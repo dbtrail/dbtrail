@@ -232,10 +232,11 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 		// The condition that actually decides the producer. It used to be the
 		// S3 destination (until #1539), then a missing local backup directory
 		// (until #2212, when S3-only servers began updating through the
-		// staging folder); now it is the first backup, or a staging folder
-		// an S3-only update cannot use.
+		// staging folder, and #2431, when every server got a local folder);
+		// now it is the first backup, and a server with no local folder gets
+		// nothing.
 		"a server with no previous backup yet gets a **full backup**",
-		"under the working folder that is uploaded and then deleted",
+		"a server with no local folder gets no snapshot at all",
 		// The whole of #1539 in the docs. Without this line the page still
 		// reads as if an S3 destination meant a nightly full read.
 		"reads its previous snapshot straight from the bucket and uploads its result back to the same place",
@@ -267,10 +268,13 @@ func TestBackupScheduleCard_saysWhatARunCosts(t *testing.T) {
 			"snapshots that go to S3 are full reads",
 			// #2212 made these false too: an S3-only server is updated.
 			"a server with no local backup directory gets a full backup",
+			// #2431 made these false: no update is staged, nothing is copied
+			// inside the bucket.
+			"uploaded and then deleted",
+			"is copied inside the bucket",
 		} {
 			if strings.Contains(flat, banned) {
-				t.Errorf("docs/%s still says %q, which #1539 made false: the scheduled update reads the "+
-					"bucket and uploads its result there", page, banned)
+				t.Errorf("docs/%s still says %q, which is no longer true (#1539, #2212, #2431)", page, banned)
 			}
 		}
 	}
@@ -561,31 +565,6 @@ func TestDuckDBCard_titleDoesNotPromiseAQuery(t *testing.T) {
 	}
 }
 
-// TestLocalCopyWords_saysEveryTableIsWrittenWithoutALocalCopy ties the "no"
-// sentence (#1681) to the rule that makes it true. Choosing "only in S3" is
-// choosing a full write of every table on every run, because carrying a file
-// forward is a hard link and carryForwardEligible refuses an s3:// previous
-// snapshot. If that exclusion is ever lifted, the sentence understates what
-// a server without a local copy gets, and this fails in the same change.
-func TestLocalCopyWords_saysEveryTableIsWrittenWithoutALocalCopy(t *testing.T) {
-	body := jsFunctionBody(t, readAsset(t, "app.js"), "localCopyWords")
-	if !strings.Contains(body, `"Snapshots live only in S3, and every run writes every table."`) {
-		t.Error("the no answer no longer says, in those words, that snapshots live only in S3 and every run writes every table")
-	}
-	src, err := os.ReadFile(filepath.Join("..", "reconstruct", "carryforward.go"))
-	if err != nil {
-		t.Fatalf("read carryforward.go: %v", err)
-	}
-	// Anchored before the literal's own slashes, as the card's guard was:
-	// "s3://" contains "//", so the comment strip truncates the real line of
-	// code exactly there, and a comment quoting the rule cannot supply it.
-	const rule = `!strings.HasPrefix(srcPath, "s3:`
-	if !strings.Contains(stripGoLineComments(string(src)), rule) {
-		t.Errorf("carryForwardEligible no longer excludes an s3:// previous snapshot (%s is gone), so the "+
-			"no answer's sentence now understates what a server without a local copy gets", rule)
-	}
-}
-
 // visibleStrings returns the user-facing strings a card function renders: the
 // text: values, the arguments of its say() helper, and BOTH arms of a string
 // ternary. The false arm needed its own pattern: a `: "Off" }))` and a
@@ -610,19 +589,4 @@ func visibleStrings(body string) []string {
 		}
 	}
 	return out
-}
-
-// stripGoLineComments removes // comments so a must-contain over Go source
-// cannot be satisfied by prose quoting the thing it looks for. Crude on
-// purpose: a "//" inside a string literal truncates that line, which can only
-// make a must-contain stricter, never looser.
-func stripGoLineComments(src string) string {
-	var out []string
-	for _, ln := range strings.Split(src, "\n") {
-		if c := strings.Index(ln, "//"); c >= 0 {
-			ln = ln[:c]
-		}
-		out = append(out, ln)
-	}
-	return strings.Join(out, "\n")
 }

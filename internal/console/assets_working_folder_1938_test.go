@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// #1938: the folder full reads, S3-only updates and .sql builds write their
-// temporary files to had four names on screen (".sql build folder", "temp
+// #1938: the folder full reads and .sql builds write their temporary files
+// to (and, before #2431, S3-only updates) had four names on screen (".sql build folder", "temp
 // folder", "staging folder", "staging directory"), and the settings row, the
 // one place to move it, carried the name that hid full reads. It is "Working
 // folder" everywhere a reader sees it. The row is drawn by the REAL
@@ -43,7 +43,7 @@ console.log(JSON.stringify({
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode: %v\n%s", err, raw)
 	}
-	const help = "Where DBTrail writes temporary files during a full read, an S3-only update, or a .sql build. " +
+	const help = "Where DBTrail writes temporary files during a full read or a .sql build. " +
 		"Needs room for the largest database it reads."
 	for _, name := range []string{"empty", "set", "locked"} {
 		r := got[name]

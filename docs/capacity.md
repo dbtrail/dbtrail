@@ -152,7 +152,7 @@ A full read (the web interface's **Read database now**, or a scheduled full read
 
 - Less free than **half the size of the data**, not counting indexes: the read is **refused** before anything is dumped. No measured dump came to less than that (the smallest, apart from a table with most of its rows deleted, was 0.89× its data).
 - Less free than the data plus the indexes: the read runs, with a loud warning that the dump may not fit.
-- Below 1.8× the data plus the indexes, with the Parquet on the same disk (always the case for an S3-only destination, whose Parquet is staged in the same folder): the read runs, with a warning that the dump plus its Parquet may not fit.
+- Below 1.8× the data plus the indexes, with the Parquet on the same disk (the server's Local folder on the same filesystem as the working folder): the read runs, with a warning that the dump plus its Parquet may not fit.
 - The sizes cannot be read, or the free space cannot be measured: the read runs, and says the check did not run. A guess never refuses a backup.
 
 **Compressed tables.** A table with `ROW_FORMAT=COMPRESSED`, or one in MyRocks, reports its compressed size, and a full read writes it uncompressed. For those the sizes above are not a bound. The check counts them, names the two largest, and when the free space covers the reported sizes its note opens with "Disk check cannot tell whether this read fits" instead of saying there is room. InnoDB page compression (`COMPRESSION=`, MariaDB's `PAGE_COMPRESSED`) is not treated this way: whether its reported size is the compressed one has not been measured (#2256).

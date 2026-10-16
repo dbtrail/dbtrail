@@ -82,35 +82,30 @@ function lastRun(sch, everyRunCode) {
   ` + lastRunBlock(t, card) + `
   return out;
 }
-const srv = (o) => Object.assign({ baseline_dir: "", baseline_s3: "", full_backup_possible: true, schedule_loop: true }, o);
+const srv = (o) => Object.assign({ baseline_dir: "", baseline_s3: "" }, o);
 const out = {
   warn: [
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p" })),
     s3OnlyBackupWarning(srv({ baseline_dir: "/var/lib/bintrail/baselines/a", baseline_s3: "s3://b/p" })),
     s3OnlyBackupWarning(srv({})),
     s3OnlyBackupWarning(srv({ baseline_dir: "/d" })),
-    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", full_backup_possible: false })),
     s3OnlyBackupWarning(null),
-    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_loop: false, full_backup_possible: false })),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", schedule_refusal: "creating snapshots from the console is turned off" })),
-    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the working folder /stage cannot be written: permission denied" })),
-    s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p", staging_refusal: "the working folder /stage cannot be written: permission denied", full_backup_possible: false })),
     s3OnlyBackupWarning(srv({ baseline_s3: "s3://b/p" }), false),
   ],
   fault: [
     s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p" })),
-    s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p", staging_refusal: "x" })),
-    s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p", staging_refusal: "x", schedule_loop: false })),
+    s3OnlyBackupFault(srv({ baseline_s3: "s3://b/p", baseline_dir: "/d" })),
   ],
   alarms: [
-    nextRun({ runnable: true, next_method: "full", next_method_why: "an update for a server whose snapshots go only to S3 is built in the working folder, which cannot be used; the working folder /stage cannot be written: permission denied", next_method_why_code: "no_staging" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "no previous snapshot to update", next_method_why_code: "first_backup" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "no load on your database" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "this server has no index connection to read the recorded changes from", next_method_why_code: "no_index" }),
     nextRun({ runnable: true, next_method: "refresh", next_method_why: "x", next_method_why_code: "no_local_dir" }),
     nextRun({ runnable: true, next_method: "full", next_method_why: "the previous snapshot could not be read", next_method_why_code: "previous_unreadable" }),
-    // An old daemon's code, should one ever be predicted: no longer every run.
+    // Old daemons' codes, should one ever be predicted: neither is every run.
     nextRun({ runnable: true, next_method: "full", next_method_why: "an update from the recorded changes needs a local snapshot directory", next_method_why_code: "no_local_dir" }),
+    nextRun({ runnable: true, next_method: "full", next_method_why: "an update for a server whose snapshots go only to S3 is built in the working folder, which cannot be used", next_method_why_code: "no_staging" }),
   ],
   lines,
   lastRun: [
@@ -145,24 +140,24 @@ console.log(JSON.stringify(out));
 	// #2431: no snapshot is written for an S3-only server, whatever this
 	// process runs, so the note says that, in red, wherever it applies.
 	const nothing = "With S3 only, no snapshot is written for this server: every server keeps its snapshots on this machine, with S3 beside it."
-	for _, i := range []int{0, 4, 6, 8, 9} {
+	for _, i := range []int{0} {
 		if got.Warn[i] != nothing+" Add a Local folder." {
 			t.Errorf("case %d: S3 only is not told nothing is written: %q", i, got.Warn[i])
 		}
 	}
-	if got.Warn[10] != nothing {
-		t.Errorf("a session that cannot save the row is told what to do: %q", got.Warn[10])
+	if got.Warn[6] != nothing {
+		t.Errorf("a session that cannot save the row is told what to do: %q", got.Warn[6])
 	}
-	for _, i := range []int{1, 2, 3, 5, 7} {
+	for _, i := range []int{1, 2, 3, 4, 5} {
 		if got.Warn[i] != "" {
 			t.Errorf("case %d warned where it must not: %q", i, got.Warn[i])
 		}
 	}
-	if len(got.Fault) != 3 || !got.Fault[0] || !got.Fault[1] || !got.Fault[2] {
-		t.Errorf("fault = %v, want red in every S3-only case", got.Fault)
+	if len(got.Fault) != 2 || !got.Fault[0] || got.Fault[1] {
+		t.Errorf("fault = %v, want red in every S3-only case and not with a folder", got.Fault)
 	}
-	wantAlarm := []bool{true, false, false, true, false, false, false}
-	wantCode := []string{"no_staging", "", "", "no_index", "", "", ""}
+	wantAlarm := []bool{false, false, true, false, false, false, false}
+	wantCode := []string{"", "", "no_index", "", "", "", ""}
 	for i := range wantAlarm {
 		if len(got.Alarms) <= i || got.Alarms[i][0] != wantAlarm[i] || got.Alarms[i][1] != wantCode[i] {
 			t.Errorf("next-run case %d: alarm/code = %v, want %v %q", i, got.Alarms, wantAlarm[i], wantCode[i])
@@ -182,14 +177,13 @@ console.log(JSON.stringify(out));
 			t.Errorf("em dash in %q", w)
 		}
 	}
-	if got.Lines[0].Class != "form-msg err" || !strings.Contains(got.Lines[0].Text, "Fix the working folder") {
-		t.Errorf("unusable staging folder: not a red line naming the setting: %+v", got.Lines[0])
+	for _, i := range []int{0, 1, 3, 4, 5, 6} {
+		if got.Lines[i].Class != "ks-chain" {
+			t.Errorf("next-run line %d (a first snapshot, an update, or an old code) is not the quiet drawing: %+v", i, got.Lines[i])
+		}
 	}
-	if got.Lines[1].Class != "ks-chain" || got.Lines[2].Class != "ks-chain" || got.Lines[4].Class != "ks-chain" || got.Lines[5].Class != "ks-chain" || got.Lines[6].Class != "ks-chain" {
-		t.Errorf("a first snapshot or an update is not the quiet drawing: %+v", got.Lines)
-	}
-	if got.Lines[3].Class != "form-msg err" || !strings.Contains(got.Lines[3].Text, "Set an index connection") {
-		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[3])
+	if got.Lines[2].Class != "form-msg err" || !strings.Contains(got.Lines[2].Text, "Set an index connection") {
+		t.Errorf("no index connection: not a red line naming the setting: %+v", got.Lines[2])
 	}
 	// The last run's full-backup reason: skipped when the next-run warning
 	// carries the same remedy, in the past tense when it carries another, and
@@ -202,7 +196,7 @@ console.log(JSON.stringify(out));
 	for _, l := range got.LastRun[2] {
 		t.Logf("old no_local_dir record: %s", l)
 	}
-	if strings.Contains(got.LastRun[1][1], "now updated") || !strings.Contains(got.LastRun[2][1], "now updated from the recorded changes, through the working folder") {
+	if strings.Contains(got.LastRun[1][1], "Every server keeps one now") || !strings.Contains(got.LastRun[2][1], "had no Local folder then. Every server keeps one now") {
 		t.Errorf("last-run reason tense: next-run warning elsewhere %q, no warning %q", got.LastRun[1][1], got.LastRun[2][1])
 	}
 }
@@ -263,15 +257,11 @@ function red(n, out = []) {
   for (const c of n.children || []) red(c, out);
   return out;
 }
-const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_s3: "s3://b/p", full_backup_possible: true, schedule_loop: true,
-  staging_refusal: "the working folder /stage cannot be written: permission denied" };
+const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_s3: "s3://b/p" };
 const rows = {
   noSchedule: base,
-  updates: Object.assign({}, base, { staging_refusal: "" }),
   withSchedule: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440 }),
   refused: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440, schedule_refusal: "creating snapshots from the console is turned off" }),
-  noLoop: Object.assign({}, base, { schedule_loop: false, full_backup_possible: false, staging_refusal: "" }),
-  noFull: Object.assign({}, base, { full_backup_possible: false }),
   withDir: Object.assign({}, base, { baseline_dir: "/var/lib/bintrail/baselines/a" }),
 };
 const out = {};
@@ -300,7 +290,7 @@ console.log(JSON.stringify(out));
 		return false
 	}
 	// #2431: red wherever it applies, a console with no schedule included.
-	for _, k := range []string{"noSchedule", "withSchedule", "updates", "noLoop", "noFull"} {
+	for _, k := range []string{"noSchedule", "withSchedule"} {
 		if !has(got[k], nothing) {
 			t.Errorf("%s: the S3-only line is not rendered in red: %q", k, got[k])
 		}

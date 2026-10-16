@@ -235,14 +235,17 @@ console.log(JSON.stringify(out));
 		t.Fatalf("decode %q: %v", out, err)
 	}
 	// no_local_dir is an old record's code since #2212: its card line says
-	// what changed, and never asks for a Local folder an update no longer needs.
-	if !strings.Contains(got.Remedy, "now updated from the recorded changes") || strings.Contains(got.Remedy, "Set a Local folder") ||
+	// what changed, and never asks for a Local folder every server has now.
+	if !strings.Contains(got.Remedy, "Every server keeps one now") || strings.Contains(got.Remedy, "Set a Local folder") ||
 		strings.Contains(got.Fact, "next run") || !strings.Contains(got.Fact, "did not have at the time") {
 		t.Errorf("remedy/fact split: remedy=%q fact=%q", got.Remedy, got.Fact)
 	}
 	t.Logf("no_staging remedy: %s", got.StagingRemedy)
 	t.Logf("no_staging fact: %s", got.StagingFact)
-	if !strings.Contains(got.StagingRemedy, "Fix the working folder") || strings.Contains(got.StagingFact, "next run") || !strings.Contains(got.StagingFact, "could not be used at the time") {
+	// no_staging is an old record's code since #2431 (no update is staged
+	// any more): its card line speaks of that run, and asks for nothing.
+	if !strings.Contains(got.StagingRemedy, "kept its snapshots only in S3 then") || strings.Contains(got.StagingRemedy, "Fix the working folder") ||
+		strings.Contains(got.StagingRemedy, "next run") || strings.Contains(got.StagingFact, "next run") || !strings.Contains(got.StagingFact, "could not be used at the time") {
 		t.Errorf("no_staging remedy/fact split: remedy=%q fact=%q", got.StagingRemedy, got.StagingFact)
 	}
 	if got.Unreadable != "The previous snapshot could not be read from the snapshot destination (boom), so a full read is taken instead." {

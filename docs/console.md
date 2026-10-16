@@ -754,11 +754,9 @@ saved, shown with the reason `serve` is not running it.
   (the Read-database-now job, reads the source, needs
   `BINTRAIL_CONSOLE_BASELINE_TRIGGER=1`); otherwise the newest backup is
   **updated from the recorded changes** (the baseline-refresh fold: reads
-  nothing from the source, writes into the server's local backup directory,
-  or, for a server whose backups go only to S3, into a folder of its own
-  under the working folder that is uploaded and then deleted, #2212; if the
-  working folder cannot be used, that server gets a full backup and the page
-  says why). When the backups go
+  nothing from the source, writes into the server's local backup directory;
+  a server with no local folder gets no snapshot at all, from either
+  producer, and the page says why, #2431). When the backups go
   to S3 that update reads its previous snapshot straight from the bucket and
   uploads its result back to the same place (#1539), so an S3 destination no
   longer forces a nightly full read of the source; when the local directory
@@ -791,9 +789,9 @@ saved, shown with the reason `serve` is not running it.
   recorded changes fails and a full backup is started in its place, the
   page says so in red until a later scheduled update goes through. A
   schedule the daemon cannot serve at all (no producer possible: creation
-  opt-in not set AND no update possible, such as S3 only with a working
-  folder that cannot be used, a lock-mode misconfiguration on such a server,
-  no destination) is refused on save with
+  opt-in not set AND no update possible, such as no local folder, a
+  lock-mode misconfiguration on such a server, no destination) is refused on
+  save with
   the reason, and one already saved is reported as not runnable on the
   page, never silently skipped.
   `PUT`/`DELETE /api/servers/{id}/backup-schedule`; state on `GET /api/baselines`
@@ -958,15 +956,24 @@ longer drawn on the page.
   recorded row changes themselves (row history, `recover`) do not depend on
   snapshots and keep their own retention. A folder that two servers shared
   is never counted, and neither is one that stopped being shared while it
-  still holds the other server's snapshots (the other server was deleted,
-  answered no, or moved away): a snapshot does not record which server
-  wrote it. That folder keeps everything, also after answering no and then
-  yes on it again, until its server moves to a new empty folder. A server
+  still holds the other server's snapshots (the other server was deleted or
+  moved away): a snapshot does not record which server wrote it. That folder
+  keeps everything until its server moves to a new empty folder. A server
   whose creation failed half way leaves no such mark. A table
   that did not change keeps its last file (a hard link where the filesystem
-  allows it), so a new snapshot only costs the tables that changed. A server
-  saved as S3-only before the page stopped asking keeps working that way
-  until its next save from the Snapshots page, which turns the local copy on.
+  allows it), so a new snapshot only costs the tables that changed. No
+  request can make a server keep its snapshots only in S3 (#2431): saving
+  `local_copy: false`, emptying the folder, or giving a server that has no
+  folder an S3 location alone is refused. A server saved with an S3 location
+  and no folder by an earlier version gets its default folder when `watch`
+  starts: the daemon saves it, logs it, and moves the snapshots it had
+  mirrored for SQL into it (see
+  [SQL on a server whose snapshots are only on S3](#sql-on-a-server-whose-snapshots-are-only-on-s3)).
+  A server that still has no folder (the daemon could not make one, or the
+  server list was written by a newer version and is read-only) gets no
+  snapshot: **Read database now** is refused with "this server has no local
+  snapshot folder", the schedule skips its slots with that reason, the
+  Getting started list says so, and its settings say it in red.
   A folder is checked when it is saved: it must be a full path, a missing one
   is created, and DBTrail must be able to write into it. That is on the
   `watch` daemon, which takes the snapshots; the read-only `serve` creates
@@ -976,7 +983,7 @@ longer drawn on the page.
   the answers and no controls. The server edit form no longer carries these
   fields, and an edit that leaves them out keeps what is stored. Servers that existed
   before #1681 are unchanged: none gets a folder or a count it did not have.
-- **Per server** (changed on the Snapshots page): each registry server's local-copy answer,
+- **Per server** (changed on the Snapshots page): each registry server's
   Local folder, S3 location and keep count, editable in place, with which location is in force
   drawn rather than said: the server's own case (own location, daemon
   default, or no location) under its fields, with a tick or a cross per lane.
@@ -1107,10 +1114,9 @@ and lands on Retention.
   per snapshot directory double-counts it (one `du` over the root reports the
   truth). It does not apply when the previous snapshot is read from S3
   into a local folder, because linking a file needs both ends on a
-  filesystem; on a server whose snapshots go only to S3 the unchanged table
-  is copied inside the bucket instead (#2212). With table deltas on (the
-  default) an unchanged table and its pair are kept, locally or by a copy in
-  S3, whether this is on or off; it governs only tables without deltas. A
+  filesystem. With table deltas on (the default) an unchanged table and its
+  pair are kept whether this is on or off; it governs only tables without
+  deltas. A
   `baseline_refresh:` block saved by an older version is ignored and kept in
   the registry file untouched.
   See [dump-and-baseline.md](dump-and-baseline.md#refreshing-on-a-schedule).
@@ -1371,12 +1377,12 @@ it. It is **not available**:
 - to a session with a data profile or table and column restrictions. The
   profile filters what the console shows, and SQL reads the raw files, which it
   cannot filter;
-- for a server whose snapshots are only on S3, until DBTrail has brought the
-  newest one to local disk. SQL reads files on this machine, so for such a
-  server `bintrail-console watch` keeps a local mirror of its two newest
-  snapshots under the state directory (`copy-mirror/`), and the card appears
-  once the first one is there. See [SQL on a server whose snapshots are only
-  on S3](#sql-on-a-server-whose-snapshots-are-only-on-s3);
+- for a server this process only reads from S3 (it keeps no local snapshot
+  folder), until DBTrail has brought the newest snapshot to local disk. SQL
+  reads files on this machine, so for such a server `bintrail-console watch`
+  keeps a local mirror of its two newest snapshots under the state directory
+  (`copy-mirror/`), and the card appears once the first one is there. See
+  [SQL on a server whose snapshots are only on S3](#sql-on-a-server-whose-snapshots-are-only-on-s3);
 - when archive access is disabled for the server.
 
 In those cases the card is not shown. For no row cap and no time limit, query
@@ -1386,9 +1392,16 @@ Server** page writes a `views.sql` over them. See
 
 #### SQL on a server whose snapshots are only on S3
 
-A statement runs in a process with no network, so it cannot read a bucket.
-For a server that keeps its snapshots in S3 and has no local snapshot folder,
-`bintrail-console watch` brings them to disk itself:
+A statement runs in a process with no network, so it cannot read a bucket:
+SQL needs the snapshot on this machine. Every server whose snapshots `watch`
+writes keeps them in its local folder (#2431), and that folder is what SQL
+reads. The mirror below is for a server whose snapshots this process only
+reads from S3: the server `watch` was started with on its command line with
+`--baseline-s3` and no `--baseline-dir` (the daemon never writes snapshots
+for it), and a server in the list that still has an S3 location and no
+folder. `bintrail-console watch` brings their snapshots to disk itself, and
+`serve` and the router read the same mirror when they share its state
+directory:
 
 - **What it keeps.** The two newest complete snapshots, in
   `copy-mirror/<server id>/` under the state directory. The newest is what
@@ -1397,14 +1410,15 @@ For a server that keeps its snapshots in S3 and has no local snapshot folder,
   reads this server's snapshots (recovery, time travel, the Snapshots page,
   the downloaded `views.sql`) keeps reading the bucket: the mirror is a cache
   for SQL, not a second copy of the backup.
-- **When.** When the daemon starts, right after each snapshot or update it
-  uploads, and every five minutes for snapshots something else published.
+- **When.** When the daemon starts, right after any snapshot it uploads for
+  another server (it may land in the bucket a mirrored server reads), and
+  every five minutes for snapshots something else published.
   The time the SQL card gives for the copy is the mirrored snapshot's, so it
   can be a few minutes behind the bucket.
-- **What it costs.** Disk for what it downloads, in Parquet. An update
-  publishes the tables that did not change as copies inside the bucket; the
-  mirror links those from the snapshot it already has and downloads only the
-  tables that changed. Every table file and change file is checked against
+- **What it costs.** Disk for what it downloads, in Parquet. A table file
+  whose bytes match one in the snapshot it already has is linked from there,
+  so a new snapshot mostly costs the tables that changed. Every table file
+  and change file is checked against
   the checksum the snapshot records for it before it is used, including the
   ones already on disk.
 - **When the disk is short.** Nothing is downloaded unless it fits with 1 GiB
@@ -1421,8 +1435,9 @@ For a server that keeps its snapshots in S3 and has no local snapshot folder,
   and, in red, why the last attempt failed (no room, with the sizes, or a
   bucket that cannot be read). It says so even when the list itself cannot
   be read. The daemon log says the same under `copy mirror`.
-- **Turning it off for one server.** For a server that should keep nothing on
-  this machine, save `no_sql_mirror` in its snapshot settings:
+- **Turning it off for one server.** For a server in the list that has an S3
+  location and no folder, and should keep nothing on this machine, save
+  `no_sql_mirror` in its snapshot settings:
 
   ```bash
   curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -1441,8 +1456,11 @@ For a server that keeps its snapshots in S3 and has no local snapshot folder,
   settings, so it has no such switch: give it a local folder
   (`--baseline-dir`) to stop the downloads.
 
-A server that also keeps a local snapshot folder has no mirror: that folder
-is what SQL reads. The change history (the `events` view) is not mirrored: on
+A server that keeps a local snapshot folder has no mirror: that folder is
+what SQL reads. When `watch` starts and gives a server saved with an S3
+location and no folder its default folder, it moves the complete snapshots
+of that server's mirror into the new folder, so SQL keeps reading what it
+read before; the daemon log names each server and what was moved. The change history (the `events` view) is not mirrored: on
 a server whose change log is only in S3, statements over the tables work and
 `events` is not offered.
 
@@ -1497,8 +1515,7 @@ one release and warns that it no longer does anything. Remove it.
   fail on first use, and a full backup reads every table in scope on the
   source, which is load an operator should choose. Turning it on also lets the
   backup schedule take a full backup on its own when an update cannot serve
-  the server (no previous backup, or S3 only with a working folder that
-  cannot be used) or fails (a capture
+  the server (no previous backup) or fails (a capture
   gap, a schema change), and it is what a schedule's full-backup timetable
   (`full_every`: the **Read the whole database again every** row of the schedule form, or the schedule API)
   needs: without it, saving one is refused with the reason, and one saved
@@ -1513,7 +1530,9 @@ one release and warns that it no longer does anything. Remove it.
   [settings that need a restart](https://www.dbtrail.com/docs/settings/backups#set-at-startup).
 - `BINTRAIL_CONSOLE_BASELINE_STAGING` (`watch` only) — the working folder
   (the **Working folder** row in the web interface's backup settings): where
-  full reads, S3-only updates and `.sql` builds write their temporary files.
+  full reads (the mydumper dump) and `.sql` builds write their temporary
+  files. Snapshots are not built there: every snapshot is written into its
+  server's local folder.
   With nothing set it is `baseline-staging` in the folder that holds the
   servers file, beside DBTrail's own data; it stays under the system temp
   folder when that data is on network storage or in memory, or the folder

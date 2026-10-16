@@ -685,8 +685,9 @@ setting it.
 It reads the servers the web interface manages and the copies on the state
 volume, which it mounts read-only. A server needs a copy on that volume for
 ordinary SQL and, with Engine Routing on, a source address the container can
-reach (as for `bintrail`). For a server whose snapshots are only on S3, that copy is
-the local mirror `bintrail` keeps on the same volume
+reach (as for `bintrail`). A server whose snapshots `bintrail` writes keeps
+that copy in its local snapshot folder on the volume. For a server it only
+reads from S3, the copy is the local mirror `bintrail` keeps on the same volume
 ([SQL on a server whose snapshots are only on S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3));
 the router reads it and brings nothing from the bucket itself.
 

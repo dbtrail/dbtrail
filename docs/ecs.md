@@ -119,8 +119,8 @@ starts another one.
 ## Disk for full reads
 
 A full read (**Read database now**, or a schedule) writes mydumper's output
-and, with S3, the Parquet copy to the working folder before it converts and
-uploads them. Leave `BINTRAIL_CONSOLE_BASELINE_STAGING` unset. Elsewhere an
+to the working folder, converts it into the server's local snapshot folder,
+and uploads the snapshot when the server has an S3 location. Leave `BINTRAIL_CONSOLE_BASELINE_STAGING` unset. Elsewhere an
 unset working folder sits beside DBTrail's data, but DBTrail does not put it
 on network storage: with the data on EFS it uses a folder under `/tmp`, which
 on Fargate is the task's ephemeral storage. The backup settings name that

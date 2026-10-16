@@ -26,9 +26,9 @@
 //     interrupted round left there, links the file the newest mirrored
 //     snapshot holds at the same path, or downloads it. The first two only
 //     after hashing the bytes on disk and finding the manifest's digest, so
-//     nothing is taken on its size or its name. An update publishes the
-//     tables that did not change as copies inside S3 (#2212), which is why
-//     most of a snapshot is bytes the mirror already has;
+//     nothing is taken on its size or its name. Most tables do not change
+//     between two snapshots, which is why most of a snapshot is bytes the
+//     mirror already has;
 //   - downloads every other file of the snapshot (the manifest does not cover
 //     them, so nothing on disk can be shown to be them) and checks each
 //     against its listed size;

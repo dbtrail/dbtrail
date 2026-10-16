@@ -2861,10 +2861,9 @@ try {
     const cur = { id: "srv-fix", kind: "registry", has_source: true };
     const b = { configured: true, source: "/tmp/baselines", kind: "dir", snapshots: [{ time: "2026-06-10 12:00:00", location: "dir" }] };
     const srv = { id: "srv-fix", name: "fixture", source: "server", baseline_dir: "/tmp/b" };
-    // S3 only, on a process that runs the schedule (#2212: without one the
-    // note names no remedy at all): the row states the cost, and "Add a
-    // Local folder" is the remedy only a writer gets.
-    const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p", schedule_loop: true };
+    // S3 only (#2431: no snapshot is written for such a server): the row
+    // says so, and "Add a Local folder" is the remedy only a writer gets.
+    const s3only = { id: "srv-s3", name: "s3fix", source: "server", baseline_s3: "s3://b/p" };
     // No location at all (#1684: the daemon's own no longer backs it):
     // "Type one above and Save." is the remedy, and only a writer gets it.
     const inherits = { id: "srv-inh", name: "inh", source: "none" };
@@ -5341,7 +5340,8 @@ try {
       fine: fine.length,
       fineOpen: fine.filter((d) => d.open).length,
       refreshCardHere: !!view.querySelector(".bkr-head"),
-      // #1681: every server box asks the one question, with two answers.
+      // #2431: no server box carries the local-copy question any more
+      // (every server keeps a local copy), not even hidden.
       questions: Array.from(view.querySelectorAll(".bks-server")).map((b) => b.querySelectorAll(".bks-q input[type=radio]").length),
       // Every case row on the page, not only those inside a server box: a
       // legend re-added anywhere raises this count above one per server.
@@ -5464,9 +5464,9 @@ try {
     ? ok("snapshots: the setup section's visible text stays under budget with the fine print compact")
     : bad("snapshots: the setup section's visible text stays under budget with the fine print compact",
         JSON.stringify({ chars: bks.visibleChars, fine: bks.fine, open: bks.fineOpen, emDash: bks.emDash }));
-  (!bks.refreshCardHere && bks.questions.length > 0 && bks.questions.every((n) => n === 2))
-    ? ok("snapshots: the disk-space card is gone and every server keeps its local-copy answer (hidden: always yes since the cut)")
-    : bad("snapshots: the disk-space card is gone and every server keeps its local-copy answer (hidden: always yes since the cut)", JSON.stringify({ card: bks.refreshCardHere, questions: bks.questions }));
+  (!bks.refreshCardHere && bks.questions.length > 0 && bks.questions.every((n) => n === 0))
+    ? ok("snapshots: the disk-space card is gone and no server is asked the local-copy question (always yes since #2431)")
+    : bad("snapshots: the disk-space card is gone and no server is asked the local-copy question (always yes since #2431)", JSON.stringify({ card: bks.refreshCardHere, questions: bks.questions }));
   // The drawing cannot lie: one case row per server and no more (#1573 took
   // the three-row legend away, and counting every .bl-case on the page is
   // what makes its return fail here), and each server's case is the source

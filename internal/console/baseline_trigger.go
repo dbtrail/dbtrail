@@ -68,12 +68,11 @@ type BaselineRequest struct {
 	// and mydumper alike: the entry's SourceSSL, the TLS capture uses (#1996).
 	SourceSSL config.SSL
 	Schemas   []string
-	// LocalDir is the per-server baseline directory (entry.BaselineDir). When
-	// set, the snapshot is written there persistently and NOT uploaded. Empty
-	// means S3-only: stage in a temp dir, upload to S3, discard the staging.
+	// LocalDir is the per-server baseline directory (entry.BaselineDir): the
+	// snapshot is written there. Required since #2431; empty is refused.
 	LocalDir string
 	// S3 is the per-server baseline S3 prefix (entry.BaselineS3, s3://…). When
-	// set, the staged snapshot is uploaded there. Region/credentials come from
+	// set, the snapshot is uploaded there too. Region/credentials come from
 	// the ambient AWS chain (env / ~/.aws / IAM role), like the rest of the
 	// console's S3 access.
 	S3 string

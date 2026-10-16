@@ -360,8 +360,9 @@ What to know before relying on it:
   marked, and raises a warning the client counts; `SHOW WARNINGS` reports
   it. The console's SQL card keeps its own behaviour: it returns the first
   rows up to the cap and says on the page that there were more.
-- **The copy has to be on local disk**, as for the SQL card. For a server
-  whose snapshots are only on S3, `bintrail-console watch` brings the newest
+- **The copy has to be on local disk**, as for the SQL card. A server whose
+  snapshots `watch` writes keeps them in its local folder. For a server whose
+  snapshots are only read from S3, `bintrail-console watch` brings the newest
   ones to disk itself (see [SQL on a server whose snapshots are only on
   S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3)); until the
   first one is there, ordinary SQL is refused with 1235 and says the local
@@ -2118,8 +2119,9 @@ with an error until it is back.
 
 **What it needs.** The servers file, a copy on local disk for each server it
 should answer ordinary SQL for, and, with Engine Routing on, a network path to
-each server's source. The router brings nothing from a bucket itself. For a
-server whose snapshots are only on S3 it reads the local mirror `watch` keeps
+each server's source. The router brings nothing from a bucket itself. A
+server whose snapshots `watch` writes has its copy in its local folder. For a
+server whose snapshots are only read from S3 it reads the local mirror `watch` keeps
 beside the servers file
 ([SQL on a server whose snapshots are only on S3](console.md#sql-on-a-server-whose-snapshots-are-only-on-s3)),
 so it has to see that folder: it does when it runs beside `watch`, as in the
@@ -2649,7 +2651,7 @@ If `bintrail-shim` is dead, `journalctl -u bintrail-shim -n 100` shows why. Comm
 The shim emits typed wire codes so ORMs and monitoring can distinguish *user input* errors from *server fault* errors — a 1105 spike no longer means "any time-travel query failed". Codes you may see:
 
 - **1064 `ER_PARSE_ERROR`** — a query mentions `_flashback` / `_snapshot` / `_diff` but doesn't match any supported shape (missing `AS OF`, missing `BETWEEN`, missing `USE <db>`, unparseable timestamp). Same code MySQL itself returns for any SQL syntax error.
-- **1235 `ER_NOT_SUPPORTED_YET`**: a non-virtual-schema query reached a shim that has no copy to run it on: the standalone `bintrail shim` (typically a direct connection to `:3308` bypassing ProxySQL; hostgroup routing is misconfigured), or the MySQL port for a server whose copy is only on S3 or whose archive access is off (the message says which).
+- **1235 `ER_NOT_SUPPORTED_YET`**: a non-virtual-schema query reached a shim that has no copy to run it on: the standalone `bintrail shim` (typically a direct connection to `:3308` bypassing ProxySQL; hostgroup routing is misconfigured), or the MySQL port for a server with no copy on local disk yet (its snapshots only read from S3 and not mirrored yet) or whose archive access is off (the message says which).
 - **1526 `ER_NO_PARTITION_FOR_GIVEN_VALUE`** — two causes, distinguished by the message. Either the AS OF or BETWEEN range falls outside what this index retains (rotated out of MySQL with no archive coverage) — narrow the time range or check `archive_state` and the shim's `--allow-gaps` flag. Or a **full-table `_snapshot`** query found the configured baseline unusable (no baseline snapshot at-or-before the AS OF instant, or a primary key the baseline merge can't canonicalize) and refused rather than return a partial table — create or re-run `bintrail baseline` so a snapshot covers the AS OF, or query `_flashback` for a binlog-only view.
 - **1045 `ER_ACCESS_DENIED_ERROR`** — credential mismatch (see the section above).
 - **1317 `ER_QUERY_INTERRUPTED`** — the query exceeded `--query-timeout` (message names the flag), or its client disconnected / the shim shut down mid-query. Narrow the AS OF range, filter by PK, or raise the timeout.

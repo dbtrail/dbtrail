@@ -14,9 +14,8 @@ import (
 // (#1681) in node, clicks through it the way a reader does, and captures what
 // Save sends and what the row says. It exists for the failure a CSS-hidden
 // field invites: an input the reader cannot see still carries its value, so a
-// "no" must never send the folder or the count sitting in the hidden inputs,
-// and a "yes" must never send a count for a server that has an S3
-// destination, where the count does nothing.
+// save must never send a count for a server that has an S3 destination, where
+// the count does nothing. Every save says local_copy true (#2431).
 func TestBackupServerRow_localCopyInEveryMode(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -56,7 +55,6 @@ async function step(name, o, act, reuse) {
   if (!s.disabled) { await s.onclick(); }
   out[name] = { before, after, body: calls.length ? calls[0].body : null };
 }
-const pick = (r, v) => { const y = byName(r, "bks-local-s1", "yes"), n = byName(r, "bks-local-s1", "no"); y.checked = v === "yes"; n.checked = v === "no"; fire(v === "yes" ? y : n, "change"); };
 const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "input"); };
 (async () => {
   // A new server: its own folder, a count, no S3.
@@ -65,14 +63,12 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("freshKeep5", fresh, (r) => type(r, "keep_newest", "5"));
   await step("freshKeepAll", fresh, (r) => type(r, "keep_newest", ""));
   await step("freshKeepBad", fresh, (r) => type(r, "keep_newest", "2.5"));
-  await step("freshNoWithoutS3", fresh, (r) => pick(r, "no"));
-  await step("freshNoWithS3", fresh, (r) => { pick(r, "no"); type(r, "baseline_s3", "s3://b/p/"); type(r, "keep_newest", "9"); });
+  await step("freshWithS3", fresh, (r) => { type(r, "baseline_s3", "s3://b/p/"); type(r, "keep_newest", "9"); });
   await step("freshNoLoop", Object.assign({}, fresh, { prune_loop: false }), null);
   await step("freshNoReuse", fresh, null, false);
-  // An existing S3-only server answering yes: the default folder, no count sent.
+  // A server saved with a bucket and no folder: the default folder shown.
   const s3only = { baseline_s3: "s3://b/p/", source: "server" };
   await step("s3onlyAsIs", s3only, null);
-  // An existing server with nothing: a toggle elsewhere must not send a no.
   // An existing local-only server that keeps everything.
   await step("oldLocal", { baseline_dir: "/srv/snaps", local_copy: true, source: "server" }, null);
   await step("s3TypedAfterBadCount", fresh, (r) => { type(r, "keep_newest", "x"); type(r, "baseline_s3", "s3://b/p/"); });
@@ -105,8 +101,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   // A session without servers:write sees the answers but no control.
   vm.runInContext("capsCache.permissions = { \"servers:write\": false };", ctx);
   const lockedRow = row({ baseline_dir: "/state/snapshots/s1", local_copy: true, keep_newest: 3, source: "server" }, true);
-  const ctl = ["baseline_dir", "baseline_s3", "keep_newest"].map((n) => byName(lockedRow, n)).concat([byName(lockedRow, "bks-local-s1", "yes"), byName(lockedRow, "bks-local-s1", "no")]);
-  pick(lockedRow, "no");
+  const ctl = ["baseline_dir", "baseline_s3", "keep_newest"].map((n) => byName(lockedRow, n));
   out.locked = { before: { words: [] }, disabled: ctl.every((c) => c && c.disabled === true), saveDisabled: saveBtn(lockedRow) === null };
   vm.runInContext("capsCache.permissions = {};", ctx);
   console.log(JSON.stringify(out));
@@ -211,30 +206,21 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if got["freshKeepBad"].Body != nil {
 		t.Errorf("a count that is not a whole number was sent: %+v", got["freshKeepBad"].Body)
 	}
-	// No without S3: red, and what is sent is refused by the server, never a silent no-copy.
-	nw := got["freshNoWithoutS3"]
-	if b(nw.After.DirShown) || b(nw.After.KeepShown) {
-		t.Errorf("no still shows the folder or the count: %+v", nw.After)
+	// A bucket typed beside the folder: the folder stays shown and is sent
+	// with local_copy true, and the count, hidden by the bucket, is not sent.
+	ws := got["freshWithS3"]
+	if !b(ws.After.DirShown) || b(ws.After.KeepShown) {
+		t.Errorf("with S3 the folder is hidden or the count is shown: %+v", ws.After)
 	}
-	if len(nw.After.Reds) == 0 || !strings.Contains(strings.Join(nw.After.Reds, " "), "With neither, this server keeps no snapshots at all") {
-		t.Errorf("no without S3 does not say there would be no snapshots: %q", joined(nw.After))
+	if ws.Body["local_copy"] != true || ws.Body["baseline_s3"] != "s3://b/p/" || ws.Body["baseline_dir"] != "/state/snapshots/s1" {
+		t.Errorf("folder + S3 sent %+v", ws.Body)
 	}
-	// No with S3: the issue's own words, the old copies named, and NOTHING of
-	// the hidden fields in what is sent.
-	ns := got["freshNoWithS3"]
-	if !strings.Contains(joined(ns.After), "Snapshots live only in S3, and every run writes every table.") {
-		t.Errorf("no does not say it in those words: %q", joined(ns.After))
+	if _, ok := ws.Body["keep_newest"]; ok {
+		t.Errorf("the hidden count was sent: %+v", ws.Body)
 	}
-	if !strings.Contains(joined(ns.After), "The snapshots already in /state/snapshots/s1 stay there") {
-		t.Errorf("no does not say what happens to the snapshots already here: %q", joined(ns.After))
-	}
-	if ns.Body["local_copy"] != false || ns.Body["baseline_s3"] != "s3://b/p/" {
-		t.Errorf("no + S3 sent %+v", ns.Body)
-	}
-	for _, k := range []string{"baseline_dir", "keep_newest"} {
-		if _, ok := ns.Body[k]; ok {
-			t.Errorf("no sent the hidden %s: %+v", k, ns.Body)
-		}
+	// The "no" answer left the page (#2431): no hidden radio carries one.
+	if strings.Contains(jsFunctionSpan(t, readAsset(t, "app.js"), "backupServerRow"), "body.local_copy = false") {
+		t.Error("backupServerRow can still send local_copy false")
 	}
 	// An S3-only server reads as yes since the cut (the local copy is always
 	// on): its folder shows, prefilled with the default one, and the row says
@@ -263,8 +249,6 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		t.Errorf("a server with no location is told about the startup folder: %q", w)
 	}
 
-	// A server with nothing: an unrelated toggle does not send a no (which
-	// the server would refuse for want of S3).
 	// An existing local-only server keeps everything, and the row says so.
 	if !strings.Contains(joined(got["oldLocal"].Before), "Every snapshot stays on this machine; nothing removes them.") {
 		t.Errorf("an existing local server does not say it keeps everything: %q", joined(got["oldLocal"].Before))

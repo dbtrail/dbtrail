@@ -747,10 +747,10 @@ const (
 	// reason, for a server with no local folder (#2431: an S3 location alone
 	// is not one), whose full read is refused first.
 	BackupWhyNoLocalDir = "an update from the recorded changes needs a local snapshot directory"
-	// BackupWhyNoStagingPrefix starts the reason a server whose snapshots go
-	// only to S3 is read in full: its update is built in the working folder,
-	// and that folder cannot be used (the rest names why). A setting, like
-	// the two above, so every run is a full read until it is fixed.
+	// BackupWhyNoStagingPrefix started the reason a server whose snapshots
+	// went only to S3 was read in full, when its update was built in a
+	// working folder that could not be used. Recognized for run records
+	// written before #2431, never written now.
 	BackupWhyNoStagingPrefix = "an update for a server whose snapshots go only to S3 is built in the working folder, which cannot be used"
 	// backupWhyNoStagingPrefixOld is the same reason as daemons before #1938
 	// worded it, when the folder was called the staging folder. Recognized,

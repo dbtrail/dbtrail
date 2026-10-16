@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Every server keeps a local copy of its snapshots, with S3 beside it, never instead of it.** A create or an edit that would leave a server with an S3 location and no local folder is refused: `local_copy: false`, an emptied folder, or a bucket alone on a server with no folder. When `watch` starts, it gives a server saved that way by an earlier version its default folder, `<state dir>/snapshots/<id>`, saves and logs it, and moves the snapshots it had mirrored for SQL into that folder, so SQL on the copy keeps working. A server that still has no local folder gets no snapshot: Read database now is refused with the reason, the schedule skips its slots with it, and the Snapshots page and Getting started say why. The updates built in the working folder for servers whose snapshots went only to S3 are removed, and so are the copies of unchanged tables inside S3; the working folder now holds only the dump of a full read and `.sql` builds. Snapshots that a process only reads from S3 (the server `watch --baseline-s3` is started with when there is no `--baseline-dir`, also read by `serve` and the router) still get the local mirror `watch` keeps for SQL (#2431, #2432, #2433, #2434, #2435).
 
 ## [0.107.0] - 2026-10-16
 ### Added

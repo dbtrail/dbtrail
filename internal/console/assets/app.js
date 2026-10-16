@@ -8846,11 +8846,10 @@ function backupDaemonEditRow(row, locked) {
   if (row.key === "baseline_retain") {
     wrap.append(el("p", { class: "form-hint", text: "Days or hours: 7d, 36h. Empty keeps them all. Deletes only where snapshots also go to S3, once S3 has each one. Without S3, copies younger than this stay even past the count." }));
   }
-  // The one row whose name cannot say what it holds (#1938): full reads,
-  // S3-only updates and .sql builds all write here, and it has to fit the
-  // largest of them.
+  // The one row whose name cannot say what it holds (#1938): full reads
+  // and .sql builds write here, and it has to fit the largest of them.
   if (row.key === "staging_dir") {
-    wrap.append(el("p", { class: "form-hint", text: "Where DBTrail writes temporary files during a full read, an S3-only update, or a .sql build. Needs room for the largest database it reads." }));
+    wrap.append(el("p", { class: "form-hint", text: "Where DBTrail writes temporary files during a full read or a .sql build. Needs room for the largest database it reads." }));
     const unset = workingFolderUnsetLine(row);
     if (unset) wrap.append(el("p", { class: row.default_in_memory ? "form-msg warn" : "form-hint", text: unset }));
   }
@@ -8977,39 +8976,30 @@ function s3OnlyBackupFault(srv) {
   return !!(srv && !srv.baseline_dir && srv.baseline_s3);
 }
 
-// localCopyWords is what the per-server yes/no means right now (#1681), from
-// the form's CURRENT values, so the sentence follows the reader's clicks
+// localCopyWords is what the per-server local copy means right now (#1681),
+// from the form's CURRENT values, so the sentence follows the reader's typing
 // before a save. It returns the lines to show and whether each is a fault.
+// Every server keeps the copy (#2431), so there is no "no" to describe.
 //
-//   local  the yes/no as clicked         s3    the S3 field as typed
-//   keep   the count as typed (0 = all)  loop  this process removes snapshots
+//   s3     the S3 field as typed         keep  the count as typed (0 = all)
+//   loop   this process removes snapshots
 //   reuse  unchanged tables keep their last file on this daemon
-//   was    the saved answer, folder and provenance, and whether that folder is one
+//   was    the saved provenance, and whether the folder is one
 //          the prune never counts (shared, or DBTrail's own), or held (it
 //          was shared and still holds the other server's snapshots)
 //   reach  how far back the count reaches (localReachWords): the count in
 //          force, the snapshot interval and the age retention, in minutes
 //
-// The "no" sentence is the issue's own words: no is not "no snapshots", it is
-// "only in S3, and every run writes every table". The saving is promised
+// The saving is promised
 // only for a server whose copies are all here: with a bucket as well, a
 // scheduled run reuses only when the folder holds the newest snapshot and a
 // restore never does, which one sentence cannot carry without being false.
-function localCopyWords(local, s3, keep, loop, reuse, was, reach) {
+function localCopyWords(s3, keep, loop, reuse, was, reach) {
   const out = [];
   const say = (text, err) => out.push({ text, err: !!err });
   // First, and whatever the answers below are: it is about the place as
   // saved, local or S3, and it is the one line here that is about data.
   for (const w of was.shared || []) say(sharedLocationWords(w), true);
-  if (!local) {
-    if (!s3) {
-      say("Set an S3 destination below first. With neither, this server keeps no snapshots at all.", true);
-      return out;
-    }
-    say("Snapshots live only in S3, and every run writes every table.");
-    if (was.local && was.dir) say("The snapshots already in " + was.dir + " stay there. DBTrail stops listing them and never removes them.");
-    return out;
-  }
   if (s3) {
     // With S3 the count does not apply: age does ("Delete by age"), and only
     // to a local copy S3 has confirmed (2026-10-01). Said for the place as
@@ -9141,28 +9131,16 @@ function reachSpan(mins) {
 function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const box = el("div", { class: "bks-server" });
   box.append(el("h3", { class: "bks-server-name", text: srv.name || srv.id }));
-  // The one question (#1681): does this server keep a copy of its snapshots
-  // on this machine. Yes shows where, and how many are kept when there is no
-  // S3 destination; no hides both and is never SENT unless it was clicked.
-  const q = "bks-local-" + srv.id;
-  const yes = el("input", { type: "radio", name: q, value: "yes" });
-  const no = el("input", { type: "radio", name: q, value: "no" });
-  // The local copy is always yes (D13): the question left the page, and a
-  // save from here always says so. The two inputs stay as the form's state,
-  // in the row but hidden.
-  yes.checked = true;
-  no.checked = false;
-  box.append(el("fieldset", { class: "bks-q", hidden: true },
-    el("legend", { class: "field-label", text: "Keep a copy of this server's snapshots on this machine?" }),
-    el("label", { class: "check" }, yes, el("span", { text: "Yes" })),
-    el("label", { class: "check" }, no, el("span", { text: "No, only in S3" }))));
+  // Every server keeps a copy of its snapshots on this machine (#1681, #2431):
+  // the yes/no question left the page, and a save from here always sends
+  // local_copy true.
   // Two cards (round 3): the count to keep, as a stepper around the number,
   // and the two places the copy lives, as tiles the folder and the bucket
   // are typed into. The inputs keep their names: the save reads them, the
   // browser tests find them by name.
   const grid = el("div", { class: "stg-two" });
-  // The folder a yes uses: this server's own, or the default one named after
-  // its id when it has none yet. Shown, never silently sent: a no omits it.
+  // The folder: this server's own, or the default one named after its id
+  // when it has none yet.
   const dirWas = (srv.baseline_dir || srv.default_dir || "").trim();
   const dir = el("input", { class: "input where-in", name: "baseline_dir", value: dirWas, placeholder: srv.default_dir || "/full/path/to/a/folder" });
   const s3 = el("input", { class: "input where-in", name: "baseline_s3", value: srv.baseline_s3 || "", placeholder: "s3://bucket/prefix/" });
@@ -9207,8 +9185,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const signing = s3SigningNote(s3, srv, snapStorage, snapRegistry);
   if (signing) box.append(signing);
   // S3 without a folder (#1659): said next to the two fields, schedule or
-  // not; in red only when the staging folder its updates need cannot be
-  // used (#2212). From the SAVED values, the ones the schedule reads
+  // not, and in red: no snapshot is written for such a server (#2431). From
+  // the SAVED values, the ones the schedule reads
   // (rebuildPossible): a daemon default folder does not save this server,
   // and a warning that followed the typing would vanish on a save that
   // failed. The page redraws after a successful save.
@@ -9278,15 +9256,15 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // answers locked and no Save at all: hidden by permission.
   const mayWrite = sessionMay("servers:write");
   const locked = !!readOnly || !mayWrite;
-  if (locked) { dir.disabled = s3.disabled = noArch.disabled = yes.disabled = no.disabled = keep.disabled = minus.disabled = plus.disabled = true; }
+  if (locked) { dir.disabled = s3.disabled = noArch.disabled = keep.disabled = minus.disabled = plus.disabled = true; }
   // Save wakes up when something differs from what was loaded, so a click
   // always means a change; Enter in a field saves too.
   // Trimmed on both sides: the PUT trims, so a stored value with stray
   // whitespace is not a change waiting to be saved.
-  // local: true, whatever was stored: the answer is always yes now, so a
-  // server saved as S3-only does not wake Save on its own; its next save from
-  // here turns the local copy on along with whatever changed.
-  const was = { local: true, dir: dirWas, rawDir: (srv.baseline_dir || "").trim(),
+  // A server saved with a bucket and no folder does not wake Save on its
+  // own; its next save from here sends the folder shown (the default one
+  // unless another is typed) along with whatever changed.
+  const was = { dir: dirWas, rawDir: (srv.baseline_dir || "").trim(),
     s3: (srv.baseline_s3 || "").trim(), keep: srv.keep_newest || 0, noArch: !!srv.no_archive };
   // The count as typed: "" is 0 (keep them all); anything else must be a
   // whole number, or it is null and Save refuses it.
@@ -9295,27 +9273,25 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     if (t === "") return 0;
     return /^\d+$/.test(t) ? Number(t) : null;
   };
-  const dirty = () => yes.checked !== was.local || s3.value.trim() !== was.s3 || noArch.checked !== was.noArch ||
-    (yes.checked && (dir.value.trim() !== was.dir || keepNow() !== was.keep));
+  const dirty = () => s3.value.trim() !== was.s3 || noArch.checked !== was.noArch ||
+    dir.value.trim() !== was.dir || keepNow() !== was.keep;
   const paint = () => {
-    const local = yes.checked;
     const s3v = s3.value.trim();
-    dirField.hidden = !local;
     // A tile lights when the place is this server's OWN: a folder typed here
     // (the daemon's default, shown as the placeholder value, is not), or a
     // bucket. The verdict row under them says the same in words.
     const ownDir = dir.value.trim() !== "" && (was.rawDir !== "" || dir.value.trim() !== (srv.default_dir || "").trim());
-    dirField.classList.toggle("on", local && ownDir);
+    dirField.classList.toggle("on", ownDir);
     s3Field.classList.toggle("on", !!s3v);
     // With S3 the count does nothing (S3 keeps everything), so the stepper
     // goes and the words say what happens instead.
-    minus.hidden = plus.hidden = keep.hidden = unit.hidden = !local || !!s3v;
+    minus.hidden = plus.hidden = keep.hidden = unit.hidden = !!s3v;
     keepStep.hidden = keep.hidden;
     // Saved with S3 and no folder of its own, untouched: the folder field
     // shows the default only as a suggestion (Save stays asleep), so nothing
     // is on this machine and the card must not promise "after you save".
     const s3OnlyAtRest = !was.rawDir && !!was.s3 && s3v === was.s3 && dir.value.trim() === was.dir;
-    keepTitle.textContent = !local ? (s3v ? "Only in S3" : "No snapshots") : s3OnlyAtRest ? "Only in S3" : s3v ? "On this machine" : "Keep by count";
+    keepTitle.textContent = s3OnlyAtRest ? "Only in S3" : s3v ? "On this machine" : "Keep by count";
     clear(words);
     // The reach is said for the count as it applies to the folder as saved:
     // a typed folder or destination makes it a number that does not apply yet.
@@ -9326,8 +9302,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // The card keeps the refusals and the one line that answers "how far
     // back can I go"; the rest of what the count means waits under "More
     // about this server", so the card is read at a glance.
-    const said = localCopyWords(local, s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
-      { local: was.local, dir: was.rawDir, source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held,
+    const said = localCopyWords(s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
+      { source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held,
         age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
@@ -9346,34 +9322,25 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     input.addEventListener("input", sync);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !save.disabled) save.click(); });
   }
-  for (const r of [yes, no]) r.addEventListener("change", sync);
   noArch.addEventListener("change", sync);
   sync();
   save.onclick = async () => {
     save.disabled = true;
     msg.hidden = true;
-    // What is sent follows the answer, not the fields on screen: a no sends
-    // local_copy false and never the folder or the count still sitting in
-    // the hidden inputs; a yes always says so, so an emptied folder means
-    // "the default one" and never "no copy anywhere".
-    const body = { baseline_s3: s3.value.trim(), no_archive: noArch.checked };
-    if (yes.checked) {
-      body.local_copy = true;
-      body.baseline_dir = dir.value.trim();
-      // The count only while its field is shown (no S3): hidden, it does
-      // nothing, so it is neither checked nor sent.
-      if (!s3.value.trim()) {
-        const k = keepNow();
-        if (k === null) {
-          msg.textContent = "Keep the newest takes a whole number, or nothing to keep them all.";
-          msg.hidden = false;
-          sync();
-          return;
-        }
-        if (k !== was.keep) body.keep_newest = k;
+    // local_copy true always, so an emptied folder means "the default one"
+    // and never "no copy anywhere".
+    const body = { baseline_s3: s3.value.trim(), no_archive: noArch.checked, local_copy: true, baseline_dir: dir.value.trim() };
+    // The count only while its field is shown (no S3): hidden, it does
+    // nothing, so it is neither checked nor sent.
+    if (!s3.value.trim()) {
+      const k = keepNow();
+      if (k === null) {
+        msg.textContent = "Keep the newest takes a whole number, or nothing to keep them all.";
+        msg.hidden = false;
+        sync();
+        return;
       }
-    } else if (was.local) {
-      body.local_copy = false;
+      if (k !== was.keep) body.keep_newest = k;
     }
     try {
       await api("/api/backup-settings/servers/" + encodeURIComponent(srv.id), {
@@ -9873,6 +9840,8 @@ function archivingPanel(servers, serversErr) {
 // s3CopiedNote (#2212) counts the tables an S3-only update copied inside S3
 // from the previous snapshot: nothing was written for them, so they are
 // neither "refreshed" nor part of the reuse note, which speaks of disk.
+// Old records only since #2431: a current daemon runs no such update, so
+// only a run written before it carries s3_copied.
 function s3CopiedNote(n) {
   return n ? ", " + n + " unchanged and copied inside S3 without being downloaded" : "";
 }
@@ -11079,29 +11048,32 @@ const BACKUP_KIND_LABEL = { dump: "database read", refresh: "automatic refresh",
 
 // Why a scheduled run read the database in full instead of updating the
 // previous backup (#1604), keyed by the code the daemon fixed when the run
-// happened. The first two are the setting to change, said as such; the
-// rest carry the run's own reason, which names the error.
+// happened. no_index is the setting to change, said as such; the two old
+// codes explain a past run; the rest carry the run's own reason, which names
+// the error.
 const BACKUP_WHY_REMEDY = {
   no_index: "Set an index connection for this server (Servers) and the next run updates from the recorded changes instead of reading your database in full; without one there are no recorded changes to update from.",
-  // Old records only (#2212): servers that keep snapshots only in S3 are
-  // updated through the staging folder now.
-  no_local_dir: "That run read your database in full because this server had no Local folder then. Servers that keep their snapshots only in S3 are now updated from the recorded changes, through the working folder.",
-  no_staging: "Fix the working folder (the Working folder setting, BINTRAIL_CONSOLE_BASELINE_STAGING) or set a Local folder for this server, and the next run updates from the recorded changes instead of reading your database in full.",
+  // Old records only (#2212, #2431): a current daemon writes neither code for
+  // a run that happened. Every server keeps a Local folder now, and updates
+  // are built there.
+  no_local_dir: "That run read your database in full because this server had no Local folder then. Every server keeps one now, and updates are built in it.",
+  no_staging: "That run read your database in full because this server kept its snapshots only in S3 then, and the working folder its update was built in could not be used. Every server keeps a Local folder now, and updates are built in it.",
   first_backup: "First snapshot: there was nothing to update from yet. The next run updates from it.",
 };
 // The codes whose cause is a setting, so every run until it changes is a
 // full read of the database (#1659). first_backup is not one: the next run
 // after it updates.
-// no_local_dir is no longer one (#2212): a current daemon never predicts it
-// for a server that can run at all, and its remedy now speaks of a past run.
-const BACKUP_WHY_EVERY_RUN = new Set(["no_index", "no_staging"]);
-// The same three, as a FACT about a past run, for the detail of a backup
+// no_local_dir and no_staging are not (#2212, #2431): a current daemon never
+// predicts either for a server that can run at all, and their remedies speak
+// of a past run.
+const BACKUP_WHY_EVERY_RUN = new Set(["no_index"]);
+// The same codes, as a FACT about a past run, for the detail of a backup
 // that may be months old: "the next run updates" is false there (it ran
 // long ago) and "this server has no index connection" may no longer hold.
 const BACKUP_WHY_FACT = {
   no_index: "Full read: this server had no index connection at the time, so there were no recorded changes to update from.",
   no_local_dir: "Full read: an update from the recorded changes needed a local snapshot directory, which this server did not have at the time.",
-  no_staging: "Full read: this server keeps its snapshots only in S3, and the working folder its update is built in could not be used at the time.",
+  no_staging: "Full read: this server kept its snapshots only in S3 then, and the working folder its update was built in could not be used at the time.",
   first_backup: "Full read: the first one, with nothing to update from yet.",
 };
 // remedy: true on the schedule card (this IS the last run, and the setting
