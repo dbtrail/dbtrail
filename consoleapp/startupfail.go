@@ -24,7 +24,7 @@ import (
 // used to exit, and its supervisor (compose's restart policy, systemd) started
 // it again, hundreds of times a day, while the browser showed nothing and the
 // reason scrolled past in the log. Instead, it now keeps the console's port
-// with one page that says why, until it is stopped.
+// with one page that says why, for startupPageFor.
 //
 // Only for failures classed as configuration, permissions or a missing
 // database. Some of those still heal with time (an app's migrations create the
@@ -192,10 +192,11 @@ p{margin:12px 0}
 <h1>dbtrail could not start</h1>
 {{if .Show}}<p>It stopped on this, before the web interface opened:</p>
 <pre>{{.Message}}</pre>
-{{else}}<p>It stopped on its configuration, before the web interface opened. The reason is in dbtrail's log (with the Docker Compose stack: <code>docker compose logs bintrail</code>).</p>
-<p>This page does not show it to this address. Open it from the machine dbtrail runs on, or add this hostname to <code>BINTRAIL_CONSOLE_ALLOWED_HOSTS</code>.</p>{{end}}
+{{else}}<p>It stopped before the web interface opened. The reason is in dbtrail's log (with the Docker Compose stack: <code>docker compose logs bintrail</code>; with the package: <code>journalctl -u bintrail-console</code>).</p>
+{{if .Trusted}}<p>This page does not show it under this hostname. Open it by IP or as <code>localhost</code>, or add this hostname to <code>BINTRAIL_CONSOLE_ALLOWED_HOSTS</code>.</p>
+{{else}}<p>This page does not show it: the web interface listens on a public address with no password set, so anyone reaching it would read it.</p>{{end}}{{end}}
 {{if .Checks}}<p>Checks that failed: {{range $i, $c := .Checks}}{{if $i}}, {{end}}<code>{{$c}}</code>{{end}}. The log shows how to fix each one.</p>{{end}}
-<p>dbtrail tries again by itself every {{.Every}}. After fixing it, to try now: <code>docker compose restart bintrail</code> (or restart the service the way you run it).</p>
+<p>After {{.Every}} dbtrail exits; Docker Compose and the package's service start it again by themselves. After fixing it, to try now: <code>docker compose restart bintrail</code> (or restart the service the way you run it).</p>
 </main></body></html>`))
 
 func (f *startupFailure) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -207,10 +208,11 @@ func (f *startupFailure) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = startupPageTmpl.Execute(w, struct {
 		Show    bool
+		Trusted bool
 		Message string
 		Checks  []string
 		Every   string
-	}{show, f.message, f.checks, humanMinutes(startupPageFor)})
+	}{show, f.trusted, f.message, f.checks, humanMinutes(startupPageFor)})
 }
 
 func humanMinutes(d time.Duration) string {

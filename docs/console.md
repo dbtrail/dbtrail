@@ -1501,10 +1501,12 @@ one release and warns that it no longer does anything. Remove it.
   its supervisor starts it again, so a failure that heals with time (tables
   created by an app's migrations, grants applied later) still heals, at one
   restart every five minutes instead of a tight loop. A failure a restart fixes
-  at once (the index not reachable yet) exits immediately, as before. The full
-  reason shows only on a loopback bind or with `BINTRAIL_CONSOLE_ALLOW_SETUP`,
-  and only under an IP, `localhost` or a name in
-  `BINTRAIL_CONSOLE_ALLOWED_HOSTS`; elsewhere the page points to the log. Under
+  at once (the index not reachable yet) exits immediately, as before. The
+  messages dbtrail writes itself (a malformed index DSN, the public-bind
+  refusal) show anywhere; any other reason shows only on a loopback bind or
+  with `BINTRAIL_CONSOLE_ALLOW_SETUP`, and only under an IP, `localhost` or a
+  name in `BINTRAIL_CONSOLE_ALLOWED_HOSTS`; elsewhere the page points to the
+  log. Under
   systemd the unit reads `active (running)` while the page is up; turn the page
   off if your alerting watches for a failed unit. Not shown over TLS.
 - `BINTRAIL_CONSOLE_URL`: the address people open the web interface at, when it is not

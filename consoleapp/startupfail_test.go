@@ -249,6 +249,16 @@ func TestStartupFailureReviewFixes(t *testing.T) {
 	if body := get(public.build(errCfg), "10.1.1.1:8090"); !strings.Contains(body, "docker compose restart bintrail") || strings.Contains(body, "docker compose up -d") {
 		t.Errorf("restart advice: %s", body)
 	}
+
+	// The hidden-reason hint matches why it is hidden: a hostname fix only
+	// helps a trusted bind; an untrusted one points to the log.
+	internal := fmt.Errorf("init: %w", &mysql.MySQLError{Number: 1045, Message: "denied"})
+	if body := get(public.build(internal), "127.0.0.1:8090"); strings.Contains(body, "ALLOWED_HOSTS") || !strings.Contains(body, "no password set") {
+		t.Errorf("untrusted bind hint: %s", body)
+	}
+	if body := get(failureEnv{reached: true}.build(internal), "evil.example"); !strings.Contains(body, "ALLOWED_HOSTS") {
+		t.Errorf("trusted bind, unknown host hint: %s", body)
+	}
 }
 
 // TestStartupFailureTimesOut: the page gives way after startupPageFor so the
