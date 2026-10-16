@@ -198,7 +198,19 @@ func TestWatchStartupFailureWiring(t *testing.T) {
 	t.Setenv("BINTRAIL_CONSOLE_LISTEN", "0.0.0.0:18090")
 	t.Setenv(startupPageEnv, "")
 	t.Setenv("BINTRAIL_CONSOLE_TLS_CERT", "")
+	// Integration tests in this package run a real watch first: it listens
+	// and may set console flags. Start from what a fresh process has.
 	watchReached.Store(false)
+	watchListening.Store(false)
+	origTLS := upConsoleTLSCert
+	t.Cleanup(func() { upConsoleTLSCert = origTLS })
+	upConsoleTLSCert = ""
+	for _, name := range []string{"console-listen", "console-tls-cert", "console-allow-setup", "console-allowed-hosts"} {
+		f := watchCmd.Flags().Lookup(name)
+		was := f.Changed
+		f.Changed = false
+		t.Cleanup(func() { f.Changed = was })
+	}
 	upIndexDSN = ""
 	err := runWatch(watchCmd, nil)
 	if err == nil {
