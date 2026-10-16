@@ -111,7 +111,8 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	// FlashbackListen and ReadRouting are display config (watch passes what
 	// it bound); the port below is served by hand on its own listener.
 	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
-		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2}})
+		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, ScanRows: 2},
+		StatementTable: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,6 +431,34 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	}
 	if tally.Copy != 5 {
 		t.Errorf("copy = %d, want 5", tally.Copy)
+	}
+	// The per-statement table (#2360): its rows add up to the answers of
+	// each side, and carry no value a statement was sent with, typed or
+	// bound to a prepared statement.
+	st := srv.RouterNumbers().Servers[ent.ID].Statements
+	if st == nil || st.NotCounted != 0 {
+		t.Fatalf("statement table = %+v", st)
+	}
+	perSide := map[string]uint64{}
+	for _, r := range st.Rows {
+		perSide[r.Side] += r.Count
+		for _, value := range []string{"zz", "it's", `a\b`, "'"} {
+			if strings.Contains(r.Statement, value) {
+				t.Errorf("row %q carries the value %q", r.Statement, value)
+			}
+		}
+	}
+	if perSide["copy"] != tally.Answers["copy"].Count || perSide["mysql"] != tally.Answers["mysql"].Count {
+		t.Errorf("rows add up to %v, answers are copy %d mysql %d", perSide, tally.Answers["copy"].Count, tally.Answers["mysql"].Count)
+	}
+	grouped := false
+	for _, r := range st.Rows {
+		if r.Side == "copy" && strings.HasPrefix(r.Statement, "select status, count(*) from orders") {
+			grouped = true
+		}
+	}
+	if !grouped {
+		t.Errorf("no row for the GROUP BY the copy answered: %+v", st.Rows)
 	}
 	// What each side finished, end to end through the real port (#2358).
 	// #2361 deleted this wiring by accident and every other assertion here

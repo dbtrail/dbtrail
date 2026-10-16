@@ -608,9 +608,9 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 					srv.RecordRouteDecision(id, string(route), string(reason))
 					tgt.SQL.NoteRoute(string(route))
 				},
-				Answered: func(side shim.RouteSide, took time.Duration, failed, timedOut bool) {
+				Answered: func(side shim.RouteSide, stmt string, took time.Duration, failed, timedOut bool) {
 					observe.ObserveRouteAnswer(id, string(side), took, failed, timedOut)
-					srv.RecordRouteAnswer(id, string(side), took, failed, timedOut)
+					srv.RecordRouteAnswer(id, string(side), stmt, took, failed, timedOut)
 				},
 			})
 		}

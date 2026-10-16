@@ -374,6 +374,25 @@ sum by (server, route) (rate(bintrail_read_routing_answer_seconds_total[5m]))
   / sum by (server, route) (rate(bintrail_read_routing_answers_total[5m]))
 ```
 
+### Which statements took the time
+
+The counters above are per side, never per statement: a statement's text
+would be a label without end, and it names tables and columns. The router
+keeps a table per statement shape only when started with
+`--statement-table` (`BINTRAIL_ROUTER_STATEMENT_TABLE=1`, or
+`ROUTER_STATEMENT_TABLE=1` in the Docker stack's `.env`). Each row is one
+shape on one side, with its count, errors, timeouts, total and slowest time.
+Every value in a shape is blanked (`WHERE id = 12345` and `WHERE id = ?` are
+one row, and so are `IN` lists of any length); table and column names are
+kept. A server keeps up to 200 rows; a shape first seen past that is counted
+in `not_counted`, so the table never reads as complete when it is not.
+
+It is published in the router's `/status` document, under each server's
+`statements`, on the `--metrics-addr` address, which asks for no password.
+Whoever reaches that address reads the names of the tables and columns your
+clients query. The web interface passes it on only to sessions with no data
+profile, and tells the others it was withheld.
+
 ## Example Prometheus alert rules
 
 The push-based sibling of these metrics is the watch daemon's

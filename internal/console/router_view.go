@@ -76,8 +76,11 @@ type routerViewDTO struct {
 	// What it understands is shown.
 	Newer bool `json:"newer,omitempty"`
 	// ReadAt is when this console read the document, RFC 3339 UTC.
-	ReadAt string           `json:"read_at,omitempty"`
-	Status *RouterStatusDoc `json:"status,omitempty"`
+	ReadAt string `json:"read_at,omitempty"`
+	// StatementsWithheld: the router keeps the per-statement table and this
+	// session may not see it (a data profile), so it was taken out.
+	StatementsWithheld bool             `json:"statements_withheld,omitempty"`
+	Status             *RouterStatusDoc `json:"status,omitempty"`
 }
 
 // routerView reads the router's document once.
@@ -164,5 +167,7 @@ func fetchRouterStatus(ctx context.Context, client *http.Client, addr string) (*
 
 // handleRouterGet is GET /api/router (settings:read).
 func (s *Server) handleRouterGet(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.routerView(r.Context()))
+	v := s.routerView(r.Context())
+	s.withholdStatements(r.Context(), &v)
+	writeJSON(w, http.StatusOK, v)
 }

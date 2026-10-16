@@ -13,7 +13,7 @@ import (
 // route outside copy|mysql is kept under its reason so a vocabulary drift
 // stays visible instead of vanishing.
 func TestRoutingStats_tallyPerServer(t *testing.T) {
-	r := newRoutingStats(time.Now())
+	r := newRoutingStats(time.Now(), false)
 	r.record("a", "copy", "expensive_plan")
 	r.record("a", "mysql", "veto")
 	r.record("a", "mysql", "veto")

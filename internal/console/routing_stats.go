@@ -16,6 +16,8 @@ import (
 type routingStats struct {
 	mu    sync.Mutex
 	since time.Time
+	// statementsOn: the per-statement table is kept (Config.StatementTable).
+	statementsOn bool
 	// perServer is keyed by the registry id the port resolved the connection
 	// to (the canonical id, never the display name a client typed), so a
 	// renamed server keeps its tally. An entry outlives its server: a deleted
@@ -49,6 +51,9 @@ type routingTally struct {
 	// apart from the decisions above. A decision is counted when it is
 	// made; an answer when the statement is over, with how long it took.
 	answers map[string]*routingAnswers
+	// statements is the per-statement table (#2360), nil while it is off
+	// or nothing has finished.
+	statements *statementTally
 }
 
 // routingAnswers is one side's finished statements for one server.
@@ -73,8 +78,8 @@ type RouteAnswers struct {
 	SlowestSeconds float64 `json:"slowest_seconds"`
 }
 
-func newRoutingStats(now time.Time) *routingStats {
-	return &routingStats{since: now, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}, sessionUntracked: map[string]string{}}
+func newRoutingStats(now time.Time, statementsOn bool) *routingStats {
+	return &routingStats{since: now, statementsOn: statementsOn, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}, sessionUntracked: map[string]string{}}
 }
 
 // record tallies one decision. route is "copy", "mysql" or "refused" (the
@@ -101,7 +106,7 @@ func (r *routingStats) record(serverID, route, reason string) {
 
 // answered tallies one finished statement. side is "copy" or "mysql"; any
 // other value is dropped, since no column of the page is its.
-func (r *routingStats) answered(serverID, side string, took time.Duration, failed, timedOut bool) {
+func (r *routingStats) answered(serverID, side, shape string, took time.Duration, failed, timedOut bool) {
 	if side != "copy" && side != "mysql" {
 		return
 	}
@@ -123,6 +128,14 @@ func (r *routingStats) answered(serverID, side string, took time.Duration, faile
 		a = &routingAnswers{}
 		t.answers[side] = a
 	}
+	a.add(took, failed, timedOut)
+	if shape != "" {
+		t.answeredStatement(shape, side, took, failed, timedOut)
+	}
+}
+
+// add counts one finished statement.
+func (a *routingAnswers) add(took time.Duration, failed, timedOut bool) {
 	a.count++
 	if failed {
 		a.failed++
@@ -136,6 +149,12 @@ func (r *routingStats) answered(serverID, side string, took time.Duration, faile
 	}
 }
 
+// dto is the wire form.
+func (a *routingAnswers) dto() RouteAnswers {
+	return RouteAnswers{Count: a.count, Errors: a.failed, Timeouts: a.timedOut,
+		Seconds: a.total.Seconds(), SlowestSeconds: a.slowest.Seconds()}
+}
+
 // answersDTO copies a tally's answers for the wire, nil when it has none.
 func (t *routingTally) answersDTO() map[string]RouteAnswers {
 	if len(t.answers) == 0 {
@@ -143,8 +162,7 @@ func (t *routingTally) answersDTO() map[string]RouteAnswers {
 	}
 	out := make(map[string]RouteAnswers, len(t.answers))
 	for side, a := range t.answers {
-		out[side] = RouteAnswers{Count: a.count, Errors: a.failed, Timeouts: a.timedOut,
-			Seconds: a.total.Seconds(), SlowestSeconds: a.slowest.Seconds()}
+		out[side] = a.dto()
 	}
 	return out
 }
@@ -226,8 +244,12 @@ func (s *Server) RecordRouteDecision(serverID, route, reason string) {
 // RecordRouteAnswer tallies one statement a side finished: how long it took
 // and whether the client got an error for it. Called by the port's serving
 // layer from the shim's RouterConfig.Answered hook; safe from any goroutine.
-func (s *Server) RecordRouteAnswer(serverID, side string, took time.Duration, failed, timedOut bool) {
-	s.routing.answered(serverID, side, took, failed, timedOut)
+func (s *Server) RecordRouteAnswer(serverID, side, stmt string, took time.Duration, failed, timedOut bool) {
+	shape := ""
+	if s.routing.statementsOn {
+		shape = statementShape(stmt)
+	}
+	s.routing.answered(serverID, side, shape, took, failed, timedOut)
 }
 
 // RecordRouteUnavailable notes that a connection to serverID could not route

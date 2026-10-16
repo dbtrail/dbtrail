@@ -8,16 +8,16 @@ import (
 )
 
 func TestRoutingStats_answersPerSide(t *testing.T) {
-	r := newRoutingStats(time.Now())
-	r.answered("a", "mysql", 2*time.Second, false, false)
-	r.answered("a", "mysql", 4*time.Second, true, false)
-	r.answered("a", "mysql", time.Second, true, true)
-	r.answered("a", "copy", 500*time.Millisecond, false, false)
+	r := newRoutingStats(time.Now(), false)
+	r.answered("a", "mysql", "", 2*time.Second, false, false)
+	r.answered("a", "mysql", "", 4*time.Second, true, false)
+	r.answered("a", "mysql", "", time.Second, true, true)
+	r.answered("a", "copy", "", 500*time.Millisecond, false, false)
 	// Not counted as a timeout unless it failed, a side nobody knows is
 	// dropped, and a negative time (the clock stepped back) counts as zero.
-	r.answered("a", "copy", -time.Second, false, true)
-	r.answered("a", "refused", time.Second, false, false)
-	r.answered("b", "copy", time.Second, false, false)
+	r.answered("a", "copy", "", -time.Second, false, true)
+	r.answered("a", "refused", "", time.Second, false, false)
+	r.answered("b", "copy", "", time.Second, false, false)
 
 	got := r.snapshot()
 	my, cp := got["a"].Answers["mysql"], got["a"].Answers["copy"]
@@ -35,7 +35,7 @@ func TestRoutingStats_answersPerSide(t *testing.T) {
 // A server with decisions and no finished statement has no answers key at
 // all: zero counts would read as "measured, and nothing ran".
 func TestRoutingStats_noAnswersIsAbsent(t *testing.T) {
-	r := newRoutingStats(time.Now())
+	r := newRoutingStats(time.Now(), false)
 	r.record("a", "mysql", "cheap_plan")
 	b, err := json.Marshal(r.snapshot()["a"])
 	if err != nil || strings.Contains(string(b), "answers") {
@@ -54,7 +54,7 @@ func TestRouterNumbers_carryAnswers(t *testing.T) {
 		t.Cleanup(r.Close)
 	}
 	srv.RecordRouteDecision("a", "copy", "expensive_plan")
-	srv.RecordRouteAnswer("a", "copy", 1500*time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "copy", "SELECT 1", 1500*time.Millisecond, false, false)
 	n := srv.RouterNumbers()
 	if got := n.Servers["a"].Answers["copy"]; got != (RouteAnswers{Count: 1, Seconds: 1.5, SlowestSeconds: 1.5}) {
 		t.Fatalf("answers = %+v", got)

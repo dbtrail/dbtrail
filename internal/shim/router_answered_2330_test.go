@@ -24,7 +24,7 @@ func answeredConfig(cfg RouterConfig, decided, answered *[]string) RouterConfig 
 	cfg.Observe = func(route RouteSide, reason RouteReason) {
 		*decided = append(*decided, string(route)+"/"+string(reason))
 	}
-	cfg.Answered = func(side RouteSide, took time.Duration, failed, timedOut bool) {
+	cfg.Answered = func(side RouteSide, _ string, took time.Duration, failed, timedOut bool) {
 		how := "ok"
 		switch {
 		case timedOut && !failed:
@@ -157,5 +157,34 @@ func TestRouterAnswered_preparedStatement(t *testing.T) {
 	}
 	if len(answered) != 1 || answered[0] != "mysql/ok" {
 		t.Errorf("answered %v, want [mysql/ok] (decided %v)", answered, decided)
+	}
+}
+
+// The statement is reported with the answer, as the client sent it: for a
+// prepared one its template, never the values it ran with (#2360).
+func TestRouterAnswered_carriesTheStatement(t *testing.T) {
+	var got []string
+	cfg := RouterConfig{MaxCopyAge: time.Minute}
+	cfg.Answered = func(side RouteSide, stmt string, _ time.Duration, _, _ bool) {
+		got = append(got, string(side)+": "+stmt)
+	}
+	r := &fakeRouter{toCopy: false, reason: "cheap"}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	h := NewHandler(nil, nil)
+	h.BindFreeSQL(f)
+	h.BindRouter(r, cfg)
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, ctx, err := h.HandleStmtPrepare("SELECT * FROM t WHERE id = ?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.HandleStmtExecute(ctx, "", []any{int64(424242)}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mysql: SELECT * FROM t WHERE id = 1", "mysql: SELECT * FROM t WHERE id = ?"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("answered %q, want %q", got, want)
 	}
 }

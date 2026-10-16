@@ -128,6 +128,9 @@ type RouterNumbers struct {
 	CountingSince string `json:"counting_since"`
 	// Pool is absent when this process runs no SQL on the copy.
 	Pool *RouterPoolNumbers `json:"pool,omitempty"`
+	// StatementTable: this router keeps the per-statement table (#2360),
+	// so each server carries Statements.
+	StatementTable bool `json:"statement_table,omitempty"`
 	// Servers is keyed by registry id; a server nothing was sent to and
 	// nothing is known about has no entry. Never null.
 	Servers map[string]RouterServerNumbers `json:"servers"`
@@ -187,14 +190,23 @@ type RouterServerNumbers struct {
 	// Answers is what each side ("copy", "mysql") finished: counts and
 	// times. Absent until a statement finishes.
 	Answers map[string]RouteAnswers `json:"answers,omitempty"`
+	// Statements is the per-statement table (#2360), present only when
+	// StatementTable is: unlike the rest of this document, its rows name
+	// tables and columns (never a value, which is blanked).
+	Statements *RouterStatementTable `json:"statements,omitempty"`
 }
 
 // RouterNumbers reads the counts and the pool. It opens nothing and lists no
 // folder: the copies' snapshot times are the caller's to add.
 func (s *Server) RouterNumbers() RouterNumbers {
 	out := RouterNumbers{
-		CountingSince: s.routing.since.UTC().Format(time.RFC3339),
-		Servers:       map[string]RouterServerNumbers{},
+		CountingSince:  s.routing.since.UTC().Format(time.RFC3339),
+		StatementTable: s.routing.statementsOn,
+		Servers:        map[string]RouterServerNumbers{},
+	}
+	var tables map[string]*RouterStatementTable
+	if s.routing.statementsOn {
+		tables = s.routing.statementTables()
 	}
 	for id, t := range s.routing.snapshot() {
 		reasons := t.Reasons
@@ -215,6 +227,12 @@ func (s *Server) RouterNumbers() RouterNumbers {
 			}
 		}
 		n.Answers = t.Answers
+		if s.routing.statementsOn {
+			n.Statements = tables[id]
+			if n.Statements == nil {
+				n.Statements = &RouterStatementTable{Rows: []RouterStatementRow{}, Limit: StatementTableLimit}
+			}
+		}
 		out.Servers[id] = n
 	}
 	if runner := s.SQLSandbox(); runner != nil {

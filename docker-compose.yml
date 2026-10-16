@@ -584,6 +584,11 @@ services:
       # here (ROUTER_MAX_WAIT=30s in .env) refuses it past that, with an
       # error drivers and pools retry.
       BINTRAIL_ROUTER_MAX_WAIT: ${ROUTER_MAX_WAIT:-}
+      # Off unless ROUTER_STATEMENT_TABLE=1 in .env: a table of each statement
+      # shape the router answered (values blanked), with counts and times,
+      # shown on the router panel. It names your tables and columns, and the
+      # router's status address asks for no password.
+      BINTRAIL_ROUTER_STATEMENT_TABLE: ${ROUTER_STATEMENT_TABLE:-}
       # READ-ONLY unless you say otherwise: a statement that is not a read is
       # refused and never reaches the source. This service starts with the
       # stack, and its password is one that until now could only read (the

@@ -91,6 +91,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("concurrency", "", "How many statements run on the copy at once, 1 to 64, like innodb_thread_concurrency on a MySQL server. Empty or 0: worked out from the cores and the memory this process may use (one statement per two cores). A number above that is taken as said: each statement gets fewer threads, down to one, and the startup lines warn when the number can ask for more memory than there is. A higher number also divides the temporary disk statements may use past their memory into more shares, and keeps that many idle worker processes ready. The rest wait their turn. Env BINTRAIL_ROUTER_CONCURRENCY.")
 	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets an error (1040 on a routed connection, 1203 on one that is not). Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
+	f.Bool("statement-table", false, "Keep a table of every statement shape each side answered, with how many times, how long and how many failed (values blanked, table and column names kept), and publish it on --metrics-addr /status, which asks for no password: whoever reaches that address then reads the names of the tables and columns your clients query. The web interface shows it only to sessions with no data profile. Env BINTRAIL_ROUTER_STATEMENT_TABLE.")
 	f.Bool("route-read-only", true, "On unless set to false (--route-read-only=false, BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0). Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	f.Float64("route-cost-threshold", def.CostThreshold, "A SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
 	f.Int64("route-scan-rows", def.ScanRows, "A SELECT whose plan has a full table scan over at least this many rows goes to the copy (on a MariaDB source, whose plans carry no comparable cost, a full index scan too, and a plan whose joins read at least this many rows in all). 0 disables the scan rule. Env BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.")
@@ -115,6 +116,8 @@ type routerSettings struct {
 	MaxWait  time.Duration
 	Policy   readrouter.Policy
 	ReadOnly bool
+	// StatementTable keeps and publishes the per-statement table (#2360).
+	StatementTable bool
 }
 
 // routerSettingsFrom resolves the router's flags with the environment, a
@@ -178,6 +181,14 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 		if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_READ_ONLY"); v != "" {
 			if st.ReadOnly, err = strconv.ParseBool(v); err != nil {
 				return st, fmt.Errorf("BINTRAIL_CONSOLE_ROUTE_READ_ONLY=%q is not a yes or no: use 1 or true (or leave it unset) for a read-only port, 0 or false to forward writes", v)
+			}
+		}
+	}
+	st.StatementTable, _ = f.GetBool("statement-table")
+	if !f.Changed("statement-table") {
+		if v := os.Getenv("BINTRAIL_ROUTER_STATEMENT_TABLE"); v != "" {
+			if st.StatementTable, err = strconv.ParseBool(v); err != nil {
+				return st, fmt.Errorf("BINTRAIL_ROUTER_STATEMENT_TABLE=%q is not a yes or no: use 1 or true to keep the per-statement table, 0 or false (or leave it unset) not to", v)
 			}
 		}
 	}
@@ -248,6 +259,7 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		SQLWorkerStatements:    sqlsandbox.DefaultWorkerStatements,
 		SQLMaxWaiters:          routerMaxWaiters,
 		SQLMaxWait:             st.MaxWait,
+		StatementTable:         st.StatementTable,
 		SQLPortSharedSlots:     true,
 		SQLPortMaxRows:         st.SQLPortMaxRows,
 		KillSourceThreads:      killSourceThreads,
@@ -646,6 +658,10 @@ type routerStartup struct {
 	// InContainer: this process runs in a container, where listening on
 	// every interface is how a port is published and not an exposure.
 	InContainer bool
+	// StatementTable and MetricsAddr: the per-statement table is kept, and
+	// where it is published.
+	StatementTable bool
+	MetricsAddr    string
 }
 
 // routerStartupLines says, at startup, where the port will be, which files
@@ -693,6 +709,13 @@ func routerStartupLines(u routerStartup) string {
 		b.WriteString("Router: Engine Routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")
 	} else {
 		b.WriteString("Router: Engine Routing is read-write: statements, writes included, go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". Anyone holding a credential of this port can do on each source what that account can. Set --route-read-only to refuse writes, and a forwarding account on each server to bound the rest.\n")
+	}
+	if u.StatementTable {
+		if u.MetricsAddr == "" {
+			b.WriteString("Router: the statement table is ON, and there is no --metrics-addr: it is kept and nobody can read it. Set BINTRAIL_ROUTER_METRICS_ADDR or --metrics-addr to see it in the web interface.\n")
+		} else {
+			fmt.Fprintf(&b, "Router: the statement table is ON. http://%s/status lists each statement shape your clients sent, which names tables and columns (values are blanked), and that address asks for no password. The web interface shows it only to sessions with no data profile.\n", u.MetricsAddr)
+		}
 	}
 	for _, line := range u.Ignored {
 		b.WriteString("Router: " + line + ".\n")
@@ -874,6 +897,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, MemoryFrom: memoryFrom, MemoryErr: savedErr, Cfg: cfg,
 		ServersFile: st.ServersFile, ServersExists: statErr == nil, Servers: srv.ServerCount(),
 		PortFile: routerPortFile(st), Token: st.Token != "", MaxWait: st.MaxWait, Ignored: routerIgnoredEnv(), InContainer: inContainer(),
+		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr,
 	}))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)
