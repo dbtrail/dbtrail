@@ -476,12 +476,12 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	if req.NoArchive != nil {
 		entry.NoArchive = *req.NoArchive
 	}
+	if req.LocalCopy != nil && !*req.LocalCopy {
+		writeJSONError(w, http.StatusBadRequest, localCopyRequiredMsg)
+		return
+	}
 	if req.LocalCopy != nil {
-		if !*req.LocalCopy {
-			// The snapshots already in the folder stay where they are; the
-			// page says so, because nothing lists or prunes them after this.
-			entry.BaselineDir = ""
-		} else if entry.BaselineDir == "" {
+		if entry.BaselineDir == "" {
 			entry.BaselineDir = s.cm.reg.DefaultBaselineDir(entry.ID)
 			if entry.BaselineDir == "" {
 				writeJSONError(w, http.StatusBadRequest, "type the folder this server's snapshots go in")
@@ -489,8 +489,8 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 			}
 		}
 	}
-	if entry.BaselineDir == "" && entry.BaselineS3 == "" && req.LocalCopy != nil && !*req.LocalCopy {
-		writeJSONError(w, http.StatusBadRequest, noCopyAnywhereMsg)
+	if entry.BaselineDir == "" && before.BaselineDir != "" {
+		writeJSONError(w, http.StatusBadRequest, localDirRequiredMsg)
 		return
 	}
 	if req.KeepNewest != nil {

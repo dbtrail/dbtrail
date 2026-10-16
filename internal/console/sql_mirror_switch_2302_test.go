@@ -140,10 +140,7 @@ func TestSQLMirrorSwitch_stateAndRefusal(t *testing.T) {
 // connection, and reaches the open bundle at once.
 func TestSQLMirrorSwitch_savedAndKept(t *testing.T) {
 	srv, state := newLocalCopyServer(t)
-	rec, dto := createServer(t, srv, newServerBody+`,"local_copy":false,"baseline_s3":"s3://bucket/prefix"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
-	}
+	dto := addS3OnlyEntry(t, srv)
 	stored := func() ServerEntry {
 		t.Helper()
 		e, ok := srv.cm.reg.Get(dto.ID)
@@ -212,7 +209,7 @@ func TestSQLMirrorSwitch_savedAndKept(t *testing.T) {
 // The save reaches a bundle that is already open.
 func TestSQLMirrorSwitch_saveReachesTheOpenBundle(t *testing.T) {
 	srv, _ := newLocalCopyServer(t)
-	_, dto := createServer(t, srv, newServerBody+`,"local_copy":false,"baseline_s3":"s3://bucket/prefix"}`)
+	dto := addS3OnlyEntry(t, srv)
 	entry, _ := srv.cm.reg.Get(dto.ID)
 	srv.cm.lazyIndex = true
 	b, err := srv.cm.buildBundle(entry)
@@ -249,4 +246,15 @@ func TestSQLMirror_theManagerMakesBundlesOneWay(t *testing.T) {
 	if !strings.Contains(functionBody(t, src, "func (cm *connManager) newBundle("), "newBundleDerived(db, dbName, entry, cm.profileActive)") {
 		t.Error("newBundle no longer builds on newBundleDerived")
 	}
+}
+
+// addS3OnlyEntry is a server saved with a bucket and no folder, as a file
+// written before #2431 holds one: no request can make one any more.
+func addS3OnlyEntry(t *testing.T, srv *Server) ServerEntry {
+	t.Helper()
+	e, err := srv.cm.reg.Add(ServerEntry{Name: "prod", DSN: "u:p@tcp(h:3306)/idx", BaselineS3: "s3://bucket/prefix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
 }

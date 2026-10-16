@@ -343,12 +343,7 @@ func (s *Server) buildNewEntry(req serverRequest) (ServerEntry, bool, error) {
 	// Save would. No IO: the folder itself is prepared in persistNewEntry.
 	localDir := strings.TrimSpace(req.BaselineDir)
 	if req.LocalCopy != nil && !*req.LocalCopy {
-		if localDir != "" {
-			return ServerEntry{}, false, errors.New("a folder was given for a server that keeps no copy on this machine; send one or the other")
-		}
-		if strings.TrimSpace(req.BaselineS3) == "" {
-			return ServerEntry{}, false, errors.New(noCopyAnywhereMsg)
-		}
+		return ServerEntry{}, false, errors.New(localCopyRequiredMsg)
 	}
 	return ServerEntry{
 		Name:              strings.TrimSpace(req.Name),
@@ -539,6 +534,9 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(raw, &sent)
 	if _, ok := sent["baseline_dir"]; !ok {
 		req.BaselineDir = old.BaselineDir
+	} else if strings.TrimSpace(req.BaselineDir) == "" && old.BaselineDir != "" {
+		writeJSONError(w, http.StatusBadRequest, localDirRequiredMsg)
+		return
 	}
 	if _, ok := sent["baseline_s3"]; !ok {
 		req.BaselineS3 = old.BaselineS3

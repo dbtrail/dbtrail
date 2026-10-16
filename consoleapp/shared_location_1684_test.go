@@ -108,7 +108,7 @@ func TestLoadConsoleRegistry_countsTheCommandLineWriter(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		reg, err := loadConsoleRegistry(path, tc.cliRefreshes, dir, "")
+		reg, err := loadConsoleRegistry(path, tc.cliRefreshes, false, dir, "")
 		if err != nil {
 			t.Fatal(err)
 		}

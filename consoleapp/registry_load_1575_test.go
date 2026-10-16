@@ -22,13 +22,13 @@ func TestLoadConsoleRegistry_registersTheDaemonBaselineBucket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := loadConsoleRegistry(path, false, "", ""); err != nil {
+	if _, err := loadConsoleRegistry(path, false, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := storage.BucketStoreFor("daemon"); !ok {
 		t.Fatal("with no --baseline-s3 the saved store must route its bucket")
 	}
-	if _, err := loadConsoleRegistry(path, false, "", "s3://daemon/baselines/"); err != nil {
+	if _, err := loadConsoleRegistry(path, false, false, "", "s3://daemon/baselines/"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := storage.BucketStoreFor("daemon"); ok {
@@ -47,7 +47,7 @@ func TestLoadConsoleRegistry_migratesTheStartupLocationFirst(t *testing.T) {
 	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reg, err := loadConsoleRegistry(path, false, "/daemon/baselines", "s3://daemon/baselines/")
+	reg, err := loadConsoleRegistry(path, false, false, "/daemon/baselines", "s3://daemon/baselines/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +85,45 @@ func TestConsoleEntrypointsLoadTheRegistryThroughTheHelper(t *testing.T) {
 		}
 		if n := strings.Count(string(src), "loadConsoleRegistry("); n != want {
 			t.Errorf("%s calls loadConsoleRegistry %d times, want %d", file, n, want)
+		}
+	}
+}
+
+// #2431: the process that takes the snapshots gives every server that keeps
+// them only in S3 its default local folder at load, after the migration
+// above (which can hand an entry the daemon's bucket alone); serve does not.
+func TestLoadConsoleRegistry_givesS3OnlyServersALocalFolder(t *testing.T) {
+	storage.SetBucketStores(nil)
+	t.Cleanup(func() { storage.SetBucketStores(nil) })
+	file := "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaaa\n    name: A\n    index_dsn: u:p@tcp(h:3306)/a\n  - id: bbbbbbbbbbbbbbbb\n    name: B\n    index_dsn: u:p@tcp(h:3306)/b\n    baseline_s3: s3://own/b/\n"
+	for _, takes := range []bool{false, true} {
+		state := t.TempDir()
+		path := filepath.Join(state, "servers.yaml")
+		if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		reg, err := loadConsoleRegistry(path, false, takes, "", "s3://daemon/baselines/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range reg.List() {
+			want := ""
+			if takes {
+				want = filepath.Join(state, "snapshots", e.ID)
+			}
+			if e.BaselineDir != want {
+				t.Errorf("takesSnapshots=%v: %s dir = %q, want %q", takes, e.Name, e.BaselineDir, want)
+			}
+		}
+	}
+	// watch takes the snapshots in both of its loads; serve never does.
+	for file, want := range map[string]string{"watch.go": `upBaselineRefreshEvery != "", true, `, "serve.go": "loadConsoleRegistry(serversPath, false, false, "} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, all := strings.Count(string(src), want), strings.Count(string(src), "loadConsoleRegistry("); n != all {
+			t.Errorf("%s: %d of %d loads pass the expected takesSnapshots", file, n, all)
 		}
 	}
 }

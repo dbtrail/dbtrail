@@ -75,11 +75,13 @@ func TestLocalKeepHeld_deletingTheOtherServerKeepsTheFolderUnpruned(t *testing.T
 	}
 }
 
-func TestLocalKeepHeld_theOtherServerAnsweringNoKeepsTheFolderUnpruned(t *testing.T) {
+func TestLocalKeepHeld_theOtherServerMovingAwayKeepsTheFolderUnpruned(t *testing.T) {
 	srv, _ := newLocalCopyServer(t)
 	a, b, dir := sharedPair(t, srv)
-	if rec := putBackupSettings(t, srv, b, `{"local_copy":false,"baseline_s3":"s3://bucket/b/"}`); rec.Code != http.StatusOK {
-		t.Fatalf("b answers no: %d %s", rec.Code, rec.Body.String())
+	// No server can answer no any more (#2431): moving to another folder
+	// is how the other server leaves this one.
+	if rec := putBackupSettings(t, srv, b, `{"baseline_dir":"`+filepath.Join(t.TempDir(), "b-away")+`","baseline_s3":"s3://bucket/b/"}`); rec.Code != http.StatusOK {
+		t.Fatalf("b moves away: %d %s", rec.Code, rec.Body.String())
 	}
 	wantHeld(t, srv, a, dir)
 }
@@ -167,19 +169,18 @@ func TestLocalKeepHeld_undoingAFailedCreateHoldsNothing(t *testing.T) {
 	}
 }
 
-// Answering no and then yes on the same folder, or moving away and back,
-// does not forget the hold: the other server's snapshots are still there.
-func TestLocalKeepHeld_noThenYesOnTheSameFolderStaysHeld(t *testing.T) {
+// Moving away and back to the same folder does not forget the hold: the other server's snapshots are still there.
+func TestLocalKeepHeld_awayAndBackOnTheSameFolderStaysHeld(t *testing.T) {
 	srv, _ := newLocalCopyServer(t)
 	a, b, dir := sharedPair(t, srv)
 	if err := srv.cm.reg.Delete(b); err != nil {
 		t.Fatal(err)
 	}
-	if rec := putBackupSettings(t, srv, a, `{"local_copy":false,"baseline_s3":"s3://bucket/a/"}`); rec.Code != http.StatusOK {
-		t.Fatalf("a answers no: %d %s", rec.Code, rec.Body.String())
+	if rec := putBackupSettings(t, srv, a, `{"baseline_dir":"`+filepath.Join(t.TempDir(), "a-away")+`","baseline_s3":"s3://bucket/a/"}`); rec.Code != http.StatusOK {
+		t.Fatalf("a moves away: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := putBackupSettings(t, srv, a, `{"local_copy":true,"baseline_dir":"`+dir+`","baseline_s3":"","keep_newest":0}`); rec.Code != http.StatusOK {
-		t.Fatalf("a answers yes again: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("a moves back: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := putBackupSettings(t, srv, a, `{"keep_newest":2}`); rec.Code != http.StatusOK {
 		t.Fatalf("a sets a count: %d %s", rec.Code, rec.Body.String())

@@ -576,7 +576,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if serversPath == "" {
 		serversPath = console.DefaultRegistryPath()
 	}
-	registry, err := loadConsoleRegistry(serversPath, upIndexDSN != "" && upBaselineRefreshEvery != "", upConsoleBaselineDir, upConsoleBaselineS3)
+	registry, err := loadConsoleRegistry(serversPath, upIndexDSN != "" && upBaselineRefreshEvery != "", true, upConsoleBaselineDir, upConsoleBaselineS3)
 	if err != nil {
 		return fmt.Errorf("console: %w", err)
 	}
@@ -915,7 +915,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if serversPath == "" {
 		serversPath = console.DefaultRegistryPath()
 	}
-	registry, err := loadConsoleRegistry(serversPath, upIndexDSN != "" && upBaselineRefreshEvery != "", upConsoleBaselineDir, upConsoleBaselineS3)
+	registry, err := loadConsoleRegistry(serversPath, upIndexDSN != "" && upBaselineRefreshEvery != "", true, upConsoleBaselineDir, upConsoleBaselineS3)
 	if err != nil {
 		return fmt.Errorf("console: %w", err)
 	}

@@ -100,26 +100,6 @@ func TestLocalCopy_newServerGetsItsOwnFolderByID(t *testing.T) {
 	}
 }
 
-func TestLocalCopy_newServerWithoutALocalCopyNeedsADestination(t *testing.T) {
-	srv, _ := newLocalCopyServer(t)
-	if rec, _ := createServer(t, srv, newServerBody+`,"local_copy":false}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("no copy anywhere: code %d, want 400", rec.Code)
-	}
-	if srv.cm.reg.Len() != 0 {
-		t.Fatal("a refused create left an entry")
-	}
-	rec, dto := createServer(t, srv, newServerBody+`,"local_copy":false,"baseline_s3":"s3://b/p/"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("S3 only: %d %s", rec.Code, rec.Body.String())
-	}
-	if e, _ := srv.cm.reg.Get(dto.ID); e.BaselineDir != "" {
-		t.Errorf("S3-only server got a local folder %q", e.BaselineDir)
-	}
-	if rec, _ := createServer(t, srv, `{"name":"x","host":"h","port":"3306","user":"u","password":"p","dbname":"i2","local_copy":false,"baseline_s3":"s3://b/q/","baseline_dir":"/tmp/x"}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("no local copy with a folder: code %d, want 400", rec.Code)
-	}
-}
-
 func TestLocalCopy_namedFolderIsCheckedAtCreate(t *testing.T) {
 	srv, state := newLocalCopyServer(t)
 	if rec, _ := createServer(t, srv, newServerBody+`,"baseline_dir":"relative/snaps"}`); rec.Code != http.StatusBadRequest {
@@ -234,36 +214,6 @@ func TestLocalCopy_connectionEditChecksAChangedFolderOnly(t *testing.T) {
 }
 
 // ── the yes/no on the backup settings ────────────────────────────────────────
-
-func TestLocalCopy_answeringNoClearsTheFolderButNeedsADestination(t *testing.T) {
-	srv, _ := newLocalCopyServer(t)
-	_, dto := createServer(t, srv, newServerBody+`}`)
-	before, _ := srv.cm.reg.Get(dto.ID)
-
-	if rec := putBackupSettings(t, srv, dto.ID, `{"local_copy":false}`); rec.Code != http.StatusBadRequest {
-		t.Fatalf("no copy anywhere: code %d, want 400", rec.Code)
-	}
-	if e, _ := srv.cm.reg.Get(dto.ID); e.BaselineDir != before.BaselineDir {
-		t.Fatalf("a refused save changed the folder to %q", e.BaselineDir)
-	}
-	rec := putBackupSettings(t, srv, dto.ID, `{"local_copy":false,"baseline_s3":"s3://b/p/"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("no + S3: %d %s", rec.Code, rec.Body.String())
-	}
-	e, _ := srv.cm.reg.Get(dto.ID)
-	if e.BaselineDir != "" || e.BaselineS3 != "s3://b/p/" {
-		t.Fatalf("after no: dir=%q s3=%q", e.BaselineDir, e.BaselineS3)
-	}
-	// The snapshots already there stay: answering no deletes nothing.
-	if _, err := os.Stat(before.BaselineDir); err != nil {
-		t.Errorf("answering no removed the folder: %v", err)
-	}
-	var got backupSettingsServerDTO
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got.LocalCopy {
-		t.Error("the answer still says local copy")
-	}
-}
 
 func TestLocalCopy_answeringYesUsesTheDefaultFolder(t *testing.T) {
 	srv, state := newLocalCopyServer(t)
