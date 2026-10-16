@@ -320,6 +320,7 @@ func init() {
 }
 
 func runWatch(cmd *cobra.Command, args []string) error {
+	watchReached.Store(true)
 	// The index DSN first: everything after it needs the index, and a
 	// malformed one must not wait out the reachability retries below.
 	if err := checkIndexDSN(upIndexDSN); err != nil {
@@ -715,6 +716,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("console: cannot bind %s: %w", upConsoleListen, err)
 	}
+	watchListening.Store(true)
 
 	// One daemon-level /metrics endpoint for ALL supervised streams — the
 	// Prometheus registry is process-global and every stream metric carries
@@ -1069,6 +1071,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("console: cannot bind %s: %w", upConsoleListen, err)
 	}
+	watchListening.Store(true)
 	// Bind the flashback port BEFORE starting the console goroutine: its error
 	// (missing token, port conflict) must return before any goroutine touches
 	// the shared index db, so the deferred db.Close can never race an in-flight

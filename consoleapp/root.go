@@ -91,6 +91,11 @@ func Main(version, commitSHA, buildDate string) int {
 	views.SetProducerVersion(version)
 	if err := tel.Execute(rootCmd); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		// A watch that failed on its configuration before its web interface
+		// opened shows why on that port instead of exiting into a restart loop.
+		if f := watchStartupFailure(err); f != nil {
+			return f.serve(os.Stderr)
+		}
 		return 1
 	}
 	return 0

@@ -1,0 +1,219 @@
+package consoleapp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/telemetry"
+)
+
+// A watch that dies on its configuration before the web interface listens
+// used to exit, and its supervisor (compose's restart policy, systemd) started
+// it again, hundreds of times a day, while the browser showed nothing and the
+// reason scrolled past in the log. Instead, it now keeps the console's port
+// with one page that says why, until it is stopped.
+//
+// Only for failures a restart cannot fix (configuration, permissions, a
+// database that does not exist). A transient one (the index not up yet, the
+// network) keeps exiting, so the restart still heals it on its own.
+
+// watchReached and watchListening are set by runWatch: the page is for a
+// watch run that failed before its console accepted its listener. Failures
+// after that keep exiting as before.
+var (
+	watchReached   atomic.Bool
+	watchListening atomic.Bool
+)
+
+// startupPageEnv turns the page off ("0", "false", "off"): the process then
+// exits on a startup failure as it did before, for an operator whose alerting
+// watches for a process that is down.
+const startupPageEnv = "BINTRAIL_CONSOLE_STARTUP_PAGE"
+
+// startupState is what newStartupFailure reads, gathered by the caller so the
+// decision is testable without the process's globals.
+type startupState struct {
+	reached, listening bool
+	getenv             func(string) string
+	changed            func(flag string) bool
+	listen             string // --console-listen as parsed
+	tlsCert            string // --console-tls-cert as parsed
+	allowSetup         bool   // --console-allow-setup as parsed
+	allowedHosts       []string
+}
+
+// startupFailure is the page for one failed start.
+type startupFailure struct {
+	listen       string
+	message      string
+	public       bool // the message is one we wrote: shown to anyone
+	trusted      bool // loopback bind, or access control asserted by allow-setup
+	allowedHosts []string
+}
+
+// shownToAnyone is implemented by the startup errors whose text we wrote and
+// know carries nothing internal (no hostnames, users or paths).
+type shownToAnyone interface{ ShownToAnyone() bool }
+
+func (configError) ShownToAnyone() bool { return true }
+
+// permanentClasses are the failures a restart cannot fix.
+var permanentClasses = map[string]bool{
+	telemetry.ClassConfigInvalid: true,
+	telemetry.ClassDBPermission:  true,
+	telemetry.ClassNotFound:      true,
+}
+
+func newStartupFailure(err error, st startupState) *startupFailure {
+	if err == nil || !st.reached || st.listening {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(st.getenv(startupPageEnv))) {
+	case "0", "false", "off", "no":
+		return nil
+	}
+	if !permanentClasses[telemetry.ClassifyError(err)] {
+		return nil
+	}
+	// The flag wins when given; otherwise the variable the run may have died
+	// before reading. Same order as resolveUpConsoleEnv.
+	pick := func(flag, val, env string) string {
+		if st.changed(flag) {
+			return val
+		}
+		if v := st.getenv(env); v != "" {
+			return v
+		}
+		return val
+	}
+	// A browser expecting HTTPS would get a protocol error from a plain page.
+	if pick("console-tls-cert", st.tlsCert, "BINTRAIL_CONSOLE_TLS_CERT") != "" {
+		return nil
+	}
+	listen := pick("console-listen", st.listen, "BINTRAIL_CONSOLE_LISTEN")
+	allowSetup := st.allowSetup
+	if !st.changed("console-allow-setup") {
+		if v := st.getenv("BINTRAIL_CONSOLE_ALLOW_SETUP"); v == "1" || v == "true" {
+			allowSetup = true
+		}
+	}
+	hosts := st.allowedHosts
+	if !st.changed("console-allowed-hosts") {
+		if v := st.getenv("BINTRAIL_CONSOLE_ALLOWED_HOSTS"); v != "" {
+			hosts = strings.Split(v, ",")
+		}
+	}
+	var pub shownToAnyone
+	return &startupFailure{
+		listen:       listen,
+		message:      err.Error(),
+		public:       errors.As(err, &pub) && pub.ShownToAnyone(),
+		trusted:      console.IsLoopbackAddr(listen) || allowSetup,
+		allowedHosts: hosts,
+	}
+}
+
+// watchStartupFailure is newStartupFailure over this process's own state.
+func watchStartupFailure(err error) *startupFailure {
+	return newStartupFailure(err, startupState{
+		reached:      watchReached.Load(),
+		listening:    watchListening.Load(),
+		getenv:       os.Getenv,
+		changed:      func(f string) bool { return watchCmd.Flags().Changed(f) },
+		listen:       upConsoleListen,
+		tlsCert:      upConsoleTLSCert,
+		allowSetup:   upConsoleAllowSetup,
+		allowedHosts: upConsoleAllowedHost,
+	})
+}
+
+// knownHost mirrors the console's Host check: IP literals and localhost
+// always, plus the configured names. A page reached under any other name may
+// be a DNS-rebinding page in someone's browser, so it gets no internal detail.
+func (f *startupFailure) knownHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if net.ParseIP(host) != nil || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	for _, a := range f.allowedHosts {
+		if strings.EqualFold(strings.TrimSpace(a), host) {
+			return true
+		}
+	}
+	return false
+}
+
+var startupPageTmpl = template.Must(template.New("p").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dbtrail could not start</title>
+<style>
+body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:48px 16px;background:#fafaf9;color:#1c1917}
+main{max-width:44rem;margin:0 auto}
+h1{font-size:1.5rem;margin:0 0 8px}
+pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid #e7e5e4;border-left:4px solid #b91c1c;border-radius:6px;padding:12px 16px;font-size:.9rem}
+code{background:#f5f5f4;padding:1px 4px;border-radius:4px}
+p{margin:12px 0}
+@media (prefers-color-scheme:dark){body{background:#1c1917;color:#f5f5f4}pre{background:#292524;border-color:#44403c;border-left-color:#ef4444}code{background:#292524}}
+</style></head><body><main>
+<h1>dbtrail could not start</h1>
+{{if .Show}}<p>It stopped on this, before the web interface opened:</p>
+<pre>{{.Message}}</pre>
+<p>Fix it, then restart dbtrail (with the Docker Compose stack: <code>docker compose up -d</code>). This page stays until then.</p>
+{{else}}<p>It stopped on its configuration, before the web interface opened. The reason is in dbtrail's log (with the Docker Compose stack: <code>docker compose logs bintrail</code>).</p>
+<p>This page does not show it to this address. Open it from the machine dbtrail runs on, or add this hostname to <code>BINTRAIL_CONSOLE_ALLOWED_HOSTS</code>.</p>
+<p>Fix it, then restart dbtrail. This page stays until then.</p>{{end}}
+</main></body></html>`))
+
+func (f *startupFailure) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	show := f.public || (f.trusted && f.knownHost(r.Host))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	// 503 on every path, /api/healthz included, so a health check reports
+	// the failed start instead of reading the page as a healthy console.
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = startupPageTmpl.Execute(w, struct {
+		Show    bool
+		Message string
+	}{show, f.message})
+}
+
+// serve binds the console's address and shows the page until SIGINT/SIGTERM.
+// It returns the process exit code: 1, so a supervisor still sees a failed
+// run. A bind failure (the port taken) prints why and returns 1 at once.
+func (f *startupFailure) serve(stderr io.Writer) int {
+	ln, err := net.Listen("tcp", f.listen)
+	if err != nil {
+		fmt.Fprintf(stderr, "could not open %s to show why dbtrail did not start: %v\n", f.listen, err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return f.run(ctx, ln, stderr)
+}
+
+func (f *startupFailure) run(ctx context.Context, ln net.Listener, stderr io.Writer) int {
+	fmt.Fprintf(stderr, "dbtrail did not start; the web interface at %s shows why until dbtrail is stopped (%s=0 exits instead)\n", ln.Addr(), startupPageEnv)
+	srv := &http.Server{Handler: f, ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+	return 1
+}

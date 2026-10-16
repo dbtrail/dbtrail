@@ -14,6 +14,11 @@ import (
 // isLoopbackAddr reports whether a listen address binds only to the loopback
 // interface. An empty host or a wildcard (0.0.0.0 / ::) binds to every
 // interface and is NOT loopback — those require an explicit token.
+// IsLoopbackAddr reports whether a bind address only accepts connections
+// from the same machine. Exported for watch's startup-failure page, which
+// decides what to show by the same rule the console's setup uses.
+func IsLoopbackAddr(addr string) bool { return isLoopbackAddr(addr) }
+
 func isLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

@@ -1344,6 +1344,10 @@ type bindRefusalError struct{ msg string }
 func (e bindRefusalError) Error() string          { return e.msg }
 func (e bindRefusalError) TelemetryClass() string { return telemetry.ClassConfigInvalid }
 
+// ShownToAnyone: the text names only the bind address and the fix, so watch's
+// startup-failure page may show it on a bind it does not trust.
+func (bindRefusalError) ShownToAnyone() bool { return true }
+
 // bindRefusal names the running command's own flags (empty = serve's), and
 // the environment variables both commands read.
 func bindRefusal(listen, tokenFlag, allowSetupFlag string) error {

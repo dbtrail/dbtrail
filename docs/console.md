@@ -1492,6 +1492,17 @@ one release and warns that it no longer does anything. Remove it.
 - `BINTRAIL_CONSOLE_TLS_CERT` / `BINTRAIL_CONSOLE_TLS_KEY` — same as `--tls-cert` / `--tls-key`.
 - `BINTRAIL_CONSOLE_ALLOWED_HOSTS` — comma-separated, same as `--allowed-hosts`.
 - `BINTRAIL_CONSOLE_ALLOW_SETUP` — `1`/`true`, same as `--allow-setup`.
+- `BINTRAIL_CONSOLE_STARTUP_PAGE` (`watch` only): `0`/`false`/`off` turns off the
+  startup-failure page. When `watch` stops on its configuration before the web
+  interface opens (a malformed index DSN, missing grants, a public bind with no
+  password), it does not exit: it keeps the web interface's address with one
+  page that says why, answering 503 on every path so a health check reports it,
+  until it is stopped (then it exits 1). The full reason shows only on a
+  loopback bind or with `BINTRAIL_CONSOLE_ALLOW_SETUP`, and only under an IP,
+  `localhost` or a name in `BINTRAIL_CONSOLE_ALLOWED_HOSTS`; elsewhere the page
+  points to the log. A failure a restart can fix (the index not reachable yet)
+  still exits, so the restart heals it. Turn the page off if your alerting
+  watches for the process being down. Not shown over TLS.
 - `BINTRAIL_CONSOLE_URL`: the address people open the web interface at, when it is not
   the listen address (a container whose port is published as another, a reverse
   proxy). Only the startup banner uses it; nothing listens or redirects
