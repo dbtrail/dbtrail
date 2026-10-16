@@ -554,7 +554,7 @@ func TestIntegrationEvictOnDSNEdit(t *testing.T) {
 
 	// Baseline-only edit (structured fields unchanged) keeps the same db.
 	doReqOn(t, srv, "", "PUT", "/api/servers/"+created.ID,
-		`{"name":"second","host":"`+created.Host+`","port":"`+created.Port+`","user":"`+created.User+`","dbname":"`+created.DBName+`","baseline_s3":"s3://b/"}`)
+		`{"name":"second","host":"`+created.Host+`","port":"`+created.Port+`","user":"`+created.User+`","dbname":"`+created.DBName+`","baseline_s3":"s3://b/","baseline_dir":"`+t.TempDir()+`"}`)
 	srv.cm.mu.Lock()
 	rebuilt := srv.cm.bundles[created.ID]
 	srv.cm.mu.Unlock()
