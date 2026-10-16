@@ -312,7 +312,9 @@ func init() {
 	watchCmd.Flags().IntVar(&upRotateAddFuture, "rotate-add-future", 3, "Built-in rotation: keep at least N future hourly partitions ready")
 	// --source-dsn is deliberately NOT required: the daemon may start
 	// source-less (zero-config install) and sources are added from the UI.
-	_ = watchCmd.MarkFlagRequired("index-dsn")
+	// --index-dsn is required, but checked in runWatch rather than with
+	// MarkFlagRequired: cobra's refusal names only the flag, and most installs
+	// set it through BINTRAIL_INDEX_DSN.
 	bindWatchEnv(watchCmd)
 	rootCmd.AddCommand(watchCmd)
 }
@@ -321,6 +323,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// bindWatchEnv already loaded the env file in init(), so the variable is
 	// visible here whichever way it was set. Here rather than in init() so the
 	// binary warns once, for the command actually being run.
+	// The index DSN first: everything after it needs the index, and a
+	// malformed one must not wait out the reachability retries below.
+	if err := checkIndexDSN(upIndexDSN); err != nil {
+		return err
+	}
 	warnSQLPanelRetired()
 	if !cliutil.IsValidOutputFormat(upFormat) {
 		return fmt.Errorf("invalid --format %q; must be text or json", upFormat)
@@ -2011,7 +2018,10 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 			TableDeltas: upBaselineTableDeltas,
 		},
 		AllowSetup: opts.AllowSetup,
-		Version:    appVersion,
+		// watch's spelling of the flags the bind refusal quotes.
+		TokenFlag:      "--console-token",
+		AllowSetupFlag: "--console-allow-setup",
+		Version:        appVersion,
 		// MonitorCtrl (the control-plane supervisor) is wired by the caller —
 		// runUpStreamWithConsole / runUpConsoleOnly — because it needs the
 		// registry and the daemon lifecycle context, which this config builder

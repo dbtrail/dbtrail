@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/dbtrail/dbtrail/internal/telemetry"
 	"log/slog"
 	"net"
 	"net/http"
@@ -276,6 +277,13 @@ type Config struct {
 	// allow setup regardless. Off by default: an unguarded setup endpoint on a
 	// truly public bind would let the first stranger claim the password.
 	AllowSetup bool
+	// TokenFlag and AllowSetupFlag are how the command that built this Config
+	// spells the Token and AllowSetup flags, quoted by the refusal of a
+	// credential-less non-loopback bind so its advice works as typed. Empty
+	// means serve's spelling, --token and --allow-setup; watch passes
+	// --console-token and --console-allow-setup.
+	TokenFlag      string
+	AllowSetupFlag string
 	// RotationDefaults carries the daemon's --rotate-* flag/env values so
 	// GET /api/rotation can report the effective policy (and the console panel
 	// prefill it) before any console override is saved. Set by the watch
@@ -767,7 +775,7 @@ func New(cfg Config) (*Server, error) {
 	noCredential := token == "" && !passwordCfg && ext.ConsoleCredential() == nil
 	willSetup := noCredential && (isLoopbackAddr(listen) || cfg.AllowSetup)
 	if noCredential && !willSetup && ext.ConsoleAuth() == nil {
-		return nil, fmt.Errorf("authentication is required when binding to a non-loopback address %q: set a web interface password with `bintrail-console user set-password`, set --token / BINTRAIL_CONSOLE_TOKEN for automation, or pass --allow-setup if this bind is access-controlled (e.g. published only on the host's loopback)", listen)
+		return nil, bindRefusal(listen, cfg.TokenFlag, cfg.AllowSetupFlag)
 	}
 	// A missing auth file is the EXPECTED first-run state (browser setup creates
 	// it). Only warn about a missing explicit --auth-file when setup is NOT the
@@ -1326,4 +1334,24 @@ func displayHost(listen string) string {
 		}
 	}
 	return host + ":" + port
+}
+
+// bindRefusalError is the refusal of a credential-less non-loopback bind. It
+// is a configuration problem, and says so to telemetry, which would otherwise
+// count it as unknown.
+type bindRefusalError struct{ msg string }
+
+func (e bindRefusalError) Error() string          { return e.msg }
+func (e bindRefusalError) TelemetryClass() string { return telemetry.ClassConfigInvalid }
+
+// bindRefusal names the running command's own flags (empty = serve's), and
+// the environment variables both commands read.
+func bindRefusal(listen, tokenFlag, allowSetupFlag string) error {
+	if tokenFlag == "" {
+		tokenFlag = "--token"
+	}
+	if allowSetupFlag == "" {
+		allowSetupFlag = "--allow-setup"
+	}
+	return bindRefusalError{fmt.Sprintf("authentication is required when binding to a non-loopback address %q: set a web interface password with `bintrail-console user set-password`, set %s / BINTRAIL_CONSOLE_TOKEN for automation, or pass %s (or set BINTRAIL_CONSOLE_ALLOW_SETUP=1) if this bind is access-controlled (e.g. published only on the host's loopback)", listen, tokenFlag, allowSetupFlag)}
 }
