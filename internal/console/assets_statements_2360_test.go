@@ -104,6 +104,7 @@ func TestDrawStatements2360(t *testing.T) {
 		"twelve":          c{"view": view(c{"statement_table": true}, c{"mysql": 12, "statements": table(0, twelve...)}), "cur": cur},
 		"not counted":     c{"view": view(c{"statement_table": true}, c{"mysql": 9, "statements": table(7, row("select 1", "mysql", 2, 1, 1, 0, 0))}), "cur": cur},
 		"junk rows":       c{"view": view(c{"statement_table": true}, c{"mysql": 9, "statements": c{"rows": []any{nil, 3, "x", c{"side": "mysql", "count": 1}, c{"statement": "select 2", "side": "elsewhere", "count": 1}, c{"statement": "select 3", "side": "mysql", "count": 0}, row("select 4", "mysql", 1, -5, -1, -1, 9)}}}), "cur": cur},
+		"only blanks":     c{"view": view(c{"statement_table": true}, c{"mysql": 3, "statements": table(3)}), "cur": cur},
 		"rows not a list": c{"view": view(c{"statement_table": true}, c{"mysql": 9, "statements": c{"rows": "x"}}), "cur": cur},
 		"long statement":  c{"view": view(c{"statement_table": true}, c{"mysql": 1, "statements": table(0, row(long, "mysql", 1, 1, 1, 0, 0))}), "cur": cur},
 		"unsorted":        c{"view": view(c{"statement_table": true}, c{"mysql": 2, "statements": table(0, row("select small", "mysql", 1, 1, 1, 0, 0), row("select big", "mysql", 1, 4, 4, 0, 0))}), "cur": cur},
@@ -166,7 +167,10 @@ func TestDrawStatements2360(t *testing.T) {
 	if o := out["twelve"]; len(o.Shown) != 10 || o.More != 2 || o.Bars != 12 || !strings.Contains(o.Screen, "2 more") {
 		t.Errorf("twelve: shown %d more %d bars %d\n%q", len(o.Shown), o.More, o.Bars, o.Screen)
 	}
-	if o := out["not counted"]; o.NotCounted != 7 || !strings.Contains(o.Screen, "7 statements are not listed") || !strings.Contains(o.Screen, "200") {
+	if o := out["only blanks"]; o.State != "none" || strings.Contains(o.Screen, "No statement has finished") || !strings.Contains(o.Screen, "3 statements are not listed") {
+		t.Errorf("only blanks: the two lines contradict each other: %q", o.Screen)
+	}
+	if o := out["not counted"]; o.NotCounted != 7 || !strings.Contains(o.Screen, "7 statements are not listed") || !strings.Contains(o.Screen, "200 lines for each server, one per statement and side") {
 		t.Errorf("not counted: %+v", o)
 	}
 	if o := out["junk rows"]; len(o.Shown) != 1 || o.Shown[0] != "mysql|1|||0|0|0|select 4" || strings.Contains(o.Screen, "NaN") {

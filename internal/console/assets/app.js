@@ -15558,7 +15558,9 @@ function routerStatements(m) {
     wrap.append(el("p", { class: "form-hint", text: "The router keeps this list, and it is shown only to users with no data profile: it names tables and columns." }));
     return wrap;
   }
-  if (m.state === "none") {
+  // Nothing listed and nothing left out: nothing has finished. With some
+  // left out (blank statements, a full list), the line below says so alone.
+  if (m.state === "none" && !m.notCounted) {
     wrap.append(el("p", { class: "form-hint", text: "No statement has finished on this server since the router started." }));
   }
   const line = (r) => {
@@ -15580,7 +15582,7 @@ function routerStatements(m) {
   }
   if (m.notCounted) {
     wrap.append(el("p", { class: "form-hint", text: trendCount(m.notCounted) + (m.notCounted === 1 ? " statement is" : " statements are") +
-      " not listed: the list keeps the first " + (m.limit || 200) + " kinds of statement for each server, and a blank statement has none." }));
+      " not listed: the list holds " + (m.limit || 200) + " lines for each server, one per statement and side, and a blank statement has no line." }));
   }
   return wrap;
 }
