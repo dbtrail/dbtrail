@@ -123,16 +123,6 @@ type Event struct {
 	// consumer persists it as a schema snapshot and stamps subsequent rows'
 	// SchemaVersion. nil for every other event type; never written to binlog_events.
 	Relation *metadata.PGRelationSchema
-	// StmtEnd is true on the row events of the ROWS_EVENT that carries STMT_END_F —
-	// the last chunk of a statement. A statement larger than
-	// binlog_row_event_max_size (8 KiB default) is split into several ROWS_EVENTs
-	// under ONE TABLE_MAP, and only the last one sets STMT_END_F. The stream
-	// consumer keys its POSITION-mode safe checkpoint off this flag so a resume
-	// never lands on a byte offset BETWEEN two chunks — a mid-statement position
-	// has no preceding TABLE_MAP for the live syncer and closes the stream with
-	// "invalid table id, no corresponding table map event" (#775). Transient:
-	// never written to binlog_events.
-	StmtEnd bool
 	// ReadAt is when the replication client delivered the binlog event this row
 	// came out of — T1 in the availability-lag design (#1223). Transient: it is
 	// in-memory only, never written to binlog_events and never to the archive

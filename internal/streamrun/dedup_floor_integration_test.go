@@ -32,9 +32,9 @@ import (
 // the unbounded delete would remove, and does the bounded delete remove
 // exactly the same rows.
 
-// floorEvent builds one synthetic row event. stmtEnd marks the ROWS_EVENT
-// carrying STMT_END_F, which is what advances the position-mode checkpoint.
-func floorEvent(n int, gtid string, stmtEnd bool) parser.Event {
+// floorEvent builds one synthetic row event. Only a floorCommit advances the
+// position-mode checkpoint (#2391).
+func floorEvent(n int, gtid string) parser.Event {
 	return parser.Event{
 		BinlogFile: "binlog.000007",
 		StartPos:   uint64(n * 100),
@@ -45,14 +45,13 @@ func floorEvent(n int, gtid string, stmtEnd bool) parser.Event {
 		Schema:     "testdb",
 		Table:      "orders",
 		EventType:  parser.EventInsert,
-		StmtEnd:    stmtEnd,
 		PKValues:   strconv.Itoa(n),
 		RowAfter:   map[string]any{"id": int64(n), "amount": 1.5},
 	}
 }
 
 func floorCommit(n int, gtid string) parser.Event {
-	ev := floorEvent(n, gtid, true)
+	ev := floorEvent(n, gtid)
 	ev.EventType = parser.EventCommit
 	return ev
 }
@@ -130,7 +129,7 @@ func lowestStragglerRow(t *testing.T, db *sql.DB, file string, pos uint64, saved
 // floor it persisted against the database.
 func TestIntegrationDedupFloorStaysBelowEveryRowItMustNotHide(t *testing.T) {
 	// Trap 1 — position mode. The persisted binlog_position is safePos, the
-	// last STMT_END_F/commit/DDL boundary, and it TRAILS the last event read
+	// last commit/DDL boundary, and it TRAILS the last event read
 	// (#775). Rows between the two are flushed by checkpoint()'s own flush, so
 	// at the instant the checkpoint row is written they are already in the
 	// table AND already match the delete. A floor taken at that instant — the
@@ -140,11 +139,14 @@ func TestIntegrationDedupFloorStaysBelowEveryRowItMustNotHide(t *testing.T) {
 		idx, db := floorIndex(t, 2)
 		var evs []parser.Event
 		for n := 1; n <= 9; n++ {
-			evs = append(evs, floorEvent(n, "", n%3 == 0)) // a boundary every third event
+			evs = append(evs, floorEvent(n, ""))
+			if n%3 == 0 {
+				evs = append(evs, floorCommit(n, "")) // a boundary every third event
+			}
 		}
 		// Two more AFTER the last boundary: these are the rows that must be
 		// deleted and that the trap would hide.
-		evs = append(evs, floorEvent(10, "", false), floorEvent(11, "", false))
+		evs = append(evs, floorEvent(10, ""), floorEvent(11, ""))
 
 		state := &streamState{mode: "position", serverID: 1}
 		if err := streamLoop(t.Context(), feedClosed(evs), idx, db, time.Hour, state,
@@ -167,11 +169,11 @@ func TestIntegrationDedupFloorStaysBelowEveryRowItMustNotHide(t *testing.T) {
 		assertBoundedDeleteMatchesUnbounded(t, db, saved.binlogFile, saved.binlogPos, saved.dedupFloorID, nil, "")
 	})
 
-	// Trap 2 — GTID mode. safePos also advances at STMT_END_F, which fires
-	// INSIDE an open transaction. A floor keyed on that boundary would climb
-	// past the open transaction's earlier statements — precisely the straggler
-	// rows the GTID pass exists to find, since GTID replay restarts a
-	// transaction from its beginning.
+	// Trap 2 — GTID mode. The persisted position is the per-event one, which
+	// sits INSIDE an open transaction. A floor keyed on it would climb past the
+	// open transaction's earlier statements — precisely the straggler rows the
+	// GTID pass exists to find, since GTID replay restarts a transaction from
+	// its beginning.
 	t.Run("gtid mode, an open transaction spanning a flush", func(t *testing.T) {
 		idx, db := floorIndex(t, 2)
 		const g1 = "3f2a1c88-0000-0000-0000-000000000001:1"
@@ -184,13 +186,13 @@ func TestIntegrationDedupFloorStaysBelowEveryRowItMustNotHide(t *testing.T) {
 		var evs []parser.Event
 		// A committed transaction first, so the floor has somewhere to climb to.
 		for n := 1; n <= 4; n++ {
-			evs = append(evs, floorEvent(n, g1, n%2 == 0))
+			evs = append(evs, floorEvent(n, g1))
 		}
 		evs = append(evs, floorCommit(5, g1))
 		// Then one that never commits. Its statements end (STMT_END_F) and its
 		// rows flush, but the checkpoint's gtid_set will not contain it.
 		for n := 6; n <= 11; n++ {
-			evs = append(evs, floorEvent(n, g2, n%2 == 0))
+			evs = append(evs, floorEvent(n, g2))
 		}
 
 		state := &streamState{mode: "gtid", serverID: 1, accGTID: accGTID}
@@ -242,16 +244,16 @@ func TestIntegrationDedupFloorIgnoresACommitTheGTIDSetRefused(t *testing.T) {
 
 	var evs []parser.Event
 	for n := 1; n <= 4; n++ {
-		evs = append(evs, floorEvent(n, g1, n%2 == 0))
+		evs = append(evs, floorEvent(n, g1))
 	}
 	evs = append(evs, floorCommit(5, g1))
 	for n := 6; n <= 9; n++ {
-		evs = append(evs, floorEvent(n, g2, n%2 == 0))
+		evs = append(evs, floorEvent(n, g2))
 	}
 	// The commit the set will refuse. Its rows above still carry a valid g2,
 	// so they remain identifiable stragglers rather than parse failures.
 	evs = append(evs, floorCommit(10, "this-is-not-a-gtid"))
-	evs = append(evs, floorEvent(11, g2, true))
+	evs = append(evs, floorEvent(11, g2))
 
 	state := &streamState{mode: "gtid", serverID: 1, accGTID: accGTID}
 	if err := streamLoop(t.Context(), feedClosed(evs), idx, db, time.Hour, state,
@@ -784,7 +786,7 @@ func TestIntegrationDedupFloorSurvivesAQuietResume(t *testing.T) {
 		t.Fatalf("seed checkpoint: %v", err)
 	}
 
-	// ONE event, and it is a boundary. With a batch size of 10 nothing has
+	// ONE event, and it is a boundary (a commit). With a batch size of 10 nothing has
 	// flushed by the time the boundary fires, so noteDedupFloor is called with
 	// the indexer's zero — the exact call the monotonicity guard exists for.
 	// Without that guard the earned floor is overwritten with 0 here and the
@@ -792,7 +794,7 @@ func TestIntegrationDedupFloorSurvivesAQuietResume(t *testing.T) {
 	state := &streamState{mode: "position", binlogFile: "binlog.000007", binlogPos: 900,
 		safeFile: "binlog.000007", safePos: 900, flavor: gomysql.MySQLFlavor, serverID: 1,
 		dedupFloorID: earned}
-	if err := streamLoop(t.Context(), feedClosed([]parser.Event{floorEvent(20, "", true)}), idx, db, time.Hour, state,
+	if err := streamLoop(t.Context(), feedClosed([]parser.Event{floorCommit(20, "")}), idx, db, time.Hour, state,
 		observe.ForSource("floor-quiet"), nil); err != nil {
 		t.Fatalf("streamLoop: %v", err)
 	}

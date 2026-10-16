@@ -36,12 +36,14 @@ type streamState struct {
 	binlogFile string
 	binlogPos  uint64 // per-EVENT byte offset — advances on every event (metrics/display; GTID-mode checkpoint + dedup)
 	// safeFile/safePos hold the last POSITION-mode SAFE resume point: a byte
-	// offset that only advances at a statement (STMT_END_F) / commit / DDL
-	// boundary, never mid-statement. saveCheckpoint persists these in position
+	// offset that only advances at a transaction end (EventCommit) or a DDL,
+	// never inside a transaction. saveCheckpoint persists these in position
 	// mode so a resume can never land between the ROWS_EVENTs of one split
 	// statement and crash StartSync with "invalid table id, no corresponding
-	// table map event" (#775). Mirrors the commit-only gtidSet semantics of #491,
-	// but works for non-GTID sources too (which emit no EventCommit). Unused in
+	// table map event" (#775), nor after some statements of a transaction that
+	// is still open (#2391). Mirrors the commit-only gtidSet semantics of #491;
+	// non-GTID sources get it because the stream parser announces their
+	// transaction ends too (an EventCommit with no GTID). Unused in
 	// GTID mode (that path keeps checkpointing the per-event binlogPos, which
 	// deleteEventsSinceCheckpointGTID relies on).
 	safeFile string
@@ -53,8 +55,8 @@ type streamState struct {
 	// The rule that makes it valid, and the only one that does: it advances at
 	// the SAME event that advances the coordinate the checkpoint persists.
 	// checkpointPosition already branches on mode for that reason, and this
-	// branches with it — position mode at the statement/commit/DDL boundary
-	// that moves safePos, GTID mode at the commit that moves gtidSet. Getting
+	// branches with it — position mode at the commit/DDL boundary that moves
+	// safePos, GTID mode at the commit that moves gtidSet. Getting
 	// that pairing wrong does not merely slow the delete down, it makes it
 	// miss rows:
 	//
@@ -62,10 +64,11 @@ type streamState struct {
 	//     trails binlogPos, so rows between them are already in the table and
 	//     already match the delete. A floor taken at the instant sits above
 	//     them and they survive as duplicates.
-	//   - Keyed on the position boundary in GTID mode: STMT_END_F fires INSIDE
-	//     an open transaction, so the floor would climb past that
-	//     transaction's earlier statements — the exact rows the straggler pass
-	//     exists to find.
+	//   - Keyed on the position boundary in GTID mode: GTID mode persists the
+	//     PER-EVENT position, which can sit inside an open transaction, so the
+	//     floor must wait for the commit that moves gtidSet, or it would climb
+	//     past that transaction's earlier rows — the exact rows the straggler
+	//     pass exists to find.
 	//
 	// Zero means "no floor", which reduces both passes to the unbounded
 	// statements they were before: a checkpoint written by an older build, a
@@ -164,7 +167,7 @@ func (s *streamState) noteDedupFloor(id int64) {
 }
 
 // checkpointPosition returns the (binlog_file, binlog_position) to persist for a
-// checkpoint. POSITION mode persists the last statement/commit/DDL boundary
+// checkpoint. POSITION mode persists the last commit/DDL boundary
 // (safeFile/safePos) instead of the per-event binlogFile/binlogPos, so a resume
 // never lands on a byte offset mid-statement — StartSync from between the
 // ROWS_EVENTs of one split statement closes the stream with "invalid table id, no
@@ -181,16 +184,18 @@ func checkpointPosition(state *streamState) (string, uint64) {
 }
 
 // isPositionCheckpointBoundary reports whether an event marks a valid POSITION-mode
-// resume point: a statement end (a row event of the ROWS_EVENT carrying STMT_END_F),
-// a transaction commit (EventCommit), or a DDL (EventDDL). Every other position —
-// notably the byte offset between two ROWS_EVENTs of one split statement — is unsafe
-// to resume from (#775).
+// resume point: a transaction end (EventCommit, which the stream parser emits
+// with or without a GTID) or a DDL (EventDDL). Every other position is inside a
+// transaction: between the ROWS_EVENTs of one split statement (#775, StartSync
+// from there crash-loops), or after a statement whose transaction is still open
+// (#2391, a resume from there keeps the transaction's first statements as
+// already written, so the index can never take back half a transaction).
 func isPositionCheckpointBoundary(ev parser.Event) bool {
 	switch ev.EventType {
 	case parser.EventCommit, parser.EventDDL:
 		return true
 	}
-	return ev.StmtEnd
+	return false
 }
 
 // checkpointInsertArgs builds the placeholder arguments for the shared
@@ -1938,18 +1943,17 @@ func streamLoop(
 				state.binlogFile = ev.BinlogFile
 			}
 			state.binlogPos = ev.EndPos
-			// Advance the POSITION-mode safe checkpoint only at statement/commit/DDL
-			// boundaries, never mid-statement — a resume from between the ROWS_EVENTs
-			// of one split statement crashes StartSync (#775). The per-event
+			// Advance the POSITION-mode safe checkpoint only at transaction ends
+			// and DDL, never inside a transaction (#775, #2391). The per-event
 			// binlogPos above stays for metrics/display and GTID-mode checkpointing.
 			if isPositionCheckpointBoundary(ev) {
 				state.safeFile, state.safePos = state.binlogFile, ev.EndPos
 				// The floor travels with the coordinate the checkpoint
 				// persists, and in position mode that is safePos, right here.
-				// GTID mode deliberately does NOT take it here: this fires at
-				// STMT_END_F too, which is mid-transaction, and would push the
-				// floor past the straggler rows. It takes it at the commit
-				// instead (advanceGTID below).
+				// GTID mode deliberately does NOT take it here: its persisted
+				// position is the per-event one, which can sit inside an open
+				// transaction, so it takes the floor at the commit instead
+				// (advanceGTID below).
 				if state.mode == "position" {
 					state.noteDedupFloor(idx.FirstIDOfLastBatch())
 				}
@@ -2996,7 +3000,7 @@ func oneRun(ctx context.Context, cfg Config) error {
 		// valid resume point instead of an empty file / position 0. safeFile/
 		// safePos seed identically — the resolved start is always a boundary, and
 		// this keeps the position-mode checkpoint at a valid resume point until the
-		// first statement/commit/DDL boundary advances it (#775).
+		// first commit/DDL boundary advances it (#775, #2391).
 		binlogFile:     startFile,
 		binlogPos:      uint64(startPos),
 		safeFile:       startFile,

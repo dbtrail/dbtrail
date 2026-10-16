@@ -907,12 +907,6 @@ func handleRows(
 	endPos := uint64(binlogEv.Header.LogPos)
 	ts := time.Unix(int64(binlogEv.Header.Timestamp), 0).UTC()
 	pkCols := tm.PKColumnMetas()
-	// stmtEnd marks the last ROWS_EVENT of a statement (STMT_END_F). endPos is a
-	// valid POSITION-mode resume point only at a statement boundary — the stream
-	// consumer stamps this onto every emitted row event so its safe checkpoint
-	// never lands between the chunks of a split statement (#775).
-	stmtEnd := rowsEv.Flags&replication.RowsEventStmtEndFlag != 0
-
 	// MariaDB's MARIADB_*_ROWS_COMPRESSED_EVENT_V1 (log_bin_compress=ON, #520)
 	// dispatch alongside their uncompressed siblings: go-mysql v1.13.0 already
 	// routes them into RowsEvent decoding and decompresses the payload
@@ -934,21 +928,21 @@ func handleRows(
 		replication.WRITE_ROWS_EVENTv2,
 		replication.MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
 		skips.RecordCaptured()
-		unmapped, emitErr = emitInserts(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
+		unmapped, emitErr = emitInserts(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, out)
 
 	case replication.DELETE_ROWS_EVENTv0,
 		replication.DELETE_ROWS_EVENTv1,
 		replication.DELETE_ROWS_EVENTv2,
 		replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
 		skips.RecordCaptured()
-		unmapped, emitErr = emitDeletes(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
+		unmapped, emitErr = emitDeletes(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, out)
 
 	case replication.UPDATE_ROWS_EVENTv0,
 		replication.UPDATE_ROWS_EVENTv1,
 		replication.UPDATE_ROWS_EVENTv2,
 		replication.MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
 		skips.RecordCaptured()
-		unmapped, emitErr = emitUpdates(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, stmtEnd, out)
+		unmapped, emitErr = emitUpdates(ctx, logger, resolver, rowsEv.Rows, schema, table, filename, currentGTID, connectionID, commitTsUS, queryText, startPos, endPos, ts, pkCols, schemaVersion, out)
 		// emitUpdates walks before/after pairs; a trailing image with no
 		// partner is dropped there. The binlog format always writes pairs, so
 		// this is a decoding fault: say so and record it (#2144). Recorded
@@ -1042,7 +1036,6 @@ func emitInserts(
 	ts time.Time,
 	pkCols []metadata.ColumnMeta,
 	schemaVersion uint32,
-	stmtEnd bool,
 	out emitter,
 ) (unmapped int, err error) {
 	for _, row := range rows {
@@ -1060,7 +1053,6 @@ func emitInserts(
 			PKValues:      BuildPKValues(pkCols, named),
 			RowAfter:      named,
 			SchemaVersion: schemaVersion,
-			StmtEnd:       stmtEnd,
 		}
 		if err := out.send(ctx, ev); err != nil {
 			return unmapped, err
@@ -1082,7 +1074,6 @@ func emitDeletes(
 	ts time.Time,
 	pkCols []metadata.ColumnMeta,
 	schemaVersion uint32,
-	stmtEnd bool,
 	out emitter,
 ) (unmapped int, err error) {
 	for _, row := range rows {
@@ -1100,7 +1091,6 @@ func emitDeletes(
 			PKValues:      BuildPKValues(pkCols, named),
 			RowBefore:     named,
 			SchemaVersion: schemaVersion,
-			StmtEnd:       stmtEnd,
 		}
 		if err := out.send(ctx, ev); err != nil {
 			return unmapped, err
@@ -1122,7 +1112,6 @@ func emitUpdates(
 	ts time.Time,
 	pkCols []metadata.ColumnMeta,
 	schemaVersion uint32,
-	stmtEnd bool,
 	out emitter,
 ) (unmapped int, err error) {
 	// go-mysql delivers UPDATE rows as interleaved before/after pairs:
@@ -1150,7 +1139,6 @@ func emitUpdates(
 			RowBefore:     before,
 			RowAfter:      after,
 			SchemaVersion: schemaVersion,
-			StmtEnd:       stmtEnd,
 		}
 		if err := out.send(ctx, ev); err != nil {
 			return unmapped, err

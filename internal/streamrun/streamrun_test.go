@@ -2035,18 +2035,19 @@ func TestDeleteEventsSinceCheckpointGTID_deletesStragglers(t *testing.T) {
 	}
 }
 
-// ─── #775: position-mode safe checkpoint never mid-statement ──────────────────
+// ─── #775 / #2391: position-mode safe checkpoint never mid-transaction ────────
 
-// TestPositionCheckpoint_neverMidStatement is the unit guard for #775. In
-// POSITION mode the persisted checkpoint must be the last statement/commit/DDL
-// boundary, never a byte offset between the ROWS_EVENTs of one split statement
-// (a statement > binlog_row_event_max_size is split into several ROWS_EVENTs
-// under ONE TABLE_MAP — resuming StartSync mid-statement hits a rows event with
-// no preceding TABLE_MAP and crash-loops). It drives the same two decisions
-// streamLoop makes per event — the per-event binlogPos advance and the
-// boundary-gated safePos advance — then asserts checkpointPosition (what
-// saveCheckpoint persists) tracks the committed boundary.
-func TestPositionCheckpoint_neverMidStatement(t *testing.T) {
+// TestPositionCheckpoint_neverMidTransaction is the unit guard for #775 and
+// #2391. In POSITION mode the persisted checkpoint must be the end of the last
+// transaction (or DDL), never a byte offset inside one: not between the
+// ROWS_EVENTs of one split statement (#775: StartSync from there crash-loops),
+// and not at the end of a statement whose transaction is still open (#2391: a
+// resume from there would keep the transaction's first statements as written
+// and could not take them back). It drives the same two decisions streamLoop
+// makes per event (the per-event binlogPos advance and the boundary-gated
+// safePos advance) and asserts what checkpointPosition, and so saveCheckpoint,
+// persists.
+func TestPositionCheckpoint_neverMidTransaction(t *testing.T) {
 	const file = "binlog.000001"
 	// Seeded at the resolved start boundary (pos 100), as One() does.
 	state := &streamState{mode: "position", binlogFile: file, binlogPos: 100, safeFile: file, safePos: 100}
@@ -2061,38 +2062,36 @@ func TestPositionCheckpoint_neverMidStatement(t *testing.T) {
 			state.safeFile, state.safePos = state.binlogFile, ev.EndPos
 		}
 	}
-
-	// A bulk UPDATE split across two ROWS_EVENTs under one TABLE_MAP: the first
-	// chunk (no STMT_END) then a second chunk, still not the statement end.
-	apply(parser.Event{EventType: parser.EventUpdate, BinlogFile: file, EndPos: 300, StmtEnd: false})
-	apply(parser.Event{EventType: parser.EventUpdate, BinlogFile: file, EndPos: 500, StmtEnd: false})
-
-	// A ticker checkpoint fires HERE — mid-statement. It must persist the prior
-	// committed boundary (100), not the per-event offset (500).
-	if f, p := checkpointPosition(state); f != file || p != 100 {
-		t.Fatalf("mid-statement checkpoint must stay at the committed boundary %s:100, got %s:%d", file, f, p)
+	mustStay := func(when string, want uint64) {
+		t.Helper()
+		if f, p := checkpointPosition(state); f != file || p != want {
+			t.Fatalf("%s: the checkpoint must stay at %s:%d, got %s:%d", when, file, want, f, p)
+		}
 	}
+
+	// A bulk UPDATE split across ROWS_EVENTs under one TABLE_MAP, then the
+	// statement's last chunk. None of them ends the transaction.
+	apply(parser.Event{EventType: parser.EventUpdate, BinlogFile: file, EndPos: 300})
+	apply(parser.Event{EventType: parser.EventUpdate, BinlogFile: file, EndPos: 500})
+	mustStay("mid-statement", 100)
 	if state.binlogPos != 500 {
 		t.Fatalf("per-event binlogPos should still track the latest event for metrics/display, got %d", state.binlogPos)
 	}
+	apply(parser.Event{EventType: parser.EventUpdate, BinlogFile: file, EndPos: 700})
+	mustStay("after a statement end inside an open transaction", 100)
 
-	// The statement's last chunk (STMT_END_F) arrives — safePos may now advance.
-	apply(parser.Event{EventType: parser.EventUpdate, BinlogFile: file, EndPos: 700, StmtEnd: true})
-	if _, p := checkpointPosition(state); p != 700 {
-		t.Fatalf("after STMT_END the safe checkpoint must advance to 700, got %d", p)
-	}
+	// A second statement of the same transaction.
+	apply(parser.Event{EventType: parser.EventInsert, BinlogFile: file, EndPos: 800})
+	mustStay("after the transaction's second statement", 100)
+
+	// EventCommit IS a boundary, with or without a GTID: a source with GTIDs
+	// off announces its XIDs too (#2391).
+	apply(parser.Event{EventType: parser.EventCommit, BinlogFile: file, EndPos: 850})
+	mustStay("after the commit", 850)
 
 	// EventGTID (transaction-start marker) is NOT a boundary.
-	apply(parser.Event{EventType: parser.EventGTID, BinlogFile: file, EndPos: 720})
-	if _, p := checkpointPosition(state); p != 700 {
-		t.Fatalf("EventGTID must not advance the safe checkpoint; want 700, got %d", p)
-	}
-
-	// EventCommit (XID) IS a boundary.
-	apply(parser.Event{EventType: parser.EventCommit, BinlogFile: file, EndPos: 750})
-	if _, p := checkpointPosition(state); p != 750 {
-		t.Fatalf("after commit the safe checkpoint must advance to 750, got %d", p)
-	}
+	apply(parser.Event{EventType: parser.EventGTID, BinlogFile: file, EndPos: 900})
+	mustStay("after a transaction start", 850)
 
 	// EventDDL (auto-commit) IS a boundary, and carries the new file after a rotate.
 	apply(parser.Event{EventType: parser.EventDDL, BinlogFile: "binlog.000002", EndPos: 900})

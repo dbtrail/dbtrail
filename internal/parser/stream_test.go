@@ -372,53 +372,6 @@ func TestStreamParser_mariadbGTIDThenXIDEmitsCommit(t *testing.T) {
 
 // ─── STMT_END_F / split-statement boundary (#775) ────────────────────────────
 
-// TestStreamParser_stmtEndFlagMarksStatementBoundary verifies that Event.StmtEnd
-// mirrors the ROWS_EVENT's STMT_END_F flag. A statement larger than
-// binlog_row_event_max_size is split into several ROWS_EVENTs under ONE
-// TABLE_MAP, and only the LAST one sets STMT_END_F. The stream consumer keys its
-// POSITION-mode safe checkpoint off StmtEnd so a resume never lands on the byte
-// offset between two chunks (#775): the first (non-STMT_END) chunk must report
-// StmtEnd=false, the last (STMT_END) chunk StmtEnd=true.
-func TestStreamParser_stmtEndFlagMarksStatementBoundary(t *testing.T) {
-	sp := NewStreamParser(makeOrdersResolver(), Filters{}, nil)
-	streamer := replication.NewBinlogStreamer()
-	out := make(chan Event, 10)
-
-	mkChunk := func(logPos uint32, stmtEnd bool) *replication.BinlogEvent {
-		var flags uint16
-		if stmtEnd {
-			flags = replication.RowsEventStmtEndFlag
-		}
-		return &replication.BinlogEvent{
-			Header: &replication.EventHeader{EventType: replication.WRITE_ROWS_EVENTv2, LogPos: logPos, EventSize: 100},
-			Event: &replication.RowsEvent{
-				Flags: flags,
-				Table: &replication.TableMapEvent{Schema: []byte("shop"), Table: []byte("orders"), ColumnCount: 2},
-				Rows:  [][]any{{int64(1), int64(10)}},
-			},
-		}
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	// One split statement: first chunk (mid-statement, no STMT_END_F), then the
-	// last chunk (STMT_END_F set) — both under the same implied TABLE_MAP.
-	feedThenCancel(t, streamer, cancel, mkChunk(300, false), mkChunk(500, true))
-	if err := sp.Run(ctx, streamer, out); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	evs := drainAll(out)
-	if len(evs) != 2 {
-		t.Fatalf("expected 2 row events, got %d: %v", len(evs), typesOf(evs))
-	}
-	if evs[0].StmtEnd {
-		t.Errorf("mid-statement ROWS_EVENT (no STMT_END_F, pos %d) must have StmtEnd=false", evs[0].EndPos)
-	}
-	if !evs[1].StmtEnd {
-		t.Errorf("final ROWS_EVENT (STMT_END_F, pos %d) must have StmtEnd=true", evs[1].EndPos)
-	}
-}
-
 // ─── QueryEvent / DDL ────────────────────────────────────────────────────────
 
 // TestStreamParser_queryEventNonDDL verifies that a non-DDL QUERY_EVENT
@@ -1113,9 +1066,9 @@ func TestStreamParser_transactionPayloadDispatchesInnerRows(t *testing.T) {
 	}
 }
 
-// TestStreamParser_emptyPayloadNoEffect: a payload with no inner events, and
-// one whose only inner event bintrail ignores (XID), both emit nothing and do
-// not error.
+// TestStreamParser_emptyPayloadNoEffect: a payload with no inner events emits
+// nothing, and one whose only inner event is an XID emits just that
+// transaction end, with no GTID (#2391). Neither errors.
 func TestStreamParser_emptyPayloadNoEffect(t *testing.T) {
 	sp := NewStreamParser(nil, Filters{}, nil)
 	streamer := replication.NewBinlogStreamer()
@@ -1127,17 +1080,17 @@ func TestStreamParser_emptyPayloadNoEffect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	feedThenCancel(t, streamer, cancel,
 		makePayloadEvent(3000, 200), // no inner events at all
-		// An inner XID with NO preceding GTID: emitCommit is a no-op because
-		// currentGTID is empty, so still nothing is emitted. (A GTID-led
-		// transaction's inner XID DOES emit EventCommit — see
-		// TestStreamParser_compressedTransactionEmitsCommit.)
+		// An inner XID with NO preceding GTID: the transaction end is still
+		// announced, without a GTID. (A GTID-led transaction's inner XID
+		// carries its GTID — see TestStreamParser_compressedTransactionEmitsCommit.)
 		makePayloadEvent(4000, 200, innerXID),
 	)
 	if err := sp.Run(ctx, streamer, out); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(out) != 0 {
-		t.Errorf("expected 0 events from empty/ignored payloads, got %d", len(out))
+	evs := drainAll(out)
+	if len(evs) != 1 || evs[0].EventType != EventCommit || evs[0].GTID != "" {
+		t.Errorf("expected only the inner XID's transaction end, with no GTID; got %v", typesOf(evs))
 	}
 }
 
@@ -1202,5 +1155,145 @@ func TestEmitter_sendStampsAndHonoursCancellation(t *testing.T) {
 	cancel()
 	if err := (emitter{ch: make(chan Event), readAt: want}).send(ctx, Event{}); !errors.Is(err, context.Canceled) {
 		t.Errorf("send on a cancelled ctx = %v, want context.Canceled", err)
+	}
+}
+
+// ─── #2391: every transaction end is announced, with or without a GTID ────────
+
+// withLogPos sets the end position a real server stamps on every event.
+func withLogPos(ev *replication.BinlogEvent, pos uint32) *replication.BinlogEvent {
+	ev.Header.LogPos = pos
+	return ev
+}
+
+// commitEvents returns the EventCommit events in evs (resend_test.go's
+// commitsOf returns only their GTIDs).
+func commitEvents(evs []Event) []Event {
+	var out []Event
+	for _, ev := range evs {
+		if ev.EventType == EventCommit {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// runParser feeds evs through a fresh StreamParser and returns what it emitted.
+func runParser(t *testing.T, evs ...*replication.BinlogEvent) []Event {
+	t.Helper()
+	sp := NewStreamParser(nil, Filters{}, nil)
+	streamer := replication.NewBinlogStreamer()
+	out := make(chan Event, 50)
+	ctx, cancel := context.WithCancel(context.Background())
+	feedThenCancel(t, streamer, cancel, evs...)
+	if err := sp.Run(ctx, streamer, out); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return drainAll(out)
+}
+
+// A source without GTIDs (MySQL 8 writes an ANONYMOUS_GTID_EVENT, older ones
+// nothing) still announces the XID, at the XID's own end position: that is the
+// only point a position-mode resume can start from without splitting the
+// transaction.
+func TestStreamParser_xidWithoutGTIDEmitsCommit(t *testing.T) {
+	evs := runParser(t,
+		makeAnonymousGTIDEvent(0), makeQueryEvent("BEGIN"), makeXIDEvent(500),
+		makeQueryEvent("BEGIN"), makeXIDEvent(900), // no GTID event at all (pre-5.7 shape)
+	)
+	commits := commitEvents(evs)
+	if len(commits) != 2 {
+		t.Fatalf("want one commit per XID, got %d in %v", len(commits), typesOf(evs))
+	}
+	for i, want := range []uint64{500, 900} {
+		if commits[i].EndPos != want || commits[i].GTID != "" {
+			t.Errorf("commit %d: EndPos=%d GTID=%q, want EndPos=%d and no GTID", i, commits[i].EndPos, commits[i].GTID, want)
+		}
+	}
+}
+
+// A transaction that touched a non-transactional table ends in a QUERY
+// "COMMIT", not an XID. With a GTID it commits there (and only there: the next
+// GTID must not commit it a second time); without one it is still announced.
+func TestStreamParser_queryCommitEmitsCommit(t *testing.T) {
+	t.Run("gtid", func(t *testing.T) {
+		evs := runParser(t,
+			makeGTIDEvent(1), makeQueryEvent("BEGIN"), withLogPos(makeQueryEvent("COMMIT"), 400),
+			makeGTIDEvent(2),
+		)
+		commits := commitEvents(evs)
+		if len(commits) != 1 {
+			t.Fatalf("want exactly one commit (at the COMMIT, none from the next GTID), got %d in %v", len(commits), typesOf(evs))
+		}
+		if commits[0].EndPos != 400 || commits[0].GTID != evs[0].GTID {
+			t.Errorf("commit: EndPos=%d GTID=%q, want EndPos=400 GTID=%q", commits[0].EndPos, commits[0].GTID, evs[0].GTID)
+		}
+	})
+	t.Run("no gtid", func(t *testing.T) {
+		evs := runParser(t,
+			makeAnonymousGTIDEvent(0), makeQueryEvent("BEGIN"), withLogPos(makeQueryEvent("COMMIT"), 400),
+		)
+		commits := commitEvents(evs)
+		if len(commits) != 1 || commits[0].EndPos != 400 {
+			t.Fatalf("want one commit at 400, got %v", commits)
+		}
+	})
+	t.Run("rollback of a non-transactional change", func(t *testing.T) {
+		evs := runParser(t,
+			makeAnonymousGTIDEvent(0), makeQueryEvent("BEGIN"), withLogPos(makeQueryEvent("ROLLBACK"), 450),
+		)
+		if commits := commitEvents(evs); len(commits) != 1 || commits[0].EndPos != 450 {
+			t.Fatalf("want one transaction end at 450, got %v", commits)
+		}
+	})
+}
+
+// ROLLBACK TO SAVEPOINT is logged inside a transaction that goes on. It must
+// not end it: the XID that follows is the end.
+func TestStreamParser_rollbackToSavepointIsNotACommit(t *testing.T) {
+	evs := runParser(t,
+		makeGTIDEvent(1), makeQueryEvent("BEGIN"),
+		withLogPos(makeQueryEvent("SAVEPOINT s1"), 300),
+		withLogPos(makeQueryEvent("ROLLBACK TO SAVEPOINT s1"), 350),
+		makeXIDEvent(600),
+	)
+	commits := commitEvents(evs)
+	if len(commits) != 1 || commits[0].EndPos != 600 {
+		t.Fatalf("want the XID at 600 as the only commit, got %v", commits)
+	}
+}
+
+// MySQL ends an XA transaction's prepared group with an XA_PREPARE_LOG_EVENT,
+// which go-mysql hands over undecoded. The rows are all in that group, so it is
+// the group's end. The XA COMMIT that follows later is its own group.
+func TestStreamParser_xaPrepareEmitsCommit(t *testing.T) {
+	xaPrepare := &replication.BinlogEvent{
+		Header: &replication.EventHeader{EventType: replication.XA_PREPARE_LOG_EVENT, LogPos: 700},
+		Event:  &replication.GenericEvent{},
+	}
+	evs := runParser(t,
+		makeGTIDEvent(1), makeQueryEvent("XA START X'31'"), makeQueryEvent("XA END X'31'"), xaPrepare,
+		makeGTIDEvent(2), withLogPos(makeQueryEvent("XA COMMIT X'31'"), 900),
+	)
+	commits := commitEvents(evs)
+	if len(commits) != 2 || commits[0].EndPos != 700 || commits[1].EndPos != 900 {
+		t.Fatalf("want commits at 700 (prepare) and 900 (XA COMMIT), got %v", commits)
+	}
+	if commits[0].GTID == commits[1].GTID {
+		t.Errorf("the prepare and the XA COMMIT are two transactions, both commits carry %q", commits[0].GTID)
+	}
+}
+
+// The next-GTID fallback exists for GTID transactions that end without any
+// terminator; it has nothing to commit when there is no GTID. A source with
+// GTIDs off must not get a commit at every transaction START: that position
+// is inside the next transaction.
+func TestStreamParser_anonymousGTIDStartsAreNotCommits(t *testing.T) {
+	evs := runParser(t,
+		withLogPos(makeAnonymousGTIDEvent(0), 100), withLogPos(makeQueryEvent("GRANT SELECT ON *.* TO 'x'@'%'"), 200),
+		withLogPos(makeAnonymousGTIDEvent(0), 300), withLogPos(makeQueryEvent("GRANT SELECT ON *.* TO 'y'@'%'"), 400),
+	)
+	if commits := commitEvents(evs); len(commits) != 0 {
+		t.Fatalf("no terminator was logged, so no commit may be emitted; got %v", commits)
 	}
 }
