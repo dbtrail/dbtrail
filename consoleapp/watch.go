@@ -320,14 +320,14 @@ func init() {
 }
 
 func runWatch(cmd *cobra.Command, args []string) error {
-	// bindWatchEnv already loaded the env file in init(), so the variable is
-	// visible here whichever way it was set. Here rather than in init() so the
-	// binary warns once, for the command actually being run.
 	// The index DSN first: everything after it needs the index, and a
 	// malformed one must not wait out the reachability retries below.
 	if err := checkIndexDSN(upIndexDSN); err != nil {
 		return err
 	}
+	// bindWatchEnv already loaded the env file in init(), so the variable is
+	// visible here whichever way it was set. Here rather than in init() so the
+	// binary warns once, for the command actually being run.
 	warnSQLPanelRetired()
 	if !cliutil.IsValidOutputFormat(upFormat) {
 		return fmt.Errorf("invalid --format %q; must be text or json", upFormat)
