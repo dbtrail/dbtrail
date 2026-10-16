@@ -24,8 +24,11 @@ type fakeIndex struct {
 	// changed refuse.
 	newestErr, sinceErr, changedErr error
 	fillErr                         map[string]error
-	startWhy, fillWhy               map[string]string
-	changed                         map[string]string
+	// startErr fails Start for a table once (its schema snapshot could not
+	// be read).
+	startErr          map[string]error
+	startWhy, fillWhy map[string]string
+	changed           map[string]string
 	// cuts is the event id each table's published cut stops at.
 	cuts map[string]uint64
 	// fills counts Fill calls; pages the pages handed out; sinceTables the
@@ -61,6 +64,10 @@ func (f *fakeIndex) Holds(_ context.Context, m tailMark) (bool, error) {
 }
 
 func (f *fakeIndex) Start(_ context.Context, t views.BaselineTable) (tailTable, string, error) {
+	if err := f.startErr[tailKey(t.Schema, t.Table)]; err != nil {
+		delete(f.startErr, tailKey(t.Schema, t.Table))
+		return nil, "", err
+	}
 	if why := f.startWhy[tailKey(t.Schema, t.Table)]; why != "" {
 		return nil, why, nil
 	}
@@ -226,6 +233,21 @@ func TestTailKeeper(t *testing.T) {
 	t.Run("nothing indexed: no tails", func(t *testing.T) {
 		if got := refresh(t, newKeeper(&fakeIndex{}), orders); len(got) != 0 {
 			t.Fatalf("%v", got)
+		}
+	})
+
+	t.Run("a Start that cannot read the index is tried again at the next statement", func(t *testing.T) {
+		f := &fakeIndex{startErr: map[string]error{ko: errors.New("connection reset")}}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		if got := refresh(t, k, orders); len(got) != 0 {
+			t.Fatalf("a tail out of a Start that failed: %v", got)
+		}
+		if e := k.tables[ko]; e != nil && e.refused != "" {
+			t.Fatalf("a failed read is remembered as a refusal (%q): it would stand until the copy's next snapshot", e.refused)
+		}
+		if v, ok := refresh(t, k, orders)[ko]; !ok || fileKeys(t, v.Path) != 1 {
+			t.Fatalf("the next statement has no tail: %+v (present %v)", v, ok)
 		}
 	})
 

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **The router's answers are fresh again: the copy's tails were never used by `bintrail-console router`.** The router opens each server's index lazily, so it never loaded the index's schema snapshot, and every table's tail was refused with "the index has no schema snapshot to read <table>'s key from", even with a snapshot in the index. Every statement the router sent to the copy then read the copy as of its snapshot, minutes behind capture, instead of seconds. The tail now reads the newest schema snapshot from the index when its server has none loaded, and again only when a newer one appears. The same fix covers a server added to `watch` before its first schema snapshot, whose tails stayed off until a restart. A schema snapshot that cannot be read is no longer reported as missing: the read is tried again at the next statement.
 
 ## [0.105.3] - 2026-10-15
 ### Added

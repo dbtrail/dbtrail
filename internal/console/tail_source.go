@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -41,6 +42,12 @@ type indexTailSource struct {
 	// would claim a copy as current as the index.
 	captures        func(schema, table string) bool
 	capturesUnknown bool
+
+	// schemaMu guards schema and schemaID: the resolver this source loaded
+	// itself, for a bundle that has none (indexSchema).
+	schemaMu sync.Mutex
+	schema   *metadata.Resolver
+	schemaID int
 }
 
 // tailPageSize is how many events one read of the index returns.
@@ -113,7 +120,7 @@ func (d decodingTail) Apply(page []query.ResultRow) error {
 // (the table's definition) and the schema snapshot (its key, which must be
 // the definition's: a snapshot loaded before the key changed would drop
 // published rows by a part of it).
-func (x *indexTailSource) Start(_ context.Context, t views.BaselineTable) (tailTable, string, error) {
+func (x *indexTailSource) Start(ctx context.Context, t views.BaselineTable) (tailTable, string, error) {
 	name := t.Schema + "." + t.Table
 	if x.capturesUnknown {
 		return nil, "which tables capture records is not known here", nil
@@ -129,10 +136,11 @@ func (x *indexTailSource) Start(_ context.Context, t views.BaselineTable) (tailT
 	if err != nil {
 		return nil, fmt.Sprintf("the snapshot file of %s could not be read: %v", name, err), nil
 	}
-	if x.b.resolver == nil {
-		return nil, "the index has no schema snapshot to read " + name + "'s key from", nil
+	resolver, why, err := x.indexSchema(ctx, name)
+	if err != nil || why != "" {
+		return nil, why, err
 	}
-	tm, err := x.b.resolver.Resolve(t.Schema, t.Table)
+	tm, err := resolver.Resolve(t.Schema, t.Table)
 	if err != nil {
 		return nil, fmt.Sprintf("%s could not be found in the index's schema snapshot: %v", name, err), nil
 	}
@@ -148,7 +156,44 @@ func (x *indexTailSource) Start(_ context.Context, t views.BaselineTable) (tailT
 		}
 		return nil, "", err
 	}
-	return decodingTail{tail, reconstruct.NewTailDecoder(x.b.db, t.Schema, t.Table, x.b.resolver)}, "", nil
+	return decodingTail{tail, reconstruct.NewTailDecoder(x.b.db, t.Schema, t.Table, resolver)}, "", nil
+}
+
+// indexSchema is the schema snapshot a tail reads name's key from, or why
+// there is none, or the error that kept it from being read.
+//
+// A bundle that loaded its resolver when it was opened (watch) keeps it. One
+// that has none reads the newest snapshot here: a bundle whose index is
+// opened lazily (the router, Config.LazyIndex) never loads one, and one
+// opened before the index had a snapshot (a server just added to watch)
+// would otherwise refuse every tail until a restart. It is read again only
+// when a newer snapshot appears, so a table added since is found and an
+// unchanged snapshot costs one query. A snapshot that cannot be read is an
+// error, not a refusal: the keeper keeps a tail it already has and asks
+// again at the next statement, where a refusal would stand until the copy's
+// next snapshot.
+func (x *indexTailSource) indexSchema(ctx context.Context, name string) (*metadata.Resolver, string, error) {
+	none := "the index has no schema snapshot to read " + name + "'s key from"
+	if x.b.resolver != nil {
+		return x.b.resolver, "", nil
+	}
+	x.schemaMu.Lock()
+	defer x.schemaMu.Unlock()
+	var id int
+	if err := x.b.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(snapshot_id), 0) FROM schema_snapshots").Scan(&id); err != nil {
+		return nil, "", fmt.Errorf("read the newest schema snapshot of the index for %s's key: %w", name, err)
+	}
+	if id == 0 {
+		return nil, none, nil
+	}
+	if x.schema == nil || id != x.schemaID {
+		r, err := metadata.NewResolver(x.b.db, id)
+		if err != nil {
+			return nil, "", fmt.Errorf("read schema snapshot %d of the index for %s's key: %w", id, name, err)
+		}
+		x.schema, x.schemaID = r, id
+	}
+	return x.schema, "", nil
 }
 
 // Fill reads t's events after its cut up to upTo, a page at a time, then
