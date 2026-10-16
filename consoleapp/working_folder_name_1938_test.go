@@ -23,7 +23,7 @@ func TestExecute_anUncreatableWorkingFolderIsNamedAsOne(t *testing.T) {
 	stage := filepath.Join(blocker, "work")
 	calls := countMydumper(t)
 	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeFTWRL)
-	req := console.BaselineRequest{ServerID: "s1", SourceDSN: "src", S3: "s3://b/p"}
+	req := console.BaselineRequest{ServerID: "s1", SourceDSN: "src", S3: "s3://b/p", LocalDir: t.TempDir()}
 
 	_, err := s.execute(req)
 	if err == nil || !strings.HasPrefix(err.Error(), "create the working folder "+stage+": ") {

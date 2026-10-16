@@ -160,7 +160,7 @@ func dumpOutcomeAt(t *testing.T, root string, at time.Time) dumpOutcome {
 	t.Helper()
 	dir := filepath.Join(root, reconstruct.SnapshotDirName(at))
 	writeSnapshotFiles(t, dir, baseline.SuccessMarker)
-	return dumpOutcome{stats: baseline.Stats{TablesProcessed: 1, RowsWritten: 5}, snapDir: dir, at: at, cleanup: func() {}}
+	return dumpOutcome{stats: baseline.Stats{TablesProcessed: 1, RowsWritten: 5}, snapDir: dir, at: at}
 }
 
 func TestDump_publishesLocallyBeforeTheUploadAndFreesTheSlot(t *testing.T) {
@@ -221,42 +221,6 @@ func TestDump_uploadFailureAfterPublishIsAFailedRunThatKeepsTheSnapshot(t *testi
 	}
 	if _, err := os.Stat(filepath.Join(out.snapDir, baseline.SuccessMarker)); err != nil {
 		t.Fatalf("the published snapshot was removed after the upload failed: %v", err)
-	}
-}
-
-// TestDump_s3OnlyKeepsTheSlotThroughTheUpload: with no local directory the
-// staging is temporary and nothing is published until the destination has
-// it, so the slot stays held and a failed upload is a failed run.
-func TestDump_s3OnlyKeepsTheSlotThroughTheUpload(t *testing.T) {
-	at := time.Date(2026, 9, 18, 11, 23, 49, 0, time.UTC)
-	ds := stubDumpUpload(t, map[string]bool{}, nil)
-	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
-	req := console.BaselineRequest{ServerID: "a", ServerName: "a", S3: "s3://bucket/backups/"}
-	sup.jobs["a"] = &console.BaselineStatus{State: "running"}
-	staging := t.TempDir()
-	out := dumpOutcomeAt(t, staging, at)
-	out.staged = true
-
-	done := make(chan struct{})
-	go func() { defer close(done); completeDumpOwn(sup, req, out, nil) }()
-	select {
-	case <-ds.entered: // the run is inside the upload, not still on its way there
-	case <-time.After(5 * time.Second):
-		t.Fatal("the upload never started")
-	}
-	sup.mu.Lock()
-	busy := sup.busyLocked("a")
-	sup.mu.Unlock()
-	if st := sup.Status("a"); !busy || st.State != "running" || st.Published {
-		t.Fatalf("S3-only dump released the slot before the upload: busy=%v status=%+v", busy, st)
-	}
-	close(ds.hold)
-	<-done
-	if st := sup.Status("a"); st.State != "succeeded" || st.Uploaded != 3 {
-		t.Fatalf("status = %+v", st)
-	}
-	if len(ds.calls) != 1 || ds.calls[0].dest != "s3://bucket/backups/"+reconstruct.SnapshotDirName(at) {
-		t.Fatalf("uploads = %+v", ds.calls)
 	}
 }
 
@@ -590,7 +554,6 @@ func TestDump_historyNamesTheSnapshotOnlyWhenOneWasPublished(t *testing.T) {
 	}{
 		{"local and S3, upload ok", true, nil, true, 3, ""},
 		{"local and S3, upload failed", true, errors.New("AccessDenied"), true, 0, "AccessDenied"},
-		{"S3 only, upload failed", false, errors.New("AccessDenied"), false, 0, "AccessDenied"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -604,7 +567,6 @@ func TestDump_historyNamesTheSnapshotOnlyWhenOneWasPublished(t *testing.T) {
 				req.LocalDir = dir
 			}
 			out := dumpOutcomeAt(t, dir, at)
-			out.staged = !c.localDir
 			sup.jobs["a"] = &console.BaselineStatus{State: "running"}
 			completeDumpOwn(sup, req, out, nil)
 			runs := sup.history.List("a")
@@ -620,48 +582,6 @@ func TestDump_historyNamesTheSnapshotOnlyWhenOneWasPublished(t *testing.T) {
 				t.Fatalf("record = %+v, want snapshot %q uploaded %d error containing %q", r, wantSnap, c.wantUploaded, c.wantErr)
 			}
 		})
-	}
-}
-
-// TestDump_s3OnlyFailedUploadPublishesNothingAndNamesNoStagingPath: the
-// staging directory is gone once the run ends, so the error must not send
-// the operator to it; the upload reads the staging BEFORE cleanup runs.
-func TestDump_s3OnlyFailedUploadPublishesNothingAndNamesNoStagingPath(t *testing.T) {
-	at := time.Date(2026, 9, 18, 11, 23, 49, 0, time.UTC)
-	staging := t.TempDir()
-	out := dumpOutcomeAt(t, staging, at)
-	out.staged = true
-	cleaned := false
-	out.cleanup = func() { cleaned = true; os.RemoveAll(staging) }
-	ds := stubDumpUploadFn(t, map[string]bool{}, func(string, bool) error {
-		if cleaned {
-			t.Error("the staging was removed before the upload read it")
-		}
-		if _, err := os.Stat(out.snapDir); err != nil {
-			t.Errorf("the staged snapshot is not readable during the upload: %v", err)
-		}
-		return errors.New("AccessDenied")
-	})
-	close(ds.hold)
-	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
-	req := console.BaselineRequest{ServerID: "a", ServerName: "a", S3: "s3://bucket/backups/"}
-	sup.jobs["a"] = &console.BaselineStatus{State: "running"}
-	completeDumpOwn(sup, req, out, nil)
-	st := sup.Status("a")
-	if st.State != "failed" || st.Published || st.Uploading || !strings.Contains(st.LastError, "AccessDenied") {
-		t.Fatalf("status = %+v, want failed, nothing published", st)
-	}
-	if strings.Contains(st.LastError, staging) {
-		t.Fatalf("LastError names the staging directory, which no longer exists: %q", st.LastError)
-	}
-	if !cleaned {
-		t.Fatal("the staging was not cleaned up after the failed upload")
-	}
-	sup.mu.Lock()
-	busy := sup.busyLocked("a")
-	sup.mu.Unlock()
-	if busy {
-		t.Fatal("a failed S3-only run left the server busy")
 	}
 }
 

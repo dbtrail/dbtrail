@@ -130,7 +130,7 @@ func TestBaselineSupervisor_singleFlightIsShared(t *testing.T) {
 	// A refresh in flight blocks a dump.
 	sup.jobs = map[string]*console.BaselineStatus{}
 	sup.refreshes["a"] = &console.BaselineStatus{State: "running"}
-	if err := sup.Trigger(console.BaselineRequest{ServerID: "a"}); err != console.ErrBaselineRunning {
+	if err := sup.Trigger(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "a"}); err != console.ErrBaselineRunning {
 		t.Fatalf("Trigger during a refresh = %v, want ErrBaselineRunning", err)
 	}
 }

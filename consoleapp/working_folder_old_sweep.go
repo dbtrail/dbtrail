@@ -55,7 +55,8 @@ const unusedDefaultSweepEvery = time.Hour
 //     (ownFolder), and only when no other user can rename the working folder
 //     or any folder above it (heldInPlace). Without that, an entry could be swapped for a
 //     link between the check and the removal.
-//   - Never the dump, staged-snapshot or staged-run folders. Those of a dead
+//   - Never the dump folders, nor the staged-snapshot and staged-run folders
+//     an older version made for S3-only servers (#2431). Those of a dead
 //     job this install journaled are reclaimed through the journal, which
 //     stores absolute paths, when a snapshot feature is on; any other is
 //     another process's work or cannot be told from it.

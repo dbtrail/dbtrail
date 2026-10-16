@@ -22,9 +22,9 @@ import (
 //
 // A refresh or a full read that dies uncatchably (SIGKILL, the kernel's OOM
 // killer) leaves its work in progress: a snapshot directory marked
-// _INCOMPLETE, a mydumper dump of the whole source in the staging folder, a
-// staged copy of a snapshot bound for S3. In-process failures clean these up
-// (#1501 and the staging defers); a dead process cannot, and before this
+// _INCOMPLETE, a mydumper dump of the whole source in the staging folder.
+// In-process failures clean these up (#1501 and the staging defers); a dead
+// process cannot, and before this
 // nothing after the restart did either: every listing skipped the partial
 // snapshot with a warning, retention never touches an _INCOMPLETE snapshot,
 // and the staging folder is walked by nothing.
@@ -114,7 +114,7 @@ func (j *jobRun) Created(root, name string) {
 // journal is Created reporting whether the directory is now in the journal:
 // false for a job with no journal, and for one whose entry could not be
 // written (said at Warn here). A caller that must tell an operator who will
-// clean a directory up reads this rather than assuming (#2212).
+// clean a directory up reads this rather than assuming.
 func (j *jobRun) journal(root, name string) bool {
 	if j == nil {
 		return false
@@ -169,7 +169,7 @@ func (j *jobRun) release() {
 
 // keepForReclaim ends the job WITHOUT dropping its journal entry: the lock is
 // released and the lock file kept, so the next start finds the job dead and
-// removes what it journaled (a run folder whose delete failed, #2212). Its
+// removes what it journaled (a folder whose delete failed). Its
 // record, already written, is not written again. Idempotent with release.
 func (j *jobRun) keepForReclaim() {
 	if j == nil {
@@ -328,11 +328,13 @@ type jobDirResult struct {
 }
 
 // stagingNamePrefixes are the os.MkdirTemp patterns of the scratch
-// directories in the staging folder: the full read's dump, a staged snapshot
-// bound for S3, a PostgreSQL one, and the run folder of an update of a server
-// whose snapshots go only to S3 (stagedRunPrefix, #2212). Nothing in them is
+// directories in the staging folder. Only the full read's dump is made today;
+// "baseline-", "pgbaseline-" and "refresh-" are the staged snapshots and
+// update runs of servers whose snapshots went only to S3, which no longer
+// exist (#2431). They stay listed so a folder an older version journaled
+// before it died is still reclaimed after the upgrade. Nothing in them is
 // ever kept by a run that ends.
-var stagingNamePrefixes = []string{"dump-", "baseline-", "pgbaseline-", stagedRunPrefix}
+var stagingNamePrefixes = []string{"dump-", "baseline-", "pgbaseline-", "refresh-"}
 
 func isStagingName(name string) bool {
 	for _, p := range stagingNamePrefixes {

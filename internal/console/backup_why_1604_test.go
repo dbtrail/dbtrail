@@ -48,17 +48,14 @@ func TestBackupWhyCode(t *testing.T) {
 	// S3 only: every server keeps a local copy since #2431, so a server
 	// with a bucket and no folder is updated by nothing, whatever the
 	// working folder.
-	for _, g := range []BackupScheduleGates{{}, {StagingRefusal: "x"}} {
-		if err := rebuildPossible(ServerEntry{DSN: "d", BaselineS3: "s3://b/p/"}, g); err == nil || err.Error() != BackupWhyNoLocalDir {
-			t.Errorf("rebuildPossible for an S3-only server = %v, want the constant", err)
-		}
+	if err := rebuildPossible(ServerEntry{DSN: "d", BaselineS3: "s3://b/p/"}, BackupScheduleGates{}); err == nil || err.Error() != BackupWhyNoLocalDir {
+		t.Errorf("rebuildPossible for an S3-only server = %v, want the constant", err)
 	}
 	if err := rebuildPossible(ServerEntry{DSN: "d", BaselineDir: "  ", BaselineS3: "s3://b/p/"}, BackupScheduleGates{}); err == nil || err.Error() != BackupWhyNoLocalDir {
 		t.Errorf("rebuildPossible with a blank folder = %v, want the constant", err)
 	}
-	// A server WITH a local folder never consults the staging folder.
-	if err := rebuildPossible(ServerEntry{DSN: "d", BaselineDir: "/b", BaselineS3: "s3://b/"}, BackupScheduleGates{StagingRefusal: "x"}); err != nil {
-		t.Errorf("rebuildPossible with a local folder = %v, want nil whatever the staging folder", err)
+	if err := rebuildPossible(ServerEntry{DSN: "d", BaselineDir: "/b", BaselineS3: "s3://b/"}, BackupScheduleGates{}); err != nil {
+		t.Errorf("rebuildPossible with a local folder = %v, want nil", err)
 	}
 }
 

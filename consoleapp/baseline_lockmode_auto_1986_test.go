@@ -235,7 +235,7 @@ func TestExecute_retriesWithLockAllOnlyForTheRefusedDefault(t *testing.T) {
 				s.reg = liveRegistry(t)
 				save(t, s.reg, console.BackupSettingLockMode, *c.saved)
 			}
-			_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN})
+			_, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: ownHostDSN})
 			if err == nil {
 				t.Fatal("execute succeeded over a failed dump")
 			}
@@ -264,7 +264,7 @@ func TestExecute_retriesWithLockAllOnlyForTheRefusedDefault(t *testing.T) {
 func TestExecute_lockAllIsNeverRetriedOrWeakened(t *testing.T) {
 	calls, _ := stubRetryDump(t, func(int, baseline.LockMode, string) error { return errDeniedFTWRL })
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
-	_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: dsnFor("db1.abc.us-east-1.rds.amazonaws.com")})
+	_, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: dsnFor("db1.abc.us-east-1.rds.amazonaws.com")})
 	if err == nil {
 		t.Fatal("execute succeeded over a failed dump")
 	}
@@ -278,7 +278,7 @@ func TestExecute_noRetryAfterShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls, _ := stubRetryDump(t, func(int, baseline.LockMode, string) error { cancel(); return errDeniedFTWRL })
 	s := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
-	if _, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN}); err == nil {
+	if _, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: ownHostDSN}); err == nil {
 		t.Fatal("execute succeeded")
 	}
 	if len(*calls) != 1 {
@@ -324,7 +324,6 @@ func TestExecute_retryStartsCleanAndRecordsLockAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	defer out.cleanup()
 
 	raw, _ := os.ReadFile(logf)
 	runs := strings.Split(strings.TrimSpace(string(raw)), "\n")
@@ -416,7 +415,7 @@ func TestExecute_refusesAnInvalidEnvironmentValue(t *testing.T) {
 	calls, _ := stubRetryDump(t, func(int, baseline.LockMode, string) error { return nil })
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	s.configErr = errors.New(`BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: unknown lock mode "lock-everything"`)
-	if _, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: dsnFor("db1.abc.us-east-1.rds.amazonaws.com")}); err == nil ||
+	if _, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: dsnFor("db1.abc.us-east-1.rds.amazonaws.com")}); err == nil ||
 		!strings.Contains(err.Error(), "lock-everything") {
 		t.Fatalf("err = %v, want the configuration refusal", err)
 	}

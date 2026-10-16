@@ -29,7 +29,7 @@ func TestFullBackup_readsTheDDLMarkBeforeTheDump(t *testing.T) {
 		return stop
 	}
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.LockModeFTWRL)
-	if _, err := s.execute(console.BaselineRequest{ServerID: "s1", IndexDSN: "idx-s1", SourceDSN: "src"}); !errors.Is(err, stop) {
+	if _, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", IndexDSN: "idx-s1", SourceDSN: "src"}); !errors.Is(err, stop) {
 		t.Fatalf("execute = %v", err)
 	}
 	if len(order) != 2 || order[0] != "mark:idx-s1" || order[1] != "mydumper" {

@@ -977,13 +977,13 @@ func TestBackupScheduler_removedScheduleIsForgotten(t *testing.T) {
 func TestScheduledRuns_stampTheTrigger(t *testing.T) {
 	_, _, sup := newScheduleFixture(t, true)
 	sup.jobs["d"] = &console.BaselineStatus{State: "running"}
-	sup.run(console.BaselineRequest{ServerID: "d", ServerName: "d", SourceDSN: "not a dsn",
+	sup.run(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "d", ServerName: "d", SourceDSN: "not a dsn",
 		Trigger: console.BaselineRunTriggerScheduled})
 	if run, _ := sup.history.LastScheduled("d"); run == nil || run.Kind != console.BaselineRunDump || run.Error == "" {
 		t.Fatalf("dump record = %+v, want a failed scheduled dump", run)
 	}
 	sup.jobs["m"] = &console.BaselineStatus{State: "running"}
-	sup.run(console.BaselineRequest{ServerID: "m", ServerName: "m", SourceDSN: "not a dsn"})
+	sup.run(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "m", ServerName: "m", SourceDSN: "not a dsn"})
 	if run, _ := sup.history.LastScheduled("m"); run != nil {
 		t.Fatalf("a manual dump was attributed to the schedule: %+v", run)
 	}

@@ -528,7 +528,7 @@ func TestExecute_journalsTheDumpDirBeforeMydumperRuns(t *testing.T) {
 		dumpDir = dir
 		return stop
 	}
-	if _, err := sup.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "src", Journal: j}); !errors.Is(err, stop) {
+	if _, err := sup.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: "src", Journal: j}); !errors.Is(err, stop) {
 		t.Fatalf("execute = %v", err)
 	}
 	if len(during) != 1 || len(during[0].Dirs) != 1 || during[0].Dirs[0].Root != f.staging || during[0].Dirs[0].Name != filepath.Base(dumpDir) {
@@ -578,9 +578,6 @@ func TestExecute_journalsTheLocalSnapshotOnlyWhenVacant(t *testing.T) {
 		}
 		out, _ := sup.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "u:p@tcp(127.0.0.1:1)/", LocalDir: local, Journal: j})
 		during := sup.history.Jobs()
-		if out.cleanup != nil {
-			out.cleanup()
-		}
 		j.release()
 		var names []string
 		for _, d := range during[0].Dirs {

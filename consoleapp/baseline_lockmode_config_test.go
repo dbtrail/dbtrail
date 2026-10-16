@@ -49,7 +49,7 @@ func TestBaselineSupervisorRefusesOnConfigError(t *testing.T) {
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	sup.configErr = errors.New("BINTRAIL_CONSOLE_BASELINE_LOCK_MODE: unknown lock mode \"FTWRL\"")
 
-	err := sup.Trigger(console.BaselineRequest{ServerID: "s1", ServerName: "prod"})
+	err := sup.Trigger(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", ServerName: "prod"})
 	if err == nil {
 		t.Fatal("a misconfigured supervisor started a baseline anyway")
 	}
@@ -80,12 +80,12 @@ func TestBaselineWiringCarriesConfigError(t *testing.T) {
 		t.Fatalf("startup failed over a baseline setting: %v", err)
 	}
 	sup := newBaselineSupervisorFromConfig(context.Background(), t.TempDir(), nil)
-	if err := sup.Trigger(console.BaselineRequest{ServerID: "s1"}); err == nil {
+	if err := sup.Trigger(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1"}); err == nil {
 		t.Fatal("a baseline ran under a mode the operator did not ask for; the config error never reached the supervisor")
 	}
 	// PostgreSQL is unaffected: it never consults the lock mode, so a
 	// MySQL-only typo must not take away a working button.
-	if err := sup.Trigger(console.BaselineRequest{ServerID: "pg1", Flavor: console.FlavorPostgres}); err != nil {
+	if err := sup.Trigger(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "pg1", Flavor: console.FlavorPostgres}); err != nil {
 		t.Errorf("a Postgres baseline was refused over a MySQL-only setting: %v", err)
 	}
 	// Accepting the trigger starts REAL work in a goroutine (it will fail on

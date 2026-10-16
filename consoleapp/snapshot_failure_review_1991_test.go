@@ -39,7 +39,7 @@ func TestExecute_failureSaysWhetherTheModeWasChosen(t *testing.T) {
 			})
 			s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 			s.lockModeChosen = c.chosen
-			req := console.BaselineRequest{ServerID: "s1", SourceDSN: c.dsn}
+			req := console.BaselineRequest{ServerID: "s1", SourceDSN: c.dsn, LocalDir: t.TempDir()}
 			_, err := s.execute(req)
 			if err == nil {
 				t.Fatal("execute succeeded over a failed dump")

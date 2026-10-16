@@ -55,13 +55,7 @@ type baselineSupervisor struct {
 	// gate is the heavy-work gate (#2385); nil is the process's heavyWork.
 	gate       *heavyGate
 	ctx        context.Context // daemon lifecycle; cancels an in-flight dump on shutdown
-	stagingDir string          // base dir for temp dump + staged Parquet (S3-destined runs)
-
-	// The cached answer of stagedUpdatesRefusal (#2212), so the schedule's
-	// gates, read on every page load, do not probe the disk each time.
-	stagingMu      sync.Mutex
-	stagingChecked time.Time
-	stagingErr     error
+	stagingDir string          // base dir for the temp dump
 
 	// lockMode selects how mydumper synchronizes its worker threads onto one
 	// instant for MySQL/MariaDB dumps — see internal/baseline.LockMode for the
@@ -340,6 +334,12 @@ func sourceIsManaged(dsn string) bool {
 // Trigger starts a baseline in the background; returns console.ErrBaselineRunning
 // if one is already in flight for this server.
 func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
+	// Every server that is written keeps a local folder (#2431). The
+	// precheck refuses one without before this; this is the belt for any
+	// other caller, refused before the job slot is taken.
+	if strings.TrimSpace(req.LocalDir) == "" {
+		return console.NoLocalFolderError()
+	}
 	// Scoped to MySQL/MariaDB: executePG anchors on pgoutput's own
 	// consistent-point LSN and never consults lockMode, so refusing a
 	// Postgres baseline over a MySQL-only knob would take away a working
@@ -499,16 +499,11 @@ func (s *baselineSupervisor) recoverDumpJob(req console.BaselineRequest, own *du
 }
 
 // dumpOutcome is what producing a full backup leaves behind for publication:
-// the snapshot directory (persistent under the server's local directory, or
-// staged under a temp dir when the destination is S3 only), its instant, and
-// the cleanup that removes the staging.
+// the snapshot directory under the server's local directory, and its instant.
 type dumpOutcome struct {
 	stats   baseline.Stats
 	snapDir string
 	at      time.Time
-	// staged: snapDir lives under a temp dir removed by cleanup (S3-only).
-	staged  bool
-	cleanup func()
 	// indexMark is the index's event high-water mark read before the dump
 	// started (dumpIndexMark); zero when unknown.
 	indexMark uint64
@@ -520,9 +515,7 @@ type dumpOutcome struct {
 // disk (#1725): the status says so and the server's job slot is free before
 // the upload starts, so a scheduled refresh runs alongside the upload — it
 // reads the local copy (resolveFoldSource) — instead of being skipped for as
-// long as the copy takes to reach the destination. S3-only keeps the slot
-// through the upload: its staging is temporary, and nothing is published
-// until the destination has it.
+// long as the copy takes to reach the destination.
 //
 // own receives the status entry this run owns once it has published (see
 // finishDump) and how far its upload got; the caller's panic guard reads it.
@@ -531,25 +524,18 @@ func (s *baselineSupervisor) completeDump(req console.BaselineRequest, started t
 		s.finishDump(req, started, out, nil, 0, 0, err)
 		return
 	}
-	if out.cleanup != nil {
-		defer out.cleanup()
-	}
 	if req.S3 == "" {
 		s.finishDump(req, started, out, nil, 0, 0, nil)
 		return
 	}
-	if req.LocalDir != "" {
-		own.st = s.publishDump(req, out)
-	}
+	own.st = s.publishDump(req, out)
 	root := strings.TrimSuffix(req.S3, "/")
 	name := reconstruct.SnapshotDirName(out.at)
 	uploaded, err := s.uploadDump(req, out, root+"/"+name)
 	swept := 0
 	if err == nil {
 		own.uploaded = true
-		if req.LocalDir != "" {
-			swept = s.sweepUnuploaded(req, root, name)
-		}
+		swept = s.sweepUnuploaded(req, root, name)
 	}
 	s.finishDump(req, started, out, own.st, uploaded, swept, err)
 }
@@ -601,11 +587,6 @@ func (s *baselineSupervisor) dumpStatusLocked(serverID string) *console.Baseline
 func (s *baselineSupervisor) uploadDump(req console.BaselineRequest, out dumpOutcome, dest string) (int, error) {
 	uploaded, err := s.uploadMarked(req.ServerID, reconstruct.SnapshotDirName(out.at), out.snapDir, dest, false)
 	if err != nil {
-		if out.staged {
-			// The staging is removed on return: naming it would send the
-			// operator to a directory that no longer exists.
-			return 0, fmt.Errorf("upload: %w", err)
-		}
 		return 0, fmt.Errorf("upload: the snapshot was written to %s but could not be uploaded to %s; the next full read sends it: %w",
 			out.snapDir, dest, err)
 	}
@@ -734,7 +715,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	rec.TransportNote = s.dumpTransportOf(req.ServerID, own)
 	// A snapshot instant is recorded when a snapshot was published: a
 	// success, or a local publish whose upload failed.
-	if !out.at.IsZero() && (err == nil || (out.snapDir != "" && !out.staged)) {
+	if !out.at.IsZero() && (err == nil || out.snapDir != "") {
 		rec.SnapshotTime = out.at.UTC().Format(time.RFC3339)
 	}
 	// A low-disk warning is about the dump and its conversion (#1938). Once a
@@ -742,7 +723,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	// the note says so in place of "this read may fail"; a read that wrote
 	// none keeps the warning as it was given. wroteSnapshot is the condition
 	// above without the timestamp, which a Postgres read does not have here.
-	wroteSnapshot := err == nil || (out.snapDir != "" && !out.staged)
+	wroteSnapshot := err == nil || out.snapDir != ""
 	if wroteSnapshot {
 		rec.DiskCheck, rec.DiskNote = dumpDiskOnceItFit(rec.DiskCheck, rec.DiskNote)
 	}
@@ -835,10 +816,12 @@ var s3ObjectPresent = func(ctx context.Context, url string) (bool, error) {
 }
 
 // execute runs the production half of a full backup: mydumper → baseline.Run.
-// For a local-dir destination the Parquet is written there persistently; for
-// an S3-only destination it is staged under a fresh temp dir that the returned
-// cleanup removes once the upload is done. The upload itself is completeDump's.
+// The Parquet is written into the server's local directory, which every
+// server that is written has (#2431); the upload is completeDump's.
 func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, error) {
+	if strings.TrimSpace(req.LocalDir) == "" {
+		return dumpOutcome{}, console.NoLocalFolderError()
+	}
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
 		return dumpOutcome{}, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
 	}
@@ -915,35 +898,23 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 		return dumpOutcome{}, fmt.Errorf("dump: cannot read mydumper's metadata, so the snapshot cannot be anchored to a binlog position: %w", err)
 	}
 
-	out := dumpOutcome{at: dumpStartedAt, cleanup: func() {}}
+	out := dumpOutcome{at: dumpStartedAt}
 	outputDir := req.LocalDir
-	if outputDir == "" { // S3-only: stage, upload, discard the staging
-		outputDir, err = os.MkdirTemp(s.stagingDir, "baseline-")
-		if err != nil {
-			return dumpOutcome{}, fmt.Errorf("create this run's folder in the working folder %s: %w", s.stagingDir, err)
-		}
-		journalDir(req, s.stagingDir, filepath.Base(outputDir))
-		out.staged = true
-		out.cleanup = func() { os.RemoveAll(outputDir) }
-	}
 
 	// ownSnapshot is the snapshot folder this run alone writes, "" when it
 	// cannot be said to be this run's.
 	ownSnapshot := ""
-	if !out.staged {
-		// The snapshot directory baseline.Run is about to create, journaled
-		// only when it is vacant now: one that already holds files is not
-		// this run's alone (a same-second CLI run), and a kill must never make
-		// it reclaimable.
-		name := reconstruct.SnapshotDirName(dumpStartedAt)
-		if vacant, verr := reconstruct.SnapshotDirVacant(filepath.Join(outputDir, name)); verr == nil && vacant {
-			journalDir(req, outputDir, name)
-			ownSnapshot = name
-		}
+	// The snapshot directory baseline.Run is about to create, journaled only
+	// when it is vacant now: one that already holds files is not this run's
+	// alone (a same-second CLI run), and a kill must never make it
+	// reclaimable.
+	name := reconstruct.SnapshotDirName(dumpStartedAt)
+	if vacant, verr := reconstruct.SnapshotDirVacant(filepath.Join(outputDir, name)); verr == nil && vacant {
+		journalDir(req, outputDir, name)
+		ownSnapshot = name
 	}
 	stats, err := baseline.Run(s.ctx, s.dumpBaselineConfig(req, dumpDir, outputDir, dumpStartedAt, ddlMark, eventMark))
 	if err != nil {
-		out.cleanup()
 		convErr := err
 		err = fmt.Errorf("convert: %w", err)
 		if ownSnapshot != "" {
@@ -1301,30 +1272,23 @@ var dumpEventMarkFunc = func(req console.BaselineRequest) string {
 // executePG produces a PostgreSQL baseline in-process via internal/pgbaseline —
 // COPY straight to Parquet, anchored at the slot's consistent-point LSN. No
 // mydumper subprocess and no #768 timestamp skew: pgbaseline self-stamps the
-// snapshot time from the database's own now(). Destination handling mirrors
-// execute(): a local dir is written persistently; S3-only stages in a temp dir,
-// uploads via the same source-agnostic baseline.Upload, and discards the staging.
+// snapshot time from the database's own now(). Like execute(), it writes into
+// the server's local directory (#2431), then uploads through the same
+// source-agnostic baseline.Upload.
 // pgBaselineRun is pgbaseline.Run; a test replaces it.
 var pgBaselineRun = pgbaseline.Run
 
 // executePG returns the snapshot it wrote even when the upload after it
-// failed: with a local directory that snapshot exists (out.snapDir set,
-// not staged), and finishDump then marks the run published and names its
+// failed: that snapshot exists in the local directory (out.snapDir set), and
+// finishDump then marks the run published and names its
 // time, so no page calls it unfinished (#1991 review).
 func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome, int, error) {
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
 		return dumpOutcome{}, 0, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
 	}
 	outputDir := req.LocalDir
-	staged := outputDir == ""
-	if staged { // S3-only: stage then upload, discard staging
-		var err error
-		outputDir, err = os.MkdirTemp(s.stagingDir, "pgbaseline-")
-		if err != nil {
-			return dumpOutcome{}, 0, fmt.Errorf("create this run's folder in the working folder %s: %w", s.stagingDir, err)
-		}
-		journalDir(req, s.stagingDir, filepath.Base(outputDir))
-		defer os.RemoveAll(outputDir)
+	if strings.TrimSpace(outputDir) == "" {
+		return dumpOutcome{}, 0, console.NoLocalFolderError()
 	}
 
 	cfg, err := pgBaselineConfig(req, outputDir)
@@ -1339,7 +1303,7 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 		TablesProcessed: pgStats.TablesProcessed,
 		RowsWritten:     pgStats.RowsWritten,
 		FilesWritten:    pgStats.FilesWritten,
-	}, at: pgStats.SnapshotTime, staged: staged}
+	}, at: pgStats.SnapshotTime}
 	if !pgStats.SnapshotTime.IsZero() {
 		out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(pgStats.SnapshotTime))
 	}

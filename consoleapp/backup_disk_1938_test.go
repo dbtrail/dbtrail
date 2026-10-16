@@ -298,7 +298,7 @@ func TestExecute_diskRefusalStopsBeforeMydumper(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(stage, 0o755) })
 	s := newBaselineSupervisor(context.Background(), stage, baseline.LockModeFTWRL)
-	_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "src", S3: "s3://b/p"})
+	_, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: "src", S3: "s3://b/p"})
 	if !errors.Is(err, errFoldDiskFull) {
 		t.Fatalf("err = %v, want the disk refusal before any folder is created", err)
 	}
@@ -338,7 +338,7 @@ func TestFullRead_S3OnlyLowDiskWarnsInStatusAndHistory(t *testing.T) {
 	diskByPath(t, map[string]uint64{stage: 12 * gib})
 	calls := countMydumper(t)
 	s := supWithHistory(t, stage)
-	st := runFullRead(t, s, console.BaselineRequest{ServerID: "s1", ServerName: "wp", SourceDSN: "src", S3: "s3://b/p"})
+	st := runFullRead(t, s, console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", ServerName: "wp", SourceDSN: "src", S3: "s3://b/p"})
 	if calls.Load() != 1 {
 		t.Fatalf("mydumper ran %d times, want 1: a low disk is a warning", calls.Load())
 	}
@@ -379,7 +379,7 @@ func TestFullRead_refusalIsDiskRefused(t *testing.T) {
 	diskByPath(t, map[string]uint64{stage: gib})
 	calls := countMydumper(t)
 	s := supWithHistory(t, stage)
-	st := runFullRead(t, s, console.BaselineRequest{ServerID: "s1", SourceDSN: "src", S3: "s3://b/p"})
+	st := runFullRead(t, s, console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: "src", S3: "s3://b/p"})
 	if calls.Load() != 0 || st.State != "failed" || !st.DiskRefused || !strings.Contains(st.LastError, stage) {
 		t.Fatalf("calls = %d, status = %+v", calls.Load(), st)
 	}

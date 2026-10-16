@@ -132,9 +132,9 @@ func (s *baselineSupervisor) checkDumpDisk(req console.BaselineRequest) (check, 
 }
 
 // dumpDiskVerdict decides from the estimate and the free space where each
-// part is written. The dump always goes to stagingDir. The Parquet goes to
-// localDir, or to stagingDir too when the destination is S3 only (localDir
-// empty). When both land on one filesystem the peak is the dump plus the
+// part is written. The dump always goes to stagingDir, the Parquet to localDir
+// (or to stagingDir too when localDir is empty, which since #2431 only a test
+// passes: every server that is written has a local folder). When both land on one filesystem the peak is the dump plus the
 // Parquet; when they do not, the staging folder only has to hold the dump,
 // and the other disk gets a warning at most, since its share was measured
 // below the estimate in every case.

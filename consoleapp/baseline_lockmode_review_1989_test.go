@@ -124,7 +124,7 @@ func TestExecute_savedModeSaysWhereItIsSaved(t *testing.T) {
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	s.reg = liveRegistry(t)
 	save(t, s.reg, console.BackupSettingLockMode, "ftwrl")
-	_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN})
+	_, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: ownHostDSN})
 	if err == nil || !strings.Contains(err.Error(), s.reg.Path()) {
 		t.Fatalf("err = %v, want the settings file %s named", err, s.reg.Path())
 	}
@@ -170,7 +170,7 @@ func TestExecute_failedRetryKeepsBothCausesAndWarns(t *testing.T) {
 		return lockAll
 	})
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
-	_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN})
+	_, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: ownHostDSN})
 	if !errors.Is(err, lockAll) {
 		t.Fatalf("err = %v, want the lock-all failure", err)
 	}
@@ -224,7 +224,7 @@ func TestDumpAttempt_logsAFolderItCannotRemove(t *testing.T) {
 	// After TempDir: cleanups run last-in first-out, and the folder must be
 	// writable again before TempDir removes it.
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	if _, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN}); err == nil {
+	if _, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: ownHostDSN}); err == nil {
 		t.Fatal("execute succeeded")
 	}
 	if os.Geteuid() == 0 {

@@ -260,7 +260,7 @@ func TestFullRead_aDiskThatFillsDuringTheDumpReachesThePage_1938(t *testing.T) {
 	t.Cleanup(func() { dumpDDLMarkFunc, dumpEventMarkFunc = prevDDL, prevEv })
 
 	s := supWithHistory(t, stage)
-	st := runFullRead(t, s, console.BaselineRequest{ServerID: "s1", ServerName: "shop-db", SourceDSN: "src", S3: "s3://b/p"})
+	st := runFullRead(t, s, console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", ServerName: "shop-db", SourceDSN: "src", S3: "s3://b/p"})
 	if st.State != "failed" || !st.DiskRefused {
 		t.Fatalf("status = %+v, want a failed run marked as a disk failure", st)
 	}

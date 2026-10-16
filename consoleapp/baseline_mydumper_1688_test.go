@@ -442,7 +442,6 @@ func TestExecuteConvertsAHealthyDumpFromAnOldBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute refused a dump that records its position: %v", err)
 	}
-	defer out.cleanup()
 	if _, statErr := os.Stat(filepath.Join(out.snapDir, "appdb", "t.parquet")); statErr != nil {
 		t.Errorf("no converted table in %s: %v", out.snapDir, statErr)
 	}

@@ -352,14 +352,6 @@ type BackupScheduleGates struct {
 	// one another server writes too (#1684, Registry.WriteRefusal). It beats
 	// every producer, the update included. Nil: no such check (a test).
 	WriteRefusal func(ServerEntry) error
-	// StagingRefusal is why this daemon cannot build an update for a server
-	// whose snapshots go only to S3 (#2212): such an update is written into
-	// a folder of its own under the staging folder
-	// (BINTRAIL_CONSOLE_BASELINE_STAGING), uploaded, and deleted, and this
-	// says that folder cannot be used. Empty: it can. Read when the gates
-	// are built (BackupScheduleReporter.StagedUpdates), never probed here,
-	// so the checker stays free of IO.
-	StagingRefusal string
 }
 
 // writeRefused applies gates.WriteRefusal, nil-safe.
@@ -1163,8 +1155,4 @@ type BackupScheduleReporter interface {
 	// WindowProbe measures what an update would fold (#1721), for
 	// ChooseBackupMethod; nil when this process measures nothing.
 	WindowProbe() BackupWindowProbe
-	// StagedUpdates reports why the update of a server whose snapshots go
-	// only to S3 cannot be built in this daemon's staging folder (#2212):
-	// nil when it can. Becomes BackupScheduleGates.StagingRefusal.
-	StagedUpdates() error
 }

@@ -535,7 +535,7 @@ func TestFullRead_CleartextReadIsNotedInStatusAndHistory(t *testing.T) {
 	}
 	t.Cleanup(func() { runMydumperFunc = prev })
 	s := supWithHistory(t, stage)
-	st := runFullRead(t, s, console.BaselineRequest{ServerID: "s1", ServerName: "wp", SourceDSN: "src", S3: "s3://b/p"})
+	st := runFullRead(t, s, console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", ServerName: "wp", SourceDSN: "src", S3: "s3://b/p"})
 	if !strings.Contains(st.TransportNote, "without encryption") {
 		t.Fatalf("status = %+v, want the cleartext note", st)
 	}

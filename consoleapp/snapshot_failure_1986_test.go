@@ -138,7 +138,7 @@ func TestExecute_retryFailureNamesLockAllsPermission(t *testing.T) {
 		return missingErr(baseline.LockModeLockAll, "`u`@`%`", "LOCK TABLES")
 	})
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
-	_, err := s.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: ownHostDSN})
+	_, err := s.execute(console.BaselineRequest{LocalDir: t.TempDir(), ServerID: "s1", SourceDSN: ownHostDSN})
 	if err == nil {
 		t.Fatal("execute succeeded over a failed dump")
 	}
