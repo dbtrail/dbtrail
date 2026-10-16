@@ -51,6 +51,14 @@ func lagTestIndex(t *testing.T) (*indexer.Indexer, *sql.DB) {
 	return indexer.New(db, 10), db
 }
 
+// committed appends the end of the transaction evs belong to, as the stream
+// parser does: rows of a transaction whose end never arrives are discarded
+// when the stream stops, not written (#2391).
+func committed(evs []parser.Event) []parser.Event {
+	last := evs[len(evs)-1]
+	return append(evs, parser.Event{BinlogFile: last.BinlogFile, EndPos: last.EndPos + 31, GTID: last.GTID, EventType: parser.EventCommit})
+}
+
 func feedClosed(evs []parser.Event) chan parser.Event {
 	ch := make(chan parser.Event, len(evs)+1)
 	for _, ev := range evs {
@@ -70,7 +78,7 @@ func TestStreamLoop_commitLagMetricsWired(t *testing.T) {
 	m := observe.ForSource("wired-ok")
 
 	before := histCount(t, m.IndexCommitLatency)
-	err := streamLoop(context.Background(), feedClosed(lagEvents(3, 2*time.Second, 30*time.Second)),
+	err := streamLoop(context.Background(), feedClosed(committed(lagEvents(3, 2*time.Second, 30*time.Second))),
 		idx, db, time.Hour, &streamState{mode: "position", serverID: 1}, m, nil)
 	if err != nil {
 		t.Fatalf("streamLoop: %v", err)
@@ -102,7 +110,7 @@ func TestStreamLoop_commitLagSilentOnFlushFailure(t *testing.T) {
 	}
 
 	before := histCount(t, m.IndexCommitLatency)
-	err := streamLoop(context.Background(), feedClosed(lagEvents(2, time.Second, 10*time.Second)),
+	err := streamLoop(context.Background(), feedClosed(committed(lagEvents(2, time.Second, 10*time.Second))),
 		idx, db, time.Hour, &streamState{mode: "position", serverID: 1}, m, nil)
 	if err == nil {
 		t.Fatal("expected streamLoop to propagate the flush failure")

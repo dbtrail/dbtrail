@@ -252,6 +252,18 @@ func (idx *Indexer) BatchSize() int {
 // event_id and pk_hash are omitted — they are AUTO_INCREMENT and STORED
 // generated respectively, so MySQL computes them on write.
 func (idx *Indexer) insertBatch(batch []event.Event) (int64, error) {
+	return idx.insertBatchOn(idx.db, batch)
+}
+
+// execer is what a batch INSERT runs on: the pool (each INSERT commits on its
+// own) or one pinned connection inside an index transaction (Txn).
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// insertBatchOn is insertBatch on a chosen connection. The statement-digest
+// lookups stay on the pool: they read nothing the transaction wrote.
+func (idx *Indexer) insertBatchOn(ex execer, batch []event.Event) (int64, error) {
 	valClause := strings.TrimRight(strings.Repeat(rowPlaceholders+",", len(batch)), ",")
 	insertSQL := `INSERT INTO binlog_events (` + insertColumnsSQL + `) VALUES ` + valClause
 
@@ -338,7 +350,7 @@ func (idx *Indexer) insertBatch(batch []event.Event) (int64, error) {
 	// healthy daemon capturing nothing.
 	ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
 	defer cancel()
-	result, err := idx.db.ExecContext(ctx, insertSQL, args...)
+	result, err := ex.ExecContext(ctx, insertSQL, args...)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			// Distinguish a slow-but-working link (a batch too large to transmit

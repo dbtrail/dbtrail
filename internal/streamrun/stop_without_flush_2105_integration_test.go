@@ -30,7 +30,7 @@ func TestStreamLoop_stopWithoutFlushWritesNothing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			idx, db := lagTestIndex(t) // batch size 10: three events stay pending
 			events := make(chan parser.Event, 4)
-			for _, ev := range lagEvents(3, time.Second, 10*time.Second) {
+			for _, ev := range committed(lagEvents(3, time.Second, 10*time.Second)) {
 				events <- ev
 			}
 			ctx, cancel := context.WithCancelCause(context.Background())

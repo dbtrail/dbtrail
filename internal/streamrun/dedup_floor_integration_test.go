@@ -128,11 +128,18 @@ func lowestStragglerRow(t *testing.T, db *sql.DB, file string, pos uint64, saved
 // streamLoop through the two shapes that break a naive floor, and checks the
 // floor it persisted against the database.
 func TestIntegrationDedupFloorStaysBelowEveryRowItMustNotHide(t *testing.T) {
+	// Rows of a transaction still being read reach the index only when it is
+	// split past a cap (#2391); a cap of 2 rows makes the open transactions
+	// below do that, which is the shape both traps need.
+	prev := maxTxnRows
+	maxTxnRows = 2
+	t.Cleanup(func() { maxTxnRows = prev })
+
 	// Trap 1 — position mode. The persisted binlog_position is safePos, the
 	// last commit/DDL boundary, and it TRAILS the last event read
-	// (#775). Rows between the two are flushed by checkpoint()'s own flush, so
-	// at the instant the checkpoint row is written they are already in the
-	// table AND already match the delete. A floor taken at that instant — the
+	// (#775). Rows between the two are committed by a split, so at the
+	// instant the checkpoint row is written they are already in the table AND
+	// already match the delete. A floor taken at that instant — the
 	// obvious implementation, MAX(event_id) as the checkpoint is saved — sits
 	// above them, and they survive the next resume as duplicates.
 	t.Run("position mode, rows already flushed past the persisted boundary", func(t *testing.T) {
@@ -189,8 +196,8 @@ func TestIntegrationDedupFloorStaysBelowEveryRowItMustNotHide(t *testing.T) {
 			evs = append(evs, floorEvent(n, g1))
 		}
 		evs = append(evs, floorCommit(5, g1))
-		// Then one that never commits. Its statements end (STMT_END_F) and its
-		// rows flush, but the checkpoint's gtid_set will not contain it.
+		// Then one that never commits. Its rows are committed by splits, but
+		// the checkpoint's gtid_set will not contain it.
 		for n := 6; n <= 11; n++ {
 			evs = append(evs, floorEvent(n, g2))
 		}

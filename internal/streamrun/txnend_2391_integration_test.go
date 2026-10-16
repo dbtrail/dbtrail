@@ -106,15 +106,15 @@ func TestIntegrationEveryTransactionEndIsAnnounced_2391(t *testing.T) {
 }
 
 // TestIntegrationPositionResumeReplaysAnOpenTransactionWhole_2391 stops
-// capture while a transaction is half read and half written, then resumes the
-// way a restart does. The checkpoint must name the end of the last COMPLETE
-// transaction, the resume cleanup must take back the half that was written,
-// and the replay must leave each row exactly once.
+// capture while a transaction is half read, part of it already in an index
+// transaction, then resumes the way a restart does. The open transaction's
+// rows are not kept, the checkpoint names the end of the last COMPLETE
+// transaction, and the replay leaves each row exactly once.
 func TestIntegrationPositionResumeReplaysAnOpenTransactionWhole_2391(t *testing.T) {
-	idx, db := floorIndex(t, 2) // batches of two, so the open transaction's rows reach the table
+	idx, db := floorIndex(t, 2) // batches of two, so the open transaction's rows reach an index transaction
 
 	// Transaction 1: rows 1 and 2, committed (its end is at 400).
-	// Transaction 2: rows 4 and 5, read and flushed, then capture stops.
+	// Transaction 2: rows 4 and 5, read and written uncommitted, then capture stops.
 	run1 := []parser.Event{floorEvent(1, ""), floorEvent(2, ""), floorCommit(3, ""), floorEvent(4, ""), floorEvent(5, "")}
 	state := &streamState{mode: "position", serverID: 1, binlogFile: "binlog.000007", binlogPos: 100,
 		safeFile: "binlog.000007", safePos: 100, flavor: gomysql.MySQLFlavor}
@@ -122,8 +122,8 @@ func TestIntegrationPositionResumeReplaysAnOpenTransactionWhole_2391(t *testing.
 		observe.ForSource("txnend-run1"), nil); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	if n := countRows(t, db); n != 4 {
-		t.Fatalf("the fixture must leave the open transaction's rows written (4 rows), got %d: it cannot discriminate", n)
+	if n := countRows(t, db); n != 2 {
+		t.Fatalf("only the complete transaction's 2 rows may be kept, got %d", n)
 	}
 	saved := savedCheckpoint(t, db)
 	if saved.binlogFile != "binlog.000007" || saved.binlogPos != 400 {

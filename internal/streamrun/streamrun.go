@@ -1792,8 +1792,38 @@ func mariadbCheckpointCoversFloor(checkpoint, floor *gomysql.MariadbGTIDSet) boo
 
 // ─── Stream loop ────────────────────────────────────────────────────────────────
 
+// The caps on how much of ONE source transaction capture holds in an open
+// index transaction before it makes what it has visible anyway (#2391). Past
+// either, the transaction is split: committed in parts, each split counted in
+// bintrail_stream_transaction_splits_total and the first one logged.
+//
+//   - maxTxnRows bounds the index transaction's size. An index whose server
+//     limits one transaction (max_binlog_cache_size on a BYO index, a group
+//     replication size limit) would refuse the COMMIT of an oversized one;
+//     capture would restart, read the same transaction and fail again, forever.
+//   - maxTxnOpen bounds how long the index transaction stays open. While it
+//     is open, partition rotation cannot take the table: its ALTER waits a few
+//     seconds per attempt and gives up after its last one (#2280), so a long
+//     open transaction would skip partition maintenance.
+//
+// Variables so a test can shrink them; they are not configuration.
+var (
+	maxTxnRows int64 = 100_000
+	maxTxnOpen       = 10 * time.Second
+)
+
 // streamLoop consumes parser events, flushes batches to MySQL, and writes
 // checkpoints to stream_state at the given interval.
+//
+// A reader of the index never sees part of a source transaction (#2391).
+// Rows of COMPLETE transactions are batched together as before, up to the
+// batch size, and each batch commits in one statement (or one index
+// transaction when it needs more than one). Rows of the transaction still
+// being read are never committed with them: once they fill a batch they go to
+// an index transaction of their own, which commits when the source
+// transaction's end (EventCommit or EventDDL) arrives, or in parts past
+// maxTxnRows / maxTxnOpen. A stop in the middle of a transaction discards its
+// rows, and the next resume reads it again.
 //
 // DDL events flush the current batch and are never inserted. The DDL
 // HANDLING (auto-snapshot + resolver swap + schema_changes record) is NOT
@@ -1827,54 +1857,212 @@ func streamLoop(
 	m *observe.StreamMetrics,
 	hooks *Hooks,
 ) error {
-	batch := make([]parser.Event, 0, idx.BatchSize())
 	ticker := time.NewTicker(checkpointInterval)
 	defer ticker.Stop()
 
-	flush := func() error {
+	// batch holds rows read and not yet written. batch[:done] belong to
+	// transactions whose end has arrived; batch[done:] to the one still being
+	// read (inTxn). tx, when open, holds ONLY rows of that open transaction,
+	// written but not committed, so whenever tx != nil, done == 0.
+	var (
+		batch    = make([]parser.Event, 0, idx.BatchSize())
+		done     int
+		inTxn    bool
+		tx       *indexer.Txn
+		txBegan  time.Time
+		txRows   int64
+		txStamps []commitStamp
+		splits   int // times the open source transaction was split
+	)
+	rollbackTx := func() {
+		if tx == nil {
+			return
+		}
+		if err := tx.Rollback(); err != nil {
+			slog.Debug("rolling back the open index transaction failed; its connection was dropped, which rolls it back", "error", err)
+		}
+		tx, txRows, txStamps = nil, 0, nil
+	}
+	defer rollbackTx()
+
+	// writeChunks INSERTs rows through ins, at most one batch per statement.
+	writeChunks := func(rows []parser.Event, ins func([]parser.Event) (int64, error)) (int64, error) {
+		var total int64
+		for len(rows) > 0 {
+			k := min(len(rows), idx.BatchSize())
+			m.BatchSize.Observe(float64(k))
+			n, err := ins(rows[:k])
+			m.BatchFlushes.Inc()
+			total += n
+			if err != nil {
+				m.Errors.WithLabelValues("batch_flush").Inc()
+				return total, err
+			}
+			rows = rows[k:]
+		}
+		return total, nil
+	}
+
+	// published runs once rows are committed: queryable and recoverable now.
+	published := func(n int64, stamps []commitStamp) {
+		state.eventsIndexed += n
+		m.EventsIndexed.Add(float64(n))
+		// T2 (#1225): only on success, and only at the COMMIT that makes the
+		// rows visible, never at an INSERT inside a still-open transaction.
+		observeCommitStamps(m, stamps, time.Now())
+		if n > 0 && hooks != nil && hooks.OnIndexed != nil {
+			hooks.OnIndexed(n)
+		}
+	}
+
+	// commitDone makes the rows of complete transactions (batch[:done])
+	// durable and visible, all at once.
+	commitDone := func() error {
 		// Checked on every write, not only on the ctx.Done branch below: a
 		// full batch, a DDL or the parser's closed channel can win the select
 		// against a cancellation that already happened.
 		if stopWithoutFlush(ctx) {
 			return ErrStopWithoutFlush
 		}
+		rows := batch[:done]
+		if len(rows) == 0 {
+			return nil
+		}
+		var n int64
+		var err error
+		if len(rows) <= idx.BatchSize() {
+			n, err = writeChunks(rows, idx.InsertBatch) // one statement commits on its own
+		} else {
+			// More than one statement: they must land together, or a reader
+			// between them could see a transaction cut at the chunk edge.
+			var t *indexer.Txn
+			if t, err = idx.Begin(); err == nil {
+				if n, err = writeChunks(rows, t.InsertBatch); err == nil {
+					err = t.Commit()
+				}
+				_ = t.Rollback() // no-op after a successful Commit
+			}
+			if err != nil {
+				m.Errors.WithLabelValues("batch_flush").Inc()
+			}
+		}
+		if err != nil {
+			return err
+		}
+		published(n, appendCommitStamps(nil, rows))
+		batch = batch[:copy(batch, batch[done:])]
+		done = 0
+		return nil
+	}
+
+	// spill writes the open transaction's rows into its index transaction,
+	// uncommitted. Requires done == 0: commitDone runs first.
+	spill := func() error {
+		if stopWithoutFlush(ctx) {
+			return ErrStopWithoutFlush
+		}
 		if len(batch) == 0 {
 			return nil
 		}
-		m.BatchSize.Observe(float64(len(batch)))
-		n, err := idx.InsertBatch(batch)
-		state.eventsIndexed += n
-		m.EventsIndexed.Add(float64(n))
-		m.BatchFlushes.Inc()
-		if err == nil {
-			// T2 (#1225): the batch is durable, so its events are queryable and
-			// recoverable NOW. Only on success — a failed InsertBatch may have
-			// written some rows, but nothing about that partial state is an
-			// availability guarantee worth publishing. Read the batch before the
-			// truncation below.
-			observeCommitLag(m, batch, time.Now())
+		if tx == nil {
+			t, err := idx.Begin()
+			if err != nil {
+				m.Errors.WithLabelValues("batch_flush").Inc()
+				return err
+			}
+			tx, txBegan = t, time.Now()
 		}
-		batch = batch[:0]
+		n, err := writeChunks(batch, tx.InsertBatch)
 		if err != nil {
+			return err
+		}
+		txRows += n
+		txStamps = appendCommitStamps(txStamps, batch)
+		batch = batch[:0]
+		return nil
+	}
+
+	// commitTx commits the open index transaction, spilling first.
+	commitTx := func() error {
+		if err := spill(); err != nil {
+			return err
+		}
+		if tx == nil {
+			return nil
+		}
+		err := tx.Commit()
+		tx = nil
+		if err != nil {
+			txRows, txStamps = 0, nil
 			m.Errors.WithLabelValues("batch_flush").Inc()
 			return err
 		}
-		if n > 0 && hooks != nil && hooks.OnIndexed != nil {
-			hooks.OnIndexed(n)
+		published(txRows, txStamps)
+		txRows, txStamps = 0, nil
+		return nil
+	}
+
+	// split makes the open transaction's rows visible before its end arrives,
+	// because it passed a cap (see maxTxnRows). Its later rows start a new
+	// index transaction. The checkpoint is NOT moved: it still names the
+	// transaction's start, so a resume reads it whole again, and the resume
+	// cleanup removes the parts already written.
+	split := func(why string) error {
+		rows, open := txRows, time.Since(txBegan)
+		if err := commitTx(); err != nil {
+			return err
+		}
+		splits++
+		m.TxnSplits.Inc()
+		if splits == 1 {
+			slog.Warn("a source transaction is too large to make visible all at once; readers can see part of it until its end is captured",
+				"reason", why, "rows_so_far", rows, "open_for", open.Round(time.Millisecond),
+				"row_cap", maxTxnRows, "time_cap", maxTxnOpen,
+				"file", state.binlogFile, "pos", state.binlogPos)
 		}
 		return nil
 	}
 
-	// checkpoint flushes the pending batch, then persists the stream position.
-	// A flush failure is RETURNED to the caller so the stream aborts loudly and
-	// replays from the last durable checkpoint on restart — the same fail-loud
-	// contract the batch-full (len>=BatchSize) and DDL flushes already follow.
+	// overCap reports why the open index transaction must be split, or "".
+	overCap := func() string {
+		switch {
+		case tx == nil:
+			return ""
+		case txRows >= maxTxnRows:
+			return "row cap"
+		case time.Since(txBegan) >= maxTxnOpen:
+			return "time cap"
+		}
+		return ""
+	}
+
+	// endTxn runs at a source transaction's end (EventCommit or EventDDL).
+	endTxn := func() error {
+		inTxn, splits = false, 0
+		if tx != nil {
+			// batch holds only this transaction's remaining rows (done == 0).
+			return commitTx()
+		}
+		done = len(batch)
+		if len(batch) >= idx.BatchSize() {
+			return commitDone()
+		}
+		return nil
+	}
+
+	// checkpoint commits the rows of complete transactions, then persists the
+	// stream position, which in both modes never claims more than that (the
+	// position-mode safe point and the GTID set advance only at transaction
+	// ends). A transaction still being read stays uncommitted and keeps
+	// arriving. A flush failure is RETURNED to the caller so the stream aborts
+	// loudly and replays from the last durable checkpoint on restart — the
+	// same fail-loud contract the batch-full and DDL flushes follow.
 	// Swallowing it here let an un-indexable event (e.g. one over the server's
 	// max_allowed_packet) be silently skipped (#652). A saveCheckpoint failure
 	// is NOT data loss — it only re-streams from an older checkpoint on restart —
 	// so it stays a warning.
 	checkpoint := func() error {
-		if err := flush(); err != nil {
+		if err := commitDone(); err != nil {
 			return err
 		}
 		state.lastSaveErr = nil
@@ -1893,6 +2081,25 @@ func streamLoop(
 				"events_indexed", state.eventsIndexed)
 		}
 		return nil
+	}
+
+	// stop ends the loop on cancellation or a closed channel. The rows of a
+	// transaction still being read are discarded, written or not: committing
+	// them would leave half a transaction visible for as long as capture stays
+	// down. The resume reads that transaction again from the checkpoint.
+	stop := func() error {
+		if stopWithoutFlush(ctx) {
+			return ErrStopWithoutFlush
+		}
+		if inTxn {
+			if n := int64(len(batch)-done) + txRows; n > 0 {
+				slog.Info("capture stopped inside a source transaction; its rows are not kept, and the next resume reads it again",
+					"rows_discarded", n, "file", state.binlogFile, "pos", state.binlogPos)
+			}
+			batch = batch[:done]
+			rollbackTx()
+		}
+		return checkpoint()
 	}
 
 	// advanceGTID adds a committed transaction's GTID to the durable set. It is
@@ -1927,22 +2134,21 @@ func streamLoop(
 	for {
 		select {
 		case <-ctx.Done():
-			if err := checkpoint(); err != nil {
-				return err
-			}
-			return nil
+			return stop()
 
 		case <-ticker.C:
+			if why := overCap(); why != "" {
+				if err := split(why); err != nil {
+					return err
+				}
+			}
 			if err := checkpoint(); err != nil {
 				return err
 			}
 
 		case ev, ok := <-events:
 			if !ok {
-				if err := checkpoint(); err != nil {
-					return err
-				}
-				return nil
+				return stop()
 			}
 			// Update position tracking from each event.
 			if ev.BinlogFile != "" {
@@ -1977,13 +2183,21 @@ func streamLoop(
 				continue
 			case parser.EventCommit:
 				// Transaction committed: all its rows have been received, so it is
-				// now safe to advance the durable GTID checkpoint.
+				// now safe to advance the durable GTID checkpoint, and to let
+				// readers see the transaction.
 				advanceGTID(ev.GTID)
+				if err := endTxn(); err != nil {
+					return err
+				}
 				continue
 			case parser.EventDDL:
-				// DDL flushes pending rows, then auto-commits its own GTID
-				// (insertion itself is handled by the parser's synchronous hook).
-				if err := flush(); err != nil {
+				// A DDL ends whatever came before it. It writes every pending
+				// row, then auto-commits its own GTID (insertion itself is
+				// handled by the parser's synchronous hook).
+				if err := endTxn(); err != nil {
+					return err
+				}
+				if err := commitDone(); err != nil {
 					return err
 				}
 				advanceGTID(ev.GTID)
@@ -2002,9 +2216,21 @@ func streamLoop(
 				"type", ev.EventType,
 				"gtid", ev.GTID)
 
+			inTxn = true
 			batch = append(batch, ev)
-			if len(batch) >= idx.BatchSize() {
-				if err := flush(); err != nil {
+			if len(batch)-done >= idx.BatchSize() {
+				// The open transaction fills a batch on its own. What came
+				// before it is complete: commit that first, so the index
+				// transaction it moves into holds nothing else.
+				if err := commitDone(); err != nil {
+					return err
+				}
+				if err := spill(); err != nil {
+					return err
+				}
+			}
+			if why := overCap(); why != "" {
+				if err := split(why); err != nil {
 					return err
 				}
 			}

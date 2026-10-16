@@ -373,6 +373,9 @@ func TestStreamLoop_flushAndCheckpoint(t *testing.T) {
 			RowAfter:   map[string]any{"id": int64(i + 1), "amount": 9.99},
 		}
 	}
+	// The transaction's end: rows of a transaction whose end never arrives
+	// are discarded when the stream stops, not written (#2391).
+	events <- parser.Event{BinlogFile: "binlog.000001", EndPos: 350, EventType: parser.EventCommit}
 	close(events)
 
 	state := &streamState{
@@ -430,7 +433,7 @@ func TestStreamLoop_flushFailurePropagates(t *testing.T) {
 	// it flushes at channel close, exercising the checkpoint() path.
 	idx := indexer.New(db, 10)
 
-	events := make(chan parser.Event, 1)
+	events := make(chan parser.Event, 2)
 	events <- parser.Event{
 		BinlogFile: "binlog.000001",
 		StartPos:   0,
@@ -442,6 +445,9 @@ func TestStreamLoop_flushFailurePropagates(t *testing.T) {
 		PKValues:   "1",
 		RowAfter:   map[string]any{"id": int64(1)},
 	}
+	// The transaction's end: rows of a transaction whose end never arrives
+	// are discarded when the stream stops, not written (#2391).
+	events <- parser.Event{BinlogFile: "binlog.000001", EndPos: 150, EventType: parser.EventCommit}
 	close(events)
 
 	// Force the flush to fail (the pool stays open so CreateTestDB's cleanup can
@@ -474,7 +480,7 @@ func TestStreamLoop_saveCheckpointFailureDoesNotAbort(t *testing.T) {
 
 	idx := indexer.New(db, 10)
 
-	events := make(chan parser.Event, 1)
+	events := make(chan parser.Event, 2)
 	events <- parser.Event{
 		BinlogFile: "binlog.000001",
 		StartPos:   0,
@@ -486,6 +492,9 @@ func TestStreamLoop_saveCheckpointFailureDoesNotAbort(t *testing.T) {
 		PKValues:   "1",
 		RowAfter:   map[string]any{"id": int64(1)},
 	}
+	// The transaction's end: rows of a transaction whose end never arrives
+	// are discarded when the stream stops, not written (#2391).
+	events <- parser.Event{BinlogFile: "binlog.000001", EndPos: 150, EventType: parser.EventCommit}
 	close(events)
 
 	// The flush (into binlog_events) succeeds; only saveCheckpoint fails.
@@ -650,6 +659,10 @@ func TestStreamLoop_contextCancel(t *testing.T) {
 		}
 	}
 
+	// The transaction's end: rows of a transaction whose end never arrives
+	// are discarded when the stream stops, not written (#2391).
+	events <- parser.Event{BinlogFile: "binlog.000001", EndPos: 250, EventType: parser.EventCommit}
+
 	state := &streamState{mode: "position", serverID: 1}
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -713,7 +726,9 @@ func TestStreamLoop_gtidCheckpointAtCommit(t *testing.T) {
 	}
 
 	// Scenario A: GTID + row, then checkpoint (channel close) BEFORE the commit.
-	// The GTID must NOT be persisted, but the row must be indexed.
+	// The GTID must NOT be persisted, and the row of the unfinished transaction
+	// is not written either (#2391): a resume reads the whole transaction again,
+	// because its GTID is not in the persisted set.
 	t.Run("mid-transaction checkpoint does not claim the GTID", func(t *testing.T) {
 		idx, db := setupIdx(t)
 		events := make(chan parser.Event, 10)
@@ -737,8 +752,8 @@ func TestStreamLoop_gtidCheckpointAtCommit(t *testing.T) {
 		if err := db.QueryRow("SELECT COUNT(*) FROM binlog_events").Scan(&count); err != nil {
 			t.Fatalf("count: %v", err)
 		}
-		if count != 1 {
-			t.Errorf("the row must still be indexed (no loss): want 1, got %d", count)
+		if count != 0 {
+			t.Errorf("the row of an unfinished transaction must not be kept (it is read again on resume): want 0, got %d", count)
 		}
 	})
 
@@ -1032,6 +1047,10 @@ func TestStreamLoop_tickerCheckpoint(t *testing.T) {
 		RowAfter:   map[string]any{"id": int64(1), "amount": 9.99},
 	}
 
+	// The transaction's end: rows of a transaction whose end never arrives
+	// are discarded when the stream stops, not written (#2391).
+	events <- parser.Event{BinlogFile: "binlog.000001", EndPos: 150, EventType: parser.EventCommit}
+
 	state := &streamState{mode: "position", serverID: 1}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1091,6 +1110,9 @@ func TestStreamLoop_positionTracking(t *testing.T) {
 			PKValues: "3", RowAfter: map[string]any{"id": int64(3)},
 		},
 	}
+	// The transaction's end: rows of a transaction whose end never arrives
+	// are discarded when the stream stops, not written (#2391).
+	testEvents = append(testEvents, parser.Event{BinlogFile: "binlog.000002", EndPos: 350, EventType: parser.EventCommit})
 	for _, ev := range testEvents {
 		events <- ev
 	}
@@ -1141,6 +1163,9 @@ func TestStreamLoop_batchOverflow(t *testing.T) {
 			RowAfter:   map[string]any{"id": int64(i + 1)},
 		}
 	}
+	// The transaction's end: rows of a transaction whose end never arrives
+	// are discarded when the stream stops, not written (#2391).
+	events <- parser.Event{BinlogFile: "binlog.000001", EndPos: 750, EventType: parser.EventCommit}
 	close(events)
 
 	state := &streamState{mode: "position", serverID: 1}

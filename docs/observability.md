@@ -31,6 +31,7 @@ The live pipeline — emitted on the hot path as events flow.
 | `bintrail_stream_events_indexed_total` | counter | Row events written to `binlog_events` |
 | `bintrail_stream_batch_flushes_total` | counter | Batch INSERT operations executed |
 | `bintrail_stream_checkpoint_saves_total` | counter | Successful checkpoint saves |
+| `bintrail_stream_transaction_splits_total` | counter | Times a source transaction too large or too slow for one index transaction was made visible in parts; readers can see part of it until its end is captured |
 | `bintrail_stream_last_event_timestamp_seconds` | gauge | Timestamp of the last event processed |
 | `bintrail_stream_replication_lag_seconds` | gauge | Now minus the last processed event timestamp. **Receive-time** — see the warning below |
 | `bintrail_stream_index_commit_latency_seconds` | histogram | Seconds from replication read to the event being **queryable** in the index |

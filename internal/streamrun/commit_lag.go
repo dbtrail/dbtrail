@@ -30,23 +30,43 @@ import (
 //     make anything queryable", which is exactly the question the other two
 //     gauges cannot answer once traffic stops.
 func observeCommitLag(m *observe.StreamMetrics, batch []parser.Event, now time.Time) {
+	observeCommitStamps(m, appendCommitStamps(nil, batch), now)
+}
+
+// commitStamp is the part of a written row observeCommitLag needs. Rows that
+// wait in an open index transaction keep only this until it commits (#2391),
+// not the row images.
+type commitStamp struct {
+	readAt, ts time.Time
+}
+
+// appendCommitStamps appends batch's stamps to dst.
+func appendCommitStamps(dst []commitStamp, batch []parser.Event) []commitStamp {
+	for i := range batch {
+		dst = append(dst, commitStamp{readAt: batch[i].ReadAt, ts: batch[i].Timestamp})
+	}
+	return dst
+}
+
+// observeCommitStamps is observeCommitLag over stamps already taken.
+func observeCommitStamps(m *observe.StreamMetrics, batch []commitStamp, now time.Time) {
 	if m == nil || len(batch) == 0 {
 		return
 	}
 	maxLag, haveLag := 0.0, false
 	for i := range batch {
 		ev := &batch[i]
-		if ev.ReadAt.IsZero() {
+		if ev.readAt.IsZero() {
 			continue
 		}
-		m.IndexCommitLatency.Observe(now.Sub(ev.ReadAt).Seconds())
-		if ev.Timestamp.IsZero() {
+		m.IndexCommitLatency.Observe(now.Sub(ev.readAt).Seconds())
+		if ev.ts.IsZero() {
 			continue
 		}
 		// T2−T0 crosses the source's clock and ours. A source clock running
 		// ahead yields a negative, which is not a state that exists: clamp to 0
 		// rather than publish a number that would drag an average below zero.
-		lag := now.Sub(ev.Timestamp).Seconds()
+		lag := now.Sub(ev.ts).Seconds()
 		if lag < 0 {
 			lag = 0
 		}

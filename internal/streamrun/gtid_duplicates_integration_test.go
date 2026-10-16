@@ -4,6 +4,7 @@ package streamrun
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -454,15 +455,18 @@ func runCutMidTransaction(t *testing.T, src dupSource, indexDB *sql.DB, indexNam
 				t.Fatalf("commit: %v", err)
 			}
 			want = src.executedSet(t)
-			// Kill while the transaction's rows are still arriving.
-			for deadline := time.Now().Add(60 * time.Second); indexedOrders(t, indexDB, src.schema) == 0; {
+			// Kill while the transaction's rows are still arriving. They are
+			// written into an index transaction nobody else can see until the
+			// source's commit arrives (#2391), so the probe reads uncommitted
+			// rows to know capture is in the middle of it.
+			for deadline := time.Now().Add(60 * time.Second); writtenOrders(t, indexDB, src.schema) == 0; {
 				if time.Now().After(deadline) {
-					t.Fatal("no row of the transaction was indexed within 60s")
+					t.Fatal("no row of the transaction was written within 60s")
 				}
 				time.Sleep(5 * time.Millisecond)
 			}
-			if got := indexedOrders(t, indexDB, src.schema); got >= n {
-				t.Fatalf("the whole transaction (%d rows) was indexed before the kill; the scenario needs a cut", got)
+			if got := writtenOrders(t, indexDB, src.schema); got >= n {
+				t.Fatalf("the whole transaction (%d rows) was written before the kill; the scenario needs a cut", got)
 			}
 			for _, id := range dumpThreads(t, src.db) {
 				if _, err := src.db.Exec(fmt.Sprintf("KILL %d", id)); err != nil {
@@ -524,4 +528,31 @@ func TestIntegrationGTIDFreshStartCheckpointsAtOnce(t *testing.T) {
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 	runFreshStartCheckpointsAtOnce(t, mysqlGTIDDupSource(t, 99969), indexDB, indexName)
+}
+
+// writtenOrders counts the orders rows written to the index, COMMITTED OR NOT:
+// the rows of a source transaction still being read sit in an open index
+// transaction (#2391), and a test that has to act in the middle of one can only
+// see them this way. It reads on a connection of its own at READ UNCOMMITTED.
+func writtenOrders(t *testing.T, indexDB *sql.DB, schema string) int {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := indexDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer conn.Close()
+	var n int
+	err = func() error {
+		if _, err := conn.ExecContext(ctx, "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"); err != nil {
+			return err
+		}
+		defer conn.ExecContext(ctx, "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ") //nolint:errcheck // the pooled connection goes back as it came
+		return conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM binlog_events
+			WHERE schema_name = ? AND table_name = 'orders'`, schema).Scan(&n)
+	}()
+	if err != nil {
+		t.Fatalf("count written rows: %v", err)
+	}
+	return n
 }

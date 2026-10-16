@@ -38,6 +38,13 @@ var (
 		Help:      "Total number of batch INSERT operations executed.",
 	}, []string{"source"})
 
+	streamTxnSplits = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bintrail",
+		Subsystem: "stream",
+		Name:      "transaction_splits_total",
+		Help:      "Times a source transaction too large or too slow to hold in one index transaction was made visible in parts.",
+	}, []string{"source"})
+
 	streamCheckpointSaves = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bintrail",
 		Subsystem: "stream",
@@ -319,10 +326,14 @@ func UnhandledRowsDropped(n int) { unhandledRowsDropped.Add(float64(n)) }
 // StreamMetrics is the full set of stream metrics curried to one source
 // label — call sites keep the ergonomics of plain counters/gauges.
 type StreamMetrics struct {
-	EventsReceived     prometheus.Counter
-	EventsIndexed      prometheus.Counter
-	BatchFlushes       prometheus.Counter
-	CheckpointSaves    prometheus.Counter
+	EventsReceived  prometheus.Counter
+	EventsIndexed   prometheus.Counter
+	BatchFlushes    prometheus.Counter
+	CheckpointSaves prometheus.Counter
+	// TxnSplits counts the times one source transaction was committed to the
+	// index in parts because it passed the row or time cap (#2391): a reader
+	// can see part of it until its end arrives.
+	TxnSplits          prometheus.Counter
 	LastEventTimestamp prometheus.Gauge
 	// ReplicationLag keeps its RECEIVE-time semantics (source commit → read off
 	// the stream channel), deliberately unchanged: it is set before batching, so
@@ -355,6 +366,7 @@ func ForSource(source string) *StreamMetrics {
 		EventsIndexed:      streamEventsIndexed.WithLabelValues(source),
 		BatchFlushes:       streamBatchFlushes.WithLabelValues(source),
 		CheckpointSaves:    streamCheckpointSaves.WithLabelValues(source),
+		TxnSplits:          streamTxnSplits.WithLabelValues(source),
 		LastEventTimestamp: streamLastEventTimestamp.WithLabelValues(source),
 		ReplicationLag:     streamReplicationLag.WithLabelValues(source),
 		AvailabilityLag:    streamAvailabilityLag.WithLabelValues(source),

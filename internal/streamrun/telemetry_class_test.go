@@ -33,6 +33,8 @@ func TestGapRefusedErrorIsClassed(t *testing.T) {
 }
 
 // oneRowEvent is a single committed INSERT, enough to make streamLoop flush.
+// The commit is part of it: rows of a transaction whose end never arrives are
+// discarded when the stream stops, not written (#2391).
 func oneRowEvent() []parser.Event {
 	return []parser.Event{{
 		BinlogFile: "binlog.000001", StartPos: 4, EndPos: 120,
@@ -40,6 +42,8 @@ func oneRowEvent() []parser.Event {
 		EventType: parser.EventInsert,
 		Timestamp: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 		RowAfter:  map[string]any{"id": 1},
+	}, {
+		BinlogFile: "binlog.000001", EndPos: 151, EventType: parser.EventCommit,
 	}}
 }
 
