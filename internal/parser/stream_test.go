@@ -1297,3 +1297,28 @@ func TestStreamParser_anonymousGTIDStartsAreNotCommits(t *testing.T) {
 		t.Fatalf("no terminator was logged, so no commit may be emitted; got %v", commits)
 	}
 }
+
+// The next-GTID fallback commits a GTID transaction that ended with no
+// terminator (a GRANT, CREATE DATABASE, a key-only ALTER). It learns of that
+// end only when the NEXT transaction's GTID event arrives, so the end it
+// reports is where that GTID event STARTS: its end is inside the next
+// transaction, and a position-mode resume from there would split it (#2391).
+func TestStreamParser_fallbackCommitEndsBeforeTheNextGTIDEvent(t *testing.T) {
+	g1 := makeGTIDEvent(1)
+	g1.Header.LogPos, g1.Header.EventSize = 200, 79
+	grant := withLogPos(makeQueryEvent("GRANT SELECT ON *.* TO 'x'@'%'"), 350)
+	g2 := makeGTIDEvent(2)
+	g2.Header.LogPos, g2.Header.EventSize = 429, 79
+	evs := runParser(t, g1, grant, g2, withLogPos(makeQueryEvent("BEGIN"), 500), makeXIDEvent(700))
+	commits := commitEvents(evs)
+	if len(commits) != 2 {
+		t.Fatalf("want the GRANT's fallback commit and the XID, got %v", commits)
+	}
+	if commits[0].GTID != evs[0].GTID || commits[0].EndPos != 350 {
+		t.Errorf("fallback commit: GTID=%q EndPos=%d, want GTID=%q EndPos=350 (where the next GTID event starts)",
+			commits[0].GTID, commits[0].EndPos, evs[0].GTID)
+	}
+	if commits[1].EndPos != 700 {
+		t.Errorf("XID commit at %d, want 700", commits[1].EndPos)
+	}
+}

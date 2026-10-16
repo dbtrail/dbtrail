@@ -294,9 +294,9 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	// Without one (gtid_mode=OFF, or the XID of a CREATE ... SELECT whose GTID
 	// the DDL already consumed) it still sends an EventCommit, with no GTID, at
 	// the terminator's end position: the only place a position-mode resume can
-	// start without splitting a transaction. Unlike the next-GTID fallback in
-	// beginTxn, it is never fired from a transaction START, so it never names a
-	// position inside the next transaction.
+	// start without splitting a transaction. It is never fired from a
+	// transaction START: that is the next-GTID fallback in beginTxn, which
+	// only ever commits a GTID it holds.
 	endTxn := func(hdr *replication.EventHeader) error {
 		if currentGTID != "" {
 			return emitCommit(hdr)
@@ -329,7 +329,17 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			}
 			currentGTID = ""
 		}
-		if err := emitCommit(hdr); err != nil {
+		// The fallback learns the pending transaction ended only now, at the
+		// next GTID event, so it reports that end as where THIS event starts:
+		// the event's own end is already inside the next transaction, and a
+		// position-mode resume from there would split it (#2391). LogPos is
+		// the event's end and EventSize its length; a header without a size
+		// keeps its end, as before.
+		prevEnd := *hdr
+		if hdr.EventSize > 0 && hdr.LogPos >= hdr.EventSize {
+			prevEnd.LogPos = hdr.LogPos - hdr.EventSize
+		}
+		if err := emitCommit(&prevEnd); err != nil {
 			return err
 		}
 		currentGTID = gtid

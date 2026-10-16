@@ -190,6 +190,12 @@ func checkpointPosition(state *streamState) (string, uint64) {
 // from there crash-loops), or after a statement whose transaction is still open
 // (#2391, a resume from there keeps the transaction's first statements as
 // already written, so the index can never take back half a transaction).
+//
+// One known exception: CREATE TABLE ... SELECT logs the DDL and then its rows
+// in ONE transaction, and the DDL is a boundary here because nothing at that
+// point says rows follow. A resume from it replays all of those rows from
+// their TABLE_MAP, and the resume cleanup removes the ones already written, so
+// it does not split anything that cannot be read again.
 func isPositionCheckpointBoundary(ev parser.Event) bool {
 	switch ev.EventType {
 	case parser.EventCommit, parser.EventDDL:
