@@ -2,7 +2,6 @@ package console
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,20 +142,15 @@ console.log(JSON.stringify(out));
 	for i, w := range got.Warn {
 		t.Logf("warning %d: %q", i, w)
 	}
-	// #2212: an S3-only server is updated through the staging folder, so the
-	// note is its cost, a hint, wherever this process cannot tell otherwise.
-	const cost = "With S3 only, each scheduled update downloads, rewrites and uploads again the tables that changed. Unchanged tables are usually copied inside S3 without being downloaded; the first update after a full read rewrites every table, as does an update whose previous snapshot is in another bucket."
-	const costFix = cost + " Add a Local folder so changed tables are not downloaded first."
-	// A process that runs no schedule says so instead of the cost.
-	if got.Warn[6] != "With S3 only, scheduled updates are built in the working folder of the DBTrail service that runs the schedule. This one runs none." {
-		t.Errorf("no schedule loop: %q", got.Warn[6])
-	}
-	for _, i := range []int{0, 4} {
-		if got.Warn[i] != costFix {
-			t.Errorf("case %d: S3 only is not told the cost of its updates: %q", i, got.Warn[i])
+	// #2431: no snapshot is written for an S3-only server, whatever this
+	// process runs, so the note says that, in red, wherever it applies.
+	const nothing = "With S3 only, no snapshot is written for this server: every server keeps its snapshots on this machine, with S3 beside it."
+	for _, i := range []int{0, 4, 6, 8, 9} {
+		if got.Warn[i] != nothing+" Add a Local folder." {
+			t.Errorf("case %d: S3 only is not told nothing is written: %q", i, got.Warn[i])
 		}
 	}
-	if got.Warn[10] != cost {
+	if got.Warn[10] != nothing {
 		t.Errorf("a session that cannot save the row is told what to do: %q", got.Warn[10])
 	}
 	for _, i := range []int{1, 2, 3, 5, 7} {
@@ -164,16 +158,8 @@ console.log(JSON.stringify(out));
 			t.Errorf("case %d warned where it must not: %q", i, got.Warn[i])
 		}
 	}
-	// The staging folder cannot be used: every run is a full read, or, with
-	// no full read either, nothing runs.
-	if w := got.Warn[8]; w != "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the working folder, or add a Local folder." {
-		t.Errorf("S3 only, staging unusable: %q", w)
-	}
-	if w := got.Warn[9]; w != "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the working folder, or add a Local folder." {
-		t.Errorf("S3 only, staging unusable, no full read: %q", w)
-	}
-	if len(got.Fault) != 3 || got.Fault[0] || !got.Fault[1] || got.Fault[2] {
-		t.Errorf("fault = %v, want a hint for the cost and red for an unusable staging folder", got.Fault)
+	if len(got.Fault) != 3 || !got.Fault[0] || !got.Fault[1] || !got.Fault[2] {
+		t.Errorf("fault = %v, want red in every S3-only case", got.Fault)
 	}
 	wantAlarm := []bool{true, false, false, true, false, false, false}
 	wantCode := []string{"no_staging", "", "", "no_index", "", "", ""}
@@ -256,60 +242,6 @@ func nextRunBranch(t *testing.T, card string) string {
 	return strings.Replace(card[start:end], "plainWords(sch.next_method_error)", "String(sch.next_method_error)", 1)
 }
 
-// TestBackupSettings_fullBackupPossibleReachesTheWire (#1659): the S3-only
-// warning says "every scheduled snapshot reads your whole database" only where a
-// full backup can actually start; elsewhere nothing runs, and the page needs
-// the daemon's answer to say which. Driven through the real handler, with the
-// schedule loop both present and absent.
-func TestBackupSettings_fullBackupPossibleReachesTheWire(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		rep  *stubScheduleReporter
-		want bool
-	}{
-		{"full reads enabled", &stubScheduleReporter{full: true}, true},
-		{"full reads off on this daemon", &stubScheduleReporter{full: false}, false},
-		{"no schedule loop (read-only console)", nil, false},
-		// Per-server: the daemon may take full backups, this server cannot.
-		{"no source connection on this server", &stubScheduleReporter{full: true}, false},
-		{"full reads refused on this daemon", &stubScheduleReporter{full: true, refusal: errors.New("lock mode refused")}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, _ := newScheduleServer(t, tc.rep)
-			source := "src:pw@tcp(127.0.0.1:3306)/"
-			if tc.name == "no source connection on this server" {
-				source = ""
-			}
-			// With a local folder: S3 alone is no place to write since #2431.
-			s3only, err := srv.cm.reg.Add(ServerEntry{Name: "s3only", DSN: "idx:pw@tcp(127.0.0.1:3306)/idx3",
-				SourceDSN: source, BaselineDir: t.TempDir(), BaselineS3: "s3://bucket/backups"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, row := range backupSettingsGet(t, srv).Servers {
-				if row.ID != s3only.ID {
-					continue
-				}
-				if row.FullBackupPossible != tc.want {
-					t.Errorf("full_backup_possible = %v, want %v", row.FullBackupPossible, tc.want)
-				}
-				if row.ScheduleLoop != (tc.rep != nil) {
-					t.Errorf("schedule_loop = %v with reporter %v", row.ScheduleLoop, tc.rep != nil)
-				}
-				raw, _ := json.Marshal(row)
-				if !strings.Contains(string(raw), `"full_backup_possible":`) {
-					t.Errorf("the row does not serialise full_backup_possible: %s", raw)
-				}
-				return
-			}
-			t.Fatal("the S3-only server is not in the listing")
-		})
-	}
-}
-
-// TestBackupServerRow_s3OnlyWarningRendered renders the real Backup settings
-// row: the whole app.js in a node VM with fake page elements. A shape check on
-// the source could not tell a warning mounted inside a condition from one that
 // is not; the rendered row can.
 func TestBackupServerRow_s3OnlyWarningRendered(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -335,7 +267,6 @@ const base = { id: "a", name: "a", kind: "registry", baseline_dir: "", baseline_
   staging_refusal: "the working folder /stage cannot be written: permission denied" };
 const rows = {
   noSchedule: base,
-  // #2212: updates run; their cost is a hint, never red.
   updates: Object.assign({}, base, { staging_refusal: "" }),
   withSchedule: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440 }),
   refused: Object.assign({}, base, { schedule_every: "1d", schedule_every_minutes: 1440, schedule_refusal: "creating snapshots from the console is turned off" }),
@@ -359,7 +290,7 @@ console.log(JSON.stringify(out));
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
 	}
-	const fullRead = "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), so every scheduled snapshot reads your whole database. Fix the working folder, or add a Local folder."
+	const nothing = "With S3 only, no snapshot is written for this server: every server keeps its snapshots on this machine, with S3 beside it. Add a Local folder."
 	has := func(lines []string, want string) bool {
 		for _, l := range lines {
 			if l == want {
@@ -368,20 +299,14 @@ console.log(JSON.stringify(out));
 		}
 		return false
 	}
-	if !has(got["noSchedule"], fullRead) || !has(got["withSchedule"], fullRead) {
-		t.Errorf("the S3-only warning is not rendered in red with and without a schedule: %q", got)
+	// #2431: red wherever it applies, a console with no schedule included.
+	for _, k := range []string{"noSchedule", "withSchedule", "updates", "noLoop", "noFull"} {
+		if !has(got[k], nothing) {
+			t.Errorf("%s: the S3-only line is not rendered in red: %q", k, got[k])
+		}
 	}
-	if has(got["refused"], fullRead) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating snapshots from the console is turned off") {
+	if has(got["refused"], nothing) || len(got["refused"]) != 1 || !strings.Contains(got["refused"][0], "creating snapshots from the console is turned off") {
 		t.Errorf("a refused schedule shows the S3-only line next to its own reason: %q", got["refused"])
-	}
-	if len(got["noLoop"]) != 0 {
-		t.Errorf("a console that runs no schedule shows a red S3-only line: %q", got["noLoop"])
-	}
-	if !has(got["noFull"], "With S3 only, a scheduled update is built in the working folder, which cannot be used here (the working folder /stage cannot be written: permission denied), and a full read is not available either, so scheduled snapshots cannot run on this server. Fix the working folder, or add a Local folder.") {
-		t.Errorf("staging unusable and no full read: %q", got["noFull"])
-	}
-	if len(got["updates"]) != 0 {
-		t.Errorf("an S3-only server whose updates run is warned in red: %q", got["updates"])
 	}
 	if len(got["withDir"]) != 0 {
 		t.Errorf("a server with a Snapshot dir is warned: %q", got["withDir"])

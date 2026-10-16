@@ -44,7 +44,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		// The migration the registry file could not keep (#1684).
 		"settings.location_migration",
 		"srv.schedule_every", "srv.schedule_at", "srv.schedule_refusal", "srv.schedule_full_every",
-		"srv.schedule_every_minutes", "srv.archive_s3", "srv.full_backup_possible",
+		"srv.schedule_every_minutes", "srv.archive_s3",
 		// How far back the kept count reaches, and a held folder (#1681).
 		"srv.keep_in_force", "srv.snapshot_every_minutes", "srv.prune_retain_minutes", "srv.keep_held",
 	} {

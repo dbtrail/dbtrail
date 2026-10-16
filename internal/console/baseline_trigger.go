@@ -384,9 +384,9 @@ type BaselineStatus struct {
 
 // handleBaselineTrigger enqueues an in-process baseline for the selected server.
 // Gating, in order: the feature must be enabled (control-plane + opt-in), the
-// entry must be a real registry server with a source configured AND a baseline
-// destination (dir or S3) — without a destination there is nowhere for the
-// snapshot to live, so Time-travel would never see it.
+// entry must be a real registry server with a source configured AND a local
+// snapshot folder (since #2431 an S3 location alone is not one; it is kept
+// beside the folder, not instead of it).
 func (s *Server) handleBaselineTrigger(w http.ResponseWriter, r *http.Request) {
 	if s.baselineCtrl == nil {
 		writeJSONError(w, http.StatusForbidden,

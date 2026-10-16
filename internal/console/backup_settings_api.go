@@ -152,24 +152,6 @@ type backupSettingsServerDTO struct {
 	// retention rule the page generates must never cover it, and the page
 	// can only refuse what it can see.
 	ArchiveS3 string `json:"archive_s3,omitempty"`
-	// FullBackupPossible reports whether this daemon could take a full
-	// backup of this server right now (FullBackupPossible, IO-free like
-	// CheckBackupSchedule). The S3-only warning (#1659) needs it: where the
-	// staging folder an S3-only update is built in cannot be used (#2212), a
-	// scheduled run can only be a full backup, so where that is not possible
-	// either, "every run reads your whole database" would be false; nothing
-	// runs at all.
-	FullBackupPossible bool `json:"full_backup_possible"`
-	// ScheduleLoop is whether this process runs scheduled backups at all. A
-	// read-only console, or a daemon without the backup loop, answers false
-	// for full_backup_possible for a reason no setting on this server fixes,
-	// so the S3-only warning must not say "cannot run on this server" there.
-	ScheduleLoop bool `json:"schedule_loop"`
-	// StagingRefusal, on a server whose snapshots go only to S3, is why its
-	// update cannot be built in this daemon's staging folder (#2212), so
-	// every scheduled run would be a full read; empty when it can, and on
-	// every other server.
-	StagingRefusal string `json:"staging_refusal,omitempty"`
 	// LocalCopy answers the one per-server question (#1681): does this
 	// server keep a copy of its snapshots on this machine. It is whether the
 	// entry names its own folder.
@@ -355,12 +337,6 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		dto.KeepInForce = r.KeepNewest
 		dto.PruneRetainMinutes = s.pruneRetainMinutes()
 		dto.SnapshotEveryMinutes = s.snapshotEveryMinutes(e)
-	}
-	gates := s.scheduleGates()
-	dto.FullBackupPossible = FullBackupPossible(e, gates) == nil
-	dto.ScheduleLoop = s.backupSchedules != nil
-	if e.BaselineDir == "" && e.BaselineS3 != "" {
-		dto.StagingRefusal = gates.StagingRefusal
 	}
 	if e.BackupSchedule != nil {
 		dto.ScheduleEvery = e.BackupSchedule.Every
