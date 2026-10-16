@@ -4,7 +4,8 @@ Thank you for your interest in contributing. This document covers how to get set
 
 ## Prerequisites
 
-- Go 1.24 or later (the codebase uses `range N`, `min()`, `slices`, and `strings.SplitSeq`)
+- Go 1.25.11 or later (the version pinned in `go.mod`)
+- A C toolchain (`CGO_ENABLED=1`): the query engine links DuckDB
 - A MySQL 8.0+ instance for integration testing (unit tests run without a DB)
 - `git`
 
@@ -21,19 +22,24 @@ go test ./...
 All unit tests pass without a running database. If you want to test against a real MySQL instance, see [Integration testing](#integration-testing) below.
 
 ## Project layout
-
 ```
-cmd/bintrail/      One file per command.
-cmd/bintrail-mcp/  MCP server exposing query, recover, and status as read-only tools.
-internal/          Core packages. Each package has a _test.go alongside it.
-  cliutil/         Shared filter parsers (ParseEventType, ParseTime, IsValidFormat) — used by
-                   both cmd/bintrail/ commands and cmd/bintrail-mcp/.
-  observe/         Structured logging (slog) setup and Prometheus metrics for stream.
-  status/          Shared index status types and display helpers.
-docs/migrations/   Reference DDL — tables are created by `bintrail init`, not this file.
+cmd/bintrail/          The main CLI. One file per command.
+cmd/bintrail-console/  The web interface and the `watch` daemon (capture + web interface in one process).
+cmd/bintrail-mcp/      The MCP server (read-only tools for AI clients).
+cmd/bintrail-pg/       The PostgreSQL source CLI.
+cliapp/, consoleapp/   Exported entry points the binaries are built from.
+internal/              Core packages. Each package has a _test.go alongside it.
+  parser/              Binlog parsing.
+  indexer/             Writes parsed events into the index.
+  query/, recovery/    Reading the index and generating reversal SQL.
+  reconstruct/         Point-in-time state: a baseline snapshot plus the changes after it.
+  console/             The web interface (HTTP API and browser assets).
+  mcptools/            The MCP tool implementations, shared by bintrail-mcp and the web interface.
+  cliutil/             Shared filter parsers (ParseEventType, ParseTime, IsValidFormat).
+docs/                  User documentation. Start with docs/guide.md.
+docs/migrations/       Reference DDL. Tables are created by `bintrail init`, not this file.
+test/                  End-to-end, shim and browser test suites.
 ```
-
-Read `CLAUDE.md` for a detailed map of the architecture, key patterns, and gotchas discovered during development.
 
 ## Making changes
 
@@ -51,7 +57,7 @@ Read `CLAUDE.md` for a detailed map of the architecture, key patterns, and gotch
 - Use `min()`, `max()` built-ins instead of manual comparisons.
 - Use `range N` instead of `for i := 0; i < N; i++`.
 - Use `slices.Reverse`, `slices.Sort`, etc. from the standard library.
-- Use `strings.SplitSeq` (Go 1.24) where applicable.
+- Use `strings.SplitSeq` where applicable.
 - Keep command files self-contained. Avoid creating shared packages for logic that is only used in one place.
 
 ### The web interface: what earns a place on screen
@@ -192,7 +198,7 @@ go tool cover -func=cover.out
 - [ ] `go test ./...` passes
 - [ ] `go vet ./...` is clean
 - [ ] New behaviour is covered by tests
-- [ ] `CLAUDE.md` is updated if you introduced a new pattern, gotcha, or architectural decision
+- [ ] User-facing docs under `docs/` are updated if behaviour or flags changed
 - [ ] Commit messages are clear and describe *why*, not just *what*
 
 ## Commit style
@@ -209,8 +215,8 @@ exact column names and not substrings (e.g. "status" must not match
 
 ## Contributor License Agreement
 
-By opening a pull request, you agree to the terms of the [Contributor License Agreement](CLA.md). First-time contributors will be asked to confirm via [CLA Assistant](https://cla-assistant.io/) before their PR can be merged.
+By opening a pull request, you agree to the terms of the [Contributor License Agreement](https://github.com/dbtrail/dbtrail/blob/main/.github/CLA.md). First-time contributors will be asked to confirm via [CLA Assistant](https://cla-assistant.io/) before their PR can be merged.
 
 ## License
 
-This project is licensed under the [Apache License, Version 2.0](../LICENSE). By contributing, you grant the maintainer the rights described in the [CLA](CLA.md), which include the right to use your contributions under the current and future license terms.
+This project is licensed under the [Apache License, Version 2.0](https://github.com/dbtrail/dbtrail/blob/main/LICENSE). By contributing, you grant the maintainer the rights described in the [CLA](https://github.com/dbtrail/dbtrail/blob/main/.github/CLA.md), which include the right to use your contributions under the current and future license terms.
