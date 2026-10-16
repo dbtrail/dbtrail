@@ -129,7 +129,7 @@ func (r *routingStats) answered(serverID, side, shape string, took time.Duration
 		t.answers[side] = a
 	}
 	a.add(took, failed, timedOut)
-	if shape != "" {
+	if r.statementsOn {
 		t.answeredStatement(shape, side, took, failed, timedOut)
 	}
 }
@@ -208,6 +208,22 @@ func (r *routingStats) setSessionUntracked(serverID, why string) {
 func (r *routingStats) snapshot() map[string]routingServerDTO {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.snapshotLocked()
+}
+
+// snapshotWithStatements is snapshot and the statement tables (nil while
+// off) read at one instant, so a side's rows add up to its answers.
+func (r *routingStats) snapshotWithStatements() (map[string]routingServerDTO, map[string]*RouterStatementTable) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var tables map[string]*RouterStatementTable
+	if r.statementsOn {
+		tables = r.statementTablesLocked()
+	}
+	return r.snapshotLocked(), tables
+}
+
+func (r *routingStats) snapshotLocked() map[string]routingServerDTO {
 	out := make(map[string]routingServerDTO, len(r.perServer))
 	for id, t := range r.perServer {
 		out[id] = routingServerDTO{Copy: t.copy, MySQL: t.mysql, Refused: t.refused, Reasons: maps.Clone(t.reasons), Answers: t.answersDTO()}

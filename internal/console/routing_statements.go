@@ -29,7 +29,8 @@ const (
 type RouterStatementTable struct {
 	// Rows, most time first. Never null while the table is on.
 	Rows []RouterStatementRow `json:"rows"`
-	// NotCounted is the statements whose shape found the table full.
+	// NotCounted is the statements with no row: their shape found the
+	// table full, or they were blank.
 	NotCounted uint64 `json:"not_counted"`
 	// Limit is StatementTableLimit, so a reader can say the table is full.
 	Limit int `json:"limit"`
@@ -73,6 +74,12 @@ func (t *routingTally) answeredStatement(shape, side string, took time.Duration,
 	if t.statements == nil {
 		t.statements = &statementTally{rows: map[statementKey]*routingAnswers{}}
 	}
+	if shape == "" {
+		// Nothing but white space: no shape to show, and still counted, so
+		// the rows and NotCounted add up to the side's answers.
+		t.statements.notCounted++
+		return
+	}
 	k := statementKey{shape, side}
 	a := t.statements.rows[k]
 	if a == nil {
@@ -86,10 +93,9 @@ func (t *routingTally) answeredStatement(shape, side string, took time.Duration,
 	a.add(took, failed, timedOut)
 }
 
-// statementTables copies every server's table for the wire.
-func (r *routingStats) statementTables() map[string]*RouterStatementTable {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// statementTablesLocked copies every server's table for the wire, r.mu
+// held.
+func (r *routingStats) statementTablesLocked() map[string]*RouterStatementTable {
 	out := map[string]*RouterStatementTable{}
 	for id, t := range r.perServer {
 		if t.statements == nil {
@@ -117,14 +123,20 @@ func (s *Server) fullDataAccess(ctx context.Context) bool {
 }
 
 // withholdStatements takes the statement tables out of a router view the
-// request may not see, and says so.
+// request may not see, and says so. Whatever the document says of itself:
+// a router of another version, or another program on that address, may
+// carry rows without statement_table, and they name tables all the same.
 func (s *Server) withholdStatements(ctx context.Context, v *routerViewDTO) {
-	if v.Status == nil || !v.Status.StatementTable || s.fullDataAccess(ctx) {
+	if v.Status == nil || s.fullDataAccess(ctx) {
 		return
 	}
+	withheld := v.Status.StatementTable
 	for id, n := range v.Status.Servers {
-		n.Statements = nil
-		v.Status.Servers[id] = n
+		if n.Statements != nil {
+			withheld = true
+			n.Statements = nil
+			v.Status.Servers[id] = n
+		}
 	}
-	v.StatementsWithheld = true
+	v.StatementsWithheld = withheld
 }

@@ -80,7 +80,8 @@ func TestStatementTable_rows(t *testing.T) {
 			t.Errorf("row %d = %+v, want %+v", i, st.Rows[i], want[i])
 		}
 	}
-	if st.NotCounted != 0 || st.Limit != StatementTableLimit {
+	// The blank statement has no row and is counted.
+	if st.NotCounted != 1 || st.Limit != StatementTableLimit {
 		t.Errorf("not_counted %d limit %d", st.NotCounted, st.Limit)
 	}
 	if b := n.Servers["b"].Statements; b == nil || len(b.Rows) != 1 || b.Rows[0].Statement != "select * from u" {
@@ -184,6 +185,14 @@ func TestRouterView_statementsOnlyWithFullAccess(t *testing.T) {
 	cons.withholdStatements(context.Background(), &v)
 	if !v.StatementsWithheld {
 		t.Fatal("a console under a profile showed the table")
+	}
+
+	// Rows from a router that does not say statement_table: withheld too.
+	v = routerViewDTO{Configured: true, Status: doc()}
+	v.Status.StatementTable = false
+	full.withholdStatements(scoped, &v)
+	if b, _ := json.Marshal(v); !v.StatementsWithheld || strings.Contains(string(b), "secret") {
+		t.Fatalf("rows without the flag reached a profile: %s", b)
 	}
 
 	// Off at the router: nothing is withheld, since there is nothing.

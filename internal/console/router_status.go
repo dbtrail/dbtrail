@@ -204,11 +204,8 @@ func (s *Server) RouterNumbers() RouterNumbers {
 		StatementTable: s.routing.statementsOn,
 		Servers:        map[string]RouterServerNumbers{},
 	}
-	var tables map[string]*RouterStatementTable
-	if s.routing.statementsOn {
-		tables = s.routing.statementTables()
-	}
-	for id, t := range s.routing.snapshot() {
+	snap, tables := s.routing.snapshotWithStatements()
+	for id, t := range snap {
 		reasons := t.Reasons
 		if reasons == nil {
 			reasons = map[string]uint64{}
