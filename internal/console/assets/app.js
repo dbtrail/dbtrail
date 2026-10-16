@@ -7967,8 +7967,9 @@ function snapshotHero(b, cov, cur, acts) {
   if (cur && cur.id && cur.kind === "registry" && sessionMay(PERM_SNAPSHOT_CREATE)) {
     // cur is the RAW registry entry, while b.configured also counts the
     // daemon-wide default, which a backup refuses to write to. The precheck
-    // reads the raw fields (hasOwnBackupLocation), so this does too.
-    const ownLoc = !!(cur.baseline_dir || cur.baseline_s3);
+    // reads the raw folder (hasOwnBackupLocation: since #2431 an S3 location
+    // alone is not where a snapshot is written), so this does too.
+    const ownLoc = !!(cur.baseline_dir || "").trim();
     const off = !capsCache.baseline_trigger;
     if (!off && ownLoc && cur.write_refusal) {
       // The location is shared (#1684): the dump would be refused, so the
@@ -7982,7 +7983,7 @@ function snapshotHero(b, cov, cur, acts) {
     } else if (cur.has_source) {
       const why = [];
       if (off) why.push("turned off at startup");
-      if (!ownLoc) why.push("needs this server's own snapshot location");
+      if (!ownLoc) why.push("needs a local snapshot folder for this server");
       hero.append(el("div", { class: "hero-note", text: "Read database now: " + why.join(", and ") + (sessionMayConfigureServer() && acts && acts.settings ? " (under Settings)" : "") }));
     }
   }

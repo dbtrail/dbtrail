@@ -112,13 +112,13 @@ console.log(JSON.stringify({
 	if !strings.Contains(got.Off.Text, "turned off") || !strings.Contains(got.Off.Text, "mydumper") || strings.Contains(got.Off.Text, "snapshot location") {
 		t.Errorf("off: %s", got.Off.Text)
 	}
-	if !strings.Contains(got.OffNoLoc.Text, "its own snapshot location") {
+	if !strings.Contains(got.OffNoLoc.Text, "needs a local snapshot folder") {
 		t.Errorf("off with no location does not name the location: %s", got.OffNoLoc.Text)
 	}
 	if strings.Contains(got.OffPG.Text, "mydumper") {
 		t.Errorf("a PostgreSQL full read does not run mydumper: %s", got.OffPG.Text)
 	}
-	if !strings.Contains(got.NoLoc.Text, "no snapshot location of its own") || strings.Contains(got.NoLoc.Text, "turned off") {
+	if !strings.Contains(got.NoLoc.Text, "no local snapshot folder") || strings.Contains(got.NoLoc.Text, "turned off") {
 		t.Errorf("no location: %s", got.NoLoc.Text)
 	}
 
@@ -138,7 +138,7 @@ console.log(JSON.stringify({
 		t.Errorf("the note shows where the button is missing for another reason: boot %q, unconfigured %q",
 			got.StripOffBoot.Text, got.StripOffUnconfigured.Text)
 	}
-	const loc = "needs this server's own snapshot location"
+	const loc = "needs a local snapshot folder for this server"
 	if strings.Contains(got.StripOff.Text, loc) {
 		t.Errorf("a server with its own location is told it needs one: %s", got.StripOff.Text)
 	}
@@ -157,11 +157,12 @@ console.log(JSON.stringify({
 	}
 	// A bucket is a location of the server's own, like a directory: the
 	// precheck takes either, and so must the strip.
-	if len(got.StripOnS3Only.Buttons) != 1 || strings.Contains(got.StripOnS3Only.Text, loc) {
-		t.Errorf("creation on, S3 only: want the button and no location reason: %+v", got.StripOnS3Only)
+	// S3 only is no place to write since #2431: no button, the folder named.
+	if len(got.StripOnS3Only.Buttons) != 0 || !strings.Contains(got.StripOnS3Only.Text, loc) {
+		t.Errorf("creation on, S3 only: want no button and the folder reason: %+v", got.StripOnS3Only)
 	}
-	if !strings.Contains(got.StripOffS3Only.Text, note) || strings.Contains(got.StripOffS3Only.Text, loc) {
-		t.Errorf("creation off, S3 only: want only the off reason: %+v", got.StripOffS3Only)
+	if !strings.Contains(got.StripOffS3Only.Text, note) || !strings.Contains(got.StripOffS3Only.Text, loc) {
+		t.Errorf("creation off, S3 only: want the off reason and the folder reason: %+v", got.StripOffS3Only)
 	}
 	if len(got.StripOnNoSource.Buttons) != 1 {
 		t.Errorf("the button moved for a server with no source and its own location: %+v", got.StripOnNoSource)

@@ -342,18 +342,18 @@ func TestFirstRunBackupStepSaysWhyItCannotRun(t *testing.T) {
 			[]string{"snapshot location", "Set when DBTrail starts", "button row", PageSnapshots + " page"}},
 		{"off, MySQL, no location: both fixes", true, true, false,
 			[]string{"turned off"},
-			[]string{"under Set at startup", "mydumper", "its own snapshot location", "on the " + PageSnapshots + " page under Where and how often"},
+			[]string{"under Set at startup", "mydumper", "needs a local snapshot folder", "on the " + PageSnapshots + " page under Where and how often"},
 			[]string{"Set when DBTrail starts", "button row", "that page"}},
 		{"off, PostgreSQL: no mydumper", true, false, true,
 			[]string{"turned off"},
 			[]string{"under Set at startup", "reads every table"},
 			[]string{"mydumper", "snapshot location", "Set when DBTrail starts", "button row"}},
 		{"on, no location of its own", false, true, false,
-			[]string{"no snapshot location of its own"},
+			[]string{"no local snapshot folder"},
 			// One page now (#1573), so the fix names it once and then says
 			// where on it — naming a second page would send the reader
 			// looking for one that does not exist.
-			[]string{"Local folder or S3 location", PageSnapshots + " page", "Where and how often"},
+			[]string{"Local folder under Where and how often", PageSnapshots + " page", "Where and how often"},
 			[]string{"Set at startup", "mydumper", "Restart"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -483,7 +483,7 @@ func TestHandleFirstRun(t *testing.T) {
 		if code != 200 || len(rep.Steps) != 6 || !strings.Contains(names(rep), "Read the table structure") {
 			t.Fatalf("code = %d, steps = %s, body = %s", code, names(rep), body)
 		}
-		if s := rep.Steps[5]; s.Name != "Take the first full DB snapshot" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "no snapshot location of its own") {
+		if s := rep.Steps[5]; s.Name != "Take the first full DB snapshot" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "no local snapshot folder") {
 			t.Fatalf("snapshot step = %+v", s)
 		}
 		if !strings.Contains(body, `"name":"Create the index database"`) || !strings.Contains(body, `"state":"waiting"`) {
@@ -491,7 +491,7 @@ func TestHandleFirstRun(t *testing.T) {
 		}
 	})
 	t.Run("a MySQL server with a location gets its snapshot job's state", func(t *testing.T) {
-		id := add(ServerEntry{Name: "myloc", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineS3: "s3://b/p"})
+		id := add(ServerEntry{Name: "myloc", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineDir: t.TempDir(), BaselineS3: "s3://b/p"})
 		_, body, rep := get(id)
 		if s := rep.Steps[len(rep.Steps)-1]; s.Name != "Take the first full DB snapshot" || s.Fix != "Create one on the "+PageSnapshots+" page." {
 			t.Fatalf("snapshot step = %+v, body = %s", s, body)
@@ -552,7 +552,7 @@ func TestHandleFirstRun(t *testing.T) {
 		listed = nil
 		ctrl.status = BaselineStatus{State: "succeeded", Published: true}
 		defer func() { ctrl.status = BaselineStatus{State: "idle"} }()
-		id := add(ServerEntry{Name: "published", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineS3: "s3://b/published"})
+		id := add(ServerEntry{Name: "published", SourceDSN: "src:srcpw@tcp(127.0.0.1:2)/", BaselineDir: t.TempDir(), BaselineS3: "s3://b/published"})
 		_, body, rep := get(id)
 		s := rep.Steps[len(rep.Steps)-1]
 		if s.State != firstRunDone || len(listed) != 0 {
@@ -833,7 +833,7 @@ func TestHandleFirstRunWithBackupsOff(t *testing.T) {
 			if s.Name != "Take the first full DB snapshot" || s.State != firstRunWaiting || !strings.Contains(s.Detail, "turned off") {
 				t.Fatalf("snapshot step = %+v", s)
 			}
-			if got := strings.Contains(s.Fix, "snapshot location"); got != c.wantLocText {
+			if got := strings.Contains(s.Fix, "local snapshot folder"); got != c.wantLocText {
 				t.Errorf("fix names the location = %v, want %v: %q", got, c.wantLocText, s.Fix)
 			}
 		})

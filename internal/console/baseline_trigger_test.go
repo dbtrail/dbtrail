@@ -100,7 +100,7 @@ func TestBaselineTrigger_disabledConsole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "", "")
+	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "/srv/snaps", "")
 	rec, _ := doServersReq(t, srv, "POST", "/api/servers/"+id+"/baseline", "")
 	if rec.Code != 403 {
 		t.Fatalf("disabled console: code=%d, want 403", rec.Code)
@@ -135,6 +135,20 @@ func TestBaselineTrigger_requiresDestination(t *testing.T) {
 	}
 }
 
+// TestBaselineTrigger_requiresALocalFolder: an S3 location alone is no
+// place to write since #2431 — 400, naming the folder.
+func TestBaselineTrigger_requiresALocalFolder(t *testing.T) {
+	srv, ctrl := newBaselineTriggerServer(t)
+	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "", "")
+	rec, body := doServersReq(t, srv, "POST", "/api/servers/"+id+"/baseline", "")
+	if rec.Code != 400 || !strings.Contains(string(body), "no local snapshot folder") {
+		t.Fatalf("S3 only: code=%d body=%s, want 400 naming the folder", rec.Code, body)
+	}
+	if len(ctrl.triggered) != 0 {
+		t.Fatalf("controller must not be triggered without a local folder")
+	}
+}
+
 // TestBaselineTrigger_unknownServer: a bad server id is 404, never a trigger.
 func TestBaselineTrigger_unknownServer(t *testing.T) {
 	srv, _ := newBaselineTriggerServer(t)
@@ -150,7 +164,7 @@ func TestBaselineTrigger_unknownServer(t *testing.T) {
 func TestBaselineTrigger_happy(t *testing.T) {
 	srv, ctrl := newBaselineTriggerServer(t)
 	source := "repl:" + baselineSecretPW + "@tcp(10.0.0.5:3306)/"
-	id := addBaselineEntry(t, srv, source, "s3://my-bucket/baselines/", "", "wordpress, shop")
+	id := addBaselineEntry(t, srv, source, "s3://my-bucket/baselines/", "/srv/snaps", "wordpress, shop")
 
 	rec, body := doServersReq(t, srv, "POST", "/api/servers/"+id+"/baseline", "")
 	if rec.Code != 202 {
@@ -180,7 +194,7 @@ func TestBaselineTrigger_happy(t *testing.T) {
 func TestBaselineTrigger_alreadyRunning(t *testing.T) {
 	srv, ctrl := newBaselineTriggerServer(t)
 	ctrl.err = ErrBaselineRunning
-	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "", "")
+	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "/srv/snaps", "")
 	rec, _ := doServersReq(t, srv, "POST", "/api/servers/"+id+"/baseline", "")
 	if rec.Code != 409 {
 		t.Fatalf("already running: code=%d, want 409", rec.Code)
@@ -191,7 +205,7 @@ func TestBaselineTrigger_alreadyRunning(t *testing.T) {
 func TestBaselineStatus_returnsControllerState(t *testing.T) {
 	srv, ctrl := newBaselineTriggerServer(t)
 	ctrl.status = BaselineStatus{State: "succeeded", Tables: 47, Rows: 33391, Uploaded: 48}
-	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "", "")
+	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "/srv/snaps", "")
 
 	rec, body := doServersReq(t, srv, "GET", "/api/servers/"+id+"/baseline", "")
 	if rec.Code != 200 {
@@ -312,7 +326,7 @@ func TestBaselineRefreshDoesNotUnGateTheDumpTrigger(t *testing.T) {
 		t.Fatal("BaselineRefresh was not wired through to the server")
 	}
 
-	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "", "")
+	id := addBaselineEntry(t, srv, "u:p@tcp(127.0.0.1:3306)/", "s3://b/baselines/", "/srv/snaps", "")
 	rec, _ := doServersReq(t, srv, "POST", "/api/servers/"+id+"/baseline", "")
 	if rec.Code != 403 {
 		t.Fatalf("baseline trigger with refresh-only wiring = %d, want 403 (the mydumper dump was never enabled)", rec.Code)

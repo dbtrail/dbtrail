@@ -280,8 +280,9 @@ func TestBackupSettings_fullBackupPossibleReachesTheWire(t *testing.T) {
 			if tc.name == "no source connection on this server" {
 				source = ""
 			}
+			// With a local folder: S3 alone is no place to write since #2431.
 			s3only, err := srv.cm.reg.Add(ServerEntry{Name: "s3only", DSN: "idx:pw@tcp(127.0.0.1:3306)/idx3",
-				SourceDSN: source, BaselineS3: "s3://bucket/backups"})
+				SourceDSN: source, BaselineDir: t.TempDir(), BaselineS3: "s3://bucket/backups"})
 			if err != nil {
 				t.Fatal(err)
 			}

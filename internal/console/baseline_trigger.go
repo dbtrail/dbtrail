@@ -141,7 +141,7 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 		return errors.New("this server has no source configured; set the source connection first")
 	}
 	if !hasOwnBackupLocation(e) {
-		return errors.New("this server has no baseline location set up; set a baseline directory or S3 location first" + onPage(PageSnapshots))
+		return NoLocalFolderError()
 	}
 	if pgSourceIncomplete(e) {
 		return errors.New("this PostgreSQL server has no replication slot/publication configured; set them first (Edit → Source)")
@@ -149,15 +149,23 @@ func baselineTriggerPrecheck(e ServerEntry) error {
 	return nil
 }
 
-// hasOwnBackupLocation: the server has a backup location of its own, the one
-// a console-created backup writes to. Since #1684 that is the entry as
-// stored: no daemon-wide default fills it in (a server that relied on one
-// was given it as its own at upgrade). The precheck and the Getting started
-// list's reason call it, and the Snapshots page strip (baselineContextStrip in
-// app.js) repeats the same emptiness test, so change them together. A
-// restore needs a local Backup dir, and does not use this.
+// hasOwnBackupLocation: the server has a local snapshot folder of its own,
+// the one a console-created snapshot writes to. Since #2431 an S3 location
+// alone is not one: every server keeps its snapshots on this machine, with
+// S3 beside it. Since #1684 no daemon-wide default fills it in (a server that
+// relied on one was given it as its own at upgrade). The precheck and the
+// Getting started list's reason call it, and the Snapshots page strip
+// (snapshotHero in app.js) repeats the same emptiness test, so change them
+// together.
 func hasOwnBackupLocation(e ServerEntry) bool {
-	return e.BaselineDir != "" || e.BaselineS3 != ""
+	return strings.TrimSpace(e.BaselineDir) != ""
+}
+
+// NoLocalFolderError refuses a snapshot for a server with no local folder
+// (#2431). The same words for the button, the schedule and the daemon.
+func NoLocalFolderError() error {
+	return errors.New("this server has no local snapshot folder: every server keeps its snapshots on this machine, " +
+		"with S3 beside it when set, so give it a Local folder first" + onPage(PageSnapshots))
 }
 
 // pgSourceIncomplete: a PostgreSQL server with no replication slot or

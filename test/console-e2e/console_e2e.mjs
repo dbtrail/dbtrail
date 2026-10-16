@@ -2895,7 +2895,7 @@ try {
   });
   const H = hints;
   (/Read database now:/.test(H.full.strip) && /under Settings/.test(H.full.strip)
-    && /Read database now:/.test(H.operator.strip) && /own snapshot location/.test(H.operator.strip) && !/under Settings/.test(H.operator.strip)
+    && /Read database now:/.test(H.operator.strip) && /local snapshot folder/.test(H.operator.strip) && !/under Settings/.test(H.operator.strip)
     && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
     && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
     && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)

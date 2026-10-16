@@ -277,11 +277,11 @@ func blockedBackupStep(in firstRunInput) (FirstRunStep, bool) {
 			step.Fix += ", and mydumper must be installed where DBTrail runs."
 		}
 		if in.BackupNoLocation {
-			step.Fix += " This server also needs its own snapshot location, set on the " + PageSnapshots + " page under Where and how often."
+			step.Fix += " This server also needs a local snapshot folder, set on the " + PageSnapshots + " page under Where and how often."
 		}
 	case in.BackupNoLocation:
-		step.Detail = "This server has no snapshot location of its own, so no snapshot can be written for it."
-		step.Fix = "On the " + PageSnapshots + " page, set this server's Local folder or S3 location under Where and how often, then press Read database now."
+		step.Detail = "This server has no local snapshot folder, so no snapshot can be written for it."
+		step.Fix = "On the " + PageSnapshots + " page, set this server's Local folder under Where and how often (an S3 location goes beside it, not instead of it), then press Read database now."
 	default:
 		return FirstRunStep{}, false
 	}

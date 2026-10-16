@@ -728,22 +728,16 @@ func BaselineFoldSource(e ServerEntry) string {
 // rebuildPossible reports whether a rebuild from the change history can be
 // attempted for e (the fold itself may still refuse), and why not.
 //
-// The fold WRITES Parquet to a filesystem. A server with a local folder
-// writes there; a server whose snapshots go only to S3 writes into a folder
-// of its own under the staging folder, which is uploaded and then deleted
-// (#2212). Before that, an S3-only server could only ever be read in full.
+// The fold WRITES Parquet into the server's local folder. Since #2431 every
+// server has one; one without it (an old entry the daemon could not give a
+// folder) is updated by nothing, and is not read in full either: the
+// precheck refuses it the same way.
 func rebuildPossible(e ServerEntry, gates BackupScheduleGates) error {
 	if e.DSN == "" {
 		return errors.New(BackupWhyNoIndex)
 	}
-	if e.BaselineDir == "" {
-		if e.BaselineS3 == "" {
-			// No destination at all: nothing to write into, here or anywhere.
-			return errors.New(BackupWhyNoLocalDir)
-		}
-		if gates.StagingRefusal != "" {
-			return errors.New(BackupWhyNoStagingPrefix + "; " + gates.StagingRefusal)
-		}
+	if strings.TrimSpace(e.BaselineDir) == "" {
+		return errors.New(BackupWhyNoLocalDir)
 	}
 	return nil
 }
@@ -758,8 +752,8 @@ const (
 	BackupWhyNoIndex = "this server has no index connection to read the recorded changes from"
 	// BackupWhyNoLocalDir is kept for run records written before #2212,
 	// when a server whose snapshots go only to S3 could not be updated at
-	// all. A current daemon records it only for a server with no snapshot
-	// location of any kind.
+	// all. A current daemon records it for a server with no local folder
+	// (#2431: an S3 location alone is not one).
 	BackupWhyNoLocalDir = "an update from the recorded changes needs a local snapshot directory"
 	// BackupWhyNoStagingPrefix starts the reason a server whose snapshots go
 	// only to S3 is read in full: its update is built in the working folder,

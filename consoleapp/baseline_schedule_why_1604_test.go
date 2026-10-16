@@ -3,8 +3,6 @@ package consoleapp
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,8 +59,8 @@ func TestBackupScheduler_recordsWhyTheFallbackWasFull(t *testing.T) {
 
 // The reasons that stay true until a setting changes (#1604's headline
 // cases) reach the record from the scheduler: decided BEFORE any probe of
-// the destination, so an S3-only server whose staging folder cannot be used
-// (#2212) records that setting, not "first snapshot" or an unreadable bucket.
+// the destination, so a server with no index connection records that
+// setting, not "first snapshot" or an unreadable bucket.
 func TestBackupScheduler_recordsThePermanentReasons(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -70,14 +68,6 @@ func TestBackupScheduler_recordsThePermanentReasons(t *testing.T) {
 		why   string
 		code  string
 	}{
-		{"S3 only, and the staging folder cannot be used", func(e *console.ServerEntry, sup *baselineSupervisor) {
-			e.BaselineDir, e.BaselineS3 = "", "s3://bucket/prefix"
-			blocker := filepath.Join(t.TempDir(), "staging-is-a-file")
-			if err := os.WriteFile(blocker, nil, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			sup.stagingDir = blocker
-		}, console.BackupWhyNoStagingPrefix, "no_staging"},
 		{"no index connection", func(e *console.ServerEntry, _ *baselineSupervisor) { e.DSN = "" }, console.BackupWhyNoIndex, "no_index"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,5 +89,26 @@ func TestBackupScheduler_recordsThePermanentReasons(t *testing.T) {
 				t.Fatalf("record = %+v, want why %q code %q", run, tc.why, tc.code)
 			}
 		})
+	}
+}
+
+// #2431: a scheduled server with an S3 location and no local folder runs
+// nothing: the slot is skipped, saying the folder is what is missing, and no
+// job is started.
+func TestBackupScheduler_s3OnlyServerIsSkippedNamingTheFolder(t *testing.T) {
+	b, reg, sup := newScheduleFixture(t, true)
+	e := addScheduled(t, reg, false)
+	e.BaselineDir, e.BaselineS3 = "", "s3://bucket/prefix"
+	if err := reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC))
+	b.watchers.Wait()
+	st := b.ScheduleState(e.ID)
+	if !strings.Contains(st.LastSkipReason, "no local snapshot folder") || st.LastStartedAt != "" || st.Running {
+		t.Fatalf("schedule state = %+v, want a skip naming the folder and no job", st)
+	}
+	if runs := sup.history.List(e.ID); len(runs) != 1 || !strings.Contains(runs[0].SkipReason, "no local snapshot folder") {
+		t.Fatalf("history = %+v, want the one skipped slot, naming the folder", runs)
 	}
 }

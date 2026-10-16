@@ -581,9 +581,6 @@ func TestBackupScheduleAPI_nextMethodWhyCodeReachesTheWire(t *testing.T) {
 		want    string
 	}{
 		{"no snapshot yet", false, nil, "first_backup"},
-		// #2212: S3 only reads in full only when the staging folder the
-		// update is built in cannot be used.
-		{"S3 only, staging folder unusable", true, errors.New("the working folder /stage cannot be written: permission denied"), "no_staging"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, id := newScheduleServer(t, &stubScheduleReporter{full: true, staging: tc.staging})

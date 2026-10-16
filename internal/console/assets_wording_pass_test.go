@@ -296,7 +296,7 @@ func TestWordingPassTheseSentences(t *testing.T) {
 		"The docs name the setting under Set at startup. Restart DBTrail after changing it. A full read reads every table this server captures"
 	wantFix := []string{
 		fixHead + ", and mydumper must be installed where DBTrail runs.",
-		fixHead + ", and mydumper must be installed where DBTrail runs. This server also needs its own snapshot location, set on the Snapshots page under Where and how often.",
+		fixHead + ", and mydumper must be installed where DBTrail runs. This server also needs a local snapshot folder, set on the Snapshots page under Where and how often.",
 		fixHead + ".",
 	}
 	if len(got.FirstRun) != len(wantFix) {

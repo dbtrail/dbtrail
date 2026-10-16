@@ -45,17 +45,16 @@ func TestBackupWhyCode(t *testing.T) {
 	if err := rebuildPossible(ServerEntry{DSN: "d"}, BackupScheduleGates{}); err == nil || err.Error() != BackupWhyNoLocalDir {
 		t.Errorf("rebuildPossible without any location = %v, want the constant", err)
 	}
-	// S3 only (#2212): an update is possible, built in the staging folder,
-	// unless that folder cannot be used, which is said with its own code.
-	s3only := ServerEntry{DSN: "d", BaselineS3: "s3://b/p/"}
-	if err := rebuildPossible(s3only, BackupScheduleGates{}); err != nil {
-		t.Errorf("rebuildPossible for an S3-only server = %v, want nil", err)
+	// S3 only: every server keeps a local copy since #2431, so a server
+	// with a bucket and no folder is updated by nothing, whatever the
+	// working folder.
+	for _, g := range []BackupScheduleGates{{}, {StagingRefusal: "x"}} {
+		if err := rebuildPossible(ServerEntry{DSN: "d", BaselineS3: "s3://b/p/"}, g); err == nil || err.Error() != BackupWhyNoLocalDir {
+			t.Errorf("rebuildPossible for an S3-only server = %v, want the constant", err)
+		}
 	}
-	err := rebuildPossible(s3only, BackupScheduleGates{StagingRefusal: "the working folder /stage cannot be written: permission denied"})
-	if err == nil || BackupWhyCode(err.Error()) != "no_staging" || !strings.Contains(err.Error(), "/stage cannot be written") {
-		t.Errorf("rebuildPossible with an unusable staging folder = %v, want the no_staging reason naming the folder", err)
-	} else {
-		t.Logf("no_staging reason: %s", err)
+	if err := rebuildPossible(ServerEntry{DSN: "d", BaselineDir: "  ", BaselineS3: "s3://b/p/"}, BackupScheduleGates{}); err == nil || err.Error() != BackupWhyNoLocalDir {
+		t.Errorf("rebuildPossible with a blank folder = %v, want the constant", err)
 	}
 	// A server WITH a local folder never consults the staging folder.
 	if err := rebuildPossible(ServerEntry{DSN: "d", BaselineDir: "/b", BaselineS3: "s3://b/"}, BackupScheduleGates{StagingRefusal: "x"}); err != nil {
