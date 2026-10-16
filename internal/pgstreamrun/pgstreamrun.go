@@ -342,13 +342,21 @@ func saveSourceHealth(db *sql.DB, serverID uint32, healthJSON []byte, logger *sl
 	}
 }
 
+// The caps on one source transaction held in an open index transaction
+// (#2391): see indexer.DefaultMaxTxnRows. Variables so a test can shrink them.
+var (
+	maxTxnRows = indexer.DefaultMaxTxnRows
+	maxTxnOpen = indexer.DefaultMaxTxnOpen
+)
+
 // streamLoopPG batches row events into the indexer and checkpoints the durable LSN.
 //
 // The checkpoint cursor is the last COMPLETE transaction's commit LSN (lastCommitLSN)
-// and nothing else — never a per-row LSN. A batch-full or ticker flush can land rows
-// of an in-flight transaction, but the checkpoint stays at the last commit, so a
-// crash resumes at a transaction boundary and PostgreSQL re-delivers the in-flight
-// tail (at-least-once). This is the #491 invariant. The order at every checkpoint is
+// and nothing else — never a per-row LSN. Rows of an in-flight transaction are held
+// uncommitted in an index transaction until its commit (#2391), and the checkpoint
+// stays at the last commit, so a crash resumes at a transaction boundary and
+// PostgreSQL re-delivers the in-flight tail; only a transaction split past the
+// caps can leave part of itself in the index to be delivered again. This is the #491 invariant. The order at every checkpoint is
 // flush → saveCheckpointPG → AckCommitted: PostgreSQL WAL is released only after the
 // rows are durably indexed AND the checkpoint is durably persisted.
 func streamLoopPG(
@@ -364,7 +372,6 @@ func streamLoopPG(
 	logger *slog.Logger,
 	hooks *Hooks,
 ) error {
-	batch := make([]event.Event, 0, idx.BatchSize())
 	ticker := time.NewTicker(checkpointInterval)
 	defer ticker.Stop()
 
@@ -418,27 +425,34 @@ func streamLoopPG(
 	// never hits (its RelationMessage always precedes it).
 	snapshotByTable := make(map[string]uint32)
 
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		n, err := idx.InsertBatch(batch)
-		state.eventsIndexed += n
-		// Discard the batch unconditionally: InsertBatch is a single atomic INSERT
-		// (0 rows on error), and every flush-error path here is fatal — the loop
-		// aborts and PostgreSQL re-streams the whole tail from the unadvanced
-		// checkpoint. If a future change ever retries or continues past a flush
-		// error, this clear must move into the success branch or those rows are lost.
-		batch = batch[:0]
-		// Liveness: any rows indexed flip a supervised job pending→running.
-		if err == nil && n > 0 && hooks != nil && hooks.OnIndexed != nil {
-			hooks.OnIndexed(n)
-		}
-		return err
-	}
+	// The writer (#2391): rows of complete transactions are batched together,
+	// and the transaction being read is held in an index transaction of its
+	// own until its commit, so a reader never sees part of it (past the
+	// indexer's row/time caps it is made visible in parts, and logged).
+	w := indexer.NewTxnBatcher(idx, maxTxnRows, maxTxnOpen, indexer.TxnBatcherHooks{
+		Published: func(n int64, _ []indexer.CommitStamp) {
+			state.eventsIndexed += n
+			// Liveness: any rows indexed flip a supervised job pending→running.
+			if n > 0 && hooks != nil && hooks.OnIndexed != nil {
+				hooks.OnIndexed(n)
+			}
+		},
+		Split: func(why string, rows int64, open time.Duration, first bool) {
+			if first {
+				logger.Warn("pgstreamrun: a source transaction is too large to make visible all at once; readers can see part of it until its commit is captured",
+					"reason", why, "rows_so_far", rows, "open_for", open.Round(time.Millisecond))
+			}
+		},
+	})
+	defer w.Close()
 
+	// checkpoint commits the rows of complete transactions, then persists the
+	// last commit LSN. The order is commit → saveCheckpointPG → AckCommitted:
+	// PostgreSQL releases WAL only after the rows are durably indexed AND the
+	// checkpoint is durably persisted. Every row at or before lastCommitLSN
+	// belongs to a complete transaction, so it is in the index by then.
 	checkpoint := func() error {
-		if err := flush(); err != nil {
+		if err := w.CommitComplete(); err != nil {
 			return err
 		}
 		if lastCommitLSN == 0 {
@@ -448,18 +462,38 @@ func streamLoopPG(
 			return err
 		}
 		// Only now is it safe to let PostgreSQL release WAL up to lastCommitLSN.
-		cap.AckCommitted(lastCommitLSN)
+		if cap != nil {
+			cap.AckCommitted(lastCommitLSN)
+		}
 		state.lsn = lastCommitLSN
 		return nil
+	}
+
+	// stop drops the rows of a transaction still being read before the last
+	// checkpoint: committing them would leave half a transaction visible while
+	// capture is down. PostgreSQL re-delivers it from the checkpoint.
+	stop := func() error {
+		if w.InTxn() {
+			if n := w.Discard(); n > 0 {
+				logger.Info("pgstreamrun: capture stopped inside a source transaction; its rows are not kept, and the next start receives it again",
+					"rows_discarded", n)
+			}
+		}
+		return checkpoint()
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			if err := checkpoint(); err != nil {
+			if err := stop(); err != nil {
 				logger.Warn("pgstreamrun: final checkpoint failed on shutdown", "error", err)
 			}
 			return nil
+
+		case <-w.CapC():
+			if err := w.OnCap(); err != nil {
+				return err
+			}
 
 		case <-ticker.C:
 			if err := checkpoint(); err != nil {
@@ -481,7 +515,7 @@ func streamLoopPG(
 
 		case ev, ok := <-events:
 			if !ok {
-				if err := checkpoint(); err != nil {
+				if err := stop(); err != nil {
 					logger.Warn("pgstreamrun: final checkpoint failed", "error", err)
 				}
 				return nil
@@ -492,8 +526,11 @@ func streamLoopPG(
 			switch ev.EventType {
 			case event.EventCommit:
 				// The boundary: record the commit LSN; its rows are already in the
-				// batch (pgoutput delivers them before the commit).
+				// writer (pgoutput delivers them before the commit).
 				lastCommitLSN = ev.EndPos
+				if err := w.End(); err != nil {
+					return err
+				}
 			case event.EventDDL:
 				// A DDL marker — on the PostgreSQL path today only a TRUNCATE audit
 				// record (#827). Persist it to schema_changes immediately, the
@@ -530,11 +567,8 @@ func streamLoopPG(
 				// PostgreSQL does not emit a leading GTID marker; ignore defensively.
 			default:
 				ev.SchemaVersion = snapshotByTable[ev.Schema+"."+ev.Table]
-				batch = append(batch, ev)
-				if len(batch) >= idx.BatchSize() {
-					if err := flush(); err != nil {
-						return err
-					}
+				if err := w.Add(ev); err != nil {
+					return err
 				}
 			}
 		}
