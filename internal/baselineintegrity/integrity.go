@@ -102,9 +102,6 @@ func WriteManifest(snapshotDir string) error {
 // from a prior snapshot's manifest, and files hashed here.
 type ManifestStats struct {
 	Reused, Hashed int
-	// Carried counts the entries taken as given for files that are not on
-	// disk (WriteManifestWith).
-	Carried int
 }
 
 // WriteManifestFrom is WriteManifest for a snapshot that links files forward
@@ -127,18 +124,6 @@ type ManifestStats struct {
 // it could carry a stale digest into a fresh snapshot and refuse a good
 // file on read.
 func WriteManifestFrom(snapshotDir string, priorDirs []string) (ManifestStats, error) {
-	return WriteManifestWith(snapshotDir, priorDirs, nil)
-}
-
-// WriteManifestWith is WriteManifestFrom for a snapshot some of whose files
-// are not on disk because they are copied inside S3 when it is uploaded
-// (#2212). carried maps each such file's snapshot-relative, forward-slashed
-// path to the digest its SOURCE snapshot's manifest recorded
-// (S3ManifestDigest), and the entry is written as given: an S3 copy is the
-// same bytes, so the digest that held for the source holds for the copy,
-// and rot in the source still fails the copy's read rather than being
-// certified afresh. A file that IS on disk is hashed whatever carried says.
-func WriteManifestWith(snapshotDir string, priorDirs []string, carried map[string]string) (ManifestStats, error) {
 	var st ManifestStats
 	priors := loadPriors(snapshotDir, priorDirs)
 	m := Manifest{Version: manifestVersion, Algo: "crc32c", Files: map[string]string{}}
@@ -165,13 +150,6 @@ func WriteManifestWith(snapshotDir string, priorDirs []string, carried map[strin
 	})
 	if err != nil {
 		return st, err
-	}
-	for rel, crc := range carried {
-		if _, onDisk := m.Files[rel]; onDisk || crc == "" {
-			continue
-		}
-		m.Files[rel] = crc
-		st.Carried++
 	}
 	b, err := json.Marshal(m)
 	if err != nil {

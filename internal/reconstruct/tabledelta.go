@@ -296,8 +296,7 @@ func tableDeltaCompactReason(prev *tableDelta, basePath string, baseSize int64, 
 
 // chainCompactReason is tableDeltaCompactReason without the S3 rule: every
 // reason a chain must end that is about the chain itself, not about where its
-// files are. A copy inside S3 (#2212) applies these to the chain it would
-// carry, exactly as a local carry does.
+// files are.
 //
 // maxUpserts is FullTableConfig.MaxChainUpserts, or MaxResolvedChainUpserts
 // for a table read through its resolved pair (chainUpsertsLine): past it the
@@ -1039,12 +1038,6 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	reserved := ""
 	if cols, err := baseline.ParseSchemaText(in.CreateTableSQL); err == nil {
 		reserved = reservedDeltaColumn(cols)
-	}
-	// An s3:// previous snapshot cannot be linked; on an S3-only server's
-	// update an unchanged table and its chain are copied inside S3 instead
-	// (#2212), behind the same refusals and chain rules.
-	if s3CopyUnchangedChain(ctx, p, hasAnchor, reserved, rep) {
-		return nil
 	}
 	maxUpserts, _ := chainUpsertsLine(p)
 	if reason := tableDeltaCompactReason(p.prev, p.basePath, baseSize, p.capGap, p.cfg.At, hasAnchor, reserved, p.cfg.ChainStartFloor, newChainStart(p), maxUpserts); reason != "" {

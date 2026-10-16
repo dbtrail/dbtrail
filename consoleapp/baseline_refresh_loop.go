@@ -564,7 +564,7 @@ func (s *baselineSupervisor) publishedReadsFrom(req refreshRequest, at time.Time
 	if !s.tableDeltas {
 		return at, true
 	}
-	from, err := snapshotReadsFrom(s.ctx, req.BaselineDir, at, nil)
+	from, err := snapshotReadsFrom(s.ctx, req.BaselineDir, at)
 	known := err == nil
 	why := ""
 	if err != nil {
