@@ -453,8 +453,27 @@ func TestIntegrationFlashbackReadRouting(t *testing.T) {
 	}
 	grouped := false
 	for _, r := range st.Rows {
+		var why uint64
+		for _, n := range r.Reasons {
+			why += n
+		}
+		if why != r.Count {
+			t.Errorf("row %s %q: reasons %v add up to %d, the row counts %d", r.Side, r.Statement, r.Reasons, why, r.Count)
+		}
+		if r.Side == "mysql" && r.Fresh != nil {
+			t.Errorf("row of MySQL %q carries the copy's lag: %+v", r.Statement, r.Fresh)
+		}
 		if r.Side == "copy" && strings.HasPrefix(r.Statement, "select status, count(*) from orders") {
 			grouped = true
+			// Through the real port: the answer hook names the statement
+			// before the decision commits the copy's run (#2360). Unwired,
+			// the row has no lag at all.
+			if r.Fresh == nil || r.Fresh.Known+r.Fresh.Unknown == 0 && !r.Fresh.Pending {
+				t.Errorf("copy row %q has no lag of its answers: %+v", r.Statement, r.Fresh)
+			}
+			if r.Reasons["expensive_plan"]+r.Reasons["tables_unchanged"] != r.Count {
+				t.Errorf("copy row %q: reasons %v", r.Statement, r.Reasons)
+			}
 		}
 	}
 	if !grouped {

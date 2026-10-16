@@ -382,7 +382,20 @@ would be a label without end, and it names tables and columns. The router
 keeps a table per statement shape only when started with
 `--statement-table` (`BINTRAIL_ROUTER_STATEMENT_TABLE=1`, or
 `ROUTER_STATEMENT_TABLE=1` in the Docker stack's `.env`). Each row is one
-shape on one side, with its count, errors, timeouts, total and slowest time.
+shape on one side, with its count, errors, timeouts, total and slowest time,
+and `reasons`: why the router sent it to that side, counted per reason in
+the same vocabulary as the `reason` label above (`cheap_plan`,
+`expensive_plan`, `copy_refused`, ...), adding up to the row's count. A row
+of the copy also carries `fresh`: how far behind capture the data of its
+answers was, the last answer's (`last_age_seconds`, `last_as_of`) and the
+least and most over its answers (`min_age_seconds`, `max_age_seconds`), each
+one answer's own lag, rounded up; `known` and `unknown` count the answers
+whose lag is and is not known (`unknown_reason` says why, in a fixed
+sentence), `pending` says the last answer's waits for the router to place
+its snapshot in the index, `tailed` counts the answers that read every table
+up to date with what capture indexed since its snapshot, and `snapshot` those
+that read some table as of its snapshot. A row of MySQL has none: the source
+answers with its own current data.
 Every value in a shape is blanked (`WHERE id = 12345` and `WHERE id = ?` are
 one row, and so are `IN` lists of any length); table and column names are
 kept. A server keeps up to 200 rows; a shape first seen past that is counted
@@ -397,9 +410,15 @@ profile, and tells the others it was withheld.
 The web interface draws it on the MySQL clients page, under the router's
 two sides, as **Which statements take the time**: one bar per shape, as
 long as its total time next to the shape that took the most, with how many
-times it ran, its time each, its slowest and its errors. The ten that took
-the most are shown and the rest fold away. A router without the table says
-so in one folded line.
+times it ran, its time each, its slowest, its errors and, on the copy, the
+lag of its last answer. Five are shown to a page, most time first, and
+buttons above the list show all of them, only your MySQL's or only the
+copy's. A shape opens its detail: its whole text, and for each side that
+answered it how often, why the router sent it there, and how fresh the data
+was. On the copy that is the lag of its last answer, its least and its most,
+and whether the answers read every table up to date (fresh) or read some
+table as of its snapshot (as old as that snapshot). A router without the
+table says so in one folded line.
 
 ## Example Prometheus alert rules
 

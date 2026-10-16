@@ -32,7 +32,7 @@ func newStatementServer(t *testing.T, on bool) *Server {
 
 func TestStatementTable_offPublishesNothing(t *testing.T) {
 	srv := newStatementServer(t, false)
-	srv.RecordRouteAnswer("a", "mysql", "SELECT 1", time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "SELECT 1", time.Millisecond, false, false)
 	n := srv.RouterNumbers()
 	if n.StatementTable || n.Servers["a"].Statements != nil {
 		t.Fatalf("off: %+v", n)
@@ -53,14 +53,14 @@ func TestStatementTable_offPublishesNothing(t *testing.T) {
 
 func TestStatementTable_rows(t *testing.T) {
 	srv := newStatementServer(t, true)
-	srv.RecordRouteAnswer("a", "mysql", "SELECT * FROM t WHERE id = 1", 2*time.Millisecond, false, false)
-	srv.RecordRouteAnswer("a", "mysql", "select *  from t where id = 99999", 4*time.Millisecond, true, false)
-	srv.RecordRouteAnswer("a", "mysql", "SELECT * FROM t WHERE id = 7", 6*time.Millisecond, true, true)
-	srv.RecordRouteAnswer("a", "copy", "SELECT * FROM t WHERE id = 3", time.Second, false, false)
-	srv.RecordRouteAnswer("a", "copy", "SELECT s, count(*) FROM t GROUP BY s", 3*time.Second, false, false)
-	srv.RecordRouteAnswer("b", "copy", "SELECT * FROM u", time.Second, false, false)
-	srv.RecordRouteAnswer("a", "refused", "SELECT 2", time.Second, false, false)
-	srv.RecordRouteAnswer("a", "copy", "   ", time.Second, false, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "SELECT * FROM t WHERE id = 1", 2*time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "select *  from t where id = 99999", 4*time.Millisecond, true, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "SELECT * FROM t WHERE id = 7", 6*time.Millisecond, true, true)
+	srv.RecordRouteAnswer("a", "copy", "expensive_plan", "SELECT * FROM t WHERE id = 3", time.Second, false, false)
+	srv.RecordRouteAnswer("a", "copy", "expensive_plan", "SELECT s, count(*) FROM t GROUP BY s", 3*time.Second, false, false)
+	srv.RecordRouteAnswer("b", "copy", "expensive_plan", "SELECT * FROM u", time.Second, false, false)
+	srv.RecordRouteAnswer("a", "refused", "read_only", "SELECT 2", time.Second, false, false)
+	srv.RecordRouteAnswer("a", "copy", "expensive_plan", "   ", time.Second, false, false)
 
 	n := srv.RouterNumbers()
 	if !n.StatementTable {
@@ -81,8 +81,9 @@ func TestStatementTable_rows(t *testing.T) {
 		t.Fatalf("rows = %+v", st.Rows)
 	}
 	for i := range want {
-		if st.Rows[i] != want[i] {
-			t.Errorf("row %d = %+v, want %+v", i, st.Rows[i], want[i])
+		got := st.Rows[i]
+		if got.Statement != want[i].Statement || got.Side != want[i].Side || got.RouteAnswers != want[i].RouteAnswers {
+			t.Errorf("row %d = %+v, want %+v", i, got, want[i])
 		}
 	}
 	// The blank statement has no row and is counted.
@@ -106,13 +107,13 @@ func TestStatementTable_emptyIsAList(t *testing.T) {
 func TestStatementTable_bounded(t *testing.T) {
 	srv := newStatementServer(t, true)
 	for i := 0; i < StatementTableLimit; i++ {
-		srv.RecordRouteAnswer("a", "mysql", "SELECT c FROM t"+strings.Repeat("x", i), time.Millisecond, false, false)
+		srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "SELECT c FROM t"+strings.Repeat("x", i), time.Millisecond, false, false)
 	}
 	// Full: a new shape is not a row, and is counted as such.
-	srv.RecordRouteAnswer("a", "mysql", "SELECT c FROM other", time.Millisecond, false, false)
-	srv.RecordRouteAnswer("a", "copy", "SELECT c FROM t", time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "SELECT c FROM other", time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "copy", "expensive_plan", "SELECT c FROM t", time.Millisecond, false, false)
 	// A shape already in the table still counts.
-	srv.RecordRouteAnswer("a", "mysql", "SELECT c FROM t", time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "SELECT c FROM t", time.Millisecond, false, false)
 	st := srv.RouterNumbers().Servers["a"].Statements
 	if len(st.Rows) != StatementTableLimit || st.NotCounted != 2 {
 		t.Fatalf("rows %d not_counted %d", len(st.Rows), st.NotCounted)
@@ -123,7 +124,7 @@ func TestStatementTable_bounded(t *testing.T) {
 		}
 	}
 	// Another server has its own room.
-	srv.RecordRouteAnswer("b", "mysql", "SELECT c FROM other", time.Millisecond, false, false)
+	srv.RecordRouteAnswer("b", "mysql", "cheap_plan", "SELECT c FROM other", time.Millisecond, false, false)
 	if b := srv.RouterNumbers().Servers["b"].Statements; len(b.Rows) != 1 || b.NotCounted != 0 {
 		t.Fatalf("server b = %+v", b)
 	}
@@ -132,8 +133,8 @@ func TestStatementTable_bounded(t *testing.T) {
 func TestStatementTable_longStatementCut(t *testing.T) {
 	srv := newStatementServer(t, true)
 	long := "SELECT " + strings.Repeat("é", StatementMaxBytes) + " FROM t"
-	srv.RecordRouteAnswer("a", "mysql", long, time.Millisecond, false, false)
-	srv.RecordRouteAnswer("a", "mysql", long+" WHERE id = 1", time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", long, time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "mysql", "cheap_plan", long+" WHERE id = 1", time.Millisecond, false, false)
 	st := srv.RouterNumbers().Servers["a"].Statements
 	if len(st.Rows) != 1 || st.Rows[0].Count != 2 {
 		// Two statements alike for longer than the cut share a row.
@@ -143,7 +144,7 @@ func TestStatementTable_longStatementCut(t *testing.T) {
 	if len(s) > StatementMaxBytes+len("…") || !strings.HasSuffix(s, "…") {
 		t.Fatalf("cut to %d bytes: %q…", len(s), s[:20])
 	}
-	if !json.Valid([]byte(`"` + s + `"`)) || strings.ContainsRune(s, '�') {
+	if !json.Valid([]byte(`"`+s+`"`)) || strings.ContainsRune(s, '�') {
 		t.Fatal("a character was cut in half")
 	}
 }

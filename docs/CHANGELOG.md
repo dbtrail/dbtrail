@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **The router panel's statement list says why each statement went where it did, and how fresh the copy's answers were.** Each row of the router's per-statement table now carries `reasons` (why it went to that side, per reason) and, on the copy, `fresh`: the lag of its last answer, its least and most over its answers (each answer's own, rounded up), how many answers' lag is not known and why, and how many read every table up to date against how many read some table as of its snapshot. On the MySQL clients page the list shows five statements to a page, with buttons to show all of them, only your MySQL's or only the copy's, and a statement opens its detail with both sides of it together. The shim's `RouterConfig.Answered` hook carries the routing reason, the same one `Observe` is told.
 
 ## [0.106.0] - 2026-10-15
 ### Added

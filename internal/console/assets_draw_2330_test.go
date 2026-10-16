@@ -162,10 +162,10 @@ func TestDrawings2330(t *testing.T) {
 		}
 		for i := 0; i < 3; i++ {
 			srv.RecordRouteDecision("a", "mysql", "cheap_plan")
-			srv.RecordRouteAnswer("a", "mysql", "SELECT 1", 4*time.Millisecond, i == 2, false)
+			srv.RecordRouteAnswer("a", "mysql", "cheap_plan", "SELECT 1", 4*time.Millisecond, i == 2, false)
 		}
 		srv.RecordRouteDecision("a", "copy", "expensive_plan")
-		srv.RecordRouteAnswer("a", "copy", "SELECT 1", 1500*time.Millisecond, false, false)
+		srv.RecordRouteAnswer("a", "copy", "expensive_plan", "SELECT 1", 1500*time.Millisecond, false, false)
 		raw, err := json.Marshal(srv.RouterNumbers().Servers["a"])
 		if err != nil {
 			t.Fatal(err)

@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -52,6 +53,37 @@ type serverCopyAges struct {
 	// cut is the instant of each set of snapshots already resolved. Bounded:
 	// a router reads few snapshots at once, and one dropped is asked again.
 	cut map[string]time.Time
+	// shapes is the same record per statement of the per-statement table
+	// (#2360), for the panel's detail of one statement. Bounded like the
+	// table: a statement first answered past StatementTableLimit has none.
+	shapes map[string]*shapeAges
+}
+
+// shapeAges is how far behind capture the data of the copy's answers to one
+// statement was. Every age is one answer's own, so the least is a real
+// answer's and never fresher than any was.
+type shapeAges struct {
+	// last is the newest answer: its run, its instant when known, whether
+	// it waits on the index (lastKey), or why it is unknown.
+	lastRan, lastThrough time.Time
+	lastTail             time.Time
+	lastPending          bool
+	lastKey, lastWhy     string
+	least, most          time.Duration
+	// known counts the answers whose age is known; unknown those whose age
+	// cannot be told; tailed those that read every table up to date
+	// (allTailed); snapshot those that read some table as of its snapshot.
+	known, unknown, tailed, snapshot uint64
+}
+
+func (a *shapeAges) record(age time.Duration) {
+	if a.known == 0 || age < a.least {
+		a.least = age
+	}
+	if a.known == 0 || age > a.most {
+		a.most = age
+	}
+	a.known++
 }
 
 // pendingCopyAge is what an unresolved set of snapshots must give the worst
@@ -63,7 +95,18 @@ type pendingCopyAge struct {
 	tailWorst time.Duration
 	// n is how many answers wait on it.
 	n uint64
+	// shapes is, per statement, the answers that wait on it, each with its
+	// own run and tail, so each one's age is told when the index answers.
+	// At most freshPendingPerShape a statement: past it they are unknown.
+	shapes map[string][]pendingShapeAnswer
 }
+
+type pendingShapeAnswer struct{ ranAt, tail time.Time }
+
+// freshPendingPerShape is how many of one statement's answers wait on one
+// set of snapshots with their own times; the index is asked every 30 seconds,
+// so more than this is a statement run several times a second.
+const freshPendingPerShape = 64
 
 // copyAgesCutKeep is how many resolved sets of snapshots a server keeps.
 const copyAgesCutKeep = 16
@@ -90,10 +133,26 @@ func (c *copyAges) server(id string) *serverCopyAges {
 	}
 	s := c.by[id]
 	if s == nil {
-		s = &serverCopyAges{pending: map[string]*pendingCopyAge{}, cut: map[string]time.Time{}}
+		s = &serverCopyAges{pending: map[string]*pendingCopyAge{}, cut: map[string]time.Time{}, shapes: map[string]*shapeAges{}}
 		c.by[id] = s
 	}
 	return s
+}
+
+// shape is s's record of one statement, nil when it has none and no room.
+func (s *serverCopyAges) shape(shape string) *shapeAges {
+	if shape == "" {
+		return nil
+	}
+	a := s.shapes[shape]
+	if a == nil {
+		if len(s.shapes) >= StatementTableLimit {
+			return nil
+		}
+		a = &shapeAges{}
+		s.shapes[shape] = a
+	}
+	return a
 }
 
 // The reasons the status document gives for an unknown lag. A fixed few on
@@ -128,7 +187,9 @@ func (c *copyAges) forget(id string) {
 	delete(c.by, id)
 }
 
-// note records a, an answer the copy gave for server id.
+// note records a, an answer the copy gave for server id, for the server and
+// for its statement (a.shape) on one path, so the panel's lag and the
+// detail's never disagree.
 func (c *copyAges) note(id string, a copyAnswer) {
 	if a.side != "copy" {
 		return
@@ -137,47 +198,87 @@ func (c *copyAges) note(id string, a copyAnswer) {
 	defer c.mu.Unlock()
 	s := c.server(id)
 	s.last, s.lastThrough, s.lastPending, s.lastKey, s.lastWhy = a, time.Time{}, false, "", ""
+	sh := s.shape(a.shape)
+	if sh != nil {
+		sh.lastRan, sh.lastTail, sh.lastThrough, sh.lastPending, sh.lastKey, sh.lastWhy = a.ranAt, a.tailThrough, time.Time{}, false, "", ""
+	}
+	unknown := func(why string) {
+		s.lastWhy = why
+		c.unknownFor(id, s, 1, why, "")
+		if sh != nil {
+			sh.unknown++
+			sh.lastWhy = why
+		}
+	}
+	known := func(through time.Time) {
+		s.lastThrough = through
+		age := copyAgeOf(a.ranAt, through)
+		s.worse(age)
+		if sh != nil {
+			sh.lastThrough = through
+			sh.record(age)
+		}
+	}
 	switch {
 	case a.allTailed:
-		s.lastThrough = a.tailThrough
-		s.worse(copyAgeOf(a.ranAt, a.tailThrough))
+		if sh != nil {
+			sh.tailed++
+		}
+		known(a.tailThrough)
 	case !a.ok || len(a.files) == 0:
 		// Which snapshots it read is not known.
-		s.lastWhy = copyAgeWhyNoFiles
-		c.unknownFor(id, s, 1, copyAgeWhyNoFiles, "")
+		unknown(copyAgeWhyNoFiles)
 	default:
+		// snapshot counts an answer only once the snapshot it read is one
+		// that can be placed: an answer through the moving link, or past
+		// the backlog, is unknown and nothing more.
 		key := copyAgesKey(a.files)
 		if !copyAgesCacheable(key) {
 			// Which snapshot the link named when the statement ran is not
 			// known by the time the index is asked: never a number.
-			s.lastWhy = copyAgeWhyMoving
-			c.unknownFor(id, s, 1, copyAgeWhyMoving, "")
+			unknown(copyAgeWhyMoving)
 			return
 		}
 		if cut, ok := s.cut[key]; ok {
-			s.lastThrough = olderOf(cut, a.tailThrough)
-			s.worse(copyAgeOf(a.ranAt, s.lastThrough))
+			if sh != nil {
+				sh.snapshot++
+			}
+			known(olderOf(cut, a.tailThrough))
 			return
 		}
-		s.lastPending, s.lastKey = true, key
 		p := s.pending[key]
 		if p == nil {
 			if len(s.pending) >= copyAgesCutKeep {
 				// The index is not keeping up: this answer stays unknown
 				// rather than the map growing.
-				s.lastPending, s.lastKey, s.lastWhy = false, "", copyAgeWhyBacklog
-				c.unknownFor(id, s, 1, copyAgeWhyBacklog, "")
+				unknown(copyAgeWhyBacklog)
 				return
 			}
 			p = &pendingCopyAge{files: a.files}
 			s.pending[key] = p
 		}
+		s.lastPending, s.lastKey = true, key
 		p.n++
 		if a.ranAt.After(p.latest) {
 			p.latest = a.ranAt
 		}
 		if !a.tailThrough.IsZero() {
 			p.tailWorst = max(p.tailWorst, copyAgeOf(a.ranAt, a.tailThrough))
+		}
+		if sh != nil {
+			sh.snapshot++
+			if p.shapes == nil {
+				p.shapes = map[string][]pendingShapeAnswer{}
+			}
+			if len(p.shapes[a.shape]) < freshPendingPerShape {
+				p.shapes[a.shape] = append(p.shapes[a.shape], pendingShapeAnswer{a.ranAt, a.tailThrough})
+				sh.lastPending, sh.lastKey = true, key
+			} else {
+				// Past the cap its own times are not kept: unknown, never
+				// a guess.
+				sh.unknown++
+				sh.lastWhy = copyAgeWhyBacklog
+			}
 		}
 	}
 }
@@ -258,6 +359,55 @@ func (c *copyAges) settle(id, key string, cut time.Time, why string) {
 			s.lastWhy = public
 		}
 	}
+	for shape, answers := range p.shapes {
+		sh := s.shapes[shape]
+		if sh == nil {
+			continue
+		}
+		for _, ans := range answers {
+			if why == "" {
+				sh.record(copyAgeOf(ans.ranAt, olderOf(cut, ans.tail)))
+			} else {
+				sh.unknown++
+			}
+		}
+		if sh.lastPending && sh.lastKey == key {
+			sh.lastPending = false
+			if why == "" {
+				sh.lastThrough = olderOf(cut, sh.lastTail)
+			} else {
+				sh.lastWhy = public
+			}
+		}
+	}
+}
+
+// shapeNow is one statement's lag for the per-statement table, nil when the
+// copy answered it nothing this process recorded.
+func (c *copyAges) shapeNow(id, shape string) *RouterStatementFresh {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.by[id]
+	if s == nil {
+		return nil
+	}
+	a := s.shapes[shape]
+	if a == nil {
+		return nil
+	}
+	// Rounded up: a lag is never said smaller than it was.
+	secs := func(d time.Duration) *int64 { v := int64(math.Ceil(d.Seconds())); return &v }
+	out := &RouterStatementFresh{Known: a.known, Unknown: a.unknown, Tailed: a.tailed, Snapshot: a.snapshot, Pending: a.lastPending}
+	if !a.lastPending && !a.lastThrough.IsZero() {
+		out.LastAsOf, out.LastAgeSeconds = a.lastThrough.UTC().Format(time.RFC3339), secs(copyAgeOf(a.lastRan, a.lastThrough))
+	}
+	if !a.lastPending && a.lastThrough.IsZero() {
+		out.UnknownReason = a.lastWhy
+	}
+	if a.known > 0 {
+		out.MinAgeSeconds, out.MaxAgeSeconds = secs(a.least), secs(a.most)
+	}
+	return out
 }
 
 // copyAgesNow is one server's numbers for the status document: zero values

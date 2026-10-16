@@ -15513,8 +15513,11 @@ function routerSidesModel(view, cur) {
 // server the router has no entry for). Otherwise a state: "off" (the router
 // does not keep the table), "withheld" (this session may not see it), "none"
 // (nothing finished yet) or "rows". Rows are the router's, checked one by
-// one: a row that does not read as a statement on a side is left out.
-const ROUTER_STATEMENTS_SHOWN = 10;
+// one: a row that does not read as a statement on a side is left out. Each
+// row keeps why the router sent it to that side (reasons, the closed
+// RouteReason vocabulary) and, on the copy, how far behind capture the data
+// of its answers was (fresh).
+const ROUTER_STATEMENTS_PER_PAGE = 5;
 function routerStatementsModel(view, cur) {
   if (!view || !view.configured || view.error || !view.status || !cur) return null;
   const t = view.status.servers && view.status.servers[cur.id];
@@ -15525,26 +15528,58 @@ function routerStatementsModel(view, cur) {
   const notCounted = Math.max(0, Number(st.not_counted) || 0);
   const limit = Math.max(0, Number(st.limit) || 0);
   const num = (v) => { const n = Number(v); return isFinite(n) && n > 0 ? n : 0; };
+  const age = (v) => (v == null || !isFinite(Number(v)) || Number(v) < 0 ? null : Number(v));
   const rows = (Array.isArray(st.rows) ? st.rows : []).filter((r) => r && typeof r === "object" &&
     typeof r.statement === "string" && r.statement !== "" && (r.side === "copy" || r.side === "mysql") && num(r.count) > 0)
     .map((r) => {
       const count = num(r.count), seconds = num(r.seconds), errors = Math.floor(num(r.errors));
+      const reasons = Object.entries(r.reasons && typeof r.reasons === "object" ? r.reasons : {})
+        .map(([k, n]) => [String(k), Math.floor(num(n))]).filter(([k, n]) => k && n > 0)
+        .sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1));
+      let fresh = null;
+      const f = r.side === "copy" && r.fresh && typeof r.fresh === "object" ? r.fresh : null;
+      if (f) {
+        fresh = { last: age(f.last_age_seconds), lastAt: f.last_as_of ? new Date(f.last_as_of) : null,
+          min: age(f.min_age_seconds), max: age(f.max_age_seconds),
+          known: Math.floor(num(f.known)), unknown: Math.floor(num(f.unknown)), why: String(f.unknown_reason || ""),
+          pending: f.pending === true, tailed: Math.floor(num(f.tailed)), snapshot: Math.floor(num(f.snapshot)) };
+        if (fresh.lastAt && isNaN(fresh.lastAt)) fresh.lastAt = null;
+      }
       return { text: r.statement, side: r.side, count: count, seconds: seconds,
         avg: seconds > 0 ? routerSecs(seconds / count) : "", slowest: num(r.slowest_seconds) > 0 ? routerSecs(r.slowest_seconds) : "",
         // Timeouts are among the errors: said apart, never added twice.
-        errors: errors, timeouts: Math.min(Math.floor(num(r.timeouts)), errors) };
+        errors: errors, timeouts: Math.min(Math.floor(num(r.timeouts)), errors), reasons: reasons, fresh: fresh };
     })
     .sort((x, y) => y.seconds - x.seconds || y.count - x.count);
   if (!rows.length) return { state: "none", notCounted: notCounted, limit: limit };
   const max = rows[0].seconds;
   for (const r of rows) r.pct = max > 0 ? (r.seconds / max) * 100 : 0;
-  return { state: "rows", shown: rows.slice(0, ROUTER_STATEMENTS_SHOWN), more: rows.slice(ROUTER_STATEMENTS_SHOWN), notCounted: notCounted, limit: limit };
+  return { state: "rows", rows: rows, notCounted: notCounted, limit: limit };
 }
+
+// routerStatementsPage is the part of m one page shows: rows of one side or
+// both, ROUTER_STATEMENTS_PER_PAGE at a time. Pure. The page asked for is
+// kept in range, so a list that shrank (a filter, a restarted router) never
+// shows an empty page.
+function routerStatementsPage(m, filter, page) {
+  const all = m && m.rows ? m.rows : [];
+  const rows = filter === "copy" || filter === "mysql" ? all.filter((r) => r.side === filter) : all;
+  const pages = Math.max(1, Math.ceil(rows.length / ROUTER_STATEMENTS_PER_PAGE));
+  const p = Math.min(Math.max(0, Math.floor(Number(page) || 0)), pages - 1);
+  return { rows: rows.slice(p * ROUTER_STATEMENTS_PER_PAGE, (p + 1) * ROUTER_STATEMENTS_PER_PAGE), page: p, pages: pages, total: rows.length,
+    counts: { all: all.length, mysql: all.filter((r) => r.side === "mysql").length, copy: all.filter((r) => r.side === "copy").length } };
+}
+
+// routerStatementsView is what the list shows for each server (filter and
+// page), kept across the panel's redraws: Refresh rebuilds the panel, and a
+// reader on page 3 of the copy's rows must stay there.
+const routerStatementsView = {};
 
 // routerStatements draws routerStatementsModel: one line per statement shape,
 // a bar as long as the time it took next to the one that took the most, in
-// the side's colour, and what it cost under it. The rest fold away.
-function routerStatements(m) {
+// the side's colour, and what it cost under it; five to a page, filtered by
+// side. A line opens the statement's detail (routerStatementDetail).
+function routerStatements(m, serverID) {
   const wrap = el("div", { class: "st-wrap" });
   if (m.state === "off") {
     // Folded: most routers run without it, and a paragraph on every panel
@@ -15563,28 +15598,153 @@ function routerStatements(m) {
   if (m.state === "none" && !m.notCounted) {
     wrap.append(el("p", { class: "form-hint", text: "No statement has finished on this server since the router started." }));
   }
-  const line = (r) => {
-    const facts = el("div", { class: "st-facts" },
-      el("span", { class: "st-side", text: r.side === "copy" ? "DBTrail's copy" : "your MySQL" }),
-      el("span", { text: trendCount(r.count) + (r.count === 1 ? " time" : " times") }));
-    if (r.avg) facts.append(el("span", {}, el("b", { text: r.avg }), " each"));
-    if (r.slowest && r.count > 1) facts.append(el("span", {}, "slowest ", el("b", { text: r.slowest })));
-    if (r.errors) facts.append(el("span", { class: "bad" }, el("b", { text: String(r.errors) }), r.errors === 1 ? " error" : " errors",
-      r.timeouts ? " (" + r.timeouts + " out of time)" : ""));
-    return el("div", { class: "st-row st-" + r.side },
-      el("div", { class: "st-track" }, el("span", { class: "st-bar", style: "width:" + Math.max(r.pct, 0.5).toFixed(1) + "%" })),
-      el("code", { class: "st-text", title: r.text, text: r.text }),
-      facts);
-  };
   if (m.state === "rows") {
-    for (const r of m.shown) wrap.append(line(r));
-    if (m.more.length) wrap.append(cnFine(m.more.length + " more", ...m.more.map(line)));
+    const key = serverID || "";
+    const v = routerStatementsView[key] || (routerStatementsView[key] = { filter: "all", page: 0 });
+    const body = el("div", { class: "st-body" });
+    const draw = () => {
+      const pg = routerStatementsPage(m, v.filter, v.page);
+      v.page = pg.page;
+      const tabs = el("div", { class: "st-filter", role: "group", "aria-label": "Show the statements answered by" });
+      for (const [f, label] of [["all", "All"], ["mysql", "Your MySQL"], ["copy", "DBTrail's copy"]]) {
+        const b = el("button", { class: "st-chip" + (v.filter === f ? " is-on" : ""), type: "button", "aria-pressed": v.filter === f ? "true" : "false" },
+          label, el("span", { class: "st-chip-n", text: String(pg.counts[f]) }));
+        b.onclick = () => { v.filter = f; v.page = 0; draw(); };
+        tabs.append(b);
+      }
+      const list = el("div", { class: "st-list" });
+      if (!pg.rows.length) {
+        list.append(el("p", { class: "form-hint", text: v.filter === "copy" ? "The copy has answered no statement on this server since the router started." : "Your MySQL has answered no statement on this server since the router started." }));
+      }
+      for (const r of pg.rows) list.append(routerStatementLine(r, () => routerStatementDetail(m, r)));
+      const kids = [tabs, list];
+      if (pg.pages > 1) {
+        const prev = el("button", { class: "btn btn-sm", type: "button", text: "Previous", disabled: pg.page === 0 });
+        const next = el("button", { class: "btn btn-sm", type: "button", text: "Next", disabled: pg.page >= pg.pages - 1 });
+        prev.onclick = () => { v.page = pg.page - 1; draw(); };
+        next.onclick = () => { v.page = pg.page + 1; draw(); };
+        const from = pg.page * ROUTER_STATEMENTS_PER_PAGE + 1, to = from + pg.rows.length - 1;
+        kids.push(el("div", { class: "st-pager" }, prev, el("span", { class: "st-pager-n", text: from + " to " + to + " of " + pg.total }), next));
+      }
+      body.replaceChildren(...kids);
+    };
+    draw();
+    wrap.append(body);
   }
   if (m.notCounted) {
     wrap.append(el("p", { class: "form-hint", text: trendCount(m.notCounted) + (m.notCounted === 1 ? " statement is" : " statements are") +
       " not listed: the list holds " + (m.limit || 200) + " lines for each server, one per statement and side, and a blank statement has no line." }));
   }
   return wrap;
+}
+
+// routerStatementLine is one statement on one side: a button that opens its
+// detail.
+function routerStatementLine(r, open) {
+  const facts = el("div", { class: "st-facts" },
+    el("span", { class: "st-side", text: r.side === "copy" ? "DBTrail's copy" : "your MySQL" }),
+    el("span", { text: trendCount(r.count) + (r.count === 1 ? " time" : " times") }));
+  if (r.avg) facts.append(el("span", {}, el("b", { text: r.avg }), " each"));
+  if (r.slowest && r.count > 1) facts.append(el("span", {}, "slowest ", el("b", { text: r.slowest })));
+  if (r.side === "copy" && r.fresh && r.fresh.last != null) facts.append(el("span", {}, "Lag ", el("b", { text: routerBehindWords(r.fresh.last) })));
+  if (r.errors) facts.append(el("span", { class: "bad" }, el("b", { text: String(r.errors) }), r.errors === 1 ? " error" : " errors",
+    r.timeouts ? " (" + r.timeouts + " out of time)" : ""));
+  const row = el("button", { class: "st-row st-" + r.side, type: "button", title: "Show where this statement ran, why, and how fresh its data was" },
+    el("span", { class: "st-track" }, el("span", { class: "st-bar", style: "width:" + Math.max(r.pct, 0.5).toFixed(1) + "%" })),
+    el("code", { class: "st-text", title: r.text, text: r.text }),
+    facts);
+  row.onclick = open;
+  return row;
+}
+
+// routerStatementFresh says how far behind capture the data of the copy's
+// answers to one statement was. Pure: a list of { k, v, note } facts and a
+// verdict sentence. Unknown is said as unknown, never as fresh.
+function routerStatementFresh(f, count) {
+  if (!f) return { verdict: "The router did not say how fresh these answers were: it is older than this page.", facts: [] };
+  const facts = [];
+  if (f.last != null) facts.push({ k: "Lag", v: routerBehindWords(f.last), note: "last answer" + (f.lastAt ? ", data up to " + f.lastAt.toLocaleTimeString() : "") });
+  else if (f.pending) facts.push({ k: "Lag", v: "being worked out", note: "last answer; the router places a snapshot within 30 seconds" });
+  else facts.push({ k: "Lag", v: "unknown", note: "last answer" + (f.why ? ": " + f.why : "") });
+  if (f.min != null) facts.push({ k: "Min lag", v: routerBehindWords(f.min), note: "" });
+  if (f.max != null) facts.push({ k: "Max lag", v: (f.unknown ? "at least " : "") + routerBehindWords(f.max), note: "" });
+  // The sentence is built from what was measured, never promised: "Fresh"
+  // only when every answer read every table up to date and none is unknown
+  // or waiting, and always with the most it was behind.
+  const most = f.max != null ? routerBehindWords(f.max) : "";
+  const upTo = most ? " Its data was at most " + most + " behind capture." : "";
+  const n = f.tailed + f.snapshot + f.unknown;
+  let verdict;
+  if (f.tailed && !f.snapshot && !f.unknown && !f.pending) {
+    verdict = "Fresh: every table it read was brought up to date with what capture had indexed." + upTo;
+  } else if (f.snapshot && !f.tailed && !f.unknown && !f.pending) {
+    verdict = "Not fresh: it read at least one table as of its snapshot, which DBTrail refreshes every few minutes, so its data was as old as that snapshot." + upTo;
+  } else if (n === 0 || (!f.tailed && !f.snapshot)) {
+    verdict = f.pending ? "How fresh it was is being worked out: the router places the snapshot it read within 30 seconds." : "How each answer read its tables is not known, so how fresh it was is not known.";
+  } else {
+    const parts = [];
+    if (f.tailed) parts.push(trendCount(f.tailed) + " read every table up to date");
+    if (f.snapshot) parts.push(trendCount(f.snapshot) + " read at least one table as of its snapshot");
+    if (f.unknown) parts.push("for " + trendCount(f.unknown) + " how fresh it was is not known");
+    verdict = "Mixed: of its answers, " + parts.join(", ") + "." + (most ? " Its data was at most " + most + " behind capture" + (f.unknown || f.pending ? ", counting only the answers whose lag is known." : ".") : "");
+  }
+  if (f.unknown) facts.push({ k: "Lag unknown", v: trendCount(f.unknown) + " of " + trendCount(count), note: f.why ? "last one: " + f.why : "" });
+  return { verdict: verdict, facts: facts };
+}
+
+// routerStatementDetail opens one statement: its full text, and for each
+// side that answered it how often, what it cost, why the router sent it
+// there, and, on the copy, how fresh the data was. Both sides of the same
+// statement are shown together: "34 times on the copy, once on MySQL" is
+// the answer to "why one side and not the other".
+function routerStatementDetail(m, picked) {
+  const d = openModal({ label: "Statement", title: "Statement", class: "st-modal" });
+  d.body.append(...routerStatementDetailParts(m, picked));
+}
+
+// routerStatementDetailParts is the detail's content, apart from the dialog
+// that holds it.
+function routerStatementDetailParts(m, picked) {
+  const sides = (m.rows || []).filter((r) => r.text === picked.text);
+  sides.sort((x, y) => (x.side === picked.side ? -1 : y.side === picked.side ? 1 : 0));
+  const parts = [el("pre", { class: "st-modal-text", text: picked.text })];
+  for (const r of sides) {
+    const sect = el("section", { class: "st-modal-side st-" + r.side });
+    sect.append(el("h3", { class: "st-modal-h" }, el("i", { class: "rs-dot" }), r.side === "copy" ? "Answered by DBTrail's copy" : "Answered by your MySQL"));
+    const facts = el("div", { class: "st-modal-facts" });
+    const fact = (k, v, note) => facts.append(el("div", { class: "st-modal-fact" }, el("div", { class: "st-modal-k", text: k }), el("div", { class: "st-modal-v", text: v }), note ? el("div", { class: "st-modal-note", text: note }) : ""));
+    fact("Times", trendCount(r.count), "");
+    if (r.avg) fact("Each", r.avg, "");
+    if (r.slowest) fact("Slowest", r.slowest, "");
+    if (r.errors) fact("Errors", String(r.errors), r.timeouts ? r.timeouts + " out of time" : "");
+    sect.append(facts);
+    if (r.side === "copy") {
+      const fr = routerStatementFresh(r.fresh, r.count);
+      sect.append(el("h4", { class: "st-modal-sub", text: "How fresh the data was" }));
+      sect.append(el("p", { class: "st-modal-verdict", text: fr.verdict }));
+      const ff = el("div", { class: "st-modal-facts" });
+      for (const x of fr.facts) ff.append(el("div", { class: "st-modal-fact" }, el("div", { class: "st-modal-k", text: x.k }), el("div", { class: "st-modal-v", text: x.v }), x.note ? el("div", { class: "st-modal-note", text: x.note }) : ""));
+      if (fr.facts.length) sect.append(ff);
+    } else {
+      sect.append(el("h4", { class: "st-modal-sub", text: "How fresh the data was" }));
+      sect.append(el("p", { class: "st-modal-verdict", text: "Current: your MySQL answered from its own tables, with no lag." }));
+    }
+    sect.append(el("h4", { class: "st-modal-sub", text: r.side === "copy" ? "Why the copy answered it" : "Why your MySQL answered it" }));
+    if (r.reasons.length) {
+      const ul = el("ul", { class: "st-modal-why" });
+      for (const [k, n] of r.reasons) ul.append(el("li", {}, el("b", { text: trendCount(n) + " ×" }), " " + (ROUTER_REASON_TEXT[k] || ROUTE_REASON_TEXT[k] || k)));
+      sect.append(ul);
+    } else {
+      sect.append(el("p", { class: "form-hint", text: "The router did not say why: it is older than this page." }));
+    }
+    parts.push(sect);
+  }
+  if (!sides.some((r) => r.side === "copy")) {
+    parts.push(el("p", { class: "form-hint", text: "The copy never answered this statement since the router started." }));
+  } else if (!sides.some((r) => r.side === "mysql")) {
+    parts.push(el("p", { class: "form-hint", text: "Your MySQL never answered this statement since the router started." }));
+  }
+  return parts;
 }
 
 const ROUTER_SIDE_HELP = {
@@ -15799,7 +15959,7 @@ function routingSwitch(fb, cur, rt, toggle, port) {
   if (sides) {
     try { statements = routerStatementsModel(rt, cur); } catch (err) { statements = null; }
   }
-  if (statements) wrap.append(routerStatements(statements));
+  if (statements) wrap.append(routerStatements(statements, cur && cur.id));
   return wrap;
 }
 

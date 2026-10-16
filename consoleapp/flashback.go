@@ -608,9 +608,14 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 					srv.RecordRouteDecision(id, string(route), string(reason))
 					tgt.SQL.NoteRoute(string(route))
 				},
-				Answered: func(side shim.RouteSide, stmt string, took time.Duration, failed, timedOut bool) {
+				Answered: func(side shim.RouteSide, reason shim.RouteReason, stmt string, took time.Duration, failed, timedOut bool) {
 					observe.ObserveRouteAnswer(id, string(side), took, failed, timedOut)
-					srv.RecordRouteAnswer(id, string(side), stmt, took, failed, timedOut)
+					shape := srv.RecordRouteAnswer(id, string(side), string(reason), stmt, took, failed, timedOut)
+					if side == shim.RouteCopy {
+						// Answered before Observe on the copy's path: the run
+						// it names is still pending, and NoteRoute commits it.
+						tgt.SQL.NoteAnswerShape(shape)
+					}
 				},
 			})
 		}

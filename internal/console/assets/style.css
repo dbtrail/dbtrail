@@ -3558,6 +3558,32 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .st-facts b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .st-facts .bad, .st-facts .bad b { color: var(--error); }
 .st-side { font-weight: 500; }
+.st-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.st-chip { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12.5px; font-weight: 500; color: var(--ink-2); background: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px; cursor: pointer; }
+.st-chip:hover { color: var(--ink); background: var(--raised); }
+.st-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.st-chip.is-on { color: var(--ink); border-color: var(--ink); font-weight: 600; }
+.st-chip-n { font-variant-numeric: tabular-nums; color: var(--ink-3); font-weight: 500; }
+button.st-row { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: none; border: 0; border-top: 1px solid var(--line-soft); cursor: pointer; padding: 8px 6px; margin: 0 -6px; width: calc(100% + 12px); border-radius: var(--r-sm); }
+button.st-row:hover { background: var(--raised); }
+button.st-row .st-track, button.st-row .st-bar { display: block; }
+button.st-row .st-facts { display: flex; }
+button.st-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.st-pager { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--ink-3); }
+.st-pager-n { font-variant-numeric: tabular-nums; }
+.st-modal-text { margin: 0 0 18px; padding: 12px 14px; background: var(--raised); border-radius: var(--r-sm); font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 30vh; overflow-y: auto; }
+.st-modal-side { padding: 14px 0 6px; border-top: 1px solid var(--line-soft); }
+.st-modal-h { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+.st-modal-side .rs-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; background: var(--ink); }
+.st-modal-side.st-copy .rs-dot { background: var(--pink-mid); }
+.st-modal-facts { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 0 0 6px; }
+.st-modal-k { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; }
+.st-modal-v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+.st-modal-note { font-size: 12px; color: var(--ink-3); max-width: 28ch; }
+.st-modal-sub { margin: 14px 0 4px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.st-modal-verdict { margin: 0 0 8px; font-size: 13.5px; color: var(--ink); max-width: 64ch; }
+.st-modal-why { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); }
+.st-modal-why b { color: var(--ink); font-variant-numeric: tabular-nums; }
 /* ── Copy jobs (#2330): a bar per job, then the list ── */
 .cj-card { padding: 28px 28px 20px; }
 .cj-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }

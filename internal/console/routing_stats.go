@@ -108,7 +108,7 @@ func (r *routingStats) record(serverID, route, reason string) {
 
 // answered tallies one finished statement. side is "copy" or "mysql"; any
 // other value is dropped, since no column of the page is its.
-func (r *routingStats) answered(serverID, side, shape string, took time.Duration, failed, timedOut bool) {
+func (r *routingStats) answered(serverID, side, reason, shape string, took time.Duration, failed, timedOut bool) {
 	if side != "copy" && side != "mysql" {
 		return
 	}
@@ -132,7 +132,7 @@ func (r *routingStats) answered(serverID, side, shape string, took time.Duration
 	}
 	a.add(took, failed, timedOut)
 	if r.statementsOn {
-		t.answeredStatement(shape, side, took, failed, timedOut)
+		t.answeredStatement(shape, side, reason, took, failed, timedOut)
 	}
 }
 
@@ -262,12 +262,18 @@ func (s *Server) RecordRouteDecision(serverID, route, reason string) {
 // RecordRouteAnswer tallies one statement a side finished: how long it took
 // and whether the client got an error for it. Called by the port's serving
 // layer from the shim's RouterConfig.Answered hook; safe from any goroutine.
-func (s *Server) RecordRouteAnswer(serverID, side, stmt string, took time.Duration, failed, timedOut bool) {
+//
+// reason is why the statement went to side (the shim's RouteReason). It
+// returns the statement's row in the per-statement table, "" while the table
+// is off, for the serving layer to hand the copy's pending run
+// (SQLOnCopy.NoteAnswerShape), so its lag is kept for that row too.
+func (s *Server) RecordRouteAnswer(serverID, side, reason, stmt string, took time.Duration, failed, timedOut bool) string {
 	shape := ""
 	if s.routing.statementsOn {
 		shape = statementShape(s.routing.shape, stmt)
 	}
-	s.routing.answered(serverID, side, shape, took, failed, timedOut)
+	s.routing.answered(serverID, side, reason, shape, took, failed, timedOut)
+	return shape
 }
 
 // RecordRouteUnavailable notes that a connection to serverID could not route

@@ -164,7 +164,11 @@ type RouterConfig struct {
 	// stmt is the statement as the client sent it: for a prepared one, its
 	// template, never the values it ran with (#2360). It may carry literals,
 	// so the caller keeps it to itself unless it blanks them.
-	Answered func(side RouteSide, stmt string, took time.Duration, failed, timedOut bool)
+	//
+	// reason is why the statement went to that side: the RouteReason
+	// Observe was told for the same statement, so a tally kept from either
+	// hook reads the same.
+	Answered func(side RouteSide, reason RouteReason, stmt string, took time.Duration, failed, timedOut bool)
 	// ReadOnly refuses every statement that is not a read or the session and
 	// transaction control around reads (readrouter.ReadOnlyRefusal), before
 	// anything is asked of the Router: a refused statement never reaches the
@@ -469,15 +473,17 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 			took := time.Since(start)
 			switch {
 			case err == nil:
-				answered(RouteMySQL, qstr, took, false, false)
+				answered(RouteMySQL, reason, qstr, took, false, false)
 			case !readrouter.IsLost(err):
 				// MySQL's own error: it ran the statement and said no.
-				answered(RouteMySQL, qstr, took, true, false)
+				answered(RouteMySQL, reason, qstr, took, true, false)
 			case errors.Is(ctx.Err(), context.DeadlineExceeded):
 				// The statement's time ran out. It reaches here as a lost
 				// connection (closing the socket is how the wait is ended),
-				// so it is the statement's own context that says which.
-				answered(RouteMySQL, qstr, took, true, true)
+				// so it is the statement's own context that says which. The
+				// forward observes a lost connection as upstream_lost, and
+				// the answer says the same.
+				answered(RouteMySQL, RouteReasonUpstreamLost, qstr, took, true, true)
 			}
 			// Any other lost connection is nobody's answer: the source was
 			// not reached, or the client left. The decision says so
@@ -489,7 +495,12 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 			start := time.Now()
 			res, err := runCopy(reason, unchangedWithin)
 			if err == nil {
-				answered(RouteCopy, qstr, time.Since(start), false, false)
+				// The reason route observes for the copy's answer, below.
+				why := RouteReasonExpensivePlan
+				if unchangedWithin > 0 {
+					why = RouteReasonTablesUnchanged
+				}
+				answered(RouteCopy, why, qstr, time.Since(start), false, false)
 			}
 			return res, err
 		}

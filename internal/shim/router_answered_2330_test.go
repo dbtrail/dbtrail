@@ -20,11 +20,17 @@ func answeredHandler(r *fakeRouter, f *fakeFreeSQL, cfg RouterConfig, decided, a
 	return h
 }
 
+// answeredReasons is the reason each answer carried, in order, for the test
+// that runs now (the tests here are not parallel).
+var answeredReasons []string
+
 func answeredConfig(cfg RouterConfig, decided, answered *[]string) RouterConfig {
+	answeredReasons = nil
 	cfg.Observe = func(route RouteSide, reason RouteReason) {
 		*decided = append(*decided, string(route)+"/"+string(reason))
 	}
-	cfg.Answered = func(side RouteSide, _ string, took time.Duration, failed, timedOut bool) {
+	cfg.Answered = func(side RouteSide, reason RouteReason, _ string, took time.Duration, failed, timedOut bool) {
+		answeredReasons = append(answeredReasons, string(reason))
 		how := "ok"
 		switch {
 		case timedOut && !failed:
@@ -71,9 +77,13 @@ func TestRouterAnswered_onceOnTheSideThatRan(t *testing.T) {
 			if len(answered) != 1 || answered[0] != tc.want {
 				t.Errorf("answered %v, want exactly [%s] (decided %v)", answered, tc.want, decided)
 			}
-			// The answer is on the side the decision named.
+			// The answer is on the side the decision named, for the reason
+			// the decision gave: a tally kept from either hook reads the same.
 			if len(decided) != 1 || strings.SplitN(decided[0], "/", 2)[0] != strings.SplitN(tc.want, "/", 2)[0] {
 				t.Errorf("decided %v, answered %v: not the same side", decided, answered)
+			}
+			if len(decided) == 1 && (len(answeredReasons) != 1 || answeredReasons[0] != strings.SplitN(decided[0], "/", 2)[1]) {
+				t.Errorf("decided %v, the answer said %v: not the same reason", decided, answeredReasons)
 			}
 		})
 	}
@@ -111,6 +121,9 @@ func TestRouterAnswered_timeoutAndLostConnection(t *testing.T) {
 	}
 	if len(answered) != 1 || answered[0] != "mysql/timeout" {
 		t.Errorf("out of time: answered %v, want [mysql/timeout] (decided %v)", answered, decided)
+	}
+	if len(decided) != 1 || len(answeredReasons) != 1 || "mysql/"+answeredReasons[0] != decided[0] {
+		t.Errorf("out of time: decided %v, the answer said %v: not the same reason", decided, answeredReasons)
 	}
 
 	r = &fakeRouter{toCopy: false, reason: "cheap", forwardErr: lost}
@@ -165,7 +178,7 @@ func TestRouterAnswered_preparedStatement(t *testing.T) {
 func TestRouterAnswered_carriesTheStatement(t *testing.T) {
 	var got []string
 	cfg := RouterConfig{MaxCopyAge: time.Minute}
-	cfg.Answered = func(side RouteSide, stmt string, _ time.Duration, _, _ bool) {
+	cfg.Answered = func(side RouteSide, _ RouteReason, stmt string, _ time.Duration, _, _ bool) {
 		got = append(got, string(side)+": "+stmt)
 	}
 	r := &fakeRouter{toCopy: false, reason: "cheap"}

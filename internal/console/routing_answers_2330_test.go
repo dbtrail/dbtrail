@@ -9,15 +9,15 @@ import (
 
 func TestRoutingStats_answersPerSide(t *testing.T) {
 	r := newRoutingStats(time.Now(), nil)
-	r.answered("a", "mysql", "", 2*time.Second, false, false)
-	r.answered("a", "mysql", "", 4*time.Second, true, false)
-	r.answered("a", "mysql", "", time.Second, true, true)
-	r.answered("a", "copy", "", 500*time.Millisecond, false, false)
+	r.answered("a", "mysql", "", "", 2*time.Second, false, false)
+	r.answered("a", "mysql", "", "", 4*time.Second, true, false)
+	r.answered("a", "mysql", "", "", time.Second, true, true)
+	r.answered("a", "copy", "", "", 500*time.Millisecond, false, false)
 	// Not counted as a timeout unless it failed, a side nobody knows is
 	// dropped, and a negative time (the clock stepped back) counts as zero.
-	r.answered("a", "copy", "", -time.Second, false, true)
-	r.answered("a", "refused", "", time.Second, false, false)
-	r.answered("b", "copy", "", time.Second, false, false)
+	r.answered("a", "copy", "", "", -time.Second, false, true)
+	r.answered("a", "refused", "", "", time.Second, false, false)
+	r.answered("b", "copy", "", "", time.Second, false, false)
 
 	got := r.snapshot()
 	my, cp := got["a"].Answers["mysql"], got["a"].Answers["copy"]
@@ -54,7 +54,7 @@ func TestRouterNumbers_carryAnswers(t *testing.T) {
 		t.Cleanup(r.Close)
 	}
 	srv.RecordRouteDecision("a", "copy", "expensive_plan")
-	srv.RecordRouteAnswer("a", "copy", "SELECT 1", 1500*time.Millisecond, false, false)
+	srv.RecordRouteAnswer("a", "copy", "expensive_plan", "SELECT 1", 1500*time.Millisecond, false, false)
 	n := srv.RouterNumbers()
 	if got := n.Servers["a"].Answers["copy"]; got != (RouteAnswers{Count: 1, Seconds: 1.5, SlowestSeconds: 1.5}) {
 		t.Fatalf("answers = %+v", got)

@@ -245,6 +245,10 @@ type copyAnswer struct {
 	// through, zero for none; allTailed says every table read had one.
 	tailThrough time.Time
 	allTailed   bool
+	// shape is the statement's row in the router's per-statement table
+	// (#2360), "" when the table is off: the answer's lag is kept for that
+	// row too.
+	shape string
 }
 
 // lastAnswerState is the SQLOnCopy's record of its connection's last answer.
@@ -270,6 +274,21 @@ func (q *SQLOnCopy) noteCopyAnswer(files map[string][]string, ok bool, ranAt, ta
 	a := copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt, tailThrough: tailThrough, allTailed: allTailed}
 	q.last.mu.Lock()
 	q.last.pending = &a
+	q.last.mu.Unlock()
+}
+
+// NoteAnswerShape names the statement whose run on the copy is pending, by
+// its row in the per-statement table. The port reports a statement the copy
+// answered before it decides the copy answered it (NoteRoute), so the shape
+// waits on the pending run and is kept only if that run becomes the answer.
+func (q *SQLOnCopy) NoteAnswerShape(shape string) {
+	if q == nil || shape == "" {
+		return
+	}
+	q.last.mu.Lock()
+	if q.last.pending != nil {
+		q.last.pending.shape = shape
+	}
 	q.last.mu.Unlock()
 }
 

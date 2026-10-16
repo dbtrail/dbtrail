@@ -3,6 +3,7 @@ package console
 import (
 	"cmp"
 	"context"
+	"maps"
 	"slices"
 	"time"
 	"unicode/utf8"
@@ -42,14 +43,51 @@ type RouterStatementRow struct {
 	// Side is "copy" or "mysql": the router sends each statement to one.
 	Side string `json:"side"`
 	RouteAnswers
+	// Reasons is why the router sent the row's statements to its side, in
+	// the shim's RouteReason vocabulary (a closed set: never an error's
+	// text), adding up to Count.
+	Reasons map[string]uint64 `json:"reasons"`
+	// Fresh is, on a row of the copy, how far behind capture the data of
+	// its answers was. Absent on MySQL's rows (the source is current) and
+	// on a copy row whose answers this process recorded no lag for.
+	Fresh *RouterStatementFresh `json:"fresh,omitempty"`
+}
+
+// RouterStatementFresh is the lag of the copy's answers to one statement:
+// the last answer's, and the least and most over the answers whose lag is
+// known, each one answer's own, in seconds rounded up.
+type RouterStatementFresh struct {
+	LastAgeSeconds *int64 `json:"last_age_seconds,omitempty"`
+	// LastAsOf is the instant the last answer's data was indexed through.
+	LastAsOf      string `json:"last_as_of,omitempty"`
+	MinAgeSeconds *int64 `json:"min_age_seconds,omitempty"`
+	MaxAgeSeconds *int64 `json:"max_age_seconds,omitempty"`
+	// Known and Unknown count the answers whose lag is and is not known;
+	// UnknownReason is why the last answer's is not (one of the fixed
+	// copyAgeWhy sentences). Pending: the last answer's waits on the index.
+	Known         uint64 `json:"known"`
+	Unknown       uint64 `json:"unknown"`
+	UnknownReason string `json:"unknown_reason,omitempty"`
+	Pending       bool   `json:"pending,omitempty"`
+	// Tailed counts the answers that read every table up to date with what
+	// capture indexed since its snapshot; Snapshot those that read some
+	// table as of its snapshot.
+	Tailed   uint64 `json:"tailed"`
+	Snapshot uint64 `json:"snapshot"`
 }
 
 type statementKey struct{ shape, side string }
 
 // statementTally is one server's table.
 type statementTally struct {
-	rows       map[statementKey]*routingAnswers
+	rows       map[statementKey]*statementRow
 	notCounted uint64
+}
+
+// statementRow is one row: what it cost, and why it went to its side.
+type statementRow struct {
+	routingAnswers
+	reasons map[string]uint64
 }
 
 // statementShape is the row a statement lands on, "" for none (nothing
@@ -68,9 +106,9 @@ func statementShape(fingerprint func(string) string, stmt string) string {
 
 // answeredStatement adds one finished statement to its row. Called with
 // r.mu held, side already checked.
-func (t *routingTally) answeredStatement(shape, side string, took time.Duration, failed, timedOut bool) {
+func (t *routingTally) answeredStatement(shape, side, reason string, took time.Duration, failed, timedOut bool) {
 	if t.statements == nil {
-		t.statements = &statementTally{rows: map[statementKey]*routingAnswers{}}
+		t.statements = &statementTally{rows: map[statementKey]*statementRow{}}
 	}
 	if shape == "" {
 		// Nothing but white space: no shape to show, and still counted, so
@@ -85,10 +123,11 @@ func (t *routingTally) answeredStatement(shape, side string, took time.Duration,
 			t.statements.notCounted++
 			return
 		}
-		a = &routingAnswers{}
+		a = &statementRow{reasons: map[string]uint64{}}
 		t.statements.rows[k] = a
 	}
 	a.add(took, failed, timedOut)
+	a.reasons[reason]++
 }
 
 // statementTablesLocked copies every server's table for the wire, r.mu
@@ -101,7 +140,7 @@ func (r *routingStats) statementTablesLocked() map[string]*RouterStatementTable 
 		}
 		tab := &RouterStatementTable{Rows: make([]RouterStatementRow, 0, len(t.statements.rows)), NotCounted: t.statements.notCounted, Limit: StatementTableLimit}
 		for k, a := range t.statements.rows {
-			tab.Rows = append(tab.Rows, RouterStatementRow{Statement: k.shape, Side: k.side, RouteAnswers: a.dto()})
+			tab.Rows = append(tab.Rows, RouterStatementRow{Statement: k.shape, Side: k.side, RouteAnswers: a.dto(), Reasons: maps.Clone(a.reasons)})
 		}
 		slices.SortFunc(tab.Rows, func(x, y RouterStatementRow) int {
 			return cmp.Or(cmp.Compare(y.Seconds, x.Seconds), cmp.Compare(y.Count, x.Count),

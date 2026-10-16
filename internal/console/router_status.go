@@ -229,6 +229,11 @@ func (s *Server) RouterNumbers() RouterNumbers {
 			if n.Statements == nil {
 				n.Statements = &RouterStatementTable{Rows: []RouterStatementRow{}, Limit: StatementTableLimit}
 			}
+			for i := range n.Statements.Rows {
+				if r := &n.Statements.Rows[i]; r.Side == "copy" {
+					r.Fresh = s.copyAges.shapeNow(id, r.Statement)
+				}
+			}
 		}
 		out.Servers[id] = n
 	}
