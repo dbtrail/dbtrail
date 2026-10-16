@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/copymirror"
 )
 
 // Every server keeps a local copy of its snapshots by default (#1681), in a
@@ -215,35 +216,59 @@ const localCopyRequiredMsg = "every server keeps a copy of its snapshots on this
 // localDirRequiredMsg refuses a request that empties a server's folder.
 const localDirRequiredMsg = "every server keeps a copy of its snapshots on this machine, so its folder cannot be emptied: send another folder, or leave baseline_dir out to keep this one"
 
+// localDirWithS3Msg refuses a request that would give a server with no
+// folder an S3 destination alone.
+const localDirWithS3Msg = "every server keeps a copy of its snapshots on this machine, so an S3 destination needs a folder beside it: " +
+	"send baseline_dir with it, or local_copy true in the server's snapshot settings for its default folder"
+
 // LocalCopyAssignment is one server GiveEveryServerALocalCopy gave its
-// default folder, or could not (Err set, nothing saved).
+// default folder, or could not (Err set, the entry left as it was).
 type LocalCopyAssignment struct {
 	ID, Name, Dir string
 	Err           error
+	// Moved names the snapshots taken from the server's mirror into the
+	// folder; MoveErr says why none or not all were (nil with Moved empty:
+	// the mirror held none).
+	Moved   []string
+	MoveErr error
 }
 
 // GiveEveryServerALocalCopy gives every entry that keeps its snapshots only
 // in S3 (a bucket and no folder: a file saved before #2431, or edited by
-// hand) its default folder, creates it and saves the entry. Only the process
-// that takes the snapshots calls it; the registry is never changed on read.
-// An entry that already has a folder, or has neither a folder nor a bucket,
-// is not touched. The returned list names what was done, for the log.
+// hand) its default folder, creates it and saves the entry, then moves the
+// complete snapshots its mirror holds into it, so SQL on its copy keeps
+// reading what it read before. Only the process that takes the snapshots
+// calls it; the registry is never changed on read. An entry that already has
+// a folder, or has neither a folder nor a bucket, is not touched; a
+// read-only registry (written by a newer version) is not touched at all.
+// The returned list names what was done, for the log.
 func (r *Registry) GiveEveryServerALocalCopy() []LocalCopyAssignment {
+	if r.ReadOnly() {
+		return nil
+	}
 	var out []LocalCopyAssignment
 	for _, e := range r.List() {
 		if strings.TrimSpace(e.BaselineS3) == "" || strings.TrimSpace(e.BaselineDir) != "" {
 			continue
 		}
+		// The mirror is named by the entry as it is now: once it has a
+		// folder it has none.
+		mirror := r.CopyMirrorDir(e)
 		a := LocalCopyAssignment{ID: e.ID, Name: e.Name, Dir: r.DefaultBaselineDir(e.ID)}
-		switch {
-		case a.Dir == "":
+		if a.Dir == "" {
 			a.Err = errors.New("this registry has no state directory to put the folder in")
-		default:
-			a.Err = prepareLocalSnapshotDir(a.Dir)
+			out = append(out, a)
+			continue
+		}
+		fresh := !dirExists(a.Dir)
+		if a.Err = prepareLocalSnapshotDir(a.Dir); a.Err == nil {
+			e.BaselineDir = a.Dir
+			if a.Err = r.Update(e); a.Err != nil && fresh {
+				_ = os.RemoveAll(a.Dir) // made by this call, for an entry that did not take it
+			}
 		}
 		if a.Err == nil {
-			e.BaselineDir = a.Dir
-			a.Err = r.Update(e)
+			a.Moved, a.MoveErr = copymirror.MoveSnapshots(mirror, a.Dir)
 		}
 		out = append(out, a)
 	}

@@ -383,7 +383,7 @@ func TestServersAPI_s3Store(t *testing.T) {
 	}
 
 	rec, body = doServersReq(t, srv, "PUT", "/api/servers/"+a.ID,
-		`{"name":"a","host":"h","port":"3306","user":"u","dbname":"a","archive_s3":"s3://shared/a/","baseline_s3":" s3://shared/bb/ ",`+
+		`{"name":"a","host":"h","port":"3306","user":"u","dbname":"a","archive_s3":"s3://shared/a/","baseline_s3":" s3://shared/bb/ ","baseline_dir":"`+t.TempDir()+`",`+
 			`"s3_endpoint":"http://minio:9000","s3_path_style":"","s3_region":"us-east-1"}`)
 	if rec.Code != 200 || !strings.Contains(string(body), `"baseline_s3":"s3://shared/bb/"`) {
 		t.Errorf("an edit with a padded Snapshots S3 location: %d %s, want 200 with it trimmed", rec.Code, body)
@@ -487,7 +487,7 @@ func TestRegistryS3Store_daemonDefaultBucketHasNoStore(t *testing.T) {
 func TestBackupSettings_s3StoreRefusals(t *testing.T) {
 	clearStores(t)
 	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "", "")
-	a, err := srv.cm.reg.Add(ServerEntry{Name: "A", DSN: "u:p@tcp(h:3306)/a", BaselineS3: "s3://bk/a/", S3Endpoint: "http://minio:9000"})
+	a, err := srv.cm.reg.Add(ServerEntry{Name: "A", DSN: "u:p@tcp(h:3306)/a", BaselineDir: t.TempDir(), BaselineS3: "s3://bk/a/", S3Endpoint: "http://minio:9000"})
 	if err != nil {
 		t.Fatal(err)
 	}

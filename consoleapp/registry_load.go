@@ -50,13 +50,19 @@ func loadConsoleRegistry(path string, cliRefreshes, takesSnapshots bool, baselin
 // seen again.
 func logLocalCopyAssignments(done []console.LocalCopyAssignment) {
 	for _, a := range done {
-		if a.Err != nil {
-			slog.Error("server keeps its snapshots only in S3 and could not be given a folder on this machine; "+
-				"give it one on the "+console.PageSnapshots+" page, or SQL on its copy stays unavailable",
+		switch {
+		case a.Err != nil:
+			slog.Error("server keeps its snapshots only in S3 and could not be given a folder on this machine, so it stays as it was; "+
+				"fix the reason and restart, or give it a folder on the "+console.PageSnapshots+" page",
 				"server", a.Name, "id", a.ID, "folder", a.Dir, "error", a.Err)
-			continue
+		case len(a.Moved) > 0:
+			slog.Warn("server kept its snapshots only in S3; it now also keeps them on this machine, "+
+				"and the snapshots its local mirror held were moved into its folder, so SQL on its copy reads what it read before",
+				"server", a.Name, "id", a.ID, "folder", a.Dir, "moved", a.Moved, "move_error", a.MoveErr)
+		default:
+			slog.Warn("server kept its snapshots only in S3; it now also keeps them on this machine, "+
+				"but SQL on its copy has no snapshot to read until its next one lands in the folder (take one on the "+console.PageSnapshots+" page)",
+				"server", a.Name, "id", a.ID, "folder", a.Dir, "moved", a.Moved, "move_error", a.MoveErr)
 		}
-		slog.Warn("server kept its snapshots only in S3; it now also keeps them on this machine, from its next snapshot on",
-			"server", a.Name, "id", a.ID, "folder", a.Dir)
 	}
 }

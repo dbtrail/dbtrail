@@ -493,6 +493,10 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		writeJSONError(w, http.StatusBadRequest, localDirRequiredMsg)
 		return
 	}
+	if entry.BaselineDir == "" && entry.BaselineS3 != "" && entry.BaselineS3 != before.BaselineS3 {
+		writeJSONError(w, http.StatusBadRequest, localDirWithS3Msg)
+		return
+	}
 	if req.KeepNewest != nil {
 		if err := validLocalKeepNewest(*req.KeepNewest); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())

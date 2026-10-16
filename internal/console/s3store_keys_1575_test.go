@@ -291,7 +291,9 @@ func TestServersAPI_s3Keys(t *testing.T) {
 func TestBackupSettings_keepsS3Keys(t *testing.T) {
 	clearStores(t)
 	srv := newBackupSettingsServer(t, BackupSettingsDefaults{}, "", "")
-	a, err := srv.cm.reg.Add(keyedEntry("A", "s3://bk/a/", "http://minio:9000", keyID, keySecret))
+	keyed := keyedEntry("A", "s3://bk/a/", "http://minio:9000", keyID, keySecret)
+	keyed.BaselineDir = t.TempDir() // every server keeps a local copy (#2431)
+	a, err := srv.cm.reg.Add(keyed)
 	if err != nil {
 		t.Fatal(err)
 	}
