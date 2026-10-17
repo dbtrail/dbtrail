@@ -57,6 +57,11 @@ type Config struct {
 	// OnStarted, when set, is called once replication has started on the
 	// slot: both source connections are open and the stream is attached.
 	OnStarted func()
+	// KnownShapes and LastChange turn on DDL inference (#2441): the last
+	// shape the index holds per table (oldest first), and the newest indexed
+	// change to a table before an LSN. LastChange nil = inference off.
+	KnownShapes []KnownShape
+	LastChange  func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
 }
 
 // Capturer decodes a PostgreSQL logical-replication stream into event.Event. It
@@ -183,7 +188,24 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		defer cancel()
 		return queryColumnAttrs(qctx, queryConn, relationID)
 	}
-	decoder := NewDecoder(resolvePK, c.cfg.Filters, c.logger, WithAttrResolver(attrResolver))
+	opts := []DecoderOption{WithAttrResolver(attrResolver)}
+	if c.cfg.LastChange != nil {
+		start, err := publicationOIDs(startupCtx, queryConn, c.cfg.Publication)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, WithDDLInference(DDLInference{
+			Known:     c.cfg.KnownShapes,
+			StartOIDs: start,
+			Lookup: func(oid uint32) (RelationFacts, error) {
+				qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				return queryRelationFacts(qctx, queryConn, oid)
+			},
+			LastChange: c.cfg.LastChange,
+		}))
+	}
+	decoder := NewDecoder(resolvePK, c.cfg.Filters, c.logger, opts...)
 
 	interval := c.cfg.StandbyInterval
 	if interval <= 0 {

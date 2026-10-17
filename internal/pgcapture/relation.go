@@ -2,6 +2,7 @@ package pgcapture
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -154,4 +155,59 @@ func queryColumnAttrs(ctx context.Context, conn *pgx.Conn, relationID uint32) (m
 		return nil, fmt.Errorf("pgcapture: iterate column attrs for relation OID %d: %w", relationID, err)
 	}
 	return attrs, nil
+}
+
+// publicationOIDs lists the OIDs of the tables a publication streams, as the
+// stream names them: the root under publish_via_partition_root = true, each
+// leaf under false (pg_publication_tables applies the same rule). Read once at
+// capture start: a table outside this set that the stream later describes is
+// new since the start (#2441).
+func publicationOIDs(ctx context.Context, conn *pgx.Conn, publication string) (map[uint32]bool, error) {
+	rows, err := conn.Query(ctx, `
+		SELECT c.oid
+		FROM pg_publication_tables pt
+		JOIN pg_namespace n ON n.nspname = pt.schemaname
+		JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = n.oid
+		WHERE pt.pubname = $1`, publication)
+	if err != nil {
+		return nil, fmt.Errorf("pgcapture: list tables of publication %q: %w", publication, err)
+	}
+	defer rows.Close()
+	out := map[uint32]bool{}
+	for rows.Next() {
+		var oid uint32
+		if err := rows.Scan(&oid); err != nil {
+			return nil, fmt.Errorf("pgcapture: scan tables of publication %q: %w", publication, err)
+		}
+		out[oid] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pgcapture: list tables of publication %q: %w", publication, err)
+	}
+	return out, nil
+}
+
+// relationFactsQuery reads what the live catalog says about one relation OID:
+// its current name and, for a partition, its parent. No row = the OID no
+// longer exists.
+const relationFactsQuery = `SELECT n.nspname, c.relname, c.relispartition,
+	COALESCE((SELECT pn.nspname || '.' || pc.relname
+	          FROM pg_inherits i
+	          JOIN pg_class pc ON pc.oid = i.inhparent
+	          JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+	          WHERE i.inhrelid = c.oid LIMIT 1), '')
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.oid = $1`
+
+func queryRelationFacts(ctx context.Context, conn *pgx.Conn, oid uint32) (RelationFacts, error) {
+	var f RelationFacts
+	err := conn.QueryRow(ctx, relationFactsQuery, oid).Scan(&f.Schema, &f.Table, &f.IsPartition, &f.Parent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RelationFacts{}, nil
+	}
+	if err != nil {
+		return RelationFacts{}, fmt.Errorf("pgcapture: catalog lookup for relation OID %d: %w", oid, err)
+	}
+	f.Exists = true
+	return f, nil
 }

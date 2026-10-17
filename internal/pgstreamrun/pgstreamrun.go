@@ -159,6 +159,15 @@ func One(ctx context.Context, cfg Config) error {
 		state.eventsIndexed = saved.eventsIndexed
 	}
 
+	// The last shape the index holds per table (#2441), so the first
+	// Relation after a restart is compared with it instead of being taken as
+	// the first version. A failure here stops the start: carrying on with
+	// nothing known would silently turn DDL inference off for every table.
+	known, err := loadKnownShapes(indexDB)
+	if err != nil {
+		return err
+	}
+
 	cap := pgcapture.New(pgcapture.Config{
 		ReplDSN:            cfg.ReplDSN,
 		QueryDSN:           cfg.QueryDSN,
@@ -169,6 +178,8 @@ func One(ctx context.Context, cfg Config) error {
 		ExpectExistingSlot: saved != nil, // resuming → the slot must still exist + be valid
 		OnStarted:          sourceConnectedHook(cfg.Hooks),
 		Logger:             logger,
+		KnownShapes:        known,
+		LastChange:         lastIndexedChange(indexDB),
 	})
 	idx := indexer.New(indexDB, cfg.BatchSize)
 
@@ -532,8 +543,10 @@ func streamLoopPG(
 					return err
 				}
 			case event.EventDDL:
-				// A DDL marker — on the PostgreSQL path today only a TRUNCATE audit
-				// record (#827). Persist it to schema_changes immediately, the
+				// A DDL marker: a TRUNCATE audit record (#827), or a schema change
+				// inferred from a Relation shape (#2441; the decoder emits it
+				// BEFORE that shape's EventRelation, so a crash between the two
+				// re-delivers and re-records it rather than losing it). Persist it to schema_changes immediately, the
 				// source-neutral analog of the MySQL DDL path, so the truncate is a
 				// durable, queryable record (bintrail-mcp list_schema_changes / the
 				// schema_changes table) rather than a transient warn. Like the
@@ -544,7 +557,7 @@ func streamLoopPG(
 				// before the next checkpoint re-delivers the TRUNCATE and re-records a
 				// benign duplicate marker.
 				if err := indexer.InsertSchemaChange(indexDB, ev, nil); err != nil {
-					return fmt.Errorf("pgstreamrun: record TRUNCATE marker for %s.%s: %w", ev.Schema, ev.Table, err)
+					return fmt.Errorf("pgstreamrun: record %s for %s.%s: %w", ev.DDLType, ev.Schema, ev.Table, err)
 				}
 			case event.EventRelation:
 				// A relation's shape (#533): persist it as a schema snapshot and record
@@ -660,4 +673,50 @@ func resolveStartLSN(saved *pgStreamState, flagLSN uint64, logger *slog.Logger) 
 	}
 	logger.Info("pgstreamrun: first run — starting from the slot's consistent point")
 	return 0
+}
+
+// loadKnownShapes reads the last shape persisted per table for DDL inference
+// (#2441).
+func loadKnownShapes(indexDB *sql.DB) ([]pgcapture.KnownShape, error) {
+	shapes, err := metadata.LoadPGShapes(context.Background(), indexDB)
+	if err != nil {
+		return nil, fmt.Errorf("pgstreamrun: load the last known table shapes: %w", err)
+	}
+	out := make([]pgcapture.KnownShape, len(shapes))
+	for i, s := range shapes {
+		k := pgcapture.KnownShape{OID: s.Relation.OID, Schema: s.Relation.Schema, Table: s.Relation.Table}
+		for _, c := range s.Relation.Columns {
+			k.Columns = append(k.Columns, pgcapture.ShapeColumn{Name: c.Name, TypeOID: c.TypeOID, TypeMod: c.TypeMod})
+		}
+		out[i] = k
+	}
+	return out, nil
+}
+
+// lastIndexedChange returns the newest indexed change to a table that
+// committed before an LSN: the lower bound of a schema change when the stream
+// has not decoded one since it started (#2441). The plain comparison uses
+// idx_row_lookup; the BINARY one keeps the index's case-insensitive collation
+// from answering for "A" when asked about a.
+func lastIndexedChange(indexDB *sql.DB) func(schema, table string, beforeLSN uint64) (uint64, time.Time, bool, error) {
+	return func(schema, table string, beforeLSN uint64) (uint64, time.Time, bool, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
+		defer cancel()
+		var lsn uint64
+		var at time.Time
+		err := indexDB.QueryRowContext(ctx, `
+			SELECT end_pos, event_timestamp FROM binlog_events
+			WHERE schema_name = ? AND table_name = ?
+			  AND BINARY schema_name = ? AND BINARY table_name = ?
+			  AND end_pos < ?
+			ORDER BY event_timestamp DESC, event_id DESC
+			LIMIT 1`, schema, table, schema, table, beforeLSN).Scan(&lsn, &at)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, time.Time{}, false, nil
+		}
+		if err != nil {
+			return 0, time.Time{}, false, err
+		}
+		return lsn, at.UTC(), true, nil
+	}
 }
