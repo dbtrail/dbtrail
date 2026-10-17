@@ -433,6 +433,11 @@ func streamLoopPG(
 	// never hits (its RelationMessage always precedes it).
 	snapshotByTable := make(map[string]uint32)
 
+	// inferredSeen counts the inferred schema changes written in the current
+	// transaction, so a resent one is recognised without dropping a second
+	// real change of the same kind in the same transaction (#2441).
+	inferredSeen := &inferredCounter{}
+
 	// The writer (#2391): rows of complete transactions are batched together,
 	// and the transaction being read is held in an index transaction of its
 	// own until its commit, so a reader never sees part of it (past the
@@ -541,6 +546,7 @@ func streamLoopPG(
 				// The boundary: record the commit LSN; its rows are already in the
 				// writer (pgoutput delivers them before the commit).
 				lastCommitLSN = ev.EndPos
+				inferredSeen.reset()
 				if err := w.End(); err != nil {
 					return err
 				}
@@ -558,7 +564,7 @@ func streamLoopPG(
 				// cursor) and does NOT force a flush of the in-flight batch. A crash
 				// before the next checkpoint re-delivers the TRUNCATE and re-records a
 				// benign duplicate marker.
-				if dup, err := inferredRowRecorded(indexDB, ev); err != nil {
+				if dup, err := inferredSeen.recorded(indexDB, ev); err != nil {
 					return fmt.Errorf("pgstreamrun: check for an already recorded %s on %s.%s: %w", ev.DDLType, ev.Schema, ev.Table, err)
 				} else if dup {
 					continue
@@ -729,16 +735,31 @@ func lastIndexedChange(indexDB *sql.DB) func(schema, table string, beforeLSN uin
 	}
 }
 
-// inferredRowRecorded reports whether an inferred schema change (#2441) is
+// inferredCounter recognises an inferred schema change (#2441) that is
 // already in schema_changes, written before a restart made PostgreSQL resend
-// the transaction that produced it. The same change is the same table OID at
-// the same stream position with the same kind; a DROP and a RENAME of one OID
-// at one position are the same change (which of the two depends on the live
-// catalog, read again on the resend). The text is not compared: a resend can
-// word the same change differently (a lower bound found another way, a name
-// read from a catalog that moved on). Other DDL markers are not checked (a
-// TRUNCATE recorded twice stays a benign duplicate, as before).
-func inferredRowRecorded(indexDB *sql.DB, ev event.Event) (bool, error) {
+// the transaction that produced it.
+//
+// The same change is the same table OID at the same stream position with the
+// same kind; a DROP and a RENAME of one OID at one position count as one kind
+// (which of the two depends on the live catalog, read again on the resend).
+// The text is not compared: a resend can word the same change differently.
+// One transaction can change one table twice the same way (two ALTERs), so
+// existence is not enough: the n-th such change of a transaction is a resend
+// only when the index already holds more than n-1 of them. A resend emits
+// them in the same order. Other DDL markers are not checked (a TRUNCATE
+// recorded twice stays a benign duplicate, as before).
+type inferredCounter struct{ emitted map[string]int }
+
+func (c *inferredCounter) reset() { c.emitted = nil }
+
+func inferredFamily(k event.DDLKind) string {
+	if k == event.DDLDropTable || k == event.DDLRenameTable {
+		return "gone"
+	}
+	return string(k)
+}
+
+func (c *inferredCounter) recorded(indexDB *sql.DB, ev event.Event) (bool, error) {
 	if !strings.HasPrefix(ev.DDLQuery, event.InferredDDLPrefix) {
 		return false, nil
 	}
@@ -746,32 +767,46 @@ func inferredRowRecorded(indexDB *sql.DB, ev event.Event) (bool, error) {
 	if !ok {
 		return false, nil
 	}
+	// The row that carries the text: the first table's (a rename writes a
+	// second row, under the new name, that points at it).
+	sch, tbl := ev.Schema, ev.Table
+	if len(ev.DDLTables) > 0 {
+		sch, tbl = ev.DDLTables[0].Schema, ev.DDLTables[0].Table
+	}
+	fam := inferredFamily(ev.DDLType)
+	key := fmt.Sprintf("%d/%d/%s", ev.EndPos, oid, fam)
+	if c.emitted == nil {
+		c.emitted = map[string]int{}
+	}
+	before := c.emitted[key]
+	c.emitted[key] = before + 1
+
 	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
 	defer cancel()
 	rows, err := indexDB.QueryContext(ctx, `
 		SELECT ddl_type FROM schema_changes
-		WHERE binlog_pos = ? AND binlog_file = ? AND ddl_query LIKE ?`,
-		ev.EndPos, ev.BinlogFile, fmt.Sprintf("%s oid=%d;%%", event.InferredDDLPrefix, oid))
+		WHERE binlog_pos = ? AND binlog_file = ?
+		  AND BINARY schema_name = ? AND BINARY table_name = ?
+		  AND ddl_query LIKE ?`,
+		ev.EndPos, ev.BinlogFile, sch, tbl, fmt.Sprintf("%s oid=%d;%%", event.InferredDDLPrefix, oid))
 	if err != nil {
 		return false, err
 	}
 	defer rows.Close()
-	family := func(k string) string {
-		if k == string(event.DDLDropTable) || k == string(event.DDLRenameTable) {
-			return "gone"
-		}
-		return k
-	}
+	held := 0
 	for rows.Next() {
 		var kind string
 		if err := rows.Scan(&kind); err != nil {
 			return false, err
 		}
-		if family(kind) == family(string(ev.DDLType)) {
-			return true, nil
+		if inferredFamily(event.DDLKind(kind)) == fam {
+			held++
 		}
 	}
-	return false, rows.Err()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return held > before, nil
 }
 
 // inferredOID reads the table OID from an inferred row's marker.

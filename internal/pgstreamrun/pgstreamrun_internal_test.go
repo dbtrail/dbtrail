@@ -213,3 +213,44 @@ func TestInferredOID_2441(t *testing.T) {
 		}
 	}
 }
+
+// Two ALTERs of one table in one transaction carry the same position, OID
+// and kind. After a resend, the index already holding the first must skip
+// only the first: the second is a real change.
+func TestInferredCounter_twoChangesOfOneKindInOneTransaction_2441(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	alter := func(text string) event.Event {
+		return event.Event{BinlogFile: "0/2", EndPos: 2, Schema: "s", Table: "a", EventType: event.EventDDL, DDLType: event.DDLAlterTable,
+			DDLQuery: event.InferredDDLPrefix + " oid=10; instant=at-or-before; low=none; high=0/2@2026-01-01T00:00:00Z */ " + text}
+	}
+	held := sqlmock.NewRows([]string{"ddl_type"}).AddRow("ALTER TABLE")
+	mock.ExpectQuery("FROM schema_changes").WithArgs(uint64(2), "0/2", "s", "a", event.InferredDDLPrefix+" oid=10;%").WillReturnRows(held)
+	mock.ExpectQuery("FROM schema_changes").WithArgs(uint64(2), "0/2", "s", "a", event.InferredDDLPrefix+" oid=10;%").
+		WillReturnRows(sqlmock.NewRows([]string{"ddl_type"}).AddRow("ALTER TABLE"))
+
+	c := &inferredCounter{}
+	if dup, err := c.recorded(db, alter("ALTER TABLE s.a: added x (text)")); err != nil || !dup {
+		t.Fatalf("first ALTER: dup %v err %v, want recorded already", dup, err)
+	}
+	if dup, err := c.recorded(db, alter("ALTER TABLE s.a: added y (text)")); err != nil || dup {
+		t.Fatalf("second ALTER: dup %v err %v, want a new row", dup, err)
+	}
+	c.reset()
+
+	// A RENAME is counted on the row that carries its text, the old name's;
+	// a DROP at the same position and OID is the same change.
+	mock.ExpectQuery("FROM schema_changes").WithArgs(uint64(2), "0/2", "s", "old", event.InferredDDLPrefix+" oid=10;%").
+		WillReturnRows(sqlmock.NewRows([]string{"ddl_type"}).AddRow("RENAME TABLE"))
+	drop := event.Event{BinlogFile: "0/2", EndPos: 2, Schema: "s", Table: "old", EventType: event.EventDDL, DDLType: event.DDLDropTable,
+		DDLQuery: event.InferredDDLPrefix + " oid=10; instant=at-or-before; low=none; high=0/2@2026-01-01T00:00:00Z */ DROP TABLE s.old"}
+	if dup, err := c.recorded(db, drop); err != nil || !dup {
+		t.Fatalf("DROP after a recorded RENAME of the same OID: dup %v err %v", dup, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
