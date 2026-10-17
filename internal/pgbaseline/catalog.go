@@ -137,12 +137,11 @@ func warnPartitioned(tables []tableInfo, publication string, logger *slog.Logger
 // columns from reverse-INSERTs, #557). Dropped columns are excluded too,
 // which also matches the delta path.
 //
-// Publication COLUMN LISTS (PG15+, `FOR TABLE t (a, b)`) are not a divergence
-// risk here: bintrail requires REPLICA IDENTITY FULL on every captured table,
-// and PostgreSQL rejects UPDATE/DELETE on a table published with a column
-// list narrower than its replica identity — so any table whose mutations the
-// delta path can capture is effectively published with ALL columns, matching
-// the full catalog set selected below.
+// Publication COLUMN LISTS (PG15+, `FOR TABLE t (a, b)`) would make the
+// stream carry fewer columns than this list (INSERTs still go through on such
+// a table). What keeps the two equal is capture, not this function: the
+// capturer refuses any published table with a column list
+// (pgcapture restrictedPublicationError), so no delta is ever indexed for one.
 //
 // The table is looked up by the OID discovery read, not by name, so the
 // columns are those of the exact relation discovery listed. Each column comes

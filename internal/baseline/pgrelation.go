@@ -12,9 +12,12 @@ import (
 // transaction (#1596 slice 1). The value is PGRelation as JSON.
 //
 // The column list is the one the file stores (live, not dropped, not
-// generated, attnum order), which is also the column list a pgoutput Relation
-// message carries, so a later shape can be compared against it by
-// (name, type_oid, typmod) and the OID survives a rename (#2441).
+// generated, attnum order). On PostgreSQL 14-17 that is also the column list a
+// pgoutput Relation message carries, so a later shape can be compared against
+// it by (name, type_oid, typmod), and the OID survives a rename (#2441). On
+// PostgreSQL 18 a publication created WITH (publish_generated_columns =
+// stored) also streams STORED generated columns, which this list leaves out:
+// a comparison must account for that before it reads the difference as DDL.
 //
 // Absent on MySQL/MariaDB baselines and on PostgreSQL baselines written before
 // this key existed.
