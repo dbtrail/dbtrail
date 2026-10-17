@@ -1059,12 +1059,19 @@ func buildFilters(opts query.Options, cols map[string]bool) ([]string, []any) {
 			where = append(where, "event_timestamp >= ?")
 			args = append(args, *hint)
 		}
-		// Exact binlog lower bound, mirroring UntilPos's rollover-safe file
-		// ordering (#840) below, inverted for a lower bound.
-		where = append(where, "(length(binlog_file) > length(?)"+
-			" OR (length(binlog_file) = length(?) AND binlog_file > ?)"+
-			" OR (binlog_file = ? AND start_pos >= ?))")
-		args = append(args, opts.SincePos.File, opts.SincePos.File, opts.SincePos.File, opts.SincePos.File, posArg(opts.SincePos.Pos))
+		if opts.SincePos.IsLSN() {
+			// A PostgreSQL anchor (#1596): the commit LSN, by number, as
+			// internal/query's buildQuery does.
+			where = append(where, "start_pos >= ?")
+			args = append(args, posArg(opts.SincePos.Pos))
+		} else {
+			// Exact binlog lower bound, mirroring UntilPos's rollover-safe file
+			// ordering (#840) below, inverted for a lower bound.
+			where = append(where, "(length(binlog_file) > length(?)"+
+				" OR (length(binlog_file) = length(?) AND binlog_file > ?)"+
+				" OR (binlog_file = ? AND start_pos >= ?))")
+			args = append(args, opts.SincePos.File, opts.SincePos.File, opts.SincePos.File, opts.SincePos.File, posArg(opts.SincePos.Pos))
+		}
 	} else if opts.Since != nil {
 		where = append(where, "event_timestamp >= ?")
 		args = append(args, *opts.Since)
@@ -1073,7 +1080,11 @@ func buildFilters(opts query.Options, cols map[string]bool) ([]string, []any) {
 		where = append(where, "event_timestamp <= ?")
 		args = append(args, *opts.Until)
 	}
-	if opts.UntilPos != nil {
+	if opts.UntilPos != nil && opts.UntilPos.IsLSN() {
+		// A PostgreSQL anchor (#1596): the commit LSN, by number.
+		where = append(where, "end_pos <= ?")
+		args = append(args, posArg(opts.UntilPos.Pos))
+	} else if opts.UntilPos != nil {
 		// Exact binlog upper bound, mirroring the live-MySQL path (query.go):
 		// events whose end position is at-or-before the anchor. File order is
 		// length-then-lexicographic so the .999999 → .1000000 suffix rollover
