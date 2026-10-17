@@ -313,6 +313,7 @@ func (d *Decoder) cacheRelation(m *pglogrepl.RelationMessage) error {
 	}
 
 	d.relations[m.RelationID] = &relationInfo{
+		oid:     m.RelationID,
 		schema:  m.Namespace,
 		table:   m.RelationName,
 		columns: cols,
@@ -359,6 +360,7 @@ func relationEvent(rel *relationInfo) event.Event {
 		Table:     rel.table,
 		EventType: event.EventRelation,
 		Relation: &metadata.PGRelationSchema{
+			OID:     rel.oid,
 			Schema:  rel.schema,
 			Table:   rel.table,
 			Columns: cols,

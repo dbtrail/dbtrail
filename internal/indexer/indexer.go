@@ -738,6 +738,15 @@ func EnsureSchema(db *sql.DB) error {
 	); err != nil {
 		return err
 	}
+	// pg_relation_oid is the PostgreSQL table's OID (#2441): the identity a
+	// table keeps across a rename, so the shape last seen for a table can be
+	// found again after a restart and a DDL inferred from the next Relation
+	// message. Nullable: MySQL snapshots and older PostgreSQL ones leave it NULL.
+	if err := ensureColumn(db, "schema_snapshots", "pg_relation_oid",
+		`ALTER TABLE schema_snapshots ADD COLUMN pg_relation_oid INT UNSIGNED DEFAULT NULL COMMENT 'PostgreSQL pg_class OID of the relation (pgoutput RelationID), stable across a rename; NULL for MySQL snapshots and PostgreSQL snapshots written before #2441' AFTER is_identity_always`,
+	); err != nil {
+		return err
+	}
 	// query_text/query_hash carry the original SQL statement that produced each
 	// row event (#699): the text from the binlog's ROWS_QUERY/ANNOTATE_ROWS
 	// event (opt-in on the source via binlog_rows_query_log_events /

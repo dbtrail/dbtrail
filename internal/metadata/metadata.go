@@ -805,6 +805,9 @@ type PGRelationColumn struct {
 // reverse would be an import cycle) and because WritePGSnapshot — its only
 // consumer — belongs next to TakeSnapshot.
 type PGRelationSchema struct {
+	// OID is the relation's pg_class OID (the RelationMessage's RelationID),
+	// which survives a rename (#2441). 0 = unknown, stored as NULL.
+	OID     uint32
 	Schema  string
 	Table   string
 	Columns []PGRelationColumn // table-ordinal order
@@ -863,13 +866,17 @@ func WritePGSnapshot(ctx context.Context, db *sql.DB, rel *PGRelationSchema) (in
 	}
 
 	snapshotTime := time.Now().UTC()
-	valClause := strings.TrimRight(strings.Repeat("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?),", len(rel.Columns)), ",")
+	valClause := strings.TrimRight(strings.Repeat("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?),", len(rel.Columns)), ",")
 	insertSQL := "INSERT INTO schema_snapshots " +
 		"(snapshot_id, snapshot_time, schema_name, table_name, column_name, " +
 		"ordinal_position, column_key, data_type, column_type, is_nullable, column_default, is_generated, " +
-		"pg_type_oid, pg_type_mod, is_identity_always) VALUES " + valClause
+		"pg_type_oid, pg_type_mod, is_identity_always, pg_relation_oid) VALUES " + valClause
 
-	args := make([]any, 0, len(rel.Columns)*15)
+	var relOID any // NULL when unknown, never a fake 0
+	if rel.OID != 0 {
+		relOID = rel.OID
+	}
+	args := make([]any, 0, len(rel.Columns)*16)
 	for _, c := range rel.Columns {
 		columnKey := ""
 		if c.IsPK {
@@ -878,7 +885,7 @@ func WritePGSnapshot(ctx context.Context, db *sql.DB, rel *PGRelationSchema) (in
 		args = append(args,
 			nextID, snapshotTime, rel.Schema, rel.Table, c.Name,
 			c.Ordinal, columnKey, "", nil, "", nil, c.IsGenerated,
-			c.TypeOID, c.TypeMod, c.IsIdentityAlways,
+			c.TypeOID, c.TypeMod, c.IsIdentityAlways, relOID,
 		)
 	}
 	if _, err = db.ExecContext(ctx, insertSQL, args...); err != nil {

@@ -33,6 +33,7 @@ type relColumn struct {
 // but built entirely from the in-band RelationMessage (column names arrive in the
 // stream) plus a one-time catalog primary-key lookup — no schema_snapshots needed.
 type relationInfo struct {
+	oid     uint32 // pg_class OID = RelationMessage.RelationID; survives a rename (#2441)
 	schema  string
 	table   string
 	columns []relColumn           // ordinal order, matching the tuple column order
