@@ -214,12 +214,25 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 	// we are about to read) is what keeps the types identical across a refresh
 	// chain: Parquet's own types are lossy in the other direction — a DECIMAL, a
 	// TIME and a JSON column are all "string" once written.
-	cols, err := baseline.ParseSchemaText(in.CreateTableSQL)
-	if err != nil {
-		return fmt.Errorf("parse the baseline's embedded CREATE TABLE for %s.%s: %w", in.Schema, in.Table, err)
-	}
-	if err := checkSchemaMatchesBaseline(cols, colNames, in.Schema, in.Table); err != nil {
-		return err
+	var cols []baseline.Column
+	if in.PG {
+		// PostgreSQL (#1596): no CREATE TABLE; the baseline's own text
+		// columns, which must be exactly the ones its recorded shape names.
+		rel, _, err := baseline.ParsePGRelation(in.SourceBaseline.Metadata.PGRelation)
+		if err != nil {
+			return fmt.Errorf("%s.%s: read the snapshot's recorded table shape: %w", in.Schema, in.Table, err)
+		}
+		if err := checkPGFileColumns(rel, colNames, in.Schema, in.Table); err != nil {
+			return err
+		}
+		cols = rawTextColumns(colNames)
+	} else {
+		if cols, err = baseline.ParseSchemaText(in.CreateTableSQL); err != nil {
+			return fmt.Errorf("parse the baseline's embedded CREATE TABLE for %s.%s: %w", in.Schema, in.Table, err)
+		}
+		if err := checkSchemaMatchesBaseline(cols, colNames, in.Schema, in.Table); err != nil {
+			return err
+		}
 	}
 
 	md := snapshotFileMetadata(in)
@@ -262,6 +275,7 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		PKCols:            in.PKCols,
 		Changes:           in.Changes,
 		Spill:             in.Spill,
+		PGTextPK:          in.PG,
 		CheckPass: func(m map[string]*query.ResultRow) error {
 			return checkPostBaselineColumns(in, m, colNames)
 		},
@@ -312,6 +326,9 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 		md[baseline.MetaKeyLockMode] = stamp
 	}
 	in.FoldedFrom.Next().Stamp(md)
+	if in.PG {
+		return pgSnapshotFileMetadata(in, md)
+	}
 	if in.LastEventID > 0 {
 		md[baseline.MetaKeyLastEventID] = strconv.FormatUint(in.LastEventID, 10)
 	}
@@ -637,6 +654,17 @@ func orNone(s []string) []string {
 func renderBaselineValue(col baseline.Column, v any) (text string, isNull bool, err error) {
 	if v == nil {
 		return "", true, nil
+	}
+	if col.RawText {
+		// PostgreSQL (#1596): the value is PostgreSQL's own text, in the
+		// baseline and in every captured change. Anything else (a decoded
+		// number or bool, an unchanged-TOAST marker) has no correct text
+		// here: the MySQL rules below would write "1" for true, or a Go map.
+		s, ok := v.(string)
+		if !ok {
+			return "", false, fmt.Errorf("column %s: a %T value where PostgreSQL text was expected", col.Name, v)
+		}
+		return s, false, nil
 	}
 	if dt := col.MySQLType; metadata.MariaDBFixedWidth(dt) > 0 {
 		// MariaDB UUID/INET: the copy holds the server's text (mydumper dumps

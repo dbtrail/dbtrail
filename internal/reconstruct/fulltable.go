@@ -1896,6 +1896,15 @@ func prepareMerge(ctx context.Context, in mergeInput) ([]string, error) {
 // the fold's own map is empty.
 func checkPostBaselineColumns(in mergeInput, changes map[string]*query.ResultRow, colNames []string) error {
 	extra := postBaselineColumns(changes, colNames)
+	if in.PG && len(in.PGGenerated) > 0 && len(extra) > 0 {
+		kept := extra[:0]
+		for _, col := range extra {
+			if !in.PGGenerated[col] {
+				kept = append(kept, col)
+			}
+		}
+		extra = kept
+	}
 	if gen := generatedColumnsIn(in.CreateTableSQL); len(gen) > 0 && len(extra) > 0 {
 		kept := extra[:0]
 		var dropped []string
@@ -1991,6 +2000,18 @@ type mergeInput struct {
 	SnapshotAt     time.Time
 	Cut            *query.BinlogPos
 	SourceBaseline baselineMeta
+	// PG marks a PostgreSQL source (#1596): the columns are the baseline
+	// file's own (all text), the PK is joined as text, and the footer is
+	// pgSnapshotFileMetadata's. PGCutLSN is where the next run starts (the
+	// cut); 0 = nothing folded, the source baseline's floor carries over. Cut
+	// stays nil for PostgreSQL: it is a binlog coordinate.
+	PG       bool
+	PGCutLSN uint64
+	// PGGenerated names the STORED generated columns the table's streamed
+	// shapes carry (PostgreSQL 18 publish_generated_columns): the baseline
+	// never holds them, so a change carrying one is not a column added after
+	// it, and the output leaves it out like a MySQL generated column.
+	PGGenerated map[string]bool
 	// FoldedFrom is when the state this run folds last came from a real read
 	// of the source, and how many folds since (#1570). Every file the run
 	// writes stamps FoldedFrom.Next(). NOT derived from SourceBaseline: with
