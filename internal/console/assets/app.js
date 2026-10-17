@@ -13950,6 +13950,32 @@ async function runSchemaChangesQuery(form) {
 // svgEl is right here).
 const SCHEMA_EMPTY_ART = `<svg viewBox="0 0 160 72" aria-hidden="true"><rect x="14" y="8" width="96" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/><path d="M14 24h96M46 8v56M78 8v56" stroke="var(--line)"/><rect x="22" y="13" width="16" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="54" y="13" width="16" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="86" y="13" width="16" height="5" rx="2.5" fill="var(--ink-4)"/><rect x="118" y="8" width="28" height="56" rx="8" fill="var(--update-bg)" stroke="var(--update)" stroke-dasharray="4 3"/><path d="M132 30v12M126 36h12" stroke="var(--update)" stroke-width="2"/></svg>`;
 
+// scDisplay turns one schema_changes row into what its line shows. A
+// PostgreSQL position is an LSN, shown once, not as a MySQL file:position.
+// A change inferred on a PostgreSQL source (#2441) carries no statement: its
+// text is a machine marker with the time range, then a description; the line
+// shows the description and when it happened, the marker stays in the title.
+function scDisplay(c) {
+  const pg = String(c.binlog_file || "").includes("/");
+  const out = { pos: pg ? "LSN " + c.binlog_file : c.binlog_file + ":" + c.binlog_pos, stmt: c.statement || "", title: null };
+  const mark = "/* dbtrail: inferred from relation shape;";
+  if (out.stmt.startsWith(mark)) {
+    const end = out.stmt.indexOf("*/");
+    if (end > 0) {
+      const head = out.stmt.slice(mark.length, end);
+      const at = (k) => {
+        const m = head.match(new RegExp("\\b" + k + "=[^@;]*@([^;\\s]+)"));
+        return m ? m[1].replace("T", " ").replace(/(\.\d+)?Z$/, " UTC") : "";
+      };
+      const low = at("low"), high = at("high");
+      const when = low ? "between " + low + " and " + high : "at or before " + high;
+      out.title = out.stmt;
+      out.stmt = "Inferred from the change stream, " + when + ". " + out.stmt.slice(end + 2).trim();
+    }
+  }
+  return out;
+}
+
 function buildSchemaChangeRows(container, changes, filtered, withheld) {
   clear(container);
   if (!changes.length) {
@@ -13974,10 +14000,11 @@ function buildSchemaChangeRows(container, changes, filtered, withheld) {
     row.append(el("span", { class: "ev-table", text: c.schema_name ? c.schema_name + "." + c.table_name : c.table_name,
       title: c.schema_name ? null : "Schema not recorded: the statement did not name it" }));
     row.append(el("span", {}, scBadge(c.ddl_type)));
-    row.append(el("span", { class: "sc-pos", text: c.binlog_file + ":" + c.binlog_pos }));
+    const shown = scDisplay(c);
+    row.append(el("span", { class: "sc-pos", text: shown.pos }));
     row.append(withheld
       ? el("pre", { class: "sc-stmt sc-stmt-withheld", text: "(statement withheld under the active access profile)" })
-      : el("pre", { class: "sc-stmt", text: c.statement || "" }));
+      : el("pre", { class: "sc-stmt", text: shown.stmt, title: shown.title }));
     row.addEventListener("click", () => {
       const open = row.classList.toggle("open");
       row.setAttribute("aria-expanded", open ? "true" : "false");

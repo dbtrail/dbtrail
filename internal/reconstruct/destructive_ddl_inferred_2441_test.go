@@ -46,7 +46,8 @@ func TestCheckDestructiveDDL_inferredBracketOverlappingTheSnapshot(t *testing.T)
 	}
 	t.Logf("refusal: %v", err)
 	for _, want := range []string{"run after 2026-01-01T10:00:00Z and at or before 2026-01-01T10:20:00Z",
-		"stream position 0/19DF9E8", "inferred from the change stream", "snapshot of the table after 2026-01-01T10:20:00Z"} {
+		"stream position 0/19DF9E8", "inferred from the change stream", "), may lie between the snapshot",
+		"snapshot of the table after 2026-01-01T10:20:00Z"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q lacks %q", err, want)
 		}
@@ -81,9 +82,17 @@ func TestCheckDestructiveDDL_inferredWithoutALowerBound(t *testing.T) {
 	if !errors.Is(err, ErrDestructiveDDL) {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
-	if !strings.Contains(err.Error(), "run at or before 2026-01-01T12:00:00Z") {
-		t.Errorf("refusal %v", err)
+	// The requested point (10:30) is before the range ends (12:00): no
+	// snapshot after 12:00 can rebuild it, and the advice must not say so.
+	for _, want := range []string{"run at or before 2026-01-01T12:00:00Z", "may or may not have happened yet", "Pick a point after 2026-01-01T12:00:00Z"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err, want)
+		}
 	}
+	if strings.Contains(err.Error(), "Take a new snapshot of the table after") {
+		t.Errorf("refusal gives advice that cannot work: %v", err)
+	}
+	t.Logf("refusal: %v", err)
 }
 
 // The high end keeps its fraction of a second: a snapshot taken in the same

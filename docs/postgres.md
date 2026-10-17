@@ -820,11 +820,13 @@ starts with a marker carrying that range, for example:
 /* dbtrail: inferred from relation shape; oid=16411; instant=at-or-before; low=0/16B3748@2026-10-17T10:00:00Z; high=0/16B9A20@2026-10-17T10:20:00Z */ ALTER TABLE shop.orders: added note (text)
 ```
 
-The row's `detected_at` is the start of the range and its stream position the
-end. `reconstruct` refuses a point in time whose window overlaps the range of
-a `DROP TABLE`, `RENAME TABLE` or `TRUNCATE TABLE`, since the table may or
-may not have changed yet at that point; the refusal says so and names a
-snapshot newer than the range as the way through. A table that was not written
+The row's `detected_at` is the start of the range (the end, when the range has
+no start) and its stream position the end. `reconstruct` refuses a point in
+time whose window overlaps the range of an inferred `DROP TABLE` or `RENAME
+TABLE`, since the table may or may not have changed yet at that point; the
+refusal says so and says which points in time can still be rebuilt. A
+`TRUNCATE TABLE` is reported by PostgreSQL with its exact transaction, so it
+has no range and refuses exactly where it happened. A table that was not written
 to for a while after the change has a wide range.
 
 **What cannot be seen.** Anything that changes neither a column's name or type
@@ -843,7 +845,10 @@ ran it are never available.
 **If detection cannot start.** What detection needs is read when capture
 starts. If that read fails (for example a very slow index database),
 bintrail-pg captures rows as usual and does not detect schema changes until
-its next restart, and logs that at ERROR level.
+its next restart, and logs that at ERROR level. The table shapes seen during
+that run are stored without their position in the stream, so the next start
+compares against the last shapes detection did see, and a change made in
+between is still found then (its range covers the whole run).
 
 **After a restart.** PostgreSQL resends changes from the point it last
 confirmed, which can be earlier than what bintrail-pg had already recorded.

@@ -167,3 +167,43 @@ func TestInsertSchemaChange_longDropStillLands(t *testing.T) {
 		})
 	}
 }
+
+// An inferred PostgreSQL rename (#2441) keeps its marker on the pointer row
+// under the new name too: status, MCP and the reconstruct guard read each
+// table's rows on their own.
+func TestInsertSchemaChange_inferredPointerRowKeepsTheMarker(t *testing.T) {
+	db, _ := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	marker := event.InferredDDLPrefix + " oid=7; instant=at-or-before; low=none; high=0/2@2026-01-01T00:00:00Z */"
+	ev := event.Event{
+		BinlogFile: "0/2", EndPos: 2, Timestamp: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		EventType: event.EventDDL, DDLType: event.DDLRenameTable, DDLQuery: marker + " RENAME TABLE s.old TO s.new",
+		Schema: "s", Table: "new",
+		DDLTables: []event.DDLTable{{Schema: "s", Table: "old"}, {Schema: "s", Table: "new"}},
+	}
+	if err := InsertSchemaChange(db, ev, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT table_name, ddl_query FROM schema_changes ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var tbl, q string
+		if err := rows.Scan(&tbl, &q); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(q, marker) {
+			t.Errorf("row for %s lost the marker: %q", tbl, q)
+		}
+		got = append(got, tbl)
+		if tbl == "new" && !strings.Contains(q, "(same RENAME TABLE statement as the row for s.old)") {
+			t.Errorf("pointer row = %q", q)
+		}
+	}
+	if strings.Join(got, "|") != "old|new" {
+		t.Fatalf("rows = %v", got)
+	}
+}

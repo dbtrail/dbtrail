@@ -103,7 +103,7 @@ func TestOne_InfersDDLFromRelationShapes_2441(t *testing.T) {
 	inferred := func() []row {
 		t.Helper()
 		rs, err := indexDB.Query(`SELECT ddl_type, table_name, ddl_query FROM schema_changes
-			WHERE ddl_query LIKE '/* dbtrail: inferred%' OR ddl_query LIKE '(same %' ORDER BY id`)
+			WHERE ddl_query LIKE '/* dbtrail: inferred%' ORDER BY id`)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +149,8 @@ func TestOne_InfersDDLFromRelationShapes_2441(t *testing.T) {
 	mustExec(fmt.Sprintf("ALTER TABLE %s RENAME TO %s", tbl, renamed))
 	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (3, 'r', 'r')", renamed))
 	indexed(renamed, "3")
-	// A rename writes a row under each name; the second points at the first.
+	// A rename writes a row under each name; the second points at the first
+	// and carries the marker too (the query above only matches marked rows).
 	expect("rename while streaming", "ALTER TABLE "+tbl, "RENAME TABLE "+tbl, "RENAME TABLE "+renamed)
 	stop()
 

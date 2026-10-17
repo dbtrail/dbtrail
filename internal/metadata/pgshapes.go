@@ -23,8 +23,9 @@ type PGShape struct {
 // slot's confirmed position, which can be before shapes this index already
 // holds, so for each OID this returns every shape seen at or after from,
 // plus the newest one seen before it (the shape in effect where the resend
-// starts). from 0 means the slot is new and nothing is resent: the newest
-// shape per OID is enough.
+// starts). The capture passes the slot's confirmed position, which is never
+// 0 (a new slot reports its consistent point); from 0 returns only the newest
+// shape per OID.
 //
 // Shapes written before #2441 carry no OID and are keyed by (schema, table);
 // such a shape is returned only when it is the newest of its exact name and
@@ -71,8 +72,12 @@ func LoadPGShapes(ctx context.Context, db *sql.DB, from uint64) ([]PGShape, erro
 			return nil, fmt.Errorf("metadata: PostgreSQL snapshot %d has rows with different table OIDs", id)
 		}
 		rel := PGRelationSchema{OID: uint32(minOID.Int64), Schema: sch, Table: table}
-		if seenLSN.Valid && seenAt.Valid {
-			rel.SeenLSN, rel.SeenAt = uint64(seenLSN.Int64), seenAt.Time.UTC()
+		// A position with no time: seen while DDL inference was off.
+		if seenLSN.Valid {
+			rel.SeenLSN = uint64(seenLSN.Int64)
+			if seenAt.Valid {
+				rel.SeenAt = seenAt.Time.UTC()
+			}
 		}
 		heads = append(heads, PGShape{SnapshotID: id, Relation: rel})
 	}
@@ -172,9 +177,13 @@ func latestPGShapes(in []PGShape, from uint64) []PGShape {
 			}
 			return versions[i].SnapshotID < versions[j].SnapshotID
 		})
-		base := -1 // newest version seen before from
+		// The newest version inference compared that was seen before from;
+		// versions seen while inference was off (a position, no time) are
+		// never a reference, but those after it are kept: they mark where
+		// the index cannot bound a change.
+		base := -1
 		for i, v := range versions {
-			if from == 0 || v.Relation.SeenLSN < from {
+			if (from == 0 || v.Relation.SeenLSN < from) && !(v.Relation.SeenLSN != 0 && v.Relation.SeenAt.IsZero()) {
 				base = i
 			}
 		}

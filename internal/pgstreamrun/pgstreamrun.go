@@ -175,7 +175,7 @@ func One(ctx context.Context, cfg Config) error {
 		// knows where the slot resends from. If they cannot be read, the
 		// capturer captures rows without detecting schema changes for that
 		// run and says so at ERROR level; it never stops capture.
-		LoadKnownShapes: func(from uint64) ([]pgcapture.KnownShape, error) { return loadKnownShapes(indexDB, from) },
+		LoadKnownShapes: func(from uint64) (pgcapture.KnownState, error) { return loadKnownState(indexDB, from) },
 		LastChange:      lastIndexedChange(indexDB),
 	})
 	idx := indexer.New(indexDB, cfg.BatchSize)
@@ -688,8 +688,59 @@ func resolveStartLSN(saved *pgStreamState, flagLSN uint64, logger *slog.Logger) 
 	return 0
 }
 
-// loadKnownShapes reads the last shape persisted per table for DDL inference
-// (#2441).
+// loadKnownState reads what DDL inference needs at start (#2441): the shapes
+// a resend from the slot's position is compared against, and the inferred
+// DROP/RENAME rows already recorded, which say where a table gave up a name.
+func loadKnownState(indexDB *sql.DB, from uint64) (pgcapture.KnownState, error) {
+	shapes, err := loadKnownShapes(indexDB, from)
+	if err != nil {
+		return pgcapture.KnownState{}, err
+	}
+	releases, err := loadKnownReleases(indexDB)
+	if err != nil {
+		return pgcapture.KnownState{}, err
+	}
+	return pgcapture.KnownState{Shapes: shapes, Releases: releases}, nil
+}
+
+// loadKnownReleases reads the inferred DROP TABLE and RENAME TABLE rows that
+// carry the text (not a rename's pointer row under its new name): each says
+// table OID gave up schema_name.table_name at binlog_pos.
+func loadKnownReleases(indexDB *sql.DB) ([]pgcapture.KnownRelease, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
+	defer cancel()
+	rows, err := indexDB.QueryContext(ctx, `
+		SELECT schema_name, table_name, binlog_pos, LEFT(ddl_query, 600) FROM schema_changes
+		WHERE ddl_type IN ('DROP TABLE', 'RENAME TABLE') AND ddl_query LIKE ?`,
+		event.InferredDDLPrefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("pgstreamrun: load recorded table drops and renames: %w", err)
+	}
+	defer rows.Close()
+	var out []pgcapture.KnownRelease
+	for rows.Next() {
+		var r pgcapture.KnownRelease
+		var head string
+		if err := rows.Scan(&r.Schema, &r.Table, &r.LSN, &head); err != nil {
+			return nil, fmt.Errorf("pgstreamrun: scan recorded table drops and renames: %w", err)
+		}
+		oid, ok := inferredOID(head)
+		if !ok {
+			continue
+		}
+		if end := strings.Index(head, "*/"); end < 0 || strings.HasPrefix(strings.TrimSpace(head[end+2:]), "(same ") {
+			continue // a pointer row: its table is the name taken, not given up
+		}
+		r.OID = oid
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pgstreamrun: load recorded table drops and renames: %w", err)
+	}
+	return out, nil
+}
+
+// loadKnownShapes reads the stored shapes per table for DDL inference.
 func loadKnownShapes(indexDB *sql.DB, from uint64) ([]pgcapture.KnownShape, error) {
 	shapes, err := metadata.LoadPGShapes(context.Background(), indexDB, from)
 	if err != nil {

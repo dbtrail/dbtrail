@@ -42,6 +42,9 @@ func TestIntegrationUncoveredOnlyMatchesTheStatusCount(t *testing.T) {
 	insert(200, "users", "ALTER TABLE", "ALTER TABLE users DROP COLUMN tmp", "NULL")     // uncovered
 	insert(300, "orders", "TRUNCATE TABLE", "TRUNCATE TABLE orders", "NULL")             // null by design
 	insert(400, "users", "TRUNCATE TABLE", "TRUNCATE users", "NULL")                     // null by design
+	// Inferred on a PostgreSQL source (#2441): the stream saves the new shape
+	// itself, so its null is not a gap either.
+	insert(500, "users", "ALTER TABLE", "/* dbtrail: inferred from relation shape; oid=7; instant=at-or-before; low=none; high=0/2@2026-08-01T12:00:00Z */ ALTER TABLE shop.users: added x (text)", "NULL")
 
 	cov, err := status.LoadCoverage(context.Background(), db)
 	if err != nil {
@@ -84,11 +87,14 @@ func TestIntegrationUncoveredOnlyMatchesTheStatusCount(t *testing.T) {
 		t.Fatalf("tool (plain): %v", err)
 	}
 	allText := resultText(resAll)
-	if !strings.Contains(allText, "4 schema change(s)") {
+	if !strings.Contains(allText, "5 schema change(s)") {
 		t.Errorf("plain listing lost rows: %s", allText)
 	}
 	if strings.Count(allText, "no snapshot needed") != 2 {
 		t.Errorf("both TRUNCATE rows must carry the snapshot_note, got:\n%s", allText)
+	}
+	if strings.Count(allText, "inferred from the PostgreSQL change stream") != 1 {
+		t.Errorf("the inferred row must carry its snapshot_note, got:\n%s", allText)
 	}
 }
 

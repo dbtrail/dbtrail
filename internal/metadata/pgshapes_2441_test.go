@@ -3,6 +3,7 @@ package metadata
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func shape(id int, oid uint32, schema, table string) PGShape {
@@ -66,6 +67,9 @@ func TestLatestPGShapes(t *testing.T) {
 func seenShape(id int, oid uint32, lsn uint64) PGShape {
 	s := shape(id, oid, "s", "a")
 	s.Relation.SeenLSN = lsn
+	if lsn != 0 {
+		s.Relation.SeenAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(lsn) * time.Second)
+	}
 	return s
 }
 
@@ -92,5 +96,24 @@ func TestLatestPGShapes_fromAResumePosition(t *testing.T) {
 	in = []PGShape{seenShape(1, 10, 0), seenShape(2, 10, 300)}
 	if got := ids(latestPGShapes(in, 250)); !reflect.DeepEqual(got, []int{1, 2}) {
 		t.Errorf("unpositioned base: got %v", got)
+	}
+}
+
+// A version seen while inference was off (position, no time) is never the
+// base, but is kept when it comes after the base.
+func TestLatestPGShapes_blindVersions(t *testing.T) {
+	blind := func(id int, lsn uint64) PGShape {
+		s := seenShape(id, 10, lsn)
+		s.Relation.SeenAt = time.Time{}
+		return s
+	}
+	seen := func(id int, lsn uint64) PGShape {
+		s := seenShape(id, 10, lsn)
+		s.Relation.SeenAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		return s
+	}
+	in := []PGShape{seen(1, 100), blind(2, 200), blind(3, 300)}
+	if got := ids(latestPGShapes(in, 400)); !reflect.DeepEqual(got, []int{1, 2, 3}) {
+		t.Errorf("got %v, want the last compared shape and the blind ones after it", got)
 	}
 }

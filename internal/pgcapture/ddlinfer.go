@@ -54,8 +54,24 @@ type KnownShape struct {
 	Columns []ShapeColumn
 	// SeenLSN/SeenAt: the commit of the transaction the shape was last
 	// described in (0 = unknown, a shape stored before this was recorded).
+	// A position with a zero time is a shape seen while inference was off.
 	SeenLSN uint64
 	SeenAt  time.Time
+}
+
+// KnownState is what the index holds for DDL inference at start.
+type KnownState struct {
+	Shapes   []KnownShape
+	Releases []KnownRelease
+}
+
+// KnownRelease is an inferred DROP TABLE or RENAME TABLE already in the
+// index: table OID gave up the name Schema.Table in the transaction that
+// committed at LSN.
+type KnownRelease struct {
+	OID           uint32
+	Schema, Table string
+	LSN           uint64
 }
 
 // RelationFacts is what the live catalog says about a relation OID.
@@ -68,6 +84,9 @@ type RelationFacts struct {
 
 // DDLInference configures inference. Lookup and LastChange are required.
 type DDLInference struct {
+	// Releases are the inferred DROP and RENAME rows already recorded: the
+	// points where a table gave up a name (see KnownRelease).
+	Releases []KnownRelease
 	// Known is what the index holds of each table's shapes: for each OID
 	// the versions that a replay from the slot's position can be compared
 	// against (see metadata.LoadPGShapes), each with where it was seen.
@@ -110,6 +129,9 @@ type version struct {
 	cols []ShapeColumn
 	seen bound // lsn 0 = unknown (a shape stored before positions were)
 	live bool
+	// blind: seen while DDL inference was off (a position, no time). Never a
+	// reference; it marks a stretch where indexed rows cannot bound a change.
+	blind bool
 }
 
 type knownRel struct {
@@ -119,11 +141,41 @@ type knownRel struct {
 	// current shape; cleared when the shape changes.
 	low    bound
 	hasLow bool
-	// nameFromCatalog: the table's name moved to a new table and what it is
-	// called now was read from the live catalog (or it is gone from it),
-	// which can be ahead of the stream. Its next Relation is not compared
-	// by name, only by columns.
-	nameFromCatalog bool
+	// releases are the points where another table took a name this one
+	// had, recorded as a DROP or RENAME then (its new name, if any, came
+	// from the live catalog). Persisted as those schema_changes rows.
+	releases []release
+}
+
+// release: the table gave up name at the transaction committing at lsn.
+type release struct {
+	name relName
+	lsn  pglogrepl.LSN
+	live bool // recorded by this process
+}
+
+// released reports whether the table gave up name at or after from and
+// before the transaction committing at before, or in that same transaction
+// as seen by this process (the same rule as knownRel.at: a stored release at
+// before is that transaction from an earlier run, which a resend is now
+// deriving again).
+func (k *knownRel) released(name relName, from, before pglogrepl.LSN) bool {
+	for _, r := range k.releases {
+		if r.name == name && r.lsn >= from && (r.lsn < before || (r.live && r.lsn == before)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (k *knownRel) addRelease(r release) {
+	for i, x := range k.releases {
+		if x.name == r.name && x.lsn == r.lsn {
+			k.releases[i].live = k.releases[i].live || r.live
+			return
+		}
+	}
+	k.releases = append(k.releases, r)
 }
 
 // at returns the shape in effect for a Relation in the transaction that
@@ -135,6 +187,9 @@ type knownRel struct {
 func (k *knownRel) at(lsn pglogrepl.LSN) (version, bool) {
 	for i := len(k.versions) - 1; i >= 0; i-- {
 		v := k.versions[i]
+		if v.blind {
+			continue
+		}
 		if v.seen.lsn < lsn || (v.live && v.seen.lsn == lsn) {
 			return v, true
 		}
@@ -172,7 +227,16 @@ func newInferState(cfg DDLInference) *inferState {
 			r = &knownRel{}
 			s.byOID[k.OID] = r
 		}
-		r.add(version{name: n, cols: k.Columns, seen: bound{pglogrepl.LSN(k.SeenLSN), k.SeenAt}})
+		r.add(version{name: n, cols: k.Columns, seen: bound{pglogrepl.LSN(k.SeenLSN), k.SeenAt},
+			blind: k.SeenLSN != 0 && k.SeenAt.IsZero()})
+	}
+	for _, rel := range cfg.Releases {
+		r := s.byOID[rel.OID]
+		if r == nil {
+			r = &knownRel{}
+			s.byOID[rel.OID] = r
+		}
+		r.addRelease(release{name: relName{rel.Schema, rel.Table}, lsn: pglogrepl.LSN(rel.LSN)})
 	}
 	return s
 }
@@ -189,7 +253,7 @@ func (s *inferState) holderAt(n relName, oid uint32, lsn pglogrepl.LSN) (uint32,
 			continue
 		}
 		v, ok := k.at(lsn)
-		if !ok || v.name != n {
+		if !ok || v.name != n || k.released(n, v.seen.lsn, lsn) {
 			continue
 		}
 		if !found || v.seen.lsn > bestV.seen.lsn {
@@ -254,7 +318,10 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 
 	if k, ok := s.byOID[oid]; ok {
 		if prev, ok := k.at(high.lsn); ok {
-			renamed := prev.name != n && !k.nameFromCatalog
+			// A name given up earlier, when another table took it, was
+			// recorded then (with the new name read from the catalog): the
+			// table's own next description is compared by columns only.
+			renamed := prev.name != n && !k.released(prev.name, prev.seen.lsn, high.lsn)
 			altered := !equalShape(prev.cols, cols)
 			if (renamed || altered) && (inScope(prev.name) || inScope(n)) {
 				low, err := s.lowFor(k, prev, high)
@@ -271,7 +338,6 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 			if renamed || altered {
 				k.hasLow = false
 			}
-			k.nameFromCatalog = false
 			k.add(cur)
 			return out, nil
 		}
@@ -296,7 +362,8 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 		// catalog can say, and it may be ahead of the stream: whatever it
 		// says, the old table's own next Relation is compared by columns
 		// only.
-		hk.nameFromCatalog, hk.hasLow = true, false
+		hk.addRelease(release{n, high.lsn, true})
+		hk.hasLow = false
 		if !inScope(n) {
 			return nil, nil
 		}
@@ -354,6 +421,20 @@ func (s *inferState) lowFor(k *knownRel, prev version, high bound) (*bound, erro
 	if k != nil && k.hasLow && k.low.lsn < high.lsn {
 		b := k.low
 		return &b, nil
+	}
+	// Inference was off somewhere between the old shape and now: rows the
+	// index holds from then may already be under the new shape, so only the
+	// old shape's own position bounds the change.
+	if k != nil {
+		for _, v := range k.versions {
+			if v.blind && v.seen.lsn >= prev.seen.lsn && v.seen.lsn < high.lsn {
+				if prev.seen.lsn == 0 {
+					return nil, nil
+				}
+				b := prev.seen
+				return &b, nil
+			}
+		}
 	}
 	lsn, at, ok, err := s.cfg.LastChange(prev.name.schema, prev.name.table, uint64(high.lsn))
 	if err != nil {

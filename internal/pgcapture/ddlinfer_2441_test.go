@@ -64,14 +64,21 @@ type inferRig struct {
 
 func newInferRig(t *testing.T, start []uint32, shapes ...pgcapture.KnownShape) *inferRig {
 	t.Helper()
-	r := &inferRig{facts: map[uint32]pgcapture.RelationFacts{}, lastOK: true}
 	startSet := map[uint32]bool{}
 	for _, o := range start {
 		startSet[o] = true
 	}
+	return newInferRigWith(t, pgcapture.DDLInference{Known: shapes, StartOIDs: startSet})
+}
+
+// newInferRigWith is newInferRig with Known, StartOIDs and Releases from cfg.
+func newInferRigWith(t *testing.T, cfg pgcapture.DDLInference) *inferRig {
+	t.Helper()
+	r := &inferRig{facts: map[uint32]pgcapture.RelationFacts{}, lastOK: true}
 	r.d = pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, slogDiscard(), pgcapture.WithDDLInference(pgcapture.DDLInference{
-		Known:     shapes,
-		StartOIDs: startSet,
+		Known:     cfg.Known,
+		StartOIDs: cfg.StartOIDs,
+		Releases:  cfg.Releases,
 		Lookup: func(oid uint32) (pgcapture.RelationFacts, error) {
 			r.lookupCalls++
 			return r.facts[oid], r.lookupErr
@@ -659,5 +666,77 @@ func TestInfer_boundsKeepFractions(t *testing.T) {
 	mustContain(t, d[0].DDLQuery, "high=0/19DF9E8@2026-06-21T12:00:00.5Z")
 	if b, ok := event.ParseInferredBracket(d[0].DDLQuery); !ok || !b.High.Equal(txnTime.Add(500*time.Millisecond)) {
 		t.Errorf("bracket %+v ok %v", b, ok)
+	}
+}
+
+// A name that changes hands twice: n is dropped and recreated (OID 1 -> 2),
+// OID 2 is renamed to m, then a new OID 3 takes n. OID 1 gave n up at the
+// first hand-over, so it is not the holder the second time: no second DROP.
+func TestInfer_nameReusedTwiceAfterARename(t *testing.T) {
+	r := newInferRig(t, nil, known(1, "s", "n", int4("id")))
+	r.facts[1] = pgcapture.RelationFacts{Exists: false}
+	if got := kinds(relAt(t, r, 20, typedRel(2, "s", "n", int4("id")))); got != "DROP TABLE s.n | CREATE TABLE s.n" {
+		t.Fatalf("first hand-over: %s", got)
+	}
+	if got := kinds(relAt(t, r, 40, typedRel(2, "s", "m", int4("id")))); got != "RENAME TABLE s.m" {
+		t.Fatalf("rename: %s", got)
+	}
+	if got := kinds(relAt(t, r, 50, typedRel(3, "s", "n", int4("id")))); got != "CREATE TABLE s.n" {
+		t.Fatalf("second take of n: %s (a gone table must not hold its old name)", got)
+	}
+}
+
+// After a restart the release comes back from the recorded DROP/RENAME row:
+// the old table neither holds its old name nor re-records the rename when
+// its own description, under the new name, finally arrives.
+func TestInfer_releaseSurvivesARestart(t *testing.T) {
+	k1 := seenKnown(1, 10, int4("id"))
+	k1.Table = "n"
+	k2 := seenKnown(2, 20, int4("id"))
+	k2.Table = "n"
+	r := newInferRigWith(t, pgcapture.DDLInference{
+		Known:    []pgcapture.KnownShape{k1, k2},
+		Releases: []pgcapture.KnownRelease{{OID: 1, Schema: "s", Table: "n", LSN: 20}},
+	})
+	// OID 1, renamed to b before OID 2 took n, is written to under b.
+	if d := relAt(t, r, 30, typedRel(1, "s", "b", int4("id"))); len(d) != 0 {
+		t.Fatalf("the rename recorded at the hand-over was recorded again: %s", kinds(d))
+	}
+	// A new OID taking n later finds OID 2 as the holder, not OID 1.
+	r.facts[2] = pgcapture.RelationFacts{Exists: false}
+	d := relAt(t, r, 50, typedRel(3, "s", "n", int4("id")))
+	if got := kinds(d); got != "DROP TABLE s.n | CREATE TABLE s.n" {
+		t.Fatalf("got %s", got)
+	}
+	mustContain(t, d[0].DDLQuery, "oid=2;")
+}
+
+// While inference is off, shapes are stored without a position, so the next
+// start compares against the last shape inference saw.
+func TestInfer_shapesSeenWithoutInferenceHaveNoPosition(t *testing.T) {
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, slogDiscard())
+	mustDecode(t, d, beginMsg())
+	ev, _ := mustDecode(t, d, typedRel(10, "s", "a", int4("id")))
+	if ev.Relation.SeenLSN != uint64(txnLSN) || !ev.Relation.SeenAt.IsZero() || ev.Relation.OID != 10 {
+		t.Fatalf("relation = %+v, want the OID, the position and no time", ev.Relation)
+	}
+}
+
+// A run with inference off left shapes with a position and no time. The next
+// run compares against the last shape inference saw, and does not take the
+// index's rows from that stretch as the lower bound: they may already be
+// under the new shape.
+func TestInfer_afterARunWithInferenceOff(t *testing.T) {
+	old := seenKnown(10, 100, int4("id"))
+	blind := seenKnown(10, 200, int4("id"), text("x"))
+	blind.SeenAt = time.Time{}
+	r := newInferRig(t, nil, old, blind)
+	d := relAt(t, r, 300, typedRel(10, "s", "a", int4("id"), text("x")))
+	if len(d) != 1 || d[0].DDLType != event.DDLAlterTable {
+		t.Fatalf("got %s, want the ALTER made while inference was off", kinds(d))
+	}
+	mustContain(t, d[0].DDLQuery, "added x (text)", "low=0/64@")
+	if len(r.lastCalls) != 0 {
+		t.Errorf("the index was asked for a lower bound over a stretch it cannot bound: %v", r.lastCalls)
 	}
 }

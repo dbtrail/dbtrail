@@ -254,3 +254,28 @@ func TestInferredCounter_twoChangesOfOneKindInOneTransaction_2441(t *testing.T) 
 		t.Error(err)
 	}
 }
+
+// The text row of an inferred DROP or RENAME is a release; a rename's
+// pointer row (its new name) and a row whose marker does not parse are not.
+func TestLoadKnownReleases_2441(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := event.InferredDDLPrefix + " oid=7; instant=at-or-before; low=none; high=0/2@2026-01-01T00:00:00Z */ "
+	mock.ExpectQuery("FROM schema_changes").WithArgs(event.InferredDDLPrefix + "%").WillReturnRows(
+		sqlmock.NewRows([]string{"schema_name", "table_name", "binlog_pos", "head"}).
+			AddRow("s", "old", 2, m+"RENAME TABLE s.old TO s.new").
+			AddRow("s", "new", 2, m+"(same RENAME TABLE statement as the row for s.old)").
+			AddRow("s", "gone", 3, m+"DROP TABLE s.gone (its name now belongs to a new table)").
+			AddRow("s", "x", 4, event.InferredDDLPrefix+" instant=at-or-before */ DROP TABLE s.x"))
+	got, err := loadKnownReleases(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []pgcapture.KnownRelease{{OID: 7, Schema: "s", Table: "old", LSN: 2}, {OID: 7, Schema: "s", Table: "gone", LSN: 3}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}

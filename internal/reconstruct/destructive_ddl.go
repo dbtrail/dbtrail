@@ -227,8 +227,18 @@ func destructiveDDLErr(schema, table string, f ddlFinding, w DDLWindow) error {
 	todo := fmt.Sprintf("Take a new snapshot of the table, which will hold it as it is after the %s, and start from that one",
 		strings.ToLower(d.Type))
 	if d.Inferred {
-		todo = fmt.Sprintf("Take a new snapshot of the table after %s, which will hold it as it is after the %s, and start from that one",
-			d.Bracket.High.UTC().Format(time.RFC3339), strings.ToLower(d.Type))
+		high := d.Bracket.High.UTC().Format(time.RFC3339)
+		if w.Until.Before(d.Bracket.High) {
+			// The requested point is inside the range: no snapshot can start
+			// a rebuild of a point it is newer than.
+			todo = "The requested point in time falls where the change may or may not have happened yet, so it cannot be rebuilt reliably. Pick a point after " + high + " and start from a snapshot taken after " + high
+			if d.Bracket.HasLow {
+				todo += ", or a point before " + d.Bracket.Low.UTC().Format(time.RFC3339)
+			}
+		} else {
+			todo = fmt.Sprintf("Take a new snapshot of the table after %s, which will hold it as it is after the %s, and start from that one",
+				high, strings.ToLower(d.Type))
+		}
 	}
 	switch how {
 	case ddlByPosition:
@@ -245,10 +255,14 @@ func destructiveDDLErr(schema, table string, f ddlFinding, w DDLWindow) error {
 		todo = "A snapshot from a full backup taken by DBTrail clears this. Otherwise the rows this window " +
 			"counts by position alone have to be removed from the index database: " + deleteSQL
 	}
+	lies := "lies " + placed
+	if d.Inferred && how == ddlByTime {
+		lies = "may lie between the snapshot this starts from and the requested point in time (the change stream only says it happened inside that range)"
+	}
 	return fmt.Errorf(
-		"%w: %s on %s.%s, %s (%s), lies %s. "+
+		"%w: %s on %s.%s, %s (%s), %s. "+
 			"It wrote no row changes to replay, so the result would keep the rows it removed as if they still existed. %s",
-		ErrDestructiveDDL, d.Type, schema, table, when, where, placed, todo)
+		ErrDestructiveDDL, d.Type, schema, table, when, where, lies, todo)
 }
 
 // errSchemaChangesMissing marks an index that has no schema_changes table at

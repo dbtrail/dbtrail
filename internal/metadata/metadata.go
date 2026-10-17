@@ -882,7 +882,10 @@ func WritePGSnapshot(ctx context.Context, db *sql.DB, rel *PGRelationSchema) (in
 	}
 	var seenLSN, seenAt any
 	if rel.SeenLSN != 0 {
-		seenLSN, seenAt = rel.SeenLSN, rel.SeenAt.UTC()
+		seenLSN = rel.SeenLSN
+	}
+	if rel.SeenLSN != 0 && !rel.SeenAt.IsZero() {
+		seenAt = rel.SeenAt.UTC()
 	}
 	args := make([]any, 0, len(rel.Columns)*18)
 	for _, c := range rel.Columns {

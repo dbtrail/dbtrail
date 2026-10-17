@@ -61,7 +61,7 @@ type Config struct {
 	// index holds of each table's shapes for a resend starting at fromLSN
 	// (the slot's confirmed position, read at start), and the newest indexed
 	// change to a table before an LSN. Both nil = inference off.
-	LoadKnownShapes func(fromLSN uint64) ([]KnownShape, error)
+	LoadKnownShapes func(fromLSN uint64) (KnownState, error)
 	LastChange      func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
 }
 
@@ -212,7 +212,8 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 				return DDLInference{}, err
 			}
 			return DDLInference{
-				Known:     known,
+				Known:     known.Shapes,
+				Releases:  known.Releases,
 				StartOIDs: start,
 				Lookup: func(oid uint32) (RelationFacts, error) {
 					qctx, cancel := context.WithTimeout(ctx, 10*time.Second)

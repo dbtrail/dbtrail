@@ -159,7 +159,7 @@ func (d *Decoder) Decode(msg pglogrepl.Message) (event.Event, bool, error) {
 		// stamp a SchemaVersion. Gate the EMIT, not the cache.
 		rel := d.relations[m.RelationID]
 		if d.filters.Matches(rel.schema, rel.table) {
-			out = append(out, relationEvent(rel, d.txn))
+			out = append(out, relationEvent(rel, d.txn, d.infer != nil))
 		}
 		if len(out) == 0 {
 			return event.Event{}, false, nil
@@ -365,15 +365,24 @@ func isTimescaleChunk(schema, table string) bool {
 // MySQL's TakeSnapshot — no information_schema). IsPK is by name; rel.pkCols is
 // already in table-ordinal order (cacheRelation reordered it), so the snapshot's PK
 // columns align with the resolver. Ordinal is the table-column position.
-func relationEvent(rel *relationInfo, txn txnContext) event.Event {
+func relationEvent(rel *relationInfo, txn txnContext, inferring bool) event.Event {
 	pkNames := make(map[string]bool, len(rel.pkCols))
 	for _, pk := range rel.pkCols {
 		pkNames[pk.Name] = true
 	}
 	var seenLSN uint64
 	var seenAt time.Time
+	// Where the shape was seen. While DDL inference is off, the time is left
+	// out: such a shape was never compared, so the next start does not use it
+	// as the reference (it compares against the last shape inference saw,
+	// and a change made meanwhile is still found), and its position marks a
+	// stretch where the index's own rows cannot bound a change (some of them
+	// may already be under a new shape).
 	if txn.open {
-		seenLSN, seenAt = uint64(txn.commitLSN), txn.commitTime
+		seenLSN = uint64(txn.commitLSN)
+		if inferring {
+			seenAt = txn.commitTime
+		}
 	}
 	cols := make([]metadata.PGRelationColumn, len(rel.columns))
 	for i, c := range rel.columns {
