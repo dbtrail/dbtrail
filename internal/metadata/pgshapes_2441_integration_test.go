@@ -38,6 +38,7 @@ func TestLoadPGShapes_integration(t *testing.T) {
 	}
 
 	write(0, "legacy_kept", "id")             // pre-#2441, never identified since
+	write(0, "Legacy_kept", "id")             // another table: PostgreSQL names are case-sensitive
 	write(0, "renamed_away", "id")            // pre-#2441 ...
 	write(20, "renamed_away", "id")           // ... then identified ...
 	renamed := write(20, "renamed_now", "id") // ... then renamed
@@ -56,8 +57,8 @@ func TestLoadPGShapes_integration(t *testing.T) {
 	for _, s := range shapes {
 		got[s.SnapshotID] = s
 	}
-	if len(shapes) != 4 {
-		t.Fatalf("got %d shapes %+v, want 4", len(shapes), shapes)
+	if len(shapes) != 5 {
+		t.Fatalf("got %d shapes %+v, want 5", len(shapes), shapes)
 	}
 	if s := got[renamed]; s.Relation.OID != 20 || s.Relation.Table != "renamed_now" {
 		t.Errorf("renamed table = %+v", s.Relation)
@@ -73,13 +74,13 @@ func TestLoadPGShapes_integration(t *testing.T) {
 	for _, s := range shapes {
 		if s.Relation.OID == 0 {
 			legacy++
-			if s.Relation.Table != "legacy_kept" {
-				t.Errorf("legacy shape %q returned; only legacy_kept should be", s.Relation.Table)
+			if s.Relation.Table != "legacy_kept" && s.Relation.Table != "Legacy_kept" {
+				t.Errorf("legacy shape %q returned; only legacy_kept and Legacy_kept should be", s.Relation.Table)
 			}
 		}
 	}
-	if legacy != 1 {
-		t.Errorf("%d legacy shapes, want 1", legacy)
+	if legacy != 2 {
+		t.Errorf("%d legacy shapes, want 2 (case-distinct names are two tables)", legacy)
 	}
 	for i := 1; i < len(shapes); i++ {
 		if shapes[i-1].SnapshotID >= shapes[i].SnapshotID {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // PGShape is one PostgreSQL relation shape as last persisted by
@@ -23,7 +24,8 @@ type PGShape struct {
 // returned, so a renamed table appears once, under its newest name. Shapes
 // written before carry no OID and are keyed by (schema, table); such a shape
 // is dropped once any newer identified shape was written under the same name,
-// even if that table has been renamed since. Several
+// even if that table has been renamed since. Names compare exactly, as in
+// PostgreSQL, never by the index's collation. Several
 // OIDs can share a name (a table dropped and created again); all are returned,
 // and the newest by snapshot is the one that currently holds the name.
 //
@@ -32,79 +34,137 @@ type PGShape struct {
 func LoadPGShapes(ctx context.Context, db *sql.DB) ([]PGShape, error) {
 	ctx, cancel := context.WithTimeout(ctx, latestPerTableLoadTimeout)
 	defer cancel()
+
+	// One row per PostgreSQL snapshot (WritePGSnapshot writes one table per
+	// snapshot_id). Grouping by snapshot_id, never by name, keeps the
+	// index's collation out of it: it ignores case and trailing spaces,
+	// while PostgreSQL's "A" and a are two tables. Names are compared in Go.
 	rows, err := db.QueryContext(ctx, `
-		SELECT s.snapshot_id, COALESCE(s.pg_relation_oid, 0), s.schema_name, s.table_name,
-		       s.column_name, s.ordinal_position, s.column_key,
-		       COALESCE(s.pg_type_oid, 0), COALESCE(s.pg_type_mod, -1),
-		       s.is_generated, s.is_identity_always
-		FROM schema_snapshots s
-		JOIN (
-			SELECT MAX(snapshot_id) AS snapshot_id FROM schema_snapshots
-			WHERE pg_relation_oid IS NOT NULL
-			GROUP BY pg_relation_oid
-			UNION
-			SELECT MAX(l.snapshot_id) FROM schema_snapshots l
-			WHERE l.pg_relation_oid IS NULL AND l.pg_type_oid IS NOT NULL
-			GROUP BY l.schema_name, l.table_name
-			-- Superseded by ANY later identified row of the name, not only by
-			-- the newest one per OID: that table may have been renamed since.
-			HAVING MAX(l.snapshot_id) > COALESCE((
-				SELECT MAX(i.snapshot_id) FROM schema_snapshots i
-				WHERE i.pg_relation_oid IS NOT NULL
-				  AND i.schema_name = l.schema_name AND i.table_name = l.table_name), 0)
-		) newest ON newest.snapshot_id = s.snapshot_id
-		ORDER BY s.snapshot_id, s.ordinal_position`)
+		SELECT snapshot_id, MIN(pg_relation_oid), MAX(pg_relation_oid),
+		       MIN(schema_name), MIN(table_name)
+		FROM schema_snapshots
+		WHERE pg_type_oid IS NOT NULL
+		GROUP BY snapshot_id`)
 	if err != nil {
-		return nil, fmt.Errorf("metadata: load PostgreSQL shapes: %w", err)
+		return nil, fmt.Errorf("metadata: list PostgreSQL shapes: %w", err)
+	}
+	var heads []PGShape
+	for rows.Next() {
+		var (
+			id         int
+			minOID     sql.NullInt64
+			maxOID     sql.NullInt64
+			sch, table string
+		)
+		if err := rows.Scan(&id, &minOID, &maxOID, &sch, &table); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("metadata: scan PostgreSQL shape list: %w", err)
+		}
+		if minOID != maxOID {
+			rows.Close()
+			return nil, fmt.Errorf("metadata: PostgreSQL snapshot %d has rows with different table OIDs", id)
+		}
+		heads = append(heads, PGShape{SnapshotID: id, Relation: PGRelationSchema{OID: uint32(minOID.Int64), Schema: sch, Table: table}})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("metadata: list PostgreSQL shapes: %w", err)
+	}
+	rows.Close()
+
+	keep := latestPGShapes(heads)
+	for i := 0; i < len(keep); i += pgShapeChunk {
+		if err := loadPGShapeColumns(ctx, db, keep[i:min(len(keep), i+pgShapeChunk)]); err != nil {
+			return nil, err
+		}
+	}
+	return keep, nil
+}
+
+// pgShapeChunk bounds the IN list of one column query.
+const pgShapeChunk = 500
+
+// loadPGShapeColumns fills the columns of each shape, in ordinal order. A
+// column without its type OID or modifier is an error naming the snapshot:
+// -1 is a real "no modifier", so a NULL read as -1 would compare as a
+// legitimate type.
+func loadPGShapeColumns(ctx context.Context, db *sql.DB, shapes []PGShape) error {
+	byID := make(map[int]*PGShape, len(shapes))
+	args := make([]any, len(shapes))
+	for i := range shapes {
+		byID[shapes[i].SnapshotID] = &shapes[i]
+		args[i] = shapes[i].SnapshotID
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT snapshot_id, column_name, ordinal_position, column_key,
+		       pg_type_oid, pg_type_mod, is_generated, is_identity_always
+		FROM schema_snapshots
+		WHERE snapshot_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(shapes)), ",")+`)
+		ORDER BY snapshot_id, ordinal_position`, args...)
+	if err != nil {
+		return fmt.Errorf("metadata: load PostgreSQL shape columns: %w", err)
 	}
 	defer rows.Close()
-
-	var shapes []PGShape
 	for rows.Next() {
 		var (
 			id      int
-			oid     uint32
 			c       PGRelationColumn
 			key     string
-			sch, tb string
+			typeOID sql.NullInt64
+			typeMod sql.NullInt32
 		)
-		if err := rows.Scan(&id, &oid, &sch, &tb, &c.Name, &c.Ordinal, &key,
-			&c.TypeOID, &c.TypeMod, &c.IsGenerated, &c.IsIdentityAlways); err != nil {
-			return nil, fmt.Errorf("metadata: scan PostgreSQL shape: %w", err)
+		if err := rows.Scan(&id, &c.Name, &c.Ordinal, &key, &typeOID, &typeMod, &c.IsGenerated, &c.IsIdentityAlways); err != nil {
+			return fmt.Errorf("metadata: scan PostgreSQL shape column: %w", err)
 		}
-		c.IsPK = key == "PRI"
-		if n := len(shapes); n == 0 || shapes[n-1].SnapshotID != id {
-			shapes = append(shapes, PGShape{SnapshotID: id, Relation: PGRelationSchema{OID: oid, Schema: sch, Table: tb}})
+		if !typeOID.Valid || !typeMod.Valid {
+			return fmt.Errorf("metadata: PostgreSQL snapshot %d column %q has no type OID or modifier", id, c.Name)
 		}
-		last := &shapes[len(shapes)-1].Relation
-		last.Columns = append(last.Columns, c)
+		c.TypeOID, c.TypeMod, c.IsPK = uint32(typeOID.Int64), typeMod.Int32, key == "PRI"
+		sh := byID[id]
+		sh.Relation.Columns = append(sh.Relation.Columns, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("metadata: load PostgreSQL shapes: %w", err)
+		return fmt.Errorf("metadata: load PostgreSQL shape columns: %w", err)
 	}
-	return latestPGShapes(shapes), nil
+	for _, sh := range shapes {
+		if len(sh.Relation.Columns) == 0 {
+			return fmt.Errorf("metadata: PostgreSQL snapshot %d has no columns", sh.SnapshotID)
+		}
+	}
+	return nil
 }
 
-// latestPGShapes drops each legacy (OID-less) shape that a newer identified
-// shape of the same (schema, table) supersedes, and orders the rest by
-// snapshot. See LoadPGShapes. The query already drops a legacy shape
-// superseded by an identified row that has since been renamed away (which
-// this function cannot see); this is the same rule over what it returns.
+// latestPGShapes picks, from one entry per stored snapshot, the shapes that
+// are still the last one seen: the newest per OID, and each OID-less (legacy)
+// shape that is the newest of its exact (schema, table) and that no later
+// identified snapshot was written under. Names compare exactly, as
+// PostgreSQL does. Output is ordered by snapshot.
 func latestPGShapes(in []PGShape) []PGShape {
 	type name struct{ schema, table string }
+	newestByOID := map[uint32]PGShape{}
+	newestLegacy := map[name]PGShape{}
 	newestIdentified := map[name]int{}
 	for _, s := range in {
+		n := name{s.Relation.Schema, s.Relation.Table}
 		if s.Relation.OID != 0 {
-			n := name{s.Relation.Schema, s.Relation.Table}
+			if cur, ok := newestByOID[s.Relation.OID]; !ok || s.SnapshotID > cur.SnapshotID {
+				newestByOID[s.Relation.OID] = s
+			}
 			newestIdentified[n] = max(newestIdentified[n], s.SnapshotID)
-		}
-	}
-	out := make([]PGShape, 0, len(in))
-	for _, s := range in {
-		if s.Relation.OID == 0 && newestIdentified[name{s.Relation.Schema, s.Relation.Table}] > s.SnapshotID {
 			continue
 		}
+		if cur, ok := newestLegacy[n]; !ok || s.SnapshotID > cur.SnapshotID {
+			newestLegacy[n] = s
+		}
+	}
+	out := make([]PGShape, 0, len(newestByOID)+len(newestLegacy))
+	for _, s := range newestByOID {
 		out = append(out, s)
+	}
+	for n, s := range newestLegacy {
+		if newestIdentified[n] < s.SnapshotID {
+			out = append(out, s)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SnapshotID < out[j].SnapshotID })
 	return out
