@@ -747,6 +747,21 @@ func EnsureSchema(db *sql.DB) error {
 	); err != nil {
 		return err
 	}
+	// pg_seen_lsn/pg_seen_at: where in the stream the shape was described
+	// (#2441). On a restart the stream replays from the checkpoint, so only
+	// shapes seen at or before it are "already known"; a later one will be
+	// described again, and comparing against it would infer a change in
+	// reverse. pg_seen_at is also a lower bound for the next change.
+	if err := ensureColumn(db, "schema_snapshots", "pg_seen_lsn",
+		`ALTER TABLE schema_snapshots ADD COLUMN pg_seen_lsn BIGINT UNSIGNED DEFAULT NULL COMMENT 'commit LSN of the PostgreSQL transaction the shape was described in; NULL for MySQL snapshots and older PostgreSQL ones' AFTER pg_relation_oid`,
+	); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "schema_snapshots", "pg_seen_at",
+		`ALTER TABLE schema_snapshots ADD COLUMN pg_seen_at DATETIME(6) DEFAULT NULL COMMENT 'commit time of that transaction (UTC); NULL with pg_seen_lsn' AFTER pg_seen_lsn`,
+	); err != nil {
+		return err
+	}
 	// query_text/query_hash carry the original SQL statement that produced each
 	// row event (#699): the text from the binlog's ROWS_QUERY/ANNOTATE_ROWS
 	// event (opt-in on the source via binlog_rows_query_log_events /
@@ -1141,6 +1156,14 @@ func InsertSchemaChange(db *sql.DB, ev event.Event, snapshotID *int) error {
 		text = capDDLQuery(text)
 	}
 	pointer := fmt.Sprintf("(same %s statement as the row for %s.%s)", ev.DDLType, tables[0].Schema, tables[0].Table)
+	// An inferred PostgreSQL row (#2441) keeps its marker on every table's
+	// row: readers of one table's rows (the reconstruct guard, status) read
+	// the bracket from it.
+	if strings.HasPrefix(text, event.InferredDDLPrefix) {
+		if end := strings.Index(text, "*/"); end >= 0 {
+			pointer = text[:end+2] + " " + pointer
+		}
+	}
 	for done := 0; done < len(tables); {
 		chunk := tables[done:min(len(tables), done+schemaChangeChunkRows)]
 		q := `INSERT INTO schema_changes

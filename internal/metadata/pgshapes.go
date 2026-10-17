@@ -31,7 +31,13 @@ type PGShape struct {
 //
 // MySQL snapshots (no pg_type_oid) are ignored. An empty index returns an
 // empty slice and no error.
-func LoadPGShapes(ctx context.Context, db *sql.DB) ([]PGShape, error) {
+//
+// upTo, when non-zero, is the stream's resume checkpoint: shapes described in
+// a transaction after it are left out. The stream replays from the
+// checkpoint and will describe them again; comparing a replayed older shape
+// against a newer one would infer a change in reverse. Shapes with no
+// recorded position (written before it was recorded) are kept.
+func LoadPGShapes(ctx context.Context, db *sql.DB, upTo uint64) ([]PGShape, error) {
 	ctx, cancel := context.WithTimeout(ctx, latestPerTableLoadTimeout)
 	defer cancel()
 
@@ -41,10 +47,11 @@ func LoadPGShapes(ctx context.Context, db *sql.DB) ([]PGShape, error) {
 	// while PostgreSQL's "A" and a are two tables. Names are compared in Go.
 	rows, err := db.QueryContext(ctx, `
 		SELECT snapshot_id, MIN(pg_relation_oid), MAX(pg_relation_oid),
-		       MIN(schema_name), MIN(table_name)
+		       MIN(schema_name), MIN(table_name), MAX(pg_seen_lsn), MAX(pg_seen_at)
 		FROM schema_snapshots
 		WHERE pg_type_oid IS NOT NULL
-		GROUP BY snapshot_id`)
+		  AND (? = 0 OR pg_seen_lsn IS NULL OR pg_seen_lsn <= ?)
+		GROUP BY snapshot_id`, upTo, upTo)
 	if err != nil {
 		return nil, fmt.Errorf("metadata: list PostgreSQL shapes: %w", err)
 	}
@@ -55,8 +62,10 @@ func LoadPGShapes(ctx context.Context, db *sql.DB) ([]PGShape, error) {
 			minOID     sql.NullInt64
 			maxOID     sql.NullInt64
 			sch, table string
+			seenLSN    sql.NullInt64
+			seenAt     sql.NullTime
 		)
-		if err := rows.Scan(&id, &minOID, &maxOID, &sch, &table); err != nil {
+		if err := rows.Scan(&id, &minOID, &maxOID, &sch, &table, &seenLSN, &seenAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("metadata: scan PostgreSQL shape list: %w", err)
 		}
@@ -64,7 +73,11 @@ func LoadPGShapes(ctx context.Context, db *sql.DB) ([]PGShape, error) {
 			rows.Close()
 			return nil, fmt.Errorf("metadata: PostgreSQL snapshot %d has rows with different table OIDs", id)
 		}
-		heads = append(heads, PGShape{SnapshotID: id, Relation: PGRelationSchema{OID: uint32(minOID.Int64), Schema: sch, Table: table}})
+		rel := PGRelationSchema{OID: uint32(minOID.Int64), Schema: sch, Table: table}
+		if seenLSN.Valid && seenAt.Valid {
+			rel.SeenLSN, rel.SeenAt = uint64(seenLSN.Int64), seenAt.Time.UTC()
+		}
+		heads = append(heads, PGShape{SnapshotID: id, Relation: rel})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()

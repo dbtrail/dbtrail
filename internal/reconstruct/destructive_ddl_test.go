@@ -12,7 +12,7 @@ import (
 )
 
 // ddlCols is what loadDestructiveDDLs selects.
-var ddlCols = []string{"id", "ddl_type", "detected_at", "binlog_file", "binlog_pos", "after_since", "at_or_before_until"}
+var ddlCols = []string{"id", "ddl_type", "detected_at", "binlog_file", "binlog_pos", "after_since", "at_or_before_until", "ddl_query_head"}
 
 // TestCheckDestructiveDDL_truncateInWindowRefuses is the regression for #764:
 // a TRUNCATE between the baseline snapshot and --at emits no row events, so
@@ -32,7 +32,7 @@ func TestCheckDestructiveDDL_truncateInWindowRefuses(t *testing.T) {
 	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
 		WithArgs(since, until, "mydb", "orders").
 		WillReturnRows(sqlmock.NewRows(ddlCols).
-			AddRow(1, "TRUNCATE TABLE", detectedAt, "binlog.000001", 400, true, true))
+			AddRow(1, "TRUNCATE TABLE", detectedAt, "binlog.000001", 400, true, true, ""))
 
 	err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", DDLWindow{Since: since, Until: until})
 	if err == nil {
@@ -69,7 +69,7 @@ func TestCheckDestructiveDDL_dropAndRenameAlsoRefuse(t *testing.T) {
 			mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
 				WithArgs(since, until, "mydb", "orders").
 				WillReturnRows(sqlmock.NewRows(ddlCols).
-					AddRow(2, ddlType, detectedAt, "binlog.000001", 400, true, true))
+					AddRow(2, ddlType, detectedAt, "binlog.000001", 400, true, true, ""))
 
 			err = CheckDestructiveDDL(context.Background(), db, "mydb", "orders", DDLWindow{Since: since, Until: until})
 			if err == nil {

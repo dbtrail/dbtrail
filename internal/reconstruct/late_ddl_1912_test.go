@@ -153,8 +153,8 @@ func TestCheckDestructiveDDL_reportsTheLateStatementAndNotAnOlderOne(t *testing.
 	old := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
 	late := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
 	_, check := lateDDLMock(t, since, until, sqlmock.NewRows(ddlCols).
-		AddRow(1, "DROP TABLE", old, "binlog.000002", 77, false, true).
-		AddRow(2, "TRUNCATE TABLE", late, "binlog.000009", 640, false, true))
+		AddRow(1, "DROP TABLE", old, "binlog.000002", 77, false, true, "").
+		AddRow(2, "TRUNCATE TABLE", late, "binlog.000009", 640, false, true, ""))
 
 	err := check(DDLWindow{Since: since, Until: until, Anchor: &query.BinlogPos{File: "binlog.000009", Pos: 500}})
 	if !errors.Is(err, ErrDestructiveDDL) {
@@ -183,8 +183,8 @@ func TestCheckDestructiveDDL_statementsBeforeTheSnapshotNeverRefuse(t *testing.T
 	until := time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
 	old := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
 	_, check := lateDDLMock(t, since, until, sqlmock.NewRows(ddlCols).
-		AddRow(3, "TRUNCATE TABLE", old, "binlog.000002", 77, false, true).
-		AddRow(4, "TRUNCATE TABLE", old.Add(time.Hour), "binlog.000009", 500, false, true))
+		AddRow(3, "TRUNCATE TABLE", old, "binlog.000002", 77, false, true, "").
+		AddRow(4, "TRUNCATE TABLE", old.Add(time.Hour), "binlog.000009", 500, false, true, ""))
 	if err := check(DDLWindow{Since: since, Until: until,
 		Anchor: &query.BinlogPos{File: "binlog.000009", Pos: 500},
 		Cut:    &query.BinlogPos{File: "binlog.000010", Pos: 300}}); err != nil {
@@ -197,7 +197,7 @@ func TestCheckDestructiveDDL_aRowWithNoPositionRefusesAndSaysWhy(t *testing.T) {
 	since := time.Date(2026, 1, 2, 10, 0, 5, 0, time.UTC)
 	until := time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
 	_, check := lateDDLMock(t, since, until, sqlmock.NewRows(ddlCols).
-		AddRow(5, "TRUNCATE TABLE", since.Add(-time.Minute), "", 0, false, true))
+		AddRow(5, "TRUNCATE TABLE", since.Add(-time.Minute), "", 0, false, true, ""))
 	err := check(DDLWindow{Since: since, Until: until, Anchor: &query.BinlogPos{File: "binlog.000009", Pos: 500}})
 	if !errors.Is(err, ErrDestructiveDDL) {
 		t.Fatalf("err = %v, want ErrDestructiveDDL", err)
@@ -225,8 +225,8 @@ func TestFindDestructiveDDL_looksByTimeAlone(t *testing.T) {
 	mock.ExpectQuery("detected_at >= \\?, detected_at <= \\?").
 		WithArgs(since, until, "shop", "orders").
 		WillReturnRows(sqlmock.NewRows(ddlCols).
-			AddRow(6, "TRUNCATE TABLE", since.Add(-time.Minute), "binlog.000010", 100, false, true).
-			AddRow(7, "DROP TABLE", since, "binlog.000010", 200, true, true))
+			AddRow(6, "TRUNCATE TABLE", since.Add(-time.Minute), "binlog.000010", 100, false, true, "").
+			AddRow(7, "DROP TABLE", since, "binlog.000010", 200, true, true, ""))
 	ddl, at, found, err := FindDestructiveDDL(context.Background(), db, "shop", "orders", since, until)
 	if err != nil || !found || ddl != "DROP TABLE" || !at.Equal(since) {
 		t.Fatalf("FindDestructiveDDL = %q %s %v %v, want the DROP TABLE in the same second as since", ddl, at, found, err)
@@ -341,8 +341,8 @@ func TestCheckDestructiveDDL_aMarkIsUsedOnlyWhileItsRowIsTheSame(t *testing.T) {
 			mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
 				WithArgs(since, until, "shop", "orders").
 				WillReturnRows(sqlmock.NewRows(ddlCols).
-					AddRow(12, "TRUNCATE TABLE", old, "binlog.000412", 900, false, true).
-					AddRow(13, "TRUNCATE TABLE", old, "binlog.000413", 50, false, true))
+					AddRow(12, "TRUNCATE TABLE", old, "binlog.000412", 900, false, true, "").
+					AddRow(13, "TRUNCATE TABLE", old, "binlog.000413", 50, false, true, ""))
 			mock.ExpectQuery("FROM schema_changes WHERE id = \\?").WithArgs(uint64(40)).WillReturnRows(tt.markRow)
 			err = CheckDestructiveDDL(context.Background(), db, "shop", "orders", w)
 			if got := errors.Is(err, ErrDestructiveDDL); got != tt.refuse {
@@ -369,7 +369,7 @@ func TestCheckDestructiveDDL_aMarkThatChangesNothingIsNotRead(t *testing.T) {
 	defer db.Close()
 	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
 		WithArgs(since, until, "shop", "orders").
-		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(41, "TRUNCATE TABLE", since.Add(-time.Minute), "binlog.000003", 640, false, true))
+		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(41, "TRUNCATE TABLE", since.Add(-time.Minute), "binlog.000003", 640, false, true, ""))
 	err = CheckDestructiveDDL(context.Background(), db, "shop", "orders", DDLWindow{Since: since, Until: until,
 		Anchor: &query.BinlogPos{File: "binlog.000003", Pos: 500}, Mark: &DDLMark{ID: 40}})
 	if !errors.Is(err, ErrDestructiveDDL) {

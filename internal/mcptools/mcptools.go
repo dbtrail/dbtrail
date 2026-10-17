@@ -44,6 +44,7 @@ import (
 	"github.com/dbtrail/dbtrail/ext/mcpext"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
@@ -1434,6 +1435,11 @@ func MakeSchemaChangesTool(cfg Config) func(context.Context, *mcp.CallToolReques
 				// records TRUNCATE with snapshot_id = NULL on purpose, and
 				// the status warning excludes it for the same reason.
 				sc.SnapshotNote = "no snapshot needed: TRUNCATE changes no table structure"
+			} else if strings.HasPrefix(sc.Statement, event.InferredDDLPrefix) {
+				// Inferred on a PostgreSQL source (#2441): the stream saves the
+				// new shape itself, so the null is not a gap either; the status
+				// warning excludes these rows too.
+				sc.SnapshotNote = "inferred from the PostgreSQL change stream, which saves the new table shape itself; the statement field is a marker with the time range the change happened in, then a description, not SQL"
 			}
 			results = append(results, sc)
 		}

@@ -341,6 +341,8 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		pg_type_mod      INT          DEFAULT NULL,
 		is_identity_always TINYINT(1) NOT NULL DEFAULT 0,
 		pg_relation_oid  INT UNSIGNED DEFAULT NULL,
+		pg_seen_lsn      BIGINT UNSIGNED DEFAULT NULL,
+		pg_seen_at       DATETIME(6)  DEFAULT NULL,
 		INDEX idx_snapshot_id    (snapshot_id),
 		INDEX idx_snapshot_table (snapshot_id, schema_name, table_name)
 	) ENGINE=InnoDB`)

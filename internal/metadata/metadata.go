@@ -811,6 +811,10 @@ type PGRelationSchema struct {
 	Schema  string
 	Table   string
 	Columns []PGRelationColumn // table-ordinal order
+	// SeenLSN/SeenAt: the commit of the transaction the shape was described
+	// in (#2441). 0/zero = unknown, stored as NULL.
+	SeenLSN uint64
+	SeenAt  time.Time
 }
 
 // WritePGSnapshot persists one PostgreSQL relation's shape as a schema_snapshots
@@ -866,17 +870,21 @@ func WritePGSnapshot(ctx context.Context, db *sql.DB, rel *PGRelationSchema) (in
 	}
 
 	snapshotTime := time.Now().UTC()
-	valClause := strings.TrimRight(strings.Repeat("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?),", len(rel.Columns)), ",")
+	valClause := strings.TrimRight(strings.Repeat("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?),", len(rel.Columns)), ",")
 	insertSQL := "INSERT INTO schema_snapshots " +
 		"(snapshot_id, snapshot_time, schema_name, table_name, column_name, " +
 		"ordinal_position, column_key, data_type, column_type, is_nullable, column_default, is_generated, " +
-		"pg_type_oid, pg_type_mod, is_identity_always, pg_relation_oid) VALUES " + valClause
+		"pg_type_oid, pg_type_mod, is_identity_always, pg_relation_oid, pg_seen_lsn, pg_seen_at) VALUES " + valClause
 
 	var relOID any // NULL when unknown, never a fake 0
 	if rel.OID != 0 {
 		relOID = rel.OID
 	}
-	args := make([]any, 0, len(rel.Columns)*16)
+	var seenLSN, seenAt any
+	if rel.SeenLSN != 0 {
+		seenLSN, seenAt = rel.SeenLSN, rel.SeenAt.UTC()
+	}
+	args := make([]any, 0, len(rel.Columns)*18)
 	for _, c := range rel.Columns {
 		columnKey := ""
 		if c.IsPK {
@@ -885,7 +893,7 @@ func WritePGSnapshot(ctx context.Context, db *sql.DB, rel *PGRelationSchema) (in
 		args = append(args,
 			nextID, snapshotTime, rel.Schema, rel.Table, c.Name,
 			c.Ordinal, columnKey, "", nil, "", nil, c.IsGenerated,
-			c.TypeOID, c.TypeMod, c.IsIdentityAlways, relOID,
+			c.TypeOID, c.TypeMod, c.IsIdentityAlways, relOID, seenLSN, seenAt,
 		)
 	}
 	if _, err = db.ExecContext(ctx, insertSQL, args...); err != nil {

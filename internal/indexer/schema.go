@@ -178,6 +178,8 @@ const ddlSchemaSnapshots = `CREATE TABLE IF NOT EXISTS schema_snapshots (
     pg_type_oid      INT UNSIGNED DEFAULT NULL COMMENT 'PostgreSQL pg_type OID (pgoutput RelationMessage); NULL for MySQL snapshots (#533)',
     pg_type_mod      INT          DEFAULT NULL COMMENT 'PostgreSQL atttypmod (pgoutput RelationMessage); NULL for MySQL snapshots (#533)',
     is_identity_always TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 if PostgreSQL GENERATED ALWAYS AS IDENTITY; 0 for MySQL (#557)',
+    pg_seen_lsn      BIGINT UNSIGNED DEFAULT NULL COMMENT 'commit LSN of the PostgreSQL transaction the shape was described in; NULL for MySQL snapshots and older PostgreSQL ones',
+    pg_seen_at       DATETIME(6)  DEFAULT NULL COMMENT 'commit time of that transaction (UTC); NULL with pg_seen_lsn',
     pg_relation_oid  INT UNSIGNED DEFAULT NULL COMMENT 'PostgreSQL pg_class OID of the relation (pgoutput RelationID), stable across a rename; NULL for MySQL snapshots and PostgreSQL snapshots written before #2441',
     INDEX idx_snapshot_id    (snapshot_id),
     INDEX idx_snapshot_table (snapshot_id, schema_name, table_name),

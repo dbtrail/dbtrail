@@ -142,7 +142,8 @@ func (d *Decoder) Decode(msg pglogrepl.Message) (event.Event, bool, error) {
 		// every relation; only in-scope rows are emitted.
 		var out []event.Event
 		if d.infer != nil {
-			inferred, err := d.infer.observe(m, d.txn, d.logger.Warn)
+			inScope := func(n relName) bool { return d.filters.Matches(n.schema, n.table) }
+			inferred, err := d.infer.observe(m, d.txn, inScope, d.logger.Warn)
 			if err != nil {
 				return event.Event{}, false, err
 			}
@@ -158,7 +159,7 @@ func (d *Decoder) Decode(msg pglogrepl.Message) (event.Event, bool, error) {
 		// stamp a SchemaVersion. Gate the EMIT, not the cache.
 		rel := d.relations[m.RelationID]
 		if d.filters.Matches(rel.schema, rel.table) {
-			out = append(out, relationEvent(rel))
+			out = append(out, relationEvent(rel, d.txn))
 		}
 		if len(out) == 0 {
 			return event.Event{}, false, nil
@@ -364,10 +365,15 @@ func isTimescaleChunk(schema, table string) bool {
 // MySQL's TakeSnapshot — no information_schema). IsPK is by name; rel.pkCols is
 // already in table-ordinal order (cacheRelation reordered it), so the snapshot's PK
 // columns align with the resolver. Ordinal is the table-column position.
-func relationEvent(rel *relationInfo) event.Event {
+func relationEvent(rel *relationInfo, txn txnContext) event.Event {
 	pkNames := make(map[string]bool, len(rel.pkCols))
 	for _, pk := range rel.pkCols {
 		pkNames[pk.Name] = true
+	}
+	var seenLSN uint64
+	var seenAt time.Time
+	if txn.open {
+		seenLSN, seenAt = uint64(txn.commitLSN), txn.commitTime
 	}
 	cols := make([]metadata.PGRelationColumn, len(rel.columns))
 	for i, c := range rel.columns {
@@ -387,6 +393,8 @@ func relationEvent(rel *relationInfo) event.Event {
 		EventType: event.EventRelation,
 		Relation: &metadata.PGRelationSchema{
 			OID:     rel.oid,
+			SeenLSN: seenLSN,
+			SeenAt:  seenAt,
 			Schema:  rel.schema,
 			Table:   rel.table,
 			Columns: cols,

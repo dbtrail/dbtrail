@@ -379,7 +379,7 @@ func TestSchemaChangesTool_uncoveredOnlyFilter(t *testing.T) {
 	// the rows the status warning counts, and the two clauses diverged once
 	// (9 listed against a count of 1, the delta being TRUNCATEs whose null is
 	// by design).
-	mock.ExpectQuery(`FROM schema_changes WHERE 1=1 AND \(snapshot_id IS NULL AND ddl_type <> 'TRUNCATE TABLE'\) ORDER BY detected_at DESC, binlog_file DESC, binlog_pos DESC, id DESC LIMIT`).
+	mock.ExpectQuery(`FROM schema_changes WHERE 1=1 AND \(snapshot_id IS NULL AND ddl_type <> 'TRUNCATE TABLE' AND ddl_query NOT LIKE '/\* dbtrail: inferred from relation shape;%'\) ORDER BY detected_at DESC, binlog_file DESC, binlog_pos DESC, id DESC LIMIT`).
 		WillReturnRows(sqlmock.NewRows(schemaChangesMockCols).
 			AddRow(2, detected, "shop", "orders", "ALTER TABLE",
 				"ALTER TABLE orders ADD COLUMN note TEXT", "binlog.000001", 900, nil, nil))

@@ -415,12 +415,137 @@ func TestInfer_lookupAndIndexFailuresFailLoud(t *testing.T) {
 }
 
 func TestWithDDLInference_requiresResolvers(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("no panic for a nil Lookup")
+	lookup := func(uint32) (pgcapture.RelationFacts, error) { return pgcapture.RelationFacts{}, nil }
+	last := func(string, string, uint64) (uint64, time.Time, bool, error) { return 0, time.Time{}, false, nil }
+	for name, cfg := range map[string]pgcapture.DDLInference{
+		"no Lookup":     {LastChange: last},
+		"no LastChange": {Lookup: lookup},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: no panic", name)
+				}
+			}()
+			pgcapture.WithDDLInference(cfg)
+		}()
+	}
+}
+
+// Every inferred row's marker reads back with the bounds it was written with.
+func TestInfer_markerParsesBack(t *testing.T) {
+	r := newInferRig(t, nil, known(10, "s", "a", int4("id")))
+	r.facts[10] = pgcapture.RelationFacts{Exists: false}
+	evs := ddls(r.relation(t, typedRel(11, "s", "a", int4("id"), text("x"))))
+	for _, e := range evs {
+		b, ok := event.ParseInferredBracket(e.DDLQuery)
+		if !ok || !b.High.Equal(txnTime) {
+			t.Errorf("%s: bracket %+v ok %v from %q", e.DDLType, b, ok, e.DDLQuery)
 		}
-	}()
-	pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, slogDiscard(), pgcapture.WithDDLInference(pgcapture.DDLInference{}))
+		if e.DDLType == event.DDLDropTable && (!b.HasLow || !b.Low.Equal(lowTime)) {
+			t.Errorf("DROP low = %+v", b)
+		}
+	}
+}
+
+// The live catalog can be ahead of the stream. a -> b, CREATE a, and later
+// b -> c: when the new a arrives the catalog already says c. The row says the
+// name is the current one; the old table's own Relations, which still say b,
+// must not produce a reversed rename.
+func TestInfer_liveCatalogAheadOfTheStream(t *testing.T) {
+	r := newInferRig(t, nil, known(10, "s", "a", int4("id")))
+	r.facts[10] = pgcapture.RelationFacts{Exists: true, Schema: "s", Table: "c"}
+	evs := ddls(r.relation(t, typedRel(11, "s", "a", int4("id"))))
+	if got := kinds(evs); got != "RENAME TABLE s.c | CREATE TABLE s.a" {
+		t.Fatalf("events = %s", got)
+	}
+	mustContain(t, evs[0].DDLQuery, "current catalog")
+	// The stream now catches up with the old table under b, then c.
+	if d := ddls(r.decodeAll(t, typedRel(10, "s", "b", int4("id")))); len(d) != 0 {
+		t.Fatalf("the old table's first Relation after a catalog-named rename wrote %s", kinds(d))
+	}
+	d := ddls(r.decodeAll(t, typedRel(10, "s", "c", int4("id"))))
+	if got := kinds(d); got != "RENAME TABLE s.c" {
+		t.Fatalf("b -> c: got %s", got)
+	}
+	mustContain(t, d[0].DDLQuery, "RENAME TABLE s.b TO s.c")
+}
+
+// a -> b, CREATE a, later DROP b: the catalog says the old OID is gone. When
+// the stream catches up with the old table under b, that is not a new table.
+func TestInfer_catalogGoneButStreamStillShowsIt(t *testing.T) {
+	r := newInferRig(t, nil, known(10, "s", "a", int4("id")))
+	r.facts[10] = pgcapture.RelationFacts{Exists: false}
+	r.relation(t, typedRel(11, "s", "a", int4("id")))
+	if d := ddls(r.decodeAll(t, typedRel(10, "s", "b", int4("id")))); len(d) != 0 {
+		t.Fatalf("the old table under its stream name wrote %s", kinds(d))
+	}
+}
+
+// A change that touches no captured name asks neither the catalog nor the
+// index, so their failure cannot stop capture of the captured tables.
+func TestInfer_outOfScopeAsksNothing(t *testing.T) {
+	calls := 0
+	d := pgcapture.NewDecoder(pkResolver("id"), event.Filters{Schemas: map[string]bool{"s": true}}, slogDiscard(),
+		pgcapture.WithDDLInference(pgcapture.DDLInference{
+			Known: []pgcapture.KnownShape{known(10, "other", "a", int4("id")), known(20, "other", "b", int4("id"))},
+			Lookup: func(uint32) (pgcapture.RelationFacts, error) {
+				calls++
+				return pgcapture.RelationFacts{}, nil
+			},
+			LastChange: func(string, string, uint64) (uint64, time.Time, bool, error) {
+				calls++
+				return 0, time.Time{}, false, nil
+			},
+		}))
+	mustDecode(t, d, beginMsg())
+	for _, m := range []*pglogrepl.RelationMessage{
+		typedRel(10, "other", "a", int4("id"), text("x")),  // ALTER
+		typedRel(10, "other", "a2", int4("id"), text("x")), // RENAME
+		typedRel(21, "other", "b", int4("id")),             // name reused
+		typedRel(30, "other", "new", int4("id")),           // CREATE
+	} {
+		if _, emit := mustDecode(t, d, m); emit || len(d.TakePending()) != 0 {
+			t.Fatalf("out-of-scope %s.%s produced events", m.Namespace, m.RelationName)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("%d resolver calls for out-of-scope changes", calls)
+	}
+	// Renamed INTO scope: still known by OID, so a rename, not a create.
+	ev, _ := mustDecode(t, d, typedRel(10, "s", "a", int4("id"), text("x")))
+	if ev.EventType != event.EventDDL || ev.DDLType != event.DDLRenameTable {
+		t.Fatalf("rename into scope = %v %s", ev.EventType, ev.DDLType)
+	}
+}
+
+// With no change decoded and none indexed, the commit the old shape was last
+// described in is the lower bound: the shape was in effect then.
+func TestInfer_seenIsTheFallbackLowerBound(t *testing.T) {
+	seen := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	k := known(10, "s", "a", int4("id"))
+	k.SeenLSN, k.SeenAt = 0x500, seen
+	r := newInferRig(t, nil, k)
+	r.lastOK = false
+	d := ddls(r.relation(t, typedRel(10, "s", "a", int4("id"), text("x"))))
+	if len(d) != 1 {
+		t.Fatalf("got %s", kinds(d))
+	}
+	mustContain(t, d[0].DDLQuery, "low=0/500@2026-06-21T09:00:00Z")
+	if !d[0].Timestamp.Equal(seen) {
+		t.Errorf("detected_at = %v, want %v", d[0].Timestamp, seen)
+	}
+}
+
+// The snapshot the decoder emits records where the shape was described, so a
+// restart can tell shapes it will see again from shapes already behind it.
+func TestInfer_relationSnapshotRecordsWhereItWasSeen(t *testing.T) {
+	r := newInferRig(t, []uint32{10})
+	evs := r.relation(t, typedRel(10, "s", "a", int4("id")))
+	rel := evs[len(evs)-1]
+	if rel.EventType != event.EventRelation || rel.Relation.SeenLSN != uint64(txnLSN) || !rel.Relation.SeenAt.Equal(txnTime) || rel.Relation.OID != 10 {
+		t.Fatalf("relation event = %+v", rel.Relation)
+	}
 }
 
 // A very wide ALTER fits schema_changes.ddl_query; the marker stays whole.
@@ -438,5 +563,8 @@ func TestInfer_wideAlterIsCapped(t *testing.T) {
 	q := d[0].DDLQuery
 	if len(q) > 20<<10 || !utf8.ValidString(q) || !strings.HasSuffix(q, "(truncated)") || !strings.HasPrefix(q, "/* dbtrail: inferred") || !strings.Contains(q, " */ ALTER TABLE s.a: retyped") {
 		t.Fatalf("len %d, valid %v, head %.120q, tail %q", len(q), utf8.ValidString(q), q, q[len(q)-40:])
+	}
+	if _, ok := event.ParseInferredBracket(q); !ok {
+		t.Error("a capped row's marker no longer parses")
 	}
 }

@@ -2957,9 +2957,11 @@ func findCapturedCreateTableDDL(ctx context.Context, db *sql.DB, schema, table s
 	row := db.QueryRowContext(ctx, `
 		SELECT ddl_type, ddl_query FROM schema_changes
 		WHERE schema_name = ? AND table_name = ? AND ddl_type IN (?, ?) AND detected_at <= ?
+		  AND ddl_query NOT LIKE ?
 		ORDER BY detected_at DESC, id DESC
 		LIMIT 1`,
-		schema, table, event.DDLCreateTable, event.DDLReplaceTable, at)
+		// An inferred PostgreSQL CREATE (#2441) is prose, not a statement.
+		schema, table, event.DDLCreateTable, event.DDLReplaceTable, at, event.InferredDDLPrefix+"%")
 	var kind string
 	if err := row.Scan(&kind, &ddl); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

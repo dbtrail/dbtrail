@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/event"
 )
 
 // IndexStateRow holds one row from the index_state table.
@@ -349,10 +351,14 @@ func LoadArchiveStats(ctx context.Context, db *sql.DB) (*ArchiveStats, error) {
 // (no snapshot needed)") — a NULL there is not a coverage gap, and counting
 // it would permanently inflate the warning.
 //
+// A schema change inferred from a PostgreSQL shape (#2441) is excluded too:
+// the shape it describes is persisted by the stream's own snapshot of that
+// Relation, written right after the row, so there is no gap to report.
+//
 // Parenthesized so both consumers compose it safely: status appends it to
 // WHERE, the tool to an existing clause with AND — an OR added here later
 // would otherwise bind correctly in one site and silently wrong in the other.
-const UncoveredDDLWhere = `(snapshot_id IS NULL AND ddl_type <> 'TRUNCATE TABLE')`
+const UncoveredDDLWhere = `(snapshot_id IS NULL AND ddl_type <> 'TRUNCATE TABLE' AND ddl_query NOT LIKE '` + event.InferredDDLPrefix + `%')`
 
 // LoadCoverage loads restore coverage info from binlog_events, schema_changes,
 // and archive_state. Archive coverage is derived from partition names stored in

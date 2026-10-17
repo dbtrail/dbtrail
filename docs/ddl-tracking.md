@@ -119,8 +119,8 @@ Key fields:
 | Field | Description |
 |---|---|
 | `ddl_type` | One of `ALTER TABLE`, `CREATE TABLE`, `CREATE OR REPLACE TABLE`, `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE` |
-| `ddl_query` | The DDL statement from the binlog. For a `DROP` or `RENAME` that names several tables, it is on the first table's row, and the other tables' rows say which row carries it. A `DROP` or `RENAME` longer than the column's 65,535 bytes is cut to fit (past that it is only more names, each with its own row) |
-| `snapshot_id` | The snapshot taken after this DDL. NULL when none was taken: file mode without `--source-dsn`, a failed auto-snapshot, or `TRUNCATE TABLE` (which changes no table structure, so no snapshot is needed — by design, in every mode) |
+| `ddl_query` | The DDL statement from the binlog. On a PostgreSQL source, where no statement is available, it is a marker with the time range the change happened in, followed by a description in words (see [Schema changes on PostgreSQL](postgres.md#schema-changes-on-postgresql)). For a `DROP` or `RENAME` that names several tables, it is on the first table's row, and the other tables' rows say which row carries it. A `DROP` or `RENAME` longer than the column's 65,535 bytes is cut to fit (past that it is only more names, each with its own row) |
+| `snapshot_id` | The snapshot taken after this DDL. NULL when none was taken: file mode without `--source-dsn`, a failed auto-snapshot, `TRUNCATE TABLE` (which changes no table structure, so no snapshot is needed — by design, in every mode), or a change inferred on a PostgreSQL source (the stream saves the new shape itself, right after the row) |
 
 A `DROP TABLE` or `RENAME TABLE` that names several tables records one row per table, all at the statement's own position: every table a `DROP` names, and both sides of every rename pair (the old name stops holding its rows, the new one starts holding another table's). That is what lets the destructive-DDL checks, which look one table up at a time, see a table that was not named first. `bintrail status` and `list_schema_changes` count these rows, so a `DROP` of three tables is three schema changes.
 
@@ -158,7 +158,7 @@ The `status` command includes a "Restore Coverage" section that answers the ques
   Warning: 1 schema change(s) detected without auto-snapshot (file-mode indexing without --source-dsn, or a failed auto-snapshot) — recovery across these changes may require manual snapshot
 ```
 
-The warning appears when `schema_changes` rows have `snapshot_id = NULL` for a DDL type that needs a snapshot — either a DDL detected in file mode without `--source-dsn`, or an auto-snapshot that failed (in any mode). `TRUNCATE TABLE` rows are excluded from the count: they record `snapshot_id = NULL` by design (a truncate changes no table structure, so no snapshot is taken) and are not a coverage gap. Recovery SQL generated for events spanning a genuinely uncovered DDL boundary may use incorrect column names.
+The warning appears when `schema_changes` rows have `snapshot_id = NULL` for a DDL type that needs a snapshot — either a DDL detected in file mode without `--source-dsn`, or an auto-snapshot that failed (in any mode). `TRUNCATE TABLE` rows are excluded from the count: they record `snapshot_id = NULL` by design (a truncate changes no table structure, so no snapshot is taken) and are not a coverage gap. So are changes inferred on a PostgreSQL source, whose new shape the stream saves on its own. Recovery SQL generated for events spanning a genuinely uncovered DDL boundary may use incorrect column names.
 
 ### JSON output
 
@@ -186,4 +186,4 @@ The warning appears when `schema_changes` rows have `snapshot_id = NULL` for a D
 | User action needed | None | None | Run `bintrail snapshot` after DDL |
 | Restore coverage warning | No (snapshot covers the DDL) | No (snapshot covers the DDL) | Yes (warns about uncovered DDLs) |
 
-Two cases sit outside this happy-path table: a **failed auto-snapshot** (any mode) records the DDL with `snapshot_id = NULL` and counts toward the restore coverage warning; a **`TRUNCATE TABLE`** records `snapshot_id = NULL` by design in every mode and is excluded from the warning.
+Two cases sit outside this happy-path table: a **failed auto-snapshot** (any mode) records the DDL with `snapshot_id = NULL` and counts toward the restore coverage warning; a **`TRUNCATE TABLE`** records `snapshot_id = NULL` by design in every mode and is excluded from the warning, as is a change inferred on a PostgreSQL source.

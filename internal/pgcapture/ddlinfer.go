@@ -52,6 +52,10 @@ type KnownShape struct {
 	Schema  string
 	Table   string
 	Columns []ShapeColumn
+	// SeenLSN/SeenAt: the commit of the transaction the shape was last
+	// described in (0 = unknown, a shape stored before this was recorded).
+	SeenLSN uint64
+	SeenAt  time.Time
 }
 
 // RelationFacts is what the live catalog says about a relation OID.
@@ -105,6 +109,14 @@ type knownRel struct {
 	// stream; set by rowEvent, cleared when the shape changes.
 	low    bound
 	hasLow bool
+	// seen is the commit of the transaction this shape was last described
+	// in: the shape was in effect then, so a later change to it committed
+	// after seen. The fallback lower bound when no row change is known.
+	seen    bound
+	hasSeen bool
+	// nameUnknown: the name came from the live catalog, which can be ahead
+	// of the stream. The next Relation for this OID is learned without a row.
+	nameUnknown bool
 }
 
 type inferState struct {
@@ -122,7 +134,11 @@ func newInferState(cfg DDLInference) *inferState {
 			s.legacy[n] = k.Columns
 			continue
 		}
-		s.byOID[k.OID] = &knownRel{name: n, cols: k.Columns}
+		r := &knownRel{name: n, cols: k.Columns}
+		if k.SeenLSN != 0 {
+			r.seen, r.hasSeen = bound{pglogrepl.LSN(k.SeenLSN), k.SeenAt}, true
+		}
+		s.byOID[k.OID] = r
 		s.byName[n] = k.OID
 	}
 	return s
@@ -157,8 +173,10 @@ func equalShape(a, b []ShapeColumn) bool {
 
 // observe compares a Relation message with the last known shape of its table,
 // updates what is known, and returns the inferred DDL events in the order they
-// must be written. txn is the transaction the message arrived in.
-func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, warn func(msg string, args ...any)) ([]event.Event, error) {
+// must be written. txn is the transaction the message arrived in. inScope
+// says whether a table name is captured: a change that touches no captured
+// name updates what is known without asking the catalog or the index.
+func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inScope func(relName) bool, warn func(msg string, args ...any)) ([]event.Event, error) {
 	oid := m.RelationID
 	n := relName{m.Namespace, m.RelationName}
 	cols := shapeOf(m)
@@ -173,7 +191,14 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, warn 
 	if k, ok := s.byOID[oid]; ok {
 		renamed := k.name != n
 		altered := !equalShape(k.cols, cols)
-		if (renamed || altered) && placeable {
+		switch {
+		case !renamed && !altered:
+		case k.nameUnknown:
+			// Its last name came from the live catalog; this is the first
+			// time the stream itself names it. Learn, do not compare.
+		case !placeable:
+			warn("pgcapture: relation shape changed outside a transaction; not recorded as a schema change", "oid", oid, "table", n.String())
+		case inScope(k.name) || inScope(n):
 			low, err := s.lowFor(k, k.name, high)
 			if err != nil {
 				return nil, err
@@ -184,67 +209,69 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, warn 
 			if altered {
 				out = append(out, alterEvent(oid, n, k.cols, cols, "", low, high))
 			}
-		} else if renamed || altered {
-			warn("pgcapture: relation shape changed outside a transaction; not recorded as a schema change", "oid", oid, "table", n.String())
 		}
 		if renamed && s.byName[k.name] == oid {
 			delete(s.byName, k.name)
 		}
 		s.byName[n] = oid
-		k.name, k.cols = n, cols
 		if renamed || altered {
 			k.hasLow = false
+		}
+		k.name, k.cols, k.nameUnknown = n, cols, false
+		if placeable {
+			k.seen, k.hasSeen = high, true
 		}
 		return out, nil
 	}
 
 	// A new OID.
 	newRel := &knownRel{name: n, cols: cols}
+	if placeable {
+		newRel.seen, newRel.hasSeen = high, true
+	}
 	if holder, ok := s.byName[n]; ok && holder != oid {
 		hk := s.byOID[holder]
+		s.byOID[oid], s.byName[n] = newRel, oid
+		// The name moved to a new table, so the old one was dropped or
+		// renamed at or before this point. Which, and to what, only the live
+		// catalog can say, and it may be ahead of the stream: whatever it
+		// says, the old table's own next Relation is learned, not compared.
+		hk.nameUnknown, hk.hasLow = true, false
+		if !placeable || !inScope(n) {
+			return nil, nil
+		}
 		facts, err := s.cfg.Lookup(holder)
 		if err != nil {
 			return nil, fmt.Errorf("pgcapture: catalog lookup for relation OID %d (formerly %s): %w", holder, n, err)
 		}
-		if placeable {
-			low, err := s.lowFor(hk, n, high)
-			if err != nil {
-				return nil, err
-			}
-			if facts.Exists {
-				// Renamed away, never written to under its new name: the name
-				// was freed, not the table dropped.
-				to := relName{facts.Schema, facts.Table}
-				out = append(out, renameEvent(holder, n, to,
-					" (its new name read from the current catalog: the rename committed at or before this point)", low, high))
-			} else {
-				out = append(out, ddlEvent(event.DDLDropTable, holder, n, nil,
-					fmt.Sprintf("DROP TABLE %s (its name now belongs to a new table and the old one is gone from the catalog: dropped here, or renamed here and dropped since)", n),
-					low, high))
-			}
-			c, err := s.createEvent(oid, n, " under a name that belonged to another table", high)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, c)
+		low, err := s.lowFor(hk, n, high)
+		if err != nil {
+			return nil, err
 		}
 		if facts.Exists {
 			to := relName{facts.Schema, facts.Table}
-			hk.name, hk.hasLow = to, false
-			if to != n {
+			out = append(out, renameEvent(holder, n, to,
+				" (the new name is the one in the current catalog, which can be later than this point: the table was renamed at or before here, and may have been renamed again since)", low, high))
+			hk.name = to
+			if _, taken := s.byName[to]; !taken {
 				s.byName[to] = holder
 			}
 		} else {
-			delete(s.byOID, holder)
+			out = append(out, ddlEvent(event.DDLDropTable, holder, n, nil,
+				fmt.Sprintf("DROP TABLE %s (its name now belongs to a new table and the old one is gone from the current catalog: dropped here, or renamed here and dropped since)", n),
+				low, high))
 		}
-		s.byOID[oid], s.byName[n] = newRel, oid
-		return out, nil
+		c, err := s.createEvent(oid, n, " under a name that belonged to another table", high)
+		if err != nil {
+			return nil, err
+		}
+		return append(out, c), nil
 	}
 
 	if lc, ok := s.legacy[n]; ok {
 		delete(s.legacy, n)
 		s.byOID[oid], s.byName[n] = newRel, oid
-		if !equalShape(lc, cols) && placeable {
+		if !equalShape(lc, cols) && placeable && inScope(n) {
 			low, err := s.lowFor(nil, n, high)
 			if err != nil {
 				return nil, err
@@ -256,7 +283,7 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, warn 
 	}
 
 	s.byOID[oid], s.byName[n] = newRel, oid
-	if s.cfg.StartOIDs[oid] || !placeable {
+	if s.cfg.StartOIDs[oid] || !placeable || !inScope(n) {
 		return nil, nil // version zero
 	}
 	c, err := s.createEvent(oid, n, "", high)
@@ -268,7 +295,8 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, warn 
 
 // lowFor is the lower bound of a shape change on the table k (nil when only a
 // legacy shape was known) that last held name: the last change decoded in
-// this stream, else the newest indexed change before high, else none.
+// this stream, else the newest indexed change before high, else the commit
+// the old shape was last described in, else none.
 func (s *inferState) lowFor(k *knownRel, name relName, high bound) (*bound, error) {
 	if k != nil && k.hasLow {
 		b := k.low
@@ -277,6 +305,10 @@ func (s *inferState) lowFor(k *knownRel, name relName, high bound) (*bound, erro
 	lsn, at, ok, err := s.cfg.LastChange(name.schema, name.table, uint64(high.lsn))
 	if err != nil {
 		return nil, fmt.Errorf("pgcapture: last indexed change to %s (lower bound of a schema change): %w", name, err)
+	}
+	if k != nil && k.hasSeen && (!ok || pglogrepl.LSN(lsn) < k.seen.lsn) {
+		b := k.seen
+		return &b, nil
 	}
 	if !ok {
 		return nil, nil
@@ -291,7 +323,7 @@ func (s *inferState) createEvent(oid uint32, n relName, why string, high bound) 
 	}
 	text := fmt.Sprintf("CREATE TABLE %s", n)
 	if facts.IsPartition {
-		text += " partition of " + facts.Parent
+		text += " partition of " + facts.Parent + " (per the current catalog)"
 	}
 	if why != "" {
 		text += " (a new table" + why + ")"
@@ -405,8 +437,8 @@ func ddlEvent(kind event.DDLKind, oid uint32, n relName, tables []event.DDLTable
 	if low != nil {
 		lowText, ts = fmtBound(*low), low.at
 	}
-	marker := fmt.Sprintf("/* dbtrail: inferred from relation shape; oid=%d; instant=at-or-before; low=%s; high=%s */ ",
-		oid, lowText, fmtBound(high))
+	marker := fmt.Sprintf("%s oid=%d; instant=at-or-before; low=%s; high=%s */ ",
+		event.InferredDDLPrefix, oid, lowText, fmtBound(high))
 	lsn := high.lsn.String()
 	return event.Event{
 		BinlogFile: lsn,

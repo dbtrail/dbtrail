@@ -633,7 +633,7 @@ func TestFindCapturedCreateTableDDL_found(t *testing.T) {
 
 	at := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").
-		WithArgs("mydb", "orders", string(event.DDLCreateTable), string(event.DDLReplaceTable), at).
+		WithArgs("mydb", "orders", string(event.DDLCreateTable), string(event.DDLReplaceTable), at, event.InferredDDLPrefix+"%").
 		WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "ddl_query"}).
 			AddRow("CREATE TABLE", "CREATE TABLE `orders` (`id` int NOT NULL, PRIMARY KEY (`id`))"))
 

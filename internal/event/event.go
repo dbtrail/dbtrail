@@ -478,6 +478,14 @@ func SanitizeQueryText(s string) string {
 	return s[:cut] + QueryTextTruncationMarker
 }
 
+// InferredDDLPrefix starts the ddl_query of a schema_changes row that was
+// inferred from a PostgreSQL Relation shape change rather than read from a
+// statement (#2441). What follows it is a marker with the bracket the change
+// committed in (low and high bounds, each "<lsn>@<RFC3339>" or low=none),
+// then prose. Such a row's detected_at is the low bound (or high when there
+// is none), its binlog position the high bound. Never SQL.
+const InferredDDLPrefix = "/* dbtrail: inferred from relation shape;"
+
 // DDLTable is one table a DDL statement names.
 type DDLTable struct {
 	Schema, Table string

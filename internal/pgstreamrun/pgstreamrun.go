@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -163,7 +164,11 @@ func One(ctx context.Context, cfg Config) error {
 	// Relation after a restart is compared with it instead of being taken as
 	// the first version. A failure here stops the start: carrying on with
 	// nothing known would silently turn DDL inference off for every table.
-	known, err := loadKnownShapes(indexDB)
+	var upTo uint64
+	if saved != nil {
+		upTo = startLSN
+	}
+	known, err := loadKnownShapes(indexDB, upTo)
 	if err != nil {
 		return err
 	}
@@ -531,7 +536,12 @@ func streamLoopPG(
 				}
 				return nil
 			}
-			if !ev.Timestamp.IsZero() {
+			// An inferred schema change is dated at the LOW end of its bracket
+			// (#2441), possibly long before the stream's position, so it is not
+			// a reading of how far the stream is. (The change and commit of the
+			// same transaction follow it and would set the time anyway; this
+			// keeps a checkpoint between them from saving the older time.)
+			if !ev.Timestamp.IsZero() && !strings.HasPrefix(ev.DDLQuery, event.InferredDDLPrefix) {
 				state.lastEventTime = sql.NullTime{Time: ev.Timestamp, Valid: true}
 			}
 			switch ev.EventType {
@@ -556,6 +566,11 @@ func streamLoopPG(
 				// cursor) and does NOT force a flush of the in-flight batch. A crash
 				// before the next checkpoint re-delivers the TRUNCATE and re-records a
 				// benign duplicate marker.
+				if dup, err := inferredRowRecorded(indexDB, ev); err != nil {
+					return fmt.Errorf("pgstreamrun: check for an already recorded %s on %s.%s: %w", ev.DDLType, ev.Schema, ev.Table, err)
+				} else if dup {
+					continue
+				}
 				if err := indexer.InsertSchemaChange(indexDB, ev, nil); err != nil {
 					return fmt.Errorf("pgstreamrun: record %s for %s.%s: %w", ev.DDLType, ev.Schema, ev.Table, err)
 				}
@@ -677,14 +692,15 @@ func resolveStartLSN(saved *pgStreamState, flagLSN uint64, logger *slog.Logger) 
 
 // loadKnownShapes reads the last shape persisted per table for DDL inference
 // (#2441).
-func loadKnownShapes(indexDB *sql.DB) ([]pgcapture.KnownShape, error) {
-	shapes, err := metadata.LoadPGShapes(context.Background(), indexDB)
+func loadKnownShapes(indexDB *sql.DB, upTo uint64) ([]pgcapture.KnownShape, error) {
+	shapes, err := metadata.LoadPGShapes(context.Background(), indexDB, upTo)
 	if err != nil {
 		return nil, fmt.Errorf("pgstreamrun: load the last known table shapes: %w", err)
 	}
 	out := make([]pgcapture.KnownShape, len(shapes))
 	for i, s := range shapes {
-		k := pgcapture.KnownShape{OID: s.Relation.OID, Schema: s.Relation.Schema, Table: s.Relation.Table}
+		k := pgcapture.KnownShape{OID: s.Relation.OID, Schema: s.Relation.Schema, Table: s.Relation.Table,
+			SeenLSN: s.Relation.SeenLSN, SeenAt: s.Relation.SeenAt}
 		for _, c := range s.Relation.Columns {
 			k.Columns = append(k.Columns, pgcapture.ShapeColumn{Name: c.Name, TypeOID: c.TypeOID, TypeMod: c.TypeMod})
 		}
@@ -719,4 +735,27 @@ func lastIndexedChange(indexDB *sql.DB) func(schema, table string, beforeLSN uin
 		}
 		return lsn, at.UTC(), true, nil
 	}
+}
+
+// inferredRowRecorded reports whether an inferred schema change (#2441) is
+// already in schema_changes, written before a restart replayed the
+// transaction that produced it: same position, table, kind and text. Other
+// DDL markers are not checked (a TRUNCATE recorded twice stays a benign
+// duplicate, as before).
+func inferredRowRecorded(indexDB *sql.DB, ev event.Event) (bool, error) {
+	if !strings.HasPrefix(ev.DDLQuery, event.InferredDDLPrefix) {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
+	defer cancel()
+	var one int
+	err := indexDB.QueryRowContext(ctx, `
+		SELECT 1 FROM schema_changes
+		WHERE binlog_pos = ? AND binlog_file = ? AND ddl_type = ?
+		  AND BINARY schema_name = ? AND BINARY table_name = ? AND BINARY ddl_query = ?
+		LIMIT 1`, ev.EndPos, ev.BinlogFile, string(ev.DDLType), ev.Schema, ev.Table, ev.DDLQuery).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
