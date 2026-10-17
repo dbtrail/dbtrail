@@ -59,3 +59,50 @@ func TestCheckDestructiveDDL_inferredBracketOverlappingTheSnapshot(t *testing.T)
 		t.Fatalf("bracket ending before the snapshot: err = %v, want none", err)
 	}
 }
+
+// With no lower bound the change can have happened at any time up to its
+// high end, so it overlaps every window that starts before that end, even
+// one that ends long before it.
+func TestCheckDestructiveDDL_inferredWithoutALowerBound(t *testing.T) {
+	since := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 1, 1, 10, 30, 0, 0, time.UTC)
+	high := time.Date(2026, 1, 1, 12, 0, 0, 500000000, time.UTC)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	q := event.InferredDDLPrefix + " oid=10; instant=at-or-before; low=none; high=0/19DF9E8@" + high.Format(time.RFC3339Nano) + " */ DROP TABLE public.t"
+	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
+		WithArgs(since, until, "public", "t").
+		// detected_at is the high end: the database says "not before until".
+		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", high, "0/19DF9E8", 27130344, true, false, q))
+	err = CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until})
+	if !errors.Is(err, ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "run at or before 2026-01-01T12:00:00Z") {
+		t.Errorf("refusal %v", err)
+	}
+}
+
+// The high end keeps its fraction of a second: a snapshot taken in the same
+// second, before the change's high end, still refuses.
+func TestCheckDestructiveDDL_inferredHighKeepsTheFraction(t *testing.T) {
+	low := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+	since := time.Date(2026, 1, 1, 10, 0, 0, 200000000, time.UTC)
+	high := time.Date(2026, 1, 1, 10, 0, 0, 700000000, time.UTC)
+	until := time.Date(2026, 1, 1, 11, 0, 0, 0, time.UTC)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	q := event.InferredDDLPrefix + " oid=10; instant=at-or-before; low=0/1@" + low.Format(time.RFC3339Nano) + "; high=0/2@" + high.Format(time.RFC3339Nano) + " */ DROP TABLE public.t"
+	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
+		WithArgs(since, until, "public", "t").
+		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", low, "0/2", 2, false, true, q))
+	if err := CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until}); !errors.Is(err, ErrDestructiveDDL) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+}

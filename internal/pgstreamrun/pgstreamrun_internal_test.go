@@ -3,6 +3,7 @@ package pgstreamrun
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"log/slog"
 	"strings"
 	"testing"
@@ -196,5 +197,19 @@ func TestResolveStartLSN(t *testing.T) {
 	// ConsistentPoint (this must NOT be an error).
 	if got := resolveStartLSN(nil, 0, log); got != 0 {
 		t.Errorf("first run: got %d, want 0", got)
+	}
+}
+
+func TestInferredOID_2441(t *testing.T) {
+	for q, want := range map[string]uint32{
+		event.InferredDDLPrefix + " oid=16411; instant=at-or-before; low=none; high=0/1@2026-01-01T00:00:00Z */ x": 16411,
+		event.InferredDDLPrefix + " oid=0; low=none */ x":                                                          0,
+		event.InferredDDLPrefix + " instant=at-or-before */ x":                                                     0,
+		"ALTER TABLE t ADD c INT": 0,
+	} {
+		got, ok := inferredOID(q)
+		if got != want || ok != (want != 0) {
+			t.Errorf("inferredOID(%q) = %d %v, want %d", q, got, ok, want)
+		}
 	}
 }

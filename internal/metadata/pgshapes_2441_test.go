@@ -57,8 +57,40 @@ func TestLatestPGShapes(t *testing.T) {
 		{"unsorted input", []PGShape{shape(3, 11, "s", "b"), shape(1, 0, "s", "a"), shape(2, 10, "s", "a")}, []int{2, 3}},
 	}
 	for _, c := range cases {
-		if got := ids(latestPGShapes(c.in)); !reflect.DeepEqual(got, c.want) {
+		if got := ids(latestPGShapes(c.in, 0)); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func seenShape(id int, oid uint32, lsn uint64) PGShape {
+	s := shape(id, oid, "s", "a")
+	s.Relation.SeenLSN = lsn
+	return s
+}
+
+// With a resume position, every version from it on is kept, plus the one in
+// effect where the resend starts; older ones are not needed.
+func TestLatestPGShapes_fromAResumePosition(t *testing.T) {
+	in := []PGShape{seenShape(1, 10, 100), seenShape(2, 10, 200), seenShape(3, 10, 300), seenShape(4, 10, 400)}
+	for _, c := range []struct {
+		from uint64
+		want []int
+	}{
+		{0, []int{4}},            // a new slot resends nothing
+		{250, []int{2, 3, 4}},    // 200 was in effect at 250
+		{300, []int{2, 3, 4}},    // 300 itself may be resent: 200 is the base
+		{100, []int{1, 2, 3, 4}}, // nothing before 100 but itself... base is none, keep all
+		{50, []int{1, 2, 3, 4}},
+		{500, []int{4}},
+	} {
+		if got := ids(latestPGShapes(in, c.from)); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("from %d: got %v, want %v", c.from, got, c.want)
+		}
+	}
+	// A shape with no recorded position counts as seen at 0: the base.
+	in = []PGShape{seenShape(1, 10, 0), seenShape(2, 10, 300)}
+	if got := ids(latestPGShapes(in, 250)); !reflect.DeepEqual(got, []int{1, 2}) {
+		t.Errorf("unpositioned base: got %v", got)
 	}
 }

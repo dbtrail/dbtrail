@@ -15,29 +15,27 @@ type PGShape struct {
 	Relation   PGRelationSchema
 }
 
-// LoadPGShapes returns the last shape the stream persisted for every
-// PostgreSQL relation in the index, oldest snapshot first (#2441). It is what
-// the decoder compares the next Relation message against, so a restart does
-// not start from nothing and a DDL made while capture was down is still seen.
+// LoadPGShapes returns what the index holds of each PostgreSQL table's
+// shapes for DDL inference (#2441), ordered by snapshot.
 //
-// Shapes written since #2441 are identified by OID: the newest per OID is
-// returned, so a renamed table appears once, under its newest name. Shapes
-// written before carry no OID and are keyed by (schema, table); such a shape
-// is dropped once any newer identified shape was written under the same name,
-// even if that table has been renamed since. Names compare exactly, as in
-// PostgreSQL, never by the index's collation. Several
-// OIDs can share a name (a table dropped and created again); all are returned,
-// and the newest by snapshot is the one that currently holds the name.
+// The stream compares each Relation with the shape its table had just before
+// it in the stream. After a restart PostgreSQL resends transactions from the
+// slot's confirmed position, which can be before shapes this index already
+// holds, so for each OID this returns every shape seen at or after from,
+// plus the newest one seen before it (the shape in effect where the resend
+// starts). from 0 means the slot is new and nothing is resent: the newest
+// shape per OID is enough.
+//
+// Shapes written before #2441 carry no OID and are keyed by (schema, table);
+// such a shape is returned only when it is the newest of its exact name and
+// no later shape with an OID was written under that name, even if that table
+// has been renamed since. Names compare exactly, as in PostgreSQL, never by
+// the index's collation. Shapes with an OID but no recorded position count as
+// seen at position 0.
 //
 // MySQL snapshots (no pg_type_oid) are ignored. An empty index returns an
 // empty slice and no error.
-//
-// upTo, when non-zero, is the stream's resume checkpoint: shapes described in
-// a transaction after it are left out. The stream replays from the
-// checkpoint and will describe them again; comparing a replayed older shape
-// against a newer one would infer a change in reverse. Shapes with no
-// recorded position (written before it was recorded) are kept.
-func LoadPGShapes(ctx context.Context, db *sql.DB, upTo uint64) ([]PGShape, error) {
+func LoadPGShapes(ctx context.Context, db *sql.DB, from uint64) ([]PGShape, error) {
 	ctx, cancel := context.WithTimeout(ctx, latestPerTableLoadTimeout)
 	defer cancel()
 
@@ -50,8 +48,7 @@ func LoadPGShapes(ctx context.Context, db *sql.DB, upTo uint64) ([]PGShape, erro
 		       MIN(schema_name), MIN(table_name), MAX(pg_seen_lsn), MAX(pg_seen_at)
 		FROM schema_snapshots
 		WHERE pg_type_oid IS NOT NULL
-		  AND (? = 0 OR pg_seen_lsn IS NULL OR pg_seen_lsn <= ?)
-		GROUP BY snapshot_id`, upTo, upTo)
+		GROUP BY snapshot_id`)
 	if err != nil {
 		return nil, fmt.Errorf("metadata: list PostgreSQL shapes: %w", err)
 	}
@@ -85,7 +82,7 @@ func LoadPGShapes(ctx context.Context, db *sql.DB, upTo uint64) ([]PGShape, erro
 	}
 	rows.Close()
 
-	keep := latestPGShapes(heads)
+	keep := latestPGShapes(heads, from)
 	for i := 0; i < len(keep); i += pgShapeChunk {
 		if err := loadPGShapeColumns(ctx, db, keep[i:min(len(keep), i+pgShapeChunk)]); err != nil {
 			return nil, err
@@ -147,22 +144,17 @@ func loadPGShapeColumns(ctx context.Context, db *sql.DB, shapes []PGShape) error
 	return nil
 }
 
-// latestPGShapes picks, from one entry per stored snapshot, the shapes that
-// are still the last one seen: the newest per OID, and each OID-less (legacy)
-// shape that is the newest of its exact (schema, table) and that no later
-// identified snapshot was written under. Names compare exactly, as
-// PostgreSQL does. Output is ordered by snapshot.
-func latestPGShapes(in []PGShape) []PGShape {
+// latestPGShapes picks, from one entry per stored snapshot, the shapes
+// LoadPGShapes returns (see there). Output is ordered by snapshot.
+func latestPGShapes(in []PGShape, from uint64) []PGShape {
 	type name struct{ schema, table string }
-	newestByOID := map[uint32]PGShape{}
+	byOID := map[uint32][]PGShape{}
 	newestLegacy := map[name]PGShape{}
 	newestIdentified := map[name]int{}
 	for _, s := range in {
 		n := name{s.Relation.Schema, s.Relation.Table}
 		if s.Relation.OID != 0 {
-			if cur, ok := newestByOID[s.Relation.OID]; !ok || s.SnapshotID > cur.SnapshotID {
-				newestByOID[s.Relation.OID] = s
-			}
+			byOID[s.Relation.OID] = append(byOID[s.Relation.OID], s)
 			newestIdentified[n] = max(newestIdentified[n], s.SnapshotID)
 			continue
 		}
@@ -170,9 +162,28 @@ func latestPGShapes(in []PGShape) []PGShape {
 			newestLegacy[n] = s
 		}
 	}
-	out := make([]PGShape, 0, len(newestByOID)+len(newestLegacy))
-	for _, s := range newestByOID {
-		out = append(out, s)
+	var out []PGShape
+	for _, versions := range byOID {
+		// Stream order: by position seen, then by snapshot.
+		sort.Slice(versions, func(i, j int) bool {
+			a, b := versions[i].Relation.SeenLSN, versions[j].Relation.SeenLSN
+			if a != b {
+				return a < b
+			}
+			return versions[i].SnapshotID < versions[j].SnapshotID
+		})
+		base := -1 // newest version seen before from
+		for i, v := range versions {
+			if from == 0 || v.Relation.SeenLSN < from {
+				base = i
+			}
+		}
+		if from == 0 {
+			out = append(out, versions[len(versions)-1])
+			continue
+		}
+		start := max(base, 0)
+		out = append(out, versions[start:]...)
 	}
 	for n, s := range newestLegacy {
 		if newestIdentified[n] < s.SnapshotID {

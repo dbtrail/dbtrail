@@ -833,7 +833,18 @@ ownership, grants, comments, `SET LOGGED` / `UNLOGGED`. A `DROP TABLE` that is
 not followed by a new table of the same name leaves no row: the table simply
 stops appearing. A table created while bintrail-pg was stopped is taken as
 already existing when capture starts again, so it gets no `CREATE TABLE` row.
-The statement text and the role that ran it are never available.
+On the first restart after upgrading to a version that records table
+identities, a table whose stored shape predates that is matched by name: if
+its columns differ, the change is recorded as an `ALTER TABLE` whose text says
+it could also have been a drop and a create, and `reconstruct` does not refuse
+on it the way it does on a `DROP TABLE`. The statement text and the role that
+ran it are never available.
+
+**After a restart.** PostgreSQL resends changes from the point it last
+confirmed, which can be earlier than what bintrail-pg had already recorded.
+Each table description is compared with the shape that table had just before
+it in the stream, so a resent stretch is read exactly as it was the first time,
+and a change already recorded is not recorded again.
 
 **Changes that look like DDL but are not.** Narrowing a publication's column
 list (`ALTER PUBLICATION ... SET TABLE t (a, b)`, PostgreSQL 15+), or on

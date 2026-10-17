@@ -57,11 +57,12 @@ type Config struct {
 	// OnStarted, when set, is called once replication has started on the
 	// slot: both source connections are open and the stream is attached.
 	OnStarted func()
-	// KnownShapes and LastChange turn on DDL inference (#2441): the last
-	// shape the index holds per table (oldest first), and the newest indexed
-	// change to a table before an LSN. LastChange nil = inference off.
-	KnownShapes []KnownShape
-	LastChange  func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
+	// LoadKnownShapes and LastChange turn on DDL inference (#2441): what the
+	// index holds of each table's shapes for a resend starting at fromLSN
+	// (the slot's confirmed position, read at start), and the newest indexed
+	// change to a table before an LSN. Both nil = inference off.
+	LoadKnownShapes func(fromLSN uint64) ([]KnownShape, error)
+	LastChange      func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
 }
 
 // Capturer decodes a PostgreSQL logical-replication stream into event.Event. It
@@ -189,13 +190,28 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		return queryColumnAttrs(qctx, queryConn, relationID)
 	}
 	opts := []DecoderOption{WithAttrResolver(attrResolver)}
-	if c.cfg.LastChange != nil {
+	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {
 		start, err := publicationOIDs(startupCtx, queryConn, c.cfg.Publication)
 		if err != nil {
 			return err
 		}
+		// PostgreSQL resends from the slot's own confirmed position, which
+		// can be before what the index already holds; the shapes loaded must
+		// cover a comparison from there.
+		var fromText string
+		if err := queryConn.QueryRow(startupCtx, `SELECT COALESCE(confirmed_flush_lsn, '0/0'::pg_lsn)::text FROM pg_replication_slots WHERE slot_name = $1`, c.cfg.SlotName).Scan(&fromText); err != nil {
+			return fmt.Errorf("pgcapture: read confirmed position of slot %q: %w", c.cfg.SlotName, err)
+		}
+		from, err := pglogrepl.ParseLSN(fromText)
+		if err != nil {
+			return fmt.Errorf("pgcapture: parse confirmed position %q of slot %q: %w", fromText, c.cfg.SlotName, err)
+		}
+		known, err := c.cfg.LoadKnownShapes(uint64(from))
+		if err != nil {
+			return err
+		}
 		opts = append(opts, WithDDLInference(DDLInference{
-			Known:     c.cfg.KnownShapes,
+			Known:     known,
 			StartOIDs: start,
 			Lookup: func(oid uint32) (RelationFacts, error) {
 				qctx, cancel := context.WithTimeout(ctx, 10*time.Second)

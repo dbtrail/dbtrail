@@ -68,8 +68,9 @@ type RelationFacts struct {
 
 // DDLInference configures inference. Lookup and LastChange are required.
 type DDLInference struct {
-	// Known is the last shape persisted per table, oldest first (the
-	// order metadata.LoadPGShapes returns); later entries win a name.
+	// Known is what the index holds of each table's shapes: for each OID
+	// the versions that a replay from the slot's position can be compared
+	// against (see metadata.LoadPGShapes), each with where it was seen.
 	Known []KnownShape
 	// StartOIDs are the tables the publication covered when capture
 	// started. The first Relation for one of them with nothing known is
@@ -102,46 +103,100 @@ type bound struct {
 	at  time.Time
 }
 
-type knownRel struct {
+// version is one shape a table had, and the commit of the transaction the
+// stream described it in. live marks a version observed by this process.
+type version struct {
 	name relName
 	cols []ShapeColumn
-	// low is the commit of the last change decoded under cols in this
-	// stream; set by rowEvent, cleared when the shape changes.
+	seen bound // lsn 0 = unknown (a shape stored before positions were)
+	live bool
+}
+
+type knownRel struct {
+	// versions in stream order (by seen, live after stored at one LSN).
+	versions []version
+	// low is the commit of the last change decoded in this stream under the
+	// current shape; cleared when the shape changes.
 	low    bound
 	hasLow bool
-	// seen is the commit of the transaction this shape was last described
-	// in: the shape was in effect then, so a later change to it committed
-	// after seen. The fallback lower bound when no row change is known.
-	seen    bound
-	hasSeen bool
-	// nameUnknown: the name came from the live catalog, which can be ahead
-	// of the stream. The next Relation for this OID is learned without a row.
-	nameUnknown bool
+	// nameFromCatalog: the table's name moved to a new table and what it is
+	// called now was read from the live catalog (or it is gone from it),
+	// which can be ahead of the stream. Its next Relation is not compared
+	// by name, only by columns.
+	nameFromCatalog bool
+}
+
+// at returns the shape in effect for a Relation in the transaction that
+// commits at lsn: the newest version described before that transaction, or
+// one this process described in that same transaction (a shape that changes
+// twice in one transaction). A stored version at lsn itself is that same
+// transaction seen by an earlier run, which a replay is now describing
+// again, so it is not the reference.
+func (k *knownRel) at(lsn pglogrepl.LSN) (version, bool) {
+	for i := len(k.versions) - 1; i >= 0; i-- {
+		v := k.versions[i]
+		if v.seen.lsn < lsn || (v.live && v.seen.lsn == lsn) {
+			return v, true
+		}
+	}
+	return version{}, false
+}
+
+// add records a version observed now, keeping stream order.
+func (k *knownRel) add(v version) {
+	i := len(k.versions)
+	for i > 0 && k.versions[i-1].seen.lsn > v.seen.lsn {
+		i--
+	}
+	k.versions = append(k.versions, version{})
+	copy(k.versions[i+1:], k.versions[i:])
+	k.versions[i] = v
 }
 
 type inferState struct {
 	cfg    DDLInference
 	byOID  map[uint32]*knownRel
-	byName map[relName]uint32
 	legacy map[relName][]ShapeColumn
 }
 
 func newInferState(cfg DDLInference) *inferState {
-	s := &inferState{cfg: cfg, byOID: map[uint32]*knownRel{}, byName: map[relName]uint32{}, legacy: map[relName][]ShapeColumn{}}
+	s := &inferState{cfg: cfg, byOID: map[uint32]*knownRel{}, legacy: map[relName][]ShapeColumn{}}
 	for _, k := range cfg.Known {
 		n := relName{k.Schema, k.Table}
 		if k.OID == 0 {
 			s.legacy[n] = k.Columns
 			continue
 		}
-		r := &knownRel{name: n, cols: k.Columns}
-		if k.SeenLSN != 0 {
-			r.seen, r.hasSeen = bound{pglogrepl.LSN(k.SeenLSN), k.SeenAt}, true
+		r := s.byOID[k.OID]
+		if r == nil {
+			r = &knownRel{}
+			s.byOID[k.OID] = r
 		}
-		s.byOID[k.OID] = r
-		s.byName[n] = k.OID
+		r.add(version{name: n, cols: k.Columns, seen: bound{pglogrepl.LSN(k.SeenLSN), k.SeenAt}})
 	}
 	return s
+}
+
+// holderAt returns the OID other than oid whose shape in effect at lsn
+// carries name n.
+func (s *inferState) holderAt(n relName, oid uint32, lsn pglogrepl.LSN) (uint32, *knownRel, version, bool) {
+	var best uint32
+	var bestK *knownRel
+	var bestV version
+	found := false
+	for o, k := range s.byOID {
+		if o == oid {
+			continue
+		}
+		v, ok := k.at(lsn)
+		if !ok || v.name != n {
+			continue
+		}
+		if !found || v.seen.lsn > bestV.seen.lsn {
+			best, bestK, bestV, found = o, k, v, true
+		}
+	}
+	return best, bestK, bestV, found
 }
 
 // noteChange records a decoded row change as the newest under its shape.
@@ -171,91 +226,91 @@ func equalShape(a, b []ShapeColumn) bool {
 	return true
 }
 
-// observe compares a Relation message with the last known shape of its table,
-// updates what is known, and returns the inferred DDL events in the order they
-// must be written. txn is the transaction the message arrived in. inScope
-// says whether a table name is captured: a change that touches no captured
-// name updates what is known without asking the catalog or the index.
+// observe compares a Relation message with the shape its table had just
+// before it in the stream, records the new shape, and returns the inferred
+// DDL events in the order they must be written. txn is the transaction the
+// message arrived in. inScope says whether a table name is captured: a change
+// that touches no captured name updates what is known without asking the
+// catalog or the index.
+//
+// The comparison is by stream position, never with "the newest shape
+// known": after a restart PostgreSQL resends transactions from its own
+// confirmed position, which can be before what this index already holds, and
+// a replayed transaction must be compared exactly as it was the first time.
 func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inScope func(relName) bool, warn func(msg string, args ...any)) ([]event.Event, error) {
 	oid := m.RelationID
 	n := relName{m.Namespace, m.RelationName}
 	cols := shapeOf(m)
 
-	// A Relation arrives inside the transaction whose change needs it. Without
-	// one there is no position to place a row at: learn the shape, write
-	// nothing.
-	placeable := txn.open
+	// A Relation arrives inside the transaction whose change needs it.
+	// Without one there is no position to place a row at, or to compare by.
+	if !txn.open {
+		warn("pgcapture: relation description outside a transaction; schema changes for it cannot be placed", "oid", oid, "table", n.String())
+		return nil, nil
+	}
 	high := bound{txn.commitLSN, txn.commitTime}
+	cur := version{name: n, cols: cols, seen: high, live: true}
 	var out []event.Event
 
 	if k, ok := s.byOID[oid]; ok {
-		renamed := k.name != n
-		altered := !equalShape(k.cols, cols)
-		switch {
-		case !renamed && !altered:
-		case k.nameUnknown:
-			// Its last name came from the live catalog; this is the first
-			// time the stream itself names it. Learn, do not compare.
-		case !placeable:
-			warn("pgcapture: relation shape changed outside a transaction; not recorded as a schema change", "oid", oid, "table", n.String())
-		case inScope(k.name) || inScope(n):
-			low, err := s.lowFor(k, k.name, high)
-			if err != nil {
-				return nil, err
+		if prev, ok := k.at(high.lsn); ok {
+			renamed := prev.name != n && !k.nameFromCatalog
+			altered := !equalShape(prev.cols, cols)
+			if (renamed || altered) && (inScope(prev.name) || inScope(n)) {
+				low, err := s.lowFor(k, prev, high)
+				if err != nil {
+					return nil, err
+				}
+				if renamed {
+					out = append(out, renameEvent(oid, prev.name, n, "", low, high))
+				}
+				if altered {
+					out = append(out, alterEvent(oid, n, prev.cols, cols, "", low, high))
+				}
 			}
-			if renamed {
-				out = append(out, renameEvent(oid, k.name, n, "", low, high))
+			if renamed || altered {
+				k.hasLow = false
 			}
-			if altered {
-				out = append(out, alterEvent(oid, n, k.cols, cols, "", low, high))
-			}
+			k.nameFromCatalog = false
+			k.add(cur)
+			return out, nil
 		}
-		if renamed && s.byName[k.name] == oid {
-			delete(s.byName, k.name)
-		}
-		s.byName[n] = oid
-		if renamed || altered {
-			k.hasLow = false
-		}
-		k.name, k.cols, k.nameUnknown = n, cols, false
-		if placeable {
-			k.seen, k.hasSeen = high, true
-		}
-		return out, nil
+		// Every version known is from this point on: PostgreSQL is resending
+		// the start of what this index already holds. What it was compared
+		// with the first time is not loaded, and whatever that comparison
+		// found was recorded then. Learn, write nothing.
+		k.add(cur)
+		return nil, nil
 	}
 
-	// A new OID.
-	newRel := &knownRel{name: n, cols: cols}
-	if placeable {
-		newRel.seen, newRel.hasSeen = high, true
+	k := s.byOID[oid]
+	if k == nil {
+		k = &knownRel{}
+		s.byOID[oid] = k
 	}
-	if holder, ok := s.byName[n]; ok && holder != oid {
-		hk := s.byOID[holder]
-		s.byOID[oid], s.byName[n] = newRel, oid
+	k.add(cur)
+
+	if holder, hk, hv, ok := s.holderAt(n, oid, high.lsn); ok {
 		// The name moved to a new table, so the old one was dropped or
 		// renamed at or before this point. Which, and to what, only the live
 		// catalog can say, and it may be ahead of the stream: whatever it
-		// says, the old table's own next Relation is learned, not compared.
-		hk.nameUnknown, hk.hasLow = true, false
-		if !placeable || !inScope(n) {
+		// says, the old table's own next Relation is compared by columns
+		// only.
+		hk.nameFromCatalog, hk.hasLow = true, false
+		if !inScope(n) {
 			return nil, nil
 		}
 		facts, err := s.cfg.Lookup(holder)
 		if err != nil {
 			return nil, fmt.Errorf("pgcapture: catalog lookup for relation OID %d (formerly %s): %w", holder, n, err)
 		}
-		low, err := s.lowFor(hk, n, high)
+		low, err := s.lowFor(hk, hv, high)
 		if err != nil {
 			return nil, err
 		}
 		if facts.Exists {
-			to := relName{facts.Schema, facts.Table}
-			out = append(out, renameEvent(holder, n, to,
+			out = append(out, renameEvent(holder, n, relName{facts.Schema, facts.Table},
 				" (the new name is the one in the current catalog, which can be later than this point: the table was renamed at or before here, and may have been renamed again since)", low, high))
-			hk.name = to
-			if _, taken := s.byName[to]; !taken {
-				s.byName[to] = holder
-			}
 		} else {
 			out = append(out, ddlEvent(event.DDLDropTable, holder, n, nil,
 				fmt.Sprintf("DROP TABLE %s (its name now belongs to a new table and the old one is gone from the current catalog: dropped here, or renamed here and dropped since)", n),
@@ -270,9 +325,8 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 
 	if lc, ok := s.legacy[n]; ok {
 		delete(s.legacy, n)
-		s.byOID[oid], s.byName[n] = newRel, oid
-		if !equalShape(lc, cols) && placeable && inScope(n) {
-			low, err := s.lowFor(nil, n, high)
+		if !equalShape(lc, cols) && inScope(n) {
+			low, err := s.lowFor(nil, version{name: n}, high)
 			if err != nil {
 				return nil, err
 			}
@@ -282,8 +336,7 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 		return out, nil
 	}
 
-	s.byOID[oid], s.byName[n] = newRel, oid
-	if s.cfg.StartOIDs[oid] || !placeable || !inScope(n) {
+	if s.cfg.StartOIDs[oid] || !inScope(n) {
 		return nil, nil // version zero
 	}
 	c, err := s.createEvent(oid, n, "", high)
@@ -293,21 +346,21 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 	return []event.Event{c}, nil
 }
 
-// lowFor is the lower bound of a shape change on the table k (nil when only a
-// legacy shape was known) that last held name: the last change decoded in
-// this stream, else the newest indexed change before high, else the commit
-// the old shape was last described in, else none.
-func (s *inferState) lowFor(k *knownRel, name relName, high bound) (*bound, error) {
-	if k != nil && k.hasLow {
+// lowFor is the lower bound of a change away from shape prev of table k
+// (nil when only a legacy shape was known): the last change decoded under it
+// in this stream, else the newest indexed change to its name before high,
+// else the commit prev was described in, else none.
+func (s *inferState) lowFor(k *knownRel, prev version, high bound) (*bound, error) {
+	if k != nil && k.hasLow && k.low.lsn < high.lsn {
 		b := k.low
 		return &b, nil
 	}
-	lsn, at, ok, err := s.cfg.LastChange(name.schema, name.table, uint64(high.lsn))
+	lsn, at, ok, err := s.cfg.LastChange(prev.name.schema, prev.name.table, uint64(high.lsn))
 	if err != nil {
-		return nil, fmt.Errorf("pgcapture: last indexed change to %s (lower bound of a schema change): %w", name, err)
+		return nil, fmt.Errorf("pgcapture: last indexed change to %s (lower bound of a schema change): %w", prev.name, err)
 	}
-	if k != nil && k.hasSeen && (!ok || pglogrepl.LSN(lsn) < k.seen.lsn) {
-		b := k.seen
+	if prev.seen.lsn != 0 && prev.seen.lsn < high.lsn && (!ok || pglogrepl.LSN(lsn) < prev.seen.lsn) {
+		b := prev.seen
 		return &b, nil
 	}
 	if !ok {
@@ -474,5 +527,7 @@ func capInferredText(s string) string {
 }
 
 func fmtBound(b bound) string {
-	return b.lsn.String() + "@" + b.at.UTC().Format(time.RFC3339)
+	// Fractions are kept: flooring the high end to the second would narrow
+	// the bracket, and a guard reading it would miss a change in that second.
+	return b.lsn.String() + "@" + b.at.UTC().Format(time.RFC3339Nano)
 }

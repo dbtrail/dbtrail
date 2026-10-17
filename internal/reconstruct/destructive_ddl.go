@@ -389,13 +389,16 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 			return nil, fmt.Errorf("check schema_changes for destructive DDL on %s.%s: %w", schema, table, err)
 		}
 		// An inferred row committed somewhere in its bracket, so it is in the
-		// window whenever the bracket overlaps it: its low end (detected_at)
-		// at or before Until, and its high end after Since. Placing it by
-		// detected_at alone would miss a drop whose bracket starts before the
-		// snapshot and ends after it.
+		// window whenever the bracket overlaps it: its low end at or before
+		// Until (always, when there is no low end), and its high end after
+		// Since. Placing it by detected_at alone would miss a drop whose
+		// bracket starts before the snapshot and ends after it. Both ends are
+		// read from the marker, which keeps fractions of a second;
+		// detected_at is rounded to the second.
 		if b, ok := event.ParseInferredBracket(head); ok {
 			d.Inferred, d.Bracket = true, b
 			d.AfterSince = b.High.After(w.Since) || (w.sinceInclusive && b.High.Equal(w.Since))
+			d.AtOrBeforeUntil = !b.HasLow || !b.Low.After(w.Until)
 		}
 		out = append(out, d)
 	}

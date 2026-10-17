@@ -568,3 +568,96 @@ func TestInfer_wideAlterIsCapped(t *testing.T) {
 		t.Error("a capped row's marker no longer parses")
 	}
 }
+
+func seenKnown(oid uint32, lsn uint64, cols ...col) pgcapture.KnownShape {
+	k := known(oid, "s", "a", cols...)
+	k.SeenLSN, k.SeenAt = lsn, txnTime.Add(-time.Hour)
+	return k
+}
+
+func relAt(t *testing.T, r *inferRig, lsn uint64, msgs ...*pglogrepl.RelationMessage) []event.Event {
+	t.Helper()
+	mustDecode(t, r.d, &pglogrepl.BeginMessage{FinalLSN: pglogrepl.LSN(lsn), CommitTime: txnTime})
+	var out []event.Event
+	for _, m := range msgs {
+		out = append(out, ddls(r.decodeAll(t, m))...)
+	}
+	mustDecode(t, r.d, &pglogrepl.CommitMessage{CommitLSN: pglogrepl.LSN(lsn), CommitTime: txnTime})
+	return out
+}
+
+// PostgreSQL resends from the slot's confirmed position, which can be before
+// shapes the index already holds. Each Relation is compared with the shape in
+// effect just before it, so the resend finds what the first pass found, and
+// never the reverse.
+func TestInfer_resendComparesByPosition(t *testing.T) {
+	s0 := []col{int4("id")}
+	s1 := []col{int4("id"), text("c")}
+	// The index holds S0 (seen at 100) and S1 (seen at 200); the resend
+	// starts at 150, so the shape in effect there is S0.
+	r := newInferRig(t, nil, seenKnown(10, 100, s0...), seenKnown(10, 200, s1...))
+	if d := relAt(t, r, 180, typedRel(10, "s", "a", s0...)); len(d) != 0 {
+		t.Fatalf("resent old shape wrote %s (a reversed change)", kinds(d))
+	}
+	d := relAt(t, r, 200, typedRel(10, "s", "a", s1...))
+	if len(d) != 1 || d[0].DDLType != event.DDLAlterTable {
+		t.Fatalf("resent ALTER: got %s", kinds(d))
+	}
+	mustContain(t, d[0].DDLQuery, "added c (text)")
+	if d := relAt(t, r, 300, typedRel(10, "s", "a", s1...)); len(d) != 0 {
+		t.Fatalf("after the resend: %s", kinds(d))
+	}
+}
+
+// The resend starts at the very first shape the index holds for a table:
+// there is nothing loaded before it, and it writes nothing.
+func TestInfer_resendOfTheFirstKnownShapeWritesNothing(t *testing.T) {
+	r := newInferRig(t, nil, seenKnown(10, 100, int4("id")))
+	if d := relAt(t, r, 100, typedRel(10, "s", "a", int4("id"))); len(d) != 0 {
+		t.Fatalf("got %s", kinds(d))
+	}
+}
+
+// A shape that changes twice in one transaction: the second is compared with
+// the first, not with the shape before the transaction.
+func TestInfer_twoShapesInOneTransaction(t *testing.T) {
+	r := newInferRig(t, nil, seenKnown(10, 100, int4("id")))
+	d := relAt(t, r, 300, typedRel(10, "s", "a", int4("id"), text("x")), typedRel(10, "s", "a", int4("id"), text("x"), text("y")))
+	if len(d) != 2 {
+		t.Fatalf("got %s", kinds(d))
+	}
+	mustContain(t, d[0].DDLQuery, "added x (text)")
+	mustContain(t, d[1].DDLQuery, "added y (text)")
+	if strings.Contains(d[1].DDLQuery, "added x") {
+		t.Errorf("second change compared with the shape before the transaction: %s", d[1].DDLQuery)
+	}
+}
+
+// A table whose name was read from the live catalog still has its columns
+// compared: only the rename is left out.
+func TestInfer_catalogNamedTableStillComparesColumns(t *testing.T) {
+	r := newInferRig(t, nil, known(10, "s", "a", int4("id"), text("x")))
+	r.facts[10] = pgcapture.RelationFacts{Exists: true, Schema: "s", Table: "a_old"}
+	r.relation(t, typedRel(11, "s", "a", int4("id")))
+	d := ddls(r.decodeAll(t, typedRel(10, "s", "a_old", int4("id"))))
+	if got := kinds(d); got != "ALTER TABLE s.a_old" {
+		t.Fatalf("got %s", got)
+	}
+	mustContain(t, d[0].DDLQuery, "dropped x (text)")
+}
+
+// The bounds keep their fraction of a second: flooring the high end would
+// narrow the bracket a guard reads.
+func TestInfer_boundsKeepFractions(t *testing.T) {
+	r := newInferRig(t, nil, known(10, "s", "a", int4("id")))
+	r.lastOK = false
+	mustDecode(t, r.d, &pglogrepl.BeginMessage{FinalLSN: txnLSN, CommitTime: txnTime.Add(500 * time.Millisecond)})
+	d := ddls(r.decodeAll(t, typedRel(10, "s", "a", int4("id"), text("x"))))
+	if len(d) != 1 {
+		t.Fatalf("got %s", kinds(d))
+	}
+	mustContain(t, d[0].DDLQuery, "high=0/19DF9E8@2026-06-21T12:00:00.5Z")
+	if b, ok := event.ParseInferredBracket(d[0].DDLQuery); !ok || !b.High.Equal(txnTime.Add(500*time.Millisecond)) {
+		t.Errorf("bracket %+v ok %v", b, ok)
+	}
+}

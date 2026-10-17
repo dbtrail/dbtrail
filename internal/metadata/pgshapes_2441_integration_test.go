@@ -90,14 +90,14 @@ func TestLoadPGShapes_integration(t *testing.T) {
 	}
 }
 
-// A shape described after the resume checkpoint is left out: the stream will
-// describe it again, and comparing a replayed older shape with it would infer
-// a change in reverse. Shapes with no recorded position are kept.
-func TestLoadPGShapes_upToCheckpoint(t *testing.T) {
+// For a resume position, every shape seen from it on is returned, plus the
+// one in effect where PostgreSQL's resend starts; the position and time each
+// was seen read back.
+func TestLoadPGShapes_fromAResumePosition(t *testing.T) {
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 	ctx := context.Background()
-	at := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 10, 17, 12, 0, 0, 123456000, time.UTC)
 	write := func(lsn uint64, cols ...string) int {
 		t.Helper()
 		r := &PGRelationSchema{OID: 40, Schema: "public", Table: "t", SeenLSN: lsn, SeenAt: at.Add(time.Duration(lsn) * time.Second)}
@@ -113,19 +113,16 @@ func TestLoadPGShapes_upToCheckpoint(t *testing.T) {
 	old := write(100, "id")
 	write(200, "id", "x")
 	for _, c := range []struct {
-		upTo uint64
-		cols int
-	}{{150, 1}, {200, 2}, {0, 2}} {
-		shapes, err := LoadPGShapes(ctx, indexDB, c.upTo)
-		if err != nil || len(shapes) != 1 {
-			t.Fatalf("upTo %d: %d shapes, err %v", c.upTo, len(shapes), err)
-		}
-		if got := len(shapes[0].Relation.Columns); got != c.cols {
-			t.Errorf("upTo %d: %d columns, want %d", c.upTo, got, c.cols)
+		from uint64
+		n    int
+	}{{150, 2}, {0, 1}, {300, 1}, {50, 2}} {
+		shapes, err := LoadPGShapes(ctx, indexDB, c.from)
+		if err != nil || len(shapes) != c.n {
+			t.Fatalf("from %d: %d shapes, err %v, want %d", c.from, len(shapes), err, c.n)
 		}
 	}
 	shapes, _ := LoadPGShapes(ctx, indexDB, 150)
 	if s := shapes[0]; s.SnapshotID != old || s.Relation.SeenLSN != 100 || !s.Relation.SeenAt.Equal(at.Add(100*time.Second)) {
-		t.Errorf("shape = id %d seen %d@%v", s.SnapshotID, s.Relation.SeenLSN, s.Relation.SeenAt)
+		t.Errorf("base shape = id %d seen %d@%v", s.SnapshotID, s.Relation.SeenLSN, s.Relation.SeenAt)
 	}
 }
