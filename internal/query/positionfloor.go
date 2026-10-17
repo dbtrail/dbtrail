@@ -70,6 +70,9 @@ type partitionHead struct {
 //
 // The premise is the one ResolveSnapshotCut already stakes the cut on. It
 // holds for an index a stream writes and for binlog files indexed in order.
+// A PostgreSQL stream writes in commit order too, but has no delete of what a
+// restart replays: two crashes inside one replay can leave a partition whose
+// highest-id row is not its highest LSN (#1596, low likelihood).
 // It does not hold while `bintrail index` adds files to an index a stream
 // writes: those rows get the newest ids with old positions and can sit on top
 // of a partition, hiding later positions below them. index_state says when
@@ -538,6 +541,12 @@ func archivesMayHold(archives []archiveHead, since time.Time, anchor BinlogPos, 
 		switch {
 		case !a.recorded:
 			may = written
+		case a.hasPos && a.pos.IsLSN():
+			// A PostgreSQL archive (#1596). Builds before #1596 recorded its
+			// newest change by the binlog file-name rule, which orders LSN text
+			// wrongly, and nothing tells those records from correct ones: read
+			// it. Costs a read, never a change.
+			may = true
 		case checked == nil && a.hasPos && binlogBaseName(a.pos.File) != binlogBaseName(anchor.File):
 			may = written
 		case checked != nil:

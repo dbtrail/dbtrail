@@ -51,7 +51,13 @@ func (n *Newest) Add(eventID uint64, file sql.NullString, pos sql.Null[uint64]) 
 // binlog order. The same rule as query.BinlogPos.AtOrBefore, which this
 // package cannot import (query imports archive): file name length first (the
 // .999999 → .1000000 rollover, #840), then the name, then the position.
+//
+// Two PostgreSQL LSNs ("0/16B3748": text in the file column, the number in the
+// position) compare by the number, as query.BinlogPos does (#1596).
 func laterCoordinate(fa string, pa uint64, fb string, pb uint64) bool {
+	if strings.Contains(fa, "/") && strings.Contains(fb, "/") {
+		return pa > pb
+	}
 	if len(fa) != len(fb) {
 		return len(fa) > len(fb)
 	}
@@ -111,7 +117,10 @@ func ReadContentWith(ctx context.Context, duck *sql.DB, path string) (Content, e
 	err := duck.QueryRowContext(ctx,
 		"SELECT binlog_file, COALESCE(start_pos, 0) FROM parquet_scan("+lit+")"+
 			" WHERE binlog_file IS NOT NULL AND binlog_file <> ''"+
-			" ORDER BY octet_length(encode(binlog_file)) DESC, encode(binlog_file) DESC, COALESCE(start_pos, 0) DESC LIMIT 1",
+			// A PostgreSQL LSN orders by its number (#1596); a binlog file by
+			// name length, then name, then position (#840).
+			" ORDER BY CASE WHEN contains(binlog_file, '/') THEN COALESCE(start_pos, 0) END DESC NULLS LAST,"+
+			" octet_length(encode(binlog_file)) DESC, encode(binlog_file) DESC, COALESCE(start_pos, 0) DESC LIMIT 1",
 	).Scan(&c.File, &c.Pos)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):

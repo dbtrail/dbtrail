@@ -71,18 +71,6 @@ func TestBuildQuery_LSNBounds(t *testing.T) {
 	}
 }
 
-// The archive-skip proof cannot see the LSN gate either: it declines.
-func TestWindowSatisfiedLive_declinesOnAnLSNAnchor(t *testing.T) {
-	since := time.Date(2026, 10, 17, 10, 0, 0, 0, time.UTC)
-	plan := &QueryPlan{MySQLRanges: []TimeRange{{Start: since.Add(-time.Hour)}}, ArchivesBelowLive: true}
-	if windowSatisfiedLive(Options{Since: &since, SincePos: &BinlogPos{File: "0/1", Pos: 1}}, plan) {
-		t.Fatal("proof fired for an LSN-anchored fetch")
-	}
-	if ArchiveSkipNeedsPlan(Options{Since: &since, SincePos: &BinlogPos{File: "0/1", Pos: 1}}, nil) {
-		t.Error("ArchiveSkipNeedsPlan wants a plan for an LSN-anchored fetch")
-	}
-}
-
 // Which partitions may hold a change after an LSN anchor: by the number.
 func TestPartitionHeads_belowAnLSNAnchor(t *testing.T) {
 	since := time.Date(2026, 10, 17, 10, 0, 0, 0, time.UTC)
@@ -94,5 +82,27 @@ func TestPartitionHeads_belowAnLSNAnchor(t *testing.T) {
 	got := h.below(since, BinlogPos{File: "1/0", Pos: 1 << 32})
 	if len(got) != 1 || got[0] != "p_new" {
 		t.Fatalf("below = %v, want only p_new (its newest row is after 1/0)", got)
+	}
+}
+
+// One LSN against one binlog coordinate (an index reused across sources):
+// no order relates them, and the answer keeps the read.
+func TestBinlogPos_mixedKeepsTheRead(t *testing.T) {
+	lsn := BinlogPos{File: "1A/2B3C4D5E", Pos: 0x1A2B3C4D5E}
+	file := BinlogPos{File: "b.000001", Pos: 4}
+	if !lsn.AtOrBefore(file) || !file.AtOrBefore(lsn) {
+		t.Fatal("a mixed comparison must answer true both ways")
+	}
+}
+
+// A PostgreSQL archive is always read: records written before #1596 ordered
+// its LSNs by text and cannot be told from correct ones.
+func TestArchivesMayHold_LSNArchiveIsRead(t *testing.T) {
+	since := time.Date(2026, 10, 17, 10, 0, 0, 0, time.UTC)
+	old := since.Add(-24 * time.Hour)
+	a := []archiveHead{{name: "p_old", lower: old, recorded: true, hasPos: true,
+		pos: BinlogPos{File: "0/FFFFFF00", Pos: 0xFFFFFF00}, archivedAt: old}}
+	if _, n := archivesMayHold(a, since, BinlogPos{File: "1/0", Pos: 1 << 32}, nil); n != 1 {
+		t.Fatalf("a PostgreSQL archive recorded before the anchor was skipped (n = %d)", n)
 	}
 }

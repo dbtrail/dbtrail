@@ -197,6 +197,11 @@ func (p BinlogPos) IsLSN() bool { return strings.Contains(p.File, "/") }
 // the position. In SQL that rule is applied to start_pos for the lower bound
 // and to end_pos for the upper one; here it compares two coordinates as such.
 //
+// A PostgreSQL LSN orders by its number, and an LSN never orders against a
+// binlog coordinate (see the IsLSN branches): the copies below are MySQL-only,
+// reached with no LSN (cascade reads binlog anchors only, the Iceberg export
+// refuses a PostgreSQL source).
+//
 // Two packages carry their own copy: cascade.afterSnapshot compares a whole
 // ResultRow against a coordinate, and icebergexport.binlogBefore is this same
 // two-coordinate comparison spelled as four loose scalars (and strict, not
@@ -208,6 +213,13 @@ func (p BinlogPos) IsLSN() bool { return strings.Contains(p.File, "/") }
 func (p BinlogPos) AtOrBefore(q BinlogPos) bool {
 	if p.IsLSN() && q.IsLSN() {
 		return p.Pos <= q.Pos
+	}
+	if p.IsLSN() != q.IsLSN() {
+		// One LSN and one binlog coordinate: rows of two sources in one index
+		// (an index reused after `reset`), which no order relates. True is
+		// the answer that keeps a read: every floor caller asks "may this
+		// hold something at or after the anchor".
+		return true
 	}
 	if len(p.File) != len(q.File) {
 		return len(p.File) < len(q.File)
