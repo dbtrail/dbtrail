@@ -1,6 +1,13 @@
 package pgcapture
 
-import "testing"
+import (
+	"bytes"
+	"errors"
+	"log/slog"
+	"strings"
+	"testing"
+	"time"
+)
 
 // TestAckCommitted_AdvanceOnly pins the monotonicity of lastAcked: a stale or
 // out-of-order ack must never regress the durable cursor (which would make the next
@@ -30,5 +37,25 @@ func TestAckCommitted_AdvanceOnly(t *testing.T) {
 	c.AckCommitted(150) // advances
 	if got := c.lastAcked.Load(); got != 150 {
 		t.Errorf("after Ack(150): lastAcked=%d, want 150", got)
+	}
+}
+
+// What DDL detection needs at start failing to load leaves detection off for
+// the run, loudly, and never stops capture (#2441).
+func TestInferenceOrWarn(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	if opts := inferenceOrWarn(func() (DDLInference, error) { return DDLInference{}, errors.New("index timed out") }, logger); len(opts) != 0 {
+		t.Fatalf("got %d options, want inference off", len(opts))
+	}
+	if !strings.Contains(buf.String(), "will NOT be detected") || !strings.Contains(buf.String(), "index timed out") || !strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("warning = %q", buf.String())
+	}
+	ok := DDLInference{
+		Lookup:     func(uint32) (RelationFacts, error) { return RelationFacts{}, nil },
+		LastChange: func(string, string, uint64) (uint64, time.Time, bool, error) { return 0, time.Time{}, false, nil },
+	}
+	if opts := inferenceOrWarn(func() (DDLInference, error) { return ok, nil }, logger); len(opts) != 1 {
+		t.Fatalf("got %d options, want inference on", len(opts))
 	}
 }

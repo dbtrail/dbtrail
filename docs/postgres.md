@@ -840,6 +840,11 @@ it could also have been a drop and a create, and `reconstruct` does not refuse
 on it the way it does on a `DROP TABLE`. The statement text and the role that
 ran it are never available.
 
+**If detection cannot start.** What detection needs is read when capture
+starts. If that read fails (for example a very slow index database),
+bintrail-pg captures rows as usual and does not detect schema changes until
+its next restart, and logs that at ERROR level.
+
 **After a restart.** PostgreSQL resends changes from the point it last
 confirmed, which can be earlier than what bintrail-pg had already recorded.
 Each table description is compared with the shape that table had just before

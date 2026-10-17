@@ -172,9 +172,9 @@ func One(ctx context.Context, cfg Config) error {
 		OnStarted:          sourceConnectedHook(cfg.Hooks),
 		Logger:             logger,
 		// The shapes the index holds (#2441), loaded by the capturer once it
-		// knows where the slot resends from. A failure stops the start:
-		// carrying on with nothing known would silently turn DDL inference
-		// off for every table.
+		// knows where the slot resends from. If they cannot be read, the
+		// capturer captures rows without detecting schema changes for that
+		// run and says so at ERROR level; it never stops capture.
 		LoadKnownShapes: func(from uint64) ([]pgcapture.KnownShape, error) { return loadKnownShapes(indexDB, from) },
 		LastChange:      lastIndexedChange(indexDB),
 	})

@@ -191,35 +191,37 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	}
 	opts := []DecoderOption{WithAttrResolver(attrResolver)}
 	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {
-		start, err := publicationOIDs(startupCtx, queryConn, c.cfg.Publication)
-		if err != nil {
-			return err
-		}
-		// PostgreSQL resends from the slot's own confirmed position, which
-		// can be before what the index already holds; the shapes loaded must
-		// cover a comparison from there.
-		var fromText string
-		if err := queryConn.QueryRow(startupCtx, `SELECT COALESCE(confirmed_flush_lsn, '0/0'::pg_lsn)::text FROM pg_replication_slots WHERE slot_name = $1`, c.cfg.SlotName).Scan(&fromText); err != nil {
-			return fmt.Errorf("pgcapture: read confirmed position of slot %q: %w", c.cfg.SlotName, err)
-		}
-		from, err := pglogrepl.ParseLSN(fromText)
-		if err != nil {
-			return fmt.Errorf("pgcapture: parse confirmed position %q of slot %q: %w", fromText, c.cfg.SlotName, err)
-		}
-		known, err := c.cfg.LoadKnownShapes(uint64(from))
-		if err != nil {
-			return err
-		}
-		opts = append(opts, WithDDLInference(DDLInference{
-			Known:     known,
-			StartOIDs: start,
-			Lookup: func(oid uint32) (RelationFacts, error) {
-				qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				return queryRelationFacts(qctx, queryConn, oid)
-			},
-			LastChange: c.cfg.LastChange,
-		}))
+		opts = append(opts, inferenceOrWarn(func() (DDLInference, error) {
+			start, err := publicationOIDs(startupCtx, queryConn, c.cfg.Publication)
+			if err != nil {
+				return DDLInference{}, err
+			}
+			// PostgreSQL resends from the slot's own confirmed position, which
+			// can be before what the index already holds; the shapes loaded
+			// must cover a comparison from there.
+			var fromText string
+			if err := queryConn.QueryRow(startupCtx, `SELECT COALESCE(confirmed_flush_lsn, '0/0'::pg_lsn)::text FROM pg_replication_slots WHERE slot_name = $1`, c.cfg.SlotName).Scan(&fromText); err != nil {
+				return DDLInference{}, fmt.Errorf("pgcapture: read confirmed position of slot %q: %w", c.cfg.SlotName, err)
+			}
+			from, err := pglogrepl.ParseLSN(fromText)
+			if err != nil {
+				return DDLInference{}, fmt.Errorf("pgcapture: parse confirmed position %q of slot %q: %w", fromText, c.cfg.SlotName, err)
+			}
+			known, err := c.cfg.LoadKnownShapes(uint64(from))
+			if err != nil {
+				return DDLInference{}, err
+			}
+			return DDLInference{
+				Known:     known,
+				StartOIDs: start,
+				Lookup: func(oid uint32) (RelationFacts, error) {
+					qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					defer cancel()
+					return queryRelationFacts(qctx, queryConn, oid)
+				},
+				LastChange: c.cfg.LastChange,
+			}, nil
+		}, c.logger)...)
 	}
 	decoder := NewDecoder(resolvePK, c.cfg.Filters, c.logger, opts...)
 
@@ -408,4 +410,18 @@ func closeQueryConn(conn *pgx.Conn) {
 	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = conn.Close(cctx)
+}
+
+// inferenceOrWarn prepares DDL inference (#2441), or, when what it needs
+// cannot be read at start, leaves it off for this run with a loud warning:
+// the schema-changes timeline must never take row capture down with it.
+// The next start tries again.
+func inferenceOrWarn(prepare func() (DDLInference, error), logger *slog.Logger) []DecoderOption {
+	cfg, err := prepare()
+	if err != nil {
+		logger.Error("pgcapture: schema changes will NOT be detected until the next restart (rows are captured normally): could not read what DDL detection needs at start",
+			"error", err)
+		return nil
+	}
+	return []DecoderOption{WithDDLInference(cfg)}
 }
