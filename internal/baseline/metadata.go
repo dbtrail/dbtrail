@@ -190,6 +190,9 @@ type DumpMetadata struct {
 	// record, which is UNKNOWN and never "consistent". Read it through
 	// ReadConsistencyOf, the one place that rule lives.
 	LockMode string
+	// PGRelation is MetaKeyPGRelation, verbatim; "" when absent. Decode it
+	// with ParsePGRelation.
+	PGRelation string
 }
 
 // StartedAtMarkerFile is a bintrail-authored sidecar written into the mydumper
@@ -486,6 +489,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyLockMode); ok {
 		m.LockMode = v
 	}
+	if v, ok := pf.Lookup(MetaKeyPGRelation); ok {
+		m.PGRelation = v
+	}
 	readProvenance(path, &m, func(k string) (string, bool) { return pf.Lookup(k) })
 	if v, ok := pf.Lookup(MetaKeyDeltaChainStart); ok {
 		m.DeltaChainStart = parseFooterTime(path, MetaKeyDeltaChainStart, v)
@@ -631,6 +637,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.CaptureGap = val
 	case MetaKeyLockMode:
 		m.LockMode = val
+	case MetaKeyPGRelation:
+		m.PGRelation = val
 	case MetaKeySnapshotProducer:
 		m.Producer = val
 	case MetaKeyDerivedFromPath:

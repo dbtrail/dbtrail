@@ -43,7 +43,7 @@ func writeGateBaseline(t *testing.T, schema, table string, meta map[string]strin
 
 // TestReconstructTable_pgBaselineRemediation is the #830 guard: a full-table
 // reconstruct over a PostgreSQL baseline (LSN-stamped, no CreateTableSQL) must
-// fail with the "#597 not yet supported for PostgreSQL" message, NOT the
+// fail with the "#1596 not yet supported for PostgreSQL" message, NOT the
 // MySQL-only "re-run `bintrail baseline`" remediation (which no PG baseline can
 // ever satisfy — pgbaseline deliberately omits CreateTableSQL). The LSN!=0
 // branch short-circuits before any DB read, so a nil DB is enough here.
@@ -57,7 +57,7 @@ func TestReconstructTable_pgBaselineRemediation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the PG-not-supported error, got nil")
 	}
-	if !strings.Contains(err.Error(), "not yet supported for PostgreSQL sources (#597)") {
+	if !strings.Contains(err.Error(), "not yet supported for PostgreSQL sources (#1596)") {
 		t.Fatalf("PG baseline got the wrong error: %v", err)
 	}
 	if strings.Contains(err.Error(), "re-run `bintrail baseline`") {
@@ -87,7 +87,7 @@ func TestReconstructTable_mysqlMissingCreateTableSQLUnchanged(t *testing.T) {
 
 // TestReconstructTable_pgNoBaselineRefused is the #916 secondary guard: a
 // full-table reconstruct of a PG-flavored source (stream_state.flavor='postgres')
-// for a table with NO baseline must refuse (#597), not fall through to a
+// for a table with NO baseline must refuse (#1596), not fall through to a
 // binlog-only report mislabeled as full-table. With no baseline there is no LSN
 // anchor, so detection is by the recorded source flavor alone.
 func TestReconstructTable_pgNoBaselineRefused(t *testing.T) {
@@ -106,7 +106,7 @@ func TestReconstructTable_pgNoBaselineRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the PG no-baseline refusal, got nil")
 	}
-	if !strings.Contains(err.Error(), "not yet supported for PostgreSQL sources (#597)") {
+	if !strings.Contains(err.Error(), "not yet supported for PostgreSQL sources (#1596)") {
 		t.Fatalf("PG no-baseline reconstruct got the wrong error: %v", err)
 	}
 	if merr := mock.ExpectationsWereMet(); merr != nil {

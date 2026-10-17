@@ -217,13 +217,13 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 			// WritePGSnapshot writes ""). Blaming the PK type would send the
 			// operator chasing a column problem nothing they do to the table
 			// can fix. No flavor probe: the shape alone proves a PG-sourced
-			// table, and full-table _snapshot for PG is the #597 limitation
+			// table, and full-table _snapshot for PG is the #1596 limitation
 			// either way — resolving the flavor would only change which
 			// refusal fires, so the shared "check the index database" remedy
 			// of the wrong-path verdict is not actionable here.
 			if strings.TrimSpace(c.DataType) == "" {
 				return nil, mysql.NewError(mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE, fmt.Sprintf(
-					"resolve %s: %s.%s is PostgreSQL-sourced (PG snapshot shape); full-table _snapshot is not yet supported for PostgreSQL sources (#597) — "+
+					"resolve %s: %s.%s is PostgreSQL-sourced (PG snapshot shape); full-table _snapshot is not yet supported for PostgreSQL sources (#1596) — "+
 						"use a single-row _snapshot lookup or _flashback for a binlog-only view",
 					q.Type, q.Schema, q.Table))
 			}

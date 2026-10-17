@@ -55,7 +55,7 @@ func TestRunSnapshotFullTable_pgShapedSnapshotGetsWrongPathVerdict(t *testing.T)
 	if strings.Contains(myErr.Message, "unsupported by the baseline canonicalizer") {
 		t.Errorf("empty DATA_TYPE must not get the misleading PK-type blame: %q", myErr.Message)
 	}
-	for _, want := range []string{"PG snapshot shape", "not yet supported for PostgreSQL sources (#597)", "app.orders", "_flashback"} {
+	for _, want := range []string{"PG snapshot shape", "not yet supported for PostgreSQL sources (#1596)", "app.orders", "_flashback"} {
 		if !strings.Contains(myErr.Message, want) {
 			t.Errorf("wrong-path verdict lacks %q: %q", want, myErr.Message)
 		}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/event"
 )
 
@@ -31,9 +32,17 @@ type tableInfo struct {
 	// name (pubviaroot=false). Same flip warning applies.
 	LeafPartition bool
 
+	// OID is the table's pg_class OID, read in the same discovery query
+	// (#1596 slice 1). It equals the RelationID pgoutput puts on every
+	// message for this table and survives a rename (#2441).
+	OID uint32
+
 	// Columns are the live, non-dropped, non-generated columns in attnum
 	// order, resolved inside the snapshot transaction (loadColumns).
 	Columns []string
+	// Shape is the same column list with each column's type (#1596 slice
+	// 1), recorded under baseline.MetaKeyPGRelation.
+	Shape []baseline.PGColumn
 }
 
 // discoverTables lists the tables the publication streams, narrowed by the
@@ -52,7 +61,7 @@ func discoverTables(ctx context.Context, conn *pgx.Conn, publication string, fil
 	}
 
 	rows, err := conn.Query(ctx, `
-		SELECT pt.schemaname, pt.tablename, c.relkind = 'p', c.relispartition
+		SELECT pt.schemaname, pt.tablename, c.relkind = 'p', c.relispartition, c.oid
 		FROM pg_publication_tables pt
 		JOIN pg_namespace n ON n.nspname = pt.schemaname
 		JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = n.oid
@@ -66,7 +75,7 @@ func discoverTables(ctx context.Context, conn *pgx.Conn, publication string, fil
 	var tables []tableInfo
 	for rows.Next() {
 		var t tableInfo
-		if err := rows.Scan(&t.Schema, &t.Table, &t.PartitionParent, &t.LeafPartition); err != nil {
+		if err := rows.Scan(&t.Schema, &t.Table, &t.PartitionParent, &t.LeafPartition, &t.OID); err != nil {
 			return nil, fmt.Errorf("pgbaseline: scanning tables of publication %q: %w", publication, err)
 		}
 		if !filters.Matches(t.Schema, t.Table) {
@@ -134,32 +143,37 @@ func warnPartitioned(tables []tableInfo, publication string, logger *slog.Logger
 // list narrower than its replica identity — so any table whose mutations the
 // delta path can capture is effectively published with ALL columns, matching
 // the full catalog set selected below.
-func loadColumns(ctx context.Context, conn *pgx.Conn, schema, table string, logger *slog.Logger) ([]string, error) {
+//
+// The table is looked up by the OID discovery read, not by name, so the
+// columns are those of the exact relation discovery listed. Each column comes
+// back with its type as pgoutput describes it (atttypid, atttypmod) and as a
+// CREATE TABLE spells it (format_type).
+func loadColumns(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table string, logger *slog.Logger) ([]baseline.PGColumn, error) {
 	rows, err := conn.Query(ctx, `
-		SELECT a.attname, a.attgenerated <> ''
+		SELECT a.attname, a.attgenerated <> '', a.atttypid, a.atttypmod,
+		       format_type(a.atttypid, a.atttypmod)
 		FROM pg_attribute a
-		JOIN pg_class c ON c.oid = a.attrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2
+		WHERE a.attrelid = $1
 		  AND a.attnum > 0 AND NOT a.attisdropped
-		ORDER BY a.attnum`, schema, table)
+		ORDER BY a.attnum`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("pgbaseline: listing columns of %s.%s: %w", schema, table, err)
 	}
 	defer rows.Close()
 
-	var cols, generated []string
+	var cols []baseline.PGColumn
+	var generated []string
 	for rows.Next() {
-		var name string
+		var c baseline.PGColumn
 		var isGenerated bool
-		if err := rows.Scan(&name, &isGenerated); err != nil {
+		if err := rows.Scan(&c.Name, &isGenerated, &c.TypeOID, &c.TypeMod, &c.Type); err != nil {
 			return nil, fmt.Errorf("pgbaseline: scanning columns of %s.%s: %w", schema, table, err)
 		}
 		if isGenerated {
-			generated = append(generated, name)
+			generated = append(generated, c.Name)
 			continue
 		}
-		cols = append(cols, name)
+		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("pgbaseline: listing columns of %s.%s: %w", schema, table, err)

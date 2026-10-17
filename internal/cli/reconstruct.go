@@ -542,7 +542,7 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// the binlog_file column must never be compared for a PG source — see
 	// reconstruct.GapDetected and resolveGapCheck. NOTE: single-row reconstruct
 	// (and the shim's _snapshot) DO run for a PG source today — a beta warn
-	// fired above; full-table reconstruct stays gated for PG (#830/#597). The
+	// fired above; full-table reconstruct stays gated for PG (#830/#1596). The
 	// remaining slice-D GA hardening is end-to-end type-fidelity validation and
 	// pinning the baseline COPY vs pgoutput rendering GUCs so their text agrees;
 	// it must honor "replay at/after the floor", not "strictly after the

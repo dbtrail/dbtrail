@@ -244,11 +244,15 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return Stats{}, fmt.Errorf("pgbaseline: publication %q streams no tables matching the filters — the baseline would be empty; check the publication's table list and the --schemas/--tables filters", cfg.Publication)
 	}
 	for i := range tables {
-		cols, err := loadColumns(ctx, conn, tables[i].Schema, tables[i].Table, logger)
+		shape, err := loadColumns(ctx, conn, tables[i].OID, tables[i].Schema, tables[i].Table, logger)
 		if err != nil {
 			return Stats{}, err
 		}
-		tables[i].Columns = cols
+		tables[i].Shape = shape
+		tables[i].Columns = make([]string, len(shape))
+		for j, c := range shape {
+			tables[i].Columns[j] = c.Name
+		}
 	}
 
 	concurrency := cfg.Parallelism
@@ -418,7 +422,17 @@ func openWorkerConn(ctx context.Context, dsn, snapshotID string) (*pgx.Conn, err
 }
 
 // tableFooter is the footer of one table of a PostgreSQL snapshot.
-func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) map[string]string {
+func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) (map[string]string, error) {
+	// The table's OID and typed column list (#1596 slice 1). Written only if
+	// it reads back: a shape the readers would reject is a bug here, and a
+	// baseline without its shape must not be published as if it had one.
+	shape, err := baseline.PGRelation{OID: t.OID, Columns: t.Shape}.Encode()
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := baseline.ParsePGRelation(shape); err != nil {
+		return nil, fmt.Errorf("pgbaseline: %s.%s: %w", t.Schema, t.Table, err)
+	}
 	return map[string]string{
 		baseline.MetaKeySnapshotTimestamp: tsStr,
 		"bintrail.source_database":        t.Schema,
@@ -443,15 +457,16 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) map[string]str
 		// snapshot — see Stats.AnchorLSN). Any overlap this floor introduces
 		// with rows already in the baseline is harmless: the merge is
 		// last-write-wins over full-row images. MetaKeyCreateTableSQL is
-		// deliberately absent — it exists for full-table mydumper
-		// reconstruct, out of scope for PG.
+		// deliberately absent: it is MySQL text the reconstruct engine parses
+		// as MySQL; MetaKeyPGRelation below is the PostgreSQL shape (#1596).
 		baseline.MetaKeyLSN: strconv.FormatUint(deltaStartLSN, 10),
 		// The rendering-GUC stamp (#593 slice D): records that this baseline's
 		// text was rendered under the pinned canonical GUCs. Readers use its
 		// ABSENCE to detect a pre-pin baseline whose GUC-sensitive text may
 		// not join post-pin deltas (warn + re-baseline guidance).
 		baseline.MetaKeyRenderGUCs: pgcapture.RenderGUCsStamp(),
-	}
+		baseline.MetaKeyPGRelation: shape,
+	}, nil
 }
 
 // processTable COPYs one table into its Parquet file. Returns rows written.
@@ -465,7 +480,10 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) map[string]str
 func processTable(ctx context.Context, conn *pgx.Conn, t tableInfo, outputDir, tsDir, tsStr string, deltaStartLSN uint64, compression string, rowGroupSize int, logger *slog.Logger) (int64, error) {
 	outPath := filepath.Join(outputDir, tsDir, t.Schema, t.Table+".parquet")
 
-	md := tableFooter(t, tsStr, deltaStartLSN)
+	md, err := tableFooter(t, tsStr, deltaStartLSN)
+	if err != nil {
+		return 0, err
+	}
 
 	cols := make([]baseline.Column, len(t.Columns))
 	for i, name := range t.Columns {

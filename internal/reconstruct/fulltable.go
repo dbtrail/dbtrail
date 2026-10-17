@@ -1210,7 +1210,7 @@ func ReconstructTable(
 		if !errors.Is(err, ErrNoBaseline) {
 			return nil, fmt.Errorf("find baseline: %w", err)
 		}
-		// Full-table reconstruct is out of GA scope for PostgreSQL (#597). With no
+		// Full-table reconstruct is out of GA scope for PostgreSQL (#1596). With no
 		// baseline found the LSN anchor is unavailable, so detect PG by the recorded
 		// source flavor and refuse here too — otherwise a PG full-table reconstruct
 		// of a table absent from the baseline would fall through to the binlog-only
@@ -1218,7 +1218,7 @@ func ReconstructTable(
 		// Mirrors the with-baseline PG gate further down.
 		if query.SourceFlavor(db) == "postgres" {
 			return nil, fmt.Errorf(
-				"full-table reconstruct is not yet supported for PostgreSQL sources (#597); " +
+				"full-table reconstruct is not yet supported for PostgreSQL sources (#1596); " +
 					"use single-row `reconstruct` or the shim `_flashback` for PostgreSQL time-travel")
 		}
 		// No baseline exists for this table. This can happen when: (1) the
@@ -1257,7 +1257,7 @@ func ReconstructTable(
 	// "re-run `bintrail baseline`" remediation below is impossible to satisfy
 	// for a PG source and sends the operator into a loop re-dumping baselines
 	// that will never carry that metadata. Full-table reconstruct is out of GA
-	// scope for PostgreSQL (#597). Detect PG via the LSN anchor first (no DB
+	// scope for PostgreSQL (#1596). Detect PG via the LSN anchor first (no DB
 	// read; written only by pgbaseline) then the recorded source flavor
 	// (catches pre-#593 PG baselines with LSN==0), and fail with the correct
 	// message BEFORE the MySQL-only CreateTableSQL check so a genuine MySQL
@@ -1265,7 +1265,7 @@ func ReconstructTable(
 	// guidance.
 	if bmeta.LSN != 0 || query.SourceFlavor(db) == "postgres" {
 		return nil, fmt.Errorf(
-			"full-table reconstruct is not yet supported for PostgreSQL sources (#597); " +
+			"full-table reconstruct is not yet supported for PostgreSQL sources (#1596); " +
 				"use single-row `reconstruct` or the shim `_flashback` for PostgreSQL time-travel")
 	}
 	if bmeta.CreateTableSQL == "" {

@@ -90,7 +90,7 @@ func retainEvent(ev *query.ResultRow) *query.ResultRow {
 //     only saw the surviving last event per PK, this sees every event,
 //     including ones a later event overwrote. Harmless today because the
 //     marker is a PostgreSQL concept and full-table reconstruct refuses PG
-//     sources outright (#597, gated in ReconstructTable) — so it cannot fire
+//     sources outright (#1596, gated in ReconstructTable) — so it cannot fire
 //     on a MySQL window at all. If that PG gate is ever lifted, revisit this:
 //     an overwritten event carrying a marker would then refuse a run whose
 //     OUTPUT would have been clean.
@@ -471,7 +471,7 @@ var foldWindow = foldEventWindow
 // StartPos == EndPos == the commit LSN for every row of a transaction
 // (internal/pgcapture/decoder.go), so a PG-sourced index holds rows a
 // since==until window would ADMIT; what keeps this sound is ReconstructTable's
-// PG refusal (#597), which runs long before this is consulted. A MariaDB 11.4+
+// PG refusal (#1596), which runs long before this is consulted. A MariaDB 11.4+
 // row with a zero LogPos would underflow into a ~2^64 start_pos, which is why
 // the parser refuses to index one (#1117) — a belt that is prospective, so rows
 // an older build already wrote are not covered by it. Do not move this call

@@ -276,6 +276,30 @@ func TestPGBaseline_Integration(t *testing.T) {
 		t.Errorf("table Gen n = %v, want %q", strOrNull(got), "21")
 	}
 
+	// ── #1596 slice 1: the table's OID and typed columns, generated column
+	// excluded like the data, in the same order the file stores them ──
+	var wantOID uint32
+	if err := setup.QueryRow(ctx, "SELECT $1::regclass::oid", "public."+itTblGen).Scan(&wantOID); err != nil {
+		t.Fatalf("read OID of %s: %v", itTblGen, err)
+	}
+	mdG := readParquetMetadata(t, filepath.Join(snapDir, "public", itTblGen+".parquet"))
+	shape, ok, err := baseline.ParsePGRelation(mdG[baseline.MetaKeyPGRelation])
+	if err != nil || !ok {
+		t.Fatalf("table Gen shape %q: ok %v, err %v", mdG[baseline.MetaKeyPGRelation], ok, err)
+	}
+	wantCols := []baseline.PGColumn{
+		{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer"},
+		{Name: "n", TypeOID: 23, TypeMod: -1, Type: "integer"},
+	}
+	if shape.OID != wantOID || len(shape.Columns) != len(wantCols) {
+		t.Fatalf("table Gen shape = %+v, want oid %d and columns %+v", shape, wantOID, wantCols)
+	}
+	for i, c := range wantCols {
+		if shape.Columns[i] != c {
+			t.Errorf("table Gen shape column %d = %+v, want %+v", i, shape.Columns[i], c)
+		}
+	}
+
 	// ── Re-baseline: slot already exists, NO replication DSN needed — the
 	// first-run and re-baseline path are the same code path by design. ──
 	time.Sleep(1100 * time.Millisecond) // snapshot dirs are timestamp-named (1s granularity); don't collide
