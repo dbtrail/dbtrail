@@ -234,6 +234,7 @@ func TestFooterReaders_agreeOnEveryKey(t *testing.T) {
 		"MetaKeyRowCount":          "7",
 		"MetaKeyContentDigest":     "v1:abc",
 		"MetaKeyRenderGUCs":        RenderGUCsPinned,
+		"MetaKeyPGDeltaSince":      "2026-06-10T02:00:00Z",
 		"MetaKeyCaptureGap":        "2026-06-10T03:00:00Z: a gap",
 		"MetaKeyLastEventID":       "4500",
 		"MetaKeyDDLMark":           `{"id":7,"binlog_file":"binlog.000003","binlog_pos":500,"detected_at":"2026-06-01T00:00:00Z","ddl_type":"TRUNCATE TABLE"}`,

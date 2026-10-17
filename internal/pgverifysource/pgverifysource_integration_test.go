@@ -186,7 +186,9 @@ func TestVerifyTablePG_Integration(t *testing.T) {
 	// its own clock, taken after this fixture, and an hour with no partition
 	// in that window makes the verdict inconclusive. Without it a test started
 	// in the last second of an hour failed.
-	testutil.SetupPartitionedTable(t, indexDB, dbName, []time.Time{curHour.Add(-time.Hour), curHour, curHour.Add(time.Hour)})
+	// Two hours back: verify reads a PostgreSQL baseline's changes from up
+	// to an hour before its time (reconstruct.PGDeltaMargin, #1596).
+	testutil.SetupPartitionedTable(t, indexDB, dbName, []time.Time{curHour.Add(-2 * time.Hour), curHour.Add(-time.Hour), curHour, curHour.Add(time.Hour)})
 	ctx := context.Background()
 
 	setup, err := pgx.Connect(ctx, baseDSN)
@@ -218,15 +220,20 @@ func TestVerifyTablePG_Integration(t *testing.T) {
 	mustExec(fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", vpgPub, vpgTbl))
 
 	outDir := t.TempDir()
-	if _, err := pgbaseline.Run(ctx, pgbaseline.Config{
+	stats, err := pgbaseline.Run(ctx, pgbaseline.Config{
 		QueryDSN:    baseDSN,
 		ReplDSN:     pgReplDSN(baseDSN),
 		SlotName:    vpgSlot,
 		Publication: vpgPub,
 		OutputDir:   outDir,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("pgbaseline.Run: %v", err)
 	}
+	// Changes after the baseline sit at or past its LSN floor: verify reads
+	// from there (#1596).
+	lsnText := func(lsn uint64) string { return fmt.Sprintf("%X/%X", lsn>>32, uint32(lsn)) }
+	after := stats.AnchorLSN + 0x100
 
 	// Index side: the relation's schema snapshot (what the capture daemon
 	// writes on the first RelationMessage) ...
@@ -307,7 +314,7 @@ func TestVerifyTablePG_Integration(t *testing.T) {
 	// data; without it a PK-spelling regression between the event and baseline
 	// sides (the #1155/#1158 bug class) would ship green and turn every
 	// captured write into a false MISMATCH.
-	testutil.InsertEvent(t, indexDB, "0/1000000", 100, 200,
+	testutil.InsertEvent(t, indexDB, lsnText(after), after, after,
 		time.Now().UTC().Format("2006-01-02 15:04:05"), nil,
 		"public", vpgTbl, 2 /*UPDATE*/, "1", nil,
 		[]byte(`{"id":"1","v":"café 日本語","ok":"t","num":"12.30"}`),
@@ -321,6 +328,23 @@ func TestVerifyTablePG_Integration(t *testing.T) {
 	}
 
 	// MISMATCH (row count): an uncaptured DELETE is always conclusive.
+	// A commit that raced the baseline's start: past its floor, stamped
+	// before its time, missing from it. Read from the time alone it was
+	// left out and read as a mismatch (#1596, #771).
+	mustExec(fmt.Sprintf("UPDATE %s SET v = 'raced' WHERE id = 3", vpgTbl))
+	testutil.InsertEvent(t, indexDB, lsnText(stats.DeltaStartLSN), stats.DeltaStartLSN, stats.DeltaStartLSN,
+		stats.SnapshotTime.Add(-10*time.Second).Format("2006-01-02 15:04:05"), nil,
+		"public", vpgTbl, 2 /*UPDATE*/, "3", nil,
+		[]byte(`{"id":"3","v":null,"ok":null,"num":"0.01"}`),
+		[]byte(`{"id":"3","v":"raced","ok":null,"num":"0.01"}`))
+	res, err = verify.VerifyTablePG(ctx, cfg, "public", vpgTbl)
+	if err != nil {
+		t.Fatalf("VerifyTablePG (raced commit): %v", err)
+	}
+	if res.Status != verify.StatusMatch {
+		t.Fatalf("status = %q (detail=%q), want match: the commit past the floor and before the snapshot's time was not read", res.Status, res.Detail)
+	}
+
 	mustExec(fmt.Sprintf("DELETE FROM %s WHERE id = 2", vpgTbl))
 	res, err = verify.VerifyTablePG(ctx, cfg, "public", vpgTbl)
 	if err != nil {

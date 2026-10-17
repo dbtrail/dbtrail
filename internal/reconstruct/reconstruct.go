@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -335,6 +336,46 @@ func WriteSQLResultsCSV(rows []map[string]any, cols []string, w io.Writer) error
 // than emitting a state whose provenance is broken.
 func checkEventToast(ev query.ResultRow) error {
 	return event.CheckUnresolvedToast(ev.SchemaName, ev.TableName, ev.PKValues, ev.RowBefore, ev.RowAfter)
+}
+
+// FoldBeforeSnapshot applies to row (a snapshot's row, nil when the snapshot
+// has none) the events stamped before snapshotTime and returns the result
+// with the remaining events, in their order. A fetch from a PostgreSQL
+// snapshot's LSN floor (#1596) returns changes from before its time: most
+// are already in the snapshot (applying a full row image again changes
+// nothing), and one whose commit raced the snapshot's start is not. Folded
+// here, they never reach a caller as changes after the snapshot: the
+// history, the "earliest event is not an INSERT" tell and the event count
+// see what they saw before. events must be in commit order within those
+// stamped before snapshotTime. row is not modified.
+//
+// An UPDATE that moved the row to another primary key (pkCols) leaves this
+// one: the row stops existing here, it does not become the moved row. The
+// events of one key are stored under its before-image, so the fetch for the
+// old key returns that UPDATE, and its after-image belongs to the new key.
+func FoldBeforeSnapshot(row map[string]any, events []query.ResultRow, snapshotTime time.Time, pkCols []metadata.ColumnMeta) (map[string]any, []query.ResultRow, error) {
+	state := row
+	folded := false
+	var rest []query.ResultRow
+	for _, ev := range events {
+		if !ev.EventTimestamp.Before(snapshotTime) {
+			rest = append(rest, ev)
+			continue
+		}
+		if err := checkEventToast(ev); err != nil {
+			return nil, nil, err
+		}
+		if _, _, moved := pkChangedInEvent(&ev, pkCols); moved {
+			state = nil
+		} else {
+			state = applyEvent(state, ev)
+		}
+		folded = true
+	}
+	if !folded {
+		return row, events, nil
+	}
+	return state, rest, nil
 }
 
 func applyEvent(state map[string]any, ev query.ResultRow) map[string]any {

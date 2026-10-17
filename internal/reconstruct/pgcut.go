@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -42,6 +43,73 @@ var pgFirstEventPast = firstEventPast
 // this package is linked into the MySQL binary, which must not link the
 // PostgreSQL driver (cliapp/pgfree_test.go).
 func lsnText(lsn uint64) string { return fmt.Sprintf("%X/%X", lsn>>32, uint32(lsn)) }
+
+// PGDeltaFloor is where a reader of a PostgreSQL snapshot fetches the
+// changes after it from: the snapshot's LSN floor (MetaKeyLSN), nil for a
+// MySQL snapshot (it records a binlog coordinate, AnchorOf) or a PostgreSQL
+// one taken before the floor was recorded. The floor is read before the
+// snapshot opens, so a transaction can commit at or after it and before the
+// snapshot's time, yet be missing from the snapshot (#771): a reader that
+// starts at the snapshot's time drops it, with nothing to say so. Reading
+// from the floor applies some changes the snapshot already holds again,
+// which is harmless: every change is a full row image.
+func PGDeltaFloor(bmeta baseline.DumpMetadata) *query.BinlogPos {
+	if bmeta.LSN == 0 || bmeta.BinlogFile != "" {
+		return nil
+	}
+	return lsnPos(bmeta.LSN)
+}
+
+// PGDeltaMargin is how far before a PostgreSQL snapshot's time a reader is
+// sure to look for the changes it may be missing when the snapshot records no
+// bound (MetaKeyPGDeltaSince). The only change a snapshot from `bintrail-pg
+// baseline` can miss is one whose commit raced the snapshot's start: its
+// commit time is just before the snapshot's, by far less than this. A commit
+// held longer than this across the snapshot's start (a synchronous standby
+// that stopped answering) is not covered. The fetch itself reads further back
+// (query.CoarseSinceFloor under a position); the margin is what the
+// coverage check holds the index to, so it stays short: an hour reached
+// before a new index's first partition and refused every snapshot taken in
+// its first hour.
+const PGDeltaMargin = time.Minute
+
+// PGDeltaWindow is where a reader of a snapshot fetches the changes after it
+// from: since and from (SincePos), and whether since is a recorded or
+// documented bound the fetch must keep (query.Options.SinceProven). For a
+// MySQL snapshot, or a PostgreSQL one with no floor: snapshotTime, nil,
+// false. For a PostgreSQL one: the floor, and MetaKeyPGDeltaSince (never
+// after snapshotTime) or PGDeltaMargin before snapshotTime. A
+// MetaKeyPGDeltaSince that does not parse refuses.
+func PGDeltaWindow(bmeta baseline.DumpMetadata, snapshotTime time.Time) (since time.Time, from *query.BinlogPos, proven bool, err error) {
+	from = PGDeltaFloor(bmeta)
+	if from == nil {
+		return snapshotTime, nil, false, nil
+	}
+	since = snapshotTime.Add(-PGDeltaMargin)
+	if bmeta.PGDeltaSince != "" {
+		t, perr := time.Parse(time.RFC3339, bmeta.PGDeltaSince)
+		if perr != nil {
+			return time.Time{}, nil, false, fmt.Errorf("the snapshot's bound on how far back its missing changes reach (%s = %q) cannot be read; %s",
+				baseline.MetaKeyPGDeltaSince, bmeta.PGDeltaSince, pgRebaseline)
+		}
+		since = t.UTC()
+		if since.After(snapshotTime) {
+			since = snapshotTime
+		}
+	}
+	return since, from, true, nil
+}
+
+// PGEventCapNote is what a PostgreSQL read adds to a per-row event cap's
+// refusal: the count starts at the snapshot's LSN floor, which can be before
+// the snapshot's time (#1596), so a nearer target time may not bring it
+// under. "" when pg is false.
+func PGEventCapNote(pg bool) string {
+	if !pg {
+		return ""
+	}
+	return " (on PostgreSQL the count starts at the snapshot's LSN floor, which can be before its time: a newer snapshot brings it down where a nearer time does not)"
+}
 
 func lsnPos(lsn uint64) *query.BinlogPos {
 	return &query.BinlogPos{File: lsnText(lsn), Pos: lsn}

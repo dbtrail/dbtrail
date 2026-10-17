@@ -73,6 +73,14 @@ const (
 	// baseline whose GUC-sensitive text may not join post-pin deltas — readers
 	// warn and recommend re-baselining. Absent on MySQL/MariaDB baselines.
 	MetaKeyRenderGUCs = "bintrail.render_gucs"
+	// MetaKeyPGDeltaSince bounds, on a PostgreSQL snapshot, how far back in
+	// time the changes it may be missing reach (#1596): no change at or after
+	// its LSN floor (MetaKeyLSN) committed before this instant (RFC3339). A
+	// reader fetches from here and filters by the floor, instead of searching
+	// every older hour. Written by whoever knows the bound (a fold knows the
+	// oldest change it left to the next one); absent, readers assume
+	// reconstruct.PGDeltaMargin before the snapshot's time.
+	MetaKeyPGDeltaSince = "bintrail.pg_delta_since"
 	// MetaKeyCaptureGap marks a snapshot that was published over a KNOWN
 	// permanent capture gap — a `baseline refresh` / `reconstruct
 	// --output-format parquet` run whose window contained a stamped
@@ -134,6 +142,10 @@ type DumpMetadata struct {
 	RowCount       int64  // rows ingested into this table's baseline; valid only when ContentDigest != ""
 	LSN            uint64 // PostgreSQL WAL LSN delta-replay floor, inclusive (MetaKeyLSN, see its doc comment / #771); 0 = absent (MySQL baseline, or pre-#593 PG baseline)
 	RenderGUCs     string // pinned rendering-GUC stamp (MetaKeyRenderGUCs, #593 slice D); "" = pre-pin PG baseline or MySQL baseline
+	// PGDeltaSince is MetaKeyPGDeltaSince as written, "" when absent. Kept as
+	// text: a value that does not parse must refuse, never read as absent
+	// (absent means a default that can look back less far than it said).
+	PGDeltaSince string
 	// DeltaChainStart / DeltaBaseAnchor / DeltaBaseSize are set only on the two
 	// files of a table delta (#1638, tabledelta.go): when the chain over the
 	// base started, and which exact base the row numbers were computed against.
@@ -633,6 +645,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.ContentDigest = val
 	case MetaKeyRenderGUCs:
 		m.RenderGUCs = val
+	case MetaKeyPGDeltaSince:
+		m.PGDeltaSince = val
 	case MetaKeyCaptureGap:
 		m.CaptureGap = val
 	case MetaKeyLockMode:

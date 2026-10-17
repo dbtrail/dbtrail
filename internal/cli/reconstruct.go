@@ -280,7 +280,8 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// read failure is non-fatal — warn and proceed with a zero bmeta (gap
 	// detection then reports "unavailable", the pre-#916 S3 behavior).
 	var bmeta baseline.DumpMetadata
-	if bm, metaErr := baseline.ReadParquetMetadataAny(cmd.Context(), baselinePath); metaErr != nil {
+	bm, metaErr := baseline.ReadParquetMetadataAny(cmd.Context(), baselinePath)
+	if metaErr != nil {
 		slog.Warn("could not read baseline metadata; a TRUNCATE, DROP or RENAME is looked for by time alone, so one indexed late is not seen",
 			"error", metaErr)
 	} else {
@@ -332,6 +333,12 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("connect to index database: %w", err)
 	}
 	defer db.Close()
+	// On PostgreSQL the footer says where the changes after the snapshot
+	// start (its LSN floor, #1596); read from the time alone, a commit that
+	// raced the snapshot's start is dropped with nothing to say so.
+	if metaErr != nil && query.SourceFlavor(db) == "postgres" {
+		return fmt.Errorf("read baseline metadata %q: %w; on PostgreSQL it records where the changes after the snapshot start, and reading from the snapshot's time instead can drop one", baselinePath, metaErr)
+	}
 
 	// Idempotent schema migration: the query engine SELECTs
 	// post-initial-schema binlog_events columns (query_text/query_hash,
@@ -432,6 +439,10 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("read baseline: %w", err)
 	}
 
+	deltaSince, deltaFrom, deltaProven, err := reconstruct.PGDeltaWindow(bmeta, snapshotTime)
+	if err != nil {
+		return fmt.Errorf("reconstruct %s.%s: %w", recSchema, recTable, err)
+	}
 	opts := query.Options{
 		Schema: recSchema,
 		Table:  recTable,
@@ -443,8 +454,13 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		// resolves such a key, the fetch returns zero events, and ApplyAt then
 		// renders baseline-era state as the state at --at.
 		PKValues: pkSearch,
-		Since:    &snapshotTime,
+		Since:    &deltaSince,
+		// PostgreSQL: from the snapshot's LSN floor, not its time (#1596).
+		SincePos: deltaFrom,
 		Until:    &at,
+	}
+	if deltaProven {
+		opts = opts.SinceProven()
 	}
 	if sysVer != nil {
 		sysVer.ExpandKey(&opts)
@@ -486,6 +502,22 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// ENUM/SET ordinals → labels (#476), each delta decoded with the
+	// snapshot in effect at its event time (#475). No latest-resolver
+	// fallback here: if the epoch lookup fails, ordinals pass through
+	// raw — the pre-#476 CLI output.
+	reconstruct.MapEventEnumLabels(db, nil, recSchema, recTable, events)
+	// BLOB/TEXT columns are stored base64-encoded; decode them on the deltas
+	// before the ApplyAt/BuildHistory fold so the output carries the real value,
+	// not its base64 text (#666). Baseline rows are read raw and untouched.
+	reconstruct.DecodeEventBinaries(db, recSchema, recTable, events)
+	// Changes from before the snapshot (read from a PostgreSQL floor) go into
+	// its row; what follows sees only the changes after it. The gap check
+	// below keeps every fetched event: the first one is its evidence.
+	fetched := events
+	if baselineRow, events, err = reconstruct.FoldBeforeSnapshot(baselineRow, events, snapshotTime, pkMetas); err != nil {
+		return err
+	}
 
 	// No baseline row for this PK (the fixed BINARY(n) pad-and-retry already
 	// ran inside ReadBaselineRow). Refuse — but tell a genuinely-absent
@@ -521,16 +553,6 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no row found in baseline %q matching pk filter %v", baselinePath, pkFilter)
 	}
 
-	// ENUM/SET ordinals → labels (#476), each delta decoded with the
-	// snapshot in effect at its event time (#475). No latest-resolver
-	// fallback here: if the epoch lookup fails, ordinals pass through
-	// raw — the pre-#476 CLI output.
-	reconstruct.MapEventEnumLabels(db, nil, recSchema, recTable, events)
-	// BLOB/TEXT columns are stored base64-encoded; decode them on the deltas
-	// before the ApplyAt/BuildHistory fold so the output carries the real value,
-	// not its base64 text (#666). Baseline rows are read raw and untouched.
-	reconstruct.DecodeEventBinaries(db, recSchema, recTable, events)
-
 	// Warn if there is a gap between the baseline position and the first indexed
 	// event — events in that gap are missing from the reconstruction. The
 	// comparable anchor is flavor-dependent (#593): PostgreSQL baselines carry
@@ -547,8 +569,8 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// pinning the baseline COPY vs pgoutput rendering GUCs so their text agrees;
 	// it must honor "replay at/after the floor", not "strictly after the
 	// snapshot's live LSN".
-	if len(events) > 0 {
-		first := events[0]
+	if len(fetched) > 0 {
+		first := fetched[0]
 		flavor, lineageGuard, anchorPresent, eventPosMissing := resolveGapCheck(
 			query.SourceFlavor(db), bmeta, first.BinlogFile, first.StartPos)
 		if lineageGuard {

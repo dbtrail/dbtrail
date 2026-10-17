@@ -683,6 +683,18 @@ func (o Options) SearchesBelowItsOwnFloor() Options {
 	return o
 }
 
+// SinceProven returns o marked as a fetch whose Since is a proven lower bound
+// on the time of every change at or after its SincePos, so the engine must
+// not move it back (#2138's settling). Legitimate only when the bound was
+// recorded by whoever wrote the snapshot SincePos comes from, or is a margin
+// that snapshot's kind documents: a PostgreSQL snapshot's
+// MetaKeyPGDeltaSince (#1596). Without such a bound the settling is what
+// keeps a change indexed late, or archived, from being dropped.
+func (o Options) SinceProven() Options {
+	o.sinceSettled = true
+	return o
+}
+
 // pictureLoads counts the pictures loaded by this process.
 var pictureLoads atomic.Int64
 

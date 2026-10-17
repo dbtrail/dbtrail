@@ -332,7 +332,10 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	// image, so the row would silently resolve as if it still existed (#764).
 	// The baseline's position is read here, ahead of the fetch that also
 	// takes it: the check places a statement indexed late by it (#1912).
-	sincePos, ddlMark, eventMark := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table)
+	sincePos, ddlMark, eventMark, delta := snapshotAnchor(ctx, baselinePath, h.logger, q.Schema, q.Table, snapshotTime)
+	if err := h.deltaRefusal(delta); err != nil {
+		return nil, nil, err
+	}
 	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
 		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
 		return nil, nil, err
@@ -356,13 +359,11 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		return nil, nil, err
 	}
 
-	opts := query.Options{
-		Schema:   q.Schema,
-		Table:    q.Table,
-		Since:    &snapshotTime,
-		SincePos: sincePos,
-		Until:    &q.AsOf,
-	}
+	opts := delta.apply(query.Options{
+		Schema: q.Schema,
+		Table:  q.Table,
+		Until:  &q.AsOf,
+	})
 	// Delta fetch matches binlog_events.pk_values (BuildPKValues-encoded), so
 	// re-encode with EscapePKValue — the mirror of the raw ReadBaselineRow match
 	// above (#826). The empty-string PK routes through PKValuesIn for the same

@@ -519,6 +519,11 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	//    has no baseline entry yet still exists as of `at`, and ApplyAt(nil,
 	//    deltas, at) reconstructs it correctly. Reporting found=false before
 	//    fetching would mislabel that common case as "never existed".
+	deltaSince, deltaFrom, deltaProven, err := reconstruct.PGDeltaWindow(bmeta, snapshotTime)
+	if err != nil {
+		writeJSONError(w, http.StatusUnprocessableEntity, "time-travel stopped: "+err.Error())
+		return
+	}
 	opts := query.Options{
 		Schema: schema,
 		Table:  table,
@@ -531,10 +536,15 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 		// fail-silent regression (#1155's indexPKSpelling hazard, same as the
 		// CLI).
 		PKValues: pkSearch,
-		Since:    &snapshotTime,
+		Since:    &deltaSince,
+		// PostgreSQL: from the snapshot's LSN floor, not its time (#1596).
+		SincePos: deltaFrom,
 		Until:    &atTime,
 		Order:    "", // ASC: ApplyAt/BuildHistory require chronological input.
 		Limit:    reconstructMaxEvents + 1,
+	}
+	if deltaProven {
+		opts = opts.SinceProven()
 	}
 	if sysVer != nil {
 		sysVer.ExpandKey(&opts)
@@ -574,7 +584,7 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(rows) > reconstructMaxEvents {
 		writeJSONError(w, http.StatusUnprocessableEntity,
-			fmt.Sprintf("too many events (>%d) for this row between the baseline and the target time to reconstruct safely; narrow the time or use the offline `bintrail reconstruct`", reconstructMaxEvents))
+			fmt.Sprintf("too many events (>%d) for this row between the baseline and the target time to reconstruct safely; narrow the time or use the offline `bintrail reconstruct`%s", reconstructMaxEvents, reconstruct.PGEventCapNote(deltaFrom != nil)))
 		return
 	}
 	// Trim a trailing PARTIAL transaction AFTER the overflow check above, not
@@ -601,6 +611,12 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+	}
+	// Changes from before the snapshot (read from a PostgreSQL floor) go into
+	// its row; the history, the count and existence see only those after it.
+	if baselineRow, rows, err = reconstruct.FoldBeforeSnapshot(baselineRow, rows, snapshotTime, pkMetas); err != nil {
+		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
+		return
 	}
 
 	resp := reconstructResponse{

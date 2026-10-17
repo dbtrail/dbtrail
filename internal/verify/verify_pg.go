@@ -113,11 +113,11 @@ func pgNormalizeRenderedBytes(raw []byte) []byte {
 //   - No PK-type gate: PG stores every PK column as raw text on BOTH the
 //     baseline (COPY text) and delta (pgoutput text) sides, so the match is
 //     string-identity — same bypass as VerifyBaselinePair's pg branch.
-//   - The delta window is time-bounded ONLY (no SincePos/UntilPos): PG events
-//     carry a non-monotonic "X/Y" LSN in binlog_file that the
-//     length-lexicographic position filter cannot bound correctly — the same
-//     "PG never sets a position bound" invariant baselineFetchOptions keeps
-//     (#1022 is the deferred numeric-LSN refinement).
+//   - The delta window starts at the baseline's LSN floor and recorded bound
+//     (reconstruct.PGDeltaWindow, #1596; positions compare as numbers since
+//     #2446): from the snapshot's time alone, a commit that raced the
+//     snapshot's start was left out and read as a mismatch. It has no upper
+//     position bound (#2198). baselineFetchOptions still reads by time.
 //   - Coverage is checked against the stream's LSN checkpoint
 //     (indexCoversPG), which can PROVE coverage but not always disprove it —
 //     see pgCoverageVerdict for the honest degradation.
@@ -181,17 +181,32 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 		return inconclusive(res, coverageNote), nil
 	}
 
-	// 4. Latest event per PK in (baseline, asOf]. Time bounds only — no
-	// SincePos/UntilPos on a PG window (see the function doc).
+	// 4. Latest event per PK from the baseline's floor to asOf (see the
+	// function doc). A change from before the snapshot's time is either in
+	// the snapshot already (its full row image changes nothing) or the one
+	// the snapshot missed.
+	bmeta, err := baseline.ReadParquetMetadataAny(ctx, baselinePath)
+	if err != nil {
+		return res, fmt.Errorf("read baseline metadata %s.%s: %w", schema, table, err)
+	}
+	deltaSince, deltaFrom, deltaProven, err := reconstruct.PGDeltaWindow(bmeta, snapshotTime)
+	if err != nil {
+		return res, fmt.Errorf("%s.%s: %w", schema, table, err)
+	}
+	deltaOpts := query.Options{
+		Schema:     schema,
+		Table:      table,
+		Since:      &deltaSince,
+		SincePos:   deltaFrom,
+		Until:      &asOf,
+		LimitPerPK: 1,
+	}
+	if deltaProven {
+		deltaOpts = deltaOpts.SinceProven()
+	}
 	engine := query.New(cfg.IndexDB)
 	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, query.FetchMergedOptions{
-		Opts: query.Options{
-			Schema:     schema,
-			Table:      table,
-			Since:      &snapshotTime,
-			Until:      &asOf,
-			LimitPerPK: 1,
-		},
+		Opts:           deltaOpts,
 		DBName:         cfg.IndexDBName,
 		NoArchive:      cfg.NoArchive,
 		ArchiveFetcher: cfg.ArchiveFetcher,

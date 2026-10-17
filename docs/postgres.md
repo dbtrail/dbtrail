@@ -458,6 +458,15 @@ directly.
 > across the upgrade, so `--pk` lookups and `--history` can split there;
 > re-baselining resolves this going forward (deltas before the new anchor are
 > not replayed).
+> **Where the changes after a snapshot start.** A PostgreSQL snapshot records
+> an LSN floor read just before it opens, and reads start there, not at the
+> snapshot's time: a transaction committing at the instant the snapshot opens
+> can be missing from it, and is then applied from the index. Such a commit
+> is looked for at least a minute before the snapshot's time; one held longer
+> than that across the snapshot's start (a synchronous standby that stopped
+> answering) is not covered. A primary-key-changing UPDATE in that minute
+> makes the shim's whole-table `_snapshot` and `verify` refuse, as one after
+> the snapshot does.
 > **Full-table** `reconstruct` (`--output-format mydumper`) remains
 > deliberately out of scope: a PG baseline does not carry the `CREATE TABLE`
 > metadata it needs. `verify` is not bound by that limit — it digests row

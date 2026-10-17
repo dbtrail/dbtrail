@@ -362,6 +362,10 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		//    ApplyAt(nil, deltas, at) reconstructs it correctly. Reporting
 		//    found=false before fetching would mislabel that common case as
 		//    "never existed".
+		deltaSince, deltaFrom, deltaProven, err := reconstruct.PGDeltaWindow(bmeta, snapshotTime)
+		if err != nil {
+			return ErrorResult(err), nil, nil
+		}
 		fmOpts := query.FetchMergedOptions{
 			Opts: query.Options{
 				Schema: args.Schema,
@@ -376,7 +380,9 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 				// fail-silent regression (#1155's indexPKSpelling hazard,
 				// same as the CLI).
 				PKValues: pkSearch,
-				Since:    &snapshotTime,
+				Since:    &deltaSince,
+				// PostgreSQL: from the snapshot's LSN floor, not its time (#1596).
+				SincePos: deltaFrom,
 				Until:    &atTime,
 				Order:    "", // ASC: ApplyAt/BuildHistory require chronological input.
 				Limit:    MaxReconstructEvents + 1,
@@ -393,6 +399,9 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 			// a stale registration is `bintrail archive reconcile --repair` —
 			// full wording in reconstructFetchError below.
 			ArchiveFetcher: parquetquery.Fetch,
+		}
+		if deltaProven {
+			fmOpts.Opts = fmOpts.Opts.SinceProven()
 		}
 		if sysVer != nil {
 			sysVer.ExpandKey(&fmOpts.Opts)
@@ -415,8 +424,8 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		if len(rows) > MaxReconstructEvents {
 			return ErrorResult(fmt.Errorf(
 				"too many events (>%d) for this row between the baseline and the target time to reconstruct safely; "+
-					"narrow the time range, or use the offline `bintrail reconstruct` CLI",
-				MaxReconstructEvents)), nil, nil
+					"narrow the time range, or use the offline `bintrail reconstruct` CLI%s",
+				MaxReconstructEvents, reconstruct.PGEventCapNote(deltaFrom != nil))), nil, nil
 		}
 		// Trim a trailing PARTIAL transaction AFTER the overflow check above, not
 		// before: trimming reduces len(rows), and running it first would let a
@@ -437,6 +446,12 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 			if rows, err = sysVer.Normalize(rows); err != nil {
 				return ErrorResult(err), nil, nil
 			}
+		}
+		// Changes from before the snapshot (read from a PostgreSQL floor) go
+		// into its row; the history, the count, the warnings and existence
+		// see only those after it.
+		if baselineRow, rows, err = reconstruct.FoldBeforeSnapshot(baselineRow, rows, snapshotTime, pkMetas); err != nil {
+			return ErrorResult(err), nil, nil
 		}
 
 		res := reconstructResult{
