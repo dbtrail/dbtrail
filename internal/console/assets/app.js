@@ -12527,6 +12527,10 @@ function backupDuckLane(b) {
   return lane;
 }
 
+// Whether the reader opened the in-place fold, kept outside the node for the
+// reason takeAwayOpen is. Closed on first arrival.
+let inPlaceOpen = false;
+
 // snapshotInPlace: the copy used where it lives, without downloading it (the
 // DuckDB schema with its options, and the Iceberg export). Both sat on pages
 // about other things (MCP Server, MySQL clients); they are what a reader can
@@ -12542,7 +12546,11 @@ function snapshotInPlace(cur, b) {
     if (ice) parts.push(ice);
   }
   if (!parts.length) return null;
-  const fold = el("details", { class: "ov-panel bk-take bk-inplace" });
+  // Its open state outlives the node, like takeAwayOpen: the page repaints
+  // on its own (every 2s while a run is in flight), and each repaint draws a
+  // new <details>, which would fold itself shut under the reader.
+  const fold = el("details", { class: "ov-panel bk-take bk-inplace", open: inPlaceOpen || null });
+  fold.addEventListener("toggle", () => { inPlaceOpen = !!fold.open; });
   fold.append(el("summary", { class: "ov-panel-head bk-take-sum" },
     el("h2", { class: "ov-panel-title", text: "Use it where it lives" }),
     el("span", { class: "bk-take-note", text: "Your own DuckDB on this server or in S3, or an Iceberg table, without downloading." })));

@@ -27,6 +27,7 @@ func TestSnapshotInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := renderHarnessJS + `
+FakeEl.prototype.addEventListener = function (t, f) { (this._l = this._l || {})[t] = ((this._l || {})[t] || []).concat(f); };
 const flat = (n, out = []) => { if (!n) return out; if (n.nodeType === 3) { out.push(n.textContent); return out; }
   if (n._text) out.push(n._text); for (const c of n.children || []) flat(c, out); return out; };
 const cur = { id: "a", name: "a", kind: "registry", host: "db.internal", port: "3307", user: "reader", dbname: "idx" };
@@ -41,7 +42,20 @@ const run = (caps, b) => {
   return { duck: text.includes("Download a DuckDB schema"), ice: text.includes("Keep it current with Iceberg"),
     dirFlag: text.includes("--baseline-dir"), s3Flag: text.includes("--baseline-s3"), title: text.includes("Use it where it lives") };
 };
+// Opened by the reader, then the page repaints: the new fold is open too.
+vm.runInContext("capsCache = { views: true }; capsKnown = true;", ctx);
+ctx.__cur = cur; ctx.__b = dir;
+const first = vm.runInContext("snapshotInPlace(__cur, __b)", ctx);
+// el() sets open as an attribute, which is what a browser reads for <details>.
+const isOpen = (n) => !!n.open || (n.attrs && n.attrs.open != null);
+const closedOnArrival = !isOpen(first);
+first.open = true; for (const f of (first._l || {}).toggle || []) f();
+const repainted = vm.runInContext("snapshotInPlace(__cur, __b)", ctx);
+const keptOpen = isOpen(repainted);
+repainted.open = false; for (const f of (repainted._l || {}).toggle || []) f();
+const keptClosed = !isOpen(vm.runInContext("snapshotInPlace(__cur, __b)", ctx));
 console.log(JSON.stringify({
+  persist: { closedOnArrival, keptOpen, keptClosed },
   both: run({ views: true }, dir),
   s3: run({ views: true }, s3),
   profile: run({ views: true, data_profile: true }, dir),
@@ -63,6 +77,17 @@ console.log(JSON.stringify({
 	var got map[string]*fold
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode %q: %v", raw, err)
+	}
+	var persist struct {
+		Persist struct{ ClosedOnArrival, KeptOpen, KeptClosed bool }
+	}
+	if err := json.Unmarshal(raw, &persist); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	// The page repaints on its own (every 2s while a run is in flight); a
+	// fold that forgets it was opened shuts under the reader.
+	if p := persist.Persist; !p.ClosedOnArrival || !p.KeptOpen || !p.KeptClosed {
+		t.Errorf("fold state across repaints: closed on arrival %v, kept open %v, kept closed %v; want all true", p.ClosedOnArrival, p.KeptOpen, p.KeptClosed)
 	}
 	if f := got["both"]; f == nil || !f.Title || !f.Duck || !f.Ice || !f.DirFlag {
 		t.Errorf("views on, a directory destination: %+v; want the fold with the DuckDB card and the Iceberg panel naming --baseline-dir", f)

@@ -5665,6 +5665,7 @@ try {
   await page.evaluate((was) => {
     const f = document.querySelector(".view details.bk-inplace");
     if (f) f.open = false;
+    inPlaceOpen = false; // the remembered state too, or the next repaint reopens it
     const t = document.querySelector('.snap-tab[data-tab="' + was + '"]');
     if (t) t.click();
   }, inplaceWas);
