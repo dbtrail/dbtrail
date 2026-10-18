@@ -40,7 +40,7 @@ func TestResolvePGFoldBounds_integration(t *testing.T) {
 	add(1<<32+0x40, t3)
 
 	// A point between the first and second transaction: stop right before 1/0.
-	b, err := resolvePGFoldBounds(ctx, db, t1.Add(time.Minute), 0x100, first)
+	b, err := resolvePGFoldBounds(ctx, db, t1.Add(time.Minute), 0x100, first, first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestResolvePGFoldBounds_integration(t *testing.T) {
 	// Past everything, not checkpointed: the newest transaction is left whole.
 	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, flavor, events_indexed, last_checkpoint, server_id)
 		VALUES (1, 'gtid', '1/0', 4294967296, 'postgres', 3, UTC_TIMESTAMP(), 1)`)
-	b, err = resolvePGFoldBounds(ctx, db, t3.Add(time.Hour), 0x100, first)
+	b, err = resolvePGFoldBounds(ctx, db, t3.Add(time.Hour), 0x100, first, first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestResolvePGFoldBounds_integration(t *testing.T) {
 	}
 	// Checkpointed: taken.
 	testutil.MustExec(t, db, `UPDATE stream_state SET binlog_position = 4294967360 WHERE id = 1`)
-	b, err = resolvePGFoldBounds(ctx, db, t3.Add(time.Hour), 0x100, first)
+	b, err = resolvePGFoldBounds(ctx, db, t3.Add(time.Hour), 0x100, first, first)
 	if err != nil {
 		t.Fatal(err)
 	}

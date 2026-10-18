@@ -90,7 +90,7 @@ func TestResolvePGFoldBounds(t *testing.T) {
 			cut: &query.BinlogPos{File: "0/5000", Pos: 0x5000}, wantErr: "another PostgreSQL cluster"},
 		// A change committed after the baseline with an LSN below its floor:
 		// another cluster.
-		{name: "another cluster", setup: func(m sqlmock.Sqlmock) { newest(m, 0x800, baselineAt.Add(time.Minute)) },
+		{name: "another cluster", setup: func(m sqlmock.Sqlmock) { newest(m, 0x800, baselineAt.Add(time.Minute)); checkpoint(m, int64(0x800)) },
 			wantErr: "another PostgreSQL cluster"},
 	}
 	for _, c := range cases {
@@ -102,7 +102,7 @@ func TestResolvePGFoldBounds(t *testing.T) {
 			defer db.Close()
 			c.setup(mock)
 			withFirstEventPast(t, c.cut)
-			b, err := resolvePGFoldBounds(context.Background(), db, at, floor, baselineAt)
+			b, err := resolvePGFoldBounds(context.Background(), db, at, floor, baselineAt, baselineAt)
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) || (strings.Contains(c.wantErr, "cluster") && !strings.Contains(err.Error(), "bintrail-pg baseline")) {
 					t.Fatalf("err = %v, want %q", err, c.wantErr)
@@ -139,7 +139,7 @@ func TestResolvePGFoldBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := resolvePGFoldBounds(context.Background(), db, baselineAt.Add(-time.Second), floor, baselineAt); err == nil || !strings.Contains(err.Error(), "before the snapshot") {
+	if _, err := resolvePGFoldBounds(context.Background(), db, baselineAt.Add(-time.Second), floor, baselineAt, baselineAt); err == nil || !strings.Contains(err.Error(), "before the snapshot") {
 		t.Fatalf("err = %v, want the before-the-snapshot refusal", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

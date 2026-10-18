@@ -117,7 +117,7 @@ func TestPGSnapshotFileMetadata(t *testing.T) {
 	allowed := map[string]bool{baseline.MetaKeySnapshotTimestamp: true, "bintrail.source_database": true, "bintrail.source_table": true,
 		"bintrail.bintrail_version": true, MetaKeySnapshotProducer: true, MetaKeyDerivedFrom: true, MetaKeyDerivedFromPath: true,
 		baseline.MetaKeyCaptureGap: true, baseline.MetaKeyLockMode: true, baseline.MetaKeyLastDumpAt: true, baseline.MetaKeyFoldGeneration: true,
-		baseline.MetaKeyLSN: true, baseline.MetaKeyPGRelation: true, baseline.MetaKeyRenderGUCs: true}
+		baseline.MetaKeyLSN: true, baseline.MetaKeyPGRelation: true, baseline.MetaKeyRenderGUCs: true, baseline.MetaKeyPGDeltaSince: true}
 	for k := range md {
 		if !allowed[k] {
 			t.Errorf("footer key %s on a PostgreSQL fold", k)
@@ -144,6 +144,20 @@ func TestPGSnapshotFileMetadata(t *testing.T) {
 	in.PGCutLSN = 0
 	if md := snapshotFileMetadata(in); md[baseline.MetaKeyLSN] != "1280" {
 		t.Errorf("no cut: LSN = %q, want the source's 1280", md[baseline.MetaKeyLSN])
+	}
+	// The bound on how far back the changes after it reach: the fold's
+	// own, else the source's word for word, else none.
+	in.PGDeltaSince = time.Date(2026, 10, 17, 10, 59, 0, 0, time.UTC)
+	if md := snapshotFileMetadata(in); md[baseline.MetaKeyPGDeltaSince] != "2026-10-17T10:59:00Z" {
+		t.Errorf("delta since = %q", md[baseline.MetaKeyPGDeltaSince])
+	}
+	in.PGDeltaSince = time.Time{}
+	if v, ok := snapshotFileMetadata(in)[baseline.MetaKeyPGDeltaSince]; ok {
+		t.Errorf("no bound anywhere: delta since = %q present", v)
+	}
+	in.SourceBaseline.Metadata.PGDeltaSince = "2026-10-16T23:59:00Z"
+	if md := snapshotFileMetadata(in); md[baseline.MetaKeyPGDeltaSince] != "2026-10-16T23:59:00Z" {
+		t.Errorf("source bound: delta since = %q", md[baseline.MetaKeyPGDeltaSince])
 	}
 }
 

@@ -3,8 +3,10 @@ package reconstruct
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,10 +94,27 @@ func TestMergeBaselineIntoParquet_PG(t *testing.T) {
 	in := mergeInput{LocalBaselinePath: src, Schema: "public", Table: "orders", PKCols: pgPK(), Changes: changes,
 		SnapshotDir: snapDir, SnapshotAt: at, PG: true, PGCutLSN: 0x1000,
 		SourceBaseline: baselineMeta{Path: src, Time: at.Add(-12 * time.Hour), Metadata: srcMeta}}
+	out := filepath.Join(snapDir, "public", "orders.parquet")
+	// Folded past the source's LSN with no bound for its reader: refused,
+	// and nothing left behind.
+	if err := mergeBaselineIntoParquet(context.Background(), in, rep); err == nil || !strings.Contains(err.Error(), "no bound on how far back") {
+		t.Fatalf("no delta bound: err = %v", err)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("a refused fold left %s: %v", out, err)
+	}
+	// Nothing folded (the source's LSN carries over): the source's bound,
+	// or its absence, still holds, so no bound is needed.
+	same := in
+	// No changes of its own: the merge takes the ones it applies out of the map.
+	same.PGCutLSN, same.SnapshotDir, same.Changes = srcMeta.LSN, t.TempDir(), map[string]*query.ResultRow{}
+	if err := mergeBaselineIntoParquet(context.Background(), same, &TableReport{}); err != nil {
+		t.Fatalf("the source's LSN with no bound: %v", err)
+	}
+	in.PGDeltaSince = at.Add(-time.Hour)
 	if err := mergeBaselineIntoParquet(context.Background(), in, rep); err != nil {
 		t.Fatalf("mergeBaselineIntoParquet: %v", err)
 	}
-	out := filepath.Join(snapDir, "public", "orders.parquet")
 
 	// Read the written file directly, not through the merge's own reader.
 	duck, err := sql.Open("duckdb", "")
@@ -143,6 +162,9 @@ func TestMergeBaselineIntoParquet_PG(t *testing.T) {
 		meta.BinlogFile != "" || meta.BinlogPos != 0 || meta.CreateTableSQL != "" || meta.EventMark != "" {
 		t.Fatalf("footer = LSN %d rel %v gucs %q binlog %q:%d create %q mark %q",
 			meta.LSN, meta.PGRelation == srcMeta.PGRelation, meta.RenderGUCs, meta.BinlogFile, meta.BinlogPos, meta.CreateTableSQL, meta.EventMark)
+	}
+	if meta.PGDeltaSince != "2026-10-17T11:00:00Z" {
+		t.Errorf("delta since = %q", meta.PGDeltaSince)
 	}
 	if AnchorOf(meta) != nil {
 		t.Error("a PostgreSQL fold has a binlog anchor: the next run would order its LSN as a file name")

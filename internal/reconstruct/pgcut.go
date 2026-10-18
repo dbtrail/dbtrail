@@ -26,6 +26,10 @@ type pgFoldBounds struct {
 	// Next is the LSN the next fold starts from: the folded snapshot's
 	// MetaKeyLSN. Never below the floor: when nothing is folded, the floor.
 	Next uint64
+	// Since is what the folded snapshot records as MetaKeyPGDeltaSince
+	// (pgRunEnd.foldedDeltaSince): carried with Next, so a caller cannot
+	// write one without the other.
+	Since time.Time
 }
 
 // empty reports whether a fold from floor (the baseline's MetaKeyLSN, an
@@ -117,7 +121,23 @@ func lsnPos(lsn uint64) *query.BinlogPos {
 
 // resolvePGFoldBounds finds the bounds of a PostgreSQL fold to the point in
 // time at, from a baseline whose floor is floor and whose snapshot was taken
-// at baselineAt.
+// at baselineAt, read with the time bound prevSince (PGDeltaWindow):
+// resolvePGRunEnd, then boundsFor. A run of several tables calls the two
+// apart, the first once (see pgRunEnd).
+func resolvePGFoldBounds(ctx context.Context, db *sql.DB, at time.Time, floor uint64, baselineAt, prevSince time.Time) (pgFoldBounds, error) {
+	if err := pgPointAfterBaseline(at, baselineAt); err != nil {
+		return pgFoldBounds{}, err
+	}
+	run, err := resolvePGRunEnd(ctx, db, at)
+	if err != nil {
+		return pgFoldBounds{}, err
+	}
+	return run.boundsFor(floor, baselineAt, prevSince)
+}
+
+// pgRunEnd is where every PostgreSQL fold of one run stops, read once per run
+// (#1596): read per table while capture writes, the tables of one snapshot
+// would each be folded through a different LSN.
 //
 //   - The first event committed after at, in commit order (event_id: a
 //     PostgreSQL stream writes in commit order), is where the next fold
@@ -129,64 +149,134 @@ func lsnPos(lsn uint64) *query.BinlogPos {
 //     LSN is then left whole to the next fold, never split between two.
 //   - An LSN that goes backwards is impossible on one cluster: the index now
 //     follows another one (a restored or replaced cluster, whose LSNs started
-//     over). Refused when it shows: the newest event committed after the
-//     baseline with an LSN below its floor, or the first event past at with
-//     an LSN above the newest event's. Not caught once the other cluster's
-//     LSNs pass the old ones everywhere this looks: no cluster identity is
-//     recorded.
-//   - An at before the baseline is refused: the baseline already holds
-//     changes after at, which no fold can take out.
+//     over). Refused when it shows: the first event past at with an LSN above
+//     the newest event's here, the newest event committed after a baseline
+//     with an LSN below its floor in boundsFor. Not caught once the other
+//     cluster's LSNs pass the old ones everywhere this looks: no cluster
+//     identity is recorded.
 //   - An event with LSN 0 is refused: no commit has it, the index row is
 //     damaged, and no bound can be placed around it.
-func resolvePGFoldBounds(ctx context.Context, db *sql.DB, at time.Time, floor uint64, baselineAt time.Time) (pgFoldBounds, error) {
-	if at.Before(baselineAt) {
-		return pgFoldBounds{}, fmt.Errorf("the requested point %s is before the snapshot (taken %s), which already holds later changes; use an older snapshot",
-			at.UTC().Format(time.RFC3339), baselineAt.UTC().Format(time.RFC3339))
-	}
-	var newestEnd uint64
-	var newestAt time.Time
+//
+// The newest event is the index's, of every table: one index database
+// follows one source, the premise ResolveSnapshotCut makes for MySQL. An
+// index holding a second source's rows would put the end, and the bound
+// foldedDeltaSince derives from it, past where this source's capture is.
+type pgRunEnd struct {
+	at time.Time
+	// none: the index holds no event.
+	none bool
+	// until is the last LSN a fold of this run may take.
+	until     uint64
+	newestEnd uint64
+	newestAt  time.Time
+}
+
+// resolvePGRunEnd reads a run's pgRunEnd at the point at.
+func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, error) {
+	run := pgRunEnd{at: at}
 	err := db.QueryRowContext(ctx, `SELECT end_pos, event_timestamp FROM binlog_events
 		WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
-		ORDER BY event_id DESC LIMIT 1`).Scan(&newestEnd, &newestAt)
+		ORDER BY event_id DESC LIMIT 1`).Scan(&run.newestEnd, &run.newestAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return pgFoldBounds{Next: floor}, nil
+		run.none = true
+		return run, nil
 	}
 	if err != nil {
-		return pgFoldBounds{}, fmt.Errorf("find where a PostgreSQL fold stops (newest indexed event): %w", err)
+		return pgRunEnd{}, fmt.Errorf("find where a PostgreSQL fold stops (newest indexed event): %w", err)
 	}
-	if newestEnd == 0 {
-		return pgFoldBounds{}, errors.New("the newest change in the index has LSN 0, which no PostgreSQL commit has: the index row is damaged; a fold cannot place its bounds")
-	}
-	if newestEnd < floor && newestAt.After(baselineAt) {
-		return pgFoldBounds{}, fmt.Errorf("the newest change in the index (committed %s, LSN %s) is after the snapshot (taken %s) but before its LSN %s: "+
-			"the index now follows another PostgreSQL cluster than the one the snapshot was taken from; take a new snapshot (`bintrail-pg baseline`)",
-			newestAt.UTC().Format(time.RFC3339), lsnText(newestEnd), baselineAt.UTC().Format(time.RFC3339), lsnText(floor))
+	if run.newestEnd == 0 {
+		return pgRunEnd{}, errors.New("the newest change in the index has LSN 0, which no PostgreSQL commit has: the index row is damaged; a fold cannot place its bounds")
 	}
 	cut, _, err := pgFirstEventPast(ctx, db, at, 0)
 	if err != nil {
-		return pgFoldBounds{}, err
+		return pgRunEnd{}, err
 	}
 	if cut != nil {
 		switch {
 		case cut.Pos == 0:
-			return pgFoldBounds{}, fmt.Errorf("the first change in the index after %s has LSN 0, which no PostgreSQL commit has: the index row is damaged; a fold cannot place its bounds",
+			return pgRunEnd{}, fmt.Errorf("the first change in the index after %s has LSN 0, which no PostgreSQL commit has: the index row is damaged; a fold cannot place its bounds",
 				at.UTC().Format(time.RFC3339))
-		case cut.Pos > newestEnd:
-			return pgFoldBounds{}, fmt.Errorf("the first change in the index after %s (LSN %s) is later in the WAL than the newest change (LSN %s): "+
+		case cut.Pos > run.newestEnd:
+			return pgRunEnd{}, fmt.Errorf("the first change in the index after %s (LSN %s) is later in the WAL than the newest change (LSN %s): "+
 				"the index now follows another PostgreSQL cluster than the one the snapshot was taken from; take a new snapshot (`bintrail-pg baseline`)",
-				at.UTC().Format(time.RFC3339), lsnText(cut.Pos), lsnText(newestEnd))
+				at.UTC().Format(time.RFC3339), lsnText(cut.Pos), lsnText(run.newestEnd))
 		}
-		return foldFrom(floor, cut.Pos-1), nil
+		run.until = cut.Pos - 1
+		return run, nil
 	}
 	var checkpoint sql.NullInt64
 	err = db.QueryRowContext(ctx, `SELECT binlog_position FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&checkpoint)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return pgFoldBounds{}, fmt.Errorf("find where a PostgreSQL fold stops (stream checkpoint): %w", err)
+		return pgRunEnd{}, fmt.Errorf("find where a PostgreSQL fold stops (stream checkpoint): %w", err)
 	}
-	if checkpoint.Valid && uint64(checkpoint.Int64) >= newestEnd {
-		return foldFrom(floor, newestEnd), nil
+	run.until = run.newestEnd - 1
+	if checkpoint.Valid && uint64(checkpoint.Int64) >= run.newestEnd {
+		run.until = run.newestEnd
 	}
-	return foldFrom(floor, newestEnd-1), nil
+	return run, nil
+}
+
+// pgPointAfterBaseline refuses an at before the baseline: the baseline
+// already holds changes after at, which no fold can take out.
+func pgPointAfterBaseline(at, baselineAt time.Time) error {
+	if at.Before(baselineAt) {
+		return fmt.Errorf("the requested point %s is before the snapshot (taken %s), which already holds later changes; use an older snapshot",
+			at.UTC().Format(time.RFC3339), baselineAt.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// boundsFor is the run's end for one table, from a baseline whose floor is
+// floor, whose snapshot was taken at baselineAt and whose changes were read
+// from the time prevSince (PGDeltaWindow). A zero prevSince is refused: it
+// would leave the folded snapshot no bound, and its reader would fall back to
+// a margin before the fold's own time, past changes capture has not
+// delivered yet.
+func (r pgRunEnd) boundsFor(floor uint64, baselineAt, prevSince time.Time) (pgFoldBounds, error) {
+	if err := pgPointAfterBaseline(r.at, baselineAt); err != nil {
+		return pgFoldBounds{}, err
+	}
+	if prevSince.IsZero() {
+		return pgFoldBounds{}, errors.New("a PostgreSQL fold was given no time its changes were read from; it cannot record how far back the changes after it reach")
+	}
+	b := pgFoldBounds{Next: floor}
+	if !r.none {
+		if r.newestEnd < floor && r.newestAt.After(baselineAt) {
+			return pgFoldBounds{}, fmt.Errorf("the newest change in the index (committed %s, LSN %s) is after the snapshot (taken %s) but before its LSN %s: "+
+				"the index now follows another PostgreSQL cluster than the one the snapshot was taken from; take a new snapshot (`bintrail-pg baseline`)",
+				r.newestAt.UTC().Format(time.RFC3339), lsnText(r.newestEnd), baselineAt.UTC().Format(time.RFC3339), lsnText(floor))
+		}
+		b = foldFrom(floor, r.until)
+	}
+	b.Since = r.foldedDeltaSince(b, floor, prevSince)
+	return b, nil
+}
+
+// foldedDeltaSince is what a snapshot folded to b records as
+// MetaKeyPGDeltaSince: no change at or after b.Next committed before it.
+// prevSince is the bound the fold read its own changes with (PGDeltaWindow).
+//
+// When nothing was folded the next fold starts at the same floor, so
+// prevSince still holds. Otherwise a change this run did not fold is in the
+// index past the run's end, or has not reached the index yet (capture is
+// behind, or was stopped). Either one committed after the newest change the
+// index holds, and, when a change past at was found, after at: commit times
+// follow commit order within PGDeltaMargin, the premise PGDeltaWindow's
+// margin already makes. The point alone would not do: a change committed
+// before at that capture delivers only after this run has an LSN past the
+// next floor and a time before at, and a reader that started at at would
+// drop it.
+//
+// Truncated down to the second, as RFC3339 writes it.
+func (r pgRunEnd) foldedDeltaSince(b pgFoldBounds, floor uint64, prevSince time.Time) time.Time {
+	if b.Next == floor {
+		return prevSince.UTC().Truncate(time.Second)
+	}
+	since := r.at
+	if r.newestAt.Before(since) {
+		since = r.newestAt
+	}
+	return since.Add(-PGDeltaMargin).UTC().Truncate(time.Second)
 }
 
 // foldFrom is the bounds of a fold from floor through until: nothing to fold

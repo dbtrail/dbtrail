@@ -225,6 +225,14 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		if err := checkPGFileColumns(rel, colNames, in.Schema, in.Table); err != nil {
 			return err
 		}
+		// A footer whose LSN moved past the source's must say how far back
+		// the changes after it reach: without it the reader falls back to a
+		// margin before this file's own time, past changes capture had not
+		// delivered when it was folded.
+		if in.PGCutLSN != 0 && in.PGCutLSN != in.SourceBaseline.Metadata.LSN && in.PGDeltaSince.IsZero() {
+			return fmt.Errorf("%s.%s: a PostgreSQL fold to LSN %s was given no bound on how far back the changes after it reach; refusing to write a snapshot its reader would read from too late",
+				in.Schema, in.Table, lsnText(in.PGCutLSN))
+		}
 		cols = rawTextColumns(colNames)
 	} else {
 		if cols, err = baseline.ParseSchemaText(in.CreateTableSQL); err != nil {

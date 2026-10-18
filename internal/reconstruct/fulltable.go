@@ -2007,6 +2007,9 @@ type mergeInput struct {
 	// stays nil for PostgreSQL: it is a binlog coordinate.
 	PG       bool
 	PGCutLSN uint64
+	// PGDeltaSince is what the footer records as MetaKeyPGDeltaSince
+	// (pgRunEnd.foldedDeltaSince); zero = the source baseline's, as written.
+	PGDeltaSince time.Time
 	// PGGenerated names the STORED generated columns the table's streamed
 	// shapes carry (PostgreSQL 18 publish_generated_columns): the baseline
 	// never holds them, so a change carrying one is not a column added after

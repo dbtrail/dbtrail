@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -198,6 +199,11 @@ func pgSnapshotFileMetadata(in mergeInput, built map[string]string) map[string]s
 	}
 	if v := in.SourceBaseline.Metadata.RenderGUCs; v != "" {
 		md[baseline.MetaKeyRenderGUCs] = v
+	}
+	if !in.PGDeltaSince.IsZero() {
+		md[baseline.MetaKeyPGDeltaSince] = in.PGDeltaSince.UTC().Format(time.RFC3339)
+	} else if v := in.SourceBaseline.Metadata.PGDeltaSince; v != "" {
+		md[baseline.MetaKeyPGDeltaSince] = v
 	}
 	return md
 }
