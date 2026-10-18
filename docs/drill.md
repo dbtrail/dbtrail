@@ -2,7 +2,7 @@
 
 `verify` proves your index and baselines are consistent **without** doing a
 restore. `drill` goes one level up: it performs an *actual* restore into a
-scratch MySQL and checks it — a fire drill. Run it monthly and you always
+scratch MySQL (or, for a PostgreSQL source, a scratch PostgreSQL — see [PostgreSQL sources](#postgresql-sources)) and checks it — a fire drill. Run it monthly and you always
 know two things a backup tool must be able to answer: *does my restore
 actually work*, and *how long does it take* (a measured RTO, not a guessed
 one).
@@ -61,6 +61,37 @@ bintrail drill \
 docker compose --profile drill rm -sf drill-mysql
 docker volume rm "$(basename "$PWD")_drill-scratch-data"
 ```
+
+## PostgreSQL sources
+For tables captured from PostgreSQL, run the drill with `bintrail-pg` and
+point `--target-dsn` at a scratch **PostgreSQL**, written as a URL
+(`postgres://...`). The target picks the dump: each table is reconstructed
+as the SQL file `reconstruct --output-format psql` writes, and loaded the
+way `psql -f` would run it, inside the file's one transaction. A load that
+fails anywhere leaves no table behind. The checks are the same: the target
+must hold nothing in the drilled schemas (no table, sequence or view), and
+each table's `count(*)` must equal the rows the file holds.
+
+```sh
+docker compose --profile drill up -d drill-postgres
+
+bintrail-pg drill \
+  --index-dsn  "root:pw@tcp(127.0.0.1:3306)/bintrail_index" \
+  --baseline-dir /var/lib/bintrail/baselines \
+  --tables public.orders \
+  --target-dsn "postgres://postgres:${DRILL_POSTGRES_PASSWORD:-drill}@127.0.0.1:15433/postgres?sslmode=disable"
+
+docker compose --profile drill rm -sf drill-postgres
+docker volume rm "$(basename "$PWD")_drill-postgres-data"
+```
+
+The SQL file makes what the snapshot recorded: columns, types, NOT NULL,
+defaults, identity and sequences, generated columns and the primary key.
+Other indexes, constraints and grants are not rebuilt (see
+[PostgreSQL: Full-table snapshots](postgres.md#full-table-snapshots)).
+`bintrail` (the MySQL binary) refuses a `postgres://` target and names
+`bintrail-pg`; a PostgreSQL-captured table into a MySQL target is refused
+with the same advice.
 
 ## The monthly runbook
 

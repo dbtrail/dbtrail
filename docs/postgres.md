@@ -470,9 +470,11 @@ directly.
 > **Full-table** `reconstruct --output-format parquet` and `bintrail baseline
 > refresh` work for PostgreSQL: they fold a snapshot forward to a point in
 > time, and the result is a snapshot the next fold starts from (see
-> [Full-table snapshots](#full-table-snapshots)). `--output-format mydumper`
-> stays out of scope: a mydumper dump is MySQL's, and `drill` restores it into
-> a MySQL scratch. `verify` digests row content without emitting a dump, so
+> [Full-table snapshots](#full-table-snapshots)). `--output-format psql`
+> writes SQL files psql loads, and `bintrail-pg drill` rehearses a restore with
+> them into a scratch PostgreSQL (see
+> [Restore drills](drill.md#postgresql-sources)). `--output-format mydumper`
+> stays out of scope: a mydumper dump is MySQL's. `verify` digests row content without emitting a dump, so
 > both baseline-anchored and live-source `verify` are supported for PostgreSQL
 > (see
 > [verify — Notes per source](verify.md#notes-per-source)). `query` and
@@ -811,8 +813,9 @@ coerce, but verify your own round-trip.
   columns are absent from the stream before PostgreSQL 18). Treat as best-effort.
 - **Full-table `reconstruct` writes snapshots** (`--output-format
   parquet`, and `baseline refresh`) **or SQL psql loads** (`--output-format
-  psql`); a mydumper dump, and so `drill`, stay MySQL's (see
-  [Full-table snapshots](#full-table-snapshots)).
+  psql`); a mydumper dump stays MySQL's (see
+  [Full-table snapshots](#full-table-snapshots)). `bintrail-pg drill`
+  rehearses the restore into a scratch PostgreSQL from the psql files.
   `verify` is supported too: baseline-anchored, live-source, and
   recover-input modes are all supported for PostgreSQL sources (see
   [verify — Notes per source](verify.md#notes-per-source), including how the

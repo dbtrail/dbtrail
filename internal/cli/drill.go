@@ -20,14 +20,16 @@ import (
 
 var drillCmd = &cobra.Command{
 	Use:   "drill",
-	Short: "Rehearse a real restore into a scratch MySQL and check it (a fire drill)",
+	Short: "Rehearse a real restore into a scratch MySQL or PostgreSQL and check it (a fire drill)",
 	Long: `Performs an actual restore end to end and reports whether it worked:
 
   1. Probes the SCRATCH target first: the run is refused if the target
      already holds ANY table in the drilled schemas; pointing drill at a
      server that already has data there is assumed to be a mistake.
-  2. Reconstructs the selected tables at --at (default now) into a
-     mydumper-format dump (baseline + indexed deltas).
+  2. Reconstructs the selected tables at --at (default now) into a dump
+     the target loads (baseline + indexed deltas): a mydumper dump for a
+     MySQL target, psql's SQL for a PostgreSQL one (postgres://...; with
+     bintrail-pg, the binary that links the PostgreSQL driver).
   3. Loads the dump into the target and checks each loaded table's row
      count against the exact number of rows the dump writer emitted,
      reporting per-table timings; a measured restore duration is an RTO
@@ -44,9 +46,9 @@ exactly what the dump writer emitted, and how long the restore takes.
 Value-level fidelity of reconstructed content against the source is
 verify's job ('bintrail verify'), not re-proven here.
 
-The binary never launches or supervises a MySQL server: the scratch comes
-from you (any throwaway instance), e.g. the opt-in compose profile:
-  docker compose --profile drill up -d drill-mysql
+The binary never launches or supervises a server: the scratch comes from
+you (any throwaway instance), e.g. the opt-in compose profile:
+  docker compose --profile drill up -d drill-mysql      (or drill-postgres)
 
 Example:
   bintrail drill --index-dsn "root:pw@tcp(127.0.0.1:3306)/bintrail_index" \
@@ -70,7 +72,7 @@ var (
 func init() {
 	f := drillCmd.Flags()
 	f.StringVar(&drlIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required)")
-	f.StringVar(&drlTargetDSN, "target-dsn", "", "DSN of the SCRATCH MySQL to load the rehearsal into (required; refused if the target already holds any table in the drilled schemas)")
+	f.StringVar(&drlTargetDSN, "target-dsn", "", "DSN of the SCRATCH server to load the rehearsal into: a MySQL DSN, or a postgres:// URL (required; refused if the target already holds anything in the drilled schemas)")
 	f.StringVar(&drlTables, "tables", "", "Comma-separated schema.table list to rehearse (required)")
 	f.StringVar(&drlAt, "at", "", "Point in time to restore to (default now)")
 	f.StringVar(&drlBaselineDir, "baseline-dir", "", "Local directory of baseline Parquet snapshots")

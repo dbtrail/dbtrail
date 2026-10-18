@@ -79,6 +79,10 @@ volumes:
                           #   docker volume rm <project>_drill-scratch-data
                           # NEVER `docker compose down -v` — it also removes
                           # the INDEX volumes above (your system of record).
+  drill-postgres-data:    # Same, for the `drill` profile's scratch PostgreSQL
+                          # (a PostgreSQL source's rehearsal loads there):
+                          #   docker compose --profile drill rm -sf drill-postgres
+                          #   docker volume rm <project>_drill-postgres-data
 
 services:
 
@@ -1013,3 +1017,17 @@ services:
       - "127.0.0.1:13307:3306"
     volumes:
       - drill-scratch-data:/var/lib/mysql
+  # The PostgreSQL scratch, for a PostgreSQL source's rehearsal with
+  # bintrail-pg; same rules, the binary only loads into the URL:
+  #   docker compose --profile drill up -d drill-postgres
+  #   bintrail-pg drill --target-dsn "postgres://postgres:${DRILL_POSTGRES_PASSWORD:-drill}@127.0.0.1:15433/postgres?sslmode=disable" ...
+  drill-postgres:
+    profiles: ["drill"]
+    image: postgres:16.10
+    environment:
+      # Scratch-only credential — loopback-mapped below, holds throwaway data.
+      POSTGRES_PASSWORD: ${DRILL_POSTGRES_PASSWORD:-drill}
+    ports:
+      - "127.0.0.1:15433:5432"
+    volumes:
+      - drill-postgres-data:/var/lib/postgresql/data
