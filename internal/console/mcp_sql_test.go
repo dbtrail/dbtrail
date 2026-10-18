@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -32,6 +33,7 @@ func mcpSQLSession(t *testing.T, f *sqlFixture) func(args map[string]any) (bool,
 // the slot is keyed by the token, and the answer echoes the statement with
 // the copy's time.
 func TestMCPSQL_runsOnTheCopyLikeTheSQLPage(t *testing.T) {
+	rec := audittest.Install(t)
 	runner := &fakeSQLRunner{res: oneRowResult()}
 	f := newSQLFixture(t, runner, false)
 	call := mcpSQLSession(t, f)
@@ -66,6 +68,12 @@ func TestMCPSQL_runsOnTheCopyLikeTheSQLPage(t *testing.T) {
 	if len(runner.users) != 1 || runner.users[0] != "mcp:static" {
 		t.Errorf("slot keys = %v, want [mcp:static]: the slot is the token's", runner.users)
 	}
+	// The record a real console emission makes: tagged console-mcp, with
+	// the statement as asked.
+	evs := rec.Events()
+	if len(evs) != 1 || evs[0].Surface != "console-mcp" || evs[0].Action != "sql.run" || evs[0].Detail["sql"] != stmt {
+		t.Errorf("audit = %+v, want one console-mcp sql.run carrying the statement", evs)
+	}
 }
 
 // The REAL worker behind the tool: a locked DuckDB over the fixture copy.
@@ -93,11 +101,11 @@ func TestMCPSQL_realWorker(t *testing.T) {
 	}
 
 	planted := filepath.Join(f.root, "console-servers.yaml")
-	if err := os.WriteFile(planted, []byte("password: s3cret"), 0o600); err != nil {
+	if err := os.WriteFile(planted, []byte("leak-marker-2456"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	isErr, text = call(map[string]any{"statement": "SELECT content FROM read_text('" + planted + "')"})
-	if !isErr || !strings.Contains(text, "Permission Error") || strings.Contains(text, "s3cret") {
+	if !isErr || !strings.Contains(text, "Permission Error") || strings.Contains(text, "leak-marker-2456") {
 		t.Errorf("a file outside the copy: isErr=%v %q", isErr, text)
 	}
 }

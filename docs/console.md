@@ -2002,8 +2002,9 @@ per server as `source` in [`/api/capabilities`](#api), derived from
 The web interface serves the same six read-only MCP tools as
 [`bintrail-mcp`](mcp-server.md) — `query`, `recover`, `recover_cascade`,
 `reconstruct`, `status`, `list_schema_changes` — plus `sql`, which runs one
-read-only statement on the copy (the same engine and limits as the SQL page, at
-most 500 rows and 1 MiB per answer, and refused on a server with access rules),
+read-only statement on the copy (the same engine as the SQL page, with smaller
+limits: at most 500 rows and 1 MiB per answer; refused on a server with access
+rules),
 over **Streamable HTTP**, on both `bintrail-console serve` and
 `bintrail-console watch`:
 
