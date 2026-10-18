@@ -14307,7 +14307,8 @@ function buildConnect(servers, tokStatus, minted) {
     el("div", { class: "cn-hero-r" },
       claudeAskMock(servers, tokStatus, minted, arm),
       el("p", { class: "cn-mock-cap", text: "What Claude asks for, filled in with this console's values." }),
-      mcpConnLine(tokStatus))));
+      mcpConnLine(tokStatus),
+      mcpTunnelNote(arm))));
   v.append(mcpQuestions());
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
   // Only Claude here. The DuckDB schema card is on Snapshots -> Download
@@ -14864,6 +14865,35 @@ function mcpConnPoll() {
 }
 const MCP_CONN_POLL_MS = 5000;
 const MCP_CONN_RECENT_S = 24 * 3600;
+
+// mcpTunnelNote: this page was opened on this computer's own address
+// (localhost, 127.x, ::1), which on a DBTrail that runs on a server almost
+// always means a tunnel (ssh -L, an SSM port forward). Claude Desktop on the
+// same computer goes through the same tunnel, so the address works, but only
+// while the tunnel is open, and nothing else would say why Claude stopped
+// connecting the next day. claude.ai runs on Anthropic's servers and never
+// reaches a private address. Any other host draws nothing: Claude Desktop
+// reaches a LAN address or a public name directly.
+function mcpTunnelNote(arm) {
+  const host = String(location.hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (!(host === "localhost" || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host))) return null;
+  const port = location.port || (location.protocol === "https:" ? "443" : "80");
+  const ssh = "ssh -N -L " + port + ":localhost:" + port + " <user>@<your-server>";
+  const autossh = "autossh -M 0 \\\n  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \\\n  -N -L " + port + ":localhost:" + port + " <user>@<your-server>";
+  const ssm = "aws ssm start-session --target <instance-id> \\\n  --document-name AWS-StartPortForwardingSession \\\n  --parameters portNumber=" + port + ",localPortNumber=" + port;
+  const note = el("div", { class: "cn-tunnel" },
+    el("p", { class: "cn-tunnel-p", text: "This address is on this computer. If you reached DBTrail through a tunnel, Claude can use it only while that tunnel is open." +
+      (arm.desktop ? "" : " claude.ai in the browser cannot reach it, tunnel or not: it needs a public https address.") }));
+  note.append(cnFine("How to keep the tunnel open",
+    el("p", { class: "form-hint", text: "With ssh, leave this running in a terminal (the second " + port + " is DBTrail's port on the server; change it if yours differs):" }),
+    el("pre", { class: "stg-code cn-snippet", text: ssh }),
+    el("p", { class: "form-hint", text: "To have it come back by itself after a dropped connection, use autossh:" }),
+    el("pre", { class: "stg-code cn-snippet", text: autossh }),
+    el("p", { class: "form-hint", text: "On AWS, with Session Manager instead of ssh:" }),
+    el("pre", { class: "stg-code cn-snippet", text: ssm }),
+    el("p", { class: "form-hint", text: "Session Manager can close a session that sits idle (20 minutes by default, set in its preferences); start it again before asking Claude." })));
+  return note;
+}
 
 function mcpQuestions() {
   return el("div", { class: "cn-try" },

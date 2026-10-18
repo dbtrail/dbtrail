@@ -54,6 +54,23 @@ vm.runInContext("capsCache = { mcp: true, version: '0.108.1' };", ctx);
 for (const [k, s] of [["mac", "Mozilla/5.0 (Macintosh)"], ["linux", "Mozilla/5.0 (X11; Linux x86_64)"], ["windows", "Mozilla/5.0 (Windows NT 10.0)"]]) {
   ua(s); out[k] = draw("mcpInstallStep(mcpInstallArm())");
 }
+// The tunnel note, by the host this page was opened on.
+const tunnel = (host, port, desktop) => {
+  vm.runInContext("location.hostname = " + JSON.stringify(host) + "; location.port = " + JSON.stringify(port) + ";", ctx);
+  const n = vm.runInContext("mcpTunnelNote({ desktop: " + desktop + " })", ctx);
+  return n ? { text: flat(n).join(" "), hrefs: [], cls: n.className || "" } : { text: "", hrefs: [], cls: "" };
+};
+out.tLocal = tunnel("localhost", "8090", true);
+out.tUpper = tunnel("LOCALHOST", "8090", true);
+out.t127 = tunnel("127.0.1.1", "9000", true);
+out.tV6 = tunnel("[::1]", "8090", true);
+out.tNoPort = tunnel("localhost", "", true);
+out.tWin = tunnel("127.0.0.1", "8090", false);
+out.tLan = tunnel("192.168.1.20", "8090", true);
+out.tLocalDomain = tunnel("db.local", "8090", true);
+out.tPublic = tunnel("console.example.com", "443", true);
+out.tLookalike = tunnel("localhost.example.com", "8090", true);
+out.tNip = tunnel("127.0.0.1.nip.io", "8090", true);
 vm.runInContext("capsCache = { mcp: true, version: 'dev' };", ctx);
 ua("Mozilla/5.0 (Macintosh)"); out.devMac = draw("mcpInstallStep(mcpInstallArm())");
 console.log(JSON.stringify(out));
@@ -133,6 +150,30 @@ console.log(JSON.stringify(out));
 		}
 	}
 	has("windows", "There is no Windows installer yet")
+	// A page opened on this computer's own address was most likely reached
+	// through a tunnel: Claude can use the address only while it is open.
+	for _, k := range []string{"tLocal", "tUpper", "t127", "tV6", "tNoPort", "tWin"} {
+		has(k, "This address is on this computer")
+	}
+	has("tLocal", "only while that tunnel is open")
+	has("tLocal", "ssh -N -L 8090:localhost:8090")
+	has("tLocal", "AWS-StartPortForwardingSession")
+	has("tLocal", "localPortNumber=8090")
+	has("t127", "-L 9000:localhost:9000")
+	// No port in the address: the browser's default for the scheme, never
+	// the word undefined.
+	has("tNoPort", "-L 80:localhost:80")
+	lacks("tNoPort", "undefined")
+	// claude.ai runs on Anthropic's servers, which never reach a private
+	// address, tunnel or not.
+	has("tWin", "claude.ai in the browser cannot reach it")
+	lacks("tLocal", "cannot reach it")
+	// Not a tunnel signal: Claude Desktop reaches these directly.
+	for _, k := range []string{"tLan", "tLocalDomain", "tPublic", "tLookalike", "tNip"} {
+		if got[k].Text != "" {
+			t.Errorf("%s: a tunnel note on a host that is not this computer: %q", k, got[k].Text)
+		}
+	}
 	found := false
 	for _, h := range got["linux"].Hrefs {
 		found = found || strings.HasSuffix(h, "/releases/download/v0.108.1/dbtrail-linux-amd64.mcpb")

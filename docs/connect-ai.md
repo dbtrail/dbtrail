@@ -30,6 +30,9 @@ server, exactly like the web interface's Time-travel tab; without one the tool s
 > values). Beside them it draws the box Claude shows while installing, already
 > holding your address (and your token, the one time it is shown), and under
 > it says whether an AI client has reached DBTrail since DBTrail last started.
+> Opened through a tunnel (`ssh -L`, an SSM port forward) on `localhost`,
+> the page also reminds you that Claude can use that address only while the
+> tunnel stays open, with the commands to keep one up.
 
 The AI connects to your **web interface**, which serves an MCP endpoint at
 `/mcp`. If you already run `bintrail-console` (standalone `serve`, `watch`, or
