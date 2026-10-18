@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -269,6 +270,14 @@ type managedMCPToken struct {
 	// loadWarned de-duplicates the unreadable-file warning: once per broken
 	// state, not once per request (re-armed by a successful load).
 	loadWarned bool
+
+	// usedAt is when a value last made an /mcp request that reached a
+	// server, and usedDigest which value it was. Kept in memory only. info
+	// reports it only while usedDigest is still the current value, so a
+	// rotate or revoke (here or by another process) reads as unused instead
+	// of crediting the new value with the old one's connection.
+	usedDigest []byte
+	usedAt     time.Time
 }
 
 // initFromDisk seeds the state at New() time. Load errors degrade to
@@ -341,11 +350,22 @@ func (m *managedMCPToken) configured() bool {
 	return m.digest != nil
 }
 
-func (m *managedMCPToken) info() (createdAt string, readOnly bool, configured bool) {
+func (m *managedMCPToken) info() (createdAt string, readOnly bool, configured bool, lastUsed time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refreshLocked()
-	return m.createdAt, m.readOnly, m.digest != nil
+	if m.digest != nil && bytes.Equal(m.usedDigest, m.digest) {
+		lastUsed = m.usedAt
+	}
+	return m.createdAt, m.readOnly, m.digest != nil, lastUsed
+}
+
+// markUsed records that the value whose raw SHA-256 is digest made an /mcp
+// request that reached a server.
+func (m *managedMCPToken) markUsed(digest []byte, at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.usedDigest, m.usedAt = digest, at
 }
 
 // matches reports whether got is the managed token, comparing raw SHA-256

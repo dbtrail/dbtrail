@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -637,6 +638,9 @@ type Server struct {
 	// generate/rotate/revoke handlers so changes apply without a restart.
 	mcpTokenPath string
 	managedTok   managedMCPToken
+	// mcpStaticUsedAt is when the static token last made an /mcp request
+	// that reached a server (unix nanoseconds, 0 = not since start).
+	mcpStaticUsedAt atomic.Int64
 	// sessionProfiles caches per-(server, profile) RBAC rules for per-session
 	// data-profile enforcement (#1075). Inert in OSS (no session ever carries a
 	// profile); populated lazily on the first profiled request.

@@ -140,6 +140,10 @@ func (s *Server) mcpHandler() http.Handler {
 				"unknown server: use /mcp for the default server, or /mcp/{id-or-name} for a server from the console registry")
 			return
 		}
+		// Stamped here, after the server check: a right token on a wrong
+		// address reached nothing, and the MCP Server page must not call
+		// that connected.
+		s.markMCPUsed(r.Context(), time.Now())
 		// This request has authenticated. Clear the connection read deadline
 		// armed by the server-wide ReadTimeout (#848): a streamable-HTTP SSE
 		// GET hangs open by design, and net/http's background read hitting
@@ -161,6 +165,24 @@ func (s *Server) mcpHandler() http.Handler {
 		}
 		authed.ServeHTTP(w, r)
 	})
+}
+
+// markMCPUsed records which credential authenticated this /mcp request, for
+// the MCP Server page's "connected" line (GET /api/mcp-token).
+func (s *Server) markMCPUsed(ctx context.Context, at time.Time) {
+	ti := auth.TokenInfoFromContext(ctx)
+	if ti == nil {
+		return
+	}
+	if ti.UserID == "static" {
+		s.mcpStaticUsedAt.Store(at.UnixNano())
+		return
+	}
+	if h, ok := strings.CutPrefix(ti.UserID, "managed:"); ok {
+		if d, err := hex.DecodeString(h); err == nil {
+			s.managedTok.markUsed(d, at)
+		}
+	}
 }
 
 // mcpPolicyFrom returns the authenticated /mcp credential's grant cap from

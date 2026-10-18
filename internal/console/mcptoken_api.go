@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
 )
@@ -22,16 +23,31 @@ type mcpTokenStatusDTO struct {
 	// ReadOnly: the on-disk token file was written by a newer bintrail —
 	// the token authenticates, but generate/rotate/revoke refuse.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// LastUsedAt / StaticLastUsedAt: when the managed (the current value
+	// only) and the static token last made an /mcp request that reached a
+	// server. Kept in memory, so they are empty again after a restart;
+	// CountingSince is when this process started counting.
+	LastUsedAt       string `json:"last_used_at,omitempty"`
+	StaticLastUsedAt string `json:"static_last_used_at,omitempty"`
+	CountingSince    string `json:"counting_since,omitempty"`
 }
 
 func (s *Server) mcpTokenStatus() mcpTokenStatusDTO {
-	createdAt, readOnly, configured := s.managedTok.info()
-	return mcpTokenStatusDTO{
-		Static:    s.token != "",
-		Managed:   configured,
-		CreatedAt: createdAt,
-		ReadOnly:  readOnly,
+	createdAt, readOnly, configured, used := s.managedTok.info()
+	st := mcpTokenStatusDTO{
+		Static:        s.token != "",
+		Managed:       configured,
+		CreatedAt:     createdAt,
+		ReadOnly:      readOnly,
+		CountingSince: startedAtWire(s.startedAt),
 	}
+	if !used.IsZero() {
+		st.LastUsedAt = used.UTC().Format(time.RFC3339)
+	}
+	if n := s.mcpStaticUsedAt.Load(); n != 0 && s.token != "" {
+		st.StaticLastUsedAt = time.Unix(0, n).UTC().Format(time.RFC3339)
+	}
+	return st
 }
 
 // handleMCPTokenGet reports whether tokens are configured — never their
