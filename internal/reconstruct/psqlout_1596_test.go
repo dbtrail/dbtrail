@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -186,5 +187,24 @@ func TestPGFileName(t *testing.T) {
 	}
 	if err := pgFileCollisions([]string{"public.a", "public.b"}); err != nil {
 		t.Errorf("distinct names: %v", err)
+	}
+}
+
+// The offset counts what has reached the file and what is still buffered,
+// across a flush.
+func TestOffsetWriter(t *testing.T) {
+	var b bytes.Buffer
+	w := newOffsetWriter(&b, 16)
+	w.WriteString("abc")
+	if w.Offset() != 3 || b.Len() != 0 {
+		t.Fatalf("buffered: offset %d, written %d", w.Offset(), b.Len())
+	}
+	w.WriteString(strings.Repeat("x", 20))
+	if w.Offset() != 23 || b.Len() == 0 {
+		t.Fatalf("past a flush: offset %d, written %d", w.Offset(), b.Len())
+	}
+	w.Flush()
+	if w.Offset() != 23 || b.Len() != 23 {
+		t.Fatalf("flushed: offset %d, written %d", w.Offset(), b.Len())
 	}
 }

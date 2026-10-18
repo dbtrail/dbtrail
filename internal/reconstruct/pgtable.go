@@ -16,15 +16,15 @@ import (
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
-// errPGFullTableMydumper refuses a full-table PostgreSQL reconstruct to a
+// ErrPGFullTableMydumper refuses a full-table PostgreSQL reconstruct to a
 // mydumper dump: the dump is MySQL's, and so is every consumer of it (drill
 // restores it into a MySQL scratch). Parquet is the PostgreSQL output.
-var errPGFullTableMydumper = errors.New("a full-table reconstruct of a PostgreSQL table is written as a snapshot (`--output-format parquet`) " +
+var ErrPGFullTableMydumper = errors.New("a full-table reconstruct of a PostgreSQL table is written as a snapshot (`--output-format parquet`) " +
 	"or as SQL files psql loads (`--output-format psql`); a mydumper dump is MySQL's. Use single-row `reconstruct` or the shim `_flashback` to read one row")
 
-// errPsqlNeedsPostgres refuses the psql output on an index that records no
+// ErrPsqlNeedsPostgres refuses the psql output on an index that records no
 // PostgreSQL source: it is PostgreSQL's SQL.
-var errPsqlNeedsPostgres = errors.New("`--output-format psql` writes PostgreSQL's SQL, and this index records no PostgreSQL source; use `--output-format mydumper` for a MySQL dump")
+var ErrPsqlNeedsPostgres = errors.New("`--output-format psql` writes PostgreSQL's SQL, and this index records no PostgreSQL source; use `--output-format mydumper` for a MySQL dump")
 
 // pgTableInput is what ReconstructTable already found for a PostgreSQL table.
 type pgTableInput struct {

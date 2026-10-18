@@ -406,7 +406,12 @@ type TableReport struct {
 	// checks COUNT(*) against it.
 	RowsWritten int64
 	Files       []string
-	Duration    time.Duration
+	// PsqlCopy locates the data inside a psql output's one file, for a
+	// loader that cannot hand the whole file to psql: a COPY's rows follow
+	// its statement inline, which only psql's own reader splits off. Nil for
+	// every other output.
+	PsqlCopy *PsqlCopy
+	Duration time.Duration
 	// BinlogOnly is true when the table had no baseline at all and was
 	// recovered entirely from the binlog (#766's ErrNoBaseline fallback,
 	// reconstructBinlogOnly). Files is non-empty in this case too, so
@@ -841,7 +846,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// snapshot alone describes one table (#1596).
 	pgSource := query.SourceFlavor(db) == "postgres"
 	if psqlMode && !pgSource {
-		return nil, errPsqlNeedsPostgres
+		return nil, ErrPsqlNeedsPostgres
 	}
 	var resolver *metadata.Resolver
 	if pgSource {
@@ -1256,7 +1261,7 @@ func ReconstructTable(
 		// start from (#1596).
 		if query.SourceFlavor(db) == "postgres" {
 			if cfg.OutputFormat != OutputFormatParquet && cfg.OutputFormat != OutputFormatPsql {
-				return nil, errPGFullTableMydumper
+				return nil, ErrPGFullTableMydumper
 			}
 			return nil, fmt.Errorf("%s.%s has no snapshot at or before %s to rebuild it from; take one first (`bintrail-pg baseline`)",
 				schema, table, cfg.At.UTC().Format(time.RFC3339))
@@ -1304,7 +1309,7 @@ func ReconstructTable(
 	if bmeta.LSN != 0 || query.SourceFlavor(db) == "postgres" {
 		switch {
 		case cfg.OutputFormat != OutputFormatParquet && cfg.OutputFormat != OutputFormatPsql:
-			return nil, errPGFullTableMydumper
+			return nil, ErrPGFullTableMydumper
 		case cfg.pgRun == nil:
 			// A PostgreSQL snapshot over an index that records no PostgreSQL
 			// stream (ReconstructTables reads the run's end only for one): there

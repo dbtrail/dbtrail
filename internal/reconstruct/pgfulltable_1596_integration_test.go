@@ -504,6 +504,18 @@ func TestReconstructTables_PGPsqlOutput(t *testing.T) {
 	if strings.Contains(got, "2\topen") {
 		t.Error("the deleted row is in the output")
 	}
+	// The report locates the rows by position, for a loader that cannot
+	// hand the file to psql.
+	copyLine := "COPY \"public\".\"orders\" (\"id\", \"status\") FROM stdin;\n"
+	pc := reps[0].PsqlCopy
+	if pc == nil || pc.Statement+";\n" != copyLine {
+		t.Fatalf("PsqlCopy = %+v", pc)
+	}
+	start := int64(strings.Index(got, copyLine) + len(copyLine))
+	end := int64(strings.LastIndex(got, "\\.\n"))
+	if pc.DataStart != start || pc.DataEnd != end || strings.Count(got[pc.DataStart:pc.DataEnd], "\n") != 3 {
+		t.Errorf("PsqlCopy = %+v, want data [%d, %d): %q", pc, start, end, got[pc.DataStart:pc.DataEnd])
+	}
 	if entries, _ := os.ReadDir(root); len(entries) != 1 {
 		t.Errorf("a psql run published a snapshot: %v", entries)
 	}
@@ -521,7 +533,7 @@ func TestReconstructTables_PsqlNeedsPostgres(t *testing.T) {
 		IndexDSN: testutil.BaseDSN() + "/" + dbName, BaselineSrc: t.TempDir(), Tables: []string{"shop.orders"},
 		At: time.Now().UTC(), OutputDir: t.TempDir(), OutputFormat: reconstruct.OutputFormatPsql,
 	})
-	if err == nil || !strings.Contains(err.Error(), "records no PostgreSQL source") {
+	if !errors.Is(err, reconstruct.ErrPsqlNeedsPostgres) {
 		t.Fatalf("err = %v", err)
 	}
 }

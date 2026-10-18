@@ -130,12 +130,12 @@ func TestDrillTable_verdicts(t *testing.T) {
 		return db
 	}
 
-	got := drillTable(context.Background(), newDB(t, 3), dir, rep())
+	got := drillTable(context.Background(), &mysqlDrillTarget{db: newDB(t, 3)}, dir, rep())
 	if got.Status != "pass" || got.RowsLoaded != 3 || got.Error != "" {
 		t.Fatalf("matching count must pass: %+v", got)
 	}
 
-	got = drillTable(context.Background(), newDB(t, 2), dir, rep())
+	got = drillTable(context.Background(), &mysqlDrillTarget{db: newDB(t, 2)}, dir, rep())
 	if got.Status != "fail" || !strings.Contains(got.Error, "loaded 2 rows, dump wrote 3") {
 		t.Fatalf("count mismatch must fail with both numbers: %+v", got)
 	}
@@ -148,7 +148,7 @@ func TestDrillTable_verdicts(t *testing.T) {
 	defer db.Close()
 	r := rep()
 	r.BinlogOnly = true
-	got = drillTable(context.Background(), db, dir, r)
+	got = drillTable(context.Background(), &mysqlDrillTarget{db: db}, dir, r)
 	if got.Status != "fail" || !got.BinlogOnly || !strings.Contains(got.Error, "baseline") {
 		t.Fatalf("binlog-only must fail without loading: %+v", got)
 	}

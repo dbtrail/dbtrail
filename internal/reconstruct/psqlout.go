@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -282,7 +283,8 @@ func mergeBaselineIntoPsql(ctx context.Context, in mergeInput, rep *TableReport)
 			os.Remove(f.Name())
 		}
 	}()
-	w := bufio.NewWriterSize(f, 1<<20)
+	w := newOffsetWriter(f, 1<<20)
+	offset := w.Offset
 	fmt.Fprintf(w, "-- %s as of %s, rebuilt by bintrail from the snapshot of %s and the changes after it.\n",
 		pgCommentText(name), in.SnapshotAt.UTC().Format(time.RFC3339), in.SourceBaseline.Time.UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "-- Load with: psql -v ON_ERROR_STOP=1 -f '%s'\n", pgCommentText(strings.ReplaceAll(file, "'", `'\''`)))
@@ -292,7 +294,9 @@ func mergeBaselineIntoPsql(ctx context.Context, in mergeInput, rep *TableReport)
 	w.WriteString("BEGIN;\n")
 	w.WriteString(settings)
 	w.WriteString(create)
-	fmt.Fprintf(w, "COPY %s (%s) FROM stdin;\n", name, strings.Join(quoted, ", "))
+	copyStmt := fmt.Sprintf("COPY %s (%s) FROM stdin", name, strings.Join(quoted, ", "))
+	w.WriteString(copyStmt + ";\n")
+	dataStart := offset()
 
 	fields := make([]string, len(colNames))
 	var written int64
@@ -323,6 +327,7 @@ func mergeBaselineIntoPsql(ctx context.Context, in mergeInput, rep *TableReport)
 	if err != nil {
 		return err
 	}
+	dataEnd := offset()
 	w.WriteString("\\.\n")
 	w.WriteString(pgSetSequences(in.Schema, in.Table, rel))
 	w.WriteString("COMMIT;\n")
@@ -345,5 +350,42 @@ func mergeBaselineIntoPsql(ctx context.Context, in mergeInput, rep *TableReport)
 	rep.DeletesSkipped = stats.DeletesSkipped
 	rep.RowsWritten = written
 	rep.Files = []string{file}
+	rep.PsqlCopy = &PsqlCopy{Statement: copyStmt, DataStart: dataStart, DataEnd: dataEnd}
 	return nil
+}
+
+// PsqlCopy is where a psql output file's COPY sits: Statement is the COPY
+// (without its semicolon), and the bytes [DataStart, DataEnd) are its rows,
+// ending in a newline unless there are none. Before DataStart is the SQL that
+// runs ahead of it, ending in the statement's own line; from DataEnd come the
+// end-of-data line `\.` and the SQL that runs after. Found by position, not by
+// reading the file: a default's text can hold a line that looks like either.
+type PsqlCopy struct {
+	Statement          string
+	DataStart, DataEnd int64
+}
+
+// offsetWriter is a buffered writer that knows how many bytes it has been
+// given: those already passed down plus those still buffered.
+type offsetWriter struct {
+	*bufio.Writer
+	counted *countingWriter
+}
+
+func newOffsetWriter(w io.Writer, size int) offsetWriter {
+	c := &countingWriter{w: w}
+	return offsetWriter{Writer: bufio.NewWriterSize(c, size), counted: c}
+}
+
+func (o offsetWriter) Offset() int64 { return o.counted.n + int64(o.Buffered()) }
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }

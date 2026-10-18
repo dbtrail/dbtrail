@@ -11,12 +11,10 @@ import (
 	"strings"
 	"time"
 
-	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
-	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
@@ -298,23 +296,13 @@ func runDrill(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := cmd.Context()
-	tcfg, err := drivermysql.ParseDSN(drlTargetDSN)
+	target, err := openDrillTarget(ctx, drlTargetDSN)
 	if err != nil {
-		return fmt.Errorf("invalid --target-dsn: %w", err)
-	}
-	// A real baseline's -schema.sql is VERBATIM mydumper output: a /*!…*/
-	// SET preamble plus the CREATE TABLE — several statements in one file.
-	// The load connection must accept that blob whole; without this every
-	// drill against a real baseline dies on the schema file with a 1064.
-	tcfg.MultiStatements = true
-	target, err := config.Connect(tcfg.FormatDSN())
-	if err != nil {
-		return fmt.Errorf("connect to --target-dsn: %w", err)
+		return err
 	}
 	defer target.Close()
-	// Fail BEFORE the expensive reconstruct, and before anything touches the
-	// target.
-	if err := drillTargetEmpty(ctx, target, schemas); err != nil {
+
+	if err := target.Empty(ctx, schemas); err != nil {
 		return err
 	}
 
@@ -340,6 +328,9 @@ func runDrill(cmd *cobra.Command, args []string) error {
 		Tables:      tables,
 		At:          at,
 		OutputDir:   outDir,
+		// The format the target loads: a mydumper dump into MySQL, psql's
+		// SQL into PostgreSQL.
+		OutputFormat: target.OutputFormat(),
 		// Each chunk is applied to the scratch as ONE statement, so it must
 		// fit the target's max_allowed_packet. Chunks can overshoot by one
 		// row tuple (rotation triggers after the threshold), so the ~48MiB
@@ -352,6 +343,15 @@ func runDrill(cmd *cobra.Command, args []string) error {
 		DuckDBTuning:       duckTuning,
 	})
 	if err != nil {
+		if derr := drillReconstructError(err); derr != nil {
+			// Every table was refused before writing: nothing to keep.
+			if tempDir {
+				if rmErr := os.RemoveAll(outDir); rmErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not remove temp dump dir %s: %v\n", outDir, rmErr)
+				}
+			}
+			return derr
+		}
 		if tempDir {
 			// Keep the partial output for inspection — a failed drill IS the
 			// signal the command exists to produce.
@@ -404,7 +404,7 @@ func runDrill(cmd *cobra.Command, args []string) error {
 // drillTable runs one table's load-and-check half and produces its verdict —
 // extracted so the verdict wiring (fail-by-default, binlog-only refusal,
 // count comparison) is unit-testable without a real reconstruct.
-func drillTable(ctx context.Context, target *sql.DB, outDir string, rep *reconstruct.TableReport) drillTableResult {
+func drillTable(ctx context.Context, target DrillTarget, outDir string, rep *reconstruct.TableReport) drillTableResult {
 	res := drillTableResult{
 		Schema:             rep.Schema,
 		Table:              rep.Table,
@@ -421,15 +421,14 @@ func drillTable(ctx context.Context, target *sql.DB, outDir string, rep *reconst
 		return res
 	}
 	loadStart := time.Now()
-	if err := drillLoadTable(ctx, target, outDir, rep); err != nil {
+	if err := target.Load(ctx, outDir, rep); err != nil {
 		res.Error = err.Error()
 		res.LoadSeconds = time.Since(loadStart).Seconds()
 		return res
 	}
 	res.LoadSeconds = time.Since(loadStart).Seconds()
-	var loaded int64
-	if err := target.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM `"+rep.Schema+"`.`"+rep.Table+"`").Scan(&loaded); err != nil {
+	loaded, err := target.Count(ctx, rep.Schema, rep.Table)
+	if err != nil {
 		res.Error = fmt.Sprintf("count loaded rows: %v", err)
 		return res
 	}

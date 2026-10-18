@@ -58,7 +58,7 @@ func TestReconstructTable_pgBaselineRemediation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the PG-not-supported error, got nil")
 	}
-	if !errors.Is(err, errPGFullTableMydumper) {
+	if !errors.Is(err, ErrPGFullTableMydumper) {
 		t.Fatalf("PG baseline got the wrong error: %v", err)
 	}
 	if strings.Contains(err.Error(), "re-run `bintrail baseline`") {
@@ -114,7 +114,7 @@ func TestReconstructTable_pgNoBaselineRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the PG no-baseline refusal, got nil")
 	}
-	if !errors.Is(err, errPGFullTableMydumper) {
+	if !errors.Is(err, ErrPGFullTableMydumper) {
 		t.Fatalf("PG no-baseline reconstruct got the wrong error: %v", err)
 	}
 	if merr := mock.ExpectationsWereMet(); merr != nil {
