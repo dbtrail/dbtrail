@@ -29,6 +29,13 @@ type fakeServer struct {
 	killed  map[uint64]chan struct{}
 
 	idErr error // CONNECTION_ID() fails when set
+	// hostFor names the server a new connection reaches (default "h1").
+	hostFor func(id uint64) string
+	// connectHook runs inside Connect's identity read (tests that cancel there).
+	idHook func(ctx context.Context) error
+	// killSent records every KILL QUERY the default KillFunc sent, with the
+	// host it reached.
+	killSent []string
 }
 
 func newFakeServer() *fakeServer {
@@ -77,13 +84,18 @@ func (c fakeConnector) Connect(context.Context) (driver.Conn, error) {
 	c.srv.nextID++
 	id := c.srv.nextID
 	c.srv.mu.Unlock()
-	return &fakeConn{srv: c.srv, id: id}, nil
+	host := "h1"
+	if c.srv.hostFor != nil {
+		host = c.srv.hostFor(id)
+	}
+	return &fakeConn{srv: c.srv, id: id, host: host}, nil
 }
 func (c fakeConnector) Driver() driver.Driver { return nil }
 
 type fakeConn struct {
 	srv    *fakeServer
 	id     uint64
+	host   string
 	closed bool
 }
 
@@ -97,11 +109,19 @@ func (c *fakeConn) Begin() (driver.Tx, error)             { return nil, errors.N
 // driver, it returns an error with the server still running it). "FAST"
 // returns two rows at once.
 func (c *fakeConn) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
-	if q == "SELECT CONNECTION_ID()" {
+	if q == threadQuery {
+		if c.srv.idHook != nil {
+			if err := c.srv.idHook(ctx); err != nil {
+				return nil, err
+			}
+		}
 		if c.srv.idErr != nil {
 			return nil, c.srv.idErr
 		}
-		return &fakeRows{vals: [][]driver.Value{{int64(c.id)}}, cols: []string{"id"}}, nil
+		return &fakeRows{vals: [][]driver.Value{{int64(c.id), []byte(c.host), int64(3306), int64(1)}}, cols: []string{"id", "h", "p", "s"}}, nil
+	}
+	if q == "BADCONN" {
+		return nil, driver.ErrBadConn
 	}
 	if len(args) > 0 {
 		return nil, driver.ErrSkip
@@ -122,13 +142,20 @@ func (c *fakeConn) run(ctx context.Context, q string) (driver.Rows, error) {
 	case <-killed:
 		return nil, &mysql.MySQLError{Number: 1317, Message: "Query execution was interrupted"}
 	case <-ctx.Done():
-		// The real driver closes the socket and returns; the server keeps
-		// running the statement. So does the fake: running stays set.
-		return nil, driver.ErrBadConn
+		// The real driver closes the socket and returns the context's
+		// error; the server keeps running the statement. So does the fake:
+		// running stays set.
+		return nil, ctx.Err()
 	}
 }
 
 func (c *fakeConn) ExecContext(ctx context.Context, q string, _ []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(q, "KILL QUERY ") {
+		c.srv.mu.Lock()
+		c.srv.killSent = append(c.srv.killSent, c.host+" "+q)
+		c.srv.mu.Unlock()
+		return driver.RowsAffected(0), nil
+	}
 	killed := c.srv.start(c.id, q)
 	select {
 	case <-killed:
@@ -190,10 +217,10 @@ func newHarness(t *testing.T, opts ...Option) *harness {
 	logger := slog.New(slog.NewTextHandler(lockedWriter{&logMu, h.logs}, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	base := []Option{
 		WithLogger(logger),
-		WithKillFunc(func(_ context.Context, id uint64) error {
-			hit := h.srv.kill(id)
+		WithKillFunc(func(_ context.Context, t Thread) error {
+			hit := h.srv.kill(t.ID)
 			h.mu.Lock()
-			h.kills = append(h.kills, killRecord{id, hit})
+			h.kills = append(h.kills, killRecord{t.ID, hit})
 			h.mu.Unlock()
 			return nil
 		}),
@@ -383,8 +410,9 @@ func TestKilledConnIsDiscarded(t *testing.T) {
 	cancel()
 	<-done
 	killedID := h.killList()[0].id
-	var id int64
-	if err := h.db.QueryRowContext(context.Background(), "SELECT CONNECTION_ID()").Scan(&id); err != nil {
+	var id, port, sid int64
+	var host string
+	if err := h.db.QueryRowContext(context.Background(), threadQuery).Scan(&id, &host, &port, &sid); err != nil {
 		t.Fatal(err)
 	}
 	if uint64(id) == killedID {
@@ -394,7 +422,7 @@ func TestKilledConnIsDiscarded(t *testing.T) {
 
 func TestConnValidityAfterKill(t *testing.T) {
 	srv := newFakeServer()
-	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, uint64) error { return nil }))
+	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, Thread) error { return nil }))
 	dc, err := c.Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -417,7 +445,7 @@ func TestConnValidityAfterKill(t *testing.T) {
 // operator gets one warning.
 func TestKillRefusedLogsWarningAndReturns(t *testing.T) {
 	var h *harness
-	h = newHarness(t, WithKillFunc(func(context.Context, uint64) error {
+	h = newHarness(t, WithKillFunc(func(context.Context, Thread) error {
 		return &mysql.MySQLError{Number: 1095, Message: "You are not owner of thread 7"}
 	}))
 	for range 3 {
@@ -450,7 +478,7 @@ func TestKillRefusedLogsWarningAndReturns(t *testing.T) {
 func TestKillHangsIsBounded(t *testing.T) {
 	h := newHarness(t,
 		WithKillTimeout(100*time.Millisecond),
-		WithKillFunc(func(ctx context.Context, _ uint64) error { <-ctx.Done(); return ctx.Err() }))
+		WithKillFunc(func(ctx context.Context, _ Thread) error { <-ctx.Done(); return ctx.Err() }))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _, _ = h.db.QueryContext(ctx, "SLOW hang"); close(done) }()
@@ -467,7 +495,7 @@ func TestKillHangsIsBounded(t *testing.T) {
 }
 
 func TestNoSuchThreadIsQuiet(t *testing.T) {
-	h := newHarness(t, WithKillFunc(func(context.Context, uint64) error {
+	h := newHarness(t, WithKillFunc(func(context.Context, Thread) error {
 		return &mysql.MySQLError{Number: 1094, Message: "Unknown thread id"}
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -608,7 +636,7 @@ func (r *streamRows) Next(dest []driver.Value) error {
 	case <-r.killed:
 		return &mysql.MySQLError{Number: 1317, Message: "Query execution was interrupted"}
 	case <-r.ctx.Done():
-		return driver.ErrBadConn
+		return r.ctx.Err()
 	}
 }
 
@@ -616,7 +644,7 @@ func (r *streamRows) Next(dest []driver.Value) error {
 // gone); the server is still producing rows.
 func (r *streamRows) Close() error {
 	if r.ctx.Err() != nil {
-		return driver.ErrBadConn
+		return errors.New("invalid connection")
 	}
 	r.srv.stop(r.id)
 	return nil
@@ -648,8 +676,8 @@ func TestCancelWhileStreamingRowsKills(t *testing.T) {
 func TestEndAfterCancelKillsEvenBeforeWatcherRuns(t *testing.T) {
 	srv := newFakeServer()
 	var kills atomic.Int32
-	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, uint64) error { kills.Add(1); return nil }))
-	cn := &conn{c: c, id: 7, hasID: true}
+	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, Thread) error { kills.Add(1); return nil }))
+	cn := &conn{c: c, thread: Thread{ID: 7, Server: "h1:3306/1"}, hasID: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	st := &statement{cn: cn, ctx: ctx, stop: make(chan struct{}), exited: make(chan struct{})}
@@ -666,8 +694,8 @@ func TestEndAfterCancelKillsEvenBeforeWatcherRuns(t *testing.T) {
 func TestEndCompleteNeverKills(t *testing.T) {
 	srv := newFakeServer()
 	var kills atomic.Int32
-	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, uint64) error { kills.Add(1); return nil }))
-	cn := &conn{c: c, id: 7, hasID: true}
+	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, Thread) error { kills.Add(1); return nil }))
+	cn := &conn{c: c, thread: Thread{ID: 7, Server: "h1:3306/1"}, hasID: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	st := &statement{cn: cn, ctx: ctx, stop: make(chan struct{}), exited: make(chan struct{})}
@@ -684,12 +712,12 @@ func TestEndWaitsForInFlightKill(t *testing.T) {
 	srv := newFakeServer()
 	release := make(chan struct{})
 	entered := make(chan struct{})
-	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, uint64) error {
+	c := New(fakeConnector{srv}, WithKillFunc(func(context.Context, Thread) error {
 		close(entered)
 		<-release
 		return nil
 	}))
-	cn := &conn{c: c, id: 7, hasID: true}
+	cn := &conn{c: c, thread: Thread{ID: 7, Server: "h1:3306/1"}, hasID: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &statement{cn: cn, ctx: ctx, stop: make(chan struct{}), exited: make(chan struct{})}
 	go st.watch()
@@ -704,4 +732,71 @@ func TestEndWaitsForInFlightKill(t *testing.T) {
 	}
 	close(release)
 	<-ended
+}
+
+// The KILL connection is dialed anew; behind a name with several addresses
+// it can reach another server, where the same thread id is someone else's.
+// The default KillFunc checks the server before sending anything.
+func TestKillOnOtherServerIsRefused(t *testing.T) {
+	srv := newFakeServer()
+	// The statement ran on h1; the KILL connection lands on h2.
+	srv.hostFor = func(uint64) string { return "h2" }
+	c := New(fakeConnector{srv})
+	cn := &conn{c: c, thread: Thread{ID: 101, Server: "h1:3306/1"}, hasID: true}
+	err := c.dialAndKill(context.Background(), cn.thread)
+	if !errors.Is(err, errOtherServer) {
+		t.Fatalf("err = %v, want errOtherServer", err)
+	}
+	if len(srv.killSent) != 0 {
+		t.Fatalf("KILL sent on the other server: %v", srv.killSent)
+	}
+}
+
+// Same server: the default KillFunc sends KILL QUERY <id>.
+func TestKillOnSameServerIsSent(t *testing.T) {
+	srv := newFakeServer()
+	c := New(fakeConnector{srv})
+	if err := c.dialAndKill(context.Background(), Thread{ID: 101, Server: "h1:3306/1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.killSent) != 1 || srv.killSent[0] != "h1 KILL QUERY 101" {
+		t.Fatalf("killSent = %v, want one KILL QUERY 101 on h1", srv.killSent)
+	}
+}
+
+// A caller that gives up while a new connection reads its identity gets its
+// own error, no unguarded connection and no warning.
+func TestConnectCancelledDuringIDReadReturnsError(t *testing.T) {
+	srv := newFakeServer()
+	var logs bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.idHook = func(context.Context) error { cancel(); return errors.New("invalid connection") }
+	c := New(fakeConnector{srv}, WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	dc, err := c.Connect(ctx)
+	if err == nil || dc != nil {
+		t.Fatalf("Connect = %v, %v; want the context's error and no connection", dc, err)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a cancelled connect was reported as a guard failure:\n%s", logs.String())
+	}
+}
+
+// go-sql-driver returns ErrBadConn only when nothing was written: there is no
+// statement of ours to kill, and a KILL could hit an earlier one on the thread.
+func TestBadConnBeforeSendNoKill(t *testing.T) {
+	srv := newFakeServer()
+	cn := &conn{c: New(fakeConnector{srv}, WithKillFunc(func(context.Context, Thread) error {
+		t.Error("KILL sent for a statement that was never written")
+		return nil
+	})), thread: Thread{ID: 9, Server: "h1:3306/1"}, hasID: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The context ends while the driver fails before writing anything.
+	_, err := cn.guard(ctx, func() (driver.Rows, error) { cancel(); return nil, driver.ErrBadConn })
+	if !errors.Is(err, driver.ErrBadConn) {
+		t.Fatalf("err = %v", err)
+	}
+	if !cn.IsValid() {
+		t.Fatal("connection poisoned though nothing was killed")
+	}
 }

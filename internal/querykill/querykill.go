@@ -27,13 +27,22 @@
 //     request that asked for it goes away, and is stopped only when its own
 //     context ends.
 //
-// No KILL ever reaches another statement. The KILL is sent while the
-// statement still holds the connection: closing the rows waits for an
-// in-flight KILL, and database/sql cannot hand the connection to anyone else
-// until that close returns. A connection that had a KILL sent on its behalf
-// is then reported as bad (IsValid false, ResetSession ErrBadConn), so the
-// pool discards it: its thread id can only ever have belonged to our
+// A KILL never reaches another statement on the same server. The KILL is
+// sent while the statement still holds the connection: closing the rows waits
+// for an in-flight KILL, and database/sql cannot hand the connection to anyone
+// else until that close returns. A connection that had a KILL sent on its
+// behalf is then reported as bad (IsValid false, ResetSession ErrBadConn), so
+// the pool discards it: its thread id can only ever have belonged to our
 // statement, or to nothing.
+//
+// Nor on another server: thread ids are only unique per server, and the
+// connection that carries the KILL is dialed anew, so behind a DNS name with
+// several addresses or a load balancer it can land elsewhere. Each connection
+// therefore records the server it reached (@@hostname, @@port, @@server_id),
+// and the KILL connection checks it reached the same one before sending
+// anything. What this cannot see is a proxy that multiplexes client sessions
+// over backend connections: there CONNECTION_ID() names whatever the proxy
+// answers for, and the guard is only as good as the proxy's own KILL.
 package querykill
 
 import (
@@ -65,9 +74,20 @@ const erNoSuchThread = 1094
 // seconds.
 const warnEvery = time.Minute
 
-// KillFunc sends KILL QUERY id to the server. It is the test seam; the
-// default dials a new connection from the wrapped connector.
-type KillFunc func(ctx context.Context, id uint64) error
+// Thread names one connection on one server: its CONNECTION_ID() and the
+// server it was opened on.
+type Thread struct {
+	ID     uint64
+	Server string // "hostname:port/server_id" as the server reports it
+}
+
+// errOtherServer is the KILL connection reaching a server other than the
+// statement's.
+var errOtherServer = errors.New("the connection opened to send KILL QUERY reached a different server than the statement's; nothing was killed")
+
+// KillFunc sends KILL QUERY for t. It is the test seam; the default dials a
+// new connection from the wrapped connector and checks it reached t.Server.
+type KillFunc func(ctx context.Context, t Thread) error
 
 // Connector is a driver.Connector whose connections kill their own abandoned
 // reads on the server. Build it with New.
@@ -77,8 +97,21 @@ type Connector struct {
 	timeout time.Duration
 	log     *slog.Logger
 
-	lastWarn atomic.Int64 // unix nanos of the last KILL-failure warning
-	idWarned atomic.Bool
+	killWarn limiter // KILL failures
+	idWarn   limiter // CONNECTION_ID() failures
+}
+
+// limiter lets one warning through per warnEvery; the rest go to Debug.
+type limiter struct{ last atomic.Int64 }
+
+func (l *limiter) log(lg *slog.Logger, msg string, args ...any) {
+	now := time.Now().UnixNano()
+	last := l.last.Load()
+	if (last != 0 && now-last < int64(warnEvery)) || !l.last.CompareAndSwap(last, now) {
+		lg.Debug(msg, args...)
+		return
+	}
+	lg.Warn(msg, args...)
 }
 
 // Option tunes a Connector.
@@ -131,36 +164,59 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, err
 	}
 	cn := &conn{inner: inner, c: c}
-	id, err := readConnectionID(ctx, inner)
+	t, err := readThread(ctx, inner)
 	if err != nil {
-		if c.idWarned.CompareAndSwap(false, true) {
-			c.log.Warn("index: could not read CONNECTION_ID(); a read abandoned by its caller will keep running on the server until it ends",
-				"error", err)
+		if ctx.Err() != nil {
+			// The caller gave up while the connection was being set up: the
+			// driver has closed it. Not a reason to warn about the guard.
+			inner.Close()
+			return nil, ctx.Err()
 		}
+		c.idWarn.log(c.log, "index: could not read CONNECTION_ID(); a read abandoned by its caller on this connection will keep running on the server until it ends",
+			"error", err)
 		return cn, nil
 	}
-	cn.id, cn.hasID = id, true
+	cn.thread, cn.hasID = t, true
 	return cn, nil
 }
 
-func readConnectionID(ctx context.Context, c driver.Conn) (uint64, error) {
+// threadQuery reads the connection's id and the server it reached. Every
+// part exists on MySQL 5.7+ and MariaDB.
+const threadQuery = "SELECT CONNECTION_ID(), @@hostname, @@port, @@server_id"
+
+func readThread(ctx context.Context, c driver.Conn) (Thread, error) {
 	q, ok := c.(driver.QueryerContext)
 	if !ok {
-		return 0, errors.New("driver connection cannot run a query")
+		return Thread{}, errors.New("driver connection cannot run a query")
 	}
-	rows, err := q.QueryContext(ctx, "SELECT CONNECTION_ID()", nil)
+	rows, err := q.QueryContext(ctx, threadQuery, nil)
 	if err != nil {
-		return 0, err
+		return Thread{}, err
 	}
 	defer rows.Close()
 	dest := make([]driver.Value, len(rows.Columns()))
-	if len(dest) != 1 {
-		return 0, fmt.Errorf("CONNECTION_ID() returned %d columns", len(dest))
+	if len(dest) != 4 {
+		return Thread{}, fmt.Errorf("%s returned %d columns", threadQuery, len(dest))
 	}
 	if err := rows.Next(dest); err != nil {
-		return 0, fmt.Errorf("CONNECTION_ID(): %w", err)
+		return Thread{}, fmt.Errorf("%s: %w", threadQuery, err)
 	}
-	switch v := dest[0].(type) {
+	id, err := positiveID(dest[0])
+	if err != nil {
+		return Thread{}, err
+	}
+	return Thread{ID: id, Server: fmt.Sprintf("%s:%s/%s", text(dest[1]), text(dest[2]), text(dest[3]))}, nil
+}
+
+func text(v driver.Value) string {
+	if b, ok := v.([]byte); ok {
+		return string(b)
+	}
+	return fmt.Sprint(v)
+}
+
+func positiveID(v driver.Value) (uint64, error) {
+	switch v := v.(type) {
 	case int64:
 		if v > 0 {
 			return uint64(v), nil
@@ -178,31 +234,38 @@ func readConnectionID(ctx context.Context, c driver.Conn) (uint64, error) {
 			return n, nil
 		}
 	}
-	return 0, fmt.Errorf("CONNECTION_ID() returned %v (%T)", dest[0], dest[0])
+	return 0, fmt.Errorf("CONNECTION_ID() returned %v (%T)", v, v)
 }
 
-func (c *Connector) dialAndKill(ctx context.Context, id uint64) error {
+func (c *Connector) dialAndKill(ctx context.Context, t Thread) error {
 	k, err := c.inner.Connect(ctx)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer k.Close()
+	here, err := readThread(ctx, k)
+	if err != nil {
+		return fmt.Errorf("identify the server: %w", err)
+	}
+	if here.Server != t.Server {
+		return fmt.Errorf("%w (statement on %s, KILL connection on %s)", errOtherServer, t.Server, here.Server)
+	}
 	ex, ok := k.(driver.ExecerContext)
 	if !ok {
 		return errors.New("driver connection cannot run a statement")
 	}
-	_, err = ex.ExecContext(ctx, "KILL QUERY "+strconv.FormatUint(id, 10), nil)
+	_, err = ex.ExecContext(ctx, "KILL QUERY "+strconv.FormatUint(t.ID, 10), nil)
 	return err
 }
 
-// killQuery sends the KILL for cn within the connector's budget. It never
+// killQuery sends the KILL for t within the connector's budget. It never
 // returns an error: the read it cleans up after has already failed for its
 // caller, and a KILL the server refuses must not turn that into a crash or a
-// hang. Failures are logged, at most once per warnEvery.
-func (c *Connector) killQuery(id uint64) {
+// hang. Failures are logged, one warning per warnEvery.
+func (c *Connector) killQuery(t Thread) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
-	err := c.kill(ctx, id)
+	err := c.kill(ctx, t)
 	if err == nil {
 		return
 	}
@@ -210,25 +273,16 @@ func (c *Connector) killQuery(id uint64) {
 	if errors.As(err, &me) && me.Number == erNoSuchThread {
 		return
 	}
-	now := time.Now().UnixNano()
-	last := c.lastWarn.Load()
-	if last != 0 && now-last < int64(warnEvery) {
-		c.log.Debug("index: KILL QUERY for an abandoned read failed", "connection_id", id, "error", err)
-		return
-	}
-	if !c.lastWarn.CompareAndSwap(last, now) {
-		return
-	}
-	c.log.Warn("index: could not stop an abandoned read on the server (KILL QUERY failed); it keeps running until it ends",
-		"connection_id", id, "error", err)
+	c.killWarn.log(c.log, "index: could not stop an abandoned read on the server (KILL QUERY failed); it keeps running until it ends",
+		"connection_id", t.ID, "error", err)
 }
 
 // conn wraps one physical connection.
 type conn struct {
-	inner driver.Conn
-	c     *Connector
-	id    uint64
-	hasID bool
+	inner  driver.Conn
+	c      *Connector
+	thread Thread
+	hasID  bool
 	// killed is set once a KILL was sent on this connection's behalf: from
 	// then on the pool must not reuse it (see the package doc).
 	killed atomic.Bool
@@ -334,7 +388,7 @@ func (cn *conn) CheckNamedValue(nv *driver.NamedValue) error {
 
 func (cn *conn) kill() {
 	cn.killed.Store(true)
-	cn.c.killQuery(cn.id)
+	cn.c.killQuery(cn.thread)
 }
 
 // guard runs one read under watch. run is the wrapped driver's own call.
@@ -348,10 +402,13 @@ func (cn *conn) guard(ctx context.Context, run func() (driver.Rows, error)) (dri
 	st := &statement{cn: cn, ctx: ctx, stop: make(chan struct{}), exited: make(chan struct{})}
 	go st.watch()
 	rows, err := run()
-	if errors.Is(err, driver.ErrSkip) {
-		// The driver declined before sending anything (bind args without
-		// client-side interpolation): database/sql retries as a prepared
-		// statement, which is guarded on its own.
+	if errors.Is(err, driver.ErrSkip) || errors.Is(err, driver.ErrBadConn) {
+		// The driver sent nothing: ErrSkip declines bind args without
+		// client-side interpolation (database/sql retries as a prepared
+		// statement, guarded on its own), and go-sql-driver returns
+		// ErrBadConn only when nothing was written. A KILL now could only
+		// hit an earlier statement still running on this thread, such as
+		// an abandoned write inside the same transaction.
 		st.end(true)
 		return nil, err
 	}
