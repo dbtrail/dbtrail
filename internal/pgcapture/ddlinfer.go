@@ -102,6 +102,11 @@ type DDLInference struct {
 	// decoded one. ok is false when there is none. An error stops the
 	// stream.
 	LastChange func(schema, table string, beforeLSN uint64) (lsn uint64, at time.Time, ok bool, err error)
+	// Stamps reads the commit times of a table's catalog rows, to date an
+	// inferred change exactly (ddlinstant.go). nil: never exact (the server
+	// has track_commit_timestamp off). An error is said once and leaves the
+	// row at or before; it never stops the stream.
+	Stamps func(oid uint32) (CatalogStamps, error)
 }
 
 // WithDDLInference turns DDL inference on. It panics on a missing resolver,
@@ -212,6 +217,10 @@ type inferState struct {
 	cfg    DDLInference
 	byOID  map[uint32]*knownRel
 	legacy map[relName][]ShapeColumn
+	// stampsWarnedAt is when a failing stamp read was last said, and
+	// stampsFailed how many failed since (stampsFor).
+	stampsWarnedAt time.Time
+	stampsFailed   int
 }
 
 func newInferState(cfg DDLInference) *inferState {
@@ -328,11 +337,20 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 				if err != nil {
 					return nil, err
 				}
+				st, stamped := s.stampsFor(oid, warn)
 				if renamed {
-					out = append(out, renameEvent(oid, prev.name, n, "", low, high))
+					var exact *time.Time
+					if stamped {
+						exact = st.renameInstant(n, cols, low, high)
+					}
+					out = append(out, renameEvent(oid, prev.name, n, "", low, high, exact))
 				}
 				if altered {
-					out = append(out, alterEvent(oid, n, prev.cols, cols, "", low, high))
+					var exact *time.Time
+					if stamped {
+						exact = st.alterInstant(n, prev.cols, cols, low, high)
+					}
+					out = append(out, alterEvent(oid, n, prev.cols, cols, "", low, high, exact))
 				}
 			}
 			if renamed || altered {
@@ -377,13 +395,13 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 		}
 		if facts.Exists {
 			out = append(out, renameEvent(holder, n, relName{facts.Schema, facts.Table},
-				" (the new name is the one in the current catalog, which can be later than this point: the table was renamed at or before here, and may have been renamed again since)", low, high))
+				" (the new name is the one in the current catalog, which can be later than this point: the table was renamed at or before here, and may have been renamed again since)", low, high, nil))
 		} else {
 			out = append(out, ddlEvent(event.DDLDropTable, holder, n, nil,
 				fmt.Sprintf("DROP TABLE %s (its name now belongs to a new table and the old one is gone from the current catalog: dropped here, or renamed here and dropped since)", n),
-				low, high))
+				low, high, nil))
 		}
-		c, err := s.createEvent(oid, n, " under a name that belonged to another table", high)
+		c, err := s.createEvent(oid, n, cols, " under a name that belonged to another table", high, warn)
 		if err != nil {
 			return nil, err
 		}
@@ -398,7 +416,7 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 				return nil, err
 			}
 			out = append(out, alterEvent(oid, n, lc, cols,
-				" (the earlier shape was stored without the table's identity, so this could also be a drop and a create)", low, high))
+				" (the earlier shape was stored without the table's identity, so this could also be a drop and a create)", low, high, nil))
 		}
 		return out, nil
 	}
@@ -406,7 +424,7 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 	if s.cfg.StartOIDs[oid] || !inScope(n) {
 		return nil, nil // version zero
 	}
-	c, err := s.createEvent(oid, n, "", high)
+	c, err := s.createEvent(oid, n, cols, "", high, warn)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +468,7 @@ func (s *inferState) lowFor(k *knownRel, prev version, high bound) (*bound, erro
 	return &bound{pglogrepl.LSN(lsn), at}, nil
 }
 
-func (s *inferState) createEvent(oid uint32, n relName, why string, high bound) (event.Event, error) {
+func (s *inferState) createEvent(oid uint32, n relName, cols []ShapeColumn, why string, high bound, warn func(msg string, args ...any)) (event.Event, error) {
 	facts, err := s.cfg.Lookup(oid)
 	if err != nil {
 		return event.Event{}, fmt.Errorf("pgcapture: catalog lookup for relation OID %d (%s): %w", oid, n, err)
@@ -464,10 +482,14 @@ func (s *inferState) createEvent(oid uint32, n relName, why string, high bound) 
 	} else {
 		text += " (first seen in the stream: created, or added to the publication)"
 	}
-	return ddlEvent(event.DDLCreateTable, oid, n, nil, text, nil, high), nil
+	var exact *time.Time
+	if st, ok := s.stampsFor(oid, warn); ok {
+		exact = st.createInstant(n, cols, high)
+	}
+	return ddlEvent(event.DDLCreateTable, oid, n, nil, text, nil, high, exact), nil
 }
 
-func renameEvent(oid uint32, from, to relName, note string, low *bound, high bound) event.Event {
+func renameEvent(oid uint32, from, to relName, note string, low *bound, high bound, exact *time.Time) event.Event {
 	text := fmt.Sprintf("RENAME TABLE %s TO %s", from, to)
 	if from.schema != to.schema {
 		text += " (ALTER TABLE ... SET SCHEMA"
@@ -477,11 +499,11 @@ func renameEvent(oid uint32, from, to relName, note string, low *bound, high bou
 		text += ")"
 	}
 	text += note
-	return ddlEvent(event.DDLRenameTable, oid, to, []event.DDLTable{{Schema: from.schema, Table: from.table}, {Schema: to.schema, Table: to.table}}, text, low, high)
+	return ddlEvent(event.DDLRenameTable, oid, to, []event.DDLTable{{Schema: from.schema, Table: from.table}, {Schema: to.schema, Table: to.table}}, text, low, high, exact)
 }
 
-func alterEvent(oid uint32, n relName, before, after []ShapeColumn, note string, low *bound, high bound) event.Event {
-	return ddlEvent(event.DDLAlterTable, oid, n, nil, fmt.Sprintf("ALTER TABLE %s: %s%s", n, describeShapeDiff(before, after), note), low, high)
+func alterEvent(oid uint32, n relName, before, after []ShapeColumn, note string, low *bound, high bound, exact *time.Time) event.Event {
+	return ddlEvent(event.DDLAlterTable, oid, n, nil, fmt.Sprintf("ALTER TABLE %s: %s%s", n, describeShapeDiff(before, after), note), low, high, exact)
 }
 
 // describeShapeDiff says, in words, how two column lists differ.
@@ -564,15 +586,23 @@ func typeName(oid uint32, mod int32) string {
 }
 
 // ddlEvent builds one inferred schema_changes row. Its stream position is the
-// upper bound; its timestamp is the lower bound when there is one, else the
-// upper bound. The query text starts with a machine-readable marker.
-func ddlEvent(kind event.DDLKind, oid uint32, n relName, tables []event.DDLTable, text string, low *bound, high bound) event.Event {
+// upper bound; its timestamp is the exact instant when the catalog gave one
+// (ddlinstant.go), else the lower bound when there is one, else the upper
+// bound. The query text starts with a machine-readable marker; the bracket
+// stays in it with an exact instant, and is what the reconstruct guard places
+// the row by.
+func ddlEvent(kind event.DDLKind, oid uint32, n relName, tables []event.DDLTable, text string, low *bound, high bound, exact *time.Time) event.Event {
 	lowText, ts := "none", high.at
 	if low != nil {
 		lowText, ts = fmtBound(*low), low.at
 	}
-	marker := fmt.Sprintf("%s oid=%d; instant=at-or-before; low=%s; high=%s */ ",
-		event.InferredDDLPrefix, oid, lowText, fmtBound(high))
+	instant := "instant=at-or-before"
+	if exact != nil {
+		ts = exact.UTC()
+		instant = "instant=exact; at=" + ts.Format(time.RFC3339Nano)
+	}
+	marker := fmt.Sprintf("%s oid=%d; %s; low=%s; high=%s */ ",
+		event.InferredDDLPrefix, oid, instant, lowText, fmtBound(high))
 	lsn := high.lsn.String()
 	return event.Event{
 		BinlogFile: lsn,

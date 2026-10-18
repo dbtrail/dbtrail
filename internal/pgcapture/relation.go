@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -210,4 +212,101 @@ func queryRelationFacts(ctx context.Context, conn *pgx.Conn, oid uint32) (Relati
 	}
 	f.Exists = true
 	return f, nil
+}
+
+// stampsReader is DDLInference.Stamps over a connection of its own, or nil
+// when the server does not record commit times (track_commit_timestamp off)
+// or they cannot be read: an inferred change is then dated at or before, as
+// without this. Its own connection, because a read that times out closes the
+// connection it ran on, and the catalog reads capture needs must not share
+// that with an optional one. close releases it.
+func stampsReader(startupCtx, ctx context.Context, dsn string, logger *slog.Logger) (read func(uint32) (CatalogStamps, error), close func()) {
+	none := func() {}
+	conn, err := pgx.Connect(startupCtx, dsn)
+	if err != nil {
+		logger.Warn("pgcapture: cannot open a connection to read when schema changes committed; inferred schema changes are dated at or before the change that shows them",
+			"error", err)
+		return nil, none
+	}
+	closeConn := func() { _ = conn.Close(context.Background()) }
+	var on string
+	if err := conn.QueryRow(startupCtx, "SELECT current_setting('track_commit_timestamp')").Scan(&on); err != nil {
+		logger.Warn("pgcapture: cannot read track_commit_timestamp; inferred schema changes are dated at or before the change that shows them",
+			"error", err)
+		closeConn()
+		return nil, none
+	}
+	if on != "on" {
+		logger.Info("pgcapture: track_commit_timestamp is not on, so inferred schema changes are dated at or before the change that shows them, not at their exact commit",
+			"setting", on)
+		closeConn()
+		return nil, none
+	}
+	return func(oid uint32) (CatalogStamps, error) {
+		if conn.IsClosed() {
+			return CatalogStamps{}, errors.New("pgcapture: the connection that reads commit times is closed")
+		}
+		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return queryCatalogStamps(qctx, conn, oid)
+	}, closeConn
+}
+
+const catalogStampsClassQuery = `SELECT n.nspname, c.relname,
+	pg_xact_commit_timestamp(c.xmin), pg_xact_commit_timestamp(t.xmin)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_type t ON t.oid = c.reltype
+WHERE c.oid = $1`
+
+const catalogStampsColumnsQuery = `SELECT attname, atttypid, atttypmod, attisdropped, attgenerated <> '',
+	attacl IS NOT NULL, pg_xact_commit_timestamp(xmin)
+FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 ORDER BY attnum`
+
+// queryCatalogStamps reads the commit times of oid's catalog rows
+// (CatalogStamps). No row = the OID no longer exists.
+func queryCatalogStamps(ctx context.Context, conn *pgx.Conn, oid uint32) (CatalogStamps, error) {
+	var st CatalogStamps
+	err := conn.QueryRow(ctx, catalogStampsClassQuery, oid).Scan(&st.Schema, &st.Table, &st.ClassAt, &st.TypeAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CatalogStamps{}, nil
+	}
+	if err != nil {
+		return CatalogStamps{}, fmt.Errorf("pgcapture: catalog commit times for relation OID %d: %w", oid, err)
+	}
+	rows, err := conn.Query(ctx, catalogStampsColumnsQuery, oid)
+	if err != nil {
+		return CatalogStamps{}, fmt.Errorf("pgcapture: catalog commit times of the columns of relation OID %d: %w", oid, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			c       CatalogColumn
+			dropped bool
+		)
+		if err := rows.Scan(&c.Name, &c.TypeOID, &c.TypeMod, &dropped, &c.Generated, &c.HasACL, &c.At); err != nil {
+			return CatalogStamps{}, fmt.Errorf("pgcapture: scan catalog commit times of relation OID %d: %w", oid, err)
+		}
+		if dropped {
+			if c.At != nil {
+				st.DroppedAt = append(st.DroppedAt, c.At.UTC())
+			}
+			continue
+		}
+		if c.At != nil {
+			u := c.At.UTC()
+			c.At = &u
+		}
+		st.Cols = append(st.Cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return CatalogStamps{}, fmt.Errorf("pgcapture: read catalog commit times of relation OID %d: %w", oid, err)
+	}
+	for _, p := range []**time.Time{&st.ClassAt, &st.TypeAt} {
+		if *p != nil {
+			u := (**p).UTC()
+			*p = &u
+		}
+	}
+	st.Exists = true
+	return st, nil
 }

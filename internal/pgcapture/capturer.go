@@ -190,6 +190,8 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		return queryColumnAttrs(qctx, queryConn, relationID)
 	}
 	opts := []DecoderOption{WithAttrResolver(attrResolver)}
+	stampsClose := func() {}
+	defer func() { stampsClose() }()
 	if c.cfg.LastChange != nil && c.cfg.LoadKnownShapes != nil {
 		opts = append(opts, inferenceOrWarn(func() (DDLInference, error) {
 			start, err := publicationOIDs(startupCtx, queryConn, c.cfg.Publication)
@@ -211,6 +213,8 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 			if err != nil {
 				return DDLInference{}, err
 			}
+			stamps, closeStamps := stampsReader(startupCtx, ctx, c.cfg.QueryDSN, c.logger)
+			stampsClose = closeStamps
 			return DDLInference{
 				Known:     known.Shapes,
 				Releases:  known.Releases,
@@ -221,6 +225,7 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 					return queryRelationFacts(qctx, queryConn, oid)
 				},
 				LastChange: c.cfg.LastChange,
+				Stamps:     stamps,
 			}, nil
 		}, c.logger)...)
 	}

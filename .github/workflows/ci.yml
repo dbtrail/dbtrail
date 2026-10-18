@@ -887,7 +887,7 @@ jobs:
             -e POSTGRES_DB=pgtest \
             -p 15432:5432 \
             "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}" \
-            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 -c track_commit_timestamp=on
           # Probe TCP from inside the container: during first-init the entrypoint
           # runs a temporary unix-socket-only server, so a TCP (-h 127.0.0.1)
           # pg_isready only succeeds once the REAL server is up — avoiding the
@@ -1013,7 +1013,7 @@ jobs:
             -e POSTGRES_DB=pgtest \
             -p 15432:5432 \
             "${TEST_IMAGES}/${{ matrix.image }}" \
-            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 -c track_commit_timestamp=on
           # Same in-container TCP probe as integration-postgres-source (the
           # postgis/pgvector images reuse the official postgres entrypoint,
           # first-init unix-socket-only phase included).

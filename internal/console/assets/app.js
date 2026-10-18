@@ -13968,7 +13968,9 @@ function scDisplay(c) {
         return m ? m[1].replace("T", " ").replace(/(\.\d+)?Z$/, " UTC") : "";
       };
       const low = at("low"), high = at("high");
-      const when = low ? "between " + low + " and " + high : "at or before " + high;
+      const exact = head.match(/\binstant=exact; at=([^;\s]+)/);
+      const when = exact ? "committed at " + exact[1].replace("T", " ").replace(/(\.\d+)?Z$/, " UTC")
+        : low ? "between " + low + " and " + high : "at or before " + high;
       out.title = out.stmt;
       out.stmt = "Inferred from the change stream, " + when + ". " + out.stmt.slice(end + 2).trim();
     }

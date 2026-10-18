@@ -174,3 +174,16 @@ func TestCascadeCoverageResult(t *testing.T) {
 		t.Errorf("detail should name child + action + parent, got %q", got.Detail)
 	}
 }
+
+// track_commit_timestamp is informational (#2441): it passes either way and
+// says what each value means for inferred schema changes.
+func TestCommitTimestampResult(t *testing.T) {
+	on := commitTimestampResult("on")
+	off := commitTimestampResult("off")
+	if on.Status != doctor.StatusPass || off.Status != doctor.StatusPass {
+		t.Fatalf("statuses %s / %s, want pass both", on.Status, off.Status)
+	}
+	if !strings.Contains(on.Detail, "exact commit time") || !strings.Contains(off.Detail, "at or before") || !strings.Contains(off.Detail, "track_commit_timestamp = on") {
+		t.Fatalf("details: %q / %q", on.Detail, off.Detail)
+	}
+}

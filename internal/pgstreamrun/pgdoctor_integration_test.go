@@ -83,6 +83,10 @@ func TestBuildPGReport_Integration(t *testing.T) {
 		if c := findCheck(t, r, "max_slot_wal_keep_size"); c.Status != doctor.StatusWarn && c.Status != doctor.StatusPass {
 			t.Errorf("max_slot_wal_keep_size = %s (%s), want warn (unlimited) or pass (bounded)", c.Status, c.Detail)
 		}
+		// Informational, whatever the setting.
+		if c := findCheck(t, r, "track_commit_timestamp"); c.Status != doctor.StatusPass {
+			t.Errorf("track_commit_timestamp = %s (%s), want pass", c.Status, c.Detail)
+		}
 		if r.Failed != 0 {
 			t.Errorf("healthy source has %d failed checks, want 0", r.Failed)
 		}

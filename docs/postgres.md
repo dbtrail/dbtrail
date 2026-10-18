@@ -874,8 +874,40 @@ starts with a marker carrying that range, for example:
 /* dbtrail: inferred from relation shape; oid=16411; instant=at-or-before; low=0/16B3748@2026-10-17T10:00:00Z; high=0/16B9A20@2026-10-17T10:20:00Z */ ALTER TABLE shop.orders: added note (text)
 ```
 
-The row's `detected_at` is the start of the range (the end, when the range has
-no start) and its stream position the end. `reconstruct` refuses a point in
+**The exact instant, when the server keeps commit times.** With
+`track_commit_timestamp = on` (a server setting that needs a restart; on
+managed PostgreSQL, check that your provider lets you set it; `bintrail-pg
+doctor` says whether it is on), bintrail-pg reads from the catalog when the
+statement that gave the table the shape the stream shows committed, and the
+marker says `instant=exact; at=<time>`, the range still beside it. When several
+changes fall in one range (a column added, then retyped), that is the last of
+them. It does so only where the catalog can prove it:
+
+- an added column, or a retyped one whose change rewrote the table, when the
+  column's catalog row and the table's still agree and the column has no
+  column-level grant (a later statement on that column, such as `SET
+  STATISTICS` or `SET NOT NULL`, or on the table, such as a `GRANT`, moves one
+  of them; a retype that does not rewrite the table, such as `varchar(10)` to
+  `varchar(20)`, is never exact);
+- a dropped column, whose catalog row is never written again;
+- a rename or a schema move, from the table's row type, which a later `GRANT`
+  or column change does not move;
+- a new table, from its row type, when the table's earliest column carries the
+  same time.
+
+Not caught, and read as the change's time: an `ALTER ... OWNER TO` later in the
+range for a rename, and one later statement that rewrites both a changed
+column and the table (a multi-part `ALTER`). The catalog must also show the
+table with the columns the stream does (when bintrail-pg is catching up past a
+later change, it does not), and the time must lie inside the range. Anything
+else stays "at or before". A renamed column is never exact. Reading the times
+uses a connection of its own and never stops capture: if the catalog cannot
+answer, bintrail-pg logs a warning (at most every ten minutes, with how many
+reads failed) and dates the rows by range.
+
+The row's `detected_at` is the exact instant when there is one; otherwise the
+start of the range (the end, when the range has no start). Its stream position
+is the end. `reconstruct` places an inferred row by its range either way. `reconstruct` refuses a point in
 time whose window overlaps the range of an inferred `DROP TABLE` or `RENAME
 TABLE`, since the table may or may not have changed yet at that point; the
 refusal says so and says which points in time can still be rebuilt. A

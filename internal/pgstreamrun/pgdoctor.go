@@ -22,7 +22,7 @@ const doctorTimeout = 30 * time.Second
 
 // dependentCheckNames are the checks BuildPGReport skips when wal_level is genuinely
 // not 'logical' — logical decoding is impossible, so they cannot meaningfully run.
-var dependentCheckNames = []string{"Publication coverage", "REPLICA IDENTITY FULL", "No UNLOGGED tables", "FK cascade-child coverage", "max_slot_wal_keep_size", "Replication slot health"}
+var dependentCheckNames = []string{"Publication coverage", "REPLICA IDENTITY FULL", "No UNLOGGED tables", "FK cascade-child coverage", "max_slot_wal_keep_size", "Replication slot health", commitTimestampCheckName}
 
 // PGDoctorConfig is the subset of stream settings a health check needs: a normal
 // (non-replication) connection to the source, the slot to inspect, and the
@@ -110,7 +110,32 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 	addCascadeCoverageCheck(ctx, r, conn, cfg.Publication)
 	addKeepSizeCheck(ctx, r, conn)
 	addSlotHealthCheck(ctx, r, conn, cfg.SlotName)
+	addCommitTimestampCheck(ctx, r, conn)
 	return r
+}
+
+const commitTimestampCheckName = "track_commit_timestamp"
+
+// addCommitTimestampCheck reports whether inferred schema changes can carry
+// their exact commit time (#2441). Informational: on or off, it passes, and a
+// read failure is a warning. The mapping is the pure commitTimestampResult.
+func addCommitTimestampCheck(ctx context.Context, r *doctor.Report, conn *pgx.Conn) {
+	var setting string
+	if err := conn.QueryRow(ctx, "SELECT current_setting('track_commit_timestamp')").Scan(&setting); err != nil {
+		r.Add(doctor.CheckResult{Name: commitTimestampCheckName, Status: doctor.StatusWarn, Detail: "could not read: " + err.Error()})
+		return
+	}
+	r.Add(commitTimestampResult(setting))
+}
+
+func commitTimestampResult(setting string) doctor.CheckResult {
+	if setting == "on" {
+		return doctor.CheckResult{Name: commitTimestampCheckName, Status: doctor.StatusPass,
+			Detail: "on: a schema change inferred from the stream carries its exact commit time where the catalog shows it"}
+	}
+	return doctor.CheckResult{Name: commitTimestampCheckName, Status: doctor.StatusPass,
+		Detail: setting + ": a schema change inferred from the stream is dated at or before the first change that shows it. " +
+			"Optional: track_commit_timestamp = on (a restart; settable in RDS and Aurora parameter groups) dates it exactly where the catalog shows it"}
 }
 
 // walLevelResult maps the CheckWALLevel outcome to its CheckResult and whether the

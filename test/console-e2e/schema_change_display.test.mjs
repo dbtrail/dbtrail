@@ -52,3 +52,11 @@ test("a PostgreSQL TRUNCATE shows its LSN and its statement", () => {
   assert.equal(d.pos, "LSN 0/19DF9E8");
   assert.equal(d.stmt, "TRUNCATE TABLE s.a");
 });
+
+test("an inferred row with an exact instant says when it committed", () => {
+  const q = "/* dbtrail: inferred from relation shape; oid=16411; instant=exact; at=2026-10-17T10:12:03.25Z; low=0/16B3748@2026-10-17T10:00:00Z; high=0/16B9A20@2026-10-17T10:20:00Z */ ALTER TABLE shop.orders: added note (text)";
+  const d = ctx.scDisplay({ binlog_file: "0/16B9A20", binlog_pos: 23829024, statement: q });
+  console.log(d.pos + " | " + d.stmt);
+  assert.equal(d.stmt, "Inferred from the change stream, committed at 2026-10-17 10:12:03 UTC. ALTER TABLE shop.orders: added note (text)");
+  assert.equal(d.title, q);
+});
