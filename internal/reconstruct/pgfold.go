@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -76,7 +77,19 @@ func checkPGFoldable(schema, table string, md baseline.DumpMetadata) (baseline.P
 // comparison: the baseline never holds one, and PostgreSQL 18 can stream it
 // (publish_generated_columns).
 func checkPGShape(schema, table string, rel baseline.PGRelation, floor, cut uint64, shapes []metadata.PGShape) error {
+	_, err := checkPGShapeKey(schema, table, rel, floor, cut, shapes)
+	return err
+}
+
+// checkPGShapeKey is checkPGShape, and returns the primary key every shape it
+// compared names (column names in table order): the key the changes in the
+// window were captured under. nil when no shape was compared. A key that
+// changed inside the window refuses: the changes before and after the
+// change name their rows by different columns.
+func checkPGShapeKey(schema, table string, rel baseline.PGRelation, floor, cut uint64, shapes []metadata.PGShape) ([]string, error) {
 	name := schema + "." + table
+	var key []string
+	keyed := false
 	for _, s := range shapes {
 		r := s.Relation
 		if r.SeenLSN >= cut && r.SeenLSN != 0 {
@@ -91,19 +104,36 @@ func checkPGShape(schema, table string, rel baseline.PGRelation, floor, cut uint
 			continue
 		}
 		if !mine {
-			return fmt.Errorf("%s: a different table (OID %d, the snapshot's is %d) held this name between the snapshot and the requested point: the table was dropped and created again; %s",
+			return nil, fmt.Errorf("%s: a different table (OID %d, the snapshot's is %d) held this name between the snapshot and the requested point: the table was dropped and created again; %s",
 				name, r.OID, rel.OID, pgRebaseline)
 		}
 		if !sameName {
-			return fmt.Errorf("%s: the table was renamed to %s.%s before the requested point; %s", name, r.Schema, r.Table, pgRebaseline)
+			return nil, fmt.Errorf("%s: the table was renamed to %s.%s before the requested point; %s", name, r.Schema, r.Table, pgRebaseline)
 		}
 		if diff := pgShapeDiff(rel.Columns, r.Columns); diff != "" {
-			return fmt.Errorf("%s: the table's columns as the change stream recorded them, from the snapshot up to the requested point, are not the snapshot's (%s). "+
+			return nil, fmt.Errorf("%s: the table's columns as the change stream recorded them, from the snapshot up to the requested point, are not the snapshot's (%s). "+
 				"A change made shortly before the snapshot that no write followed reads the same way; %s",
 				name, diff, pgRebaseline)
 		}
+		k := pgKeyOf(r.Columns)
+		if keyed && !slices.Equal(k, key) {
+			return nil, fmt.Errorf("%s: the table's primary key changed between the snapshot and the requested point (%s, then %s); %s",
+				name, strings.Join(key, ", "), strings.Join(k, ", "), pgRebaseline)
+		}
+		key, keyed = k, true
 	}
-	return nil
+	return key, nil
+}
+
+// pgKeyOf is the primary key a shape names, in table order.
+func pgKeyOf(cols []metadata.PGRelationColumn) []string {
+	k := []string{}
+	for _, c := range cols {
+		if c.IsPK {
+			k = append(k, c.Name)
+		}
+	}
+	return k
 }
 
 // inEffectAtFloor reports whether s, seen before floor, is what held its

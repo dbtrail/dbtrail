@@ -88,12 +88,11 @@ func retainEvent(ev *query.ResultRow) *query.ResultRow {
 //     reconstructed dump as the marker's own JSON — silent corruption.
 //     NOTE this is stricter than the map-level check it replaced: that one
 //     only saw the surviving last event per PK, this sees every event,
-//     including ones a later event overwrote. Harmless today because the
-//     marker is a PostgreSQL concept and full-table reconstruct refuses PG
-//     sources outright (#1596, gated in ReconstructTable) — so it cannot fire
-//     on a MySQL window at all. If that PG gate is ever lifted, revisit this:
-//     an overwritten event carrying a marker would then refuse a run whose
-//     OUTPUT would have been clean.
+//     including ones a later event overwrote. The marker is a PostgreSQL
+//     concept, so it cannot fire on a MySQL window. On a PostgreSQL fold
+//     (#1596, reconstructPGTable) an overwritten event carrying a marker
+//     refuses a run whose OUTPUT would have been clean: kept on purpose,
+//     loud rather than clever, and documented in docs/postgres.md.
 //   - #782: the change map is keyed by the BEFORE-image PK, so folding an
 //     UPDATE whose PK changed would duplicate, resurrect, or silently drop rows.
 //     Checking per event rather than over the finished map catches the
@@ -470,12 +469,13 @@ var foldWindow = foldEventWindow
 // two belts elsewhere rather than by the column types. pgcapture writes
 // StartPos == EndPos == the commit LSN for every row of a transaction
 // (internal/pgcapture/decoder.go), so a PG-sourced index holds rows a
-// since==until window would ADMIT; what keeps this sound is ReconstructTable's
-// PG refusal (#1596), which runs long before this is consulted. A MariaDB 11.4+
+// since==until window would ADMIT; what keeps this sound is that a PostgreSQL
+// table takes its own path before this is consulted (#1596,
+// reconstructPGTable), which uses pgFoldBounds.empty instead. A MariaDB 11.4+
 // row with a zero LogPos would underflow into a ~2^64 start_pos, which is why
 // the parser refuses to index one (#1117) — a belt that is prospective, so rows
 // an older build already wrote are not covered by it. Do not move this call
-// ahead of the PG gate, and do not reuse it where neither belt runs.
+// ahead of the PG branch, and do not reuse it where neither belt runs.
 //
 // This is not a rare corner. A refresh anchors on the previous backup's
 // coordinate and cuts at the newest indexed event, so any refresh that runs

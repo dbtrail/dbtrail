@@ -146,3 +146,21 @@ func parsePGFooter(t *testing.T, md map[string]string) baseline.DumpMetadata {
 	}
 	return baseline.DumpMetadata{LSN: lsn, PGDeltaSince: md[baseline.MetaKeyPGDeltaSince]}
 }
+
+// How far capture is behind the point, for the run's warning.
+func TestPGRunEndLagBehind(t *testing.T) {
+	at := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		run  pgRunEnd
+		want time.Duration
+	}{
+		{pgRunEnd{at: at, newestAt: at.Add(-time.Hour)}, time.Hour},
+		{pgRunEnd{at: at, newestAt: at}, 0},
+		{pgRunEnd{at: at, newestAt: at.Add(time.Hour)}, 0},
+		{pgRunEnd{at: at, none: true}, 0},
+	} {
+		if got := c.run.lagBehind(); got != c.want {
+			t.Errorf("%+v: lag %v, want %v", c.run, got, c.want)
+		}
+	}
+}

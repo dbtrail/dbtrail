@@ -53,7 +53,8 @@ the exit status is non-zero. A half-refreshed snapshot would be a set of tables
 from two different points in time under one anchor.
 
 Every full-table reconstruct limit applies (primary key required, a PK-changing
-UPDATE in the window refuses, PostgreSQL sources are out of scope).
+UPDATE in the window refuses). On a PostgreSQL source a table with no change
+is rewritten rather than carried forward, and table deltas do not apply.
 
 Examples:
   # Refresh every table of the newest snapshot, in place

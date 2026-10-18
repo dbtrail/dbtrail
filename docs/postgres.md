@@ -6,9 +6,9 @@ MySQL. PostgreSQL capture lives in its own binary, **`bintrail-pg`**. This is a
 `REPLICA IDENTITY FULL`-enforced, replication-slot/WAL-retention-monitored, and
 DDL-drift-safe, all verified end-to-end against real PostgreSQL (14–17 in CI)
 and smoke-validated on managed PostgreSQL (RDS / Aurora). It still has
-documented limitations (below) — notably full-table `reconstruct` /
-time-travel, which stays out of scope for PostgreSQL — so read them before
-pointing it at production.
+documented limitations (below) — notably whole-table time-travel in the shim
+and full-table `reconstruct` to a mydumper dump, which stay out of scope for
+PostgreSQL — so read them before pointing it at production.
 
 **Scope:** PostgreSQL is supported as a **source** (the database you capture
 changes from). The **index** — where bintrail stores the indexed events — stays
@@ -467,15 +467,57 @@ directly.
 > answering) is not covered. A primary-key-changing UPDATE in that minute
 > makes the shim's whole-table `_snapshot` and `verify` refuse, as one after
 > the snapshot does.
-> **Full-table** `reconstruct` (`--output-format mydumper`) remains
-> deliberately out of scope: a PG baseline does not carry the `CREATE TABLE`
-> metadata it needs. `verify` is not bound by that limit — it digests row
-> content without emitting a dump, so both baseline-anchored and live-source
-> `verify` are supported for PostgreSQL (see
+> **Full-table** `reconstruct --output-format parquet` and `bintrail baseline
+> refresh` work for PostgreSQL: they fold a snapshot forward to a point in
+> time, and the result is a snapshot the next fold starts from (see
+> [Full-table snapshots](#full-table-snapshots)). `--output-format mydumper`
+> stays out of scope: a mydumper dump is MySQL's, and `drill` restores it into
+> a MySQL scratch. `verify` digests row content without emitting a dump, so
+> both baseline-anchored and live-source `verify` are supported for PostgreSQL
+> (see
 > [verify — Notes per source](verify.md#notes-per-source)). `query` and
 > `recover` (which work from the indexed deltas alone, no baseline required)
 > round out the recovery surface — see [Limitations](#limitations) for the
 > complete picture.
+
+### Full-table snapshots
+`bintrail reconstruct --output-format parquet --tables public.orders --at …`
+and `bintrail baseline refresh` take a PostgreSQL snapshot (from
+`bintrail-pg baseline`, or a previous fold) and the indexed changes after it,
+and write a snapshot of the whole table at the requested point. Each one
+records where the next fold starts (an LSN) and how far back in time the
+changes after it can reach, so a chain of folds applies every transaction
+exactly once.
+
+What to know:
+
+- **The output is a snapshot, not a dump.** Its values are PostgreSQL's own
+  text, as `bintrail-pg baseline` writes them. `--output-format mydumper` is
+  refused.
+- **A change to the table's columns or primary key refuses**, a type-only
+  change included: the fold compares the shape the snapshot recorded with every
+  shape the stream saw up to the point, and the key the changes were captured
+  under with the one rows are joined by. Take a new snapshot with
+  `bintrail-pg baseline`.
+- **A TRUNCATE, a DROP or a rename refuses**, including one that committed at
+  the instant the snapshot opened: it writes no row changes, so the fold
+  would bring the rows back.
+- **A primary-key-changing UPDATE refuses**, including one in the minute
+  before the snapshot, which the fold reads again (see above).
+- **An unchanged-TOAST marker refuses** on any change the fold reads, even
+  one a later change overwrote.
+- **A table with no change is rewritten**, never carried forward or written as
+  a delta (`--carry-forward-unchanged` and `--table-deltas` apply to MySQL only):
+  the new file must hold the new starting point.
+- **Capture that is behind is safe for the chain, not for one file.** A
+  snapshot folded while capture is behind holds the table as of the newest
+  change the index has, under the requested point's name, and the run warns.
+  The next fold applies what capture delivers later: the folded snapshot's time
+  bound is set from the newest change the index holds, not from the point.
+- **A transaction the stream has not checkpointed** is left whole to the next
+  fold, never applied in part.
+- One index database follows one PostgreSQL source: the fold reads where it
+  stops from the whole index.
 
 ### Interactive `AS OF` from `psql`
 
@@ -511,9 +553,10 @@ SELECT * FROM orders AS OF '5 minutes ago' WHERE id = 42;
 Scope and behaviour track PostgreSQL's current time-travel maturity:
 
 - **Single-row `AS OF` only** — a `WHERE <primary-key> = <value>` predicate.
-  Full-table `AS OF` is refused with remediation: a PG baseline does not carry
-  the `CREATE TABLE` metadata full-table reconstruct needs (the same limit as
-  `reconstruct --output-format mydumper`).
+  Full-table `AS OF` is refused with remediation: the shim's whole-table read
+  needs the `CREATE TABLE` metadata a PG baseline does not carry. A whole
+  table at a point in time is `reconstruct --output-format parquet` (see
+  [Full-table snapshots](#full-table-snapshots)).
 - Columns render as **text** (the conservative first cut): read each one as a
   string, or let your driver text-parse it into a typed target. One caveat: a
   binary/`bytea` value containing a `0x00` byte truncates at the first NUL in
@@ -751,9 +794,10 @@ coerce, but verify your own round-trip.
 - **`GENERATED ... AS IDENTITY` / generated columns** can need care on recovery
   (`GENERATED ALWAYS AS IDENTITY` rejects an explicit insert; `STORED` generated
   columns are absent from the stream before PostgreSQL 18). Treat as best-effort.
-- **Full-table `reconstruct` is not wired for PostgreSQL** — a PG baseline
-  deliberately omits the `CREATE TABLE` metadata it needs (see above).
-  `verify` is not bound by that limit: baseline-anchored, live-source, and
+- **Full-table `reconstruct` writes snapshots only** (`--output-format
+  parquet`, and `baseline refresh`); a mydumper dump, and so `drill`, stay
+  MySQL's (see [Full-table snapshots](#full-table-snapshots)).
+  `verify` is supported too: baseline-anchored, live-source, and
   recover-input modes are all supported for PostgreSQL sources (see
   [verify — Notes per source](verify.md#notes-per-source), including how the
   live-source coverage check differs). **Single-row** `reconstruct` and
@@ -789,8 +833,9 @@ baseline↔delta rendering-GUC identity and its fold-validated type matrix
 (#593), the managed-PostgreSQL smoke matrix (RDS and Aurora — see
 [Managed PostgreSQL](#managed-postgresql)), and source-aware web interface
 presentation including the live replication-health panel (v0.20.1).
-**Full-table** `reconstruct` remains documented out of scope (above);
-`verify` — baseline-anchored, live-source, and recover-input — is supported.
+**Full-table** `reconstruct` writes snapshots (`--output-format parquet`, and
+`baseline refresh`); a mydumper dump stays out of scope (above). `verify`
+(baseline-anchored, live-source and recover-input) is supported.
 
 ---
 

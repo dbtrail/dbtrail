@@ -192,8 +192,12 @@ type FullTableConfig struct {
 	// snapshot history cannot be read; the check then compares names only.
 	schemaAt     *metadata.Resolver
 	schemaAtTime time.Time
-	Parallelism  int  // max concurrent tables (0 → runtime.NumCPU())
-	AllowGaps    bool // false = strict abort on gaps (default for reconstruct)
+	// pgRun is where every PostgreSQL fold of a Parquet-mode run stops, read
+	// once for the run (#1596; see pgRunEnd). nil when the index does not
+	// record a PostgreSQL source, or outside Parquet mode.
+	pgRun       *pgRunEnd
+	Parallelism int  // max concurrent tables (0 → runtime.NumCPU())
+	AllowGaps   bool // false = strict abort on gaps (default for reconstruct)
 
 	// CarryForwardUnchanged publishes a table that had NO events in the window
 	// by carrying its previous Parquet file forward (a hard link where the
@@ -832,7 +836,15 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// Load schema resolver once (latest snapshot). All PK encoding goes
 	// through event.BuildPKValues with the resolver's ColumnMetas so the
 	// keys are byte-identical to what the indexer stored in pk_values.
-	resolver, err := metadata.NewResolver(db, 0)
+	// A PostgreSQL stream writes one schema snapshot per table, so the latest
+	// snapshot alone describes one table (#1596).
+	pgSource := query.SourceFlavor(db) == "postgres"
+	var resolver *metadata.Resolver
+	if pgSource {
+		resolver, err = metadata.NewLatestPerTableResolver(db)
+	} else {
+		resolver, err = metadata.NewResolver(db, 0)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load schema resolver: %w; run `bintrail snapshot` first", err)
 	}
@@ -857,7 +869,24 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// must be pinned before the first fetch: reading it afterwards would anchor
 	// the snapshot at a coordinate later than the events it actually folded, and
 	// the next refresh would skip everything in between.
-	if parquetMode {
+	if parquetMode && pgSource {
+		// PostgreSQL (#1596): the run's end, read once, by LSN. None of the
+		// MySQL marks below: they are binlog coordinates.
+		run, err := resolvePGRunEnd(ctx, db, cfg.At)
+		if err != nil {
+			return nil, err
+		}
+		cfg.pgRun = &run
+		// Capture behind the point: the snapshot holds the tables as of the
+		// newest change the index has, under the point's name. The next fold
+		// applies what capture delivers later (pgRunEnd.foldedDeltaSince);
+		// this file alone does not hold it.
+		if lag := run.lagBehind(); lag > PGDeltaMargin {
+			slog.Warn("capture is behind the requested point: the snapshot holds the tables as of the newest change the index has; "+
+				"changes committed after it reach the next refresh, not this snapshot",
+				"at", cfg.At.UTC().Format(time.RFC3339), "newest_change", run.newestAt.UTC().Format(time.RFC3339), "behind", lag.Round(time.Second).String())
+		}
+	} else if parquetMode {
 		// The DDL mark first: every table's check below reads schema_changes
 		// after it, so every row up to it is one those checks placed.
 		cfg.ddlMark = readRunDDLMark(ctx, db)
@@ -1210,16 +1239,18 @@ func ReconstructTable(
 		if !errors.Is(err, ErrNoBaseline) {
 			return nil, fmt.Errorf("find baseline: %w", err)
 		}
-		// Full-table reconstruct is out of GA scope for PostgreSQL (#1596). With no
-		// baseline found the LSN anchor is unavailable, so detect PG by the recorded
-		// source flavor and refuse here too — otherwise a PG full-table reconstruct
-		// of a table absent from the baseline would fall through to the binlog-only
-		// (delta-only) report below, mislabeled as a full-table reconstruct (#916).
-		// Mirrors the with-baseline PG gate further down.
+		// With no baseline found the LSN anchor is unavailable, so detect PG by
+		// the recorded source flavor and refuse here too: otherwise a PG
+		// full-table reconstruct of a table absent from the baseline would fall
+		// through to the binlog-only (delta-only) report below, mislabeled as a
+		// full-table reconstruct (#916). A PostgreSQL fold needs a snapshot to
+		// start from (#1596).
 		if query.SourceFlavor(db) == "postgres" {
-			return nil, fmt.Errorf(
-				"full-table reconstruct is not yet supported for PostgreSQL sources (#1596); " +
-					"use single-row `reconstruct` or the shim `_flashback` for PostgreSQL time-travel")
+			if cfg.OutputFormat != OutputFormatParquet {
+				return nil, errPGFullTableMydumper
+			}
+			return nil, fmt.Errorf("%s.%s has no snapshot at or before %s to rebuild it from; take one first (`bintrail-pg baseline`)",
+				schema, table, cfg.At.UTC().Format(time.RFC3339))
 		}
 		// No baseline exists for this table. This can happen when: (1) the
 		// table was empty at dump time and the baseline predates 0-row
@@ -1253,20 +1284,28 @@ func ReconstructTable(
 		return nil, fmt.Errorf("read baseline metadata: %w", err)
 	}
 	// PostgreSQL baselines deliberately omit CreateTableSQL (pgbaseline embeds
-	// an LSN anchor, not a mydumper CREATE TABLE), so the generic
-	// "re-run `bintrail baseline`" remediation below is impossible to satisfy
-	// for a PG source and sends the operator into a loop re-dumping baselines
-	// that will never carry that metadata. Full-table reconstruct is out of GA
-	// scope for PostgreSQL (#1596). Detect PG via the LSN anchor first (no DB
-	// read; written only by pgbaseline) then the recorded source flavor
-	// (catches pre-#593 PG baselines with LSN==0), and fail with the correct
-	// message BEFORE the MySQL-only CreateTableSQL check so a genuine MySQL
-	// baseline missing that metadata still gets the "re-run `bintrail baseline`"
-	// guidance.
+	// an LSN anchor, not a mydumper CREATE TABLE), and every MySQL step below
+	// reads it or a binlog coordinate, so a PostgreSQL table takes its own
+	// path (#1596, reconstructPGTable). Detect PG via the LSN anchor first (no
+	// DB read; written only by pgbaseline) then the recorded source flavor
+	// (catches pre-#593 PG baselines with LSN==0, which reconstructPGTable
+	// refuses with the remedy), BEFORE the MySQL-only CreateTableSQL check so a
+	// genuine MySQL baseline missing that metadata still gets the "re-run
+	// `bintrail baseline`" guidance.
 	if bmeta.LSN != 0 || query.SourceFlavor(db) == "postgres" {
-		return nil, fmt.Errorf(
-			"full-table reconstruct is not yet supported for PostgreSQL sources (#1596); " +
-				"use single-row `reconstruct` or the shim `_flashback` for PostgreSQL time-travel")
+		switch {
+		case cfg.OutputFormat != OutputFormatParquet:
+			return nil, errPGFullTableMydumper
+		case cfg.pgRun == nil:
+			// A PostgreSQL snapshot over an index that records no PostgreSQL
+			// stream (ReconstructTables reads the run's end only for one): there
+			// is no LSN order to fold it in.
+			return nil, fmt.Errorf("%s.%s: the snapshot is a PostgreSQL one, but the index records no PostgreSQL source to fold its changes from", schema, table)
+		}
+		return reconstructPGTable(ctx, cfg, pgTableInput{
+			schema: schema, table: table, db: db, engine: engine, resolver: resolver, dbName: dbName,
+			baselinePath: baselinePath, snapshotTime: snapshotTime, bmeta: bmeta,
+		}, rep, start)
 	}
 	if bmeta.CreateTableSQL == "" {
 		return nil, fmt.Errorf(

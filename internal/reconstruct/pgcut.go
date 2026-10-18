@@ -216,6 +216,16 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 	return run, nil
 }
 
+// lagBehind is how far the newest change the index holds is before the
+// point, when no change past the point was found: how much of the time up to
+// the point a snapshot folded to it does not hold yet. 0 otherwise.
+func (r pgRunEnd) lagBehind() time.Duration {
+	if r.none || !r.newestAt.Before(r.at) {
+		return 0
+	}
+	return r.at.Sub(r.newestAt)
+}
+
 // pgPointAfterBaseline refuses an at before the baseline: the baseline
 // already holds changes after at, which no fold can take out.
 func pgPointAfterBaseline(at, baselineAt time.Time) error {

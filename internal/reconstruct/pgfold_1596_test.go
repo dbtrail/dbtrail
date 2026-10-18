@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -226,5 +227,46 @@ func TestCheckPostBaselineColumns_PGGenerated(t *testing.T) {
 	if err := checkPostBaselineColumns(in, changes, []string{"id", "note"}); err == nil || !strings.Contains(err.Error(), "added") ||
 		strings.Contains(err.Error(), "total") {
 		t.Fatalf("a real added column must refuse alone: %v", err)
+	}
+}
+
+// The key the changes in the window were captured under (#1596): every shape
+// compared must name the same one, and it is returned for the caller to
+// compare with the key it joins rows by.
+func TestCheckPGShapeKey(t *testing.T) {
+	const floor, cut = 100, 500
+	pk := func(c metadata.PGRelationColumn) metadata.PGRelationColumn { c.IsPK = true; return c }
+	byID := []metadata.PGRelationColumn{pk(col("id", 23, -1)), col("note", 1043, 14)}
+	byNote := []metadata.PGRelationColumn{col("id", 23, -1), pk(col("note", 1043, 14))}
+	byBoth := []metadata.PGRelationColumn{pk(col("id", 23, -1)), pk(col("note", 1043, 14))}
+	cases := []struct {
+		name    string
+		shapes  []metadata.PGShape
+		want    []string
+		wantErr bool
+	}{
+		{"no shape compared", nil, nil, false},
+		{"one key all along", []metadata.PGShape{pgShape(1, 16411, "orders", 50, false, byID...), pgShape(2, 16411, "orders", 200, false, byID...)}, []string{"id"}, false},
+		{"a composite key, in table order", []metadata.PGShape{pgShape(1, 16411, "orders", 200, false, byBoth...)}, []string{"id", "note"}, false},
+		// Same columns, same types: only the key moved.
+		{"the key moved in the window", []metadata.PGShape{pgShape(1, 16411, "orders", 50, false, byID...), pgShape(2, 16411, "orders", 200, false, byNote...)}, nil, true},
+		{"the key grew in the window", []metadata.PGShape{pgShape(1, 16411, "orders", 150, false, byID...), pgShape(2, 16411, "orders", 200, false, byBoth...)}, nil, true},
+		// After the point: not this window's (the caller compares it).
+		{"the key moved after the point", []metadata.PGShape{pgShape(1, 16411, "orders", 200, false, byID...), pgShape(2, 16411, "orders", 600, false, byNote...)}, []string{"id"}, false},
+		{"no key at all", []metadata.PGShape{pgShape(1, 16411, "orders", 200, false, same...)}, []string{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := checkPGShapeKey("public", "orders", pgRel, floor, cut, c.shapes)
+			if c.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "primary key changed") || !strings.Contains(err.Error(), "bintrail-pg baseline") {
+					t.Fatalf("err = %v, want the key refusal", err)
+				}
+				return
+			}
+			if err != nil || (got == nil) != (c.want == nil) || !slices.Equal(got, c.want) {
+				t.Fatalf("key = %#v, %v; want %#v", got, err, c.want)
+			}
+		})
 	}
 }

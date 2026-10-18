@@ -2,6 +2,7 @@ package reconstruct
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -57,11 +58,18 @@ func TestReconstructTable_pgBaselineRemediation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the PG-not-supported error, got nil")
 	}
-	if !strings.Contains(err.Error(), "not yet supported for PostgreSQL sources (#1596)") {
+	if !errors.Is(err, errPGFullTableMydumper) {
 		t.Fatalf("PG baseline got the wrong error: %v", err)
 	}
 	if strings.Contains(err.Error(), "re-run `bintrail baseline`") {
 		t.Fatalf("PG baseline must NOT prescribe re-running bintrail baseline: %v", err)
+	}
+	// To Parquet, over an index that records no PostgreSQL stream (no run
+	// end was read): no LSN order to fold in.
+	cfg.OutputFormat = OutputFormatParquet
+	if _, err := ReconstructTable(context.Background(), cfg, "shop", "orders", nil, nil, nil, nil, ""); err == nil ||
+		!strings.Contains(err.Error(), "records no PostgreSQL source") {
+		t.Fatalf("PG baseline to Parquet with no PostgreSQL index: %v", err)
 	}
 }
 
@@ -106,7 +114,7 @@ func TestReconstructTable_pgNoBaselineRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the PG no-baseline refusal, got nil")
 	}
-	if !strings.Contains(err.Error(), "not yet supported for PostgreSQL sources (#1596)") {
+	if !errors.Is(err, errPGFullTableMydumper) {
 		t.Fatalf("PG no-baseline reconstruct got the wrong error: %v", err)
 	}
 	if merr := mock.ExpectationsWereMet(); merr != nil {
