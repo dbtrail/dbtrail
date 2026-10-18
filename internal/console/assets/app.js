@@ -8180,8 +8180,11 @@ async function renderSnapshots() {
     // Below it the tabs (Versions, Download, Checks, Settings); a tab this
     // daemon or session cannot serve is not offered.
     const takeAway = backupTakeAway(cur, baselines, sqlSt);
-    const inPlace = snapshotInPlace(cur, baselines);
-    const tabs = snapshotTabs({ download: !!(takeAway || inPlace), checks: drawChecks, settings: drawSetup });
+    // Built here because the tab bar needs to know whether to offer Download;
+    // a throw inside it costs the Download tab, not the whole page.
+    let inPlace = null, inPlaceErr = null;
+    try { inPlace = snapshotInPlace(cur, baselines); } catch (err) { inPlaceErr = err; }
+    const tabs = snapshotTabs({ download: !!(takeAway || inPlace || inPlaceErr), checks: drawChecks, settings: drawSetup });
     part("The copy", () => {
       v.append(snapshotHero(baselines, coverage, cur, {
         settings: drawSetup ? () => tabs.select("settings") : null,
@@ -8224,10 +8227,14 @@ async function renderSnapshots() {
     v.append(tabs.panels.versions);
     // Download has its own tab: the two lanes are a thing to do with a copy,
     // not a part of the list, and above the list they pushed it off screen.
-    if (takeAway || inPlace) {
+    if (takeAway || inPlace || inPlaceErr) {
       part("Download", () => {
         if (takeAway) tabs.panels.download.append(takeAway);
         if (inPlace) tabs.panels.download.append(inPlace);
+        if (inPlaceErr) {
+          tabs.panels.download.append(el("div", { class: "error-box", text:
+            "The DuckDB schema and Iceberg export could not be drawn: " + ((inPlaceErr && inPlaceErr.message) || String(inPlaceErr)) }));
+        }
         // An outcome waiting on a tab that is closed on arrival (a build
         // that failed, one ready and not yet downloaded): the tab says so.
         const t = takeAway && takeAway.dataset.owed ? tabs.bar.querySelector('.snap-tab[data-tab="download"]') : null;
@@ -12504,6 +12511,14 @@ function backupDuckLane(b) {
   lane.append(el("div", { class: "bk-lane-go" }, dl), msg);
   lane.append(el("p", { class: "form-hint", text: "Unpack it, go into its folder, and run:" }));
   lane.append(duckdbCommandLine(DUCKDB_VIEWS_FILE));
+  // snapshotViewsRelative leaves the file out when a table's changes are
+  // half-written (a pair missing its other file) or the snapshot holds no
+  // table, and the listing does not say which snapshot that is. Said once,
+  // in a fold, rather than promised and broken.
+  lane.append(cnFine("No " + DUCKDB_VIEWS_FILE + " in the folder?",
+    el("p", { class: "form-hint", text:
+      "DBTrail leaves it out when a table's latest changes were caught halfway through being written, so the file " +
+      "could not describe that table correctly. Download the next snapshot, which comes with it." })));
   // b.incomplete means at least one configured location would not answer, so
   // the list is a SUBSET and "the newest" is only the newest of what was read.
   lane.append(el("p", { class: "form-hint", text:
@@ -14202,12 +14217,14 @@ async function renderMySQLClients() {
     ? api("/api/router").then((v) => v, (err) => (err && (err.status === 403 || err.status === 404) ? undefined : null))
     : Promise.resolve(undefined);
   // The server list, for the SQL client panel's per-server addresses. A
-  // refusal or the empty console leaves it empty; the panel says what it can.
-  let servers = [];
+  // refusal or the empty console leaves it empty and says nothing (there is
+  // nothing to name); any other failure is said above the panel, which would
+  // otherwise read as a console with no servers.
+  let servers = [], serversFailed = false;
   try {
     const r = await api("/api/servers");
     servers = r.servers || [];
-  } catch (err) { /* drawn without the list */ }
+  } catch (err) { serversFailed = err.status !== 403 && err.status !== 404; }
   // Time-travel port status (#1446): on/off plus its address, never the token.
   // null on failure — the SQL client panel says it could not check.
   // undefined: this session may not read settings, which is what the route
@@ -14228,7 +14245,7 @@ async function renderMySQLClients() {
   // page paint over the next one.
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
-    buildMySQLClients(servers, fbStatus, sqlMem, rtView);
+    buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed);
   } catch (err) {
     const v = VIEW(); clear(v); v.append(pageHead("MySQL clients", null)); renderError(v, err);
   }
@@ -14287,11 +14304,15 @@ function buildConnect(servers, tokStatus, minted) {
   viewEnter();
 }
 
-function buildMySQLClients(servers, fbStatus, sqlMem, rtView) {
+function buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Two ways to use one MySQL port.");
   v.append(pageHead("MySQL clients", sub));
+  if (serversFailed) {
+    v.append(el("p", { class: "form-msg err cn-servers-err", text:
+      "Could not read the list of servers, so the commands below do not name yours. Reload the page to try again." }));
+  }
   v.append(sqlClientPanel(servers, fbStatus, "", null, rtView, true));
   if (sqlMem !== undefined) {
     v.append(cnSection("Applies to both", "", "What each statement that runs on the copy may use.", "sun"));

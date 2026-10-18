@@ -2615,7 +2615,7 @@ try {
       // The two folds are closed on arrival, and the mode help still carries
       // its text while closed (a fold that emptied itself would pass the
       // budget by losing the words instead of deferring them).
-      takeAwayOpen: (document.querySelector("details.bk-take") || {}).open || false,
+      takeAwayOpen: (document.querySelector("details.bk-take:not(.bk-inplace)") || {}).open || false,
       helpOpen: help ? help.open : null,
       helpWords: words((document.querySelector(".vfy-modehelp") || {}).textContent) };
   });

@@ -69,7 +69,7 @@ console.log(JSON.stringify(out));
 		if len(downloads) != 1 || downloads[0] != "Download the data" {
 			t.Errorf("views capability %s: buttons %q, want the archive's alone", k, g.Buttons)
 		}
-		for _, want := range []string{"Parquet files", "views.sql", "One download.", "Unpack it, go into its folder, and run:", "duckdb -init views.sql lake.db"} {
+		for _, want := range []string{"Parquet files", "views.sql", "One download.", "Unpack it, go into its folder, and run:", "duckdb -init views.sql lake.db", "No views.sql in the folder?"} {
 			if !strings.Contains(g.Text, want) {
 				t.Errorf("views capability %s: the lane lacks %q in:\n%s", k, want, g.Text)
 			}

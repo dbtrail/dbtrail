@@ -133,7 +133,7 @@ func TestTakeAwayPanelIsMountedOnItsOwnTab(t *testing.T) {
 	if !strings.Contains(body, "v.append(tabs.panels.download)") {
 		t.Error("the Download panel is never appended to the view")
 	}
-	if !strings.Contains(body, "download: !!(takeAway || inPlace)") {
+	if !strings.Contains(body, "download: !!(takeAway || inPlace || inPlaceErr)") {
 		t.Error("the tab bar is not told whether there are lanes or in-place panels to show, so the Download tab is never offered")
 	}
 	if !strings.Contains(body, "if (inPlace) tabs.panels.download.append(inPlace)") {

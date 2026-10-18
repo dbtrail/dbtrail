@@ -180,8 +180,14 @@ func TestDuckDBCardMountsOnSnapshots(t *testing.T) {
 		t.Fatal("snapshotInPlace does not mount duckdbPanel on capsCache.views plus settings:read")
 	}
 	snaps := stripJSLineComments(functionBody(t, js, "async function renderSnapshots("))
-	if !strings.Contains(snaps, "snapshotInPlace(cur, baselines)") {
-		t.Fatal("renderSnapshots does not draw snapshotInPlace, so the schema download has no page at all")
+	// Inside a try: it is built before the tab bar (which needs to know
+	// whether to offer Download), outside every part(), so a throw in the
+	// DuckDB card or the Iceberg panel would otherwise blank the whole page.
+	if !strings.Contains(snaps, "try { inPlace = snapshotInPlace(cur, baselines); } catch (err) { inPlaceErr = err; }") {
+		t.Fatal("renderSnapshots does not build snapshotInPlace inside its own try, or not at all")
+	}
+	if !strings.Contains(snaps, "if (inPlaceErr) {") {
+		t.Error("a throw in snapshotInPlace is caught and then said nowhere")
 	}
 	for _, fn := range []string{"function buildConnect(", "function buildMySQLClients("} {
 		if strings.Contains(stripJSLineComments(functionBody(t, js, fn)), "duckdbPanel(") {
@@ -223,6 +229,14 @@ func TestTheMySQLPortHasItsOwnPage(t *testing.T) {
 		if strings.Contains(load, not) {
 			t.Errorf("renderConnect asks %s, which no MCP Server panel is drawn from", not)
 		}
+	}
+	// A failed server list is said: without it the panel names no server and
+	// reads as a console that has none. A refusal or an empty console is not
+	// a failure and says nothing.
+	mysqlPage := stripJSLineComments(functionBody(t, js, "async function renderMySQLClients("))
+	if !strings.Contains(mysqlPage, "serversFailed = err.status !== 403 && err.status !== 404") ||
+		!strings.Contains(stripJSLineComments(functionBody(t, js, "function buildMySQLClients(")), "if (serversFailed) {") {
+		t.Error("MySQL clients no longer says when the server list could not be read")
 	}
 	// MySQL clients no longer draws the Iceberg export, so it no longer asks
 	// where the snapshots live.
