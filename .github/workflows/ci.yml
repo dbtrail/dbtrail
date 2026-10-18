@@ -1318,5 +1318,7 @@ jobs:
         run: bash scripts/check-mariadb-matrix-lockstep.sh
       - name: MySQL shards lockstep (ci.yml, release.yaml)
         run: bash scripts/check-mysql-shard-lockstep.sh
+      - name: PostgreSQL source settings lockstep (ci.yml, release.yaml)
+        run: bash scripts/check-postgres-source-lockstep.sh
       - name: Test images come from the mirror, not Docker Hub (ci.yml, release.yaml, managed-pg-smoke.yml)
         run: bash scripts/check-test-image-registry.sh

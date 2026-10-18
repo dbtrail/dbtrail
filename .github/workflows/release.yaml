@@ -574,7 +574,7 @@ jobs:
             -e POSTGRES_DB=pgtest \
             -p 15432:5432 \
             "${TEST_IMAGES}/library/postgres:${{ matrix.postgres }}" \
-            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 -c track_commit_timestamp=on
           # Probe TCP from inside the container — see ci.yml's equivalent step
           # for why a socket-only pg_isready would false-ready during init.
           for i in $(seq 1 60); do
