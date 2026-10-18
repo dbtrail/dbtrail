@@ -208,7 +208,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--index-dsn must include a database name (e.g. user:pass@tcp(host:3306)/binlog_index)")
 		}
 
-		db, err = config.Connect(conIndexDSN)
+		db, err = config.ConnectKillingAbandoned(conIndexDSN)
 		if err != nil {
 			return fmt.Errorf("failed to connect to index database: %w", err)
 		}

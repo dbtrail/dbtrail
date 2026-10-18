@@ -299,7 +299,7 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 		return nil, fmt.Errorf("server %q: DSN must include a database name", entry.Name)
 	}
 	if cm.lazyIndex {
-		db, err := config.Open(entry.DSN)
+		db, err := config.OpenKillingAbandoned(entry.DSN)
 		if err != nil {
 			return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
 		}
@@ -311,7 +311,7 @@ func (cm *connManager) buildBundle(entry ServerEntry) (*bundle, error) {
 		b.resolverUnavailable = true
 		return b, nil
 	}
-	db, err := config.Connect(entry.DSN)
+	db, err := config.ConnectKillingAbandoned(entry.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("server %q: %s", entry.Name, scrubDSNError(err, entry.DSN))
 	}

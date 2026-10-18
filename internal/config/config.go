@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/querykill"
 )
 
 // CurrentBinlogPosition returns the current binlog file name and position
@@ -209,6 +211,42 @@ func Open(dsn string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open MySQL connection: %w", err)
 	}
 	return db, nil
+}
+
+// ConnectKillingAbandoned is Connect for a pool whose reads serve someone who
+// can stop waiting (the console's index pools): a SELECT whose context ends
+// before the statement does is also stopped on the server, with KILL QUERY
+// (see internal/querykill). Writes, and reads on a context that cannot end,
+// behave exactly as on a Connect pool. Not for capture: its write-deadline
+// replay relies on a timed-out INSERT committing.
+func ConnectKillingAbandoned(dsn string) (*sql.DB, error) {
+	db, cfg, err := openKillingAbandoned(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := pingBounded(db, cfg.Timeout); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping MySQL: %w", err)
+	}
+	return db, nil
+}
+
+// OpenKillingAbandoned is ConnectKillingAbandoned without the ping (see Open).
+func OpenKillingAbandoned(dsn string) (*sql.DB, error) {
+	db, _, err := openKillingAbandoned(dsn)
+	return db, err
+}
+
+func openKillingAbandoned(dsn string) (*sql.DB, *mysql.Config, error) {
+	cfg, err := normalizeDSN(dsn)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open MySQL connection: %w", err)
+	}
+	return sql.OpenDB(querykill.New(conn)), cfg, nil
 }
 
 // pingBounded verifies a freshly opened connection within the DSN's own connect

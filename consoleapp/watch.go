@@ -903,7 +903,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	db, err := config.Connect(upIndexDSN)
+	db, err := config.ConnectKillingAbandoned(upIndexDSN)
 	if err != nil {
 		return fmt.Errorf("console: connect index database: %w", err)
 	}
