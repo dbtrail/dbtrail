@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **A PostgreSQL capture test waits for replication to start, not for the slot to read active.** PostgreSQL also marks a slot active while it creates it; a drop in the gap before replication starts succeeded and failed the 0.109.0 release (#2468).
+
 
 ## [0.109.0] - 2026-10-18
 ### Added

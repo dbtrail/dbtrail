@@ -559,13 +559,21 @@ func TestDropSlot_ActiveSlotErrors(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	runErr := make(chan error, 1)
+	var started atomic.Bool
 	go func() {
 		runErr <- pgstreamrun.One(runCtx, pgstreamrun.Config{
 			IndexDSN: indexDSN, ReplDSN: replDSN(pgDSN), QueryDSN: pgDSN,
 			SlotName: slot, Publication: pub, ServerID: 53,
 			Tables: "public." + tbl, BatchSize: 100, Checkpoint: 200 * time.Millisecond,
+			Hooks: &pgstreamrun.Hooks{OnSourceConnected: func() { started.Store(true) }},
 		})
 	}()
+	// Wait for replication to have STARTED, not for the slot to read active:
+	// PostgreSQL also marks a logical slot active while CREATE_REPLICATION_SLOT
+	// builds it, releases it when the command returns, and acquires it again
+	// at START_REPLICATION. A drop that lands between the two succeeds, which
+	// is what failed this test once (v0.109.0 release, PostgreSQL 16).
+	waitFor(t, 15*time.Second, started.Load, "replication started on the slot")
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
 		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
