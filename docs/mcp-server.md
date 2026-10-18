@@ -260,7 +260,8 @@ What to expect:
   port to get every row.
 - **Claude finds the tables on its own**: the copy answers `SHOW ALL TABLES`
   (every table with its columns and types) and `DESCRIBE schema.table`. The
-  history of row changes is the `events` table.
+  history of row changes is the `events` table, present when the change log
+  is on the web interface's machine.
 - **It needs the `sql:execute` permission**, like the SQL page, and it is
   refused on a server with access rules (a data profile, denied tables or
   redacted columns), because free SQL reads the copy's files directly and

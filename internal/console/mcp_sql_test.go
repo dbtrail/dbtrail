@@ -228,6 +228,13 @@ func TestMCPSQL_catalogStatementsTheDescriptionNames(t *testing.T) {
 	if text := run("SHOW TABLES"); !strings.Contains(text, `"row_count":0`) {
 		t.Errorf("SHOW TABLES now lists something; the description says it lists nothing:\n%s", text)
 	}
+	// "unless the schema parameter is set": with it, that schema's tables.
+	if !strings.Contains(mcptools.SQLCatalogHint(), "unless the schema parameter is set") {
+		t.Fatal("the description no longer says when SHOW TABLES lists something")
+	}
+	if isErr, text := call(map[string]any{"statement": "SHOW TABLES", "schema": "shop"}); isErr || !strings.Contains(text, `"rows":[["orders"]]`) {
+		t.Errorf("SHOW TABLES with schema shop: isErr=%v\n%s", isErr, text)
+	}
 	if text := run("DESCRIBE events"); !strings.Contains(text, `"event_id","BIGINT"`) {
 		t.Errorf("DESCRIBE events lacks the change history's columns:\n%s", text)
 	}
@@ -238,5 +245,15 @@ func TestMCPSQL_catalogStatementsTheDescriptionNames(t *testing.T) {
 	}
 	if isErr, text := call(map[string]any{"statement": "DESCRIBE shop.orders"}); isErr || !strings.Contains(text, `["id","INTEGER"`) {
 		t.Errorf("DESCRIBE shop.orders: isErr=%v\n%s", isErr, text)
+	}
+
+	// "exists when the change log is on this server's machine": a copy with
+	// no change log has no events table.
+	if !strings.Contains(mcptools.SQLCatalogHint(), "exists when the change log is on this server's machine") {
+		t.Fatal("the description no longer says when events exists")
+	}
+	bare := newSQLFixture(t, runner, false)
+	if isErr, text := mcpSQLSession(t, bare)(map[string]any{"statement": "DESCRIBE events"}); !isErr || !strings.Contains(text, "events does not exist") {
+		t.Errorf("DESCRIBE events with no change log: isErr=%v %q", isErr, text)
 	}
 }

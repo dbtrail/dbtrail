@@ -101,13 +101,16 @@ const sqlToolDescription = "Run one read-only SQL statement on the copy of the m
 
 // sqlCatalogHint tells the model how to learn the tables before guessing
 // names (#2456). The copy answers its own catalog, so this is a sentence, not
-// a tool; it names the two traps measured on a real worker: SHOW TABLES
-// alone searches a schema that holds no table and returns nothing, and the
-// events table is not in SHOW ALL TABLES (its view is installed only for a
-// statement that names it) although it can be queried.
+// a tool; it names the traps measured on a real worker: SHOW TABLES without
+// the schema parameter searches a schema that holds no table and returns
+// nothing (with it, it lists that schema's tables); and the events table is
+// not in SHOW ALL TABLES (its view is installed only for a statement that
+// names it) although it can be queried, and only exists where the change log
+// is on the console's machine.
 const sqlCatalogHint = "To learn the tables before writing a query, run SHOW ALL TABLES (every table with its columns and types) " +
-	"or DESCRIBE schema.table; SHOW TABLES alone lists nothing. " +
-	"The events table, the history of row changes, is not listed there but can be queried: DESCRIBE events shows its columns."
+	"or DESCRIBE schema.table; SHOW TABLES lists nothing unless the schema parameter is set. " +
+	"The events table, the history of row changes, exists when the change log is on this server's machine: " +
+	"it is not listed by SHOW ALL TABLES but can be queried, and DESCRIBE events shows its columns."
 
 // SQLCatalogHint is the sentence of the sql tool's description that sends a
 // model to the copy's own catalog, exported so the console's real-worker test
