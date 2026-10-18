@@ -55,7 +55,7 @@ out.iceberg = lines(run("icebergComposeNote")({ id: "s1", kind: "registry" }));
 run("capsCache = { views: false, monitor: true, permissions: null };");
 out.lane = lines(run("backupDuckLane")({ configured: true, source: "/data/snaps", kind: "dir",
   snapshots: [{ time: "2026-06-10 12:00:00", location: "dir", files: [{ name: "x.parquet", bytes: 10 }] }] }));
-out.token = lines(run("mcpTokenCard")({ managed: true, read_only: true, static: true, created_at: "2026-06-10T12:00:00Z" }, ""));
+out.token = lines(run("mcpTokenStep")({ managed: true, read_only: true, static: true, created_at: "2026-06-10T12:00:00Z" }, ""));
 run("capsCache = { monitor: true };");
 const fb = JSON.parse(process.argv[4]);
 // The port, on, with what the router answered (#2341): on every address of

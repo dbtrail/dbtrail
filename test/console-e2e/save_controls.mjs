@@ -819,18 +819,21 @@ export async function runSaveScenes(ctx) {
         if (b) { b.click(); return true; }
         return false;
       }));
-      // The plaintext, read from the token card only: the page has other
-      // copyable rows (the address) drawn the same way.
-      const shownToken = () => page.evaluate(() => {
-        const card = Array.from(document.querySelectorAll(".cn-card")).find((c) => /Create a token/.test((c.querySelector(".cn-title") || {}).textContent || ""));
-        return (card && (card.querySelector(".cn-urlrow code.cn-url") || {}).textContent) || "";
-      });
+      // The plaintext, read from the token field only: the address field is
+      // drawn the same way, and only the token's is marked hot.
+      const shownToken = () => page.evaluate(() =>
+        (document.querySelector(".view .cn-mock .cn-mock-field.is-hot code") || {}).textContent || "");
+      const lastUsed = async () => ((await readAs(page, "/api/mcp-token")).body || {}).last_used_at || "";
       const minted1 = await until(shownToken);
       const st1 = (await readAs(page, "/api/mcp-token")).body;
       const auth1 = minted1 ? await mcpStatus(minted1) : 0;
       check("mcp-token", "Generate token stores a token the MCP endpoint accepts",
         before && before.managed === false && gen && !!minted1 && st1 && st1.managed === true && !!st1.created_at && auth1 !== 401,
         JSON.stringify({ before, gen, minted: !!minted1, st1, auth1 }));
+      // The request that just reached /mcp is what the page calls connected.
+      const used1 = await lastUsed();
+      check("mcp-token", "a request that reaches /mcp is reported as the token's last use",
+        !st1.last_used_at && !!used1, JSON.stringify({ before: st1.last_used_at, after: used1 }));
 
       // New token replaces it: the old value stops working at once.
       await until(() => page.evaluate(() => {
@@ -842,17 +845,34 @@ export async function runSaveScenes(ctx) {
         const t = await shownToken();
         return t && t !== minted1 ? t : "";
       });
-      const auth2 = minted2 ? await mcpStatus(minted2) : 0;
+      // A new value starts unused; the old value's refusal and the new
+      // value on an address that names no server are not uses either.
+      const usedNew = await lastUsed();
+      const lineAfterNew = await page.evaluate(() => (document.querySelector(".view .cn-hero .cn-conn") || {}).textContent || "");
       const authOld = minted1 ? await mcpStatus(minted1) : 0;
+      const wrongAddr = minted2 ? await page.evaluate(async (tok) => (await fetch("/mcp/no-such-server", { method: "POST",
+        headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "0" } } }) })).status, minted2) : 0;
+      const usedAfterMisses = await lastUsed();
+      check("mcp-token", "a new token starts unused, and a refused or misaddressed request does not count",
+        !usedNew && /Not connected yet/.test(lineAfterNew) && authOld === 401 && wrongAddr === 404 && !usedAfterMisses,
+        JSON.stringify({ usedNew, lineAfterNew, authOld, wrongAddr, usedAfterMisses }));
+      const auth2 = minted2 ? await mcpStatus(minted2) : 0;
       check("mcp-token", "New token stores a new value and the old one stops working",
         !!minted2 && auth2 !== 401 && authOld === 401, JSON.stringify({ minted2: !!minted2, auth2, authOld }));
+      // The open page notices by itself, without repainting: the one-time
+      // token is still on screen when the line turns.
+      const turned = await until(() => page.evaluate(() => !!document.querySelector(".view .cn-hero .cn-conn.is-on")), 15000);
+      const stillShown = await shownToken();
+      check("mcp-token", "the open page says connected on its own and keeps the one-time token on screen",
+        !!turned && stillShown === minted2, JSON.stringify({ turned: !!turned, kept: stillShown === minted2 }));
 
       const tab = await freshTab();
       try {
         await tab.evaluate(() => navigate("connect"));
-        const said = await until(() => tab.evaluate(() => Array.from(document.querySelectorAll(".cn-card p"))
-          .some((p) => /You already have a token/.test(p.textContent))));
-        check("mcp-token", "a fresh tab says a token exists", !!said, "no 'You already have a token' line");
+        const said = await until(() => tab.evaluate(() => Array.from(document.querySelectorAll(".view .cn-step"))
+          .some((st) => /Token ready/.test(st.textContent) && /It cannot be shown again/.test(st.textContent))));
+        check("mcp-token", "a fresh tab says a token exists", !!said, "no 'Token ready ... It cannot be shown again' step");
       } finally { await tab.close(); }
 
       await until(() => page.evaluate(() => {

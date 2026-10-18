@@ -2065,7 +2065,7 @@ Rules that differ from the standalone `bintrail-mcp` server:
   contract), its plaintext is shown exactly once at generation, and it is
   **scoped to `/mcp` alone** — it cannot drive the browser API (registry
   CRUD, monitor verbs, or its own rotation). New token / Delete token from
-  the same card take effect on the next request, including for sibling `bintrail-console`
+  the same page take effect on the next request, including for sibling `bintrail-console`
   processes sharing the file: every `/mcp` request re-validates the
   credential, so a rotated-away or revoked token stops authenticating
   immediately. An MCP *session* is additionally bound to the credential that
@@ -2074,6 +2074,15 @@ Rules that differ from the standalone `bintrail-mcp` server:
   out but never be driven again) and is discarded after the idle timeout:
   sessions with no request for **30 minutes** are closed (clients keep a
   session alive with pings, or transparently re-initialize).
+- **The page says whether a client got through.** `GET /api/mcp-token`
+  reports presence and provenance only (never a value) and, since this
+  release, when each token last made an `/mcp` request that reached a
+  server: `last_used_at` for the managed token (the current value only, so
+  a new or deleted token reads as unused) and `static_last_used_at` for the
+  static one, both RFC 3339 UTC, plus `counting_since`, when this process
+  started. A refused token (`401`) or an unknown `/mcp/{id-or-name}`
+  (`404`) is not a use. The times are kept in memory, so after a restart
+  the page says "not connected yet" from `counting_since`, never "never".
 - **A managed token carries the grants of the session that minted it.** Each
   tool call requires the same permission as its `/api` counterpart — `query`
   and `list_schema_changes` need `query:execute`, `recover` needs

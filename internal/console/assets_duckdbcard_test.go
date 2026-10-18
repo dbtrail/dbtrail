@@ -196,7 +196,7 @@ func TestDuckDBCardMountsOnSnapshots(t *testing.T) {
 	}
 }
 
-// TestTheMySQLPortHasItsOwnPage: MCP Server is the token, the address, the
+// TestTheMySQLPortHasItsOwnPage: MCP Server is the token, the drawn Claude box, the
 // installer and the other AI clients; MySQL clients is the MySQL port and the
 // memory a statement may use. Neither carries the DuckDB schema or the
 // Iceberg export, which are Snapshots' (snapshotInPlace). The
@@ -206,7 +206,7 @@ func TestDuckDBCardMountsOnSnapshots(t *testing.T) {
 // clients panel is drawn from.
 func TestTheMySQLPortHasItsOwnPage(t *testing.T) {
 	js := readAsset(t, "app.js")
-	mcp := []string{"mcpTokenCard(", "mcpEndpointCard(", "bundleCard(", "otherClientsPanel("}
+	mcp := []string{"mcpTokenStep(", "mcpInstallStep(", "mcpPasteStep(", "claudeAskMock(", "otherClientsPanel("}
 	port := []string{"sqlClientPanel(", "sqlMemoryPanel("}
 	snapshots := []string{"duckdbPanel(", "icebergExportPanel("}
 	check := func(name string, own, other []string) {

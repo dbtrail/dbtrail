@@ -14296,19 +14296,24 @@ function copyText(text, what) {
 
 function buildConnect(servers, tokStatus, minted) {
   const v = VIEW(); clear(v);
-  const sub = el("p", { class: "page-sub" },
-    "Three steps and Claude can answer questions about your database history. It can only read; it can never change anything.");
-  v.append(pageHead("MCP Server", sub));
-
-  const cards = el("div", { class: "cards" });
-  cards.append(mcpTokenCard(tokStatus, minted));
-  cards.append(mcpEndpointCard(servers));
-  cards.append(bundleCard());
-  v.append(cards);
+  v.append(pageHead("MCP Server", null));
+  const arm = mcpInstallArm();
+  v.append(el("section", { class: "cn-hero" },
+    el("div", { class: "cn-hero-l" },
+      el("h2", { class: "cn-hero-t" }, "Ask Claude", el("br"), "about your data."),
+      el("p", { class: "cn-hero-lead", text: "What your tables hold now, and every change they went through. Claude can only read; it can never change anything." }),
+      el("ol", { class: "cn-steps" },
+        mcpTokenStep(tokStatus, minted), mcpInstallStep(arm), mcpPasteStep(servers, arm))),
+    el("div", { class: "cn-hero-r" },
+      claudeAskMock(servers, tokStatus, minted, arm),
+      el("p", { class: "cn-mock-cap", text: "What Claude asks for, filled in with this console's values." }),
+      mcpConnLine(tokStatus))));
+  v.append(mcpQuestions());
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
   // Only Claude here. The DuckDB schema card is on Snapshots -> Download
   // (snapshotInPlace): a page about connecting an AI client is not where a
   // reader looks for a file their own DuckDB opens.
+  mcpConnPoll();
   viewEnter();
 }
 
@@ -14631,19 +14636,8 @@ async function revokeMCPToken() {
   renderConnect();
 }
 
-// cnCard: a step card whose number is a BADGE, not prose. The three cards are
-// the whole how-to, so each stays at one action plus one short line per state;
-// parenthetical and rare facts fold into cnFine below.
-function cnCard(num, title) {
-  return el("div", { class: "card cn-card" },
-    el("div", { class: "card-title cn-title" },
-      el("span", { class: "cn-num", text: String(num) }),
-      title));
-}
-
-// cnFine: collapsed fine print. The audience is non-technical, and the #1430
-// step rewrite proved that spelling every contingency out in the open reads
-// as a wall of text; the facts stay on the page, but folded.
+// cnFine: a closed fold for the rare case, so the open page stays one action
+// plus one short line per step.
 function cnFine(label, ...kids) {
   const d = el("details", { class: "form-advanced cn-fine" },
     el("summary", { class: "form-adv-summary", text: label }));
@@ -14651,160 +14645,235 @@ function cnFine(label, ...kids) {
   return d;
 }
 
-// mcpTokenCard (#1052): generate, rotate, and revoke the managed MCP token
-// without leaving the UI. The token value renders exactly once — right after
-// generation — and is otherwise represented only by its creation date.
-// TOKEN_EMPTY_ART: a key with an empty dashed slot beside it (static).
-const TOKEN_EMPTY_ART = `<svg viewBox="0 0 120 36" aria-hidden="true"><circle cx="16" cy="18" r="9" fill="none" stroke="var(--ink-3)" stroke-width="2"/><path d="M25 18h30M47 18v7M40 18v5" stroke="var(--ink-3)" stroke-width="2"/><rect x="66" y="8" width="50" height="20" rx="6" fill="none" stroke="var(--ink-4)" stroke-width="1.5" stroke-dasharray="4 3"/></svg>`;
+// The MCP Server page (#2463 follow-up): one panel. On the left the three
+// steps, each a numbered badge, a title and one short line, with every rare
+// case folded. On the right the box Claude shows when it installs DBTrail,
+// drawn large and already holding this console's address (and the token, the
+// one time it exists in plain text), so the reader copies each value from
+// the place they will paste it. Under it, whether a client has reached
+// DBTrail since it started.
 
-function mcpTokenCard(tok, minted) {
-  const card = cnCard(1, "Create a token");
-  // The one-time plaintext renders UNCONDITIONALLY: a failed status fetch
-  // must never swallow a token that was just minted (after a rotate, it is
-  // the only valid credential and cannot be re-displayed).
-  if (minted) {
-    card.append(el("p", { class: "stg-hint", text: "Copy it now and keep it somewhere safe. It will never be shown again:" }));
-    card.append(el("div", { class: "cn-urlrow" },
-      el("code", { class: "stg-code cn-url", text: minted }),
-      el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(minted, "Access token") })));
+function cnStep(num, done, title, ...kids) {
+  return el("li", { class: "cn-step" + (done ? " is-done" : "") },
+    el("span", { class: "cn-num", "aria-hidden": "true" }, done ? svgEl(ICONS.check) : String(num)),
+    el("div", { class: "cn-step-body" }, el("h3", { class: "cn-step-t", text: title }), ...kids));
+}
+
+// mcpInstallArm: which way into Claude this computer has. released picks a
+// direct file link (it exists on a tag) over the releases page (a
+// development build has no file of its own); plat "" is Windows, which has
+// no installer, so it goes through claude.ai in the browser.
+function mcpInstallArm() {
+  const ver = String(capsCache.version || "").replace(/^v/, "");
+  const released = /^\d+\.\d+\.\d+$/.test(ver);
+  const plat = guessPlatform();
+  return { ver, released, plat, desktop: !!plat };
+}
+
+function mcpTokenStep(tok, minted) {
+  const hint = (text) => el("p", { class: "cn-step-p", text });
+  // The one-time token first: with it on screen, "reload" would throw away
+  // the only copy, so a failed status read must not say that.
+  if (!tok && minted) {
+    return cnStep(1, true, "Token created", hint("It is in the Access token field. Copy it now: it is shown only once."));
   }
   if (!tok) {
-    card.append(el("p", { class: "stg-hint", text: "We could not check whether a token exists. Reload the page to try again." }));
-    return card;
+    return cnStep(1, false, "Create a token", hint("We could not check whether a token exists. Reload the page to try again."));
   }
-  if (tok.managed) {
-    if (!minted) {
-      card.append(el("p", { class: "stg-hint", text:
-        "You already have a token" + (tok.created_at ? ", created " + utcLabel(tok.created_at) : "") +
-        ". It cannot be shown again." +
-        // read_only hides the buttons below, so never tell that user to click one
-        (tok.read_only ? "" : " Lost it? New token gives you a fresh value, shown only once; the old one stops working.") }));
-    }
-    if (tok.read_only) {
-      card.append(cnFine("Why are there no New token and Delete token buttons?",
-        el("p", { class: "form-hint", text: "This token was created by a newer version of DBTrail. It keeps working, but this version cannot replace or delete it; upgrading brings those buttons back." })));
-    } else {
-      card.append(el("div", { class: "cn-links" },
-        el("button", { class: "btn btn-sm", type: "button", text: "New token", onclick: () => mintMCPToken(true) }),
-        el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Delete token", onclick: revokeMCPToken })));
-    }
+  const kids = [];
+  let done = false, title = "Create a token";
+  if (minted) {
+    done = true; title = "Token created";
+    kids.push(hint("It is in the Access token field. Copy it now: it is shown only once."));
+  } else if (tok.managed) {
+    done = true; title = "Token ready";
+    kids.push(hint("Created " + (tok.created_at ? utcLabel(tok.created_at) : "earlier") + ". It cannot be shown again." +
+      (tok.read_only ? "" : " Lost it? New token makes another; the old one stops working.")));
+  } else if (tok.static) {
+    done = true; title = "Token ready";
+    kids.push(hint("A token was set when DBTrail started; Claude can use that one. A token made here is shown only once."));
+  } else {
+    kids.push(hint("Claude's password for DBTrail. It is shown only once, so copy it right away."));
+  }
+  if (tok.managed && tok.read_only) {
+    kids.push(cnFine("Why are there no New token and Delete token buttons?",
+      el("p", { class: "form-hint", text: "This token was created by a newer version of DBTrail. It keeps working, but this version cannot replace or delete it; upgrading brings those buttons back." })));
+  } else if (tok.managed) {
+    kids.push(el("div", { class: "cn-links" },
+      el("button", { class: "btn btn-sm", type: "button", text: "New token", onclick: () => mintMCPToken(true) }),
+      el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Delete token", onclick: revokeMCPToken })));
   } else if (!minted) {
-    // No token yet (#1950): a small key, and Generate token is the page's one
-    // filled button, unless a token set at startup already works, where a
-    // filled button would push people to replace a working one.
-    card.append(el("div", { class: "empty-art cn-key", "aria-hidden": "true" }, svgEl(TOKEN_EMPTY_ART)));
-    card.append(el("p", { class: "stg-hint", text: "The token is Claude's password for DBTrail. It is shown only once, so copy it right away." }));
-    card.append(el("div", { class: "cn-links" },
-      el("button", { class: "btn btn-sm" + (tok.static ? "" : " btn-primary"), type: "button", text: "Generate token", onclick: () => mintMCPToken(false) })));
+    kids.push(el("div", { class: "cn-links" },
+      el("button", { class: "btn " + (tok.static ? "btn-sm" : "btn-primary"), type: "button", text: "Generate token", onclick: () => mintMCPToken(false) })));
   }
   if (tok.static) {
-    card.append(cnFine("A token was set at startup, and it already works",
+    kids.push(cnFine("A token was set at startup, and it already works",
       el("p", { class: "form-hint" },
         "That fixed token also works (CLI: ",
         el("code", { text: "--token" }), " or ", el("code", { text: "BINTRAIL_CONSOLE_TOKEN" }),
         "). It is managed wherever it was set up, not in the web interface.")));
   }
-  return card;
+  return cnStep(1, done, title, ...kids);
 }
 
-// mcpEndpointCard: the ready-to-copy URL when the endpoint is usable, or the
-// how-to-enable explanation when no token is configured (capabilities.mcp) —
-// never a URL presented as ready that would only ever answer 403.
-function mcpEndpointCard(servers) {
-  const card = cnCard(2, "Copy the address");
-  if (!capsCache.mcp) {
-    card.append(el("p", { class: "stg-hint", text: "Finish step 1 first; DBTrail's address then appears below, ready to copy." }));
-    return card;
+function mcpInstallStep(arm) {
+  const hint = (text) => el("p", { class: "cn-step-p", text });
+  const relTag = "https://github.com/dbtrail/dbtrail/releases/tag/v" + arm.ver;
+  const releases = "https://github.com/dbtrail/dbtrail/releases";
+  const ext = (cls, href, text) => el("a", { class: cls, href, target: "_blank", rel: "noopener", text });
+  const browserPath = "In claude.ai, open Settings, then Connectors, then Add custom connector.";
+  const privateNet = el("p", { class: "form-hint", text: "On a private network (only reachable from inside), claude.ai cannot reach DBTrail; install the desktop bundle on a Mac or Linux machine instead." });
+  if (arm.released && arm.desktop) {
+    const asset = "dbtrail-" + arm.plat + ".mcpb";
+    const forWhat = arm.plat.startsWith("darwin") ? "Mac" : "Linux";
+    return cnStep(2, false, "Install DBTrail in Claude Desktop",
+      hint("Get the Claude Desktop app (claude.ai/download), then open this file:"),
+      el("div", { class: "cn-links" },
+        ext("btn btn-primary", "https://github.com/dbtrail/dbtrail/releases/download/v" + arm.ver + "/" + asset, "Download for " + forWhat),
+        ext("btn btn-sm btn-ghost", relTag, "All downloads")),
+      cnFine("Intel Mac, Windows, or claude.ai in the browser?",
+        el("p", { class: "form-hint", text: "The download button guesses this computer from the browser, and Macs are assumed to have an Apple chip. On an Intel Mac, use All downloads and take dbtrail-darwin-amd64.mcpb (v" + arm.ver + " matches DBTrail)." }),
+        el("p", { class: "form-hint", text: "If the download lands on Not Found, that release shipped without the installer; take the newest release's file from All downloads instead." }),
+        el("p", { class: "form-hint", text: "Windows has no installer yet. Use claude.ai in the browser: if DBTrail is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), the browser path cannot reach it; use the desktop app on a Mac or Linux machine instead." })));
   }
-  const url = mcpURL(servers);
-  card.append(el("div", { class: "cn-urlrow" },
-    el("code", { class: "stg-code cn-url", text: url }),
-    el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(url, "Web address") })));
-  card.append(el("p", { class: "stg-hint", text: "Claude will ask for a URL; this is the one to paste." }));
+  if (arm.desktop) {
+    return cnStep(2, false, "Install DBTrail in Claude Desktop",
+      hint("Get the Claude Desktop app (claude.ai/download), then the newest installer for this computer:"),
+      el("div", { class: "cn-links" }, ext("btn btn-primary", releases, "Open the releases page")),
+      cnFine("Which file is for this computer?",
+        el("p", { class: "form-hint", text: "This is a development build, so there is no matching download link. In the newest release: Mac with Apple chip is dbtrail-darwin-arm64.mcpb, Intel Mac is dbtrail-darwin-amd64.mcpb, Linux is dbtrail-linux-amd64.mcpb (or -arm64). Windows has no installer yet." }),
+        el("p", { class: "form-hint", text: "Using claude.ai in the browser instead of the desktop app? If DBTrail is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), use the desktop app." })));
+  }
+  // Windows: no installer has ever been published, so no file link at all.
+  return cnStep(2, false, "Add DBTrail in claude.ai",
+    hint("There is no Windows installer yet. " + browserPath + " This works when DBTrail is reachable from the internet."),
+    cnFine("DBTrail on a private network?", privateNet,
+      el("p", { class: "form-hint" }, arm.released
+        ? ext("", relTag, "All downloads for v" + arm.ver)
+        : ext("", releases, "Open the releases page"))));
+}
+
+function mcpPasteStep(servers, arm) {
+  const kids = [el("p", { class: "cn-step-p", text: arm.desktop
+    ? "Claude asks for them when it installs DBTrail. Copy each one from its field in the Claude box."
+    : "Copy each one from its field in the Claude box." })];
   if ((servers || []).length > 1) {
-    card.append(cnFine("Connecting a different server?",
+    kids.push(cnFine("Connecting a different server?",
       el("p", { class: "form-hint", text: "This address points at the server picked in the left sidebar (the Server box at the top). Pick a different server there and copy again; each server has its own address." })));
   }
-  return card;
+  return cnStep(3, false, "Paste the two values", ...kids);
 }
 
-// claudeAskMock: a drawn miniature of Claude Desktop's install dialog, so the
-// user recognizes the two fields instead of reading a paragraph about them.
-// The field labels are quoted VERBATIM from
-// build/packaging/mcpb/manifest.template.json; if the bundle renames them the
-// picture lies. e2e 17g reads the manifest's user_config titles and compares
-// the drawn labels against them, so renaming either side alone rings.
-function claudeAskMock() {
-  const field = (n, label, hint) => el("div", { class: "cn-mock-row" },
-    el("div", { class: "cn-mock-label", text: label }),
-    el("div", { class: "cn-mock-field" },
-      el("span", { class: "cn-chip", text: String(n) }),
-      el("span", { class: "cn-mock-paste", text: hint })));
+// claudeAskMock draws what Claude asks for. The field names are the bundle
+// manifest's own (build/packaging/mcpb/manifest.template.json, pinned by the
+// browser suite) and the title is its display_name; nothing else on the
+// drawing claims to be Claude's words, so it carries no buttons.
+function claudeAskMock(servers, tok, minted, arm) {
+  const val = (value, what, hot) => el("div", { class: "cn-mock-field is-set" + (hot ? " is-hot" : "") },
+    el("code", { text: value }),
+    el("button", { class: "btn btn-sm", type: "button", text: "Copy", onclick: () => copyText(value, what) }));
+  const wait = (text) => el("div", { class: "cn-mock-field" }, el("span", { class: "cn-mock-paste", text }));
+  const field = (label, body) => el("div", { class: "cn-mock-row" }, el("div", { class: "cn-mock-label", text: label }), body);
+  // A token that exists makes the endpoint usable even when the capability
+  // refresh after a mint failed and left capsCache.mcp behind.
+  const haveTok = !!(minted || (tok && (tok.managed || tok.static)));
+  const urlBody = capsCache.mcp || haveTok ? val(mcpURL(servers), "Web address") : wait("appears after step 1");
+  const tokBody = minted ? val(minted, "Access token", true)
+    : tok && tok.managed ? wait("the token you saved in step 1")
+    : tok && tok.static ? wait("the token DBTrail was started with")
+    : wait("appears after step 1");
   return el("div", { class: "cn-mock" },
-    el("div", { class: "cn-mock-bar" }, el("span", { class: "cn-mock-dots" }), "Claude Desktop"),
-    field(2, "Web address / MCP endpoint", "paste the address from step 2"),
-    field(1, "Access token", "paste the token from step 1"));
+    el("div", { class: "cn-mock-bar" }, el("span", { class: "cn-mock-dots", "aria-hidden": "true" }), arm.desktop ? "Claude Desktop" : "claude.ai"),
+    el("div", { class: "cn-mock-in" },
+      el("div", { class: "cn-mock-head" },
+        el("span", { class: "cn-mock-ico" }, el("img", { src: "/dbtrail-lockup-white.png", alt: "", width: "79", height: "30" })),
+        el("b", { text: "DBTrail" })),
+      field("Web address / MCP endpoint", urlBody),
+      field("Access token", tokBody)));
 }
 
-// askExample: the payoff line, drawn as the chat message it becomes.
-function askExample() {
-  return el("div", { class: "cn-ask" },
-    "Then open a new chat and ask: ",
-    el("b", { text: "\u201Cwhat changed in my database in the last hour?\u201D" }));
+// mcpLastUse: the newest use among the credentials that still exist. The
+// static stamp only counts while a static token is configured, the managed
+// one only for the current value (the server already drops a rotated one).
+function mcpLastUse(tok) {
+  if (!tok) return null;
+  const at = [tok.managed && tok.last_used_at, tok.static && tok.static_last_used_at]
+    .filter(Boolean).map((s) => Date.parse(s)).filter((n) => isFinite(n));
+  return at.length ? Math.max(...at) : null;
 }
 
-// bundleCard links the .mcpb bundle (one-click Claude Desktop install) for the
-// RUNNING version. Honesty rules carried from #1430: never render a download
-// that can only 404 (no Windows bundle has ever been published, and an
-// unversioned build has no matching asset), and the dialog mock's field
-// labels come verbatim from the manifest.
-function bundleCard() {
-  const card = cnCard(3, "Add it to Claude");
-  const ver = String(capsCache.version || "").replace(/^v/, "");
-  const released = /^\d+\.\d+\.\d+$/.test(ver);
-  const plat = guessPlatform();
-  const relTag = "https://github.com/dbtrail/dbtrail/releases/tag/v" + ver;
-  if (released && plat) {
-    const asset = "dbtrail-" + plat + ".mcpb";
-    card.append(el("p", { class: "stg-hint", text: "Get the Claude Desktop app (claude.ai/download), then download this installer and double-click it:" }));
-    card.append(el("div", { class: "cn-links" },
-      el("a", { class: "btn btn-sm", href: "https://github.com/dbtrail/dbtrail/releases/download/v" + ver + "/" + asset, target: "_blank", rel: "noopener", text: "Download the installer" }),
-      el("a", { class: "btn btn-sm btn-ghost", href: relTag, target: "_blank", rel: "noopener", text: "All downloads" })));
-    card.append(el("p", { class: "stg-hint", text: "Claude opens and asks to install DBTrail; accept, then fill in two things:" }));
-    card.append(claudeAskMock());
-    card.append(askExample());
-    card.append(cnFine("Intel Mac, Windows, or claude.ai in the browser?",
-      el("p", { class: "form-hint", text: "The download button guesses this computer from the browser, and Macs are assumed to have an Apple chip. On an Intel Mac, use All downloads and take dbtrail-darwin-amd64.mcpb (v" + ver + " matches DBTrail)." }),
-      el("p", { class: "form-hint", text: "If the download lands on Not Found, that release shipped without the installer; take the newest release's file from All downloads instead." }),
-      el("p", { class: "form-hint", text: "Windows has no installer yet. Use claude.ai in the browser: if DBTrail is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), the browser path cannot reach it; use the desktop app on a Mac or Linux machine instead." })));
-  } else if (released) {
-    // Windows on a released build: the desktop bundle does not exist, so the
-    // browser connector IS the path, not a footnote.
-    card.append(el("p", { class: "stg-hint", text: "There is no Windows installer yet. If DBTrail is reachable from the internet, connect from claude.ai in the browser: open Settings, then Connectors, then Add custom connector, and paste the address and token from steps 1 and 2." }));
-    card.append(askExample());
-    card.append(cnFine("DBTrail on a private network?",
-      el("p", { class: "form-hint", text: "On a private network (only reachable from inside), claude.ai cannot reach DBTrail; install the desktop bundle on a Mac or Linux machine instead. All downloads below has the files." }),
-      el("p", { class: "form-hint" }, el("a", { href: relTag, target: "_blank", rel: "noopener", text: "All downloads for v" + ver }))));
-  } else if (plat) {
-    card.append(el("p", { class: "stg-hint", text: "Get the Claude Desktop app (claude.ai/download), then download the newest installer for this computer and double-click it:" }));
-    card.append(el("div", { class: "cn-links" },
-      el("a", { class: "btn btn-sm", href: "https://github.com/dbtrail/dbtrail/releases", target: "_blank", rel: "noopener", text: "Open the releases page" })));
-    card.append(el("p", { class: "stg-hint", text: "Claude opens and asks to install DBTrail; accept, then fill in two things:" }));
-    card.append(claudeAskMock());
-    card.append(askExample());
-    card.append(cnFine("Which file is for this computer?",
-      el("p", { class: "form-hint", text: "This is a development build, so there is no matching download link. In the newest release: Mac with Apple chip is dbtrail-darwin-arm64.mcpb, Intel Mac is dbtrail-darwin-amd64.mcpb, Linux is dbtrail-linux-amd64.mcpb (or -arm64). Windows has no installer yet." }),
-      el("p", { class: "form-hint", text: "Using claude.ai in the browser instead of the desktop app? If DBTrail is reachable from the internet, open Settings, then Connectors, then Add custom connector, and paste the same address and token. On a private network (only reachable from inside), use the desktop app." })));
+// mcpConnLine: did a client reach DBTrail? Only said once a token exists
+// (before that nothing could have). The server keeps the stamp in memory, so
+// "not yet" is said from when it started counting, never as "never".
+function mcpConnLine(tok) {
+  const line = el("p", { class: "cn-conn", "aria-live": "polite" });
+  if (!tok || !(tok.managed || tok.static)) return line;
+  const used = mcpLastUse(tok);
+  if (used != null) {
+    const age = Math.max(0, (Date.now() - used) / 1000);
+    // Green only while the use is recent: a request from days ago says when
+    // it was, not that a client is connected now.
+    const recent = age < MCP_CONN_RECENT_S;
+    if (recent) line.classList.add("is-on");
+    line.append(el("span", { class: "health-dot " + (recent ? "ok" : "none") }),
+      (recent ? " Connected: last request " : " Last request ") + (age >= 2 * 86400 ? Math.round(age / 86400) + " days ago" : agoText(age)));
   } else {
-    // Development build ON WINDOWS: no installer exists at any version, so
-    // the browser connector is the only path here too.
-    card.append(el("p", { class: "stg-hint", text: "There is no Windows installer. If DBTrail is reachable from the internet, connect from claude.ai in the browser: open Settings, then Connectors, then Add custom connector, and paste the address and token from steps 1 and 2." }));
-    card.append(askExample());
-    card.append(cnFine("DBTrail on a private network?",
-      el("p", { class: "form-hint", text: "On a private network (only reachable from inside), claude.ai cannot reach DBTrail; install the desktop bundle on a Mac or Linux machine instead." }),
-      el("p", { class: "form-hint" }, el("a", { href: "https://github.com/dbtrail/dbtrail/releases", target: "_blank", rel: "noopener", text: "Open the releases page" }))));
+    // Said of this token, not of DBTrail: after New token, the old value's
+    // requests happened and do not count for the new one.
+    line.append(el("span", { class: "health-dot none" }),
+      " Not connected yet: this token has made no request" + (tok.counting_since ? " since DBTrail started, " + utcLabel(tok.counting_since) : ""));
   }
-  return card;
+  return line;
+}
+
+// mcpConnPoll keeps the connection line current while the page is open, by
+// replacing that one line. It never repaints the page: renderConnect consumes
+// the one-time token, and a repaint would wipe it from the screen. One loop
+// per paint: a newer paint (a mint re-renders without a route change) or a
+// route or server change ends the old one.
+let mcpConnLoop = null;
+function mcpConnPoll() {
+  const mine = mcpConnLoop = {};
+  const gen = serverGen, vgen = viewGen;
+  const alive = () => mine === mcpConnLoop && gen === serverGen && vgen === viewGen && routeSegment() === "connect";
+  const tick = async () => {
+    if (!alive()) return;
+    try {
+      if (document.hidden) return;
+      let tok = null, failed = false;
+      try { tok = await api("/api/mcp-token"); } catch (_) { failed = true; }
+      if (!alive()) return;
+      const cur = document.querySelector(".view .cn-conn");
+      if (!cur) return;
+      // A failed read must not leave the last answer on screen as if it
+      // were current.
+      if (failed) {
+        const stale = el("p", { class: "cn-conn", "aria-live": "polite" },
+          el("span", { class: "health-dot none" }), " Could not check the connection just now. Trying again.");
+        cur.replaceWith(stale);
+      } else if (tok) {
+        cur.replaceWith(mcpConnLine(tok));
+      }
+    } catch (err) {
+      console.warn("MCP connection line:", err);
+    } finally {
+      if (alive()) setTimeout(tick, MCP_CONN_POLL_MS);
+    }
+  };
+  setTimeout(tick, MCP_CONN_POLL_MS);
+}
+const MCP_CONN_POLL_MS = 5000;
+const MCP_CONN_RECENT_S = 24 * 3600;
+
+function mcpQuestions() {
+  return el("div", { class: "cn-try" },
+    el("span", { class: "cn-try-k", text: "Then ask" }),
+    el("div", { class: "cn-try-q" }, ...[
+      "What changed in my database in the last hour?",
+      // Current data is the copy's, answered only where there is one.
+      capsCache.sql ? "Which ten customers spent the most this month?" : null,
+      "What did order 1042 hold before it was deleted?",
+    ].filter(Boolean).map((q) => el("span", { text: "“" + q + "”" }))));
 }
 
 // guessPlatform maps the browser's environment to a release-artifact os-arch
@@ -14832,9 +14901,9 @@ function otherClientsPanel(servers) {
       dbtrail: { command: "bintrail-mcp", args: ["--connect", url, "--token", "YOUR_ACCESS_TOKEN"] },
     },
   }, null, 2);
-  const panel = el("section", { class: "ov-panel cn-other", style: "margin-top:18px" });
+  const panel = el("section", { class: "cn-other" });
   const adv = el("details", { class: "form-advanced", style: "margin-top:0" },
-    el("summary", { class: "form-adv-summary", text: "Other AI tools (technical)" }));
+    el("summary", { class: "form-adv-summary", text: "Another AI tool, or Claude Code? Connection details" }));
   adv.append(el("p", { class: "form-hint", text:
     "For claude_desktop_config.json, or any client that launches stdio MCP servers: bintrail-mcp bridges stdio to DBTrail. The token travels as an Authorization: Bearer header. Replace the placeholder with your access token:" }));
   adv.append(el("pre", { class: "stg-code cn-snippet", text: snippet }));
@@ -15968,8 +16037,8 @@ async function gateCapabilities() {
 // the rendered string (a "v1.2.3" that skips the released branch is echoed
 // verbatim by the fallback and reads the same), but it keeps a tag-shaped
 // -ldflags value on the same side of the released/unreleased split that
-// bundleCard() puts it on. That sibling anchors its regex and this one does
-// not, deliberately: bundleCard derives a download URL that has to resolve, so
+// mcpInstallArm() puts it on. That sibling anchors its regex and this one does
+// not, deliberately: mcpInstallArm decides on a download URL that has to resolve, so
 // it rejects "1.2.3-rc1"; this row only echoes what the server reported.
 function updateSideVersion(known) {
   const b = $("#meta-version b");

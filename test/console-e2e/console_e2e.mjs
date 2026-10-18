@@ -5170,22 +5170,33 @@ try {
   // page wraps to two columns and its third card is alone on the last row.
   // Without the span rule that leaves 287 to 387px of nothing beside it, which
   // is the same hole moved to a laptop width. Measured on the LAST row, at a
-  // width inside the band, on the page that carries three cards.
+  // width inside the band, on a row of three cards. No page is guaranteed to
+  // carry three any more (MCP Server, which did, is one panel since its
+  // redesign), so the row is built here, three plain cards in the view under
+  // the real stylesheet: the rule is what is measured, not a page's data.
   //
   // The suite's viewport is restored before moving on: every scenario after
   // this one assumes 1300.
   await page.setViewportSize({ width: 1000, height: 1000 });
-  await page.evaluate(() => navigate("connect"));
-  await page.waitForFunction(() => location.pathname === "/connect"
-    && document.querySelectorAll(".cards .card").length >= 3);
+  await page.evaluate(() => navigate("retention"));
+  await page.waitForFunction(() => location.pathname === "/retention" && !!document.querySelector(".view"));
   const bandRow = await page.evaluate(() => {
-    const g = document.querySelector(".cards");
+    const g = document.createElement("div");
+    g.className = "cards e2e-band";
+    for (let i = 0; i < 3; i++) {
+      const c = document.createElement("div");
+      c.className = "card";
+      c.textContent = "card " + (i + 1);
+      g.append(c);
+    }
+    document.querySelector(".view").append(g);
     const gw = g.getBoundingClientRect().width;
     const boxes = Array.from(g.children).map((c) => c.getBoundingClientRect());
     const tops = [...new Set(boxes.map((b) => Math.round(b.top)))].sort((a, z) => a - z);
     const last = boxes.filter((b) => Math.round(b.top) === tops[tops.length - 1]);
     const gap = parseFloat(getComputedStyle(g).columnGap) || 0;
     const used = last.reduce((s, b) => s + b.width, 0) + gap * (last.length - 1);
+    g.remove();
     return { cards: boxes.length, rows: tops.length, onLast: last.length, left: Math.round(gw - used) };
   });
   await page.setViewportSize({ width: 1300, height: 1000 });
@@ -5670,7 +5681,7 @@ try {
     if (t) t.click();
   }, inplaceWas);
 
-  // ── Scenario 17g — Connect AI is three short steps with a drawn dialog ──
+  // ── Scenario 17g — MCP Server is three short steps beside a drawn dialog ──
   // The audience is Claude users, mostly non-technical. The first rewrite
   // (#1430) made the steps explicit but drowned them in prose; the verdict on
   // the live page was "demasiado texto". This pass folds every contingency
@@ -5693,18 +5704,18 @@ try {
   // Limit worth naming: run.sh builds without -ldflags, so this only ever
   // photographs the UNVERSIONED bundle arm.
   await page.evaluate(() => navigate("connect"));
-  // Wait on .cn-card, a connect-only marker. ".card" is not connect-specific:
-  // anything else that paints cards into the shared #view container (another
-  // view's late async paint — the route-clobber class scenario 17c exists
-  // for) can satisfy it, and the preview loop for this scenario photographed
-  // exactly one such half-built page. .cn-card can only exist after
-  // buildConnect ran, and === 3 also rings if a card is dropped.
-  // Tolerant wait: against a page with no .cn-card at all (the M1 mutation,
+  // Wait on .cn-hero .cn-step, a connect-only marker. ".card" is not
+  // connect-specific: anything else that paints cards into the shared #view
+  // container (another view's late async paint — the route-clobber class
+  // scenario 17c exists for) can satisfy it, and the preview loop for this
+  // scenario photographed exactly one such half-built page. .cn-step can only
+  // exist after buildConnect ran, and === 3 also rings if a step is dropped.
+  // Tolerant wait: against a page with no steps at all (the M1 mutation,
   // assets reverted to the pre-simplify page) a bare waitForFunction timeout
   // ABORTS the suite at this line, hiding the four assertions below and every
   // later scenario. Catch it and let the assertions report the actual shape.
   await page.waitForFunction(() => location.pathname === "/connect"
-    && document.querySelectorAll(".view .cn-card").length === 3)
+    && document.querySelectorAll(".view .cn-hero .cn-step").length === 3)
     .catch(() => {});
   // The mock's field labels come from the REAL bundle manifest, not from a
   // second hand-maintained copy: renaming either side alone rings below. A
@@ -5717,10 +5728,13 @@ try {
     const mcpbCfg = JSON.parse(readFileSync(new globalThis.URL("../../build/packaging/mcpb/manifest.template.json", import.meta.url), "utf8")).user_config;
     mcpbTitles = [mcpbCfg.console_url.title, mcpbCfg.token.title];
   } catch (e) { mcpbReadErr = String(e); }
+  const cnTok = await page.evaluate(() => api("/api/mcp-token").catch(() => null));
   const cn = await page.evaluate(() => {
-    const badges = Array.from(document.querySelectorAll(".view .card .cn-num")).map((n) => n.textContent).join("");
+    // A step that is done wears a tick in place of its number.
+    const badges = Array.from(document.querySelectorAll(".view .cn-step .cn-num"))
+      .map((n) => n.querySelector("svg") ? "v" : n.textContent).join("");
     const labels = Array.from(document.querySelectorAll(".cn-mock .cn-mock-label")).map((n) => n.textContent);
-    const addrCard = document.querySelectorAll(".view .cn-card")[1];
+    const addrRow = document.querySelectorAll(".view .cn-mock .cn-mock-row")[0];
     const view = document.querySelector(".view") || { innerText: "", querySelectorAll: () => [], querySelector: () => null };
     const visible = view.innerText;
     return {
@@ -5736,16 +5750,27 @@ try {
         || Array.from(view.querySelectorAll(".ov-panel-title")).some((t) => t.textContent === "Download a DuckDB schema"),
       duckViewsCap: !!capsCache.views,
       fine: document.querySelectorAll(".view details.cn-fine").length,
-      addrCopy: addrCard ? Array.from(addrCard.querySelectorAll("button")).some((b) => b.textContent === "Copy") : false,
+      addrCopy: addrRow ? Array.from(addrRow.querySelectorAll("button")).some((b) => b.textContent === "Copy") : false,
+      conn: (document.querySelector(".view .cn-hero .cn-conn") || {}).textContent || "",
       once: /shown only once/.test(visible),
       // The 404-honesty rule's photographable half: this run is the
       // unversioned arm, where a direct release-asset link can only 404.
       downloadLinks: document.querySelectorAll('.view a[href*="/releases/download/"]').length,
     };
   });
-  (cn.badges === "123")
+  // Step 1 is ticked exactly when a token exists; 2 and 3 are never ticked,
+  // since nothing tells the page Claude was installed.
+  const haveTok = !!(cnTok && (cnTok.managed || cnTok.static));
+  (cn.badges === (haveTok ? "v23" : "123"))
     ? ok("connect: three numbered step badges in order")
-    : bad("connect: three numbered step badges in order", JSON.stringify(cn.badges));
+    : bad("connect: three numbered step badges in order", JSON.stringify({ badges: cn.badges, token: cnTok }));
+  // The line under the box follows the token's own last use (the change
+  // between its states on an open page is driven in save_controls).
+  const usedAt = cnTok ? [cnTok.managed && cnTok.last_used_at, cnTok.static && cnTok.static_last_used_at].filter(Boolean) : [];
+  const wantConn = !haveTok ? /^$/ : usedAt.length ? /^ ?(Connected: last request|Last request)/ : /^ ?Not connected yet: this token has made no request/;
+  (cnTok && wantConn.test(cn.conn))
+    ? ok("connect: the line under the box says whether a client reached DBTrail")
+    : bad("connect: the line under the box says whether a client reached DBTrail", JSON.stringify({ conn: cn.conn, token: cnTok }));
   (cn.labels.length === 2 && cn.labels[0] === mcpbTitles[0] && cn.labels[1] === mcpbTitles[1])
     ? ok("connect: the drawn dialog carries the manifest's field names verbatim")
     : bad("connect: the drawn dialog carries the manifest's field names verbatim", JSON.stringify({ drawn: cn.labels, manifest: mcpbTitles, readErr: mcpbReadErr }));
@@ -5789,8 +5814,8 @@ try {
     const memPanel = view.querySelector(".cn-sqlmem");
     return {
       title: (document.querySelector(".view h1") || {}).textContent || "",
-      // The MCP steps stayed behind: no numbered card here.
-      steps: document.querySelectorAll(".view .cn-card").length,
+      // The MCP steps stayed behind: no numbered step here.
+      steps: document.querySelectorAll(".view .cn-step").length,
       // The memory panel's own text, its folded notes closed.
       mem: memPanel ? { present: true, chars: memPanel.innerText.length,
         open: memPanel.querySelectorAll("details[open]").length } : { present: false },

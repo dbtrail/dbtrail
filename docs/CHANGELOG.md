@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **The MCP Server page is one panel that shows what Claude will ask for.** The three cards become three short steps beside a drawing of the box Claude Desktop shows while installing DBTrail, already holding this console's address and, the one time it is shown, the new token, each with its own Copy button. Under it the page says whether an AI client has reached DBTrail, and updates that line by itself while it is open. Example questions sit under the panel, and the setup for other AI tools folds into one line.
+
+### Added
+- **`GET /api/mcp-token` says when each token last reached a server**: `last_used_at` for the managed token (the current value only, so a new or deleted token reads as unused), `static_last_used_at` for the static one, and `counting_since`, when the process started. A refused token or an unknown `/mcp/{id-or-name}` is not a use. Kept in memory.
+
 
 ## [0.108.1] - 2026-10-18
 

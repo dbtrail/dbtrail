@@ -2321,11 +2321,10 @@ section.bk-restore { margin-top: 18px; }
 .ap-stack { display: grid; gap: 18px; }
 .ap-row .stg-dest { flex: 1; }
 .empty.ap-empty { padding: 18px 16px; gap: 8px; margin: 4px 0 10px; }
-.ap-empty .empty-art svg, .cn-key svg, .srv-empty .empty-art svg { width: 120px; height: 40px; }
+.ap-empty .empty-art svg, .srv-empty .empty-art svg { width: 120px; height: 40px; }
 /* no taller than the line it replaced: the add form opens under it (first-run walk) */
 .empty.srv-empty { padding: 18px 16px; gap: 8px; margin: 0; }
 .modal-body:has(#server-form-mount > *) .srv-empty { display: none; }
-.cn-key { margin: 2px 0 8px; }
 /* how flags, profiles and rules work together, drawn (#1950) */
 .ap-draw { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -8px 0 22px; }
 .ap-step { display: flex; flex-direction: column; gap: 4px; }
@@ -2520,6 +2519,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .cn-url { flex: 1; align-self: auto; white-space: nowrap; }
 .cn-links { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .cn-snippet { display: block; margin: 8px 0 10px; white-space: pre; }
+.cn-other { margin-top: 22px; max-width: 760px; }
 .cn-other .form-hint { margin-top: 8px; }
 .cn-sql-body { padding: 0 14px 14px; }
 .cn-sql-row { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); }
@@ -2992,22 +2992,37 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
    open. The panel is a programmatic target, not a tab stop: no ring. */
 .modal:focus { outline: none; }
 
-/* Connect AI, simple pass: the step number is a badge, the two Claude fields
-   are a drawn dialog, and everything conditional folds into <details>. */
-.cn-title { display: flex; align-items: center; gap: 10px; }
-/* Step cards hug their content: card 3 carries the drawn dialog and is much
-   taller, and stretching 1 and 2 to match reads as two-thirds empty page. */
-.cards .cn-card { align-self: start; }
-/* The disk-space card's title row. It carried a state pill until #1681 took
-   the switch away; the measurements that justified the pill's colour went
-   with it. */
+/* MCP Server: one panel, the steps on the left and the box Claude shows on
+   the right, drawn large and holding the real values. Steps keep a badge,
+   a title and one line; everything conditional folds into <details>. */
+.cn-hero {
+  position: relative; overflow: hidden; isolation: isolate;
+  display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 44px; align-items: center;
+  background: var(--surface); border-radius: var(--r-xl); box-shadow: var(--shadow);
+  padding: 44px 48px; margin-top: 6px;
+}
+.cn-hero::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: radial-gradient(55% 80% at 85% 30%, var(--brand-wash-pink), transparent 70%),
+              radial-gradient(40% 60% at 70% 100%, var(--brand-wash-sun), transparent 70%);
+}
+.cn-hero-t { font-family: var(--f-display); font-size: 34px; font-weight: 800; line-height: 1.08; letter-spacing: -0.02em; margin: 0 0 14px; color: var(--ink); }
+.cn-hero-lead { font-size: 15px; line-height: 1.55; color: var(--ink-2); margin: 0 0 26px; max-width: 400px; }
+.cn-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 18px; }
+.cn-step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 14px; align-items: start; }
+.cn-step-t { font-size: 15px; font-weight: 700; color: var(--ink); margin: 4px 0 6px; }
+.cn-step-p { font-size: 13px; line-height: 1.5; color: var(--ink-3); margin: 0 0 8px; }
+.cn-step .cn-links { margin: 6px 0 2px; }
 .cn-num {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 50%; flex: none;
   background: var(--grad-deep);
-  color: var(--white); font-size: 14px; font-weight: 700;
+  color: var(--white); font-size: 13px; font-weight: 700;
 }
+.cn-step.is-done .cn-num { background: var(--mint-tint); color: var(--ok); }
+.cn-num svg { width: 16px; height: 16px; }
 .cn-fine { margin-top: 10px; }
+
 /* The mock and the ask bubble sit INSIDE a tinted config card, where the
    --line family drowns (1.08 on the violet tint); they take the same stronger
    hairline the file already gives .stg-code insets on tints, and the bubble
@@ -3040,15 +3055,33 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .dk-off .dk-bar { background: var(--line); }
 .dk-cap { font-size: 11.5px; color: var(--ink-3); margin-top: 5px; }
 
-.cn-mock { border: 1px solid var(--line-on-tint); border-radius: var(--r-md); background: var(--surface); margin: 10px 0; max-width: 430px; box-shadow: var(--panel-shadow); }
-.cn-mock-bar { display: flex; align-items: center; padding: 7px 12px; border-bottom: 1px solid var(--line-soft); color: var(--ink-4); font-size: 11.5px; }
-.cn-mock-dots { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--delete); box-shadow: 13px 0 0 var(--sun), 26px 0 0 var(--insert); margin-right: 44px; }
-.cn-mock-row { padding: 9px 12px 3px; }
-.cn-mock-row:last-child { padding-bottom: 12px; }
-.cn-mock-label { font-size: 11.5px; font-weight: 600; color: var(--ink-3); margin-bottom: 4px; }
-.cn-mock-field { display: flex; align-items: center; gap: 8px; border: 1px dashed var(--line); border-radius: var(--r-sm); padding: 6px 10px; background: var(--raised); font-size: 12.5px; color: var(--ink-3); font-style: italic; }
-.cn-chip { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; flex: none; background: var(--grad-deep); color: var(--white); font-size: 11.5px; font-weight: 700; font-style: normal; }
-.cn-ask { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; margin: 8px 0 2px; padding: 8px 14px; border-radius: var(--r-lg) var(--r-lg) var(--r-lg) var(--r-xs); background: var(--surface); border: 1px solid var(--line-on-tint); font-size: 12.5px; color: var(--ink-2); }
+/* The drawn box. Its own hairline and a deep, soft shadow lift it off the
+   washed panel; the fields are the one place values are copied from. */
+.cn-mock { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 30px 60px -28px oklch(0.3 0.08 300 / 0.35), 0 2px 6px oklch(0.3 0.05 300 / 0.06); }
+.cn-mock-bar { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); color: var(--ink-4); font-size: 12.5px; }
+.cn-mock-dots { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--delete); box-shadow: 16px 0 0 var(--sun), 32px 0 0 var(--insert); margin-right: 40px; }
+.cn-mock-in { padding: 22px 24px 8px; }
+.cn-mock-head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; font-size: 16px; color: var(--ink); }
+.cn-mock-ico { width: 44px; height: 44px; border-radius: 11px; background: var(--grad); display: grid; place-items: center; flex: none; }
+.cn-mock-ico img { width: 34px; height: auto; }
+.cn-mock-row { margin-bottom: 16px; }
+.cn-mock-label { font-size: 12.5px; font-weight: 600; color: var(--ink-2); margin-bottom: 6px; }
+.cn-mock-field { display: flex; align-items: center; gap: 8px; min-height: 44px; border: 1.5px solid var(--line); border-radius: 10px; padding: 6px 7px 6px 13px; }
+.cn-mock-field code { flex: 1; min-width: 0; font-family: var(--f-mono); font-size: 13.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-mock-paste { color: var(--ink-4); font-size: 13px; font-style: italic; }
+.cn-mock-field.is-hot { border-color: var(--sun-mid); background: var(--sun-tint); }
+.cn-mock-cap { font-size: 12.5px; color: var(--ink-4); text-align: center; margin: 12px 0 0; }
+.cn-conn { font-size: 13px; line-height: 1.5; color: var(--ink-3); text-align: center; max-width: 440px; margin: 8px auto 0; min-height: 1em; text-wrap: balance; }
+.cn-conn .health-dot { display: inline-block; vertical-align: middle; margin-right: 2px; }
+.cn-conn.is-on { color: var(--ok); font-weight: 600; }
+.cn-try { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 18px; align-items: center; margin-top: 26px; }
+.cn-try-k { font-size: 13px; font-weight: 600; color: var(--ink-3); }
+.cn-try-q { display: flex; gap: 8px; flex-wrap: wrap; }
+.cn-try-q span { font-size: 13px; color: var(--ink-2); background: var(--surface); box-shadow: var(--shadow); border-radius: var(--r-pill); padding: 8px 14px; }
+@media (max-width: 880px) {
+  .cn-hero { grid-template-columns: 1fr; gap: 28px; padding: 28px 22px; }
+  .cn-try { grid-template-columns: 1fr; gap: 10px; }
+}
 /* inline flag/env names in hints never wrap mid-token: a --flag broken
    across lines reads as "- -flag" to the non-technical audience this page
    addresses. */

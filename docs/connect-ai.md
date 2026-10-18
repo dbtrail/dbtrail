@@ -25,9 +25,11 @@ server, exactly like the web interface's Time-travel tab; without one the tool s
 
 ## Step 1: you need the web interface with a token
 
-> The step numbers in this guide match the numbered cards on the web interface's **MCP Server**
-> page (1 Create a token, 2 Copy the address, 3 Add it to Claude), so you can
-> follow either surface.
+> The web interface's **MCP Server** page walks the same path in three steps
+> (1 Create a token, 2 Install DBTrail in Claude Desktop, 3 Paste the two
+> values). Beside them it draws the box Claude shows while installing, already
+> holding your address (and your token, the one time it is shown), and under
+> it says whether an AI client has reached DBTrail since DBTrail last started.
 
 The AI connects to your **web interface**, which serves an MCP endpoint at
 `/mcp`. If you already run `bintrail-console` (standalone `serve`, `watch`, or
@@ -35,9 +37,9 @@ the Docker stack), you're nearly done — the AI client just needs an **access
 token**, and you mint one without leaving the browser:
 
 Open **Settings → MCP Server** in the sidebar. If no token is configured yet,
-the **Create a token** card has a **Generate token** button — click it, copy the
+step 1, **Create a token**, has a **Generate token** button — click it, copy the
 value it shows (it appears exactly once and is never stored), and you're done.
-No flags, no environment variables, no restart. The same card replaces the
+No flags, no environment variables, no restart. The same step replaces the
 token (**New token**) or deletes it (**Delete token**) later. The generated token is scoped to the MCP tools only —
 it cannot administer the web interface, and it carries the permission grants of the
 session that minted it, so each MCP tool works only if your session could use
@@ -49,8 +51,8 @@ token is their credential.
 
 > **Prefer configuration-managed credentials?** A static token via `--token`
 > or the `BINTRAIL_CONSOLE_TOKEN` environment variable (set where the daemon
-> process starts, then restart it) also works, and is reported on the Connect
-> AI page as environment-owned.
+> process starts, then restart it) also works, and the MCP Server page says
+> one was set at startup.
 
 
 > **Nothing installed yet?** The [start page](https://www.dbtrail.com/docs/quickstart/) gets a full stack up in a
