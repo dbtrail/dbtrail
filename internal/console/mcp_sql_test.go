@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/audittest"
+	"github.com/dbtrail/dbtrail/internal/mcptools"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -186,5 +187,56 @@ func TestMCPSQLError(t *testing.T) {
 				t.Errorf("got %q, must not contain %q", got, tc.notWant)
 			}
 		})
+	}
+}
+
+// The catalog the sql tool's description sends a model to (#2456): each
+// statement it names answers on a real worker, and the two traps it warns
+// about are real. If a worker change made SHOW TABLES list the tables, or
+// put events in SHOW ALL TABLES, the description would be telling the model
+// something false, and this test says so.
+func TestMCPSQL_catalogStatementsTheDescriptionNames(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
+	f := newSQLFixture(t, runner, true)
+	for range 4 {
+		f.expectArchive()
+	}
+	call := mcpSQLSession(t, f)
+	run := func(stmt string) string {
+		t.Helper()
+		if !strings.Contains(mcptools.SQLCatalogHint(), stmt) {
+			t.Fatalf("the description no longer names %q; keep this test in step with it", stmt)
+		}
+		isErr, text := call(map[string]any{"statement": stmt})
+		if isErr {
+			t.Fatalf("%s: %s", stmt, text)
+		}
+		return text
+	}
+
+	all := run("SHOW ALL TABLES")
+	if !strings.Contains(all, `"shop","orders",["id","status"],["INTEGER","VARCHAR"]`) {
+		t.Errorf("SHOW ALL TABLES lacks shop.orders with its columns and types:\n%s", all)
+	}
+	if strings.Contains(all, `"events"`) {
+		t.Errorf("events is now in SHOW ALL TABLES; the description says it is not:\n%s", all)
+	}
+	if text := run("SHOW TABLES"); !strings.Contains(text, `"row_count":0`) {
+		t.Errorf("SHOW TABLES now lists something; the description says it lists nothing:\n%s", text)
+	}
+	if text := run("DESCRIBE events"); !strings.Contains(text, `"event_id","BIGINT"`) {
+		t.Errorf("DESCRIBE events lacks the change history's columns:\n%s", text)
+	}
+	// DESCRIBE schema.table is a pattern in the description; the fixture's
+	// table stands in for it.
+	if !strings.Contains(mcptools.SQLCatalogHint(), "DESCRIBE schema.table") {
+		t.Fatal("the description no longer names DESCRIBE schema.table")
+	}
+	if isErr, text := call(map[string]any{"statement": "DESCRIBE shop.orders"}); isErr || !strings.Contains(text, `["id","INTEGER"`) {
+		t.Errorf("DESCRIBE shop.orders: isErr=%v\n%s", isErr, text)
 	}
 }

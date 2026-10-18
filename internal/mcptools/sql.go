@@ -96,7 +96,23 @@ const sqlToolDescription = "Run one read-only SQL statement on the copy of the m
 	"The answer carries the statement that ran (statement) and the time of the copy that answered (copy_updated_at): " +
 	"show the user both with the result, so they can check what was asked and how current the numbers are. " +
 	"At most 500 rows and 1 MiB come back; past that, truncated is true and notice says what was left out. " +
-	"Prefer aggregating in SQL (GROUP BY, ORDER BY ... LIMIT) over pulling raw rows."
+	"Prefer aggregating in SQL (GROUP BY, ORDER BY ... LIMIT) over pulling raw rows. " +
+	sqlCatalogHint
+
+// sqlCatalogHint tells the model how to learn the tables before guessing
+// names (#2456). The copy answers its own catalog, so this is a sentence, not
+// a tool; it names the two traps measured on a real worker: SHOW TABLES
+// alone searches a schema that holds no table and returns nothing, and the
+// events table is not in SHOW ALL TABLES (its view is installed only for a
+// statement that names it) although it can be queried.
+const sqlCatalogHint = "To learn the tables before writing a query, run SHOW ALL TABLES (every table with its columns and types) " +
+	"or DESCRIBE schema.table; SHOW TABLES alone lists nothing. " +
+	"The events table, the history of row changes, is not listed there but can be queried: DESCRIBE events shows its columns."
+
+// SQLCatalogHint is the sentence of the sql tool's description that sends a
+// model to the copy's own catalog, exported so the console's real-worker test
+// can run each statement it names.
+func SQLCatalogHint() string { return sqlCatalogHint }
 
 // errSQLAccessRules is the per-call refusal under access rules.
 var errSQLAccessRules = errors.New("SQL on the copy is unavailable on this server while access rules are active " +

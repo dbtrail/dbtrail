@@ -234,6 +234,41 @@ Prompts that work well:
 >
 > "What was customer 42's row before the last change?"
 
+## Questions about your data (web interface only)
+
+The six tools above read the history of changes. When Claude is connected to
+the web interface's `/mcp`, it also gets a seventh tool, `sql`, which answers
+questions about the data as it is now: totals, rankings, trends, joins across
+tables. It runs one read-only statement on the copy of your tables, with the
+same engine as the web interface's SQL page.
+
+Prompts that work well:
+
+> "Which 10 customers spent the most last month?"
+>
+> "How many orders were created per day this week, by status?"
+>
+> "Which products have never been ordered?"
+
+What to expect:
+
+- **Claude shows you the query it ran**, and the time of the copy that
+  answered (`copy_updated_at`), so you can check what was asked and how
+  current the numbers are.
+- **At most 500 rows and 1 MiB per answer.** When an answer is cut, it says
+  so, and you can run the same query on the SQL page or on DBTrail's MySQL
+  port to get every row.
+- **Claude finds the tables on its own**: the copy answers `SHOW ALL TABLES`
+  (every table with its columns and types) and `DESCRIBE schema.table`. The
+  history of row changes is the `events` table.
+- **It needs the `sql:execute` permission**, like the SQL page, and it is
+  refused on a server with access rules (a data profile, denied tables or
+  redacted columns), because free SQL reads the copy's files directly and
+  those rules cannot filter them.
+
+The standalone `bintrail-mcp` binary does not serve `sql`: it needs the copy
+on the same machine, which is where the web interface runs.
+
 ---
 
 ## Tool parameters and behavior (reference)
