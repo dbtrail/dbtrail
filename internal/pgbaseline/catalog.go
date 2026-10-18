@@ -156,13 +156,16 @@ func warnPartitioned(tables []tableInfo, publication string, logger *slog.Logger
 // attnum. The generated columns come back apart, with their expressions.
 func loadColumns(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table string, logger *slog.Logger) ([]baseline.PGColumn, []baseline.PGGeneratedColumn, error) {
 	rows, err := conn.Query(ctx, `
-		SELECT a.attname, a.attgenerated <> '', a.atttypid, a.atttypmod,
+		SELECT a.attname, a.attgenerated <> '', a.attgenerated = 'v', a.atttypid, a.atttypmod,
 		       format_type(a.atttypid, a.atttypmod), a.attnotnull,
 		       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity::text,
-		       COALESCE(pg_get_serial_sequence(a.attrelid::regclass::text, a.attname), ''),
-		       a.attnum
+		       COALESCE(seq.name, ''), a.attnum,
+		       COALESCE(format_type(s.seqtypid, NULL), ''), COALESCE(s.seqstart, 0), COALESCE(s.seqincrement, 0),
+		       COALESCE(s.seqmin, 0), COALESCE(s.seqmax, 0), COALESCE(s.seqcache, 0), COALESCE(s.seqcycle, false)
 		FROM pg_attribute a
 		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		CROSS JOIN LATERAL (SELECT pg_get_serial_sequence(a.attrelid::regclass::text, a.attname) AS name) seq
+		LEFT JOIN pg_sequence s ON s.seqrelid = seq.name::regclass
 		WHERE a.attrelid = $1
 		  AND a.attnum > 0 AND NOT a.attisdropped
 		ORDER BY a.attnum`, oid)
@@ -176,13 +179,14 @@ func loadColumns(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table 
 	var generated []string
 	for rows.Next() {
 		var c baseline.PGColumn
-		var isGenerated bool
-		if err := rows.Scan(&c.Name, &isGenerated, &c.TypeOID, &c.TypeMod, &c.Type, &c.NotNull, &c.Default, &c.Identity, &c.Sequence, &c.Ordinal); err != nil {
+		var isGenerated, virtual bool
+		if err := rows.Scan(&c.Name, &isGenerated, &virtual, &c.TypeOID, &c.TypeMod, &c.Type, &c.NotNull, &c.Default, &c.Identity, &c.Sequence, &c.Ordinal,
+			&c.Seq.Type, &c.Seq.Start, &c.Seq.Increment, &c.Seq.Min, &c.Seq.Max, &c.Seq.Cache, &c.Seq.Cycle); err != nil {
 			return nil, nil, fmt.Errorf("pgbaseline: scanning columns of %s.%s: %w", schema, table, err)
 		}
 		if isGenerated {
 			generated = append(generated, c.Name)
-			gens = append(gens, baseline.PGGeneratedColumn{Name: c.Name, Type: c.Type, Expr: c.Default, NotNull: c.NotNull, Ordinal: c.Ordinal})
+			gens = append(gens, baseline.PGGeneratedColumn{Name: c.Name, Type: c.Type, Expr: c.Default, NotNull: c.NotNull, Ordinal: c.Ordinal, Virtual: virtual})
 			continue
 		}
 		cols = append(cols, c)

@@ -230,6 +230,10 @@ type foldConfig struct {
 	// refusing (#1107), and past MaxChangeBytes (#2207), which never refuses. Only the merge over a baseline reads a spill; the
 	// binlog-only fallback keeps the refusal.
 	SpillOverBudget bool
+	// PG folds a PostgreSQL window (#1596): its values are PostgreSQL's own
+	// text as captured (bytea as hex), with no ENUM ordinals and no base64
+	// to decode, so neither decoding pass runs.
+	PG bool
 
 	// Heads is the run's query.PartitionHeads, passed to the fetch so every
 	// table reads the same picture of the index; nil has the fetch load one.
@@ -600,8 +604,10 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		}
 		foldStart := time.Now()
 		defer func() { res.FoldDuration += time.Since(foldStart) }()
-		dec.mapEnums(page)
-		dec.decodeBinaries(page)
+		if !fc.PG {
+			dec.mapEnums(page)
+			dec.decodeBinaries(page)
+		}
 
 		if res.First == nil {
 			first := page[0]

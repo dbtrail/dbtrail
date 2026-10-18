@@ -49,6 +49,8 @@ type PGGeneratedColumn struct {
 	Expr    string `json:"expr"`
 	NotNull bool   `json:"not_null,omitempty"`
 	Ordinal int    `json:"ordinal,omitempty"`
+	// Virtual is a VIRTUAL generated column (PostgreSQL 18), else STORED.
+	Virtual bool `json:"virtual,omitempty"`
 }
 
 // PGColumn is one column of a PGRelation. TypeOID and TypeMod are
@@ -74,6 +76,21 @@ type PGColumn struct {
 	// Ordinal is attnum: where the column sits among all of the table's,
 	// generated ones included. 0 = not recorded.
 	Ordinal int `json:"ordinal,omitempty"`
+	// Seq is the options of Sequence (pg_sequence); zero when the column
+	// owns none or they were not recorded.
+	Seq PGSequence `json:"seq,omitzero"`
+}
+
+// PGSequence is a sequence's options as pg_sequence holds them: its type as
+// format_type spells it, start, increment, bounds, cache and cycle.
+type PGSequence struct {
+	Type      string `json:"type"`
+	Start     int64  `json:"start"`
+	Increment int64  `json:"increment"`
+	Min       int64  `json:"min"`
+	Max       int64  `json:"max"`
+	Cache     int64  `json:"cache"`
+	Cycle     bool   `json:"cycle,omitempty"`
 }
 
 // Encode returns the footer value.

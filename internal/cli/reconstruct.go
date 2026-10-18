@@ -171,7 +171,7 @@ func init() {
 	reconstructCmd.Flags().BoolVar(&recNoArchive, "no-archive", false, "Disable auto-routing to Parquet archives (MySQL-only event fetch)")
 	reconstructCmd.Flags().BoolVar(&recAllowGaps, "allow-gaps", false, "Proceed even when the event index has missing hours in the baseline-to-target range (may produce incomplete reconstruction)")
 	// Full-table mydumper mode (#187).
-	reconstructCmd.Flags().StringVar(&recOutputFormat, "output-format", "", "Output format for full-table mode: 'mydumper' for a mydumper-compatible dump directory, 'parquet' for a discoverable baseline snapshot (default: single-row mode)")
+	reconstructCmd.Flags().StringVar(&recOutputFormat, "output-format", "", "Output format for full-table mode: 'mydumper' for a mydumper-compatible dump directory, 'parquet' for a discoverable baseline snapshot, 'psql' for one SQL file per table that psql loads (PostgreSQL sources) (default: single-row mode)")
 	reconstructCmd.Flags().BoolVar(&recCarryForward, "carry-forward-unchanged", false, "Off by default. With --output-format parquet, publish a table that had no changes by reusing the previous snapshot's file (hard link where possible) instead of writing it again")
 	AddOutputFlag(reconstructCmd, &recOutputDir, "", "Output directory for full-table mode (created if missing); with --output-format=parquet this is the baselines root and the snapshot lands in a <timestamp>/ subdirectory", OutputDirAlias)
 	reconstructCmd.Flags().StringVar(&recTables, "tables", "", "Comma-separated schema.table list for full-table mode (e.g. mydb.orders,mydb.users)")
@@ -189,9 +189,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 
 	// ── --output-format mydumper mode: full-table reconstruct (#187) ───────────
 	if recOutputFormat != "" {
-		if recOutputFormat != reconstruct.OutputFormatMydumper && recOutputFormat != reconstruct.OutputFormatParquet {
-			return fmt.Errorf("--output-format: only %q and %q are supported, got %q",
-				reconstruct.OutputFormatMydumper, reconstruct.OutputFormatParquet, recOutputFormat)
+		if recOutputFormat != reconstruct.OutputFormatMydumper && recOutputFormat != reconstruct.OutputFormatParquet && recOutputFormat != reconstruct.OutputFormatPsql {
+			return fmt.Errorf("--output-format: only %q, %q and %q are supported, got %q",
+				reconstruct.OutputFormatMydumper, reconstruct.OutputFormatParquet, reconstruct.OutputFormatPsql, recOutputFormat)
 		}
 		return runReconstructFullTable(cmd, start)
 	}

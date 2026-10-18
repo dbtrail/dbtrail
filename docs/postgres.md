@@ -491,9 +491,18 @@ exactly once.
 
 What to know:
 
-- **The output is a snapshot, not a dump.** Its values are PostgreSQL's own
-  text, as `bintrail-pg baseline` writes them. `--output-format mydumper` is
-  refused.
+- **The output is a snapshot, or SQL psql loads.** A snapshot's values are
+  PostgreSQL's own text, as `bintrail-pg baseline` writes them.
+  `--output-format psql` instead writes one file per table,
+  `<schema>.<table>.sql`, that `psql -v ON_ERROR_STOP=1 -f <file>` loads in one
+  transaction: the settings the values were rendered under, a `CREATE TABLE`
+  built from the snapshot's recorded shape (columns, types, `NOT NULL`,
+  defaults, identity and `serial` sequences, `STORED` generated columns, the
+  primary key), the rows as `COPY ... FROM stdin`, and each sequence moved past
+  the loaded rows. Not made: other indexes and constraints, collations,
+  comments, grants, and any type or sequence a default refers to that the table
+  does not own; a snapshot taken before these facts were recorded is refused
+  (take a new one). `--output-format mydumper` is refused.
 - **A change to the table's columns or primary key refuses**, a type-only
   change included: the fold compares the shape the snapshot recorded with every
   shape the stream saw up to the point, and the key the changes were captured
@@ -800,9 +809,10 @@ coerce, but verify your own round-trip.
 - **`GENERATED ... AS IDENTITY` / generated columns** can need care on recovery
   (`GENERATED ALWAYS AS IDENTITY` rejects an explicit insert; `STORED` generated
   columns are absent from the stream before PostgreSQL 18). Treat as best-effort.
-- **Full-table `reconstruct` writes snapshots only** (`--output-format
-  parquet`, and `baseline refresh`); a mydumper dump, and so `drill`, stay
-  MySQL's (see [Full-table snapshots](#full-table-snapshots)).
+- **Full-table `reconstruct` writes snapshots** (`--output-format
+  parquet`, and `baseline refresh`) **or SQL psql loads** (`--output-format
+  psql`); a mydumper dump, and so `drill`, stay MySQL's (see
+  [Full-table snapshots](#full-table-snapshots)).
   `verify` is supported too: baseline-anchored, live-source, and
   recover-input modes are all supported for PostgreSQL sources (see
   [verify — Notes per source](verify.md#notes-per-source), including how the
@@ -840,7 +850,8 @@ baseline↔delta rendering-GUC identity and its fold-validated type matrix
 [Managed PostgreSQL](#managed-postgresql)), and source-aware web interface
 presentation including the live replication-health panel (v0.20.1).
 **Full-table** `reconstruct` writes snapshots (`--output-format parquet`, and
-`baseline refresh`); a mydumper dump stays out of scope (above). `verify`
+`baseline refresh`) or SQL psql loads (`--output-format psql`); a mydumper dump
+stays out of scope (above). `verify`
 (baseline-anchored, live-source and recover-input) is supported.
 
 ---

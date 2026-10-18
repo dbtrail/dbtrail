@@ -243,6 +243,18 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		// Time-travel silently reconstructing from an older snapshot.
 		return Stats{}, fmt.Errorf("pgbaseline: publication %q streams no tables matching the filters — the baseline would be empty; check the publication's table list and the --schemas/--tables filters", cfg.Publication)
 	}
+	// The catalog's expressions and type names are read with an empty
+	// search_path, so every name in them comes back schema-qualified (as
+	// pg_dump reads them): a CREATE TABLE made from them binds to the same
+	// objects whatever the loading session's search_path. Restored before any
+	// row is read, so values render as they always have.
+	var searchPath string
+	if err := conn.QueryRow(ctx, "SELECT current_setting('search_path')").Scan(&searchPath); err != nil {
+		return Stats{}, fmt.Errorf("pgbaseline: read search_path: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT set_config('search_path', '', true)"); err != nil {
+		return Stats{}, fmt.Errorf("pgbaseline: clear search_path for the catalog reads: %w", err)
+	}
 	for i := range tables {
 		shape, gens, err := loadColumns(ctx, conn, tables[i].OID, tables[i].Schema, tables[i].Table, logger)
 		if err != nil {
@@ -257,6 +269,9 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		for j, c := range shape {
 			tables[i].Columns[j] = c.Name
 		}
+	}
+	if _, err := conn.Exec(ctx, "SELECT set_config('search_path', $1, true)", searchPath); err != nil {
+		return Stats{}, fmt.Errorf("pgbaseline: restore search_path after the catalog reads: %w", err)
 	}
 
 	concurrency := cfg.Parallelism

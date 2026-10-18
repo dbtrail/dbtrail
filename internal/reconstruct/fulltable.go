@@ -733,11 +733,12 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	if cfg.OutputFormat == "" {
 		cfg.OutputFormat = OutputFormatMydumper
 	}
-	if cfg.OutputFormat != OutputFormatMydumper && cfg.OutputFormat != OutputFormatParquet {
-		return nil, fmt.Errorf("FullTableConfig: unknown OutputFormat %q (want %q or %q)",
-			cfg.OutputFormat, OutputFormatMydumper, OutputFormatParquet)
+	if cfg.OutputFormat != OutputFormatMydumper && cfg.OutputFormat != OutputFormatParquet && cfg.OutputFormat != OutputFormatPsql {
+		return nil, fmt.Errorf("FullTableConfig: unknown OutputFormat %q (want %q, %q or %q)",
+			cfg.OutputFormat, OutputFormatMydumper, OutputFormatParquet, OutputFormatPsql)
 	}
 	parquetMode := cfg.OutputFormat == OutputFormatParquet
+	psqlMode := cfg.OutputFormat == OutputFormatPsql
 
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
@@ -839,6 +840,9 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// A PostgreSQL stream writes one schema snapshot per table, so the latest
 	// snapshot alone describes one table (#1596).
 	pgSource := query.SourceFlavor(db) == "postgres"
+	if psqlMode && !pgSource {
+		return nil, errPsqlNeedsPostgres
+	}
 	var resolver *metadata.Resolver
 	if pgSource {
 		resolver, err = metadata.NewLatestPerTableResolver(db)
@@ -869,7 +873,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// must be pinned before the first fetch: reading it afterwards would anchor
 	// the snapshot at a coordinate later than the events it actually folded, and
 	// the next refresh would skip everything in between.
-	if parquetMode && pgSource {
+	if (parquetMode || psqlMode) && pgSource {
 		// PostgreSQL (#1596): the run's end, read once, by LSN. None of the
 		// MySQL marks below: they are binlog coordinates.
 		run, err := resolvePGRunEnd(ctx, db, cfg.At)
@@ -959,6 +963,11 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 			return nil, fmt.Errorf("invalid --tables entry %q: must be schema.table", entry)
 		}
 	}
+	if psqlMode {
+		if err := pgFileCollisions(cfg.Tables); err != nil {
+			return nil, err
+		}
+	}
 	for _, entry := range cfg.Tables {
 		schema, table, _ := splitSchemaTable(entry)
 		wg.Add(1)
@@ -998,7 +1007,7 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// user somehow reconstructs tables from baselines of different ages,
 	// the metadata file will reflect the first one and the rest will log
 	// a warning in ReconstructTable itself.
-	if len(reports) > 0 && !parquetMode {
+	if len(reports) > 0 && cfg.OutputFormat == OutputFormatMydumper {
 		// Pick the first report that actually produced output files from a
 		// real baseline (skip tables that had no baseline: an empty report,
 		// or a #766 binlog-only report — neither has baseline GTID/binlog
@@ -1246,7 +1255,7 @@ func ReconstructTable(
 		// full-table reconstruct (#916). A PostgreSQL fold needs a snapshot to
 		// start from (#1596).
 		if query.SourceFlavor(db) == "postgres" {
-			if cfg.OutputFormat != OutputFormatParquet {
+			if cfg.OutputFormat != OutputFormatParquet && cfg.OutputFormat != OutputFormatPsql {
 				return nil, errPGFullTableMydumper
 			}
 			return nil, fmt.Errorf("%s.%s has no snapshot at or before %s to rebuild it from; take one first (`bintrail-pg baseline`)",
@@ -1294,7 +1303,7 @@ func ReconstructTable(
 	// `bintrail baseline`" guidance.
 	if bmeta.LSN != 0 || query.SourceFlavor(db) == "postgres" {
 		switch {
-		case cfg.OutputFormat != OutputFormatParquet:
+		case cfg.OutputFormat != OutputFormatParquet && cfg.OutputFormat != OutputFormatPsql:
 			return nil, errPGFullTableMydumper
 		case cfg.pgRun == nil:
 			// A PostgreSQL snapshot over an index that records no PostgreSQL

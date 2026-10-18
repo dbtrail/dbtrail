@@ -19,8 +19,12 @@ import (
 // errPGFullTableMydumper refuses a full-table PostgreSQL reconstruct to a
 // mydumper dump: the dump is MySQL's, and so is every consumer of it (drill
 // restores it into a MySQL scratch). Parquet is the PostgreSQL output.
-var errPGFullTableMydumper = errors.New("a full-table reconstruct of a PostgreSQL table can only be written as a snapshot (`--output-format parquet`); " +
-	"a mydumper dump is MySQL's. Use single-row `reconstruct` or the shim `_flashback` to read one row")
+var errPGFullTableMydumper = errors.New("a full-table reconstruct of a PostgreSQL table is written as a snapshot (`--output-format parquet`) " +
+	"or as SQL files psql loads (`--output-format psql`); a mydumper dump is MySQL's. Use single-row `reconstruct` or the shim `_flashback` to read one row")
+
+// errPsqlNeedsPostgres refuses the psql output on an index that records no
+// PostgreSQL source: it is PostgreSQL's SQL.
+var errPsqlNeedsPostgres = errors.New("`--output-format psql` writes PostgreSQL's SQL, and this index records no PostgreSQL source; use `--output-format mydumper` for a MySQL dump")
 
 // pgTableInput is what ReconstructTable already found for a PostgreSQL table.
 type pgTableInput struct {
@@ -132,6 +136,7 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		Schema: schema, Table: table, PKCols: pkCols,
 		Opts: fetchOpts, AllowGaps: cfg.AllowGaps, ArchiveFetcher: fetcher,
 		SpillOverBudget: true,
+		PG:              true,
 	})
 	fold := &foldResult{Changes: map[string]*query.ResultRow{}}
 	if b.empty(floor) {
@@ -189,7 +194,11 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		PGDeltaSince:      b.Since,
 		PGGenerated:       generated,
 	}
-	if err := mergeBaselineIntoParquet(ctx, in, rep); err != nil {
+	merge := mergeBaselineIntoParquet
+	if cfg.OutputFormat == OutputFormatPsql {
+		merge = mergeBaselineIntoPsql
+	}
+	if err := merge(ctx, in, rep); err != nil {
 		return nil, err
 	}
 	rep.Duration = time.Since(start)

@@ -66,8 +66,10 @@ func TestPGBaseline_RecordsCreateTableFacts(t *testing.T) {
 		t.Fatalf("shape %q: %v %v", md[baseline.MetaKeyPGRelation], ok, err)
 	}
 	want := []baseline.PGColumn{
-		{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Default: `nextval('"Facts Tbl_id_seq"'::regclass)`, Sequence: `public."Facts Tbl_id_seq"`, Ordinal: 1},
-		{Name: "tenant", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Identity: "d", Sequence: `public."Facts Tbl_tenant_seq"`, Ordinal: 2},
+		{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Default: `nextval('public."Facts Tbl_id_seq"'::regclass)`, Sequence: `public."Facts Tbl_id_seq"`, Ordinal: 1,
+			Seq: baseline.PGSequence{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 2147483647, Cache: 1}},
+		{Name: "tenant", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Identity: "d", Sequence: `public."Facts Tbl_tenant_seq"`, Ordinal: 2,
+			Seq: baseline.PGSequence{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 2147483647, Cache: 1}},
 		{Name: "note", TypeOID: 25, TypeMod: -1, Type: "text", NotNull: true, Default: "'it''s'::text", Ordinal: 4},
 		{Name: "v", TypeOID: 1043, TypeMod: 24, Type: "character varying(20)", Ordinal: 5},
 	}

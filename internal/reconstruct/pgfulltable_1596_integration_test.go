@@ -3,10 +3,14 @@
 package reconstruct_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,9 +32,9 @@ import (
 const pgOID = 16500
 
 var pgOrdersRel = baseline.PGRelation{OID: pgOID, Columns: []baseline.PGColumn{
-	{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer"},
-	{Name: "status", TypeOID: 25, TypeMod: -1, Type: "text"},
-}}
+	{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Ordinal: 1},
+	{Name: "status", TypeOID: 25, TypeMod: -1, Type: "text", Ordinal: 2},
+}, PrimaryKey: []string{"id"}}
 
 type pgFixture struct {
 	t    *testing.T
@@ -86,7 +90,7 @@ func (f *pgFixture) event(lsn uint64, d time.Duration, typ uint8, id string, aft
 	f.t.Helper()
 	var img []byte
 	if after != nil {
-		img = []byte(fmt.Sprintf(`{"id":"%s","status":"%s"}`, id, *after))
+		img, _ = json.Marshal(map[string]string{"id": id, "status": *after})
 	}
 	before := []byte(fmt.Sprintf(`{"id":"%s","status":"x"}`, id))
 	if typ == 1 {
@@ -239,9 +243,18 @@ func TestReconstructTables_PGParquetChain(t *testing.T) {
 	// search older partitions for changes after the floor (#2138's
 	// settling), which on PostgreSQL would read every archive.
 	loads := query.PictureLoads()
+	// The values are PostgreSQL's text: nothing to decode, nothing to warn
+	// about.
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	got, md, _, err := f.run(root, pgRun{at: at1})
+	slog.SetDefault(prev)
 	if err != nil {
 		t.Fatalf("fold to %s: %v", at1, err)
+	}
+	if !strings.Contains(logs.String(), "table reconstructed") || strings.Contains(logs.String(), "BASE64") {
+		t.Errorf("the fold's log:\n%s", logs.String())
 	}
 	if n := query.PictureLoads() - loads; n != 0 {
 		t.Errorf("the fold loaded %d partition pictures, want 0", n)
@@ -432,4 +445,83 @@ func TestReconstructTables_PGRefusals(t *testing.T) {
 			t.Fatalf("err = %v, want the no-snapshot refusal", err)
 		}
 	})
+}
+
+// The same fold written as SQL psql loads (#1596 slice 2): the CREATE TABLE
+// from the snapshot's recorded shape, the folded rows as COPY text, one
+// transaction. Nothing is published as a snapshot.
+func TestReconstructTables_PGPsqlOutput(t *testing.T) {
+	f := newPGFixture(t)
+	snap := f.at(10 * time.Minute)
+	f.event(0x600, 9*time.Minute+30*time.Second, 2, "1", s("tab\there\\x"))
+	f.event(0x700, 15*time.Minute, 1, "3", s("newbie"))
+	f.event(0x700, 15*time.Minute, 3, "2", nil)
+	f.checkpoint(0x700)
+	root := t.TempDir()
+	f.baseline(root, snap, 0x500, "", [2]string{"1", "paid"}, [2]string{"2", "open"}, [2]string{"5", "keep"})
+	out := t.TempDir()
+	// The values are PostgreSQL's text: nothing to decode, nothing to warn
+	// about.
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	reps, err := reconstruct.ReconstructTables(context.Background(), reconstruct.FullTableConfig{
+		IndexDSN: f.dsn, BaselineSrc: root, Tables: []string{"public.orders"}, At: f.at(30 * time.Minute),
+		OutputDir: out, OutputFormat: reconstruct.OutputFormatPsql, Parallelism: 1,
+	})
+	slog.SetDefault(prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "table reconstructed") {
+		t.Errorf("the run's log was not captured:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "BASE64") {
+		t.Errorf("a PostgreSQL fold warned about base64:\n%s", logs.String())
+	}
+	if len(reps) != 1 || len(reps[0].Files) != 1 || reps[0].Files[0] != "public.orders.sql" || reps[0].RowsWritten != 3 {
+		t.Fatalf("reports = %+v", reps[0])
+	}
+	b, err := os.ReadFile(filepath.Join(out, "public.orders.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	t.Logf("\n%s", got)
+	for _, want := range []string{
+		"BEGIN;\nSET client_encoding = 'UTF8';\nSET TimeZone = 'UTC';",
+		"CREATE TABLE \"public\".\"orders\" (\n  \"id\" integer NOT NULL,\n  \"status\" text,\n  PRIMARY KEY (\"id\")\n);\n",
+		"COPY \"public\".\"orders\" (\"id\", \"status\") FROM stdin;\n",
+		"1\ttab\\there\\\\x\n",
+		"3\tnewbie\n",
+		"5\tkeep\n",
+		"\\.\nCOMMIT;\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(got, "2\topen") {
+		t.Error("the deleted row is in the output")
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 1 {
+		t.Errorf("a psql run published a snapshot: %v", entries)
+	}
+}
+
+// psql output is PostgreSQL's SQL: refused on an index that records no
+// PostgreSQL source.
+func TestReconstructTables_PsqlNeedsPostgres(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, dbName := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(context.Background(), db, 2, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err := reconstruct.ReconstructTables(context.Background(), reconstruct.FullTableConfig{
+		IndexDSN: testutil.BaseDSN() + "/" + dbName, BaselineSrc: t.TempDir(), Tables: []string{"shop.orders"},
+		At: time.Now().UTC(), OutputDir: t.TempDir(), OutputFormat: reconstruct.OutputFormatPsql,
+	})
+	if err == nil || !strings.Contains(err.Error(), "records no PostgreSQL source") {
+		t.Fatalf("err = %v", err)
+	}
 }
