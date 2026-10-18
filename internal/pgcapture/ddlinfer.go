@@ -95,6 +95,10 @@ type DDLInference struct {
 	// started. The first Relation for one of them with nothing known is
 	// version zero (no row); a table outside it is new since the start.
 	StartOIDs map[uint32]bool
+	// StartAt is when StartOIDs was read, by the server's clock: a table in
+	// it whose publication row is later was taken out and added back since.
+	// Zero = not known.
+	StartAt time.Time
 	// Lookup reads the live catalog for an OID. An error stops the stream.
 	Lookup func(oid uint32) (RelationFacts, error)
 	// LastChange returns the newest indexed change to schema.table that
@@ -332,12 +336,37 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 			// table's own next description is compared by columns only.
 			renamed := prev.name != n && !k.released(prev.name, prev.seen.lsn, high.lsn)
 			altered := !equalShape(prev.cols, cols)
+			// The catalog is read once per description, and only when a
+			// row may come of it.
+			var (
+				st             CatalogStamps
+				stamped, asked bool
+				low            *bound
+				lowRead        bool
+			)
+			stamps := func() (CatalogStamps, bool) {
+				if !asked {
+					st, stamped = s.stampsFor(oid, warn)
+					asked = true
+				}
+				return st, stamped
+			}
+			lowOf := func() (*bound, error) {
+				if !lowRead {
+					var err error
+					if low, err = s.lowFor(k, prev, high); err != nil {
+						return nil, err
+					}
+					lowRead = true
+				}
+				return low, nil
+			}
 			if (renamed || altered) && (inScope(prev.name) || inScope(n)) {
-				low, err := s.lowFor(k, prev, high)
+				low, err := lowOf()
 				if err != nil {
 					return nil, err
 				}
-				st, stamped := s.stampsFor(oid, warn)
+				st, stamped := stamps()
 				if renamed {
 					var exact *time.Time
 					if stamped {
@@ -351,6 +380,24 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 						exact = st.alterInstant(n, prev.cols, cols, low, high)
 					}
 					out = append(out, alterEvent(oid, n, prev.cols, cols, "", low, high, exact))
+				}
+			}
+			// Added back to the publication since the shape was last seen:
+			// the publication's row for the table is later than that, and no
+			// later than this transaction (a resent transaction from before
+			// the add is not where it happened). Only a shape seen with a time
+			// can tell; the changes in between were never captured.
+			if inScope(n) && !prev.blind && prev.seen.lsn != 0 && !prev.seen.at.IsZero() {
+				// An add later than this transaction: PostgreSQL describes a
+				// table again after an add, so this description may follow
+				// an earlier add the catalog no longer shows (taken out
+				// twice). Refused over this stretch, conservatively.
+				if st, ok := stamps(); ok && st.PubAt != nil && st.PubAt.After(prev.seen.at) {
+					low, err := lowOf()
+					if err != nil {
+						return nil, err
+					}
+					out = append(out, pubAddEvent(oid, n, true, low, high, st.PubAt))
 				}
 			}
 			if renamed || altered {
@@ -421,8 +468,19 @@ func (s *inferState) observe(m *pglogrepl.RelationMessage, txn txnContext, inSco
 		return out, nil
 	}
 
-	if s.cfg.StartOIDs[oid] || !inScope(n) {
-		return nil, nil // version zero
+	if !inScope(n) {
+		return nil, nil
+	}
+	if s.cfg.StartOIDs[oid] {
+		// Version zero. A table no change showed yet: its publication row,
+		// written after capture started, says it was taken out and added
+		// back since, and nothing was captured in between.
+		if !s.cfg.StartAt.IsZero() {
+			if st, ok := s.stampsFor(oid, warn); ok && st.PubAt != nil && st.PubAt.After(s.cfg.StartAt) && !st.PubAt.After(high.at) {
+				return []event.Event{pubAddEvent(oid, n, true, &bound{0, s.cfg.StartAt}, high, st.PubAt)}, nil
+			}
+		}
+		return nil, nil
 	}
 	c, err := s.createEvent(oid, n, cols, "", high, warn)
 	if err != nil {
@@ -484,9 +542,42 @@ func (s *inferState) createEvent(oid uint32, n relName, cols []ShapeColumn, why 
 	}
 	var exact *time.Time
 	if st, ok := s.stampsFor(oid, warn); ok {
+		// First seen, and added to the publication after the table existed:
+		// not created here. Its earlier changes are before capture covered
+		// it, as the changes before capture started; no gap.
+		if why == "" && st.PubAt != nil && !st.PubAt.After(high.at) {
+			if created := st.earliestCol(); created == nil || st.PubAt.After(*created) {
+				return pubAddEvent(oid, n, false, nil, high, st.PubAt), nil
+			}
+		}
 		exact = st.createInstant(n, cols, high)
 	}
 	return ddlEvent(event.DDLCreateTable, oid, n, nil, text, nil, high, exact), nil
+}
+
+// pubAddEvent records a table added to the publication at pubAt: back,
+// after it was taken out (again: the marker carries the gap the changes in
+// between left), or for the first time.
+func pubAddEvent(oid uint32, n relName, again bool, low *bound, high bound, pubAt *time.Time) event.Event {
+	var exact *time.Time
+	if inBracket(*pubAt, low, high) {
+		exact = pubAt
+	}
+	if !again {
+		return ddlEvent(event.DDLAlterPublication, oid, n, nil,
+			fmt.Sprintf("ALTER PUBLICATION ... ADD TABLE %s: added to the publication; the table existed before, and its changes from before then were never captured", n),
+			low, high, exact)
+	}
+	text := fmt.Sprintf("ALTER PUBLICATION ... ADD TABLE %s: its row in the publication was written again (the table was taken out and added back, "+
+		"or its row filter or column list was changed); changes made to it while it was out, if it was, were never captured", n)
+	if pubAt.After(high.at) {
+		text = fmt.Sprintf("ALTER PUBLICATION ... ADD TABLE %s: the catalog shows the table added to the publication again after this point, "+
+			"so it may also have been out before it; changes made to it while it was out, if it was, were never captured", n)
+	}
+	e := ddlEvent(event.DDLAlterPublication, oid, n, nil, text, low, high, exact)
+	head := fmt.Sprintf("%s oid=%d; ", event.InferredDDLPrefix, oid)
+	e.DDLQuery = head + "gap=" + event.InferredGapUncaptured + "; " + strings.TrimPrefix(e.DDLQuery, head)
+	return e
 }
 
 func renameEvent(oid uint32, from, to relName, note string, low *bound, high bound, exact *time.Time) event.Event {

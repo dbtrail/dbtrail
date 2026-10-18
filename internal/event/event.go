@@ -501,6 +501,10 @@ const (
 	DDLDropTable     DDLKind = "DROP TABLE"
 	DDLRenameTable   DDLKind = "RENAME TABLE"
 	DDLTruncateTable DDLKind = "TRUNCATE TABLE"
+	// DDLAlterPublication is a PostgreSQL table added to the publication
+	// capture reads (#2441, inferred): first, or back after it was taken out,
+	// which the marker's gap says.
+	DDLAlterPublication DDLKind = "ALTER PUBLICATION"
 	// DDLReplaceTable is MariaDB's CREATE OR REPLACE TABLE: on an existing
 	// table it is a DROP and a CREATE in one statement, so it refuses a
 	// reconstruct over its window like a DROP (#1664).

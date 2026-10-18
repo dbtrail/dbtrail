@@ -213,12 +213,18 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 			if err != nil {
 				return DDLInference{}, err
 			}
-			stamps, closeStamps := stampsReader(startupCtx, ctx, c.cfg.QueryDSN, c.logger)
+			stamps, closeStamps := stampsReader(startupCtx, ctx, c.cfg.QueryDSN, c.cfg.Publication, c.logger)
 			stampsClose = closeStamps
+			// When the publication's tables were read, by the server's clock.
+			var startAt time.Time
+			if err := queryConn.QueryRow(startupCtx, "SELECT now()").Scan(&startAt); err != nil {
+				return DDLInference{}, fmt.Errorf("pgcapture: read the server's time: %w", err)
+			}
 			return DDLInference{
 				Known:     known.Shapes,
 				Releases:  known.Releases,
 				StartOIDs: start,
+				StartAt:   startAt.UTC(),
 				Lookup: func(oid uint32) (RelationFacts, error) {
 					qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 					defer cancel()

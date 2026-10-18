@@ -115,3 +115,55 @@ func TestCheckDestructiveDDL_inferredHighKeepsTheFraction(t *testing.T) {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
 }
+
+// A table added back to the publication (#2441) left changes uncaptured
+// inside its bracket: a window across it refuses, saying so. A first add
+// marks no gap and does not refuse: the changes before it are before capture
+// covered the table, as the changes before capture started.
+func TestCheckDestructiveDDL_addedBackToThePublication(t *testing.T) {
+	since := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 1, 1, 10, 30, 0, 0, time.UTC)
+	low := time.Date(2026, 1, 1, 10, 5, 0, 0, time.UTC)
+	run := func(gap string) error {
+		t.Helper()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		q := event.InferredDDLPrefix + " oid=10; " + gap + "instant=exact; at=2026-01-01T10:15:00Z; low=0/1000@" + low.Format(time.RFC3339) +
+			"; high=0/19DF9E8@2026-01-01T10:20:00Z */ ALTER PUBLICATION ... ADD TABLE public.t"
+		mock.ExpectQuery("ddl_type IN \\('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE', 'ALTER PUBLICATION'\\)").
+			WithArgs(since, until, "public", "t").
+			WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "ALTER PUBLICATION", low, "0/19DF9E8", 27130344, true, true, q))
+		return CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until})
+	}
+	err := run("gap=uncaptured; ")
+	if !errors.Is(err, ErrDestructiveDDL) {
+		t.Fatalf("added back: err = %v, want a refusal", err)
+	}
+	t.Logf("refusal: %v", err)
+	for _, want := range []string{"ALTER PUBLICATION on public.t", "out of the publication", "never have been captured"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "keep the rows it removed") {
+		t.Errorf("the refusal speaks of removed rows: %v", err)
+	}
+	if err := run(""); err != nil {
+		t.Fatalf("a first add: err = %v, want none", err)
+	}
+	// A row whose marker cannot be read is not taken for a first add.
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT id, ddl_type, detected_at").WithArgs(since, until, "public", "t").
+		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "ALTER PUBLICATION", low, "0/19DF9E8", 27130344, true, true,
+			event.InferredDDLPrefix+" oid=10; gap=uncaptured; low=garbled */ ALTER PUBLICATION"))
+	if err := CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until}); !errors.Is(err, ErrDestructiveDDL) {
+		t.Fatalf("an unreadable marker: err = %v, want a refusal", err)
+	}
+}

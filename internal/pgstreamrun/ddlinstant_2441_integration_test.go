@@ -165,3 +165,118 @@ func TestOne_DatesInferredDDLExactly_2441(t *testing.T) {
 	q, at = row("ALTER TABLE", renamed)
 	wantExact("a dropped column", q, at, drop)
 }
+
+// TestOne_RecordsTablesAddedToThePublication_2441: a table taken out of the
+// publication and added back is recorded with the gap its uncaptured changes
+// left, and a reconstruct across it refuses; a table first added after it was
+// created is recorded as added, not created, and marks no gap.
+func TestOne_RecordsTablesAddedToThePublication_2441(t *testing.T) {
+	pgDSN := testutil.SkipIfNoPostgres(t)
+	testutil.SkipIfNoMySQL(t)
+	ctx := context.Background()
+	indexDB, dbName := testutil.CreateTestDB(t)
+	indexDSN := testutil.BaseDSN() + "/" + dbName
+	const slot = "bintrail_pgsr_pubadd"
+	const pub = "bintrail_pgsr_pubadd_pub"
+	const tbl, later = "pgsr_pubadd_t", "pgsr_pubadd_later"
+
+	pg, err := pgx.Connect(ctx, pgDSN)
+	if err != nil {
+		t.Fatalf("connect PG: %v", err)
+	}
+	t.Cleanup(func() { pg.Close(context.Background()) })
+	var setting string
+	if err := pg.QueryRow(ctx, "SELECT current_setting('track_commit_timestamp')").Scan(&setting); err != nil || setting != "on" {
+		t.Fatalf("the source must run with track_commit_timestamp=on for this test (got %q, %v)", setting, err)
+	}
+	dropAll := func() {
+		bg := context.Background()
+		_, _ = pg.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = pg.Exec(bg, "DROP TABLE IF EXISTS "+tbl)
+		_, _ = pg.Exec(bg, "DROP TABLE IF EXISTS "+later)
+		_, _ = pg.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot)
+	}
+	dropAll()
+	t.Cleanup(dropAll)
+	mustExec := func(sql string) {
+		t.Helper()
+		if _, err := pg.Exec(ctx, sql); err != nil {
+			t.Fatalf("exec %q: %v", sql, err)
+		}
+	}
+	for _, n := range []string{tbl, later} {
+		mustExec(fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY, a text)", n))
+		mustExec(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", n))
+	}
+	mustExec(fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pub, tbl))
+
+	cfg := pgstreamrun.Config{
+		IndexDSN: indexDSN, ReplDSN: replDSN(pgDSN), QueryDSN: pgDSN,
+		SlotName: slot, Publication: pub, ServerID: 46,
+		Schemas: "public", BatchSize: 100, Checkpoint: 200 * time.Millisecond,
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- pgstreamrun.One(runCtx, cfg) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-runErr; err != nil {
+			t.Errorf("One returned error: %v", err)
+		}
+	})
+	waitFor(t, 15*time.Second, func() bool {
+		var active bool
+		_ = pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active)
+		return active
+	}, "replication slot active")
+	indexed := func(table, pk string) {
+		t.Helper()
+		waitFor(t, 15*time.Second, func() bool {
+			var n int
+			_ = indexDB.QueryRow("SELECT COUNT(*) FROM binlog_events WHERE table_name = ? AND pk_values = ?", table, pk).Scan(&n)
+			return n >= 1
+		}, table+" pk "+pk+" indexed")
+	}
+	rows := func(table string) []string {
+		t.Helper()
+		rs, err := indexDB.Query(`SELECT ddl_type, ddl_query FROM schema_changes
+			WHERE ddl_query LIKE '/* dbtrail: inferred%' AND table_name = ? ORDER BY id`, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rs.Close()
+		var out []string
+		for rs.Next() {
+			var k, q string
+			if err := rs.Scan(&k, &q); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, k+": "+q)
+		}
+		return out
+	}
+
+	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (1, 'x')", tbl))
+	indexed(tbl, "1")
+	time.Sleep(1100 * time.Millisecond)
+	mustExec(fmt.Sprintf("ALTER PUBLICATION %s DROP TABLE %s", pub, tbl))
+	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (2, 'lost')", tbl))
+	mustExec(fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", pub, tbl))
+	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (3, 'back')", tbl))
+	indexed(tbl, "3")
+	got := rows(tbl)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "ALTER PUBLICATION: ") || !strings.Contains(got[0], "gap=uncaptured;") ||
+		!strings.Contains(got[0], "instant=exact;") || !strings.Contains(got[0], "added back") {
+		t.Fatalf("added back: rows = %q", got)
+	}
+
+	// Created before it was added.
+	time.Sleep(1100 * time.Millisecond)
+	mustExec(fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", pub, later))
+	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (1, 'y')", later))
+	indexed(later, "1")
+	got = rows(later)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "ALTER PUBLICATION: ") || strings.Contains(got[0], "gap=") || !strings.Contains(got[0], "existed before") {
+		t.Fatalf("first added: rows = %q", got)
+	}
+}

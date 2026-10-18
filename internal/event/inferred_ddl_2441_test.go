@@ -34,3 +34,16 @@ func TestParseInferredBracket(t *testing.T) {
 		}
 	}
 }
+
+// The gap mark (#2441): a table added back to the publication, whose changes
+// while out were never captured.
+func TestParseInferredBracket_gap(t *testing.T) {
+	gap := InferredDDLPrefix + " oid=10; gap=uncaptured; instant=exact; at=2026-10-17T10:10:00Z; low=0/1@2026-10-17T10:00:00Z; high=0/2@2026-10-17T10:20:00Z */ ALTER PUBLICATION"
+	if b, ok := ParseInferredBracket(gap); !ok || !b.Gap || !b.HasLow {
+		t.Fatalf("gap row: %+v, %v", b, ok)
+	}
+	plain := InferredDDLPrefix + " oid=10; instant=at-or-before; low=none; high=0/2@2026-10-17T10:20:00Z */ ALTER PUBLICATION"
+	if b, ok := ParseInferredBracket(plain); !ok || b.Gap {
+		t.Fatalf("plain row: %+v, %v", b, ok)
+	}
+}

@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// InferredGapUncaptured is the marker's gap value for a table added back to
+// the publication.
+const InferredGapUncaptured = "uncaptured"
+
 // InferredBracket is the window an inferred schema change (#2441) committed
 // in, read back from its ddl_query marker: after Low (when HasLow) and at or
 // before High.
@@ -12,6 +16,9 @@ type InferredBracket struct {
 	Low    time.Time
 	HasLow bool
 	High   time.Time
+	// Gap marks a table added back to the publication: changes made to it
+	// while it was out, inside the bracket, were never captured.
+	Gap bool
 }
 
 // ParseInferredBracket reads the bracket from a ddl_query that starts with
@@ -27,6 +34,7 @@ func ParseInferredBracket(q string) (b InferredBracket, ok bool) {
 		return InferredBracket{}, false
 	}
 	var low, high string
+	gap := false
 	for f := range strings.SplitSeq(q[len(InferredDDLPrefix):end], ";") {
 		k, v, _ := strings.Cut(strings.TrimSpace(f), "=")
 		switch k {
@@ -34,6 +42,8 @@ func ParseInferredBracket(q string) (b InferredBracket, ok bool) {
 			low = v
 		case "high":
 			high = v
+		case "gap":
+			gap = v == InferredGapUncaptured
 		}
 	}
 	at := func(v string) (time.Time, bool) {
@@ -48,7 +58,7 @@ func ParseInferredBracket(q string) (b InferredBracket, ok bool) {
 	if !ok {
 		return InferredBracket{}, false
 	}
-	b.High = h
+	b.High, b.Gap = h, gap
 	if low == "none" {
 		return b, true
 	}

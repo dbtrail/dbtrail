@@ -10,6 +10,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -324,9 +325,13 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 		return res, fmt.Errorf("look for a TRUNCATE, DROP or RENAME of %s.%s between the two snapshots: %w", p.Schema, p.Table, err)
 	}
 	if found {
-		return inconclusive(res, fmt.Sprintf("a %s on this table at %s, between the two compared snapshots, records no row changes to replay, "+
+		what := "records no row changes to replay"
+		if ddl == string(event.DDLAlterPublication) {
+			what = "says the table may have been out of the publication, so changes made to it then may never have been captured"
+		}
+		return inconclusive(res, fmt.Sprintf("a %s on this table at %s, between the two compared snapshots, %s, "+
 			"so the older snapshot cannot be carried forward to the newer one. The next full backup makes the table checkable again",
-			ddl, ddlAt.UTC().Format(time.RFC3339))), nil
+			ddl, ddlAt.UTC().Format(time.RFC3339), what)), nil
 	}
 
 	// Hash exactly the columns the baseline Parquet holds. mydumper excludes true

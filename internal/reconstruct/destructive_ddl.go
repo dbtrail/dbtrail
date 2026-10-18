@@ -259,10 +259,12 @@ func destructiveDDLErr(schema, table string, f ddlFinding, w DDLWindow) error {
 	if d.Inferred && how == ddlByTime {
 		lies = "may lie between the snapshot this starts from and the requested point in time (the change stream only says it happened inside that range)"
 	}
-	return fmt.Errorf(
-		"%w: %s on %s.%s, %s (%s), %s. "+
-			"It wrote no row changes to replay, so the result would keep the rows it removed as if they still existed. %s",
-		ErrDestructiveDDL, d.Type, schema, table, when, where, lies, todo)
+	why := "It wrote no row changes to replay, so the result would keep the rows it removed as if they still existed."
+	if d.Type == string(event.DDLAlterPublication) {
+		why = "The table may have been out of the publication before it, so changes made to it then may never have been captured, and the result would miss them."
+	}
+	return fmt.Errorf("%w: %s on %s.%s, %s (%s), %s. %s %s",
+		ErrDestructiveDDL, d.Type, schema, table, when, where, lies, why, todo)
 }
 
 // errSchemaChangesMissing marks an index that has no schema_changes table at
@@ -376,7 +378,7 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 			detected_at ` + sinceOp + ` ?, detected_at <= ?, LEFT(ddl_query, 400)
 		FROM schema_changes
 		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
-		AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE')
+		AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE', 'ALTER PUBLICATION')
 		ORDER BY detected_at ASC, id ASC`
 
 	rows, err := db.QueryContext(ctx, q, w.Since, w.Until, schema, table)
@@ -409,7 +411,14 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 		// bracket starts before the snapshot and ends after it. Both ends are
 		// read from the marker, which keeps fractions of a second;
 		// detected_at is rounded to the second.
-		if b, ok := event.ParseInferredBracket(head); ok {
+		b, inferred := event.ParseInferredBracket(head)
+		// A PostgreSQL table added to the publication (#2441) removes no
+		// rows; only one added BACK left changes uncaptured inside its
+		// bracket, which the marker's gap says.
+		if d.Type == string(event.DDLAlterPublication) && inferred && !b.Gap {
+			continue
+		}
+		if inferred {
 			d.Inferred, d.Bracket = true, b
 			d.AfterSince = b.High.After(w.Since) || (w.sinceInclusive && b.High.Equal(w.Since))
 			d.AtOrBeforeUntil = !b.HasLow || !b.Low.After(w.Until)

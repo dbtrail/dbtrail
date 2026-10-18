@@ -39,6 +39,11 @@ type CatalogStamps struct {
 	// DroppedAt are the stamped rows of dropped columns: a dropped column's
 	// row is never written again, so each is the time of its drop.
 	DroppedAt []time.Time
+	// PubAt is the table's row in the publication capture reads
+	// (pg_publication_rel): written when the table was added to it. nil
+	// when the publication covers the table otherwise (FOR ALL TABLES, a
+	// schema, a parent) or the time is not known.
+	PubAt *time.Time
 }
 
 // stampsWarnEvery bounds how often a failing stamp read is said.
@@ -56,7 +61,8 @@ func (s *inferState) stampsFor(oid uint32, warn func(msg string, args ...any)) (
 	if err != nil {
 		s.stampsFailed++
 		if now := time.Now(); s.stampsWarnedAt.IsZero() || now.Sub(s.stampsWarnedAt) >= stampsWarnEvery {
-			warn("pgcapture: cannot read when a schema change committed from the catalog; inferred schema changes are dated at or before the change that shows them",
+			warn("pgcapture: cannot read commit times from the catalog: inferred schema changes are dated at or before the change that shows them, "+
+				"and a table taken out of the publication and added back meanwhile is not detected",
 				"oid", oid, "error", err, "failed_reads", s.stampsFailed)
 			s.stampsWarnedAt, s.stampsFailed = now, 0
 		}
@@ -178,16 +184,22 @@ func (st CatalogStamps) createInstant(n relName, cols []ShapeColumn, high bound)
 	if !st.showsShape(n, cols) || st.TypeAt == nil || !inBracket(*st.TypeAt, nil, high) {
 		return nil
 	}
+	if earliest := st.earliestCol(); earliest == nil || !earliest.Equal(*st.TypeAt) {
+		return nil
+	}
+	return st.TypeAt
+}
+
+// earliestCol is the earliest stamped column time: the table's creation,
+// unless every column was rewritten since. nil when none is stamped.
+func (st CatalogStamps) earliestCol() *time.Time {
 	var earliest *time.Time
 	for _, c := range st.Cols {
 		if c.At != nil && (earliest == nil || c.At.Before(*earliest)) {
 			earliest = c.At
 		}
 	}
-	if earliest == nil || !earliest.Equal(*st.TypeAt) {
-		return nil
-	}
-	return st.TypeAt
+	return earliest
 }
 
 func (st CatalogStamps) col(name string) (CatalogColumn, bool) {

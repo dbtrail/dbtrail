@@ -220,7 +220,7 @@ func queryRelationFacts(ctx context.Context, conn *pgx.Conn, oid uint32) (Relati
 // without this. Its own connection, because a read that times out closes the
 // connection it ran on, and the catalog reads capture needs must not share
 // that with an optional one. close releases it.
-func stampsReader(startupCtx, ctx context.Context, dsn string, logger *slog.Logger) (read func(uint32) (CatalogStamps, error), close func()) {
+func stampsReader(startupCtx, ctx context.Context, dsn, publication string, logger *slog.Logger) (read func(uint32) (CatalogStamps, error), close func()) {
 	none := func() {}
 	conn, err := pgx.Connect(startupCtx, dsn)
 	if err != nil {
@@ -248,12 +248,15 @@ func stampsReader(startupCtx, ctx context.Context, dsn string, logger *slog.Logg
 		}
 		qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return queryCatalogStamps(qctx, conn, oid)
+		return queryCatalogStamps(qctx, conn, oid, publication)
 	}, closeConn
 }
 
 const catalogStampsClassQuery = `SELECT n.nspname, c.relname,
-	pg_xact_commit_timestamp(c.xmin), pg_xact_commit_timestamp(t.xmin)
+	pg_xact_commit_timestamp(c.xmin), pg_xact_commit_timestamp(t.xmin),
+	(SELECT pg_xact_commit_timestamp(pr.xmin) FROM pg_publication_rel pr
+	 JOIN pg_publication p ON p.oid = pr.prpubid
+	 WHERE p.pubname = $2 AND pr.prrelid = c.oid)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_type t ON t.oid = c.reltype
 WHERE c.oid = $1`
@@ -264,9 +267,9 @@ FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 ORDER BY attnum`
 
 // queryCatalogStamps reads the commit times of oid's catalog rows
 // (CatalogStamps). No row = the OID no longer exists.
-func queryCatalogStamps(ctx context.Context, conn *pgx.Conn, oid uint32) (CatalogStamps, error) {
+func queryCatalogStamps(ctx context.Context, conn *pgx.Conn, oid uint32, publication string) (CatalogStamps, error) {
 	var st CatalogStamps
-	err := conn.QueryRow(ctx, catalogStampsClassQuery, oid).Scan(&st.Schema, &st.Table, &st.ClassAt, &st.TypeAt)
+	err := conn.QueryRow(ctx, catalogStampsClassQuery, oid, publication).Scan(&st.Schema, &st.Table, &st.ClassAt, &st.TypeAt, &st.PubAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CatalogStamps{}, nil
 	}
@@ -301,7 +304,7 @@ func queryCatalogStamps(ctx context.Context, conn *pgx.Conn, oid uint32) (Catalo
 	if err := rows.Err(); err != nil {
 		return CatalogStamps{}, fmt.Errorf("pgcapture: read catalog commit times of relation OID %d: %w", oid, err)
 	}
-	for _, p := range []**time.Time{&st.ClassAt, &st.TypeAt} {
+	for _, p := range []**time.Time{&st.ClassAt, &st.TypeAt, &st.PubAt} {
 		if *p != nil {
 			u := (**p).UTC()
 			*p = &u

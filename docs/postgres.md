@@ -502,6 +502,12 @@ What to know:
 - **A TRUNCATE, a DROP or a rename refuses**, including one that committed at
   the instant the snapshot opened: it writes no row changes, so the fold
   would bring the rows back.
+- **A table taken out of the publication and added back refuses** across that
+  stretch: its changes while it was out were never captured. This is seen only
+  for a `FOR TABLE` publication with `track_commit_timestamp = on` (see
+  [Schema changes on PostgreSQL](#schema-changes-on-postgresql)); otherwise
+  the fold cannot tell, and the chain's "every transaction exactly once" holds
+  only for what capture received.
 - **A primary-key-changing UPDATE refuses**, including one in the minute
   before the snapshot, which the fold reads again (see above).
 - **An unchanged-TOAST marker refuses** on any change the fold reads, even
@@ -855,7 +861,8 @@ rename), and records what changed in `schema_changes`:
 | Same table, other columns | `ALTER TABLE`, listing the columns added, dropped and retyped (a renamed column reads as one dropped plus one added, and the text says so) |
 | A new table under a name another table held, the old one gone | `DROP TABLE` then `CREATE TABLE` |
 | A new table under a name another table held, the old one still there under another name | `RENAME TABLE` for the old one, then `CREATE TABLE` |
-| A table that was not in the publication when capture started | `CREATE TABLE` (labelled when it is a partition) |
+| A table that was not in the publication when capture started | `CREATE TABLE` (labelled when it is a partition), or `ALTER PUBLICATION` when the catalog shows it was added to the publication after it existed |
+| A table taken out of the publication and added back | `ALTER PUBLICATION`, marked `gap=uncaptured`: its changes while it was out were never captured, and `reconstruct` and the snapshot-pair `verify` refuse a window across it |
 | A `TRUNCATE` | `TRUNCATE TABLE` |
 
 Nothing is installed in your database for this; it is read from the stream
@@ -914,6 +921,29 @@ refusal says so and says which points in time can still be rebuilt. A
 `TRUNCATE TABLE` is reported by PostgreSQL with its exact transaction, so it
 has no range and refuses exactly where it happened. A table that was not written
 to for a while after the change has a wide range.
+
+**Tables added to the publication.** A table added to a `FOR TABLE`
+publication has a row in the catalog written when it was added, and with
+`track_commit_timestamp = on` bintrail-pg reads its time. A table first seen
+after capture started whose catalog row is later than the table itself is
+recorded as added (`ALTER PUBLICATION`), not created; its changes from before
+are outside what capture covers, like the changes before capture started. A
+known table seen again after it was added back is recorded with the gap, so a
+rebuild that would need the changes made while it was out refuses instead of
+missing them. A table that no change has shown yet is caught too when it was
+in the publication when capture started and its row is later than that. When
+the catalog shows an add later than the change being read (bintrail-pg is
+behind), the stretch is refused as well, since the table may also have been
+out before. Changing a table's row filter or column list (PostgreSQL 15+)
+rewrites the same row and reads the same way; the row says so. Not seen: a
+table added back while `track_commit_timestamp` is off, or while the catalog
+cannot be read (bintrail-pg warns); a table no change had shown, taken out and
+added back while bintrail-pg was stopped; a table taken out again and not yet
+added back; tables covered by a `FOR ALL TABLES` or `FOR TABLES IN SCHEMA`
+publication or through a published parent (they are not added one by one); and
+a server clock stepped back across the add, since the add is placed by time.
+The live-source `verify` compares with the source as it is now and does not
+read these rows: a gap shows there as a difference.
 
 **What cannot be seen.** Anything that changes neither a column's name or type
 nor the table's name or schema: indexes, constraints, defaults, `NOT NULL`,

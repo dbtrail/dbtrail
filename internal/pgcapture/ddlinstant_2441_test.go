@@ -40,20 +40,32 @@ type stampRig struct {
 	err    error
 	calls  int
 	logs   *bytes.Buffer
+	// start, shapes and startAt are what rebuild makes the decoder from.
+	start   []uint32
+	shapes  []pgcapture.KnownShape
+	startAt time.Time
 }
 
 func newStampRig(t *testing.T, start []uint32, shapes ...pgcapture.KnownShape) *stampRig {
 	t.Helper()
 	r := &stampRig{inferRig: &inferRig{facts: map[uint32]pgcapture.RelationFacts{}, lastOK: true},
-		stamps: map[uint32]pgcapture.CatalogStamps{}, logs: &bytes.Buffer{}}
+		stamps: map[uint32]pgcapture.CatalogStamps{}, logs: &bytes.Buffer{}, start: start, shapes: shapes}
+	r.rebuild(t)
+	return r
+}
+
+// rebuild makes the decoder again from the rig's settings.
+func (r *stampRig) rebuild(t *testing.T) {
+	t.Helper()
 	startSet := map[uint32]bool{}
-	for _, o := range start {
+	for _, o := range r.start {
 		startSet[o] = true
 	}
 	logger := slog.New(slog.NewTextHandler(r.logs, nil))
 	r.d = pgcapture.NewDecoder(pkResolver("id"), event.Filters{}, logger, pgcapture.WithDDLInference(pgcapture.DDLInference{
-		Known:     shapes,
+		Known:     r.shapes,
 		StartOIDs: startSet,
+		StartAt:   r.startAt,
 		Lookup: func(oid uint32) (pgcapture.RelationFacts, error) {
 			return r.facts[oid], nil
 		},
@@ -65,7 +77,6 @@ func newStampRig(t *testing.T, start []uint32, shapes ...pgcapture.KnownShape) *
 			return r.stamps[oid], r.err
 		},
 	}))
-	return r
 }
 
 // live is the catalog's columns, as a stamp set holds them.
@@ -332,11 +343,13 @@ func TestInstant_catalogErrorFallsBack(t *testing.T) {
 	}
 }
 
-// No change and no stamps asked: the catalog is not read for a Relation
-// that changes nothing.
-func TestInstant_noChangeAsksNothing(t *testing.T) {
+// A Relation that changes nothing reads only whether the table was added back
+// to the publication, and writes nothing.
+func TestInstant_noChangeWritesNothing(t *testing.T) {
 	r := newStampRig(t, nil, known(10, "s", "a", int4("id")))
-	if d := ddls(r.relation(t, typedRel(10, "s", "a", int4("id")))); len(d) != 0 || r.calls != 0 {
-		t.Fatalf("got %s, %d catalog reads", kinds(d), r.calls)
+	if d := ddls(r.relation(t, typedRel(10, "s", "a", int4("id")))); len(d) != 0 {
+		t.Fatalf("got %s", kinds(d))
 	}
 }
+
+var errNoStamps = errors.New("commit timestamps are not kept")
