@@ -2,17 +2,17 @@ package console
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/event"
-	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -39,7 +39,9 @@ import (
 // waits, an expensive one in the background while the previous one is
 // served), so an idle console runs no scans
 // and no daemon loop is needed — the mechanism works identically under `serve`
-// and `watch`.
+// and `watch`. How one count reads the index (one at a time per index
+// database under a MySQL named lock, partition by partition, keeping the
+// counts of hours already past) is described in activity_scan.go.
 //
 // SINGLE-TIER since #1352: the aggregate reads live binlog_events EXCLUSIVELY —
 // no archive counts, and no archive_state read for a completeness caveat,
@@ -99,10 +101,19 @@ const (
 	// finishes for the next request.
 	activityInlineWait = 2 * time.Second
 
-	// activityComputeTimeout bounds one materialization flight. Flights run on
-	// a background context (a browser navigating away must not abort the
-	// refresh every OTHER tab is waiting on), so they need their own leash.
-	activityComputeTimeout = 5 * time.Minute
+	// activityColdWait is how long a request with NOTHING cached waits for the
+	// first count before it is answered with a 503 that says the count is
+	// still running. A request never holds the page for a whole scan: on a
+	// large index the first count takes minutes, and waiting for it is how a
+	// request used to come back as a bare 500 when the flight's own deadline
+	// fired.
+	activityColdWait = 10 * time.Second
+
+	// activityRetryBackoff is how long after a FAILED count (an error, a
+	// timeout, or the index's lock held elsewhere) the next one may start. A
+	// page that asks every few seconds would otherwise turn one failing
+	// statement into a scan per request.
+	activityRetryBackoff = 30 * time.Second
 
 	// activityMaxProfiles caps the cached aggregates per server. The cache is
 	// keyed by the session's RBAC deny set (each deny profile must see its own
@@ -203,6 +214,16 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := b.activityFor(r.Context(), opts.DenyTables, opts.AllowTables)
 	if err != nil {
+		// Nothing cached and no count to give: say why (still running, or the
+		// last one failed and when the next starts) instead of a bare 500.
+		var unavail *activityUnavailableError
+		if errors.As(err, &unavail) {
+			if !unavail.running {
+				w.Header().Set("Retry-After", strconv.Itoa(int(max(time.Until(unavail.retryAt), time.Second).Round(time.Second)/time.Second)))
+			}
+			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		writeFetchError(w, err)
 		return
 	}
@@ -210,90 +231,22 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 }
 
 // activityFor returns the materialized aggregate for this server under the
-// given deny set, computing it when no cached copy exists (single-flight:
-// concurrent misses share one computation) and otherwise as activityCache.get
-// describes: a stale cheap copy is recomputed while the request waits, a stale
-// expensive one is served with its original refreshed_at while it recomputes
-// in the background.
+// given deny/allow scope, as activityCache.get describes.
 func (b *bundle) activityFor(ctx context.Context, deny, allow []query.SchemaTable) (activityResponse, error) {
-	compute := func(cctx context.Context) (activityResponse, error) {
-		return computeActivity(cctx, b.db, b.dbName, deny, allow)
-	}
+	key := activityScopeKey(deny, allow)
+	sc := activityScan{dbName: b.dbName, deny: deny, allow: allow, storeBudget: -1}
 	if b.activity == nil {
 		// Test-constructed bundles only: every production bundle gets its cache
 		// in newBundleDerived (pinned by TestBundleAlwaysCarriesActivityCache).
-		return compute(ctx)
+		return computeActivity(ctx, b.db, sc)
 	}
-	return b.activity.get(ctx, activityScopeKey(deny, allow), compute)
-}
-
-// computeActivity is one materialization flight: derive the live-retention
-// window, run the aggregate over live binlog_events, fold, and stamp the
-// result. This is the ONLY data path behind /api/activity — there is no
-// archive read to fall back to (see the #1352 header comment).
-func computeActivity(ctx context.Context, db *sql.DB, dbName string, deny, allow []query.SchemaTable) (activityResponse, error) {
-	until := time.Now().UTC().Truncate(time.Second)
-	since, label, err := liveWindow(ctx, db, dbName, until)
-	if err != nil {
-		return activityResponse{}, err
-	}
-	agg, err := collectActivity(ctx, db, since, until, deny, allow)
-	if err != nil {
-		return activityResponse{}, err
-	}
-	resp := agg.response(label, since, until)
-	resp.RefreshedAt = until.Format(consoleTSFormat)
-	resp.Complete = !resp.Truncated
-	if resp.Truncated {
-		resp.Notes = append(resp.Notes, fmt.Sprintf(
-			"This index has more than %d table/event-type groups in the window; the counts below are a floor, not the total.", activityMaxGroups))
-	}
-	return resp, nil
-}
-
-// liveWindow derives the Overview's window from what the live table actually
-// holds: since = the oldest dated live partition's hour, until = now. The
-// window IS the live retention (#1352) — if rotation keeps 12 hours live, the
-// window is 12 hours — which is what makes the single-tier read honest by
-// construction: a window equal to live coverage cannot contain archived-only
-// hours, so no completeness caveat is needed and none is computed.
-//
-// When the floor cannot be determined — no dated partitions yet (a fresh index
-// whose rows all sit in p_future) or a bundle with no database name — the
-// window falls back to a bounded, stated activityFallbackWindow rather than an
-// unbounded scan or a fabricated floor.
-func liveWindow(ctx context.Context, db *sql.DB, dbName string, until time.Time) (time.Time, string, error) {
-	if dbName == "" {
-		return until.Add(-activityFallbackWindow), activityFallbackLabel, nil
-	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT PARTITION_NAME FROM information_schema.PARTITIONS
-		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'binlog_events' AND PARTITION_NAME IS NOT NULL`, dbName)
-	if err != nil {
-		return time.Time{}, "", fmt.Errorf("list live partitions: %w", err)
-	}
-	defer rows.Close()
-	var oldest time.Time
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return time.Time{}, "", err
-		}
-		t, ok := indexer.PartitionDate(name)
-		if !ok {
-			continue // p_future / malformed
-		}
-		if oldest.IsZero() || t.Before(oldest) {
-			oldest = t
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return time.Time{}, "", err
-	}
-	if oldest.IsZero() || !oldest.Before(until) {
-		return until.Add(-activityFallbackWindow), activityFallbackLabel, nil
-	}
-	return oldest, "live retention · " + windowLabel(until.Sub(oldest)), nil
+	c := b.activity
+	return c.get(ctx, key, func(cctx context.Context) (activityResponse, error) {
+		// Runs inside activityCache.run, which holds scanMu: the partition
+		// store is only ever touched there.
+		sc.store, sc.storeBudget = c.partStoreLocked(key)
+		return computeActivity(cctx, b.db, sc)
+	})
 }
 
 // windowLabel renders an approximate width for the tile ("~14 h", "~3 d"). The
@@ -337,7 +290,7 @@ func tableSetKey(set []query.SchemaTable) string {
 }
 
 // activityCache is one server's materialized Overview aggregates, keyed by
-// RBAC deny set. Lives on the bundle so it shares the connection's lifecycle:
+// RBAC scope. Lives on the bundle so it shares the connection's lifecycle:
 // evicting a server (DSN edit/delete) drops its materialization with it.
 type activityCache struct {
 	mu      sync.Mutex
@@ -352,8 +305,22 @@ type activityCache struct {
 	costs     map[string]time.Duration
 	prevCosts map[string]time.Duration
 	flights   map[string]*activityFlight
-	// inlineWait is activityInlineWait; a field so tests can shorten it.
-	inlineWait time.Duration
+	// retryAt/lastErr remember a failed count: no new one starts for the key
+	// before retryAt, and a request with nothing cached is told lastErr.
+	retryAt map[string]time.Time
+	lastErr map[string]error
+
+	// scanMu serializes counts across scope keys: one count at a time per
+	// server from this process (the index's named lock covers every other
+	// process). It also guards parts, which only run touches.
+	scanMu sync.Mutex
+	parts  map[string]*activityPartStore
+
+	// Fields so tests can shorten them.
+	inlineWait   time.Duration // activityInlineWait
+	coldWait     time.Duration // activityColdWait
+	retryBackoff time.Duration // activityRetryBackoff
+	runTimeout   time.Duration // activityRunTimeout
 }
 
 // activityFlight is one in-progress materialization. resp/err are written
@@ -370,14 +337,58 @@ type activityFlight struct {
 
 func newActivityCache() *activityCache {
 	return &activityCache{
-		entries:    map[string]activityResponse{},
-		stamps:     map[string]time.Time{},
-		costs:      map[string]time.Duration{},
-		prevCosts:  map[string]time.Duration{},
-		flights:    map[string]*activityFlight{},
-		inlineWait: activityInlineWait,
+		entries:      map[string]activityResponse{},
+		stamps:       map[string]time.Time{},
+		costs:        map[string]time.Duration{},
+		prevCosts:    map[string]time.Duration{},
+		flights:      map[string]*activityFlight{},
+		retryAt:      map[string]time.Time{},
+		lastErr:      map[string]error{},
+		parts:        map[string]*activityPartStore{},
+		inlineWait:   activityInlineWait,
+		coldWait:     activityColdWait,
+		retryBackoff: activityRetryBackoff,
+		runTimeout:   activityRunTimeout,
 	}
 }
+
+// partStoreLocked returns key's partition store and how many more groups it
+// may keep under activityMaxStoredGroups. Caller holds scanMu.
+func (c *activityCache) partStoreLocked(key string) (*activityPartStore, int) {
+	st := c.parts[key]
+	if st == nil {
+		st = newActivityPartStore()
+		c.parts[key] = st
+	}
+	used := 0
+	for _, other := range c.parts {
+		used += other.groups()
+	}
+	return st, max(activityMaxStoredGroups-used, 0)
+}
+
+// activityUnavailableError is the answer to a request with nothing cached
+// that could not be given a count: the first one is still running, or the
+// last one failed. The handler turns it into a 503 whose body says which.
+type activityUnavailableError struct {
+	// running: a count is in progress and started at since.
+	running bool
+	since   time.Time
+	// cause: the last count failed with it; retryAt is when the next starts.
+	cause   error
+	retryAt time.Time
+}
+
+func (e *activityUnavailableError) Error() string {
+	if e.running {
+		return fmt.Sprintf("the activity counts for this server are still being computed (started %s ago); they appear here once the first count finishes",
+			time.Since(e.since).Round(time.Second))
+	}
+	wait := max(time.Until(e.retryAt), 0).Round(time.Second)
+	return fmt.Sprintf("the activity counts for this server could not be computed: %v; the next attempt starts in %s", e.cause, wait)
+}
+
+func (e *activityUnavailableError) Unwrap() error { return e.cause }
 
 // activityTTL is how long an aggregate that took cost to compute is reused:
 // activityCostFactor times the cost, between activityMinTTL and
@@ -396,6 +407,21 @@ func (c *activityCache) costLocked(key string) time.Duration {
 	return cost
 }
 
+// startLocked returns key's running flight, starting one unless a failed
+// count's backoff is still running (then nil). Caller holds c.mu.
+func (c *activityCache) startLocked(key string, compute func(context.Context) (activityResponse, error), background bool) *activityFlight {
+	if f := c.flights[key]; f != nil {
+		return f
+	}
+	if time.Now().Before(c.retryAt[key]) {
+		return nil
+	}
+	f := &activityFlight{done: make(chan struct{}), started: time.Now()}
+	c.flights[key] = f
+	go c.run(key, f, compute, background)
+	return f
+}
+
 // get implements the read path described on handleActivity:
 //   - cached and within its TTL (activityTTL of its cost) → return it;
 //   - cached and stale, and cheap (cost under activityInlineCost) → join or
@@ -404,12 +430,13 @@ func (c *activityCache) costLocked(key string) time.Duration {
 //     entry, whose refreshed_at discloses the age;
 //   - cached and stale, and expensive → return it AS IS and start ONE
 //     background recompute for the next request;
-//   - not cached → compute now, single-flight (concurrent misses wait for the
-//     same flight rather than each scanning).
+//   - not cached → join or start ONE compute and wait up to coldWait; past
+//     that, or when the last count failed, an *activityUnavailableError.
 //
-// The compute always runs on a background context with its own timeout: the
-// flight outlives the request that started it on purpose, so a canceled tab
-// neither aborts the refresh other waiters share nor leaves the cache cold.
+// The compute always runs in its own goroutine on a background context: the
+// request only ever WAITS for it, so a canceled tab neither aborts the refresh
+// other waiters share nor leaves the cache cold. A failed count holds off the
+// next one for retryBackoff.
 func (c *activityCache) get(ctx context.Context, key string, compute func(context.Context) (activityResponse, error)) (activityResponse, error) {
 	c.mu.Lock()
 	if resp, ok := c.entries[key]; ok {
@@ -418,18 +445,12 @@ func (c *activityCache) get(ctx context.Context, key string, compute func(contex
 			c.mu.Unlock()
 			return resp, nil
 		}
-		f := c.flights[key]
-		if f == nil {
-			f = &activityFlight{done: make(chan struct{}), started: time.Now()}
-			c.flights[key] = f
-			go c.run(key, f, compute, true)
-		}
-		wait := c.inlineWait - time.Since(f.started)
+		f := c.startLocked(key, compute, true)
 		c.mu.Unlock()
-		if cost >= activityInlineCost {
+		if f == nil || cost >= activityInlineCost {
 			return resp, nil
 		}
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(c.inlineWait - time.Since(f.started))
 		defer timer.Stop()
 		select {
 		case <-f.done:
@@ -441,27 +462,40 @@ func (c *activityCache) get(ctx context.Context, key string, compute func(contex
 		}
 		return resp, nil
 	}
-	f := c.flights[key]
+	f := c.startLocked(key, compute, false)
 	if f == nil {
-		f = &activityFlight{done: make(chan struct{}), started: time.Now()}
-		c.flights[key] = f
-		go c.run(key, f, compute, false)
+		e := &activityUnavailableError{cause: c.lastErr[key], retryAt: c.retryAt[key]}
+		c.mu.Unlock()
+		return activityResponse{}, e
 	}
 	c.mu.Unlock()
+	timer := time.NewTimer(c.coldWait)
+	defer timer.Stop()
 	select {
 	case <-f.done:
-		return f.resp, f.err
+		if f.err != nil {
+			c.mu.Lock()
+			retryAt := c.retryAt[key]
+			c.mu.Unlock()
+			return activityResponse{}, &activityUnavailableError{cause: f.err, retryAt: retryAt}
+		}
+		return f.resp, nil
+	case <-timer.C:
+		return activityResponse{}, &activityUnavailableError{running: true, since: f.started}
 	case <-ctx.Done():
 		return activityResponse{}, ctx.Err()
 	}
 }
 
-// run executes one flight and publishes its result. A FAILED background
-// refresh keeps the previous entry (stale-but-disclosed beats an error page on
-// the landing tile) and logs; the flight is cleared either way, so the next
-// request retries instead of waiting for a TTL that will never restamp.
+// run executes one flight and publishes its result. It holds scanMu for the
+// whole count, so this server runs one count at a time across every scope. A
+// FAILED refresh keeps the previous entry (stale-but-disclosed beats an error
+// page on the landing tile), logs, and starts the retry backoff; the flight is
+// cleared either way.
 func (c *activityCache) run(key string, f *activityFlight, compute func(context.Context) (activityResponse, error), background bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), activityComputeTimeout)
+	c.scanMu.Lock()
+	defer c.scanMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), c.runTimeout)
 	defer cancel()
 	start := time.Now()
 	resp, err := compute(ctx)
@@ -474,12 +508,21 @@ func (c *activityCache) run(key string, f *activityFlight, compute func(context.
 			c.prevCosts[key] = last
 		}
 		c.costs[key] = cost
+		delete(c.retryAt, key)
+		delete(c.lastErr, key)
 		c.evictOverCapLocked()
+	} else {
+		c.retryAt[key] = time.Now().Add(c.retryBackoff)
+		c.lastErr[key] = err
 	}
 	delete(c.flights, key)
 	c.mu.Unlock()
-	if err != nil && background {
-		slog.Warn("console: activity refresh failed; the previous aggregate stays on screen with its refreshed_at", "error", err)
+	if err != nil {
+		if background {
+			slog.Warn("console: activity refresh failed; the previous aggregate stays on screen with its refreshed_at", "error", err)
+		} else {
+			slog.Warn("console: activity count failed; the Overview tiles show no number until one succeeds", "error", err)
+		}
 	}
 	f.resp, f.err = resp, err
 	close(f.done)
@@ -501,6 +544,8 @@ func (c *activityCache) evictOverCapLocked() {
 		delete(c.stamps, oldestKey)
 		delete(c.costs, oldestKey)
 		delete(c.prevCosts, oldestKey)
+		// Callers hold scanMu too (evictOverCapLocked runs inside run).
+		delete(c.parts, oldestKey)
 	}
 }
 
@@ -599,9 +644,27 @@ func (a *activityAgg) response(label string, since, until time.Time) activityRes
 // clock-skewed future rows sitting in p_future and count them under a label
 // that says they are inside the window.
 func buildActivitySQL(since, until time.Time, deny, allow []query.SchemaTable) (string, []any) {
+	return buildActivitySQLFor("", 0, since, until, deny, allow)
+}
+
+// buildActivitySQLFor is buildActivitySQL restricted to one partition (when
+// partition is set) and carrying a server-side MAX_EXECUTION_TIME (when
+// timeout is positive): the server, not the client, ends a statement that runs
+// too long, so no statement outlives the scan that issued it (see
+// activity_scan.go). The time predicate stays even with the PARTITION clause:
+// the first partition also holds rows older than the window, and the open
+// partition rows newer than "now".
+func buildActivitySQLFor(partition string, timeout time.Duration, since, until time.Time, deny, allow []query.SchemaTable) (string, []any) {
 	var sb strings.Builder
-	sb.WriteString("SELECT schema_name, table_name, event_type, COUNT(*) AS n FROM binlog_events" +
-		" WHERE event_timestamp >= ? AND event_timestamp < ?")
+	sb.WriteString("SELECT ")
+	if ms := timeout.Milliseconds(); ms > 0 {
+		fmt.Fprintf(&sb, "/*+ MAX_EXECUTION_TIME(%d) */ ", ms)
+	}
+	sb.WriteString("schema_name, table_name, event_type, COUNT(*) AS n FROM binlog_events")
+	if partition != "" {
+		sb.WriteString(" PARTITION (" + quotePartition(partition) + ")")
+	}
+	sb.WriteString(" WHERE event_timestamp >= ? AND event_timestamp < ?")
 	args := []any{since, until}
 	// Allow-list mode (#1449) mirrors buildQuery, BINARY included: a
 	// case-insensitive allow would also count a distinct same-name-other-case
@@ -620,30 +683,4 @@ func buildActivitySQL(since, until time.Time, deny, allow []query.SchemaTable) (
 	}
 	sb.WriteString(" GROUP BY schema_name, table_name, event_type")
 	return sb.String(), args
-}
-
-// collectActivity runs the aggregate and folds it.
-func collectActivity(ctx context.Context, db *sql.DB, since, until time.Time, deny, allow []query.SchemaTable) (*activityAgg, error) {
-	q, args := buildActivitySQL(since, until, deny, allow)
-	rows, err := db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	agg := newActivityAgg()
-	for rows.Next() {
-		var schema, table string
-		var etype uint8
-		var n int64
-		if err := rows.Scan(&schema, &table, &etype, &n); err != nil {
-			return nil, err
-		}
-		if !agg.add(schema, table, etype, n) {
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return agg, nil
 }

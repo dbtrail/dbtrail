@@ -63,9 +63,8 @@ func countingCompute(resp activityResponse, err error) (func(context.Context) (a
 func TestActivityCheapStaleEntryIsRecomputedWhileTheRequestWaits(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
-	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).WillReturnRows(activityResult())
-	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).
-		WillReturnRows(activityResult(aRow{"shop", "orders", 3, 1}))
+	expectActivityScan(mock, activityResult())
+	expectActivityScan(mock, activityResult(aRow{"shop", "orders", 3, 1}))
 	srv := newBootServer(db)
 
 	if code, first, body := getActivity(t, srv, "/api/activity"); code != 200 {

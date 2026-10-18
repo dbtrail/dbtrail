@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -29,12 +31,47 @@ func activityResult(rows ...aRow) *sqlmock.Rows {
 	return r
 }
 
-// partitionsResult builds the information_schema.PARTITIONS listing the
-// live-window derivation reads.
+// partitionsResult builds the information_schema.PARTITIONS listing the scan
+// reads, in range order: an hourly name's bound is the next hour, anything
+// else is MAXVALUE.
 func partitionsResult(names ...string) *sqlmock.Rows {
-	r := sqlmock.NewRows([]string{"PARTITION_NAME"})
+	r := sqlmock.NewRows([]string{"PARTITION_NAME", "PARTITION_DESCRIPTION"})
 	for _, n := range names {
-		r.AddRow(n)
+		desc := "MAXVALUE"
+		if h, ok := indexer.PartitionDate(n); ok {
+			desc = strconv.FormatInt(h.Add(time.Hour).Unix()+62167219200, 10)
+		}
+		r.AddRow(n, desc)
+	}
+	return r
+}
+
+// expectActivityLock / expectActivityRelease are the named lock every count
+// takes on its pinned connection.
+func expectActivityLock(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT GET_LOCK\(\?, 0\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(1))
+}
+
+func expectActivityRelease(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT RELEASE_LOCK\(\?\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(1))
+}
+
+// expectActivityScan is one whole count on a bundle with no database name:
+// lock, the single aggregate statement, release.
+func expectActivityScan(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+	expectActivityLock(mock)
+	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).WillReturnRows(rows)
+	expectActivityRelease(mock)
+}
+
+// fingerprintResult is the MAX(event_id) per closed partition, in the order
+// the fingerprint statement lists them.
+func fingerprintResult(maxIDs ...any) *sqlmock.Rows {
+	r := sqlmock.NewRows([]string{"i", "m"})
+	for i, m := range maxIDs {
+		r.AddRow(i, m)
 	}
 	return r
 }
@@ -61,7 +98,7 @@ func getActivity(t *testing.T, srv *Server, path string) (int, activityResponse,
 func TestActivityAPICounts(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
-	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).WillReturnRows(activityResult(
+	expectActivityScan(mock, activityResult(
 		aRow{"shop", "orders", 1, 10}, // INSERT
 		aRow{"shop", "orders", 2, 5},  // UPDATE
 		aRow{"shop", "orders", 3, 2},  // DELETE
@@ -126,14 +163,21 @@ func TestActivityWindowIsLiveRetention(t *testing.T) {
 	now := time.Now().UTC()
 	oldest := now.Add(-3 * time.Hour).Truncate(time.Hour)
 
-	mock.ExpectQuery("PARTITION_NAME FROM information_schema.PARTITIONS").
+	expectActivityLock(mock)
+	mock.ExpectQuery("PARTITION_NAME, PARTITION_DESCRIPTION FROM information_schema.PARTITIONS").
 		WillReturnRows(partitionsResult(
-			now.Format("p_2006010215"),
-			oldest.Format("p_2006010215"), // the floor, listed out of order on purpose
+			oldest.Format("p_2006010215"), // the floor
 			now.Add(-time.Hour).Format("p_2006010215"),
+			now.Format("p_2006010215"),
 			"p_future", // never a floor
 		))
-	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).WillReturnRows(activityResult())
+	// The two closed hours are fingerprinted, then every hour is counted,
+	// newest first; p_future starts after now and holds nothing of the window.
+	mock.ExpectQuery(`MAX\(event_id\)`).WillReturnRows(fingerprintResult(10, 20))
+	for range 3 {
+		mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events PARTITION`).WillReturnRows(activityResult())
+	}
+	expectActivityRelease(mock)
 
 	srv := newBootServer(db)
 	srv.cm.boot.dbName = "binlog_index"
@@ -165,10 +209,13 @@ func TestActivityReadsLiveTierOnly(t *testing.T) {
 	defer closeDB()
 	now := time.Now().UTC()
 
-	mock.ExpectQuery("PARTITION_NAME FROM information_schema.PARTITIONS").
+	expectActivityLock(mock)
+	mock.ExpectQuery("PARTITION_NAME, PARTITION_DESCRIPTION FROM information_schema.PARTITIONS").
 		WillReturnRows(partitionsResult(now.Add(-2 * time.Hour).Format("p_2006010215")))
+	mock.ExpectQuery(`MAX\(event_id\)`).WillReturnRows(fingerprintResult(7))
 	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).
 		WillReturnRows(activityResult(aRow{"shop", "orders", 3, 4}))
+	expectActivityRelease(mock)
 
 	srv := newBootServer(db)
 	srv.cm.boot.dbName = "binlog_index"
@@ -194,8 +241,7 @@ func TestActivityReadsLiveTierOnly(t *testing.T) {
 func TestActivityIsMaterializedAndDisclosesFreshness(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
-	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).
-		WillReturnRows(activityResult(aRow{"shop", "orders", 3, 4}))
+	expectActivityScan(mock, activityResult(aRow{"shop", "orders", 3, 4}))
 	srv := newBootServer(db)
 
 	code, first, body := getActivity(t, srv, "/api/activity")
@@ -225,12 +271,10 @@ func TestActivityIsMaterializedAndDisclosesFreshness(t *testing.T) {
 func TestActivityStaleCacheServesOldAndRefreshes(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
-	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).
-		WillReturnRows(activityResult(aRow{"shop", "orders", 3, 4}))
+	expectActivityScan(mock, activityResult(aRow{"shop", "orders", 3, 4}))
 	// The background refresh's compute: different counts, so serving it is
 	// observable.
-	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).
-		WillReturnRows(activityResult(aRow{"shop", "orders", 3, 9}))
+	expectActivityScan(mock, activityResult(aRow{"shop", "orders", 3, 9}))
 	srv := newBootServer(db)
 
 	if code, first, body := getActivity(t, srv, "/api/activity"); code != 200 {
@@ -415,8 +459,10 @@ func TestActivitySQLExcludesDeniedTables(t *testing.T) {
 func TestActivityDenyTablesReachTheQuery(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
+	expectActivityLock(mock)
 	mock.ExpectQuery(`NOT \(schema_name = \? AND table_name = \?\)`).
 		WillReturnRows(activityResult())
+	expectActivityRelease(mock)
 	srv := newBootServer(db)
 	srv.denyTables = []query.SchemaTable{{Schema: "shop", Table: "secrets"}}
 	srv.profileActive = true

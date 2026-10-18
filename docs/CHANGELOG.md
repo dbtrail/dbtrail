@@ -21,6 +21,12 @@ was published and runs the same code.
 
 ### Changed
 - **A PostgreSQL capture test waits for replication to start, not for the slot to read active.** PostgreSQL also marks a slot active while it creates it; a drop in the gap before replication starts succeeded and failed the 0.109.0 release (#2468).
+- **The Overview's activity counts no longer run the same aggregate twice on the index, and their cost follows what changed instead of the whole live retention.** On a large index the count (`GET /api/activity`) took longer than its 5-minute deadline; the console then gave up on the statement, but the index server kept running it (the MySQL driver closes the connection without `KILL QUERY`), and the next page refresh started a second copy beside it. Because the count never finished, nothing was ever cached, and a request that joined a count near its deadline came back as a bare HTTP 500. Now:
+  - at most one count runs per index database, held by a MySQL named lock on the connection the count uses, so it stays held for as long as the server is really running the statement, across a console restart or a second console on the same index;
+  - each statement carries a server-side `MAX_EXECUTION_TIME`, so a statement whose client went away ends by itself;
+  - the count runs one hourly partition at a time and keeps the counts of hours already past, each with that partition's `MAX(event_id)` read before counting; a refresh re-reads those values (an index lookup per partition) and recounts only the current hour and the hours whose value moved (a backlog write into an older hour, a resume-time dedup delete), plus one kept hour per refresh once its counts are an hour old. Hours counted before a failure are kept, so a first count longer than any deadline finishes over several attempts;
+  - a failed count waits 30 seconds before the next one starts, and the previous counts stay on screen with their "as of" time;
+  - with nothing computed yet, the endpoint waits up to 10 seconds and then answers `503` with a message saying the first count is still running, or why the last one failed and when the next one starts.
 
 ## [0.109.0] - 2026-10-18
 ### Added
