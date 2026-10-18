@@ -288,8 +288,8 @@ func TestPGBaseline_Integration(t *testing.T) {
 		t.Fatalf("table Gen shape %q: ok %v, err %v", mdG[baseline.MetaKeyPGRelation], ok, err)
 	}
 	wantCols := []baseline.PGColumn{
-		{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer"},
-		{Name: "n", TypeOID: 23, TypeMod: -1, Type: "integer"},
+		{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Ordinal: 1},
+		{Name: "n", TypeOID: 23, TypeMod: -1, Type: "integer", Ordinal: 2},
 	}
 	if shape.OID != wantOID || len(shape.Columns) != len(wantCols) {
 		t.Fatalf("table Gen shape = %+v, want oid %d and columns %+v", shape, wantOID, wantCols)

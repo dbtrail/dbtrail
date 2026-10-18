@@ -1,6 +1,9 @@
 package baseline
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The footer value round-trips, including the PostgreSQL shapes that are easy
 // to get wrong: typmod -1 (no modifier), a quoted identifier with a space and
@@ -73,5 +76,62 @@ func TestParsePGRelation_caseDistinctNamesAreNotDuplicates(t *testing.T) {
 	s := `{"oid":7,"columns":[{"name":"a","type_oid":25,"typmod":-1},{"name":"A","type_oid":25,"typmod":-1}]}`
 	if _, ok, err := ParsePGRelation(s); err != nil || !ok {
 		t.Fatalf("ParsePGRelation = ok %v, err %v", ok, err)
+	}
+}
+
+// What a CREATE TABLE needs beyond the column list (#1596 slice 2) round-trips:
+// NOT NULL, a default with quotes and a newline, identity, an owned sequence,
+// the position among the generated columns, a composite primary key in key
+// order, and a STORED generated column with its expression.
+func TestPGRelation_createTableFacts(t *testing.T) {
+	in := PGRelation{
+		OID: 16500,
+		Columns: []PGColumn{
+			{Name: "id", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Default: "nextval('public.\"Odd seq\"'::regclass)", Sequence: `public."Odd seq"`, Ordinal: 1},
+			{Name: "tenant", TypeOID: 23, TypeMod: -1, Type: "integer", NotNull: true, Identity: "d", Sequence: "public.t_tenant_seq", Ordinal: 2},
+			{Name: "note", TypeOID: 25, TypeMod: -1, Type: "text", Default: "'it''s\nhere'::text", Ordinal: 4},
+		},
+		PrimaryKey: []string{"tenant", "id"},
+		Generated:  []PGGeneratedColumn{{Name: "twice", Type: "integer", Expr: "(id * 2)", Ordinal: 3}},
+	}
+	s, err := in.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := ParsePGRelation(s)
+	if err != nil || !ok {
+		t.Fatalf("ParsePGRelation(%q) = ok %v, err %v", s, ok, err)
+	}
+	if len(got.Columns) != 3 || got.Columns[0] != in.Columns[0] || got.Columns[1] != in.Columns[1] || got.Columns[2] != in.Columns[2] {
+		t.Fatalf("columns = %+v", got.Columns)
+	}
+	if strings.Join(got.PrimaryKey, ",") != "tenant,id" || len(got.Generated) != 1 || got.Generated[0] != in.Generated[0] {
+		t.Fatalf("key %v generated %+v", got.PrimaryKey, got.Generated)
+	}
+	// The field names are a contract with every reader, old and new.
+	if !strings.Contains(s, `"not_null":true`) || !strings.Contains(s, `"identity":"d"`) || !strings.Contains(s, `"sequence":`) ||
+		!strings.Contains(s, `"ordinal":1`) || !strings.Contains(s, `"primary_key":["tenant","id"]`) || !strings.Contains(s, `"generated":[{"name":"twice","type":"integer","expr":"(id * 2)","ordinal":3}]`) {
+		t.Fatalf("Encode = %s", s)
+	}
+}
+
+// A footer that says something wrong about the table is refused, never used
+// to write a CREATE TABLE that differs from it.
+func TestParsePGRelation_badCreateTableFacts(t *testing.T) {
+	col := `{"name":"a","type_oid":25,"typmod":-1}`
+	for name, s := range map[string]string{
+		"a key column that is not a column": `{"oid":7,"columns":[` + col + `],"primary_key":["b"]}`,
+		"an empty key column":               `{"oid":7,"columns":[` + col + `],"primary_key":[""]}`,
+		"a key column twice":                `{"oid":7,"columns":[` + col + `],"primary_key":["a","a"]}`,
+		"a generated key column":            `{"oid":7,"columns":[` + col + `],"primary_key":["g"],"generated":[{"name":"g","type":"integer","expr":"1"}]}`,
+		"an unknown identity":               `{"oid":7,"columns":[{"name":"a","type_oid":25,"typmod":-1,"identity":"x"}]}`,
+		"a generated column named twice":    `{"oid":7,"columns":[` + col + `],"generated":[{"name":"a","type":"integer","expr":"1"}]}`,
+		"a generated column with no type":   `{"oid":7,"columns":[` + col + `],"generated":[{"name":"g","expr":"1"}]}`,
+		"a generated column with no expr":   `{"oid":7,"columns":[` + col + `],"generated":[{"name":"g","type":"integer"}]}`,
+		"a generated column with no name":   `{"oid":7,"columns":[` + col + `],"generated":[{"type":"integer","expr":"1"}]}`,
+	} {
+		if _, _, err := ParsePGRelation(s); err == nil {
+			t.Errorf("%s: ParsePGRelation(%q) accepted it", name, s)
+		}
 	}
 }

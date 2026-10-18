@@ -244,11 +244,15 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 		return Stats{}, fmt.Errorf("pgbaseline: publication %q streams no tables matching the filters — the baseline would be empty; check the publication's table list and the --schemas/--tables filters", cfg.Publication)
 	}
 	for i := range tables {
-		shape, err := loadColumns(ctx, conn, tables[i].OID, tables[i].Schema, tables[i].Table, logger)
+		shape, gens, err := loadColumns(ctx, conn, tables[i].OID, tables[i].Schema, tables[i].Table, logger)
 		if err != nil {
 			return Stats{}, err
 		}
-		tables[i].Shape = shape
+		key, err := loadPrimaryKey(ctx, conn, tables[i].OID, tables[i].Schema, tables[i].Table)
+		if err != nil {
+			return Stats{}, err
+		}
+		tables[i].Shape, tables[i].Generated, tables[i].PrimaryKey = shape, gens, key
 		tables[i].Columns = make([]string, len(shape))
 		for j, c := range shape {
 			tables[i].Columns[j] = c.Name
@@ -426,7 +430,7 @@ func tableFooter(t tableInfo, tsStr string, deltaStartLSN uint64) (map[string]st
 	// The table's OID and typed column list (#1596 slice 1). Written only if
 	// it reads back: a shape the readers would reject is a bug here, and a
 	// baseline without its shape must not be published as if it had one.
-	shape, err := baseline.PGRelation{OID: t.OID, Columns: t.Shape}.Encode()
+	shape, err := baseline.PGRelation{OID: t.OID, Columns: t.Shape, Generated: t.Generated, PrimaryKey: t.PrimaryKey}.Encode()
 	if err != nil {
 		return nil, err
 	}

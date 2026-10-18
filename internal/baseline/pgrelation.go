@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -24,9 +25,30 @@ import (
 const MetaKeyPGRelation = "bintrail.pg_relation"
 
 // PGRelation is the value of MetaKeyPGRelation.
+//
+// PrimaryKey and Generated, and the NotNull, Default, Identity, Sequence and
+// Ordinal of each column, are what a CREATE TABLE needs beyond the column
+// list (#1596 slice 2), read in the same transaction. Absent on snapshots
+// written before they were recorded.
 type PGRelation struct {
 	OID     uint32     `json:"oid"`
 	Columns []PGColumn `json:"columns"`
+	// PrimaryKey names the primary key's columns in key order; empty when
+	// the table has none or it was not recorded.
+	PrimaryKey []string `json:"primary_key,omitempty"`
+	// Generated are the STORED generated columns, which the file does not
+	// hold (PostgreSQL computes them again on load).
+	Generated []PGGeneratedColumn `json:"generated,omitempty"`
+}
+
+// PGGeneratedColumn is one STORED generated column: its type as format_type
+// spells it and its generation expression as pg_get_expr spells it.
+type PGGeneratedColumn struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Expr    string `json:"expr"`
+	NotNull bool   `json:"not_null,omitempty"`
+	Ordinal int    `json:"ordinal,omitempty"`
 }
 
 // PGColumn is one column of a PGRelation. TypeOID and TypeMod are
@@ -38,6 +60,20 @@ type PGColumn struct {
 	TypeOID uint32 `json:"type_oid"`
 	TypeMod int32  `json:"typmod"`
 	Type    string `json:"type,omitempty"`
+	// NotNull is attnotnull.
+	NotNull bool `json:"not_null,omitempty"`
+	// Default is the default expression as pg_get_expr spells it; "" none.
+	Default string `json:"default,omitempty"`
+	// Identity is attidentity: "a" GENERATED ALWAYS, "d" BY DEFAULT, ""
+	// not an identity column.
+	Identity string `json:"identity,omitempty"`
+	// Sequence is the sequence the column owns (a serial or identity
+	// column), schema-qualified and quoted as pg_get_serial_sequence
+	// returns it; "" none.
+	Sequence string `json:"sequence,omitempty"`
+	// Ordinal is attnum: where the column sits among all of the table's,
+	// generated ones included. 0 = not recorded.
+	Ordinal int `json:"ordinal,omitempty"`
 }
 
 // Encode returns the footer value.
@@ -81,6 +117,30 @@ func ParsePGRelation(s string) (r PGRelation, ok bool, err error) {
 			return PGRelation{}, false, fmt.Errorf("parse %s: column %q appears twice", MetaKeyPGRelation, c.Name)
 		}
 		seen[c.Name] = true
+		if c.Identity != "" && c.Identity != "a" && c.Identity != "d" {
+			return PGRelation{}, false, fmt.Errorf("parse %s: column %q has identity %q", MetaKeyPGRelation, c.Name, c.Identity)
+		}
+	}
+	for i, g := range r.Generated {
+		switch {
+		case g.Name == "":
+			return PGRelation{}, false, fmt.Errorf("parse %s: generated column %d has no name", MetaKeyPGRelation, i+1)
+		case seen[g.Name]:
+			return PGRelation{}, false, fmt.Errorf("parse %s: column %q appears twice", MetaKeyPGRelation, g.Name)
+		case g.Type == "" || g.Expr == "":
+			return PGRelation{}, false, fmt.Errorf("parse %s: generated column %q has no type or expression", MetaKeyPGRelation, g.Name)
+		}
+		seen[g.Name] = true
+	}
+	inKey := make(map[string]bool, len(r.PrimaryKey))
+	for _, k := range r.PrimaryKey {
+		if inKey[k] {
+			return PGRelation{}, false, fmt.Errorf("parse %s: primary key names %q twice", MetaKeyPGRelation, k)
+		}
+		inKey[k] = true
+		if !slices.ContainsFunc(r.Columns, func(c PGColumn) bool { return c.Name == k }) {
+			return PGRelation{}, false, fmt.Errorf("parse %s: primary key column %q is not a stored column", MetaKeyPGRelation, k)
+		}
 	}
 	return r, true, nil
 }

@@ -41,8 +41,11 @@ type tableInfo struct {
 	// order, resolved inside the snapshot transaction (loadColumns).
 	Columns []string
 	// Shape is the same column list with each column's type (#1596 slice
-	// 1), recorded under baseline.MetaKeyPGRelation.
-	Shape []baseline.PGColumn
+	// 1), recorded under baseline.MetaKeyPGRelation, with what a CREATE
+	// TABLE needs beyond it (slice 2): Generated and PrimaryKey too.
+	Shape      []baseline.PGColumn
+	Generated  []baseline.PGGeneratedColumn
+	PrimaryKey []string
 }
 
 // discoverTables lists the tables the publication streams, narrowed by the
@@ -147,42 +150,81 @@ func warnPartitioned(tables []tableInfo, publication string, logger *slog.Logger
 // columns are those of the exact relation discovery listed. Each column comes
 // back with its type as pgoutput describes it (atttypid, atttypmod) and as a
 // CREATE TABLE spells it (format_type).
-func loadColumns(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table string, logger *slog.Logger) ([]baseline.PGColumn, error) {
+//
+// With each column comes what a CREATE TABLE needs beyond it (#1596 slice
+// 2): NOT NULL, the default and identity, the sequence it owns, and its
+// attnum. The generated columns come back apart, with their expressions.
+func loadColumns(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table string, logger *slog.Logger) ([]baseline.PGColumn, []baseline.PGGeneratedColumn, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT a.attname, a.attgenerated <> '', a.atttypid, a.atttypmod,
-		       format_type(a.atttypid, a.atttypmod)
+		       format_type(a.atttypid, a.atttypmod), a.attnotnull,
+		       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity::text,
+		       COALESCE(pg_get_serial_sequence(a.attrelid::regclass::text, a.attname), ''),
+		       a.attnum
 		FROM pg_attribute a
+		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 		WHERE a.attrelid = $1
 		  AND a.attnum > 0 AND NOT a.attisdropped
 		ORDER BY a.attnum`, oid)
 	if err != nil {
-		return nil, fmt.Errorf("pgbaseline: listing columns of %s.%s: %w", schema, table, err)
+		return nil, nil, fmt.Errorf("pgbaseline: listing columns of %s.%s: %w", schema, table, err)
 	}
 	defer rows.Close()
 
 	var cols []baseline.PGColumn
+	var gens []baseline.PGGeneratedColumn
 	var generated []string
 	for rows.Next() {
 		var c baseline.PGColumn
 		var isGenerated bool
-		if err := rows.Scan(&c.Name, &isGenerated, &c.TypeOID, &c.TypeMod, &c.Type); err != nil {
-			return nil, fmt.Errorf("pgbaseline: scanning columns of %s.%s: %w", schema, table, err)
+		if err := rows.Scan(&c.Name, &isGenerated, &c.TypeOID, &c.TypeMod, &c.Type, &c.NotNull, &c.Default, &c.Identity, &c.Sequence, &c.Ordinal); err != nil {
+			return nil, nil, fmt.Errorf("pgbaseline: scanning columns of %s.%s: %w", schema, table, err)
 		}
 		if isGenerated {
 			generated = append(generated, c.Name)
+			gens = append(gens, baseline.PGGeneratedColumn{Name: c.Name, Type: c.Type, Expr: c.Default, NotNull: c.NotNull, Ordinal: c.Ordinal})
 			continue
 		}
 		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("pgbaseline: listing columns of %s.%s: %w", schema, table, err)
+		return nil, nil, fmt.Errorf("pgbaseline: listing columns of %s.%s: %w", schema, table, err)
 	}
 	if len(generated) > 0 {
 		logger.Info("pgbaseline: excluding STORED generated column(s) — pgoutput does not stream them on PG 14–17, so the delta path never carries them; keeping them out of the baseline keeps the merged column set consistent (PostgreSQL recomputes them on re-INSERT)",
 			"table", schema+"."+table, "columns", generated)
 	}
 	if len(cols) == 0 {
-		return nil, fmt.Errorf("pgbaseline: table %s.%s has no copyable columns (all dropped or generated)", schema, table)
+		return nil, nil, fmt.Errorf("pgbaseline: table %s.%s has no copyable columns (all dropped or generated)", schema, table)
 	}
-	return cols, nil
+	return cols, gens, nil
+}
+
+// loadPrimaryKey names a table's primary key columns in key order (not table
+// order); nil when it has none. Read in the snapshot transaction (#1596
+// slice 2).
+func loadPrimaryKey(ctx context.Context, conn *pgx.Conn, oid uint32, schema, table string) ([]string, error) {
+	rows, err := conn.Query(ctx, `
+		SELECT a.attname
+		FROM pg_index i
+		CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+		WHERE i.indrelid = $1 AND i.indisprimary
+		ORDER BY k.ord`, oid)
+	if err != nil {
+		return nil, fmt.Errorf("pgbaseline: reading the primary key of %s.%s: %w", schema, table, err)
+	}
+	defer rows.Close()
+	var key []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("pgbaseline: reading the primary key of %s.%s: %w", schema, table, err)
+		}
+		key = append(key, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pgbaseline: reading the primary key of %s.%s: %w", schema, table, err)
+	}
+	return key, nil
 }
