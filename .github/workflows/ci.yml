@@ -476,7 +476,7 @@ jobs:
       # failed jobs") uploads beside its earlier result instead of under the
       # same name, and the `integration` job reads the highest attempt of each
       # shard. Under one name it sometimes read the older result (#2299).
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() && env.RUN == 'true' }}
         with:
           name: mysql-it-${{ matrix.mysql }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
@@ -1102,7 +1102,7 @@ jobs:
 
       - name: Upload failure screenshot
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: console-e2e-failure
           path: |
@@ -1202,7 +1202,7 @@ jobs:
 
       - name: Upload the scoreboard and what failed
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: first-run-walk
           path: |
