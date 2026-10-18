@@ -177,7 +177,7 @@ endpoint at all.
 Once such a gateway is reachable at a public URL: in **claude.ai → Settings →
 Integrations → Add custom integration**, enter the gateway URL (your domain, or
 `https://mcp.dbtrail.com/mcp` for managed customers), complete the OAuth login,
-and the six tools appear. Works from web, Desktop, and mobile; tokens refresh
+and the tools appear. Works from web, Desktop, and mobile; tokens refresh
 automatically.
 
 ---
@@ -204,7 +204,9 @@ selected and inherit its posture, including the web interface's refusal of a
 tool-level `index_dsn`.
 
 The same six tools are also served by the web interface at `/mcp` (Streamable
-HTTP, access token auth, per-server routing by URL path). If you already run
+HTTP, access token auth, per-server routing by URL path), plus a seventh, `sql`,
+which only the web interface serves: it runs read-only SQL on the copy of your
+tables, for questions about the data as it is now. If you already run
 `bintrail-console`, you may not need this binary at all; see
 [console.md](console.md#mcp-endpoint).
 `list_schema_changes` accepts `schema`, `table`, `ddl_type`

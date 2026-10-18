@@ -27,8 +27,9 @@ import (
 //     implementations and so reports the same "cli" surface;
 //     there is no "pg" surface.
 //   - "mcp"     — query.run, recover.generate, recover.cascade,
-//     reconstruct.row (internal/mcptools; the console's /mcp
-//     endpoint reuses the same handlers with Surface "console").
+//     reconstruct.row, sql.run (internal/mcptools; the console's /mcp
+//     endpoint reuses the same handlers with Surface "console-mcp",
+//     and is the only surface that registers sql).
 //   - "shim"    — timetravel.query, for every virtual schema that returns
 //     row images (_flashback, _snapshot, _diff), from all THREE
 //     serving layers: the standalone `bintrail shim`, the

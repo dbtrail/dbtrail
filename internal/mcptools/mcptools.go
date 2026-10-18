@@ -140,6 +140,10 @@ type Target struct {
 	// surface, which serves one index and records no server.
 	ServerID   string
 	ServerName string
+	// RunSQL runs a statement on this server's copy for the sql tool
+	// (#2456): the console binds its bundle to the path /api/sql runs. nil
+	// where the surface has no copy to run SQL on.
+	RunSQL SQLRunFunc
 }
 
 // release closes the connection when this call owns it.
@@ -213,6 +217,10 @@ type Config struct {
 	// only when a baseline is available (Target.FindBaseline on routed
 	// surfaces; the baseline parameters/environment on the standalone one).
 	RecoverCascade bool
+	// SQL registers the sql tool (#2456), which runs a read-only statement
+	// through Target.RunSQL. Opt-in: only a surface that can bind RunSQL (the
+	// console, when it runs a SQL sandbox) advertises it.
+	SQL bool
 	// AllowBaselineParams accepts the reconstruct tool's baseline_dir /
 	// baseline_s3 parameters, with BINTRAIL_BASELINE_DIR / BINTRAIL_BASELINE_S3
 	// as the fallback (standalone). When false they are rejected exactly like
@@ -285,8 +293,8 @@ func (c Config) scriptBudgetOverride() (int64, bool) {
 
 // NewServer builds an MCP server exposing the read-only tools bound to cfg:
 // query, recover, status and list_schema_changes always, plus reconstruct when
-// cfg.Reconstruct is set and recover_cascade when cfg.RecoverCascade is set.
-// All tools are annotated read-only + idempotent.
+// cfg.Reconstruct is set, recover_cascade when cfg.RecoverCascade is set and
+// sql when cfg.SQL is set. All tools are annotated read-only + idempotent.
 func NewServer(cfg Config) *mcp.Server {
 	if cfg.Servers != nil {
 		cfg = withRouteAttribution(cfg)
@@ -398,6 +406,19 @@ func NewServer(cfg Config) *mcp.Server {
 				IdempotentHint: true,
 			},
 		}, MakeRecoverCascadeTool(cfg))
+	}
+
+	// Opt-in (#2456): see Config.SQL.
+	if cfg.SQL {
+		addCoreTool[SQLArgs, routedSQLArgs](server, cfg, &mcp.Tool{
+			Name:        "sql",
+			Description: sqlToolDescription,
+			Annotations: &mcp.ToolAnnotations{
+				Title:          "Run SQL on the copy",
+				ReadOnlyHint:   true,
+				IdempotentHint: true,
+			},
+		}, MakeSQLTool(cfg))
 	}
 
 	// Extension tools (mcpext.Register) are added AFTER the built-ins, so a

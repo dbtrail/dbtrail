@@ -61,6 +61,8 @@ func mcpGrantToolText(t *testing.T, res *mcp.CallToolResult) string {
 // typo guard.
 func TestMCPToolPermsCoverCoreTools(t *testing.T) {
 	s := newManagedServer(t, "tok")
+	// A SQL sandbox, so the opt-in sql tool (#2456) is listed with the rest.
+	s.sqlRunner = &fakeSQLRunner{}
 	ts := httptest.NewServer(s.mux)
 	t.Cleanup(ts.Close)
 
@@ -97,6 +99,10 @@ func TestMCPToolPermsCoverCoreTools(t *testing.T) {
 // permission error).
 func TestMCPManagedTokenGrantEnforcement(t *testing.T) {
 	s := newManagedServer(t, "")
+	// The sql tool registered (#2456): without a runner the loop below would
+	// pass for sql only because the gate runs before the tool lookup.
+	runner := &fakeSQLRunner{}
+	s.sqlRunner = runner
 	ts := httptest.NewServer(s.mux)
 	t.Cleanup(ts.Close)
 	ctx := context.Background()
@@ -158,6 +164,18 @@ func TestMCPManagedTokenGrantEnforcement(t *testing.T) {
 	}
 	if !res.IsError || !strings.Contains(mcpGrantToolText(t, res), "recover:execute") {
 		t.Errorf("recover with a query-only token: want forbidden recover:execute, got %q", mcpGrantToolText(t, res))
+	}
+	// Free SQL needs sql:execute, as POST /api/sql does: a query-only token is
+	// refused before a slot is taken.
+	res, err = session2.CallTool(ctx, &mcp.CallToolParams{Name: "sql", Arguments: map[string]any{"statement": "SELECT 1"}})
+	if err != nil {
+		t.Fatalf("CallTool sql (analyst): %v", err)
+	}
+	if !res.IsError || !strings.Contains(mcpGrantToolText(t, res), "sql:execute") {
+		t.Errorf("sql with a query-only token: want forbidden sql:execute, got %q", mcpGrantToolText(t, res))
+	}
+	if len(runner.users) != 0 {
+		t.Errorf("a refused sql call reserved a slot: %v", runner.users)
 	}
 }
 

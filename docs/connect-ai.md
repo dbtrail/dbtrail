@@ -156,7 +156,7 @@ directly with a DSN — see [mcp-server.md](mcp-server.md).
 
 - The endpoint requires the access token on **every** request; unknown hosts
   are rejected by the same host-header allowlist as the rest of the web interface.
-- The six tools are read-only and annotated as such (`ReadOnlyHint`); the AI
+- Every tool is read-only and annotated as such (`ReadOnlyHint`); the AI
   cannot write to the index, the source, or anywhere else through them.
 - Responses carry the web interface's field redactions, e.g. captured SQL statement
   text is withheld, same as the web interface.

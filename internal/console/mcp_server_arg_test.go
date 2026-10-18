@@ -244,6 +244,7 @@ func TestMCPServerArg_unreachableServer(t *testing.T) {
 func TestMCPServerArg_descriptionsListNames(t *testing.T) {
 	for _, hide := range []bool{false, true} {
 		f := newRoutedFixture(t, hide)
+		f.s.sqlRunner = &fakeSQLRunner{} // every core tool listed, sql (#2456) included
 		session := mcpGrantConnect(t, f.ts.URL+"/mcp", "t")
 		tools, err := session.ListTools(context.Background(), nil)
 		if err != nil {

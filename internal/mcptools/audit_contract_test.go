@@ -29,7 +29,21 @@ func TestAuditContract_MCP(t *testing.T) {
 		name   string
 		action string
 		call   func(t *testing.T)
+		// tableless: the action names no schema/table (sql.run: the
+		// statement can read any number of tables, and is in Detail).
+		tableless bool
 	}{
+		{
+			name:      "sql tool",
+			action:    "sql.run",
+			tableless: true,
+			call: func(t *testing.T) {
+				res, _, _ := MakeSQLTool(sqlToolConfig(&Target{RunSQL: stubSQL(oneSQLRow(), nil)}))(ctx, nil, SQLArgs{Statement: "SELECT 1"})
+				if res.IsError {
+					t.Fatalf("sql tool failed: %s", resultText(res))
+				}
+			},
+		},
 		{
 			name:   "query tool",
 			action: "query.run",
@@ -119,7 +133,7 @@ func TestAuditContract_MCP(t *testing.T) {
 			if ev.Actor == "" {
 				t.Error("actor must not be empty")
 			}
-			if ev.Schema != "app" || ev.Table != "users" {
+			if !tc.tableless && (ev.Schema != "app" || ev.Table != "users") {
 				t.Errorf("schema/table = %q/%q, want app/users", ev.Schema, ev.Table)
 			}
 			observed = append(observed, audittest.Pair{Surface: ev.Surface, Action: ev.Action})

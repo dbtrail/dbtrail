@@ -44,6 +44,8 @@ type fakeSQLRunner struct {
 	refs *sqlsandbox.Refs
 	// reserveCtx is the context the last Reserve was called with.
 	reserveCtx context.Context
+	// users are the slot keys Reserve was called with, in order.
+	users []string
 }
 
 func (f *fakeSQLRunner) Run(_ context.Context, job sqlsandbox.Job) (sqlsandbox.Result, error) {
@@ -68,9 +70,10 @@ func (f *fakeSQLRunner) Run(_ context.Context, job sqlsandbox.Job) (sqlsandbox.R
 
 // Reserve hands out a slot that runs through the fake; busy makes it refuse
 // like a full runner would, before any job exists.
-func (f *fakeSQLRunner) Reserve(ctx context.Context, _ string) (sqlSlot, error) {
+func (f *fakeSQLRunner) Reserve(ctx context.Context, user string) (sqlSlot, error) {
 	f.mu.Lock()
 	f.reserveCtx = ctx
+	f.users = append(f.users, user)
 	busy := f.busy
 	f.mu.Unlock()
 	if busy {

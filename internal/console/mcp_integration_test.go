@@ -116,13 +116,13 @@ func TestIntegrationMCPEndpoint(t *testing.T) {
 	for _, tool := range tools.Tools {
 		names[tool.Name] = true
 	}
-	for _, want := range []string{"query", "recover", "recover_cascade", "status", "list_schema_changes", "reconstruct"} {
+	for _, want := range []string{"query", "recover", "recover_cascade", "status", "list_schema_changes", "reconstruct", "sql"} {
 		if !names[want] {
 			t.Errorf("tool %q not listed; got %v", want, names)
 		}
 	}
-	if len(tools.Tools) != 6 {
-		t.Errorf("expected 6 tools, got %d", len(tools.Tools))
+	if len(tools.Tools) != 7 {
+		t.Errorf("expected 7 tools, got %d", len(tools.Tools))
 	}
 
 	// This console was seeded with NoArchive (no baseline), so the per-server

@@ -190,6 +190,7 @@ var mcpToolPerms = map[string]ext.Permission{
 	"recover_cascade":     ext.PermRecoverExecute,
 	"reconstruct":         ext.PermReconstructExecute,
 	"status":              ext.PermStatusRead,
+	"sql":                 ext.PermSQLExecute,
 }
 
 // mcpMetaMethods are the protocol exchanges any authenticated session may
@@ -306,7 +307,8 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 		Version: "console",
 		Instructions: "Bintrail console MCP endpoint for querying indexed binlog events, " +
 			"generating recovery SQL (including reversal of foreign-key cascade side effects), " +
-			"reconstructing a row's state at a point in time, and viewing index status. " +
+			"reconstructing a row's state at a point in time, and viewing index status; " +
+			"when the sql tool is listed, also for running read-only SQL on the copy of the database's current tables. " +
 			"This connection's server is chosen by URL path: /mcp for the console's default server, " +
 			"/mcp/{id-or-name} for a named server from the console registry. " +
 			"The built-in tools also take an optional server argument that sends that one call to another " +
@@ -393,6 +395,8 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 				Resolver:            b.resolver,
 				ResolverLoaded:      true,
 				RedactStatementText: true,
+				// The sql tool (#2456): the same path POST /api/sql runs.
+				RunSQL: s.mcpSQLRunner(b),
 			}, nil
 		},
 		AllowDSNParam:     false,
@@ -413,7 +417,13 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 		// call from the bundle's FindBaseline exactly like the handler's
 		// cascadeProviderFor(b), baseline parameters rejected like
 		// reconstruct's.
-		RecoverCascade:  true,
+		RecoverCascade: true,
+		// sql (#2456) is served where this process runs a SQL sandbox, the
+		// same condition the SQL page and the MySQL port have. The tool
+		// refuses per call under access rules, as /api/sql does; a token can
+		// carry no data profile of its own, because handleMCPTokenGenerate
+		// refuses to mint one from a data-restricted session.
+		SQL:             s.sqlRunner != nil,
 		QueryMaxLimit:   func() int { return eventsMaxLimit },
 		RecoverMaxLimit: recoverMaxLimit,
 		// #849: the console's /mcp recover tool renders the same reversal
