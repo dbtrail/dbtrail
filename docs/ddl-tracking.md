@@ -153,12 +153,14 @@ The `status` command includes a "Restore Coverage" section that answers the ques
 === Restore Coverage ===
   Earliest event:     2026-02-28 14:00:00 UTC
   Latest event:       2026-03-02 09:45:00 UTC
-  Total events:       1,284,567
+  Total events:       1284567 (estimate)
   Schema changes:     3 detected
   Warning: 1 schema change(s) detected without auto-snapshot (file-mode indexing without --source-dsn, or a failed auto-snapshot) — recovery across these changes may require manual snapshot
 ```
 
 The warning appears when `schema_changes` rows have `snapshot_id = NULL` for a DDL type that needs a snapshot — either a DDL detected in file mode without `--source-dsn`, or an auto-snapshot that failed (in any mode). `TRUNCATE TABLE` rows are excluded from the count: they record `snapshot_id = NULL` by design (a truncate changes no table structure, so no snapshot is taken) and are not a coverage gap. So are changes inferred on a PostgreSQL source, whose new shape the stream saves on its own. Recovery SQL generated for events spanning a genuinely uncovered DDL boundary may use incorrect column names.
+
+The earliest and latest event are exact. The total is InnoDB's row estimate for the live index (the same figure as `Total events (est.)` under the partition table), so it can differ from a `COUNT(*)` by a few percent; reading it this way keeps `status`, the web interface and the capture daemon's `bintrail_index_events_total` gauge from scanning every retained row each time they ask. Right after the first writes, while the estimate still says 0, the total is counted exactly and the `(estimate)` and `total_events_estimated` markers are absent.
 
 ### JSON output
 
@@ -168,6 +170,7 @@ The warning appears when `schema_changes` rows have `snapshot_id = NULL` for a D
     "earliest_event": "2026-02-28T14:00:00Z",
     "latest_event": "2026-03-02T09:45:00Z",
     "total_events": 1284567,
+    "total_events_estimated": true,
     "schema_changes": 3,
     "uncovered_ddls": 1
   }

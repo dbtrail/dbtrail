@@ -209,7 +209,12 @@ type CoverageInfo struct {
 	EarliestEvent sql.NullTime
 	LatestEvent   sql.NullTime
 	TotalEvents   int64
-	SchemaChanges int
+	// TotalEventsEstimated says TotalEvents is InnoDB's row estimate (the sum
+	// of the partitions' TABLE_ROWS) rather than a count; see loadEventSpan.
+	// EarliestEvent and LatestEvent are exact either way, and they, never the
+	// count, are what says whether the index holds anything.
+	TotalEventsEstimated bool
+	SchemaChanges        int
 	// UncoveredDDLs counts schema_changes rows (one per table a statement
 	// changed) with snapshot_id IS NULL whose
 	// DDL type NEEDS a snapshot — i.e. file-mode indexing without --source-dsn,
@@ -366,11 +371,7 @@ const UncoveredDDLWhere = `(snapshot_id IS NULL AND ddl_type <> 'TRUNCATE TABLE'
 // Parquet files.
 func LoadCoverage(ctx context.Context, db *sql.DB) (*CoverageInfo, error) {
 	var c CoverageInfo
-	err := db.QueryRowContext(ctx, `
-		SELECT MIN(event_timestamp),
-		       MAX(event_timestamp),
-		       COUNT(*)
-		FROM binlog_events`).Scan(&c.EarliestEvent, &c.LatestEvent, &c.TotalEvents)
+	err := loadEventSpan(ctx, db, &c)
 	if err != nil {
 		return nil, fmt.Errorf("query binlog_events coverage: %w", err)
 	}
@@ -1176,11 +1177,15 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 		}
 
 		totalEvents := coverage.TotalEvents + coverage.ArchiveTotalRows
+		est := ""
+		if coverage.TotalEventsEstimated {
+			est = " (estimate)"
+		}
 		if coverage.ArchiveTotalRows > 0 {
-			fmt.Fprintf(w, "  Total events:   %d (%d live + %d archived)\n",
-				totalEvents, coverage.TotalEvents, coverage.ArchiveTotalRows)
+			fmt.Fprintf(w, "  Total events:   %d (%d live + %d archived)%s\n",
+				totalEvents, coverage.TotalEvents, coverage.ArchiveTotalRows, est)
 		} else {
-			fmt.Fprintf(w, "  Total events:   %d\n", totalEvents)
+			fmt.Fprintf(w, "  Total events:   %d%s\n", totalEvents, est)
 		}
 		if coverage.IndexSizeBytes > 0 {
 			fmt.Fprintf(w, "  Index size:     %s (MySQL binlog_events)\n", formatBytes(coverage.IndexSizeBytes))
@@ -1411,10 +1416,14 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		S3Buckets      []string `json:"s3_buckets"`
 	}
 	type jsonCoverage struct {
-		EarliestEvent        *string `json:"earliest_event"`
-		LatestEvent          *string `json:"latest_event"`
-		TotalEvents          int64   `json:"total_events"`
-		LiveEvents           int64   `json:"live_events"`
+		EarliestEvent *string `json:"earliest_event"`
+		LatestEvent   *string `json:"latest_event"`
+		TotalEvents   int64   `json:"total_events"`
+		LiveEvents    int64   `json:"live_events"`
+		// TotalEventsEstimated: total_events and live_events carry InnoDB's
+		// row estimate for the live index, not a count (archived_events is
+		// still the archives' recorded row count).
+		TotalEventsEstimated bool    `json:"total_events_estimated,omitempty"`
 		ArchivedEvents       int64   `json:"archived_events"`
 		ArchiveEarliestEvent *string `json:"archive_earliest_event,omitempty"`
 		IndexSizeBytes       int64   `json:"index_size_bytes,omitempty"`
@@ -1780,12 +1789,13 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 	}
 	if coverage != nil {
 		jc := &jsonCoverage{
-			TotalEvents:    coverage.TotalEvents + coverage.ArchiveTotalRows,
-			LiveEvents:     coverage.TotalEvents,
-			ArchivedEvents: coverage.ArchiveTotalRows,
-			IndexSizeBytes: coverage.IndexSizeBytes,
-			SchemaChanges:  coverage.SchemaChanges,
-			UncoveredDDLs:  coverage.UncoveredDDLs,
+			TotalEvents:          coverage.TotalEvents + coverage.ArchiveTotalRows,
+			LiveEvents:           coverage.TotalEvents,
+			TotalEventsEstimated: coverage.TotalEventsEstimated,
+			ArchivedEvents:       coverage.ArchiveTotalRows,
+			IndexSizeBytes:       coverage.IndexSizeBytes,
+			SchemaChanges:        coverage.SchemaChanges,
+			UncoveredDDLs:        coverage.UncoveredDDLs,
 			// #816: the figures above are live-only and a LOWER BOUND when
 			// this is set. A monitor that treats earliest_event as the
 			// recovery horizon must be able to tell the difference.

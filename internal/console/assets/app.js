@@ -6177,9 +6177,12 @@ function statusFlowModel(data, capacity, caps, copy) {
   }
 
   // 2. DBTrail: what the index holds, and whether it holds all of it
+  // Both sources can be InnoDB's row estimate: total_events_estimate always,
+  // coverage.total_events when total_events_estimated says so.
+  const exact = cov.total_events !== undefined && !cov.total_events_estimated;
   const events = cov.total_events !== undefined ? cov.total_events : data.total_events_estimate;
   const parts = (data.partitions || []).length;
-  const held = n(events) + " events · " + parts + " hour" + (parts === 1 ? "" : "s");
+  const held = (exact ? "" : "about ") + n(events) + " events · " + parts + " hour" + (parts === 1 ? "" : "s");
   const ch = stream && stream.capture_health;
   let dbt;
   if (stream && stream.gap_lost) dbt = piece("DBTrail", "bad", "events permanently lost", held);

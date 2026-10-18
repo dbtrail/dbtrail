@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The restore-coverage figures no longer scan the whole index.** `status`, the web interface's `/api/status` (polled by the Overview) and the capture daemon's per-minute `bintrail_index_*` gauges read the oldest event, the newest event and the event total with one `SELECT MIN, MAX, COUNT(*)` over all of `binlog_events`, whose cost grows with everything the index retains: about 1 second per call at 7 million rows on a 4-core host with a sized buffer pool, about 6 seconds with the 128 MB default, and a full scan of a week on an index that keeps one. The oldest and newest event now come from the first and last partition that holds a row (still exact), and the total from InnoDB's row estimate. The total is marked as one: `(estimate)` after the total in the text output, `total_events_estimated: true` in the JSON, "about" in the web interface. This is what `docs/observability.md` already said `bintrail_index_events_total` was.
+
 ## [0.109.1] - 2026-10-18
 The first published build of the changes listed under 0.109.0, which was
 tagged and has no binaries or packages of its own: its release stopped on a
