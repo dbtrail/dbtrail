@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -156,13 +157,12 @@ func TestReport_pgShapedVerdictFailsRunInBothFormats(t *testing.T) {
 	}
 }
 
-// TestBaselineFetchOptions_pgNeverBoundsByPosition guards the load-bearing B4
-// invariant that VerifyBaselinePair and ExplainBaselinePairMismatch share: a PG
-// delta window is time-bounded ONLY (its binlog_file is a non-monotonic "X/Y"
-// LSN the position filter can't order), while MySQL pins the exact binlog cut.
-// A refactor that set a position bound for PG — the exact regression the review
-// flagged — fails here without a live DB.
-func TestBaselineFetchOptions_pgNeverBoundsByPosition(t *testing.T) {
+// TestBaselineFetchOptions_pgBoundsByTheFloor guards the window VerifyBaselinePair
+// and ExplainBaselinePairMismatch share. PostgreSQL (#1596): from the previous
+// snapshot's LSN floor and recorded time bound when it has a floor, by number,
+// and never an upper position bound; time only without a floor. MySQL pins the
+// exact binlog cut.
+func TestBaselineFetchOptions_pgBoundsByTheFloor(t *testing.T) {
 	p := BaselinePair{
 		Schema: "app", Table: "orders",
 		PrevSnapshot: time.Unix(100, 0).UTC(), NewSnapshot: time.Unix(200, 0).UTC(),
@@ -172,10 +172,19 @@ func TestBaselineFetchOptions_pgNeverBoundsByPosition(t *testing.T) {
 
 	pgOpts := baselineFetchOptions(p, true)
 	if pgOpts.UntilPos != nil || pgOpts.SincePos != nil {
-		t.Errorf("PG window must set NO position bound: UntilPos=%v SincePos=%v", pgOpts.UntilPos, pgOpts.SincePos)
+		t.Errorf("PG window with no floor must set NO position bound: UntilPos=%v SincePos=%v", pgOpts.UntilPos, pgOpts.SincePos)
 	}
-	if pgOpts.Since == nil || pgOpts.Until == nil || pgOpts.LimitPerPK != 1 {
+	if pgOpts.Since == nil || !pgOpts.Since.Equal(p.PrevSnapshot) || pgOpts.Until == nil || pgOpts.LimitPerPK != 1 {
 		t.Errorf("PG window must keep the time bounds + LimitPerPK: %+v", pgOpts)
+	}
+	p.PrevPGFrom = &query.BinlogPos{File: "1/0", Pos: 1 << 32}
+	p.PrevPGSince = time.Unix(40, 0).UTC()
+	pgOpts = baselineFetchOptions(p, true)
+	// Settled: the read stays at the recorded bound (no widening into older
+	// partitions and archives).
+	want := query.Options{Schema: "app", Table: "orders", Since: &p.PrevPGSince, Until: &p.NewSnapshot, LimitPerPK: 1, SincePos: p.PrevPGFrom}.SinceProven()
+	if !reflect.DeepEqual(pgOpts, want) {
+		t.Errorf("PG window from the floor: %+v, want %+v", pgOpts, want)
 	}
 
 	myOpts := baselineFetchOptions(p, false)

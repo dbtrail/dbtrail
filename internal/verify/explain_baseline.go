@@ -137,8 +137,7 @@ func ExplainBaselinePairMismatch(ctx context.Context, cfg BaselineConfig, p Base
 	}
 	pg := cfg.SourceFlavor == flavorPostgres
 	engine := query.New(cfg.IndexDB)
-	// Same window as VerifyBaselinePair (time-bounded, position cut for MySQL
-	// only) so the drill-down sees exactly the rows the verdict's digest saw.
+	// Same window as VerifyBaselinePair (baselineFetchOptions) so the drill-down sees exactly the rows the verdict's digest saw.
 	var order query.LatestPerPKOrder
 	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, baselineFetchMerged(cfg, p, pg, &order))
 	if err != nil {

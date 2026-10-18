@@ -26,8 +26,8 @@ type BaselineConfig struct {
 	NoArchive      bool
 	ArchiveFetcher query.ArchiveFetcher
 	// SourceFlavor is the index's source family (query.SourceFlavor: "postgres"
-	// selects the PG path — LSN anchor, text-identity PK, time-bounded delta
-	// window; "" / "mysql" / "mariadb" keep the MySQL path). Set once per run by
+	// selects the PG path — LSN anchor, text-identity PK, delta window from
+	// the previous snapshot's LSN floor; "" / "mysql" / "mariadb" keep the MySQL path). Set once per run by
 	// the caller from the index, never the registry field — the index is truth.
 	SourceFlavor string
 	// DuckDBTuning is the resource budget for the baseline-merge DuckDB
@@ -68,13 +68,16 @@ func anchorLabel(pg bool, p BaselinePair) string {
 // previous baseline forward to the new one. The window is ALWAYS time-bounded
 // (Since/Until on event_timestamp). MySQL additionally pins the exact binlog-
 // position cut — UntilPos at the new anchor, SincePos at the prev anchor when it
-// recorded one (#797). PostgreSQL does NOT: its events carry a non-monotonic
-// "X/Y" LSN in binlog_file that the length-lexicographic position filter cannot
-// bound correctly, so a PG window is time-bounded only (accepting the (prev,new]
-// boundary drift the live-source path documents; a numeric-LSN position filter
-// is a deferred refinement, #1022). "PG never sets a position bound" is the
-// load-bearing correctness invariant — kept in ONE place, shared by
-// VerifyBaselinePair and ExplainBaselinePairMismatch.
+// recorded one (#797).
+//
+// PostgreSQL (#1596) starts at the previous snapshot's LSN floor and the time
+// bound it records (reconstruct.PGDeltaWindow, in PrevPGFrom/PrevPGSince):
+// a transaction committing as that snapshot opened can be missing from it,
+// with a commit time before the snapshot's. Positions compare as numbers. Its
+// upper bound stays the new snapshot's time, never its floor: the new side is
+// a read of the database, and a transaction past its floor that committed
+// before its read is in it. Kept in ONE place, shared by VerifyBaselinePair and
+// ExplainBaselinePairMismatch.
 func baselineFetchOptions(p BaselinePair, pg bool) query.Options {
 	opts := query.Options{
 		Schema:     p.Schema,
@@ -83,11 +86,16 @@ func baselineFetchOptions(p BaselinePair, pg bool) query.Options {
 		Until:      &p.NewSnapshot,
 		LimitPerPK: 1,
 	}
-	if !pg {
-		opts.UntilPos = &p.NewAnchor
-		if p.PrevAnchor.File != "" && p.PrevAnchor.Pos != 0 {
-			opts.SincePos = &p.PrevAnchor
+	if pg {
+		if p.PrevPGFrom != nil {
+			opts.Since, opts.SincePos = &p.PrevPGSince, p.PrevPGFrom
+			opts = opts.SinceProven()
 		}
+		return opts
+	}
+	opts.UntilPos = &p.NewAnchor
+	if p.PrevAnchor.File != "" && p.PrevAnchor.Pos != 0 {
+		opts.SincePos = &p.PrevAnchor
 	}
 	return opts
 }
@@ -141,6 +149,12 @@ type BaselinePair struct {
 	// PrevAnchor. 0 = a MySQL baseline or a pre-#593 PG baseline (no LSN).
 	NewLSN  uint64
 	PrevLSN uint64
+	// PrevPGFrom and PrevPGSince are where the changes after the previous
+	// snapshot start on PostgreSQL (reconstruct.PGDeltaWindow): its LSN
+	// floor and the time bound it records. nil for MySQL and for a
+	// PostgreSQL snapshot that recorded no floor (read by time).
+	PrevPGFrom  *query.BinlogPos
+	PrevPGSince time.Time
 	// NewReadFromDatabase: the new side is a snapshot that read this table
 	// from the database (a dump), its file written there, not carried there.
 	// Set by FindBaselinePair, which picks no other new side (and so leaves
@@ -299,7 +313,13 @@ func VerifyBaselinePair(ctx context.Context, cfg BaselineConfig, p BaselinePair)
 		return inconclusive(res, unchecked), nil
 	}
 
-	ddl, ddlAt, found, err := reconstruct.FindDestructiveDDL(ctx, cfg.IndexDB, p.Schema, p.Table, p.PrevSnapshot, p.NewSnapshot)
+	// From where the changes are read: on PostgreSQL a TRUNCATE that raced
+	// the previous snapshot writes no row change and may be missing from it.
+	ddlSince := p.PrevSnapshot
+	if pg && p.PrevPGFrom != nil {
+		ddlSince = p.PrevPGSince
+	}
+	ddl, ddlAt, found, err := reconstruct.FindDestructiveDDL(ctx, cfg.IndexDB, p.Schema, p.Table, ddlSince, p.NewSnapshot)
 	if err != nil {
 		return res, fmt.Errorf("look for a TRUNCATE, DROP or RENAME of %s.%s between the two snapshots: %w", p.Schema, p.Table, err)
 	}
@@ -765,6 +785,12 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 	if err != nil {
 		return settle(StatusError, err.Error()), restsOn{}
 	}
+	// PostgreSQL: where the changes after the previous snapshot start. A
+	// MySQL footer has no LSN, and PGDeltaWindow answers nil for it.
+	prevPGSince, prevPGFrom, _, err := reconstruct.PGDeltaWindow(prevMeta, prev.SnapshotTime)
+	if err != nil {
+		return settle(StatusError, fmt.Sprintf("%s: %v", prev.Path, err)), restsOn{}
+	}
 	// A previous base with a table delta beside it (#1638) has events of its
 	// own between its chain's start and its directory's time, so the fetch is
 	// bounded from the chain's start. Same rule, and same reason, as
@@ -789,6 +815,8 @@ func pairLastRead(ctx context.Context, snaps []reconstruct.BaselineFile, other s
 		PrevEventMark:       prevMeta.EventMark,
 		NewLSN:              nMeta.LSN,
 		PrevLSN:             prevMeta.LSN,
+		PrevPGFrom:          prevPGFrom,
+		PrevPGSince:         prevPGSince,
 		NewReadFromDatabase: true,
 		NewCascadeNote:      cascadeNote(nMeta.CreateTableSQL),
 		PrevDir:             prev.SnapshotTime,
