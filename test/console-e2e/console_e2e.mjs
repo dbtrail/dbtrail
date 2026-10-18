@@ -2691,9 +2691,16 @@ try {
         create: btn("Read database now"),
         createNote: /Read database now:/.test((v.querySelector(".snap-hero") || {}).textContent || ""),
         restore: !!v.querySelector(".bk-restore:not(.bk-schedule)"),
-        takeAway: !!v.querySelector("details.bk-take"),
+        // The take-away panel, not the "Use it where it lives" fold below
+        // it, which wears the same panel class.
+        takeAway: !!v.querySelector("details.bk-take:not(.bk-inplace)"),
         duckData: btn("Download the data"),
-        views: btn("Download views.sql"),
+        // The DuckDB lane no longer offers views.sql on its own: the file
+        // rides inside the archive. The one views.sql button left is the
+        // schema card's, in the fold, which GET /api/views.sql gates on
+        // settings:read.
+        laneViews: Array.from(v.querySelectorAll(".bk-take:not(.bk-inplace) button")).some((b) => /views\.sql/.test(b.textContent)),
+        views: !!v.querySelector(".bk-inplace .cn-dk"),
         build: btn("Build"),
         runCheck: !!v.querySelector(".vfy-control"),
         currentRun: !!v.querySelector(".vfy-current"),
@@ -2736,7 +2743,7 @@ try {
   });
   const pc = permCases;
   // The control: with every permission the probe finds every control.
-  (pc.full.rows > 0 && pc.full.create && !pc.full.restore && pc.full.takeAway && pc.full.duckData && pc.full.build
+  (pc.full.rows > 0 && pc.full.create && !pc.full.restore && pc.full.takeAway && pc.full.duckData && !pc.full.laneViews && pc.full.views && pc.full.build
     && pc.full.runCheck && pc.full.serverSave && pc.full.schedSave && !pc.full.startsLabel && !pc.full.currentSettings
     && pc.full.errorBoxes === 0 && pc.permKeys.includes("servers:read"))
     ? ok("permissions: with full access every control is drawn (the probe's control case)")
@@ -2851,7 +2858,9 @@ try {
   // may create a snapshot but not see or change settings: the Create note
   // keeps its reason and drops "(under Settings)". A session that
   // may download but not read settings keeps the DuckDB lane without the
-  // false line about how DBTrail is configured. A session that may read
+  // false line about how DBTrail is configured; and since the lane is one
+  // download whose views.sql rides in the archive, it is the same lane with
+  // the views capability off, with no withheld-file sentence. A session that may read
   // settings but not write servers is not told to "select this server to
   // change it". Each is paired with the full-access text as its control.
   const hints = await page.evaluate(() => {
@@ -2898,7 +2907,7 @@ try {
     && (H.views ? !/set not to read archived data/.test(H.operator.duck) : true) && /Download the data/.test(H.operator.duck)
     && /Select this server at the top/.test(H.full.row) && !/Select this server at the top/.test(H.reader.row) && /No schedule/.test(H.reader.row)
     && (H.views ? !/set not to read archived data/.test(H.full.duck) : true)
-    && /set not to read archived data/.test(H.operator.duckNoViews)
+    && !/set not to read archived data/.test(H.operator.duckNoViews) && H.operator.duckNoViews === H.operator.duck
     && /With S3 only/.test(H.full.s3) && /Add a Local folder/.test(H.full.s3)
     && /With S3 only/.test(H.reader.s3) && !/Add a Local folder/.test(H.reader.s3)
     && /Type one above and Save/.test(H.full.inh) && /keeps no snapshots/.test(H.reader.inh) && !/Type one above and Save/.test(H.reader.inh))
@@ -3258,6 +3267,7 @@ try {
         tiles: l.querySelectorAll(".bk-file").length,
         lead: (l.querySelector(".bk-lane-lead") || {}).textContent || "",
         views: Array.from(l.querySelectorAll("button")).some((b) => /views\.sql/.test(b.textContent)),
+        cmd: (l.querySelector(".dk-cmd") || {}).textContent || "",
       });
     });
     return out;
@@ -3267,28 +3277,27 @@ try {
   (duck && mysql)
     ? ok("take-away: both download lanes render")
     : bad("take-away: both download lanes render", JSON.stringify(lanes));
-  // The drawing and the sentence come from one source, so the rendered tile
-  // count must match the word the lane prints. A drawing that outlived its
-  // lane is the failure this pins.
-  const counts = { 1: "One download", 2: "Two downloads" };
-  (duck && counts[duck.tiles] && duck.lead.startsWith(counts[duck.tiles]))
-    ? ok("take-away: the DuckDB lane's drawing and its sentence agree")
-    : bad("take-away: the DuckDB lane's drawing and its sentence agree", JSON.stringify(duck));
+  // The DuckDB lane is ONE download that still draws two tiles: the archive
+  // carries its own views.sql. The count word follows what the reader saves,
+  // not the tiles drawn, so a lane that went back to counting tiles ("Two
+  // downloads") rings here.
+  (duck && duck.tiles === 2 && duck.lead.startsWith("One download") && /together/.test(duck.lead))
+    ? ok("take-away: the DuckDB lane draws both files and says it is one download")
+    : bad("take-away: the DuckDB lane draws both files and says it is one download", JSON.stringify(duck));
   (mysql && mysql.tiles === 1 && mysql.lead.startsWith("One download"))
     ? ok("take-away: the MySQL lane draws one download and says so")
     : bad("take-away: the MySQL lane draws one download and says so", JSON.stringify(mysql));
-  // The views half is offered only when the server can make the file: the
-  // lane downloads it itself (#1573), gated on the views capability.
-  (duck && duck.views === lanes.views && duck.tiles === (lanes.views ? 2 : 1))
-    ? ok("take-away: the views file is offered only when the server can make it")
-    : bad("take-away: the views file is offered only when the server can make it", JSON.stringify({ caps: lanes.views, duck: duck }));
+  // No second button: a views.sql from this server names this server's
+  // folders, which mean nothing on the reader's machine. In its place, the
+  // command to run inside the unpacked folder.
+  (duck && !duck.views && duck.cmd === "duckdb -init views.sql lake.db")
+    ? ok("take-away: the DuckDB lane offers no separate views.sql, and shows the command to open the archive")
+    : bad("take-away: the DuckDB lane offers no separate views.sql, and shows the command to open the archive", JSON.stringify(duck));
 
-  // The GATED arm, fixture-driven through the real builder. The assertions
-  // above run on a stack whose views capability is ON, so the one-tile arm --
-  // its sentence, its missing button -- is drawn by nothing otherwise. Same
-  // shape as sqlxGateOff below: flip the capability, call the builder,
-  // restore. Without this, inverting the gate is caught only by the assertion
-  // above, and the arm itself is never rendered at all.
+  // The lane no longer depends on the views capability: the archive's
+  // views.sql is written with the snapshot, not by GET /api/views.sql.
+  // Driven through the real builder with the capability flipped both ways;
+  // the two arms must be the same lane.
   const duckOff = await page.evaluate(() => {
     const b = { configured: true, snapshots: [{ time: "2026-06-10 12:00:00" }] };
     const keep = capsCache.views;
@@ -3301,35 +3310,44 @@ try {
       tiles: lane.querySelectorAll(".bk-file").length,
       lead: (lane.querySelector(".bk-lane-lead") || {}).textContent || "",
       views: Array.from(lane.querySelectorAll("button")).some((x) => /views\.sql/.test(x.textContent)),
+      cmd: (lane.querySelector(".dk-cmd") || {}).textContent || "",
       text: lane.textContent,
     });
     return { off: read(off), on: read(on) };
   });
-  (duckOff.off && duckOff.off.tiles === 1 && !duckOff.off.views && duckOff.off.lead.startsWith("One download"))
-    ? ok("take-away: with no views capability the lane draws one download and offers no views file")
-    : bad("take-away: with no views capability the lane draws one download and offers no views file", JSON.stringify(duckOff.off));
-  // And it must say WHY, rather than dressing a console setting as a property
-  // of the data: the same folder still yields the file from the command line.
-  (duckOff.off && /not offered, because/.test(duckOff.off.text) && /decimal columns arrive as text/.test(duckOff.off.text))
-    ? ok("take-away: the withheld views file is explained, not implied away")
-    : bad("take-away: the withheld views file is explained, not implied away", JSON.stringify(duckOff.off && duckOff.off.text));
-  // The on-arm is the vacuousness control: a builder that always drew one
-  // tile would pass the off-arm alone.
-  (duckOff.on && duckOff.on.tiles === 2 && duckOff.on.views)
-    ? ok("take-away: with the capability on, the same builder draws both downloads")
-    : bad("take-away: with the capability on, the same builder draws both downloads", JSON.stringify(duckOff.on));
+  (duckOff.off && duckOff.off.tiles === 2 && !duckOff.off.views && duckOff.off.lead.startsWith("One download")
+    && duckOff.off.cmd === "duckdb -init views.sql lake.db")
+    ? ok("take-away: with no views capability the lane is still one download of both files")
+    : bad("take-away: with no views capability the lane is still one download of both files", JSON.stringify(duckOff.off));
+  // The old off-arm explained a withheld file; nothing is withheld now, so
+  // that sentence must not survive to describe a file the archive carries.
+  (duckOff.off && !/not offered, because/.test(duckOff.off.text))
+    ? ok("take-away: the lane no longer says the views file is withheld")
+    : bad("take-away: the lane no longer says the views file is withheld", JSON.stringify(duckOff.off && duckOff.off.text));
+  (duckOff.on && duckOff.off && duckOff.on.text === duckOff.off.text)
+    ? ok("take-away: the DuckDB lane is the same with the views capability on or off")
+    : bad("take-away: the DuckDB lane is the same with the views capability on or off", JSON.stringify(duckOff));
 
-  // The DuckDB schema card moved to MCP Server (#1573); its drawing and
-  // budget checks moved with it, to scenario 17g. Found by its title,
+  // The DuckDB schema card is on Snapshots, under Download, inside the
+  // "Use it where it lives" fold, which arrives closed. Found by its title,
   // and anchored on the listing being drawn, so a page that never rendered
-  // cannot pass; the lane above still downloads the file itself.
-  const dkGone = await page.evaluate(() => {
-    const titles = Array.from(document.querySelectorAll(".view .ov-panel-title")).map((t) => t.textContent);
-    return { listed: !!document.querySelector(".view .stg-list .stg-row"), card: titles.includes("Download a DuckDB schema") };
+  // cannot pass. Its drawing and budget checks run with the fold opened, in
+  // scenario 17a2.
+  const dkHere = await page.evaluate(() => {
+    const fold = document.querySelector(".view details.bk-inplace");
+    const titles = fold ? Array.from(fold.querySelectorAll(".ov-panel-title")).map((t) => t.textContent) : [];
+    return {
+      listed: !!document.querySelector(".view .stg-list .stg-row"),
+      fold: !!fold,
+      inDownload: !!(fold && fold.closest("#snap-download")),
+      open: fold ? fold.open : null,
+      summary: fold ? ((fold.querySelector(":scope > summary .ov-panel-title") || {}).textContent || "") : "",
+      card: titles.includes("Download a DuckDB schema"),
+    };
   });
-  (dkGone.listed && !dkGone.card)
-    ? ok("snapshots: the DuckDB schema card is not here (it lives on MCP Server)")
-    : bad("snapshots: the DuckDB schema card is not here (it lives on MCP Server)", JSON.stringify(dkGone));
+  (dkHere.listed && dkHere.fold && dkHere.inDownload && dkHere.open === false && dkHere.summary === "Use it where it lives" && dkHere.card)
+    ? ok("snapshots: the DuckDB schema card is on the Download tab, inside the closed \"Use it where it lives\" fold")
+    : bad("snapshots: the DuckDB schema card is on the Download tab, inside the closed \"Use it where it lives\" fold", JSON.stringify(dkHere));
 
   // Paging, EXECUTED through the real panel. The Go guards test the window
   // function and the clamp in isolation and read the call site as text; their
@@ -5559,15 +5577,97 @@ try {
   (cardCount === 0)
     ? ok("snapshots: the disk-space card is not drawn")
     : bad("snapshots: the disk-space card is not drawn", "found " + cardCount + " .bkr-head on /snapshots");
-  // The Iceberg export panel moved to MySQL clients. Found by its title,
-  // not by its class: the old page mounted it without .cn-ice, and a class
-  // lookup would pass against it. Scenario 17g4 shows the same server DOES get
-  // the panel, on Connect, so absence here is the move and not a gate.
-  const iceOnSnapshots = await page.evaluate(() => Array.from(document.querySelectorAll(".view .ov-panel-title"))
-    .some((t) => t.textContent === "Keep it current with Iceberg"));
-  (!iceOnSnapshots)
-    ? ok("snapshots: the Iceberg export panel is not here (it lives on MySQL clients)")
-    : bad("snapshots: the Iceberg export panel is not here (it lives on MySQL clients)", "found its title on /snapshots");
+  // ── Scenario 17a2 — "Use it where it lives": the DuckDB schema card and
+  // the Iceberg export, folded under the Download tab's lanes ──
+  // Both left pages about other things (MCP Server, MySQL clients). Opened
+  // the way a reader opens them: the Download tab, then the fold's summary;
+  // innerText only measures what is rendered, so the budgets below need the
+  // fold open. The tab and fold are put back afterwards for the scenes that
+  // follow.
+  const inplaceWas = await page.evaluate(() => snapTab);
+  await page.evaluate(() => {
+    const t = document.querySelector('.snap-tab[data-tab="download"]');
+    if (t) t.click();
+    const s = document.querySelector(".view details.bk-inplace > summary");
+    if (s) s.click();
+  });
+  await page.waitForFunction(() => { const f = document.querySelector(".view details.bk-inplace"); return f && f.open; })
+    .catch(() => {});
+  const ip = await page.evaluate(() => {
+    const fold = document.querySelector(".view details.bk-inplace");
+    const dkPanel = fold ? fold.querySelector(".cn-dk") : null;
+    const icePanel = fold ? fold.querySelector(".cn-ice") : null;
+    const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
+    return {
+      open: fold ? fold.open : null,
+      tabShown: !!fold && !fold.closest("#snap-download").hidden,
+      duckViewsCap: !!capsCache.views,
+      // The DuckDB schema card (#1573). Its own budget (300): enough for a
+      // title, one control and a button, and not enough to start
+      // explaining, the prose door #1549 closed.
+      dk: dkPanel ? {
+        present: true,
+        chars: dkPanel.innerText.length,
+        tiles: dkPanel.querySelectorAll(".dk-shape .dk-tile").length,
+        bars: dkPanel.querySelectorAll(".dk-shape .dk-bar").length,
+        lit: dkPanel.querySelectorAll(".dk-shape .dk-part:not(.dk-off)").length,
+      } : { present: false },
+      ice: {
+        present: !!icePanel,
+        title: icePanel ? (icePanel.querySelector(".ov-panel-title") || {}).textContent || "" : "",
+        cmd: iceCode ? iceCode.textContent : "",
+      },
+      // Fold order: the schema card first, then the Iceberg export.
+      dkFirst: !!(dkPanel && icePanel && (dkPanel.compareDocumentPosition(icePanel) & Node.DOCUMENT_POSITION_FOLLOWING)),
+    };
+  });
+  (ip.open && ip.tabShown)
+    ? ok("snapshots: the \"Use it where it lives\" fold opens from its summary on the Download tab")
+    : bad("snapshots: the \"Use it where it lives\" fold opens from its summary on the Download tab", JSON.stringify({ open: ip.open, tabShown: ip.tabShown }));
+  // The views capability is on for this stack, so absence would be a bug.
+  (ip.duckViewsCap && ip.dk.present && ip.dk.chars > 0 && ip.dk.chars <= 300)
+    ? ok("snapshots: the DuckDB schema card renders in the fold under its 300-character budget")
+    : bad("snapshots: the DuckDB schema card renders in the fold under its 300-character budget",
+        JSON.stringify({ views: ip.duckViewsCap, dk: ip.dk }));
+  (ip.dk.present && ip.dk.tiles > 0 && ip.dk.bars > ip.dk.tiles && ip.dk.lit === 1)
+    ? ok("snapshots: the DuckDB card draws the shape, with the change log unlit until asked for")
+    : bad("snapshots: the DuckDB card draws the shape, with the change log unlit until asked for", JSON.stringify(ip.dk));
+  // The Iceberg command names the fixture's snapshot folder. On this stack
+  // byo-idx's own folder and index are the same as the daemon's, so this
+  // cannot tell one server from another; TestBaselinesAPI_locationOnlyRegistry
+  // carries that guarantee, with a different folder per server.
+  const iceDirArg = "--baseline-dir '" + (process.env.E2E_BASELINE_DIR || "") + "'";
+  (ip.ice.present && ip.ice.title === "Keep it current with Iceberg"
+    && ip.ice.cmd.startsWith("bintrail export iceberg ") && ip.ice.cmd.includes(iceDirArg))
+    ? ok("snapshots: the Iceberg export panel is in the fold, pointed at this server's snapshot folder")
+    : bad("snapshots: the Iceberg export panel is in the fold, pointed at this server's snapshot folder",
+        JSON.stringify({ ice: ip.ice, want: iceDirArg }));
+  (ip.dkFirst)
+    ? ok("snapshots: the fold shows the DuckDB schema card before the Iceberg export")
+    : bad("snapshots: the fold shows the DuckDB schema card before the Iceberg export", JSON.stringify({ dk: ip.dk.present, ice: ip.ice.present }));
+  // The three stage cards size to their words: the first two carry a title
+  // and a line, the third also the engine pills, so a stretched row turns the
+  // first two into big empty boxes. And the arrows sit on the middle line of
+  // the cards they join.
+  const iceGeo = await page.evaluate(() => {
+    const box = (n) => { const r = n.getBoundingClientRect(); return { top: r.top, h: r.height, mid: r.top + r.height / 2 }; };
+    const stages = Array.from(document.querySelectorAll(".view .bk-inplace .cn-ice .ice-flow .ice-stage")).map(box);
+    const arrows = Array.from(document.querySelectorAll(".view .bk-inplace .cn-ice .ice-flow .ice-arrow")).map(box);
+    return { stages, arrows };
+  });
+  const iceMid = (a, b) => Math.abs(a.mid - b.mid) <= 2;
+  (iceGeo.stages.length === 3 && iceGeo.arrows.length === 2
+    && iceGeo.stages[0].h < iceGeo.stages[2].h - 10 && iceGeo.stages[1].h < iceGeo.stages[2].h - 10
+    && iceMid(iceGeo.arrows[0], iceGeo.stages[0]) && iceMid(iceGeo.arrows[0], iceGeo.stages[1])
+    && iceMid(iceGeo.arrows[1], iceGeo.stages[1]))
+    ? ok("snapshots: the Iceberg stage cards are as tall as their words, the arrows on their middle line")
+    : bad("snapshots: the Iceberg stage cards are as tall as their words, the arrows on their middle line", JSON.stringify(iceGeo));
+  await page.evaluate((was) => {
+    const f = document.querySelector(".view details.bk-inplace");
+    if (f) f.open = false;
+    const t = document.querySelector('.snap-tab[data-tab="' + was + '"]');
+    if (t) t.click();
+  }, inplaceWas);
 
   // ── Scenario 17g — Connect AI is three short steps with a drawn dialog ──
   // The audience is Claude users, mostly non-technical. The first rewrite
@@ -5585,8 +5685,8 @@ try {
   // copy edit breathes but a wall of text rings. The SQL client, memory and
   // Iceberg panels moved to MySQL clients: none of them may be drawn here,
   // and each keeps its own assertion on that page, further down. The DuckDB
-  // schema card stays under the steps and is left out of this measurement:
-  // it carries its own 300-character budget, asserted below.
+  // schema card left too, for Snapshots -> Download (scenario 17a2), and
+  // the Iceberg export with it.
   // The memory panel's own budget (700) sits about 50% above what it shows
   // (about 460 chars on this stack), as the cap above does for the steps.
   // Limit worth naming: run.sh builds without -ldflags, so this only ever
@@ -5622,24 +5722,17 @@ try {
     const addrCard = document.querySelectorAll(".view .cn-card")[1];
     const view = document.querySelector(".view") || { innerText: "", querySelectorAll: () => [], querySelector: () => null };
     const visible = view.innerText;
-    const dkPanel = view.querySelector(".cn-dk");
     return {
       badges,
       labels,
-      visibleChars: visible.length - (dkPanel ? dkPanel.innerText.length : 0),
+      visibleChars: visible.length,
       // The panels that moved to MySQL clients: none is drawn under the steps.
       // .cn-sql is worn by the SQL client and Iceberg panels both.
       foreign: view.querySelectorAll(".cn-sql, .cn-sqlmem, .cn-routep").length,
-      // The DuckDB schema card (#1573). Its own budget (300): enough for a
-      // title, one control and a button, and not enough to start
-      // explaining, the prose door #1549 closed.
-      dk: dkPanel ? {
-        present: true,
-        chars: dkPanel.innerText.length,
-        tiles: dkPanel.querySelectorAll(".dk-shape .dk-tile").length,
-        bars: dkPanel.querySelectorAll(".dk-shape .dk-bar").length,
-        lit: dkPanel.querySelectorAll(".dk-shape .dk-part:not(.dk-off)").length,
-      } : { present: false },
+      // The DuckDB schema card moved to Snapshots -> Download; found by its
+      // title as well as its class, so a renamed class cannot hide it.
+      dk: !!view.querySelector(".cn-dk")
+        || Array.from(view.querySelectorAll(".ov-panel-title")).some((t) => t.textContent === "Download a DuckDB schema"),
       duckViewsCap: !!capsCache.views,
       fine: document.querySelectorAll(".view details.cn-fine").length,
       addrCopy: addrCard ? Array.from(addrCard.querySelectorAll("button")).some((b) => b.textContent === "Copy") : false,
@@ -5661,15 +5754,12 @@ try {
   (cn.foreign === 0)
     ? ok("connect: no SQL client, read routing, memory or Iceberg panel under the steps (they live on MySQL clients)")
     : bad("connect: no SQL client, read routing, memory or Iceberg panel under the steps (they live on MySQL clients)", "found " + cn.foreign);
-  // The DuckDB schema card lives here since #1573, with monitor on too (the
-  // views capability is on for this stack, so absence would be a bug).
-  (cn.duckViewsCap && cn.dk.present && cn.dk.chars > 0 && cn.dk.chars <= 300)
-    ? ok("connect: the DuckDB schema card renders here under its 300-character budget")
-    : bad("connect: the DuckDB schema card renders here under its 300-character budget",
-        JSON.stringify({ views: cn.duckViewsCap, dk: cn.dk }));
-  (cn.dk.present && cn.dk.tiles > 0 && cn.dk.bars > cn.dk.tiles && cn.dk.lit === 1)
-    ? ok("connect: the DuckDB card draws the shape, with the change log unlit until asked for")
-    : bad("connect: the DuckDB card draws the shape, with the change log unlit until asked for", JSON.stringify(cn.dk));
+  // The DuckDB schema card is not here any more (it is on Snapshots ->
+  // Download). The views capability is on for this stack, so this absence is
+  // the move and not the card's own gate: scenario 17a2 draws it there.
+  (cn.duckViewsCap && !cn.dk)
+    ? ok("connect: the DuckDB schema card is not here (it lives on Snapshots -> Download)")
+    : bad("connect: the DuckDB schema card is not here (it lives on Snapshots -> Download)", JSON.stringify({ views: cn.duckViewsCap, dk: cn.dk }));
   // "shown only once" is carried by the fresh state and the managed state
   // (except managed read_only, which drops the Lost-it clause and the phrase
   // with it); this run exercises the fresh one (no scenario mints a token).
@@ -5679,21 +5769,23 @@ try {
 
   // ── Scenario 17g4 — MySQL clients carries the panels that left MCP Server ──
   // The MySQL port and read routing as two headed sections, then the memory
-  // a statement may use and the Iceberg export. Waited on
+  // a statement may use. The Iceberg export is on Snapshots -> Download now
+  // (scenario 17a2), and the page no longer asks where the snapshots are
+  // kept: the requests it makes on the way in are recorded. Waited on
   // .cn-sql, which only buildMySQLClients draws; tolerant for the reason the
   // wait above is, so a page without it reports through the assertions.
+  const sqlcAsked = [];
+  const sqlcOnReq = (r) => { if (r.url().includes("/api/baselines")) sqlcAsked.push(r.url()); };
+  page.on("request", sqlcOnReq);
   await page.evaluate(() => navigate("mysql-clients"));
   await page.waitForFunction(() => location.pathname === "/mysql-clients"
-    && !!document.querySelector(".view .cn-sql:not(.cn-ice)"))
+    && !!document.querySelector(".view .cn-sql"))
     .catch(() => {});
+  page.off("request", sqlcOnReq);
   const sc = await page.evaluate(() => {
     const view = document.querySelector(".view") || { innerText: "", querySelector: () => null };
-    // Two panels wear .cn-sql; .cn-ice tells the Iceberg one apart, so
-    // neither is mistaken for the other.
     const sqlPanel = view.querySelector(".cn-sql:not(.cn-ice)");
-    const icePanel = view.querySelector(".cn-ice");
     const memPanel = view.querySelector(".cn-sqlmem");
-    const iceCode = icePanel ? icePanel.querySelector("code.cn-url") : null;
     return {
       title: (document.querySelector(".view h1") || {}).textContent || "",
       // The MCP steps stayed behind: no numbered card here.
@@ -5701,11 +5793,11 @@ try {
       // The memory panel's own text, its folded notes closed.
       mem: memPanel ? { present: true, chars: memPanel.innerText.length,
         open: memPanel.querySelectorAll("details[open]").length } : { present: false },
-      ice: {
-        present: !!icePanel,
-        title: icePanel ? (icePanel.querySelector(".ov-panel-title") || {}).textContent || "" : "",
-        cmd: iceCode ? iceCode.textContent : "",
-      },
+      // The Iceberg export left for Snapshots: found by its class and by its
+      // title, so neither a renamed class nor a retitled panel hides it.
+      ice: !!view.querySelector(".cn-ice")
+        || Array.from(view.querySelectorAll(".ov-panel-title")).some((t) => t.textContent === "Keep it current with Iceberg"),
+      iceErr: !!view.querySelector(".cn-ice-err"),
       // Two sections, each under its own heading, so that reading the copy
       // from a MySQL client is not taken for read routing: the headings,
       // read routing in a card of its own, and its switch there.
@@ -5725,34 +5817,16 @@ try {
   (sc.mem.present && sc.mem.chars > 0 && sc.mem.chars <= 700 && sc.mem.open === 0)
     ? ok("sql clients: the memory panel stays under its 700-character budget, its notes folded")
     : bad("sql clients: the memory panel stays under its 700-character budget, its notes folded", JSON.stringify(sc.mem));
-  // The Iceberg export panel lives here (it was on Snapshots until #1573), and
-  // its command names the fixture's snapshot folder. On this stack byo-idx's own
-  // folder and index are the same as the daemon's, so this cannot tell one
-  // server from another; TestBaselinesAPI_locationOnlyRegistry carries that
-  // guarantee, with a different folder per server.
-  const iceDirArg = "--baseline-dir '" + (process.env.E2E_BASELINE_DIR || "") + "'";
-  (sc.ice.present && sc.ice.title === "Keep it current with Iceberg"
-    && sc.ice.cmd.startsWith("bintrail export iceberg ") && sc.ice.cmd.includes(iceDirArg))
-    ? ok("sql clients: the Iceberg export panel is here, pointed at this server's snapshot folder")
-    : bad("sql clients: the Iceberg export panel is here, pointed at this server's snapshot folder",
-        JSON.stringify({ ice: sc.ice, want: iceDirArg }));
-  // The three stage cards size to their words: the first two carry a title
-  // and a line, the third also the engine pills, so a stretched row turns the
-  // first two into big empty boxes. And the arrows sit on the middle line of
-  // the cards they join.
-  const iceGeo = await page.evaluate(() => {
-    const box = (n) => { const r = n.getBoundingClientRect(); return { top: r.top, h: r.height, mid: r.top + r.height / 2 }; };
-    const stages = Array.from(document.querySelectorAll(".view .cn-ice .ice-flow .ice-stage")).map(box);
-    const arrows = Array.from(document.querySelectorAll(".view .cn-ice .ice-flow .ice-arrow")).map(box);
-    return { stages, arrows };
-  });
-  const iceMid = (a, b) => Math.abs(a.mid - b.mid) <= 2;
-  (iceGeo.stages.length === 3 && iceGeo.arrows.length === 2
-    && iceGeo.stages[0].h < iceGeo.stages[2].h - 10 && iceGeo.stages[1].h < iceGeo.stages[2].h - 10
-    && iceMid(iceGeo.arrows[0], iceGeo.stages[0]) && iceMid(iceGeo.arrows[0], iceGeo.stages[1])
-    && iceMid(iceGeo.arrows[1], iceGeo.stages[1]))
-    ? ok("sql clients: the Iceberg stage cards are as tall as their words, the arrows on their middle line")
-    : bad("sql clients: the Iceberg stage cards are as tall as their words, the arrows on their middle line", JSON.stringify(iceGeo));
+  // The Iceberg export is not here (it is on Snapshots -> Download), and
+  // nothing asks for the snapshot location it used to need: a page that
+  // still called GET /api/baselines?location_only=1 would pay for a panel
+  // it no longer draws.
+  (!sc.ice && !sc.iceErr)
+    ? ok("sql clients: the Iceberg export panel is not here (it lives on Snapshots -> Download)")
+    : bad("sql clients: the Iceberg export panel is not here (it lives on Snapshots -> Download)", JSON.stringify({ ice: sc.ice, iceErr: sc.iceErr }));
+  (sqlcAsked.length === 0)
+    ? ok("sql clients: the page does not ask where the snapshots are kept")
+    : bad("sql clients: the page does not ask where the snapshots are kept", JSON.stringify(sqlcAsked));
   // The SQL client panel (#1446). run.sh saves this daemon's MySQL port as
   // on, so the ENABLED shape is what gets photographed: a mysql line carrying
   // the port and the selected server as its user (never a placeholder), with

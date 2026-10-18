@@ -775,7 +775,7 @@ func sqlChainTooHeavyMessage(h sqlHeavyChain, limit int64, memory string) string
 		read = "Read them"
 	}
 	msg := fmt.Sprintf("%s, and SQL on the copy merges at most %d MB: it runs with %s of memory on the capture host, for quick looks. "+
-		"%s with your own DuckDB instead (in the web interface: Settings, MCP Server, Download a DuckDB schema).", what, limit>>20, sqlMemoryWords(memory), read)
+		"%s with your own DuckDB instead (in the web interface: Snapshots, Download, Use it where it lives).", what, limit>>20, sqlMemoryWords(memory), read)
 	// A MySQL client shows 512 bytes; the last sentence goes first.
 	if tail := " DBTrail merges them on its own, within a day while updates run."; len(msg)+len(tail) <= 512 {
 		msg += tail
@@ -791,7 +791,7 @@ func sqlWithMemoryHint(err error, memory string) error {
 		return err
 	}
 	return &sqlsandbox.QueryError{Message: qerr.Message + " SQL on the copy runs with " + sqlMemoryWords(memory) + " of memory on the host that captures changes, " +
-		"for quick looks. For heavier reads use your own DuckDB (the web interface has the file for it: Settings, MCP Server, Download a DuckDB schema)."}
+		"for quick looks. For heavier reads use your own DuckDB (the web interface has the file for it: Snapshots, Download, Use it where it lives)."}
 }
 
 // sqlOutcome is a statement that ran.
@@ -1726,13 +1726,13 @@ var sqlEventsMissing = regexp.MustCompile(`(?i)table with name "?events"? does n
 // (sqlEventsInS3PortMessage): a MySQL client has no page to open.
 const sqlEventsInS3Message = "the change history for this server is on S3, so events cannot be read here; the tables can. " +
 	"For one row's history, open the Events page. " +
-	"To query the whole history, download a DuckDB schema with the change log included (Settings, MCP Server) and run it in your own DuckDB"
+	"To query the whole history, download a DuckDB schema with the change log included (Snapshots, Download, Use it where it lives) and run it in your own DuckDB"
 
 // sqlEventsInS3Note is the same fact on GET /api/sql, under the list of
 // tables: without it the list is one name short and reads as "this server
 // has no change log".
 const sqlEventsInS3Note = "events, the change log, is not listed: this server's change history is on S3. " +
-	"The Events page shows a row's history. Your own DuckDB reads all of it: Settings, MCP Server, Download a DuckDB schema."
+	"The Events page shows a row's history. Your own DuckDB reads all of it: Snapshots, Download, Use it where it lives."
 
 // sqlEventsLookupFailedMessage answers a statement that reads events when
 // the archive registry could not be read (#2078), so the view was not

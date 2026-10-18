@@ -94,7 +94,7 @@ func TestSQLChainTooHeavyMessage(t *testing.T) {
 	one := sqlChainTooHeavyMessage(sqlHeavyChain{"tpcc.order_line1", 86 << 20, 86 << 20, 1}, 48<<20, "2GB")
 	want := "tpcc.order_line1 has 86 MB of changes not merged into it yet, and SQL on the copy merges at most 48 MB: " +
 		"it runs with 2 GB of memory on the capture host, for quick looks. " +
-		"Read it with your own DuckDB instead (in the web interface: Settings, MCP Server, Download a DuckDB schema). " +
+		"Read it with your own DuckDB instead (in the web interface: Snapshots, Download, Use it where it lives). " +
 		"DBTrail merges them on its own, within a day while updates run."
 	if one != want {
 		t.Errorf("one table:\n got %q\nwant %q", one, want)

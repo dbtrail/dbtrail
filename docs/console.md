@@ -1098,11 +1098,14 @@ each server's local-copy question, where it is true or not.
 SQL page is gated on `query:execute` and on the `sql` capability, so the
 download was unreachable for a role the endpoint would have authorized, and
 gone entirely on a daemon started with `BINTRAIL_CONSOLE_SQL_PANEL=0` — then
-to **Backups** (#1581), below the snapshot listing, and back to **MCP Server**
-(#1573), with or without the daemon, beside the other ways to take the data
-somewhere else. The Backups take-away lane keeps a **Download views.sql**
-button that saves the default file (no change log) and shows the command to
-open it; the options stay on the card. The old `/storage` link still works
+to **Backups** (#1581), below the snapshot listing, to **MCP Server**
+(#1573), and finally to **Snapshots → Download**, folded under **Use it where
+it lives** beside the Iceberg export: MCP Server is about connecting an AI
+client. The **To open in DuckDB** lane above it is one download: the archive
+carries its own `views.sql` with `./` paths, so it opens wherever it is
+unpacked, and the lane shows the command to run in that folder. It no longer
+has a second **Download views.sql** button, whose file named the server's own
+folders and so pointed at nothing on the reader's machine. The old `/storage` link still works
 and lands on Retention.
 
 - **Table deltas are not on the Retention page.** Table deltas (#1638), which make a refresh keep a changed table's file and write its changes beside it, are on by default (#1729) and turned off with a daemon flag only (`--baseline-table-deltas=false`, or `BINTRAIL_BASELINE_TABLE_DELTAS=false`); there is no card for them in the web interface. It changes the files every refresh publishes; [Dump and baseline](dump-and-baseline.md) describes the layout, who reads it, and what to do with DuckDB views when turning it on or off.
@@ -1128,7 +1131,7 @@ and lands on Retention.
   could not be removed stays listed with the reason (a previous build a
   newer one could not clear included) and is retried every minute. Shown
   only on a daemon that can build `.sql` backups.
-- **Download a DuckDB schema** (#1528, formerly *Query in DuckDB*; on MCP Server since #1573, below the AI clients) — a one-click download of `views.sql`: a ready-made
+- **Download a DuckDB schema** (#1528, formerly *Query in DuckDB*; on **Snapshots → Download**, folded under **Use it where it lives** beside the Iceberg export) — a one-click download of `views.sql`: a ready-made
   DuckDB schema over the selected server's own Parquet — one
   view per table in the newest baseline snapshot, named like the source table
   (`shop.orders`), plus
@@ -2123,18 +2126,17 @@ its switch, a drawing of where a statement goes, who answered, and the
 router's numbers. Under both, **Memory for SQL on the copy** shows the
 setting as figures, for a session that can read settings.
 
-Last on the page, the **Keep it current with Iceberg** panel (#1466; it
-used to sit at the bottom of Backups) prints the
+The **Keep it current with Iceberg** panel (#1466) is not on this page: it
+is on **Snapshots → Download**, folded under **Use it where it lives**. It prints the
 exact `bintrail export iceberg` command for the selected server, with its
 index connection and its resolved backup destination filled in, a Copy
 button, and an hourly cron line. It shows when the selected server has a
 backup location (its own or the daemon-wide default) and an index reached
 over TCP, and the session can read settings; while a data profile is active
 (a named `--profile`, even one with no rules yet, or the session's) the page
-does not offer it. The page learns the location from
-`GET /api/baselines?location_only=1`, which reads neither the storage nor the
-server's index; when that lookup or the server list fails for any reason
-other than a refusal, a one-line note takes the panel's place.
+does not offer it. It reads the location from the snapshot listing that
+page already loads, so when that listing fails, the panel is not drawn and
+the listing's own error says why.
 Nothing runs from the web interface: the export writes a new copy of your data and is kept
 out of the process that captures changes. The password is shown as `***` for
 you to replace, and the command carries the index host, port, database and

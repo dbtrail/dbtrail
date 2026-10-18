@@ -53,58 +53,28 @@ func TestTakeAwayLaneCountIsDerivedNotWritten(t *testing.T) {
 	}
 }
 
-// The views half is a promise this lane keeps only when the server can make
-// the file: its button downloads it through downloadViewsSQL (#1573; it used
-// to jump to the card), and GET /api/views.sql answers only under
-// capsCache.views. Ungated here, the lane drew a views.sql tile and a button
-// that only fails -- exactly the trade views_api.go says this codebase
-// refuses ("a button that only 404s is a lie").
-func TestDuckLaneGatesTheFileItDoesNotProduce(t *testing.T) {
+// The DuckDB lane is ONE download: the archive carries its own views.sql,
+// respelled to "./" paths so it opens wherever it is unpacked (#1583), and
+// that file is made whatever the views capability says. The lane used to
+// offer a second button, GET /api/views.sql, whose file names this server's
+// folders and so pointed at nothing on the reader's machine. The lane must
+// not grow it back, nor gate the tile on a capability the archive does not
+// depend on (a tile hidden for a file the download still carries).
+func TestDuckLaneIsOneDownload(t *testing.T) {
 	js := readAsset(t, "app.js")
 	lane := stripJSLineComments(functionBody(t, js, "function backupDuckLane("))
-	if !strings.Contains(lane, "capsCache.views") {
-		t.Fatal("the DuckDB lane no longer checks capsCache.views, so it can promise a views file " +
-			"that no card on the page will produce")
-	}
-	// Both halves must sit behind it, and "behind" means INSIDE the branch,
-	// not merely later in the file. Comparing byte offsets was the first cut
-	// and it passed a mutation that gated the tile and left the button loose:
-	// the button still came after `const hasViews = ...`.
-	for _, half := range []string{"DUCKDB_VIEWS_FILE, cap:", "downloadViewsSQL("} {
-		if !guardedByHasViews(lane, half) {
-			t.Errorf("%q is not inside an `if (hasViews)` branch. A gated tile beside an ungated "+
-				"button still offers a file the server will not make", half)
+	for _, not := range []string{"downloadViewsSQL(", "/api/views.sql", "capsCache.views"} {
+		if strings.Contains(lane, not) {
+			t.Errorf("backupDuckLane mentions %s: the lane is the archive alone, which carries its own views.sql", not)
 		}
+	}
+	if !strings.Contains(lane, `"duck", 1)`) {
+		t.Error("backupDuckLane no longer tells backupLane it is one download; the lead would count its two tiles as two downloads")
 	}
 }
 
-// guardedByHasViews reports whether every line mentioning needle sits inside
-// an `if (hasViews)` branch -- either the single-statement form on the same
-// line, or a braced block. Line-based on purpose: the lane uses both forms,
-// so a brace matcher alone would miss the one-liner that pushes the tile.
-func guardedByHasViews(body, needle string) bool {
-	depth, seen := 0, false
-	for _, line := range strings.Split(body, "\n") {
-		guardOpensHere := strings.Contains(line, "if (hasViews)")
-		if strings.Contains(line, needle) {
-			seen = true
-			if depth == 0 && !guardOpensHere {
-				return false
-			}
-		}
-		if guardOpensHere && strings.HasSuffix(strings.TrimSpace(line), "{") {
-			depth++
-			continue
-		}
-		if depth > 0 && strings.TrimSpace(line) == "}" {
-			depth--
-		}
-	}
-	return seen
-}
-
-// The views file is named on two surfaces: the card on Connect AI that builds
-// it, and the Backups take-away lane that downloads the default one. They
+// The views file is named on two surfaces: the DuckDB schema card that builds
+// it, and the take-away lane that draws it as the archive's second tile. They
 // share a constant so they cannot drift; this pins that neither re-hardcodes it.
 func TestViewsFileIsNamedFromOneConstant(t *testing.T) {
 	js := stripJSLineComments(readAsset(t, "app.js"))
@@ -153,7 +123,7 @@ func TestTakeAwayPanelIsMountedOnItsOwnTab(t *testing.T) {
 	// call sitting there, and a guard that reads the call reports a panel
 	// that no reader can see. The lanes have the Download tab to themselves:
 	// above the list of snapshots they pushed it off the screen.
-	if !strings.Contains(body, "tabs.panels.download.append(takeAway)") {
+	if !strings.Contains(body, "if (takeAway) tabs.panels.download.append(takeAway)") {
 		t.Fatal("Snapshots no longer mounts backupTakeAway: the Parquet download goes back " +
 			"inside a row expand, and the .sql builder leaves the page entirely — backupTakeAway " +
 			"is its only caller")
@@ -163,8 +133,11 @@ func TestTakeAwayPanelIsMountedOnItsOwnTab(t *testing.T) {
 	if !strings.Contains(body, "v.append(tabs.panels.download)") {
 		t.Error("the Download panel is never appended to the view")
 	}
-	if !strings.Contains(body, "download: !!takeAway") {
-		t.Error("the tab bar is not told whether there are lanes to show, so the Download tab is never offered")
+	if !strings.Contains(body, "download: !!(takeAway || inPlace)") {
+		t.Error("the tab bar is not told whether there are lanes or in-place panels to show, so the Download tab is never offered")
+	}
+	if !strings.Contains(body, "if (inPlace) tabs.panels.download.append(inPlace)") {
+		t.Error("the in-place fold (DuckDB schema, Iceberg) is not mounted on the Download tab")
 	}
 	if !strings.Contains(functionBody(t, js, "function snapshotTabs("), `["download", "Download"]`) {
 		t.Error("the tab bar has no Download tab")

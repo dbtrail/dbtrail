@@ -101,13 +101,13 @@ func TestIcebergExportPanel(t *testing.T) {
 	}
 
 	// And it is actually on a page: a panel nothing calls is invisible, and
-	// every check above would still pass. It lives on MySQL clients;
-	// TestIcebergPanelLivesOnMySQLClients drives that page for real.
-	if !strings.Contains(functionBody(t, js, "function buildMySQLClients("), "icebergExportPanel(") {
-		t.Error("buildMySQLClients never calls icebergExportPanel, so the panel never renders")
+	// every check above would still pass. It lives on Snapshots -> Download;
+	// TestSnapshotInPlace drives that fold for real.
+	if !strings.Contains(functionBody(t, js, "function snapshotInPlace("), "icebergExportPanel(") {
+		t.Error("snapshotInPlace never calls icebergExportPanel, so the panel never renders")
 	}
-	if strings.Contains(functionBody(t, js, "async function renderSnapshots("), "icebergExportPanel(") {
-		t.Error("Snapshots still mounts the Iceberg panel, which moved to MySQL clients")
+	if strings.Contains(functionBody(t, js, "function buildMySQLClients("), "icebergExportPanel(") {
+		t.Error("MySQL clients still mounts the Iceberg panel, which moved to Snapshots")
 	}
 }
 

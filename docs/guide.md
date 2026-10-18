@@ -526,7 +526,7 @@ readable by any DuckDB, Spark, Trino or Athena with no DBTrail involved.
 one view per table in the newest baseline, named like the source table
 (`shop.orders`), plus, with
 `--include-events`, an `events` view across every archive (the web interface's
-**MCP Server → Download a DuckDB schema** card downloads the same file). The change log
+**Snapshots → Download → Use it where it lives → Download a DuckDB schema** card downloads the same file). The change log
 is opt-in because defining that view opens one Parquet footer per archived file
 before it returns a row, a cost that grows with the archive.
 

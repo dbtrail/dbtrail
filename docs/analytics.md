@@ -66,7 +66,7 @@ tables or none, so a snapshot never mixes two points in time.
 A `views.sql` file turns the snapshots into tables with plain names. There are
 two ways to get one:
 
-- **Web interface:** on the **MCP Server** page, **Download a DuckDB schema**.
+- **Web interface:** **Snapshots → Download**, open **Use it where it lives**, then **Download a DuckDB schema**.
 - **Command line:**
 
   ```sh

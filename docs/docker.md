@@ -541,8 +541,9 @@ inconclusive results land, and drill into a mismatch — see
 an editor, and each query runs in a separate process with its own limits, over
 the copy on local disk, never inside the process that captures and never on
 MySQL (see [SQL in the browser](console.md#sql-in-the-browser)). For no row cap
-and no time limit, open **MCP Server**, click **Download views.sql** on the
-**Download a DuckDB schema** card, and run the file in your own DuckDB.
+and no time limit, open **Snapshots → Download**, open **Use it where it
+lives**, click **Download views.sql** on the **Download a DuckDB schema** card,
+and run the file in your own DuckDB.
 
 Notes:
 

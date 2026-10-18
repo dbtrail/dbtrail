@@ -90,7 +90,7 @@ of them:
 
 ## 1. Get the views file
 
-On the **MCP Server** page, **Download a DuckDB schema**. If the panel shows a
+On **Snapshots → Download**, open **Use it where it lives**, then **Download a DuckDB schema**. If the panel shows a
 **Works on another machine** box, leave it unticked: ticked, the file names the
 S3 copy of the snapshots instead of the local folder.
 

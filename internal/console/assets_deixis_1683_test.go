@@ -145,7 +145,8 @@ func TestScreenTextNamesThePlace(t *testing.T) {
 	has("rotation", "Changes saved with Edit rotation take effect only after DBTrail restarts.")
 	has("duck", "Runs in your own DuckDB, not in DBTrail, and no credentials are in the file.")
 	has("iceberg", "not the server picked in the left sidebar.")
-	has("lane", "The file that describes these tables is not offered, because DBTrail is set not to read archived data.")
+	// With views off the lane is unchanged: the archive carries its own views.sql.
+	has("lane", "Unpack it, go into its folder, and run:")
 	has("token", "Why are there no New token and Delete token buttons?")
 	has("token", "This token was created by a newer version of DBTrail. It keeps working, but this version cannot replace or delete it")
 	has("token", "It is managed wherever it was set up, not in the web interface.")

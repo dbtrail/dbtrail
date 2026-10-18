@@ -165,42 +165,44 @@ func TestDuckDBCardStaysNearlyTextless(t *testing.T) {
 	}
 }
 
-// TestDuckDBCardMountsOnConnect: the DuckDB schema card lives on MCP Server
-// (#1573), with or without the watch daemon; Backups no longer mounts it (its
-// take-away lane downloads the default file itself), and neither does MySQL
-// clients, the page the MySQL port moved to.
-func TestDuckDBCardMountsOnConnect(t *testing.T) {
+// TestDuckDBCardMountsOnSnapshots: the DuckDB schema card lives on Snapshots
+// -> Download, folded under the download lanes (snapshotInPlace), beside the
+// Iceberg export: what a reader can do with this server's snapshots where they
+// live. It sat on MCP Server from #1573, a page about connecting an AI client,
+// where nobody looking for a file their own DuckDB opens looked.
+func TestDuckDBCardMountsOnSnapshots(t *testing.T) {
 	js := readAsset(t, "app.js")
-	if strings.Contains(stripJSLineComments(functionBody(t, js, "async function renderSnapshots(")), "duckdbPanel(") {
-		t.Error("Snapshots mounts duckdbPanel again; the card moved to MCP Server (#1573), and two " +
-			"copies of one download put two different option sets in front of the reader")
-	}
-	connect := stripJSLineComments(functionBody(t, js, "function buildConnect("))
+	inPlace := stripJSLineComments(functionBody(t, js, "function snapshotInPlace("))
 	// Gated on views and on settings:read, the permission GET /api/views.sql
-	// checks: on Backups the listing's own permission hid it, and without the
-	// second half a session denied it sees a button that can only be refused.
-	if !strings.Contains(connect, `if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel())`) {
-		t.Fatal("buildConnect does not mount duckdbPanel on capsCache.views plus settings:read; with " +
-			"the daemon running (monitor on) the views download would have no page at all, or a " +
-			"session denied settings:read would get a button that only 403s")
+	// checks: without the second half a session denied it sees a button that
+	// can only be refused.
+	if !strings.Contains(inPlace, `if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) parts.push(duckdbPanel())`) {
+		t.Fatal("snapshotInPlace does not mount duckdbPanel on capsCache.views plus settings:read")
 	}
-	// After the AI clients: the steps are what the page is for.
-	if strings.Index(connect, "duckdbPanel(") < strings.Index(connect, "otherClientsPanel(") {
-		t.Error("the DuckDB card is drawn above the AI clients on MCP Server; it belongs below them")
+	snaps := stripJSLineComments(functionBody(t, js, "async function renderSnapshots("))
+	if !strings.Contains(snaps, "snapshotInPlace(cur, baselines)") {
+		t.Fatal("renderSnapshots does not draw snapshotInPlace, so the schema download has no page at all")
+	}
+	for _, fn := range []string{"function buildConnect(", "function buildMySQLClients("} {
+		if strings.Contains(stripJSLineComments(functionBody(t, js, fn)), "duckdbPanel(") {
+			t.Errorf("%s mounts duckdbPanel again; two copies of one download put two option sets in front of the reader", fn)
+		}
 	}
 }
 
 // TestTheMySQLPortHasItsOwnPage: MCP Server is the token, the address, the
-// installer, the other AI clients and the DuckDB schema; MySQL clients is the
-// MySQL port, the memory a statement may use and the Iceberg export. The
+// installer and the other AI clients; MySQL clients is the MySQL port and the
+// memory a statement may use. Neither carries the DuckDB schema or the
+// Iceberg export, which are Snapshots' (snapshotInPlace). The
 // port's panels sat under the MCP steps until the page was split, and a
 // reader looking for the mysql line did not look there. Neither builder
 // mounts the other's panels, and the MCP loader asks for nothing a MySQL
 // clients panel is drawn from.
 func TestTheMySQLPortHasItsOwnPage(t *testing.T) {
 	js := readAsset(t, "app.js")
-	mcp := []string{"mcpTokenCard(", "mcpEndpointCard(", "bundleCard(", "otherClientsPanel(", "duckdbPanel("}
-	port := []string{"sqlClientPanel(", "sqlMemoryPanel(", "icebergExportPanel("}
+	mcp := []string{"mcpTokenCard(", "mcpEndpointCard(", "bundleCard(", "otherClientsPanel("}
+	port := []string{"sqlClientPanel(", "sqlMemoryPanel("}
+	snapshots := []string{"duckdbPanel(", "icebergExportPanel("}
 	check := func(name string, own, other []string) {
 		body := stripJSLineComments(functionBody(t, js, "function "+name+"("))
 		for _, must := range own {
@@ -214,13 +216,18 @@ func TestTheMySQLPortHasItsOwnPage(t *testing.T) {
 			}
 		}
 	}
-	check("buildConnect", mcp, port)
-	check("buildMySQLClients", port, mcp)
+	check("buildConnect", mcp, append(append([]string{}, port...), snapshots...))
+	check("buildMySQLClients", port, append(append([]string{}, mcp...), snapshots...))
 	load := stripJSLineComments(functionBody(t, js, "async function renderConnect("))
 	for _, not := range []string{"/api/flashback", "/api/sql-settings", "/api/router", "/api/baselines"} {
 		if strings.Contains(load, not) {
-			t.Errorf("renderConnect asks %s, which only a MySQL clients panel is drawn from", not)
+			t.Errorf("renderConnect asks %s, which no MCP Server panel is drawn from", not)
 		}
+	}
+	// MySQL clients no longer draws the Iceberg export, so it no longer asks
+	// where the snapshots live.
+	if strings.Contains(stripJSLineComments(functionBody(t, js, "async function renderMySQLClients(")), "/api/baselines") {
+		t.Error("renderMySQLClients asks /api/baselines, which only the Iceberg export (now on Snapshots) needed")
 	}
 	// The port's setting takes settings:read. A session without it is not
 	// asked (the request could only be refused, on every visit) and is told

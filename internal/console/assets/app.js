@@ -34,8 +34,8 @@ const SERVER_KEY = "bintrail_console_server";
 const ONBOARD_KEY = "bintrail_console_onboarded";
 
 // The generated DuckDB views file, named in two places that must not drift:
-// the card that builds it (on MCP Server, #1573) and the take-away lane on
-// Snapshots that downloads the default one. Shared rather than guarded -- a
+// the card that builds it and the take-away lane that draws it as the
+// archive's second tile, both on Snapshots -> Download. Shared rather than guarded -- a
 // constant cannot disagree with itself, and a test comparing two literals
 // only reports the drift after someone ships it.
 const DUCKDB_VIEWS_FILE = "views.sql";
@@ -71,9 +71,8 @@ const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover",
   // Retention through ROUTE_ALIASES; its other half, This daemon, was
   // dissolved in #1867 and /daemon lands on Status.
   "retention", "connect",
-  // MySQL clients: the MySQL port, read routing, the memory a statement
-  // may use and the Iceberg export, which sat on MCP Server until the page
-  // was split.
+  // MySQL clients: the MySQL port, read routing and the memory a statement
+  // may use.
   "mysql-clients",
   // Access profiles (#1445): author the flags/profiles/rules a data profile
   // enforces. Not monitor-gated: the standalone serve can author too, the
@@ -1128,7 +1127,7 @@ const ROUTE_ALIASES = new Map([
   ["daemon", () => "status"],
   // The SQL page was removed (#1549). An address that says "sql" lands on
   // MySQL clients, which every console has, so no capability answer is needed
-  // to know where to send it. (Its DuckDB schema card is on MCP Server.)
+  // to know where to send it. (Its DuckDB schema card is on Snapshots -> Download.)
   ["sql", () => "mysql-clients"],
   // The three backup pages merged into Snapshots (#1573). Each lands where
   // its page went, so a bookmark, a link in an email or a Back entry still
@@ -3294,8 +3293,8 @@ const USE_PANELS = {
   },
   dash(body) {
     // The always-current path (#2014): see dashPanelBody. The local folder's
-    // schema card stays on MCP Server, where the dashboards guide sends a tool
-    // that runs on this machine.
+    // schema card is on Snapshots -> Download, for a tool that runs on this
+    // machine.
     if ((capsCache.permissions || {})["settings:read"] === false) {
       body.append(el("p", { class: "use-note", text: dashErrorText(403, "") }));
       return;
@@ -8181,7 +8180,8 @@ async function renderSnapshots() {
     // Below it the tabs (Versions, Download, Checks, Settings); a tab this
     // daemon or session cannot serve is not offered.
     const takeAway = backupTakeAway(cur, baselines, sqlSt);
-    const tabs = snapshotTabs({ download: !!takeAway, checks: drawChecks, settings: drawSetup });
+    const inPlace = snapshotInPlace(cur, baselines);
+    const tabs = snapshotTabs({ download: !!(takeAway || inPlace), checks: drawChecks, settings: drawSetup });
     part("The copy", () => {
       v.append(snapshotHero(baselines, coverage, cur, {
         settings: drawSetup ? () => tabs.select("settings") : null,
@@ -8224,12 +8224,13 @@ async function renderSnapshots() {
     v.append(tabs.panels.versions);
     // Download has its own tab: the two lanes are a thing to do with a copy,
     // not a part of the list, and above the list they pushed it off screen.
-    if (takeAway) {
+    if (takeAway || inPlace) {
       part("Download", () => {
-        tabs.panels.download.append(takeAway);
+        if (takeAway) tabs.panels.download.append(takeAway);
+        if (inPlace) tabs.panels.download.append(inPlace);
         // An outcome waiting on a tab that is closed on arrival (a build
         // that failed, one ready and not yet downloaded): the tab says so.
-        const t = takeAway.dataset.owed ? tabs.bar.querySelector('.snap-tab[data-tab="download"]') : null;
+        const t = takeAway && takeAway.dataset.owed ? tabs.bar.querySelector('.snap-tab[data-tab="download"]') : null;
         if (t) { t.classList.add("has-alarm"); t.setAttribute("title", "A .sql build needs attention"); }
       });
       v.append(tabs.panels.download);
@@ -9639,9 +9640,9 @@ async function downloadViewsSQL(opts) {
 //
 // It is NOT the console SQL page, which #1549 removed: nothing here executes.
 // The title is load-bearing beyond this panel and must not be renamed casually
-// (it was "Query in DuckDB" until #1528). Mounted on MCP Server (#1573); it
-// sat on Backups from #1581 to #1573, where the take-away lane still
-// downloads the default file through downloadViewsSQL.
+// (it was "Query in DuckDB" until #1528). Mounted on Snapshots -> Download,
+// folded under the download lanes (snapshotInPlace); it sat on MCP Server
+// from #1573, a page about connecting an AI client.
 function duckdbPanel() {
   // A section, not a .cn-card, wherever it mounts. On Connect, sqlClientPanel
   // already drew this line for the identical case: "the three numbered cards
@@ -12460,8 +12461,10 @@ function backupFilesShape(files) {
 // tile is a whole folder arriving as one .tar.gz. Counting files would be
 // wrong by hundreds.
 const LANE_COUNT_WORD = ["No", "One", "Two", "Three"];
-function backupLane(title, files, tail, ico) {
-  const n = files.length;
+function backupLane(title, files, tail, ico, downloads) {
+  // downloads, when given, is how many things the reader saves; the files
+  // drawn can be more (the DuckDB archive carries its views.sql inside).
+  const n = downloads || files.length;
   const word = (LANE_COUNT_WORD[n] || String(n)) + " download" + (n === 1 ? "" : "s");
   return el("div", { class: "bk-lane" },
     el("div", { class: "stg-card-t" }, ico ? icon(ico, "stg-ico stg-ico-pink") : null, el("h3", { class: "bk-lane-t", text: title })),
@@ -12469,31 +12472,23 @@ function backupLane(title, files, tail, ico) {
     el("p", { class: "bk-lane-lead", text: word + tail }));
 }
 
-// The DuckDB lane. Downloading what is already stored asks for no capability,
-// so the DATA half is gated on there being a backup and nothing else.
-//
-// The VIEWS half is a different promise and needs its own gate. The button
-// downloads the file (#1573; it used to jump to the card), and the server
-// makes it only under capsCache.views: viewsAvailable() is false whenever the
-// selected server has archived data turned off (a checkbox on this console's
-// own server form), among other reasons. Ungated, this lane drew a views.sql
-// tile and a button that only fails. views_api.go puts it plainly: "a button
-// that only 404s is a lie, and this codebase already refuses that trade for
-// reconstruct and verify." Naming the file from a shared constant pinned its
-// NAME; only this pins its EXISTENCE.
+// The DuckDB lane: ONE download. The archive carries its own views.sql
+// (snapshotViewsRelative, #1583), respelled with "./" paths so it opens
+// wherever the reader unpacks it. This lane used to offer a second button,
+// GET /api/views.sql, whose file names THIS server's folders: on the reader's
+// own machine, the one a "take a copy with you" download goes to, it pointed
+// at nothing. The file with options (the change log, reading from S3) is the
+// card below the lanes, for a DuckDB that reads the copy where it lives.
+// Downloading what is already stored asks for no capability, so the lane is
+// gated on there being a backup and on query:execute (it is row data).
 function backupDuckLane(b) {
   if (!b || b.error || !b.configured) return null;
-  // The lane IS a download of row data, which takes query:execute; the
-  // views file beside it is GET /api/views.sql, which takes settings:read.
   if (!sessionMay("query:execute")) return null;
   const snaps = (b.snapshots || []);
   if (!snaps.length) return null;
-  const hasViews = !!capsCache.views && sessionMay("settings:read");
-  const files = [{ name: "Parquet files", cap: "your tables" }];
-  if (hasViews) files.push({ name: DUCKDB_VIEWS_FILE, cap: "how to read them" });
-  const lane = backupLane("To open in DuckDB", files, hasViews
-    ? ". The data, and the file that tells DuckDB how to read it."
-    : ". The data, on its own.", "duck");
+  const files = [{ name: "Parquet files", cap: "your tables" }, { name: DUCKDB_VIEWS_FILE, cap: "how to read them" }];
+  const lane = backupLane("To open in DuckDB", files,
+    ". Your tables and the file that tells DuckDB how to read them, together.", "duck", 1);
   const msg = el("p", { class: "form-msg err" });
   msg.hidden = true;
   const dl = el("button", { class: "btn", type: "button", text: "Download the data" });
@@ -12506,52 +12501,38 @@ function backupDuckLane(b) {
     msg.textContent = err;
     msg.hidden = !err;
   };
-  const go = el("div", { class: "bk-lane-go" }, dl);
-  if (hasViews) {
-    const views = el("button", { class: "btn btn-ghost", type: "button", text: "Download " + DUCKDB_VIEWS_FILE });
-    // A download, not a jump: the card with the options moved to MCP Server
-    // (#1573). This saves the default file (no change log, for this machine)
-    // and then shows the one command a reader cannot guess. Errors land in
-    // the lane's own line, or in a toast when the lane was repainted.
-    views.onclick = async () => {
-      views.disabled = true;
-      try {
-        const got = await downloadViewsSQL({});
-        msg.hidden = true;
-        const older = lane.querySelector(".dk-run");
-        if (older) older.remove();
-        lane.append(duckdbCommandLine(got.name));
-      } catch (err) {
-        const text = "Could not make " + DUCKDB_VIEWS_FILE + ": " + ((err && err.message) || err);
-        if (!msg.isConnected) { toastError(text); return; }
-        msg.textContent = text;
-        msg.hidden = false;
-      } finally {
-        views.disabled = false;
-      }
-    };
-    go.append(views);
-  }
-  lane.append(go, msg);
+  lane.append(el("div", { class: "bk-lane-go" }, dl), msg);
+  lane.append(el("p", { class: "form-hint", text: "Unpack it, go into its folder, and run:" }));
+  lane.append(duckdbCommandLine(DUCKDB_VIEWS_FILE));
   // b.incomplete means at least one configured location would not answer, so
   // the list is a SUBSET and "the newest" is only the newest of what was read.
   lane.append(el("p", { class: "form-hint", text:
     (b.incomplete ? "The newest snapshot that could be read, from " : "The newest snapshot, from ") +
     utcLabel(snaps[0].time) + ". Any other one downloads from its row in Versions." }));
-  // Say WHY the second file is missing, and do not dress it as a property of
-  // the data. It is withheld by this console's own setting, not by the
-  // backup: the same folder still yields the file from the command line. And
-  // it is not a convenience -- money columns are stored as text in Parquet,
-  // so without it the first SUM a reader writes fails to bind.
-  // Only for the CONFIGURATION reason. When views.sql is held back because
-  // this session may not read settings, saying "DBTrail is set not to read
-  // archived data" is a false statement about the installation.
-  if (!capsCache.views) {
-    lane.append(el("p", { class: "form-hint", text:
-      "The file that describes these tables is not offered, because DBTrail is set not to read archived data. " +
-      "DuckDB still opens the Parquet files, but decimal columns arrive as text, so totals will not add up until you cast them." }));
-  }
   return lane;
+}
+
+// snapshotInPlace: the copy used where it lives, without downloading it (the
+// DuckDB schema with its options, and the Iceberg export). Both sat on pages
+// about other things (MCP Server, MySQL clients); they are what a reader can
+// do with this server's snapshots, so they are here, folded under the
+// download lanes. Each keeps its own gate: the schema needs the views
+// capability and settings:read (GET /api/views.sql), and the Iceberg command
+// hands out unredacted data, so it is not drawn under a data profile.
+function snapshotInPlace(cur, b) {
+  const parts = [];
+  if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) parts.push(duckdbPanel());
+  if (!capsCache.data_profile) {
+    const ice = icebergExportPanel(cur, b);
+    if (ice) parts.push(ice);
+  }
+  if (!parts.length) return null;
+  const fold = el("details", { class: "ov-panel bk-take bk-inplace" });
+  fold.append(el("summary", { class: "ov-panel-head bk-take-sum" },
+    el("h2", { class: "ov-panel-title", text: "Use it where it lives" }),
+    el("span", { class: "bk-take-note", text: "Your own DuckDB on this server or in S3, or an Iceberg table, without downloading." })));
+  for (const p of parts) fold.append(p);
+  return fold;
 }
 
 // downloadNewestBackup resolves the size before handing off, because
@@ -14220,17 +14201,13 @@ async function renderMySQLClients() {
   const rtAsked = sessionMay("settings:read")
     ? api("/api/router").then((v) => v, (err) => (err && (err.status === 403 || err.status === 404) ? undefined : null))
     : Promise.resolve(undefined);
-  // serversFailed: the Iceberg command needs the selected server's index
-  // address, and a failure other than a refusal or the empty console must
-  // say why the panel is missing. The default id is THIS response's, the one
-  // a header-less request resolves to right now, not the one the last
-  // loadServers left behind.
-  let servers = [], serversDefault = "", serversFailed = false;
+  // The server list, for the SQL client panel's per-server addresses. A
+  // refusal or the empty console leaves it empty; the panel says what it can.
+  let servers = [];
   try {
     const r = await api("/api/servers");
     servers = r.servers || [];
-    serversDefault = r.default_id || "";
-  } catch (err) { serversFailed = err.status !== 403 && err.status !== 404; }
+  } catch (err) { /* drawn without the list */ }
   // Time-travel port status (#1446): on/off plus its address, never the token.
   // null on failure — the SQL client panel says it could not check.
   // undefined: this session may not read settings, which is what the route
@@ -14247,34 +14224,11 @@ async function renderMySQLClients() {
     try { sqlMem = await api("/api/sql-settings"); } catch (err) { sqlMem = err.status === 403 ? undefined : null; }
   }
   const rtView = await rtAsked;
-  // Where the selected server's snapshots live, for the Iceberg export
-  // command (#1573): location_only is the Backups listing's own resolution,
-  // answered without reading the storage or opening the server's index. Not
-  // asked when the session may not read this server or a data profile is
-  // active (data_profile, the key the server refuses on): the server would
-  // refuse it on every visit, auditing a denial under a profile, since the
-  // command hands out unredacted data. A refusal draws no panel; any other
-  // failure says so in one line, so a missing panel never reads as "this
-  // server keeps no backups".
-  //
-  // The permission is servers:read because that is what the route takes:
-  // listing a server's snapshots is a read about that server, not console
-  // administration. It must track the route — gating on settings:read here
-  // would draw the panel for a settings-only session and then 403 its
-  // location lookup, which is a button that fails rather than one absent.
-  let bLoc = null, bLocFailed = false;
-  if ((capsCache.permissions || {})["servers:read"] !== false && !capsCache.data_profile) {
-    try { bLoc = await api("/api/baselines?location_only=1"); } catch (err) { bLocFailed = err.status !== 403; }
-  }
   // vgen: navigating away while these requests are out must not let this
   // page paint over the next one.
   if (gen !== serverGen || vgen !== viewGen) return;
   try {
-    // No note for a console with no server at all: the location 404s there
-    // too, and "this server" would name nothing.
-    const cur = servers.find((s) => s.id === (currentServer || serversDefault));
-    buildMySQLClients(servers, fbStatus,
-      { cur: cur, loc: bLoc, failed: (bLocFailed && !!cur) || serversFailed }, sqlMem, rtView);
+    buildMySQLClients(servers, fbStatus, sqlMem, rtView);
   } catch (err) {
     const v = VIEW(); clear(v); v.append(pageHead("MySQL clients", null)); renderError(v, err);
   }
@@ -14327,17 +14281,13 @@ function buildConnect(servers, tokStatus, minted) {
   cards.append(bundleCard());
   v.append(cards);
   if (capsCache.mcp) v.append(otherClientsPanel(servers));
-  // The DuckDB schema card, on this page with or without the watch daemon
-  // (#1573; it sat on Backups from #1581, and here only on a serve-only
-  // console). GET /api/views.sql needs settings:read, so a session denied it
-  // gets no card whose button could only be refused (on the old Backups page
-  // the listing's own permission hid it). The views capability is already false under a
-  // data profile.
-  if (capsCache.views && (capsCache.permissions || {})["settings:read"] !== false) v.append(duckdbPanel());
+  // Only Claude here. The DuckDB schema card is on Snapshots -> Download
+  // (snapshotInPlace): a page about connecting an AI client is not where a
+  // reader looks for a file their own DuckDB opens.
   viewEnter();
 }
 
-function buildMySQLClients(servers, fbStatus, ice, sqlMem, rtView) {
+function buildMySQLClients(servers, fbStatus, sqlMem, rtView) {
   const v = VIEW(); clear(v);
   const sub = el("p", { class: "page-sub" },
     "Two ways to use one MySQL port.");
@@ -14350,16 +14300,8 @@ function buildMySQLClients(servers, fbStatus, ice, sqlMem, rtView) {
     mem.className += " sqlc";
     v.append(mem);
   }
-  // Last: what the selected server's snapshots can become, for a reader who
-  // wants them in front of a reporting engine (#1466). It was the bottom of
-  // the old Backups page, a third answer to "what do I download" there — the
-  // page that has since merged into Snapshots, which never carried it (#1573).
-  const iceberg = icebergExportPanel(ice.cur, ice.loc);
-  if (iceberg) { iceberg.className += " sqlc"; v.append(iceberg); }
-  else if (ice.failed) {
-    v.append(el("p", { class: "form-hint cn-ice-err", style: "margin-top:18px", text:
-      "Could not check where this server's snapshots are kept, so the Iceberg export command is not shown. Reload the page to try again." }));
-  }
+  // The Iceberg export is on Snapshots -> Download (snapshotInPlace): it is
+  // what this server's snapshots can become, not a use of the MySQL port.
   viewEnter();
 }
 
