@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The bundled index MySQL sizes its buffer pool to the machine when `INDEX_BUFFER_POOL` is unset** (compose file version 6). Before, a stack started from `docker-compose.yml` alone, without `install.sh`, ran the index MySQL with InnoDB's 128 MB default whatever the machine had, which caps capture on a busy source and slows every refresh of the copy for SQL: measured on a 4-core, 8 GB host under a TPC-C load, a refresh of 5 minutes of changes took 10 to 12 minutes at 128 MB and 2 to 3 minutes at the 1G this rule picks there. The `index-mysql` entrypoint now applies the rule `install.sh` and `doctor` already use (a quarter of the memory, whole GB from 1G, at most 32G, the default under about 1 GB) and prints the value in `docker compose logs index-mysql`. A value in `.env` is still used as written. **On upgrade**: taking the version 6 file restarts an index MySQL that ran at 128 MB with a quarter of the machine's memory; set `INDEX_BUFFER_POOL` in `.env` first to keep a lower value.
+
 ## [0.108.1] - 2026-10-18
 
 The first published build of the changes listed under 0.108.0, which was

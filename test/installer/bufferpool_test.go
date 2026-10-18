@@ -84,32 +84,42 @@ func TestInstaller_writesTheBufferPoolTheDoctorRecommends(t *testing.T) {
 }
 
 // Docker that reports no usable number leaves .env alone and still installs.
+//
+// With the current compose file the container reads its own memory, so the
+// install says that instead of claiming the default stays; a file that only
+// passes the value on (version 5) does keep the default, and says so.
 func TestInstaller_noMemoryNumberWritesNothing(t *testing.T) {
-	for _, v := range []string{"", "abc", "-5", "0", "12345678901234567890123"} {
-		t.Run(v, func(t *testing.T) {
-			r := install(t, "STUB_MEM_TOTAL="+v)
-			if r.failed || !strings.Contains(r.out, "DBTrail is up.") {
-				t.Fatalf("install did not finish:\n%s", r.out)
-			}
-			if got := poolLines(envFile(t, r)); len(got) != 0 {
-				t.Fatalf("wrote %v from %q", got, v)
-			}
-			if !strings.Contains(r.out, "Docker did not say how much memory") {
-				t.Errorf("an unread memory is not said:\n%s", r.out)
-			}
-		})
-	}
-}
-
-// The compose file hands the value to the bundled MySQL, with today's
-// default when .env has none.
-func TestCompose_passesTheBufferPool(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
-	if err != nil {
+	passOnly := filepath.Join(t.TempDir(), "docker-compose.yml")
+	if err := os.WriteFile(passOnly, []byte(passOnlyCompose), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `- "--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}"`) {
-		t.Fatal("docker-compose.yml does not pass INDEX_BUFFER_POOL to index-mysql with a 128M default")
+	for _, v := range []string{"", "abc", "-5", "0", "12345678901234567890123"} {
+		for _, tc := range []struct {
+			name, src, want, notWant string
+		}{
+			{"current compose", "", "works out its memory each time it starts", "keeps the 128 MB"},
+			{"compose that only passes the value on", passOnly, "Docker did not say how much memory", "works out its memory"},
+		} {
+			t.Run(v+"/"+tc.name, func(t *testing.T) {
+				env := []string{"STUB_MEM_TOTAL=" + v}
+				if tc.src != "" {
+					env = append(env, "COMPOSE_SRC="+tc.src)
+				}
+				r := install(t, env...)
+				if r.failed || !strings.Contains(r.out, "DBTrail is up.") {
+					t.Fatalf("install did not finish:\n%s", r.out)
+				}
+				if got := poolLines(envFile(t, r)); len(got) != 0 {
+					t.Fatalf("wrote %v from %q", got, v)
+				}
+				if !strings.Contains(r.out, tc.want) || strings.Contains(r.out, tc.notWant) {
+					t.Errorf("want %q and not %q:\n%s", tc.want, tc.notWant, r.out)
+				}
+				for _, h := range sentenceHits(t, r.out, r.dir) {
+					t.Errorf("banned in a sentence the installer prints: %s", h)
+				}
+			})
+		}
 	}
 }
 
@@ -189,7 +199,15 @@ func TestInstaller_anOlderComposeGetsNoLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := strings.ReplaceAll(string(b), `      - "--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}"`+"\n", "")
+	// Every line that sizes or passes the pool goes: the flag and the
+	// pool-auto markers, which is what a file from before the setting had.
+	var kept []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if !strings.Contains(l, "--innodb-buffer-pool-size=") && !strings.Contains(l, "pool-auto:") {
+			kept = append(kept, l)
+		}
+	}
+	old := strings.Join(kept, "\n")
 	if strings.Contains(old, "--innodb-buffer-pool-size=") {
 		t.Fatal("could not build the older compose file")
 	}
@@ -228,9 +246,14 @@ func TestInstaller_aReRunSuggestsTheLineInsteadOfWritingIt(t *testing.T) {
 		suggest bool
 		upgrade bool
 	}{
-		{"no .env, current compose", "-", string(compose), true, false},
+		// The current file sizes the pool itself (pool-auto), so there is
+		// nothing to suggest; a file that only passes the value on (version
+		// 5) still needs the line.
+		{"no .env, current compose", "-", string(compose), false, false},
+		{".env without the line, current compose", "SCHEMAS=shop\n", string(compose), false, false},
+		{"no .env, compose that only passes the value on", "-", passOnlyCompose, true, false},
+		{".env without the line, compose that only passes the value on", "SCHEMAS=shop\n", passOnlyCompose, true, false},
 		{"no .env, compose from before the setting", "-", "services: {}\n", true, true},
-		{".env without the line", "SCHEMAS=shop\n", string(compose), true, false},
 		{".env with the line", "INDEX_BUFFER_POOL=2G\n", string(compose), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

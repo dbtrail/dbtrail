@@ -55,7 +55,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 5
+x-bintrail-compose-version: &compose_version 6
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -193,14 +193,74 @@ services:
     # operator who repoints the volume at an exotic filesystem may need to drop
     # this one flag.
     #
-    # --innodb-buffer-pool-size comes from INDEX_BUFFER_POOL in .env. install.sh
-    # writes it on a fresh install as a quarter of the memory Docker has (at
-    # most 32G; a machine under about 1 GB keeps the default), because the
-    # 128M InnoDB default caps capture at about 1,400 row changes per second on
-    # a busy server whatever the machine has (#2141). Unset, it stays 128M, as
-    # before. It is a number, never hardcoded here: the machine decides it, and
-    # the operator can change it in .env (docs/deployment.md §3). `doctor`
-    # warns when it is still 128M on a machine with far more memory.
+    # --innodb-buffer-pool-size: INDEX_BUFFER_POOL in .env when it is set (and
+    # not empty), used as written. Unset, the entrypoint below works it out
+    # when the container starts: a quarter of the memory this machine has
+    # (Docker Desktop: its VM), whole GB from 1G up, 128 MB steps below, at
+    # most 32G, and the 128M InnoDB default under about 1 GB. Before file
+    # version 6 an unset value stayed 128M on every machine, which caps capture
+    # at about 1,400 row changes per second on a busy server (#2141); install.sh
+    # wrote the value on a fresh install, but a stack started from this file
+    # alone never got one. A quarter, because the web interface's SQL engine
+    # and often the source database share the machine. The same rule lives in
+    # internal/doctor RecommendedBufferPool and install.sh; test/installer
+    # holds the three together. The value chosen is printed in
+    # `docker compose logs index-mysql`. The image's own entrypoint still runs
+    # (exec, last line), so the first start of a new volume initialises it as
+    # before.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # pool-auto:begin
+        # Only the MySQL server gets a pool: a `compose run` of another
+        # program (mysql, mysqldump, bash) passes through untouched, and a
+        # command that already carries its own pool keeps it.
+        serves=""
+        case "$${1:-}" in -*|mysqld) serves=1 ;; esac
+        for a in "$$@"; do
+          case "$$a" in --innodb-buffer-pool-size=*|--innodb_buffer_pool_size=*) serves="" ;; esac
+        done
+        pool="$$INDEX_BUFFER_POOL"
+        if [ -n "$$serves" ] && [ -z "$$pool" ]; then
+          kb=""
+          while read -r key value unit; do
+            if [ "$$key" = "MemTotal:" ]; then kb="$$value"; break; fi
+          done < /proc/meminfo
+          case "$$kb" in ''|0|*[!0-9]*) kb="" ;; esac
+          [ "$${#kb}" -le 15 ] || kb=""
+          # A memory limit on this container is the memory mysqld has.
+          lim=""
+          for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+            if [ -r "$$f" ]; then read -r lim < "$$f"; break; fi
+          done
+          case "$$lim" in ''|max|0|*[!0-9]*) lim="" ;; esac
+          [ "$${#lim}" -le 18 ] || lim=""
+          where="this machine has"
+          if [ -n "$$lim" ] && [ -n "$$kb" ] && [ "$$(( lim / 1024 ))" -lt "$$kb" ]; then
+            kb=$$(( lim / 1024 )); where="this container may use"
+          fi
+          if [ -z "$$kb" ]; then
+            pool=128M
+            why="the memory of this machine could not be read, so the InnoDB default stays; set INDEX_BUFFER_POOL in .env"
+          else
+            q=$$(( kb / 1024 / 4 ))
+            if [ "$$q" -ge 1024 ]; then
+              g=$$(( q / 1024 )); [ "$$g" -gt 32 ] && g=32
+              pool="$${g}G"
+            elif [ "$$q" -ge 256 ]; then
+              pool="$$(( q / 128 * 128 ))M"
+            else
+              pool=128M
+            fi
+            why="a quarter of the $$(( kb / 1024 )) MB $$where, at most 32G; INDEX_BUFFER_POOL in .env overrides it"
+          fi
+          echo "index-mysql: InnoDB buffer pool $$pool ($$why)" >&2
+        fi
+        [ -n "$$serves" ] && set -- "$$@" "--innodb-buffer-pool-size=$$pool"
+        # pool-auto:end
+        exec docker-entrypoint.sh "$$@"
+      - sh
     command:
       - "--innodb-flush-log-at-trx-commit=2"
       - "--sort-buffer-size=4M"
@@ -208,8 +268,9 @@ services:
       - "--skip-log-bin"
       - "--innodb-redo-log-capacity=2147483648"
       - "--innodb-flush-method=O_DIRECT"
-      - "--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}"
     environment:
+      # Read by the entrypoint above; empty means "work it out".
+      INDEX_BUFFER_POOL: ${INDEX_BUFFER_POOL:-}
       # 8.4 defaults to caching_sha2_password (native_password disabled);
       # bintrail's driver negotiates it over the plaintext Docker network.
       MYSQL_ROOT_PASSWORD_FILE: /run/secret/index_password

@@ -300,7 +300,12 @@ grep -q '^services:' docker-compose.yml || die \
 #
 # Only a fresh install writes: on a re-run a new line would change the
 # MySQL's configuration and the `up -d` below would restart it in the middle
-# of capture, so the line is printed instead. A value already in .env, in any
+# of capture, so the line is printed instead. A compose file of version 6 or
+# later (the `pool-auto:begin` block on index-mysql) works the same rule out
+# itself when .env has no value, so a re-run over one has nothing to suggest,
+# and neither does a run where Docker did not report its memory: the container
+# reads its own. A fresh install still writes the value it worked out, so the
+# size stays what the install said even if the machine's memory changes later. A value already in .env, in any
 # form compose's .env reader takes (KEY=, KEY:, export KEY=, a bare KEY), is
 # never touched. A compose file without the setting (an older DBTRAIL_REF)
 # gets no line: it would claim a size nothing passes on. MySQL rounds the
@@ -337,6 +342,8 @@ elif [ -n "$pool" ] && [ -n "${FRESH:-}" ]; then
   if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then printf '\n' >> .env; fi
   printf 'INDEX_BUFFER_POOL=%s\n' "$pool" >> .env || die "Couldn't write ${DIR}/.env."
   say "${DIM}    DBTrail's MySQL gets ${pool} of memory, a quarter of what Docker has and at most 32G (INDEX_BUFFER_POOL in .env)${RST}"
+elif grep -q 'pool-auto:begin' docker-compose.yml; then
+  say "${DIM}    DBTrail's MySQL works out its memory each time it starts, a quarter of what this machine has and at most 32G (INDEX_BUFFER_POOL in .env overrides it)${RST}"
 elif [ -n "$pool" ]; then
   warn "DBTrail's MySQL may still run with the 128 MB memory default, which slows capture on a busy server."
   if grep -q -- '--innodb-buffer-pool-size=' docker-compose.yml; then

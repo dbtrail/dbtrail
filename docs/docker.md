@@ -168,9 +168,9 @@ sign-in.
 
 Optional knobs go in a `.env` next to the file: `SOURCE_DSN` to start
 streaming one source immediately at boot, `INDEX_DSN` to bring your own index
-MySQL, `INDEX_BUFFER_POOL` for the bundled index MySQL's buffer pool (`install.sh`
-writes it from the machine's memory; see
-[deployment.md §3](deployment.md#innodb-tuning)), `CONSOLE_TOKEN` for an
+MySQL, `INDEX_BUFFER_POOL` for the bundled index MySQL's buffer pool (unset, the
+compose file works it out from the machine's memory when the container
+starts; see [deployment.md §3](deployment.md#innodb-tuning)), `CONSOLE_TOKEN` for an
 opt-in API-automation token (humans use the password). (From a source checkout, `cp .env.example .env` gives you the
 annotated template.)
 
@@ -261,7 +261,8 @@ What a stale compose file costs:
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
-| `--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}` on `index-mysql` | `INDEX_BUFFER_POOL` in `.env` does nothing, and the index MySQL keeps the 128 MB buffer pool, which caps capture on a busy source | `doctor` warns "Index buffer pool" at 128 MB on a machine with about 4 GB or more; capture lag keeps growing |
+| the `index-mysql` entrypoint that sizes the buffer pool when `INDEX_BUFFER_POOL` is unset (file version 6) | without a value in `.env`, the index MySQL keeps InnoDB's 128 MB buffer pool, which caps capture on a busy source and slows every refresh of the copy for SQL | `doctor` warns "Index buffer pool" at 128 MB on a machine with about 4 GB or more; capture lag keeps growing. Taking the version 6 file changes this on the next `up -d`: an index MySQL that ran at 128 MB restarts with a quarter of the machine's memory. To keep it lower, set `INDEX_BUFFER_POOL` in `.env` first |
+| `--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}` on `index-mysql` | `INDEX_BUFFER_POOL` in `.env` does nothing, and the index MySQL keeps the 128 MB buffer pool | as above |
 | `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page it switched was removed in 0.75.0 | Remove the variable. It is read for one release and warns. SQL in the browser is on the Overview now and this variable does not control it |
 
 **The MySQL port moved to the `router` service (file version 4).** Until
