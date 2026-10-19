@@ -61,7 +61,19 @@ func newestWalkEligible(opts Options) bool {
 		opts.LimitPerPK == 0 && !opts.LatestPerPKCandidates &&
 		(opts.Schema == "" || opts.Table == "") &&
 		opts.PKValues == "" && len(opts.PKValuesIn) == 0 && opts.PKRange == nil &&
-		opts.GTID == "" && opts.EventAnchor == nil
+		opts.GTID == "" && opts.EventAnchor == nil && columnEqSafe(opts.ColumnEq)
+}
+
+// columnEqSafe reports that every ColumnEq names a column buildWhere accepts.
+// One it rejects is logged by buildWhere each time it builds the WHERE
+// clause; such a read keeps the single statement, so it logs once.
+func columnEqSafe(eqs []ColumnEq) bool {
+	for _, ce := range eqs {
+		if !IsSafeColumnName(ce.Column) {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchNewestByPartition answers a newest-first fetch with a small Limit by
@@ -161,6 +173,20 @@ const (
 // index scans; a partition touching more tables than this is sorted whole.
 const newestBranchTables = 64
 
+// newestMaxPlaceholders caps the placeholders of one branch statement, under
+// the 65,535 a prepared statement can carry (ER_PS_MANY_PARAM, 1390). Every
+// branch repeats the fetch's filters, and an access profile can bring a few
+// values per table it allows or denies, so a long profile times the tables of
+// a partition can pass it; that step then sorts the partition whole, whose
+// statement carries the filters once.
+const newestMaxPlaceholders = 60000
+
+// branchPlaceholders is the placeholder count of buildNewestBranches: per
+// table its schema, table, filters and limit, then the outer limit.
+func branchPlaceholders(tables, filterArgs int) int {
+	return tables*(3+filterArgs) + 1
+}
+
 // walkNewest reads the partitions in parts (oldest first, as listed) from the
 // last back, asking each for the newest rows still missing. Partitions wholly
 // newer than the fetch's Until or BeforeEvent are passed without a query, and
@@ -181,7 +207,8 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 	names := parts.names
 	floor, ceil := newestWindow(opts)
 	var out []ResultRow
-	read := false // some partition held rows and its read ran
+	read := false                        // some partition held rows and its read ran
+	where, whereArgs := buildWhere(opts) // once per walk: the same for every step
 	for i := len(names) - 1; i >= 0 && len(out) < opts.Limit; i-- {
 		part := names[i]
 		if parts.uppers != nil {
@@ -212,10 +239,10 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 		o.Limit = opts.Limit - len(out)
 		var q string
 		var args []any
-		if len(tables) <= newestBranchTables {
-			q, args = buildNewestBranches(o, part, tables)
+		if len(tables) <= newestBranchTables && branchPlaceholders(len(tables), len(whereArgs)) <= newestMaxPlaceholders {
+			q, args = buildNewestBranches(o, part, tables, where, whereArgs)
 		} else {
-			q, args = buildQueryIn(o, []string{part})
+			q, args = assembleQuery(o, []string{part}, where, slices.Clone(whereArgs))
 		}
 		got, err := queryRows(ctx, db, q, args)
 		switch {
@@ -224,6 +251,11 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 		case isMissingIndexErr(err):
 			// An index created without idx_row_lookup (every `bintrail
 			// init` creates it): the single statement still answers.
+			return nil, walkFallBack, nil
+		case isTooManyPlaceholdersErr(err):
+			// Even the whole-partition statement carries more filter values
+			// than a prepared statement takes; the single statement carries
+			// the same, so it answers (or fails) as it always did.
 			return nil, walkFallBack, nil
 		case err != nil:
 			return nil, 0, fmt.Errorf("query failed (partition %s): %w", part, err)
@@ -284,8 +316,7 @@ func partitionTables(ctx context.Context, db querier, part string, opts Options)
 // partition as one backward index scan per table, unioned, sorted and cut,
 // then joined back to the wide columns like buildQuery's statement (see the
 // late-materialization comment there: only narrow keys are sorted).
-func buildNewestBranches(opts Options, part string, tables []SchemaTable) (string, []any) {
-	where, whereArgs := buildWhere(opts)
+func buildNewestBranches(opts Options, part string, tables []SchemaTable, where []string, whereArgs []any) (string, []any) {
 	filter := ""
 	if len(where) > 0 {
 		filter = " AND " + strings.Join(where, " AND ")
@@ -314,6 +345,13 @@ func buildNewestBranches(opts Options, part string, tables []SchemaTable) (strin
 func isTableDefChangedErr(err error) bool {
 	var me *drivermysql.MySQLError
 	return errors.As(err, &me) && me.Number == 1412
+}
+
+// isTooManyPlaceholdersErr reports MySQL's ER_PS_MANY_PARAM (1390): a prepared
+// statement with more than 65,535 placeholders.
+func isTooManyPlaceholdersErr(err error) bool {
+	var me *drivermysql.MySQLError
+	return errors.As(err, &me) && me.Number == 1390
 }
 
 // isMissingIndexErr reports MySQL's ER_KEY_DOES_NOT_EXITS (1176): a FORCE

@@ -211,6 +211,11 @@ func TestNewestWalkIntegration_filtersKeepTheirMeaning(t *testing.T) {
 			putEvent(t, db, now.Add(time.Duration(h)*time.Hour+time.Duration(i)*time.Minute), tbl, et)
 		}
 	}
+	// One statement digest on the users rows of two hours, so the hash filter
+	// matches some rows and not others.
+	hash := strings.Repeat("a", 64)
+	testutil.MustExec(t, db, "UPDATE binlog_events SET query_hash = ? WHERE table_name = 'users' AND event_timestamp >= ?",
+		hash, now.Add(-2*time.Hour))
 	del := event.EventDelete
 	since := now.Add(-3*time.Hour + 2*time.Minute)
 	until := now.Add(-time.Hour + 3*time.Minute)
@@ -227,11 +232,11 @@ func TestNewestWalkIntegration_filtersKeepTheirMeaning(t *testing.T) {
 		"page two":       {BeforeEvent: cursor},
 		"deny":           {DenyTables: []SchemaTable{{"app", "orders"}}},
 		"allow":          {AllowTables: []SchemaTable{{"app", "items"}}},
-		"no match":       {Table: "nothing"},
+		"no match":       {ColumnEq: []ColumnEq{{Column: "id", Value: "no such value"}}},
 		"since event":    {SinceEventID: recent[20].EventID},
 		"profile named":  {ProfileActive: true, RedactColumns: []SchemaTableColumn{{"app", "users", "id"}}},
 		"column value":   {ColumnEq: []ColumnEq{{Column: "id", Value: "1"}}},
-		"statement hash": {QueryHash: strings.Repeat("a", 64)},
+		"statement hash": {QueryHash: hash},
 		"flag":           {Flag: "pii"},
 	}
 	testutil.MustExec(t, db, "INSERT INTO table_flags (schema_name, table_name, column_name, flag) VALUES ('app', 'items', '', 'pii')")
@@ -243,13 +248,23 @@ func TestNewestWalkIntegration_filtersKeepTheirMeaning(t *testing.T) {
 			t.Fatalf("walked %v", *steps)
 		}
 	})
+	t.Run("no table of that name keeps the single statement", func(t *testing.T) {
+		o := Options{Limit: 7, Order: "DESC", Table: "nothing"}
+		sameAsSingleStatement(t, e, o)
+		if _, walked, err := fetchNewestByPartition(context.Background(), db, o); err != nil || walked {
+			t.Fatalf("walked %v (%v): no partition lists the table, so the free single statement answers", walked, err)
+		}
+	})
 	for name, o := range cases {
 		t.Run(name, func(t *testing.T) {
-			*steps = nil
 			o.Limit, o.Order = 7, "DESC"
-			sameAsSingleStatement(t, e, o)
-			if len(*steps) == 0 {
-				t.Fatalf("the walk did not run")
+			got := sameAsSingleStatement(t, e, o)
+			if (name == "no match") != (len(got) == 0) {
+				t.Fatalf("%d rows: the fixture must make this filter match some rows (none for no match)", len(got))
+			}
+			// The walk itself answered, not its fallback.
+			if _, walked, err := fetchNewestByPartition(context.Background(), db, o); err != nil || !walked {
+				t.Fatalf("walked %v (%v)", walked, err)
 			}
 		})
 	}
@@ -416,7 +431,7 @@ func TestNewestWalkMeasure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		bq, bargs := buildNewestBranches(o, part, tables)
+		bq, bargs := buildNewestBranchesFor(o, part, tables)
 		explainLog(t, db, "walk tables "+part, "SELECT DISTINCT schema_name, table_name FROM binlog_events PARTITION (`"+part+"`)")
 		explainLog(t, db, "walk branches "+part, bq, bargs...)
 		q, args := buildQuery(o)
@@ -529,5 +544,31 @@ func TestNewestWalkIntegration_oldWindowSkipsTheNewerPartitions(t *testing.T) {
 	want := []string{now.Add(-3 * time.Hour).Format("p_2006010215"), now.Add(-4 * time.Hour).Format("p_2006010215")}
 	if !slices.Equal(*steps, want) {
 		t.Fatalf("read %v, want only %v", *steps, want)
+	}
+}
+
+// An access profile long enough that its filter values, repeated in one
+// branch per table, would pass a prepared statement's 65,535 placeholders
+// (1390): 600 denied tables (1,200 values) times 64 tables in the newest
+// partition. The step sorts the partition whole instead, whose statement
+// carries the values once, and the walk still answers.
+func TestNewestWalkIntegration_longProfileStaysUnderThePlaceholderCap(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Hour)
+	db, e := walkFixture(t, hoursFrom(now.Add(-2*time.Hour), 3))
+	for i := range 64 {
+		putEvent(t, db, now.Add(-time.Hour+time.Duration(i)*time.Second), fmt.Sprintf("t%02d", i), event.EventInsert)
+	}
+	deny := make([]SchemaTable, 600)
+	for i := range deny {
+		deny[i] = SchemaTable{Schema: "app", Table: fmt.Sprintf("denied%03d", i)}
+	}
+	deny[0].Table = "t05" // one real table denied, so the filter changes the page
+	o := Options{Limit: 20, Order: "DESC", DenyTables: deny}
+	got := sameAsSingleStatement(t, e, o)
+	if len(got) != 20 {
+		t.Fatalf("got %d rows", len(got))
+	}
+	if _, walked, err := fetchNewestByPartition(context.Background(), db, o); err != nil || !walked {
+		t.Fatalf("walked %v (%v): the walk must answer under a long profile", walked, err)
 	}
 }

@@ -52,6 +52,7 @@ func TestNewestWalkEligible(t *testing.T) {
 		"several primary keys":            {Limit: 9, Order: "DESC", PKValuesIn: []string{"1", "2"}},
 		"primary key range":               {Limit: 9, Order: "DESC", PKRange: &PKRange{}},
 		"gtid":                            {Limit: 9, Order: "DESC", GTID: "u:1"},
+		"unsafe column filter":            {Limit: 9, Order: "DESC", ColumnEq: []ColumnEq{{Column: "x') OR 1=1 -- ", Value: "1"}}},
 		"one anchored event":              {Limit: 9, Order: "DESC", EventAnchor: &EventCursor{Timestamp: at, EventID: 5}},
 		"forward cursor (refused anyway)": {Limit: 9, Order: "ASC", AfterEvent: &EventCursor{Timestamp: at, EventID: 5}},
 	}
@@ -379,7 +380,7 @@ func TestNewestWalk_droppedBetweenListingAndReadRelists(t *testing.T) {
 func TestBuildNewestBranchesCarriesTheFiltersIntoEveryBranch(t *testing.T) {
 	del := event.EventType(3)
 	o := Options{Limit: 4, Order: "DESC", EventType: &del, DenyTables: []SchemaTable{{"app", "secret"}}}
-	q, args := buildNewestBranches(o, "p_x", []SchemaTable{{"app", "a"}, {"app", "b"}})
+	q, args := buildNewestBranchesFor(o, "p_x", []SchemaTable{{"app", "a"}, {"app", "b"}})
 	if n := strings.Count(q, "FORCE INDEX (idx_row_lookup) WHERE schema_name = ? AND table_name = ? AND event_type = ? AND NOT (schema_name = ? AND table_name = ?) ORDER BY event_timestamp DESC, event_id DESC LIMIT ?)"); n != 2 {
 		t.Fatalf("want two filtered branches, got %d in %s", n, q)
 	}
@@ -627,6 +628,63 @@ func TestNewestWalk_boundsChangedUnderTheWalkRewalks(t *testing.T) {
 	}
 	if g := ids(got); len(g) != 1 || g[0] != 5 {
 		t.Fatalf("got %v, want the second walk's [5]", g)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// buildNewestBranchesFor is buildNewestBranches over opts' own WHERE clause.
+func buildNewestBranchesFor(opts Options, part string, tables []SchemaTable) (string, []any) {
+	where, args := buildWhere(opts)
+	return buildNewestBranches(opts, part, tables, where, args)
+}
+
+// Filter values times tables past the cap: the step reads the partition with
+// one statement that carries the values once, not one branch per table.
+func TestNewestWalk_longProfileSortsThePartitionWhole(t *testing.T) {
+	deny := make([]SchemaTable, 600)
+	for i := range deny {
+		deny[i] = SchemaTable{Schema: "app", Table: fmt.Sprintf("d%03d", i)}
+	}
+	if n := branchPlaceholders(64, 2*len(deny)); n <= 65535 {
+		t.Fatalf("fixture too small: %d placeholders would fit", n)
+	}
+	e, mock := newWalkMock(t)
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
+	tables := sqlmock.NewRows([]string{"s", "t"})
+	for i := range 64 {
+		tables.AddRow("app", fmt.Sprintf("t%02d", i))
+	}
+	mock.ExpectQuery(tablesSQL("p_future")).WillReturnRows(tables)
+	mock.ExpectQuery(regexp.QuoteMeta("FROM binlog_events PARTITION (`p_future`) WHERE NOT")).WillReturnRows(walkRows(3))
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	if _, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC", DenyTables: deny}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 1390 on a step's read (more placeholders than a prepared statement takes,
+// even with the values once): the single statement answers, as it did.
+func TestNewestWalk_tooManyPlaceholdersFallsBack(t *testing.T) {
+	e, mock := newWalkMock(t)
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
+	mock.ExpectQuery(tablesSQL("p_future")).WillReturnRows(sqlmock.NewRows([]string{"s", "t"}).AddRow("app", "t"))
+	mock.ExpectQuery(branchSQL("p_future")).WillReturnError(&drivermysql.MySQLError{Number: 1390, Message: "Prepared statement contains too many placeholders"})
+	mock.ExpectRollback()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM binlog_events ORDER BY")).WillReturnRows(walkRows(4))
+	got, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d rows", len(got))
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
