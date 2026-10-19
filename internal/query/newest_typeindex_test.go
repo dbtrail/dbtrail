@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,6 +23,9 @@ func TestTypeIndexNameIsTheIndexersName(t *testing.T) {
 	if typeIndexName != indexer.TypeIndexName {
 		t.Fatalf("query reads %q, indexer builds %q", typeIndexName, indexer.TypeIndexName)
 	}
+	if !slices.Equal(typeIndexKey, indexer.TypeIndexColumns()) {
+		t.Fatalf("query expects key %v, indexer builds %v", typeIndexKey, indexer.TypeIndexColumns())
+	}
 }
 
 // With the index, the table listing keeps only the tables holding a row of
@@ -29,7 +33,7 @@ func TestTypeIndexNameIsTheIndexersName(t *testing.T) {
 func TestNewestWalk_typeFilterReadsTheTypeIndex(t *testing.T) {
 	e, mock := newWalkMock(t)
 	del := event.EventType(3)
-	mock.ExpectQuery(statsSQL).WithArgs("idx_type_lookup").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+	mock.ExpectQuery(statsSQL).WithArgs("idx_type_lookup").WillReturnRows(typeKeyRows(typeIndexKey...))
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT event_type, schema_name, table_name FROM binlog_events PARTITION (`p_future`) WHERE event_type = ?") + "$").
@@ -56,7 +60,7 @@ func TestNewestWalk_typeFilterReadsTheTypeIndex(t *testing.T) {
 func TestNewestWalk_typeAndSchemaNarrowTheListingTogether(t *testing.T) {
 	e, mock := newWalkMock(t)
 	upd := event.EventType(2)
-	mock.ExpectQuery(statsSQL).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+	mock.ExpectQuery(statsSQL).WillReturnRows(typeKeyRows(typeIndexKey...))
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT event_type, schema_name, table_name FROM binlog_events PARTITION (`p_future`) WHERE event_type = ? AND schema_name = ?")+"$").
@@ -81,7 +85,7 @@ func TestNewestWalk_typeAndSchemaNarrowTheListingTogether(t *testing.T) {
 func TestNewestWalk_typeFilterWithoutTheTypeIndexKeepsTheLookupIndex(t *testing.T) {
 	e, mock := newWalkMock(t)
 	del := event.EventType(3)
-	mock.ExpectQuery(statsSQL).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+	mock.ExpectQuery(statsSQL).WillReturnRows(typeKeyRows())
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
 	mock.ExpectBegin()
 	mock.ExpectQuery(tablesSQL("p_future") + "$").WillReturnRows(sqlmock.NewRows([]string{"s", "t"}).AddRow("app", "t"))
@@ -103,5 +107,33 @@ func TestBuildNewestBranchesWithoutATypeKeepsTheLookupIndex(t *testing.T) {
 	q, _ := buildNewestBranches(Options{Limit: 3, Order: "DESC"}, "p_x", []SchemaTable{{"app", "a"}}, nil, nil, true)
 	if !strings.Contains(q, "FORCE INDEX (idx_row_lookup)") || strings.Contains(q, typeIndexName) {
 		t.Fatalf("an untyped branch must read idx_row_lookup: %s", q)
+	}
+}
+
+func typeKeyRows(cols ...string) *sqlmock.Rows {
+	r := sqlmock.NewRows([]string{"COLUMN_NAME"})
+	for _, c := range cols {
+		r.AddRow(c)
+	}
+	return r
+}
+
+// idx_type_lookup over another key (built by hand) is not forced: the walk
+// reads as without the index.
+func TestNewestWalk_typeIndexWithAnotherKeyIsNotUsed(t *testing.T) {
+	e, mock := newWalkMock(t)
+	del := event.EventType(3)
+	mock.ExpectQuery(statsSQL).WillReturnRows(typeKeyRows("event_type"))
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
+	mock.ExpectQuery(tablesSQL("p_future") + "$").WillReturnRows(sqlmock.NewRows([]string{"s", "t"}).AddRow("app", "t"))
+	mock.ExpectQuery(branchSQL("p_future")).WillReturnRows(walkRows(7))
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	if _, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC", EventType: &del}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

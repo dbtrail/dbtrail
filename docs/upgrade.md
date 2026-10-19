@@ -202,9 +202,13 @@ What to expect:
   (stopping the client does not stop the statement), and a daemon started in
   the meantime sees it running and does not start a second one. To stop it,
   `KILL` the thread id the log names.
-- **Rotation during the build** waits for it to finish (it needs the table's
-  lock); with the default three hourly partitions of headroom, a build shorter
-  than three hours never lets rows reach `p_future`.
+- **Rotation during the build** cannot get the table (the build holds its
+  lock), so each rotation cycle that runs meanwhile gives up after a few short
+  tries and logs that `binlog_events` was in use; the next cycle after the
+  build does the work. With the default three hourly partitions of headroom,
+  a build shorter than about three hours never lets rows reach `p_future`.
+- **A failed build never fails capture or `init`.** It is logged with its
+  cause and fix, and event-type filters keep working without the index.
 
 ### The MySQL port moved to the router
 

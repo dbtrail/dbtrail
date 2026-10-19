@@ -280,9 +280,10 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 		// is narrowed to the type, so no table listed means no row of the
 		// type in the window, an exact empty page, while the table itself
 		// may be large and the single statement would read every entry of
-		// the type to find nothing. (An index carrying idx_type_lookup was
-		// built by a daemon whose EnsureSchema added every column, so the
-		// 1054 refusal above cannot be what this skips.)
+		// the type to find nothing. (The cost: on a legacy index missing a
+		// column that got idx_type_lookup by hand, an empty typed page
+		// answers empty instead of the 1054 refusal; a page with rows still
+		// reports it.)
 		return nil, walkFallBack, nil
 	}
 	return out, walkDone, nil
@@ -395,20 +396,37 @@ func buildNewestBranches(opts Options, part string, tables []SchemaTable, where 
 		" ON be.event_id = k.event_id AND be.event_timestamp = k.event_timestamp", args
 }
 
-// typeIndexName is indexer.TypeIndexName (a test pins the two equal; query
-// does not import indexer for one constant).
+// typeIndexName and typeIndexKey are indexer.TypeIndexName and its key (a
+// test pins them equal; query does not import indexer for two constants).
 const typeIndexName = "idx_type_lookup"
 
-// hasTypeIndex reports whether binlog_events carries idx_type_lookup. An
-// index that has not got it yet (built in the background by the capture
-// daemon after an upgrade) keeps reading on idx_row_lookup, as before.
+var typeIndexKey = []string{"event_type", "schema_name", "table_name", "event_timestamp"}
+
+// hasTypeIndex reports whether binlog_events carries idx_type_lookup with its
+// key (an index of that name over another key, built by hand, is not
+// forced). An index that has not got it yet (built in the background by the
+// capture daemon after an upgrade) keeps reading on idx_row_lookup, as
+// before.
 func hasTypeIndex(ctx context.Context, db *sql.DB) (bool, error) {
-	var n int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events' AND INDEX_NAME = ?`, typeIndexName).Scan(&n); err != nil {
+	rows, err := db.QueryContext(ctx, `SELECT COLUMN_NAME FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events' AND INDEX_NAME = ?
+		ORDER BY SEQ_IN_INDEX`, typeIndexName)
+	if err != nil {
 		return false, fmt.Errorf("check binlog_events index %s: %w", typeIndexName, err)
 	}
-	return n > 0, nil
+	defer rows.Close()
+	var key []string
+	for rows.Next() {
+		var col sql.NullString // NULL for a functional key part
+		if err := rows.Scan(&col); err != nil {
+			return false, fmt.Errorf("check binlog_events index %s: %w", typeIndexName, err)
+		}
+		key = append(key, strings.ToLower(col.String))
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("check binlog_events index %s: %w", typeIndexName, err)
+	}
+	return len(key) >= len(typeIndexKey) && slices.Equal(key[:len(typeIndexKey)], typeIndexKey), nil
 }
 
 // isTableDefChangedErr reports MySQL's ER_TABLE_DEF_CHANGED (1412): the table

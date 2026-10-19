@@ -3,9 +3,11 @@ package indexer
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -113,6 +115,9 @@ func TypeIndexStatus(ctx context.Context, db *sql.DB) (TypeIndexState, string, e
 	return TypeIndexMissing, "", nil
 }
 
+// TypeIndexColumns is TypeIndexName's key, in order (a copy).
+func TypeIndexColumns() []string { return slices.Clone(typeIndexColumns) }
+
 // servesTypeFilter reports whether an index key starts with typeIndexColumns:
 // trailing columns do not change what the leading ones serve.
 func servesTypeFilter(key []string) bool {
@@ -130,7 +135,7 @@ var ErrTypeIndexBuildRunning = errors.New("the index build is already running on
 func typeIndexBuildRunning(ctx context.Context, db *sql.DB) (id int64, secs int64, found bool, err error) {
 	err = db.QueryRowContext(ctx, `SELECT ID, TIME FROM information_schema.PROCESSLIST
 		WHERE DB = DATABASE() AND COMMAND = 'Query' AND ID <> CONNECTION_ID()
-		  AND INFO LIKE ? LIMIT 1`, "%ADD INDEX "+TypeIndexName+"%").Scan(&id, &secs)
+		  AND INFO LIKE 'ALTER TABLE%' AND INFO LIKE ? LIMIT 1`, "%ADD INDEX "+TypeIndexName+"%").Scan(&id, &secs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, false, nil
 	}
@@ -145,9 +150,10 @@ func typeIndexBuildRunning(ctx context.Context, db *sql.DB) (id int64, secs int6
 type TypeIndexBuildError struct {
 	err error
 	// Retry is true for a lock-wait timeout (a long read held the table when
-	// the build needed its brief exclusive lock), false for anything trying
-	// again at the same load cannot fix (the online log or the temporary
-	// space ran out, the account lacks ALTER).
+	// the build needed its brief exclusive lock) and for a lost connection
+	// (the server keeps running the ALTER, which the next attempt finds),
+	// false for anything trying again at the same load cannot fix (the online
+	// log or the temporary space ran out, the account lacks the privilege).
 	Retry bool
 	hint  string
 }
@@ -165,12 +171,20 @@ func (e *TypeIndexBuildError) Unwrap() error { return e.err }
 // that names the fix.
 func classifyTypeIndexBuildErr(err error) error {
 	be := &TypeIndexBuildError{err: fmt.Errorf("build binlog_events index %s: %w", TypeIndexName, err)}
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) {
+		be.Retry = true
+		be.hint = "the connection to the index server was lost; the server may still be running the build"
+		return be
+	}
 	var me *mysql.MySQLError
 	if errors.As(err, &me) {
 		switch me.Number {
+		case 2013: // CR_SERVER_LOST
+			be.Retry = true
+			be.hint = "the connection to the index server was lost; the server may still be running the build"
 		case 1205: // ER_LOCK_WAIT_TIMEOUT
 			be.Retry = true
-			be.hint = "a long read held binlog_events when the build needed its brief exclusive lock; the capture daemon tries again later, and `bintrail init` against this index tries at once"
+			be.hint = "a long read held binlog_events when the build needed its brief exclusive lock"
 		case 1799: // ER_INNODB_ONLINE_LOG_TOO_BIG
 			be.hint = "more rows were written during the build than innodb_online_alter_log_max_size holds; " +
 				"raise that server variable, or run `bintrail init` against this index at a quieter hour"
@@ -178,7 +192,7 @@ func classifyTypeIndexBuildErr(err error) error {
 			be.hint = "the index server ran out of space for the build's temporary files; free space (or point innodb_tmpdir at a larger disk) " +
 				"and run `bintrail init` against this index"
 		case 1142, 1044: // no ALTER / INDEX privilege
-			be.hint = "the index account lacks the ALTER and INDEX privileges on binlog_events; event-type filters keep working, unindexed"
+			be.hint = "the index account lacks the ALTER, CREATE and INSERT privileges ALTER TABLE needs on binlog_events; event-type filters keep working, unindexed"
 		case 1845, 1846: // the server cannot build it online
 			be.hint = "this server cannot build the index online, so it is not built (a locking build would stop capture); " +
 				"build it in a maintenance window with `ALTER TABLE binlog_events ADD INDEX " + TypeIndexName +
@@ -212,7 +226,8 @@ func EnsureTypeIndex(ctx context.Context, db *sql.DB, logger *slog.Logger) error
 	case TypeIndexPresent, TypeIndexNoTable:
 		return nil
 	case TypeIndexOtherName:
-		logger.Info("binlog_events already has an index on (event_type, schema_name, table_name, event_timestamp) under another name; not building "+TypeIndexName,
+		logger.Info("binlog_events already has an index on (event_type, schema_name, table_name, event_timestamp) under another name, so "+TypeIndexName+
+			" is not built; the newest-first read looks for it by name, so rename it to have it used: ALTER TABLE binlog_events RENAME INDEX `"+name+"` TO "+TypeIndexName,
 			"index", name)
 		return nil
 	case TypeIndexWrongShape:
@@ -238,12 +253,19 @@ func EnsureTypeIndex(ctx context.Context, db *sql.DB, logger *slog.Logger) error
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", max(1, int(typeIndexLockWait.Seconds())))); err != nil {
 		return fmt.Errorf("build binlog_events index %s: %w", TypeIndexName, err)
 	}
+	// The connection goes back to db's pool, which may be the caller's (init):
+	// it must not keep the short bound for that caller's later statements.
+	defer conn.ExecContext(context.Background(), "SET SESSION lock_wait_timeout = DEFAULT") //nolint:errcheck // best effort; a dead connection is discarded anyway
 	var rowsEstimate sql.NullInt64
-	_ = conn.QueryRowContext(ctx, `SELECT TABLE_ROWS FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events'`).Scan(&rowsEstimate)
+	estimate := []any{}
+	if err := conn.QueryRowContext(ctx, `SELECT TABLE_ROWS FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events'`).Scan(&rowsEstimate); err != nil {
+		logger.Debug("cannot estimate the rows of binlog_events", "error", err)
+	} else if rowsEstimate.Valid {
+		estimate = []any{"rows_estimate", rowsEstimate.Int64}
+	}
 	logger.Info("building index "+TypeIndexName+" on binlog_events so event-type filters stop reading every row; "+
-		"the build is online (capture keeps writing) and takes minutes on a large index",
-		"rows_estimate", rowsEstimate.Int64)
+		"the build is online (capture keeps writing) and takes minutes on a large index", estimate...)
 	start := time.Now()
 	if _, err := conn.ExecContext(ctx, typeIndexDDL); err != nil {
 		var me *mysql.MySQLError
@@ -256,7 +278,7 @@ func EnsureTypeIndex(ctx context.Context, db *sql.DB, logger *slog.Logger) error
 		return be
 	}
 	logger.Info("built index "+TypeIndexName+" on binlog_events",
-		"took", time.Since(start).Round(time.Millisecond).String(), "rows_estimate", rowsEstimate.Int64)
+		append([]any{"took", time.Since(start).Round(time.Millisecond).String()}, estimate...)...)
 	return nil
 }
 
@@ -271,16 +293,26 @@ var (
 )
 
 // typeIndexRetryWaits is the wait before each further attempt after a
-// retriable failure; its length caps the attempts. A variable for tests.
-var typeIndexRetryWaits = []time.Duration{2 * time.Minute, 10 * time.Minute}
+// retriable failure; its length caps the attempts. typeIndexRunningPoll is
+// how often a build another thread is running is checked for its end.
+// Variables for tests.
+var (
+	typeIndexRetryWaits  = []time.Duration{2 * time.Minute, 10 * time.Minute}
+	typeIndexRunningPoll = time.Minute
+)
 
 // StartTypeIndexBuild runs EnsureTypeIndex in the background for the index
 // database key names (its DSN), once per process: capture starts at once and
 // keeps writing while the server builds. open returns a connection pool of
 // its own, closed when the build ends, so a stream restart closing its pool
 // never waits for the build (sql.DB.Close waits for running statements). A
-// lock-wait failure is tried again after typeIndexRetryWaits; any other
-// failure is logged with its fix and not retried by this process.
+// lock-wait failure or a lost connection is tried again after
+// typeIndexRetryWaits; a build already running on the server (a previous
+// run's) is waited for and the index checked again when it ends; any other
+// build failure is logged with its fix and not retried by this process, so a
+// stream that restarts never repeats a build that failed at its end. A failure
+// before the build (no connection, a panic) frees the key: the next stream
+// start tries again.
 //
 // done, if not nil, is called with the outcome when the goroutine ends.
 func StartTypeIndexBuild(key string, open func() (*sql.DB, error), logger *slog.Logger, done func(error)) {
@@ -292,6 +324,10 @@ func StartTypeIndexBuild(key string, open func() (*sql.DB, error), logger *slog.
 	}
 	go func() {
 		err := runTypeIndexBuild(context.Background(), open, logger)
+		var be *TypeIndexBuildError
+		if err != nil && !errors.As(err, &be) {
+			typeIndexBuilds.Delete(key)
+		}
 		if done != nil {
 			done(err)
 		}
@@ -301,25 +337,52 @@ func StartTypeIndexBuild(key string, open func() (*sql.DB, error), logger *slog.
 func runTypeIndexBuild(ctx context.Context, open func() (*sql.DB, error), logger *slog.Logger) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error("building index "+TypeIndexName+" panicked; capture is unaffected", "panic", r)
+			logger.Error("building index "+TypeIndexName+" panicked; capture is unaffected", "panic", r, "stack", string(debug.Stack()))
 			err = fmt.Errorf("build binlog_events index %s: panic: %v", TypeIndexName, r)
 		}
 	}()
-	buildMu.Lock()
-	defer buildMu.Unlock()
 	db, err := open()
 	if err != nil {
 		logger.Warn("cannot open a connection to build index "+TypeIndexName, "error", err)
 		return err
 	}
 	defer db.Close()
-	for attempt := 0; ; attempt++ {
-		err = EnsureTypeIndex(ctx, db, logger)
+	for attempt := 0; ; {
+		// Held per attempt, not across the waits between them, so one
+		// index's retries never hold up another's build.
+		err = func() error {
+			buildMu.Lock()
+			defer buildMu.Unlock() // a panic below must not leave it held
+			return EnsureTypeIndex(ctx, db, logger)
+		}()
+		if errors.Is(err, ErrTypeIndexBuildRunning) {
+			// Wait for the other build to end, then look again: it may have
+			// failed, with nobody left to say so.
+			for {
+				time.Sleep(typeIndexRunningPoll)
+				_, _, found, perr := typeIndexBuildRunning(ctx, db)
+				if perr != nil {
+					logger.Warn("cannot tell whether the running "+TypeIndexName+" build ended; not trying again", "error", perr)
+					return perr
+				}
+				if !found {
+					break
+				}
+			}
+			continue
+		}
 		var be *TypeIndexBuildError
-		if !errors.As(err, &be) || !be.Retry || attempt >= len(typeIndexRetryWaits) {
+		if !errors.As(err, &be) || !be.Retry {
+			return err
+		}
+		if attempt >= len(typeIndexRetryWaits) {
+			logger.Error("gave up building index "+TypeIndexName+" on binlog_events after "+fmt.Sprint(attempt+1)+
+				" attempts; event-type filters keep working, unindexed. Run `bintrail init --index-dsn <this index>` at a quieter hour to build it",
+				"error", err)
 			return err
 		}
 		logger.Info("trying the "+TypeIndexName+" build again later", "in", typeIndexRetryWaits[attempt].String())
 		time.Sleep(typeIndexRetryWaits[attempt])
+		attempt++
 	}
 }

@@ -116,9 +116,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// An index created before idx_type_lookup existed gets it here, at once
 	// (CREATE TABLE IF NOT EXISTS above leaves an existing binlog_events as
 	// it is). Online: a capture daemon writing to this index keeps writing.
-	// A fresh index already has it, and this returns without building.
+	// A fresh index already has it, and this returns without building. A
+	// build that failed (logged with its fix) does not fail init: the index
+	// only speeds event-type filters up, which keep working without it.
+	var buildErr *indexer.TypeIndexBuildError
 	if err := indexer.EnsureTypeIndex(cmd.Context(), db, slog.Default()); err != nil &&
-		!errors.Is(err, indexer.ErrTypeIndexBuildRunning) {
+		!errors.Is(err, indexer.ErrTypeIndexBuildRunning) && !errors.As(err, &buildErr) {
 		return err
 	}
 

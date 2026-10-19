@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"io"
 	"log/slog"
@@ -121,7 +122,10 @@ func expectBuild(mock sqlmock.Sqlmock) *sqlmock.ExpectedExec {
 	mock.ExpectQuery("information_schema.PROCESSLIST").WillReturnRows(sqlmock.NewRows([]string{"ID", "TIME"}))
 	mock.ExpectExec("SET SESSION lock_wait_timeout = 5").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("TABLE_ROWS").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1000))
-	return mock.ExpectExec(strings.ReplaceAll(strings.ReplaceAll(typeIndexDDL, "(", `\(`), ")", `\)`))
+	alter := mock.ExpectExec(strings.ReplaceAll(strings.ReplaceAll(typeIndexDDL, "(", `\(`), ")", `\)`))
+	// The connection goes back to the caller's pool without the short bound.
+	mock.ExpectExec("SET SESSION lock_wait_timeout = DEFAULT").WillReturnResult(sqlmock.NewResult(0, 0))
+	return alter
 }
 
 func TestEnsureTypeIndexRunsTheOnlineBuild(t *testing.T) {
@@ -153,12 +157,13 @@ func TestClassifyTypeIndexBuildErr(t *testing.T) {
 		retry bool
 		hint  string
 	}{
-		1205: {true, "tries again later"},
+		1205: {true, "a long read held binlog_events"},
+		2013: {true, "connection to the index server was lost"},
 		1799: {false, "innodb_online_alter_log_max_size"},
 		1114: {false, "ran out of space"},
 		1142: {false, "privileges"},
 		1846: {false, "cannot build the index online"},
-		2013: {false, ""},
+		1317: {false, ""},
 	} {
 		err := classifyTypeIndexBuildErr(&mysql.MySQLError{Number: num, Message: "x"})
 		var be *TypeIndexBuildError
@@ -173,6 +178,34 @@ func TestClassifyTypeIndexBuildErr(t *testing.T) {
 			t.Errorf("%d: the server error must stay reachable: %v", num, err)
 		}
 	}
+	for _, lost := range []error{mysql.ErrInvalidConn, driver.ErrBadConn} {
+		var be *TypeIndexBuildError
+		if err := classifyTypeIndexBuildErr(lost); !errors.As(err, &be) || !be.Retry || !errors.Is(err, lost) {
+			t.Errorf("%v: %v, want a retriable error wrapping it", lost, err)
+		}
+	}
+}
+
+// A build another thread runs (a previous daemon's, left running on the
+// server) is waited for, and the index is checked again when it ends: if that
+// build failed, nobody else is left to say so or to build it.
+func TestRunTypeIndexBuildWaitsForARunningBuildThenLooksAgain(t *testing.T) {
+	saved := typeIndexRunningPoll
+	typeIndexRunningPoll = 0
+	t.Cleanup(func() { typeIndexRunningPoll = saved })
+	db, mock, _ := sqlmock.New()
+	mock.ExpectQuery("information_schema.STATISTICS").WillReturnRows(statsRows(keyRows("PRIMARY", "event_id")...))
+	mock.ExpectQuery("information_schema.PROCESSLIST").WillReturnRows(sqlmock.NewRows([]string{"ID", "TIME"}).AddRow(7, 30))
+	mock.ExpectQuery("information_schema.PROCESSLIST").WillReturnRows(sqlmock.NewRows([]string{"ID", "TIME"}).AddRow(7, 90))
+	mock.ExpectQuery("information_schema.PROCESSLIST").WillReturnRows(sqlmock.NewRows([]string{"ID", "TIME"}))
+	expectBuild(mock).WillReturnResult(sqlmock.NewResult(0, 0)) // the other build failed: this one builds
+	mock.ExpectClose()
+	if err := runTypeIndexBuild(context.Background(), func() (*sql.DB, error) { return db, nil }, discardLogger()); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // A lock-wait failure is tried again, up to the cap; anything else is not.
@@ -184,10 +217,11 @@ func TestRunTypeIndexBuildRetriesOnlyLockWaits(t *testing.T) {
 		errs     []uint16 // one ALTER answer per attempt
 		attempts int
 	}{
-		"lock wait, then built": {[]uint16{1205, 0}, 2},
-		"lock wait every time":  {[]uint16{1205, 1205, 1205}, 3},
-		"online log full, once": {[]uint16{1799}, 1},
-		"out of space, once":    {[]uint16{1114}, 1},
+		"lock wait, then built":       {[]uint16{1205, 0}, 2},
+		"lock wait every time":        {[]uint16{1205, 1205, 1205}, 3},
+		"connection lost, then built": {[]uint16{2013, 0}, 2},
+		"online log full, once":       {[]uint16{1799}, 1},
+		"out of space, once":          {[]uint16{1114}, 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			db, mock, _ := sqlmock.New()
@@ -228,12 +262,16 @@ func TestRunTypeIndexBuildRetriesOnlyLockWaits(t *testing.T) {
 func TestStartTypeIndexBuildOncePerIndex(t *testing.T) {
 	var opens atomic.Int32
 	done := make(chan error, 4)
-	open := func() (*sql.DB, error) { opens.Add(1); return nil, errors.New("no server here") }
+	release := make(chan struct{})
+	// Held open until every call is made: the key is what refuses the
+	// repeats, not a build that already ended.
+	open := func() (*sql.DB, error) { opens.Add(1); <-release; return nil, errors.New("no server here") }
 	key := "user@tcp(h:3306)/once_" + t.Name()
 	for range 3 {
 		StartTypeIndexBuild(key, open, discardLogger(), func(err error) { done <- err })
 	}
 	StartTypeIndexBuild(key+"_other", open, discardLogger(), func(err error) { done <- err })
+	close(release)
 	for range 2 {
 		select {
 		case <-done:
@@ -252,3 +290,26 @@ func TestStartTypeIndexBuildOncePerIndex(t *testing.T) {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// A failure before any build (no connection) frees the key, so the stream's
+// next start tries again; a build that failed keeps it, so a restarting
+// stream never repeats a build that fails at its end.
+func TestStartTypeIndexBuildFreesTheKeyOnlyWhenNothingWasBuilt(t *testing.T) {
+	key := "user@tcp(h:3306)/free_" + t.Name()
+	done := make(chan error, 1)
+	StartTypeIndexBuild(key, func() (*sql.DB, error) { return nil, errors.New("no server here") }, discardLogger(), func(err error) { done <- err })
+	<-done
+	if _, held := typeIndexBuilds.Load(key); held {
+		t.Fatal("a failed connection kept the key: the next stream start would never try")
+	}
+
+	db, mock, _ := sqlmock.New()
+	expectBuild(mock).WillReturnError(&mysql.MySQLError{Number: 1799})
+	mock.ExpectClose()
+	key2 := key + "_built"
+	StartTypeIndexBuild(key2, func() (*sql.DB, error) { return db, nil }, discardLogger(), func(err error) { done <- err })
+	<-done
+	if _, held := typeIndexBuilds.Load(key2); !held {
+		t.Fatal("a build that failed freed the key: a restarting stream would build again")
+	}
+}
