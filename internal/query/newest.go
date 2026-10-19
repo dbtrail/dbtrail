@@ -122,6 +122,9 @@ func fetchNewestByPartition(ctx context.Context, db *sql.DB, opts Options) (rows
 		switch outcome {
 		case walkRelist:
 			continue
+		case walkWithoutTypeIndex:
+			typeIdx = false
+			continue
 		case walkFallBack:
 			slog.Debug("newest-first fetch: the partition walk cannot answer, running the single statement")
 			return nil, false, nil
@@ -170,9 +173,10 @@ type querier interface {
 type walkOutcome int
 
 const (
-	walkDone     walkOutcome = iota // the page is exact for that list
-	walkRelist                      // a listed partition is gone: list again
-	walkFallBack                    // the walk cannot answer: run the single statement
+	walkDone             walkOutcome = iota // the page is exact for that list
+	walkRelist                              // a listed partition is gone: list again
+	walkFallBack                            // the walk cannot answer: run the single statement
+	walkWithoutTypeIndex                    // idx_type_lookup is gone: walk again on idx_row_lookup
 )
 
 // newestBranchTables caps the tables one partition's step reads as separate
@@ -254,6 +258,11 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 		switch {
 		case isUnknownPartitionErr(err) || isTableDefChangedErr(err):
 			return nil, walkRelist, nil
+		case isMissingIndexErr(err) && typeIdx && opts.EventType != nil:
+			// idx_type_lookup dropped or made invisible since the check: the
+			// path without it still walks, where the single statement would
+			// read the whole table.
+			return nil, walkWithoutTypeIndex, nil
 		case isMissingIndexErr(err):
 			// An index created without idx_row_lookup (every `bintrail
 			// init` creates it): the single statement still answers.
@@ -403,13 +412,14 @@ const typeIndexName = "idx_type_lookup"
 var typeIndexKey = []string{"event_type", "schema_name", "table_name", "event_timestamp"}
 
 // hasTypeIndex reports whether binlog_events carries idx_type_lookup with its
-// key (an index of that name over another key, built by hand, is not
-// forced). An index that has not got it yet (built in the background by the
+// key and visible (an index of that name over another key, built by hand,
+// is not forced, and FORCE INDEX cannot name an invisible one). An index that has not got it yet (built in the background by the
 // capture daemon after an upgrade) keeps reading on idx_row_lookup, as
 // before.
 func hasTypeIndex(ctx context.Context, db *sql.DB) (bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT COLUMN_NAME FROM information_schema.STATISTICS
 		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events' AND INDEX_NAME = ?
+		  AND IS_VISIBLE = 'YES'
 		ORDER BY SEQ_IN_INDEX`, typeIndexName)
 	if err != nil {
 		return false, fmt.Errorf("check binlog_events index %s: %w", typeIndexName, err)

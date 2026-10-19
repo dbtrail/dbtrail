@@ -313,3 +313,19 @@ func TestStartTypeIndexBuildFreesTheKeyOnlyWhenNothingWasBuilt(t *testing.T) {
 		t.Fatal("a build that failed freed the key: a restarting stream would build again")
 	}
 }
+
+// A failure before the ALTER (here the index check) is logged with what to
+// run, not only returned: in the background nobody reads the return value.
+func TestRunTypeIndexBuildLogsAFailureBeforeTheBuild(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	mock.ExpectQuery("information_schema.STATISTICS").WillReturnError(errors.New("connection reset"))
+	mock.ExpectClose()
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	if err := runTypeIndexBuild(context.Background(), func() (*sql.DB, error) { return db, nil }, logger); err == nil {
+		t.Fatal("want the check's error")
+	}
+	if out := buf.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "connection reset") || !strings.Contains(out, "bintrail init") {
+		t.Fatalf("want a WARN with the error and `bintrail init`, got: %s", out)
+	}
+}

@@ -87,3 +87,26 @@ func equalIDs(a, b []uint64) bool {
 	}
 	return true
 }
+
+// An invisible idx_type_lookup is not forced (FORCE INDEX would answer 1176
+// on every typed page): the walk runs on idx_row_lookup.
+func TestNewestWalkIntegration_invisibleTypeIndexWalksWithoutIt(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Hour)
+	db, e := walkFixture(t, hoursFrom(now.Add(-2*time.Hour), 3))
+	for h := -2; h <= 0; h++ {
+		putEvent(t, db, now.Add(time.Duration(h)*time.Hour), "items", event.EventDelete)
+		putEvent(t, db, now.Add(time.Duration(h)*time.Hour+time.Minute), "users", event.EventUpdate)
+	}
+	testutil.MustExec(t, db, "ALTER TABLE binlog_events ALTER INDEX idx_type_lookup INVISIBLE")
+	if has, err := hasTypeIndex(context.Background(), db); err != nil || has {
+		t.Fatalf("hasTypeIndex on an invisible index = %v (%v), want false", has, err)
+	}
+	del := event.EventDelete
+	o := Options{Limit: 2, Order: "DESC", EventType: &del}
+	if got := sameAsSingleStatement(t, e, o); len(got) != 2 {
+		t.Fatalf("got %d rows, want 2", len(got))
+	}
+	if _, walked, err := fetchNewestByPartition(context.Background(), db, o); err != nil || !walked {
+		t.Fatalf("walked %v (%v)", walked, err)
+	}
+}

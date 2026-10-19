@@ -175,7 +175,7 @@ func TestTypeIndex_runningBuildIsNotRepeated(t *testing.T) {
 	go func() { first <- EnsureTypeIndex(ctx, db, discardLogger()) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, _, found, err := typeIndexBuildRunning(ctx, db); err != nil {
+		if _, _, found, err := TypeIndexBuildRunning(ctx, db); err != nil {
 			t.Fatal(err)
 		} else if found {
 			break

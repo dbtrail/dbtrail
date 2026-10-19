@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/indexer"
 )
 
 // How long one ALTER of binlog_events may wait for the table, and how often
@@ -60,7 +62,7 @@ func alterBinlogEvents(ctx context.Context, db *sql.DB, q string, stillSafe func
 			return err
 		}
 		if attempt >= ddlLockAttempts {
-			return fmt.Errorf("%w (%d attempts, %s each): %v", errTableBusy, ddlLockAttempts, ddlLockWait, err)
+			return fmt.Errorf("%w (%d attempts, %s each): %v%s", errTableBusy, ddlLockAttempts, ddlLockWait, err, typeIndexBuildNote(ctx, db))
 		}
 		select {
 		case <-ctx.Done():
@@ -96,4 +98,25 @@ func alterOnce(ctx context.Context, db *sql.DB, q string) error {
 func isLockWaitTimeout(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me) && me.Number == 1205
+}
+
+// typeIndexBuildNote names an idx_type_lookup build the server is running on
+// this index, the one cause of a busy table that lasts for minutes on
+// purpose: the online build holds binlog_events for its whole run, so every
+// rotation statement meanwhile gives up. "" when there is none, or when it
+// cannot tell (the busy error stands on its own).
+func typeIndexBuildNote(ctx context.Context, db *sql.DB) string {
+	id, secs, found, err := indexer.TypeIndexBuildRunning(ctx, db)
+	if err != nil || !found {
+		return ""
+	}
+	note := fmt.Sprintf("; the online build of index %s (thread %d, running for %s) holds the table, and rotation resumes after it",
+		indexer.TypeIndexName, id, time.Duration(secs)*time.Second)
+	var hours sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT FLOOR((MAX(CAST(PARTITION_DESCRIPTION AS SIGNED)) - TO_SECONDS(UTC_TIMESTAMP())) / 3600)
+		FROM information_schema.PARTITIONS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events' AND PARTITION_DESCRIPTION <> 'MAXVALUE'`).Scan(&hours); err == nil && hours.Valid {
+		note += fmt.Sprintf("; the partitions ahead cover about %d more hour(s) before rows land in p_future", max(hours.Int64, 0))
+	}
+	return note
 }

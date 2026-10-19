@@ -132,7 +132,7 @@ var ErrTypeIndexBuildRunning = errors.New("the index build is already running on
 // typeIndexBuildRunning reports a statement adding TypeIndexName to this
 // database's binlog_events that the server is executing now: its thread id
 // and for how long it has been running.
-func typeIndexBuildRunning(ctx context.Context, db *sql.DB) (id int64, secs int64, found bool, err error) {
+func TypeIndexBuildRunning(ctx context.Context, db *sql.DB) (id int64, secs int64, found bool, err error) {
 	err = db.QueryRowContext(ctx, `SELECT ID, TIME FROM information_schema.PROCESSLIST
 		WHERE DB = DATABASE() AND COMMAND = 'Query' AND ID <> CONNECTION_ID()
 		  AND INFO LIKE 'ALTER TABLE%' AND INFO LIKE ? LIMIT 1`, "%ADD INDEX "+TypeIndexName+"%").Scan(&id, &secs)
@@ -235,7 +235,7 @@ func EnsureTypeIndex(ctx context.Context, db *sql.DB, logger *slog.Logger) error
 			"key", name, "expected", strings.Join(typeIndexColumns, ", "))
 		return nil
 	}
-	if id, secs, found, err := typeIndexBuildRunning(ctx, db); err != nil {
+	if id, secs, found, err := TypeIndexBuildRunning(ctx, db); err != nil {
 		return err
 	} else if found {
 		logger.Info("the index server is already building "+TypeIndexName+" on binlog_events; not starting another",
@@ -360,7 +360,7 @@ func runTypeIndexBuild(ctx context.Context, open func() (*sql.DB, error), logger
 			// failed, with nobody left to say so.
 			for {
 				time.Sleep(typeIndexRunningPoll)
-				_, _, found, perr := typeIndexBuildRunning(ctx, db)
+				_, _, found, perr := TypeIndexBuildRunning(ctx, db)
 				if perr != nil {
 					logger.Warn("cannot tell whether the running "+TypeIndexName+" build ended; not trying again", "error", perr)
 					return perr
@@ -372,7 +372,15 @@ func runTypeIndexBuild(ctx context.Context, open func() (*sql.DB, error), logger
 			continue
 		}
 		var be *TypeIndexBuildError
-		if !errors.As(err, &be) || !be.Retry {
+		if err != nil && !errors.As(err, &be) {
+			// Failed before any ALTER ran (the index check, the process
+			// list, the connection): EnsureTypeIndex returns these unlogged,
+			// and in the background nobody reads the return value.
+			logger.Warn("could not start building index "+TypeIndexName+" on binlog_events; event-type filters keep working, unindexed. "+
+				"The next capture start tries again, or run `bintrail init --index-dsn <this index>` to build it now", "error", err)
+			return err
+		}
+		if be == nil || !be.Retry {
 			return err
 		}
 		if attempt >= len(typeIndexRetryWaits) {

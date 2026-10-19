@@ -202,10 +202,13 @@ What to expect:
   (stopping the client does not stop the statement), and a daemon started in
   the meantime sees it running and does not start a second one. To stop it,
   `KILL` the thread id the log names.
-- **Rotation during the build** cannot get the table (the build holds its
-  lock), so each rotation cycle that runs meanwhile gives up after a few short
-  tries and logs that `binlog_events` was in use; the next cycle after the
-  build does the work. With the default three hourly partitions of headroom,
+- **Rotation during the build** cannot get the table: the online build holds
+  a lock on `binlog_events` for its whole run (measured: adding and dropping
+  partitions both failed every attempt while a build ran). Each rotation cycle
+  meanwhile gives up after a few short tries and logs that `binlog_events` was
+  in use, naming the `idx_type_lookup` build, its thread id, and how many hours
+  the partitions ahead still cover; the next cycle after the build does the
+  work. With the default three hourly partitions of headroom,
   a build shorter than about three hours never lets rows reach `p_future`.
 - **A failed build never fails capture or `init`.** It is logged with its
   cause and fix, and event-type filters keep working without the index.

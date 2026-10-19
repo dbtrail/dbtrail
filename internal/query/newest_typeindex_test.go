@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	drivermysql "github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
@@ -132,6 +133,56 @@ func TestNewestWalk_typeIndexWithAnotherKeyIsNotUsed(t *testing.T) {
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
 	if _, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC", EventType: &del}); err != nil {
 		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// idx_type_lookup dropped (or made invisible) between the check and the
+// read: the branch's FORCE INDEX answers 1176, and the walk runs again on
+// idx_row_lookup, the path without the index, instead of the single
+// statement over the whole table.
+func TestNewestWalk_typeIndexGoneMidWalkWalksWithoutIt(t *testing.T) {
+	e, mock := newWalkMock(t)
+	del := event.EventType(3)
+	mock.ExpectQuery(statsSQL).WillReturnRows(typeKeyRows(typeIndexKey...))
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT event_type, schema_name, table_name FROM binlog_events PARTITION (`p_future`) WHERE event_type = ?")).
+		WillReturnRows(sqlmock.NewRows([]string{"e", "s", "t"}).AddRow(3, "app", "t"))
+	mock.ExpectQuery(regexp.QuoteMeta("FORCE INDEX (idx_type_lookup)")).
+		WillReturnError(&drivermysql.MySQLError{Number: 1176, Message: "Key 'idx_type_lookup' doesn't exist"})
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
+	mock.ExpectQuery(tablesSQL("p_future") + "$").WillReturnRows(sqlmock.NewRows([]string{"s", "t"}).AddRow("app", "t"))
+	mock.ExpectQuery(branchSQL("p_future")).WillReturnRows(walkRows(7))
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	got, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC", EventType: &del})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d rows", len(got))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The check reads only a visible index: FORCE INDEX cannot name an
+// invisible one.
+func TestHasTypeIndexReadsOnlyAVisibleIndex(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(regexp.QuoteMeta("IS_VISIBLE = 'YES'")).WillReturnRows(typeKeyRows())
+	if has, err := hasTypeIndex(context.Background(), db); err != nil || has {
+		t.Fatalf("hasTypeIndex = %v, %v", has, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
