@@ -151,6 +151,7 @@ func TestFetchPageSkipsArchivesOnFilledTopN(t *testing.T) {
 			nil, nil, nil, 1, nil, nil,
 			nil)
 	}
+	expectNoEventPartitions(mock)
 	mock.ExpectQuery("SELECT").WillReturnRows(live)
 
 	var archiveCalls int
@@ -230,6 +231,7 @@ func TestFetchPageReadsArchivesOnFilledTopNWhenAnArchivedHourSitsAboveLive(t *te
 		nil, nil, "shop", "orders", 3, "A", nil, nil, nil, 1, nil, nil, nil)
 	live.AddRow(uint64(1), "mysql-bin.000001", 100, 200, hr(15),
 		nil, nil, "shop", "orders", 3, "B", nil, nil, nil, 1, nil, nil, nil)
+	expectNoEventPartitions(mock)
 	mock.ExpectQuery("SELECT").WillReturnRows(live)
 
 	var archiveCalls int

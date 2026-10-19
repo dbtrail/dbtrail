@@ -622,15 +622,14 @@ func (e *Engine) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
 	if _, _, err := settleSince(ctx, e.db, &opts, heads); err != nil {
 		return nil, err
 	}
-	q, args := buildQuery(opts)
-	rows, err := e.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", annotateMissingLookupIndex(err, opts))
-	}
-	defer rows.Close()
-	results, err := scanRows(rows)
+	results, walked, err := fetchNewestByPartition(ctx, e.db, opts)
 	if err != nil {
 		return nil, err
+	}
+	if !walked {
+		if results, err = e.fetchOnce(ctx, opts); err != nil {
+			return nil, err
+		}
 	}
 	// The JOIN form deliberately omits the outer ORDER BY (see buildQuery for
 	// why), so it may hand rows back in any order. Re-establish the total
@@ -648,6 +647,17 @@ func (e *Engine) Fetch(ctx context.Context, opts Options) ([]ResultRow, error) {
 		applyRedaction(results, opts.RedactColumns, opts.AllowColumns)
 	}
 	return results, nil
+}
+
+// fetchOnce runs the fetch as one statement over the whole table.
+func (e *Engine) fetchOnce(ctx context.Context, opts Options) ([]ResultRow, error) {
+	q, args := buildQuery(opts)
+	rows, err := e.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query failed: %w", annotateMissingLookupIndex(err, opts))
+	}
+	defer rows.Close()
+	return scanRows(rows)
 }
 
 // RedactionActive reports whether an RBAC policy is in force for these options.
@@ -847,6 +857,22 @@ const resultColumns = `be.event_id, be.binlog_file, be.start_pos, be.end_pos, be
 	         be.commit_ts_us`
 
 func buildQuery(opts Options) (string, []any) {
+	return buildQueryIn(opts, nil)
+}
+
+// buildQueryIn is buildQuery with the key search restricted to the named
+// partitions of binlog_events (nil: all of them). Only the narrow key query
+// takes the PARTITION clause; the join back to the wide columns is a primary
+// key lookup that prunes on its own. Used by the newest-first partition walk
+// (newest.go), which never sends a per-key cap or the stream shape here.
+func buildQueryIn(opts Options, partitions []string) (string, []any) {
+	where, args := buildWhere(opts)
+	return assembleQuery(opts, partitions, where, args)
+}
+
+// buildWhere is every row filter of opts as WHERE conjuncts and their args,
+// shared by buildQueryIn and the newest-first walk's per-table branches.
+func buildWhere(opts Options) ([]string, []any) {
 	var where []string
 	var args []any
 
@@ -1187,6 +1213,12 @@ func buildQuery(opts Options) (string, []any) {
 		where = append(where, "NOT (schema_name = ? AND table_name = ?)")
 		args = append(args, dt.Schema, dt.Table)
 	}
+	return where, args
+}
+
+// assembleQuery is the statement buildQueryIn returns, over the conjuncts
+// buildWhere made.
+func assembleQuery(opts Options, partitions []string, where []string, args []any) (string, []any) {
 
 	// Late materialization. A naive `SELECT <wide cols> ... ORDER BY
 	// event_timestamp ... LIMIT N` makes MySQL carry the wide JSON columns
@@ -1264,7 +1296,7 @@ func buildQuery(opts Options) (string, []any) {
 			" ORDER BY event_timestamp DESC, event_id DESC) AS bt_rn" + rank + " FROM binlog_events" + whereSQL
 		keys = "SELECT event_id, event_timestamp" + span + " FROM (" + window + ") AS w WHERE " + filter
 	} else {
-		keys = "SELECT event_id, event_timestamp FROM binlog_events" + whereSQL
+		keys = "SELECT event_id, event_timestamp FROM binlog_events" + partitionClause(partitions) + whereSQL
 	}
 	// The narrow ORDER BY + LIMIT only matters when paging: it decides WHICH N
 	// rows survive. With no LIMIT the selection is the whole filtered set, so

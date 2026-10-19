@@ -61,6 +61,7 @@ func TestFetchMergedFull_defaultBrowse(t *testing.T) {
 		}
 		defer db.Close()
 		armPrologue(mock)
+		expectNoEventPartitions(mock)
 		mock.ExpectQuery("FROM binlog_events").WillReturnRows(liveRows(limit))
 
 		var archiveCalls int
@@ -100,6 +101,7 @@ func TestFetchMergedFull_defaultBrowse(t *testing.T) {
 		}
 		defer db.Close()
 		armPrologue(mock)
+		expectNoEventPartitions(mock)
 		mock.ExpectQuery("FROM binlog_events").WillReturnRows(liveRows(limit - 1))
 
 		var archiveCalls int
@@ -139,6 +141,7 @@ func TestFetchMergedFull_defaultBrowse(t *testing.T) {
 		// no discovery, no browse plan, one live fetch — and the fetch must
 		// not report "skipped because they could not matter" when the truth is
 		// "excluded by policy" (#1311's distinction).
+		expectNoEventPartitions(mock)
 		mock.ExpectQuery("FROM binlog_events").WillReturnRows(liveRows(limit))
 		_, _, _, _, elided, err := FetchMergedFull(context.Background(), db, New(db), FetchMergedOptions{
 			Opts:      Options{Limit: limit, Order: "DESC"},

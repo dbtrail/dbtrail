@@ -140,6 +140,7 @@ func TestFetchPageSkipsArchivesOnLiveCoveredWindow(t *testing.T) {
 			nil, nil, nil, 1, nil, nil,
 			nil)
 	}
+	expectNoEventPartitions(mock)
 	mock.ExpectQuery("SELECT").WillReturnRows(live)
 
 	since := now.Add(-12 * time.Hour)

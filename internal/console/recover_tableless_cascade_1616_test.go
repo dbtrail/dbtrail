@@ -61,6 +61,7 @@ func TestRecover_tablelessUndoNamesCascadeChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	expectNoEventPartitions(mock)
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(tablelessRecoverRows(int64(parser.EventDelete)))
 	mock.ExpectQuery("information_schema.TABLES").WillReturnRows(sqlmock.NewRows([]string{"e"}).AddRow(true))
 	mock.ExpectQuery("FROM fk_constraints").WillReturnRows(sqlmock.NewRows(
@@ -86,6 +87,7 @@ func TestRecover_tablelessInsertUndoCarriesNoCascadeWarning(t *testing.T) {
 	defer db.Close()
 	// No FK probe is expected: an INSERT-only window never cascaded, and an
 	// unexpected query would surface as a "Could not check" warning.
+	expectNoEventPartitions(mock)
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(tablelessRecoverRows(int64(parser.EventInsert)))
 
 	resp := postTablelessRecover(t, newBootServer(db))
@@ -106,6 +108,7 @@ func TestRecover_tablelessProbeFailureIsSaid(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	expectNoEventPartitions(mock)
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(tablelessRecoverRows(int64(parser.EventDelete)))
 	mock.ExpectQuery("information_schema.TABLES").WillReturnError(errors.New("index: access denied"))
 
@@ -128,4 +131,13 @@ func TestRowsContainCascadeTriggerOn_caseInsensitive(t *testing.T) {
 	if rowsContainCascadeTriggerOn(rows, "Orders", false, true) {
 		t.Error("a DELETE matched the ON UPDATE rule")
 	}
+}
+
+// expectNoEventPartitions answers the partition listing a newest-first fetch
+// asks first (query.fetchNewestByPartition) with no partitions, so the fetch
+// runs as the one statement this mock describes. The walk itself is covered
+// in internal/query/newest_test.go.
+func expectNoEventPartitions(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
+		sqlmock.NewRows([]string{"name", "method", "expr", "sub"}))
 }

@@ -189,6 +189,7 @@ func TestRecoverTool_tablelessWarningNamesTheWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	expectUnpartitionedIndex(mock) // no table named: the newest-first fetch lists partitions first
 	mock.ExpectQuery("FROM binlog_events").WillReturnRows(cascadeAdvisoryRows(int64(parser.EventDelete), "orders"))
 	expectCascadeParent(mock)
 
@@ -218,4 +219,13 @@ func TestRecoverTool_insertOnlyWindowSkipsTheProbe(t *testing.T) {
 	if res.IsError || strings.Contains(resultText(res), "could not check") {
 		t.Errorf("an INSERT-only window reached the FK probe:\n%s", resultText(res))
 	}
+}
+
+// expectUnpartitionedIndex answers the partition listing a newest-first fetch
+// without a table asks first (query.fetchNewestByPartition) with no
+// partitions, so the fetch runs as the one statement the mock describes. The
+// walk itself is covered in internal/query.
+func expectUnpartitionedIndex(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
+		sqlmock.NewRows([]string{"name", "method", "expr", "sub"}))
 }
