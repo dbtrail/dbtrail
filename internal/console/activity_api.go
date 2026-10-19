@@ -181,6 +181,11 @@ type activityResponse struct {
 	Notes    []string `json:"notes,omitempty"`
 	// Truncated reports that activityMaxGroups tripped: the counts are a floor.
 	Truncated bool `json:"truncated,omitempty"`
+
+	// steadyCost, when set, is what the next refresh is expected to cost
+	// (activityAgg.steady); the cache takes the TTL from it instead of from
+	// this count's own duration. Not on the wire.
+	steadyCost time.Duration
 }
 
 func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
@@ -223,8 +228,11 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 			if !unavail.running {
 				retry = max(time.Until(unavail.retryAt), time.Second)
 			}
-			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second)/time.Second)))
-			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
+			secs := int(retry.Round(time.Second) / time.Second)
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			// retry_after repeats the header in the body, where the page's
+			// fetch helper (which keeps the parsed body on the error) reads it.
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error(), "retry_after": secs})
 			return
 		}
 		writeFetchError(w, err)
@@ -237,7 +245,7 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 // given deny/allow scope, as activityCache.get describes.
 func (b *bundle) activityFor(ctx context.Context, deny, allow []query.SchemaTable) (activityResponse, error) {
 	key := activityScopeKey(deny, allow)
-	sc := activityScan{dbName: b.dbName, deny: deny, allow: allow, storeBudget: -1}
+	sc := activityScan{dbName: b.dbName, deny: deny, allow: allow, storeBudget: -1, lockWait: activityLockWait}
 	if b.activity == nil {
 		// Test-constructed bundles only: every production bundle gets its cache
 		// in newBundleDerived (pinned by TestBundleAlwaysCarriesActivityCache).
@@ -521,6 +529,9 @@ func (c *activityCache) run(key string, f *activityFlight, compute func(context.
 	start := time.Now()
 	resp, err := safeActivityCompute(ctx, compute)
 	cost := time.Since(start)
+	if resp.steadyCost > 0 && resp.steadyCost < cost {
+		cost = resp.steadyCost
+	}
 	c.mu.Lock()
 	if err == nil {
 		c.entries[key] = resp
@@ -602,6 +613,9 @@ type activityAgg struct {
 	total, inserts, updates, deletes, other int64
 	byTable                                 map[string]*activityTable
 	truncated                               bool
+	// steady is what a refresh costs when nothing but the open hour changed
+	// (set by the partitioned count; zero otherwise).
+	steady time.Duration
 }
 
 func newActivityAgg() *activityAgg {

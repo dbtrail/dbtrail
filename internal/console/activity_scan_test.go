@@ -401,7 +401,7 @@ func TestActivityStoreBudgetIsRespected(t *testing.T) {
 func TestActivityLockHeldElsewhereIsBusy(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
-	mock.ExpectQuery(`SELECT GET_LOCK\(\?, 0\)`).WithArgs(activityLockName("idx")).
+	mock.ExpectQuery(`SELECT GET_LOCK\(\?, \?\)`).WithArgs(activityLockName("idx"), 0).
 		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(0))
 	_, err := computeActivity(context.Background(), db, scanAt(nil, scanNow))
 	if !errors.Is(err, errActivityBusy) {
@@ -618,7 +618,7 @@ func TestActivityEvictionDropsPartStore(t *testing.T) {
 func TestActivityColdRequestPastColdWaitAnswers503(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
-	mock.ExpectQuery(`SELECT GET_LOCK\(\?, 0\)`).WillDelayFor(300 * time.Millisecond).
+	mock.ExpectQuery(`SELECT GET_LOCK\(\?, \?\)`).WillDelayFor(300 * time.Millisecond).
 		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(1))
 	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).WillReturnRows(activityResult())
 	expectActivityRelease(mock)
@@ -661,8 +661,8 @@ func TestActivityColdFailureAnswers503WithCause(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(body, "could not be computed") || !strings.Contains(body, "disk full") {
 		t.Fatalf("code = %d body = %s", rec.Code, body)
 	}
-	if rec.Header().Get("Retry-After") == "" {
-		t.Error("no Retry-After on a failed count")
+	if rec.Header().Get("Retry-After") == "" || !strings.Contains(body, `"retry_after":`) {
+		t.Error("no Retry-After (header and body) on a failed count")
 	}
 }
 
@@ -673,7 +673,7 @@ func TestActivityLockHeldElsewhere(t *testing.T) {
 	db, mock, closeDB := newSQLMock(t)
 	defer closeDB()
 	busy := func() {
-		mock.ExpectQuery(`SELECT GET_LOCK\(\?, 0\)`).WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(0))
+		mock.ExpectQuery(`SELECT GET_LOCK\(\?, \?\)`).WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(0))
 	}
 	busy()
 	srv := newBootServer(db)
@@ -719,17 +719,31 @@ func TestActivityLockHeldElsewhere(t *testing.T) {
 }
 
 // TestActivityBusyNamesTheHoldingSession: a console host that vanished leaves
-// an idle session holding the lock until wait_timeout. The error names it so
-// an operator can KILL it.
+// an IDLE session holding the lock until wait_timeout; the error names it so
+// an operator can KILL it. A session running a statement is a healthy count
+// (another console's) and gets no KILL advice.
 func TestActivityBusyNamesTheHoldingSession(t *testing.T) {
-	db, mock, closeDB := newSQLMock(t)
-	defer closeDB()
-	mock.ExpectQuery(`SELECT GET_LOCK\(\?, 0\)`).WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(0))
-	mock.ExpectQuery(`SELECT IS_USED_LOCK\(\?\)`).WithArgs(activityLockName("idx")).
-		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(42))
-	_, err := computeActivity(context.Background(), db, scanAt(nil, scanNow))
-	if !errors.Is(err, errActivityBusy) || !strings.Contains(err.Error(), "KILL 42") {
-		t.Fatalf("err = %v, want busy naming connection 42", err)
+	for _, tc := range []struct {
+		command  string
+		wantKill bool
+	}{{"Sleep", true}, {"Query", false}} {
+		db, mock, closeDB := newSQLMock(t)
+		mock.ExpectQuery(`SELECT GET_LOCK\(\?, \?\)`).WithArgs(activityLockName("idx"), 5).
+			WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(0))
+		mock.ExpectQuery(`SELECT IS_USED_LOCK\(\?\)`).WithArgs(activityLockName("idx")).
+			WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(42))
+		mock.ExpectQuery(`FROM information_schema.PROCESSLIST WHERE ID = \?`).WithArgs(int64(42)).
+			WillReturnRows(sqlmock.NewRows([]string{"COMMAND", "TIME"}).AddRow(tc.command, 900))
+		sc := scanAt(nil, scanNow)
+		sc.lockWait = activityLockWait
+		_, err := computeActivity(context.Background(), db, sc)
+		closeDB()
+		if !errors.Is(err, errActivityBusy) || !strings.Contains(err.Error(), "42") {
+			t.Fatalf("%s: err = %v, want busy naming connection 42", tc.command, err)
+		}
+		if got := strings.Contains(err.Error(), "KILL 42"); got != tc.wantKill {
+			t.Errorf("%s: KILL advised = %v, want %v: %v", tc.command, got, tc.wantKill, err)
+		}
 	}
 }
 
@@ -824,5 +838,66 @@ func TestActivityFailedReleaseDiscardsTheConnection(t *testing.T) {
 	}
 	if n := db.Stats().OpenConnections; n != 0 {
 		t.Errorf("%d connection(s) back in the pool after a failed RELEASE_LOCK, want 0", n)
+	}
+}
+
+// TestActivitySteadyCostIsTheOpenHourNotTheFirstCount: after a restart the
+// first count reads the whole retention; the TTL must follow what the next
+// refresh costs (fingerprints + open hour), or the counts sit 30 minutes old.
+func TestActivitySteadyCostIsTheOpenHourNotTheFirstCount(t *testing.T) {
+	db, mock, closeDB := newSQLMock(t)
+	defer closeDB()
+	expectActivityLock(mock)
+	mock.ExpectQuery("PARTITION_NAME, PARTITION_DESCRIPTION FROM information_schema.PARTITIONS").
+		WillReturnRows(partitionsResult("p_2026101818", "p_2026101819"))
+	mock.ExpectQuery(`MAX\(event_id\)`).WillReturnRows(fingerprintResult(30))
+	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events PARTITION`).WillReturnRows(activityResult())
+	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events PARTITION`).WillDelayFor(200 * time.Millisecond).
+		WillReturnRows(activityResult())
+	expectActivityRelease(mock)
+	got, err := computeActivity(context.Background(), db, scanAt(newActivityPartStore(), scanNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.steadyCost <= 0 || got.steadyCost >= 150*time.Millisecond {
+		t.Errorf("steadyCost = %v, want the fast open hour, not the 200ms closed one", got.steadyCost)
+	}
+}
+
+// TestActivityTTLFollowsTheSteadyCost: the cache records the steady cost,
+// not the run's duration.
+func TestActivityTTLFollowsTheSteadyCost(t *testing.T) {
+	c := newActivityCache()
+	_, err := c.get(context.Background(), "", func(context.Context) (activityResponse, error) {
+		time.Sleep(100 * time.Millisecond)
+		return activityResponse{steadyCost: time.Millisecond}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	cost := c.costs[""]
+	c.mu.Unlock()
+	if cost != time.Millisecond {
+		t.Errorf("recorded cost = %v, want the steady 1ms", cost)
+	}
+}
+
+// TestActivityHandlerWaitsForTheLock: through the handler a count waits
+// activityLockWait for the index's lock, so two consoles reading one index
+// take turns instead of failing each other's refresh.
+func TestActivityHandlerWaitsForTheLock(t *testing.T) {
+	db, mock, closeDB := newSQLMock(t)
+	defer closeDB()
+	mock.ExpectQuery(`SELECT GET_LOCK\(\?, \?\)`).WithArgs(sqlmock.AnyArg(), int(activityLockWait/time.Second)).
+		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(1))
+	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).WillReturnRows(activityResult())
+	expectActivityRelease(mock)
+	srv := newBootServer(db)
+	if code, _, body := getActivity(t, srv, "/api/activity"); code != 200 {
+		t.Fatalf("code = %d body = %s", code, body)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }

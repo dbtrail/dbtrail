@@ -49,7 +49,7 @@ func partitionsResult(names ...string) *sqlmock.Rows {
 // expectActivityLock / expectActivityRelease are the named lock every count
 // takes on its pinned connection.
 func expectActivityLock(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery(`SELECT GET_LOCK\(\?, 0\)`).
+	mock.ExpectQuery(`SELECT GET_LOCK\(\?, \?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(1))
 }
 

@@ -150,7 +150,7 @@ func TestIntegrationActivityLockOutlivesCancelledStatement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	release, err := acquireActivityLock(context.Background(), conn, dbName)
+	release, err := acquireActivityLock(context.Background(), conn, dbName, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +172,12 @@ func TestIntegrationActivityLockOutlivesCancelledStatement(t *testing.T) {
 	if !holder.Valid {
 		t.Fatal("the lock was freed when the client gave up, while the statement still runs on the server")
 	}
-	if _, err := computeActivity(context.Background(), db, activityScan{dbName: dbName}); !errors.Is(err, errActivityBusy) {
+	_, err = computeActivity(context.Background(), db, activityScan{dbName: dbName})
+	if !errors.Is(err, errActivityBusy) {
 		t.Fatalf("a second count started beside the running statement: err = %v", err)
+	}
+	if strings.Contains(err.Error(), "KILL") {
+		t.Errorf("KILL advised for a session that is running a statement: %v", err)
 	}
 
 	deadline := time.Now().Add(20 * time.Second)
@@ -191,5 +195,34 @@ func TestIntegrationActivityLockOutlivesCancelledStatement(t *testing.T) {
 	}
 	if _, err := computeActivity(context.Background(), db, activityScan{dbName: dbName}); err != nil {
 		t.Errorf("count after the orphan ended: %v", err)
+	}
+}
+
+// TestIntegrationActivityLockIdleHolderAndWait: an IDLE session holding the
+// lock (a console host that vanished) gets the KILL advice; and a count that
+// waits for the lock runs once a healthy holder lets go, instead of failing.
+func TestIntegrationActivityLockIdleHolderAndWait(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	release, err := acquireActivityLock(context.Background(), conn, dbName, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = computeActivity(context.Background(), db, activityScan{dbName: dbName})
+	if !errors.Is(err, errActivityBusy) || !strings.Contains(err.Error(), "KILL ") {
+		t.Fatalf("idle holder: err = %v, want busy with the KILL advice", err)
+	}
+	go func() { time.Sleep(time.Second); release() }()
+	start := time.Now()
+	if _, err := computeActivity(context.Background(), db, activityScan{dbName: dbName, lockWait: 5 * time.Second}); err != nil {
+		t.Fatalf("waiting count: %v", err)
+	}
+	if d := time.Since(start); d < 500*time.Millisecond {
+		t.Errorf("the count ran after %v, before the holder let go", d)
 	}
 }

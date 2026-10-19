@@ -1888,14 +1888,19 @@ function ovTickAges(root) {
 // window is the LIVE RETENTION, derived server-side from the oldest live
 // partition; the label travels in the payload so the tile and the measurement
 // can never disagree.
-function fillOvActivity(f, activity) {
+// err is the fetch error when activity is null. A 503 is the server saying
+// the count is still running (or why it failed and when it retries): its own
+// message is shown, since "could not be loaded" would be untrue while a count
+// is simply not finished yet.
+function fillOvActivity(f, activity, err) {
   // Identical bytes leave the panel alone (#1801). The aggregate behind it is
   // a server-side cache with a 30-minute life, so a busy server sends the
   // same payload turn after turn; rebuilding it every five seconds would
   // destroy and recreate the same rows ~720 times an hour. Each row is a
   // link, so one swapped between a mouse going down and coming up loses the
   // click, and hovering it would flicker. fillOvEvents does the same.
-  const key = JSON.stringify(activity || null);
+  const pending = !activity && err && err.status === 503 ? ((err && err.message) || "") : "";
+  const key = JSON.stringify(activity || { pending });
   if (key === f.activityKey) return;
   f.activityKey = key;
   const deletes = activity ? activity.deletes : null;
@@ -1918,7 +1923,7 @@ function fillOvActivity(f, activity) {
   clear(f.warnSlot);
   if (!activity) {
     f.warnSlot.append(el("div", { class: "warn-item" }, icon("warn"),
-      el("span", { text: "The window counts could not be loaded, so the deletes and tables tiles show no number rather than a zero." })));
+      el("span", { text: pending ? ovPendingText(pending) : "The window counts could not be loaded, so the deletes and tables tiles show no number rather than a zero." })));
   }
   (activity && activity.notes || []).forEach((n) => {
     f.warnSlot.append(el("div", { class: "warn-item" }, icon("warn"), el("span", { text: n })));
@@ -3571,8 +3576,7 @@ function renderOverview() {
   // A zero-filled fallback would print "0 deletes", an assurance nobody
   // measured. No period parameter: the server derives the window from the
   // live retention (#1352) and names it in the payload's label.
-  api("/api/activity").catch((err) => { console.error("activity fetch failed", err); return null; })
-    .then((activity) => { if (live()) fillOvActivity(f, activity); });
+  loadOvActivity(f, live);
 }
 
 // addServerCard is the first step on a console that lists no server yet
@@ -3833,6 +3837,36 @@ function ovVisibilityChanged() { if (!document.hidden && ovLive) ovLive.wake(); 
 // updated, and it keeps trying, more slowly; a refusal (403, 404) says it
 // stopped and stops. The first turn runs at once and reads the list after
 // the id, which is how the paint gets its Recent changes.
+// ovPendingText words the server's 503 for the tiles: its message, with a
+// capital and a full stop, and why the tiles show no number.
+function ovPendingText(msg) {
+  const m = String(msg).trim();
+  const s = m.charAt(0).toUpperCase() + m.slice(1);
+  return s + (/[.!?]$/.test(s) ? "" : ".") + " Until then the deletes and tables tiles show no number rather than a zero.";
+}
+
+// ovActivityRetryMs is how long to wait before asking again after a 503: the
+// server's retry_after, kept between 5 s and 60 s.
+function ovActivityRetryMs(err) {
+  const secs = Number(err && err.body && err.body.retry_after);
+  return Math.min(Math.max(Number.isFinite(secs) && secs > 0 ? secs : 10, 5), 60) * 1000;
+}
+
+// loadOvActivity fetches the counts and fills the tiles. On a 503 it asks
+// again after ovActivityRetryMs, while the page is live: on a quiet index
+// nothing else would ask before the slow refresh, minutes later.
+function loadOvActivity(f, live) {
+  clearTimeout(f.activityRetry);
+  return api("/api/activity").then((activity) => {
+    if (live()) fillOvActivity(f, activity);
+  }, (err) => {
+    console.error("activity fetch failed", err);
+    if (!live()) return;
+    fillOvActivity(f, null, err);
+    if (err && err.status === 503) f.activityRetry = setTimeout(() => { if (live()) loadOvActivity(f, live); }, ovActivityRetryMs(err));
+  });
+}
+
 function watchOverview(f, live, firstRun) {
   const me = {};
   ovLive = me;
@@ -3922,12 +3956,19 @@ function watchOverview(f, live, firstRun) {
       if (prev === null) return;
       const changed = next !== prev;
       const now = Date.now();
+      const refreshActivity = () => apiWithin("/api/activity", OV_REQUEST_MS).then((a) => {
+        if (!on()) return;
+        if (a) { clearTimeout(f.activityRetry); fillOvActivity(f, a); sideOkAt = nowClock(); sideNote(""); }
+      }, (err) => {
+        console.error("activity refresh failed", err);
+        if (!on()) return;
+        // Nothing counted yet: the tiles say why and ask again themselves.
+        if (err && err.status === 503 && f.activityKey !== undefined && JSON.parse(f.activityKey).pending !== undefined) { loadOvActivity(f, on); return; }
+        sideNote((err && err.message) || String(err));
+      });
       if (changed) {
         askList = "change";
-        apiWithin("/api/activity", OV_REQUEST_MS).then((a) => {
-          if (!on()) return;
-          if (a) { fillOvActivity(f, a); sideOkAt = nowClock(); sideNote(""); }
-        }, (err) => { console.error("activity refresh failed", err); if (on()) sideNote((err && err.message) || String(err)); });
+        refreshActivity();
       }
       // The two expensive reads: on the first change to an index that had
       // none (the window goes from "nothing to restore" to a real one), and
@@ -3936,6 +3977,9 @@ function watchOverview(f, live, firstRun) {
       if ((changed && !prev) || (changed && now >= slowAt) || now >= idleSlowAt) {
         slowAt = now + OV_SLOW_MS;
         idleSlowAt = now + OV_IDLE_SLOW_MS;
+        // A quiet index still gets its counts refreshed (the cached ones age,
+        // and a first count finishes with no new event to trigger a read).
+        if (!changed) refreshActivity();
         apiWithin("/api/status", OV_REQUEST_MS).then((st) => {
           if (!on()) return;
           if (st) { fillOvStatus(f, st); sideOkAt = nowClock(); sideNote(""); }

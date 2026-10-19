@@ -23,11 +23,13 @@ import (
 // this process. Every scan holds a MySQL named lock (GET_LOCK) on the pinned
 // connection its statements run on. A Go-side single-flight cannot see a
 // second console process, a console restarted while its old statement still
-// runs, or a client that gave up on a statement: go-sql-driver cancels by
-// closing the socket WITHOUT KILL QUERY, so the server keeps scanning after
-// the client returned. The named lock belongs to the server session, so it
-// stays held until that statement really ends, and nothing can start another
-// scan meanwhile. Each statement also carries a server-side
+// runs, or a statement whose client is gone: a process that died or lost its
+// network, or a client that gave up without the server being told to stop
+// (go-sql-driver alone cancels by closing the socket, with no KILL QUERY; a
+// pool that issues KILL QUERY on cancel still cannot do so from a process that
+// is gone). The named lock belongs to the server session, so it stays held
+// until that statement really ends, and nothing can start another scan
+// meanwhile. Each statement also carries a server-side
 // MAX_EXECUTION_TIME, so an orphaned statement (its client gone) ends by
 // itself instead of running for as long as the scan takes.
 //
@@ -96,6 +98,9 @@ const (
 	// not hold the scan for activityRunTimeout.
 	activityMetaTimeout = time.Minute
 
+	// activityLockWait is how long a count waits for the index's lock.
+	activityLockWait = 5 * time.Second
+
 	// activityFingerprintChunk is how many partitions one fingerprint
 	// statement reads.
 	activityFingerprintChunk = 100
@@ -124,10 +129,10 @@ type activityQuerier interface {
 // acquireActivityLock takes the index's activity lock on conn without
 // waiting. The returned release gives it back; if that fails, the connection
 // is discarded rather than returned to the pool still holding the lock.
-func acquireActivityLock(ctx context.Context, conn *sql.Conn, dbName string) (func(), error) {
+func acquireActivityLock(ctx context.Context, conn *sql.Conn, dbName string, wait time.Duration) (func(), error) {
 	name := activityLockName(dbName)
 	var got sql.NullInt64
-	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", name).Scan(&got); err != nil {
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", name, int(wait/time.Second)).Scan(&got); err != nil {
 		return nil, fmt.Errorf("take the activity lock: %w", err)
 	}
 	if !got.Valid {
@@ -137,12 +142,21 @@ func acquireActivityLock(ctx context.Context, conn *sql.Conn, dbName string) (fu
 		// Name the session that holds it: a console host that vanished
 		// without closing its connection leaves an IDLE session holding the
 		// lock until wait_timeout, and the operator needs its id to KILL it.
+		// A KILL is only advised for a session that is idle: one running a
+		// statement is a healthy count (another console's, usually), and
+		// killing it would only start the scan over.
 		var holder sql.NullInt64
-		if err := conn.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", name).Scan(&holder); err == nil && holder.Valid {
-			return nil, fmt.Errorf("%w; the index connection holding it is %d (lock %s): if no console is counting, that connection is dead and `KILL %d` frees it",
-				errActivityBusy, holder.Int64, name, holder.Int64)
+		if err := conn.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", name).Scan(&holder); err != nil || !holder.Valid {
+			return nil, errActivityBusy
 		}
-		return nil, errActivityBusy
+		var command string
+		var idle int64
+		err := conn.QueryRowContext(ctx, "SELECT COMMAND, TIME FROM information_schema.PROCESSLIST WHERE ID = ?", holder.Int64).Scan(&command, &idle)
+		if err == nil && command == "Sleep" {
+			return nil, fmt.Errorf("%w; the index connection holding it, %d, has been idle for %ds: if no console is counting, that connection is dead and `KILL %d` frees it (lock %s)",
+				errActivityBusy, holder.Int64, idle, holder.Int64, name)
+		}
+		return nil, fmt.Errorf("%w; it is held by index connection %d", errActivityBusy, holder.Int64)
 	}
 	return func() {
 		rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -208,7 +222,11 @@ type activityScan struct {
 	// storeBudget is how many more groups store may take; <0 = unlimited.
 	storeBudget int
 	stmtTimeout time.Duration
-	now         time.Time
+	// lockWait is how long to wait for another session's count to release
+	// the lock (activityLockWait), so two consoles reading one index take
+	// turns instead of failing each other's refresh.
+	lockWait time.Duration
+	now      time.Time
 }
 
 // computeActivity is one materialization: take the index's activity lock,
@@ -224,7 +242,7 @@ func computeActivity(ctx context.Context, db *sql.DB, sc activityScan) (activity
 		return activityResponse{}, fmt.Errorf("open an index connection: %w", err)
 	}
 	defer conn.Close()
-	release, err := acquireActivityLock(ctx, conn, sc.dbName)
+	release, err := acquireActivityLock(ctx, conn, sc.dbName, sc.lockWait)
 	if err != nil {
 		return activityResponse{}, err
 	}
@@ -261,6 +279,7 @@ func computeActivity(ctx context.Context, db *sql.DB, sc activityScan) (activity
 	}
 
 	resp := agg.response(label, since, until)
+	resp.steadyCost = agg.steady
 	resp.RefreshedAt = until.Format(consoleTSFormat)
 	resp.Complete = !resp.Truncated
 	if resp.Truncated {
@@ -405,7 +424,15 @@ func collectPartitioned(ctx context.Context, q activityQuerier, parts []activity
 
 	// Fingerprints BEFORE counts (see the file comment for why the order
 	// matters).
+	// steady times what every refresh pays whatever changed: the
+	// fingerprints and the open hour(s). It, not this run's total, sets the
+	// TTL: the first count after a restart counts the whole retention once,
+	// and a TTL taken from it would hold the next counts for 30 minutes
+	// although they cost a fraction of it.
+	var steady time.Duration
+	fpStart := time.Now()
 	fps, err := activityFingerprints(ctx, q, closedNames)
+	steady += time.Since(fpStart)
 	if err != nil {
 		return nil, err
 	}
@@ -436,9 +463,13 @@ func collectPartitioned(ctx context.Context, q activityQuerier, parts []activity
 		if w.closed && reuse[w.p.name] {
 			continue
 		}
+		countStart := time.Now()
 		rows, trunc, err := countActivity(ctx, q, w.p.name, w.lo, w.hi, sc)
 		if err != nil {
 			return nil, err
+		}
+		if !w.closed {
+			steady += time.Since(countStart)
 		}
 		truncated = truncated || trunc
 		if old := store.parts[w.p.name]; old != nil {
@@ -472,6 +503,7 @@ func collectPartitioned(ctx context.Context, q activityQuerier, parts []activity
 		}
 	}
 	agg.truncated = agg.truncated || truncated
+	agg.steady = max(steady, time.Nanosecond)
 	return agg, nil
 }
 
