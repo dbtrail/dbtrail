@@ -629,6 +629,10 @@ func TestActivityColdRequestPastColdWaitAnswers503(t *testing.T) {
 	if code != http.StatusServiceUnavailable || !strings.Contains(body, "still being computed") {
 		t.Fatalf("code = %d body = %s, want 503 saying the count is running", code, body)
 	}
+	rec, _ := doServersReq(t, srv, "GET", "/api/activity", "")
+	if rec.Code == http.StatusServiceUnavailable && rec.Header().Get("Retry-After") == "" {
+		t.Error("no Retry-After on the still-running 503")
+	}
 	// The flight finishes behind the answer; the next request gets the count.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -711,5 +715,94 @@ func TestActivityLockHeldElsewhere(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
+	}
+}
+
+// TestActivityBusyNamesTheHoldingSession: a console host that vanished leaves
+// an idle session holding the lock until wait_timeout. The error names it so
+// an operator can KILL it.
+func TestActivityBusyNamesTheHoldingSession(t *testing.T) {
+	db, mock, closeDB := newSQLMock(t)
+	defer closeDB()
+	mock.ExpectQuery(`SELECT GET_LOCK\(\?, 0\)`).WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(0))
+	mock.ExpectQuery(`SELECT IS_USED_LOCK\(\?\)`).WithArgs(activityLockName("idx")).
+		WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(42))
+	_, err := computeActivity(context.Background(), db, scanAt(nil, scanNow))
+	if !errors.Is(err, errActivityBusy) || !strings.Contains(err.Error(), "KILL 42") {
+		t.Fatalf("err = %v, want busy naming connection 42", err)
+	}
+}
+
+// TestActivityFailedRefreshIsSaidOnTheTiles: warm cache, the last refresh
+// failed. The old counts are served with a note naming the failure, not as if
+// nothing were wrong.
+func TestActivityFailedRefreshIsSaidOnTheTiles(t *testing.T) {
+	c := newActivityCache()
+	notes := make([]string, 1, 4) // spare capacity: an append in place would leak into the cache
+	notes[0] = "existing"
+	c.entries[""] = activityResponse{Deletes: 4, RefreshedAt: "2026-10-18 19:00:00", Notes: notes}
+	c.stamps[""] = time.Now().Add(-time.Hour)
+	c.costs[""] = time.Minute
+	c.lastErr[""] = errors.New("statement timed out")
+	c.retryAt[""] = time.Now().Add(time.Minute)
+	got, err := c.get(context.Background(), "", func(context.Context) (activityResponse, error) {
+		t.Error("a count started during the backoff")
+		return activityResponse{}, nil
+	})
+	if err != nil || got.Deletes != 4 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if len(got.Notes) != 2 || !strings.Contains(got.Notes[1], "statement timed out") || !strings.Contains(got.Notes[1], "2026-10-18 19:00:00") {
+		t.Errorf("notes = %v, want one naming the failure and the counts' time", got.Notes)
+	}
+	if n := c.entries[""].Notes; len(n) != 1 || n[:2][1] != "" {
+		t.Error("the note was written into the cached entry")
+	}
+}
+
+// TestActivityQueuedCountIsNotCalledRunning: a scope's count waiting behind
+// another scope's must not be reported as running since it was requested.
+func TestActivityQueuedCountIsNotCalledRunning(t *testing.T) {
+	c := newActivityCache()
+	c.coldWait = 30 * time.Millisecond
+	release := make(chan struct{})
+	go func() {
+		_, _ = c.get(context.Background(), "a", func(context.Context) (activityResponse, error) {
+			<-release
+			return activityResponse{}, nil
+		})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c.mu.Lock()
+		f := c.flights["a"]
+		started := f != nil && !f.counting.IsZero()
+		c.mu.Unlock()
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first count never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, err := c.get(context.Background(), "b", func(context.Context) (activityResponse, error) {
+		return activityResponse{}, nil
+	})
+	close(release)
+	if err == nil || !strings.Contains(err.Error(), "waiting for another count") {
+		t.Errorf("err = %v, want the queued message", err)
+	}
+}
+
+// TestActivityPanickingCountFailsTheFlight: a panic becomes the flight's
+// error; waiters are answered instead of hanging, and the process lives.
+func TestActivityPanickingCountFailsTheFlight(t *testing.T) {
+	c := newActivityCache()
+	_, err := c.get(context.Background(), "", func(context.Context) (activityResponse, error) {
+		panic("boom")
+	})
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("err = %v, want the panic as the failure", err)
 	}
 }

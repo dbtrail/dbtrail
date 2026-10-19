@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -218,9 +219,11 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		// last one failed and when the next starts) instead of a bare 500.
 		var unavail *activityUnavailableError
 		if errors.As(err, &unavail) {
+			retry := activityColdWait
 			if !unavail.running {
-				w.Header().Set("Retry-After", strconv.Itoa(int(max(time.Until(unavail.retryAt), time.Second).Round(time.Second)/time.Second)))
+				retry = max(time.Until(unavail.retryAt), time.Second)
 			}
+			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Round(time.Second)/time.Second)))
 			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
@@ -331,8 +334,11 @@ type activityFlight struct {
 	// inlineWait since the flight began, so a hung index costs the wait once
 	// per flight rather than once per request.
 	started time.Time
-	resp    activityResponse
-	err     error
+	// counting is when run got the scan lock (zero while it waits behind
+	// another scope's count). Guarded by the cache's mu.
+	counting time.Time
+	resp     activityResponse
+	err      error
 }
 
 func newActivityCache() *activityCache {
@@ -371,7 +377,8 @@ func (c *activityCache) partStoreLocked(key string) (*activityPartStore, int) {
 // that could not be given a count: the first one is still running, or the
 // last one failed. The handler turns it into a 503 whose body says which.
 type activityUnavailableError struct {
-	// running: a count is in progress and started at since.
+	// running: a count is pending; since is when it got the scan lock, zero
+	// while it still waits behind another scope's count on this server.
 	running bool
 	since   time.Time
 	// cause: the last count failed with it; retryAt is when the next starts.
@@ -380,6 +387,9 @@ type activityUnavailableError struct {
 }
 
 func (e *activityUnavailableError) Error() string {
+	if e.running && e.since.IsZero() {
+		return "the activity counts for this server are waiting for another count on this server to finish; they appear here once theirs has run"
+	}
 	if e.running {
 		return fmt.Sprintf("the activity counts for this server are still being computed (started %s ago); they appear here once the first count finishes",
 			time.Since(e.since).Round(time.Second))
@@ -446,6 +456,11 @@ func (c *activityCache) get(ctx context.Context, key string, compute func(contex
 			return resp, nil
 		}
 		f := c.startLocked(key, compute, true)
+		// A refresh that failed is said on the tiles, not only in the log:
+		// otherwise a refresh failing for hours (a dead session holding the
+		// lock, a statement that always times out) shows the old numbers as
+		// if nothing were wrong.
+		resp = withRefreshNote(resp, c.lastErr[key])
 		c.mu.Unlock()
 		if f == nil || cost >= activityInlineCost {
 			return resp, nil
@@ -481,7 +496,10 @@ func (c *activityCache) get(ctx context.Context, key string, compute func(contex
 		}
 		return f.resp, nil
 	case <-timer.C:
-		return activityResponse{}, &activityUnavailableError{running: true, since: f.started}
+		c.mu.Lock()
+		counting := f.counting
+		c.mu.Unlock()
+		return activityResponse{}, &activityUnavailableError{running: true, since: counting}
 	case <-ctx.Done():
 		return activityResponse{}, ctx.Err()
 	}
@@ -495,10 +513,13 @@ func (c *activityCache) get(ctx context.Context, key string, compute func(contex
 func (c *activityCache) run(key string, f *activityFlight, compute func(context.Context) (activityResponse, error), background bool) {
 	c.scanMu.Lock()
 	defer c.scanMu.Unlock()
+	c.mu.Lock()
+	f.counting = time.Now()
+	c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), c.runTimeout)
 	defer cancel()
 	start := time.Now()
-	resp, err := compute(ctx)
+	resp, err := safeActivityCompute(ctx, compute)
 	cost := time.Since(start)
 	c.mu.Lock()
 	if err == nil {
@@ -526,6 +547,31 @@ func (c *activityCache) run(key string, f *activityFlight, compute func(context.
 	}
 	f.resp, f.err = resp, err
 	close(f.done)
+}
+
+// safeActivityCompute turns a panic in a count into an error. Under `watch`
+// the console and capture share one process, so a panic here would take
+// capture down; and a flight whose done never closes would hang every request
+// that waits on it.
+func safeActivityCompute(ctx context.Context, compute func(context.Context) (activityResponse, error)) (resp activityResponse, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("console: activity count panicked", "panic", p, "stack", string(debug.Stack()))
+			resp, err = activityResponse{}, fmt.Errorf("activity count panicked: %v", p)
+		}
+	}()
+	return compute(ctx)
+}
+
+// withRefreshNote returns resp with a note saying its last refresh failed,
+// when err is set. resp is a cached value: its Notes slice is copied.
+func withRefreshNote(resp activityResponse, err error) activityResponse {
+	if err == nil {
+		return resp
+	}
+	notes := append([]string(nil), resp.Notes...)
+	resp.Notes = append(notes, fmt.Sprintf("These counts are from %s UTC: refreshing them failed (%v).", resp.RefreshedAt, err))
+	return resp
 }
 
 // evictOverCapLocked drops the oldest entries beyond activityMaxProfiles.

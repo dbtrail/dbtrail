@@ -54,11 +54,18 @@ import (
 // Reading the fingerprint BEFORE counting is load-bearing: a row committed in
 // between is then counted but not fingerprinted, which only causes one
 // needless recount; the other order would leave it uncounted for good.
-// What the argument does not cover — two writers on one index database
-// committing out of order, or `restore-index` re-inserting archived rows with
-// their original ids into a partition that already holds rows — is bounded by
-// a rolling recount: every refresh also recounts the one kept partition whose
-// counts are oldest, once they are older than activityReverifyAge.
+// What the argument does not cover is any change that leaves a partition's
+// MAX in place: two writers on one index database committing out of order;
+// `restore-index` re-inserting archived rows with their original ids into a
+// partition that already holds rows; and the dedup's legacy shapes with no
+// event_id floor, which can reach older rows (the GTID straggler pass after a
+// MariaDB RESET MASTER renumbers GTIDs, or the position pass when file names
+// after a failover sort "greater"). Those are bounded by a rolling recount:
+// every refresh also recounts the one kept partition whose counts are oldest,
+// once they are older than activityReverifyAge. That bound is slow on a long
+// retention (one hour of it per refresh), which is the price of not
+// re-scanning the retention; a COUNT(*) fingerprint would close the holes but
+// IS a scan of the partition.
 const (
 	// activityStmtTimeout is the server-side deadline on each aggregate
 	// statement (MAX_EXECUTION_TIME). One partition is an hour of capture.
@@ -83,6 +90,11 @@ const (
 	// across all partitions and scopes of one server. Past it, further
 	// partitions are counted on every refresh instead of kept.
 	activityMaxStoredGroups = 500000
+
+	// activityMetaTimeout bounds the partition listing and a fingerprint
+	// statement, both index-only reads; one stuck behind a metadata lock must
+	// not hold the scan for activityRunTimeout.
+	activityMetaTimeout = time.Minute
 
 	// activityFingerprintChunk is how many partitions one fingerprint
 	// statement reads.
@@ -122,6 +134,14 @@ func acquireActivityLock(ctx context.Context, conn *sql.Conn, dbName string) (fu
 		return nil, fmt.Errorf("take the activity lock: GET_LOCK returned NULL")
 	}
 	if got.Int64 != 1 {
+		// Name the session that holds it: a console host that vanished
+		// without closing its connection leaves an IDLE session holding the
+		// lock until wait_timeout, and the operator needs its id to KILL it.
+		var holder sql.NullInt64
+		if err := conn.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", name).Scan(&holder); err == nil && holder.Valid {
+			return nil, fmt.Errorf("%w; the index connection holding it is %d (lock %s): if no console is counting, that connection is dead and `KILL %d` frees it",
+				errActivityBusy, holder.Int64, name, holder.Int64)
+		}
 		return nil, errActivityBusy
 	}
 	return func() {
@@ -252,6 +272,8 @@ func computeActivity(ctx context.Context, db *sql.DB, sc activityScan) (activity
 
 // listActivityPartitions reads binlog_events' partitions in range order.
 func listActivityPartitions(ctx context.Context, q activityQuerier, dbName string) ([]activityPartition, error) {
+	ctx, cancel := context.WithTimeout(ctx, activityMetaTimeout)
+	defer cancel()
 	rows, err := q.QueryContext(ctx, `
 		SELECT PARTITION_NAME, PARTITION_DESCRIPTION FROM information_schema.PARTITIONS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'binlog_events' AND PARTITION_NAME IS NOT NULL
@@ -462,28 +484,34 @@ func activityFingerprints(ctx context.Context, q activityQuerier, names []string
 		for i, name := range chunk {
 			parts[i] = fmt.Sprintf("SELECT %d AS i, MAX(event_id) AS m FROM binlog_events PARTITION (%s)", i, quotePartition(name))
 		}
-		rows, err := q.QueryContext(ctx, strings.Join(parts, " UNION ALL "))
+		fctx, cancel := context.WithTimeout(ctx, activityMetaTimeout)
+		rows, err := q.QueryContext(fctx, strings.Join(parts, " UNION ALL "))
 		if err != nil {
+			cancel()
 			return nil, fmt.Errorf("read partition fingerprints: %w", err)
 		}
-		for rows.Next() {
-			var i int
-			var m sql.NullInt64
-			if err := rows.Scan(&i, &m); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if i >= 0 && i < len(chunk) {
-				out[chunk[i]] = m
-			}
-		}
-		err = rows.Err()
-		rows.Close()
+		err = scanFingerprints(rows, chunk, out)
+		cancel()
 		if err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
+}
+
+func scanFingerprints(rows *sql.Rows, chunk []string, out map[string]sql.NullInt64) error {
+	defer rows.Close()
+	for rows.Next() {
+		var i int
+		var m sql.NullInt64
+		if err := rows.Scan(&i, &m); err != nil {
+			return err
+		}
+		if i >= 0 && i < len(chunk) {
+			out[chunk[i]] = m
+		}
+	}
+	return rows.Err()
 }
 
 func quotePartition(name string) string {

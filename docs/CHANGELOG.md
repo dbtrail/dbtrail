@@ -25,7 +25,7 @@ was published and runs the same code.
   - at most one count runs per index database, held by a MySQL named lock on the connection the count uses, so it stays held for as long as the server is really running the statement, across a console restart or a second console on the same index;
   - each statement carries a server-side `MAX_EXECUTION_TIME`, so a statement whose client went away ends by itself;
   - the count runs one hourly partition at a time and keeps the counts of hours already past, each with that partition's `MAX(event_id)` read before counting; a refresh re-reads those values (an index lookup per partition) and recounts only the current hour and the hours whose value moved (a backlog write into an older hour, a resume-time dedup delete), plus one kept hour per refresh once its counts are an hour old. Hours counted before a failure are kept, so a first count longer than any deadline finishes over several attempts;
-  - a failed count waits 30 seconds before the next one starts, and the previous counts stay on screen with their "as of" time;
+  - a failed count waits 30 seconds before the next one starts, and the previous counts stay on screen with their "as of" time and a note saying the refresh failed and why; when the lock is held by another session, the message names that index connection, so a session left behind by a host that vanished can be ended with `KILL`;
   - with nothing computed yet, the endpoint waits up to 10 seconds and then answers `503` with a message saying the first count is still running, or why the last one failed and when the next one starts.
 
 ## [0.109.0] - 2026-10-18
