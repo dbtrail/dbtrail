@@ -417,7 +417,7 @@ func TestNewestWalkMeasure(t *testing.T) {
 			}
 			walk := time.Since(t0)
 			t0 = time.Now()
-			if _, err := partitionTables(ctx, db, start.Format("p_2006010215"), Options{}); err != nil {
+			if _, err := partitionTables(ctx, db, start.Format("p_2006010215"), Options{}, false); err != nil {
 				t.Fatal(err)
 			}
 			t.Logf("  table listing of the oldest data hour alone: %v", time.Since(t0))
@@ -427,7 +427,7 @@ func TestNewestWalkMeasure(t *testing.T) {
 		if span <= 3600 {
 			part = start.Format("p_2006010215")
 		}
-		tables, err := partitionTables(ctx, db, part, o)
+		tables, err := partitionTables(ctx, db, part, o, false)
 		if err != nil {
 			t.Fatal(err)
 		}

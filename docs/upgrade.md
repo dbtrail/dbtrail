@@ -162,6 +162,50 @@ upgrade that adds a column. This is the same architectural boundary described in
 [console.md](./console.md) (`connManager` never runs `EnsureSchema` on a
 registry DSN).
 
+### The event-type index (`idx_type_lookup`)
+
+`binlog_events` has a fourth secondary index, `idx_type_lookup (event_type,
+schema_name, table_name, event_timestamp)`, which makes a filter on the event
+type (the console's Type filter, `query --event-type`) read only the rows of
+that type instead of every row. A new index gets it from `bintrail init`. An
+existing one does **not** get it from `EnsureSchema`: adding a column is
+instant, building an index reads every row the index keeps, and `EnsureSchema`
+runs at the start of every read command and of the console. It is built:
+
+- **by the capture daemon** (`stream`, `bintrail-console watch`, `bintrail-pg
+  stream`) when it starts, in the background, once per process. Capture starts
+  at once and keeps writing during the build (`ALGORITHM=INPLACE, LOCK=NONE`:
+  the server refuses rather than lock the table). The log says when it starts,
+  on about how many rows, and how long it took: `building index
+  idx_type_lookup on binlog_events ...` then `built index idx_type_lookup ...
+  took=...`;
+- **or by `bintrail init --index-dsn <the same DSN>`**, at once, if you prefer
+  to choose the hour. `init` leaves the rest of an existing index as it is.
+
+What to expect:
+
+- **Time.** Measured at 25 s for 3 million events on a 2-vCPU MySQL 8.0 with
+  the data mostly in memory, while capture kept inserting (slowest insert 114
+  ms). An index much larger than its buffer pool reads from disk and takes
+  longer; until it finishes, event-type filters work as before (slow), and
+  nothing else changes.
+- **Disk.** About 40 bytes per event the index keeps (5 to 6% on narrow rows),
+  plus temporary space for the sort while it builds.
+- **Rows written during the build.** MySQL keeps them in a log bounded by
+  `innodb_online_alter_log_max_size` (128 MB by default). Each event costs
+  it roughly 50 bytes (estimated from the 41-byte index entry, not measured
+  at scale), so at 6 million events an hour it fills in about 25 minutes, and a build that outlasts it fails at the end with error 1799.
+  Capture is not affected, the daemon logs the cause and does not try again
+  until it restarts. On a large, busy index, raise that server variable for the
+  upgrade, or run `bintrail init` at a quiet hour.
+- **A daemon stopped mid-build.** The server finishes the build on its own
+  (stopping the client does not stop the statement), and a daemon started in
+  the meantime sees it running and does not start a second one. To stop it,
+  `KILL` the thread id the log names.
+- **Rotation during the build** waits for it to finish (it needs the table's
+  lock); with the default three hourly partitions of headroom, a build shorter
+  than three hours never lets rows reach `p_future`.
+
 ### The MySQL port moved to the router
 
 Before, the capture process (`bintrail-console watch`) could open the MySQL

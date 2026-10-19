@@ -138,6 +138,7 @@ func buildBinlogEventsDDL(parts []string, encrypt bool) string {
     PRIMARY KEY (event_id, event_timestamp),
     INDEX idx_row_lookup (schema_name, table_name, event_timestamp),
     INDEX idx_pk_hash    (schema_name, table_name, pk_hash, event_timestamp),
+    INDEX idx_type_lookup (event_type, schema_name, table_name, event_timestamp),
     INDEX idx_gtid       (gtid)
 ) ENGINE=InnoDB` + encryptClause + `
   PARTITION BY RANGE (TO_SECONDS(event_timestamp)) (

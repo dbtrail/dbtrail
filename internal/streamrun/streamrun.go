@@ -2384,6 +2384,13 @@ func oneRun(ctx context.Context, cfg Config) error {
 	if err := indexer.EnsureSchema(indexDB); err != nil {
 		return fmt.Errorf("schema migration: %w", err)
 	}
+	// The event-type index is a build over every row the index keeps, not an
+	// instant column: it runs in the background, online, once per process, on
+	// a pool of its own (so this run closing indexDB on a restart never waits
+	// for it), while capture starts now.
+	indexer.StartTypeIndexBuild(cfg.IndexDSN, func() (*sql.DB, error) {
+		return connectHelper(cfg.IndexDSN, "index database", cfg.SSLMode, cfg.SSLCA, cfg.SSLCert, cfg.SSLKey)
+	}, slog.Default(), nil)
 
 	// ── 2. Connect to source database: validate binlog_row_image ─────────────
 	// #946: same --ssl-mode TLS for the source helper connection (schema reads +

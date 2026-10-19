@@ -211,6 +211,7 @@ CREATE TABLE binlog_events (
     PRIMARY KEY (event_id, event_timestamp),
     INDEX idx_row_lookup (schema_name, table_name, event_timestamp),
     INDEX idx_pk_hash (schema_name, table_name, pk_hash, event_timestamp),
+    INDEX idx_type_lookup (event_type, schema_name, table_name, event_timestamp),
     INDEX idx_gtid (gtid)
 ) ENGINE=InnoDB
   PARTITION BY RANGE (UNIX_TIMESTAMP(event_timestamp)) (

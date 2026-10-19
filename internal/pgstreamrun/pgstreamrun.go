@@ -149,6 +149,11 @@ func One(ctx context.Context, cfg Config) error {
 	if err := indexer.EnsureSchema(indexDB); err != nil {
 		return fmt.Errorf("pgstreamrun: migrate index schema: %w", err)
 	}
+	// In the background, online, once per process, on its own pool: see
+	// indexer.StartTypeIndexBuild.
+	indexer.StartTypeIndexBuild(cfg.IndexDSN, func() (*sql.DB, error) {
+		return config.Connect(cfg.IndexDSN)
+	}, logger, nil)
 
 	saved, err := loadStreamStatePG(indexDB)
 	if err != nil {

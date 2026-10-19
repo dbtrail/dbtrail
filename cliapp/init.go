@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -110,6 +111,14 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Create the full index table set (shared with the control-plane
 	// supervisor, which provisions a per-source index DB the same way).
 	if err := indexer.CreateIndexTables(cmd.Context(), db, initPartitions, initEncrypt, logTable); err != nil {
+		return err
+	}
+	// An index created before idx_type_lookup existed gets it here, at once
+	// (CREATE TABLE IF NOT EXISTS above leaves an existing binlog_events as
+	// it is). Online: a capture daemon writing to this index keeps writing.
+	// A fresh index already has it, and this returns without building.
+	if err := indexer.EnsureTypeIndex(cmd.Context(), db, slog.Default()); err != nil &&
+		!errors.Is(err, indexer.ErrTypeIndexBuildRunning) {
 		return err
 	}
 

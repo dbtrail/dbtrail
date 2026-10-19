@@ -637,7 +637,7 @@ func TestNewestWalk_boundsChangedUnderTheWalkRewalks(t *testing.T) {
 // buildNewestBranchesFor is buildNewestBranches over opts' own WHERE clause.
 func buildNewestBranchesFor(opts Options, part string, tables []SchemaTable) (string, []any) {
 	where, args := buildWhere(opts)
-	return buildNewestBranches(opts, part, tables, where, args)
+	return buildNewestBranches(opts, part, tables, where, args, false)
 }
 
 // Filter values times tables past the cap: the step reads the partition with

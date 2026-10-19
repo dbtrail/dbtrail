@@ -23,7 +23,7 @@ The event type decides how many images are stored:
 
 ### Measured per-event sizes (live index, InnoDB)
 
-Measured against the real `binlog_events` schema on MySQL 8.0 (InnoDB defaults, 10,000 rows per combination, `data_length + index_length` from `information_schema`). Figures **include** the clustered row, all three secondary indexes, and page overhead — there is no separate "InnoDB overhead" to add on top.
+Measured against the real `binlog_events` schema on MySQL 8.0 (InnoDB defaults, 10,000 rows per combination, `data_length + index_length` from `information_schema`). Figures **include** the clustered row, the three secondary indexes the schema had then, and page overhead — there is no separate "InnoDB overhead" to add on top. Add **~40 B per event** for the fourth, `idx_type_lookup` (event type, schema, table, time), which makes event-type filters seekable: measured at 41 B per event on a 3M-event index, about +6% on narrow rows and less on wider ones.
 
 | Source row shape | INSERT / DELETE | UPDATE |
 |---|---|---|

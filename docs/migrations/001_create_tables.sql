@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS binlog_events (
     PRIMARY KEY (event_id, event_timestamp),
     INDEX idx_row_lookup (schema_name, table_name, event_timestamp),
     INDEX idx_pk_hash    (schema_name, table_name, pk_hash, event_timestamp),
+    -- Event-type filters (the console's Type filter, `query --event-type`):
+    -- seekable with or without a table. Indexes created before it get it from
+    -- the capture daemon (online, in the background) or `bintrail init`.
+    INDEX idx_type_lookup (event_type, schema_name, table_name, event_timestamp),
     INDEX idx_gtid       (gtid)
 ) ENGINE=InnoDB
   PARTITION BY RANGE (TO_SECONDS(event_timestamp)) (

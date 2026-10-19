@@ -100,6 +100,12 @@ func fetchNewestByPartition(ctx context.Context, db *sql.DB, opts Options) (rows
 	if !newestWalkEligible(opts) {
 		return nil, false, nil
 	}
+	typeIdx := false
+	if opts.EventType != nil {
+		if typeIdx, err = hasTypeIndex(ctx, db); err != nil {
+			return nil, false, err
+		}
+	}
 	for range newestWalkAttempts {
 		parts, byTime, err := listEventPartitions(ctx, db)
 		if err != nil {
@@ -109,7 +115,7 @@ func fetchNewestByPartition(ctx context.Context, db *sql.DB, opts Options) (rows
 			slog.Debug("newest-first fetch: binlog_events is not RANGE partitioned on event_timestamp, running the single statement")
 			return nil, false, nil
 		}
-		rows, outcome, err := walkInSnapshot(ctx, db, opts, parts)
+		rows, outcome, err := walkInSnapshot(ctx, db, opts, parts, typeIdx)
 		if err != nil {
 			return nil, false, err
 		}
@@ -146,13 +152,13 @@ func fetchNewestByPartition(ctx context.Context, db *sql.DB, opts Options) (rows
 // The transaction also holds binlog_events' metadata lock until the walk ends,
 // so rotation cannot reorganise or drop a partition between two of its
 // statements; it waits for the walk, as it waits for the single statement.
-func walkInSnapshot(ctx context.Context, db *sql.DB, opts Options, parts eventPartitions) ([]ResultRow, walkOutcome, error) {
+func walkInSnapshot(ctx context.Context, db *sql.DB, opts Options, parts eventPartitions, typeIdx bool) ([]ResultRow, walkOutcome, error) {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return nil, 0, fmt.Errorf("begin the newest-first read: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // read-only: nothing to undo
-	return walkNewest(ctx, tx, opts, parts)
+	return walkNewest(ctx, tx, opts, parts, typeIdx)
 }
 
 // querier is what a walk reads through: the snapshot transaction.
@@ -203,7 +209,7 @@ func branchPlaceholders(tables, filterArgs int) int {
 // only in case or trailing spaces are one group under the column's collation,
 // and the same collation decides the branch's equality, so a branch reads all
 // of its group's rows and no row is read by two branches.
-func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartitions) ([]ResultRow, walkOutcome, error) {
+func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartitions, typeIdx bool) ([]ResultRow, walkOutcome, error) {
 	names := parts.names
 	floor, ceil := newestWindow(opts)
 	var out []ResultRow
@@ -222,7 +228,7 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 		if newestWalkStep != nil {
 			newestWalkStep(part)
 		}
-		tables, err := partitionTables(ctx, db, part, opts)
+		tables, err := partitionTables(ctx, db, part, opts, typeIdx)
 		if isUnknownPartitionErr(err) || isTableDefChangedErr(err) {
 			return nil, walkRelist, nil // rotation changed the partitions since they were listed
 		}
@@ -240,7 +246,7 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 		var q string
 		var args []any
 		if len(tables) <= newestBranchTables && branchPlaceholders(len(tables), len(whereArgs)) <= newestMaxPlaceholders {
-			q, args = buildNewestBranches(o, part, tables, where, whereArgs)
+			q, args = buildNewestBranches(o, part, tables, where, whereArgs, typeIdx)
 		} else {
 			q, args = assembleQuery(o, []string{part}, where, slices.Clone(whereArgs))
 		}
@@ -263,12 +269,20 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 		read = true
 		out = append(out, got...)
 	}
-	if !read {
+	if !read && !(typeIdx && opts.EventType != nil) {
 		// No partition holds a row: the table is empty, so the single
 		// statement costs nothing, and it is the one that reports a table
 		// this build cannot read (a legacy index missing a column answers
 		// 1054 there, which the console turns into its actionable refusal;
 		// the walk alone would answer an empty page).
+		//
+		// Not under a type filter read on idx_type_lookup: there the listing
+		// is narrowed to the type, so no table listed means no row of the
+		// type in the window, an exact empty page, while the table itself
+		// may be large and the single statement would read every entry of
+		// the type to find nothing. (An index carrying idx_type_lookup was
+		// built by a daemon whose EnsureSchema added every column, so the
+		// 1054 refusal above cannot be what this skips.)
 		return nil, walkFallBack, nil
 	}
 	return out, walkDone, nil
@@ -279,16 +293,43 @@ func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartit
 // schema or table when one is named (compared by the column's collation, as
 // the filter itself compares it), so no branch is built for a table the
 // filter could never admit.
-func partitionTables(ctx context.Context, db querier, part string, opts Options) ([]SchemaTable, error) {
-	q := "SELECT DISTINCT schema_name, table_name FROM binlog_events" + partitionClause([]string{part})
+//
+// Under an event-type filter, with typeIdx (binlog_events has
+// idx_type_lookup), the listing is narrowed to the tables that hold a row of
+// that type in the partition: a loose scan of idx_type_lookup's first three
+// columns, a few index dives however many rows the partition holds. The type
+// is selected too because the server takes the loose scan only when the
+// DISTINCT names the index's leading column (measured on 8.0: DISTINCT
+// schema_name, table_name under event_type = ? reads every entry of the type
+// instead); the planner chooses idx_type_lookup on its own, so no hint. So a
+// table with no row of the type gets no branch at all, where
+// before its branch scanned its whole slice of the partition, reading every
+// row image to test the type. Without the index the type stays out of the
+// listing: idx_row_lookup does not carry it, and testing it would read every
+// row of the partition just to list its tables.
+func partitionTables(ctx context.Context, db querier, part string, opts Options, typeIdx bool) ([]SchemaTable, error) {
+	byType := typeIdx && opts.EventType != nil
+	cols := "schema_name, table_name"
+	if byType {
+		cols = "event_type, " + cols
+	}
+	q := "SELECT DISTINCT " + cols + " FROM binlog_events" + partitionClause([]string{part})
+	var conds []string
 	var args []any
+	if byType {
+		conds = append(conds, "event_type = ?")
+		args = append(args, uint8(*opts.EventType))
+	}
 	switch {
 	case opts.Schema != "":
-		q += " WHERE schema_name = ?"
+		conds = append(conds, "schema_name = ?")
 		args = append(args, opts.Schema)
 	case opts.Table != "":
-		q += " WHERE table_name = ?"
+		conds = append(conds, "table_name = ?")
 		args = append(args, opts.Table)
+	}
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
 	}
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -301,7 +342,12 @@ func partitionTables(ctx context.Context, db querier, part string, opts Options)
 	var out []SchemaTable
 	for rows.Next() {
 		var st SchemaTable
-		if err := rows.Scan(&st.Schema, &st.Table); err != nil {
+		dest := []any{&st.Schema, &st.Table}
+		if byType {
+			var ty uint8
+			dest = append([]any{&ty}, dest...)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("list the tables of partition %s: %w", part, err)
 		}
 		out = append(out, st)
@@ -316,12 +362,22 @@ func partitionTables(ctx context.Context, db querier, part string, opts Options)
 // partition as one backward index scan per table, unioned, sorted and cut,
 // then joined back to the wide columns like buildQuery's statement (see the
 // late-materialization comment there: only narrow keys are sorted).
-func buildNewestBranches(opts Options, part string, tables []SchemaTable, where []string, whereArgs []any) (string, []any) {
+//
+// Each branch is read on idx_row_lookup, or, under an event-type filter with
+// typeIdx, on idx_type_lookup: with the type, the schema and the table pinned
+// by equality its entries come out in (event_timestamp, event_id) order too,
+// and only rows of that type are visited, where idx_row_lookup visits every
+// row of the table and reads its row image to test the type.
+func buildNewestBranches(opts Options, part string, tables []SchemaTable, where []string, whereArgs []any, typeIdx bool) (string, []any) {
 	filter := ""
 	if len(where) > 0 {
 		filter = " AND " + strings.Join(where, " AND ")
 	}
-	from := "binlog_events" + partitionClause([]string{part}) + " FORCE INDEX (idx_row_lookup)"
+	index := "idx_row_lookup"
+	if typeIdx && opts.EventType != nil {
+		index = typeIndexName
+	}
+	from := "binlog_events" + partitionClause([]string{part}) + " FORCE INDEX (" + index + ")"
 	branches := make([]string, len(tables))
 	var args []any
 	for i, st := range tables {
@@ -337,6 +393,22 @@ func buildNewestBranches(opts Options, part string, tables []SchemaTable, where 
 	args = append(args, opts.Limit)
 	return "SELECT " + resultColumns + " FROM binlog_events AS be JOIN (" + keys + ") AS k" +
 		" ON be.event_id = k.event_id AND be.event_timestamp = k.event_timestamp", args
+}
+
+// typeIndexName is indexer.TypeIndexName (a test pins the two equal; query
+// does not import indexer for one constant).
+const typeIndexName = "idx_type_lookup"
+
+// hasTypeIndex reports whether binlog_events carries idx_type_lookup. An
+// index that has not got it yet (built in the background by the capture
+// daemon after an upgrade) keeps reading on idx_row_lookup, as before.
+func hasTypeIndex(ctx context.Context, db *sql.DB) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events' AND INDEX_NAME = ?`, typeIndexName).Scan(&n); err != nil {
+		return false, fmt.Errorf("check binlog_events index %s: %w", typeIndexName, err)
+	}
+	return n > 0, nil
 }
 
 // isTableDefChangedErr reports MySQL's ER_TABLE_DEF_CHANGED (1412): the table
