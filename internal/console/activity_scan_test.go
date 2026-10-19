@@ -766,7 +766,10 @@ func TestActivityQueuedCountIsNotCalledRunning(t *testing.T) {
 	c := newActivityCache()
 	c.coldWait = 30 * time.Millisecond
 	release := make(chan struct{})
+	done := make(chan struct{})
+	defer func() { <-done }()
 	go func() {
+		defer close(done)
 		_, _ = c.get(context.Background(), "a", func(context.Context) (activityResponse, error) {
 			<-release
 			return activityResponse{}, nil
@@ -804,5 +807,22 @@ func TestActivityPanickingCountFailsTheFlight(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "panicked") {
 		t.Fatalf("err = %v, want the panic as the failure", err)
+	}
+}
+
+// TestActivityFailedReleaseDiscardsTheConnection: a connection whose
+// RELEASE_LOCK did not succeed must not return to the pool still holding the
+// lock — it would block every later count for as long as it lived.
+func TestActivityFailedReleaseDiscardsTheConnection(t *testing.T) {
+	db, mock, closeDB := newSQLMock(t)
+	defer closeDB()
+	expectActivityLock(mock)
+	mock.ExpectQuery(`COUNT\(\*\) AS n FROM binlog_events`).WillReturnRows(activityResult())
+	mock.ExpectQuery(`SELECT RELEASE_LOCK\(\?\)`).WillReturnRows(sqlmock.NewRows([]string{"l"}).AddRow(0))
+	if _, err := computeActivity(context.Background(), db, activityScan{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := db.Stats().OpenConnections; n != 0 {
+		t.Errorf("%d connection(s) back in the pool after a failed RELEASE_LOCK, want 0", n)
 	}
 }
