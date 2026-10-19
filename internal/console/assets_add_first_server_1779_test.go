@@ -42,6 +42,8 @@ const loadOvUncaptured = () => {};
 const loadOvFlow = () => Promise.resolve();
 // The three tiles above the flow load beside it since #2330; none here.
 const loadOvStrip = () => Promise.resolve();
+// The activity tiles load through their own retrying loader since #2470.
+const loadOvActivity = () => Promise.resolve();
 const watchOverview = () => calls.push("live");
 const overviewOnScreen = () => true;
 const sessionMay = () => true;
