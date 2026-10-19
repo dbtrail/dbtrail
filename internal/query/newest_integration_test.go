@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,16 +221,20 @@ func TestNewestWalkIntegration_filtersKeepTheirMeaning(t *testing.T) {
 	sortResults(recent, "DESC")
 	cursor := &EventCursor{Timestamp: recent[10].EventTimestamp, EventID: recent[10].EventID}
 	cases := map[string]Options{
-		"schema only":   {Schema: "app"},
-		"event type":    {EventType: &del},
-		"window":        {Since: &since, Until: &until},
-		"page two":      {BeforeEvent: cursor},
-		"deny":          {DenyTables: []SchemaTable{{"app", "orders"}}},
-		"allow":         {AllowTables: []SchemaTable{{"app", "items"}}},
-		"no match":      {Table: "nothing"},
-		"since event":   {SinceEventID: recent[20].EventID},
-		"profile named": {ProfileActive: true, RedactColumns: []SchemaTableColumn{{"app", "users", "id"}}},
+		"schema only":    {Schema: "app"},
+		"event type":     {EventType: &del},
+		"window":         {Since: &since, Until: &until},
+		"page two":       {BeforeEvent: cursor},
+		"deny":           {DenyTables: []SchemaTable{{"app", "orders"}}},
+		"allow":          {AllowTables: []SchemaTable{{"app", "items"}}},
+		"no match":       {Table: "nothing"},
+		"since event":    {SinceEventID: recent[20].EventID},
+		"profile named":  {ProfileActive: true, RedactColumns: []SchemaTableColumn{{"app", "users", "id"}}},
+		"column value":   {ColumnEq: []ColumnEq{{Column: "id", Value: "1"}}},
+		"statement hash": {QueryHash: strings.Repeat("a", 64)},
+		"flag":           {Flag: "pii"},
 	}
+	testutil.MustExec(t, db, "INSERT INTO table_flags (schema_name, table_name, column_name, flag) VALUES ('app', 'items', '', 'pii')")
 	steps := countSteps(t)
 	t.Run("schema and table keep the single statement", func(t *testing.T) {
 		*steps = nil
@@ -397,7 +402,7 @@ func TestNewestWalkMeasure(t *testing.T) {
 			}
 			walk := time.Since(t0)
 			t0 = time.Now()
-			if _, err := partitionTables(ctx, db, start.Format("p_2006010215")); err != nil {
+			if _, err := partitionTables(ctx, db, start.Format("p_2006010215"), Options{}); err != nil {
 				t.Fatal(err)
 			}
 			t.Logf("  table listing of the oldest data hour alone: %v", time.Since(t0))
@@ -407,7 +412,7 @@ func TestNewestWalkMeasure(t *testing.T) {
 		if span <= 3600 {
 			part = start.Format("p_2006010215")
 		}
-		tables, err := partitionTables(ctx, db, part)
+		tables, err := partitionTables(ctx, db, part, o)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -471,5 +476,58 @@ func TestNewestWalkIntegration_tableNamesTheCollationFolds(t *testing.T) {
 	}
 	if len(*steps) == 0 {
 		t.Fatal("the walk did not run")
+	}
+}
+
+// Rows that commit between a step's table listing and its read: table T2's
+// first row, then a newer row of T1. Read in one snapshot the page holds
+// neither; read as two snapshots it would hold T1's newer row without T2's
+// older one, a hole a newest-first scroll never returns to.
+func TestNewestWalkIntegration_rowsCommittedMidStepLeaveNoHole(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Hour)
+	db, e := walkFixture(t, hoursFrom(now.Add(-2*time.Hour), 3))
+	base := now.Add(-time.Hour + 10*time.Minute)
+	putEvent(t, db, base, "t1", event.EventInsert)
+	part := now.Add(-time.Hour).Format("p_2006010215")
+	done := false
+	newestWalkListed = func(p string) {
+		if p == part && !done {
+			done = true
+			putEvent(t, db, base.Add(time.Minute), "t2", event.EventInsert)
+			putEvent(t, db, base.Add(2*time.Minute), "t1", event.EventInsert)
+		}
+	}
+	t.Cleanup(func() { newestWalkListed = nil })
+	got, err := e.Fetch(context.Background(), Options{Limit: 5, Order: "DESC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("the hook never fired")
+	}
+	var sawT1Late, sawT2 bool
+	for _, r := range got {
+		sawT1Late = sawT1Late || (r.TableName == "t1" && r.EventTimestamp.Equal(base.Add(2*time.Minute)))
+		sawT2 = sawT2 || r.TableName == "t2"
+	}
+	if sawT1Late && !sawT2 {
+		t.Fatalf("page holds t1's later row but not t2's older one: %v", eventIDs(got))
+	}
+}
+
+// A window that ends hours ago, on the init layout (48 empty future hours):
+// the partitions after it are passed without a query.
+func TestNewestWalkIntegration_oldWindowSkipsTheNewerPartitions(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Hour)
+	db, e := walkFixture(t, hoursFrom(now.Add(-5*time.Hour), 6+48))
+	for h := -5; h <= 0; h++ {
+		putEvent(t, db, now.Add(time.Duration(h)*time.Hour+time.Minute), "t", event.EventInsert)
+	}
+	since, until := now.Add(-4*time.Hour), now.Add(-3*time.Hour+30*time.Minute)
+	steps := countSteps(t)
+	sameAsSingleStatement(t, e, Options{Limit: 9, Order: "DESC", Since: &since, Until: &until})
+	want := []string{now.Add(-3 * time.Hour).Format("p_2006010215"), now.Add(-4 * time.Hour).Format("p_2006010215")}
+	if !slices.Equal(*steps, want) {
+		t.Fatalf("read %v, want only %v", *steps, want)
 	}
 }

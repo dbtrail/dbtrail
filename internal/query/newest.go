@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 
 	drivermysql "github.com/go-sql-driver/mysql"
@@ -24,6 +27,11 @@ const newestWalkAttempts = 3
 // that partition's name. Tests use it to change the partitions mid-walk and
 // to see that the walk ran; nil in production.
 var newestWalkStep func(partition string)
+
+// newestWalkListed, when set, runs after a step listed its partition's
+// tables and before it reads them. Tests use it to commit rows between the
+// two statements; nil in production.
+var newestWalkListed func(partition string)
 
 // newestWalkEligible reports whether a fetch can be answered by walking the
 // partitions of binlog_events from the newest one back (fetchNewestByPartition).
@@ -81,14 +89,15 @@ func fetchNewestByPartition(ctx context.Context, db *sql.DB, opts Options) (rows
 		return nil, false, nil
 	}
 	for range newestWalkAttempts {
-		names, byTime, err := listEventPartitions(ctx, db)
+		parts, byTime, err := listEventPartitions(ctx, db)
 		if err != nil {
 			return nil, false, err
 		}
-		if len(names) == 0 || !byTime {
+		if len(parts.names) == 0 || !byTime {
+			slog.Debug("newest-first fetch: binlog_events is not RANGE partitioned on event_timestamp, running the single statement")
 			return nil, false, nil
 		}
-		rows, outcome, err := walkNewest(ctx, db, opts, names)
+		rows, outcome, err := walkInSnapshot(ctx, db, opts, parts)
 		if err != nil {
 			return nil, false, err
 		}
@@ -96,6 +105,7 @@ func fetchNewestByPartition(ctx context.Context, db *sql.DB, opts Options) (rows
 		case walkRelist:
 			continue
 		case walkFallBack:
+			slog.Debug("newest-first fetch: the partition walk cannot answer, running the single statement")
 			return nil, false, nil
 		}
 		// Rotation can reorganise p_future into new hourly partitions while
@@ -106,11 +116,36 @@ func fetchNewestByPartition(ctx context.Context, db *sql.DB, opts Options) (rows
 		if err != nil {
 			return nil, false, err
 		}
-		if slices.Equal(names, again) {
+		if slices.Equal(parts.names, again.names) && slices.Equal(parts.uppers, again.uppers) {
 			return rows, true, nil
 		}
 	}
+	slog.Debug("newest-first fetch: the partition list kept changing during the walk, running the single statement",
+		"attempts", newestWalkAttempts)
 	return nil, false, nil
+}
+
+// walkInSnapshot runs one walk inside a read-only REPEATABLE READ
+// transaction, so every statement of the walk reads the same snapshot: the
+// one the single statement would have read. Without it, a step's table
+// listing and its read are two snapshots, and a table whose first row of the
+// hour commits between them is missing from the page while a later row of
+// another table is on it (a hole a newest-first scroll never comes back to).
+// The transaction also holds binlog_events' metadata lock until the walk ends,
+// so rotation cannot reorganise or drop a partition between two of its
+// statements; it waits for the walk, as it waits for the single statement.
+func walkInSnapshot(ctx context.Context, db *sql.DB, opts Options, parts eventPartitions) ([]ResultRow, walkOutcome, error) {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, 0, fmt.Errorf("begin the newest-first read: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only: nothing to undo
+	return walkNewest(ctx, tx, opts, parts)
+}
+
+// querier is what a walk reads through: the snapshot transaction.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // walkOutcome is how a walk over one partition list ended.
@@ -126,8 +161,10 @@ const (
 // index scans; a partition touching more tables than this is sorted whole.
 const newestBranchTables = 64
 
-// walkNewest reads the partitions in names (oldest first, as listed) from the
-// last back, asking each for the newest rows still missing.
+// walkNewest reads the partitions in parts (oldest first, as listed) from the
+// last back, asking each for the newest rows still missing. Partitions wholly
+// newer than the fetch's Until or BeforeEvent are passed without a query, and
+// the walk ends at the first one wholly older than its Since.
 //
 // Each step first lists the tables the partition holds rows for (a real
 // query, so an empty partition is known empty). Then, instead of sorting the
@@ -140,20 +177,33 @@ const newestBranchTables = 64
 // only in case or trailing spaces are one group under the column's collation,
 // and the same collation decides the branch's equality, so a branch reads all
 // of its group's rows and no row is read by two branches.
-func walkNewest(ctx context.Context, db *sql.DB, opts Options, names []string) ([]ResultRow, walkOutcome, error) {
+func walkNewest(ctx context.Context, db querier, opts Options, parts eventPartitions) ([]ResultRow, walkOutcome, error) {
+	names := parts.names
+	floor, ceil := newestWindow(opts)
 	var out []ResultRow
 	read := false // some partition held rows and its read ran
 	for i := len(names) - 1; i >= 0 && len(out) < opts.Limit; i-- {
 		part := names[i]
+		if parts.uppers != nil {
+			if parts.uppers[i] <= floor {
+				break // this partition and every older one end before Since
+			}
+			if i > 0 && parts.uppers[i-1] >= ceil {
+				continue // starts after Until / BeforeEvent
+			}
+		}
 		if newestWalkStep != nil {
 			newestWalkStep(part)
 		}
-		tables, err := partitionTables(ctx, db, part)
-		if isUnknownPartitionErr(err) {
-			return nil, walkRelist, nil // rotation dropped it since it was listed
+		tables, err := partitionTables(ctx, db, part, opts)
+		if isUnknownPartitionErr(err) || isTableDefChangedErr(err) {
+			return nil, walkRelist, nil // rotation changed the partitions since they were listed
 		}
 		if err != nil {
 			return nil, 0, err
+		}
+		if newestWalkListed != nil {
+			newestWalkListed(part)
 		}
 		if len(tables) == 0 {
 			continue
@@ -169,7 +219,7 @@ func walkNewest(ctx context.Context, db *sql.DB, opts Options, names []string) (
 		}
 		got, err := queryRows(ctx, db, q, args)
 		switch {
-		case isUnknownPartitionErr(err):
+		case isUnknownPartitionErr(err) || isTableDefChangedErr(err):
 			return nil, walkRelist, nil
 		case isMissingIndexErr(err):
 			// An index created without idx_row_lookup (every `bintrail
@@ -193,11 +243,24 @@ func walkNewest(ctx context.Context, db *sql.DB, opts Options, names []string) (
 }
 
 // partitionTables lists the (schema, table) groups partition part holds rows
-// for, a loose scan of idx_row_lookup's leading columns.
-func partitionTables(ctx context.Context, db *sql.DB, part string) ([]SchemaTable, error) {
-	rows, err := db.QueryContext(ctx, "SELECT DISTINCT schema_name, table_name FROM binlog_events"+partitionClause([]string{part}))
+// for, a loose scan of idx_row_lookup's leading columns, narrowed to opts'
+// schema or table when one is named (compared by the column's collation, as
+// the filter itself compares it), so no branch is built for a table the
+// filter could never admit.
+func partitionTables(ctx context.Context, db querier, part string, opts Options) ([]SchemaTable, error) {
+	q := "SELECT DISTINCT schema_name, table_name FROM binlog_events" + partitionClause([]string{part})
+	var args []any
+	switch {
+	case opts.Schema != "":
+		q += " WHERE schema_name = ?"
+		args = append(args, opts.Schema)
+	case opts.Table != "":
+		q += " WHERE table_name = ?"
+		args = append(args, opts.Table)
+	}
+	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
-		if isUnknownPartitionErr(err) {
+		if isUnknownPartitionErr(err) || isTableDefChangedErr(err) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("list the tables of partition %s: %w", part, err)
@@ -245,6 +308,14 @@ func buildNewestBranches(opts Options, part string, tables []SchemaTable) (strin
 		" ON be.event_id = k.event_id AND be.event_timestamp = k.event_timestamp", args
 }
 
+// isTableDefChangedErr reports MySQL's ER_TABLE_DEF_CHANGED (1412): the table
+// was altered (rotation reorganised or dropped partitions) after the snapshot
+// transaction began.
+func isTableDefChangedErr(err error) bool {
+	var me *drivermysql.MySQLError
+	return errors.As(err, &me) && me.Number == 1412
+}
+
 // isMissingIndexErr reports MySQL's ER_KEY_DOES_NOT_EXITS (1176): a FORCE
 // INDEX naming an index the table does not have.
 func isMissingIndexErr(err error) bool {
@@ -252,7 +323,7 @@ func isMissingIndexErr(err error) bool {
 	return errors.As(err, &me) && me.Number == 1176
 }
 
-func queryRows(ctx context.Context, db *sql.DB, q string, args []any) ([]ResultRow, error) {
+func queryRows(ctx context.Context, db querier, q string, args []any) ([]ResultRow, error) {
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -261,41 +332,86 @@ func queryRows(ctx context.Context, db *sql.DB, q string, args []any) ([]ResultR
 	return scanRows(rows)
 }
 
+// eventPartitions is binlog_events' partition list in partition order.
+type eventPartitions struct {
+	names []string
+	// uppers[i] is partition i's VALUES LESS THAN bound in TO_SECONDS, and
+	// math.MaxInt64 for MAXVALUE. Set only when every bound read as an
+	// integer (RANGE on TO_SECONDS(event_timestamp), the layout bintrail
+	// creates); nil otherwise, and then no partition is skipped by time.
+	uppers []int64
+}
+
 // listEventPartitions returns binlog_events' partitions in partition order
 // and whether the table is RANGE partitioned on event_timestamp without
 // subpartitions: only then is partition order time order, which the walk
 // relies on. The layout bintrail creates always is; a table re-partitioned
 // another way reads through the single statement. DATABASE() is the schema the
 // unqualified binlog_events of every fetch resolves to on this connection.
-func listEventPartitions(ctx context.Context, db *sql.DB) (names []string, byTime bool, err error) {
+func listEventPartitions(ctx context.Context, db *sql.DB) (parts eventPartitions, byTime bool, err error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT PARTITION_NAME, COALESCE(PARTITION_METHOD, ''), COALESCE(PARTITION_EXPRESSION, ''),
-		       SUBPARTITION_NAME IS NOT NULL
+		       SUBPARTITION_NAME IS NOT NULL, COALESCE(PARTITION_DESCRIPTION, '')
 		FROM information_schema.PARTITIONS
 		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'binlog_events'
 		  AND PARTITION_NAME IS NOT NULL
 		ORDER BY PARTITION_ORDINAL_POSITION, SUBPARTITION_ORDINAL_POSITION`)
 	if err != nil {
-		return nil, false, fmt.Errorf("list binlog_events partitions: %w", err)
+		return eventPartitions{}, false, fmt.Errorf("list binlog_events partitions: %w", err)
 	}
 	defer rows.Close()
-	byTime = true
+	byTime, boundsKnown := true, true
 	for rows.Next() {
-		var name, method, expr string
+		var name, method, expr, desc string
 		var sub bool
-		if err := rows.Scan(&name, &method, &expr, &sub); err != nil {
-			return nil, false, fmt.Errorf("list binlog_events partitions: %w", err)
+		if err := rows.Scan(&name, &method, &expr, &sub, &desc); err != nil {
+			return eventPartitions{}, false, fmt.Errorf("list binlog_events partitions: %w", err)
 		}
 		if sub || !strings.HasPrefix(strings.ToUpper(method), "RANGE") ||
 			!strings.Contains(strings.ToLower(expr), "event_timestamp") {
 			byTime = false
 		}
-		if len(names) == 0 || names[len(names)-1] != name {
-			names = append(names, name)
+		if len(parts.names) > 0 && parts.names[len(parts.names)-1] == name {
+			continue
 		}
+		parts.names = append(parts.names, name)
+		upper := int64(math.MaxInt64)
+		if desc != "MAXVALUE" {
+			n, perr := strconv.ParseInt(desc, 10, 64)
+			if perr != nil || !strings.Contains(strings.ToLower(expr), "to_seconds") {
+				boundsKnown = false
+			}
+			upper = n
+		}
+		parts.uppers = append(parts.uppers, upper)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("list binlog_events partitions: %w", err)
+		return eventPartitions{}, false, fmt.Errorf("list binlog_events partitions: %w", err)
 	}
-	return names, byTime, nil
+	if !boundsKnown {
+		parts.uppers = nil
+	}
+	return parts, byTime, nil
+}
+
+// newestWindow is the TO_SECONDS range the fetch's own bounds admit: rows at
+// or after floor and before ceil. A partition entirely outside it holds no row
+// the WHERE clause would keep, so the walk does not read it. Only the bounds
+// that are times are used; every other filter is left to the WHERE clause.
+func newestWindow(opts Options) (floor, ceil int64) {
+	floor, ceil = math.MinInt64, math.MaxInt64
+	if opts.Until != nil {
+		ceil = min(ceil, mysqlToSeconds(*opts.Until)+1)
+	}
+	if opts.BeforeEvent != nil {
+		ceil = min(ceil, mysqlToSeconds(opts.BeforeEvent.Timestamp)+1)
+	}
+	if opts.Since != nil {
+		since := *opts.Since
+		if opts.SincePos != nil {
+			since = CoarseSinceFloor(since) // the bound buildWhere sends then
+		}
+		floor = mysqlToSeconds(since)
+	}
+	return floor, ceil
 }

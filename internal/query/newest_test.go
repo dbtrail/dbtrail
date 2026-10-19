@@ -3,7 +3,9 @@ package query
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -94,13 +96,21 @@ func walkRows(ids ...int64) *sqlmock.Rows {
 	return r
 }
 
+// partitionList is a listing of RANGE partitions on event_timestamp whose
+// bounds are far in the future (so no fetch bound skips one), p_future last.
 func partitionList(names ...string) *sqlmock.Rows {
-	r := sqlmock.NewRows([]string{"name", "method", "expr", "sub"})
-	for _, n := range names {
-		r.AddRow(n, "RANGE", "to_seconds(`event_timestamp`)", false)
+	r := sqlmock.NewRows(listCols)
+	for i, n := range names {
+		desc := fmt.Sprint(int64(1) << 40 * int64(i+1))
+		if n == "p_future" {
+			desc = "MAXVALUE"
+		}
+		r.AddRow(n, "RANGE", "to_seconds(`event_timestamp`)", false, desc)
 	}
 	return r
 }
+
+var listCols = []string{"name", "method", "expr", "sub", "desc"}
 
 const listSQL = "information_schema.PARTITIONS"
 
@@ -148,9 +158,11 @@ func ids(rows []ResultRow) []uint64 {
 func TestNewestWalk_stopsWhenThePageIsFull(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_old", "p_mid", "p_new", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 3)
 	expectStep(mock, "p_new", 3, 9, 8)
 	expectStep(mock, "p_mid", 1, 5)
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_old", "p_mid", "p_new", "p_future"))
 	got, err := e.Fetch(context.Background(), Options{Limit: 3, Order: "DESC"})
 	if err != nil {
@@ -168,8 +180,10 @@ func TestNewestWalk_stopsWhenThePageIsFull(t *testing.T) {
 func TestNewestWalk_fewerRowsThanTheLimit(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 5, 7)
 	expectStep(mock, "p_a", 4, 2)
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_future"))
 	got, err := e.Fetch(context.Background(), Options{Limit: 5, Order: "DESC"})
 	if err != nil {
@@ -189,12 +203,16 @@ func TestNewestWalk_droppedPartitionRelists(t *testing.T) {
 	e, mock := newWalkMock(t)
 	gone := &drivermysql.MySQLError{Number: 1735, Message: "Unknown partition 'p_old'"}
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_old", "p_new", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 2)
 	expectStep(mock, "p_new", 2, 9)
 	mock.ExpectQuery(tablesSQL("p_old")).WillReturnError(gone)
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_new", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 2)
 	expectStep(mock, "p_new", 2, 9)
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_new", "p_future"))
 	got, err := e.Fetch(context.Background(), Options{Limit: 2, Order: "DESC"})
 	if err != nil {
@@ -214,12 +232,16 @@ func TestNewestWalk_droppedPartitionRelists(t *testing.T) {
 func TestNewestWalk_listChangedUnderTheWalkRewalks(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 1)
 	expectStep(mock, "p_a", 1, 3)
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_b", "p_future"))
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_b", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 1)
 	expectStep(mock, "p_b", 1, 8)
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_b", "p_future"))
 	got, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC"})
 	if err != nil {
@@ -239,8 +261,10 @@ func TestNewestWalk_listNeverStableFallsBack(t *testing.T) {
 	e, mock := newWalkMock(t)
 	for i := range newestWalkAttempts {
 		mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_future"))
+		mock.ExpectBegin()
 		expectStep(mock, "p_future", 1, 1)
 		if i%2 == 0 {
+			mock.ExpectRollback()
 			mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_b", "p_future"))
 		} else {
 			mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_c", "p_future"))
@@ -264,10 +288,10 @@ func TestNewestWalk_listNeverStableFallsBack(t *testing.T) {
 // event_timestamp.
 func TestNewestWalk_notRangeOnTimeRunsTheSingleStatement(t *testing.T) {
 	cases := map[string]*sqlmock.Rows{
-		"not partitioned": sqlmock.NewRows([]string{"name", "method", "expr", "sub"}),
-		"hash":            sqlmock.NewRows([]string{"name", "method", "expr", "sub"}).AddRow("p0", "HASH", "`event_id`", false),
-		"range on id":     sqlmock.NewRows([]string{"name", "method", "expr", "sub"}).AddRow("p0", "RANGE", "`event_id`", false),
-		"subpartitioned":  sqlmock.NewRows([]string{"name", "method", "expr", "sub"}).AddRow("p0", "RANGE", "to_seconds(`event_timestamp`)", true),
+		"not partitioned": sqlmock.NewRows(listCols),
+		"hash":            sqlmock.NewRows(listCols).AddRow("p0", "HASH", "`event_id`", false, ""),
+		"range on id":     sqlmock.NewRows(listCols).AddRow("p0", "RANGE", "`event_id`", false, "MAXVALUE"),
+		"subpartitioned":  sqlmock.NewRows(listCols).AddRow("p0", "RANGE", "to_seconds(`event_timestamp`)", true, "MAXVALUE"),
 	}
 	for name, list := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -302,8 +326,10 @@ func TestNewestWalk_listingErrorIsReturned(t *testing.T) {
 func TestNewestWalk_partitionReadErrorIsReturned(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_future"))
+	mock.ExpectBegin()
 	mock.ExpectQuery(tablesSQL("p_future")).WillReturnRows(sqlmock.NewRows([]string{"s", "t"}).AddRow("app", "t"))
 	mock.ExpectQuery(branchSQL("p_future")).WillReturnError(&drivermysql.MySQLError{Number: 1205, Message: "Lock wait timeout"})
+	mock.ExpectRollback()
 	if _, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC"}); err == nil || !strings.Contains(err.Error(), "p_future") {
 		t.Fatalf("want the read error naming the partition, got %v", err)
 	}
@@ -326,11 +352,15 @@ func TestNewestWalk_ascendingIsUntouched(t *testing.T) {
 func TestNewestWalk_droppedBetweenListingAndReadRelists(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_old", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 2)
 	mock.ExpectQuery(tablesSQL("p_old")).WillReturnRows(sqlmock.NewRows([]string{"s", "t"}).AddRow("app", "t"))
 	mock.ExpectQuery(branchSQL("p_old")).WillReturnError(&drivermysql.MySQLError{Number: 1735, Message: "Unknown partition"})
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 2, 4)
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
 	got, err := e.Fetch(context.Background(), Options{Limit: 2, Order: "DESC"})
 	if err != nil {
@@ -372,12 +402,14 @@ func TestBuildNewestBranchesCarriesTheFiltersIntoEveryBranch(t *testing.T) {
 func TestNewestWalk_manyTablesSortsThePartition(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
 	many := sqlmock.NewRows([]string{"s", "t"})
 	for i := range newestBranchTables + 1 {
 		many.AddRow("app", "t"+strings.Repeat("x", i))
 	}
 	mock.ExpectQuery(tablesSQL("p_future")).WillReturnRows(many)
 	mock.ExpectQuery(regexp.QuoteMeta("FROM binlog_events PARTITION (`p_future`) ORDER BY")).WillReturnRows(walkRows(3))
+	mock.ExpectRollback()
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
 	if _, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC"}); err != nil {
 		t.Fatal(err)
@@ -392,8 +424,10 @@ func TestNewestWalk_manyTablesSortsThePartition(t *testing.T) {
 func TestNewestWalk_noLookupIndexFallsBack(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
 	mock.ExpectQuery(tablesSQL("p_future")).WillReturnRows(sqlmock.NewRows([]string{"s", "t"}).AddRow("app", "t"))
 	mock.ExpectQuery(branchSQL("p_future")).WillReturnError(&drivermysql.MySQLError{Number: 1176, Message: "Key 'idx_row_lookup' doesn't exist"})
+	mock.ExpectRollback()
 	mock.ExpectQuery(regexp.QuoteMeta("FROM binlog_events ORDER BY")).WillReturnRows(walkRows(4))
 	got, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC"})
 	if err != nil {
@@ -412,8 +446,7 @@ func TestNewestWalk_noLookupIndexFallsBack(t *testing.T) {
 // runs as the one statement this mock describes. The walk itself is covered
 // in internal/query/newest_test.go.
 func expectNoEventPartitions(mock sqlmock.Sqlmock) {
-	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(
-		sqlmock.NewRows([]string{"name", "method", "expr", "sub"}))
+	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnRows(sqlmock.NewRows(listCols))
 }
 
 // Every partition empty: the walk hands over to the single statement, which
@@ -422,14 +455,178 @@ func expectNoEventPartitions(mock sqlmock.Sqlmock) {
 func TestNewestWalk_emptyTableRunsTheSingleStatement(t *testing.T) {
 	e, mock := newWalkMock(t)
 	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_future"))
+	mock.ExpectBegin()
 	expectStep(mock, "p_future", 3)
 	expectStep(mock, "p_a", 3)
+	mock.ExpectRollback()
 	mock.ExpectQuery(regexp.QuoteMeta("FROM binlog_events ORDER BY")).
 		WillReturnError(&drivermysql.MySQLError{Number: 1054, Message: "Unknown column 'be.connection_id'"})
 	_, err := e.Fetch(context.Background(), Options{Limit: 3, Order: "DESC"})
 	var me *drivermysql.MySQLError
 	if !errors.As(err, &me) || me.Number != 1054 {
 		t.Fatalf("want the single statement's 1054, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// boundedList lists three hourly partitions at h-2, h-1, h and p_future.
+func boundedList(h time.Time) *sqlmock.Rows {
+	r := sqlmock.NewRows(listCols)
+	for i := -2; i <= 0; i++ {
+		start := h.Add(time.Duration(i) * time.Hour)
+		r.AddRow(start.Format("p_2006010215"), "RANGE", "to_seconds(`event_timestamp`)", false,
+			fmt.Sprint(mysqlToSeconds(start.Add(time.Hour))))
+	}
+	return r.AddRow("p_future", "RANGE", "to_seconds(`event_timestamp`)", false, "MAXVALUE")
+}
+
+// The fetch's own time bounds skip partitions without a query: those that
+// start after Until (or after the BeforeEvent cursor) are passed, and the
+// walk ends at the first one that ends before Since.
+func TestNewestWalk_timeBoundsSkipPartitions(t *testing.T) {
+	h := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	p := func(d int) string { return h.Add(time.Duration(d) * time.Hour).Format("p_2006010215") }
+	until := h.Add(-time.Hour + 30*time.Minute) // inside h-1
+	since := h.Add(-time.Hour + 10*time.Minute) // inside h-1
+	exactEnd := h.Add(-time.Second)             // the last second of h-1
+	cases := map[string]struct {
+		opts Options
+		read []string
+	}{
+		"until skips the newer ones":       {Options{Until: &until}, []string{p(-1), p(-2)}},
+		"cursor skips the newer ones":      {Options{BeforeEvent: &EventCursor{Timestamp: until, EventID: 9}}, []string{p(-1), p(-2)}},
+		"since ends the walk":              {Options{Since: &since}, []string{"p_future", p(0), p(-1)}},
+		"since and until: one partition":   {Options{Since: &since, Until: &until}, []string{p(-1)}},
+		"until on the last second of hour": {Options{Until: &exactEnd}, []string{p(-1), p(-2)}},
+		"until at the next hour's start":   {Options{Until: &h}, []string{p(0), p(-1), p(-2)}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e, mock := newWalkMock(t)
+			var read []string
+			newestWalkStep = func(part string) { read = append(read, part) }
+			t.Cleanup(func() { newestWalkStep = nil })
+			mock.ExpectQuery(listSQL).WillReturnRows(boundedList(h))
+			mock.ExpectBegin()
+			for _, part := range tc.read {
+				expectStep(mock, part, 5)
+			}
+			mock.ExpectRollback()
+			mock.ExpectQuery(regexp.QuoteMeta("FROM binlog_events WHERE")).WillReturnRows(walkRows())
+			o := tc.opts
+			o.Limit, o.Order = 5, "DESC"
+			if _, err := e.Fetch(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(read, tc.read) {
+				t.Fatalf("read %v, want %v", read, tc.read)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A schema (or a table) named by the fetch narrows each step's table
+// listing, so no branch is built for a table the filter can never admit.
+func TestNewestWalk_tableListingFollowsTheNamedSchemaOrTable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		opts Options
+		arg  string
+		col  string
+	}{
+		"schema": {Options{Schema: "app"}, "app", "schema_name"},
+		"table":  {Options{Table: "orders"}, "orders", "table_name"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, mock := newWalkMock(t)
+			mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+			mock.ExpectBegin()
+			mock.ExpectQuery(tablesSQL("p_future") + regexp.QuoteMeta(" WHERE "+tc.col+" = ?")).WithArgs(tc.arg).
+				WillReturnRows(sqlmock.NewRows([]string{"s", "t"}))
+			mock.ExpectRollback()
+			mock.ExpectQuery(regexp.QuoteMeta("FROM binlog_events WHERE")).WillReturnRows(walkRows())
+			o := tc.opts
+			o.Limit, o.Order = 2, "DESC"
+			if _, err := e.Fetch(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// The table altered after the snapshot began (1412, rotation committed a
+// reorganise): the walk lists again, as for a dropped partition.
+func TestNewestWalk_tableDefinitionChangedRelists(t *testing.T) {
+	e, mock := newWalkMock(t)
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_future"))
+	mock.ExpectBegin()
+	mock.ExpectQuery(tablesSQL("p_future")).WillReturnError(&drivermysql.MySQLError{Number: 1412, Message: "Table definition has changed"})
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_new", "p_future"))
+	mock.ExpectBegin()
+	expectStep(mock, "p_future", 1)
+	expectStep(mock, "p_new", 1, 6)
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_new", "p_future"))
+	got, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := ids(got); len(g) != 1 || g[0] != 6 {
+		t.Fatalf("got %v, want [6]", g)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// With a position anchor, Since is not the bound buildWhere sends: it sends
+// CoarseSinceFloor(Since), an hour earlier, because a change logged after the
+// position can carry an earlier statement time. The walk's floor follows it.
+func TestNewestWindowFollowsTheCoarseFloorUnderAPosition(t *testing.T) {
+	since := time.Date(2026, 10, 18, 12, 10, 0, 0, time.UTC)
+	floor, _ := newestWindow(Options{Since: &since, SincePos: &BinlogPos{File: "bin.000002", Pos: 4}})
+	if want := mysqlToSeconds(CoarseSinceFloor(since)); floor != want {
+		t.Fatalf("floor %d, want the coarse floor %d", floor, want)
+	}
+	floor, _ = newestWindow(Options{Since: &since})
+	if want := mysqlToSeconds(since); floor != want {
+		t.Fatalf("floor %d, want %d", floor, want)
+	}
+}
+
+// Same names, different bounds after the walk (a partition redefined in
+// place): the walk is redone like any other changed list.
+func TestNewestWalk_boundsChangedUnderTheWalkRewalks(t *testing.T) {
+	e, mock := newWalkMock(t)
+	moved := func() *sqlmock.Rows {
+		return sqlmock.NewRows(listCols).
+			AddRow("p_a", "RANGE", "to_seconds(`event_timestamp`)", false, "99").
+			AddRow("p_future", "RANGE", "to_seconds(`event_timestamp`)", false, "MAXVALUE")
+	}
+	mock.ExpectQuery(listSQL).WillReturnRows(partitionList("p_a", "p_future"))
+	mock.ExpectBegin()
+	expectStep(mock, "p_future", 1, 3)
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(moved())
+	mock.ExpectQuery(listSQL).WillReturnRows(moved())
+	mock.ExpectBegin()
+	expectStep(mock, "p_future", 1, 5)
+	mock.ExpectRollback()
+	mock.ExpectQuery(listSQL).WillReturnRows(moved())
+	got, err := e.Fetch(context.Background(), Options{Limit: 1, Order: "DESC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := ids(got); len(g) != 1 || g[0] != 5 {
+		t.Fatalf("got %v, want the second walk's [5]", g)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
