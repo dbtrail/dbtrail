@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,6 +113,7 @@ func consoleBundleDB(t *testing.T, lazy bool) (*sql.DB, *sql.DB) {
 }
 
 func TestIntegrationAbandonedConsoleReadIsKilled(t *testing.T) {
+	requireAbandonedSleepSurvives(t)
 	for _, tc := range []struct {
 		name string
 		lazy bool
@@ -125,15 +127,26 @@ func TestIntegrationAbandonedConsoleReadIsKilled(t *testing.T) {
 			db, observer := consoleBundleDB(t, tc.lazy)
 			marker := abandonMarker(t)
 			t.Cleanup(func() { killLeftover(t, observer, marker) })
+			// Pin one pool connection to learn the thread the KILL will hit;
+			// it goes back to the pool on Close, like any request's.
+			conn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var killedID int64
+			if err := conn.QueryRowContext(context.Background(), "SELECT CONNECTION_ID()").Scan(&killedID); err != nil {
+				t.Fatal(err)
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			errc := make(chan error, 1)
 			go func() {
 				var err error
 				if tc.args {
-					_, err = db.QueryContext(ctx, "SELECT /* "+marker+" */ SLEEP(?)", 30)
+					_, err = conn.QueryContext(ctx, "SELECT /* "+marker+" */ SLEEP(?)", 30)
 				} else {
-					_, err = db.QueryContext(ctx, "SELECT /* "+marker+" */ SLEEP(30)")
+					_, err = conn.QueryContext(ctx, "SELECT /* "+marker+" */ SLEEP(30)")
 				}
+				conn.Close()
 				errc <- err
 			}()
 			waitRunning(t, observer, marker)
@@ -146,37 +159,62 @@ func TestIntegrationAbandonedConsoleReadIsKilled(t *testing.T) {
 			if !goneWithin(t, observer, marker, 3*time.Second) {
 				t.Fatal("the abandoned read is still running on the index server")
 			}
-			// The pool still serves after a KILL (the killed connection was
-			// discarded, not reused).
-			var one int
-			if err := db.QueryRowContext(context.Background(), "SELECT 1").Scan(&one); err != nil || one != 1 {
+			// The pool still serves after a KILL, and not on the killed
+			// connection: that one was discarded, not handed out again.
+			var nextID int64
+			if err := db.QueryRowContext(context.Background(), "SELECT CONNECTION_ID()").Scan(&nextID); err != nil {
 				t.Fatalf("pool broken after the KILL: %v", err)
+			}
+			if nextID == killedID {
+				t.Fatalf("the pool reused connection %d after a KILL was sent for it", killedID)
 			}
 		})
 	}
 }
 
-// The control: the same read on a plain pool (what the console used before)
-// keeps running after its caller leaves. If this ever goes green the driver
+// abandonedSleepSurvives is the premise every kill assertion here rests on:
+// on a plain pool (what the console used before) an abandoned SLEEP is still
+// running 3 s after its caller left. On a server that ends it by itself, "gone
+// from PROCESSLIST" would pass with the KILL broken, so the kill tests skip
+// there instead of reading green. Measured once per test binary.
+var (
+	premiseOnce     sync.Once
+	premiseSurvives bool
+)
+
+func abandonedSleepSurvives(t *testing.T) bool {
+	t.Helper()
+	premiseOnce.Do(func() {
+		observer, dbName := testutil.CreateTestDB(t)
+		plain, err := config.Connect(testutil.IntegrationDSN(dbName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer plain.Close()
+		marker := abandonMarker(t)
+		defer killLeftover(t, observer, marker)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { _, _ = plain.QueryContext(ctx, "SELECT /* "+marker+" */ SLEEP(?)", 20); close(done) }()
+		waitRunning(t, observer, marker)
+		cancel()
+		<-done
+		premiseSurvives = !goneWithin(t, observer, marker, 3*time.Second)
+	})
+	return premiseSurvives
+}
+
+func requireAbandonedSleepSurvives(t *testing.T) {
+	t.Helper()
+	if !abandonedSleepSurvives(t) {
+		t.Skip("this server ends an abandoned SLEEP on its own when the client disconnects, so a statement leaving PROCESSLIST would not prove the KILL")
+	}
+}
+
+// The control, as its own test: if this ever skips, the driver or the server
 // changed, and the guard deserves a second look.
 func TestIntegrationAbandonedReadOnPlainPoolKeepsRunning(t *testing.T) {
-	observer, dbName := testutil.CreateTestDB(t)
-	plain, err := config.Connect(testutil.IntegrationDSN(dbName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plain.Close()
-	marker := abandonMarker(t)
-	t.Cleanup(func() { killLeftover(t, observer, marker) })
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _, _ = plain.QueryContext(ctx, "SELECT /* "+marker+" */ SLEEP(?)", 20); close(done) }()
-	waitRunning(t, observer, marker)
-	cancel()
-	<-done
-	if goneWithin(t, observer, marker, 3*time.Second) {
-		t.Skip("this server ends an abandoned SLEEP on its own; the control does not apply here")
-	}
+	requireAbandonedSleepSurvives(t)
 }
 
 // A background job runs on its own context; the request that started it can

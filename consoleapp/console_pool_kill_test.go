@@ -21,7 +21,14 @@ func TestConsoleBootPoolKillsAbandonedReads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(src), want) {
+		live := false
+		for line := range strings.SplitSeq(string(src), "\n") {
+			// A commented-out line does not open anything.
+			if code, _, _ := strings.Cut(line, "//"); strings.Contains(code, want) {
+				live = true
+			}
+		}
+		if !live {
 			t.Errorf("%s: the console's index pool is not opened with %q", file, want)
 		}
 	}
