@@ -16,10 +16,10 @@ import (
 // true, matching the old tests' default (no planner / archive discovery).
 func newBootServer(db *sql.DB) *Server {
 	// sessionProfiles is set like production (server.go New) — handlers that
-	// resolve a session's profile per request (events, activity, schemas)
+	// resolve a session's profile per request (events, schemas)
 	// reach the cache even in handler-level tests.
 	s := &Server{token: "t", cm: newConnManager(nil, false), sessionProfiles: newProfileRuleCache()}
-	s.cm.boot = &bundle{db: db, engine: query.New(db), noArchive: true, activity: newActivityCache()}
+	s.cm.boot = &bundle{db: db, engine: query.New(db), noArchive: true}
 	s.mux = s.buildHandler()
 	return s
 }

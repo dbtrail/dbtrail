@@ -487,15 +487,15 @@ func TestOverviewUncapturedSlotAndSeam(t *testing.T) {
 	}
 }
 
-// TestUncapturedSlotSurvivesAFourArgumentBuild: buildOverview grew a fifth
-// parameter, and the browser suite calls it with FOUR
+// TestUncapturedSlotSurvivesABuildWithoutIt: the uncaptured payload is
+// buildOverview's last parameter, and the browser suite calls it without one
 // (test/console-e2e/console_e2e.mjs, the overview fixture scenario, which
-// drives the real builder three times and then reads every .warn-item on the
-// page). So the payload arrives undefined there, and this pins what that must
-// do: draw NOTHING, and throw nothing. A card built from an absent payload
-// would put a warning on a page that was told nothing, and a throw would take
-// the three tile assertions down with it in a suite this change may not edit.
-func TestUncapturedSlotSurvivesAFourArgumentBuild(t *testing.T) {
+// drives the real builder twice and reads the tiles). So the payload arrives
+// undefined there, and this pins what that must do: draw NOTHING, and throw
+// nothing. A card built from an absent payload would put a warning on a page
+// that was told nothing, and a throw would take the tile assertions down with
+// it.
+func TestUncapturedSlotSurvivesABuildWithoutIt(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		if os.Getenv(requireNodeEnv) != "" {
@@ -540,10 +540,10 @@ console.log(JSON.stringify(out));
 		t.Fatalf("decode %q: %v", raw, err)
 	}
 	if got.Threw != nil {
-		t.Errorf("a four-argument build threw %q; the browser suite calls it that way", *got.Threw)
+		t.Errorf("a build without the uncaptured payload threw %q; the browser suite calls it that way", *got.Threw)
 	}
 	if got.Left != 0 {
-		t.Errorf("a four-argument build left %d node(s) in the slot, want an empty slot", got.Left)
+		t.Errorf("a build without the uncaptured payload left %d node(s) in the slot, want an empty slot", got.Left)
 	}
 	if !got.UndefCard || !got.NullCard {
 		t.Errorf("a missing payload drew a card (undefined empty=%v, null empty=%v)", got.UndefCard, got.NullCard)

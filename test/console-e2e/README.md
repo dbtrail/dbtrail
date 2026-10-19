@@ -50,7 +50,7 @@ down.
 | cascade: banner + counts (×3) | the `cascade_detected` positive-half rendering (#619) — the banner block whose missing `)` once broke the whole SPA |
 | schema changes (×9) | the DDL history view (#1443): seeded rows render, same-second DDLs list in binlog order, UTC column, the type filter narrows through the API, the empty state |
 | timetravel (×6) | the reconstruct gate + baseline+deltas over a real fixture baseline (#970): event fold, baseline-only row, deleted row |
-| overview: window honesty (×2) | `buildOverview` window line uses the fetched window's own bounds, never `status.coverage` (#679/#686) |
+| overview: scope honesty (×5) | `buildOverview` tiles each state their own scope, the all-time tile says it is an estimate, and `status.coverage` never reaches a tile (#679/#686) |
 | storage: Create-baseline gates (×5) | the button's double-gate (#686): live enabled arm, destination-missing arm, capability-off arm; the fixture snapshot listed |
 | telemetry: sample event (×3) | the Storage card's "Show a sample event" fold (#1447): closed by default, opens to a read-only `<pre>` carrying the daemon's `sample_event` string verbatim (never re-serialized in the frontend) |
 | access profiles (×6) | the Settings > Access profiles page (#1445): reachable from the sidebar on a fresh index, the real forms author a flag, a profile and a deny rule onto the index, a refusal shows the shared message, and the Remove buttons take everything back off |

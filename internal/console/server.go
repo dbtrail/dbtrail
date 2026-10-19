@@ -992,7 +992,6 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/coverage", s.handleCoverage)
 	api.HandleFunc("GET /api/capture-status", s.handleCaptureStatus)
 	api.HandleFunc("GET /api/uncaptured-tables", s.handleUncapturedTables)
-	api.HandleFunc("GET /api/activity", s.handleActivity)
 	api.HandleFunc("GET /api/schemas", s.handleSchemas)
 	api.HandleFunc("GET /api/events", s.handleEvents)
 	// Whether the index gained a row since the Overview last asked (#1801):

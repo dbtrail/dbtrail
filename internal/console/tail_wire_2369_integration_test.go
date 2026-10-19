@@ -24,7 +24,7 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 	r, _ := newTailRig(t)
 	r.s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
 	r.s.sqlLimits = resolveSQLLimits(sqlsandbox.Limits{})
-	r.b.baselineConfigured, r.b.activity = true, newActivityCache()
+	r.b.baselineConfigured = true
 	captured := true
 	r.s.tailCapturesHook = func(string) (func(string, string) bool, bool) {
 		return func(string, string) bool { return captured }, true

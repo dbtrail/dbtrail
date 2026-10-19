@@ -197,7 +197,7 @@ func newSQLFixture(t *testing.T, runner sqlRunner, withArchive bool) *sqlFixture
 	}
 	f.schemaDir = writeSQLBaselineFixture(t, f.root)
 	f.s = &Server{token: "t", cm: newConnManager(nil, false), sessionProfiles: newProfileRuleCache()}
-	f.s.cm.boot = &bundle{baselineSrc: f.root, baselineConfigured: true, activity: newActivityCache()}
+	f.s.cm.boot = &bundle{baselineSrc: f.root, baselineConfigured: true}
 	if withArchive {
 		db, mock, closeDB := newSQLMock(t)
 		t.Cleanup(closeDB)
@@ -606,7 +606,7 @@ func TestSQLAPI_permissionEnforcedEndToEnd(t *testing.T) {
 	srv.sqlRunner = runner
 	dir := t.TempDir()
 	writeSQLBaselineFixture(t, dir)
-	srv.cm.boot = &bundle{baselineSrc: dir, baselineConfigured: true, activity: newActivityCache()}
+	srv.cm.boot = &bundle{baselineSrc: dir, baselineConfigured: true}
 
 	post := func(cred string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "http://127.0.0.1:8090/api/sql", strings.NewReader(`{"sql":"SELECT 1"}`))
@@ -855,7 +855,7 @@ func TestCSVCellMatchesTheClientDialect(t *testing.T) {
 func TestSQLAPI_noCopyIs409(t *testing.T) {
 	runner := &fakeSQLRunner{res: oneRowResult()}
 	s := &Server{token: "t", cm: newConnManager(nil, false), sessionProfiles: newProfileRuleCache()}
-	s.cm.boot = &bundle{activity: newActivityCache()}
+	s.cm.boot = &bundle{}
 	s.sqlRunner = runner
 	s.sqlLimits = resolveSQLLimits(sqlsandbox.Limits{})
 	s.mux = s.buildHandler()

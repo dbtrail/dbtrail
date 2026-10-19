@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -91,44 +90,6 @@ func TestIntegrationSessionRestrictionsAllowList(t *testing.T) {
 	rec = getPath(t, srv, "127.0.0.1:8090", "/api/events?schema=app&table=users&changed_column=ssn", scoped)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("changed_column under a column allow list = %d, want 403: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestIntegrationSessionRestrictionsActivity pins the Overview aggregate:
-// allow-list mode scopes the counts AND the table-name inventory, and the
-// materialization cache never crosses the trust boundary (the full-access
-// read on the same server still sees everything, from its own cache entry).
-func TestIntegrationSessionRestrictionsActivity(t *testing.T) {
-	testutil.SkipIfNoMySQL(t)
-	srv := newProfileIndexServer(t)
-	// The Overview window is live retention (24h fallback here); the shared
-	// fixture's events sit outside it, so the aggregate needs events of its
-	// own, inside the window.
-	recent := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
-	testutil.InsertEvent(t, srv.cm.boot.db, "bin.000002", 4, 40, recent, nil,
-		"app", "users", 1 /*INSERT*/, "9",
-		nil, nil, []byte(`{"id":9,"email":"bob@example","ssn":"ssn-999"}`))
-	testutil.InsertEvent(t, srv.cm.boot.db, "bin.000002", 40, 80, recent, nil,
-		"app", "secrets", 1 /*INSERT*/, "9",
-		nil, nil, []byte(`{"id":9,"value":"topsecret2"}`))
-	scoped := restrictedBearer(t, srv, &ext.SessionRestrictions{
-		AllowTables: []ext.TableRef{{Schema: "app", Table: "users"}},
-	})
-
-	rec := getPath(t, srv, "127.0.0.1:8090", "/api/activity", scoped)
-	if rec.Code != 200 {
-		t.Fatalf("activity = %d: %s", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "secrets") {
-		t.Errorf("a table outside the allow list surfaced in the activity aggregate: %s", rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "users") {
-		t.Errorf("the allowed table must still be counted: %s", rec.Body.String())
-	}
-	// Full access on the same server: its own materialization, unscoped.
-	rec = getPath(t, srv, "127.0.0.1:8090", "/api/activity", "static-tok")
-	if !strings.Contains(rec.Body.String(), "secrets") {
-		t.Errorf("the full-access aggregate must not inherit the restricted session's scope: %s", rec.Body.String())
 	}
 }
 

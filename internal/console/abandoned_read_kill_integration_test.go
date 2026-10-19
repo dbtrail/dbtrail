@@ -217,37 +217,6 @@ func TestIntegrationAbandonedReadOnPlainPoolKeepsRunning(t *testing.T) {
 	requireAbandonedSleepSurvives(t)
 }
 
-// A background job runs on its own context; the request that started it can
-// go away without the job's statement being killed.
-func TestIntegrationActivityFlightSurvivesItsRequest(t *testing.T) {
-	db, observer := consoleBundleDB(t, false)
-	marker := abandonMarker(t)
-	t.Cleanup(func() { killLeftover(t, observer, marker) })
-	cache := newActivityCache()
-	reqCtx, cancel := context.WithCancel(context.Background())
-	got := make(chan error, 1)
-	go func() {
-		_, err := cache.get(reqCtx, "k", func(ctx context.Context) (activityResponse, error) {
-			var n int
-			err := db.QueryRowContext(ctx, "SELECT /* "+marker+" */ SLEEP(?)", 3).Scan(&n)
-			return activityResponse{}, err
-		})
-		got <- err
-	}()
-	waitRunning(t, observer, marker)
-	cancel()
-	if err := <-got; err == nil {
-		t.Fatal("the cancelled request got an answer")
-	}
-	time.Sleep(500 * time.Millisecond)
-	if !stillRunning(t, observer, marker) {
-		t.Fatal("the background flight's statement was killed when the request that started it left")
-	}
-	if !goneWithin(t, observer, marker, 10*time.Second) {
-		t.Fatal("the flight's statement never finished")
-	}
-}
-
 // A guarded read still carries the server's column types.
 func TestIntegrationGuardedReadKeepsColumnTypes(t *testing.T) {
 	db, _ := consoleBundleDB(t, false)

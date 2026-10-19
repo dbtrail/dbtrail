@@ -639,11 +639,11 @@ button { font-family: inherit; }
 
 /* links inside running text: the only underlined things in the console
    (navigation is never underlined, #1950). */
-.link, .flow-link, .fr-go, .hero-link, .rc-restore-note a, .bks-docs, .ov-actline-link {
+.link, .flow-link, .fr-go, .hero-link, .rc-restore-note a, .bks-docs {
   color: var(--ink-2); font-weight: 600; text-decoration: underline;
   text-underline-offset: 3px; text-decoration-color: var(--ink-4); border-bottom: 0;
 }
-.link:hover, .flow-link:hover, .fr-go:hover, .hero-link:hover, .rc-restore-note a:hover, .bks-docs:hover, .ov-actline-link:hover {
+.link:hover, .flow-link:hover, .fr-go:hover, .hero-link:hover, .rc-restore-note a:hover, .bks-docs:hover {
   color: var(--ink); text-decoration-color: var(--ink);
 }
 .fr-go { white-space: nowrap; }
@@ -1366,7 +1366,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 /* ============================================================
    overview / dashboard
    ============================================================ */
-.ov-stats { display: grid; grid-template-columns: repeat(3, 1fr) 1.4fr; gap: 16px; margin-bottom: 24px; }
+.ov-stats { display: grid; grid-template-columns: 1fr 1.4fr; gap: 16px; margin-bottom: 24px; }
 .ov-stat {
   /* white bento card (#1421): the site's own console mock keeps the stat
      tiles white — the tint layer is for the panels below. */
@@ -1545,7 +1545,7 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 .ov-fold { margin-top: 20px; }
 .ov-fold > summary { cursor: pointer; font-family: var(--f-ui); font-size: 13.5px; color: var(--ink-3); padding: 6px 0; }
 .ov-fold[open] > summary { margin-bottom: 10px; }
-/* The two panels' folds (#1860): one readable line each, the count in ink. */
+/* The Recent-changes fold (#1860): one readable line, the count in ink. */
 .ov-fold-panel { margin-top: 8px; }
 .ov-fold-panel > summary { font-size: 14.5px; color: var(--ink-2); padding: 8px 0; }
 .ov-fold-panel > summary::marker { color: var(--ink-3); }
@@ -1727,18 +1727,22 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
 
 .ov-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; align-items: start; }
 .ov-panel { padding: 14px 14px 16px; }
-/* the two tint modifiers (#1421, #1950): OPT-IN, valid on any card
+/* the tint modifier (#1421, #1950): OPT-IN, valid on any card
    ("ov-panel tcard-violet"). Violet and sun are the STRUCTURE tints, the
-   most a screen may show; pink/orange never land near event data. They sit
+   most a screen may show (sun is used directly by the cards that need it); pink/orange never land near event data. They sit
    AFTER the card ground rule because at equal specificity the cascade
    decides. */
 .tcard-violet { background: var(--violet-tint); border-color: transparent; }
-.tcard-sun    { background: var(--sun-tint);    border-color: transparent; }
 .tcard-violet .tag-pill { background: var(--surface); color: var(--violet-deep); }
-.tcard-sun    .tag-pill { background: var(--surface); color: var(--sun-deep); }
+/* In dark the pill's --surface fill sits 1.08:1 off the translucent violet
+   ground, under the 1.15 floor light holds (1.18), so the eyebrow lost its
+   shape. A --violet-line edge (about 1.5:1) gives it back; the padding gives
+   up the pixel the border takes so the pill keeps its size. The sun panel's
+   pill used to hide this from console-e2e's marks sweep: it scored 1.06 in
+   light, under every floor, so the class was never judged. */
+[data-theme="dark"] .tcard-violet .tag-pill { border: 1px solid var(--violet-line); padding: 3px 10px; }
 /* the tint-aware dividers (see the token block) */
-.tcard-violet .ov-ev, .tcard-violet .ov-tablerow, .tcard-violet .ov-coverage { border-top-color: var(--violet-line); }
-.tcard-sun .ov-ev, .tcard-sun .ov-tablerow, .tcard-sun .ov-coverage { border-top-color: var(--sun-line); }
+.tcard-violet .ov-ev { border-top-color: var(--violet-line); }
 .ov-panel-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px; }
 
 .ov-evlist { display: flex; flex-direction: column; }
@@ -1763,28 +1767,6 @@ input[type="checkbox"][disabled], input[type="radio"][disabled] { opacity: .45; 
    way to undo anything. */
 .ov-ev-undo svg { width: 12px; height: 12px; }
 
-.ov-tables { display: flex; flex-direction: column; }
-.ov-tablerow {
-  display: grid; grid-template-columns: 1fr 56px auto; align-items: center; gap: 12px;
-  width: 100%; text-align: left; background: none; border: none; cursor: pointer;
-  min-height: 40px; padding: 6px 14px; border-top: 1px solid var(--line-soft); transition: background .14s;
-}
-.ov-tablerow:first-child { border-top: none; }
-.ov-tablerow:hover { background: var(--raised); }
-.ov-tname { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink); }
-.ov-bar { display: flex; height: 7px; border-radius: var(--r-xs); overflow: hidden; background: var(--inset); gap: 1.5px; }
-.ov-seg { display: block; }
-.ov-seg.i { background: var(--insert); }
-.ov-seg.u { background: var(--update); }
-.ov-seg.d { background: var(--delete); }
-.ov-total { font-family: var(--f-ui); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
-.ov-coverage {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 13px 14px 8px; margin-top: 4px; border-top: 1px solid var(--line-soft);
-  font-family: var(--f-mono); font-size: var(--fs-xs); color: var(--ink-3);
-}
-.ov-coverage span { text-transform: uppercase; letter-spacing: 0.06em; font-size: var(--fs-xs); }
-.ov-coverage b { color: var(--ink); font-weight: 500; }
 
 
 /* ============================================================

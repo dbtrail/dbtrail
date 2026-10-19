@@ -67,13 +67,6 @@ var apiRoutePerms = []routePerm{
 	// server.go but never classified here, so every policy-carrying session got
 	// a 403 on the Overview's own coverage card; the drift went unseen because
 	// registeredAPIPatterns, the completeness test's mirror, was missing it too.)
-	//
-	// activity does NOT sit there: it aggregates the indexed row data and
-	// reports which tables changed and how often. The giveaway is that its
-	// handler has to apply the profile's DenyTables to be safe — an endpoint
-	// needing data-profile deny rules is not a health read. It is tiered with
-	// query execution, and costs a caller nothing extra: the page that renders
-	// it also reads /api/events.
 	{"GET", "/api/status", ext.PermStatusRead},
 	{"GET", "/api/coverage", ext.PermStatusRead},
 	{"GET", "/api/capture-status", ext.PermStatusRead},
@@ -84,7 +77,6 @@ var apiRoutePerms = []routePerm{
 	// /api/status: the handler withholds each name the session's data scope
 	// refuses and keeps the counts, the same rule under the same tier.
 	{"GET", "/api/uncaptured-tables", ext.PermStatusRead},
-	{"GET", "/api/activity", ext.PermQueryExecute},
 	{"GET", "/api/events", ext.PermQueryExecute},
 	// The events list's change probe (#1801): whoever may read the list may
 	// ask whether it changed, and nobody else.

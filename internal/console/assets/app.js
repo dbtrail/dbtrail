@@ -1657,12 +1657,7 @@ function ovFrame() {
   f.useSlot = el("div");
   f.useSlot.append(f.use.section);
   v.append(f.useSlot);
-  // One grey line under the drawing (#1860): does the copy carry life? Two
-  // numbers over the index's own window, filled by fillOvActivity; the
-  // per-table figures live in the fold below.
-  f.actLine = el("div", { class: "ov-actline" });
-  v.append(f.actLine);
-  // The restore window, the table-coverage check and the four tiles are
+  // The restore window, the table-coverage check and the two tiles are
   // the page's recovery-era half. They keep their slots and fills (the
   // live-refresh loop and every fill are untouched), but hang under one
   // closed fold at the foot of the page: the flow above answers the
@@ -1675,25 +1670,19 @@ function ovFrame() {
 
   const stats = el("div", { class: "ov-stats" });
   f.statTotal = ovStatPending("changes indexed", "all time · estimate");
-  f.statDeletes = ovStatPending("deletes", "");
-  f.statTables = ovStatPending("tables touched", "");
   f.statLatest = ovStatPending("most recent change", "point in time (UTC)");
-  stats.append(f.statTotal, f.statDeletes, f.statTables, f.statLatest);
+  stats.append(f.statTotal, f.statLatest);
 
-  // Where the tiles say their figures could not be refreshed, above the
-  // notes the aggregate itself carries (which fillOvActivity clears).
+  // Where the tiles say their figures could not be refreshed.
   f.sideSlot = el("div");
-  // Whatever the aggregate could not account for lands here, at the point of
-  // use — between the tiles and the panels, where the old layout put it.
-  f.warnSlot = el("div");
 
-  // The two panels carry the home's tint layer (#1421): violet and sun, the
-  // structure tints. The pill is the eyebrow — the title stays an h2 for the
-  // document outline; the pill is presentation, not the heading.
+  // The panel carries the home's tint layer (#1421): violet, a structure
+  // tint. The pill is the eyebrow — the title stays an h2 for the document
+  // outline; the pill is presentation, not the heading.
   //
-  // Both hang under a closed fold of one line each (#1860): the drawing
-  // above is the page's answer, and two tinted panels with an Undo per row
-  // under it read as an undo list with a diagram on top. The fold's line
+  // It hangs under a closed fold of one line (#1860): the drawing above is
+  // the page's answer, and a tinted panel with an Undo per row under it
+  // reads as an undo list with a diagram on top. The fold's line
   // carries the count, so what is inside is never in doubt; Undo stays
   // where it was, one click down (D6). Fold state lives on the node.
   f.recentPanel = el("section", { class: "ov-panel tcard-violet" });
@@ -1711,27 +1700,9 @@ function ovFrame() {
   ovFoldRemember(f.recentFold, "recent");
   v.append(f.recentFold);
 
-  f.tablesPanel = el("section", { class: "ov-panel tcard-sun" });
-  // The "as of" stamp has a slot of its own, so a refill replaces it instead
-  // of adding a second one beside it.
-  f.tablesAsOf = el("span");
-  f.tablesHead = el("div", { class: "ov-panel-head" },
-    el("h2", { class: "ov-panel-title" }, el("span", { class: "tag-pill", text: "Activity by table" })), f.tablesAsOf);
-  f.tablesPanel.append(f.tablesHead);
-  f.tablesBody = el("div", { class: "ov-tables" });
-  f.tablesBody.append(ovSkelLines(4), el("div", { class: "skel-note", text: "computing window activity…" }));
-  f.tablesPanel.append(f.tablesBody);
-  f.tablesFoot = el("div", { class: "ov-coverage" });
-  f.tablesPanel.append(f.tablesFoot);
-  f.tablesFold = el("details", { class: "ov-fold ov-fold-panel ov-fold-tables" });
-  f.tablesSummary = el("summary", { text: "Activity by table" });
-  f.tablesFold.append(f.tablesSummary, f.tablesPanel);
-  ovFoldRemember(f.tablesFold, "tables");
-  v.append(f.tablesFold);
-
   const fold = el("details", { class: "ov-fold ov-fold-figures" });
   fold.append(el("summary", { text: "Restore window and figures" }));
-  fold.append(f.covSlot, f.uncapSlot, stats, f.sideSlot, f.warnSlot);
+  fold.append(f.covSlot, f.uncapSlot, stats, f.sideSlot);
   v.append(fold);
   viewEnter();
   return f;
@@ -1836,31 +1807,6 @@ function ovFoldRemember(details, name, openByDefault) {
   });
 }
 
-// ovSinceLabel says where a window starts, at a glance: the time alone when
-// it opened today, "yesterday" when it opened the day before, the date
-// otherwise. Both stamps are the index's own, in UTC.
-function ovSinceLabel(since, until) {
-  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(String(since || ""));
-  if (!m) return "";
-  const day = (stamp) => String(stamp || "").slice(0, 10);
-  const untilDay = day(until);
-  if (m[1] === untilDay) return "Since " + m[2];
-  const prev = new Date(Date.parse(untilDay + "T00:00:00Z") - 86400000);
-  if (untilDay && m[1] === prev.toISOString().slice(0, 10)) return "Since " + m[2] + " yesterday";
-  return "Since " + m[1] + " " + m[2];
-}
-
-// ovActivityLine is the one grey line's text: two numbers over the index's
-// window, or the zero said in words with the hour it holds since.
-function ovActivityLine(activity) {
-  if (!activity) return "";
-  const since = ovSinceLabel(activity.since, activity.until);
-  const total = Number(activity.total) || 0;
-  const tables = Number(activity.tables) || 0;
-  if (total === 0) return "No changes" + (since ? " " + since.charAt(0).toLowerCase() + since.slice(1) : "");
-  return (since ? since + " · " : "") + total.toLocaleString("en-US") + (total === 1 ? " change" : " changes") + " in " + tables + (tables === 1 ? " table" : " tables");
-}
-
 // ovAgeText is the copy's age from its own stamp, so the large number keeps
 // moving between two reads of the listing (a still number reads as a frozen
 // page). The stamp is the index's, in UTC, with or without a zone suffix.
@@ -1879,82 +1825,6 @@ function ovTickAges(root) {
     if (text && n.textContent !== text) n.textContent = text;
   }
 }
-
-// fillOvActivity fills every window-scoped surface from the /api/activity
-// materialization (#1352): the deletes/tables tiles, the warning items, the
-// Activity-by-table panel, and the window footer. The aggregate is precomputed
-// server-side, so its refreshed_at is rendered wherever its numbers appear
-// ("as of …") — a stale count must be visibly stale, never silently so. The
-// window is the LIVE RETENTION, derived server-side from the oldest live
-// partition; the label travels in the payload so the tile and the measurement
-// can never disagree.
-function fillOvActivity(f, activity) {
-  // Identical bytes leave the panel alone (#1801). The aggregate behind it is
-  // a server-side cache with a 30-minute life, so a busy server sends the
-  // same payload turn after turn; rebuilding it every five seconds would
-  // destroy and recreate the same rows ~720 times an hour. Each row is a
-  // link, so one swapped between a mouse going down and coming up loses the
-  // click, and hovering it would flicker. fillOvEvents does the same.
-  const key = JSON.stringify(activity || null);
-  if (key === f.activityKey) return;
-  f.activityKey = key;
-  const deletes = activity ? activity.deletes : null;
-  const tableCount = activity ? activity.tables : null;
-  const refreshed = (activity && activity.refreshed_at) || "";
-  // Tiles carry the compact time-of-day stamp; the footer carries the full
-  // one. Both are labeled: the freshness clock beside them (nowClock) says
-  // "UTC", and an unlabeled sibling would read as a different zone (#1354).
-  const asofShort = refreshed ? " · as of " + (refreshed.length > 11 ? refreshed.slice(11) : refreshed) + " UTC" : "";
-  // The window scope printed on every window-scoped tile. "partial" is not
-  // decoration: the server sets complete=false when the counts are knowably a
-  // floor, and a narrower number under a wider label is the bug this page is
-  // fixing.
-  const winScope = activity ? (activity.label + (activity.complete ? "" : " · partial") + asofShort) : "unavailable";
-  f.statDeletes.replaceWith(f.statDeletes =
-    ovStat(deletes === null ? "—" : String(deletes), "deletes", deletes ? "danger" : "", winScope));
-  f.statTables.replaceWith(f.statTables =
-    ovStat(tableCount === null ? "—" : String(tableCount), "tables touched", "", winScope));
-
-  clear(f.warnSlot);
-  if (!activity) {
-    f.warnSlot.append(el("div", { class: "warn-item" }, icon("warn"),
-      el("span", { text: "The window counts could not be loaded, so the deletes and tables tiles show no number rather than a zero." })));
-  }
-  (activity && activity.notes || []).forEach((n) => {
-    f.warnSlot.append(el("div", { class: "warn-item" }, icon("warn"), el("span", { text: n })));
-  });
-
-  clear(f.tablesAsOf);
-  if (refreshed) {
-    f.tablesAsOf.append(el("span", { class: "cov-asof", text: "as of " + utcLabel(refreshed) }));
-  }
-  if (f.tablesSummary) f.tablesSummary.textContent = ovFoldLine("Activity by table", tableCount === null ? "" : tableCount === 0 ? "no changes in this window" : tableCount + (tableCount === 1 ? " table" : " tables"), "");
-  if (f.actLine) {
-    clear(f.actLine);
-    const line = ovActivityLine(activity);
-    if (line) f.actLine.append(el("a", { class: "ov-actline-link", href: "/events", text: line + " ›", onclick: (e) => { e.preventDefault(); navigate("events"); } }));
-  }
-  clear(f.tablesBody);
-  const tables = (activity && activity.top_tables || []).map((t) => ({
-    key: t.schema + "." + t.table, insert: t.insert, update: t.update, delete: t.delete, total: t.total,
-  }));
-  if (!tables.length) {
-    f.tablesBody.append(el("div", { class: "ev-empty", text: activity ? "No changes in this window." : "Window activity unavailable." }));
-  }
-  tables.forEach((s) => f.tablesBody.append(ovTableRow(s, activity && activity.since)));
-  // The footer states the AGGREGATE's own bounds. It must never fall back to
-  // status.coverage.oldest (#679/#684/#686): that is the index's whole history,
-  // and printing it under "window" would attribute counts from one span to a
-  // far wider one — the same class of mismatch as the tiles' (#1300).
-  clear(f.tablesFoot);
-  f.tablesFoot.append(
-    el("span", { text: "window (UTC)" }), " ",
-    el("b", { text: activity ? activity.since : "—", title: activity ? utcLocalTitle(activity.since) || null : null }),
-    " → ",
-    el("b", { text: activity ? activity.until : "—", title: activity ? utcLocalTitle(activity.until) || null : null }),
-    el("span", { text: activity ? " · " + winScope : "" }));
-}
-
 
 // ── The copy flow ────────────────────────────────────────────────────────────
 //
@@ -3553,8 +3423,8 @@ function renderOverview() {
   api("/api/status").catch(() => null)
     .then((status) => { if (live()) fillOvStatus(f, status); });
   // Only the Recent-changes list needs event ROWS, and it renders 8 of them.
-  // The tiles' counts come from /api/activity (#1300), so this page never
-  // pulls row images to derive four integers. The list is read by the loop
+  // The page counts nothing over the window: the all-time tile is the index's
+  // own estimate (/api/status). The list is read by the loop
   // that keeps the page current, which asks first for the newest event id:
   // read in that order, the list holds at least everything that id counts,
   // and the next change moves the id.
@@ -3567,12 +3437,6 @@ function renderOverview() {
   loadOvFlow(f, live, coverageP).catch((err) => console.error("flow paint failed", err));
   loadOvStrip(f, live).catch((err) => console.error("strip paint failed", err));
   loadOvUncaptured(f, live);
-  // null on failure, never {} — the fill renders "—" for a missing aggregate.
-  // A zero-filled fallback would print "0 deletes", an assurance nobody
-  // measured. No period parameter: the server derives the window from the
-  // live retention (#1352) and names it in the payload's label.
-  api("/api/activity").catch((err) => { console.error("activity fetch failed", err); return null; })
-    .then((activity) => { if (live()) fillOvActivity(f, activity); });
 }
 
 // addServerCard is the first step on a console that lists no server yet
@@ -3823,9 +3687,8 @@ function ovVisibilityChanged() { if (!document.hidden && ovLive) ovLive.wake(); 
 
 // watchOverview keeps a painted Overview current. Every 5 s it asks for the
 // newest event id (GET /api/events/head, no row data), and only when that
-// moved does it read the Recent changes list and the window counts again, so
-// an Overview left open does not re-read, and audit, the same eight rows
-// every five seconds. Coverage and the all-time count are read again when
+// moved does it read the Recent changes list again, so an Overview left
+// open does not re-read, and audit, the same eight rows every five seconds. Coverage and the all-time count are read again when
 // the first change lands on an empty index and otherwise at most once a
 // minute: a profile-restricted session records a refusal on every coverage
 // read, and the coverage card lists every backup location. A hidden tab asks
@@ -3847,15 +3710,15 @@ function watchOverview(f, live, firstRun) {
     clear(f.liveSlot);
     if (msg) f.liveSlot.append(el("div", { class: "warn-item ov-live-note" }, icon("warn"), el("span", { text: msg })));
   };
-  // The tiles and the table activity have reads of their own, and they fail
-  // on their own: the rows can be arriving while the counts are not. Their
-  // last good figures stay on screen, and this says they are from before,
+  // The all-time tile has a read of its own, and it fails on its own: the
+  // rows can be arriving while the total is not. Its last good figure stays
+  // on screen, and this says it is from before,
   // the way the coverage card does. Without it the all-time total sat there
   // labelled as current for as long as those reads kept failing.
   const sideNote = (msg) => {
     clear(f.sideSlot);
     if (msg) f.sideSlot.append(el("div", { class: "warn-item ov-side-note" }, icon("warn"),
-      el("span", { text: "The counts above could not be refreshed: " + msg + ". They are the ones read at " + sideOkAt + "." })));
+      el("span", { text: "The total above could not be refreshed: " + msg + ". It is the one read at " + sideOkAt + "." })));
   };
   const failed = (err) => {
     const msg = (err && err.message) || String(err);
@@ -3922,13 +3785,7 @@ function watchOverview(f, live, firstRun) {
       if (prev === null) return;
       const changed = next !== prev;
       const now = Date.now();
-      if (changed) {
-        askList = "change";
-        apiWithin("/api/activity", OV_REQUEST_MS).then((a) => {
-          if (!on()) return;
-          if (a) { fillOvActivity(f, a); sideOkAt = nowClock(); sideNote(""); }
-        }, (err) => { console.error("activity refresh failed", err); if (on()) sideNote((err && err.message) || String(err)); });
-      }
+      if (changed) askList = "change";
       // The two expensive reads: on the first change to an index that had
       // none (the window goes from "nothing to restore" to a real one), and
       // otherwise rate-limited while changes arrive, on a long interval when
@@ -4099,18 +3956,15 @@ function uncapturedRow(t) {
 
 // buildOverview renders the dashboard from already-fetched payloads — the
 // composition seam the e2e fixture drives directly, sharing every fill with
-// the progressive path above. status and activity may each be null (their
-// fetches are best-effort); when one is, the tiles it feeds read "—". Every
-// tile carries its OWN scope line, because these numbers get screenshotted
-// into incident channels without the page around them (#1300): "N deletes"
-// beside "N changes indexed" invites reading the first as a share of the
-// second, and before this they were different denominators.
-function buildOverview(status, eventsData, coverage, activity, uncaptured) {
+// the progressive path above. status may be null (its fetch is best-effort);
+// the all-time tile then reads "—". Every tile carries its OWN scope line,
+// because these numbers get screenshotted into incident channels without the
+// page around them (#1300).
+function buildOverview(status, eventsData, coverage, uncaptured) {
   const f = ovFrame();
   fillOvStatus(f, status);
   fillOvEvents(f, eventsData, null);
   fillOvCoverage(f, coverage);
-  fillOvActivity(f, activity);
   fillOvUncaptured(f, uncaptured || null);
 }
 
@@ -4166,28 +4020,6 @@ function ovEventRow(e) {
   row.undoButton = undo;
   return row;
 }
-
-function ovTableRow(s, winSince) {
-  // The click carries the widget's OWN window (#1414): the count was computed
-  // over the live retention, so the search it opens states that bound — as a
-  // visible since: token, not a hidden field — and the server's window proof
-  // (windowSatisfiedLive) can then skip the archive scan that structurally
-  // cannot contribute. Spelled RFC3339 (T...Z) because the smart-search
-  // tokenizer splits on spaces.
-  const q = s.key + (winSince ? " since:" + winSince.replace(" ", "T") + "Z" : "");
-  const row = el("a", { class: "ov-tablerow",
-    onclick: () => navigate("events", { q }) });
-  row.append(el("span", { class: "ov-tname", text: s.key }));
-  const bar = el("span", { class: "ov-bar" });
-  if (s.insert) bar.append(el("span", { class: "ov-seg i", style: "flex:" + s.insert }));
-  if (s.update) bar.append(el("span", { class: "ov-seg u", style: "flex:" + s.update }));
-  if (s.delete) bar.append(el("span", { class: "ov-seg d", style: "flex:" + s.delete }));
-  row.append(bar);
-  row.append(el("span", { class: "ov-total", text: String(s.total) }));
-  return row;
-}
-
-// ── Events ─────────────────────────────────────────────────────────────────
 
 function renderEvents(params) {
   const v = VIEW(); clear(v);

@@ -81,7 +81,7 @@ func TestEventsHead(t *testing.T) {
 // to a year, so an ALTER holding the metadata lock (rotation drops a
 // partition) or an index host that went away can hold this open for minutes.
 // The page asks every five seconds and shows stale rows while it waits, so a
-// rejection is what it needs. Precedent: activityComputeTimeout.
+// rejection is what it needs.
 func TestEventsHeadIsBounded(t *testing.T) {
 	if eventsHeadTimeout <= 0 || eventsHeadTimeout > 30*time.Second {
 		t.Fatalf("eventsHeadTimeout = %v, want a short positive bound", eventsHeadTimeout)

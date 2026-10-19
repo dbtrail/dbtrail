@@ -2231,44 +2231,45 @@ try {
   // Scenario 14c — the Overview against the LIVE daemon (#1300). The fixture
   // scenario below drives buildOverview directly, so it cannot catch a route
   // that was never registered, an authz table that refuses it, or a JSON shape
-  // that drifted from the struct. This one renders the real page: two tiles
-  // must come back carrying a real period, and the window line must name the
-  // aggregate's own bounds rather than the "—" a failed fetch would leave.
+  // that drifted from the struct. This one renders the real page: the two
+  // tiles must come back with their scope lines, and nothing from the window
+  // aggregate may be left on the page (that read was removed: it scanned
+  // every retained event to print a few figures; the node test
+  // TestOverviewKeepsItselfCurrent pins that the page never asks for it).
   await page.evaluate(() => navigate("overview"));
   // Wait on the TILES, not on the scope lines: waiting on the thing under test
   // turns a missing scope into a driver timeout that aborts the rest of the run
   // instead of one legible failure.
-  await page.waitForFunction(() => document.querySelectorAll(".ov-stat").length === 4);
+  await page.waitForFunction(() => document.querySelectorAll(".ov-stat").length === 2);
   // The coverage card fills independently (#1352); its freshness clock is part
   // of what this scenario pins, so wait for that fill too.
   await page.waitForFunction(() => !!document.querySelector(".cov-card .cov-asof"));
-  // The window tiles fill from /api/activity, a third independent fetch: the
-  // tiles exist with an empty scope line until it answers. Bounded and
-  // caught, so a scope that never arrives is still the legible failures below
+  // The tiles' scope lines are written as the tiles fill. Bounded and
+  // caught, so a scope that never arrives is still the legible failure below
   // and not a driver timeout.
   await page.waitForFunction(() => Array.from(document.querySelectorAll(".ov-stat-scope")).every((n) => n.textContent.trim() !== ""),
     undefined, { timeout: 30000 }).catch(() => {});
   const ovLive = await page.evaluate(() => ({
     scopes: Array.from(document.querySelectorAll(".ov-stat")).map((n) => (n.querySelector(".ov-stat-scope") || {}).textContent || ""),
-    win: (document.querySelector(".ov-coverage") || {}).textContent || "",
-    warns: Array.from(document.querySelectorAll(".warn-item")).map((n) => n.textContent),
+    keys: Array.from(document.querySelectorAll(".ov-stat-k")).map((n) => n.textContent),
+    leftovers: document.querySelectorAll(".ov-tablerow, .ov-actline, .ov-fold-tables, .tcard-sun").length,
     asof: (document.querySelector(".cov-card .cov-asof") || {}).textContent || "",
     tzChips: document.querySelectorAll(".tz-chip").length,
   }));
   // #1421: the tint layer is RENDERED, not merely classed. Asserted as
   // computed background because that is the only thing the operator sees — a
   // cascade rule beating the tint would leave the classes in the DOM and the
-  // panels white, and no grep can see a cascade. The two panels must differ
-  // from each other (violet vs sun) and from plain white; the pill eyebrow
-  // must render on a distinct surface from its card.
+  // panel white, and no grep can see a cascade. The panel must differ from
+  // plain white; the pill eyebrow must render on a distinct surface from its
+  // card.
   const tint = await page.evaluate(() => {
     const bg = (sel) => { const n = document.querySelector(sel); return n ? getComputedStyle(n).backgroundColor : null; };
-    return { violet: bg(".ov-panel.tcard-violet"), sun: bg(".ov-panel.tcard-sun"),
+    return { violet: bg(".ov-panel.tcard-violet"),
              pill: bg(".ov-panel.tcard-violet .tag-pill"), white: "rgb(255, 255, 255)" };
   });
-  (tint.violet && tint.sun && tint.violet !== tint.white && tint.sun !== tint.white && tint.violet !== tint.sun)
-    ? ok("overview (live): the two panels render the home tint layer (violet ≠ sun ≠ white)")
-    : bad("overview (live): the two panels render the home tint layer (violet ≠ sun ≠ white)", JSON.stringify(tint));
+  (tint.violet && tint.violet !== tint.white)
+    ? ok("overview (live): the Recent changes panel renders the home tint layer (violet, not white)")
+    : bad("overview (live): the Recent changes panel renders the home tint layer (violet, not white)", JSON.stringify(tint));
   (tint.pill && tint.pill !== tint.violet)
     ? ok("overview (live): the pill eyebrow renders on its own surface inside the tinted card")
     : bad("overview (live): the pill eyebrow renders on its own surface inside the tinted card", JSON.stringify(tint));
@@ -2288,8 +2289,7 @@ try {
   // answers for the class whether or not live rows have rendered yet.
   const tintText = await page.evaluate(() => {
     const vp = document.querySelector(".ov-panel.tcard-violet");
-    const sp = document.querySelector(".ov-panel.tcard-sun");
-    if (!vp || !sp) return null;
+    if (!vp) return null;
     const cs = getComputedStyle;
     // Canvas pixels, not string parsing: the ink ramp computes to oklch(...)
     // strings, which no rgb() regex can read — the first draft measured 0 for
@@ -2320,45 +2320,31 @@ try {
       parent.appendChild(n);
       return n;
     };
-    const vbg = cs(vp).backgroundColor, sbg = cs(sp).backgroundColor;
+    const vbg = cs(vp).backgroundColor;
     const pk = probe(vp, "ov-ev-pk", "span");
     const ev = probe(vp, "ov-ev");
-    const cov = probe(sp, "ov-coverage");
-    const trow = probe(sp, "ov-tablerow");
     const out = {
       pkRatio: ratio(cs(pk).color, vbg),
       evDivider: ratio(cs(ev).borderTopColor, vbg),
-      covRatio: ratio(cs(cov).color, sbg),
-      trowDivider: ratio(cs(trow).borderTopColor, sbg),
     };
-    [pk, ev, cov, trow].forEach((n) => n.remove());
+    [pk, ev].forEach((n) => n.remove());
     return out;
   });
-  (tintText && tintText.pkRatio >= 4.5 && tintText.covRatio >= 4.5)
-    ? ok("overview (live): body text on the tinted panels holds the 4.5:1 floor as rendered")
-    : bad("overview (live): body text on the tinted panels holds the 4.5:1 floor as rendered", JSON.stringify(tintText));
+  (tintText && tintText.pkRatio >= 4.5)
+    ? ok("overview (live): body text on the tinted panel holds the 4.5:1 floor as rendered")
+    : bad("overview (live): body text on the tinted panel holds the 4.5:1 floor as rendered", JSON.stringify(tintText));
   // 1.15 = the hairline idiom's own floor (--line-soft on white is 1.17).
   // Deleting the tint-aware divider override lands the violet list at 1.01 —
   // no dividers at all — and rings here, not in any token test.
-  (tintText && tintText.evDivider >= 1.15 && tintText.trowDivider >= 1.15)
-    ? ok("overview (live): row dividers stay visible on the tinted panels")
-    : bad("overview (live): row dividers stay visible on the tinted panels", JSON.stringify(tintText));
+  (tintText && tintText.evDivider >= 1.15)
+    ? ok("overview (live): row dividers stay visible on the tinted panel")
+    : bad("overview (live): row dividers stay visible on the tinted panel", JSON.stringify(tintText));
   ovLive.scopes.every((s) => s.trim() !== "")
     ? ok("overview (live): every rendered tile carries a scope line")
     : bad("overview (live): every rendered tile carries a scope line", JSON.stringify(ovLive.scopes));
-  // The window is the live retention (#1352): "live retention · ~N h/d" when a
-  // dated partition names the floor, the stated 24 h fallback otherwise.
-  (ovLive.scopes.filter((s) => /^(live retention · ~\d+ [hd]|last 24 h)/.test(s)).length === 2)
-    ? ok("overview (live): the window tiles carry a real window from /api/activity")
-    : bad("overview (live): the window tiles carry a real window from /api/activity", JSON.stringify(ovLive));
-  // The aggregate is a server-side materialization (#1352): its freshness must
-  // be rendered with its numbers, or a stale count reads as live.
-  (ovLive.scopes.filter((s) => / · as of \d{2}:\d{2}:\d{2} UTC/.test(s)).length === 2)
-    ? ok("overview (live): the window tiles disclose the aggregate's refresh time, labeled UTC")
-    : bad("overview (live): the window tiles disclose the aggregate's refresh time, labeled UTC", JSON.stringify(ovLive));
-  (/window \(UTC\)\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(ovLive.win) && !ovLive.warns.some((w) => /window counts could not be loaded/.test(w)))
-    ? ok("overview (live): the window line states the aggregate's own bounds and their zone")
-    : bad("overview (live): the window line states the aggregate's own bounds and their zone", JSON.stringify(ovLive));
+  (ovLive.keys.join("|") === "changes indexed|most recent change" && ovLive.leftovers === 0)
+    ? ok("overview (live): two tiles, and no window aggregate left on the page")
+    : bad("overview (live): two tiles, and no window aggregate left on the page", JSON.stringify(ovLive));
   // Timezone discipline (#1354): the freshness clock is the labeled UTC clock
   // — nowClock() was toLocaleTimeString(), which put an unlabeled browser-local
   // time directly above data timestamps that are all UTC, so the same instant
@@ -2372,30 +2358,14 @@ try {
     : bad("overview (live): timestamp-bearing sections carry a UTC chip", `tz chips: ${ovLive.tzChips}`);
 
   // Scenario 15 — Overview scope honesty (#686 + #1300): fixture-drive the REAL
-  // buildOverview and pin that (a) every tile states its OWN scope, (b) the
-  // period-scoped numbers come from the /api/activity aggregate rather than
-  // from the handful of events the Recent-changes list renders, and (c) the
-  // window line uses the AGGREGATE's bounds — a reintroduced
-  // status.coverage.oldest fallback (#679/#684) fails here and nowhere else,
-  // since the Go suite never renders app.js.
-  //
-  // The fixture is built so the two sources DISAGREE on purpose: the events
-  // array holds 1 delete across 1 table, the aggregate says 17 deletes across
-  // 5. A tile that recomputes from the events (the pre-#1300 behaviour) prints
-  // 1 and 1 and fails.
+  // buildOverview and pin that every tile states its OWN scope, that the
+  // all-time tile says it is an estimate, and that a failed status read shows
+  // no number rather than a zero. The fixture's status.coverage.oldest is a
+  // decade old: it must never reach a tile.
   const mkev = (ts, type, pk) => ({ event_timestamp: ts, schema_name: "ovfix", table_name: "t", event_type: type, pk_values: pk, changed_columns: [] });
   const ovFix = {
     events: [mkev("2026-03-01 10:30:00", "DELETE", "9"), mkev("2026-03-01 10:00:00", "INSERT", "8")],
-    // oldest is a decade before the aggregate's window: if it ever reaches the
-    // window line or a tile, the number is attributed to the wrong span.
     status: { coverage: { oldest: "2020-01-01 00:00:00", newest: "2026-06-30 00:00:00", total_events: 123456 }, total_events_estimate: 3121 },
-    activity: {
-      label: "live retention · ~24 h", refreshed_at: "2026-03-02 09:00:00",
-      since: "2026-03-01 09:00:00", until: "2026-03-02 09:00:00",
-      total: 640, inserts: 400, updates: 223, deletes: 17, other: 0,
-      tables: 5, complete: true,
-      top_tables: [{ schema: "ovfix", table: "orders", insert: 300, update: 200, delete: 10, total: 510 }],
-    },
   };
 
   const ov = await page.evaluate((fx) => {
@@ -2404,48 +2374,31 @@ try {
       k: (n.querySelector(".ov-stat-k") || {}).textContent || "",
       scope: (n.querySelector(".ov-stat-scope") || {}).textContent || "",
     }));
-    const notes = () => Array.from(document.querySelectorAll(".warn-item")).map((n) => n.textContent);
-    buildOverview(fx.status, { events: fx.events }, null, fx.activity);
-    const full = {
-      tiles: readTiles(),
-      win: (document.querySelector(".ov-coverage") || {}).textContent || "",
-    };
-    // Degraded arms, rendered through the SAME real function: a partial
-    // aggregate must SAY partial on the tiles it scopes (a narrower number
-    // under a wider label is the bug), and a failed aggregate must render "—"
-    // rather than a zero nobody measured.
-    buildOverview(fx.status, { events: fx.events }, null,
-      Object.assign({}, fx.activity, { complete: false, truncated: true, notes: ["This index has more than 20000 table/event-type groups in the window; the counts below are a floor, not the total."] }));
-    const partial = { tiles: readTiles(), notes: notes() };
-    buildOverview(fx.status, { events: fx.events }, null, null);
-    const missing = { tiles: readTiles(), notes: notes() };
-    return { full, partial, missing };
+    buildOverview(fx.status, { events: fx.events }, null);
+    const full = { tiles: readTiles(), page: (document.getElementById("view") || document.body).textContent || "" };
+    buildOverview(null, { events: fx.events }, null);
+    const missing = { tiles: readTiles() };
+    return { full, missing };
   }, ovFix);
 
   const tileBy = (tiles, key) => tiles.find((t) => t.k === key) || { v: "", k: "", scope: "" };
-  (ov.full.tiles.length === 4 && ov.full.tiles.every((t) => t.scope.trim() !== ""))
+  (ov.full.tiles.length === 2 && ov.full.tiles.every((t) => t.scope.trim() !== ""))
     ? ok("overview: every tile states its own scope")
     : bad("overview: every tile states its own scope", JSON.stringify(ov.full.tiles));
-  (tileBy(ov.full.tiles, "deletes").v === "17" && tileBy(ov.full.tiles, "deletes").scope.includes("live retention") && tileBy(ov.full.tiles, "deletes").scope.includes("as of 09:00:00 UTC"))
-    ? ok("overview: the deletes tile is the server aggregate, labelled with its window and freshness")
-    : bad("overview: the deletes tile is the server aggregate, labelled with its window and freshness", JSON.stringify(tileBy(ov.full.tiles, "deletes")));
-  (tileBy(ov.full.tiles, "tables touched").v === "5" && tileBy(ov.full.tiles, "tables touched").scope.includes("live retention"))
-    ? ok("overview: the tables-touched tile is the server aggregate, labelled with its window")
-    : bad("overview: the tables-touched tile is the server aggregate, labelled with its window", JSON.stringify(tileBy(ov.full.tiles, "tables touched")));
   // total_events_estimate is information_schema TABLE_ROWS — an InnoDB
-  // estimate. It sits beside three exact counts, so the tile has to say so.
-  (tileBy(ov.full.tiles, "changes indexed").scope.includes("all time") && /estimate/i.test(tileBy(ov.full.tiles, "changes indexed").scope))
+  // estimate, so the tile has to say so.
+  (tileBy(ov.full.tiles, "changes indexed").v === "3121" && tileBy(ov.full.tiles, "changes indexed").scope.includes("all time") && /estimate/i.test(tileBy(ov.full.tiles, "changes indexed").scope))
     ? ok("overview: the all-time tile declares both its scope and that it is an estimate")
     : bad("overview: the all-time tile declares both its scope and that it is an estimate", JSON.stringify(tileBy(ov.full.tiles, "changes indexed")));
-  (ov.full.win.includes("2026-03-01 09:00:00") && ov.full.win.includes("2026-03-02 09:00:00") && !ov.full.win.includes("2020-01-01"))
-    ? ok("overview: window line uses the aggregate's own bounds")
-    : bad("overview: window line uses the aggregate's own bounds", ov.full.win);
-  (tileBy(ov.partial.tiles, "deletes").scope.includes("partial") && ov.partial.notes.some((n) => /floor/.test(n)))
-    ? ok("overview: an incomplete window is marked partial on the tile and explained")
-    : bad("overview: an incomplete window is marked partial on the tile and explained", JSON.stringify(ov.partial));
-  (tileBy(ov.missing.tiles, "deletes").v === "—" && tileBy(ov.missing.tiles, "tables touched").v === "—" && ov.missing.notes.length > 0)
-    ? ok("overview: a failed aggregate shows no number, never a zero")
-    : bad("overview: a failed aggregate shows no number, never a zero", JSON.stringify(ov.missing));
+  (tileBy(ov.full.tiles, "most recent change").v === "2026-03-01 10:30:00")
+    ? ok("overview: the most-recent-change tile is the newest listed change")
+    : bad("overview: the most-recent-change tile is the newest listed change", JSON.stringify(tileBy(ov.full.tiles, "most recent change")));
+  (!ov.full.page.includes("2020-01-01") && !/Activity by table|tables touched/.test(ov.full.page))
+    ? ok("overview: no tile or line carries the index's whole history or a window aggregate")
+    : bad("overview: no tile or line carries the index's whole history or a window aggregate", ov.full.page.slice(0, 400));
+  (tileBy(ov.missing.tiles, "changes indexed").v === "—")
+    ? ok("overview: a failed status read shows no number, never a zero")
+    : bad("overview: a failed status read shows no number, never a zero", JSON.stringify(ov.missing));
 
   // Scenario 15b — Baselines page live (#686, moved off Storage by #1384):
   // with the daemon opted in (BINTRAIL_CONSOLE_BASELINE_TRIGGER=1) and this
@@ -4840,7 +4793,7 @@ try {
   // be relied on at WCAG's LARGE-text bar of 3:1 and never at the 4.5:1 body
   // bar. (Its violet stop alone would clear 4.5:1; that buys nothing, the
   // other stops share the sweep.) A tile that takes the gradient without being large text is
-  // unreadable, and the deletes tile additionally carries the semantic
+  // unreadable, and a `danger` tile additionally carries the semantic
   // --delete that the brand palette must never repaint.
   //
   // ovStat is called for real rather than synthesised: the gate lives inside
@@ -4848,9 +4801,9 @@ try {
   //
   // Two things this deliberately does NOT reach, so nobody reads more into a
   // green run than it earns. The scenario passes "danger" itself, so it proves
-  // the GATE honours the modifier and not that fillOvActivity still sends one
-  // — drop that argument at its call site and the deletes tile takes the
-  // gradient with every check green. And the tiles are mounted on document.body
+  // the GATE honours the modifier, not that any Overview tile sends one (none
+  // does today: the deletes tile that did was removed with the window
+  // aggregate). And the tiles are mounted on document.body
   // rather than inside a rendered Overview, so a rule scoped to an .ov-stats
   // or .view ancestor is invisible here in both directions. The wordmark
   // assertion below has neither limit: it reads the real element in place.
@@ -4981,8 +4934,8 @@ try {
   // Both halves matter. No gradient is the gate doing its job; a colour that
   // is still --delete is the cascade doing its job if the gate ever stops.
   (brand.dangerImage === "none" && brand.dangerColor === brand.deleteRef)
-    ? ok("brand paint: the deletes tile keeps the semantic --delete and takes no gradient")
-    : bad("brand paint: the deletes tile keeps the semantic --delete and takes no gradient", JSON.stringify(brand));
+    ? ok("brand paint: a danger tile keeps the semantic --delete and takes no gradient")
+    : bad("brand paint: a danger tile keeps the semantic --delete and takes no gradient", JSON.stringify(brand));
   (brand.smallImage === "none" && brand.smallColor !== transparent)
     ? ok("brand paint: the 19px/500 timestamp tile is left as plain readable ink")
     : bad("brand paint: the 19px/500 timestamp tile is left as plain readable ink", JSON.stringify(brand));

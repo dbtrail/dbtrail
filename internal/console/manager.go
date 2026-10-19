@@ -74,12 +74,6 @@ type bundle struct {
 	// is present AND archives are enabled AND no RBAC profile is active. See
 	// the rationale on newBundleDerived.
 	baselineConfigured bool
-	// activity is this server's materialized Overview aggregate (#1352). It
-	// lives on the bundle so evicting the server drops the materialization
-	// with the connection. The POINTER is what rebuildDerived carries across a
-	// derived-only rebuild — the bundle snapshot stays immutable; the cache's
-	// interior mutability is its own, behind its own lock.
-	activity *activityCache
 }
 
 // connManager owns the per-server connection lifecycle: lazy open on first
@@ -355,7 +349,6 @@ func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActiv
 		baselineSrc:         src,
 		baselineFallbackSrc: fallback,
 		baselineConfigured:  src != "" && !noArchive,
-		activity:            newActivityCache(),
 	}
 }
 
@@ -530,9 +523,6 @@ func (cm *connManager) rebuildDerived(entry ServerEntry) {
 	nb.engine = old.engine
 	nb.resolver = old.resolver
 	nb.resolverUnavailable = old.resolverUnavailable
-	// A baseline/no-archive edit changes nothing the activity materialization
-	// read (live binlog_events under this same db), so keep it warm.
-	nb.activity = old.activity
 	cm.bundles[entry.ID] = nb
 }
 

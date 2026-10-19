@@ -61,13 +61,9 @@ const advance = async (ms) => {
 // any, is released.
 const servers = {};
 const reqs = [];
-// Rebuilt-panel counting: every Activity row carries an identity, so the test
-// can tell a redraw from an untouched panel.
-ctx.__stampN = 0;
-const tableRows = () => find(screen, "ov-tablerow").map((r) => r.__stamp);
 const ev = (id, type, pk) => ({ event_id: id, anchor: "2026-09-22T11:00:00." + id + "Z|" + id, event_timestamp: "2026-09-22 11:00:0" + (id % 10),
   schema_name: "shop", table_name: "orders", event_type: type, pk_values: String(pk), changed_columns: type === "UPDATE" ? ["status"] : [] });
-const fresh = () => ({ events: [], firstRun: null, coverage: { continuity: "ok", freshness: "idle" }, fail: {}, hold: {}, activityShift: false });
+const fresh = () => ({ events: [], firstRun: null, coverage: { continuity: "ok", freshness: "idle" }, fail: {}, hold: {} });
 const fail = (status, msg) => Object.assign(new Error(msg || ("HTTP " + status)), { status });
 ctx.__api = async (path, opts) => {
   const server = vm.runInContext("currentServer", ctx);
@@ -83,12 +79,6 @@ ctx.__api = async (path, opts) => {
   else if (key === "/api/events") answer = { events: st.events.filter((e) => !(st.withheld && e.event_id === 99)).reverse().slice(0, 8) };
   else if (key === "/api/status") answer = { total_events_estimate: st.events.length, coverage: {} };
   else if (key === "/api/coverage") answer = st.coverage;
-  else if (key === "/api/activity") answer = { deletes: st.events.filter((e) => e.event_type === "DELETE").length, tables: st.events.length ? 1 : 0,
-    // Identical bytes unless the test moves them: the real aggregate is a
-    // server-side cache with a 30-minute life, so a busy server sends the
-    // same payload for many turns.
-    top_tables: st.events.length ? [{ schema: "shop", table: st.activityShift ? "customers" : "orders", insert: 1, update: 0, delete: 0, total: 1 }] : [],
-    label: "live retention", complete: true, refreshed_at: "2026-09-22 11:00:00", since: "2026-09-22 10:00:00", until: "2026-09-22 11:00:00" };
   else if (/\/first-run$/.test(key)) { const q = st.firstRun || []; answer = q.length > 1 ? q.shift() : q[0]; if (answer instanceof Error) throw answer; }
   else answer = {};
   const h = st.hold[key];
@@ -106,9 +96,6 @@ ctx.__api = async (path, opts) => {
   return JSON.parse(JSON.stringify(answer || {}));
 };
 vm.runInContext("api = (path, opts) => __api(path, opts); renderRoute = () => { __rendered++; };", ctx);
-// Each Activity row gets an identity, so the test can tell a panel that was
-// left alone from one torn down and rebuilt with the same bytes.
-vm.runInContext("ovTableRow = ((orig) => (s, w) => { const n = orig(s, w); n.__stamp = ++__stampN; return n; })(ovTableRow);", ctx);
 ctx.__rendered = 0;
 // A request that hangs until the test releases it, for every turn that asks,
 // which is what a locked table or a host that went away looks like.
@@ -500,20 +487,23 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
   servers.a.events.push(ev(1, "INSERT", 1));
   await paint("a");
   await advance(5000);
-  // The three tiles the failing reads feed. The fourth ("most recent
-  // change") comes from the events list, which is still arriving.
+  // The tile the failing read feeds. The other ("most recent change")
+  // comes from the events list, which is still arriving.
   const sideTiles = () => find(screen, "ov-stat").map(text).filter((t) => !t.includes("most recent change"));
   const tilesBefore = sideTiles();
   servers.a.fail["/api/status"] = [fail(500, "index went away"), fail(500, "index went away")];
-  servers.a.fail["/api/activity"] = [fail(500, "index went away"), fail(500, "index went away")];
   for (let i = 2; i < 6; i++) { servers.a.events.push(ev(i, "INSERT", i)); await advance(5000); }
   await advance(120000);
+  // A change past the slow interval is what re-reads the all-time count.
+  servers.a.events.push(ev(6, "INSERT", 6));
+  await advance(10000);
   out.sideFailed = { note: find(screen, "ov-side-note").map(text).join(" | "), tiles: sideTiles(), tilesBefore };
-  // And it goes when they answer again.
+  // And it goes when it answers again, at the next change past the slow
+  // interval.
   delete servers.a.fail["/api/status"];
-  delete servers.a.fail["/api/activity"];
+  await advance(70000);
   servers.a.events.push(ev(9, "UPDATE", 9));
-  await advance(130000);
+  await advance(10000);
   out.sideFailed.after = find(screen, "ov-side-note").map(text).join(" | ");
 
   // A busy server whose list waits only for a backup: the change pokes do
@@ -540,21 +530,15 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
   await advance(1800000); // half an hour
   out.idleSlow = { status: count("a", "/api/status") - idleFrom.status, cov: count("a", "/api/coverage") - idleFrom.cov };
 
-  // The Activity panel is not torn down and rebuilt for identical data: its
-  // rows keep their identity while the aggregate does not change, and a
-  // click mid-refresh cannot land on a row that was swapped underneath.
+  // The page counts nothing over the window: a busy server's changes move
+  // the list and the tiles, and no read aggregates the whole live index.
   reset();
   servers.a = fresh();
   servers.a.events.push(ev(1, "INSERT", 1));
   await paint("a");
-  await advance(5000);
-  const stamps0 = tableRows();
   for (let i = 2; i < 8; i++) { servers.a.events.push(ev(i, "INSERT", i)); await advance(5000); }
-  const stamps1 = tableRows();
-  servers.a.activityShift = true;
-  servers.a.events.push(ev(9, "DELETE", 9));
-  await advance(5000);
-  out.activity = { before: stamps0, same: stamps1, afterChange: tableRows() };
+  await advance(1800000);
+  out.noWindowCount = { asks: reqs.filter((r) => /^\/api\/activity/.test(r.path)).length, status: count("a", "/api/status") };
 
   // The list's own request hangs: its loop must give up and keep asking,
   // not sit in it for as long as the page is open.
@@ -593,23 +577,6 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
   await advance(10000);
   statusOnly.after = find(screen, "ov-side-note").map(text).join(" | ");
   out.statusOnly = statusOnly;
-
-  // Only the window counts' read fails, and answers again: the note goes
-  // with it, rather than waiting for the other read to clear it.
-  reset();
-  servers.a = fresh();
-  servers.a.events.push(ev(1, "INSERT", 1));
-  await paint("a");
-  await advance(5000);
-  servers.a.fail["/api/activity"] = [fail(500, "aggregate failed")];
-  servers.a.events.push(ev(2, "INSERT", 2));
-  await advance(5000);
-  const activityOnly = { note: find(screen, "ov-side-note").map(text).join(" | ") };
-  delete servers.a.fail["/api/activity"];
-  servers.a.events.push(ev(3, "INSERT", 3));
-  await advance(5000);
-  activityOnly.after = find(screen, "ov-side-note").map(text).join(" | ");
-  out.activityOnly = activityOnly;
 
   // A coverage read that fails on THIS server must not re-render the card
   // from the payload another server's paint left in the module-wide slot.
@@ -689,17 +656,14 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 			Note, After        string
 			Tiles, TilesBefore []string
 		}
-		BusySettled struct{ Asks, Minutes int }
-		IdleSlow    struct{ Status, Cov int }
-		Activity    struct {
-			Before, Same, AfterChange []int
-		}
-		ListHang struct {
+		BusySettled   struct{ Asks, Minutes int }
+		IdleSlow      struct{ Status, Cov int }
+		NoWindowCount struct{ Asks, Status int }
+		ListHang      struct {
 			Asks      int
 			CardAfter string
 		}
 		StatusOnly     struct{ Note, After string }
-		ActivityOnly   struct{ Note, After string }
 		CovAfterSwitch struct{ Card string }
 		NeverDrawn     struct{ Note, Panel, Card string }
 		Stops          struct{ Away, SignOut int }
@@ -850,12 +814,9 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 		t.Error("an idle page never re-read coverage: a stalled capture would never surface")
 	}
 
-	a := got.Activity
-	if len(a.Before) == 0 || len(a.Same) == 0 || a.Before[0] != a.Same[0] {
-		t.Errorf("the Activity panel was rebuilt for identical data: rows %v then %v", a.Before, a.Same)
-	}
-	if len(a.AfterChange) == 0 || a.AfterChange[0] == a.Same[0] {
-		t.Errorf("the Activity panel did not redraw when its numbers changed: %v then %v", a.Same, a.AfterChange)
+	if got.NoWindowCount.Asks != 0 || got.NoWindowCount.Status == 0 {
+		t.Errorf("the Overview asked for a window aggregate %d time(s) (status reads: %d); want none, and the all-time tile still refreshed",
+			got.NoWindowCount.Asks, got.NoWindowCount.Status)
 	}
 
 	if got.ListHang.Asks < 3 {
@@ -866,9 +827,6 @@ const WAITING = ` + waiting + `, CHANGED = ` + changed + `, SNAPSHOT = ` + snaps
 	}
 	if !strings.Contains(got.StatusOnly.Note, "could not be refreshed") || got.StatusOnly.After != "" {
 		t.Errorf("the all-time count's read failing alone: note %q, then %q; want it said and then taken back", got.StatusOnly.Note, got.StatusOnly.After)
-	}
-	if !strings.Contains(got.ActivityOnly.Note, "could not be refreshed") || got.ActivityOnly.After != "" {
-		t.Errorf("the window counts' read failing alone: note %q, then %q; want it said and then taken back", got.ActivityOnly.Note, got.ActivityOnly.After)
 	}
 	if strings.Contains(got.CovAfterSwitch.Card, "2026-09-22 11:00:00") || strings.Contains(got.CovAfterSwitch.Card, "2026-09-22 09:00:00") {
 		t.Errorf("a failed coverage read painted the previous server's window: %q", got.CovAfterSwitch.Card)
