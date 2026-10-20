@@ -17,6 +17,7 @@ package views
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"slices"
@@ -97,6 +98,14 @@ type BaselineTable struct {
 	// what the snapshot holds and what is weighed. A following view ignores
 	// it: the pair belongs to one snapshot and is removed after it.
 	DeltaResolved *baseline.TableDeltaFile
+
+	// DeltaNoDead is true when the one pair a PINNED view reads the table
+	// through (DeltaResolved, or the chain's only pair) has an empty posdel,
+	// read from its footer (#2478; set by MarkTableDeltasWithoutDeadRows).
+	// The view then reads the base without the file_row_number join that
+	// removes dead rows: with none to remove it costs as much as reading the
+	// base again. A following view ignores it: a later pair can hold some.
+	DeltaNoDead bool
 
 	// Tail, when set, is the table's tail (#2369): the newest change of each
 	// key the index holds after the snapshot, in the .upserts layout, which a
@@ -220,6 +229,7 @@ func MarkTableDeltas(ctx context.Context, tables []BaselineTable) error {
 		tables[i].DeltaFiles = nil
 		// The pair of the chain as it was listed before, if any.
 		tables[i].DeltaResolved = nil
+		tables[i].DeltaNoDead = false
 		if c != nil && !c.Legacy {
 			tables[i].DeltaFiles = c.Files
 		}
@@ -236,9 +246,42 @@ func MarkTableDeltas(ctx context.Context, tables []BaselineTable) error {
 func MarkResolvedTableDeltas(tables []BaselineTable) {
 	for i := range tables {
 		tables[i].DeltaResolved = nil
+		// The mark was made for the pair read before this lookup.
+		tables[i].DeltaNoDead = false
 		if f, ok := baseline.FindResolvedTableDelta(tables[i].Path, tables[i].DeltaFiles); ok {
 			tables[i].DeltaResolved = &f
 		}
+	}
+}
+
+// MarkTableDeltasWithoutDeadRows sets DeltaNoDead on every table whose one
+// pair, the one a pinned view reads it through, has an empty posdel (#2478):
+// a table unchanged since its chain started, or one that only gains rows.
+// Call it after MarkResolvedTableDeltas, which decides which pair that is,
+// and only for views generated per statement, like that one: the mark is
+// about files as they are now.
+//
+// The posdel's footer is read, a few hundred bytes. A footer that cannot be
+// read leaves the mark off, which keeps the join the view has always had:
+// the statement then reads the file and fails on it as it did before.
+func MarkTableDeltasWithoutDeadRows(tables []BaselineTable) {
+	for i := range tables {
+		t := &tables[i]
+		t.DeltaNoDead = false
+		pair := t.DeltaResolved
+		if pair == nil && !t.DeltaLegacy && len(t.DeltaFiles) == 1 {
+			pair = &t.DeltaFiles[0]
+		}
+		if pair == nil {
+			continue
+		}
+		empty, err := baseline.TableDeltaPosdelEmpty(pair.Posdel)
+		if err != nil {
+			slog.Warn("views: could not read a table delta's dead rows; the view keeps its dead-row join",
+				"table", t.Schema+"."+t.Table, "path", pair.Posdel, "error", err)
+			continue
+		}
+		t.DeltaNoDead = empty
 	}
 }
 
@@ -2939,6 +2982,10 @@ func deltaStateStar(t BaselineTable, p string, expr func(string) string, pinned 
 		f := t.DeltaResolved
 		if f == nil {
 			f = &t.DeltaFiles[0]
+		}
+		if t.DeltaNoDead {
+			// Its posdel is empty: the base's rows are all alive (#2478).
+			return baseline.TableDeltaOnePairNoDeadStateSQL(expr(fileGlob(p)), expr(fileGlob(f.Posdel)), expr(fileGlob(f.Upserts)), replace)
 		}
 		return baseline.TableDeltaOnePairStateSQL(expr(fileGlob(p)), expr(fileGlob(f.Posdel)), expr(fileGlob(f.Upserts)), replace)
 	}

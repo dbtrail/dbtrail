@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+	"github.com/parquet-go/parquet-go"
 	"regexp"
 )
 
@@ -845,6 +846,74 @@ func TableDeltaOnePairStateSQL(base, posdel, upserts, replace string) string {
 		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM read_parquet(%s) WHERE \"%s\" = '%s')",
 		star, baseMinusDeadSQL(base, posdelPositionsSQL(posdel)),
 		TableDeltaPKColumn, TableDeltaOpColumn, upserts, TableDeltaOpColumn, TableDeltaOpUpsert)
+}
+
+// TableDeltaOnePairNoDeadStateSQL is TableDeltaOnePairStateSQL for a pair
+// whose posdel held no row when the views were generated
+// (TableDeltaPosdelEmpty, #2478): the base as it is, plus the pair's rows
+// that are not tombstones. Without dead rows to remove, the base minus them
+// is the base, and the file_row_number join that would remove them costs as
+// much as reading the base again (measured over a 60 M row table, DuckDB
+// 1.4.5, 4 threads: a GROUP BY over the whole table took 0.43 s through the
+// join with an empty posdel and 0.26 s without it, the base alone 0.27 s).
+// A tombstone in the pair is dropped by the filter as before; with no dead
+// row it can only name a key the base does not hold.
+//
+// The posdel is still read, for its row count only: a pair replaced under
+// the same name between the footer read and this statement (a resolved pair
+// that was not this chain's, reconstruct.ResolveTableDelta) can bring dead
+// rows, and reading the base whole beside its upserts would then show rows
+// the pair says are gone. The count fails the statement instead. DuckDB
+// answers count(*) of a Parquet file from its footer. The WHERE is what
+// makes DuckDB evaluate it: a column nothing reads is pruned with its
+// expression, error() included.
+func TableDeltaOnePairNoDeadStateSQL(base, posdel, upserts, replace string) string {
+	star := "*"
+	if replace != "" {
+		star = "* REPLACE (" + replace + ")"
+	}
+	return fmt.Sprintf("SELECT %s FROM (SELECT bintrail_b.* FROM read_parquet(%s) AS bintrail_b, "+
+		"(SELECT CASE WHEN count(*) = 0 THEN 1 ELSE error('%s') END FROM read_parquet(%s)) AS bintrail_nodead(bintrail_ok) WHERE bintrail_nodead.bintrail_ok = 1 "+
+		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM read_parquet(%s) WHERE \"%s\" = '%s')",
+		star, base, TableDeltaPosdelChangedError, posdel,
+		TableDeltaPKColumn, TableDeltaOpColumn, upserts, TableDeltaOpColumn, TableDeltaOpUpsert)
+}
+
+// TableDeltaPosdelChangedError is the error a statement fails with when a
+// pair read as having no dead rows has some by the time it runs
+// (TableDeltaOnePairNoDeadStateSQL). Running the statement again generates
+// its views from the files as they are then.
+const TableDeltaPosdelChangedError = "the changes of a table were replaced while this statement was being prepared; run it again"
+
+// TableDeltaPosdelEmpty reports whether the local posdel file at path holds
+// no row, from its Parquet footer. An error is returned for a file that is
+// not there or not Parquet, never "empty": a caller that took it for empty
+// would show rows the pair says are gone.
+func TableDeltaPosdelEmpty(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	pf, err := parquet.OpenFile(f, info.Size())
+	if err != nil {
+		return false, fmt.Errorf("read the footer of %s: %w", path, err)
+	}
+	if pf.NumRows() != 0 {
+		return false, nil
+	}
+	// The file's count and its row groups' must agree: a footer whose
+	// total says 0 over row groups that hold rows is not taken for empty.
+	for _, rg := range pf.RowGroups() {
+		if rg.NumRows() != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // LegacyTableDeltaStateSQL is TableDeltaStateSQL for a v0.83.0 pair: the base
