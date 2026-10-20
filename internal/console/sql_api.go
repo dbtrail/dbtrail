@@ -1109,6 +1109,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		// shared automation token as one identity.
 		User:     user,
 		CopyDirs: copyDirs,
+		Keys:     sqlTableKeys(in),
 		ViewsFor: func(refs sqlsandbox.Refs) (string, error) {
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
@@ -1913,4 +1914,15 @@ func markReadTableDeadRows(tables, read []views.BaselineTable) {
 			views.MarkTableDeltaDeadRows(tables[i : i+1])
 		}
 	}
+}
+
+// sqlTableKeys are the copy's state views with the PRIMARY KEY of the table
+// each one reads, for the worker to narrow a GROUP BY that holds a whole key
+// (sqlsandbox.Job.Keys, #2479).
+func sqlTableKeys(in views.Input) []sqlsandbox.TableKey {
+	var out []sqlsandbox.TableKey
+	for _, k := range in.StateViewKeys() {
+		out = append(out, sqlsandbox.TableKey{Schema: k.Schema, Table: k.View, Columns: k.Columns})
+	}
+	return out
 }

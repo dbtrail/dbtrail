@@ -287,7 +287,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	// rule DuckDB itself resolves names by (catalogSchema), so the probe and
 	// the SET cannot disagree; and if the SET is refused all the same, that
 	// is one more schema that was not applied, not a failed session.
-	missingSchema := ""
+	missingSchema, searchSchema := "", ""
 	if job.Schema != "" {
 		name, ok := catalogSchema(ctx, conn, job.Schema)
 		if ok {
@@ -296,7 +296,9 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 				ok = false
 			}
 		}
-		if !ok {
+		if ok {
+			searchSchema = name
+		} else {
 			missingSchema = job.Schema
 		}
 	}
@@ -330,7 +332,24 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 
 	start := time.Now()
-	rows, err := conn.QueryContext(ctx, job.SQL)
+	// The same statement with a GROUP BY narrowed to a table's key, when it
+	// has one (#2479). It is an optimization, never a precondition: anything
+	// that goes wrong with it runs the statement as written.
+	rewritten, err := groupByKeyRewrite(ctx, conn, stmt, job.Keys, searchSchema)
+	if err != nil {
+		fmt.Fprintf(stderr, "sql worker: the statement runs as written: %v\n", err)
+	}
+	var rows *sql.Rows
+	if rewritten != "" {
+		if rows, err = conn.QueryContext(ctx, rewritten); err == nil {
+			res.GroupedByKey = true
+		} else {
+			fmt.Fprintf(stderr, "sql worker: the statement runs as written: the rewritten one failed: %v\n", err)
+		}
+	}
+	if rows == nil {
+		rows, err = conn.QueryContext(ctx, job.SQL)
+	}
 	if err != nil {
 		msg := err.Error()
 		if missingSchema != "" && strings.Contains(msg, "does not exist") {

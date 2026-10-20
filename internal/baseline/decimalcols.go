@@ -65,6 +65,12 @@ type TableFooter struct {
 	// keeps a statement that does arithmetic on one, or names a TIME or a
 	// YEAR, on the source (#2133).
 	Temporal []TemporalColumn
+	// PrimaryKey names the columns of the table's PRIMARY KEY, in the key's
+	// order, or nil when it has none or its declaration cannot be read
+	// (PrimaryKeyColumns). The copy's SQL session reads it to know that a
+	// grouping by the key already fixes every other column of the table
+	// (#2479).
+	PrimaryKey []string
 }
 
 // TemporalColumn is a column MySQL holds as a date, a time or a year, and the
@@ -407,7 +413,8 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		st.footers[file] = TableFooter{Decimals: decs, DeltaReserved: hasDeltaReservedColumn(cols), Datetimes: DatetimeColumns(cols),
 			BinaryText: BinaryCollationColumns(string(createSQL), cols),
 			Columns:    columnNames(cols), StarDiffers: starDifference(string(createSQL)),
-			NotHeld: notHeld, NotHeldUnread: notHeldUnread, Temporal: TemporalColumns(cols)}
+			NotHeld: notHeld, NotHeldUnread: notHeldUnread, Temporal: TemporalColumns(cols),
+			PrimaryKey: PrimaryKeyColumns(string(createSQL))}
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the

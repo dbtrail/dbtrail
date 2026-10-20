@@ -179,6 +179,10 @@ type BaselineTable struct {
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool
+	// PrimaryKey names the table's PRIMARY KEY columns, nil when none was
+	// read (baseline.TableFooter.PrimaryKey). Set with SchemaKnown.
+	// StateViewKeys is the reader.
+	PrimaryKey []string
 	// SchemaKnown records whether the table's embedded CREATE TABLE was read at
 	// all. It separates "this table has no decimal columns" from "we could not
 	// find out", which are the same empty Decimals slice and very different

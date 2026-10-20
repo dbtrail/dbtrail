@@ -202,6 +202,31 @@ type StateView struct {
 	Table BaselineTable
 }
 
+// ViewKey is a state view and the PRIMARY KEY of the table it reads: the
+// view is defined as Schema.View (no database part), and Columns are the
+// table's key columns, which the view returns under the same names.
+type ViewKey struct {
+	Schema, View string
+	Columns      []string
+}
+
+// StateViewKeys lists the key of every state view whose table's key was read
+// (BaselineTable.PrimaryKey), for the copy's SQL session (#2479). A view of
+// a file generated with Database set is under one more name part than
+// ViewKey holds, so such an Input lists none.
+func (in Input) StateViewKeys() []ViewKey {
+	if in.Database != "" {
+		return nil
+	}
+	var out []ViewKey
+	for _, p := range stateViewPlan(in) {
+		if p.skip == "" && len(p.table.PrimaryKey) > 0 {
+			out = append(out, ViewKey{Schema: p.table.Schema, View: p.view, Columns: p.table.PrimaryKey})
+		}
+	}
+	return out
+}
+
 // StateViews pairs each state view DefinedViews lists with its table, in
 // the same order, for a caller that reports per view on the files behind it
 // (#2210: the changes waiting in each table, beside its name).

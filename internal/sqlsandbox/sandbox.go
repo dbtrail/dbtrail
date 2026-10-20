@@ -205,6 +205,11 @@ type Job struct {
 	Session Session
 	// Limits override the Runner's defaults field by field.
 	Limits Limits
+	// Keys are the PRIMARY KEYs of the copy's views, as far as they are
+	// known (views.Input.StateViewKeys). A statement grouping by every
+	// column of one runs without that table's text columns in its GROUP BY
+	// (groupByKeyRewrite, #2479). Empty leaves every statement as written.
+	Keys []TableKey
 }
 
 // Session is what a client connection set for itself and the statement must
@@ -299,6 +304,10 @@ type Result struct {
 	Elapsed        time.Duration `json:"elapsed_ns"`
 	// Phases is where the time went, for the measurement #2026 asks for.
 	Phases Phases `json:"phases"`
+	// GroupedByKey says the statement ran with its GROUP BY narrowed to a
+	// table's key (groupByKeyRewrite, #2479): the same answer, reached
+	// without comparing that table's text columns.
+	GroupedByKey bool `json:"grouped_by_key,omitempty"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
@@ -1341,7 +1350,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, more bool) ([]byte, err
 		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
-		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
+		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more, Keys: job.Keys,
 	})
 }
 
@@ -1575,7 +1584,7 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 		}
 	}
 	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
-		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS),
+		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS), GroupedByKey: out.GroupedByKey,
 		Phases: Phases{
 			Open: time.Duration(out.OpenNS), Lockdown: time.Duration(out.LockdownNS),
 			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),

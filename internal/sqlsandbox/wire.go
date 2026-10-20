@@ -51,6 +51,8 @@ type wireJob struct {
 	// worker does not exit after its result. Unset, the worker serves this
 	// job and exits.
 	More bool `json:"more,omitempty"`
+	// Keys are Job.Keys.
+	Keys []TableKey `json:"keys,omitempty"`
 }
 
 // wireViews is the parent's answer to an Ask: the views script to install.
@@ -79,6 +81,8 @@ type wireResult struct {
 	OpenNS     int64      `json:"open_ns,omitempty"`
 	LockdownNS int64      `json:"lockdown_ns,omitempty"`
 	ViewsNS    int64      `json:"views_ns,omitempty"`
+	// GroupedByKey is Result.GroupedByKey.
+	GroupedByKey bool `json:"grouped_by_key,omitempty"`
 	Error      *wireError `json:"error,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its
 	// DuckDB closed; 0 where the platform does not say. Sent by a worker that
