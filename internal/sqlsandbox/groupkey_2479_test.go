@@ -40,6 +40,7 @@ func groupKeySession(t *testing.T) *sql.Conn {
 		"CREATE TABLE main.mitem AS SELECT * FROM s.item",
 		"CREATE TABLE s.big AS SELECT * FROM (VALUES (1234567890123456789, 'wanted', 0.123456789012345678::DECIMAL(19,18)), "+
 			"(1234567890123456800, 'other', 0.123456789012345680::DECIMAL(19,18))) t(id, name, frac)",
+		"CREATE TABLE s.dk AS SELECT * FROM (VALUES (NULL::DATE, 'zero-date row'), (DATE '2020-01-01', 'jan')) t(d, nm)",
 		"CREATE TABLE s.dup AS SELECT * FROM (VALUES (1, 'Café'), (1, 'cafe'), (2, 'x'), (2, NULL), (3, 'y'), (3, 'y')) t(id, name)",
 		"CREATE TABLE s.nokey AS SELECT * FROM (VALUES (1, 'Café'), (2, 'cafe')) t(x, i_name)",
 	) {
@@ -58,6 +59,7 @@ var groupKeyKeys = []TableKey{
 	{Schema: "main", Table: "mitem", Columns: []string{"i_id"}},
 	{Schema: "s", Table: "big", Columns: []string{"id"}},
 	{Schema: "s", Table: "dup", Columns: []string{"id"}},
+	{Schema: "s", Table: "dk", Columns: []string{"d"}},
 }
 
 // answer is a statement's columns and rows, as text.
@@ -187,6 +189,8 @@ func TestGroupByKeyRewrite_leftAlone(t *testing.T) {
 		{"renamed columns", "SELECT a, b FROM s.item AS t(a, b) GROUP BY a, b", ""},
 		{"columns renamed into each other", "SELECT i_id, i_name FROM s.item AS t(i_name, i_id) GROUP BY i_id, i_name", ""},
 		{"table function", "SELECT i, n FROM (VALUES (1, 'a')) v(i, n) GROUP BY i, n", ""},
+		{"ORDER BY a name two tables hold, which the added alias would settle", "SELECT i.i_name, count(*) AS c FROM s.item i JOIN s.nokey n ON n.x = i.i_id " +
+			"GROUP BY i.i_id, i.i_name, n.i_name ORDER BY i_name", ""},
 		{"only non-text columns beside the key", "SELECT i_id, i_price FROM s.item GROUP BY i_id, i_price", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -260,6 +264,10 @@ func TestGroupByKeyRewrite_keyNotUniqueRefuses(t *testing.T) {
 		{"SELECT id, name, count(*) AS n FROM s.dup WHERE id = 1 GROUP BY id, name", true},
 		{"SELECT id, name, count(*) AS n FROM s.dup WHERE id = 2 GROUP BY id, name", true},
 		{"SELECT id, name, count(*) AS n FROM s.dup WHERE id = 3 GROUP BY id, name ORDER BY id", false},
+		// A key stored as NULL (a zero date) on the optional side of an outer
+		// join shares its group with the rows that found no match.
+		{"SELECT k.d, k.nm, count(*) AS n FROM s.item i LEFT JOIN s.dk k ON (k.d IS NULL AND i.i_id = 1) OR k.d = DATE '2020-01-01' + i.i_id - 2 " +
+			"GROUP BY k.d, k.nm ORDER BY n", true},
 	} {
 		rewritten := rewriteOf(t, conn, c.sql, "")
 		if rewritten == "" {

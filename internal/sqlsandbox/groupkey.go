@@ -619,7 +619,20 @@ func (cat *rewriteCatalog) rewriteNode(node map[string]any) bool {
 	}
 
 	// Decide every replacement before making any.
-	rw := exprRewriter{cat: cat, isDropped: isDropped, aliases: aliases}
+	// The names the rewrite gives a bare column that had none. In ORDER BY
+	// and HAVING a bare name can bind to such an alias where it bound to
+	// nothing before (two relations hold the column: "ambiguous"), so a
+	// bare name spelled like one must be that very column.
+	added := map[string]bool{}
+	for _, item := range selectList {
+		im, _ := item.(map[string]any)
+		if a, _ := im["alias"].(string); a == "" && im["class"] == "COLUMN_REF" {
+			if col, ok := isDropped(im); ok {
+				added[asciiLower(col.name)] = true
+			}
+		}
+	}
+	rw := exprRewriter{cat: cat, isDropped: isDropped, aliases: aliases, added: added}
 	newSelect := make([]any, len(selectList))
 	for i, item := range selectList {
 		im, _ := item.(map[string]any)
@@ -772,6 +785,7 @@ type exprRewriter struct {
 	cat       *rewriteCatalog
 	isDropped func(map[string]any) (catalogColumn, bool)
 	aliases   map[string]bool
+	added     map[string]bool
 }
 
 // expr returns the expression rewritten, whether it changed, and false when
@@ -784,7 +798,13 @@ func (r exprRewriter) expr(v any, aliasScope bool) (any, bool, bool) {
 		case "WINDOW", "SUBQUERY", "LAMBDA", "STAR":
 			return nil, false, false
 		case "COLUMN_REF":
-			if _, ok := r.isDropped(x); !ok {
+			_, dropped := r.isDropped(x)
+			if parts, _ := x["column_names"].([]any); aliasScope && len(parts) == 1 && !dropped {
+				if name, _ := parts[0].(string); r.added[asciiLower(name)] {
+					return nil, false, false
+				}
+			}
+			if !dropped {
 				return x, false, true
 			}
 			if parts, _ := x["column_names"].([]any); aliasScope && len(parts) == 1 {
