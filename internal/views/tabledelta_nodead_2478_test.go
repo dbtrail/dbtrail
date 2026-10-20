@@ -20,7 +20,7 @@ const deadJoinMark = "file_row_number"
 
 // generatePinnedMarked lists the chain, marks the resolved pair and the pairs
 // without dead rows as a statement's views are marked, and generates the
-// pinned views. withoutDead=false skips MarkTableDeltasWithoutDeadRows: the
+// pinned views. withoutDead=false skips MarkTableDeltaDeadRows: the
 // views as they were before #2478, to compare rows against.
 func generatePinnedMarked(t *testing.T, root string, tables []BaselineTable, withoutDead bool) string {
 	t.Helper()
@@ -29,7 +29,7 @@ func generatePinnedMarked(t *testing.T, root string, tables []BaselineTable, wit
 	}
 	MarkResolvedTableDeltas(tables)
 	if withoutDead {
-		MarkTableDeltasWithoutDeadRows(tables)
+		MarkTableDeltaDeadRows(tables)
 	}
 	return generateMarked(root, FollowNone, tables)
 }
@@ -147,7 +147,7 @@ func TestStateView_unreadablePosdelKeepsTheDeadJoin(t *testing.T) {
 				t.Fatal(err)
 			}
 			MarkResolvedTableDeltas(tables)
-			MarkTableDeltasWithoutDeadRows(tables)
+			MarkTableDeltaDeadRows(tables)
 			if tables[0].DeltaNoDead {
 				t.Fatal("an unreadable posdel was marked as holding no dead rows")
 			}
@@ -252,7 +252,7 @@ func TestStateView_followingViewIgnoresTheMark(t *testing.T) {
 			if err := MarkTableDeltas(context.Background(), tables); err != nil {
 				t.Fatal(err)
 			}
-			MarkTableDeltasWithoutDeadRows(tables)
+			MarkTableDeltaDeadRows(tables)
 			if !tables[0].DeltaNoDead {
 				t.Fatal("the case needs a marked table")
 			}

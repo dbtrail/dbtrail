@@ -84,6 +84,11 @@ func TestSQLAPI_pairWithoutDeadRowsIsReadWithoutTheDeadJoin(t *testing.T) {
 	if !strings.Contains(script, deadJoin) {
 		t.Errorf("a pair with a dead row is read without the dead-row join:\n%s", script)
 	}
+	// Its one dead row is the base's last, half the base or less: the join
+	// is confined to it, the base's first row is read as it is.
+	if !strings.Contains(script, "file_row_number BETWEEN 1 AND 1") {
+		t.Errorf("the dead-row join is not confined to the dead row's stretch:\n%s", script)
+	}
 	if want := []string{"1=new", "2=shipped"}; !reflect.DeepEqual(rows, want) {
 		t.Errorf("a dead row: rows = %v, want %v", rows, want)
 	}

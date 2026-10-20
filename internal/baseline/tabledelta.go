@@ -3,6 +3,7 @@ package baseline
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/format"
 	"regexp"
 )
 
@@ -797,13 +799,21 @@ func posdelPositionsSQL(posdel string) string {
 // Every name the statement adds starts with bintrail_ and is qualified, and
 // only the file's own columns are selected, so a table with a column of any
 // of these names reads as itself.
-func baseMinusDeadSQL(base, dead string) string {
+func baseMinusDeadSQL(base, dead string) string { return baseMinusDeadWhereSQL(base, dead, "") }
+
+// baseMinusDeadWhereSQL is baseMinusDeadSQL over the base rows that also
+// match where, a predicate on bintrail_b ("" for every row).
+func baseMinusDeadWhereSQL(base, dead, where string) string {
+	cond := "bintrail_dead.bintrail_mask IS NULL OR (bintrail_dead.bintrail_mask >> (bintrail_b.file_row_number & 63)::UBIGINT) & 1 = 0"
+	if where != "" {
+		cond = where + " AND (" + cond + ")"
+	}
 	return fmt.Sprintf("SELECT bintrail_b.* EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) AS bintrail_b "+
 		"LEFT JOIN (SELECT bintrail_p >> 6 AS bintrail_block, bit_or(1::UBIGINT << (bintrail_p & 63)::UBIGINT) AS bintrail_mask "+
 		"FROM (%s) AS bintrail_d(bintrail_p) GROUP BY 1) AS bintrail_dead "+
 		"ON (bintrail_b.file_row_number >> 6) = bintrail_dead.bintrail_block "+
-		"WHERE bintrail_dead.bintrail_mask IS NULL OR (bintrail_dead.bintrail_mask >> (bintrail_b.file_row_number & 63)::UBIGINT) & 1 = 0",
-		base, dead)
+		"WHERE %s",
+		base, dead, cond)
 }
 
 // TableDeltaOnePairStateSQL is TableDeltaStateSQL for a chain that is exactly
@@ -850,7 +860,7 @@ func TableDeltaOnePairStateSQL(base, posdel, upserts, replace string) string {
 
 // TableDeltaOnePairNoDeadStateSQL is TableDeltaOnePairStateSQL for a pair
 // whose posdel held no row when the views were generated
-// (TableDeltaPosdelEmpty, #2478): the base as it is, plus the pair's rows
+// (ReadTableDeltaPosdelFooter, #2478): the base as it is, plus the pair's rows
 // that are not tombstones. Without dead rows to remove, the base minus them
 // is the base, and the file_row_number join that would remove them adds up
 // to the cost of a second base read (measured over a 60 M row table, DuckDB
@@ -880,42 +890,153 @@ func TableDeltaOnePairNoDeadStateSQL(base, posdel, upserts, replace string) stri
 		TableDeltaPKColumn, TableDeltaOpColumn, upserts, TableDeltaOpColumn, TableDeltaOpUpsert)
 }
 
+// TableDeltaDeadRange bounds every dead row number of a posdel: Lo is the
+// smallest, Hi the largest, both included.
+type TableDeltaDeadRange struct{ Lo, Hi int64 }
+
+// TableDeltaOnePairRangeStateSQL is TableDeltaOnePairStateSQL for a pair whose
+// dead row numbers all lie in r (#2478): the base rows before r.Lo and after
+// r.Hi are read as they are, and only the rows in r go through the dead-row
+// join. A table whose recent rows change (an order line delivered, an order
+// closed) keeps its dead rows near the end of its file, so most of the base
+// skips the join: measured over a 60 M row table with 374 k dead rows in its
+// last 3 M (DuckDB 1.4.5, 4 threads), a GROUP BY over the whole table took
+// 0.60 s through the join, 0.37 s like this, 0.28 s over the base alone.
+//
+// Two reads of the base, not one with `< Lo OR > Hi`: DuckDB skips row groups
+// on a file_row_number range only when the predicate is one range (measured:
+// the OR form cost 0.49 s on the same table).
+//
+// The posdel's row-group statistics are checked again inside the statement,
+// from parquet_metadata, before its positions are read: a pair replaced under
+// the same name since the range was read (TableDeltaOnePairNoDeadStateSQL
+// says when) with a dead row outside r fails the statement with
+// TableDeltaPosdelChangedError instead of showing that row. A row group that
+// holds rows and no statistics fails it too: nothing then bounds its
+// positions. An empty row group is skipped, as ReadTableDeltaPosdelFooter
+// skips it.
+func TableDeltaOnePairRangeStateSQL(base, posdel, upserts string, r TableDeltaDeadRange, replace string) string {
+	star := "*"
+	if replace != "" {
+		star = "* REPLACE (" + replace + ")"
+	}
+	pos := `"` + TableDeltaPosColumn + `"`
+	dead := fmt.Sprintf("SELECT %[1]s FROM read_parquet(%[2]s), "+
+		"(SELECT CASE WHEN bool_and(row_group_num_rows = 0 OR (stats_min_value IS NOT NULL AND stats_max_value IS NOT NULL "+
+		"AND stats_min_value::BIGINT >= %[3]d AND stats_max_value::BIGINT <= %[4]d)) IS NOT FALSE "+
+		"THEN 1 ELSE error('%[5]s') END FROM parquet_metadata(%[2]s)) AS bintrail_range(bintrail_ok) "+
+		"WHERE bintrail_range.bintrail_ok = 1 AND %[1]s IS NOT NULL",
+		pos, posdel, r.Lo, r.Hi, TableDeltaPosdelChangedError)
+	plain := func(cmp string) string {
+		return fmt.Sprintf("SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number=true) WHERE file_row_number %s", base, cmp)
+	}
+	return fmt.Sprintf("SELECT %s FROM (%s UNION ALL BY NAME %s UNION ALL BY NAME %s "+
+		"UNION ALL BY NAME SELECT * EXCLUDE (\"%s\", \"%s\") FROM read_parquet(%s) WHERE \"%s\" = '%s')",
+		star, plain(fmt.Sprintf("< %d", r.Lo)), plain(fmt.Sprintf("> %d", r.Hi)),
+		baseMinusDeadWhereSQL(base, dead, fmt.Sprintf("bintrail_b.file_row_number BETWEEN %d AND %d", r.Lo, r.Hi)),
+		TableDeltaPKColumn, TableDeltaOpColumn, upserts, TableDeltaOpColumn, TableDeltaOpUpsert)
+}
+
 // TableDeltaPosdelChangedError is the error a statement fails with when a
-// pair read as having no dead rows has some by the time it runs
-// (TableDeltaOnePairNoDeadStateSQL). Running the statement again generates
-// its views from the files as they are then.
+// pair's dead rows are not, by the time it runs, what its views were
+// generated from: some where none were read (TableDeltaOnePairNoDeadStateSQL),
+// or some outside the range that was read (TableDeltaOnePairRangeStateSQL).
+// Running the statement again generates its views from the files as they
+// are then.
 const TableDeltaPosdelChangedError = "the changes of a table were replaced while this statement was being prepared; run it again"
 
-// TableDeltaPosdelEmpty reports whether the local posdel file at path holds
-// no row, from its Parquet footer. An error is returned for a file that is
-// not there or not Parquet, never "empty": a caller that took it for empty
-// would show rows the pair says are gone.
-func TableDeltaPosdelEmpty(path string) (bool, error) {
+// TableDeltaPosdelFooter is what a posdel's footer says about its dead rows.
+type TableDeltaPosdelFooter struct {
+	// Rows is how many rows the file holds; 0 only when the file's count and
+	// every row group's agree on it.
+	Rows int64
+	// Range bounds every position, from the row groups' statistics; nil
+	// when a row group that holds rows does not record a min and a max for
+	// an INT64 position (a NULL-only group, or a writer that wrote none).
+	Range *TableDeltaDeadRange
+}
+
+// ReadTableDeltaPosdelFooter reads the footer of the local posdel file at path
+// (#2478). An error is returned for a file that is not there or not Parquet,
+// never an empty footer: a caller that took it for empty would show rows the
+// pair says are gone.
+func ReadTableDeltaPosdelFooter(path string) (TableDeltaPosdelFooter, error) {
+	pf, err := openParquetFooter(path)
+	if err != nil {
+		return TableDeltaPosdelFooter{}, err
+	}
+	var out TableDeltaPosdelFooter
+	out.Rows = pf.NumRows()
+	var r *TableDeltaDeadRange
+	ranged := true
+	for _, rg := range pf.Metadata().RowGroups {
+		if rg.NumRows == 0 {
+			continue
+		}
+		// The file's count and its row groups' must agree: a footer whose
+		// total says 0 over row groups that hold rows is not taken for empty.
+		out.Rows = max(out.Rows, 1)
+		lo, hi, ok := int64ChunkBounds(rg.Columns)
+		if !ok {
+			ranged = false
+			continue
+		}
+		if r == nil {
+			r = &TableDeltaDeadRange{Lo: lo, Hi: hi}
+		}
+		r.Lo, r.Hi = min(r.Lo, lo), max(r.Hi, hi)
+	}
+	if ranged && r != nil {
+		out.Range = r
+	}
+	return out, nil
+}
+
+// int64ChunkBounds is the min and max a posdel's one column records in one
+// row group, when it is an INT64 column with both.
+func int64ChunkBounds(cols []format.ColumnChunk) (lo, hi int64, ok bool) {
+	if len(cols) != 1 || cols[0].MetaData.Type != format.Int64 {
+		return 0, 0, false
+	}
+	st := cols[0].MetaData.Statistics
+	// MinValue and MaxValue only, not the deprecated Min and Max: they are
+	// what the in-statement check reads (parquet_metadata's
+	// stats_min_value and stats_max_value), and a range the check cannot
+	// confirm would fail every statement on the table.
+	minB, maxB := st.MinValue, st.MaxValue
+	if len(minB) != 8 || len(maxB) != 8 {
+		return 0, 0, false
+	}
+	return int64(binary.LittleEndian.Uint64(minB)), int64(binary.LittleEndian.Uint64(maxB)), true
+}
+
+// TableFileRows is how many rows the local Parquet file at path holds, from
+// its footer.
+func TableFileRows(path string) (int64, error) {
+	pf, err := openParquetFooter(path)
+	if err != nil {
+		return 0, err
+	}
+	return pf.NumRows(), nil
+}
+
+// openParquetFooter opens the local Parquet file at path for its footer only:
+// no page index, no bloom filters.
+func openParquetFooter(path string) (*parquet.File, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	// The footer only: no page index, no bloom filters.
 	pf, err := parquet.OpenFile(f, info.Size(), parquet.SkipPageIndex(true), parquet.SkipBloomFilters(true))
 	if err != nil {
-		return false, fmt.Errorf("read the footer of %s: %w", path, err)
+		return nil, fmt.Errorf("read the footer of %s: %w", path, err)
 	}
-	if pf.NumRows() != 0 {
-		return false, nil
-	}
-	// The file's count and its row groups' must agree: a footer whose
-	// total says 0 over row groups that hold rows is not taken for empty.
-	for _, rg := range pf.RowGroups() {
-		if rg.NumRows() != 0 {
-			return false, nil
-		}
-	}
-	return true, nil
+	return pf, nil
 }
 
 // LegacyTableDeltaStateSQL is TableDeltaStateSQL for a v0.83.0 pair: the base
