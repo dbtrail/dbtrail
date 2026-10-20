@@ -13,8 +13,8 @@ import (
 )
 
 // #2478: a pinned view over one pair with no dead row numbers reads the base
-// without the file_row_number join (baseMinusDeadSQL), which costs as much
-// as reading the base again and removes nothing. deadJoinMark is that join's
+// without the file_row_number join (baseMinusDeadSQL), which adds up to the
+// cost of a second base read and removes nothing. deadJoinMark is that join's
 // name in the generated SQL.
 const deadJoinMark = "file_row_number"
 
@@ -160,10 +160,11 @@ func TestStateView_unreadablePosdelKeepsTheDeadJoin(t *testing.T) {
 
 // TestStateView_resolvedPairDecidesTheDeadJoin: when a statement reads the
 // chain's resolved pair, the mark comes from THAT pair's posdel, not from
-// the chain's. Both ways round: a chain with dead rows merged into a pair
-// with none (every killed row came back and went again inside the window is
-// not possible, so the pair here is written to say so), and a chain without
-// any merged into a pair with some.
+// the chain's. Both ways round: a chain with dead rows beside a pair with
+// none (no writer produces this, since a base row killed anywhere in the
+// chain stays killed in the merged pair; the pair is written by hand so the
+// mark can be seen following the resolved pair and not the chain), and a
+// chain without any beside a pair with some.
 func TestStateView_resolvedPairDecidesTheDeadJoin(t *testing.T) {
 	const stamp = "2026-04-30T03-00-00Z"
 	for _, c := range []struct {

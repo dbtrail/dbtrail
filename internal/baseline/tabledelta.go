@@ -852,12 +852,13 @@ func TableDeltaOnePairStateSQL(base, posdel, upserts, replace string) string {
 // whose posdel held no row when the views were generated
 // (TableDeltaPosdelEmpty, #2478): the base as it is, plus the pair's rows
 // that are not tombstones. Without dead rows to remove, the base minus them
-// is the base, and the file_row_number join that would remove them costs as
-// much as reading the base again (measured over a 60 M row table, DuckDB
+// is the base, and the file_row_number join that would remove them adds up
+// to the cost of a second base read (measured over a 60 M row table, DuckDB
 // 1.4.5, 4 threads: a GROUP BY over the whole table took 0.43 s through the
-// join with an empty posdel and 0.26 s without it, the base alone 0.27 s).
-// A tombstone in the pair is dropped by the filter as before; with no dead
-// row it can only name a key the base does not hold.
+// join with an empty posdel, 0.27 s without it, in-statement count included,
+// and 0.27 s over the base alone; a narrow range read 0.045 s, 0.024 s and
+// 0.022 s). A tombstone in the pair is dropped by the filter as before: with
+// the posdel empty, this returns exactly the rows the join form returns.
 //
 // The posdel is still read, for its row count only: a pair replaced under
 // the same name between the footer read and this statement (a resolved pair
@@ -899,7 +900,8 @@ func TableDeltaPosdelEmpty(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	pf, err := parquet.OpenFile(f, info.Size())
+	// The footer only: no page index, no bloom filters.
+	pf, err := parquet.OpenFile(f, info.Size(), parquet.SkipPageIndex(true), parquet.SkipBloomFilters(true))
 	if err != nil {
 		return false, fmt.Errorf("read the footer of %s: %w", path, err)
 	}

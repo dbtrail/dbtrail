@@ -103,8 +103,9 @@ type BaselineTable struct {
 	// through (DeltaResolved, or the chain's only pair) has an empty posdel,
 	// read from its footer (#2478; set by MarkTableDeltasWithoutDeadRows).
 	// The view then reads the base without the file_row_number join that
-	// removes dead rows: with none to remove it costs as much as reading the
-	// base again. A following view ignores it: a later pair can hold some.
+	// removes dead rows: with none to remove, it adds up to the cost of a
+	// second base read and removes nothing. A following view ignores it: a
+	// later pair can hold some.
 	DeltaNoDead bool
 
 	// Tail, when set, is the table's tail (#2369): the newest change of each
@@ -261,7 +262,7 @@ func MarkResolvedTableDeltas(tables []BaselineTable) {
 // and only for views generated per statement, like that one: the mark is
 // about files as they are now.
 //
-// The posdel's footer is read, a few hundred bytes. A footer that cannot be
+// Only the posdel's Parquet footer is read, not its rows. A footer that cannot be
 // read leaves the mark off, which keeps the join the view has always had:
 // the statement then reads the file and fails on it as it did before.
 func MarkTableDeltasWithoutDeadRows(tables []BaselineTable) {
