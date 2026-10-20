@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -27,9 +28,17 @@ type TableKey struct {
 // as slow. When the GROUP BY holds every column of a table's PRIMARY KEY, the
 // key already fixes that table's other columns, so its text columns cannot
 // split a group further: the statement groups by the key alone and reads
-// each such column as any_value(col), the one value its group holds. Same
-// groups, same values, and the ORDER BY and HAVING over them still compare
-// under the session's collation.
+// each such column as the one value its group holds. Same groups, same
+// values, and the ORDER BY and HAVING over them still compare under the
+// session's collation.
+//
+// "Fixes" is checked, not trusted (groupKeyCheckSQL): the key is read from
+// the CREATE TABLE in the snapshot's file, and a view can hold one key value
+// twice when that is not the key its changes were applied by (a key altered
+// after the snapshot), or when the writer folded two values into one (zero
+// dates are stored as NULL). Each replaced column is read through a check
+// that its group holds one value, byte for byte, and the statement fails with
+// groupKeyMixed otherwise, which runs it as written.
 //
 // A statement is rewritten only where every part of it is understood; any
 // shape this does not read leaves its SELECT as written, which is always
@@ -52,12 +61,18 @@ type TableKey struct {
 //
 // The rewritten tree is turned back into text by the engine itself
 // (json_deserialize_sql), and that text is parsed again and must give the
-// same tree; if it does not, the statement runs as written.
-func groupByKeyRewrite(ctx context.Context, conn *sql.Conn, stmt any, keys []TableKey, searchSchema string) (string, error) {
+// same tree; if it does not, the statement runs as written. The tree is the
+// parser's own, read with its numbers as their digits (parseExact): a
+// literal read as a float64 would come back rounded past 15 digits, in the
+// tree and in the text alike, so the comparison could not see it.
+//
+// stmt is the worker's parse of text, read only to skip a statement with no
+// GROUP BY without a second parse.
+func groupByKeyRewrite(ctx context.Context, conn *sql.Conn, text string, stmt any, keys []TableKey, searchSchema string) (string, error) {
 	if len(keys) == 0 || !hasGroupBy(stmt) {
 		return "", nil
 	}
-	tree, err := deepCopy(stmt)
+	tree, err := parseExact(ctx, conn, text)
 	if err != nil {
 		return "", err
 	}
@@ -92,18 +107,40 @@ func groupByKeyRewrite(ctx context.Context, conn *sql.Conn, stmt any, keys []Tab
 	if err != nil {
 		return "", err
 	}
-	var text string
-	if err := conn.QueryRowContext(ctx, "SELECT json_deserialize_sql(?::JSON)", string(wrapped)).Scan(&text); err != nil {
+	var out string
+	if err := conn.QueryRowContext(ctx, "SELECT json_deserialize_sql(?::JSON)", string(wrapped)).Scan(&out); err != nil {
 		return "", fmt.Errorf("render the rewritten statement: %w", err)
 	}
-	again, reason := parseStatement(ctx, conn, text)
-	if reason != "" {
-		return "", fmt.Errorf("the rewritten statement does not parse: %s", reason)
+	again, err := parseExact(ctx, conn, out)
+	if err != nil {
+		return "", fmt.Errorf("the rewritten statement does not parse: %w", err)
 	}
 	if !reflect.DeepEqual(withoutLocations(again), withoutLocations(tree)) {
 		return "", fmt.Errorf("the rewritten statement does not parse back to the rewritten tree")
 	}
-	return text, nil
+	return out, nil
+}
+
+// parseExact is the parser's tree of one statement, with every number kept
+// as the digits the parser wrote (json.Number).
+func parseExact(ctx context.Context, conn *sql.Conn, text string) (any, error) {
+	var raw string
+	if err := conn.QueryRowContext(ctx, "SELECT json_serialize_sql(?::VARCHAR)::VARCHAR", text).Scan(&raw); err != nil {
+		return nil, err
+	}
+	d := json.NewDecoder(strings.NewReader(raw))
+	d.UseNumber()
+	var parsed struct {
+		Error      bool  `json:"error"`
+		Statements []any `json:"statements"`
+	}
+	if err := d.Decode(&parsed); err != nil {
+		return nil, err
+	}
+	if parsed.Error || len(parsed.Statements) != 1 {
+		return nil, fmt.Errorf("not one statement")
+	}
+	return parsed.Statements[0], nil
 }
 
 // hasGroupBy says whether any SELECT in the tree has a GROUP BY, so a
@@ -129,13 +166,16 @@ func hasGroupBy(v any) bool {
 	return false
 }
 
+// deepCopy copies a tree, numbers kept as their digits.
 func deepCopy(v any) (any, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
+	d := json.NewDecoder(strings.NewReader(string(b)))
+	d.UseNumber()
 	var out any
-	err = json.Unmarshal(b, &out)
+	err = d.Decode(&out)
 	return out, err
 }
 
@@ -199,11 +239,17 @@ func cteNames(v any) map[string]bool {
 type rewriteCatalog struct {
 	columns      map[[2]string][]catalogColumn
 	keys         map[[2]string][]string
-	aggregate    map[string]bool // an aggregate and nothing else
-	ambiguous    map[string]bool // both an aggregate and a scalar function
-	anyValue     map[string]any  // any_value(x), as the parser writes it
 	searchSchema string
 	ctes         map[string]bool
+
+	// Read once a SELECT has a column to replace (functions).
+	ctx       context.Context
+	conn      *sql.Conn
+	loaded    bool
+	loadErr   error
+	aggregate map[string]bool // an aggregate and nothing else
+	ambiguous map[string]bool // both an aggregate and a scalar function
+	check     map[string]any  // groupKeyCheckSQL's expression, as the parser writes it
 }
 
 type catalogColumn struct {
@@ -238,17 +284,50 @@ func loadRewriteCatalog(ctx context.Context, conn *sql.Conn, keys []TableKey) (*
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("read the views' columns: %w", err)
 	}
-	rows, err = conn.QueryContext(ctx, "SELECT lower(function_name), bool_or(function_type = 'aggregate'), "+
+	cat.ctx, cat.conn = ctx, conn
+	return cat, nil
+}
+
+// groupKeyMixed is the error a replaced column's check raises when its group
+// holds more than one value: the key did not fix it after all.
+const groupKeyMixed = "bintrail: a grouping key of the copy holds more than one text value"
+
+// groupKeyCheckSQL is what a replaced column becomes, with bintrail_x
+// standing for it: its group's one value when every row of the group holds
+// that value byte for byte (or every row holds NULL), and an error
+// otherwise. The bytes, not the session's collation: two spellings that
+// collation folds together are two groups under the key and one as written,
+// so they are a mismatch too, and comparing bytes is what keeps the check
+// cheap. any_value, not min, gives the value: min(x COLLATE C) would carry
+// that collation into the ORDER BY over it.
+const groupKeyCheckSQL = "SELECT CASE WHEN count(bintrail_x) = 0 OR (count(bintrail_x) = count(*) AND " +
+	"min(bintrail_x COLLATE C) = max(bintrail_x COLLATE C)) THEN any_value(bintrail_x) " +
+	"ELSE error('" + groupKeyMixed + "') END"
+
+// functions reads which function names are aggregates, and the check's
+// expression, the first time a SELECT has a column to replace.
+func (cat *rewriteCatalog) functions() error {
+	if cat.loaded {
+		return cat.loadErr
+	}
+	cat.loaded = true
+	cat.loadErr = cat.readFunctions()
+	return cat.loadErr
+}
+
+func (cat *rewriteCatalog) readFunctions() error {
+	cat.aggregate, cat.ambiguous = map[string]bool{}, map[string]bool{}
+	rows, err := cat.conn.QueryContext(cat.ctx, "SELECT lower(function_name), bool_or(function_type = 'aggregate'), "+
 		"bool_or(function_type <> 'aggregate') FROM duckdb_functions() GROUP BY 1")
 	if err != nil {
-		return nil, fmt.Errorf("read the functions: %w", err)
+		return fmt.Errorf("read the functions: %w", err)
 	}
 	for rows.Next() {
 		var name string
 		var agg, other bool
 		if err := rows.Scan(&name, &agg, &other); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("read the functions: %w", err)
+			return fmt.Errorf("read the functions: %w", err)
 		}
 		switch {
 		case agg && other:
@@ -258,24 +337,22 @@ func loadRewriteCatalog(ctx context.Context, conn *sql.Conn, keys []TableKey) (*
 		}
 	}
 	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("read the functions: %w", err)
+		return fmt.Errorf("read the functions: %w", err)
 	}
-	var raw string
-	if err := conn.QueryRowContext(ctx, "SELECT json_serialize_sql('SELECT any_value(bintrail_x)')::VARCHAR").Scan(&raw); err != nil {
-		return nil, fmt.Errorf("parse any_value: %w", err)
+	tree, err := parseExact(cat.ctx, cat.conn, groupKeyCheckSQL)
+	if err != nil {
+		return fmt.Errorf("parse the check: %w", err)
 	}
-	var parsed struct {
-		Statements []struct {
-			Node struct {
-				SelectList []map[string]any `json:"select_list"`
-			} `json:"node"`
-		} `json:"statements"`
+	node, _ := tree.(map[string]any)["node"].(map[string]any)
+	list, _ := node["select_list"].([]any)
+	if len(list) != 1 {
+		return fmt.Errorf("parse the check: unexpected shape")
 	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil || len(parsed.Statements) != 1 || len(parsed.Statements[0].Node.SelectList) != 1 {
-		return nil, fmt.Errorf("parse any_value: unexpected shape")
+	cat.check, _ = list[0].(map[string]any)
+	if cat.check == nil {
+		return fmt.Errorf("parse the check: unexpected shape")
 	}
-	cat.anyValue = parsed.Statements[0].Node.SelectList[0]
-	return cat, nil
+	return nil
 }
 
 // binding is one relation of a FROM: the name its columns are qualified by,
@@ -304,6 +381,11 @@ func (cat *rewriteCatalog) bindings(from any) ([]binding, bool) {
 	}
 	switch m["type"] {
 	case "BASE_TABLE":
+		// Each field that decides what the relation's names bind to must be
+		// there: an engine that stopped writing one would read as "none".
+		if !hasKeys(m, "catalog_name", "schema_name", "table_name", "alias", "at_clause", "sample", "column_name_alias") {
+			return nil, false
+		}
 		if m["catalog_name"] != "" || m["at_clause"] != nil || m["sample"] != nil {
 			return nil, false
 		}
@@ -335,6 +417,9 @@ func (cat *rewriteCatalog) bindings(from any) ([]binding, bool) {
 		}
 		return []binding{{name: name, columns: cols, key: cat.keys[id]}}, true
 	case "JOIN":
+		if !hasKeys(m, "using_columns", "ref_type", "join_type", "left", "right") {
+			return nil, false
+		}
 		if u, _ := m["using_columns"].([]any); len(u) > 0 {
 			return nil, false
 		}
@@ -421,6 +506,9 @@ func keyType(t string) bool {
 // is left exactly as it was.
 func (cat *rewriteCatalog) rewriteNode(node map[string]any) bool {
 	groups, _ := node["group_expressions"].([]any)
+	if !hasKeys(node, "group_sets", "aggregate_handling", "qualify", "having", "modifiers", "select_list", "from_table") {
+		return false
+	}
 	if len(groups) == 0 || node["aggregate_handling"] != "STANDARD_HANDLING" || node["qualify"] != nil {
 		return false
 	}
@@ -518,7 +606,7 @@ func (cat *rewriteCatalog) rewriteNode(node map[string]any) bool {
 			}
 		}
 	}
-	if len(dropped) == 0 {
+	if len(dropped) == 0 || cat.functions() != nil {
 		return false
 	}
 	isDropped := func(ref map[string]any) (catalogColumn, bool) {
@@ -590,7 +678,7 @@ func (cat *rewriteCatalog) rewriteNode(node map[string]any) bool {
 	}
 	set := make([]any, len(keep))
 	for i := range keep {
-		set[i] = float64(i)
+		set[i] = json.Number(strconv.Itoa(i))
 	}
 	node["select_list"] = newSelect
 	node["having"] = newHaving
@@ -614,12 +702,25 @@ func plainGroupingSet(v any, n int) bool {
 	}
 	seen := make([]bool, n)
 	for _, x := range set {
-		f, ok := x.(float64)
-		i := int(f)
-		if !ok || float64(i) != f || i < 0 || i >= n || seen[i] {
+		num, ok := x.(json.Number)
+		if !ok {
+			return false
+		}
+		i64, err := num.Int64()
+		i := int(i64)
+		if err != nil || i < 0 || i >= n || seen[i] {
 			return false
 		}
 		seen[i] = true
+	}
+	return true
+}
+
+func hasKeys(m map[string]any, keys ...string) bool {
+	for _, k := range keys {
+		if _, ok := m[k]; !ok {
+			return false
+		}
 	}
 	return true
 }
@@ -632,13 +733,35 @@ func shallowCopy(m map[string]any) map[string]any {
 	return out
 }
 
-// wrap is any_value(ref) under alias.
+// wrap is groupKeyCheckSQL over ref, under alias.
 func (cat *rewriteCatalog) wrap(ref map[string]any, alias string) map[string]any {
-	fn, _ := deepCopy(cat.anyValue)
-	f := fn.(map[string]any)
 	inner := shallowCopy(ref)
 	inner["alias"] = ""
-	f["children"] = []any{inner}
+	var sub func(v any) any
+	sub = func(v any) any {
+		switch x := v.(type) {
+		case map[string]any:
+			if x["class"] == "COLUMN_REF" {
+				if parts, _ := x["column_names"].([]any); len(parts) == 1 && parts[0] == "bintrail_x" {
+					c, _ := deepCopy(inner)
+					return c
+				}
+			}
+			out := make(map[string]any, len(x))
+			for k, child := range x {
+				out[k] = sub(child)
+			}
+			return out
+		case []any:
+			out := make([]any, len(x))
+			for i, child := range x {
+				out[i] = sub(child)
+			}
+			return out
+		}
+		return v
+	}
+	f := sub(cat.check).(map[string]any)
 	f["alias"] = alias
 	return f
 }

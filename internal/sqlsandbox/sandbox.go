@@ -328,6 +328,9 @@ type Phases struct {
 	// Child: installing the views script (CREATE VIEW over the copy), the
 	// USE and the final configuration lock.
 	Views time.Duration `json:"views_ns"`
+	// Child: deciding whether the statement's GROUP BY narrows to a table's
+	// key, and preparing the narrowed statement when it does (#2479).
+	Rewrite time.Duration `json:"rewrite_ns"`
 	// Child: running the statement and collecting rows (= Elapsed). The
 	// child cannot time its own encoding from inside the encoded message;
 	// Spawn minus the child phases is that cost plus process start and exit.
@@ -1583,11 +1586,17 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			return Result{}, &WorkerError{Err: errors.New(out.Error.Message), PID: pid, Stderr: w.stderr.text()}
 		}
 	}
+	if out.GroupedByKeyNote != "" {
+		// A statement that had a table's key to group by ran as written: an
+		// answer as correct, without #2479's saving. Logged so that a
+		// rewrite an engine change broke for every statement shows.
+		slog.Warn("sql: a GROUP BY was not narrowed to its table's key", "why", out.GroupedByKeyNote)
+	}
 	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
 		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS), GroupedByKey: out.GroupedByKey,
 		Phases: Phases{
 			Open: time.Duration(out.OpenNS), Lockdown: time.Duration(out.LockdownNS),
-			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),
+			Views: time.Duration(out.ViewsNS), Rewrite: time.Duration(out.RewriteNS), Query: time.Duration(out.ElapsedNS),
 			Spawn: spawnTook, Decode: time.Since(decodeStart),
 		}}
 	if res.Rows == nil {

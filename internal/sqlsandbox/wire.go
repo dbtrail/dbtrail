@@ -83,6 +83,11 @@ type wireResult struct {
 	ViewsNS    int64      `json:"views_ns,omitempty"`
 	// GroupedByKey is Result.GroupedByKey.
 	GroupedByKey bool `json:"grouped_by_key,omitempty"`
+	// GroupedByKeyNote says why a statement that had a key to group by ran
+	// as written (groupByKeyRewrite); the parent logs it. RewriteNS is the
+	// time spent deciding and preparing the rewrite (Phases.Rewrite).
+	GroupedByKeyNote string `json:"grouped_by_key_note,omitempty"`
+	RewriteNS        int64  `json:"rewrite_ns,omitempty"`
 	Error      *wireError `json:"error,omitempty"`
 	// ResidentBytes is the memory the worker holds after the statement, its
 	// DuckDB closed; 0 where the platform does not say. Sent by a worker that

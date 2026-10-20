@@ -3,6 +3,7 @@ package sqlsandbox
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
@@ -37,6 +38,9 @@ func groupKeySession(t *testing.T) *sql.Conn {
 		"CREATE TABLE s.district AS SELECT * FROM (VALUES (1, 1, 'North'), (1, 2, 'north'), (2, 1, 'NÖRTH'), (2, 2, 'South')) t(w, d, d_name)",
 		"CREATE TABLE s.code AS SELECT * FROM (VALUES ('a', 'x'), ('A', 'y')) t(c, c_name)",
 		"CREATE TABLE main.mitem AS SELECT * FROM s.item",
+		"CREATE TABLE s.big AS SELECT * FROM (VALUES (1234567890123456789, 'wanted', 0.123456789012345678::DECIMAL(19,18)), "+
+			"(1234567890123456800, 'other', 0.123456789012345680::DECIMAL(19,18))) t(id, name, frac)",
+		"CREATE TABLE s.dup AS SELECT * FROM (VALUES (1, 'Café'), (1, 'cafe'), (2, 'x'), (2, NULL), (3, 'y'), (3, 'y')) t(id, name)",
 		"CREATE TABLE s.nokey AS SELECT * FROM (VALUES (1, 'Café'), (2, 'cafe')) t(x, i_name)",
 	) {
 		if _, err := conn.ExecContext(context.Background(), stmt); err != nil {
@@ -52,6 +56,8 @@ var groupKeyKeys = []TableKey{
 	{Schema: "S", Table: "DISTRICT", Columns: []string{"W", "d"}},
 	{Schema: "s", Table: "code", Columns: []string{"c"}},
 	{Schema: "main", Table: "mitem", Columns: []string{"i_id"}},
+	{Schema: "s", Table: "big", Columns: []string{"id"}},
+	{Schema: "s", Table: "dup", Columns: []string{"id"}},
 }
 
 // answer is a statement's columns and rows, as text.
@@ -86,7 +92,7 @@ func rewriteOf(t *testing.T, conn *sql.Conn, text, search string) string {
 	if reason != "" {
 		t.Fatalf("%s: %s", text, reason)
 	}
-	out, err := groupByKeyRewrite(context.Background(), conn, stmt, groupKeyKeys, search)
+	out, err := groupByKeyRewrite(context.Background(), conn, text, stmt, groupKeyKeys, search)
 	if err != nil {
 		t.Fatalf("%s: %v", text, err)
 	}
@@ -120,6 +126,8 @@ func TestGroupByKeyRewrite_sameAnswer(t *testing.T) {
 		{"ordered by position", "SELECT i.i_id, i.i_name FROM s.item i GROUP BY i.i_id, i.i_name ORDER BY 2, 1", ""},
 		{"text of a table without a key beside it", "SELECT i.i_id, i.i_name, n.i_name AS other, count(*) AS c FROM s.item i JOIN s.nokey n ON n.x = i.i_id " +
 			"GROUP BY i.i_id, i.i_name, n.i_name ORDER BY i.i_id", ""},
+		{"literals past a float's digits", "SELECT b.id, b.name, count(*) AS n FROM s.big b WHERE b.id = 1234567890123456789 " +
+			"OR b.frac = 0.123456789012345678 GROUP BY b.id, b.name ORDER BY b.id LIMIT 9223372036854775807", ""},
 		{"same table twice", "SELECT a.i_id, a.i_name, b.i_id AS b_id, b.i_name AS b_name FROM s.item a JOIN s.item b ON lower(a.i_name) = lower(b.i_name) " +
 			"GROUP BY a.i_id, a.i_name, b.i_id, b.i_name ORDER BY a.i_id, b_id", ""},
 	} {
@@ -201,15 +209,16 @@ func TestGroupByKeyRewrite_leftAlone(t *testing.T) {
 func TestGroupByKeyRewrite_noKeysCostsNothing(t *testing.T) {
 	conn := groupKeySession(t)
 	stmt, _ := parseStatement(context.Background(), conn, "SELECT i_id, i_name FROM s.item GROUP BY i_id, i_name")
-	got, err := groupByKeyRewrite(context.Background(), conn, stmt, nil, "")
+	const q = "SELECT i_id, i_name FROM s.item GROUP BY i_id, i_name"
+	got, err := groupByKeyRewrite(context.Background(), conn, q, stmt, nil, "")
 	if got != "" || err != nil {
 		t.Fatalf("with no keys: %q, %v", got, err)
 	}
-	before, _ := deepCopy(stmt)
-	if _, err := groupByKeyRewrite(context.Background(), conn, stmt, groupKeyKeys, ""); err != nil {
+	before, _ := json.Marshal(stmt)
+	if _, err := groupByKeyRewrite(context.Background(), conn, q, stmt, groupKeyKeys, ""); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(stmt, before) {
+	if after, _ := json.Marshal(stmt); string(after) != string(before) {
 		t.Fatal("the rewrite changed the parsed statement it was given")
 	}
 }
@@ -235,5 +244,61 @@ func TestGroupByKeyRewrite_throughTheWorker(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plain.Columns, keyed.Columns) || !reflect.DeepEqual(plain.Rows, keyed.Rows) {
 		t.Fatalf("answers differ:\n%v %v\n%v %v", plain.Columns, plain.Rows, keyed.Columns, keyed.Rows)
+	}
+}
+
+// A key value the view holds twice, with text that differs (byte for byte,
+// or only by case and accents, or NULL beside a value): the narrowed
+// statement refuses with groupKeyMixed instead of answering, and a key value
+// held twice with the same text answers as written.
+func TestGroupByKeyRewrite_keyNotUniqueRefuses(t *testing.T) {
+	conn := groupKeySession(t)
+	for _, c := range []struct {
+		sql     string
+		refuses bool
+	}{
+		{"SELECT id, name, count(*) AS n FROM s.dup WHERE id = 1 GROUP BY id, name", true},
+		{"SELECT id, name, count(*) AS n FROM s.dup WHERE id = 2 GROUP BY id, name", true},
+		{"SELECT id, name, count(*) AS n FROM s.dup WHERE id = 3 GROUP BY id, name ORDER BY id", false},
+	} {
+		rewritten := rewriteOf(t, conn, c.sql, "")
+		if rewritten == "" {
+			t.Fatalf("not rewritten: %s", c.sql)
+		}
+		_, err := conn.ExecContext(context.Background(), rewritten)
+		if got := err != nil && strings.Contains(err.Error(), groupKeyMixed); got != c.refuses {
+			t.Errorf("%s: refused %v (%v), want %v", c.sql, got, err, c.refuses)
+		}
+		if !c.refuses {
+			wantCols, wantRows := answer(t, conn, c.sql)
+			gotCols, gotRows := answer(t, conn, rewritten)
+			if !slices.Equal(gotCols, wantCols) || !slices.Equal(gotRows, wantRows) {
+				t.Errorf("answers differ: %v %q, rewritten %v %q", wantCols, wantRows, gotCols, gotRows)
+			}
+		}
+	}
+}
+
+// Through the worker: a key value the copy holds twice runs the statement as
+// written, with its answer, and says the rewrite did not apply.
+func TestGroupByKeyRewrite_throughTheWorker_keyNotUnique(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	job := f.job("SELECT id, name, count(*) AS n FROM dup.t GROUP BY id, name ORDER BY name")
+	job.ViewsSQL += "\nCREATE SCHEMA dup;\nCREATE VIEW dup.t AS SELECT * FROM (VALUES (1, 'a'), (1, 'b')) v(id, name);\n"
+	plain, err := r.Run(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Keys = []TableKey{{Schema: "dup", Table: "t", Columns: []string{"id"}}}
+	keyed, err := r.Run(context.Background(), job)
+	if err != nil {
+		t.Fatalf("a key held twice failed the statement instead of running it as written: %v", err)
+	}
+	if keyed.GroupedByKey || len(keyed.Rows) != 2 {
+		t.Fatalf("GroupedByKey %v, rows %v", keyed.GroupedByKey, keyed.Rows)
+	}
+	if !reflect.DeepEqual(plain.Rows, keyed.Rows) {
+		t.Fatalf("answers differ: %v, %v", plain.Rows, keyed.Rows)
 	}
 }
