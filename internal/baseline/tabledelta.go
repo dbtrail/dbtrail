@@ -903,18 +903,23 @@ type TableDeltaDeadRange struct{ Lo, Hi int64 }
 // last 3 M (DuckDB 1.4.5, 4 threads), a GROUP BY over the whole table took
 // 0.60 s through the join, 0.37 s like this, 0.28 s over the base alone.
 //
-// Two reads of the base, not one with `< Lo OR > Hi`: DuckDB skips row groups
-// on a file_row_number range only when the predicate is one range (measured:
-// the OR form cost 0.49 s on the same table).
+// Two reads of the base, not one with `< Lo OR > Hi`: on DuckDB 1.4.5 an OR
+// of two file_row_number ranges did not skip row groups the way one range
+// does (measured: 0.49 s against 0.37 s on the same table).
 //
 // The posdel's row-group statistics are checked again inside the statement,
-// from parquet_metadata, before its positions are read: a pair replaced under
-// the same name since the range was read (TableDeltaOnePairNoDeadStateSQL
-// says when) with a dead row outside r fails the statement with
-// TableDeltaPosdelChangedError instead of showing that row. A row group that
-// holds rows and no statistics fails it too: nothing then bounds its
-// positions. An empty row group is skipped, as ReadTableDeltaPosdelFooter
-// skips it.
+// from parquet_metadata, in the same read as its positions: a pair replaced
+// under the same name since the range was read (TableDeltaOnePairNoDeadStateSQL
+// says when) with a dead row outside r fails the statement (with
+// TableDeltaPosdelChangedError for an INT64 posdel) instead of showing that
+// row. A row group that holds rows and no statistics fails it too: nothing
+// then bounds its positions. An empty row group is skipped, as
+// ReadTableDeltaPosdelFooter skips it. The WHERE on bintrail_ok keeps DuckDB
+// from pruning the check, as in TableDeltaOnePairNoDeadStateSQL. That the
+// check also runs when a LIMIT is filled by the plain reads first, or no row
+// of the stretch matches, is DuckDB building the join's dead side anyway:
+// behaviour, not contract, pinned by
+// TestStateView_deadRowOutsideTheRangeFailsTheStatement.
 func TableDeltaOnePairRangeStateSQL(base, posdel, upserts string, r TableDeltaDeadRange, replace string) string {
 	star := "*"
 	if replace != "" {
@@ -947,12 +952,14 @@ const TableDeltaPosdelChangedError = "the changes of a table were replaced while
 
 // TableDeltaPosdelFooter is what a posdel's footer says about its dead rows.
 type TableDeltaPosdelFooter struct {
-	// Rows is how many rows the file holds; 0 only when the file's count and
-	// every row group's agree on it.
+	// Rows is the file's row count from its footer, raised to 1 when that
+	// count is 0 but a row group holds rows: it is 0 only when the file's
+	// count and every row group's agree on it.
 	Rows int64
 	// Range bounds every position, from the row groups' statistics; nil
-	// when a row group that holds rows does not record a min and a max for
-	// an INT64 position (a NULL-only group, or a writer that wrote none).
+	// when a row group that holds rows gives no 8-byte MinValue and
+	// MaxValue for a single INT64 column (a NULL-only group, a writer that
+	// wrote none, or positions of another type).
 	Range *TableDeltaDeadRange
 }
 

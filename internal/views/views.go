@@ -308,10 +308,13 @@ func MarkTableDeltaDeadRows(tables []BaselineTable) {
 				"table", t.Schema+"."+t.Table, "path", t.Path, "error", err)
 			continue
 		}
-		// Past half the base the join is confined to little, and two more
-		// reads of the base cost more than they save (measured: dead rows
-		// spread over the whole file read 5 to 10 % slower this way).
-		if r := *foot.Range; r.Hi-r.Lo+1 <= rows/2 {
+		// Past half the base, little of it skips the join, and the two
+		// extra base reads can cost more than they save: with dead rows
+		// spread over the whole file this form read 5 to 10 % slower
+		// (DuckDB 1.4.5). Half is a chosen line, not a measured break-even.
+		// A negative low end bounds nothing a row number can be, and could
+		// overflow the span.
+		if r := *foot.Range; r.Lo >= 0 && r.Hi-r.Lo+1 <= rows/2 {
 			t.DeltaDeadRange = &r
 		}
 	}

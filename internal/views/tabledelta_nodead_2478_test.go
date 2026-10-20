@@ -15,11 +15,12 @@ import (
 // #2478: a pinned view over one pair with no dead row numbers reads the base
 // without the file_row_number join (baseMinusDeadSQL), which adds up to the
 // cost of a second base read and removes nothing. deadJoinMark is that join's
-// name in the generated SQL.
+// name in the generated SQL. The range form (DeltaDeadRange) names
+// file_row_number in its plain reads too; tell it apart with rangeMark.
 const deadJoinMark = "file_row_number"
 
-// generatePinnedMarked lists the chain, marks the resolved pair and the pairs
-// without dead rows as a statement's views are marked, and generates the
+// generatePinnedMarked lists the chain, marks the resolved pair and where each
+// pair's dead rows lie, as a statement's views are marked, and generates the
 // pinned views. withoutDead=false skips MarkTableDeltaDeadRows: the
 // views as they were before #2478, to compare rows against.
 func generatePinnedMarked(t *testing.T, root string, tables []BaselineTable, withoutDead bool) string {
