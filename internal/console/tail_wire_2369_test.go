@@ -46,12 +46,20 @@ func TestStatementTailsAllOrNothing(t *testing.T) {
 	s := &Server{}
 	newKeeper := func(f *fakeIndex) *tailKeeper { return newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour) }
 	tables := []views.BaselineTable{orders, customers}
+	// stmt is a statement after the builds an earlier one started are in.
+	stmt := func(k *tailKeeper, read []views.BaselineTable) ([]views.BaselineTable, time.Time, bool) {
+		s.statementTails(ctx, k, tables, read)
+		k.settle()
+		out, through, ok := s.statementTails(ctx, k, tables, read)
+		k.settle()
+		return out, through, ok
+	}
 
 	t.Run("every table read has a tail: all of them laid over", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
 		f.add("customers", "9")
-		out, through, ok := s.statementTails(ctx, newKeeper(f), tables, tables)
+		out, through, ok := stmt(newKeeper(f), tables)
 		if !ok || out[0].Tail == nil || out[1].Tail == nil || !through.Equal(f.at(2)) {
 			t.Fatalf("%v %v %+v", ok, through, out)
 		}
@@ -63,11 +71,11 @@ func TestStatementTailsAllOrNothing(t *testing.T) {
 	t.Run("one table without a tail: none", func(t *testing.T) {
 		f := &fakeIndex{startWhy: map[string]string{tailKey("shop", "customers"): "no key"}}
 		f.add("orders", "1")
-		out, through, ok := s.statementTails(ctx, newKeeper(f), tables, tables)
+		out, through, ok := stmt(newKeeper(f), tables)
 		if ok || !through.IsZero() || out[0].Tail != nil {
 			t.Fatalf("%v %v %+v", ok, through, out)
 		}
-		if _, _, ok := s.statementTails(ctx, newKeeper(f), tables, tables[1:]); ok {
+		if _, _, ok := stmt(newKeeper(f), tables[1:]); ok {
 			t.Error("a statement over the one table without a tail said it read tails")
 		}
 	})
@@ -77,24 +85,43 @@ func TestStatementTailsAllOrNothing(t *testing.T) {
 		f.add("orders", "1")
 		f.add("customers", "9")
 		k := newKeeper(f)
-		s.statementTails(ctx, k, tables, tables)
+		stmt(k, tables)
 		for _, key := range []string{"2", "3", "4"} {
 			f.add("orders", key) // over the budget of 3: frozen
 		}
 		f.add("customers", "8")
-		out, _, ok := s.statementTails(ctx, k, tables, tables)
+		out, _, ok := stmt(k, tables)
 		if ok || out[0].Tail != nil || out[1].Tail != nil {
 			t.Fatalf("a frozen tail read with a current one: %v %+v", ok, out)
 		}
-		if _, _, ok := s.statementTails(ctx, k, tables, tables[1:]); !ok {
+		if _, _, ok := stmt(k, tables[1:]); !ok {
 			t.Error("a statement over the current table alone has no tail")
+		}
+	})
+
+	t.Run("one table ready, one still building: none, and no wait", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		f.add("customers", "9")
+		k := newKeeper(f)
+		stmt(k, tables[:1]) // orders is in
+		gate := make(chan struct{})
+		f.fillGate = map[string]chan struct{}{tailKey("shop", "customers"): gate}
+		out, through, ok := s.statementTails(ctx, k, tables, tables)
+		if ok || !through.IsZero() || out[0].Tail != nil || out[1].Tail != nil {
+			t.Fatalf("a statement read one table at the index's instant and one at its snapshot's: %v %v %+v", ok, through, out)
+		}
+		close(gate)
+		k.settle()
+		if out, _, ok := s.statementTails(ctx, k, tables, tables); !ok || out[0].Tail == nil || out[1].Tail == nil {
+			t.Fatalf("both tails, once the build is in: %v %+v", ok, out)
 		}
 	})
 
 	t.Run("no table read: none", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
-		if _, _, ok := s.statementTails(ctx, newKeeper(f), tables, nil); ok {
+		if _, _, ok := stmt(newKeeper(f), nil); ok {
 			t.Fatal("tails for a statement that reads no table")
 		}
 	})

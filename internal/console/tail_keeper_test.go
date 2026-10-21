@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,10 @@ import (
 // fakeIndex is a tailSource over events held in memory, ids in the order
 // they were indexed, handed out two at a time.
 type fakeIndex struct {
+	// mu guards every field against the keeper's background builds; a test
+	// changes a field only while no build reads it (before one starts, or
+	// after settle).
+	mu     sync.Mutex
 	events []query.ResultRow
 	// newestErr, sinceErr, changedErr fail those reads; fillErr fails Fill
 	// for a table once (a rebuild that times out); startWhy, fillWhy,
@@ -52,11 +57,25 @@ type fakeIndex struct {
 	cutAt   map[string]query.BinlogPos
 	cutWhy  map[string]string
 	cutLast map[string]uint64
+	// fillGate holds a table's Fill (a build in flight) until the channel is
+	// closed or the build's context ends (fillDeaf: only the channel, a read
+	// that finishes after it was no longer wanted); fillEntered is told the
+	// table when a Fill reaches its gate. fillPanic makes a table's Fill
+	// panic once.
+	fillGate    map[string]chan struct{}
+	fillDeaf    bool
+	fillEntered chan string
+	fillPanic   map[string]bool
 }
 
 const fakePage = 2
 
-func (f *fakeIndex) Newest(context.Context) (tailMark, error) {
+func (f *fakeIndex) Newest(ctx context.Context) (tailMark, error) {
+	if err := ctx.Err(); err != nil {
+		return tailMark{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.newestErr != nil || len(f.events) == 0 {
 		return tailMark{}, f.newestErr
 	}
@@ -65,6 +84,8 @@ func (f *fakeIndex) Newest(context.Context) (tailMark, error) {
 }
 
 func (f *fakeIndex) Holds(_ context.Context, m tailMark) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, ev := range f.events {
 		if ev.EventID == m.ID {
 			return ev.BinlogFile == m.Pos.File && ev.StartPos == m.Pos.Pos, nil
@@ -74,6 +95,8 @@ func (f *fakeIndex) Holds(_ context.Context, m tailMark) (bool, error) {
 }
 
 func (f *fakeIndex) Start(_ context.Context, t views.BaselineTable) (tailTable, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err := f.startErr[tailKey(t.Schema, t.Table)]; err != nil {
 		delete(f.startErr, tailKey(t.Schema, t.Table))
 		return nil, "", err
@@ -98,9 +121,34 @@ func (f *fakeIndex) hand(evs []query.ResultRow, page func([]query.ResultRow) err
 
 func (f *fakeIndex) Fill(ctx context.Context, t views.BaselineTable, upTo uint64, page func([]query.ResultRow) error) (string, error) {
 	key := tailKey(t.Schema, t.Table)
+	f.mu.Lock()
+	gate, entered, deaf := f.fillGate[key], f.fillEntered, f.fillDeaf
+	f.mu.Unlock()
+	if gate != nil {
+		if entered != nil {
+			entered <- key
+		}
+		if deaf {
+			<-gate
+		} else {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fillPanic[key] {
+		delete(f.fillPanic, key)
+		panic("a fold that panics")
+	}
 	if f.fillWait[key] {
 		delete(f.fillWait, key) // once: a retry must not hang the test
+		f.mu.Unlock()
 		<-ctx.Done()
+		f.mu.Lock()
 		return "", ctx.Err()
 	}
 	if err := f.fillErr[key]; err != nil {
@@ -121,6 +169,8 @@ func (f *fakeIndex) Fill(ctx context.Context, t views.BaselineTable, upTo uint64
 }
 
 func (f *fakeIndex) Since(_ context.Context, tables []views.BaselineTable, from, upTo uint64, page func([]query.ResultRow) error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.sinceErr != nil {
 		return f.sinceErr
 	}
@@ -147,6 +197,8 @@ func (f *fakeIndex) Since(_ context.Context, tables []views.BaselineTable, from,
 }
 
 func (f *fakeIndex) Cut(t views.BaselineTable) (tailFloor, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	key := tailKey(t.Schema, t.Table)
 	switch {
 	case !f.anchors:
@@ -171,12 +223,16 @@ func (f *fakeIndex) Cut(t views.BaselineTable) (tailFloor, string) {
 }
 
 func (f *fakeIndex) Broken(context.Context, []views.BaselineTable) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.changed, f.changedErr
 }
 
 // add indexes one change of shop.<table> to key, a minute after the last,
 // further on in binlog.000003.
 func (f *fakeIndex) add(table, key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	id := uint64(len(f.events) + 1)
 	f.events = append(f.events, query.ResultRow{EventID: id, SchemaName: "shop", TableName: table, PKValues: key,
 		BinlogFile: "binlog.000003", StartPos: id * 100,
@@ -248,6 +304,24 @@ func newerCut(t views.BaselineTable) views.BaselineTable {
 	return t
 }
 
+// settled is a statement over tables after the builds an earlier one started
+// are in: a refresh, every build it started run to its end, and the refresh
+// the next statement makes, whose builds also end before it returns, so the
+// test reads a keeper no goroutine touches.
+func settled(t *testing.T, ctx context.Context, k *tailKeeper, tables ...views.BaselineTable) map[string]tailView {
+	t.Helper()
+	if _, err := k.refresh(ctx, tables); err != nil {
+		t.Fatal(err)
+	}
+	k.settle()
+	got, err := k.refresh(ctx, tables)
+	k.settle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 func fileKeys(t *testing.T, path string) int {
 	t.Helper()
 	if path == "" {
@@ -271,16 +345,12 @@ func TestTailKeeper(t *testing.T) {
 	newKeeper := func(f *fakeIndex) *tailKeeper {
 		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
-		k.minBuild = 0
+		k.retryMin, k.retryMax = 0, 0
 		return k
 	}
 	refresh := func(t *testing.T, k *tailKeeper, tables ...views.BaselineTable) map[string]tailView {
 		t.Helper()
-		got, err := k.refresh(ctx, tables)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return got
+		return settled(t, ctx, k, tables...)
 	}
 
 	t.Run("nothing indexed: no tails", func(t *testing.T) {
@@ -350,10 +420,16 @@ func TestTailKeeper(t *testing.T) {
 				refresh(t, k, orders) // so the next read goes by Since
 			}
 			f.add("orders", "2")
+			// One statement whose Newest is followed by event 3: its fold
+			// (warm) or the build it starts (cold) stops at event 2.
 			k.src = &lateIndex{fakeIndex: f}
-			got := refresh(t, k, orders)
-			if fileKeys(t, got[ko].Path) != 2 || !got[ko].Through.Equal(f.at(2)) {
-				t.Fatalf("warm=%v: %+v (keys %d)", warm, got[ko], fileKeys(t, got[ko].Path))
+			if _, err := k.refresh(ctx, []views.BaselineTable{orders}); err != nil {
+				t.Fatal(err)
+			}
+			k.settle()
+			e := k.tables[ko]
+			if e == nil || e.tail.Keys() != 2 || k.mark.ID != 2 || !k.through.Equal(f.at(2)) {
+				t.Fatalf("warm=%v: %+v, mark %d, through %v", warm, e, k.mark.ID, k.through)
 			}
 		}
 	})
@@ -440,30 +516,35 @@ func TestTailKeeper(t *testing.T) {
 		}
 	})
 
-	t.Run("a first read that runs out of time: no tail until the next cut, and the others are not judged on it", func(t *testing.T) {
+	t.Run("a first read that runs out of time: no tail for now, never refused, built again later", func(t *testing.T) {
 		f := &fakeIndex{fillWait: map[string]bool{ko: true}}
 		f.add("orders", "1")
 		f.add("customers", "9")
 		k := newKeeper(f)
-		short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
-		defer cancel()
-		got, err := k.refresh(short, []views.BaselineTable{orders, customers})
-		if err != nil || len(got) != 0 {
-			t.Fatalf("%+v %v", got, err)
+		k.buildTimeout = 20 * time.Millisecond
+		k.retryMin, k.retryMax = time.Minute, time.Hour
+		if got, err := k.refresh(ctx, []views.BaselineTable{orders, customers}); err != nil || len(got) != 0 {
+			t.Fatalf("a statement waited for its builds: %+v %v", got, err)
 		}
-		if e := k.tables[kc]; e != nil {
-			t.Errorf("a table the statement had no time left for was judged: %+v", e)
-		}
-		got = refresh(t, k, orders, customers)
+		k.settle() // orders' build ran out of its own time; customers' is in
+		got := refresh(t, k, orders, customers)
 		if _, ok := got[ko]; ok {
-			t.Errorf("a table that ran out of time is read again at every statement: %+v", got[ko])
+			t.Errorf("a build that ran out of time served a tail: %+v", got[ko])
 		}
 		if _, ok := got[kc]; !ok {
-			t.Error("the other table has no tail at the next statement")
+			t.Error("the other table has no tail: it was judged on the one that ran out of time")
 		}
-		f.cuts = map[string]uint64{}
-		if _, ok := refresh(t, k, newerCut(orders))[ko]; !ok {
-			t.Error("not built again over its next cut")
+		if e := k.tables[ko]; e != nil {
+			t.Fatalf("a build that ran out of time left an entry (refused %q): it would stand until the next cut", e.refused)
+		}
+		fills := f.fills
+		refresh(t, k, orders, customers)
+		if f.fills != fills {
+			t.Error("tried again before its wait was over")
+		}
+		clock = clock.Add(time.Minute)
+		if _, ok := refresh(t, k, orders, customers)[ko]; !ok {
+			t.Error("not built again once its wait was over")
 		}
 	})
 
@@ -471,46 +552,32 @@ func TestTailKeeper(t *testing.T) {
 		f := &fakeIndex{anchors: true}
 		f.add("orders", "1")
 		k := newKeeper(f)
+		k.buildTimeout = 20 * time.Millisecond
+		k.retryMin, k.retryMax = time.Hour, time.Hour
 		before := refresh(t, k, orders)
 		f.fillWait = map[string]bool{ko: true}
-		short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
-		defer cancel()
-		if got, err := k.refresh(short, []views.BaselineTable{newerCut(orders)}); err != nil || got[ko].Path != before[ko].Path {
+		if got, err := k.refresh(ctx, []views.BaselineTable{newerCut(orders)}); err != nil || got[ko].Path != before[ko].Path {
 			t.Fatalf("the tail it had was dropped: %+v %v", got[ko], err)
 		}
+		k.settle()
 		fills := f.fills
 		if got := refresh(t, k, newerCut(orders)); got[ko].Path != before[ko].Path || f.fills != fills {
 			t.Errorf("rebuilt again at every statement: %+v, %d fills", got[ko], f.fills-fills)
 		}
 	})
 
-	t.Run("a table left too little time by the others waits for the next statement, unjudged", func(t *testing.T) {
-		f := &fakeIndex{fillWait: map[string]bool{ko: true}}
-		f.add("orders", "1")
-		k := newKeeper(f)
-		k.minBuild = time.Hour
-		short, cancel := context.WithTimeout(ctx, time.Minute)
-		defer cancel()
-		if got, err := k.refresh(short, []views.BaselineTable{orders}); err != nil || len(got) != 0 {
-			t.Fatalf("%+v %v", got, err)
-		}
-		if e := k.tables[ko]; e != nil || !f.fillWait[ko] {
-			t.Fatalf("started on a remainder, or judged on it: %+v", e)
-		}
-	})
-
 	t.Run("the time to refresh is counted from when the keeper is the statement's", func(t *testing.T) {
-		f := &fakeIndex{fillWait: map[string]bool{ko: true}}
+		f := &fakeIndex{}
 		f.add("orders", "1")
 		k := newKeeper(f)
 		k.mu.Lock()
-		go func() { time.Sleep(100 * time.Millisecond); k.mu.Unlock() }()
+		released := make(chan struct{})
+		go func() { time.Sleep(100 * time.Millisecond); k.mu.Unlock(); close(released) }()
 		if _, err := k.refreshWithin(ctx, 50*time.Millisecond, []views.BaselineTable{orders}); err != nil {
-			t.Fatal(err)
+			t.Fatalf("the wait for another statement was spent from this one's time: %v", err)
 		}
-		if e := k.tables[ko]; e == nil || f.fillWait[ko] {
-			t.Fatalf("the wait for another statement was spent from this one's time: %+v", e)
-		}
+		<-released
+		k.settle()
 	})
 
 	t.Run("a version written over an older cut is not laid over a newer one", func(t *testing.T) {
@@ -876,6 +943,8 @@ func (l *lateIndex) Newest(ctx context.Context) (tailMark, error) {
 type foldingIndex struct{ *fakeIndex }
 
 func (f *foldingIndex) Since(_ context.Context, tables []views.BaselineTable, from, upTo uint64, page func([]query.ResultRow) error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	want := map[string]bool{}
 	for _, t := range tables {
 		want[strings.ToLower(tailKey(t.Schema, t.Table))] = true
@@ -900,16 +969,12 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 	newKeeper := func(f *fakeIndex) *tailKeeper {
 		k := newTailKeeper(f, t.TempDir(), 10, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
-		k.minBuild = 0
+		k.retryMin, k.retryMax = 0, 0
 		return k
 	}
 	refresh := func(t *testing.T, k *tailKeeper, tables ...views.BaselineTable) map[string]tailView {
 		t.Helper()
-		got, err := k.refresh(ctx, tables)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return got
+		return settled(t, ctx, k, tables...)
 	}
 	// started is a keeper whose tail of orders holds keys 1..4 (events 1..4)
 	// over a cut at 0, and an index whose newer cut of orders stops at event
@@ -977,15 +1042,13 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		}
 	})
 
-	t.Run("no wait: a statement with no time left still gets the pruned tail", func(t *testing.T) {
+	t.Run("no build: the statement gets the pruned tail at once", func(t *testing.T) {
 		f, k, _ := started(t)
-		f.fillWait = map[string]bool{ko: true}
-		k.minBuild = time.Hour
-		short, cancel := context.WithTimeout(ctx, time.Minute)
-		defer cancel()
-		got, err := k.refresh(short, []views.BaselineTable{newerCut(orders)})
-		if err != nil || fileKeys(t, got[ko].Path) != 2 || f.fills != 1 || !f.fillWait[ko] {
-			t.Fatalf("%+v %v, %d fills", got[ko], err, f.fills)
+		f.fillGate = map[string]chan struct{}{ko: make(chan struct{})} // a build would hang
+		got, err := k.refresh(ctx, []views.BaselineTable{newerCut(orders)})
+		k.settle()
+		if err != nil || fileKeys(t, got[ko].Path) != 2 || f.fills != 1 || len(k.builds) != 0 {
+			t.Fatalf("%+v %v, %d fills, builds %v", got[ko], err, f.fills, k.builds)
 		}
 	})
 
@@ -1071,6 +1134,7 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 
 	t.Run("a tail kept over a newer cut after a rebuild failed still prunes from its own cut", func(t *testing.T) {
 		f, k, _ := started(t)
+		k.retryMin, k.retryMax = time.Hour, time.Hour // the failed rebuild is not tried again here
 		f.cutWhy = map[string]string{ko: "unreadable now"}
 		f.fillErr = map[string]error{ko: errors.New("timeout")}
 		refresh(t, k, newerCut(orders))
@@ -1096,16 +1160,12 @@ func TestTailKeeper_aCutAheadOfTheCursor(t *testing.T) {
 	ko := tailKey("shop", "orders")
 	newKeeper := func(f *fakeIndex) *tailKeeper {
 		k := newTailKeeper(f, t.TempDir(), 10, time.Minute, time.Hour)
-		k.minBuild = 0
+		k.retryMin, k.retryMax = 0, 0
 		return k
 	}
 	refresh := func(t *testing.T, k *tailKeeper, tables ...views.BaselineTable) map[string]tailView {
 		t.Helper()
-		got, err := k.refresh(ctx, tables)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return got
+		return settled(t, ctx, k, tables...)
 	}
 	keys := func(k *tailKeeper) string {
 		var out []string
@@ -1149,34 +1209,27 @@ func TestTailKeeper_aCutAheadOfTheCursor(t *testing.T) {
 		}
 	})
 
-	t.Run("a tail it had is not kept standing over it when the rebuild fails", func(t *testing.T) {
+	t.Run("a tail it had is not kept standing over it while it is rebuilt, nor when the rebuild fails", func(t *testing.T) {
 		for name, fail := range map[string]func(f *fakeIndex){
+			"in flight":    func(f *fakeIndex) { f.fillGate = map[string]chan struct{}{ko: make(chan struct{})} },
 			"a read error": func(f *fakeIndex) { f.fillErr = map[string]error{ko: errors.New("gone")} },
 			"no time":      func(f *fakeIndex) { f.fillWait = map[string]bool{ko: true} },
 		} {
 			f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
 			f.add("orders", "1")
 			k := newKeeper(f)
+			k.buildTimeout = 20 * time.Millisecond
+			k.retryMin, k.retryMax = time.Hour, time.Hour
 			refresh(t, k, orders)
 			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 901}}
 			fail(f)
-			short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-			got, err := k.refresh(short, []views.BaselineTable{newerCut(orders)})
-			cancel()
-			if _, ok := got[ko]; ok || err != nil {
-				t.Errorf("%s: a tail laid over a cut the cursor has not reached: %+v %v", name, got[ko], err)
+			for i := range 2 { // while the build runs, and after it failed
+				got, err := k.refresh(ctx, []views.BaselineTable{newerCut(orders)})
+				if _, ok := got[ko]; ok || err != nil {
+					t.Errorf("%s, statement %d: a tail laid over a cut the cursor has not reached: %+v %v", name, i, got[ko], err)
+				}
+				k.settle()
 			}
-		}
-		f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
-		f.add("orders", "1")
-		k := newKeeper(f)
-		k.minBuild = time.Hour
-		refresh(t, k, orders)
-		f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 901}}
-		short, cancel := context.WithTimeout(ctx, time.Minute)
-		defer cancel()
-		if got, err := k.refresh(short, []views.BaselineTable{newerCut(orders)}); err != nil || len(got) != 0 {
-			t.Errorf("no time left: a tail laid over a cut the cursor has not reached: %+v %v", got, err)
 		}
 	})
 }

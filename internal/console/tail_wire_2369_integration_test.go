@@ -48,6 +48,19 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		}
 		return out
 	}
+	// settled reads once, so the keeper builds the table's tail in the
+	// background (#2483: no statement waits for one), and waits for it.
+	settled := func(t *testing.T) []string {
+		t.Helper()
+		read(t)
+		r.s.tails.mu.Lock()
+		k := r.s.tails.by[bootServerID]
+		r.s.tails.mu.Unlock()
+		if k != nil {
+			k.settle()
+		}
+		return read(t)
+	}
 	status := func() map[string]string {
 		out := map[string]string{}
 		for _, p := range q.lastAnswerStatus(context.Background()) {
@@ -56,7 +69,7 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		return out
 	}
 
-	if got := read(t); len(got) != 2 || got[0] != "1=paid" || got[1] != "2=two" {
+	if got := settled(t); len(got) != 2 || got[0] != "1=paid" || got[1] != "2=two" {
 		t.Fatalf("with its tail: %v", got)
 	}
 	if st := status(); st["last_answer_indexed_through"] != at.Format(time.RFC3339) {
@@ -81,7 +94,7 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 
 	captured = false
 	r.s.tails = tailKeepers{} // a keeper made again, with the filters now
-	if got := read(t); len(got) != 1 || got[0] != "1=new" {
+	if got := settled(t); len(got) != 1 || got[0] != "1=new" {
 		t.Fatalf("a table capture does not record: %v", got)
 	}
 }

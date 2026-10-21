@@ -94,7 +94,7 @@ func TestIntegrationTailSource(t *testing.T) {
 		r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, hourAgo)
 		r.change(tbl.Table, event.EventInsert, "2", "two", "binlog.000008", 200, hourAgo)
 		r.change("other", event.EventInsert, "9", "x", "binlog.000008", 300, hourAgo)
-		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -109,7 +109,7 @@ func TestIntegrationTailSource(t *testing.T) {
 		// Later: a delete, and a late commit indexed after with an early time.
 		r.change(tbl.Table, event.EventDelete, "2", "two", "binlog.000009", 100, time.Now().UTC())
 		r.change(tbl.Table, event.EventInsert, "3", "late", "binlog.000009", 200, r.stamp.Add(time.Hour))
-		got, err = k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err = settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,7 +127,7 @@ func TestIntegrationTailSource(t *testing.T) {
 		defer testutil.MustExec(t, r.db, "UPDATE stream_state SET mode = 'gtid', gtid_set = '3e11fa47-71ca-11e1-9e33-c80aa9429562:1-50' WHERE id = 1")
 		tbl := r.table(nil)
 		r.change(tbl.Table, event.EventUpdate, "1", "pos", "binlog.000010", 100, hourAgo)
-		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,13 +139,13 @@ func TestIntegrationTailSource(t *testing.T) {
 	t.Run("a loss in capture after the tail was built ends it", func(t *testing.T) {
 		tbl := r.table(nil)
 		r.change(tbl.Table, event.EventUpdate, "1", "x", "binlog.000012", 100, hourAgo)
-		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || !ok {
 			t.Fatalf("no tail to begin with: %v", err)
 		}
 		testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP() WHERE id = 1")
 		defer testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = NULL WHERE id = 1")
-		got, err = k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err = settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || ok {
 			t.Fatalf("a tail across a gap recorded after it was built (%v)", err)
 		}
@@ -158,12 +158,12 @@ func TestIntegrationTailSource(t *testing.T) {
 		} {
 			tbl := r.table(nil)
 			r.change(tbl.Table, event.EventUpdate, "1", "x", "binlog.000013", 100, hourAgo)
-			got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+			got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 			if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || !ok {
 				t.Fatalf("%s: no tail to begin with: %v", name, err)
 			}
 			testutil.MustExec(t, r.db, c.set)
-			got, err = k.refresh(ctx, []views.BaselineTable{tbl})
+			got, err = settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 			testutil.MustExec(t, r.db, c.undo)
 			if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || ok {
 				t.Fatalf("%s: still a tail (%v)", name, err)
@@ -182,7 +182,7 @@ func TestIntegrationTailSource(t *testing.T) {
 		saved := tm.Columns
 		tm.Columns = []metadata.ColumnMeta{{Name: "id", DataType: "int"}, {Name: "n", IsPK: true, DataType: "int"}}
 		defer func() { tm.Columns = saved }()
-		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if _, ok := got[tailKey("shop", tbl.Table)]; err != nil || ok {
 			t.Fatalf("a tail keyed by another column (%v)", err)
 		}
@@ -192,7 +192,7 @@ func TestIntegrationTailSource(t *testing.T) {
 		testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP() WHERE id = 1")
 		defer testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = NULL WHERE id = 1")
 		tbl := r.table(nil)
-		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +204,7 @@ func TestIntegrationTailSource(t *testing.T) {
 	t.Run("refused: a schema change after the cut", func(t *testing.T) {
 		tbl := r.table(nil)
 		testutil.MustExec(t, r.db, `INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query) VALUES (UTC_TIMESTAMP(), 'binlog.000011', 100, 'shop', ?, 'ALTER TABLE', 'ALTER TABLE x ADD c int')`, tbl.Table)
-		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -216,7 +216,7 @@ func TestIntegrationTailSource(t *testing.T) {
 	t.Run("refused: a table not in the schema snapshot", func(t *testing.T) {
 		tbl := r.table(nil)
 		tbl.Table = "nowhere"
-		got, err := k.refresh(ctx, []views.BaselineTable{tbl})
+		got, err := settledRefresh(t, ctx, k, []views.BaselineTable{tbl})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,4 +224,17 @@ func TestIntegrationTailSource(t *testing.T) {
 			t.Fatal("a tail with no key")
 		}
 	})
+}
+
+// settledRefresh is a statement after the builds an earlier one started are
+// in (#2483: a statement never waits for a tail to be built).
+func settledRefresh(t *testing.T, ctx context.Context, k *tailKeeper, tables []views.BaselineTable) (map[string]tailView, error) {
+	t.Helper()
+	if _, err := k.refresh(ctx, tables); err != nil {
+		return nil, err
+	}
+	k.settle()
+	got, err := k.refresh(ctx, tables)
+	k.settle()
+	return got, err
 }

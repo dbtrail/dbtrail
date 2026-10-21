@@ -40,6 +40,16 @@ func TestTidyTails(t *testing.T) {
 	if _, err := kk.refresh(t.Context(), []views.BaselineTable{keeperTable("orders")}); err != nil {
 		t.Fatal(err)
 	}
+	kk.settle() // its tail is built in the background
+	// A build of the removed server's keeper, in flight when it goes.
+	gate := make(chan struct{})
+	defer close(gate)
+	f.fillGate = map[string]chan struct{}{tailKey("shop", "items"): gate}
+	f.fillEntered = make(chan string, 1)
+	if _, err := kg.refresh(t.Context(), []views.BaselineTable{keeperTable("items")}); err != nil {
+		t.Fatal(err)
+	}
+	<-f.fillEntered
 	if _, err := kg.ensureDir(); err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +62,10 @@ func TestTidyTails(t *testing.T) {
 	srv.TidyTails()
 	if _, ok := srv.tails.by[gone.ID]; ok {
 		t.Error("a removed server kept its keeper")
+	}
+	kg.settle() // returns only because the removal ended the build in flight
+	if len(kg.tables) != 0 || len(kg.builds) != 0 {
+		t.Errorf("a build of a removed server's keeper was installed: %d tables, %d builds", len(kg.tables), len(kg.builds))
 	}
 	if n := srv.copyAges.now(gone.ID); n.known {
 		t.Error("a removed server kept its lag record")

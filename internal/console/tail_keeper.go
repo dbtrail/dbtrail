@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -41,14 +42,28 @@ import (
 // checks it (reached), with every other condition the argument needs, and the
 // tail is rebuilt from the cut when one fails; a tail built over a cut the
 // cursor has not reached folds, as it advances, only the changes after that
-// cut (tailFloor.admits), as its first read did. A rebuild that fails keeps
-// the old tail while it is still advancing and the cursor has reached the
-// newer cut: it then holds every change after an older cut up to the cursor,
-// and a change it folds after that is newer than what the cut holds. A tail
-// that grows past its
+// cut (tailFloor.admits), as its first read did. A tail that grows past its
 // budget stops advancing (frozen) and goes on serving what it holds, with its
 // own older instant, until the next published cut rebuilds it; a frozen tail
 // is never laid over a newer cut, whose rows may be newer than its own.
+//
+// A statement never waits for a tail to be built (#2483): a table with none
+// (new, frozen, refused, or one whose newer cut could not be pruned to) is
+// built in the background, one build per table at a time, and the statement
+// goes on without it. Until the build is in, the old tail stands for the
+// newer cut when it may (live, and the cursor has reached the cut: it then
+// holds every change after an older cut up to the cursor, and a change it
+// folds after that is newer than what the cut holds); else the table is read
+// with no tail. A build reads the index without the keeper's lock, up to the
+// cursor as it stood when it started; it then folds, the same way advance
+// does, what the cursor passed since, and is installed under the lock, in
+// the same hold that finds it caught up with the cursor, and only while it
+// is still wanted:
+// for the cut it was started for, with the tails it would join not forgotten
+// since (an index rebuilt, a numbering started again) and the keeper not
+// replaced (endBuild marks it dead in each of these). A build that
+// fails or runs out of time is tried again later (retryMin, doubling to
+// retryMax); it never refuses the table.
 //
 // Events are read and folded a page at a time, so the memory a refresh takes
 // is a page and the tails, never the backlog since the last statement.
@@ -180,10 +195,18 @@ var errTailRenumbered = errors.New("the source's binary log started again from a
 type tailKeeper struct {
 	mu  sync.Mutex
 	src tailSource
-	// minBuild is the least time a table's first read is started with: one
-	// left less by the others of its statement waits for the next, rather
-	// than be refused as too slow on a remainder.
-	minBuild time.Duration
+	// life is the keeper's lifetime: every build runs under it, and stop
+	// (close) ends them all when the keeper is replaced or forgotten.
+	life context.Context
+	stop context.CancelFunc
+	// builds are the tails being built in the background, or waiting to be
+	// tried again, by tailKey; wg counts the goroutines that build them.
+	builds map[string]*tailBuild
+	wg     sync.WaitGroup
+	// buildTimeout bounds one build; retryMin and retryMax the wait before a
+	// failed one is tried again, doubling from one to the other.
+	buildTimeout       time.Duration
+	retryMin, retryMax time.Duration
 	// noteMu guards failing, the reason no statement reads tails now.
 	noteMu  sync.Mutex
 	failing string
@@ -213,8 +236,43 @@ type tailKeeper struct {
 }
 
 func newTailKeeper(src tailSource, parent string, maxKeys int, keepOld, idle time.Duration) *tailKeeper {
-	return &tailKeeper{src: src, parent: parent, maxKeys: maxKeys, keepOld: keepOld, idle: idle, now: time.Now, minBuild: tailMinBuild, tables: map[string]*tailEntry{}}
+	life, stop := context.WithCancel(context.Background())
+	return &tailKeeper{src: src, parent: parent, maxKeys: maxKeys, keepOld: keepOld, idle: idle, now: time.Now,
+		life: life, stop: stop, builds: map[string]*tailBuild{},
+		buildTimeout: tailBuildTimeout, retryMin: tailRetryMin, retryMax: tailRetryMax,
+		tables: map[string]*tailEntry{}}
 }
+
+// tailBuild is one table's tail being built in the background, or the wait
+// before a build that failed is tried again.
+type tailBuild struct {
+	// cut is the published cut it builds over; cancel ends its read. Set
+	// before it starts, never after.
+	cut    string
+	cancel context.CancelFunc
+	// running while its goroutine is; dead when what it builds is no longer
+	// wanted (another cut, a definition that changed, every tail forgotten,
+	// the keeper closed): it is then never installed, and its slot is
+	// cleared when the goroutine ends.
+	running, dead bool
+	// failures in a row, and when the next try may start; asked when a
+	// statement last wanted it.
+	failures int
+	retryAt  time.Time
+	asked    time.Time
+}
+
+// close ends every build of a keeper that was replaced or forgotten: none is
+// installed after, none is started.
+func (k *tailKeeper) close() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.stop()
+	k.dropBuilds()
+}
+
+// settle waits for every build started so far to end (tests).
+func (k *tailKeeper) settle() { k.wg.Wait() }
 
 // refresh brings the tails of tables up to what the index holds now and
 // returns, by tailKey, what a statement over them reads. A table it leaves
@@ -282,7 +340,7 @@ func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineT
 	out := map[string]tailView{}
 	for _, t := range tables {
 		key := tailKey(t.Schema, t.Table)
-		e := k.entryFor(ctx, key, t, changed[key])
+		e := k.entryFor(key, t, changed[key])
 		if e == nil || e.refused != "" {
 			continue
 		}
@@ -314,14 +372,33 @@ func tailStartOver(mark, newest tailMark) string {
 }
 
 // advance folds the events after the cursor up to upTo into the tails that
-// are advancing. A table with no tail yet has its events read by its first
-// Fill. The events must go on in the binary log from the cursor's: one
-// before the last stops the read (errTailRenumbered), since a numbering that
-// started again inside the window would rank its changes below older ones.
-// Several rows of one statement share a position, so "before" is strict.
+// are advancing, moving the cursor with every page. A table with no tail yet
+// has its events read by its first Fill.
 func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
+	return k.fold(ctx, k.src, k.tables, k.mark, upTo, func(ev query.ResultRow) {
+		// The cursor moves with every page folded: a read that runs out of
+		// time keeps what it did, and the next statement goes on from there
+		// instead of reading the same backlog again.
+		if ev.EventID > k.mark.ID {
+			k.mark = tailMark{ID: ev.EventID, Pos: query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}, At: ev.EventTimestamp}
+			if k.mark.At.After(k.through) {
+				k.through = k.mark.At
+			}
+		}
+	})
+}
+
+// fold folds the events after from up to upTo into the entries that are
+// advancing, read from src a page at a time; moved, when not nil, is handed
+// the last event of each page. It touches nothing but entries, so a build
+// catches its own tail up with it without the keeper's lock. The events must
+// go on in the binary log from from's: one before the last stops the read
+// (errTailRenumbered), since a numbering that started again inside the
+// window would rank its changes below older ones. Several rows of one
+// statement share a position, so "before" is strict.
+func (k *tailKeeper) fold(ctx context.Context, src tailSource, entries map[string]*tailEntry, from tailMark, upTo uint64, moved func(query.ResultRow)) error {
 	var live []views.BaselineTable
-	for _, e := range k.tables {
+	for _, e := range entries {
 		if e.refused == "" && !e.frozen {
 			live = append(live, e.table)
 		}
@@ -329,11 +406,11 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 	if len(live) == 0 {
 		return nil
 	}
-	last := k.mark.Pos
-	return k.src.Since(ctx, live, k.mark.ID, upTo, func(page []query.ResultRow) error {
+	last := from.Pos
+	return src.Since(ctx, live, from.ID, upTo, func(page []query.ResultRow) error {
 		byTable := map[string][]query.ResultRow{}
 		folded := map[string]string{}
-		for key, e := range k.tables {
+		for key, e := range entries {
 			folded[strings.ToLower(e.table.Schema)+"\x00"+strings.ToLower(e.table.Table)] = key
 		}
 		for _, ev := range page {
@@ -342,7 +419,7 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 			// and the index spell apart, and that tail cannot tell it is
 			// missing its changes.
 			if key, ok := folded[strings.ToLower(ev.SchemaName)+"\x00"+strings.ToLower(ev.TableName)]; ok && key != tailKey(ev.SchemaName, ev.TableName) {
-				if e := k.tables[key]; e.refused == "" {
+				if e := entries[key]; e.refused == "" {
 					k.refuse(e, "the index names it in another case than its copy")
 				}
 				continue
@@ -353,12 +430,12 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 			}
 			last = at
 			key := tailKey(ev.SchemaName, ev.TableName)
-			if e := k.tables[key]; e != nil && e.refused == "" && !e.frozen && e.from.admits(at, ev.EventID) {
+			if e := entries[key]; e != nil && e.refused == "" && !e.frozen && e.from.admits(at, ev.EventID) {
 				byTable[key] = append(byTable[key], ev)
 			}
 		}
 		for key, evs := range byTable {
-			e := k.tables[key]
+			e := entries[key]
 			if err := e.tail.Apply(evs); err != nil {
 				k.refuse(e, "its changes could not be folded: "+err.Error())
 				continue
@@ -372,26 +449,22 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 					"table", e.table.Schema+"."+e.table.Table, "keys", e.tail.Keys(), "budget", k.maxKeys)
 			}
 		}
-		// The cursor moves with every page folded: a read that runs out of
-		// time keeps what it did, and the next statement goes on from there
-		// instead of reading the same backlog again.
-		if n := len(page); n > 0 && page[n-1].EventID > k.mark.ID {
-			ev := page[n-1]
-			k.mark = tailMark{ID: ev.EventID, Pos: query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}, At: ev.EventTimestamp}
-			if k.mark.At.After(k.through) {
-				k.through = k.mark.At
-			}
+		if n := len(page); n > 0 && moved != nil {
+			moved(page[n-1])
 		}
 		return nil
 	})
 }
 
-// entryFor is key's tail over t's published cut, built when there is none
-// or the cut moved; a refused one records why the table has none.
-func (k *tailKeeper) entryFor(ctx context.Context, key string, t views.BaselineTable, changed string) *tailEntry {
+// entryFor is key's tail over t's published cut; a refused one records why
+// the table has none. A cut the tail cannot be pruned to has its tail built
+// in the background (startBuild): until it is in, the tail it had stands for
+// the newer cut when it may, else the table has none for this statement.
+func (k *tailKeeper) entryFor(key string, t views.BaselineTable, changed string) *tailEntry {
 	cut := tailCutOf(t)
 	e := k.tables[key]
 	if changed != "" {
+		k.endBuild(key)
 		if e == nil || e.refused == "" {
 			k.drop(e)
 			e = &tailEntry{table: t, cut: cut, used: k.now()}
@@ -401,52 +474,176 @@ func (k *tailKeeper) entryFor(ctx context.Context, key string, t views.BaselineT
 		return nil
 	}
 	if e != nil && e.cut == cut {
+		if b := k.builds[key]; b != nil && b.cut != cut {
+			k.endBuild(key) // for a cut no statement reads any more
+		}
 		return e
 	}
-	// Before the statement's clock is looked at: a prune reads nothing.
 	if e != nil && k.pruneTo(e, t, cut) {
+		k.endBuild(key)
 		return e
 	}
-	if dl, ok := ctx.Deadline(); ctx.Err() != nil || ok && time.Until(dl) < k.minBuild {
-		// The statement's time went on another table: this one is not
-		// judged on what is left of it, and is built at the next statement.
-		if e != nil && e.refused == "" && !e.frozen && k.reached(t) {
-			return e
+	k.startBuild(key, t, cut)
+	// A tail it already had stands for the newer cut while it is advancing
+	// and the cursor has reached the cut: it is correct over it (see the top
+	// of this file). Not a frozen one: it stopped before the cursor, maybe
+	// before the newer cut, and laid over it would put older values over
+	// newer ones. Its cut stays its own, so the build that replaces it is
+	// installed, and it still prunes from what it read.
+	if e != nil && e.refused == "" && !e.frozen && k.reached(t) {
+		return e
+	}
+	return nil
+}
+
+// startBuild builds key's tail over t's cut in the background, unless one
+// is running (one per table: a build for an older cut is ended, and the
+// newer one starts once it has), a failed one is waiting to be tried again,
+// or the keeper is closed.
+func (k *tailKeeper) startBuild(key string, t views.BaselineTable, cut string) {
+	if k.life.Err() != nil {
+		return
+	}
+	prev := k.builds[key]
+	if prev != nil && prev.cut != cut {
+		if prev.running {
+			prev.dead = true
+			prev.cancel()
+			return
 		}
-		return nil
+		prev = nil
 	}
-	fresh, err := k.build(ctx, t, cut)
-	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		// Out of time: trying again at every statement would make each pay
-		// the whole wait. A tail it already had stays, now standing for the
-		// newer cut too (it is correct over it, see the top of this file);
-		// else the table has none until its cut moves again.
-		if e != nil && e.refused == "" && !e.frozen && k.reached(t) {
-			e.cut = cut
-			return e
+	now := k.now()
+	if prev != nil {
+		prev.asked = now
+		if prev.running || now.Before(prev.retryAt) {
+			return
 		}
-		fresh, err = &tailEntry{table: t, cut: cut, refused: "its changes since the snapshot could not be read in time"}, nil
 	}
-	if err != nil {
-		// The index could not be read. A tail it already had stays while it
-		// is advancing: it is correct over the newer copy too (see the top of
-		// this file). Not a frozen one: it stopped before the cursor, maybe
-		// before the newer cut, and laid over it would put older values over
-		// newer ones.
-		slog.Debug("Engine Routing: a table's tail could not be rebuilt over its newer snapshot", "table", t.Schema+"."+t.Table, "error", err)
-		if e != nil && e.refused == "" && !e.frozen && k.reached(t) {
-			return e
+	ctx, cancel := context.WithTimeout(k.life, k.buildTimeout)
+	b := &tailBuild{cut: cut, cancel: cancel, running: true, asked: now}
+	if prev != nil {
+		b.failures = prev.failures
+	}
+	k.builds[key] = b
+	src, from := k.src, k.mark
+	k.wg.Add(1)
+	go k.runBuild(ctx, b, key, t, src, from)
+}
+
+// endBuild ends key's build: what it reads is no longer wanted.
+func (k *tailKeeper) endBuild(key string) {
+	b := k.builds[key]
+	switch {
+	case b == nil:
+	case b.running:
+		b.dead = true
+		b.cancel()
+	default:
+		delete(k.builds, key)
+	}
+}
+
+// dropBuilds ends every build.
+func (k *tailKeeper) dropBuilds() {
+	for key := range k.builds {
+		k.endBuild(key)
+	}
+}
+
+// current says whether b is still wanted, under k.mu: every way a build
+// stops being wanted (another cut, a definition that changed, every tail
+// forgotten, the keeper closed) goes through endBuild, which marks it dead.
+func (k *tailKeeper) current(key string, b *tailBuild) bool {
+	return k.builds[key] == b && !b.dead
+}
+
+// runBuild is b's goroutine: it reads t's tail up to from without the lock,
+// folds what the cursor passed since until it has caught up, and installs it
+// under the lock, in the same hold as the check that it has caught up. A
+// panic fails the build like an error, so its slot is not left running.
+func (k *tailKeeper) runBuild(ctx context.Context, b *tailBuild, key string, t views.BaselineTable, src tailSource, from tailMark) {
+	defer k.wg.Done()
+	defer b.cancel()
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("Engine Routing: building a table's tail panicked", "table", t.Schema+"."+t.Table, "panic", p, "stack", string(debug.Stack()))
+			k.failBuild(key, b, t, fmt.Errorf("panic: %v", p))
 		}
-		return nil
+	}()
+	e, err := k.build(ctx, src, t, b.cut, from.ID)
+	for err == nil {
+		var to tailMark
+		done := func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			if !k.current(key, b) {
+				if k.builds[key] == b {
+					delete(k.builds, key)
+				}
+				return true
+			}
+			if e.refused != "" || e.frozen || from.ID >= k.mark.ID {
+				k.install(key, e)
+				return true
+			}
+			to = k.mark
+			return false
+		}()
+		if done {
+			return
+		}
+		if err = k.fold(ctx, src, map[string]*tailEntry{key: e}, from, to.ID, nil); err == nil {
+			from = to
+		}
 	}
-	k.drop(e)
-	fresh.used = k.now()
-	k.tables[key] = fresh
-	if why := fresh.refused; why != "" {
-		fresh.refused = ""
-		k.refuse(fresh, why)
+	k.failBuild(key, b, t, err)
+}
+
+// install puts a finished build in, under k.mu: the tail it replaces is
+// dropped, a refusal stands until the table's next cut.
+func (k *tailKeeper) install(key string, e *tailEntry) {
+	delete(k.builds, key)
+	k.drop(k.tables[key])
+	e.used = k.now()
+	k.tables[key] = e
+	why := e.refused
+	if e.frozen {
+		// Over the budget while it caught up: as over it at its first read.
+		e.frozen, why = false, fmt.Sprintf("more keys changed since its snapshot than a tail holds (%d)", k.maxKeys)
 	}
-	return fresh
+	if why != "" {
+		e.refused = ""
+		k.refuse(e, why)
+	}
+}
+
+// failBuild records that b failed: the table goes on without the tail it
+// was building (or with the one it had), and the build is tried again after
+// a wait that doubles with each failure in a row. Said once, at the first.
+func (k *tailKeeper) failBuild(key string, b *tailBuild, t views.BaselineTable, err error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.current(key, b) {
+		if k.builds[key] == b {
+			delete(k.builds, key)
+		}
+		return
+	}
+	b.running = false
+	b.failures++
+	wait := k.retryMin
+	for i := 1; i < b.failures && wait < k.retryMax; i++ {
+		wait *= 2
+	}
+	wait = min(wait, k.retryMax)
+	b.retryAt = k.now().Add(wait)
+	log := slog.Debug
+	if b.failures == 1 {
+		log = slog.Warn
+	}
+	log("Engine Routing: a table's tail could not be built; statements read it without one (or with the one it had) until it is tried again",
+		"table", t.Schema+"."+t.Table, "failures", b.failures, "retry_in", wait, "error", err)
 }
 
 // pruneTo moves e's tail to t's newer cut by dropping what that cut holds,
@@ -570,16 +767,17 @@ func (k *tailKeeper) note(err error) {
 }
 
 // build starts t's tail over its published cut and folds its events up to
-// the cursor.
-func (k *tailKeeper) build(ctx context.Context, t views.BaselineTable, cut string) (*tailEntry, error) {
+// upTo, read from src. It runs without the keeper's lock: it reads nothing of
+// the keeper's but what never changes.
+func (k *tailKeeper) build(ctx context.Context, src tailSource, t views.BaselineTable, cut string, upTo uint64) (*tailEntry, error) {
 	refused := func(why string) (*tailEntry, error) { return &tailEntry{table: t, cut: cut, refused: why}, nil }
 	// Where the read below starts, from the same footer Fill reads it from;
 	// none on record (Fill refuses then) leaves a tail that is never pruned.
 	var from *tailFloor
-	if f, why := k.src.Cut(t); why == "" {
+	if f, why := src.Cut(t); why == "" {
 		from = &f
 	}
-	tail, why, err := k.src.Start(ctx, t)
+	tail, why, err := src.Start(ctx, t)
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +785,7 @@ func (k *tailKeeper) build(ctx context.Context, t views.BaselineTable, cut strin
 		return refused(why)
 	}
 	var foldErr error
-	why, err = k.src.Fill(ctx, t, k.mark.ID, func(page []query.ResultRow) error {
+	why, err = src.Fill(ctx, t, upTo, func(page []query.ResultRow) error {
 		if foldErr = tail.Apply(page); foldErr != nil {
 			return foldErr
 		}
@@ -707,6 +905,7 @@ func (k *tailKeeper) drop(e *tailEntry) {
 // dropAll forgets every tail, keeping their files until no statement reads
 // them.
 func (k *tailKeeper) dropAll() {
+	k.dropBuilds()
 	for key, e := range k.tables {
 		k.drop(e)
 		delete(k.tables, key)
@@ -722,6 +921,13 @@ func (k *tailKeeper) forgetIdle() {
 		if e.used.Before(cutoff) {
 			k.drop(e)
 			delete(k.tables, key)
+		}
+	}
+	// And a failed build no statement asked for since: a running one is
+	// installed, then forgotten like any tail.
+	for key, b := range k.builds {
+		if !b.running && b.asked.Before(cutoff) {
+			delete(k.builds, key)
 		}
 	}
 }

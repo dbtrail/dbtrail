@@ -27,8 +27,11 @@ const (
 	tailMaxKeys = 200_000
 	tailKeepOld = 30 * time.Minute
 	tailIdle    = 30 * time.Minute
-	// tailMinBuild is the least time left for a table's first read.
-	tailMinBuild = time.Second
+	// tailBuildTimeout bounds one background build of a table's tail; a
+	// failed one is tried again after tailRetryMin, doubling to tailRetryMax.
+	tailBuildTimeout = 2 * time.Minute
+	tailRetryMin     = 5 * time.Second
+	tailRetryMax     = 2 * time.Minute
 )
 
 // tailKeepers are the keepers of one process, by server id.
@@ -85,7 +88,9 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 	s.tails.by[id] = k
 	s.tails.mu.Unlock()
 	if old != nil {
-		// Outside the keepers' lock: the old one may be mid-refresh.
+		// Outside the keepers' lock: the old one may be mid-refresh. Its
+		// builds end now, and none installs into it after.
+		old.close()
 		time.AfterFunc(tailKeepOld, func() {
 			old.mu.Lock()
 			dir := old.dir
@@ -203,6 +208,7 @@ func (s *Server) TidyTails() {
 	}
 	s.tails.mu.Unlock()
 	for _, k := range gone {
+		k.close()
 		k.mu.Lock()
 		dir := k.dir
 		k.mu.Unlock()
