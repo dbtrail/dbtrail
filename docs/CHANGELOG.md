@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **A statement on the routed MySQL port no longer brings the tables' recent changes up to date itself.** Before reading, each statement asked the index for the changes captured since the previous statement, folded the new changes of every table it kept a tail for, and wrote every changed table's tail file again, whole, all under one lock, so concurrent statements took turns. Under a steady write load that was every statement, and it cost more than laying the changes over the copy: about 0.15 s on a statement over a 2,000-row table, and rewriting a tail of 200,000 rows takes about half a second on a laptop. A follower now does it in the background, about once a second while statements read tails, and stops a minute after the last one; a statement reads the newest version ready and never reads the index. An answer can be up to about a second older than before. The first statement over a table no statement read in the last minute, and the first after a newer snapshot of it, read it without its recent changes; the follower is woken for them, and the statements after read them. A failed update leaves no tails to read until one succeeds, as a statement that met the error did before. Each update's timings are logged at debug level.
 
 ## [0.111.1] - 2026-10-21
 ### Fixed

@@ -85,6 +85,7 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 		}
 	}
 	k := newTailKeeper(newIndexTailSource(s, b).capturing(captures), os.TempDir(), tailMaxKeys, tailKeepOld, tailIdle)
+	k.pub.auto = true
 	if s.tails.by == nil {
 		s.tails.by = map[string]*tailKeeper{}
 	}
@@ -128,22 +129,19 @@ func (s *Server) tailCaptures(id string) (func(schema, table string) bool, bool)
 	return filters.Matches, true
 }
 
-// statementTails refreshes the tails of read, the tables a statement reads,
-// and returns tables with theirs set and the instant they are indexed
-// through. All or nothing: a statement reads every table at one moment, so
-// unless every table it reads has a tail at the same instant, none is used
-// and it reads the published copy, which is one moment too. A join over a
-// table read now and one read as of its snapshot would pair rows that never
-// coexisted. ok false: tables, unchanged.
-func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, ok bool) {
+// statementTails returns tables with the tails of read, the tables a
+// statement reads, set as the follower last published them, and the instant
+// they are indexed through. It reads nothing of the index and never waits
+// (tailKeeper.latest). All or nothing: a statement reads every table at one
+// moment, so unless every table it reads has a tail at the same instant,
+// none is used and it reads the published copy, which is one moment too. A
+// join over a table read now and one read as of its snapshot would pair rows
+// that never coexisted. ok false: tables, unchanged.
+func (s *Server) statementTails(k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, ok bool) {
 	if len(read) == 0 {
 		return tables, time.Time{}, false
 	}
-	got, err := k.refreshWithin(ctx, copyUnchangedTimeout, read)
-	k.note(err)
-	if err != nil {
-		return tables, time.Time{}, false
-	}
+	got := k.latest(read)
 	for i, t := range read {
 		v, has := got[tailKey(t.Schema, t.Table)]
 		if !has || (i > 0 && !v.Through.Equal(through)) {

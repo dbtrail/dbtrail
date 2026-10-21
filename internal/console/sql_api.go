@@ -1131,7 +1131,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// Not over a statement whose tables the parse could not tell: it
 			// would build a tail for every table of the copy.
 			if tails != nil && narrowed.OnlyViews != nil {
-				narrowed.Baselines, tailThrough, allTailed = s.statementTails(ctx, tails, narrowed.Baselines, readTables)
+				narrowed.Baselines, tailThrough, allTailed = s.statementTails(tails, narrowed.Baselines, readTables)
 				allTailed = tailsSayTheInstant(statement, allTailed)
 			}
 			if h := sqlChainTooHeavy(named, limit, sqlFileSize); h.Table != "" {

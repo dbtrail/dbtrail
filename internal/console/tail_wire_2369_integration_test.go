@@ -49,7 +49,10 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		return out
 	}
 	// settled reads once, so the keeper builds the table's tail in the
-	// background (#2483: no statement waits for one), and waits for it.
+	// background (#2483: no statement waits for one) and its follower
+	// publishes it (no statement brings it up to date either), and waits for
+	// both: an update that starts the build, the build, an update that
+	// publishes it.
 	settled := func(t *testing.T) []string {
 		t.Helper()
 		read(t)
@@ -57,7 +60,9 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		k := r.s.tails.by[bootServerID]
 		r.s.tails.mu.Unlock()
 		if k != nil {
+			k.followOnce(context.Background())
 			k.settle()
+			k.followOnce(context.Background())
 		}
 		return read(t)
 	}

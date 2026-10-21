@@ -190,12 +190,13 @@ var errTailRenumbered = errors.New("the source's binary log started again from a
 
 // tailKeeper keeps one server's tails.
 //
-// One lock over a whole refresh: the tails are one cursor's, and a refresh is
-// bounded by the caller's deadline, the time a statement is allowed to wait
-// for its tails.
+// One lock over a whole refresh: the tails are one cursor's. Statements do
+// not take it: they read what the follower published (pub, tail_follow.go),
+// and the follower refreshes under it, bounded by its own deadline.
 type tailKeeper struct {
 	mu  sync.Mutex
 	src tailSource
+	pub tailPublish
 	// life is the keeper's lifetime: every build runs under it, and stop
 	// (close) ends them all when the keeper is replaced or forgotten.
 	life context.Context
@@ -246,7 +247,7 @@ func newTailKeeper(src tailSource, parent string, maxKeys int, keepOld, idle tim
 		life: life, stop: stop, builds: map[string]*tailBuild{},
 		buildTimeout: tailBuildTimeout, retryMin: tailRetryMin, retryMax: tailRetryMax,
 		slots:  make(chan struct{}, tailMaxBuilds),
-		tables: map[string]*tailEntry{}}
+		tables: map[string]*tailEntry{}, pub: newTailPublish()}
 }
 
 // tailBuild is one table's tail being built in the background, or the wait
@@ -304,6 +305,8 @@ func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables 
 }
 
 func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineTable) (map[string]tailView, error) {
+	start, from, written := k.now(), k.mark.ID, k.written
+	var read, folded time.Duration
 	// The newest event FIRST: every read below is bounded by it, so the
 	// instant reported is of an event every tail has folded.
 	newest, err := k.src.Newest(ctx)
@@ -325,6 +328,7 @@ func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineT
 			why = "the index no longer holds the last event read (it was rebuilt)"
 		}
 	}
+	read = k.now().Sub(start)
 	if why == "" && newest.ID > k.mark.ID && k.mark.ID != 0 {
 		err := k.advance(ctx, newest.ID)
 		switch {
@@ -342,6 +346,7 @@ func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineT
 	if newest.At.After(k.through) {
 		k.through = newest.At
 	}
+	folded = k.now().Sub(start) - read
 	changed, err := k.src.Broken(ctx, tables)
 	if err != nil {
 		return nil, err
@@ -360,6 +365,8 @@ func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineT
 	}
 	k.forgetIdle()
 	k.collect()
+	slog.Debug("Engine Routing: the copy's tails were brought up to date", "tables", len(tables), "events_after", from, "events_through", k.mark.ID,
+		"newest_read", read, "fold", folded, "files_written", k.written-written, "total", k.now().Sub(start))
 	return out, nil
 }
 
