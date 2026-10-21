@@ -32,6 +32,9 @@ const (
 	tailBuildTimeout = 2 * time.Minute
 	tailRetryMin     = 5 * time.Second
 	tailRetryMax     = 2 * time.Minute
+	// tailMaxBuilds is how many builds of one server's tails read its index
+	// at once.
+	tailMaxBuilds = 2
 )
 
 // tailKeepers are the keepers of one process, by server id.

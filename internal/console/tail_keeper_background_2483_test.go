@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
@@ -308,13 +309,17 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 	})
 
 	t.Run("the old tail stands while the newer cut's tail is built, where it may", func(t *testing.T) {
-		f := &fakeIndex{anchors: true}
+		f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
 		f.add("orders", "1")
 		k := newKeeper(f)
 		statement(t, k, orders)
 		k.settle()
 		before := statement(t, k, orders)[ko]
-		// The newer cut's anchor did not move: no prune, a build.
+		// The newer cut moves forward, to the cursor, but the tail cannot be
+		// pruned to it (a key it cannot order): a build, and the old tail,
+		// which holds every change after the newer cut, stands meanwhile.
+		f.cuts[ko] = 1
+		k.tables[ko].tail.(*fakeTail).pruneErr = errors.New("no position")
 		release := gated(f, ko, false)
 		if got := statement(t, k, newerCut(orders))[ko]; got.Path != before.Path {
 			t.Fatalf("the old tail did not stand during the build: %+v", got)
@@ -324,6 +329,70 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 		k.settle()
 		if e := k.tables[ko]; e.cut != tailCutOf(newerCut(orders)) {
 			t.Fatalf("the build was not installed over the old tail: %+v", e)
+		}
+	})
+
+	t.Run("the old tail does not stand where it would miss changes the newer cut does not hold", func(t *testing.T) {
+		for name, newer := range map[string]func(f *fakeIndex) views.BaselineTable{
+			// A copy taken further back: its anchor is before the old cut's,
+			// and the changes between the two are in neither.
+			"the cut moved back": func(f *fakeIndex) views.BaselineTable {
+				f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000002", Pos: 900}}
+				return newerCut(orders)
+			},
+			"the cut did not move (another copy at the same position)": func(*fakeIndex) views.BaselineTable { return newerCut(orders) },
+			"another base file": func(*fakeIndex) views.BaselineTable {
+				redump := newerCut(orders)
+				redump.Path = "/snap/2/shop/orders.parquet"
+				return redump
+			},
+			"the newer cut's position cannot be read": func(f *fakeIndex) views.BaselineTable {
+				f.cutWhy = map[string]string{ko: "no position"}
+				return newerCut(orders)
+			},
+		} {
+			f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
+			f.add("orders", "1")
+			f.add("orders", "2")
+			k := newKeeper(f)
+			statement(t, k, orders)
+			k.settle()
+			if _, ok := statement(t, k, orders)[ko]; !ok {
+				t.Fatalf("%s: setup", name)
+			}
+			table := newer(f)
+			release := gated(f, ko, false)
+			if got, ok := statement(t, k, table)[ko]; ok {
+				t.Errorf("%s: the old tail stood for the newer cut during its build: %+v", name, got)
+			}
+			<-f.fillEntered
+			release()
+			k.settle()
+		}
+	})
+
+	t.Run("at most maxBuilds builds read the index at once", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		f.add("customers", "9")
+		k := newKeeper(f)
+		k.slots = make(chan struct{}, 1)
+		gate := make(chan struct{})
+		f.fillGate = map[string]chan struct{}{ko: gate, kc: gate}
+		f.fillEntered = make(chan string, 8)
+		statement(t, k, orders, customers)
+		first := <-f.fillEntered
+		statement(t, k, orders, customers) // the other build still waits for a slot
+		if len(k.slots) != 1 || len(f.fillEntered) != 0 {
+			t.Fatalf("the build reading the index holds no slot (%d), or two read at once", len(k.slots))
+		}
+		close(gate)
+		if second := <-f.fillEntered; second == first {
+			t.Fatalf("the same table twice: %s", first)
+		}
+		k.settle()
+		if got := statement(t, k, orders, customers); len(got) != 2 {
+			t.Fatalf("%+v", got)
 		}
 	})
 

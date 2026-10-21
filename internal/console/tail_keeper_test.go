@@ -481,10 +481,12 @@ func TestTailKeeper(t *testing.T) {
 	})
 
 	t.Run("a rebuild that cannot read the index keeps the advancing tail it had, and is retried", func(t *testing.T) {
-		f := &fakeIndex{fillErr: map[string]error{}, anchors: true}
+		f := &fakeIndex{fillErr: map[string]error{}, anchors: true, cuts: map[string]uint64{}}
 		f.add("orders", "1")
 		k := newKeeper(f)
 		before := refresh(t, k, orders)
+		f.cuts[ko] = 1                                                     // the cut moves forward, to the cursor
+		k.tables[ko].tail.(*fakeTail).pruneErr = errors.New("no position") // but cannot be pruned to: a build
 		f.fillErr[ko] = errors.New("timeout")
 		if got := refresh(t, k, newerCut(orders)); got[ko].Path != before[ko].Path {
 			t.Fatalf("the tail it had was dropped: %+v", got[ko])
@@ -549,12 +551,14 @@ func TestTailKeeper(t *testing.T) {
 	})
 
 	t.Run("a rebuild that runs out of time keeps the advancing tail it had, over the newer cut", func(t *testing.T) {
-		f := &fakeIndex{anchors: true}
+		f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
 		f.add("orders", "1")
 		k := newKeeper(f)
 		k.buildTimeout = 20 * time.Millisecond
 		k.retryMin, k.retryMax = time.Hour, time.Hour
 		before := refresh(t, k, orders)
+		f.cuts[ko] = 1
+		k.tables[ko].tail.(*fakeTail).pruneErr = errors.New("no position")
 		f.fillWait = map[string]bool{ko: true}
 		if got, err := k.refresh(ctx, []views.BaselineTable{newerCut(orders)}); err != nil || got[ko].Path != before[ko].Path {
 			t.Fatalf("the tail it had was dropped: %+v %v", got[ko], err)
