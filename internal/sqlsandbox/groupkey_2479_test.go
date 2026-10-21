@@ -310,3 +310,30 @@ func TestGroupByKeyRewrite_throughTheWorker_keyNotUnique(t *testing.T) {
 		t.Fatalf("answers differ: %v, %v", plain.Rows, keyed.Rows)
 	}
 }
+
+// A GROUP BY rewriteNode cannot narrow costs no second parse and no catalog
+// read: one entry, or an entry that is not a bare column, never qualifies.
+func TestGroupByKeyRewrite_hasGroupByScreens(t *testing.T) {
+	conn := groupKeySession(t)
+	for _, c := range []struct {
+		sql  string
+		want bool
+	}{
+		{"SELECT w, SUM(d) FROM s.district GROUP BY w", false},
+		{"SELECT d_name, COUNT(*) FROM s.district GROUP BY d_name", false},
+		{"SELECT w + 1, d_name, COUNT(*) FROM s.district GROUP BY w + 1, d_name", false},
+		{"SELECT lower(d_name), w, d, COUNT(*) FROM s.district GROUP BY lower(d_name), w, d", false},
+		{"SELECT COUNT(*) FROM s.district", false},
+		{"SELECT w, d, d_name, COUNT(*) FROM s.district GROUP BY w, d, d_name", true},
+		{"SELECT i_id, i_name, COUNT(*) FROM s.item GROUP BY 1, 2", false}, // positions: rewriteNode refuses them too
+		{"SELECT x.n, COUNT(*) FROM (SELECT i_id, i_name AS n FROM s.item GROUP BY i_id, i_name) x GROUP BY x.n", true},
+	} {
+		stmt, reason := parseStatement(context.Background(), conn, c.sql)
+		if reason != "" {
+			t.Fatalf("%s: %s", c.sql, reason)
+		}
+		if got := hasGroupBy(stmt); got != c.want {
+			t.Errorf("hasGroupBy(%s) = %v, want %v", c.sql, got, c.want)
+		}
+	}
+}

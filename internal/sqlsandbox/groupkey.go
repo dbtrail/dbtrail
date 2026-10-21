@@ -143,12 +143,15 @@ func parseExact(ctx context.Context, conn *sql.Conn, text string) (any, error) {
 	return parsed.Statements[0], nil
 }
 
-// hasGroupBy says whether any SELECT in the tree has a GROUP BY, so a
-// statement without one costs no catalog read.
+// hasGroupBy says whether any SELECT in the tree has a GROUP BY that
+// rewriteNode could narrow, so a statement with none costs no second parse
+// and no catalog read. rewriteNode needs every entry a plain column and the
+// table's whole key beside at least one text column, and a key column is
+// never text (keyType): two entries at the least.
 func hasGroupBy(v any) bool {
 	switch x := v.(type) {
 	case map[string]any:
-		if g, ok := x["group_expressions"].([]any); ok && len(g) > 0 && x["type"] == "SELECT_NODE" {
+		if g, ok := x["group_expressions"].([]any); ok && len(g) >= 2 && x["type"] == "SELECT_NODE" && allColumnRefs(g) {
 			return true
 		}
 		for _, child := range x {
@@ -254,6 +257,16 @@ type rewriteCatalog struct {
 
 type catalogColumn struct {
 	name, typ string
+}
+
+// allColumnRefs says whether every expression in g is a bare column.
+func allColumnRefs(g []any) bool {
+	for _, e := range g {
+		if m, _ := e.(map[string]any); m["class"] != "COLUMN_REF" {
+			return false
+		}
+	}
+	return true
 }
 
 func loadRewriteCatalog(ctx context.Context, conn *sql.Conn, keys []TableKey) (*rewriteCatalog, error) {
