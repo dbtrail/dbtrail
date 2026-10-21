@@ -131,17 +131,18 @@ func (s *Server) tailCaptures(id string) (func(schema, table string) bool, bool)
 
 // statementTails returns tables with the tails of read, the tables a
 // statement reads, set as the follower last published them, and the instant
-// they are indexed through. It reads nothing of the index and never waits
-// (tailKeeper.latest). All or nothing: a statement reads every table at one
+// they are indexed through. It reads the index, within the time a statement
+// waits, only for a table the follower has not brought up to date over its
+// cut (tailKeeper.latest). All or nothing: a statement reads every table at one
 // moment, so unless every table it reads has a tail at the same instant,
 // none is used and it reads the published copy, which is one moment too. A
 // join over a table read now and one read as of its snapshot would pair rows
 // that never coexisted. ok false: tables, unchanged.
-func (s *Server) statementTails(k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, ok bool) {
+func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, ok bool) {
 	if len(read) == 0 {
 		return tables, time.Time{}, false
 	}
-	got := k.latest(read)
+	got := k.latest(ctx, copyUnchangedTimeout, read)
 	for i, t := range read {
 		v, has := got[tailKey(t.Schema, t.Table)]
 		if !has || (i > 0 && !v.Through.Equal(through)) {

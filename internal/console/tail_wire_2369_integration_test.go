@@ -60,9 +60,9 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 		k := r.s.tails.by[bootServerID]
 		r.s.tails.mu.Unlock()
 		if k != nil {
-			k.followOnce(context.Background())
+			k.followOnce(context.Background(), time.Minute)
 			k.settle()
-			k.followOnce(context.Background())
+			k.followOnce(context.Background(), time.Minute)
 		}
 		return read(t)
 	}

@@ -49,16 +49,16 @@ func TestStatementTailsAllOrNothing(t *testing.T) {
 	// follow is the follower's update after the builds an earlier one
 	// started are in, then another that publishes them.
 	follow := func(k *tailKeeper) {
-		k.followOnce(ctx)
+		k.followOnce(ctx, time.Minute)
 		k.settle()
-		k.followOnce(ctx)
+		k.followOnce(ctx, time.Minute)
 	}
 	// stmt is a statement after the follower published what an earlier one
 	// asked for.
 	stmt := func(k *tailKeeper, read []views.BaselineTable) ([]views.BaselineTable, time.Time, bool) {
-		s.statementTails(k, tables, read)
+		s.statementTails(ctx, k, tables, read)
 		follow(k)
-		return s.statementTails(k, tables, read)
+		return s.statementTails(ctx, k, tables, read)
 	}
 
 	t.Run("every table read has a tail: all of them laid over", func(t *testing.T) {
@@ -113,15 +113,15 @@ func TestStatementTailsAllOrNothing(t *testing.T) {
 		stmt(k, tables[:1]) // orders is in
 		gate := make(chan struct{})
 		f.fillGate = map[string]chan struct{}{tailKey("shop", "customers"): gate}
-		s.statementTails(k, tables, tables)
-		k.followOnce(ctx) // customers' build starts and waits on the gate
-		out, through, ok := s.statementTails(k, tables, tables)
+		s.statementTails(ctx, k, tables, tables)
+		k.followOnce(ctx, time.Minute) // customers' build starts and waits on the gate
+		out, through, ok := s.statementTails(ctx, k, tables, tables)
 		if ok || !through.IsZero() || out[0].Tail != nil || out[1].Tail != nil {
 			t.Fatalf("a statement read one table at the index's instant and one at its snapshot's: %v %v %+v", ok, through, out)
 		}
 		close(gate)
 		follow(k)
-		if out, _, ok := s.statementTails(k, tables, tables); !ok || out[0].Tail == nil || out[1].Tail == nil {
+		if out, _, ok := s.statementTails(ctx, k, tables, tables); !ok || out[0].Tail == nil || out[1].Tail == nil {
 			t.Fatalf("both tails, once the build is in: %v %+v", ok, out)
 		}
 	})

@@ -275,9 +275,12 @@ type tailBuild struct {
 // close ends every build of a keeper that was replaced or forgotten: none is
 // installed after, none is started.
 func (k *tailKeeper) close() {
+	// Before the lock: an update holding it ends at its next read instead
+	// of running out its deadline while the caller (a statement, when the
+	// keeper is replaced) waits.
+	k.stop()
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.stop()
 	k.dropBuilds()
 }
 
