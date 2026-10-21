@@ -138,6 +138,44 @@ func (t *Tail) Apply(page []query.ResultRow) error {
 	return nil
 }
 
+// PruneThrough drops the keys a newer published cut already holds (#2483):
+// every key whose last change the read of that cut's window would not return.
+// That read takes an event whose start position is at or after anchor (the
+// position where the next write begins, so an event starting there is after
+// the cut) and, when afterID is not 0, whose id is above it
+// (query.Options.SincePos and SinceEventID); a key stays exactly when its
+// last change passes both, and is dropped otherwise. It returns how many keys
+// it dropped.
+//
+// A tail that held every change after an older cut, through some event at or
+// after anchor, is then the newer cut's tail through that event. Which cuts
+// those are is the caller's to say.
+//
+// An anchor or a key's change that no order relates (no position, an LSN,
+// another binary log base name) refuses with an error and drops nothing: the
+// caller builds the tail again from the index.
+func (t *Tail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, error) {
+	if anchor.File == "" || anchor.IsLSN() {
+		return 0, fmt.Errorf("%s.%s: the cut's position %q:%d is not a binary log position", t.schema, t.table, anchor.File, anchor.Pos)
+	}
+	base := BinlogBaseName(anchor.File)
+	var drop []string
+	for k, ev := range t.fold.Changes {
+		at := query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}
+		if !query.HasBinlogCoordinate(ev) || at.IsLSN() || BinlogBaseName(at.File) != base {
+			return 0, fmt.Errorf("%s.%s: the last change of key %q (%s:%d) cannot be ordered against the cut's position %s:%d",
+				t.schema, t.table, k, ev.BinlogFile, ev.StartPos, anchor.File, anchor.Pos)
+		}
+		if !anchor.AtOrBefore(at) || (afterID != 0 && ev.EventID <= afterID) {
+			drop = append(drop, k)
+		}
+	}
+	for _, k := range drop {
+		delete(t.fold.Changes, k)
+	}
+	return len(drop), nil
+}
+
 // Keys is how many keys the tail holds.
 func (t *Tail) Keys() int { return len(t.fold.Changes) }
 

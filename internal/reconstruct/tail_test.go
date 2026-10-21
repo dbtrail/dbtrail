@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -502,4 +503,138 @@ func TestTail_writeFileRefusesAnExistingName(t *testing.T) {
 	if _, err := tail.WriteFile(path); err == nil {
 		t.Error("a version was written over another")
 	}
+}
+
+// #2483: a newer published cut prunes the tail instead of rebuilding it. A key
+// stays exactly when the read of the newer cut's window would return its last
+// event (indexTailSource.Fill): start position at or after the anchor (the
+// anchor is where the next write begins, so an event starting there is after
+// the cut) and, when the cut records one, an id above its last event id.
+func TestTail_pruneThrough(t *testing.T) {
+	base := writeTailBase(t, t.TempDir(), "orders.parquet", tailOrdersDDL)
+	newTail := func(t *testing.T, evs ...query.ResultRow) *Tail {
+		t.Helper()
+		tail, err := NewTail("shop", "orders", tailOrdersDDL, base, tailOrdersPK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tail.Apply(evs); err != nil {
+			t.Fatal(err)
+		}
+		return tail
+	}
+	keys := func(tail *Tail) string {
+		var out []string
+		for k := range tail.fold.Changes {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return strings.Join(out, ",")
+	}
+	at := func(file string, pos uint64) query.BinlogPos { return query.BinlogPos{File: file, Pos: pos} }
+
+	t.Run("before the anchor dropped, at it and after it kept", func(t *testing.T) {
+		tail := newTail(t,
+			tailEvent(1, event.EventUpdate, "1", "before", 100),
+			tailEvent(2, event.EventUpdate, "2", "at", 200),
+			tailEvent(3, event.EventDelete, "3", "", 300),
+		)
+		n, err := tail.PruneThrough(at("binlog.000003", 200), 0)
+		if err != nil || n != 1 || keys(tail) != "2,3" {
+			t.Fatalf("dropped %d (%v), kept %s", n, err, keys(tail))
+		}
+	})
+	t.Run("a key keeps its last change: an earlier one before the anchor does not drop it", func(t *testing.T) {
+		tail := newTail(t,
+			tailEvent(1, event.EventUpdate, "1", "old", 100),
+			tailEvent(5, event.EventUpdate, "1", "new", 500),
+		)
+		if n, err := tail.PruneThrough(at("binlog.000003", 200), 0); err != nil || n != 0 || keys(tail) != "1" {
+			t.Fatalf("dropped %d (%v), kept %s", n, err, keys(tail))
+		}
+	})
+	t.Run("an id at or below the cut's last event id is dropped, one above kept", func(t *testing.T) {
+		tail := newTail(t,
+			tailEvent(7, event.EventUpdate, "1", "at id", 300),
+			tailEvent(8, event.EventUpdate, "2", "above", 400),
+		)
+		if n, err := tail.PruneThrough(at("binlog.000003", 200), 7); err != nil || n != 1 || keys(tail) != "2" {
+			t.Fatalf("dropped %d (%v), kept %s", n, err, keys(tail))
+		}
+	})
+	t.Run("later files are after the anchor, by length first", func(t *testing.T) {
+		e1 := tailEvent(1, event.EventUpdate, "1", "next file", 4)
+		e1.BinlogFile = "binlog.000004"
+		e2 := tailEvent(2, event.EventUpdate, "2", "longer name", 4)
+		e2.BinlogFile = "binlog.1000000"
+		e3 := tailEvent(3, event.EventUpdate, "3", "earlier file", 900)
+		e3.BinlogFile = "binlog.000002"
+		tail := newTail(t, e3, e1, e2)
+		if n, err := tail.PruneThrough(at("binlog.000003", 500), 0); err != nil || n != 1 || keys(tail) != "1,2" {
+			t.Fatalf("dropped %d (%v), kept %s", n, err, keys(tail))
+		}
+	})
+	t.Run("everything at or before the anchor: an empty tail", func(t *testing.T) {
+		tail := newTail(t, tailEvent(1, event.EventInsert, "1", "x", 100))
+		if n, err := tail.PruneThrough(at("binlog.000003", 101), 0); err != nil || n != 1 || tail.Keys() != 0 {
+			t.Fatalf("dropped %d (%v), kept %s", n, err, keys(tail))
+		}
+	})
+	t.Run("an empty tail prunes to nothing", func(t *testing.T) {
+		tail := newTail(t)
+		if n, err := tail.PruneThrough(at("binlog.000003", 101), 0); err != nil || n != 0 {
+			t.Fatalf("dropped %d (%v)", n, err)
+		}
+	})
+	t.Run("refused, and nothing dropped, when no order relates a key's change to the anchor", func(t *testing.T) {
+		for name, c := range map[string]struct {
+			anchor query.BinlogPos
+			edit   func(*Tail)
+		}{
+			"an anchor with no file":                 {anchor: at("", 200)},
+			"an anchor that is an LSN":               {anchor: at("0/16B3748", 200)},
+			"an anchor under another base name":      {anchor: at("mysql-bin.000003", 200)},
+			"a key's change with no position":        {anchor: at("binlog.000003", 200), edit: func(tl *Tail) { tl.fold.Changes["3"].BinlogFile = "" }},
+			"a key's change under another numbering": {anchor: at("binlog.000003", 200), edit: func(tl *Tail) { tl.fold.Changes["3"].BinlogFile = "mysql-bin.000009" }},
+		} {
+			tail := newTail(t,
+				tailEvent(1, event.EventUpdate, "1", "before", 100),
+				tailEvent(3, event.EventUpdate, "3", "after", 300),
+			)
+			if c.edit != nil {
+				c.edit(tail)
+			}
+			if n, err := tail.PruneThrough(c.anchor, 0); err == nil || n != 0 || keys(tail) != "1,3" {
+				t.Errorf("%s: dropped %d (%v), kept %s", name, n, err, keys(tail))
+			}
+		}
+	})
+	t.Run("the pruned tail writes only what it kept, over the newer copy", func(t *testing.T) {
+		dir := t.TempDir()
+		newer := writeTailBase(t, dir, "orders.parquet", tailOrdersDDL,
+			map[string]string{"id": "1", "status": "in the cut"},
+			map[string]string{"id": "2", "status": "in the cut"},
+		)
+		tail := newTail(t,
+			tailEvent(1, event.EventUpdate, "1", "in the cut", 100),
+			tailEvent(2, event.EventUpdate, "2", "after the cut", 300),
+		)
+		if _, err := tail.PruneThrough(at("binlog.000003", 200), 1); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "orders.tail.parquet")
+		if _, err := tail.WriteFile(path); err != nil {
+			t.Fatal(err)
+		}
+		got := readState(t, baseline.TableTailStateSQL("SELECT * FROM read_parquet("+lit(newer)+")", lit(path), tail.PKColumns(), ""))
+		if strings.Join(got, ",") != "1=in the cut,2=after the cut" {
+			t.Errorf("%v", got)
+		}
+		var n int
+		db, _ := sql.Open("duckdb", "")
+		defer db.Close()
+		if err := db.QueryRow("SELECT count(*) FROM read_parquet(" + lit(path) + ")").Scan(&n); err != nil || n != 1 {
+			t.Errorf("the file holds %d rows (%v), want the 1 key kept", n, err)
+		}
+	})
 }

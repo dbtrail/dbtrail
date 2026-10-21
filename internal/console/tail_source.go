@@ -326,6 +326,15 @@ func (x *indexTailSource) Since(ctx context.Context, tables []views.BaselineTabl
 	return nil
 }
 
+// Cut reads where Fill starts t's window: its cut's anchor and last event id.
+func (x *indexTailSource) Cut(t views.BaselineTable) (tailFloor, string) {
+	cut := copyCutOf(t, x.s.copyCuts.footer)
+	if cut.refusal != "" {
+		return tailFloor{}, cut.refusal
+	}
+	return tailFloor{anchor: cut.anchor, lastEventID: cut.lastEventID}, ""
+}
+
 // Broken says why each table's tail cannot go on, asked at every refresh:
 // a schema change placed after its cut (as copyUnchanged places them), a
 // loss in capture recorded since its rows were read from the source, or a

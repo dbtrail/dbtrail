@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,15 @@ type fakeIndex struct {
 	sinceFails int
 	sinceFrom  uint64
 	fillWait   map[string]bool
+	// anchors turns on Cut (#2483), off by default so the cases above keep
+	// rebuilding: a table's cut then stands where the read of its window
+	// starts (Fill's id floor, cuts), in binlog.000003 unless cutFile says
+	// otherwise; cutAt moves a table's anchor, cutWhy refuses it.
+	anchors bool
+	cutFile string
+	cutAt   map[string]query.BinlogPos
+	cutWhy  map[string]string
+	cutLast map[string]uint64
 }
 
 const fakePage = 2
@@ -136,6 +146,30 @@ func (f *fakeIndex) Since(_ context.Context, tables []views.BaselineTable, from,
 	return f.hand(evs, page)
 }
 
+func (f *fakeIndex) Cut(t views.BaselineTable) (tailFloor, string) {
+	key := tailKey(t.Schema, t.Table)
+	switch {
+	case !f.anchors:
+		return tailFloor{}, "no anchor in this fake"
+	case f.cutWhy[key] != "":
+		return tailFloor{}, f.cutWhy[key]
+	}
+	file := f.cutFile
+	if file == "" {
+		file = "binlog.000003"
+	}
+	// add puts event id at id*100: the anchor sits just after the cut's last
+	// event, so the window starts at the event after it, as Fill's id floor.
+	c := tailFloor{anchor: query.BinlogPos{File: file, Pos: f.cuts[key]*100 + 1}, lastEventID: f.cuts[key]}
+	if at, ok := f.cutAt[key]; ok {
+		c.anchor = at
+	}
+	if last, ok := f.cutLast[key]; ok {
+		c.lastEventID = last
+	}
+	return c, ""
+}
+
 func (f *fakeIndex) Broken(context.Context, []views.BaselineTable) (map[string]string, error) {
 	return f.changed, f.changedErr
 }
@@ -151,11 +185,14 @@ func (f *fakeIndex) add(table, key string) {
 
 func (f *fakeIndex) at(id uint64) time.Time { return f.events[id-1].EventTimestamp }
 
-// fakeTail keeps the keys it was given and writes them, one per line.
+// fakeTail keeps the last event of each key it was given and writes the
+// keys, one per line.
 type fakeTail struct {
-	keys     map[string]bool
+	keys     map[string]query.ResultRow
 	applyErr error
 	writeErr *error
+	pruneErr error
+	prunes   int
 }
 
 func (t *fakeTail) Apply(page []query.ResultRow) error {
@@ -163,12 +200,28 @@ func (t *fakeTail) Apply(page []query.ResultRow) error {
 		return t.applyErr
 	}
 	if t.keys == nil {
-		t.keys = map[string]bool{}
+		t.keys = map[string]query.ResultRow{}
 	}
 	for _, ev := range page {
-		t.keys[ev.PKValues] = true
+		t.keys[ev.PKValues] = ev
 	}
 	return nil
+}
+
+// PruneThrough is reconstruct.Tail's rule over the fake's single numbering.
+func (t *fakeTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, error) {
+	if t.pruneErr != nil {
+		return 0, t.pruneErr
+	}
+	t.prunes++
+	n := 0
+	for k, ev := range t.keys {
+		if !anchor.AtOrBefore(query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}) || afterID != 0 && ev.EventID <= afterID {
+			delete(t.keys, k)
+			n++
+		}
+	}
+	return n, nil
 }
 func (t *fakeTail) Keys() int           { return len(t.keys) }
 func (t *fakeTail) PKColumns() []string { return []string{"id"} }
@@ -834,4 +887,196 @@ func (f *foldingIndex) Since(_ context.Context, tables []views.BaselineTable, fr
 		}
 	}
 	return f.hand(evs, page)
+}
+
+// #2483: a newer published cut prunes a live tail to it, with no read of the
+// index and no wait; every case where pruning could serve a wrong row builds
+// the tail again from the index instead, as before.
+func TestTailKeeper_pruneToANewerCut(t *testing.T) {
+	ctx := context.Background()
+	orders := keeperTable("orders")
+	ko := tailKey("shop", "orders")
+	clock := time.Date(2026, 10, 14, 13, 0, 0, 0, time.UTC)
+	newKeeper := func(f *fakeIndex) *tailKeeper {
+		k := newTailKeeper(f, t.TempDir(), 10, time.Minute, time.Hour)
+		k.now = func() time.Time { return clock }
+		k.minBuild = 0
+		return k
+	}
+	refresh := func(t *testing.T, k *tailKeeper, tables ...views.BaselineTable) map[string]tailView {
+		t.Helper()
+		got, err := k.refresh(ctx, tables)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	// started is a keeper whose tail of orders holds keys 1..4 (events 1..4)
+	// over a cut at 0, and an index whose newer cut of orders stops at event
+	// 2, the cursor at event 5 (another table's).
+	started := func(t *testing.T) (*fakeIndex, *tailKeeper, tailView) {
+		t.Helper()
+		f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
+		for _, key := range []string{"1", "2", "3", "4"} {
+			f.add("orders", key)
+		}
+		k := newKeeper(f)
+		before := refresh(t, k, orders)[ko]
+		if fileKeys(t, before.Path) != 4 || f.fills != 1 {
+			t.Fatalf("setup: %+v, %d fills", before, f.fills)
+		}
+		f.add("customers", "9")
+		f.cuts[ko] = 2
+		return f, k, before
+	}
+	keys := func(k *tailKeeper) string {
+		var out []string
+		for key := range k.tables[ko].tail.(*fakeTail).keys {
+			out = append(out, key)
+		}
+		slices.Sort(out)
+		return strings.Join(out, ",")
+	}
+
+	t.Run("prunes what the newer cut holds, into a new file, with no read of the index", func(t *testing.T) {
+		f, k, before := started(t)
+		got := refresh(t, k, newerCut(orders))[ko]
+		if f.fills != 1 {
+			t.Errorf("filled %d times: the newer cut was read from the index", f.fills)
+		}
+		if keys(k) != "3,4" || fileKeys(t, got.Path) != 2 {
+			t.Errorf("kept %s, file holds %d keys, want 3,4", keys(k), fileKeys(t, got.Path))
+		}
+		if got.Path == before.Path || !got.Through.Equal(f.at(5)) {
+			t.Errorf("before %+v after %+v", before, got)
+		}
+		if _, err := os.Stat(before.Path); err != nil {
+			t.Errorf("the version a running statement may read is gone: %v", err)
+		}
+		if e := k.tables[ko]; e.cut != tailCutOf(newerCut(orders)) || e.fileCut != e.cut || e.from == nil || e.from.lastEventID != 2 {
+			t.Errorf("entry not moved to the newer cut: %+v", e)
+		}
+		// And it goes on advancing over it.
+		f.add("orders", "1")
+		if got := refresh(t, k, newerCut(orders))[ko]; keys(k) != "1,3,4" || fileKeys(t, got.Path) != 3 || f.fills != 1 {
+			t.Errorf("after the prune: kept %s, %d fills", keys(k), f.fills)
+		}
+	})
+
+	t.Run("the same keys as a rebuild from the newer cut", func(t *testing.T) {
+		_, pruned, _ := started(t)
+		refresh(t, pruned, newerCut(orders))
+		f, rebuilt, _ := started(t)
+		f.anchors = false
+		refresh(t, rebuilt, newerCut(orders))
+		if f.fills != 2 {
+			t.Fatalf("the reference was not rebuilt: %d fills", f.fills)
+		}
+		if keys(pruned) != keys(rebuilt) {
+			t.Errorf("pruned %s, rebuilt %s", keys(pruned), keys(rebuilt))
+		}
+	})
+
+	t.Run("no wait: a statement with no time left still gets the pruned tail", func(t *testing.T) {
+		f, k, _ := started(t)
+		f.fillWait = map[string]bool{ko: true}
+		k.minBuild = time.Hour
+		short, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		got, err := k.refresh(short, []views.BaselineTable{newerCut(orders)})
+		if err != nil || fileKeys(t, got[ko].Path) != 2 || f.fills != 1 || !f.fillWait[ko] {
+			t.Fatalf("%+v %v, %d fills", got[ko], err, f.fills)
+		}
+	})
+
+	t.Run("pruned to nothing: no file, the cursor's instant", func(t *testing.T) {
+		f, k, _ := started(t)
+		f.cuts[ko] = 4
+		got, ok := refresh(t, k, newerCut(orders))[ko]
+		if !ok || got.Path != "" || !got.Through.Equal(f.at(5)) || f.fills != 1 {
+			t.Fatalf("%+v %v, %d fills", got, ok, f.fills)
+		}
+	})
+
+	// Every case below builds the tail again from the index (a second Fill).
+	rebuilds := func(t *testing.T, f *fakeIndex, k *tailKeeper, table views.BaselineTable) {
+		t.Helper()
+		refresh(t, k, table)
+		if f.fills != 2 {
+			t.Errorf("filled %d times, want a rebuild", f.fills)
+		}
+		if e := k.tables[ko]; e != nil && e.tail != nil && e.tail.(*fakeTail).prunes != 0 {
+			t.Errorf("pruned too")
+		}
+	}
+	for name, edit := range map[string]func(f *fakeIndex, k *tailKeeper){
+		"the newer cut's position cannot be read": func(f *fakeIndex, _ *tailKeeper) { f.cutWhy = map[string]string{ko: "no position"} },
+		"the newer cut is in another numbering":   func(f *fakeIndex, _ *tailKeeper) { f.cutFile = "mysql-bin.000003" },
+		"the cut did not move (a re-dump at the same position)": func(f *fakeIndex, _ *tailKeeper) {
+			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 1}}
+		},
+		"the cut moved back": func(f *fakeIndex, _ *tailKeeper) {
+			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000002", Pos: 900}}
+		},
+		"the cut is past the cursor (capture behind a dump's position)": func(f *fakeIndex, _ *tailKeeper) {
+			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 501}}
+		},
+		"the cut is past the cursor, in a later file": func(f *fakeIndex, _ *tailKeeper) {
+			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000004", Pos: 4}}
+		},
+		"the newer cut's last event id is below the older's": func(f *fakeIndex, k *tailKeeper) {
+			k.tables[ko].from.lastEventID = 3
+		},
+		"the tail was built with no position on record": func(_ *fakeIndex, k *tailKeeper) { k.tables[ko].from = nil },
+		"a key's change cannot be ordered against the cut": func(_ *fakeIndex, k *tailKeeper) {
+			k.tables[ko].tail.(*fakeTail).pruneErr = errors.New("no position")
+		},
+	} {
+		t.Run("rebuilds: "+name, func(t *testing.T) {
+			f, k, _ := started(t)
+			edit(f, k)
+			rebuilds(t, f, k, newerCut(orders))
+		})
+	}
+
+	t.Run("rebuilds: the table's copy was written again (another file)", func(t *testing.T) {
+		f, k, _ := started(t)
+		redump := orders
+		redump.Path = "/snap/2/shop/orders.parquet"
+		rebuilds(t, f, k, redump)
+	})
+
+	t.Run("rebuilds: a frozen tail", func(t *testing.T) {
+		f, k, _ := started(t)
+		k.tables[ko].frozen = true
+		rebuilds(t, f, k, newerCut(orders))
+	})
+
+	t.Run("no prune for a refused tail or a definition that changed", func(t *testing.T) {
+		f, k, _ := started(t)
+		f.changed = map[string]string{ko: "ALTER TABLE"}
+		if got := refresh(t, k, newerCut(orders)); len(got) != 0 || f.fills != 1 {
+			t.Fatalf("%+v, %d fills", got, f.fills)
+		}
+		f.changed = nil
+		k.tables[ko].cut = "older"
+		rebuilds(t, f, k, newerCut(orders))
+	})
+
+	t.Run("a tail kept over a newer cut after a rebuild failed still prunes from its own cut", func(t *testing.T) {
+		f, k, _ := started(t)
+		f.cutWhy = map[string]string{ko: "unreadable now"}
+		f.fillErr = map[string]error{ko: errors.New("timeout")}
+		refresh(t, k, newerCut(orders))
+		if e := k.tables[ko]; e.from == nil || e.from.lastEventID != 0 {
+			t.Fatalf("the position of what the tail holds moved with a relabel: %+v", e.from)
+		}
+		f.cutWhy = nil
+		f.cuts[ko] = 3
+		third := newerCut(orders)
+		third.DeltaFiles = append(third.DeltaFiles, baseline.TableDeltaFile{Upserts: "/snap/3/shop/orders.000001.upserts"})
+		if got := refresh(t, k, third)[ko]; keys(k) != "4" || fileKeys(t, got.Path) != 1 || f.fills != 1 {
+			t.Errorf("kept %s, %d fills", keys(k), f.fills)
+		}
+	})
 }
