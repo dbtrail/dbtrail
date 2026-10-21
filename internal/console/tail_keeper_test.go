@@ -405,7 +405,7 @@ func TestTailKeeper(t *testing.T) {
 	})
 
 	t.Run("a rebuild that cannot read the index keeps the advancing tail it had, and is retried", func(t *testing.T) {
-		f := &fakeIndex{fillErr: map[string]error{}}
+		f := &fakeIndex{fillErr: map[string]error{}, anchors: true}
 		f.add("orders", "1")
 		k := newKeeper(f)
 		before := refresh(t, k, orders)
@@ -468,7 +468,7 @@ func TestTailKeeper(t *testing.T) {
 	})
 
 	t.Run("a rebuild that runs out of time keeps the advancing tail it had, over the newer cut", func(t *testing.T) {
-		f := &fakeIndex{}
+		f := &fakeIndex{anchors: true}
 		f.add("orders", "1")
 		k := newKeeper(f)
 		before := refresh(t, k, orders)
@@ -1020,9 +1020,15 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		},
 		"the cut is past the cursor (capture behind a dump's position)": func(f *fakeIndex, _ *tailKeeper) {
 			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 501}}
+			f.cutLast = map[string]uint64{ko: 0}
 		},
 		"the cut is past the cursor, in a later file": func(f *fakeIndex, _ *tailKeeper) {
 			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000004", Pos: 4}}
+			f.cutLast = map[string]uint64{ko: 0}
+		},
+		"the cut's last event of the table is past the cursor": func(f *fakeIndex, _ *tailKeeper) {
+			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 501}}
+			f.cutLast = map[string]uint64{ko: 6}
 		},
 		"the newer cut's last event id is below the older's": func(f *fakeIndex, k *tailKeeper) {
 			k.tables[ko].from.lastEventID = 3
@@ -1077,6 +1083,100 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		third.DeltaFiles = append(third.DeltaFiles, baseline.TableDeltaFile{Upserts: "/snap/3/shop/orders.000001.upserts"})
 		if got := refresh(t, k, third)[ko]; keys(k) != "4" || fileKeys(t, got.Path) != 1 || f.fills != 1 {
 			t.Errorf("kept %s, %d fills", keys(k), f.fills)
+		}
+	})
+}
+
+// #2483 review: a cut the cursor has not reached (a dump's position, ahead of
+// capture) holds changes the keeper has yet to fold. Folded later, they would
+// be laid over the cut as changes after it, older values over its newer ones.
+func TestTailKeeper_aCutAheadOfTheCursor(t *testing.T) {
+	ctx := context.Background()
+	orders := keeperTable("orders")
+	ko := tailKey("shop", "orders")
+	newKeeper := func(f *fakeIndex) *tailKeeper {
+		k := newTailKeeper(f, t.TempDir(), 10, time.Minute, time.Hour)
+		k.minBuild = 0
+		return k
+	}
+	refresh := func(t *testing.T, k *tailKeeper, tables ...views.BaselineTable) map[string]tailView {
+		t.Helper()
+		got, err := k.refresh(ctx, tables)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	keys := func(k *tailKeeper) string {
+		var out []string
+		for key := range k.tables[ko].tail.(*fakeTail).keys {
+			out = append(out, key)
+		}
+		slices.Sort(out)
+		return strings.Join(out, ",")
+	}
+
+	t.Run("a refresh's cut that ends right after the cursor's event prunes, by its last event id", func(t *testing.T) {
+		f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
+		for _, key := range []string{"1", "2", "3"} {
+			f.add("orders", key)
+		}
+		k := newKeeper(f)
+		refresh(t, k, orders)
+		f.cuts[ko] = 3
+		f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 310}} // the end of event 3
+		if got, ok := refresh(t, k, newerCut(orders))[ko]; !ok || got.Path != "" || f.fills != 1 {
+			t.Fatalf("%+v %v, %d fills", got, ok, f.fills)
+		}
+	})
+
+	t.Run("a tail built over it folds only the changes after it, as its first read did", func(t *testing.T) {
+		f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
+		f.add("orders", "1")
+		f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 301}} // ahead of event 1
+		k := newKeeper(f)
+		if got := refresh(t, k, orders)[ko]; fileKeys(t, got.Path) != 1 {
+			t.Fatalf("setup: %+v", got)
+		}
+		f.add("orders", "2") // at 200: in the cut
+		f.add("orders", "3") // at 300: in the cut
+		f.add("orders", "4") // at 400: after it
+		refresh(t, k, orders)
+		// Key 1 came from the fake's own Fill, which floors by id, not by
+		// position; what matters is that 2 and 3 were not folded.
+		if keys(k) != "1,4" {
+			t.Errorf("kept %s, want 2 and 3 left to the cut", keys(k))
+		}
+	})
+
+	t.Run("a tail it had is not kept standing over it when the rebuild fails", func(t *testing.T) {
+		for name, fail := range map[string]func(f *fakeIndex){
+			"a read error": func(f *fakeIndex) { f.fillErr = map[string]error{ko: errors.New("gone")} },
+			"no time":      func(f *fakeIndex) { f.fillWait = map[string]bool{ko: true} },
+		} {
+			f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
+			f.add("orders", "1")
+			k := newKeeper(f)
+			refresh(t, k, orders)
+			f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 901}}
+			fail(f)
+			short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+			got, err := k.refresh(short, []views.BaselineTable{newerCut(orders)})
+			cancel()
+			if _, ok := got[ko]; ok || err != nil {
+				t.Errorf("%s: a tail laid over a cut the cursor has not reached: %+v %v", name, got[ko], err)
+			}
+		}
+		f := &fakeIndex{anchors: true, cuts: map[string]uint64{}}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		k.minBuild = time.Hour
+		refresh(t, k, orders)
+		f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 901}}
+		short, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		if got, err := k.refresh(short, []views.BaselineTable{newerCut(orders)}); err != nil || len(got) != 0 {
+			t.Errorf("no time left: a tail laid over a cut the cursor has not reached: %+v %v", got, err)
 		}
 	})
 }
