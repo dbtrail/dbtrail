@@ -205,11 +205,6 @@ type Job struct {
 	Session Session
 	// Limits override the Runner's defaults field by field.
 	Limits Limits
-	// Keys are the PRIMARY KEYs of the copy's views, as far as they are
-	// known (views.Input.StateViewKeys). A statement grouping by every
-	// column of one runs without that table's text columns in its GROUP BY
-	// (groupByKeyRewrite, #2479). Empty leaves every statement as written.
-	Keys []TableKey
 }
 
 // Session is what a client connection set for itself and the statement must
@@ -304,10 +299,6 @@ type Result struct {
 	Elapsed        time.Duration `json:"elapsed_ns"`
 	// Phases is where the time went, for the measurement #2026 asks for.
 	Phases Phases `json:"phases"`
-	// GroupedByKey says the statement ran with its GROUP BY narrowed to a
-	// table's key (groupByKeyRewrite, #2479): the same answer, reached
-	// without comparing that table's text columns.
-	GroupedByKey bool `json:"grouped_by_key,omitempty"`
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
@@ -328,9 +319,6 @@ type Phases struct {
 	// Child: installing the views script (CREATE VIEW over the copy), the
 	// USE and the final configuration lock.
 	Views time.Duration `json:"views_ns"`
-	// Child: deciding whether the statement's GROUP BY narrows to a table's
-	// key, and preparing the narrowed statement when it does (#2479).
-	Rewrite time.Duration `json:"rewrite_ns"`
 	// Child: running the statement and collecting rows (= Elapsed). The
 	// child cannot time its own encoding from inside the encoded message;
 	// Spawn minus the child phases is that cost plus process start and exit.
@@ -1353,7 +1341,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, more bool) ([]byte, err
 		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
-		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more, Keys: job.Keys,
+		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
 	})
 }
 
@@ -1586,17 +1574,11 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			return Result{}, &WorkerError{Err: errors.New(out.Error.Message), PID: pid, Stderr: w.stderr.text()}
 		}
 	}
-	if out.GroupedByKeyNote != "" {
-		// A statement that had a table's key to group by ran as written: an
-		// answer as correct, without #2479's saving. Logged so that a
-		// rewrite an engine change broke for every statement shows.
-		slog.Warn("sql: a GROUP BY was not narrowed to its table's key", "why", out.GroupedByKeyNote)
-	}
 	res := Result{Columns: out.Columns, Rows: out.Rows, Truncated: out.Truncated,
-		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS), GroupedByKey: out.GroupedByKey,
+		TruncatedCells: out.TruncatedCells, Elapsed: time.Duration(out.ElapsedNS),
 		Phases: Phases{
 			Open: time.Duration(out.OpenNS), Lockdown: time.Duration(out.LockdownNS),
-			Views: time.Duration(out.ViewsNS), Rewrite: time.Duration(out.RewriteNS), Query: time.Duration(out.ElapsedNS),
+			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),
 			Spawn: spawnTook, Decode: time.Since(decodeStart),
 		}}
 	if res.Rows == nil {

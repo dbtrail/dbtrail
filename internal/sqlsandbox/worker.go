@@ -287,7 +287,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	// rule DuckDB itself resolves names by (catalogSchema), so the probe and
 	// the SET cannot disagree; and if the SET is refused all the same, that
 	// is one more schema that was not applied, not a failed session.
-	missingSchema, searchSchema := "", ""
+	missingSchema := ""
 	if job.Schema != "" {
 		name, ok := catalogSchema(ctx, conn, job.Schema)
 		if ok {
@@ -296,9 +296,7 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 				ok = false
 			}
 		}
-		if ok {
-			searchSchema = name
-		} else {
+		if !ok {
 			missingSchema = job.Schema
 		}
 	}
@@ -331,48 +329,8 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		}
 	}
 
-	// The same statement with a GROUP BY narrowed to a table's key, when it
-	// has one (#2479). It is an optimization, never a precondition: a
-	// rewrite that cannot be built or does not prepare runs the statement as
-	// written, before either has started. Once the rewritten statement runs,
-	// its own failure is the statement's (the same work would fail the same
-	// way, and running it again would spend the time limit twice), except
-	// the one its check raises when the key did not fix its group, which
-	// runs the statement as written. The reason it did not apply is reported
-	// to the parent (GroupedByKeyNote), which logs it.
-	rewriteStart := time.Now()
-	rewritten, err := groupByKeyRewrite(ctx, conn, job.SQL, stmt, job.Keys, searchSchema)
-	if err != nil {
-		res.GroupedByKeyNote = "not rewritten: " + firstLine(err.Error())
-	}
-	var prepared *sql.Stmt
-	if rewritten != "" {
-		if prepared, err = conn.PrepareContext(ctx, rewritten); err != nil {
-			res.GroupedByKeyNote = "the rewritten statement did not prepare: " + firstLine(err.Error())
-			prepared = nil
-		} else {
-			defer prepared.Close()
-		}
-	}
-	res.RewriteNS = int64(time.Since(rewriteStart))
-
 	start := time.Now()
-	var rows *sql.Rows
-	err = nil
-	if prepared != nil {
-		rows, err = prepared.QueryContext(ctx)
-		switch {
-		case err == nil:
-			res.GroupedByKey = true
-		case strings.Contains(err.Error(), groupKeyMixed):
-			res.GroupedByKeyNote = "a grouping key held more than one text value; ran as written"
-			rows, err = nil, nil
-			start = time.Now()
-		}
-	}
-	if rows == nil && err == nil {
-		rows, err = conn.QueryContext(ctx, job.SQL)
-	}
+	rows, err := conn.QueryContext(ctx, job.SQL)
 	if err != nil {
 		msg := err.Error()
 		if missingSchema != "" && strings.Contains(msg, "does not exist") {
