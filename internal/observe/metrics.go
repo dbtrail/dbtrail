@@ -196,11 +196,13 @@ func RefreshArithmeticMismatch(table string) {
 }
 
 // RefreshArithmeticMismatches is the counter's total over every table, for
-// a harness that asserts it did not move (the oracle's refresh step).
-func RefreshArithmeticMismatches() float64 {
+// a harness that asserts it did not move (the oracle's refresh step). The
+// error is the registry's, and a harness must fail on it rather than read
+// a zero as "nothing moved".
+func RefreshArithmeticMismatches() (float64, error) {
 	mfs, err := prometheus.DefaultGatherer.Gather()
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	var total float64
 	for _, mf := range mfs {
@@ -211,7 +213,7 @@ func RefreshArithmeticMismatches() float64 {
 			total += m.GetCounter().GetValue()
 		}
 	}
-	return total
+	return total, nil
 }
 
 // ObserveSQLStatementPhase records one phase of a SQL-on-the-copy statement.

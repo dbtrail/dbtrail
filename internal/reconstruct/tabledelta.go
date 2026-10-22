@@ -1309,7 +1309,7 @@ func rowsBeforeWindow(p tableDeltaPublish, seq int) int64 {
 	baseRows := func() int64 {
 		n, err := baseline.TableFileRows(p.basePath)
 		if err != nil {
-			slog.Warn("refresh arithmetic: the base's row count cannot be read; this window is not checked", "schema", p.schema, "table", p.table, "error", err)
+			slog.Warn("refresh arithmetic: the base's row count cannot be read; the rows before and after this window are unknown (its keys are still checked)", "schema", p.schema, "table", p.table, "error", err)
 			return -1
 		}
 		return n

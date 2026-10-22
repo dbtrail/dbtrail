@@ -84,6 +84,15 @@ func TestRefreshArithmetic_problems(t *testing.T) {
 	}
 }
 
+func mismatchesNow(t *testing.T) float64 {
+	t.Helper()
+	n, err := observe.RefreshArithmeticMismatches()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // captureLogs routes slog to a buffer at debug level for the test.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
@@ -128,7 +137,7 @@ func TestRefreshArithmetic_deltaWindows(t *testing.T) {
 	}
 	prevBase, prevTime := src, t0
 	logs := captureLogs(t)
-	before := observe.RefreshArithmeticMismatches()
+	before := mismatchesNow(t)
 	for i, w := range windows {
 		at := t0.Add(time.Duration(i+1) * 5 * time.Minute)
 		cut := &query.BinlogPos{File: "binlog.000009", Pos: uint64(1000 * (i + 1))}
@@ -157,7 +166,7 @@ func TestRefreshArithmetic_deltaWindows(t *testing.T) {
 		}
 		prevBase, prevTime = newBase, at
 	}
-	if moved := observe.RefreshArithmeticMismatches() - before; moved != 0 {
+	if moved := mismatchesNow(t) - before; moved != 0 {
 		t.Errorf("bintrail_refresh_arithmetic_mismatch_total moved by %v on windows that close", moved)
 	}
 	if n := strings.Count(logs.String(), "refresh arithmetic: rows after = rows before + inserts - deletes"); n != len(windows) {
@@ -186,7 +195,7 @@ func TestRefreshArithmetic_deltaWindows(t *testing.T) {
 	if _, err := os.Stat(newBase); err != nil {
 		t.Errorf("the table was not published: %v", err)
 	}
-	if moved := observe.RefreshArithmeticMismatches() - before; moved != 1 {
+	if moved := mismatchesNow(t) - before; moved != 1 {
 		t.Errorf("bintrail_refresh_arithmetic_mismatch_total moved by %v, want 1", moved)
 	}
 	if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "does not close") ||
@@ -216,7 +225,7 @@ func TestRefreshArithmetic_chainWithoutACount(t *testing.T) {
 			t.Fatalf("first window: %v, problems %q, rows after %d", err, rep.ArithmeticProblems, rep.RowsAfter)
 		}
 		logs := captureLogs(t)
-		before := observe.RefreshArithmeticMismatches()
+		before := mismatchesNow(t)
 		_, rep, err = deltaWindow(t, root, first, t0.Add(5*time.Minute), changeMap(upd(9, "nine-v2"), del(1)), t0.Add(10*time.Minute), &query.BinlogPos{File: "b.1", Pos: 20}, noCount)
 		if err != nil {
 			t.Fatal(err)
@@ -224,7 +233,7 @@ func TestRefreshArithmetic_chainWithoutACount(t *testing.T) {
 		if rep.RowsBefore != -1 || rep.RowsAfter != -1 || len(rep.ArithmeticProblems) != 0 {
 			t.Errorf("rows before/after = %d/%d problems %q; want unknown and none", rep.RowsBefore, rep.RowsAfter, rep.ArithmeticProblems)
 		}
-		if moved := observe.RefreshArithmeticMismatches() - before; moved != 0 || strings.Contains(logs.String(), "does not close") {
+		if moved := mismatchesNow(t) - before; moved != 0 || strings.Contains(logs.String(), "does not close") {
 			t.Errorf("a chain without a count was counted as a mismatch (%v):\n%s", moved, logs.String())
 		}
 		if !strings.Contains(logs.String(), "rows_before=-1") {

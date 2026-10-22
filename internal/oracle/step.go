@@ -199,7 +199,10 @@ func (s *RefreshStep) Apply(ctx context.Context, cut *Cut) error {
 	// The refresh checks its own arithmetic per table and publishes the
 	// table either way (#2505); here, a mismatch fails the run, so the
 	// check itself is exercised by every refresh the harness drives.
-	mismatches := observe.RefreshArithmeticMismatches()
+	mismatches, merr := observe.RefreshArithmeticMismatches()
+	if merr != nil {
+		return &RefreshError{Err: fmt.Errorf("read bintrail_refresh_arithmetic_mismatch_total before the refresh: %w", merr)}
+	}
 	_, failures, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
 		IndexDSN: s.IndexDSN, BaselineSrc: s.Root, Tables: tables, At: cut.At,
 		OutputDir: s.Root, OutputFormat: reconstruct.OutputFormatParquet, TableDeltas: true, Parallelism: 2,
@@ -207,7 +210,11 @@ func (s *RefreshStep) Apply(ctx context.Context, cut *Cut) error {
 	if err != nil {
 		return &RefreshError{Failures: failures, Err: err}
 	}
-	if moved := observe.RefreshArithmeticMismatches() - mismatches; moved != 0 {
+	after, merr := observe.RefreshArithmeticMismatches()
+	if merr != nil {
+		return &RefreshError{Err: fmt.Errorf("read bintrail_refresh_arithmetic_mismatch_total after the refresh: %w", merr)}
+	}
+	if moved := after - mismatches; moved != 0 {
 		return &RefreshError{Err: fmt.Errorf("the refresh's arithmetic did not close on %v table(s) (bintrail_refresh_arithmetic_mismatch_total moved); the refresh's error line says which", moved)}
 	}
 	return nil
