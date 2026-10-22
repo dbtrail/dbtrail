@@ -125,7 +125,7 @@ func deltaWindow(t *testing.T, root, prevBase string, prevDirTime time.Time, cha
 	if mutate != nil {
 		mutate(&p)
 	}
-	rep = &TableReport{Schema: "mydb", Table: "orders"}
+	rep = newTableReport("mydb", "orders")
 	err = publishWithTableDelta(context.Background(), p, rep)
 	return filepath.Join(snapDir, "mydb", "orders.parquet"), rep, err
 }

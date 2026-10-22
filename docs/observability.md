@@ -296,6 +296,12 @@ closes against the events and against the chain's running count.
 Alert on any increase: `increase(bintrail_refresh_arithmetic_mismatch_total[1h]) > 0`.
 A mismatch says the copy may hold a wrong row count for that table; check it
 against the source (`bintrail verify`) and report it with the error line.
+One miscount can move the counter twice: a delta whose check failed still
+carries its running count forward, so the rewrite that later compacts the
+chain compares a state read in full against that count and reports the
+same miscount again ("the chain's count said N"). Two increases on one
+table, a delta's and then a rewrite's, are one bug, not two; the error
+lines say which was which (`published_as`).
 
 ## SQL on the copy (`bintrail_sql_statement_phase_seconds`)
 

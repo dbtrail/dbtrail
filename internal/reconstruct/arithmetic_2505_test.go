@@ -256,3 +256,64 @@ func TestRefreshArithmetic_chainWithoutACount(t *testing.T) {
 		}
 	})
 }
+
+// #2505 (review): a table the window did not touch is carried forward with
+// nothing to check, and its report must say so: the counts unknown (-1),
+// not zero, and the check not run.
+func TestRefreshArithmetic_carriedForwardTableIsNotCounted(t *testing.T) {
+	noCompaction(t)
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	root := t.TempDir()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	first, rep, err := deltaWindow(t, root, src, t0, changeMap(ins(9, "nine")), t0.Add(5*time.Minute), &query.BinlogPos{File: "b.1", Pos: 10}, nil)
+	if err != nil || !rep.ArithmeticChecked || rep.RowsAfter != 4 {
+		t.Fatalf("first window: %v checked=%v rows after %d", err, rep.ArithmeticChecked, rep.RowsAfter)
+	}
+	_, rep, err = deltaWindow(t, root, first, t0.Add(5*time.Minute), changeMap(), t0.Add(10*time.Minute), &query.BinlogPos{File: "b.1", Pos: 20}, nil)
+	if err != nil || rep.DeltaPairWritten {
+		t.Fatalf("empty window: %v, pair written %v", err, rep.DeltaPairWritten)
+	}
+	if rep.ArithmeticChecked || rep.RowsBefore != -1 || rep.RowsAfter != -1 || rep.WindowInserts != 0 || len(rep.ArithmeticProblems) != 0 {
+		t.Errorf("carried-forward report: checked=%v rows %d/%d inserts %d problems %q; want unchecked, -1/-1", rep.ArithmeticChecked, rep.RowsBefore, rep.RowsAfter, rep.WindowInserts, rep.ArithmeticProblems)
+	}
+	if r := newTableReport("s", "t"); r.RowsBefore != -1 || r.RowsAfter != -1 || r.ArithmeticChecked {
+		t.Errorf("a fresh report starts at %+v, want unknown counts", r)
+	}
+}
+
+// #2505 (review): the rewrite that compacts a chain reads "rows before" the
+// way the pair that extends it does: a chain that is only the empty
+// sequence-0 pair without a count still has the base's count, so the state
+// the merge read is checked against it.
+func TestRefreshArithmetic_rewriteReadsTheChainsCountLikeThePair(t *testing.T) {
+	noCompaction(t)
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	root := t.TempDir()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	first, rep, err := deltaWindow(t, root, src, t0, changeMap(), t0.Add(5*time.Minute), &query.BinlogPos{File: "b.1", Pos: 10}, nil)
+	if err != nil || !rep.DeltaPairWritten || rep.DeltaSeq != 0 {
+		t.Fatalf("empty first window: %v, written %v seq %d", err, rep.DeltaPairWritten, rep.DeltaSeq)
+	}
+	// A day later the chain is rewritten; the previous pair carries no count.
+	at := t0.Add(25 * time.Hour)
+	logs := captureLogs(t)
+	_, rep, err = deltaWindow(t, root, first, t0.Add(5*time.Minute), changeMap(ins(9, "nine"), del(1)), at, &query.BinlogPos{File: "b.1", Pos: 20},
+		func(p *tableDeltaPublish) { p.prev.Meta.DeltaRows = -1 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.TableDelta || rep.DeltaCompacted == "" {
+		t.Fatalf("want a rewrite, got delta=%v compacted=%q", rep.TableDelta, rep.DeltaCompacted)
+	}
+	if !rep.ArithmeticChecked || rep.RowsBefore != 3 || rep.RowsAfter != 3 || len(rep.ArithmeticProblems) != 0 {
+		t.Errorf("rewrite report: checked=%v rows %d/%d problems %q; want 3/3 from the base's count and none", rep.ArithmeticChecked, rep.RowsBefore, rep.RowsAfter, rep.ArithmeticProblems)
+	}
+	// rows_before is what the merge read; chain_rows is what the chain
+	// carried in, the base's count through the exception, and the two met.
+	if !strings.Contains(logs.String(), "published_as=rewrite") || !strings.Contains(logs.String(), "rows_before=3") ||
+		!strings.Contains(logs.String(), "chain_rows=3") {
+		t.Errorf("the rewrite's debug line:\n%s", logs.String())
+	}
+}

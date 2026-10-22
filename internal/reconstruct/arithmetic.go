@@ -155,6 +155,7 @@ func (a refreshArithmetic) report(rep *TableReport) {
 	rep.WindowInserts, rep.WindowDeletes = a.Inserts, a.Deletes
 	rep.RowsBefore, rep.RowsAfter = a.rowsBefore(), a.rowsAfter()
 	rep.ArithmeticProblems = problems
+	rep.ArithmeticChecked = a.Unchecked == ""
 	how := "pair"
 	if a.Rewrite {
 		how = "rewrite"
@@ -166,7 +167,9 @@ func (a refreshArithmetic) report(rep *TableReport) {
 	if a.Pair {
 		attrs = append(attrs, "seq", a.Seq, "keys", a.Keys, "alive_rows", a.Upserts, "dead_rows", a.Dead)
 	} else {
-		attrs = append(attrs, "baseline_rows", a.BaselineRows, "updates_applied", a.UpdatesApplied,
+		// chain_rows is the count the chain carried into this rewrite (-1
+		// for none), beside rows_before, the rows the merge read.
+		attrs = append(attrs, "chain_rows", a.RowsBefore, "baseline_rows", a.BaselineRows, "updates_applied", a.UpdatesApplied,
 			"deletes_skipped", a.DeletesSkipped, "inserts_emitted", a.InsertsEmitted, "rows_written", a.RowsWritten)
 	}
 	if a.Unchecked != "" {

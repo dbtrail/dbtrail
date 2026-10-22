@@ -1317,11 +1317,21 @@ func rowsBeforeWindow(p tableDeltaPublish, seq int) int64 {
 	if seq == 0 || p.prev == nil {
 		return baseRows()
 	}
-	if p.prev.Meta.DeltaRows >= 0 {
-		return p.prev.Meta.DeltaRows
+	return rowsBeforeChain(p.prev, baseRows)
+}
+
+// rowsBeforeChain is the resolved rows a chain's state holds, as its last
+// pair's count says, -1 when the pair carries none (#2505), with one
+// exception: a chain that is only the empty sequence-0 pair applies
+// nothing, so the base's count (baseRows, read on demand) still stands.
+// Used by the pair that extends the chain and by the rewrite that compacts
+// it, so the two cannot disagree on what "before" was.
+func rowsBeforeChain(prev *tableDelta, baseRows func() int64) int64 {
+	if prev.Meta.DeltaRows >= 0 {
+		return prev.Meta.DeltaRows
 	}
-	if p.prev.Meta.DeltaSeq == 0 && p.prev.Chain != nil && len(p.prev.Chain.Files) == 1 {
-		if n, err := baseline.TableFileRows(p.prev.Chain.Files[0].Upserts); err == nil && n == 0 {
+	if prev.Meta.DeltaSeq == 0 && prev.Chain != nil && len(prev.Chain.Files) == 1 {
+		if n, err := baseline.TableFileRows(prev.Chain.Files[0].Upserts); err == nil && n == 0 {
 			return baseRows()
 		}
 	}
@@ -1400,7 +1410,18 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 		InsertsEmitted: rep.InsertsEmitted, RowsWritten: rep.RowsWritten,
 	}
 	if p.prev != nil {
-		arith.RowsBefore = p.prev.Meta.DeltaRows
+		// A base on S3 is read whole by the merge; its footer is not opened
+		// here for a count the merge's own read supplies.
+		arith.RowsBefore = rowsBeforeChain(p.prev, func() int64 {
+			if strings.HasPrefix(p.basePath, "s3://") {
+				return -1
+			}
+			n, err := baseline.TableFileRows(p.basePath)
+			if err != nil {
+				return -1
+			}
+			return n
+		})
 	}
 	if p.capGap != nil {
 		arith.Unchecked = "the window crosses a known capture gap"
