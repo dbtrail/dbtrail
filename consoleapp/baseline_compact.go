@@ -329,7 +329,7 @@ func (s *baselineSupervisor) compactOne(req refreshRequest, root string, c compa
 	if err := newDiskSpaceCheck()(root, need); err != nil {
 		return err
 	}
-	mc, err := compactMinor(laneCtx(s.ctx, laneSnapshot), c.base, c.chain, lo, hi, dir)
+	mc, err := compactMinor(soloLaneCtx(s.ctx, laneSnapshot), c.base, c.chain, lo, hi, dir)
 	if err != nil {
 		os.RemoveAll(dir)
 		return err

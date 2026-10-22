@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **The daemon's background DuckDB work takes no more than half the cores** (#2491). A refresh folds two tables at once, each with two DuckDB threads, and the resolved pairs and the minor compaction that follow it ran with two as well: on a 4-core host that was every core for the 20-30 s a refresh takes, five times an hour, shared with any statement on the MySQL port or the SQL card. The lane's threads are now sized from the cores the process may use, as its memory already was from the host's (#2385): a job that runs several sessions at once (the fold, an Explain) gets half the cores shared between them, a job of one session at a time (resolved pairs, a minor compaction, a check table) gets the half. On 4 cores the fold runs 2 × 1 thread and the resolved pairs 1 × 2; hosts with 8 cores or more keep exactly the numbers they had. Answers on the port stay as fresh as before: their recent changes do not wait for the refresh.
 
 ## [0.112.0] - 2026-10-21
 ### Changed

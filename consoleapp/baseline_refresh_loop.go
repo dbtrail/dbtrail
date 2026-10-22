@@ -1425,8 +1425,11 @@ func applyFoldStatus(st *console.BaselineStatus, tables, refused int, reuse reus
 // the number of tables that refused.
 //
 // RESOURCE POSTURE — read before changing. Every DuckDB budget here is left at
-// its zero value on purpose, which resolves to duckdbutil.DefaultTuning (2
-// threads / 4 GB) and the container-safe archive fetcher. This is a long-lived
+// its zero value on purpose, which resolves to the snapshot lane's budget
+// (heavybudget.go: memory from the host's, threads from its cores so the
+// fold's tables never add up to more than half of them, #2385/#2491) or,
+// where the host's memory is unknown, duckdbutil.DefaultTuning (2 threads /
+// 4 GB), and the container-safe archive fetcher. This is a long-lived
 // daemon that is also streaming replication and serving a console; --ultrafast
 // exists for offline commands that own the machine (#510), and letting a
 // background refresh self-tune to ~80% of host RAM would starve the capture path
