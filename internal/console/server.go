@@ -595,6 +595,11 @@ type Server struct {
 	// route built before it generates the views: what the worker will be
 	// handed is otherwise only visible as rendered SQL text.
 	sqlViewsObserver func(views.Input)
+	// sqlViewsForHook, when set (tests only), runs at the start of a
+	// statement's ViewsFor callback, inside the worker's run: a hook that
+	// sleeps is time the views_for and wall phases must see and view_build
+	// must not (#2504).
+	sqlViewsForHook func()
 	// archiveFetcher reads one archive source for the browsing endpoints —
 	// parquetquery.Fetch in production, injectable so a test can pin the
 	// seam a mock DB cannot see: sqlmock never reports a SURPLUS query, so

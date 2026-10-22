@@ -1366,11 +1366,20 @@ on which server, the statement, and how many rows came back. The response's
 `phases_ms` field, the daemon's log at debug level, and the
 `bintrail_sql_statement_phase_seconds` histogram under `watch --metrics-addr`
 ([Observability](observability.md)) say where the time went: `slot_wait`
-(the wait for a free slot), `view_build` (the console's own discovery), `spawn` (the worker's whole lifetime, which
+(the wait for a free slot), `view_build` (the console's own discovery, which
+stops before the worker starts), `views_for` (the console's callback inside
+the worker's run, once the worker knows what the statement names: the
+tables' recent changes, the checks on those names, and the views script),
+`tails` (the part of `views_for` that reads the tables' recent changes, or
+brings them up to date when none are published for the snapshot the
+statement reads), `spawn` (the worker's whole lifetime, which
 contains `open`, `lockdown`, `views` and `query`; what is left of it is
-process start, result encoding and exit), `decode` and `total`. `views` is
+process start, result encoding and exit), `decode`, `total` (the worker's
+run) and `wall` (the whole statement, from the console accepting it to the
+result being handed to the port or the response). `views` is
 installing the views the query names, including the console writing them
-while the worker waits.
+while the worker waits, so it contains `views_for`. `wall − total −
+slot_wait − view_build` is time no phase accounts for.
 
 Who sees it: a session that holds the `sql:execute` permission. With no access
 policy (the built-in password login and the static token) every session holds

@@ -1547,7 +1547,7 @@ func TestSQL_phasesReachTheHistogram(t *testing.T) {
 			Spawn: want["spawn"], Decode: want["decode"], Total: want["total"]},
 	}}
 	f := newSQLFixture(t, runner, false)
-	phases := []string{"slot_wait", "view_build", "spawn", "open", "lockdown", "views", "query", "decode", "total"}
+	phases := []string{"slot_wait", "view_build", "views_for", "tails", "spawn", "open", "lockdown", "views", "query", "decode", "total", "wall"}
 
 	before, sumBefore := sqlPhaseHistograms(t)
 	rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`)
@@ -1567,7 +1567,7 @@ func TestSQL_phasesReachTheHistogram(t *testing.T) {
 		}
 		d, ok := want[p]
 		if !ok {
-			continue // view_build is the daemon's own clock
+			continue // slot_wait, view_build, views_for, tails and wall are the daemon's own clocks
 		}
 		if got := sumAfter[p] - sumBefore[p]; math.Abs(got-d.Seconds()) > 1e-9 {
 			t.Errorf("phase %q: histogram got %v s, want %v s", p, got, d.Seconds())

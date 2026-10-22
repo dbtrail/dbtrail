@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **SQL on the copy: a statement's phases now cover the whole statement** (#2504). The phases a statement reports (`phases_ms` in the `POST /api/sql` response, the `console: sql statement phases` debug line and the `bintrail_sql_statement_phase_seconds` histogram) were measured from the inside: `view_build` stopped before the worker started, and the step that reads the tables' recent changes ran after it, inside the worker's run, in no phase at all. Against a client's clock, on a 4-core host under a TPC-C source with recent changes on, statements spent 0.8 to 1.7 s (median) that no phase accounted for, and the log showed a `total` smaller than what the client waited. Three phases join the set: `wall`, the statement as the daemon saw it, from accepting it (before it asks for a slot) to handing the result to the port or the response, so that `wall − total − slot_wait − view_build` is the unaccounted time on every line; `views_for`, the daemon's whole callback inside the worker's run (the recent changes, the checks on what the statement names, the views script); and `tails`, the part of `views_for` that reads the tables' recent changes, or brings them up to date when none are published yet. `total` keeps its meaning (the worker's run). Nothing a statement does changes; what the new phases show decides the next change.
 
 ## [0.113.0] - 2026-10-22
 ### Added
