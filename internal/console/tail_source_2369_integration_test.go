@@ -64,9 +64,11 @@ func merged(t *testing.T, tbl views.BaselineTable, v tailView) []string {
 	}
 	defer db.Close()
 	q := "SELECT * FROM read_parquet('" + tbl.Path + "')"
-	if v.Path != "" {
-		q = baseline.TableTailStateSQL(q, "'"+v.Path+"'", v.PK, "")
+	segs := make([]string, len(v.Paths))
+	for i, p := range v.Paths {
+		segs[i] = "'" + p + "'"
 	}
+	q = baseline.TableTailChainStateSQL(q, segs, v.PK, "")
 	rs, err := db.Query("SELECT CAST(id AS VARCHAR) || '=' || status FROM (" + q + ") ORDER BY id")
 	if err != nil {
 		t.Fatal(err)

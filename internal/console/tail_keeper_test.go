@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -243,14 +244,19 @@ func (f *fakeIndex) add(table, key string) {
 func (f *fakeIndex) at(id uint64) time.Time { return f.events[id-1].EventTimestamp }
 
 // fakeTail keeps the last event of each key it was given and writes the
-// keys, one per line.
+// keys, one per line: all of them, or those changed since the last file
+// (reconstruct.Tail's rules: a prune makes the next file whole).
 type fakeTail struct {
 	keys     map[string]query.ResultRow
+	dirty    map[string]bool
+	needFull bool
 	rowBytes int64 // what Bytes counts per key; 0 counts 1
 	applyErr error
 	writeErr *error
 	pruneErr error
 	prunes   int
+	// writes are the rows of each file written, in order.
+	writes []int
 }
 
 func (t *fakeTail) Apply(page []query.ResultRow) error {
@@ -260,8 +266,12 @@ func (t *fakeTail) Apply(page []query.ResultRow) error {
 	if t.keys == nil {
 		t.keys = map[string]query.ResultRow{}
 	}
+	if t.dirty == nil {
+		t.dirty = map[string]bool{}
+	}
 	for _, ev := range page {
 		t.keys[ev.PKValues] = ev
+		t.dirty[ev.PKValues] = true
 	}
 	return nil
 }
@@ -276,26 +286,50 @@ func (t *fakeTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, er
 	for k, ev := range t.keys {
 		if !anchor.AtOrBefore(query.BinlogPos{File: ev.BinlogFile, Pos: ev.StartPos}) || afterID != 0 && ev.EventID <= afterID {
 			delete(t.keys, k)
+			delete(t.dirty, k)
 			n++
 		}
 	}
+	t.needFull = true
 	return n, nil
 }
 func (t *fakeTail) Keys() int           { return len(t.keys) }
 func (t *fakeTail) Bytes() int64        { return int64(len(t.keys)) * max(1, t.rowBytes) }
 func (t *fakeTail) PKColumns() []string { return []string{"id"} }
 func (t *fakeTail) WriteFile(path string) (int64, error) {
+	var keys []string
+	for k := range t.keys {
+		keys = append(keys, k)
+	}
+	n, err := t.write(path, keys)
+	if err == nil {
+		t.needFull = false
+	}
+	return n, err
+}
+func (t *fakeTail) WriteDelta(path string) (int64, error) {
+	if t.needFull {
+		return 0, errors.New("a delta after a prune")
+	}
+	var keys []string
+	for k := range t.dirty {
+		keys = append(keys, k)
+	}
+	return t.write(path, keys)
+}
+func (t *fakeTail) write(path string, keys []string) (int64, error) {
 	if t.writeErr != nil && *t.writeErr != nil {
 		return 0, *t.writeErr
 	}
 	if _, err := os.Lstat(path); err == nil {
 		return 0, errors.New("exists")
 	}
-	var keys []string
-	for k := range t.keys {
-		keys = append(keys, k)
+	if err := os.WriteFile(path, []byte(strings.Join(keys, "\n")), 0o600); err != nil {
+		return 0, err
 	}
-	return int64(len(keys)), os.WriteFile(path, []byte(strings.Join(keys, "\n")), 0o600)
+	t.writes = append(t.writes, len(keys))
+	clear(t.dirty)
+	return int64(len(keys)), nil
 }
 
 func keeperTable(name string) views.BaselineTable {
@@ -325,19 +359,46 @@ func settled(t *testing.T, ctx context.Context, k *tailKeeper, tables ...views.B
 	return got
 }
 
-func fileKeys(t *testing.T, path string) int {
+// fileKeys is how many keys a chain of the fake's files holds: every key any
+// of them carries, once.
+func fileKeys(t *testing.T, paths []string) int {
 	t.Helper()
-	if path == "" {
-		return 0
+	keys := map[string]bool{}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) == 0 {
+			continue
+		}
+		for _, k := range strings.Split(string(b), "\n") {
+			keys[k] = true
+		}
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	return len(keys)
+}
+
+// chain names a version of a tail: its files, in order ("" for none).
+func chain(v tailView) string { return strings.Join(v.Paths, "\n") }
+
+// statChain checks every file of v: nil when each exists (wantGone false), or
+// when none does (wantGone true); else the first that is not so.
+func statChain(t *testing.T, v tailView, wantGone bool) error {
+	t.Helper()
+	if len(v.Paths) == 0 {
+		t.Fatal("a version with no file")
 	}
-	if len(b) == 0 {
-		return 0
+	for _, p := range v.Paths {
+		_, err := os.Stat(p)
+		if wantGone && !os.IsNotExist(err) {
+			return fmt.Errorf("%s: %v", p, err)
+		}
+		if !wantGone && err != nil {
+			return err
+		}
 	}
-	return len(strings.Split(string(b), "\n"))
+	return nil
 }
 
 func TestTailKeeper(t *testing.T) {
@@ -372,7 +433,7 @@ func TestTailKeeper(t *testing.T) {
 		if e := k.tables[ko]; e != nil && e.refused != "" {
 			t.Fatalf("a failed read is remembered as a refusal (%q): it would stand until the copy's next snapshot", e.refused)
 		}
-		if v, ok := refresh(t, k, orders)[ko]; !ok || fileKeys(t, v.Path) != 1 {
+		if v, ok := refresh(t, k, orders)[ko]; !ok || fileKeys(t, v.Paths) != 1 {
 			t.Fatalf("the next statement has no tail: %+v (present %v)", v, ok)
 		}
 	})
@@ -383,7 +444,7 @@ func TestTailKeeper(t *testing.T) {
 		f.add("orders", "2")
 		f.add("customers", "9")
 		v := refresh(t, newKeeper(f), orders)[ko]
-		if fileKeys(t, v.Path) != 1 || !v.Through.Equal(f.at(3)) || v.PK[0] != "id" {
+		if fileKeys(t, v.Paths) != 1 || !v.Through.Equal(f.at(3)) || v.PK[0] != "id" {
 			t.Fatalf("%+v", v)
 		}
 	})
@@ -396,20 +457,20 @@ func TestTailKeeper(t *testing.T) {
 		f.add("orders", "2")
 		f.add("customers", "5")
 		second := refresh(t, k, orders)
-		if second[ko].Path == first[ko].Path || fileKeys(t, second[ko].Path) != 2 || !second[ko].Through.Equal(f.at(3)) {
+		if chain(second[ko]) == chain(first[ko]) || fileKeys(t, second[ko].Paths) != 2 || !second[ko].Through.Equal(f.at(3)) {
 			t.Fatalf("first %+v second %+v", first[ko], second[ko])
 		}
 		if strings.Join(f.sinceTables, ",") != "orders" {
 			t.Errorf("read the events of %v, want only the tails' tables", f.sinceTables)
 		}
-		if _, err := os.Stat(first[ko].Path); err != nil {
+		if err := statChain(t, first[ko], false); err != nil {
 			t.Errorf("the replaced version is gone at once: %v", err)
 		}
 		if f.fills != 1 {
 			t.Errorf("filled %d times, want once: later reads go by the cursor", f.fills)
 		}
 		third := refresh(t, k, orders)
-		if third[ko].Path != second[ko].Path || !third[ko].Through.Equal(second[ko].Through) {
+		if chain(third[ko]) != chain(second[ko]) || !third[ko].Through.Equal(second[ko].Through) {
 			t.Errorf("nothing new changed the view: %+v -> %+v", second[ko], third[ko])
 		}
 	})
@@ -445,7 +506,7 @@ func TestTailKeeper(t *testing.T) {
 		f.add("orders", "2")
 		f.events[1].EventTimestamp = f.events[0].EventTimestamp.Add(-time.Hour)
 		got := refresh(t, k, orders)
-		if fileKeys(t, got[ko].Path) != 2 || got[ko].Through.Before(before[ko].Through) {
+		if fileKeys(t, got[ko].Paths) != 2 || got[ko].Through.Before(before[ko].Through) {
 			t.Fatalf("%+v -> %+v", before[ko], got[ko])
 		}
 	})
@@ -465,7 +526,7 @@ func TestTailKeeper(t *testing.T) {
 	t.Run("an unchanged table has no file and the cursor's instant", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("customers", "1")
-		if v, ok := refresh(t, newKeeper(f), orders)[ko]; !ok || v.Path != "" || !v.Through.Equal(f.at(1)) {
+		if v, ok := refresh(t, newKeeper(f), orders)[ko]; !ok || chain(v) != "" || !v.Through.Equal(f.at(1)) {
 			t.Fatalf("%+v %v", v, ok)
 		}
 	})
@@ -478,7 +539,7 @@ func TestTailKeeper(t *testing.T) {
 		before := refresh(t, k, orders)
 		f.cuts[ko] = 1
 		after := refresh(t, k, newerCut(orders))
-		if fileKeys(t, before[ko].Path) != 2 || fileKeys(t, after[ko].Path) != 1 {
+		if fileKeys(t, before[ko].Paths) != 2 || fileKeys(t, after[ko].Paths) != 1 {
 			t.Fatalf("before %+v after %+v", before[ko], after[ko])
 		}
 	})
@@ -491,10 +552,10 @@ func TestTailKeeper(t *testing.T) {
 		f.cuts[ko] = 1                                                     // the cut moves forward, to the cursor
 		k.tables[ko].tail.(*fakeTail).pruneErr = errors.New("no position") // but cannot be pruned to: a build
 		f.fillErr[ko] = errors.New("timeout")
-		if got := refresh(t, k, newerCut(orders)); got[ko].Path != before[ko].Path {
+		if got := refresh(t, k, newerCut(orders)); chain(got[ko]) != chain(before[ko]) {
 			t.Fatalf("the tail it had was dropped: %+v", got[ko])
 		}
-		if got := refresh(t, k, newerCut(orders)); got[ko].Path == before[ko].Path {
+		if got := refresh(t, k, newerCut(orders)); chain(got[ko]) == chain(before[ko]) {
 			t.Error("the rebuild was not retried")
 		}
 	})
@@ -516,7 +577,7 @@ func TestTailKeeper(t *testing.T) {
 		if f.sinceFrom != 3 {
 			t.Errorf("the next read started after event %d, want 3: the folded page was read again", f.sinceFrom)
 		}
-		if fileKeys(t, got[ko].Path) != 2 || !got[ko].Through.Equal(f.at(6)) {
+		if fileKeys(t, got[ko].Paths) != 2 || !got[ko].Through.Equal(f.at(6)) {
 			t.Errorf("%+v", got[ko])
 		}
 	})
@@ -563,12 +624,12 @@ func TestTailKeeper(t *testing.T) {
 		f.cuts[ko] = 1
 		k.tables[ko].tail.(*fakeTail).pruneErr = errors.New("no position")
 		f.fillWait = map[string]bool{ko: true}
-		if got, err := k.refresh(ctx, []views.BaselineTable{newerCut(orders)}); err != nil || got[ko].Path != before[ko].Path {
+		if got, err := k.refresh(ctx, []views.BaselineTable{newerCut(orders)}); err != nil || chain(got[ko]) != chain(before[ko]) {
 			t.Fatalf("the tail it had was dropped: %+v %v", got[ko], err)
 		}
 		k.settle()
 		fills := f.fills
-		if got := refresh(t, k, newerCut(orders)); got[ko].Path != before[ko].Path || f.fills != fills {
+		if got := refresh(t, k, newerCut(orders)); chain(got[ko]) != chain(before[ko]) || f.fills != fills {
 			t.Errorf("rebuilt again at every statement: %+v, %d fills", got[ko], f.fills-fills)
 		}
 	})
@@ -592,7 +653,7 @@ func TestTailKeeper(t *testing.T) {
 		f.add("orders", "1")
 		k := newKeeper(f)
 		before := refresh(t, k, orders)
-		if before[ko].Path == "" {
+		if chain(before[ko]) == "" {
 			t.Fatal("no version written")
 		}
 		f.add("orders", "2")
@@ -602,7 +663,7 @@ func TestTailKeeper(t *testing.T) {
 			t.Fatalf("a version of the older cut over the newer one: %+v", got[ko])
 		}
 		f.writeErr = nil
-		if got := refresh(t, k, newerCut(orders)); got[ko].Path == "" {
+		if got := refresh(t, k, newerCut(orders)); chain(got[ko]) == "" {
 			t.Error("no version once it could be written")
 		}
 	})
@@ -650,7 +711,7 @@ func TestTailKeeper(t *testing.T) {
 		}
 		clock = clock.Add(2 * time.Minute)
 		refresh(t, k, orders)
-		if _, err := os.Stat(before[ko].Path); !os.IsNotExist(err) {
+		if err := statChain(t, before[ko], true); err != nil {
 			t.Errorf("its file stays: %v", err)
 		}
 	})
@@ -676,13 +737,13 @@ func TestTailKeeper(t *testing.T) {
 			f.add("orders", key)
 		}
 		got := refresh(t, k, orders)
-		if got[ko].Path != before[ko].Path || !got[ko].Through.Equal(before[ko].Through) {
+		if chain(got[ko]) != chain(before[ko]) || !got[ko].Through.Equal(before[ko].Through) {
 			t.Fatalf("a frozen tail moved: %+v -> %+v", before[ko], got[ko])
 		}
 		held := k.tables[ko].tail.Keys()
 		f.add("orders", "5")
 		f.sinceTables = nil
-		if got := refresh(t, k, orders); got[ko].Path != before[ko].Path {
+		if got := refresh(t, k, orders); chain(got[ko]) != chain(before[ko]) {
 			t.Fatalf("a frozen tail advanced: %+v", got[ko])
 		}
 		if n := k.tables[ko].tail.Keys(); n != held {
@@ -729,7 +790,7 @@ func TestTailKeeper(t *testing.T) {
 		// Rebuilt: its ids start again, while the source's binary log went on.
 		f.events = f.events[:1]
 		f.events[0].StartPos = 900
-		if got := refresh(t, k, orders); fileKeys(t, got[ko].Path) != 1 || !got[ko].Through.Equal(f.at(1)) || f.fills != 2 {
+		if got := refresh(t, k, orders); fileKeys(t, got[ko].Paths) != 1 || !got[ko].Through.Equal(f.at(1)) || f.fills != 2 {
 			t.Fatalf("%+v (filled %d times)", got[ko], f.fills)
 		}
 	})
@@ -771,8 +832,8 @@ func TestTailKeeper(t *testing.T) {
 			f.events[i].StartPos += 1000
 		}
 		got := refresh(t, k, orders)
-		if f.fills != 2 || fileKeys(t, got[ko].Path) != 3 {
-			t.Fatalf("filled %d times, %d keys: the new events were skipped", f.fills, fileKeys(t, got[ko].Path))
+		if f.fills != 2 || fileKeys(t, got[ko].Paths) != 3 {
+			t.Fatalf("filled %d times, %d keys: the new events were skipped", f.fills, fileKeys(t, got[ko].Paths))
 		}
 	})
 
@@ -855,7 +916,7 @@ func TestTailKeeper(t *testing.T) {
 			t.Fatal("a schema_changes read that failed gave tails")
 		}
 		f.changedErr = nil
-		if got := refresh(t, k, orders); fileKeys(t, got[ko].Path) != 2 {
+		if got := refresh(t, k, orders); fileKeys(t, got[ko].Paths) != 2 {
 			t.Errorf("not caught up after the index came back: %+v", got[ko])
 		}
 	})
@@ -868,11 +929,11 @@ func TestTailKeeper(t *testing.T) {
 		f.add("orders", "2")
 		f.writeErr = errors.New("disk full")
 		got := refresh(t, k, orders)
-		if got[ko].Path != before[ko].Path || !got[ko].Through.Equal(before[ko].Through) {
+		if chain(got[ko]) != chain(before[ko]) || !got[ko].Through.Equal(before[ko].Through) {
 			t.Fatalf("a failed write moved the view: %+v -> %+v", before[ko], got[ko])
 		}
 		f.writeErr = nil
-		if got := refresh(t, k, orders); fileKeys(t, got[ko].Path) != 2 || !got[ko].Through.Equal(f.at(2)) {
+		if got := refresh(t, k, orders); fileKeys(t, got[ko].Paths) != 2 || !got[ko].Through.Equal(f.at(2)) {
 			t.Fatalf("not retried: %+v", got[ko])
 		}
 		f.add("orders", "3")
@@ -895,7 +956,7 @@ func TestTailKeeper(t *testing.T) {
 		}
 		clock = clock.Add(2 * time.Minute)
 		refresh(t, k, customers)
-		if _, err := os.Stat(first[ko].Path); !os.IsNotExist(err) {
+		if err := statChain(t, first[ko], true); err != nil {
 			t.Errorf("its file stays: %v", err)
 		}
 	})
@@ -907,12 +968,22 @@ func TestTailKeeper(t *testing.T) {
 		first := refresh(t, k, orders)
 		f.add("orders", "2")
 		second := refresh(t, k, orders)
+		// A version goes on from the one before (#2495): the first file is
+		// still the chain's.
+		if len(second[ko].Paths) != 2 || second[ko].Paths[0] != first[ko].Paths[0] {
+			t.Fatalf("second version %v over first %v", second[ko].Paths, first[ko].Paths)
+		}
+		// A prune starts a new chain: every file of the old one is replaced.
+		third := refresh(t, k, newerCut(orders))
+		if len(third[ko].Paths) != 1 || slices.Contains(second[ko].Paths, third[ko].Paths[0]) {
+			t.Fatalf("after a prune %v, over %v", third[ko].Paths, second[ko].Paths)
+		}
 		clock = clock.Add(2 * time.Minute)
-		refresh(t, k, orders)
-		if _, err := os.Stat(first[ko].Path); !os.IsNotExist(err) {
+		refresh(t, k, newerCut(orders))
+		if err := statChain(t, second[ko], true); err != nil {
 			t.Errorf("an old version outlived its time: %v", err)
 		}
-		if _, err := os.Stat(second[ko].Path); err != nil {
+		if err := statChain(t, third[ko], false); err != nil {
 			t.Errorf("the current version was removed: %v", err)
 		}
 		if names, _ := filepath.Glob(filepath.Join(k.dir, "*")); len(names) != 1 {
@@ -994,7 +1065,7 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		}
 		k := newKeeper(f)
 		before := refresh(t, k, orders)[ko]
-		if fileKeys(t, before.Path) != 4 || f.fills != 1 {
+		if fileKeys(t, before.Paths) != 4 || f.fills != 1 {
 			t.Fatalf("setup: %+v, %d fills", before, f.fills)
 		}
 		f.add("customers", "9")
@@ -1016,13 +1087,13 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		if f.fills != 1 {
 			t.Errorf("filled %d times: the newer cut was read from the index", f.fills)
 		}
-		if keys(k) != "3,4" || fileKeys(t, got.Path) != 2 {
-			t.Errorf("kept %s, file holds %d keys, want 3,4", keys(k), fileKeys(t, got.Path))
+		if keys(k) != "3,4" || fileKeys(t, got.Paths) != 2 {
+			t.Errorf("kept %s, file holds %d keys, want 3,4", keys(k), fileKeys(t, got.Paths))
 		}
-		if got.Path == before.Path || !got.Through.Equal(f.at(5)) {
+		if chain(got) == chain(before) || !got.Through.Equal(f.at(5)) {
 			t.Errorf("before %+v after %+v", before, got)
 		}
-		if _, err := os.Stat(before.Path); err != nil {
+		if err := statChain(t, before, false); err != nil {
 			t.Errorf("the version a running statement may read is gone: %v", err)
 		}
 		if e := k.tables[ko]; e.cut != tailCutOf(newerCut(orders)) || e.fileCut != e.cut || e.from == nil || e.from.lastEventID != 2 {
@@ -1030,7 +1101,7 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		}
 		// And it goes on advancing over it.
 		f.add("orders", "1")
-		if got := refresh(t, k, newerCut(orders))[ko]; keys(k) != "1,3,4" || fileKeys(t, got.Path) != 3 || f.fills != 1 {
+		if got := refresh(t, k, newerCut(orders))[ko]; keys(k) != "1,3,4" || fileKeys(t, got.Paths) != 3 || f.fills != 1 {
 			t.Errorf("after the prune: kept %s, %d fills", keys(k), f.fills)
 		}
 	})
@@ -1054,7 +1125,7 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		f.fillGate = map[string]chan struct{}{ko: make(chan struct{})} // a build would hang
 		got, err := k.refresh(ctx, []views.BaselineTable{newerCut(orders)})
 		k.settle()
-		if err != nil || fileKeys(t, got[ko].Path) != 2 || f.fills != 1 || len(k.builds) != 0 {
+		if err != nil || fileKeys(t, got[ko].Paths) != 2 || f.fills != 1 || len(k.builds) != 0 {
 			t.Fatalf("%+v %v, %d fills, builds %v", got[ko], err, f.fills, k.builds)
 		}
 	})
@@ -1063,7 +1134,7 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		f, k, _ := started(t)
 		f.cuts[ko] = 4
 		got, ok := refresh(t, k, newerCut(orders))[ko]
-		if !ok || got.Path != "" || !got.Through.Equal(f.at(5)) || f.fills != 1 {
+		if !ok || chain(got) != "" || !got.Through.Equal(f.at(5)) || f.fills != 1 {
 			t.Fatalf("%+v %v, %d fills", got, ok, f.fills)
 		}
 	})
@@ -1152,7 +1223,7 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 		f.cuts[ko] = 3
 		third := newerCut(orders)
 		third.DeltaFiles = append(third.DeltaFiles, baseline.TableDeltaFile{Upserts: "/snap/3/shop/orders.000001.upserts"})
-		if got := refresh(t, k, third)[ko]; keys(k) != "4" || fileKeys(t, got.Path) != 1 || f.fills != 1 {
+		if got := refresh(t, k, third)[ko]; keys(k) != "4" || fileKeys(t, got.Paths) != 1 || f.fills != 1 {
 			t.Errorf("kept %s, %d fills", keys(k), f.fills)
 		}
 	})
@@ -1192,7 +1263,7 @@ func TestTailKeeper_aCutAheadOfTheCursor(t *testing.T) {
 		refresh(t, k, orders)
 		f.cuts[ko] = 3
 		f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 310}} // the end of event 3
-		if got, ok := refresh(t, k, newerCut(orders))[ko]; !ok || got.Path != "" || f.fills != 1 {
+		if got, ok := refresh(t, k, newerCut(orders))[ko]; !ok || chain(got) != "" || f.fills != 1 {
 			t.Fatalf("%+v %v, %d fills", got, ok, f.fills)
 		}
 	})
@@ -1202,7 +1273,7 @@ func TestTailKeeper_aCutAheadOfTheCursor(t *testing.T) {
 		f.add("orders", "1")
 		f.cutAt = map[string]query.BinlogPos{ko: {File: "binlog.000003", Pos: 301}} // ahead of event 1
 		k := newKeeper(f)
-		if got := refresh(t, k, orders)[ko]; fileKeys(t, got.Path) != 1 {
+		if got := refresh(t, k, orders)[ko]; fileKeys(t, got.Paths) != 1 {
 			t.Fatalf("setup: %+v", got)
 		}
 		f.add("orders", "2") // at 200: in the cut

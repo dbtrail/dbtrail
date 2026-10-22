@@ -46,6 +46,12 @@ const (
 	// tailMaxBuilds is how many builds of one server's tails read its index
 	// at once.
 	tailMaxBuilds = 2
+	// tailMaxSegments bounds the files of a table's tail chain, and
+	// tailMergeRatio the rows they hold against the tail's keys: past either,
+	// the next write is the whole tail (#2495). A statement reads every file
+	// of the chain.
+	tailMaxSegments = 8
+	tailMergeRatio  = 2
 )
 
 // tailKeepers are the keepers of one process, by server id.
@@ -164,8 +170,8 @@ func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read
 	out = make([]views.BaselineTable, len(tables))
 	copy(out, tables)
 	for i := range out {
-		if v, ok := got[tailKey(out[i].Schema, out[i].Table)]; ok && v.Path != "" {
-			out[i].Tail = &views.TableTail{Path: v.Path, PK: v.PK}
+		if v, ok := got[tailKey(out[i].Schema, out[i].Table)]; ok && len(v.Paths) > 0 {
+			out[i].Tail = &views.TableTail{Paths: v.Paths, PK: v.PK}
 		}
 	}
 	return out, through, true

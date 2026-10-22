@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -121,16 +122,19 @@ type tailTable interface {
 	// Bytes is an estimate of the heap the tail holds (#2494).
 	Bytes() int64
 	WriteFile(path string) (int64, error)
+	// WriteDelta writes only the keys changed since the last file (#2495).
+	WriteDelta(path string) (int64, error)
 	PKColumns() []string
 }
 
 var _ tailTable = (*reconstruct.Tail)(nil)
 
-// tailView is what a statement reads of one table's tail: the file to lay
-// over its published state ("" when nothing changed since its cut), its key,
-// and the instant both together are indexed through.
+// tailView is what a statement reads of one table's tail: the files to lay
+// over its published state, a chain read oldest first (none when nothing
+// changed since its cut), its key, and the instant both together are indexed
+// through.
 type tailView struct {
-	Path    string
+	Paths   []string
 	PK      []string
 	Through time.Time
 }
@@ -169,12 +173,20 @@ type tailEntry struct {
 	frozenWhy string
 	dirty     bool
 	used      time.Time
-	// file is the newest version written ("" before the first, or while the
-	// tail holds nothing), through the instant it is indexed through.
-	file    string
+	// segs is the newest version written, a chain of files oldest first: a
+	// whole tail, then the keys changed in each later write (#2495). None
+	// before the first, or while the tail holds nothing. through is the
+	// instant it is indexed through.
+	segs    []string
 	through time.Time
-	// fileCut is the published cut file was written over: a version is
-	// laid only over the copy it was written for.
+	// segRows is how many rows the chain's files hold together: past
+	// tailMergeRatio times the tail's keys, its files are mostly keys a
+	// newer file overrides, and the next write is whole.
+	segRows int64
+	// fileCut is the published cut the chain's first file was written over:
+	// a version is laid only over the copy it was written for, and a chain
+	// goes on only over that copy (a prune drops keys an older file still
+	// carries, reconstruct.Tail.WriteDelta).
 	fileCut string
 	// old are the earlier versions, kept while a statement may still read
 	// them.
@@ -241,6 +253,9 @@ type tailKeeper struct {
 	through time.Time
 	tables  map[string]*tailEntry
 	written int
+	// rowsWritten counts the rows of every file written, for the debug log:
+	// what a cycle cost.
+	rowsWritten int64
 	// orphans are the files of tails replaced or forgotten, kept like old
 	// versions.
 	orphans []tailOldFile
@@ -324,7 +339,7 @@ func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables 
 }
 
 func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineTable) (map[string]tailView, error) {
-	start, from, written := k.now(), k.mark.ID, k.written
+	start, from, written, rows := k.now(), k.mark.ID, k.written, k.rowsWritten
 	var read, folded time.Duration
 	// The newest event FIRST: every read below is bounded by it, so the
 	// instant reported is of an event every tail has folded.
@@ -385,7 +400,7 @@ func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineT
 	k.forgetIdle()
 	k.collect()
 	slog.Debug("Engine Routing: the copy's tails were brought up to date", "tables", len(tables), "events_after", from, "events_through", k.mark.ID,
-		"newest_read", read, "fold", folded, "files_written", k.written-written, "total", k.now().Sub(start))
+		"newest_read", read, "fold", folded, "files_written", k.written-written, "rows_written", k.rowsWritten-rows, "total", k.now().Sub(start))
 	return out, nil
 }
 
@@ -983,7 +998,7 @@ func (k *tailKeeper) view(t views.BaselineTable, e *tailEntry) (tailView, bool) 
 			if e.through.IsZero() || e.fileCut != tailCutOf(t) {
 				return tailView{}, false
 			}
-			return tailView{Path: e.file, PK: e.tail.PKColumns(), Through: e.through}, true
+			return tailView{Paths: e.segs, PK: e.tail.PKColumns(), Through: e.through}, true
 		}
 	}
 	if !e.frozen {
@@ -994,27 +1009,51 @@ func (k *tailKeeper) view(t views.BaselineTable, e *tailEntry) (tailView, bool) 
 		// instant to say.
 		return tailView{}, false
 	}
-	return tailView{Path: e.file, PK: e.tail.PKColumns(), Through: e.through}, true
+	return tailView{Paths: e.segs, PK: e.tail.PKColumns(), Through: e.through}, true
 }
 
 // write publishes e's tail under a name never used before (a statement reads
-// the file twice), or retires its file when the tail holds nothing.
+// a file more than once), or retires its files when the tail holds nothing.
+// Only the keys changed since the last write are written, as a new file at
+// the end of its chain (#2495), so a cycle costs what changed and not the
+// whole tail; the whole tail is written, starting a new chain, when there is
+// none, when it was written over another cut (a prune, or a tail standing
+// for a newer cut), or when the chain has grown past tailMaxSegments files or
+// tailMergeRatio times the tail's rows. Each version is the whole chain:
+// files are only added or retired, so a statement holding an older one reads
+// it until keepOld.
 func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 	if e.tail.Keys() == 0 {
 		k.retire(e)
 		e.dirty = false
 		return nil
 	}
+	whole := len(e.segs) == 0 || e.fileCut != e.cut || len(e.segs) >= tailMaxSegments ||
+		e.segRows > int64(tailMergeRatio)*int64(e.tail.Keys())
 	if _, err := k.makeDir(); err != nil {
 		return err
 	}
 	k.written++
 	path := filepath.Join(k.dir, fmt.Sprintf("%d-%s.%s.parquet", k.written, url.PathEscape(t.Schema), url.PathEscape(t.Table)))
-	if _, err := e.tail.WriteFile(path); err != nil {
+	if !whole {
+		n, err := e.tail.WriteDelta(path)
+		if err != nil {
+			return err
+		}
+		k.rowsWritten += n
+		// A new slice: the version a statement was handed keeps its own.
+		e.segs = append(slices.Clip(e.segs), path)
+		e.segRows += n
+		e.dirty = false
+		return nil
+	}
+	n, err := e.tail.WriteFile(path)
+	if err != nil {
 		return err
 	}
+	k.rowsWritten += n
 	k.retire(e)
-	e.file, e.dirty, e.fileCut = path, false, e.cut
+	e.segs, e.segRows, e.dirty, e.fileCut = []string{path}, n, false, e.cut
 	return nil
 }
 
@@ -1041,12 +1080,12 @@ func (k *tailKeeper) makeDir() (string, error) {
 	return k.dir, nil
 }
 
-// retire moves e's current file among the old ones.
+// retire moves every file of e's chain among the old ones.
 func (k *tailKeeper) retire(e *tailEntry) {
-	if e.file != "" {
-		e.old = append(e.old, tailOldFile{e.file, k.now()})
-		e.file = ""
+	for _, p := range e.segs {
+		e.old = append(e.old, tailOldFile{p, k.now()})
 	}
+	e.segs, e.segRows = nil, 0
 }
 
 // drop retires every file of e, which is being replaced or forgotten.

@@ -73,7 +73,7 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 		}
 		release()
 		k.settle()
-		if v, ok := statement(t, k, orders)[ko]; !ok || fileKeys(t, v.Path) != 1 || !v.Through.Equal(f.at(1)) {
+		if v, ok := statement(t, k, orders)[ko]; !ok || fileKeys(t, v.Paths) != 1 || !v.Through.Equal(f.at(1)) {
 			t.Fatalf("the finished build is not the next statement's: %+v %v", v, ok)
 		}
 		if f.fills != 1 {
@@ -101,12 +101,12 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 			t.Fatalf("installed with %s, want 1,2,3: the changes the cursor passed during the build are missing", got)
 		}
 		v := statement(t, k, orders)[ko]
-		if fileKeys(t, v.Path) != 3 || !v.Through.Equal(f.at(4)) {
-			t.Fatalf("%+v (%d keys)", v, fileKeys(t, v.Path))
+		if fileKeys(t, v.Paths) != 3 || !v.Through.Equal(f.at(4)) {
+			t.Fatalf("%+v (%d keys)", v, fileKeys(t, v.Paths))
 		}
 		// And it advances from there like any tail.
 		f.add("orders", "2")
-		if after := statement(t, k, orders)[ko]; after.Path == v.Path || fileKeys(t, after.Path) != 3 || !after.Through.Equal(f.at(5)) {
+		if after := statement(t, k, orders)[ko]; chain(after) == chain(v) || fileKeys(t, after.Paths) != 3 || !after.Through.Equal(f.at(5)) {
 			t.Fatalf("after: %+v", after)
 		}
 	})
@@ -267,7 +267,7 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 		delete(f.fillErr, ko)
 		statement(t, k, orders)
 		k.settle()
-		if v, ok := statement(t, k, orders)[ko]; !ok || fileKeys(t, v.Path) != 1 {
+		if v, ok := statement(t, k, orders)[ko]; !ok || fileKeys(t, v.Paths) != 1 {
 			t.Fatalf("not built once the index answered: %+v", v)
 		}
 		if _, ok := k.builds[ko]; ok {
@@ -321,7 +321,7 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 		f.cuts[ko] = 1
 		k.tables[ko].tail.(*fakeTail).pruneErr = errors.New("no position")
 		release := gated(f, ko, false)
-		if got := statement(t, k, newerCut(orders))[ko]; got.Path != before.Path {
+		if got := statement(t, k, newerCut(orders))[ko]; chain(got) != chain(before) {
 			t.Fatalf("the old tail did not stand during the build: %+v", got)
 		}
 		<-f.fillEntered
@@ -418,7 +418,7 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 		<-f.fillEntered
 		release()
 		k.settle()
-		if v, ok := statement(t, k, newerCut(orders))[ko]; !ok || v.Path != "" || !v.Through.Equal(f.at(4)) {
+		if v, ok := statement(t, k, newerCut(orders))[ko]; !ok || chain(v) != "" || !v.Through.Equal(f.at(4)) {
 			t.Fatalf("%+v %v", v, ok)
 		}
 	})

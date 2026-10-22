@@ -3153,11 +3153,12 @@ func anyStoreHasKeys(stores map[string]storage.BucketStore) bool {
 	return false
 }
 
-// TableTail is a table's tail as a pinned state view reads it: the file and
-// the table's key columns.
+// TableTail is a table's tail as a pinned state view reads it: its files, a
+// chain oldest first whose newest file carrying a key holds that key's row
+// (baseline.TableTailChainStateSQL), and the table's key columns.
 type TableTail struct {
-	Path string
-	PK   []string
+	Paths []string
+	PK    []string
 }
 
 // tailStateBody is a pinned state view's body for a table with a tail: its
@@ -3171,6 +3172,10 @@ func tailStateBody(t BaselineTable) string {
 	return ordered(t, func(replace string) string {
 		// Through globLiteral like every file a view names (#2235): a table
 		// named "a*b" has a tail file with that name in it.
-		return baseline.TableTailStateSQL(published, sqlString(fileGlob(t.Tail.Path)), t.Tail.PK, replace)
+		segs := make([]string, len(t.Tail.Paths))
+		for i, p := range t.Tail.Paths {
+			segs[i] = sqlString(fileGlob(p))
+		}
+		return baseline.TableTailChainStateSQL(published, segs, t.Tail.PK, replace)
 	})
 }

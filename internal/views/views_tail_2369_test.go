@@ -9,7 +9,7 @@ import (
 // a following one never does (the file is one statement's moment).
 func TestStateView_tail(t *testing.T) {
 	tbl := BaselineTable{Schema: "shop", Table: "orders", Path: "/snap/2026-10-14T10-00-00Z/shop/orders.parquet",
-		Rel: "shop/orders.parquet", Tail: &TableTail{Path: "/tails/1-shop.or*ders.parquet", PK: []string{"id"}}}
+		Rel: "shop/orders.parquet", Tail: &TableTail{Paths: []string{"/tails/1-shop.or*ders.parquet"}, PK: []string{"id"}}}
 	pinned := Generate(Input{Baselines: []BaselineTable{tbl}})
 	for _, want := range []string{"ANTI JOIN", `"id"`, `1-shop.or[*]ders.parquet`} {
 		if !strings.Contains(pinned, want) {
