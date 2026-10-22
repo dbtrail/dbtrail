@@ -469,6 +469,18 @@ type TableReport struct {
 	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
 	// job's range pair in place of the chain's first pairs (#1723).
 	DeltaCompactedRange string
+
+	// The refresh's arithmetic (#2505), filled by a refresh with table
+	// deltas that wrote a pair or rewrote the table: WindowInserts and
+	// WindowDeletes are the window's INSERT and DELETE events, RowsBefore
+	// the resolved rows the window was folded over and RowsAfter the rows
+	// the published state holds, -1 when the refresh could not know them.
+	// ArithmeticProblems is empty when the numbers close (or could not be
+	// checked), else what did not, in the words the error line used; the
+	// table is published either way.
+	WindowInserts, WindowDeletes int64
+	RowsBefore, RowsAfter        int64
+	ArithmeticProblems           []string
 }
 
 // fetchFloor decides where a run with deltas on fetches from: the chain's last

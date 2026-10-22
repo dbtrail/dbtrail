@@ -159,6 +159,9 @@ type DumpMetadata struct {
 	// absent (a plain pair: its low end is DeltaSeq).
 	DeltaSeq   int
 	DeltaSeqLo int
+	// DeltaRows is MetaKeyDeltaRows (#2505): the rows the resolved state
+	// holds with this pair applied; -1 when absent or unreadable.
+	DeltaRows int64
 	// LastEventID is MetaKeyLastEventID; 0 when absent.
 	LastEventID uint64
 	// DDLMark is MetaKeyDDLMark, verbatim; "" when absent.
@@ -438,7 +441,7 @@ func RequireDumpPosition(inputDir string) error {
 // at 0 would read a file that records its source read but no count as the
 // read itself.
 func emptyFooterMetadata() DumpMetadata {
-	return DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1, FoldGeneration: -1}
+	return DumpMetadata{DeltaSeq: -1, DeltaSeqLo: -1, DeltaRows: -1, FoldGeneration: -1}
 }
 
 // ReadParquetMetadata opens a local Parquet file and extracts the baseline
@@ -519,6 +522,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	}
 	if v, ok := pf.Lookup(MetaKeyDeltaSeqLo); ok {
 		m.DeltaSeqLo = parseDeltaSeq(path, v)
+	}
+	if v, ok := pf.Lookup(MetaKeyDeltaRows); ok {
+		m.DeltaRows = parseDeltaRows(path, v)
 	}
 	if v, ok := pf.Lookup(MetaKeyDDLMark); ok {
 		m.DDLMark = v
@@ -683,6 +689,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.DeltaSeq = parseDeltaSeq(path, val)
 	case MetaKeyDeltaSeqLo:
 		m.DeltaSeqLo = parseDeltaSeq(path, val)
+	case MetaKeyDeltaRows:
+		m.DeltaRows = parseDeltaRows(path, val)
 	case MetaKeyDDLMark:
 		m.DDLMark = val
 	case MetaKeyEventMark:
@@ -728,6 +736,18 @@ func parseDeltaBaseSize(path, raw string) int64 {
 	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || n < 0 {
 		slog.Warn("corrupt delta_base_size in Parquet metadata", "path", path, "raw_value", raw, "error", err)
+		return -1
+	}
+	return n
+}
+
+// parseDeltaRows reads MetaKeyDeltaRows (#2505). A value that does not parse
+// is -1, "unknown": the next pair starts no count from it, and a rewrite's
+// check against it is skipped rather than failed on a footer it cannot read.
+func parseDeltaRows(path, raw string) int64 {
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		slog.Warn("corrupt delta_rows in Parquet metadata; the refresh's row count starts over at the next rewrite", "path", path, "raw_value", raw, "error", err)
 		return -1
 	}
 	return n

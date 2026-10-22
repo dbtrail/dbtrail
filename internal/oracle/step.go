@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -195,12 +196,19 @@ func (s *RefreshStep) Apply(ctx context.Context, cut *Cut) error {
 	for i, t := range cut.Tables {
 		tables[i] = cut.Schema + "." + t.Name
 	}
+	// The refresh checks its own arithmetic per table and publishes the
+	// table either way (#2505); here, a mismatch fails the run, so the
+	// check itself is exercised by every refresh the harness drives.
+	mismatches := observe.RefreshArithmeticMismatches()
 	_, failures, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
 		IndexDSN: s.IndexDSN, BaselineSrc: s.Root, Tables: tables, At: cut.At,
 		OutputDir: s.Root, OutputFormat: reconstruct.OutputFormatParquet, TableDeltas: true, Parallelism: 2,
 	})
 	if err != nil {
 		return &RefreshError{Failures: failures, Err: err}
+	}
+	if moved := observe.RefreshArithmeticMismatches() - mismatches; moved != 0 {
+		return &RefreshError{Err: fmt.Errorf("the refresh's arithmetic did not close on %v table(s) (bintrail_refresh_arithmetic_mismatch_total moved); the refresh's error line says which", moved)}
 	}
 	return nil
 }
