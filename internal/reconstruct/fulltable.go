@@ -458,6 +458,14 @@ type TableReport struct {
 	// the window's changes were on disk (#2126); zero for a pair written from
 	// memory, and for a rewrite.
 	DeltaSpillPasses int
+	// LookupDuration and LookupRows are what locating the base rows the
+	// window touched cost (#2496): the time spent in that lookup and the
+	// base rows it examined (the matches when the keys were joined in
+	// DuckDB, every base row per pass when they were scanned through Go),
+	// summed over the passes of a spilled window. Zero for a rewrite and
+	// for a window with no changes, which looks nothing up.
+	LookupDuration time.Duration
+	LookupRows     int64
 	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
 	// job's range pair in place of the chain's first pairs (#1723).
 	DeltaCompactedRange string

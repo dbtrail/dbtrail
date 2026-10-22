@@ -107,6 +107,9 @@ func bothWays(t *testing.T, base string, pkCols []metadata.ColumnMeta, changes m
 	if st.Joined && st.Examined != len(got) {
 		t.Fatalf("the join let %d rows into Go for %d matches", st.Examined, len(got))
 	}
+	if st.BaseReads != 1 || scanSt.BaseReads != 1 {
+		t.Fatalf("the base's rows were read in %d (join) and %d (scan) queries, want one each", st.BaseReads, scanSt.BaseReads)
+	}
 	if !st.Joined && st.Examined != scanSt.Examined {
 		t.Fatalf("fallback examined %d rows, the scan %d", st.Examined, scanSt.Examined)
 	}
@@ -290,10 +293,11 @@ func TestLookupBasePositions_nullKeyIsRefusedOnBothPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	pkCols := pkColsIntID()
-	// The scan refuses when it reaches the row; the join refuses from its
-	// own probe, BEFORE any early return — including the window whose keys
-	// are all out of range (the realistic shape: every new id of an
-	// auto-increment table past 2^31 is), where there is nothing to join.
+	// The scan refuses when it reaches the row; the join lets the NULL row
+	// through its one pass and refuses it in Go (#2496) — including the
+	// window whose keys are all out of range (the realistic shape: every
+	// new id of an auto-increment table past 2^31 is), where there is
+	// nothing to join and the pass is made for the NULL rows alone.
 	for _, keys := range [][]string{{"3", "3000000000"}, {"3000000000"}} {
 		for _, allow := range []bool{false, true} {
 			_, st, err := lookupBasePositionsWith(context.Background(), base, "s", "t", pkCols, touched(keys...), duckdbutil.DefaultTuning(), allow)

@@ -368,30 +368,35 @@ func reservedDeltaColumn(cols []baseline.Column) string {
 
 // lookupBasePositions returns the row numbers, ascending, of the base rows
 // whose PRIMARY KEY the window touched. For integer keys the touched keys go
-// to DuckDB as a table and the base is semi-joined against it, so only the
-// matching rows cross into Go (#1716); every other key type scans the base's
-// key columns through Go, as the merge does. Either way the canonical check
+// to DuckDB as a table and the base is filtered against it, so only the
+// matching rows cross into Go (#1716), plus any row whose key is NULL, which
+// Go refuses (#2496); every other key type scans the base's key columns
+// through Go, as the merge does. Either way the base's key columns are read
+// in ONE DuckDB pass per lookup, and the canonical check
 // (canonicalizePKMap + event.BuildPKValues against the change map) is what
 // decides: the join only narrows what Go looks at, and it is taken only when
 // every touched key is either handed to DuckDB exactly or provably outside
 // what its column can hold. It reads the change map and never drains it: the
 // upserts writer runs after this and needs every entry.
 func lookupBasePositions(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
-	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) ([]int64, error) {
-	out, _, err := lookupBasePositionsWith(ctx, basePath, schema, table, pkCols, changes, tuning, tableDeltaJoinKeys)
-	return out, err
+	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) ([]int64, lookupStats, error) {
+	return lookupBasePositionsWith(ctx, basePath, schema, table, pkCols, changes, tuning, tableDeltaJoinKeys)
 }
 
 // tableDeltaJoinKeys lets lookupBasePositions take the DuckDB join; a variable
 // so a test can hold a whole publish to the scan.
 var tableDeltaJoinKeys = true
 
-// lookupStats says how a lookup went: whether the join was taken and how
-// many base rows crossed into Go. A test pins Examined, because a join that
-// silently stopped narrowing would still return the right positions.
+// lookupStats says how a lookup went: whether the join was taken, how many
+// base rows crossed into Go, and in how many DuckDB queries the base's rows
+// were read. A test pins Examined, because a join that silently stopped
+// narrowing would still return the right positions; another pins BaseReads
+// at one, because a second full pass over the key columns (#2496) would
+// return them too.
 type lookupStats struct {
-	Joined   bool
-	Examined int
+	Joined    bool
+	Examined  int
+	BaseReads int
 }
 
 // lookupBasePositionsWith is lookupBasePositions with the join switchable
@@ -451,26 +456,31 @@ func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string
 			st.Joined = true
 			// A key column that holds NULL — a baseline written before #522
 			// lost unsigned values past the signed range that way — is a
-			// row the scan refuses when it reaches it. The join would never
-			// reach it (NULL matches nothing), so it is refused here.
-			if err := refuseNullKeys(ctx, ddb, scanSQL, quoted, schema, table); err != nil {
-				return nil, st, err
-			}
-			if n == 0 {
-				// Every touched key is outside what the columns can hold: no
-				// base row can carry one, so there is nothing to look up.
-				return nil, st, nil
-			}
-			on := make([]string, len(quoted))
-			cols := make([]string, len(quoted))
+			// row the scan refuses when it reaches it. A join would never
+			// reach it (NULL matches nothing), so the NULL rows are let
+			// through beside the matches and refused as they arrive in Go
+			// (#2496): one pass over the key columns, where the probe that
+			// used to run first was a second full pass. A window whose keys
+			// are all outside what the columns can hold has nothing to
+			// join, and still makes the pass for the NULL rows.
+			preds := make([]string, len(quoted))
 			for i, c := range quoted {
-				on[i] = "b." + c + " = t." + c
-				cols[i] = "'" + strings.ReplaceAll(names[i], "'", "''") + "': '" + types[i] + "'"
+				preds[i] = "b." + c + " IS NULL"
 			}
-			q += fmt.Sprintf(" SEMI JOIN read_csv('%s', header=false, auto_detect=false, delim=',', new_line='\\n', columns={%s}) AS t ON %s",
-				strings.ReplaceAll(csvPath, "'", "''"), strings.Join(cols, ", "), strings.Join(on, " AND "))
+			q += " WHERE (" + strings.Join(preds, " OR ") + ")"
+			if n > 0 {
+				on := make([]string, len(quoted))
+				cols := make([]string, len(quoted))
+				for i, c := range quoted {
+					on[i] = "b." + c + " = t." + c
+					cols[i] = "'" + strings.ReplaceAll(names[i], "'", "''") + "': '" + types[i] + "'"
+				}
+				q += fmt.Sprintf(" OR EXISTS (SELECT 1 FROM read_csv('%s', header=false, auto_detect=false, delim=',', new_line='\\n', columns={%s}) AS t WHERE %s)",
+					strings.ReplaceAll(csvPath, "'", "''"), strings.Join(cols, ", "), strings.Join(on, " AND "))
+			}
 		}
 	}
+	st.BaseReads++
 	rows, err := ddb.QueryContext(ctx, q)
 	if err != nil {
 		return nil, st, fmt.Errorf("scan the base's key columns: %w", err)
@@ -490,6 +500,13 @@ func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string
 		pos, ok := scan[len(pkCols)].(int64)
 		if !ok {
 			return nil, st, fmt.Errorf("internal: file_row_number came back as %T, not int64", scan[len(pkCols)])
+		}
+		if st.Joined {
+			for i, v := range scan[:len(pkCols)] {
+				if v == nil {
+					return nil, st, nullKeyRefusal(schema, table, quoted[i])
+				}
+			}
 		}
 		pkMap, err := canonicalizePKMap(zipMap(names, scan[:len(pkCols)]), pkCols)
 		if err != nil {
@@ -584,36 +601,13 @@ func integerKeyTypes(ctx context.Context, ddb *sql.DB, scanSQL string, quoted []
 	return types, "", nil
 }
 
-// refuseNullKeys fails the lookup the way the scan does when a key column
-// holds NULL in the base (canonicalizePKValue's nil refusal), because a semi
-// join never reaches such a row. One probe in DuckDB, stopping at the first
-// such row and naming the column that is NULL in it, as the scan would.
-func refuseNullKeys(ctx context.Context, ddb *sql.DB, scanSQL string, quoted []string, schema, table string) error {
-	preds := make([]string, len(quoted))
-	for i, c := range quoted {
-		preds[i] = c + " IS NULL"
-	}
-	flags := make([]bool, len(quoted))
-	ptrs := make([]any, len(quoted))
-	for i := range flags {
-		ptrs[i] = &flags[i]
-	}
-	err := ddb.QueryRowContext(ctx, "SELECT "+strings.Join(preds, ", ")+" FROM "+scanSQL+" WHERE "+strings.Join(preds, " OR ")+" LIMIT 1").Scan(ptrs...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("probe the base's key columns for NULL: %w", err)
-	}
-	col := quoted[0]
-	for i, isNull := range flags {
-		if isNull {
-			col = quoted[i]
-			break
-		}
-	}
+// nullKeyRefusal fails the lookup the way the scan does when a key column
+// holds NULL in the base (canonicalizePKValue's nil refusal), naming the
+// first column that is NULL in the row, as the scan would. The join's pass
+// lets such rows through for exactly this (#2496).
+func nullKeyRefusal(schema, table, quotedCol string) error {
 	return fmt.Errorf("canonicalize baseline PK for %s.%s: key column %s holds NULL in the base file (MySQL forbids NULL in PK columns; a baseline written before #522 lost unsigned values past the signed range this way — take a fresh baseline)",
-		schema, table, col)
+		schema, table, quotedCol)
 }
 
 // writeIntegerKeyCSV writes the touched keys as one CSV row each, typed for
@@ -1084,7 +1078,16 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		return fmt.Errorf("internal: %s.%s has %d changes in memory beside the ones on disk, which the table delta would leave out",
 			p.schema, p.table, len(in.Changes))
 	}
-	newDead, err := lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, in.Changes, p.cfg.DuckDBTuning)
+	// What the lookup costs goes on the report (#2496): one pass from memory,
+	// summed over the passes of a spilled window.
+	lookup := func(pass map[string]*query.ResultRow) ([]int64, error) {
+		start := time.Now()
+		pos, st, err := lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, pass, p.cfg.DuckDBTuning)
+		rep.LookupDuration += time.Since(start)
+		rep.LookupRows += int64(st.Examined)
+		return pos, err
+	}
+	newDead, err := lookup(in.Changes)
 	if err != nil {
 		return err
 	}
@@ -1092,7 +1095,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		if err := checkPostBaselineColumns(in, pass, colNames); err != nil {
 			return nil, err
 		}
-		return lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, pass, p.cfg.DuckDBTuning)
+		return lookup(pass)
 	}
 
 	// Carry the base and every earlier pair forward. What was published in the
@@ -1213,6 +1216,9 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		"seq", seq, "dead_rows", dead, "upsert_rows", ups, "chain_files", len(chain.Files), "chain_copied", copied,
 		"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339),
 		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds(),
+		// The base-position lookup: its time and the base rows it examined,
+		// summed over the passes of a spilled window (#2496).
+		"lookup_ms", rep.LookupDuration.Milliseconds(), "lookup_rows", rep.LookupRows,
 		// Above zero: the window's changes did not fit in memory and were
 		// read back from disk in that many passes.
 		"spill_passes", passes)
