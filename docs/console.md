@@ -1372,14 +1372,19 @@ the worker's run, once the worker knows what the statement names: the
 tables' recent changes, the checks on those names, and the views script),
 `tails` (the part of `views_for` that reads the tables' recent changes, or
 brings them up to date when none are published for the snapshot the
-statement reads), `spawn` (the worker's whole lifetime, which
+statement reads; present only when that step ran, which is a statement on
+the MySQL port with recent changes on, so a statement from this card has no
+`tails` key rather than a zero), `spawn` (the worker's whole lifetime, which
 contains `open`, `lockdown`, `views` and `query`; what is left of it is
 process start, result encoding and exit), `decode`, `total` (the worker's
 run) and `wall` (the whole statement, from the console accepting it to the
 result being handed to the port or the response). `views` is
 installing the views the query names, including the console writing them
 while the worker waits, so it contains `views_for`. `wall − total −
-slot_wait − view_build` is time no phase accounts for.
+slot_wait − view_build` is time no phase accounts for. A statement answered
+from an earlier copy ran twice; its `wall` covers both runs and the search
+for that copy, and the console's own phases are the two runs' added
+together, while the worker's phases and `total` are the run that answered.
 
 Who sees it: a session that holds the `sql:execute` permission. With no access
 policy (the built-in password login and the static token) every session holds

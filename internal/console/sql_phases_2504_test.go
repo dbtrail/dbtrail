@@ -3,6 +3,7 @@ package console
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"sort"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 // clock wired to the wrong name shows as a wrong value.
 func TestSQLPhasesKeys(t *testing.T) {
 	ms := time.Millisecond
-	parent := sqlParentPhases{SlotWait: 1 * ms, ViewBuild: 2 * ms, ViewsFor: 3 * ms, Tails: 4 * ms, Wall: 12 * ms}
+	parent := sqlParentPhases{SlotWait: 1 * ms, ViewBuild: 2 * ms, ViewsFor: 3 * ms, Tails: 4 * ms, TailsRan: true, Wall: 12 * ms}
 	p := sqlsandbox.Phases{Spawn: 5 * ms, Open: 6 * ms, Lockdown: 7 * ms, Views: 8 * ms, Query: 9 * ms, Decode: 10 * ms, Total: 11 * ms}
 	got := sqlPhases(parent, p)
 	want := map[string]time.Duration{
@@ -40,6 +41,33 @@ func TestSQLPhasesKeys(t *testing.T) {
 	// total stays the sandbox's: the worker's run, not the statement.
 	if got["total"] != p.Total || got["total"] == got["wall"] {
 		t.Errorf("total = %v, want the sandbox's %v (wall is %v)", got["total"], p.Total, got["wall"])
+	}
+	// A statement that read no tails has no tails phase, not a zero one.
+	parent.TailsRan, parent.Tails = false, 0
+	without := sqlPhases(parent, p)
+	if _, has := without["tails"]; has || len(without) != len(want)-1 {
+		t.Errorf("phases without tails = %v, want the %d keys minus tails", phaseKeys(without), len(want))
+	}
+	if _, has := sqlPhasesMS(parent, p)["tails"]; has {
+		t.Error("phases_ms carries tails for a statement that read none")
+	}
+}
+
+// #2504 (#2210): the clocks of a refused first run are added to the run
+// that answered, tails included, so the statement's phases are the
+// statement's.
+func TestSQLParentPhasesAdd(t *testing.T) {
+	ms := time.Millisecond
+	second := sqlParentPhases{SlotWait: 1 * ms, ViewBuild: 2 * ms, ViewsFor: 3 * ms}
+	second.add(sqlParentPhases{SlotWait: 10 * ms, ViewBuild: 20 * ms, ViewsFor: 30 * ms, Tails: 40 * ms, TailsRan: true})
+	want := sqlParentPhases{SlotWait: 11 * ms, ViewBuild: 22 * ms, ViewsFor: 33 * ms, Tails: 40 * ms, TailsRan: true}
+	if second != want {
+		t.Errorf("added = %+v, want %+v", second, want)
+	}
+	none := sqlParentPhases{ViewsFor: 3 * ms}
+	none.add(sqlParentPhases{ViewsFor: 30 * ms})
+	if none.TailsRan {
+		t.Error("two runs that read no tails claim a tails phase")
 	}
 }
 
@@ -94,8 +122,11 @@ func TestSQL_viewsForTimeIsInViewsForAndWallNotViewBuild(t *testing.T) {
 	if got := body.PhasesMS["total"]; got != 7 {
 		t.Errorf("phases_ms[total] = %v, want the sandbox's 7: wall is the parent's clock, total stays the worker's", got)
 	}
-	if got, ok := body.PhasesMS["tails"]; !ok || got != 0 {
-		t.Errorf("phases_ms[tails] = %v (present %v), want 0: this statement read no tails", got, ok)
+	if got, ok := body.PhasesMS["tails"]; ok {
+		t.Errorf("phases_ms[tails] = %v, want no tails key: this statement read no tails", got)
+	}
+	if after["tails"] != before["tails"] {
+		t.Errorf("histogram tails moved %d→%d on a statement that read no tails", before["tails"], after["tails"])
 	}
 	// wall holds the rest: by construction wall - total - slot_wait -
 	// view_build is the unaccounted time, which here is the callback. The
@@ -103,5 +134,56 @@ func TestSQL_viewsForTimeIsInViewsForAndWallNotViewBuild(t *testing.T) {
 	// left out of the subtraction here.
 	if un := body.PhasesMS["wall"] - body.PhasesMS["slot_wait"] - body.PhasesMS["view_build"]; un < pauseMS {
 		t.Errorf("wall - slot_wait - view_build = %v ms, want at least the callback's %v ms", un, pauseMS)
+	}
+}
+
+// #2504 (#2210): a statement answered from an earlier copy ran twice. Its
+// phases are the statement's: wall covers both runs and the search between
+// them, and views_for holds both callbacks (the first run's is where the
+// expensive tails step would have been). The real sandbox, as the #2210
+// tests drive it; the callback sleeps in both runs.
+func TestSQL_phasesOfAnAnswerFromAnEarlierCopyCoverBothRuns(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
+	prev := sqlMaxChainBytes
+	t.Cleanup(func() { sqlMaxChainBytes = prev })
+	sqlMaxChainBytes = 10
+	f := newSQLFixture(t, runner, false)
+	addChain(t, f.schemaDir, "orders")
+	writeOrdersSnapshot(t, f.root, "2026-04-30T02-00-00Z", "at two")
+	const pause = 100 * time.Millisecond
+	calls := 0
+	f.s.sqlViewsForHook = func() { calls++; time.Sleep(pause) }
+
+	before, sumBefore := sqlPhaseHistograms(t)
+	w := f.post(t, `{"sql":"SELECT status FROM shop.orders WHERE id = 1"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body.String())
+	}
+	var r sqlResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.OlderCopy == "" || calls != 2 {
+		t.Fatalf("not the two-run path: older_copy=%q callbacks=%d", r.OlderCopy, calls)
+	}
+	after, sumAfter := sqlPhaseHistograms(t)
+	both := float64((2 * pause).Milliseconds())
+	for _, k := range []string{"views_for", "wall"} {
+		if got := r.PhasesMS[k]; got < both {
+			t.Errorf("phases_ms[%q] = %v ms, want at least the two callbacks' %v ms", k, got, both)
+		}
+		if got := sumAfter[k] - sumBefore[k]; got < (2 * pause).Seconds() {
+			t.Errorf("histogram %q got %v s, want at least %v s", k, got, (2 * pause).Seconds())
+		}
+		if after[k] != before[k]+1 {
+			t.Errorf("histogram %q: count %d→%d, want +1 (the refused run observes nothing)", k, before[k], after[k])
+		}
+	}
+	if _, ok := r.PhasesMS["tails"]; ok {
+		t.Error("phases_ms carries tails: neither run read any")
 	}
 }

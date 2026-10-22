@@ -1547,7 +1547,9 @@ func TestSQL_phasesReachTheHistogram(t *testing.T) {
 			Spawn: want["spawn"], Decode: want["decode"], Total: want["total"]},
 	}}
 	f := newSQLFixture(t, runner, false)
-	phases := []string{"slot_wait", "view_build", "views_for", "tails", "spawn", "open", "lockdown", "views", "query", "decode", "total", "wall"}
+	// No tails: an HTTP statement reads none, so the key is absent rather
+	// than zero (#2504), and its series must not move.
+	phases := []string{"slot_wait", "view_build", "views_for", "spawn", "open", "lockdown", "views", "query", "decode", "total", "wall"}
 
 	before, sumBefore := sqlPhaseHistograms(t)
 	rec := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders"}`)
@@ -1576,8 +1578,17 @@ func TestSQL_phasesReachTheHistogram(t *testing.T) {
 			t.Errorf("phase %q: phases_ms = %v, want %v", p, got, d.Milliseconds())
 		}
 	}
-	if len(after) != len(phases) {
-		t.Errorf("histogram phases = %v, want exactly %v", after, phases)
+	moved := 0
+	for p, n := range after {
+		if n != before[p] {
+			moved++
+		}
+	}
+	if moved != len(phases) || after["tails"] != before["tails"] {
+		t.Errorf("histogram: %d phases moved (tails %d→%d), want exactly the %d of %v", moved, before["tails"], after["tails"], len(phases), phases)
+	}
+	if _, ok := body.PhasesMS["tails"]; ok || len(body.PhasesMS) != len(phases) {
+		t.Errorf("phases_ms = %v, want exactly %v (no tails key)", body.PhasesMS, phases)
 	}
 
 	runner.busy = true
