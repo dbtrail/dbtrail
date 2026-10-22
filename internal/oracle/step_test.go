@@ -56,16 +56,6 @@ func TestRefreshStep_refusedOnlyForTheGeneratorsPKChange(t *testing.T) {
 	}
 }
 
-func TestCut_hadPKChangeOn(t *testing.T) {
-	c := &Cut{Ops: []Op{
-		{Table: "t_int", Changes: []Change{{Kind: KindInsert, Key: 1}}},
-		{Table: "t_uniq", Changes: []Change{{Kind: KindDelete, Key: 2}, {Kind: KindPKUpdate, Key: 3, NewKey: 4}}},
-	}}
-	if !c.HadPKChange() || !c.HadPKChangeOn("t_uniq") || c.HadPKChangeOn("t_int") {
-		t.Fatalf("any=%v t_uniq=%v t_int=%v; want true true false", c.HadPKChange(), c.HadPKChangeOn("t_uniq"), c.HadPKChangeOn("t_int"))
-	}
-}
-
 type fakeStep struct {
 	name string
 	w    int
@@ -89,9 +79,6 @@ func TestCut_sincePublish(t *testing.T) {
 			{Table: "t_text"},
 			{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 1}}},
 		},
-	}
-	if c.HadPKChangeOn("t_uniq") {
-		t.Fatal("this step's ops moved nothing on t_uniq")
 	}
 	if !c.HadPKChangeSincePublishOn("t_uniq") || c.HadPKChangeSincePublishOn("t_int") {
 		t.Fatalf("since publish: t_uniq=%v t_int=%v; want true false", c.HadPKChangeSincePublishOn("t_uniq"), c.HadPKChangeSincePublishOn("t_int"))

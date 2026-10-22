@@ -31,18 +31,12 @@ type Cut struct {
 	Ops []Op
 	// SincePublish are the ops since the last cut a step published (a
 	// snapshot or a refresh), this step's included: what a refresh folds,
-	// and what a tail holds, at this cut. PublishedStep is that cut's step
-	// (0 before any).
+	// and what a tail holds, at this cut. Empty right after a publishing
+	// step: the read after it sees the cut as published, and PublishedStep
+	// is then this step; otherwise the last step that published.
 	SincePublish  []Op
 	PublishedStep int
 }
-
-// HadPKChange reports whether an op of the step moved a row to another key.
-func (c *Cut) HadPKChange() bool { return c.HadPKChangeOn("") }
-
-// HadPKChangeOn reports whether an op of the step moved a row of table to
-// another key; "" means any table.
-func (c *Cut) HadPKChangeOn(table string) bool { return hadPKChange(c.Ops, table) }
 
 // HadPKChangeSincePublishOn reports whether an op since the last published
 // cut moved a row of table to another key: the window a refresh folds and a
@@ -77,10 +71,11 @@ func hadPKChange(ops []Op, table string) bool {
 }
 
 // Step is what a run does to the copy at a cut, before reading it: a
-// snapshot cut, a refresh with table deltas, later a tail laid by the port's
-// keeper. A step knows nothing of the oracle; the read after it must equal
-// the source. Weight is its share of the draw between steps; the first cut
-// of a run always takes the first step of the list.
+// snapshot cut, a refresh with table deltas (both publish the cut), or a
+// tail laid by the port's keeper (which does not). A step knows nothing of
+// the oracle; the read after it must equal the source. Weight is its share
+// of the draw between steps; the first cut of a run always takes the first
+// step of the list.
 type Step interface {
 	Name() string
 	Weight() int

@@ -37,9 +37,11 @@ import (
 //
 // A table the port answers as of the published cut (no tail) is compared
 // with the rows read at that cut, AND the step asserts why there is no
-// tail: a PK-changing UPDATE the generator did in the window, or no change
-// to the table since the cut. Any other reason fails the run naming it:
-// that is the detector for tails silently off.
+// tail: a key the tail does not support (only integer keys have one, the
+// product's own rule: t_text's VARCHAR key), a PK-changing UPDATE the
+// generator did in the window, or no change to the table since the cut.
+// Any other reason fails the run naming it: that is the detector for tails
+// silently off.
 
 func TestOracleTails(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
@@ -97,24 +99,29 @@ func oracleEnvInt(t *testing.T, name string, def int) int {
 }
 
 // chainWatch is what the reads saw of the tails' chains: the longest, and
-// whether one shrank after growing (a merge).
+// whether one shrank after growing OVER THE SAME CUT (a merge). A new
+// snapshot or refresh starts the chain again from one file, which is not
+// a merge, so the memory is per table and per published cut.
 type chainWatch struct {
 	longest int
 	merged  bool
 	last    map[string]int
+	cuts    map[string]string
 }
 
-func (w *chainWatch) see(table string, files int) {
+func (w *chainWatch) see(table, cut string, files int) {
 	if w.last == nil {
-		w.last = map[string]int{}
+		w.last, w.cuts = map[string]int{}, map[string]string{}
 	}
 	if files > w.longest {
 		w.longest = files
 	}
-	if prev := w.last[table]; prev >= 2 && files < prev {
-		w.merged = true
+	if w.cuts[table] == cut {
+		if prev := w.last[table]; prev >= 2 && files < prev {
+			w.merged = true
+		}
 	}
-	w.last[table] = files
+	w.last[table], w.cuts[table] = files, cut
 }
 
 // tailStep brings the keeper's tails up to date at the cut, as the port's
@@ -126,7 +133,6 @@ type tailStep struct {
 	k      *tailKeeper
 	root   string
 	w      int
-	cut    *oracle.Cut
 	tables map[string]oracle.Table
 }
 
@@ -148,7 +154,23 @@ func (s *tailStep) Apply(ctx context.Context, cut *oracle.Cut) error {
 		}
 		s.k.settle()
 	}
-	s.cut = cut
+	// followOnce reports an update that failed (the index, its deadline)
+	// only to the keeper's note and the log, and a build that failed only
+	// to its retry clock: read both, or a failure here would surface steps
+	// later as "no tail" with its reason lost.
+	s.k.noteMu.Lock()
+	failing := s.k.failing
+	s.k.noteMu.Unlock()
+	if failing != "" {
+		return fmt.Errorf("the follower could not bring the tails up to date: %s", failing)
+	}
+	s.k.mu.Lock()
+	defer s.k.mu.Unlock()
+	for _, tb := range in.Baselines {
+		if b := s.k.builds[tailKey(tb.Schema, tb.Table)]; b != nil && b.failures > 0 && !b.running {
+			return fmt.Errorf("the tail of %s.%s could not be built (%d failures in a row; DBTrail's log has the error)", tb.Schema, tb.Table, b.failures)
+		}
+	}
 	return nil
 }
 
@@ -167,12 +189,12 @@ func (s *tailStep) read(ctx context.Context, cut *oracle.Cut, wallClock bool, wa
 		out, _, ok := s.s.statementTails(ctx, s.k, in.Baselines, []views.BaselineTable{tb})
 		if ok && out[i].Tail != nil {
 			in.Baselines[i].Tail = out[i].Tail
-			watch.see(tb.Table, len(out[i].Tail.Paths))
+			watch.see(tb.Table, tailCutOf(tb), len(out[i].Tail.Paths))
 			continue
 		}
 		rd.AsPublished[tb.Table] = true
 		if why := s.whyNoTail(tb, cut); why != "" {
-			return oracle.Read{}, fmt.Errorf("seed step %d: %s.%s answered as of the published cut: %s", cut.Step, tb.Schema, tb.Table, why)
+			return oracle.Read{}, fmt.Errorf("%s.%s answered as of the published cut: %s", tb.Schema, tb.Table, why)
 		}
 	}
 	rd.SQL = views.Generate(in)
@@ -198,12 +220,11 @@ func (s *tailStep) whyNoTail(tb views.BaselineTable, cut *oracle.Cut) string {
 	}
 	s.k.mu.Unlock()
 	switch {
-	case !cut.TouchedSincePublish(tb.Table):
-		// Nothing changed since the published cut, so the copy as of it IS
-		// the cut: right after a snapshot or a refresh the keeper's entry
-		// may still be the old window's (its rebuild over the new cut runs
-		// off the lock and installs on the next update), and the port
-		// answers as of the published cut meanwhile, which is correct.
+	case cut.Step == cut.PublishedStep:
+		// The read right after a snapshot or a refresh: the copy as of the
+		// published cut IS the cut, and the keeper's entry may still be the
+		// old window's (its rebuild over the new cut runs off the lock and
+		// installs on the next update), so there is nothing to verify.
 		return ""
 	case refused != "" && refused == s.keyRefusal(tb):
 		return ""
@@ -213,7 +234,12 @@ func (s *tailStep) whyNoTail(tb views.BaselineTable, cut *oracle.Cut) string {
 		}
 		return "refused for a PK-changing UPDATE, and no op since the published cut moved a key: " + refused
 	case refused != "":
+		// Before the untouched case on purpose: a refusal for a reason the
+		// generator did not cause is a finding even over a table no op
+		// touched since the cut.
 		return "the tail is refused: " + refused
+	case !cut.TouchedSincePublish(tb.Table):
+		return ""
 	case e == nil:
 		return "the keeper has no entry for the table, and ops since the published cut changed it"
 	default:
@@ -288,7 +314,15 @@ func runTailSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table, wS
 	s := &Server{cm: newConnManager(nil, false), captureStatus: &fakeWatermark{ago: 5 * time.Second}}
 	b := &bundle{db: indexDB, dbName: indexName, engine: query.New(indexDB), baselineSrc: root, resolver: resolver}
 	s.cm.boot = b
-	k := newTailKeeper(newIndexTailSource(s, b).capturing(nil), t.TempDir(), tailBudget{Keys: 1_000_000}, time.Minute, time.Hour)
+	// The keeper's parent is not t.TempDir() either: its tail files are read
+	// with read_parquet, and a "seed=N" segment above them would be a hive
+	// partition column.
+	keeperDir, err := os.MkdirTemp("", "oracle-tails-keeper-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(keeperDir) })
+	k := newTailKeeper(newIndexTailSource(s, b).capturing(nil), keeperDir, tailBudget{Keys: 1_000_000}, time.Minute, time.Hour)
 	defer k.close()
 
 	snapshot := &oracle.SnapshotStep{Root: root, Source: sourceDB, W: wSnapshot}

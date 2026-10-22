@@ -36,8 +36,8 @@ type Run struct {
 	// Read builds the port's read of the copy at cut: the views SQL and the
 	// snapshot directory it reads, with the DATETIME columns as wall clocks
 	// or as the files hold them, and which tables it answers as of the
-	// published cut. nil = PortViews over Root, every table as of the
-	// published cut (which the steps of slice 1 make the cut itself).
+	// published cut. nil = PortViews over Root, every table compared with
+	// the cut's rows, which is right only when every step publishes.
 	Read func(ctx context.Context, cut *Cut, wallClock bool) (Read, error)
 	// OpenDuckDB opens the session the views run in. nil = an in-memory
 	// DuckDB.
@@ -178,8 +178,8 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 			for _, t := range r.Tables {
 				pub[t.Name] = published{step: step, rows: cut.Rows[t.Name]}
 			}
-			sincePublish, publishedStep = nil, step
-			cut.SincePublish, cut.PublishedStep = nil, step
+			sincePublish, cut.SincePublish = nil, nil
+			publishedStep, cut.PublishedStep = step, step
 		}
 
 		// The copy is read twice, the two ways the port reads it (the
