@@ -3,16 +3,21 @@ package reconstruct
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 // #2496 slice 1: the base-position lookup reports what it cost (time and
@@ -213,5 +218,111 @@ func TestTableDelta_logLineCarriesLookupCost_2496(t *testing.T) {
 	}
 	if rep.LookupRows == 0 {
 		t.Errorf("the fixture's lookup examined no rows, so the line pins nothing")
+	}
+}
+
+// explainTokens runs EXPLAIN on q and returns the plan's words, box drawing
+// stripped, so a test can ask whether an operator or a column is in it.
+func explainTokens(t *testing.T, q string) []string {
+	t.Helper()
+	ddb, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ddb.Close()
+	rows, err := ddb.Query("EXPLAIN " + q)
+	if err != nil {
+		t.Fatalf("EXPLAIN: %v\n%s", err, q)
+	}
+	defer rows.Close()
+	var toks []string
+	for rows.Next() {
+		var kind, plan string
+		if err := rows.Scan(&kind, &plan); err != nil {
+			t.Fatal(err)
+		}
+		toks = append(toks, strings.FieldsFunc(plan, func(r rune) bool {
+			return r == ' ' || r == '\n' || r == '│' || r == '─' || r == '┌' || r == '┐' || r == '└' || r == '┘' || r == '┬' || r == '┴' || r == '├' || r == '┤'
+		})...)
+	}
+	return toks
+}
+
+// TestLookupBasePositions_planKeepsTheSemiJoin_2496: the join path's one
+// query must plan as a SEMI join (which DuckDB feeds a dynamic filter from
+// the touched keys' range, pruning row groups off the scan) and never as a
+// MARK join, which folding the NULL check into the join's predicate
+// produced; and the NULL branch must read the key columns only. Pinned on
+// the plan, because the positions come out the same either way and only
+// the time differs.
+func TestLookupBasePositions_planKeepsTheSemiJoin_2496(t *testing.T) {
+	ddl := "CREATE TABLE `t` (\n  `w` smallint NOT NULL,\n  `d` bigint unsigned NOT NULL,\n  `payload` varchar(8) DEFAULT NULL,\n  PRIMARY KEY (`w`,`d`)\n) ENGINE=InnoDB;\n"
+	base, _ := writeKeyedBaseline(t, ddl, []string{"w", "d"}, [][]string{{"1", "1", "a"}, {"2", "2", "b"}})
+	csv := filepath.Join(t.TempDir(), "k.csv")
+	if err := os.WriteFile(csv, []byte("1,1\n2,2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", base)
+	names, quoted, types := []string{"w", "d"}, []string{`"w"`, `"d"`}, []string{"INTEGER", "UBIGINT"}
+	for _, tc := range []struct {
+		name          string
+		n             int
+		semi, nullArm bool
+	}{
+		{"keys to join", 2, true, true},
+		{"every key out of range", 0, false, true},
+	} {
+		q := basePositionsQuery(scanSQL, names, quoted, types, csv, tc.n)
+		toks := explainTokens(t, q)
+		// Join types print as e.g. RIGHT_SEMI; match the word inside.
+		has := func(tok string) bool {
+			return slices.ContainsFunc(toks, func(s string) bool { return strings.Contains(s, tok) })
+		}
+		if has("MARK") {
+			t.Errorf("%s: the plan has a MARK join, which loses the semi join's dynamic filter:\n%s", tc.name, q)
+		}
+		if has("SEMI") != tc.semi {
+			t.Errorf("%s: SEMI join in the plan = %v, want %v:\n%s", tc.name, has("SEMI"), tc.semi, q)
+		}
+		if has("payload") {
+			t.Errorf("%s: a non-key column is read by the lookup:\n%s", tc.name, q)
+		}
+		// The NULL arm is a filter on the scan, not a join.
+		if nullFilter := has("IS") && has("NULL)"); nullFilter != tc.nullArm {
+			t.Errorf("%s: NULL filter in the plan = %v, want %v:\n%s", tc.name, nullFilter, tc.nullArm, q)
+		}
+	}
+	// The scan path reads every row with no join at all.
+	toks := explainTokens(t, basePositionsQuery(scanSQL, names, quoted, nil, "", 0))
+	if s := strings.Join(toks, " "); strings.Contains(s, "SEMI") || strings.Contains(s, "MARK") || strings.Contains(s, "payload") {
+		t.Errorf("scan path plan: %v", toks)
+	}
+}
+
+// TestTableDelta_emptyWindowLooksNothingUp_2496: a window with no changes
+// over an existing chain publishes the previous file unchanged and reports
+// a lookup of exactly zero, time included.
+func TestTableDelta_emptyWindowLooksNothingUp_2496(t *testing.T) {
+	noCompaction(t)
+	rows, nulls := zooRows()
+	src := writeZooBaseline(t, rows, nulls)
+	root := t.TempDir()
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	at1, at2 := t0.Add(5*time.Minute), t0.Add(10*time.Minute)
+	cut1, cut2 := &query.BinlogPos{File: "binlog.000009", Pos: 1000}, &query.BinlogPos{File: "binlog.000009", Pos: 2000}
+	base1, rep1, err := deltaWindow(t, root, src, t0, changeMap(upd(1, "v1")), at1, cut1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep1.LookupRows == 0 || rep1.LookupDuration == 0 {
+		t.Fatalf("fixture: the first window looked nothing up: %+v", rep1)
+	}
+	_, rep2, err := deltaWindow(t, root, base1, at1, map[string]*query.ResultRow{}, at2, cut2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep2.DeltaPairWritten || rep2.LookupRows != 0 || rep2.LookupDuration != 0 {
+		t.Fatalf("empty window: pair written %v, lookup_rows %d, lookup %d ns; want nothing written and exactly zero",
+			rep2.DeltaPairWritten, rep2.LookupRows, rep2.LookupDuration)
 	}
 }

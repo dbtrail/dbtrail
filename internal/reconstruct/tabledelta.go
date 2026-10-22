@@ -416,22 +416,21 @@ func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string
 
 	names := make([]string, len(pkCols))
 	quoted := make([]string, len(pkCols))
-	sel := make([]string, len(pkCols))
 	for i, c := range pkCols {
 		names[i] = c.Name
 		quoted[i] = `"` + strings.ReplaceAll(c.Name, `"`, `""`) + `"`
-		sel[i] = "b." + quoted[i] + " AS " + quoted[i]
 	}
 	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", strings.ReplaceAll(duckdbutil.FileGlob(basePath), "'", "''"))
-	q := "SELECT " + strings.Join(sel, ", ") + ", b.file_row_number FROM " + scanSQL + " AS b"
 
+	var csvPath string
+	var types []string
+	var n int
 	if allowJoin {
-		types, why, err := integerKeyTypes(ctx, ddb, scanSQL, quoted)
+		var why string
+		types, why, err = integerKeyTypes(ctx, ddb, scanSQL, quoted)
 		if err != nil {
 			return nil, st, err
 		}
-		var csvPath string
-		var n int
 		if why != "" {
 			// A property of the table, the same on every refresh: Debug.
 			slog.Debug("base positions: scanning the base's key columns through Go", "schema", schema, "table", table, "reason", why)
@@ -451,35 +450,14 @@ func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string
 				slog.Info("base positions: scanning the base's key columns through Go", "schema", schema, "table", table, "reason", why)
 			}
 		}
-		if why == "" {
+		if why != "" {
+			types = nil
+		} else {
 			defer os.Remove(csvPath)
 			st.Joined = true
-			// A key column that holds NULL — a baseline written before #522
-			// lost unsigned values past the signed range that way — is a
-			// row the scan refuses when it reaches it. A join would never
-			// reach it (NULL matches nothing), so the NULL rows are let
-			// through beside the matches and refused as they arrive in Go
-			// (#2496): one pass over the key columns, where the probe that
-			// used to run first was a second full pass. A window whose keys
-			// are all outside what the columns can hold has nothing to
-			// join, and still makes the pass for the NULL rows.
-			preds := make([]string, len(quoted))
-			for i, c := range quoted {
-				preds[i] = "b." + c + " IS NULL"
-			}
-			q += " WHERE (" + strings.Join(preds, " OR ") + ")"
-			if n > 0 {
-				on := make([]string, len(quoted))
-				cols := make([]string, len(quoted))
-				for i, c := range quoted {
-					on[i] = "b." + c + " = t." + c
-					cols[i] = "'" + strings.ReplaceAll(names[i], "'", "''") + "': '" + types[i] + "'"
-				}
-				q += fmt.Sprintf(" OR EXISTS (SELECT 1 FROM read_csv('%s', header=false, auto_detect=false, delim=',', new_line='\\n', columns={%s}) AS t WHERE %s)",
-					strings.ReplaceAll(csvPath, "'", "''"), strings.Join(cols, ", "), strings.Join(on, " AND "))
-			}
 		}
 	}
+	q := basePositionsQuery(scanSQL, names, quoted, types, csvPath, n)
 	st.BaseReads++
 	rows, err := ddb.QueryContext(ctx, q)
 	if err != nil {
@@ -531,6 +509,50 @@ func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string
 	}
 	slices.Sort(out)
 	return out, st, nil
+}
+
+// basePositionsQuery is the one DuckDB query a lookup reads the base's key
+// columns with. With types nil it is the scan: every base row's keys and
+// row number, for Go to check. With types (the join), it is two branches
+// over the same scan in one statement: the base SEMI-joined against the
+// touched keys in csvPath (n rows), UNION ALL the base rows whose key holds
+// NULL. The semi join is kept as a SEMI JOIN on purpose (#2496): DuckDB
+// plans it with a dynamic filter from the touched keys' range, which prunes
+// row groups off the Parquet scan; folding the NULL check into the same
+// branch (`... OR EXISTS`) turned it into a MARK join and lost that. A key
+// column that holds NULL — a baseline written before #522 lost unsigned
+// values past the signed range that way — is a row the scan refuses when it
+// reaches it; a join never reaches it (NULL matches nothing), so the second
+// branch delivers such rows for Go to refuse the same way, in the same
+// statement, reading only the key columns. n == 0 (every touched key is
+// outside what the columns can hold, so no base row can match) keeps the
+// NULL branch alone. A test pins the plan.
+func basePositionsQuery(scanSQL string, names, quoted, types []string, csvPath string, n int) string {
+	sel := make([]string, len(quoted))
+	for i, c := range quoted {
+		sel[i] = "b." + c + " AS " + c
+	}
+	head := "SELECT " + strings.Join(sel, ", ") + ", b.file_row_number FROM " + scanSQL + " AS b"
+	if types == nil {
+		return head
+	}
+	preds := make([]string, len(quoted))
+	for i, c := range quoted {
+		preds[i] = "b." + c + " IS NULL"
+	}
+	nullBranch := head + " WHERE (" + strings.Join(preds, " OR ") + ")"
+	if n == 0 {
+		return nullBranch
+	}
+	on := make([]string, len(quoted))
+	cols := make([]string, len(quoted))
+	for i, c := range quoted {
+		on[i] = "b." + c + " = t." + c
+		cols[i] = "'" + strings.ReplaceAll(names[i], "'", "''") + "': '" + types[i] + "'"
+	}
+	return head + fmt.Sprintf(" SEMI JOIN read_csv('%s', header=false, auto_detect=false, delim=',', new_line='\\n', columns={%s}) AS t ON %s",
+		strings.ReplaceAll(csvPath, "'", "''"), strings.Join(cols, ", "), strings.Join(on, " AND ")) +
+		" UNION ALL " + nullBranch
 }
 
 // duckDBIntegerWidths is the DuckDB type of an integer key column as the
@@ -1081,6 +1103,11 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	// What the lookup costs goes on the report (#2496): one pass from memory,
 	// summed over the passes of a spilled window.
 	lookup := func(pass map[string]*query.ResultRow) ([]int64, error) {
+		if len(pass) == 0 {
+			// Nothing to look up: the report says so with a zero, not with
+			// the nanoseconds of an early return.
+			return nil, nil
+		}
 		start := time.Now()
 		pos, st, err := lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, pass, p.cfg.DuckDBTuning)
 		rep.LookupDuration += time.Since(start)
