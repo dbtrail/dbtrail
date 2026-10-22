@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,10 +22,15 @@ func TestTailFollower(t *testing.T) {
 	orders, customers := keeperTable("orders"), keeperTable("customers")
 	ko := tailKey("shop", "orders")
 	s := &Server{}
+	// The clock is read by builds on their own goroutines (install) and
+	// moved by the test: under a lock, or the race detector sees the write.
+	var clockMu sync.Mutex
 	clock := time.Date(2026, 10, 21, 13, 0, 0, 0, time.UTC)
+	now := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }
+	tick := func(d time.Duration) { clockMu.Lock(); clock = clock.Add(d); clockMu.Unlock() }
 	newKeeper := func(f *fakeIndex) *tailKeeper {
-		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
-		k.now = func() time.Time { return clock }
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+		k.now = now
 		return k
 	}
 	follow := func(k *tailKeeper) {
@@ -146,14 +152,14 @@ func TestTailFollower(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
 		k := newKeeper(f)
-		k.pub.updating, k.pub.started = true, clock
+		k.pub.updating, k.pub.started = true, now()
 		if _, _, ok := s.statementTails(ctx, k, one(orders), one(orders)); ok || updates(k) != 0 {
 			t.Fatalf("tails %v, updates %d", ok, updates(k))
 		}
 		if k.pub.stuck {
 			t.Fatal("said stuck within its deadline")
 		}
-		clock = clock.Add(2*k.pub.deadline + time.Second)
+		tick(2*k.pub.deadline + time.Second)
 		s.statementTails(ctx, k, one(orders), one(orders))
 		if !k.pub.stuck {
 			t.Error("an update far past its deadline was not said")
@@ -188,10 +194,10 @@ func TestTailFollower(t *testing.T) {
 		f.add("customers", "9")
 		k := newKeeper(f)
 		s.statementTails(ctx, k, one(orders), one(orders))
-		clock = clock.Add(30 * time.Second)
+		tick(30 * time.Second)
 		s.statementTails(ctx, k, one(customers), one(customers))
 		k.settle()
-		clock = clock.Add(45 * time.Second) // orders asked 75 s ago, customers 45 s
+		tick(45 * time.Second) // orders asked 75 s ago, customers 45 s
 		follow(k)
 		k.pub.mu.Lock()
 		_, hasOrders := k.pub.cuts[ko]
@@ -199,7 +205,7 @@ func TestTailFollower(t *testing.T) {
 		if hasOrders {
 			t.Error("a table no statement asked for in idle was brought up to date")
 		}
-		clock = clock.Add(time.Minute)
+		tick(time.Minute)
 		k.pub.running = true // as the goroutine would be
 		if k.followOnce(ctx, time.Minute) {
 			t.Fatal("the follower went on with no table asked for")
@@ -214,7 +220,7 @@ func TestTailFollower(t *testing.T) {
 	t.Run("the goroutine: started by a statement, ended by close", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
-		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.pub.auto, k.pub.every = true, 5*time.Millisecond
 		read := one(orders)
 		s.statementTails(ctx, k, read, read)
@@ -241,7 +247,7 @@ func TestTailFollower(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
 		armed := &atomic.Bool{}
-		k := newTailKeeper(panicIndex{f, armed}, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(panicIndex{f, armed}, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.pub.auto, k.pub.every = true, 5*time.Millisecond
 		defer k.close()
 		read := one(orders)

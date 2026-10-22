@@ -20,6 +20,7 @@ import (
 // fakeIndex is a tailSource over events held in memory, ids in the order
 // they were indexed, handed out two at a time.
 type fakeIndex struct {
+	rowBytes int64 // what each fakeTail counts per key (Bytes)
 	// mu guards every field against the keeper's background builds; a test
 	// changes a field only while no build reads it (before one starts, or
 	// after settle).
@@ -104,7 +105,7 @@ func (f *fakeIndex) Start(_ context.Context, t views.BaselineTable) (tailTable, 
 	if why := f.startWhy[tailKey(t.Schema, t.Table)]; why != "" {
 		return nil, why, nil
 	}
-	return &fakeTail{writeErr: &f.writeErr}, "", nil
+	return &fakeTail{writeErr: &f.writeErr, rowBytes: f.rowBytes}, "", nil
 }
 
 func (f *fakeIndex) hand(evs []query.ResultRow, page func([]query.ResultRow) error) error {
@@ -245,6 +246,7 @@ func (f *fakeIndex) at(id uint64) time.Time { return f.events[id-1].EventTimesta
 // keys, one per line.
 type fakeTail struct {
 	keys     map[string]query.ResultRow
+	rowBytes int64 // what Bytes counts per key; 0 counts 1
 	applyErr error
 	writeErr *error
 	pruneErr error
@@ -280,6 +282,7 @@ func (t *fakeTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, er
 	return n, nil
 }
 func (t *fakeTail) Keys() int           { return len(t.keys) }
+func (t *fakeTail) Bytes() int64        { return int64(len(t.keys)) * max(1, t.rowBytes) }
 func (t *fakeTail) PKColumns() []string { return []string{"id"} }
 func (t *fakeTail) WriteFile(path string) (int64, error) {
 	if t.writeErr != nil && *t.writeErr != nil {
@@ -343,7 +346,7 @@ func TestTailKeeper(t *testing.T) {
 	ko, kc := tailKey("shop", "orders"), tailKey("shop", "customers")
 	clock := time.Date(2026, 10, 14, 13, 0, 0, 0, time.UTC)
 	newKeeper := func(f *fakeIndex) *tailKeeper {
-		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
 		k.retryMin, k.retryMax = 0, 0
 		return k
@@ -923,7 +926,7 @@ func TestTailKeeper(t *testing.T) {
 		for range 2 {
 			f := &fakeIndex{}
 			f.add("orders", "1")
-			k := newTailKeeper(f, parent, 3, time.Minute, time.Hour)
+			k := newTailKeeper(f, parent, tailBudget{Keys: 3}, time.Minute, time.Hour)
 			refresh(t, k, orders)
 			dirs = append(dirs, k.dir)
 		}
@@ -971,7 +974,7 @@ func TestTailKeeper_pruneToANewerCut(t *testing.T) {
 	ko := tailKey("shop", "orders")
 	clock := time.Date(2026, 10, 14, 13, 0, 0, 0, time.UTC)
 	newKeeper := func(f *fakeIndex) *tailKeeper {
-		k := newTailKeeper(f, t.TempDir(), 10, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 10}, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
 		k.retryMin, k.retryMax = 0, 0
 		return k
@@ -1163,7 +1166,7 @@ func TestTailKeeper_aCutAheadOfTheCursor(t *testing.T) {
 	orders := keeperTable("orders")
 	ko := tailKey("shop", "orders")
 	newKeeper := func(f *fakeIndex) *tailKeeper {
-		k := newTailKeeper(f, t.TempDir(), 10, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 10}, time.Minute, time.Hour)
 		k.retryMin, k.retryMax = 0, 0
 		return k
 	}

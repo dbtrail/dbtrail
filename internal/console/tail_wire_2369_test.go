@@ -44,7 +44,9 @@ func TestStatementTailsAllOrNothing(t *testing.T) {
 	ctx := context.Background()
 	orders, customers := keeperTable("orders"), keeperTable("customers")
 	s := &Server{}
-	newKeeper := func(f *fakeIndex) *tailKeeper { return newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour) }
+	newKeeper := func(f *fakeIndex) *tailKeeper {
+		return newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	}
 	tables := []views.BaselineTable{orders, customers}
 	// follow is the follower's update after the builds an earlier one
 	// started are in, then another that publishes them.
@@ -153,7 +155,7 @@ func TestTailsSayTheInstant(t *testing.T) {
 
 // Failures that leave every statement without tails are said once per reason.
 func TestTailKeeperNote(t *testing.T) {
-	k := newTailKeeper(&fakeIndex{}, t.TempDir(), 3, time.Minute, time.Hour)
+	k := newTailKeeper(&fakeIndex{}, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 	k.note(errors.New("denied"))
 	if k.failing != "denied" {
 		t.Fatalf("failing %q", k.failing)

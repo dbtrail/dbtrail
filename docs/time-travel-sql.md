@@ -771,8 +771,10 @@ row of an hour ago. A table has no tail when:
 - its primary key is not made of integers;
 - its definition changed since its snapshot, capture lost events since, or
   the source server changed;
-- more than 200,000 rows changed since its snapshot (its tail then stops
-  advancing until the next snapshot);
+- more keys changed since its snapshot than its budget holds, or the tails
+  together hold more memory than theirs (`BINTRAIL_SQL_TAIL_MAX_KEYS`,
+  `BINTRAIL_SQL_TAIL_MAX_BYTES`, below): its tail then stops advancing
+  until the next snapshot;
 - capture does not record it, or `bintrail index` also wrote the index;
 - its tail is being built (the first statement over it, or the first after
   a newer snapshot of it that the tail cannot be moved to), until the build
@@ -787,6 +789,30 @@ another `WITH`, for one) reads no tails either.
 
 `BINTRAIL_SQL_TAILS=off` turns tails off, and the copy answers as it was at
 its last snapshot. The console's own SQL card always reads the snapshot.
+
+Two budgets bound the tails, because they live in the router's memory:
+
+- `BINTRAIL_SQL_TAIL_MAX_KEYS` is the most keys one table's tail holds,
+  500,000 when unset. A table whose changes since its snapshot pass it
+  freezes its tail: statements keep reading the changes it holds, nothing
+  newer, until the next snapshot is published and the tail is rebuilt. The
+  router logs it as "a table's tail is over its budget" with the reason. A
+  source that changes more keys than that inside one refresh interval wants
+  a higher value, or a shorter interval.
+- `BINTRAIL_SQL_TAIL_MAX_BYTES` is the most memory every tail of one
+  server together may hold, by the router's own estimate: one fifth of the
+  memory the process may use when unset (none when that is unknown), a size
+  such as `2GiB` to set it, `0` or `off` for no bound. A router that serves
+  several servers gives each its own share. The table whose fold would pass
+  it is the one that freezes, with a reason that says memory, not keys; and
+  while the frozen tails keep the total at the bound, every other table's
+  tail that changes freezes too, until the next snapshot rebuilds them.
+  The estimate counts the rows the tails hold, not every byte Go keeps
+  around them, so it is a budget to size, not a ceiling the process cannot
+  pass.
+
+A value of either that cannot be read is warned in the router's log when the
+port first reads tails, and the default stands.
 
 This is the trade a read/write split through a proxy already makes: on one
 connection a cheap statement is answered by MySQL as it is now, and an

@@ -2,9 +2,11 @@ package console
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,13 +22,22 @@ import (
 // port's statements (SQLOnCopy.Run) do; the console's own SQL card reads
 // the published copy. BINTRAIL_SQL_TAILS=off turns tails off.
 
-// Tail budgets: keys one tail may hold, how long a replaced version stays for
-// a statement that may still read it, how long a tail no statement asked for
-// is kept.
+// Tail budgets: keys one tail may hold and memory all of them may (#2494,
+// tailBudgetFor), how long a replaced version stays for a statement that may
+// still read it, how long a tail no statement asked for is kept.
 const (
-	tailMaxKeys = 200_000
-	tailKeepOld = 30 * time.Minute
-	tailIdle    = 30 * time.Minute
+	// tailDefaultMaxKeys is BINTRAIL_SQL_TAIL_MAX_KEYS when it is not set: a
+	// TPC-C source at about 900 rows changed a second passes 200,000 keys on
+	// its busiest tables inside a 5-minute refresh interval.
+	tailDefaultMaxKeys = 500_000
+	// tailBytesShare is the share of the memory this process may use that
+	// every tail of ONE SERVER together may hold when
+	// BINTRAIL_SQL_TAIL_MAX_BYTES is not set: one fifth. A router that
+	// serves several servers gives each its fifth. The rest is the statements' (--sql-memory each), the
+	// views' footers and Go's own heap.
+	tailBytesShare = 5
+	tailKeepOld    = 30 * time.Minute
+	tailIdle       = 30 * time.Minute
 	// tailBuildTimeout bounds one background build of a table's tail; a
 	// failed one is tried again after tailRetryMin, doubling to tailRetryMax.
 	tailBuildTimeout = 2 * time.Minute
@@ -84,7 +95,7 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 			return old
 		}
 	}
-	k := newTailKeeper(newIndexTailSource(s, b).capturing(captures), os.TempDir(), tailMaxKeys, tailKeepOld, tailIdle)
+	k := newTailKeeper(newIndexTailSource(s, b).capturing(captures), os.TempDir(), tailBudgetFromEnv(), tailKeepOld, tailIdle)
 	k.pub.auto = true
 	if s.tails.by == nil {
 		s.tails.by = map[string]*tailKeeper{}
@@ -221,4 +232,46 @@ func (s *Server) TidyTails() {
 	for _, k := range live {
 		k.tidy()
 	}
+}
+
+// tailBudgetFromEnv is the process's tail budget, read once from
+// BINTRAIL_SQL_TAIL_MAX_KEYS and BINTRAIL_SQL_TAIL_MAX_BYTES and the memory
+// the process may use; a value that cannot be read is warned once and the
+// default stands.
+var tailBudgetFromEnv = sync.OnceValue(func() tailBudget {
+	b, warnings := tailBudgetFor(os.Getenv("BINTRAIL_SQL_TAIL_MAX_KEYS"), os.Getenv("BINTRAIL_SQL_TAIL_MAX_BYTES"), HostMemoryBytes())
+	for _, w := range warnings {
+		slog.Warn("Engine Routing: " + w)
+	}
+	slog.Info("Engine Routing: the budget of the copy's tails", "max_keys_per_table", b.Keys, "max_bytes_all_tables", b.Bytes)
+	return b
+})
+
+// tailBudgetFor reads the two settings over host, the bytes this process
+// may use (0 unknown). Keys: a whole number above 0, else the default.
+// Bytes: a size (1GiB, 512MB, ...), 0 or "off" for no bound, else one
+// tailBytesShare-th of host, which is no bound when host is unknown.
+func tailBudgetFor(keysRaw, bytesRaw string, host uint64) (b tailBudget, warnings []string) {
+	b.Keys = tailDefaultMaxKeys
+	if raw := strings.TrimSpace(keysRaw); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			b.Keys = n
+		} else {
+			warnings = append(warnings, fmt.Sprintf("BINTRAIL_SQL_TAIL_MAX_KEYS=%q is not a whole number above 0; the default of %d keys per table stands", raw, tailDefaultMaxKeys))
+		}
+	}
+	b.Bytes = int64(host / tailBytesShare)
+	if raw := strings.TrimSpace(bytesRaw); raw != "" {
+		switch {
+		case raw == "0" || strings.EqualFold(raw, "off"):
+			b.Bytes = 0
+		default:
+			if n, err := cliutil.ParseByteSize(raw); err == nil && n > 0 {
+				b.Bytes = n
+			} else {
+				warnings = append(warnings, fmt.Sprintf("BINTRAIL_SQL_TAIL_MAX_BYTES=%q is not a size (write it like 1GiB or 512MB, or 0 for no bound); the default of %d MiB for all tails together stands", raw, b.Bytes>>20))
+			}
+		}
+	}
+	return b, warnings
 }

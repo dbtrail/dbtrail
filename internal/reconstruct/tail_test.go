@@ -638,3 +638,34 @@ func TestTail_pruneThrough(t *testing.T) {
 		}
 	})
 }
+
+// TestTail_bytes: the heap estimate a keeper bounds tails by (#2494) is 0
+// for an empty tail and grows with the keys held.
+func TestTail_bytes(t *testing.T) {
+	dir := t.TempDir()
+	base := writeTailBase(t, dir, "orders.parquet", tailOrdersDDL, map[string]string{"id": "1", "status": "one"})
+	tail, err := NewTail("shop", "orders", tailOrdersDDL, base, tailOrdersPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tail.Bytes(); got != 0 {
+		t.Fatalf("empty tail: %d bytes", got)
+	}
+	var page []query.ResultRow
+	for i := uint64(10); i < 13; i++ {
+		page = append(page, tailEvent(i, event.EventInsert, fmt.Sprint(i), "row", i*10))
+	}
+	if err := tail.Apply(page); err != nil {
+		t.Fatal(err)
+	}
+	three := tail.Bytes()
+	for i := uint64(20); i < 26; i++ {
+		page = append(page, tailEvent(i, event.EventInsert, fmt.Sprint(i), "row", i*10))
+	}
+	if err := tail.Apply(page); err != nil {
+		t.Fatal(err)
+	}
+	if nine := tail.Bytes(); three <= 0 || nine <= three {
+		t.Fatalf("bytes do not grow with keys: 3 keys %d, 9 keys %d", three, nine)
+	}
+}

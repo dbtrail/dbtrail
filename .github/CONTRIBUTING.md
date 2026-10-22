@@ -193,6 +193,41 @@ go test -tags integration -coverprofile=cover.out ./... -count=1
 go tool cover -func=cover.out
 ```
 
+### The correctness oracle
+
+`internal/oracle` is a safety net over the whole copy pipeline (#2499): a
+deterministic generator runs random DML on a real MySQL source (five tables
+in a schema of their own: integer, composite and text primary keys, DECIMAL
+and DATETIME columns, a unique secondary key; updates, inserts, deletes,
+reinserts of deleted keys, key-changing updates, multi-row statements,
+transactions, bursts; keys drawn from a small set with two hot keys), through
+the real capture (`streamrun.One`). At the end of every step it reads the
+source's binlog position, waits until capture's checkpoint reaches it, reads
+every table, applies one step to the copy by seed — a snapshot cut or a
+refresh with table deltas (`reconstruct.ReconstructTables`) — and reads the
+copy the way the MySQL port does (the real views SQL, executed in DuckDB).
+Three checks, in order: every primary key appears once in the copy, the row
+count equals the source's, and every row equals the source's row in canonical
+text. A failure prints the seed, the step, the table, the key, both rows, the
+snapshot's files with their sizes and the one-line command that replays it.
+
+```sh
+go test -tags integration -run TestOracle -count=1 ./internal/oracle/
+```
+
+- `BINTRAIL_ORACLE_SEEDS=N` runs seeds 1..N (default 3); `BINTRAIL_ORACLE_SEED=N`
+  replays one seed, which is what a failure message tells you to run.
+- `BINTRAIL_ORACLE_STEPS=N` is the number of steps per seed (default 12).
+- `BINTRAIL_ORACLE_TABLES=t_int,t_text` narrows the run to some tables.
+- `BINTRAIL_ORACLE_REQUIRE=1` makes a missing MySQL a failure instead of a skip.
+- It uses `BINTRAIL_TEST_DSN` like every other integration test.
+
+One rule: **a seed that fails never widens the oracle.** The product is fixed,
+or an issue is filed with the seed; the oracle itself does not learn to
+tolerate the difference. The generator's unit tests (same seed, same
+statements; keys stay in the set; a reinsert only after a delete) run without
+MySQL.
+
 ## Pull request checklist
 
 - [ ] `go test ./...` passes

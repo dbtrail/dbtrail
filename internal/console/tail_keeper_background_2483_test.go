@@ -24,7 +24,7 @@ func TestTailKeeper_buildsInTheBackground(t *testing.T) {
 	ko, kc := tailKey("shop", "orders"), tailKey("shop", "customers")
 	clock := time.Date(2026, 10, 14, 13, 0, 0, 0, time.UTC)
 	newKeeper := func(f *fakeIndex) *tailKeeper {
-		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
 		k.retryMin, k.retryMax = 0, 0
 		return k

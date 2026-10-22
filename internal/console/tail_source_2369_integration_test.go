@@ -35,7 +35,7 @@ func newTailRig(t *testing.T) (*unchangedRig, *tailKeeper) {
 		}}
 	}
 	r.b.resolver = metadata.NewResolverFromTables(1, tables)
-	return r, newTailKeeper(newIndexTailSource(r.s, r.b).capturing(nil), t.TempDir(), 1000, time.Minute, time.Hour)
+	return r, newTailKeeper(newIndexTailSource(r.s, r.b).capturing(nil), t.TempDir(), tailBudget{Keys: 1000}, time.Minute, time.Hour)
 }
 
 // change indexes a row event of shop.table: id's status becomes status.
