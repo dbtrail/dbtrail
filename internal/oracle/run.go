@@ -21,6 +21,9 @@ type Run struct {
 	Tables []Table
 	Source *sql.DB
 	Index  *sql.DB
+	// Capture is where the capture goroutine's result lands (buffered). A
+	// result there while a barrier waits fails the run with it at once.
+	Capture chan error
 	// Root is the baselines root the copy lives under.
 	Root string
 
@@ -31,8 +34,9 @@ type Run struct {
 	// refuses it (Refuser) for a reason the generator caused. nil = fail.
 	Fallback Step
 	// Read builds the port's read of the copy: the views SQL and the
-	// snapshot directory it reads. nil = PortViews over Root.
-	Read func(ctx context.Context, now time.Time) (sqlText, snapshotDir string, err error)
+	// snapshot directory it reads, with the DATETIME columns as wall clocks
+	// or as the files hold them. nil = PortViews over Root.
+	Read func(ctx context.Context, now time.Time, wallClock bool) (sqlText, snapshotDir string, err error)
 	// OpenDuckDB opens the session the views run in. nil = an in-memory
 	// DuckDB.
 	OpenDuckDB func() (*sql.DB, error)
@@ -70,7 +74,9 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 	}
 	read := r.Read
 	if read == nil {
-		read = func(ctx context.Context, now time.Time) (string, string, error) { return PortViews(ctx, r.Root, now) }
+		read = func(ctx context.Context, now time.Time, wallClock bool) (string, string, error) {
+			return PortViews(ctx, r.Root, now, wallClock)
+		}
 	}
 	open := r.OpenDuckDB
 	if open == nil {
@@ -108,7 +114,7 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 		if cut.At, err = r.nextCutTime(ctx, lastAt); err != nil {
 			return res, fmt.Errorf("seed %d step %d: %w", r.Seed, step, err)
 		}
-		if _, err := WaitCaptured(ctx, r.Index, pos, barrier); err != nil {
+		if _, err := WaitCaptured(ctx, r.Index, r.Capture, pos, barrier); err != nil {
 			return res, fmt.Errorf("seed %d step %d: %w", r.Seed, step, err)
 		}
 		for _, t := range r.Tables {
@@ -140,13 +146,23 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 		res.Applied[name]++
 		lastAt = cut.At
 
-		sqlText, dir, err := read(ctx, cut.At)
-		if err != nil {
-			return res, fmt.Errorf("seed %d step %d: read the copy after %s: %w", r.Seed, step, name, err)
-		}
-		cx := Context{Seed: r.Seed, Step: step, Steps: r.Steps, StepName: name, SnapshotDir: dir}
-		if err := r.check(ctx, open, sqlText, cx, cut); err != nil {
-			return res, err
+		// The copy is read twice, the two ways the port reads it (the
+		// console's sqlWallClockDatetimes): under a session zone other than
+		// UTC, with the DATETIME columns cast to wall clocks in the view; and
+		// under UTC, with them left as the files hold them, where the read
+		// formats the wall clock itself. Both must equal the source; a zone
+		// bug in either path shows against the other.
+		var dir string
+		for _, s := range sessions {
+			sqlText, d, err := read(ctx, cut.At, s.wallClock)
+			if err != nil {
+				return res, fmt.Errorf("seed %d step %d: read the copy after %s: %w", r.Seed, step, name, err)
+			}
+			dir = d
+			cx := Context{Seed: r.Seed, Step: step, Steps: r.Steps, StepName: name, Session: s.zone, SnapshotDir: dir}
+			if err := r.check(ctx, open, s, sqlText, cx, cut); err != nil {
+				return res, err
+			}
 		}
 		res.Steps = step
 		logf("seed %d step %d: %d ops, %s at %s, copy %s equals the source", r.Seed, step, ops, name, pos, dir)
@@ -155,13 +171,23 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 	return res, nil
 }
 
-func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), sqlText string, cx Context, cut *Cut) error {
+// session is one way of reading the copy: the DuckDB session zone, whether
+// the view casts DATETIME columns to wall clocks, and whether the read must
+// format them itself.
+type session struct {
+	zone      string
+	wallClock bool
+}
+
+var sessions = []session{{"America/Bogota", true}, {"UTC", false}}
+
+func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), s session, sqlText string, cx Context, cut *Cut) error {
 	ddb, err := open()
 	if err != nil {
 		return fmt.Errorf("seed %d step %d: open DuckDB: %w", r.Seed, cx.Step, err)
 	}
 	defer ddb.Close()
-	if _, err := ddb.ExecContext(ctx, "SET TimeZone = 'UTC'"); err != nil {
+	if _, err := ddb.ExecContext(ctx, "SET TimeZone = '"+s.zone+"'"); err != nil {
 		return fmt.Errorf("seed %d step %d: %w", r.Seed, cx.Step, err)
 	}
 	if _, err := ddb.ExecContext(ctx, sqlText); err != nil {
@@ -169,9 +195,13 @@ func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), sqlText s
 	}
 	for _, t := range r.Tables {
 		source := cut.Rows[t.Name]
-		view, err := ReadView(ctx, ddb, r.Schema, t.Name, source.Columns, source.PK)
+		var datetimes []string
+		if !s.wallClock {
+			datetimes = t.Datetimes
+		}
+		view, err := ReadView(ctx, ddb, r.Schema, t.Name, source.Columns, source.PK, datetimes)
 		if err != nil {
-			return fmt.Errorf("seed %d step %d (%s): %w", r.Seed, cx.Step, cx.StepName, err)
+			return fmt.Errorf("seed %d step %d (%s, session %s): %w", r.Seed, cx.Step, cx.StepName, s.zone, err)
 		}
 		if err := Check(cx, source, view); err != nil {
 			return err

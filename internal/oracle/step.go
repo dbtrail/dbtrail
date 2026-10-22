@@ -235,10 +235,12 @@ func (s *RefreshStep) Refused(err error, cut *Cut) bool {
 // PortViews is the port's read of the copy under root, as `bintrail views`
 // and the console's SQL on the copy build it: the newest complete snapshot,
 // each table marked with the delta chain beside it and the column types of
-// its footer, the DATETIME columns read as wall clocks, rendered to the
-// views SQL pinned to that snapshot. It returns the SQL and the snapshot
-// directory it reads.
-func PortViews(ctx context.Context, root string, now time.Time) (sqlText, snapshotDir string, err error) {
+// its footer, rendered to the views SQL pinned to that snapshot. wallClock
+// is what the console sets for a statement under a session time zone other
+// than UTC (the DATETIME columns cast to zone-less timestamps); under UTC
+// it leaves them as the files hold them. It returns the SQL and the
+// snapshot directory it reads.
+func PortViews(ctx context.Context, root string, now time.Time, wallClock bool) (sqlText, snapshotDir string, err error) {
 	files, _, err := reconstruct.ListBaselinesReport(ctx, root)
 	if err != nil {
 		return "", "", fmt.Errorf("list the snapshots under %s: %w", root, err)
@@ -269,7 +271,7 @@ func PortViews(ctx context.Context, root string, now time.Time) (sqlText, snapsh
 		if !in.Baselines[i].SchemaKnown {
 			return "", "", fmt.Errorf("%s.%s: the snapshot does not record the column types", in.Baselines[i].Schema, in.Baselines[i].Table)
 		}
-		in.Baselines[i].WallClockDatetimes = true
+		in.Baselines[i].WallClockDatetimes = wallClock
 	}
 	return views.Generate(in), snapshotDir, nil
 }

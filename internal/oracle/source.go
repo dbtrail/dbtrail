@@ -73,7 +73,10 @@ func ServerNow(ctx context.Context, db *sql.DB) (time.Time, error) {
 // TableRows is a table's rows as canonical text: every column in SELECT *
 // order, each cell the server's text for the value (CAST AS CHAR) or "NULL".
 // Nulls says which cells are NULL, for a writer that must tell a NULL from
-// the text "NULL".
+// the text "NULL". The comparison itself cannot: a VARCHAR holding the four
+// letters NULL compares equal to a NULL on both sides. The generator never
+// writes that text, so the oracle does not see the difference it cannot
+// tell.
 type TableRows struct {
 	Table   string
 	Columns []string
@@ -82,7 +85,11 @@ type TableRows struct {
 	Nulls   [][]bool
 }
 
-// Key renders row i's primary key, its PK cells joined with "|".
+// Key renders row i's primary key, its PK cells joined with "|". The
+// separator is not escaped: a composite key whose cells hold "|" could
+// collide with another, and the five tables' keys are integers and
+// 'kNNN' text, which never do. A table with a "|" in a key column needs an
+// escaped join here first.
 func (r TableRows) Key(i int) string {
 	return keyOf(r.Columns, r.PK, r.Rows[i])
 }
@@ -180,12 +187,43 @@ func CheckpointPosition(ctx context.Context, index *sql.DB) (Position, bool, err
 // WaitCaptured is the barrier: it returns once capture's checkpoint is at or
 // past want, and fails after timeout naming both positions. A position, not
 // an event count: an UPDATE that changes nothing writes no row event, and
-// the checkpoint still moves past it.
-func WaitCaptured(ctx context.Context, index *sql.DB, want Position, timeout time.Duration) (Position, error) {
-	return waitPosition(ctx, func(ctx context.Context) (Position, bool, error) { return CheckpointPosition(ctx, index) }, want, timeout, 100*time.Millisecond)
+// the checkpoint still moves past it. The zero want is "any checkpoint",
+// the wait for capture to attach.
+//
+// capture, when non-nil, is the channel the capture goroutine's result
+// lands on: a result there while the barrier waits fails it at once with
+// that result (nil included: a capture that exited cleanly indexes nothing
+// more), so a capture that died mid-run is reported as such and not as a
+// deadline. The result is put back on the channel for whoever stops the
+// capture; the channel must therefore be buffered.
+func WaitCaptured(ctx context.Context, index *sql.DB, capture chan error, want Position, timeout time.Duration) (Position, error) {
+	poll := func(ctx context.Context) (Position, bool, error) { return CheckpointPosition(ctx, index) }
+	return waitPosition(ctx, withCapture(poll, capture), want, timeout, 100*time.Millisecond)
 }
 
-func waitPosition(ctx context.Context, poll func(context.Context) (Position, bool, error), want Position, timeout, every time.Duration) (Position, error) {
+type pollFunc func(context.Context) (Position, bool, error)
+
+// withCapture makes poll fail when the capture's result has landed on
+// capture, putting the result back for the caller that owns the goroutine.
+func withCapture(poll pollFunc, capture chan error) pollFunc {
+	if capture == nil {
+		return poll
+	}
+	return func(ctx context.Context) (Position, bool, error) {
+		select {
+		case err := <-capture:
+			capture <- err
+			if err == nil {
+				return Position{}, false, errors.New("the capture stopped (it returned nil) while the barrier waited; nothing indexes the rest of the run")
+			}
+			return Position{}, false, fmt.Errorf("the capture stopped while the barrier waited: %w", err)
+		default:
+		}
+		return poll(ctx)
+	}
+}
+
+func waitPosition(ctx context.Context, poll pollFunc, want Position, timeout, every time.Duration) (Position, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		have, ok, err := poll(ctx)

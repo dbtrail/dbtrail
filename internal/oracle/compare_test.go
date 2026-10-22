@@ -1,6 +1,8 @@
 package oracle
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -49,11 +51,11 @@ func checkFails(t *testing.T, cx Context, source, copy TableRows, want ...string
 // data and checks it carries the seed, the step, the table, the key, both
 // rows, the snapshot's files with their sizes and the reproduction command.
 func TestCheck_messageCarriesEverything(t *testing.T) {
-	cx := Context{Seed: 7, Step: 3, Steps: 10, StepName: "refresh", SnapshotDir: snapshotDirWithFiles(t)}
+	cx := Context{Seed: 7, Step: 3, Steps: 10, StepName: "refresh", Session: "America/Bogota", SnapshotDir: snapshotDirWithFiles(t)}
 	source := rowsOf("t_int", []string{"1", "10", "a"}, []string{"2", "20", "NULL"})
 	copy := rowsOf("t_int", []string{"1", "10", "a"}, []string{"2", "21", "NULL"})
 	f := checkFails(t, cx, source, copy,
-		"seed 7", "step 3 of 10", "refresh", "table t_int", "key 2", "column v",
+		"seed 7", "step 3 of 10", "(refresh, session America/Bogota)", "table t_int", "key 2", "column v",
 		"source: id=2, v=20, note=NULL", "copy:   id=2, v=21, note=NULL",
 		"sch/t_int.parquet 1234 bytes", "sch/t_int.000001.posdel 56 bytes", "sch/t_int.000001.upserts 789 bytes", "_SUCCESS 0 bytes",
 		"BINTRAIL_ORACLE_SEED=7 BINTRAIL_ORACLE_STEPS=10 go test -tags integration -run TestOracle ./internal/oracle/")
@@ -104,6 +106,43 @@ func TestCheck_compositeKeyAndNullText(t *testing.T) {
 	src := TableRows{Table: "t_comp", Columns: []string{"a", "b", "v"}, PK: []string{"a", "b"}, Rows: [][]string{{"1", "2", "5"}}}
 	cp := TableRows{Table: "t_comp", Columns: []string{"a", "b", "v"}, PK: []string{"a", "b"}, Rows: [][]string{{"1", "2", "6"}}}
 	checkFails(t, cx, src, cp, "key 1|2", "column v")
+}
+
+// TestReadView_datetimeText runs ReadView against a real DuckDB session, the
+// two ways the run reads the copy: a DATETIME column read as TIMESTAMPTZ
+// under a UTC session prints a zone suffix unless the read names it as a
+// datetime and formats the wall clock; NULL reads as NULL either way.
+func TestReadView_datetimeText(t *testing.T) {
+	ddb, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ddb.Close()
+	ctx := context.Background()
+	for _, q := range []string{
+		"SET TimeZone = 'UTC'",
+		"CREATE SCHEMA sch",
+		"CREATE VIEW sch.t_types AS SELECT 1 AS id, TIMESTAMPTZ '2027-01-02 03:04:05+00' AS seen, NULL::TIMESTAMPTZ AS seen2, 12.30::DECIMAL(12,2) AS amount",
+	} {
+		if _, err := ddb.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	cols := []string{"id", "seen", "seen2", "amount"}
+	got, err := ReadView(ctx, ddb, "sch", "t_types", cols, []string{"id"}, []string{"seen", "seen2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"1", "2027-01-02 03:04:05", "NULL", "12.30"}; strings.Join(got.Rows[0], ",") != strings.Join(want, ",") {
+		t.Fatalf("normalized read = %v, want %v", got.Rows[0], want)
+	}
+	raw, err := ReadView(ctx, ddb, "sch", "t_types", cols, []string{"id"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.Rows[0][1] != "2027-01-02 03:04:05+00" {
+		t.Fatalf("raw read of a TIMESTAMPTZ = %q; the normalization above exists because this is not the source's text", raw.Rows[0][1])
+	}
 }
 
 func TestFilesUnder_missingDir(t *testing.T) {

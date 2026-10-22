@@ -35,13 +35,17 @@ const (
 	KindBurst    Kind = "burst"     // MinBurst..MaxBurst statements in one transaction
 )
 
-// Weights are the issue's operation weights, drawn over their sum.
+// Weights are the operation weights, drawn over their sum. The issue gave
+// the PK-changing update 7; it is 2 here because the fold refuses every
+// window holding one (reconstruct's #782 guard) and the run then takes a
+// snapshot instead of a refresh, so at 7 most cuts were snapshots and the
+// chain of delta pairs, the thing this net watches, rarely grew.
 var Weights = []struct {
 	Kind   Kind
 	Weight int
 }{
 	{KindUpdate, 30}, {KindInsert, 20}, {KindDelete, 15}, {KindReinsert, 10},
-	{KindPKUpdate, 7}, {KindMulti, 8}, {KindTxn, 8}, {KindBurst, 2},
+	{KindPKUpdate, 2}, {KindMulti, 8}, {KindTxn, 8}, {KindBurst, 2},
 }
 
 const (
@@ -59,14 +63,16 @@ const (
 )
 
 // Table is one of the five tables a seed plays on. Cols is every column in
-// CREATE TABLE order, PK the key columns; key renders a key index as the PK
-// literals, in PK order.
+// CREATE TABLE order, PK the key columns, Datetimes the DATETIME columns
+// (read as wall clocks); key renders a key index as the PK literals, in PK
+// order.
 type Table struct {
-	Name string
-	DDL  string
-	PK   []string
-	Cols []string
-	key  func(k int) []string
+	Name      string
+	DDL       string
+	PK        []string
+	Cols      []string
+	Datetimes []string
+	key       func(k int) []string
 }
 
 // Tables returns the five tables, fresh copies.
@@ -93,7 +99,7 @@ func Tables() []Table {
 		{
 			Name: "t_types",
 			DDL:  "CREATE TABLE `t_types` (`id` INT NOT NULL, `v` INT NOT NULL, `amount` DECIMAL(12,2) NULL, `seen` DATETIME NULL, `note` VARCHAR(32) NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
-			PK:   []string{"id"}, Cols: []string{"id", "v", "amount", "seen", "note"},
+			PK:   []string{"id"}, Cols: []string{"id", "v", "amount", "seen", "note"}, Datetimes: []string{"seen"},
 			key: func(k int) []string { return []string{fmt.Sprint(k + 1)} },
 		},
 		{

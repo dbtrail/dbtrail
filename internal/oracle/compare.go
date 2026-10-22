@@ -24,6 +24,9 @@ type Context struct {
 	Steps int
 	// StepName is the step applied at this cut (snapshot, refresh, ...).
 	StepName string
+	// Session names the DuckDB session the copy was read under (its time
+	// zone), since the run reads it more than one way.
+	Session string
 	// SnapshotDir is the snapshot directory the copy was read from; its
 	// files and sizes go into the message.
 	SnapshotDir string
@@ -44,7 +47,11 @@ type Failure struct {
 
 func (f *Failure) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "oracle: seed %d, step %d of %d (%s), table %s: %s", f.Seed, f.Step, f.Steps, f.StepName, f.Table, f.Detail)
+	how := f.StepName
+	if f.Session != "" {
+		how += ", session " + f.Session
+	}
+	fmt.Fprintf(&b, "oracle: seed %d, step %d of %d (%s), table %s: %s", f.Seed, f.Step, f.Steps, how, f.Table, f.Detail)
 	if f.Key != "" {
 		fmt.Fprintf(&b, "\n  key %s", f.Key)
 	}
@@ -257,10 +264,18 @@ func reorder(r TableRows, row int, columns []string) []string {
 
 // ReadView reads the copy's state of schema.table through the view the port
 // defines, as canonical text in columns order: every cell cast to text,
-// NULL as "NULL", the same rendering the source read uses.
-func ReadView(ctx context.Context, ddb *sql.DB, schema, table string, columns, pk []string) (TableRows, error) {
+// NULL as "NULL", the same rendering the source read uses. datetimes names
+// the DATETIME columns to read as a wall clock (strftime) instead of cast:
+// a view that leaves them TIMESTAMPTZ prints them with a zone suffix, which
+// is not the source's text, while a view that already made them wall
+// clocks (WallClockDatetimes) needs no list.
+func ReadView(ctx context.Context, ddb *sql.DB, schema, table string, columns, pk, datetimes []string) (TableRows, error) {
 	parts := make([]string, len(columns))
 	for i, c := range columns {
+		if slices.Contains(datetimes, c) {
+			parts[i] = fmt.Sprintf(`IFNULL(strftime("%s", '%%Y-%%m-%%d %%H:%%M:%%S'), 'NULL')`, c)
+			continue
+		}
 		parts[i] = fmt.Sprintf(`IFNULL(CAST("%s" AS VARCHAR), 'NULL')`, c)
 	}
 	rows, err := ddb.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM "%s"."%s"`, strings.Join(parts, ", "), schema, table))

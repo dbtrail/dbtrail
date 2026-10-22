@@ -73,6 +73,68 @@ func TestWaitPosition_reachesOrTimesOut(t *testing.T) {
 	}
 }
 
+// TestWaitPosition_captureDeathIsTheError: when the capture goroutine exits
+// while the barrier waits, the barrier fails with the capture's own error
+// at once, not with "did not reach X in 60s" after the deadline, and the
+// error is put back on the channel so the test's stop() still sees it.
+func TestWaitPosition_captureDeathIsTheError(t *testing.T) {
+	want := Position{"binlog.000007", 5000}
+	behind := func(context.Context) (Position, bool, error) { return Position{"binlog.000007", 4000}, true, nil }
+	errCh := make(chan error, 1)
+	died := errors.New("binlog syncer: connection reset")
+	errCh <- died
+	start := time.Now()
+	_, err := waitPosition(context.Background(), withCapture(behind, errCh), want, 10*time.Second, time.Millisecond)
+	if !errors.Is(err, died) || !strings.Contains(err.Error(), "capture stopped") || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("barrier error = %v; want the capture's error, named as the capture stopping", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("the barrier waited for its deadline instead of failing on the capture's death")
+	}
+	select {
+	case back := <-errCh:
+		if back != died {
+			t.Fatalf("channel holds %v after the barrier, want the capture's error put back", back)
+		}
+	default:
+		t.Fatal("the barrier consumed the capture's error; stop() would block on the channel")
+	}
+	// A capture that exited CLEANLY (nil) while the barrier waits is just as
+	// fatal: nothing will index the rest.
+	errCh <- nil
+	if _, err := waitPosition(context.Background(), withCapture(behind, errCh), want, 10*time.Second, time.Millisecond); err == nil || !strings.Contains(err.Error(), "capture stopped") || !strings.Contains(err.Error(), "returned nil") {
+		t.Fatalf("a capture that returned nil mid-run did not fail the barrier: %v", err)
+	}
+	// With the channel quiet (the nil result put back above drained) the
+	// barrier behaves as before.
+	<-errCh
+	if _, err := waitPosition(context.Background(), withCapture(behind, errCh), want, 20*time.Millisecond, time.Millisecond); err == nil || !strings.Contains(err.Error(), "did not reach") {
+		t.Fatalf("quiet channel: %v", err)
+	}
+}
+
+// TestWaitPosition_firstCheckpoint: the zero target is "any checkpoint" (the
+// test's wait for capture to attach), and a poll error there is returned,
+// not retried for 60 s.
+func TestWaitPosition_firstCheckpoint(t *testing.T) {
+	seq := []bool{false, false, true}
+	i := 0
+	poll := func(context.Context) (Position, bool, error) {
+		ok := seq[min(i, len(seq)-1)]
+		i++
+		return Position{"binlog.000001", 4}, ok, nil
+	}
+	if got, err := waitPosition(context.Background(), poll, Position{}, time.Second, time.Millisecond); err != nil || got != (Position{"binlog.000001", 4}) || i != 3 {
+		t.Fatalf("first checkpoint: got %s err %v after %d polls", got, err, i)
+	}
+	boom := errors.New("Error 1146: Table 'stream_state' doesn't exist")
+	start := time.Now()
+	_, err := waitPosition(context.Background(), func(context.Context) (Position, bool, error) { return Position{}, false, boom }, Position{}, 10*time.Second, time.Millisecond)
+	if !errors.Is(err, boom) || time.Since(start) > time.Second {
+		t.Fatalf("poll error: %v after %s; want it returned at once", err, time.Since(start))
+	}
+}
+
 func TestTableRows_key(t *testing.T) {
 	r := TableRows{Table: "t_comp", Columns: []string{"a", "b", "v"}, PK: []string{"a", "b"}, Rows: [][]string{{"1", "2", "9"}}}
 	if k := r.Key(0); k != "1|2" {

@@ -3,15 +3,16 @@ package oracle
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/rand/v2"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
+// pkChangeErr is the fold's own refusal text, so a reword of it fails here
+// instead of silently turning every refused refresh into a run failure.
 func pkChangeErr(table string) error {
-	return fmt.Errorf("full-table reconstruct: s.%s has a PK-changing UPDATE in the window (primary key \"7\" → \"28\"); re-run", table)
+	return reconstruct.PKChangingUpdateError("s", table, "7", "28")
 }
 
 // TestRefreshStep_refusedOnlyForTheGeneratorsPKChange: a refresh counts as

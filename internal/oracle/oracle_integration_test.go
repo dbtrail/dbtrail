@@ -5,6 +5,7 @@ package oracle_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -103,7 +104,7 @@ func runSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table) oracle
 		t.Fatalf("TakeSnapshot: %v", err)
 	}
 	indexDSN := testutil.IntegrationDSN(indexName)
-	stop := startCapture(t, sourceDB, indexDB, indexDSN, sourceName, 92499+uint32(seed%1000))
+	captureErr, stop := startCapture(t, indexDB, indexDSN, sourceName, 92499+uint32(seed%1000))
 	defer stop()
 
 	// Not t.TempDir(): its name carries the subtest's "seed=N", and DuckDB
@@ -118,7 +119,7 @@ func runSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table) oracle
 	refresh := &oracle.RefreshStep{IndexDSN: indexDSN, Root: root, W: 3}
 	run := &oracle.Run{
 		Seed: seed, Steps: steps, Schema: sourceName, Tables: tables,
-		Source: sourceDB, Index: indexDB, Root: root,
+		Source: sourceDB, Index: indexDB, Capture: captureErr, Root: root,
 		Between: []oracle.Step{snapshot, refresh}, Fallback: snapshot,
 		Logf: t.Logf,
 	}
@@ -132,11 +133,13 @@ func runSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table) oracle
 // startCapture runs streamrun.One on the source into the index and waits
 // for its first checkpoint: with none saved, One attaches at the source's
 // CURRENT position, so writes before that checkpoint would never be
-// streamed.
-func startCapture(t *testing.T, sourceDB, indexDB *sql.DB, indexDSN, schema string, serverID uint32) (stop func()) {
+// streamed. errCh is where One's result lands; the run watches it so a
+// capture that dies mid-run is reported as that, and stop() reports any
+// result that is not the cancel it asked for.
+func startCapture(t *testing.T, indexDB *sql.DB, indexDSN, schema string, serverID uint32) (errCh chan error, stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
+	errCh = make(chan error, 1)
 	go func() {
 		errCh <- streamrun.One(ctx, streamrun.Config{
 			IndexDSN:   indexDSN,
@@ -166,25 +169,17 @@ func startCapture(t *testing.T, sourceDB, indexDB *sql.DB, indexDSN, schema stri
 	stop = func() {
 		cancel()
 		select {
-		case <-errCh:
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("capture exited: %v", err)
+			}
 		case <-time.After(30 * time.Second):
 			t.Error("the capture did not stop")
 		}
 	}
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		if _, ok, err := oracle.CheckpointPosition(context.Background(), indexDB); err == nil && ok {
-			return stop
-		}
-		select {
-		case err := <-errCh:
-			t.Fatalf("the capture stopped before its first checkpoint: %v", err)
-		default:
-		}
-		if time.Now().After(deadline) {
-			stop()
-			t.Fatal("the capture saved no checkpoint in 60s")
-		}
-		time.Sleep(200 * time.Millisecond)
+	if _, err := oracle.WaitCaptured(context.Background(), indexDB, errCh, oracle.Position{}, 60*time.Second); err != nil {
+		stop()
+		t.Fatalf("the capture saved no first checkpoint: %v", err)
 	}
+	return errCh, stop
 }
