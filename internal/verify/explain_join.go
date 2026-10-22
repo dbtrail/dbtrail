@@ -101,9 +101,11 @@ func newRowJoinCapped(ctx context.Context, tuning duckdbutil.Tuning, memoryLimit
 	// database, and every SET below lands on it.
 	db.SetMaxOpenConns(1)
 	j := &rowJoin{db: db, dir: dir}
+	// Threads as the memory above: the job's budget (#2491) when the caller
+	// set none, which is DefaultTuning's 2 where there is no budget.
 	threads := tuning.Threads
 	if threads <= 0 {
-		threads = duckdbutil.DefaultTuning().Threads
+		threads = duckdbutil.DefaultTuningFor(ctx).Threads
 	}
 	duckdbutil.Tuning{Threads: threads}.Apply(ctx, db)
 	// The cap IS this session's guarantee, so unlike the shared sessions'

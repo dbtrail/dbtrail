@@ -27,7 +27,7 @@ import (
 // share of nothing.
 //
 // The threads are worked out from the cores the process may use (#2491),
-// so that the lane's sessions never add up to more than half of them: a
+// so that one lane's sessions never add up to more than half of them: a
 // statement on the port, or on the web interface's SQL card, shares the
 // host with this work, and on a 4-core host the fold's two tables at two
 // threads each took the whole machine for the 20-30 s a refresh runs. A job
@@ -36,6 +36,13 @@ import (
 // resolved pairs, a minor compaction, a check table) gets the half. Never
 // more than DefaultTuning's 2, so a host with 8 cores or more keeps
 // exactly the numbers it had. On 4 cores: fold 2 x 1, resolved pairs 1 x 2.
+// Two limits of the claim: it holds per lane, and the two lanes can run at
+// once (heavyGate lets a refresh start while a check is mid-table), so
+// together they can reach the whole; and below 4 cores the floor of one
+// thread per session is what rules, so two sessions take both cores of two.
+// The cores are read once, with the memory: Go 1.25 follows a container's
+// CPU quota in GOMAXPROCS, and a quota changed while the daemon runs is not
+// seen here until it restarts.
 const (
 	heavySharePercent = 40
 	// snapshotSessions: a fold runs daemonFoldParallelism tables at once,

@@ -292,6 +292,36 @@ func TestRowJoin_capFollowsTheJobBudget(t *testing.T) {
 	}
 }
 
+// TestRowJoin_threadsFollowTheJobBudget: under a job's DuckDB budget the
+// join takes the budget's threads (#2491) when its caller set none, and the
+// caller's when it did; with no budget, DefaultTuning's 2.
+func TestRowJoin_threadsFollowTheJobBudget(t *testing.T) {
+	budget := duckdbutil.WithSessionTuning(context.Background(), duckdbutil.Tuning{Threads: 1, MemoryLimit: "300MiB"})
+	for _, tc := range []struct {
+		name   string
+		ctx    context.Context
+		tuning duckdbutil.Tuning
+		want   string
+	}{
+		{"budget, caller set none", budget, duckdbutil.Tuning{}, "1"},
+		{"budget, caller set 2", budget, duckdbutil.Tuning{Threads: 2}, "2"},
+		{"no budget", context.Background(), duckdbutil.Tuning{}, "2"},
+	} {
+		j, err := newRowJoin(tc.ctx, tc.tuning)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got string
+		if err := j.conn.QueryRowContext(tc.ctx, "SELECT current_setting('threads')").Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		j.close()
+		if got != tc.want {
+			t.Errorf("%s: join threads = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestRowJoin_neverAboveItsOwnCap: a job budget larger than the join's own
 // 1GB (a large host) leaves the join at 1GB.
 func TestRowJoin_neverAboveItsOwnCap(t *testing.T) {
