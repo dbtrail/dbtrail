@@ -45,6 +45,15 @@ type Tail struct {
 	// would write a NULL key, and the deleted row would come back.
 	pkNames []string
 	fold    foldResult
+	// dirty holds the keys changed since the last file was written (#2495):
+	// what WriteDelta writes. Marked on every key a page touches, also when
+	// the fold kept an older change, which only rewrites the same row.
+	dirty map[string]struct{}
+	// needFull is set by PruneThrough and cleared by WriteFile: after a
+	// prune, the segments written before it may still carry a dropped key's
+	// older change, which the chain would lay over the newer cut's row.
+	// WriteDelta refuses until a whole file starts a new chain.
+	needFull bool
 }
 
 // tailKeyTypes are the MySQL types a tail key may have: the integers. Not
@@ -99,7 +108,7 @@ func NewTail(schema, table, createTableSQL, basePath string, pkCols []metadata.C
 		return nil, &TailRefusal{fmt.Sprintf("%s: its copy stores %s as text, which the next refresh rewrites as bytes", name, strings.Join(mixed, ", "))}
 	}
 	return &Tail{schema: schema, table: table, cols: cols, pkCols: pkCols, pkNames: pkNames,
-		fold: foldResult{Changes: map[string]*query.ResultRow{}}}, nil
+		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}}, nil
 }
 
 // tailIntegerColumn: an integer type by name. The copy stores each as an
@@ -134,6 +143,7 @@ func (t *Tail) Apply(page []query.ResultRow) error {
 	}
 	for i := range page {
 		t.fold.LastEventID = max(t.fold.LastEventID, page[i].EventID)
+		t.dirty[page[i].PKValues] = struct{}{}
 	}
 	return nil
 }
@@ -172,7 +182,9 @@ func (t *Tail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, error)
 	}
 	for _, k := range drop {
 		delete(t.fold.Changes, k)
+		delete(t.dirty, k)
 	}
+	t.needFull = true
 	return len(drop), nil
 }
 
@@ -183,6 +195,10 @@ func (t *Tail) Keys() int { return len(t.fold.Changes) }
 // changes (sampledChangeBytes): what a keeper bounds all tails by (#2494).
 func (t *Tail) Bytes() int64 { b, _ := sampledChangeBytes(t.fold.Changes); return b }
 
+// Dirty is how many keys changed since the last file was written: the rows
+// the next WriteDelta writes.
+func (t *Tail) Dirty() int { return len(t.dirty) }
+
 // LastEventID is the highest event id folded, 0 before the first.
 func (t *Tail) LastEventID() uint64 { return t.fold.LastEventID }
 
@@ -192,23 +208,65 @@ func (t *Tail) PKColumns() []string { return append([]string(nil), t.pkNames...)
 
 // WriteFile writes the tail to path in the .upserts layout, one row per key:
 // the newest image under 'u', or a tombstone under 'd' that carries the
-// key's values and NULL elsewhere. The tail is left as it was. The file is
-// written beside path and renamed onto it, so a reader sees a whole file or
-// none.
+// key's values and NULL elsewhere. The tail is left as it was, but for the
+// changed keys it no longer counts (Dirty). The file is written beside path
+// and renamed onto it, so a reader sees a whole file or none.
 //
 // path must be a name no earlier version used, and an existing one is
 // refused: the view reads the file twice in one statement (the keys it
 // drops, the rows it adds), and a file replaced between the two would drop
 // one version's keys and add another's rows.
 func (t *Tail) WriteFile(path string) (rows int64, retErr error) {
+	keys := make([]string, 0, len(t.fold.Changes))
+	for k := range t.fold.Changes {
+		keys = append(keys, k)
+	}
+	rows, err := t.write(path, keys)
+	if err != nil {
+		return 0, err
+	}
+	t.needFull = false
+	return rows, nil
+}
+
+// WriteDelta writes only the keys changed since the last file was written
+// (#2495), in WriteFile's layout and under its rules: a segment of a chain
+// the view reads newest first (baseline.TableTailChainStateSQL), so a
+// follower's cycle costs the keys that changed, not the whole tail. Every
+// segment since the last WriteFile is needed: one left out loses its keys'
+// changes. With no key changed it writes an empty file. After PruneThrough
+// it refuses until a WriteFile: the chain must start again over the newer
+// cut.
+//
+// A write that fails keeps the keys as changed, and the next delta carries
+// them with whatever changed since.
+func (t *Tail) WriteDelta(path string) (rows int64, retErr error) {
+	if t.needFull {
+		return 0, fmt.Errorf("internal: the tail of %s.%s was pruned to a newer cut, so its next file must be whole, not a delta", t.schema, t.table)
+	}
+	keys := make([]string, 0, len(t.dirty))
+	for k := range t.dirty {
+		if _, ok := t.fold.Changes[k]; !ok {
+			// PruneThrough forgets the keys it drops; nothing else removes one.
+			return 0, fmt.Errorf("internal: key %q of %s.%s changed but the tail no longer holds it", k, t.schema, t.table)
+		}
+		keys = append(keys, k)
+	}
+	return t.write(path, keys)
+}
+
+// write writes keys' rows to path (WriteFile) and, once the file is in
+// place, counts no key as changed.
+func (t *Tail) write(path string, keys []string) (rows int64, retErr error) {
 	if _, err := os.Lstat(path); err == nil {
 		return 0, fmt.Errorf("internal: the tail of %s.%s would replace %s, which a running statement may be reading", t.schema, t.table, path)
 	}
 	// The refresh's #843 guard: a column the copy has and a change's image
 	// lacks was dropped at the source after the cut. Written, the touched rows
 	// would read NULL beside untouched ones keeping the old value, two
-	// versions of the table in one view. A change of the table's definition
-	// in the window (#602) is the caller's to screen, before Apply.
+	// versions of the table in one view. A delta checks it too: its rows are
+	// read over the same copy. A change of the table's definition in the
+	// window (#602) is the caller's to screen, before Apply.
 	names := make([]string, len(t.cols))
 	for i, c := range t.cols {
 		names[i] = c.Name
@@ -234,10 +292,6 @@ func (t *Tail) WriteFile(path string) (rows int64, retErr error) {
 			_ = os.Remove(tmp)
 		}
 	}()
-	keys := make([]string, 0, len(t.fold.Changes))
-	for k := range t.fold.Changes {
-		keys = append(keys, k)
-	}
 	sort.Strings(keys)
 	for _, k := range keys {
 		row, err := t.tailRow(k, t.fold.Changes[k])
@@ -254,6 +308,7 @@ func (t *Tail) WriteFile(path string) (rows int64, retErr error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return 0, fmt.Errorf("publish the tail of %s.%s: %w", t.schema, t.table, err)
 	}
+	clear(t.dirty)
 	return w.Rows(), nil
 }
 

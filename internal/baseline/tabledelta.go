@@ -1418,3 +1418,48 @@ func TableTailStateSQL(state, tail string, pk []string, replace string) string {
 		star, state, using, tail, using,
 		TableDeltaPKColumn, TableDeltaOpColumn, tail, TableDeltaOpColumn, TableDeltaOpUpsert)
 }
+
+// TableTailChainStateSQL is TableTailStateSQL over a tail written as a chain
+// of segments (#2495): segs are SQL expressions for their paths, oldest
+// first, each holding one row per key it carries (reconstruct.Tail's
+// WriteFile, then a WriteDelta per cycle). A key's row is the one in the
+// newest segment that carries it.
+//
+// The published rows of every key any segment carries are dropped, as with
+// one file; a segment's live rows are added unless a newer segment carries
+// their key. Both sides are anti-joins on the typed key columns, whose build
+// side is the keys of the segments after the one probed: the newest, small
+// ones, never the whole chain (a GROUP BY over every key, or a window, holds
+// the whole tail in memory, #2210). With one segment it is TableTailStateSQL
+// to the byte; with none, the published state.
+func TableTailChainStateSQL(state string, segs []string, pk []string, replace string) string {
+	star := "*"
+	if replace != "" {
+		star = "* REPLACE (" + replace + ")"
+	}
+	switch len(segs) {
+	case 0:
+		return fmt.Sprintf("SELECT %s FROM (%s)", star, state)
+	case 1:
+		return TableTailStateSQL(state, segs[0], pk, replace)
+	}
+	keys := make([]string, len(pk))
+	for i, c := range pk {
+		keys[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
+	}
+	using := strings.Join(keys, ", ")
+	var b strings.Builder
+	fmt.Fprintf(&b, "SELECT %s FROM (SELECT bintrail_state.* FROM (%s) bintrail_state ANTI JOIN (SELECT %s FROM read_parquet([%s])) bintrail_tail USING (%s)",
+		star, state, using, strings.Join(segs, ", "), using)
+	for i, seg := range segs {
+		fmt.Fprintf(&b, " UNION ALL BY NAME SELECT bintrail_seg.* EXCLUDE (\"%s\", \"%s\") FROM read_parquet(%s) bintrail_seg",
+			TableDeltaPKColumn, TableDeltaOpColumn, seg)
+		if i < len(segs)-1 {
+			fmt.Fprintf(&b, " ANTI JOIN (SELECT %s FROM read_parquet([%s])) bintrail_newer USING (%s)",
+				using, strings.Join(segs[i+1:], ", "), using)
+		}
+		fmt.Fprintf(&b, " WHERE bintrail_seg.\"%s\" = '%s'", TableDeltaOpColumn, TableDeltaOpUpsert)
+	}
+	b.WriteString(")")
+	return b.String()
+}
