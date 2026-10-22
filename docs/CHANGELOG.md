@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **The correctness oracle covers the port's tails** (#2499, slice 2). A third step, `tail`, drives the console's real keeper over the real index between cuts, and the copy is read as a statement on the MySQL port reads it, with each table's tail (since #2495 a chain of files) laid over its published state. Two scenarios: a mix of snapshot, refresh and tail steps, and a run of tails alone long enough for the chain to merge. A table the port answers as of its published cut is compared with the rows read at that cut, and the run fails naming the reason when there is no tail for a reason the generator did not cause, so tails silently off cannot pass. It runs on request (`BINTRAIL_ORACLE_REQUIRE=1 go test -tags integration -run TestOracleTails ./internal/console/`); the refresh step's refusal for a key-changing update now looks at every op since the published cut, not only the step's own.
 
 ## [0.113.0] - 2026-10-22
 ### Added

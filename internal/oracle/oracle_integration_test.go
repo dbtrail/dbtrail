@@ -5,7 +5,6 @@ package oracle_test
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,13 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dbtrail/dbtrail/internal/byos"
-	"github.com/dbtrail/dbtrail/internal/cliutil"
-	"github.com/dbtrail/dbtrail/internal/config"
-	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/oracle"
-	"github.com/dbtrail/dbtrail/internal/streamrun"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -130,56 +124,15 @@ func runSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table) oracle
 	return res
 }
 
-// startCapture runs streamrun.One on the source into the index and waits
-// for its first checkpoint: with none saved, One attaches at the source's
-// CURRENT position, so writes before that checkpoint would never be
-// streamed. errCh is where One's result lands; the run watches it so a
-// capture that dies mid-run is reported as that, and stop() reports any
-// result that is not the cancel it asked for.
 func startCapture(t *testing.T, indexDB *sql.DB, indexDSN, schema string, serverID uint32) (errCh chan error, stop func()) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh = make(chan error, 1)
-	go func() {
-		errCh <- streamrun.One(ctx, streamrun.Config{
-			IndexDSN:   indexDSN,
-			SourceDSN:  testutil.IntegrationDSN(schema),
-			ServerID:   serverID,
-			BatchSize:  200,
-			Schemas:    schema,
-			Checkpoint: 1,
-			GapTimeout: 30,
-			Format:     "text",
-			SSLMode:    "preferred",
-			Deps: streamrun.Deps{
-				ValidateBinlogFormat:   metadata.ValidateBinlogFormat,
-				ValidateBinlogRowImage: metadata.ValidateBinlogRowImage,
-				ValidateNoFKCascades:   metadata.ValidateNoFKCascades,
-				ParseSchemaList:        cliutil.ParseSchemaList,
-				ResolveServerIdentity:  byos.ResolveServerIdentity,
-				EnsureResolver:         metadata.EnsureResolver,
-				BuildIndexFilters:      cliutil.BuildIndexFilters,
-				InsertSchemaChange:     indexer.InsertSchemaChange,
-				ParseSourceDSN:         config.ParseSourceDSN,
-				OutputJSON:             cliutil.OutputJSON,
-				DetectSourceFlavor:     metadata.DetectSourceFlavor,
-			},
-		})
-	}()
-	stop = func() {
-		cancel()
-		select {
-		case err := <-errCh:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				t.Errorf("capture exited: %v", err)
-			}
-		case <-time.After(30 * time.Second):
-			t.Error("the capture did not stop")
+	errCh, stopCapture, err := oracle.StartCapture(context.Background(), indexDB, indexDSN, testutil.IntegrationDSN(schema), schema, serverID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return errCh, func() {
+		if err := stopCapture(); err != nil {
+			t.Error(err)
 		}
 	}
-	if _, err := oracle.WaitCaptured(context.Background(), indexDB, errCh, oracle.Position{}, 60*time.Second); err != nil {
-		stop()
-		t.Fatalf("the capture saved no first checkpoint: %v", err)
-	}
-	return errCh, stop
 }

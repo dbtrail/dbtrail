@@ -81,20 +81,13 @@ func NewTail(schema, table, createTableSQL, basePath string, pkCols []metadata.C
 	if len(pkCols) == 0 {
 		return nil, &TailRefusal{name + ": no primary key"}
 	}
-	byName := make(map[string]baseline.Column, len(cols))
-	for _, c := range cols {
-		byName[strings.ToLower(c.Name)] = c
+	pk := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		pk[i] = c.Name
 	}
-	pkNames := make([]string, len(pkCols))
-	for i, pk := range pkCols {
-		c, ok := byName[strings.ToLower(pk.Name)]
-		if !ok {
-			return nil, &TailRefusal{fmt.Sprintf("%s: its key column %s is not in its copy", name, pk.Name)}
-		}
-		if !tailIntegerColumn(c) {
-			return nil, &TailRefusal{fmt.Sprintf("%s: its key column %s is %s, and only integer keys have a tail", name, c.Name, c.MySQLType)}
-		}
-		pkNames[i] = c.Name
+	pkNames, why := TailKeyRefusal(name, cols, pk)
+	if why != "" {
+		return nil, &TailRefusal{why}
 	}
 	// A copy written before a type joined the binary list (VECTOR) stores
 	// that column as text, and the tail would store bytes: UNION ALL BY NAME
@@ -109,6 +102,30 @@ func NewTail(schema, table, createTableSQL, basePath string, pkCols []metadata.C
 	}
 	return &Tail{schema: schema, table: table, cols: cols, pkCols: pkCols, pkNames: pkNames,
 		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}}, nil
+}
+
+// TailKeyRefusal is the rule on a table's key for a tail: every key column
+// (pk, by name, in key order) must be in cols and of an integer type. It
+// returns the key's column names as cols spell them, or why the table has
+// no tail. Exported so a check over the port's tails can tell this refusal,
+// the product's own rule, from one it did not cause.
+func TailKeyRefusal(name string, cols []baseline.Column, pk []string) (pkNames []string, why string) {
+	byName := make(map[string]baseline.Column, len(cols))
+	for _, c := range cols {
+		byName[strings.ToLower(c.Name)] = c
+	}
+	pkNames = make([]string, len(pk))
+	for i, p := range pk {
+		c, ok := byName[strings.ToLower(p)]
+		if !ok {
+			return nil, fmt.Sprintf("%s: its key column %s is not in its copy", name, p)
+		}
+		if !tailIntegerColumn(c) {
+			return nil, fmt.Sprintf("%s: its key column %s is %s, and only integer keys have a tail", name, c.Name, c.MySQLType)
+		}
+		pkNames[i] = c.Name
+	}
+	return pkNames, ""
 }
 
 // tailIntegerColumn: an integer type by name. The copy stores each as an

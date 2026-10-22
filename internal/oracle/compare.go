@@ -30,6 +30,10 @@ type Context struct {
 	// SnapshotDir is the snapshot directory the copy was read from; its
 	// files and sizes go into the message.
 	SnapshotDir string
+	// AsOf, when set, says the copy answered the table as of an earlier
+	// cut than the one checked (the published one, with no tail over it),
+	// and the rows it is compared with are that cut's.
+	AsOf string
 }
 
 // Failure is one check failing: which check, on which key, with both rows.
@@ -52,6 +56,9 @@ func (f *Failure) Error() string {
 		how += ", session " + f.Session
 	}
 	fmt.Fprintf(&b, "oracle: seed %d, step %d of %d (%s), table %s: %s", f.Seed, f.Step, f.Steps, how, f.Table, f.Detail)
+	if f.AsOf != "" {
+		fmt.Fprintf(&b, "\n  the copy answered as of %s; the rows compared are that cut's", f.AsOf)
+	}
 	if f.Key != "" {
 		fmt.Fprintf(&b, "\n  key %s", f.Key)
 	}
