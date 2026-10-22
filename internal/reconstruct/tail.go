@@ -179,6 +179,10 @@ func (t *Tail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, error)
 // Keys is how many keys the tail holds.
 func (t *Tail) Keys() int { return len(t.fold.Changes) }
 
+// Bytes is an estimate of the heap the tail holds, from a sample of its
+// changes (sampledChangeBytes): what a keeper bounds all tails by (#2494).
+func (t *Tail) Bytes() int64 { b, _ := sampledChangeBytes(t.fold.Changes); return b }
+
 // LastEventID is the highest event id folded, 0 before the first.
 func (t *Tail) LastEventID() uint64 { return t.fold.LastEventID }
 

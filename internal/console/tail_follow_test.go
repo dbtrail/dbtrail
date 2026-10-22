@@ -23,7 +23,7 @@ func TestTailFollower(t *testing.T) {
 	s := &Server{}
 	clock := time.Date(2026, 10, 21, 13, 0, 0, 0, time.UTC)
 	newKeeper := func(f *fakeIndex) *tailKeeper {
-		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
 		return k
 	}
@@ -214,7 +214,7 @@ func TestTailFollower(t *testing.T) {
 	t.Run("the goroutine: started by a statement, ended by close", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
-		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.pub.auto, k.pub.every = true, 5*time.Millisecond
 		read := one(orders)
 		s.statementTails(ctx, k, read, read)
@@ -241,7 +241,7 @@ func TestTailFollower(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
 		armed := &atomic.Bool{}
-		k := newTailKeeper(panicIndex{f, armed}, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(panicIndex{f, armed}, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.pub.auto, k.pub.every = true, 5*time.Millisecond
 		defer k.close()
 		read := one(orders)

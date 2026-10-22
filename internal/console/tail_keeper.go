@@ -118,6 +118,8 @@ type tailTable interface {
 	Apply(page []query.ResultRow) error
 	PruneThrough(anchor query.BinlogPos, afterID uint64) (int, error)
 	Keys() int
+	// Bytes is an estimate of the heap the tail holds (#2494).
+	Bytes() int64
 	WriteFile(path string) (int64, error)
 	PKColumns() []string
 }
@@ -162,8 +164,11 @@ type tailEntry struct {
 	tail    tailTable
 	refused string
 	frozen  bool
-	dirty   bool
-	used    time.Time
+	// frozenWhy is which budget froze it, for the refusal it becomes when
+	// it is installed over its budget (install).
+	frozenWhy string
+	dirty     bool
+	used      time.Time
 	// file is the newest version written ("" before the first, or while the
 	// tail holds nothing), through the instant it is indexed through.
 	file    string
@@ -221,10 +226,10 @@ type tailKeeper struct {
 	// name repeats.
 	parent string
 	dir    string
-	// maxKeys is the budget of one tail; keepOld how long a replaced
+	// budget bounds the tails (tailBudget); keepOld how long a replaced
 	// version stays for a statement that may still read it; idle how long
 	// a tail no statement asked for is kept.
-	maxKeys int
+	budget  tailBudget
 	keepOld time.Duration
 	idle    time.Duration
 	now     func() time.Time
@@ -241,9 +246,20 @@ type tailKeeper struct {
 	orphans []tailOldFile
 }
 
-func newTailKeeper(src tailSource, parent string, maxKeys int, keepOld, idle time.Duration) *tailKeeper {
+// tailBudget bounds the tails of one server (#2494): Keys is the most keys
+// ONE tail holds; Bytes the most heap ALL of them hold together, by the
+// tails' own estimate (tailTable.Bytes), 0 for no bound. A tail that would
+// pass either stops advancing (frozen) and serves what it holds until the
+// next published cut rebuilds it; a build that passes either is refused
+// until then.
+type tailBudget struct {
+	Keys  int
+	Bytes int64
+}
+
+func newTailKeeper(src tailSource, parent string, budget tailBudget, keepOld, idle time.Duration) *tailKeeper {
 	life, stop := context.WithCancel(context.Background())
-	return &tailKeeper{src: src, parent: parent, maxKeys: maxKeys, keepOld: keepOld, idle: idle, now: time.Now,
+	return &tailKeeper{src: src, parent: parent, budget: budget, keepOld: keepOld, idle: idle, now: time.Now,
 		life: life, stop: stop, builds: map[string]*tailBuild{},
 		buildTimeout: tailBuildTimeout, retryMin: tailRetryMin, retryMax: tailRetryMax,
 		slots:  make(chan struct{}, tailMaxBuilds),
@@ -460,12 +476,13 @@ func (k *tailKeeper) fold(ctx context.Context, src tailSource, entries map[strin
 				continue
 			}
 			e.dirty = true
-			if e.tail.Keys() > k.maxKeys {
+			if why := k.overBudgetLocked(key, e.tail); why != "" {
 				// Kept as it is, not dropped: dropping it would send the
 				// next statement back to an older answer.
-				e.frozen = true
+				e.frozen, e.frozenWhy = true, why
 				slog.Info("Engine Routing: a table's tail is over its budget; it stops advancing until the next snapshot update",
-					"table", e.table.Schema+"."+e.table.Table, "keys", e.tail.Keys(), "budget", k.maxKeys)
+					"table", e.table.Schema+"."+e.table.Table, "keys", e.tail.Keys(), "bytes", e.tail.Bytes(),
+					"budget_keys", k.budget.Keys, "budget_bytes", k.budget.Bytes, "reason", why)
 			}
 		}
 		if n := len(page); n > 0 && moved != nil {
@@ -663,8 +680,11 @@ func (k *tailKeeper) install(key string, e *tailEntry) {
 	k.tables[key] = e
 	why := e.refused
 	if e.frozen {
-		// Over the budget while it caught up: as over it at its first read.
-		e.frozen, why = false, fmt.Sprintf("more keys changed since its snapshot than a tail holds (%d)", k.maxKeys)
+		// Over a budget while it caught up: as over it at its first read.
+		e.frozen, why = false, e.frozenWhy
+		if why == "" {
+			why = k.keysBudgetWhy()
+		}
 	}
 	if why != "" {
 		e.refused = ""
@@ -806,6 +826,46 @@ func (f *tailFloor) admits(at query.BinlogPos, id uint64) bool {
 
 // refuse ends e's tail for why, said once: statements over the table read
 // its copy as of its snapshot until its next one.
+// overBudgetLocked says why tail, the tail of table key, is over a budget
+// (#2494), "" when it is not; under k.mu. The keys bound is the tail's own;
+// the bytes bound is over it and every other table's tail together, so the
+// table that folds past it is the one that stops, whichever it is.
+func (k *tailKeeper) overBudgetLocked(key string, tail tailTable) string {
+	if tail.Keys() > k.budget.Keys {
+		return k.keysBudgetWhy()
+	}
+	if k.budget.Bytes > 0 {
+		if own, others := tail.Bytes(), k.heldBytesLocked(key); own+others > k.budget.Bytes {
+			return fmt.Sprintf("the tails would hold more memory than their budget (%d MiB: this table's %d MiB, the others' %d MiB)",
+				k.budget.Bytes>>20, own>>20, others>>20)
+		}
+	}
+	return ""
+}
+
+// overBudget is overBudgetLocked for a build, which runs without k.mu.
+func (k *tailKeeper) overBudget(key string, tail tailTable) string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.overBudgetLocked(key, tail)
+}
+
+func (k *tailKeeper) keysBudgetWhy() string {
+	return fmt.Sprintf("more keys changed since its snapshot than a tail holds (%d)", k.budget.Keys)
+}
+
+// heldBytesLocked is the heap the tails of every table but except hold,
+// frozen ones included (they are served), refused ones not (they hold none).
+func (k *tailKeeper) heldBytesLocked(except string) int64 {
+	var n int64
+	for key, e := range k.tables {
+		if key != except && e.tail != nil && e.refused == "" {
+			n += e.tail.Bytes()
+		}
+	}
+	return n
+}
+
 func (k *tailKeeper) refuse(e *tailEntry, why string) {
 	if e.refused != "" {
 		return
@@ -853,18 +913,19 @@ func (k *tailKeeper) build(ctx context.Context, src tailSource, t views.Baseline
 		return refused(why)
 	}
 	var foldErr error
+	var budgetWhy string
 	why, err = src.Fill(ctx, t, upTo, func(page []query.ResultRow) error {
 		if foldErr = tail.Apply(page); foldErr != nil {
 			return foldErr
 		}
-		if tail.Keys() > k.maxKeys {
+		if budgetWhy = k.overBudget(tailKey(t.Schema, t.Table), tail); budgetWhy != "" {
 			return errTailBudget
 		}
 		return nil
 	})
 	switch {
 	case errors.Is(err, errTailBudget):
-		return refused(fmt.Sprintf("more keys changed since its snapshot than a tail holds (%d)", k.maxKeys))
+		return refused(budgetWhy)
 	case foldErr != nil:
 		return refused("its changes could not be folded: " + foldErr.Error())
 	case err != nil:

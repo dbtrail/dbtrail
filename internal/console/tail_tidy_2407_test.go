@@ -32,7 +32,7 @@ func TestTidyTails(t *testing.T) {
 	f.add("orders", "1")
 	clock := time.Date(2026, 10, 15, 1, 0, 0, 0, time.UTC)
 	keeper := func() *tailKeeper {
-		k := newTailKeeper(f, t.TempDir(), 3, time.Minute, time.Hour)
+		k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
 		k.now = func() time.Time { return clock }
 		return k
 	}
