@@ -31,8 +31,9 @@ const (
 	// its busiest tables inside a 5-minute refresh interval.
 	tailDefaultMaxKeys = 500_000
 	// tailBytesShare is the share of the memory this process may use that
-	// every tail together may hold when BINTRAIL_SQL_TAIL_MAX_BYTES is not
-	// set: one fifth. The rest is the statements' (--sql-memory each), the
+	// every tail of ONE SERVER together may hold when
+	// BINTRAIL_SQL_TAIL_MAX_BYTES is not set: one fifth. A router that
+	// serves several servers gives each its fifth. The rest is the statements' (--sql-memory each), the
 	// views' footers and Go's own heap.
 	tailBytesShare = 5
 	tailKeepOld    = 30 * time.Minute

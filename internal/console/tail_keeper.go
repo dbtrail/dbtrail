@@ -410,7 +410,7 @@ func tailStartOver(mark, newest tailMark) string {
 // are advancing, moving the cursor with every page. A table with no tail yet
 // has its events read by its first Fill.
 func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
-	return k.fold(ctx, k.src, k.tables, k.mark, upTo, func(ev query.ResultRow) {
+	return k.fold(ctx, k.src, k.tables, k.mark, upTo, k.overBudgetLocked, func(ev query.ResultRow) {
 		// The cursor moves with every page folded: a read that runs out of
 		// time keeps what it did, and the next statement goes on from there
 		// instead of reading the same backlog again.
@@ -425,13 +425,16 @@ func (k *tailKeeper) advance(ctx context.Context, upTo uint64) error {
 
 // fold folds the events after from up to upTo into the entries that are
 // advancing, read from src a page at a time; moved, when not nil, is handed
-// the last event of each page. It touches nothing but entries, so a build
-// catches its own tail up with it without the keeper's lock. The events must
+// the last event of each page. It touches nothing but entries and what judge
+// reads, so a build catches its own tail up with it without the keeper's
+// lock: judge says why a folded tail is over a budget ("" when not), and a
+// caller without the lock passes one that reads no shared state
+// (judgeAgainst), the advance one that does (overBudgetLocked). The events must
 // go on in the binary log from from's: one before the last stops the read
 // (errTailRenumbered), since a numbering that started again inside the
 // window would rank its changes below older ones. Several rows of one
 // statement share a position, so "before" is strict.
-func (k *tailKeeper) fold(ctx context.Context, src tailSource, entries map[string]*tailEntry, from tailMark, upTo uint64, moved func(query.ResultRow)) error {
+func (k *tailKeeper) fold(ctx context.Context, src tailSource, entries map[string]*tailEntry, from tailMark, upTo uint64, judge func(key string, tail tailTable) string, moved func(query.ResultRow)) error {
 	var live []views.BaselineTable
 	for _, e := range entries {
 		if e.refused == "" && !e.frozen {
@@ -476,7 +479,7 @@ func (k *tailKeeper) fold(ctx context.Context, src tailSource, entries map[strin
 				continue
 			}
 			e.dirty = true
-			if why := k.overBudgetLocked(key, e.tail); why != "" {
+			if why := judge(key, e.tail); why != "" {
 				// Kept as it is, not dropped: dropping it would send the
 				// next statement back to an older answer.
 				e.frozen, e.frozenWhy = true, why
@@ -629,12 +632,18 @@ func (k *tailKeeper) runBuild(ctx context.Context, b *tailBuild, key string, t v
 	}
 	ctx, stop := context.WithTimeout(ctx, k.buildTimeout)
 	defer stop()
-	e, err := k.build(ctx, src, t, b.cut, from.ID)
+	// What the other tables' tails hold, read under the lock once here and
+	// once per catch-up: the build and its fold judge their tail against
+	// that number without the lock (judgeAgainst), and install judges it
+	// again against the live one.
+	others := k.heldBytesOf(key)
+	e, err := k.build(ctx, src, t, b.cut, from.ID, others)
 	for err == nil {
 		var to tailMark
 		done := func() bool {
 			k.mu.Lock()
 			defer k.mu.Unlock()
+			others = k.heldBytesLocked(key)
 			if !k.current(key, b) {
 				if k.builds[key] == b {
 					delete(k.builds, key)
@@ -654,7 +663,7 @@ func (k *tailKeeper) runBuild(ctx context.Context, b *tailBuild, key string, t v
 		if done {
 			return
 		}
-		if err = k.fold(ctx, src, map[string]*tailEntry{key: e}, from, to.ID, nil); err == nil {
+		if err = k.fold(ctx, src, map[string]*tailEntry{key: e}, from, to.ID, k.judgeAgainst(others), nil); err == nil {
 			from = to
 		}
 	}
@@ -685,6 +694,11 @@ func (k *tailKeeper) install(key string, e *tailEntry) {
 		if why == "" {
 			why = k.keysBudgetWhy()
 		}
+	}
+	if why == "" && e.tail != nil {
+		// Judged while it was built against what the others held then;
+		// again now, under the lock, against what they hold.
+		why = k.overBudgetLocked(key, e.tail)
 	}
 	if why != "" {
 		e.refused = ""
@@ -831,27 +845,41 @@ func (f *tailFloor) admits(at query.BinlogPos, id uint64) bool {
 // the bytes bound is over it and every other table's tail together, so the
 // table that folds past it is the one that stops, whichever it is.
 func (k *tailKeeper) overBudgetLocked(key string, tail tailTable) string {
+	return k.judge(tail, k.heldBytesLocked(key))
+}
+
+// judgeAgainst is the judge for a build and its catch-up, which run without
+// k.mu: others is what the other tables' tails held when the caller last
+// looked under the lock, and tail is the build's own, which no one else
+// touches. Reads nothing of the keeper's.
+func (k *tailKeeper) judgeAgainst(others int64) func(key string, tail tailTable) string {
+	return func(_ string, tail tailTable) string { return k.judge(tail, others) }
+}
+
+// judge says why tail is over a budget given others, the bytes the other
+// tails hold; "" when it is not. Reads k.budget, which never changes.
+func (k *tailKeeper) judge(tail tailTable, others int64) string {
 	if tail.Keys() > k.budget.Keys {
 		return k.keysBudgetWhy()
 	}
 	if k.budget.Bytes > 0 {
-		if own, others := tail.Bytes(), k.heldBytesLocked(key); own+others > k.budget.Bytes {
-			return fmt.Sprintf("the tails would hold more memory than their budget (%d MiB: this table's %d MiB, the others' %d MiB)",
+		if own := tail.Bytes(); own+others > k.budget.Bytes {
+			return fmt.Sprintf("the tails would hold more memory than their budget (%d MiB, BINTRAIL_SQL_TAIL_MAX_BYTES: this table's %d MiB, the others' %d MiB)",
 				k.budget.Bytes>>20, own>>20, others>>20)
 		}
 	}
 	return ""
 }
 
-// overBudget is overBudgetLocked for a build, which runs without k.mu.
-func (k *tailKeeper) overBudget(key string, tail tailTable) string {
+// heldBytesOf is heldBytesLocked under the lock, for a caller without it.
+func (k *tailKeeper) heldBytesOf(except string) int64 {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.overBudgetLocked(key, tail)
+	return k.heldBytesLocked(except)
 }
 
 func (k *tailKeeper) keysBudgetWhy() string {
-	return fmt.Sprintf("more keys changed since its snapshot than a tail holds (%d)", k.budget.Keys)
+	return fmt.Sprintf("more keys changed since its snapshot than a tail holds (%d, BINTRAIL_SQL_TAIL_MAX_KEYS)", k.budget.Keys)
 }
 
 // heldBytesLocked is the heap the tails of every table but except hold,
@@ -897,7 +925,7 @@ func (k *tailKeeper) note(err error) {
 // build starts t's tail over its published cut and folds its events up to
 // upTo, read from src. It runs without the keeper's lock: it reads nothing of
 // the keeper's but what never changes.
-func (k *tailKeeper) build(ctx context.Context, src tailSource, t views.BaselineTable, cut string, upTo uint64) (*tailEntry, error) {
+func (k *tailKeeper) build(ctx context.Context, src tailSource, t views.BaselineTable, cut string, upTo uint64, others int64) (*tailEntry, error) {
 	refused := func(why string) (*tailEntry, error) { return &tailEntry{table: t, cut: cut, refused: why}, nil }
 	// Where the read below starts, from the same footer Fill reads it from;
 	// none on record (Fill refuses then) leaves a tail that is never pruned.
@@ -918,7 +946,7 @@ func (k *tailKeeper) build(ctx context.Context, src tailSource, t views.Baseline
 		if foldErr = tail.Apply(page); foldErr != nil {
 			return foldErr
 		}
-		if budgetWhy = k.overBudget(tailKey(t.Schema, t.Table), tail); budgetWhy != "" {
+		if budgetWhy = k.judgeAgainst(others)(tailKey(t.Schema, t.Table), tail); budgetWhy != "" {
 			return errTailBudget
 		}
 		return nil

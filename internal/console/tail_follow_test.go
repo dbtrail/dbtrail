@@ -153,6 +153,9 @@ func TestTailFollower(t *testing.T) {
 		if k.pub.stuck {
 			t.Fatal("said stuck within its deadline")
 		}
+		// The build the statement started reads the clock when it installs:
+		// let it end before the clock moves (a write the race detector sees).
+		k.settle()
 		clock = clock.Add(2*k.pub.deadline + time.Second)
 		s.statementTails(ctx, k, one(orders), one(orders))
 		if !k.pub.stuck {
