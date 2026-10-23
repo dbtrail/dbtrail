@@ -61,6 +61,7 @@ type refRecord struct {
 // reference is DuckDB's own answer, the one the index must equal.
 func reference(t *testing.T, base string, keys []string) []refRecord {
 	t.Helper()
+	keys = fileOrder(t, base, keys)
 	ddb := openDuck(t)
 	q := make([]string, len(keys))
 	for i, k := range keys {
@@ -135,6 +136,9 @@ func checkIndex(t *testing.T, base string, keys []string) []record {
 	if ix.Records != int64(len(ref)) || ix.BaseRows != rows || ix.BaseSize != fi.Size() || size != fi.Size() || ix.FooterCRC != crc {
 		t.Fatalf("header %+v; want %d records, base %d bytes, %d rows, footer %08x", ix.header, len(ref), fi.Size(), rows, crc)
 	}
+	if want := fileOrder(t, base, keys); !slices.Equal(ix.Names, want) {
+		t.Fatalf("header names %q, want the base file's order %q", ix.Names, want)
+	}
 	if res.Records != int64(len(ref)) || res.Bytes != fi2(t, res.Path) {
 		t.Fatalf("result %+v; want %d records and the file's %d bytes", res, len(ref), fi2(t, res.Path))
 	}
@@ -180,6 +184,32 @@ func checkIndex(t *testing.T, base string, keys []string) []record {
 		}
 	}
 	return got
+}
+
+// fileOrder is keys in the order the base's columns have in the file, read
+// off DuckDB's DESCRIBE of it.
+func fileOrder(t *testing.T, base string, keys []string) []string {
+	t.Helper()
+	ddb := openDuck(t)
+	rows, err := ddb.Query("SELECT column_name FROM (DESCRIBE SELECT * FROM parquet_scan('" + base + "'))")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(keys, name) {
+			out = append(out, name)
+		}
+	}
+	if len(out) != len(keys) {
+		t.Fatalf("keys %q, found %q in the file", keys, out)
+	}
+	return out
 }
 
 func fi2(t *testing.T, p string) int64 {
@@ -243,9 +273,9 @@ func TestBuild_sizeFollowsTheFormula(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := int64(40+2) + 5000*(4+8+8) + 2*(4+8+4) + 4
-	if res.Bytes != want || fi2(t, res.Path) != want || ExpectedSize(5000, 2, 12) != want {
-		t.Fatalf("size %d (file %d, formula %d), want %d", res.Bytes, fi2(t, res.Path), ExpectedSize(5000, 2, 12), want)
+	want := int64(40+2+(2+1)+(2+1)) + 5000*(4+8+8) + 2*(4+8+4) + 4
+	if res.Bytes != want || fi2(t, res.Path) != want || ExpectedSize(5000, []string{"w", "d"}, 12) != want {
+		t.Fatalf("size %d (file %d, formula %d), want %d", res.Bytes, fi2(t, res.Path), ExpectedSize(5000, []string{"w", "d"}, 12), want)
 	}
 }
 
@@ -294,9 +324,16 @@ func TestBuild_aFailedBuildLeavesNoFile(t *testing.T) {
 	if err := os.WriteFile(path+".tmp", []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(context.Background(), base, []string{"id"}, duckdbutil.DefaultTuning()); err == nil {
-		t.Fatal("a NULL key built")
+	flushed := 0
+	blockHook = func() { flushed++ }
+	t.Cleanup(func() { blockHook = nil })
+	if _, err := Build(context.Background(), base, []string{"id"}, duckdbutil.DefaultTuning()); err == nil || !strings.Contains(err.Error(), `key column "id" holds NULL in the base file`) {
+		t.Fatalf("err = %v, want the NULL refusal", err)
 	}
+	if flushed < 2 {
+		t.Fatalf("%d block(s) were written before the NULL was reached; the fixture has to fail part way", flushed)
+	}
+	blockHook = nil
 	for _, p := range []string{path, path + ".tmp"} {
 		if _, err := os.Stat(p); err == nil {
 			t.Fatalf("%s left behind", p)
@@ -305,8 +342,8 @@ func TestBuild_aFailedBuildLeavesNoFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	good := writeBase(t, "SELECT i::INTEGER AS id FROM range(9000) r(i)", 1000)
-	if _, err := Build(ctx, good, []string{"id"}, duckdbutil.DefaultTuning()); err == nil {
-		t.Fatal("a cancelled build succeeded")
+	if _, err := Build(ctx, good, []string{"id"}, duckdbutil.DefaultTuning()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a build cancelled before it started: %v", err)
 	}
 	for _, p := range []string{PathFor(good), PathFor(good) + ".tmp"} {
 		if _, err := os.Stat(p); err == nil {
@@ -325,12 +362,15 @@ func TestBuild_aFailedBuildLeavesNoFile(t *testing.T) {
 
 func TestBuild_skipsWhenTheDiskIsShort(t *testing.T) {
 	base := writeBase(t, "SELECT i::INTEGER AS id FROM range(100) r(i)", 1000)
-	prev := diskSpace
-	t.Cleanup(func() { diskSpace = prev })
+	prev, prevSame := diskSpace, sameFilesystem
+	t.Cleanup(func() { diskSpace, sameFilesystem = prev, prevSame })
+	sameFilesystem = func(a, b string) bool { return false }
 	var asked string
 	diskSpace = func(dir string) (free, total uint64, err error) {
-		asked = dir
-		return uint64(ExpectedSize(100, 1, 4)) + FreeMargin - 1, 1 << 40, nil
+		if asked == "" {
+			asked = dir
+		}
+		return uint64(ExpectedSize(100, []string{"id"}, 4)) + FreeMargin - 1, 1 << 40, nil
 	}
 	res, err := Build(context.Background(), base, []string{"id"}, duckdbutil.DefaultTuning())
 	if err != nil || res.Skipped == "" || !res.Warn || !strings.Contains(res.Skipped, "kept free") {
@@ -344,15 +384,30 @@ func TestBuild_skipsWhenTheDiskIsShort(t *testing.T) {
 	}
 	// One byte more and it builds; a disk that cannot be measured builds too.
 	diskSpace = func(string) (uint64, uint64, error) {
-		return uint64(ExpectedSize(100, 1, 4)) + FreeMargin, 1 << 40, nil
+		return uint64(ExpectedSize(100, []string{"id"}, 4)) + FreeMargin, 1 << 40, nil
 	}
 	if res, err := Build(context.Background(), base, []string{"id"}, duckdbutil.DefaultTuning()); err != nil || res.Skipped != "" {
 		t.Fatalf("at the margin: res %+v err %v", res, err)
 	}
 	diskSpace = func(string) (uint64, uint64, error) { return 0, 0, errors.New("no statfs") }
+	logs := captureDebug(t)
 	if res, err := Build(context.Background(), base, []string{"id"}, duckdbutil.DefaultTuning()); err != nil || res.Skipped != "" {
 		t.Fatalf("unmeasurable: res %+v err %v", res, err)
 	}
+	if !strings.Contains(logs.String(), `msg="key index: free space cannot be measured; building anyway"`) || !strings.Contains(logs.String(), "no statfs") {
+		t.Fatalf("an unmeasurable disk built in silence:\n%s", logs.String())
+	}
+}
+
+// captureDebug routes the default logger into a buffer at Debug level for
+// the test (process-global: not parallel).
+func captureDebug(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 // The reader refuses what the writer did not write: a flipped byte in a
@@ -368,7 +423,7 @@ func TestReader_refusesDamage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	headerLen := 41
+	headerLen := 41 + 2 + 2 // fixed, the type code, the name "id" with its length
 	bodyLen := 5000 * 12
 	damage := func(name string, mutate func(b []byte) []byte, atOpen bool) {
 		t.Run(name, func(t *testing.T) {
@@ -397,13 +452,15 @@ func TestReader_refusesDamage(t *testing.T) {
 	damage("a byte of the skip table", func(b []byte) []byte { b[headerLen+bodyLen+2] ^= 1; return b }, true)
 	damage("the trailing CRC", func(b []byte) []byte { b[len(b)-1] ^= 1; return b }, true)
 	damage("the record count", func(b []byte) []byte { b[19] ^= 1; return b }, true)
+	damage("the key column's name", func(b []byte) []byte { b[43] = 'x'; return b }, true)
+	damage("the name's length past the file", func(b []byte) []byte { b[41] = 0xff; return b }, true)
 	damage("the magic", func(b []byte) []byte { b[0] = 'X'; return b }, true)
 	damage("the version", func(b []byte) []byte { b[9] = 2; return b }, true)
 	damage("one byte short", func(b []byte) []byte { return b[:len(b)-1] }, true)
 	damage("one byte long", func(b []byte) []byte { return append(b, 0) }, true)
-	// A record whose row number is the previous block's, with the CRCs
-	// redone: the block reads, which is the reader's job; whether it is
-	// the base's row is the base binding's, not the block's.
+	// The binding to the base is Bound's job, not the block reader's: an
+	// index copied beside another base of the same row count is refused
+	// there (TestBound), not here.
 }
 
 // ParquetFooter: the CRC is over exactly the last footer_length+8 bytes.

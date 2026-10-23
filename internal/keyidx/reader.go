@@ -13,6 +13,7 @@ import (
 type header struct {
 	Version   uint16
 	Types     []string
+	Names     []string // the key columns, in the base file's order
 	RowWidth  int
 	Records   int64
 	BaseSize  int64
@@ -107,17 +108,36 @@ func readIndex(f *os.File) (*index, error) {
 	if h.Records < 0 || h.Records != h.BaseRows {
 		return nil, fmt.Errorf("%w: %d records for a base of %d rows", errCorrupt, h.Records, h.BaseRows)
 	}
-	want := ExpectedSize(h.Records, ncols, keyWidth)
+	// The names: each a 2-byte length and its bytes, all within the file.
+	off := int64(fixedHeader + ncols)
+	for range ncols {
+		var l [2]byte
+		if _, err := f.ReadAt(l[:], off); err != nil {
+			return nil, fmt.Errorf("%w: key column names: %v", errCorrupt, err)
+		}
+		n := int64(binary.BigEndian.Uint16(l[:]))
+		if n == 0 || off+2+n > size {
+			return nil, fmt.Errorf("%w: a key column name of %d bytes at offset %d", errCorrupt, n, off)
+		}
+		name := make([]byte, n)
+		if _, err := f.ReadAt(name, off+2); err != nil {
+			return nil, fmt.Errorf("%w: key column names: %v", errCorrupt, err)
+		}
+		h.Names = append(h.Names, string(name))
+		off += 2 + n
+	}
+	want := ExpectedSize(h.Records, h.Names, keyWidth)
 	if size != want {
 		return nil, fmt.Errorf("%w: %d bytes, the header implies %d", errCorrupt, size, want)
 	}
-	headerLen := int64(fixedHeader + ncols)
+	headerLen := headerSize(h.Names)
 	recordWidth := keyWidth + rowWidth
 	nblocks := int((h.Records + BlockRecords - 1) / BlockRecords)
 	skipLen := int64(nblocks * (keyWidth + 4))
 	tail := make([]byte, headerLen+skipLen+4)
-	copy(tail, fixed)
-	copy(tail[fixedHeader:], codes)
+	if _, err := f.ReadAt(tail[:headerLen], 0); err != nil {
+		return nil, fmt.Errorf("%w: header: %v", errCorrupt, err)
+	}
 	if _, err := f.ReadAt(tail[headerLen:], headerLen+h.Records*int64(recordWidth)); err != nil {
 		return nil, fmt.Errorf("%w: skip table: %v", errCorrupt, err)
 	}

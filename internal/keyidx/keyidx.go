@@ -21,9 +21,17 @@
 //	28      4     CRC-32C of the base's Parquet footer (FooterCRC)
 //	32      8     the base's num_rows, from its footer
 //	40      n     type code per key column: 1 INTEGER, 2 BIGINT, 3 UBIGINT
+//	40+n    ...   per key column its name: a 2-byte length, then UTF-8 bytes
 //
-// The header is 40+n bytes. The body follows: record count records, each
-// the key columns encoded in order followed by the row number as 8 bytes,
+// The header is 40+n+sum(2+len(name)) bytes. The key columns are in THE
+// ORDER THEY HAVE IN THE BASE FILE, whatever order the caller named them in
+// (Build sorts them by their position in the base's schema): the two sites
+// that write bases name the key in different orders (a snapshot's schema
+// lists it in table order, a dump's PRIMARY KEY line in key order), and the
+// file itself is the one order both can agree on. The names in the header
+// say which columns the records hold, so a reader can refuse an index built
+// on another key. The body follows: record count records, each the key
+// columns encoded in that order followed by the row number as 8 bytes,
 // sorted by (key tuple, row number). An INTEGER is 4 bytes and a BIGINT 8,
 // both with the sign bit flipped so that unsigned byte order is numeric
 // order; a UBIGINT is its 8 bytes as they are. A key the base holds twice
@@ -33,14 +41,22 @@
 // records (the last block short), each the block's first key (the key bytes
 // of its first record) and the CRC-32C of the block's bytes. The file ends
 // with a CRC-32C over the header bytes followed by the skip table bytes. So
-// the size is 40+n + records*W + blocks*(K+4) + 4, with K the key width and
-// W = K+8 the record width; a reader checks that before anything else.
+// the size is header + records*W + blocks*(K+4) + 4, with K the key width
+// and W = K+8 the record width; a reader checks that before anything else.
 //
 // The index is tied to its base by the base's size, footer CRC and num_rows,
 // not by the snapshot's _MANIFEST, which lists data files and is written after
 // the tables; the index is derived from the base and is rebuilt, never
 // certified. It is written to <path>.tmp and renamed into place, so a partial
-// index never exists under the name a reader opens.
+// index never exists under the name a reader opens; and whenever a build does
+// not end in an index (a failure, a skip) any index already beside the base
+// is removed, so a stale one from an earlier build never sits beside a
+// rewritten base.
+//
+// Builds run ONE AT A TIME per process (buildSlots): a dump conversion runs
+// one worker per CPU, and a DuckDB session per worker at the daemon's budget
+// is the oversubscription #2513 is about; the conversion workers keep
+// converting while the builds queue behind them.
 package keyidx
 
 import (
@@ -57,6 +73,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -77,8 +94,12 @@ const (
 	BlockRecords = 4096
 	// rowWidth is the row number's width in bytes, fixed in version 1.
 	rowWidth = 8
-	// fixedHeader is the header's size before the per-column type codes.
+	// fixedHeader is the header's size before the per-column type codes
+	// and names.
 	fixedHeader = 40
+	// maxNameLen bounds a key column's name in the header (MySQL allows 64
+	// characters, PostgreSQL 63; the field is 2 bytes).
+	maxNameLen = 1 << 16
 	// FreeMargin is the free disk kept beside the index's own size before
 	// one is built: the same gigabyte the fold keeps (#1614), because an
 	// accelerator must never be what fills a capture host's disk.
@@ -86,6 +107,18 @@ const (
 )
 
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
+
+// buildSlots is the one build at a time per process; see the package doc.
+var buildSlots = make(chan struct{}, 1)
+
+// BuildHook, when set, is called while a build holds its slot, before the
+// base is read. A test seam for observing how many builds run at once; nil
+// in production.
+var BuildHook func()
+
+// blockHook, when set, is called after each block is written to the .tmp:
+// the seam a test cancels a build from part way through.
+var blockHook func()
 
 // Width is the bit width an integer key value must fit, and whether it is
 // unsigned.
@@ -193,11 +226,85 @@ type Result struct {
 // diskSpace is doctor.DiskSpace, a seam for the free-space test.
 var diskSpace = doctor.DiskSpace
 
-// ExpectedSize is the index's size for n records with a key of keyWidth
-// bytes over ncols columns.
-func ExpectedSize(n int64, ncols, keyWidth int) int64 {
+// sameFilesystem is sameDevice, a seam for the free-space test.
+var sameFilesystem = sameDevice
+
+// spillDir is where the build's DuckDB session spills its sort, for the
+// free-space guard; a seam for the test.
+var spillDir = duckdbutil.ScratchDir
+
+// headerSize is the header's size for the key columns names.
+func headerSize(names []string) int64 {
+	n := int64(fixedHeader + len(names))
+	for _, name := range names {
+		n += 2 + int64(len(name))
+	}
+	return n
+}
+
+// ExpectedSize is the index's size for n records over the key columns names
+// with a key of keyWidth bytes.
+func ExpectedSize(n int64, names []string, keyWidth int) int64 {
 	blocks := (n + BlockRecords - 1) / BlockRecords
-	return int64(fixedHeader+ncols) + n*int64(keyWidth+rowWidth) + blocks*int64(keyWidth+4) + 4
+	return headerSize(names) + n*int64(keyWidth+rowWidth) + blocks*int64(keyWidth+4) + 4
+}
+
+// baseColumnOrder is the base's columns in the order the file holds them.
+func baseColumnOrder(ctx context.Context, ddb *sql.DB, scanSQL string) ([]string, error) {
+	rows, err := ddb.QueryContext(ctx, "DESCRIBE SELECT * FROM "+scanSQL)
+	if err != nil {
+		return nil, fmt.Errorf("describe the base: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		for i, c := range cols {
+			if c == "column_name" {
+				name, _ := vals[i].(string)
+				out = append(out, name)
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+// orderKeys returns keys in the order fileCols holds them, the index's
+// canonical order. A key the base has no column for, or named twice, is an
+// error: an index on the wrong columns must not be built.
+func orderKeys(keys, fileCols []string) ([]string, error) {
+	pos := make(map[string]int, len(fileCols))
+	for i, c := range fileCols {
+		pos[c] = i
+	}
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if _, ok := pos[k]; !ok {
+			return nil, fmt.Errorf("key column %q is not a column of the base file", k)
+		}
+		if seen[k] {
+			return nil, fmt.Errorf("key column %q named twice", k)
+		}
+		if len(k) >= maxNameLen {
+			return nil, fmt.Errorf("key column name of %d bytes does not fit the header", len(k))
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	slices.SortStableFunc(out, func(a, b string) int { return pos[a] - pos[b] })
+	return out, nil
 }
 
 // Build writes the key index beside the local Parquet file at basePath for
@@ -207,19 +314,31 @@ func ExpectedSize(n int64, ncols, keyWidth int) int64 {
 // block plus the skip table (one entry per BlockRecords records); the sort
 // itself runs under tuning (the daemon's budget when zero) and spills.
 //
-// A non-integer key, an s3:// base and too little free disk beside the base
-// are Result.Skipped, not errors. An error means the build failed: a NULL
-// key (the base is refused by the lookup anyway), a record count that is not
-// the footer's num_rows, a row number past it, records DuckDB did not hand
-// over in order, a write that failed. Whatever happens, no partial file is
-// left under the index's name: the .tmp is removed, and the base is untouched.
-func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdbutil.Tuning) (Result, error) {
+// A non-integer key, an s3:// base, a table with no key and too little free
+// disk (beside the base for the index, in the spill directory for the sort;
+// summed when they are one filesystem) are Result.Skipped, not errors. An
+// error means the build failed: a NULL key (the base is refused by the
+// lookup anyway), a key column the base does not have, a record count that
+// is not the footer's num_rows, a row number past it, records DuckDB did not
+// hand over in order, a write that failed. Whatever happens, no partial file
+// is left under the index's name: the .tmp is removed, an index already
+// there from an earlier build is removed too, and the base is untouched.
+func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdbutil.Tuning) (res Result, err error) {
 	start := time.Now()
-	res := Result{Path: PathFor(basePath)}
+	res = Result{Path: PathFor(basePath)}
 	if strings.HasPrefix(basePath, "s3://") {
 		res.Skipped = "the base is on S3"
 		return res, nil
 	}
+	written := false
+	defer func() {
+		if written {
+			return
+		}
+		if rerr := os.Remove(res.Path); rerr != nil && !os.IsNotExist(rerr) {
+			slog.Warn("could not remove a stale key index", "path", res.Path, "error", rerr)
+		}
+	}()
 	if len(keyCols) == 0 {
 		res.Skipped = "the table has no key columns"
 		return res, nil
@@ -228,22 +347,42 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 	if err != nil {
 		return res, err
 	}
+	select {
+	case buildSlots <- struct{}{}:
+	case <-ctx.Done():
+		return res, ctx.Err()
+	}
+	defer func() { <-buildSlots }()
+	if BuildHook != nil {
+		BuildHook()
+	}
+	// A cancelled context past this point would make every SET below warn
+	// "could not configure DuckDB" before the build fails: say nothing but
+	// the cancellation.
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
 		return res, fmt.Errorf("open duckdb: %w", err)
 	}
 	defer ddb.Close()
-	if tuning == (duckdbutil.Tuning{}) {
-		tuning = duckdbutil.DefaultTuningFor(ctx)
-	}
-	tuning.Apply(ctx, ddb)
+	buildTuning(ctx, tuning).Apply(ctx, ddb)
 	duckdbutil.SetTempDirectory(ctx, ddb)
 
-	quoted := make([]string, len(keyCols))
-	for i, c := range keyCols {
+	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", strings.ReplaceAll(duckdbutil.FileGlob(basePath), "'", "''"))
+	fileCols, err := baseColumnOrder(ctx, ddb, scanSQL)
+	if err != nil {
+		return res, err
+	}
+	names, err := orderKeys(keyCols, fileCols)
+	if err != nil {
+		return res, err
+	}
+	quoted := make([]string, len(names))
+	for i, c := range names {
 		quoted[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
 	}
-	scanSQL := fmt.Sprintf("parquet_scan('%s', file_row_number=true)", strings.ReplaceAll(duckdbutil.FileGlob(basePath), "'", "''"))
 	types, why, err := IntegerKeyTypes(ctx, ddb, scanSQL, quoted)
 	if err != nil {
 		return res, err
@@ -256,14 +395,14 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 	for _, t := range types {
 		keyWidth += keyBytes(t)
 	}
-	expected := ExpectedSize(numRows, len(types), keyWidth)
-	if free, total, ferr := diskSpace(filepath.Dir(basePath)); ferr == nil && total > 0 && free < uint64(expected)+FreeMargin {
-		res.Skipped = fmt.Sprintf("%s has %d bytes free, and the index needs about %d plus %d kept free", filepath.Dir(basePath), free, expected, int64(FreeMargin))
+	expected := ExpectedSize(numRows, names, keyWidth)
+	if reason := freeSpaceShort(filepath.Dir(basePath), spillDir(), expected, numRows*int64(keyWidth+rowWidth)); reason != "" {
+		res.Skipped = reason
 		res.Warn = true
 		return res, nil
 	}
 
-	hdr := encodeHeader(types, numRows, size, footerCRC)
+	hdr := encodeHeader(types, names, numRows, size, footerCRC)
 	cols := strings.Join(quoted, ", ")
 	q := "SELECT " + cols + ", file_row_number FROM " + scanSQL + " ORDER BY " + cols + ", file_row_number"
 	rows, err := ddb.QueryContext(ctx, q)
@@ -279,7 +418,7 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 	}
 	fail := func(err error) (Result, error) {
 		f.Close()
-		os.Remove(tmp)
+		removeTemp(tmp)
 		return res, err
 	}
 	w := bufio.NewWriterSize(f, 1<<20)
@@ -297,6 +436,15 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 		skip = binary.BigEndian.AppendUint32(skip, crc32.Checksum(block, crc32cTable))
 		_, err := w.Write(block)
 		block = block[:0]
+		if blockHook != nil {
+			blockHook()
+		}
+		if err == nil {
+			// A cancelled build stops at the next block, not at the end of
+			// the scan, and reports the cancellation, not what DuckDB made
+			// of the interrupt.
+			err = ctx.Err()
+		}
 		return err
 	}
 	scan := make([]any, len(types)+1)
@@ -345,6 +493,9 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 		}
 	}
 	if err := rows.Err(); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return fail(cerr)
+		}
 		return fail(fmt.Errorf("read the base's keys in order: %w", err))
 	}
 	if n != numRows {
@@ -363,18 +514,111 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 	if err := w.Flush(); err != nil {
 		return fail(err)
 	}
+	// Durable before it is named: the rename is what makes the index exist
+	// for a reader, and a power loss after the rename but before the bytes
+	// reached the disk would leave a complete name over a partial file. The
+	// reader's size and CRC checks are the second belt, for the damage no
+	// fsync covers (a disk that lies, bytes rotting later).
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		removeTemp(tmp)
 		return res, err
 	}
 	if err := os.Rename(tmp, res.Path); err != nil {
-		os.Remove(tmp)
+		removeTemp(tmp)
 		return res, err
 	}
+	written = true
 	res.Records = n
-	res.Bytes = ExpectedSize(n, len(types), keyWidth)
+	res.Bytes = ExpectedSize(n, names, keyWidth)
 	res.Build = time.Since(start)
 	return res, nil
+}
+
+// freeSpaceShort says why a build would not fit, or "": the index of
+// indexBytes beside the base in baseDir, and the sort's spill of about
+// spillBytes (the sorted keys and row numbers, the records once more) in
+// spill, each against its own filesystem's free space plus FreeMargin, or
+// their sum when the two directories are one filesystem. A filesystem whose
+// space cannot be measured lets the build through.
+func freeSpaceShort(baseDir, spill string, indexBytes, spillBytes int64) string {
+	short := func(dir string, need int64, what string) string {
+		free, total, err := diskSpace(dir)
+		if err != nil || total == 0 {
+			slog.Debug("key index: free space cannot be measured; building anyway", "dir", dir, "error", err)
+			return ""
+		}
+		if free >= uint64(need)+FreeMargin {
+			return ""
+		}
+		return fmt.Sprintf("%s has %d bytes free, and %s needs about %d plus %d kept free", dir, free, what, need, int64(FreeMargin))
+	}
+	if sameFilesystem(baseDir, spill) {
+		return short(baseDir, indexBytes+spillBytes, "the index with its sort's spill")
+	}
+	if r := short(baseDir, indexBytes, "the index"); r != "" {
+		return r
+	}
+	return short(spill, spillBytes, "the sort's spill")
+}
+
+// buildTuning is the budget the sort runs under: tuning, unless it caps
+// nothing (zero, or a routing-only tuning such as S3Direct), in which case
+// the budget the caller's job put on ctx, or the default.
+func buildTuning(ctx context.Context, tuning duckdbutil.Tuning) duckdbutil.Tuning {
+	if tuning.Threads == 0 && tuning.MemoryLimit == "" {
+		return duckdbutil.DefaultTuningFor(ctx)
+	}
+	return tuning
+}
+
+// removeTemp removes a build's .tmp; a file that will not go is said, since
+// it is bytes the operator would otherwise find without a name for them.
+func removeTemp(tmp string) {
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		slog.Warn("could not remove a key index's temporary file", "path", tmp, "error", err)
+	}
+}
+
+// Bound reports whether the index beside basePath is there and tied to that
+// base: its header's base size, footer CRC and num_rows are the base's. An
+// absent index is false with a nil error; a damaged one, or a base whose
+// footer cannot be read, is an error.
+func Bound(basePath string) (bool, error) {
+	ix, err := openIndex(PathFor(basePath))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	ix.Close()
+	size, crc, rows, err := ParquetFooter(basePath)
+	if err != nil {
+		return false, err
+	}
+	return ix.BaseSize == size && ix.FooterCRC == crc && ix.BaseRows == rows, nil
+}
+
+// EnsureBeside is WriteBeside for a base that was NOT just written (a
+// conversion resumed with --retry over a table it converted earlier): a
+// leftover .tmp of an interrupted build is removed, an index that is there
+// and bound to the base is kept (one debug line), anything else is built.
+func EnsureBeside(ctx context.Context, schema, table, basePath string, keyCols []string, tuning duckdbutil.Tuning) Result {
+	if !strings.HasPrefix(basePath, "s3://") {
+		removeTemp(PathFor(basePath) + ".tmp")
+	}
+	ok, err := Bound(basePath)
+	if ok {
+		slog.Debug("key index present", "schema", schema, "table", table, "path", PathFor(basePath))
+		return Result{Path: PathFor(basePath)}
+	}
+	if err != nil {
+		slog.Warn("key index beside an existing file is not usable; building it again", "schema", schema, "table", table, "path", PathFor(basePath), "error", err)
+	}
+	return WriteBeside(ctx, schema, table, basePath, keyCols, tuning)
 }
 
 // WriteBeside is Build under a publish's policy: the base is already
@@ -385,6 +629,10 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 func WriteBeside(ctx context.Context, schema, table, basePath string, keyCols []string, tuning duckdbutil.Tuning) Result {
 	res, err := Build(ctx, basePath, keyCols, tuning)
 	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		// A shutdown, not a defect: one line per table in flight at Warn
+		// would read as a problem with the tables.
+		slog.Debug("key index not written: the build was cancelled", "schema", schema, "table", table, "path", res.Path, "error", err)
 	case err != nil:
 		slog.Warn("key index not written; the next refresh scans the table's file", "schema", schema, "table", table, "path", res.Path, "error", err)
 	case res.Skipped != "" && res.Warn:
@@ -398,10 +646,10 @@ func WriteBeside(ctx context.Context, schema, table, basePath string, keyCols []
 	return res
 }
 
-// encodeHeader renders the header for types over a base of numRows rows,
-// size bytes and footer CRC footerCRC.
-func encodeHeader(types []string, numRows, size int64, footerCRC uint32) []byte {
-	hdr := make([]byte, 0, fixedHeader+len(types))
+// encodeHeader renders the header for the key columns names of types over
+// a base of numRows rows, size bytes and footer CRC footerCRC.
+func encodeHeader(types, names []string, numRows, size int64, footerCRC uint32) []byte {
+	hdr := make([]byte, 0, headerSize(names))
 	hdr = append(hdr, Magic...)
 	hdr = binary.BigEndian.AppendUint16(hdr, Version)
 	hdr = append(hdr, byte(len(types)), rowWidth)
@@ -411,6 +659,10 @@ func encodeHeader(types []string, numRows, size int64, footerCRC uint32) []byte 
 	hdr = binary.BigEndian.AppendUint64(hdr, uint64(numRows))
 	for _, t := range types {
 		hdr = append(hdr, typeCodes[t])
+	}
+	for _, name := range names {
+		hdr = binary.BigEndian.AppendUint16(hdr, uint16(len(name)))
+		hdr = append(hdr, name...)
 	}
 	return hdr
 }
@@ -497,48 +749,74 @@ func footerCRCOf(r io.ReaderAt, size int64) (uint32, error) {
 }
 
 // primaryKeyRE is the column list of a CREATE TABLE's PRIMARY KEY as SHOW
-// CREATE TABLE prints it, backquoted names, each possibly with a prefix
-// length (which no integer column has).
-var primaryKeyRE = regexp.MustCompile("(?i)PRIMARY KEY\\s*\\(((?:`(?:[^`]|``)*`\\s*(?:\\(\\d+\\))?\\s*,?\\s*)+)\\)")
+// CREATE TABLE prints it (optionally under a CONSTRAINT name): backquoted
+// names, each possibly with a prefix length (which no integer column has)
+// and a direction.
+var primaryKeyRE = regexp.MustCompile("(?i)(?:CONSTRAINT\\s+`(?:[^`]|``)*`\\s+)?PRIMARY\\s+KEY\\s*\\(((?:`(?:[^`]|``)*`\\s*(?:\\(\\d+\\))?\\s*(?:ASC|DESC)?\\s*,?\\s*)+)\\)")
+
+// inlinePrimaryKeyRE is a column line that declares its column the key:
+// `id` int NOT NULL PRIMARY KEY. SHOW CREATE TABLE never prints this form,
+// a hand-written schema may.
+var inlinePrimaryKeyRE = regexp.MustCompile("(?im)(?:^|[(,])\\s*(`(?:[^`]|``)*`)\\s+[^,\\n(]*\\bPRIMARY\\s+KEY\\b\\s*(?:[,)]|$)")
 var backquotedRE = regexp.MustCompile("`((?:[^`]|``)*)`")
 
 // PrimaryKeyColumns returns the names of a CREATE TABLE's PRIMARY KEY in
-// key order, or nil when it declares none the way SHOW CREATE TABLE prints
-// one (a key declared inline on a column line is not read, nor a key whose
-// list this cannot read; the table then gets no index, which is a debug
-// line, never a refusal). Quoted strings are blanked first so the words
-// inside a COMMENT are not a key.
+// the order it declares them (Build reorders them to the base file's own
+// order), or nil when it declares none: the table then gets no index, which
+// is a debug line, never a refusal. Read: the PRIMARY KEY (...) line as SHOW
+// CREATE TABLE prints it, with or without a CONSTRAINT name, with prefix
+// lengths and ASC/DESC; or one column line with PRIMARY KEY inline. Quoted
+// strings are blanked first and backquoted names stepped over, so the words
+// inside a COMMENT, or a name holding a quote, are not a key.
 func PrimaryKeyColumns(createSQL string) []string {
-	m := primaryKeyRE.FindStringSubmatch(blankStrings(createSQL))
-	if m == nil {
-		return nil
+	blanked := blankStrings(createSQL)
+	if m := primaryKeyRE.FindStringSubmatch(blanked); m != nil {
+		var cols []string
+		for _, q := range backquotedRE.FindAllStringSubmatch(m[1], -1) {
+			cols = append(cols, strings.ReplaceAll(q[1], "``", "`"))
+		}
+		return cols
 	}
-	var cols []string
-	for _, q := range backquotedRE.FindAllStringSubmatch(m[1], -1) {
-		cols = append(cols, strings.ReplaceAll(q[1], "``", "`"))
+	if m := inlinePrimaryKeyRE.FindStringSubmatch(blanked); m != nil {
+		return []string{strings.ReplaceAll(m[1][1:len(m[1])-1], "``", "`")}
 	}
-	return cols
+	return nil
 }
 
-// blankStrings replaces the inside of every single-quoted string with
-// spaces, the quotes kept, so a pattern sees no words inside it. A doubled
+// blankStrings replaces the inside of every single- or double-quoted
+// string with spaces, the quotes kept, and steps over backquoted names
+// untouched (a backtick inside one is doubled), so a pattern sees no words
+// inside a string and a quote inside a name does not open one. A doubled
 // quote and a backslash escape stay inside the string.
 func blankStrings(s string) string {
 	b := []byte(s)
-	in := false
+	var in byte // the quote that opened the current string, 0 outside one
 	for i := 0; i < len(b); i++ {
+		c := b[i]
 		switch {
-		case !in && b[i] == '\'':
-			in = true
-		case in && b[i] == '\\' && i+1 < len(b):
+		case in == 0 && c == '`':
+			// Step over the name: a doubled backtick is a literal one.
+			for i++; i < len(b); i++ {
+				if b[i] != '`' {
+					continue
+				}
+				if i+1 < len(b) && b[i+1] == '`' {
+					i++
+					continue
+				}
+				break
+			}
+		case in == 0 && (c == '\'' || c == '"'):
+			in = c
+		case in != 0 && c == '\\' && i+1 < len(b):
 			b[i], b[i+1] = ' ', ' '
 			i++
-		case in && b[i] == '\'' && i+1 < len(b) && b[i+1] == '\'':
+		case in != 0 && c == in && i+1 < len(b) && b[i+1] == in:
 			b[i], b[i+1] = ' ', ' '
 			i++
-		case in && b[i] == '\'':
-			in = false
-		case in:
+		case in != 0 && c == in:
+			in = 0
+		case in != 0:
 			b[i] = ' '
 		}
 	}

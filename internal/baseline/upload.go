@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/dbtrail/dbtrail/internal/keyidx"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -212,6 +213,12 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		// the whole upload down. It is a local convenience that means nothing
 		// in S3, so skip it by name.
 		if isPointerArtifact(outputDir, path, d) || isPointerLock(outputDir, path) || isPruneArtifact(outputDir, path) {
+			return nil
+		}
+		// The key index beside a table (#2496) and a build's .tmp stay
+		// local: a refresh never looks a base up on S3, the S3 listing
+		// selects .parquet, and the index is rebuilt from the base.
+		if isKeyIndexArtifact(d.Name()) {
 			return nil
 		}
 		// Every OTHER non-regular entry is RESOLVED, not skipped. An operator
@@ -542,4 +549,10 @@ func isPointerArtifact(root, path string, d fs.DirEntry) bool {
 // snapshot data. It is a local mutex; it means nothing in S3.
 func isPointerLock(root, path string) bool {
 	return filepath.Dir(path) == filepath.Clean(root) && filepath.Base(path) == pointerLockName
+}
+
+// isKeyIndexArtifact reports a key index (#2496) or a key index build's
+// temporary file, neither of which is snapshot data.
+func isKeyIndexArtifact(name string) bool {
+	return strings.HasSuffix(name, keyidx.Suffix) || strings.HasSuffix(name, keyidx.Suffix+".tmp")
 }

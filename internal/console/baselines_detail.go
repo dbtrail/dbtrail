@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/keyidx"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/storage"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -215,6 +216,10 @@ func (ss *snapshotSource) files(ctx context.Context, dirName string) ([]baseline
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil || d.IsDir() {
 				return walkErr
+			}
+			// A key index build's .tmp (#2496) is not a snapshot file.
+			if strings.HasSuffix(d.Name(), keyidx.Suffix+".tmp") {
+				return nil
 			}
 			info, err := d.Info()
 			if err != nil {

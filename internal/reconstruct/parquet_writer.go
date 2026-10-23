@@ -310,12 +310,22 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 	// logged and the table is published either way. Not in rep.Files: the
 	// manifest lists data files, and the index is tied to its base by the
 	// base's own size and footer.
-	keys := make([]string, len(in.PKCols))
-	for i, c := range in.PKCols {
-		keys[i] = c.Name
+	if wantKeyIndex(in) {
+		keys := make([]string, len(in.PKCols))
+		for i, c := range in.PKCols {
+			keys[i] = c.Name
+		}
+		keyidx.WriteBeside(ctx, in.Schema, in.Table, path, keys, in.DuckDBTuning)
 	}
-	keyidx.WriteBeside(ctx, in.Schema, in.Table, path, keys, in.DuckDBTuning)
 	return nil
+}
+
+// wantKeyIndex says whether a file the merge wrote gets a key index built:
+// a PostgreSQL baseline stores its key as text, which the index cannot hold,
+// so no DuckDB session is opened to find that out; a table with no key has
+// nothing to index.
+func wantKeyIndex(in mergeInput) bool {
+	return !in.PG && len(in.PKCols) > 0
 }
 
 // snapshotFileMetadata is the footer every file a Parquet-mode run writes

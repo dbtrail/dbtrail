@@ -299,6 +299,12 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 						}
 						slog.Info("skipping existing file (--retry)",
 							"db", tf.Database, "table", tf.Table, "file", outPath)
+						// The index beside it (#2496): a run killed between
+						// the conversion and the build left the file without
+						// one, and nothing else would ever build it.
+						if rawSchema, serr := os.ReadFile(tf.SchemaFile); serr == nil {
+							keyidx.EnsureBeside(ctx, tf.Database, tf.Table, outPath, keyidx.PrimaryKeyColumns(string(rawSchema)), duckdbutil.DefaultTuningFor(ctx))
+						}
 						mu.Lock()
 						stats.TablesProcessed++
 						stats.FilesWritten++
