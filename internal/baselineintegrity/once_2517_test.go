@@ -3,10 +3,10 @@ package baselineintegrity
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,13 +62,25 @@ func snapshotWithFile(t *testing.T, root, name string, data []byte) (snap, path 
 	if err := WriteManifest(snap); err != nil {
 		t.Fatal(err)
 	}
+	// The writer seeds the memo with what it hashed (F4); these fixtures
+	// want the file NEW to the process, so the seed is dropped here.
+	ForgetVerified()
 	return snap, path
 }
 
 func memoLen() int {
 	verifiedMu.Lock()
 	defer verifiedMu.Unlock()
-	return len(verified)
+	return len(verifiedCurrent) + len(verifiedPrevious)
+}
+
+// needIdentity skips a test whose contract needs a device/inode: on any
+// other platform fileIdentity answers ok=false and every call validates.
+func needIdentity(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("no file identity on %s: the memo is never consulted here", runtime.GOOS)
+	}
 }
 
 // Bullet 1: the same "cannot verify" outcomes as ValidateLocalFile, and none of
@@ -118,6 +130,7 @@ func TestOnce_nothingToVerifyMemoizesNothing(t *testing.T) {
 // (path, size in MB, ms); the second call over the same identity reads nothing
 // and says so at Debug, with the path.
 func TestOnce_readsOnceThenSkipsAndLogsBoth(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	logs := captureLog(t)
@@ -158,6 +171,7 @@ func TestOnce_readsOnceThenSkipsAndLogsBoth(t *testing.T) {
 // Bullet 3: a mismatch is the same ErrIntegrity as ValidateLocalFile, and it is
 // NOT remembered: the next call reads again (the file may have been repaired).
 func TestOnce_mismatchFailsEveryTimeAndMemoizesNothing(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	snap, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("original contents"))
@@ -188,6 +202,7 @@ func TestOnce_mismatchFailsEveryTimeAndMemoizesNothing(t *testing.T) {
 // A listed file that cannot be stat'ed is the non-integrity error
 // ValidateLocalFile gives for a file it cannot read.
 func TestOnce_missingListedFileIsNotAnIntegrityError(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	_, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("bytes"))
 	if err := os.Remove(path); err != nil {
@@ -205,6 +220,7 @@ func TestOnce_missingListedFileIsNotAnIntegrityError(t *testing.T) {
 // Bullet 4: the same identity under a manifest that disagrees (another
 // snapshot lists a different digest for the linked file) reads again and fails.
 func TestOnce_sameIdentityDifferentManifestDigestReadsAgain(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	root := t.TempDir()
@@ -234,6 +250,7 @@ func TestOnce_sameIdentityDifferentManifestDigestReadsAgain(t *testing.T) {
 // this process verified under the previous snapshot, and its new manifest
 // carries the same digest (#1717), so the new path reads nothing.
 func TestOnce_hardLinkedFileUnderTheNextSnapshotReadsNothing(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	logs := captureLog(t)
@@ -272,6 +289,7 @@ func TestOnce_hardLinkedFileUnderTheNextSnapshotReadsNothing(t *testing.T) {
 
 // Bullet 5: a new inode at the same path (rewrite by rename) reads again.
 func TestOnce_newInodeAtTheSamePathReadsAgain(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	snap, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("the bytes"))
@@ -303,6 +321,7 @@ func TestOnce_newInodeAtTheSamePathReadsAgain(t *testing.T) {
 
 // Bullet 5: a changed size (truncated in place, same inode) reads again.
 func TestOnce_changedSizeReadsAgain(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	_, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("the bytes of the file"))
@@ -323,6 +342,7 @@ func TestOnce_changedSizeReadsAgain(t *testing.T) {
 // Bullet 5: a changed mtime (same inode, same size) reads again, and catches
 // the changed bytes under it.
 func TestOnce_changedMtimeReadsAgain(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	_, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("the bytes"))
@@ -354,6 +374,7 @@ func TestOnce_changedMtimeReadsAgain(t *testing.T) {
 // this shape does not occur on their own output. Pinned so a change to the
 // identity is a decision, not an accident.
 func TestOnce_sameIdentityWithChangedBytesIsSkipped_limitation(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	_, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("the bytes"))
@@ -387,6 +408,7 @@ func TestOnce_sameIdentityWithChangedBytesIsSkipped_limitation(t *testing.T) {
 // it and skip the corrupt bytes; the memo taken after the second stat is empty
 // and the next call reads and fails.
 func TestOnce_identityChangedAcrossTheReadIsNotMemoized(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	_, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("the bytes"))
 	info, err := os.Stat(path)
@@ -426,54 +448,9 @@ func TestOnce_identityChangedAcrossTheReadIsNotMemoized(t *testing.T) {
 	}
 }
 
-// Bullet 7: the memo is bounded. Past verifiedCap the map is cleared, so the
-// older entries read again and the new one is remembered.
-func TestOnce_capClearsTheMemo(t *testing.T) {
-	forgetOnExit(t)
-	reads := countReads(t)
-	logs := captureLog(t)
-	prevCap := verifiedCap
-	verifiedCap = 2
-	t.Cleanup(func() { verifiedCap = prevCap })
-	root := t.TempDir()
-	var paths []string
-	for i := range 3 {
-		_, p := snapshotWithFile(t, root, fmt.Sprintf("s%d", i), []byte(fmt.Sprintf("bytes %d", i)))
-		paths = append(paths, p)
-	}
-	for _, p := range paths[:2] {
-		if err := ValidateLocalFileOnce(p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if n := memoLen(); n != 2 {
-		t.Fatalf("memo holds %d entries, want 2", n)
-	}
-	if err := ValidateLocalFileOnce(paths[2]); err != nil {
-		t.Fatal(err)
-	}
-	if n := memoLen(); n != 1 {
-		t.Errorf("memo holds %d entries after passing the cap, want 1 (cleared, then the new entry)", n)
-	}
-	if !strings.Contains(logs.String(), "integrity memo full; forgetting") {
-		t.Errorf("the clear was not logged:\n%s", logs.String())
-	}
-	if err := ValidateLocalFileOnce(paths[2]); err != nil {
-		t.Fatal(err)
-	}
-	if n := reads.Load(); n != 3 {
-		t.Errorf("the entry stored after the clear was not kept (%d reads, want 3)", n)
-	}
-	if err := ValidateLocalFileOnce(paths[0]); err != nil {
-		t.Fatal(err)
-	}
-	if n := reads.Load(); n != 4 {
-		t.Errorf("a forgotten entry was not read again (%d reads, want 4)", n)
-	}
-}
-
 // Bullet 8: ForgetVerified empties the memo; the next call reads.
 func TestOnce_forgetVerifiedReadsAgain(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	_, path := snapshotWithFile(t, t.TempDir(), "snap", []byte("the bytes"))
@@ -498,6 +475,7 @@ func TestOnce_forgetVerifiedReadsAgain(t *testing.T) {
 // goroutine may read before any memo lands, never more than once each, and the
 // memo holds one entry at the end.
 func TestOnce_concurrentCallsOnOneFile(t *testing.T) {
+	needIdentity(t)
 	forgetOnExit(t)
 	reads := countReads(t)
 	_, path := snapshotWithFile(t, t.TempDir(), "snap", bytes.Repeat([]byte("y"), 10000))

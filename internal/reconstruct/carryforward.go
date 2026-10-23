@@ -65,18 +65,26 @@ import (
 // the one route into a snapshot that bypasses the check.
 //
 // The check is ValidateLocalFileOnce (#2517): the guarantee is kept, the
-// repetition is dropped. The bytes are read and hashed once per process per
-// identity, where the identity is the file's device + inode + size + mtime.
-// A file carried forward by hard link keeps all four, so the base this
-// refresh links into snapshot N+1 is the inode the process verified when it
-// carried (or wrote) it at snapshot N, and it is not read again; before this
-// every refresh re-read every base end to end, on a host whose bases exceed
-// RAM about two thirds of the refresh. A rewritten base is a new inode and is
-// read on its first carry; the copy fallback below reads its source every
-// time, because a copy is new bytes under a new identity. The limitation the
-// identity accepts: bytes changed in place under the same inode, size and
-// mtime are not seen, which the writers never do (a published file is written
-// to a temp name and renamed, never edited in place).
+// repetition is dropped. A base is read whole and hashed when it is new to
+// the process (its identity, device + inode + size + mtime, is not in the
+// memo), when its snapshot's manifest lists a digest other than the one the
+// memo matched, and when its last check is older than the memo's TTL (about
+// a week, spread per file). A file carried forward by hard link keeps all
+// four, so the base this refresh links into snapshot N+1 is the inode the
+// process verified, or wrote, at snapshot N (the manifest writer remembers
+// what it hashed), and it is not read again; before this every refresh
+// re-read every base end to end, on a host whose bases exceed RAM about two
+// thirds of the refresh. A rewritten base is a new inode with a new digest
+// in its manifest, which is what covers the writers' rewrites. The copy
+// fallback below is a new inode too: the manifest writer hashes it (nothing
+// to reuse, #1717) and remembers it. Corruption that appears on the disk
+// between a check and the TTL's end changes none of the four and is not
+// seen until then; the digest reuse re-certifies the same inode under each
+// new manifest for that long. Within one process every reader of a base
+// shares the memo, except the compaction job (consoleapp, deliberate: it is
+// the one path where bytes it reads become a freshly certified file, and
+// its full read is the daemon's real periodic re-check) and `query
+// --include-snapshot`.
 //
 // What that check does NOT do is worth stating: ValidateLocalFileOnce, like
 // ValidateLocalFile, passes when the snapshot has no manifest at all, or lists

@@ -10,7 +10,9 @@
 // read paths re-hash and compare, failing loud on a mismatch instead of
 // returning garbage rows. Local reads validate via ValidateLocalFile, or via
 // ValidateLocalFileOnce where one process sees the same file on every refresh
-// (a read once per process per device+inode+size+mtime, #2517 — see once.go);
+// (a read once per process per device+inode+size+mtime, again when the
+// manifest digest differs or the check is older than verifiedTTL, #2517 —
+// see once.go);
 // S3 reads validate via ValidateS3File (#698), which pre-pass-streams the
 // original object through CRC-32C before any DuckDB reader touches it — see
 // s3.go.
@@ -143,12 +145,19 @@ func WriteManifestFrom(snapshotDir string, priorDirs []string) (ManifestStats, e
 			m.Files[filepath.ToSlash(rel)] = crc
 			return nil
 		}
+		before, statErr := os.Stat(p)
 		crc, err := CRC32CFile(p)
 		if err != nil {
 			return fmt.Errorf("crc32c %s: %w", p, err)
 		}
 		st.Hashed++
 		m.Files[filepath.ToSlash(rel)] = crc
+		// The writer just read these bytes: the memo behind
+		// ValidateLocalFileOnce (#2517) takes them as verified, so a
+		// rewritten base is not read again at its first carry forward.
+		if statErr == nil {
+			rememberIfUnchanged(p, before, crc)
+		}
 		return nil
 	})
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
@@ -319,6 +320,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// move the number this change exists to get right, in either direction.
 	// started stays for the RFC3339 stamp, which wants the wall clock.
 	elapsed := time.Now()
+	integrityBefore := snapshotIntegrityCounts()
 	req.laneWait = new(time.Duration)
 	// Journaled from here (#2180), below the #1689 gate so a skipped cycle
 	// still leaves no trace, and the snapshot directory only when it was
@@ -401,6 +403,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// instead measures how long it takes to spawn a goroutine, which is
 	// microseconds no matter what the refresh costs.
 	took := time.Since(elapsed)
+	reportIntegrityChecks(req.ServerName, integrityBefore)
 	if err == nil {
 		gap.action, gap.reason = planNewTables(req, gap.all)
 	}
@@ -2464,4 +2467,26 @@ func resetSharedSkipsSaid() {
 	sharedSkipsMu.Lock()
 	sharedSkipsSaid = map[string]string{}
 	sharedSkipsMu.Unlock()
+}
+
+// integrityCounts is a reading of baselineintegrity.Stats.
+type integrityCounts struct{ reads, skips, bytes uint64 }
+
+func snapshotIntegrityCounts() integrityCounts {
+	r, s, b := baselineintegrity.Stats()
+	return integrityCounts{reads: r, skips: s, bytes: b}
+}
+
+// reportIntegrityChecks says, once per refresh cycle at Info, how many base
+// files the cycle's integrity checks read whole (and their MB) and how many
+// they skipped as verified earlier by this process (#2517). The per-file
+// skip is a Debug line, since a line per table per refresh would be spam;
+// this is the line that makes the saving, and the absence of a read,
+// visible at the default level. The counters are process-wide, so two
+// servers refreshing at once each count the other's checks in their cycle.
+func reportIntegrityChecks(server string, before integrityCounts) {
+	now := snapshotIntegrityCounts()
+	mb := fmt.Sprintf("%.1f", float64(now.bytes-before.bytes)/(1<<20))
+	slog.Info("baseline refresh: integrity checks this cycle", "server", server,
+		"read_files", now.reads-before.reads, "read_mb", mb, "skipped_files", now.skips-before.skips)
 }

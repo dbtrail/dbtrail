@@ -35,6 +35,11 @@ func carryTwiceFixture(t *testing.T) (root, s1, s2, s3 string) {
 	if err := baselineintegrity.WriteManifest(s1); err != nil {
 		t.Fatal(err)
 	}
+	// The manifest writer seeds the memo with the files it hashed (round 2,
+	// F4). These tests are about the READER's first and second check, so the
+	// seed is dropped: s1's file is new to the process when the first carry
+	// checks it.
+	baselineintegrity.ForgetVerified()
 	return root, s1, s2, s3
 }
 
@@ -82,7 +87,9 @@ func TestCarryForward_validatesABaseOncePerProcess_2517(t *testing.T) {
 
 // The mirror: between two refreshes the base is replaced by a corrupt file
 // under a NEW inode (a rewrite by rename). The memo holds the old inode, so the
-// next carry reads the new one and refuses it.
+// next carry reads the new one and refuses it. A regression guard, not a
+// discriminator: it passes with ValidateLocalFile as well (which reads every
+// time); what it pins is that the memo never lets a new inode through.
 func TestCarryForward_aBaseReplacedBetweenRefreshesIsStillRefused_2517(t *testing.T) {
 	baselineintegrity.ForgetVerified()
 	t.Cleanup(baselineintegrity.ForgetVerified)

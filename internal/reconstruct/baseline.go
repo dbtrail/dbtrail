@@ -230,9 +230,11 @@ func ReadBaselineRows(ctx context.Context, path string, filter map[string]string
 		if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
 			return nil, err
 		}
-	} else if err := baselineintegrity.ValidateLocalFile(path); err != nil {
+	} else if err := baselineintegrity.ValidateLocalFileOnce(path); err != nil {
 		// At-rest integrity (#636): fail loud on a corrupt local baseline before
-		// the cascade Phase-2 scan trusts it.
+		// the cascade Phase-2 scan trusts it. Once per process per identity
+		// (#2517): in the daemon this reader is reached for ONE row, and it
+		// used to read the whole base every time.
 		return nil, err
 	}
 
