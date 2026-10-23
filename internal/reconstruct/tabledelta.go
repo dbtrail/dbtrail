@@ -20,6 +20,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/keyidx"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
@@ -555,72 +556,16 @@ func basePositionsQuery(scanSQL string, names, quoted, types []string, csvPath s
 		" UNION ALL " + nullBranch
 }
 
-// duckDBIntegerWidths is the DuckDB type of an integer key column as the
-// base's Parquet reads back (DESCRIBE), with the bit width the value must fit
-// and whether it is unsigned. Only the three types the baseline writer
-// produces (INT32, INT64 and UINT64 physical columns): a base written by
-// anything else keeps the scan, because a width that was wrong here would
-// drop an in-range key from the join with no error, and that row would be
-// published twice.
-var duckDBIntegerWidths = map[string]struct {
-	bits     int
-	unsigned bool
-}{
-	"INTEGER": {32, false}, "BIGINT": {64, false}, "UBIGINT": {64, true},
-}
+// duckDBIntegerWidths is keyidx.IntegerWidths: the one decision, shared with
+// the key index writer (#2496), of which Parquet-side types the join and the
+// index treat as integer keys. See the doc there.
+var duckDBIntegerWidths = keyidx.IntegerWidths
 
-// integerKeyTypes reads the base's DuckDB types for the key columns and
-// returns them when every one is an integer type; otherwise why says which
-// column is not, and the caller scans. The Parquet side, not the MySQL
-// DATA_TYPE, decides: it is the type the join compares.
+// integerKeyTypes is keyidx.IntegerKeyTypes: the base's DuckDB types for the
+// key columns when every one is an integer type, else why and the caller
+// scans. Shared with the index writer so the two cannot disagree on a table.
 func integerKeyTypes(ctx context.Context, ddb *sql.DB, scanSQL string, quoted []string) (types []string, why string, err error) {
-	rows, err := ddb.QueryContext(ctx, "DESCRIBE SELECT "+strings.Join(quoted, ", ")+" FROM "+scanSQL)
-	if err != nil {
-		return nil, "", fmt.Errorf("describe the base's key columns: %w", err)
-	}
-	defer rows.Close()
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, "", err
-	}
-	nameIdx, typeIdx := -1, -1
-	for i, c := range cols {
-		switch c {
-		case "column_name":
-			nameIdx = i
-		case "column_type":
-			typeIdx = i
-		}
-	}
-	if typeIdx < 0 {
-		return nil, "DESCRIBE returned no column_type", nil
-	}
-	for rows.Next() {
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, "", err
-		}
-		typ, _ := vals[typeIdx].(string)
-		if _, ok := duckDBIntegerWidths[typ]; !ok {
-			name := ""
-			if nameIdx >= 0 {
-				name, _ = vals[nameIdx].(string)
-			}
-			return nil, fmt.Sprintf("key column %q is %s in the file, not an integer type", name, typ), nil
-		}
-		types = append(types, typ)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	if len(types) != len(quoted) {
-		return nil, fmt.Sprintf("DESCRIBE returned %d key columns, expected %d", len(types), len(quoted)), nil
-	}
-	return types, "", nil
+	return keyidx.IntegerKeyTypes(ctx, ddb, scanSQL, quoted)
 }
 
 // nullKeyRefusal fails the lookup the way the scan does when a key column
@@ -664,11 +609,11 @@ func writeIntegerKeyCSV(pkCols []metadata.ColumnMeta, types []string, changes ma
 				return fail(fmt.Sprintf("key %q is not a plain integer", key))
 			}
 			width := duckDBIntegerWidths[types[i]]
-			if width.unsigned {
-				if _, perr := strconv.ParseUint(part, 10, width.bits); perr != nil {
+			if width.Unsigned {
+				if _, perr := strconv.ParseUint(part, 10, width.Bits); perr != nil {
 					inRange = false
 				}
-			} else if _, perr := strconv.ParseInt(part, 10, width.bits); perr != nil {
+			} else if _, perr := strconv.ParseInt(part, 10, width.Bits); perr != nil {
 				inRange = false
 			}
 		}

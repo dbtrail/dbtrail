@@ -164,7 +164,7 @@ func TestRun_SlashInNameLeavesOutOnlyThatTable_2006(t *testing.T) {
 	if stats.TablesProcessed != 12 || len(stats.TablesLeftOut) != 1 || stats.TablesLeftOut[0].Table != "demo.order/items" {
 		t.Fatalf("stats = %+v", stats)
 	}
-	if m, _ := filepath.Glob(filepath.Join(out, "20*", "demo", "order*")); len(m) != 2 {
+	if m, _ := filepath.Glob(filepath.Join(out, "20*", "demo", "order*.parquet")); len(m) != 2 {
 		t.Errorf("want order.items and order items in the snapshot and nothing for order/items, got %q", m)
 	}
 	// A caller that cannot report left-out tables still gets them as an error.

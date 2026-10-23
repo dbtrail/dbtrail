@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/keyidx"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
@@ -304,6 +305,16 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 	}
 	rep.Files = []string{filepath.Join(in.Schema, in.Table+".parquet")}
 	rep.RowsWritten = w.Rows()
+	// The key index beside the published file (#2496): an accelerator for
+	// the next refresh's lookup, never a dependency, so whatever it does is
+	// logged and the table is published either way. Not in rep.Files: the
+	// manifest lists data files, and the index is tied to its base by the
+	// base's own size and footer.
+	keys := make([]string, len(in.PKCols))
+	for i, c := range in.PKCols {
+		keys[i] = c.Name
+	}
+	keyidx.WriteBeside(ctx, in.Schema, in.Table, path, keys, in.DuckDBTuning)
 	return nil
 }
 
