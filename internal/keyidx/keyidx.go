@@ -621,14 +621,13 @@ func (ix *index) bound(id baseIdentity) bool {
 	return ix.BaseSize == id.Size && ix.FooterCRC == id.FooterCRC && ix.BaseRows == id.Rows && ix.BaseIno == id.Ino && ix.BaseMtime == id.Mtime
 }
 
-// baseIdentity is what ties an index to its base. See the package doc for
-// why the footer alone is not it.
+// baseIdentity is what ties an index to its base: the stat half
+// (FileIdentity) plus the footer's CRC and the row count. See the package
+// doc for why the footer alone is not it.
 type baseIdentity struct {
-	Size      int64
+	FileIdentity
 	FooterCRC uint32
 	Rows      int64
-	Ino       uint64
-	Mtime     int64 // UNIX nanoseconds
 }
 
 // FileIdentity tells one version of a base from another without reading
@@ -648,13 +647,19 @@ func StatIdentity(path string) (FileIdentity, error) {
 	if err != nil {
 		return FileIdentity{}, err
 	}
-	return FileIdentity{Size: info.Size(), Mtime: info.ModTime().UnixNano(), Ino: fileIno(info)}, nil
+	return fileIdentityOf(info), nil
+}
+
+// fileIdentityOf is the FileIdentity of a stat'ed file: the ONE place the
+// three fields are read, so the memo's key and the index's binding agree.
+func fileIdentityOf(info os.FileInfo) FileIdentity {
+	return FileIdentity{Size: info.Size(), Mtime: info.ModTime().UnixNano(), Ino: fileIno(info)}
 }
 
 // identityOf is the identity of a stat'ed base whose footer CRC and
 // num_rows are known.
 func identityOf(info os.FileInfo, footerCRC uint32, rows int64) baseIdentity {
-	return baseIdentity{Size: info.Size(), FooterCRC: footerCRC, Rows: rows, Ino: fileIno(info), Mtime: info.ModTime().UnixNano()}
+	return baseIdentity{FileIdentity: fileIdentityOf(info), FooterCRC: footerCRC, Rows: rows}
 }
 
 // readBaseIdentity reads a base's identity: ParquetFooter plus the inode
@@ -699,22 +704,28 @@ func EnsureBeside(ctx context.Context, schema, table, basePath string, keyCols [
 	return WriteBeside(ctx, schema, table, basePath, keyCols, tuning)
 }
 
+// buildIndex is Build; a seam so a test can hand WriteBeside an error of
+// another shape under a cancelled context.
+var buildIndex = Build
+
 // WriteBeside is Build under a publish's policy: the base is already
 // published, and an index is an accelerator, never a dependency, so nothing
 // here fails the caller. A failed build is a warning with its reason; a skip
 // for disk is a warning, a skip for the table's own shape a debug line; a
 // written index is one Info line with its cost.
 func WriteBeside(ctx context.Context, schema, table, basePath string, keyCols []string, tuning duckdbutil.Tuning) Result {
-	res, err := Build(ctx, basePath, keyCols, tuning)
+	res, err := buildIndex(ctx, basePath, keyCols, tuning)
 	switch {
-	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+	case err != nil && ctx.Err() != nil:
 		// A shutdown, not a defect: one line per table in flight at Warn
-		// would read as a problem with the tables.
+		// would read as a problem with the tables. Decided by the context,
+		// not by the error: a build interrupted inside DuckDB fails with
+		// DuckDB's own error, which does not wrap context.Canceled.
 		slog.Debug("key index not written: the build was cancelled", "schema", schema, "table", table, "path", res.Path, "error", err)
 	case err != nil:
-		slog.Warn("key index not written; the next refresh scans the table's file", "schema", schema, "table", table, "path", res.Path, "error", err)
+		slog.Warn("key index not written; the table's file is read through DuckDB, and the build is not tried again until the table's file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", res.Path, "error", err)
 	case res.Skipped != "" && res.Warn:
-		slog.Warn("key index skipped; the next refresh scans the table's file", "schema", schema, "table", table, "path", res.Path, "reason", res.Skipped)
+		slog.Warn("key index skipped; the table's file is read through DuckDB, and the build is not tried again until the table's file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", res.Path, "reason", res.Skipped)
 	case res.Skipped != "":
 		slog.Debug("key index skipped", "schema", schema, "table", table, "reason", res.Skipped)
 	default:

@@ -142,10 +142,12 @@ func carryForward(ctx context.Context, srcPath, snapshotDir, schema, table strin
 // the base just carried forward, so the next refresh over dst resolves its
 // keys through it instead of scanning. Only by hard link, and only an index
 // Bound ties to srcPath: the index is bound to the base's inode, so a COPIED
-// base (the other arm) gets none, and the next refresh over the copy builds
-// one beside it (one build per copy: a stack whose snapshot folders sit on
-// two filesystems pays that at every refresh of every table, which the
-// docs say to avoid). Nothing here fails the table: an absent index is a
+// base (the other arm) gets none, and is remembered (rememberNoIndex) as a
+// base the lookup must not build beside: a copy has a new inode and
+// modification time at every refresh, so a build beside it would be paid
+// at every refresh (15 s and 1.5 GB per 61 M-row table, every five
+// minutes); the copy is read through DuckDB until the snapshot folders
+// share a filesystem. Nothing here fails the table: an absent index is a
 // Debug line, a copy is a Debug line, a link that cannot be made is a Debug
 // line; a damaged or unbound index beside the previous base is a WARN once
 // per carry, naming the file, because that is damage worth knowing about;
@@ -163,7 +165,8 @@ func carryKeyIndex(srcPath, dst string, linked bool, schema, table string) {
 		return
 	}
 	if !linked {
-		slog.Debug("carry forward: the file was copied, so its key index is not carried (an index is bound to one inode); the next refresh builds one beside the copy, and every refresh that copies pays that build again: keep the snapshot folders on one filesystem", "schema", schema, "table", table, "path", src)
+		rememberNoIndex(dst)
+		slog.Debug("carry forward: the file was copied, so its key index is not carried (an index is bound to one inode) and none is built beside the copy; the base is read through DuckDB until the snapshot folders share a filesystem", "schema", schema, "table", table, "path", src)
 		return
 	}
 	ok, err := keyidx.Bound(srcPath)

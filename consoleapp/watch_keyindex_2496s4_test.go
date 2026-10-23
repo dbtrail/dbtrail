@@ -19,6 +19,11 @@ import (
 // once per process, so the wiring is pinned through the seam, and the seam
 // is pinned to the real switch.
 func TestNewBaselineSupervisorFromConfig_readsTheKeyIndexSwitch(t *testing.T) {
+	// Pointer equality holds today because both are the same func value:
+	// every closure newKeyIndexSwitch returns shares one code pointer, and
+	// the seam is assigned the switch itself. Wrapping the seam in another
+	// func (`func() bool { return reconstruct.KeyIndexEnabled() }`) would
+	// break this check on purpose: the wiring would then need a new pin.
 	if reflect.ValueOf(keyIndexSwitch).Pointer() != reflect.ValueOf(reconstruct.KeyIndexEnabled).Pointer() {
 		t.Fatal("keyIndexSwitch is not reconstruct.KeyIndexEnabled")
 	}

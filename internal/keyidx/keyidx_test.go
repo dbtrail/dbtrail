@@ -578,7 +578,7 @@ func TestWriteBeside_logsOneLinePerOutcome(t *testing.T) {
 	diskSpace = func(string) (uint64, uint64, error) { return 1, 1 << 40, nil }
 	WriteBeside(ctx, "s", "t", good, []string{"id"}, duckdbutil.Tuning{})
 	diskSpace = prevDisk
-	if line = lastLine(buf.String()); !strings.Contains(line, "level=WARN") || !strings.Contains(line, `msg="key index skipped; the next refresh scans the table's file"`) {
+	if line = lastLine(buf.String()); !strings.Contains(line, "level=WARN") || !strings.Contains(line, `msg="key index skipped; the table's file is read through DuckDB, and the build is not tried again until the table's file is rewritten or the daemon restarts"`) {
 		t.Errorf("short disk: %s", line)
 	}
 }

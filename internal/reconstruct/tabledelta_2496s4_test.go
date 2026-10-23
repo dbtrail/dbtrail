@@ -132,7 +132,7 @@ func TestKeyIndexSwitch_saysItsStateAtBoot_2496s4(t *testing.T) {
 		lines []string
 	}{
 		{"", true, []string{"level=INFO", "by default", "BINTRAIL_KEY_INDEX=0"}},
-		{"1", true, []string{"level=INFO", "by default"}},
+		{"1", true, []string{"level=INFO", "enabled by " + KeyIndexEnv}},
 		{"0", false, []string{"level=INFO", "disabled by " + KeyIndexEnv, "scans the table's file"}},
 		{"maybe", true, []string{"level=WARN", "level=INFO", "default"}},
 	} {
@@ -147,6 +147,11 @@ func TestKeyIndexSwitch_saysItsStateAtBoot_2496s4(t *testing.T) {
 			if !strings.Contains(log.String(), want) {
 				t.Fatalf("%q: no %q in the log:\n%s", tc.raw, want, log.String())
 			}
+		}
+		// "by default" is for the empty value only (F8): an explicit 1 is
+		// said as the operator's choice.
+		if tc.raw == "1" && strings.Contains(log.String(), "by default") {
+			t.Fatalf("%q: an explicit value is said as the default:\n%s", tc.raw, log.String())
 		}
 		wantLines := 1
 		if tc.raw == "maybe" {
@@ -512,8 +517,9 @@ func TestTableReport_addLookupSumsTheBuild_2496s4(t *testing.T) {
 }
 
 // TestCarryForward_copyArmSaysTheNextRefreshBuilds_2496s4: the copy arm's
-// Debug line says what now happens: the next refresh builds an index beside
-// the copy.
+// Debug line says what now happens: no index is built beside the copy, the
+// base is read through DuckDB until the folders share a filesystem (round
+// 2, F2; the lookup half is in tabledelta_2496s4r2_test.go).
 func TestCarryForward_copyArmSaysTheNextRefreshBuilds_2496s4(t *testing.T) {
 	base, _ := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"1", "a"}})
 	indexBeside(t, base, "id")
@@ -522,7 +528,7 @@ func TestCarryForward_copyArmSaysTheNextRefreshBuilds_2496s4(t *testing.T) {
 	if _, err := carryForward(context.Background(), base, t.TempDir(), "s", "t"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(log.String(), "the next refresh builds one beside the copy") {
-		t.Fatalf("the copy arm does not say the next refresh builds:\n%s", log.String())
+	if !strings.Contains(log.String(), "none is built beside the copy") || !strings.Contains(log.String(), "until the snapshot folders share a filesystem") {
+		t.Fatalf("the copy arm does not say no index is built beside the copy:\n%s", log.String())
 	}
 }

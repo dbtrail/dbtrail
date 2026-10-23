@@ -433,13 +433,17 @@ var KeyIndexEnabled = newKeyIndexSwitch(os.Getenv)
 // (two for a value it cannot read: the warning, then the default's line).
 func newKeyIndexSwitch(getenv func(string) string) func() bool {
 	return sync.OnceValue(func() bool {
-		on, warning := keyIndexOn(getenv(KeyIndexEnv))
+		raw := getenv(KeyIndexEnv)
+		on, warning := keyIndexOn(raw)
 		if warning != "" {
 			slog.Warn(warning)
 		}
-		if on {
+		switch {
+		case on && strings.TrimSpace(raw) == "":
 			slog.Info("key index lookup enabled by default: a refresh resolves its changed keys against <table>.keyidx beside the table's file, building the index there when the file has none; set BINTRAIL_KEY_INDEX=0 to scan the file instead", "env", KeyIndexEnv)
-		} else {
+		case on:
+			slog.Info("key index lookup enabled by BINTRAIL_KEY_INDEX: a refresh resolves its changed keys against <table>.keyidx beside the table's file, building the index there when the file has none", "env", KeyIndexEnv)
+		default:
 			slog.Info("key index lookup disabled by BINTRAIL_KEY_INDEX; every refresh scans the table's file for its changed keys", "env", KeyIndexEnv)
 		}
 		return on
@@ -465,12 +469,19 @@ var writeIndexBeside = keyidx.WriteBeside
 // unchanged base does not probe or warn again; a rewritten base is a new
 // identity and gets one new attempt, and a base carried forward by hard
 // link keeps its identity under its new path, so the memory follows it down
-// the chain. A build cut short by the context leaves no entry. The value is
-// the path the entry was made under, for the Debug line. Process-wide:
-// every table of every source folds in this one process.
+// the chain (TestLookupBasePositions_memoFollowsTheHardLink_2496s4r2). A
+// base carried by COPY is entered by the carry itself (carryKeyIndex): its
+// identity is new at every refresh, so a build beside it would be paid at
+// every refresh. A build cut short by the context leaves no entry, and so
+// does an open that failed on the BASE rather than the index (transient).
+// The value is the path the entry was made under, for the Debug line.
+// Process-wide: every table of every source folds in this one process.
+// Bounded by noIndexCap: past it the memo is emptied with one Debug line,
+// and the cost is one re-probe per base.
 var (
 	noIndexMu  sync.Mutex
 	noIndexFor = map[keyidx.FileIdentity]string{}
+	noIndexCap = 4096
 )
 
 // noIndexMemoEntry says whether a build over basePath's current version is
@@ -495,6 +506,10 @@ func rememberNoIndex(basePath string) {
 	}
 	noIndexMu.Lock()
 	defer noIndexMu.Unlock()
+	if _, known := noIndexFor[id]; !known && len(noIndexFor) >= noIndexCap {
+		slog.Debug("base positions: the memo of files not to build a key index beside reached its cap and was emptied; each such file is probed once more", "cap", noIndexCap, "path", basePath)
+		clear(noIndexFor)
+	}
 	noIndexFor[id] = basePath
 }
 
@@ -664,11 +679,16 @@ func lookupBasePositionsVia(ctx context.Context, basePath, schema, table string,
 	return out, st, nil
 }
 
-// keyIndexUnusable is the WARN for an index that is there and cannot be
-// used (damage, not absence), when the lookup could not replace it: it
-// repeats at every lookup of every pass of every refresh until the index is
-// gone, so it says what to do.
-const keyIndexUnusable = "base positions: the key index beside the base is not usable; the base is read through DuckDB; remove it to silence this; it is rebuilt at the table's next refresh"
+// keyIndexUnusable is the WARN for an index that is unusable AGAIN right
+// after the lookup rebuilt it: a deterministic defect, not damage. The
+// index is removed and the base remembered, so the line is said once per
+// version of the base.
+const keyIndexUnusable = "base positions: the key index beside the base is not usable after being rebuilt; the base is read through DuckDB, and the index is not built again until the file is rewritten or the daemon restarts"
+
+// keyIndexUnchecked is the WARN for an open that failed on the BASE, not
+// the index (a permission, an I/O error): nothing is known about the
+// index, so nothing is removed, built or remembered.
+const keyIndexUnchecked = "base positions: the key index beside the base could not be checked against the base; the base is read through DuckDB and the index is left as it is"
 
 // keyIndexRebuilding is the WARN for an index that is there and cannot be
 // used and is replaced in this lookup (slice 4): the cause is in the attrs.
@@ -698,8 +718,10 @@ const keyIndexRebuilding = "base positions: the key index beside the base is not
 // hold it. The index is opened per lookup and closed, and nothing is cached
 // across lookups but the memo of builds that produced nothing. A base
 // carried forward by hard link takes its index along (carryKeyIndex), bound
-// by the inode the link keeps; a copied base does not, and the next lookup
-// over it builds one beside the copy.
+// by the inode the link keeps; a copied base does not, and is remembered by
+// the carry as a base not to build beside (its identity is new at every
+// refresh), so it is read through DuckDB until the folders share a
+// filesystem.
 func lookupViaIndex(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta, changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) (out []int64, st lookupStats, ok bool) {
 	if strings.HasPrefix(basePath, "s3://") {
 		slog.Debug("base positions: no key index for a base on S3; the base is read through DuckDB", "schema", schema, "table", table)
@@ -717,6 +739,8 @@ func lookupViaIndex(ctx context.Context, basePath, schema, table string, pkCols 
 		keyNames[i] = c.Name
 	}
 	rebuilt := false
+	// At most two turns: open (building where there is none), then open
+	// again after a rebuild forced by damage the first open did not see.
 	for {
 		r, col, built, ok := keyIndexFor(ctx, basePath, schema, table, pkCols, keyNames, tuning, rebuilt)
 		st.Built += built
@@ -736,13 +760,27 @@ func lookupViaIndex(ctx context.Context, basePath, schema, table string, pkCols 
 			return out, st, true
 		}
 		// Damage the open did not see (a block's CRC, records out of order):
-		// replace the index once in this lookup; the second time, stand aside.
+		// replace the index once in this lookup; unusable again after that
+		// is a defect of this base, remembered so it is not rebuilt at every
+		// refresh (the next lookup is one Debug line).
 		if rebuilt {
 			slog.Warn(keyIndexUnusable, "schema", schema, "table", table, "path", keyidx.PathFor(basePath), "error", err)
+			rememberNoIndex(basePath)
+			removeStaleIndex(basePath, schema, table)
+			return nil, st, false
+		}
+		if under, memo := noIndexMemoEntry(basePath); memo {
+			// Said at an earlier lookup (a damaged index that could not be
+			// removed): one Debug line now.
+			slog.Debug("base positions: the key index beside the base is not usable and the build over this version of the file produced none; not tried again until the file is rewritten; the base is read through DuckDB",
+				"schema", schema, "table", table, "path", keyidx.PathFor(basePath), "tried_under", under, "error", err)
 			return nil, st, false
 		}
 		slog.Warn(keyIndexRebuilding, "schema", schema, "table", table, "path", keyidx.PathFor(basePath), "error", err)
 		if !removeStaleIndex(basePath, schema, table) {
+			// Remembered: a stale index that cannot be removed would be
+			// found and warned about at every refresh otherwise.
+			rememberNoIndex(basePath)
 			return nil, st, false
 		}
 		rebuilt = true
@@ -759,9 +797,11 @@ func lookupViaIndex(ctx context.Context, basePath, schema, table string, pkCols 
 // over this version of the base produced nothing. Unusable (ErrCorrupt,
 // ErrUnbound, ErrMismatch, or a header whose names are not a permutation
 // of the key's): WARN with the cause and "rebuilding it now", the stale
-// file removed (a removal that fails is a WARN and the join answers this
-// lookup, nothing built over the file), then the build. The base not there
-// at all (ErrNoBase): Debug, the lookup fails in DuckDB as before.
+// file removed (a removal that fails is a WARN, the base is remembered so
+// the WARN is not repeated, and the join answers), then the build. An open
+// that failed on the base rather than the index (any other error): WARN,
+// nothing touched, nothing remembered. The base not there at all
+// (ErrNoBase): Debug, the lookup fails in DuckDB as before.
 func keyIndexFor(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta, keyNames []string, tuning duckdbutil.Tuning, afterRebuild bool) (r *keyidx.Reader, col []int, built time.Duration, ok bool) {
 	path := keyidx.PathFor(basePath)
 	open := func() (*keyidx.Reader, []int, error) {
@@ -795,13 +835,33 @@ func keyIndexFor(ctx context.Context, basePath, schema, table string, pkCols []m
 			// said why; the absence here is expected.
 			slog.Debug("base positions: no key index beside the base; building it now", "schema", schema, "table", table, "path", path)
 		}
+	case !errors.Is(err, keyidx.ErrCorrupt) && !errors.Is(err, keyidx.ErrUnbound) && !errors.Is(err, keyidx.ErrMismatch):
+		// The open failed on the BASE (a permission, a stat, an I/O error
+		// reading its footer), not on the index: nothing is known about the
+		// index, so it is left alone, and nothing is remembered: the base
+		// may read fine at the next refresh.
+		slog.Warn(keyIndexUnchecked, "schema", schema, "table", table, "path", path, "error", err)
+		return nil, nil, 0, false
 	default:
+		if under, memo := noIndexMemoEntry(basePath); memo {
+			// A stale index that could not be removed at an earlier lookup,
+			// or one unusable again after a rebuild that could not be
+			// removed: said then, one Debug line now.
+			slog.Debug("base positions: the key index beside the base is not usable and the build over this version of the file produced none; not tried again until the file is rewritten; the base is read through DuckDB",
+				"schema", schema, "table", table, "path", path, "tried_under", under, "error", err)
+			return nil, nil, 0, false
+		}
 		if afterRebuild {
 			slog.Warn(keyIndexUnusable, "schema", schema, "table", table, "path", path, "error", err)
+			rememberNoIndex(basePath)
+			removeStaleIndex(basePath, schema, table)
 			return nil, nil, 0, false
 		}
 		slog.Warn(keyIndexRebuilding, "schema", schema, "table", table, "path", path, "error", err)
 		if !removeStaleIndex(basePath, schema, table) {
+			// Remembered: otherwise this WARN and the removal's repeat at
+			// every refresh while the folder stays unwritable.
+			rememberNoIndex(basePath)
 			return nil, nil, 0, false
 		}
 	}
@@ -820,7 +880,7 @@ func keyIndexFor(ctx context.Context, basePath, schema, table string, pkCols []m
 		// built and not usable (a defect: WARN). Not again on this version.
 		rememberNoIndex(basePath)
 		if !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("base positions: the key index just built is not usable; the base is read through DuckDB, and the index is not built again until the file is rewritten", "schema", schema, "table", table, "path", path, "error", err)
+			slog.Warn("base positions: the key index just built is not usable; the base is read through DuckDB, and the index is not built again until the file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", path, "error", err)
 			removeStaleIndex(basePath, schema, table)
 		}
 		return nil, nil, built, false
