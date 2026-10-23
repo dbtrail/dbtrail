@@ -132,11 +132,29 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 }
 
 // NewestIndexedEvent is newestIndexedEvent for a caller outside this package:
-// the snapshot fold reads it beside its index mark (#2201), so the instant it
-// records as the newest change a copy holds is measured exactly the way the
-// coverage window's upper edge is. Zero with a nil error is an empty index.
+// the coverage window's exact upper edge, one MAX probe over the newest
+// partition that has rows. Zero with a nil error is an empty index.
 func NewestIndexedEvent(ctx context.Context, db *sql.DB, dbName string) (time.Time, error) {
 	return newestIndexedEvent(ctx, db, dbName)
+}
+
+// NewestIndexedRow is the event_timestamp of the index's newest row by
+// primary key: one index dive per partition, merged, where NewestIndexedEvent
+// reads the newest partition whole (no index leads with event_timestamp).
+// It is at most the exact newest event, never past it: the newest row by id
+// is the last one capture wrote, whose time is the newest unless an older
+// binlog was indexed after live capture, when it reads older until the next
+// live batch. The snapshot update records it as the newest change a copy
+// holds (#2201, #2509): that record must be older than the copy's data,
+// never newer, and this is, at the cost of one partition dive instead of
+// one partition scan per update. Zero with a nil error is an empty index.
+func NewestIndexedRow(ctx context.Context, db *sql.DB) (time.Time, error) {
+	var t sql.NullTime
+	found, err := edgeRowByKey(ctx, db, "DESC", &t)
+	if err != nil || !found {
+		return time.Time{}, err
+	}
+	return t.Time, nil
 }
 
 // newestIndexedEvent finds the newest event_timestamp with per-partition MAX

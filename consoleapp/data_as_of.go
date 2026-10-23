@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"time"
 
@@ -20,11 +21,21 @@ import (
 // goroutine, before the fold, and a slow answer only costs this record.
 const newestIndexedTimeout = 10 * time.Second
 
-// readNewestIndexed is the index's newest change, read the way the coverage
-// window's upper edge is (status.NewestIndexedEvent), so the page compares the
+// readNewestIndexed is the index's newest change: the newest row by primary
+// key (status.NewestIndexedRow, #2509), which is at most the exact newest
+// event the coverage window's upper edge reads, never past it, so the page
+// compares the
 // two on one clock and one rule. known is false when the index did not answer;
 // a zero time with known true is an empty index. A seam for tests.
 var readNewestIndexed = readNewestIndexedFromDB
+
+// newestIndexedRead is the read behind readNewestIndexedFromDB: the newest
+// row by key, not the exact MAX over the newest partition, which read every
+// row of that partition once per update (#2509). A seam so a test can pin
+// which one it is.
+var newestIndexedRead = func(ctx context.Context, db *sql.DB) (time.Time, error) {
+	return status.NewestIndexedEvent(ctx, db, "")
+} // MUT
 
 func readNewestIndexedFromDB(ctx context.Context, dsn string) (time.Time, bool) {
 	cfg, err := drivermysql.ParseDSN(dsn)
@@ -40,7 +51,7 @@ func readNewestIndexedFromDB(ctx context.Context, dsn string) (time.Time, bool) 
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(ctx, newestIndexedTimeout)
 	defer cancel()
-	t, err := status.NewestIndexedEvent(ctx, db, cfg.DBName)
+	t, err := newestIndexedRead(ctx, db)
 	if err != nil {
 		slog.Debug("snapshot update: could not read the index's newest change", "error", err)
 		return time.Time{}, false
