@@ -57,7 +57,7 @@ func TestKeyIndex_ordinalOrderIsNotTheFilesOrderAndTheWriterConverges_2496(t *te
 	}
 	// The file's order is alphabetical, so d before w: not the ordinal order.
 	n := int(fromOrdinal[10])
-	off := 40 + n
+	off := int(keyidx.HeaderSize(nil)) + n // the fixed header, then the type codes
 	var names []string
 	for range n {
 		l := int(binary.BigEndian.Uint16(fromOrdinal[off:]))

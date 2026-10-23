@@ -381,10 +381,15 @@ func reservedDeltaColumn(cols []baseline.Column) string {
 // join only narrows what Go looks at, and it is taken only when every
 // touched key is either handed to DuckDB exactly or provably outside what
 // its column can hold. The index path takes the same keys under the same
-// filter, and the scan stays the truth it must agree with: every way the
-// index can be unusable falls back, logged by cause. It reads the change
-// map and never drains it: the upserts writer runs after this and needs
-// every entry.
+// filter, and its answer is used AS IS: no DuckDB read and no canonical
+// check runs after it. What protects that answer is the index's own CRCs,
+// its binding to this very base (size, footer CRC, row count), the name
+// and type checks against the base and the key, and the key metadata
+// guard (integerPKDataType); any of them failing sends the lookup to the
+// join or the scan, logged by cause, and the tests pin the index's
+// positions to the scan's on every shape. It reads the change map and
+// never drains it: the upserts writer runs after this and needs every
+// entry.
 func lookupBasePositions(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
 	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) ([]int64, lookupStats, error) {
 	return lookupBasePositionsVia(ctx, basePath, schema, table, pkCols, changes, tuning, tableDeltaJoinKeys, keyIndexEnabled())
@@ -414,16 +419,24 @@ func keyIndexOn(raw string) (on bool, warning string) {
 }
 
 // KeyIndexEnabled is the switch, read once per process and logged once.
-var KeyIndexEnabled = sync.OnceValue(func() bool {
-	on, warning := keyIndexOn(os.Getenv(KeyIndexEnv))
-	if warning != "" {
-		slog.Warn(warning)
-	}
-	if on {
-		slog.Info("key index lookup enabled: a refresh resolves its changed keys against <table>.keyidx where one is bound to the table's file; the file is scanned where there is none, and every fallback is logged", "env", KeyIndexEnv)
-	}
-	return on
-})
+// Exported for the daemon, which calls it when the refresh loop starts so
+// the line is at boot, beside the loop's own, and not at the first refresh
+// with table deltas (the lookup is the only other reader, through the seam).
+var KeyIndexEnabled = newKeyIndexSwitch(os.Getenv)
+
+// newKeyIndexSwitch is KeyIndexEnabled over getenv: one read, one line.
+func newKeyIndexSwitch(getenv func(string) string) func() bool {
+	return sync.OnceValue(func() bool {
+		on, warning := keyIndexOn(getenv(KeyIndexEnv))
+		if warning != "" {
+			slog.Warn(warning)
+		}
+		if on {
+			slog.Info("key index lookup enabled: a refresh resolves its changed keys against <table>.keyidx where one is bound to the table's file; the file is scanned where there is none, and every fallback is logged", "env", KeyIndexEnv)
+		}
+		return on
+	})
+}
 
 // keyIndexEnabled is what the lookup reads; a seam so a test can set the
 // switch without the environment.
@@ -584,6 +597,11 @@ func lookupBasePositionsVia(ctx context.Context, basePath, schema, table string,
 	return out, st, nil
 }
 
+// keyIndexUnusable is the WARN for an index that is there and cannot be
+// used (damage, not absence): it repeats at every lookup of every pass of
+// every refresh until the index is gone, so it says what to do.
+const keyIndexUnusable = "base positions: the key index beside the base is not usable; the base is read through DuckDB; remove it to silence this; it is rebuilt at the table's next full rewrite"
+
 // lookupViaIndex resolves the window's keys against the key index beside
 // basePath (#2496, slice 3) and reports whether it did; false means the
 // caller joins or scans as if there were no index, and why is in the log.
@@ -595,24 +613,42 @@ func lookupBasePositionsVia(ctx context.Context, basePath, schema, table string,
 // would not hand to DuckDB exactly (Debug here, the join's own Info line
 // follows: the same filter, writeIntegerKeyCSV's, decides both, so the
 // index never resolves a key the join would not); a block that fails its
-// CRC (WARN). The keys are encoded in the HEADER's order, which is the
-// base file's column order and not the key's: the header says which column
-// each record's bytes hold. A key outside its column's range is left out,
-// as the join leaves it out: no base row can hold it. The index is opened
-// per lookup and closed; a base carried forward by hard link keeps the same
-// index path, and nothing is cached across lookups.
+// CRC (WARN). Before any of it, the key's snapshot metadata: a key column
+// whose DataType is not one canonicalizePKValue passes through untouched
+// (integerPKDataType) is a column the join would run through the
+// canonicalizer, which refuses an integer where the snapshot says a string;
+// the index stands aside (Debug) so the join refuses as before. The keys
+// are encoded in the HEADER's order, which is the base file's column order
+// and not the key's: the header says which column each record's bytes
+// hold, and the names must be a permutation of the key's (a header naming
+// a column twice is refused too). A key outside its column's range is left
+// out, as the join leaves it out: no base row can hold it. The index is
+// opened per lookup and closed, and nothing is cached across lookups. A
+// base carried forward by hard link takes its index along (carryKeyIndex),
+// bound by the inode the link keeps; a copied base does not, and is read
+// through DuckDB until the next full rewrite builds one.
 func lookupViaIndex(basePath, schema, table string, pkCols []metadata.ColumnMeta, changes map[string]*query.ResultRow) (out []int64, st lookupStats, ok bool) {
 	if strings.HasPrefix(basePath, "s3://") {
 		slog.Debug("base positions: no key index for a base on S3; the base is read through DuckDB", "schema", schema, "table", table)
 		return nil, st, false
 	}
+	for _, c := range pkCols {
+		if !integerPKDataType(c.DataType) {
+			slog.Debug("base positions: key index not used for this table", "schema", schema, "table", table,
+				"reason", fmt.Sprintf("key column %q is %q in the schema snapshot, not an integer type the join passes through; the join decides", c.Name, c.DataType))
+			return nil, st, false
+		}
+	}
 	r, err := keyIndexOpen(basePath)
 	switch {
+	case errors.Is(err, keyidx.ErrNoBase):
+		slog.Debug("base positions: the base file is not there; the lookup reads it through DuckDB and fails there", "schema", schema, "table", table, "error", err)
+		return nil, st, false
 	case errors.Is(err, os.ErrNotExist):
 		slog.Debug("base positions: no key index beside the base; the base is read through DuckDB", "schema", schema, "table", table, "path", keyidx.PathFor(basePath))
 		return nil, st, false
 	case err != nil:
-		slog.Warn("base positions: the key index beside the base is not usable; the base is read through DuckDB", "schema", schema, "table", table, "error", err)
+		slog.Warn(keyIndexUnusable, "schema", schema, "table", table, "path", keyidx.PathFor(basePath), "error", err)
 		return nil, st, false
 	}
 	defer r.Close()
@@ -620,6 +656,8 @@ func lookupViaIndex(basePath, schema, table string, pkCols []metadata.ColumnMeta
 	// The header's columns must be the key's, as a set; the order is the
 	// file's and is followed below.
 	col := make([]int, len(names)) // header position -> pkCols index
+	seen := make([]bool, len(pkCols))
+	permutation := len(names) == len(pkCols)
 	for j, name := range names {
 		col[j] = -1
 		for i, c := range pkCols {
@@ -627,13 +665,18 @@ func lookupViaIndex(basePath, schema, table string, pkCols []metadata.ColumnMeta
 				col[j] = i
 			}
 		}
+		if col[j] < 0 || seen[col[j]] {
+			permutation = false
+		} else {
+			seen[col[j]] = true
+		}
 	}
-	if len(names) != len(pkCols) || slices.Contains(col, -1) {
+	if !permutation {
 		keyNames := make([]string, len(pkCols))
 		for i, c := range pkCols {
 			keyNames[i] = c.Name
 		}
-		slog.Warn("base positions: the key index beside the base is built on other key columns than the table's; the base is read through DuckDB",
+		slog.Warn("base positions: the key index beside the base is built on other key columns than the table's; the base is read through DuckDB; remove it to silence this; it is rebuilt at the table's next full rewrite",
 			"schema", schema, "table", table, "path", keyidx.PathFor(basePath), "index_columns", names, "key_columns", keyNames)
 		return nil, st, false
 	}
@@ -660,7 +703,7 @@ func lookupViaIndex(basePath, schema, table string, pkCols []metadata.ColumnMeta
 			if !in {
 				inRange = false
 			} else if err := keyidx.EncodeKey(buf[off:], types[j], v); err != nil {
-				slog.Warn("base positions: the key index beside the base is not usable; the base is read through DuckDB", "schema", schema, "table", table, "error", err)
+				slog.Warn(keyIndexUnusable, "schema", schema, "table", table, "path", keyidx.PathFor(basePath), "error", err)
 				return nil, st, false
 			}
 			off += keyidx.IntegerWidths[types[j]].Bits / 8
@@ -671,7 +714,7 @@ func lookupViaIndex(basePath, schema, table string, pkCols []metadata.ColumnMeta
 	}
 	out, found, err := r.Find(keys)
 	if err != nil {
-		slog.Warn("base positions: the key index beside the base is not usable; the base is read through DuckDB", "schema", schema, "table", table, "error", err)
+		slog.Warn(keyIndexUnusable, "schema", schema, "table", table, "path", keyidx.PathFor(basePath), "error", err)
 		return nil, st, false
 	}
 	st.Path, st.Examined, st.IndexBlocks = "index", found.Matches, found.Blocks
@@ -1293,7 +1336,8 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 	if err != nil {
 		return fmt.Errorf("carry the backup file of %s.%s forward: %w", p.schema, p.table, err)
 	}
-	published = append(published, newBase)
+	// The index carried beside the base goes with it on failure (#2496).
+	published = append(published, newBase, keyidx.PathFor(newBase))
 	chainStart, seq, spaceHint := newChainStart(p), 0, int64(0)
 	copied := 0
 	adopted := ""

@@ -26,3 +26,13 @@ func sameDevice(a, b string) bool {
 	db, ok := sb.Sys().(*syscall.Stat_t)
 	return ok && da.Dev == db.Dev
 }
+
+// fileIno is the inode of a stat'ed file, what a hard link keeps and a
+// copy does not; 0 where the platform does not say.
+func fileIno(info os.FileInfo) uint64 {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0
+	}
+	return uint64(st.Ino)
+}

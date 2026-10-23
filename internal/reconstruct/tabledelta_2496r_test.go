@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -295,7 +296,7 @@ func TestLookupBasePositions_indexAgreesWithJoinAndScan_2496r(t *testing.T) {
 // keyWidth bytes, records records) so only the forgery is what the reader
 // sees. Mirrors the format in the keyidx package doc.
 func retrailIndex(raw []byte, name string, keyWidth int, records int64) []byte {
-	headerLen := int64(40 + 1 + 2 + len(name))
+	headerLen := keyidx.HeaderSize([]string{name})
 	nblocks := (records + keyidx.BlockRecords - 1) / keyidx.BlockRecords
 	skipLen := nblocks * int64(keyWidth+4)
 	tailStart := headerLen + records*int64(keyWidth+8)
@@ -339,15 +340,15 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 		}, "WARN", "not bound"},
 		{"corrupt body", func(t *testing.T, base string) {
 			indexBeside(t, base, "id")
-			flip(t, keyidx.PathFor(base), 45+5)
+			flip(t, keyidx.PathFor(base), hdr("id")+5)
 		}, "WARN", "corrupt"},
 		{"corrupt skip table", func(t *testing.T, base string) {
 			indexBeside(t, base, "id")
-			flip(t, keyidx.PathFor(base), 45+4*12+1)
+			flip(t, keyidx.PathFor(base), hdr("id")+4*12+1)
 		}, "WARN", "corrupt"},
 		{"corrupt header name", func(t *testing.T, base string) {
 			indexBeside(t, base, "id")
-			flip(t, keyidx.PathFor(base), 43)
+			flip(t, keyidx.PathFor(base), hdr()+1+2)
 		}, "WARN", "corrupt"},
 		{"names mismatch: built on another key set", func(t *testing.T, base string) {
 			indexBeside(t, base, "v")
@@ -359,7 +360,7 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			raw[40] = 2 // INTEGER -> BIGINT: size no longer agrees -> corrupt, not mismatch; see the bigint case below
+			raw[hdr()] = 2 // INTEGER -> BIGINT: size no longer agrees -> corrupt, not mismatch; see the bigint case below
 			if err := os.WriteFile(p, retrailIndex(raw, "id", 4, 4), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -382,8 +383,47 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 			if line == "" || !strings.Contains(line, c.text) {
 				t.Fatalf("no %s line about the key index carrying %q:\n%s", c.level, c.text, log.String())
 			}
+			// Damage is said with the file to remove and what removing it
+			// does; the line repeats every lookup until then.
+			if c.level == "WARN" && (!strings.Contains(line, " path="+keyidx.PathFor(base)) || !strings.Contains(line, "remove it to silence this; it is rebuilt at the table's next full rewrite")) {
+				t.Fatalf("the WARN lacks the path or the remediation:\n%s", line)
+			}
 		})
 	}
+	// An index whose CRCs agree but whose records are out of order inside a
+	// block would answer a SUBSET; the reader refuses it and the lookup
+	// falls back, with the same WARN shape.
+	t.Run("records out of order inside a block", func(t *testing.T) {
+		base, pkCols := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, rows)
+		indexBeside(t, base, "id")
+		p := keyidx.PathFor(base)
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, b := hdr("id")+0*12, hdr("id")+1*12
+		tmp := append([]byte(nil), raw[a:a+12]...)
+		copy(raw[a:a+12], raw[b:b+12])
+		copy(raw[b:b+12], tmp)
+		// Block 0's CRC in the skip table, then the trailing CRC. The
+		// block's first key in the skip table is left as it was, so the
+		// reader's first-key check does not fire before the order check.
+		tbl := crc32.MakeTable(crc32.Castagnoli)
+		tail := int64(hdr("id")) + 4*12
+		binary.BigEndian.PutUint32(raw[tail+4:], crc32.Checksum(raw[hdr("id"):tail], tbl))
+		copy(raw[tail:tail+4], raw[a:a+4])
+		if err := os.WriteFile(p, retrailIndex(raw, "id", 4, 4), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		log := captureDebugLog(t)
+		st, got := threeWays(t, base, pkCols, keys)
+		if st.Path != "join" || !reflect.DeepEqual(got, want) {
+			t.Fatalf("st=%+v got=%v", st, got)
+		}
+		if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "order") || !strings.Contains(log.String(), "remove it to silence this") {
+			t.Fatalf("no WARN about the order:\n%s", log.String())
+		}
+	})
 	// A BIGINT key forged to UBIGINT keeps the size: the type check is what
 	// refuses it, and a mutant that skipped it would return the WRONG rows
 	// (the sign bit is flipped on one side only), which the equality catches.
@@ -396,7 +436,7 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw[40] = 3 // BIGINT -> UBIGINT
+		raw[hdr()] = 3 // BIGINT -> UBIGINT
 		if err := os.WriteFile(p, retrailIndex(raw, "id", 8, 4), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -626,6 +666,365 @@ func TestLookupBasePositions_keyIndexTiming_2496r(t *testing.T) {
 				}
 			}
 			t.Logf("%s / %s: %d positions, path=%s examined=%d blocks=%d, best of 3 %s", set.name, path.name, len(got), st.Path, st.Examined, st.IndexBlocks, best)
+		}
+	}
+}
+
+// TestLookupBasePositions_keyMetadataTypeGuard_2496r: the join refuses, in
+// canonicalizePKValue, a key whose snapshot DataType is a string type while
+// the base stores an integer (the column's type changed after the base was
+// written; CheckDestructiveDDL does not cover ALTER ... MODIFY). The index
+// path must not answer where the join would refuse: with any key column
+// whose DataType is not one the canonicalizer passes through untouched it
+// stands aside (Debug), and the join's refusal text is unchanged.
+func TestLookupBasePositions_keyMetadataTypeGuard_2496r(t *testing.T) {
+	base, _ := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"1", "a"}, {"2", "b"}, {"3", "c"}})
+	indexBeside(t, base, "id")
+	for _, dt := range []string{"varchar", "char", "decimal", "binary", "datetime", "", "int unsigned", "int32"} {
+		pk := []metadata.ColumnMeta{{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: dt}}
+		_, joinSt, joinErr := lookupBasePositionsWith(context.Background(), base, "s", "t", pk, touched("1", "3"), duckdbutil.DefaultTuning(), true)
+		log := captureDebugLog(t)
+		got, st, err := lookupBasePositionsVia(context.Background(), base, "s", "t", pk, touched("1", "3"), duckdbutil.DefaultTuning(), true, true)
+		if st.Path != joinSt.Path || fmt.Sprint(err) != fmt.Sprint(joinErr) {
+			t.Fatalf("DataType %q: index on: path=%q err=%v; join alone: path=%q err=%v", dt, st.Path, err, joinSt.Path, joinErr)
+		}
+		if st.Path == "index" {
+			t.Fatalf("DataType %q: the index answered %v", dt, got)
+		}
+		if !strings.Contains(log.String(), "level=DEBUG") || !strings.Contains(log.String(), "key index not used") {
+			t.Fatalf("DataType %q: no Debug line about standing aside:\n%s", dt, log.String())
+		}
+	}
+	// And the canonical pass-through types all take the index.
+	for _, dt := range []string{"int", "integer", "smallint", "tinyint", "mediumint", "bigint", "year", "INT", " Int "} {
+		pk := []metadata.ColumnMeta{{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: dt}}
+		got, st, err := lookupBasePositionsVia(context.Background(), base, "s", "t", pk, touched("1", "3"), duckdbutil.DefaultTuning(), true, true)
+		if err != nil || st.Path != "index" || !reflect.DeepEqual(got, []int64{0, 2}) {
+			t.Fatalf("DataType %q: got=%v st=%+v err=%v", dt, got, st, err)
+		}
+	}
+}
+
+// TestLookupBasePositions_duplicateHeaderNamesFallBack_2496r: a header that
+// names one key column twice (forged: same lengths, trailing CRC rewritten)
+// has the key's column count and every name is a key column, yet it is not
+// the key: the names must be a permutation of it, or the index stands
+// aside with a WARN.
+func TestLookupBasePositions_duplicateHeaderNamesFallBack_2496r(t *testing.T) {
+	ddl := "CREATE TABLE `t` (\n  `a` int NOT NULL,\n  `b` int NOT NULL,\n  PRIMARY KEY (`a`,`b`)\n) ENGINE=InnoDB;\n"
+	base, pkCols := writeKeyedBaseline(t, ddl, []string{"a", "b"}, [][]string{{"1", "2"}, {"2", "1"}, {"3", "3"}})
+	indexBeside(t, base, "a", "b")
+	p := keyidx.PathFor(base)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Header: fixed + 2 type codes + (2+1 "a") + (2+1 "b"): the second
+	// name's byte is at fixed+2+3+2.
+	at := hdr() + 2 + 3 + 2
+	if raw[at] != 'b' {
+		t.Fatalf("fixture: byte %d is %q, not the second name", at, raw[at])
+	}
+	raw[at] = 'a'
+	headerLen := keyidx.HeaderSize([]string{"a", "b"})
+	nblocks := int64(1)
+	skipLen := nblocks * (8 + 4)
+	tailStart := headerLen + 3*(8+8)
+	tbl := crc32.MakeTable(crc32.Castagnoli)
+	crc := crc32.Checksum(raw[:headerLen], tbl)
+	crc = crc32.Update(crc, tbl, raw[tailStart:tailStart+skipLen])
+	binary.BigEndian.PutUint32(raw[tailStart+skipLen:], crc)
+	if err := os.WriteFile(p, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := keyidx.Open(base); err != nil {
+		t.Fatalf("fixture: the forged index must open (the forgery is the names, not the format): %v", err)
+	} else {
+		r.Close()
+	}
+	log := captureDebugLog(t)
+	st, got := threeWays(t, base, pkCols, touched("1|2", "2|1", "3|3", "1|1"))
+	if st.Path != "join" || !reflect.DeepEqual(got, []int64{0, 1, 2}) {
+		t.Fatalf("st=%+v got=%v", st, got)
+	}
+	if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "other key columns") {
+		t.Fatalf("no WARN about the names:\n%s", log.String())
+	}
+}
+
+// TestLookupBasePositions_missingBaseIsSaidSo_2496r: an index beside a base
+// that is gone must not be logged as "no key index": the Debug line names
+// the base, and the lookup then fails the way it fails today.
+func TestLookupBasePositions_missingBaseIsSaidSo_2496r(t *testing.T) {
+	base, pkCols := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"1", "a"}})
+	indexBeside(t, base, "id")
+	if err := os.Remove(base); err != nil {
+		t.Fatal(err)
+	}
+	log := captureDebugLog(t)
+	_, st, err := lookupBasePositionsVia(context.Background(), base, "s", "t", pkCols, touched("1"), duckdbutil.DefaultTuning(), true, true)
+	if err == nil || st.Path == "index" {
+		t.Fatalf("missing base: err=%v st=%+v", err, st)
+	}
+	if strings.Contains(log.String(), "no key index") || !strings.Contains(log.String(), "the base file is not there") {
+		t.Fatalf("the log blames the index, or does not name the base:\n%s", log.String())
+	}
+}
+
+// TestKeyIndexSwitch_readsOnceAndLogsOnce_2496r: the switch reads the
+// environment once and says once what it read; the daemon calls it when
+// the refresh loop starts so the line is at boot, not at the first refresh.
+func TestKeyIndexSwitch_readsOnceAndLogsOnce_2496r(t *testing.T) {
+	for _, tc := range []struct {
+		raw   string
+		on    bool
+		level string
+	}{
+		{"1", true, "level=INFO"}, {"maybe", false, "level=WARN"}, {"", false, ""},
+	} {
+		log := captureDebugLog(t)
+		reads := 0
+		sw := newKeyIndexSwitch(func(name string) string {
+			if name != KeyIndexEnv {
+				t.Fatalf("read %q, want %s", name, KeyIndexEnv)
+			}
+			reads++
+			return tc.raw
+		})
+		for range 3 {
+			if sw() != tc.on {
+				t.Fatalf("%q: on=%v, want %v", tc.raw, sw(), tc.on)
+			}
+		}
+		if reads != 1 {
+			t.Fatalf("%q: the environment was read %d times", tc.raw, reads)
+		}
+		if n := strings.Count(log.String(), KeyIndexEnv); (tc.level == "" && n != 0) || (tc.level != "" && (n != 1 || !strings.Contains(log.String(), tc.level))) {
+			t.Fatalf("%q: %d lines naming the switch (want %q once):\n%s", tc.raw, n, tc.level, log.String())
+		}
+	}
+}
+
+// hdr is the index header's size for the named key columns (none: the
+// fixed part alone), for a test that forges bytes at known offsets.
+func hdr(names ...string) int { return int(keyidx.HeaderSize(names)) }
+
+// chainStep is one refresh of a chain in TestTableDelta_carriesTheIndexForward_2496r.
+type chainStep struct {
+	window func() map[string]*query.ResultRow
+	at     time.Time
+	cut    *query.BinlogPos
+}
+
+// TestTableDelta_carriesTheIndexForward_2496r (A): the index travels with
+// the base it describes when the base is carried forward by hard link, so
+// every refresh of a chain resolves through it, not only the first after
+// the rewrite. Switch on and off are run as two chains from the same
+// rewritten snapshot; at every step the pair's dead positions and upsert
+// rows must agree, and at the first step, where both chains still hang off
+// the one previous file, the .posdel bytes too (from the second step on
+// each chain's pair names its own previous file in the footer, so the
+// bytes cannot be equal and the positions are what is compared).
+func TestTableDelta_carriesTheIndexForward_2496r(t *testing.T) {
+	noCompaction(t)
+	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	f := indexedBase(t, changeMap(upd(1, "a")))
+	steps := []chainStep{
+		{func() map[string]*query.ResultRow { return changeMap(upd(1, "s2"), ins(10, "ten")) }, f.at2, f.cut2},
+		{func() map[string]*query.ResultRow { return changeMap(del(2), upd(10, "ten-b"), ins(11, "eleven")) }, t0.Add(15 * time.Minute), &query.BinlogPos{File: "binlog.000009", Pos: 3000}},
+		{func() map[string]*query.ResultRow { return changeMap(upd(3, "s4"), del(11), ins(12, "twelve")) }, t0.Add(20 * time.Minute), &query.BinlogPos{File: "binlog.000009", Pos: 4000}},
+	}
+	type run struct {
+		on       bool
+		base     string
+		prevTime time.Time
+	}
+	runs := []*run{{on: false, base: f.ref1, prevTime: f.at1}, {on: true, base: f.ref1, prevTime: f.at1}}
+	for i, step := range steps {
+		var posdel [2][]byte
+		var dead [2][]int64
+		var ups [2][]string
+		for j, r := range runs {
+			useKeyIndex(t, r.on)
+			log := captureDebugLog(t)
+			newBase, rep, err := deltaWindow(t, t.TempDir(), r.base, r.prevTime, step.window(), step.at, step.cut, nil)
+			if err != nil {
+				t.Fatalf("step %d on=%v: %v", i+1, r.on, err)
+			}
+			wantPath := "join"
+			if r.on {
+				wantPath = "index"
+			}
+			if rep.LookupPath != wantPath {
+				t.Fatalf("step %d on=%v: lookup_path=%q, want %q:\n%s", i+1, r.on, rep.LookupPath, wantPath, log.String())
+			}
+			if ok, err := keyidx.Bound(newBase); !ok || err != nil {
+				t.Fatalf("step %d on=%v: the carried base has no bound index beside it (ok=%v err=%v)", i+1, r.on, ok, err)
+			}
+			if strings.Contains(log.String(), "level=WARN") && strings.Contains(log.String(), "key index") {
+				t.Fatalf("step %d on=%v: a WARN about the key index:\n%s", i+1, r.on, log.String())
+			}
+			pd, _ := baseline.TableDeltaPaths(newBase, rep.DeltaSeq)
+			posdel[j], err = os.ReadFile(pd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dead[j], ups[j] = readPositions(t, pd), sortedUpserts(t, newBase, rep.DeltaSeq)
+			t.Logf("step %d on=%v: seq=%d lookup_path=%s lookup_blocks=%d lookup_rows=%d dead=%d upserts=%d", i+1, r.on, rep.DeltaSeq, rep.LookupPath, rep.LookupBlocks, rep.LookupRows, rep.DeltaDeadRows, rep.DeltaUpsertRows)
+			r.base, r.prevTime = newBase, step.at
+		}
+		if !reflect.DeepEqual(dead[0], dead[1]) || !reflect.DeepEqual(ups[0], ups[1]) {
+			t.Fatalf("step %d: the pair differs between switch off and on: dead %v vs %v, upserts %v vs %v", i+1, dead[0], dead[1], ups[0], ups[1])
+		}
+		if len(dead[0]) == 0 {
+			t.Fatalf("step %d: the fixture killed no base row, so the lookup is not exercised", i+1)
+		}
+		if i == 0 && !bytes.Equal(posdel[0], posdel[1]) {
+			t.Fatalf("step %d: .posdel differs between switch off and on", i+1)
+		}
+	}
+}
+
+// TestCarryForward_indexTravelsOnlyByLink_2496r (A): the copy arm leaves no
+// index beside the copied base (another inode: the index would be unbound
+// anyway) and says so at Debug; a damaged or unbound index beside the
+// previous base is not carried and a WARN says so, once, with the path; a
+// link that cannot be made is a Debug line, never the table's failure.
+func TestCarryForward_indexTravelsOnlyByLink_2496r(t *testing.T) {
+	ctx := context.Background()
+	t.Run("copy arm", func(t *testing.T) {
+		base, _ := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"1", "a"}})
+		indexBeside(t, base, "id")
+		t.Cleanup(StubLinkFileForTest(func(string, string) error { return syscall.EXDEV }))
+		log := captureDebugLog(t)
+		dir := t.TempDir()
+		linked, err := carryForward(ctx, base, dir, "s", "t")
+		if err != nil || linked {
+			t.Fatalf("linked=%v err=%v", linked, err)
+		}
+		if _, err := os.Stat(keyidx.PathFor(filepath.Join(dir, "s", "t.parquet"))); !os.IsNotExist(err) {
+			t.Fatalf("an index beside the COPIED base: %v", err)
+		}
+		if !strings.Contains(log.String(), "level=DEBUG") || !strings.Contains(log.String(), "copied") {
+			t.Fatalf("no Debug line about the index not travelling with a copy:\n%s", log.String())
+		}
+	})
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, base string)
+	}{
+		// The trailing CRC: what Bound checks (header, skip table, their
+		// CRC). A block's own damage is found by the lookup that reads the
+		// block, which warns with the same remediation.
+		{"damaged", func(t *testing.T, base string) {
+			raw, err := os.ReadFile(keyidx.PathFor(base))
+			if err != nil {
+				t.Fatal(err)
+			}
+			flip(t, keyidx.PathFor(base), len(raw)-1)
+		}},
+		{"unbound", func(t *testing.T, base string) {
+			other, _ := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"2", "b"}})
+			indexBeside(t, other, "id")
+			raw, err := os.ReadFile(keyidx.PathFor(other))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keyidx.PathFor(base), raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name+" index is not carried", func(t *testing.T) {
+			base, _ := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"1", "a"}})
+			indexBeside(t, base, "id")
+			tc.prepare(t, base)
+			log := captureDebugLog(t)
+			dir := t.TempDir()
+			linked, err := carryForward(ctx, base, dir, "s", "t")
+			if err != nil || !linked {
+				t.Fatalf("linked=%v err=%v", linked, err)
+			}
+			if _, err := os.Stat(keyidx.PathFor(filepath.Join(dir, "s", "t.parquet"))); !os.IsNotExist(err) {
+				t.Fatalf("the %s index was carried: %v", tc.name, err)
+			}
+			warns := 0
+			for _, l := range strings.Split(log.String(), "\n") {
+				if strings.Contains(l, "level=WARN") && strings.Contains(l, "key index") {
+					warns++
+					if !strings.Contains(l, " path="+keyidx.PathFor(base)) || !strings.Contains(l, "remove it to silence this") {
+						t.Fatalf("the WARN lacks the path or the remediation:\n%s", l)
+					}
+				}
+			}
+			if warns != 1 {
+				t.Fatalf("%d WARN lines about the key index, want 1:\n%s", warns, log.String())
+			}
+		})
+	}
+	t.Run("absent index is a Debug line", func(t *testing.T) {
+		base, _ := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"1", "a"}})
+		log := captureDebugLog(t)
+		if _, err := carryForward(ctx, base, t.TempDir(), "s", "t"); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "no key index") {
+			t.Fatalf("absent index:\n%s", log.String())
+		}
+	})
+	t.Run("index link failure is a Debug line, not the table's failure", func(t *testing.T) {
+		base, _ := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, [][]string{{"1", "a"}})
+		indexBeside(t, base, "id")
+		t.Cleanup(StubLinkFileForTest(func(old, new string) error {
+			if strings.HasSuffix(old, keyidx.Suffix) {
+				return os.ErrPermission
+			}
+			return os.Link(old, new)
+		}))
+		log := captureDebugLog(t)
+		dir := t.TempDir()
+		linked, err := carryForward(ctx, base, dir, "s", "t")
+		if err != nil || !linked {
+			t.Fatalf("linked=%v err=%v", linked, err)
+		}
+		if _, err := os.Stat(keyidx.PathFor(filepath.Join(dir, "s", "t.parquet"))); !os.IsNotExist(err) {
+			t.Fatalf("an index beside the base after a failed link: %v", err)
+		}
+		if !strings.Contains(log.String(), "level=DEBUG") || !strings.Contains(log.String(), "could not link") || strings.Contains(log.String(), "level=WARN") {
+			t.Fatalf("link failure:\n%s", log.String())
+		}
+	})
+}
+
+// TestTableDelta_failedPublishRemovesTheCarriedIndex_2496r (A): when the
+// publish fails after the base and its index were carried, the index goes
+// with the base: nothing of the failed table stays in the new snapshot.
+func TestTableDelta_failedPublishRemovesTheCarriedIndex_2496r(t *testing.T) {
+	noCompaction(t)
+	useKeyIndex(t, true)
+	f := indexedBase(t, changeMap(upd(1, "a")))
+	root := t.TempDir()
+	base2, rep, err := deltaWindow(t, root, f.ref1, f.at1, changeMap(upd(1, "s2")), f.at2, f.cut2, nil)
+	if err != nil || rep.LookupPath != "index" {
+		t.Fatalf("fixture: err=%v path=%q", err, rep.LookupPath)
+	}
+	// The next refresh carries the chain's pair forward too; removing it
+	// between the read and the publish fails the carry of the chain, after
+	// the base and its index were linked.
+	at3 := f.at2.Add(5 * time.Minute)
+	newBase := filepath.Join(root, SnapshotDirName(at3), "mydb", "orders.parquet")
+	_, _, err = deltaWindow(t, root, base2, f.at2, changeMap(upd(3, "s3")), at3, &query.BinlogPos{File: "binlog.000009", Pos: 3000}, func(p *tableDeltaPublish) {
+		pd, _ := baseline.TableDeltaPaths(base2, rep.DeltaSeq)
+		if err := os.Remove(pd); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil {
+		t.Fatal("the publish succeeded without the chain's pair")
+	}
+	for _, p := range []string{newBase, keyidx.PathFor(newBase)} {
+		if _, serr := os.Stat(p); !os.IsNotExist(serr) {
+			t.Fatalf("%s is still in the failed snapshot (stat err %v); publish err: %v", p, serr, err)
 		}
 	}
 }

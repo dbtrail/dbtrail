@@ -21,10 +21,12 @@
 //	20      8     base file size in bytes
 //	28      4     CRC-32C of the base's Parquet footer (FooterCRC)
 //	32      8     the base's num_rows, from its footer
-//	40      n     type code per key column: 1 INTEGER, 2 BIGINT, 3 UBIGINT
-//	40+n    ...   per key column its name: a 2-byte length, then UTF-8 bytes
+//	40      8     the base's inode (0 where the platform has none)
+//	48      8     the base's modification time, UNIX nanoseconds
+//	56      n     type code per key column: 1 INTEGER, 2 BIGINT, 3 UBIGINT
+//	56+n    ...   per key column its name: a 2-byte length, then UTF-8 bytes
 //
-// The header is 40+n+sum(2+len(name)) bytes. The key columns are in THE
+// The header is 56+n+sum(2+len(name)) bytes. The key columns are in THE
 // ORDER THEY HAVE IN THE BASE FILE, whatever order the caller named them in
 // (Build sorts them by their position in the base's schema): the two sites
 // that write bases name the key in different orders (a snapshot's schema
@@ -45,10 +47,16 @@
 // the size is header + records*W + blocks*(K+4) + 4, with K the key width
 // and W = K+8 the record width; a reader checks that before anything else.
 //
-// The index is tied to its base by the base's size, footer CRC and num_rows,
-// not by the snapshot's _MANIFEST, which lists data files and is written after
-// the tables; the index is derived from the base and is rebuilt, never
-// certified. It is written to <path>.tmp and renamed into place, so a partial
+// The index is tied to its base by the base's size, footer CRC and num_rows
+// AND by the file's inode and modification time, not by the snapshot's
+// _MANIFEST, which lists data files and is written after the tables; the
+// index is derived from the base and is rebuilt, never certified. The footer
+// alone is not enough: a base rewritten in place with the same rows in
+// another order, uncompressed, keeps size, footer and row count while every
+// row number moves, and an index bound by the footer alone would answer the
+// OLD positions, the one failure nothing may let through. The inode and the
+// time close it: a rewrite changes the time, a copy changes the inode, and a
+// hard link (how a refresh carries a base forward) keeps both. It is written to <path>.tmp and renamed into place, so a partial
 // index never exists under the name a reader opens; and whenever a build does
 // not end in an index (a failure, a skip) any index already beside the base
 // is removed, so a stale one from an earlier build never sits beside a
@@ -97,7 +105,7 @@ const (
 	rowWidth = 8
 	// fixedHeader is the header's size before the per-column type codes
 	// and names.
-	fixedHeader = 40
+	fixedHeader = 56
 	// maxNameLen bounds a key column's name in the header (MySQL allows 64
 	// characters, PostgreSQL 63; the field is 2 bytes).
 	maxNameLen = 1 << 16
@@ -243,6 +251,10 @@ func headerSize(names []string) int64 {
 	return n
 }
 
+// HeaderSize is headerSize for a test outside the package that forges bytes
+// at known offsets.
+func HeaderSize(names []string) int64 { return headerSize(names) }
+
 // ExpectedSize is the index's size for n records over the key columns names
 // with a key of keyWidth bytes.
 func ExpectedSize(n int64, names []string, keyWidth int) int64 {
@@ -344,10 +356,11 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 		res.Skipped = "the table has no key columns"
 		return res, nil
 	}
-	size, footerCRC, numRows, err := ParquetFooter(basePath)
+	ident, err := readBaseIdentity(basePath)
 	if err != nil {
 		return res, err
 	}
+	numRows := ident.Rows
 	select {
 	case buildSlots <- struct{}{}:
 	case <-ctx.Done():
@@ -403,7 +416,7 @@ func Build(ctx context.Context, basePath string, keyCols []string, tuning duckdb
 		return res, nil
 	}
 
-	hdr := encodeHeader(types, names, numRows, size, footerCRC)
+	hdr := encodeHeader(types, names, ident)
 	cols := strings.Join(quoted, ", ")
 	q := "SELECT " + cols + ", file_row_number FROM " + scanSQL + " ORDER BY " + cols + ", file_row_number"
 	rows, err := ddb.QueryContext(ctx, q)
@@ -584,9 +597,9 @@ func removeTemp(tmp string) {
 }
 
 // Bound reports whether the index beside basePath is there and tied to that
-// base: its header's base size, footer CRC and num_rows are the base's. An
-// absent index is false with a nil error; a damaged one, or a base whose
-// footer cannot be read, is an error.
+// base: its header's base size, footer CRC, num_rows, inode and modification
+// time are the base's. An absent index is false with a nil error; a damaged
+// one, or a base whose footer cannot be read, is an error.
 func Bound(basePath string) (bool, error) {
 	ix, err := openIndex(PathFor(basePath))
 	if errors.Is(err, os.ErrNotExist) {
@@ -596,11 +609,55 @@ func Bound(basePath string) (bool, error) {
 		return false, err
 	}
 	ix.Close()
-	size, crc, rows, err := ParquetFooter(basePath)
+	ident, err := readBaseIdentity(basePath)
 	if err != nil {
 		return false, err
 	}
-	return ix.BaseSize == size && ix.FooterCRC == crc && ix.BaseRows == rows, nil
+	return ix.bound(ident), nil
+}
+
+// bound is Bound's comparison: every field of the base's identity.
+func (ix *index) bound(id baseIdentity) bool {
+	return ix.BaseSize == id.Size && ix.FooterCRC == id.FooterCRC && ix.BaseRows == id.Rows && ix.BaseIno == id.Ino && ix.BaseMtime == id.Mtime
+}
+
+// baseIdentity is what ties an index to its base. See the package doc for
+// why the footer alone is not it.
+type baseIdentity struct {
+	Size      int64
+	FooterCRC uint32
+	Rows      int64
+	Ino       uint64
+	Mtime     int64 // UNIX nanoseconds
+}
+
+// identityOf is the identity of a stat'ed base whose footer CRC and
+// num_rows are known.
+func identityOf(info os.FileInfo, footerCRC uint32, rows int64) baseIdentity {
+	return baseIdentity{Size: info.Size(), FooterCRC: footerCRC, Rows: rows, Ino: fileIno(info), Mtime: info.ModTime().UnixNano()}
+}
+
+// readBaseIdentity reads a base's identity: ParquetFooter plus the inode
+// and modification time of the same stat.
+func readBaseIdentity(path string) (baseIdentity, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return baseIdentity{}, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return baseIdentity{}, err
+	}
+	crc, err := footerCRCOf(f, info.Size())
+	if err != nil {
+		return baseIdentity{}, fmt.Errorf("read the footer of %s: %w", path, err)
+	}
+	pf, err := openParquet(f, info.Size())
+	if err != nil {
+		return baseIdentity{}, fmt.Errorf("read the footer of %s: %w", path, err)
+	}
+	return identityOf(info, crc, pf.NumRows()), nil
 }
 
 // EnsureBeside is WriteBeside for a base that was NOT just written (a
@@ -648,16 +705,18 @@ func WriteBeside(ctx context.Context, schema, table, basePath string, keyCols []
 }
 
 // encodeHeader renders the header for the key columns names of types over
-// a base of numRows rows, size bytes and footer CRC footerCRC.
-func encodeHeader(types, names []string, numRows, size int64, footerCRC uint32) []byte {
+// the base id describes.
+func encodeHeader(types, names []string, id baseIdentity) []byte {
 	hdr := make([]byte, 0, headerSize(names))
 	hdr = append(hdr, Magic...)
 	hdr = binary.BigEndian.AppendUint16(hdr, Version)
 	hdr = append(hdr, byte(len(types)), rowWidth)
-	hdr = binary.BigEndian.AppendUint64(hdr, uint64(numRows))
-	hdr = binary.BigEndian.AppendUint64(hdr, uint64(size))
-	hdr = binary.BigEndian.AppendUint32(hdr, footerCRC)
-	hdr = binary.BigEndian.AppendUint64(hdr, uint64(numRows))
+	hdr = binary.BigEndian.AppendUint64(hdr, uint64(id.Rows))
+	hdr = binary.BigEndian.AppendUint64(hdr, uint64(id.Size))
+	hdr = binary.BigEndian.AppendUint32(hdr, id.FooterCRC)
+	hdr = binary.BigEndian.AppendUint64(hdr, uint64(id.Rows))
+	hdr = binary.BigEndian.AppendUint64(hdr, id.Ino)
+	hdr = binary.BigEndian.AppendUint64(hdr, uint64(id.Mtime))
 	for _, t := range types {
 		hdr = append(hdr, typeCodes[t])
 	}

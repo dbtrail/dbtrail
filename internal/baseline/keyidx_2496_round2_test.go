@@ -57,7 +57,7 @@ func headerNames(t *testing.T, path string) []string {
 		t.Fatal(err)
 	}
 	n := int(b[10])
-	off := 40 + n
+	off := int(keyidx.HeaderSize(nil)) + n // the fixed header, then the type codes
 	var names []string
 	for range n {
 		l := int(binary.BigEndian.Uint16(b[off:]))

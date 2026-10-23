@@ -33,7 +33,7 @@ func TestRun_writesTheKeyIndexBesideEachTable_2496(t *testing.T) {
 		if err != nil {
 			t.Fatalf("no index beside %s: %v", base, err)
 		}
-		if string(b[:8]) != keyidx.Magic || binary.BigEndian.Uint64(b[12:20]) != 2 || b[10] != 1 || b[40] != 1 {
+		if string(b[:8]) != keyidx.Magic || binary.BigEndian.Uint64(b[12:20]) != 2 || b[10] != 1 || b[keyidx.HeaderSize(nil)] != 1 {
 			t.Fatalf("%s: header %x; want 2 records of one INTEGER key", keyidx.PathFor(base), b[:41])
 		}
 		if _, err := os.Stat(keyidx.PathFor(base) + ".tmp"); err == nil {

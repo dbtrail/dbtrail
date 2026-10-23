@@ -115,19 +115,35 @@ import (
 // of the refused types was part of #1155's shape; their round-trip between
 // the indexer's pk_values and the baseline Parquet is unverified, not
 // known-bad.
+// integerPKDataType says whether dt (a snapshot's DataType, lowercased and
+// trimmed by the caller or not) is one of the integer types
+// canonicalizePKValue passes through untouched. The key index path (#2496)
+// stands aside for any key column outside this set: on the join, such a
+// column's values go through canonicalizePKValue, which refuses an integer
+// where the snapshot says a string (the column's type changed after the
+// base was written), and the index must never answer where the join would
+// refuse. One list, used by both.
+func integerPKDataType(dt string) bool {
+	switch strings.ToLower(strings.TrimSpace(dt)) {
+	case "int", "integer", "smallint", "tinyint", "mediumint", "bigint", "year":
+		return true
+	}
+	return false
+}
+
 func canonicalizePKValue(raw any, col metadata.ColumnMeta) (any, error) {
 	if raw == nil {
 		return nil, fmt.Errorf("canonicalizePKValue: nil PK value for column %q (MySQL forbids NULL in PK columns; baseline row may be missing the column after schema drift)", col.Name)
 	}
 	dt := strings.ToLower(strings.TrimSpace(col.DataType))
-
-	switch dt {
-	case "int", "integer", "smallint", "tinyint", "mediumint", "bigint", "year":
+	if integerPKDataType(dt) {
 		// Both indexer and DuckDB deliver Go int/uint types; %v
 		// produces identical strings. Pass-through without inspection so
 		// int32/int64/uint32/uint64 differences don't matter.
 		return raw, nil
+	}
 
+	switch dt {
 	case "char", "varchar", "text", "tinytext", "mediumtext", "longtext", "enum", "set":
 		// Both sides deliver Go string. Reject non-strings because that
 		// would indicate a type mismatch we can't reason about.

@@ -1849,8 +1849,12 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 	// alternative is work that keeps happening, or stops happening, for no
 	// stated reason.
 	carryOn, carrySource := carryForwardProvenance(reg, carryDefault)
+	// key_index: whether a refresh resolves its changed keys against the key
+	// index beside each table's file (BINTRAIL_KEY_INDEX, #2496). Read here,
+	// once, so its own line (or the warning for a value it cannot read) is at
+	// boot beside this one and not at the first refresh with table deltas.
 	slog.Info("baseline refresh loop enabled", "interval", interval, "servers", len(targets),
-		"reuse_unchanged", carryOn, "reuse_set_by", carrySource)
+		"reuse_unchanged", carryOn, "reuse_set_by", carrySource, "key_index", reconstruct.KeyIndexEnabled())
 	if len(targets) == 0 {
 		// WARN, not a refusal — and the distinction is load-bearing. Every tick
 		// recomputes the target set, so "nothing to refresh" is a state a daemon

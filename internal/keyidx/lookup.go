@@ -13,8 +13,9 @@ import (
 )
 
 // The reader (#2496, slice 3). Open ties the index beside a base to THAT
-// base (size, footer CRC, num_rows, and the base's own key column types read
-// off its Parquet schema), and Find resolves a set of encoded keys against
+// base (size, footer CRC, num_rows, inode and modification time, and the
+// base's own key column types read off its Parquet schema), and Find
+// resolves a set of encoded keys against
 // the skip table, reading only the blocks the keys can fall in, each once.
 // Every refusal is a sentinel the caller can log by cause and then fall back
 // on: the scan of the base stays the truth, the index only says where to
@@ -31,6 +32,10 @@ var (
 	// not the base's key column types, or a header column is not an integer
 	// column of the base.
 	ErrMismatch = errors.New("key index does not describe the base's key columns")
+	// ErrNoBase: there is an index, and the base beside it is not there. Its
+	// own sentinel, so a caller that matches os.ErrNotExist for "no index"
+	// does not say that about a missing base.
+	ErrNoBase = errors.New("the base file is not there")
 )
 
 // Reader is an open, bound index.
@@ -47,8 +52,9 @@ type Stats struct {
 
 // Open opens the index beside basePath and checks it against the base:
 // os.ErrNotExist when there is none, ErrCorrupt when it does not read,
-// ErrUnbound when it describes another base, ErrMismatch when its key
-// column types are not the base's.
+// ErrNoBase when the base itself is gone, ErrUnbound when the index
+// describes another base, ErrMismatch when its key column types are not
+// the base's.
 func Open(basePath string) (*Reader, error) {
 	ix, err := openIndex(PathFor(basePath))
 	if err != nil {
@@ -57,7 +63,10 @@ func Open(basePath string) (*Reader, error) {
 	f, err := os.Open(basePath)
 	if err != nil {
 		ix.Close()
-		return nil, err
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNoBase, basePath)
+		}
+		return nil, fmt.Errorf("open the base %s: %w", basePath, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
@@ -76,10 +85,10 @@ func Open(basePath string) (*Reader, error) {
 		ix.Close()
 		return nil, fmt.Errorf("read the footer of %s: %w", basePath, err)
 	}
-	if ix.BaseSize != size || ix.FooterCRC != crc || ix.BaseRows != pf.NumRows() {
+	if id := identityOf(info, crc, pf.NumRows()); !ix.bound(id) {
 		ix.Close()
-		return nil, fmt.Errorf("%w: %s: the index says %d bytes, footer %08x, %d rows; the base is %d bytes, footer %08x, %d rows",
-			ErrUnbound, ix.path, ix.BaseSize, ix.FooterCRC, ix.BaseRows, size, crc, pf.NumRows())
+		return nil, fmt.Errorf("%w: %s: the index says %d bytes, footer %08x, %d rows, inode %d, mtime %d; the base is %d bytes, footer %08x, %d rows, inode %d, mtime %d",
+			ErrUnbound, ix.path, ix.BaseSize, ix.FooterCRC, ix.BaseRows, ix.BaseIno, ix.BaseMtime, id.Size, id.FooterCRC, id.Rows, id.Ino, id.Mtime)
 	}
 	types, err := baseKeyTypes(pf, ix.Names)
 	if err != nil {

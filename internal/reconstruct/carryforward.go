@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
+	"github.com/dbtrail/dbtrail/internal/keyidx"
 )
 
 // carryForward publishes a table into a new Parquet snapshot by taking the
@@ -105,7 +106,55 @@ var linkFile = os.Link
 // was read), but every byte was written again — collapsing the two is how the
 // console came to confirm a disk saving the daemon log denied (#1578).
 func carryForward(ctx context.Context, srcPath, snapshotDir, schema, table string) (linked bool, err error) {
-	return carryForwardFile(ctx, srcPath, filepath.Join(snapshotDir, schema, table+".parquet"), true)
+	dst := filepath.Join(snapshotDir, schema, table+".parquet")
+	linked, err = carryForwardFile(ctx, srcPath, dst, true)
+	if err != nil {
+		return false, err
+	}
+	carryKeyIndex(srcPath, dst, linked, schema, table)
+	return linked, nil
+}
+
+// carryKeyIndex carries the key index beside srcPath (#2496) to beside dst,
+// the base just carried forward, so the next refresh over dst resolves its
+// keys through it instead of scanning. Only by hard link, and only an index
+// Bound ties to srcPath: the index is bound to the base's inode, so a COPIED
+// base (the other arm) gets none, and the next full rewrite builds it
+// again. Nothing here fails the table: an absent index is a Debug line, a
+// copy is a Debug line, a link that cannot be made is a Debug line; a
+// damaged or unbound index beside the previous base is a WARN once per
+// carry, with the file to remove, because that is damage the operator can
+// clear and a lookup would otherwise warn about it every refresh. Bound
+// reads the header, the skip table and their CRC, not the body (that is
+// the whole index, per table, per refresh): a block with a bad CRC is found
+// by the lookup that reads it, which warns with the same remediation.
+func carryKeyIndex(srcPath, dst string, linked bool, schema, table string) {
+	src, out := keyidx.PathFor(srcPath), keyidx.PathFor(dst)
+	if err := os.Remove(out); err != nil && !os.IsNotExist(err) {
+		slog.Debug("carry forward: could not remove a key index beside the destination", "path", out, "error", err)
+	}
+	if _, err := os.Stat(src); err != nil {
+		slog.Debug("carry forward: no key index beside the previous file; the next refresh reads the file through DuckDB", "schema", schema, "table", table, "path", src)
+		return
+	}
+	if !linked {
+		slog.Debug("carry forward: the file was copied, so its key index is not carried (an index is bound to one inode); the next refresh reads the file through DuckDB", "schema", schema, "table", table, "path", src)
+		return
+	}
+	ok, err := keyidx.Bound(srcPath)
+	switch {
+	case err != nil:
+		slog.Warn("carry forward: the key index beside the previous file is not usable and is not carried; remove it to silence this; it is rebuilt at the table's next full rewrite",
+			"schema", schema, "table", table, "path", src, "error", err)
+		return
+	case !ok:
+		slog.Warn("carry forward: the key index beside the previous file is not bound to it and is not carried; remove it to silence this; it is rebuilt at the table's next full rewrite",
+			"schema", schema, "table", table, "path", src)
+		return
+	}
+	if err := linkFile(src, out); err != nil {
+		slog.Debug("carry forward: could not link the key index beside the carried file; the next refresh reads the file through DuckDB", "schema", schema, "table", table, "src", src, "dst", out, "error", err)
+	}
 }
 
 // carryForwardFile is carryForward for one file at an explicit destination:

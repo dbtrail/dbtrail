@@ -273,7 +273,7 @@ func TestBuild_sizeFollowsTheFormula(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := int64(40+2+(2+1)+(2+1)) + 5000*(4+8+8) + 2*(4+8+4) + 4
+	want := int64(56+2+(2+1)+(2+1)) + 5000*(4+8+8) + 2*(4+8+4) + 4 // 56: the fixed header, inode and mtime included
 	if res.Bytes != want || fi2(t, res.Path) != want || ExpectedSize(5000, []string{"w", "d"}, 12) != want {
 		t.Fatalf("size %d (file %d, formula %d), want %d", res.Bytes, fi2(t, res.Path), ExpectedSize(5000, []string{"w", "d"}, 12), want)
 	}
@@ -423,7 +423,8 @@ func TestReader_refusesDamage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	headerLen := 41 + 2 + 2 // fixed, the type code, the name "id" with its length
+	headerLen := int(headerSize([]string{"id"})) // fixed, the type code, the name "id" with its length
+	nameAt := fixedHeader + 1                    // the name's 2-byte length, then its bytes
 	bodyLen := 5000 * 12
 	damage := func(name string, mutate func(b []byte) []byte, atOpen bool) {
 		t.Run(name, func(t *testing.T) {
@@ -452,8 +453,8 @@ func TestReader_refusesDamage(t *testing.T) {
 	damage("a byte of the skip table", func(b []byte) []byte { b[headerLen+bodyLen+2] ^= 1; return b }, true)
 	damage("the trailing CRC", func(b []byte) []byte { b[len(b)-1] ^= 1; return b }, true)
 	damage("the record count", func(b []byte) []byte { b[19] ^= 1; return b }, true)
-	damage("the key column's name", func(b []byte) []byte { b[43] = 'x'; return b }, true)
-	damage("the name's length past the file", func(b []byte) []byte { b[41] = 0xff; return b }, true)
+	damage("the key column's name", func(b []byte) []byte { b[nameAt+2] = 'x'; return b }, true)
+	damage("the name's length past the file", func(b []byte) []byte { b[nameAt] = 0xff; return b }, true)
 	damage("the magic", func(b []byte) []byte { b[0] = 'X'; return b }, true)
 	damage("the version", func(b []byte) []byte { b[9] = 2; return b }, true)
 	damage("one byte short", func(b []byte) []byte { return b[:len(b)-1] }, true)

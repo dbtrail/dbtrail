@@ -461,8 +461,10 @@ type TableReport struct {
 	// LookupDuration and LookupRows are what locating the base rows the
 	// window touched cost (#2496): the time spent in that lookup and the
 	// base rows it examined (the matches when the keys were joined in
-	// DuckDB, every base row per pass when they were scanned through Go),
-	// summed over the passes of a spilled window. Zero for a rewrite and
+	// DuckDB, every base row per pass when they were scanned through Go,
+	// and on the index path the index records that matched, which is the
+	// positions returned: no base row is examined there at all), summed
+	// over the passes of a spilled window. Zero for a rewrite and
 	// for a window with no changes, which looks nothing up.
 	LookupDuration time.Duration
 	LookupRows     int64

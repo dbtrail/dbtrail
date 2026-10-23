@@ -19,6 +19,8 @@ type header struct {
 	BaseSize  int64
 	FooterCRC uint32
 	BaseRows  int64
+	BaseIno   uint64
+	BaseMtime int64
 }
 
 // blockEntry is one skip-table entry: a block's first key and the CRC-32C of
@@ -92,6 +94,8 @@ func readIndex(f *os.File) (*index, error) {
 	h.BaseSize = int64(binary.BigEndian.Uint64(fixed[20:28]))
 	h.FooterCRC = binary.BigEndian.Uint32(fixed[28:32])
 	h.BaseRows = int64(binary.BigEndian.Uint64(fixed[32:40]))
+	h.BaseIno = binary.BigEndian.Uint64(fixed[40:48])
+	h.BaseMtime = int64(binary.BigEndian.Uint64(fixed[48:56]))
 	codes := make([]byte, ncols)
 	if _, err := f.ReadAt(codes, fixedHeader); err != nil {
 		return nil, fmt.Errorf("%w: type codes: %v", errCorrupt, err)
@@ -150,6 +154,11 @@ func readIndex(f *os.File) (*index, error) {
 	for i := range nblocks {
 		e := skip[i*(keyWidth+4):]
 		ix.blocks = append(ix.blocks, blockEntry{FirstKey: bytes.Clone(e[:keyWidth]), CRC: binary.BigEndian.Uint32(e[keyWidth:])})
+		// The search relies on the first keys ascending; a skip table that
+		// does not, CRC or no CRC, would make it answer a subset.
+		if i > 0 && bytes.Compare(ix.blocks[i-1].FirstKey, ix.blocks[i].FirstKey) > 0 {
+			return nil, fmt.Errorf("%w: skip table out of order at block %d", errCorrupt, i)
+		}
 	}
 	return ix, nil
 }
@@ -182,6 +191,14 @@ func (ix *index) blockBytes(i int) ([]byte, error) {
 	}
 	if !bytes.Equal(buf[:ix.keyWidth], ix.blocks[i].FirstKey) {
 		return nil, fmt.Errorf("%w: block %d starts with another key than its skip entry", errCorrupt, i)
+	}
+	// Records ascend by (key, row); the in-block search relies on it, and
+	// a block that does not, CRC or no CRC, would make Find answer a subset.
+	w := ix.recordWidth
+	for j := 1; j < int(n); j++ {
+		if bytes.Compare(buf[(j-1)*w:j*w], buf[j*w:(j+1)*w]) > 0 {
+			return nil, fmt.Errorf("%w: block %d: record %d is out of order", errCorrupt, i, j)
+		}
 	}
 	return buf, nil
 }

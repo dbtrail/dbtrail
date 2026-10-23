@@ -920,3 +920,30 @@ func TestRefreshFoldConfig_readsTheBucketAndWritesTheLocalDirectory(t *testing.T
 		})
 	}
 }
+
+// TestStartBaselineRefreshLoop_namesTheKeyIndexSwitch: the loop's startup
+// line says whether the refresh resolves keys against the key index
+// (BINTRAIL_KEY_INDEX, #2496), so the switch is read and reported at boot,
+// at the one moment an operator reads the log for their configuration, not
+// at the first refresh.
+func TestStartBaselineRefreshLoop_namesTheKeyIndexSwitch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sup := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	if err := startBaselineRefreshLoop(ctx, nil, sup, "dsn", "/b", "6h", false); err != nil {
+		t.Fatal(err)
+	}
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, `msg="baseline refresh loop enabled"`) {
+			line = l
+		}
+	}
+	if line == "" || !strings.Contains(line, " key_index=") {
+		t.Fatalf("the startup line does not say whether the key index is on:\n%s", buf.String())
+	}
+}
