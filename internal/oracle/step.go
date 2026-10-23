@@ -3,7 +3,6 @@ package oracle
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,8 +90,11 @@ type Step interface {
 
 // Refuser is a Step that can refuse a cut for a reason the generator
 // caused, which the run then answers with its Fallback step instead of
-// failing. The only such reason today: the fold refuses a window with a
-// PK-changing UPDATE and tells the operator to take a new snapshot.
+// failing. No step implements it today: the one reason there was, the fold
+// refusing a window with a PK-changing UPDATE, went with #2501 (the fold
+// folds such an UPDATE as a DELETE of the old key and an INSERT of the new
+// one), and a refresh that refuses for it now fails the run like any other
+// refusal. The seam stays for the next mechanism that refuses by design.
 type Refuser interface {
 	Refused(err error, cut *Cut) bool
 }
@@ -262,25 +264,6 @@ type RefreshError struct {
 
 func (e *RefreshError) Error() string { return e.Err.Error() }
 func (e *RefreshError) Unwrap() error { return e.Err }
-
-// Refused: the fold refuses a window holding a PK-changing UPDATE and says
-// to take a new snapshot (reconstruct's #782 guard). A refresh is refused
-// only when EVERY failed table failed that way and an op since the last
-// published cut (the window the refresh folds, not only this step's ops)
-// moved a row on that table; any other failure, or that error on a table
-// whose window changed no key, is a failure of the run.
-func (s *RefreshStep) Refused(err error, cut *Cut) bool {
-	var re *RefreshError
-	if !errors.As(err, &re) || len(re.Failures) == 0 {
-		return false
-	}
-	for _, f := range re.Failures {
-		if !strings.Contains(f.Err.Error(), "PK-changing UPDATE") || !cut.HadPKChangeSincePublishOn(f.Table) {
-			return false
-		}
-	}
-	return true
-}
 
 // PortViews is the port's read of the copy under root, as `bintrail views`
 // and the console's SQL on the copy build it: the newest complete snapshot,

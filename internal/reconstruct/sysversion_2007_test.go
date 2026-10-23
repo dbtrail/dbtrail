@@ -233,7 +233,7 @@ func TestFoldPage_systemVersioned_2007(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			sv, key := implicitSV(t)
 			res := &foldResult{Changes: map[string]*query.ResultRow{}}
-			if err := foldPage(c.page, "shop", "prices", key, sv, res); err != nil {
+			if err := foldPage(c.page, "shop", "prices", key, sv, foldOptions{}, res); err != nil {
 				t.Fatalf("foldPage: %v", err)
 			}
 			got := map[string]string{}
@@ -260,18 +260,31 @@ func TestFoldPage_systemVersioned_2007(t *testing.T) {
 	}
 }
 
-// A real change of the declared key on a versioned table is still a
-// PK-changing UPDATE (#782), judged on the declared key.
-func TestFoldPage_systemVersioned_pkChangeStillRefused_2007(t *testing.T) {
+// A real change of the declared key on a versioned table is a PK-changing
+// UPDATE judged on the declared key (#782), split into its two halves on that
+// key (#2501): the old key dead, the new one alive with the stripped image.
+func TestFoldPage_systemVersioned_pkChangeSplit_2007(t *testing.T) {
 	sv, key := implicitSV(t)
 	t0 := "2026-10-02 06:13:40.000001"
 	page := []query.ResultRow{
 		svEv(1, event.EventUpdate, "1|"+svCur, svRow(1, "1.00", t0, svCur), svRow(9, "1.00", t0, svCur)),
 	}
 	res := &foldResult{Changes: map[string]*query.ResultRow{}}
-	err := foldPage(page, "shop", "prices", key, sv, res)
-	if err == nil || !strings.Contains(err.Error(), "PK-changing UPDATE") || !strings.Contains(err.Error(), `"1" → "9"`) {
-		t.Fatalf("foldPage = %v, want the PK-changing UPDATE refusal on the declared key (1 → 9)", err)
+	if err := foldPage(page, "shop", "prices", key, sv, foldOptions{}, res); err != nil {
+		t.Fatalf("foldPage: %v", err)
+	}
+	if old := res.Changes["1"]; old == nil || old.EventType != event.EventDelete {
+		t.Fatalf("key 1 = %+v, want dead", old)
+	}
+	moved := res.Changes["9"]
+	if moved == nil || moved.EventType != event.EventInsert || moved.RowAfter == nil {
+		t.Fatalf("key 9 = %+v, want the INSERT half", moved)
+	}
+	if _, ok := moved.RowAfter["row_end"]; ok {
+		t.Fatal("the period columns reached the moved row's image")
+	}
+	if len(res.Changes) != 2 {
+		t.Fatalf("changes = %d keys, want 2", len(res.Changes))
 	}
 }
 

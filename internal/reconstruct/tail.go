@@ -155,12 +155,16 @@ func (t *Tail) Apply(page []query.ResultRow) error {
 			return fmt.Errorf("internal: a %v event handed to the tail of %s.%s", page[i].EventType, t.schema, t.table)
 		}
 	}
-	if err := foldPage(page, t.schema, t.table, t.pkCols, nil, &t.fold); err != nil {
+	// The keys changed come from the fold, not from the page's own pk_values:
+	// an UPDATE that moves a row to another key is folded as a DELETE of the
+	// old key and an INSERT of the new one (#2501), and a delta that marked
+	// only the old key would leave the moved row out.
+	opts := foldOptions{touched: func(key string) { t.dirty[key] = struct{}{} }}
+	if err := foldPage(page, t.schema, t.table, t.pkCols, nil, opts, &t.fold); err != nil {
 		return err
 	}
 	for i := range page {
 		t.fold.LastEventID = max(t.fold.LastEventID, page[i].EventID)
-		t.dirty[page[i].PKValues] = struct{}{}
 	}
 	return nil
 }

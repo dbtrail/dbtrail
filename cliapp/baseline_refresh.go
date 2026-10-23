@@ -52,9 +52,11 @@ Publication is all-or-nothing: if any table refuses, NOTHING is published and
 the exit status is non-zero. A half-refreshed snapshot would be a set of tables
 from two different points in time under one anchor.
 
-Every full-table reconstruct limit applies (primary key required, a PK-changing
-UPDATE in the window refuses). On a PostgreSQL source a table with no change
-is rewritten rather than carried forward, and table deltas do not apply.
+Every full-table reconstruct limit applies (primary key required). An UPDATE
+that moves a row to another key is folded as a delete of the old key and an
+insert of the new one, except on a PostgreSQL source, where it refuses. On a
+PostgreSQL source a table with no change is rewritten rather than carried
+forward, and table deltas do not apply.
 
 Examples:
   # Refresh every table of the newest snapshot, in place

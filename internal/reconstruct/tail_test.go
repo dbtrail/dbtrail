@@ -380,11 +380,17 @@ func TestTail_applyOnlyItsTable(t *testing.T) {
 		t.Error("a DDL event was folded")
 	}
 	// A key-changing UPDATE refuses, as the refresh refuses it (#782).
+	// A key-changing UPDATE is folded as its two halves (#2501): both keys
+	// are held and both count as changed (TestTail_pkChange_2501 reads the
+	// delta it writes).
 	moved := tailEvent(4, event.EventUpdate, "5", "x", 30)
 	moved.RowBefore = map[string]any{"id": json.Number("4"), "status": "x"}
 	moved.PKValues = "4"
-	if err := tail.Apply([]query.ResultRow{moved}); err == nil {
-		t.Error("a key-changing UPDATE was folded")
+	if err := tail.Apply([]query.ResultRow{moved}); err != nil {
+		t.Errorf("a key-changing UPDATE was refused: %v", err)
+	}
+	if tail.Keys() != 2 || tail.Dirty() != 2 {
+		t.Errorf("keys %d dirty %d after a key-changing UPDATE, want 2 and 2", tail.Keys(), tail.Dirty())
 	}
 }
 

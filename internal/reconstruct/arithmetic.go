@@ -23,9 +23,24 @@ import (
 // A pair (refreshPair). The pair holds one row per key the window touched:
 // op "u" for a key the window leaves alive, a tombstone for one it leaves
 // dead. Each INSERT event turns a key alive, each DELETE turns one dead and
-// an UPDATE leaves it, so summed over the touched keys
+// an UPDATE turns none: one that keeps the key leaves it alive, one that
+// moves the row to another key (#2501) turns the old key dead and the new
+// one alive, net zero, and the fold counts it once, as the UPDATE it is, so
+// summed over the touched keys
 //
 //	alive after - alive before = inserts - deletes
+//
+// The PK change worked through, the pair holding one row per key (the fold
+// files such an UPDATE as a DELETE of the old key and an INSERT of the new
+// one at its own position, foldPage): `UPDATE 1→2` alone over a base holding
+// key 1: keys 2, upserts 1, inserts 0, deletes 0, so aliveBefore = 1, and the
+// lookup finds key 1 in the base, dead = 1. `UPDATE 1→2; DELETE 2`: upserts
+// 0, deletes 1, aliveBefore = 1, dead = 1 (key 1). `DELETE 2; UPDATE 1→2`
+// over a base holding 1 and 2: upserts 1, deletes 1, aliveBefore = 2, dead =
+// 2 (both keys). In a rewrite the same three are DeletesSkipped + 1 (the base
+// row of key 1) and InsertsEmitted + 1 (the row under key 2), net 0 — or, for
+// the third, the row under key 2 replacing the base's, an UpdatesApplied,
+// beside the skipped key 1, net -1 = 0 inserts - 1 delete.
 //
 // and alive after is the "u" rows, which gives the keys that were alive
 // before the window, aliveBefore = upserts - inserts + deletes. That number

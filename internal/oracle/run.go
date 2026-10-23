@@ -27,6 +27,12 @@ type Run struct {
 	// Root is the baselines root the copy lives under.
 	Root string
 
+	// Script, when set, is the ops of each step, written by hand: step i runs
+	// Script[i-1] on the source instead of OpsPerStep draws of the generator,
+	// and Steps must be len(Script). For a window whose shape is the point (a
+	// PK change followed by a change of the old or the new key, #2501) rather
+	// than one a seed happens to draw. The step draw stays by seed.
+	Script [][]Op
 	// Between are the steps drawn at each cut, by weight; the first cut
 	// always takes Between[0] (there is no copy to refresh yet).
 	Between []Step
@@ -82,6 +88,9 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 	if r.Steps <= 0 || len(r.Between) == 0 || len(r.Tables) == 0 {
 		return res, fmt.Errorf("oracle run: Steps, Between and Tables are required")
 	}
+	if r.Script != nil && len(r.Script) != r.Steps {
+		return res, fmt.Errorf("oracle run: Script has %d steps, Steps is %d", len(r.Script), r.Steps)
+	}
 	ops := r.OpsPerStep
 	if ops <= 0 {
 		ops = DefaultOpsPerStep
@@ -118,8 +127,15 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 	publishedStep := 0
 	for step := 1; step <= r.Steps; step++ {
 		cut := &Cut{Step: step, Schema: r.Schema, Tables: r.Tables, Rows: map[string]TableRows{}, PublishedStep: publishedStep}
-		for i := range ops {
-			op := g.Next()
+		var stepOps []Op
+		if r.Script != nil {
+			stepOps = r.Script[step-1]
+		} else {
+			for range ops {
+				stepOps = append(stepOps, g.Next())
+			}
+		}
+		for i, op := range stepOps {
 			if err := execOp(ctx, r.Source, op); err != nil {
 				return res, fmt.Errorf("seed %d step %d op %d (%s on %s): %w\n%s", r.Seed, step, i+1, op.Kind, op.Table, err, strings.Join(op.SQL, "\n"))
 			}
@@ -201,7 +217,7 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 			}
 		}
 		res.Steps = step
-		logf("seed %d step %d: %d ops, %s at %s, copy %s equals the source", r.Seed, step, ops, name, pos, dir)
+		logf("seed %d step %d: %d ops, %s at %s, copy %s equals the source", r.Seed, step, len(stepOps), name, pos, dir)
 	}
 	res.Wall = time.Since(start)
 	return res, nil

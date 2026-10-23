@@ -2,57 +2,29 @@ package oracle
 
 import (
 	"context"
-	"errors"
 	"math/rand/v2"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
-// pkChangeErr is the fold's own refusal text, so a reword of it fails here
-// instead of silently turning every refused refresh into a run failure.
+// pkChangeErr is the fold's own refusal text (the one the three untouched paths
+// keep), so a reword of it fails here.
 func pkChangeErr(table string) error {
 	return reconstruct.PKChangingUpdateError("s", table, "7", "28")
 }
 
-// TestRefreshStep_refusedOnlyForTheGeneratorsPKChange: a refresh counts as
-// refused only when every failed table failed on the fold's PK-change guard
-// and an op since the published cut moved a row on that table. Anything
-// else is a failure of the run, so a product defect cannot hide behind the
-// fallback.
-func TestRefreshStep_refusedOnlyForTheGeneratorsPKChange(t *testing.T) {
-	s := &RefreshStep{}
-	pkMove := []Op{{Table: "t_int", Changes: []Change{{Kind: KindPKUpdate, Key: 7, NewKey: 28}}}}
-	moved := &Cut{Ops: pkMove, SincePublish: pkMove}
-	// Moved two steps ago, after the last publish: the window the refresh
-	// folds holds it, this step's ops do not.
-	movedEarlier := &Cut{Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 9}}}},
-		SincePublish: append(append([]Op{}, pkMove...), Op{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 9}}})}
-	// Moved before the last publish: that window was folded or snapshotted
-	// already; this refresh's window holds no move.
-	movedBefore := &Cut{Ops: pkMove}
-	quiet := &Cut{Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 7}}}}, SincePublish: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 7}}}}}
-	cases := []struct {
-		name string
-		err  error
-		cut  *Cut
-		want bool
-	}{
-		{"pk change on the moved table", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, moved, true},
-		{"pk change moved by an earlier step since the publish", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, movedEarlier, true},
-		{"pk change moved before the last publish", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, movedBefore, false},
-		{"pk change on a table whose ops moved nothing", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_text", Err: pkChangeErr("t_text")}}, Err: pkChangeErr("t_text")}, moved, false},
-		{"pk change with no PK-changing op", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, quiet, false},
-		{"one table refused, another failed otherwise", &RefreshError{Failures: []reconstruct.TableFailure{
-			{Table: "t_int", Err: pkChangeErr("t_int")}, {Table: "t_comp", Err: errors.New("capture gap")}}, Err: errors.New("joined")}, moved, false},
-		{"another error on the moved table", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: errors.New("capture gap")}}, Err: errors.New("capture gap")}, moved, false},
-		{"an error that is not a RefreshError", pkChangeErr("t_int"), moved, false},
-		{"a RefreshError without failures", &RefreshError{Err: errors.New("index unreachable")}, moved, false},
+// A refresh refuses nothing by design any more: the one reason it did (the
+// fold's #782 refusal of a window with a PK-changing UPDATE) went with #2501,
+// so RefreshStep must NOT implement Refuser — the run then fails on that
+// error instead of taking the fallback, and a product defect cannot hide
+// behind it.
+func TestRefreshStep_isNotARefuser(t *testing.T) {
+	if _, ok := any(&RefreshStep{}).(Refuser); ok {
+		t.Fatal("RefreshStep implements Refuser: a refresh refused for a PK-changing UPDATE would take the fallback instead of failing the run")
 	}
-	for _, c := range cases {
-		if got := s.Refused(c.err, c.cut); got != c.want {
-			t.Errorf("%s: refused = %v, want %v", c.name, got, c.want)
-		}
+	if err := pkChangeErr("t_int"); err == nil {
+		t.Fatal("the #782 error the three untouched paths keep must still exist")
 	}
 }
 

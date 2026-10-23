@@ -35,17 +35,19 @@ const (
 	KindBurst    Kind = "burst"     // MinBurst..MaxBurst statements in one transaction
 )
 
-// Weights are the operation weights, drawn over their sum. The issue gave
-// the PK-changing update 7; it is 2 here because the fold refuses every
-// window holding one (reconstruct's #782 guard) and the run then takes a
-// snapshot instead of a refresh, so at 7 most cuts were snapshots and the
-// chain of delta pairs, the thing this net watches, rarely grew.
+// Weights are the operation weights, drawn over their sum. The PK-changing
+// update has the 7 the issue gave it: the fold folds such an UPDATE as a
+// DELETE of the old key and an INSERT of the new one (#2501), so a window
+// holding one is refreshed like any other and the chain of delta pairs, the
+// thing this net watches, keeps growing. (At 2, with the fold still refusing
+// every such window and the run taking a snapshot instead, 15 of 36 refreshes
+// of a run fell back at weight 7, which is what #2501 was opened on.)
 var Weights = []struct {
 	Kind   Kind
 	Weight int
 }{
 	{KindUpdate, 30}, {KindInsert, 20}, {KindDelete, 15}, {KindReinsert, 10},
-	{KindPKUpdate, 2}, {KindMulti, 8}, {KindTxn, 8}, {KindBurst, 2},
+	{KindPKUpdate, 7}, {KindMulti, 8}, {KindTxn, 8}, {KindBurst, 2},
 }
 
 const (

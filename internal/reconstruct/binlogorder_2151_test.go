@@ -1,7 +1,6 @@
 package reconstruct
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -30,7 +29,7 @@ func foldPages(t *testing.T, pages ...[]query.ResultRow) *foldResult {
 	t.Helper()
 	res := &foldResult{Changes: map[string]*query.ResultRow{}}
 	for i, p := range pages {
-		if err := foldPage(p, "mydb", "orders", pkColsIntID(), nil, res); err != nil {
+		if err := foldPage(p, "mydb", "orders", pkColsIntID(), nil, foldOptions{}, res); err != nil {
 			t.Fatalf("foldPage(page %d): %v", i, err)
 		}
 	}
@@ -147,14 +146,21 @@ func TestFoldPage_aSupersededChangeStillReachesTheGuards(t *testing.T) {
 	const f = "binlog.000007"
 	b := orderEvent(2, 0, f, 300, "1", "B")
 
-	t.Run("a primary key change refuses", func(t *testing.T) {
+	t.Run("a primary key change is split (#2501)", func(t *testing.T) {
+		// The superseded change moved the row to key 2: its INSERT half
+		// still files key 2, while key 1 keeps B, the later change.
 		a := orderEvent(1, 2, f, 100, "1", "A")
 		a.RowBefore = map[string]any{"id": float64(1), "v": "old"}
 		a.RowAfter = map[string]any{"id": float64(2), "v": "A"}
 		res := &foldResult{Changes: map[string]*query.ResultRow{}}
-		err := foldPage([]query.ResultRow{b, a}, "mydb", "orders", pkColsIntID(), nil, res)
-		if err == nil || !strings.Contains(err.Error(), "PK-changing UPDATE") {
-			t.Fatalf("err = %v, want the PK-changing UPDATE refusal", err)
+		if err := foldPage([]query.ResultRow{b, a}, "mydb", "orders", pkColsIntID(), nil, foldOptions{}, res); err != nil {
+			t.Fatalf("foldPage: %v", err)
+		}
+		if got := keptValue(t, res, "1"); got != "B" {
+			t.Fatalf("row 1 = %v, want B", got)
+		}
+		if got := keptValue(t, res, "2"); got != "A" {
+			t.Fatalf("row 2 = %v, want A: the superseded change's INSERT half", got)
 		}
 	})
 	t.Run("its columns are counted", func(t *testing.T) {
@@ -194,7 +200,7 @@ func TestChangeSpill_keepsTheChangeTheBinlogHoldsLast(t *testing.T) {
 	res := &foldResult{Changes: map[string]*query.ResultRow{}}
 	t.Cleanup(res.close)
 	for _, page := range [][]query.ResultRow{{b, orderEvent(4, 0, f, 310, "2", "x")}, {a}} {
-		if err := foldPage(page, "mydb", "orders", pkColsIntID(), nil, res); err != nil {
+		if err := foldPage(page, "mydb", "orders", pkColsIntID(), nil, foldOptions{}, res); err != nil {
 			t.Fatal(err)
 		}
 		if err := res.admitPage(1, 1, true); err != nil {

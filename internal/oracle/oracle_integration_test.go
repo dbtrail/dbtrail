@@ -83,7 +83,19 @@ func TestOracle(t *testing.T) {
 
 func runSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table) oracle.Result {
 	t.Helper()
-	ctx := context.Background()
+	run := prepareRun(t, seed, steps, tables)
+	res, err := run.Do(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// prepareRun builds a run of seed over tables against a fresh source and
+// index schema with real capture started, the snapshot step first and the
+// refresh step drawn three times in four after it; the caller runs it.
+func prepareRun(t *testing.T, seed uint64, steps int, tables []oracle.Table) *oracle.Run {
+	t.Helper()
 	sourceDB, sourceName := testutil.CreateTestDB(t)
 	indexDB, indexName := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
@@ -99,7 +111,7 @@ func runSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table) oracle
 	}
 	indexDSN := testutil.IntegrationDSN(indexName)
 	captureErr, stop := startCapture(t, indexDB, indexDSN, sourceName, 92499+uint32(seed%1000))
-	defer stop()
+	t.Cleanup(stop)
 
 	// Not t.TempDir(): its name carries the subtest's "seed=N", and DuckDB
 	// reads a "key=value" path segment as a hive partition column, which the
@@ -111,17 +123,12 @@ func runSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table) oracle
 	t.Cleanup(func() { os.RemoveAll(root) })
 	snapshot := &oracle.SnapshotStep{Root: root, Source: sourceDB, W: 1}
 	refresh := &oracle.RefreshStep{IndexDSN: indexDSN, Root: root, W: 3}
-	run := &oracle.Run{
+	return &oracle.Run{
 		Seed: seed, Steps: steps, Schema: sourceName, Tables: tables,
 		Source: sourceDB, Index: indexDB, Capture: captureErr, Root: root,
 		Between: []oracle.Step{snapshot, refresh}, Fallback: snapshot,
 		Logf: t.Logf,
 	}
-	res, err := run.Do(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return res
 }
 
 func startCapture(t *testing.T, indexDB *sql.DB, indexDSN, schema string, serverID uint32) (errCh chan error, stop func()) {

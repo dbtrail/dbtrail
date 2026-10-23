@@ -46,8 +46,8 @@ import (
 //
 //   - RowBefore: mergeBaselineImages emits row_after only, and the THREE
 //     consumers that read a before-image have all been served before this call
-//     — #592 unresolved-TOAST and #782 PK-changing UPDATE run per event in
-//     foldPage, and the #843 dropped-column guard gets what it needs from
+//     — #592 unresolved-TOAST and the #782 PK-changing UPDATE split run per
+//     event in foldPage, and the #843 dropped-column guard gets what it needs from
 //     foldResult.observeImages. Serving them upstream of the trim is precisely
 //     what makes dropping it safe; none of them may be re-expressed against the
 //     map, where they would read a nil before-image and silently pass.
@@ -94,16 +94,24 @@ func retainEvent(ev *query.ResultRow) *query.ResultRow {
 //     (#1596, reconstructPGTable) an overwritten event carrying a marker
 //     refuses a run whose OUTPUT would have been clean: kept on purpose,
 //     loud rather than clever, and documented in docs/postgres.md.
-//   - #782: the change map is keyed by the BEFORE-image PK, so folding an
-//     UPDATE whose PK changed would duplicate, resurrect, or silently drop rows.
-//     Checking per event rather than over the finished map catches the
-//     permutation a map scan structurally cannot see (`UPDATE pk 1→2` followed
-//     by `INSERT pk=1`, where the INSERT overwrites the UPDATE under key "1") —
-//     and it catches it no matter which page each event landed on.
+//   - #782/#2501: the change map is keyed by the BEFORE-image PK, so folding
+//     an UPDATE whose PK changed under that one key would duplicate, resurrect,
+//     or silently drop rows (the permutation a map scan structurally cannot
+//     see: `UPDATE pk 1→2` followed by `INSERT pk=1`, where the INSERT
+//     overwrites the UPDATE under key "1"). Since #2501 such an UPDATE is
+//     folded as the two events it is, a DELETE of the old key and an INSERT
+//     of the new one (splitPKChange), both at the UPDATE's own place in the
+//     binary log, so the per-key "last in the binary log wins" rule below
+//     orders each half against every other change of that key, on whichever
+//     page it landed. Two shapes still refuse with the #782 error: a
+//     PostgreSQL window (opts.pg: its rows have no binary log coordinate for
+//     the ordering rule, and its before-image may hold only the key), and an
+//     event whose decoded before-image does not spell the key exactly as the
+//     parser stored it (splitPKChange says why that proof is the gate).
 //
-// Both refuse the whole run. That is deliberate and matches the pre-existing
-// stance for these two conditions: the alternative is a dump that loads cleanly
-// and is wrong.
+// The #592 guard and the two remaining #782 refusals refuse the whole run.
+// That is deliberate and matches the pre-existing stance for these
+// conditions: the alternative is a dump that loads cleanly and is wrong.
 //
 // sv is non-nil for a MariaDB system-versioned table (#2007): each event is
 // first rewritten into its meaning for the current rows (or dropped, for the
@@ -114,6 +122,7 @@ func foldPage(
 	schema, table string,
 	pkCols []metadata.ColumnMeta,
 	sv *sysVersioned,
+	opts foldOptions,
 	res *foldResult,
 ) error {
 	for i := range page {
@@ -130,12 +139,14 @@ func foldPage(
 		if err := checkEventToast(*ev); err != nil {
 			return err
 		}
-		if before, after, ok := pkChangedInEvent(ev, pkCols); ok {
-			return pkChangingUpdateErr(schema, table, before, after)
+		halves, err := splitPKChange(ev, schema, table, pkCols, opts.pg)
+		if err != nil {
+			return err
 		}
 		// Sample both images for the #843 guard BEFORE the trim discards the
-		// before-image. Order matters: retainEvent must be the last thing that
-		// touches this event.
+		// before-image, and on the event itself, not on its halves: the guard
+		// sees the event once, whole. Order matters: retainEvent must be the
+		// last thing that touches this event.
 		res.observeImages(ev)
 		// The row keeps the change the binary log holds LAST, which is not
 		// always the one that arrives last (#2151): pages come in
@@ -149,7 +160,10 @@ func foldPage(
 		// read it.
 		// Counted before the drop below: the binary log holds that event
 		// whether or not the map keeps it, and the refresh's arithmetic
-		// (#2505) is over what the log holds.
+		// (#2505) is over what the log holds. A PK change counts ONCE, as the
+		// UPDATE it is, never as its two halves: the window's inserts and
+		// deletes are what the arithmetic closes on, and the row it moved is
+		// neither (arithmetic.go works the cases).
 		switch ev.EventType {
 		case event.EventInsert:
 			res.Inserts++
@@ -158,12 +172,78 @@ func foldPage(
 		case event.EventDelete:
 			res.Deletes++
 		}
-		if cur, ok := res.Changes[ev.PKValues]; ok && query.LaterInBinlog(cur, ev) {
+		if halves == nil {
+			res.fold(ev, opts.touched)
 			continue
 		}
-		res.Changes[ev.PKValues] = retainEvent(ev)
+		for h := range halves {
+			res.fold(&halves[h], opts.touched)
+		}
 	}
 	return nil
+}
+
+// fold files ev under its key unless the map already holds a later change of
+// that key, and reports the key to touched either way.
+func (r *foldResult) fold(ev *query.ResultRow, touched func(string)) {
+	if touched != nil {
+		touched(ev.PKValues)
+	}
+	if cur, ok := r.Changes[ev.PKValues]; ok && query.LaterInBinlog(cur, ev) {
+		return
+	}
+	r.Changes[ev.PKValues] = retainEvent(ev)
+}
+
+// foldOptions is what a fold's caller decides for a whole table, not per page.
+type foldOptions struct {
+	// pg folds a PostgreSQL window (foldConfig.PG): a PK-changing UPDATE
+	// keeps refusing there, see splitPKChange.
+	pg bool
+	// touched, when set, is called with every key a page files or declines
+	// to file (the fold kept a later change): what a tail marks changed
+	// (#2495). Both keys of a PK change are reported, which is why a tail
+	// cannot take them from the page's own pk_values.
+	touched func(key string)
+}
+
+// splitPKChange turns an UPDATE that changed the row's primary key (#782)
+// into the two events it is: a DELETE of the old key and an INSERT of the new
+// one, both at the UPDATE's own (file, pos, event_id, timestamp), so the
+// per-key "last in the binary log wins" rule orders each half against every
+// other change of that key in the window. It returns nil for any other event,
+// and the #782 refusal where the split is not safe (#2501):
+//
+//   - pg: a PostgreSQL window. Its rows carry an LSN, not a binary log
+//     coordinate, so LaterInBinlog cannot order the halves against other
+//     changes of the same key, and under REPLICA IDENTITY DEFAULT the
+//     before-image may hold only the key.
+//   - the spelling proof fails: the decoded before-image, spelled by
+//     event.BuildPKValues, must equal the key the parser STORED for this
+//     event (pk_values is built from the same values that became row_before,
+//     parser.go emitUpdates). That equality proves the storage and decode
+//     round-trip preserves the spelling for this event's key columns, and the
+//     after-image went through the same path, so the INSERT's key — spelled
+//     from the decoded after-image — is what a later real event on that key
+//     carries. Without it the two could land under two spellings of one key
+//     (a BINARY column left as stored base64 because no schema epoch covered
+//     the event, an image decoded as float64 past 2^53) and the #782
+//     duplicate or resurrection would come back silently; so the refusal
+//     stays, with its text.
+//
+// The halves share nothing the writer mutates: the DELETE has no RowAfter.
+func splitPKChange(ev *query.ResultRow, schema, table string, pkCols []metadata.ColumnMeta, pg bool) ([]query.ResultRow, error) {
+	before, after, changed := pkChangedInEvent(ev, pkCols)
+	if !changed {
+		return nil, nil
+	}
+	if pg || before != ev.PKValues {
+		return nil, pkChangingUpdateErr(schema, table, before, after)
+	}
+	del, ins := *ev, *ev
+	del.EventType, del.PKValues, del.RowAfter = event.EventDelete, ev.PKValues, nil
+	ins.EventType, ins.PKValues, ins.RowBefore = event.EventInsert, after, nil
+	return []query.ResultRow{del, ins}, nil
 }
 
 // observeImages narrows ImageColumns to the intersection with each of ev's
@@ -584,12 +664,15 @@ func verifyFoldCoverage(ctx context.Context, fc foldConfig) error {
 //     resolved against the schema snapshot in effect at each event's OWN
 //     timestamp (#475/#476/#668). A page is a valid unit for this because the
 //     decoding is per-event, not window-relative.
-//  2. The #592 unresolved-TOAST and #782 PK-changing-UPDATE guards, per event,
-//     on the untrimmed event.
+//  2. The #592 unresolved-TOAST guard and the #782 PK-changing-UPDATE
+//     handling, per event, on the untrimmed event: the former refuses, the
+//     latter splits the UPDATE into a DELETE of the old key and an INSERT of
+//     the new one (#2501, splitPKChange), refusing only on a PostgreSQL
+//     window or an unproven key spelling.
 //  3. The fold, via retainEvent.
 //
-// Running the guards per event over the raw stream is strictly stronger than
-// the map-level checks it replaces: the map only ever held the surviving last
+// Running these per event over the raw stream is strictly stronger than the
+// map-level checks it replaces: the map only ever held the surviving last
 // event per PK, so a PK-changing UPDATE whose old key a later event reused was
 // invisible to it. That is why fulltable.go's baseline path no longer calls
 // pkChangingUpdate/checkChangesToast on the map at all — a nil-before-image map
@@ -638,7 +721,7 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 			}
 		}
 
-		if err := foldPage(page, fc.Schema, fc.Table, fc.PKCols, fc.SysVersioned, res); err != nil {
+		if err := foldPage(page, fc.Schema, fc.Table, fc.PKCols, fc.SysVersioned, foldOptions{pg: fc.PG}, res); err != nil {
 			foldErr = err
 			return err
 		}
