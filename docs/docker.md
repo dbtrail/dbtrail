@@ -694,35 +694,38 @@ reads from S3, the copy is the local mirror `bintrail` keeps on the same volume
 the router reads it and brings nothing from the bucket itself.
 
 **How much of the machine it takes.** How many statements run on the copy at
-once is worked out from the cores and the memory the service may use. In
-the compose file each service plans with a share of the machine's memory
-(`BINTRAIL_MEMORY_SHARE`): the router 0.3 (`ROUTER_MEMORY_SHARE` in `.env`),
-the `bintrail` service 0.4 (`DAEMON_MEMORY_SHARE`), and the index MySQL takes
-a quarter for its buffer pool, so the three add up to the machine instead of
-each taking its own cut of all of it. Inside the router's share, the tails it
-keeps (the newest changes laid over the copy) and the statements it runs come
-out of the same number. Set `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env` to
-give it hard ceilings: the share then applies to that ceiling, and a statement
-that outgrows its memory is stopped inside the router's own. A router started
-outside compose with no share set plans with half of the machine, since
-capture uses the machine too. To set the number of statements yourself, set
-`ROUTER_CONCURRENCY`. Each statement
+once is worked out from the cores and the memory the service may use. By
+default it has no ceiling of its own and plans with half of the machine for
+its statements and a fifth for its tails (the newest changes laid over the
+copy), since capture uses the machine too. Each service can instead plan
+with a share of the machine's memory (`BINTRAIL_MEMORY_SHARE`: `ROUTER_MEMORY_SHARE`
+and `DAEMON_MEMORY_SHARE` in `.env`, empty by default): 0.3 for the router and
+0.4 for the `bintrail` service beside the index MySQL's quarter add up to the
+machine instead of each taking its own cut of all of it, which is the setting
+for a host where the kernel stops DBTrail's processes for memory. Inside the
+router's share, its tails and its statements come out of the same number.
+Set `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env` to give it hard ceilings: a
+share then applies to that ceiling, and a statement that outgrows its memory
+is stopped inside the router's own. To set the number of statements yourself,
+set `ROUTER_CONCURRENCY`. Each statement
 may reach `SQL_MEMORY` (2 GB unless set) plus a quarter, and the router keeps
 half a gigabyte for itself. `docker compose logs router` shows the numbers it
 worked out and why, as the budget less the tails.
 
-Two things follow from the shares that a host which ran the stack before
-them may notice. A `SQL_MEMORY` or `ROUTER_CONCURRENCY` that fitted the whole
-machine may not fit the share: on an 8 GB host the web interface's SQL card
-runs 2 statements at up to 2 GB each, 4 GB, more than the 3.2 GB the
-`bintrail` service plans with at share 0.4, and the startup log says so,
-naming the share. And the router runs fewer statements at once on a mid-size
-host: on 16 GB it ran 3 (half the machine), now 1 (0.3 of it, less the
-tails). To change that, raise `ROUTER_MEMORY_SHARE` or `DAEMON_MEMORY_SHARE`
-in `.env` by lowering another share (the three add up to the machine), or
-set `ROUTER_CONCURRENCY` to the number you want; a tail budget set past the
-share (`BINTRAIL_SQL_TAIL_MAX_BYTES`) is warned at startup, not silently
-ignored.
+Two things to know before setting shares. A smaller share means less for
+everything the process sizes from it: with 0.4 on an 8 GB host the `bintrail`
+service's snapshot sessions drop to their 512 MiB floor and its tails to a
+fifth of 3.2 GB, so the copy is refreshed with less memory and the tails
+freeze earlier on busy tables; a `SQL_MEMORY` or `ROUTER_CONCURRENCY` that
+fitted the whole machine may not fit the share (the SQL card's 2 statements at
+2 GB each are more than 3.2 GB), and the startup log says so naming the share;
+and the router runs fewer statements at once on a mid-size host (16 GB: 3 with
+half the machine, 1 with 0.3 of it less the tails). Set `ROUTER_CONCURRENCY`
+to the number you want; a tail budget set past the share
+(`BINTRAIL_SQL_TAIL_MAX_BYTES`) is warned at startup, not silently ignored.
+The trade is being killed by the kernel against planning with less; the
+startup lines of each service say what they planned with, so the choice can
+be read back.
 
 Without this service nothing serves the MySQL port: the web interface can
 turn it on and nothing listens. The router itself is described in
@@ -799,8 +802,8 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `CONSOLE_TOKEN` | compose (optional) | Opt-in static API-automation token (default: none; humans sign in with a username and password) |
 | `METRICS_ADDR` | compose (optional) | Container-side bind for the watch daemon's Prometheus `/metrics` (default `:9090`, published on the host loopback as `127.0.0.1:9090`; set empty to disable) |
 | `ROUTER_MEMORY` | compose `router` service (optional) | Memory ceiling of the router (e.g. `8g`). Unset = none: the router plans with its share of the machine |
-| `ROUTER_MEMORY_SHARE` | compose `router` service (optional) | Fraction of the machine's memory (or of `ROUTER_MEMORY`) the router plans with: its tails and its statements together. Default `0.3` |
-| `DAEMON_MEMORY_SHARE` | compose `bintrail` service (optional) | Fraction of the machine's memory the watch daemon plans with: its snapshot work, its tails and its SQL card. Default `0.4`; with the router's `0.3` and the index's quarter the stack adds up |
+| `ROUTER_MEMORY_SHARE` | compose `router` service (optional) | Fraction of the machine's memory (or of `ROUTER_MEMORY`) the router plans with: its tails and its statements together. Unset = the whole machine (half for statements, a fifth for tails); `0.3` beside `DAEMON_MEMORY_SHARE=0.4` and the index's quarter adds up to the machine |
+| `DAEMON_MEMORY_SHARE` | compose `bintrail` service (optional) | Fraction of the machine's memory the watch daemon plans with: its snapshot work, its tails and its SQL card. Unset = the whole machine; a share also shrinks the snapshot work and the tails |
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
 | `ROUTER_CONCURRENCY` | compose `router` service (optional) | How many statements run on the copy at once, 1 to 64. Unset = the router works it out: one per two of its cores, as many as its memory holds. The rest wait their turn. Needs the current `docker-compose.yml` |
 | `ROUTER_MAX_WAIT` | compose `router` service (optional) | How long a statement waits for its turn on the copy when every worker is busy (e.g. `30s`); past it the client gets an error. Unset = no limit: it waits for as long as its client stays connected |

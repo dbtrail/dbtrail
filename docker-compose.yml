@@ -449,12 +449,15 @@ services:
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
       # The fraction of this machine's memory this service plans with
       # (#2513): its snapshot work, the copy's tails and its SQL statements
-      # are sized from this share, not from the whole machine, so that with
-      # the router's share below and the index's quarter the stack adds up
-      # (0.4 + 0.3 + 0.25). DAEMON_MEMORY_SHARE in .env changes it; a value
-      # that is not a fraction in (0, 1] is warned at startup and the whole
-      # machine stands.
-      BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-0.4}
+      # are then sized from that share instead of from the whole machine.
+      # Empty (the default) is the whole machine, as before. Set
+      # DAEMON_MEMORY_SHARE in .env (e.g. 0.4, with ROUTER_MEMORY_SHARE 0.3
+      # and the index's quarter) on a host where the kernel stops DBTrail's
+      # processes for memory; a smaller share also means less memory for the
+      # snapshot work and the tails, so it is a choice, not a default. A
+      # value that is not a fraction in (0, 1] is warned at startup and the
+      # whole machine stands.
+      BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-}
       # "Run verification" button (#677): lets the console run `bintrail verify`
       # in-process for a monitored server (trigger, poll per-table results,
       # explain a mismatch) — the same read-only baseline/index reads the
@@ -646,11 +649,13 @@ services:
       # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
       # The fraction of this machine's memory the router plans with (#2513):
-      # the tails it keeps and the statements it runs come out of this one
-      # number, beside the `bintrail` service's share and the index's quarter.
-      # ROUTER_MEMORY_SHARE in .env changes it; under ROUTER_MEMORY (a
-      # ceiling) the share applies to that ceiling.
-      BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-0.3}
+      # the tails it keeps and the statements it runs then come out of that
+      # one number. Empty (the default) is the whole machine, as before: half
+      # of it for the statements, a fifth for the tails. Set
+      # ROUTER_MEMORY_SHARE in .env beside DAEMON_MEMORY_SHARE on a host
+      # where the kernel stops DBTrail's processes for memory; under
+      # ROUTER_MEMORY (a ceiling) the share applies to that ceiling.
+      BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # How many statements run on the copy at once (1 to 64). Empty = the
       # router works it out from the cores and memory it may use, one

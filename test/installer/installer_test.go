@@ -186,11 +186,14 @@ func TestInstaller_theComposeCarriesTheMemoryShares(t *testing.T) {
 		t.Fatalf("install failed:\n%s", r.out)
 	}
 	c := r.compose(t)
-	if !strings.Contains(c, "BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-0.4}") {
-		t.Error("the bintrail service has no memory share (BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-0.4})")
+	// Off by default (empty = the whole machine, as before): a share is a
+	// choice an operator makes for a host the kernel runs short on, since
+	// it also takes memory from the snapshot work and the tails.
+	if !strings.Contains(c, "BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-}") {
+		t.Error("the bintrail service has no memory share hook (BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-})")
 	}
-	if !strings.Contains(c, "BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-0.3}") {
-		t.Error("the router service has no memory share (BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-0.3})")
+	if !strings.Contains(c, "BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-}") {
+		t.Error("the router service has no memory share hook (BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-})")
 	}
 }
 
