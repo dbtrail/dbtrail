@@ -894,7 +894,7 @@ func keyIndexFor(ctx context.Context, basePath, schema, table string, pkCols []m
 func removeStaleIndex(basePath, schema, table string) bool {
 	path := keyidx.PathFor(basePath)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		slog.Warn("base positions: the stale key index could not be removed, so it is not rebuilt; the base is read through DuckDB", "schema", schema, "table", table, "path", path, "error", err)
+		slog.Warn("base positions: the stale key index could not be removed, so it is not rebuilt; the base is read through DuckDB, and the index is not tried again until the file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", path, "error", err)
 		return false
 	}
 	return true
