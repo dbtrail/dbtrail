@@ -5552,11 +5552,18 @@ try {
   await page.evaluate(() => {
     const t = document.querySelector('.snap-tab[data-tab="download"]');
     if (t) t.click();
-    const s = document.querySelector(".view details.bk-inplace > summary");
-    if (s) s.click();
   });
-  await page.waitForFunction(() => { const f = document.querySelector(".view details.bk-inplace"); return f && f.open; })
-    .catch(() => {});
+  // The fold may not be drawn yet when the tab is clicked, and clicking a
+  // summary that is not there clicked nothing (#2520). So the summary is
+  // clicked from inside the wait, again whenever the fold on screen is
+  // closed (which also covers a repaint drawing a new one), and a fold that
+  // never opens fails here with its own message.
+  await page.waitForFunction(() => {
+    const f = document.querySelector(".view details.bk-inplace");
+    if (!f) return false;
+    if (!f.open) f.querySelector(":scope > summary").click();
+    return f.open;
+  }, null, { polling: 250 });
   const ip = await page.evaluate(() => {
     const fold = document.querySelector(".view details.bk-inplace");
     const dkPanel = fold ? fold.querySelector(".cn-dk") : null;
