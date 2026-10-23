@@ -433,17 +433,17 @@ func ForSource(source string) *StreamMetrics {
 var (
 	indexOldestEvent = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "bintrail", Subsystem: "index", Name: "oldest_event_timestamp_seconds",
-		Help: "Unix timestamp of the oldest event still in the index (recovery floor).",
+		Help: "Unix timestamp of the oldest event still in the index (recovery floor), to the hour: the lower bound of the oldest partition that holds rows.",
 	}, []string{"source"})
 
 	indexNewestEvent = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "bintrail", Subsystem: "index", Name: "newest_event_timestamp_seconds",
-		Help: "Unix timestamp of the newest event in the index.",
+		Help: "Unix timestamp of the newest event in the index: the capture's last checkpointed event, at most one checkpoint behind.",
 	}, []string{"source"})
 
 	indexRetentionHorizon = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "bintrail", Subsystem: "index", Name: "retention_horizon_seconds",
-		Help: "How far back the index reaches: now minus the oldest event timestamp.",
+		Help: "How far back the index reaches: now minus the oldest event timestamp (to the hour).",
 	}, []string{"source"})
 
 	indexEventsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{

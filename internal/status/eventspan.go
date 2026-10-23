@@ -38,10 +38,11 @@ const erUnknownPartition = 1735
 // the single exact query, and so does a partition list that changed while it
 // was read (see the end of the function).
 func loadEventSpan(ctx context.Context, db *sql.DB, c *CoverageInfo) error {
-	names, estimate, byTime, err := listEventPartitions(ctx, db)
+	parts, estimate, byTime, err := listEventPartitions(ctx, db)
 	if err != nil {
 		return err
 	}
+	names := partitionNames(parts)
 	if len(names) == 0 || !byTime {
 		return fullEventSpan(ctx, db, c)
 	}
@@ -77,7 +78,7 @@ func loadEventSpan(ctx context.Context, db *sql.DB, c *CoverageInfo) error {
 	if err != nil {
 		return err
 	}
-	if !slices.Equal(names, again) {
+	if !slices.Equal(names, partitionNames(again)) {
 		*c = CoverageInfo{}
 		return fullEventSpan(ctx, db, c)
 	}
@@ -107,6 +108,85 @@ func loadEventSpan(ctx context.Context, db *sql.DB, c *CoverageInfo) error {
 	return nil
 }
 
+// loadEventSpanForGauges fills the span for the capture daemon's gauges,
+// which it refreshes every minute, unattended, for as long as it runs
+// (#2509): it never reads a partition's rows. loadEventSpan's exact probes,
+// MIN and MAX of event_timestamp over the edge partitions, read every row
+// of each (no index starts with event_timestamp), which on a busy index is
+// millions of rows for one answer, a minute apart, forever: measured at 97 %
+// of the time the index spent on SELECTs, competing with capture's writes
+// and the refresh's reads. The exact span stays what `bintrail status`, the
+// console and MCP read on demand.
+//
+// The newest event is the capture's own last checkpointed event (newest,
+// from stream_state): the daemon that scrapes is the capture, so this is at
+// most one checkpoint behind what the index holds and never ahead; without
+// a checkpoint, the newest row by primary key. The oldest is the lower hour
+// bound of the oldest partition whose TABLE_ROWS estimate is not zero, a
+// gauge to the hour, which is the granularity the retention horizon and gap
+// hours already have; when that partition is p_future (no bound) or no
+// partition carries an estimate, the oldest row by primary key. A table
+// that is not partitioned by time keeps the exact query: it is small. The
+// count is the estimate loadEventSpan already reports; this never counts.
+//
+// The primary-key reads assume event_id order is time order, which capture
+// in binlog order gives; an older binlog indexed after live capture breaks
+// it for the oldest (the horizon then reads too new) until the next hour's
+// partition carries an estimate.
+func loadEventSpanForGauges(ctx context.Context, db *sql.DB, c *CoverageInfo, newest sql.NullTime) error {
+	parts, estimate, byTime, err := listEventPartitions(ctx, db)
+	if err != nil {
+		return err
+	}
+	if len(parts) == 0 || !byTime {
+		return fullEventSpan(ctx, db, c)
+	}
+	oldestByKey := true
+	for _, p := range parts {
+		if p.rows == 0 {
+			continue
+		}
+		if h, ok := parsePartitionName(p.name); ok {
+			c.EarliestEvent = sql.NullTime{Time: h, Valid: true}
+			oldestByKey = false
+		}
+		break
+	}
+	if oldestByKey {
+		found, err := edgeRowByKey(ctx, db, "ASC", &c.EarliestEvent)
+		if err != nil {
+			return err
+		}
+		if !found {
+			c.TotalEvents = 0
+			return nil
+		}
+	}
+	if newest.Valid {
+		c.LatestEvent = newest
+	} else if _, err := edgeRowByKey(ctx, db, "DESC", &c.LatestEvent); err != nil {
+		return err
+	}
+	c.TotalEvents, c.TotalEventsEstimated = estimate, true
+	return nil
+}
+
+// edgeRowByKey reads the event_timestamp of the first (ASC) or last (DESC)
+// row by primary key into dst: one row per partition, merged. It says
+// whether the table held a row.
+func edgeRowByKey(ctx context.Context, db *sql.DB, order string, dst *sql.NullTime) (bool, error) {
+	var t sql.NullTime
+	err := db.QueryRowContext(ctx, "SELECT event_timestamp FROM binlog_events FORCE INDEX (PRIMARY) ORDER BY event_id "+order+" LIMIT 1").Scan(&t)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("read the %s event by key: %w", map[string]string{"ASC": "oldest", "DESC": "newest"}[order], err)
+	}
+	*dst = t
+	return t.Valid, nil
+}
+
 // fullEventSpan is the exact span in one query over the whole table: the
 // fallback for a table that is not partitioned by event time, and for a
 // partition list that changed while it was being read.
@@ -116,12 +196,28 @@ func fullEventSpan(ctx context.Context, db *sql.DB, c *CoverageInfo) error {
 		FROM binlog_events`).Scan(&c.EarliestEvent, &c.LatestEvent, &c.TotalEvents)
 }
 
-// listEventPartitions returns binlog_events' partitions in order, the sum of
-// their row estimates, and whether the table is RANGE partitioned on
-// event_timestamp: only then is partition order time order, which the span
-// relies on. The layout bintrail creates always is; a table an operator
-// re-partitioned another way reads through the full query instead.
-func listEventPartitions(ctx context.Context, db *sql.DB) (names []string, estimate int64, byTime bool, err error) {
+// eventPartition is one partition of binlog_events: its name and its
+// TABLE_ROWS estimate (never a count; 0 can be a partition that has rows).
+type eventPartition struct {
+	name string
+	rows int64
+}
+
+func partitionNames(parts []eventPartition) []string {
+	names := make([]string, len(parts))
+	for i, p := range parts {
+		names[i] = p.name
+	}
+	return names
+}
+
+// listEventPartitions returns binlog_events' partitions in order with their
+// row estimates, the sum of those estimates, and whether the table is RANGE
+// partitioned on event_timestamp: only then is partition order time order,
+// which the span relies on. The layout bintrail creates always is; a table
+// an operator re-partitioned another way reads through the full query
+// instead.
+func listEventPartitions(ctx context.Context, db *sql.DB) (parts []eventPartition, estimate int64, byTime bool, err error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT PARTITION_NAME, COALESCE(TABLE_ROWS, 0),
 		       COALESCE(PARTITION_METHOD, ''), COALESCE(PARTITION_EXPRESSION, ''),
@@ -145,15 +241,16 @@ func listEventPartitions(ctx context.Context, db *sql.DB) (names []string, estim
 		if sub || !strings.HasPrefix(strings.ToUpper(method), "RANGE") || !strings.Contains(strings.ToLower(expr), "event_timestamp") {
 			byTime = false
 		}
-		if len(names) == 0 || names[len(names)-1] != name {
-			names = append(names, name)
+		if len(parts) == 0 || parts[len(parts)-1].name != name {
+			parts = append(parts, eventPartition{name: name})
 		}
+		parts[len(parts)-1].rows += n
 		estimate += n
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, false, fmt.Errorf("list binlog_events partitions: %w", err)
 	}
-	return names, estimate, byTime, nil
+	return parts, estimate, byTime, nil
 }
 
 // probePartition reads agg(event_timestamp) of one partition into dst and says

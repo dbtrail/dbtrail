@@ -23,7 +23,11 @@ const defaultIndexMetricsInterval = 60 * time.Second
 // returns immediately and stops when ctx is cancelled. A scrape failure is
 // logged and the previous gauge values are left in place — a slightly stale
 // reading beats a gap or a misleading zero. The work is a handful of
-// information_schema/aggregate queries on a timer, not a per-event path.
+// information_schema queries on a timer, not a per-event path: the snapshot
+// is the gauges' one (status.CollectStatusForGauges, #2509), whose event
+// span never reads a partition's rows; the exact span costs two whole
+// partitions per scrape, which a minute apart forever was most of what the
+// index spent on reads.
 func startIndexMetricsScraper(ctx context.Context, db *sql.DB, indexDSN, source string, intervalSeconds int) {
 	interval := time.Duration(intervalSeconds) * time.Second
 	if interval <= 0 {
@@ -54,8 +58,12 @@ func startIndexMetricsScraper(ctx context.Context, db *sql.DB, indexDSN, source 
 	}()
 }
 
+// collectForGauges is the status snapshot the scraper takes; a seam so a
+// test can pin that it is the gauges' one, not the exact one.
+var collectForGauges = status.CollectStatusForGauges
+
 func scrapeIndexMetrics(ctx context.Context, db *sql.DB, dbName string, m *observe.IndexMetrics) {
-	data, err := status.CollectStatus(ctx, db, dbName)
+	data, err := collectForGauges(ctx, db, dbName)
 	if err != nil {
 		slog.Warn("index metrics scrape: could not collect status", "error", err)
 		return
