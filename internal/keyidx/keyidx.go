@@ -723,9 +723,9 @@ func WriteBeside(ctx context.Context, schema, table, basePath string, keyCols []
 		// DuckDB's own error, which does not wrap context.Canceled.
 		slog.Debug("key index not written: the build was cancelled", "schema", schema, "table", table, "path", res.Path, "error", err)
 	case err != nil:
-		slog.Warn("key index not written; the table's file is read through DuckDB, and the build is not tried again until the table's file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", res.Path, "error", err)
+		slog.Warn("key index not written; the table's file is read through DuckDB, and the build is not tried again until the table's file is rewritten or DBTrail restarts", "schema", schema, "table", table, "path", res.Path, "error", err)
 	case res.Skipped != "" && res.Warn:
-		slog.Warn("key index skipped; the table's file is read through DuckDB, and the build is not tried again until the table's file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", res.Path, "reason", res.Skipped)
+		slog.Warn("key index skipped; the table's file is read through DuckDB, and the build is not tried again until the table's file is rewritten or DBTrail restarts", "schema", schema, "table", table, "path", res.Path, "reason", res.Skipped)
 	case res.Skipped != "":
 		slog.Debug("key index skipped", "schema", schema, "table", table, "reason", res.Skipped)
 	default:

@@ -186,7 +186,7 @@ func TestLookupBasePositions_rebuiltAndStillUnusableIsNotRetried_2496s4r2(t *tes
 	if len(warns) > 0 {
 		last = warns[len(warns)-1]
 	}
-	if !strings.Contains(last, "not built again until the file is rewritten or the daemon restarts") || strings.Contains(log.String(), "remove it to silence this") {
+	if !strings.Contains(last, "not built again until the file is rewritten or DBTrail restarts") || strings.Contains(log.String(), "remove it to silence this") {
 		t.Fatalf("the second failure does not name the retry condition:\n%s", log.String())
 	}
 	if _, err := os.Stat(keyidx.PathFor(base)); !os.IsNotExist(err) {

@@ -16,10 +16,10 @@ import (
 
 // TestWriteBeside_namesTheRetryCondition_2496s4 (F5): a skip for disk and a
 // failed build are WARN lines that say the build is not tried again until
-// the table's file is rewritten or the daemon restarts.
+// the table's file is rewritten or DBTrail restarts.
 func TestWriteBeside_namesTheRetryCondition_2496s4(t *testing.T) {
 	ctx := context.Background()
-	const want = "not tried again until the table's file is rewritten or the daemon restarts"
+	const want = "not tried again until the table's file is rewritten or DBTrail restarts"
 	logs := captureDebug(t)
 	null := writeBase(t, "SELECT NULL::INTEGER AS id", 1000)
 	WriteBeside(ctx, "s", "t", null, []string{"id"}, duckdbutil.Tuning{})

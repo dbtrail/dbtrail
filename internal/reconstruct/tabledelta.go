@@ -683,7 +683,7 @@ func lookupBasePositionsVia(ctx context.Context, basePath, schema, table string,
 // after the lookup rebuilt it: a deterministic defect, not damage. The
 // index is removed and the base remembered, so the line is said once per
 // version of the base.
-const keyIndexUnusable = "base positions: the key index beside the base is not usable after being rebuilt; the base is read through DuckDB, and the index is not built again until the file is rewritten or the daemon restarts"
+const keyIndexUnusable = "base positions: the key index beside the base is not usable after being rebuilt; the base is read through DuckDB, and the index is not built again until the file is rewritten or DBTrail restarts"
 
 // keyIndexUnchecked is the WARN for an open that failed on the BASE, not
 // the index (a permission, an I/O error): nothing is known about the
@@ -880,7 +880,7 @@ func keyIndexFor(ctx context.Context, basePath, schema, table string, pkCols []m
 		// built and not usable (a defect: WARN). Not again on this version.
 		rememberNoIndex(basePath)
 		if !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("base positions: the key index just built is not usable; the base is read through DuckDB, and the index is not built again until the file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", path, "error", err)
+			slog.Warn("base positions: the key index just built is not usable; the base is read through DuckDB, and the index is not built again until the file is rewritten or DBTrail restarts", "schema", schema, "table", table, "path", path, "error", err)
 			removeStaleIndex(basePath, schema, table)
 		}
 		return nil, nil, built, false
@@ -894,7 +894,7 @@ func keyIndexFor(ctx context.Context, basePath, schema, table string, pkCols []m
 func removeStaleIndex(basePath, schema, table string) bool {
 	path := keyidx.PathFor(basePath)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		slog.Warn("base positions: the stale key index could not be removed, so it is not rebuilt; the base is read through DuckDB, and the index is not tried again until the file is rewritten or the daemon restarts", "schema", schema, "table", table, "path", path, "error", err)
+		slog.Warn("base positions: the stale key index could not be removed, so it is not rebuilt; the base is read through DuckDB, and the index is not tried again until the file is rewritten or DBTrail restarts", "schema", schema, "table", table, "path", path, "error", err)
 		return false
 	}
 	return true
