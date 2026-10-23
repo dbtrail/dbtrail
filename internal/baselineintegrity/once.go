@@ -131,6 +131,10 @@ func ValidateLocalFileOnce(path string) error {
 		return nil
 	}
 	start := time.Now()
+	// Counted before the verdict: a read that ends in a mismatch read the
+	// whole file too, and the cycle's summary must say so beside the error.
+	statReads.Add(1)
+	statBytes.Add(uint64(before.Size()))
 	got, err := crcFile(path)
 	if err != nil {
 		return fmt.Errorf("read baseline for integrity check %s: %w", path, err)
@@ -138,8 +142,6 @@ func ValidateLocalFileOnce(path string) error {
 	if got != want {
 		return fmt.Errorf("%w: %s (crc32c %s, manifest %s)", ErrIntegrity, path, got, want)
 	}
-	statReads.Add(1)
-	statBytes.Add(uint64(before.Size()))
 	attrs := []any{"path", path, "size_mb", sizeMB(before.Size()), "ms", time.Since(start).Milliseconds()}
 	if !hasID {
 		// Every call reads here, so at Info this would be a line per file

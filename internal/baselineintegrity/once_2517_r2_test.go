@@ -273,6 +273,28 @@ func TestStats_countsReadsSkipsAndBytes(t *testing.T) {
 	}
 }
 
+// A read that ends in a mismatch is still a whole-file read: the cycle's
+// summary counts it, so "read_files=0" never sits beside a corruption error.
+func TestStats_countsAReadThatFailedTheCheck(t *testing.T) {
+	needIdentity(t)
+	forgetOnExit(t)
+	data := make([]byte, 2048)
+	_, path := snapshotWithFile(t, t.TempDir(), "snap", data)
+	corrupt := make([]byte, 2048)
+	corrupt[7] = 1
+	if err := os.WriteFile(path, corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r0, _, b0 := Stats()
+	if err := ValidateLocalFileOnce(path); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("want ErrIntegrity, got %v", err)
+	}
+	r1, _, b1 := Stats()
+	if r1-r0 != 1 || b1-b0 != 2048 {
+		t.Errorf("delta reads=%d bytes=%d, want 1/2048", r1-r0, b1-b0)
+	}
+}
+
 // F7: the size on the read line has one decimal, so a small file does not
 // read as 0.
 func TestOnce_readLineSizeHasOneDecimal(t *testing.T) {
