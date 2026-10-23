@@ -368,46 +368,118 @@ func reservedDeltaColumn(cols []baseline.Column) string {
 }
 
 // lookupBasePositions returns the row numbers, ascending, of the base rows
-// whose PRIMARY KEY the window touched. For integer keys the touched keys go
-// to DuckDB as a table and the base is filtered against it, so only the
-// matching rows cross into Go (#1716), plus any row whose key is NULL, which
-// Go refuses (#2496); every other key type scans the base's key columns
-// through Go, as the merge does. Either way the base's key columns are read
-// in ONE DuckDB pass per lookup, and the canonical check
-// (canonicalizePKMap + event.BuildPKValues against the change map) is what
-// decides: the join only narrows what Go looks at, and it is taken only when
-// every touched key is either handed to DuckDB exactly or provably outside
-// what its column can hold. It reads the change map and never drains it: the
-// upserts writer runs after this and needs every entry.
+// whose PRIMARY KEY the window touched. With BINTRAIL_KEY_INDEX on and a key
+// index beside the base that is bound to it (#2496, slice 3), the touched
+// keys are resolved against the index, reading only the blocks they fall
+// in. Otherwise, for integer keys the touched keys go to DuckDB as a table
+// and the base is filtered against it, so only the matching rows cross into
+// Go (#1716), plus any row whose key is NULL, which Go refuses (#2496);
+// every other key type scans the base's key columns through Go, as the
+// merge does. The join and the scan read the base's key columns in ONE
+// DuckDB pass per lookup, and the canonical check (canonicalizePKMap +
+// event.BuildPKValues against the change map) is what decides there: the
+// join only narrows what Go looks at, and it is taken only when every
+// touched key is either handed to DuckDB exactly or provably outside what
+// its column can hold. The index path takes the same keys under the same
+// filter, and the scan stays the truth it must agree with: every way the
+// index can be unusable falls back, logged by cause. It reads the change
+// map and never drains it: the upserts writer runs after this and needs
+// every entry.
 func lookupBasePositions(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
 	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning) ([]int64, lookupStats, error) {
-	return lookupBasePositionsWith(ctx, basePath, schema, table, pkCols, changes, tuning, tableDeltaJoinKeys)
+	return lookupBasePositionsVia(ctx, basePath, schema, table, pkCols, changes, tuning, tableDeltaJoinKeys, keyIndexEnabled())
 }
 
 // tableDeltaJoinKeys lets lookupBasePositions take the DuckDB join; a variable
 // so a test can hold a whole publish to the scan.
 var tableDeltaJoinKeys = true
 
-// lookupStats says how a lookup went: whether the join was taken, how many
-// base rows crossed into Go, and in how many DuckDB queries the base's rows
-// were read. A test pins Examined, because a join that silently stopped
-// narrowing would still return the right positions; another pins BaseReads
-// at one, because a second full pass over the key columns (#2496) would
-// return them too.
+// KeyIndexEnv is the switch for the key index path of the lookup (#2496,
+// slice 3): 1/true/yes/on resolve the window's keys against <table>.keyidx
+// where one is beside the base and bound to it; unset, empty, 0/false/no/off
+// keep the join and the scan. Off by default in this slice: the index path
+// is measured against the join on real refreshes before it is the default.
+const KeyIndexEnv = "BINTRAIL_KEY_INDEX"
+
+// keyIndexOn parses KeyIndexEnv's value; a value that is neither spelling
+// is off with a warning naming the variable.
+func keyIndexOn(raw string) (on bool, warning string) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true, ""
+	case "", "0", "false", "no", "off":
+		return false, ""
+	}
+	return false, fmt.Sprintf("%s=%q is not 1/true or 0/false; the key index is not used, the base is scanned as before", KeyIndexEnv, raw)
+}
+
+// KeyIndexEnabled is the switch, read once per process and logged once.
+var KeyIndexEnabled = sync.OnceValue(func() bool {
+	on, warning := keyIndexOn(os.Getenv(KeyIndexEnv))
+	if warning != "" {
+		slog.Warn(warning)
+	}
+	if on {
+		slog.Info("key index lookup enabled: a refresh resolves its changed keys against <table>.keyidx where one is bound to the table's file; the file is scanned where there is none, and every fallback is logged", "env", KeyIndexEnv)
+	}
+	return on
+})
+
+// keyIndexEnabled is what the lookup reads; a seam so a test can set the
+// switch without the environment.
+var keyIndexEnabled = func() bool { return KeyIndexEnabled() }
+
+// keyIndexOpen is keyidx.Open; a seam so a test can count the opens.
+var keyIndexOpen = keyidx.Open
+
+// lookupStats says how a lookup went: which path resolved it ("index",
+// "join" or "scan"), whether the join was taken, how many base rows crossed
+// into Go (on the index path, the records that matched), in how many DuckDB
+// queries the base's rows were read, and how many index blocks were read. A
+// test pins Examined, because a join that silently stopped narrowing would
+// still return the right positions; another pins BaseReads at one, because
+// a second full pass over the key columns (#2496) would return them too;
+// another pins IndexBlocks to exactly the blocks the keys fall in, because
+// an index path that read every block would return them too.
 type lookupStats struct {
-	Joined    bool
-	Examined  int
-	BaseReads int
+	Path        string
+	Joined      bool
+	Examined    int
+	BaseReads   int
+	IndexBlocks int
 }
 
 // lookupBasePositionsWith is lookupBasePositions with the join switchable
-// and the outcome reported, so a test can pin both paths against each other
-// on the same base.
+// and the index off, so the existing tests pin the join and the scan
+// against each other on the same base.
 func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
 	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning, allowJoin bool) (out []int64, st lookupStats, err error) {
+	return lookupBasePositionsVia(ctx, basePath, schema, table, pkCols, changes, tuning, allowJoin, false)
+}
+
+// lookupBasePositionsVia is lookupBasePositions with both the join and the
+// index switchable and the outcome reported, so a test can pin all three
+// paths against each other on the same base. The index is tried first, and
+// before any DuckDB session is opened: a lookup it resolves costs no DuckDB
+// at all. Anything it cannot resolve goes to the join or the scan as if the
+// index were not there.
+func lookupBasePositionsVia(ctx context.Context, basePath, schema, table string, pkCols []metadata.ColumnMeta,
+	changes map[string]*query.ResultRow, tuning duckdbutil.Tuning, allowJoin, useIndex bool) (out []int64, st lookupStats, err error) {
 	if len(changes) == 0 {
 		return nil, st, nil
 	}
+	if useIndex {
+		if out, st, ok := lookupViaIndex(basePath, schema, table, pkCols, changes); ok {
+			return out, st, nil
+		}
+	}
+	defer func() {
+		if st.Joined {
+			st.Path = "join"
+		} else {
+			st.Path = "scan"
+		}
+	}()
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
 		return nil, st, fmt.Errorf("open duckdb: %w", err)
@@ -512,6 +584,100 @@ func lookupBasePositionsWith(ctx context.Context, basePath, schema, table string
 	return out, st, nil
 }
 
+// lookupViaIndex resolves the window's keys against the key index beside
+// basePath (#2496, slice 3) and reports whether it did; false means the
+// caller joins or scans as if there were no index, and why is in the log.
+// In order: a base on S3 has no index (Debug); none beside the base (Debug:
+// absence, an older snapshot or a build that was skipped); one that does
+// not read, is bound to another version of the base, or whose header types
+// are not the base's (WARN: damage, not absence); a header naming other
+// columns than the key (WARN: built on another key set); a key the join
+// would not hand to DuckDB exactly (Debug here, the join's own Info line
+// follows: the same filter, writeIntegerKeyCSV's, decides both, so the
+// index never resolves a key the join would not); a block that fails its
+// CRC (WARN). The keys are encoded in the HEADER's order, which is the
+// base file's column order and not the key's: the header says which column
+// each record's bytes hold. A key outside its column's range is left out,
+// as the join leaves it out: no base row can hold it. The index is opened
+// per lookup and closed; a base carried forward by hard link keeps the same
+// index path, and nothing is cached across lookups.
+func lookupViaIndex(basePath, schema, table string, pkCols []metadata.ColumnMeta, changes map[string]*query.ResultRow) (out []int64, st lookupStats, ok bool) {
+	if strings.HasPrefix(basePath, "s3://") {
+		slog.Debug("base positions: no key index for a base on S3; the base is read through DuckDB", "schema", schema, "table", table)
+		return nil, st, false
+	}
+	r, err := keyIndexOpen(basePath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		slog.Debug("base positions: no key index beside the base; the base is read through DuckDB", "schema", schema, "table", table, "path", keyidx.PathFor(basePath))
+		return nil, st, false
+	case err != nil:
+		slog.Warn("base positions: the key index beside the base is not usable; the base is read through DuckDB", "schema", schema, "table", table, "error", err)
+		return nil, st, false
+	}
+	defer r.Close()
+	names, types := r.Names(), r.Types()
+	// The header's columns must be the key's, as a set; the order is the
+	// file's and is followed below.
+	col := make([]int, len(names)) // header position -> pkCols index
+	for j, name := range names {
+		col[j] = -1
+		for i, c := range pkCols {
+			if c.Name == name {
+				col[j] = i
+			}
+		}
+	}
+	if len(names) != len(pkCols) || slices.Contains(col, -1) {
+		keyNames := make([]string, len(pkCols))
+		for i, c := range pkCols {
+			keyNames[i] = c.Name
+		}
+		slog.Warn("base positions: the key index beside the base is built on other key columns than the table's; the base is read through DuckDB",
+			"schema", schema, "table", table, "path", keyidx.PathFor(basePath), "index_columns", names, "key_columns", keyNames)
+		return nil, st, false
+	}
+	width := r.KeyWidth()
+	keys := make([][]byte, 0, len(changes))
+	for key := range changes {
+		parts := strings.Split(key, "|")
+		if len(parts) != len(pkCols) {
+			slog.Debug("base positions: key index not used for this window", "schema", schema, "table", table,
+				"reason", fmt.Sprintf("key %q has %d parts, the key has %d columns", key, len(parts), len(pkCols)))
+			return nil, st, false
+		}
+		buf := make([]byte, width)
+		off := 0
+		inRange := true
+		for j, i := range col {
+			part := parts[i]
+			if !plainInteger(part) {
+				slog.Debug("base positions: key index not used for this window", "schema", schema, "table", table,
+					"reason", fmt.Sprintf("key %q is not a plain integer", key))
+				return nil, st, false
+			}
+			v, in := integerKeyValue(part, types[j])
+			if !in {
+				inRange = false
+			} else if err := keyidx.EncodeKey(buf[off:], types[j], v); err != nil {
+				slog.Warn("base positions: the key index beside the base is not usable; the base is read through DuckDB", "schema", schema, "table", table, "error", err)
+				return nil, st, false
+			}
+			off += keyidx.IntegerWidths[types[j]].Bits / 8
+		}
+		if inRange {
+			keys = append(keys, buf)
+		}
+	}
+	out, found, err := r.Find(keys)
+	if err != nil {
+		slog.Warn("base positions: the key index beside the base is not usable; the base is read through DuckDB", "schema", schema, "table", table, "error", err)
+		return nil, st, false
+	}
+	st.Path, st.Examined, st.IndexBlocks = "index", found.Matches, found.Blocks
+	return out, st, true
+}
+
 // basePositionsQuery is the one DuckDB query a lookup reads the base's key
 // columns with. With types nil it is the scan: every base row's keys and
 // row number, for Go to check. With types (the join), it is two branches
@@ -608,12 +774,7 @@ func writeIntegerKeyCSV(pkCols []metadata.ColumnMeta, types []string, changes ma
 			if !plainInteger(part) {
 				return fail(fmt.Sprintf("key %q is not a plain integer", key))
 			}
-			width := duckDBIntegerWidths[types[i]]
-			if width.Unsigned {
-				if _, perr := strconv.ParseUint(part, 10, width.Bits); perr != nil {
-					inRange = false
-				}
-			} else if _, perr := strconv.ParseInt(part, 10, width.Bits); perr != nil {
+			if _, in := integerKeyValue(part, types[i]); !in {
 				inRange = false
 			}
 		}
@@ -634,6 +795,27 @@ func writeIntegerKeyCSV(pkCols []metadata.ColumnMeta, types []string, changes ma
 		return "", 0, "", fmt.Errorf("close: %w", err)
 	}
 	return path, n, "", nil
+}
+
+// integerKeyValue parses part, a plain integer spelling, as a value of the
+// DuckDB type typ (INTEGER int32, BIGINT int64, UBIGINT uint64) and says
+// whether the column can hold it. The one range decision of the join's
+// touched-keys file and of the key index path: a key outside it is a key
+// no base row can carry, and both leave it out.
+func integerKeyValue(part, typ string) (v any, inRange bool) {
+	width := duckDBIntegerWidths[typ]
+	if width.Unsigned {
+		u, err := strconv.ParseUint(part, 10, width.Bits)
+		return u, err == nil
+	}
+	n, err := strconv.ParseInt(part, 10, width.Bits)
+	if err != nil {
+		return nil, false
+	}
+	if width.Bits == 32 {
+		return int32(n), true
+	}
+	return n, true
 }
 
 // plainInteger: the one spelling %v gives an integer — an optional minus,
@@ -1080,7 +1262,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		start := time.Now()
 		pos, st, err := lookupBasePositions(ctx, p.basePath, p.schema, p.table, p.pkCols, pass, p.cfg.DuckDBTuning)
 		rep.LookupDuration += time.Since(start)
-		rep.LookupRows += int64(st.Examined)
+		rep.addLookup(st)
 		return pos, err
 	}
 	newDead, err := lookup(in.Changes)
@@ -1226,9 +1408,12 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		"seq", seq, "dead_rows", dead, "upsert_rows", ups, "chain_files", len(chain.Files), "chain_copied", copied,
 		"base_linked", linked, "chain_start", chainStart.UTC().Format(time.RFC3339),
 		"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds(),
-		// The base-position lookup: its time and the base rows it examined,
-		// summed over the passes of a spilled window (#2496).
+		// The base-position lookup: its time, the base rows it examined, the
+		// path that resolved it (index, join, scan; mixed over passes that
+		// took different ones) and the index blocks it read, summed over the
+		// passes of a spilled window (#2496).
 		"lookup_ms", rep.LookupDuration.Milliseconds(), "lookup_rows", rep.LookupRows,
+		"lookup_path", rep.LookupPath, "lookup_blocks", rep.LookupBlocks,
 		// Above zero: the window's changes did not fit in memory and were
 		// read back from disk in that many passes.
 		"spill_passes", passes)

@@ -1,9 +1,10 @@
 // Package keyidx writes the key index that sits beside a snapshot table's
 // Parquet file (#2496): every row's integer key with the row's number in the
 // file, sorted by key, in a flat fixed-width file a refresh can search
-// without reading it whole. This slice writes the index at every site that
-// writes a base; the lookup that reads it is the next slice, and until then
-// the file is only ever written and verified.
+// without reading it whole. Build writes the index at every site that
+// writes a base; Open and Reader.Find (lookup.go) are the reader the
+// refresh's position lookup resolves its keys with, behind a switch until
+// it is measured as the default.
 //
 // # Layout
 //

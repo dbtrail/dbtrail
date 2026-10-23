@@ -466,6 +466,13 @@ type TableReport struct {
 	// for a window with no changes, which looks nothing up.
 	LookupDuration time.Duration
 	LookupRows     int64
+	// LookupPath is the path that resolved the lookup (#2496, slice 3):
+	// "index" (the key index beside the base), "join" (integer keys joined
+	// in DuckDB), "scan" (every base row through Go), "mixed" when the
+	// passes of a spilled window took different ones, "" when nothing was
+	// looked up. LookupBlocks is the index blocks read, summed.
+	LookupPath   string
+	LookupBlocks int64
 	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
 	// job's range pair in place of the chain's first pairs (#1723).
 	DeltaCompactedRange string
@@ -489,6 +496,19 @@ type TableReport struct {
 
 // newTableReport is a table's report before anything ran: the row counts
 // of the arithmetic (#2505) start unknown (-1), not at zero.
+// addLookup adds one lookup's outcome to the report: rows and blocks sum,
+// the path is the one every pass took or "mixed".
+func (r *TableReport) addLookup(st lookupStats) {
+	r.LookupRows += int64(st.Examined)
+	r.LookupBlocks += int64(st.IndexBlocks)
+	switch {
+	case r.LookupPath == "":
+		r.LookupPath = st.Path
+	case r.LookupPath != st.Path:
+		r.LookupPath = "mixed"
+	}
+}
+
 func newTableReport(schema, table string) *TableReport {
 	return &TableReport{Schema: schema, Table: table, RowsBefore: -1, RowsAfter: -1}
 }

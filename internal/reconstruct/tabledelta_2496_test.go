@@ -208,7 +208,12 @@ func TestTableDelta_logLineCarriesLookupCost_2496(t *testing.T) {
 	}
 	for _, want := range []string{
 		fmt.Sprintf(" lookup_ms=%d ", rep.LookupDuration.Milliseconds()),
-		fmt.Sprintf(" lookup_rows=%d", rep.LookupRows),
+		fmt.Sprintf(" lookup_rows=%d ", rep.LookupRows),
+		// Slice 3: the path that resolved it and the index blocks read. This
+		// fixture's base carries no index, so the join resolved it and no
+		// block was read; the index path's line is pinned in the 2496r test.
+		fmt.Sprintf(" lookup_path=%s ", rep.LookupPath),
+		fmt.Sprintf(" lookup_blocks=%d", rep.LookupBlocks),
 		fmt.Sprintf(" fetch_ms=%d ", rep.FetchDuration.Milliseconds()),
 		fmt.Sprintf(" fold_ms=%d ", rep.FoldDuration.Milliseconds()),
 	} {
@@ -218,6 +223,9 @@ func TestTableDelta_logLineCarriesLookupCost_2496(t *testing.T) {
 	}
 	if rep.LookupRows == 0 {
 		t.Errorf("the fixture's lookup examined no rows, so the line pins nothing")
+	}
+	if rep.LookupPath != "join" || rep.LookupBlocks != 0 {
+		t.Errorf("the fixture's lookup went by %q reading %d index blocks; the line pins the join with none", rep.LookupPath, rep.LookupBlocks)
 	}
 }
 

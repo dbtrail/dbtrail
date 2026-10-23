@@ -29,9 +29,9 @@ type blockEntry struct {
 }
 
 // index is an open index file: its header, its skip table, and where the
-// body starts. Blocks are read on demand (block), each verified against its
-// CRC. This is the reader the lookup of the next slice searches with; here
-// it is what the tests check the writer against.
+// body starts. Blocks are read on demand (blockBytes, block), each verified
+// against its CRC. Reader (lookup.go) wraps it for the lookup; the tests
+// check the writer against it directly.
 type index struct {
 	header
 	path        string
@@ -165,9 +165,10 @@ func (ix *index) blockRecords(i int) int64 {
 	return n
 }
 
-// block reads block i's records, verified against the skip table's CRC and
-// first key.
-func (ix *index) block(i int) ([]record, error) {
+// blockBytes reads block i's bytes, verified against the skip table's CRC
+// and first key: blockRecords(i) records of recordWidth bytes each. The
+// lookup searches these bytes in place (Find); block decodes them.
+func (ix *index) blockBytes(i int) ([]byte, error) {
 	if i < 0 || i >= len(ix.blocks) {
 		return nil, fmt.Errorf("block %d of %d", i, len(ix.blocks))
 	}
@@ -182,7 +183,17 @@ func (ix *index) block(i int) ([]record, error) {
 	if !bytes.Equal(buf[:ix.keyWidth], ix.blocks[i].FirstKey) {
 		return nil, fmt.Errorf("%w: block %d starts with another key than its skip entry", errCorrupt, i)
 	}
-	out := make([]record, n)
+	return buf, nil
+}
+
+// block reads block i's records, verified against the skip table's CRC and
+// first key.
+func (ix *index) block(i int) ([]record, error) {
+	buf, err := ix.blockBytes(i)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]record, len(buf)/ix.recordWidth)
 	for j := range out {
 		r := buf[j*ix.recordWidth:]
 		out[j] = record{Key: bytes.Clone(r[:ix.keyWidth]), Row: int64(binary.BigEndian.Uint64(r[ix.keyWidth:ix.recordWidth]))}
