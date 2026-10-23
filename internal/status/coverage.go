@@ -131,15 +131,8 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 	return sum, nil
 }
 
-// NewestIndexedEvent is newestIndexedEvent for a caller outside this package:
-// the coverage window's exact upper edge, one MAX probe over the newest
-// partition that has rows. Zero with a nil error is an empty index.
-func NewestIndexedEvent(ctx context.Context, db *sql.DB, dbName string) (time.Time, error) {
-	return newestIndexedEvent(ctx, db, dbName)
-}
-
 // NewestIndexedRow is the event_timestamp of the index's newest row by
-// primary key: one index dive per partition, merged, where NewestIndexedEvent
+// primary key: one index dive per partition, merged, where newestIndexedEvent
 // reads the newest partition whole (no index leads with event_timestamp).
 // It is at most the exact newest event, never past it: the newest row by id
 // is the last one capture wrote, whose time is the newest unless an older

@@ -168,7 +168,9 @@ and searching events:
    An update made while capture is an hour behind writes a copy whose data is
    an hour old, however recently it was written. Each update records the
    newest change it folded (the later of what the snapshot it started from
-   held and the newest change the index had when it started); a full read
+   held and the index's newest row when it started, which is at most the
+   newest change and never past it: indexing an older binlog while capture
+   runs makes it read older until the next live batch); a full read
    holds the database as of its own time. A snapshot with no such record (made
    by the command line, or before this record existed) is shown as at least
    as old as capture's lag, since a copy cannot hold a change capture has not
