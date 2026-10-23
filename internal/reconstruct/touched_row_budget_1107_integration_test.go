@@ -187,18 +187,22 @@ func TestRefresh_touchedRowBudget(t *testing.T) {
 	})
 	t.Run("a fold refused after its changes went to disk leaves nothing on disk", func(t *testing.T) {
 		// Pages of 5 with a limit of 1: the first page goes to disk, and a later
-		// page carries an UPDATE that changes the row's key, which the fold
-		// refuses. That refusal returns from the fold itself, before the merge,
-		// so only the fold's own cleanup can remove what it wrote; run checks
-		// the temp directory afterwards.
+		// page carries an UPDATE that changes the row's key whose stored
+		// pk_values ("02") is not how its decoded before-image spells the key
+		// ("2"), which the fold refuses (the spelling proof of #2501; a
+		// key-changing UPDATE whose spelling proves is folded, not refused,
+		// since then). That refusal returns from the fold itself, before the
+		// merge, so only the fold's own cleanup can remove what it wrote; run
+		// checks the temp directory afterwards.
 		out := run(t, 1, map[string][]string{"a": pks(2, 11)}, []string{"a"}, 1, 1,
 			func(db *sql.DB, ts func(time.Duration) string, cfg *reconstruct.FullTableConfig) {
 				testutil.InsertEvent(t, db, "binlog.000001", 9000, 9100, ts(30*time.Minute), nil,
-					schema, "a", 2, "2", nil, []byte(`{"id":2,"v":"x2"}`), []byte(`{"id":99,"v":"moved"}`))
+					schema, "a", 2, "02", nil, []byte(`{"id":2,"v":"x2"}`), []byte(`{"id":99,"v":"moved"}`))
 				cfg.FetchBatchSize = 5
 			})
-		if out.err == nil || out.published || errors.Is(out.err, reconstruct.ErrTouchedRowBudget) || !strings.Contains(out.err.Error(), "99") {
-			t.Fatalf("published=%v err=%v; want the fold's key-change refusal", out.published, out.err)
+		if out.err == nil || out.published || errors.Is(out.err, reconstruct.ErrTouchedRowBudget) ||
+			!strings.Contains(out.err.Error(), "cannot follow") || !strings.Contains(out.err.Error(), `"02"`) || !strings.Contains(out.err.Error(), `"99"`) {
+			t.Fatalf("published=%v err=%v; want the fold's spelling refusal naming the stored key \"02\" and the new key \"99\"", out.published, out.err)
 		}
 	})
 	t.Run("a row changed many times counts once", func(t *testing.T) {

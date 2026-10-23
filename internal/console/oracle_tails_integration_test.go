@@ -38,10 +38,9 @@ import (
 // A table the port answers as of the published cut (no tail) is compared
 // with the rows read at that cut, AND the step asserts why there is no
 // tail: a key the tail does not support (only integer keys have one, the
-// product's own rule: t_text's VARCHAR key), a PK-changing UPDATE the
-// generator did in the window, or no change to the table since the cut.
-// Any other reason fails the run naming it: that is the detector for tails
-// silently off.
+// product's own rule: t_text's VARCHAR key), or no change to the table since
+// the cut. Any other reason fails the run naming it: that is the detector
+// for tails silently off.
 
 func TestOracleTails(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
