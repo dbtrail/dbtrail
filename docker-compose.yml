@@ -447,6 +447,14 @@ services:
       # The changes a statement's tables may hold unmerged grow with it
       # (384 MB at 2GB, 768 MB at 4GB).
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # The fraction of this machine's memory this service plans with
+      # (#2513): its snapshot work, the copy's tails and its SQL statements
+      # are sized from this share, not from the whole machine, so that with
+      # the router's share below and the index's quarter the stack adds up
+      # (0.4 + 0.3 + 0.25). DAEMON_MEMORY_SHARE in .env changes it; a value
+      # that is not a fraction in (0, 1] is warned at startup and the whole
+      # machine stands.
+      BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-0.4}
       # "Run verification" button (#677): lets the console run `bintrail verify`
       # in-process for a monitored server (trigger, poll per-table results,
       # explain a mismatch) — the same read-only baseline/index reads the
@@ -601,12 +609,13 @@ services:
   # `bintrail` does.
   #
   # How many statements run on the copy at once is worked out from the cores
-  # and memory this service may use. With no ceiling it takes half of the
-  # machine, since capture uses the machine too. To give it ceilings of its
-  # own, set ROUTER_MEMORY (e.g. 8g) and ROUTER_CPUS (e.g. 4) in .env: it then
-  # uses all of what it was given, and a statement that outgrows its memory
-  # cannot reach capture's. Each statement may take the memory saved in the
-  # web interface (SQL_MEMORY in .env wins; 2GB unless set) plus a quarter.
+  # and the memory this service plans with: its share of the machine
+  # (BINTRAIL_MEMORY_SHARE below, 0.3), less what its tails may hold. To give
+  # it ceilings of its own, set ROUTER_MEMORY (e.g. 8g) and ROUTER_CPUS (e.g.
+  # 4) in .env: the share then applies to that ceiling, and a statement that
+  # outgrows its memory cannot reach capture's. Each statement may take the
+  # memory saved in the web interface (SQL_MEMORY in .env wins; 2GB unless
+  # set) plus a quarter.
   #
   # Without this service nothing serves the MySQL port: the web interface
   # can turn it on and nothing listens.
@@ -636,6 +645,12 @@ services:
       # Memory each statement on the copy may use, and the most rows one
       # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # The fraction of this machine's memory the router plans with (#2513):
+      # the tails it keeps and the statements it runs come out of this one
+      # number, beside the `bintrail` service's share and the index's quarter.
+      # ROUTER_MEMORY_SHARE in .env changes it; under ROUTER_MEMORY (a
+      # ceiling) the share applies to that ceiling.
+      BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-0.3}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # How many statements run on the copy at once (1 to 64). Empty = the
       # router works it out from the cores and memory it may use, one

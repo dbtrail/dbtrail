@@ -1905,7 +1905,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 	if w := sqlMaxInFlightWarning(opts.SQLMaxInFlight, sqlsandbox.DefaultLimits().Threads, runtime.GOMAXPROCS(0)); w != "" {
 		slog.Warn(w)
 	}
-	if w := sqlMemoryWarning(opts.SQLMemoryLimit, max(opts.SQLMaxInFlight, 1), console.HostMemoryBytes()); w != "" {
+	if w := sqlMemoryWarning(opts.SQLMemoryLimit, max(opts.SQLMaxInFlight, 1), console.MemoryBudgetBytes()); w != "" {
 		slog.Warn(w)
 	}
 	// Only a daemon that captures its own source has a flavor to show.

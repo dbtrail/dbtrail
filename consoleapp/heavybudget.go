@@ -105,9 +105,10 @@ func threadsFor(cores, sessions int) int {
 // variable so a test can set one where the host's memory is unknown.
 var processBudget = hostBudget
 
-// hostBudget is budgetFor this host, worked out and logged once.
+// hostBudget is budgetFor this process's memory budget (the host, or its
+// share, console.MemoryBudgetBytes, #2513), worked out and logged once.
 var hostBudget = sync.OnceValues(func() (heavyBudget, bool) {
-	host, cores := console.HostMemoryBytes(), runtime.GOMAXPROCS(0)
+	host, cores := console.MemoryBudgetBytes(), runtime.GOMAXPROCS(0)
 	b, ok := budgetFor(host, cores)
 	if ok {
 		slog.Info("DuckDB memory and threads per session, from this host's memory and cores", "host_mib", host>>20, "cores", cores,

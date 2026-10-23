@@ -801,7 +801,8 @@ Two budgets bound the tails, because they live in the router's memory:
   a higher value, or a shorter interval.
 - `BINTRAIL_SQL_TAIL_MAX_BYTES` is the most memory every tail of one
   server together may hold, by the router's own estimate: one fifth of the
-  memory the process may use when unset (none when that is unknown), a size
+  memory the process plans with when unset (the machine's, or the share of
+  it `BINTRAIL_MEMORY_SHARE` names; none when that is unknown), a size
   such as `2GiB` to set it, `0` or `off` for no bound. A router that serves
   several servers gives each its own share. The table whose fold would pass
   it is the one that freezes, with a reason that says memory, not keys; and

@@ -165,13 +165,33 @@ func gibText(b uint64) string {
 
 // ThisMachineForSQLPool reads what this process was given: its cores
 // (GOMAXPROCS, which the Go runtime already sets from a CPU ceiling) and its
-// memory, and whether each is a ceiling of its own.
+// memory, and whether each is a ceiling of its own. The memory is the
+// process's budget (MemoryBudgetBytes, #2513) less what its tails may hold
+// when tails are on, so the two come out of one number; a share below 1 is
+// a ceiling of this process's own, like a container's, and the pool then
+// plans with all of it, not half.
 func ThisMachineForSQLPool(memoryLimit string) SQLPoolInput {
+	var tails int64
+	if !tailsOff() {
+		tails = tailBudgetFromEnv().Bytes
+	}
+	return machineForSQLPool(memoryLimit, runtime.GOMAXPROCS(0), cpuCapped("/"), memoryBudget(), memoryCapped("/"), MemoryShare(), tails)
+}
+
+// machineForSQLPool is ThisMachineForSQLPool over its inputs: budget is the
+// memory the process plans with (0 unknown), capped whether a ceiling of its
+// own set it, share its MemoryShare, tails the bytes its tails may hold (0
+// none or unbounded, which then takes nothing off).
+func machineForSQLPool(memoryLimit string, cores int, coresOwn bool, budget uint64, capped bool, share float64, tails int64) SQLPoolInput {
+	mem := budget
+	if tails > 0 && uint64(tails) < mem {
+		mem -= uint64(tails)
+	}
 	return SQLPoolInput{
-		Cores:       runtime.GOMAXPROCS(0),
-		CoresOwn:    cpuCapped("/"),
-		MemoryBytes: HostMemoryBytes(),
-		MemoryOwn:   memoryCapped("/"),
+		Cores:       cores,
+		CoresOwn:    coresOwn,
+		MemoryBytes: mem,
+		MemoryOwn:   capped || share < 1,
 		MemoryLimit: memoryLimit,
 	}
 }

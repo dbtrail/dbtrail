@@ -242,10 +242,10 @@ func (s *Server) TidyTails() {
 
 // tailBudgetFromEnv is the process's tail budget, read once from
 // BINTRAIL_SQL_TAIL_MAX_KEYS and BINTRAIL_SQL_TAIL_MAX_BYTES and the memory
-// the process may use; a value that cannot be read is warned once and the
-// default stands.
+// the process plans with (MemoryBudgetBytes: the host, or its share, #2513);
+// a value that cannot be read is warned once and the default stands.
 var tailBudgetFromEnv = sync.OnceValue(func() tailBudget {
-	b, warnings := tailBudgetFor(os.Getenv("BINTRAIL_SQL_TAIL_MAX_KEYS"), os.Getenv("BINTRAIL_SQL_TAIL_MAX_BYTES"), HostMemoryBytes())
+	b, warnings := tailBudgetFor(os.Getenv("BINTRAIL_SQL_TAIL_MAX_KEYS"), os.Getenv("BINTRAIL_SQL_TAIL_MAX_BYTES"), memoryBudget())
 	for _, w := range warnings {
 		slog.Warn("Engine Routing: " + w)
 	}

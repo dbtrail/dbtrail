@@ -345,7 +345,7 @@ func (s *Server) hostMemoryBytes() uint64 {
 	if s.hostMemory != nil {
 		return s.hostMemory()
 	}
-	return HostMemoryBytes()
+	return memoryBudget()
 }
 
 func sqlMiB(limit string) int64 {
