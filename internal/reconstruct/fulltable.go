@@ -3240,7 +3240,7 @@ func materializeBaselineLocalIn(ctx context.Context, path string, tuning duckdbu
 		// At-rest integrity (#636): validate the local file against its snapshot's
 		// _MANIFEST before any reader trusts it (DuckDB validates nothing). Fail
 		// loud on corruption; a legacy snapshot with no manifest is a no-op.
-		if err := baselineintegrity.ValidateLocalFile(path); err != nil {
+		if err := baselineintegrity.ValidateLocalFileOnce(path); err != nil {
 			return "", nil, err
 		}
 		return path, func() {}, nil

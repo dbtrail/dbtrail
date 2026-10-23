@@ -57,17 +57,32 @@ import (
 // # Integrity
 //
 // The source is validated against its own snapshot's _MANIFEST before it is
-// copied. Skipping that would let a corrupt file propagate into a fresh
-// snapshot and be re-certified under the new manifest, which is worse than
-// reading it: the merge path validates on read (materializeBaselineLocal), so
-// carrying forward without validating would be the one route into a snapshot
-// that bypasses the check.
+// linked or copied. Skipping that would let a corrupt file propagate into a
+// fresh snapshot and be re-certified under the new manifest (the manifest
+// writer reuses the source manifest's digest for a linked file, #1717), which
+// is worse than reading it: the merge path validates on read
+// (materializeBaselineLocal), so carrying forward without validating would be
+// the one route into a snapshot that bypasses the check.
 //
-// What that check does NOT do is worth stating: ValidateLocalFile passes when
-// the snapshot has no manifest at all, or lists no entry for this file. It
-// catches a CRC mismatch, not an absent guarantee. A legacy snapshot with no
-// manifest is carried forward unverified, exactly as the merge path would read
-// it unverified.
+// The check is ValidateLocalFileOnce (#2517): the guarantee is kept, the
+// repetition is dropped. The bytes are read and hashed once per process per
+// identity, where the identity is the file's device + inode + size + mtime.
+// A file carried forward by hard link keeps all four, so the base this
+// refresh links into snapshot N+1 is the inode the process verified when it
+// carried (or wrote) it at snapshot N, and it is not read again; before this
+// every refresh re-read every base end to end, on a host whose bases exceed
+// RAM about two thirds of the refresh. A rewritten base is a new inode and is
+// read on its first carry; the copy fallback below reads its source every
+// time, because a copy is new bytes under a new identity. The limitation the
+// identity accepts: bytes changed in place under the same inode, size and
+// mtime are not seen, which the writers never do (a published file is written
+// to a temp name and renamed, never edited in place).
+//
+// What that check does NOT do is worth stating: ValidateLocalFileOnce, like
+// ValidateLocalFile, passes when the snapshot has no manifest at all, or lists
+// no entry for this file. It catches a CRC mismatch, not an absent guarantee.
+// A legacy snapshot with no manifest is carried forward unverified, exactly
+// as the merge path would read it unverified.
 //
 // # Hard link, then copy
 //
@@ -159,9 +174,10 @@ func carryKeyIndex(srcPath, dst string, linked bool, schema, table string) {
 
 // carryForwardFile is carryForward for one file at an explicit destination:
 // the base, or one file of a table delta's chain (#1718), which travel the
-// same way. validate runs the manifest check on the source first; a caller
+// same way. validate runs the manifest check on the source first
+// (ValidateLocalFileOnce: a read per process per identity, #2517); a caller
 // that just validated the file (readTableDelta, over every pair of a chain)
-// passes false rather than hash the same bytes twice per refresh.
+// passes false rather than resolve the manifest twice per refresh.
 // A caller passing validate=false asserts that srcPath was already validated
 // against its snapshot's manifest in this run (readTableDelta does, for every
 // pair of a chain): the manifest writer reuses that manifest's digest for the
@@ -172,7 +188,7 @@ func carryForwardFile(ctx context.Context, srcPath, dst string, validate bool) (
 		return false, err
 	}
 	if validate {
-		if err := baselineintegrity.ValidateLocalFile(srcPath); err != nil {
+		if err := baselineintegrity.ValidateLocalFileOnce(srcPath); err != nil {
 			return false, fmt.Errorf("validate the snapshot being carried forward: %w", err)
 		}
 	}

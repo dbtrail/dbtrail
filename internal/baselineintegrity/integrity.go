@@ -8,9 +8,12 @@
 // would be read back as truth. The _MANIFEST sidecar closes that: it records a
 // CRC-32C over each table's Parquet file BYTES at write time, and the baseline
 // read paths re-hash and compare, failing loud on a mismatch instead of
-// returning garbage rows. Local reads validate via ValidateLocalFile; S3 reads
-// validate via ValidateS3File (#698), which pre-pass-streams the original
-// object through CRC-32C before any DuckDB reader touches it — see s3.go.
+// returning garbage rows. Local reads validate via ValidateLocalFile, or via
+// ValidateLocalFileOnce where one process sees the same file on every refresh
+// (a read once per process per device+inode+size+mtime, #2517 — see once.go);
+// S3 reads validate via ValidateS3File (#698), which pre-pass-streams the
+// original object through CRC-32C before any DuckDB reader touches it — see
+// s3.go.
 //
 // Scope is bit-rot / partial-write, NOT deliberate tampering: an attacker who
 // rewrites a Parquet file can also rewrite this manifest. True tamper-evidence
@@ -266,23 +269,7 @@ func LoadManifest(snapshotDir string) (m *Manifest, ok bool, err error) {
 //   - a non-ErrIntegrity error only when the data file cannot be opened/read
 //     (it would fail the subsequent read anyway).
 func ValidateLocalFile(path string) error {
-	snapshotDir := filepath.Dir(filepath.Dir(path))
-	m, ok, err := LoadManifest(snapshotDir)
-	if err != nil {
-		// Unreadable / unparseable manifest = cannot verify, not data corruption;
-		// degrade to a skip so a rotted sidecar can't deny recovery of good data.
-		slog.Warn("integrity manifest unreadable; treating baseline as integrity-not-verified",
-			"snapshot", snapshotDir, "error", err)
-		return nil
-	}
-	if !ok {
-		return nil // no manifest — legacy/temp/test, not verifiable, not a failure
-	}
-	rel, err := filepath.Rel(snapshotDir, path)
-	if err != nil {
-		return nil // path not under the snapshot dir — unexpected layout, skip
-	}
-	want, verify := m.digestFor(filepath.ToSlash(rel), snapshotDir)
+	want, verify := localDigest(path)
 	if !verify {
 		return nil
 	}
@@ -294,6 +281,31 @@ func ValidateLocalFile(path string) error {
 		return fmt.Errorf("%w: %s (crc32c %s, manifest %s)", ErrIntegrity, path, got, want)
 	}
 	return nil
+}
+
+// localDigest resolves the manifest digest a local file is checked against:
+// the snapshot directory is the file's grandparent, its _MANIFEST is loaded,
+// and digestFor answers for the file's snapshot-relative path. The shared
+// core of ValidateLocalFile and ValidateLocalFileOnce; verify=false is
+// "cannot verify", never "data corrupt" (see ValidateLocalFile's outcomes).
+func localDigest(path string) (want string, verify bool) {
+	snapshotDir := filepath.Dir(filepath.Dir(path))
+	m, ok, err := LoadManifest(snapshotDir)
+	if err != nil {
+		// Unreadable / unparseable manifest = cannot verify, not data corruption;
+		// degrade to a skip so a rotted sidecar can't deny recovery of good data.
+		slog.Warn("integrity manifest unreadable; treating baseline as integrity-not-verified",
+			"snapshot", snapshotDir, "error", err)
+		return "", false
+	}
+	if !ok {
+		return "", false // no manifest — legacy/temp/test, not verifiable, not a failure
+	}
+	rel, err := filepath.Rel(snapshotDir, path)
+	if err != nil {
+		return "", false // path not under the snapshot dir — unexpected layout, skip
+	}
+	return m.digestFor(filepath.ToSlash(rel), snapshotDir)
 }
 
 // digestFor returns the manifest's recorded digest for rel (forward-slashed,

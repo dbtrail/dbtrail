@@ -17,7 +17,7 @@ import (
 // times they are reached and fail one.
 var (
 	resolveMerge    = CompactTableDeltaMinor
-	resolveValidate = baselineintegrity.ValidateLocalFile
+	resolveValidate = baselineintegrity.ValidateLocalFileOnce
 )
 
 // ResolveTableDelta writes the resolved pair of the chain beside basePath
@@ -38,10 +38,11 @@ var (
 //
 // Before a merge reads a file of the chain, the file is checked against the
 // snapshot's manifest when the manifest lists it
-// (baselineintegrity.ValidateLocalFile; a snapshot with no manifest is merged
-// unchecked, as every other reader reads it): the pair is read in place of
-// those files, so it must not be the way damaged bytes reach a statement. A
-// linked pair was checked when it was merged.
+// (baselineintegrity.ValidateLocalFileOnce, a read once per process per
+// identity, #2517; a snapshot with no manifest is merged unchecked, as every
+// other reader reads it): the pair is read in place of those files, so it
+// must not be the way damaged bytes reach a statement. A linked pair was
+// checked when it was merged.
 //
 // A pair already there is kept only if its footers name this chain and this
 // base (resolvedIsFor); one that does not is replaced. A reader trusts the

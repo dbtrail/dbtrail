@@ -142,7 +142,7 @@ func readTableDeltaReason(ctx context.Context, basePath string, bmeta baseline.D
 		return nil, "", fmt.Errorf("size the base of a table delta: %w", err)
 	}
 	for _, f := range chain.Paths() {
-		if err := baselineintegrity.ValidateLocalFile(f); err != nil {
+		if err := baselineintegrity.ValidateLocalFileOnce(f); err != nil {
 			return setAside("it fails the snapshot's integrity check (" + err.Error() + ")")
 		}
 	}
@@ -1559,7 +1559,7 @@ func rewriteWithEmptyDelta(ctx context.Context, p tableDeltaPublish, in mergeInp
 	var cleanup func()
 	var err error
 	if p.prev != nil {
-		if err := baselineintegrity.ValidateLocalFile(p.basePath); err != nil {
+		if err := baselineintegrity.ValidateLocalFileOnce(p.basePath); err != nil {
 			return err
 		}
 		in.LocalBaselinePath, cleanup, err = materializeBaseWithDelta(ctx, p.basePath, p.prev, p.cfg.DuckDBTuning, p.cfg.DownloadDir, p.cfg.SpaceCheck)
