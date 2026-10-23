@@ -17,12 +17,21 @@ func pkChangeErr(table string) error {
 
 // TestRefreshStep_refusedOnlyForTheGeneratorsPKChange: a refresh counts as
 // refused only when every failed table failed on the fold's PK-change guard
-// and this step's ops moved a row on that table. Anything else is a failure
-// of the run, so a product defect cannot hide behind the fallback.
+// and an op since the published cut moved a row on that table. Anything
+// else is a failure of the run, so a product defect cannot hide behind the
+// fallback.
 func TestRefreshStep_refusedOnlyForTheGeneratorsPKChange(t *testing.T) {
 	s := &RefreshStep{}
-	moved := &Cut{Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindPKUpdate, Key: 7, NewKey: 28}}}}}
-	quiet := &Cut{Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 7}}}}}
+	pkMove := []Op{{Table: "t_int", Changes: []Change{{Kind: KindPKUpdate, Key: 7, NewKey: 28}}}}
+	moved := &Cut{Ops: pkMove, SincePublish: pkMove}
+	// Moved two steps ago, after the last publish: the window the refresh
+	// folds holds it, this step's ops do not.
+	movedEarlier := &Cut{Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 9}}}},
+		SincePublish: append(append([]Op{}, pkMove...), Op{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 9}}})}
+	// Moved before the last publish: that window was folded or snapshotted
+	// already; this refresh's window holds no move.
+	movedBefore := &Cut{Ops: pkMove}
+	quiet := &Cut{Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 7}}}}, SincePublish: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 7}}}}}
 	cases := []struct {
 		name string
 		err  error
@@ -30,6 +39,8 @@ func TestRefreshStep_refusedOnlyForTheGeneratorsPKChange(t *testing.T) {
 		want bool
 	}{
 		{"pk change on the moved table", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, moved, true},
+		{"pk change moved by an earlier step since the publish", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, movedEarlier, true},
+		{"pk change moved before the last publish", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, movedBefore, false},
 		{"pk change on a table whose ops moved nothing", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_text", Err: pkChangeErr("t_text")}}, Err: pkChangeErr("t_text")}, moved, false},
 		{"pk change with no PK-changing op", &RefreshError{Failures: []reconstruct.TableFailure{{Table: "t_int", Err: pkChangeErr("t_int")}}, Err: pkChangeErr("t_int")}, quiet, false},
 		{"one table refused, another failed otherwise", &RefreshError{Failures: []reconstruct.TableFailure{
@@ -45,16 +56,6 @@ func TestRefreshStep_refusedOnlyForTheGeneratorsPKChange(t *testing.T) {
 	}
 }
 
-func TestCut_hadPKChangeOn(t *testing.T) {
-	c := &Cut{Ops: []Op{
-		{Table: "t_int", Changes: []Change{{Kind: KindInsert, Key: 1}}},
-		{Table: "t_uniq", Changes: []Change{{Kind: KindDelete, Key: 2}, {Kind: KindPKUpdate, Key: 3, NewKey: 4}}},
-	}}
-	if !c.HadPKChange() || !c.HadPKChangeOn("t_uniq") || c.HadPKChangeOn("t_int") {
-		t.Fatalf("any=%v t_uniq=%v t_int=%v; want true true false", c.HadPKChange(), c.HadPKChangeOn("t_uniq"), c.HadPKChangeOn("t_int"))
-	}
-}
-
 type fakeStep struct {
 	name string
 	w    int
@@ -63,6 +64,41 @@ type fakeStep struct {
 func (f fakeStep) Name() string                      { return f.name }
 func (f fakeStep) Weight() int                       { return f.w }
 func (f fakeStep) Apply(context.Context, *Cut) error { return nil }
+func (f fakeStep) Publishes() bool                   { return true }
+
+// TestCut_sincePublish: the window since the published cut is what a
+// refresh folds and a tail holds, so a PK move and a touch are asked over
+// it, not over this step's ops; a no-op and an op that changed nothing do
+// not touch.
+func TestCut_sincePublish(t *testing.T) {
+	c := &Cut{
+		Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 1}}}},
+		SincePublish: []Op{
+			{Table: "t_uniq", Changes: []Change{{Kind: KindPKUpdate, Key: 3, NewKey: 4}}},
+			{Table: "t_comp", Noop: true, Changes: []Change{{Kind: KindUpdate, Key: 5}}},
+			{Table: "t_text"},
+			{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 1}}},
+		},
+	}
+	if !c.HadPKChangeSincePublishOn("t_uniq") || c.HadPKChangeSincePublishOn("t_int") {
+		t.Fatalf("since publish: t_uniq=%v t_int=%v; want true false", c.HadPKChangeSincePublishOn("t_uniq"), c.HadPKChangeSincePublishOn("t_int"))
+	}
+	for table, want := range map[string]bool{"t_int": true, "t_uniq": true, "t_comp": false, "t_text": false, "t_none": false} {
+		if got := c.TouchedSincePublish(table); got != want {
+			t.Errorf("TouchedSincePublish(%s) = %v, want %v", table, got, want)
+		}
+	}
+}
+
+// TestSteps_publish: a snapshot and a refresh publish the cut; the run
+// compares a table the port answers as of the published cut with the rows
+// of the last such step, so a step that said it publishes when it does not
+// would compare against rows the copy cannot hold.
+func TestSteps_publish(t *testing.T) {
+	if !(&SnapshotStep{}).Publishes() || !(&RefreshStep{}).Publishes() {
+		t.Fatal("a snapshot and a refresh publish the cut")
+	}
+}
 
 // TestRun_drawStepFollowsWeights: steps are drawn by weight from a stream of
 // the seed's own, and the draw is reproducible.

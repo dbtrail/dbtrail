@@ -33,10 +33,12 @@ type Run struct {
 	// Fallback is applied at the same cut, one second later, when a step
 	// refuses it (Refuser) for a reason the generator caused. nil = fail.
 	Fallback Step
-	// Read builds the port's read of the copy: the views SQL and the
+	// Read builds the port's read of the copy at cut: the views SQL and the
 	// snapshot directory it reads, with the DATETIME columns as wall clocks
-	// or as the files hold them. nil = PortViews over Root.
-	Read func(ctx context.Context, now time.Time, wallClock bool) (sqlText, snapshotDir string, err error)
+	// or as the files hold them, and which tables it answers as of the
+	// published cut. nil = PortViews over Root, every table compared with
+	// the cut's rows, which is right only when every step publishes.
+	Read func(ctx context.Context, cut *Cut, wallClock bool) (Read, error)
 	// OpenDuckDB opens the session the views run in. nil = an in-memory
 	// DuckDB.
 	OpenDuckDB func() (*sql.DB, error)
@@ -47,6 +49,22 @@ type Run struct {
 
 // DefaultOpsPerStep is how many ops a step runs when Run.OpsPerStep is 0.
 const DefaultOpsPerStep = 10
+
+// Read is one read of the copy: the views SQL, the snapshot directory it
+// reads, and the tables the port answers as of the published cut rather
+// than the cut being checked (no tail over them). Those are compared with
+// the rows of the published cut; the others with the cut's.
+type Read struct {
+	SQL         string
+	SnapshotDir string
+	AsPublished map[string]bool
+}
+
+// published is a table's rows at the last cut a step published.
+type published struct {
+	step int
+	rows TableRows
+}
 
 // Result is what a run did, for the log.
 type Result struct {
@@ -74,8 +92,9 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 	}
 	read := r.Read
 	if read == nil {
-		read = func(ctx context.Context, now time.Time, wallClock bool) (string, string, error) {
-			return PortViews(ctx, r.Root, now, wallClock)
+		read = func(ctx context.Context, cut *Cut, wallClock bool) (Read, error) {
+			sqlText, dir, err := PortViews(ctx, r.Root, cut.At, wallClock)
+			return Read{SQL: sqlText, SnapshotDir: dir}, err
 		}
 	}
 	open := r.OpenDuckDB
@@ -93,16 +112,22 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 	// the source sees.
 	draw := rand.New(rand.NewPCG(r.Seed, 1))
 	var lastAt time.Time
+	// The published cut: its step, the rows read there, and the ops since.
+	pub := map[string]published{}
+	var sincePublish []Op
+	publishedStep := 0
 	for step := 1; step <= r.Steps; step++ {
-		cut := &Cut{Step: step, Schema: r.Schema, Tables: r.Tables, Rows: map[string]TableRows{}}
+		cut := &Cut{Step: step, Schema: r.Schema, Tables: r.Tables, Rows: map[string]TableRows{}, PublishedStep: publishedStep}
 		for i := range ops {
 			op := g.Next()
 			if err := execOp(ctx, r.Source, op); err != nil {
 				return res, fmt.Errorf("seed %d step %d op %d (%s on %s): %w\n%s", r.Seed, step, i+1, op.Kind, op.Table, err, strings.Join(op.SQL, "\n"))
 			}
 			cut.Ops = append(cut.Ops, op)
+			sincePublish = append(sincePublish, op)
 			res.Ops++
 		}
+		cut.SincePublish = sincePublish
 		// The quiet point: the position first, then the clock, then the
 		// barrier, then the rows. Nothing of this run is in flight, so the
 		// rows are the state at the position.
@@ -130,6 +155,7 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 			st = r.drawStep(draw)
 		}
 		name := st.Name()
+		publishes := st.Publishes()
 		if err := st.Apply(ctx, cut); err != nil {
 			ref, ok := st.(Refuser)
 			if !ok || r.Fallback == nil || !ref.Refused(err, cut) {
@@ -141,10 +167,20 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 				return res, fmt.Errorf("seed %d step %d: %s after a refused %s: %w", r.Seed, step, r.Fallback.Name(), name, err)
 			}
 			name = name + "→" + r.Fallback.Name()
+			publishes = r.Fallback.Publishes()
 			res.Fallbacks++
 		}
 		res.Applied[name]++
 		lastAt = cut.At
+		if publishes {
+			// The read after this step sees the cut as published: nothing
+			// is since it yet.
+			for _, t := range r.Tables {
+				pub[t.Name] = published{step: step, rows: cut.Rows[t.Name]}
+			}
+			sincePublish, cut.SincePublish = nil, nil
+			publishedStep, cut.PublishedStep = step, step
+		}
 
 		// The copy is read twice, the two ways the port reads it (the
 		// console's sqlWallClockDatetimes): under a session zone other than
@@ -154,13 +190,13 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 		// bug in either path shows against the other.
 		var dir string
 		for _, s := range sessions {
-			sqlText, d, err := read(ctx, cut.At, s.wallClock)
+			rd, err := read(ctx, cut, s.wallClock)
 			if err != nil {
 				return res, fmt.Errorf("seed %d step %d: read the copy after %s: %w", r.Seed, step, name, err)
 			}
-			dir = d
+			dir = rd.SnapshotDir
 			cx := Context{Seed: r.Seed, Step: step, Steps: r.Steps, StepName: name, Session: s.zone, SnapshotDir: dir}
-			if err := r.check(ctx, open, s, sqlText, cx, cut); err != nil {
+			if err := r.check(ctx, open, s, rd, cx, cut, pub); err != nil {
 				return res, err
 			}
 		}
@@ -181,7 +217,8 @@ type session struct {
 
 var sessions = []session{{"America/Bogota", true}, {"UTC", false}}
 
-func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), s session, sqlText string, cx Context, cut *Cut) error {
+func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), s session, rd Read, cx Context, cut *Cut, pub map[string]published) error {
+	sqlText := rd.SQL
 	ddb, err := open()
 	if err != nil {
 		return fmt.Errorf("seed %d step %d: open DuckDB: %w", r.Seed, cx.Step, err)
@@ -194,7 +231,10 @@ func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), s session
 		return fmt.Errorf("seed %d step %d: DuckDB rejected the views SQL: %w\n--- generated ---\n%s", r.Seed, cx.Step, err, sqlText)
 	}
 	for _, t := range r.Tables {
-		source := cut.Rows[t.Name]
+		source, tcx, err := sourceFor(cx, t.Name, cut, rd, pub)
+		if err != nil {
+			return fmt.Errorf("seed %d step %d (%s, session %s): %w", r.Seed, cx.Step, cx.StepName, s.zone, err)
+		}
 		var datetimes []string
 		if !s.wallClock {
 			datetimes = t.Datetimes
@@ -203,11 +243,27 @@ func (r *Run) check(ctx context.Context, open func() (*sql.DB, error), s session
 		if err != nil {
 			return fmt.Errorf("seed %d step %d (%s, session %s): %w", r.Seed, cx.Step, cx.StepName, s.zone, err)
 		}
-		if err := Check(cx, source, view); err != nil {
+		if err := Check(tcx, source, view); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// sourceFor is what the copy's read of table must equal: the cut's rows,
+// or, for a table the read answers as of the published cut, the rows read
+// at that cut, with the check's context saying so. A table answered as of
+// a published cut when none was published is a read that invented one.
+func sourceFor(cx Context, table string, cut *Cut, rd Read, pub map[string]published) (TableRows, Context, error) {
+	if !rd.AsPublished[table] {
+		return cut.Rows[table], cx, nil
+	}
+	p, ok := pub[table]
+	if !ok {
+		return TableRows{}, cx, fmt.Errorf("table %s: the read answers as of the published cut, and no step published one", table)
+	}
+	cx.AsOf = fmt.Sprintf("the published cut (step %d)", p.step)
+	return p.rows, cx, nil
 }
 
 // nextCutTime reads the server clock and makes it strictly later than the

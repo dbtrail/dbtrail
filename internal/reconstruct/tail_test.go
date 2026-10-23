@@ -669,3 +669,24 @@ func TestTail_bytes(t *testing.T) {
 		t.Fatalf("bytes do not grow with keys: 3 keys %d, 9 keys %d", three, nine)
 	}
 }
+
+// TestTailKeyRefusal: the rule on a table's key, as NewTail applies it and
+// as the oracle over the port's tails asks it: integer keys pass (named as
+// the copy spells them), any other type refuses naming the column and its
+// type, a key column the copy lacks refuses.
+func TestTailKeyRefusal(t *testing.T) {
+	cols := []baseline.Column{{Name: "ID", MySQLType: "int"}, {Name: "code", MySQLType: "varchar(16)"}, {Name: "b", MySQLType: "bigint"}}
+	names, why := TailKeyRefusal("s.t", cols, []string{"id"})
+	if why != "" || len(names) != 1 || names[0] != "ID" {
+		t.Fatalf("int key: names=%v why=%q", names, why)
+	}
+	if _, why = TailKeyRefusal("s.t", cols, []string{"id", "code"}); why != "s.t: its key column code is varchar(16), and only integer keys have a tail" {
+		t.Fatalf("varchar in a composite key: %q", why)
+	}
+	if names, why = TailKeyRefusal("s.t", cols, []string{"b", "id"}); why != "" || len(names) != 2 || names[1] != "ID" {
+		t.Fatalf("composite integer key: names=%v why=%q", names, why)
+	}
+	if _, why = TailKeyRefusal("s.t", cols, []string{"missing"}); why != "s.t: its key column missing is not in its copy" {
+		t.Fatalf("missing column: %q", why)
+	}
+}

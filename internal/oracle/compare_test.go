@@ -68,6 +68,20 @@ func TestCheck_messageCarriesEverything(t *testing.T) {
 // first even when the counts also differ; a count mismatch without
 // duplicates fails the second; equal counts with a key swapped fail the
 // third naming the key missing from the copy and the one it has instead.
+// TestFailure_saysAsOf: a table answered as of the published cut is
+// compared with that cut's rows, and the message says so, or a mismatch
+// would read as the current cut's.
+func TestFailure_saysAsOf(t *testing.T) {
+	f := &Failure{Context: Context{Seed: 1, Step: 4, Steps: 9, StepName: "tail", AsOf: "the published cut (step 2)"}, Table: "t_int", Detail: "row count differs"}
+	msg := f.Error()
+	if !strings.Contains(msg, "the copy answered as of the published cut (step 2); the rows compared are that cut's") {
+		t.Fatalf("message does not say the cut compared:\n%s", msg)
+	}
+	if strings.Contains((&Failure{Context: Context{Seed: 1}, Table: "t_int", Detail: "x"}).Error(), "answered as of") {
+		t.Fatal("a check against the cut itself must not claim an earlier one")
+	}
+}
+
 func TestCheck_order(t *testing.T) {
 	cx := Context{Seed: 1, Step: 1, Steps: 1, StepName: "snapshot"}
 	source := rowsOf("t_int", []string{"1", "10", "a"})

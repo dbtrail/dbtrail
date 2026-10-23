@@ -120,6 +120,12 @@ const (
 	// HIGH end, and MetaKeyDeltaSeqLo the low one; absent on a plain pair.
 	MetaKeyDeltaSeq   = "bintrail.delta_seq"
 	MetaKeyDeltaSeqLo = "bintrail.delta_seq_lo"
+	// MetaKeyDeltaRows is the rows the resolved state holds once this pair is
+	// applied (#2505): the refresh's running count, rows before the window
+	// plus its INSERT events minus its DELETE events, which the next pair
+	// starts from and a rewrite is checked against. Absent on a pair written
+	// before the count existed, or after one whose count was unknown.
+	MetaKeyDeltaRows = "bintrail.delta_rows"
 )
 
 // TableDeltaPaths returns where the pair of sequence seq of a table's delta
@@ -1292,6 +1298,13 @@ func writeEmptyTableDelta(base string) error {
 		MetaKeyDeltaChainStart:   m.SnapshotTimestamp.UTC().Format(time.RFC3339),
 		MetaKeyDeltaBaseAnchor:   m.BinlogFile + ":" + pos,
 		MetaKeyDeltaBaseSize:     strconv.FormatInt(fi.Size(), 10),
+	}
+	// The empty pair applies nothing, so the state's rows are the base's
+	// (#2505): the first window's arithmetic starts from this count.
+	if rows, err := TableFileRows(base); err == nil {
+		md[MetaKeyDeltaRows] = strconv.FormatInt(rows, 10)
+	} else {
+		slog.Warn("empty table delta written without the base's row count; the refresh's arithmetic starts at the next rewrite", "path", base, "error", err)
 	}
 	return WriteTableDeltaPair(base, 0, cols, md, nil, nil)
 }

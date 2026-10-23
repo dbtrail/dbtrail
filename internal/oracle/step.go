@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -29,15 +30,35 @@ type Cut struct {
 	Rows     map[string]TableRows
 	// Ops are the ops of the step that ended at this cut.
 	Ops []Op
+	// SincePublish are the ops since the last cut a step published (a
+	// snapshot or a refresh), this step's included: what a refresh folds,
+	// and what a tail holds, at this cut. Empty right after a publishing
+	// step: the read after it sees the cut as published, and PublishedStep
+	// is then this step; otherwise the last step that published.
+	SincePublish  []Op
+	PublishedStep int
 }
 
-// HadPKChange reports whether an op of the step moved a row to another key.
-func (c *Cut) HadPKChange() bool { return c.HadPKChangeOn("") }
+// HadPKChangeSincePublishOn reports whether an op since the last published
+// cut moved a row of table to another key: the window a refresh folds and a
+// tail holds, so the one that decides whether their refusal is the
+// generator's doing.
+func (c *Cut) HadPKChangeSincePublishOn(table string) bool { return hadPKChange(c.SincePublish, table) }
 
-// HadPKChangeOn reports whether an op of the step moved a row of table to
-// another key; "" means any table.
-func (c *Cut) HadPKChangeOn(table string) bool {
-	for _, op := range c.Ops {
+// TouchedSincePublish reports whether an op since the last published cut
+// changed a row of table: a tail with no key over it is then a tail that
+// was lost, not an idle table.
+func (c *Cut) TouchedSincePublish(table string) bool {
+	for _, op := range c.SincePublish {
+		if op.Table == table && !op.Noop && len(op.Changes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hadPKChange(ops []Op, table string) bool {
+	for _, op := range ops {
 		if table != "" && op.Table != table {
 			continue
 		}
@@ -51,14 +72,21 @@ func (c *Cut) HadPKChangeOn(table string) bool {
 }
 
 // Step is what a run does to the copy at a cut, before reading it: a
-// snapshot cut, a refresh with table deltas, later a tail laid by the port's
-// keeper. A step knows nothing of the oracle; the read after it must equal
-// the source. Weight is its share of the draw between steps; the first cut
-// of a run always takes the first step of the list.
+// snapshot cut, a refresh with table deltas (both publish the cut), or a
+// tail laid by the port's keeper (which does not). A step knows nothing of
+// the oracle; the read after it must equal the source. Weight is its share
+// of the draw between steps; the first cut of a run always takes the first
+// step of the list.
 type Step interface {
 	Name() string
 	Weight() int
 	Apply(ctx context.Context, cut *Cut) error
+	// Publishes reports whether the step publishes the cut as the copy's
+	// state (a snapshot, a refresh): the port then answers as of it until
+	// the next. A step that does not (a tail) leaves the published cut as
+	// it was, and a table the port answers as of that cut is compared
+	// with the rows read there.
+	Publishes() bool
 }
 
 // Refuser is a Step that can refuse a cut for a reason the generator
@@ -80,8 +108,9 @@ type SnapshotStep struct {
 	ddl    map[string]string
 }
 
-func (s *SnapshotStep) Name() string { return "snapshot" }
-func (s *SnapshotStep) Weight() int  { return s.W }
+func (s *SnapshotStep) Name() string    { return "snapshot" }
+func (s *SnapshotStep) Weight() int     { return s.W }
+func (s *SnapshotStep) Publishes() bool { return true }
 
 func (s *SnapshotStep) Apply(ctx context.Context, cut *Cut) error {
 	dir := filepath.Join(s.Root, reconstruct.SnapshotDirName(cut.At))
@@ -110,6 +139,11 @@ func (s *SnapshotStep) Apply(ctx context.Context, cut *Cut) error {
 				baseline.MetaKeyLastDumpAt:        ts,
 				baseline.MetaKeyFoldGeneration:    "0",
 				baseline.MetaKeyMydumperFormat:    "sql",
+				// Read at the quiet point, after its position and with no
+				// write of this run in flight: of one instant with no lock,
+				// which is what the port's keeper requires of a snapshot
+				// before it lays a tail over it (an unknown read is refused).
+				baseline.MetaKeyLockMode: string(baseline.LockModeSafeNoLock),
 			},
 		})
 		if err != nil {
@@ -187,13 +221,21 @@ type RefreshStep struct {
 	W        int
 }
 
-func (s *RefreshStep) Name() string { return "refresh" }
-func (s *RefreshStep) Weight() int  { return s.W }
+func (s *RefreshStep) Name() string    { return "refresh" }
+func (s *RefreshStep) Weight() int     { return s.W }
+func (s *RefreshStep) Publishes() bool { return true }
 
 func (s *RefreshStep) Apply(ctx context.Context, cut *Cut) error {
 	tables := make([]string, len(cut.Tables))
 	for i, t := range cut.Tables {
 		tables[i] = cut.Schema + "." + t.Name
+	}
+	// The refresh checks its own arithmetic per table and publishes the
+	// table either way (#2505); here, a mismatch fails the run, so the
+	// check itself is exercised by every refresh the harness drives.
+	mismatches, merr := observe.RefreshArithmeticMismatches()
+	if merr != nil {
+		return &RefreshError{Err: fmt.Errorf("read bintrail_refresh_arithmetic_mismatch_total before the refresh: %w", merr)}
 	}
 	_, failures, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
 		IndexDSN: s.IndexDSN, BaselineSrc: s.Root, Tables: tables, At: cut.At,
@@ -201,6 +243,13 @@ func (s *RefreshStep) Apply(ctx context.Context, cut *Cut) error {
 	})
 	if err != nil {
 		return &RefreshError{Failures: failures, Err: err}
+	}
+	after, merr := observe.RefreshArithmeticMismatches()
+	if merr != nil {
+		return &RefreshError{Err: fmt.Errorf("read bintrail_refresh_arithmetic_mismatch_total after the refresh: %w", merr)}
+	}
+	if moved := after - mismatches; moved != 0 {
+		return &RefreshError{Err: fmt.Errorf("the refresh's arithmetic did not close on %v table(s) (bintrail_refresh_arithmetic_mismatch_total moved); the refresh's error line says which", moved)}
 	}
 	return nil
 }
@@ -216,16 +265,17 @@ func (e *RefreshError) Unwrap() error { return e.Err }
 
 // Refused: the fold refuses a window holding a PK-changing UPDATE and says
 // to take a new snapshot (reconstruct's #782 guard). A refresh is refused
-// only when EVERY failed table failed that way and the step's ops moved a
-// row on that table; any other failure, or that error on a table whose ops
-// changed no key, is a failure of the run.
+// only when EVERY failed table failed that way and an op since the last
+// published cut (the window the refresh folds, not only this step's ops)
+// moved a row on that table; any other failure, or that error on a table
+// whose window changed no key, is a failure of the run.
 func (s *RefreshStep) Refused(err error, cut *Cut) bool {
 	var re *RefreshError
 	if !errors.As(err, &re) || len(re.Failures) == 0 {
 		return false
 	}
 	for _, f := range re.Failures {
-		if !strings.Contains(f.Err.Error(), "PK-changing UPDATE") || !cut.HadPKChangeOn(f.Table) {
+		if !strings.Contains(f.Err.Error(), "PK-changing UPDATE") || !cut.HadPKChangeSincePublishOn(f.Table) {
 			return false
 		}
 	}
@@ -241,15 +291,26 @@ func (s *RefreshStep) Refused(err error, cut *Cut) bool {
 // it leaves them as the files hold them. It returns the SQL and the
 // snapshot directory it reads.
 func PortViews(ctx context.Context, root string, now time.Time, wallClock bool) (sqlText, snapshotDir string, err error) {
+	in, snapshotDir, err := PortInput(ctx, root, now, wallClock)
+	if err != nil {
+		return "", "", err
+	}
+	return views.Generate(in), snapshotDir, nil
+}
+
+// PortInput is what PortViews renders: the views input over the newest
+// complete snapshot, before Generate. A caller that lays more over a table
+// (the port's keeper lays its tail) sets it on the input and renders.
+func PortInput(ctx context.Context, root string, now time.Time, wallClock bool) (in views.Input, snapshotDir string, err error) {
 	files, _, err := reconstruct.ListBaselinesReport(ctx, root)
 	if err != nil {
-		return "", "", fmt.Errorf("list the snapshots under %s: %w", root, err)
+		return in, "", fmt.Errorf("list the snapshots under %s: %w", root, err)
 	}
 	if len(files) == 0 {
-		return "", "", fmt.Errorf("no complete snapshot under %s", root)
+		return in, "", fmt.Errorf("no complete snapshot under %s", root)
 	}
 	newest := files[0].SnapshotTime
-	in := views.Input{GeneratedAt: now, Version: "oracle", BaselineSource: root, BaselineSnapshot: newest, Follow: views.FollowNone}
+	in = views.Input{GeneratedAt: now, Version: "oracle", BaselineSource: root, BaselineSnapshot: newest, Follow: views.FollowNone}
 	for _, f := range files {
 		if !f.SnapshotTime.Equal(newest) {
 			continue
@@ -260,18 +321,18 @@ func PortViews(ctx context.Context, root string, now time.Time, wallClock bool) 
 		snapshotDir = filepath.Dir(filepath.Dir(f.Path))
 	}
 	if err := views.MarkTableDeltas(ctx, in.Baselines); err != nil {
-		return "", "", err
+		return in, "", err
 	}
 	footers, err := baseline.TableFootersFor(ctx, in.BaselinePaths())
 	if err != nil {
-		return "", "", fmt.Errorf("read the column types of the snapshot: %w", err)
+		return in, "", fmt.Errorf("read the column types of the snapshot: %w", err)
 	}
 	in.ApplyFooters(footers)
 	for i := range in.Baselines {
 		if !in.Baselines[i].SchemaKnown {
-			return "", "", fmt.Errorf("%s.%s: the snapshot does not record the column types", in.Baselines[i].Schema, in.Baselines[i].Table)
+			return in, "", fmt.Errorf("%s.%s: the snapshot does not record the column types", in.Baselines[i].Schema, in.Baselines[i].Table)
 		}
 		in.Baselines[i].WallClockDatetimes = wallClock
 	}
-	return views.Generate(in), snapshotDir, nil
+	return in, snapshotDir, nil
 }

@@ -73,6 +73,26 @@ func noSizeFloor(t *testing.T) {
 // deltaWindow publishes one window as a table delta, doing for the unit under
 // test what ReconstructTable does around it: read the base's footer, read the
 // delta beside it, resume from the delta's anchor.
+// foldOf is a window's fold over a change map in which every key had the one
+// event the map holds: the per-type counts the arithmetic (#2505) reads are
+// those events. A window with more than one event on a key builds its fold
+// by hand (see arithmetic_2505_test.go).
+func foldOf(changes map[string]*query.ResultRow) *foldResult {
+	f := &foldResult{Changes: changes}
+	for _, ev := range changes {
+		switch ev.EventType {
+		case event.EventInsert:
+			f.Inserts++
+		case event.EventUpdate:
+			f.Updates++
+		case event.EventDelete:
+			f.Deletes++
+		}
+	}
+	f.Total = f.Inserts + f.Updates + f.Deletes
+	return f
+}
+
 func deltaWindow(t *testing.T, root, prevBase string, prevDirTime time.Time, changes map[string]*query.ResultRow,
 	at time.Time, cut *query.BinlogPos, mutate func(*tableDeltaPublish)) (newBase string, rep *TableReport, err error) {
 	t.Helper()
@@ -99,13 +119,13 @@ func deltaWindow(t *testing.T, root, prevBase string, prevDirTime time.Time, cha
 		cfg:    FullTableConfig{At: at, OutputFormat: OutputFormatParquet, TableDeltas: true, snapshotDir: snapDir, cut: cut},
 		schema: "mydb", table: "orders",
 		basePath: prevBase, chainStart: chainStart, baseMeta: bmeta, anchorMeta: anchorMeta,
-		prev: prev, fold: &foldResult{Changes: changes}, pkCols: pkColsIntID(),
+		prev: prev, fold: foldOf(changes), pkCols: pkColsIntID(),
 		streamCaptured: true,
 	}
 	if mutate != nil {
 		mutate(&p)
 	}
-	rep = &TableReport{Schema: "mydb", Table: "orders"}
+	rep = newTableReport("mydb", "orders")
 	err = publishWithTableDelta(context.Background(), p, rep)
 	return filepath.Join(snapDir, "mydb", "orders.parquet"), rep, err
 }

@@ -222,6 +222,28 @@ go test -tags integration -run TestOracle -count=1 ./internal/oracle/
 - `BINTRAIL_ORACLE_REQUIRE=1` makes a missing MySQL a failure instead of a skip.
 - It uses `BINTRAIL_TEST_DSN` like every other integration test.
 
+The port's tails (the changes captured after a table's published cut, laid
+over it by the console's keeper as a chain of files) are the second slice,
+and it lives beside the keeper because the keeper is package-private:
+
+```sh
+BINTRAIL_ORACLE_REQUIRE=1 go test -tags integration -run TestOracleTails -count=1 ./internal/console/
+```
+It takes the same variables, runs on request only (one of
+`BINTRAIL_ORACLE_SEEDS`/`BINTRAIL_ORACLE_REQUIRE` set), and adds a third
+step, `tail`: the REAL keeper follows the real index and the copy is read as
+a statement on the MySQL port reads it (`statementTails`). Two scenarios:
+`mixed` draws snapshot, refresh and tail steps (a tail over a fresh snapshot
+and over a delta chain, rebuilt on a new cut, keys changed in two tail steps,
+deleted then re-inserted across them); `chain` runs tails almost only so the
+chain of files grows to its merge, and asserts the merge happened. A table
+the port answers as of its published cut (no tail) is compared with the rows
+read at that cut, and the run asserts WHY there is no tail: a key the tail
+does not support (only integer keys have one, the product's own rule), a
+key-changing update the generator did in the window, or no change to the
+table since the cut. Any other reason fails the run naming it, so tails
+silently off cannot pass.
+
 One rule: **a seed that fails never widens the oracle.** The product is fixed,
 or an issue is filed with the seed; the oracle itself does not learn to
 tolerate the difference. The generator's unit tests (same seed, same
