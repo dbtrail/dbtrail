@@ -133,7 +133,7 @@ func loadEventSpan(ctx context.Context, db *sql.DB, c *CoverageInfo) error {
 // in binlog order gives; an older binlog indexed after live capture breaks
 // it for the oldest (the horizon then reads too new) until the next hour's
 // partition carries an estimate.
-func loadEventSpanForGauges(ctx context.Context, db *sql.DB, c *CoverageInfo, newest sql.NullTime) error {
+func loadEventSpanForGauges(ctx context.Context, db *sql.DB, c *CoverageInfo) error {
 	parts, estimate, byTime, err := listEventPartitions(ctx, db)
 	if err != nil {
 		return err
@@ -162,12 +162,11 @@ func loadEventSpanForGauges(ctx context.Context, db *sql.DB, c *CoverageInfo, ne
 			return nil
 		}
 	}
-	if newest.Valid {
-		c.LatestEvent = newest
-	} else if _, err := edgeRowByKey(ctx, db, "DESC", &c.LatestEvent); err != nil {
+	if _, err := edgeRowByKey(ctx, db, "DESC", &c.LatestEvent); err != nil {
 		return err
 	}
 	c.TotalEvents, c.TotalEventsEstimated = estimate, true
+	c.TotalEventsUnknown = estimate == 0
 	return nil
 }
 

@@ -98,8 +98,8 @@ The **state of the index** — refreshed periodically (default 60s,
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `bintrail_index_oldest_event_timestamp_seconds` | gauge | Oldest event still in the index — the recovery floor, to the hour (the lower bound of the oldest partition that holds rows; `bintrail status` prints the exact event) |
-| `bintrail_index_newest_event_timestamp_seconds` | gauge | Newest event in the index: the capture's last checkpointed event, at most one checkpoint behind |
+| `bintrail_index_oldest_event_timestamp_seconds` | gauge | Oldest event still in the index — the recovery floor, to the hour: the lower bound of the oldest partition whose row estimate is not zero (an estimate of 0 on a partition that has rows moves it one partition newer until statistics catch up; `bintrail status` prints the exact event) |
+| `bintrail_index_newest_event_timestamp_seconds` | gauge | Newest row in the index, by primary key: it stops where the index stopped, even while capture keeps reading commits of tables the index does not take |
 | `bintrail_index_retention_horizon_seconds` | gauge | How far back recovery reaches (now − oldest, to the hour) |
 | `bintrail_index_events_total` | gauge | Approximate event count (information_schema estimate) |
 | `bintrail_index_partitions_total{kind}` | gauge | Partition count, `kind` = `active` or `future` |

@@ -214,7 +214,11 @@ type CoverageInfo struct {
 	// EarliestEvent and LatestEvent are exact either way, and they, never the
 	// count, are what says whether the index holds anything.
 	TotalEventsEstimated bool
-	SchemaChanges        int
+	// TotalEventsUnknown: the gauges' span (#2509) found a row while every
+	// partition's estimate read 0 (statistics not caught up), and did not
+	// count; TotalEvents is then 0 and must not be published as a count.
+	TotalEventsUnknown bool
+	SchemaChanges      int
 	// UncoveredDDLs counts schema_changes rows (one per table a statement
 	// changed) with snapshot_id IS NULL whose
 	// DDL type NEEDS a snapshot — i.e. file-mode indexing without --source-dsn,
@@ -375,13 +379,10 @@ func LoadCoverage(ctx context.Context, db *sql.DB) (*CoverageInfo, error) {
 
 // LoadCoverageForGauges is LoadCoverage with the event span the capture's
 // gauge loop can afford every minute (loadEventSpanForGauges, #2509): the
-// newest event is newest, the capture's last checkpointed event, when it is
-// valid; the oldest is to the hour. Everything else is read as LoadCoverage
-// reads it.
-func LoadCoverageForGauges(ctx context.Context, db *sql.DB, newest sql.NullTime) (*CoverageInfo, error) {
-	return loadCoverage(ctx, db, func(ctx context.Context, db *sql.DB, c *CoverageInfo) error {
-		return loadEventSpanForGauges(ctx, db, c, newest)
-	})
+// newest row by key, the oldest to the hour, the count an estimate or
+// unknown. Everything else is read as LoadCoverage reads it.
+func LoadCoverageForGauges(ctx context.Context, db *sql.DB) (*CoverageInfo, error) {
+	return loadCoverage(ctx, db, loadEventSpanForGauges)
 }
 
 func loadCoverage(ctx context.Context, db *sql.DB, span func(context.Context, *sql.DB, *CoverageInfo) error) (*CoverageInfo, error) {
@@ -781,10 +782,9 @@ func CollectStatus(ctx context.Context, db *sql.DB, dbName string) (*StatusData,
 
 // CollectStatusForGauges is CollectStatus for the capture daemon's gauge
 // loop (#2509): the same snapshot, with the coverage's event span read the
-// cheap way (LoadCoverageForGauges, fed the stream's last checkpointed
-// event) instead of the exact probes that read two whole partitions. The
-// on-demand readers, `bintrail status`, the console and MCP, keep
-// CollectStatus.
+// cheap way (LoadCoverageForGauges) instead of the exact probes that read
+// two whole partitions. The on-demand readers, `bintrail status`, the
+// console and MCP, keep CollectStatus.
 func CollectStatusForGauges(ctx context.Context, db *sql.DB, dbName string) (*StatusData, error) {
 	return collectStatus(ctx, db, dbName, true)
 }
@@ -837,11 +837,7 @@ func collectStatus(ctx context.Context, db *sql.DB, dbName string, gauges bool) 
 
 	var coverage *CoverageInfo
 	if gauges {
-		var newest sql.NullTime
-		if d.Stream != nil {
-			newest = d.Stream.LastEventTime
-		}
-		coverage, err = LoadCoverageForGauges(ctx, db, newest)
+		coverage, err = LoadCoverageForGauges(ctx, db)
 	} else {
 		coverage, err = LoadCoverage(ctx, db)
 	}

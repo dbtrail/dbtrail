@@ -78,6 +78,7 @@ func scrapeIndexMetrics(ctx context.Context, db *sql.DB, dbName string, m *obser
 			snap.NewestEvent = data.Coverage.LatestEvent.Time
 		}
 		snap.Events = data.Coverage.TotalEvents
+		snap.EventsUnknown = data.Coverage.TotalEventsUnknown
 		snap.MySQLBytes = data.Coverage.IndexSizeBytes
 	}
 	var newestExplicit time.Time // newest EXPLICIT hourly partition (excludes p_future)
