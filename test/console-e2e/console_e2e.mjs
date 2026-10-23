@@ -5552,11 +5552,21 @@ try {
   await page.evaluate(() => {
     const t = document.querySelector('.snap-tab[data-tab="download"]');
     if (t) t.click();
-    const s = document.querySelector(".view details.bk-inplace > summary");
-    if (s) s.click();
   });
-  await page.waitForFunction(() => { const f = document.querySelector(".view details.bk-inplace"); return f && f.open; })
-    .catch(() => {});
+  // Clicked until it is open, not once (#2520): the tab's own repaint draws
+  // a new <details>, and the summary clicked in the same tick as the tab was
+  // the old node's; its toggle event, which is what carries the open state
+  // across repaints, is dispatched asynchronously, so the new node arrived
+  // closed and the two checks below read a closed fold. A fold that never
+  // opens fails here, with its own message, not in the checks that need it.
+  await page.waitForFunction(() => {
+    const f = document.querySelector(".view details.bk-inplace");
+    if (!f) return false;
+    if (f.open) return true;
+    const s = f.querySelector(":scope > summary");
+    if (s) s.click();
+    return false;
+  }, null, { polling: 100 });
   const ip = await page.evaluate(() => {
     const fold = document.querySelector(".view details.bk-inplace");
     const dkPanel = fold ? fold.querySelector(".cn-dk") : null;
