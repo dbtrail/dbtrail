@@ -46,8 +46,9 @@ func TestKeyIndex_writtenByTheRewriteNotCarriedByThePair_2496(t *testing.T) {
 		t.Fatalf("the report lists %v; the index is not a data file", rep.Files)
 	}
 
-	// A window published as a pair carries the previous file forward; the
-	// index is not carried yet (that is slice 4), and nothing writes one.
+	// An empty window published as a pair carries the previous file forward:
+	// nothing is looked up, so the lookup builds no index beside the source
+	// (slice 4 builds one only where a lookup runs), and none is carried.
 	first, rep, err := deltaWindow(t, root, src, t0, changeMap(), t0.Add(5*time.Minute), &query.BinlogPos{File: "b.1", Pos: 10}, nil)
 	if err != nil || !rep.DeltaPairWritten {
 		t.Fatalf("first window: %v, pair written %v", err, rep.DeltaPairWritten)

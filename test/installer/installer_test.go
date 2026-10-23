@@ -195,6 +195,11 @@ func TestInstaller_theComposeCarriesTheMemoryShares(t *testing.T) {
 	if !strings.Contains(c, "BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-}") {
 		t.Error("the router service has no memory share hook (BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-})")
 	}
+	// The key index switch (#2496) travels the same way: empty = the
+	// daemon's default (on), KEY_INDEX=0 in .env turns it off.
+	if !strings.Contains(c, "BINTRAIL_KEY_INDEX: ${KEY_INDEX:-}") {
+		t.Error("the bintrail service has no key index hook (BINTRAIL_KEY_INDEX: ${KEY_INDEX:-})")
+	}
 }
 
 // A compose file from before #1784 (an older DBTRAIL_REF) has no banner

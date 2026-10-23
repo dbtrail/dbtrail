@@ -234,7 +234,7 @@ func TestCompactTableDeltaMinor_overAChainHoldingARange(t *testing.T) {
 		names[i] = filepath.Base(names[i])
 	}
 	wantNames := []string{"orders.000000-000002.posdel", "orders.000000-000002.upserts", "orders.000003.posdel", "orders.000003.upserts",
-		"orders.000004.posdel", "orders.000004.upserts", "orders.parquet"}
+		"orders.000004.posdel", "orders.000004.upserts", "orders.keyidx", "orders.parquet"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("files beside the new base = %v\nwant %v", names, wantNames)
 	}

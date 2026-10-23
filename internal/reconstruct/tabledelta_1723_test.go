@@ -135,7 +135,9 @@ func TestCompactTableDeltaMinor(t *testing.T) {
 		names[i] = filepath.Base(names[i])
 	}
 	wantNames := []string{"orders.000000-000001.posdel", "orders.000000-000001.upserts", "orders.000002.posdel", "orders.000002.upserts",
-		"orders.000003.posdel", "orders.000003.upserts", "orders.parquet"}
+		// The key index the first refresh built beside the base (#2496, slice
+		// 4), carried with it by hard link since.
+		"orders.000003.posdel", "orders.000003.upserts", "orders.keyidx", "orders.parquet"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("files beside the new base = %v\nwant %v", names, wantNames)
 	}
@@ -229,7 +231,7 @@ func TestPublishWithTableDelta_adoptsACompaction(t *testing.T) {
 		t.Fatalf("report = %+v, want the range adopted", rep)
 	}
 	wantNames := []string{"orders.000000-000001.posdel", "orders.000000-000001.upserts", "orders.000002.posdel", "orders.000002.upserts",
-		"orders.000003.posdel", "orders.000003.upserts", "orders.000004.posdel", "orders.000004.upserts", "orders.parquet"}
+		"orders.000003.posdel", "orders.000003.upserts", "orders.000004.posdel", "orders.000004.upserts", "orders.keyidx", "orders.parquet"}
 	if got := names(nb); !reflect.DeepEqual(got, wantNames) {
 		t.Fatalf("files = %v\nwant %v", got, wantNames)
 	}
@@ -277,7 +279,7 @@ func TestPublishWithTableDelta_adoptsACompaction(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("a rejected compaction result was left behind")
 	}
-	wantNames = append(wantNames[:8], "orders.000005.posdel", "orders.000005.upserts", "orders.parquet")
+	wantNames = append(wantNames[:8], "orders.000005.posdel", "orders.000005.upserts", "orders.keyidx", "orders.parquet")
 	if got := names(nb); !reflect.DeepEqual(got, wantNames) {
 		t.Fatalf("files = %v\nwant the earlier range kept and pairs 2..5 plain: %v", got, wantNames)
 	}

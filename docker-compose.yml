@@ -458,6 +458,10 @@ services:
       # value that is not a fraction in (0, 1] is warned at startup and the
       # whole machine stands.
       BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-}
+      # The key index beside each table's file (#2496): a refresh resolves
+      # its changed keys through it instead of scanning the file; on by
+      # default, built where a file has none. KEY_INDEX=0 in .env turns it off.
+      BINTRAIL_KEY_INDEX: ${KEY_INDEX:-}
       # "Run verification" button (#677): lets the console run `bintrail verify`
       # in-process for a monitored server (trigger, poll per-table results,
       # explain a mismatch) — the same read-only baseline/index reads the

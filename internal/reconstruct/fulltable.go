@@ -472,9 +472,14 @@ type TableReport struct {
 	// "index" (the key index beside the base), "join" (integer keys joined
 	// in DuckDB), "scan" (every base row through Go), "mixed" when the
 	// passes of a spilled window took different ones, "" when nothing was
-	// looked up. LookupBlocks is the index blocks read, summed.
+	// looked up. LookupBlocks is the index blocks read, summed. LookupBuilt
+	// is the time the lookup spent building the key index beside the base
+	// because the base had none, or an unusable one (#2496, slice 4): once
+	// per version of the base, so it is reported beside the refresh it hit
+	// (lookup_index_built_ms in the per-table line, only when above zero).
 	LookupPath   string
 	LookupBlocks int64
+	LookupBuilt  time.Duration
 	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
 	// job's range pair in place of the chain's first pairs (#1723).
 	DeltaCompactedRange string
@@ -503,6 +508,7 @@ type TableReport struct {
 func (r *TableReport) addLookup(st lookupStats) {
 	r.LookupRows += int64(st.Examined)
 	r.LookupBlocks += int64(st.IndexBlocks)
+	r.LookupBuilt += st.Built
 	switch {
 	case r.LookupPath == "":
 		r.LookupPath = st.Path

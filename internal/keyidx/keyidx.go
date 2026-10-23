@@ -631,6 +631,26 @@ type baseIdentity struct {
 	Mtime     int64 // UNIX nanoseconds
 }
 
+// FileIdentity tells one version of a base from another without reading
+// it: size, modification time and inode, the three a rewrite changes and a
+// hard link keeps. It is the stat part of what binds an index to its base;
+// a caller that remembers a build it could not make keys that memory by it,
+// so a rewritten base gets a new attempt and an unchanged one does not.
+type FileIdentity struct {
+	Size  int64
+	Mtime int64 // UNIX nanoseconds
+	Ino   uint64
+}
+
+// StatIdentity is path's FileIdentity from one stat.
+func StatIdentity(path string) (FileIdentity, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileIdentity{}, err
+	}
+	return FileIdentity{Size: info.Size(), Mtime: info.ModTime().UnixNano(), Ino: fileIno(info)}, nil
+}
+
 // identityOf is the identity of a stat'ed base whose footer CRC and
 // num_rows are known.
 func identityOf(info os.FileInfo, footerCRC uint32, rows int64) baseIdentity {

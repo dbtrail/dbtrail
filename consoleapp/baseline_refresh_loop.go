@@ -1853,9 +1853,9 @@ func startBaselineRefreshLoop(ctx context.Context, reg *console.Registry, sup *b
 	// stated reason.
 	carryOn, carrySource := carryForwardProvenance(reg, carryDefault)
 	// key_index: whether a refresh resolves its changed keys against the key
-	// index beside each table's file (BINTRAIL_KEY_INDEX, #2496). Read here,
-	// once, so its own line (or the warning for a value it cannot read) is at
-	// boot beside this one and not at the first refresh with table deltas.
+	// index beside each table's file (BINTRAIL_KEY_INDEX, #2496). The switch
+	// said its own line when the supervisor was built; the value is repeated
+	// here so this loop's one configuration line is complete.
 	slog.Info("baseline refresh loop enabled", "interval", interval, "servers", len(targets),
 		"reuse_unchanged", carryOn, "reuse_set_by", carrySource, "key_index", reconstruct.KeyIndexEnabled())
 	if len(targets) == 0 {

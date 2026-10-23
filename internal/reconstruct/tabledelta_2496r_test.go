@@ -97,9 +97,11 @@ func TestKeyIndexOn_parsing_2496r(t *testing.T) {
 		on   bool
 		warn bool
 	}{
-		{"", false, false}, {"0", false, false}, {"false", false, false}, {"FALSE", false, false}, {"no", false, false}, {"off", false, false},
+		// Slice 4: unset is on, and so is a value that is neither spelling
+		// (the default applies, with a warning).
+		{"", true, false}, {"0", false, false}, {"false", false, false}, {"FALSE", false, false}, {"no", false, false}, {"off", false, false},
 		{"1", true, false}, {"true", true, false}, {"TRUE", true, false}, {" yes ", true, false}, {"on", true, false},
-		{"2", false, true}, {"maybe", false, true},
+		{"2", true, true}, {"maybe", true, true},
 	} {
 		on, warning := keyIndexOn(tc.raw)
 		if on != tc.on || (warning != "") != tc.warn {
@@ -308,9 +310,12 @@ func retrailIndex(raw []byte, name string, keyWidth int, records int64) []byte {
 }
 
 // TestLookupBasePositions_indexFallbacks_2496r: every way the index can be
-// unusable falls back to the join (or scan) with the same positions, absence
-// at Debug and damage at WARN, naming the cause; never an error.
+// absent or unusable is said, absence at Debug and damage at WARN naming the
+// cause, and since slice 4 the lookup builds the index there and then and
+// resolves through it, with the join's and the scan's positions; never an
+// error. The WARN says the index is being rebuilt, and the path.
 func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
+	freshMemo(t)
 	rows := [][]string{{"1", "a"}, {"2", "b"}, {"3", "c"}, {"-4", "d"}}
 	keys := touched("1", "3", "-4", "9")
 	want := []int64{0, 2, 3}
@@ -370,30 +375,34 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 			base, pkCols := writeKeyedBaseline(t, "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `v` int NOT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n", []string{"id"}, [][]string{{"1", "7"}, {"2", "7"}, {"3", "7"}, {"-4", "7"}})
 			c.prepare(t, base)
 			log := captureDebugLog(t)
+			builds := countIndexBuilds(t)
 			st, got := threeWays(t, base, pkCols, keys)
-			if st.Path != "join" || !reflect.DeepEqual(got, want) {
-				t.Fatalf("st=%+v got=%v, want the join and %v", st, got, want)
+			if st.Path != "index" || st.Built <= 0 || *builds != 1 || !reflect.DeepEqual(got, want) {
+				t.Fatalf("st=%+v builds=%d got=%v, want the index built once and %v", st, *builds, got, want)
 			}
 			var line string
 			for _, l := range strings.Split(log.String(), "\n") {
-				if strings.Contains(l, "key index") && strings.Contains(l, "level="+c.level) {
+				if strings.Contains(l, "key index") && strings.Contains(l, "level="+c.level) && !strings.Contains(l, `msg="key index written"`) {
 					line = l
 				}
 			}
 			if line == "" || !strings.Contains(line, c.text) {
 				t.Fatalf("no %s line about the key index carrying %q:\n%s", c.level, c.text, log.String())
 			}
-			// Damage is said with the file to remove and what removing it
-			// does; the line repeats every lookup until then.
-			if c.level == "WARN" && (!strings.Contains(line, " path="+keyidx.PathFor(base)) || !strings.Contains(line, "remove it to silence this; it is rebuilt at the table's next full rewrite")) {
-				t.Fatalf("the WARN lacks the path or the remediation:\n%s", line)
+			// Damage is said with the file and that it is being replaced.
+			if c.level == "WARN" && (!strings.Contains(line, " path="+keyidx.PathFor(base)) || !strings.Contains(line, "rebuilding it now")) {
+				t.Fatalf("the WARN lacks the path or the rebuild:\n%s", line)
+			}
+			if ok, err := keyidx.Bound(base); !ok || err != nil {
+				t.Fatalf("no bound index beside the base after the lookup (ok=%v err=%v)", ok, err)
 			}
 		})
 	}
 	// An index whose CRCs agree but whose records are out of order inside a
 	// block would answer a SUBSET; the reader refuses it and the lookup
-	// falls back, with the same WARN shape.
+	// replaces it, with the same WARN shape.
 	t.Run("records out of order inside a block", func(t *testing.T) {
+		freshMemo(t)
 		base, pkCols := writeKeyedBaseline(t, intKeyDDL, []string{"id"}, rows)
 		indexBeside(t, base, "id")
 		p := keyidx.PathFor(base)
@@ -417,10 +426,10 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 		}
 		log := captureDebugLog(t)
 		st, got := threeWays(t, base, pkCols, keys)
-		if st.Path != "join" || !reflect.DeepEqual(got, want) {
+		if st.Path != "index" || st.Built <= 0 || !reflect.DeepEqual(got, want) {
 			t.Fatalf("st=%+v got=%v", st, got)
 		}
-		if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "order") || !strings.Contains(log.String(), "remove it to silence this") {
+		if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "order") || !strings.Contains(log.String(), "rebuilding it now") {
 			t.Fatalf("no WARN about the order:\n%s", log.String())
 		}
 	})
@@ -428,6 +437,7 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 	// refuses it, and a mutant that skipped it would return the WRONG rows
 	// (the sign bit is flipped on one side only), which the equality catches.
 	t.Run("type mismatch at the same width", func(t *testing.T) {
+		freshMemo(t)
 		ddl := "CREATE TABLE `t` (\n  `id` bigint NOT NULL,\n  `v` varchar(8) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB;\n"
 		base, pkCols := writeKeyedBaseline(t, ddl, []string{"id"}, rows)
 		indexBeside(t, base, "id")
@@ -442,25 +452,30 @@ func TestLookupBasePositions_indexFallbacks_2496r(t *testing.T) {
 		}
 		log := captureDebugLog(t)
 		st, got := threeWays(t, base, pkCols, keys)
-		if st.Path != "join" || !reflect.DeepEqual(got, want) {
+		if st.Path != "index" || st.Built <= 0 || !reflect.DeepEqual(got, want) {
 			t.Fatalf("st=%+v got=%v", st, got)
 		}
-		if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "does not describe") {
+		if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "does not describe") || !strings.Contains(log.String(), "rebuilding it now") {
 			t.Fatalf("no WARN about the types:\n%s", log.String())
 		}
 	})
-	// A base with a NULL key has no index (the writer refuses to build one),
-	// so the join's refusal stands, with its text unchanged.
+	// A base with a NULL key has no index (the writer refuses to build one,
+	// and the lookup's own build fails the same way, once), so the join's
+	// refusal stands, with its text unchanged.
 	t.Run("null key: no index, the join refuses as today", func(t *testing.T) {
+		freshMemo(t)
 		base := nullKeyBase(t)
 		res, err := keyidx.Build(context.Background(), base, []string{"id"}, duckdbutil.DefaultTuning())
 		if err == nil {
 			t.Fatalf("fixture: an index was built on a NULL key: %+v", res)
 		}
-		_, st, err := lookupBasePositionsVia(context.Background(), base, "s", "t", pkColsIntID(), touched("1", "3"), duckdbutil.DefaultTuning(), true, true)
+		builds := countIndexBuilds(t)
 		want := `canonicalize baseline PK for s.t: key column "id" holds NULL in the base file (MySQL forbids NULL in PK columns; a baseline written before #522 lost unsigned values past the signed range this way — take a fresh baseline)`
-		if err == nil || err.Error() != want || st.Path != "join" {
-			t.Fatalf("err=%v st=%+v", err, st)
+		for i := range 2 {
+			_, st, err := lookupBasePositionsVia(context.Background(), base, "s", "t", pkColsIntID(), touched("1", "3"), duckdbutil.DefaultTuning(), true, true)
+			if err == nil || err.Error() != want || st.Path != "join" || *builds != 1 {
+				t.Fatalf("lookup %d: err=%v st=%+v builds=%d", i+1, err, st, *builds)
+			}
 		}
 	})
 	// An index beside a base on S3 is never looked for.
@@ -708,9 +723,10 @@ func TestLookupBasePositions_keyMetadataTypeGuard_2496r(t *testing.T) {
 // TestLookupBasePositions_duplicateHeaderNamesFallBack_2496r: a header that
 // names one key column twice (forged: same lengths, trailing CRC rewritten)
 // has the key's column count and every name is a key column, yet it is not
-// the key: the names must be a permutation of it, or the index stands
-// aside with a WARN.
+// the key: the names must be a permutation of it, or the index is replaced
+// with a WARN (slice 4; it stood aside before).
 func TestLookupBasePositions_duplicateHeaderNamesFallBack_2496r(t *testing.T) {
+	freshMemo(t)
 	ddl := "CREATE TABLE `t` (\n  `a` int NOT NULL,\n  `b` int NOT NULL,\n  PRIMARY KEY (`a`,`b`)\n) ENGINE=InnoDB;\n"
 	base, pkCols := writeKeyedBaseline(t, ddl, []string{"a", "b"}, [][]string{{"1", "2"}, {"2", "1"}, {"3", "3"}})
 	indexBeside(t, base, "a", "b")
@@ -744,10 +760,10 @@ func TestLookupBasePositions_duplicateHeaderNamesFallBack_2496r(t *testing.T) {
 	}
 	log := captureDebugLog(t)
 	st, got := threeWays(t, base, pkCols, touched("1|2", "2|1", "3|3", "1|1"))
-	if st.Path != "join" || !reflect.DeepEqual(got, []int64{0, 1, 2}) {
+	if st.Path != "index" || st.Built <= 0 || !reflect.DeepEqual(got, []int64{0, 1, 2}) {
 		t.Fatalf("st=%+v got=%v", st, got)
 	}
-	if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "other key columns") {
+	if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), "other key columns") || !strings.Contains(log.String(), "rebuilding it now") {
 		t.Fatalf("no WARN about the names:\n%s", log.String())
 	}
 }
@@ -780,7 +796,9 @@ func TestKeyIndexSwitch_readsOnceAndLogsOnce_2496r(t *testing.T) {
 		on    bool
 		level string
 	}{
-		{"1", true, "level=INFO"}, {"maybe", false, "level=WARN"}, {"", false, ""},
+		// Slice 4: every value is said (on by default, off, or the warning
+		// plus the default's line).
+		{"1", true, "level=INFO"}, {"maybe", true, "level=WARN"}, {"", true, "level=INFO"}, {"0", false, "level=INFO"},
 	} {
 		log := captureDebugLog(t)
 		reads := 0
@@ -799,8 +817,12 @@ func TestKeyIndexSwitch_readsOnceAndLogsOnce_2496r(t *testing.T) {
 		if reads != 1 {
 			t.Fatalf("%q: the environment was read %d times", tc.raw, reads)
 		}
-		if n := strings.Count(log.String(), KeyIndexEnv); (tc.level == "" && n != 0) || (tc.level != "" && (n != 1 || !strings.Contains(log.String(), tc.level))) {
-			t.Fatalf("%q: %d lines naming the switch (want %q once):\n%s", tc.raw, n, tc.level, log.String())
+		wantLines := 1
+		if tc.raw == "maybe" {
+			wantLines = 2 // the warning, then the default's own line
+		}
+		if n := strings.Count(log.String(), "\n"); n != wantLines || !strings.Contains(log.String(), tc.level) || !strings.Contains(log.String(), KeyIndexEnv) {
+			t.Fatalf("%q: %d lines (want %d, one at %s naming the switch):\n%s", tc.raw, n, wantLines, tc.level, log.String())
 		}
 	}
 }

@@ -142,41 +142,43 @@ func carryForward(ctx context.Context, srcPath, snapshotDir, schema, table strin
 // the base just carried forward, so the next refresh over dst resolves its
 // keys through it instead of scanning. Only by hard link, and only an index
 // Bound ties to srcPath: the index is bound to the base's inode, so a COPIED
-// base (the other arm) gets none, and the next full rewrite builds it
-// again. Nothing here fails the table: an absent index is a Debug line, a
-// copy is a Debug line, a link that cannot be made is a Debug line; a
-// damaged or unbound index beside the previous base is a WARN once per
-// carry, with the file to remove, because that is damage the operator can
-// clear and a lookup would otherwise warn about it every refresh. Bound
+// base (the other arm) gets none, and the next refresh over the copy builds
+// one beside it (one build per copy: a stack whose snapshot folders sit on
+// two filesystems pays that at every refresh of every table, which the
+// docs say to avoid). Nothing here fails the table: an absent index is a
+// Debug line, a copy is a Debug line, a link that cannot be made is a Debug
+// line; a damaged or unbound index beside the previous base is a WARN once
+// per carry, naming the file, because that is damage worth knowing about;
+// the next refresh builds a new one beside the carried base. Bound
 // reads the header, the skip table and their CRC, not the body (that is
 // the whole index, per table, per refresh): a block with a bad CRC is found
-// by the lookup that reads it, which warns with the same remediation.
+// by the lookup that reads it, which replaces the index.
 func carryKeyIndex(srcPath, dst string, linked bool, schema, table string) {
 	src, out := keyidx.PathFor(srcPath), keyidx.PathFor(dst)
 	if err := os.Remove(out); err != nil && !os.IsNotExist(err) {
 		slog.Debug("carry forward: could not remove a key index beside the destination", "path", out, "error", err)
 	}
 	if _, err := os.Stat(src); err != nil {
-		slog.Debug("carry forward: no key index beside the previous file; the next refresh reads the file through DuckDB", "schema", schema, "table", table, "path", src)
+		slog.Debug("carry forward: no key index beside the previous file; the next refresh builds one beside the carried file", "schema", schema, "table", table, "path", src)
 		return
 	}
 	if !linked {
-		slog.Debug("carry forward: the file was copied, so its key index is not carried (an index is bound to one inode); the next refresh reads the file through DuckDB", "schema", schema, "table", table, "path", src)
+		slog.Debug("carry forward: the file was copied, so its key index is not carried (an index is bound to one inode); the next refresh builds one beside the copy, and every refresh that copies pays that build again: keep the snapshot folders on one filesystem", "schema", schema, "table", table, "path", src)
 		return
 	}
 	ok, err := keyidx.Bound(srcPath)
 	switch {
 	case err != nil:
-		slog.Warn("carry forward: the key index beside the previous file is not usable and is not carried; remove it to silence this; it is rebuilt at the table's next full rewrite",
+		slog.Warn("carry forward: the key index beside the previous file is not usable and is not carried; the next refresh builds a new one beside the carried file; remove it to silence this",
 			"schema", schema, "table", table, "path", src, "error", err)
 		return
 	case !ok:
-		slog.Warn("carry forward: the key index beside the previous file is not bound to it and is not carried; remove it to silence this; it is rebuilt at the table's next full rewrite",
+		slog.Warn("carry forward: the key index beside the previous file is not bound to it and is not carried; the next refresh builds a new one beside the carried file; remove it to silence this",
 			"schema", schema, "table", table, "path", src)
 		return
 	}
 	if err := linkFile(src, out); err != nil {
-		slog.Debug("carry forward: could not link the key index beside the carried file; the next refresh reads the file through DuckDB", "schema", schema, "table", table, "src", src, "dst", out, "error", err)
+		slog.Debug("carry forward: could not link the key index beside the carried file; the next refresh builds one there", "schema", schema, "table", table, "src", src, "dst", out, "error", err)
 	}
 }
 

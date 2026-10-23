@@ -35,6 +35,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/status"
@@ -1198,6 +1199,14 @@ func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg
 	// The settings store the lock mode is re-read from per job (#1682).
 	sup.reg = reg
 	sup.tableDeltas = upBaselineTableDeltas
+	// The key index switch (BINTRAIL_KEY_INDEX, #2496) says its state once
+	// per process, the first time it is read. Read here, because every
+	// daemon that refreshes builds this supervisor, whether the refresh is
+	// scheduled from the console (the compose stack) or by
+	// --baseline-refresh-interval (whose own startup line carries the value
+	// too): the line is at boot, beside the other configuration lines, and
+	// not at the first refresh with table deltas hours later.
+	keyIndexSwitch()
 	if upBaselineTableDeltas {
 		// Once per boot, because the failure it prevents is silent: a DuckDB
 		// view generated before this was on reads a table's file alone, and
@@ -1223,6 +1232,12 @@ func newBaselineSupervisorFromConfig(ctx context.Context, stagingDir string, reg
 	go sup.runSQLExportReaper()
 	return sup
 }
+
+// keyIndexSwitch is reconstruct.KeyIndexEnabled, the once-per-process read
+// of BINTRAIL_KEY_INDEX that logs its state; a seam so a test can pin that
+// building the supervisor reads it (the real switch reads once per process,
+// so its line cannot be observed from a second construction).
+var keyIndexSwitch = reconstruct.KeyIndexEnabled
 
 // envBoolOr reads a boolean environment variable, keeping fallback when the
 // variable is unset or does not parse.

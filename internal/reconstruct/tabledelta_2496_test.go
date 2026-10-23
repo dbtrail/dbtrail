@@ -148,6 +148,9 @@ func TestTableDelta_reportsLookupCost_2496(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			noCompaction(t)
+			// The join's and the scan's counts are what this pins; slice 4
+			// would build an index beside the base and count its matches.
+			useKeyIndex(t, false)
 			prev := tableDeltaJoinKeys
 			tableDeltaJoinKeys = tc.join
 			t.Cleanup(func() { tableDeltaJoinKeys = prev })
@@ -196,6 +199,9 @@ func TestTableDelta_logLineCarriesLookupCost_2496(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(prev)
 
+	// Slice 4 would build an index beside this fixture's base and take it;
+	// the join's line is what this test pins.
+	useKeyIndex(t, false)
 	_, _, rep := spilledChain(t, bigWindow("final"), nil)
 	var line string
 	for _, l := range strings.Split(buf.String(), "\n") {
