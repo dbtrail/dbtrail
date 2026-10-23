@@ -52,6 +52,7 @@ func realBaselineParquet(t *testing.T) string {
 	if parquetPath == "" {
 		t.Fatal("no .parquet produced")
 	}
+	ageFile(t, parquetPath) // outside the memo's racy margin, so one read remembers it
 	return parquetPath
 }
 
@@ -73,6 +74,7 @@ func TestMaterializeBaselineLocal_validatesOncePerProcess_2517(t *testing.T) {
 		t.Fatal(err)
 	}
 	baselineintegrity.ForgetVerified() // the writer seeds the memo; this test is about the reader
+	ageFile(t, path)                   // outside the memo's racy margin, so one read remembers it
 	for range 2 {
 		local, cleanup, err := materializeBaselineLocalIn(context.Background(), path, duckdbutil.DefaultTuning(), "", nil)
 		if err != nil {
@@ -142,6 +144,7 @@ func TestCarryForward_copyArmIsANewIdentity_2517(t *testing.T) {
 	if os.SameFile(a, b) {
 		t.Fatal("fixture: the copy shares the source's inode")
 	}
+	ageFile(t, src2) // the copy was written seconds ago; aged so the writer's seed takes
 	st, err := baselineintegrity.WriteManifestFrom(s2, []string{s1})
 	if err != nil {
 		t.Fatal(err)

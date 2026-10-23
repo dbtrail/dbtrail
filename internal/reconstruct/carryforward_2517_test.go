@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 )
@@ -40,7 +41,19 @@ func carryTwiceFixture(t *testing.T) (root, s1, s2, s3 string) {
 	// seed is dropped: s1's file is new to the process when the first carry
 	// checks it.
 	baselineintegrity.ForgetVerified()
+	// Aged past the memo's racy margin: a file modified seconds ago is never
+	// remembered (coarse timestamps), and these tests expect a skip after one read.
+	ageFile(t, src)
 	return root, s1, s2, s3
+}
+
+// ageFile sets path's mtime a minute in the past, outside the memo's racy margin.
+func ageFile(t *testing.T, path string) {
+	t.Helper()
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCarryForward_validatesABaseOncePerProcess_2517(t *testing.T) {

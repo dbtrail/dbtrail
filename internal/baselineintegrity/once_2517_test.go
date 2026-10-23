@@ -65,7 +65,20 @@ func snapshotWithFile(t *testing.T, root, name string, data []byte) (snap, path 
 	// The writer seeds the memo with what it hashed (F4); these fixtures
 	// want the file NEW to the process, so the seed is dropped here.
 	ForgetVerified()
+	// A file modified less than racyMargin ago is never remembered (coarse
+	// timestamps); these fixtures expect a skip after one read, so the file
+	// is aged a minute.
+	ageFileT(t, path)
 	return snap, path
+}
+
+// ageFileT sets path's mtime a minute in the past, outside racyMargin.
+func ageFileT(t *testing.T, path string) {
+	t.Helper()
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func memoLen() int {

@@ -56,6 +56,18 @@ var (
 	// crcFile is the read behind the check, a seam so a test can count reads.
 	crcFile = CRC32CFile
 
+	// racyMargin: a file whose mtime is within this of the clock is NOT
+	// remembered, the way git treats a "racily clean" entry. File timestamps
+	// are coarse (Linux stamps with the kernel's coarse clock, ticks of a
+	// few ms), so a rewrite in place within the same tick as the write that
+	// was checked keeps device, inode, size AND mtime; an operator's `cp`
+	// over a file is that shape. Not remembering a fresh file costs one more
+	// read at its next check, by which time a same-tick rewrite shows another
+	// mtime, or the file is old enough that none can hide. The writer's seed
+	// pays it for a file hashed within 2 s of its last write, which is the
+	// small ones; a large base takes longer than that to hash and is seeded.
+	racyMargin = 2 * time.Second
+
 	// Counters behind Stats.
 	statReads, statSkips, statBytes atomic.Uint64
 )
@@ -106,7 +118,9 @@ func Stats() (reads, skips, bytesRead uint64) {
 // manifest does not list, an algorithm this build does not know: the same
 // nil as ValidateLocalFile, there was nothing to verify), or when the
 // identity changed between the stat before the read and the stat after it
-// (a file replaced mid-read). On a platform with no device/inode
+// (a file replaced mid-read), or when the file was modified less than
+// racyMargin before the check (coarse timestamps; see racyMargin). On a
+// platform with no device/inode
 // (fileIdentity) the memo is never consulted and every call validates.
 func ValidateLocalFileOnce(path string) error {
 	want, verify := localDigest(path)
@@ -175,7 +189,13 @@ func rememberIfUnchanged(path string, before os.FileInfo, want string) {
 			"path", path)
 		return
 	}
-	remember(id, want, time.Now())
+	now := time.Now()
+	if age := now.Sub(after.ModTime()); age < racyMargin {
+		slog.Debug("integrity check verified the file but did not remember it: modified less than the margin ago, so a same-tick rewrite could keep its identity; it is read again at its next check",
+			"path", path, "modified_ago", age, "margin", racyMargin)
+		return
+	}
+	remember(id, want, now)
 }
 
 // sizeMB is a size in MB with one decimal, so a small file does not read as 0.

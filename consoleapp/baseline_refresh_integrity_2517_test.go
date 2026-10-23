@@ -38,6 +38,12 @@ func TestReportIntegrityChecks_logsTheCycleDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 	baselineintegrity.ForgetVerified()
+	// Aged past the memo's racy margin (a file modified seconds ago is never
+	// remembered), so the second and third checks are skips.
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 	// A check before the cycle starts must not be counted in it.
 	if err := baselineintegrity.ValidateLocalFileOnce(path); err != nil {
 		t.Fatal(err)

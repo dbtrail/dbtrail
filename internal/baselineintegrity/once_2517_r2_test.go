@@ -171,6 +171,9 @@ func TestWriteManifest_seedsTheMemo(t *testing.T) {
 	snap := t.TempDir()
 	writeFileT(t, filepath.Join(snap, "db", "a.parquet"), []byte("aaaa"))
 	writeFileT(t, filepath.Join(snap, "db", "b.posdel"), []byte("bbbb"))
+	// Aged past racyMargin: a file written just now is not seeded (round 3).
+	ageFileT(t, filepath.Join(snap, "db", "a.parquet"))
+	ageFileT(t, filepath.Join(snap, "db", "b.posdel"))
 	if err := WriteManifest(snap); err != nil {
 		t.Fatal(err)
 	}
