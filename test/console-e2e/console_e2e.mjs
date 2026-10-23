@@ -4035,13 +4035,17 @@ try {
   // The split itself: Retention holds only the data lifecycle, photographed
   // rather than grepped. The other half, This daemon, was dissolved (#1867):
   // its telemetry card is on Status, and the old /daemon address lands there.
-  const halves = await page.evaluate(async () => {
-    const titles = () => Array.from(document.querySelectorAll(".card-title")).map((h) => h.textContent);
-    const retention = titles();
-    navigate("daemon");
-    await new Promise((r) => setTimeout(r, 1200));
-    return { retention: retention, status: titles(), path: location.pathname };
-  });
+  // Status is read once its telemetry card is drawn, not after a fixed
+  // 1.2s: on a slower machine the page was still empty at that point and
+  // the check failed with status:[]. A card that never arrives falls
+  // through to the check below, which reports what was on screen.
+  const cardTitles = () => Array.from(document.querySelectorAll(".card-title")).map((h) => h.textContent);
+  const retentionTitles = await page.evaluate(cardTitles);
+  await page.evaluate(() => navigate("daemon"));
+  await page.waitForFunction(() => location.pathname === "/status"
+    && Array.from(document.querySelectorAll(".card-title")).some((h) => /Usage telemetry/.test(h.textContent)))
+    .catch(() => {});
+  const halves = { retention: retentionTitles, status: await page.evaluate(cardTitles), path: await page.evaluate(() => location.pathname) };
   (halves.path === "/status"
     && !halves.retention.some((t) => /AWS credentials|Usage telemetry|File reuse/.test(t))
     && halves.status.some((t) => /Usage telemetry/.test(t))
