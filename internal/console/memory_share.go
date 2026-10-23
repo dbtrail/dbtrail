@@ -67,6 +67,48 @@ var MemoryBudgetBytes = sync.OnceValue(func() uint64 {
 // a budget on a host whose memory is unknown.
 var memoryBudget = func() uint64 { return MemoryBudgetBytes() }
 
+// MemoryBudgetWords says where MemoryBudgetBytes came from, for every line
+// that compares a figure against it: a warning that blamed "this host" or
+// "a container limit" for a number that was a SHARE of the host sent the
+// operator to the wrong setting. Read once, like the budget. "" when the
+// host's memory is unknown (no budget, so nothing to compare against).
+var MemoryBudgetWords = sync.OnceValue(func() string {
+	return memoryBudgetWords(HostMemoryBytes(), MemoryShare(), MemoryBudgetBytes(), memoryCapped("/"))
+})
+
+// memoryBudgetWords is MemoryBudgetWords over its inputs: host is what
+// HostMemoryBytes read (the machine, or the ceiling on the process's cgroup
+// chain when capped says that is what it read), share the process's.
+func memoryBudgetWords(host uint64, share float64, budget uint64, capped bool) string {
+	switch {
+	case host == 0:
+		return ""
+	case capped && share < 1:
+		return fmt.Sprintf("the container's %s ceiling (%s=%s of it: %s)", memoryWords(host), MemoryShareEnv, shareText(share), memoryWords(budget))
+	case capped:
+		return fmt.Sprintf("the container's %s ceiling", memoryWords(host))
+	case share < 1:
+		return fmt.Sprintf("the %s share %s=%s gives this process of the host's %s", memoryWords(budget), MemoryShareEnv, shareText(share), memoryWords(host))
+	default:
+		return fmt.Sprintf("this host's %s", memoryWords(host))
+	}
+}
+
+// shareText is a share as the operator would write it: 0.4, not 0.400000.
+func shareText(share float64) string { return strconv.FormatFloat(share, 'g', -1, 64) }
+
+// memoryWords is a size for a sentence: whole GiB plain ("8 GiB"), else one
+// decimal ("3.2 GiB"), MiB below a GiB.
+func memoryWords(b uint64) string {
+	switch {
+	case b%(1<<30) == 0:
+		return fmt.Sprintf("%d GiB", b>>30)
+	case b < 1<<30:
+		return fmt.Sprintf("%d MiB", b>>20)
+	}
+	return strconv.FormatFloat(float64(b)/(1<<30), 'f', 1, 64) + " GiB"
+}
+
 // logMemoryBudget is the one startup line that says what every sizing line
 // after it was cut from.
 func logMemoryBudget(l *slog.Logger, host uint64, share float64, budget uint64) {

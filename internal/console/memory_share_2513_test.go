@@ -81,3 +81,35 @@ func TestThisMachineForSQLPool_readsTheBudget(t *testing.T) {
 		t.Fatalf("pool memory = %d, want the budget 3 GiB", in.MemoryBytes)
 	}
 }
+
+// The words every memory warning interpolates (#2513 review): a budget that
+// is a share of the host is blamed on the share, a container's ceiling on
+// the container, and a whole host on the host; an unknown host has no words,
+// as it has no budget. Generated with the real values of an 8 GB host.
+func TestMemoryBudgetWords(t *testing.T) {
+	const host = uint64(8) << 30
+	for _, c := range []struct {
+		share  float64
+		capped bool
+		want   string
+	}{
+		{0.4, false, "the 3.2 GiB share BINTRAIL_MEMORY_SHARE=0.4 gives this process of the host's 8 GiB"},
+		{1, false, "this host's 8 GiB"},
+		{0.3, true, "the container's 8 GiB ceiling (BINTRAIL_MEMORY_SHARE=0.3 of it: 2.4 GiB)"},
+		{1, true, "the container's 8 GiB ceiling"},
+	} {
+		if got := memoryBudgetWords(host, c.share, memoryBudgetFor(host, c.share), c.capped); got != c.want {
+			t.Errorf("share %v capped %v:\n got %q\nwant %q", c.share, c.capped, got, c.want)
+		}
+	}
+	if got := memoryBudgetWords(0, 0.3, 0, false); got != "" {
+		t.Errorf("unknown host: %q, want no words", got)
+	}
+	// The sizes a sentence gets: whole GiB plain, else one decimal, MiB
+	// under a GiB.
+	for b, want := range map[uint64]string{8 << 30: "8 GiB", 3435973836: "3.2 GiB", 768 << 20: "768 MiB", 1 << 30: "1 GiB"} {
+		if got := memoryWords(b); got != want {
+			t.Errorf("memoryWords(%d) = %q, want %q", b, got, want)
+		}
+	}
+}

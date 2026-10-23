@@ -5,26 +5,42 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
 )
 
-// The memory DuckDB may use in this process, worked out from the host's
-// (#2385) instead of DefaultTuning's fixed 4GB per session. On an 8 GB host:
+// The memory DuckDB may use in this process, worked out from the process's
+// memory budget (#2385; since #2513 the budget is the host's memory times
+// BINTRAIL_MEMORY_SHARE, console.MemoryBudgetBytes) instead of
+// DefaultTuning's fixed 4GB per session. A process alone on an 8 GB host
+// (share 1, the default outside compose):
 //
 //	heavy work        40% of 8 GiB            = 3.2 GiB
 //	snapshot lane     2/3 of that, 2 sessions  = 1092 MiB each
 //	check lane        1/3 of that, 2 sessions  =  546 MiB each
 //
+// The compose daemon on the same host (share 0.4, DAEMON_MEMORY_SHARE):
+//
+//	budget            0.4 of 8 GiB             = 3276 MiB
+//	heavy work        40% of that              = 1310 MiB
+//	snapshot lane     2/3 of that, 2 sessions  =  436 MiB each, raised to the 512 MiB floor
+//	check lane        1/3 of that, 2 sessions  =  218 MiB each, raised to the 512 MiB floor
+//	the lanes         4 sessions x 512 MiB     = 2048 MiB, more than the 1310 planned
+//
 // The rest is for capture, the index MySQL next to it, Go's own heap and
 // DuckDB's memory outside memory_limit (a session capped at 64 MB was
 // measured at about 250 MB resident). Each lane runs one job at a time
-// (heavyGate), so these add up to the whole budget. Below about 5 GB the
-// per-session floor takes over and they add up to more: a small host gets
-// the least memory the heaviest query was measured to work with, not a
-// share of nothing.
+// (heavyGate), so these add up to the whole budget. Below about 5 GB of
+// budget the per-session floor takes over and they add up to more, as in
+// the second table: a small budget gets the least memory the heaviest
+// query was measured to work with, not a share of nothing. The startup
+// line says so when it happens (heavyBudget.floorNote): memory_limit is a
+// cap, not a reservation, and the two lanes seldom both run a job at once,
+// so the sum past the plan is accepted rather than cut under the floor,
+// where the query fails instead of spilling.
 //
 // The threads are worked out from the cores the process may use (#2491),
 // so that one lane's sessions never add up to more than half of them: a
@@ -69,27 +85,64 @@ const (
 type heavyBudget struct {
 	snapshot, check         duckdbutil.Tuning
 	snapshotSolo, checkSolo duckdbutil.Tuning
+	// plannedMiB is the heavy share of the budget; snapshotEachMiB and
+	// checkEachMiB what that share leaves one session of each lane before
+	// the floor and the ceiling; lanesMiB what the lanes' sessions add up
+	// to after them (more than planned when the floor took over).
+	plannedMiB, snapshotEachMiB, checkEachMiB, lanesMiB uint64
 }
 
-// budgetFor works the budget out of host bytes and the cores the process may
-// use; ok is false when the host's memory is unknown (0: outside Linux), and
+// budgetFor works the budget out of the process's budget bytes and the cores
+// it may use; ok is false when the memory is unknown (0: outside Linux), and
 // then nothing changes, threads included.
-func budgetFor(host uint64, cores int) (b heavyBudget, ok bool) {
-	if host == 0 {
+func budgetFor(budget uint64, cores int) (b heavyBudget, ok bool) {
+	if budget == 0 {
 		return heavyBudget{}, false
 	}
-	heavyMiB := host / 100 * heavySharePercent >> 20
-	per := func(share, sessions uint64) duckdbutil.Tuning {
-		mib := min(max(share/sessions, sessionFloorMiB), sessionCeilingMiB)
-		return duckdbutil.Tuning{Threads: threadsFor(cores, int(sessions)), MemoryLimit: fmt.Sprintf("%dMiB", mib)}
+	heavyMiB := budget / 100 * heavySharePercent >> 20
+	per := func(share, sessions uint64) (duckdbutil.Tuning, uint64, uint64) {
+		each := share / sessions
+		mib := min(max(each, sessionFloorMiB), sessionCeilingMiB)
+		return duckdbutil.Tuning{Threads: threadsFor(cores, int(sessions)), MemoryLimit: fmt.Sprintf("%dMiB", mib)}, each, mib * sessions
 	}
-	b = heavyBudget{
-		snapshot: per(heavyMiB*2/3, snapshotSessions),
-		check:    per(heavyMiB/3, checkSessions),
-	}
+	var snapLane, checkLane uint64
+	b.plannedMiB = heavyMiB
+	b.snapshot, b.snapshotEachMiB, snapLane = per(heavyMiB*2/3, snapshotSessions)
+	b.check, b.checkEachMiB, checkLane = per(heavyMiB/3, checkSessions)
+	b.lanesMiB = snapLane + checkLane
 	b.snapshotSolo, b.checkSolo = b.snapshot, b.check
 	b.snapshotSolo.Threads, b.checkSolo.Threads = threadsFor(cores, 1), threadsFor(cores, 1)
 	return b, true
+}
+
+// floorNote says, for the startup line, when the per-session floor took
+// over: which lane's share fell under it, and what the lanes then add up to
+// against the plan. "" when every session got its share.
+func (b heavyBudget) floorNote() string {
+	var parts []string
+	if b.snapshotEachMiB < sessionFloorMiB {
+		parts = append(parts, fmt.Sprintf("snapshot sessions at the %d MiB floor: the share leaves %d MiB each", sessionFloorMiB, b.snapshotEachMiB))
+	}
+	if b.checkEachMiB < sessionFloorMiB {
+		parts = append(parts, fmt.Sprintf("check sessions at the %d MiB floor: the share leaves %d MiB each", sessionFloorMiB, b.checkEachMiB))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "; ") + fmt.Sprintf("; the lanes add up to %d MiB, more than the %d MiB planned", b.lanesMiB, b.plannedMiB)
+}
+
+// logHeavyBudget is the startup line: the budget the lanes were cut from
+// (budget_mib, the process's, not the host's), and the floor note when the
+// floor took over.
+func logHeavyBudget(l *slog.Logger, budget uint64, cores int, b heavyBudget) {
+	attrs := []any{"budget_mib", budget >> 20, "cores", cores,
+		"snapshot_work", b.snapshot.MemoryLimit, "snapshot_threads", b.snapshot.Threads, "snapshot_threads_alone", b.snapshotSolo.Threads,
+		"checks", b.check.MemoryLimit, "check_threads", b.check.Threads, "check_threads_alone", b.checkSolo.Threads}
+	if note := b.floorNote(); note != "" {
+		attrs = append(attrs, "floor", note)
+	}
+	l.Info("DuckDB memory and threads per session, from this process's memory budget and cores", attrs...)
 }
 
 // threadsFor is the threads one session gets when sessions of them run at
@@ -108,12 +161,10 @@ var processBudget = hostBudget
 // hostBudget is budgetFor this process's memory budget (the host, or its
 // share, console.MemoryBudgetBytes, #2513), worked out and logged once.
 var hostBudget = sync.OnceValues(func() (heavyBudget, bool) {
-	host, cores := console.MemoryBudgetBytes(), runtime.GOMAXPROCS(0)
-	b, ok := budgetFor(host, cores)
+	budget, cores := console.MemoryBudgetBytes(), runtime.GOMAXPROCS(0)
+	b, ok := budgetFor(budget, cores)
 	if ok {
-		slog.Info("DuckDB memory and threads per session, from this host's memory and cores", "host_mib", host>>20, "cores", cores,
-			"snapshot_work", b.snapshot.MemoryLimit, "snapshot_threads", b.snapshot.Threads, "snapshot_threads_alone", b.snapshotSolo.Threads,
-			"checks", b.check.MemoryLimit, "check_threads", b.check.Threads, "check_threads_alone", b.checkSolo.Threads)
+		logHeavyBudget(slog.Default(), budget, cores, b)
 	}
 	return b, ok
 })

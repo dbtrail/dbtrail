@@ -124,12 +124,31 @@ func TestSQLMemoryWarning_2210(t *testing.T) {
 		{"6144MiB", 1, host, false},
 		{"6144MiB", 2, 0, false},
 	} {
-		got := sqlMemoryWarning(c.limit, c.n, c.host)
+		got := sqlMemoryWarning(c.limit, c.n, c.host, "this host's 8 GiB")
 		if (got != "") != c.warn {
 			t.Errorf("sqlMemoryWarning(%q, %d, %d) = %q, want warn=%v", c.limit, c.n, c.host, got, c.warn)
 		}
 		if c.warn && !strings.Contains(got, "--sql-memory") {
 			t.Errorf("warning must name the flag: %q", got)
+		}
+	}
+}
+
+// The warning names what the memory it compares against is (#2513): the
+// compose daemon's budget is a share of the host, and a line that blamed
+// the host or a container limit for it sent the operator to the wrong
+// setting. Generated with the real values of an 8 GB host at share 0.4.
+func TestSQLMemoryWarning_namesTheBudget_2513(t *testing.T) {
+	var host uint64 = 8 << 30
+	budget := uint64(float64(host) * 0.4)
+	got := sqlMemoryWarning("2048MiB", 2, budget, "the 3.2 GiB share BINTRAIL_MEMORY_SHARE=0.4 gives this process of the host's 8 GiB")
+	want := "--sql-memory 2048 MiB: 2 statements at once can take 4096 MiB, more than the 3.2 GiB share BINTRAIL_MEMORY_SHARE=0.4 gives this process of the host's 8 GiB (3276 MiB), which capture shares; a statement may be killed by the kernel instead of refused"
+	if got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+	for _, not := range []string{"this host lets", "container limit"} {
+		if strings.Contains(got, not) {
+			t.Errorf("the warning still blames %q: %s", not, got)
 		}
 	}
 }

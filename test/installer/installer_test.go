@@ -177,6 +177,23 @@ func TestInstaller_aMovedConsoleTellsTheBannerItsPort(t *testing.T) {
 	}
 }
 
+// The compose file carries one memory share per service (#2513): the
+// daemon's and the router's, each overridable from .env, so the bundled
+// stack adds up on the host instead of each process planning with all of it.
+func TestInstaller_theComposeCarriesTheMemoryShares(t *testing.T) {
+	r := install(t)
+	if r.failed {
+		t.Fatalf("install failed:\n%s", r.out)
+	}
+	c := r.compose(t)
+	if !strings.Contains(c, "BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-0.4}") {
+		t.Error("the bintrail service has no memory share (BINTRAIL_MEMORY_SHARE: ${DAEMON_MEMORY_SHARE:-0.4})")
+	}
+	if !strings.Contains(c, "BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-0.3}") {
+		t.Error("the router service has no memory share (BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-0.3})")
+	}
+}
+
 // A compose file from before #1784 (an older DBTRAIL_REF) has no banner
 // address; moving the console port must still install, not die on the missing
 // line.

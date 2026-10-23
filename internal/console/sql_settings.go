@@ -306,8 +306,8 @@ func (s *Server) initSQLMemory(startup bool, path string) {
 	lim, _ := s.sqlMemoryNow()
 	slog.Info("console: SQL on the copy runs with the memory saved in the web interface", "memory", sqlMemoryWords(lim))
 	if total, over := SQLMemoryOverHost(lim, s.sqlMaxInFlight, s.hostMemoryBytes()); over {
-		slog.Warn(fmt.Sprintf("console: saved SQL memory %d MiB: %d statements at once can take %d MiB, more than this host's %d MiB, which capture shares; a statement may be killed by the kernel instead of refused",
-			sqlMiB(lim), s.sqlMaxInFlight, total, s.hostMemoryBytes()>>20))
+		slog.Warn(fmt.Sprintf("console: saved SQL memory %d MiB: %d statements at once can take %d MiB, more than %s (%d MiB), which capture shares; a statement may be killed by the kernel instead of refused",
+			sqlMiB(lim), s.sqlMaxInFlight, total, s.memoryBudgetWords(), s.hostMemoryBytes()>>20))
 	}
 }
 
@@ -346,6 +346,17 @@ func (s *Server) hostMemoryBytes() uint64 {
 		return s.hostMemory()
 	}
 	return memoryBudget()
+}
+
+// memoryBudgetWords is MemoryBudgetWords for the lines that compare against
+// hostMemoryBytes. A test that hands the server a host hands it a whole
+// host, so the words say that.
+func (s *Server) memoryBudgetWords() string {
+	if s.hostMemory != nil {
+		h := s.hostMemory()
+		return memoryBudgetWords(h, 1, h, false)
+	}
+	return MemoryBudgetWords()
 }
 
 func sqlMiB(limit string) int64 {
@@ -410,9 +421,14 @@ type sqlSettingsDTO struct {
 	// MaxInFlight is how many statements run at once; HostMemoryBytes the
 	// machine's memory, 0 (omitted) when not known; Warning is set when the
 	// first times the memory is more than the second.
-	MaxInFlight     int    `json:"max_in_flight"`
-	HostMemoryBytes uint64 `json:"host_memory_bytes,omitempty"`
-	Warning         string `json:"warning,omitempty"`
+	MaxInFlight int `json:"max_in_flight"`
+	// HostMemoryBytes is the memory this process plans with: its budget
+	// (console.MemoryBudgetBytes, the host's memory or the share of it
+	// BINTRAIL_MEMORY_SHARE gives it, #2513), under the name the field had
+	// when it was the host's. MemoryBudgetWords says where it came from.
+	HostMemoryBytes   uint64 `json:"host_memory_bytes,omitempty"`
+	MemoryBudgetWords string `json:"memory_budget_words,omitempty"`
+	Warning           string `json:"warning,omitempty"`
 	// CanManage: a PUT can change it. Locked is why not, when it cannot.
 	CanManage bool   `json:"can_manage"`
 	Locked    string `json:"locked,omitempty"`
@@ -427,18 +443,19 @@ func (s *Server) sqlSettings() sqlSettingsDTO {
 	nbytes, _ := cliutil.ParseByteSize(lim)
 	locked := sqlMemoryLockedReason(sn)
 	dto := sqlSettingsDTO{
-		Memory:          sqlMemoryWords(lim),
-		MemoryBytes:     nbytes,
-		Value:           sqlMemoryValue(lim),
-		Source:          src,
-		Default:         sqlMemoryWords(sqlsandbox.DefaultLimits().MemoryLimit),
-		FloorMB:         SQLMemoryFloor >> 20,
-		MaxUnmergedMB:   sqlChainLimit(lim) >> 20,
-		MaxInFlight:     s.sqlMaxInFlight,
-		HostMemoryBytes: s.hostMemoryBytes(),
-		CanManage:       locked == "",
-		Locked:          locked,
-		Error:           loadErr,
+		Memory:            sqlMemoryWords(lim),
+		MemoryBytes:       nbytes,
+		Value:             sqlMemoryValue(lim),
+		Source:            src,
+		Default:           sqlMemoryWords(sqlsandbox.DefaultLimits().MemoryLimit),
+		FloorMB:           SQLMemoryFloor >> 20,
+		MaxUnmergedMB:     sqlChainLimit(lim) >> 20,
+		MaxInFlight:       s.sqlMaxInFlight,
+		HostMemoryBytes:   s.hostMemoryBytes(),
+		MemoryBudgetWords: s.memoryBudgetWords(),
+		CanManage:         locked == "",
+		Locked:            locked,
+		Error:             loadErr,
 	}
 	if s.sqlSpillState != nil {
 		if n, err := s.sqlSpillState(lim); err != nil {
@@ -454,8 +471,8 @@ func (s *Server) sqlSettings() sqlSettingsDTO {
 		dto.Saved = sqlMemoryWords(fmt.Sprintf("%dMiB", saved))
 	}
 	if total, over := SQLMemoryOverHost(lim, s.sqlMaxInFlight, dto.HostMemoryBytes); over {
-		dto.Warning = fmt.Sprintf("Together, the statements that can run at once can take %s, more than the %s of memory DBTrail can use here (the machine's, or a lower limit set on its container). If memory runs out, the system may stop a statement instead of DBTrail refusing it.",
-			sqlMemoryWords(fmt.Sprintf("%dMiB", total)), sqlMemoryWords(fmt.Sprintf("%dMiB", dto.HostMemoryBytes>>20)))
+		dto.Warning = fmt.Sprintf("Together, the statements that can run at once can take %s, more than the memory DBTrail can use here (%s). If memory runs out, the system may stop a statement instead of DBTrail refusing it.",
+			sqlMemoryWords(fmt.Sprintf("%dMiB", total)), dto.MemoryBudgetWords)
 	}
 	return dto
 }
@@ -511,8 +528,8 @@ func (s *Server) handleSQLSettingsPut(w http.ResponseWriter, r *http.Request) {
 	slog.Info("console: SQL memory changed from the web interface", "actor", consoleActor(r),
 		"from", sqlMemoryWords(before), "to", sqlMemoryWords(after), "source", src)
 	if total, over := SQLMemoryOverHost(after, s.sqlMaxInFlight, s.hostMemoryBytes()); over {
-		slog.Warn(fmt.Sprintf("console: SQL memory saved from the web interface, %d MiB: %d statements at once can take %d MiB, more than this host's %d MiB, which capture shares; a statement may be killed by the kernel instead of refused",
-			sqlMiB(after), s.sqlMaxInFlight, total, s.hostMemoryBytes()>>20))
+		slog.Warn(fmt.Sprintf("console: SQL memory saved from the web interface, %d MiB: %d statements at once can take %d MiB, more than %s (%d MiB), which capture shares; a statement may be killed by the kernel instead of refused",
+			sqlMiB(after), s.sqlMaxInFlight, total, s.memoryBudgetWords(), s.hostMemoryBytes()>>20))
 	}
 	writeJSON(w, http.StatusOK, s.sqlSettings())
 }

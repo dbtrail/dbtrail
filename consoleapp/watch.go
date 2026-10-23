@@ -1905,7 +1905,7 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 	if w := sqlMaxInFlightWarning(opts.SQLMaxInFlight, sqlsandbox.DefaultLimits().Threads, runtime.GOMAXPROCS(0)); w != "" {
 		slog.Warn(w)
 	}
-	if w := sqlMemoryWarning(opts.SQLMemoryLimit, max(opts.SQLMaxInFlight, 1), console.MemoryBudgetBytes()); w != "" {
+	if w := sqlMemoryWarning(opts.SQLMemoryLimit, max(opts.SQLMaxInFlight, 1), console.MemoryBudgetBytes(), console.MemoryBudgetWords()); w != "" {
 		slog.Warn(w)
 	}
 	// Only a daemon that captures its own source has a flavor to show.
@@ -2332,8 +2332,10 @@ func sqlMemoryFrom(cmd *cobra.Command) (string, error) {
 // refusal, as with the threads: statements rarely all run to the cap. Only
 // for a memory the operator set here; a value saved in the web interface is
 // warned about by the console when it loads it. Empty when it fits or the
-// host is unknown.
-func sqlMemoryWarning(memoryLimit string, maxInFlight int, hostBytes uint64) string {
+// host is unknown. hostBytes is the process's budget (the host's memory, or
+// its share, #2513) and words says where it came from
+// (console.MemoryBudgetWords), so the line blames the setting that cut it.
+func sqlMemoryWarning(memoryLimit string, maxInFlight int, hostBytes uint64, words string) string {
 	if memoryLimit == "" {
 		return ""
 	}
@@ -2342,8 +2344,11 @@ func sqlMemoryWarning(memoryLimit string, maxInFlight int, hostBytes uint64) str
 		return ""
 	}
 	each, _ := cliutil.ParseByteSize(memoryLimit)
-	return fmt.Sprintf("--sql-memory %d MiB: %d statements at once can take %d MiB, more than the %d MiB this host lets DBTrail use (its memory, or a lower container limit), which capture shares; a statement may be killed by the kernel instead of refused",
-		each>>20, maxInFlight, total, hostBytes>>20)
+	if words == "" {
+		words = "the memory this process plans with"
+	}
+	return fmt.Sprintf("--sql-memory %d MiB: %d statements at once can take %d MiB, more than %s (%d MiB), which capture shares; a statement may be killed by the kernel instead of refused",
+		each>>20, maxInFlight, total, words, hostBytes>>20)
 }
 
 // resolveSQLMaxInFlight sets upSQLMaxInFlight from --sql-max-in-flight or,

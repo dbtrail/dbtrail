@@ -2,6 +2,7 @@ package console
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,6 +24,13 @@ type SQLPoolInput struct {
 	// it is a ceiling set on this process and not the machine's memory.
 	MemoryBytes uint64
 	MemoryOwn   bool
+	// MemoryWords says where MemoryBytes came from (MemoryBudgetWords: the
+	// host, a share of it, a container's ceiling), "" when not known;
+	// TailsBytes is what the copy's tails took off that before MemoryBytes,
+	// 0 when none or when they left it nothing (MemoryBytes is then what the
+	// process keeps for itself, and machineForSQLPool warned).
+	MemoryWords string
+	TailsBytes  uint64
 	// MemoryLimit is what one statement's DuckDB is given, e.g. "2048MiB".
 	MemoryLimit string
 	// Asked is how many statements the operator said run at once, 0 when
@@ -87,9 +95,15 @@ func SQLPoolFor(in SQLPoolInput) SQLPool {
 		why += "; this machine's memory is not known, so memory was not counted"
 	default:
 		mem, memWhy := in.MemoryBytes, ""
-		if !in.MemoryOwn {
+		switch {
+		case !in.MemoryOwn && in.TailsBytes > 0:
+			mem /= 2
+			memWhy = fmt.Sprintf(" (half of the machine's %s less %s for its tails: this process has no memory ceiling of its own)", gibText(in.MemoryBytes+in.TailsBytes), mibText(in.TailsBytes))
+		case !in.MemoryOwn:
 			mem /= 2
 			memWhy = " (half of the machine's: this process has no memory ceiling of its own)"
+		case in.TailsBytes > 0:
+			memWhy = fmt.Sprintf(" (the process's %s budget less %s for its tails)", gibText(in.MemoryBytes+in.TailsBytes), mibText(in.TailsBytes))
 		}
 		byMem := 0
 		if mem > sqlPoolOwnBytes {
@@ -131,12 +145,35 @@ func SQLPoolFor(in SQLPoolInput) SQLPool {
 			mem /= 2
 		}
 		if need := uint64(asked)*uint64(ceiling) + sqlPoolOwnBytes; need > mem {
-			warning = fmt.Sprintf("%s at up to %s each can reach %s, more than the %s counted for this process, so under load a statement may be stopped for memory or the machine run short of it. Lower the number (--concurrency), or the memory each may use (--sql-memory)",
-				countOfStatements(asked), gibText(uint64(ceiling)), gibText(need), gibText(mem))
+			warning = fmt.Sprintf("%s at up to %s each can reach %s, more than the %s counted for this process%s, so under load a statement may be stopped for memory or the machine run short of it. Lower the number (--concurrency), or the memory each may use (--sql-memory)",
+				countOfStatements(asked), gibText(uint64(ceiling)), gibText(need), gibText(mem), memoryCountedWhy(in))
 		}
 	}
 	return SQLPool{Workers: asked, Threads: max(cores/asked, 1), Why: said, Warning: warning}
 }
+
+// memoryCountedWhy says, for the warning over the operator's number, what
+// the memory counted for the process is cut from: " (the 2.4 GiB share
+// BINTRAIL_MEMORY_SHARE=0.3 gives this process of the host's 8 GiB, less
+// 491 MiB for its tails)"; "" when the input does not say.
+func memoryCountedWhy(in SQLPoolInput) string {
+	if in.MemoryWords == "" {
+		return ""
+	}
+	tails := ""
+	if in.TailsBytes > 0 {
+		tails = fmt.Sprintf(" less %s for its tails", mibText(in.TailsBytes))
+	}
+	if !in.MemoryOwn {
+		return fmt.Sprintf(" (half of %s%s: no memory ceiling of its own)", in.MemoryWords, tails)
+	}
+	if tails != "" {
+		tails = "," + tails
+	}
+	return fmt.Sprintf(" (%s%s)", in.MemoryWords, tails)
+}
+
+func mibText(b uint64) string { return fmt.Sprintf("%d MiB", b>>20) }
 
 func countOfStatements(n int) string {
 	if n == 1 {
@@ -175,25 +212,42 @@ func ThisMachineForSQLPool(memoryLimit string) SQLPoolInput {
 	if !tailsOff() {
 		tails = tailBudgetFromEnv().Bytes
 	}
-	return machineForSQLPool(memoryLimit, runtime.GOMAXPROCS(0), cpuCapped("/"), memoryBudget(), memoryCapped("/"), MemoryShare(), tails)
+	return machineForSQLPool(memoryLimit, runtime.GOMAXPROCS(0), cpuCapped("/"), memoryBudget(), memoryCapped("/"), MemoryShare(), tails, MemoryBudgetWords())
 }
 
 // machineForSQLPool is ThisMachineForSQLPool over its inputs: budget is the
 // memory the process plans with (0 unknown), capped whether a ceiling of its
 // own set it, share its MemoryShare, tails the bytes its tails may hold (0
-// none or unbounded, which then takes nothing off).
-func machineForSQLPool(memoryLimit string, cores int, coresOwn bool, budget uint64, capped bool, share float64, tails int64) SQLPoolInput {
-	mem := budget
-	if tails > 0 && uint64(tails) < mem {
-		mem -= uint64(tails)
-	}
-	return SQLPoolInput{
+// none or unbounded, which then takes nothing off), words where the budget
+// came from (MemoryBudgetWords). Tails that leave the pool less than
+// sqlPoolOwnBytes of a known budget are warned (BINTRAIL_SQL_TAIL_MAX_BYTES
+// was set past what the share holds), and the pool keeps sqlPoolOwnBytes:
+// one statement at a time, said so by SQLPoolFor, instead of a pool sized
+// as if the tails were free.
+func machineForSQLPool(memoryLimit string, cores int, coresOwn bool, budget uint64, capped bool, share float64, tails int64, words string) SQLPoolInput {
+	in := SQLPoolInput{
 		Cores:       cores,
 		CoresOwn:    coresOwn,
-		MemoryBytes: mem,
+		MemoryBytes: budget,
 		MemoryOwn:   capped || share < 1,
+		MemoryWords: words,
 		MemoryLimit: memoryLimit,
 	}
+	switch {
+	case tails <= 0 || budget == 0:
+	case uint64(tails)+sqlPoolOwnBytes > budget:
+		from := ""
+		if words != "" {
+			from = " (" + words + ")"
+		}
+		slog.Warn(fmt.Sprintf("BINTRAIL_SQL_TAIL_MAX_BYTES=%dMiB: the copy's tails may hold %s, which leaves the SQL pool less than the %d MiB this process keeps for itself out of its %s budget%s; one statement runs at a time with that much and may be stopped for memory. Lower the tails or raise %s",
+			uint64(tails)>>20, gibText(uint64(tails)), sqlPoolOwnBytes>>20, gibText(budget), from, MemoryShareEnv))
+		in.MemoryBytes = sqlPoolOwnBytes
+	default:
+		in.MemoryBytes = budget - uint64(tails)
+		in.TailsBytes = uint64(tails)
+	}
+	return in
 }
 
 // memoryCapped reports whether this process runs under a memory ceiling

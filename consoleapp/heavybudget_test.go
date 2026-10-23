@@ -1,8 +1,11 @@
 package consoleapp
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,5 +241,41 @@ func TestBudgetWiring_compactionAndResolve(t *testing.T) {
 	rsup.maybeResolve(rreq)
 	if resolved != b.snapshotSolo {
 		t.Errorf("resolved pairs budget = %+v, want %+v (one session at a time)", resolved, b.snapshotSolo)
+	}
+}
+
+// The compose daemon's budget on an 8 GB host, share 0.4 (#2513 review):
+// 3276 MiB, of which the lanes plan 1310, which puts every session under
+// the 512 MiB floor; the floor stands (the daemon keeps the least memory
+// the heaviest query was measured to work with) and the startup line says
+// so, with the budget under its own name. Generated with real values.
+func TestBudgetFor_floorNote_2513(t *testing.T) {
+	var host uint64 = 8 << 30
+	budget := uint64(float64(host) * 0.4)
+	b, ok := budgetFor(budget, 4)
+	if !ok || b.snapshot.MemoryLimit != "512MiB" || b.check.MemoryLimit != "512MiB" {
+		t.Fatalf("budgetFor(3276 MiB, 4) = %+v, %v; want both lanes at the floor", b, ok)
+	}
+	want := "snapshot sessions at the 512 MiB floor: the share leaves 436 MiB each; check sessions at the 512 MiB floor: the share leaves 218 MiB each; the lanes add up to 2048 MiB, more than the 1310 MiB planned"
+	if got := b.floorNote(); got != want {
+		t.Errorf("floor note:\n got %q\nwant %q", got, want)
+	}
+	var buf bytes.Buffer
+	logHeavyBudget(slog.New(slog.NewTextHandler(&buf, nil)), budget, 4, b)
+	line := buf.String()
+	for _, w := range []string{`msg="DuckDB memory and threads per session, from this process's memory budget and cores"`, "budget_mib=3276 cores=4 snapshot_work=512MiB", `floor="` + want + `"`} {
+		if !strings.Contains(line, w) {
+			t.Errorf("missing %q in:\n%s", w, line)
+		}
+	}
+	if strings.Contains(line, "host_mib") {
+		t.Errorf("the line still calls the budget the host's:\n%s", line)
+	}
+	// A process alone on the host: every session gets its share, no note.
+	buf.Reset()
+	b, _ = budgetFor(8<<30, 8)
+	logHeavyBudget(slog.New(slog.NewTextHandler(&buf, nil)), 8<<30, 8, b)
+	if b.floorNote() != "" || strings.Contains(buf.String(), "floor=") {
+		t.Errorf("8 GiB alone: note %q, line:\n%s", b.floorNote(), buf.String())
 	}
 }

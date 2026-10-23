@@ -708,8 +708,21 @@ outside compose with no share set plans with half of the machine, since
 capture uses the machine too. To set the number of statements yourself, set
 `ROUTER_CONCURRENCY`. Each statement
 may reach `SQL_MEMORY` (2 GB unless set) plus a quarter, and the router keeps
-half a gigabyte for itself, so 8g and 4 cores run two statements at once.
-`docker compose logs router` shows the numbers it worked out and why.
+half a gigabyte for itself. `docker compose logs router` shows the numbers it
+worked out and why, as the budget less the tails.
+
+Two things follow from the shares that a host which ran the stack before
+them may notice. A `SQL_MEMORY` or `ROUTER_CONCURRENCY` that fitted the whole
+machine may not fit the share: on an 8 GB host the web interface's SQL card
+runs 2 statements at up to 2 GB each, 4 GB, more than the 3.2 GB the
+`bintrail` service plans with at share 0.4, and the startup log says so,
+naming the share. And the router runs fewer statements at once on a mid-size
+host: on 16 GB it ran 3 (half the machine), now 1 (0.3 of it, less the
+tails). To change that, raise `ROUTER_MEMORY_SHARE` or `DAEMON_MEMORY_SHARE`
+in `.env` by lowering another share (the three add up to the machine), or
+set `ROUTER_CONCURRENCY` to the number you want; a tail budget set past the
+share (`BINTRAIL_SQL_TAIL_MAX_BYTES`) is warned at startup, not silently
+ignored.
 
 Without this service nothing serves the MySQL port: the web interface can
 turn it on and nothing listens. The router itself is described in

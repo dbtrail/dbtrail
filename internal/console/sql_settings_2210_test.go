@@ -1,9 +1,11 @@
 package console
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -390,5 +392,39 @@ func TestSQLSettings_reachesTheNextStatement_2210(t *testing.T) {
 	f.s.handleSQLInfo(w, req)
 	if !strings.Contains(w.Body.String(), `"memory":"6 GB"`) || !strings.Contains(w.Body.String(), `"max_unmerged_mb":1152`) {
 		t.Errorf("GET /api/sql after the PUT: %s", w.Body.String())
+	}
+}
+
+// The two log lines over a saved SQL memory that does not fit (#2513
+// review) name what the memory is compared against, the process's budget,
+// instead of blaming "this host" for a number that may be a share of it.
+// Generated with real values: 64 GB saved, 2 at once, an 8 GiB host.
+func TestSQLSettings_savedMemoryWarningsNameTheBudget_2513(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	path := filepath.Join(t.TempDir(), SQLSettingsFileName)
+	s := sqlSettingsServer(t, path, "")
+	if rec, _ := sqlSettingsDo(t, s, "PUT", `{"memory":"64GB"}`); rec.Code != 200 {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	saved := `level=WARN msg="console: SQL memory saved from the web interface, 65536 MiB: 2 statements at once can take 131072 MiB, more than this host's 8 GiB (8192 MiB), which capture shares; a statement may be killed by the kernel instead of refused"`
+	if got := buf.String(); !strings.Contains(got, saved) {
+		t.Errorf("on save: got\n%s\nwant a line with\n%s", got, saved)
+	}
+	// The same file loaded by the next start.
+	buf.Reset()
+	s2 := sqlSettingsServer(t, path, "")
+	s2.initSQLMemory(false, path)
+	loaded := `level=WARN msg="console: saved SQL memory 65536 MiB: 2 statements at once can take 131072 MiB, more than this host's 8 GiB (8192 MiB), which capture shares; a statement may be killed by the kernel instead of refused"`
+	if got := buf.String(); !strings.Contains(got, loaded) {
+		t.Errorf("on load: got\n%s\nwant a line with\n%s", got, loaded)
+	}
+	for _, not := range []string{"more than this host's 8192 MiB", "container limit"} {
+		if strings.Contains(buf.String(), not) {
+			t.Errorf("still blames %q:\n%s", not, buf.String())
+		}
 	}
 }
