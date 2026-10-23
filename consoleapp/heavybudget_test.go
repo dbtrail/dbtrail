@@ -229,6 +229,10 @@ func TestBudgetWiring_compactionAndResolve(t *testing.T) {
 	if compacted != b.snapshotSolo {
 		t.Errorf("compaction budget = %+v, want %+v (one session at a time)", compacted, b.snapshotSolo)
 	}
+	// waitCompact returns when the job's status turns terminal, but the job's
+	// goroutine goes on to the resolved pairs (#2261) and reads the seams
+	// resolveRig is about to swap (#2518): joined here, not at cleanup.
+	sup.postRefresh.Wait()
 
 	rsup, rreq, _, _ := resolveRig(t, []int{1}, map[string]int{"orders": 2})
 	var resolved duckdbutil.Tuning
