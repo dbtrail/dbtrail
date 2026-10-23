@@ -274,6 +274,35 @@ for an index the watcher cannot reach, so unknown can never read as no-gap).
 | `bintrail_rotation_healthy` | gauge | 1 = the last built-in rotation cycle neither failed nor declined to drop a partition past retention |
 | `bintrail_rotation_deferred_partitions` | gauge | Partitions past retention the last cycle declined to drop: unarchived, with an unconfirmed S3 upload, or changed since they were archived |
 
+## The refresh's arithmetic (`bintrail_refresh_arithmetic_mismatch_total`)
+
+A refresh with table deltas (the daemon's scheduled update of the copy) checks
+its own counting on every table it publishes: rows after = rows before +
+inserts − deletes, where inserts and deletes are the window's INSERT and
+DELETE events, rows before is the state the window was folded over and rows
+after the state it published. The numbers come from what the refresh already
+has (the fold's event counts, the rows of the delta files it just wrote, the
+row count the previous delta carries in its footer), so the check costs
+nothing: no second pass over the table. A table published as a delta checks
+that the keys it found in its base agree with the keys the events say were
+alive before the window (exactly, at the start of a chain; as a bound later in
+it); a table rewritten in full checks that what the merge read, kept and wrote
+closes against the events and against the chain's running count.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `bintrail_refresh_arithmetic_mismatch_total{table}` | counter | Tables (`schema.table`) whose refresh did not close its arithmetic. The table is **still published**: a refresh that refuses on its own check would turn a counting bug into a copy that silently ages, which is worse than a loud wrong number. The daemon's log carries an error line, `refresh arithmetic does not close`, with the four numbers and what did not close; every table logs the same numbers at debug level, so a mismatch can be read against its neighbours |
+
+Alert on any increase: `increase(bintrail_refresh_arithmetic_mismatch_total[1h]) > 0`.
+A mismatch says the copy may hold a wrong row count for that table; check it
+against the source (`bintrail verify`) and report it with the error line.
+One miscount can move the counter twice: a delta whose check failed still
+carries its running count forward, so the rewrite that later compacts the
+chain compares a state read in full against that count and reports the
+same miscount again ("the chain's count said N"). Two increases on one
+table, a delta's and then a rewrite's, are one bug, not two; the error
+lines say which was which (`published_as`).
+
 ## SQL on the copy (`bintrail_sql_statement_phase_seconds`)
 
 SQL on the copy runs in two places: the SQL card of the web interface, in

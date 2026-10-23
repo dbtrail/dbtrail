@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
@@ -146,6 +147,17 @@ func foldPage(
 		// that arrives after a change of the same row from further on in the
 		// binary log is therefore dropped here, after every guard above has
 		// read it.
+		// Counted before the drop below: the binary log holds that event
+		// whether or not the map keeps it, and the refresh's arithmetic
+		// (#2505) is over what the log holds.
+		switch ev.EventType {
+		case event.EventInsert:
+			res.Inserts++
+		case event.EventUpdate:
+			res.Updates++
+		case event.EventDelete:
+			res.Deletes++
+		}
 		if cur, ok := res.Changes[ev.PKValues]; ok && query.LaterInBinlog(cur, ev) {
 			continue
 		}
@@ -261,6 +273,13 @@ type foldResult struct {
 	// archive-inclusive, deduplicated count — the same number the old
 	// len(events) reported).
 	Total int64
+	// Inserts, Updates and Deletes split Total by event type, every event
+	// counted once (an event dropped for an earlier binary log position
+	// still counts: the log holds it). A system-versioned table's events are
+	// counted as normalized, in their meaning for the current rows. They are
+	// the refresh's arithmetic (#2505): the window leaves Inserts - Deletes
+	// more rows than it found.
+	Inserts, Updates, Deletes int64
 
 	// First is a copy of the very first event of the window, or nil when the
 	// window was empty. Kept because the baseline-vs-first-event gap warning

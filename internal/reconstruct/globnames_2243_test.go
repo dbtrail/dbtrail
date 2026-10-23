@@ -65,7 +65,7 @@ func globWindow(t *testing.T, root, table, prevBase string, prevDirTime time.Tim
 		cfg:    FullTableConfig{At: at, OutputFormat: OutputFormatParquet, TableDeltas: true, snapshotDir: snapDir, cut: &query.BinlogPos{File: "binlog.000009", Pos: pos}},
 		schema: "mydb", table: table,
 		basePath: prevBase, chainStart: chainStart, baseMeta: bmeta, anchorMeta: anchorMeta,
-		prev: prev, fold: &foldResult{Changes: changes}, pkCols: pkColsIntID(),
+		prev: prev, fold: foldOf(changes), pkCols: pkColsIntID(),
 		streamCaptured: true,
 	}
 	err = publishWithTableDelta(context.Background(), p, &TableReport{Schema: "mydb", Table: table})

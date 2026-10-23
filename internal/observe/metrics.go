@@ -176,6 +176,46 @@ var sqlStatementPhase = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 17), // 1ms … ~65s; a statement past the 60s cap fails and is not observed
 }, []string{"phase"})
 
+// refreshArithmeticMismatch counts the tables whose refresh with table
+// deltas did not close its own arithmetic, rows after = rows before +
+// inserts - deletes (#2505, internal/reconstruct arithmetic.go). The table
+// is published all the same, so this counter is what an operator alerts on.
+// Labelled by schema.table: the cardinality is the tables refreshed, which
+// the per-table log lines already carry.
+var refreshArithmeticMismatch = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "bintrail",
+	Subsystem: "refresh",
+	Name:      "arithmetic_mismatch_total",
+	Help:      "Tables whose refresh with table deltas did not close rows after = rows before + inserts - deletes; the table was published as it is.",
+}, []string{"table"})
+
+// RefreshArithmeticMismatch counts one table whose refresh arithmetic did
+// not close.
+func RefreshArithmeticMismatch(table string) {
+	refreshArithmeticMismatch.WithLabelValues(table).Inc()
+}
+
+// RefreshArithmeticMismatches is the counter's total over every table, for
+// a harness that asserts it did not move (the oracle's refresh step). The
+// error is the registry's, and a harness must fail on it rather than read
+// a zero as "nothing moved".
+func RefreshArithmeticMismatches() (float64, error) {
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		return 0, err
+	}
+	var total float64
+	for _, mf := range mfs {
+		if mf.GetName() != "bintrail_refresh_arithmetic_mismatch_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			total += m.GetCounter().GetValue()
+		}
+	}
+	return total, nil
+}
+
 // ObserveSQLStatementPhase records one phase of a SQL-on-the-copy statement.
 func ObserveSQLStatementPhase(phase string, d time.Duration) {
 	sqlStatementPhase.WithLabelValues(phase).Observe(d.Seconds())

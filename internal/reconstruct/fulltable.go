@@ -469,6 +469,28 @@ type TableReport struct {
 	// DeltaCompactedRange is "<lo>-<hi>" when this run adopted a compaction
 	// job's range pair in place of the chain's first pairs (#1723).
 	DeltaCompactedRange string
+
+	// The refresh's arithmetic (#2505), filled by a refresh with table
+	// deltas that wrote a pair or rewrote the table, and ArithmeticChecked
+	// then: WindowInserts and WindowDeletes are the window's INSERT and
+	// DELETE events, RowsBefore the resolved rows the window was folded
+	// over and RowsAfter the rows the published state holds, -1 when the
+	// refresh could not know them (newTableReport starts them there, so a
+	// carried-forward table, a table of the ordinary line or a run without
+	// deltas never reads as an empty table that was counted).
+	// ArithmeticProblems is empty when the numbers close (or could not be
+	// checked), else what did not, in the words the error line used; the
+	// table is published either way.
+	ArithmeticChecked            bool
+	WindowInserts, WindowDeletes int64
+	RowsBefore, RowsAfter        int64
+	ArithmeticProblems           []string
+}
+
+// newTableReport is a table's report before anything ran: the row counts
+// of the arithmetic (#2505) start unknown (-1), not at zero.
+func newTableReport(schema, table string) *TableReport {
+	return &TableReport{Schema: schema, Table: table, RowsBefore: -1, RowsAfter: -1}
 }
 
 // fetchFloor decides where a run with deltas on fetches from: the chain's last
@@ -1248,7 +1270,7 @@ func ReconstructTable(
 	dbName string,
 ) (*TableReport, error) {
 	start := time.Now()
-	rep := &TableReport{Schema: schema, Table: table}
+	rep := newTableReport(schema, table)
 
 	// ── 1. Find the baseline snapshot ──────────────────────────────────────
 	// FindBaseline already logs a stale-fallback warning (#466) server-side.
