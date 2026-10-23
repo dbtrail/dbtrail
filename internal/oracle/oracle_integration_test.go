@@ -75,8 +75,8 @@ func TestOracle(t *testing.T) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			start := time.Now()
 			res := runSeed(t, seed, steps, tables)
-			t.Logf("seed %d: %d steps, %d ops, steps applied %v (%d fallbacks), %.1fs wall",
-				seed, res.Steps, res.Ops, res.Applied, res.Fallbacks, time.Since(start).Seconds())
+			t.Logf("seed %d: %d steps, %d ops, steps applied %v, %.1fs wall",
+				seed, res.Steps, res.Ops, res.Applied, time.Since(start).Seconds())
 		})
 	}
 }
@@ -126,8 +126,8 @@ func prepareRun(t *testing.T, seed uint64, steps int, tables []oracle.Table) *or
 	return &oracle.Run{
 		Seed: seed, Steps: steps, Schema: sourceName, Tables: tables,
 		Source: sourceDB, Index: indexDB, Capture: captureErr, Root: root,
-		Between: []oracle.Step{snapshot, refresh}, Fallback: snapshot,
-		Logf: t.Logf,
+		Between: []oracle.Step{snapshot, refresh},
+		Logf:    t.Logf,
 	}
 }
 

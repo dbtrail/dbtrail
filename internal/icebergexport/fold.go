@@ -50,9 +50,12 @@ func newFold(schema, table string, pkCols []metadata.ColumnMeta) *fold {
 	return &fold{schema: schema, table: table, pkCols: pkCols, ops: map[string]*netOp{}}
 }
 
-// addPage folds one page. The guards match the full-table reconstruct's:
-// an unresolved TOAST marker (#592) and a PK-changing UPDATE (#782) refuse the
-// table, because the alternative is a table that reads cleanly and is wrong.
+// addPage folds one page. Two guards, per event: an unresolved TOAST marker
+// (#592) and a PK-changing UPDATE (#782) refuse the table, because the
+// alternative is a table that reads cleanly and is wrong. The full-table
+// reconstruct shares the first; since #2501 it folds the second as a DELETE
+// of the old key and an INSERT of the new one instead, which this fold does
+// not (its own guard, unchanged: the export keeps refusing such a window).
 func (f *fold) addPage(page []query.ResultRow) error {
 	for i := range page {
 		ev := &page[i]

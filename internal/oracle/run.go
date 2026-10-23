@@ -36,9 +36,6 @@ type Run struct {
 	// Between are the steps drawn at each cut, by weight; the first cut
 	// always takes Between[0] (there is no copy to refresh yet).
 	Between []Step
-	// Fallback is applied at the same cut, one second later, when a step
-	// refuses it (Refuser) for a reason the generator caused. nil = fail.
-	Fallback Step
 	// Read builds the port's read of the copy at cut: the views SQL and the
 	// snapshot directory it reads, with the DATETIME columns as wall clocks
 	// or as the files hold them, and which tables it answers as of the
@@ -74,11 +71,10 @@ type published struct {
 
 // Result is what a run did, for the log.
 type Result struct {
-	Steps     int
-	Ops       int
-	Applied   map[string]int // step name → times applied
-	Fallbacks int
-	Wall      time.Duration
+	Steps   int
+	Ops     int
+	Applied map[string]int // step name → times applied
+	Wall    time.Duration
 }
 
 // Do runs the seed. The error of a failed check is a *Failure.
@@ -172,19 +168,11 @@ func (r *Run) Do(ctx context.Context) (Result, error) {
 		}
 		name := st.Name()
 		publishes := st.Publishes()
+		// A step that fails fails the run. There is no fallback: the one
+		// refusal a step made by design (the fold's, of a window with a
+		// PK-changing UPDATE) went with #2501, and a refusal is a finding.
 		if err := st.Apply(ctx, cut); err != nil {
-			ref, ok := st.(Refuser)
-			if !ok || r.Fallback == nil || !ref.Refused(err, cut) {
-				return res, fmt.Errorf("seed %d step %d: %s: %w", r.Seed, step, name, err)
-			}
-			logf("seed %d step %d: %s refused the cut, taking a %s instead: %v", r.Seed, step, name, r.Fallback.Name(), err)
-			cut.At = cut.At.Add(time.Second)
-			if err := r.Fallback.Apply(ctx, cut); err != nil {
-				return res, fmt.Errorf("seed %d step %d: %s after a refused %s: %w", r.Seed, step, r.Fallback.Name(), name, err)
-			}
-			name = name + "→" + r.Fallback.Name()
-			publishes = r.Fallback.Publishes()
-			res.Fallbacks++
+			return res, fmt.Errorf("seed %d step %d: %s: %w", r.Seed, step, name, err)
 		}
 		res.Applied[name]++
 		lastAt = cut.At

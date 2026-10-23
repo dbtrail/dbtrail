@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -218,32 +219,83 @@ type foldOptions struct {
 //     coordinate, so LaterInBinlog cannot order the halves against other
 //     changes of the same key, and under REPLICA IDENTITY DEFAULT the
 //     before-image may hold only the key.
-//   - the spelling proof fails: the decoded before-image, spelled by
-//     event.BuildPKValues, must equal the key the parser STORED for this
-//     event (pk_values is built from the same values that became row_before,
-//     parser.go emitUpdates). That equality proves the storage and decode
-//     round-trip preserves the spelling for this event's key columns, and the
-//     after-image went through the same path, so the INSERT's key — spelled
-//     from the decoded after-image — is what a later real event on that key
-//     carries. Without it the two could land under two spellings of one key
-//     (a BINARY column left as stored base64 because no schema epoch covered
-//     the event, an image decoded as float64 past 2^53) and the #782
-//     duplicate or resurrection would come back silently; so the refusal
-//     stays, with its text.
+//   - the spelling proof fails (pkSpellingErr, its own text): the decoded
+//     before-image, spelled by event.BuildPKValues, must equal the key the
+//     parser STORED for this event (pk_values is built from the same values
+//     that became row_before, parser.go emitUpdates). That equality proves
+//     the storage and decode round-trip preserves the spelling for this
+//     event's key columns, and the after-image went through the same path,
+//     so the INSERT's key — spelled from the decoded after-image — is what a
+//     later real event on that key carries. Without it the two could land
+//     under two spellings of one key (a BINARY column left as stored base64
+//     because no schema epoch covered the event, a MariaDB UUID/INET6 key
+//     the decoder renders as text, an image decoded as float64 past 2^53)
+//     and the #782 duplicate or resurrection would come back silently.
+//   - the new key's values are not spellable from the decoded image
+//     (pkKeyUnspellable): the proof above is value-independent only where
+//     formatPKValue spells a decoded value as it spelled the parser's. A
+//     TEXT-family key decodes to a Go STRING, on which the hex rule for bytes
+//     that are not UTF-8 never applies, so an old key of plain ASCII proves
+//     nothing about a new key holding a latin1 byte (the parser stores the
+//     later DELETE of that key as 0x…); and TEXT bytes that look like a JSON
+//     container are promoted to a JSON value by the indexer and decode as a
+//     slice or a map, which print as `[1 2]`, not `[1,2]`. So every value of
+//     the new key must be a scalar and, when a string, valid UTF-8.
 //
 // The halves share nothing the writer mutates: the DELETE has no RowAfter.
+// Both carry no ChangedColumns, the INSERT/DELETE convention (and the fold's
+// byte estimate would count the UPDATE's list twice otherwise).
 func splitPKChange(ev *query.ResultRow, schema, table string, pkCols []metadata.ColumnMeta, pg bool) ([]query.ResultRow, error) {
 	before, after, changed := pkChangedInEvent(ev, pkCols)
 	if !changed {
 		return nil, nil
 	}
-	if pg || before != ev.PKValues {
+	if pg {
 		return nil, pkChangingUpdateErr(schema, table, before, after)
 	}
+	if before != ev.PKValues {
+		return nil, pkSpellingErr(schema, table, ev.PKValues, after,
+			fmt.Sprintf("the index stores the old key as %q but its row image decodes as %q", ev.PKValues, before))
+	}
+	if col, why := pkKeyUnspellable(pkCols, ev.RowAfter); why != "" {
+		return nil, pkSpellingErr(schema, table, ev.PKValues, after,
+			fmt.Sprintf("the new key's column %s decodes to %s, which the index would spell another way", col, why))
+	}
 	del, ins := *ev, *ev
-	del.EventType, del.PKValues, del.RowAfter = event.EventDelete, ev.PKValues, nil
-	ins.EventType, ins.PKValues, ins.RowBefore = event.EventInsert, after, nil
+	del.EventType, del.PKValues, del.RowAfter, del.ChangedColumns = event.EventDelete, ev.PKValues, nil, nil
+	ins.EventType, ins.PKValues, ins.RowBefore, ins.ChangedColumns = event.EventInsert, after, nil, nil
 	return []query.ResultRow{del, ins}, nil
+}
+
+// pkKeyUnspellable names the first key column of row whose decoded value
+// formatPKValue would spell differently from the parser's bytes (see
+// splitPKChange), with why, or "" when every value is a scalar and every
+// string is valid UTF-8.
+func pkKeyUnspellable(pkCols []metadata.ColumnMeta, row map[string]any) (col, why string) {
+	for _, c := range pkCols {
+		switch v := row[c.Name].(type) {
+		case []any, map[string]any:
+			return c.Name, "a JSON value"
+		case string:
+			if !utf8.ValidString(v) {
+				return c.Name, "text that is not valid UTF-8"
+			}
+		}
+	}
+	return "", ""
+}
+
+// pkSpellingErr is the #2501 refusal of a split the index's own spelling does
+// not prove safe (splitPKChange). It names both keys as the fold sees them,
+// the reason, and the remedy: a snapshot at or after the change, from which
+// the refresh starts without this window.
+func pkSpellingErr(schema, table, before, after, why string) error {
+	return fmt.Errorf(
+		"full-table reconstruct: %s.%s has a PK-changing UPDATE in the window (primary key %q → %q) "+
+			"that the refresh cannot follow to the row's new key: %s. A BINARY key whose rows no schema "+
+			"snapshot covers, or a MariaDB UUID/INET6 key, spells this way; take a new snapshot with "+
+			"`bintrail baseline` at or after the change (a full backup from the web interface does the same) and refresh from it",
+		schema, table, before, after, why)
 }
 
 // observeImages narrows ImageColumns to the intersection with each of ev's

@@ -17,9 +17,9 @@ import (
 // row by row with the source. The fold folds an UPDATE that moves a row to
 // another key as a DELETE of the old key and an INSERT of the new one
 // (#2501); before, every one of these windows was refused and the run took a
-// snapshot instead. The run has the snapshot as its fallback on purpose and
-// asserts it was never taken: a refresh refused for a PK-changing UPDATE must
-// FAIL this test, not fall back and pass.
+// snapshot instead. A refresh that refuses now fails the run (Run.Do has no
+// fallback), so the real checks are the run's error and that both windows
+// were applied as refreshes.
 //
 // It skips without MySQL unless BINTRAIL_ORACLE_REQUIRE=1.
 func TestOracle_pkChangeShapes_2501(t *testing.T) {
@@ -28,7 +28,7 @@ func TestOracle_pkChangeShapes_2501(t *testing.T) {
 	}
 	testutil.SkipIfNoMySQL(t)
 
-	tables := []oracle.Table{oracle.TableByName("t_int"), oracle.TableByName("t_comp"), oracle.TableByName("t_text"), oracle.TableByName("t_types")}
+	tables := []oracle.Table{oracle.TableByName("t_int"), oracle.TableByName("t_comp"), oracle.TableByName("t_text"), oracle.TableByName("t_types"), tDatetimeKey}
 	run := prepareRun(t, 2501, 3, tables)
 	// Step 1 is always the snapshot; the draws after it must be refreshes.
 	run.Between[0].(*oracle.SnapshotStep).W = 0
@@ -40,8 +40,8 @@ func TestOracle_pkChangeShapes_2501(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Fallbacks != 0 || res.Applied["refresh"] != 2 || res.Applied["snapshot"] != 1 {
-		t.Fatalf("steps applied %v with %d fallbacks; want one snapshot, two refreshes and no fallback", res.Applied, res.Fallbacks)
+	if res.Applied["refresh"] != 2 || res.Applied["snapshot"] != 1 {
+		t.Fatalf("steps applied %v; want one snapshot and two refreshes", res.Applied)
 	}
 }
 
@@ -65,6 +65,8 @@ func keyOf(table string, n int) string {
 		return fmt.Sprintf("`a` = %d AND `b` = %d", n/1000+1, n%1000)
 	case "t_text":
 		return fmt.Sprintf("`code` = 'k%04d'", n)
+	case "t_dt":
+		return "`at` = " + dtLiteral(n)
 	default:
 		return fmt.Sprintf("`id` = %d", n)
 	}
@@ -76,6 +78,8 @@ func setKey(table string, n int) string {
 		return fmt.Sprintf("`a` = %d, `b` = %d", n/1000+1, n%1000)
 	case "t_text":
 		return fmt.Sprintf("`code` = 'k%04d'", n)
+	case "t_dt":
+		return "`at` = " + dtLiteral(n)
 	default:
 		return fmt.Sprintf("`id` = %d", n)
 	}
@@ -87,6 +91,8 @@ func insertOf(table string, n int, v int) string {
 		return fmt.Sprintf("INSERT INTO `t_comp` (`a`, `b`, `v`) VALUES (%d, %d, %d)", n/1000+1, n%1000, v)
 	case "t_text":
 		return fmt.Sprintf("INSERT INTO `t_text` (`code`, `v`, `note`) VALUES ('k%04d', %d, 'n%d')", n, v, v)
+	case "t_dt":
+		return fmt.Sprintf("INSERT INTO `t_dt` (`at`, `v`) VALUES (%s, %d)", dtLiteral(n), v)
 	case "t_types":
 		return fmt.Sprintf("INSERT INTO `t_types` (`id`, `v`, `amount`, `seen`, `note`) VALUES (%d, %d, %d.25, '2026-04-01 08:00:%02d', 'n%d')", n, v, v, v%60, v)
 	default:
@@ -94,7 +100,20 @@ func insertOf(table string, n int, v int) string {
 	}
 }
 
-var shapeTables = []string{"t_int", "t_comp", "t_text", "t_types"}
+// tDatetimeKey is a table of this test alone: a DATETIME key, so one key the
+// parser spells from a string (not an integer) goes through real capture.
+// Keyed by n as '2026-04-01 00:00:00' + n seconds.
+var tDatetimeKey = oracle.Table{
+	Name: "t_dt",
+	DDL:  "CREATE TABLE `t_dt` (`at` DATETIME NOT NULL, `v` INT NOT NULL, PRIMARY KEY (`at`)) ENGINE=InnoDB",
+	PK:   []string{"at"}, Cols: []string{"at", "v"}, Datetimes: []string{"at"},
+}
+
+func dtLiteral(n int) string {
+	return fmt.Sprintf("'2026-04-01 %02d:%02d:%02d'", n/3600, n/60%60, n%60)
+}
+
+var shapeTables = []string{"t_int", "t_comp", "t_text", "t_types", "t_dt"}
 
 // seedOps inserts keys 1..12 and 101..112 on every table: the rows the
 // shapes move, delete and update.

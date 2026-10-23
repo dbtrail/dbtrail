@@ -39,9 +39,9 @@ const (
 // update has the 7 the issue gave it: the fold folds such an UPDATE as a
 // DELETE of the old key and an INSERT of the new one (#2501), so a window
 // holding one is refreshed like any other and the chain of delta pairs, the
-// thing this net watches, keeps growing. (At 2, with the fold still refusing
-// every such window and the run taking a snapshot instead, 15 of 36 refreshes
-// of a run fell back at weight 7, which is what #2501 was opened on.)
+// thing this net watches, keeps growing. Before #2501 the fold refused every
+// such window and the run took a snapshot instead, so the weight was held at
+// 2 to keep the chain growing at all.
 var Weights = []struct {
 	Kind   Kind
 	Weight int

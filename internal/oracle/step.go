@@ -38,12 +38,6 @@ type Cut struct {
 	PublishedStep int
 }
 
-// HadPKChangeSincePublishOn reports whether an op since the last published
-// cut moved a row of table to another key: the window a refresh folds and a
-// tail holds, so the one that decides whether their refusal is the
-// generator's doing.
-func (c *Cut) HadPKChangeSincePublishOn(table string) bool { return hadPKChange(c.SincePublish, table) }
-
 // TouchedSincePublish reports whether an op since the last published cut
 // changed a row of table: a tail with no key over it is then a tail that
 // was lost, not an idle table.
@@ -56,26 +50,14 @@ func (c *Cut) TouchedSincePublish(table string) bool {
 	return false
 }
 
-func hadPKChange(ops []Op, table string) bool {
-	for _, op := range ops {
-		if table != "" && op.Table != table {
-			continue
-		}
-		for _, ch := range op.Changes {
-			if ch.Kind == KindPKUpdate {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // Step is what a run does to the copy at a cut, before reading it: a
 // snapshot cut, a refresh with table deltas (both publish the cut), or a
 // tail laid by the port's keeper (which does not). A step knows nothing of
-// the oracle; the read after it must equal the source. Weight is its share
-// of the draw between steps; the first cut of a run always takes the first
-// step of the list.
+// the oracle; the read after it must equal the source, and a step that fails
+// fails the run (no step refuses by design: the fold's refusal of a window
+// with a PK-changing UPDATE, once excused here, went with #2501). Weight is
+// its share of the draw between steps; the first cut of a run always takes
+// the first step of the list.
 type Step interface {
 	Name() string
 	Weight() int
@@ -86,17 +68,6 @@ type Step interface {
 	// it was, and a table the port answers as of that cut is compared
 	// with the rows read there.
 	Publishes() bool
-}
-
-// Refuser is a Step that can refuse a cut for a reason the generator
-// caused, which the run then answers with its Fallback step instead of
-// failing. No step implements it today: the one reason there was, the fold
-// refusing a window with a PK-changing UPDATE, went with #2501 (the fold
-// folds such an UPDATE as a DELETE of the old key and an INSERT of the new
-// one), and a refresh that refuses for it now fails the run like any other
-// refusal. The seam stays for the next mechanism that refuses by design.
-type Refuser interface {
-	Refused(err error, cut *Cut) bool
 }
 
 // SnapshotStep writes a full snapshot of the source rows at the cut, the way

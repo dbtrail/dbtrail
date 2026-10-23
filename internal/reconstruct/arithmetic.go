@@ -30,18 +30,6 @@ import (
 //
 //	alive after - alive before = inserts - deletes
 //
-// The PK change worked through, the pair holding one row per key (the fold
-// files such an UPDATE as a DELETE of the old key and an INSERT of the new
-// one at its own position, foldPage): `UPDATE 1→2` alone over a base holding
-// key 1: keys 2, upserts 1, inserts 0, deletes 0, so aliveBefore = 1, and the
-// lookup finds key 1 in the base, dead = 1. `UPDATE 1→2; DELETE 2`: upserts
-// 0, deletes 1, aliveBefore = 1, dead = 1 (key 1). `DELETE 2; UPDATE 1→2`
-// over a base holding 1 and 2: upserts 1, deletes 1, aliveBefore = 2, dead =
-// 2 (both keys). In a rewrite the same three are DeletesSkipped + 1 (the base
-// row of key 1) and InsertsEmitted + 1 (the row under key 2), net 0 — or, for
-// the third, the row under key 2 replacing the base's, an UpdatesApplied,
-// beside the skipped key 1, net -1 = 0 inserts - 1 delete.
-//
 // and alive after is the "u" rows, which gives the keys that were alive
 // before the window, aliveBefore = upserts - inserts + deletes. That number
 // must sit between 0 and the keys. At sequence 0 the base IS the state
@@ -52,6 +40,20 @@ import (
 // can also live in an earlier pair, or sit dead in the base, so only
 // dead <= keys holds. Rows after is the running count rows before + inserts
 // - deletes, stamped in the pair's footer for the next pair to start from.
+//
+// The PK change worked through, the pair holding one row per key (the fold
+// files such an UPDATE as a DELETE of the old key and an INSERT of the new
+// one at its own position, foldPage): `UPDATE 1→2` alone over a base holding
+// key 1: keys 2, upserts 1, inserts 0, deletes 0, so aliveBefore = 1, and the
+// lookup finds key 1 in the base, dead = 1. `UPDATE 1→2; DELETE 2`: upserts
+// 0, deletes 1, aliveBefore = 1, dead = 1 (key 1). `DELETE 2; UPDATE 1→2`
+// over a base holding 1 and 2: upserts 1, deletes 1, aliveBefore = 2, dead =
+// 2 (both keys). In a rewrite over the same bases: the first skips base row
+// 1 and appends the row under key 2, DeletesSkipped 1 and InsertsEmitted 1,
+// net 0 = 0 inserts - 0 deletes; the second skips base row 1 and appends
+// nothing (key 2 is dead and the base never held it), net -1 = 0 - 1; the
+// third skips base row 1 and replaces base row 2 (an UpdatesApplied), net -1
+// = 0 - 1.
 //
 // A rewrite (refreshRewrite). The merge read the resolved state before the
 // window row by row (BaselineRows passed through, UpdatesApplied replaced,

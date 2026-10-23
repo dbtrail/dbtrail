@@ -78,12 +78,11 @@ import (
 // whose decoded spelling is not the stored one). Three paths still REFUSE the
 // run with an actionable error, by design: the shim's `_snapshot` and verify
 // (SnapshotFullTableImages, which fetches one change per key and cannot
-// rebuild the chain), the Iceberg export (icebergexport/fold.go) and
-// single-row reconstruct. Their authoritative check (pkChangingUpdateInEvents)
-// scans the RAW pre-collapse event slice — the map alone would miss a
-// PK-changing UPDATE whose old key a later event reused (`UPDATE 1->2; INSERT
-// 1`); pkChangingUpdate is a cheap map backstop. There, re-snapshot the
-// baseline at or after the PK change and reconstruct from the new one.
+// rebuild the chain; its check, pkChangingUpdateInEvents, scans the raw
+// event slice it is handed, and pkChangingUpdate is its map backstop), the
+// Iceberg export (icebergexport/fold.go, its own per-event guard, not changed
+// by #2501) and single-row reconstruct. There, re-snapshot the baseline at or
+// after the PK change and reconstruct from the new one.
 // Output formats FullTableConfig.OutputFormat accepts.
 const (
 	// OutputFormatMydumper writes a mydumper-compatible SQL dump directory —
@@ -2781,12 +2780,14 @@ func pkChangedInEvent(ev *query.ResultRow, pkCols []metadata.ColumnMeta) (before
 //     overwritten UPDATE, so the moved row (pk=2) is never emitted.
 //
 // The slice is already sorted ascending by (event_timestamp, event_id), so this
-// returns the EARLIEST offender deterministically. Callers that fetch the full
-// window (reconstruct dump, binlog-only fallback) pass their raw events here so
-// the check is window-complete; the map-scan backstop (pkChangingUpdate) covers
-// callers that don't. Note that callers fetching LimitPerPK=1 (shim `_snapshot`,
-// verify) hand a raw slice already collapsed by the query to the latest event
-// per PK, so their detection is bounded by that fetch, not by this scan.
+// returns the EARLIEST offender deterministically. Its one caller today is
+// SnapshotFullTableImages (the shim's `_snapshot` and verify), whose raw slice
+// is already collapsed by the query to the latest event per PK (LimitPerPK=1),
+// so its detection is bounded by that fetch, not by this scan; the map-scan
+// backstop (pkChangingUpdate) follows it. The paged paths (the reconstruct
+// dump, the binlog-only fallback, the refresh) stopped passing their events
+// here with #1097 — foldPage handles the event itself, since #2501 by
+// splitting it (splitPKChange).
 func pkChangingUpdateInEvents(events []query.ResultRow, pkCols []metadata.ColumnMeta) (before, after string, found bool) {
 	for i := range events {
 		if b, a, ok := pkChangedInEvent(&events[i], pkCols); ok {

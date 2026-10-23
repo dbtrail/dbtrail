@@ -239,9 +239,8 @@ deleted then re-inserted across them); `chain` runs tails almost only so the
 chain of files grows to its merge, and asserts the merge happened. A table
 the port answers as of its published cut (no tail) is compared with the rows
 read at that cut, and the run asserts WHY there is no tail: a key the tail
-does not support (only integer keys have one, the product's own rule), a
-key-changing update the generator did in the window, or no change to the
-table since the cut. Any other reason fails the run naming it, so tails
+does not support (only integer keys have one, the product's own rule), or no
+change to the table since the cut. Any other reason fails the run naming it, so tails
 silently off cannot pass.
 
 One rule: **a seed that fails never widens the oracle.** The product is fixed,

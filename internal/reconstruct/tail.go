@@ -158,7 +158,9 @@ func (t *Tail) Apply(page []query.ResultRow) error {
 	// The keys changed come from the fold, not from the page's own pk_values:
 	// an UPDATE that moves a row to another key is folded as a DELETE of the
 	// old key and an INSERT of the new one (#2501), and a delta that marked
-	// only the old key would leave the moved row out.
+	// only the old key would leave the moved row out. No pg option here: the
+	// PostgreSQL safety of that split comes from the check above, which
+	// refuses a row without a binary log coordinate (an LSN holds a "/").
 	opts := foldOptions{touched: func(key string) { t.dirty[key] = struct{}{} }}
 	if err := foldPage(page, t.schema, t.table, t.pkCols, nil, opts, &t.fold); err != nil {
 		return err

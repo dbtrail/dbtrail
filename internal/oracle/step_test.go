@@ -4,29 +4,7 @@ import (
 	"context"
 	"math/rand/v2"
 	"testing"
-
-	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
-
-// pkChangeErr is the fold's own refusal text (the one the three untouched paths
-// keep), so a reword of it fails here.
-func pkChangeErr(table string) error {
-	return reconstruct.PKChangingUpdateError("s", table, "7", "28")
-}
-
-// A refresh refuses nothing by design any more: the one reason it did (the
-// fold's #782 refusal of a window with a PK-changing UPDATE) went with #2501,
-// so RefreshStep must NOT implement Refuser — the run then fails on that
-// error instead of taking the fallback, and a product defect cannot hide
-// behind it.
-func TestRefreshStep_isNotARefuser(t *testing.T) {
-	if _, ok := any(&RefreshStep{}).(Refuser); ok {
-		t.Fatal("RefreshStep implements Refuser: a refresh refused for a PK-changing UPDATE would take the fallback instead of failing the run")
-	}
-	if err := pkChangeErr("t_int"); err == nil {
-		t.Fatal("the #782 error the three untouched paths keep must still exist")
-	}
-}
 
 type fakeStep struct {
 	name string
@@ -39,9 +17,8 @@ func (f fakeStep) Apply(context.Context, *Cut) error { return nil }
 func (f fakeStep) Publishes() bool                   { return true }
 
 // TestCut_sincePublish: the window since the published cut is what a
-// refresh folds and a tail holds, so a PK move and a touch are asked over
-// it, not over this step's ops; a no-op and an op that changed nothing do
-// not touch.
+// refresh folds and a tail holds, so a touch is asked over it, not over
+// this step's ops; a no-op and an op that changed nothing do not touch.
 func TestCut_sincePublish(t *testing.T) {
 	c := &Cut{
 		Ops: []Op{{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 1}}}},
@@ -51,9 +28,6 @@ func TestCut_sincePublish(t *testing.T) {
 			{Table: "t_text"},
 			{Table: "t_int", Changes: []Change{{Kind: KindUpdate, Key: 1}}},
 		},
-	}
-	if !c.HadPKChangeSincePublishOn("t_uniq") || c.HadPKChangeSincePublishOn("t_int") {
-		t.Fatalf("since publish: t_uniq=%v t_int=%v; want true false", c.HadPKChangeSincePublishOn("t_uniq"), c.HadPKChangeSincePublishOn("t_int"))
 	}
 	for table, want := range map[string]bool{"t_int": true, "t_uniq": true, "t_comp": false, "t_text": false, "t_none": false} {
 		if got := c.TouchedSincePublish(table); got != want {

@@ -65,7 +65,7 @@ func TestOracleTails(t *testing.T) {
 				if res.Applied["tail"] == 0 {
 					t.Fatalf("no tail step applied in %d steps: %v", steps, res.Applied)
 				}
-				t.Logf("seed %d: %d steps, %d ops, applied %v, %d fallbacks, chains up to %d files, in %s", seed, res.Steps, res.Ops, res.Applied, res.Fallbacks, chains.longest, res.Wall.Round(time.Millisecond))
+				t.Logf("seed %d: %d steps, %d ops, applied %v, chains up to %d files, in %s", seed, res.Steps, res.Ops, res.Applied, chains.longest, res.Wall.Round(time.Millisecond))
 			})
 		}
 	})
@@ -336,7 +336,7 @@ func runTailSeed(t *testing.T, seed uint64, steps int, tables []oracle.Table, wS
 	run := &oracle.Run{
 		Seed: seed, Steps: steps, Schema: sourceName, Tables: tables,
 		Source: sourceDB, Index: indexDB, Capture: captureErr, Root: root,
-		Between: between, Fallback: snapshot,
+		Between: between,
 		Read: func(ctx context.Context, cut *oracle.Cut, wallClock bool) (oracle.Read, error) {
 			return tail.read(ctx, cut, wallClock, watch)
 		},

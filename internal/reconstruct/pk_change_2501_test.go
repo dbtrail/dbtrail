@@ -208,6 +208,22 @@ func TestFoldPage_pkChange_acrossPages(t *testing.T) {
 	}
 }
 
+// Rows with no binary log coordinate (archives from before positions were
+// stored, pre-#1180 MariaDB positions): LaterInBinlog cannot order them and
+// arrival order rules, for the halves as for any row. C and E arrive in
+// their real order here.
+func TestFoldPage_pkChange_noCoordinatesArrivalOrder(t *testing.T) {
+	strip := func(evs ...query.ResultRow) []query.ResultRow {
+		for i := range evs {
+			evs[i].BinlogFile, evs[i].StartPos, evs[i].EndPos = "", 0, 0
+		}
+		return evs
+	}
+	wantState(t, foldPK(t, strip(pkUpd(1, 0, 1, 2, "moved"), pkIns(2, 0, 1, "reinserted"))), map[int]string{1: "reinserted", 2: "moved"})
+	wantState(t, foldPK(t, strip(pkDel(1, 0, 2), pkUpd(2, 0, 1, 2, "took its place"))), map[int]string{1: "", 2: "took its place"})
+	wantState(t, foldPK(t, strip(pkUpd(1, 0, 1, 2, "moved")), strip(pkDel(2, 0, 2))), map[int]string{1: "", 2: ""})
+}
+
 // I: the #2151 shape with a PK change. A DELETE of key 2 that waited on the
 // row lock the UPDATE 1→2 held commits AFTER it (pos 300) but started earlier,
 // so it arrives first. Key 2 must keep the DELETE: the synthetic INSERT sits at
@@ -229,7 +245,25 @@ func TestFoldPage_pkChange_outOfOrderByLock(t *testing.T) {
 	}
 }
 
-// pkRefusal asserts today's #782 refusal text, unchanged.
+// spellingRefusal asserts the #2501 refusal of a split the index's spelling
+// does not prove: it names both keys, the stored spelling and the remedy.
+func spellingRefusal(t *testing.T, err error, before, after string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected the spelling refusal, got nil")
+	}
+	for _, want := range []string{"PK-changing UPDATE", "mydb.orders", fmt.Sprintf("%q", before), fmt.Sprintf("%q", after), "cannot follow", "bintrail baseline", "UUID"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%s", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "before-image primary key") {
+		t.Errorf("the spelling refusal must not blame the before-image fold, which is not the cause any more:\n%s", err)
+	}
+}
+
+// pkRefusal asserts today's #782 refusal text, unchanged: what the
+// PostgreSQL gate and the three untouched paths say.
 func pkRefusal(t *testing.T, err error, before, after string) {
 	t.Helper()
 	if err == nil {
@@ -245,11 +279,18 @@ func pkRefusal(t *testing.T, err error, before, after string) {
 // J and the per-type table: the split happens only when the decoded
 // before-image spells the key exactly as the parser stored it, which proves
 // the synthetic INSERT's key (spelled from the decoded after-image) is what a
-// later real event on that key carries. Each row builds the stored key the
-// way the parser does (event.BuildPKValues over the Go values go-mysql and
-// metadata.MapRow deliver), stores the images the way the indexer does
-// (encoding/json) and decodes them the way the fold does
-// (query.UnmarshalRowImage, then decodeImageBinaries for BINARY).
+// later real event on that key carries, AND when every decoded value of the
+// new key is one formatPKValue spells the same way from a string as from the
+// parser's bytes: a scalar (a JSON container the indexer promoted prints as
+// `[1 2]`, not `[1,2]`) and, for a string, valid UTF-8 (a TEXT key decodes
+// to a Go string, on which the hex rule for invalid bytes never applies).
+// Each row builds the stored key the way the parser does (event.BuildPKValues
+// over the Go values go-mysql and metadata.MapRow deliver), stores the images
+// the way the indexer does (encoding/json) and decodes them the way the fold
+// does (query.UnmarshalRowImage, then decodeImageBinaries / the MariaDB
+// fixed-width renderer). The rows are asserted from those literal shapes,
+// not from captured rows: the scripted oracle (TestOracle_pkChangeShapes_2501)
+// is where INT, composite, VARCHAR and DATETIME keys go through real capture.
 func TestFoldPage_pkChange_spellingProofPerType(t *testing.T) {
 	type row struct {
 		name   string
@@ -261,9 +302,24 @@ func TestFoldPage_pkChange_spellingProofPerType(t *testing.T) {
 		split  bool
 	}
 	colsOf := func(cols ...metadata.ColumnMeta) []metadata.ColumnMeta { return cols }
-	bin := []byte{0xB2, 0x81, 0x00, 0x00} // not UTF-8: spelled 0xB2810000
-	bin2 := []byte{0xB2, 0x82, 0x00, 0x00}
+	bin := []byte{0xB2, 0x81, 0xC3, 0x28} // not UTF-8: spelled 0xB281C328
+	bin2 := []byte{0xB2, 0x82, 0xC3, 0x28}
 	decodeBinary := func(m map[string]any) { decodeImageBinaries(m, map[string]bool{"id": true}) }
+	decodeText := func(m map[string]any) { decodeImageBinaries(m, map[string]bool{"id": false}) }
+	// The indexer promotes TEXT bytes that look like a JSON container to a
+	// JSON value (marshalRow), which decodes as []any.
+	decodeTextJSON := func(m map[string]any) {
+		decodeText(m)
+		if m["id"] == "[1,2]" {
+			m["id"] = []any{json.Number("1"), json.Number("2")}
+		}
+	}
+	// A MariaDB UUID key: the parser pads it to 16 bytes and stores them raw
+	// or hex; the fold's decoder renders the stored base64 as the server's
+	// text form (renderImageMariaDBFixed), which never equals the stored key.
+	uuid1 := []byte{0xB2, 0x81, 0xC3, 0x28, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	uuid2 := []byte{0xB2, 0x82, 0xC3, 0x28, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	decodeUUID := func(m map[string]any) { renderImageMariaDBFixed(m, map[string]string{"id": "uuid"}) }
 	float := func(m map[string]any) {
 		for k, v := range m {
 			if n, ok := v.(json.Number); ok {
@@ -283,6 +339,16 @@ func TestFoldPage_pkChange_spellingProofPerType(t *testing.T) {
 			map[string]any{"id": bin}, map[string]any{"id": bin2}, decodeBinary, true},
 		{"binary(4) left as stored base64 (decode degraded)", colsOf(metadata.ColumnMeta{Name: "id", DataType: "binary"}),
 			map[string]any{"id": bin}, map[string]any{"id": bin2}, nil, false},
+		{"text key, both keys ASCII", colsOf(metadata.ColumnMeta{Name: "id", DataType: "text"}),
+			map[string]any{"id": []byte("cafe")}, map[string]any{"id": []byte("cafes")}, decodeText, true},
+		// A latin1 byte in the NEW key: the parser stores the later DELETE of
+		// that key as 0x636166E9, but the decoded string spells it raw.
+		{"text key, new key holds a byte that is not UTF-8", colsOf(metadata.ColumnMeta{Name: "id", DataType: "text"}),
+			map[string]any{"id": []byte("cafe")}, map[string]any{"id": []byte{'c', 'a', 'f', 0xE9}}, decodeText, false},
+		{"text key, new key looks like a JSON container", colsOf(metadata.ColumnMeta{Name: "id", DataType: "text"}),
+			map[string]any{"id": []byte("k1")}, map[string]any{"id": []byte("[1,2]")}, decodeTextJSON, false},
+		{"mariadb uuid key rendered as text", colsOf(metadata.ColumnMeta{Name: "id", DataType: "uuid"}),
+			map[string]any{"id": uuid1}, map[string]any{"id": uuid2}, decodeUUID, false},
 		{"datetime", colsOf(metadata.ColumnMeta{Name: "id", DataType: "datetime"}),
 			map[string]any{"id": "2026-04-01 08:00:00"}, map[string]any{"id": "2026-04-01 08:00:01"}, nil, true},
 		{"decimal", colsOf(metadata.ColumnMeta{Name: "id", DataType: "decimal"}),
@@ -319,7 +385,7 @@ func TestFoldPage_pkChange_spellingProofPerType(t *testing.T) {
 			res := &foldResult{Changes: map[string]*query.ResultRow{}}
 			err := foldPage([]query.ResultRow{ev}, "mydb", "orders", r.pkCols, nil, foldOptions{}, res)
 			if !r.split {
-				pkRefusal(t, err, event.BuildPKValues(r.pkCols, ev.RowBefore), event.BuildPKValues(r.pkCols, ev.RowAfter))
+				spellingRefusal(t, err, stored, event.BuildPKValues(r.pkCols, ev.RowAfter))
 				if len(res.Changes) != 0 {
 					t.Errorf("a refused page left %d entries", len(res.Changes))
 				}
@@ -543,12 +609,18 @@ func readTailRows(t *testing.T, path string) string {
 	return strings.Join(got, ",")
 }
 
-// The refusal the three untouched paths keep is the same error value, so a
-// caller that matched it (the oracle, the console) still can.
+// The refusal the PostgreSQL gate and the three untouched paths keep is the
+// #782 error, text unchanged; the spelling refusal is its own text, naming
+// the stored and the decoded spelling and what to do.
 func TestPKChangingUpdateErr_isUnchanged(t *testing.T) {
 	err := pkChangingUpdateErr("mydb", "orders", "1", "2")
 	pkRefusal(t, err, "1", "2")
 	if errors.Unwrap(err) != nil {
 		t.Error("the refusal must stay a plain error")
+	}
+	err = pkSpellingErr("mydb", "orders", "0xB281", "0xB282", `the index stores the old key as "0xB281" but its row image decodes as "sYE="`)
+	spellingRefusal(t, err, "0xB281", "0xB282")
+	if !strings.Contains(err.Error(), `"sYE="`) {
+		t.Errorf("the spelling refusal must show the decoded spelling:\n%s", err)
 	}
 }
