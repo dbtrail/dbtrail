@@ -42,6 +42,9 @@ type scanned struct {
 	// occurred. All three are read from the client's text, before any
 	// rewrite.
 	doubleQuoted, backslash, hash bool
+	// twoDigitYear: a string literal is written as a date with a two-digit
+	// year (TwoDigitYear), whatever refusal came first (UnroutedVeto).
+	twoDigitYear bool
 	// refusal names why the names cannot be rewritten with certainty, or "".
 	refusal string
 }
@@ -225,6 +228,7 @@ func scan(stmt string) scanned {
 				// the string is used as a date is not read: any string
 				// written this way keeps the statement on the source.
 				refuse(vetoTwoDigitYear)
+				sc.twoDigitYear = true
 			}
 			if amountOfInterval && closed && !wholeNumber(stmt[i+1:j]) {
 				// MySQL cuts a quoted amount at the first character that

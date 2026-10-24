@@ -188,8 +188,8 @@ func copyWords(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{isNull, diff, "", "the column status under the alias isnull on the source (open, done, open); the test status IS NULL on the copy"},
 		{reserved, refused, "", "at is a column on the source and a syntax error on the copy"},
 		{anyColumn, refused, "", "the column status under an alias on the source; a constant of a type the copy does not have"},
-		{curUser, diff, "", "the source's user (root@localhost) on the source, duckdb on the copy"},
-		{curRole, diff, "", "NONE on MySQL, NULL on MariaDB, duckdb on the copy"},
+		{curUser, refused, "", "refused on a connection the copy answers alone (#2532); it would read the source's user (root@localhost) on the source, duckdb on the copy"},
+		{curRole, refused, "", "refused on a connection the copy answers alone (#2532); it would read NONE on MySQL, NULL on MariaDB, duckdb on the copy"},
 	}
 	by := compareInHalves(t, sourceDSN, copies, policy, fixtures)
 	checkValuesFixtures(t, sourceDSN, copies[0], fixtures, by)

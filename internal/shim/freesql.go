@@ -946,6 +946,15 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 			h.noteAnswer(side)
 		}()
 	}
+	if h.router == nil {
+		// Where the copy answers alone there is no MySQL to send a
+		// statement written for MySQL to: one the copy would answer
+		// differently, without an error, is refused with what to write
+		// instead (#2532). A routed connection's ladder vetoes it to MySQL.
+		if r, refused := readrouter.UnroutedVeto(qstr); refused {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, r.Message())
+		}
+	}
 	// Before anything is run (#2241): a statement whose result the port has
 	// no room to hold is refused here, not after the copy answered it.
 	if err := h.cfg.ResultBudget.admit(h.logger); err != nil {
