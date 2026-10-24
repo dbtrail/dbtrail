@@ -234,6 +234,11 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT side, n + 1, created_on FROM ev WHERE created_on >= '2026-01-15' ORDER BY n", who: "copy", why: "a + that is not next to the date"},
 		{stmt: "SELECT side, n FROM ev WHERE created_on = ? ORDER BY n", args: []any{"2026-01-15"}, who: "copy", why: "a date with its whole year bound to a prepared statement"},
 		{stmt: "SELECT side, created_on + INTERVAL 1 DAY FROM ev ORDER BY n", who: "copy", why: "a date plus INTERVAL: the same day, a known difference in how it is shown"},
+		// #2532: DISTINCT inside an aggregate, decided by the column's type.
+		{stmt: "SELECT MIN(side), COUNT(DISTINCT n), COUNT(DISTINCT created_on), COUNT(DISTINCT ev.dt) FROM ev", who: "copy", why: "DISTINCT over a number and dates: counted alike"},
+		{stmt: "SELECT MIN(side), COUNT(DISTINCT side) FROM ev", who: "live", why: "DISTINCT over text: the copy does not fold its case"},
+		{stmt: "SELECT MIN(side), COUNT(DISTINCT n + 1) FROM ev", who: "live", why: "DISTINCT over an expression"},
+		{stmt: "SELECT MIN(side), COUNT(DISTINCT n) FROM (SELECT side, side AS n FROM ev) q", who: "live", why: "DISTINCT over a name a subquery defines"},
 	} {
 		got := answerText(routed, c.stmt, c.args...)
 		t.Logf("routed  %-60s %s", got, c.stmt)
@@ -259,10 +264,12 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		t.Errorf("routed created_on + 1: got %s, want 20260102 / 20260204 / 20260116", got)
 	}
 
-	// Who answered, and why the source: twelve statements declined by the
-	// copy for a column's type (ten in the list, the star over the TIME column and the one just now), two kept on
-	// the source from the text (the bit operator, the bound two-digit year),
-	// four answered by the copy, and the copy at fault in none.
+	// Who answered, and why the source: fifteen statements declined by the
+	// copy for a column's type (ten in the list, three DISTINCT aggregates
+	// over text, an expression or a subquery's name (#2532), the star over
+	// the TIME column and the one just now), two kept on the source from the
+	// text (the bit operator, the bound two-digit year), five answered by the
+	// copy, and the copy at fault in none.
 	req := httptest.NewRequest("GET", "http://127.0.0.1/api/flashback", nil)
 	req.Header.Set("Authorization", "Bearer tok")
 	rec := httptest.NewRecorder()
@@ -279,7 +286,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_columns_differ"] != 12 || reasons["veto"] != 2 || reasons["expensive_plan"] != 4 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 12, veto 2, expensive_plan 4, copy_refused 0, explain_failed 0", reasons)
+	if reasons["copy_columns_differ"] != 15 || reasons["veto"] != 2 || reasons["expensive_plan"] != 5 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 15, veto 2, expensive_plan 5, copy_refused 0, explain_failed 0", reasons)
 	}
 }

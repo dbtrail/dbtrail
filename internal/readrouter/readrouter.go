@@ -198,7 +198,8 @@ var vetoes = []struct {
 	{"MATCH AGAINST", regexp.MustCompile(`(?i)\bmatch\s*\(.*\)\s*against\b`)},
 	{"binary string comparison", regexp.MustCompile(`(?i)\bbinary\s+[\w\x60'"(]`)},
 	{"LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)", regexp.MustCompile(`(?i)\b(like|regexp|rlike)\b`)}, // the copy's default collation (nocase) does not reach LIKE (DuckDB #10416)
-	{"DISTINCT inside an aggregate (not folded by the copy's collation)", regexp.MustCompile(`(?i)\b(count|sum|avg|min|max|group_concat)\s*\(\s*distinct\b`)},
+	// DISTINCT inside an aggregate is decided by the types of its columns
+	// where they are known (DistinctVeto, #2532), not here.
 	{"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)", regexp.MustCompile(`(?i)\b(instr|locate|position|strcmp|field|find_in_set)\s*\(`)},
 	{"|| (string concatenation on the copy, logical OR on MySQL)", regexp.MustCompile(`\|\|`)},
 	{"JSON function or -> operator (missing or different on the copy)", regexp.MustCompile(`(?i)\bjson_[a-z_]+\s*\(|->>?`)}, // JSON_UNQUOTE does not exist on the copy; JSON_EXTRACT paths and quoting differ

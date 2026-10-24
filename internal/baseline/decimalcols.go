@@ -65,6 +65,41 @@ type TableFooter struct {
 	// keeps a statement that does arithmetic on one, or names a TIME or a
 	// YEAR, on the source (#2133).
 	Temporal []TemporalColumn
+	// DistinctSafe are the table's columns whose DISTINCT values the copy
+	// counts as MySQL does, a whole number, an exact decimal or a date, and
+	// DistinctOther every other column (DistinctColumns). Read routing lets
+	// the copy answer COUNT(DISTINCT col) only over the first (#2532).
+	DistinctSafe, DistinctOther []string
+}
+
+// DistinctColumns splits a parsed schema into the columns whose DISTINCT
+// values the copy counts as MySQL does and all the others (#2532). Safe are
+// the integer types, BOOL, an exact DECIMAL the copy holds as a decimal
+// (MaxDuckDBDecimalPrecision or less) and DATE, DATETIME, TIMESTAMP and
+// YEAR: values equal on one side are equal on the other. Not safe: text,
+// ENUM, SET, JSON and binary, whose equality depends on the collation; FLOAT
+// and DOUBLE, whose values are not compared exactly; TIME, which the copy
+// holds as text; a wider DECIMAL, held as text; a value kept verbatim as
+// text (RawText); and every type not known here.
+func DistinctColumns(cols []Column) (safe, other []string) {
+	for _, c := range cols {
+		ok := false
+		if !c.RawText {
+			switch c.MySQLType {
+			case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "bool", "boolean",
+				"date", "datetime", "timestamp", "year":
+				ok = true
+			case "decimal", "numeric":
+				ok = c.DecimalPrecision > 0 && c.DecimalPrecision <= MaxDuckDBDecimalPrecision
+			}
+		}
+		if ok {
+			safe = append(safe, c.Name)
+		} else {
+			other = append(other, c.Name)
+		}
+	}
+	return safe, other
 }
 
 // TemporalColumn is a column MySQL holds as a date, a time or a year, and the
@@ -408,6 +443,9 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 			BinaryText: BinaryCollationColumns(string(createSQL), cols),
 			Columns:    columnNames(cols), StarDiffers: starDifference(string(createSQL)),
 			NotHeld: notHeld, NotHeldUnread: notHeldUnread, Temporal: TemporalColumns(cols)}
+		f := st.footers[file]
+		f.DistinctSafe, f.DistinctOther = DistinctColumns(cols)
+		st.footers[file] = f
 	}
 	if err := rows.Err(); err != nil {
 		// Warn: an iteration that dies partway leaves every file after the

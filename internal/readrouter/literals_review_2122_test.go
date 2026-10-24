@@ -210,7 +210,7 @@ func TestVeto_dateInsideAGroup(t *testing.T) {
 		"SELECT avg ( CAST(ts AS DATE) ) FROM t":                               vetoDateArithmetic,
 		"SELECT AVG(DATE '2026-01-01')":                                        vetoDateArithmetic,
 		"SELECT AVG(GREATEST(DATE(a), DATE(b))) FROM t":                        vetoDateArithmetic,
-		"SELECT AVG(DISTINCT DATE(ts)) FROM t":                                 "DISTINCT inside an aggregate (not folded by the copy's collation)",
+		"SELECT AVG(DISTINCT DATE(ts)) FROM t":                                 "date or timestamp, or a group that holds one, next to + or -, or under AVG (a number built from its digits on MySQL; a date, a count of days or an interval on the copy)",
 		"SELECT MAX(CAST(? AS DATE)) + ? FROM t":                               vetoDateArithmetic, // a prepared statement's template
 		// Over-vetoes, on purpose: the group holds a date, whatever it
 		// returns.

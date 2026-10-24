@@ -942,7 +942,11 @@ What this is and is not:
   literals, a backslash inside a string literal (an escape on MySQL, a
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where
-  `5--3` is 8; a comment on the copy), a `#` comment (a comment on MySQL; on the copy `#2` is the table's second column), `count(DISTINCT ...)`, `INSTR`/`LOCATE`,
+  `5--3` is 8; a comment on the copy), a `#` comment (a comment on MySQL; on the copy `#2` is the table's second column), `count(DISTINCT ...)` over text, an
+  expression or a column whose type is not known (over a bare number or
+  date column, `COUNT(DISTINCT ol_w_id)`, the copy answers: both count the
+  same values; a name a subquery or `WITH` defines, or the aggregate in
+  `HAVING` or `ORDER BY`, stays on MySQL), `INSTR`/`LOCATE`,
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
   row on MySQL and two on the copy; `UNION ALL` is not kept back),

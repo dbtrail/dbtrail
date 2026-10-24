@@ -64,6 +64,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		in.Baselines[i].NotHeld = f.NotHeld
 		in.Baselines[i].NotHeldUnread = f.NotHeldUnread
 		in.Baselines[i].Temporal = f.Temporal
+		in.Baselines[i].DistinctSafe, in.Baselines[i].DistinctOther = f.DistinctSafe, f.DistinctOther
 		in.Baselines[i].SchemaKnown = true
 	}
 }

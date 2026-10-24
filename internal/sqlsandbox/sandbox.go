@@ -271,9 +271,15 @@ type Session struct {
 // of those tables' columns (#2131): names are all of them, and the answer
 // is why the copy would refuse the statement, or "". It spares the copy a
 // statement it cannot run; it is not what keeps a wrong answer away.
+//
+// DistinctVeto is the third (#2532): safe are the columns whose DISTINCT
+// values the copy counts as MySQL does (numbers and dates), other all the
+// rest, and the answer is why an aggregate over DISTINCT values must not be
+// answered by the copy, or "".
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
 	NameVeto(names []string) string
+	DistinctVeto(safe, other []string) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,

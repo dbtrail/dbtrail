@@ -176,6 +176,10 @@ type BaselineTable struct {
 	// (baseline.TableFooter.Temporal). Set with SchemaKnown. TypedColumns
 	// is the reader.
 	Temporal []baseline.TemporalColumn
+	// DistinctSafe and DistinctOther split the table's columns into those
+	// whose DISTINCT values the copy counts as MySQL does and the rest
+	// (baseline.TableFooter.DistinctSafe, #2532). Set with SchemaKnown.
+	DistinctSafe, DistinctOther []string
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool

@@ -1504,7 +1504,37 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlTypesRefusalFor(narrowed, refs, types); msg != "" {
 		return msg
 	}
+	if msg := sqlDistinctRefusalFor(narrowed, statement, types); msg != "" {
+		return msg
+	}
 	return sqlWordsRefusalFor(narrowed, types)
+}
+
+// sqlDistinctRefusalFor says why the copy must not answer a statement because
+// of an aggregate over DISTINCT values, or "" when it can (#2532). The
+// copy's collation does not reach DISTINCT inside an aggregate, so over text
+// it counts 'Paid' and 'paid' as two values where MySQL counts one; over a
+// number or a date both count the same. The rule is the routing layer's
+// (readrouter.DistinctVeto, asked through types), over every table's columns
+// split by type from its snapshot's table definition. With no reading of the
+// statement to ask (types is nil) the copy does not answer a statement that
+// holds the word DISTINCT anywhere: not known is never "nothing to find".
+func sqlDistinctRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes) string {
+	why := ""
+	switch {
+	case types == nil && strings.Contains(strings.ToLower(statement), "distinct"):
+		why = "the statement could not be searched for an aggregate over DISTINCT values"
+	case types != nil:
+		var safe, other []string
+		for _, t := range narrowed.SelectedBaselines() {
+			safe, other = append(safe, t.DistinctSafe...), append(other, t.DistinctOther...)
+		}
+		why = types.DistinctVeto(safe, other)
+	}
+	if why == "" {
+		return ""
+	}
+	return "the copy does not answer this statement: " + why
 }
 
 // sqlWordsRefusalFor says why the copy would refuse a statement because of

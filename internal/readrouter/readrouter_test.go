@@ -73,7 +73,7 @@ func TestVeto(t *testing.T) {
 		"SELECT * FROM t WHERE BINARY name = 'A'":               "binary string comparison",
 		"SELECT /*+ NO_INDEX(t) */ * FROM t":                    "optimizer hint or MySQL comment",
 		"SELECT * FROM t WHERE name LIKE 'a%'":                  "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
-		"SELECT count(DISTINCT status) FROM t":                  "DISTINCT inside an aggregate (not folded by the copy's collation)",
+		"SELECT count(DISTINCT status) FROM t":                  "",
 		"SELECT INSTR(name, 'x') FROM t":                        "INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)",
 		"SELECT * FROM t WHERE name REGEXP '^a'":                "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
 		"SELECT * FROM t WHERE x > 5--3 AND y = 1":              "-- without a space after it (two minus signs on MySQL, a comment on the copy)",

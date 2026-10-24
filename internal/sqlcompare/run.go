@@ -480,7 +480,7 @@ func WriteText(w io.Writer, rep *Report) {
 	if rep.NothingCompared() {
 		fmt.Fprintln(w, "NOTHING WAS COMPARED: no statement reached both sides. Check the copy (NOT_ON_COPY lines), the source (SOURCE_ERROR) and the statement file (SKIPPED).")
 	}
-	fmt.Fprintln(w, "Not modelled here: the copy's age (past --route-max-copy-age the port forwards a statement unless the tables it reads are unchanged since their snapshot), transactions and session SETs (the port forwards those too). A copy behind the source shows up as a difference.")
+	fmt.Fprintln(w, "Not modelled here: the copy's age (past --route-max-copy-age the port forwards a statement unless the tables it reads are unchanged since their snapshot), transactions and session SETs (the port forwards those too), and the column types the port checks before the copy answers (arithmetic on a date, an aggregate over DISTINCT text: the port forwards those, and here they are compared). A copy behind the source shows up as a difference.")
 }
 
 // WriteJSON renders the report as JSON.

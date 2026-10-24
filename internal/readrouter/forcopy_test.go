@@ -205,7 +205,7 @@ func TestVeto_everyVetoStillFiresOnBacktickStatements(t *testing.T) {
 		"SELECT `a` AS $\xff$, 2 AS $\xff$ FROM `t`":        vetoDollar,
 		"SELECT * FROM `t` WHERE `name` LIKE 'a%'":          "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
 		"SELECT * FROM `t` WHERE `name` LIKE BINARY 'a%'":   "binary string comparison",
-		"SELECT count(DISTINCT `status`) FROM `t`":          "DISTINCT inside an aggregate (not folded by the copy's collation)",
+		"SELECT count(DISTINCT `status`) FROM `t`":          "",
 		"SELECT INSTR(`name`, 'x') FROM `t`":                "INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)",
 		"SELECT `a` || `b` FROM `t`":                        "|| (string concatenation on the copy, logical OR on MySQL)",
 		"SELECT JSON_EXTRACT(`v`, '$.tier') FROM `t`":       "JSON function or -> operator (missing or different on the copy)",
