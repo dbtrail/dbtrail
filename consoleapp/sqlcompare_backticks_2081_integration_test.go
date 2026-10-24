@@ -411,7 +411,7 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		// (#2122): kept on MySQL, with or without quoted names.
 		kept("SELECT 0x10", noc, "starts with a digit", "refused on a connection the copy answers alone (#2532), where it would read the byte 0x10 on MySQL; the number 0 in a column named x10 on the copy"),
 		kept("SELECT 0b101", noc, "starts with a digit", "refused on a connection the copy answers alone (#2532), where it would read the byte 0x05 on MySQL; 0 in a column named b101 on the copy"),
-		kept("SELECT 2fa FROM (SELECT 7 AS `2fa`) `t`", noc, "starts with a digit", "refused on a connection the copy answers alone (#2532), where it would read a name may start with a digit on MySQL (7); the copy reads the number 2 under the alias fa"),
+		kept("SELECT 2fa FROM (SELECT 7 AS `2fa`) `t`", diff, "starts with a digit", "a name may start with a digit on MySQL (7); the copy reads the number 2 under the alias fa"),
 		same("SELECT `2fa` FROM (SELECT 7 AS `2fa`) `t`", "the same name quoted is a name on both"),
 		kept("SELECT b'1'", noc, "right against a string literal", "refused on a connection the copy answers alone (#2532), where it would read a bit string on MySQL (the byte 0x01); the text b1 on the copy"),
 		kept("SELECT x'41'", noc, "right against a string literal", "refused on a connection the copy answers alone (#2532), where it would read a hexadecimal string on MySQL (A); the text x41 on the copy"),
@@ -428,7 +428,7 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		kept("SELECT DATE '2026-01-01' + INTERVAL '1e2' DAY", diff, "quoted amount that is not a whole number", "MySQL cuts the amount at the e (one day); the copy reads a hundred"),
 		kept("SELECT `created_on` + INTERVAL (1.5) DAY FROM `orders` WHERE `id` = 1", diff, "in parentheses or a placeholder", "MySQL rounds the expression (two days later), the copy cuts it (one)"),
 		kept("SELECT AVG(TIME '10:00:00')", diff, "under AVG", "100000.0000 on MySQL, the time 10:00:00 on the copy"),
-		kept("SELECT 1.5_5", noc, "starts with a digit", "refused on a connection the copy answers alone (#2532), where it would read 1.5 under the alias _5 on MySQL; 1.55 on the copy"),
+		kept("SELECT 1.5_5", diff, "starts with a digit", "1.5 under the alias _5 on MySQL; 1.55 on the copy"),
 		same("SELECT `id` FROM `orders` WHERE `created_on` >= DATE '2026-01-05' - INTERVAL 1 DAY ORDER BY `id`", "a date minus INTERVAL is the same day on both: not kept back"),
 		// What the text does not show (#2122): the same arithmetic on a column
 		// is not vetoed, because nothing in the text says the column is a

@@ -163,7 +163,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, copyAddr, srcName),
 		fmt.Sprintf("%s:tok@tcp(%s)/%s", entB.ID, copyAddr, srcName),
 	}
-	diff, refused := sqlcompare.Different, sqlcompare.NotOnCopy
+	diff := sqlcompare.Different
 	fixtures := []valuesFixture{
 		{plus, diff, "", "a DATE plus a number: 20260102 on the source, 2026-01-02 on the copy"},
 		{minus, diff, "", "the difference of two numbers on the source (102), a count of days on the copy (33)"},
@@ -171,7 +171,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{alias, diff, "", "the same date under an alias, from outside its subquery"},
 		{timeText, diff, "rows", "a TIME is text on the copy: '10:00:00' sorts before '9:00:00' there"},
 		{bitOr, diff, "", "64 unsigned bits on the source (18446744073709551608), signed on the copy (-8)"},
-		{yearTwo, refused, "", "refused on a connection the copy answers alone (#2532); it would read the year 2026 on the source (one row), the year 26 on the copy (none)"},
+		{yearTwo, diff, "rows", "the year 2026 on the source (one row), the year 26 on the copy (none)"},
 		{castFrac, diff, "", "the fraction is rounded by MySQL, cut by MariaDB and kept by the copy"},
 		{renamed, diff, "", "20260100 on the source, 2025-12-31 on the copy"},
 		{timeStar, diff, "", "by time on the source (-05:00:00 first, 100:00:00 last); as text on the copy"},

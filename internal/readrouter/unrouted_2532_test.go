@@ -21,6 +21,12 @@ func TestUnroutedVeto(t *testing.T) {
 		"SELECT EXTRACT(WEEK FROM d) FROM t":             "weekofyear",
 		"SELECT STR_TO_DATE(s, '%Y') FROM t":             "strptime",
 		"SELECT DATEDIFF(a, b) FROM t":                   "date_diff",
+		"SELECT TIMEDIFF(a, b) FROM t":                   "end - start",
+		"SELECT @@version":                               "variable",
+		"SELECT a FROM t WHERE b = @x":                   "variable",
+		"SELECT FOUND_ROWS ( )":                          "MySQL",
+		"SELECT SQL_CALC_FOUND_ROWS a FROM t":            "MySQL",
+		"SELECT MICROSECOND(ts) FROM t":                  "% 1000000",
 		"SELECT TIMESTAMPDIFF(DAY, a, b) FROM t":         "date_diff",
 		"SELECT CAST(x AS UNSIGNED) FROM t":              "BIGINT",
 		"SELECT CAST(x AS SIGNED) FROM t":                "BIGINT",
@@ -42,7 +48,6 @@ func TestUnroutedVeto(t *testing.T) {
 		"SELECT b'101'":                                  "hexadecimal",
 		"SELECT a FROM t LIMIT 10, 5":                    "OFFSET",
 		"SELECT _binary'x'":                              "_binary",
-		"SELECT * FROM t WHERE d = '26-01-15'":           "full",
 		"SELECT DAYOFWEEK(d) FROM t":                     "isodow",
 		"SELECT WEEKDAY(d) FROM t":                       "isodow",
 	}
@@ -94,6 +99,16 @@ func TestUnroutedVeto(t *testing.T) {
 		"SELECT * FROM t WHERE a = ?",
 		"SELECT position('a' IN b), instr(b, 'a') FROM t",
 		"SELECT a FROM t ORDER BY a NULLS LAST",
+		// Found by review: the copy's SQL a dashboard writes.
+		"SELECT count(*) AS row_count FROM t",
+		"SELECT s.row_count, found_rows, last_insert_id FROM s",
+		"SELECT * FROM t WHERE code = '10-20-30' OR d = '21-04-2026' OR d = '26-01-15'",
+		"SELECT datediff('day', a, b) FROM t",
+		"SELECT [1, 2] @> [1], [1] <@ [1, 2], 'abc' ^@ 'a'",
+		"SELECT 1_000_000",
+		"SELECT 'it''s /*! not a comment */' FROM t",
+		"SELECT a FROM t -- /*! in a comment",
+		"SELECT 'user@example.com' AS email",
 		// The clock answers in the connection's zone (#2035).
 		"SELECT NOW(), current_date, current_timestamp",
 		// A backslash is a character in the copy's strings.
