@@ -204,3 +204,33 @@ func TestStatementTextIsBlankedUnderAnyRule(t *testing.T) {
 		t.Errorf("query_text=%v query_hash=%v, want both NULL under any rule", qt, qh)
 	}
 }
+
+// A column rule on a table hides its pk_values too: the key may be the
+// hidden column, and pk_values cannot say which columns it holds.
+func TestHiddenColumnBlanksPKValues(t *testing.T) {
+	db := hiddenFixture(t, mustRules(t, nil, []string{"shop.orders.id"}), false)
+	var pk sql.NullString
+	if err := db.QueryRow(`SELECT pk_values FROM events`).Scan(&pk); err != nil {
+		t.Fatal(err)
+	}
+	if pk.Valid {
+		t.Errorf("pk_values = %q, want NULL under a column rule on the table", pk.String)
+	}
+	db = hiddenFixture(t, mustRules(t, nil, []string{"shop.customers.id"}), false)
+	if err := db.QueryRow(`SELECT pk_values FROM events`).Scan(&pk); err != nil || !pk.Valid {
+		t.Errorf("pk_values of an unruled table = %v, %v; want kept", pk, err)
+	}
+}
+
+// A table whose every column is hidden is hidden: a view with no column
+// fails at CREATE, which would break every statement that installs every view.
+func TestEveryColumnHiddenHidesTheTable(t *testing.T) {
+	in := Input{Baselines: []BaselineTable{
+		{Schema: "shop", Table: "orders", Columns: []string{"id", "status"}},
+		{Schema: "shop", Table: "tags", Columns: []string{"ID"}},
+	}}
+	ApplyHidden(&in, mustRules(t, nil, []string{"shop.*.id"}))
+	if len(in.Baselines) != 1 || in.Baselines[0].Table != "orders" {
+		t.Fatalf("Baselines = %+v, want only orders", in.Baselines)
+	}
+}

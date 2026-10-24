@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
@@ -78,16 +79,36 @@ func TestSQLHidden_columnLeavesTheCopy(t *testing.T) {
 
 	// The files hold the column: no statement may read them directly.
 	glob := filepath.Join(f.schemaDir, "*.parquet")
+	file := filepath.Join(f.schemaDir, "orders.parquet")
 	for _, stmt := range []string{
 		"SELECT status FROM read_parquet('" + glob + "')",
 		"SELECT * FROM parquet_schema('" + glob + "')",
 		"SELECT sql FROM duckdb_views()",
 		"SELECT * FROM (SELECT 1) t, LATERAL (SELECT count(*) FROM glob('" + glob + "'))",
+		// A path in quotes is a replacement scan: a table reference to
+		// DuckDB's parser, not a function call.
+		"SELECT * FROM '" + file + "'",
+		"SELECT status FROM '" + glob + "'",
+		"WITH x AS (FROM '" + file + "') SELECT status FROM x",
+		"DESCRIBE '" + file + "'",
+		"SUMMARIZE '" + file + "'",
+		// The views' own text names the files and the hidden columns.
+		"SELECT sql FROM duckdb_views",
+		"SELECT view_definition FROM information_schema.views",
+		"SELECT sql FROM sqlite_master",
+		"SELECT definition FROM pg_catalog.pg_views",
 	} {
 		w := postSQL(t, f.s, `{"sql":`+jsonString(stmt)+`}`)
 		if w.Code == http.StatusOK || strings.Contains(w.Body.String(), "paid") ||
 			!strings.Contains(w.Body.String(), "not allowed on this server") {
 			t.Errorf("%s: %d %s, want refused", stmt, w.Code, w.Body.String())
+		}
+	}
+
+	// The catalog listings that carry no view text keep working.
+	for _, stmt := range []string{"SHOW TABLES", "SELECT table_name FROM information_schema.tables", "DESCRIBE shop.orders"} {
+		if w := postSQL(t, f.s, `{"sql":`+jsonString(stmt)+`}`); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "status") {
+			t.Errorf("%s: %d %s, want answered without the hidden column", stmt, w.Code, w.Body.String())
 		}
 	}
 
@@ -98,17 +119,76 @@ func TestSQLHidden_columnLeavesTheCopy(t *testing.T) {
 	}
 }
 
-func TestSQLHidden_tableLeavesTheCopyAndItsListing(t *testing.T) {
+// Every table hidden: the answers say so, never "no snapshot" or "only on
+// S3", which would send the operator after a problem that is not there.
+func TestSQLHidden_everyTableHiddenSaysSo(t *testing.T) {
 	f, _ := hiddenSQLFixture(t, &hiderules.Rules{Tables: []string{"shop.orders"}})
 	w := postSQL(t, f.s, `{"sql":"SELECT * FROM shop.orders"}`)
-	if w.Code == http.StatusOK || strings.Contains(w.Body.String(), "paid") {
-		t.Fatalf("hidden table answered: %d %s", w.Code, w.Body.String())
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "hidden by this server's rules") || strings.Contains(w.Body.String(), "paid") {
+		t.Fatalf("hidden table: %d %s", w.Code, w.Body.String())
 	}
 	req := httptest.NewRequest("GET", "/api/sql", nil)
 	rec := httptest.NewRecorder()
 	f.s.handleSQLInfo(rec, req)
-	if strings.Contains(rec.Body.String(), "orders") {
-		t.Errorf("GET /api/sql lists the hidden table: %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "orders") || strings.Contains(rec.Body.String(), "only on S3") {
+		t.Errorf("GET /api/sql: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A hidden table beside a visible one: the visible one answers and is
+// listed, the hidden one is neither, at the HTTP level.
+func TestSQLHidden_tableBesideAVisibleOne(t *testing.T) {
+	f, _ := hiddenSQLFixture(t, &hiderules.Rules{Tables: []string{"shop.customers"}})
+	writeSQLExtraTable(t, f.schemaDir, "customers", "a@x")
+	if w := postSQL(t, f.s, `{"sql":"SELECT * FROM shop.customers"}`); w.Code == http.StatusOK || strings.Contains(w.Body.String(), "a@x") {
+		t.Fatalf("hidden table answered: %d %s", w.Code, w.Body.String())
+	}
+	if cols, body := sqlAnswer(t, postSQL(t, f.s, `{"sql":"SELECT * FROM shop.orders"}`)); strings.Join(cols, ",") != "id,status" {
+		t.Fatalf("visible table: %q %s", cols, body)
+	}
+	req := httptest.NewRequest("GET", "/api/sql", nil)
+	rec := httptest.NewRecorder()
+	f.s.handleSQLInfo(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "orders") || strings.Contains(rec.Body.String(), "customers") {
+		t.Errorf("GET /api/sql: %d %s, want orders listed and customers not", rec.Code, rec.Body.String())
+	}
+}
+
+// A bundle whose registry entry is gone serves nothing: its rules cannot be
+// known.
+func TestSQLHidden_entryGoneRefuses(t *testing.T) {
+	f, reg := hiddenSQLFixture(t, &hiderules.Rules{Columns: []string{"shop.orders.status"}})
+	if err := reg.Delete(f.s.cm.boot.serverID); err != nil {
+		t.Fatal(err)
+	}
+	w := postSQL(t, f.s, `{"sql":"SELECT * FROM shop.orders"}`)
+	if w.Code != http.StatusConflict || strings.Contains(w.Body.String(), "paid") {
+		t.Fatalf("entry gone: %d %s, want 409", w.Code, w.Body.String())
+	}
+}
+
+// writeSQLExtraTable writes shop.<table>(id, email) beside the fixture's
+// orders, in the same snapshot.
+func writeSQLExtraTable(t *testing.T, schemaDir, table, email string) {
+	t.Helper()
+	schemaFile := filepath.Join(t.TempDir(), "shop."+table+"-schema.sql")
+	ddl := "CREATE TABLE `" + table + "` (\n  `id` int NOT NULL,\n  `email` varchar(64) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	if err := os.WriteFile(schemaFile, []byte(ddl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cols, err := baseline.ParseSchema(schemaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := baseline.NewWriter(filepath.Join(schemaDir, table+".parquet"), cols, baseline.WriterConfig{Compression: "none", RowGroupSize: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRow([]string{"1", email}, []bool{false, false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

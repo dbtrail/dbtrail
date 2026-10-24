@@ -433,9 +433,13 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in, err := s.buildViewsInput(r.Context(), b, viewsRequest{PinSnapshot: true, OmitEvents: true, LocalCopy: true, ApplyHidden: true})
+	var hiddenErr *hiddenRulesError
 	switch {
 	case errors.Is(err, errNoViewSources):
 		writeJSONError(w, http.StatusConflict, errNoViewSources.Error()+"; there is no copy to run SQL on yet")
+		return
+	case errors.As(err, &hiddenErr):
+		writeJSONError(w, http.StatusConflict, hiddenErr.Error())
 		return
 	case err != nil:
 		writeJSONError(w, http.StatusBadGateway, err.Error())
@@ -456,6 +460,10 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		names = append(names, n)
 	}
 	if len(names) == 0 {
+		if in.Hidden != nil {
+			writeJSONError(w, http.StatusConflict, sqlAllHiddenMessage)
+			return
+		}
 		if why := viewsLeftOutMessage(in); why != "" {
 			writeJSONError(w, http.StatusConflict, why)
 			return
@@ -1120,6 +1128,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	}
 	if why := viewsLeftOutMessage(in); why != "" {
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, why}
+	}
+	if in.Hidden != nil && !in.RendersAnyView() {
+		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlAllHiddenMessage}
 	}
 	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {
 		// The tables themselves are in S3, or the change log in S3 is all
@@ -1855,7 +1866,11 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string, a
 // table or column that is not in its view (#2529): on a server with hidden
 // rules the name may be hidden rather than mistyped, and the bare answer
 // would read as "no such thing on the source".
-var sqlHiddenNameMissing = regexp.MustCompile(`(?i)not found|does not exist|resulted in an empty set of columns`)
+var sqlHiddenNameMissing = regexp.MustCompile(`(?i)Referenced column|Table with name|Referenced table|resulted in an empty set of columns`)
+
+// sqlAllHiddenMessage answers a server whose every table the rules hide: the
+// copy is there, which "no snapshot" or "only on S3" would deny.
+const sqlAllHiddenMessage = "every table of this server's copy is hidden by this server's rules; its settings list them"
 
 // sqlHiddenHint is appended to those answers. It names no hidden table or
 // column: the rules are visible in the server settings to whoever may edit

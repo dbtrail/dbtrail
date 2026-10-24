@@ -26,10 +26,29 @@ func ApplyHidden(in *Input, set *hiderules.Set) {
 			continue
 		}
 		t.HiddenColumns = set.HiddenColumns(t.Schema, t.Table)
+		if everyColumnHidden(t, set) {
+			// A view with no column fails at CREATE, which would break every
+			// statement that installs every view: the table is hidden.
+			continue
+		}
 		kept = append(kept, t)
 	}
 	in.Baselines = kept
 	in.Hidden = set
+}
+
+// everyColumnHidden reports whether the table's known columns are all
+// hidden. Unknown columns (no schema read) report false.
+func everyColumnHidden(t BaselineTable, set *hiderules.Set) bool {
+	if len(t.Columns) == 0 || len(t.HiddenColumns) == 0 {
+		return false
+	}
+	for _, c := range t.Columns {
+		if !set.ColumnHidden(t.Schema, t.Table, c) {
+			return false
+		}
+	}
+	return true
 }
 
 // hideColumns wraps one state view body (ending in ";\n") so the named
@@ -115,6 +134,12 @@ func hideEvents(body string, set *hiderules.Set, exclude []string) string {
 			replace = append(replace, fmt.Sprintf(
 				"CASE WHEN %[1]s IS NOT NULL AND (%[2]s) THEN (SELECT coalesce(json_group_object(key, value), '{}'::JSON) FROM json_each(%[1]s) WHERE NOT (%[3]s)) ELSE %[1]s END AS %[1]s",
 				col, ruled, keyHidden("key")))
+		}
+		// pk_values carries the key's values, and the key may be a hidden
+		// column; which columns it holds is not in the row, so it is blanked
+		// on every table a column rule applies to.
+		if !excluded["pk_values"] {
+			replace = append(replace, fmt.Sprintf("CASE WHEN %s THEN CAST(NULL AS VARCHAR) ELSE pk_values END AS pk_values", ruled))
 		}
 		if !excluded["changed_columns"] {
 			replace = append(replace, fmt.Sprintf(

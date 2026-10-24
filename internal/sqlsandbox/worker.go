@@ -636,6 +636,52 @@ var fileReaderFunctions = map[string]bool{
 	"duckdb_views": true,
 }
 
+// viewTextCatalogs are the catalog relations that print the views' SQL, which
+// names the copy's files and the hidden columns (#2529).
+var viewTextCatalogs = map[string]bool{
+	"duckdb_views": true, "sqlite_master": true, "sqlite_schema": true,
+	"sqlite_temp_master": true, "sqlite_temp_schema": true, "pg_views": true,
+}
+
+// fileOrViewTextRef returns what a table reference in the statement tree
+// reads that only the views may: a file named in quotes (a replacement scan,
+// which DuckDB's parser keeps as a table reference, not a function call), or
+// a catalog relation that prints the views' text. "" when there is none. The
+// walk is over every BASE_TABLE node at any depth, CTE bodies included.
+func fileOrViewTextRef(node any) string {
+	switch x := node.(type) {
+	case map[string]any:
+		if x["type"] == "BASE_TABLE" {
+			name, _ := x["table_name"].(string)
+			schema, _ := x["schema_name"].(string)
+			lname, lschema := strings.ToLower(name), strings.ToLower(schema)
+			switch {
+			case strings.ContainsAny(name, `/\`):
+				return "reading a file by its path"
+			case viewTextCatalogs[lname], lschema == "information_schema" && lname == "views":
+				return name
+			}
+		}
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := fileOrViewTextRef(x[k]); r != "" {
+				return r
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if r := fileOrViewTextRef(e); r != "" {
+				return r
+			}
+		}
+	}
+	return ""
+}
+
 // fileReaderFunction returns the first table function in the statement tree
 // that reads a file of the copy directly, or "".
 func fileReaderFunction(node any) string {
@@ -752,6 +798,9 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 		return nil, fmt.Sprintf("one statement at a time: %d statements were given", len(parsed.Statements))
 	}
 	if noFileReaders {
+		if what := fileOrViewTextRef(parsed.Statements[0]); what != "" {
+			return nil, fmt.Sprintf("%s is not allowed on this server: it hides some tables and columns, and the copy's files and the views' text hold them; query its tables by name", what)
+		}
 		if name := fileReaderFunction(parsed.Statements[0]); name != "" {
 			return nil, fmt.Sprintf("%s is not allowed on this server: it hides some tables and columns, and the copy's files hold them; query its tables by name", name)
 		}

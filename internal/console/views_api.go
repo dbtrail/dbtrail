@@ -110,7 +110,9 @@ func (s *Server) hiddenRulesFor(b *bundle) (*hiderules.Set, error) {
 	}
 	e, ok := s.cm.reg.Get(b.serverID)
 	if !ok {
-		return nil, nil
+		// The entry is gone (deleted, or a bundle outliving it): its rules
+		// cannot be known, so nothing is served under none.
+		return nil, &hiddenRulesError{errors.New("the server is no longer in the registry, so its hidden rules cannot be read")}
 	}
 	set, err := hiderules.Load(e.Hidden)
 	if err != nil {
