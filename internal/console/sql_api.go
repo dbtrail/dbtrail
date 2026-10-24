@@ -135,7 +135,7 @@ type sqlParentPhases struct {
 	// tails the follower published, or a whole update of them when the
 	// follower has none over the snapshot the statement reads. Part of
 	// ViewsFor. TailsRan says the step ran at all: a statement that read no
-	// tails (the SQL card, MCP, BINTRAIL_SQL_TAILS=off, a copy with no
+	// tails (the SQL card, MCP, the fast mode without BINTRAIL_SQL_TAILS=on, a copy with no
 	// index) has no tails phase, not a zero one, so the key is left out of
 	// sqlPhases and the histogram's quantiles are not pulled to zero by
 	// every console statement.

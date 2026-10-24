@@ -20,7 +20,8 @@ import (
 // (#2369): what capture has indexed since the snapshot, so a statement on the
 // copy is as current as the index, not only as the last refresh. Only the
 // port's statements (SQLOnCopy.Run) do; the console's own SQL card reads
-// the published copy. BINTRAIL_SQL_TAILS=off turns tails off.
+// the published copy. Tails are the opt-in fresh mode: BINTRAIL_SQL_TAILS=on
+// (tailsOff).
 
 // Tail budgets: keys one tail may hold and memory all of them may (#2494,
 // tailBudgetFor), how long a replaced version stays for a statement that may

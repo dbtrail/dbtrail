@@ -720,20 +720,21 @@ and `DAEMON_MEMORY_SHARE` in `.env`, empty by default): 0.3 for the router and
 0.4 for the `bintrail` service beside the index MySQL's quarter add up to the
 machine instead of each taking its own cut of all of it, which is the setting
 for a host where the kernel stops DBTrail's processes for memory. Inside the
-router's share, its tails and its statements come out of the same number.
+router's share, its statements and, in the fresh mode, its tails come out
+of the same number.
 Set `ROUTER_MEMORY` and `ROUTER_CPUS` in `.env` to give it hard ceilings: a
 share then applies to that ceiling, and a statement that outgrows its memory
 is stopped inside the router's own. To set the number of statements yourself,
 set `ROUTER_CONCURRENCY`. Each statement
 may reach `SQL_MEMORY` (2 GB unless set) plus a quarter, and the router keeps
 half a gigabyte for itself. `docker compose logs router` shows the numbers it
-worked out and why, as the budget less the tails.
+worked out and why, as the budget less the tails in the fresh mode.
 
 Two things to know before setting shares. A smaller share means less for
 everything the process sizes from it: with 0.4 on an 8 GB host the `bintrail`
-service's snapshot sessions drop to their 512 MiB floor and its tails to a
-fifth of 3.2 GB, so the copy is refreshed with less memory and the tails
-freeze earlier on busy tables; a `SQL_MEMORY` or `ROUTER_CONCURRENCY` that
+service's snapshot sessions drop to their 512 MiB floor, so the copy is
+refreshed with less memory, and in the fresh mode the router's tails freeze
+earlier on busy tables; a `SQL_MEMORY` or `ROUTER_CONCURRENCY` that
 fitted the whole machine may not fit the share (the SQL card's 2 statements at
 2 GB each are more than 3.2 GB), and the startup log says so naming the share;
 and the router runs fewer statements at once on a mid-size host (16 GB: 3 with
@@ -819,8 +820,8 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `CONSOLE_TOKEN` | compose (optional) | Opt-in static API-automation token (default: none; humans sign in with a username and password) |
 | `METRICS_ADDR` | compose (optional) | Container-side bind for the watch daemon's Prometheus `/metrics` (default `:9090`, published on the host loopback as `127.0.0.1:9090`; set empty to disable) |
 | `ROUTER_MEMORY` | compose `router` service (optional) | Memory ceiling of the router (e.g. `8g`). Unset = none: the router plans with its share of the machine |
-| `ROUTER_MEMORY_SHARE` | compose `router` service (optional) | Fraction of the machine's memory (or of `ROUTER_MEMORY`) the router plans with: its tails and its statements together. Unset = the whole machine (half for statements, a fifth for tails); `0.3` beside `DAEMON_MEMORY_SHARE=0.4` and the index's quarter adds up to the machine |
-| `DAEMON_MEMORY_SHARE` | compose `bintrail` service (optional) | Fraction of the machine's memory the watch daemon plans with: its snapshot work, its tails and its SQL card. Unset = the whole machine; a share also shrinks the snapshot work and the tails |
+| `ROUTER_MEMORY_SHARE` | compose `router` service (optional) | Fraction of the machine's memory (or of `ROUTER_MEMORY`) the router plans with: its statements and, in the fresh mode, its tails together. Unset = the whole machine (half for statements, and a fifth for tails in the fresh mode); `0.3` beside `DAEMON_MEMORY_SHARE=0.4` and the index's quarter adds up to the machine |
+| `DAEMON_MEMORY_SHARE` | compose `bintrail` service (optional) | Fraction of the machine's memory the watch daemon plans with: its snapshot work and its SQL card. Unset = the whole machine; a share also shrinks the snapshot work |
 | `KEY_INDEX` | compose `bintrail` service (optional) | Whether a snapshot refresh resolves the keys a window changed through the key index beside each table's file instead of scanning the file. Unset = on; a file with no index gets one built at its next refresh. `0` turns it off |
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
 | `ROUTER_CPU_SHARES` | compose `router` service (optional) | CPU priority of the router against the other services (`cpu_shares`). Unset = 256, well below the default, so statements use every core and capture takes them back when it needs them. The weight it becomes depends on the runtime; the router's log says what it read |

@@ -46,10 +46,11 @@ every version of every row next to the current state.
 The schedule is set per server on the **Snapshots** page of the web interface.
 It can be as often as every 5 minutes or as rare as once a day. The interval is
 the ceiling on how fresh a report can be: at `5m` a dashboard sees this
-morning; at `1d` it sees yesterday. A statement sent through the SQL port is
-the exception: it also reads what capture has indexed since each table's
-snapshot, so it answers about as far behind as capture, usually seconds (see
-[No maximum copy age](time-travel-sql.md#no-maximum-copy-age)). From the
+morning; at `1d` it sees yesterday. The SQL port answers from the same
+snapshots by default. Its fresh mode (`SQL_FRESH=on`) is the exception: it
+also reads what capture has indexed since each table's snapshot, so it
+answers about as far behind as capture, usually seconds, for some memory and
+speed (see [No maximum copy age](time-travel-sql.md#no-maximum-copy-age)). From the
 command line, the same fold is
 `bintrail baseline refresh`, and `bintrail-console watch
 --baseline-refresh-interval` runs it from the daemon. See
@@ -198,9 +199,9 @@ edges you know.
 - **Not your backup.** History starts the day you install it. Keep your
   physical backups.
 - **Minutes behind, not seconds, for the files.** The snapshot interval is
-  your setting, 5 minutes at the shortest from the web interface. Through the
-  SQL port a heavy read also sees what capture has indexed since, usually
-  seconds behind.
+  your setting, 5 minutes at the shortest from the web interface. The SQL
+  port's fresh mode (`SQL_FRESH=on`) also reads what capture has indexed
+  since, usually seconds behind.
 - **The price of entry.** `binlog_format=ROW` and `binlog_row_image=FULL` on
   the source, and a primary key on every table you want refreshed.
   `bintrail doctor` checks the binlog settings and prints the fix.
