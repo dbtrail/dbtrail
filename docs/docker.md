@@ -261,7 +261,7 @@ What a stale compose file costs:
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
-| `cpu_shares` on the `router` service (file version 7) | statements on the copy run with half the machine's cores, about half as fast on an analytical query (a full-table aggregate over 78 M rows: 7 to 10 s against 3 s on 4 cores) | the router's startup line and its card in the web interface say "statements use 2 of this machine's 4 cores". Taking the version 7 file, or setting `ROUTER_CPUS` to the core count in `.env`, gives them all |
+| `cpu_shares` on the `router` service (file version 7) | statements on the copy run with half the machine's cores, about half as fast on an analytical query (a full-table aggregate over 78 M rows: 7 to 10 s against 3 s on 4 cores) | the router's startup line and its card in the web interface say "statements use 2 of this machine's 4 cores". Taking the version 7 file gives them all |
 | the `index-mysql` entrypoint that sizes the buffer pool when `INDEX_BUFFER_POOL` is unset (file version 6) | without a value in `.env`, the index MySQL keeps InnoDB's 128 MB buffer pool, which caps capture on a busy source and slows every refresh of the copy for SQL | `doctor` warns "Index buffer pool" at 128 MB on a machine with about 4 GB or more; capture lag keeps growing. Taking the version 6 file changes this on the next `up -d`: an index MySQL that ran at 128 MB restarts with a quarter of the machine's memory. To keep it lower, set `INDEX_BUFFER_POOL` in `.env` first |
 | `--innodb-buffer-pool-size=${INDEX_BUFFER_POOL:-128M}` on `index-mysql` | `INDEX_BUFFER_POOL` in `.env` does nothing, and the index MySQL keeps the 128 MB buffer pool | as above |
 | `BINTRAIL_CONSOLE_SQL_PANEL` (the current file does not set it) | nothing: the SQL page it switched was removed in 0.75.0 | Remove the variable. It is read for one release and warns. SQL in the browser is on the Overview now and this variable does not control it |
@@ -698,12 +698,18 @@ the router reads it and brings nothing from the bucket itself.
 once is worked out from the cores and the memory the service may use. By
 default it has no ceiling of its own. Its statements use every core, at a
 lower CPU priority than capture (`cpu_shares: 256` in the file,
-`ROUTER_CPU_SHARES` in `.env`): while capture and the snapshot refresh are
-quiet the statements have the whole machine, and the kernel hands capture
-its cores back the moment it needs them. A router that runs at the default
-priority (a file older than version 7, or `ROUTER_CPU_SHARES` set to 1024 or
-more) keeps half the cores for capture all the time, and says so in its log
-and on the web interface's router card. For memory it plans with half of the
+`ROUTER_CPU_SHARES` in `.env`; `CPUWeight=25` in the packaged systemd unit):
+while capture and the snapshot refresh are quiet the statements have the
+whole machine, and the kernel hands capture its cores back the moment it
+needs them. The router reads its own weight at start (`cpu.weight`, whose
+value for a given `cpu_shares` depends on the container runtime: 35 for 256
+on runc 1.3, 10 on older ones). At half the default weight or more, or when
+the weight cannot be read, it keeps half the cores for capture all the time,
+and its log and the web interface's router card say so and what they read.
+Two setups this does not protect: capture's service lowered as well (leave
+the other services at the default priority), and Kubernetes, where a
+container's weight competes only inside its pod; set a CPU limit on the
+router there. For memory it plans with half of the
 machine for its statements and a fifth for its tails (the newest changes
 laid over the copy), since capture uses the machine too. Each service can instead plan
 with a share of the machine's memory (`BINTRAIL_MEMORY_SHARE`: `ROUTER_MEMORY_SHARE`
@@ -814,7 +820,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `DAEMON_MEMORY_SHARE` | compose `bintrail` service (optional) | Fraction of the machine's memory the watch daemon plans with: its snapshot work, its tails and its SQL card. Unset = the whole machine; a share also shrinks the snapshot work and the tails |
 | `KEY_INDEX` | compose `bintrail` service (optional) | Whether a snapshot refresh resolves the keys a window changed through the key index beside each table's file instead of scanning the file. Unset = on; a file with no index gets one built at its next refresh. `0` turns it off |
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
-| `ROUTER_CPU_SHARES` | compose `router` service (optional) | CPU priority of the router against the other services (`cpu_shares`). Unset = 256, below the default, so statements use every core and capture takes them back when it needs them. 1024 or more = the old behaviour: half the cores for statements |
+| `ROUTER_CPU_SHARES` | compose `router` service (optional) | CPU priority of the router against the other services (`cpu_shares`). Unset = 256, well below the default, so statements use every core and capture takes them back when it needs them. The weight it becomes depends on the runtime; the router's log says what it read |
 | `ROUTER_CONCURRENCY` | compose `router` service (optional) | How many statements run on the copy at once, 1 to 64. Unset = the router works it out: one per two of its cores, as many as its memory holds. The rest wait their turn. Needs the current `docker-compose.yml` |
 | `ROUTER_MAX_WAIT` | compose `router` service (optional) | How long a statement waits for its turn on the copy when every worker is busy (e.g. `30s`); past it the client gets an error. Unset = no limit: it waits for as long as its client stays connected |
 | `ROUTER_READ_ONLY` | compose `router` service (optional) | The router refuses every statement that is not a read, and never sends it to the source (default `1`). `0` forwards writes too |

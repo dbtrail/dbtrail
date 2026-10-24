@@ -13,30 +13,39 @@ import (
 // CPUWeight) is already kept off capture's cores by the scheduler when
 // capture needs them, so it takes all of them.
 
-func TestCPUYields(t *testing.T) {
+func TestCPUPriorityOf(t *testing.T) {
 	type file struct{ path, body string }
 	for _, tc := range []struct {
 		name  string
 		files []file
 		want  bool
+		read  string
 	}{
-		{"no cgroup files", nil, false},
+		{"no cgroup files", nil, false, "/proc/self/cgroup could not be read"},
 		{"v2, the default weight", []file{
 			{"proc/self/cgroup", "0::/\n"},
 			{"sys/fs/cgroup/cpu.weight", "100\n"},
-		}, false},
-		{"v2, a private namespace: the container's own weight, lowered", []file{
+		}, false, "cpu.weight 100"},
+		{"v2, a private namespace: the container's own weight, lowered (cpu_shares 256 on runc 1.3+)", []file{
 			{"proc/self/cgroup", "0::/\n"},
-			{"sys/fs/cgroup/cpu.weight", "10\n"},
-		}, true},
+			{"sys/fs/cgroup/cpu.weight", "35\n"},
+		}, true, "cpu.weight 35"},
+		{"v2, half the default yields", []file{
+			{"proc/self/cgroup", "0::/\n"},
+			{"sys/fs/cgroup/cpu.weight", "50\n"},
+		}, true, "cpu.weight 50"},
+		{"v2, just below the default protects nothing", []file{
+			{"proc/self/cgroup", "0::/\n"},
+			{"sys/fs/cgroup/cpu.weight", "99\n"},
+		}, false, "cpu.weight 99"},
 		{"v2, a unit's own weight, lowered", []file{
 			{"proc/self/cgroup", "0::/system.slice/router.service\n"},
-			{"sys/fs/cgroup/system.slice/router.service/cpu.weight", "20\n"},
-		}, true},
-		{"v2, a weight above the default yields nothing", []file{
+			{"sys/fs/cgroup/system.slice/router.service/cpu.weight", "25\n"},
+		}, true, "cpu.weight 25"},
+		{"v2, a weight above the default", []file{
 			{"proc/self/cgroup", "0::/\n"},
 			{"sys/fs/cgroup/cpu.weight", "500\n"},
-		}, false},
+		}, false, "cpu.weight 500"},
 		// A parent's weight lowers this process and its siblings alike (capture
 		// in the next container sits under the same parent), so it protects
 		// nothing and is not read.
@@ -44,29 +53,47 @@ func TestCPUYields(t *testing.T) {
 			{"proc/self/cgroup", "0::/system.slice/router.service\n"},
 			{"sys/fs/cgroup/system.slice/router.service/cpu.weight", "100\n"},
 			{"sys/fs/cgroup/system.slice/cpu.weight", "10\n"},
-		}, false},
-		{"v2, the weight file missing", []file{
+		}, false, "cpu.weight 100"},
+		// cgroupns host on v2: /proc/self/cgroup names the host's path, the
+		// container's own cgroup is mounted at the root.
+		{"v2, host cgroup namespace: the path is the host's, the file at the mount root", []file{
+			{"proc/self/cgroup", "0::/system.slice/docker-abc.scope\n"},
+			{"sys/fs/cgroup/cpu.weight", "10\n"},
+		}, true, "cpu.weight 10"},
+		{"v2, the weight file missing everywhere", []file{
 			{"proc/self/cgroup", "0::/\n"},
-		}, false},
+		}, false, "could not be read"},
 		{"v2, a weight that does not read", []file{
 			{"proc/self/cgroup", "0::/\n"},
 			{"sys/fs/cgroup/cpu.weight", "low\n"},
-		}, false},
+		}, false, `holds "low"`},
 		{"v2, an empty weight file", []file{
 			{"proc/self/cgroup", "0::/\n"},
 			{"sys/fs/cgroup/cpu.weight", "\n"},
-		}, false},
-		{"v1, shares lowered", []file{
+		}, false, `holds ""`},
+		{"v1 on a bare host, shares lowered", []file{
+			{"proc/self/cgroup", "11:cpu,cpuacct:/system.slice/router.service\n12:memory:/system.slice/router.service\n"},
+			{"sys/fs/cgroup/cpu,cpuacct/system.slice/router.service/cpu.shares", "256\n"},
+		}, true, "cpu.shares 256"},
+		// v1 in a container: the host's path in /proc/self/cgroup, the
+		// container's own cgroup bind-mounted at the controller's root.
+		{"v1 in a container: the host's path, the file at the mount root", []file{
 			{"proc/self/cgroup", "11:cpu,cpuacct:/docker/abc\n12:memory:/docker/abc\n"},
-			{"sys/fs/cgroup/cpu,cpuacct/docker/abc/cpu.shares", "256\n"},
-		}, true},
+			{"sys/fs/cgroup/cpu,cpuacct/cpu.shares", "256\n"},
+		}, true, "cpu.shares 256"},
 		{"v1, the default shares", []file{
 			{"proc/self/cgroup", "11:cpu,cpuacct:/docker/abc\n"},
-			{"sys/fs/cgroup/cpu,cpuacct/docker/abc/cpu.shares", "1024\n"},
-		}, false},
+			{"sys/fs/cgroup/cpu,cpuacct/cpu.shares", "1024\n"},
+		}, false, "cpu.shares 1024"},
 		{"v1, only the memory controller listed", []file{
 			{"proc/self/cgroup", "12:memory:/docker/abc\n"},
-		}, false},
+		}, false, "no cpu controller"},
+		// A hybrid host lists v1 controllers and a 0:: line: a v1 file that
+		// does not read is skipped, and the v2 line still answers.
+		{"hybrid: the v1 file missing, the v2 one answers", []file{
+			{"proc/self/cgroup", "11:cpu,cpuacct:/docker/abc\n0::/\n"},
+			{"sys/fs/cgroup/cpu.weight", "20\n"},
+		}, true, "cpu.weight 20"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -79,8 +106,15 @@ func TestCPUYields(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if got := cpuYields(root); got != tc.want {
-				t.Errorf("cpuYields = %v, want %v", got, tc.want)
+			got, read := cpuPriorityOf(root)
+			if got != tc.want {
+				t.Errorf("yields = %v, want %v (read %q)", got, tc.want, read)
+			}
+			if !strings.Contains(read, tc.read) {
+				t.Errorf("read = %q, want it to say %q", read, tc.read)
+			}
+			if strings.Contains(read, root) {
+				t.Errorf("read = %q names the test's temporary root", read)
 			}
 		})
 	}
@@ -97,6 +131,9 @@ func TestSQLPoolFor_lowerPriorityTakesAllTheCores(t *testing.T) {
 		{"4 cores, no ceiling, no lower priority: half, and it says how to fix it",
 			SQLPoolInput{Cores: 4, MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
 			1, 2, "half of the machine's 4", "2 of this machine's 4 cores"},
+		{"the note says what it read and never offers ROUTER_CPUS, which would take capture's cores",
+			SQLPoolInput{Cores: 4, CoresPriority: "cpu.weight 100, the default being 100", MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
+			1, 2, "half", "its CPU priority: cpu.weight 100, the default being 100"},
 		{"4 cores at a lower priority: all four",
 			SQLPoolInput{Cores: 4, CoresYield: true, MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
 			1, 4, "lower CPU priority", ""},
@@ -126,6 +163,9 @@ func TestSQLPoolFor_lowerPriorityTakesAllTheCores(t *testing.T) {
 			}
 			if tc.note != "" && !strings.Contains(got.CoresNote, tc.note) {
 				t.Errorf("note = %q, want it to say %q", got.CoresNote, tc.note)
+			}
+			if strings.Contains(got.CoresNote, "ROUTER_CPUS") {
+				t.Errorf("note = %q: a ceiling of all the cores takes capture's protection away", got.CoresNote)
 			}
 		})
 	}

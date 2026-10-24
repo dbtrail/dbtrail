@@ -37,6 +37,11 @@ TimeoutStopSec=30
 # marks the group it hands over: 255 (Ubuntu 24.04) does, 249 (Ubuntu 22.04)
 # does not, and the service says which at start.
 Delegate=yes
+# A lower CPU priority than the console service, which runs capture (#2531):
+# the statements on the copy then use every core while capture is quiet, and
+# the kernel hands capture its cores back when it needs them. The router reads
+# its own weight at start; at the default (100) it keeps half the cores.
+CPUWeight=25
 # No ceiling of its own by default: it sizes itself from half of the machine,
 # since capture uses the machine too. To give it one, `systemctl edit
 # bintrail-router` and set, under [Service], for example:

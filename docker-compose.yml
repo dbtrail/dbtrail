@@ -703,12 +703,15 @@ services:
     # 0 = no ceiling. See ROUTER_MEMORY / ROUTER_CPUS above.
     mem_limit: ${ROUTER_MEMORY:-0}
     cpus: ${ROUTER_CPUS:-0}
-    # A lower CPU priority than capture (#2531): 256 against the default of
-    # the other services. The statements on the copy then use every core
+    # A lower CPU priority than capture (#2531), which the other services
+    # keep at the default. The statements on the copy then use every core
     # while capture and the snapshot refresh are quiet, and the kernel hands
-    # capture its cores back the moment it needs them. Without it the router
-    # keeps half the cores for capture all the time. A higher number gives
-    # the statements more of a busy machine and capture less.
+    # capture its cores back the moment it needs them. The weight this
+    # becomes depends on the container runtime (35 against 100 on runc 1.3,
+    # 10 on older ones); the router reads it at start and says so in its log.
+    # At half the default weight or more it keeps half the cores for capture
+    # instead. Leave the other services' priority alone: lowering capture's
+    # too takes its protection away.
     cpu_shares: ${ROUTER_CPU_SHARES:-256}
     # A memory ceiling per statement on the copy, as on the `bintrail`
     # service: needs Docker 28 or later. Without it a statement that outgrows
