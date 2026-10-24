@@ -945,6 +945,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data.TableVisible = tableVisible(opts.DenyTables, opts.AllowTables)
+	s.writeStatus(w, b, opts, data)
+}
+
+// writeStatus writes the status document, with what the server hides from
+// SQL on the copy beside it (#2529).
+func (s *Server) writeStatus(w http.ResponseWriter, b *bundle, opts query.Options, data *status.StatusData) {
 	// Encode into a buffer first: status data is already in memory, so this is
 	// free and avoids committing a 200 then emitting a truncated body if the
 	// encode fails partway (mirrors handleRecover).
@@ -953,8 +959,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	body := buf.Bytes()
+	if section := s.hiddenFromSQL(b, opts); section != nil {
+		withSection, err := addStatusSection(body, "hidden_from_sql", section)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		body = withSection
+	}
 	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write(buf.Bytes()); err != nil {
+	if _, err := w.Write(body); err != nil {
 		slog.Error("console: status write failed", "error", err)
 	}
 }
