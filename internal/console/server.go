@@ -1069,6 +1069,8 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("DELETE /api/servers/{id}", s.handleServersDelete)
 	api.HandleFunc("POST /api/servers/{id}/test", s.handleServersTest)
 	api.HandleFunc("GET /api/servers/{id}/route-grants", s.handleRouteGrants)
+	api.HandleFunc("GET /api/servers/{id}/hidden", s.handleHiddenGet)
+	api.HandleFunc("PUT /api/servers/{id}/hidden", s.recordAction("hidden-rules", s.handleHiddenPut))
 	// Monitor verbs: 403 unless this process is a control-plane supervisor
 	// (`bintrail-console watch`). The standalone console stays read-only.
 	api.HandleFunc("POST /api/servers/{id}/monitor/start", s.handleMonitorStart)

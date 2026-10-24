@@ -14,6 +14,7 @@ import (
 	yaml "go.yaml.in/yaml/v2"
 
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -84,6 +85,12 @@ type ServerEntry struct {
 	SourceServerID uint32 `yaml:"source_server_id,omitempty"`
 	// Schemas is the optional comma-separated schema filter for monitoring.
 	Schemas string `yaml:"schemas,omitempty"`
+	// Hidden are the tables and columns the analytical surfaces (SQL on the
+	// copy, the MySQL-protocol port, the MCP sql tool) leave out for this
+	// server, like a MySQL view (#2529). It changes nothing the copy stores.
+	// Registry-owned: only SetHidden writes it, and Update keeps the stored
+	// value, so an edit built from an older read cannot put old rules back.
+	Hidden *hiderules.Rules `yaml:"hidden,omitempty"`
 
 	// ── Source family (#1019) ──
 	// Flavor selects the capture engine: "" or "mysql" (MySQL), "mariadb"
@@ -715,6 +722,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	}
 	e.ID = id
 	e.LocalKeepHeldDir = "" // registry-owned; a new entry never starts held
+	e.Hidden = nil          // SetHidden is the only writer (#2529)
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -755,6 +763,8 @@ func (r *Registry) Update(e ServerEntry) error {
 		}
 		// Registry-owned (#1681): always the stored value, whatever was sent.
 		e.LocalKeepHeldDir = old.LocalKeepHeldDir
+		// So are the hidden rules (#2529): SetHidden is their only writer.
+		e.Hidden = old.Hidden
 		// Within MySQL and MariaDB the Source type is registry-owned too:
 		// capture corrects it (CorrectSourceFlavor), and an edit built from
 		// a copy read before that must not put the old value back. No edit
@@ -774,6 +784,35 @@ func (r *Registry) Update(e ServerEntry) error {
 		return nil
 	}
 	return ErrUnknownServer
+}
+
+// SetHidden saves the hidden rules of entry id (#2529), already parsed: an
+// empty set removes them. It is the only writer of ServerEntry.Hidden, and it
+// changes nothing else in the entry.
+func (r *Registry) SetHidden(id string, set *hiderules.Set) (ServerEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readOnly {
+		return ServerEntry{}, ErrRegistryReadOnly
+	}
+	for i, old := range r.file.Servers {
+		if old.ID != id {
+			continue
+		}
+		var next *hiderules.Rules
+		if !set.Empty() {
+			rules := set.Rules()
+			next = &rules
+		}
+		prev := old.Hidden
+		r.file.Servers[i].Hidden = next
+		if err := r.save(); err != nil {
+			r.file.Servers[i].Hidden = prev // roll back
+			return ServerEntry{}, err
+		}
+		return r.file.Servers[i], nil
+	}
+	return ServerEntry{}, ErrUnknownServer
 }
 
 // CorrectSourceFlavor saves detected, the flavor the server reported when

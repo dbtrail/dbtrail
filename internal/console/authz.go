@@ -256,6 +256,10 @@ var apiRoutePerms = []routePerm{
 	// What the forwarding account may do on the source (SHOW GRANTS):
 	// shown beside the router's numbers, read on the same tier.
 	{"GET", "/api/servers/{}/route-grants", ext.PermSettingsRead},
+	// The hidden rules (#2529) are per-server configuration of what the
+	// analytical surfaces show, edited like the server itself.
+	{"GET", "/api/servers/{}/hidden", ext.PermServersRead},
+	{"PUT", "/api/servers/{}/hidden", ext.PermServersWrite},
 	// Turning the port on, off, or giving it a new password opens (or
 	// re-keys) a network door onto every server's history: a settings
 	// mutation, and the response is the one place the password is shown.
