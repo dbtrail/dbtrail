@@ -20,9 +20,10 @@ import (
 // of the default is weighed against.
 //
 // The copy's default folds case and nothing else: it disagrees with MySQL on
-// 36 of these 57 pairs, every one in the safe direction (MySQL equal, the
-// copy not: accents, 'ß' and 'ss', full-width and ligature forms), so the
-// copy returns fewer rows for them, never more. nocase.icu_noaccent
+// 36 of these 57 pairs, every one of them a pair MySQL holds equal and the
+// copy does not (accents, 'ß' and 'ss', full-width and ligature forms). An
+// equality on them matches fewer rows on the copy; a <>, NOT IN, anti-join,
+// DISTINCT or GROUP BY returns more. nocase.icu_noaccent
 // disagreed on 1, nocase.noaccent on 26. The documentation says so; this
 // table is what keeps it true across an engine bump.
 var collationPairs = []struct {
@@ -94,8 +95,8 @@ var collationPairs = []struct {
 // servers: the two that differ by a trailing space, which MariaDB's default
 // ignores (PAD SPACE) and MySQL's does not. On the other 55 the two agree, so
 // what this table says about MySQL holds for a MariaDB source too, except
-// that neither DuckDB collation pads: against MariaDB the copy's default
-// differs on 3 pairs (these two and the one it differs from MySQL on).
+// that no DuckDB collation pads: against MariaDB the copy's default (nocase)
+// differs on 38 pairs (these two and the 36 it differs from MySQL on).
 var mariadbPadPairs = []int{6, 37}
 
 func TestCollationPairs_mariadbDiffersOnlyOnTrailingSpaces(t *testing.T) {
@@ -104,6 +105,16 @@ func TestCollationPairs_mariadbDiffersOnlyOnTrailingSpaces(t *testing.T) {
 		if strings.TrimRight(p.a, " ") != strings.TrimRight(p.b, " ") || p.mysql {
 			t.Errorf("pair %d (%q, %q) is recorded as a trailing-space pair MySQL keeps apart; it is not", i, p.a, p.b)
 		}
+	}
+	differs := 0
+	for i, p := range collationPairs {
+		mariadb := p.mysql || slices.Contains(mariadbPadPairs, i)
+		if p.nocase != mariadb {
+			differs++
+		}
+	}
+	if differs != 38 {
+		t.Errorf("against MariaDB the copy's default differs on %d pairs, documented 38 in docs/time-travel-sql.md", differs)
 	}
 }
 
@@ -148,10 +159,10 @@ func TestDefaultCollation_whereItDiffersFromMySQL(t *testing.T) {
 			t.Errorf("%s differs from MySQL's utf8mb4_0900_ai_ci on %d of %d pairs, recorded %d: %q", c.collation, len(differs), len(collationPairs), c.wantDiffers, differs)
 		}
 	}
-	// Every difference of the copy's default is in the safe direction: a
-	// pair MySQL holds equal and the copy does not (fewer rows on the
-	// copy). A pair the copy equated and MySQL kept apart would return rows
-	// MySQL leaves out, with no error: that would need its own line in the
+	// Every difference of the copy's default is of one kind: a pair MySQL
+	// holds equal and the copy does not. A pair of the other kind (the copy
+	// equal, MySQL apart) would make an EQUALITY return rows MySQL leaves
+	// out, with no error: that would need its own line in the
 	// documentation before this default could stay.
 	for _, p := range collationPairs {
 		if p.nocase && !p.mysql {
@@ -176,12 +187,14 @@ var collationSortList = []string{"a", "A", "b", "B", "Z", "z", "_", "-", " ", "1
 
 var mysqlSortOrder = []int{42, 8, 6, 7, 13, 36, 15, 14, 35, 9, 10, 11, 12, 0, 1, 34, 37, 39, 38, 40, 41, 29, 28, 30, 2, 3, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 4, 5, 45, 46, 47, 43, 44, 31, 32, 33}
 
-// ORDER BY on the copy does NOT return those 48 strings in MySQL's order:
-// its default (nocase) sorts punctuation by code point and puts accented
-// letters, 'ß', 'æ', 'ø' and the full-width letter after 'z'. That is a
-// documented difference. nocase.icu_noaccent, the default before #2532,
-// sorted them as MySQL does; it stays here as the reference that the list
-// and MySQL's order are still right.
+// nocaseSortOrder is the order the copy's default (nocase) returns those 48
+// strings in: punctuation by code point, accented letters, 'ß', 'æ', 'ø'
+// and the full-width letter after 'z'. A documented difference from
+// MySQL's; nocase.icu_noaccent, the default before #2532, sorted them as
+// MySQL does and stays here as the reference that the list and MySQL's
+// order are still right.
+var nocaseSortOrder = []int{42, 8, 36, 7, 9, 10, 11, 12, 13, 14, 15, 6, 0, 1, 37, 39, 38, 40, 41, 29, 30, 2, 3, 17, 18, 20, 21, 24, 25, 27, 4, 5, 35, 26, 28, 16, 19, 22, 23, 46, 47, 43, 44, 45, 31, 33, 32, 34}
+
 func TestDefaultCollation_orderAgainstMySQL(t *testing.T) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
@@ -216,8 +229,11 @@ func TestDefaultCollation_orderAgainstMySQL(t *testing.T) {
 	if got := order("nocase.icu_noaccent"); !slices.Equal(got, mysqlSortOrder) {
 		t.Errorf("nocase.icu_noaccent no longer sorts like MySQL, so the reference list is out of date:\n got  %v\n want %v", got, mysqlSortOrder)
 	}
-	if got := order("nocase"); slices.Equal(got, mysqlSortOrder) {
-		t.Error("the copy's default (nocase) now sorts like MySQL; the difference in docs/time-travel-sql.md is out of date")
+	if got := order("nocase"); !slices.Equal(got, nocaseSortOrder) {
+		t.Errorf("the copy's default (nocase) sorts differently than recorded; update docs/time-travel-sql.md:\n got  %v\n want %v", got, nocaseSortOrder)
+	}
+	if slices.Equal(nocaseSortOrder, mysqlSortOrder) {
+		t.Error("the copy's default now sorts like MySQL; the difference in docs/time-travel-sql.md is out of date")
 	}
 }
 
@@ -245,7 +261,8 @@ var copyEquatesMoreThanMySQL = []struct {
 	{"letter newer than Unicode 9 (Georgian Mtavruli against Mkhedruli)", "Რ", "რ", true, true},
 }
 
-// mysqlEquatesMoreThanCopy is the safe direction, beyond the 57 pairs above:
+// mysqlEquatesMoreThanCopy is the other kind, beyond the 57 pairs above (an
+// equality on them matches fewer rows on the copy, a <> or NOT IN more):
 // texts MySQL 8.4.9 holds equal (measured: true on every one, on MariaDB 11.4
 // as well) and the copy does not, under either collation. The copy returns
 // FEWER rows for them, never more.
@@ -324,6 +341,40 @@ func TestDefaultCollation_hanOutsideTheMainBlockSortsDifferently(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("%s: max is %q (%+q), recorded %q; MySQL answers %+q", collation, got, got, want, mysqlMax)
+		}
+	}
+}
+
+// decomposedEqualOnMySQL: a letter written as a base letter and a combining
+// mark against the same letter in one character. MySQL 8.4.9 holds each
+// pair equal (measured, with MariaDB 11.4 agreeing except on the Hangul
+// syllable). The copy's default (nocase) does not normalize, so text that
+// arrives decomposed does not match its composed form: documented in
+// docs/time-travel-sql.md.
+var decomposedEqualOnMySQL = [][2]string{
+	{"e\u0301", "\u00e9"},      // e + combining acute against é
+	{"n\u0303", "\u00f1"},      // n + combining tilde against ñ
+	{"A\u030a", "\u00c5"},      // A + combining ring against Å
+	{"\u1100\u1161", "\uac00"}, // two Hangul jamo against the syllable
+}
+
+func TestDefaultCollation_decomposedTextStaysApart(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("SET default_collation = 'nocase'"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range decomposedEqualOnMySQL {
+		var got bool
+		if err := db.QueryRow("SELECT '" + p[0] + "'::VARCHAR = '" + p[1] + "'::VARCHAR").Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got {
+			t.Errorf("%+q = %+q is true under nocase now, as on MySQL: drop the line from docs/time-travel-sql.md", p[0], p[1])
 		}
 	}
 }

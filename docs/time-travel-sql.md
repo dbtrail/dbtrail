@@ -634,7 +634,7 @@ The decision, in order, for every statement:
    | `sql_auto_is_null` | `0` | `1` |
    | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
    | `character_set_results` | `utf8mb4`; `NULL` or `binary` (no conversion: each column comes in its own character set and says so, as from the copy) | `latin1`, `utf8mb3` and the rest: MySQL converts, the copy answers in utf8mb4 |
-   | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs` |
+   | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. The copy itself folds case only: accents, `ß` and full-width letters stay a documented difference under every one of these (see "The copy itself compares text"). Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs` |
 
    These are session settings whose value MySQL reads when it answers a
    `SELECT` the vetoes of step 3 let through. `group_concat_max_len` and
@@ -1101,19 +1101,32 @@ What this is and is not:
 
   This is a choice, made for speed (#2532): before it the copy used ICU's
   accent-insensitive collation (`nocase.icu_noaccent`), which matched
-  MySQL on 56 of 57 measured pairs of strings but made every statement
-  that compares, groups or sorts text 1.6 to 1.8 times slower, and up to
-  ten times on a column where every value is different. `nocase` costs
-  about 1.15 times what no collation costs. Statements over numbers and
-  dates were never affected.
+  MySQL on 56 of 57 measured pairs of strings but cost 1.6 to 1.8 times
+  what no collation costs on the text-grouping query it was measured on,
+  and up to ten times on an equality filter over a column where every
+  value is different. `nocase` cost 1.1 to 1.4 times on the same query.
+  Statements over numbers and dates were never affected.
 
   What differs from MySQL's `utf8mb4_0900_ai_ci`, none of which can be
   caught per statement:
-  - **The copy returns FEWER rows than MySQL (the common case).** Of 57
-    pairs of strings measured against MySQL 8.4, the copy differs on 36,
-    and on every one MySQL holds the two equal and the copy does not. A
-    filter or a join on them matches fewer rows on the copy, and a `GROUP
-    BY` keeps apart groups MySQL merges:
+  - **Texts MySQL holds equal and the copy does not (the common case).**
+    Of 57 pairs of strings measured against MySQL 8.4, the copy differs on
+    36, and on every one MySQL holds the two equal and the copy does not.
+    What that does depends on the statement, and it goes both ways:
+    - an equality (`=`, `IN`, a join on equal values) matches **fewer**
+      rows on the copy: `WHERE name = 'cafe'` misses `'café'`;
+    - anything built on NOT being equal matches **more**: `<>`, `NOT IN`,
+      `NOT EXISTS` and `LEFT JOIN ... IS NULL` keep `'café'` when asked to
+      drop `'cafe'`, so an exclusion report ("customers with no order")
+      can list rows MySQL does not;
+    - `SELECT DISTINCT` and `GROUP BY` return **more** rows, each with a
+      smaller count: `'café'`, `'cafe'` and `'Cafe'` are two groups here and
+      one on MySQL;
+    - a range on text (`> 'y'`, `BETWEEN`) can take accented words MySQL
+      leaves out, because they sort after `z` (below), and `ORDER BY ...
+      LIMIT`, `MIN` and `MAX` can pick other rows.
+
+    The pairs:
     - accents and other marks: `'café' = 'cafe'`, `'Ñ' = 'N'`, `'ü' = 'u'`
       are true on MySQL and false here;
     - `'ß' = 'ss'`, ligatures (`'æ' = 'ae'`, `'œ' = 'oe'`), letters with a
@@ -1130,15 +1143,17 @@ What this is and is not:
 
     If a report has to treat these as equal, normalize them in the query
     (`strip_accents(lower(x))`, `nfc_normalize(x)`), or send it to MySQL.
-  - **The copy can return MORE rows than MySQL for one known family.**
-    Letters whose upper and lower case Unicode added after version 9, which
-    MySQL's `0900` collations do not know and so give a weight of their
-    own each, fold to one another on the copy: a Georgian Mtavruli capital
-    (U+1CA0) is equal to the ordinary Georgian letter (U+10E0) here and not
-    on MySQL. Of the eight families where the previous collation returned
-    more rows than MySQL (an `l` with a middle dot, Thai and Lao vowel
-    order, combining marks newer than Unicode 9, ...), this is the only one
-    left; how many such pairs exist was not counted.
+  - **Texts the copy holds equal and MySQL does not: one known rule.** A
+    case pair Unicode added after version 9, which MySQL's `0900`
+    collations do not know and so weigh apart, folds to one on the copy:
+    a Georgian Mtavruli capital (U+1CA0) is equal to the ordinary Georgian
+    letter (U+10E0) here and not on MySQL. An equality on such text matches
+    MORE rows here. The rule covers every case pair added after Unicode 9;
+    only the Georgian one was measured, and how many there are was not
+    counted. Of the eight families measured one pair each where the
+    previous collation held texts equal that MySQL keeps apart (an `l` with
+    a middle dot, Thai and Lao vowel order, combining marks newer than
+    Unicode 9, ...), this is the only one left.
   - **`ORDER BY` differs on text.** Punctuation sorts by its code point
     (MySQL puts it before the digits), accented letters, `ß`, `æ`, `ø` and
     full-width letters sort after `z`, and `é` after `f`. `MIN`, `MAX`
@@ -1162,7 +1177,9 @@ What this is and is not:
     and again on MariaDB 11.4 under its default collation. The two agree
     on each of them except the two that differ by a trailing space (the
     point above), so on a MariaDB source the copy differs on 38 of the 57
-    where it differs on 36 on a MySQL source.
+    where it differs on 36 on a MySQL source. A Hangul syllable written as
+    its two jamo is equal to the one-character syllable on MySQL and
+    different on MariaDB 11.4 and on the copy.
   - **`_bin` outside UTF-8.** A `_bin` column in a multi-byte character
     set other than UTF-8 sorts by that character set's bytes on MySQL and
     by Unicode code point here. Equality is the same.

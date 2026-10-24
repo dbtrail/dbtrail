@@ -258,13 +258,13 @@ func valuesFixtures() []valuesFixture {
 		{"SELECT id FROM sales WHERE name = 'bob'", diff, "rows", "utf8mb4_general_ci is PAD SPACE: 'bob ' matches on MySQL"},
 		// The copy's default collation (nocase, #2532) folds case only. What
 		// utf8mb4_0900_ai_ci equates beyond case stays apart on the copy, in
-		// the safe direction (fewer matches, more groups), each in
+		// fewer matches on an equality and more groups, each in
 		// docs/time-travel-sql.md: notes are straße, Ａ (full width), strasse, a, NULL.
-		{"SELECT id FROM sales WHERE note = 'strasse'", diff, "", "ß is not ss on the copy: MySQL matches ids 1 and 3, the copy 3"},
-		{"SELECT id FROM sales WHERE note = 'A'", diff, "", "full-width A is not A on the copy: MySQL matches ids 2 and 4, the copy 4"},
-		{"SELECT id, note FROM sales ORDER BY note, id", diff, "", "the copy sorts ß after s and full-width letters after z"},
-		{"SELECT COUNT(*) FROM (SELECT note FROM sales GROUP BY note) t", diff, "", "three groups on MySQL, five on the copy"},
-		{"SELECT COUNT(DISTINCT id) FROM sales a WHERE EXISTS (SELECT 1 FROM sales b WHERE b.note = a.note AND b.id <> a.id)", diff, "", "a join on the column: all four match on MySQL, none on the copy"},
+		{"SELECT id FROM sales WHERE note = 'strasse'", diff, "rows", "ß is not ss on the copy: MySQL matches ids 1 and 3, the copy 3"},
+		{"SELECT id FROM sales WHERE note = 'A'", diff, "rows", "full-width A is not A on the copy: MySQL matches ids 2 and 4, the copy 4"},
+		{"SELECT id, note FROM sales ORDER BY note, id", diff, "order", "the copy sorts ß after s and full-width letters after z"},
+		{"SELECT COUNT(*) FROM (SELECT note FROM sales GROUP BY note) t", diff, "rows", "three groups on MySQL, five on the copy"},
+		{"SELECT COUNT(DISTINCT id) FROM sales a WHERE EXISTS (SELECT 1 FROM sales b WHERE b.note = a.note AND b.id <> a.id)", diff, "rows", "a join on the column: all four match on MySQL, none on the copy"},
 		// A _bin column next to folded ones, under the new default.
 		{"SELECT COUNT(*) FROM (SELECT code k FROM sales UNION ALL SELECT name FROM sales) t WHERE k = 'ab'", eq, "", "_bin and _ci in one UNION ALL column: bytes on both"},
 		// UNION's own duplicate removal does not fold on the copy, under this

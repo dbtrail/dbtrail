@@ -11,8 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **SQL on the copy compares text by case only, no longer by accents (#2532).**
   - **What changed.** The copy's session collation is now DuckDB's built-in `nocase`. It was ICU's `nocase.icu_noaccent`. `'Paid' = 'paid'` is still true, but `'café' = 'cafe'`, `'ß' = 'ss'`, full-width letters and a letter written in two parts against the same letter in one are now different on the copy, where MySQL's `utf8mb4_0900_ai_ci` holds them equal.
-  - **What it does to results.** Every one of those differences returns fewer rows than MySQL (and more groups), never rows MySQL leaves out. The one exception is a family of case pairs Unicode added after version 9 (Georgian Mtavruli). `ORDER BY` on text now sorts punctuation and accented letters by code point.
-  - **Why.** The ICU collation made every statement that compares, groups or sorts text 1.6 to 1.8 times slower. `nocase` costs about 1.15 times what no collation costs. Statements over numbers and dates are unchanged.
+  - **What it does to results, and it goes both ways.**
+    - An equality (`=`, `IN`, a join) matches FEWER rows than MySQL.
+    - Anything built on NOT being equal matches MORE: `<>`, `NOT IN`, `NOT EXISTS` and anti-joins keep `'café'` when asked to drop `'cafe'`.
+    - `DISTINCT` and `GROUP BY` return more groups.
+    - `ORDER BY` on text sorts punctuation and accented letters by code point, so ranges, `LIMIT`, `MIN` and `MAX` can pick other rows.
+    - Case pairs Unicode added after version 9 (Georgian Mtavruli) are equal here and not on MySQL.
+  - **Why.** On the text-grouping query it was measured on, the ICU collation cost 1.6 to 1.8 times what no collation costs, and `nocase` 1.1 to 1.4 times. Statements over numbers and dates are unchanged.
+  - **Engine Routing.** With routing on, such a statement is still answered by the copy: the router cannot tell from the statement whether the data holds accents.
   - **What to do.** A report that needs accents folded can normalize in the query (`strip_accents(lower(x))`, `nfc_normalize(x)`) or run on MySQL. The full list of differences is in docs/time-travel-sql.md.
 
 ## [0.114.0] - 2026-10-23

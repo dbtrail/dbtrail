@@ -495,14 +495,17 @@ type spillSpec struct {
 //     error. nocase folds case and NOTHING ELSE (#2532): accents, 'ß' and
 //     'ss', full-width forms and ligatures stay apart, where MySQL equates
 //     them, and ORDER BY sorts punctuation by code point and accented
-//     letters after 'z'. Every one of those differences is in the safe
-//     direction for a filter, a join or a GROUP BY: the copy returns fewer
-//     rows (more groups) than MySQL, never rows MySQL leaves out
-//     (collations_2083_test.go measures it; docs/time-travel-sql.md lists
-//     it). nocase.icu_noaccent, the default from #2083 to #2532, matched
-//     MySQL on 56 of the 57 measured pairs but cost 1.6-1.8x on every
-//     statement that compares, groups or sorts text, measured against no
-//     collation (nocase: 1.15x); nocase.noaccent, the default before it,
+//     letters after 'z'. For equality (=, IN, a join on equal values) that
+//     means fewer matches than MySQL; for everything built on NOT being
+//     equal or on order it means MORE: <> and NOT IN keep 'café' when asked
+//     to drop 'cafe', an anti-join keeps rows MySQL drops, DISTINCT and
+//     GROUP BY return more rows, a range (> 'y') takes accented words, and
+//     ORDER BY/LIMIT/MIN/MAX pick other rows (collations_2083_test.go
+//     measures the pairs; docs/time-travel-sql.md lists every effect).
+//     nocase.icu_noaccent, the default from #2083 to #2532, matched MySQL
+//     on 56 of the 57 measured pairs but cost 1.6-1.8x on the text-grouping
+//     query it was measured on (nocase: 1.1-1.4x), against no collation;
+//     nocase.noaccent, the default before it,
 //     also folds accents but equated far more texts MySQL keeps apart
 //     (combining marks, Indic vowel signs), the dangerous direction. A
 //     collation the engine does not have fails this SET, and runJob fails
@@ -840,9 +843,8 @@ func floatCell(f float64) any {
 // byte exactly. So "SHOP" finds shop, and "été" does not find Été.
 //
 // The comparison is done here and not in SQL on purpose. In SQL it would run
-// under the session's default collation, which equates far more than that
-// ('ß' with 'ss', accents, full-width forms), and lower() folds all of
-// Unicode: both said a schema existed under a name SET search_path then
+// under the session's default collation, which folds case beyond ASCII
+// ('été' with 'ÉTÉ'), and lower() folds all of Unicode: both said a schema existed under a name SET search_path then
 // refused, which failed every statement on the connection. A lookup failure
 // reads as absent, which is the safe side (the default stays).
 func catalogSchema(ctx context.Context, conn *sql.Conn, schema string) (string, bool) {

@@ -1033,7 +1033,7 @@ func testExe(t *testing.T) string {
 // sort. Accents are NOT folded (#2532): the copy's collation is DuckDB's
 // built-in nocase. The settings are part of the lock-down, so the query
 // cannot change them.
-func TestRun_textComparesLikeMySQL(t *testing.T) {
+func TestRun_textFoldsCaseNotAccents(t *testing.T) {
 	f := newCopyFixture(t)
 	r := newTestRunner(t, testLimits())
 	res, err := r.Run(context.Background(), f.job(`SELECT

@@ -147,8 +147,8 @@ type BaselineTable struct {
 	// collation (set with SchemaKnown). The state view gives each one byte
 	// comparison (COLLATE C), so it compares, groups and sorts as on MySQL
 	// whatever the session's default collation is. Without it, a session that
-	// folds case and accents to match MySQL's default (the copy's SQL session
-	// does) folds these columns too, and `code = 'ab'` matches 'AB' (#2083).
+	// folds case to match MySQL's default (the copy's SQL session does, with
+	// nocase) folds these columns too, and `code = 'ab'` matches 'AB' (#2083).
 	// Only a pinned view carries it; writeStateViews says why a following
 	// one does not.
 	BinaryText []string
