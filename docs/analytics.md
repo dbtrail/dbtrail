@@ -44,7 +44,10 @@ every version of every row next to the current state.
    writes only the rows it changed beside it (see [Table deltas](#table-deltas)).
 
 The schedule is set per server on the **Snapshots** page of the web interface.
-It can be as often as every 5 minutes or as rare as once a day. The interval is
+It can be as often as every 5 minutes or as rare as once a day. A new server
+that keeps its snapshots on this machine only gets every 5 minutes once its
+first snapshot is taken; one with an S3 location gets none, since its copies
+there are never removed automatically. The interval is
 the ceiling on how fresh a report can be: at `5m` a dashboard sees this
 morning; at `1d` it sees yesterday. The SQL port answers from the same
 snapshots by default. Its fresh mode (`SQL_FRESH=on`) is the exception: it

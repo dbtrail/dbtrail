@@ -154,6 +154,12 @@ type ServerEntry struct {
 	// schedule endpoints; the server edit form carries it over untouched.
 	// On binaries that predate it, it round-trips through Extra.
 	BackupSchedule *BackupSchedule `yaml:"backup_schedule,omitempty"`
+	// DefaultScheduleOnFirst says a snapshot every DefaultBackupEvery starts
+	// once this server's first snapshot is taken (ActivateDefaultSchedule).
+	// Set at creation, where that is bounded on disk; cleared when it fires
+	// or when the operator saves or removes a schedule first. Nothing reads
+	// the source on its own: the first snapshot is the operator's.
+	DefaultScheduleOnFirst bool `yaml:"default_schedule_on_first,omitempty"`
 	// LocalKeepNewest is this server's local snapshot retention (#1681):
 	// while it has a local folder (BaselineDir) and no external destination
 	// (BaselineS3), the daemon keeps the newest LocalKeepNewest complete
