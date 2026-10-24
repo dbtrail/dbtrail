@@ -460,7 +460,7 @@ func (s *Server) handleSQLInfo(w http.ResponseWriter, r *http.Request) {
 		names = append(names, n)
 	}
 	if len(names) == 0 {
-		if in.Hidden != nil {
+		if in.HiddenEveryTable {
 			writeJSONError(w, http.StatusConflict, sqlAllHiddenMessage)
 			return
 		}
@@ -1129,7 +1129,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	if why := viewsLeftOutMessage(in); why != "" {
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, why}
 	}
-	if in.Hidden != nil && !in.RendersAnyView() {
+	if in.HiddenEveryTable && !in.RendersAnyView() {
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, sqlAllHiddenMessage}
 	}
 	if in.NeedsS3() || (!in.RendersAnyView() && eventsInS3) {
@@ -1234,6 +1234,17 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			if h := sqlChainTooHeavy(named, limit, sqlFileSize); h.Table != "" {
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, sqlChainTooHeavyMessage(h, limit, memory)}
 				*heavy = &sqlHeavyRun{tables: named, chain: h, limit: limit, newest: in.BaselineSnapshot}
+				return "", viewsRefusal
+			}
+			// A hidden column is a column MySQL has and the view does not, so
+			// a name the reader writes for it can bind to ANOTHER table's
+			// column of that name (a join, a correlated subquery) and answer
+			// other rows with no error, and a NATURAL JOIN pairs on fewer
+			// columns (#2529). Refused before anything runs; the message
+			// names only what the reader wrote, and does not say whether the
+			// name is hidden or simply not there.
+			if why := sqlHiddenNameRefusal(statement, refs, readTables); why != "" {
+				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, why}
 				return "", viewsRefusal
 			}
 			if sess.StrictStar && refs.Natural {
@@ -1867,6 +1878,49 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string, a
 // rules the name may be hidden rather than mistyped, and the bare answer
 // would read as "no such thing on the source".
 var sqlHiddenNameMissing = regexp.MustCompile(`(?i)Referenced column|Table with name|Referenced table|resulted in an empty set of columns`)
+
+// sqlIdentRE finds the identifiers a statement writes: bare words, and the
+// insides of backtick and double-quoted names (both are identifiers to
+// DuckDB). String literals are removed first (sqlStringLiteralRE).
+var (
+	sqlStringLiteralRE = regexp.MustCompile(`'(?:[^']|'')*'`)
+	sqlIdentRE         = regexp.MustCompile("`((?:[^`]|``)+)`|\"((?:[^\"]|\"\")+)\"|([\\p{L}_][\\p{L}\\p{N}_$]*)")
+)
+
+// sqlHiddenNameRefusal refuses a statement that writes the name of a column
+// hidden in a table it may read, or that NATURAL-joins over such a table: on
+// the copy those bind to something else instead of failing (see the call).
+// A column of another table that shares the hidden name is refused too: the
+// text does not say which table a bare name belongs to.
+func sqlHiddenNameRefusal(statement string, refs sqlsandbox.Refs, tables []views.BaselineTable) string {
+	hidden := map[string]bool{}
+	for _, t := range tables {
+		for _, c := range t.HiddenColumns {
+			hidden[strings.ToLower(c)] = true
+		}
+	}
+	if len(hidden) == 0 {
+		return ""
+	}
+	if refs.Natural {
+		return "a NATURAL JOIN pairs on the columns its tables share, and some columns are not in the copy for this server" +
+			sqlHiddenHint + "; write the join with ON or USING"
+	}
+	text := sqlStringLiteralRE.ReplaceAllString(statement, "''")
+	for _, m := range sqlIdentRE.FindAllStringSubmatch(text, -1) {
+		name := m[3]
+		switch {
+		case m[1] != "":
+			name = strings.ReplaceAll(m[1], "``", "`")
+		case m[2] != "":
+			name = strings.ReplaceAll(m[2], `""`, `"`)
+		}
+		if hidden[strings.ToLower(name)] {
+			return fmt.Sprintf("the statement names %q, which is not in the copy for this server", name) + sqlHiddenHint
+		}
+	}
+	return ""
+}
 
 // sqlAllHiddenMessage answers a server whose every table the rules hide: the
 // copy is there, which "no snapshot" or "only on S3" would deny.

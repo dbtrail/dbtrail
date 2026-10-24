@@ -42,6 +42,19 @@ func TestApplyHidden(t *testing.T) {
 	if in.Hidden == nil {
 		t.Fatal("ApplyHidden must keep the set for the events view")
 	}
+	if in.HiddenEveryTable {
+		t.Error("HiddenEveryTable with two tables left")
+	}
+	all := Input{Baselines: []BaselineTable{{Schema: "shop", Table: "orders"}}}
+	ApplyHidden(&all, mustRules(t, []string{"shop.*"}, nil))
+	if !all.HiddenEveryTable {
+		t.Error("every table removed: HiddenEveryTable must say so")
+	}
+	none := Input{}
+	ApplyHidden(&none, mustRules(t, []string{"shop.*"}, nil))
+	if none.HiddenEveryTable {
+		t.Error("no table to remove: the rules did not empty the copy")
+	}
 
 	// No rules: nothing changes, and the events view is not wrapped.
 	in2 := Input{Baselines: []BaselineTable{{Schema: "shop", Table: "orders"}}}

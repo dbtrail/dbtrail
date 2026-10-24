@@ -581,6 +581,9 @@ type Input struct {
 	// images and changed_columns, and blanks the statement text. Nil when
 	// the server hides nothing.
 	Hidden *hiderules.Set
+	// HiddenEveryTable: the rules removed every state view there was, so
+	// a copy with no view is the rules' doing, not a missing snapshot.
+	HiddenEveryTable bool
 
 	// NonUTCSession says the reader will run this script and then set a
 	// session time zone other than UTC (the MySQL-protocol port after SET

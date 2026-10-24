@@ -33,6 +33,7 @@ func ApplyHidden(in *Input, set *hiderules.Set) {
 		}
 		kept = append(kept, t)
 	}
+	in.HiddenEveryTable = len(in.Baselines) > 0 && len(kept) == 0
 	in.Baselines = kept
 	in.Hidden = set
 }

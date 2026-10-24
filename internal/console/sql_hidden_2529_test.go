@@ -72,9 +72,20 @@ func TestSQLHidden_columnLeavesTheCopy(t *testing.T) {
 		t.Fatalf("SELECT * = %q / %s, want only id", cols, body)
 	}
 
-	w := postSQL(t, f.s, `{"sql":"SELECT status FROM shop.orders"}`)
-	if w.Code == http.StatusOK || !strings.Contains(w.Body.String(), "hides some tables and columns") {
-		t.Fatalf("naming the hidden column: %d %s, want an error with the hint", w.Code, w.Body.String())
+	for _, stmt := range []string{
+		"SELECT status FROM shop.orders",
+		"SELECT o.status FROM shop.orders o",
+		"SELECT \"STATUS\" FROM shop.orders",
+		"SELECT `status` FROM shop.orders",
+	} {
+		w := postSQL(t, f.s, `{"sql":`+jsonString(stmt)+`}`)
+		if w.Code == http.StatusOK || !strings.Contains(w.Body.String(), "hides some tables and columns") || strings.Contains(w.Body.String(), "paid") {
+			t.Errorf("%s: %d %s, want an error with the hint", stmt, w.Code, w.Body.String())
+		}
+	}
+	// A word inside a string literal is not a name.
+	if w := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders WHERE 'status' <> ''"}`); w.Code != http.StatusOK {
+		t.Errorf("a literal holding the hidden name: %d %s", w.Code, w.Body.String())
 	}
 
 	// The files hold the column: no statement may read them directly.
@@ -119,6 +130,31 @@ func TestSQLHidden_columnLeavesTheCopy(t *testing.T) {
 	}
 }
 
+// A hidden column's name must not bind to another table's column of that
+// name: a join or a correlated subquery would answer other rows with no
+// error, and a NATURAL JOIN would pair on fewer columns.
+func TestSQLHidden_hiddenNameNeverRebinds(t *testing.T) {
+	f, _ := hiddenSQLFixture(t, &hiderules.Rules{Columns: []string{"shop.orders.status"}})
+	writeSQLExtraTableCol(t, f.schemaDir, "states", "status", "decoy")
+	for _, stmt := range []string{
+		"SELECT o.id, status FROM shop.orders o JOIN shop.states s ON o.id = s.id",
+		"SELECT id FROM shop.states s WHERE id IN (SELECT id FROM shop.orders WHERE status = 'new')",
+		"SELECT * FROM shop.orders NATURAL JOIN shop.states",
+		// Every spelling of the name, case included: DuckDB folds them all.
+		"SELECT o.id, STATUS FROM shop.orders o JOIN shop.states s ON o.id = s.id",
+		"SELECT o.id, \"Status\" FROM shop.orders o JOIN shop.states s ON o.id = s.id",
+		"SELECT o.id, `status` FROM shop.orders o JOIN shop.states s ON o.id = s.id",
+	} {
+		w := postSQL(t, f.s, `{"sql":`+jsonString(stmt)+`}`)
+		if w.Code == http.StatusOK || !strings.Contains(w.Body.String(), "hides some tables and columns") {
+			t.Errorf("%s: %d %s, want refused", stmt, w.Code, w.Body.String())
+		}
+	}
+	if cols, body := sqlAnswer(t, postSQL(t, f.s, `{"sql":"SELECT * FROM shop.states"}`)); strings.Join(cols, ",") != "id,status" {
+		t.Errorf("the other table, alone: %q %s", cols, body)
+	}
+}
+
 // Every table hidden: the answers say so, never "no snapshot" or "only on
 // S3", which would send the operator after a problem that is not there.
 func TestSQLHidden_everyTableHiddenSaysSo(t *testing.T) {
@@ -130,7 +166,7 @@ func TestSQLHidden_everyTableHiddenSaysSo(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/sql", nil)
 	rec := httptest.NewRecorder()
 	f.s.handleSQLInfo(rec, req)
-	if strings.Contains(rec.Body.String(), "orders") || strings.Contains(rec.Body.String(), "only on S3") {
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "hidden by this server's rules") || strings.Contains(rec.Body.String(), "orders") {
 		t.Errorf("GET /api/sql: %d %s", rec.Code, rec.Body.String())
 	}
 }
@@ -171,8 +207,14 @@ func TestSQLHidden_entryGoneRefuses(t *testing.T) {
 // orders, in the same snapshot.
 func writeSQLExtraTable(t *testing.T, schemaDir, table, email string) {
 	t.Helper()
+	writeSQLExtraTableCol(t, schemaDir, table, "email", email)
+}
+
+// writeSQLExtraTableCol writes shop.<table>(id, <col>) with one row (1, value).
+func writeSQLExtraTableCol(t *testing.T, schemaDir, table, col, value string) {
+	t.Helper()
 	schemaFile := filepath.Join(t.TempDir(), "shop."+table+"-schema.sql")
-	ddl := "CREATE TABLE `" + table + "` (\n  `id` int NOT NULL,\n  `email` varchar(64) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	ddl := "CREATE TABLE `" + table + "` (\n  `id` int NOT NULL,\n  `" + col + "` varchar(64) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
 	if err := os.WriteFile(schemaFile, []byte(ddl), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +226,7 @@ func writeSQLExtraTable(t *testing.T, schemaDir, table, email string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.WriteRow([]string{"1", email}, []bool{false, false}); err != nil {
+	if err := w.WriteRow([]string{"1", value}, []bool{false, false}); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {
