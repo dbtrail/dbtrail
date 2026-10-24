@@ -241,6 +241,8 @@ the web interface's `/mcp`, it also gets a seventh tool, `sql`, which answers
 questions about the data as it is now: totals, rankings, trends, joins across
 tables. It runs one read-only statement on the copy of your tables, with the
 same engine as the web interface's SQL page.
+A server's hidden tables and columns are hidden from this tool too: see
+[Hiding tables and columns from SQL](console.md#hiding-tables-and-columns-from-sql).
 
 Prompts that work well:
 

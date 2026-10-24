@@ -108,6 +108,10 @@ mysql> SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12
 
 <a id="ordinary-sql-on-the-copy-embedded-port-only"></a>
 ### Ordinary SQL on the copy
+
+A server can hide tables and columns from this SQL: see
+[Hiding tables and columns from SQL](console.md#hiding-tables-and-columns-from-sql).
+On such a server, time travel (`_flashback`, `_snapshot`, `_diff`) is off.
 The same connection runs ordinary read-only SQL over the server's Parquet
 copy, the snapshots and the archived change log, exactly as the console's
 **SQL** card does: same locked DuckDB child process, same views, the same
@@ -390,6 +394,11 @@ What to know before relying on it:
 ### Engine Routing: MySQL answers, the copy takes the heavy reads
 Engine Routing is off until it is turned on. Off, the copy answers every
 statement on the port, as described above, and nothing is sent to MySQL.
+
+A server's hidden tables and columns apply to what the copy answers. What the
+port sends to MySQL runs under the forwarding account's grants instead, so
+narrow those grants to match: **Settings**, **MySQL clients**, **Hidden from SQL**
+lists what they can still read.
 
 Turn it on in the web interface: **Settings**, **MySQL clients**, **Connect a
 SQL client**, **Turn routing on** (or `PUT /api/flashback` with
