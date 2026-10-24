@@ -744,6 +744,30 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 func (r *Registry) Update(e ServerEntry) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.updateLocked(e)
+}
+
+// UpdateWith reads entry id and saves what edit makes of it, under one hold
+// of the lock, so a write fired from the background cannot put back a copy
+// read before a concurrent edit. edit returns the entry and whether to save
+// it; it must not call back into the registry.
+func (r *Registry) UpdateWith(id string, edit func(ServerEntry) (ServerEntry, bool)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, cur := range r.file.Servers {
+		if cur.ID == id {
+			e, save := edit(cur)
+			if !save {
+				return nil
+			}
+			return r.updateLocked(e)
+		}
+	}
+	return ErrUnknownServer
+}
+
+// updateLocked is Update with r.mu held.
+func (r *Registry) updateLocked(e ServerEntry) error {
 	if r.readOnly {
 		return ErrRegistryReadOnly
 	}

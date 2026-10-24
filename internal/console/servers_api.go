@@ -503,25 +503,38 @@ func (s *Server) ActivateDefaultSchedule(id string) {
 	if !ok || !e.DefaultScheduleOnFirst {
 		return
 	}
-	e.DefaultScheduleOnFirst = false
 	sched := BackupSchedule{Every: DefaultBackupEvery}
 	start := e.BackupSchedule == nil && defaultScheduleBounded(e)
 	if start {
+		// Outside the registry's lock: the gates read the registry too.
 		if err := CheckBackupSchedule(e, sched, s.scheduleGates()); err != nil {
 			slog.Info("console: the default snapshot schedule was not started", "server", e.Name, "reason", err.Error())
 			start = false
 		}
 	}
-	if start {
-		e.BackupSchedule = &sched
-	}
-	if err := s.cm.reg.Update(e); err != nil {
+	started := false
+	// The write re-reads the entry under the lock: a schedule the operator
+	// saved or removed since (which clears the mark), or a location changed
+	// since the check, wins over this background write.
+	err := s.cm.reg.UpdateWith(id, func(cur ServerEntry) (ServerEntry, bool) {
+		if !cur.DefaultScheduleOnFirst {
+			return cur, false
+		}
+		cur.DefaultScheduleOnFirst = false
+		if start && cur.BackupSchedule == nil && defaultScheduleBounded(cur) &&
+			cur.BaselineDir == e.BaselineDir && cur.DSN == e.DSN && cur.SourceDSN == e.SourceDSN {
+			cur.BackupSchedule = &sched
+			started = true
+		}
+		return cur, true
+	})
+	if err != nil {
 		slog.Warn("console: could not save a server's default snapshot schedule", "server", e.Name, "error", err.Error())
 		return
 	}
-	if start {
+	if started {
 		if s.backupSchedules != nil {
-			s.backupSchedules.Observe(e.ID, sched, time.Now().UTC())
+			s.backupSchedules.Observe(id, sched, time.Now().UTC())
 		}
 		slog.Info("console: first snapshot taken, a snapshot every "+DefaultBackupEvery+" starts now; change it on the "+PageSnapshots+" page", "server", e.Name)
 	}

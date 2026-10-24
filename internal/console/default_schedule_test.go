@@ -100,3 +100,31 @@ func TestDefaultSchedule(t *testing.T) {
 		}
 	})
 }
+
+// UpdateWith edits the entry as it is under the lock, and saves only when
+// asked.
+func TestRegistryUpdateWith(t *testing.T) {
+	srv, id := newScheduleServer(t, nil)
+	reg := srv.cm.reg
+	if err := reg.UpdateWith(id, func(e ServerEntry) (ServerEntry, bool) {
+		e.DefaultScheduleOnFirst = true
+		return e, false
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := reg.Get(id); got.DefaultScheduleOnFirst {
+		t.Error("saved without being asked")
+	}
+	if err := reg.UpdateWith(id, func(e ServerEntry) (ServerEntry, bool) {
+		e.DefaultScheduleOnFirst = true
+		return e, true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := reg.Get(id); !got.DefaultScheduleOnFirst {
+		t.Error("not saved")
+	}
+	if err := reg.UpdateWith("nope", func(e ServerEntry) (ServerEntry, bool) { return e, true }); err == nil {
+		t.Error("an unknown id was saved")
+	}
+}
