@@ -72,7 +72,8 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 			switch p.name {
 			case "EXECUTE":
 				execute = true
-			case "FILE", "PROCESS", "SUPER":
+			case "FILE", "PROCESS", "SUPER", "REPLICATION SLAVE", "REPLICATION REPLICA",
+				"BINLOG MONITOR", "REPLICA MONITOR", "SLAVE MONITOR", "BINLOG ADMIN", "BINLOG_ADMIN":
 				serverWide = append(serverWide, grantSecret.ReplaceAllString(line, "${1}'<hidden>'"))
 			}
 		}
@@ -142,10 +143,20 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 	}
 	// Any read at all: a view there may select what the rules hide, with
 	// its creator's rights (SQL SECURITY DEFINER, MySQL's default).
+	var logsReadable bool
 	for _, g := range parsed {
-		if readable(g, "") {
-			readsElsewhere = true
-			break
+		if !readable(g, "") {
+			continue
+		}
+		readsElsewhere = true
+		db := strings.ToLower(g.db)
+		tbl := strings.ToLower(g.table)
+		switch {
+		case db == "*",
+			db == "performance_schema",
+			g.dbIsWildcard && (likeFold(g.db, "mysql") || likeFold(g.db, "performance_schema")),
+			db == "mysql" && (tbl == "*" || tbl == "general_log" || tbl == "slow_log"):
+			logsReadable = true
 		}
 	}
 	for _, r := range set.TableRules() {
@@ -168,6 +179,10 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 		out.Unsure = append(out.Unsure, fmt.Sprintf("the account holds the role(s) %s, and SHOW GRANTS does not list what a role allows: "+
 			"check that none of them can read what this server hides", strings.Join(roles, ", ")))
 	}
+	if logsReadable {
+		out.Unsure = append(out.Unsure, "the account can read MySQL's own log tables (mysql.general_log, mysql.slow_log or performance_schema's statement history), "+
+			"which hold other sessions' statements with their values: revoke that read")
+	}
 	if readsElsewhere {
 		out.Unsure = append(out.Unsure, "the account can read tables, and a VIEW among them runs with its creator's rights: "+
 			"check that no view it can read selects what this server hides")
@@ -177,7 +192,8 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 			"check that none it can call returns what this server hides")
 	}
 	for _, l := range serverWide {
-		out.Unsure = append(out.Unsure, "this grant reaches beyond tables (FILE reads the server's files, PROCESS shows other sessions' statements): "+l)
+		out.Unsure = append(out.Unsure, "this grant reaches beyond tables (FILE reads the server's files; PROCESS and SUPER show other sessions' statements; "+
+			"REPLICATION SLAVE, BINLOG MONITOR and REPLICA MONITOR read the binary log, which holds statement text with its values): "+l)
 	}
 	for _, l := range unreadable {
 		out.Unsure = append(out.Unsure, "this grant reads something this check cannot name: "+l)
@@ -266,6 +282,11 @@ func splitQuotedDepth(s string) []string {
 // likeFold matches name against a database-level grant's name, where _ and %
 // are wildcards unless escaped with a backslash, without case.
 func likeFold(pattern, name string) bool {
+	// Runs of % match what one does; collapsed so the backtracking below
+	// stays linear in practice on a pattern like a%%%%%b.
+	for strings.Contains(pattern, "%%") {
+		pattern = strings.ReplaceAll(pattern, "%%", "%")
+	}
 	p, n := []rune(strings.ToLower(pattern)), []rune(strings.ToLower(name))
 	var match func(i, j int) bool
 	match = func(i, j int) bool {

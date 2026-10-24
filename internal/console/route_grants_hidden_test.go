@@ -53,6 +53,18 @@ func TestHiddenExposures(t *testing.T) {
 			safe: []string{"shop.customers.email"}, unsure: []string{"VIEW"}},
 		{name: "server-wide privileges", grants: []string{"GRANT FILE, PROCESS ON *.* TO `r`@`%`"},
 			unsure: []string{"GRANT FILE, PROCESS ON *.*"}},
+		// The binary log holds statement text with its literals.
+		{name: "replication", grants: []string{"GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO `r`@`%`"},
+			unsure: []string{"binary log", "GRANT REPLICATION SLAVE"}},
+		{name: "mariadb binlog monitor", grants: []string{"GRANT BINLOG MONITOR ON *.* TO `r`@`%`"},
+			unsure: []string{"GRANT BINLOG MONITOR"}},
+		{name: "mariadb replica monitor", grants: []string{"GRANT REPLICA MONITOR ON *.* TO `r`@`%`"},
+			unsure: []string{"GRANT REPLICA MONITOR"}},
+		// MySQL's own log tables hold other sessions' statements.
+		{name: "general log", grants: []string{"GRANT SELECT ON `mysql`.`general_log` TO `r`@`%`"},
+			unsure: []string{"mysql.general_log"}},
+		{name: "statement history", grants: []string{"GRANT SELECT ON `performance_schema`.* TO `r`@`%`"},
+			unsure: []string{"performance_schema"}},
 		// In a database-level grant, _ and % are wildcards (LIKE), unless escaped.
 		{name: "wildcard database name", grants: []string{"GRANT SELECT ON `sh_p`.* TO `r`@`%`"},
 			exposed: []string{"shop.audit_log", "shop.customers.email"}, safe: []string{"hr.*"}},
@@ -134,6 +146,7 @@ func TestLikeFold(t *testing.T) {
 		{`%`, "", true},
 		{`shop`, "shop2", false},
 		{`s%p`, "sp", true},
+		{`a%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%b`, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac", false},
 	} {
 		if got := likeFold(c.pattern, c.name); got != c.want {
 			t.Errorf("likeFold(%q, %q) = %v, want %v", c.pattern, c.name, got, c.want)
