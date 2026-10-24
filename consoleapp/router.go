@@ -260,6 +260,7 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		FlashbackPath:          routerPortFile(st),
 		FlashbackFollowsSwitch: true,
 		SQLLimits:              sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
+		SQLPoolCoresNote:       pool.CoresNote,
 		SQLMaxInFlight:         pool.Workers,
 		SQLWorkerStatements:    sqlsandbox.DefaultWorkerStatements,
 		SQLMaxWaiters:          routerMaxWaiters,
@@ -700,6 +701,9 @@ func routerStartupLines(u routerStartup) string {
 	fmt.Fprintf(&b, "Router: %s on the copy at once, %s and up to %s of memory each: %s.\n", countOfStatements(u.Pool.Workers), countOfThreads(u.Pool.Threads), u.MemoryLimit, u.Pool.Why)
 	if u.Pool.Warning != "" {
 		fmt.Fprintf(&b, "Router: WARNING: %s.\n", u.Pool.Warning)
+	}
+	if u.Pool.CoresNote != "" {
+		fmt.Fprintf(&b, "Router: NOTE: %s.\n", u.Pool.CoresNote)
 	}
 	if u.MemoryFrom != "" {
 		fmt.Fprintf(&b, "Router: that memory is %s. A change saved in the web interface is applied when the router is restarted.\n", u.MemoryFrom)

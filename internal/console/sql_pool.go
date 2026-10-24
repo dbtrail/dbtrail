@@ -20,6 +20,10 @@ type SQLPoolInput struct {
 	// the machine's count.
 	Cores    int
 	CoresOwn bool
+	// CoresYield says this process runs at a lower CPU priority than its
+	// siblings (cpuYields: a container's cpu_shares, a unit's CPUWeight), so
+	// the scheduler hands capture the cores when it needs them (#2531).
+	CoresYield bool
 	// MemoryBytes is the memory it may use, 0 when not known; MemoryOwn says
 	// it is a ceiling set on this process and not the machine's memory.
 	MemoryBytes uint64
@@ -50,6 +54,11 @@ type SQLPool struct {
 	// warn about: the number the operator set can ask for more memory than
 	// this process may use.
 	Warning string
+	// CoresNote, "" unless the statements were given half the cores because
+	// this process has neither a CPU ceiling nor a lower CPU priority of its
+	// own (#2531): it says so and how to give them all, for the startup
+	// line and the web interface.
+	CoresNote string
 }
 
 const (
@@ -77,11 +86,21 @@ const (
 // A resource with no ceiling of its own is the machine's, which capture
 // uses too: half of it is taken. A service started with its own ceilings
 // (the compose service, the systemd unit) gets all of what it was given.
+// So does one that runs at a lower CPU priority than capture (#2531): the
+// scheduler gives capture the cores back whenever it needs them, so the
+// statements can use all of them the rest of the time.
 func SQLPoolFor(in SQLPoolInput) SQLPool {
-	cores, coresWhy := max(in.Cores, 1), ""
-	if !in.CoresOwn && cores > 1 {
+	cores, coresWhy, coresNote := max(in.Cores, 1), "", ""
+	switch {
+	case in.CoresOwn || cores <= 1:
+	case in.CoresYield:
+		coresWhy = fmt.Sprintf(" (all of the machine's %d: this process runs at a lower CPU priority than capture, which takes cores back when it needs them)", in.Cores)
+	default:
 		cores = max(cores/2, 1)
 		coresWhy = fmt.Sprintf(" (half of the machine's %d: this process has no CPU ceiling of its own, and capture uses the machine too)", in.Cores)
+		coresNote = fmt.Sprintf("statements use %d of this machine's %d cores, because the router has neither a CPU ceiling nor a lower CPU priority of its own. "+
+			"With Docker Compose, take the current docker-compose.yml (its router runs at a lower CPU priority) or set ROUTER_CPUS=%d in .env, then docker compose up -d router; "+
+			"under systemd, give the router's unit a CPUWeight below 100", cores, in.Cores, in.Cores)
 	}
 	byCores := max(cores/sqlPoolMinThreads, 1)
 	workers := byCores
@@ -123,7 +142,7 @@ func SQLPoolFor(in SQLPoolInput) SQLPool {
 		why += fmt.Sprintf("; at most %d run at once", SQLPoolMaxWorkers)
 	}
 	if in.Asked <= 0 {
-		return SQLPool{Workers: workers, Threads: max(cores/workers, sqlPoolMinThreads), Why: why}
+		return SQLPool{Workers: workers, Threads: max(cores/workers, sqlPoolMinThreads), Why: why, CoresNote: coresNote}
 	}
 	// The operator's number. A statement gets its share of the cores, down
 	// to one thread: asked for more statements than the cores divide into
@@ -149,7 +168,7 @@ func SQLPoolFor(in SQLPoolInput) SQLPool {
 				countOfStatements(asked), gibText(uint64(ceiling)), gibText(need), gibText(mem), memoryCountedWhy(in))
 		}
 	}
-	return SQLPool{Workers: asked, Threads: max(cores/asked, 1), Why: said, Warning: warning}
+	return SQLPool{Workers: asked, Threads: max(cores/asked, 1), Why: said, Warning: warning, CoresNote: coresNote}
 }
 
 // memoryCountedWhy says, for the warning over the operator's number, what
@@ -212,7 +231,9 @@ func ThisMachineForSQLPool(memoryLimit string) SQLPoolInput {
 	if !tailsOff() {
 		tails = tailBudgetFromEnv().Bytes
 	}
-	return machineForSQLPool(memoryLimit, runtime.GOMAXPROCS(0), cpuCapped("/"), memoryBudget(), memoryCapped("/"), MemoryShare(), tails, MemoryBudgetWords())
+	in := machineForSQLPool(memoryLimit, runtime.GOMAXPROCS(0), cpuCapped("/"), memoryBudget(), memoryCapped("/"), MemoryShare(), tails, MemoryBudgetWords())
+	in.CoresYield = cpuYields("/")
+	return in
 }
 
 // machineForSQLPool is ThisMachineForSQLPool over its inputs: budget is the
@@ -292,6 +313,42 @@ func cpuCapped(root string) bool {
 				break
 			}
 		}
+	}
+	return false
+}
+
+// cpuYields reports whether this process's OWN cgroup runs at a CPU
+// priority below the default: cpu.weight under 100 under cgroup v2, cpu.shares
+// under 1024 under v1 (a container's cpu_shares, a systemd unit's CPUWeight).
+// Only its own: a parent's weight lowers this process and capture beside it
+// alike, which protects nothing. Anything that does not read is false, so the
+// pool keeps half the cores, as before #2531.
+func cpuYields(root string) bool {
+	b, err := os.ReadFile(filepath.Join(root, "proc/self/cgroup"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		var path string
+		var def int64
+		switch {
+		case parts[0] == "0" && parts[1] == "":
+			path, def = filepath.Join(root, "sys/fs/cgroup", filepath.Clean("/"+parts[2]), "cpu.weight"), 100
+		case strings.Contains(","+parts[1]+",", ",cpu,"):
+			path, def = filepath.Join(root, "sys/fs/cgroup", parts[1], filepath.Clean("/"+parts[2]), "cpu.shares"), 1024
+		default:
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		v, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return err == nil && v > 0 && v < def
 	}
 	return false
 }

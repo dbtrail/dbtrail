@@ -55,7 +55,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 6
+x-bintrail-compose-version: &compose_version 7
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -624,6 +624,11 @@ services:
   # memory saved in the web interface (SQL_MEMORY in .env wins; 2GB unless
   # set) plus a quarter.
   #
+  # Cores: the statements use every core this service sees, at a lower CPU
+  # priority than capture (cpu_shares below, ROUTER_CPU_SHARES in .env), so
+  # capture gets them back when it needs them. ROUTER_CPUS sets a hard
+  # ceiling instead.
+  #
   # Without this service nothing serves the MySQL port: the web interface
   # can turn it on and nothing listens.
   router:
@@ -698,6 +703,13 @@ services:
     # 0 = no ceiling. See ROUTER_MEMORY / ROUTER_CPUS above.
     mem_limit: ${ROUTER_MEMORY:-0}
     cpus: ${ROUTER_CPUS:-0}
+    # A lower CPU priority than capture (#2531): 256 against the default of
+    # the other services. The statements on the copy then use every core
+    # while capture and the snapshot refresh are quiet, and the kernel hands
+    # capture its cores back the moment it needs them. Without it the router
+    # keeps half the cores for capture all the time. A higher number gives
+    # the statements more of a busy machine and capture less.
+    cpu_shares: ${ROUTER_CPU_SHARES:-256}
     # A memory ceiling per statement on the copy, as on the `bintrail`
     # service: needs Docker 28 or later. Without it a statement that outgrows
     # its memory is stopped by this service's ceiling, or by the host.

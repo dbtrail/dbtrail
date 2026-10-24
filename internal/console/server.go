@@ -172,6 +172,10 @@ type Config struct {
 	// threads, memory, wall clock, rows. Zero fields take
 	// sqlsandbox.DefaultLimits (2 threads, 2 GB, 60 s, 1,000 rows).
 	SQLLimits sqlsandbox.Limits
+	// SQLPoolCoresNote is console.SQLPool.CoresNote of the pool the router
+	// sized (#2531): "" unless its statements were given half the cores. The
+	// router's numbers carry it to the web interface.
+	SQLPoolCoresNote string
 	// SQLPortMaxRows is the most rows one statement returns on the embedded
 	// MySQL port. Its own number, not SQLLimits.MaxRows: that one is how
 	// many rows the web interface's SQL page shows, and a program that
@@ -570,6 +574,8 @@ type Server struct {
 	// zero Config.SQLLimits is sqlsandbox.DefaultLimits); the handler reads
 	// them to bound max_rows and to name the timeout in its refusal.
 	sqlLimits sqlsandbox.Limits
+	// sqlPoolCoresNote is Config.SQLPoolCoresNote.
+	sqlPoolCoresNote string
 	// fillsCopyMirrors is Config.FillsCopyMirrors.
 	fillsCopyMirrors bool
 	// copyMirror is Config.CopyMirror.
@@ -891,6 +897,7 @@ func New(cfg Config) (*Server, error) {
 	// given the value on upgrade (MigrateProcessBaselineLocation, run where
 	// the registry is loaded, before any loop reads it).
 	s.sqlLimits = resolveSQLLimits(cfg.SQLLimits)
+	s.sqlPoolCoresNote = cfg.SQLPoolCoresNote
 	s.fillsCopyMirrors = cfg.FillsCopyMirrors
 	s.copyMirror = cfg.CopyMirror
 	s.sqlPortMaxRows = cfg.SQLPortMaxRows

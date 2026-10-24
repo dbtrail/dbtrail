@@ -145,6 +145,9 @@ type RouterPoolNumbers struct {
 	MemoryEach             string `json:"memory_each"`
 	WorkerProcessesStarted int64  `json:"worker_processes_started"`
 	StatementsPerWorker    int    `json:"statements_per_worker"`
+	// CoresNote says the statements were given half the machine's cores and
+	// how to give them all (#2531); empty when they have all they may use.
+	CoresNote string `json:"cores_note,omitempty"`
 }
 
 // RouterServerNumbers is one server's decisions since CountingSince.
@@ -243,6 +246,7 @@ func (s *Server) RouterNumbers() RouterNumbers {
 			Workers: runner.MaxInFlight(), Running: runner.Running(), Waiting: runner.Waiting(),
 			ThreadsEach: s.sqlLimits.Threads, MemoryEach: memory,
 			WorkerProcessesStarted: runner.WorkersStarted(), StatementsPerWorker: runner.WorkerStatements(),
+			CoresNote: s.sqlPoolCoresNote,
 		}
 	}
 	return out

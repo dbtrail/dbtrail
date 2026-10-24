@@ -57,7 +57,7 @@ import (
 // two together (TestComposeVersionMatchesTheBinary asserts they agree) and add
 // a composeVersionAdded entry saying what the new number buys, or the daemon
 // can only tell an operator that their file is old and not what it is missing.
-const bundledComposeVersion = 6
+const bundledComposeVersion = 7
 
 // composeVersionAdded names, per version, the wiring that version added. Only
 // versions ABOVE the operator's are read, so version 1 (the first numbered
@@ -68,6 +68,7 @@ var composeVersionAdded = map[int]string{
 	4: "the MySQL port (3309) is served by the router service and no longer by this one: with an older file nothing listens on 3309, and a MySQL client that connected there is refused",
 	5: "the usage telemetry choice is kept on the state volume (BINTRAIL_TELEMETRY_DIR) and read by the router and shim services too: with an older file it lives inside the container, so telemetry turned off in the web interface is back on after the next upgrade, and those two services never follow it",
 	6: "the bundled index MySQL sizes its buffer pool to the machine when INDEX_BUFFER_POOL is unset: with an older file it keeps InnoDB's 128 MB default, which caps capture at about 1,400 row changes per second on a busy server",
+	7: "the router runs at a lower CPU priority than capture (cpu_shares), so statements on the copy use every core instead of half of them: with an older file they run with half the machine's cores unless ROUTER_CPUS is set",
 }
 
 // composeIndexHost is the bundled index MySQL's service name in
