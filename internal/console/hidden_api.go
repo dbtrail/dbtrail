@@ -24,6 +24,20 @@ type hiddenDTO struct {
 	Refusal  string `json:"refusal,omitempty"`
 }
 
+// hiddenListsDTO is the rules on the server list: both lists, never null,
+// absent when the server hides nothing.
+type hiddenListsDTO struct {
+	Tables  []string `json:"tables"`
+	Columns []string `json:"columns"`
+}
+
+func newHiddenListsDTO(r *hiderules.Rules) *hiddenListsDTO {
+	if r == nil || (len(r.Tables) == 0 && len(r.Columns) == 0) {
+		return nil
+	}
+	return &hiddenListsDTO{Tables: append([]string{}, r.Tables...), Columns: append([]string{}, r.Columns...)}
+}
+
 func newHiddenDTO(r *hiderules.Rules) hiddenDTO {
 	d := hiddenDTO{Tables: []string{}, Columns: []string{}, Editable: true}
 	if r != nil {

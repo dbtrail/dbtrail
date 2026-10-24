@@ -799,9 +799,16 @@ func (r *Registry) SetHidden(id string, set *hiderules.Set) (ServerEntry, error)
 		if old.ID != id {
 			continue
 		}
+		// Keys a newer build wrote under the rules are kept: this build
+		// cannot read them, and dropping them would drop restrictions.
+		var keep map[string]any
+		if old.Hidden != nil {
+			keep = old.Hidden.Extra
+		}
 		var next *hiderules.Rules
-		if !set.Empty() {
+		if !set.Empty() || len(keep) > 0 {
 			rules := set.Rules()
+			rules.Extra = keep
 			next = &rules
 		}
 		prev := old.Hidden

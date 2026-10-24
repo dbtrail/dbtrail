@@ -223,3 +223,56 @@ func TestHiddenAPIAuthzRows(t *testing.T) {
 		}
 	}
 }
+
+// A server hiding only columns lists "tables": [] on the server list, never
+// null, so a page can read its length.
+func TestServerListHiddenNeverNull(t *testing.T) {
+	srv := newRegistryServer(t)
+	id := createHiddenTestServer(t, srv)
+	if rec, body := doServersReq(t, srv, "PUT", "/api/servers/"+id+"/hidden",
+		`{"tables":[],"columns":["shop.customers.email"]}`); rec.Code != 200 {
+		t.Fatalf("save = %d %s", rec.Code, body)
+	}
+	_, body := doServersReq(t, srv, "GET", "/api/servers/"+id, "")
+	if !strings.Contains(string(body), `"hidden":{"tables":[],"columns":["shop.customers.email"]}`) {
+		t.Fatalf("server DTO hidden = %s", body)
+	}
+}
+
+// Keys a newer build wrote under hidden: survive this build's saves, both an
+// unrelated edit of the server and a save of the rules themselves.
+func TestHiddenRulesKeepFutureKeys(t *testing.T) {
+	path := t.TempDir() + "/console-servers.yaml"
+	yamlText := "version: 1\nservers:\n- id: s1\n  name: prod\n  dsn: u:p@tcp(h:3306)/db\n" +
+		"  hidden:\n    tables:\n    - shop.audit_log\n    future_rule: keep-me\n"
+	if err := os.WriteFile(path, []byte(yamlText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := reg.Get("s1")
+	if !ok {
+		t.Fatal("entry not loaded")
+	}
+	e.Name = "prod-renamed"
+	if err := reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "future_rule: keep-me") {
+		t.Fatalf("an unrelated edit dropped the future key:\n%s", raw)
+	}
+	set, err := hiderules.Parse(hiderules.Rules{Columns: []string{"shop.customers.email"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.SetHidden("s1", set); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "future_rule: keep-me") || !strings.Contains(string(raw), "shop.customers.email") ||
+		strings.Contains(string(raw), "shop.audit_log") {
+		t.Fatalf("SetHidden must replace the lists and keep the future key:\n%s", raw)
+	}
+}

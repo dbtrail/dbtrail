@@ -36,6 +36,11 @@ const MaxEntries = 1000
 type Rules struct {
 	Tables  []string `yaml:"tables,omitempty" json:"tables"`
 	Columns []string `yaml:"columns,omitempty" json:"columns"`
+	// Extra keeps keys a newer build wrote under the rules, the way
+	// ServerEntry.Extra does for the entry, so an older build that rewrites
+	// the registry does not drop a restriction it cannot read. Parse ignores
+	// it; the registry carries it across saves.
+	Extra map[string]any `yaml:",inline" json:"-"`
 }
 
 type part struct {
