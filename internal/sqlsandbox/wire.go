@@ -29,14 +29,16 @@ type wireJob struct {
 	ViewsSQL string   `json:"views_sql"`
 	// AskViews: ViewsSQL is empty, and the worker asks for the script once
 	// it has parsed the statement (Job.ViewsFor).
-	AskViews    bool   `json:"ask_views,omitempty"`
-	SQL         string `json:"sql"`
-	Schema      string `json:"schema,omitempty"`
-	TimeZone    string `json:"time_zone,omitempty"`
-	SelectLimit int    `json:"select_limit,omitempty"`
-	Threads     int    `json:"threads"`
-	MemoryLimit string `json:"memory_limit"`
-	MaxRows     int    `json:"max_rows"`
+	AskViews bool   `json:"ask_views,omitempty"`
+	SQL      string `json:"sql"`
+	// NoFileReaders: see Job.NoFileReaders.
+	NoFileReaders bool   `json:"no_file_readers,omitempty"`
+	Schema        string `json:"schema,omitempty"`
+	TimeZone      string `json:"time_zone,omitempty"`
+	SelectLimit   int    `json:"select_limit,omitempty"`
+	Threads       int    `json:"threads"`
+	MemoryLimit   string `json:"memory_limit"`
+	MaxRows       int    `json:"max_rows"`
 	// MaxResultBytes is counted by the worker as it collects rows, so it
 	// stops before building a result the parent would refuse anyway.
 	MaxResultBytes int64 `json:"max_result_bytes"`

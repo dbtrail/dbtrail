@@ -147,7 +147,7 @@ func TestSelectLimitApplies_unknownShapeIsNotGuessed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	stmt, reason := parseStatement(context.Background(), conn, "SELECT 1")
+	stmt, reason := parseStatement(context.Background(), conn, "SELECT 1", false)
 	if reason != "" {
 		t.Fatal(reason)
 	}

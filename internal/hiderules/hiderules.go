@@ -328,3 +328,48 @@ func (s *Set) ColumnHidden(schema, table, column string) bool {
 	}
 	return false
 }
+
+// TableRule is one table entry, for a reader that renders the rules (the
+// events view filters rows by them in SQL).
+type TableRule struct {
+	Schema, Table string
+	AllTables     bool // schema.*: Table is empty
+}
+
+// ColumnRule is one column entry; AllTables means schema.*.column.
+type ColumnRule struct {
+	Schema, Table, Column string
+	AllTables             bool
+}
+
+// TableRules returns the table entries in rule order.
+func (s *Set) TableRules() []TableRule {
+	if s == nil {
+		return nil
+	}
+	out := make([]TableRule, 0, len(s.tables))
+	for _, t := range s.tables {
+		r := TableRule{Schema: t.schema, Table: t.table, AllTables: t.allTables}
+		if r.AllTables {
+			r.Table = ""
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// ColumnRules returns the column entries in rule order.
+func (s *Set) ColumnRules() []ColumnRule {
+	if s == nil {
+		return nil
+	}
+	out := make([]ColumnRule, 0, len(s.columns))
+	for _, c := range s.columns {
+		r := ColumnRule{Schema: c.schema, Table: c.table, Column: c.column, AllTables: c.allTables}
+		if r.AllTables {
+			r.Table = ""
+		}
+		out = append(out, r)
+	}
+	return out
+}

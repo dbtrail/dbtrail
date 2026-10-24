@@ -189,6 +189,11 @@ type Job struct {
 	ViewsFor func(Refs) (string, error)
 	// SQL is the user's statement.
 	SQL string
+	// NoFileReaders refuses statements that read files directly (read_parquet,
+	// glob, the parquet_* metadata functions, read_csv and the other readers)
+	// and duckdb_views(): set for a server with hidden rules (#2529), whose
+	// files under CopyDirs hold what the views leave out.
+	NoFileReaders bool
 	// Schema, when set, is the schema unqualified names in SQL resolve in
 	// (DuckDB's search_path): the MySQL-protocol port's USE. The views put
 	// each source schema's tables in a schema of that name, and events in
@@ -1343,7 +1348,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, more bool) ([]byte, err
 		viewsSQL = ""
 	}
 	return json.Marshal(wireJob{
-		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, Schema: job.Schema,
+		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
 		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),

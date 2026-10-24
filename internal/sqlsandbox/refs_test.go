@@ -25,7 +25,7 @@ func parseForRefs(t *testing.T, text string) Refs {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	stmt, reason := parseStatement(context.Background(), conn, text)
+	stmt, reason := parseStatement(context.Background(), conn, text, false)
 	if reason != "" {
 		t.Fatalf("%q refused: %s", text, reason)
 	}

@@ -26,8 +26,12 @@ var errNoServers = errors.New("no servers configured: pass --index-dsn or add a 
 // Server when the console spoke to exactly one index. One bundle per selected
 // server, built lazily and cached by connManager.
 type bundle struct {
-	db     *sql.DB
-	dbName string
+	// serverID is the registry id this bundle serves, so a reader that must
+	// see the entry's CURRENT settings (the hidden rules, #2529) reads them
+	// fresh instead of trusting a bundle a long-lived connection holds.
+	serverID string
+	db       *sql.DB
+	dbName   string
 	// dsn is the connection's own DSN, kept for the capacity probe's
 	// locality check (is the index datadir on THIS host?) and never
 	// serialized — the masked DTOs are built elsewhere (#1444).
@@ -341,6 +345,7 @@ func newBundleDerived(db *sql.DB, dbName string, entry ServerEntry, profileActiv
 	noArchive := entry.NoArchive || profileActive
 	src, fallback := baselineSources(entry)
 	return &bundle{
+		serverID:            entry.ID,
 		db:                  db,
 		dbName:              dbName,
 		engine:              query.New(db),

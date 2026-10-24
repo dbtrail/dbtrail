@@ -27,6 +27,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/archive"
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -65,7 +66,10 @@ func (m FollowMode) follows() bool { return m != FollowNone }
 type BaselineTable struct {
 	Schema string
 	Table  string
-	Path   string // local path or s3:// URL of the table's .parquet file
+	// HiddenColumns are the columns this table's view leaves out (#2529),
+	// set by ApplyHidden; names compare without case.
+	HiddenColumns []string
+	Path          string // local path or s3:// URL of the table's .parquet file
 	// Rel is Path relative to its snapshot directory ("schema/table.parquet"),
 	// set by the producer under BOTH following modes. FollowNewest needs it to
 	// build its view bodies at all: the following there is a SQL shape rather
@@ -570,6 +574,13 @@ type Input struct {
 	// Empty for the downloadable `bintrail views` file, which describes the
 	// operator's OWN Parquet in full.
 	ExcludeEventColumns []string
+
+	// Hidden are the server's hidden rules (#2529), set by ApplyHidden: the
+	// state views of hidden tables are already gone from Baselines, and the
+	// events view drops their rows, strips hidden columns from the row
+	// images and changed_columns, and blanks the statement text. Nil when
+	// the server hides nothing.
+	Hidden *hiderules.Set
 
 	// NonUTCSession says the reader will run this script and then set a
 	// session time zone other than UTC (the MySQL-protocol port after SET
@@ -1849,15 +1860,18 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		writeAttachDegradeNote(b, stateSurvives, true)
 		writeLiveCostNote(b, in, true)
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(eventsViewName))
-		b.WriteString("  WITH cold AS (\n")
-		writeColdSide(b, in, "    ")
-		b.WriteString("\n  ), hot AS (\n")
-		writeEventSelect(b, in, true, nil, "    ")
-		b.WriteString("\n  )\n")
-		b.WriteString("  SELECT * FROM cold\n")
-		b.WriteString("  UNION ALL BY NAME\n")
-		b.WriteString("  SELECT * FROM hot\n")
-		b.WriteString("   WHERE NOT EXISTS (SELECT 1 FROM cold WHERE cold.event_id = hot.event_id);\n\n")
+		var body strings.Builder
+		body.WriteString("  WITH cold AS (\n")
+		writeColdSide(&body, in, "    ")
+		body.WriteString("\n  ), hot AS (\n")
+		writeEventSelect(&body, in, true, nil, "    ")
+		body.WriteString("\n  )\n")
+		body.WriteString("  SELECT * FROM cold\n")
+		body.WriteString("  UNION ALL BY NAME\n")
+		body.WriteString("  SELECT * FROM hot\n")
+		body.WriteString("   WHERE NOT EXISTS (SELECT 1 FROM cold WHERE cold.event_id = hot.event_id);\n")
+		b.WriteString(hideEvents(body.String(), in.Hidden, in.ExcludeEventColumns))
+		b.WriteString("\n")
 	case live:
 		b.WriteString("--\n")
 		// "No archive source in this file", not "nothing has been archived":
@@ -1872,8 +1886,11 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 		writeAttachDegradeNote(b, stateSurvives, false)
 		writeLiveCostNote(b, in, false)
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(eventsViewName))
-		writeEventSelect(b, in, true, nil, "  ")
-		b.WriteString(";\n\n")
+		var body strings.Builder
+		writeEventSelect(&body, in, true, nil, "  ")
+		body.WriteString(";\n")
+		b.WriteString(hideEvents(body.String(), in.Hidden, in.ExcludeEventColumns))
+		b.WriteString("\n")
 	default:
 		b.WriteString("--\n")
 		b.WriteString("-- SCOPE: these are the ARCHIVED events only. Partitions rotation has not\n")
@@ -1893,8 +1910,11 @@ func writeEventsView(b *strings.Builder, in Input, stateSurvives bool) bool {
 			b.WriteString("--   bintrail views --index-dsn ... --include-live\n")
 		}
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.viewRef(eventsViewName))
-		writeColdSide(b, in, "  ")
-		b.WriteString(";\n\n")
+		var body strings.Builder
+		writeColdSide(&body, in, "  ")
+		body.WriteString(";\n")
+		b.WriteString(hideEvents(body.String(), in.Hidden, in.ExcludeEventColumns))
+		b.WriteString("\n")
 	}
 	return true
 }
@@ -2383,17 +2403,30 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 			}
 		}
 		fmt.Fprintf(b, "CREATE OR REPLACE VIEW %s AS\n", in.stateRef(p))
+		// Every body variant is written first and wrapped once (#2529), so
+		// a hidden column leaves the view whichever way the table is read.
+		var body strings.Builder
+		writeStateBody(&body, in, t)
+		b.WriteString(hideColumns(body.String(), t.HiddenColumns))
+	}
+	b.WriteString("\n")
+	return len(wanted) > 0
+}
+
+// writeStateBody writes one state view's body, ending in ";\n".
+func writeStateBody(b *strings.Builder, in Input, t BaselineTable) {
+	{
 		if t.Tail != nil && !in.Follow.follows() {
 			fmt.Fprintf(b, "  %s;\n", tailStateBody(t))
-			continue
+			return
 		}
 		if in.Follow == FollowNewest {
 			writeNewestStateBody(b, in, t)
-			continue
+			return
 		}
 		if t.Delta || (in.Follow.follows() && chainReady(in, t)) {
 			fmt.Fprintf(b, "  %s;\n", deltaStateBody(t, t.Path, sqlString, in.Follow == FollowNone))
-			continue
+			return
 		}
 		// Only a view that FOLLOWS can meet a snapshot it was not generated
 		// against; a pinned one reads the same files forever.
@@ -2412,17 +2445,15 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 			// and collations stand on their columns in the list.
 			fmt.Fprintf(b, "  SELECT %s\n", list)
 			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(fileGlob(t.Path)), guard)
-			continue
+			return
 		}
 		if replace := replaceClause(t); replace != "" {
 			fmt.Fprintf(b, "  SELECT * REPLACE (%s)\n", replace)
 			fmt.Fprintf(b, "  FROM read_parquet(%s)%s;\n", sqlString(fileGlob(t.Path)), guard)
-			continue
+			return
 		}
 		fmt.Fprintf(b, "  SELECT * FROM read_parquet(%s)%s;\n", sqlString(fileGlob(t.Path)), guard)
 	}
-	b.WriteString("\n")
-	return len(wanted) > 0
 }
 
 // newestVar is the session variable holding the snapshot directory every state

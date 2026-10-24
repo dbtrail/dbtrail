@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/storage"
@@ -83,6 +84,39 @@ type viewsRequest struct {
 	// Zero means the newest, as before. A snapshot that is not there is an
 	// error, never a silent fall back to the newest.
 	SnapshotAt time.Time
+	// ApplyHidden applies the server's hidden rules (#2529): set by the
+	// surfaces that run statements for a reader (SQL on the copy, the
+	// MySQL-protocol port, the MCP sql tool) and never by a downloaded
+	// views file, which the operator's own DuckDB reads directly. Rules
+	// this build cannot enforce fail the build with a *hiddenRulesError.
+	ApplyHidden bool
+}
+
+// hiddenRulesError refuses a statement on a server whose stored hidden rules
+// this build cannot enforce (hiderules.Load): serving it without them would
+// show what someone asked to hide.
+type hiddenRulesError struct{ err error }
+
+func (e *hiddenRulesError) Error() string {
+	return "this server's statements are refused: " + e.err.Error()
+}
+
+// hiddenRulesFor loads the CURRENT hidden rules of b's server from the
+// registry, never from the bundle, so an edit governs the next statement of
+// a connection that is already open. The command-line server has none.
+func (s *Server) hiddenRulesFor(b *bundle) (*hiderules.Set, error) {
+	if b == nil || b.serverID == "" || b.serverID == bootServerID || s.cm == nil || s.cm.reg == nil {
+		return nil, nil
+	}
+	e, ok := s.cm.reg.Get(b.serverID)
+	if !ok {
+		return nil, nil
+	}
+	set, err := hiderules.Load(e.Hidden)
+	if err != nil {
+		return nil, &hiddenRulesError{err}
+	}
+	return set, nil
 }
 
 // naming, not a degrade: silently dropping the baseline half would hand over a
@@ -94,6 +128,24 @@ type viewsRequest struct {
 // feed the events view, baselines feed the state views, and a server can have
 // its archives in S3 while its backups are on local disk or the reverse.
 func (s *Server) buildViewsInput(ctx context.Context, b *bundle, req viewsRequest) (views.Input, error) {
+	var hidden *hiderules.Set
+	if req.ApplyHidden {
+		set, err := s.hiddenRulesFor(b)
+		if err != nil {
+			return views.Input{}, err
+		}
+		hidden = set
+	}
+	in, err := s.buildViewsInputAll(ctx, b, req)
+	if err != nil {
+		return in, err
+	}
+	views.ApplyHidden(&in, hidden)
+	return in, nil
+}
+
+// buildViewsInputAll is buildViewsInput before the hidden rules.
+func (s *Server) buildViewsInputAll(ctx context.Context, b *bundle, req viewsRequest) (views.Input, error) {
 	portable, omitEvents, pinSnapshot := req.PortableArchives, req.OmitEvents, req.PinSnapshot
 	in := views.Input{
 		GeneratedAt: time.Now().UTC(),
