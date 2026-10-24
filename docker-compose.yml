@@ -709,7 +709,7 @@ services:
     # capture its cores back the moment it needs them. The weight this
     # becomes depends on the container runtime (35 against 100 on runc 1.3,
     # 10 on older ones); the router reads it at start and says so in its log.
-    # At half the default weight or more it keeps half the cores for capture
+    # Above half the default weight it keeps half the cores for capture
     # instead. Leave the other services' priority alone: lowering capture's
     # too takes its protection away.
     cpu_shares: ${ROUTER_CPU_SHARES:-256}

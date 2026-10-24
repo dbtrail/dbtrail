@@ -134,9 +134,17 @@ func TestSQLPoolFor_lowerPriorityTakesAllTheCores(t *testing.T) {
 		{"the note says what it read and never offers ROUTER_CPUS, which would take capture's cores",
 			SQLPoolInput{Cores: 4, CoresPriority: "cpu.weight 100, the default being 100", MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
 			1, 2, "half", "its CPU priority: cpu.weight 100, the default being 100"},
-		{"4 cores at a lower priority: all four",
-			SQLPoolInput{Cores: 4, CoresYield: true, MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
-			1, 4, "lower CPU priority", ""},
+		{"4 cores at a lower priority: all four, and the startup says what it read",
+			SQLPoolInput{Cores: 4, CoresYield: true, CoresPriority: "cpu.weight 35, the default being 100", MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
+			1, 4, "below the default CPU priority (cpu.weight 35, the default being 100)", ""},
+		// A pod's weight competes only inside the pod: capture's pod is not
+		// behind it, so a low weight there protects nothing.
+		{"Kubernetes, a low weight: still half, and the fix is a CPU limit",
+			SQLPoolInput{Cores: 4, CoresYield: true, InKubernetes: true, CoresPriority: "cpu.weight 4, the default being 100", MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
+			1, 2, "half", "resources.limits.cpu"},
+		{"unreadable priority: half, and it does not prescribe a setting that may already be there",
+			SQLPoolInput{Cores: 4, CoresPriority: "unknown: no cpu controller in /proc/self/cgroup", MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
+			1, 2, "half", "could not be read (unknown: no cpu controller in /proc/self/cgroup)"},
 		{"a ceiling of its own wins over priority: all of what it was given",
 			SQLPoolInput{Cores: 4, CoresOwn: true, CoresYield: true, MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
 			1, 4, "4 cores allow 2", ""},
@@ -147,8 +155,8 @@ func TestSQLPoolFor_lowerPriorityTakesAllTheCores(t *testing.T) {
 			SQLPoolInput{Cores: 1, MemoryBytes: 8 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
 			1, 2, "1 core allows 1", ""},
 		{"8 cores at a lower priority, memory for two (5 GiB ceiling each): two of four threads",
-			SQLPoolInput{Cores: 8, CoresYield: true, MemoryBytes: 11 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
-			2, 4, "lower CPU priority", ""},
+			SQLPoolInput{Cores: 8, CoresYield: true, CoresPriority: "cpu.shares 256, the default being 1024", MemoryBytes: 11 * gib, MemoryOwn: true, MemoryLimit: "4096MiB"},
+			2, 4, "below the default CPU priority (cpu.shares 256", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := SQLPoolFor(tc.in)
@@ -163,6 +171,9 @@ func TestSQLPoolFor_lowerPriorityTakesAllTheCores(t *testing.T) {
 			}
 			if tc.note != "" && !strings.Contains(got.CoresNote, tc.note) {
 				t.Errorf("note = %q, want it to say %q", got.CoresNote, tc.note)
+			}
+			if (tc.in.InKubernetes || strings.HasPrefix(tc.in.CoresPriority, "unknown")) && strings.Contains(got.CoresNote, "CPUWeight=25") {
+				t.Errorf("note = %q prescribes the priority setting where it cannot help", got.CoresNote)
 			}
 			if strings.Contains(got.CoresNote, "ROUTER_CPUS") {
 				t.Errorf("note = %q: a ceiling of all the cores takes capture's protection away", got.CoresNote)

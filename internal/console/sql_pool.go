@@ -29,6 +29,10 @@ type SQLPoolInput struct {
 	// "cpu.weight 100", or why nothing could be read.
 	CoresYield    bool
 	CoresPriority string
+	// InKubernetes: a container's weight there competes only with the other
+	// containers of its own pod, never with capture's pod, so a low weight
+	// protects nothing and the pool keeps half (KUBERNETES_SERVICE_HOST).
+	InKubernetes bool
 	// MemoryBytes is the memory it may use, 0 when not known; MemoryOwn says
 	// it is a ceiling set on this process and not the machine's memory.
 	MemoryBytes uint64
@@ -98,19 +102,30 @@ func SQLPoolFor(in SQLPoolInput) SQLPool {
 	cores, coresWhy, coresNote := max(in.Cores, 1), "", ""
 	switch {
 	case in.CoresOwn || cores <= 1:
-	case in.CoresYield:
-		coresWhy = fmt.Sprintf(" (all of the machine's %d: this process runs at a lower CPU priority than capture, which takes cores back when it needs them)", in.Cores)
+	case in.CoresYield && !in.InKubernetes:
+		coresWhy = fmt.Sprintf(" (all of the machine's %d: this process runs below the default CPU priority (%s), so capture, at the default, takes cores back when it needs them)", in.Cores, in.CoresPriority)
 	default:
 		cores = max(cores/2, 1)
 		coresWhy = fmt.Sprintf(" (half of the machine's %d: this process has no CPU ceiling of its own, and capture uses the machine too)", in.Cores)
 		read := in.CoresPriority
 		if read == "" {
-			read = "not known"
+			read = "unknown"
 		}
-		coresNote = fmt.Sprintf("statements use %d of this machine's %d cores and leave the rest to capture, because the router has no CPU ceiling of its own "+
-			"and does not run at a lower CPU priority than capture (its CPU priority: %s). To give them every core, run the router at a lower priority: "+
-			"with Docker Compose, take the current docker-compose.yml (cpu_shares on the router service) and docker compose up -d router; "+
-			"under systemd, CPUWeight=25 on the router's unit. Capture keeps its cores either way", cores, in.Cores, read)
+		head := fmt.Sprintf("statements use %d of this machine's %d cores and leave the rest to capture, because the router has no CPU ceiling of its own", cores, in.Cores)
+		switch {
+		case in.InKubernetes:
+			coresNote = head + ". On Kubernetes a container's CPU priority competes only inside its own pod, so it cannot protect capture. " +
+				"To give statements more cores, set a CPU limit on the router's container (resources.limits.cpu) and they use all of it"
+		case strings.HasPrefix(read, "unknown"):
+			coresNote = head + fmt.Sprintf(" and its CPU priority could not be read (%s). ", read) +
+				"The cpu controller is probably not available to the router (rootless Docker, or a systemd setup that does not delegate it), " +
+				"and then cpu_shares or CPUWeight has no effect either. Capture keeps its cores either way"
+		default:
+			coresNote = head + fmt.Sprintf(" and does not run below the default CPU priority (its CPU priority: %s). ", read) +
+				"To give them every core, run the router at a lower priority: " +
+				"with Docker Compose, take the current docker-compose.yml (cpu_shares on the router service) and docker compose up -d router; " +
+				"under systemd, CPUWeight=25 on the router's unit. Capture keeps its cores either way"
+		}
 	}
 	byCores := max(cores/sqlPoolMinThreads, 1)
 	workers := byCores
@@ -243,6 +258,7 @@ func ThisMachineForSQLPool(memoryLimit string) SQLPoolInput {
 	}
 	in := machineForSQLPool(memoryLimit, runtime.GOMAXPROCS(0), cpuCapped("/"), memoryBudget(), memoryCapped("/"), MemoryShare(), tails, MemoryBudgetWords())
 	in.CoresYield, in.CoresPriority = cpuPriorityOf("/")
+	in.InKubernetes = os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 	return in
 }
 

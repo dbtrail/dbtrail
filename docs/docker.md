@@ -703,13 +703,14 @@ while capture and the snapshot refresh are quiet the statements have the
 whole machine, and the kernel hands capture its cores back the moment it
 needs them. The router reads its own weight at start (`cpu.weight`, whose
 value for a given `cpu_shares` depends on the container runtime: 35 for 256
-on runc 1.3, 10 on older ones). At half the default weight or more, or when
-the weight cannot be read, it keeps half the cores for capture all the time,
+on runc 1.3, 10 on older ones; on cgroup v1 the share itself, where 512 or
+less counts). Above half the default weight, when the weight cannot be read,
+or on Kubernetes, it keeps half the cores for capture all the time,
 and its log and the web interface's router card say so and what they read.
 Two setups this does not protect: capture's service lowered as well (leave
 the other services at the default priority), and Kubernetes, where a
-container's weight competes only inside its pod; set a CPU limit on the
-router there. For memory it plans with half of the
+container's weight competes only inside its pod, so the router ignores it
+there and keeps half; set a CPU limit on the router there. For memory it plans with half of the
 machine for its statements and a fifth for its tails (the newest changes
 laid over the copy), since capture uses the machine too. Each service can instead plan
 with a share of the machine's memory (`BINTRAIL_MEMORY_SHARE`: `ROUTER_MEMORY_SHARE`
