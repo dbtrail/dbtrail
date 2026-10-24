@@ -273,7 +273,7 @@ type Session struct {
 // statement it cannot run; it is not what keeps a wrong answer away.
 //
 // DistinctVeto is the third (#2532): safe are the columns whose DISTINCT
-// values the copy counts as MySQL does (numbers and dates), other all the
+// values the copy counts as MySQL does (whole and exact numbers), other all the
 // rest, and the answer is why an aggregate over DISTINCT values must not be
 // answered by the copy, or "".
 type ColumnTypes interface {

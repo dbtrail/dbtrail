@@ -943,9 +943,10 @@ What this is and is not:
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where
   `5--3` is 8; a comment on the copy), a `#` comment (a comment on MySQL; on the copy `#2` is the table's second column), `count(DISTINCT ...)` over text, an
-  expression or a column whose type is not known (over a bare number or
-  date column, `COUNT(DISTINCT ol_w_id)`, the copy answers: both count the
-  same values; a name a subquery or `WITH` defines, or the aggregate in
+  expression or a column whose type is not known (over a bare whole-number or
+  exact `DECIMAL` column, `COUNT(DISTINCT ol_w_id)`, the copy answers: both
+  count the same values; a date stays on MySQL, since the copy holds the
+  zero date as NULL; a name a subquery or `WITH` defines, or the aggregate in
   `HAVING` or `ORDER BY`, stays on MySQL), `INSTR`/`LOCATE`,
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one

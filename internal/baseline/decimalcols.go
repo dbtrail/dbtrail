@@ -66,7 +66,7 @@ type TableFooter struct {
 	// YEAR, on the source (#2133).
 	Temporal []TemporalColumn
 	// DistinctSafe are the table's columns whose DISTINCT values the copy
-	// counts as MySQL does, a whole number, an exact decimal or a date, and
+	// counts as MySQL does, a whole number or an exact decimal, and
 	// DistinctOther every other column (DistinctColumns). Read routing lets
 	// the copy answer COUNT(DISTINCT col) only over the first (#2532).
 	DistinctSafe, DistinctOther []string
@@ -74,9 +74,10 @@ type TableFooter struct {
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
 // values the copy counts as MySQL does and all the others (#2532). Safe are
-// the integer types, BOOL, an exact DECIMAL the copy holds as a decimal
-// (MaxDuckDBDecimalPrecision or less) and DATE, DATETIME, TIMESTAMP and
-// YEAR: values equal on one side are equal on the other. Not safe: text,
+// the integer types, BOOL and an exact DECIMAL the copy holds as a decimal
+// (MaxDuckDBDecimalPrecision or less): values equal on one side are equal
+// on the other. Not safe: the date types, because the copy holds MySQL's
+// zero date (0000-00-00) as NULL, which COUNT(DISTINCT) leaves out; text,
 // ENUM, SET, JSON and binary, whose equality depends on the collation; FLOAT
 // and DOUBLE, whose values are not compared exactly; TIME, which the copy
 // holds as text; a wider DECIMAL, held as text; a value kept verbatim as
@@ -86,8 +87,7 @@ func DistinctColumns(cols []Column) (safe, other []string) {
 		ok := false
 		if !c.RawText {
 			switch c.MySQLType {
-			case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "bool", "boolean",
-				"date", "datetime", "timestamp", "year":
+			case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "bool", "boolean":
 				ok = true
 			case "decimal", "numeric":
 				ok = c.DecimalPrecision > 0 && c.DecimalPrecision <= MaxDuckDBDecimalPrecision

@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Engine Routing: `COUNT(DISTINCT ...)` over numbers and dates is answered by the copy (#2532).**
-  - **What changed.** An aggregate over DISTINCT values (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) was always sent to MySQL. Now the copy answers it when every argument is a bare column the table defines as a whole number, an exact `DECIMAL` or a date (`DATE`, `DATETIME`, `TIMESTAMP`, `YEAR`): both sides count the same values.
-  - **Still sent to MySQL.** Text, `ENUM`, `SET`, `JSON`, binary, `FLOAT`/`DOUBLE`, `TIME` and columns of an unknown type; an expression or a call (`COUNT(DISTINCT id + 1)`); a name that is text in any table the statement reads; a statement with a subquery or `WITH`, where an alias can hold text under a number's name; the aggregate in `HAVING` or `ORDER BY`; and `GROUP_CONCAT`. The copy does not fold case inside such an aggregate, so over text it counts `'Paid'` and `'paid'` as two.
+- **Engine Routing: `COUNT(DISTINCT ...)` over whole and exact numbers is answered by the copy (#2532).**
+  - **What changed.** An aggregate over DISTINCT values (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) was always sent to MySQL. Now the copy answers it when every argument is a bare column the table defines as a whole number or an exact `DECIMAL`: both sides count the same values.
+  - **Still sent to MySQL.** Dates (the copy holds MySQL's zero date `0000-00-00` as NULL, which the count leaves out), text, `ENUM`, `SET`, `JSON`, binary, `FLOAT`/`DOUBLE`, `TIME` and columns of an unknown type; an expression or a call (`COUNT(DISTINCT id + 1)`); a name that is text in any table the statement reads; a statement with a subquery or `WITH`, where an alias can hold text under a number's name; the aggregate in `HAVING` or `ORDER BY`; and `GROUP_CONCAT`. The copy does not fold case inside such an aggregate, so over text it counts `'Paid'` and `'paid'` as two.
   - **Why.** A full-table report that counts distinct warehouses or items went to MySQL for nothing: about 3 s on the copy against 200 s on a replica of the same data.
 
 - **Statements on the copy use every core, not half (#2531).**

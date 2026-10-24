@@ -1514,7 +1514,7 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 // of an aggregate over DISTINCT values, or "" when it can (#2532). The
 // copy's collation does not reach DISTINCT inside an aggregate, so over text
 // it counts 'Paid' and 'paid' as two values where MySQL counts one; over a
-// number or a date both count the same. The rule is the routing layer's
+// whole or exact number both count the same. The rule is the routing layer's
 // (readrouter.DistinctVeto, asked through types), over every table's columns
 // split by type from its snapshot's table definition. With no reading of the
 // statement to ask (types is nil) the copy does not answer a statement that

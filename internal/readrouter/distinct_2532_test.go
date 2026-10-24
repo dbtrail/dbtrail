@@ -24,6 +24,8 @@ func TestDistinctVeto(t *testing.T) {
 		"SELECT COUNT(DISTINCT ol_w_id, ol_i_id) FROM order_line":                                                       false,
 		"SELECT COUNT(DISTINCT año) FROM t":                                                                             false,
 		"SELECT i_name, COUNT(DISTINCT ol_w_id) FROM order_line JOIN item ON i_id = ol_i_id GROUP BY i_name ORDER BY 2": false,
+		"SELECT COUNT(DISTINCTROW status) FROM t":                 true,
+		"SELECT COUNT(DISTINCTROW ol_w_id) FROM t":                false,
 		"SELECT DISTINCT status FROM t":                                                                                 false, // not inside an aggregate: the collation folds it
 		"SELECT COUNT(*) FROM t":                                                                                        false,
 		"SELECT status FROM t WHERE note = 'count(distinct status)'":                                                    false, // inside a string

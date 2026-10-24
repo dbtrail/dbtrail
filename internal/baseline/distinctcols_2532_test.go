@@ -32,14 +32,14 @@ func TestDistinctColumns(t *testing.T) {
 		{Name: "odd", MySQLType: "somethingnew"},
 	}
 	safe, other := DistinctColumns(cols)
-	wantSafe := []string{"id", "n", "flag", "ok", "amount", "created_on", "seen_at", "ts", "yr"}
+	wantSafe := []string{"id", "n", "flag", "ok", "amount"}
 	if !slices.Equal(safe, wantSafe) {
 		t.Errorf("safe = %v, want %v", safe, wantSafe)
 	}
 	if len(safe)+len(other) != len(cols) {
 		t.Errorf("safe %v + other %v do not cover the %d columns", safe, other, len(cols))
 	}
-	for _, name := range []string{"huge", "noprec", "tm", "ratio", "score", "status", "kind", "tags", "doc", "raw", "bits", "pg", "odd"} {
+	for _, name := range []string{"created_on", "seen_at", "ts", "yr", "huge", "noprec", "tm", "ratio", "score", "status", "kind", "tags", "doc", "raw", "bits", "pg", "odd"} {
 		if !slices.Contains(other, name) {
 			t.Errorf("%s is not among the others: %v", name, other)
 		}
@@ -55,7 +55,7 @@ func TestReadTableFooters_distinct(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := footers[path]
-	if !slices.Equal(f.DistinctSafe, []string{"id", "amount", "created_on"}) || !slices.Equal(f.DistinctOther, []string{"status"}) {
+	if !slices.Equal(f.DistinctSafe, []string{"id", "amount"}) || !slices.Equal(f.DistinctOther, []string{"status", "created_on"}) {
 		t.Errorf("DistinctSafe = %v, DistinctOther = %v", f.DistinctSafe, f.DistinctOther)
 	}
 }

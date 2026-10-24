@@ -6,11 +6,11 @@ import (
 )
 
 // VetoDistinct is why DistinctVeto keeps a statement on MySQL.
-const VetoDistinct = "DISTINCT inside an aggregate over text, an expression or a column not known to be a number or a date (not folded by the copy's collation)"
+const VetoDistinct = "DISTINCT inside an aggregate over text, a date, an expression or a column not known to be a number (not folded by the copy's collation)"
 
 var (
 	// distinctAgg opens an aggregate whose argument starts with DISTINCT.
-	distinctAgg = regexp.MustCompile(`(?i)\b(count|sum|avg|min|max|group_concat)\s*\(\s*distinct\b`)
+	distinctAgg = regexp.MustCompile(`(?i)\b(count|sum|avg|min|max|group_concat)\s*\(\s*distinct(?:row)?\b`)
 	// columnRef is a bare column, qualified by a table and a database or
 	// not, each part a word or a double-quoted name.
 	columnRef = regexp.MustCompile(`^(?:(?:"[^"]*"|[\pL\pN_$]+)\s*\.\s*){0,2}("[^"]*"|[\pL\pN_$]+)$`)
@@ -20,9 +20,10 @@ var (
 // aggregate over DISTINCT values, or "" when it can (#2532). The copy's
 // collation does not reach DISTINCT inside an aggregate, so over text
 // COUNT(DISTINCT status) counts 'Paid' and 'paid' twice where MySQL counts
-// them once. Over a number or a date both count the same values. shape is
-// Shape of the statement; safe are the columns of the tables it reads
-// whose type is a number or a date (baseline.DistinctSafeColumns), other
+// them once. Over a whole or exact number both count the same values. shape
+// is Shape of the statement (DISTINCTROW, MySQL's other spelling, is read
+// too); safe are the columns of the tables it reads whose type is such a
+// number (baseline.DistinctColumns), other
 // all their other columns, the ones whose type is not known among them.
 //
 // The copy may answer when every DISTINCT argument is a bare column whose
