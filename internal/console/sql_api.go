@@ -1222,6 +1222,18 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			if readTables = named; narrowed.OnlyViews == nil {
 				readTables = in.Baselines
 			}
+			// A hidden column is a column MySQL has and the view does not, so
+			// a name the reader writes for it can bind to ANOTHER table's
+			// column of that name (a join, a correlated subquery) and answer
+			// other rows with no error, and a NATURAL JOIN pairs on fewer
+			// columns (#2529). Refused before anything heavier runs. Where no
+			// rebinding is possible the statement goes on, and DuckDB answers
+			// as for a name that does not exist. The names are not secret
+			// (the server's settings list them); the values are.
+			if why := sqlHiddenNameRefusal(refs, readTables); why != "" {
+				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, why}
+				return "", viewsRefusal
+			}
 			// Not over a statement whose tables the parse could not tell: it
 			// would build a tail for every table of the copy.
 			if tails != nil && narrowed.OnlyViews != nil {
@@ -1234,17 +1246,6 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			if h := sqlChainTooHeavy(named, limit, sqlFileSize); h.Table != "" {
 				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, sqlChainTooHeavyMessage(h, limit, memory)}
 				*heavy = &sqlHeavyRun{tables: named, chain: h, limit: limit, newest: in.BaselineSnapshot}
-				return "", viewsRefusal
-			}
-			// A hidden column is a column MySQL has and the view does not, so
-			// a name the reader writes for it can bind to ANOTHER table's
-			// column of that name (a join, a correlated subquery) and answer
-			// other rows with no error, and a NATURAL JOIN pairs on fewer
-			// columns (#2529). Refused before anything runs; the message
-			// names only what the reader wrote, and does not say whether the
-			// name is hidden or simply not there.
-			if why := sqlHiddenNameRefusal(statement, refs, readTables); why != "" {
-				viewsRefusal = &sqlRefusal{http.StatusUnprocessableEntity, why}
 				return "", viewsRefusal
 			}
 			if sess.StrictStar && refs.Natural {
@@ -1877,46 +1878,65 @@ func (s *Server) sqlViewsFor(ctx context.Context, b *bundle, statement string, a
 // table or column that is not in its view (#2529): on a server with hidden
 // rules the name may be hidden rather than mistyped, and the bare answer
 // would read as "no such thing on the source".
-var sqlHiddenNameMissing = regexp.MustCompile(`(?i)Referenced column|Table with name|Referenced table|resulted in an empty set of columns`)
+var sqlHiddenNameMissing = regexp.MustCompile(`(?i)Referenced column|Table with name|Referenced table|does not have a column named|does not exist on (left|right) side of join|resulted in an empty set of columns`)
 
-// sqlIdentRE finds the identifiers a statement writes: bare words, and the
-// insides of backtick and double-quoted names (both are identifiers to
-// DuckDB). String literals are removed first (sqlStringLiteralRE).
-var (
-	sqlStringLiteralRE = regexp.MustCompile(`'(?:[^']|'')*'`)
-	sqlIdentRE         = regexp.MustCompile("`((?:[^`]|``)+)`|\"((?:[^\"]|\"\")+)\"|([\\p{L}_][\\p{L}\\p{N}_$]*)")
-)
-
-// sqlHiddenNameRefusal refuses a statement that writes the name of a column
-// hidden in a table it may read, or that NATURAL-joins over such a table: on
-// the copy those bind to something else instead of failing (see the call).
-// A column of another table that shares the hidden name is refused too: the
-// text does not say which table a bare name belongs to.
-func sqlHiddenNameRefusal(statement string, refs sqlsandbox.Refs, tables []views.BaselineTable) string {
-	hidden := map[string]bool{}
+// sqlHiddenNameRefusal refuses a statement in which a hidden column's name
+// could bind to another column: an UNQUALIFIED reference to it while
+// another table the statement may read has (or may have) a column of that
+// name, or a NATURAL JOIN over a table with hidden columns. It reads DuckDB's parse (Refs.Columns), never the text.
+func sqlHiddenNameRefusal(refs sqlsandbox.Refs, tables []views.BaselineTable) string {
+	hiddenIn := map[string][]views.BaselineTable{} // folded column -> tables hiding it
 	for _, t := range tables {
 		for _, c := range t.HiddenColumns {
-			hidden[strings.ToLower(c)] = true
+			k := strings.ToLower(c)
+			hiddenIn[k] = append(hiddenIn[k], t)
 		}
 	}
-	if len(hidden) == 0 {
+	if len(hiddenIn) == 0 {
 		return ""
 	}
 	if refs.Natural {
 		return "a NATURAL JOIN pairs on the columns its tables share, and some columns are not in the copy for this server" +
 			sqlHiddenHint + "; write the join with ON or USING"
 	}
-	text := sqlStringLiteralRE.ReplaceAllString(statement, "''")
-	for _, m := range sqlIdentRE.FindAllStringSubmatch(text, -1) {
-		name := m[3]
-		switch {
-		case m[1] != "":
-			name = strings.ReplaceAll(m[1], "``", "`")
-		case m[2] != "":
-			name = strings.ReplaceAll(m[2], `""`, `"`)
+	hides := func(t views.BaselineTable, col string) bool {
+		for _, c := range t.HiddenColumns {
+			if strings.EqualFold(c, col) {
+				return true
+			}
 		}
-		if hidden[strings.ToLower(name)] {
-			return fmt.Sprintf("the statement names %q, which is not in the copy for this server", name) + sqlHiddenHint
+		return false
+	}
+	// mayHold: a visible column of that name in t, or t's columns unknown.
+	mayHold := func(t views.BaselineTable, col string) bool {
+		if hides(t, col) {
+			return false
+		}
+		if len(t.Columns) == 0 {
+			return true
+		}
+		for _, c := range t.Columns {
+			if strings.EqualFold(c, col) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, ref := range refs.Columns {
+		col := strings.ToLower(ref.Name)
+		if len(hiddenIn[col]) == 0 {
+			continue
+		}
+		if ref.Qualifier != "" {
+			// A qualified name binds inside the relation it names (a table,
+			// a subquery, a CTE), whose columns come from the views: it
+			// answers there or fails there, and cannot reach another table.
+			continue
+		}
+		for _, t := range tables {
+			if mayHold(t, ref.Name) {
+				return fmt.Sprintf("the statement names %q, which is not in the copy for this server", ref.Name) + sqlHiddenHint
+			}
 		}
 	}
 	return ""

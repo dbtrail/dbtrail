@@ -76,16 +76,32 @@ func TestSQLHidden_columnLeavesTheCopy(t *testing.T) {
 		"SELECT status FROM shop.orders",
 		"SELECT o.status FROM shop.orders o",
 		"SELECT \"STATUS\" FROM shop.orders",
-		"SELECT `status` FROM shop.orders",
 	} {
 		w := postSQL(t, f.s, `{"sql":`+jsonString(stmt)+`}`)
 		if w.Code == http.StatusOK || !strings.Contains(w.Body.String(), "hides some tables and columns") || strings.Contains(w.Body.String(), "paid") {
 			t.Errorf("%s: %d %s, want an error with the hint", stmt, w.Code, w.Body.String())
 		}
 	}
-	// A word inside a string literal is not a name.
-	if w := postSQL(t, f.s, `{"sql":"SELECT id FROM shop.orders WHERE 'status' <> ''"}`); w.Code != http.StatusOK {
-		t.Errorf("a literal holding the hidden name: %d %s", w.Code, w.Body.String())
+	// On one table the hidden name gets exactly what a missing name gets:
+	// DuckDB's own answer plus the hint, no refusal of ours that would mark
+	// the name as hidden.
+	if w := postSQL(t, f.s, `{"sql":"SELECT status FROM shop.orders"}`); !strings.Contains(w.Body.String(), "Referenced column") {
+		t.Errorf("a hidden name on one table: %d %s, want DuckDB's answer", w.Code, w.Body.String())
+	}
+	// A name that does not exist gets the same hint: what DuckDB says,
+	// plus that this server hides some names.
+	if w := postSQL(t, f.s, `{"sql":"SELECT statux FROM shop.orders"}`); w.Code == http.StatusOK || !strings.Contains(w.Body.String(), "hides some tables and columns") {
+		t.Errorf("a missing name: %d %s, want the hint", w.Code, w.Body.String())
+	}
+	// Words that are not column references: a literal, a comment, an alias.
+	for _, stmt := range []string{
+		"SELECT id FROM shop.orders WHERE 'status' <> ''",
+		"SELECT id FROM shop.orders -- status report",
+		"SELECT id AS status FROM shop.orders",
+	} {
+		if w := postSQL(t, f.s, `{"sql":`+jsonString(stmt)+`}`); w.Code != http.StatusOK {
+			t.Errorf("%s: %d %s, want answered", stmt, w.Code, w.Body.String())
+		}
 	}
 
 	// The files hold the column: no statement may read them directly.
@@ -143,7 +159,11 @@ func TestSQLHidden_hiddenNameNeverRebinds(t *testing.T) {
 		// Every spelling of the name, case included: DuckDB folds them all.
 		"SELECT o.id, STATUS FROM shop.orders o JOIN shop.states s ON o.id = s.id",
 		"SELECT o.id, \"Status\" FROM shop.orders o JOIN shop.states s ON o.id = s.id",
-		"SELECT o.id, `status` FROM shop.orders o JOIN shop.states s ON o.id = s.id",
+		// A comment or a string that throws off a text reader.
+		"SELECT o.id, -- the order's state\n status FROM shop.orders o JOIN shop.states s ON o.id = s.id WHERE 'a' = 'a'",
+		"SELECT o.id, /* ' */ status FROM shop.orders o JOIN shop.states s ON o.id = s.id OR 'x' = ''",
+		"SELECT o.id, E'it\\'s', status FROM shop.orders o JOIN shop.states s ON o.id = s.id WHERE 'x' = 'x'",
+		"SELECT o.id, $$it's$$, status FROM shop.orders o JOIN shop.states s ON o.id = s.id WHERE 'x' = 'x'",
 	} {
 		w := postSQL(t, f.s, `{"sql":`+jsonString(stmt)+`}`)
 		if w.Code == http.StatusOK || !strings.Contains(w.Body.String(), "hides some tables and columns") {
@@ -152,6 +172,18 @@ func TestSQLHidden_hiddenNameNeverRebinds(t *testing.T) {
 	}
 	if cols, body := sqlAnswer(t, postSQL(t, f.s, `{"sql":"SELECT * FROM shop.states"}`)); strings.Join(cols, ",") != "id,status" {
 		t.Errorf("the other table, alone: %q %s", cols, body)
+	}
+	// A qualified name binds in the relation it names, a subquery too.
+	if cols, body := sqlAnswer(t, postSQL(t, f.s, `{"sql":"SELECT x.status FROM (SELECT * FROM shop.states) x JOIN shop.orders o ON o.id = x.id"}`)); strings.Join(cols, ",") != "status" || !strings.Contains(body, "decoy") {
+		t.Errorf("x.status: %q %s", cols, body)
+	}
+	// Pinned to the visible table, the name is that table's: answered.
+	if cols, body := sqlAnswer(t, postSQL(t, f.s, `{"sql":"SELECT s.status FROM shop.orders o JOIN shop.states s ON o.id = s.id"}`)); strings.Join(cols, ",") != "status" || !strings.Contains(body, "decoy") {
+		t.Errorf("s.status: %q %s", cols, body)
+	}
+	// Pinned to the hiding table, it fails there, with the hint.
+	if w := postSQL(t, f.s, `{"sql":"SELECT o.status FROM shop.orders o JOIN shop.states s ON o.id = s.id"}`); w.Code == http.StatusOK || strings.Contains(w.Body.String(), "decoy") || !strings.Contains(w.Body.String(), "hides some tables and columns") {
+		t.Errorf("o.status: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -176,8 +208,9 @@ func TestSQLHidden_everyTableHiddenSaysSo(t *testing.T) {
 func TestSQLHidden_tableBesideAVisibleOne(t *testing.T) {
 	f, _ := hiddenSQLFixture(t, &hiderules.Rules{Tables: []string{"shop.customers"}})
 	writeSQLExtraTable(t, f.schemaDir, "customers", "a@x")
-	if w := postSQL(t, f.s, `{"sql":"SELECT * FROM shop.customers"}`); w.Code == http.StatusOK || strings.Contains(w.Body.String(), "a@x") {
-		t.Fatalf("hidden table answered: %d %s", w.Code, w.Body.String())
+	if w := postSQL(t, f.s, `{"sql":"SELECT * FROM shop.customers"}`); w.Code == http.StatusOK || strings.Contains(w.Body.String(), "a@x") ||
+		!strings.Contains(w.Body.String(), "hides some tables and columns") {
+		t.Fatalf("hidden table: %d %s, want refused with the hint", w.Code, w.Body.String())
 	}
 	if cols, body := sqlAnswer(t, postSQL(t, f.s, `{"sql":"SELECT * FROM shop.orders"}`)); strings.Join(cols, ",") != "id,status" {
 		t.Fatalf("visible table: %q %s", cols, body)

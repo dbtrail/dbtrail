@@ -1,5 +1,7 @@
 package sqlsandbox
 
+import "sort"
+
 // TableRef is one relation a statement names, spelled as the user typed it
 // (case included): the catalog and schema are empty when not written.
 type TableRef struct {
@@ -41,6 +43,9 @@ type Refs struct {
 	// every column the two tables share by name, so what it returns depends
 	// on each table's column SET whether or not the statement holds a star.
 	Natural bool `json:"natural,omitempty"`
+	// Columns are the column references the statement writes, from the
+	// parse (collectNames).
+	Columns []ColumnRef `json:"columns,omitempty"`
 }
 
 // collectRefs walks a json_serialize_sql statement tree. A shape this walk
@@ -65,7 +70,47 @@ type Refs struct {
 func collectRefs(stmt any) Refs {
 	var r Refs
 	walkRefs(stmt, nil, &r)
+	collectNames(stmt, &r)
 	return r
+}
+
+// ColumnRef is one column reference as DuckDB's parser reads it: Name is
+// its last part, Qualifier the part before it ("o" in o.status, "orders" in
+// shop.orders.status), empty when the name is bare.
+type ColumnRef struct {
+	Qualifier string `json:"qualifier,omitempty"`
+	Name      string `json:"name"`
+}
+
+// collectNames records every column reference in the statement tree, at any
+// depth. From the parse, not the text: a comment or a string is never a
+// name, and an alias is never a column (#2529).
+func collectNames(node any, r *Refs) {
+	switch v := node.(type) {
+	case map[string]any:
+		if v["class"] == "COLUMN_REF" {
+			if names, ok := v["column_names"].([]any); ok && len(names) > 0 {
+				c := ColumnRef{}
+				c.Name, _ = names[len(names)-1].(string)
+				if len(names) > 1 {
+					c.Qualifier, _ = names[len(names)-2].(string)
+				}
+				r.Columns = append(r.Columns, c)
+			}
+		}
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			collectNames(v[k], r)
+		}
+	case []any:
+		for _, e := range v {
+			collectNames(e, r)
+		}
+	}
 }
 
 func walkRefs(node any, scope map[string]bool, r *Refs) {

@@ -89,6 +89,7 @@ func TestCollectRefs(t *testing.T) {
 	for _, c := range cases {
 		got := parseForRefs(t, c.sql)
 		got.Star, got.NamedJoin, got.Natural, got.StarTables, got.StarNamedJoin = false, false, false, nil, false // TestCollectRefs_star has them
+		got.Columns = nil                                                                                         // TestCollectRefs_names has them
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.sql, got, c.want)
 		}
@@ -219,7 +220,8 @@ func TestRun_asksForTheViewsItNeeds(t *testing.T) {
 	if len(res.Rows) != 2 {
 		t.Errorf("rows = %v, want 2", res.Rows)
 	}
-	want := []Refs{{Tables: []TableRef{{Schema: "shop", Name: "orders"}}}}
+	want := []Refs{{Tables: []TableRef{{Schema: "shop", Name: "orders"}},
+		Columns: []ColumnRef{{Name: "id"}, {Name: "id"}, {Name: "status"}}}}
 	if !reflect.DeepEqual(seen, want) {
 		t.Errorf("asked with %+v, want %+v", seen, want)
 	}
@@ -286,5 +288,18 @@ func TestRun_longStatementWithAsk(t *testing.T) {
 	}
 	if got := res.Rows[0][0]; got != json.Number("2") {
 		t.Errorf("count = %#v, want 2", got)
+	}
+}
+
+// The column references come from the parse (#2529): a comment or a string
+// is never a name, an alias is not a column, and a qualified name keeps its
+// qualifier.
+func TestCollectRefs_names(t *testing.T) {
+	got := parseForRefs(t, "SELECT o.id, -- the order's state\n status, $$it's$$, id AS total "+
+		"FROM shop.orders o JOIN shop.states AS s ON o.id = s.id WHERE 'status' <> ''")
+	// In the walk's order (keys sorted): the join condition, then the list.
+	wantCols := []ColumnRef{{Qualifier: "o", Name: "id"}, {Qualifier: "s", Name: "id"}, {Qualifier: "o", Name: "id"}, {Name: "status"}, {Name: "id"}}
+	if !reflect.DeepEqual(got.Columns, wantCols) {
+		t.Errorf("columns = %+v\nwant %+v", got.Columns, wantCols)
 	}
 }
