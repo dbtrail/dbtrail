@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -134,6 +136,29 @@ func TestIntegrationFlashbackRoutesByServer(t *testing.T) {
 	if got := queryFlashbackName(t, ln.Addr().String(), entC.ID, "tok", "myapp", q); got != "alice" {
 		t.Errorf("handshake DB must win over the SourceDSN seed: name = %q, want alice", got)
 	}
+
+	// A server with hidden rules refuses time travel on the port (#2529):
+	// it reads the index directly, past the views that apply the rules.
+	entD, err := reg.Add(console.ServerEntry{Name: "srvd", DSN: dsnA, SourceDSN: "r:p@tcp(x:3306)/myapp", NoArchive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := hiderules.Parse(hiderules.Rules{Columns: []string{"myapp.users.email"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.SetHidden(entD.ID, set); err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		db := openFlashback(t, ln.Addr().String(), entD.ID, "tok", "")
+		defer db.Close()
+		var name string
+		err := db.QueryRow(q).Scan(&name)
+		if err == nil || !strings.Contains(err.Error(), "hides some tables and columns") || name == "alice" {
+			t.Errorf("time travel on a server with rules: name=%q err=%v, want refused", name, err)
+		}
+	}()
 
 	// A wrong password is rejected (auth is the console token).
 	if db := openFlashback(t, ln.Addr().String(), entA.ID, "wrong", ""); func() bool {

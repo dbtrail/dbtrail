@@ -380,6 +380,9 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// named after a database (#1123). The standalone shim and the PG front-end
 	// bind their real per-tenant credential, unprefixed.
 	h.BindActor("server:" + user)
+	// Hidden rules (#2529): time travel reads past the views that apply
+	// them, so a server with rules refuses it, whatever free SQL can do.
+	h.BindTimeTravelGate(tgt.TimeTravelRefusal)
 
 	// Free SQL on the copy (freesql.go): the console's own executor when
 	// the port can offer it, else the reason the 1235 refusal will carry.

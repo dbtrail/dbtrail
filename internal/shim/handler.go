@@ -176,7 +176,9 @@ type Handler struct {
 	// `_snapshot` or `_flashback` read whose order of changes is unproven
 	// (#2156), each with
 	// lastWarningCode; guarded by mu.
-	freeSQL         FreeSQL
+	freeSQL FreeSQL
+	// timeTravelGate: see BindTimeTravelGate.
+	timeTravelGate  func() string
 	freeSQLWhyNot   string
 	lastWarnings    []string
 	lastWarningCode uint16
@@ -592,6 +594,9 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 	// snapshots rather than letting the query fall through to the
 	// real MySQL (which returns ER_BAD_DB on the virtual schema).
 	if m := showTablesFromVirtualRE.FindStringSubmatch(qstr); m != nil {
+		if err := h.timeTravelRefused(); err != nil {
+			return nil, err
+		}
 		// Belt to the UseDB gate (#824): currentDB can only get here via
 		// UseDB (already gated) or the serving layer's source_dsn seed,
 		// but the listing serves per-schema metadata, so re-check rather
@@ -605,6 +610,11 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 
 	q, perr := Parse(qstr, currentDB)
 	if perr == nil {
+		// Before anything reads: the server's hidden rules (#2529) do not
+		// reach time travel, so a server with rules refuses it.
+		if err := h.timeTravelRefused(); err != nil {
+			return nil, err
+		}
 		// Time travel reads its AS OF time in UTC and prints in UTC. On a
 		// connection that SET another zone (#2035) that would be a second
 		// clock on the same connection, with nothing saying so: refuse it by
