@@ -2442,6 +2442,10 @@ func autoServerID(ctx context.Context, w io.Writer) (uint32, error) {
 // starts serving.
 func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
 	if sup != nil && srv != nil {
+		// A new server's default snapshot schedule starts at its first
+		// snapshot (console.Server.ActivateDefaultSchedule).
+		onSnapshot := srv.ActivateDefaultSchedule
+		sup.onSnapshot.Store(&onSnapshot)
 		line, limit := srv.SQLFoldLine, srv.SQLChainLimit
 		sup.sqlChainLine.Store(&line)
 		sup.sqlChainLimit.Store(&limit)

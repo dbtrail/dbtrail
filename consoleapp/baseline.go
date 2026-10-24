@@ -52,6 +52,10 @@ var checkMydumperPrivileges = func(ctx context.Context, sourceDSN string, ssl co
 // mounts the docker socket. One job at a time per server, tracked in-memory —
 // the durable record is the snapshot itself (listed by /api/baselines).
 type baselineSupervisor struct {
+	// onSnapshot is told the server id of each full read that completed
+	// (console.Server.ActivateDefaultSchedule), wired after the console is
+	// built; nil until then and in tests.
+	onSnapshot atomic.Pointer[func(id string)]
 	// gate is the heavy-work gate (#2385); nil is the process's heavyWork.
 	gate       *heavyGate
 	ctx        context.Context // daemon lifecycle; cancels an in-flight dump on shutdown
@@ -786,6 +790,10 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 		return
 	}
 	st.State = "succeeded"
+	if fn := s.onSnapshot.Load(); fn != nil {
+		// Off this lock: it writes the registry and tells the schedule loop.
+		go (*fn)(req.ServerID)
+	}
 	st.LastError = ""
 	st.Failure = nil
 	st.Tables = out.stats.TablesProcessed

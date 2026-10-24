@@ -502,6 +502,7 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 		sched.FullSince = now.Format(time.RFC3339)
 	}
 	e.BackupSchedule = &sched
+	e.DefaultScheduleOnFirst = false // the operator chose: no default later
 	if err := s.cm.reg.Update(e); err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
@@ -537,8 +538,10 @@ func (s *Server) handleBackupScheduleDelete(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if e.BackupSchedule != nil {
-		e.BackupSchedule = nil
+	if e.BackupSchedule != nil || e.DefaultScheduleOnFirst {
+		// Turned off before the first snapshot too: no default schedule
+		// starts later.
+		e.BackupSchedule, e.DefaultScheduleOnFirst = nil, false
 		if err := s.cm.reg.Update(e); err != nil {
 			writeJSONError(w, registryErrStatus(err), err.Error())
 			return

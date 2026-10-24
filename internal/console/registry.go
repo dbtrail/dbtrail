@@ -154,6 +154,12 @@ type ServerEntry struct {
 	// schedule endpoints; the server edit form carries it over untouched.
 	// On binaries that predate it, it round-trips through Extra.
 	BackupSchedule *BackupSchedule `yaml:"backup_schedule,omitempty"`
+	// DefaultScheduleOnFirst says a snapshot every DefaultBackupEvery starts
+	// once this server's first snapshot is taken (ActivateDefaultSchedule).
+	// Set at creation, where that is bounded on disk; cleared when it fires
+	// or when the operator saves or removes a schedule first. Nothing reads
+	// the source on its own: the first snapshot is the operator's.
+	DefaultScheduleOnFirst bool `yaml:"default_schedule_on_first,omitempty"`
 	// LocalKeepNewest is this server's local snapshot retention (#1681):
 	// while it has a local folder (BaselineDir) and no external destination
 	// (BaselineS3), the daemon keeps the newest LocalKeepNewest complete
@@ -738,6 +744,30 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 func (r *Registry) Update(e ServerEntry) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.updateLocked(e)
+}
+
+// UpdateWith reads entry id and saves what edit makes of it, under one hold
+// of the lock, so a write fired from the background cannot put back a copy
+// read before a concurrent edit. edit returns the entry and whether to save
+// it; it must not call back into the registry.
+func (r *Registry) UpdateWith(id string, edit func(ServerEntry) (ServerEntry, bool)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, cur := range r.file.Servers {
+		if cur.ID == id {
+			e, save := edit(cur)
+			if !save {
+				return nil
+			}
+			return r.updateLocked(e)
+		}
+	}
+	return ErrUnknownServer
+}
+
+// updateLocked is Update with r.mu held.
+func (r *Registry) updateLocked(e ServerEntry) error {
 	if r.readOnly {
 		return ErrRegistryReadOnly
 	}

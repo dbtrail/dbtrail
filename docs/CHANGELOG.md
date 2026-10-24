@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A new server gets a snapshot every 5 minutes once its first snapshot is taken.**
+  - **What changed.** Before, a new server had no snapshot schedule until someone turned one on on the Snapshots page, so its copy was never refreshed. Now, when the first snapshot of a server added from the web interface completes, a schedule of every 5 minutes starts. The SQL port answers from the last snapshot by default, so this is how far behind its answers are. Change it on the Snapshots page.
+  - **The first snapshot is still the operator's.** It is a full read of the source database, with the configured lock mode, and adding a server does not start it.
+  - **After that, the schedule behaves like any other.** When an update cannot serve, it takes a full read on its own: after a schema change, when tables appear, when an update fails, or when an update would cost more than a full read.
+  - **Not given one.** A server with an S3 location, because nothing removes its old copies there. A folder that already held snapshots, because it keeps every copy. A server whose schedule could not run, for the same reasons the Snapshots page gives; the log says why. A schedule saved or removed before the first snapshot wins.
+  - **Existing servers are unchanged.** A server with no schedule may have had it turned off, and that is not told apart.
+
 - **The SQL port answers from the last snapshot by default; the fresh mode is opt-in.**
   - **What changed.** By default a statement on the copy is answered from each table's last snapshot, as old as its last refresh. Before, the newest captured changes ("tails") were always laid over the snapshot. That cost a fifth of the router's memory, an update every second, and a share of every statement's time.
   - **The fresh mode.** `SQL_FRESH=on` in the compose `.env` (compose file version 8), then `docker compose up -d router`, brings the tails back: answers about as far behind as capture. Outside Compose, `BINTRAIL_SQL_TAILS=on`. The router's startup line and its card in the web interface say which mode is on.

@@ -419,6 +419,7 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			entry.LocalKeepNewest = 0
 		}
 	}
+	entry.DefaultScheduleOnFirst = defaultScheduleBounded(entry)
 	added, err = s.cm.reg.AddAutoNamed(entry, nameBase)
 	if err != nil {
 		return ServerEntry{}, created, err
@@ -475,6 +476,68 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 		}
 	}
 	return added, created, nil
+}
+
+// DefaultBackupEvery is the snapshot cadence a new server starts with once
+// its first snapshot is taken: the SQL port answers from the last snapshot by
+// default, so this is how far behind its answers are until the operator picks
+// another on the Snapshots page.
+const DefaultBackupEvery = "5m"
+
+// defaultScheduleBounded says a server's local copies stay bounded under a
+// schedule: only its newest LocalKeepNewest are kept and it has no S3
+// location (an S3 server's local folder is pruned only under
+// --baseline-retain, and its bucket never).
+func defaultScheduleBounded(e ServerEntry) bool {
+	return e.BaselineS3 == "" && e.LocalKeepNewest > 0
+}
+
+// ActivateDefaultSchedule starts a snapshot every DefaultBackupEvery on a
+// server created with DefaultScheduleOnFirst, called once a snapshot of it
+// completes. The mark is cleared whatever happens: it is a one-time offer. A
+// schedule is saved only where none was chosen, the copies stay bounded, and
+// CheckBackupSchedule passes (the Snapshots page's own check); otherwise the
+// log says why and the server keeps none, as before.
+func (s *Server) ActivateDefaultSchedule(id string) {
+	e, ok := s.cm.reg.Get(id)
+	if !ok || !e.DefaultScheduleOnFirst {
+		return
+	}
+	sched := BackupSchedule{Every: DefaultBackupEvery}
+	start := e.BackupSchedule == nil && defaultScheduleBounded(e)
+	if start {
+		// Outside the registry's lock: the gates read the registry too.
+		if err := CheckBackupSchedule(e, sched, s.scheduleGates()); err != nil {
+			slog.Info("console: the default snapshot schedule was not started", "server", e.Name, "reason", err.Error())
+			start = false
+		}
+	}
+	started := false
+	// The write re-reads the entry under the lock: a schedule the operator
+	// saved or removed since (which clears the mark), or a location changed
+	// since the check, wins over this background write.
+	err := s.cm.reg.UpdateWith(id, func(cur ServerEntry) (ServerEntry, bool) {
+		if !cur.DefaultScheduleOnFirst {
+			return cur, false
+		}
+		cur.DefaultScheduleOnFirst = false
+		if start && cur.BackupSchedule == nil && defaultScheduleBounded(cur) &&
+			cur.BaselineDir == e.BaselineDir && cur.DSN == e.DSN && cur.SourceDSN == e.SourceDSN {
+			cur.BackupSchedule = &sched
+			started = true
+		}
+		return cur, true
+	})
+	if err != nil {
+		slog.Warn("console: could not save a server's default snapshot schedule", "server", e.Name, "error", err.Error())
+		return
+	}
+	if started {
+		if s.backupSchedules != nil {
+			s.backupSchedules.Observe(id, sched, time.Now().UTC())
+		}
+		slog.Info("console: first snapshot taken, a snapshot every "+DefaultBackupEvery+" starts now; change it on the "+PageSnapshots+" page", "server", e.Name)
+	}
 }
 
 // dirExists reports whether path names something already there. Anything but
@@ -643,7 +706,8 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		MonitorDesired: old.MonitorDesired,
 		// The schedule has its own endpoints; an edit of the connection must
 		// not silently remove it.
-		BackupSchedule: old.BackupSchedule,
+		BackupSchedule:         old.BackupSchedule,
+		DefaultScheduleOnFirst: old.DefaultScheduleOnFirst,
 		// Local retention (#1681) is set on the backup settings; a plain
 		// edit must not turn it off by omission.
 		LocalKeepNewest: old.LocalKeepNewest,
