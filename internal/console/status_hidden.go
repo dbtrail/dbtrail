@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -23,7 +24,9 @@ type hiddenFromSQLStatus struct {
 	// read; while there are any, the SQL surfaces refuse this server.
 	UnreadableKeys []string `json:"unreadable_keys,omitempty"`
 	// Refused: the SQL surfaces refuse this server's statements (rules
-	// this build cannot enforce, or an entry no longer in the registry).
+	// this build cannot enforce, or an entry no longer in the registry). To
+	// a scoped session it is said without the entries, which the parse
+	// error quotes word for word.
 	Refused string `json:"refused,omitempty"`
 }
 
@@ -32,26 +35,42 @@ func (s *Server) hiddenFromSQL(b *bundle, opts query.Options) *hiddenFromSQLStat
 	if b == nil || b.serverID == "" || b.serverID == bootServerID || s.cm == nil || s.cm.reg == nil {
 		return nil
 	}
-	e, ok := s.cm.reg.Get(b.serverID)
-	if !ok || e.Hidden == nil {
-		return nil
-	}
-	out := &hiddenFromSQLStatus{
-		TablesCount:    len(e.Hidden.Tables),
-		ColumnsCount:   len(e.Hidden.Columns),
-		UnreadableKeys: e.Hidden.UnknownKeys(),
-	}
-	if out.TablesCount == 0 && out.ColumnsCount == 0 && len(out.UnreadableKeys) == 0 {
-		return nil
-	}
-	if _, err := s.hiddenRulesFor(b); err != nil {
-		out.Refused = err.Error()
-	}
 	scoped := opts.ProfileActive || len(opts.DenyTables) > 0 || len(opts.AllowTables) > 0 ||
 		len(opts.RedactColumns) > 0 || len(opts.AllowColumns) > 0
+	e, ok := s.cm.reg.Get(b.serverID)
+	if !ok {
+		// The SQL surfaces refuse a server whose entry is gone; say so here
+		// too, so status and SQL never disagree.
+		_, err := s.hiddenRulesFor(b)
+		if err == nil {
+			return nil
+		}
+		return &hiddenFromSQLStatus{Refused: err.Error()}
+	}
+	if e.Hidden == nil {
+		return nil
+	}
+	out := &hiddenFromSQLStatus{UnreadableKeys: e.Hidden.UnknownKeys()}
+	set, err := s.hiddenRulesFor(b)
+	switch {
+	case err != nil && scoped:
+		out.Refused = "the stored hidden rules cannot be enforced by this build, so this server's SQL is refused"
+	case err != nil:
+		out.Refused = err.Error()
+	}
+	// The counts and lists are what is enforced: the parsed rules, blanks
+	// and repeats gone. Rules that do not parse are counted as saved.
+	shown := hiderules.Rules{Tables: e.Hidden.Tables, Columns: e.Hidden.Columns}
+	if err == nil {
+		shown = set.Rules()
+	}
+	out.TablesCount, out.ColumnsCount = len(shown.Tables), len(shown.Columns)
+	if out.TablesCount == 0 && out.ColumnsCount == 0 && len(out.UnreadableKeys) == 0 && out.Refused == "" {
+		return nil
+	}
 	if !scoped {
-		out.Tables = append([]string{}, e.Hidden.Tables...)
-		out.Columns = append([]string{}, e.Hidden.Columns...)
+		out.Tables = append([]string{}, shown.Tables...)
+		out.Columns = append([]string{}, shown.Columns...)
 	}
 	return out
 }

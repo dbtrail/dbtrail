@@ -73,6 +73,32 @@ func TestStatusHiddenFromSQL(t *testing.T) {
 		t.Errorf("scoped session: %s", raw)
 	}
 
+	// Rules saved by hand that do not parse: a scoped session learns that the
+	// server is refused, never the entries, which the parse error quotes.
+	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"payroll.salaries.x"}})
+	raw = statusBody(t, s, b, query.Options{ProfileActive: true})["hidden_from_sql"]
+	if strings.Contains(string(raw), "payroll") || !strings.Contains(string(raw), "refused") {
+		t.Errorf("scoped, unparseable rules: %s", raw)
+	}
+	if raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]; !strings.Contains(string(raw), "payroll.salaries.x") {
+		t.Errorf("unscoped, unparseable rules: %s, want the entry named", raw)
+	}
+
+	// Counts are what is enforced: blanks and repeats are not rules.
+	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"", "a.b", "A.B"}})
+	if raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]; !strings.Contains(string(raw), `"tables_count":1`) || strings.Contains(string(raw), `""`) {
+		t.Errorf("hand-saved blanks and repeats: %s", raw)
+	}
+
+	// An entry gone from the registry: status says what SQL does.
+	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"shop.a"}})
+	if err := s.cm.reg.Delete(b.serverID); err != nil {
+		t.Fatal(err)
+	}
+	if raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]; !strings.Contains(string(raw), "no longer in the registry") {
+		t.Errorf("entry gone: %s", raw)
+	}
+
 	// Rules this build cannot read: named, and the refusal said.
 	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"shop.a"}, Extra: map[string]any{"row_filters": "x"}})
 	raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]
