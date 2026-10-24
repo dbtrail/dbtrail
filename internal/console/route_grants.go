@@ -280,7 +280,7 @@ func (s *Server) routeGrants(ctx context.Context, e ServerEntry) routeGrantsResu
 		set, lerr := hiderules.Load(e.Hidden)
 		switch {
 		case lerr != nil:
-			res.Hidden = &hiddenGrantCheck{Unsure: lerr.Error()}
+			res.Hidden = &hiddenGrantCheck{Unsure: []string{lerr.Error()}}
 		case !set.Empty():
 			check := hiddenExposures(lines, set)
 			res.Hidden = &check

@@ -23,7 +23,7 @@ func TestHiddenExposures(t *testing.T) {
 		grants  []string
 		exposed []string // rules that must be named
 		safe    []string // rules that must NOT be named
-		unsure  bool
+		unsure  []string // substrings that must appear among the unsure notes
 	}{
 		{name: "usage only", grants: []string{"GRANT USAGE ON *.* TO `r`@`%`"},
 			safe: []string{"shop.audit_log", "hr.*", "shop.customers.email", "billing.*.card"}},
@@ -45,8 +45,14 @@ func TestHiddenExposures(t *testing.T) {
 			exposed: []string{"shop.customers.email"}},
 		{name: "write only", grants: []string{"GRANT INSERT, UPDATE ON `shop`.* TO `r`@`%`"},
 			safe: []string{"shop.audit_log", "shop.customers.email"}},
+		// A routine runs with its creator's rights: not "safe", unsure.
 		{name: "routine grant", grants: []string{"GRANT EXECUTE ON PROCEDURE `shop`.`p` TO `r`@`%`"},
-			safe: []string{"shop.audit_log"}},
+			safe: []string{"shop.audit_log"}, unsure: []string{"EXECUTE"}},
+		// A view elsewhere may select a hidden column with its creator's rights.
+		{name: "a read on another schema", grants: []string{"GRANT SELECT ON `reporting`.* TO `r`@`%`"},
+			safe: []string{"shop.customers.email"}, unsure: []string{"VIEW"}},
+		{name: "server-wide privileges", grants: []string{"GRANT FILE, PROCESS ON *.* TO `r`@`%`"},
+			unsure: []string{"GRANT FILE, PROCESS ON *.*"}},
 		// In a database-level grant, _ and % are wildcards (LIKE), unless escaped.
 		{name: "wildcard database name", grants: []string{"GRANT SELECT ON `sh_p`.* TO `r`@`%`"},
 			exposed: []string{"shop.audit_log", "shop.customers.email"}, safe: []string{"hr.*"}},
@@ -54,7 +60,7 @@ func TestHiddenExposures(t *testing.T) {
 			safe: []string{"shop.audit_log"}},
 		{name: "percent database name", grants: []string{"GRANT SELECT ON `%`.* TO `r`@`%`"},
 			exposed: []string{"shop.audit_log", "hr.*", "billing.*.card"}},
-		{name: "roles", grants: []string{"GRANT USAGE ON *.* TO `r`@`%`", "GRANT `reader`@`%` TO `r`@`%`"}, unsure: true},
+		{name: "roles", grants: []string{"GRANT USAGE ON *.* TO `r`@`%`", "GRANT `reader`@`%` TO `r`@`%`"}, unsure: []string{"reader"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -70,12 +76,22 @@ func TestHiddenExposures(t *testing.T) {
 					t.Errorf("%q named as readable, it is not:\n%s", r, text)
 				}
 			}
-			if (got.Unsure != "") != c.unsure {
-				t.Errorf("unsure = %q, want %v", got.Unsure, c.unsure)
+			notes := strings.Join(got.Unsure, "\n")
+			for _, u := range c.unsure {
+				if !strings.Contains(notes, u) {
+					t.Errorf("unsure notes do not mention %q:\n%s", u, notes)
+				}
+			}
+			// What no grant list settles is always said.
+			if !strings.Contains(notes, "mandatory_roles") {
+				t.Errorf("the always-unsure note is missing:\n%s", notes)
+			}
+			if len(c.unsure) == 0 && len(got.Unsure) != 1 && !strings.Contains(notes, "VIEW") {
+				t.Errorf("unexpected unsure notes:\n%s", notes)
 			}
 		})
 	}
-	if got := hiddenExposures([]string{"GRANT SELECT ON *.* TO `r`@`%`"}, nil); len(got.Exposed) != 0 || got.Unsure != "" {
+	if got := hiddenExposures([]string{"GRANT SELECT ON *.* TO `r`@`%`"}, nil); len(got.Exposed) != 0 || got.Unsure != nil {
 		t.Errorf("no rules: %+v", got)
 	}
 }
@@ -99,7 +115,7 @@ func TestRouteGrantsCarryHiddenCheck(t *testing.T) {
 		t.Errorf("rules: hidden = %+v", r.Hidden)
 	}
 	e.Hidden = &hiderules.Rules{Tables: []string{"orders"}}
-	if r := grantsServer(t, e, ok).routeGrants(context.Background(), e); r.Hidden == nil || r.Hidden.Unsure == "" {
+	if r := grantsServer(t, e, ok).routeGrants(context.Background(), e); r.Hidden == nil || len(r.Hidden.Unsure) == 0 || !strings.Contains(r.Hidden.Unsure[0], "do not parse") {
 		t.Errorf("unreadable rules: hidden = %+v", r.Hidden)
 	}
 }

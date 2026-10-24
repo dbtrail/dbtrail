@@ -15,11 +15,18 @@ import (
 type hiddenGrantCheck struct {
 	// Exposed: "<rule>: <grant line>" for every rule the account can read.
 	Exposed []string `json:"exposed,omitempty"`
-	// Unsure: why the grants cannot settle it (roles, whose privileges
-	// SHOW GRANTS does not list). Never empty when something may be readable
-	// and the answer cannot say.
-	Unsure string `json:"unsure,omitempty"`
+	// Unsure: what the grants cannot settle, each with what to check. A
+	// grant list can show that the account reads something; it can never
+	// show that it does not (views and routines run with their creator's
+	// rights, roles and grants to everyone are not all listed), so this is
+	// never empty when there are rules.
+	Unsure []string `json:"unsure,omitempty"`
 }
+
+// hiddenGrantsAlwaysUnsure is what no SHOW GRANTS settles: it is said on
+// every server with rules, beside whatever the grants did show.
+const hiddenGrantsAlwaysUnsure = "SHOW GRANTS does not list MySQL's mandatory roles or MariaDB's grants to PUBLIC: " +
+	"check @@mandatory_roles and SHOW GRANTS FOR PUBLIC for anything that reads what this server hides"
 
 type grantPriv struct {
 	name string
@@ -40,6 +47,8 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 	}
 	var parsed []grantLine
 	var roles []string
+	var execute, readsElsewhere bool
+	var unreadable, serverWide []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(strings.ToUpper(line), "GRANT ") {
@@ -58,17 +67,34 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 			obj = body[on+len(" ON ") : to]
 		}
 		obj = strings.TrimSpace(obj)
+		privs := splitPrivilegesCols(body[:on])
+		for _, p := range privs {
+			switch p.name {
+			case "EXECUTE":
+				execute = true
+			case "FILE", "PROCESS", "SUPER":
+				serverWide = append(serverWide, grantSecret.ReplaceAllString(line, "${1}'<hidden>'"))
+			}
+		}
 		// A routine grant (ON PROCEDURE/FUNCTION ...) splits into a db that
 		// is not a schema name and never matches; EXECUTE does not read.
 		if up := strings.ToUpper(obj); strings.HasPrefix(up, "TABLE ") {
 			obj = strings.TrimSpace(obj[len("TABLE "):])
 		}
 		parts := splitDotted(obj)
+		shown := grantSecret.ReplaceAllString(line, "${1}'<hidden>'")
 		if len(parts) != 2 {
+			// A line that grants a read on something this cannot name is
+			// said, never dropped: dropping it would read as "safe".
+			for _, p := range privs {
+				if p.name == "SELECT" || p.name == "ALL" || p.name == "ALL PRIVILEGES" {
+					unreadable = append(unreadable, shown)
+					break
+				}
+			}
 			continue
 		}
-		g := grantLine{shown: grantSecret.ReplaceAllString(line, "${1}'<hidden>'"),
-			privs: splitPrivilegesCols(body[:on]), db: parts[0], table: parts[1]}
+		g := grantLine{shown: shown, privs: privs, db: parts[0], table: parts[1]}
 		g.dbIsWildcard = g.table == "*" && g.db != "*"
 		parsed = append(parsed, g)
 	}
@@ -114,6 +140,14 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 		}
 		return n
 	}
+	// Any read at all: a view there may select what the rules hide, with
+	// its creator's rights (SQL SECURITY DEFINER, MySQL's default).
+	for _, g := range parsed {
+		if readable(g, "") {
+			readsElsewhere = true
+			break
+		}
+	}
 	for _, r := range set.TableRules() {
 		for _, g := range parsed {
 			if covers(g, r.Schema, r.Table, r.AllTables, "") {
@@ -131,9 +165,24 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 		}
 	}
 	if len(roles) > 0 {
-		out.Unsure = fmt.Sprintf("the account holds the role(s) %s, and SHOW GRANTS does not list what a role allows: "+
-			"check that none of them can read what this server hides", strings.Join(roles, ", "))
+		out.Unsure = append(out.Unsure, fmt.Sprintf("the account holds the role(s) %s, and SHOW GRANTS does not list what a role allows: "+
+			"check that none of them can read what this server hides", strings.Join(roles, ", ")))
 	}
+	if readsElsewhere {
+		out.Unsure = append(out.Unsure, "the account can read tables, and a VIEW among them runs with its creator's rights: "+
+			"check that no view it can read selects what this server hides")
+	}
+	if execute {
+		out.Unsure = append(out.Unsure, "the account has EXECUTE, and a stored function or procedure runs with its creator's rights: "+
+			"check that none it can call returns what this server hides")
+	}
+	for _, l := range serverWide {
+		out.Unsure = append(out.Unsure, "this grant reaches beyond tables (FILE reads the server's files, PROCESS shows other sessions' statements): "+l)
+	}
+	for _, l := range unreadable {
+		out.Unsure = append(out.Unsure, "this grant reads something this check cannot name: "+l)
+	}
+	out.Unsure = append(out.Unsure, hiddenGrantsAlwaysUnsure)
 	return out
 }
 
