@@ -276,3 +276,57 @@ func TestHiddenRulesKeepFutureKeys(t *testing.T) {
 		t.Fatalf("SetHidden must replace the lists and keep the future key:\n%s", raw)
 	}
 }
+
+// Clearing the lists keeps the keys a newer build wrote, and GET names them
+// so the operator is not told "nothing hidden" while the surfaces refuse.
+func TestHiddenClearKeepsFutureKeysAndNamesThem(t *testing.T) {
+	path := t.TempDir() + "/console-servers.yaml"
+	yamlText := "version: 1\nservers:\n- id: s1\n  name: prod\n  dsn: u:p@tcp(h:3306)/db\n" +
+		"  hidden:\n    tables:\n    - shop.audit_log\n    future_rule: keep-me\n"
+	if err := os.WriteFile(path, []byte(yamlText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clearStores(t)
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, body := doServersReq(t, srv, "PUT", "/api/servers/s1/hidden", `{"tables":[],"columns":[]}`)
+	if rec.Code != 200 {
+		t.Fatalf("clear = %d %s", rec.Code, body)
+	}
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "future_rule: keep-me") || strings.Contains(string(raw), "shop.audit_log") {
+		t.Fatalf("clearing the lists must keep only the future key:\n%s", raw)
+	}
+	_, body = doServersReq(t, srv, "GET", "/api/servers/s1/hidden", "")
+	if d := decodeHidden(t, body); !slices.Equal(d.UnreadableKeys, []string{"future_rule"}) {
+		t.Fatalf("GET = %s, want unreadable_keys [future_rule]", body)
+	}
+}
+
+func TestHiddenGetReadOnlyRegistryIsNotEditable(t *testing.T) {
+	path := t.TempDir() + "/console-servers.yaml"
+	if err := os.WriteFile(path, []byte("version: 99\nservers:\n- id: s1\n  name: prod\n  dsn: u:p@tcp(h:3306)/db\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clearStores(t)
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reg.ReadOnly() {
+		t.Fatal("fixture: a newer registry version must open read-only")
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, body := doServersReq(t, srv, "GET", "/api/servers/s1/hidden", "")
+	if d := decodeHidden(t, body); rec.Code != 200 || d.Editable || d.Refusal == "" {
+		t.Fatalf("read-only GET = %d %s, want not editable with a reason", rec.Code, body)
+	}
+}

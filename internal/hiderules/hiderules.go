@@ -16,6 +16,7 @@ package hiderules
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -38,9 +39,49 @@ type Rules struct {
 	Columns []string `yaml:"columns,omitempty" json:"columns"`
 	// Extra keeps keys a newer build wrote under the rules, the way
 	// ServerEntry.Extra does for the entry, so an older build that rewrites
-	// the registry does not drop a restriction it cannot read. Parse ignores
-	// it; the registry carries it across saves.
+	// the registry does not drop a restriction it cannot read.
+	//
+	// Format rule for every later build: EVERYTHING under `hidden:` restricts.
+	// A build that finds a key here it does not know cannot enforce it, so
+	// Load refuses the rules and the surfaces refuse that server's statements
+	// rather than serve without a restriction someone asked for. Anything
+	// informational (a note, an edit date) belongs on the server entry, never
+	// here, or every older build would stop serving the server.
 	Extra map[string]any `yaml:",inline" json:"-"`
+}
+
+// UnknownKeys returns the keys under the rules this build cannot read,
+// sorted; nil when none.
+func (r *Rules) UnknownKeys() []string {
+	if r == nil || len(r.Extra) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(r.Extra))
+	for k := range r.Extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// Load is how every enforcing reader turns STORED rules into a Set. It fails
+// when a stored entry does not parse (a hand edit) and when the rules hold
+// keys this build cannot read (a newer build wrote them): either way some
+// restriction cannot be enforced, and the caller must refuse, never read the
+// error as "hide nothing". A nil r loads as an empty set.
+func Load(r *Rules) (*Set, error) {
+	if r == nil {
+		return &Set{}, nil
+	}
+	if keys := r.UnknownKeys(); len(keys) > 0 {
+		return nil, fmt.Errorf("the hidden rules hold %s, which this build cannot read: a newer DBTrail wrote them; "+
+			"upgrade DBTrail to serve this server's analytical surfaces again", strings.Join(keys, ", "))
+	}
+	set, err := Parse(Rules{Tables: r.Tables, Columns: r.Columns})
+	if err != nil {
+		return nil, fmt.Errorf("the stored hidden rules do not parse: %w", err)
+	}
+	return set, nil
 }
 
 type part struct {

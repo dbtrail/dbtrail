@@ -19,9 +19,15 @@ const hiddenBootRefusal = "the command-line server cannot hide tables or columns
 type hiddenDTO struct {
 	Tables  []string `json:"tables"`
 	Columns []string `json:"columns"`
-	// Editable is false on the command-line server; Refusal says why.
+	// Editable is false on the command-line server and on a registry this
+	// build opened read-only; Refusal says why.
 	Editable bool   `json:"editable"`
 	Refusal  string `json:"refusal,omitempty"`
+	// UnreadableKeys are rules a newer build saved that this build cannot
+	// read. While there are any, the analytical surfaces refuse this
+	// server's statements (hiderules.Load), so the lists alone do not tell
+	// the whole story.
+	UnreadableKeys []string `json:"unreadable_keys,omitempty"`
 }
 
 // hiddenListsDTO is the rules on the server list: both lists, never null,
@@ -61,7 +67,12 @@ func (s *Server) handleHiddenGet(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, newHiddenDTO(e.Hidden))
+	d := newHiddenDTO(e.Hidden)
+	d.UnreadableKeys = e.Hidden.UnknownKeys()
+	if s.cm.reg.ReadOnly() {
+		d.Editable, d.Refusal = false, ErrRegistryReadOnly.Error()
+	}
+	writeJSON(w, http.StatusOK, d)
 }
 
 // handleHiddenPut serves PUT /api/servers/{id}/hidden: the body replaces both
@@ -112,5 +123,7 @@ func (s *Server) handleHiddenPut(w http.ResponseWriter, r *http.Request) {
 	saved := set.Rules()
 	slog.Info("console: hidden rules saved", "actor", consoleActor(r), "server", e.Name, "id", id,
 		"tables", strings.Join(saved.Tables, ","), "columns", strings.Join(saved.Columns, ","))
-	writeJSON(w, http.StatusOK, newHiddenDTO(e.Hidden))
+	d := newHiddenDTO(e.Hidden)
+	d.UnreadableKeys = e.Hidden.UnknownKeys()
+	writeJSON(w, http.StatusOK, d)
 }

@@ -165,3 +165,22 @@ func TestCanonicalRoundTrips(t *testing.T) {
 		t.Fatal("a quoted star must stay a literal table name after the round trip")
 	}
 }
+
+func TestLoadRefusesWhatItCannotEnforce(t *testing.T) {
+	if s, err := Load(nil); err != nil || !s.Empty() {
+		t.Fatalf("Load(nil) = %v, %v; want an empty set", s, err)
+	}
+	s, err := Load(&Rules{Tables: []string{"shop.audit_log"}})
+	if err != nil || !s.TableHidden("shop", "audit_log") {
+		t.Fatalf("Load(valid) = %v, %v", s, err)
+	}
+	// A hand edit that does not parse: never "hide nothing".
+	if _, err := Load(&Rules{Tables: []string{"audit_log"}}); err == nil || !strings.Contains(err.Error(), "do not parse") {
+		t.Fatalf("Load(unparseable) err = %v", err)
+	}
+	// Keys a newer build wrote: restrictions this build cannot enforce.
+	_, err = Load(&Rules{Tables: []string{"shop.a"}, Extra: map[string]any{"row_filters": []any{"x"}, "allow": 1}})
+	if err == nil || !strings.Contains(err.Error(), "allow, row_filters") || !strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("Load(future keys) err = %v", err)
+	}
+}
