@@ -273,5 +273,10 @@ type RouterStatusDoc struct {
 	// and the snapshot times are then the last ones known, not the
 	// current ones.
 	CopySnapshotsReadAt string `json:"copy_snapshots_read_at,omitempty"`
+	// Fresh says the port lays each table's newest captured changes over its
+	// snapshot (BINTRAIL_SQL_TAILS=on, the fresh mode); false is the default
+	// fast mode, answers from the snapshot alone. Absent from a router older
+	// than the switch.
+	Fresh *bool `json:"fresh,omitempty"`
 	RouterNumbers
 }

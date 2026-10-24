@@ -17,6 +17,7 @@ import (
 // how far that was indexed; with tails off, or for a table capture does not
 // record, it reads the published copy.
 func TestIntegrationPortReadsTheTail(t *testing.T) {
+	t.Setenv("BINTRAIL_SQL_TAILS", "on") // tails are opt-in: the fresh mode
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +96,7 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 	if got := read(t); len(got) != 1 || got[0] != "1=new" {
 		t.Fatalf("tails off: %v", got)
 	}
-	os.Unsetenv("BINTRAIL_SQL_TAILS")
+	os.Setenv("BINTRAIL_SQL_TAILS", "on")
 
 	captured = false
 	r.s.tails = tailKeepers{} // a keeper made again, with the filters now

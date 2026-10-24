@@ -15311,6 +15311,9 @@ function routerLines(view, cur) {
     // #2531: the statements run on half the cores, and how to give them all.
     if (p.cores_note) out.push({ text: p.cores_note.charAt(0).toUpperCase() + p.cores_note.slice(1) + "." });
   }
+  // Fast mode is the default: answers from each table's last snapshot.
+  if (st.fresh === true) out.push({ text: "Fresh mode: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture." });
+  else if (st.fresh === false) out.push({ text: "Fast mode: answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, set SQL_FRESH=on in the compose .env and run docker compose up -d router (BINTRAIL_SQL_TAILS=on outside Compose)." });
   const rules = [];
   if (st.cost_threshold > 0) rules.push("MySQL's plan costs at least " + st.cost_threshold);
   if (st.scan_rows > 0) rules.push("it scans a whole table of at least " + st.scan_rows + " rows");

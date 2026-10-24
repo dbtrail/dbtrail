@@ -55,7 +55,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 7
+x-bintrail-compose-version: &compose_version 8
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -660,11 +660,19 @@ services:
       # The fraction of this machine's memory the router plans with (#2513):
       # the tails it keeps and the statements it runs then come out of that
       # one number. Empty (the default) is the whole machine, as before: half
-      # of it for the statements, a fifth for the tails. Set
+      # of it for the statements, and a fifth for the tails in the fresh mode
+      # (SQL_FRESH below). Set
       # ROUTER_MEMORY_SHARE in .env beside DAEMON_MEMORY_SHARE on a host
       # where the kernel stops DBTrail's processes for memory; under
       # ROUTER_MEMORY (a ceiling) the share applies to that ceiling.
       BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-}
+      # Fast mode by default: a statement on the copy is answered from each
+      # table's last snapshot, as old as its last refresh (set the cadence on
+      # the Snapshots page). SQL_FRESH=on in .env is the fresh mode: each
+      # table's newest captured changes are laid over its snapshot, so
+      # answers are about as far behind as capture, at the cost of a fifth of
+      # the router's memory and an update of them every second.
+      BINTRAIL_SQL_TAILS: ${SQL_FRESH:-}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # How many statements run on the copy at once (1 to 64). Empty = the
       # router works it out from the cores and memory it may use, one

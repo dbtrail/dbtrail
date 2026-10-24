@@ -5,17 +5,26 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
+// Tails are opt-in (the fresh mode): unset, off and anything unknown answer
+// from the snapshot alone.
 func TestTailsOff(t *testing.T) {
-	for v, want := range map[string]bool{"": false, "on": false, "off": true, "OFF": true, " Off ": true, "false": true, "0": true, "no": true, "1": false} {
+	for v, want := range map[string]bool{
+		"": true, "off": true, "OFF": true, "false": true, "0": true, "no": true, "maybe": true, "onn": true,
+		"on": false, "ON": false, " On ": false, "true": false, "1": false, "yes": false, "fresh": false, "FRESH": false,
+	} {
 		t.Setenv("BINTRAIL_SQL_TAILS", v)
 		if got := tailsOff(); got != want {
 			t.Errorf("BINTRAIL_SQL_TAILS=%q: off %v, want %v", v, got, want)
+		}
+		if _, read := TailsSetting(); read != strings.TrimSpace(v) {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: read %q", v, read)
 		}
 	}
 }

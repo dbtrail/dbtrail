@@ -354,6 +354,23 @@ func exportCopySnapshots(ctx context.Context, read func(context.Context) map[str
 // the metrics are on.
 const routerStatusPath = "/status"
 
+// routerFreshnessLine says which answers the port gives: each table's last
+// snapshot (the default, fast mode) or that snapshot with the newest captured
+// changes laid over it (fresh mode, BINTRAIL_SQL_TAILS=on), and how to switch.
+// read is the variable as set, named when it is set but not understood.
+func routerFreshnessLine(on bool, read string) string {
+	if on {
+		return "Router: fresh mode (BINTRAIL_SQL_TAILS=" + read + "): each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture, at the cost of memory set aside for them and an update every second. Unset it (SQL_FRESH in the compose .env, then docker compose up -d router) for the fast mode.\n"
+	}
+	unknown := ""
+	switch strings.ToLower(read) {
+	case "", "off", "false", "0", "no":
+	default:
+		unknown = fmt.Sprintf(" (BINTRAIL_SQL_TAILS=%q is not on or off, and is read as off)", read)
+	}
+	return "Router: fast mode" + unknown + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, set BINTRAIL_SQL_TAILS=on (SQL_FRESH=on in the compose .env, then docker compose up -d router).\n"
+}
+
 // routerStatus builds the document from the numbers and the last reading of
 // the copies. A server that has a copy and was sent nothing yet gets an
 // entry of zeros with its snapshot: its copy's age is a number to watch
@@ -364,6 +381,8 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 		CostThreshold: st.Policy.CostThreshold, ScanRows: st.Policy.ScanRows,
 		RouterNumbers: numbers,
 	}
+	fresh, _ := console.TailsSetting()
+	doc.Fresh = &fresh
 	if doc.Servers == nil {
 		doc.Servers = map[string]console.RouterServerNumbers{}
 	}
@@ -907,6 +926,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		PortFile: routerPortFile(st), Token: st.Token != "", MaxWait: st.MaxWait, Ignored: routerIgnoredEnv(), InContainer: inContainer(),
 		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr,
 	}))
+	fmt.Fprint(os.Stderr, routerFreshnessLine(console.TailsSetting()))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)
 }

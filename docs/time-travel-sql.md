@@ -755,8 +755,20 @@ expensive read goes to the copy whatever the age of its snapshot. Earlier
 versions had a limit (`--route-max-copy-age`) and, past it, a check of which
 tables had changed since their snapshot. Both are gone.
 
-The copy answers with what capture has indexed, not only with its last
-snapshot. For each table a statement reads, the newest change of each row the
+**Fast mode, the default: the copy answers with its last snapshot.** Each
+table is as old as its last refresh, so the refresh cadence on the
+Snapshots page (every 5 minutes, 15, an hour...) is how far behind the
+answers may be. Nothing is laid over the snapshot, so the router's memory all
+goes to the statements and nothing runs in the background between
+statements.
+
+**Fresh mode, opt-in: the copy answers with what capture has indexed.**
+`SQL_FRESH=on` in the compose `.env` (then `docker compose up -d router`), or
+`BINTRAIL_SQL_TAILS=on` outside Compose, turns it on; the router's startup
+line and its card in the web interface say which mode is on. It costs a
+fifth of the router's memory, taken from the statements, and an update of
+the tails every second while statements arrive. For each table a statement
+reads, the newest change of each row the
 index holds after the table's snapshot (the table's tail) replaces the
 snapshot's row, so the answer is about as far behind as capture, usually
 seconds, plus about a second more: the tails are brought up to date in the
@@ -788,8 +800,9 @@ row of an hour ago. A table has no tail when:
 A statement whose tables the port cannot tell apart (a `WITH` that reads
 another `WITH`, for one) reads no tails either.
 
-`BINTRAIL_SQL_TAILS=off` turns tails off, and the copy answers as it was at
-its last snapshot. The console's own SQL card always reads the snapshot.
+Without the fresh mode (unset, `off`, or any value other than `on`, `true`,
+`1`, `yes` or `fresh`, which the startup line names) the copy answers as it
+was at its last snapshot. The console's own SQL card always reads the snapshot.
 
 Two budgets bound the tails, because they live in the router's memory:
 
@@ -842,10 +855,10 @@ connect straight to MySQL and not through this port.
 
 What this is and is not:
 
-- **The copy's answer is as fresh as capture, or as its snapshot.** A heavy
-  read served from the copy sees what capture has indexed, and when one of
-  its tables has no tail, only what the last snapshots hold, however long
-  ago that was ([No maximum copy age](#no-maximum-copy-age) above).
+- **The copy's answer is as fresh as its snapshot, or as capture in the
+  fresh mode.** A heavy read served from the copy sees what the last
+  snapshots hold, however long ago that was, and in the fresh mode what
+  capture has indexed, except over a table that has no tail ([No maximum copy age](#no-maximum-copy-age) above).
   That is why Engine Routing is off until you turn it on. A `SELECT` that
   must see the last second belongs in a transaction, which MySQL always
   answers.
