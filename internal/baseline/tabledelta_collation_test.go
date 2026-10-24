@@ -73,7 +73,7 @@ func TestTableDeltaState_keysDifferingInCaseSurviveNocaseSession(t *testing.T) {
 		"SELECT count(*) FROM (" + TableDeltaStateSQL("'"+base+"'", "'"+posdel+"'", "'"+upserts+"'", base, "") + ")",
 		"SELECT count(*) FROM (" + TableDeltaFollowStateSQL("'"+base+"'", "'"+fposdel+"'", "'"+fupserts+"'", base, "") + ")",
 	} {
-		for _, session := range []string{"", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"} {
+		for _, session := range []string{"", "SET default_collation = 'nocase'", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"} {
 			ddb, err := sql.Open("duckdb", "")
 			if err != nil {
 				t.Fatal(err)

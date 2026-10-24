@@ -108,7 +108,7 @@ func TestStateView_binaryCollationColumnComparesBytes(t *testing.T) {
 	// The copy's session defaults (sqlsandbox lock-down), and the built-in
 	// folding collation it used before: COLLATE C on the column outranks
 	// both.
-	for _, collation := range []string{"nocase.icu_noaccent", "nocase.noaccent"} {
+	for _, collation := range []string{"nocase", "nocase.icu_noaccent", "nocase.noaccent"} {
 		t.Run(collation, func(t *testing.T) { binaryCollationCases(t, sqlText, collation) })
 	}
 }
@@ -128,11 +128,18 @@ func binaryCollationCases(t *testing.T, sqlText, collation string) {
 	if _, err := db.Exec(sqlText); err != nil {
 		t.Fatalf("DuckDB rejected the generated views:\n%v\n\n--- generated ---\n%s", err, sqlText)
 	}
+	// nocase, the copy's default since #2532, folds case only: 'e' and 'é'
+	// stay apart on the folded column too. The accent-folding ones it
+	// replaced equate them.
+	foldsAccents := "5"
+	if collation == "nocase" {
+		foldsAccents = ""
+	}
 	cases := []struct{ name, query, want string }{
 		{"= matches the exact bytes", `SELECT id FROM shop.codes WHERE code = 'ab' ORDER BY id`, "2"},
 		{"= on the folded column still folds", `SELECT id FROM shop.codes WHERE label = 'ab' ORDER BY id`, "1,2"},
 		{"accents are bytes too", `SELECT id FROM shop.codes WHERE code = 'e' ORDER BY id`, ""},
-		{"the folded column still folds accents", `SELECT id FROM shop.codes WHERE label = 'é' ORDER BY id`, "5"},
+		{"the folded column folds accents only where its collation does", `SELECT id FROM shop.codes WHERE label = 'é' ORDER BY id`, foldsAccents},
 		{"IN", `SELECT id FROM shop.codes WHERE code IN ('ab', 'AB') ORDER BY id`, "1,2"},
 		{"<>", `SELECT id FROM shop.codes WHERE code <> 'ab' ORDER BY id`, "1,3,4,5"},
 		{"GROUP BY keeps three spellings apart", `SELECT count(*) FROM (SELECT code FROM shop.codes GROUP BY code)`, "6"},

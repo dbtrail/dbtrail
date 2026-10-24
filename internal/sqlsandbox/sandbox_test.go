@@ -1028,9 +1028,10 @@ func testExe(t *testing.T) string {
 	return exe
 }
 
-// Text compares and NULLs sort the way MySQL's defaults do (#2038): case-
-// and accent-insensitive equality, grouping and ordering; NULL first on an
-// ascending sort. The settings are part of the lock-down, so the query
+// Text compares and NULLs sort close to MySQL's defaults (#2038): case-
+// insensitive equality, grouping and ordering; NULL first on an ascending
+// sort. Accents are NOT folded (#2532): the copy's collation is DuckDB's
+// built-in nocase. The settings are part of the lock-down, so the query
 // cannot change them.
 func TestRun_textComparesLikeMySQL(t *testing.T) {
 	f := newCopyFixture(t)
@@ -1051,13 +1052,14 @@ func TestRun_textComparesLikeMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Byte order of b/a/C would be C,a,b; NULL on DESC goes LAST, as on
-	// MySQL. count(DISTINCT) does NOT fold (2): the router vetoes it. The
-	// second row of cells is what the ICU collation adds over plain
-	// nocase.noaccent (#2083): 'ß' = 'ss', full-width forms, ligatures, a
-	// trailing space still counts (utf8mb4_0900_ai_ci is NO PAD), and
-	// punctuation sorts before the digits.
-	want := []string{"true", "true", "true", "true", "true", "true", "false", "_,:,1,a,b,C",
-		"1", "NULL,1,2", "2,1,NULL", "a,b,C", "1", "2", "nocase.icu_noaccent", "NULLS_FIRST_ON_ASC_LAST_ON_DESC"}
+	// MySQL. count(DISTINCT) does NOT fold (2): the router vetoes it. What
+	// differs from MySQL, each in docs/time-travel-sql.md: 'Café' = 'cafe',
+	// 'ß' = 'ss', full-width forms and ligatures are false here and true on
+	// MySQL, and punctuation sorts by code point (MySQL puts it before the
+	// digits). A trailing space still counts, as on utf8mb4_0900_ai_ci (NO
+	// PAD).
+	want := []string{"true", "false", "true", "false", "false", "false", "false", "1,:,_,a,b,C",
+		"1", "NULL,1,2", "2,1,NULL", "a,b,C", "1", "2", "nocase", "NULLS_FIRST_ON_ASC_LAST_ON_DESC"}
 	for i, w := range want {
 		if got := fmt.Sprint(res.Rows[0][i]); got != w {
 			t.Errorf("cell %d = %s, want %s", i, got, w)

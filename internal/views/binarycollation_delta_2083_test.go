@@ -41,7 +41,7 @@ func TestStateView_binaryCollationThroughADeltaChain(t *testing.T) {
 	if !strings.Contains(sqlText, "bintrail_latest") || !strings.Contains(sqlText, `"status" COLLATE C AS "status"`) {
 		t.Fatalf("the view is not the delta shape with the collation:\n%s", sqlText)
 	}
-	for _, collation := range []string{"nocase.icu_noaccent", "nocase.noaccent"} {
+	for _, collation := range []string{"nocase", "nocase.icu_noaccent", "nocase.noaccent"} {
 		t.Run(collation, func(t *testing.T) {
 			db, err := sql.Open("duckdb", "")
 			if err != nil {

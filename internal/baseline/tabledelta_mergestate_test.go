@@ -149,7 +149,7 @@ func queryRows(t *testing.T, session, q string) []string {
 	return out
 }
 
-var mergeSessions = []string{"", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"}
+var mergeSessions = []string{"", "SET default_collation = 'nocase'", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"}
 
 func TestTableDeltaMergeState_isTheStateTheViewsRead(t *testing.T) {
 	f := writeMergeFixture(t)

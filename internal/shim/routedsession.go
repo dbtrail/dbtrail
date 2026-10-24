@@ -244,10 +244,14 @@ func modeVerdict(mode string) string {
 }
 
 // collationReproducible reads the collation probe: 'a' = 'A', 'a' = 'á',
-// 'ß' = 'ss', 'a' = 'ａ' (full-width) and 'a' = 'a ', each 1 or 0. The copy
-// compares text as utf8mb4_0900_ai_ci does, which answers 11110. The
-// connection collation only decides comparisons between literals (a column
-// carries its own), and the first four are what it must agree on.
+// 'ß' = 'ss', 'a' = 'ａ' (full-width) and 'a' = 'a ', each 1 or 0. The copy's
+// differences are measured and documented against utf8mb4_0900_ai_ci, which
+// answers 11110, so that is what the source's connection must agree with on
+// the first four. The copy itself folds case only (10000 since #2532: accents,
+// 'ß' and full-width letters stay apart), a documented difference that is the
+// same whatever the source, so it is not what this reads. The connection
+// collation only decides comparisons between literals (a column carries its
+// own).
 //
 // The fifth, trailing spaces, is read and not required. A PAD SPACE
 // collation that agrees on the rest (utf8mb4_unicode_ci, MariaDB's default
@@ -373,7 +377,7 @@ func sessionFromReadBack(cells []any, instants []time.Time, copyZone func(duckZo
 		return differ("character_set_connection", csConnection, "the copy reads the statement's literals as utf8mb4")
 	case !collationReproducible(collation):
 		return differ("collation_connection", "(not one that compares like utf8mb4_0900_ai_ci)",
-			"the copy compares text as MySQL's default collation does: without case or accents, ß as ss, a full-width letter as the plain one. "+
+			"the copy's text comparisons are documented against MySQL's default collation (utf8mb4_0900_ai_ci), and this connection compares otherwise. "+
 				"utf8mb4_unicode_ci and utf8mb4_0900_ai_ci do; utf8mb4_general_ci (MariaDB 10.11's default for utf8mb4, which SET NAMES utf8mb4 with no COLLATE asks for) does not: "+
 				"SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci on the connection")
 	}

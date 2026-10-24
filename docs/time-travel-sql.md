@@ -206,13 +206,14 @@ What to know before relying on it:
   `phases_ms` field of the SQL card's response, and the
   `bintrail_sql_statement_phase_seconds` histogram say where each
   statement's time went.
-- **Text compares close to MySQL's default collation, not DuckDB's.**
-  `'Paid' = 'paid'` and `'café' = 'cafe'` are true, `GROUP BY` and `SELECT
-  DISTINCT` fold them, `ORDER BY` sorts them together, and NULLs sort first
-  on an ascending `ORDER BY` and last on a descending one, as on MySQL
-  (`utf8mb4_0900_ai_ci`). So are `'ß' = 'ss'`, full-width letters,
-  `'æ' = 'ae'` and hiragana against katakana, and punctuation sorts before
-  the digits. Not folded: `LIKE`, `REGEXP`, `count(DISTINCT ...)`,
+- **Text ignores case, as on MySQL, but not accents.** `'Paid' = 'paid'`
+  is true, `GROUP BY` and `SELECT DISTINCT` fold case, `ORDER BY` sorts the
+  two together, and NULLs sort first on an ascending `ORDER BY` and last on
+  a descending one, as on MySQL (`utf8mb4_0900_ai_ci`). Unlike MySQL,
+  `'café' = 'cafe'`, `'ß' = 'ss'`, full-width letters and `'æ' = 'ae'` are
+  false here, and punctuation and accented letters sort by code point. The
+  full list, and why, is further down this page, at "The copy itself
+  compares text". Not folded either: `LIKE`, `REGEXP`, `count(DISTINCT ...)`,
   `instr`/`position`/`contains`, and the duplicate removal of `UNION`,
   `INTERSECT` and `EXCEPT`. A column MySQL
   declares under a `_bin` collation compares byte by byte here too
@@ -1086,73 +1087,62 @@ What this is and is not:
 
   The
   copy itself compares text close to the way MySQL's default collation
-  does: `'Paid'` and `'paid'`, `'café'` and `'cafe'` are equal in `WHERE`,
-  `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs sort first
-  on an ascending `ORDER BY` and last on a descending one (DuckDB's
-  `default_collation`, set to `nocase.icu_noaccent`, and
-  `default_null_order`, fixed in the copy's locked session). That
-  collation also equates what MySQL's does beyond case and accents
-  (`'ß' = 'ss'`, full-width letters, `'æ' = 'ae'`, `'ø' = 'o'`, hiragana
-  against katakana) and sorts as it does (punctuation before the digits):
-  of 57 pairs of strings measured against MySQL 8.4 one differs (a
-  mathematical bold `𝐀` is an `A` on MySQL and not on the copy), and a
-  list of 48 strings sorts in the same order on both. Those numbers hold
-  for those pairs and that list, not for all text: the differences found
-  outside them are listed below. ICU, which provides it, is part
-  of the binary; nothing is downloaded. It has a price: comparing,
-  grouping or sorting text costs about twice what DuckDB's built-in
-  case-and-accent folding does, and about ten times on a column where
-  every value is different (5 million rows of 32-character tokens on
-  disk: an equality filter takes 1.8 s instead of 0.2 s). Columns with
-  few distinct values, numbers, dates and `_bin` columns are not
-  affected. A column MySQL declares under a `_bin` collation
-  (`utf8mb4_bin`, `utf8mb4_0900_bin`, `latin1_bin`, ...), by its own
-  definition or by its table's default, is compared byte by byte on the
-  copy as well: the copy reads each column's collation from the `CREATE
-  TABLE` stored with the snapshot. Close, not identical. What still
-  differs, none of which can be caught per statement:
-  - **The copy can return MORE rows than MySQL for these texts.** The
-    copy holds them equal and MySQL's `utf8mb4_0900_ai_ci` does not, so a
-    filter or a join on them matches rows MySQL leaves out, and a `GROUP
-    BY` merges groups MySQL keeps apart, with no error:
-    - `l` or `L` followed by a middle dot, against `l` alone: `'l·l' =
-      'll'`, so `'col·lecció' = 'collecció'`.
-    - A Thai or Lao consonant and a leading vowel, in either order:
-      `'กเ' = 'เก'`, `'ກເ' = 'ເກ'`.
-    - A letter written in two parts against the same letter in one:
-      Cyrillic `и` followed by a combining breve against `й`, Arabic alef
-      followed by a combining madda or hamza against `آ`, `أ`, `إ`.
-    - One Javanese pair, the vowel sign tarung (U+A9B4) against its long
-      form (U+A9B5).
-    - 86 combining and format marks that the copy ignores and MySQL does
-      not, all added to Unicode after version 9: the Gujarati sign shadda
-      (U+0AFB), the Bengali sandhi mark (U+09FE), the combining dot above
-      left (U+1DF8). `'a' || chr(7672) = 'a'` here.
-    - Characters added to Unicode after version 9, which MySQL's `0900`
-      collations do not know and so give a weight of their own each: 1,463
-      of them are equal to another character on the copy. A Georgian
-      Mtavruli capital (U+1CA0) is equal to the ordinary Georgian letter
-      (U+10E0) here and not on MySQL.
+  does in one respect only: **case**. `'Paid'` and `'paid'` are equal in
+  `WHERE`, `GROUP BY`, `SELECT DISTINCT`, `IN` and `ORDER BY`, and NULLs
+  sort first on an ascending `ORDER BY` and last on a descending one
+  (DuckDB's built-in `default_collation = 'nocase'` and
+  `default_null_order`, fixed in the copy's locked session). **Accents are
+  not folded**: `'café'` and `'cafe'` are two values on the copy and one on
+  MySQL. A column MySQL declares under a `_bin` collation (`utf8mb4_bin`,
+  `utf8mb4_0900_bin`, `latin1_bin`, ...), by its own definition or by its
+  table's default, is compared byte by byte on the copy as well: the copy
+  reads each column's collation from the `CREATE TABLE` stored with the
+  snapshot.
 
-    A MariaDB source agrees with the copy on every one of these (measured
-    on 11.4 under `utf8mb4_uca1400_ai_ci`); the difference is against
-    MySQL only. It is not new either: the collation the copy used before
-    this one (`nocase.noaccent`) was wider in this direction (it ignored 1,327 combining marks MySQL does
-    not, the Indic vowel signs among them; of 75,900 strings of one or two characters
-    tested, it held 25,725 equal to another one that MySQL keeps apart,
-    against 2,613 now). The first two families are the ones it did not
-    have.
-  - **Equalities MySQL has and the copy lacks, beyond the 57 pairs.** The
-    copy returns fewer rows for these, never more: a small kana against
-    the normal one (`'ぁ' = 'あ'`, `'ッ' = 'ツ'`), enclosed and
-    mathematical letters (`'🅰' = 'a'`, `'𝒜' = 'A'`), a symbol against its
-    spelling (`'℃' = '°C'`, `'№' = 'No'`), and the katakana middle dot in
-    full width against half width (`'・' = '･'`) are equal on MySQL and on
-    MariaDB and different here.
-  - **Han characters outside the main block sort differently.** MySQL
-    and MariaDB put `𠀀` (U+20000) after `中`, the copy before: over
-    `𠀀`, `中` and `z`, `max(x)` is `𠀀` on MySQL and `中` on the
-    copy. `ORDER BY`, `MIN`, `MAX` and `<` on such text differ.
+  This is a choice, made for speed (#2532): before it the copy used ICU's
+  accent-insensitive collation (`nocase.icu_noaccent`), which matched
+  MySQL on 56 of 57 measured pairs of strings but made every statement
+  that compares, groups or sorts text 1.6 to 1.8 times slower, and up to
+  ten times on a column where every value is different. `nocase` costs
+  about 1.15 times what no collation costs. Statements over numbers and
+  dates were never affected.
+
+  What differs from MySQL's `utf8mb4_0900_ai_ci`, none of which can be
+  caught per statement:
+  - **The copy returns FEWER rows than MySQL (the common case).** Of 57
+    pairs of strings measured against MySQL 8.4, the copy differs on 36,
+    and on every one MySQL holds the two equal and the copy does not. A
+    filter or a join on them matches fewer rows on the copy, and a `GROUP
+    BY` keeps apart groups MySQL merges:
+    - accents and other marks: `'café' = 'cafe'`, `'Ñ' = 'N'`, `'ü' = 'u'`
+      are true on MySQL and false here;
+    - `'ß' = 'ss'`, ligatures (`'æ' = 'ae'`, `'œ' = 'oe'`), letters with a
+      stroke (`'ø' = 'o'`, `'đ' = 'd'`);
+    - full-width letters against the plain ones (`'Ａ' = 'A'`), and kana
+      (hiragana against katakana, small against normal);
+    - a letter written in two parts against the same letter in one: `e`
+      followed by a combining acute accent against `é`, and the same for
+      `ñ`, `Å` or a Hangul syllable written as its two jamo. Text that
+      arrives decomposed (macOS file names often do) does not match its
+      composed form on the copy;
+    - enclosed and mathematical letters, symbols against their spelling
+      (`'℃' = '°C'`, `'№' = 'No'`).
+
+    If a report has to treat these as equal, normalize them in the query
+    (`strip_accents(lower(x))`, `nfc_normalize(x)`), or send it to MySQL.
+  - **The copy can return MORE rows than MySQL for one known family.**
+    Letters whose upper and lower case Unicode added after version 9, which
+    MySQL's `0900` collations do not know and so give a weight of their
+    own each, fold to one another on the copy: a Georgian Mtavruli capital
+    (U+1CA0) is equal to the ordinary Georgian letter (U+10E0) here and not
+    on MySQL. Of the eight families where the previous collation returned
+    more rows than MySQL (an `l` with a middle dot, Thai and Lao vowel
+    order, combining marks newer than Unicode 9, ...), this is the only one
+    left; how many such pairs exist was not counted.
+  - **`ORDER BY` differs on text.** Punctuation sorts by its code point
+    (MySQL puts it before the digits), accented letters, `ß`, `æ`, `ø` and
+    full-width letters sort after `z`, and `é` after `f`. `MIN`, `MAX`
+    and `<` on such text follow the same order.
   - **`_cs` columns.** A column MySQL declares `_cs`
     (`utf8mb4_0900_as_cs`) is case-insensitive on the copy. Bytes would
     compare it right and sort it wrong: `_cs` puts `a` before `B`, bytes
@@ -1168,20 +1158,11 @@ What this is and is not:
   - **`ENUM` and `SET` in `ORDER BY`.** MySQL and MariaDB sort them by the
     position of the value in the column's definition (`enum('z','a')`
     gives `z`, `a`); the copy sorts the text (`a`, `z`).
-  - **MySQL against MariaDB.** The comparisons above were measured on
-    MySQL 8.4 and again on MariaDB 11.4 under its default collation. The
-    two agree on each of those 57 pairs except the two that differ by a
-    trailing space (the point above), and on the order of every one of the
-    48 strings except the empty one against a single space. So on a
-    MariaDB source the copy differs on 3 of the 57 pairs (the bold letter
-    and the two that differ by a trailing space) where it differs on 1 on
-    a MySQL source. That holds for those pairs, not for all text. One case
-    outside them: a Hangul syllable written as one character (U+AC00) and
-    the same syllable written as its two parts (U+1100 U+1161) are equal
-    on MySQL and on the copy and different on MariaDB 11.4. Other
-    characters written in parts (`e` followed by a combining acute accent
-    against `é`, and the same for `Å`, `ñ`, a voiced kana) are equal on
-    all three.
+  - **MySQL against MariaDB.** The 57 pairs were measured on MySQL 8.4
+    and again on MariaDB 11.4 under its default collation. The two agree
+    on each of them except the two that differ by a trailing space (the
+    point above), so on a MariaDB source the copy differs on 38 of the 57
+    where it differs on 36 on a MySQL source.
   - **`_bin` outside UTF-8.** A `_bin` column in a multi-byte character
     set other than UTF-8 sorts by that character set's bytes on MySQL and
     by Unicode code point here. Equality is the same.

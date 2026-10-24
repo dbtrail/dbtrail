@@ -1349,10 +1349,11 @@ The limits, so a query can never hurt capture:
   `duckdb_tables()`), or that names a table the copy does not have, gets
   every table, so the list is complete and a misspelled name is still
   answered with the closest real one.
-- Text compares close to MySQL's default collation: `'Paid' = 'paid'` and
-  `'café' = 'cafe'` are true, `GROUP BY` and `SELECT DISTINCT` fold them,
-  and NULLs sort first on an ascending `ORDER BY`, last on a descending one;
-  `'ß' = 'ss'` and full-width letters are equal too, as on MySQL.
+- Text ignores case as MySQL's default collation does (`'Paid' = 'paid'`
+  is true, `GROUP BY` and `SELECT DISTINCT` fold case), and NULLs sort first
+  on an ascending `ORDER BY`, last on a descending one. Accents are NOT
+  ignored: `'café' = 'cafe'`, `'ß' = 'ss'` and full-width letters are false
+  here and true on MySQL (docs/time-travel-sql.md lists every difference).
   Not folded: `LIKE`, `REGEXP`, `count(DISTINCT ...)`, `instr`/`position`,
   and the duplicate removal of `UNION`.
   A column MySQL declares under a `_bin` collation is compared byte by byte,

@@ -29,7 +29,7 @@ import (
 
 // onePairSessions are the collations a state is read under: DuckDB's own, and
 // the two the console's SQL sandbox has used, which fold case and accents.
-var onePairSessions = []string{"", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"}
+var onePairSessions = []string{"", "SET default_collation = 'nocase'", "SET default_collation = 'nocase.noaccent'", "SET default_collation = 'nocase.icu_noaccent'"}
 
 // oddKeys are keys as pk_values spells them, the ones a comparison could get
 // wrong: two that differ only in case, two only in an accent, an escaped pipe,

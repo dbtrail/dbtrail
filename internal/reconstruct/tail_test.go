@@ -87,7 +87,7 @@ func readState(t *testing.T, stateSQL string) []string {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, "SET default_collation = 'nocase.icu_noaccent'"); err != nil {
+	if _, err := db.ExecContext(ctx, "SET default_collation = 'nocase'"); err != nil {
 		t.Fatal(err)
 	}
 	rs, err := db.QueryContext(ctx, "SELECT CAST(id AS VARCHAR), coalesce(status, 'NULL') FROM ("+stateSQL+") ORDER BY 1 COLLATE \"binary\"")

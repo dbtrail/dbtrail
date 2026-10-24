@@ -748,9 +748,10 @@ func TableDeltaFollowStateSQL(base, posdelGlob, upsertsGlob, basePath, replace s
 // be two downloads.
 //
 // Its keys are compared as their bytes, whatever the session's default
-// collation: the console's SQL sandbox runs under nocase.icu_noaccent (#2038,
-// #2083), which would otherwise fold two keys that differ only in case or
-// accents into one and drop a row, silently.
+// collation: the console's SQL sandbox runs under a case-folding default
+// (nocase since #2532, nocase.icu_noaccent before it; #2038, #2083), which
+// would otherwise fold two keys that differ only in case into one and drop a
+// row, silently.
 func tableDeltaStateSQL(base, upserts, dead, replace string) string {
 	star := "*"
 	if replace != "" {
