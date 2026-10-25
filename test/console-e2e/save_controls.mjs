@@ -674,10 +674,16 @@ export async function runSaveScenes(ctx) {
         await p.evaluate(async (id) => { await switchServer(id); navigate("mysql-clients"); }, srvId);
         await p.waitForSelector('.cn-hidden textarea[name="tables"]', { timeout: 15000 });
       };
+      // Returns the body the page sent: the server trims too, so only the
+      // request tells the page's own trimming apart.
       const saveWith = async (tables, columns) => {
         await page.fill('.cn-hidden textarea[name="tables"]', tables);
         await page.fill('.cn-hidden textarea[name="columns"]', columns);
-        await page.click(".cn-hidden .bk-restore-row button");
+        const [req] = await Promise.all([
+          page.waitForRequest((r) => r.method() === "PUT" && new URL(r.url()).pathname === PATH, { timeout: 10000 }),
+          page.click(".cn-hidden .bk-restore-row button"),
+        ]);
+        return req.postData();
       };
       const said = () => page.evaluate(() => {
         const m = document.querySelector('.cn-hidden p.form-msg[role="status"]');
@@ -691,7 +697,11 @@ export async function runSaveScenes(ctx) {
         /not a table/.test(refused) && got.status === 200 && got.body.tables.length === 0 && got.body.columns.length === 0,
         JSON.stringify({ refused, got }));
 
-      await saveWith("  SHOP.audit_log  \n\n", "shop.customers.email\n");
+      const sent = await saveWith("  SHOP.audit_log  \n\n", "shop.customers.email\n");
+      check("hidden", "the page sends both lists, trimmed, blank lines dropped",
+        sent === JSON.stringify({ tables: ["SHOP.audit_log"], columns: ["shop.customers.email"] }), sent);
+      const savedLine = await until(async () => { const t = await said(); return /\|Saved\.$/.test(t) ? t : ""; });
+      check("hidden", "Saved. is shown after the save", !!savedLine, await said());
       got = await until(async () => {
         const r = await readAs(page, PATH);
         return r.body && r.body.tables.length === 1 ? r : null;
