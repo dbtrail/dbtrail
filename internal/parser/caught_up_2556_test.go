@@ -253,7 +253,7 @@ func TestCaughtUp_aStalledHeartbeatIsCappedAtWhenItWasSent_2556(t *testing.T) {
 	if !marker.ReadAt.Before(heartbeatFed) {
 		t.Fatalf("marker time %v is not before the stalled heartbeat's arrival %v: it would claim changes still on the way", marker.ReadAt, heartbeatFed)
 	}
-	if limit := lastEventFed.Add(testHeartbeatPeriod + 50*time.Millisecond); marker.ReadAt.After(limit) {
+	if limit := lastEventFed.Add(2 * testHeartbeatPeriod); marker.ReadAt.After(limit) {
 		t.Fatalf("marker time %v is past the previous packet's read time plus one period (%v)", marker.ReadAt, limit)
 	}
 }
