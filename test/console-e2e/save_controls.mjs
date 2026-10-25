@@ -690,11 +690,19 @@ export async function runSaveScenes(ctx) {
         return m && !m.hidden ? m.className + "|" + m.textContent : "";
       });
       await open(page);
+      // A rule first, so the refusal below is shown to leave it untouched.
+      await saveWith("shop.orders", "shop.orders.note");
+      let got = await until(async () => {
+        const r = await readAs(page, PATH);
+        return r.body && r.body.tables.length === 1 ? r : null;
+      });
+      check("hidden", "the first rule is stored", !!got, JSON.stringify(got && got.body));
       await saveWith("shop.audit_log\nnot a table", "");
       const refused = await until(async () => { const t = await said(); return t.includes("err") ? t : ""; });
-      let got = await readAs(page, PATH);
-      check("hidden", "a bad entry is refused in the server's words and stores nothing",
-        /not a table/.test(refused) && got.status === 200 && got.body.tables.length === 0 && got.body.columns.length === 0,
+      got = await readAs(page, PATH);
+      check("hidden", "a bad entry is refused in the server's words and leaves the stored rules as they were",
+        /not a table/.test(refused) && got.status === 200 && JSON.stringify(got.body.tables) === '["shop.orders"]' &&
+        JSON.stringify(got.body.columns) === '["shop.orders.note"]',
         JSON.stringify({ refused, got }));
 
       const sent = await saveWith("  SHOP.audit_log  \n\n", "shop.customers.email\n");
@@ -704,7 +712,7 @@ export async function runSaveScenes(ctx) {
       check("hidden", "Saved. is shown after the save", !!savedLine, await said());
       got = await until(async () => {
         const r = await readAs(page, PATH);
-        return r.body && r.body.tables.length === 1 ? r : null;
+        return r.body && r.body.tables.length === 1 && /audit_log/i.test(r.body.tables[0]) ? r : null;
       });
       check("hidden", "Save stores the rules, trimmed, blank lines dropped",
         !!got && got.body.columns.length === 1 && /audit_log/i.test(got.body.tables[0]) && got.body.columns[0] === "shop.customers.email",

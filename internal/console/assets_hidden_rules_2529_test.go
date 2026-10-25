@@ -1,10 +1,15 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/config"
 
 	"github.com/dbtrail/dbtrail/internal/hiderules"
 )
@@ -57,6 +62,8 @@ const findArea = (box, name) => { let hit = null; walk(box, (x) => { if (!hit &&
   out.capture = read(body(d.withRules, d.grantsCapture));
   out.realNone = read(body(d.withRules, d.grantsNone));
   out.grantLine = read(body(d.withRules, d.grantsGrantLine));
+  out.gone = read(body(d.withRules, "gone"));
+  out.unmatched = read(body(d.unmatched, d.grantsNone));
   caps({ "servers:write": false });
   out.readOnly = read(body(d.withRules, d.grantsClean));
   out.readOnlyKey = read(body(d.onlyKey, d.grantsLoadErrOnly));
@@ -109,6 +116,17 @@ const findArea = (box, name) => { let hit = null; walk(box, (x) => { if (!hit &&
   await settle(); await settle();
   out.switched = { calls: ctx.__calls.splice(0), after: read(box), current: run("hiddenRulesOf()") };
 
+  // What the grants read turns into: a 404 is a server gone, a 403 a
+  // session that may not.
+  const fetchWith = async (status) => {
+    run('api = (p) => Promise.reject(Object.assign(new Error("x"), { status: ' + status + ' }));');
+    const v = await run('hiddenGrantsFetch("s1")');
+    return v === undefined ? "undefined" : v === null ? "null" : String(v);
+  };
+  out.fetch404 = await fetchWith(404);
+  out.fetch403 = await fetchWith(403);
+  out.fetch500 = await fetchWith(500);
+  run('api = (p, o) => { __calls.push([p, o || null]); if (__fail && o && o.method === "PUT") return Promise.reject(new Error(__fail)); return Promise.resolve(__answers[p]); };');
   // The notes beside SQL on the copy and the downloads, drawn from the real
   // server list DTO; the per-server read answers the same.
   run("rememberHiddenRules(" + JSON.stringify(d.list) + ")");
@@ -155,6 +173,11 @@ const findArea = (box, name) => { let hit = null; walk(box, (x) => { if (!hit &&
   const sqlBox3 = box2(); ctx.__sb3 = sqlBox3; run("renderSQLPanel(__sb3)");
   await settle();
   out.sqlNoteOnlyKey = read(sqlBox3).lines.filter((l) => l.includes("hides") || l.includes("hidden rules"));
+  caps({ "servers:write": false });
+  const sqlBox5 = box2(); ctx.__sb5 = sqlBox5; run("renderSQLPanel(__sb5)");
+  await settle();
+  out.sqlNoteNoWrite = read(sqlBox5).lines.filter((l) => l.includes("hidden rules"));
+  caps(null);
   // A list read before someone added rules: the note appears once the
   // server's rules are read again.
   run("rememberHiddenRules([])");
@@ -262,17 +285,14 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 		t.Fatalf("clear s3: %d %s", rec.Code, body)
 	}
 	raw("onlyKeyAfterClear", body)
-	loadErr := func(id string) string {
-		t.Helper()
-		e, ok := reg.Get(id)
-		if !ok {
-			t.Fatalf("%s not loaded", id)
-		}
-		_, lerr := hiderules.Load(e.Hidden)
-		if lerr == nil {
-			t.Fatalf("%s: hiderules.Load accepted rules it must refuse", id)
-		}
-		return lerr.Error()
+
+	// GET over a server whose copy SQL reads: shop.orders is in the
+	// snapshot, shop.nothere is not.
+	uf, _ := hiddenSQLFixture(t, &hiderules.Rules{Tables: []string{"shop.orders", "shop.nothere"}})
+	if code, b := hiddenGet(t, uf.s, uf.s.cm.boot.serverID); code != 200 {
+		t.Fatalf("unmatched GET = %d %s", code, b)
+	} else {
+		raw("unmatched", b)
 	}
 
 	// route-grants answers the real handler gives with no rules involved.
@@ -289,26 +309,40 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 
 	// The grants check, in the shape GET /api/servers/{id}/route-grants
 	// answers on a server with rules (field hidden: exposed and unsure).
-	const always = "SHOW GRANTS does not list MySQL's mandatory roles or MariaDB's grants to PUBLIC: " +
-		"check @@mandatory_roles and SHOW GRANTS FOR PUBLIC for anything that reads what this server hides"
-	grant := "GRANT SELECT ON `shop`.* TO `report_ro`@`%`"
-	data["grantsExposed"] = map[string]any{"user": "report_ro", "grants": []string{grant},
-		"hidden": map[string]any{"exposed": []string{"shop.audit_log: " + grant, "shop.customers.email: " + grant}, "unsure": []string{always}}}
-	data["grantsClean"] = map[string]any{"user": "report_ro", "grants": []string{"GRANT USAGE ON *.* TO `report_ro`@`%`"},
-		"hidden": map[string]any{"unsure": []string{always}}}
-	// The check on a server whose rules this build cannot read: route-grants
-	// answers only the load error, as unsure.
-	loadErrGrants := func(id string) map[string]any {
-		return map[string]any{"user": "report_ro", "grants": []string{grant}, "hidden": map[string]any{"unsure": []string{loadErr(id)}}}
+	// The grants check from the real handler (#2541), with SHOW GRANTS
+	// answered by a stand-in for the forwarding account's MySQL.
+	var showGrants []string
+	var showErr error
+	fut.routeAccountGrants = func(context.Context, string, config.SSL, time.Duration) ([]string, error) { return showGrants, showErr }
+	routed := func(id string, lines []string, err error) json.RawMessage {
+		t.Helper()
+		e := ServerEntry{ID: id, SourceDSN: "repl:pw@tcp(db:3306)/", RouteDSN: "report_ro:pw@tcp(db:3306)/"}
+		if id != "" {
+			got, ok := reg.Get(id)
+			if !ok {
+				t.Fatalf("%s not loaded", id)
+			}
+			e.Hidden = got.Hidden
+		}
+		showGrants, showErr = lines, err
+		return grantsFor(e)
 	}
-	data["grantsLoadErr"] = loadErrGrants("s4")
-	data["grantsLoadErrOnly"] = loadErrGrants("s3")
-	data["grantsLoadErrBroken"] = loadErrGrants("s5")
-	unnamed := "this grant reads something this check cannot name: GRANT SELECT ON `shop`.`v_customers` TO `report_ro`@`%`"
-	data["grantsGrantLine"] = map[string]any{"user": "report_ro", "grants": []string{grant},
-		"hidden": map[string]any{"unsure": []string{unnamed, always}}}
-	data["grantsOld"] = map[string]any{"user": "report_ro", "grants": []string{grant}}
-	data["grantsError"] = map[string]any{"user": "report_ro", "error": "Error 1045: Access denied"}
+	usage := "GRANT USAGE ON *.* TO `report_ro`@`%`"
+	grant := "GRANT SELECT ON `shop`.* TO `report_ro`@`%`"
+	fileGrant := "GRANT FILE ON *.* TO `report_ro`@`%`"
+	data["grantsExposed"] = routed("s1", []string{usage, grant}, nil)
+	data["grantsClean"] = routed("s1", []string{usage, "GRANT SELECT ON `sales`.* TO `report_ro`@`%`"}, nil)
+	data["grantsGrantLine"] = routed("s1", []string{fileGrant}, nil)
+	data["grantsLoadErr"] = routed("s4", []string{usage, grant}, nil)
+	data["grantsLoadErrOnly"] = routed("s3", []string{usage, grant}, nil)
+	data["grantsLoadErrBroken"] = routed("s5", []string{usage, grant}, nil)
+	data["grantsOld"] = routed("", []string{usage, grant}, nil)
+	data["grantsError"] = routed("s1", nil, errors.New("Error 1045: Access denied"))
+	for _, k := range []string{"grantsExposed", "grantsClean", "grantsGrantLine", "grantsLoadErrOnly"} {
+		if !strings.Contains(string(data[k].(json.RawMessage)), `"hidden"`) {
+			t.Fatalf("%s carries no hidden check: %s", k, data[k])
+		}
+	}
 
 	arg, err := json.Marshal(data)
 	if err != nil {
@@ -316,8 +350,8 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 	}
 	outRaw := runNodeConnectArgs(t, renderHarnessJS+hiddenRulesJS, string(arg))
 	var got struct {
-		Empty, Exposed, Clean, None, Failed, NotAsked, NoRulesExposed, OldServer, GrantsError, Boot, Unreadable, UnreadableGrants, UnreadNull, ReadOnly, ReadOnlyKey, OnlyKey, BrokenEdit, Capture, RealNone, GrantLine hiddenDrawn
-		OnlyKeySaved, Switched                                                                                                                                                                                          struct {
+		Empty, Exposed, Clean, None, Failed, NotAsked, NoRulesExposed, OldServer, GrantsError, Boot, Unreadable, UnreadableGrants, UnreadNull, ReadOnly, ReadOnlyKey, OnlyKey, BrokenEdit, Capture, RealNone, GrantLine, Gone, Unmatched hiddenDrawn
+		OnlyKeySaved, Switched                                                                                                                                                                                                           struct {
 			Calls   [][]json.RawMessage
 			After   hiddenDrawn
 			Current *struct {
@@ -325,9 +359,10 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 				Unreadable      bool
 			}
 		}
-		LaptopViewsOnly                                                                                    struct{ Lines, Buttons []string }
-		Dash, InPlaceHidden, InPlacePlain, DuckOnlyKey, DuckNoCur, SQLNoteOnlyKey, StaleBefore, StaleAfter []string
-		Saved                                                                                              struct {
+		LaptopViewsOnly                                                                                                    struct{ Lines, Buttons []string }
+		Fetch404, Fetch403, Fetch500                                                                                       string
+		Dash, InPlaceHidden, InPlacePlain, DuckOnlyKey, DuckNoCur, SQLNoteOnlyKey, SQLNoteNoWrite, StaleBefore, StaleAfter []string
+		Saved                                                                                                              struct {
 			Calls   [][]json.RawMessage
 			After   hiddenDrawn
 			Current *struct{ Tables, Columns []string }
@@ -350,8 +385,8 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 	all := func(d hiddenDrawn) string {
 		return strings.Join(append(append(append([]string{}, d.Lines...), d.Errs...), d.Items...), " | ")
 	}
-	does := "Hidden tables and columns disappear from SQL on the copy, the MySQL port and the AI connector, and the port's time travel (_flashback, _snapshot, _diff) is off for this server."
-	doesNot := "The data stays in the copy's files and in the index, so time travel in this console (it follows its own access profiles), downloads, and anyone with the files still see it."
+	does := "Hidden tables and columns disappear from SQL on the copy, the MySQL port and the AI connector's SQL tool, and the port's time travel (_flashback, _snapshot, _diff) is off for this server."
+	doesNot := "The data stays in the copy's files and in the index, so time travel in this console and the AI connector's history tools (both follow access profiles) still see full rows, and so do downloads and anyone with the files."
 
 	// The form, with what it does and does not do said before Save.
 	e := got.Empty
@@ -415,12 +450,26 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 		strings.Contains(strings.Join(sw.After.Lines, "|"), "Saved") {
 		t.Errorf("save while the server changed: %+v current=%+v", sw, sw.Current)
 	}
+	if got.Fetch404 != "gone" || got.Fetch403 != "undefined" || got.Fetch500 != "null" {
+		t.Errorf("route-grants refusals: 404 %q 403 %q 500 %q", got.Fetch404, got.Fetch403, got.Fetch500)
+	}
+	if x := strings.Join(got.Gone.Errs, "|"); x != "This server is no longer in the list." || strings.Contains(all(got.Gone), "may not check") {
+		t.Errorf("route-grants 404: %+v", got.Gone)
+	}
+	// A rule that matches nothing in the copy (from the real GET over the SQL
+	// fixture's snapshot) is a warning; a copy that could not be read says so.
+	if x := all(got.Unmatched); !strings.Contains(x, "These match no table or column in this server's copy: shop.nothere.") || strings.Contains(x, "shop.orders.") {
+		t.Errorf("unmatched: %s", x)
+	}
+	if x := all(got.Exposed); !strings.Contains(x, "Could not check these rules against the copy: ") || strings.Contains(x, "These match no") {
+		t.Errorf("unchecked: %s", x)
+	}
 	// The capture account is not a failure to read: the port does not forward.
 	if c := got.Capture; len(c.Errs) != 0 || !strings.Contains(all(c), "No forwarding account: the port does not forward for this server.") {
 		t.Errorf("capture account: %+v", c)
 	}
 	// Unsure lines are kept as written: one ending in a GRANT gets no "." added.
-	if x := strings.Join(got.GrantLine.Items, "|"); !strings.Contains(x, "This grant reads something this check cannot name: GRANT SELECT ON `shop`.`v_customers` TO `report_ro`@`%`|") {
+	if x := strings.Join(got.GrantLine.Items, "|"); !strings.Contains(x, ": GRANT FILE ON *.* TO `report_ro`@`%`|") || !strings.HasPrefix(x, "This grant") {
 		t.Errorf("unsure items: %q", x)
 	}
 	// The command-line server: its refusal, no form.
@@ -478,7 +527,7 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 		}
 	}
 	file := "This server hides some tables and columns from SQL; this file reads them too."
-	if strings.Join(got.LaptopViewsOnly.Lines, "|") != note || strings.Join(got.LaptopViewsOnly.Buttons, ",") != "Download views.sql" {
+	if strings.Join(got.LaptopViewsOnly.Lines, "|") != file || strings.Join(got.LaptopViewsOnly.Buttons, ",") != "Download views.sql" {
 		t.Errorf("views.sql only: %+v", got.LaptopViewsOnly)
 	}
 	if strings.Join(got.Dash, "|") != file {
@@ -487,8 +536,11 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 	if strings.Join(got.InPlaceHidden, "|") != "This server hides some tables and columns from SQL; the files and the export below include them." || len(got.InPlacePlain) != 0 {
 		t.Errorf("use it where it lives: %q / plain %q", got.InPlaceHidden, got.InPlacePlain)
 	}
-	if strings.Join(got.SQLNoteOnlyKey, "|") != "This server holds hidden rules this DBTrail cannot read, so its SQL is refused. See Settings, MySQL clients." {
+	if strings.Join(got.SQLNoteOnlyKey, "|") != "This server holds hidden rules this DBTrail cannot read, so its SQL is refused. Change it in Settings, MySQL clients." {
 		t.Errorf("SQL note, only a key: %q", got.SQLNoteOnlyKey)
+	}
+	if strings.Join(got.SQLNoteNoWrite, "|") != "This server holds hidden rules this DBTrail cannot read, so its SQL is refused." {
+		t.Errorf("SQL note for a session that may not change servers: %q", got.SQLNoteNoWrite)
 	}
 	if len(got.StaleBefore) != 0 || len(got.StaleAfter) != 1 {
 		t.Errorf("SQL note must follow the rules read when the panel opens: before %q after %q", got.StaleBefore, got.StaleAfter)

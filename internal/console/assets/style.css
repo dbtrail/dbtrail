@@ -3735,3 +3735,4 @@ button.st-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .hidden-exposed code { font-size: 12px; color: var(--error); }
 .sqlp-hidden { margin: 0 0 10px; color: var(--ink-2); font-size: var(--fs-xs); }
 .hidden-dl-note { color: var(--ink-2); }
+.hidden-unmatched { color: var(--warn, var(--ink)); }

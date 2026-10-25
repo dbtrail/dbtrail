@@ -3164,7 +3164,9 @@ const USE_PANELS = {
     }
     body.append(row, msg);
     // Both buttons hand over what SQL hides: the data, and a file that reads it.
-    if (row.children.length) body.append(liveHiddenNote("use-note hidden-dl-note", (h) => h ? HIDDEN_DOWNLOAD_NOTE : ""));
+    // With row data, the download note; with only views.sql, the file's.
+    const dataDrawn = sessionMay("query:execute");
+    if (row.children.length) body.append(liveHiddenNote("use-note hidden-dl-note", (h) => !h ? "" : dataDrawn ? HIDDEN_DOWNLOAD_NOTE : HIDDEN_FILE_NOTE));
   },
   dash(body) {
     // The always-current path (#2014): see dashPanelBody. The local folder's
@@ -14194,7 +14196,7 @@ function buildMySQLClients(servers, fbStatus, sqlMem, rtView, serversFailed) {
   // Hidden from SQL (#2529): per server, so for the one picked in the sidebar.
   const cur = servers.find((s) => s.id === (currentServer || defaultServerId));
   if (cur && sessionMay("servers:read")) {
-    v.append(cnSection("This server", "", "Tables and columns that SQL on the copy, the MySQL port and the AI connector do not show.", "violet"));
+    v.append(cnSection("This server", "", "Tables and columns that SQL on the copy, the MySQL port and the AI connector's SQL tool do not show.", "violet"));
     v.append(hiddenRulesPanel(cur));
   }
   // The Iceberg export is on Snapshots -> Download (snapshotInPlace): it is
@@ -14264,10 +14266,11 @@ function hiddenDownloadNote(h, cls, text) {
 function hiddenSQLNoteText(h) {
   if (!h) return "";
   const all = h.tables.concat(h.columns);
-  if (!all.length) return "This server holds hidden rules this DBTrail cannot read, so its SQL is refused. See Settings, MySQL clients.";
+  const where = sessionMay("servers:write") ? " Change it in Settings, MySQL clients." : "";
+  if (!all.length) return "This server holds hidden rules this DBTrail cannot read, so its SQL is refused." + where;
   const shown = all.slice(0, 6).join(", ") + (all.length > 6 ? " and " + (all.length - 6) + " more" : "");
   return "This server hides some tables and columns from SQL: " + shown + "." +
-    (h.unreadable ? " Some of its rules cannot be read by this DBTrail, so its SQL is refused." : "") + " Change it in Settings, MySQL clients.";
+    (h.unreadable ? " Some of its rules cannot be read by this DBTrail, so its SQL is refused." : "") + where;
 }
 
 // liveHiddenNote is a note drawn from the rules as last read, redrawn once
@@ -14311,6 +14314,7 @@ function hiddenGrantsBlock(g, hasRules, blocked) {
     return [el("p", { class: "form-hint", text: "No forwarding account: the port does not forward for this server." })];
   }
   if (g === undefined) return [el("p", { class: "form-hint", text: "Your session may not check what the forwarding account can read." })];
+  if (g === "gone") return [el("p", { class: "form-msg err", text: "This server is no longer in the list." })];
   const head = el("p", { class: "cn-grants-head" }, "Forwarding account ", g && g.user ? el("code", { text: String(g.user) }) : "");
   if (g === null) return [head, el("p", { class: "form-msg err", text: "Could not check what the forwarding account can read. Reload the page to try again." })];
   if (g.skipped) return [head, el("p", { class: "form-msg err", text: "Could not check what it can read: " + g.skipped + "." })];
@@ -14337,8 +14341,8 @@ function hiddenGrantsBlock(g, hasRules, blocked) {
   return out;
 }
 
-const HIDDEN_DOES = "Hidden tables and columns disappear from SQL on the copy, the MySQL port and the AI connector, and the port's time travel (_flashback, _snapshot, _diff) is off for this server.";
-const HIDDEN_DOES_NOT = "The data stays in the copy's files and in the index, so time travel in this console (it follows its own access profiles), downloads, and anyone with the files still see it.";
+const HIDDEN_DOES = "Hidden tables and columns disappear from SQL on the copy, the MySQL port and the AI connector's SQL tool, and the port's time travel (_flashback, _snapshot, _diff) is off for this server.";
+const HIDDEN_DOES_NOT = "The data stays in the copy's files and in the index, so time travel in this console and the AI connector's history tools (both follow access profiles) still see full rows, and so do downloads and anyone with the files.";
 
 // hiddenRulesBody draws the section from GET .../hidden (h) and the grants
 // check (g, as hiddenGrantsBlock takes it) into box, with the form when the
@@ -14365,6 +14369,16 @@ function hiddenRulesBody(box, cur, h, g, said) {
       "A newer DBTrail saved rules this version cannot read (" + unreadable.join(", ") + "); this server's SQL is refused until you upgrade." }));
   } else if (refused) {
     box.append(el("p", { class: "form-msg err hidden-unreadable", text: "This server's SQL is refused: " + hiddenCap(refused) }));
+  }
+  // Rules that match nothing in the copy: most likely a typo, which saves
+  // and hides nothing. Not checked (no snapshot here, or only in S3) is
+  // said as such, never as an empty list.
+  const unmatched = Array.isArray(h.unmatched) ? h.unmatched.map(String) : null;
+  if (unmatched && unmatched.length) {
+    box.append(el("p", { class: "form-msg hidden-unmatched" }, "These match no table or column in this server's copy: ",
+      ...unmatched.flatMap((x, i) => [i ? ", " : "", el("code", { text: x })]), "."));
+  } else if (!unmatched && h.unmatched_unchecked && tables.length + columns.length > 0) {
+    box.append(el("p", { class: "form-hint hidden-unchecked", text: hiddenCap(h.unmatched_unchecked) }));
   }
   const names = (label, xs) => el("p", { class: "cn-sql-row" }, label, ...xs.flatMap((x, i) => [i ? ", " : "", el("code", { text: x })]));
   const listed = () => tables.length + columns.length
@@ -14432,12 +14446,12 @@ function hiddenRulesBody(box, cur, h, g, said) {
 }
 
 // hiddenGrantsFetch reads the forwarding account's grants check: undefined
-// when this session may not read it (no settings:read, or the route answers
-// 403 or 404), null when the read failed.
+// when this session may not read it (no settings:read, or a 403), "gone"
+// when the server is no longer in the list (404), null when the read failed.
 function hiddenGrantsFetch(id) {
   if (!sessionMay("settings:read")) return Promise.resolve(undefined);
   return api("/api/servers/" + encodeURIComponent(id) + "/route-grants").then((v) => v,
-    (err) => (err && (err.status === 403 || err.status === 404) ? undefined : null));
+    (err) => (err && err.status === 403 ? undefined : err && err.status === 404 ? "gone" : null));
 }
 
 // hiddenRulesPanel is the "Hidden from SQL" panel of the server picked in the
