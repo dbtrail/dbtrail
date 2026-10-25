@@ -1535,9 +1535,9 @@ function covCard(c, stamp) {
     const age = typeof c.checkpoint_age_seconds === "number" ? " for " + plainDuration(c.checkpoint_age_seconds) : "";
     card.append(el("p", { class: "cov-line bad", text:
       "Capture is STALLED: DBTrail has not checkpointed" + age + ". The window's upper edge is frozen: changes since then are NOT recoverable. Check that the stream is running." }));
-  } else if (asked === "up_to_date") {
+  } else if (covUpToDate(c)) {
     // Said only when the source was asked and holds nothing capture has not
-    // recorded. "captured" because the source may have written to schemas
+    // recorded, or told capture so itself over replication (#2556). "captured" because the source may have written to schemas
     // or tables capture does not read. The time is the newest captured change, in UTC like the
     // rest of the card; past a day it carries its date.
     const since = String(c.delta_to || "");
@@ -1934,8 +1934,6 @@ function captureFallingBehind(cov) {
   const g = cov.lag_growth;
   if (!g || typeof g.grown_seconds !== "number" || typeof g.over_seconds !== "number") return null;
   if (covCaptureState(cov) === "behind") return g;
-  // #2556: the source just told capture it had nothing more to send.
-  if (captureCaughtUp(cov)) return null;
   if (g.indexing === true && (cov.freshness === "current" || cov.freshness === "idle")) return g;
   return null;
 }
@@ -2017,10 +2015,6 @@ function ovFlowModel(inp) {
     if (cont === "gap_lost") {
       capture = piece("binlog", "bad", "changes lost for good", lastIndexed ? "last change " + lastIndexed : "");
       cut = { at: lastIndexed, piece: "capture" };
-    } else if (fresh === "current" && covUpToDate(cov)) {
-      // #2556: the source told capture it had nothing more to send, so the
-      // time since the last change is a quiet moment, not a lag.
-      capture = piece("binlog", "ok", "up to date", lastIndexed ? "last change " + lastIndexed : "");
     } else if (fresh === "current") {
       capture = piece("binlog", "ok", typeof cov.lag_seconds === "number" ? plainDuration(cov.lag_seconds) + " behind" : "reading", "");
     } else if (fresh === "idle") {
@@ -15838,9 +15832,13 @@ function behindSourceLine(t) {
 const CAUGHT_UP_WINDOW_SECONDS = 60;
 
 // captureCaughtUp says the coverage document shows capture caught up with
-// its source within the window (caught_up_ago_seconds, #2556).
+// its source within the window (caught_up_ago_seconds, #2556), and only
+// while capture is idle: the stamp says when capture was LAST caught up, so
+// with recent changes being indexed ("current") a burst or a restart after
+// it could be hiding a backlog, and only a quiet capture keeps it true.
 function captureCaughtUp(cov) {
-  return !!cov && typeof cov.caught_up_ago_seconds === "number" && cov.caught_up_ago_seconds >= 0 && cov.caught_up_ago_seconds <= CAUGHT_UP_WINDOW_SECONDS;
+  return !!cov && cov.freshness === "idle" && typeof cov.caught_up_ago_seconds === "number" &&
+    cov.caught_up_ago_seconds >= 0 && cov.caught_up_ago_seconds <= CAUGHT_UP_WINDOW_SECONDS;
 }
 
 // covUpToDate says capture holds everything its source had: the source said

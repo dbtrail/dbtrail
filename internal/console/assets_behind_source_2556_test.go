@@ -15,6 +15,7 @@ func TestBehindSourceScreens_2556(t *testing.T) {
 		CurrentCaught, CurrentOld, CurrentNoTag struct{ Arrow, Source, Screen string }
 		IdleCaught, IdleCaughtSourceBehind      struct{ Arrow, Source, Screen string }
 		FallingCaught, FallingOld               bool
+		StatusIdleCaught                        string
 	}
 	runCaptureJS(t, `
 vm.runInContext("capsCache = { monitor: true, permissions: {} };", ctx);
@@ -57,6 +58,7 @@ console.log(JSON.stringify({
   idleCaughtSourceBehind: draw({ ...idle, caught_up_ago_seconds: 20, capture: { server_id: "a", state: "behind" } }),
   fallingCaught: !!falling({ ...current, lag_growth: growing, caught_up_ago_seconds: 20 }),
   fallingOld: !!falling({ ...current, lag_growth: growing }),
+  statusIdleCaught: vm.runInContext("covCard", ctx)({ ...idle, caught_up_ago_seconds: 20 }).textContent,
 }));
 `, &got)
 	for k, l := range got.Lines {
@@ -68,6 +70,7 @@ console.log(JSON.stringify({
 	t.Logf("snapshots card: %s", got.SnapshotsCard)
 	t.Logf("strip current caught up: %q / source %q", got.CurrentCaught.Arrow, got.CurrentCaught.Source)
 	t.Logf("strip idle caught up: %q / source %q", got.IdleCaught.Arrow, got.IdleCaught.Source)
+	t.Logf("status card idle caught up: %s", got.StatusIdleCaught)
 
 	if l := got.Lines["zero"]; l == nil || l.State != "known" || l.Text != "The last query read data 0 seconds behind your MySQL." {
 		t.Errorf("zero: %+v", l)
@@ -95,8 +98,10 @@ console.log(JSON.stringify({
 	if !strings.Contains(got.SnapshotsCard, "The last query read data 0 seconds behind your MySQL.") {
 		t.Errorf("snapshots card: %q", got.SnapshotsCard)
 	}
-	if got.CurrentCaught.Arrow != "up to date" {
-		t.Errorf("current, caught up: %+v", got.CurrentCaught)
+	// With recent changes being indexed a stamp could hide a backlog after
+	// it: the strip keeps today's words.
+	if !strings.HasSuffix(got.CurrentCaught.Arrow, "behind") || got.CurrentCaught.Source == "up to date" {
+		t.Errorf("current, caught up: %+v, a stamp must not count while changes are indexed", got.CurrentCaught)
 	}
 	if !strings.HasSuffix(got.CurrentOld.Arrow, "behind") {
 		t.Errorf("current, old stamp: %+v", got.CurrentOld)
@@ -110,7 +115,10 @@ console.log(JSON.stringify({
 	if got.IdleCaughtSourceBehind.Arrow != "behind" || got.IdleCaughtSourceBehind.Source == "up to date" {
 		t.Errorf("idle, stamp but the source says behind: %+v, the source's answer must win", got.IdleCaughtSourceBehind)
 	}
-	if got.FallingCaught || !got.FallingOld {
-		t.Errorf("falling behind: caught up %v (want false), no stamp %v (want true)", got.FallingCaught, got.FallingOld)
+	if !got.FallingCaught || !got.FallingOld {
+		t.Errorf("falling behind: with a stamp %v, without %v; a stamp never hides it", got.FallingCaught, got.FallingOld)
+	}
+	if !strings.Contains(got.StatusIdleCaught, "Up to date.") || strings.Contains(got.StatusIdleCaught, "cannot tell which") {
+		t.Errorf("status card, idle and caught up: %q, must agree with the Overview", got.StatusIdleCaught)
 	}
 }
