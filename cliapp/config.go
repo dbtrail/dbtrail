@@ -216,6 +216,8 @@ var envSections = []envSection{
 		Header: "Iceberg export (bintrail export iceberg)",
 		Bindings: []envTemplateEntry{
 			{"BINTRAIL_ICEBERG_WAREHOUSE", ""},
+			// Run again this long after each run ends (e.g. 1h, at least 1m); empty = once.
+			{"BINTRAIL_ICEBERG_EVERY", ""},
 		},
 	},
 	{

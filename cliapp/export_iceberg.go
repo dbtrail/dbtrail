@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -102,8 +105,8 @@ WHAT IT REFUSES
                   complete for it.
 
 Those refusals are per table. A refused table does not advance and is retried
-on the next run; the other tables commit. The exit status is non-zero when any
-table did not end current.
+on the next run; the other tables commit. Without --every, the exit status is
+non-zero when any table did not end current.
 
 One refusal is for the whole run, before any table is touched: an index that
 holds more than one source in bintrail_servers, or has no such table. Events
@@ -111,8 +114,22 @@ cannot be attributed to one source, so two sources with the same schema.table
 would interleave in one Iceberg table. A file-mode index with no registered
 source is accepted.
 
-This is a one-shot command for the operator's scheduler. It never runs inside
-the capture daemon.
+RUNNING ON A TIMETABLE
+
+Without --every this runs once, for the operator's scheduler (cron, a systemd
+timer). With --every 1h it stays running: it exports, waits one hour from the
+moment that run ENDED, and exports again, until stopped. Runs never overlap,
+and a slow run is not followed by catch-up runs. The flags, the catalog
+settings, the secrets and the baseline's table list are checked once at
+start, and a mistake there exits with an error. A run that fails after that (the index or the catalog not
+answering) is logged with the time of the next attempt and the loop goes on;
+the exit status stays 0. SIGINT or SIGTERM stops it: at once while waiting, or
+after canceling the run in progress, which leaves every table at its last
+complete commit. With --format json each run prints one JSON document on one
+line. On a local warehouse the single-writer lock is held only during a run,
+so a manual run can slip in between two.
+
+Either way it is a separate process and never runs inside the capture daemon.
 
 Examples:
   # First run: load every table of the newest snapshot, then fold the deltas
@@ -122,6 +139,10 @@ Examples:
   # Hourly, from cron: the same command line appends only what changed
   bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
     --warehouse /data/iceberg --tables shop.orders,shop.customers
+
+  # The same, without cron: stay running and export every 15 minutes
+  bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
+    --warehouse /data/iceberg --every 15m
 
   # Register the tables in AWS Glue, data on S3 (Athena reads them by name)
   AWS_REGION=us-west-2 bintrail export iceberg --index-dsn "..." \
@@ -147,6 +168,7 @@ var (
 	eiAt          string
 	eiFetchBatch  int
 	eiFormat      string
+	eiEvery       string
 
 	eiCatalog          string
 	eiCatalogURI       string
@@ -181,6 +203,7 @@ func init() {
 	f.StringVar(&eiAt, "at", "", "Point-in-time to export up to (default: now)")
 	f.IntVar(&eiFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
 	f.StringVar(&eiFormat, "format", "text", "Output format: text or json")
+	f.StringVar(&eiEvery, "every", "", "Run again this long after each run ends, until stopped (e.g. 15m, 1h; at least 1m). Empty = run once")
 	f.StringVar(&eiCatalog, "catalog", "hadoop", "Catalog to register the tables in: hadoop (a local directory), glue (AWS Glue, data on S3) or rest (an Iceberg REST catalog)")
 	f.StringVar(&eiCatalogURI, "catalog-uri", "", "REST catalog base URL (--catalog rest)")
 	f.StringVar(&eiCatalogWarehouse, "catalog-warehouse", "", "REST catalog warehouse identifier: a catalog name, an AWS account id, an S3 Tables bucket ARN (--catalog rest)")
@@ -196,80 +219,177 @@ func init() {
 	rootCmd.AddCommand(exportCmd)
 }
 
+// exportEveryFloor is the shortest --every accepted. Below it the loop would
+// spend most of its time starting runs (listing the baseline, opening the
+// catalog, connecting to the index) for a few seconds of new changes.
+const exportEveryFloor = time.Minute
+
+// Swapped by tests: the export itself, the wait between runs and the clock.
+var (
+	exportRunFn   = icebergexport.Run
+	exportSleepFn = sleepCtx
+	exportNowFn   = time.Now
+)
+
+// parseExportEvery reads --every. Empty means no loop (the one-shot). It is a
+// string flag rather than a duration on purpose: the env binding only warns
+// when a flag refuses a value, so a garbage BINTRAIL_ICEBERG_EVERY on a
+// duration flag would quietly become a one-shot, which under a restart
+// policy runs back to back with no interval at all.
+func parseExportEvery(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("--every %q is not a duration (use a unit: 15m, 1h, 1h30m)", raw)
+	}
+	if d < exportEveryFloor {
+		return 0, fmt.Errorf("--every must be at least %s (got %s)", exportEveryFloor, raw)
+	}
+	return d, nil
+}
+
+// exportJob is a validated export, ready to run once or on a loop.
+type exportJob struct {
+	cfg      icebergexport.Config // everything but At and Tables
+	source   string
+	fixedAt  *time.Time
+	tables   []string // resolved at start
+	listEach bool     // re-list the newest snapshot's tables before each loop run
+	target   string
+	compact  bool // one JSON document per line (the loop)
+}
+
 func runExportIceberg(cmd *cobra.Command, _ []string) error {
-	if eiIndexDSN == "" {
-		return fmt.Errorf("--index-dsn is required")
-	}
-	if eiBaselineDir == "" && eiBaselineS3 == "" {
-		return fmt.Errorf("one of --baseline-dir or --baseline-s3 is required")
-	}
-	if eiBaselineDir != "" && eiBaselineS3 != "" {
-		return fmt.Errorf("--baseline-dir and --baseline-s3 are mutually exclusive")
-	}
-	catCfg, err := exportCatalogConfig()
+	job, every, err := prepareExport(cmd)
 	if err != nil {
 		return err
 	}
+	if every == 0 {
+		return job.runOnce(cmd.Context(), cmd.OutOrStdout(), job.tables)
+	}
+	job.compact = true
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
+	log.Info("iceberg export: running on a loop; each run starts this long after the previous one ended", "every", every.String())
+	first := true
+	return exportLoop(ctx, every, func(ctx context.Context) error {
+		tables := job.tables
+		if job.listEach && !first {
+			// A newer snapshot may carry new tables, as it would for a
+			// scheduler starting the command afresh.
+			var err error
+			if tables, err = reconstruct.NewestSnapshotTables(ctx, job.source); err != nil {
+				return fmt.Errorf("list the newest snapshot's tables: %w", err)
+			}
+		}
+		first = false
+		return job.runOnce(ctx, cmd.OutOrStdout(), tables)
+	}, exportSleepFn, exportNowFn, log)
+}
+
+// prepareExport checks everything that can be checked without the index or
+// the catalog: the flags, the catalog settings and secrets, and that there are
+// tables to export. With --every these are the mistakes that must stop the
+// process at start instead of failing every run forever.
+func prepareExport(cmd *cobra.Command) (*exportJob, time.Duration, error) {
+	if eiIndexDSN == "" {
+		return nil, 0, fmt.Errorf("--index-dsn is required")
+	}
+	if eiBaselineDir == "" && eiBaselineS3 == "" {
+		return nil, 0, fmt.Errorf("one of --baseline-dir or --baseline-s3 is required")
+	}
+	if eiBaselineDir != "" && eiBaselineS3 != "" {
+		return nil, 0, fmt.Errorf("--baseline-dir and --baseline-s3 are mutually exclusive")
+	}
+	every, err := parseExportEvery(eiEvery)
+	if err != nil {
+		return nil, 0, err
+	}
+	catCfg, err := exportCatalogConfig()
+	if err != nil {
+		return nil, 0, err
+	}
 	if catCfg.Kind == icebergexport.CatalogHadoop {
 		if strings.TrimSpace(eiWarehouse) == "" {
-			return fmt.Errorf("--warehouse is required")
+			return nil, 0, fmt.Errorf("--warehouse is required")
 		}
 		if err := icebergexport.CheckWarehouse(eiWarehouse); err != nil {
-			return fmt.Errorf("--warehouse: %w", err)
+			return nil, 0, fmt.Errorf("--warehouse: %w", err)
 		}
 	}
 	location, err := icebergexport.CheckCatalog(catCfg, eiWarehouse)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	if !cliutil.IsValidOutputFormat(eiFormat) {
-		return fmt.Errorf("--format must be text or json")
+		return nil, 0, fmt.Errorf("--format must be text or json")
 	}
 	if eiFetchBatch < 0 {
-		return fmt.Errorf("--fetch-batch-size must be >= 0 (0 = default)")
+		return nil, 0, fmt.Errorf("--fetch-batch-size must be >= 0 (0 = default)")
 	}
 	source := eiBaselineDir
 	if source == "" {
 		source = eiBaselineS3
 	}
 
-	at := time.Now().UTC()
+	job := &exportJob{source: source, target: exportTarget(catCfg, location), listEach: eiTables == ""}
 	if eiAt != "" {
+		if every > 0 {
+			return nil, 0, fmt.Errorf("--at cannot be used with --every: every run would export up to the same moment")
+		}
 		parsed, err := cliutil.ParseTime(eiAt)
 		if err != nil {
-			return fmt.Errorf("--at: %w", err)
+			return nil, 0, fmt.Errorf("--at: %w", err)
 		}
-		if parsed != nil {
-			at = *parsed
-		}
+		job.fixedAt = parsed
 	}
 
-	tables, err := resolveExportTables(cmd, source)
+	tables, err := resolveExportTables(cmd.Context(), source)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	if len(tables) == 0 {
-		return fmt.Errorf("no tables to export: no baseline snapshot was discovered under %s "+
+		return nil, 0, fmt.Errorf("no tables to export: no baseline snapshot was discovered under %s "+
 			"(take one with `bintrail dump` + `bintrail baseline` first)", source)
 	}
+	job.tables = tables
 
 	tuning, err := cli.DuckDBTuningFromFlags(cmd)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-
-	outcomes, err := icebergexport.Run(cmd.Context(), icebergexport.Config{
+	job.cfg = icebergexport.Config{
 		IndexDSN:       eiIndexDSN,
 		BaselineSrc:    source,
 		Warehouse:      eiWarehouse,
-		Tables:         tables,
-		At:             at,
 		Catalog:        catCfg,
 		FetchBatchSize: eiFetchBatch,
 		ArchiveFetcher: cli.TunedArchiveFetcher(tuning),
 		DuckDBTuning:   tuning,
-		OnCommit:       func(c icebergexport.Commit) { auditIcebergCommit(cmd.Context(), c) },
-	})
+	}
+	return job, every, nil
+}
+
+// runOnce is one export run and its report: the whole command without
+// --every, one turn of the loop with it. Its error is the run's failure: a
+// run-level error, or tables that did not end current.
+func (j *exportJob) runOnce(ctx context.Context, w io.Writer, tables []string) error {
+	at := exportNowFn().UTC()
+	if j.fixedAt != nil {
+		at = *j.fixedAt
+	}
+	if len(tables) == 0 {
+		return fmt.Errorf("no tables to export: no baseline snapshot was discovered under %s", j.source)
+	}
+	cfg := j.cfg
+	cfg.At = at
+	cfg.Tables = tables
+	cfg.OnCommit = func(c icebergexport.Commit) { auditIcebergCommit(ctx, c) }
+	outcomes, err := exportRunFn(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -280,11 +400,10 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 			failed++
 		}
 	}
-	target := exportTarget(catCfg, location)
 	if eiFormat == "json" {
-		err = writeExportJSON(cmd.OutOrStdout(), outcomes, string(catCfg.Kind), eiWarehouse, at)
+		err = writeExportJSON(w, outcomes, string(cfg.Catalog.Kind), cfg.Warehouse, at, j.compact)
 	} else {
-		err = writeExportSummary(cmd.OutOrStdout(), outcomes, target, at)
+		err = writeExportSummary(w, outcomes, j.target, at)
 	}
 	if err != nil {
 		return fmt.Errorf("write the export report: %w", err)
@@ -293,6 +412,47 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("iceberg export: %d of %d table(s) did not end current", failed, len(outcomes))
 	}
 	return nil
+}
+
+// exportLoop runs run, waits every, and runs again until ctx is canceled.
+// The wait starts when a run ENDS, so runs never overlap and a slow run is
+// not followed by a burst of catch-up runs. A failed run is logged with the
+// time of the next attempt and does not end the loop: the next run retries
+// from the tables' own committed cursors. A cancel (SIGINT, SIGTERM) ends it
+// with success, at once during the wait, and once the run in progress has
+// returned when it lands during a run; that run's tables keep their last
+// complete commit.
+func exportLoop(ctx context.Context, every time.Duration, run func(context.Context) error,
+	sleep func(context.Context, time.Duration) error, now func() time.Time, log *slog.Logger) error {
+	for {
+		err := run(ctx)
+		if ctx.Err() != nil {
+			log.Info("iceberg export: stopped by a signal; the run in progress was canceled, and every table keeps its last complete commit")
+			return nil
+		}
+		next := now().Add(every).UTC().Format(time.RFC3339)
+		if err != nil {
+			log.Warn("iceberg export: run failed; next attempt at "+next, "err", err.Error())
+		} else {
+			log.Info("iceberg export: run finished; next run at " + next)
+		}
+		if err := sleep(ctx, every); err != nil || ctx.Err() != nil {
+			log.Info("iceberg export: stopped by a signal while waiting for the next run")
+			return nil
+		}
+	}
+}
+
+// sleepCtx waits d, or less if ctx is canceled first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // exportCatalogConfig builds the catalog settings from the flags. The REST
@@ -381,7 +541,7 @@ func exportTarget(c icebergexport.CatalogConfig, warehouse string) string {
 // resolveExportTables returns --tables when given, otherwise every table in
 // the newest discoverable baseline snapshot: the set the first run can seed,
 // which keeps later runs a strict continuation of it.
-func resolveExportTables(cmd *cobra.Command, source string) ([]string, error) {
+func resolveExportTables(ctx context.Context, source string) ([]string, error) {
 	if eiTables != "" {
 		var out []string
 		for _, entry := range strings.Split(eiTables, ",") {
@@ -399,7 +559,7 @@ func resolveExportTables(cmd *cobra.Command, source string) ([]string, error) {
 		}
 		return out, nil
 	}
-	return reconstruct.NewestSnapshotTables(cmd.Context(), source)
+	return reconstruct.NewestSnapshotTables(ctx, source)
 }
 
 // auditIcebergCommit records one audit event per commit, called by the
@@ -478,7 +638,10 @@ type exportTableJSON struct {
 	Location   string `json:"location,omitempty"`
 }
 
-func writeExportJSON(w io.Writer, outcomes []icebergexport.Outcome, catalogKind, warehouse string, at time.Time) error {
+// writeExportJSON writes one run's report: indented for a one-shot, on a
+// single line when compact (the --every loop), so a stream of runs reads as
+// one JSON document per line.
+func writeExportJSON(w io.Writer, outcomes []icebergexport.Outcome, catalogKind, warehouse string, at time.Time, compact bool) error {
 	out := exportJSON{Catalog: catalogKind, Warehouse: warehouse, At: at.UTC().Format(time.RFC3339)}
 	for _, o := range outcomes {
 		out.Tables = append(out.Tables, exportTableJSON{
@@ -488,6 +651,8 @@ func writeExportJSON(w io.Writer, outcomes []icebergexport.Outcome, catalogKind,
 		})
 	}
 	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
+	if !compact {
+		enc.SetIndent("", "  ")
+	}
 	return enc.Encode(out)
 }

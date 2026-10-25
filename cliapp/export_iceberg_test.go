@@ -15,12 +15,12 @@ import (
 
 func resetExportGlobals(t *testing.T) {
 	t.Helper()
-	sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat := eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat
+	sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat, sEvery := eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery
 	t.Cleanup(func() {
-		eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat = sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat
+		eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery = sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat, sEvery
 		exportIcebergCmd.SetOut(nil)
 	})
-	eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat = "", "", "", "", "", "", 0, "text"
+	eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery = "", "", "", "", "", "", 0, "text", ""
 }
 
 // TestRunExportIceberg_flagValidation: each refusal fires before anything
@@ -75,7 +75,7 @@ func TestWriteExportJSON_shape(t *testing.T) {
 		{Schema: "shop", Table: "orders", Verdict: icebergexport.VerdictExported, Detail: "3 events", Events: 3, Upserts: 2, Deletes: 1, SnapshotID: i64(42), Cursor: "binlog.000001:700 at 2026-08-28T12:00:00Z", Location: "/w/shop/orders"},
 		{Schema: "shop", Table: "customers", Verdict: icebergexport.VerdictRefusedGap, Detail: "gap"},
 		{Schema: "shop", Table: "empty", Verdict: icebergexport.VerdictLoaded, Detail: "0 rows", Cursor: "binlog.000001:100 at 2026-08-28T11:00:00Z", Location: "/w/shop/empty"},
-	}, "hadoop", "/w", at)
+	}, "hadoop", "/w", at, false)
 	if err != nil {
 		t.Fatal(err)
 	}

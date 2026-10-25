@@ -47,7 +47,63 @@ the tables by name.
 ## Running it on a timetable
 
 The public guide sends the reader here for this, because the website carries no
-`bintrail` commands. Hourly from cron:
+`bintrail` commands. There are three ways to run the export on a timetable:
+with `--every`, as a compose service, or from cron. Each run adds only what
+changed since the one before, whichever way it is started.
+
+### With `--every`, no cron needed
+
+Add `--every` and the command stays running. It exports, waits, and exports
+again, until you stop it:
+
+```
+bintrail export iceberg --index-dsn "..." --baseline-dir /data/backups --warehouse /data/iceberg --every 1h
+```
+
+- **The wait starts when a run ends.** With `--every 1h`, a run that took ten
+  minutes is followed by an hour of waiting, not fifty minutes. Runs never
+  overlap, and a slow run is never followed by a burst of runs to catch up.
+  The shortest interval is `1m`. The value needs a unit: `15m`, `1h`, `1h30m`.
+  You can also set it with `BINTRAIL_ICEBERG_EVERY`.
+- **Mistakes in the settings stop it at start.** A bad interval, catalog
+  setting or secret ends the command with an error before the first run, so
+  you see it right away. So does a backup folder with no snapshot in it, when
+  `--tables` does not name the tables.
+  `--at` cannot be combined with `--every`: every run would stop at the same
+  moment.
+- **A failed run does not stop it.** If the index or the catalog does not
+  answer, or a table is refused, the run prints one line with the error and the
+  time of the next attempt, and the next run tries again from where each table
+  last committed. The exit status stays 0.
+- **Each run prints its own report.** In text, the usual summary, headed with
+  the run's time. With `--format json`, one JSON document per run, on one line,
+  so a log reader can take them line by line. Log lines go to stderr, the
+  reports to stdout.
+- **Stopping it is safe.** Ctrl-C or `SIGTERM` stops the wait at once. If a run
+  is in progress it is canceled first, and every table keeps its last complete
+  commit. The command then exits with status 0.
+- **A new table in a newer snapshot is picked up** on the next run, the same as
+  a scheduler starting the command again would, unless you named the tables
+  with `--tables`.
+
+### With docker compose
+
+The stack's compose file has the same loop as a service that stays up:
+
+```
+docker compose --profile iceberg-export-loop up -d iceberg-export-loop
+```
+
+It exports every `ICEBERG_EVERY` (default `1h`; set it in `.env`), restarts
+with Docker (`restart: unless-stopped`), and takes the same settings as the
+one-shot `iceberg-export` service, catalog included (see
+[docker.md](docker.md)). `docker compose logs iceberg-export-loop` shows each
+run. `docker compose stop iceberg-export-loop` stops it the safe way described
+above.
+
+### From cron
+
+Hourly from cron:
 
 ```
 17 * * * * bintrail export iceberg --index-dsn "..." --baseline-dir /data/backups --warehouse /data/iceberg
@@ -89,8 +145,10 @@ The export is deliberately not a button and never runs inside the capture
 daemon: it writes a whole new copy of your data, and keeping it out of that
 process is what stops a long run slowing capture down.
 
-Two runs cannot overlap on one warehouse; the second refuses while the first
-holds it. A run that dies half way leaves the previous snapshot readable, and
+Two runs cannot overlap on one local warehouse; the second refuses while the
+first holds it. With `--every`, the loop holds the warehouse only while a run
+is in progress, so a run you start by hand between two of its runs goes
+through. A run that dies half way leaves the previous snapshot readable, and
 the next one resumes from the last complete commit.
 
 ## Writing to AWS Glue or a REST catalog
@@ -448,5 +506,6 @@ cursor commits nothing and records nothing. Both report `unchanged`.
 | `--tables` | comma-separated `schema.table` list (default: every table in the newest snapshot) |
 | `--at` | export up to this instant (default: now); must be after the table's cursor and not below the live window |
 | `--fetch-batch-size` | event page size for the fold (0 = default) |
-| `--format` | `text` or `json` |
+| `--format` | `text` or `json` (with `--every`, one JSON document per run, one per line) |
+| `--every` | stay running and export again this long after each run ends (at least `1m`; empty = run once); env `BINTRAIL_ICEBERG_EVERY` |
 | `--ultrafast`, `--duckdb-threads`, `--duckdb-memory-limit` | the DuckDB budget for the baseline scan and the archive reads |
