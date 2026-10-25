@@ -58,6 +58,13 @@ type coverageResponse struct {
 	// same gap at one second per second, so the page shows it only beside a
 	// capture that is reading ("current") or that the source says is behind.
 	LagGrowth *lagGrowthDTO `json:"lag_growth,omitempty"`
+	// CaughtUpAgoSeconds is how long ago capture last had every change its
+	// source had sent (#2556, stream_state.caught_up_at, from replication
+	// heartbeats; nothing is written to the source), on the index's clock,
+	// rounded up. Omitted when there is no stamp or it could not be read. It
+	// is what tells a quiet source (stamped about every 30 to 40 seconds)
+	// from capture fallen behind, which lag_seconds cannot.
+	CaughtUpAgoSeconds *int64 `json:"caught_up_ago_seconds,omitempty"`
 }
 
 // serverID labels log lines with the request's selected server — a
@@ -101,5 +108,12 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 		resp.DeltaTo = sum.DeltaTo.Format(consoleTSFormat)
 	}
 	resp.LagGrowth = s.lagTrend.observe(serverID(r), now, sum.DeltaTo)
+	if ago, ok, err := caughtUpAgo(r.Context(), b.db); err != nil {
+		// Left out: the page then says what it said before the stamp
+		// existed, which never claims "up to date".
+		slog.Debug("console: when capture was last caught up could not be read", "server", serverID(r), "error", err)
+	} else if ok {
+		resp.CaughtUpAgoSeconds = caughtUpAgoSeconds(ago)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
