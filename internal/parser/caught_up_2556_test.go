@@ -3,6 +3,7 @@ package parser
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/replication"
 )
@@ -38,19 +39,58 @@ func makeOtherAt(pos uint32) *replication.BinlogEvent {
 	}
 }
 
-func caughtUpMarkers(t *testing.T, evs ...*replication.BinlogEvent) int {
+// testHeartbeatPeriod is the period these tests tell the parser; a heartbeat
+// counts only when the parser waited at least half of it before reading it.
+const testHeartbeatPeriod = 40 * time.Millisecond
+
+// feedLikeAQuietSource adds evs to the streamer from a goroutine and pauses a
+// full heartbeat period before each heartbeat, as a source with nothing to
+// send does, so the parser blocks in GetEvent before reading it. queued
+// skips the pauses: every event, heartbeats included, is already waiting,
+// as behind a backlog. Cancels when done.
+func feedLikeAQuietSource(t *testing.T, streamer *replication.BinlogStreamer, cancel context.CancelFunc, queued bool, evs ...*replication.BinlogEvent) {
 	t.Helper()
-	sp := NewStreamParser(nil, Filters{}, nil)
+	if queued {
+		feedThenCancel(t, streamer, cancel, evs...)
+		return
+	}
+	go func() {
+		defer cancel()
+		for _, ev := range evs {
+			if _, ok := ev.Event.(*replication.HeartbeatEvent); ok {
+				time.Sleep(testHeartbeatPeriod)
+			}
+			if err := streamer.AddEventToStreamer(ev); err != nil {
+				t.Errorf("AddEventToStreamer: %v", err)
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}()
+}
+
+func runCaughtUp(t *testing.T, sp *StreamParser, queued bool, evs ...*replication.BinlogEvent) []Event {
+	t.Helper()
+	sp.SetHeartbeatPeriod(testHeartbeatPeriod)
 	streamer := replication.NewBinlogStreamer()
 	out := make(chan Event, 64)
 	ctx, cancel := context.WithCancel(context.Background())
-	feedThenCancel(t, streamer, cancel, evs...)
+	feedLikeAQuietSource(t, streamer, cancel, queued, evs...)
 	if err := sp.Run(ctx, streamer, out); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	close(out)
+	return drainAll(out)
+}
+
+func caughtUpMarkers(t *testing.T, evs ...*replication.BinlogEvent) int {
+	t.Helper()
+	return countMarkers(t, runCaughtUp(t, NewStreamParser(nil, Filters{}, nil), false, evs...))
+}
+
+func countMarkers(t *testing.T, evs []Event) int {
+	t.Helper()
 	n := 0
-	for ev := range out {
+	for _, ev := range evs {
 		if ev.EventType == EventCaughtUp {
 			if ev.BinlogFile != "" || ev.EndPos != 0 || !ev.Timestamp.IsZero() {
 				t.Errorf("a caught-up marker carries a position or a time (%q %d %v): the checkpoint must never move on it", ev.BinlogFile, ev.EndPos, ev.Timestamp)
@@ -59,6 +99,29 @@ func caughtUpMarkers(t *testing.T, evs ...*replication.BinlogEvent) int {
 		}
 	}
 	return n
+}
+
+// A heartbeat already queued when the parser asks for it waited behind a
+// backlog: changes the source made after sending it may sit behind it. Not
+// caught up, even at the received position, even as a pair. And with no
+// period known, never.
+func TestCaughtUp_aQueuedHeartbeatDoesNotCount_2556(t *testing.T) {
+	evs := []*replication.BinlogEvent{makeRotate("binlog.000003"), makeOtherAt(500),
+		makeHeartbeat("binlog.000003", 500, false), makeHeartbeat("binlog.000003", 500, false)}
+	if n := countMarkers(t, runCaughtUp(t, NewStreamParser(nil, Filters{}, nil), true, evs...)); n != 0 {
+		t.Fatalf("queued heartbeats: %d markers, want 0", n)
+	}
+	sp := NewStreamParser(nil, Filters{}, nil)
+	streamer := replication.NewBinlogStreamer()
+	out := make(chan Event, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	feedLikeAQuietSource(t, streamer, cancel, false, evs...)
+	if err := sp.Run(ctx, streamer, out); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := countMarkers(t, drainAll(out)); n != 0 {
+		t.Fatalf("no heartbeat period set: %d markers, want 0", n)
+	}
 }
 
 func TestCaughtUp_heartbeatAtTheReceivedPosition_2556(t *testing.T) {
@@ -128,25 +191,12 @@ func TestCaughtUp_nothingReceivedYet_2556(t *testing.T) {
 // reconnect, the stream is mid-way through it: never caught up, even on a
 // pair of idle heartbeats.
 func TestCaughtUp_notWhileSkippingAResentTransaction_2556(t *testing.T) {
-	sp := NewStreamParser(makeOrdersResolver(), Filters{}, nil)
-	streamer := replication.NewBinlogStreamer()
-	out := make(chan Event, 64)
-	ctx, cancel := context.WithCancel(context.Background())
-	feedThenCancel(t, streamer, cancel,
+	n := countMarkers(t, runCaughtUp(t, NewStreamParser(makeOrdersResolver(), Filters{}, nil), false,
 		artificialRotate("binlog.000001", 4),
 		makeGTIDEvent(1), makeQueryEvent("BEGIN"), makeOrdersInsertEvent(1, 10), makeXIDEvent(300),
 		artificialRotate("binlog.000001", 4),
 		makeGTIDEvent(1), makeQueryEvent("BEGIN"),
-		makeHeartbeat("binlog.000001", 900, false), makeHeartbeat("binlog.000001", 900, false))
-	if err := sp.Run(ctx, streamer, out); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	n := 0
-	for _, ev := range drainAll(out) {
-		if ev.EventType == EventCaughtUp {
-			n++
-		}
-	}
+		makeHeartbeat("binlog.000001", 900, false), makeHeartbeat("binlog.000001", 900, false)))
 	if n != 0 {
 		t.Fatalf("idle heartbeats inside a re-sent transaction: %d markers, want 0", n)
 	}

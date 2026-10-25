@@ -48,6 +48,19 @@ type StreamParser struct {
 	// onFileOpened, when set, is told the identity of every binlog file the
 	// stream opens (see SetFileOpenedHook). Set before Run starts.
 	onFileOpened func(file, identity string)
+	// heartbeatPeriod is the replication heartbeat period the stream asked
+	// the source for (see SetHeartbeatPeriod); zero = unknown, and no
+	// EventCaughtUp is ever emitted.
+	heartbeatPeriod time.Duration
+}
+
+// SetHeartbeatPeriod tells Run the heartbeat period the replication client
+// asked the source for, which onHeartbeat needs to tell a heartbeat that
+// came straight off the wire from one that waited in a queue (#2556). Zero,
+// the default, turns EventCaughtUp off. Set before Run starts (the
+// SetFlavor contract).
+func (sp *StreamParser) SetHeartbeatPeriod(d time.Duration) {
+	sp.heartbeatPeriod = d
 }
 
 // NewStreamParser creates a StreamParser that resolves column names via
@@ -256,6 +269,9 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	var hbFile string
 	var hbPos uint64
 	var hbIdle bool
+	// waited is how long the last GetEvent blocked before it returned: the
+	// time this parser sat with nothing to read.
+	var waited time.Duration
 	// txnRows counts the row events emitted for the transaction in flight.
 	var txnRows int
 
@@ -400,6 +416,15 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	//     this stream never received an event at. While it skips, its
 	//     heartbeats move, so the pair never forms.
 	//
+	// Only a heartbeat that came straight off the wire counts: GetEvent must
+	// have blocked for at least half the heartbeat period before returning
+	// it. The client queues up to thousands of events ahead of this parser;
+	// a heartbeat that waited behind a backlog was sent long before it is
+	// read, and changes the source made in between sit behind it, unread,
+	// while its read time would claim them. A source sends a heartbeat only
+	// after a full period with nothing to send, so a parser keeping up waits
+	// about that long; one draining a queue gets it at once.
+	//
 	// It is compared with the position as it stood BEFORE this heartbeat:
 	// heartbeats never move lastLogPos, so the wraparound guard and this
 	// check only ever see positions of events. Not during a re-sent
@@ -414,7 +439,8 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			pos = hb.Offset
 		}
 		caught := false
-		if hb.Filename != "" && !skipTxn {
+		offWire := sp.heartbeatPeriod > 0 && waited >= sp.heartbeatPeriod/2
+		if hb.Filename != "" && !skipTxn && offWire {
 			atReceived := hb.Filename == currentFile && lastLogPos != 0 && pos == uint64(lastLogPos)
 			idlePair := hbIdle && hb.Filename == hbFile && pos == hbPos
 			caught = atReceived || idlePair
@@ -735,6 +761,7 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	}
 
 	for {
+		asked := time.Now()
 		binlogEv, err := streamer.GetEvent(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -749,6 +776,7 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 		// buffered and a receive-side stamp would swallow the queue wait, which
 		// is the largest part of the lag precisely when the indexer is behind.
 		em = emitter{ch: out, readAt: time.Now(), rows: &txnRows}
+		waited = em.readAt.Sub(asked)
 
 		if err := handleEvent(binlogEv); err != nil {
 			if ctx.Err() != nil {

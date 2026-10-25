@@ -255,6 +255,12 @@ func checkpointInsertArgs(state *streamState) ([]any, error) {
 		state.eventsIndexed, lastEventTime, state.serverID, bintrailIDArg, srcIdentity}, nil
 }
 
+// sourceHeartbeatPeriod is the replication heartbeat period capture asks the
+// source for, on its own connection: the source sends a heartbeat after this
+// long with nothing to send. The StreamParser turns one into EventCaughtUp
+// (#2556) and must know the same period.
+const sourceHeartbeatPeriod = 30 * time.Second
+
 // saveCheckpoint persists the current stream state to the stream_state table.
 //
 // capture_skips (#1034) rides every checkpoint — it is the only writer of that
@@ -287,7 +293,10 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 	// so the column shares last_checkpoint's clock. A NULL interval makes the
 	// value NULL, which the update arm's COALESCE turns into "keep the last
 	// one": the column says when capture was LAST caught up, and the reader
-	// compares it with now. clearCaughtUp overrides both with NULL.
+	// compares it with now. clearCaughtUp overrides both with NULL. The
+	// interval is measured before the statement travels, so the stamp is
+	// later than the read by about one round trip to the index: milliseconds,
+	// the same order as the hop the heartbeat itself took.
 	var caughtUpAgo any
 	if !state.caughtUpReadAt.IsZero() {
 		caughtUpAgo = max(time.Since(state.caughtUpReadAt).Microseconds(), 0)
@@ -2697,7 +2706,7 @@ func oneRun(ctx context.Context, cfg Config) error {
 		Port:                    port,
 		User:                    user,
 		Password:                password,
-		HeartbeatPeriod:         30 * time.Second,
+		HeartbeatPeriod:         sourceHeartbeatPeriod,
 		MaxReconnectAttempts:    0, // infinite retry
 		TLSConfig:               tlsCfg,
 		TimestampStringLocation: time.UTC, // see internal/parser/parser.go (#757)
@@ -3250,6 +3259,9 @@ func oneRun(ctx context.Context, cfg Config) error {
 
 	// ── 10. StreamParser + its synchronous DDL hook ──────────────────────────
 	sp := parser.NewStreamParser(resolver, filters, nil)
+	// The period the syncer asked the source for (#2556): the parser needs it
+	// to tell a heartbeat off the wire from one that waited in a queue.
+	sp.SetHeartbeatPeriod(sourceHeartbeatPeriod)
 	// Wire the shared capture-skip tally (#1034) before Run's goroutine spawns
 	// (the SetFlavor happens-before contract).
 	sp.SetSkipCounters(state.skips)

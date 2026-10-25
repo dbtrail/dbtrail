@@ -84,6 +84,7 @@ func (r caughtUpRun) run(t *testing.T) {
 		t.Fatalf("NewResolver: %v", err)
 	}
 	sp := parser.NewStreamParser(resolver, parser.Filters{Schemas: map[string]bool{r.sourceName: true}}, nil)
+	sp.SetHeartbeatPeriod(time.Second)
 	if r.flavor == gomysql.MariaDBFlavor {
 		sp.SetFlavor("mariadb")
 	}
