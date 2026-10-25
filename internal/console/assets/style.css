@@ -3723,3 +3723,15 @@ button.st-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .cj-tip::after { content: ""; position: absolute; left: 50%; top: 100%; margin-left: -6px; border: 6px solid transparent; border-top-color: var(--ink); }
 .cj-key.has-tip:hover .cj-tip, .cj-key.has-tip:focus-visible .cj-tip { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
 @media (prefers-reduced-motion: reduce) { .cj-tip { transition: none; } }
+
+/* Hidden from SQL (#2529): the per-server rules on Settings, MySQL clients,
+   and the notes beside SQL on the copy and the downloads. */
+.cn-hidden .field { display: block; margin: 0 0 12px; }
+.cn-hidden .field-label { display: block; margin-bottom: 4px; }
+.hidden-ta { width: 100%; box-sizing: border-box; min-height: 84px; font-family: var(--f-mono); font-size: 13px; resize: vertical; }
+.cn-hidden .field .form-hint { display: block; margin-top: 4px; }
+.hidden-exposed, .hidden-unsure { margin: 0 0 10px; padding-left: 18px; }
+.hidden-exposed li, .hidden-unsure li { margin: 0 0 4px; word-break: break-word; }
+.hidden-exposed code { font-size: 12px; color: var(--error); }
+.sqlp-hidden { margin: 0 0 10px; color: var(--ink-2); font-size: var(--fs-xs); }
+.hidden-dl-note { color: var(--ink-2); }

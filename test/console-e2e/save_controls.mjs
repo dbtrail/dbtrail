@@ -44,6 +44,8 @@ export const WRITES = [
   { method: "PUT", path: "/api/servers/{id}", count: 1, kind: "scene", id: "server-form" },
   { method: "DELETE", path: "/api/servers/{id}", count: 1, kind: "scene", id: "server-delete" },
   { method: "PUT", path: "/api/servers/{id}/backup-schedule", count: 1, kind: "scene", id: "schedule" },
+  // Hidden from SQL, per server, on Settings, MySQL clients (#2529).
+  { method: "PUT", path: "/api/servers/{id}/hidden", count: 1, kind: "scene", id: "hidden" },
   { method: "DELETE", path: "/api/servers/{id}/backup-schedule", count: 1, kind: "scene", id: "schedule" },
   { method: "POST", path: "/api/telemetry", count: 1, kind: "scene", id: "telemetry" },
   { method: "POST", path: "/api/mcp-token", count: 1, kind: "scene", id: "mcp-token" },
@@ -662,6 +664,62 @@ export async function runSaveScenes(ctx) {
     });
 
     // ── deleting the server ─────────────────────────────────────────────
+    // Hidden from SQL (#2529): a refused entry stores nothing and is shown
+    // in the server's words; a good save reads back in the server's spelling,
+    // a fresh tab shows it, and emptying both lists removes the rules.
+    await scene("hidden", async () => {
+      if (!srvId) throw new Error("no server from the server-form scene");
+      const PATH = "/api/servers/" + encodeURIComponent(srvId) + "/hidden";
+      const open = async (p) => {
+        await p.evaluate(async (id) => { await switchServer(id); navigate("mysql-clients"); }, srvId);
+        await p.waitForSelector('.cn-hidden textarea[name="tables"]', { timeout: 15000 });
+      };
+      const saveWith = async (tables, columns) => {
+        await page.fill('.cn-hidden textarea[name="tables"]', tables);
+        await page.fill('.cn-hidden textarea[name="columns"]', columns);
+        await page.click(".cn-hidden .bk-restore-row button");
+      };
+      const said = () => page.evaluate(() => {
+        const m = document.querySelector('.cn-hidden p.form-msg[role="status"]');
+        return m && !m.hidden ? m.className + "|" + m.textContent : "";
+      });
+      await open(page);
+      await saveWith("shop.audit_log\nnot a table", "");
+      const refused = await until(async () => { const t = await said(); return t.includes("err") ? t : ""; });
+      let got = await readAs(page, PATH);
+      check("hidden", "a bad entry is refused in the server's words and stores nothing",
+        /not a table/.test(refused) && got.status === 200 && got.body.tables.length === 0 && got.body.columns.length === 0,
+        JSON.stringify({ refused, got }));
+
+      await saveWith("  SHOP.audit_log  \n\n", "shop.customers.email\n");
+      got = await until(async () => {
+        const r = await readAs(page, PATH);
+        return r.body && r.body.tables.length === 1 ? r : null;
+      });
+      check("hidden", "Save stores the rules, trimmed, blank lines dropped",
+        !!got && got.body.columns.length === 1 && /audit_log/i.test(got.body.tables[0]) && got.body.columns[0] === "shop.customers.email",
+        JSON.stringify(got && got.body));
+      const listed = await readAs(page, "/api/servers");
+      const own = ((listed.body && listed.body.servers) || []).find((s) => s.id === srvId);
+      check("hidden", "the server list carries the rules", !!(own && own.hidden && own.hidden.tables.length === 1), JSON.stringify(own && own.hidden));
+
+      const tab = await freshTab(srvId);
+      try {
+        await tab.evaluate(() => navigate("mysql-clients"));
+        await tab.waitForSelector('.cn-hidden textarea[name="tables"]', { timeout: 15000 });
+        const shown = await until(() => tab.evaluate(() => document.querySelector('.cn-hidden textarea[name="columns"]').value));
+        check("hidden", "a fresh tab shows the saved rules", shown === "shop.customers.email", JSON.stringify(shown));
+      } finally { await tab.close(); }
+
+      await open(page);
+      await saveWith("", "");
+      got = await until(async () => {
+        const r = await readAs(page, PATH);
+        return r.body && r.body.tables.length === 0 && r.body.columns.length === 0 ? r : null;
+      });
+      check("hidden", "emptying both lists removes the rules", !!got, JSON.stringify(got && got.body));
+    });
+
     await scene("server-delete", async () => {
       if (!srvId) throw new Error("no server from the server-form scene");
       await page.evaluate(() => openServersModal());
