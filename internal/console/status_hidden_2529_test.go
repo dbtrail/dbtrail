@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/hiderules"
-	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
 
@@ -36,10 +35,10 @@ func statusServer(t *testing.T, rules *hiderules.Rules) (*Server, *bundle) {
 	return s, &bundle{serverID: e.ID}
 }
 
-func statusBody(t *testing.T, s *Server, b *bundle, opts query.Options) map[string]json.RawMessage {
+func statusBody(t *testing.T, s *Server, b *bundle) map[string]json.RawMessage {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	s.writeStatus(rec, b, opts, &status.StatusData{})
+	s.writeStatus(rec, b, &status.StatusData{})
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
 		t.Fatalf("status body is not JSON: %v\n%s", err, rec.Body.String())
@@ -49,12 +48,12 @@ func statusBody(t *testing.T, s *Server, b *bundle, opts query.Options) map[stri
 
 func TestStatusHiddenFromSQL(t *testing.T) {
 	s, b := statusServer(t, nil)
-	if doc := statusBody(t, s, b, query.Options{}); doc["hidden_from_sql"] != nil {
+	if doc := statusBody(t, s, b); doc["hidden_from_sql"] != nil {
 		t.Errorf("no rules: %s", doc["hidden_from_sql"])
 	}
 
 	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"shop.audit_log"}, Columns: []string{"shop.customers.email"}})
-	doc := statusBody(t, s, b, query.Options{})
+	doc := statusBody(t, s, b)
 	var h hiddenFromSQLStatus
 	if err := json.Unmarshal(doc["hidden_from_sql"], &h); err != nil {
 		t.Fatalf("hidden_from_sql: %v (%s)", err, doc["hidden_from_sql"])
@@ -70,7 +69,7 @@ func TestStatusHiddenFromSQL(t *testing.T) {
 	// Rules saved by hand that do not parse: the refusal names the entry,
 	// as the SQL surfaces do.
 	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"payroll.salaries.x"}})
-	raw := statusBody(t, s, b, query.Options{})["hidden_from_sql"]
+	raw := statusBody(t, s, b)["hidden_from_sql"]
 	var hr hiddenFromSQLStatus
 	if err := json.Unmarshal(raw, &hr); err != nil || !strings.Contains(hr.Refused, "payroll.salaries.x") {
 		t.Errorf("unparseable rules: %s", raw)
@@ -78,7 +77,7 @@ func TestStatusHiddenFromSQL(t *testing.T) {
 
 	// Counts are what is enforced: blanks and repeats are not rules.
 	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"", "a.b", "A.B"}})
-	if raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]; !strings.Contains(string(raw), `"tables_count":1`) || strings.Contains(string(raw), `""`) {
+	if raw = statusBody(t, s, b)["hidden_from_sql"]; !strings.Contains(string(raw), `"tables_count":1`) || strings.Contains(string(raw), `""`) {
 		t.Errorf("hand-saved blanks and repeats: %s", raw)
 	}
 
@@ -87,13 +86,29 @@ func TestStatusHiddenFromSQL(t *testing.T) {
 	if err := s.cm.reg.Delete(b.serverID); err != nil {
 		t.Fatal(err)
 	}
-	if raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]; !strings.Contains(string(raw), "no longer in the registry") {
+	if raw = statusBody(t, s, b)["hidden_from_sql"]; !strings.Contains(string(raw), "no longer in the registry") {
 		t.Errorf("entry gone: %s", raw)
+	}
+
+	// Columns only: the commonest rule, and a section of its own.
+	s, b = statusServer(t, &hiderules.Rules{Columns: []string{"shop.customers.email"}})
+	if raw = statusBody(t, s, b)["hidden_from_sql"]; !strings.Contains(string(raw), `"columns_count":1`) {
+		t.Errorf("columns only: %s", raw)
+	}
+	// Only blanks saved by hand: nothing is hidden, so no section.
+	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"", " "}})
+	if raw, ok := statusBody(t, s, b)["hidden_from_sql"]; ok {
+		t.Errorf("blanks only: %s, want no section", raw)
+	}
+	// Only a key a newer build wrote: SQL refuses, so status must say so.
+	s, b = statusServer(t, &hiderules.Rules{Extra: map[string]any{"row_filters": "x"}})
+	if raw = statusBody(t, s, b)["hidden_from_sql"]; !strings.Contains(string(raw), "row_filters") || !strings.Contains(string(raw), "refused") {
+		t.Errorf("only an unknown key: %s", raw)
 	}
 
 	// Rules this build cannot read: named, and the refusal said.
 	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"shop.a"}, Extra: map[string]any{"row_filters": "x"}})
-	raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]
+	raw = statusBody(t, s, b)["hidden_from_sql"]
 	var hu hiddenFromSQLStatus
 	if err := json.Unmarshal(raw, &hu); err != nil || strings.Join(hu.UnreadableKeys, ",") != "row_filters" || hu.Refused == "" {
 		t.Errorf("unreadable rules: %s, want unreadable_keys [row_filters] and a refusal", raw)

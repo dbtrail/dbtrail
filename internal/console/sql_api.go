@@ -1947,8 +1947,8 @@ func sqlHiddenNameRefusal(refs sqlsandbox.Refs, tables []views.BaselineTable) st
 const sqlAllHiddenMessage = "every table of this server's copy is hidden by this server's rules; its settings list them"
 
 // sqlHiddenHint is appended to those answers. It names no hidden table or
-// column: the rules are visible in the server settings to whoever may edit
-// them, and the error must not list them to whoever may not.
+// column: an error answers one statement, and the rules are listed where
+// the server's settings and status are (their names are server metadata).
 const sqlHiddenHint = "; this server hides some tables and columns from SQL on the copy (its settings list them), so a hidden name reads as missing"
 
 // sqlEventsMissing matches DuckDB's answer to a statement that reads a

@@ -6,12 +6,12 @@ import (
 	"errors"
 
 	"github.com/dbtrail/dbtrail/internal/hiderules"
-	"github.com/dbtrail/dbtrail/internal/query"
 )
 
 // hiddenFromSQLStatus is /api/status's "hidden_from_sql" (#2529): what this
 // server's rules leave out of SQL on the copy, the MySQL port and MCP sql,
-// so an empty answer there is never read as "no data".
+// so an empty answer there is never read as "no data". (What the port
+// forwards to the source under Engine Routing obeys MySQL's grants instead.)
 type hiddenFromSQLStatus struct {
 	// Tables and Columns are the enforced rules. The NAMES are server
 	// metadata, shown to anyone who may read the server (its settings and
@@ -30,18 +30,15 @@ type hiddenFromSQLStatus struct {
 }
 
 // hiddenFromSQL is the section for b's server, nil when it hides nothing.
-func (s *Server) hiddenFromSQL(b *bundle, _ query.Options) *hiddenFromSQLStatus {
+func (s *Server) hiddenFromSQL(b *bundle) *hiddenFromSQLStatus {
 	if b == nil || b.serverID == "" || b.serverID == bootServerID || s.cm == nil || s.cm.reg == nil {
 		return nil
 	}
 	e, ok := s.cm.reg.Get(b.serverID)
 	if !ok {
-		// The SQL surfaces refuse a server whose entry is gone; say so here
-		// too, so status and SQL never disagree.
+		// The SQL surfaces refuse a server whose entry is gone
+		// (hiddenRulesFor); say so here too, in their words.
 		_, err := s.hiddenRulesFor(b)
-		if err == nil {
-			return nil
-		}
 		return &hiddenFromSQLStatus{Refused: err.Error()}
 	}
 	if e.Hidden == nil {

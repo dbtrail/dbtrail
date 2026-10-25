@@ -929,7 +929,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// exactly what every other listing withholds from a restricted session.
 	// The counts stay whole — the health verdict is the floor a viewer-tier
 	// session exists for — only the names are scoped, through the same
-	// predicate the table pickers use, so there is one rule.
+	// predicate the table pickers use, so there is one rule. The one
+	// deliberate exception is hidden_from_sql (#2529): the hidden rules'
+	// names are server metadata, shown to every session that may read the
+	// server; what they hide is values.
 	opts, err := s.applySessionProfile(r.Context(), r, b, query.Options{
 		DenyTables:    s.denyTables,
 		RedactColumns: s.redactCols,
@@ -945,12 +948,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data.TableVisible = tableVisible(opts.DenyTables, opts.AllowTables)
-	s.writeStatus(w, b, opts, data)
+	s.writeStatus(w, b, data)
 }
 
 // writeStatus writes the status document, with what the server hides from
 // SQL on the copy beside it (#2529).
-func (s *Server) writeStatus(w http.ResponseWriter, b *bundle, opts query.Options, data *status.StatusData) {
+func (s *Server) writeStatus(w http.ResponseWriter, b *bundle, data *status.StatusData) {
 	// Encode into a buffer first: status data is already in memory, so this is
 	// free and avoids committing a 200 then emitting a truncated body if the
 	// encode fails partway (mirrors handleRecover).
@@ -960,7 +963,7 @@ func (s *Server) writeStatus(w http.ResponseWriter, b *bundle, opts query.Option
 		return
 	}
 	body := buf.Bytes()
-	if section := s.hiddenFromSQL(b, opts); section != nil {
+	if section := s.hiddenFromSQL(b); section != nil {
 		withSection, err := addStatusSection(body, "hidden_from_sql", section)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
