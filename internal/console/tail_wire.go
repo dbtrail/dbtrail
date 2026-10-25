@@ -107,6 +107,15 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 	}
 	tailSweep.Do(func() { sweepTailDirs(os.TempDir(), time.Now().Add(-tailKeepOld)) })
 	s.tails.mu.Lock()
+	// Asked again under the keepers' lock (#2546): a statement that passed
+	// the gate just before its server turned fast must not make the keeper
+	// applySQLFresh dropped. It turns the server off BEFORE it takes this
+	// lock to drop the keeper, so either the keeper made here is dropped
+	// after, or the server is seen fast here and none is made.
+	if !s.tailsOnFor(id) {
+		s.tails.mu.Unlock()
+		return nil
+	}
 	old := s.tails.by[id]
 	if old != nil {
 		if src, ok := old.src.(*indexTailSource); ok && src.b == b {

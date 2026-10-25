@@ -100,7 +100,8 @@ func (s *Server) SQLModeOf(id string) (mode, from string) {
 // applySQLFresh brings the servers that read tails to what the registry
 // says. The order is what keeps statements and tails inside the process's
 // memory: the pool is lowered BEFORE the first server reads tails, and
-// raised only AFTER the last one stopped. A pool that cannot be lowered (the
+// raised only AFTER the last one stopped and its keepers' builds ended (up to
+// tailSettleBound). A pool that cannot be lowered (the
 // runner is closing) leaves the servers fast. A server turned fast, or
 // deleted, has its keeper dropped, so nothing follows its index any more.
 // With BINTRAIL_SQL_TAILS=on there is nothing to do: every server reads
@@ -160,11 +161,19 @@ func (s *Server) applySQLFresh() {
 	for _, id := range on {
 		slog.Info("Engine Routing: fresh mode on: this server's statements read its newest captured changes over its snapshot", "server", s.serverName(id))
 	}
+	var dropped []*tailKeeper
 	for _, id := range off {
-		s.dropTailKeeper(id)
+		if k := s.dropTailKeeper(id); k != nil {
+			dropped = append(dropped, k)
+		}
 		slog.Info("Engine Routing: fresh mode off: this server's statements read its snapshot alone", "server", s.serverName(id))
 	}
 	if left == 0 && f.lowered {
+		// The dropped keepers' builds were told to end; what they read
+		// still holds memory until they do. Waited for, within a bound: a
+		// read the index does not give back is not a reason to keep the
+		// pool small for minutes.
+		settleWithin(dropped, tailSettleBound)
 		if err := f.pool.SetMaxInFlight(f.fastWorkers); err != nil {
 			slog.Warn("Engine Routing: no server is in fresh mode any more, but the statements that run at once could not be raised back", "error", err)
 			return
@@ -186,15 +195,41 @@ func (s *Server) serverName(id string) string {
 	return id
 }
 
-// dropTailKeeper forgets server id's keeper: its builds end now, and its
-// files are removed once no statement can still read them.
-func (s *Server) dropTailKeeper(id string) {
+// dropTailKeeper forgets server id's keeper and returns it (nil when it had
+// none): its builds end now, and its files are removed once no statement can
+// still read them.
+func (s *Server) dropTailKeeper(id string) *tailKeeper {
 	s.tails.mu.Lock()
 	k := s.tails.by[id]
 	delete(s.tails.by, id)
 	s.tails.mu.Unlock()
 	if k != nil {
 		retireTailKeeper(k)
+	}
+	return k
+}
+
+// tailSettleBound is how long applySQLFresh waits for the builds of the
+// keepers it dropped before it raises the pool.
+const tailSettleBound = 5 * time.Second
+
+// settleWithin waits for every build of ks to end, up to d, and says so when
+// they did not.
+func settleWithin(ks []*tailKeeper, d time.Duration) {
+	if len(ks) == 0 {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		for _, k := range ks {
+			k.settle()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		slog.Warn("Engine Routing: a tail build of a server turned to fast mode had not ended when more statements were let run at once; the memory it holds is given back when its read of the index ends", "waited", d)
 	}
 }
 

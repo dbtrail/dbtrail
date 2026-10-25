@@ -315,7 +315,8 @@ func (k *tailKeeper) close() {
 	k.dropBuilds()
 }
 
-// settle waits for every build started so far to end (tests).
+// settle waits for every build started so far to end (tests, and
+// applySQLFresh before it raises the pool, #2546).
 func (k *tailKeeper) settle() { k.wg.Wait() }
 
 // refresh brings the tails of tables up to what the index holds now and

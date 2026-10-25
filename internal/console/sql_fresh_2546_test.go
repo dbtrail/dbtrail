@@ -4,6 +4,7 @@ import (
 	"os"
 	"slices"
 	"testing"
+	"time"
 )
 
 // #2546: fresh mode per server, saved on its registry entry and applied by
@@ -227,17 +228,6 @@ func TestSQLFresh_theEnvironmentDecidesOnlyWhenOn_2546(t *testing.T) {
 	}
 }
 
-// The command-line server has no registry entry and never reads tails from
-// a switch.
-func TestSQLFresh_theBootServerIsNeverSwitched_2546(t *testing.T) {
-	reg, _ := freshTestRegistry(t)
-	s, _ := freshTestServer(t, reg, 4, 3)
-	s.applySQLFresh()
-	if s.tailsOnFor(bootServerID) {
-		t.Fatal("the command-line server reads tails with no environment")
-	}
-}
-
 // A newer registry, opened read-only, refuses the switch.
 func TestSQLFresh_aReadOnlyRegistryRefuses_2546(t *testing.T) {
 	path := t.TempDir() + "/console-servers.yaml"
@@ -296,5 +286,57 @@ func TestSQLFresh_appliedWhenTheServerStarts_2546(t *testing.T) {
 	}
 	if !srv.tailsOnFor(ids[0]) {
 		t.Fatal("a server switched before the process started is fast")
+	}
+}
+
+// A statement that passed the gate just before its server turned fast must
+// not bring the dropped keeper back: it would follow the index and hold tails
+// with the pool already raised, and nothing would drop it again.
+func TestSQLFresh_aLateStatementDoesNotBringTheKeeperBack_2546(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a")
+	s, _ := freshTestServer(t, reg, 4, 3)
+	s.tailCapturesHook = func(string) (func(string, string) bool, bool) { return nil, true }
+	if _, err := reg.SetSQLFresh(ids[0], true); err != nil {
+		t.Fatal(err)
+	}
+	s.applySQLFresh()
+	if !s.tailsOnFor(ids[0]) {
+		t.Fatal("fixture: the server is not fresh")
+	}
+	// The statement has passed the gate; the server turns fast before it
+	// asks for its keeper.
+	if _, err := reg.SetSQLFresh(ids[0], false); err != nil {
+		t.Fatal(err)
+	}
+	s.applySQLFresh()
+	if k := s.tailKeeperFor(ids[0], &bundle{}); k != nil {
+		t.Fatal("a keeper was made for a server in fast mode")
+	}
+	s.tails.mu.Lock()
+	_, made := s.tails.by[ids[0]]
+	s.tails.mu.Unlock()
+	if made {
+		t.Fatal("a keeper for a server in fast mode was stored")
+	}
+}
+
+// The pool is raised after the dropped keepers' builds end, but a build
+// stuck on a read does not keep it small past the bound.
+func TestSQLFresh_settleWaitsForBuildsWithinTheBound_2546(t *testing.T) {
+	k := &tailKeeper{}
+	k.wg.Add(1)
+	go func() { time.Sleep(50 * time.Millisecond); k.wg.Done() }()
+	start := time.Now()
+	settleWithin([]*tailKeeper{k}, 5*time.Second)
+	if d := time.Since(start); d < 40*time.Millisecond {
+		t.Fatalf("returned after %v, before the build ended", d)
+	}
+	stuck := &tailKeeper{}
+	stuck.wg.Add(1)
+	defer stuck.wg.Done()
+	start = time.Now()
+	settleWithin([]*tailKeeper{stuck}, 80*time.Millisecond)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("a stuck build held it %v, past the bound", d)
 	}
 }

@@ -32,6 +32,7 @@ func TestTailsOff(t *testing.T) {
 // A server whose capture filters are not known here gets no keeper: no
 // index read is paid for a tail it could not trust.
 func TestTailKeeperForUnknownCapture(t *testing.T) {
+	t.Setenv("BINTRAIL_SQL_TAILS", "on") // a keeper is only made for a server in fresh mode
 	s := &Server{}
 	s.tailCapturesHook = func(string) (func(string, string) bool, bool) { return nil, false }
 	if k := s.tailKeeperFor("srv", &bundle{}); k != nil {
