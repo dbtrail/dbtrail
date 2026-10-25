@@ -19,7 +19,6 @@ import (
 	"sort"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 // MaxEntries bounds each list. The rules travel in the server registry file
@@ -189,8 +188,10 @@ func splitEntry(raw string) ([]part, error) {
 	// A format character (zero-width space, joiner, soft hyphen, the byte
 	// order mark) is invisible on screen, so a name holding one would match
 	// nothing while looking right. Refused anywhere, backticks included.
-	if i := strings.IndexFunc(raw, func(r rune) bool { return unicode.Is(unicode.Cf, r) }); i >= 0 {
-		r, _ := utf8.DecodeRuneInString(raw[i:])
+	// Two exceptions are real spellings (UAX #31 joining context): ZWNJ and
+	// ZWJ between letters (Persian, Indic scripts), and the Mongolian vowel
+	// separator between Mongolian letters.
+	if r, ok := strayFormatChar([]rune(raw)); ok {
 		return nil, fmt.Errorf("an invisible character was pasted into it (U+%04X); delete it and type the name again", r)
 	}
 	var parts []part
@@ -254,6 +255,28 @@ func splitEntry(raw string) ([]part, error) {
 		return nil, err
 	}
 	return parts, nil
+}
+
+// strayFormatChar returns the first format character (Unicode Cf) that is
+// not part of a real name: ZWNJ (U+200C) and ZWJ (U+200D) with a letter or
+// a nonspacing mark on each side, and U+180E between Mongolian letters, are
+// kept.
+func strayFormatChar(rs []rune) (rune, bool) {
+	letterish := func(r rune) bool { return unicode.IsLetter(r) || unicode.Is(unicode.Mn, r) }
+	for i, r := range rs {
+		if !unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		inside := i > 0 && i+1 < len(rs)
+		switch {
+		case (r == 0x200C || r == 0x200D) && inside && letterish(rs[i-1]) && letterish(rs[i+1]):
+			continue
+		case r == 0x180E && inside && unicode.Is(unicode.Mongolian, rs[i-1]) && unicode.Is(unicode.Mongolian, rs[i+1]):
+			continue
+		}
+		return r, true
+	}
+	return 0, false
 }
 
 // quote spells one name the way splitEntry reads it back.
