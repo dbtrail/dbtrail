@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -37,8 +38,9 @@ type hiddenDTO struct {
 	// not parse). Empty when the rules load.
 	Refused string `json:"refused,omitempty"`
 	// Unmatched are the rules that match no table or column of the copy's
-	// newest snapshot (#2529): most likely a typo, which saves and hides
-	// nothing. Present (possibly empty) only when the rules were checked
+	// newest snapshot (#2529). Not proof of a typo: a table or column added
+	// after that snapshot lives only in the change history, where the rule
+	// still hides it. Present (possibly empty) only when the rules were checked
 	// against the copy; a table whose columns are unknown counts as a
 	// possible match, so an entry is never called unmatched on a guess.
 	Unmatched *[]string `json:"unmatched,omitempty"`
@@ -144,6 +146,11 @@ func (s *Server) checkHiddenAgainstCopy(ctx context.Context, id string, d *hidde
 		return
 	}
 	in, err := s.buildViewsInputAll(ctx, b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true})
+	if err != nil && !errors.Is(err, errNoViewSources) {
+		slog.Warn("hidden rules: could not read the copy to check them", "server", id, "error", err)
+		d.Unchecked = why + "this server's snapshot on this host could not be read: " + err.Error()
+		return
+	}
 	if err != nil || len(in.Baselines) == 0 {
 		d.Unchecked = why + "there is no snapshot of this server on this host yet"
 		return

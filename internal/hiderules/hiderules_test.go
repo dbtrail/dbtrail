@@ -59,6 +59,13 @@ func TestParseEdgeCases(t *testing.T) {
 		{name: "ZWJ at the end of a name", tables: []string{"shop.orders\u200d"}, wantErr: "an invisible character was pasted into"},
 		{name: "ZWNJ between ASCII and a dot", tables: []string{"shop\u200c.orders"}, wantErr: "an invisible character was pasted into"},
 		{name: "ZWNJ beside a digit", tables: []string{"shop.a\u200c1"}, wantErr: "an invisible character was pasted into"},
+		{name: "ZWNJ between Latin letters looks like the real table and hides nothing", tables: []string{"shop.cust\u200comers"}, wantErr: "an invisible character was pasted into"},
+		{name: "ZWJ between Latin letters in a column", columns: []string{"shop.customers.e\u200dmail"}, wantErr: "an invisible character was pasted into"},
+		{name: "ZWNJ between CJK letters", tables: []string{"shop.中\u200c文"}, wantErr: "an invisible character was pasted into"},
+		{name: "ZWNJ between an Arabic and a Latin letter", tables: []string{"shop.م\u200ca"}, wantErr: "an invisible character was pasted into"},
+		{name: "ZWNJ between Devanagari and Bengali letters", tables: []string{"shop.क\u200cক"}, wantErr: "an invisible character was pasted into"},
+		{name: "ZWNJ after an Arabic letter carrying a vowel mark", tables: []string{"shop.مَ\u200cخ"}, wantTables: []string{"shop.مَ\u200cخ"}},
+		{name: "ZWNJ after a virama in a Malayalam name", tables: []string{"shop.ന്\u200cമ"}, wantTables: []string{"shop.ന്\u200cമ"}},
 		{name: "Mongolian separator between Latin letters", tables: []string{"shop.a\u180eb"}, wantErr: "an invisible character was pasted into"},
 		{name: "every bad entry is named", tables: []string{"a", "b"}, wantErr: `"b"`},
 	}

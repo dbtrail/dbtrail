@@ -14370,13 +14370,16 @@ function hiddenRulesBody(box, cur, h, g, said) {
   } else if (refused) {
     box.append(el("p", { class: "form-msg err hidden-unreadable", text: "This server's SQL is refused: " + hiddenCap(refused) }));
   }
-  // Rules that match nothing in the copy: most likely a typo, which saves
-  // and hides nothing. Not checked (no snapshot here, or only in S3) is
-  // said as such, never as an empty list.
+  // Rules that match nothing in the newest snapshot. Not proof of a typo: a
+  // table or column added after that snapshot exists only in the change
+  // history, where the rule still hides it, so the line never tells the
+  // operator to delete the rule. Not checked (no snapshot here, or only in
+  // S3) is said as such, never as an empty list.
   const unmatched = Array.isArray(h.unmatched) ? h.unmatched.map(String) : null;
   if (unmatched && unmatched.length) {
-    box.append(el("p", { class: "form-msg hidden-unmatched" }, "These match no table or column in this server's copy: ",
-      ...unmatched.flatMap((x, i) => [i ? ", " : "", el("code", { text: x })]), "."));
+    box.append(el("p", { class: "form-msg hidden-unmatched" }, "Not in this server's newest snapshot: ",
+      ...unmatched.flatMap((x, i) => [i ? ", " : "", el("code", { text: x })]),
+      ". A table or column added after that snapshot still has its changes hidden; anything else, check the spelling."));
   } else if (!unmatched && h.unmatched_unchecked && tables.length + columns.length > 0) {
     box.append(el("p", { class: "form-hint hidden-unchecked", text: hiddenCap(h.unmatched_unchecked) }));
   }

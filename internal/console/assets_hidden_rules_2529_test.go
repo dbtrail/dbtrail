@@ -458,7 +458,7 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 	}
 	// A rule that matches nothing in the copy (from the real GET over the SQL
 	// fixture's snapshot) is a warning; a copy that could not be read says so.
-	if x := all(got.Unmatched); !strings.Contains(x, "These match no table or column in this server's copy: shop.nothere.") || strings.Contains(x, "shop.orders.") {
+	if x := all(got.Unmatched); !strings.Contains(x, "Not in this server's newest snapshot: shop.nothere. A table or column added after that snapshot still has its changes hidden; anything else, check the spelling.") || strings.Contains(x, "shop.orders.") {
 		t.Errorf("unmatched: %s", x)
 	}
 	if x := all(got.Exposed); !strings.Contains(x, "Could not check these rules against the copy: ") || strings.Contains(x, "These match no") {

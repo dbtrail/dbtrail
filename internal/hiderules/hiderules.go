@@ -258,25 +258,58 @@ func splitEntry(raw string) ([]part, error) {
 }
 
 // strayFormatChar returns the first format character (Unicode Cf) that is
-// not part of a real name: ZWNJ (U+200C) and ZWJ (U+200D) with a letter or
-// a nonspacing mark on each side, and U+180E between Mongolian letters, are
-// kept.
+// not part of a real name. Kept: ZWNJ (U+200C) and ZWJ (U+200D) between two
+// letters of the same script that writes with them (Arabic, Syriac, NKo and
+// the Indic scripts; a vowel mark on either side is skipped), and U+180E
+// between Mongolian letters. Anywhere else, a Latin or CJK name included,
+// the joiner is invisible and makes a rule that reads like the real table
+// and matches nothing.
 func strayFormatChar(rs []rune) (rune, bool) {
-	letterish := func(r rune) bool { return unicode.IsLetter(r) || unicode.Is(unicode.Mn, r) }
 	for i, r := range rs {
 		if !unicode.Is(unicode.Cf, r) {
 			continue
 		}
-		inside := i > 0 && i+1 < len(rs)
 		switch {
-		case (r == 0x200C || r == 0x200D) && inside && letterish(rs[i-1]) && letterish(rs[i+1]):
-			continue
-		case r == 0x180E && inside && unicode.Is(unicode.Mongolian, rs[i-1]) && unicode.Is(unicode.Mongolian, rs[i+1]):
+		case r == 0x200C || r == 0x200D:
+			if left, right := joiningScript(rs, i, -1), joiningScript(rs, i, 1); left != nil && left == right {
+				continue
+			}
+		case r == 0x180E && i > 0 && i+1 < len(rs) && unicode.Is(unicode.Mongolian, rs[i-1]) && unicode.Is(unicode.Mongolian, rs[i+1]):
 			continue
 		}
 		return r, true
 	}
 	return 0, false
+}
+
+// joinerScripts write some words with ZWNJ/ZWJ between their letters.
+var joinerScripts = []*unicode.RangeTable{
+	unicode.Arabic, unicode.Syriac, unicode.Nko, unicode.Mongolian,
+	unicode.Devanagari, unicode.Bengali, unicode.Gurmukhi, unicode.Gujarati,
+	unicode.Oriya, unicode.Tamil, unicode.Telugu, unicode.Kannada,
+	unicode.Malayalam, unicode.Sinhala, unicode.Khmer, unicode.Myanmar,
+}
+
+// joiningScript returns the joiner script of the nearest letter or mark
+// beside rs[i] in direction step, skipping marks that belong to no script
+// (Unicode Inherited, such as Arabic vowel marks); nil when there is none.
+func joiningScript(rs []rune, i, step int) *unicode.RangeTable {
+	for j := i + step; j >= 0 && j < len(rs); j += step {
+		c := rs[j]
+		if unicode.Is(unicode.Inherited, c) {
+			continue
+		}
+		if !unicode.IsLetter(c) && !unicode.Is(unicode.Mn, c) && !unicode.Is(unicode.Mc, c) {
+			return nil
+		}
+		for _, t := range joinerScripts {
+			if unicode.Is(t, c) {
+				return t
+			}
+		}
+		return nil
+	}
+	return nil
 }
 
 // quote spells one name the way splitEntry reads it back.

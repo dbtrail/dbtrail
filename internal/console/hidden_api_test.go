@@ -517,6 +517,21 @@ func TestHiddenUnmatchedNotCheckedWithoutACopy(t *testing.T) {
 	if code != 200 || d.Unmatched != nil || d.Unchecked == "" || strings.Contains(string(body), `"unmatched"`) {
 		t.Fatalf("GET = %d %s, want no unmatched field and a reason", code, body)
 	}
+	if !strings.Contains(d.Unchecked, "no snapshot of this server on this host yet") {
+		t.Fatalf("empty folder reason = %q", d.Unchecked)
+	}
+	// A snapshot folder that will not open is not "no snapshot yet": the
+	// operator would wait for a snapshot that already exists.
+	locked := t.TempDir()
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	f.s.cm.boot.baselineSrc = locked
+	_, body = hiddenGet(t, f.s, id)
+	if d := decodeHidden(t, body); d.Unmatched != nil || !strings.Contains(d.Unchecked, "could not be read") || strings.Contains(d.Unchecked, "yet") {
+		t.Fatalf("unreadable folder GET = %s, want the read error as the reason", body)
+	}
 	f.s.cm.boot.baselineSrc = "s3://bucket/snaps"
 	_, body = hiddenGet(t, f.s, id)
 	if d := decodeHidden(t, body); d.Unmatched != nil || d.Unchecked == "" {
