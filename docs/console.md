@@ -1505,7 +1505,7 @@ copy. It works like a view in MySQL: the data is still there, and the copy
 answers as if those tables and columns did not exist.
 
 Set it in **Settings**, **MySQL clients**, under **Hidden from SQL on
-<server>** for the server chosen in the sidebar, one entry per line:
+`<server>`** for the server chosen in the sidebar, one entry per line:
 
 | Entry | Hides |
 |---|---|
@@ -1517,23 +1517,25 @@ Set it in **Settings**, **MySQL clients**, under **Hidden from SQL on
 Names are compared without case. A name with a dot, a space or a backtick goes
 in backticks, as in MySQL: `` `my.db`.orders ``. The rules are saved with the
 server and apply from the next statement, on connections that are already open
-too. The same rules are on the API: `GET` and `PUT /api/servers/{id}/hidden`,
+too (within a couple of seconds on a separate `bintrail-console router`). The same rules are on the API: `GET` and `PUT /api/servers/{id}/hidden`,
 with `{"tables": [...], "columns": [...]}`; empty lists remove them.
 
 **Where the rules apply.** SQL on the copy in this page, ordinary SQL on the
 MySQL port, and the `sql` tool of the AI connector. There:
 
 - a hidden table is not listed and reads as a table that does not exist;
-- the settings list any rule that names no table or column of the copy's
-  newest snapshot, so a typo is not mistaken for protection. A table or
+- when this host has the copy's newest snapshot, the settings list any rule
+  that names no table or column in it (otherwise they say they could not
+  check), so a typo is not mistaken for protection. A table or
   column added after that snapshot is listed too, and its changes are still
   hidden, so check the spelling before removing such a rule. A name with an
   invisible character pasted into it is refused when you save;
 - a hidden column is not in `SELECT *`, and naming it fails as a column that
   does not exist would, with a note that this server hides some names;
 - the `events` view drops the hidden tables' changes, removes hidden columns
-  from `row_before`, `row_after` and `changed_columns`, empties `pk_values` on
-  tables with hidden columns, and empties the statement text on every row,
+  from `row_before`, `row_after` and `changed_columns`, sets `pk_values` to
+  NULL on every table a column rule names (with `shop.*.ssn`, every table of
+  `shop`, since the key may be the hidden column), and empties the statement text on every row,
   because one statement can mention several tables;
 - statements that read the copy's files directly (`read_parquet`, a file path
   in quotes, `glob`) are refused, because the files hold everything;
@@ -1543,17 +1545,20 @@ MySQL port, and the `sql` tool of the AI connector. There:
 `GET /api/status` says what the server hides under `hidden_from_sql`, so an
 empty answer is never mistaken for no data.
 
-**Where they do not apply.** Hiding is not deleting. The rules do not change
-what DBTrail stores, so:
+**Where they do not apply.** Only the three places above hide. Hiding is not
+deleting: the rules do not change what DBTrail stores, so:
 
 - the index (the MySQL database DBTrail writes changes to) and the copy's
   Parquet files keep every table and column. Anyone who can read those files
   or that database sees everything, the same as anyone who can read a MySQL
   data directory. Protect them with file, bucket and database permissions;
-- the downloads (the SQL dump and the snapshot archive) include everything;
-- time travel in this web interface, and the AI connector's history tools
-  (`query`, `recover`, `recover_cascade`, `reconstruct`), are governed by the
-  access profiles, not by these rules: they return full rows;
+- the downloads (the SQL dump, the snapshot archive, the views file and the
+  Dashboards card's views file) include everything;
+- the rest of this web interface (the change history, recovery, reconstruct,
+  flashback, schema changes) and the AI connector's other tools (`query`,
+  `recover`, `recover_cascade`, `reconstruct`, `list_schema_changes`) are
+  governed by the access profiles, not by these rules: they return full rows
+  and column names;
 - `bintrail views` and `bintrail export iceberg` do not read the rules;
 - with Engine Routing on, statements the port sends to the source MySQL run
   under the forwarding account, and there MySQL's grants decide. The same
@@ -1566,8 +1571,9 @@ The command-line server (the one `watch` starts from `--source-dsn` or
 `SOURCE_DSN`) cannot hide anything: add the server from the web interface to
 set rules for it.
 
-If you return to a DBTrail version older than this feature, it ignores the
-rules and hides nothing. A version newer than the one that saved the rules may
+If you return to a version before 0.116.0, it ignores the rules and hides
+nothing. 0.116.0 hides as described but has no panel, no `hidden_from_sql` in
+`/api/status` and no check of the forwarding account's grants. A version newer than the one that saved the rules may
 add kinds of rule; an older version that finds one it cannot read refuses the
 server's statements instead of serving without it.
 

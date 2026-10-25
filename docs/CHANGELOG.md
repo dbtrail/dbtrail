@@ -8,10 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 - **Hide tables and columns from SQL, per server (#2529).**
-  - **What it does.** **Settings**, **MySQL clients**, **Hidden from SQL on <server>** lists tables (`shop.audit_log`, `hr.*`) and columns (`shop.customers.email`, `shop.*.ssn`) that SQL on the copy, ordinary SQL on the MySQL port and the AI connector's `sql` tool treat as if they did not exist. It works like a view in MySQL: hiding is not deleting. The same rules are on `GET` and `PUT /api/servers/{id}/hidden`, and `GET /api/status` lists them under `hidden_from_sql`.
+  - **What it does.** **Settings**, **MySQL clients**, **Hidden from SQL on `<server>`** lists tables (`shop.audit_log`, `hr.*`) and columns (`shop.customers.email`, `shop.*.ssn`) that SQL on the copy, ordinary SQL on the MySQL port and the AI connector's `sql` tool treat as if they did not exist. It works like a view in MySQL: hiding is not deleting. The same rules are on `GET` and `PUT /api/servers/{id}/hidden`, and `GET /api/status` lists them under `hidden_from_sql`.
   - **Also on such a server.** The `events` view drops the hidden tables' changes and removes hidden columns from the row images. Statements that read the copy's files directly are refused. Time travel on the MySQL port (`_flashback`, `_snapshot`, `_diff`) is off.
-  - **What it does not cover.** The index and the copy's files keep everything, and so do the downloads. Time travel in the web interface and the AI connector's history tools follow the access profiles and return full rows. What Engine Routing forwards to MySQL runs under the forwarding account's grants; the same panel lists what those grants can still read.
-  - **Downgrading.** A version older than this one ignores the rules and hides nothing.
+  - **What it does not cover.** Only those three places hide. The index and the copy's files keep everything, and so do the downloads, including the views files. The rest of the web interface (change history, recovery, reconstruct, flashback, schema changes) and the AI connector's other tools follow the access profiles and return full rows. What Engine Routing forwards to MySQL runs under the forwarding account's grants; the same panel lists what those grants can still read.
+  - **Downgrading.** Versions before 0.116.0 ignore the rules and hide nothing. 0.116.0 hides as described, without the panel, `hidden_from_sql` or the grants check.
 
 
 ## [0.116.0] - 2026-10-24
