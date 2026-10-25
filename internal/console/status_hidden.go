@@ -13,9 +13,9 @@ import (
 // server's rules leave out of SQL on the copy, the MySQL port and MCP sql,
 // so an empty answer there is never read as "no data".
 type hiddenFromSQLStatus struct {
-	// Tables and Columns are the rules as saved. A session under a data
-	// profile or a table scope gets the counts only: a name it may not see
-	// elsewhere is not shown here either.
+	// Tables and Columns are the enforced rules. The NAMES are server
+	// metadata, shown to anyone who may read the server (its settings and
+	// GET /api/servers carry them too); the values are what the rules hide.
 	Tables       []string `json:"tables,omitempty"`
 	Columns      []string `json:"columns,omitempty"`
 	TablesCount  int      `json:"tables_count"`
@@ -24,19 +24,16 @@ type hiddenFromSQLStatus struct {
 	// read; while there are any, the SQL surfaces refuse this server.
 	UnreadableKeys []string `json:"unreadable_keys,omitempty"`
 	// Refused: the SQL surfaces refuse this server's statements (rules
-	// this build cannot enforce, or an entry no longer in the registry). To
-	// a scoped session it is said without the entries, which the parse
-	// error quotes word for word.
+	// this build cannot enforce, or an entry no longer in the registry), in
+	// the words the SQL surfaces use.
 	Refused string `json:"refused,omitempty"`
 }
 
 // hiddenFromSQL is the section for b's server, nil when it hides nothing.
-func (s *Server) hiddenFromSQL(b *bundle, opts query.Options) *hiddenFromSQLStatus {
+func (s *Server) hiddenFromSQL(b *bundle, _ query.Options) *hiddenFromSQLStatus {
 	if b == nil || b.serverID == "" || b.serverID == bootServerID || s.cm == nil || s.cm.reg == nil {
 		return nil
 	}
-	scoped := opts.ProfileActive || len(opts.DenyTables) > 0 || len(opts.AllowTables) > 0 ||
-		len(opts.RedactColumns) > 0 || len(opts.AllowColumns) > 0
 	e, ok := s.cm.reg.Get(b.serverID)
 	if !ok {
 		// The SQL surfaces refuse a server whose entry is gone; say so here
@@ -52,10 +49,7 @@ func (s *Server) hiddenFromSQL(b *bundle, opts query.Options) *hiddenFromSQLStat
 	}
 	out := &hiddenFromSQLStatus{UnreadableKeys: e.Hidden.UnknownKeys()}
 	set, err := s.hiddenRulesFor(b)
-	switch {
-	case err != nil && scoped:
-		out.Refused = "the stored hidden rules cannot be enforced by this build, so this server's SQL is refused"
-	case err != nil:
+	if err != nil {
 		out.Refused = err.Error()
 	}
 	// The counts and lists are what is enforced: the parsed rules, blanks
@@ -68,10 +62,8 @@ func (s *Server) hiddenFromSQL(b *bundle, opts query.Options) *hiddenFromSQLStat
 	if out.TablesCount == 0 && out.ColumnsCount == 0 && len(out.UnreadableKeys) == 0 && out.Refused == "" {
 		return nil
 	}
-	if !scoped {
-		out.Tables = append([]string{}, shown.Tables...)
-		out.Columns = append([]string{}, shown.Columns...)
-	}
+	out.Tables = append([]string{}, shown.Tables...)
+	out.Columns = append([]string{}, shown.Columns...)
 	return out
 }
 

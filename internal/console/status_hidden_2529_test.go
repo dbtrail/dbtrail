@@ -67,21 +67,13 @@ func TestStatusHiddenFromSQL(t *testing.T) {
 		t.Errorf("the status document lost its own keys: %v", doc)
 	}
 
-	// A scoped session gets the counts, not the names.
-	raw := statusBody(t, s, b, query.Options{ProfileActive: true})["hidden_from_sql"]
-	if strings.Contains(string(raw), "audit_log") || strings.Contains(string(raw), "email") || !strings.Contains(string(raw), `"tables_count":1`) {
-		t.Errorf("scoped session: %s", raw)
-	}
-
-	// Rules saved by hand that do not parse: a scoped session learns that the
-	// server is refused, never the entries, which the parse error quotes.
+	// Rules saved by hand that do not parse: the refusal names the entry,
+	// as the SQL surfaces do.
 	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"payroll.salaries.x"}})
-	raw = statusBody(t, s, b, query.Options{ProfileActive: true})["hidden_from_sql"]
-	if strings.Contains(string(raw), "payroll") || !strings.Contains(string(raw), "refused") {
-		t.Errorf("scoped, unparseable rules: %s", raw)
-	}
-	if raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]; !strings.Contains(string(raw), "payroll.salaries.x") {
-		t.Errorf("unscoped, unparseable rules: %s, want the entry named", raw)
+	raw := statusBody(t, s, b, query.Options{})["hidden_from_sql"]
+	var hr hiddenFromSQLStatus
+	if err := json.Unmarshal(raw, &hr); err != nil || !strings.Contains(hr.Refused, "payroll.salaries.x") {
+		t.Errorf("unparseable rules: %s", raw)
 	}
 
 	// Counts are what is enforced: blanks and repeats are not rules.
@@ -102,8 +94,9 @@ func TestStatusHiddenFromSQL(t *testing.T) {
 	// Rules this build cannot read: named, and the refusal said.
 	s, b = statusServer(t, &hiderules.Rules{Tables: []string{"shop.a"}, Extra: map[string]any{"row_filters": "x"}})
 	raw = statusBody(t, s, b, query.Options{})["hidden_from_sql"]
-	if !strings.Contains(string(raw), "row_filters") || !strings.Contains(string(raw), "refused") {
-		t.Errorf("unreadable rules: %s", raw)
+	var hu hiddenFromSQLStatus
+	if err := json.Unmarshal(raw, &hu); err != nil || strings.Join(hu.UnreadableKeys, ",") != "row_filters" || hu.Refused == "" {
+		t.Errorf("unreadable rules: %s, want unreadable_keys [row_filters] and a refusal", raw)
 	}
 }
 
