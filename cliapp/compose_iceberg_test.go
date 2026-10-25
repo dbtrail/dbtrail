@@ -145,8 +145,16 @@ func TestComposeIcebergExportLoop(t *testing.T) {
 	if one.Restart != "" {
 		t.Errorf("iceberg-export restart = %q; the one-shot must not restart", one.Restart)
 	}
-	if _, ok := one.Environment["BINTRAIL_ICEBERG_EVERY"]; ok {
-		t.Error("the one-shot iceberg-export carries BINTRAIL_ICEBERG_EVERY, so `run --rm` would never return")
+	for _, k := range []string{"ICEBERG_EVERY", "BINTRAIL_ICEBERG_EVERY"} {
+		if _, ok := one.Environment[k]; ok {
+			t.Errorf("the one-shot iceberg-export carries %s, so `run --rm` would never return", k)
+		}
+	}
+	if _, ok := loop.Environment["BINTRAIL_ICEBERG_EVERY"]; ok {
+		t.Error("iceberg-export-loop sets BINTRAIL_ICEBERG_EVERY; bintrail does not read it, --every is a flag")
+	}
+	if !strings.Contains(strings.Join(one.Command, "\n"), `--every "$$ICEBERG_EVERY"`) {
+		t.Error("the shared command does not turn ICEBERG_EVERY into --every")
 	}
 	if loop.Image != one.Image || strings.Join(loop.Command, "\n") != strings.Join(one.Command, "\n") ||
 		strings.Join(loop.Volumes, ",") != strings.Join(one.Volumes, ",") {
@@ -156,11 +164,11 @@ func TestComposeIcebergExportLoop(t *testing.T) {
 		t.Errorf("iceberg-export-loop depends_on index-mysql = %+v, want service_healthy", dep)
 	}
 	for k, v := range one.Environment {
-		if loop.Environment[k] != v {
+		if lv, ok := loop.Environment[k]; !ok || lv != v {
 			t.Errorf("iceberg-export-loop %s = %q, the one-shot has %q", k, loop.Environment[k], v)
 		}
 	}
-	every := composeDefault(loop.Environment["BINTRAIL_ICEBERG_EVERY"])
+	every := composeDefault(loop.Environment["ICEBERG_EVERY"])
 	if d, err := parseExportEvery(every); err != nil || d == 0 {
 		t.Errorf("iceberg-export-loop default interval %q is not one --every accepts: %v", every, err)
 	}

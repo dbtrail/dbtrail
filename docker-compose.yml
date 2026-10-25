@@ -1123,6 +1123,9 @@ services:
           set -- --baseline-dir "$$BASELINE_DIR"
         fi
         [ -n "$$ICEBERG_TABLES" ] && set -- "$$@" --tables "$$ICEBERG_TABLES"
+        # Only the loop service sets ICEBERG_EVERY; bintrail refuses a value
+        # that is not a duration of at least 1m before the first run.
+        [ -n "$$ICEBERG_EVERY" ] && set -- "$$@" --every "$$ICEBERG_EVERY"
         [ -n "$$ICEBERG_CATALOG" ] && set -- "$$@" --catalog "$$ICEBERG_CATALOG"
         [ -n "$$ICEBERG_CATALOG_URI" ] && set -- "$$@" --catalog-uri "$$ICEBERG_CATALOG_URI"
         [ -n "$$ICEBERG_CATALOG_WAREHOUSE" ] && set -- "$$@" --catalog-warehouse "$$ICEBERG_CATALOG_WAREHOUSE"
@@ -1163,7 +1166,9 @@ services:
     restart: unless-stopped
     environment:
       <<: *iceberg-export-env
-      BINTRAIL_ICEBERG_EVERY: ${ICEBERG_EVERY:-1h}
+      # The interval, turned into --every by the shared command above. The
+      # one-shot does not list it, so `run --rm iceberg-export` always returns.
+      ICEBERG_EVERY: ${ICEBERG_EVERY:-1h}
 
   # ── `drill` profile: scratch MySQL for `bintrail drill` (#1195) ──────────
   # An opt-in THROWAWAY server the restore rehearsal loads into. Same pinned

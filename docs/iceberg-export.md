@@ -64,7 +64,9 @@ bintrail export iceberg --index-dsn "..." --baseline-dir /data/backups --warehou
   minutes is followed by an hour of waiting, not fifty minutes. Runs never
   overlap, and a slow run is never followed by a burst of runs to catch up.
   The shortest interval is `1m`. The value needs a unit: `15m`, `1h`, `1h30m`.
-  You can also set it with `BINTRAIL_ICEBERG_EVERY`.
+  It is set on the command line only, never from an environment variable or
+  the env file: there it would turn every export cron starts into one that
+  never ends.
 - **Mistakes in the settings stop it at start.** A bad interval, catalog
   setting or secret ends the command with an error before the first run, so
   you see it right away. So does a backup folder with no snapshot in it, when
@@ -507,5 +509,5 @@ cursor commits nothing and records nothing. Both report `unchanged`.
 | `--at` | export up to this instant (default: now); must be after the table's cursor and not below the live window |
 | `--fetch-batch-size` | event page size for the fold (0 = default) |
 | `--format` | `text` or `json` (with `--every`, one JSON document per run, one per line) |
-| `--every` | stay running and export again this long after each run ends (at least `1m`; empty = run once); env `BINTRAIL_ICEBERG_EVERY` |
+| `--every` | stay running and export again this long after each run ends (at least `1m`; empty = run once); command line only, no environment variable |
 | `--ultrafast`, `--duckdb-threads`, `--duckdb-memory-limit` | the DuckDB budget for the baseline scan and the archive reads |

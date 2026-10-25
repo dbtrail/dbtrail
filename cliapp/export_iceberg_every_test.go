@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/icebergexport"
 )
 
@@ -359,12 +360,30 @@ func TestRunExportIceberg_noEveryIsOneShot(t *testing.T) {
 	}
 }
 
-func TestExportIceberg_envReachesEveryFlag(t *testing.T) {
-	resetExportGlobals(t)
+// TestExportIceberg_envNeverMakesItLoop: --every is set on the command line
+// only. An environment variable (or the env file, which loads into the
+// environment) that made it loop would turn every cron-started one-shot into
+// a process that never exits, and cron would start another one each hour.
+func TestExportIceberg_envNeverMakesItLoop(t *testing.T) {
+	resetCatalogGlobals(t)
+	everyValid(t)
+	eiEvery = ""
 	t.Setenv("BINTRAIL_ICEBERG_EVERY", "15m")
+	t.Setenv("BINTRAIL_EVERY", "15m")
 	bindCommandEnv(exportIcebergCmd)
-	if eiEvery != "15m" {
-		t.Fatalf("eiEvery = %q, want the env value 15m", eiEvery)
+	if eiEvery != "" {
+		t.Fatalf("eiEvery = %q from the environment; --every must come from the command line only", eiEvery)
+	}
+	_, _, calls, err := everyHarness(t, 99, func(context.Context, icebergexport.Config) ([]icebergexport.Outcome, error) {
+		return []icebergexport.Outcome{{Schema: "shop", Table: "orders", Verdict: icebergexport.VerdictUnchanged}}, nil
+	})
+	if err != nil || len(calls) != 1 {
+		t.Fatalf("err = %v, runs = %d; want one run and a return", err, len(calls))
+	}
+	for _, b := range cli.EnvBindings {
+		if b.Flag == "every" {
+			t.Fatalf("--every is bound to %s; it must not be bound to any variable", b.EnvVar)
+		}
 	}
 }
 

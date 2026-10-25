@@ -203,7 +203,7 @@ func init() {
 	f.StringVar(&eiAt, "at", "", "Point-in-time to export up to (default: now)")
 	f.IntVar(&eiFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
 	f.StringVar(&eiFormat, "format", "text", "Output format: text or json")
-	f.StringVar(&eiEvery, "every", "", "Run again this long after each run ends, until stopped (e.g. 15m, 1h; at least 1m). Empty = run once")
+	f.StringVar(&eiEvery, "every", "", "Run again this long after each run ends, until stopped (e.g. 15m, 1h; at least 1m). Empty = run once. Command line only, never read from the environment")
 	f.StringVar(&eiCatalog, "catalog", "hadoop", "Catalog to register the tables in: hadoop (a local directory), glue (AWS Glue, data on S3) or rest (an Iceberg REST catalog)")
 	f.StringVar(&eiCatalogURI, "catalog-uri", "", "REST catalog base URL (--catalog rest)")
 	f.StringVar(&eiCatalogWarehouse, "catalog-warehouse", "", "REST catalog warehouse identifier: a catalog name, an AWS account id, an S3 Tables bucket ARN (--catalog rest)")
@@ -231,11 +231,12 @@ var (
 	exportNowFn   = time.Now
 )
 
-// parseExportEvery reads --every. Empty means no loop (the one-shot). It is a
-// string flag rather than a duration on purpose: the env binding only warns
-// when a flag refuses a value, so a garbage BINTRAIL_ICEBERG_EVERY on a
-// duration flag would quietly become a one-shot, which under a restart
-// policy runs back to back with no interval at all.
+// parseExportEvery reads --every. Empty means no loop (the one-shot), and so
+// does "--every=": an empty value is the off switch a wrapper script can
+// pass. --every is deliberately NOT bound to any environment variable or the
+// env file (internal/cli.EnvBindings): set there, it would turn every
+// cron-started one-shot into a process that never exits, and cron would pile
+// a new one up each hour. It is only ever set on the command line.
 func parseExportEvery(raw string) (time.Duration, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
