@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 )
 
 // routeGrantsResult is GET /api/servers/{id}/route-grants: what the server's
@@ -33,6 +35,10 @@ type routeGrantsResult struct {
 	// Roles are the roles granted to the account: SHOW GRANTS does not list
 	// what a role allows, so the page cannot say the account only reads.
 	Roles []string `json:"roles,omitempty"`
+	// Hidden: on a server with hidden rules (#2529), which of them this
+	// account can read through MySQL's grants. The port forwards some
+	// statements with it, and there MySQL's grants apply, not the rules.
+	Hidden *hiddenGrantCheck `json:"hidden,omitempty"`
 	// None: no forwarding account, and why; nothing was read.
 	None string `json:"none,omitempty"`
 	// Skipped: not read, and why (this process has no MySQL client).
@@ -270,5 +276,15 @@ func (s *Server) routeGrants(ctx context.Context, e ServerEntry) routeGrantsResu
 		return res
 	}
 	res.Grants, res.Writes, res.Other, res.Roles, res.Execute = g.shown, g.writes, g.other, g.roles, g.execute
+	if e.Hidden != nil {
+		set, lerr := hiderules.Load(e.Hidden)
+		switch {
+		case lerr != nil:
+			res.Hidden = &hiddenGrantCheck{Unsure: []string{lerr.Error()}}
+		case !set.Empty():
+			check := hiddenExposures(lines, set)
+			res.Hidden = &check
+		}
+	}
 	return res
 }

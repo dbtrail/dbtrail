@@ -887,6 +887,26 @@ func (h *Handler) BindFreeSQL(f FreeSQL) {
 	h.freeSQLWhyNot = ""
 }
 
+// BindTimeTravelGate binds a per-statement check that may refuse the
+// time-travel schemas (_flashback, _snapshot, _diff) on this connection: the
+// console port refuses them for a server that hides tables and columns
+// (#2529), since they read the index and the snapshot directly. A nil gate,
+// or one that returns "", refuses nothing.
+func (h *Handler) BindTimeTravelGate(gate func() string) {
+	h.timeTravelGate = gate
+}
+
+// timeTravelRefused is the gate's refusal as a MySQL error, or nil.
+func (h *Handler) timeTravelRefused() error {
+	if h.timeTravelGate == nil {
+		return nil
+	}
+	if why := h.timeTravelGate(); why != "" {
+		return mysql.NewError(mysql.ER_SPECIFIC_ACCESS_DENIED_ERROR, why)
+	}
+	return nil
+}
+
 // BindFreeSQLUnavailable records why this connection has no free SQL, so
 // the 1235 refusal says it instead of only "time travel only".
 func (h *Handler) BindFreeSQLUnavailable(why string) {

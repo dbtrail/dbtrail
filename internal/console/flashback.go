@@ -55,6 +55,12 @@ type FlashbackTarget struct {
 	// per statement, inside Run, so the reason stays exact.
 	SQL            *SQLOnCopy
 	SQLUnavailable string
+	// TimeTravelRefusal, when it returns a reason, refuses the port's
+	// time-travel schemas (_flashback, _snapshot, _diff) for this server:
+	// they read the index and the snapshot directly, past the views that
+	// apply the server's hidden rules (#2529). Asked per statement, so a
+	// rule saved while the connection is open governs its next statement.
+	TimeTravelRefusal func() string
 	// ForwardDSN is the DSN (credentials included) the serving layer's read
 	// router (#2038) opens its ONE upstream connection with: everything the
 	// router does on the source (EXPLAIN, forwarded statements, prepared
@@ -253,7 +259,28 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 		ForwardRefused: forwardRefused,
 		ForwardGen:     forwardGen,
 		SourceSSL:      s.flashbackSourceSSL(id),
+		TimeTravelRefusal: func() string {
+			return s.timeTravelRefusal(b)
+		},
 	}, nil
+}
+
+// timeTravelRefusalMessage is why a server with hidden rules has no time
+// travel on the port: those reads do not pass through the views.
+const timeTravelRefusalMessage = "this server hides some tables and columns, so time travel on this port " +
+	"(_flashback, _snapshot, _diff) is off for it; query its tables by name to read the copy"
+
+// timeTravelRefusal is FlashbackTarget.TimeTravelRefusal for b's server:
+// the rules this build cannot read refuse too, with their own reason.
+func (s *Server) timeTravelRefusal(b *bundle) string {
+	set, err := s.hiddenRulesFor(b)
+	switch {
+	case err != nil:
+		return err.Error()
+	case !set.Empty():
+		return timeTravelRefusalMessage
+	}
+	return ""
 }
 
 // flashbackTarget maps a connection username to a canonical server id: a
