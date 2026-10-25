@@ -1,8 +1,18 @@
 # Capacity Planning
 
-How much disk the index MySQL needs, how to estimate it before you deploy, and how to monitor it afterwards.
+How much memory the machine needs, how much disk the index MySQL needs, how to estimate it before you deploy, and how to monitor it afterwards.
 
 This page covers the math; the *operation* of the index MySQL — provisioning the disk, watching it, backing it up — is the operator's responsibility, as spelled out in [SUPPORT.md](./SUPPORT.md). It applies to whatever MySQL 8.0+ your `--index-dsn` points at. (Want the index sized, monitored, and operated for you? That is what [DBTrail](https://dbtrail.com) is.)
+
+## Memory: 16 GB minimum, 32 GB recommended
+
+The machine that runs the stack (capture, the index MySQL and the router that answers SQL) needs **at least 16 GB of memory, and 32 GB is recommended** for a production database.
+
+- **32 GB** is what we recommend for a database of tens of GB under constant writes: capture, the index MySQL and the SQL statements each get room, and the router can keep the fresh mode's newest changes in memory beside its statements.
+- **16 GB** is the smallest machine we support. Give the router's statements less memory there, and keep fresh mode for the servers that need it.
+- **8 GB is for evaluation on a small database only.** With a database of tens of GB under constant writes, an 8 GB machine runs out of memory: capture is the first process to stop, and a stopped capture is a gap in what you can recover. Below 16 GB, a problem caused by memory is not something we tune for.
+
+The machine's memory is shared: the index MySQL's buffer pool, capture, and the router's statements all come out of it. How the router splits its part is in [Docker](docker.md) (`ROUTER_MEMORY`, `SQL_MEMORY`, `ROUTER_MEMORY_SHARE`).
 
 ## What one event costs
 

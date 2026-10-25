@@ -104,7 +104,9 @@ Run the index database on a separate MySQL instance from the source. This provid
 
 ### Sizing
 
-Budget roughly **1.2–1.6 KB per indexed event** (INSERT/DELETE ≈ 1.2 KB, UPDATE ≈ 1.6 KB — an UPDATE stores both row images); narrow rows ~0.9 KB, wide/update-heavy several times higher. The full model — the `daily_events × retain_days × avg_event_bytes` formula, measured per-event-type sizes, worked examples, retention/Parquet-tiering math, multi-source sizing, and monitoring — is in [Capacity Planning](capacity.md).
+Memory: **16 GB minimum, 32 GB recommended** for the machine that runs the stack; 8 GB is for evaluation on a small database only (see [Capacity Planning](capacity.md#memory-16-gb-minimum-32-gb-recommended)).
+
+Disk: budget roughly **1.2–1.6 KB per indexed event** (INSERT/DELETE ≈ 1.2 KB, UPDATE ≈ 1.6 KB — an UPDATE stores both row images); narrow rows ~0.9 KB, wide/update-heavy several times higher. The full model — the `daily_events × retain_days × avg_event_bytes` formula, measured per-event-type sizes, worked examples, retention/Parquet-tiering math, multi-source sizing, and monitoring — is in [Capacity Planning](capacity.md).
 
 ### InnoDB tuning
 
