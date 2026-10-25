@@ -75,7 +75,7 @@ func TestWriteExportJSON_shape(t *testing.T) {
 		{Schema: "shop", Table: "orders", Verdict: icebergexport.VerdictExported, Detail: "3 events", Events: 3, Upserts: 2, Deletes: 1, SnapshotID: i64(42), Cursor: "binlog.000001:700 at 2026-08-28T12:00:00Z", Location: "/w/shop/orders"},
 		{Schema: "shop", Table: "customers", Verdict: icebergexport.VerdictRefusedGap, Detail: "gap"},
 		{Schema: "shop", Table: "empty", Verdict: icebergexport.VerdictLoaded, Detail: "0 rows", Cursor: "binlog.000001:100 at 2026-08-28T11:00:00Z", Location: "/w/shop/empty"},
-	}, "/w", at)
+	}, "hadoop", "/w", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestWriteExportJSON_shape(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, buf.String())
 	}
-	if got["warehouse"] != "/w" || got["at"] != "2026-08-28T12:00:00Z" {
+	if got["catalog"] != "hadoop" || got["warehouse"] != "/w" || got["at"] != "2026-08-28T12:00:00Z" {
 		t.Fatalf("top level = %v", got)
 	}
 	tables := got["tables"].([]any)

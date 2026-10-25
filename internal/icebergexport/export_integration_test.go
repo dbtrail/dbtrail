@@ -45,6 +45,13 @@ type fixture struct {
 
 func seedFixture(t *testing.T) fixture {
 	t.Helper()
+	return seedFixtureSchema(t, "shop")
+}
+
+// seedFixtureSchema is seedFixture with the source schema named: a catalog
+// shared by an account (Glue) needs a name no other run uses.
+func seedFixtureSchema(t *testing.T, schema string) fixture {
+	t.Helper()
 	db, dbName := testutil.CreateTestDB(t)
 	// The production DDL, not testutil's single-p_future stand-in: the query
 	// planner derives an hour's coverage from the PARTITION list, so a table
@@ -55,7 +62,7 @@ func seedFixture(t *testing.T) fixture {
 	if err := indexer.EnsureSchema(db); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
-	f := fixture{db: db, dsn: testutil.IntegrationDSN(dbName), schema: "shop"}
+	f := fixture{db: db, dsn: testutil.IntegrationDSN(dbName), schema: schema}
 	// The test index has only the p_future partition, so every hour before
 	// the current one reads as rotated-and-unarchived to the planner. The
 	// whole fixture lives inside the current hour.

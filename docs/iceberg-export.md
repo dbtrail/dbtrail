@@ -40,9 +40,9 @@ From cron, hourly is a good default:
 Each table lives at `<warehouse>/<schema>/<table>/` with Iceberg's `data/` and
 `metadata/` directories; `metadata/version-hint.text` names the current
 metadata file. DuckDB and Spark read such a directory directly. Trino, Athena
-and Snowflake read Iceberg through a catalog, so with them you register the
-table's current metadata file (or the directory, where the catalog supports a
-Hadoop-style warehouse) rather than pointing at the path.
+and Snowflake read Iceberg through a catalog: export with `--catalog glue` or
+`--catalog rest` (see "Writing to AWS Glue or a REST catalog") and they find
+the tables by name.
 
 ## Running it on a timetable
 
@@ -92,6 +92,124 @@ process is what stops a long run slowing capture down.
 Two runs cannot overlap on one warehouse; the second refuses while the first
 holds it. A run that dies half way leaves the previous snapshot readable, and
 the next one resumes from the last complete commit.
+
+## Writing to AWS Glue or a REST catalog
+
+By default the tables live in a local directory (`--catalog hadoop`). Two other
+catalogs register them where other engines find them by name:
+
+- `--catalog glue` writes the files to S3 and registers each table in the AWS
+  Glue Data Catalog. Athena, Spark on EMR or Glue, Trino and Snowflake read
+  them from there.
+- `--catalog rest` talks to any Iceberg REST catalog: Glue's own Iceberg
+  endpoint, S3 Tables, Polaris, Nessie, Unity and others.
+
+### AWS Glue
+
+```bash
+AWS_REGION=us-west-2 bintrail export iceberg \
+  --index-dsn "user:pass@tcp(index:3306)/bintrail_index" \
+  --baseline-dir /data/baselines \
+  --catalog glue --warehouse s3://my-bucket/iceberg
+```
+
+- `--warehouse` is required and must be `s3://bucket` or `s3://bucket/prefix`.
+  Doubled and trailing slashes are dropped. A local path, `gs://` or `s3a://`
+  is refused.
+- Each source schema becomes a Glue database of the same name, and each table
+  is written under `<warehouse>/<schema>/<table>/`.
+- Credentials and the region come from the usual AWS chain: environment
+  variables, a profile, SSO, or the instance role. With no region the command
+  stops and says so. Keep the bucket in the catalog's region.
+- The identity needs, on Glue: `GetDatabase`, `CreateDatabase`, `GetTable`,
+  `CreateTable` and `UpdateTable`; on the bucket: list, read, write and delete
+  under the prefix.
+- Glue keeps database and table names in lowercase letters, digits and
+  underscores. bintrail does not rename anything, so a table such as
+  `Shop.Orders` or `shop.line-items` is refused with the names that do not fit.
+  Export it with `--catalog rest` or to a local directory instead.
+
+### A REST catalog
+
+Glue's Iceberg REST endpoint, signed with your AWS credentials:
+
+```bash
+bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
+  --catalog rest \
+  --catalog-uri https://glue.us-west-2.amazonaws.com/iceberg \
+  --catalog-warehouse 123456789012 \
+  --catalog-sigv4 \
+  --warehouse s3://my-bucket/iceberg
+```
+
+- `--catalog-uri` is the catalog's base URL (required).
+- `--catalog-warehouse` is the name the server knows the warehouse by: for Glue
+  the AWS account id, for S3 Tables the table bucket's ARN, for other servers
+  their catalog name.
+- `--warehouse` is optional here. When you give it (any object-store location,
+  such as `s3://` or `gs://`), each table is created under
+  `<warehouse>/<schema>/<table>`. Without it the server picks the location.
+- `--catalog-sigv4` signs every request with AWS credentials. The service and
+  region come from the URI when it is a Glue or S3 Tables endpoint
+  (`glue.<region>.amazonaws.com` signs for `glue`, `s3tables.<region>...` for
+  `s3tables`). For any other host the service is `execute-api`, what a catalog
+  behind API Gateway expects, and the region is the AWS chain's.
+  `--catalog-sigv4-region` and `--catalog-sigv4-service` override both.
+- Names are passed through as they are; the server's own rules apply.
+
+Glue's endpoint and Glue's API register the same tables, so a table written
+with one is read with the other. The S3 Tables endpoint is wired the same way
+but was not part of this release's tests.
+
+### Secrets
+
+A command line is visible to every user on the machine (`ps`) and lands in
+shell history, so no flag takes a secret. A REST catalog that wants an OAuth
+client credential or a bearer token gets it one of two ways:
+
+- an environment variable: `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL`
+  (`client_id:client_secret`) or `BINTRAIL_ICEBERG_CATALOG_TOKEN`. The env file
+  `bintrail` already reads (`.bintrail.env` or `~/.config/bintrail/config.env`)
+  can set them;
+- a file only the job can read: `--catalog-credential-file` or
+  `--catalog-token-file`.
+
+Only one way to sign in is accepted per run: SigV4, a credential, or a token.
+Two at once, or the same secret from both the variable and the file, is
+refused. A `--catalog-uri` with a user name or password in it
+(`https://user:pass@host`), or with a query string, is refused too, and
+messages and reports print the URI without either.
+
+### Two runs at once, and tables that are not bintrail's
+
+The local catalog allows one run at a time (a lock file). Glue and REST do not
+need the lock: every commit is checked against the table state the run started
+from. If another run (or another engine) committed to the table in between,
+this run's commit is not applied and the table reports `refused-conflict`. The
+next run continues from the cursor the other run committed, so nothing is
+folded twice and nothing is skipped. The same happens if an engine rewrites the
+table (compaction) during the run. A commit whose outcome the catalog cannot
+report (a server error or timeout) is refused with that said; the next run
+reads whichever cursor the catalog holds.
+
+A table that already exists in the catalog without the property
+`bintrail.export.version` was not created by bintrail. It is refused, never
+loaded into, on every catalog. Drop it or export elsewhere.
+
+A catalog is shared by everyone in the account, so two bintrail installs that
+read different source servers could both export a `shop.orders`. Each new
+table records the source it was created from (`bintrail.export.source_id`,
+the source's `bintrail_id`), and a run whose index holds a different source
+is refused for that table instead of folding its changes onto the other
+server's rows.
+
+If the catalog reports an error for a commit that in fact went through (a
+server error or a timeout after it applied the change), the run reads the
+table back, finds its own cursor there, and reports the commit as done.
+
+To reload a table from a fresh baseline with Glue or REST, drop it from the
+catalog (`DROP TABLE` in Athena, Spark or Trino). The refusals that tell a
+local user to remove the table directory say this instead.
 
 ## What a run does
 
@@ -230,6 +348,14 @@ Two things to know:
   16 seconds more per run, while Spark read the same table in under a second
   ([#2372](https://github.com/dbtrail/dbtrail/issues/2372)). Read a frequently-exported table with Spark or another engine, or
   keep DuckDB for a table exported a few times a day.
+- **Athena** reads a Glue table by name:
+  `SELECT * FROM "shop"."orders"`. Athena's `"orders$files"` lists data files
+  only, so the delete files do not show there; `"orders$snapshots"` shows them
+  per commit (`added-delete-files`, `added-equality-deletes` in `summary`).
+  Checked with Athena engine version 3: every delta reads correctly.
+- **Spark and Trino** read the Glue tables through their Glue catalog
+  (`spark.sql.catalog.glue.type=glue`; Trino `iceberg.catalog.type=glue`) or
+  the REST endpoint; both apply equality deletes.
 - **The table is not relocatable by default.** Iceberg metadata stores
   absolute paths. If you copy or sync the warehouse elsewhere (for example
   `bintrail upload` to S3), read it with
@@ -237,19 +363,28 @@ Two things to know:
 
 ## Limits in this release
 
-- The warehouse is a local directory. Writing directly to S3 is not supported
-  yet; sync the directory and read with `allow_moved_paths`. A `--warehouse`
-  that is a URL (`s3://`, `gs://`, `file://`, any `scheme://`) is refused.
+- With the local catalog the warehouse is a local directory, and a
+  `--warehouse` that is a URL (`s3://`, `gs://`, `file://`, any `scheme://`) is
+  refused: that catalog commits through a file that races on object storage.
+  To write to S3, use `--catalog glue` or `--catalog rest`. A local warehouse
+  copied to S3 cannot be registered in a catalog later, because its metadata
+  holds absolute local paths; export to S3 from the start.
 - No schema evolution yet. A column added or dropped in the source refuses the
-  table (`refused-ddl`); remove the table directory to reload it from a fresh
-  baseline. Iceberg tracks columns by id, which is what will make an ADD
+  table (`refused-ddl`); remove the table directory (with Glue or REST, drop
+  the table) to reload it from a fresh baseline. Iceberg tracks columns by id, which is what will make an ADD
   COLUMN a metadata change in a later release.
 - Tables are unpartitioned.
 - Built for MySQL and MariaDB sources; `bintrail-pg` does not have the
   command, and the export does not check that an index was written by the
   MySQL capturer.
-- One writer at a time: the run holds a lock file at the warehouse root and a
-  second concurrent run refuses.
+- With the local catalog, one writer at a time: the run holds a lock file at
+  the warehouse root and a second concurrent run refuses. With Glue or REST,
+  concurrent runs are allowed and the one that commits second is refused for
+  that table (see "Two runs at once").
+- Scheduling is still yours (cron, a systemd timer, a Kubernetes CronJob).
+- Column names are written as the source spells them. Athena compares
+  column names without case, so two columns that differ only in case cannot
+  both be read there.
 - Memory: a run holds one entry per primary key touched in its window, like
   `baseline refresh`. Run it often enough that a window stays a fraction of the
   table.
@@ -283,7 +418,13 @@ cursor commits nothing and records nothing. Both report `unchanged`.
 |---|---|
 | `--index-dsn` | the index (required) |
 | `--baseline-dir` / `--baseline-s3` | where the baseline snapshots are (one required) |
-| `--warehouse` | local directory the Iceberg tables live under (required; env `BINTRAIL_ICEBERG_WAREHOUSE`) |
+| `--warehouse` | where the tables live: a local directory for `hadoop` (required), `s3://bucket/prefix` for `glue` (required), an optional location prefix for `rest`; env `BINTRAIL_ICEBERG_WAREHOUSE` |
+| `--catalog` | `hadoop` (default, a local directory), `glue` or `rest` |
+| `--catalog-uri` | REST catalog base URL (`rest`, required) |
+| `--catalog-warehouse` | the warehouse name the REST server expects: account id, S3 Tables ARN, catalog name (`rest`) |
+| `--catalog-sigv4` | sign REST requests with AWS credentials (`rest`) |
+| `--catalog-sigv4-region`, `--catalog-sigv4-service` | override the signing region and service (default: from a Glue or S3 Tables URI, else the AWS chain and `execute-api`) |
+| `--catalog-credential-file`, `--catalog-token-file` | file holding the REST OAuth client credential or bearer token; or env `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL`, `BINTRAIL_ICEBERG_CATALOG_TOKEN` |
 | `--tables` | comma-separated `schema.table` list (default: every table in the newest snapshot) |
 | `--at` | export up to this instant (default: now); must be after the table's cursor and not below the live window |
 | `--fetch-batch-size` | event page size for the fold (0 = default) |

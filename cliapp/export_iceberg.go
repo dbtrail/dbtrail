@@ -3,8 +3,11 @@ package cliapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +41,31 @@ var exportIcebergCmd = &cobra.Command{
 one table per <warehouse>/<schema>/<table>/, readable by DuckDB, Spark, Trino
 and Athena.
 
+CATALOGS
+
+  hadoop (default) The tables live in a local directory (--warehouse). One
+                   export at a time per directory: a second one is refused.
+  glue             The tables are registered in the AWS Glue Data Catalog and
+                   written under --warehouse s3://bucket/prefix, so Athena,
+                   EMR Spark, Trino and Snowflake read them by name. The
+                   database is the source schema. Credentials and region come
+                   from the AWS default chain (AWS_REGION, a profile, an
+                   instance role). Names must be lowercase letters, digits and
+                   underscores, the only names Glue keeps as given.
+  rest             An Iceberg REST catalog at --catalog-uri. --catalog-warehouse
+                   is the identifier the server expects (a catalog name, an AWS
+                   account id, an S3 Tables bucket ARN); --warehouse is an
+                   optional location prefix. Authenticate with --catalog-sigv4,
+                   or an OAuth client credential, or a bearer token. Secrets are
+                   never flag values: set ` + envCatalogCredential + ` or
+                   ` + envCatalogToken + `, or point --catalog-credential-file or
+                   --catalog-token-file at a file holding the secret.
+
+With glue or rest, two exports of one table may run at once: the one that
+commits second is refused for that table ("refused-conflict") and commits
+nothing; the next run continues from the winner's cursor. A table the catalog
+already holds that bintrail did not create is refused, never adopted.
+
 The first run loads the newest baseline snapshot. Every run after that appends
 only what changed: the events between the table's own cursor and the run's
 binlog cut are folded to the net change per primary key and committed as ONE
@@ -48,7 +76,8 @@ concern and any engine can do it.
 The cursor lives in the table's own properties, in the same commit as the
 data, so nothing is written to the index and a run that dies before committing
 leaves the previous snapshot in place and resumes from it. To reload a table
-from a fresh baseline, remove its directory.
+from a fresh baseline, remove its directory (with glue or rest, drop the table
+from the catalog).
 
 WHAT IT REFUSES
 
@@ -91,6 +120,15 @@ Examples:
   bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
     --warehouse /data/iceberg --tables shop.orders,shop.customers
 
+  # Register the tables in AWS Glue, data on S3 (Athena reads them by name)
+  AWS_REGION=us-west-2 bintrail export iceberg --index-dsn "..." \
+    --baseline-dir /data/baselines --catalog glue --warehouse s3://my-bucket/iceberg
+
+  # Glue's Iceberg REST endpoint, signed with SigV4
+  bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
+    --catalog rest --catalog-uri https://glue.us-west-2.amazonaws.com/iceberg \
+    --catalog-warehouse 123456789012 --catalog-sigv4 --warehouse s3://my-bucket/iceberg
+
   # Read it back (DuckDB 1.4 needs the key columns selected, or a
   # materialized copy, for equality deletes to apply; 1.5 does not)
   duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT id, status FROM iceberg_scan('/data/iceberg/shop/orders') LIMIT 10;"`,
@@ -106,6 +144,25 @@ var (
 	eiAt          string
 	eiFetchBatch  int
 	eiFormat      string
+
+	eiCatalog          string
+	eiCatalogURI       string
+	eiCatalogWarehouse string
+	eiSigV4            bool
+	eiSigV4Region      string
+	eiSigV4Service     string
+	eiCredentialFile   string
+	eiTokenFile        string
+)
+
+// The REST catalog's secrets are read from these variables or from the
+// --catalog-*-file flags, never from a flag value: a command line is
+// readable by every local user (ps, /proc/<pid>/cmdline) and lands in shell
+// history. The env file bindCommandEnv loads (.bintrail.env,
+// ~/.config/bintrail/config.env) sets them too.
+const (
+	envCatalogCredential = "BINTRAIL_ICEBERG_CATALOG_CREDENTIAL"
+	envCatalogToken      = "BINTRAIL_ICEBERG_CATALOG_TOKEN"
 )
 
 func init() {
@@ -121,6 +178,14 @@ func init() {
 	f.StringVar(&eiAt, "at", "", "Point-in-time to export up to (default: now)")
 	f.IntVar(&eiFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
 	f.StringVar(&eiFormat, "format", "text", "Output format: text or json")
+	f.StringVar(&eiCatalog, "catalog", "hadoop", "Catalog to register the tables in: hadoop (a local directory), glue (AWS Glue, data on S3) or rest (an Iceberg REST catalog)")
+	f.StringVar(&eiCatalogURI, "catalog-uri", "", "REST catalog base URL (--catalog rest)")
+	f.StringVar(&eiCatalogWarehouse, "catalog-warehouse", "", "REST catalog warehouse identifier: a catalog name, an AWS account id, an S3 Tables bucket ARN (--catalog rest)")
+	f.BoolVar(&eiSigV4, "catalog-sigv4", false, "Sign REST catalog requests with AWS credentials from the default chain (--catalog rest)")
+	f.StringVar(&eiSigV4Region, "catalog-sigv4-region", "", "Region to sign for (default: from a Glue or S3 Tables --catalog-uri, else the AWS chain)")
+	f.StringVar(&eiSigV4Service, "catalog-sigv4-service", "", "Service to sign for (default: glue or s3tables from the --catalog-uri host, else execute-api)")
+	f.StringVar(&eiCredentialFile, "catalog-credential-file", "", "File holding the REST catalog OAuth client credential (client_id:client_secret); or set "+envCatalogCredential)
+	f.StringVar(&eiTokenFile, "catalog-token-file", "", "File holding the REST catalog bearer token; or set "+envCatalogToken)
 	cli.AddDuckDBTuningFlags(exportIcebergCmd)
 	bindCommandEnv(exportIcebergCmd)
 
@@ -138,11 +203,21 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 	if eiBaselineDir != "" && eiBaselineS3 != "" {
 		return fmt.Errorf("--baseline-dir and --baseline-s3 are mutually exclusive")
 	}
-	if strings.TrimSpace(eiWarehouse) == "" {
-		return fmt.Errorf("--warehouse is required")
+	catCfg, err := exportCatalogConfig()
+	if err != nil {
+		return err
 	}
-	if err := icebergexport.CheckWarehouse(eiWarehouse); err != nil {
-		return fmt.Errorf("--warehouse: %w", err)
+	if catCfg.Kind == icebergexport.CatalogHadoop {
+		if strings.TrimSpace(eiWarehouse) == "" {
+			return fmt.Errorf("--warehouse is required")
+		}
+		if err := icebergexport.CheckWarehouse(eiWarehouse); err != nil {
+			return fmt.Errorf("--warehouse: %w", err)
+		}
+	}
+	location, err := icebergexport.CheckCatalog(catCfg, eiWarehouse)
+	if err != nil {
+		return err
 	}
 	if !cliutil.IsValidOutputFormat(eiFormat) {
 		return fmt.Errorf("--format must be text or json")
@@ -186,6 +261,7 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 		Warehouse:      eiWarehouse,
 		Tables:         tables,
 		At:             at,
+		Catalog:        catCfg,
 		FetchBatchSize: eiFetchBatch,
 		ArchiveFetcher: cli.TunedArchiveFetcher(tuning),
 		DuckDBTuning:   tuning,
@@ -201,10 +277,11 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 			failed++
 		}
 	}
+	target := exportTarget(catCfg, location)
 	if eiFormat == "json" {
-		err = writeExportJSON(cmd.OutOrStdout(), outcomes, eiWarehouse, at)
+		err = writeExportJSON(cmd.OutOrStdout(), outcomes, string(catCfg.Kind), eiWarehouse, at)
 	} else {
-		err = writeExportSummary(cmd.OutOrStdout(), outcomes, eiWarehouse, at)
+		err = writeExportSummary(cmd.OutOrStdout(), outcomes, target, at)
 	}
 	if err != nil {
 		return fmt.Errorf("write the export report: %w", err)
@@ -213,6 +290,89 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("iceberg export: %d of %d table(s) did not end current", failed, len(outcomes))
 	}
 	return nil
+}
+
+// exportCatalogConfig builds the catalog settings from the flags. The REST
+// secrets are read only for --catalog rest, so a token exported for another
+// tool does not break a local run; a secret FILE flag given with another
+// catalog is refused, because the operator meant something by it.
+func exportCatalogConfig() (icebergexport.CatalogConfig, error) {
+	c := icebergexport.CatalogConfig{
+		Kind:         icebergexport.CatalogKind(strings.ToLower(strings.TrimSpace(eiCatalog))),
+		URI:          eiCatalogURI,
+		Warehouse:    eiCatalogWarehouse,
+		SigV4:        eiSigV4,
+		SigV4Region:  eiSigV4Region,
+		SigV4Service: eiSigV4Service,
+	}
+	if c.Kind == "" {
+		c.Kind = icebergexport.CatalogHadoop
+	}
+	if c.Kind != icebergexport.CatalogREST {
+		for _, f := range []struct{ name, v string }{
+			{"--catalog-credential-file", eiCredentialFile},
+			{"--catalog-token-file", eiTokenFile},
+		} {
+			if f.v != "" {
+				return c, fmt.Errorf("%s only applies to --catalog rest", f.name)
+			}
+		}
+		return c, nil
+	}
+	var err error
+	if c.Credential, err = readSecret(envCatalogCredential, "--catalog-credential-file", eiCredentialFile); err != nil {
+		return c, err
+	}
+	if c.Token, err = readSecret(envCatalogToken, "--catalog-token-file", eiTokenFile); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// readSecret returns the secret from the environment variable or from the
+// file the flag names, trimmed of surrounding blanks (a file usually ends
+// in a newline). Both at once is refused rather than ranked. An unreadable
+// file is reported WITHOUT the value given: a secret pasted where the path
+// belongs is the likely mistake, and echoing it would print it.
+func readSecret(env, flag, path string) (string, error) {
+	fromEnv := strings.TrimSpace(os.Getenv(env))
+	if path == "" {
+		return fromEnv, nil
+	}
+	if fromEnv != "" {
+		return "", fmt.Errorf("both %s and %s are set; use one", env, flag)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return "", fmt.Errorf("%s: the file cannot be read (%v); the flag takes the PATH of a file holding the secret", flag, err)
+	}
+	v := strings.TrimSpace(string(b))
+	if v == "" {
+		return "", fmt.Errorf("%s is empty", flag)
+	}
+	return v, nil
+}
+
+// exportTarget says where a run wrote, for the summary's first line.
+func exportTarget(c icebergexport.CatalogConfig, warehouse string) string {
+	switch c.Kind {
+	case icebergexport.CatalogGlue:
+		return "the Glue catalog, " + strings.TrimSpace(warehouse)
+	case icebergexport.CatalogREST:
+		t := "the REST catalog at " + icebergexport.RedactURI(c.URI)
+		if c.Warehouse != "" {
+			t += " (warehouse " + c.Warehouse + ")"
+		}
+		if strings.TrimSpace(warehouse) != "" {
+			t += ", " + strings.TrimSpace(warehouse)
+		}
+		return t
+	}
+	return warehouse
 }
 
 // resolveExportTables returns --tables when given, otherwise every table in
@@ -295,6 +455,7 @@ func writeExportSummary(w io.Writer, outcomes []icebergexport.Outcome, warehouse
 
 // exportJSON is the --format json shape.
 type exportJSON struct {
+	Catalog   string            `json:"catalog"`
 	Warehouse string            `json:"warehouse"`
 	At        string            `json:"at"`
 	Tables    []exportTableJSON `json:"tables"`
@@ -314,8 +475,8 @@ type exportTableJSON struct {
 	Location   string `json:"location,omitempty"`
 }
 
-func writeExportJSON(w io.Writer, outcomes []icebergexport.Outcome, warehouse string, at time.Time) error {
-	out := exportJSON{Warehouse: warehouse, At: at.UTC().Format(time.RFC3339)}
+func writeExportJSON(w io.Writer, outcomes []icebergexport.Outcome, catalogKind, warehouse string, at time.Time) error {
+	out := exportJSON{Catalog: catalogKind, Warehouse: warehouse, At: at.UTC().Format(time.RFC3339)}
 	for _, o := range outcomes {
 		out.Tables = append(out.Tables, exportTableJSON{
 			Schema: o.Schema, Table: o.Table, Verdict: string(o.Verdict), Detail: o.Detail,

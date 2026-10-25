@@ -208,7 +208,7 @@ func TestFirstLoad_refusesTableWithDataAndNoCursor(t *testing.T) {
 	if err := rd.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	tbl, err = tx.Commit(context.Background())
+	tbl, err = tx.Commit(withCommitBase(context.Background(), tbl, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestWriteBaselineRows_fixedBinaryIsTrimmedAndKeyed(t *testing.T) {
 	if err := rd.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	tbl, err = tx.Commit(ctx)
+	tbl, err = tx.Commit(withCommitBase(ctx, tbl, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

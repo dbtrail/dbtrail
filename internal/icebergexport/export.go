@@ -32,10 +32,16 @@ import (
 // Config drives one export run.
 type Config struct {
 	IndexDSN    string
-	BaselineSrc string   // local directory or s3:// prefix of baseline snapshots
-	Warehouse   string   // local directory the Iceberg tables live under
-	Tables      []string // schema.table entries
-	At          time.Time
+	BaselineSrc string // local directory or s3:// prefix of baseline snapshots
+	// Warehouse is where the tables live: a local directory for the hadoop
+	// catalog, an s3:// prefix for glue, and an optional object-store prefix
+	// for rest (empty lets the REST server place the tables).
+	Warehouse string
+	Tables    []string // schema.table entries
+	At        time.Time
+	// Catalog is the catalog the tables are registered in; the zero value
+	// is the local Hadoop catalog.
+	Catalog CatalogConfig
 
 	// FetchBatchSize is the event page size (0 = query.DefaultStreamBatchSize).
 	FetchBatchSize int
@@ -66,7 +72,11 @@ const (
 	VerdictRefusedGap Verdict = "refused-gap" // events the index does not hold sit inside the window
 	VerdictRefusedDDL Verdict = "refused-ddl" // the table changed shape, or a destructive DDL sits in the window
 	VerdictRefused    Verdict = "refused"     // any other refusal; Detail says which
-	VerdictSkipped    Verdict = "skipped"     // the run ended before this table was reached
+	// VerdictRefusedConflict: another writer committed to the table while
+	// this run was folding (Glue and REST catalogs); nothing of this run's
+	// window was applied, and the next run resumes from that writer's cursor.
+	VerdictRefusedConflict Verdict = "refused-conflict"
+	VerdictSkipped         Verdict = "skipped" // the run ended before this table was reached
 )
 
 // OK reports whether the verdict left the table current.
@@ -138,6 +148,8 @@ type deps struct {
 	resolver *metadata.Resolver
 	fetcher  query.ArchiveFetcher
 	cat      catalog.Catalog
+	location string // where new tables are placed ("" = the catalog decides); see CheckCatalog
+	sourceID string // the index's single registered source (bintrail_id), "" for a file-mode index
 	mem      memory.Allocator
 }
 
@@ -150,7 +162,8 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 	if cfg.BaselineSrc == "" {
 		return nil, errors.New("a baseline source is required")
 	}
-	if err := CheckWarehouse(cfg.Warehouse); err != nil {
+	location, err := CheckCatalog(cfg.Catalog, cfg.Warehouse)
+	if err != nil {
 		return nil, err
 	}
 	if len(cfg.Tables) == 0 {
@@ -164,7 +177,7 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 	}
 	cfg.At = cfg.At.UTC()
 
-	cat, release, err := openWarehouse(ctx, cfg.Warehouse)
+	cat, release, ctx, err := openCatalog(ctx, cfg.Catalog, location)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +201,10 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 	if err := refuseMultiSource(ctx, db); err != nil {
 		return nil, err
 	}
+	sourceID, err := singleSourceID(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	resolver, err := metadata.NewResolver(db, 0)
 	if err != nil {
 		return nil, fmt.Errorf("load schema snapshot: %w", err)
@@ -204,14 +221,38 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 		resolver: resolver,
 		fetcher:  fetcher,
 		cat:      cat,
+		location: location,
+		sourceID: sourceID,
 		mem:      memory.DefaultAllocator,
 	}
+	return d.runTables(ctx, cfg.Tables), nil
+}
 
-	outcomes := make([]Outcome, 0, len(cfg.Tables))
-	for _, entry := range cfg.Tables {
+// runTables runs every entry in order. Names the catalog would not keep as
+// given are refused first, before any namespace or table is created for
+// them; the other entries still run. Every refusal's remedy is phrased for
+// the catalog in use.
+func (d *deps) runTables(ctx context.Context, entries []string) []Outcome {
+	kind := d.cfg.Catalog.kind()
+	badNames := checkCatalogNames(kind, entries)
+	outcomes := make([]Outcome, 0, len(entries))
+	for _, o := range d.runEntries(ctx, entries, badNames) {
+		o.Detail = catalogRemedy(kind, o.Detail)
+		outcomes = append(outcomes, o)
+	}
+	return outcomes
+}
+
+func (d *deps) runEntries(ctx context.Context, entries []string, badNames map[string]error) []Outcome {
+	outcomes := make([]Outcome, 0, len(entries))
+	for _, entry := range entries {
 		schema, tbl, ok := strings.Cut(entry, ".")
 		if !ok || schema == "" || tbl == "" {
 			outcomes = append(outcomes, refusal(schema, tbl, fmt.Errorf("table entry %q must be schema.table", entry)))
+			continue
+		}
+		if err := badNames[entry]; err != nil {
+			outcomes = append(outcomes, refusal(schema, tbl, err))
 			continue
 		}
 		if ctx.Err() != nil {
@@ -221,7 +262,7 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 		}
 		outcomes = append(outcomes, d.runTable(ctx, schema, tbl))
 	}
-	return outcomes, nil
+	return outcomes
 }
 
 // refuseMultiSource refuses an index that holds more than one source, or one
@@ -255,6 +296,39 @@ func refuseMultiSource(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// singleSourceID returns the bintrail_id of the index's one registered
+// source, or "" when it registers none (file mode). Run calls it after
+// refuseMultiSource.
+func singleSourceID(ctx context.Context, db *sql.DB) (string, error) {
+	var id string
+	err := db.QueryRowContext(ctx, `SELECT bintrail_id FROM bintrail_servers LIMIT 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the index's source id: %w", err)
+	}
+	return id, nil
+}
+
+// checkSource refuses a table created from another source. A Glue or REST
+// catalog is shared by an account, so two installs reading different
+// servers can both export shop.orders; without this each would fold its
+// own binlog against the other's cursor. A table created before the
+// property existed carries none and is accepted.
+func checkSource(tbl *table.Table, schema, name, runSource string) error {
+	have, ok := tbl.Properties()[propSource]
+	if !ok || have == runSource {
+		return nil
+	}
+	run := runSource
+	if run == "" {
+		run = "none (the index registers no source)"
+	}
+	return fmt.Errorf("the table %s.%s at %s was exported from another source (%s=%s), and this index's source is %s; export it to another warehouse or catalog",
+		schema, name, tbl.Location(), propSource, have, run)
+}
+
 // classify turns a per-table error into its verdict, on the sentinels the
 // reconstruct package exports rather than on message text.
 func classify(err error) Verdict {
@@ -264,6 +338,8 @@ func classify(err error) Verdict {
 		return VerdictRefusedGap
 	case errors.Is(err, reconstruct.ErrSchemaChanged), errors.Is(err, reconstruct.ErrDestructiveDDL):
 		return VerdictRefusedDDL
+	case errors.Is(err, ErrConcurrentCommit):
+		return VerdictRefusedConflict
 	default:
 		return VerdictRefused
 	}
@@ -300,6 +376,12 @@ func (d *deps) runTable(ctx context.Context, schema, tbl string) Outcome {
 	}
 	var cur *cursor
 	if exists {
+		if err := checkOwned(icetbl, schema, tbl); err != nil {
+			return refusal(schema, tbl, err)
+		}
+		if err := checkSource(icetbl, schema, tbl, d.sourceID); err != nil {
+			return refusal(schema, tbl, err)
+		}
 		cur, err = readCursor(icetbl.Properties())
 		if err != nil {
 			return refusal(schema, tbl, err)
@@ -422,7 +504,15 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 
 	icetbl := existing
 	if icetbl == nil {
-		icetbl, err = d.cat.CreateTable(ctx, ident, icebergSchema(cols), catalog.WithProperties(tableProperties()))
+		props := tableProperties()
+		if d.sourceID != "" {
+			props[propSource] = d.sourceID
+		}
+		opts := []catalog.CreateTableOpt{catalog.WithProperties(props)}
+		if loc := tableLocation(d.location, schema, tbl); loc != "" && d.cfg.Catalog.kind() != CatalogHadoop {
+			opts = append(opts, catalog.WithLocation(loc))
+		}
+		icetbl, err = d.createTable(ctx, ident, icebergSchema(cols), opts...)
 		if err != nil {
 			return nil, nil, none, fmt.Errorf("create Iceberg table %s.%s: %w", schema, tbl, err)
 		}
@@ -446,6 +536,7 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 	}
 
 	cur := &cursor{File: meta.BinlogFile, Pos: uint64(meta.BinlogPos), At: snapTime.UTC(), FromBaseline: true}
+	base := icetbl
 	tx := icetbl.NewTransaction()
 	if len(files) > 0 {
 		rd := tx.NewRowDelta(iceberg.Properties{
@@ -462,7 +553,7 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 	if err := tx.SetProperties(props); err != nil {
 		return nil, nil, none, err
 	}
-	icetbl, err = tx.Commit(ctx)
+	icetbl, err = tx.Commit(withCommitBase(ctx, base, props))
 	if err != nil {
 		return nil, nil, none, fmt.Errorf("commit the first load of %s.%s: %w", schema, tbl, err)
 	}
@@ -475,6 +566,26 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 	d.committed(Commit{Schema: schema, Table: tbl, Kind: CommitLoad, Rows: rows, SnapshotID: res.snapshotID,
 		Cursor: cur.String(), Location: icetbl.Location()})
 	return icetbl, cur, res, nil
+}
+
+// createTable creates the table, and reads a failure that left a table of
+// ours in its place as the lost race it is: two first loads ran at once and
+// the other created it first. Catalogs spell that failure differently (Glue
+// returns its own AlreadyExistsException, not catalog.ErrTableAlreadyExists),
+// so the table is looked up instead of the error matched. A same-named table
+// bintrail did not create keeps the original error; the next run's
+// ownership check names it.
+func (d *deps) createTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+	tbl, err := d.cat.CreateTable(ctx, ident, sc, opts...)
+	if err == nil {
+		return tbl, nil
+	}
+	if other, ok, lerr := loadTable(ctx, d.cat, ident); lerr == nil && ok {
+		if _, owned := other.Properties()[propVersion]; owned {
+			return nil, fmt.Errorf("%w (creating it failed: %v)", ErrConcurrentCommit, err)
+		}
+	}
+	return nil, err
 }
 
 // committed reports one durable commit to the caller.
@@ -949,10 +1060,11 @@ func writeDelta(ctx context.Context, mem memory.Allocator, icetbl *table.Table, 
 			return nil, fmt.Errorf("stage the delta commit: %w", err)
 		}
 	}
-	if err := tx.SetProperties(newCur.properties()); err != nil {
+	props := newCur.properties()
+	if err := tx.SetProperties(props); err != nil {
 		return nil, err
 	}
-	return tx.Commit(ctx)
+	return tx.Commit(withCommitBase(ctx, icetbl, props))
 }
 
 // releasing hands ownership of every yielded batch to its consumer, the way
