@@ -80,13 +80,15 @@ func (s *Server) FreshServerNames() []string {
 	return out
 }
 
-// SQLModeWarming reports whether server id is in fresh mode and still
-// catching up with capture: no answer of the copy since fresh mode applied
-// read every table it asked for with the newest captured changes. Tails are
-// built on a statement's demand, so a server with no answer since is
-// catching up, and so is one whose last answer read a table as of its
-// snapshot (a table no statement had asked for yet): that answer was not
-// fresh. With BINTRAIL_SQL_TAILS=on, fresh mode applied when this process
+// SQLModeWarming reports whether server id is in fresh mode and still in
+// its warm-up: no answer of the copy since fresh mode applied read every
+// table it asked for with its tail. Tails are built after the first
+// statement that reads each table, so right after the switch answers are as
+// old as the snapshot. The warm-up ends at the first such answer and does
+// not come back: an answer that reads no table, reads the change log, or
+// reads a table that cannot have a tail says nothing about the others, and
+// how far behind each answer is is the router's lag figure (data_age), not
+// this. With BINTRAIL_SQL_TAILS=on, fresh mode applied when this process
 // started.
 func (s *Server) SQLModeWarming(id string) bool {
 	var since time.Time
@@ -103,8 +105,8 @@ func (s *Server) SQLModeWarming(id string) bool {
 		}
 		since = t
 	}
-	a, ok := s.copyAges.lastAnswer(id)
-	return !(ok && a.allTailed && !a.ranAt.Before(since))
+	ran := s.copyAges.lastTailedRan(id)
+	return ran.IsZero() || ran.Before(since)
 }
 
 // tailsOnFor reports whether server id's statements on the port read tails.

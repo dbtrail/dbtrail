@@ -5,10 +5,12 @@ import (
 	"time"
 )
 
-// #2546: fresh mode is "catching up" from the moment it applies until the
-// copy gives an answer that read every table it asked for with the newest
-// captured changes. Tails are built on a statement's demand, so a server
-// that answered nothing since is still catching up.
+// #2546: fresh mode is in its warm-up from the moment it applies until the
+// copy's first answer that read every table it asked for with its tail.
+// Tails are built on a statement's demand, so a server that answered
+// nothing since is still warming up. The warm-up ends once and does not come
+// back: a later answer that reads no table, the change log or a table that
+// cannot have a tail says nothing about the others.
 
 func answerAt(ran time.Time, tailed bool) copyAnswer {
 	a := copyAnswer{side: "copy", ok: true, ranAt: ran, allTailed: tailed}
@@ -45,8 +47,8 @@ func TestSQLFreshWarming_2546(t *testing.T) {
 		t.Fatal("an answer since that read every table with its newest changes: still catching up")
 	}
 	s.copyAges.note(id, answerAt(time.Now().Add(3*time.Millisecond), false))
-	if !s.SQLModeWarming(id) {
-		t.Fatal("the last answer read a table as of its snapshot, yet it says caught up")
+	if s.SQLModeWarming(id) {
+		t.Fatal("a later answer that read no tail (SELECT 1, the change log, a table with no tail) put the warm-up back")
 	}
 	// Off and on again starts over.
 	s.copyAges.note(id, answerAt(time.Now().Add(4*time.Millisecond), true))
@@ -88,6 +90,36 @@ func TestSQLFreshWarming_environment_2546(t *testing.T) {
 
 // The status document carries it per server, for a server listed before its
 // first statement too.
+// An answer that read no table (a connection pool's SELECT 1) does not end
+// the warm-up.
+func TestSQLFreshWarming_aNoTableAnswerDoesNotEndIt_2546(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a")
+	s, _ := freshTestServer(t, reg, 4, 3)
+	if _, err := reg.SetSQLFresh(ids[0], true); err != nil {
+		t.Fatal(err)
+	}
+	s.applySQLFresh()
+	s.copyAges.note(ids[0], copyAnswer{side: "copy", ok: true, ranAt: time.Now().Add(time.Millisecond)})
+	if !s.SQLModeWarming(ids[0]) {
+		t.Fatal("an answer that read no table ended the warm-up")
+	}
+}
+
+// With every server fresh, a server the copy answered without a routing
+// decision (routing off, a <server>@copy connection) is in the numbers with
+// its warm-up read, not assumed.
+func TestSQLFreshWarming_environmentListsAnsweredServers_2546(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a")
+	s, _ := freshTestServer(t, reg, 0, 0)
+	s.routing = newRoutingStats(time.Now(), nil)
+	t.Setenv("BINTRAIL_SQL_TAILS", "on")
+	s.copyAges.note(ids[0], answerAt(time.Now().Add(time.Millisecond), true))
+	n, ok := s.RouterNumbers().Servers[ids[0]]
+	if !ok || n.SQLMode != "fresh" || n.SQLModeWarming {
+		t.Fatalf("listed %v, mode %q, warming %v; want listed, fresh, warmed up", ok, n.SQLMode, n.SQLModeWarming)
+	}
+}
+
 func TestSQLFreshWarming_inTheNumbers_2546(t *testing.T) {
 	reg, ids := freshTestRegistry(t, "a")
 	s, _ := freshTestServer(t, reg, 4, 3)

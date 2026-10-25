@@ -254,8 +254,15 @@ func (s *Server) RouterNumbers() RouterNumbers {
 		out.Servers[id] = n
 	}
 	// A server in fresh mode is listed before its first statement: that it
-	// is fresh is what the operator who switched it looks for.
-	for _, id := range s.fresh.ids() {
+	// is fresh is what the operator who switched it looks for. With every
+	// server fresh (BINTRAIL_SQL_TAILS=on), one the copy answered without a
+	// routing decision (routing off, a <server>@copy connection) is listed
+	// too, so its warm-up is read, not assumed.
+	listed := s.fresh.ids()
+	if !tailsOff() {
+		listed = s.copyAges.answered()
+	}
+	for _, id := range listed {
 		if _, ok := out.Servers[id]; !ok {
 			n := RouterServerNumbers{Reasons: map[string]uint64{}}
 			n.SQLMode, n.SQLModeFrom = s.SQLModeOf(id)

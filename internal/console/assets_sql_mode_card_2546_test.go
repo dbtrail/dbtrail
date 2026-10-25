@@ -76,9 +76,9 @@ console.log(JSON.stringify(out));
 		}
 	}
 	check("appliedFresh", got["appliedFresh"].Pick == "fresh" && got["appliedFresh"].Editable && got["appliedFresh"].State == "Fresh mode is on for this server.", "applied fresh")
-	check("warming", got["warming"].Editable && strings.HasPrefix(got["warming"].State, "Fresh mode is on for this server and is still catching up with capture"), "fresh but not caught up yet")
-	check("envWarming", strings.Contains(got["envWarming"].State, "still catching up"), "fresh for every server, this one not caught up yet")
-	check("appliedFresh", !strings.Contains(got["appliedFresh"].State, "catching up"), "caught up says nothing about catching up")
+	check("warming", got["warming"].Editable && strings.HasPrefix(got["warming"].State, "Fresh mode is on for this server, and it has not answered with the newest changes yet"), "fresh but not caught up yet")
+	check("envWarming", strings.Contains(got["envWarming"].State, "has not answered with the newest changes yet"), "fresh for every server, this one not caught up yet")
+	check("appliedFresh", !strings.Contains(got["appliedFresh"].State, "not answered"), "caught up says nothing about catching up")
 	check("appliedFastUnlisted", got["appliedFastUnlisted"].State == "Fast mode is on for this server.", "a server the router does not list is fast there")
 	check("pending", got["pending"].Tone == "warn" && strings.HasPrefix(got["pending"].State, "Saved: Fresh. The router still answers in fast mode"), "saved but not applied yet")
 	check("envLocked", !got["envLocked"].Editable && got["envLocked"].Pick == "fresh" && strings.Contains(got["envLocked"].State, "SQL_FRESH=on") &&

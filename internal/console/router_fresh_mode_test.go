@@ -87,10 +87,10 @@ console.log(JSON.stringify(out));
 	if !has("switched", "Fresh mode for shop, chosen on its Snapshots page") || has("switched", "Fast mode") {
 		t.Errorf("a server fresh by its own switch: %q", got["switched"])
 	}
-	if !has("warming", "Fresh mode for shop, chosen on its Snapshots page, still catching up with capture") {
+	if !has("warming", "Fresh mode for shop, chosen on its Snapshots page. It has not answered with the newest changes yet") {
 		t.Errorf("fresh but not caught up yet: %q", got["warming"])
 	}
-	if has("switched", "Fresh mode for shop, chosen on its Snapshots page, still catching up") {
+	if has("switched", "Fresh mode for shop, chosen on its Snapshots page. It has not answered") {
 		t.Errorf("caught up yet said as catching up: %q", got["switched"])
 	}
 	// A router older than the per-server switch (v0.116, v0.117): one mode
