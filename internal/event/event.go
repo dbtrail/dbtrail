@@ -56,6 +56,14 @@ const (
 	// binlog_events — the consumer handles it out-of-band — so it does not break the
 	// "EventType numeric values are a persistence contract" rule for stored rows.
 	EventRelation EventType = 8
+	// EventCaughtUp says the stream has received every event the source had
+	// when it sent a replication heartbeat (#2556): the source sends one when
+	// it has nothing newer, and the StreamParser emits this marker only when
+	// the heartbeat shows nothing is left to send (StreamParser.Run). It
+	// carries no position, no time and no row data, and is never written to
+	// binlog_events: the stream consumer handles it out of band, like
+	// EventRelation. A consumer that does not know it must skip it.
+	EventCaughtUp EventType = 9
 )
 
 // Event is a fully resolved change event with column names attached. It carries

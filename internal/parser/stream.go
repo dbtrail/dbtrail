@@ -251,6 +251,11 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	//     next transaction starts.
 	var lastCommittedGTID, ddlTxnGTID string
 	var afterRotate, skipTxn bool
+	// The last replication heartbeat (#2556): its file and position, and
+	// hbIdle while no other event arrived after it. See onHeartbeat.
+	var hbFile string
+	var hbPos uint64
+	var hbIdle bool
 	// txnRows counts the row events emitted for the transaction in flight.
 	var txnRows int
 
@@ -379,8 +384,51 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	// protocol — which go-mysql hands over pre-decoded in ev.Events.
 	// Returns ctx.Err() on cancellation; the Run loop translates that into
 	// a graceful nil.
+	// onHeartbeat turns a replication heartbeat into EventCaughtUp when it
+	// shows the source has nothing left to send this stream (#2556). A source
+	// sends one when it has had nothing newer for the heartbeat period; it is
+	// a message of the replication protocol, asked for with a session
+	// variable on this connection, and nothing is written anywhere.
+	//
+	// Caught up when either:
+	//   - the heartbeat is at the position of the last event received, in the
+	//     same file: everything before it arrived;
+	//   - two heartbeats in a row are at the same file and position, with no
+	//     event between them: the source sits idle at its binlog's end. This
+	//     is the case after a reconnect under GTID auto-position, where the
+	//     source skips what this stream already has and idles at a position
+	//     this stream never received an event at. While it skips, its
+	//     heartbeats move, so the pair never forms.
+	//
+	// It is compared with the position as it stood BEFORE this heartbeat:
+	// heartbeats never move lastLogPos, so the wraparound guard and this
+	// check only ever see positions of events. Not during a re-sent
+	// transaction (skipTxn): the stream is mid-way through it.
+	onHeartbeat := func(hb *replication.HeartbeatEvent, hdr *replication.EventHeader) error {
+		pos := uint64(hdr.LogPos)
+		if hb.Version == 2 {
+			pos = hb.Offset
+		}
+		caught := false
+		if hb.Filename != "" && !skipTxn {
+			atReceived := hb.Filename == currentFile && lastLogPos != 0 && pos == uint64(lastLogPos)
+			idlePair := hbIdle && hb.Filename == hbFile && pos == hbPos
+			caught = atReceived || idlePair
+		}
+		hbFile, hbPos, hbIdle = hb.Filename, pos, true
+		if !caught {
+			return nil
+		}
+		return em.send(ctx, Event{EventType: EventCaughtUp})
+	}
+
 	var handleEvent func(binlogEv *replication.BinlogEvent) error
 	handleEvent = func(binlogEv *replication.BinlogEvent) error {
+		if hb, ok := binlogEv.Event.(*replication.HeartbeatEvent); ok {
+			return onHeartbeat(hb, binlogEv.Header)
+		}
+		// Any other event breaks a pair of idle heartbeats.
+		hbIdle = false
 		// Post-reconnect fill correction (#1117) — must run before the
 		// wraparound guard so both the guard and the emitted events see true
 		// file offsets, not FillZeroLogPos's ghost-FDE overshoot.

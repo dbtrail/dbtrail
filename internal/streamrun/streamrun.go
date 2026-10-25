@@ -108,6 +108,12 @@ type streamState struct {
 	// it succeeded. One restarts itself after a cut transaction only when the
 	// final save succeeded: an older checkpoint may not bound the cleanup.
 	lastSaveErr error
+	// caughtUpPending is set by an EventCaughtUp marker (#2556) that arrived
+	// outside a transaction, and cleared by any other event. The next
+	// successful checkpoint, which first writes every complete transaction,
+	// stamps stream_state.caught_up_at with the index clock and clears it.
+	// Never set on the bare states --reset and the gap auto-advance write.
+	caughtUpPending bool
 
 	// accGTID is the in-memory accumulated GTID set (GTID mode only).
 	// It is serialized to gtidSet on checkpoint. Typed as the gomysql.GTIDSet
@@ -266,6 +272,12 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 	// floor with its own (--reset writes the fresh floor of its new start)
 	// rather than preserving one that belongs to coordinates it discarded
 	// (#1690).
+	// caught_up_at (#2556): the index clock, only when the stream had
+	// received everything the source had and nothing arrived since. NULL
+	// otherwise, which the update arm's COALESCE turns into "keep the last
+	// one": the column says when capture was LAST caught up, and the reader
+	// compares it with now.
+	args = append(args, state.caughtUpPending)
 	var dedupFloor any
 	if state.dedupFloorID > 0 {
 		dedupFloor = state.dedupFloorID
@@ -291,8 +303,8 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		INSERT INTO stream_state
 		    (id, mode, binlog_file, binlog_position, gtid_set, flavor,
 		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id, source_identity,
-		     capture_skips, dedup_floor_event_id, binlog_file_identity)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?, ?, ?)
+		     capture_skips, caught_up_at, dedup_floor_event_id, binlog_file_identity)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?, IF(?, UTC_TIMESTAMP(6), NULL), ?, ?)
 		ON DUPLICATE KEY UPDATE
 		    mode            = VALUES(mode),
 		    binlog_file     = VALUES(binlog_file),
@@ -306,6 +318,7 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		    bintrail_id     = VALUES(bintrail_id),
 		    source_identity = VALUES(source_identity),
 		    capture_skips   = COALESCE(VALUES(capture_skips), capture_skips),
+		    caught_up_at    = COALESCE(VALUES(caught_up_at), caught_up_at),
 		    dedup_floor_event_id = VALUES(dedup_floor_event_id),
 		    binlog_file_identity = VALUES(binlog_file_identity)`,
 		args...)
@@ -1917,6 +1930,9 @@ func streamLoop(
 			slog.Warn("saveCheckpoint failed", "error", err)
 			m.Errors.WithLabelValues("checkpoint").Inc()
 		} else {
+			// Stamped: the next stamp needs a new marker. A failed save
+			// keeps it, so the next tick retries.
+			state.caughtUpPending = false
 			m.CheckpointSaves.Inc()
 			if hooks != nil && hooks.OnCheckpoint != nil {
 				hooks.OnCheckpoint()
@@ -1999,6 +2015,18 @@ func streamLoop(
 			if !ok {
 				return stop()
 			}
+			// The caught-up marker (#2556) carries no position and no row:
+			// handled here, before anything below moves the checkpoint or
+			// the event clock. Inside a transaction it is ignored (the
+			// parser never sends one there; this is the belt). Any other
+			// event clears it: the stream is no longer known to be caught up.
+			if ev.EventType == parser.EventCaughtUp {
+				if !w.InTxn() {
+					state.caughtUpPending = true
+				}
+				continue
+			}
+			state.caughtUpPending = false
 			// Update position tracking from each event.
 			if ev.BinlogFile != "" {
 				state.binlogFile = ev.BinlogFile

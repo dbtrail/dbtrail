@@ -848,6 +848,14 @@ func EnsureSchema(db *sql.DB) error {
 	// parses the saved gtid_set with the correct GTID parser. NOT NULL DEFAULT
 	// 'mysql' means existing rows read back as mysql with no data migration,
 	// keeping every pre-MariaDB install unchanged.
+	// caught_up_at (#2556): when capture last had every event the source
+	// had, from replication heartbeats. Written only by the stream checkpoint;
+	// NULL = never caught up, or an older build.
+	if err := ensureColumn(db, "stream_state", "caught_up_at",
+		`ALTER TABLE stream_state ADD COLUMN caught_up_at DATETIME(6) DEFAULT NULL COMMENT 'when capture last had received and indexed every event the source had (#2556), from replication heartbeats; index clock (UTC); NULL = never seen caught up, or an older build' AFTER capture_skips`,
+	); err != nil {
+		return err
+	}
 	if err := ensureColumn(db, "stream_state", "dedup_floor_event_id",
 		`ALTER TABLE stream_state ADD COLUMN dedup_floor_event_id BIGINT UNSIGNED DEFAULT NULL COMMENT 'lower bound on the event_id of every row the next resume-time dedup must delete (#1690), so that DELETE is a PRIMARY range instead of a full scan of binlog_events; NULL = no floor, and both passes run unbounded exactly as before' AFTER capture_skips_ack`,
 	); err != nil {

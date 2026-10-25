@@ -36,6 +36,7 @@ const (
 	EventGTID     = event.EventGTID
 	EventSnapshot = event.EventSnapshot
 	EventCommit   = event.EventCommit
+	EventCaughtUp = event.EventCaughtUp
 )
 
 // Event is the source-agnostic change event, moved to internal/event (#528).
