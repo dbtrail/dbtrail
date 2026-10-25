@@ -403,7 +403,11 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	// It is compared with the position as it stood BEFORE this heartbeat:
 	// heartbeats never move lastLogPos, so the wraparound guard and this
 	// check only ever see positions of events. Not during a re-sent
-	// transaction (skipTxn): the stream is mid-way through it.
+	// transaction (skipTxn): the stream is mid-way through it. skipTxn ends
+	// only at the next transaction start, so after a reconnect that re-sends
+	// the last transaction and then sits idle, no marker comes until the next
+	// write. Accepted: that only delays a stamp, and ending the skip earlier
+	// would touch the guard against duplicated rows.
 	onHeartbeat := func(hb *replication.HeartbeatEvent, hdr *replication.EventHeader) error {
 		pos := uint64(hdr.LogPos)
 		if hb.Version == 2 {

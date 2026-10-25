@@ -108,12 +108,22 @@ type streamState struct {
 	// it succeeded. One restarts itself after a cut transaction only when the
 	// final save succeeded: an older checkpoint may not bound the cleanup.
 	lastSaveErr error
-	// caughtUpPending is set by an EventCaughtUp marker (#2556) that arrived
-	// outside a transaction, and cleared by any other event. The next
-	// successful checkpoint, which first writes every complete transaction,
-	// stamps stream_state.caught_up_at with the index clock and clears it.
-	// Never set on the bare states --reset and the gap auto-advance write.
-	caughtUpPending bool
+	// caughtUpReadAt is when the newest EventCaughtUp marker (#2556) that
+	// arrived outside a transaction was read off the wire; zero = none since
+	// the last stamp. At that moment every event the source had sent was
+	// consumed, and none was inside a transaction, so the next successful
+	// checkpoint, which first writes every complete transaction, makes that
+	// moment true and stamps it into stream_state.caught_up_at. It is the
+	// READ time, not the save time: events that arrive after the marker, or
+	// sit in the channel when the checkpoint runs, are after it, so the stamp
+	// stays true whatever the loop does next (a tick before the queued
+	// events, stop(), a retried save).
+	caughtUpReadAt time.Time
+	// clearCaughtUp makes the next save write caught_up_at = NULL: --reset
+	// and the gap auto-advance move the checkpoint to coordinates an old
+	// stamp says nothing about (#2556). One-shot: a successful save clears
+	// it, since the advanced state can become the running one.
+	clearCaughtUp bool
 
 	// accGTID is the in-memory accumulated GTID set (GTID mode only).
 	// It is serialized to gtidSet on checkpoint. Typed as the gomysql.GTIDSet
@@ -272,12 +282,17 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 	// floor with its own (--reset writes the fresh floor of its new start)
 	// rather than preserving one that belongs to coordinates it discarded
 	// (#1690).
-	// caught_up_at (#2556): the index clock, only when the stream had
-	// received everything the source had and nothing arrived since. NULL
-	// otherwise, which the update arm's COALESCE turns into "keep the last
+	// caught_up_at (#2556): the marker's read time on the index clock, as
+	// UTC_TIMESTAMP(6) minus how long ago it was read (Go's monotonic clock),
+	// so the column shares last_checkpoint's clock. A NULL interval makes the
+	// value NULL, which the update arm's COALESCE turns into "keep the last
 	// one": the column says when capture was LAST caught up, and the reader
-	// compares it with now.
-	args = append(args, state.caughtUpPending)
+	// compares it with now. clearCaughtUp overrides both with NULL.
+	var caughtUpAgo any
+	if !state.caughtUpReadAt.IsZero() {
+		caughtUpAgo = max(time.Since(state.caughtUpReadAt).Microseconds(), 0)
+	}
+	args = append(args, caughtUpAgo)
 	var dedupFloor any
 	if state.dedupFloorID > 0 {
 		dedupFloor = state.dedupFloorID
@@ -290,7 +305,7 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 	if file, _ := checkpointPosition(state); state.fileIdents.get(file) != "" {
 		fileIdentity = state.fileIdents.get(file)
 	}
-	args = append(args, fileIdentity)
+	args = append(args, fileIdentity, state.clearCaughtUp)
 	// mode is in the UPDATE arm for the cross-mode --reset path (#1079): the
 	// reset no longer DELETEs the row, so the mode switch must land through
 	// this upsert. For every other caller mode is invariant across the run.
@@ -304,7 +319,7 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		    (id, mode, binlog_file, binlog_position, gtid_set, flavor,
 		     events_indexed, last_event_time, last_checkpoint, server_id, bintrail_id, source_identity,
 		     capture_skips, caught_up_at, dedup_floor_event_id, binlog_file_identity)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?, IF(?, UTC_TIMESTAMP(6), NULL), ?, ?)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, ?, UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?)
 		ON DUPLICATE KEY UPDATE
 		    mode            = VALUES(mode),
 		    binlog_file     = VALUES(binlog_file),
@@ -318,10 +333,13 @@ func saveCheckpoint(db *sql.DB, state *streamState) error {
 		    bintrail_id     = VALUES(bintrail_id),
 		    source_identity = VALUES(source_identity),
 		    capture_skips   = COALESCE(VALUES(capture_skips), capture_skips),
-		    caught_up_at    = COALESCE(VALUES(caught_up_at), caught_up_at),
+		    caught_up_at    = IF(?, NULL, COALESCE(VALUES(caught_up_at), caught_up_at)),
 		    dedup_floor_event_id = VALUES(dedup_floor_event_id),
 		    binlog_file_identity = VALUES(binlog_file_identity)`,
 		args...)
+	if err == nil {
+		state.clearCaughtUp = false
+	}
 	return err
 }
 
@@ -673,6 +691,7 @@ func splitBinlogName(name string) (base, suffix string) {
 // within the same UTC_TIMESTAMP() second (supervisor crash-loop) would report 0
 // and abort a healthy startup.
 func persistGapAutoAdvance(db *sql.DB, advanced *streamState, gapMessage string) error {
+	advanced.clearCaughtUp = true // #2556: an old stamp describes skipped coordinates
 	args, err := checkpointInsertArgs(advanced)
 	if err != nil {
 		return fmt.Errorf("failed to persist gap-loss record before auto-advance: %w", err)
@@ -778,6 +797,7 @@ func classifyResetDiscard(old *streamState, flavor, mode, file string, pos uint3
 // clears here — monitor Stop remains the acknowledgment path).
 func persistResetDiscard(db *sql.DB, fresh *streamState, noop bool, detail string, hooks *Hooks) error {
 	if noop {
+		fresh.clearCaughtUp = true // #2556: the reset starts a new capture
 		if err := saveCheckpoint(db, fresh); err != nil {
 			return fmt.Errorf("failed to persist reset checkpoint: %w", err)
 		}
@@ -1931,8 +1951,8 @@ func streamLoop(
 			m.Errors.WithLabelValues("checkpoint").Inc()
 		} else {
 			// Stamped: the next stamp needs a new marker. A failed save
-			// keeps it, so the next tick retries.
-			state.caughtUpPending = false
+			// keeps it, so the next tick retries with the same read time.
+			state.caughtUpReadAt = time.Time{}
 			m.CheckpointSaves.Inc()
 			if hooks != nil && hooks.OnCheckpoint != nil {
 				hooks.OnCheckpoint()
@@ -2018,15 +2038,15 @@ func streamLoop(
 			// The caught-up marker (#2556) carries no position and no row:
 			// handled here, before anything below moves the checkpoint or
 			// the event clock. Inside a transaction it is ignored (the
-			// parser never sends one there; this is the belt). Any other
-			// event clears it: the stream is no longer known to be caught up.
+			// parser never sends one there; this is the belt): rows of that
+			// transaction were read before it and are not written yet. Later
+			// events do not cancel it, they are after its read time.
 			if ev.EventType == parser.EventCaughtUp {
-				if !w.InTxn() {
-					state.caughtUpPending = true
+				if !w.InTxn() && !ev.ReadAt.IsZero() {
+					state.caughtUpReadAt = ev.ReadAt
 				}
 				continue
 			}
-			state.caughtUpPending = false
 			// Update position tracking from each event.
 			if ev.BinlogFile != "" {
 				state.binlogFile = ev.BinlogFile

@@ -57,7 +57,7 @@ func (r caughtUpRun) run(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	syncer := replication.NewBinlogSyncer(replication.BinlogSyncerConfig{
+	cfg := replication.BinlogSyncerConfig{
 		ServerID:        uint32(90000 + time.Now().UnixNano()%9000),
 		Flavor:          r.flavor,
 		Host:            host,
@@ -65,7 +65,15 @@ func (r caughtUpRun) run(t *testing.T) {
 		User:            mc.User,
 		Password:        mc.Passwd,
 		HeartbeatPeriod: time.Second,
-	})
+	}
+	if r.flavor == gomysql.MariaDBFlavor {
+		// What production sets for MariaDB (streamrun.go, step 5): positions
+		// filled in for events the source sends with LogPos 0, which is what
+		// the heartbeat rule compares against.
+		cfg.DumpCommandFlag |= replication.BINLOG_SEND_ANNOTATE_ROWS_EVENT
+		cfg.FillZeroLogPos = true
+	}
+	syncer := replication.NewBinlogSyncer(cfg)
 	defer syncer.Close()
 	streamer, err := r.start(syncer)
 	if err != nil {
@@ -225,6 +233,20 @@ func TestIntegrationCaughtUp_gtidRestartAgainstAnIdleSource_2556(t *testing.T) {
 
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
+	// The index must live on another server: its checkpoint writes on the
+	// source would be new transactions the stream receives, and the stamp
+	// would come from the "at the received position" rule instead of the
+	// pair of idle heartbeats this test is about.
+	var srcUUID, idxUUID string
+	if err := sourceDB.QueryRow(`SELECT @@server_uuid`).Scan(&srcUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := indexDB.QueryRow(`SELECT @@server_uuid`).Scan(&idxUUID); err != nil {
+		t.Fatal(err)
+	}
+	if srcUUID == idxUUID {
+		t.Fatalf("the GTID source and the index are the same server (%s): this test would prove the wrong rule", srcUUID)
+	}
 	if _, err := metadata.TakeSnapshot(sourceDB, indexDB, []string{name}); err != nil {
 		t.Fatalf("TakeSnapshot: %v", err)
 	}
@@ -271,5 +293,103 @@ func TestIntegrationCaughtUp_mariadbIdleSourceStamps_2556(t *testing.T) {
 	}
 	if n := indexedRows(t, indexDB, sourceName); n != 5 {
 		t.Fatalf("%d rows indexed, want 5", n)
+	}
+}
+
+// The loop itself, fed by hand: what it stamps is the marker's READ time,
+// rows of a transaction still open keep it out, and the reset and gap
+// advance wipe a stored stamp once.
+
+func runLoopFor(t *testing.T, indexDB *sql.DB, state *streamState, evs ...parser.Event) {
+	t.Helper()
+	events := make(chan parser.Event, len(evs))
+	for _, ev := range evs {
+		events <- ev
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if err := streamLoop(ctx, events, indexer.New(indexDB, 100), indexDB, 100*time.Millisecond, state, observe.ForSource("test"), nil); err != nil {
+		t.Fatalf("streamLoop: %v", err)
+	}
+}
+
+func secondsAgo(t *testing.T, indexDB *sql.DB) float64 {
+	t.Helper()
+	var ago sql.NullFloat64
+	if err := indexDB.QueryRow(`SELECT TIMESTAMPDIFF(MICROSECOND, caught_up_at, UTC_TIMESTAMP(6)) / 1e6 FROM stream_state WHERE id = 1`).Scan(&ago); err != nil {
+		t.Fatal(err)
+	}
+	if !ago.Valid {
+		return -1
+	}
+	return ago.Float64
+}
+
+func insertEv(id int, end uint64) parser.Event {
+	return parser.Event{BinlogFile: "binlog.000001", StartPos: end - 50, EndPos: end, Timestamp: time.Now().UTC(),
+		Schema: "testdb", Table: "orders", EventType: parser.EventInsert, PKValues: strconv.Itoa(id),
+		RowAfter: map[string]any{"id": int64(id)}}
+}
+
+func TestIntegrationCaughtUp_loopStampsTheReadTime_2556(t *testing.T) {
+	indexDB, _ := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	// Read an hour ago, then a transaction that arrives after it: the stamp is
+	// an hour old, not the save time, and the later rows do not cancel it.
+	runLoopFor(t, indexDB, &streamState{mode: "position", serverID: 1},
+		parser.Event{EventType: parser.EventCaughtUp, ReadAt: time.Now().Add(-time.Hour)},
+		insertEv(1, 200),
+		parser.Event{BinlogFile: "binlog.000001", EndPos: 250, EventType: parser.EventCommit})
+	if ago := secondsAgo(t, indexDB); ago < 3590 || ago > 3660 {
+		t.Fatalf("caught_up_at is %.1fs ago, want about 3600: it must be the marker's read time", ago)
+	}
+}
+
+func TestIntegrationCaughtUp_loopIgnoresAMarkerInsideATransaction_2556(t *testing.T) {
+	indexDB, _ := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, indexDB)
+	runLoopFor(t, indexDB, &streamState{mode: "position", serverID: 1},
+		insertEv(1, 200),
+		parser.Event{EventType: parser.EventCaughtUp, ReadAt: time.Now()})
+	if ago := secondsAgo(t, indexDB); ago != -1 {
+		t.Fatalf("caught_up_at set (%.1fs ago) from a marker inside an open transaction", ago)
+	}
+}
+
+func TestIntegrationCaughtUp_resetAndGapAdvanceClearTheStamp_2556(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		clear func(*sql.DB, *streamState) error
+	}{
+		{"reset at the same position", func(db *sql.DB, s *streamState) error { return persistResetDiscard(db, s, true, "", nil) }},
+		{"gap auto-advance", func(db *sql.DB, s *streamState) error { return persistGapAutoAdvance(db, s, "lost") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			indexDB, _ := testutil.CreateTestDB(t)
+			testutil.InitIndexTables(t, indexDB)
+			running := &streamState{mode: "position", serverID: 1, binlogFile: "binlog.000001", safeFile: "binlog.000001", safePos: 4,
+				caughtUpReadAt: time.Now()}
+			if err := saveCheckpoint(indexDB, running); err != nil {
+				t.Fatal(err)
+			}
+			if secondsAgo(t, indexDB) < 0 {
+				t.Fatal("setup: no stamp written")
+			}
+			advanced := &streamState{mode: "position", serverID: 1, binlogFile: "binlog.000002", safeFile: "binlog.000002", safePos: 4}
+			if err := c.clear(indexDB, advanced); err != nil {
+				t.Fatal(err)
+			}
+			if ago := secondsAgo(t, indexDB); ago != -1 {
+				t.Fatalf("caught_up_at survived (%.1fs ago): it describes coordinates the checkpoint left", ago)
+			}
+			// The advanced state runs on: its next marker stamps again.
+			advanced.caughtUpReadAt = time.Now()
+			if err := saveCheckpoint(indexDB, advanced); err != nil {
+				t.Fatal(err)
+			}
+			if ago := secondsAgo(t, indexDB); ago < 0 || ago > 60 {
+				t.Fatalf("after the clear, a new marker stamps %.1fs ago, want a fresh stamp", ago)
+			}
+		})
 	}
 }

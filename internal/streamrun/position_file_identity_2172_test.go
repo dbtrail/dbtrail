@@ -245,11 +245,11 @@ func TestSaveCheckpoint_recordsTheCheckpointFilesIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			args := make([]driver.Value, 0, 14)
+			args := make([]driver.Value, 0, 15)
 			for i := 0; i < 13; i++ {
 				args = append(args, sqlmock.AnyArg())
 			}
-			args = append(args, identityArg{c.want})
+			args = append(args, identityArg{c.want}, sqlmock.AnyArg())
 			mock.ExpectExec(`(?s)INSERT INTO stream_state.*capture_skips, caught_up_at, dedup_floor_event_id, binlog_file_identity\).*` +
 				`binlog_file_identity = VALUES\(binlog_file_identity\)`).
 				WithArgs(args...).WillReturnResult(sqlmock.NewResult(0, 1))

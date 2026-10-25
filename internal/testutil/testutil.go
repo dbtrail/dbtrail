@@ -380,6 +380,7 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		source_health    JSON            DEFAULT NULL,
 		capture_skips    JSON            DEFAULT NULL,
 		capture_skips_ack JSON           DEFAULT NULL,
+		caught_up_at     DATETIME(6)     DEFAULT NULL,
 		dedup_floor_event_id BIGINT UNSIGNED DEFAULT NULL,
 		CONSTRAINT single_row CHECK (id = 1)
 	) ENGINE=InnoDB`)
