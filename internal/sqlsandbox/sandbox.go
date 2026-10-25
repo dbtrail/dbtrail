@@ -773,6 +773,14 @@ func (r *Runner) MaxInFlight() int {
 // Raised, the statements waiting are let in at once, and the standbys are
 // topped up only when some are kept now: an install nobody runs SQL on, or
 // one whose standbys were stopped for idleness, starts none.
+//
+// A statement's share of the spill disk (SpillState) is worked out from the
+// count when it starts. Right after a raise, the statements that started
+// under the lower count keep their larger shares while the new ones get the
+// smaller ones, so for as long as both run the shares together can pass
+// half of the free disk, never all of it. No share rule avoids that without
+// refusing the new statements any disk; it ends with the statements that
+// started before the raise.
 func (r *Runner) SetMaxInFlight(n int) error {
 	if n < 1 {
 		return fmt.Errorf("%d statements at once: at least 1 must run", n)

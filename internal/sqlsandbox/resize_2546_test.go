@@ -125,9 +125,11 @@ func TestSetMaxInFlight_raiseLetsTheWaitingIn_2546(t *testing.T) {
 	}
 }
 
-// Never more running than the count, while it moves under statements that
-// come and go.
-func TestSetMaxInFlight_neverOverAdmitsWhileItMoves_2546(t *testing.T) {
+// Never more running than the highest count it was set to, while it moves
+// under statements that come and go, and no unguarded read of the count
+// (-race). That each LOWER count holds the next statement back is
+// lowerKeepsRunningAndHoldsTheNext's.
+func TestSetMaxInFlight_neverOverTheHighestWhileItMoves_2546(t *testing.T) {
 	r := waitRunner(4, 10*time.Second, 1000)
 	var mu sync.Mutex
 	running, worst := 0, 0
