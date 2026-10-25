@@ -330,3 +330,78 @@ func TestHiddenGetReadOnlyRegistryIsNotEditable(t *testing.T) {
 		t.Fatalf("read-only GET = %d %s, want not editable with a reason", rec.Code, body)
 	}
 }
+
+// Rules this build cannot enforce are said on every surface that reports
+// them (#2529): GET and PUT carry the refusal the analytical surfaces give,
+// and the server list keeps the server marked as hiding something even when
+// its rules are ONLY a key a newer build wrote, or a hand edit that does not
+// parse. Without that, the console would say "nothing is hidden" about a
+// server whose SQL is refused.
+func TestHiddenUnenforceableRulesAreSaid(t *testing.T) {
+	cases := []struct {
+		name, hidden, wantRefused string
+		wantKeys                  []string
+		wantTables                []string
+	}{
+		{name: "only an unknown key", hidden: "  hidden:\n    future_rule: keep-me\n",
+			wantRefused: "future_rule, which this build cannot read", wantKeys: []string{"future_rule"}, wantTables: []string{}},
+		{name: "a hand edit that does not parse", hidden: "  hidden:\n    tables:\n    - audit_log\n",
+			wantRefused: "do not parse", wantTables: []string{"audit_log"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := t.TempDir() + "/console-servers.yaml"
+			if err := os.WriteFile(path, []byte("version: 1\nservers:\n- id: s1\n  name: prod\n  dsn: u:p@tcp(h:3306)/db\n"+c.hidden), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			clearStores(t)
+			reg, err := LoadRegistry(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, _ := reg.Get("s1")
+			_, lerr := hiderules.Load(e.Hidden)
+			if lerr == nil {
+				t.Fatal("the fixture loads; it must not")
+			}
+			_, body := doServersReq(t, srv, "GET", "/api/servers/s1/hidden", "")
+			d := decodeHidden(t, body)
+			if d.Refused != lerr.Error() || !strings.Contains(d.Refused, c.wantRefused) || !slices.Equal(d.UnreadableKeys, c.wantKeys) ||
+				!slices.Equal(d.Tables, c.wantTables) {
+				t.Fatalf("GET = %s, want refused %q", body, lerr.Error())
+			}
+			_, body = doServersReq(t, srv, "GET", "/api/servers/s1", "")
+			var dto serverDTO
+			if err := json.Unmarshal(body, &dto); err != nil {
+				t.Fatal(err)
+			}
+			if dto.Hidden == nil || !dto.Hidden.Unreadable || !slices.Equal(dto.Hidden.Tables, c.wantTables) || dto.Hidden.Columns == nil {
+				t.Fatalf("server DTO hidden = %s, want it present and marked unreadable", body)
+			}
+			// A save that leaves an unknown key in place still answers refused.
+			rec, body := doServersReq(t, srv, "PUT", "/api/servers/s1/hidden", `{"tables":[],"columns":[]}`)
+			if rec.Code != 200 {
+				t.Fatalf("PUT = %d %s", rec.Code, body)
+			}
+			d = decodeHidden(t, body)
+			if (len(c.wantKeys) > 0) != (d.Refused != "") {
+				t.Fatalf("PUT = %s: refused must follow what is still stored", body)
+			}
+		})
+	}
+	// A server whose rules all load carries no refusal and no mark.
+	srv := newRegistryServer(t)
+	id := createHiddenTestServer(t, srv)
+	_, body := doServersReq(t, srv, "PUT", "/api/servers/"+id+"/hidden", `{"tables":["shop.a"],"columns":[]}`)
+	if d := decodeHidden(t, body); d.Refused != "" {
+		t.Fatalf("PUT = %s", body)
+	}
+	_, body = doServersReq(t, srv, "GET", "/api/servers/"+id, "")
+	if strings.Contains(string(body), "unreadable") {
+		t.Fatalf("server DTO = %s", body)
+	}
+}

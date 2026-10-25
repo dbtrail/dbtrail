@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // MaxEntries bounds each list. The rules travel in the server registry file
@@ -184,6 +185,13 @@ func Parse(r Rules) (*Set, error) {
 func splitEntry(raw string) ([]part, error) {
 	if strings.ContainsAny(raw, "\r\n") {
 		return nil, errors.New("one entry per line")
+	}
+	// A format character (zero-width space, joiner, soft hyphen, the byte
+	// order mark) is invisible on screen, so a name holding one would match
+	// nothing while looking right. Refused anywhere, backticks included.
+	if i := strings.IndexFunc(raw, func(r rune) bool { return unicode.Is(unicode.Cf, r) }); i >= 0 {
+		r, _ := utf8.DecodeRuneInString(raw[i:])
+		return nil, fmt.Errorf("an invisible character was pasted into it (U+%04X); delete it and type the name again", r)
 	}
 	var parts []part
 	var cur strings.Builder

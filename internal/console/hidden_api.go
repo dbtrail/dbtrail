@@ -28,6 +28,11 @@ type hiddenDTO struct {
 	// server's statements (hiderules.Load), so the lists alone do not tell
 	// the whole story.
 	UnreadableKeys []string `json:"unreadable_keys,omitempty"`
+	// Refused is why the analytical surfaces refuse this server's
+	// statements: the hiderules.Load error, set whenever the stored rules
+	// cannot be enforced (keys a newer build wrote, or a hand edit that does
+	// not parse). Empty when the rules load.
+	Refused string `json:"refused,omitempty"`
 }
 
 // hiddenListsDTO is the rules on the server list: both lists, never null,
@@ -35,13 +40,32 @@ type hiddenDTO struct {
 type hiddenListsDTO struct {
 	Tables  []string `json:"tables"`
 	Columns []string `json:"columns"`
+	// Unreadable: the stored rules cannot be enforced (keys a newer build
+	// wrote, or a hand edit that does not parse), so the analytical surfaces
+	// refuse this server. Present even when both lists are empty: a server
+	// whose rules are only a newer build's key still hides something.
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 func newHiddenListsDTO(r *hiderules.Rules) *hiddenListsDTO {
-	if r == nil || (len(r.Tables) == 0 && len(r.Columns) == 0) {
+	if r == nil {
 		return nil
 	}
-	return &hiddenListsDTO{Tables: append([]string{}, r.Tables...), Columns: append([]string{}, r.Columns...)}
+	_, lerr := hiderules.Load(r)
+	if len(r.Tables) == 0 && len(r.Columns) == 0 && lerr == nil {
+		return nil
+	}
+	return &hiddenListsDTO{Tables: append([]string{}, r.Tables...), Columns: append([]string{}, r.Columns...), Unreadable: lerr != nil}
+}
+
+// withLoadState fills what GET and PUT say about rules this build cannot
+// enforce.
+func (d hiddenDTO) withLoadState(r *hiderules.Rules) hiddenDTO {
+	d.UnreadableKeys = r.UnknownKeys()
+	if _, err := hiderules.Load(r); err != nil {
+		d.Refused = err.Error()
+	}
+	return d
 }
 
 func newHiddenDTO(r *hiderules.Rules) hiddenDTO {
@@ -67,8 +91,7 @@ func (s *Server) handleHiddenGet(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
 		return
 	}
-	d := newHiddenDTO(e.Hidden)
-	d.UnreadableKeys = e.Hidden.UnknownKeys()
+	d := newHiddenDTO(e.Hidden).withLoadState(e.Hidden)
 	if s.cm.reg.ReadOnly() {
 		d.Editable, d.Refusal = false, ErrRegistryReadOnly.Error()
 	}
@@ -123,7 +146,6 @@ func (s *Server) handleHiddenPut(w http.ResponseWriter, r *http.Request) {
 	saved := set.Rules()
 	slog.Info("console: hidden rules saved", "actor", consoleActor(r), "server", e.Name, "id", id,
 		"tables", strings.Join(saved.Tables, ","), "columns", strings.Join(saved.Columns, ","))
-	d := newHiddenDTO(e.Hidden)
-	d.UnreadableKeys = e.Hidden.UnknownKeys()
+	d := newHiddenDTO(e.Hidden).withLoadState(e.Hidden)
 	writeJSON(w, http.StatusOK, d)
 }

@@ -47,6 +47,11 @@ func TestParseEdgeCases(t *testing.T) {
 		{name: "star inside a name is not a prefix wildcard", tables: []string{"shop.user_*"}, wantErr: "stands alone"},
 		{name: "quoted star inside a name is a literal", tables: []string{"shop.`user_*`"}, wantTables: []string{"shop.`user_*`"}},
 		{name: "non-breaking space inside unquoted name", tables: []string{"shop.a\u00a0b"}, wantErr: "backticks"},
+		{name: "zero-width space in an unquoted name", tables: []string{"shop.audit\u200b_log"}, wantErr: "an invisible character was pasted into"},
+		{name: "zero-width space inside backticks", tables: []string{"shop.`audit\u200blog`"}, wantErr: "an invisible character was pasted into"},
+		{name: "byte order mark at the start", tables: []string{"\ufeffshop.audit_log"}, wantErr: "an invisible character was pasted into"},
+		{name: "invisible character in a column", columns: []string{"shop.customers.e\u2060mail"}, wantErr: "an invisible character was pasted into"},
+		{name: "soft hyphen in a quoted column", columns: []string{"shop.customers.`e\u00admail`"}, wantErr: "an invisible character was pasted into"},
 		{name: "every bad entry is named", tables: []string{"a", "b"}, wantErr: `"b"`},
 	}
 	for _, c := range cases {
