@@ -23,6 +23,14 @@ type hiddenGrantCheck struct {
 	Unsure []string `json:"unsure,omitempty"`
 }
 
+// harmlessPrivileges show nothing of a table's values beyond what SELECT
+// grants, which is judged on its own (readable). Everything else is named.
+var harmlessPrivileges = map[string]bool{
+	"USAGE": true, "SELECT": true, "ALL": true, "ALL PRIVILEGES": true, "EXECUTE": true,
+	"SHOW VIEW": true, "SHOW DATABASES": true, "REPLICATION CLIENT": true,
+	"REFERENCES": true, "SHOW_ROUTINE": true,
+}
+
 // hiddenGrantsAlwaysUnsure is what no SHOW GRANTS settles: it is said on
 // every server with rules, beside whatever the grants did show.
 const hiddenGrantsAlwaysUnsure = "SHOW GRANTS does not list MySQL's mandatory roles or MariaDB's grants to PUBLIC: " +
@@ -69,12 +77,19 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 		obj = strings.TrimSpace(obj)
 		privs := splitPrivilegesCols(body[:on])
 		for _, p := range privs {
-			switch p.name {
-			case "EXECUTE":
+			if p.name == "EXECUTE" {
 				execute = true
-			case "FILE", "PROCESS", "SUPER", "REPLICATION SLAVE", "REPLICATION REPLICA",
-				"BINLOG MONITOR", "REPLICA MONITOR", "SLAVE MONITOR", "BINLOG ADMIN", "BINLOG_ADMIN":
+			}
+		}
+		// Every privilege that is not a plain read, or one known to show
+		// nothing of a table's values, is named, once per line: a list of
+		// the dangerous ones is never complete (binary log readers, definer
+		// setters, role and audit administration, the next MySQL adds), so
+		// the check lists what it KNOWS is harmless and names the rest.
+		for _, p := range privs {
+			if !harmlessPrivileges[p.name] {
 				serverWide = append(serverWide, grantSecret.ReplaceAllString(line, "${1}'<hidden>'"))
+				break
 			}
 		}
 		// A routine grant (ON PROCEDURE/FUNCTION ...) splits into a db that
@@ -192,8 +207,9 @@ func hiddenExposures(lines []string, set *hiderules.Set) hiddenGrantCheck {
 			"check that none it can call returns what this server hides")
 	}
 	for _, l := range serverWide {
-		out.Unsure = append(out.Unsure, "this grant reaches beyond tables (FILE reads the server's files; PROCESS and SUPER show other sessions' statements; "+
-			"REPLICATION SLAVE, BINLOG MONITOR and REPLICA MONITOR read the binary log, which holds statement text with its values): "+l)
+		out.Unsure = append(out.Unsure, "this grant allows more than reading tables, and some such privileges reach hidden values "+
+			"(FILE reads the server's files; PROCESS and SUPER show other sessions' statements; replication and binlog privileges read "+
+			"statement text with its values; definer, role and audit privileges, and writes, can reach or confirm them): "+l)
 	}
 	for _, l := range unreadable {
 		out.Unsure = append(out.Unsure, "this grant reads something this check cannot name: "+l)
@@ -282,11 +298,6 @@ func splitQuotedDepth(s string) []string {
 // likeFold matches name against a database-level grant's name, where _ and %
 // are wildcards unless escaped with a backslash, without case.
 func likeFold(pattern, name string) bool {
-	// Runs of % match what one does; collapsed so the backtracking below
-	// stays linear in practice on a pattern like a%%%%%b.
-	for strings.Contains(pattern, "%%") {
-		pattern = strings.ReplaceAll(pattern, "%%", "%")
-	}
 	p, n := []rune(strings.ToLower(pattern)), []rune(strings.ToLower(name))
 	var match func(i, j int) bool
 	match = func(i, j int) bool {
@@ -298,6 +309,12 @@ func likeFold(pattern, name string) bool {
 				}
 				i, j = i+2, j+1
 			case p[i] == '%':
+				// A run of % matches what one does: skipped, so the
+				// backtracking stays linear on a pattern like a%%%%%b. An
+				// escaped \% never reaches here, so it is kept.
+				for i+1 < len(p) && p[i+1] == '%' {
+					i++
+				}
 				for k := j; k <= len(n); k++ {
 					if match(i+1, k) {
 						return true

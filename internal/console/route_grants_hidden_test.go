@@ -43,8 +43,18 @@ func TestHiddenExposures(t *testing.T) {
 			safe: []string{"shop.customers.email"}},
 		{name: "column grant with it", grants: []string{"GRANT SELECT (`id`, `Email`), UPDATE (`name`) ON `shop`.`customers` TO `r`@`%`"},
 			exposed: []string{"shop.customers.email"}},
+		// A write does not read, so nothing is EXPOSED; it can confirm a
+		// value through a duplicate-key error, so it is named.
 		{name: "write only", grants: []string{"GRANT INSERT, UPDATE ON `shop`.* TO `r`@`%`"},
-			safe: []string{"shop.audit_log", "shop.customers.email"}},
+			safe: []string{"shop.audit_log", "shop.customers.email"}, unsure: []string{"GRANT INSERT, UPDATE ON `shop`.*"}},
+		// Privileges no list of dangerous ones would have kept up with.
+		{name: "definer and role administration", grants: []string{"GRANT SET_USER_ID, ROLE_ADMIN, AUDIT_ADMIN ON *.* TO `r`@`%`"},
+			unsure: []string{"GRANT SET_USER_ID, ROLE_ADMIN, AUDIT_ADMIN"}},
+		{name: "a privilege this build has never heard of", grants: []string{"GRANT FUTURE_THING ON *.* TO `r`@`%`"},
+			unsure: []string{"FUTURE_THING"}},
+		// Plain reads and harmless metadata name nothing beyond the view note.
+		{name: "harmless metadata", grants: []string{"GRANT USAGE, SHOW DATABASES, REPLICATION CLIENT ON *.* TO `r`@`%`"},
+			safe: []string{"shop.audit_log"}},
 		// A routine runs with its creator's rights: not "safe", unsure.
 		{name: "routine grant", grants: []string{"GRANT EXECUTE ON PROCEDURE `shop`.`p` TO `r`@`%`"},
 			safe: []string{"shop.audit_log"}, unsure: []string{"EXECUTE"}},
@@ -55,7 +65,7 @@ func TestHiddenExposures(t *testing.T) {
 			unsure: []string{"GRANT FILE, PROCESS ON *.*"}},
 		// The binary log holds statement text with its literals.
 		{name: "replication", grants: []string{"GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO `r`@`%`"},
-			unsure: []string{"binary log", "GRANT REPLICATION SLAVE"}},
+			unsure: []string{"binlog privileges", "GRANT REPLICATION SLAVE"}},
 		{name: "mariadb binlog monitor", grants: []string{"GRANT BINLOG MONITOR ON *.* TO `r`@`%`"},
 			unsure: []string{"GRANT BINLOG MONITOR"}},
 		{name: "mariadb replica monitor", grants: []string{"GRANT REPLICA MONITOR ON *.* TO `r`@`%`"},
@@ -71,7 +81,11 @@ func TestHiddenExposures(t *testing.T) {
 		{name: "escaped underscore is literal", grants: []string{"GRANT SELECT ON `sh\\_p`.* TO `r`@`%`"},
 			safe: []string{"shop.audit_log"}},
 		{name: "percent database name", grants: []string{"GRANT SELECT ON `%`.* TO `r`@`%`"},
-			exposed: []string{"shop.audit_log", "hr.*", "billing.*.card"}},
+			exposed: []string{"shop.audit_log", "hr.*", "billing.*.card"}, unsure: []string{"mysql.general_log"}},
+		{name: "wildcard on the statement history", grants: []string{"GRANT SELECT ON `perf%`.* TO `r`@`%`"},
+			unsure: []string{"performance_schema"}},
+		{name: "escaped wildcard on the statement history", grants: []string{"GRANT SELECT ON `performance\\_schema`.* TO `r`@`%`"},
+			unsure: []string{"performance_schema"}},
 		{name: "roles", grants: []string{"GRANT USAGE ON *.* TO `r`@`%`", "GRANT `reader`@`%` TO `r`@`%`"}, unsure: []string{"reader"}},
 	}
 	for _, c := range cases {
@@ -100,6 +114,14 @@ func TestHiddenExposures(t *testing.T) {
 			}
 			if len(c.unsure) == 0 && len(got.Unsure) != 1 && !strings.Contains(notes, "VIEW") {
 				t.Errorf("unexpected unsure notes:\n%s", notes)
+			}
+			// One note per grant line, however many of its privileges count.
+			seen := map[string]bool{}
+			for _, n := range got.Unsure {
+				if seen[n] {
+					t.Errorf("note repeated: %s", n)
+				}
+				seen[n] = true
 			}
 		})
 	}
@@ -146,6 +168,8 @@ func TestLikeFold(t *testing.T) {
 		{`%`, "", true},
 		{`shop`, "shop2", false},
 		{`s%p`, "sp", true},
+		{`100\%%`, "100%_x", true},
+		{`100\%%`, "100x", false},
 		{`a%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%b`, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac", false},
 	} {
 		if got := likeFold(c.pattern, c.name); got != c.want {
