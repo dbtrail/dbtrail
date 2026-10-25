@@ -758,7 +758,49 @@ func (r *Runner) Running() int {
 func (r *Runner) Waiting() int { return r.waitingNow() }
 
 // MaxInFlight is how many statements run at once.
-func (r *Runner) MaxInFlight() int { return r.maxInFlight }
+func (r *Runner) MaxInFlight() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxInFlight
+}
+
+// SetMaxInFlight changes how many statements run at once while the Runner
+// serves (#2546): a router makes room for the copy's tails when a server
+// turns to fresh mode, and gives it back when the last one turns fast.
+// Nothing that runs is stopped. Lowered below what runs now, no statement is
+// let in until enough have ended; the standbys past the new count are
+// stopped, and a kept worker that comes back past it is not kept (keep).
+// Raised, the statements waiting are let in at once, and the standbys are
+// topped up only when some are kept now: an install nobody runs SQL on, or
+// one whose standbys were stopped for idleness, starts none.
+func (r *Runner) SetMaxInFlight(n int) error {
+	if n < 1 {
+		return fmt.Errorf("%d statements at once: at least 1 must run", n)
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return errors.New("the SQL runner is closed")
+	}
+	r.maxInFlight = n
+	var stop []*worker
+	if keep := max(n-r.lent, 0); len(r.standbys) > keep {
+		// The newest go: the oldest has had the longest to finish opening.
+		stop = append(stop, r.standbys[keep:]...)
+		clear(r.standbys[keep:])
+		r.standbys = r.standbys[:keep]
+	}
+	topUp := len(r.standbys) > 0
+	r.grantLocked()
+	r.mu.Unlock()
+	for _, w := range stop {
+		go stopStandby(w)
+	}
+	if topUp {
+		r.topUpStandbys()
+	}
+	return nil
+}
 
 // FenceState reports whether a statement runs in a memory cgroup of its own
 // (#2226) and, when it does not on a host where it could, why. Without one a
@@ -861,11 +903,12 @@ func (r *Runner) SpillState(memoryLimit string) (int64, error) {
 		return 0, fmt.Errorf("the temporary directory %s is in memory (tmpfs), where spilling would use memory; point TMPDIR at a folder on disk", r.spillRoot)
 	}
 	limit := SpillFactor * mem
+	slots := r.MaxInFlight()
 	if free >= 0 {
-		limit = min(limit, free/int64(2*r.maxInFlight))
+		limit = min(limit, free/int64(2*slots))
 	}
 	if limit < minSpillBytes {
-		return 0, fmt.Errorf("the temporary directory %s has %d MB free, and a statement's share of it (half, split between the %d that can run at once) is too little to spill to", r.spillRoot, free>>20, r.maxInFlight)
+		return 0, fmt.Errorf("the temporary directory %s has %d MB free, and a statement's share of it (half, split between the %d that can run at once) is too little to spill to", r.spillRoot, free>>20, slots)
 	}
 	return limit, nil
 }
@@ -1003,7 +1046,7 @@ func (r *Runner) Reserve(ctx context.Context, user string) (*Slot, error) {
 	case <-ctx.Done():
 		gaveUp = ctx.Err()
 	case <-timeUp:
-		gaveUp = &BusyError{Waited: r.maxWait, MaxInFlight: r.maxInFlight}
+		gaveUp = &BusyError{Waited: r.maxWait, MaxInFlight: r.MaxInFlight()}
 	}
 	r.mu.Lock()
 	if w.got {
@@ -1716,7 +1759,8 @@ func converse(w *worker, job []byte, wrote chan<- error, firstLine <-chan []byte
 // the Runner is closed, or when the worker has died meanwhile: the caller
 // then stops it. There is room for it by construction: it was counted as
 // lent while it was out, and waiting and lent workers together never pass
-// maxInFlight (takeStandby, spawn and addStandby keep that).
+// maxInFlight (takeStandby, spawn and addStandby keep that), unless the count
+// was lowered meanwhile (SetMaxInFlight): then it is not kept.
 func (r *Runner) keep(w *worker, resident int64, memoryLimit string) bool {
 	w.served++
 	r.mu.Lock()
@@ -1726,6 +1770,11 @@ func (r *Runner) keep(w *worker, resident int64, memoryLimit string) bool {
 		r.lent--
 	}
 	if retire(w.served, r.workerStatements, resident, memoryLimit) || r.closed {
+		return false
+	}
+	if len(r.standbys)+r.lent >= r.maxInFlight {
+		// The count was lowered while it was out (SetMaxInFlight): its slot
+		// is no longer there.
 		return false
 	}
 	select {
