@@ -205,6 +205,10 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 	if err != nil {
 		return nil, err
 	}
+	if sourceID == "" && cfg.Catalog.kind() != CatalogHadoop {
+		return nil, fmt.Errorf("the index registers no source (bintrail_servers is empty, as in file mode), and a table in a shared %s catalog must record the source it was exported from; export from an index fed by `bintrail stream`, or to a local directory with --catalog hadoop",
+			cfg.Catalog.kind())
+	}
 	resolver, err := metadata.NewResolver(db, 0)
 	if err != nil {
 		return nil, fmt.Errorf("load schema snapshot: %w", err)
@@ -311,23 +315,45 @@ func singleSourceID(ctx context.Context, db *sql.DB) (string, error) {
 	return id, nil
 }
 
-// checkSource refuses a table created from another source. A Glue or REST
-// catalog is shared by an account, so two installs reading different
-// servers can both export shop.orders; without this each would fold its
-// own binlog against the other's cursor. A table created before the
-// property existed carries none and is accepted. runTable applies it to
-// Glue and REST only; the local catalog keeps its behavior.
-func checkSource(tbl *table.Table, schema, name, runSource string) error {
-	have, ok := tbl.Properties()[propSource]
-	if !ok || have == runSource {
+// checkProvenance refuses a table that was created for another source
+// server or another source table.
+//
+//   - Source table (every catalog): the table records the exact
+//     schema.table it was created for. A different spelling means a catalog
+//     (or a case-insensitive filesystem) mapped two source tables onto one,
+//     such as Shop.orders exported yesterday and shop.orders today. Local
+//     tables from releases before the property carry none and are accepted;
+//     nothing is stamped on them afterwards, so the check applies to the
+//     tables created from now on.
+//   - Source server (Glue and REST): a catalog shared by an account can hold
+//     another install's shop.orders, and folding this index's binlog onto it
+//     would mix two servers' rows under one cursor. Those catalogs are new
+//     in this release, so every legitimate table there carries both
+//     properties; a missing one is refused as well. The local catalog does
+//     not check the server, as before.
+func checkProvenance(tbl *table.Table, schema, name, runSource string, kind CatalogKind) error {
+	props := tbl.Properties()
+	want := schema + "." + name
+	have, ok := props[propSourceTable]
+	switch {
+	case ok && have != want:
+		return fmt.Errorf("the table at %s was created for the source table %s, and this run exports %s; the catalog does not tell names apart by case, so the two would share one table. Export only one of them, or give the other its own warehouse or catalog",
+			tbl.Location(), have, want)
+	case !ok && kind != CatalogHadoop:
+		return fmt.Errorf("the table %s at %s carries no %s property, so the export cannot tell which source table it was created for; drop it to reload it", want, tbl.Location(), propSourceTable)
+	}
+	if kind == CatalogHadoop {
 		return nil
 	}
-	run := runSource
-	if run == "" {
-		run = "none (the index registers no source)"
+	src, ok := props[propSource]
+	if !ok {
+		return fmt.Errorf("the table %s at %s carries no %s property, so the export cannot tell which source server it was created from; drop it to reload it", want, tbl.Location(), propSource)
 	}
-	return fmt.Errorf("the table %s.%s at %s was exported from another source (%s=%s), and this index's source is %s; export it to another warehouse or catalog",
-		schema, name, tbl.Location(), propSource, have, run)
+	if src != runSource {
+		return fmt.Errorf("the table %s at %s was exported from another source (%s=%s), and this index's source is %s; export it to another warehouse or catalog",
+			want, tbl.Location(), propSource, src, runSource)
+	}
+	return nil
 }
 
 // classify turns a per-table error into its verdict, on the sentinels the
@@ -380,9 +406,7 @@ func (d *deps) runTable(ctx context.Context, schema, tbl string) Outcome {
 		if err := checkOwned(icetbl, schema, tbl); err != nil {
 			return refusal(schema, tbl, err)
 		}
-		// The stamp is written on every catalog but checked on the shared
-		// ones only: the local catalog keeps today's behavior.
-		if err := checkSource(icetbl, schema, tbl, d.sourceID); err != nil && d.cfg.Catalog.kind() != CatalogHadoop {
+		if err := checkProvenance(icetbl, schema, tbl, d.sourceID, d.cfg.Catalog.kind()); err != nil {
 			return refusal(schema, tbl, err)
 		}
 		cur, err = readCursor(icetbl.Properties())
@@ -511,6 +535,7 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 		if d.sourceID != "" {
 			props[propSource] = d.sourceID
 		}
+		props[propSourceTable] = schema + "." + tbl
 		opts := []catalog.CreateTableOpt{catalog.WithProperties(props)}
 		if loc := tableLocation(d.location, schema, tbl); loc != "" && d.cfg.Catalog.kind() != CatalogHadoop {
 			opts = append(opts, catalog.WithLocation(loc))

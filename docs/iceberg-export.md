@@ -157,6 +157,9 @@ bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
   behind API Gateway expects, and the region is the AWS chain's.
   `--catalog-sigv4-region` and `--catalog-sigv4-service` override both.
 - Names are passed through as they are; the server's own rules apply.
+- A credential or token is only sent over `https://`, or over `http://` to
+  this machine (`localhost`, `127.0.0.1`, `::1`); any other `http://` address
+  is refused.
 
 Glue's endpoint and Glue's API register the same tables, so a table written
 with one is read with the other. The S3 Tables endpoint is wired the same way
@@ -199,10 +202,23 @@ loaded into, on every catalog. Drop it or export elsewhere.
 
 A catalog is shared by everyone in the account, so two bintrail installs that
 read different source servers could both export a `shop.orders`. Each new
-table records the source it was created from (`bintrail.export.source_id`,
-the source's `bintrail_id`), and a run whose index holds a different source
-is refused for that table instead of folding its changes onto the other
-server's rows. The local catalog writes the property too but does not check it.
+table records where it came from: the source server
+(`bintrail.export.source_id`, the source's `bintrail_id`) and the exact source
+table name (`bintrail.export.source_table`, case kept). With Glue or REST:
+
+- a run whose index holds a different source is refused for that table,
+  instead of folding its changes onto the other server's rows;
+- a table missing either property is refused (no earlier release wrote to
+  these catalogs, so every table there should have both);
+- the index must register its source (`bintrail_servers`, filled by
+  `bintrail stream`). An index built from binlog files with `bintrail index`
+  registers none, and the export to Glue or REST refuses before writing.
+
+On every catalog, the local one included, a table whose recorded source name
+differs from the one being exported (`Shop.orders` recorded, `shop.orders`
+exported) is refused, naming both: a catalog that ignores case, or a
+case-insensitive disk, would otherwise put the two in one table. Local tables
+written by earlier releases carry no name and are accepted as before.
 
 If the catalog reports an error for a commit that in fact went through (a
 server error or a timeout after it applied the change), the run reads the
@@ -375,6 +391,9 @@ Two things to know:
   the table) to reload it from a fresh baseline. Iceberg tracks columns by id, which is what will make an ADD
   COLUMN a metadata change in a later release.
 - Tables are unpartitioned.
+- Two source schemas or tables whose names differ only in case
+  (`Shop.orders` and `shop.orders`) are refused, both of them, on every
+  catalog.
 - Built for MySQL and MariaDB sources; `bintrail-pg` does not have the
   command, and the export does not check that an index was written by the
   MySQL capturer.

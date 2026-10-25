@@ -15,6 +15,8 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
 // The AWS leg runs the real export path (index MySQL on 13306, a baseline
@@ -69,6 +71,12 @@ func dropAfter(t *testing.T, cc CatalogConfig, loc, schema string) {
 // checks each verdict and the rows the catalog serves after each.
 func exportTwoWindows(t *testing.T, f fixture, cc CatalogConfig, warehouse string) {
 	t.Helper()
+	// Glue and REST tables record their source server, so the index must
+	// register one.
+	testutil.MustExec(t, f.db, serverid.DDLBintrailServers)
+	testutil.MustExec(t, f.db, `DELETE FROM bintrail_servers`)
+	testutil.MustExec(t, f.db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, username) VALUES
+		('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'db-a', 'repl')`)
 	cfg := f.config(warehouse, f.base.Add(20*time.Minute))
 	cfg.Catalog = cc
 	o := runOne(t, cfg)

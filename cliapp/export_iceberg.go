@@ -64,7 +64,10 @@ CATALOGS
 With glue or rest, two exports of one table may run at once: the one that
 commits second is refused for that table ("refused-conflict") and commits
 nothing; the next run continues from the winner's cursor. A table the catalog
-already holds that bintrail did not create is refused, never adopted.
+already holds that bintrail did not create, or created for another source
+server, is refused, never adopted. Glue and REST need an index that registers
+its source (bintrail stream does; bintrail index from binlog files does not).
+On every catalog, two tables whose names differ only in case are refused.
 
 The first run loads the newest baseline snapshot. Every run after that appends
 only what changed: the events between the table's own cursor and the run's

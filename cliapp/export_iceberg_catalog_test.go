@@ -54,27 +54,27 @@ func TestRunExportIceberg_catalogFlags(t *testing.T) {
 		{"unknown catalog", func(t *testing.T) { eiCatalog = "hive" }, `unknown catalog "hive"`},
 		{"hadoop with s3", func(t *testing.T) { eiWarehouse = "s3://b/p" }, "object-store URL"},
 		{"hadoop with a uri", func(t *testing.T) { eiCatalogURI = "https://c" }, "--catalog-uri only applies to --catalog rest"},
-		{"hadoop with a token file", func(t *testing.T) { eiTokenFile = secretFile(t, "tok") }, "--catalog-token-file only applies to --catalog rest"},
+		{"hadoop with a token file", func(t *testing.T) { eiTokenFile = secretFile(t, "S3CR3T-tok3") }, "--catalog-token-file only applies to --catalog rest"},
 		{"glue without warehouse", func(t *testing.T) { eiCatalog, eiWarehouse = "glue", "" }, "--catalog glue needs --warehouse s3://bucket/prefix"},
 		{"glue with a local path", func(t *testing.T) { eiCatalog = "glue" }, "must be an s3:// location"},
 		{"glue with gs", func(t *testing.T) { eiCatalog, eiWarehouse = "glue", "gs://b/p" }, "must be an s3:// location"},
 		{"glue with a credential file", func(t *testing.T) {
-			eiCatalog, eiWarehouse, eiCredentialFile = "glue", "s3://b/p", secretFile(t, "a:b")
+			eiCatalog, eiWarehouse, eiCredentialFile = "glue", "s3://b/p", secretFile(t, "S3CR3T-cred:x")
 		}, "--catalog-credential-file only applies to --catalog rest"},
 		{"rest without uri", func(t *testing.T) { eiCatalog, eiWarehouse = "rest", "" }, "--catalog rest needs --catalog-uri"},
 		{"rest with credential and token env", func(t *testing.T) {
 			eiCatalog, eiWarehouse, eiCatalogURI = "rest", "", "http://127.0.0.1:1"
-			t.Setenv(envCatalogCredential, "a:b")
-			t.Setenv(envCatalogToken, "tok")
+			t.Setenv(envCatalogCredential, "S3CR3T-cred:x")
+			t.Setenv(envCatalogToken, "S3CR3T-tok3")
 		}, "pick one way to authenticate"},
 		{"rest with token env and token file", func(t *testing.T) {
 			eiCatalog, eiWarehouse, eiCatalogURI = "rest", "", "http://127.0.0.1:1"
-			t.Setenv(envCatalogToken, "tok")
-			eiTokenFile = secretFile(t, "tok2")
+			t.Setenv(envCatalogToken, "S3CR3T-tok3")
+			eiTokenFile = secretFile(t, "S3CR3T-tok2")
 		}, "both " + envCatalogToken + " and --catalog-token-file"},
 		{"rest with sigv4 and a token", func(t *testing.T) {
 			eiCatalog, eiWarehouse, eiCatalogURI, eiSigV4 = "rest", "", "http://127.0.0.1:1", true
-			t.Setenv(envCatalogToken, "tok")
+			t.Setenv(envCatalogToken, "S3CR3T-tok3")
 		}, "pick one way to authenticate"},
 		{"rest with an empty token file", func(t *testing.T) {
 			eiCatalog, eiWarehouse, eiCatalogURI = "rest", "", "http://127.0.0.1:1"
@@ -86,11 +86,11 @@ func TestRunExportIceberg_catalogFlags(t *testing.T) {
 		}, "no AWS region"},
 		{"positive control: rest stops at the catalog", func(t *testing.T) {
 			eiCatalog, eiWarehouse, eiCatalogURI = "rest", "", "http://127.0.0.1:1"
-			eiTokenFile = secretFile(t, "tok\n")
+			eiTokenFile = secretFile(t, "S3CR3T-tok1\n")
 		}, "open the REST catalog"},
 		{"positive control: hadoop ignores catalog secrets in the environment", func(t *testing.T) {
-			t.Setenv(envCatalogToken, "tok")
-			t.Setenv(envCatalogCredential, "a:b")
+			t.Setenv(envCatalogToken, "S3CR3T-tok3")
+			t.Setenv(envCatalogCredential, "S3CR3T-cred:x")
 		}, "connect to index"},
 	}
 	for _, tc := range cases {
@@ -104,10 +104,8 @@ func TestRunExportIceberg_catalogFlags(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want containing %q", err, tc.want)
 			}
-			for _, secret := range []string{"tok", "tok2", "a:b"} {
-				if strings.Contains(err.Error(), "\""+secret+"\"") || strings.HasSuffix(err.Error(), " "+secret) {
-					t.Fatalf("error echoes a secret value: %v", err)
-				}
+			if strings.Contains(err.Error(), "S3CR3T") {
+				t.Fatalf("error echoes a secret value: %v", err)
 			}
 		})
 	}

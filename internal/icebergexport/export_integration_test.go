@@ -452,3 +452,20 @@ func TestIntegrationExport_tableRecordsItsSource(t *testing.T) {
 		t.Fatalf("%s = %q, want the registered source's bintrail_id", propSource, got)
 	}
 }
+
+// TestIntegrationExport_sharedCatalogNeedsANamedSource: with Glue or REST
+// every table records the source it came from, so an index that registers
+// no source (file mode) cannot export to them at all. The refusal comes
+// after the index is read and before any catalog call reaches AWS.
+func TestIntegrationExport_sharedCatalogNeedsANamedSource(t *testing.T) {
+	f := seedFixture(t)
+	testutil.MustExec(t, f.db, serverid.DDLBintrailServers)
+	testutil.MustExec(t, f.db, `DELETE FROM bintrail_servers`)
+	t.Setenv("AWS_REGION", "us-west-2")
+	cfg := f.config("s3://bucket-never-reached/p", f.base.Add(20*time.Minute))
+	cfg.Catalog = CatalogConfig{Kind: CatalogGlue}
+	_, err := Run(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "registers no source") {
+		t.Fatalf("err = %v, want the no-registered-source refusal", err)
+	}
+}

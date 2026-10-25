@@ -65,10 +65,9 @@ func TestConcurrentWriters_loserRefusedAndCommitsNothing(t *testing.T) {
 		// cursor. No snapshot requirement can see that; the cursor
 		// comparison does, and the loser must not move the cursor back.
 		{"both moving only their cursors", false, "", false},
-		// commit.retry.num-retries is read from the table, and another
-		// engine can set it. iceberg-go would then refresh and REPLAY the
-		// loser's commit on top of the winner's; the guard must stop that
-		// replay too.
+		// The table asks the library to retry. The guard's own check refuses
+		// first and never returns table.ErrCommitFailed, so no retry starts;
+		// TestGuard_libraryNeverRetries pins the retry half.
 		{"table asks the library to retry", true, "3", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,10 +117,11 @@ func TestConcurrentWriters_loserRefusedAndCommitsNothing(t *testing.T) {
 	}
 }
 
-// TestConcurrentWriters_secondFirstLoadRefused: two runs find the same
-// table created and empty (a first load that never committed), and both
-// load it. The second must not append a second copy of the baseline.
-func TestConcurrentWriters_secondFirstLoadRefused(t *testing.T) {
+// TestConcurrentWriters_twoCommitsOnAnEmptyTable: two writers hold the same
+// empty table (created, nothing committed) and both commit rows. The second
+// must not append on top of the first. This is the writer level; the
+// first-load path itself is TestFirstLoad_lostRaceWritesNothing.
+func TestConcurrentWriters_twoCommitsOnAnEmptyTable(t *testing.T) {
 	cat, tbl, cols := newTestTable(t, ordersCols, []string{"id"})
 	_ = tbl
 	a, b := reload(t, cat), reload(t, cat)
@@ -363,16 +363,41 @@ func TestRunTable_newerVersionRefused(t *testing.T) {
 func TestRunTables_nameRulesBeforeAnyCatalogWrite(t *testing.T) {
 	d, cat := ownershipDeps(t)
 	d.cfg.Catalog = CatalogConfig{Kind: CatalogGlue}
-	outs := d.runTables(context.Background(), []string{"Shop.Orders", "shop.orders"})
-	if len(outs) != 2 {
-		t.Fatalf("outcomes = %d, want 2", len(outs))
+	d.sourceID = "11111111-1111-1111-1111-111111111111"
+	outs := d.runTables(context.Background(), []string{"Shop.Orders"})
+	if len(outs) != 1 || outs[0].Verdict != VerdictRefused || !strings.Contains(outs[0].Detail, "Shop (schema), Orders (table)") {
+		t.Fatalf("outcomes = %+v, want the Glue name refusal listing both names", outs)
 	}
-	for _, o := range outs {
-		if o.Verdict != VerdictRefused || !strings.Contains(o.Detail, "Shop and shop") {
-			t.Fatalf("outcome %s.%s = %+v, want the collision refusal naming both", o.Schema, o.Table, o)
-		}
+	assertNoNamespace(t, cat, "Shop", "shop")
+}
+
+// TestRunTables_caseCollisionBeforeAnyCatalogWrite: two source schemas that
+// differ only in case are both refused, on every catalog (the local one
+// too: on a case-insensitive filesystem they share a directory), before a
+// namespace is created for either.
+func TestRunTables_caseCollisionBeforeAnyCatalogWrite(t *testing.T) {
+	for _, kind := range []CatalogKind{CatalogHadoop, CatalogREST} {
+		t.Run(string(kind), func(t *testing.T) {
+			d, cat := ownershipDeps(t)
+			d.cfg.Catalog = CatalogConfig{Kind: kind}
+			d.sourceID = "11111111-1111-1111-1111-111111111111"
+			outs := d.runTables(context.Background(), []string{"Shop.orders", "shop.orders"})
+			if len(outs) != 2 {
+				t.Fatalf("outcomes = %d, want 2", len(outs))
+			}
+			for _, o := range outs {
+				if o.Verdict != VerdictRefused || !strings.Contains(o.Detail, "Shop and shop") {
+					t.Fatalf("outcome %s.%s = %+v, want the collision refusal naming both", o.Schema, o.Table, o)
+				}
+			}
+			assertNoNamespace(t, cat, "Shop", "shop")
+		})
 	}
-	for _, ns := range []string{"Shop", "shop"} {
+}
+
+func assertNoNamespace(t *testing.T, cat catalog.Catalog, names ...string) {
+	t.Helper()
+	for _, ns := range names {
 		exists, err := cat.CheckNamespaceExists(context.Background(), catalog.ToIdentifier(ns))
 		if err != nil {
 			t.Fatal(err)
@@ -380,6 +405,115 @@ func TestRunTables_nameRulesBeforeAnyCatalogWrite(t *testing.T) {
 		if exists {
 			t.Fatalf("namespace %s was created for a refused table", ns)
 		}
+	}
+}
+
+// TestRunTables_remedyNamesTheCatalog: a refusal that tells a local user to
+// remove the table directory tells a Glue or REST user to drop the table
+// from the catalog, through the real run path.
+func TestRunTables_remedyNamesTheCatalog(t *testing.T) {
+	for _, kind := range []CatalogKind{CatalogHadoop, CatalogGlue, CatalogREST} {
+		t.Run(string(kind), func(t *testing.T) {
+			d, cat := ownershipDeps(t)
+			d.cfg.Catalog = CatalogConfig{Kind: kind}
+			d.sourceID = "11111111-1111-1111-1111-111111111111"
+			// A partial cursor: readCursor's refusal ends in the remedy.
+			props := ourTableProps(d.sourceID, "shop.orders")
+			props[propFile] = "binlog.000001"
+			createRaw(t, cat, props)
+			outs := d.runTables(context.Background(), []string{"shop.orders"})
+			if len(outs) != 1 || !strings.Contains(outs[0].Detail, "partial export cursor") {
+				t.Fatalf("outcomes = %+v, want the partial-cursor refusal", outs)
+			}
+			wantDir := kind == CatalogHadoop
+			if got := strings.Contains(outs[0].Detail, "remove the table directory"); got != wantDir {
+				t.Fatalf("%s: detail %q; names the directory = %v, want %v", kind, outs[0].Detail, got, wantDir)
+			}
+			if !wantDir && !strings.Contains(outs[0].Detail, "drop the table from the catalog") {
+				t.Fatalf("%s: detail %q does not say to drop the table from the catalog", kind, outs[0].Detail)
+			}
+		})
+	}
+}
+
+// ourTableProps is what the export stamps on a table it creates.
+func ourTableProps(source, sourceTable string) iceberg.Properties {
+	p := tableProperties()
+	if source != "" {
+		p[propSource] = source
+	}
+	if sourceTable != "" {
+		p[propSourceTable] = sourceTable
+	}
+	return p
+}
+
+// createRaw creates shop.orders directly in the catalog with props.
+func createRaw(t *testing.T, cat catalog.Catalog, props iceberg.Properties) {
+	t.Helper()
+	ctx := context.Background()
+	if err := ensureNamespace(ctx, cat, "shop"); err != nil {
+		t.Fatal(err)
+	}
+	cols, err := buildColumns(ordersCols, []string{"id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.CreateTable(ctx, catalog.ToIdentifier("shop", "orders"), icebergSchema(cols), catalog.WithProperties(props)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countingCatalog counts CommitTable calls reaching the catalog and fails
+// each with err.
+type countingCatalog struct {
+	catalog.Catalog
+	err   error
+	calls *int
+}
+
+func (c countingCatalog) CommitTable(context.Context, table.Identifier, []table.Requirement, []table.Update) (table.Metadata, string, error) {
+	*c.calls++
+	return nil, "", c.err
+}
+
+// TestGuard_libraryNeverRetries: iceberg-go retries a commit that failed
+// with table.ErrCommitFailed as many times as the TABLE's
+// commit.retry.num-retries says, refreshing and replaying it each time. The
+// guard never returns that sentinel, so even with retries set the catalog
+// sees the commit once.
+func TestGuard_libraryNeverRetries(t *testing.T) {
+	cat, tbl, cols := loadedTable(t)
+	tx := tbl.NewTransaction()
+	if err := tx.SetProperties(iceberg.Properties{table.CommitNumRetriesKey: "3", table.CommitMinRetryWaitMsKey: "1", table.CommitMaxRetryWaitMsKey: "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Commit(withCommitBase(context.Background(), tbl, nil)); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	g := guard(countingCatalog{Catalog: cat.(guardedCatalog).Catalog, err: fmt.Errorf("%w: conflict", table.ErrCommitFailed), calls: &calls})
+	_, err := writeDelta(context.Background(), memory.DefaultAllocator, reload(t, g), cols, nil, nil,
+		cursor{File: "binlog.000001", Pos: 200, At: t0.Add(time.Hour)})
+	if !errors.Is(err, ErrConcurrentCommit) {
+		t.Fatalf("err = %v, want ErrConcurrentCommit", err)
+	}
+	if calls != 1 {
+		t.Fatalf("the catalog saw the commit %d times, want 1 (no library retry)", calls)
+	}
+}
+
+// TestGuard_tableDroppedMidRun: a table dropped between the run's read and
+// its commit is a lost race, not a commit into nothing.
+func TestGuard_tableDroppedMidRun(t *testing.T) {
+	cat, tbl, cols := loadedTable(t)
+	if err := cat.DropTable(context.Background(), catalog.ToIdentifier("shop", "orders")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := writeDelta(context.Background(), memory.DefaultAllocator, tbl, cols, nil, nil,
+		cursor{File: "binlog.000001", Pos: 200, At: t0.Add(time.Hour)})
+	if !errors.Is(err, ErrConcurrentCommit) {
+		t.Fatalf("err = %v, want ErrConcurrentCommit", err)
 	}
 }
 
@@ -461,51 +595,49 @@ func TestCreateTable_lostRaceIsAConflict(t *testing.T) {
 	}
 }
 
-// TestRunTable_otherSourceRefused: two installs that share a Glue or REST
-// catalog and both export shop.orders from different source servers would
-// otherwise each fold their own binlog against the other's cursor. The
-// table records the source it was created from and refuses another.
-func TestRunTable_otherSourceRefused(t *testing.T) {
+// TestRunTable_provenance: on Glue and REST every table must say which
+// source server (bintrail.export.source_id) and which exact source
+// schema.table (bintrail.export.source_table) it was created from, and both
+// must match the run. Those catalogs are shared by an account, and a REST
+// server that compares names without case maps Shop.orders and shop.orders
+// to one table across runs. The local catalog checks the table name when a
+// table carries it (tables from earlier releases do not) and never the
+// source, as before.
+func TestRunTable_provenance(t *testing.T) {
+	const a, b = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
 	cases := []struct {
-		name, table, run string
-		refused          bool
-		hadoop           bool
+		name               string
+		kind               CatalogKind
+		tblSource, tblName string // "" = property absent
+		runSource          string
+		want               string // substring of the refusal; "" = not refused by provenance
 	}{
-		{"local catalog keeps today's behavior", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", false, true},
-		{"same source", "11111111-1111-1111-1111-111111111111", "11111111-1111-1111-1111-111111111111", false, false},
-		{"other source", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", true, false},
-		{"run cannot name its source", "11111111-1111-1111-1111-111111111111", "", true, false},
-		{"table predates the stamp", "", "22222222-2222-2222-2222-222222222222", false, false},
+		{"glue same source and name", CatalogGlue, a, "shop.orders", a, ""},
+		{"glue other source", CatalogGlue, a, "shop.orders", b, "another source"},
+		{"glue table without a source", CatalogGlue, "", "shop.orders", a, "carries no " + propSource},
+		{"glue table without a name", CatalogGlue, a, "", a, "carries no " + propSourceTable},
+		{"rest name differs in case", CatalogREST, a, "Shop.orders", a, "Shop.orders"},
+		{"hadoop other source accepted", CatalogHadoop, a, "shop.orders", b, ""},
+		{"hadoop table from an earlier release", CatalogHadoop, "", "", "", ""},
+		{"hadoop name differs in case", CatalogHadoop, "", "Shop.orders", "", "Shop.orders"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d, cat := ownershipDeps(t)
-			d.sourceID = tc.run
-			if !tc.hadoop {
-				d.cfg.Catalog = CatalogConfig{Kind: CatalogGlue}
+			d.sourceID = tc.runSource
+			d.cfg.Catalog = CatalogConfig{Kind: tc.kind}
+			createRaw(t, cat, ourTableProps(tc.tblSource, tc.tblName))
+			o := d.runTable(context.Background(), "shop", "orders")
+			provenance := strings.Contains(o.Detail, "another source") || strings.Contains(o.Detail, "carries no bintrail.export.source") ||
+				strings.Contains(o.Detail, "was created for the source table")
+			switch {
+			case tc.want == "" && provenance:
+				t.Fatalf("refused on provenance: %+v", o)
+			case tc.want != "" && (!provenance || !strings.Contains(o.Detail, tc.want)):
+				t.Fatalf("outcome = %+v, want a provenance refusal containing %q", o, tc.want)
 			}
-			ctx := context.Background()
-			if err := ensureNamespace(ctx, cat, "shop"); err != nil {
-				t.Fatal(err)
-			}
-			cols, err := buildColumns(ordersCols, []string{"id"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			props := tableProperties()
-			if tc.table != "" {
-				props[propSource] = tc.table
-			}
-			if _, err := cat.CreateTable(ctx, catalog.ToIdentifier("shop", "orders"), icebergSchema(cols), catalog.WithProperties(props)); err != nil {
-				t.Fatal(err)
-			}
-			o := d.runTable(ctx, "shop", "orders")
-			isRefusal := strings.Contains(o.Detail, "another source")
-			if isRefusal != tc.refused {
-				t.Fatalf("outcome = %+v, want source refusal %v", o, tc.refused)
-			}
-			if tc.refused && !strings.Contains(o.Detail, tc.table) {
-				t.Fatalf("refusal does not name the table's source: %s", o.Detail)
+			if tc.want == "Shop.orders" && !strings.Contains(o.Detail, "shop.orders") {
+				t.Fatalf("name refusal does not name both: %s", o.Detail)
 			}
 		})
 	}

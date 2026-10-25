@@ -49,6 +49,8 @@ func TestCheckCatalog_refusals(t *testing.T) {
 		{"rest with sigv4 and a token", CatalogConfig{Kind: CatalogREST, URI: "https://c", SigV4: true, Token: "t"}, "", "pick one way to authenticate"},
 		{"rest with a credential and a token", CatalogConfig{Kind: CatalogREST, URI: "https://c", Credential: "a:b", Token: "t"}, "", "pick one way to authenticate"},
 		{"rest with sigv4 and a credential", CatalogConfig{Kind: CatalogREST, URI: "https://c", SigV4: true, Credential: "a:b"}, "", "pick one way to authenticate"},
+		{"rest token over plain http", CatalogConfig{Kind: CatalogREST, URI: "http://catalog.example.com", Token: "t"}, "", "over plain http://"},
+		{"rest credential over plain http", CatalogConfig{Kind: CatalogREST, URI: "http://10.0.0.5:8181", Credential: "a:b"}, "", "over plain http://"},
 		{"rest sigv4 region without sigv4", CatalogConfig{Kind: CatalogREST, URI: "https://c", SigV4Region: "us-west-2"}, "", "--catalog-sigv4-region needs --catalog-sigv4"},
 		{"rest sigv4 service without sigv4", CatalogConfig{Kind: CatalogREST, URI: "https://c", SigV4Service: "glue"}, "", "--catalog-sigv4-service needs --catalog-sigv4"},
 	}
@@ -103,6 +105,10 @@ func TestCheckCatalog_accepts(t *testing.T) {
 		{"rest with sigv4", CatalogConfig{Kind: CatalogREST, URI: "https://glue.us-west-2.amazonaws.com/iceberg", SigV4: true}, "", ""},
 		{"rest with a token", CatalogConfig{Kind: CatalogREST, URI: "https://c", Token: "t"}, "", ""},
 		{"rest with a credential", CatalogConfig{Kind: CatalogREST, URI: "https://c", Credential: "a:b"}, "", ""},
+		{"rest token over http to localhost", CatalogConfig{Kind: CatalogREST, URI: "http://localhost:8181", Token: "t"}, "", ""},
+		{"rest token over http to 127.0.0.1", CatalogConfig{Kind: CatalogREST, URI: "http://127.0.0.1:8181", Token: "t"}, "", ""},
+		{"rest token over http to ::1", CatalogConfig{Kind: CatalogREST, URI: "http://[::1]:8181", Token: "t"}, "", ""},
+		{"rest without secrets over http", CatalogConfig{Kind: CatalogREST, URI: "http://catalog.example.com"}, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -187,8 +193,10 @@ func TestCheckCatalogNames(t *testing.T) {
 		{"glue collision names both", CatalogGlue, []string{"Shop.orders", "shop.orders"},
 			want{"Shop.orders": "Shop and shop", "shop.orders": "Shop and shop"}},
 		{"exact duplicate is not a collision", CatalogREST, []string{"shop.orders", "shop.orders"}, want{"shop.orders": ""}},
-		{"hadoop keeps today's behavior", CatalogHadoop, []string{"Shop.orders", "shop.orders", "x.line-items"},
-			want{"Shop.orders": "", "shop.orders": "", "x.line-items": ""}},
+		{"hadoop refuses case collisions too", CatalogHadoop, []string{"Shop.orders", "shop.orders", "x.Line-Items"},
+			want{"Shop.orders": "Shop and shop", "shop.orders": "Shop and shop", "x.Line-Items": ""}},
+		{"hadoop table case collision", CatalogHadoop, []string{"shop.Orders", "shop.orders"},
+			want{"shop.Orders": "shop.Orders and shop.orders", "shop.orders": "shop.Orders and shop.orders"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

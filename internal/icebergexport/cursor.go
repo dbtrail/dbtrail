@@ -28,6 +28,9 @@ const (
 	// propSource is the bintrail_id of the source the table was created
 	// from, when the index registers exactly one.
 	propSource = "bintrail.export.source_id"
+	// propSourceTable is the exact source schema.table the table was
+	// created for (case kept).
+	propSourceTable = "bintrail.export.source_table"
 
 	// exportVersion is the newest table layout this build writes and reads.
 	// A table stamped with a higher one was written by a newer bintrail, and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"slices"
@@ -149,6 +150,10 @@ func CheckCatalog(c CatalogConfig, warehouse string) (string, error) {
 		if methods > 1 {
 			return "", errors.New("pick one way to authenticate to the REST catalog: --catalog-sigv4, a client credential, or a bearer token")
 		}
+		if (c.Credential != "" || c.Token != "") && u.Scheme == "http" && !isLoopback(u.Hostname()) {
+			return "", fmt.Errorf("--catalog-uri %s would send the credential or token over plain http://, readable by anyone on the network path; use https://, or http:// only to this machine (localhost)",
+				RedactURI(c.URI))
+		}
 		if !c.SigV4 && c.SigV4Region != "" {
 			return "", errors.New("--catalog-sigv4-region needs --catalog-sigv4")
 		}
@@ -164,6 +169,15 @@ func CheckCatalog(c CatalogConfig, warehouse string) (string, error) {
 		}
 		return loc, nil
 	}
+}
+
+// isLoopback reports whether host names this machine.
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 var locScheme = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9+.-]*)://(.*)$`)
@@ -247,24 +261,24 @@ func sigV4Defaults(uri, region, service string) (string, string) {
 var glueName = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 // checkCatalogNames refuses, per schema.table entry, the names a catalog
-// would not keep as given. bintrail never renames: a renamed table would be
+// would not keep apart or as given. bintrail never renames: a renamed table would be
 // found by no one who knows the source, and two sources could land on one.
 //
 //   - glue: Glue (and Athena over it) store database and table names in
 //     lowercase letters, digits and underscores; anything else is folded or
 //     rejected. Such a name is refused, and the refusal lists it.
-//   - glue and rest: two source schemas, or two tables of one schema, whose
+//   - every catalog: two source schemas, or two tables of one schema, whose
 //     names differ only in case would meet in a catalog that compares
-//     without case (Glue always does; many REST servers do). Both are
-//     refused, each naming the other.
-//   - hadoop keeps today's behavior: nothing is refused here.
+//     without case (Glue always does; many REST servers do), and in one
+//     directory of the local catalog on a case-insensitive filesystem
+//     (macOS, Windows). Both are refused, each naming the other.
 //
-// Entries that are not schema.table are left to Run, which refuses them.
+// This only sees the entries of one run; a collision with a table an
+// earlier run created is caught by the table's recorded source name
+// (checkProvenance). Entries that are not schema.table are left to Run,
+// which refuses them.
 func checkCatalogNames(kind CatalogKind, entries []string) map[string]error {
 	out := map[string]error{}
-	if kind != CatalogGlue && kind != CatalogREST {
-		return out
-	}
 	type ent struct{ raw, schema, tbl string }
 	var ents []ent
 	schemaSpell := map[string][]string{} // folded schema -> distinct spellings
