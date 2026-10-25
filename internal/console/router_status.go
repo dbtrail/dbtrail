@@ -295,5 +295,11 @@ type RouterStatusDoc struct {
 	// fast mode, answers from the snapshot alone. Absent from a router older
 	// than the switch.
 	Fresh *bool `json:"fresh,omitempty"`
+	// PerServerMode says this router reads each server's own fresh-mode
+	// switch (#2546) and gives every server in Servers its sql_mode. Absent
+	// from an older router, which answers every server in one mode whatever
+	// was saved: a reader must not infer support from the entries, since a
+	// router that lists no server yet looks the same either way.
+	PerServerMode bool `json:"per_server_mode,omitempty"`
 	RouterNumbers
 }

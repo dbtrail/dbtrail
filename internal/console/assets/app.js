@@ -8148,6 +8148,10 @@ async function renderSnapshots() {
           nodes.unshift(scheduleCard);
         }
         nodes.forEach((n) => panel.append(n));
+      });
+      // Its own part: a failure drawing the schedule above must not take
+      // this card with it.
+      part("How current SQL answers are", () => {
         const sqlMode = cur && cur.id !== "default" ? sqlModeCard(cur, routerRes) : null;
         if (sqlMode) panel.append(sqlMode);
       });
@@ -11587,36 +11591,32 @@ function sqlModeModel(cur, rt, mayWrite) {
   const word = (m) => (m === "fresh" ? "Fresh" : "Fast");
   const out = { pick: saved, editable: !!mayWrite, state: "", tone: "", note: "" };
   const st = rt && rt.status;
-  const servers = (st && st.servers) || null;
-  const ids = servers ? Object.keys(servers) : [];
-  if (st && st.fresh === true) {
-    out.pick = "fresh";
-    out.editable = false;
-    out.state = "Fresh mode, for every server: it is set where the router starts (SQL_FRESH=on in the compose .env, or BINTRAIL_SQL_TAILS=on). Remove it there and run docker compose up -d router to choose here for each server.";
-    return out;
-  }
-  if (st && ids.length && ids.some((id) => !servers[id].sql_mode)) {
-    out.pick = "fast";
-    out.editable = false;
-    out.state = "The router is older than this choice and answers every server in fast mode. Update the router to choose here for each server.";
-    out.tone = "warn";
-    return out;
-  }
-  const mine = servers && cur ? servers[cur.id] : null;
-  // A server in fresh mode by its own switch is always listed by a router
-  // that reads switches; one the router does not list is fast there.
-  const applied = mine && mine.sql_mode ? mine.sql_mode : (ids.length ? "fast" : "");
   if (!st) {
     const why = rt === undefined ? "This session cannot read the router's numbers"
       : rt && rt.configured === false ? "This DBTrail does not know where its router runs (ROUTER_URL in the compose .env)"
-      : "The router did not answer" + (rt && rt.error ? " (" + rt.error + ")" : "");
+      : "The router could not be read" + (rt && rt.error ? " (" + rt.error + ")" : "");
     out.state = "Saved: " + word(saved) + ". " + why + ", so which mode it applies cannot be shown here. A router that serves this server reads the choice within a few seconds of a save.";
     return out;
   }
-  if (!applied) {
-    out.state = "Saved: " + word(saved) + ". The router has not answered any statement or read any copy yet, so it does not list this server.";
+  if (st.fresh === true) {
+    out.pick = "fresh";
+    out.editable = false;
+    out.state = "Fresh mode, for every server: it is set where the router starts (SQL_FRESH=on in the compose .env, or BINTRAIL_SQL_TAILS=on). Saved for this server: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d router).";
     return out;
   }
+  if (!st.per_server_mode) {
+    // A router older than the switch says so by not saying it reads it,
+    // whether or not it lists any server yet.
+    out.pick = "fast";
+    out.editable = false;
+    out.state = "The router is older than this choice and answers every server in fast mode, whatever is saved here (saved for this server: " + word(saved) + "). Update the router to choose here for each server.";
+    out.tone = "warn";
+    return out;
+  }
+  // A router that reads switches lists every server that is fresh by its
+  // own: one it does not list is fast there.
+  const mine = st.servers ? st.servers[cur.id] : null;
+  const applied = mine && mine.sql_mode ? mine.sql_mode : "fast";
   if (applied !== saved) {
     out.state = "Saved: " + word(saved) + ". The router still answers in " + applied + " mode: it reads the change within a few seconds. Refresh to see it applied.";
     out.tone = "warn";
@@ -11677,8 +11677,13 @@ async function saveSQLMode(id, fresh, btn, msgEl) {
   if (backupsOnScreen()) renderSnapshots();
   // Once more after the router had time to read it, so the card can say it
   // is applied instead of leaving the reader to guess.
+  // Not over a choice the reader has made since and not saved yet.
   const gen = serverGen;
-  setTimeout(() => { if (gen === serverGen && backupsOnScreen()) renderSnapshots(); }, 6000);
+  setTimeout(() => {
+    if (gen !== serverGen || !backupsOnScreen()) return;
+    if (document.querySelector('.sql-mode-card [data-save="sql-mode"].btn-primary')) return;
+    renderSnapshots();
+  }, 6000);
 }
 
 // backupScheduleCard (#1442): the per-server backup timer. The state line
@@ -15738,8 +15743,12 @@ function routerLines(view, cur) {
   const mine = cur && st.servers ? st.servers[cur.id] : null;
   const whose = cur ? " for " + (cur.name || cur.id) : "";
   if (st.fresh === true) out.push({ text: "Fresh mode, for every server: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture. It is set where the router starts: remove SQL_FRESH from the compose .env and run docker compose up -d router to choose each server's mode on its Snapshots page." });
-  else if (mine && mine.sql_mode === "fresh") out.push({ text: "Fresh mode" + whose + ", chosen on its Snapshots page: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture." });
-  else if (st.fresh === false) out.push({ text: "Fast mode" + whose + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, choose Fresh on " + (cur ? "its" : "a server's") + " Snapshots page." });
+  else if (st.per_server_mode && mine && mine.sql_mode === "fresh") out.push({ text: "Fresh mode" + whose + ", chosen on its Snapshots page: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture." });
+  else if (st.per_server_mode) out.push({ text: "Fast mode" + whose + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, choose Fresh on " + (cur ? "its" : "a server's") + " Snapshots page." });
+  // A router older than the per-server switch: one mode for all, set where
+  // it starts; sending the reader to the Snapshots page would be sending
+  // them to a choice this router ignores.
+  else if (st.fresh === false) out.push({ text: "Fast mode, for every server: answers come from each table's last snapshot, as old as its last refresh. This router is older than the per-server choice: for answers about as far behind as capture, set SQL_FRESH=on in the compose .env and run docker compose up -d router (BINTRAIL_SQL_TAILS=on outside Compose), or update the router." });
   const rules = [];
   if (st.cost_threshold > 0) rules.push("MySQL's plan costs at least " + st.cost_threshold);
   if (st.scan_rows > 0) rules.push("it scans a whole table of at least " + st.scan_rows + " rows");

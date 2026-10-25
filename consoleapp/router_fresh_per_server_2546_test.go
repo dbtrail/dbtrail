@@ -69,6 +69,9 @@ func TestRouterStatus_saysEachServersMode_2546(t *testing.T) {
 	if n := doc.Servers["b"]; n.SQLMode != "fast" || n.SQLModeFrom != console.SQLModeFromDefault {
 		t.Errorf("b, only a copy: %q from %q, want fast by default", n.SQLMode, n.SQLModeFrom)
 	}
+	if !doc.PerServerMode {
+		t.Error("the router does not say it reads each server's switch")
+	}
 	if doc.Fresh == nil || *doc.Fresh {
 		t.Errorf("top-level fresh %v: an older console reads it as the whole router; only the environment sets it", doc.Fresh)
 	}

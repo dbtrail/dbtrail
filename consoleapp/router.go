@@ -412,6 +412,7 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 	}
 	fresh, _ := console.TailsSetting()
 	doc.Fresh = &fresh
+	doc.PerServerMode = true
 	if doc.Servers == nil {
 		doc.Servers = map[string]console.RouterServerNumbers{}
 	}

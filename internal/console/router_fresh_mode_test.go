@@ -33,9 +33,13 @@ func TestRouterLines_sayTheMode(t *testing.T) {
 	// #2546: the selected server fresh by its own switch, the router's own
 	// setting off.
 	switched := view(&fast)
+	switched.Status.PerServerMode = true
 	switched.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fresh", SQLModeFrom: SQLModeFromSaved}}
+	perServerFast := view(&fast)
+	perServerFast.Status.PerServerMode = true
 	payload, err := json.Marshal(map[string]routerViewDTO{
-		"fast":     view(&fast),
+		"fast":     perServerFast,
+		"older":    view(&fast),
 		"fresh":    view(&fresh),
 		"old":      view(nil),
 		"switched": switched,
@@ -78,6 +82,16 @@ console.log(JSON.stringify(out));
 	}
 	if !has("switched", "Fresh mode for shop, chosen on its Snapshots page") || has("switched", "Fast mode") {
 		t.Errorf("a server fresh by its own switch: %q", got["switched"])
+	}
+	// A router older than the per-server switch (v0.116, v0.117): one mode
+	// for all, and never sent to a Snapshots choice it ignores.
+	if !has("older", "Fast mode, for every server") {
+		t.Errorf("a router older than the per-server switch: %q", got["older"])
+	}
+	for _, l := range got["older"] {
+		if strings.Contains(l, "choose Fresh on") {
+			t.Errorf("a router that ignores the switch sends the reader to it: %q", l)
+		}
 	}
 	if has("old", "Fast mode") || has("old", "Fresh mode") || len(got["old"]) == 0 {
 		t.Errorf("a router older than the switch: %q", got["old"])
