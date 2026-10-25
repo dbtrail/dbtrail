@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
 // Table properties the export owns. They are written in the same commit as
@@ -24,6 +25,12 @@ const (
 	// (lower-case names, comma-separated, "" for none), so every later run
 	// renders the same ones whatever the schema snapshot says (#1508).
 	propJSONColumns = "bintrail.export.json_columns"
+	// propSource is the bintrail_id of the source the table was created
+	// from, when the index registers exactly one.
+	propSource = "bintrail.export.source_id"
+	// propSourceTable is the exact source schema.table the table was
+	// created for (case kept).
+	propSourceTable = "bintrail.export.source_table"
 
 	// exportVersion is the newest table layout this build writes and reads.
 	// A table stamped with a higher one was written by a newer bintrail, and
@@ -116,4 +123,21 @@ func (c cursor) loadProperties(baselinePath string) iceberg.Properties {
 
 func (c cursor) String() string {
 	return fmt.Sprintf("%s:%d at %s", c.File, c.Pos, c.At.UTC().Format(time.RFC3339))
+}
+
+// checkOwned refuses a table this export did not create. Every table the
+// export creates carries propVersion from its first commit (tableProperties,
+// at CreateTable, before any data), so a table without it was made by
+// someone else: another engine, a person, an older tool. The export never
+// adopts one, empty or not, because loading a baseline into it would mix
+// two writers' rows under one cursor. This holds for every catalog; on Glue
+// or REST a same-named table is far more likely to exist already than in a
+// local directory nobody else writes to. A HIGHER version is readCursor's
+// refusal (a newer bintrail).
+func checkOwned(tbl *table.Table, schema, name string) error {
+	if _, ok := tbl.Properties()[propVersion]; ok {
+		return nil
+	}
+	return fmt.Errorf("the catalog already holds a table %s.%s at %s, and it carries no %s property, so bintrail did not create it; the export never adopts a table it did not create. Drop it, or export this table to another warehouse or catalog",
+		schema, name, tbl.Location(), propVersion)
 }

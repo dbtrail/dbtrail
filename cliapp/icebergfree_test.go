@@ -31,6 +31,11 @@ import (
 var icebergBanned = []string{
 	"github.com/apache/iceberg-go",
 	"github.com/apache/arrow-go",
+	// The catalog SDKs the export's Glue and REST catalogs pull in (#2552):
+	// the Go CDK's blob IO (with its Azure and GCS drivers) and the Glue
+	// client. They belong to the export as much as iceberg-go does.
+	"gocloud.dev",
+	"github.com/aws/aws-sdk-go-v2/service/glue",
 }
 
 // icebergAllowed may link the libraries. Keep it short; every entry widens

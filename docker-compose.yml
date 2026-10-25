@@ -1011,7 +1011,7 @@ services:
       baseline-dump:
         condition: service_completed_successfully
 
-  # ── Iceberg export (one-shot, opt-in `iceberg-export` profile) ──────────
+  # ── Iceberg export (opt-in `iceberg-export` / `iceberg-export-loop`) ────
   # Writes each table's state as an Apache Iceberg table, from the newest
   # baseline snapshot plus every change the index has recorded since. Spark,
   # Trino, Athena, Snowflake and DuckDB read the result directly. Run on
@@ -1023,6 +1023,12 @@ services:
   #
   #   17 * * * * cd /path/to/stack && docker compose --profile iceberg-export run --rm iceberg-export >> /var/log/bintrail-iceberg.log 2>&1
   #
+  # or with no cron at all, as a service that stays up and exports again
+  # ICEBERG_EVERY (default 1h) after each run ends; see iceberg-export-loop
+  # below:
+  #
+  #   docker compose --profile iceberg-export-loop up -d iceberg-export-loop
+  #
   # The first run loads the newest snapshot; every run after that appends only
   # what changed, and a run that dies before committing leaves the previous
   # copy in place and resumes from it. It needs a baseline, so run the
@@ -1030,11 +1036,18 @@ services:
   # have). Tables land in <WAREHOUSE_DIR>/<schema>/<table>/ in the
   # bintrail-iceberg volume.
   #
-  # A SEPARATE one-shot on purpose: the export writes a new copy of the data
+  # To register the tables in AWS Glue or an Iceberg REST catalog instead, set
+  # ICEBERG_CATALOG (glue or rest) and WAREHOUSE_DIR to the s3:// location, plus
+  # ICEBERG_CATALOG_URI, ICEBERG_CATALOG_WAREHOUSE and ICEBERG_CATALOG_SIGV4=1
+  # as the catalog needs (docs/iceberg-export.md). A REST secret goes in .env as
+  # BINTRAIL_ICEBERG_CATALOG_TOKEN or BINTRAIL_ICEBERG_CATALOG_CREDENTIAL; it
+  # reaches the container as a variable, never on a command line.
+  #
+  # A SEPARATE process on purpose: the export writes a new copy of the data
   # and never runs inside the capture daemon, so a long export cannot slow
   # capture down. Uses the CORE image, because the console image deliberately
   # ships without the export commands.
-  iceberg-export:
+  iceberg-export: &iceberg-export-service
     profiles: ["iceberg-export"]
     image: ghcr.io/dbtrail/bintrail:${BINTRAIL_TAG:-latest}
     # Same mapping as the bintrail service: a brought-your-own INDEX_DSN may
@@ -1046,7 +1059,7 @@ services:
     # image's non-root uid. The tables it writes are therefore root-owned,
     # which matters only if you point WAREHOUSE_DIR at a bind mount.
     user: "0:0"
-    environment:
+    environment: &iceberg-export-env
       # Bring your own index (default: the bundled MySQL, DSN built from the
       # generated password in the secret volume).
       INDEX_DSN: ${INDEX_DSN:-}
@@ -1060,6 +1073,15 @@ services:
       # Optional comma-separated schema.table list (empty = every table in the
       # newest baseline snapshot).
       ICEBERG_TABLES: ${ICEBERG_TABLES:-}
+      # Catalog (empty = hadoop, the local directory above): glue or rest, and
+      # the REST catalog's settings. See the header of this section.
+      ICEBERG_CATALOG: ${ICEBERG_CATALOG:-}
+      ICEBERG_CATALOG_URI: ${ICEBERG_CATALOG_URI:-}
+      ICEBERG_CATALOG_WAREHOUSE: ${ICEBERG_CATALOG_WAREHOUSE:-}
+      ICEBERG_CATALOG_SIGV4: ${ICEBERG_CATALOG_SIGV4:-}
+      # REST catalog secrets, read by bintrail from these variables only.
+      BINTRAIL_ICEBERG_CATALOG_CREDENTIAL: ${BINTRAIL_ICEBERG_CATALOG_CREDENTIAL:-}
+      BINTRAIL_ICEBERG_CATALOG_TOKEN: ${BINTRAIL_ICEBERG_CATALOG_TOKEN:-}
       # Needed when the baselines or the archived partitions this export folds
       # live in S3. Same passthrough as the console service.
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
@@ -1101,9 +1123,52 @@ services:
           set -- --baseline-dir "$$BASELINE_DIR"
         fi
         [ -n "$$ICEBERG_TABLES" ] && set -- "$$@" --tables "$$ICEBERG_TABLES"
-        mkdir -p "$$WAREHOUSE_DIR"
+        # Only the loop service sets ICEBERG_EVERY; bintrail refuses a value
+        # that is not a duration of at least 1m before the first run.
+        [ -n "$$ICEBERG_EVERY" ] && set -- "$$@" --every "$$ICEBERG_EVERY"
+        [ -n "$$ICEBERG_CATALOG" ] && set -- "$$@" --catalog "$$ICEBERG_CATALOG"
+        [ -n "$$ICEBERG_CATALOG_URI" ] && set -- "$$@" --catalog-uri "$$ICEBERG_CATALOG_URI"
+        [ -n "$$ICEBERG_CATALOG_WAREHOUSE" ] && set -- "$$@" --catalog-warehouse "$$ICEBERG_CATALOG_WAREHOUSE"
+        case "$$ICEBERG_CATALOG_SIGV4" in
+          ""|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) ;;
+          1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) set -- "$$@" --catalog-sigv4 ;;
+          *)
+            # Unrecognized: dropping it would leave every run failing to sign in.
+            echo "FATAL: ICEBERG_CATALOG_SIGV4=$$ICEBERG_CATALOG_SIGV4 is not 1/true/yes/on or 0/false/no/off." >&2
+            exit 1 ;;
+        esac
+        # Only a local warehouse is a directory to create; an s3:// one is not.
+        case "$$WAREHOUSE_DIR" in
+          *://*) ;;
+          *) mkdir -p "$$WAREHOUSE_DIR" ;;
+        esac
         exec bintrail export iceberg --index-dsn "$$INDEX_DSN" \
           "$$@" --warehouse "$$WAREHOUSE_DIR"
+
+  # The same export as a service that stays up: it runs, waits ICEBERG_EVERY
+  # (at least 1m) from the moment that run ENDED, and runs again. Runs never
+  # overlap. A run that fails (the index or the catalog not answering) is
+  # logged with the time of the next attempt and the loop goes on. A mistake
+  # in the settings (a bad ICEBERG_EVERY, catalog or secret) ends the process
+  # at start with the reason in `docker compose logs iceberg-export-loop`;
+  # Docker keeps restarting it, waiting longer each time, until it is fixed.
+  # `docker compose stop` cancels a run in progress: every table keeps its
+  # last complete commit, and that holds even if Docker kills it first.
+  #
+  # Its own profile, so `--profile iceberg-export` (the one-shot) never starts
+  # it and `up -d` never starts either. Same volume as the one-shot: while one
+  # of them runs on the local warehouse, the other refuses, and between two
+  # loop runs a manual `run --rm iceberg-export` can slip in. Same settings
+  # too, through the YAML anchors.
+  iceberg-export-loop:
+    <<: *iceberg-export-service
+    profiles: ["iceberg-export-loop"]
+    restart: unless-stopped
+    environment:
+      <<: *iceberg-export-env
+      # The interval, turned into --every by the shared command above. The
+      # one-shot does not list it, so `run --rm iceberg-export` always returns.
+      ICEBERG_EVERY: ${ICEBERG_EVERY:-1h}
 
   # ── `drill` profile: scratch MySQL for `bintrail drill` (#1195) ──────────
   # An opt-in THROWAWAY server the restore rehearsal loads into. Same pinned

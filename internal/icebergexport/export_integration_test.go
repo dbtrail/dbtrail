@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go/catalog"
+
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
@@ -45,6 +47,13 @@ type fixture struct {
 
 func seedFixture(t *testing.T) fixture {
 	t.Helper()
+	return seedFixtureSchema(t, "shop")
+}
+
+// seedFixtureSchema is seedFixture with the source schema named: a catalog
+// shared by an account (Glue) needs a name no other run uses.
+func seedFixtureSchema(t *testing.T, schema string) fixture {
+	t.Helper()
 	db, dbName := testutil.CreateTestDB(t)
 	// The production DDL, not testutil's single-p_future stand-in: the query
 	// planner derives an hour's coverage from the PARTITION list, so a table
@@ -55,7 +64,7 @@ func seedFixture(t *testing.T) fixture {
 	if err := indexer.EnsureSchema(db); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
-	f := fixture{db: db, dsn: testutil.IntegrationDSN(dbName), schema: "shop"}
+	f := fixture{db: db, dsn: testutil.IntegrationDSN(dbName), schema: schema}
 	// The test index has only the p_future partition, so every hour before
 	// the current one reads as rotated-and-unarchived to the planner. The
 	// whole fixture lives inside the current hour.
@@ -413,5 +422,50 @@ func TestIntegrationExport_aTruncateBeforeTheCursorRefusesNothing(t *testing.T) 
 	f.seedSecondWindow(t)
 	if o := runOne(t, f.config(warehouse, f.base.Add(40*time.Minute))); o.Verdict == VerdictRefusedDDL {
 		t.Fatalf("run 2 refused on a TRUNCATE from before the load: %s", o.Detail)
+	}
+}
+
+// TestIntegrationExport_tableRecordsItsSource: with one registered source,
+// a new table carries that source's bintrail_id, which is what lets a run
+// from another source be refused on a shared catalog.
+func TestIntegrationExport_tableRecordsItsSource(t *testing.T) {
+	f := seedFixture(t)
+	testutil.MustExec(t, f.db, serverid.DDLBintrailServers)
+	testutil.MustExec(t, f.db, `DELETE FROM bintrail_servers`)
+	testutil.MustExec(t, f.db, `INSERT INTO bintrail_servers (bintrail_id, server_uuid, host, username) VALUES
+		('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'db-a', 'repl')`)
+	warehouse := t.TempDir()
+	o := runOne(t, f.config(warehouse, f.base.Add(20*time.Minute)))
+	if o.Verdict != VerdictLoaded {
+		t.Fatalf("run = %+v, want loaded", o)
+	}
+	cat, release, err := openWarehouse(context.Background(), warehouse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier(f.schema, "orders"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tbl.Properties()[propSource]; got != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("%s = %q, want the registered source's bintrail_id", propSource, got)
+	}
+}
+
+// TestIntegrationExport_sharedCatalogNeedsANamedSource: with Glue or REST
+// every table records the source it came from, so an index that registers
+// no source (file mode) cannot export to them at all. The refusal comes
+// after the index is read and before any catalog call reaches AWS.
+func TestIntegrationExport_sharedCatalogNeedsANamedSource(t *testing.T) {
+	f := seedFixture(t)
+	testutil.MustExec(t, f.db, serverid.DDLBintrailServers)
+	testutil.MustExec(t, f.db, `DELETE FROM bintrail_servers`)
+	t.Setenv("AWS_REGION", "us-west-2")
+	cfg := f.config("s3://bucket-never-reached/p", f.base.Add(20*time.Minute))
+	cfg.Catalog = CatalogConfig{Kind: CatalogGlue}
+	_, err := Run(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "registers no source") {
+		t.Fatalf("err = %v, want the no-registered-source refusal", err)
 	}
 }

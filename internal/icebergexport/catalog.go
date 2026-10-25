@@ -30,8 +30,8 @@ const lockFileName = ".bintrail-export.lock"
 // comes before any "://".
 var urlScheme = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9+.-]*)://`)
 
-// CheckWarehouse refuses a warehouse that is not a local directory. The
-// export's catalog is a filesystem (Hadoop) catalog: it commits by writing
+// CheckWarehouse refuses a warehouse that is not a local directory, for the
+// local (Hadoop) catalog. That catalog is a filesystem catalog: it commits by writing
 // a metadata file and then a version-hint file, and on object storage two
 // writers race on that hint. Before this check, "s3://b/p" was not refused:
 // filepath.Abs made it the relative directory "./s3:/b/p".
@@ -54,17 +54,14 @@ func CheckWarehouse(warehouse string) error {
 		return fmt.Errorf("warehouse %q is a file:// URL: drop the file:// prefix and write to a local directory", warehouse)
 	}
 	return fmt.Errorf("warehouse %q is an object-store URL: the export writes a filesystem (Hadoop) catalog, "+
-		"which commits through a version-hint file that races on object storage; write to a local directory", warehouse)
+		"which commits through a version-hint file that races on object storage; write to a local directory, or register the tables in a catalog that guards its commits with --catalog glue or --catalog rest", warehouse)
 }
 
-// openWarehouse opens the catalog a run writes to and returns it with the
-// release for whatever keeps a second writer out; release must be called
-// when the run ends. Today the only catalog is the local Hadoop warehouse,
-// whose guard is a flock (openHadoopWarehouse). A catalog with optimistic
-// commits guards itself on commit and returns a no-op release.
-// Run validates the value with CheckWarehouse first.
+// openWarehouse opens the local Hadoop warehouse at dir, guarded, with the
+// release of its single-writer lock: openCatalog's hadoop branch.
 func openWarehouse(ctx context.Context, dir string) (catalog.Catalog, func(), error) {
-	return openHadoopWarehouse(ctx, dir)
+	cat, release, _, err := openCatalog(ctx, CatalogConfig{}, dir)
+	return cat, release, err
 }
 
 var _ catalog.Catalog = (*hadoop.Catalog)(nil)

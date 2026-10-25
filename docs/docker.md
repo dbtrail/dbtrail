@@ -599,6 +599,21 @@ Hourly from the host's crontab:
 17 * * * * cd /path/to/stack && docker compose --profile iceberg-export run --rm iceberg-export >> /var/log/bintrail-iceberg.log 2>&1
 ```
 
+Or skip cron and keep it running as a service that exports again
+`ICEBERG_EVERY` after each run ends (default `1h`, at least `1m`):
+
+```bash
+docker compose --profile iceberg-export-loop up -d iceberg-export-loop
+```
+
+The `iceberg-export-loop` service is the same export with the same settings,
+behind its own profile so the one-shot's profile never starts it. A run that
+fails is logged with the time of the next attempt and the service keeps
+going; a mistake in the settings ends it at start, with the reason in
+`docker compose logs iceberg-export-loop`. `docker compose stop` is safe even
+mid-run: every table keeps its last complete commit. While one of the two runs
+on the local warehouse, the other refuses.
+
 Notes:
 
 - It needs a baseline: run the `baseline` profile first, or set `BASELINE_S3`
@@ -617,6 +632,13 @@ Notes:
   Without that, the run succeeds and exports the wrong tables.
 - Set `ICEBERG_TABLES` to a comma-separated `schema.table` list to export only
   some tables (default: every table in the newest snapshot).
+- To register the tables in AWS Glue or an Iceberg REST catalog instead of
+  the local volume, set `ICEBERG_CATALOG` (`glue` or `rest`) and
+  `WAREHOUSE_DIR` to the `s3://` location, plus `ICEBERG_CATALOG_URI`,
+  `ICEBERG_CATALOG_WAREHOUSE` and `ICEBERG_CATALOG_SIGV4=1` as the catalog
+  needs. A REST secret goes in `.env` as `BINTRAIL_ICEBERG_CATALOG_TOKEN` or
+  `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL`: it reaches the container as a
+  variable, never on a command line. See [Iceberg export](iceberg-export.md).
 - A run that dies before committing leaves the previous copy in place and
   resumes from it. A run refuses to advance a table whose columns changed, or
   whose history has a gap, and says which; to load such a table again from a
@@ -840,9 +862,13 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `BASELINE_TRIGGER` | compose (optional) | Enables the web interface's in-process **Create baseline** button (dump→convert→upload) for a monitored server; **on by default**; set `BASELINE_TRIGGER=0` to disable |
 | `VERIFY_TRIGGER` | compose (optional) | Enables the web interface's Storage **Verification** panel (runs `bintrail verify` in-process) for a monitored server; **on by default**; set `VERIFY_TRIGGER=0` to disable |
 | `BINTRAIL_CONSOLE_SQL_PANEL` | retired | It switched the web interface's first SQL page, removed in 0.75.0. Read for one release, and warns that it does nothing. It does not control SQL in the browser |
-| `WAREHOUSE_DIR` | compose `iceberg-export` profile (optional) | Directory the Iceberg tables are written under (default `/var/lib/bintrail-iceberg`, in the `bintrail-iceberg` volume) |
+| `WAREHOUSE_DIR` | compose `iceberg-export` profiles (optional) | Directory the Iceberg tables are written under (default `/var/lib/bintrail-iceberg`, in the `bintrail-iceberg` volume), or the `s3://` location with Glue or REST |
 | `BASELINE_S3` | compose `iceberg-export` profile (optional) | S3 prefix holding the baseline snapshots to export from; wins over `BASELINE_DIR` |
 | `ICEBERG_TABLES` | compose `iceberg-export` profile (optional) | Comma-separated `schema.table` list to export (default: every table in the newest snapshot) |
+| `ICEBERG_EVERY` | compose `iceberg-export-loop` profile (optional) | How long the loop service waits after each run ends before the next (default `1h`, at least `1m`) |
+| `ICEBERG_CATALOG` | compose `iceberg-export` profiles (optional) | `glue` or `rest` to register the tables in that catalog (default: the local volume); set `WAREHOUSE_DIR` to the `s3://` location |
+| `ICEBERG_CATALOG_URI`, `ICEBERG_CATALOG_WAREHOUSE`, `ICEBERG_CATALOG_SIGV4` | compose `iceberg-export` profiles (optional) | The REST catalog's URL, warehouse identifier, and `1` to sign requests with AWS credentials |
+| `BINTRAIL_ICEBERG_CATALOG_TOKEN`, `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL` | compose `iceberg-export` profiles (optional) | REST catalog bearer token or OAuth client credential, passed to the container as a variable |
 | `SHIM_USER` | compose `flashback` profile | Login the time-travel `mysql` terminal authenticates with (required to start the `shim` service) |
 | `SHIM_PASSWORD` | compose `flashback` profile | Cleartext password for `SHIM_USER` (required) |
 | `SHIM_AUTH_METHOD` | compose `flashback` profile (optional) | Client auth plugin for the shim (default `mysql_native_password`; set `caching_sha2_password` for drivers that require it) |

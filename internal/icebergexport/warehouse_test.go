@@ -41,16 +41,13 @@ func TestCheckWarehouse(t *testing.T) {
 }
 
 // TestCheckWarehouse_messageNamesTheRace: the refusal says why and what to
-// do, and promises no flag that does not exist yet.
+// do, including the catalogs that do write to object storage (#2552).
 func TestCheckWarehouse_messageNamesTheRace(t *testing.T) {
 	msg := CheckWarehouse("s3://b/p").Error()
-	for _, want := range []string{"s3://b/p", "version-hint", "local directory"} {
+	for _, want := range []string{"s3://b/p", "version-hint", "local directory", "--catalog glue", "--catalog rest"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message %q lacks %q", msg, want)
 		}
-	}
-	if strings.Contains(msg, "--") {
-		t.Errorf("message %q names a flag; the refusal must not promise one", msg)
 	}
 }
 
