@@ -1,15 +1,23 @@
 # Capacity Planning
 
-How much memory the machine needs, how much disk the index MySQL needs, how to estimate it before you deploy, and how to monitor it afterwards.
+How much memory and CPU the machine needs, how much disk the index MySQL needs, how to estimate it before you deploy, and how to monitor it afterwards.
 
 This page covers the math; the *operation* of the index MySQL — provisioning the disk, watching it, backing it up — is the operator's responsibility, as spelled out in [SUPPORT.md](./SUPPORT.md). It applies to whatever MySQL 8.0+ your `--index-dsn` points at. (Want the index sized, monitored, and operated for you? That is what [DBTrail](https://dbtrail.com) is.)
 
-## Memory: 16 GB minimum, 32 GB recommended
+## Memory and CPU: 16 GB and 4 cores minimum, 32 GB and 8 cores recommended
 
-The machine that runs the stack (capture, the index MySQL and the router that answers SQL) needs **at least 16 GB of memory, and 32 GB is recommended** for a production database.
+The machine that runs the stack (capture, the index MySQL and the router that answers SQL) needs **at least 16 GB of memory and 4 physical cores; 32 GB and 8 physical cores are recommended** for a production database.
+
+### CPU: count physical cores, not vCPUs
+
+- **On most cloud instances a vCPU is half a core.** Intel instances and most AMD ones run two hardware threads per core, so 4 vCPUs are 2 cores. On those, 4 cores means 8 vCPUs. On AWS Graviton and on the AMD c7a, m7a and r7a families one vCPU is one core.
+- **SQL on the copy runs on cores, and two threads of one core do not add up to two cores.** An analytical query (a full-table aggregate over tens of millions of rows) runs noticeably faster on 4 physical cores than on 4 vCPUs that are 2 cores.
+- **4 physical cores** is the smallest machine we support. **8** leave room for capture and the snapshot refresh, which also use the cores, without slowing the statements down while they run. How the router shares the cores with capture is in [Docker](docker.md#the-router-the-service-that-answers-the-mysql-port).
+
+### Memory
 
 - **32 GB** is what we recommend for a database of tens of GB under constant writes: capture, the index MySQL and the SQL statements each get room, and the router can keep the fresh mode's newest changes in memory beside its statements.
-- **16 GB** is the smallest machine we support. Give the router's statements less memory there, and keep fresh mode for the servers that need it.
+- **16 GB** is the smallest amount we support. Give the router's statements less memory there, and keep fresh mode for the servers that need it.
 - **8 GB is for evaluation on a small database only.** With a database of tens of GB under constant writes, an 8 GB machine runs out of memory: capture is the first process to stop, and a stopped capture is a gap in what you can recover. Below 16 GB, a problem caused by memory is not something we tune for.
 
 The machine's memory is shared: the index MySQL's buffer pool, capture, and the router's statements all come out of it. How the router splits its part is in [Docker](docker.md) (`ROUTER_MEMORY`, `SQL_MEMORY`, `ROUTER_MEMORY_SHARE`).
