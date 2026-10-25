@@ -21,7 +21,7 @@ import (
 // copy is as current as the index, not only as the last refresh. Only the
 // port's statements (SQLOnCopy.Run) do; the console's own SQL card reads
 // the published copy. Tails are the opt-in fresh mode: BINTRAIL_SQL_TAILS=on
-// (tailsOff).
+// for every server (tailsOff), or one server's switch (#2546, tailsOnFor).
 
 // Tail budgets: keys one tail may hold and memory all of them may (#2494,
 // tailBudgetFor), how long a replaced version stays for a statement that may
@@ -240,13 +240,7 @@ func (s *Server) TidyTails() {
 	}
 	s.tails.mu.Unlock()
 	for _, k := range gone {
-		k.close()
-		k.mu.Lock()
-		dir := k.dir
-		k.mu.Unlock()
-		if dir != "" {
-			time.AfterFunc(tailKeepOld, func() { _ = os.RemoveAll(dir) })
-		}
+		retireTailKeeper(k)
 	}
 	for _, k := range live {
 		k.tidy()

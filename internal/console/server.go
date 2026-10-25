@@ -176,6 +176,12 @@ type Config struct {
 	// sized (#2531): "" unless its statements were given half the cores. The
 	// router's numbers carry it to the web interface.
 	SQLPoolCoresNote string
+	// SQLPoolFastWorkers and SQLPoolFreshWorkers are the statements the
+	// router runs at once with no server in fresh mode and with at least
+	// one (#2546): the second leaves memory for the copy's tails. Both set
+	// and different, the pool moves between them as servers are switched;
+	// otherwise it stays at SQLMaxInFlight.
+	SQLPoolFastWorkers, SQLPoolFreshWorkers int
 	// SQLPortMaxRows is the most rows one statement returns on the embedded
 	// MySQL port. Its own number, not SQLLimits.MaxRows: that one is how
 	// many rows the web interface's SQL page shows, and a program that
@@ -483,6 +489,8 @@ type Server struct {
 	copyChanged copyChangedMemo
 	// tails are the SQL port's tails, by server (#2369; tail_wire.go).
 	tails tailKeepers
+	// fresh is which servers read tails because of their switch (#2546).
+	fresh sqlFreshState
 	// tailCapturesHook, when set, replaces tailCaptures: a test's server
 	// has no registry.
 	tailCapturesHook func(id string) (func(schema, table string) bool, bool)
@@ -911,6 +919,7 @@ func New(cfg Config) (*Server, error) {
 		WorkerStatements: cfg.SQLWorkerStatements, MaxWaiters: cfg.SQLMaxWaiters, MaxWait: cfg.SQLMaxWait})
 	s.sqlPortSharedSlots = cfg.SQLPortSharedSlots
 	s.sqlRunner, s.sqlSpillState, s.sqlFenceState = sandboxRunner{runner}, runner.SpillState, runner.FenceState
+	s.fresh.pool, s.fresh.fastWorkers, s.fresh.freshWorkers = runner, cfg.SQLPoolFastWorkers, cfg.SQLPoolFreshWorkers
 	s.sqlMaxInFlight = cfg.SQLMaxInFlight
 	if s.sqlMaxInFlight < 1 {
 		s.sqlMaxInFlight = sqlsandbox.DefaultMaxInFlight
@@ -944,6 +953,10 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s.mux = s.buildHandler()
+	// What each server's switch saved before this process started (#2546).
+	// The router reads it again on every registry reading; a switch flipped
+	// in this process applies it when it saves.
+	s.applySQLFresh()
 	return s, nil
 }
 

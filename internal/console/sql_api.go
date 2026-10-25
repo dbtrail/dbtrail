@@ -1154,7 +1154,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// newest copy only: an earlier one's cut is not the one they follow.
 	var tails *tailKeeper
 	// A copy with no index connection has nothing to read them from.
-	if id, ok := tailsFor(ctx); ok && at.IsZero() && b.db != nil && !tailsOff() {
+	if id, ok := tailsFor(ctx); ok && at.IsZero() && b.db != nil && s.tailsOnFor(id) {
 		tails = s.tailKeeperFor(id, b)
 	}
 	if tails != nil {

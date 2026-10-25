@@ -181,6 +181,13 @@ type RouterServerNumbers struct {
 	// DataAgeMaxSeconds is the worst such age since CountingSince, over the
 	// answers whose instant is known; absent when none is.
 	DataAgeMaxSeconds *int64 `json:"data_age_max_seconds,omitempty"`
+	// SQLMode is how this server's statements answer now (#2546): "fresh"
+	// (its newest captured changes over its snapshot) or "fast" (the
+	// snapshot alone); SQLModeFrom where that comes from: "environment"
+	// (BINTRAIL_SQL_TAILS=on, every server), "saved" (its own switch) or
+	// "default". Absent from a router older than the switch.
+	SQLMode     string `json:"sql_mode,omitempty"`
+	SQLModeFrom string `json:"sql_mode_from,omitempty"`
 	// DataAgeUnknown counts the copy's answers whose lag could not be told,
 	// which DataAgeMaxSeconds cannot include: with any, the max is a floor.
 	// DataAgeUnknownReason is the last one's reason.
@@ -215,6 +222,7 @@ func (s *Server) RouterNumbers() RouterNumbers {
 		}
 		n := RouterServerNumbers{Copy: t.Copy, MySQL: t.MySQL, Refused: t.Refused, Reasons: reasons,
 			CannotRoute: t.Unavailable != "", AccountRefused: t.AccountRefused != "", SessionUntracked: t.SessionUntracked != ""}
+		n.SQLMode, n.SQLModeFrom = s.SQLModeOf(id)
 		if ages := s.copyAges.now(id); ages.known || ages.anyMax || ages.unknown > 0 || ages.pending {
 			// Rounded up: a lag is never said smaller than it was.
 			secs := func(d time.Duration) *int64 { v := int64(math.Ceil(d.Seconds())); return &v }
@@ -239,6 +247,15 @@ func (s *Server) RouterNumbers() RouterNumbers {
 			}
 		}
 		out.Servers[id] = n
+	}
+	// A server in fresh mode is listed before its first statement: that it
+	// is fresh is what the operator who switched it looks for.
+	for _, id := range s.fresh.ids() {
+		if _, ok := out.Servers[id]; !ok {
+			n := RouterServerNumbers{Reasons: map[string]uint64{}}
+			n.SQLMode, n.SQLModeFrom = s.SQLModeOf(id)
+			out.Servers[id] = n
+		}
 	}
 	if runner := s.SQLSandbox(); runner != nil {
 		memory, _ := s.sqlMemoryNow()

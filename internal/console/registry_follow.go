@@ -144,6 +144,9 @@ func (s *Server) RefreshFollowedFiles() {
 	for _, c := range changes {
 		s.applyRegistryChange(c)
 	}
+	// Every time, not only on a change: the first reading applies what was
+	// saved before this process started (#2546).
+	s.applySQLFresh()
 }
 
 // applyRegistryChange does for an entry another process changed what the

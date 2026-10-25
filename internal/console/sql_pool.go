@@ -68,6 +68,10 @@ type SQLPool struct {
 	// own (#2531): it says so and how to give them all, for the startup
 	// line and the web interface.
 	CoresNote string
+	// FreshWorkers is Workers with the copy's tails set aside, for while at
+	// least one server is in fresh mode (#2546); 0 when the pool was
+	// planned for tails already (BINTRAIL_SQL_TAILS=on) and never moves.
+	FreshWorkers int
 }
 
 const (
@@ -252,8 +256,15 @@ func gibText(b uint64) string {
 // a ceiling of this process's own, like a container's, and the pool then
 // plans with all of it, not half.
 func ThisMachineForSQLPool(memoryLimit string) SQLPoolInput {
+	return ThisMachineForSQLPoolWithTails(memoryLimit, !tailsOff())
+}
+
+// ThisMachineForSQLPoolWithTails is ThisMachineForSQLPool with the tails'
+// memory set aside or not, whatever BINTRAIL_SQL_TAILS says: the router
+// plans both, so a server switched to fresh mode can make room (#2546).
+func ThisMachineForSQLPoolWithTails(memoryLimit string, withTails bool) SQLPoolInput {
 	var tails int64
-	if !tailsOff() {
+	if withTails {
 		tails = tailBudgetFromEnv().Bytes
 	}
 	in := machineForSQLPool(memoryLimit, runtime.GOMAXPROCS(0), cpuCapped("/"), memoryBudget(), memoryCapped("/"), MemoryShare(), tails, MemoryBudgetWords())

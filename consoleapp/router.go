@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -262,6 +263,8 @@ func newRouterConsole(st routerSettings, pool console.SQLPool) (*console.Server,
 		SQLLimits:              sqlsandbox.Limits{MemoryLimit: st.SQLMemory, Threads: pool.Threads},
 		SQLPoolCoresNote:       pool.CoresNote,
 		SQLMaxInFlight:         pool.Workers,
+		SQLPoolFastWorkers:     pool.Workers,
+		SQLPoolFreshWorkers:    pool.FreshWorkers,
 		SQLWorkerStatements:    sqlsandbox.DefaultWorkerStatements,
 		SQLMaxWaiters:          routerMaxWaiters,
 		SQLMaxWait:             st.MaxWait,
@@ -354,6 +357,32 @@ func exportCopySnapshots(ctx context.Context, read func(context.Context) map[str
 // the metrics are on.
 const routerStatusPath = "/status"
 
+// routerFreshServersLine names the servers in fresh mode by their own switch
+// (#2546), read from the registry before the port opened; "" for none. The
+// line above it says the router's default. fast and fresh are the pool's two
+// counts: when they differ the line says the pool moved, and to what.
+func routerFreshServersLine(names []string, fast, fresh int) string {
+	if len(names) == 0 {
+		return ""
+	}
+	noun, whose, verb := "servers are", "their", "Their statements read"
+	if len(names) == 1 {
+		noun, whose, verb = "server is", "its", "Its statements read"
+	}
+	sorted := slices.Clone(names)
+	slices.Sort(sorted)
+	pool := ""
+	if fresh > 0 && fast > 0 && fresh != fast {
+		runs := "run"
+		if fresh == 1 {
+			runs = "runs"
+		}
+		pool = fmt.Sprintf(" While any server is in fresh mode, %s %s at once instead of %d, to leave memory for those changes.", countOfStatements(fresh), runs, fast)
+	}
+	return fmt.Sprintf("Router: %d %s in fresh mode by %s own switch: %s. %s each table's newest captured changes over its snapshot.%s\n",
+		len(names), noun, whose, strings.Join(sorted, ", "), verb, pool)
+}
+
 // routerFreshnessLine says which answers the port gives: each table's last
 // snapshot (the default, fast mode) or that snapshot with the newest captured
 // changes laid over it (fresh mode, BINTRAIL_SQL_TAILS=on), and how to switch.
@@ -399,6 +428,18 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 			n = console.RouterServerNumbers{Reasons: map[string]uint64{}}
 		}
 		n.CopySnapshot = when.UTC().Format(time.RFC3339)
+		doc.Servers[id] = n
+	}
+	// A server the numbers did not list is not in fresh mode by its own
+	// switch (those are always listed): its mode is the environment's.
+	for id, n := range doc.Servers {
+		if n.SQLMode != "" {
+			continue
+		}
+		n.SQLMode, n.SQLModeFrom = "fast", console.SQLModeFromDefault
+		if fresh {
+			n.SQLMode, n.SQLModeFrom = "fresh", console.SQLModeFromEnvironment
+		}
 		doc.Servers[id] = n
 	}
 	return doc
@@ -772,10 +813,23 @@ func routerWaitText(maxWait time.Duration) string {
 
 // routerPool sizes the router's pool of workers: from this machine, and
 // with the number of statements the operator set when there is one.
+//
+// With no BINTRAIL_SQL_TAILS=on it is planned twice (#2546): for fast mode,
+// which is what it starts with, and with the copy's tails set aside, which
+// is what it moves to while a server's own switch has it in fresh mode
+// (FreshWorkers). With it on, it is planned for the tails and never moves.
 func routerPool(st routerSettings, memoryLimit string) console.SQLPool {
-	machine := console.ThisMachineForSQLPool(memoryLimit)
-	machine.Asked = st.Concurrency
-	return console.SQLPoolFor(machine)
+	envFresh, _ := console.TailsSetting()
+	plan := func(withTails bool) console.SQLPool {
+		machine := console.ThisMachineForSQLPoolWithTails(memoryLimit, withTails)
+		machine.Asked = st.Concurrency
+		return console.SQLPoolFor(machine)
+	}
+	pool := plan(envFresh)
+	if !envFresh {
+		pool.FreshWorkers = plan(true).Workers
+	}
+	return pool
 }
 
 // parseRouterConcurrency reads --concurrency: a whole number of statements,
@@ -927,6 +981,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr,
 	}))
 	fmt.Fprint(os.Stderr, routerFreshnessLine(console.TailsSetting()))
+	fmt.Fprint(os.Stderr, routerFreshServersLine(srv.FreshServerNames(), pool.Workers, pool.FreshWorkers))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)
 }

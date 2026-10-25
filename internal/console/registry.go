@@ -91,6 +91,14 @@ type ServerEntry struct {
 	// Registry-owned: only SetHidden writes it, and Update keeps the stored
 	// value, so an edit built from an older read cannot put old rules back.
 	Hidden *hiderules.Rules `yaml:"hidden,omitempty"`
+	// SQLFresh is the server's fresh mode on the SQL port (#2546): its
+	// statements read each table's newest captured changes over its
+	// snapshot ("tails") instead of the snapshot alone. Absent is fast, as
+	// before the switch. Registry-owned like Hidden: only SetSQLFresh writes
+	// it, Add never stores it and Update keeps the stored value. The process
+	// that serves the port applies it when it reads the registry again
+	// (Server.applySQLFresh); BINTRAIL_SQL_TAILS=on overrides it.
+	SQLFresh bool `yaml:"sql_fresh,omitempty"`
 
 	// ── Source family (#1019) ──
 	// Flavor selects the capture engine: "" or "mysql" (MySQL), "mariadb"
@@ -729,6 +737,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	e.ID = id
 	e.LocalKeepHeldDir = "" // registry-owned; a new entry never starts held
 	e.Hidden = nil          // SetHidden is the only writer (#2529)
+	e.SQLFresh = false      // SetSQLFresh is the only writer (#2546)
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -795,6 +804,8 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 		e.LocalKeepHeldDir = old.LocalKeepHeldDir
 		// So are the hidden rules (#2529): SetHidden is their only writer.
 		e.Hidden = old.Hidden
+		// And the fresh mode (#2546): SetSQLFresh is its only writer.
+		e.SQLFresh = old.SQLFresh
 		// Within MySQL and MariaDB the Source type is registry-owned too:
 		// capture corrects it (CorrectSourceFlavor), and an edit built from
 		// a copy read before that must not put the old value back. No edit
@@ -845,6 +856,29 @@ func (r *Registry) SetHidden(id string, set *hiderules.Set) (ServerEntry, error)
 		r.file.Servers[i].Hidden = next
 		if err := r.save(); err != nil {
 			r.file.Servers[i].Hidden = prev // roll back
+			return ServerEntry{}, err
+		}
+		return r.file.Servers[i], nil
+	}
+	return ServerEntry{}, ErrUnknownServer
+}
+
+// SetSQLFresh saves whether entry id's statements on the SQL port read
+// tails (#2546). It is the only writer of ServerEntry.SQLFresh, and it
+// changes nothing else in the entry.
+func (r *Registry) SetSQLFresh(id string, on bool) (ServerEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readOnly {
+		return ServerEntry{}, ErrRegistryReadOnly
+	}
+	for i, old := range r.file.Servers {
+		if old.ID != id {
+			continue
+		}
+		r.file.Servers[i].SQLFresh = on
+		if err := r.save(); err != nil {
+			r.file.Servers[i].SQLFresh = old.SQLFresh // roll back
 			return ServerEntry{}, err
 		}
 		return r.file.Servers[i], nil
