@@ -852,7 +852,7 @@ func EnsureSchema(db *sql.DB) error {
 	// had, from replication heartbeats. Written only by the stream checkpoint;
 	// NULL = never caught up, or an older build.
 	if err := ensureColumn(db, "stream_state", "caught_up_at",
-		`ALTER TABLE stream_state ADD COLUMN caught_up_at DATETIME(6) DEFAULT NULL COMMENT 'when capture last had received and indexed every event the source had (#2556), from replication heartbeats; index clock (UTC); NULL = never seen caught up, or an older build' AFTER capture_skips`,
+		`ALTER TABLE stream_state ADD COLUMN caught_up_at DATETIME(6) DEFAULT NULL COMMENT 'when capture last had read every change the server it reads from had sent, with every row it keeps from them indexed (#2556), from replication heartbeats; that server is a replica when capture reads a replica; index clock (UTC); NULL = never seen caught up, or an older build' AFTER capture_skips`,
 	); err != nil {
 		return err
 	}

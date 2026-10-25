@@ -270,8 +270,10 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	var hbPos uint64
 	var hbIdle bool
 	// waited is how long the last GetEvent blocked before it returned: the
-	// time this parser sat with nothing to read.
+	// time this parser sat with nothing to read. prevReadAt is when the
+	// packet before the current one was read (zero before the first).
 	var waited time.Duration
+	var prevReadAt time.Time
 	// txnRows counts the row events emitted for the transaction in flight.
 	var txnRows int
 
@@ -425,6 +427,15 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 	// after a full period with nothing to send, so a parser keeping up waits
 	// about that long; one draining a queue gets it at once.
 	//
+	// The marker's time is capped at the previous packet's read time plus one
+	// period. The source sends a heartbeat one period after the last thing
+	// it sent, and that thing was read at prevReadAt, after it was sent: so
+	// the heartbeat left no later than prevReadAt + period. Its own read
+	// time is later than that when the network or this process stalled on
+	// the way, and changes the source made after sending it may still be on
+	// that way. The cap keeps the time to what the heartbeat proves; the
+	// error left is how late the previous packet was read, one normal hop.
+	//
 	// It is compared with the position as it stood BEFORE this heartbeat:
 	// heartbeats never move lastLogPos, so the wraparound guard and this
 	// check only ever see positions of events. Not during a re-sent
@@ -446,10 +457,14 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 			caught = atReceived || idlePair
 		}
 		hbFile, hbPos, hbIdle = hb.Filename, pos, true
-		if !caught {
+		if !caught || prevReadAt.IsZero() {
 			return nil
 		}
-		return em.send(ctx, Event{EventType: EventCaughtUp})
+		marker := em
+		if latest := prevReadAt.Add(sp.heartbeatPeriod); latest.Before(marker.readAt) {
+			marker.readAt = latest
+		}
+		return marker.send(ctx, Event{EventType: EventCaughtUp})
 	}
 
 	var handleEvent func(binlogEv *replication.BinlogEvent) error
@@ -775,6 +790,7 @@ func (sp *StreamParser) Run(ctx context.Context, streamer *replication.BinlogStr
 		// and not where the consumer receives off `out`, because `out` is
 		// buffered and a receive-side stamp would swallow the queue wait, which
 		// is the largest part of the lag precisely when the indexer is behind.
+		prevReadAt = em.readAt
 		em = emitter{ch: out, readAt: time.Now(), rows: &txnRows}
 		waited = em.readAt.Sub(asked)
 

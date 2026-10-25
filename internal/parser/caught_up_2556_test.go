@@ -41,7 +41,7 @@ func makeOtherAt(pos uint32) *replication.BinlogEvent {
 
 // testHeartbeatPeriod is the period these tests tell the parser; a heartbeat
 // counts only when the parser waited at least half of it before reading it.
-const testHeartbeatPeriod = 40 * time.Millisecond
+const testHeartbeatPeriod = 200 * time.Millisecond
 
 // feedLikeAQuietSource adds evs to the streamer from a goroutine and pauses a
 // full heartbeat period before each heartbeat, as a source with nothing to
@@ -207,5 +207,53 @@ func TestCaughtUp_notWhileSkippingAResentTransaction_2556(t *testing.T) {
 func TestCaughtUp_nothingReceivedInTheFileYet_2556(t *testing.T) {
 	if n := caughtUpMarkers(t, makeRotate("binlog.000003"), makeHeartbeat("binlog.000003", 0, false)); n != 0 {
 		t.Fatalf("heartbeat at zero right after a rotate: %d markers, want 0", n)
+	}
+}
+
+// A heartbeat held up on the way (a network stall, a paused process) is read
+// long after the source sent it, and changes made after it may be right
+// behind. Its marker time is capped at the previous packet's read time plus
+// one period: no later than the source can have sent it.
+func TestCaughtUp_aStalledHeartbeatIsCappedAtWhenItWasSent_2556(t *testing.T) {
+	sp := NewStreamParser(nil, Filters{}, nil)
+	sp.SetHeartbeatPeriod(testHeartbeatPeriod)
+	streamer := replication.NewBinlogStreamer()
+	out := make(chan Event, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	var lastEventFed, heartbeatFed time.Time
+	go func() {
+		defer cancel()
+		for _, ev := range []*replication.BinlogEvent{makeRotate("binlog.000003"), makeOtherAt(500)} {
+			if err := streamer.AddEventToStreamer(ev); err != nil {
+				t.Errorf("AddEventToStreamer: %v", err)
+				return
+			}
+		}
+		lastEventFed = time.Now()
+		time.Sleep(4 * testHeartbeatPeriod) // the stall: 3 periods late
+		heartbeatFed = time.Now()
+		if err := streamer.AddEventToStreamer(makeHeartbeat("binlog.000003", 500, false)); err != nil {
+			t.Errorf("AddEventToStreamer: %v", err)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}()
+	if err := sp.Run(ctx, streamer, out); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var marker *Event
+	for _, ev := range drainAll(out) {
+		if ev.EventType == EventCaughtUp {
+			marker = &ev
+		}
+	}
+	if marker == nil {
+		t.Fatal("no marker for a heartbeat at the received position")
+	}
+	if !marker.ReadAt.Before(heartbeatFed) {
+		t.Fatalf("marker time %v is not before the stalled heartbeat's arrival %v: it would claim changes still on the way", marker.ReadAt, heartbeatFed)
+	}
+	if limit := lastEventFed.Add(testHeartbeatPeriod + 50*time.Millisecond); marker.ReadAt.After(limit) {
+		t.Fatalf("marker time %v is past the previous packet's read time plus one period (%v)", marker.ReadAt, limit)
 	}
 }
