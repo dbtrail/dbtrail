@@ -138,8 +138,11 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 	if eiBaselineDir != "" && eiBaselineS3 != "" {
 		return fmt.Errorf("--baseline-dir and --baseline-s3 are mutually exclusive")
 	}
-	if eiWarehouse == "" {
+	if strings.TrimSpace(eiWarehouse) == "" {
 		return fmt.Errorf("--warehouse is required")
+	}
+	if err := icebergexport.CheckWarehouse(eiWarehouse); err != nil {
+		return fmt.Errorf("--warehouse: %w", err)
 	}
 	if !cliutil.IsValidOutputFormat(eiFormat) {
 		return fmt.Errorf("--format must be text or json")

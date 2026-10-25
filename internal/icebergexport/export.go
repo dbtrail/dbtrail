@@ -15,7 +15,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/table"
 	drivermysql "github.com/go-sql-driver/mysql"
 
@@ -138,7 +137,7 @@ type deps struct {
 	engine   *query.Engine
 	resolver *metadata.Resolver
 	fetcher  query.ArchiveFetcher
-	cat      *hadoop.Catalog
+	cat      catalog.Catalog
 	mem      memory.Allocator
 }
 
@@ -151,8 +150,8 @@ func Run(ctx context.Context, cfg Config) ([]Outcome, error) {
 	if cfg.BaselineSrc == "" {
 		return nil, errors.New("a baseline source is required")
 	}
-	if cfg.Warehouse == "" {
-		return nil, errors.New("a warehouse directory is required")
+	if err := CheckWarehouse(cfg.Warehouse); err != nil {
+		return nil, err
 	}
 	if len(cfg.Tables) == 0 {
 		return nil, errors.New("no tables to export")

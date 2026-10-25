@@ -238,7 +238,8 @@ Two things to know:
 ## Limits in this release
 
 - The warehouse is a local directory. Writing directly to S3 is not supported
-  yet; sync the directory and read with `allow_moved_paths`.
+  yet; sync the directory and read with `allow_moved_paths`. A `--warehouse`
+  that is a URL (`s3://`, `gs://`, `file://`, any `scheme://`) is refused.
 - No schema evolution yet. A column added or dropped in the source refuses the
   table (`refused-ddl`); remove the table directory to reload it from a fresh
   baseline. Iceberg tracks columns by id, which is what will make an ADD

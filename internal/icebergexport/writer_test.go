@@ -14,7 +14,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/table"
 	_ "github.com/duckdb/duckdb-go/v2"
 
@@ -40,7 +39,7 @@ var ordersCols = []baseline.Column{
 
 var ordersPK = []metadata.ColumnMeta{{Name: "id", IsPK: true, DataType: "bigint"}}
 
-func newTestTable(t *testing.T, bcols []baseline.Column, pkNames []string) (*hadoop.Catalog, *table.Table, []column) {
+func newTestTable(t *testing.T, bcols []baseline.Column, pkNames []string) (catalog.Catalog, *table.Table, []column) {
 	t.Helper()
 	ctx := context.Background()
 	cat, release, err := openWarehouse(ctx, t.TempDir())

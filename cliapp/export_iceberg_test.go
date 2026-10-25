@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -152,5 +153,39 @@ func TestExportIceberg_envReachesWarehouseFlag(t *testing.T) {
 	bindCommandEnv(exportIcebergCmd)
 	if eiWarehouse != dir {
 		t.Fatalf("eiWarehouse = %q, want the env value %q", eiWarehouse, dir)
+	}
+}
+
+// TestRunExportIceberg_refusesURLWarehouse: an object-store or file:// URL
+// is refused before baseline discovery (with no --tables, a missed check
+// would surface as "no tables to export" instead), and nothing is created
+// in the working directory. Before #2552 the value became the relative
+// directory "./s3:/b/p".
+func TestRunExportIceberg_refusesURLWarehouse(t *testing.T) {
+	cases := []struct{ wh, want string }{
+		{"s3://b/p", "object-store URL"},
+		{"S3://B/p", "object-store URL"},
+		{"gs://x", "object-store URL"},
+		{"file:///tmp/x", "file:// URL"},
+		{"   ", "--warehouse is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wh, func(t *testing.T) {
+			resetExportGlobals(t)
+			wd := t.TempDir()
+			t.Chdir(wd)
+			eiIndexDSN = "u:p@tcp(127.0.0.1:1)/db?timeout=200ms"
+			eiBaselineDir = t.TempDir()
+			eiWarehouse = tc.wh
+			exportIcebergCmd.SetContext(context.Background())
+			exportIcebergCmd.SetOut(&bytes.Buffer{})
+			err := runExportIceberg(exportIcebergCmd, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want containing %q", err, tc.want)
+			}
+			if ents, _ := os.ReadDir(wd); len(ents) != 0 {
+				t.Fatalf("created %q in the working directory", ents[0].Name())
+			}
+		})
 	}
 }
