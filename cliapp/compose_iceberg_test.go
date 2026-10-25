@@ -193,6 +193,11 @@ func TestComposeIcebergExportCatalogPassthrough(t *testing.T) {
 			t.Errorf("%s does not reach %s in the command", env, strings.TrimSpace(flag))
 		}
 	}
+	// An unrecognized ICEBERG_CATALOG_SIGV4 must stop the service, not be
+	// dropped: without signing, every run of the loop would fail to sign in.
+	if !strings.Contains(cmd, "FATAL: ICEBERG_CATALOG_SIGV4=") {
+		t.Error("an unrecognized ICEBERG_CATALOG_SIGV4 value is not refused")
+	}
 	for _, env := range []string{envCatalogCredential, envCatalogToken} {
 		if _, ok := svc.Environment[env]; !ok {
 			t.Errorf("iceberg-export does not pass %s through", env)

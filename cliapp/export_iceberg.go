@@ -273,6 +273,9 @@ func runExportIceberg(cmd *cobra.Command, _ []string) error {
 	job.compact = true
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// After the first signal, give the signals back: a second Ctrl-C while a
+	// run is still winding down then ends the process the usual way.
+	go func() { <-ctx.Done(); stop() }()
 	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
 	log.Info("iceberg export: running on a loop; each run starts this long after the previous one ended", "every", every.String())
 	first := true
@@ -405,13 +408,14 @@ func (j *exportJob) runOnce(ctx context.Context, w io.Writer, tables []string) e
 	} else {
 		err = writeExportSummary(w, outcomes, j.target, at)
 	}
+	var errs []error
 	if err != nil {
-		return fmt.Errorf("write the export report: %w", err)
+		errs = append(errs, fmt.Errorf("write the export report (the run's commits stand): %w", err))
 	}
 	if failed > 0 {
-		return fmt.Errorf("iceberg export: %d of %d table(s) did not end current", failed, len(outcomes))
+		errs = append(errs, fmt.Errorf("iceberg export: %d of %d table(s) did not end current", failed, len(outcomes)))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // exportLoop runs run, waits every, and runs again until ctx is canceled.
@@ -427,7 +431,10 @@ func exportLoop(ctx context.Context, every time.Duration, run func(context.Conte
 	for {
 		err := run(ctx)
 		if ctx.Err() != nil {
-			log.Info("iceberg export: stopped by a signal; the run in progress was canceled, and every table keeps its last complete commit")
+			if err != nil && !errors.Is(err, context.Canceled) {
+				log.Warn("iceberg export: the last run failed as the signal arrived", "err", err.Error())
+			}
+			log.Info("iceberg export: stopped by a signal; a run in progress was canceled, and every table keeps its last complete commit")
 			return nil
 		}
 		next := now().Add(every).UTC().Format(time.RFC3339)

@@ -367,3 +367,40 @@ func TestExportIceberg_envReachesEveryFlag(t *testing.T) {
 		t.Fatalf("eiEvery = %q, want the env value 15m", eiEvery)
 	}
 }
+
+// TestExportLoop_signalKeepsARealFailure: a run that failed for its own
+// reason just as the signal arrived still gets its error logged.
+func TestExportLoop_signalKeepsARealFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	run := func(context.Context) error {
+		cancel()
+		return errors.New("catalog answered 503")
+	}
+	var logs bytes.Buffer
+	if err := exportLoop(ctx, time.Hour, run, sleepCtx, time.Now, testLogger(&logs)); err != nil {
+		t.Fatalf("exportLoop = %v, want nil", err)
+	}
+	if !strings.Contains(logs.String(), "catalog answered 503") {
+		t.Fatalf("the run's own error was dropped:\n%s", logs.String())
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
+// TestRunOnce_reportErrorKeepsTableFailures: a report that cannot be written
+// does not hide the tables that did not end current.
+func TestRunOnce_reportErrorKeepsTableFailures(t *testing.T) {
+	resetCatalogGlobals(t)
+	sRun := exportRunFn
+	t.Cleanup(func() { exportRunFn = sRun })
+	exportRunFn = func(context.Context, icebergexport.Config) ([]icebergexport.Outcome, error) {
+		return []icebergexport.Outcome{{Schema: "shop", Table: "orders", Verdict: icebergexport.VerdictRefusedGap}}, nil
+	}
+	j := &exportJob{target: "/w"}
+	err := j.runOnce(context.Background(), failWriter{}, []string{"shop.orders"})
+	if err == nil || !strings.Contains(err.Error(), "stdout closed") || !strings.Contains(err.Error(), "did not end current") {
+		t.Fatalf("err = %v, want both the write failure and the table failure", err)
+	}
+}

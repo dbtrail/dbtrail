@@ -1126,7 +1126,14 @@ services:
         [ -n "$$ICEBERG_CATALOG" ] && set -- "$$@" --catalog "$$ICEBERG_CATALOG"
         [ -n "$$ICEBERG_CATALOG_URI" ] && set -- "$$@" --catalog-uri "$$ICEBERG_CATALOG_URI"
         [ -n "$$ICEBERG_CATALOG_WAREHOUSE" ] && set -- "$$@" --catalog-warehouse "$$ICEBERG_CATALOG_WAREHOUSE"
-        case "$$ICEBERG_CATALOG_SIGV4" in 1|true|TRUE|yes) set -- "$$@" --catalog-sigv4 ;; esac
+        case "$$ICEBERG_CATALOG_SIGV4" in
+          ""|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) ;;
+          1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) set -- "$$@" --catalog-sigv4 ;;
+          *)
+            # Unrecognized: dropping it would leave every run failing to sign in.
+            echo "FATAL: ICEBERG_CATALOG_SIGV4=$$ICEBERG_CATALOG_SIGV4 is not 1/true/yes/on or 0/false/no/off." >&2
+            exit 1 ;;
+        esac
         # Only a local warehouse is a directory to create; an s3:// one is not.
         case "$$WAREHOUSE_DIR" in
           *://*) ;;

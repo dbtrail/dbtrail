@@ -217,6 +217,8 @@ var envSections = []envSection{
 		Bindings: []envTemplateEntry{
 			{"BINTRAIL_ICEBERG_WAREHOUSE", ""},
 			// Run again this long after each run ends (e.g. 1h, at least 1m); empty = once.
+			// Set here, EVERY export command stays running: leave it empty if cron
+			// or a timer starts the export, or runs pile up.
 			{"BINTRAIL_ICEBERG_EVERY", ""},
 		},
 	},
