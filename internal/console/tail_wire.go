@@ -178,17 +178,28 @@ func (s *Server) tailCaptures(id string) (func(schema, table string) bool, bool)
 // join over a table read now and one read as of its snapshot would pair rows
 // that never coexisted. ok false: tables, unchanged.
 func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, ok bool) {
+	out, through, _, ok = s.statementTailsMark(ctx, k, tables, read)
+	return out, through, ok
+}
+
+// statementTailsMark is statementTails with throughID, the least id of the
+// index's event the tails it read hold every event through (#2556), 0 when
+// any is unknown.
+func (s *Server) statementTailsMark(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable) (out []views.BaselineTable, through time.Time, throughID uint64, ok bool) {
 	if len(read) == 0 {
-		return tables, time.Time{}, false
+		return tables, time.Time{}, 0, false
 	}
 	got := k.latest(ctx, copyUnchangedTimeout, read)
+	ids := make([]uint64, 0, len(read))
 	for i, t := range read {
 		v, has := got[tailKey(t.Schema, t.Table)]
 		if !has || (i > 0 && !v.Through.Equal(through)) {
-			return tables, time.Time{}, false
+			return tables, time.Time{}, 0, false
 		}
 		through = v.Through
+		ids = append(ids, v.ThroughID)
 	}
+	throughID = leastEventID(ids...)
 	out = make([]views.BaselineTable, len(tables))
 	copy(out, tables)
 	for i := range out {
@@ -196,7 +207,7 @@ func (s *Server) statementTails(ctx context.Context, k *tailKeeper, tables, read
 			out[i].Tail = &views.TableTail{Paths: v.Paths, PK: v.PK}
 		}
 	}
-	return out, through, true
+	return out, through, throughID, true
 }
 
 // tailsSayTheInstant is whether a statement whose tables all read tails

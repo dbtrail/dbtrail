@@ -64,6 +64,26 @@ func TestTailFollower(t *testing.T) {
 		}
 	})
 
+	// #2556: the tails carry the id of the index's event they hold every
+	// event through, the keeper's cursor, to the answer.
+	t.Run("the tails say the event id they hold every event through", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		f.add("orders", "2")
+		k := newKeeper(f)
+		s.statementTails(ctx, k, one(orders), one(orders))
+		k.settle()
+		follow(k)
+		newest, err := f.Newest(ctx)
+		if err != nil || newest.ID == 0 {
+			t.Fatalf("fake index newest: %+v %v", newest, err)
+		}
+		_, _, id, ok := s.statementTailsMark(ctx, k, one(orders), one(orders))
+		if !ok || id != newest.ID {
+			t.Fatalf("tails through event %d (ok %v), want the index's newest %d", id, ok, newest.ID)
+		}
+	})
+
 	t.Run("a statement over what was published reads no index", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
