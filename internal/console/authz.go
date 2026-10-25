@@ -260,6 +260,8 @@ var apiRoutePerms = []routePerm{
 	// analytical surfaces show, edited like the server itself.
 	{"GET", "/api/servers/{}/hidden", ext.PermServersRead},
 	{"PUT", "/api/servers/{}/hidden", ext.PermServersWrite},
+	// The SQL port's fresh mode (#2546): per-server, like the hidden rules.
+	{"PUT", "/api/servers/{}/sql-mode", ext.PermServersWrite},
 	// Turning the port on, off, or giving it a new password opens (or
 	// re-keys) a network door onto every server's history: a settings
 	// mutation, and the response is the one place the password is shown.

@@ -82,6 +82,10 @@ type serverDTO struct {
 	// Hidden are the tables and columns the analytical surfaces leave out
 	// for this server (#2529). Edited through /api/servers/{id}/hidden only.
 	Hidden *hiddenListsDTO `json:"hidden,omitempty"`
+	// SQLFresh is the fresh mode SAVED for this server's statements on the
+	// SQL port (#2546). What the router applies is its own status document's
+	// sql_mode. Edited through /api/servers/{id}/sql-mode only.
+	SQLFresh bool `json:"sql_fresh"`
 	// Flavor is the source family ("mysql" | "mariadb" | "postgres"); the
 	// frontend gates per-server without opening the index. SourceDatabase /
 	// SourceSlot / SourcePublication are the PostgreSQL-only source parts (the
@@ -1621,6 +1625,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		Schemas:              e.Schemas,
 		MonitorDesired:       e.MonitorDesired,
 		Hidden:               newHiddenListsDTO(e.Hidden),
+		SQLFresh:             e.SQLFresh,
 		Flavor:               e.SourceFlavor(),
 		SourceSlot:           e.SourceSlot,
 		SourcePublication:    e.SourcePublication,
