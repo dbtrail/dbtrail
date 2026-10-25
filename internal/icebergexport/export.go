@@ -315,7 +315,8 @@ func singleSourceID(ctx context.Context, db *sql.DB) (string, error) {
 // catalog is shared by an account, so two installs reading different
 // servers can both export shop.orders; without this each would fold its
 // own binlog against the other's cursor. A table created before the
-// property existed carries none and is accepted.
+// property existed carries none and is accepted. runTable applies it to
+// Glue and REST only; the local catalog keeps its behavior.
 func checkSource(tbl *table.Table, schema, name, runSource string) error {
 	have, ok := tbl.Properties()[propSource]
 	if !ok || have == runSource {
@@ -379,7 +380,9 @@ func (d *deps) runTable(ctx context.Context, schema, tbl string) Outcome {
 		if err := checkOwned(icetbl, schema, tbl); err != nil {
 			return refusal(schema, tbl, err)
 		}
-		if err := checkSource(icetbl, schema, tbl, d.sourceID); err != nil {
+		// The stamp is written on every catalog but checked on the shared
+		// ones only: the local catalog keeps today's behavior.
+		if err := checkSource(icetbl, schema, tbl, d.sourceID); err != nil && d.cfg.Catalog.kind() != CatalogHadoop {
 			return refusal(schema, tbl, err)
 		}
 		cur, err = readCursor(icetbl.Properties())

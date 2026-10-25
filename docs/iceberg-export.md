@@ -121,9 +121,10 @@ AWS_REGION=us-west-2 bintrail export iceberg \
 - Credentials and the region come from the usual AWS chain: environment
   variables, a profile, SSO, or the instance role. With no region the command
   stops and says so. Keep the bucket in the catalog's region.
-- The identity needs, on Glue: `GetDatabase`, `CreateDatabase`, `GetTable`,
-  `CreateTable` and `UpdateTable`; on the bucket: list, read, write and delete
-  under the prefix.
+- The identity needs, on Glue, the calls the export makes: `GetDatabase`,
+  `CreateDatabase`, `GetTable`, `CreateTable` and `UpdateTable`; on the
+  bucket, reading and writing objects under the prefix. This list comes from
+  the code, not from a tested minimal policy.
 - Glue keeps database and table names in lowercase letters, digits and
   underscores. bintrail does not rename anything, so a table such as
   `Shop.Orders` or `shop.line-items` is refused with the names that do not fit.
@@ -201,7 +202,7 @@ read different source servers could both export a `shop.orders`. Each new
 table records the source it was created from (`bintrail.export.source_id`,
 the source's `bintrail_id`), and a run whose index holds a different source
 is refused for that table instead of folding its changes onto the other
-server's rows.
+server's rows. The local catalog writes the property too but does not check it.
 
 If the catalog reports an error for a commit that in fact went through (a
 server error or a timeout after it applied the change), the run reads the
@@ -353,9 +354,9 @@ Two things to know:
   only, so the delete files do not show there; `"orders$snapshots"` shows them
   per commit (`added-delete-files`, `added-equality-deletes` in `summary`).
   Checked with Athena engine version 3: every delta reads correctly.
-- **Spark and Trino** read the Glue tables through their Glue catalog
-  (`spark.sql.catalog.glue.type=glue`; Trino `iceberg.catalog.type=glue`) or
-  the REST endpoint; both apply equality deletes.
+- **Spark, Trino and Snowflake** read Iceberg tables from Glue through their
+  own Glue or REST catalog support (see each engine's Iceberg documentation).
+  This release was checked with Athena only.
 - **The table is not relocatable by default.** Iceberg metadata stores
   absolute paths. If you copy or sync the warehouse elsewhere (for example
   `bintrail upload` to S3), read it with

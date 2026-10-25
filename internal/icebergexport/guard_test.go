@@ -469,16 +469,21 @@ func TestRunTable_otherSourceRefused(t *testing.T) {
 	cases := []struct {
 		name, table, run string
 		refused          bool
+		hadoop           bool
 	}{
-		{"same source", "11111111-1111-1111-1111-111111111111", "11111111-1111-1111-1111-111111111111", false},
-		{"other source", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", true},
-		{"run cannot name its source", "11111111-1111-1111-1111-111111111111", "", true},
-		{"table predates the stamp", "", "22222222-2222-2222-2222-222222222222", false},
+		{"local catalog keeps today's behavior", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", false, true},
+		{"same source", "11111111-1111-1111-1111-111111111111", "11111111-1111-1111-1111-111111111111", false, false},
+		{"other source", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", true, false},
+		{"run cannot name its source", "11111111-1111-1111-1111-111111111111", "", true, false},
+		{"table predates the stamp", "", "22222222-2222-2222-2222-222222222222", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d, cat := ownershipDeps(t)
 			d.sourceID = tc.run
+			if !tc.hadoop {
+				d.cfg.Catalog = CatalogConfig{Kind: CatalogGlue}
+			}
 			ctx := context.Background()
 			if err := ensureNamespace(ctx, cat, "shop"); err != nil {
 				t.Fatal(err)
