@@ -183,15 +183,112 @@ merge rule is in [Dump & Baseline](dump-and-baseline.md#refreshing-on-a-schedule
 
 ## Other engines
 
-**Plain Parquet, no conversion.** Athena, ClickHouse's `s3()`, Spark, Trino and
-pandas read the snapshot files as they are written. Keep the table-deltas note
-above in mind.
+Which files to point another engine at depends on the question.
 
-**A table instead of a path.** `bintrail export iceberg` writes each source
-table as an Apache Iceberg table, appending only what changed since its last
-run. Use it when a platform needs a catalog, an engine only reads Iceberg, or
-you want an already-merged table. The Parquet underneath does not change. See
-[Iceberg export](iceberg-export.md).
+- **The tables as they are now: the Iceberg export.** `bintrail export iceberg`
+  writes each source table as an Apache Iceberg table and appends only what
+  changed since its last run. With `--catalog glue` the tables are registered
+  in the AWS Glue Data Catalog, where Athena, Spark, Trino and Snowflake find
+  them by name. The recipes per engine are in
+  [Iceberg export: Reading the tables](iceberg-export.md#reading-the-tables).
+  The snapshot files are not a substitute: with table deltas on (the default),
+  a table's file is the table as of the start of its chain, and an engine that
+  reads it alone gets older rows without an error (see
+  [Table deltas](#table-deltas) above).
+- **What changed, and when: the change history.** Plain Parquet, one file per
+  archived hour, read as it is written. The recipes below were checked with
+  Athena engine version 3 and Spark 3.5.5. Each row is one change: the event
+  type (`1` insert, `2` update, `3` delete), the key, and the row before and
+  after as JSON text. The columns are listed in the
+  [Parquet reference](parquet-debugging.md#parquet-column-schema).
+
+### Change history in Athena
+
+An external table over the archive prefix, with partition projection so
+Athena works out the folders from the query instead of from a crawler or
+`MSCK REPAIR TABLE`:
+
+```sql
+CREATE EXTERNAL TABLE bintrail_history.events (
+  event_id bigint, binlog_file string, start_pos bigint, end_pos bigint,
+  event_timestamp timestamp, gtid string, connection_id bigint,
+  schema_name string, table_name string, event_type int, pk_values string,
+  changed_columns string, row_before string, row_after string,
+  schema_version int, query_text string, query_hash string, commit_ts_us bigint)
+PARTITIONED BY (bintrail_id string, event_date string, event_hour int)
+STORED AS PARQUET
+LOCATION 's3://your-bucket/archive/'
+TBLPROPERTIES (
+  'projection.enabled' = 'true',
+  'projection.bintrail_id.type' = 'injected',
+  'projection.event_date.type' = 'date',
+  'projection.event_date.format' = 'yyyy-MM-dd',
+  'projection.event_date.range' = '2026-01-01,NOW',
+  'projection.event_hour.type' = 'integer',
+  'projection.event_hour.range' = '0,23',
+  'projection.event_hour.digits' = '2',
+  'storage.location.template' = 's3://your-bucket/archive/bintrail_id=${bintrail_id}/event_date=${event_date}/event_hour=${event_hour}/');
+
+SELECT event_timestamp, event_type, pk_values,
+       json_extract_scalar(row_after, '$.status') AS status
+FROM bintrail_history.events
+WHERE bintrail_id = '<server id>'
+  AND event_date = '2026-10-25' AND event_hour = 22
+  AND schema_name = 'shop' AND table_name = 'orders'
+ORDER BY event_id;
+```
+
+- **`injected` makes the server id mandatory.** Every query has to say
+  `bintrail_id = '...'`, and Athena refuses one that does not. To query every
+  server at once, list them instead:
+  `'projection.bintrail_id.type' = 'enum'` and
+  `'projection.bintrail_id.values' = '<id 1>,<id 2>'`. An id in the list with no
+  files yet is fine. A server added later needs the list updated.
+- **Start the date range at your oldest archive**, not before it: Athena
+  considers every date in the range that the query does not rule out.
+- **Filter on `event_date` and `event_hour`** to read only those folders.
+  `event_timestamp` alone does not narrow the folders read.
+- `start_pos`, `end_pos` and `commit_ts_us` are unsigned in the files; declared
+  `bigint`, they read correctly.
+
+### Change history in Spark
+
+```python
+events = (spark.read
+          .option("basePath", "s3a://your-bucket/archive/")
+          .parquet("s3a://your-bucket/archive/"))
+events.where("event_date = '2026-10-25' AND event_hour = 22").show()
+```
+
+Spark finds the three folder columns on its own: `bintrail_id` as text,
+`event_date` as a date, `event_hour` as a number. The unsigned columns
+(`start_pos`, `end_pos`, `commit_ts_us`) come back as `decimal(20,0)`.
+Reading `s3a://` needs the `hadoop-aws` package that matches Spark's Hadoop.
+
+**Turn off Spark's vectorized Parquet reader for these files:**
+
+```
+spark.sql.parquet.enableVectorizedReader=false
+```
+
+Without it, Spark reads text columns wrong, without an error, in the archive
+files and the snapshot files alike. bintrail writes text with the
+`DELTA_LENGTH_BYTE_ARRAY` Parquet encoding, and Spark's vectorized reader loses
+its place in such a column after a NULL. The next value comes back
+with the start of the one after it glued on, or empty. In the check, a
+`row_after` read as `{"id": 5, ...}{"id": 1, "big"` and the next row's as an
+empty string. Seen with Spark 3.5.5 and 4.0.0. DuckDB, Athena and Spark with
+this setting read the same files correctly. Reads are slower with it, so for
+the tables as they are now, read the Iceberg export instead: its files are
+written with a different library and Spark reads them correctly with the
+default reader.
+
+### Others
+
+ClickHouse's `s3()`, Trino, pandas and anything else that reads Parquet read
+these files too; they were not run against them. Check a text column that
+holds NULLs before relying on one: the Spark failure above produces no error,
+only wrong text. Keep the table-deltas note in mind for the snapshot files.
 
 ## What it is not
 

@@ -372,17 +372,17 @@ Or generate the views and let them do it. Some columns still read as text even i
 
 ## Parquet Column Schema
 
-Archive Parquet files contain 17 columns (the `pk_hash` stored generated column is omitted):
+Archive Parquet files contain 18 columns (the `pk_hash` stored generated column is omitted). The three `BIGINT UNSIGNED` columns are unsigned 64-bit integers in the file; Athena reads them declared as `bigint`, Spark as `decimal(20,0)` (see [Analytics: Other engines](analytics.md#other-engines)):
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `event_id` | BIGINT | Auto-increment row ID from `binlog_events` |
 | `binlog_file` | VARCHAR | Source binlog filename (e.g. `binlog.000042`) |
-| `start_pos` | BIGINT | Byte offset where the event starts in the binlog |
-| `end_pos` | BIGINT | Byte offset where the event ends |
+| `start_pos` | BIGINT UNSIGNED | Byte offset where the event starts in the binlog |
+| `end_pos` | BIGINT UNSIGNED | Byte offset where the event ends |
 | `event_timestamp` | TIMESTAMP | When MySQL executed the event (UTC) |
 | `gtid` | VARCHAR | GTID if available (nullable) |
-| `connection_id` | INT | MySQL connection ID / pseudo_thread_id (nullable) |
+| `connection_id` | INT UNSIGNED | MySQL connection ID / pseudo_thread_id (nullable) |
 | `schema_name` | VARCHAR | Database name |
 | `table_name` | VARCHAR | Table name |
 | `event_type` | TINYINT | 1 = INSERT, 2 = UPDATE, 3 = DELETE |
@@ -393,6 +393,7 @@ Archive Parquet files contain 17 columns (the `pk_hash` stored generated column 
 | `schema_version` | INT | Schema snapshot version at index time |
 | `query_text` | VARCHAR | Original SQL statement, when the source logs it (nullable; archives written before statement capture existed lack the column entirely — readers substitute NULL) |
 | `query_hash` | VARCHAR | `STATEMENT_DIGEST()` of `query_text` (nullable) |
+| `commit_ts_us` | BIGINT UNSIGNED | When the transaction committed, in microseconds since 1970-01-01 UTC (nullable: NULL on MariaDB and on MySQL before 8.0.1) |
 
 ---
 

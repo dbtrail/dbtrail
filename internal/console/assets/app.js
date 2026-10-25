@@ -10254,8 +10254,17 @@ function icebergExportPanel(cur, baselines) {
       "Run it where bintrail is installed and can reach this index and these snapshots. Run it again whenever " +
       "you want the tables brought forward; it picks up where it left off, and a run that dies partway leaves " +
       "the last good copy in place." }),
+    // The no-cron routes (#2552), ahead of cron because they need nothing
+    // else installed. The interval is a flag and never an env value, so the
+    // bare command is the only place it can be written.
     el("p", { class: "form-hint", text:
-      "Hourly from cron. The Docker line keeps the index password out of your crontab, since the container " +
+      "To keep the tables current without cron, add --every 1h to the command: it stays running and starts " +
+      "each run an hour after the previous one ended. If DBTrail runs in Docker, the stack runs that loop as a " +
+      "service (ICEBERG_EVERY in the stack's .env sets the interval):" }),
+    el("code", { class: "stg-code cn-snippet", text:
+      "docker compose --profile iceberg-export-loop up -d iceberg-export-loop" }),
+    el("p", { class: "form-hint", text:
+      "Or hourly from cron. The Docker line keeps the index password out of your crontab, since the container " +
       "reads it from the stack; use it when the stack holds the index and snapshots you want exported, per the " +
       "note above." }),
     el("code", { class: "stg-code cn-snippet", text:
@@ -10263,6 +10272,12 @@ function icebergExportPanel(cur, baselines) {
     el("p", { class: "form-hint", text:
       "Running bintrail yourself instead? Use the same schedule with the command above. Keep the password " +
       "out of the crontab line: put it in a file only you can read and have the job read it from there." }),
+    // The catalog route, by its flag: the drawing above sends three engines
+    // "through a catalog", and this is how the tables get into one.
+    el("p", { class: "form-hint", text:
+      "To have Athena, Spark, Trino or Snowflake find the tables by name, register them in AWS Glue: add " +
+      "--catalog glue and give --warehouse an s3:// location. --catalog rest writes to an Iceberg REST " +
+      "catalog instead." }),
     el("p", { class: "form-hint", text:
       "Each table is written to <warehouse>/<schema>/<table>/. The export refuses to advance a table whose " +
       "columns changed, or whose history has a gap, and says which; to load one again from a fresh snapshot, " +

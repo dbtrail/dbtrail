@@ -99,6 +99,20 @@ func TestIcebergExportPanel(t *testing.T) {
 	if !strings.Contains(panel, "--profile iceberg-export") {
 		t.Error("the panel does not offer the compose route for a DBTrail running in Docker")
 	}
+	// Two ways to keep the tables current without cron (#2552): the command's
+	// own repeat flag, and the compose service that runs that loop. Both are
+	// the exact strings a reader pastes, so the guard reads them verbatim.
+	if !strings.Contains(fineHalf, "--every 1h") {
+		t.Error("the panel does not say the command can repeat itself with --every, so cron looks like the only schedule")
+	}
+	if !strings.Contains(fineHalf, "docker compose --profile iceberg-export-loop up -d iceberg-export-loop") {
+		t.Error("the panel does not offer the compose loop service, the no-cron route for a DBTrail running in Docker")
+	}
+	// The catalog route, named by its flag: without it the drawing's
+	// "through a catalog" engines have no way in from this panel.
+	if !strings.Contains(fineHalf, "--catalog glue") {
+		t.Error("the panel does not say the tables can be registered in AWS Glue")
+	}
 
 	// And it is actually on a page: a panel nothing calls is invisible, and
 	// every check above would still pass. It lives on Snapshots -> Download;

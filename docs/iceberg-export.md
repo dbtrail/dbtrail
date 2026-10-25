@@ -399,7 +399,11 @@ so that the row events, which never carry it, match it.
 
 ## Reading the tables
 
-DuckDB:
+What follows was checked with DuckDB 1.5.5, Athena engine version 3 and
+Spark 3.5.5 with Iceberg 1.8.1. Trino and Snowflake were not run against these
+tables.
+
+### DuckDB
 
 ```sql
 INSTALL iceberg; LOAD iceberg;
@@ -410,7 +414,7 @@ SELECT * FROM iceberg_snapshots('/data/iceberg/shop/orders');
 Time travel over the export works with `snapshot_from_id` or
 `snapshot_from_timestamp`, since every run is a snapshot.
 
-Two things to know:
+Three things to know:
 
 - **DuckDB 1.4** applies equality deletes only when the key columns survive
   projection pushdown, so an aggregate straight over `iceberg_scan` can fail
@@ -425,18 +429,68 @@ Two things to know:
   16 seconds more per run, while Spark read the same table in under a second
   ([#2372](https://github.com/dbtrail/dbtrail/issues/2372)). Read a frequently-exported table with Spark or another engine, or
   keep DuckDB for a table exported a few times a day.
-- **Athena** reads a Glue table by name:
-  `SELECT * FROM "shop"."orders"`. Athena's `"orders$files"` lists data files
-  only, so the delete files do not show there; `"orders$snapshots"` shows them
-  per commit (`added-delete-files`, `added-equality-deletes` in `summary`).
-  Checked with Athena engine version 3: every delta reads correctly.
-- **Spark, Trino and Snowflake** read Iceberg tables from Glue through their
-  own Glue or REST catalog support (see each engine's Iceberg documentation).
-  This release was checked with Athena only.
 - **The table is not relocatable by default.** Iceberg metadata stores
   absolute paths. If you copy or sync the warehouse elsewhere (for example
   `bintrail upload` to S3), read it with
-  `iceberg_scan('...', allow_moved_paths = true)`.
+  `iceberg_scan('...', allow_moved_paths = true)`. Other engines have no such
+  option, which is why the way to put the tables in S3 is `--catalog glue`,
+  not a copy.
+
+### Athena
+
+A table exported with `--catalog glue` is already in the Glue Data Catalog,
+which is Athena's catalog, so there is nothing to create. Query it by name:
+
+```sql
+SELECT * FROM "shop"."orders" LIMIT 10;
+SELECT * FROM "shop"."orders$snapshots";
+```
+
+Every delta reads correctly, including rows a later run deleted or replaced.
+`"orders$files"` lists data files only, so the delete files do not show
+there; `"orders$snapshots"` shows them per commit (`added-delete-files`,
+`added-equality-deletes` in `summary`).
+
+### Spark
+
+Spark reads the tables from Glue with Iceberg's Spark runtime and its AWS
+bundle (`org.apache.iceberg:iceberg-spark-runtime-3.5_2.12` and
+`org.apache.iceberg:iceberg-aws-bundle`, both 1.8.1 in the check):
+
+```bash
+AWS_REGION=us-west-2 spark-sql \
+  --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.8.1,org.apache.iceberg:iceberg-aws-bundle:1.8.1 \
+  --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+  --conf spark.sql.catalog.glue=org.apache.iceberg.spark.SparkCatalog \
+  --conf spark.sql.catalog.glue.type=glue \
+  --conf spark.sql.catalog.glue.io-impl=org.apache.iceberg.aws.s3.S3FileIO \
+  -e "SELECT * FROM glue.shop.orders LIMIT 10"
+```
+
+`glue.shop.orders.snapshots` lists the commits. The identity Spark runs as
+needs `glue:GetDatabase`, `glue:GetTable` (plus `GetDatabases` and `GetTables`
+to list them) and read access to the bucket; that set was enough in the check.
+
+For a local warehouse, use Iceberg's Hadoop catalog instead of Glue:
+`spark.sql.catalog.local.type=hadoop` and
+`spark.sql.catalog.local.warehouse=/data/iceberg`, then
+`SELECT * FROM local.shop.orders`.
+
+Spark misreads text in the Parquet files bintrail writes for its archives and
+snapshots unless one setting is changed (see
+[Analytics: Spark](analytics.md#change-history-in-spark)). The Iceberg tables are
+not affected: the export writes its files with a different Parquet library, and
+Spark read them correctly with its default settings.
+
+### Trino and Snowflake
+
+Both read Iceberg tables registered in Glue through their own Iceberg support:
+in Trino, an Iceberg catalog with `iceberg.catalog.type=glue`; in Snowflake, a
+catalog integration with Glue as its source. See each engine's Iceberg
+documentation. Neither was run against these tables, so check a table that has
+had at least one delta (a row updated or deleted after the first load), not
+only the first load: a table that has only been loaded holds no deletes and
+proves nothing about them.
 
 ## Limits in this release
 
