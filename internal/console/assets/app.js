@@ -14259,8 +14259,9 @@ function hiddenCap(s) {
 // read of what the rules hide (GET /api/servers/{id}/route-grants, field
 // hidden). g: the route's answer; undefined when this session may not read
 // it; null when the read failed. Nothing when the server hides nothing or has
-// no forwarding account. Pure, for the tests.
-function hiddenGrantsBlock(g, hasRules) {
+// no forwarding account. unreadable: the server holds rules this build cannot
+// read, so no line may sound like an all-clear. Pure, for the tests.
+function hiddenGrantsBlock(g, hasRules, unreadable) {
   if (!hasRules || g === undefined) return [];
   if (g && g.none) return [];
   const head = el("p", { class: "cn-grants-head" }, "Forwarding account ", g && g.user ? el("code", { text: String(g.user) }) : "");
@@ -14276,8 +14277,9 @@ function hiddenGrantsBlock(g, hasRules) {
     out.push(el("p", { class: "cn-grants-verdict is-bad", text: "The forwarding account can read these through MySQL:" }));
     out.push(el("ul", { class: "hidden-exposed" }, ...exposed.map((x) => el("li", {}, el("code", { text: x })))));
     out.push(el("p", { class: "form-hint", text: "With Engine Routing on, a statement the port sends to your MySQL runs as this account, and MySQL's grants decide what it reads, not these rules. Change the grant on your MySQL to hide it there too." }));
-  } else {
-    out.push(el("p", { class: "cn-grants-verdict is-ok", text: "Its grants do not let it read what this server hides." }));
+  } else if (!unreadable) {
+    // A fact, not an all-clear: what grants cannot settle follows.
+    out.push(el("p", { class: "cn-sql-row", text: "No grant line names a hidden table or column." }));
   }
   if (unsure.length) {
     out.push(el("p", { class: "form-hint", text: "What its grants cannot settle:" }));
@@ -14316,13 +14318,13 @@ function hiddenRulesBody(box, cur, h, g, said) {
   if (!h.editable) {
     box.append(el("p", { class: "cn-sql-row hidden-refusal", text: hiddenCap(h.refusal || "these rules cannot be changed by this DBTrail") }));
     if (has) box.append(listed());
-    box.append(el("div", { class: "cn-grants hidden-grants" }, ...hiddenGrantsBlock(g, has)));
+    box.append(el("div", { class: "cn-grants hidden-grants" }, ...hiddenGrantsBlock(g, has, unreadable.length > 0)));
     return;
   }
   if (!sessionMay("servers:write")) {
     box.append(listed());
     box.append(el("p", { class: "form-hint", text: "Someone who can change servers can edit this." }));
-    box.append(el("div", { class: "cn-grants hidden-grants" }, ...hiddenGrantsBlock(g, has)));
+    box.append(el("div", { class: "cn-grants hidden-grants" }, ...hiddenGrantsBlock(g, has, unreadable.length > 0)));
     return;
   }
   const ta = (name, label, lines) => {
@@ -14342,7 +14344,7 @@ function hiddenRulesBody(box, cur, h, g, said) {
     el("p", { class: "form-hint hidden-does", text: HIDDEN_DOES }),
     el("p", { class: "form-hint hidden-does-not", text: HIDDEN_DOES_NOT }),
     el("div", { class: "bk-restore-row" }, save), msg,
-    el("div", { class: "cn-grants hidden-grants" }, ...hiddenGrantsBlock(g, has)));
+    el("div", { class: "cn-grants hidden-grants" }, ...hiddenGrantsBlock(g, has, unreadable.length > 0)));
   save.onclick = async () => {
     const gen = serverGen;
     save.disabled = true;

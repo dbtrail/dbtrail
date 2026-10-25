@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 )
 
 // hiddenRulesJS draws the "Hidden from SQL" section (#2529) from what the
@@ -48,6 +50,7 @@ const findArea = (box, name) => { let hit = null; walk(box, (x) => { if (!hit &&
   out.grantsError = read(body(d.withRules, d.grantsError));
   out.boot = read(body(d.boot, U));
   out.unreadable = read(body(d.unreadable, U));
+  out.unreadableGrants = read(body(d.unreadable, d.grantsLoadErr));
   out.unreadNull = read(body(null, U));
   caps({ "servers:write": false });
   out.readOnly = read(body(d.withRules, d.grantsClean));
@@ -165,6 +168,10 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 	}
 	_, body = doServersReq(t, fut, "GET", "/api/servers/s1/hidden", "")
 	raw("unreadable", body)
+	fe, ok := reg.Get("s1")
+	if !ok {
+		t.Fatal("entry not loaded")
+	}
 
 	// The grants check, in the shape GET /api/servers/{id}/route-grants
 	// answers on a server with rules (field hidden: exposed and unsure).
@@ -175,6 +182,14 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 		"hidden": map[string]any{"exposed": []string{"shop.audit_log: " + grant, "shop.customers.email: " + grant}, "unsure": []string{always}}}
 	data["grantsClean"] = map[string]any{"user": "report_ro", "grants": []string{"GRANT USAGE ON *.* TO `report_ro`@`%`"},
 		"hidden": map[string]any{"unsure": []string{always}}}
+	// The check on a server whose rules this build cannot read: route-grants
+	// answers only the load error, as unsure.
+	_, lerr := hiderules.Load(fe.Hidden)
+	if lerr == nil {
+		t.Fatal("hiderules.Load accepted a newer build's key")
+	}
+	data["grantsLoadErr"] = map[string]any{"user": "report_ro", "grants": []string{grant},
+		"hidden": map[string]any{"unsure": []string{lerr.Error()}}}
 	data["grantsNone"] = map[string]any{"none": "no forwarding account is set for this server"}
 	data["grantsOld"] = map[string]any{"user": "report_ro", "grants": []string{grant}}
 	data["grantsError"] = map[string]any{"user": "report_ro", "error": "Error 1045: Access denied"}
@@ -185,8 +200,8 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 	}
 	outRaw := runNodeConnectArgs(t, renderHarnessJS+hiddenRulesJS, string(arg))
 	var got struct {
-		Empty, Exposed, Clean, None, Failed, NotAsked, NoRulesExposed, OldServer, GrantsError, Boot, Unreadable, UnreadNull, ReadOnly hiddenDrawn
-		Saved                                                                                                                         struct {
+		Empty, Exposed, Clean, None, Failed, NotAsked, NoRulesExposed, OldServer, GrantsError, Boot, Unreadable, UnreadableGrants, UnreadNull, ReadOnly hiddenDrawn
+		Saved                                                                                                                                           struct {
 			Calls   [][]json.RawMessage
 			After   hiddenDrawn
 			Current *struct{ Tables, Columns []string }
@@ -224,7 +239,7 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 		!strings.Contains(all(x), "What its grants cannot settle:") || !strings.Contains(all(x), "SHOW GRANTS does not list MySQL's mandatory roles") {
 		t.Errorf("exposed: %s", all(x))
 	}
-	if x := all(got.Clean); !strings.Contains(x, "Its grants do not let it read what this server hides.") || strings.Contains(x, "can read these") ||
+	if x := all(got.Clean); !strings.Contains(x, "No grant line names a hidden table or column.") || strings.Contains(x, "can read these") ||
 		!strings.Contains(x, "What its grants cannot settle:") {
 		t.Errorf("clean grants: %s", x)
 	}
@@ -248,6 +263,10 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 	}
 	if x := strings.Join(got.Unreadable.Errs, "|"); x != "A newer DBTrail saved rules this version cannot read (future_rule); this server's SQL is refused until you upgrade." {
 		t.Errorf("unreadable keys: %q", x)
+	}
+	if x := all(got.UnreadableGrants); strings.Contains(x, "No grant line names") || !strings.Contains(x, "What its grants cannot settle:") ||
+		!strings.Contains(strings.Join(got.UnreadableGrants.Errs, "|"), "cannot read (future_rule)") {
+		t.Errorf("unreadable rules with a grants check must not read as clear: %s", x)
 	}
 	if !strings.Contains(strings.Join(got.UnreadNull.Errs, "|"), "Could not read this server's hidden tables and columns") {
 		t.Errorf("unreadable GET: %+v", got.UnreadNull)
