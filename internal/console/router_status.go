@@ -201,6 +201,19 @@ type RouterServerNumbers struct {
 	// the router has not placed its snapshot in the index yet (it does
 	// every 30 seconds).
 	DataAgePending bool `json:"data_age_pending,omitempty"`
+	// BehindSourceSeconds is how far behind the source the data of the
+	// copy's last answer for this server was (#2556), read like MySQL's
+	// Seconds_Behind_Source: 0 when capture was caught up and the answer
+	// read the newest indexed data. BehindSourceRan is when that answer
+	// ran, RFC 3339 UTC. Both absent until known; BehindSourcePending says
+	// it waits on the index, BehindSourceUnknownReason why it cannot be
+	// told (the DataAgeUnknownReason vocabulary). Up to one minute after
+	// capture stops it can still show only the copy's distance to the
+	// newest indexed data; after that it grows with every answer.
+	BehindSourceSeconds       *int64 `json:"behind_source_seconds,omitempty"`
+	BehindSourceRan           string `json:"behind_source_ran,omitempty"`
+	BehindSourcePending       bool   `json:"behind_source_pending,omitempty"`
+	BehindSourceUnknownReason string `json:"behind_source_unknown_reason,omitempty"`
 	// Answers is what each side ("copy", "mysql") finished: counts and
 	// times. Absent until a statement finishes.
 	Answers map[string]RouteAnswers `json:"answers,omitempty"`
@@ -237,6 +250,10 @@ func (s *Server) RouterNumbers() RouterNumbers {
 			}
 			if ages.anyMax {
 				n.DataAgeMaxSeconds = secs(ages.worst)
+			}
+			n.BehindSourcePending, n.BehindSourceUnknownReason = ages.behindPending, ages.behindWhy
+			if ages.behindKnown {
+				n.BehindSourceSeconds, n.BehindSourceRan = secs(ages.behind), ages.behindRan.UTC().Format(time.RFC3339)
 			}
 		}
 		n.Answers = t.Answers
