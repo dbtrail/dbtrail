@@ -15,7 +15,8 @@ import (
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+
+	"github.com/dbtrail/dbtrail/internal/storage"
 
 	// Registers the s3:// (and gs://, abfs://) file IO the Glue and REST
 	// catalogs write data files through.
@@ -362,11 +363,11 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 	noop := func() {}
 	switch c.kind() {
 	case CatalogGlue:
-		cfg, err := awsConfig(ctx, "", "set AWS_REGION, or a region in the AWS profile, to the region of the Glue catalog")
+		files, cfg, err := awsConfigs(ctx, "", "set AWS_REGION, or a region in the AWS profile, to the region of the Glue catalog")
 		if err != nil {
 			return nil, nil, ctx, err
 		}
-		ctx = utils.WithAwsConfig(ctx, &cfg)
+		ctx = utils.WithAwsConfig(ctx, &files)
 		return guard(glue.NewCatalog(glue.WithAwsConfig(cfg))), noop, ctx, nil
 
 	case CatalogREST:
@@ -377,11 +378,11 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 		switch {
 		case c.SigV4:
 			region, service := sigV4Defaults(c.URI, c.SigV4Region, c.SigV4Service)
-			cfg, err := awsConfig(ctx, region, "pass --catalog-sigv4-region, or set AWS_REGION, to the catalog's region")
+			files, cfg, err := awsConfigs(ctx, region, "pass --catalog-sigv4-region, or set AWS_REGION, to the catalog's region")
 			if err != nil {
 				return nil, nil, ctx, err
 			}
-			ctx = utils.WithAwsConfig(ctx, &cfg)
+			ctx = utils.WithAwsConfig(ctx, &files)
 			opts = append(opts, rest.WithSigV4RegionSvc(cfg.Region, service), rest.WithAwsConfig(cfg))
 		case c.Credential != "":
 			opts = append(opts, rest.WithCredential(c.Credential))
@@ -403,22 +404,26 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 	}
 }
 
-// awsConfig loads the default AWS chain (environment, profile, SSO, the
-// instance role) and refuses a config with no region, which the SDK would
-// otherwise only report from deep inside the first request.
-func awsConfig(ctx context.Context, region, fix string) (aws.Config, error) {
-	var opts []func(*awsconfig.LoadOptions) error
-	if region != "" {
-		opts = append(opts, awsconfig.WithRegion(region))
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+// awsConfigs loads the AWS chain through storage.LoadAWSConfig, the one
+// place bintrail builds S3 configs, so BINTRAIL_S3_ENDPOINT and the IMDS
+// region fallback apply here as everywhere else. It returns two configs:
+// files is what the S3 file IO reads (it keeps a BINTRAIL_S3_ENDPOINT, which
+// points the data at an S3-compatible store), and catalog is the same
+// without that endpoint, because Glue and the SigV4 REST endpoint are AWS
+// services that an S3-compatible store does not serve. A config with no
+// region is refused here: the SDK would only report it from deep inside the
+// first request.
+func awsConfigs(ctx context.Context, region, fix string) (files, catalog aws.Config, err error) {
+	files, err = storage.LoadAWSConfig(ctx, region)
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("load the AWS configuration: %w", err)
+		return aws.Config{}, aws.Config{}, fmt.Errorf("load the AWS configuration: %w", err)
 	}
-	if cfg.Region == "" {
-		return aws.Config{}, fmt.Errorf("no AWS region is configured: %s", fix)
+	if files.Region == "" {
+		return aws.Config{}, aws.Config{}, fmt.Errorf("no AWS region is configured: %s", fix)
 	}
-	return cfg, nil
+	catalog = files.Copy()
+	catalog.BaseEndpoint = nil
+	return files, catalog, nil
 }
 
 // RedactURI renders a catalog URI for a message or a report as
