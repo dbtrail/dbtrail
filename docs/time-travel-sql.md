@@ -775,7 +775,11 @@ statements.
 Choose it for one server on that server's Snapshots page in the web
 interface (Settings, How current SQL answers are, then Save). The router
 reads the choice within a few seconds, with no restart, and the card says
-when it is applied. To make every server fresh instead, set `SQL_FRESH=on` in
+when it is applied. Right after that it says the server is still catching up
+with capture: the newest changes of a table are gathered after the first
+statement that reads it, so until a statement reads every table it asks for
+with them, answers can be as old as the snapshot. `/status` says the same as
+`sql_mode_warming`. To make every server fresh instead, set `SQL_FRESH=on` in
 the compose `.env` (then `docker compose up -d router`), or
 `BINTRAIL_SQL_TAILS=on` outside Compose: that setting decides for every
 server, and the Snapshots page shows the choice locked while it is there.

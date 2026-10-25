@@ -187,6 +187,17 @@ func (c *copyAges) forget(id string) {
 	delete(c.by, id)
 }
 
+// lastAnswer is the copy's newest answer for server id, false when none.
+func (c *copyAges) lastAnswer(id string) (copyAnswer, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.by[id]
+	if s == nil || s.last.side != "copy" {
+		return copyAnswer{}, false
+	}
+	return s.last, true
+}
+
 // note records a, an answer the copy gave for server id, for the server and
 // for its statement (a.shape) on one path, so the panel's lag and the
 // detail's never disagree.

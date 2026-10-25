@@ -11602,6 +11602,8 @@ function sqlModeModel(cur, rt, mayWrite) {
     out.pick = "fresh";
     out.editable = false;
     out.state = "Fresh mode, for every server: it is set where the router starts (SQL_FRESH=on in the compose .env, or BINTRAIL_SQL_TAILS=on). Saved for this server: " + word(saved) + ", which applies once that setting is removed (then docker compose up -d router).";
+    const env = st.servers ? st.servers[cur.id] : null;
+    if (env && env.sql_mode_warming) out.state += " This server is still catching up with capture, so its answers can still be as old as the snapshot.";
     return out;
   }
   if (!st.per_server_mode) {
@@ -11620,6 +11622,10 @@ function sqlModeModel(cur, rt, mayWrite) {
   if (applied !== saved) {
     out.state = "Saved: " + word(saved) + ". The router still answers in " + applied + " mode: it reads the change within a few seconds. Refresh to see it applied.";
     out.tone = "warn";
+    return out;
+  }
+  if (applied === "fresh" && mine && mine.sql_mode_warming) {
+    out.state = "Fresh mode is on for this server and is still catching up with capture. Until it does, answers can be as old as the snapshot: the newest changes of a table are gathered after the first statement that reads it.";
     return out;
   }
   out.state = word(applied) + " mode is on for this server.";
@@ -15742,7 +15748,10 @@ function routerLines(view, cur) {
   // applies it. A router older than that says one mode for all (st.fresh).
   const mine = cur && st.servers ? st.servers[cur.id] : null;
   const whose = cur ? " for " + (cur.name || cur.id) : "";
-  if (st.fresh === true) out.push({ text: "Fresh mode, for every server: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture. It is set where the router starts: remove SQL_FRESH from the compose .env and run docker compose up -d router to choose each server's mode on its Snapshots page." });
+  if (st.fresh === true) out.push({ text: "Fresh mode, for every server: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture." +
+    (mine && mine.sql_mode_warming ? " " + (cur ? (cur.name || cur.id) : "This server") + " is still catching up with capture, so its answers can still be as old as the snapshot." : "") +
+    " It is set where the router starts: remove SQL_FRESH from the compose .env and run docker compose up -d router to choose each server's mode on its Snapshots page." });
+  else if (st.per_server_mode && mine && mine.sql_mode === "fresh" && mine.sql_mode_warming) out.push({ text: "Fresh mode" + whose + ", chosen on its Snapshots page, still catching up with capture: answers can be as old as the snapshot until the newest changes of the tables they read are gathered." });
   else if (st.per_server_mode && mine && mine.sql_mode === "fresh") out.push({ text: "Fresh mode" + whose + ", chosen on its Snapshots page: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture." });
   else if (st.per_server_mode) out.push({ text: "Fast mode" + whose + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, choose Fresh on " + (cur ? "its" : "a server's") + " Snapshots page." });
   // A router older than the per-server switch: one mode for all, set where

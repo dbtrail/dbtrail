@@ -77,7 +77,7 @@ func TestRouterStatus_saysEachServersMode_2546(t *testing.T) {
 	}
 	t.Setenv("BINTRAIL_SQL_TAILS", "on")
 	doc = routerStatus(routerSettings{}, console.RouterNumbers{}, last)
-	if n := doc.Servers["b"]; n.SQLMode != "fresh" || n.SQLModeFrom != console.SQLModeFromEnvironment {
+	if n := doc.Servers["b"]; n.SQLMode != "fresh" || n.SQLModeFrom != console.SQLModeFromEnvironment || !n.SQLModeWarming {
 		t.Errorf("b with the environment on: %q from %q", n.SQLMode, n.SQLModeFrom)
 	}
 }

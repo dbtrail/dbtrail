@@ -38,6 +38,9 @@ type sqlFreshState struct {
 	apply sync.Mutex
 	mu    sync.Mutex
 	on    map[string]bool
+	// since is when each server in on turned fresh: its answers from before
+	// cannot say it caught up (SQLModeWarming).
+	since map[string]time.Time
 
 	pool                      slotSetter
 	fastWorkers, freshWorkers int
@@ -75,6 +78,33 @@ func (s *Server) FreshServerNames() []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// SQLModeWarming reports whether server id is in fresh mode and still
+// catching up with capture: no answer of the copy since fresh mode applied
+// read every table it asked for with the newest captured changes. Tails are
+// built on a statement's demand, so a server with no answer since is
+// catching up, and so is one whose last answer read a table as of its
+// snapshot (a table no statement had asked for yet): that answer was not
+// fresh. With BINTRAIL_SQL_TAILS=on, fresh mode applied when this process
+// started.
+func (s *Server) SQLModeWarming(id string) bool {
+	var since time.Time
+	if !tailsOff() {
+		if s.routing != nil {
+			since = s.routing.since
+		}
+	} else {
+		s.fresh.mu.Lock()
+		t, on := s.fresh.since[id]
+		s.fresh.mu.Unlock()
+		if !on {
+			return false
+		}
+		since = t
+	}
+	a, ok := s.copyAges.lastAnswer(id)
+	return !(ok && a.allTailed && !a.ranAt.Before(since))
 }
 
 // tailsOnFor reports whether server id's statements on the port read tails.
@@ -148,13 +178,15 @@ func (s *Server) applySQLFresh() {
 	}
 	f.mu.Lock()
 	if f.on == nil {
-		f.on = map[string]bool{}
+		f.on, f.since = map[string]bool{}, map[string]time.Time{}
 	}
+	now := time.Now()
 	for _, id := range on {
-		f.on[id] = true
+		f.on[id], f.since[id] = true, now
 	}
 	for _, id := range off {
 		delete(f.on, id)
+		delete(f.since, id)
 	}
 	left := len(f.on)
 	f.mu.Unlock()

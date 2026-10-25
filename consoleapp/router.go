@@ -439,7 +439,9 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 		}
 		n.SQLMode, n.SQLModeFrom = "fast", console.SQLModeFromDefault
 		if fresh {
-			n.SQLMode, n.SQLModeFrom = "fresh", console.SQLModeFromEnvironment
+			// Not in the numbers: no answer since this router started, so
+			// its tails have not been gathered yet.
+			n.SQLMode, n.SQLModeFrom, n.SQLModeWarming = "fresh", console.SQLModeFromEnvironment, true
 		}
 		doc.Servers[id] = n
 	}

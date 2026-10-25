@@ -35,11 +35,15 @@ func TestRouterLines_sayTheMode(t *testing.T) {
 	switched := view(&fast)
 	switched.Status.PerServerMode = true
 	switched.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fresh", SQLModeFrom: SQLModeFromSaved}}
+	warming := view(&fast)
+	warming.Status.PerServerMode = true
+	warming.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fresh", SQLModeFrom: SQLModeFromSaved, SQLModeWarming: true}}
 	perServerFast := view(&fast)
 	perServerFast.Status.PerServerMode = true
 	payload, err := json.Marshal(map[string]routerViewDTO{
 		"fast":     perServerFast,
 		"older":    view(&fast),
+		"warming":  warming,
 		"fresh":    view(&fresh),
 		"old":      view(nil),
 		"switched": switched,
@@ -82,6 +86,12 @@ console.log(JSON.stringify(out));
 	}
 	if !has("switched", "Fresh mode for shop, chosen on its Snapshots page") || has("switched", "Fast mode") {
 		t.Errorf("a server fresh by its own switch: %q", got["switched"])
+	}
+	if !has("warming", "Fresh mode for shop, chosen on its Snapshots page, still catching up with capture") {
+		t.Errorf("fresh but not caught up yet: %q", got["warming"])
+	}
+	if has("switched", "Fresh mode for shop, chosen on its Snapshots page, still catching up") {
+		t.Errorf("caught up yet said as catching up: %q", got["switched"])
 	}
 	// A router older than the per-server switch (v0.116, v0.117): one mode
 	// for all, and never sent to a Snapshots choice it ignores.

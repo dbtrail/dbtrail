@@ -36,7 +36,7 @@ func freshTestServer(t *testing.T, reg *Registry, fast, fresh int) (*Server, *fa
 	t.Helper()
 	t.Setenv("BINTRAIL_SQL_TAILS", "")
 	p := &fakePool{}
-	s := &Server{cm: &connManager{reg: reg}}
+	s := &Server{cm: &connManager{reg: reg}, routing: newRoutingStats(time.Now(), nil)}
 	s.fresh.pool, s.fresh.fastWorkers, s.fresh.freshWorkers = p, fast, fresh
 	return s, p
 }
