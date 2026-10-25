@@ -389,7 +389,7 @@ func routerFreshServersLine(names []string, fast, fresh int) string {
 // read is the variable as set, named when it is set but not understood.
 func routerFreshnessLine(on bool, read string) string {
 	if on {
-		return "Router: fresh mode (BINTRAIL_SQL_TAILS=" + read + "): each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture, at the cost of memory set aside for them and an update every second. Unset it (SQL_FRESH in the compose .env, then docker compose up -d router) for the fast mode.\n"
+		return "Router: fresh mode (BINTRAIL_SQL_TAILS=" + read + "): each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture, at the cost of memory set aside for them and an update every second. Unset it (SQL_FRESH in the compose .env, then docker compose up -d router) to choose each server's mode on its " + console.PageSnapshots + " page.\n"
 	}
 	unknown := ""
 	switch strings.ToLower(read) {
@@ -397,7 +397,7 @@ func routerFreshnessLine(on bool, read string) string {
 	default:
 		unknown = fmt.Sprintf(" (BINTRAIL_SQL_TAILS=%q is not on or off, and is read as off)", read)
 	}
-	return "Router: fast mode" + unknown + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, set BINTRAIL_SQL_TAILS=on (SQL_FRESH=on in the compose .env, then docker compose up -d router).\n"
+	return "Router: fast mode" + unknown + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, choose Fresh for a server on its " + console.PageSnapshots + " page in the web interface, or for every server set BINTRAIL_SQL_TAILS=on (SQL_FRESH=on in the compose .env, then docker compose up -d router).\n"
 }
 
 // routerStatus builds the document from the numbers and the last reading of

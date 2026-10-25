@@ -30,10 +30,15 @@ func TestRouterLines_sayTheMode(t *testing.T) {
 					Pool: &RouterPoolNumbers{Workers: 1, ThreadsEach: 2, MemoryEach: "4096MiB", StatementsPerWorker: 500}}}}
 	}
 	fast, fresh := false, true
+	// #2546: the selected server fresh by its own switch, the router's own
+	// setting off.
+	switched := view(&fast)
+	switched.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fresh", SQLModeFrom: SQLModeFromSaved}}
 	payload, err := json.Marshal(map[string]routerViewDTO{
-		"fast":  view(&fast),
-		"fresh": view(&fresh),
-		"old":   view(nil),
+		"fast":     view(&fast),
+		"fresh":    view(&fresh),
+		"old":      view(nil),
+		"switched": switched,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -65,11 +70,14 @@ console.log(JSON.stringify(out));
 		}
 		return false
 	}
-	if !has("fast", "Fast mode: answers come from each table's last snapshot") || has("fast", "Fresh mode") {
+	if !has("fast", "Fast mode for shop: answers come from each table's last snapshot") || has("fast", "Fresh mode") {
 		t.Errorf("fast: %q", got["fast"])
 	}
-	if !has("fresh", "Fresh mode: each table's newest captured changes") || has("fresh", "Fast mode") {
+	if !has("fresh", "Fresh mode, for every server: each table's newest captured changes") || has("fresh", "Fast mode") {
 		t.Errorf("fresh: %q", got["fresh"])
+	}
+	if !has("switched", "Fresh mode for shop, chosen on its Snapshots page") || has("switched", "Fast mode") {
+		t.Errorf("a server fresh by its own switch: %q", got["switched"])
 	}
 	if has("old", "Fast mode") || has("old", "Fresh mode") || len(got["old"]) == 0 {
 		t.Errorf("a router older than the switch: %q", got["old"])

@@ -772,11 +772,19 @@ goes to the statements and nothing runs in the background between
 statements.
 
 **Fresh mode, opt-in: the copy answers with what capture has indexed.**
-`SQL_FRESH=on` in the compose `.env` (then `docker compose up -d router`), or
-`BINTRAIL_SQL_TAILS=on` outside Compose, turns it on; the router's startup
-line and its card in the web interface say which mode is on. It costs a
-fifth of the router's memory, taken from the statements, and an update of
-the tails every second while statements arrive. For each table a statement
+Choose it for one server on that server's Snapshots page in the web
+interface (Settings, How current SQL answers are, then Save). The router
+reads the choice within a few seconds, with no restart, and the card says
+when it is applied. To make every server fresh instead, set `SQL_FRESH=on` in
+the compose `.env` (then `docker compose up -d router`), or
+`BINTRAIL_SQL_TAILS=on` outside Compose: that setting decides for every
+server, and the Snapshots page shows the choice locked while it is there.
+The router's startup lines, its card on the MySQL clients page and its
+`/status` document (`sql_mode` per server) say which mode each server is in.
+Fresh mode costs memory taken from the statements: while at least one server
+is fresh, the router sets aside a fifth of its memory for the tails and may
+run fewer statements at once, and it updates the tails every second while
+statements arrive. For each table a statement
 reads, the newest change of each row the
 index holds after the table's snapshot (the table's tail) replaces the
 snapshot's row, so the answer is about as far behind as capture, usually

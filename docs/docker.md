@@ -713,8 +713,9 @@ the other services at the default priority), and Kubernetes, where a
 container's weight competes only inside its pod, so the router ignores it
 there and keeps half; set a CPU limit on the router there. For memory it plans with half of the
 machine for its statements, since capture uses the machine too, and in the
-fresh mode (`SQL_FRESH=on`) a fifth for its tails (the newest changes laid
-over the copy). Each service can instead plan
+fresh mode a fifth for its tails (the newest changes laid over the copy),
+while at least one server is fresh (chosen on its Snapshots page, or every
+server with `SQL_FRESH=on`). Each service can instead plan
 with a share of the machine's memory (`BINTRAIL_MEMORY_SHARE`: `ROUTER_MEMORY_SHARE`
 and `DAEMON_MEMORY_SHARE` in `.env`, empty by default): 0.3 for the router and
 0.4 for the `bintrail` service beside the index MySQL's quarter add up to the
@@ -825,7 +826,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `KEY_INDEX` | compose `bintrail` service (optional) | Whether a snapshot refresh resolves the keys a window changed through the key index beside each table's file instead of scanning the file. Unset = on; a file with no index gets one built at its next refresh. `0` turns it off |
 | `ROUTER_CPUS` | compose `router` service (optional) | CPU ceiling of the router (e.g. `4`). Unset = none |
 | `ROUTER_CPU_SHARES` | compose `router` service (optional) | CPU priority of the router against the other services (`cpu_shares`). Unset = 256, well below the default, so statements use every core and capture takes them back when it needs them. The weight it becomes depends on the runtime; the router's log says what it read |
-| `SQL_FRESH` | compose `router` service (optional) | `on` = the fresh mode: the newest captured changes laid over each table's snapshot, answers about as far behind as capture, for a fifth of the router's memory and an update every second. Unset = the fast mode: each table's last snapshot, as old as its last refresh |
+| `SQL_FRESH` | compose `router` service (optional) | `on` = the fresh mode for every server: the newest captured changes laid over each table's snapshot, answers about as far behind as capture, for a fifth of the router's memory and an update every second. The Snapshots page shows each server's choice locked while it is on. Unset = each server's own choice on its Snapshots page, fast by default: each table's last snapshot, as old as its last refresh |
 | `ROUTER_CONCURRENCY` | compose `router` service (optional) | How many statements run on the copy at once, 1 to 64. Unset = the router works it out: one per two of its cores, as many as its memory holds. The rest wait their turn. Needs the current `docker-compose.yml` |
 | `ROUTER_MAX_WAIT` | compose `router` service (optional) | How long a statement waits for its turn on the copy when every worker is busy (e.g. `30s`); past it the client gets an error. Unset = no limit: it waits for as long as its client stays connected |
 | `ROUTER_READ_ONLY` | compose `router` service (optional) | The router refuses every statement that is not a read, and never sends it to the source (default `1`). `0` forwards writes too |

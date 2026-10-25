@@ -46,6 +46,8 @@ export const WRITES = [
   { method: "PUT", path: "/api/servers/{id}/backup-schedule", count: 1, kind: "scene", id: "schedule" },
   // Hidden from SQL, per server, on Settings, MySQL clients (#2529).
   { method: "PUT", path: "/api/servers/{id}/hidden", count: 1, kind: "scene", id: "hidden" },
+  // Fast or fresh SQL answers, per server, on the Snapshots page (#2546).
+  { method: "PUT", path: "/api/servers/{id}/sql-mode", count: 1, kind: "scene", id: "sql-mode" },
   { method: "DELETE", path: "/api/servers/{id}/backup-schedule", count: 1, kind: "scene", id: "schedule" },
   { method: "POST", path: "/api/telemetry", count: 1, kind: "scene", id: "telemetry" },
   { method: "POST", path: "/api/mcp-token", count: 1, kind: "scene", id: "mcp-token" },
@@ -661,6 +663,47 @@ export async function runSaveScenes(ctx) {
         return r.status === 200 && r.body && !r.body.schedule ? r : null;
       });
       check("schedule", "Turn off removes the stored schedule", !!off, JSON.stringify(off));
+    });
+
+    // How current SQL answers are (#2546): the choice is sent as a boolean,
+    // stored on the server, read back on the server list, and lit again on
+    // the repainted card. No router runs beside this console, so the card
+    // says what is saved and that what the router applies cannot be shown.
+    await scene("sql-mode", async () => {
+      if (!srvId) throw new Error("no server from the server-form scene");
+      const PATH = "/api/servers/" + encodeURIComponent(srvId) + "/sql-mode";
+      await page.evaluate(async (id) => { await switchServer(id); navigate("snapshots"); }, srvId);
+      await openSnapSettings(page);
+      const SAVE = '.sql-mode-card [data-save="sql-mode"]';
+      await page.waitForSelector(SAVE, { timeout: 15000 });
+      const saved = async () => {
+        const r = await readAs(page, "/api/servers");
+        const s = r.body && (r.body.servers || []).find((x) => x.id === srvId);
+        return s ? s.sql_fresh : undefined;
+      };
+      const pick = async (v) => {
+        await page.click(".sql-mode-card .sch-pill[data-value='" + v + "']");
+        const [req] = await Promise.all([
+          page.waitForRequest((r) => r.method() === "PUT" && new URL(r.url()).pathname === PATH, { timeout: 10000 }),
+          page.click(SAVE),
+        ]);
+        return req.postData();
+      };
+      const atRest = await page.evaluate((sel) => document.querySelector(sel).classList.contains("btn-primary"), SAVE);
+      const sent = await pick("fresh");
+      check("sql-mode", "Fresh is sent as a boolean", sent === JSON.stringify({ fresh: true }), sent);
+      const on = await until(async () => ((await saved()) === true ? true : null));
+      check("sql-mode", "the choice is stored and the server list says it", on === true, String(await saved()));
+      const lit = await until(() => page.evaluate(() => {
+        const p = document.querySelector(".sql-mode-card .sch-pill[data-value='fresh']");
+        const st = document.querySelector(".sql-mode-card .bk-card-state");
+        return p && p.getAttribute("aria-checked") === "true" && st && /^Saved: Fresh\./.test(st.textContent) && /cannot be shown here/.test(st.textContent) ? st.textContent : "";
+      }));
+      check("sql-mode", "the repainted card lights Fresh and says what the router applies cannot be shown", !!lit && !atRest, JSON.stringify({ lit, atRest }));
+      const back = await pick("fast");
+      check("sql-mode", "Fast is sent as false", back === JSON.stringify({ fresh: false }), back);
+      const off = await until(async () => ((await saved()) === false ? true : null));
+      check("sql-mode", "Fast is stored", off === true, String(await saved()));
     });
 
     // ── deleting the server ─────────────────────────────────────────────

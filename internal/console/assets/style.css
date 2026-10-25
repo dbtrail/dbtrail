@@ -2279,6 +2279,7 @@ section.bk-restore { margin-top: 18px; }
    would have jumped this one-sentence line to monospace, which style.css
    already had to undo once for the login panel's "Signed out." */
 .bk-card-state.alarm { color: var(--delete); }
+.bk-card-state.warn { color: var(--warn); font-weight: 600; }
 .bk-restore-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 .bk-restore-row .input { max-width: 260px; }
 /* the moment field is the date-time component: a fixed slot in the row */
@@ -3412,6 +3413,11 @@ details.bk-take > summary:hover .ov-panel-title { color: var(--accent); }
 .sch-pill:hover { border-color: var(--ink-4); color: var(--ink); }
 .sch-pill:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
 .sch-pill.is-on { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+/* #2546: two choices, not six. */
+.sch-pills.sql-mode-pills { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 320px; }
+.sch-pill:disabled { cursor: not-allowed; opacity: .6; }
+.sql-mode-cost { min-height: 2.6em; }
+.sql-mode-card .bk-card-state { margin-bottom: 14px; }
 .keep-step { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
 .keep-btn { width: 40px; height: 40px; border-radius: 50%; font-size: var(--fs-xl); color: var(--ink); }
 .keep-step .keep-n { font-family: var(--f-display); font-size: 40px; font-weight: 800; letter-spacing: -0.02em; width: 110px; text-align: center; border: 0; background: transparent; color: var(--ink); padding: 0; height: auto; -moz-appearance: textfield; }
