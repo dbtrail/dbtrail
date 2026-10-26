@@ -19105,14 +19105,14 @@ async function init() {
   // directly, bypassing this handler, so its context survives).
   $all(".nav-item").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
-    // Route-less nav items are modal triggers (e.g. #nav-rotation) with their
-    // own bindings — navigate(undefined) would coerce to /overview and repaint
-    // the view behind the modal.
+    // A route-less nav item would be a modal trigger with its own binding:
+    // navigate(undefined) would coerce to /overview and repaint the view
+    // behind the modal. None is left since Rotation, which only opened the
+    // dialog the Retention page's "Edit rotation…" opens, left the sidebar.
     if (!a.dataset.route) return;
     pendingRecover = null;
     navigate(a.dataset.route);
   }));
-  document.getElementById("nav-rotation").addEventListener("click", showRotationDialog);
   window.addEventListener("popstate", onPopState);
 
   // Pre-auth gate: with no stored token, first try the HttpOnly session

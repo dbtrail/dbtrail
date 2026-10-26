@@ -37,7 +37,7 @@ func TestSidebarOrder1863(t *testing.T) {
 	}
 	want := []string{
 		"Overview", "Snapshots", "Status",
-		"## Settings", "MySQL clients", "MCP Server", "Rotation", "Retention", "Access profiles",
+		"## Settings", "MySQL clients", "MCP Server", "Retention", "Access profiles",
 		"## Investigate", "Events", "Schema changes",
 		"## Resolve", "Restore",
 	}
@@ -48,7 +48,9 @@ func TestSidebarOrder1863(t *testing.T) {
 	if !regexp.MustCompile(`data-route="retention"[^>]*data-capability="monitor"`).MatchString(nav) {
 		t.Error("the retention entry lost its monitor gate")
 	}
-	if !regexp.MustCompile(`id="nav-rotation"[^>]*data-capability="monitor"`).MatchString(nav) {
-		t.Error("the Rotation entry lost its monitor gate")
+	// Rotation is not an entry: it only opened the dialog the Retention
+	// page's "Edit rotation…" opens, and the command palette still offers it.
+	if strings.Contains(nav, `id="nav-rotation"`) {
+		t.Error("the Rotation entry is back in the sidebar; it duplicates the Retention page's Edit rotation…")
 	}
 }

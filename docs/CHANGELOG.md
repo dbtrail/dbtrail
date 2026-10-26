@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **The sidebar no longer has a Rotation entry.** It only opened the dialog the Retention page's **Edit rotation…** opens; the rotation settings are there, beside what they keep, and the search box (⌘K) still offers "Configure rotation…".
+
 
 ## [0.118.1] - 2026-10-26
 ### Fixed
