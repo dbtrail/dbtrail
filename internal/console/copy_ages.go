@@ -2,6 +2,8 @@ package console
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"path/filepath"
 	"slices"
@@ -40,6 +42,9 @@ type serverCopyAges struct {
 	// (Server.SQLModeWarming).
 	lastTailedRan time.Time
 	lastThrough   time.Time
+	// lastThroughID is the id of the index's event the last answer's data
+	// holds every event through (#2556), 0 when unknown.
+	lastThroughID uint64
 	lastPending   bool
 	lastKey       string
 	// worst is the largest age of an answer whose instant is known;
@@ -57,10 +62,21 @@ type serverCopyAges struct {
 	// cut is the instant of each set of snapshots already resolved. Bounded:
 	// a router reads few snapshots at once, and one dropped is asked again.
 	cut map[string]time.Time
+	// cutID is the least event id each resolved set's directories hold every
+	// event through (#2556), kept and cleared with cut.
+	cutID map[string]uint64
 	// shapes is the same record per statement of the per-statement table
 	// (#2360), for the panel's detail of one statement. Bounded like the
 	// table: a statement first answered past StatementTableLimit has none.
 	shapes map[string]*shapeAges
+	// capture is the server's capture state as last read by resolve (#2556);
+	// captureHave says one was read, captureFailed that the latest read
+	// failed (the last good sample is kept: its stamp is still a real one).
+	capture       captureSample
+	captureHave   bool
+	captureFailed bool
+	// captureWhy is the public reason of the latest failed read.
+	captureWhy string
 }
 
 // shapeAges is how far behind capture the data of the copy's answers to one
@@ -137,7 +153,7 @@ func (c *copyAges) server(id string) *serverCopyAges {
 	}
 	s := c.by[id]
 	if s == nil {
-		s = &serverCopyAges{pending: map[string]*pendingCopyAge{}, cut: map[string]time.Time{}, shapes: map[string]*shapeAges{}}
+		s = &serverCopyAges{pending: map[string]*pendingCopyAge{}, cut: map[string]time.Time{}, cutID: map[string]uint64{}, shapes: map[string]*shapeAges{}}
 		c.by[id] = s
 	}
 	return s
@@ -169,6 +185,9 @@ const (
 	copyAgeWhyNoIndex   = "the server's index could not be reached"
 	copyAgeWhyNotPlaced = "the snapshot it read could not be placed in the index"
 	copyAgeWhyMoving    = "it read the snapshot through the current link, which moves"
+	// copyAgeWhyNoState: the index answered, but capture's state in it
+	// could not be read (a missing table, a denied permission) (#2556).
+	copyAgeWhyNoState = "capture's state in the server's index could not be read"
 )
 
 // unknownFor counts an answer whose lag cannot be told: public is one of
@@ -226,7 +245,7 @@ func (c *copyAges) note(id string, a copyAnswer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.server(id)
-	s.last, s.lastThrough, s.lastPending, s.lastKey, s.lastWhy = a, time.Time{}, false, "", ""
+	s.last, s.lastThrough, s.lastThroughID, s.lastPending, s.lastKey, s.lastWhy = a, time.Time{}, 0, false, "", ""
 	sh := s.shape(a.shape)
 	if sh != nil {
 		sh.lastRan, sh.lastTail, sh.lastThrough, sh.lastPending, sh.lastKey, sh.lastWhy = a.ranAt, a.tailThrough, time.Time{}, false, "", ""
@@ -255,6 +274,7 @@ func (c *copyAges) note(id string, a copyAnswer) {
 			sh.tailed++
 		}
 		known(a.tailThrough)
+		s.lastThroughID = a.tailThroughID
 	case !a.ok || len(a.files) == 0:
 		// Which snapshots it read is not known.
 		unknown(copyAgeWhyNoFiles)
@@ -274,6 +294,7 @@ func (c *copyAges) note(id string, a copyAnswer) {
 				sh.snapshot++
 			}
 			known(olderOf(cut, a.tailThrough))
+			s.lastThroughID = leastKnownID(s.cutID[key], a.tailThrough, a.tailThroughID)
 			return
 		}
 		p := s.pending[key]
@@ -356,6 +377,21 @@ func (c *copyAges) pendingFor() map[string]map[string]map[string][]string {
 // instant, or why it is not known (then the answers over them count as
 // unknown, and toward no worst).
 func (c *copyAges) settle(id, key string, cut time.Time, why string) {
+	c.settleMark(id, key, cut, 0, why)
+}
+
+// leastKnownID is the least event id an answer over a snapshot (cutID) and
+// maybe tails (tailThrough, tailID) holds every event through: the tails
+// count only when it read some, and an unknown one makes it unknown (0).
+func leastKnownID(cutID uint64, tailThrough time.Time, tailID uint64) uint64 {
+	if tailThrough.IsZero() {
+		return cutID
+	}
+	return leastEventID(cutID, tailID)
+}
+
+// settleMark is settle with the set's least event id (#2556, 0 = unknown).
+func (c *copyAges) settleMark(id, key string, cut time.Time, cutID uint64, why string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.by[id]
@@ -371,8 +407,9 @@ func (c *copyAges) settle(id, key string, cut time.Time, why string) {
 		s.worse(max(copyAgeOf(p.latest, cut), p.tailWorst))
 		if len(s.cut) >= copyAgesCutKeep {
 			clear(s.cut)
+			clear(s.cutID)
 		}
-		s.cut[key] = cut
+		s.cut[key], s.cutID[key] = cut, cutID
 	}
 	public := copyAgeWhyNotPlaced
 	if strings.HasPrefix(why, copyAgeWhyNoIndex) {
@@ -385,6 +422,7 @@ func (c *copyAges) settle(id, key string, cut time.Time, why string) {
 		s.lastPending = false
 		if why == "" {
 			s.lastThrough = olderOf(cut, s.last.tailThrough)
+			s.lastThroughID = leastKnownID(cutID, s.last.tailThrough, s.last.tailThroughID)
 		} else {
 			s.lastWhy = public
 		}
@@ -440,6 +478,51 @@ func (c *copyAges) shapeNow(id, shape string) *RouterStatementFresh {
 	return out
 }
 
+// captureRead records the outcome of reading server id's capture state: the
+// sample, or err (the detail goes to the log, never to the status document).
+// why is the public reason a failure is reported under.
+func (c *copyAges) captureRead(id string, sample captureSample, err error, why string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.by[id]
+	if s == nil {
+		// Forgotten while it was read: never brought back with the sample
+		// of an index it no longer has.
+		return
+	}
+	if err != nil {
+		s.captureFailed, s.captureWhy = true, why
+		c.faults.warn(id, "router: how far behind the source a copy answer was is not known", "server", id, "reason", why, "detail", err.Error())
+		return
+	}
+	s.capture, s.captureHave, s.captureFailed = sample, true, false
+}
+
+// captureReadEvery is how old a server's capture sample may be before
+// resolve reads it again: the status document, which anyone can ask for,
+// must not turn into one index read per request.
+const captureReadEvery = 30 * time.Second
+
+// captureDue are the answered servers whose capture state resolve should
+// read: none read yet, the last one at least captureReadEvery old, or the
+// last answer run after it (only a read after the run can show that the
+// answer held every indexed event, behindSourceOf).
+func (c *copyAges) captureDue(now time.Time) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for id, s := range c.by {
+		if s.last.side != "copy" {
+			continue
+		}
+		if !s.captureHave || now.Sub(s.capture.readAt) >= captureReadEvery || s.capture.readAt.Before(s.last.ranAt) {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // copyAgesNow is one server's numbers for the status document: zero values
 // and false when no answer is known.
 type copyAgesNow struct {
@@ -452,6 +535,15 @@ type copyAgesNow struct {
 	unknown    uint64
 	pending    bool
 	unknownWhy string
+	// behind is how far behind the source the last answer's data was
+	// (#2556, behindSourceOf), behindRan when that answer ran. Known when
+	// both its through and the server's capture sample are; pending while
+	// either waits; otherwise behindWhy is one of the copyAgeWhy reasons.
+	behind        time.Duration
+	behindRan     time.Time
+	behindKnown   bool
+	behindPending bool
+	behindWhy     string
 }
 
 func (c *copyAges) now(id string) copyAgesNow {
@@ -464,6 +556,20 @@ func (c *copyAges) now(id string) copyAgesNow {
 	out := copyAgesNow{worst: s.worst, anyMax: s.worstKnown, unknown: s.unknown, pending: s.lastPending, unknownWhy: s.lastWhy}
 	if !s.lastPending && !s.lastThrough.IsZero() {
 		out.asOf, out.age, out.known = s.lastThrough, copyAgeOf(s.last.ranAt, s.lastThrough), true
+	}
+	if s.last.side == "copy" {
+		switch {
+		case s.lastPending:
+			out.behindPending = true
+		case s.lastThrough.IsZero():
+			out.behindWhy = s.lastWhy
+		case s.captureHave:
+			out.behind, out.behindRan, out.behindKnown = behindSourceOf(s.last.ranAt, s.lastThrough, s.lastThroughID, s.capture), s.last.ranAt, true
+		case s.captureFailed:
+			out.behindWhy = s.captureWhy
+		default:
+			out.behindPending = true
+		}
 	}
 	return out
 }
@@ -478,6 +584,7 @@ func (s *Server) ResolveCopyAges(ctx context.Context) {
 		return
 	}
 	defer s.copyAges.resolving.Unlock()
+	s.resolveCaptureSamples(ctx)
 	for id, sets := range s.copyAges.pendingFor() {
 		if ctx.Err() != nil {
 			return // left pending, for the next call
@@ -498,12 +605,43 @@ func (s *Server) ResolveCopyAges(ctx context.Context) {
 		}
 		for key, files := range sets {
 			rctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
-			cut, why := s.copyIndexedThrough(rctx, b.db, files)
+			cut, cutID, why := s.copyIndexedThroughMark(rctx, b.db, files)
 			cancel()
 			if why != "" && ctx.Err() != nil {
 				return // out of the caller's time, not the index's answer
 			}
-			s.copyAges.settle(id, key, cut, why)
+			s.copyAges.settleMark(id, key, cut, cutID, why)
 		}
+	}
+
+}
+
+// resolveCaptureSamples reads the capture state of each server that is due
+// (#2556, captureDue), one read a server, before the snapshots' instants: a
+// slow index there must not leave every server without one. Never by a
+// statement.
+func (s *Server) resolveCaptureSamples(ctx context.Context) {
+	for _, id := range s.copyAges.captureDue(time.Now()) {
+		if ctx.Err() != nil {
+			return
+		}
+		b, err := s.cm.Resolve(ctx, id)
+		if err != nil && ctx.Err() != nil {
+			return
+		}
+		if err != nil || b == nil || b.db == nil {
+			if err == nil {
+				err = errors.New("no index")
+			}
+			s.copyAges.captureRead(id, captureSample{}, fmt.Errorf("the server's index could not be reached: %w", err), copyAgeWhyNoIndex)
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
+		sample, err := readCaptureSample(rctx, b.db, b.dbName, time.Now)
+		cancel()
+		if err != nil && ctx.Err() != nil {
+			return
+		}
+		s.copyAges.captureRead(id, sample, err, copyAgeWhyNoState)
 	}
 }

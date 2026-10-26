@@ -202,7 +202,17 @@ func copyMarkTime(ctx context.Context, db *sql.DB, m reconstruct.EventMark) (tim
 // files, or why one of them has none: a statement over two snapshots is as
 // current as the older one.
 func (s *Server) copyIndexedThrough(ctx context.Context, db *sql.DB, files map[string][]string) (time.Time, string) {
+	at, _, why := s.copyIndexedThroughMark(ctx, db, files)
+	return at, why
+}
+
+// copyIndexedThroughMark is copyIndexedThrough with the least event id of the
+// directories' bounds (#2556): every directory holds every event through its
+// own mark (a lower bound, copyDirMark), so all of them hold every event
+// through the least.
+func (s *Server) copyIndexedThroughMark(ctx context.Context, db *sql.DB, files map[string][]string) (time.Time, uint64, string) {
 	var oldest time.Time
+	var ids []uint64
 	for dir, paths := range files {
 		footers := make([]baseline.DumpMetadata, 0, len(paths))
 		for _, p := range paths {
@@ -210,26 +220,27 @@ func (s *Server) copyIndexedThrough(ctx context.Context, db *sql.DB, files map[s
 			if err != nil {
 				// Leaving the file out could RAISE a dump directory's bound.
 				slog.Debug("router status: a snapshot file's footer could not be read", "file", p, "error", err)
-				return time.Time{}, fmt.Sprintf("a file of the snapshot %s could not be read", dir)
+				return time.Time{}, 0, fmt.Sprintf("a file of the snapshot %s could not be read", dir)
 			}
 			footers = append(footers, md)
 		}
 		m, why := copyDirMark(footers)
 		if why != "" {
-			return time.Time{}, why
+			return time.Time{}, 0, why
 		}
 		at, why := copyMarkTime(ctx, db, m)
 		if why != "" {
-			return time.Time{}, why
+			return time.Time{}, 0, why
 		}
 		if oldest.IsZero() || at.Before(oldest) {
 			oldest = at
 		}
+		ids = append(ids, m.ID)
 	}
 	if oldest.IsZero() {
-		return time.Time{}, "no file of the snapshot was read"
+		return time.Time{}, 0, "no file of the snapshot was read"
 	}
-	return oldest, ""
+	return oldest, leastEventID(ids...), ""
 }
 
 // copyAnswer is what a connection's last statement was answered by: side is
@@ -245,6 +256,9 @@ type copyAnswer struct {
 	// through, zero for none; allTailed says every table read had one.
 	tailThrough time.Time
 	allTailed   bool
+	// tailThroughID is the least id of the index's event the tails it read
+	// hold every event through (#2556), 0 when unknown or none.
+	tailThroughID uint64
 	// shape is the statement's row in the router's per-statement table
 	// (#2360), "" when the table is off: the answer's lag is kept for that
 	// row too.
@@ -268,10 +282,15 @@ type lastAnswerState struct {
 // noteCopyAnswer records that the copy ran a statement on the connection,
 // pending the port's decision.
 func (q *SQLOnCopy) noteCopyAnswer(files map[string][]string, ok bool, ranAt, tailThrough time.Time, allTailed bool) {
+	q.noteCopyAnswerMark(files, ok, ranAt, tailThrough, 0, allTailed)
+}
+
+// noteCopyAnswerMark is noteCopyAnswer with the tails' event id (#2556).
+func (q *SQLOnCopy) noteCopyAnswerMark(files map[string][]string, ok bool, ranAt, tailThrough time.Time, tailThroughID uint64, allTailed bool) {
 	if q == nil {
 		return
 	}
-	a := copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt, tailThrough: tailThrough, allTailed: allTailed}
+	a := copyAnswer{side: "copy", files: files, ok: ok, ranAt: ranAt, tailThrough: tailThrough, tailThroughID: tailThroughID, allTailed: allTailed}
 	q.last.mu.Lock()
 	q.last.pending = &a
 	q.last.mu.Unlock()

@@ -2204,7 +2204,23 @@ lag could not be told, which the max cannot include (the panel then says
 "at least"), `data_age_unknown_reason` says why when the last answer is one of them,
 and `data_age_pending` says the last answer's lag is still being worked out
 (the router places a snapshot in the index within 30 seconds);
-the router's log says it at warning level, once a minute at most. Like
+the router's log says it at warning level, once a minute at most. One more says how far behind your MySQL the data of the copy's last
+answer was, read like `Seconds_Behind_Source`: `behind_source_seconds`,
+rounded up, and `behind_source_ran`, when that answer ran. It is 0 when
+capture was caught up and the answer read every change DBTrail had indexed,
+so a source with no writes for an hour reads 0, not an hour. When capture
+was caught up but the answer read an older snapshot, it is how much newer
+the changes it did not read are. Capture counts as caught up when the source
+told it, over the replication connection, that it had nothing more to send,
+within a minute of the answer; nothing is written to the source. Otherwise
+the number is the time from the data's instant to the answer, which grows
+with every answer while capture is stopped. Up to a minute after capture
+stops, or after a burst of writes it has not indexed yet, it can still show
+only the copy's own distance. "Your MySQL" is the server capture reads: when
+that is a replica, its own lag behind its primary is not in the number.
+`behind_source_pending` says it is still being worked out, and
+`behind_source_unknown_reason` why it cannot be told, in the words
+`data_age_unknown_reason` uses. Like
 `/metrics` it asks for no password, so it carries counts, times and the
 router's own settings only: never an account's name, nor what a source
 answered a login. Those stay in the router's log.

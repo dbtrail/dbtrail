@@ -122,3 +122,12 @@ console.log(JSON.stringify({
 		t.Errorf("status card, idle and caught up: %q, must agree with the Overview", got.StatusIdleCaught)
 	}
 }
+
+// The page's window is the router's: a stamp that counts there counts here.
+func TestBehindSourceWindowIsTheRouters_2556(t *testing.T) {
+	var got struct{ Window float64 }
+	runCaptureJS(t, `console.log(JSON.stringify({ window: vm.runInContext("CAUGHT_UP_WINDOW_SECONDS", ctx) }));`, &got)
+	if got.Window != caughtUpWindow.Seconds() {
+		t.Fatalf("page window %vs, router window %v", got.Window, caughtUpWindow)
+	}
+}

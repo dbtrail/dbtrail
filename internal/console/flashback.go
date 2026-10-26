@@ -154,7 +154,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		}
 		return sqlsandbox.Result{}, err
 	}
-	q.noteCopyAnswer(out.ReadFrom, out.ReadFromOK, time.Now(), out.TailThrough, out.AllTailed)
+	q.noteCopyAnswerMark(out.ReadFrom, out.ReadFromOK, time.Now(), out.TailThrough, out.TailThroughID, out.AllTailed)
 	out.Result.Note = out.OlderCopyNote
 	return out.Result, nil
 }

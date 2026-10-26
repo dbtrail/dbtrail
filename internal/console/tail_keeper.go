@@ -137,6 +137,9 @@ type tailView struct {
 	Paths   []string
 	PK      []string
 	Through time.Time
+	// ThroughID is the id of the index's event the view holds every event
+	// through (#2556): the keeper's cursor when it was written; 0 = unknown.
+	ThroughID uint64
 }
 
 // tailKey names a table among a server's tails. Exact: on a source with
@@ -176,9 +179,11 @@ type tailEntry struct {
 	// segs is the newest version written, a chain of files oldest first: a
 	// whole tail, then the keys changed in each later write (#2495). None
 	// before the first, or while the tail holds nothing. through is the
-	// instant it is indexed through.
-	segs    []string
-	through time.Time
+	// instant it is indexed through, and throughID the id of the index's
+	// event it holds every event through (#2556; 0 = unknown).
+	segs      []string
+	through   time.Time
+	throughID uint64
 	// segRows is how many rows the chain's files hold together: past
 	// tailMergeRatio times the tail's keys, its files are mostly keys a
 	// newer file overrides, and the next write is whole.
@@ -999,18 +1004,18 @@ func (k *tailKeeper) view(t views.BaselineTable, e *tailEntry) (tailView, bool) 
 			if e.through.IsZero() || e.fileCut != tailCutOf(t) {
 				return tailView{}, false
 			}
-			return tailView{Paths: e.segs, PK: e.tail.PKColumns(), Through: e.through}, true
+			return tailView{Paths: e.segs, PK: e.tail.PKColumns(), Through: e.through, ThroughID: e.throughID}, true
 		}
 	}
 	if !e.frozen {
-		e.through = k.through
+		e.through, e.throughID = k.through, k.mark.ID
 	}
 	if e.through.IsZero() {
 		// Frozen before any version was written: nothing to read, and no
 		// instant to say.
 		return tailView{}, false
 	}
-	return tailView{Paths: e.segs, PK: e.tail.PKColumns(), Through: e.through}, true
+	return tailView{Paths: e.segs, PK: e.tail.PKColumns(), Through: e.through, ThroughID: e.throughID}, true
 }
 
 // write publishes e's tail under a name never used before (a statement reads

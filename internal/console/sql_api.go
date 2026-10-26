@@ -879,6 +879,9 @@ type sqlOutcome struct {
 	// table it read had one, so the published copy's cut does not bound it.
 	TailThrough time.Time
 	AllTailed   bool
+	// TailThroughID is the least id of the index's event the tails it read
+	// hold every event through (#2556), 0 when unknown or none.
+	TailThroughID uint64
 }
 
 // runSQL is POST /api/sql without the HTTP: the gates that need the copy
@@ -1166,6 +1169,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		}
 	}
 	var tailThrough time.Time
+	var tailThroughID uint64
 	var allTailed bool
 	var copyUpdatedAt *time.Time
 	if !in.BaselineSnapshot.IsZero() {
@@ -1238,7 +1242,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// would build a tail for every table of the copy.
 			if tails != nil && narrowed.OnlyViews != nil {
 				tailsStart := time.Now()
-				narrowed.Baselines, tailThrough, allTailed = s.statementTails(ctx, tails, narrowed.Baselines, readTables)
+				narrowed.Baselines, tailThrough, tailThroughID, allTailed = s.statementTailsMark(ctx, tails, narrowed.Baselines, readTables)
 				parent.Tails += time.Since(tailsStart)
 				parent.TailsRan = true
 				allTailed = tailsSayTheInstant(statement, allTailed)
@@ -1346,7 +1350,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	}
 	readFrom, readFromOK := copyReadFrom(in, readTables)
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
-		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, AllTailed: allTailed}, nil
+		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed}, nil
 }
 
 // sqlWantedViews decides which of the copy's views a statement needs, from

@@ -54,7 +54,7 @@ const (
 // card (#1194): the reconstructable delta window, capture lag, and the
 // continuity verdict. Deliberately cheap — no COUNT(*), no index-size scan,
 // and the upper edge comes from per-partition MAX probes (see
-// newestIndexedEvent) rather than a whole-table MAX — because it loads on
+// NewestIndexedEvent) rather than a whole-table MAX — because it loads on
 // every server switch; CollectStatus stays the full report.
 type CoverageSummary struct {
 	// Floor is the delta-coverage floor (OldestDeltaFromDB — the #1213 strict
@@ -106,7 +106,7 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 	} else {
 		sum.Floor = floor
 	}
-	latest, err := newestIndexedEvent(ctx, db, dbName)
+	latest, err := NewestIndexedEvent(ctx, db, dbName)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 }
 
 // NewestIndexedRow is the event_timestamp of the index's newest row by
-// primary key: one index dive per partition, merged, where newestIndexedEvent
+// primary key: one index dive per partition, merged, where NewestIndexedEvent
 // reads the newest partition whole (no index leads with event_timestamp).
 // It is at most the exact newest event, never past it: the newest row by id
 // is the last one capture wrote, whose time is the newest unless an older
@@ -150,7 +150,7 @@ func NewestIndexedRow(ctx context.Context, db *sql.DB) (time.Time, error) {
 	return t.Time, nil
 }
 
-// newestIndexedEvent finds the newest event_timestamp with per-partition MAX
+// NewestIndexedEvent finds the newest event_timestamp with per-partition MAX
 // probes, newest partition first, stopping at the first non-empty one. A
 // whole-table MAX(event_timestamp) would be a full index scan — no index
 // leads with event_timestamp (the PK leads with event_id) — which is exactly
@@ -158,7 +158,7 @@ func NewestIndexedRow(ctx context.Context, db *sql.DB) (time.Time, error) {
 // it is the catch-all that holds the NEWEST rows whenever the future-
 // partition horizon lags. Cost: one probe per empty trailing partition, one
 // probe on the first non-empty — each bounded by a single hourly partition.
-func newestIndexedEvent(ctx context.Context, db *sql.DB, dbName string) (time.Time, error) {
+func NewestIndexedEvent(ctx context.Context, db *sql.DB, dbName string) (time.Time, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT PARTITION_NAME FROM information_schema.PARTITIONS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'binlog_events' AND PARTITION_NAME IS NOT NULL`, dbName)
