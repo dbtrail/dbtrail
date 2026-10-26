@@ -68,7 +68,7 @@ func FetchSnapshot(ctx context.Context, path string, opts Options) ([]ResultRow,
 		if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
 			return nil, fmt.Errorf("load httpfs: %w", err)
 		}
-		if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+		if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", path); err != nil {
 			return nil, err
 		}
 	} else if err := baselineintegrity.ValidateLocalFile(path); err != nil {

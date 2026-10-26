@@ -123,6 +123,19 @@ func EnableS3CredentialChain(ctx context.Context, db *sql.DB) error {
 // EnableS3CredentialChain exactly (no REGION clause), so existing same-region
 // callers are unchanged.
 func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region string) error {
+	return EnableS3CredentialChainFor(ctx, db, region)
+}
+
+// EnableS3CredentialChainFor is EnableS3CredentialChainRegion for a session
+// that names what it will read: the paths (s3:// URLs, globs, local files).
+// When every s3:// target is a bucket with keys of its own, the aws extension
+// and the credential_chain secret are skipped: the bucket's scoped secret
+// outranks the chain for its paths, so the chain could only cost time, and
+// off AWS it costs seconds (the SDK waits on the instance-metadata address
+// that only answers inside AWS, #2568). Routing and the per-bucket secrets
+// are applied exactly as before. No paths means the targets are unknown and
+// the chain is tried, as EnableS3CredentialChainRegion does.
+func EnableS3CredentialChainFor(ctx context.Context, db *sql.DB, region string, paths ...string) error {
 	// ROUTING FIRST, and outside every gate below (#1454). Which store a read
 	// reaches is not best-effort: an unrouted session does not fail, it
 	// succeeds against AWS with the ambient credentials, and an operator whose
@@ -140,7 +153,7 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 	}
 
 	stores := storage.BucketStores()
-	if os.Getenv("BINTRAIL_DUCKDB_NO_AWS_EXT") != "" {
+	if os.Getenv("BINTRAIL_DUCKDB_NO_AWS_EXT") != "" || !targetsNeedChain(paths, stores) {
 		return applyBucketStoreSecrets(ctx, execOn(db), stores, false)
 	}
 	ensureWritableHome()
@@ -171,6 +184,33 @@ func EnableS3CredentialChainRegion(ctx context.Context, db *sql.DB, region strin
 			"error", err)
 	}
 	return applyBucketStoreSecrets(ctx, execOn(db), stores, true)
+}
+
+// targetsNeedChain reports whether a session reading paths can use the
+// credential chain: true unless every remote target is s3://<bucket> with a
+// keyed store for exactly that bucket. Unknown targets (no paths), another
+// scheme, or a bucket with no keys of its own keep the chain. A local path
+// reads no store and decides nothing.
+func targetsNeedChain(paths []string, stores map[string]storage.BucketStore) bool {
+	if len(paths) == 0 {
+		return true
+	}
+	for _, p := range paths {
+		if !strings.Contains(p, "://") {
+			continue
+		}
+		rest, ok := strings.CutPrefix(p, "s3://")
+		if !ok {
+			return true
+		}
+		// No "/" after the bucket: the scoped secret is s3://<bucket>/ and
+		// does not match the bare s3://<bucket>.
+		bucket, _, slash := strings.Cut(rest, "/")
+		if st, keyed := stores[bucket]; !slash || bucket == "" || !keyed || !st.HasKeys() {
+			return true
+		}
+	}
+	return false
 }
 
 // execOn adapts a *sql.DB to the statement runner applyBucketStoreSecrets
@@ -207,6 +247,9 @@ func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, str
 		st := stores[b]
 		if st.HasKeys() {
 			if err := exec(ctx, bucketStoreSecret(b, st, configProvider(st.AccessKeyID, st.SecretKey, ""))); err != nil {
+				if ctx.Err() != nil {
+					return outOfTime(ctx, b, withholdIfKeyed(err, "the S3 store's keys", st.AccessKeyID, st.SecretKey))
+				}
 				return fmt.Errorf("route DuckDB S3 reads for bucket %q to its own store with its own keys (is httpfs loaded?): %s",
 					b, withholdIfKeyed(err, "the S3 store's keys", st.AccessKeyID, st.SecretKey))
 			}
@@ -221,11 +264,21 @@ func applyBucketStoreSecrets(ctx context.Context, exec func(context.Context, str
 				"bucket", b, "error", err)
 		}
 		if err := exec(ctx, bucketStoreSecret(b, st, configProvider(keyID, secret, token))); err != nil {
+			if ctx.Err() != nil {
+				return outOfTime(ctx, b, withholdIfKeyed(err, "AWS keys from the environment", keyID, secret, token))
+			}
 			return fmt.Errorf("route DuckDB S3 reads for bucket %q to its own store (is httpfs loaded?): %s",
 				b, withholdIfKeyed(err, "AWS keys from the environment", keyID, secret, token))
 		}
 	}
 	return nil
+}
+
+// outOfTime is the routing error when the statement failed while ctx was
+// done: "is httpfs loaded?" would send the operator after an extension that
+// is fine. DuckDB's message (msg, already redacted) is kept beside it.
+func outOfTime(ctx context.Context, bucket, msg string) error {
+	return fmt.Errorf("ran out of time before DuckDB S3 reads for bucket %q could be routed to its own store: %w (DuckDB: %s)", bucket, ctx.Err(), msg)
 }
 
 // withholdIfKeyed renders the error of a statement that may carry keys; source

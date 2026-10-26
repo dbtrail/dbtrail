@@ -581,7 +581,7 @@ func ReadParquetMetadataAny(ctx context.Context, path string) (DumpMetadata, err
 	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
 		return DumpMetadata{}, fmt.Errorf("load httpfs extension: %w", err)
 	}
-	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+	if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", path); err != nil {
 		return DumpMetadata{}, err
 	}
 

@@ -227,7 +227,7 @@ func ReadBaselineRows(ctx context.Context, path string, filter map[string]string
 		if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
 			return nil, fmt.Errorf("load httpfs extension: %w", err)
 		}
-		if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+		if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", path); err != nil {
 			return nil, err
 		}
 	} else if err := baselineintegrity.ValidateLocalFileOnce(path); err != nil {

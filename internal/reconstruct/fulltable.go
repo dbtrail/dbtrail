@@ -3400,7 +3400,7 @@ var downloadS3Baseline = func(ctx context.Context, tuning duckdbutil.Tuning, src
 	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
 		return fmt.Errorf("load httpfs: %w", err)
 	}
-	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+	if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", src); err != nil {
 		return err
 	}
 	safeSrc := strings.ReplaceAll(duckdbutil.FileGlob(src), "'", "''")

@@ -223,7 +223,7 @@ func ReadTableFooters(ctx context.Context, paths []string) (FooterRead, error) {
 		if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
 			return FooterRead{}, fmt.Errorf("load httpfs extension: %w", err)
 		}
-		if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+		if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", paths...); err != nil {
 			return FooterRead{}, err
 		}
 	}

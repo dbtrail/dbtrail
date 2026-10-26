@@ -522,7 +522,7 @@ func s3SiblingNames(ctx context.Context, basePath string) ([]string, error) {
 	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
 		return nil, fmt.Errorf("load httpfs extension: %w", err)
 	}
-	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+	if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", basePath); err != nil {
 		return nil, err
 	}
 	q := fmt.Sprintf("SELECT file FROM glob('%s')", strings.ReplaceAll(deltaProbePattern(basePath), "'", "''"))
@@ -1157,7 +1157,7 @@ func s3SnapshotDeltaNames(ctx context.Context, snapshotURL string) (map[string][
 	if err := duckdbutil.LoadHTTPFS(ctx, db); err != nil {
 		return nil, fmt.Errorf("load httpfs extension: %w", err)
 	}
-	if err := duckdbutil.EnableS3CredentialChain(ctx, db); err != nil {
+	if err := duckdbutil.EnableS3CredentialChainFor(ctx, db, "", snapshotURL); err != nil {
 		return nil, err
 	}
 	out := map[string][]string{}

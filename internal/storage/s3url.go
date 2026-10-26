@@ -93,6 +93,7 @@ func newStoreClient(ctx context.Context, store BucketStore, region string, extra
 	opts := append([]func(*s3.Options){func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(url)
 		o.UsePathStyle = pathStyle
+		o.DisableLogOutputChecksumValidationSkipped = true
 	}}, extra...)
 	return newS3ClientRouted(awsCfg, opts...), nil
 }
@@ -151,6 +152,13 @@ func warnIfEndpointUnmirrored(client *s3.Client) {
 // one store and DuckDB reads to the other — the split this whole change
 // exists to prevent. Client options are applied last and win.
 //
+// A store of our own (here, and a bucket store's endpoint) also silences the
+// SDK's "Response has no supported checksum" line (#2568): it is logged at
+// WARN on every GET from a store that sends no checksum headers, which most
+// S3-compatible stores do not, and it reports nothing an operator can act
+// on. The response is still validated whenever a checksum IS sent, and
+// baselines carry their own CRC-32C check.
+//
 // Path style is forced only for BINTRAIL_S3_ENDPOINT (defaulting to what MinIO
 // and LocalStack need) or when BINTRAIL_S3_PATH_STYLE names it. An endpoint
 // the SDK resolved on its own — its AWS_ENDPOINT_URL* variables, or
@@ -166,7 +174,10 @@ func S3ClientOptions() []func(*s3.Options) {
 	var opts []func(*s3.Options)
 	if ep.Managed() {
 		endpoint := ep.URL
-		opts = append(opts, func(o *s3.Options) { o.BaseEndpoint = aws.String(endpoint) })
+		opts = append(opts, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.DisableLogOutputChecksumValidationSkipped = true
+		})
 	}
 	// PathStyleExplicit applies with no endpoint of our own too: the SDK has no
 	// shared-config setting for addressing style, so BINTRAIL_S3_PATH_STYLE is
