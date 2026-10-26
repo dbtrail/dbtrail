@@ -8856,6 +8856,20 @@ function s3OnlyBackupFault(srv) {
 // only for a server whose copies are all here: with a bucket as well, a
 // scheduled run reuses only when the folder holds the newest snapshot and a
 // restore never does, which one sentence cannot carry without being false.
+// notInS3Words says which older snapshots stay on this machine because S3
+// does not have them complete, and what happens to them: the cleanup sends
+// them again (#2563). rec is the not_in_s3 record; its names are snapshot
+// folder names ("2026-10-19T03-15-06Z"), absent from an older daemon's.
+function notInS3Words(n, rec) {
+  const at = (name) => utcLabel(String(name).replace(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z$/, "$1T$2:$3:$4Z"));
+  const names = Array.isArray(rec && rec.names) ? rec.names.filter((x) => typeof x === "string" && x) : [];
+  const what = n === 1 && names.length === 1 ? "the copy of " + at(names[0])
+    : n + " older " + (n === 1 ? "copy" : "copies") + (names.length ? " (" + names.map(at).join(", ") + (n > names.length ? " and " + (n - names.length) + " more" : "") + ")"
+      : " (checked " + utcLabel(rec && rec.at) + ")");
+  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + (n === 1 ? "it" : "them") +
+    " complete; DBTrail sends " + (n === 1 ? "it" : "them") + " again at the next cleanup.";
+}
+
 function localCopyWords(s3, keep, loop, reuse, was, reach) {
   const out = [];
   const say = (text, err) => out.push({ text, err: !!err });
@@ -8878,7 +8892,7 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
     // as today's.
     const live = age.asSaved && loop && age.minutes > 0;
     const n = live && age.notIn ? age.notIn.count : 0;
-    if (n > 0) say("Not in S3, so kept here: " + n + " older " + (n === 1 ? "copy" : "copies") + " (checked " + utcLabel(age.notIn.at) + "). The log says why.", true);
+    if (n > 0) say(notInS3Words(n, age.notIn), true);
     if (live && age.notInError) say("S3 state unknown: " + age.notInError, true);
     return out;
   }

@@ -131,6 +131,11 @@ type PruneResult struct {
 	// KeptNotDurable counts snapshots retained because no durable S3 copy was
 	// confirmed (never delete the only copy).
 	KeptNotDurable int
+	// NotAtDestination names the snapshots among KeptNotDurable that the
+	// destination ANSWERED it does not have (a probe error is not an
+	// answer): complete local snapshots whose upload never finished, which
+	// sending again is what fixes. Oldest first.
+	NotAtDestination []string
 	// KeptRecent counts snapshots retained because they are within the retention
 	// window or younger than the safety floor.
 	KeptRecent int
@@ -276,7 +281,11 @@ func recordNotInDestination(opts PruneOptions, res PruneResult, err error, now t
 		}
 		return
 	}
-	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n}); werr != nil {
+	names := res.NotAtDestination
+	if len(names) > notInDestinationNamesKept {
+		names = names[:notInDestinationNamesKept]
+	}
+	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n, Names: names}); werr != nil {
 		slog.Error("baseline prune: snapshots the destination does not have were kept, and the record of them could not be written; the page will not say it",
 			"dir", opts.LocalDir, "kept", n, "error", werr)
 	}
@@ -575,6 +584,9 @@ func planPrune(snaps []localSnapshot, keepers, durable map[string]bool, retain, 
 		case !durable[s.name]:
 			// No confirmed durable S3 copy → never delete the only copy.
 			res.KeptNotDurable++
+			if have, probed := durable[s.name]; probed && !have {
+				res.NotAtDestination = append(res.NotAtDestination, s.name)
+			}
 		default:
 			prune = append(prune, s.name)
 		}

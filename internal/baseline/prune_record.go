@@ -99,7 +99,15 @@ const NotInDestinationFile = ".not-in-destination.json"
 type NotInDestination struct {
 	At    time.Time `json:"at"`
 	Count int       `json:"count"`
+	// Names are the first of them (notInDestinationNamesKept), oldest
+	// first, so the page can say which; absent in a record an older build
+	// wrote.
+	Names []string `json:"names,omitempty"`
 }
+
+// notInDestinationNamesKept bounds Names: the page names a few, the count
+// says how many.
+const notInDestinationNamesKept = 5
 
 // ReadNotInDestination reads dir's record; ok is false when the last attempt
 // found every old snapshot at the destination. An unreadable record is an

@@ -633,6 +633,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
+		resendSnapshotFn = baselineSup.resendLacking
 		// The retention the #1689 gate bounds a skipped cycle against. Wired
 		// here rather than taken as a constructor argument because it is the
 		// same provider rotation reads, and because a supervisor without one
@@ -972,6 +973,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	var baselineSup *baselineSupervisor
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
+		resendSnapshotFn = baselineSup.resendLacking
 		// The retention the #1689 gate bounds a skipped cycle against. Wired
 		// here rather than taken as a constructor argument because it is the
 		// same provider rotation reads, and because a supervisor without one
@@ -1721,6 +1723,36 @@ func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, r
 			slog.Warn("baseline prune: could not check whether some snapshots are at the snapshot destination, so they "+
 				"were kept", "dir", t.dir, "unchecked", res.ProbeErrors)
 		}
+		resendLacking(ctx, t, res.NotAtDestination)
+	}
+}
+
+// resendSnapshotFn sends one complete local snapshot the destination answered
+// it does not have: an upload that did not finish (a scheduled update's, or a
+// full read's). Set where the baseline supervisor is built
+// (baselineSupervisor.resendLacking); nil leaves them for the next full read,
+// as before. Before this, a server whose full reads are off kept such a
+// snapshot on its disk for good, behind a warning that only said "the log
+// says why".
+var resendSnapshotFn func(ctx context.Context, dir, s3URL, name string) error
+
+// resendLacking sends again, one at a time, the snapshots a prune of t found
+// complete here and missing at the destination. A failure is logged and the
+// next one goes on: the snapshot stays on disk, the next cycle tries again.
+func resendLacking(ctx context.Context, t baselinePruneTarget, names []string) {
+	if resendSnapshotFn == nil || t.s3 == "" {
+		return
+	}
+	for _, name := range names {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := resendSnapshotFn(ctx, t.dir, t.s3, name); err != nil {
+			slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the next cleanup tries again",
+				"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
+			continue
+		}
+		slog.Info("snapshot cleanup: sent again a local snapshot the destination lacked", "dir", t.dir, "snapshot", name, "destination", t.s3)
 	}
 }
 

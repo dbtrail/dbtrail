@@ -329,7 +329,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
 				dto.NotInS3Error = err.Error()
 			} else if ok {
-				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count}
+				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names}
 			}
 		}
 	}
@@ -613,4 +613,7 @@ func (s *Server) handleBackupSettingsDaemonUpdate(w http.ResponseWriter, r *http
 type notInS3DTO struct {
 	At    string `json:"at"` // RFC3339, UTC
 	Count int    `json:"count"`
+	// Names are the first of those snapshots' folder names, oldest first
+	// (#2563); absent when an older daemon wrote the record.
+	Names []string `json:"names,omitempty"`
 }

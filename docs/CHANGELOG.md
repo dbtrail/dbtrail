@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **A snapshot whose upload to S3 did not finish is sent again (#2563).** A complete local snapshot that the S3 destination does not have complete (an update's or a full read's upload that was cut short) used to wait for the next full read to be sent again; with full reads off it stayed on the machine for good. Each cleanup now sends such snapshots again, one at a time, and deletes them locally once S3 has them. The Snapshots settings card names them ("Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC ... DBTrail sends it again at the next cleanup") instead of "The log says why".
+
 
 ## [0.118.0] - 2026-10-25
 ### Added

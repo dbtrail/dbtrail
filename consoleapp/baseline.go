@@ -632,6 +632,24 @@ func (s *baselineSupervisor) isUploading(serverID, name string) bool {
 	return s.uploading[serverID+"/"+name]
 }
 
+// resendLacking sends again one complete local snapshot (dir/name) that the
+// destination answered it does not have, to its own key under s3URL, skipping
+// objects already there: the cleanup's resend (resendSnapshotFn). Refused
+// without the local _SUCCESS marker, which the uploader requires. Keyed for
+// the in-flight mark by folder, since a cleanup target names no server.
+func (s *baselineSupervisor) resendLacking(_ context.Context, dir, s3URL, name string) error {
+	if _, err := os.Stat(filepath.Join(dir, name, baseline.SuccessMarker)); err != nil {
+		return fmt.Errorf("the local snapshot has no _SUCCESS marker, so it cannot be sent: %w", err)
+	}
+	key := "dir:" + dir
+	if s.isUploading(key, name) {
+		return nil
+	}
+	dest := strings.TrimSuffix(s3URL, "/") + "/" + name
+	_, err := s.uploadMarked(key, name, filepath.Join(dir, name), dest, true)
+	return err
+}
+
 // sweepUnuploaded sends every complete local snapshot other than the one
 // named own whose _SUCCESS the destination does not have, skipping objects
 // already there and snapshots this process is sending right now (a refresh
