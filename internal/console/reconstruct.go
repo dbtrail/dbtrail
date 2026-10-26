@@ -50,6 +50,11 @@ type capabilitiesResponse struct {
 	// supervisor — `bintrail-console watch`). Process-global, not per-server:
 	// it is about what the PROCESS is, not about the selected connection.
 	Monitor bool `json:"monitor"`
+	// AccessProfiles: the Access profiles page is advertised
+	// (ext.SetAccessProfilesVisible). False in the stock build, where the SPA
+	// hides its nav entry, palette entry and route. The API behind it is
+	// served either way; this only decides what the UI offers.
+	AccessProfiles bool `json:"access_profiles"`
 	// RecoverCascade: the recover-cascade surface is available. Free tier (like
 	// recover), so available unless an RBAC redaction profile is active — under a
 	// profile cascade victim synthesis cannot honor redaction, so the endpoint
@@ -223,6 +228,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := capabilitiesResponse{
 		Monitor:         s.monitorCtrl != nil,
+		AccessProfiles:  ext.AccessProfilesVisible(),
 		BaselineTrigger: s.baselineCtrl != nil,
 		BaselineRestore: s.baselineRestore != nil,
 		BackupSchedule:  s.backupSchedules != nil,

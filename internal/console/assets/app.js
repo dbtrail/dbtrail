@@ -1182,6 +1182,9 @@ function navigate(route, params, push = true) {
   if (!isKnownRoute(route)) [route, hash] = ["overview", ""];
   // Both halves are watch-daemon surfaces (rotation, archiving, staging).
   if (route === "retention" && !capsCache.monitor) route = "overview";
+  // Access profiles is advertised only where the build turns it on
+  // (capabilities access_profiles); renderAccessProfiles guards a typed URL.
+  if (route === "access-profiles" && !capsCache.access_profiles) route = "overview";
   // Snapshots is NOT gated, where two of the three pages it replaces were
   // (#1573). On a standalone serve it leaves out what only the daemon can
   // DO — taking a backup, running a check — and keeps what serve can
@@ -14505,7 +14508,10 @@ function hiddenGrantsBlock(g, hasRules, blocked) {
 }
 
 const HIDDEN_DOES = "Hidden tables and columns disappear from SQL on the copy, the MySQL port and the AI connector's SQL tool, and the port's time travel (_flashback, _snapshot, _diff) is off for this server.";
-const HIDDEN_DOES_NOT = "The data stays in the copy's files and in the index, so time travel in this console and the AI connector's history tools (both follow access profiles) still see full rows, and so do downloads and anyone with the files.";
+// The access-profiles aside names a page only a build that shows it has.
+const hiddenDoesNot = () => "The data stays in the copy's files and in the index, so time travel in this console and the AI connector's history tools"
+  + (capsCache.access_profiles ? " (both follow access profiles)" : "")
+  + " still see full rows, and so do downloads and anyone with the files.";
 
 // hiddenRulesBody draws the section from GET .../hidden (h) and the grants
 // check (g, as hiddenGrantsBlock takes it) into box, with the form when the
@@ -14578,7 +14584,7 @@ function hiddenRulesBody(box, cur, h, g, said) {
     el("label", { class: "field" }, el("span", { class: "field-label", text: "Columns" }), cTA,
       el("span", { class: "form-hint", text: "One per line, like shop.customers.email, or shop.*.email for that column in every table in shop. Put odd names in backticks." })),
     el("p", { class: "form-hint hidden-does", text: HIDDEN_DOES }),
-    el("p", { class: "form-hint hidden-does-not", text: HIDDEN_DOES_NOT }),
+    el("p", { class: "form-hint hidden-does-not", text: hiddenDoesNot() }),
     el("div", { class: "bk-restore-row" }, save), msg,
     grantsBox());
   save.onclick = async () => {
@@ -14652,6 +14658,10 @@ function hiddenRulesPanel(cur) {
 // not see buttons that would only 403.
 
 async function renderAccessProfiles() {
+  // Gated like Retention: a typed URL or Back with the capability off rewrites
+  // the address before re-dispatching, so the Overview is not shown under
+  // /access-profiles.
+  if (!capsCache.access_profiles) { history.replaceState({}, "", "/overview"); renderRoute(); return; }
   const gen = serverGen, vgen = viewGen;
   viewLoading();
   let doc;
@@ -18914,7 +18924,7 @@ function cmdkCommands() {
   cmds.push({ group: "Navigate", label: "MCP Server", run: () => navigate("connect") });
   cmds.push({ group: "Navigate", label: "MySQL clients", run: () => navigate("mysql-clients") });
   if (capsCache.monitor) cmds.push({ group: "Navigate", label: "Retention", run: () => navigate("retention") });
-  cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });
+  if (capsCache.access_profiles) cmds.push({ group: "Navigate", label: "Access profiles", run: () => navigate("access-profiles") });
   cmds.push({ group: "Actions", label: "Manage servers", run: () => { closeCmdk(); openServersModal(); } });
   if (capsCache.monitor) cmds.push({ group: "Actions", label: "Configure rotation…", run: () => { closeCmdk(); showRotationDialog(); } });
   if (capsCache.auth) {

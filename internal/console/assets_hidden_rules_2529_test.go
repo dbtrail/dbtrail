@@ -386,7 +386,7 @@ func TestHiddenRulesSection_2529(t *testing.T) {
 		return strings.Join(append(append(append([]string{}, d.Lines...), d.Errs...), d.Items...), " | ")
 	}
 	does := "Hidden tables and columns disappear from SQL on the copy, the MySQL port and the AI connector's SQL tool, and the port's time travel (_flashback, _snapshot, _diff) is off for this server."
-	doesNot := "The data stays in the copy's files and in the index, so time travel in this console and the AI connector's history tools (both follow access profiles) still see full rows, and so do downloads and anyone with the files."
+	doesNot := "The data stays in the copy's files and in the index, so time travel in this console and the AI connector's history tools still see full rows, and so do downloads and anyone with the files."
 
 	// The form, with what it does and does not do said before Save.
 	e := got.Empty

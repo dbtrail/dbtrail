@@ -74,20 +74,22 @@
         <!-- Settings group, in four runs: how tools connect (MCP Server for
              AI clients, MySQL clients for a MySQL client or an application
              on the MySQL port),
-             what happens to the data over time (Rotation and Retention:
-             both exist only on the watch daemon and are gated per item, so
-             the always-available MCP Server and MySQL clients entries keep the group visible on
-             the standalone serve too, #1041; This daemon was dissolved into
-             Status and Snapshots, #1867), who may see
+             what happens to the data over time (Retention: it exists only
+             on the watch daemon and is gated, so the always-available MCP
+             Server and MySQL clients entries keep the group visible on the
+             standalone serve too, #1041; rotation is edited from the
+             Retention page; This daemon was dissolved into Status and
+             Snapshots, #1867), who may see
              what (Access profiles, then the extension panels a commercial
              build registers, which syncExtSettingsNav inserts right after
              it in registration order), and whatever the build registers
-             last. The Rotation entry is a modal trigger, not a route: it has
-             no data-route, and init() binds it separately (the generic
-             .nav-item handler skips route-less items). Access profiles
+             last. Access profiles
              (#1445) is NOT monitor-gated: it writes to the selected
              server's index, which the standalone serve reaches as well as
-             the watch daemon does. /storage stays a known route in app.js
+             the watch daemon does. It is gated on access_profiles instead,
+             which the stock build leaves off (ext.SetAccessProfilesVisible);
+             the node stays in the markup either way, because the extension
+             panels are inserted after it. /storage stays a known route in app.js
              and rewrites to /retention (#1543). -->
         <div class="nav-group">
           <div class="nav-label">Settings</div>
@@ -103,7 +105,7 @@
             <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></span>
             <span>Retention</span>
           </a>
-          <a class="nav-item" data-route="access-profiles" href="/access-profiles">
+          <a class="nav-item" data-route="access-profiles" href="/access-profiles" data-capability="access_profiles">
             <span class="ni-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11h-6"/><path d="M19 8v6"/></svg></span>
             <span>Access profiles</span>
           </a>

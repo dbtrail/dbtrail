@@ -10,8 +10,9 @@ import (
 
 // The sidebar's order is a decision (#1863): the three pages an operator opens
 // every day sit at the top with no heading, Investigate and Resolve keep
-// theirs below Settings, and Settings runs MySQL clients, MCP Server, Rotation, Retention, then Access
-// profiles, after which a commercial build's panels are inserted. A guard
+// theirs below Settings, and Settings runs MySQL clients, MCP Server, Retention, then Access
+// profiles (shown only where the build turns it on), after which a commercial
+// build's panels are inserted. A guard
 // over index.html, because an entry that drifts back into a group of its own
 // looks fine in every unit test and wrong on the only screen that matters.
 func TestSidebarOrder1863(t *testing.T) {
@@ -47,6 +48,12 @@ func TestSidebarOrder1863(t *testing.T) {
 	// The gates travel with the entries they gate.
 	if !regexp.MustCompile(`data-route="retention"[^>]*data-capability="monitor"`).MatchString(nav) {
 		t.Error("the retention entry lost its monitor gate")
+	}
+	// Access profiles stays in the markup, gated, in both builds: the stock
+	// build hides it, and a commercial build's panels are inserted after it,
+	// so removing the node would drop those panels with no error.
+	if !regexp.MustCompile(`data-route="access-profiles"[^>]*data-capability="access_profiles"`).MatchString(nav) {
+		t.Error("the access-profiles entry lost its access_profiles gate (or is gone, which also drops the panels inserted after it)")
 	}
 	// Rotation is not an entry: it only opened the dialog the Retention
 	// page's "Edit rotation…" opens, and the command palette still offers it.
