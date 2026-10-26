@@ -1240,11 +1240,27 @@ try {
   // rows the page repaints from the server's document, then removes all
   // three through their buttons (each asks first; the dialog is accepted
   // here) so nothing is left behind for the scenarios after it. The page is
-  // NOT monitor-gated: it must be reachable through the sidebar, not only
-  // by navigate().
+  // NOT monitor-gated, but the stock build hides it (capabilities
+  // access_profiles is off unless an embedding build turns it on): first
+  // that it is hidden and a navigate() lands on the Overview, then the
+  // capability is switched on in the page, as such a build would serve it,
+  // and the entry must be reachable through the sidebar.
   const acceptDialog = (d) => d.accept();
   page.on("dialog", acceptDialog);
   try {
+    const apStock = await page.evaluate(async () => {
+      const a = document.querySelector('.nav-item[data-route="access-profiles"]');
+      const shown = !!a && getComputedStyle(a).display !== "none";
+      navigate("access-profiles");
+      await new Promise((r) => setTimeout(r, 300));
+      const r = { present: !!a, shown, caps: capsCache.access_profiles === true, path: location.pathname };
+      capsCache.access_profiles = true;
+      $all("[data-capability]").forEach((n) => n.classList.toggle("cap-on", !!capsCache[n.dataset.capability]));
+      return r;
+    });
+    (apStock.present && !apStock.shown && !apStock.caps && apStock.path === "/overview")
+      ? ok("access profiles: hidden in the stock build, entry kept in the markup")
+      : bad("access profiles: hidden in the stock build, entry kept in the markup", JSON.stringify(apStock));
     const apNav = await page.evaluate(() => {
       const a = document.querySelector('.nav-item[data-route="access-profiles"]');
       if (!a) return { present: false };
@@ -6968,7 +6984,9 @@ try {
         const byTheme = {};
         for (const theme of ["light", "dark"]) {
           await tab.evaluate((t) => window.dbtrailTheme.set(t), theme);
-          await tab.evaluate((r) => navigate(r), route);
+          // The stock build hides Access profiles; the sweep judges the page
+          // a build that shows it would paint.
+          await tab.evaluate((r) => { if (r === "access-profiles") capsCache.access_profiles = true; navigate(r); }, route);
           await tab.waitForTimeout(1500);
           // Folded sections carry text too; rows open their before/after.
           await tab.evaluate(() => { for (const d of document.querySelectorAll("#view details")) d.open = true; for (const r of Array.from(document.querySelectorAll(".ev-row")).slice(0, 3)) if (!r.classList.contains("open")) r.click(); });

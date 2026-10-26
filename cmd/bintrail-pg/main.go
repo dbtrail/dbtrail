@@ -91,6 +91,8 @@ func init() {
 }
 
 func main() {
+	// Access profiles stay out of help unless the build shows them.
+	cli.HideAccessProfileHelp(rootCmd)
 	err := tel.Execute(rootCmd)
 	if err == nil {
 		return

@@ -82,6 +82,10 @@ node --test "$HERE/hero_fail.test.mjs"
 echo "==> forwarding account grants (route_grants.test.mjs)"
 node --test "$HERE/route_grants.test.mjs"
 
+# Access profiles hidden unless the build shows it: no daemon either.
+echo "==> access profiles hidden in the stock build (access_profiles_hidden.test.mjs)"
+node --test "$HERE/access_profiles_hidden.test.mjs"
+
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
 if [ -z "$CONSOLE_BIN" ]; then

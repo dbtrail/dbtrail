@@ -1194,61 +1194,6 @@ and lands on Retention.
   JSON one event would carry, the same bytes `bintrail telemetry show` prints;
   opening it sends nothing. See [TELEMETRY.md](./TELEMETRY.md).
 
-### The Access profiles page
-
-**Settings > Access profiles** authors the flags, profiles and rules that
-`--profile` enforces, from the browser. It is the web interface's counterpart to the
-CLI verbs (`bintrail flag`, `bintrail profile`, `bintrail access`; see
-[server-identity.md](server-identity.md#rbac-flags)): the same code runs the
-validation and the writes, so a profile authored on the Access profiles page is the rows the CLI
-would write, refused for the same reasons with the same words. The page is
-available on `serve` and on `watch` alike (it is not a daemon feature) and
-edits the **selected server's index**, the command-line entry included.
-
-Three panels, top to bottom:
-
-- **Flags** label a table (`schema.table`, column left empty) or one of its
-  columns with a name such as `pii` or `billing`. A flag on a whole table hides
-  the table from a profile that denies the flag; a flag on one column blanks
-  that column and leaves the rest of the row. Adding a flag that exists with
-  the same spelling changes nothing; a spelling that differs only by case or
-  accents (in the flag, the schema, the table or the column) is refused,
-  naming the stored row.
-- **Profiles** are named groups of people (`marketing`, `support`). Adding a
-  name that exists updates its description; a name that differs from an
-  existing profile only by case or accents is refused (the index compares
-  names without regard to either). Removing a profile removes its rules with
-  it (the page says how many before asking).
-- **Rules** say whether a profile may see what a flag covers. Only `deny`
-  changes what a query returns; `allow` records intent. Adding a rule for a
-  profile and flag that already have one replaces its permission.
-
-This is the one write from the web interface that lands in an index database (everything
-else it writes is the local registry file and the daemon's live
-settings), so it runs under rules the tests pin:
-
-- reading the page needs `settings:read`; every change needs
-  `settings:write`, the permission that already governs web interface
-  administration, so a read-only auditor role sees the configuration and
-  none of the buttons;
-- while an access-control profile is active the whole page is refused,
-  reading included: a daemon started under `--profile` (a profile with no
-  rules yet included) does not edit the rows that profile is built from, and a session that itself carries a data
-  profile could lift its own redaction (the flagged tables and columns are
-  exactly what its profile withholds), whatever its permissions;
-- names are trimmed, and a value longer than its column (64 characters for
-  a schema, table or column name, 255 for a flag or profile name) is refused
-  with the limit in the message, on the page and on the command line alike;
-- every change is recorded on the audit seam as `console/flag.add`,
-  `flag.remove`, `profile.add`, `profile.remove`, `access.add` or
-  `access.remove`, with the flag, profile or rule it named and the server it
-  targeted;
-- a change takes effect on a profiled session's next request: the daemon
-  drops that server's cached profile rules when it writes.
-
-An index created before the RBAC tables existed answers `422` here: the
-web interface cannot create tables on an index.
-
 ### SQL in the browser
 
 The Overview's **Ask it here** card opens an editor on the page. You write a

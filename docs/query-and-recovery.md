@@ -15,10 +15,7 @@ the first `--limit` events in that order. The same filter set powers
 Filters: `--schema`, `--table`, `--pk`, `--pk-min` / `--pk-max` (an inclusive
 key range, see below), `--event-type`, `--gtid`,
 `--since` / `--until`, `--changed-column` (events that touched a given column),
-`--column-eq` (events where a column has a given value — see below), and
-`--flag` (tables/columns labeled via [RBAC flags](server-identity.md),
-authored with `bintrail flag` or from the web interface's Settings > Access
-profiles page). A
+and `--column-eq` (events where a column has a given value — see below). A
 `--pk` lookup is fast and collision-safe — it matches a hash of the PK values
 plus the exact values, and it requires `--schema` and `--table` alongside it.
 That is not a formality: those two columns lead the index, so a lookup without

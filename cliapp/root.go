@@ -86,6 +86,8 @@ func Main(version, commitSHA, buildDate string) int {
 	telemetry.SetVersion(version)
 	cli.SetBuildVersion(version)
 
+	// Access profiles stay out of help unless the build shows them.
+	cli.HideAccessProfileHelp(rootCmd)
 	err := tel.Execute(rootCmd)
 	if err == nil {
 		return 0

@@ -53,7 +53,7 @@ down.
 | overview: scope honesty (×5) | `buildOverview` tiles each state their own scope, the all-time tile says it is an estimate, and `status.coverage` never reaches a tile (#679/#686) |
 | storage: Create-baseline gates (×5) | the button's double-gate (#686): live enabled arm, destination-missing arm, capability-off arm; the fixture snapshot listed |
 | telemetry: sample event (×3) | the Storage card's "Show a sample event" fold (#1447): closed by default, opens to a read-only `<pre>` carrying the daemon's `sample_event` string verbatim (never re-serialized in the frontend) |
-| access profiles (×6) | the Settings > Access profiles page (#1445): reachable from the sidebar on a fresh index, the real forms author a flag, a profile and a deny rule onto the index, a refusal shows the shared message, and the Remove buttons take everything back off |
+| access profiles (×7) | the Settings > Access profiles page (#1445): hidden in the stock build (the entry stays in the markup and a navigate lands on the Overview), then, with the capability on as an embedding build serves it, reachable from the sidebar on a fresh index, the real forms author a flag, a profile and a deny rule onto the index, a refusal shows the shared message, and the Remove buttons take everything back off |
 | save: one scene per control that writes (#1883) | a Save that answers 200 and stores nothing, or stores the wrong thing: each scene presses the real control, then reads the value back through the API (and in a fresh tab), including a refusal where one is cheap. The list and the scenes are in `save_controls.mjs` |
 | no uncaught JS errors | any thrown error over the whole drive |
 

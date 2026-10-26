@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 - **The sidebar no longer has a Rotation entry.** It only opened the dialog the Retention page's **Edit rotation…** opens; the rotation settings are there, beside what they keep, and the search box (⌘K) still offers "Configure rotation…".
-- **The console no longer shows the Access profiles page.** With one operator and nothing that assigns a profile to anyone, the page described a mechanism with no one to apply it to. Nothing stops working: profiles and rules already in an index are still enforced, the `flag`, `profile` and `access` commands and every `--profile` flag still work, and an embedding build can show the page again with `ext.SetAccessProfilesVisible(true)`.
+- **Access profiles are no longer shown in the open-source build.** With one operator and nothing that assigns a profile to anyone, they described a mechanism with no one to apply it to. The console's Access profiles page is gone from the sidebar, the search box (⌘K) and its address; `flag`, `profile` and `access` are gone from `bintrail --help`, and `--profile` and `--flag` from the help of `query`, `recover` and `serve`; the docs no longer describe them. Nothing stops working: profiles and rules already in an index are still enforced, the commands and flags still run when typed, the `/api/access-profiles` API is still served, and an embedding build can show all of it again with `ext.SetAccessProfilesVisible(true)`.
 
 
 ## [0.118.1] - 2026-10-26

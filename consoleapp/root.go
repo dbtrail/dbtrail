@@ -89,6 +89,8 @@ func Main(version, commitSHA, buildDate string) int {
 	// caller context, so the version is pushed in once here, the same road
 	// telemetry takes.
 	views.SetProducerVersion(version)
+	// Access profiles stay out of help unless the build shows them.
+	cli.HideAccessProfileHelp(rootCmd)
 	if err := tel.Execute(rootCmd); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		// A watch that failed on its configuration before its web interface
