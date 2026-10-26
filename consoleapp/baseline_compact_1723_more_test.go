@@ -43,7 +43,11 @@ func TestCompactJob_refusesACorruptInputPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	sup.maybeCompact(req)
-	st := waitCompact(t, sup, "s")
+	// Not waitCompact: the first run's "succeeded" can still be the status
+	// when this second run has been asked for and has not marked itself
+	// running yet, which read as this run succeeding (seen on CI). Wait for
+	// the outcome this run must have; one that never fails times out.
+	st := waitCompactState(t, sup, "s", "failed")
 	if st.State != "failed" || !strings.Contains(st.LastError, "pair 3") || !strings.Contains(st.LastError, baselineintegrity.ErrIntegrity.Error()) {
 		t.Fatalf("status = %+v, want the run failed on pair 3's integrity", st)
 	}

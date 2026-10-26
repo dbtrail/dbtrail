@@ -142,6 +142,24 @@ func waitCompact(t *testing.T, sup *baselineSupervisor, id string) console.Basel
 	}
 }
 
+// waitCompactState waits for server id's compaction to reach state, failing
+// after a while with the last status seen. For a second run in one test,
+// whose start may not have replaced the first's finished status yet.
+func waitCompactState(t *testing.T, sup *baselineSupervisor, id, state string) console.BaselineStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st := sup.compactStatusFor(id)
+		if st.State == state {
+			return st
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("compaction never reached %q: %+v", state, st)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestMaybeCompact_mergesTheChainPrefixAfterALongChain(t *testing.T) {
 	sup, req, cs, stage := compactRig(t, compactMinPairs)
 	sup.maybeCompact(req)
