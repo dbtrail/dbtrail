@@ -18,7 +18,15 @@ func mainHelp(t *testing.T, args ...string) string {
 	var out bytes.Buffer
 	rootCmd.SetOut(&out)
 	rootCmd.SetArgs(args)
-	t.Cleanup(func() { rootCmd.SetOut(nil); rootCmd.SetArgs(nil) })
+	t.Cleanup(func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetArgs(nil)
+		// --help stays set on the command it ran, so a later Execute of that
+		// command in this package would print help instead of running.
+		if c, _, err := rootCmd.Find(args); err == nil {
+			_ = c.Flags().Set("help", "false")
+		}
+	})
 	if code := Main("test", "none", "unknown"); code != 0 {
 		t.Fatalf("Main(%v) = %d, output:\n%s", args, code, out.String())
 	}

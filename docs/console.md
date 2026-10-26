@@ -1502,7 +1502,7 @@ deleting: the rules do not change what DBTrail stores, so:
 - the rest of this web interface (the change history, recovery, reconstruct,
   flashback, schema changes) and the AI connector's other tools (`query`,
   `recover`, `recover_cascade`, `reconstruct`, `list_schema_changes`) are
-  governed by the access profiles, not by these rules: they return full rows
+  not governed by these rules: they return full rows
   and column names;
 - `bintrail views` and `bintrail export iceberg` do not read the rules;
 - with Engine Routing on, statements the port sends to the source MySQL run
@@ -2322,9 +2322,6 @@ Three gates protect it, all enforced at the endpoint (not just by hiding the tab
 
 - **Baseline required** — without `--baseline-dir`/`--baseline-s3`, `GET
   /api/reconstruct` returns 404 and the tab is hidden.
-- **No active RBAC profile** — the baseline row is read directly (it does not
-  pass through the query engine's column redaction), so a `--profile` disables
-  reconstruct, mirroring the way a profile forces `--no-archive`.
 - **Archives enabled** — `--no-archive` disables reconstruct. The gap check that
   makes reconstruct fail loud can only verify coverage of rotated-out hours if
   their archives are actually fetched; with archives off, an archived-but-rotated

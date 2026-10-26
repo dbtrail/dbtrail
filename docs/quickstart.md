@@ -148,4 +148,4 @@ DBTrail never applies it for you. Check progress any time with
 | Plan disk space for the index MySQL | [Capacity Planning](./capacity.md) |
 | Use AI (Claude) to investigate changes | [MCP Server](./mcp-server.md) |
 | Set up cron, systemd, Docker | [Guide](./guide.md) |
-| Understand server identity and access flags | [Server Identity](./server-identity.md) |
+| Understand server identity | [Server Identity](./server-identity.md) |

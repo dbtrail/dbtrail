@@ -179,9 +179,8 @@ bintrail query --index-dsn "..." --query-hash 3f2a...e91 --format json
 
 `--query-hash` is a **read** filter and exists only on `query` — not on `recover`. The digest names a statement *shape*, not one execution: `WHERE id=1` and `WHERE id=999` share it, so the filter returns every execution of that statement inside the window. That is the right answer for "what does this query pattern touch?" and the wrong basis for a reversal, which would undo executions you never named. Reverse a specific blast radius with the PK/time filters `recover` already has.
 
-Three more things it will not do:
+Two more things it will not do:
 
-- It is refused, not silently ignored, when `--profile` is set. Under a profile the digest is blanked on every returned row, so filtering on it would confirm the statement the redaction hides — one guessed digest at a time.
 - Archives written before statement capture existed have no digest column and contribute no rows. That is reported per source (`predate statement capture`, with a file count when only *part* of a source is affected), rather than failing the query — but the report is a log line, not an error, so an answer over a half-upgraded archive is narrower than it looks.
 - **Statements over 16 KiB are unreachable by digest.** They are stored truncated and truncated statements are never digested (see the note below), so `query_hash` stays `NULL` on every row a giant bulk `UPDATE`/`DELETE` produced — which is often exactly the statement worth chasing after an incident. You can still see its `query_text`; you cannot filter by it.
 
@@ -202,7 +201,6 @@ SET GLOBAL binlog_annotate_row_events = ON;
 Notes:
 
 - Statements longer than 16 KiB are stored truncated, ending in `/* bintrail:truncated */`. Truncated statements are not digested (`query_hash` stays `NULL`) — a mid-token fragment would misrepresent the statement's shape.
-- Under an active `--profile`, `query_text` and `query_hash` are withheld on **every** row, not just rows of flagged tables — a single statement can touch several tables, so its text can embed values of a column your profile redacts even when the row itself belongs to another table.
 - The web interface never shows these fields (same boundary as `connection_id`).
 
 ### Commit time: `commit_ts_us`
@@ -626,7 +624,7 @@ of a single `--pk`, and cap how many events are undone per key with
 pass `--pk-min` / `--pk-max` instead (see
 [Primary key ranges](#primary-key-ranges---pk-min----pk-max); the same shape
 check and scan cost apply). These compose with the shared event filters
-(`--schema`/`--table`/`--event-type`/`--since`/`--until`/`--column-eq`/`--gtid`/`--flag`).
+(`--schema`/`--table`/`--event-type`/`--since`/`--until`/`--column-eq`/`--gtid`).
 For binary primary keys, each entry must use the stored `0x` uppercase-hex
 spelling — see [the `0x` hex spelling](#binary-primary-keys-the-0x-hex-spelling).
 
