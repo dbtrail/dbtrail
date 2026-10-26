@@ -1692,6 +1692,22 @@ func localKeepPruneTargets(entries []console.ServerEntry, globalDir string) []ba
 // must not strand the others. pruneFn is injected (baseline.PruneLocal in
 // production) so the per-target iteration is unit-testable without S3.
 func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, retain time.Duration, pruneFn func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error)) {
+	// A folder two targets share with different destinations (#2563): see
+	// resendLacking.
+	dests := map[string]map[string]bool{}
+	for _, t := range targets {
+		if t.s3 == "" {
+			continue
+		}
+		if dests[t.dir] == nil {
+			dests[t.dir] = map[string]bool{}
+		}
+		dests[t.dir][strings.TrimSuffix(t.s3, "/")] = true
+	}
+	sharedDir := map[string]bool{}
+	for d, set := range dests {
+		sharedDir[d] = len(set) > 1
+	}
 	for _, t := range targets {
 		res, err := pruneFn(ctx, baseline.PruneOptions{
 			LocalDir:   t.dir,
@@ -1723,7 +1739,7 @@ func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, r
 			slog.Warn("baseline prune: could not check whether some snapshots are at the snapshot destination, so they "+
 				"were kept", "dir", t.dir, "unchecked", res.ProbeErrors)
 		}
-		resendLacking(ctx, t, res.NotAtDestination)
+		resendLacking(ctx, t, res, sharedDir[t.dir])
 	}
 }
 
@@ -1731,28 +1747,69 @@ func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, r
 // it does not have: an upload that did not finish (a scheduled update's, or a
 // full read's). Set where the baseline supervisor is built
 // (baselineSupervisor.resendLacking); nil leaves them for the next full read,
-// as before. Before this, a server whose full reads are off kept such a
-// snapshot on its disk for good, behind a warning that only said "the log
-// says why".
+// as before, and the page then says to send or remove them by hand. Before
+// this, a server whose full reads are off kept such a snapshot on its disk
+// for good, behind a warning that only said "the log says why".
 var resendSnapshotFn func(ctx context.Context, dir, s3URL, name string) error
 
+// resendPerCycle bounds the resends of one folder in one cleanup: they run
+// one after another inside the cycle, and a folder with many (a server whose
+// destination changed) must not hold every other folder's cleanup for hours.
+// The rest go in the next cycles.
+const resendPerCycle = 3
+
 // resendLacking sends again, one at a time, the snapshots a prune of t found
-// complete here and missing at the destination. A failure is logged and the
-// next one goes on: the snapshot stays on disk, the next cycle tries again.
-func resendLacking(ctx context.Context, t baselinePruneTarget, names []string) {
-	if resendSnapshotFn == nil || t.s3 == "" {
+// complete here and missing at the destination, then rewrites the folder's
+// record so the page says what is still missing, and whether it is being
+// sent. Skipped:
+//   - a snapshot without its local _SUCCESS (an older build's, which the
+//     uploader refuses): it can never be sent, so it is not retried;
+//   - a folder that is also another target's with a different destination
+//     (shared): which destination its snapshots belong to cannot be told,
+//     and sending them to the other would put one server's data under
+//     another's root.
+//
+// A failure is logged and the next one goes on: the snapshot stays on disk,
+// the next cycle tries again.
+func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.PruneResult, shared bool) {
+	if t.s3 == "" || len(res.NotAtDestination) == 0 {
 		return
 	}
-	for _, name := range names {
-		if ctx.Err() != nil {
-			return
+	if resendSnapshotFn == nil {
+		return
+	}
+	if shared {
+		slog.Warn("snapshot cleanup: this folder is used with more than one S3 destination, so the snapshots one of them lacks are not sent to it; give each server its own folder",
+			"dir", t.dir, "destination", t.s3, "missing", len(res.NotAtDestination))
+		return
+	}
+	sent, tried := map[string]bool{}, 0
+	for _, name := range res.NotAtDestination {
+		if ctx.Err() != nil || tried >= resendPerCycle {
+			break
 		}
+		if _, err := os.Stat(filepath.Join(t.dir, name, baseline.SuccessMarker)); err != nil {
+			continue
+		}
+		tried++
 		if err := resendSnapshotFn(ctx, t.dir, t.s3, name); err != nil {
 			slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the next cleanup tries again",
 				"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
 			continue
 		}
+		sent[name] = true
 		slog.Info("snapshot cleanup: sent again a local snapshot the destination lacked", "dir", t.dir, "snapshot", name, "destination", t.s3)
+	}
+	var left []string
+	for _, name := range res.NotAtDestination {
+		if !sent[name] {
+			left = append(left, name)
+		}
+	}
+	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent), Names: left, Resending: true}
+	if err := baseline.RewriteNotInDestination(t.dir, rec); err != nil {
+		slog.Warn("snapshot cleanup: the record of snapshots not at the destination could not be updated; the page may say an old count until the next cleanup",
+			"dir", t.dir, "error", err)
 	}
 }
 

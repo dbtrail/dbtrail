@@ -8866,8 +8866,9 @@ function notInS3Words(n, rec) {
   const what = n === 1 && names.length === 1 ? "the copy of " + at(names[0])
     : n + " older " + (n === 1 ? "copy" : "copies") + (names.length ? " (" + names.map(at).join(", ") + (n > names.length ? " and " + (n - names.length) + " more" : "") + ")"
       : " (checked " + utcLabel(rec && rec.at) + ")");
-  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + (n === 1 ? "it" : "them") +
-    " complete; DBTrail sends " + (n === 1 ? "it" : "them") + " again at the next cleanup.";
+  const it = n === 1 ? "it" : "them";
+  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete; " +
+    (rec && rec.resending === true ? "DBTrail sends " + it + " again at the next cleanup." : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
 }
 
 function localCopyWords(s3, keep, loop, reuse, was, reach) {

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
-- **A snapshot whose upload to S3 did not finish is sent again (#2563).** A complete local snapshot that the S3 destination does not have complete (an update's or a full read's upload that was cut short) used to wait for the next full read to be sent again; with full reads off it stayed on the machine for good. Each cleanup now sends such snapshots again, one at a time, and deletes them locally once S3 has them. The Snapshots settings card names them ("Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC ... DBTrail sends it again at the next cleanup") instead of "The log says why".
+- **A snapshot whose upload to S3 did not finish is sent again (#2563).** A complete local snapshot that the S3 destination does not have complete (an update's or a full read's upload that was cut short) used to wait for the next full read to be sent again; with full reads off it stayed on the machine for good. Each cleanup now sends such snapshots again, up to three per folder at a time, and deletes them locally once S3 has them; an older build's snapshot with no `_SUCCESS` marker is not tried, and a folder used with two different destinations sends nothing (with a warning). The Snapshots settings card names them ("Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC ... DBTrail sends it again at the next cleanup", or, where nothing here resends, to send or remove them by hand) instead of "The log says why", and is updated right after the resends.
 
 
 ## [0.118.0] - 2026-10-25

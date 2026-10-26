@@ -136,8 +136,8 @@ snap("age90m", row({ delete_after_minutes: 90 }));
 snap("noLoop", row({ prune_loop: false, delete_after_minutes: 60 }));
 snap("notIn3", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-01T10:00:00Z", count: 3 } }));
 snap("notIn1", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-01T10:00:00Z", count: 1 } }));
-snap("notIn1Named", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-26T11:32:30Z", count: 1, names: ["2026-10-19T03-15-06Z"] } }));
-snap("notIn7Named", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-26T11:32:30Z", count: 7, names: ["2026-10-19T03-15-06Z", "2026-10-20T00-00-00Z"] } }));
+snap("notIn1Named", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-26T11:32:30Z", count: 1, names: ["2026-10-19T03-15-06Z"], resending: true } }));
+snap("notIn7Named", row({ delete_after_minutes: 60, not_in_s3: { at: "2026-10-26T11:32:30Z", count: 7, names: ["2026-10-19T03-15-06Z", "2026-10-20T00-00-00Z"], resending: true } }));
 snap("notInErr", row({ delete_after_minutes: 60, not_in_s3_error: "the record cannot be read" }));
 snap("localOnly", row({ baseline_s3: "", keep_newest: 3, delete_after_minutes: 0, not_in_s3: { at: "x", count: 9 } }));
 snap("ageEmptyStale", row({ not_in_s3: { at: "2026-09-01T10:00:00Z", count: 4 } }));
@@ -177,8 +177,8 @@ console.log(JSON.stringify(out));
 		"age90m":   {"On this machine", "Deleted here when older than 90 minutes, once S3 has it.", "", ""},
 		"ageEmpty": {"On this machine", "Kept here: Delete by age is empty.", "", "Deleted here"},
 		"noLoop":   {"On this machine", "Kept here: this DBTrail removes nothing.", "", "Deleted here"},
-		"notIn3":   {"On this machine", "Deleted here when older than 1 hour", "Not in S3 yet, so kept here: 3 older copies (checked 2026-10-01 10:00:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.", ""},
-		"notIn1":   {"On this machine", "", "Not in S3 yet, so kept here: 1 older copy (checked 2026-10-01 10:00:00 UTC). S3 does not have it complete; DBTrail sends it again at the next cleanup.", ""},
+		"notIn3":   {"On this machine", "Deleted here when older than 1 hour", "Not in S3 yet, so kept here: 3 older copies (checked 2026-10-01 10:00:00 UTC). S3 does not have them complete; send them to S3 again, or remove them by hand if not needed.", ""},
+		"notIn1":   {"On this machine", "", "Not in S3 yet, so kept here: 1 older copy (checked 2026-10-01 10:00:00 UTC). S3 does not have it complete; send it to S3 again, or remove it by hand if not needed.", ""},
 		"notIn1Named": {"On this machine", "", "Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC. S3 does not have it complete; DBTrail sends it again at the next cleanup.", ""},
 		"notIn7Named": {"On this machine", "", "Not in S3 yet, so kept here: 7 older copies (2026-10-19 03:15:06 UTC, 2026-10-20 00:00:00 UTC and 5 more). S3 does not have them complete; DBTrail sends them again at the next cleanup.", ""},
 		// A count no prune refreshes is not shown: age empty, or this daemon

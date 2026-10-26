@@ -5,14 +5,36 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
 
+// snapDir makes a local snapshot folder under root, with _SUCCESS when done.
+func snapDir(t *testing.T, root, name string, done bool) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		if err := os.WriteFile(filepath.Join(root, name, baseline.SuccessMarker), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // After each cleanup, the snapshots the destination answered it does not
-// have are sent again, one at a time; a failure does not stop the rest.
+// have are sent again, one at a time, at most resendPerCycle per folder; a
+// failure does not stop the rest; one without its local _SUCCESS (an older
+// build's) is never tried; a target with no destination sends nothing; and
+// the folder's record is rewritten to what is still missing.
 func TestPruneCycleResendsWhatTheDestinationLacks(t *testing.T) {
+	d1, d2 := t.TempDir(), t.TempDir()
+	for _, n := range []string{"a", "b", "c", "d"} {
+		snapDir(t, d1, n, true)
+	}
+	snapDir(t, d1, "legacy", false)
 	type call struct{ dir, s3, name string }
 	var calls []call
 	prev := resendSnapshotFn
@@ -27,14 +49,44 @@ func TestPruneCycleResendsWhatTheDestinationLacks(t *testing.T) {
 	// Even a result that names snapshots for a target with no destination
 	// sends nothing there: there is nowhere to send them.
 	prune := func(_ context.Context, o baseline.PruneOptions) (baseline.PruneResult, error) {
-		return baseline.PruneResult{KeptNotDurable: 2, NotAtDestination: []string{"a", "b"}}, nil
+		return baseline.PruneResult{KeptNotDurable: 5, NotAtDestination: []string{"legacy", "a", "b", "c", "d"}}, nil
 	}
 	runBaselinePruneCycle(context.Background(), []baselinePruneTarget{
-		{dir: "/d1", s3: "s3://bkt/p1/"},
-		{dir: "/d2", keepNewest: 3},
+		{dir: d1, s3: "s3://bkt/p1/"},
+		{dir: d2, keepNewest: 3},
 	}, 4*60*60*1e9, prune)
-	if len(calls) != 2 || calls[0] != (call{"/d1", "s3://bkt/p1/", "a"}) || calls[1] != (call{"/d1", "s3://bkt/p1/", "b"}) {
-		t.Fatalf("resend calls %+v, want a then b for /d1 only", calls)
+	want := []call{{d1, "s3://bkt/p1/", "a"}, {d1, "s3://bkt/p1/", "b"}, {d1, "s3://bkt/p1/", "c"}}
+	if len(calls) != len(want) {
+		t.Fatalf("resend calls %+v, want %+v (legacy skipped, at most %d)", calls, want, resendPerCycle)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("resend calls %+v, want %+v", calls, want)
+		}
+	}
+	rec, ok, err := baseline.ReadNotInDestination(d1)
+	if err != nil || !ok || rec.Count != 3 || !rec.Resending || strings.Join(rec.Names, ",") != "legacy,a,d" {
+		t.Fatalf("record after the resends: %+v ok=%v err=%v; want 3 left (legacy, a, d), resending", rec, ok, err)
+	}
+}
+
+// A folder two targets share with different destinations sends nothing:
+// which one its snapshots belong to cannot be told.
+func TestPruneCycleDoesNotResendFromASharedFolder(t *testing.T) {
+	d := t.TempDir()
+	snapDir(t, d, "a", true)
+	var calls int
+	prev := resendSnapshotFn
+	t.Cleanup(func() { resendSnapshotFn = prev })
+	resendSnapshotFn = func(context.Context, string, string, string) error { calls++; return nil }
+	prune := func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error) {
+		return baseline.PruneResult{KeptNotDurable: 1, NotAtDestination: []string{"a"}}, nil
+	}
+	runBaselinePruneCycle(context.Background(), []baselinePruneTarget{
+		{dir: d, s3: "s3://bkt/global/"}, {dir: d, s3: "s3://bkt/srvA"},
+	}, 4*60*60*1e9, prune)
+	if calls != 0 {
+		t.Fatalf("%d resends from a folder with two destinations", calls)
 	}
 }
 
