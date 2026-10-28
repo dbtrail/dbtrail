@@ -22,6 +22,17 @@ func TestVetoOpts_like(t *testing.T) {
 		{"SELECT count(*) FROM t WHERE name LIKE 'a' AND b REGEXP 'x'", true, true},
 		// Another veto still applies with the switch on.
 		{"SELECT GROUP_CONCAT(name) FROM t WHERE name LIKE 'a%'", true, true},
+		// The pattern must be written in the statement or be a placeholder:
+		// one that comes from a column or an expression can hold a
+		// backslash, an escape on MySQL and a character on the copy.
+		{"SELECT count(*) FROM t WHERE name LIKE other_col", true, true},
+		{"SELECT count(*) FROM t WHERE name LIKE CONCAT('%', c, '%')", true, true},
+		{"SELECT count(*) FROM t WHERE name LIKE (SELECT p FROM q)", true, true},
+		{"SELECT count(*) FROM t WHERE name LIKE ?", true, false},
+		{"SELECT count(*) FROM t WHERE name LIKE 'a%' AND b LIKE c", true, true},
+		{"SELECT count(*) FROM t WHERE name LIKE _utf8mb4'a%'", true, true},
+		// SOUNDS LIKE is not LIKE, and the copy has no SOUNDS.
+		{"SELECT count(*) FROM t WHERE name SOUNDS LIKE 'a'", true, true},
 		// Not the keyword: nothing to veto either way.
 		{"SELECT count(*) FROM t WHERE note = 'LIKE'", false, false},
 		{"SELECT likes FROM t", false, false},

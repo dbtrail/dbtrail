@@ -2,6 +2,7 @@ package console
 
 import (
 	"encoding/json"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"log/slog"
 	"net/http"
 )
@@ -22,6 +23,10 @@ type sqlModeDTO struct {
 	Fresh           bool `json:"fresh"`
 	LikeIgnoresCase bool `json:"like_ignores_case"`
 }
+
+// likeSwitchChanged is why the port's open connections of a server are
+// closed when its LIKE switch changes.
+const likeSwitchChanged = "the LIKE switch changed; connections read it when they open"
 
 const sqlModeBootRefusal = "the command-line server has no switch of its own; " +
 	"add the server from the web interface (+ Add server) to choose its mode"
@@ -58,13 +63,13 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 			`or "like_ignores_case": true or false`)
 		return
 	}
-	e, _ := s.cm.reg.Get(id)
-	var err error
+	old, _ := s.cm.reg.Get(id)
+	e, err := s.cm.reg.SetSQLMode(id, body.Fresh, body.LikeIgnoresCase)
+	if err != nil {
+		writeJSONError(w, registryErrStatus(err), err.Error())
+		return
+	}
 	if body.Fresh != nil {
-		if e, err = s.cm.reg.SetSQLFresh(id, *body.Fresh); err != nil {
-			writeJSONError(w, registryErrStatus(err), err.Error())
-			return
-		}
 		mode := "fast"
 		if e.SQLFresh {
 			mode = "fresh"
@@ -72,11 +77,13 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 		slog.Info("console: SQL mode saved", "actor", consoleActor(r), "server", e.Name, "id", id, "mode", mode)
 	}
 	if body.LikeIgnoresCase != nil {
-		if e, err = s.cm.reg.SetSQLLikeIgnoresCase(id, *body.LikeIgnoresCase); err != nil {
-			writeJSONError(w, registryErrStatus(err), err.Error())
-			return
-		}
 		slog.Info("console: SQL LIKE switch saved", "actor", consoleActor(r), "server", e.Name, "id", id, "like_ignores_case", e.SQLLikeIgnoresCase)
+	}
+	if e.SQLLikeIgnoresCase != old.SQLLikeIgnoresCase {
+		// A connection keeps the switch it read when it opened: close the
+		// open ones so the change is in force at once, turning it off above
+		// all, which is how a wrong answer is stopped.
+		s.dropRoutedConns(id, likeSwitchChanged, "", config.SSL{})
 	}
 	// This process serves no port of its own in the usual setup (the router
 	// does, and reads the registry again within seconds), but one that does

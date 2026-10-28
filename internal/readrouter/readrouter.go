@@ -253,6 +253,24 @@ var regexpOnly = regexp.MustCompile(`(?i)\b(regexp|rlike)\b`)
 
 var likeWord = regexp.MustCompile(`(?i)(^|[^.\w"\x60])like\b`)
 
+// likeThenPattern is a LIKE and what follows it; likeWritten is a pattern
+// written in the statement ('' once blanked) or a placeholder.
+var (
+	likeThenPattern = regexp.MustCompile(`(?i)(^|[^.\w"\x60])(sounds\s+)?like\b\s*`)
+	likeWritten     = regexp.MustCompile(`^(''|\?)`)
+)
+
+// likePatternsWritten reports whether every LIKE in blanked is followed by a
+// string literal or a placeholder, and none is SOUNDS LIKE.
+func likePatternsWritten(blanked string) bool {
+	for _, m := range likeThenPattern.FindAllStringSubmatchIndex(blanked, -1) {
+		if m[4] >= 0 || !likeWritten.MatchString(blanked[m[1]:]) {
+			return false
+		}
+	}
+	return true
+}
+
 // HasLike reports whether the statement uses LIKE outside its string
 // literals, comments and quoted names.
 func HasLike(stmt string) bool {
@@ -260,8 +278,11 @@ func HasLike(stmt string) bool {
 }
 
 // VetoOpts is Veto under a server's CopyOptions: with LikeIgnoresCase, LIKE
-// no longer keeps a statement on MySQL (the copy is sent ILIKE, ForCopyOpts);
-// REGEXP and RLIKE still do.
+// no longer keeps a statement on MySQL (the copy is sent ILIKE, ForCopyOpts)
+// when every LIKE in it is followed by a string literal or a placeholder.
+// A pattern read from a column or an expression can hold a backslash, an
+// escape on MySQL and a character on the copy, so it stays on MySQL; so does
+// SOUNDS LIKE, which the copy does not have, and REGEXP and RLIKE.
 func VetoOpts(stmt string, o CopyOptions) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
@@ -273,6 +294,9 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	for _, v := range vetoes {
 		re := v.re
 		if v.name == likeVeto && o.LikeIgnoresCase {
+			if !likePatternsWritten(sc.blankedCopy) {
+				return v.name
+			}
 			re = regexpOnly
 		}
 		if re.MatchString(sc.blankedCopy) {

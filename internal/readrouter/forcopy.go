@@ -26,16 +26,11 @@ const (
 // statement's text comes from this one reading, so the rewrite for the copy
 // and the veto list cannot disagree about what is a literal.
 type scanned struct {
-	// forCopy is the statement with each backtick-quoted name written in
-	// double quotes, each STRAIGHT_JOIN written as the join it means, and
-	// every other byte kept: copyText with no options. Only meaningful when refusal
-	// is empty.
-	forCopy string
 	// blanked is the statement with comments removed and string literals
 	// replaced by ''; names keep the client's backticks, and a name written
 	// against a word is set apart from it by a space.
 	blanked string
-	// blankedCopy is blanked with the names in double quotes: forCopy as the
+	// blankedCopy is blanked with the names in double quotes: the copy's text as the
 	// veto list reads it.
 	blankedCopy string
 	// doubleQuoted: a double-quoted string occurred outside comments.
@@ -355,7 +350,6 @@ func scan(stmt string) scanned {
 	}
 	sc.blanked = bl.String()
 	sc.raw = cp.String()
-	sc.forCopy = sc.copyText(CopyOptions{})
 	// Comments and string literals are gone from blanked, so every backtick
 	// left in it quotes a name.
 	sc.blankedCopy = strings.ReplaceAll(sc.blanked, "`", `"`)

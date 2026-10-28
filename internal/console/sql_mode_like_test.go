@@ -67,3 +67,48 @@ func TestSQLModeAPI_likeIgnoresCase(t *testing.T) {
 		}
 	}
 }
+
+// Changing the LIKE switch closes the server's open connections on the port,
+// whichever process changed it: one opened before keeps the switch it read,
+// and turning it off is how an operator stops a wrong answer.
+func TestSQLModeAPI_likeSwitchClosesOpenConnections(t *testing.T) {
+	t.Setenv("BINTRAIL_SQL_TAILS", "")
+	srv := newRegistryServer(t)
+	id := createHiddenTestServer(t, srv)
+	path := "/api/servers/" + id + "/sql-mode"
+	dropped := 0
+	track := func() {
+		t.Helper()
+		if _, ok := srv.TrackRoutedConn(id, srv.routed.generation(id), func() { dropped++ }, nil); !ok {
+			t.Fatal("track refused")
+		}
+	}
+	track()
+	if rec, out := doServersReq(t, srv, "PUT", path, `{"fresh":true}`); rec.Code != 200 || dropped != 0 {
+		t.Fatalf("fresh alone: %d %s, dropped %d, want none dropped", rec.Code, out, dropped)
+	}
+	if rec, out := doServersReq(t, srv, "PUT", path, `{"like_ignores_case":true}`); rec.Code != 200 || dropped != 1 {
+		t.Fatalf("switch on: %d %s, dropped %d, want 1", rec.Code, out, dropped)
+	}
+	track()
+	if rec, _ := doServersReq(t, srv, "PUT", path, `{"like_ignores_case":true}`); rec.Code != 200 || dropped != 1 {
+		t.Fatalf("saved again unchanged: dropped %d, want still 1", dropped)
+	}
+
+	// The same from another process's write, read by the follower.
+	c := RegistryChange{Old: mustEntry(t, srv, id), New: mustEntry(t, srv, id)}
+	c.New.SQLLikeIgnoresCase = !c.Old.SQLLikeIgnoresCase
+	srv.applyRegistryChange(c)
+	if dropped != 2 {
+		t.Fatalf("a change read from the file: dropped %d, want 2", dropped)
+	}
+}
+
+func mustEntry(t *testing.T, srv *Server, id string) ServerEntry {
+	t.Helper()
+	e, ok := srv.cm.reg.Get(id)
+	if !ok {
+		t.Fatalf("no entry %s", id)
+	}
+	return e
+}
