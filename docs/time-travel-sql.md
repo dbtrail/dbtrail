@@ -462,7 +462,7 @@ The decision, in order, for every statement:
    variables, locking reads, `information_schema`, full-text `MATCH`,
    JSON functions and the `->`/`->>` operators, a backslash inside a string
    literal, optimizer hints), and a backtick-quoted name the port will not
-   rewrite for the copy (see "One thing is translated" below): **MySQL**.
+   rewrite for the copy (see "Two things are translated" below): **MySQL**.
    So are three spellings the copy always refuses, so that it is not tried
    in vain: `LIMIT offset, count`, `ORDER BY NULL` and `_binary'x'` (same
    section below). This step comes before the next two, so a `LIMIT 0, 20`
@@ -889,13 +889,21 @@ What this is and is not:
   to people who may do on MySQL whatever the forwarding account is granted.
   To bound it, give that account only the grants the port should have and
   keep the port read-only, as it starts (both below).
-- **One thing is translated: backtick-quoted names.** DuckDB does not read
+- **Two things are translated: backtick-quoted names and `STRAIGHT_JOIN`.** DuckDB does not read
   MySQL's backtick-quoted names, and most ORMs and drivers quote every name
   that way. So a routed statement reaches the copy with each
   `` `name` `` written `"name"`, which is how the copy quotes a name:
   ``SELECT `orders`.`id` FROM `orders` `` is sent as
   `SELECT "orders"."id" FROM "orders"`. Every other byte is the client's.
-  A backtick inside a string literal or a comment is left alone. MySQL
+  A backtick inside a string literal or a comment is left alone.
+  `STRAIGHT_JOIN`, MySQL's join that reads the left table first, is written
+  as the join it means: `a STRAIGHT_JOIN b ON ...` (or `USING`) is sent as
+  `a JOIN b ON ...`, `a STRAIGHT_JOIN b` with no condition (MySQL filters in
+  `WHERE`) as `a CROSS JOIN b`, and the modifier in `SELECT STRAIGHT_JOIN`
+  is dropped, since it only orders MySQL's plan. The answer is the same; only
+  the order MySQL would read the tables in is lost. If the condition cannot
+  be read (a prepared statement whose placeholder sits inside the right side
+  of the join), the copy refuses the statement and MySQL answers it. MySQL
   always gets the statement as the client wrote it. Nothing else of MySQL's
   dialect is translated: a function, an operator or a clause the copy does
   not have is still refused by the copy and answered by MySQL. That costs

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Engine Routing sends statements with `STRAIGHT_JOIN` to the copy.** The copy did not read MySQL's `STRAIGHT_JOIN`, so a heavy read that used it was tried on the copy, refused, and run on MySQL. The router now writes it as the join it means: with `ON` or `USING` a `JOIN`, without a condition a `CROSS JOIN` (MySQL filters in `WHERE`), and `SELECT STRAIGHT_JOIN` loses the modifier, which only orders MySQL's plan. Where the condition cannot be read, the copy refuses the statement and MySQL answers, as before.
 
 ## [0.119.0] - 2026-10-26
 ### Changed

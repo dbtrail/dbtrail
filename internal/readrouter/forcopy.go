@@ -27,7 +27,8 @@ const (
 // and the veto list cannot disagree about what is a literal.
 type scanned struct {
 	// forCopy is the statement with each backtick-quoted name written in
-	// double quotes and every other byte kept. Only meaningful when refusal
+	// double quotes, each STRAIGHT_JOIN written as the join it means, and
+	// every other byte kept. Only meaningful when refusal
 	// is empty.
 	forCopy string
 	// blanked is the statement with comments removed and string literals
@@ -48,8 +49,9 @@ type scanned struct {
 
 // ForCopy returns the statement the copy is sent: every backtick-quoted name
 // outside string literals and comments becomes the same name in double
-// quotes, which is how the copy quotes a name. Nothing else is translated
-// and no other byte changes.
+// quotes, which is how the copy quotes a name, and every STRAIGHT_JOIN
+// keyword becomes the join it means (straightJoins). Nothing else is
+// translated and no other byte changes.
 //
 // refusal is non-empty when the statement must not be sent to the copy at
 // all, because the rewrite would be a guess or because the copy would read
@@ -123,10 +125,21 @@ func scan(stmt string) scanned {
 	// whether a string literal is the amount of an INTERVAL ('1' '5', two
 	// literals, is one amount on MySQL).
 	word, lastWord := -1, ""
+	// cpWord and blWord are where the word being read starts in the two
+	// texts being written; joins collects every STRAIGHT_JOIN read as a
+	// word, for straightJoins to rewrite once the statement is read.
+	cpWord, blWord := 0, 0
+	var joins []straightJoinAt
+	endWord := func(i int) {
+		if strings.EqualFold(stmt[word:i], "straight_join") {
+			joins = append(joins, straightJoinAt{cp: cpWord, bl: blWord})
+		}
+		lastWord, word = stmt[word:i], -1
+	}
 	for i := 0; i < n; {
 		c := stmt[i]
 		if word >= 0 && !wordByte(c) {
-			lastWord, word = stmt[word:i], -1
+			endWord(i)
 		}
 		switch {
 		case c == '/' && i+1 < n && stmt[i+1] == '*':
@@ -303,7 +316,7 @@ func scan(stmt string) scanned {
 			switch {
 			case wordByte(c):
 				if word < 0 {
-					word = i
+					word, cpWord, blWord = i, cp.Len(), bl.Len()
 				}
 			case c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v':
 				lastWord = ""
@@ -313,8 +326,11 @@ func scan(stmt string) scanned {
 			i++
 		}
 	}
-	sc.forCopy = cp.String()
+	if word >= 0 {
+		endWord(n)
+	}
 	sc.blanked = bl.String()
+	sc.forCopy = straightJoins(cp.String(), sc.blanked, joins)
 	// Comments and string literals are gone from blanked, so every backtick
 	// left in it quotes a name.
 	sc.blankedCopy = strings.ReplaceAll(sc.blanked, "`", `"`)
@@ -365,4 +381,110 @@ func notASCII(r rune) bool { return r >= 0x80 }
 // digit, an underscore, a dollar sign or a byte of a multi-byte character.
 func wordByte(c byte) bool {
 	return c == '_' || c == '$' || c >= 0x80 || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// straightJoinAt is where one STRAIGHT_JOIN keyword starts in the text sent
+// to the copy (cp) and in the blanked text (bl).
+type straightJoinAt struct{ cp, bl int }
+
+// straightJoins writes each STRAIGHT_JOIN the way the copy reads the same
+// query: MySQL's join that reads the left table first is an inner JOIN when
+// an ON or a USING follows its right side, and a CROSS JOIN when none does
+// (MySQL then filters in WHERE). As a SELECT modifier (SELECT STRAIGHT_JOIN,
+// SELECT DISTINCT STRAIGHT_JOIN) it only orders MySQL's plan and is dropped.
+//
+// Which of the two joins is read from the blanked text, where comments are
+// gone and string literals are ”, so an ON inside either is not seen. A
+// wrong pick cannot change the answer: the copy refuses a JOIN with no
+// condition and a CROSS JOIN with one as syntax errors, and MySQL answers.
+// That is the case of a prepared statement's piece that ends before its ON
+// (shim copyParts rewrites the text between placeholders one piece at a
+// time).
+func straightJoins(cp, bl string, at []straightJoinAt) string {
+	const kw = len("straight_join")
+	for k := len(at) - 1; k >= 0; k-- {
+		j := at[k]
+		if strings.HasSuffix(strings.TrimRight(bl[:j.bl], " \t\n\r\f\v"), ".") ||
+			strings.HasPrefix(strings.TrimLeft(bl[j.bl+kw:], " \t\n\r\f\v"), ".") {
+			// db.straight_join or t.straight_join: a name on MySQL, where
+			// any word after a dot is one, and on the copy. Rewritten it
+			// would name another table or column.
+			continue
+		}
+		repl := "CROSS JOIN"
+		switch {
+		case straightJoinModifier(bl[:j.bl]):
+			repl = ""
+		case straightJoinHasCondition(bl[j.bl+kw:]):
+			repl = "JOIN"
+		}
+		cp = cp[:j.cp] + repl + cp[j.cp+kw:]
+	}
+	return cp
+}
+
+// straightJoinModifier reports whether the word before the keyword makes it
+// a SELECT modifier: SELECT itself, or DISTINCT or ALL right after it. In
+// the join, the word before is the left side: a table, an alias or a ")".
+func straightJoinModifier(before string) bool {
+	before = strings.TrimRight(before, " \t\n\r\f\v")
+	i := len(before)
+	for i > 0 && wordByte(before[i-1]) {
+		i--
+	}
+	switch strings.ToLower(before[i:]) {
+	case "select", "distinct", "all":
+		return true
+	}
+	return false
+}
+
+// straightJoinEnds are the words that end a join's right side when they come
+// before any ON or USING: another join, or the next clause.
+var straightJoinEnds = map[string]bool{
+	"join": true, "straight_join": true, "cross": true, "inner": true, "left": true,
+	"right": true, "natural": true, "full": true, "where": true, "group": true,
+	"having": true, "order": true, "limit": true, "union": true, "except": true,
+	"intersect": true, "window": true, "qualify": true, "for": true, "lock": true,
+	"into": true,
+}
+
+// straightJoinHasCondition reports whether an ON or a USING follows the right
+// side of the join, read from after the keyword: at the same depth of
+// parentheses, before a word of straightJoinEnds, a comma, a semicolon or the
+// parenthesis that closes the group the join sits in.
+func straightJoinHasCondition(after string) bool {
+	depth := 0
+	for i := 0; i < len(after); {
+		c := after[i]
+		switch {
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case depth == 0 && (c == ',' || c == ';'):
+			return false
+		case wordByte(c):
+			j := i
+			for j < len(after) && wordByte(after[j]) {
+				j++
+			}
+			if depth == 0 {
+				w := strings.ToLower(after[i:j])
+				if w == "on" || w == "using" {
+					return true
+				}
+				if straightJoinEnds[w] {
+					return false
+				}
+			}
+			i = j
+			continue
+		}
+		i++
+	}
+	return false
 }

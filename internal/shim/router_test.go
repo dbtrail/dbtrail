@@ -327,9 +327,22 @@ func TestRouter_sendsTheCopyRewrittenNamesAndFollowsUSE(t *testing.T) {
 	if _, err := h.HandleQuery("SELECT `status`, count(*) FROM `orders` GROUP BY `status`"); err != nil {
 		t.Fatal(err)
 	}
-	// The one thing translated for the copy: backtick-quoted names (#2081).
+	// One of the two things translated for the copy: backtick-quoted names
+	// (#2081).
 	if want := `SELECT "status", count(*) FROM "orders" GROUP BY "status"`; f.gotStmt != want {
 		t.Errorf("copy got %q, want the client's text with its names in double quotes %q", f.gotStmt, want)
+	}
+	// The other: STRAIGHT_JOIN, written as the join it means. EXPLAIN on
+	// MySQL still reads the client's text.
+	const sj = "SELECT count(*) FROM `orders` STRAIGHT_JOIN `items` WHERE `orders`.`id` = `items`.`order_id`"
+	if _, err := h.HandleQuery(sj); err != nil {
+		t.Fatal(err)
+	}
+	if want := `SELECT count(*) FROM "orders" CROSS JOIN "items" WHERE "orders"."id" = "items"."order_id"`; f.gotStmt != want {
+		t.Errorf("copy got %q, want %q", f.gotStmt, want)
+	}
+	if r.explained[len(r.explained)-1] != sj {
+		t.Errorf("EXPLAIN did not get the client's text: %q", r.explained[len(r.explained)-1])
 	}
 	if f.gotSchema != "shop2" {
 		t.Errorf("copy schema = %q, want shop2", f.gotSchema)
