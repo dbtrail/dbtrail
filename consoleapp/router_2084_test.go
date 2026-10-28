@@ -839,3 +839,27 @@ func TestPortsNeverForwardWithTheCaptureAccount_2317(t *testing.T) {
 		t.Errorf("%d connection(s) were opened on the source of servers with no account of their own for the port", n)
 	}
 }
+
+// The server's LIKE switch travels from the connection's target to the
+// handler's routing, both ways.
+func TestRouterFlashbackConfig_likeSwitchReachesTheHandler(t *testing.T) {
+	cfg := routerFlashbackConfig(routerSettings{})
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, on := range []bool{false, true} {
+		tgt := console.FlashbackTarget{ID: "s1", SQL: &console.SQLOnCopy{}, ForwardDSN: "nobody:x@tcp(127.0.0.1:1)/none",
+			SourceSSL: console.ServerEntry{}.SourceSSL(), LikeIgnoresCase: on}
+		h := shim.NewHandler(nil, nil)
+		h.BindFreeSQL(routeTestFreeSQL{})
+		if fw := bindReadRouter(h, srv, tgt, "s1", cfg.withDefaults(), slog.Default()); fw == nil {
+			t.Fatal("no router was bound")
+		}
+		got, _ := h.RouterConfig()
+		h.Close()
+		if got.LikeIgnoresCase != on {
+			t.Errorf("target LikeIgnoresCase=%v reached the handler as %v", on, got.LikeIgnoresCase)
+		}
+	}
+}

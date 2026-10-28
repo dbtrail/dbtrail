@@ -259,7 +259,7 @@ func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, er
 	h.mu.Unlock()
 	st := &preparedStmt{up: up, query: query, db: db}
 	if len(parts)-1 == up.Params() {
-		st.parts, st.copyRefusal = copyParts(parts)
+		st.parts, st.copyRefusal = copyParts(parts, h.copyOpts())
 	}
 	// Otherwise the source counted other placeholders than this port did:
 	// the statement still runs there, and is never written out for the copy.
@@ -273,10 +273,10 @@ func (h *Handler) prepareRouted(query string, parts []string) (int, int, any, er
 // arguments are written in afterwards and are never rescanned, since they
 // are spelled the copy's way (a backslash is a character there) and this
 // scanner reads MySQL's. With a refusal the pieces come back as written.
-func copyParts(parts []string) (out []string, refusal string) {
+func copyParts(parts []string, o readrouter.CopyOptions) (out []string, refusal string) {
 	out = make([]string, len(parts))
 	for i, part := range parts {
-		text, why := readrouter.ForCopy(part)
+		text, why := readrouter.ForCopyOpts(part, o)
 		if why != "" {
 			return parts, why
 		}
@@ -337,9 +337,39 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 				// current one.
 				return "the database changed since the statement was prepared"
 			}
+			if h.routerCfg.LikeIgnoresCase && readrouter.HasLike(st.query) {
+				if why := likeUnsafeArgument(args); why != "" {
+					return why
+				}
+			}
 			return copyUnsafeArgument(args)
 		},
 	})
+}
+
+// likeUnsafeArgument names a string argument with a backslash, or "" when
+// there is none. In a LIKE pattern MySQL reads a backslash as the escape (a\_c
+// matches a_c alone) and the copy as a character, so a statement with LIKE
+// and such an argument stays on MySQL. A statement's own literals cannot
+// carry one to the copy: a backslash in a literal is a veto already.
+func likeUnsafeArgument(args []any) string {
+	for i, a := range args {
+		var b []byte
+		switch v := a.(type) {
+		case mysql.TypedBytes:
+			b = v.Bytes
+		case []byte:
+			b = v
+		case string:
+			b = []byte(v)
+		default:
+			continue
+		}
+		if bytes.IndexByte(b, '\\') >= 0 {
+			return fmt.Sprintf("argument %d holds a backslash, which escapes in a LIKE pattern on MySQL and is a character on the copy", i+1)
+		}
+	}
+	return ""
 }
 
 // plainInteger is a number MySQL and the copy both read as that integer.

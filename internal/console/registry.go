@@ -99,6 +99,13 @@ type ServerEntry struct {
 	// that serves the port applies it when it reads the registry again
 	// (Server.applySQLFresh); BINTRAIL_SQL_TAILS=on overrides it.
 	SQLFresh bool `yaml:"sql_fresh,omitempty"`
+	// SQLLikeIgnoresCase sends this server's statements with LIKE to the
+	// copy on the SQL port, written ILIKE there (readrouter.CopyOptions).
+	// Absent keeps them on MySQL, as before the switch: MySQL compares LIKE
+	// without case, the copy with it. Registry-owned like SQLFresh: only
+	// SetSQLMode writes it. The port reads it when a connection
+	// opens (FlashbackTarget).
+	SQLLikeIgnoresCase bool `yaml:"sql_like_ignores_case,omitempty"`
 
 	// ── Source family (#1019) ──
 	// Flavor selects the capture engine: "" or "mysql" (MySQL), "mariadb"
@@ -735,9 +742,10 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 		return ServerEntry{}, fmt.Errorf("generate server id: %w", err)
 	}
 	e.ID = id
-	e.LocalKeepHeldDir = "" // registry-owned; a new entry never starts held
-	e.Hidden = nil          // SetHidden is the only writer (#2529)
-	e.SQLFresh = false      // SetSQLFresh is the only writer (#2546)
+	e.LocalKeepHeldDir = ""      // registry-owned; a new entry never starts held
+	e.Hidden = nil               // SetHidden is the only writer (#2529)
+	e.SQLFresh = false           // SetSQLFresh is the only writer (#2546)
+	e.SQLLikeIgnoresCase = false // SetSQLMode is the only writer
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -806,6 +814,8 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 		e.Hidden = old.Hidden
 		// And the fresh mode (#2546): SetSQLFresh is its only writer.
 		e.SQLFresh = old.SQLFresh
+		// And the LIKE switch: SetSQLMode is its only writer.
+		e.SQLLikeIgnoresCase = old.SQLLikeIgnoresCase
 		// Within MySQL and MariaDB the Source type is registry-owned too:
 		// capture corrects it (CorrectSourceFlavor), and an edit built from
 		// a copy read before that must not put the old value back. No edit
@@ -879,6 +889,36 @@ func (r *Registry) SetSQLFresh(id string, on bool) (ServerEntry, error) {
 		r.file.Servers[i].SQLFresh = on
 		if err := r.save(); err != nil {
 			r.file.Servers[i].SQLFresh = old.SQLFresh // roll back
+			return ServerEntry{}, err
+		}
+		return r.file.Servers[i], nil
+	}
+	return ServerEntry{}, ErrUnknownServer
+}
+
+// SetSQLMode saves entry id's choices for its statements on the SQL port in
+// one write: the fresh mode when fresh is not nil (as SetSQLFresh), and
+// whether statements with LIKE go to the copy when like is not nil. It is the
+// only writer of ServerEntry.SQLLikeIgnoresCase. Either both are saved or
+// neither is.
+func (r *Registry) SetSQLMode(id string, fresh, like *bool) (ServerEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readOnly {
+		return ServerEntry{}, ErrRegistryReadOnly
+	}
+	for i, old := range r.file.Servers {
+		if old.ID != id {
+			continue
+		}
+		if fresh != nil {
+			r.file.Servers[i].SQLFresh = *fresh
+		}
+		if like != nil {
+			r.file.Servers[i].SQLLikeIgnoresCase = *like
+		}
+		if err := r.save(); err != nil {
+			r.file.Servers[i] = old // roll back
 			return ServerEntry{}, err
 		}
 		return r.file.Servers[i], nil

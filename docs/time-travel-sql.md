@@ -904,7 +904,39 @@ What this is and is not:
   the order MySQL would read the tables in is lost. If the condition cannot
   be read (a prepared statement whose placeholder sits inside the right side
   of the join), the copy refuses the statement and MySQL answers it. MySQL
-  always gets the statement as the client wrote it. Nothing else of MySQL's
+  always gets the statement as the client wrote it.
+  **LIKE without case, a switch per server, off by default.** MySQL
+  compares `LIKE` without case under its default collations; the copy
+  compares it with case, so `name LIKE 'pr%'` finds "PRODUCT" on one and
+  not on the other, and a statement with `LIKE` stays on MySQL. With the
+  switch on, such a statement may go to the copy and each `LIKE` is sent
+  as `ILIKE`, the copy's `LIKE` without case, which is how the copy already
+  compares `=`. Differences are left, and they are why the switch is off
+  by default: MySQL's collation decides what matches, and the copy has
+  none. Measured on MySQL 8.0, where `ILIKE` on the copy answered
+  otherwise than `LIKE` on MySQL:
+  - `utf8mb4_0900_ai_ci` (MySQL 8's default): accents (`'é' LIKE 'e'` is
+    true on MySQL), some letters that are not accents (`'đ'`, `'ø'`, `'ł'`
+    match `d`, `o`, `l`), and a few letter forms (Greek final sigma `ς`
+    matches `Σ`, `ſ` matches `s`);
+  - `utf8mb4_general_ci` (the default of MySQL 5.7 and of MariaDB) and
+    `utf8mb4_unicode_ci`: the same, plus, under `general_ci`, `ß` matching
+    `s` and the dotless `ı` matching `I`; both ways, the copy also finds
+    `ß` for `ẞ` and some Cherokee letters MySQL keeps apart;
+  - a case-sensitive collation (`_cs`): MySQL compares with case, the copy
+    without, as it already does for `=` on such a column.
+  A table with a column under a `_bin` collation is the exception the copy
+  does not take: the copy compares such a column byte for byte for `=`, and
+  a statement with `LIKE` over that table stays on MySQL. So does a `LIKE`
+  whose pattern is not written in the statement or passed as `?` (a column
+  or an expression can hold a backslash, an escape in the pattern on MySQL
+  and a character on the copy), a prepared statement with `LIKE` whose
+  argument holds a backslash, `SOUNDS LIKE`, `REGEXP` and `RLIKE`. Turn it
+  on with `PUT /api/servers/{id}/sql-mode` and `{"like_ignores_case":
+  true}`. A connection reads the switch when it opens; changing it closes
+  the server's open connections on the port, so the change is in force at
+  once (turning it off is how to stop an answer that is not MySQL's).
+  Nothing else of MySQL's
   dialect is translated: a function, an operator or a clause the copy does
   not have is still refused by the copy and answered by MySQL. That costs
   the failed attempt on the copy before MySQL answers (37 to 55 ms measured
@@ -980,7 +1012,8 @@ What this is and is not:
   the copy's names.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
-  `LIKE`/`REGEXP`, `COLLATE`, `DIV`, `||`, `^`, double-quoted string
+  `LIKE`/`REGEXP` (`LIKE` can go to the copy with a server's switch, see
+  "LIKE without case" above), `COLLATE`, `DIV`, `||`, `^`, double-quoted string
   literals, a backslash inside a string literal (an escape on MySQL, a
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where

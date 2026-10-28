@@ -606,6 +606,9 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				AnyCopyAge:  cfg.RouteAnyCopyAge,
 				BusyRefuses: cfg.RouteBusyRefuses,
 				ReadOnly:    cfg.RouteReadOnly,
+				// The server's LIKE switch, as saved when this connection
+				// opened.
+				LikeIgnoresCase: tgt.LikeIgnoresCase,
 				Observe: func(route shim.RouteSide, reason shim.RouteReason) {
 					observe.ObserveRouteDecision(id, string(route), string(reason))
 					srv.RecordRouteDecision(id, string(route), string(reason))

@@ -1543,7 +1543,39 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlDistinctRefusalFor(narrowed, statement, types); msg != "" {
 		return msg
 	}
+	if msg := sqlBinaryILikeRefusalFor(narrowed, statement, types); msg != "" {
+		return msg
+	}
 	return sqlWordsRefusalFor(narrowed, types)
+}
+
+// ilikeWord is ILIKE as a word, wherever it is in the statement, a quoted
+// name glued to it included ("code"ILIKE, which is how the copy is sent
+// `code`LIKE). Inside a string literal or as a quoted name of its own it
+// costs a refusal, never a wrong answer.
+var ilikeWord = regexp.MustCompile(`(?i)(^|[^.\w])ilike\b`)
+
+// sqlBinaryILikeRefusalFor says why the copy must not answer a routed
+// statement with ILIKE over a table with a _bin text column, or "" when it
+// can. The routing layer writes LIKE as ILIKE for a server whose LIKE switch
+// is on (readrouter.CopyOptions), since MySQL compares LIKE without case
+// under its default collations. A _bin column it compares with case, and the
+// copy's ILIKE ignores the byte collation the column's view gives it
+// (views.BaselineTable.BinaryText): 'AB1' would match 'ab%' on the copy
+// alone. Which column the ILIKE reads is not followed: a table with any such
+// column keeps the statement on MySQL. types is nil where the copy answers
+// alone, and ILIKE there is the client's own.
+func sqlBinaryILikeRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes) string {
+	if types == nil || !ilikeWord.MatchString(statement) {
+		return ""
+	}
+	for _, t := range narrowed.SelectedBaselines() {
+		if len(t.BinaryText) > 0 {
+			return fmt.Sprintf("the copy does not answer this statement: %s.%s has a column MySQL compares with case (%s), "+
+				"and LIKE would ignore it on the copy", t.Schema, t.Table, t.BinaryText[0])
+		}
+	}
+	return ""
 }
 
 // sqlDistinctRefusalFor says why the copy must not answer a statement because

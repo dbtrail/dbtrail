@@ -171,6 +171,9 @@ func (s *Server) applyRegistryChange(c RegistryChange) {
 	if forwardDSNOf(c.New) != forwardDSNOf(c.Old) {
 		s.dropRoutedConns(id, "the account the port forwards with changed", forwardDSNOf(c.Old), c.Old.SourceSSL())
 	}
+	if c.New.SQLLikeIgnoresCase != c.Old.SQLLikeIgnoresCase {
+		s.closeRoutedConns(id, likeSwitchChanged)
+	}
 	if c.New.DSN != c.Old.DSN {
 		s.cm.evict(id)
 		s.sessionProfiles.invalidate(id)

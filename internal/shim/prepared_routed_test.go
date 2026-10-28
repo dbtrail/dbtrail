@@ -498,7 +498,7 @@ func TestCopyParts_agreesWithTheVeto(t *testing.T) {
 		"SELECT /*+ MAX_EXECUTION_TIME(1) */ `a` FROM `t` WHERE `c` = ?",
 	} {
 		parts := splitPlaceholders(stmt, true)
-		out, refusal := copyParts(parts)
+		out, refusal := copyParts(parts, readrouter.CopyOptions{})
 		_, why := readrouter.ForCopy(stmt)
 		if (refusal == "") != (why == "") {
 			t.Errorf("%q: copyParts refusal %q, ForCopy refusal %q", stmt, refusal, why)
