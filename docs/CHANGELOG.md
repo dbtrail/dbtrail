@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.120.0] - 2026-10-28
 ### Added
 - **A per-server switch sends statements with `LIKE` to the copy.** MySQL compares `LIKE` without case under its default collations and the copy with case, so Engine Routing keeps every statement with `LIKE` on MySQL. With `PUT /api/servers/{id}/sql-mode` and `{"like_ignores_case": true}`, such a statement may go to the copy, where each `LIKE` is written `ILIKE`. It is off by default because MySQL's collation decides what `LIKE` matches and the copy has none: accents (`é` matches `e` on MySQL), a few other letters, and more under older collations; [the list](time-travel-sql.md) is measured per collation. A table with a `_bin` column, a pattern that is not written in the statement or passed as `?`, a prepared argument with a backslash, `SOUNDS LIKE` and `REGEXP` stay on MySQL. Changing the switch closes the server's open connections on the port; there is no control for it in the web interface yet.
 ### Changed
