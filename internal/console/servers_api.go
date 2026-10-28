@@ -86,6 +86,10 @@ type serverDTO struct {
 	// SQL port (#2546). What the router applies is its own status document's
 	// sql_mode. Edited through /api/servers/{id}/sql-mode only.
 	SQLFresh bool `json:"sql_fresh"`
+	// SQLLikeIgnoresCase is the LIKE switch SAVED for this server's
+	// statements on the SQL port. Edited through /api/servers/{id}/sql-mode
+	// only; applied to connections opened after the change.
+	SQLLikeIgnoresCase bool `json:"sql_like_ignores_case"`
 	// Flavor is the source family ("mysql" | "mariadb" | "postgres"); the
 	// frontend gates per-server without opening the index. SourceDatabase /
 	// SourceSlot / SourcePublication are the PostgreSQL-only source parts (the
@@ -1626,6 +1630,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		MonitorDesired:       e.MonitorDesired,
 		Hidden:               newHiddenListsDTO(e.Hidden),
 		SQLFresh:             e.SQLFresh,
+		SQLLikeIgnoresCase:   e.SQLLikeIgnoresCase,
 		Flavor:               e.SourceFlavor(),
 		SourceSlot:           e.SourceSlot,
 		SourcePublication:    e.SourcePublication,

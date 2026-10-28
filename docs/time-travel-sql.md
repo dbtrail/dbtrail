@@ -904,7 +904,24 @@ What this is and is not:
   the order MySQL would read the tables in is lost. If the condition cannot
   be read (a prepared statement whose placeholder sits inside the right side
   of the join), the copy refuses the statement and MySQL answers it. MySQL
-  always gets the statement as the client wrote it. Nothing else of MySQL's
+  always gets the statement as the client wrote it.
+  **LIKE without case, a switch per server, off by default.** MySQL
+  compares `LIKE` without case under its default collations; the copy
+  compares it with case, so `name LIKE 'pr%'` finds "PRODUCT" on one and
+  not on the other, and a statement with `LIKE` stays on MySQL. With the
+  switch on, such a statement may go to the copy and each `LIKE` is sent
+  as `ILIKE`, the copy's `LIKE` without case, which is how the copy already
+  compares `=`. One difference is left, and it is why the switch is off by
+  default: MySQL's default collation also ignores accents (`'é' LIKE 'e'`
+  is true there) and the copy does not, so a pattern or a value with
+  accented letters can find other rows. Measured on MySQL 8.0 with
+  `utf8mb4_0900_ai_ci`: case and accents are the only differences found
+  for `LIKE`, letters such as `ß` and `Æ` match the same on both.
+  `REGEXP` and `RLIKE` stay on MySQL either way, and so does a prepared
+  statement with `LIKE` whose argument holds a backslash (an escape in the
+  pattern on MySQL, a character on the copy). Turn it on with
+  `PUT /api/servers/{id}/sql-mode` and `{"like_ignores_case": true}`; it
+  applies to connections opened after the change. Nothing else of MySQL's
   dialect is translated: a function, an operator or a clause the copy does
   not have is still refused by the copy and answered by MySQL. That costs
   the failed attempt on the copy before MySQL answers (37 to 55 ms measured
@@ -980,7 +997,8 @@ What this is and is not:
   the copy's names.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
-  `LIKE`/`REGEXP`, `COLLATE`, `DIV`, `||`, `^`, double-quoted string
+  `LIKE`/`REGEXP` (`LIKE` can go to the copy with a server's switch, see
+  "LIKE without case" below), `COLLATE`, `DIV`, `||`, `^`, double-quoted string
   literals, a backslash inside a string literal (an escape on MySQL, a
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where

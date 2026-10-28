@@ -197,7 +197,7 @@ var vetoes = []struct {
 	{"system schema", regexp.MustCompile(`(?i)\b(information_schema|performance_schema|mysql|sys)[\x60"]?\s*\.`)}, // quoted or not: the copy has an information_schema of its own, and would answer
 	{"MATCH AGAINST", regexp.MustCompile(`(?i)\bmatch\s*\(.*\)\s*against\b`)},
 	{"binary string comparison", regexp.MustCompile(`(?i)\bbinary\s+[\w\x60'"(]`)},
-	{"LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)", regexp.MustCompile(`(?i)\b(like|regexp|rlike)\b`)}, // the copy's default collation (nocase) does not reach LIKE (DuckDB #10416)
+	{likeVeto, regexp.MustCompile(`(?i)\b(like|regexp|rlike)\b`)}, // the copy's default collation (nocase) does not reach LIKE (DuckDB #10416)
 	// DISTINCT inside an aggregate is decided by the types of its columns
 	// where they are known (DistinctVeto, #2532), not here.
 	{"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)", regexp.MustCompile(`(?i)\b(instr|locate|position|strcmp|field|find_in_set)\s*\(`)},
@@ -242,6 +242,27 @@ var hintComment = regexp.MustCompile(`/\*(M?!|\+)`)
 // names are written the way the copy gets them (ForCopy), so the list runs
 // on the text the copy would run.
 func Veto(stmt string) string {
+	return VetoOpts(stmt, CopyOptions{})
+}
+
+// likeVeto is the name of the veto LikeIgnoresCase narrows, and
+// regexpOnly what it still matches then.
+const likeVeto = "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)"
+
+var regexpOnly = regexp.MustCompile(`(?i)\b(regexp|rlike)\b`)
+
+var likeWord = regexp.MustCompile(`(?i)(^|[^.\w"\x60])like\b`)
+
+// HasLike reports whether the statement uses LIKE outside its string
+// literals, comments and quoted names.
+func HasLike(stmt string) bool {
+	return likeWord.MatchString(scan(stmt).blankedCopy)
+}
+
+// VetoOpts is Veto under a server's CopyOptions: with LikeIgnoresCase, LIKE
+// no longer keeps a statement on MySQL (the copy is sent ILIKE, ForCopyOpts);
+// REGEXP and RLIKE still do.
+func VetoOpts(stmt string, o CopyOptions) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
 	}
@@ -250,7 +271,11 @@ func Veto(stmt string) string {
 		return why
 	}
 	for _, v := range vetoes {
-		if v.re.MatchString(sc.blankedCopy) {
+		re := v.re
+		if v.name == likeVeto && o.LikeIgnoresCase {
+			re = regexpOnly
+		}
+		if re.MatchString(sc.blankedCopy) {
 			return v.name
 		}
 	}

@@ -61,6 +61,10 @@ type FlashbackTarget struct {
 	// apply the server's hidden rules (#2529). Asked per statement, so a
 	// rule saved while the connection is open governs its next statement.
 	TimeTravelRefusal func() string
+	// LikeIgnoresCase is the server's LIKE switch as saved when the
+	// connection opened (ServerEntry.SQLLikeIgnoresCase): statements with
+	// LIKE go to the copy, written ILIKE there.
+	LikeIgnoresCase bool
 	// ForwardDSN is the DSN (credentials included) the serving layer's read
 	// router (#2038) opens its ONE upstream connection with: everything the
 	// router does on the source (EXPLAIN, forwarded statements, prepared
@@ -246,19 +250,20 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 	forwardGen := s.routed.generation(id)
 	forwardDSN, forwardRefused := s.flashbackForwardDSN(id)
 	return FlashbackTarget{
-		ID:             id,
-		IndexDB:        b.db,
-		IndexDBName:    b.dbName,
-		BaselineDir:    dir,
-		BaselineS3:     s3,
-		NoArchive:      b.noArchive,
-		DefaultSchema:  s.flashbackDefaultSchema(id),
-		SQL:            sqlOnCopy,
-		SQLUnavailable: sqlWhyNot,
-		ForwardDSN:     forwardDSN,
-		ForwardRefused: forwardRefused,
-		ForwardGen:     forwardGen,
-		SourceSSL:      s.flashbackSourceSSL(id),
+		ID:              id,
+		IndexDB:         b.db,
+		IndexDBName:     b.dbName,
+		BaselineDir:     dir,
+		BaselineS3:      s3,
+		NoArchive:       b.noArchive,
+		DefaultSchema:   s.flashbackDefaultSchema(id),
+		SQL:             sqlOnCopy,
+		SQLUnavailable:  sqlWhyNot,
+		ForwardDSN:      forwardDSN,
+		ForwardRefused:  forwardRefused,
+		ForwardGen:      forwardGen,
+		SourceSSL:       s.flashbackSourceSSL(id),
+		LikeIgnoresCase: s.flashbackLikeIgnoresCase(id),
 		TimeTravelRefusal: func() string {
 			return s.timeTravelRefusal(b)
 		},
@@ -311,6 +316,13 @@ func (s *Server) flashbackTarget(selector string) (string, bool) {
 func (s *Server) flashbackSourceSSL(id string) config.SSL {
 	entry, _ := s.cm.reg.Get(id)
 	return entry.SourceSSL()
+}
+
+// flashbackLikeIgnoresCase is the LIKE switch saved for the server, false for
+// an unknown id and for the boot entry, which has no switch of its own.
+func (s *Server) flashbackLikeIgnoresCase(id string) bool {
+	entry, ok := s.cm.reg.Get(id)
+	return ok && entry.SQLLikeIgnoresCase
 }
 
 // flashbackDefaultSchema derives the source database name for a target server

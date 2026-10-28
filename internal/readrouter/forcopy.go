@@ -28,7 +28,7 @@ const (
 type scanned struct {
 	// forCopy is the statement with each backtick-quoted name written in
 	// double quotes, each STRAIGHT_JOIN written as the join it means, and
-	// every other byte kept. Only meaningful when refusal
+	// every other byte kept: copyText with no options. Only meaningful when refusal
 	// is empty.
 	forCopy string
 	// blanked is the statement with comments removed and string literals
@@ -45,6 +45,22 @@ type scanned struct {
 	doubleQuoted, backslash, hash bool
 	// refusal names why the names cannot be rewritten with certainty, or "".
 	refusal string
+	// raw is the statement with its names in double quotes and nothing else
+	// rewritten; keywords are where the words copyText rewrites start in raw
+	// and in blanked.
+	raw      string
+	keywords []keywordAt
+}
+
+// CopyOptions are a server's choices about what the copy may answer that
+// MySQL would answer otherwise.
+type CopyOptions struct {
+	// LikeIgnoresCase sends statements with LIKE to the copy, with LIKE
+	// written ILIKE: compared without case, as MySQL compares it under its
+	// default collations. Off, LIKE keeps a statement on MySQL (the copy
+	// compares it with case). On, accents still differ: MySQL's default
+	// collation also ignores them, the copy does not.
+	LikeIgnoresCase bool
 }
 
 // ForCopy returns the statement the copy is sent: every backtick-quoted name
@@ -66,6 +82,12 @@ type scanned struct {
 // MySQL too (it may name another reason first), so a statement that passed
 // Veto is never refused here.
 func ForCopy(stmt string) (text, refusal string) {
+	return ForCopyOpts(stmt, CopyOptions{})
+}
+
+// ForCopyOpts is ForCopy under a server's CopyOptions: with LikeIgnoresCase,
+// every LIKE keyword is also written ILIKE.
+func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 	if hintComment.MatchString(stmt) {
 		return stmt, vetoHintComment
 	}
@@ -76,7 +98,7 @@ func ForCopy(stmt string) (text, refusal string) {
 	if sc.hash {
 		return stmt, vetoHash
 	}
-	return sc.forCopy, ""
+	return sc.copyText(o), ""
 }
 
 // literalVeto is the part of the veto that comes from how the statement's
@@ -126,13 +148,15 @@ func scan(stmt string) scanned {
 	// literals, is one amount on MySQL).
 	word, lastWord := -1, ""
 	// cpWord and blWord are where the word being read starts in the two
-	// texts being written; joins collects every STRAIGHT_JOIN read as a
-	// word, for straightJoins to rewrite once the statement is read.
+	// texts being written; every STRAIGHT_JOIN and LIKE read as a word is
+	// kept in sc.keywords, for copyText to rewrite once the statement is
+	// read.
 	cpWord, blWord := 0, 0
-	var joins []straightJoinAt
 	endWord := func(i int) {
-		if strings.EqualFold(stmt[word:i], "straight_join") {
-			joins = append(joins, straightJoinAt{cp: cpWord, bl: blWord})
+		for _, kw := range rewrittenKeywords {
+			if strings.EqualFold(stmt[word:i], kw) {
+				sc.keywords = append(sc.keywords, keywordAt{word: kw, cp: cpWord, bl: blWord})
+			}
 		}
 		lastWord, word = stmt[word:i], -1
 	}
@@ -330,7 +354,8 @@ func scan(stmt string) scanned {
 		endWord(n)
 	}
 	sc.blanked = bl.String()
-	sc.forCopy = straightJoins(cp.String(), sc.blanked, joins)
+	sc.raw = cp.String()
+	sc.forCopy = sc.copyText(CopyOptions{})
 	// Comments and string literals are gone from blanked, so every backtick
 	// left in it quotes a name.
 	sc.blankedCopy = strings.ReplaceAll(sc.blanked, "`", `"`)
@@ -383,15 +408,23 @@ func wordByte(c byte) bool {
 	return c == '_' || c == '$' || c >= 0x80 || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
-// straightJoinAt is where one STRAIGHT_JOIN keyword starts in the text sent
-// to the copy (cp) and in the blanked text (bl).
-type straightJoinAt struct{ cp, bl int }
+// rewrittenKeywords are the words copyText may rewrite, lowercase.
+var rewrittenKeywords = []string{"straight_join", "like"}
 
-// straightJoins writes each STRAIGHT_JOIN the way the copy reads the same
-// query: MySQL's join that reads the left table first is an inner JOIN when
-// an ON or a USING follows its right side, and a CROSS JOIN when none does
-// (MySQL then filters in WHERE). As a SELECT modifier (SELECT STRAIGHT_JOIN,
-// SELECT DISTINCT STRAIGHT_JOIN) it only orders MySQL's plan and is dropped.
+// keywordAt is where one of rewrittenKeywords starts in the text sent to the
+// copy (cp) and in the blanked text (bl).
+type keywordAt struct {
+	word   string
+	cp, bl int
+}
+
+// copyText is the statement the copy is sent under o. Each STRAIGHT_JOIN is
+// written the way the copy reads the same query: MySQL's join that reads the
+// left table first is an inner JOIN when an ON or a USING follows its right
+// side, and a CROSS JOIN when none does (MySQL then filters in WHERE). As a
+// SELECT modifier (SELECT STRAIGHT_JOIN, SELECT DISTINCT STRAIGHT_JOIN) it
+// only orders MySQL's plan and is dropped. With o.LikeIgnoresCase each LIKE
+// is written ILIKE.
 //
 // Which of the two joins is read from the blanked text, where comments are
 // gone and string literals are ”, so an ON inside either is not seen. A
@@ -400,23 +433,31 @@ type straightJoinAt struct{ cp, bl int }
 // That is the case of a prepared statement's piece that ends before its ON
 // (shim copyParts rewrites the text between placeholders one piece at a
 // time).
-func straightJoins(cp, bl string, at []straightJoinAt) string {
-	const kw = len("straight_join")
-	for k := len(at) - 1; k >= 0; k-- {
-		j := at[k]
+func (sc scanned) copyText(o CopyOptions) string {
+	cp, bl := sc.raw, sc.blanked
+	for k := len(sc.keywords) - 1; k >= 0; k-- {
+		j := sc.keywords[k]
+		kw := len(j.word)
 		if strings.HasSuffix(strings.TrimRight(bl[:j.bl], " \t\n\r\f\v"), ".") ||
 			strings.HasPrefix(strings.TrimLeft(bl[j.bl+kw:], " \t\n\r\f\v"), ".") {
-			// db.straight_join or t.straight_join: a name on MySQL, where
-			// any word after a dot is one, and on the copy. Rewritten it
-			// would name another table or column.
+			// db.straight_join or t.like: a name on MySQL, where any word
+			// after a dot is one, and on the copy. Rewritten it would name
+			// another table or column.
 			continue
 		}
-		repl := "CROSS JOIN"
+		var repl string
 		switch {
+		case j.word == "like":
+			if !o.LikeIgnoresCase {
+				continue
+			}
+			repl = "ILIKE"
 		case straightJoinModifier(bl[:j.bl]):
 			repl = ""
 		case straightJoinHasCondition(bl[j.bl+kw:]):
 			repl = "JOIN"
+		default:
+			repl = "CROSS JOIN"
 		}
 		cp = cp[:j.cp] + repl + cp[j.cp+kw:]
 	}

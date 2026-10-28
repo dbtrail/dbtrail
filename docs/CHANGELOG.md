@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- **A per-server switch sends statements with `LIKE` to the copy.** MySQL compares `LIKE` without case under its default collations and the copy with case, so Engine Routing keeps every statement with `LIKE` on MySQL. With `PUT /api/servers/{id}/sql-mode` and `{"like_ignores_case": true}`, such a statement may go to the copy, where each `LIKE` is written `ILIKE`. It is off by default because one difference remains: MySQL's default collation also ignores accents (`é` matches `e`) and the copy does not. `REGEXP` stays on MySQL, and so does a prepared statement with `LIKE` whose argument holds a backslash. It applies to connections opened after the change; there is no control for it in the web interface yet.
 ### Changed
 - **Engine Routing sends statements with `STRAIGHT_JOIN` to the copy.** The copy did not read MySQL's `STRAIGHT_JOIN`, so a heavy read that used it was tried on the copy, refused, and run on MySQL. The router now writes it as the join it means: with `ON` or `USING` a `JOIN`, without a condition a `CROSS JOIN` (MySQL filters in `WHERE`), and `SELECT STRAIGHT_JOIN` loses the modifier, which only orders MySQL's plan. Where the condition cannot be read, the copy refuses the statement and MySQL answers, as before.
 

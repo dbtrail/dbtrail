@@ -174,6 +174,10 @@ type RouterConfig struct {
 	// anything is asked of the Router: a refused statement never reaches the
 	// source, not even as an EXPLAIN or a PREPARE (#2079).
 	ReadOnly bool
+	// LikeIgnoresCase is the server's switch that sends statements with
+	// LIKE to the copy, written ILIKE there (readrouter.CopyOptions). Off,
+	// LIKE keeps a statement on MySQL.
+	LikeIgnoresCase bool
 }
 
 // RouteSide is who answered a routed statement; RouteReason why. Both are
@@ -352,6 +356,12 @@ func (h *Handler) BindRouter(r Router, cfg RouterConfig) {
 	h.routerCfg = cfg
 }
 
+// copyOpts is what this connection's server lets the copy answer that MySQL
+// would answer otherwise.
+func (h *Handler) copyOpts() readrouter.CopyOptions {
+	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase}
+}
+
 // Close releases what a connection holds: the router's upstream connection,
 // and its share of the port's result budget. Safe to call on a handler that
 // bound nothing.
@@ -397,7 +407,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 		},
 		decide: func() (readrouter.Decision, error) { return h.router.Decide(ctx, qstr) },
 		runCopy: func(reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
-			text, err := copyText(qstr)
+			text, err := copyText(qstr, h.copyOpts())
 			if err != nil {
 				return nil, err
 			}
@@ -552,7 +562,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	case h.routerCfg.MaxCopyAge <= 0 && !h.routerCfg.AnyCopyAge:
 		return ops.forward(RouteReasonRoutingOff, "routing to the copy is off (no max copy age)")
 	}
-	if v := readrouter.Veto(qstr); v != "" {
+	if v := readrouter.VetoOpts(qstr, h.copyOpts()); v != "" {
 		return ops.forward(RouteReasonVeto, "veto: "+v)
 	}
 	if ops.extraVeto != nil {
@@ -936,8 +946,8 @@ func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
 // translated from MySQL's dialect. The ladder vetoes every
 // statement the rewrite refuses before it gets here; the error is for a
 // caller that did not, and reads as one more refusal by the copy.
-func copyText(qstr string) (string, error) {
-	text, why := readrouter.ForCopy(qstr)
+func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
+	text, why := readrouter.ForCopyOpts(qstr, o)
 	if why != "" {
 		return "", fmt.Errorf("not sent to the copy: %s", why)
 	}
