@@ -84,11 +84,20 @@ func TestSQLModeAPI_likeSwitchClosesOpenConnections(t *testing.T) {
 		}
 	}
 	track()
+	// What the source said about the forwarding account is still true
+	// after a LIKE change, which does not touch the account.
+	srv.routing.setAccountRefused(id, "access denied")
 	if rec, out := doServersReq(t, srv, "PUT", path, `{"fresh":true}`); rec.Code != 200 || dropped != 0 {
 		t.Fatalf("fresh alone: %d %s, dropped %d, want none dropped", rec.Code, out, dropped)
 	}
 	if rec, out := doServersReq(t, srv, "PUT", path, `{"like_ignores_case":true}`); rec.Code != 200 || dropped != 1 {
 		t.Fatalf("switch on: %d %s, dropped %d, want 1", rec.Code, out, dropped)
+	}
+	srv.routing.mu.Lock()
+	got := srv.routing.accountRefused[id]
+	srv.routing.mu.Unlock()
+	if got != "access denied" {
+		t.Errorf("a LIKE change cleared the account refusal: %q", got)
 	}
 	track()
 	if rec, _ := doServersReq(t, srv, "PUT", path, `{"like_ignores_case":true}`); rec.Code != 200 || dropped != 1 {

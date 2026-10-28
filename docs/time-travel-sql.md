@@ -1013,7 +1013,7 @@ What this is and is not:
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
   `LIKE`/`REGEXP` (`LIKE` can go to the copy with a server's switch, see
-  "LIKE without case" below), `COLLATE`, `DIV`, `||`, `^`, double-quoted string
+  "LIKE without case" above), `COLLATE`, `DIV`, `||`, `^`, double-quoted string
   literals, a backslash inside a string literal (an escape on MySQL, a
   plain character on the copy: `'a\\b'` and `'it\'s'` name different
   strings), `--` with no space after it (two minus signs on MySQL, where

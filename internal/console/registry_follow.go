@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/dbtrail/dbtrail/internal/config"
 	"log/slog"
 	"os"
 	"reflect"
@@ -173,7 +172,7 @@ func (s *Server) applyRegistryChange(c RegistryChange) {
 		s.dropRoutedConns(id, "the account the port forwards with changed", forwardDSNOf(c.Old), c.Old.SourceSSL())
 	}
 	if c.New.SQLLikeIgnoresCase != c.Old.SQLLikeIgnoresCase {
-		s.dropRoutedConns(id, likeSwitchChanged, "", config.SSL{})
+		s.closeRoutedConns(id, likeSwitchChanged)
 	}
 	if c.New.DSN != c.Old.DSN {
 		s.cm.evict(id)

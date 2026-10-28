@@ -2,7 +2,6 @@ package console
 
 import (
 	"encoding/json"
-	"github.com/dbtrail/dbtrail/internal/config"
 	"log/slog"
 	"net/http"
 )
@@ -83,7 +82,7 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 		// A connection keeps the switch it read when it opened: close the
 		// open ones so the change is in force at once, turning it off above
 		// all, which is how a wrong answer is stopped.
-		s.dropRoutedConns(id, likeSwitchChanged, "", config.SSL{})
+		s.closeRoutedConns(id, likeSwitchChanged)
 	}
 	// This process serves no port of its own in the usual setup (the router
 	// does, and reads the registry again within seconds), but one that does

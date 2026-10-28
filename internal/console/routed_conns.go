@@ -139,6 +139,18 @@ const routedKillTimeout = 10 * time.Second
 // threads, sends KILL for each dropped connection. That runs in the
 // background and never holds up or fails the edit; what it could not do is
 // logged at Warn.
+// closeRoutedConns closes the routed connections of a server whose account
+// did not change (its LIKE switch did), so they reopen with what is saved
+// now. Unlike dropRoutedConns it keeps what the source said about the
+// account, which is still true, and sends no KILL: the statements running
+// are the same account's.
+func (s *Server) closeRoutedConns(serverID, why string) {
+	if n := len(s.routed.drop(serverID, nil)); n > 0 {
+		slog.Info("console: closed this server's open connections on the MySQL-protocol port; they reconnect with what is saved now",
+			"server", serverID, "connections", n, "reason", why)
+	}
+}
+
 func (s *Server) dropRoutedConns(serverID, why, oldDSN string, oldSSL config.SSL) {
 	threads := s.routed.drop(serverID, func() {
 		// What the source said about the previous account is not about

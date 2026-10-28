@@ -254,15 +254,23 @@ var regexpOnly = regexp.MustCompile(`(?i)\b(regexp|rlike)\b`)
 var likeWord = regexp.MustCompile(`(?i)(^|[^.\w"\x60])like\b`)
 
 // likeThenPattern is a LIKE and what follows it; likeWritten is a pattern
-// written in the statement ('' once blanked) or a placeholder.
+// written in the statement (” once blanked) or a placeholder.
 var (
-	likeThenPattern = regexp.MustCompile(`(?i)(^|[^.\w"\x60])(sounds\s+)?like\b\s*`)
+	likeThenPattern = regexp.MustCompile(`(?i)(^|[^.\w"\x60[:^ascii:]])(sounds\s+)?like\b\s*`)
+	likeAnyWord     = regexp.MustCompile(`(?i)\blike\b`)
 	likeWritten     = regexp.MustCompile(`^(''|\?)`)
 )
 
 // likePatternsWritten reports whether every LIKE in blanked is followed by a
 // string literal or a placeholder, and none is SOUNDS LIKE.
 func likePatternsWritten(blanked string) bool {
+	// The veto list's LIKE and the one the scanner rewrites must be the
+	// same words: a LIKE right after a character outside ASCII (a no-break
+	// space) is a word to the veto list and part of a longer word to the
+	// scanner, which would send it unrewritten.
+	if len(likeThenPattern.FindAllStringIndex(blanked, -1)) != len(likeAnyWord.FindAllStringIndex(blanked, -1)) {
+		return false
+	}
 	for _, m := range likeThenPattern.FindAllStringSubmatchIndex(blanked, -1) {
 		if m[4] >= 0 || !likeWritten.MatchString(blanked[m[1]:]) {
 			return false

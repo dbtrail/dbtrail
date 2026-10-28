@@ -40,6 +40,11 @@ func TestSQL_realWorkerILikeOverBinaryText(t *testing.T) {
 	if !errors.As(err, &refusal) || !strings.Contains(refusal.Message, "shop.codes") {
 		t.Fatalf("routed ILIKE over a _bin column: err = %v, want a refusal naming shop.codes", err)
 	}
+	// The name glued to the keyword, as the copy is sent `code`LIKE.
+	const glued = `SELECT count(*) FROM shop.codes WHERE "code"ILIKE 'ab%'`
+	if _, err := f.s.runSQL(ctx, f.s.cm.boot, "u", glued, "", 0, routed(glued)); !errors.As(err, &refusal) {
+		t.Fatalf("routed ILIKE glued to a quoted name over a _bin column: err = %v, want a refusal", err)
+	}
 	if out, err := f.s.runSQL(ctx, f.s.cm.boot, "u", binStmt, "", 0, sqlsandbox.Session{}); err != nil || len(out.Result.Rows) != 1 {
 		t.Fatalf("the copy answering alone: %v %v, want its own answer", out, err)
 	}

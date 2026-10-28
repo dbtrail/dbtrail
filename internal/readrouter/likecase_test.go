@@ -31,6 +31,9 @@ func TestVetoOpts_like(t *testing.T) {
 		{"SELECT count(*) FROM t WHERE name LIKE ?", true, false},
 		{"SELECT count(*) FROM t WHERE name LIKE 'a%' AND b LIKE c", true, true},
 		{"SELECT count(*) FROM t WHERE name LIKE _utf8mb4'a%'", true, true},
+		// A no-break space before LIKE: the scanner reads it as part of a
+		// word and would not rewrite that LIKE, so it is not lifted.
+		{"SELECT count(*) FROM t WHERE name\u00a0LIKE 'a%'", true, true},
 		// SOUNDS LIKE is not LIKE, and the copy has no SOUNDS.
 		{"SELECT count(*) FROM t WHERE name SOUNDS LIKE 'a'", true, true},
 		// Not the keyword: nothing to veto either way.

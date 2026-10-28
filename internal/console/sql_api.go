@@ -1549,9 +1549,11 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	return sqlWordsRefusalFor(narrowed, types)
 }
 
-// ilikeWord is ILIKE as a word, wherever it is in the statement: inside a
-// string literal it costs a refusal, never a wrong answer.
-var ilikeWord = regexp.MustCompile(`(?i)(^|[^.\w"\x60])ilike\b`)
+// ilikeWord is ILIKE as a word, wherever it is in the statement, a quoted
+// name glued to it included ("code"ILIKE, which is how the copy is sent
+// `code`LIKE). Inside a string literal or as a quoted name of its own it
+// costs a refusal, never a wrong answer.
+var ilikeWord = regexp.MustCompile(`(?i)(^|[^.\w])ilike\b`)
 
 // sqlBinaryILikeRefusalFor says why the copy must not answer a routed
 // statement with ILIKE over a table with a _bin text column, or "" when it
