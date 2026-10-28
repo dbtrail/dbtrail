@@ -404,6 +404,13 @@ func straightJoins(cp, bl string, at []straightJoinAt) string {
 	const kw = len("straight_join")
 	for k := len(at) - 1; k >= 0; k-- {
 		j := at[k]
+		if strings.HasSuffix(strings.TrimRight(bl[:j.bl], " \t\n\r\f\v"), ".") ||
+			strings.HasPrefix(strings.TrimLeft(bl[j.bl+kw:], " \t\n\r\f\v"), ".") {
+			// db.straight_join or t.straight_join: a name on MySQL, where
+			// any word after a dot is one, and on the copy. Rewritten it
+			// would name another table or column.
+			continue
+		}
 		repl := "CROSS JOIN"
 		switch {
 		case straightJoinModifier(bl[:j.bl]):

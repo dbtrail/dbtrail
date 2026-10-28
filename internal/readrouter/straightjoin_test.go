@@ -52,6 +52,15 @@ func TestForCopy_straightJoin(t *testing.T) {
 		"SELECT 1 FROM a -- straight_join b\nWHERE 1 = 1":   "SELECT 1 FROM a -- straight_join b\nWHERE 1 = 1",
 		"SELECT `straight_join` FROM a":                     `SELECT "straight_join" FROM a`,
 		"SELECT my_straight_join, straight_joins FROM a":    "SELECT my_straight_join, straight_joins FROM a",
+		// After or before a dot it is a name on MySQL (a reserved word is a
+		// name there), and on the copy too, so it is left alone. Rewritten,
+		// db.straight_join became db.JOIN: another table, read without an
+		// error.
+		"SELECT s.x FROM a JOIN db.straight_join AS s ON a.x = s.x": "SELECT s.x FROM a JOIN db.straight_join AS s ON a.x = s.x",
+		"SELECT t.straight_join FROM t":                             "SELECT t.straight_join FROM t",
+		"SELECT t. straight_join FROM t":                            "SELECT t. straight_join FROM t",
+		"SELECT `t`.straight_join FROM `t`":                         `SELECT "t".straight_join FROM "t"`,
+		"SELECT straight_join.x FROM a":                             "SELECT straight_join.x FROM a",
 		// A comment between the right side and its ON does not hide the ON.
 		"SELECT 1 FROM a STRAIGHT_JOIN b /* why */ ON a.x = b.x": "SELECT 1 FROM a JOIN b /* why */ ON a.x = b.x",
 		"SELECT 1 FROM a STRAIGHT_JOIN b /* ON */ WHERE 1 = 1":   "SELECT 1 FROM a CROSS JOIN b /* ON */ WHERE 1 = 1",
