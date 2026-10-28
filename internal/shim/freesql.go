@@ -931,8 +931,9 @@ func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
-// text with its backtick-quoted names in double quotes (readrouter.ForCopy),
-// the one thing translated from MySQL's dialect. The ladder vetoes every
+// text with its backtick-quoted names in double quotes and STRAIGHT_JOIN
+// written as the join it means (readrouter.ForCopy), the two things
+// translated from MySQL's dialect. The ladder vetoes every
 // statement the rewrite refuses before it gets here; the error is for a
 // caller that did not, and reads as one more refusal by the copy.
 func copyText(qstr string) (string, error) {
@@ -945,8 +946,9 @@ func copyText(qstr string) (string, error) {
 
 // runFreeSQLRouted is runFreeSQL with the routing reason when there is one.
 // The copy runs the statement it is given: the routing ladder hands it the
-// client's text with backtick-quoted names rewritten (copyText), a client
-// on the port without routing its own text. Nothing else is translated from
+// client's text with backtick-quoted names and STRAIGHT_JOIN rewritten
+// (copyText), a client on the port without routing its own text. Nothing
+// else is translated from
 // MySQL's dialect, and a statement the copy refuses is the caller's to
 // forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
 //
