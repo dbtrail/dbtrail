@@ -37,12 +37,12 @@ type slowSource struct {
 	deaf bool
 	// processlist, when set, replaces what the process list shows for id.
 	processlist func(id uint32, r running) [][]any
+	// identity, when set, is what connection id answers when asked which
+	// server it is (sourceIdentitySQL); nil is one server, and "" an error.
+	identity func(id uint32) string
 }
 
-type running struct {
-	command, info string
-	since         time.Time
-}
+type running struct{ command, info string }
 
 type slowHandler struct {
 	server.EmptyHandler
@@ -53,9 +53,25 @@ type slowHandler struct {
 func (h slowHandler) HandleQuery(q string) (*mysql.Result, error) {
 	switch {
 	case strings.Contains(q, "SLEEP"):
-		return h.sleep(running{"Query", q, time.Now()})
+		return h.sleep(running{"Query", q})
 	case strings.Contains(q, "PROCESSLIST"):
 		return h.src.processlistRows(q)
+	case q == sourceIdentitySQL:
+		who := "db1/3306/1"
+		h.src.mu.Lock()
+		if h.src.identity != nil {
+			who = h.src.identity(h.id)
+		}
+		h.src.mu.Unlock()
+		if who == "" {
+			return nil, mysql.NewError(mysql.ER_UNKNOWN_SYSTEM_VARIABLE, "Unknown system variable")
+		}
+		parts := strings.Split(who, "/")
+		rs, err := mysql.BuildSimpleTextResultset([]string{"@@hostname", "@@port", "@@server_id"}, [][]any{{parts[0], parts[1], parts[2]}})
+		if err != nil {
+			return nil, err
+		}
+		return mysql.NewResult(rs), nil
 	case strings.HasPrefix(q, "KILL"):
 		h.src.kill(q)
 		return mysql.NewResultReserveResultset(0), nil
@@ -116,14 +132,13 @@ func (h slowHandler) HandleStmtExecute(_ any, q string, args []any) (*mysql.Resu
 		}
 		q = strings.Replace(q, "?", v, 1)
 	}
-	return h.sleep(running{"Execute", q, time.Now()})
+	return h.sleep(running{"Execute", q})
 }
 
 func (h slowHandler) HandleStmtClose(any) error { return nil }
 
-// processlistRows answers SELECT USER, COMMAND, INFO, TIME FROM ...
-// PROCESSLIST WHERE ID = n for the connection n is. TIME is the whole
-// seconds the statement has run, unless processlist gives one.
+// processlistRows answers SELECT USER, COMMAND, INFO FROM ... PROCESSLIST
+// WHERE ID = n for the connection n is.
 func (s *slowSource) processlistRows(q string) (*mysql.Result, error) {
 	var id uint32
 	if _, err := fmt.Sscanf(q[strings.LastIndex(q, "=")+1:], "%d", &id); err != nil {
@@ -142,16 +157,7 @@ func (s *slowSource) processlistRows(q string) (*mysql.Result, error) {
 	default:
 		rows = [][]any{{"u", "Sleep", nil}}
 	}
-	for i, row := range rows {
-		if len(row) == 3 {
-			secs := 0
-			if busy {
-				secs = int(time.Since(r.since).Seconds())
-			}
-			rows[i] = append(row, fmt.Sprint(secs))
-		}
-	}
-	rs, err := mysql.BuildSimpleTextResultset([]string{"USER", "COMMAND", "INFO", "TIME"}, rows)
+	rs, err := mysql.BuildSimpleTextResultset([]string{"USER", "COMMAND", "INFO"}, rows)
 	if err != nil {
 		return nil, err
 	}

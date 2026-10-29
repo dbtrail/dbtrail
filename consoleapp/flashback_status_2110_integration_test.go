@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"fmt"
 	"net"
 	"os"
@@ -563,16 +564,31 @@ func testFlashbackSourceSessionLost(t *testing.T, p statusPorts) {
 		everyCommandIsLost(t, c, id)
 	})
 
+	// The port's statement deadline is not a lost session: the statement is
+	// stopped on the source (KILL QUERY from a second connection, #2572)
+	// and the client keeps its connection, its session and its transaction,
+	// the way MySQL's own max_execution_time leaves them. Five rows that
+	// sleep two seconds each: stopped, the next row's check answers 1317
+	// (a lone SLEEP would return 1 and succeed).
 	t.Run("the port's statement deadline", func(t *testing.T) {
-		c, id := inTransaction(t, p.timed)
+		c, _ := inTransaction(t, p.timed)
 		start := time.Now()
-		if _, err := c.Exec("SELECT SLEEP(8)"); err == nil {
-			t.Fatal("a statement past the deadline was answered")
+		_, err := c.Exec("SELECT COUNT(*) FROM (SELECT 1 a UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5) x WHERE SLEEP(2) = 0")
+		var me *mysqlwire.Error
+		if !errors.As(err, &me) || me.Code != 1317 || !strings.Contains(me.Message, "still open") {
+			t.Fatalf("a statement past the deadline answered %v, want 1317 saying the connection is still open", err)
 		}
-		if took := time.Since(start); took > 15*time.Second {
-			t.Fatalf("the deadline of %s took %s to end the statement", statusTimedDeadline, took)
+		if took := time.Since(start); took > 8*time.Second {
+			t.Fatalf("the deadline of %s took %s to end the statement: it ran to its end", statusTimedDeadline, took)
 		}
-		everyCommandIsLost(t, c, id)
+		// Still in the transaction, which still holds its own write.
+		rep, err := c.Exec("SELECT status FROM orders WHERE id = 30")
+		if err != nil || rep.RowCount != 1 || rep.Status&sessionBits != mysqlwire.StatusAutocommit|mysqlwire.StatusInTrans {
+			t.Fatalf("after the deadline: %d rows, status 0x%04x, err %v; want the transaction's own row, still in it", rep.RowCount, rep.Status, err)
+		}
+		if _, err := c.Exec("ROLLBACK"); err != nil {
+			t.Fatalf("ROLLBACK: %v", err)
+		}
 	})
 
 	// A source that never let the connection in is another case: no session

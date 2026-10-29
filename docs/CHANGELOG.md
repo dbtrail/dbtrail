@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **0.120.1's stop on MySQL of a statement past the time limit rarely happened.** Before stopping a statement, the port also required the source's process list to show it running at least as long as the port had waited, read from the `TIME` column. `TIME` is how long the thread has been in its current state, which a statement changes as it runs, so the check usually failed and the client lost its connection as in 0.120.0 (the router's log said "the process list does not show thread N running this statement"). The check is gone. In its place the port now records which server the client's connection reached (host name, port and `server_id`) when it opens, and stops nothing unless the second connection reached the same one; the account, the statement's text and a second reading before `KILL` remain.
 
 ## [0.120.1] - 2026-10-28
 ### Changed

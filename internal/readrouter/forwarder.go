@@ -134,6 +134,10 @@ type Forwarder struct {
 	// bound is that much plus the time stopping takes (deadlineSlack), so it
 	// never expires before the source has answered the stop.
 	queryTimeout time.Duration
+	// identity is the server this connection reached, as sourceIdentitySQL
+	// reads it when the connection opens with StopOnSource; "" when it
+	// could not be read, and then no statement is stopped on the source.
+	identity string
 	// killGrace is how long a statement told to stop (KILL QUERY) has to
 	// answer before its connection is ended instead; 0 is deadlineKillGrace.
 	// A test's seam.
@@ -329,6 +333,9 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 			_ = c.Close()
 			err = fmt.Errorf("settle the session's collation: %w", serr)
 		}
+	}
+	if err == nil && f.StopOnSource && f.queryTimeout > 0 {
+		f.identity = readSourceIdentity(ctx, c)
 	}
 	tracked := false
 	if err == nil && track {
@@ -894,13 +901,12 @@ type statementWatch struct {
 // never on the connection's next statement.
 func (f *Forwarder) watchStatement(ctx context.Context, stmt string, prepared bool) *statementWatch {
 	w := &statementWatch{}
-	started := time.Now()
 	returned, done := make(chan struct{}), make(chan struct{})
 	after := context.AfterFunc(ctx, func() {
 		defer close(done)
 		cause := ctx.Err()
 		if errors.Is(cause, context.DeadlineExceeded) && f.StopOnSource && stmt != "" {
-			why := f.stopOnSource(stmt, prepared, time.Since(started), w, returned)
+			why := f.stopOnSource(stmt, prepared, w, returned)
 			if why == nil {
 				return
 			}
@@ -972,17 +978,15 @@ func (f *Forwarder) deadlineError() error {
 // stop its own statements; measured with one that may only SELECT). It
 // returns nil when the statement was stopped and has answered, errReturned
 // when it ended on its own meanwhile, and otherwise why it was not stopped.
-// ran is how long the statement has been running.
 //
 // The thread id alone does not name a statement: the side connection may
 // reach another server than this one did (a load balancer, a failover), or
 // the same server after a restart, where the id is someone else's. So the
 // source's process list must show, under that id, this account running this
-// statement (runningMatches) for at least as long as it has been running
-// here; anything else sends nothing. Only then is KILL QUERY sent. A
+// statement (runningMatches); anything else sends nothing. Only then is KILL QUERY sent. A
 // statement still running after the grace, and still shown so, has its
 // connection ended on the source (KILL), and the caller closes the socket.
-func (f *Forwarder) stopOnSource(stmt string, prepared bool, ran time.Duration, w *statementWatch, returned <-chan struct{}) error {
+func (f *Forwarder) stopOnSource(stmt string, prepared bool, w *statementWatch, returned <-chan struct{}) error {
 	ended := func() bool {
 		select {
 		case <-returned:
@@ -992,10 +996,13 @@ func (f *Forwarder) stopOnSource(stmt string, prepared bool, ran time.Duration, 
 		}
 	}
 	f.mu.Lock()
-	id, user, live := f.threadID, f.user, f.raw != nil && f.dead == nil
+	id, user, identity, live := f.threadID, f.user, f.identity, f.raw != nil && f.dead == nil
 	f.mu.Unlock()
 	if !live || id == 0 {
 		return errors.New("no connection to stop")
+	}
+	if identity == "" {
+		return errors.New("the source did not say which server it is when this connection opened")
 	}
 	if ended() {
 		return errReturned
@@ -1014,26 +1021,33 @@ func (f *Forwarder) stopOnSource(stmt string, prepared bool, ran time.Duration, 
 	}
 	// shown reads the process list and says whether it shows this
 	// statement running under id.
-	shown := func(ran time.Duration) error {
+	shown := func() error {
 		var list BufferSink
-		if err := run(fmt.Sprintf("SELECT USER, COMMAND, INFO, TIME FROM information_schema.PROCESSLIST WHERE ID = %d", id), &list); err != nil {
+		if err := run(fmt.Sprintf("SELECT USER, COMMAND, INFO FROM information_schema.PROCESSLIST WHERE ID = %d", id), &list); err != nil {
 			return fmt.Errorf("read the process list from a second connection: %w", err)
 		}
-		if len(list.Rows) != 1 || len(list.Rows[0]) != 4 {
+		if len(list.Rows) != 1 || len(list.Rows[0]) != 3 {
 			return fmt.Errorf("the process list shows no thread %d (the second connection may have reached another server)", id)
 		}
 		row := list.Rows[0]
-		// TIME is whole seconds, cut down, and counts from when the
-		// source began the statement, a little after it was sent: two
-		// seconds of margin (measured on MySQL 8.0: 0 at one second).
-		secs, _ := strconv.ParseInt(cellText(row[3]), 10, 64)
-		if cellText(row[0]) != user || !runningMatches(cellText(row[1]), cellText(row[2]), stmt, prepared) ||
-			time.Duration(secs+2)*time.Second < ran {
+		// Not TIME: it is how long the thread has been in its current
+		// STATE, which a statement changes as it runs (each row's SLEEP
+		// starts it over), not how long the statement has run.
+		if cellText(row[0]) != user || !runningMatches(cellText(row[1]), cellText(row[2]), stmt, prepared) {
 			return fmt.Errorf("the process list does not show thread %d running this statement (the second connection may have reached another server)", id)
 		}
 		return nil
 	}
-	if err := shown(ran); err != nil {
+	// The second connection must have reached the server this one did: a
+	// thread id is only a name on one server.
+	var who BufferSink
+	if err := run(sourceIdentitySQL, &who); err != nil {
+		return fmt.Errorf("ask the second connection which server it reached: %w", err)
+	}
+	if len(who.Rows) != 1 || identityOf(who.Rows[0]) != identity {
+		return errors.New("the second connection reached another server than this connection did (a load balancer or a proxy in front of the source?)")
+	}
+	if err := shown(); err != nil {
 		if ended() {
 			return errReturned
 		}
@@ -1060,7 +1074,7 @@ func (f *Forwarder) stopOnSource(stmt string, prepared bool, ran time.Duration, 
 	why := fmt.Errorf("KILL QUERY %d was sent and the statement had not stopped %s later", id, grace)
 	// Shown again before the connection is ended: the KILL must reach the
 	// same statement the KILL QUERY was meant for.
-	if err := shown(ran + grace); err != nil {
+	if err := shown(); err != nil {
 		return fmt.Errorf("%w; the connection was not ended on the source either: %w", why, err)
 	}
 	if err := run(fmt.Sprintf("KILL %d", id), &BufferSink{}); err != nil {
@@ -1070,6 +1084,53 @@ func (f *Forwarder) stopOnSource(stmt string, prepared bool, ran time.Duration, 
 		}
 	}
 	return why
+}
+
+// sourceIdentitySQL names the server a connection reached, on MySQL and
+// MariaDB alike (MariaDB has no @@server_uuid). Two servers behind one
+// address differ in it unless they were set up as copies of each other
+// down to the host name.
+const sourceIdentitySQL = "SELECT @@hostname, @@port, @@server_id"
+
+// readSourceIdentity reads sourceIdentitySQL on a connection that has just
+// opened, before anything of the client's (a statement of the port's own,
+// like settleCollation's: it leaves FOUND_ROWS() at 1 for a client that
+// reads it first). Any failure is "": the connection works, and a statement
+// past its deadline on it is not stopped on the source.
+func readSourceIdentity(ctx context.Context, c *client.Conn) string {
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	res, err := c.Execute(sourceIdentitySQL)
+	if err != nil || res == nil || res.Resultset == nil || res.RowNumber() != 1 {
+		return ""
+	}
+	cells := make([]any, len(res.Fields))
+	for i := range cells {
+		v, err := res.GetValue(0, i)
+		if err != nil {
+			return ""
+		}
+		cells[i] = v
+	}
+	return identityOf(cells)
+}
+
+// identityOf joins the cells of a sourceIdentitySQL row; "" when any is
+// NULL or empty.
+func identityOf(cells []any) string {
+	parts := make([]string, len(cells))
+	for i, v := range cells {
+		switch x := v.(type) {
+		case []byte:
+			parts[i] = string(x)
+		case nil:
+		default:
+			parts[i] = fmt.Sprint(x)
+		}
+		if parts[i] == "" {
+			return ""
+		}
+	}
+	return strings.Join(parts, "/")
 }
 
 // cellText reads a text cell of a forwarded row; NULL is "".

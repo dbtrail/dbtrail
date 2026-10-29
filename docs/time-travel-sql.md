@@ -1685,9 +1685,10 @@ What this is and is not:
   it was stopped and this connection is still open"), and its session
   (`SET`s, the database, an open transaction) is still there for the next
   statement. The port opens a second connection to the source with the same
-  account, checks in the source's process list that this connection is the
-  one running this very statement, and has been for as long as the port has
-  waited for it, and sends `KILL QUERY` for it; an account may stop its own
+  account, checks that it reached the same server as the client's connection
+  (host name, port and `server_id`, read when that connection opened) and
+  that the source's process list shows this connection running this very
+  statement, and sends `KILL QUERY` for it; an account may stop its own
   statements, so one that may only read is enough. When the process list
   shows anything else (the second connection reached another server, behind
   a load balancer or a proxy, or after a failover), nothing is sent; when the
