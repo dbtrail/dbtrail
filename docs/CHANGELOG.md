@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **Fresh mode keeps the tables' recent changes up to date for 15 minutes after the last statement that read them, not one.** A client whose statements spend minutes on MySQL (a report the copy refuses, a long forwarded query) asked for no tail all that while, so the follower stopped after a minute; the client's next statement on the copy then had to bring minutes of changes up to date within its 2 seconds, could not under a steady write load, and read the copy as of its last snapshot. On a 100-warehouse CH-benCHmark at 500 tx/s, answers were 200 to 330 s behind the source. An update with nothing new costs one read of the index's newest event.
 
 ## [0.120.2] - 2026-10-29
 ### Fixed
