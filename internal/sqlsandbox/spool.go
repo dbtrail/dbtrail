@@ -43,6 +43,31 @@ func openSpool(dir string, rows int64, release func()) (*Spool, error) {
 	return &Spool{f: f, dir: dir, rows: rows, release: release}, nil
 }
 
+// WriteSpool writes rows to dir as a worker writes a spooled result and
+// opens it: a Spool for the tests of a caller, which has no worker to make
+// one. Each cell must encode as JSON as the worker's does.
+func WriteSpool(dir string, rows [][]any) (*Spool, error) {
+	w, err := createSpool(dir, 1<<62)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		enc, err := json.Marshal(row)
+		if err != nil {
+			w.abandon()
+			return nil, err
+		}
+		if _, err := w.write(enc); err != nil {
+			w.abandon()
+			return nil, err
+		}
+	}
+	if err := w.finish(); err != nil {
+		return nil, err
+	}
+	return openSpool(dir, int64(len(rows)), nil)
+}
+
 // Rows is how many rows the spool holds.
 func (s *Spool) Rows() int64 { return s.rows }
 

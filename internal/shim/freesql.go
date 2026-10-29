@@ -367,6 +367,10 @@ func (h *Handler) copyOpts() readrouter.CopyOptions {
 // bound nothing.
 func (h *Handler) Close() {
 	h.ReleaseResult()
+	if sp := h.spooled; sp != nil {
+		h.spooled = nil
+		h.closeSpool(sp.spool)
+	}
 	if h.router != nil {
 		h.router.Close()
 	}
@@ -394,6 +398,10 @@ type routeOps struct {
 	// extraVeto, when set, names one more reason to keep the statement on
 	// MySQL (checked after the statement's own vetoes), or "".
 	extraVeto func() string
+	// toFile says runCopy can send a result past the memory cap from a
+	// file (sqlsandbox.Session.ResultToFile): the copy then has no row cap,
+	// so a plan's estimate is not held against one (resultOverRowCap).
+	toFile bool
 }
 
 // routeStatement is HandleQuery's path with a Router bound: the time-travel
@@ -401,7 +409,11 @@ type routeOps struct {
 func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) {
 	ctx, cancel := h.queryContext()
 	defer cancel()
-	return h.route(ctx, qstr, routeOps{
+	// A text statement's answer can be streamed to the client, so a large
+	// one comes from a file (#2575); a prepared one's is buffered.
+	toFile := h.conn != nil && !h.buffered
+	res, err := h.route(ctx, qstr, routeOps{
+		toFile: toFile,
 		forward: func(reason RouteReason, detail string) (*mysql.Result, error) {
 			return h.forward(ctx, qstr, reason, detail)
 		},
@@ -411,7 +423,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), readrouter.KeepsJoinOrder(qstr), reason, unchangedWithin)
+			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), readrouter.KeepsJoinOrder(qstr), toFile, reason, unchangedWithin)
 			if err != nil {
 				return nil, err
 			}
@@ -429,6 +441,85 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			return res, nil
 		},
 	})
+	// Here, not in runCopy: once a row is on the wire nothing may be
+	// forwarded, and the ladder forwards whatever error the copy's side
+	// returns. The source's names are on the header by now.
+	return h.sendSpooled(res, err)
+}
+
+// closeSpool removes a result file, saying so when it cannot: a folder left
+// behind holds disk the next large results are refused for want of.
+func (h *Handler) closeSpool(sp *sqlsandbox.Spool) {
+	if err := sp.Close(); err != nil {
+		h.logger.Warn("free sql: could not remove a large result's file", "err", err)
+	}
+}
+
+// spooledAnswer is a copy's answer whose rows are in a file: what turns
+// each cell into the text the wire carries, as freeSQLResultset does.
+type spooledAnswer struct {
+	spool   *sqlsandbox.Spool
+	columns []sqlsandbox.Column
+	loc     *time.Location
+}
+
+// sendSpooled sends the rows of the copy's answer waiting in a file, if
+// there is one, behind the header res carries, and returns what closes the
+// resultset. Without one, res and err are the statement's answer as they
+// are. The file goes once it is read or the read stops. A failure after the
+// header is out reaches the client as an error in the middle of the
+// resultset, as one from MySQL does: never forwarded, which would write a
+// second answer on the same connection.
+//
+// The statement's deadline does not run here: it began before the plan was
+// asked for, and the copy has answered. As for a result in memory, what
+// bounds the send is the connection's own write deadline, which a client
+// that stops reading reaches.
+func (h *Handler) sendSpooled(res *mysql.Result, err error) (*mysql.Result, error) {
+	sp := h.spooled
+	if sp == nil {
+		return res, err
+	}
+	h.spooled = nil
+	defer h.closeSpool(sp.spool)
+	if err != nil || res == nil || res.Resultset == nil {
+		// Only a bug gets here: the copy's answer is res itself.
+		if err == nil {
+			err = errors.New("the copy's answer was lost before it was sent")
+		}
+		return nil, err
+	}
+	w := newStreamWriterFields(h.conn, res.Resultset.Fields)
+	w.status = h.SessionStatus()
+	row := make([]any, len(sp.columns))
+	sent := 0
+	var wireErr error
+	err = sp.spool.Each(func(cells []any) error {
+		if len(cells) != len(sp.columns) {
+			return fmt.Errorf("row %d of the result file has %d cells for %d columns", sent+1, len(cells), len(sp.columns))
+		}
+		for j, c := range cells {
+			row[j] = freeSQLCell(c, sp.columns[j].Type, sp.loc)
+		}
+		if wireErr = w.writeRow(row); wireErr != nil {
+			return wireErr
+		}
+		sent++
+		return nil
+	})
+	if err != nil {
+		if wireErr != nil {
+			// The client stopped reading or left: its own doing, and the
+			// connection is likely gone with it.
+			h.logger.Debug("free sql: the client stopped taking a large result", "rows_sent", sent, "rows", sp.spool.Rows(), "err", err)
+		} else {
+			h.logger.Warn("free sql: a large result's file could not be read to the end; the client got an error after the rows sent",
+				"rows_sent", sent, "rows", sp.spool.Rows(), "err", err)
+		}
+		return nil, mysql.NewError(mysql.ER_UNKNOWN_ERROR,
+			fmt.Sprintf("the result stopped after %d of its %d rows: %v", sent, sp.spool.Rows(), err))
+	}
+	return w.finish()
 }
 
 // nameAsSource puts the source's column names on what the copy answered, so
@@ -593,7 +684,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		}
 		return ops.forward(reason, d.Reason)
 	}
-	if why := h.resultOverRowCap(ctx, d); why != "" {
+	if why := h.resultOverRowCap(ctx, d); why != "" && !(ops.toFile && h.resultFileRoom()) {
 		return ops.forward(RouteReasonResultOverCap, why+"; "+d.Reason)
 	}
 	var unchangedWithin time.Duration
@@ -713,6 +804,13 @@ func (h *Handler) pastMaxCopyAge(at time.Time) (unchangedWithin time.Duration, t
 		unchangedWithin = h.routerCfg.MaxCopyAge
 	}
 	return unchangedWithin, tooOld
+}
+
+// resultFileRoom says whether the copy can send a result from a file now
+// (#2575): a FreeSQL that cannot say has no room.
+func (h *Handler) resultFileRoom() bool {
+	r, ok := h.freeSQL.(interface{ ResultFileRoom() bool })
+	return ok && r.ResultFileRoom()
 }
 
 // resultOverRowCap says why an expensive statement is not worth trying on
@@ -945,7 +1043,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, nil, false, "", 0)
+	return h.runFreeSQLRouted(schema, qstr, nil, false, false, "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -972,7 +1070,12 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 //
 // types is sqlsandbox.Session.Types: the routing layer's reading of the
 // client's own statement, nil for a port without routing.
-func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, keepJoinOrder bool, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
+//
+// toFile is sqlsandbox.Session.ResultToFile (#2575): a result past the
+// memory cap comes back as a file, and served is then its header alone,
+// with the rows waiting in h.spooled for sendSpooled. The caller that
+// passes it calls sendSpooled once nothing can be forwarded any more.
+func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, keepJoinOrder, toFile bool, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
 	if h.router == nil {
 		// Where the copy answers alone, this is the statement's answer: the
 		// copy's when it is served, a refusal otherwise, including one made
@@ -1033,7 +1136,28 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	// rewrote it): the copy makes the joins in the order written, as MySQL.
 	sess.KeepJoinOrder = keepJoinOrder
 	sess.UnchangedWithin = unchangedWithin
+	sess.ResultToFile = toFile
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
+	if res.Spool != nil {
+		// The file is this statement's until it is handed to sendSpooled;
+		// every other way out of here removes it.
+		kept := false
+		defer func() {
+			if !kept {
+				h.closeSpool(res.Spool)
+			}
+		}()
+		if !toFile {
+			// Only a bug gets here: nothing asked for a file.
+			return nil, fmt.Errorf("free sql: the copy answered from a file nobody asked for")
+		}
+		defer func() {
+			if refused == nil {
+				h.spooled = &spooledAnswer{spool: res.Spool, columns: res.Columns, loc: vars.loc}
+				kept = true
+			}
+		}()
+	}
 	var differ *sqlsandbox.ColumnsDifferError
 	var changed *sqlsandbox.MayHaveChangedError
 	if errors.As(err, &differ) || errors.As(err, &changed) {
@@ -1076,9 +1200,12 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	out := &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}
 	// Counted from here until its answer is written (#2241). Before the
 	// warnings and the audit record below: a result refused here was never
-	// served, and must leave neither.
-	if err := h.holdResult(out); err != nil {
-		return nil, h.resultsHeld(err)
+	// served, and must leave neither. A result in a file holds no memory
+	// here: its rows are read from disk as they are sent.
+	if res.Spool == nil {
+		if err := h.holdResult(out); err != nil {
+			return nil, h.resultsHeld(err)
+		}
 	}
 	var warnings []string
 	if res.TruncatedCells > 0 {
@@ -1295,6 +1422,20 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Results
 	for i, c := range res.Columns {
 		names[i] = c.Name
 	}
+	if res.Spool != nil {
+		// The rows are in a file and go out one by one (sendSpooled): the
+		// header alone, typed as it is below for rows in memory, whose
+		// every cell is text or NULL and whose types applyDuckType sets.
+		rs, err := mysql.BuildSimpleTextResultset(names, nil)
+		if err != nil {
+			return nil, err
+		}
+		for i, c := range res.Columns {
+			rs.Fields[i].Type = mysql.MYSQL_TYPE_VAR_STRING
+			applyDuckType(rs.Fields[i], c.Type)
+		}
+		return rs, nil
+	}
 	values := make([][]any, len(res.Rows))
 	for i, row := range res.Rows {
 		out := make([]any, len(row))
@@ -1464,7 +1605,7 @@ func (h *Handler) recordFreeSQL(statement, schema string, res sqlsandbox.Result,
 	}
 	detail := map[string]string{
 		"sql":       statement,
-		"rows":      strconv.Itoa(len(res.Rows)),
+		"rows":      strconv.Itoa(resultRows(res)),
 		"truncated": strconv.FormatBool(res.Truncated),
 	}
 	if res.TruncatedCells > 0 {
@@ -1492,4 +1633,13 @@ func (h *Handler) recordFreeSQL(statement, schema string, res sqlsandbox.Result,
 		Actor:   actor,
 		Detail:  detail,
 	})
+}
+
+// resultRows is how many rows the copy answered: those in memory, or those
+// in its file.
+func resultRows(res sqlsandbox.Result) int {
+	if res.Spool != nil {
+		return int(res.Spool.Rows())
+	}
+	return len(res.Rows)
 }

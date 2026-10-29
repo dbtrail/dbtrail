@@ -47,8 +47,12 @@ func TestIntegrationFlashbackRoutingLimits_2115(t *testing.T) {
 		// The statement of the issue: a few rows of a wide range.
 		{"a LIMIT over a wide range", "SELECT status FROM ev WHERE " + limitsRange + " LIMIT 5", nil, "live", "bounded_limit"},
 		{"the same, prepared", "SELECT status FROM ev WHERE made >= ? AND made < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "bounded_limit"},
-		// 1,500 rows, the copy returns 50 at most: not tried there.
-		{"a result over the copy's row cap", "SELECT status FROM ev WHERE " + limitsRange, nil, "live", "result_over_row_cap"},
+		// 1,500 rows, over the copy's row cap of 50. A text statement's
+		// result past the copy's memory cap is sent from a file, with no row
+		// cap (#2575): the copy's. A prepared statement's is not: it keeps
+		// the cap and is not tried there.
+		{"a result over the copy's row cap", "SELECT status FROM ev WHERE " + limitsRange, nil, "copy", "expensive_plan"},
+		{"the same, prepared", "SELECT status, ? AS tag FROM ev", []any{"x"}, "live", "result_over_row_cap"},
 		// The copy's, as before.
 		{"a LIMIT with a filter no index serves", "SELECT status FROM ev WHERE " + limitsRange + " AND note = 'nope' LIMIT 5", nil, "copy", "expensive_plan"},
 		{"a LIMIT under a sort no index serves", "SELECT status FROM ev ORDER BY note DESC LIMIT 5", nil, "copy", "expensive_plan"},
@@ -80,8 +84,10 @@ func TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115(t *testing.T) {
 	routingLimits(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true", []limitsCase{
 		{"a LIMIT over a wide range", "SELECT status FROM ev WHERE " + limitsRange + " LIMIT 5", nil, "live", "cheap_plan"},
 		{"the same, prepared", "SELECT status FROM ev WHERE made >= ? AND made < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "cheap_plan"},
-		// 40,000 rows, the copy returns 50 at most: not tried there.
-		{"a result over the copy's row cap", "SELECT status FROM ev", nil, "live", "result_over_row_cap"},
+		// 40,000 rows, over the copy's row cap of 50: the copy's for a text
+		// statement (#2575), not tried there for a prepared one.
+		{"a result over the copy's row cap", "SELECT status FROM ev", nil, "copy", "expensive_plan"},
+		{"the same, prepared", "SELECT status, ? AS tag FROM ev", []any{"x"}, "live", "result_over_row_cap"},
 		// The copy's, as before.
 		{"a LIMIT under a sort no index serves", "SELECT status FROM ev ORDER BY note DESC LIMIT 5", nil, "copy", "expensive_plan"},
 		{"an aggregate: one row out of the whole table", "SELECT min(status), count(*) FROM ev", nil, "copy", "expensive_plan"},

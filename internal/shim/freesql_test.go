@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -43,7 +44,18 @@ type fakeFreeSQL struct {
 	zoneProbes  int
 	zoneErr     error
 	zoneOffsets func(zone string, at []time.Time, fromZone []string) []string
+	// spoolRows, when set, is the answer to a statement asked with
+	// Session.ResultToFile: written to a file under spoolDir, as a result
+	// past the memory cap comes back (#2575). spools holds each one made.
+	spoolRows [][]any
+	spoolDir  string
+	spools    []string
+	// noFileRoom is what ResultFileRoom answers, negated: the disk has no
+	// room for a result file now.
+	noFileRoom bool
 }
+
+func (f *fakeFreeSQL) ResultFileRoom() bool { return !f.noFileRoom }
 
 func (f *fakeFreeSQL) CopyUpdatedAt(context.Context) time.Time { f.ageCalls++; return f.updatedAt }
 func (f *fakeFreeSQL) RowCap() int                             { return f.rowCap }
@@ -76,6 +88,18 @@ func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqls
 	// of a result's rows as it renders them.
 	res := f.res
 	res.Rows = slices.Clone(f.res.Rows)
+	if f.spoolRows != nil && sess.ResultToFile && f.err == nil {
+		dir, err := os.MkdirTemp(f.spoolDir, "spool-")
+		if err != nil {
+			return sqlsandbox.Result{}, err
+		}
+		sp, err := sqlsandbox.WriteSpool(dir, f.spoolRows)
+		if err != nil {
+			return sqlsandbox.Result{}, err
+		}
+		f.spools = append(f.spools, dir)
+		res.Rows, res.Spool = nil, sp
+	}
 	return res, f.err
 }
 

@@ -426,3 +426,29 @@ func TestSpool_closeInsideEach(t *testing.T) {
 		t.Error("Each after Close said nothing")
 	}
 }
+
+// SpoolRoom answers what reserveSpool would, without reserving: no file on
+// a disk in memory, nor past half the free disk with the files alive.
+func TestRunner_spoolRoom(t *testing.T) {
+	defer func(old func(string) (int64, bool, error)) { spillFSFor = old }(spillFSFor)
+	r, _ := newSpoolRunner(t, spoolLimits(64<<20), 1)
+	spillFSFor = func(string) (int64, bool, error) { return 1 << 40, true, nil }
+	if r.SpoolRoom(64 << 20) {
+		t.Error("room on tmpfs")
+	}
+	spillFSFor = func(string) (int64, bool, error) { return 200 << 20, false, nil }
+	if !r.SpoolRoom(64 << 20) {
+		t.Error("no room for one 64 MB file in 200 MB free")
+	}
+	release, err := r.reserveSpool(64 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.SpoolRoom(64 << 20) {
+		t.Error("room for a second 64 MB file in 200 MB free")
+	}
+	release()
+	if !r.SpoolRoom(64 << 20) {
+		t.Error("no room once the first was given back")
+	}
+}
