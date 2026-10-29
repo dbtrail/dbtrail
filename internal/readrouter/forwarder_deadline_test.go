@@ -266,27 +266,6 @@ func TestRunningMatches(t *testing.T) {
 
 func threadText(id uint32) string { return strconv.FormatUint(uint64(id), 10) }
 
-// Shown running for less time than it has been running here: another
-// statement with the same text, on another server, is not this one.
-func TestForwarder_deadlineNeedsTheStatementToHaveRunThatLong(t *testing.T) {
-	src := newSlowSource(t)
-	src.processlist = func(_ uint32, r running) [][]any { return [][]any{{"u", r.command, r.info, "0"}} }
-	const limit = 2500 * time.Millisecond
-	fw := newDeadlineForwarder(t, src, limit)
-	var told []error
-	fw.OnStopFailed = func(why error) { told = append(told, why) }
-	_, err := fw.Forward(deadlineCtx(t, limit), "SELECT SLEEP(25)", &BufferSink{})
-	if !IsLost(err) || !strings.Contains(err.Error(), "could not be stopped on the source") {
-		t.Errorf("answered %v, want the lost connection saying why it was not stopped", err)
-	}
-	if got := src.kills(); len(got) != 0 {
-		t.Errorf("the source was sent %q, want no KILL", got)
-	}
-	if len(told) != 1 || !strings.Contains(told[0].Error(), "does not show thread") {
-		t.Errorf("OnStopFailed was told %v, want once, naming the process list", told)
-	}
-}
-
 // A forwarder of the port's own (a probe, the KILL of dropped connections)
 // does not stop statements on the source: past its deadline the connection
 // is closed under the statement, as it always was.

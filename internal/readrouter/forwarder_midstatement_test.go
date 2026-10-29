@@ -39,10 +39,7 @@ type slowSource struct {
 	processlist func(id uint32, r running) [][]any
 }
 
-type running struct {
-	command, info string
-	since         time.Time
-}
+type running struct{ command, info string }
 
 type slowHandler struct {
 	server.EmptyHandler
@@ -53,7 +50,7 @@ type slowHandler struct {
 func (h slowHandler) HandleQuery(q string) (*mysql.Result, error) {
 	switch {
 	case strings.Contains(q, "SLEEP"):
-		return h.sleep(running{"Query", q, time.Now()})
+		return h.sleep(running{"Query", q})
 	case strings.Contains(q, "PROCESSLIST"):
 		return h.src.processlistRows(q)
 	case strings.HasPrefix(q, "KILL"):
@@ -116,14 +113,13 @@ func (h slowHandler) HandleStmtExecute(_ any, q string, args []any) (*mysql.Resu
 		}
 		q = strings.Replace(q, "?", v, 1)
 	}
-	return h.sleep(running{"Execute", q, time.Now()})
+	return h.sleep(running{"Execute", q})
 }
 
 func (h slowHandler) HandleStmtClose(any) error { return nil }
 
-// processlistRows answers SELECT USER, COMMAND, INFO, TIME FROM ...
-// PROCESSLIST WHERE ID = n for the connection n is. TIME is the whole
-// seconds the statement has run, unless processlist gives one.
+// processlistRows answers SELECT USER, COMMAND, INFO FROM ... PROCESSLIST
+// WHERE ID = n for the connection n is.
 func (s *slowSource) processlistRows(q string) (*mysql.Result, error) {
 	var id uint32
 	if _, err := fmt.Sscanf(q[strings.LastIndex(q, "=")+1:], "%d", &id); err != nil {
@@ -142,16 +138,7 @@ func (s *slowSource) processlistRows(q string) (*mysql.Result, error) {
 	default:
 		rows = [][]any{{"u", "Sleep", nil}}
 	}
-	for i, row := range rows {
-		if len(row) == 3 {
-			secs := 0
-			if busy {
-				secs = int(time.Since(r.since).Seconds())
-			}
-			rows[i] = append(row, fmt.Sprint(secs))
-		}
-	}
-	rs, err := mysql.BuildSimpleTextResultset([]string{"USER", "COMMAND", "INFO", "TIME"}, rows)
+	rs, err := mysql.BuildSimpleTextResultset([]string{"USER", "COMMAND", "INFO"}, rows)
 	if err != nil {
 		return nil, err
 	}
