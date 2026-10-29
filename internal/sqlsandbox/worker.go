@@ -364,8 +364,24 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	res.Rows = [][]any{}
 	var rd renderer
 	var bytesSoFar int64
+	// sp is the file the rows go to once they pass MaxResultBytes, when the
+	// job gave a folder for it (wireJob.SpoolDir); nil while they are held.
+	var sp *spoolWriter
+	defer func() {
+		if sp != nil {
+			sp.abandon()
+		}
+	}()
+	tooLarge := func(limit, n int64) wireResult {
+		return wireResult{Error: &wireError{Kind: errTooLarge,
+			Message: fmt.Sprintf("the result passed %d bytes at row %d", limit, n)}}
+	}
+	spoolFailed := func(err error) wireResult {
+		return wireResult{Error: &wireError{Kind: errSpool, Message: "the result file: " + err.Error()}}
+	}
+	var n int64 // rows taken so far, held or written
 	for rows.Next() {
-		if len(res.Rows) == rowLimit {
+		if n == int64(rowLimit) {
 			// One past the limit: the result was cut. Do not keep it. A cut
 			// at the client's own sql_select_limit is what it asked for, not
 			// a truncation.
@@ -384,17 +400,49 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		for i, v := range raw {
 			row[i] = rd.cell(v, typeNames[i])
 		}
+		n++
 		// Count the result as it grows, in the bytes the parent will read,
-		// and stop before building one it would refuse anyway.
+		// and stop before building one it would refuse anyway; or, with a
+		// folder for it, go on in a file.
 		if job.MaxResultBytes > 0 {
 			enc, err := json.Marshal(row)
 			if err != nil {
 				return wireResult{Error: &wireError{Kind: errQuery, Message: "encode row: " + err.Error()}}
 			}
+			if sp != nil {
+				ok, err := sp.write(enc)
+				if err != nil {
+					return spoolFailed(err)
+				}
+				if !ok {
+					return tooLarge(job.SpoolMaxBytes, n)
+				}
+				continue
+			}
 			bytesSoFar += int64(len(enc)) + 2
 			if bytesSoFar > job.MaxResultBytes {
-				return wireResult{Error: &wireError{Kind: errTooLarge,
-					Message: fmt.Sprintf("the result passed %d bytes at row %d", job.MaxResultBytes, len(res.Rows)+1)}}
+				if job.SpoolDir == "" || job.SpoolMaxBytes <= 0 {
+					return tooLarge(job.MaxResultBytes, n)
+				}
+				if sp, err = createSpool(job.SpoolDir, job.SpoolMaxBytes); err != nil {
+					return spoolFailed(err)
+				}
+				// The rows held so far go first, then this one, in order.
+				for _, held := range append(res.Rows, row) {
+					henc, err := json.Marshal(held)
+					if err != nil {
+						return wireResult{Error: &wireError{Kind: errQuery, Message: "encode row: " + err.Error()}}
+					}
+					ok, err := sp.write(henc)
+					if err != nil {
+						return spoolFailed(err)
+					}
+					if !ok {
+						return tooLarge(job.SpoolMaxBytes, n)
+					}
+				}
+				res.Rows = nil
+				continue
 			}
 		}
 		res.Rows = append(res.Rows, row)
@@ -402,6 +450,13 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	res.TruncatedCells = rd.truncated
 	if err := rows.Err(); err != nil {
 		return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
+	}
+	if sp != nil {
+		if err := sp.finish(); err != nil {
+			return spoolFailed(err)
+		}
+		res.Spooled, res.SpoolRows = true, sp.rows
+		sp = nil
 	}
 	res.ElapsedNS = int64(time.Since(start))
 	return res

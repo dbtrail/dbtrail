@@ -117,8 +117,24 @@ type Limits struct {
 	// to know whether the result was cut, and reports it as Truncated.
 	MaxRows int
 	// MaxResultBytes bounds the encoded result the parent will read from the
-	// child. Past it the child is killed and ErrResultTooLarge is returned.
+	// child. Past it the child is killed and ErrResultTooLarge is returned,
+	// unless SpoolMaxBytes lets the result go to a file.
 	MaxResultBytes int64
+	// SpoolMaxBytes, when set, lets a result larger than MaxResultBytes be
+	// written to a file instead of refused (Result.Spool): the worker writes
+	// its rows there, one JSON array per line, and the caller reads them
+	// from it as the client takes them, with the worker already gone. It
+	// bounds the file; past it the result is refused as too large and the
+	// file removed. Zero (the default) refuses every result past
+	// MaxResultBytes, as before.
+	//
+	// Asked for by the statement, never taken from the Runner's limits
+	// (withDefaults leaves it alone): a caller that reads only Result.Rows
+	// must never be handed a spooled result, which would read as empty. It
+	// has no effect unless it is larger than MaxResultBytes, and none when
+	// the disk cannot take it (reserveSpool), where a result past the cap is
+	// refused as before.
+	SpoolMaxBytes int64
 }
 
 // DefaultLimits are the caps the issue asks for: 2 threads, 2 GB, 60 s,
@@ -322,6 +338,14 @@ type Result struct {
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
+	// Spool holds the rows instead of Rows (which is then nil) when the
+	// result passed MaxResultBytes and Limits.SpoolMaxBytes let it go to a
+	// file. The caller reads it and must Close it, which removes the file.
+	Spool *Spool `json:"-"`
+	// spooled and spoolRows are what the worker said: its rows went to the
+	// file, this many, for spawn to open it with.
+	spooled   bool
+	spoolRows int64
 }
 
 // Phases times one run, worker side (reported by the child) and parent
@@ -580,7 +604,9 @@ func spillCapMessage(msg string, spill spillSpec, noSpill error) string {
 // minSpillBytes is the least a statement is given to spill to; with less
 // room than that it runs without the disk, as before #2210.
 const (
-	spillPrefix   = "bintrail-sql-spill-"
+	spillPrefix = "bintrail-sql-spill-"
+	// spoolPrefix names a statement's result-file directory (Limits.SpoolMaxBytes).
+	spoolPrefix   = "bintrail-sql-result-"
 	minSpillBytes = 256 << 20
 )
 
@@ -634,6 +660,11 @@ type Runner struct {
 	spillMu        sync.Mutex
 	spillSweptAt   time.Time
 	spillLastError string
+	// spoolReserved is the disk the result files alive now may take
+	// (reserveSpool), and spoolLastError, both under spillMu, the last
+	// reason a statement could not have one, said once per change.
+	spoolReserved  int64
+	spoolLastError string
 
 	// fence is where a worker gets a memory cgroup of its own (#2226), found
 	// once; fenceLastError, under spillMu, is the last reason a statement
@@ -686,6 +717,9 @@ type Runner struct {
 	// beforeKeep is a test hook that receives a worker that stays once it
 	// has answered, before it is decided whether it is kept.
 	beforeKeep func(w *worker)
+	// afterSpoolDir is a test hook that receives a statement's result-file
+	// folder once it is made, before the job is written.
+	afterSpoolDir func(dir string)
 }
 
 // New builds a Runner.
@@ -881,7 +915,7 @@ func sweepSpill(root string, cutoff time.Time) {
 		return
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), spillPrefix) {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), spillPrefix) && !strings.HasPrefix(e.Name(), spoolPrefix) {
 			continue
 		}
 		if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
@@ -928,6 +962,59 @@ func (r *Runner) SpillState(memoryLimit string) (int64, error) {
 		return 0, fmt.Errorf("the temporary directory %s has %d MB free, and a statement's share of it (half, split between the %d that can run at once) is too little to spill to", r.spillRoot, free>>20, slots)
 	}
 	return limit, nil
+}
+
+// reserveSpool reserves max bytes of the spill root's disk for a result
+// file, and returns what gives them back. Result files follow the spill
+// directories' rules: never on a disk in memory (tmpfs), where a file is
+// memory outside every limit; and all of them alive at once take at most
+// half the free disk, which capture may write to too. They outlive the
+// statement (a client may read for long after the worker is gone), so they
+// are counted here, not by the slots. A file that cannot be had only means
+// a result past the memory cap is refused, as before.
+func (r *Runner) reserveSpool(max int64) (release func(), err error) {
+	free, inMemory, err := spillFSFor(r.spillRoot)
+	if err != nil {
+		return nil, fmt.Errorf("the temporary directory %s cannot be used: %w", r.spillRoot, err)
+	}
+	if inMemory {
+		return nil, fmt.Errorf("the temporary directory %s is in memory (tmpfs), where a result file would use memory; point TMPDIR at a folder on disk", r.spillRoot)
+	}
+	r.spillMu.Lock()
+	defer r.spillMu.Unlock()
+	if free >= 0 && r.spoolReserved+max > free/2 {
+		return nil, fmt.Errorf("the temporary directory %s has %d MB free, and half of it is already taken by the large results being read (%d MB)",
+			r.spillRoot, free>>20, r.spoolReserved>>20)
+	}
+	r.spoolReserved += max
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.spillMu.Lock()
+			r.spoolReserved -= max
+			r.spillMu.Unlock()
+		})
+	}, nil
+}
+
+// noteSpool logs a change in whether large results can go to a file, once
+// per change, as noteSpill does for spilling.
+func (r *Runner) noteSpool(err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	r.spillMu.Lock()
+	changed := msg != r.spoolLastError
+	r.spoolLastError = msg
+	r.spillMu.Unlock()
+	switch {
+	case !changed:
+	case err != nil:
+		slog.Warn("sql on the copy: a large result cannot go to a file, so one past the memory cap is refused", "reason", msg)
+	default:
+		slog.Info("sql on the copy: large results can go to a file again", "root", r.spillRoot)
+	}
 }
 
 // noteSpill logs a change in whether statements can spill: the first
@@ -1401,7 +1488,7 @@ func startWorkerProcess(exe string, args []string, wf *workerFence) (*worker, er
 
 // marshalJob is the job as the worker reads it. A job that asks for its views
 // (ViewsFor) carries none: the worker asks once it has parsed the statement.
-func marshalJob(job Job, limits Limits, spill spillSpec, more bool) ([]byte, error) {
+func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool) ([]byte, error) {
 	asking := job.ViewsFor != nil
 	viewsSQL := job.ViewsSQL
 	if asking {
@@ -1413,7 +1500,17 @@ func marshalJob(job Job, limits Limits, spill spillSpec, more bool) ([]byte, err
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
+		SpoolDir: spool, SpoolMaxBytes: spoolMax(spool, limits),
 	})
+}
+
+// spoolMax is the spool's cap the worker is told: none without a directory
+// to write it in.
+func spoolMax(dir string, limits Limits) int64 {
+	if dir == "" {
+		return 0
+	}
+	return limits.SpoolMaxBytes
 }
 
 func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, error) {
@@ -1429,9 +1526,61 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 			}
 		}()
 	}
+	// A result past MaxResultBytes may go to a file (Limits.SpoolMaxBytes),
+	// in a directory of its own: the spill directory goes with the worker,
+	// and a spooled result outlives it, until the caller closes it. Removed
+	// here unless the result is handed over spooled; a directory that cannot
+	// be made only means the result is refused past the cap, as before.
+	spoolDir := ""
+	release := func() {}
+	if limits.SpoolMaxBytes > limits.MaxResultBytes && limits.MaxResultBytes > 0 {
+		rel, err := r.reserveSpool(limits.SpoolMaxBytes)
+		if err == nil {
+			var d string
+			if d, err = os.MkdirTemp(r.spillRoot, spoolPrefix); err == nil {
+				spoolDir, release = d, rel
+				if r.afterSpoolDir != nil {
+					r.afterSpoolDir(d)
+				}
+			} else {
+				rel()
+				err = fmt.Errorf("could not make a folder under %s: %w", r.spillRoot, err)
+			}
+		}
+		r.noteSpool(err)
+	}
+	handedOver := false
+	if spoolDir != "" {
+		defer func() {
+			if handedOver {
+				return
+			}
+			if err := os.RemoveAll(spoolDir); err != nil {
+				slog.Warn("sql on the copy: could not remove a statement's result file", "dir", spoolDir, "error", err)
+			}
+			release()
+		}()
+	}
+	// finish hands a spooled result over with its file open (openSpool),
+	// which from then on is the caller's to close.
+	finish := func(res Result, err error) (Result, error) {
+		if err != nil || !res.spooled {
+			return res, err
+		}
+		if spoolDir == "" {
+			return Result{}, &WorkerError{Err: errors.New("the worker wrote its result to a file it was given no folder for")}
+		}
+		sp, err := openSpool(spoolDir, res.spoolRows, release)
+		if err != nil {
+			return Result{}, &WorkerError{Err: err}
+		}
+		handedOver = true
+		res.Rows, res.Spool = nil, sp
+		return res, nil
+	}
 	// Every worker of a Runner stays or none does, so the job can say which
 	// before the worker is known.
-	in, err := marshalJob(job, limits, spill, r.workerStatements > 1)
+	in, err := marshalJob(job, limits, spill, spoolDir, r.workerStatements > 1)
 	if err != nil {
 		return Result{}, &WorkerError{Err: err}
 	}
@@ -1453,7 +1602,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 				res.Phases.Standby = true
 			}
 			r.standbyUsed.Add(1)
-			return res, err
+			return finish(res, err)
 		}
 		// The standby was gone before it read the job, so the statement
 		// has not run anywhere: start a worker for it, as if there had
@@ -1477,7 +1626,7 @@ func (r *Runner) spawn(ctx context.Context, job Job, limits Limits) (Result, err
 		return Result{}, &WorkerError{Err: err}
 	}
 	w.lent = stays
-	return r.run(ctx, w, began, in, job.ViewsFor, limits, spill, noSpill)
+	return finish(r.run(ctx, w, began, in, job.ViewsFor, limits, spill, noSpill))
 }
 
 // run hands the job to w and waits for its answer. The statement's timeout
@@ -1641,6 +1790,12 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			return Result{}, &QueryError{Message: spillCapMessage(out.Error.Message, spill, noSpill)}
 		case errTooLarge:
 			return Result{}, ErrResultTooLarge
+		case errSpool:
+			// The result file could not be written (a full disk, its folder
+			// gone): the server's trouble, not the statement's. Answered as a
+			// result too large, which the port sends to MySQL.
+			slog.Warn("sql on the copy: a large result could not be written to its file; it is answered as too large", "error", out.Error.Message)
+			return Result{}, fmt.Errorf("%w: %s", ErrResultTooLarge, out.Error.Message)
 		default:
 			return Result{}, &WorkerError{Err: errors.New(out.Error.Message), PID: pid, Stderr: w.stderr.text()}
 		}
@@ -1652,7 +1807,9 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 			Views: time.Duration(out.ViewsNS), Query: time.Duration(out.ElapsedNS),
 			Spawn: spawnTook, Decode: time.Since(decodeStart),
 		}}
-	if res.Rows == nil {
+	if out.Spooled {
+		res.spooled, res.spoolRows, res.Rows = true, out.SpoolRows, nil
+	} else if res.Rows == nil {
 		res.Rows = [][]any{}
 	}
 	return res, nil
