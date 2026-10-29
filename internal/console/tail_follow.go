@@ -26,7 +26,18 @@ const (
 	// tailFollowIdle is how long the follower goes on after the last
 	// statement that asked for a table's tail: a table no statement asked for
 	// in that long is left out, and with none left the follower stops.
-	tailFollowIdle = time.Minute
+	//
+	// Minutes, not seconds: a client's statements can sit on MySQL for
+	// minutes (a report the copy refuses, a long forward) and ask for no
+	// tail all that while. Had the follower stopped, the client's next
+	// statement on the copy would have to bring minutes of changes up to date
+	// within its own small budget (copyUnchangedTimeout), which under a
+	// steady write load it cannot, and would read the published copy, as
+	// old as the last snapshot. Measured on a 100-warehouse CH-benCHmark at
+	// 500 tx/s: with one minute, answers were 200 to 330 s behind the source.
+	// An update with no new events is one read of the index's newest event;
+	// the keeper forgets an unused tail on its own, longer clock (tailIdle).
+	tailFollowIdle = 15 * time.Minute
 	// tailFollowTimeout bounds one update; one that runs out keeps what it
 	// folded (the cursor moves with every page) and publishes nothing.
 	tailFollowTimeout = 30 * time.Second

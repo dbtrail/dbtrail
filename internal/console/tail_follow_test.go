@@ -208,16 +208,50 @@ func TestTailFollower(t *testing.T) {
 		}
 	})
 
+	// A client whose statements sit on MySQL for minutes (a report the copy
+	// refuses, a long forward) asks for no tail all that while. The follower
+	// goes on keeping the tables it was asked for up to date, so the
+	// client's next statement on the copy reads a version as new as the
+	// index, without bringing minutes of changes up to date on its own clock
+	// (which it cannot within its budget, and then reads the published copy,
+	// minutes old).
+	t.Run("a statement after minutes on MySQL reads a current version", func(t *testing.T) {
+		f := &fakeIndex{}
+		f.add("orders", "1")
+		k := newKeeper(f)
+		s.statementTails(ctx, k, one(orders), one(orders))
+		k.settle()
+		follow(k)
+		for range 8 { // four minutes of changes, the follower running every 30 s
+			tick(30 * time.Second)
+			f.add("orders", "1")
+			k.followOnce(ctx, time.Minute)
+		}
+		before := updates(k)
+		_, through, ok := s.statementTails(ctx, k, one(orders), one(orders))
+		newest, err := f.Newest(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok || !through.Equal(newest.At) {
+			t.Fatalf("after four minutes with no statement: tails %v through %v, want the index's newest %v", ok, through, newest.At)
+		}
+		if updates(k) != before {
+			t.Error("the statement brought the tails up to date itself: the follower had stopped")
+		}
+	})
+
 	t.Run("tables no statement asked for in idle are left out; with none it stops", func(t *testing.T) {
 		f := &fakeIndex{}
 		f.add("orders", "1")
 		f.add("customers", "9")
 		k := newKeeper(f)
+		idle := k.pub.idle
 		s.statementTails(ctx, k, one(orders), one(orders))
-		tick(30 * time.Second)
+		tick(idle / 2)
 		s.statementTails(ctx, k, one(customers), one(customers))
 		k.settle()
-		tick(45 * time.Second) // orders asked 75 s ago, customers 45 s
+		tick(idle*3/4 + time.Second) // orders asked more than idle ago, customers less
 		follow(k)
 		k.pub.mu.Lock()
 		_, hasOrders := k.pub.cuts[ko]
@@ -225,7 +259,7 @@ func TestTailFollower(t *testing.T) {
 		if hasOrders {
 			t.Error("a table no statement asked for in idle was brought up to date")
 		}
-		tick(time.Minute)
+		tick(idle)
 		k.pub.running = true // as the goroutine would be
 		if k.followOnce(ctx, time.Minute) {
 			t.Fatal("the follower went on with no table asked for")
@@ -313,4 +347,13 @@ func (p panicIndex) Newest(ctx context.Context) (tailMark, error) {
 		panic("newest")
 	}
 	return p.fakeIndex.Newest(ctx)
+}
+
+// The follower keeps up to date only tails the keeper still holds: a window
+// longer than the keeper's own (tailIdle) would follow tables whose tails
+// were forgotten, and rebuild them for no statement.
+func TestTailFollowIdleWithinTheKeepersOwn(t *testing.T) {
+	if tailFollowIdle > tailIdle {
+		t.Fatalf("the follower goes on for %s after the last statement, past the %s the keeper keeps a tail", tailFollowIdle, tailIdle)
+	}
 }
