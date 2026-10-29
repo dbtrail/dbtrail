@@ -48,6 +48,11 @@ type wireJob struct {
 	// and SpillMaxBytes what it may hold (#2210). Empty: no spill.
 	SpillDir      string `json:"spill_dir,omitempty"`
 	SpillMaxBytes int64  `json:"spill_max_bytes,omitempty"`
+	// SpoolDir is where a result past MaxResultBytes is written, as
+	// spoolFile, up to SpoolMaxBytes (Limits.SpoolMaxBytes). Empty: refused
+	// past MaxResultBytes.
+	SpoolDir      string `json:"spool_dir,omitempty"`
+	SpoolMaxBytes int64  `json:"spool_max_bytes,omitempty"`
 	// TimeoutNS is the parent's wall clock, so the child can stop on its own
 	// shortly after it if the parent is no longer there to kill it.
 	TimeoutNS int64 `json:"timeout_ns"`
@@ -78,7 +83,11 @@ type wireResult struct {
 	Rows           [][]any  `json:"rows,omitempty"`
 	Truncated      bool     `json:"truncated"`
 	TruncatedCells int      `json:"truncated_cells"`
-	ElapsedNS      int64    `json:"elapsed_ns"`
+	// Spooled: the rows are in the job's SpoolDir, SpoolRows of them, not in
+	// Rows.
+	Spooled   bool  `json:"spooled,omitempty"`
+	SpoolRows int64 `json:"spool_rows,omitempty"`
+	ElapsedNS int64 `json:"elapsed_ns"`
 	// Child-side phase durations, ns (see Phases).
 	OpenNS     int64      `json:"open_ns,omitempty"`
 	LockdownNS int64      `json:"lockdown_ns,omitempty"`
@@ -101,4 +110,5 @@ const (
 	errQuery    = "query"     // DuckDB failed the statement
 	errSession  = "session"   // the worker could not prepare its locked session
 	errTooLarge = "too_large" // the result passed MaxResultBytes while collecting
+	errSpool    = "spool"     // the result file could not be written
 )
