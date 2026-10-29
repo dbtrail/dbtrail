@@ -558,7 +558,7 @@ func nonEmptyNotes(notes ...string) []string {
 // error that go-mysql renders as an ERR packet mid-resultset — the client sees
 // no terminating EOF and reads it as an unambiguous failure (see streamWriter).
 func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string, notes []string) (*mysql.Result, error) {
-	sw := newStreamWriter(h.conn, cols)
+	sw := newStreamWriter(h.out(), cols)
 	sw.status = h.SessionStatus()
 	cells := make([]any, len(cols)) // reused per row; writeRow encodes synchronously
 

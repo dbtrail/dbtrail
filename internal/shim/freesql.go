@@ -489,7 +489,7 @@ func (h *Handler) sendSpooled(res *mysql.Result, err error) (*mysql.Result, erro
 		}
 		return nil, err
 	}
-	w := newStreamWriterFields(h.conn, res.Resultset.Fields)
+	w := newStreamWriterFields(h.out(), res.Resultset.Fields)
 	w.status = h.SessionStatus()
 	row := make([]any, len(sp.columns))
 	sent := 0
@@ -930,7 +930,7 @@ func (h *Handler) forwardWith(reason RouteReason, detail string, binary bool, ru
 	var sink readrouter.RowSink
 	var buf *readrouter.BufferSink
 	if h.conn != nil {
-		w := newStreamWriterFields(h.conn, nil)
+		w := newStreamWriterFields(h.out(), nil)
 		w.status = h.SessionStatus()
 		w.binary = binary
 		sink = w
