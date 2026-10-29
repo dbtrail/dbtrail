@@ -186,6 +186,7 @@ func (h *Handler) HandleStmtPrepare(query string) (params int, columns int, cont
 // protocol. The statement runs buffered: a resultset streamed to the
 // connection would be text rows, which this client cannot read.
 func (h *Handler) HandleStmtExecute(context any, _ string, args []any) (*mysql.Result, error) {
+	defer h.flushWire() // as in HandleQuery
 	st, ok := context.(*preparedStmt)
 	if !ok {
 		return nil, mysql.NewError(mysql.ER_UNKNOWN_STMT_HANDLER, "unknown prepared statement")

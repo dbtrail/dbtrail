@@ -153,6 +153,9 @@ type Handler struct {
 	// never calls BindConn — keeps the bounded buffered+cap path, so streaming
 	// is strictly opt-in and cannot change behaviour for an unbound handler.
 	conn packetWriter
+	// wire coalesces the packets of a streamed resultset into few writes
+	// (stream.go); nil when conn is not go-mysql's own connection.
+	wire *coalescer
 	// buffered is set while a prepared statement executes (prepared.go):
 	// its rows go back in the binary encoding, so nothing may stream text
 	// rows to conn. Read and written on the connection's own goroutine.
@@ -463,6 +466,29 @@ func (h *Handler) BindConnContext(ctx context.Context) {
 // needed). Handlers that never bind a conn keep the bounded buffered+cap path.
 func (h *Handler) BindConn(conn packetWriter) {
 	h.conn = conn
+	h.wire = newCoalescer(conn)
+}
+
+// out is where a streamed resultset writes its packets: the coalescer when
+// the connection has one, else the connection.
+func (h *Handler) out() packetWriter {
+	if h.wire != nil {
+		return h.wire
+	}
+	return h.conn
+}
+
+// flushWire sends what the coalescer holds. Called as each command the
+// handler serves returns, on every path: go-mysql then writes the packet
+// that closes the answer, which must follow the rows.
+func (h *Handler) flushWire() {
+	if h.wire == nil {
+		return
+	}
+	if err := h.wire.flush(); err != nil {
+		// The connection is broken; go-mysql's next write says so.
+		h.logger.Debug("mysql port: could not send the rows of an answer", "err", err)
+	}
 }
 
 // BindActor records the authenticated MySQL user this connection handshook
@@ -543,6 +569,9 @@ func (h *Handler) UseDB(dbName string) error {
 // small allow-list of handshake noise so MySQL clients don't choke
 // on connection setup.
 func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
+	// Before go-mysql writes what closes the answer (an EOF or an error):
+	// rows a stream left in the coalescer must reach the client first.
+	defer h.flushWire()
 	h.mu.Lock()
 	currentDB := h.db
 	h.mu.Unlock()

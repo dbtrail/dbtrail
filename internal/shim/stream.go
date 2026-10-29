@@ -2,16 +2,18 @@ package shim
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/server"
 
 	"github.com/dbtrail/dbtrail/internal/event"
 )
 
 // packetWriter is the subset of *server.Conn the streaming full-table path
 // needs: writing raw MySQL protocol packets. Declared as an interface (not the
-// concrete *server.Conn) so the shim package doesn't take a go-mysql/server
-// import here, streamWriter is unit-testable with an in-memory capture, and a
+// concrete *server.Conn) so streamWriter is unit-testable with an in-memory
+// capture (only newCoalescer looks for the concrete type), and a
 // nil conn on the Handler is an unambiguous "buffer instead of stream" signal.
 //
 // WritePacket's contract (go-mysql packet.Conn): data must have 4 reserved
@@ -219,4 +221,76 @@ func (h *Handler) projectCell(schema, table, column string, raw any) (any, error
 		return nil, event.UnresolvedToastError(schema, table, "", []string{column})
 	}
 	return h.fullTableTextCell(schema, table, column, raw), nil
+}
+
+// coalesceBytes is how much of a streamed resultset is gathered before it
+// is written to the connection.
+const coalesceBytes = 64 << 10
+
+// coalescer gathers the packets of a streamed resultset into writes of
+// about coalesceBytes, where go-mysql writes each packet on its own: one
+// write per row, three million for a result that size, each also its own
+// TLS record on an encrypted connection. It frames each packet as go-mysql
+// does (length, then the connection's sequence number, which it advances)
+// and writes above TLS, to the connection go-mysql writes to.
+//
+// What it holds must reach the client before anything go-mysql writes
+// itself (the EOF or error that closes the answer): Handler.flushWire, as
+// each command returns. A packet too large for one frame, or a connection
+// with protocol compression, goes through go-mysql as it always did.
+type coalescer struct {
+	seq      *uint8
+	w        io.Writer
+	fallback packetWriter
+	buf      []byte
+}
+
+// newCoalescer returns a coalescer for go-mysql's server connection, nil
+// for anything else (a test's capture, a compressed connection).
+func newCoalescer(pw packetWriter) *coalescer {
+	sc, ok := pw.(*server.Conn)
+	if !ok || sc.Conn == nil || sc.Conn.Compression != mysql.MYSQL_COMPRESS_NONE {
+		return nil
+	}
+	return &coalescer{seq: &sc.Conn.Sequence, w: sc.Conn, fallback: sc}
+}
+
+// WritePacket queues one packet (4 reserved bytes, then the payload, as
+// go-mysql takes it) and writes the queue once it passes coalesceBytes.
+func (c *coalescer) WritePacket(data []byte) error {
+	length := len(data) - 4
+	if length >= mysql.MaxPayloadLen {
+		// Split across frames by go-mysql, in order after what is queued.
+		if err := c.flush(); err != nil {
+			return err
+		}
+		return c.fallback.WritePacket(data)
+	}
+	data[0], data[1], data[2], data[3] = byte(length), byte(length>>8), byte(length>>16), *c.seq
+	*c.seq++
+	c.buf = append(c.buf, data...)
+	if len(c.buf) >= coalesceBytes {
+		return c.flush()
+	}
+	return nil
+}
+
+// flush writes what is queued.
+func (c *coalescer) flush() error {
+	if len(c.buf) == 0 {
+		return nil
+	}
+	n, err := c.w.Write(c.buf)
+	if err == nil && n != len(c.buf) {
+		err = io.ErrShortWrite
+	}
+	c.buf = c.buf[:0]
+	if cap(c.buf) > 4*coalesceBytes {
+		// One large row grew it: not kept for the connection's life.
+		c.buf = nil
+	}
+	if err != nil {
+		return fmt.Errorf("write to the client: %w", err)
+	}
+	return nil
 }
