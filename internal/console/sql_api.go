@@ -1307,7 +1307,8 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		SQL:     statement,
 		Schema:  schema,
 		Session: sess,
-		Limits:  sqlsandbox.Limits{MaxRows: maxRows, MemoryLimit: memory, SpoolMaxBytes: sqlResultFileBytes(sess)},
+		Limits: sqlsandbox.Limits{MaxRows: maxRows, MemoryLimit: memory,
+			MaxResultBytes: s.sqlResultMemoryBytes(sess), SpoolMaxBytes: sqlResultFileBytes(sess)},
 	}
 	ran = true
 	res, err := slot.Run(ctx, job)

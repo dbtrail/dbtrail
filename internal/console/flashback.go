@@ -224,6 +224,25 @@ func sqlResultFileBytes(sess sqlsandbox.Session) int64 {
 	return sqlPortResultFileBytes
 }
 
+// sqlPortBinaryMemoryBytes is how much of a prepared statement's result the
+// port holds in memory before the rest goes to a file (#2575): turning rows
+// in memory into the binary encoding holds them twice, plus an index per
+// cell, in the process that also captures, and the port's result budget
+// counts them once. Past this, the result is sent from the file.
+const sqlPortBinaryMemoryBytes = 8 << 20
+
+// sqlResultMemoryBytes is Limits.MaxResultBytes for a statement run under
+// sess: 0 (the runner's) unless its caller doubles a result in memory.
+func (s *Server) sqlResultMemoryBytes(sess sqlsandbox.Session) int64 {
+	if !sess.ResultToFile || !sess.BinaryResult {
+		return 0
+	}
+	if m := s.sqlLimits.MaxResultBytes; m > 0 && m < sqlPortBinaryMemoryBytes {
+		return m
+	}
+	return sqlPortBinaryMemoryBytes
+}
+
 // DefaultSQLPortMaxRows is the port's row cap when none is configured
 // (Config.SQLPortMaxRows, router --sql-port-max-rows).
 const DefaultSQLPortMaxRows = 10_000

@@ -452,3 +452,21 @@ func TestRunner_spoolRoom(t *testing.T) {
 		t.Error("no room once the first was given back")
 	}
 }
+
+// The cap on a result is on its rows: a result whose rows are within it is
+// not refused for what its answer carries beside them (here, column names
+// longer than the rows), which the parent allows for on its own.
+func TestRun_capIsOnTheRowsNotTheEnvelope(t *testing.T) {
+	f := newCopyFixture(t)
+	l := testLimits()
+	l.MaxResultBytes = 128
+	r, _ := newSpoolRunner(t, l, 1)
+	long := strings.Repeat("c", 200)
+	res, err := r.Runner.Run(context.Background(), f.job(fmt.Sprintf("SELECT 1 AS %s, 2 AS %s_2", long, long)))
+	if err != nil {
+		t.Fatalf("a one-row result under a 128-byte cap: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf("%d rows", len(res.Rows))
+	}
+}

@@ -47,12 +47,12 @@ func TestIntegrationFlashbackRoutingLimits_2115(t *testing.T) {
 		// The statement of the issue: a few rows of a wide range.
 		{"a LIMIT over a wide range", "SELECT status FROM ev WHERE " + limitsRange + " LIMIT 5", nil, "live", "bounded_limit"},
 		{"the same, prepared", "SELECT status FROM ev WHERE made >= ? AND made < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "bounded_limit"},
-		// 1,500 rows, over the copy's row cap of 50. A text statement's
-		// result past the copy's memory cap is sent from a file, with no row
-		// cap (#2575): the copy's. A prepared statement's is not: it keeps
-		// the cap and is not tried there.
+		// 1,500 rows, over the copy's row cap of 50. A result past the copy's
+		// memory cap is sent from a file, with no row cap (#2575), so the
+		// statement is the copy's, as text and prepared alike. Where the
+		// disk has no room for a file the cap holds (internal/shim).
 		{"a result over the copy's row cap", "SELECT status FROM ev WHERE " + limitsRange, nil, "copy", "expensive_plan"},
-		{"the same, prepared", "SELECT status, ? AS tag FROM ev", []any{"x"}, "live", "result_over_row_cap"},
+		{"the same, prepared", "SELECT status, ? AS tag FROM ev", []any{"x"}, "copy", "expensive_plan"},
 		// The copy's, as before.
 		{"a LIMIT with a filter no index serves", "SELECT status FROM ev WHERE " + limitsRange + " AND note = 'nope' LIMIT 5", nil, "copy", "expensive_plan"},
 		{"a LIMIT under a sort no index serves", "SELECT status FROM ev ORDER BY note DESC LIMIT 5", nil, "copy", "expensive_plan"},
@@ -84,10 +84,10 @@ func TestIntegrationFlashbackRoutingLimitsMariaDBSource_2115(t *testing.T) {
 	routingLimits(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true", []limitsCase{
 		{"a LIMIT over a wide range", "SELECT status FROM ev WHERE " + limitsRange + " LIMIT 5", nil, "live", "cheap_plan"},
 		{"the same, prepared", "SELECT status FROM ev WHERE made >= ? AND made < ? LIMIT 5", []any{"2026-01-02 00:00:00", "2026-01-03 01:00:00"}, "live", "cheap_plan"},
-		// 40,000 rows, over the copy's row cap of 50: the copy's for a text
-		// statement (#2575), not tried there for a prepared one.
+		// 40,000 rows, over the copy's row cap of 50: the copy's, sent from a
+		// file past its memory cap (#2575), as text and prepared alike.
 		{"a result over the copy's row cap", "SELECT status FROM ev", nil, "copy", "expensive_plan"},
-		{"the same, prepared", "SELECT status, ? AS tag FROM ev", []any{"x"}, "live", "result_over_row_cap"},
+		{"the same, prepared", "SELECT status, ? AS tag FROM ev", []any{"x"}, "copy", "expensive_plan"},
 		// The copy's, as before.
 		{"a LIMIT under a sort no index serves", "SELECT status FROM ev ORDER BY note DESC LIMIT 5", nil, "copy", "expensive_plan"},
 		{"an aggregate: one row out of the whole table", "SELECT min(status), count(*) FROM ev", nil, "copy", "expensive_plan"},
@@ -161,8 +161,12 @@ func routingLimits(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, cases
 	const rowCap = 50
 	// FlashbackListen and ReadRouting are display config (the tally is
 	// reported only for a console that says it routes); the port below is
-	// served by hand on its own listener.
-	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg, SQLLimits: sqlsandbox.Limits{MaxRows: rowCap}, SQLPortMaxRows: rowCap,
+	// served by hand on its own listener. The copy holds 128 bytes of a
+	// result in memory: its 40 rows go to the client from a file (#2575),
+	// through a real driver, as text and in the binary encoding; a file
+	// that failed would refuse them and MySQL would answer instead.
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg,
+		SQLLimits: sqlsandbox.Limits{MaxRows: rowCap, MaxResultBytes: 128}, SQLPortMaxRows: rowCap,
 		FlashbackListen: "127.0.0.1:3308", ReadRouting: console.ReadRoutingConfig{MaxCopyAge: time.Hour, CostThreshold: 20, ScanRows: 1000}})
 	if err != nil {
 		t.Fatal(err)

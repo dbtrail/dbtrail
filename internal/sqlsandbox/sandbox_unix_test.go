@@ -73,7 +73,9 @@ func TestRun_parentKillsAChildThatOverflowsTheResult(t *testing.T) {
 	l := testLimits()
 	l.MaxResultBytes = 4096
 	l.Timeout = 30 * time.Second
-	r := New(Config{Exe: "/bin/sh", Args: []string{"-c", "head -c 100000 /dev/zero | tr '\\0' x; sleep 30"}, Limits: l})
+	// Past the cap and the room the answer's envelope gets beside it
+	// (resultEnvelopeBytes).
+	r := New(Config{Exe: "/bin/sh", Args: []string{"-c", "head -c 3000000 /dev/zero | tr '\\0' x; sleep 30"}, Limits: l})
 	start := time.Now()
 	_, err := r.Run(context.Background(), f.job("SELECT 1"))
 	took := time.Since(start)

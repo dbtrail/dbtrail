@@ -316,7 +316,11 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 		return &out, nil
 	}
 	h.setWarnings(nil)
-	return h.route(ctx, st.query, routeOps{
+	// The answer is streamed in the binary encoding, so a large one comes
+	// from a file too (#2575), sent once the ladder has settled.
+	toFile := h.conn != nil
+	res, err := h.route(ctx, st.query, routeOps{
+		toFile: toFile,
 		forward: func(reason RouteReason, detail string) (*mysql.Result, error) {
 			return h.forwardWith(reason, detail, true, func(sink readrouter.RowSink) (*mysql.Result, error) {
 				return st.up.Execute(ctx, args, sink)
@@ -324,7 +328,7 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 		},
 		decide: func() (readrouter.Decision, error) { return st.up.Decide(ctx, args) },
 		runCopy: func(reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
-			return h.runPreparedOnCopy(st, args, currentDB, reason, unchangedWithin)
+			return h.runPreparedOnCopy(st, args, currentDB, toFile, reason, unchangedWithin)
 		},
 		extraVeto: func() string {
 			switch {
@@ -346,6 +350,7 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 			return copyUnsafeArgument(args)
 		},
 	})
+	return h.sendSpooled(res, err)
 }
 
 // likeUnsafeArgument names a string argument with a backslash, or "" when
@@ -409,12 +414,16 @@ func copyUnsafeArgument(args []any) string {
 // The template's names are already in double quotes (copyParts).
 // The text never goes anywhere else: MySQL's rungs execute the statement
 // prepared on the source.
-func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
+//
+// toFile is runFreeSQLRouted's: a result in a file comes back as its header
+// alone, typed for the binary encoding as one in memory is, and its rows
+// wait in h.spooled for sendSpooled, marked binary.
+func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db string, toFile bool, reason string, unchangedWithin time.Duration) (*mysql.Result, error) {
 	text, err := st.interpolate(args)
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.runFreeSQLRouted(db, text, readrouter.ShapeOf(st.query), readrouter.KeepsJoinOrder(st.query), false, reason, unchangedWithin)
+	res, err := h.runFreeSQLRouted(db, text, readrouter.ShapeOf(st.query), readrouter.KeepsJoinOrder(st.query), toFile, true, reason, unchangedWithin)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +433,14 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db, reason str
 	h.nameAsSource(res, names, namesErr)
 	bin, err := binaryResultset(res.Resultset)
 	if err != nil {
+		if h.spooled != nil {
+			h.closeSpool(h.spooled.spool)
+			h.spooled = nil
+		}
 		return nil, err
+	}
+	if h.spooled != nil {
+		h.spooled.binary = true
 	}
 	out := *res
 	out.Resultset = bin
@@ -628,9 +644,7 @@ func binaryResultset(rs *mysql.Resultset) (*mysql.Resultset, error) {
 				continue
 			}
 			if _, ok := encodeBinaryCell(f, texts[r][c]); !ok {
-				f.Type = mysql.MYSQL_TYPE_VAR_STRING
-				f.Charset = 255
-				f.Flag &^= mysql.BINARY_FLAG | mysql.UNSIGNED_FLAG
+				asBinaryText(f)
 				break
 			}
 		}
@@ -654,6 +668,14 @@ func binaryResultset(rs *mysql.Resultset) (*mysql.Resultset, error) {
 	out.FieldNames = rs.FieldNames
 	out.RowDatas = rows
 	return out, nil
+}
+
+// asBinaryText declares a column text in a binary resultset: one of its
+// cells does not encode under the type it had.
+func asBinaryText(f *mysql.Field) {
+	f.Type = mysql.MYSQL_TYPE_VAR_STRING
+	f.Charset = 255
+	f.Flag &^= mysql.BINARY_FLAG | mysql.UNSIGNED_FLAG
 }
 
 // textCells reads every cell of a text resultset as the bytes the text

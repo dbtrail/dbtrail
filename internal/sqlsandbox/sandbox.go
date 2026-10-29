@@ -116,9 +116,11 @@ type Limits struct {
 	// MaxRows is how many result rows come back. The worker fetches one more
 	// to know whether the result was cut, and reports it as Truncated.
 	MaxRows int
-	// MaxResultBytes bounds the encoded result the parent will read from the
-	// child. Past it the child is killed and ErrResultTooLarge is returned,
-	// unless SpoolMaxBytes lets the result go to a file.
+	// MaxResultBytes bounds the encoded rows of a result held in memory: the
+	// worker stops past it with ErrResultTooLarge, unless SpoolMaxBytes lets
+	// the result go to a file. The parent kills a child whose whole answer
+	// passes it and the room for what comes beside the rows
+	// (resultEnvelopeBytes).
 	MaxResultBytes int64
 	// SpoolMaxBytes, when set, lets a result larger than MaxResultBytes be
 	// written to a file instead of refused (Result.Spool): the worker writes
@@ -260,9 +262,14 @@ type Session struct {
 	// result larger than the memory cap to its client from a file
 	// (Result.Spool), so the statement may run with no row cap and its
 	// result may come back spooled (Limits.SpoolMaxBytes). Never sent to the
-	// worker. Only the MySQL port's routed text statements set it (#2575):
-	// every other caller reads Result.Rows alone.
+	// worker. Only the MySQL port's routed statements set it (#2575): every
+	// other caller reads Result.Rows alone.
 	ResultToFile bool `json:"-"`
+	// BinaryResult, with ResultToFile, says the caller turns a result held
+	// in memory into the binary encoding of a prepared statement's answer,
+	// which holds it twice: the caller keeps less of it in memory, and the
+	// rest comes from the file. Never sent to the worker.
+	BinaryResult bool `json:"-"`
 	// StrictStar asks for a refusal instead of an answer when the statement
 	// holds a star over a table whose `SELECT *` on the copy is not MySQL's:
 	// the order of its columns is not known, or MySQL returns a different set
@@ -616,6 +623,13 @@ const (
 	spoolPrefix   = "bintrail-sql-result-"
 	minSpillBytes = 256 << 20
 )
+
+// resultEnvelopeBytes is what a worker's answer may carry beside its rows
+// (the request for its views, the columns, the phases, an error): the
+// worker holds the rows themselves to MaxResultBytes, and the parent's cap
+// on the whole answer, the backstop against a worker gone wrong, must not
+// refuse a result whose rows were within it.
+const resultEnvelopeBytes = 1 << 20
 
 // staleSpillAge is how old a spill directory must be before a sweep removes
 // it as left behind: one a worker kept writing after its parent died (the
@@ -1689,7 +1703,11 @@ func (r *Runner) run(ctx context.Context, w *worker, began time.Time, in []byte,
 	if w.more {
 		lineEnds = make(chan struct{}, 2)
 	}
-	w.stdout.arm(limits.MaxResultBytes, func() { _ = killProcessGroup(w.cmd.Process) }, firstLine, lineEnds)
+	stdoutMax := limits.MaxResultBytes
+	if stdoutMax > 0 {
+		stdoutMax = min(stdoutMax, math.MaxInt64-resultEnvelopeBytes) + resultEnvelopeBytes
+	}
+	w.stdout.arm(stdoutMax, func() { _ = killProcessGroup(w.cmd.Process) }, firstLine, lineEnds)
 	// wrote receives the result of writing the job, once.
 	wrote := make(chan error, 1)
 

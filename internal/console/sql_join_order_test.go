@@ -60,3 +60,51 @@ func TestSQLOnCopy_resultToFileReachesTheEngine(t *testing.T) {
 		t.Error("a statement that did not ask came back in a file")
 	}
 }
+
+// A prepared statement's result is held in memory up to 8 MB, then comes
+// from a file (#2575): its binary encoding holds it twice. Nothing else is
+// held to less than the runner's cap, and a runner cap below 8 MB stands.
+func TestSQLResultMemoryBytes(t *testing.T) {
+	s := &Server{sqlLimits: sqlsandbox.Limits{MaxResultBytes: 64 << 20}}
+	for _, c := range []struct {
+		sess sqlsandbox.Session
+		want int64
+	}{
+		{sqlsandbox.Session{}, 0},
+		{sqlsandbox.Session{ResultToFile: true}, 0},
+		{sqlsandbox.Session{BinaryResult: true}, 0}, // no file to send the rest from
+		{sqlsandbox.Session{ResultToFile: true, BinaryResult: true}, sqlPortBinaryMemoryBytes},
+	} {
+		if got := s.sqlResultMemoryBytes(c.sess); got != c.want {
+			t.Errorf("%+v: %d, want %d", c.sess, got, c.want)
+		}
+	}
+	s.sqlLimits.MaxResultBytes = 1 << 20
+	if got := s.sqlResultMemoryBytes(sqlsandbox.Session{ResultToFile: true, BinaryResult: true}); got != 1<<20 {
+		t.Errorf("under a 1 MB runner cap: %d", got)
+	}
+}
+
+// The 8 MB reach the engine: a result of about 10 MB, held in memory for a
+// text statement, comes from a file for a prepared one.
+func TestSQLOnCopy_binaryResultIsHeldToLessMemory(t *testing.T) {
+	f := newSQLFixture(t, sandboxRunner{sqlsandbox.New(sqlsandbox.Config{SpillDir: t.TempDir()})}, false)
+	q := &SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}
+	const stmt = "SELECT i, repeat('x', 1000) AS s FROM range(10000) t(i)"
+	text, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{ResultToFile: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text.Spool != nil {
+		text.Spool.Close()
+		t.Fatal("a text statement's 10 MB went to a file")
+	}
+	bin, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{ResultToFile: true, BinaryResult: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bin.Spool == nil {
+		t.Fatalf("a prepared statement's 10 MB stayed in memory (%d rows)", len(bin.Rows))
+	}
+	bin.Spool.Close()
+}
