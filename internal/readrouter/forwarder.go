@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/client"
@@ -113,10 +115,29 @@ type Forwarder struct {
 	capabilities   func(*client.Conn) string
 	policy         Policy
 	connectTimeout time.Duration
-	// queryTimeout bounds each round trip on the upstream socket (read and
-	// write deadline), the same deadline the port applies to a copy
-	// statement; a statement past it loses the connection.
+	// StopOnSource: a statement whose context's DEADLINE passes is stopped
+	// on the source (KILL QUERY) and the connection kept, instead of the
+	// connection being closed under it (see watchStatement). Set it before
+	// the first statement: it also lengthens the socket's own deadline. The
+	// port sets it on a client's connection; a forwarder of the port's own
+	// (a probe, a KILL of dropped connections) leaves it off and behaves
+	// as before.
+	StopOnSource bool
+	// OnStopFailed, when set, is told why a statement past its deadline
+	// could not be stopped on the source (its connection is then lost, as
+	// without StopOnSource), or that the KILL of its connection failed and
+	// the statement may still be running there.
+	OnStopFailed func(why error)
+	// queryTimeout is the deadline the port gives each statement, the same
+	// one it applies to a copy statement: each read and write on the socket
+	// is bounded by it (the login too). With StopOnSource the socket's
+	// bound is that much plus the time stopping takes (deadlineSlack), so it
+	// never expires before the source has answered the stop.
 	queryTimeout time.Duration
+	// killGrace is how long a statement told to stop (KILL QUERY) has to
+	// answer before its connection is ended instead; 0 is deadlineKillGrace.
+	// A test's seam.
+	killGrace time.Duration
 
 	mu   sync.Mutex
 	db   string
@@ -271,6 +292,10 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 		return client.ConnectWithContext(ctx, f.addr, f.user, f.pass, f.db, f.connectTimeout, func(c *client.Conn) error {
 			c.ReadTimeout = f.queryTimeout
 			c.WriteTimeout = f.queryTimeout
+			if f.StopOnSource && f.queryTimeout > 0 {
+				c.ReadTimeout += deadlineSlack
+				c.WriteTimeout += deadlineSlack
+			}
 			if track {
 				// Only asked for: what the source agreed to is read after
 				// the handshake (trackSession). The one error this returns
@@ -816,14 +841,291 @@ func IsLost(err error) bool {
 	return errors.As(err, &me) && me.Code == CodeUpstreamLost
 }
 
-// watch ties the upstream socket to ctx for the duration of one statement:
-// when ctx ends (the query deadline, the client connection closing, daemon
-// shutdown) the socket is closed, which is the only way to make go-mysql's
-// blocking read return. That happens on another goroutine than the
-// statement's, hence interrupt and not lose. The returned stop must be called
-// when the statement is done.
+// watch ties the upstream socket to ctx for the duration of one round trip
+// that is not a client's statement (a PING, a USE, a PREPARE): when ctx ends
+// the socket is closed (interrupt). The returned stop must be called when
+// the round trip is done. A statement is watched by watchStatement.
 func (f *Forwarder) watch(ctx context.Context) func() bool {
-	return context.AfterFunc(ctx, func() { f.interrupt(ctx.Err()) })
+	return f.watchStatement(ctx, "", false).stop
+}
+
+// Stopping a statement on the source takes at most a connection (the dial,
+// then a login whose every read is bounded by killRoundTrip), three round
+// trips before the grace, the grace, and two after it; the socket's
+// deadline leaves room for all of it.
+const (
+	deadlineKillGrace  = 10 * time.Second
+	killConnectTimeout = 5 * time.Second
+	killRoundTrip      = 5 * time.Second
+	deadlineSlack      = killConnectTimeout + 3*killRoundTrip + 3*killRoundTrip + deadlineKillGrace + 2*killRoundTrip + 10*time.Second
+)
+
+// statementWatch is watchStatement's handle on one statement.
+type statementWatch struct {
+	stop func() bool
+	// killed: the source was told to stop the statement (KILL QUERY), so
+	// a 1317 it answers is this port's deadline (answer).
+	killed atomic.Bool
+}
+
+// watchStatement ties one statement to ctx: stmt is its text as the source
+// shows it in its process list, and prepared says it was sent prepared (the
+// source shows it with the arguments in place).
+//
+// When ctx's DEADLINE passes, the statement is stopped on the source, not
+// cut off here: a connection of its own (stopOnSource) checks that the
+// source's process list shows this connection running this statement and
+// sends KILL QUERY. The source ends the statement with 1317 and keeps the
+// connection, its session and its transaction; the client reads why
+// (answer) and goes on. That is what MySQL's own max_execution_time does.
+// Closing the socket instead would leave the statement running on the
+// source to its end, and the client with a connection that answers 2006
+// until it reconnects (a benchmark's worker, a report's pool, never do).
+//
+// When the statement cannot be stopped that way (the process list shows
+// something else, the side connection fails, the statement does not stop in
+// the grace), and whenever ctx is CANCELLED (the client left, the daemon
+// stops), the socket is closed as before (interrupt). That happens on
+// another goroutine than the statement's, hence interrupt and not lose.
+//
+// stop must be called when the statement is done. It waits for a stop on
+// the source already under way, so that a KILL QUERY sent late lands while
+// this connection is idle (where it does nothing: measured on MySQL 8.0) and
+// never on the connection's next statement.
+func (f *Forwarder) watchStatement(ctx context.Context, stmt string, prepared bool) *statementWatch {
+	w := &statementWatch{}
+	started := time.Now()
+	returned, done := make(chan struct{}), make(chan struct{})
+	after := context.AfterFunc(ctx, func() {
+		defer close(done)
+		cause := ctx.Err()
+		if errors.Is(cause, context.DeadlineExceeded) && f.StopOnSource && stmt != "" {
+			why := f.stopOnSource(stmt, prepared, time.Since(started), w, returned)
+			if why == nil {
+				return
+			}
+			if !errors.Is(why, errReturned) {
+				cause = fmt.Errorf("%w; it could not be stopped on the source: %w", cause, why)
+				if f.OnStopFailed != nil {
+					f.OnStopFailed(why)
+				}
+			}
+		}
+		select {
+		case <-returned:
+			// The statement ended on its own while the source was being
+			// asked: the connection is in sync, nothing to interrupt.
+		default:
+			f.interrupt(cause)
+		}
+	})
+	var once sync.Once
+	w.stop = func() (stopped bool) {
+		once.Do(func() {
+			close(returned)
+			if stopped = after(); !stopped {
+				<-done
+			}
+		})
+		return stopped
+	}
+	return w
+}
+
+// errReturned: the statement ended on its own while it was being stopped.
+var errReturned = errors.New("the statement ended on its own")
+
+// answer is what the client is told for a statement this watch stopped on
+// the source: its 1317 names the port's deadline and says the connection is
+// still there. Any other answer is the source's own.
+func (w *statementWatch) answer(f *Forwarder, err error) error {
+	var me *mysql.MyError
+	if !w.killed.Load() || !errors.As(err, &me) || me.Code != mysql.ER_QUERY_INTERRUPTED {
+		return err
+	}
+	return f.deadlineError()
+}
+
+// notSent is the answer for a statement not sent because its context had
+// already ended (a deadline that passed while the plan was asked for, say).
+// With StopOnSource a deadline is told like one the source stopped: the
+// connection was not touched and is still open. Otherwise, and for a
+// cancellation, the context's own error.
+func (f *Forwarder) notSent(err error) error {
+	if f.StopOnSource && errors.Is(err, context.DeadlineExceeded) {
+		return f.deadlineError()
+	}
+	return err
+}
+
+func (f *Forwarder) deadlineError() error {
+	if f.queryTimeout <= 0 {
+		return mysql.NewError(mysql.ER_QUERY_INTERRUPTED, "the query ran past its deadline on MySQL; it was stopped and this connection is still open")
+	}
+	return mysql.NewError(mysql.ER_QUERY_INTERRUPTED, fmt.Sprintf(
+		"the query ran longer than this port's cap of %s s on MySQL; it was stopped and this connection is still open; narrow it",
+		strconv.FormatFloat(f.queryTimeout.Seconds(), 'f', -1, 64)))
+}
+
+// stopOnSource stops the statement this connection is running on the
+// source, from a connection of its own with the same account (an account may
+// stop its own statements; measured with one that may only SELECT). It
+// returns nil when the statement was stopped and has answered, errReturned
+// when it ended on its own meanwhile, and otherwise why it was not stopped.
+// ran is how long the statement has been running.
+//
+// The thread id alone does not name a statement: the side connection may
+// reach another server than this one did (a load balancer, a failover), or
+// the same server after a restart, where the id is someone else's. So the
+// source's process list must show, under that id, this account running this
+// statement (runningMatches) for at least as long as it has been running
+// here; anything else sends nothing. Only then is KILL QUERY sent. A
+// statement still running after the grace, and still shown so, has its
+// connection ended on the source (KILL), and the caller closes the socket.
+func (f *Forwarder) stopOnSource(stmt string, prepared bool, ran time.Duration, w *statementWatch, returned <-chan struct{}) error {
+	ended := func() bool {
+		select {
+		case <-returned:
+			return true
+		default:
+			return false
+		}
+	}
+	f.mu.Lock()
+	id, user, live := f.threadID, f.user, f.raw != nil && f.dead == nil
+	f.mu.Unlock()
+	if !live || id == 0 {
+		return errors.New("no connection to stop")
+	}
+	if ended() {
+		return errReturned
+	}
+	side, err := NewForwarder(f.dsn, f.ssl, Policy{}, killRoundTrip)
+	if err != nil {
+		return fmt.Errorf("open a second connection: %w", err)
+	}
+	side.connectTimeout = killConnectTimeout
+	defer side.Close()
+	run := func(q string, sink RowSink) error {
+		ctx, cancel := context.WithTimeout(context.Background(), killConnectTimeout+killRoundTrip)
+		defer cancel()
+		_, err := side.Forward(ctx, q, sink)
+		return err
+	}
+	// shown reads the process list and says whether it shows this
+	// statement running under id.
+	shown := func(ran time.Duration) error {
+		var list BufferSink
+		if err := run(fmt.Sprintf("SELECT USER, COMMAND, INFO, TIME FROM information_schema.PROCESSLIST WHERE ID = %d", id), &list); err != nil {
+			return fmt.Errorf("read the process list from a second connection: %w", err)
+		}
+		if len(list.Rows) != 1 || len(list.Rows[0]) != 4 {
+			return fmt.Errorf("the process list shows no thread %d (the second connection may have reached another server)", id)
+		}
+		row := list.Rows[0]
+		// TIME is whole seconds, cut down, and counts from when the
+		// source began the statement, a little after it was sent: two
+		// seconds of margin (measured on MySQL 8.0: 0 at one second).
+		secs, _ := strconv.ParseInt(cellText(row[3]), 10, 64)
+		if cellText(row[0]) != user || !runningMatches(cellText(row[1]), cellText(row[2]), stmt, prepared) ||
+			time.Duration(secs+2)*time.Second < ran {
+			return fmt.Errorf("the process list does not show thread %d running this statement (the second connection may have reached another server)", id)
+		}
+		return nil
+	}
+	if err := shown(ran); err != nil {
+		if ended() {
+			return errReturned
+		}
+		return err
+	}
+	if ended() {
+		return errReturned
+	}
+	w.killed.Store(true)
+	if err := run(fmt.Sprintf("KILL QUERY %d", id), &BufferSink{}); err != nil {
+		return fmt.Errorf("KILL QUERY %d: %w", id, err)
+	}
+	grace := f.killGrace
+	if grace <= 0 {
+		grace = deadlineKillGrace
+	}
+	t := time.NewTimer(grace)
+	defer t.Stop()
+	select {
+	case <-returned:
+		return nil
+	case <-t.C:
+	}
+	why := fmt.Errorf("KILL QUERY %d was sent and the statement had not stopped %s later", id, grace)
+	// Shown again before the connection is ended: the KILL must reach the
+	// same statement the KILL QUERY was meant for.
+	if err := shown(ran + grace); err != nil {
+		return fmt.Errorf("%w; the connection was not ended on the source either: %w", why, err)
+	}
+	if err := run(fmt.Sprintf("KILL %d", id), &BufferSink{}); err != nil {
+		var me *mysql.MyError
+		if !errors.As(err, &me) || me.Code != mysql.ER_NO_SUCH_THREAD {
+			return fmt.Errorf("%w; KILL %d failed, and the statement may still be running on the source: %w", why, id, err)
+		}
+	}
+	return why
+}
+
+// cellText reads a text cell of a forwarded row; NULL is "".
+func cellText(v any) string {
+	switch x := v.(type) {
+	case []byte:
+		return string(x)
+	case string:
+		return x
+	}
+	return ""
+}
+
+// processlistCutAt is the shortest INFO taken for a statement the process
+// list cut short (MySQL shows at most 65535 characters of it): a shorter
+// prefix of the statement is a different statement, not a cut one.
+const processlistCutAt = 1024
+
+// runningMatches reports whether a process list row (its COMMAND and INFO)
+// shows the statement stmt running. A text statement is shown as Query with
+// its own text, or the start of it when it is very long; a prepared one as
+// Execute with each ? replaced by its argument (measured on MySQL 8.0). Any
+// doubt is a no: a false no costs the connection, a false yes would stop
+// someone else's statement.
+func runningMatches(command, info, stmt string, prepared bool) bool {
+	if info == "" {
+		return false
+	}
+	if !prepared {
+		return command == "Query" && (info == stmt ||
+			len(info) >= processlistCutAt && len(info) < len(stmt) && strings.HasPrefix(stmt, info))
+	}
+	if command != "Execute" {
+		return false
+	}
+	parts := strings.Split(stmt, "?")
+	if len(parts) == 1 {
+		return info == stmt
+	}
+	rest, ok := strings.CutPrefix(info, parts[0])
+	if !ok {
+		return false
+	}
+	for _, part := range parts[1 : len(parts)-1] {
+		// Every argument is shown as at least one character (NULL, '', 0).
+		if rest == "" {
+			return false
+		}
+		i := strings.Index(rest[1:], part)
+		if i < 0 {
+			return false
+		}
+		rest = rest[1+i+len(part):]
+	}
+	last := parts[len(parts)-1]
+	return len(rest) > len(last) && strings.HasSuffix(rest, last)
 }
 
 // Decide applies the policy to the statement: the one shape that needs no
@@ -841,8 +1143,9 @@ func (f *Forwarder) Decide(ctx context.Context, stmt string) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	defer f.watch(ctx)()
-	res, err := c.Execute("EXPLAIN FORMAT=JSON " + stmt)
+	explain := "EXPLAIN FORMAT=JSON " + stmt
+	defer f.watchStatement(ctx, explain, false).stop()
+	res, err := c.Execute(explain)
 	return f.decideFromExplain(stmt, res, err)
 }
 
@@ -902,20 +1205,21 @@ func (f *Forwarder) Forward(ctx context.Context, stmt string, sink RowSink) (*my
 	// A statement whose context has ended is not sent: sent, it would start
 	// on the source and the watch below would close the session under it.
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, f.notSent(err)
 	}
 	c, err := f.get(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer f.watch(ctx)()
+	w := f.watchStatement(ctx, stmt, false)
+	defer w.stop()
 	res, err := f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
 		return c.ExecuteSelectStreaming(stmt, res, perRow, perRes)
 	})
 	if err == nil {
 		f.tellSession(stmt)
 	}
-	return res, err
+	return res, w.answer(f, err)
 }
 
 // stream runs one statement through run (the text or the prepared form of
@@ -1333,7 +1637,7 @@ func (p *prepared) Decide(ctx context.Context, args []any) (Decision, error) {
 	if err := p.live(ctx); err != nil {
 		return Decision{}, err
 	}
-	defer p.f.watch(ctx)()
+	defer p.f.watchStatement(ctx, "EXPLAIN FORMAT=JSON "+p.query, true).stop()
 	if p.explain == nil {
 		st, err := p.c.Prepare("EXPLAIN FORMAT=JSON " + p.query)
 		if err != nil {
@@ -1351,17 +1655,21 @@ func (p *prepared) Decide(ctx context.Context, args []any) (Decision, error) {
 }
 
 func (p *prepared) Execute(ctx context.Context, args []any, sink RowSink) (*mysql.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, p.f.notSent(err)
+	}
 	if err := p.live(ctx); err != nil {
 		return nil, err
 	}
-	defer p.f.watch(ctx)()
+	w := p.f.watchStatement(ctx, p.query, true)
+	defer w.stop()
 	res, err := p.f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
 		return p.st.ExecuteSelectStreaming(res, perRow, perRes, args...)
 	})
 	if err == nil {
 		p.f.tellSession(p.query)
 	}
-	return res, err
+	return res, w.answer(p.f, err)
 }
 
 // Close frees the statement (and its EXPLAIN) on the source. On a lost

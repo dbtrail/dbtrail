@@ -1671,13 +1671,35 @@ What this is and is not:
   and the **Connect a SQL client** panel says so.
 - **A lost connection to the source is not hidden.** If the upstream
   connection drops (the source closes an idle connection, a network error,
-  the query deadline), every later statement on that client connection
+  a statement past the query deadline that could not be stopped on the
+  source, below), every later statement on that client connection
   fails with MySQL error 2006 ("MySQL server has gone away") until the
   client reconnects. The port never reconnects on its own: that would be a
   new session with the transaction rolled back, the `SET`s gone and the
   database reset, while the client believes nothing happened.
 - Forwarded statements run under the port's query deadline
   (`QueryTimeout`, 5 minutes by default), the same as a copy statement.
+  **A forwarded statement past it is stopped on MySQL and the connection is
+  kept**, the way MySQL's own `max_execution_time` does it: the client gets
+  error 1317 ("the query ran longer than this port's cap of 300 s on MySQL;
+  it was stopped and this connection is still open"), and its session
+  (`SET`s, the database, an open transaction) is still there for the next
+  statement. The port opens a second connection to the source with the same
+  account, checks in the source's process list that this connection is the
+  one running this very statement, and has been for as long as the port has
+  waited for it, and sends `KILL QUERY` for it; an account may stop its own
+  statements, so one that may only read is enough. When the process list
+  shows anything else (the second connection reached another server, behind
+  a load balancer or a proxy, or after a failover), nothing is sent; when the
+  statement has not stopped 10 seconds after it was told to, and the
+  process list still shows it, its connection is ended on the source with
+  `KILL`. In both cases the client connection is lost as below (error 2006)
+  and the router's log says why, in a line that starts with "a statement
+  past the query deadline could not be stopped on the source". A statement
+  whose time ran out before it was sent (the plan took it) is not sent, and
+  answers the same 1317. A client that leaves mid-statement loses its
+  connection as before. Measured on MySQL 8.0: a `KILL QUERY` that arrives
+  just after the statement ended does nothing to the connection's next one.
 - `SHOW WARNINGS` after a forwarded statement is MySQL's; after a statement
   the copy served it is the copy's.
 - A server with no source DSN (the capture process's own command-line
@@ -1755,8 +1777,8 @@ string. The port's flags describe the session the client really has:
   2006** ("MySQL server has gone away"), not only the forwarded ones: the
   time-travel statements, `SHOW WARNINGS`, `USE` and `PING` too. The source
   ended the session (a `KILL`, a restart, an idle timeout), or the port's own
-  statement deadline cut a statement, and the transaction the client was in
-  went with it. An OK from the port could only say "autocommit, no
+  statement deadline cut a statement it could not stop on the source, and
+  the transaction the client was in went with it. An OK from the port could only say "autocommit, no
   transaction", which tells a driver that there is nothing to roll back and
   a connection pool that the connection is healthy. Reconnect to continue;
   on a connection that is not routed nothing changes. A source that never

@@ -524,6 +524,16 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			srv.RecordRouteAvailable(tgt.ID)
 			logger.Debug("Engine Routing: connection bound", "server", user)
 			host := config.DSNHost(tgt.ForwardDSN)
+			// A statement past the query deadline is stopped on the
+			// source and the client keeps its connection; when that
+			// cannot be done the connection is lost as before, and the
+			// log says why (a second connection refused, a load balancer
+			// in front of the source, a KILL that failed).
+			fw.StopOnSource = true
+			fw.OnStopFailed = func(why error) {
+				logger.Warn("Engine Routing: a statement past the query deadline could not be stopped on the source; this client connection is lost",
+					"server", user, "host", host, "why", why)
+			}
 			fw.OnCleartext = func(err error) {
 				// The same thing capture says when its own connection to
 				// this source falls back, once per client connection.

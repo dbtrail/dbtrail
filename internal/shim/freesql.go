@@ -485,14 +485,22 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 			case err == nil:
 				answered(RouteMySQL, reason, qstr, took, false, false)
 			case !readrouter.IsLost(err):
-				// MySQL's own error: it ran the statement and said no.
-				answered(RouteMySQL, reason, qstr, took, true, false)
+				// MySQL's own error: it ran the statement and said no. A
+				// 1317 with the statement's time run out is the forwarder
+				// having stopped it on the source at the deadline
+				// (readrouter.Forwarder.watchStatement): a timeout, answered
+				// by MySQL with the connection kept.
+				var me *mysql.MyError
+				timedOut := errors.As(err, &me) && me.Code == mysql.ER_QUERY_INTERRUPTED &&
+					errors.Is(ctx.Err(), context.DeadlineExceeded)
+				answered(RouteMySQL, reason, qstr, took, true, timedOut)
 			case errors.Is(ctx.Err(), context.DeadlineExceeded):
-				// The statement's time ran out. It reaches here as a lost
-				// connection (closing the socket is how the wait is ended),
-				// so it is the statement's own context that says which. The
-				// forward observes a lost connection as upstream_lost, and
-				// the answer says the same.
+				// The statement's time ran out and it could not be stopped
+				// on the source, so the forwarder closed the socket: it
+				// reaches here as a lost connection, and it is the
+				// statement's own context that says which. The forward
+				// observes a lost connection as upstream_lost, and the
+				// answer says the same.
 				answered(RouteMySQL, RouteReasonUpstreamLost, qstr, took, true, true)
 			}
 			// Any other lost connection is nobody's answer: the source was

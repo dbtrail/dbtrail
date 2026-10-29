@@ -2,6 +2,7 @@ package readrouter
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -25,6 +26,22 @@ type slowSource struct {
 
 	mu     sync.Mutex
 	killed []string
+	// running is what each connection is running, as the source's process
+	// list shows it (the statement's text; a prepared one with its
+	// arguments in place), and stop ends it the way KILL QUERY does.
+	running map[uint32]running
+	stop    map[uint32]chan struct{}
+	finish  map[uint32]chan struct{} // ends the statement with its answer (finishOK)
+	// deaf: KILL QUERY is accepted and does nothing, like a statement that
+	// does not look at the kill flag while it waits.
+	deaf bool
+	// processlist, when set, replaces what the process list shows for id.
+	processlist func(id uint32, r running) [][]any
+}
+
+type running struct {
+	command, info string
+	since         time.Time
 }
 
 type slowHandler struct {
@@ -36,19 +53,132 @@ type slowHandler struct {
 func (h slowHandler) HandleQuery(q string) (*mysql.Result, error) {
 	switch {
 	case strings.Contains(q, "SLEEP"):
-		h.src.entered <- h.id
-		<-h.src.release
+		return h.sleep(running{"Query", q, time.Now()})
+	case strings.Contains(q, "PROCESSLIST"):
+		return h.src.processlistRows(q)
 	case strings.HasPrefix(q, "KILL"):
-		h.src.mu.Lock()
-		h.src.killed = append(h.src.killed, q)
-		h.src.mu.Unlock()
+		h.src.kill(q)
 		return mysql.NewResultReserveResultset(0), nil
 	}
+	return oneRow()
+}
+
+func oneRow() (*mysql.Result, error) {
 	rs, err := mysql.BuildSimpleTextResultset([]string{"x"}, [][]any{{"1"}})
 	if err != nil {
 		return nil, err
 	}
 	return mysql.NewResult(rs), nil
+}
+
+// sleep holds the statement until the test ends or a KILL QUERY names this
+// connection, which answers 1317 as MySQL does.
+func (h slowHandler) sleep(r running) (*mysql.Result, error) {
+	stop, finish := make(chan struct{}), make(chan struct{})
+	h.src.mu.Lock()
+	if h.src.running == nil {
+		h.src.running, h.src.stop, h.src.finish = map[uint32]running{}, map[uint32]chan struct{}{}, map[uint32]chan struct{}{}
+	}
+	h.src.running[h.id], h.src.stop[h.id], h.src.finish[h.id] = r, stop, finish
+	h.src.mu.Unlock()
+	defer func() {
+		h.src.mu.Lock()
+		delete(h.src.running, h.id)
+		delete(h.src.stop, h.id)
+		delete(h.src.finish, h.id)
+		h.src.mu.Unlock()
+	}()
+	h.src.entered <- h.id
+	select {
+	case <-h.src.release:
+		return oneRow()
+	case <-finish:
+		return oneRow()
+	case <-stop:
+		return nil, mysql.NewError(mysql.ER_QUERY_INTERRUPTED, "Query execution was interrupted")
+	}
+}
+
+func (h slowHandler) HandleStmtPrepare(q string) (int, int, any, error) {
+	return strings.Count(q, "?"), 1, nil, nil
+}
+
+func (h slowHandler) HandleStmtExecute(_ any, q string, args []any) (*mysql.Result, error) {
+	if !strings.Contains(q, "SLEEP") {
+		return oneRow()
+	}
+	// The process list shows a prepared statement with its arguments in
+	// place, quoted when they are text (measured on MySQL 8.0).
+	for _, a := range args {
+		v := fmt.Sprint(a)
+		if b, ok := a.([]byte); ok {
+			v = "'" + string(b) + "'"
+		}
+		q = strings.Replace(q, "?", v, 1)
+	}
+	return h.sleep(running{"Execute", q, time.Now()})
+}
+
+func (h slowHandler) HandleStmtClose(any) error { return nil }
+
+// processlistRows answers SELECT USER, COMMAND, INFO, TIME FROM ...
+// PROCESSLIST WHERE ID = n for the connection n is. TIME is the whole
+// seconds the statement has run, unless processlist gives one.
+func (s *slowSource) processlistRows(q string) (*mysql.Result, error) {
+	var id uint32
+	if _, err := fmt.Sscanf(q[strings.LastIndex(q, "=")+1:], "%d", &id); err != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "no id in "+q)
+	}
+	s.mu.Lock()
+	r, busy := s.running[id]
+	override := s.processlist
+	s.mu.Unlock()
+	var rows [][]any
+	switch {
+	case override != nil:
+		rows = override(id, r)
+	case busy:
+		rows = [][]any{{"u", r.command, r.info}}
+	default:
+		rows = [][]any{{"u", "Sleep", nil}}
+	}
+	for i, row := range rows {
+		if len(row) == 3 {
+			secs := 0
+			if busy {
+				secs = int(time.Since(r.since).Seconds())
+			}
+			rows[i] = append(row, fmt.Sprint(secs))
+		}
+	}
+	rs, err := mysql.BuildSimpleTextResultset([]string{"USER", "COMMAND", "INFO", "TIME"}, rows)
+	if err != nil {
+		return nil, err
+	}
+	return mysql.NewResult(rs), nil
+}
+
+// finishOK ends the statement connection id is running with its answer.
+func (s *slowSource) finishOK(id uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if finish, ok := s.finish[id]; ok {
+		close(finish)
+		delete(s.finish, id)
+	}
+}
+
+func (s *slowSource) kill(q string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.killed = append(s.killed, q)
+	var id uint32
+	if _, err := fmt.Sscanf(q, "KILL QUERY %d", &id); err == nil && !s.deaf {
+		if stop, ok := s.stop[id]; ok {
+			close(stop)
+			delete(s.stop, id)
+		}
+	}
 }
 
 func newSlowSource(t *testing.T) *slowSource {

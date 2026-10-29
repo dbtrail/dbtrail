@@ -201,3 +201,40 @@ func TestRouterAnswered_carriesTheStatement(t *testing.T) {
 		t.Fatalf("answered %q, want %q", got, want)
 	}
 }
+
+// A statement whose time ran out and that the forwarder stopped ON THE
+// SOURCE comes back as MySQL's 1317 with the connection kept, the
+// statement's own context expired: a timeout, under the rung's own reason
+// (the source was reached and answered). A 1317 with the context still good
+// is somebody else's KILL QUERY: an error, not a timeout.
+func TestRouterAnswered_timeoutStoppedOnTheSource(t *testing.T) {
+	stopped := mysql.NewError(mysql.ER_QUERY_INTERRUPTED, "the query ran longer than this port's cap")
+
+	r := &fakeRouter{toCopy: false, reason: "cheap", forwardErr: stopped, forwardWaits: true}
+	f := &fakeFreeSQL{res: oneCell("side", "VARCHAR", "copy"), updatedAt: time.Now()}
+	var decided, answered []string
+	h := NewHandlerWithConfig(nil, Config{QueryTimeout: 30 * time.Millisecond}, nil)
+	h.BindFreeSQL(f)
+	h.BindRouter(r, answeredConfig(RouterConfig{MaxCopyAge: time.Minute}, &decided, &answered))
+	_, err := h.HandleQuery("SELECT * FROM t WHERE id = 1")
+	var me *mysql.MyError
+	if !errors.As(err, &me) || me.Code != mysql.ER_QUERY_INTERRUPTED {
+		t.Fatalf("the client was told %v, want the source's 1317", err)
+	}
+	if len(answered) != 1 || answered[0] != "mysql/timeout" {
+		t.Errorf("stopped on the source: answered %v, want [mysql/timeout] (decided %v)", answered, decided)
+	}
+	if len(decided) != 1 || decided[0] != "mysql/cheap_plan" || len(answeredReasons) != 1 || answeredReasons[0] != "cheap_plan" {
+		t.Errorf("stopped on the source: decided %v, the answer said %v, want the rung's own reason on both", decided, answeredReasons)
+	}
+
+	r = &fakeRouter{toCopy: false, reason: "cheap", forwardErr: stopped}
+	decided, answered = nil, nil
+	h = answeredHandler(r, f, RouterConfig{MaxCopyAge: time.Minute}, &decided, &answered)
+	if _, err := h.HandleQuery("SELECT * FROM t WHERE id = 1"); err == nil {
+		t.Fatal("the error did not reach the client")
+	}
+	if len(answered) != 1 || answered[0] != "mysql/error" {
+		t.Errorf("killed by someone else: answered %v, want [mysql/error]", answered)
+	}
+}
