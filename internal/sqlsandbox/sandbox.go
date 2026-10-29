@@ -256,6 +256,13 @@ type Session struct {
 	// not fit anywhere (a CH-benCHmark Q5 that filled 351 GB of spill and
 	// answered in 5 s in the written order).
 	KeepJoinOrder bool
+	// ResultToFile is the caller's, not the connection's: it can send a
+	// result larger than the memory cap to its client from a file
+	// (Result.Spool), so the statement may run with no row cap and its
+	// result may come back spooled (Limits.SpoolMaxBytes). Never sent to the
+	// worker. Only the MySQL port's routed text statements set it (#2575):
+	// every other caller reads Result.Rows alone.
+	ResultToFile bool `json:"-"`
 	// StrictStar asks for a refusal instead of an answer when the statement
 	// holds a star over a table whose `SELECT *` on the copy is not MySQL's:
 	// the order of its columns is not known, or MySQL returns a different set
@@ -995,6 +1002,19 @@ func (r *Runner) reserveSpool(max int64) (release func(), err error) {
 			r.spillMu.Unlock()
 		})
 	}, nil
+}
+
+// SpoolRoom says whether a result file of up to max bytes could be had now
+// (reserveSpool), without reserving it: for a caller that would rather not
+// run a statement whose large result would be refused for want of one.
+func (r *Runner) SpoolRoom(max int64) bool {
+	free, inMemory, err := spillFSFor(r.spillRoot)
+	if err != nil || inMemory {
+		return false
+	}
+	r.spillMu.Lock()
+	defer r.spillMu.Unlock()
+	return free < 0 || r.spoolReserved+max <= free/2
 }
 
 // noteSpool logs a change in whether large results can go to a file, once

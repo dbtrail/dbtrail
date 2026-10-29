@@ -157,6 +157,10 @@ type Handler struct {
 	// its rows go back in the binary encoding, so nothing may stream text
 	// rows to conn. Read and written on the connection's own goroutine.
 	buffered bool
+	// spooled is a copy's answer whose rows are in a file, waiting to be
+	// sent once the ladder has settled who answers (sendSpooled, #2575).
+	// Read and written on the connection's own goroutine.
+	spooled *spooledAnswer
 
 	// actor is the authenticated MySQL user this connection handshook as,
 	// set by BindActor. It is the audit identity for every time-travel

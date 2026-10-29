@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -128,7 +129,14 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 			return q.s.copyUnchanged(ctx, q.b, q.id, tables, sess.UnchangedWithin)
 		}
 	}
-	out, err := q.s.runSQLVouched(withTailsFor(ctx, q.id), q.b, q.user, statement, schema, q.s.sqlPortRowCap(), sess, unchanged)
+	maxRows := q.s.sqlPortRowCap()
+	if sess.ResultToFile {
+		// The port sends this result from a file as the client reads it
+		// (#2575): the size of the file bounds it (sqlResultFileBytes), not
+		// a count of rows. MySQL would return every one.
+		maxRows = math.MaxInt32
+	}
+	out, err := q.s.runSQLVouched(withTailsFor(ctx, q.id), q.b, q.user, statement, schema, maxRows, sess, unchanged)
 	if err != nil {
 		q.noteCopyRefused()
 		var werr *sqlsandbox.WorkerError
@@ -191,6 +199,30 @@ func (q *SQLOnCopy) CopyUpdatedAt(ctx context.Context) time.Time {
 // RowCap is the port's row cap for one statement on the copy: the same
 // number Run hands the worker.
 func (q *SQLOnCopy) RowCap() int { return q.s.sqlPortRowCap() }
+
+// sqlPortResultFileBytes is the largest result one statement on the port
+// sends from a file (#2575): past the memory cap a routed statement's result
+// is written to disk, up to this, and read to the client from there. Past it
+// the copy refuses the result and MySQL answers. The disk the files alive at
+// once may take is bounded on its own (sqlsandbox.Runner.reserveSpool).
+const sqlPortResultFileBytes = 2 << 30
+
+// ResultFileRoom says whether a statement's result could be sent from a file
+// now (#2575): the disk has room for one. Without it the port keeps the row
+// cap, so a statement whose result the copy would refuse is not run there.
+func (q *SQLOnCopy) ResultFileRoom() bool {
+	r, ok := q.s.sqlRunner.(interface{ SpoolRoom(int64) bool })
+	return ok && r.SpoolRoom(sqlPortResultFileBytes)
+}
+
+// sqlResultFileBytes is Limits.SpoolMaxBytes for a statement run under
+// sess: only one whose caller can send a result from a file gets one.
+func sqlResultFileBytes(sess sqlsandbox.Session) int64 {
+	if !sess.ResultToFile {
+		return 0
+	}
+	return sqlPortResultFileBytes
+}
 
 // DefaultSQLPortMaxRows is the port's row cap when none is configured
 // (Config.SQLPortMaxRows, router --sql-port-max-rows).

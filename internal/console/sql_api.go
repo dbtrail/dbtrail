@@ -74,6 +74,9 @@ type sqlSlot interface {
 // the concrete *sqlsandbox.Slot).
 type sandboxRunner struct{ r *sqlsandbox.Runner }
 
+// SpoolRoom is sqlsandbox.Runner.SpoolRoom (SQLOnCopy.ResultFileRoom).
+func (a sandboxRunner) SpoolRoom(max int64) bool { return a.r.SpoolRoom(max) }
+
 func (a sandboxRunner) Reserve(ctx context.Context, user string) (sqlSlot, error) {
 	slot, err := a.r.Reserve(ctx, user)
 	if err != nil {
@@ -1304,7 +1307,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		SQL:     statement,
 		Schema:  schema,
 		Session: sess,
-		Limits:  sqlsandbox.Limits{MaxRows: maxRows, MemoryLimit: memory},
+		Limits:  sqlsandbox.Limits{MaxRows: maxRows, MemoryLimit: memory, SpoolMaxBytes: sqlResultFileBytes(sess)},
 	}
 	ran = true
 	res, err := slot.Run(ctx, job)
