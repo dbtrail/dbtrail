@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.120.1] - 2026-10-28
 ### Changed
 - **A statement Engine Routing sends to MySQL that runs past the port's time limit is now stopped on MySQL, and the client keeps its connection.** Before, the port closed its connection to the source: the client got error 2006 on that statement and on every later one until it reconnected, and the statement went on running on MySQL to its end. Now the port checks in the source's process list that its connection is the one running that statement, sends `KILL QUERY` for it from a second connection with the same account (an account that may only read is enough), and the client gets error 1317 with its session and open transaction intact, as with MySQL's own `max_execution_time`. When the statement cannot be recognized there (the second connection reached another server, or the thread has not been running it that long) or does not stop within 10 seconds, the connection is lost as before and the router logs why. A statement whose time ran out before it was sent is not sent, and answers the same 1317. The routing counters record the stopped statement as a timeout under its own reason instead of `upstream_lost`.
 
