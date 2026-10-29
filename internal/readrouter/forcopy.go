@@ -432,8 +432,7 @@ func (sc scanned) copyText(o CopyOptions) string {
 	for k := len(sc.keywords) - 1; k >= 0; k-- {
 		j := sc.keywords[k]
 		kw := len(j.word)
-		if strings.HasSuffix(strings.TrimRight(bl[:j.bl], " \t\n\r\f\v"), ".") ||
-			strings.HasPrefix(strings.TrimLeft(bl[j.bl+kw:], " \t\n\r\f\v"), ".") {
+		if namedByDot(bl, j.bl, kw) {
 			// db.straight_join or t.like: a name on MySQL, where any word
 			// after a dot is one, and on the copy. Rewritten it would name
 			// another table or column.
@@ -456,6 +455,101 @@ func (sc scanned) copyText(o CopyOptions) string {
 		cp = cp[:j.cp] + repl + cp[j.cp+kw:]
 	}
 	return cp
+}
+
+// namedByDot reports whether the keyword of length kw at at in the blanked
+// text bl has a dot right before or after it (white space aside): a name
+// there, not the keyword.
+func namedByDot(bl string, at, kw int) bool {
+	return strings.HasSuffix(strings.TrimRight(bl[:at], " \t\n\r\f\v"), ".") ||
+		strings.HasPrefix(strings.TrimLeft(bl[at+kw:], " \t\n\r\f\v"), ".")
+}
+
+// KeepsJoinOrder reports whether stmt fixes the order of ALL its joins with
+// STRAIGHT_JOIN: it holds one (read as copyText reads it: not in a comment
+// or a string, not a name next to a dot), and every join of every FROM is
+// one, with no other JOIN and no tables listed with commas. The copy is
+// then asked to keep the written order (the sandbox's
+// Session.KeepJoinOrder): its planner reads the views' row counts as
+// guesses, and on a query written for its order it can pick one whose
+// intermediate results do not fit anywhere.
+//
+// All of them, because the copy keeps the order for every join of the
+// statement, where MySQL keeps it only for the joins STRAIGHT_JOIN names: a
+// STRAIGHT_JOIN in a subquery under an outer FROM of tables listed with
+// commas would otherwise join the outer tables in the order written, which
+// can pair tables that share no condition. Any doubt is a no, which plans
+// the joins as the copy always did. The SELECT STRAIGHT_JOIN modifier over a
+// list of tables is a no for that reason too.
+func KeepsJoinOrder(stmt string) bool {
+	sc := scan(stmt)
+	straight := false
+	for _, j := range sc.keywords {
+		if j.word == "straight_join" && !namedByDot(sc.blanked, j.bl, len(j.word)) {
+			straight = true
+			break
+		}
+	}
+	return straight && !otherJoins(sc.blanked)
+}
+
+// fromEnds are the words that end a FROM clause at its own depth.
+var fromEnds = map[string]bool{"where": true, "group": true, "order": true, "having": true, "limit": true,
+	"union": true, "intersect": true, "except": true, "window": true, "select": true, "for": true, "into": true}
+
+// otherJoins reports whether the blanked text bl joins tables otherwise than
+// with STRAIGHT_JOIN: a JOIN of any kind (INNER, CROSS, LEFT, NATURAL: the
+// word join on its own), or a comma at the depth of a FROM clause. Read word
+// by word with the depth of parentheses, so a comma in a function's
+// arguments or a subquery's select list is not one. A FOR ends a FROM only
+// at its depth: SUBSTRING(x FROM 1 FOR 2) opens its own.
+func otherJoins(bl string) bool {
+	inFrom := []bool{false}
+	for i := 0; i < len(bl); {
+		c := bl[i]
+		switch {
+		case c == '(':
+			inFrom = append(inFrom, false)
+			i++
+		case c == ')':
+			if len(inFrom) > 1 {
+				inFrom = inFrom[:len(inFrom)-1]
+			}
+			i++
+		case c == ',':
+			if inFrom[len(inFrom)-1] {
+				return true
+			}
+			i++
+		case c == '`':
+			// A quoted name: skipped whole, whatever it holds.
+			end := strings.IndexByte(bl[i+1:], '`')
+			if end < 0 {
+				return true
+			}
+			i += end + 2
+		case wordByte(c):
+			j := i
+			for j < len(bl) && wordByte(bl[j]) {
+				j++
+			}
+			w := strings.ToLower(bl[i:j])
+			if !namedByDot(bl, i, j-i) {
+				switch {
+				case w == "join":
+					return true
+				case w == "from":
+					inFrom[len(inFrom)-1] = true
+				case fromEnds[w]:
+					inFrom[len(inFrom)-1] = false
+				}
+			}
+			i = j
+		default:
+			i++
+		}
+	}
+	return false
 }
 
 // straightJoinModifier reports whether the word before the keyword makes it

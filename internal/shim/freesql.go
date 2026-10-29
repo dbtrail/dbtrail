@@ -411,7 +411,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), reason, unchangedWithin)
+			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), readrouter.KeepsJoinOrder(qstr), reason, unchangedWithin)
 			if err != nil {
 				return nil, err
 			}
@@ -945,7 +945,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, nil, "", 0)
+	return h.runFreeSQLRouted(schema, qstr, nil, false, "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -972,7 +972,7 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 //
 // types is sqlsandbox.Session.Types: the routing layer's reading of the
 // client's own statement, nil for a port without routing.
-func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
+func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, keepJoinOrder bool, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
 	if h.router == nil {
 		// Where the copy answers alone, this is the statement's answer: the
 		// copy's when it is served, a refusal otherwise, including one made
@@ -1029,6 +1029,9 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	// only ever gets here from the ladder.
 	sess.StrictStar = h.router != nil
 	sess.Types = types
+	// The client wrote STRAIGHT_JOIN, which qstr no longer holds (copyText
+	// rewrote it): the copy makes the joins in the order written, as MySQL.
+	sess.KeepJoinOrder = keepJoinOrder
 	sess.UnchangedWithin = unchangedWithin
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	var differ *sqlsandbox.ColumnsDifferError
