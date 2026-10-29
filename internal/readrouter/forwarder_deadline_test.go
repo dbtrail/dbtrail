@@ -344,3 +344,74 @@ func TestForwarder_hardKillChecksAgain(t *testing.T) {
 		t.Errorf("OnStopFailed was told %v, want that the connection was not ended", told)
 	}
 }
+
+// The second connection must reach the server this connection did: a thread
+// id names a thread on one server only. Behind a load balancer it may land
+// on another server, where the same id, account and text could be someone
+// else's (a pool, a benchmark): nothing is stopped there. A source that did
+// not say which server it is when the connection opened gets no stop either.
+func TestForwarder_deadlineStopsOnlyOnTheSameServer(t *testing.T) {
+	cases := map[string]func(main uint32) func(uint32) string{
+		"another server": func(main uint32) func(uint32) string {
+			return func(id uint32) string {
+				if id == main {
+					return "db1/3306/1"
+				}
+				return "db2/3306/1"
+			}
+		},
+		"same host, another port": func(main uint32) func(uint32) string {
+			return func(id uint32) string {
+				if id == main {
+					return "db1/3306/1"
+				}
+				return "db1/3307/1"
+			}
+		},
+		"unreadable when it opened": func(main uint32) func(uint32) string {
+			return func(id uint32) string {
+				if id == main {
+					return ""
+				}
+				return "db1/3306/1"
+			}
+		},
+		"no host name on either": func(uint32) func(uint32) string {
+			return func(uint32) string { return "/3306/1" }
+		},
+		"unreadable on the second connection": func(main uint32) func(uint32) string {
+			return func(id uint32) string {
+				if id == main {
+					return "db1/3306/1"
+				}
+				return ""
+			}
+		},
+	}
+	for name, identity := range cases {
+		t.Run(name, func(t *testing.T) {
+			src := newSlowSource(t)
+			var main uint32
+			src.identity = func(id uint32) string {
+				if main == 0 {
+					main = id // the first connection to ask is the client's
+				}
+				return identity(main)(id)
+			}
+			const limit = 300 * time.Millisecond
+			fw := newDeadlineForwarder(t, src, limit)
+			var told []error
+			fw.OnStopFailed = func(why error) { told = append(told, why) }
+			_, err := fw.Forward(deadlineCtx(t, limit), "SELECT SLEEP(25)", &BufferSink{})
+			if !IsLost(err) || !strings.Contains(err.Error(), "could not be stopped on the source") {
+				t.Errorf("answered %v, want the lost connection saying why", err)
+			}
+			if got := src.kills(); len(got) != 0 {
+				t.Errorf("the source was sent %q, want no KILL", got)
+			}
+			if len(told) != 1 {
+				t.Errorf("OnStopFailed was told %v, want once", told)
+			}
+		})
+	}
+}

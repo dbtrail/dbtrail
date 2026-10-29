@@ -37,6 +37,9 @@ type slowSource struct {
 	deaf bool
 	// processlist, when set, replaces what the process list shows for id.
 	processlist func(id uint32, r running) [][]any
+	// identity, when set, is what connection id answers when asked which
+	// server it is (sourceIdentitySQL); nil is one server, and "" an error.
+	identity func(id uint32) string
 }
 
 type running struct{ command, info string }
@@ -53,6 +56,22 @@ func (h slowHandler) HandleQuery(q string) (*mysql.Result, error) {
 		return h.sleep(running{"Query", q})
 	case strings.Contains(q, "PROCESSLIST"):
 		return h.src.processlistRows(q)
+	case q == sourceIdentitySQL:
+		who := "db1/3306/1"
+		h.src.mu.Lock()
+		if h.src.identity != nil {
+			who = h.src.identity(h.id)
+		}
+		h.src.mu.Unlock()
+		if who == "" {
+			return nil, mysql.NewError(mysql.ER_UNKNOWN_SYSTEM_VARIABLE, "Unknown system variable")
+		}
+		parts := strings.Split(who, "/")
+		rs, err := mysql.BuildSimpleTextResultset([]string{"@@hostname", "@@port", "@@server_id"}, [][]any{{parts[0], parts[1], parts[2]}})
+		if err != nil {
+			return nil, err
+		}
+		return mysql.NewResult(rs), nil
 	case strings.HasPrefix(q, "KILL"):
 		h.src.kill(q)
 		return mysql.NewResultReserveResultset(0), nil
