@@ -36,6 +36,8 @@ type wireJob struct {
 	Schema        string `json:"schema,omitempty"`
 	TimeZone      string `json:"time_zone,omitempty"`
 	SelectLimit   int    `json:"select_limit,omitempty"`
+	// KeepJoinOrder: see Session.KeepJoinOrder.
+	KeepJoinOrder bool   `json:"keep_join_order,omitempty"`
 	Threads       int    `json:"threads"`
 	MemoryLimit   string `json:"memory_limit"`
 	MaxRows       int    `json:"max_rows"`

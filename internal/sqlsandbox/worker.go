@@ -252,6 +252,17 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return sessionErr("%s: %v", stmt, err)
 		}
 	}
+	// The joins in the order written (Session.KeepJoinOrder). The database
+	// is the job's own (serveJob opens a new one per job), so the next
+	// statement plans its joins as always. The only writer of
+	// disabled_optimizers: a SET replaces the whole list, so another
+	// optimizer turned off later must be added to this one, not set apart.
+	if job.KeepJoinOrder {
+		const keep = "SET disabled_optimizers = 'join_order'"
+		if _, err := conn.ExecContext(ctx, keep); err != nil {
+			return sessionErr("%s: %v", keep, err)
+		}
+	}
 	// Then the restrictions, then the views, then the lock. The views are
 	// installed AFTER external access is restricted so an installed view can
 	// only ever reach the copy directories, and BEFORE the lock because the

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **A statement whose joins are all `STRAIGHT_JOIN` runs on the copy with its joins in the order written, as on MySQL.** The copy used to rewrite `STRAIGHT_JOIN` into a plain join and let its planner choose the order. Through the views the planner guesses the tables' sizes, and on queries written for their order it could choose one whose intermediate results never fit: CH-benCHmark Q5 and Q21 at 100 warehouses wrote 351 GB of spill and never answered on the copy, and took more than 5 minutes on MySQL. In the written order each answers in about 5 seconds. The copy can keep the order only for all the joins of a statement, so a statement that mixes `STRAIGHT_JOIN` with other joins or tables listed with commas, or uses it only in a subquery, is planned as before.
 - **Fresh mode keeps the tables' recent changes up to date for 15 minutes after the last statement that read them, not one.** A client whose statements spend minutes on MySQL (a report the copy refuses, a long forwarded query) asked for no tail all that while, so the follower stopped after a minute; the client's next statement on the copy then had to bring minutes of changes up to date within its 2 seconds, could not under a steady write load, and read the copy as of its last snapshot. On a 100-warehouse CH-benCHmark at 500 tx/s, answers were 200 to 330 s behind the source. An update with nothing new costs one read of the index's newest event.
 
 ## [0.120.2] - 2026-10-29

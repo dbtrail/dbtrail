@@ -231,6 +231,15 @@ type Session struct {
 	// top-level LIMIT ignores it, as on MySQL, and so do SHOW, DESCRIBE and
 	// SUMMARIZE, which are not SELECTs there.
 	SelectLimit int
+	// KeepJoinOrder runs the statement with the copy's join reordering off
+	// (DuckDB's join_order optimizer), so its joins are made in the order
+	// they are written: what MySQL does for a STRAIGHT_JOIN
+	// (readrouter.KeepsJoinOrder), for every join of the statement. Through
+	// the views the planner reads row counts as guesses, and on a query
+	// written for its order it can pick one whose intermediate results do
+	// not fit anywhere (a CH-benCHmark Q5 that filled 351 GB of spill and
+	// answered in 5 s in the written order).
+	KeepJoinOrder bool
 	// StrictStar asks for a refusal instead of an answer when the statement
 	// holds a star over a table whose `SELECT *` on the copy is not MySQL's:
 	// the order of its columns is not known, or MySQL returns a different set
@@ -1400,7 +1409,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, more bool) ([]byte, err
 	}
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
-		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit,
+		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,

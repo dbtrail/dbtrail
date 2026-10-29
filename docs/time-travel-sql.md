@@ -900,8 +900,21 @@ What this is and is not:
   as the join it means: `a STRAIGHT_JOIN b ON ...` (or `USING`) is sent as
   `a JOIN b ON ...`, `a STRAIGHT_JOIN b` with no condition (MySQL filters in
   `WHERE`) as `a CROSS JOIN b`, and the modifier in `SELECT STRAIGHT_JOIN`
-  is dropped, since it only orders MySQL's plan. The answer is the same; only
-  the order MySQL would read the tables in is lost. If the condition cannot
+  is dropped. The order is kept when the statement fixes it for every
+  join: when each join of each `FROM` is a `STRAIGHT_JOIN` (no other
+  `JOIN`, no tables listed with commas), the statement runs on the copy
+  with its join reordering off, so the copy too joins the tables in the
+  order they are written. That matters on queries written for their
+  order: the copy's planner sees the tables through views and guesses
+  their sizes, and on such a query it can pick an order whose intermediate
+  results grow past every limit (a CH-benCHmark Q5 that wrote 351 GB of
+  spill and never answered took 5 seconds in the written order). The copy
+  can only keep the order for all the joins of a statement or for none,
+  where MySQL keeps it for the joins `STRAIGHT_JOIN` names; so a statement
+  that mixes `STRAIGHT_JOIN` with other joins, or uses it only in a
+  subquery, is planned on the copy as any other, since keeping the written
+  order for the joins the client left open could pair tables that share no
+  condition. If the condition cannot
   be read (a prepared statement whose placeholder sits inside the right side
   of the join), the copy refuses the statement and MySQL answers it. MySQL
   always gets the statement as the client wrote it.
