@@ -82,6 +82,16 @@ func TestIntegrationCopyUnchanged_staticTableAfterRotation_2592(t *testing.T) {
 	testutil.MustExec(t, r.db, "DELETE FROM bintrail_server_changes")
 	r.wantUnchanged(quiet)
 
+	// The source's binary log started again after the refresh (a RESET
+	// MASTER): the newest change capture recorded sorts before the
+	// refresh's cut, so no search by position can rule a change out. The
+	// table's own cut, a full read's with no mark, would let that pass; the
+	// moved one carries the refresh's mark and is folded, which refuses.
+	r.change("other", event.EventInsert, "9", "x", "binlog.000002", 4, now.Add(-time.Minute))
+	r.wantNot("started again", quiet)
+	testutil.MustExec(t, r.db, "DELETE FROM binlog_events WHERE table_name = 'other'")
+	r.wantUnchanged(quiet)
+
 	// A change after the refresh's cut is seen.
 	r.change(quiet.Table, event.EventUpdate, "1", "late", "binlog.000009", 900, now.Add(-2*time.Minute))
 	r.wantNot("changed since its snapshot", quiet)
