@@ -362,7 +362,11 @@ func TestBackupScheduler_cutsOverToAFullBackupOnTheMeasuredWindow(t *testing.T) 
 	if console.BackupWhyCode(st.LastWhy) != "window_measured" || !strings.Contains(st.LastWhy, "17,000,000 events") {
 		t.Fatalf("the slot did not cut over on the measured window: %+v", st)
 	}
-	if run, _ := sup.history.LastScheduled(e.ID); run == nil || run.Kind != console.BaselineRunDump || run.WhyCode != "window_measured" {
+	// The full read fails here (its source does not parse), and an update
+	// then stands in for it at the same slot (#2586): the full read's record
+	// is the newest dump, not the newest scheduled record.
+	b.watchers.Wait()
+	if run := lastScheduledDump(sup, e.ID); run == nil || run.WhyCode != "window_measured" {
 		t.Fatalf("the full read's record does not carry the reason: %+v", run)
 	}
 	if !strings.Contains(logs.String(), "taking a full read instead of an update") {
@@ -440,7 +444,11 @@ func TestBackupScheduler_cutsOverOnAgeInTheRealSlot(t *testing.T) {
 		!strings.Contains(st.LastWhy, "no count of the changes since it, no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full read on record") {
 		t.Fatalf("the slot did not cut over on age: %+v", st)
 	}
-	if run, _ := sup.history.LastScheduled(e.ID); run == nil || run.Kind != console.BaselineRunDump || run.WhyCode != "window_age" {
+	// The full read fails here (its source does not parse), and an update
+	// then stands in for it at the same slot (#2586): the full read's record
+	// is the newest dump, not the newest scheduled record.
+	b.watchers.Wait()
+	if run := lastScheduledDump(sup, e.ID); run == nil || run.WhyCode != "window_age" {
 		t.Fatalf("the full read's record does not carry the reason: %+v", run)
 	}
 	if !strings.Contains(logs.String(), "taking a full read instead of an update") {
@@ -455,4 +463,15 @@ func openHistoryForTest(t *testing.T) *console.BaselineRunHistory {
 		t.Fatal(err)
 	}
 	return h
+}
+
+// lastScheduledDump is the newest scheduled full read on record for id.
+func lastScheduledDump(sup *baselineSupervisor, id string) *console.BaselineRunRecord {
+	runs := sup.history.List(id)
+	for i := len(runs) - 1; i >= 0; i-- {
+		if r := runs[i]; r.Kind == console.BaselineRunDump && r.Trigger == console.BaselineRunTriggerScheduled && r.SkipReason == "" {
+			return &r
+		}
+	}
+	return nil
 }

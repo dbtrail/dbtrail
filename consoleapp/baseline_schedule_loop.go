@@ -156,6 +156,12 @@ type scheduledStart struct {
 	// Its success says nothing about the update path, so it does not end
 	// the fallback alarm; any other scheduled job that succeeds does.
 	fallback bool
+	// standsInForFull: this is the update that stood in for a full read the
+	// cut-over chose and that failed (#2586). Kept apart from fallback,
+	// whose alarm and page lines are about the opposite direction. When it
+	// fails too, no full read is started in its place: that is the read
+	// that just failed.
+	standsInForFull bool
 	// fullCopy: this is a full copy the full-copy timetable asked for
 	// (#1564). Same reason as fallback: a full backup that went through
 	// proves nothing about updates, so it does not end their alarm either,
@@ -1196,10 +1202,34 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 			b.skip(e, time.Now().UTC(), "the update was refused and no full read stands in for it, because it would publish into the same location: "+st.Last.LastError)
 			return
 		}
+		b.mu.Lock()
+		own := b.started[e.ID]
+		b.mu.Unlock()
+		if own.at != stamp {
+			own = scheduledStart{}
+		}
+		if method == console.BackupMethodRefresh && own.standsInForFull {
+			// The update standing in for a failed full read. Whatever it
+			// did, nothing else is started in this slot: a full read in its
+			// place would be the one that just failed (#2586). Both runs are
+			// in the history with their errors, so no skip is recorded: a
+			// record per slot would push the real runs out of it, and the
+			// slot did start, twice.
+			if st.Last.State == "failed" {
+				slog.Warn("snapshot schedule: the full read failed and the update taken in its place failed too; nothing else is started in this slot",
+					"server", e.Name, "id", e.ID, "update_error", st.Last.LastError)
+				return
+			}
+			b.standInNewTables(e, *st.Last)
+			return
+		}
 		if method == console.BackupMethodRefresh && fullReadStandsIn(*st.Last) {
 			if !b.fullReadCannotCure(e, *st.Last) {
 				b.fallBack(e, *st.Last)
 			}
+		}
+		if method == console.BackupMethodFull && updateStandsIn(own, *st.Last) {
+			b.updateInstead(e, *st.Last)
 		}
 		if method == console.BackupMethodFull && st.Last.State == "succeeded" {
 			b.noteFallbackReadOK(e.ID, stamp)
@@ -1216,6 +1246,110 @@ func (b *backupScheduler) watchScheduled(e console.ServerEntry, stamp, method st
 // failed (#1539), and not when the disk refused it (#1614).
 func fullReadStandsIn(last console.BaselineStatus) bool {
 	return last.State == "failed" && !last.Published && !last.DiskRefused
+}
+
+// updateStandsIn reports whether a failed scheduled full read is one an
+// update from the recorded changes can stand in for (#2586): one the
+// cut-over chose over a possible update because it looked cheaper, or
+// because the snapshot it builds on was old, and that failed without
+// publishing anything. Not a first backup, a full read standing in for a
+// failed update (that update is what just failed), a full copy the
+// timetable asked for, or a read refused on the disk or the destination,
+// which an update writing to the same place would meet too.
+func updateStandsIn(own scheduledStart, last console.BaselineStatus) bool {
+	if own.method != console.BackupMethodFull || own.fallback || own.fullCopy {
+		return false
+	}
+	switch console.BackupWhyCode(own.why) {
+	case "window_measured":
+	case "window_age":
+		if strings.Contains(own.why, console.BackupWhyNothingIndexedWords) {
+			// Chosen because the index may be missing writes of the
+			// source: an update over the same index cannot settle that.
+			return false
+		}
+	default:
+		return false
+	}
+	return last.State == "failed" && !last.Published && !last.DiskRefused && !last.ForeignSource
+}
+
+// updateInstead takes the update that stands in for a failed full read, at
+// the slot the full read was scheduled for (#2586). A full read fails while
+// the source holds a statement older than mydumper's guard (60 s), and a
+// source used for long reports may hold one all the time; the cut-over
+// would choose the full read again at every slot while the changes behind
+// it, and so the cost of the update, keep growing. The update is slower but
+// needs nothing from the source. The same checks as fallBack: the schedule
+// as it is now, and the server still observed.
+func (b *backupScheduler) updateInstead(e console.ServerEntry, failed console.BaselineStatus) {
+	reason := failed.LastError
+	cur, ok := b.reg.Get(e.ID)
+	if !ok || cur.BackupSchedule == nil || cur.BackupSchedule.Identity() != e.BackupSchedule.Identity() {
+		slog.Warn("snapshot schedule: the full read failed, but the schedule was removed or changed meanwhile; no update taken in its place",
+			"server", e.Name, "reason", reason)
+		return
+	}
+	e = cur
+	now := time.Now().UTC()
+	because := "the full read failed (" + reason + ")"
+	if err := console.RebuildPossible(e, b.gates()); err != nil {
+		b.skip(e, now, because+" and no update can be taken in its place: "+err.Error())
+		return
+	}
+	if err := b.reg.WriteRefusal(e); err != nil {
+		b.skip(e, now, because+" and no update can be taken in its place: "+err.Error())
+		return
+	}
+	p, err := e.BackupSchedule.Parse()
+	if err != nil {
+		b.skip(e, now, because+" and the schedule could not be read: "+err.Error())
+		return
+	}
+	b.mu.Lock()
+	_, observed := b.seen[e.ID]
+	b.mu.Unlock()
+	if !observed {
+		slog.Warn("snapshot schedule: the full read failed, but the schedule was removed meanwhile; no update taken", "server", e.Name)
+		return
+	}
+	slog.Warn("snapshot schedule: the full read failed; updating from the recorded changes instead, although the update costs more",
+		"server", e.Name, "id", e.ID, "reason", reason)
+	stamp := now.Format(time.RFC3339)
+	switch err := b.startRebuild(e, p, stamp); {
+	case err == nil:
+		b.mu.Lock()
+		if st, ok := b.started[e.ID]; ok && st.at == stamp {
+			st.standsInForFull = true
+			b.started[e.ID] = st
+		}
+		b.mu.Unlock()
+		b.watch(e, stamp, console.BackupMethodRefresh)
+	case errors.Is(err, console.ErrBaselineRunning):
+		b.skip(e, now, because+" and another snapshot job was running when the update was tried")
+	default:
+		b.skip(e, now, because+" and the update could not start: "+err.Error())
+	}
+}
+
+// standInNewTables is includeNewTables for the update that stood in for a
+// failed full read: the same bookkeeping, and no full read for tables the
+// update left out, since that is the read that just failed. A promise the
+// planner made on the update's status ("a full read is being started") is
+// withdrawn, so the page does not say a read started that did not.
+func (b *backupScheduler) standInNewTables(e console.ServerEntry, done console.BaselineStatus) {
+	b.mu.Lock()
+	_, promised := b.newTablesPending[e.ID]
+	delete(b.newTablesPending, e.ID)
+	if len(done.NewTables) == 0 && done.NewTablesOmitted == 0 && done.NewTablesUnchecked == "" {
+		delete(b.newTablesTried, e.ID)
+	}
+	b.mu.Unlock()
+	if done.NewTablesAction == console.NewTablesActionFullRead && promised {
+		slog.Info("snapshot schedule: the update left out tables created after the previous snapshot; no full read is taken for them in this slot, since the full read just failed",
+			"server", e.Name, "id", e.ID, "tables", strings.Join(done.NewTables, ","))
+		b.sup.withdrawNewTablesPromise(e.ID)
+	}
 }
 
 // fallBack takes the full backup that stands in for a failed update, at
