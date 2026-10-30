@@ -592,8 +592,8 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 			// The detail would only repeat this.
 			what = "but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"
 		}
-		return fmt.Sprintf("%s: it is %s old and the cut-over is %s; nothing new was indexed since it, %s",
-			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), what)
+		return fmt.Sprintf("%s: it is %s old and the cut-over is %s; %s, %s",
+			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), BackupWhyNothingIndexedWords, what)
 	}
 	// The parenthetical names what is actually missing: the history keeps
 	// the rate, the full backup and (IndexMark) the count's base across
@@ -732,6 +732,19 @@ func rebuildPossible(e ServerEntry, gates BackupScheduleGates) error {
 	}
 	return nil
 }
+
+// RebuildPossible is rebuildPossible for the schedule loop, which asks it
+// again before an update stands in for a full read that failed (#2586).
+func RebuildPossible(e ServerEntry, gates BackupScheduleGates) error {
+	return rebuildPossible(e, gates)
+}
+
+// BackupWhyNothingIndexedWords is in the age rule's reason when nothing was
+// indexed since the previous snapshot: the full read was chosen because
+// "nothing" could not be trusted (the capture may have stopped, or the
+// source could not be checked), which only a read of the source settles.
+// An update cannot stand in for that one (#2586).
+const BackupWhyNothingIndexedWords = "nothing new was indexed since it"
 
 // The reasons a scheduled run takes a FULL backup instead of updating the
 // previous one (#1604). They are persisted on the run record at run time,
