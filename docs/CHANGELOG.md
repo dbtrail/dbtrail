@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.121.2] - 2026-10-30
+
+The first published build of the changes listed under 0.121.1, which was
+tagged and has no binaries or packages of its own: its release stopped in two
+scheduler tests that waited for a state the 0.121.1 fix can skip past. The
+tests are corrected; the product code is the same. The demo image `0.121.1`
+was published and runs the same code.
+
 ## [0.121.1] - 2026-10-30
 
 ### Fixed
