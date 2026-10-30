@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- After a full read, the copy's lag showed as unknown until the first update. The empty change file written beside each table after a full read now carries who wrote the table and the event mark beside it, so the lag is known right away (#2587).
+
 ## [0.121.0] - 2026-10-30
 ### Changed
 - **The MySQL port sends a large answer in few writes instead of one per row.** Rows were written to the network one at a time, each also its own TLS record on an encrypted connection; now they are gathered in blocks of 64 KB. This applies to every answer the port streams: a large result from the copy, a result forwarded from MySQL, and a full-table `_snapshot` read.

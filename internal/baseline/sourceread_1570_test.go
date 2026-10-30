@@ -110,7 +110,7 @@ func TestChainSourceRead(t *testing.T) {
 		{name: "no chain: the table file answers", base: base, want: SourceRead{At: dumpAt, Folds: 0}},
 		{
 			// The empty pair a full backup starts the chain with carries no
-			// keys and no producer (writeEmptyTableDelta): it is the dump's.
+			// read keys of its own (writeEmptyTableDelta): it is the dump's.
 			name: "the empty pair written with the base adds no fold",
 			base: base,
 			last: &DumpMetadata{SnapshotTimestamp: dumpAt, FoldGeneration: -1},
