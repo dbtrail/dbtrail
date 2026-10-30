@@ -164,6 +164,10 @@ type copyCut struct {
 	// folded: the anchor is a refresh's cut, a position of an event the index
 	// holds, rather than where the source stood when a dump read it.
 	folded bool
+	// sinceMark: the anchor is the cut of the refresh that published the
+	// table's directory, not the table's own (promoteToRunCut, #2592), so
+	// the lookup starts at the time of that cut's mark.
+	sinceMark bool
 }
 
 // copyCutKey identifies the bytes a cut was read from: a snapshot's files are
@@ -301,6 +305,27 @@ func copyTimeFloor(since time.Time) time.Time {
 // The stamp still caps the result: it cannot be later than the files.
 func copyLookupSince(ctx context.Context, db *sql.DB, t views.BaselineTable, cut copyCut) (since time.Time, refusal string, err error) {
 	name := t.Schema + "." + t.Table
+	if cut.sinceMark {
+		// The directory's refresh cut (#2592): the mark names the event the
+		// cut sits after, every event past the cut committed after it, and
+		// it is on the source's clock, as a last folded event is below.
+		var file string
+		var end uint64
+		err := db.QueryRowContext(ctx, `SELECT event_timestamp, binlog_file, end_pos FROM binlog_events WHERE event_id = ?`,
+			cut.mark.ID).Scan(&since, &file, &end)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return time.Time{}, fmt.Sprintf("the index no longer holds the event the snapshot of %s was cut at, so later changes cannot be placed", name), nil
+		case err != nil:
+			return time.Time{}, "", err
+		case file != cut.mark.File || end != cut.mark.End:
+			return time.Time{}, fmt.Sprintf("the event the snapshot of %s was cut at is another event in this index", name), nil
+		}
+		if cut.stamp.Before(since) {
+			since = cut.stamp
+		}
+		return since, "", nil
+	}
 	since = cut.sourceRead
 	if cut.lastEventID > 0 {
 		var schema, table string
