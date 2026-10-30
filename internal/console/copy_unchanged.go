@@ -615,7 +615,16 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	}
 	ctx, cancel := context.WithTimeout(ctx, copyUnchangedTimeout)
 	defer cancel()
+	// cuts are each table's own: what the schema-change, capture-loss and
+	// server-change checks ask from. look are where the lookups start, and
+	// the key of what is remembered as changed (a verdict about the moved
+	// window must not outlive it), moved to the directory's refresh cut for
+	// a table carried unchanged (tailLookupCutFrom, #2592). The refresh
+	// refuses only a destructive schema change in its window and carries a
+	// table whose definition changed without a row event as it was, so a
+	// schema change is never asked from the moved cut.
 	cuts := make([]copyCut, len(tables))
+	look := make([]copyCut, len(tables))
 	var sourceRead time.Time
 	var oldestCut query.BinlogPos
 	for i, t := range tables {
@@ -630,7 +639,8 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		if cuts[i].refusal != "" {
 			return cuts[i].refusal
 		}
-		if why := s.copyChanged.get(id, t, cuts[i].anchor); why != "" {
+		look[i] = s.tailLookupCutFrom(t, cuts[i])
+		if why := s.copyChanged.get(id, t, look[i].anchor); why != "" {
 			return why
 		}
 		if i == 0 || cuts[i].anchor.AtOrBefore(oldestCut) {
@@ -675,7 +685,7 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 				return fmt.Sprintf("%s.%s had a schema change since its snapshot", t.Schema, t.Table)
 			}
 		}
-		since, refusal, err := copyLookupSince(ctx, b.db, t, cuts[i])
+		since, refusal, err := copyLookupSince(ctx, b.db, t, look[i])
 		if err != nil {
 			return unreadable("the last change of "+t.Schema+"."+t.Table, err)
 		}
@@ -695,14 +705,14 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		// wrote and by a search of every older hour otherwise.
 		rows, err := b.engine.Fetch(ctx, query.Options{
 			Schema: t.Schema, Table: t.Table,
-			Since: &since, SincePos: &cuts[i].anchor, SinceEventID: cuts[i].lastEventID,
+			Since: &since, SincePos: &look[i].anchor, SinceEventID: look[i].lastEventID,
 			Limit: 1,
 		}.SearchesBelowItsOwnFloor())
 		if err != nil {
 			return unreadable("the events of "+t.Schema+"."+t.Table, err)
 		}
 		if len(rows) > 0 {
-			return s.copyChanged.put(id, t, cuts[i].anchor, fmt.Sprintf("%s.%s changed since its snapshot", t.Schema, t.Table))
+			return s.copyChanged.put(id, t, look[i].anchor, fmt.Sprintf("%s.%s changed since its snapshot", t.Schema, t.Table))
 		}
 		// The lookup above starts at a time floor, as the engine requires
 		// of a search by position (#797). A statement or transaction that
@@ -721,25 +731,25 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 			if err != nil {
 				return unreadable("the events older than the snapshot of "+t.Schema+"."+t.Table, err)
 			}
-			search = found && cuts[i].anchor.AtOrBefore(newest)
+			search = found && look[i].anchor.AtOrBefore(newest)
 		}
 		if search {
 			rows, err := b.engine.Fetch(ctx, query.Options{
 				Schema: t.Schema, Table: t.Table,
-				Until: &tableFloor, SincePos: &cuts[i].anchor, SinceEventID: cuts[i].lastEventID,
+				Until: &tableFloor, SincePos: &look[i].anchor, SinceEventID: look[i].lastEventID,
 				Limit: 1,
 			})
 			if err != nil {
 				return unreadable("the older events of "+t.Schema+"."+t.Table, err)
 			}
 			if len(rows) > 0 {
-				return s.copyChanged.put(id, t, cuts[i].anchor, fmt.Sprintf("%s.%s changed since its snapshot (a change that began long before it and committed after)", t.Schema, t.Table))
+				return s.copyChanged.put(id, t, look[i].anchor, fmt.Sprintf("%s.%s changed since its snapshot (a change that began long before it and committed after)", t.Schema, t.Table))
 			}
 		}
 	}
 	// No event after any position: that means "unchanged" only while the
 	// source kept one binlog numbering (#2160).
-	if why, err := numberingStartedOver(ctx, b.db, tables, cuts); err != nil {
+	if why, err := numberingStartedOver(ctx, b.db, tables, look); err != nil {
 		return unreadable("where the newest captured change sits", err)
 	} else if why != "" {
 		return why
@@ -750,7 +760,13 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	// clock: detected_at is a TIMESTAMP, which the index server reads in its
 	// own time zone.
 	var changedServer int
-	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bintrail_server_changes WHERE UNIX_TIMESTAMP(detected_at) >= ?`, floor.Unix()).Scan(&changedServer)
+	// From the tables' own reads, not the moved lookups (#2592): a refresh
+	// checks only the server's uuid in its window, this asks of any change.
+	serverFloor := floor
+	if f := copyTimeFloor(sourceRead); f.Before(serverFloor) {
+		serverFloor = f
+	}
+	err = b.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bintrail_server_changes WHERE UNIX_TIMESTAMP(detected_at) >= ?`, serverFloor.Unix()).Scan(&changedServer)
 	if err != nil {
 		return unreadable("the source's identity record", err)
 	}
@@ -785,8 +801,8 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 		return "the index keeps no record of its archives, so a change in an hour already rotated out cannot be ruled out"
 	}
 	for i, t := range tables {
-		if n := archives.MayHoldAfter(sinces[i], cuts[i].anchor); n > 0 {
-			return s.copyChanged.put(id, t, cuts[i].anchor, fmt.Sprintf(
+		if n := archives.MayHoldAfter(sinces[i], look[i].anchor); n > 0 {
+			return s.copyChanged.put(id, t, look[i].anchor, fmt.Sprintf(
 				"%s.%s may have changed since its snapshot: %d archive(s) of older hours, written since, may hold a later change (an archive is not split by table)",
 				t.Schema, t.Table, n))
 		}

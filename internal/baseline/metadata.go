@@ -122,7 +122,8 @@ const (
 	// MetaKeyFoldCut is "<binlog file>:<position>", written by a refresh only
 	// when it cut the index (#2592): the position beside it is then where
 	// every table of the run was folded through. A run that found the index
-	// empty carries its source file's position instead, and writes no key.
+	// empty carries its source file's position instead, and one told to go
+	// on past gaps (AllowGaps) may have skipped hours: neither writes the key.
 	MetaKeyFoldCut = "bintrail.fold_cut"
 )
 

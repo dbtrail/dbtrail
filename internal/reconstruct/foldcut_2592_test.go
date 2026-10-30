@@ -26,6 +26,16 @@ func TestSnapshotFileMetadata_stampsTheFoldCutOnlyWhenTheIndexWasCut(t *testing.
 	if got := snapshotFileMetadata(in)[baseline.MetaKeyFoldCut]; got != "binlog.000058:1200" {
 		t.Fatalf("fold cut = %q", got)
 	}
+	// A run told to go on past gaps may have skipped hours of the window:
+	// its "nothing found" says nothing through the cut.
+	in.GapsAllowed = true
+	if _, ok := snapshotFileMetadata(in)[baseline.MetaKeyFoldCut]; ok {
+		t.Fatal("a run that allowed gaps claimed a fold cut")
+	}
+	if snapshotFileMetadata(in)[baseline.MetaKeyBinlogPos] != "1200" {
+		t.Fatal("a run that allowed gaps lost its position")
+	}
+	in.GapsAllowed = false
 	in.PG = true
 	if _, ok := snapshotFileMetadata(in)[baseline.MetaKeyFoldCut]; ok {
 		t.Fatal("a PostgreSQL fold claimed a binlog cut")
