@@ -423,7 +423,7 @@ func (h *Handler) routeStatement(currentDB, qstr string) (*mysql.Result, error) 
 			if err != nil {
 				return nil, err
 			}
-			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), readrouter.KeepsJoinOrder(qstr), toFile, reason, unchangedWithin)
+			res, err := h.runFreeSQLRouted(currentDB, text, readrouter.ShapeOf(qstr), readrouter.KeepsJoinOrder(qstr), toFile, false, reason, unchangedWithin)
 			if err != nil {
 				return nil, err
 			}
@@ -461,6 +461,9 @@ type spooledAnswer struct {
 	spool   *sqlsandbox.Spool
 	columns []sqlsandbox.Column
 	loc     *time.Location
+	// binary is a prepared statement's answer: its rows go out in the
+	// binary encoding, under the header's types.
+	binary bool
 }
 
 // sendSpooled sends the rows of the copy's answer waiting in a file, if
@@ -489,8 +492,18 @@ func (h *Handler) sendSpooled(res *mysql.Result, err error) (*mysql.Result, erro
 		}
 		return nil, err
 	}
+	if sp.binary {
+		// In memory a column whose cells do not all encode under its type
+		// is declared text (binaryResultset), which takes every row: the
+		// file is read once for that before the header goes out.
+		if err := sp.binaryTypes(res.Resultset.Fields); err != nil {
+			h.logger.Warn("free sql: a large result's file could not be read; the client got an error", "err", err)
+			return nil, mysql.NewError(mysql.ER_UNKNOWN_ERROR, fmt.Sprintf("the result could not be read: %v", err))
+		}
+	}
 	w := newStreamWriterFields(h.out(), res.Resultset.Fields)
 	w.status = h.SessionStatus()
+	w.binary = sp.binary
 	row := make([]any, len(sp.columns))
 	sent := 0
 	var wireErr error
@@ -1043,7 +1056,7 @@ func (h *Handler) notTimeTravelError(qstr string) error {
 
 // runFreeSQL serves one ordinary statement through the bound FreeSQL.
 func (h *Handler) runFreeSQL(schema, qstr string) (*mysql.Result, error) {
-	return h.runFreeSQLRouted(schema, qstr, nil, false, false, "", 0)
+	return h.runFreeSQLRouted(schema, qstr, nil, false, false, false, "", 0)
 }
 
 // copyText is the statement the routing ladder sends the copy: the client's
@@ -1075,7 +1088,10 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 // memory cap comes back as a file, and served is then its header alone,
 // with the rows waiting in h.spooled for sendSpooled. The caller that
 // passes it calls sendSpooled once nothing can be forwarded any more.
-func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, keepJoinOrder, toFile bool, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
+//
+// binary is sqlsandbox.Session.BinaryResult: the caller turns the answer
+// into a prepared statement's, so less of it is held in memory.
+func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnTypes, keepJoinOrder, toFile, binary bool, routeReason string, unchangedWithin time.Duration) (served *mysql.Result, refused error) {
 	if h.router == nil {
 		// Where the copy answers alone, this is the statement's answer: the
 		// copy's when it is served, a refusal otherwise, including one made
@@ -1137,6 +1153,7 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	sess.KeepJoinOrder = keepJoinOrder
 	sess.UnchangedWithin = unchangedWithin
 	sess.ResultToFile = toFile
+	sess.BinaryResult = toFile && binary // what it bounds is the file's
 	res, err := h.freeSQL.Run(ctx, stmt, schema, sess)
 	if res.Spool != nil {
 		// The file is this statement's until it is handed to sendSpooled;
@@ -1642,4 +1659,39 @@ func resultRows(res sqlsandbox.Result) int {
 		return int(res.Spool.Rows())
 	}
 	return len(res.Rows)
+}
+
+// binaryTypes declares text each column of fields whose type a cell of the
+// file does not encode under, as binaryResultset does for rows in memory.
+// A column already carried as text is not looked at, and with none left to
+// look at the file is not read.
+func (sp *spooledAnswer) binaryTypes(fields []*mysql.Field) error {
+	check := make([]bool, len(fields))
+	someTyped := false
+	for c, f := range fields {
+		check[c] = !isLenEncType(f.Type)
+		someTyped = someTyped || check[c]
+	}
+	if !someTyped {
+		return nil
+	}
+	if len(fields) != len(sp.columns) {
+		return fmt.Errorf("%d columns in the header for %d in the result", len(fields), len(sp.columns))
+	}
+	return sp.spool.Each(func(cells []any) error {
+		if len(cells) != len(fields) {
+			return fmt.Errorf("a row of the result file has %d cells for %d columns", len(cells), len(fields))
+		}
+		for c, cell := range cells {
+			if !check[c] || cell == nil {
+				continue
+			}
+			text, _ := freeSQLCell(cell, sp.columns[c].Type, sp.loc).([]byte)
+			if _, ok := encodeBinaryCell(fields[c], text); !ok {
+				asBinaryText(fields[c])
+				check[c] = false
+			}
+		}
+		return nil
+	})
 }

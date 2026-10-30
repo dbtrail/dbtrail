@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -80,6 +81,9 @@ func TestRoute_resultFromAFileIsTheSameAnswer(t *testing.T) {
 	got, err := h.HandleQuery(spoolStmt)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if f.gotSess.BinaryResult {
+		t.Error("a text statement said its answer is held twice in memory")
 	}
 	if !f.gotSess.ResultToFile || len(f.spools) != 1 {
 		t.Fatalf("a routed text statement did not ask for a file (ResultToFile %v, %d files)", f.gotSess.ResultToFile, len(f.spools))
@@ -200,7 +204,7 @@ func TestHandlerClose_removesAPendingFile(t *testing.T) {
 	h := NewHandler(nil, nil)
 	h.BindFreeSQL(f)
 	h.BindConn(&capturePW{})
-	res, err := h.runFreeSQLRouted("", "SELECT 1", nil, false, true, "expensive", 0)
+	res, err := h.runFreeSQLRouted("", "SELECT 1", nil, false, true, false, "expensive", 0)
 	if err != nil || res == nil || h.spooled == nil {
 		t.Fatalf("(%v, %v), pending %v", res, err, h.spooled)
 	}
@@ -211,25 +215,92 @@ func TestHandlerClose_removesAPendingFile(t *testing.T) {
 	}
 }
 
-// A prepared statement's answer goes back in the binary encoding, buffered:
-// it never asks the copy for a file, and keeps the row cap.
-func TestRoute_preparedStatementAsksForNoFile(t *testing.T) {
+// A prepared statement's answer goes out in the binary encoding: from a
+// file it is the same answer, byte for byte, as from memory, header and
+// rows. That includes a column declared text because one of its cells does
+// not encode under its type, which in memory is decided over every row: the
+// cell that decides it here is the last one.
+func TestRoute_preparedResultFromAFileIsTheSameAnswer(t *testing.T) {
 	base, rows := spoolCase()
-	f := &fakeFreeSQL{res: base, spoolRows: rows}
-	f.res.Rows = rows
+	odd := append(slices.Clone(rows), []any{json.Number("1e400"), "x", "1.00", "2026-01-01T00:00:00Z"})
+	const stmt = "SELECT id, s, amount, created FROM t WHERE id > ?"
+	for name, rows := range map[string][][]any{"typed": rows, "a column turned text by its last cell": odd} {
+		t.Run(name, func(t *testing.T) {
+			run := func(file bool) (*Handler, *capturePW, *fakeFreeSQL, *mysql.Result) {
+				f := &fakeFreeSQL{res: base}
+				if file {
+					f.spoolRows = rows
+				} else {
+					f.res.Rows = rows
+				}
+				pw := &capturePW{}
+				h := spoolRouting(t, f, &fakeRouter{toCopy: true, reason: "expensive"}, pw)
+				_, _, ctx, err := h.HandleStmtPrepare(stmt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := h.HandleStmtExecute(ctx, "", []any{int64(0)})
+				if err != nil || res == nil || res.Resultset == nil {
+					t.Fatalf("file %v: (%v, %v)", file, res, err)
+				}
+				if f.calls != 1 {
+					t.Fatalf("file %v: the copy ran %d time(s)", file, f.calls)
+				}
+				return h, pw, f, res
+			}
+			_, _, _, want := run(false)
+			h, pw, f, got := run(true)
+			if !f.gotSess.BinaryResult {
+				t.Error("a prepared statement did not say its answer is held twice in memory")
+			}
+			if !f.gotSess.ResultToFile || len(f.spools) != 1 || !got.Resultset.StreamingDone {
+				t.Fatalf("not sent from a file (asked %v, %d files, streamed %v)", f.gotSess.ResultToFile, len(f.spools), got.Resultset.StreamingDone)
+			}
+			cols := len(want.Resultset.Fields)
+			if len(pw.packets) != cols+2+len(rows) {
+				t.Fatalf("%d packets, want %d", len(pw.packets), cols+2+len(rows))
+			}
+			for i, fd := range want.Resultset.Fields {
+				if !bytes.Equal(pw.packets[1+i], fd.Dump()) {
+					t.Errorf("column %d: from the file %q, in memory %q", i, pw.packets[1+i], fd.Dump())
+				}
+			}
+			for i, rd := range want.Resultset.RowDatas {
+				if !bytes.Equal(pw.packets[cols+2+i], rd) {
+					t.Errorf("row %d: from the file %q, in memory %q", i, pw.packets[cols+2+i], rd)
+				}
+			}
+			gone(t, f.spools)
+			if h.spooled != nil {
+				t.Error("the answer stayed pending")
+			}
+		})
+	}
+}
+
+// A file that cannot be read through before a prepared statement's header
+// goes out (the pass that settles the column types) is a clean error:
+// nothing on the wire, the file removed, nothing forwarded.
+func TestRoute_preparedFileUnreadableBeforeTheHeader(t *testing.T) {
+	base, rows := spoolCase()
+	f := &fakeFreeSQL{res: base, spoolRows: rows, damageSpool: true}
 	r := &fakeRouter{toCopy: true, reason: "expensive"}
-	h := spoolRouting(t, f, r, &capturePW{})
+	pw := &capturePW{}
+	h := spoolRouting(t, f, r, pw)
 	_, _, ctx, err := h.HandleStmtPrepare("SELECT id, s, amount, created FROM t WHERE id > ?")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.HandleStmtExecute(ctx, "", []any{int64(0)}); err != nil {
-		t.Fatal(err)
+	res, err := h.HandleStmtExecute(ctx, "", []any{int64(0)})
+	if err == nil || res != nil {
+		t.Fatalf("a damaged file answered (%v, %v)", res, err)
 	}
-	if f.calls != 1 {
-		t.Fatalf("the prepared statement reached the copy %d time(s)", f.calls)
+	wantMyError(t, err, mysql.ER_UNKNOWN_ERROR, "could not be read")
+	if len(pw.packets) != 0 {
+		t.Errorf("%d packets on the wire before the error", len(pw.packets))
 	}
-	if f.gotSess.ResultToFile || len(f.spools) != 0 {
-		t.Errorf("a prepared statement asked for a file (%v, %d made)", f.gotSess.ResultToFile, len(f.spools))
+	if f.calls != 1 || len(r.forwarded) != 0 {
+		t.Errorf("copy ran %d time(s), forwarded %v", f.calls, r.forwarded)
 	}
+	gone(t, f.spools)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -53,6 +54,8 @@ type fakeFreeSQL struct {
 	// noFileRoom is what ResultFileRoom answers, negated: the disk has no
 	// room for a result file now.
 	noFileRoom bool
+	// damageSpool appends a line that does not read to each file made.
+	damageSpool bool
 }
 
 func (f *fakeFreeSQL) ResultFileRoom() bool { return !f.noFileRoom }
@@ -98,6 +101,11 @@ func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqls
 			return sqlsandbox.Result{}, err
 		}
 		f.spools = append(f.spools, dir)
+		if f.damageSpool {
+			if err := appendFile(filepath.Join(dir, "rows.ndjson"), "[1,\n"); err != nil {
+				return sqlsandbox.Result{}, err
+			}
+		}
 		res.Rows, res.Spool = nil, sp
 	}
 	return res, f.err
@@ -629,4 +637,16 @@ func TestFreeSQL_resultSizeRefusalsFitAClient(t *testing.T) {
 			t.Errorf("%s: %q does not name the setting that moves the cap", name, me.Message)
 		}
 	}
+}
+
+func appendFile(path, text string) error {
+	fh, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	_, err = fh.WriteString(text)
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
