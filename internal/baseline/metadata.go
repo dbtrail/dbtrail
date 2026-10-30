@@ -119,6 +119,11 @@ const (
 	// it. Absent on an index no stream wrote, and on any file written before
 	// this key existed.
 	MetaKeyEventMark = "bintrail.event_mark"
+	// MetaKeyFoldCut is "<binlog file>:<position>", written by a refresh only
+	// when it cut the index (#2592): the position beside it is then where
+	// every table of the run was folded through. A run that found the index
+	// empty carries its source file's position instead, and writes no key.
+	MetaKeyFoldCut = "bintrail.fold_cut"
 )
 
 // RenderGUCsPinned is the canonical value the capture side stamps under
@@ -168,6 +173,8 @@ type DumpMetadata struct {
 	DDLMark string
 	// EventMark is MetaKeyEventMark, verbatim; "" when absent.
 	EventMark string
+	// FoldCut is MetaKeyFoldCut, verbatim; "" when absent.
+	FoldCut string
 	// Producer is MetaKeySnapshotProducer: which code path wrote these bytes
 	// ("dump" | "reconstruct"). Empty on any snapshot written before #1545
 	// stamped it on the dump path; see ProvenanceOf, which does not guess.
@@ -532,6 +539,9 @@ func ReadParquetMetadata(path string) (DumpMetadata, error) {
 	if v, ok := pf.Lookup(MetaKeyEventMark); ok {
 		m.EventMark = v
 	}
+	if v, ok := pf.Lookup(MetaKeyFoldCut); ok {
+		m.FoldCut = v
+	}
 	if v, ok := pf.Lookup(MetaKeyLastEventID); ok {
 		m.LastEventID = parseLastEventID(path, v)
 	}
@@ -695,6 +705,8 @@ func applyS3FooterKV(m *DumpMetadata, path, key, val string) (corrupt bool) {
 		m.DDLMark = val
 	case MetaKeyEventMark:
 		m.EventMark = val
+	case MetaKeyFoldCut:
+		m.FoldCut = val
 	case MetaKeyLastEventID:
 		m.LastEventID = parseLastEventID(path, val)
 	case MetaKeyRowCount:

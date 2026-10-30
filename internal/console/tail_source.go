@@ -203,7 +203,7 @@ func (x *indexTailSource) indexSchema(ctx context.Context, name string) (*metada
 func (x *indexTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo uint64, page func([]query.ResultRow) error) (string, error) {
 	db := x.b.db
 	name := t.Schema + "." + t.Table
-	cut := x.s.tailCutOf(t)
+	cut := x.s.tailLookupCut(t)
 	if cut.refusal != "" {
 		return cut.refusal, nil
 	}
@@ -328,7 +328,7 @@ func (x *indexTailSource) Since(ctx context.Context, tables []views.BaselineTabl
 
 // Cut reads where Fill starts t's window: its cut's anchor and last event id.
 func (x *indexTailSource) Cut(t views.BaselineTable) (tailFloor, string) {
-	cut := x.s.tailCutOf(t)
+	cut := x.s.tailLookupCut(t)
 	if cut.refusal != "" {
 		return tailFloor{}, cut.refusal
 	}

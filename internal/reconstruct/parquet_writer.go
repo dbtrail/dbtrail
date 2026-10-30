@@ -368,6 +368,7 @@ func snapshotFileMetadata(in mergeInput) map[string]string {
 	case in.Cut != nil:
 		md[baseline.MetaKeyBinlogFile] = in.Cut.File
 		md[baseline.MetaKeyBinlogPos] = strconv.FormatUint(in.Cut.Pos, 10)
+		md[baseline.MetaKeyFoldCut] = in.Cut.File + ":" + strconv.FormatUint(in.Cut.Pos, 10)
 		if in.EventMark != "" {
 			md[baseline.MetaKeyEventMark] = in.EventMark
 		}

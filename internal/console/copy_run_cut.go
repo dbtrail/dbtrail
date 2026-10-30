@@ -1,9 +1,9 @@
 package console
 
 import (
-	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,11 +11,12 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 // runCut is where a snapshot directory a refresh published holds every
-// table through (#2592): the refresh's cut, from the files it wrote.
+// table through (#2592): the cut of the refresh that wrote the directory.
 //
 // A refresh folds every table of the previous snapshot through its cut and
 // publishes all of them or none (foldOutcome). A table with no event in the
@@ -30,33 +31,24 @@ type runCut struct {
 	stamp time.Time
 }
 
-// runCutOf is the newest refresh cut among footers, the files of one
-// snapshot directory: every table's file and the newest pair beside it. A
-// footer a refresh did not write (a full read's), one with no position, or
-// one whose event mark is missing or past its position is not a cut and is
-// skipped, which only lowers the bound: every refresh cut in the directory
-// is one its tables were all folded through. Two binlog numberings give
-// none, as in copyDirMark.
-func runCutOf(footers []baseline.DumpMetadata) (runCut, bool) {
-	var best runCut
-	found := false
-	for _, md := range footers {
-		if md.Producer != baseline.ProducerReconstruct || md.BinlogFile == "" || md.BinlogPos <= 0 {
-			continue
-		}
-		m, why := markWithin(md)
-		if why != "" {
-			continue
-		}
-		at := query.BinlogPos{File: md.BinlogFile, Pos: uint64(md.BinlogPos)}
-		if found && reconstruct.BinlogBaseName(at.File) != reconstruct.BinlogBaseName(best.at.File) {
-			return runCut{}, false
-		}
-		if !found || best.at.AtOrBefore(at) {
-			best, found = runCut{at: at, mark: m, stamp: md.SnapshotTimestamp}, true
-		}
+// runCutIn is the cut md records when the refresh that wrote it is the one
+// that published its directory (its writer instant is the directory's, dirAt)
+// and that refresh cut the index (MetaKeyFoldCut, matching the position).
+// Every other footer says nothing about the directory: a carried file's cut
+// is an older run's, which a replay of capture can leave ABOVE this run's,
+// and a run that found the index empty carries its source file's position,
+// which may be a full read's, ahead of what capture indexed.
+func runCutIn(md baseline.DumpMetadata, dirAt time.Time) (runCut, bool) {
+	if md.Producer != baseline.ProducerReconstruct || md.BinlogFile == "" || md.BinlogPos <= 0 ||
+		dirAt.IsZero() || !md.SnapshotTimestamp.Equal(dirAt) ||
+		md.FoldCut != md.BinlogFile+":"+strconv.FormatInt(md.BinlogPos, 10) {
+		return runCut{}, false
 	}
-	return best, found
+	m, why := markWithin(md)
+	if why != "" {
+		return runCut{}, false
+	}
+	return runCut{at: query.BinlogPos{File: md.BinlogFile, Pos: uint64(md.BinlogPos)}, mark: m, stamp: md.SnapshotTimestamp}, true
 }
 
 // promoteToRunCut moves the start of cut's lookup to run when the table's
@@ -67,8 +59,8 @@ func runCutOf(footers []baseline.DumpMetadata) (runCut, bool) {
 //
 // Only the lookup moves. sourceRead and lastEventID stay the table's own,
 // so the guards that ask what happened since its rows were last read from
-// the source (a capture loss, the source server changing) ask over the
-// same span as before.
+// the source (a capture loss, the source server changing, a schema change:
+// tailSource.Broken) ask over the same span as before.
 func promoteToRunCut(cut copyCut, run runCut) copyCut {
 	if cut.refusal != "" || run.mark.ID == 0 ||
 		reconstruct.BinlogBaseName(cut.anchor.File) != reconstruct.BinlogBaseName(run.at.File) ||
@@ -81,8 +73,9 @@ func promoteToRunCut(cut copyCut, run runCut) copyCut {
 }
 
 // copyRunCutMemo remembers each directory's refresh cut. A published
-// directory is never written again, so its answer stands; the memo starts
-// over past copyCutMemoMax directories.
+// directory is never written again, so a found cut stands, and so does
+// "none" for a directory that is complete (_SUCCESS); the memo starts over
+// past copyCutMemoMax directories.
 type copyRunCutMemo struct {
 	mu   sync.Mutex
 	dirs map[string]copyRunCutEntry
@@ -94,20 +87,30 @@ type copyRunCutEntry struct {
 }
 
 // of is dir's refresh cut. dir is a snapshot directory as copySnapshotDir
-// gives it. Any file that cannot be listed or read gives no cut, and is not
-// remembered, so the next ask tries again.
-func (m *copyRunCutMemo) of(dir string, footer func(path string) (baseline.DumpMetadata, error)) (runCut, bool) {
+// gives it. Every file the run wrote carries the same cut, so the first one
+// found answers. A file that cannot be read is skipped, which can only miss
+// the cut, never invent one; a directory where one was skipped and no cut
+// was found is not remembered, and warn hears why.
+func (m *copyRunCutMemo) of(dir string, footer func(path string) (baseline.DumpMetadata, error), warn func(path string, err error)) (runCut, bool) {
 	m.mu.Lock()
 	e, ok := m.dirs[dir]
 	m.mu.Unlock()
 	if ok {
 		return e.cut, e.ok
 	}
-	footers, ok := runCutFooters(dir, footer)
-	if !ok {
+	dirAt, named := snapshotdir.ParseTime(filepath.Base(filepath.Clean(dir)))
+	if !named {
 		return runCut{}, false
 	}
-	cut, found := runCutOf(footers)
+	cut, found, skipped := scanRunCut(dir, dirAt, footer, warn)
+	if !found {
+		if skipped {
+			return runCut{}, false
+		}
+		if _, err := os.Stat(filepath.Join(dir, baseline.SuccessMarker)); err != nil {
+			return runCut{}, false
+		}
+	}
 	m.mu.Lock()
 	if m.dirs == nil || len(m.dirs) >= copyCutMemoMax {
 		m.dirs = map[string]copyRunCutEntry{}
@@ -117,60 +120,93 @@ func (m *copyRunCutMemo) of(dir string, footer func(path string) (baseline.DumpM
 	return cut, found
 }
 
-// runCutFooters reads the footer of every table file in dir and of the
-// newest pair beside it. ok false when anything could not be read.
-func runCutFooters(dir string, footer func(path string) (baseline.DumpMetadata, error)) ([]baseline.DumpMetadata, bool) {
+// scanRunCut looks through dir's table files and the newest pair beside
+// each (a delta run writes a pair, not the table file) for one the run
+// wrote. Each schema directory is listed once. skipped reports a file or
+// listing that could not be read.
+func scanRunCut(dir string, dirAt time.Time, footer func(path string) (baseline.DumpMetadata, error), warn func(path string, err error)) (cut runCut, found, skipped bool) {
 	schemas, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, false
+		warn(dir, err)
+		return runCut{}, false, true
 	}
-	var out []baseline.DumpMetadata
+	try := func(path string) bool {
+		md, err := footer(path)
+		if err != nil {
+			warn(path, err)
+			skipped = true
+			return false
+		}
+		cut, found = runCutIn(md, dirAt)
+		return found
+	}
 	for _, sd := range schemas {
 		if !sd.IsDir() {
 			continue
 		}
-		files, err := os.ReadDir(filepath.Join(dir, sd.Name()))
+		sdir := filepath.Join(dir, sd.Name())
+		entries, err := os.ReadDir(sdir)
 		if err != nil {
-			return nil, false
+			warn(sdir, err)
+			skipped = true
+			continue
 		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".parquet") {
+		names := make([]string, 0, len(entries))
+		for _, f := range entries {
+			if !f.IsDir() {
+				names = append(names, f.Name())
+			}
+		}
+		for _, n := range names {
+			if !strings.HasSuffix(n, ".parquet") {
 				continue
 			}
-			base := filepath.Join(dir, sd.Name(), f.Name())
-			md, err := footer(base)
-			if err != nil {
-				return nil, false
+			if try(filepath.Join(sdir, n)) {
+				return cut, true, skipped
 			}
-			out = append(out, md)
-			chain, err := baseline.ListTableDelta(context.Background(), base)
+			// The v0.83.0 layout's legacy pair is not read: copyCutOf
+			// refuses that layout, so nothing it would bound has a tail.
+			chain, err := baseline.TableDeltaChainIn(sdir, names, strings.TrimSuffix(n, ".parquet"))
 			if err != nil {
-				return nil, false
+				warn(filepath.Join(sdir, n), err)
+				skipped = true
+				continue
 			}
-			if chain != nil && len(chain.Files) > 0 {
-				pair, err := footer(chain.LastFileUpserts())
-				if err != nil {
-					return nil, false
-				}
-				out = append(out, pair)
+			if chain != nil && !chain.Legacy && len(chain.Files) > 0 && try(chain.Last().Upserts) {
+				return cut, true, skipped
 			}
 		}
 	}
-	return out, true
+	return runCut{}, false, skipped
 }
 
-// tailCutOf is copyCutOf for the lookup a tail starts from: the table's own
-// cut, moved to its directory's refresh cut when that is later (#2592).
-func (s *Server) tailCutOf(t views.BaselineTable) copyCut {
+// tailLookupCut is copyCutOf for the lookup a tail starts from: the table's
+// own cut, moved to its directory's refresh cut when that is later (#2592).
+// The pointer to the newest snapshot is never a directory here: it moves,
+// and a cut remembered for it would be applied to whatever it points at
+// next.
+func (s *Server) tailLookupCut(t views.BaselineTable) copyCut {
 	cut := copyCutOf(t, s.copyCuts.footer)
 	if cut.refusal != "" {
 		return cut
 	}
+	return s.tailLookupCutFrom(t, cut)
+}
+
+// tailLookupCutFrom is tailLookupCut over t's own cut, already read.
+func (s *Server) tailLookupCutFrom(t views.BaselineTable, cut copyCut) copyCut {
 	dir, ok := copySnapshotDir(t)
 	if !ok {
 		return cut
 	}
-	run, ok := s.copyRunCuts.of(dir, s.copyCuts.footer)
+	if fi, err := os.Lstat(filepath.Clean(dir)); err != nil || fi.Mode()&os.ModeSymlink != 0 ||
+		filepath.Base(filepath.Clean(dir)) == baseline.CurrentLinkName {
+		return cut
+	}
+	run, ok := s.copyRunCuts.of(dir, s.copyCuts.footer, func(path string, err error) {
+		s.copyFaults.warn(dir, "Engine Routing: a snapshot file could not be read for its directory's refresh cut; tables nobody writes may have no tail until it can",
+			"dir", dir, "path", path, "error", err)
+	})
 	if !ok {
 		return cut
 	}

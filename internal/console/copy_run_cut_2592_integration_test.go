@@ -4,6 +4,7 @@ package console
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 // #2592 against a real index: a table nobody writes, last read by a full
@@ -27,8 +29,6 @@ func TestIntegrationTailSource_staticTableStartsAtItsDirectorysRefreshCut_2592(t
 	x := newIndexTailSource(r.s, r.b).capturing(nil)
 	now := time.Now().UTC()
 
-	quiet := r.table(nil) // a full read's footer: binlog.000007:4200, read 72 h ago, no event since
-
 	// What a refresh ten minutes ago wrote beside it: a busy table's file at
 	// the run's cut, whose mark names the last event the index held then.
 	r.change("busy", event.EventUpdate, "1", "paid", "binlog.000009", 450, now.Add(-15*time.Minute))
@@ -38,8 +38,24 @@ func TestIntegrationTailSource_staticTableStartsAtItsDirectorysRefreshCut_2592(t
 	}
 	mark := reconstruct.EventMark{ID: markID, File: "binlog.000009", End: 500}
 	runAt := now.Add(-10 * time.Minute).Truncate(time.Second)
-	ddl := "CREATE TABLE `busy` (\n  `id` int NOT NULL,\n  `status` varchar(32) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
-	busyPath := filepath.Join(r.root, unchangedSnapshotDir, "shop", "busy.parquet")
+	dir := filepath.Join(r.root, reconstruct.SnapshotDirName(runAt))
+	ddlOf := func(name string) string {
+		return "CREATE TABLE `" + name + "` (\n  `id` int NOT NULL,\n  `status` varchar(32) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n);\n"
+	}
+	// The quiet table, carried into the run's directory with the footer of
+	// the full read that last wrote it: binlog.000007:4200, 72 h ago.
+	read := r.stamp.Format(time.RFC3339)
+	quiet := views.BaselineTable{Schema: "shop", Table: "t1", Path: filepath.Join(dir, "shop", "t1.parquet")}
+	r.write(quiet.Path, ddlOf("t1"), map[string]string{
+		baseline.MetaKeyBinlogFile: r.anchor.File, baseline.MetaKeyBinlogPos: strconv.FormatUint(r.anchor.Pos, 10),
+		baseline.MetaKeySnapshotTimestamp: read, baseline.MetaKeyLastDumpAt: read, baseline.MetaKeyFoldGeneration: "0",
+		baseline.MetaKeySnapshotProducer: baseline.ProducerDump, baseline.MetaKeyLockMode: string(baseline.LockModeFTWRL),
+		baseline.MetaKeyCreateTableSQL: ddlOf("t1"),
+	})
+	busyPath := filepath.Join(dir, "shop", "busy.parquet")
+	if err := os.WriteFile(filepath.Join(dir, baseline.SuccessMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// After the run, the quiet table changes once.
 	r.change(quiet.Table, event.EventUpdate, "1", "late", "binlog.000009", 900, now.Add(-2*time.Minute))
@@ -69,13 +85,14 @@ func TestIntegrationTailSource_staticTableStartsAtItsDirectorysRefreshCut_2592(t
 		t.Fatalf("without a refresh cut: %q, want the rotation refusal", why)
 	}
 
-	r.write(busyPath, ddl, map[string]string{
+	r.write(busyPath, ddlOf("busy"), map[string]string{
 		baseline.MetaKeyBinlogFile: "binlog.000009", baseline.MetaKeyBinlogPos: "500",
+		baseline.MetaKeyFoldCut:           "binlog.000009:500",
 		baseline.MetaKeySnapshotTimestamp: runAt.Format(time.RFC3339),
 		baseline.MetaKeySnapshotProducer:  baseline.ProducerReconstruct,
 		baseline.MetaKeyEventMark:         mark.Encode(),
 		baseline.MetaKeyLockMode:          string(baseline.LockModeFTWRL),
-		baseline.MetaKeyCreateTableSQL:    ddl,
+		baseline.MetaKeyCreateTableSQL:    ddlOf("busy"),
 	})
 	r.s.copyRunCuts = copyRunCutMemo{} // the test rewrote a directory, which a published one never is
 
@@ -94,7 +111,7 @@ func TestIntegrationTailSource_staticTableStartsAtItsDirectorysRefreshCut_2592(t
 	if why != "" || floor.anchor != (query.BinlogPos{File: "binlog.000009", Pos: 500}) {
 		t.Fatalf("Cut = %+v %q, want the refresh's cut", floor, why)
 	}
-	if c := r.s.tailCutOf(quiet); !c.sourceRead.Equal(r.stamp) {
+	if c := r.s.tailLookupCut(quiet); !c.sourceRead.Equal(r.stamp) {
 		t.Fatalf("the table's own read moved: %v, want %v", c.sourceRead, r.stamp)
 	}
 

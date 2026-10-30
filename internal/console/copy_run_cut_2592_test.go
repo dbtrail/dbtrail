@@ -1,14 +1,17 @@
 package console
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/views"
 )
 
 // #2592: a table nobody writes is carried unchanged by every refresh with
@@ -18,66 +21,44 @@ import (
 // every table through the refresh's cut, which is where that table's lookup
 // can start instead.
 
-func runFooter(producer, file string, pos int64, mark *reconstruct.EventMark, stamp time.Time) baseline.DumpMetadata {
-	md := dirFooter(producer, file, pos, mark)
+// runFooter is a footer a refresh writes when it cut the index at file:pos.
+func runFooter(file string, pos int64, mark *reconstruct.EventMark, stamp time.Time) baseline.DumpMetadata {
+	md := dirFooter(baseline.ProducerReconstruct, file, pos, mark)
 	md.SnapshotTimestamp = stamp
+	md.FoldCut = file + ":" + strconv.FormatInt(pos, 10)
 	return md
 }
 
-func TestRunCutOf(t *testing.T) {
-	const rec, dump = baseline.ProducerReconstruct, baseline.ProducerDump
-	t1 := time.Date(2026, 10, 30, 18, 0, 36, 0, time.UTC)
-	t2 := t1.Add(5 * time.Minute)
-	cases := []struct {
-		name    string
-		footers []baseline.DumpMetadata
-		want    query.BinlogPos // zero = none
-		mark    uint64
-		stamp   time.Time
-	}{
-		{name: "nothing read"},
-		{name: "a full read's directory has no refresh cut",
-			footers: []baseline.DumpMetadata{
-				runFooter(dump, "binlog.000047", 500, mk(9, "binlog.000047", 400), t1),
-				runFooter(dump, "binlog.000047", 500, mk(9, "binlog.000047", 400), t1),
-			}},
-		{name: "the refresh's newest cut, over a carried older one",
-			footers: []baseline.DumpMetadata{
-				runFooter(rec, "binlog.000047", 900, mk(50, "binlog.000047", 900), t1),
-				runFooter(rec, "binlog.000048", 300, mk(70, "binlog.000048", 300), t2),
-				runFooter(dump, "binlog.000047", 500, mk(9, "binlog.000047", 400), t1),
-			},
-			want: query.BinlogPos{File: "binlog.000048", Pos: 300}, mark: 70, stamp: t2},
-		{name: "a refresh footer with no mark is skipped, which only lowers the cut",
-			footers: []baseline.DumpMetadata{
-				runFooter(rec, "binlog.000048", 300, nil, t2),
-				runFooter(rec, "binlog.000047", 900, mk(50, "binlog.000047", 900), t1),
-			},
-			want: query.BinlogPos{File: "binlog.000047", Pos: 900}, mark: 50, stamp: t1},
-		{name: "a mark past its own position is skipped",
-			footers: []baseline.DumpMetadata{
-				runFooter(rec, "binlog.000048", 300, mk(70, "binlog.000048", 301), t2),
-			}},
-		{name: "a refresh footer with no position is skipped",
-			footers: []baseline.DumpMetadata{
-				runFooter(rec, "", 0, mk(70, "binlog.000048", 300), t2),
-			}},
-		{name: "two numberings: no cut",
-			footers: []baseline.DumpMetadata{
-				runFooter(rec, "binlog.000047", 900, mk(50, "binlog.000047", 900), t1),
-				runFooter(rec, "mysql-bin.000002", 300, mk(70, "mysql-bin.000002", 300), t2),
-			}},
+func TestRunCutIn(t *testing.T) {
+	dirAt := time.Date(2026, 10, 30, 19, 10, 36, 0, time.UTC)
+	good := runFooter("binlog.000058", 1200, mk(99, "binlog.000058", 1200), dirAt)
+	got, ok := runCutIn(good, dirAt)
+	if !ok || got.at != (query.BinlogPos{File: "binlog.000058", Pos: 1200}) || got.mark.ID != 99 || !got.stamp.Equal(dirAt) {
+		t.Fatalf("the directory's own run's footer: %+v ok=%v", got, ok)
 	}
-	for _, c := range cases {
-		got, ok := runCutOf(c.footers)
-		if (c.want == query.BinlogPos{}) {
-			if ok {
-				t.Errorf("%s: cut %+v, want none", c.name, got)
-			}
-			continue
-		}
-		if !ok || got.at != c.want || got.mark.ID != c.mark || !got.stamp.Equal(c.stamp) {
-			t.Errorf("%s: cut %+v ok=%v, want %v mark %d stamp %v", c.name, got, ok, c.want, c.mark, c.stamp)
+	for _, c := range []struct {
+		name string
+		edit func(*baseline.DumpMetadata)
+		at   time.Time
+	}{
+		{"carried from an older run, whose cut a replay can leave above this run's",
+			func(md *baseline.DumpMetadata) { md.SnapshotTimestamp = dirAt.Add(-5 * time.Minute) }, dirAt},
+		{"a run that found the index empty carries its source's position, not a cut",
+			func(md *baseline.DumpMetadata) { md.FoldCut = "" }, dirAt},
+		{"a fold cut that is not the footer's position",
+			func(md *baseline.DumpMetadata) { md.FoldCut = "binlog.000058:1100" }, dirAt},
+		{"a full read's file", func(md *baseline.DumpMetadata) { md.Producer = baseline.ProducerDump }, dirAt},
+		{"no producer", func(md *baseline.DumpMetadata) { md.Producer = "" }, dirAt},
+		{"no mark", func(md *baseline.DumpMetadata) { md.EventMark = "" }, dirAt},
+		{"a mark past its position", func(md *baseline.DumpMetadata) { md.EventMark = mk(99, "binlog.000058", 1201).Encode() }, dirAt},
+		{"a mark on another numbering", func(md *baseline.DumpMetadata) { md.EventMark = mk(99, "mysql-bin.000001", 4).Encode() }, dirAt},
+		{"no position", func(md *baseline.DumpMetadata) { md.BinlogFile, md.BinlogPos, md.FoldCut = "", 0, ":0" }, dirAt},
+		{"no directory instant", func(*baseline.DumpMetadata) {}, time.Time{}},
+	} {
+		md := good
+		c.edit(&md)
+		if got, ok := runCutIn(md, c.at); ok {
+			t.Errorf("%s: cut %+v, want none", c.name, got)
 		}
 	}
 }
@@ -107,7 +88,11 @@ func TestPromoteToRunCut(t *testing.T) {
 		{"refused stays refused", copyCut{refusal: "no"}, run},
 		{"no run cut", own, runCut{}},
 		{"the table's cut is the run's", func() copyCut { c := own; c.anchor = run.at; return c }(), run},
-		{"the table's cut is past the run's (a newer read)", func() copyCut { c := own; c.anchor = query.BinlogPos{File: "binlog.000059", Pos: 4}; return c }(), run},
+		{"the table's cut is past the run's (a newer read)", func() copyCut {
+			c := own
+			c.anchor = query.BinlogPos{File: "binlog.000059", Pos: 4}
+			return c
+		}(), run},
 		{"another numbering", func() copyCut { c := own; c.anchor = query.BinlogPos{File: "mysql-bin.000001", Pos: 4}; return c }(), run},
 	} {
 		if got := promoteToRunCut(c.own, c.run); got != c.own {
@@ -116,20 +101,23 @@ func TestPromoteToRunCut(t *testing.T) {
 	}
 }
 
-// The directory's cut is read from every table's file and the newest pair
-// beside it, as copyDirMark is; a file that cannot be read gives no cut.
-func TestCopyRunCutMemo(t *testing.T) {
-	dir := t.TempDir()
-	stamp := time.Date(2026, 10, 30, 19, 10, 36, 0, time.UTC)
-	snap := filepath.Join(dir, reconstruct.SnapshotDirName(stamp))
+// runCutDir lays out a published directory: quiet carried from an older
+// run, busy with a pair this run wrote, and returns it with the footers.
+func runCutDir(t *testing.T, success bool) (string, map[string]baseline.DumpMetadata) {
+	t.Helper()
+	at := time.Date(2026, 10, 30, 19, 10, 36, 0, time.UTC)
+	snap := filepath.Join(t.TempDir(), reconstruct.SnapshotDirName(at))
+	older := runFooter("binlog.000047", 900, mk(50, "binlog.000047", 900), at.Add(-70*time.Minute))
 	files := map[string]baseline.DumpMetadata{
-		"shop/static.parquet":      runFooter(baseline.ProducerReconstruct, "binlog.000047", 900, mk(50, "binlog.000047", 900), stamp.Add(-70*time.Minute)),
-		"shop/busy.parquet":        runFooter(baseline.ProducerReconstruct, "binlog.000047", 900, mk(50, "binlog.000047", 900), stamp.Add(-70*time.Minute)),
-		"shop/busy.000000.upserts": runFooter(baseline.ProducerReconstruct, "binlog.000047", 900, mk(50, "binlog.000047", 900), stamp.Add(-70*time.Minute)),
+		"shop/quiet.parquet":       older,
+		"shop/busy.parquet":        older,
+		"shop/busy.000000.upserts": older,
 		"shop/busy.000000.posdel":  {},
-		"shop/busy.000001.upserts": runFooter(baseline.ProducerReconstruct, "binlog.000058", 1200, mk(99, "binlog.000058", 1200), stamp),
+		"shop/busy.000001.upserts": runFooter("binlog.000058", 1200, mk(99, "binlog.000058", 1200), at),
 		"shop/busy.000001.posdel":  {},
-		"other/thing.parquet":      runFooter(baseline.ProducerReconstruct, "binlog.000047", 900, mk(50, "binlog.000047", 900), stamp.Add(-70*time.Minute)),
+	}
+	if success {
+		files[baseline.SuccessMarker] = baseline.DumpMetadata{}
 	}
 	for rel := range files {
 		p := filepath.Join(snap, rel)
@@ -140,47 +128,162 @@ func TestCopyRunCutMemo(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	reads := map[string]int{}
-	footer := func(p string) (baseline.DumpMetadata, error) {
+	return snap + string(filepath.Separator), files
+}
+
+func footersOf(snap string, files map[string]baseline.DumpMetadata, reads map[string]int, fail map[string]error) func(string) (baseline.DumpMetadata, error) {
+	return func(p string) (baseline.DumpMetadata, error) {
 		rel, _ := filepath.Rel(snap, p)
 		reads[rel]++
+		if err := fail[rel]; err != nil {
+			return baseline.DumpMetadata{}, err
+		}
 		md, ok := files[rel]
 		if !ok {
 			return baseline.DumpMetadata{}, os.ErrNotExist
 		}
 		return md, nil
 	}
+}
+
+func TestCopyRunCutMemo(t *testing.T) {
+	noWarn := func(path string, err error) { t.Errorf("warned about %s: %v", path, err) }
+
+	snap, files := runCutDir(t, true)
+	reads := map[string]int{}
 	var m copyRunCutMemo
-	got, ok := m.of(snap+string(filepath.Separator), footer)
+	got, ok := m.of(snap, footersOf(snap, files, reads, nil), noWarn)
 	if !ok || got.at != (query.BinlogPos{File: "binlog.000058", Pos: 1200}) {
-		t.Fatalf("directory cut = %+v ok=%v, want the newest pair's", got, ok)
+		t.Fatalf("directory cut = %+v ok=%v, want the pair this run wrote", got, ok)
 	}
 	if reads["shop/busy.000000.upserts"] != 0 {
-		t.Fatal("an older pair was read: only the newest pair beside each table bounds it")
+		t.Fatal("an older pair was read: only the newest pair beside each table can be this run's")
 	}
 	// A published directory never changes: the second ask reads nothing.
-	before := len(reads)
-	for k := range reads {
-		reads[k] = 0
-	}
-	if _, ok := m.of(snap+string(filepath.Separator), footer); !ok {
-		t.Fatal("the remembered cut was lost")
-	}
-	for k, n := range reads {
-		if n != 0 {
-			t.Fatalf("the second ask read %s again (%d files read before)", k, before)
-		}
+	clear(reads)
+	if _, ok := m.of(snap, footersOf(snap, files, reads, nil), noWarn); !ok || len(reads) != 0 {
+		t.Fatalf("the second ask read %v", reads)
 	}
 
-	// One table whose footer cannot be read: no cut, nothing guessed.
+	// A directory where no file is this run's (a full read's, or every table
+	// carried): none, remembered once the directory is complete.
+	carried := runFooter("binlog.000047", 900, mk(50, "binlog.000047", 900), time.Date(2026, 10, 30, 18, 0, 0, 0, time.UTC))
+	snap2, files2 := runCutDir(t, true)
+	files2["shop/busy.000001.upserts"] = carried
 	var m2 copyRunCutMemo
-	broken := func(p string) (baseline.DumpMetadata, error) {
-		if filepath.Base(p) == "thing.parquet" {
-			return baseline.DumpMetadata{}, os.ErrPermission
+	clear(reads)
+	if got, ok := m2.of(snap2, footersOf(snap2, files2, reads, nil), noWarn); ok {
+		t.Fatalf("no file of this run, yet a cut: %+v", got)
+	}
+	clear(reads)
+	m2.of(snap2, footersOf(snap2, files2, reads, nil), noWarn)
+	if len(reads) != 0 {
+		t.Fatal("a complete directory's \"none\" was not remembered")
+	}
+
+	// Without _SUCCESS, "none" is asked again.
+	snap3, files3 := runCutDir(t, false)
+	files3["shop/busy.000001.upserts"] = carried
+	var m3 copyRunCutMemo
+	m3.of(snap3, footersOf(snap3, files3, reads, nil), noWarn)
+	clear(reads)
+	m3.of(snap3, footersOf(snap3, files3, reads, nil), noWarn)
+	if len(reads) == 0 {
+		t.Fatal("an incomplete directory's \"none\" was remembered")
+	}
+
+	// The run's own file cannot be read: no cut, said, and asked again.
+	snap4, files4 := runCutDir(t, true)
+	var m4 copyRunCutMemo
+	var warned []string
+	warn := func(path string, err error) { warned = append(warned, path) }
+	fail := map[string]error{"shop/busy.000001.upserts": os.ErrPermission}
+	if got, ok := m4.of(snap4, footersOf(snap4, files4, reads, fail), warn); ok {
+		t.Fatalf("the run's file is unreadable, yet a cut: %+v", got)
+	}
+	if len(warned) == 0 {
+		t.Fatal("an unreadable file was skipped without a word")
+	}
+	clear(reads)
+	if _, ok := m4.of(snap4, footersOf(snap4, files4, reads, nil), noWarn); !ok {
+		t.Fatal("a skipped file's \"none\" was remembered")
+	}
+
+	// Another table's unreadable file does not cost the directory its cut.
+	snap5, files5 := runCutDir(t, true)
+	var m5 copyRunCutMemo
+	warned = nil
+	if _, ok := m5.of(snap5, footersOf(snap5, files5, reads, map[string]error{"shop/quiet.parquet": errors.New("damaged")}), warn); !ok {
+		t.Fatal("one damaged footer cost every table its cut")
+	}
+
+	// Not a snapshot directory's name: none, nothing read.
+	var m6 copyRunCutMemo
+	clear(reads)
+	if _, ok := m6.of(filepath.Join(t.TempDir(), "notasnapshot")+string(filepath.Separator), footersOf(snap, files, reads, nil), noWarn); ok || len(reads) != 0 {
+		t.Fatal("a directory with no snapshot name was read for a cut")
+	}
+}
+
+// The pointer to the newest snapshot moves: a cut remembered for it would
+// be applied to whatever it points at next. A directory reached through a
+// link is never asked.
+func TestTailLookupCut_neverThroughTheCurrentPointer(t *testing.T) {
+	snap, files := runCutDir(t, true)
+	// Named like a snapshot directory, so only the link check refuses it:
+	// the pointer's own name already gives no snapshot instant.
+	link := filepath.Join(filepath.Dir(filepath.Clean(snap)), reconstruct.SnapshotDirName(time.Date(2026, 10, 30, 19, 15, 36, 0, time.UTC)))
+	if err := os.Symlink(filepath.Clean(snap), link); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{}
+	// Every file reads as its footer through the link too, so nothing but
+	// the link check stands between the table and the run's cut.
+	s.copyCuts.cuts = map[copyCutKey]baseline.DumpMetadata{}
+	for rel, md := range files {
+		p := filepath.Join(link, rel)
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return footer(p)
+		s.copyCuts.cuts[copyCutKey{p, fi.Size(), fi.ModTime().UnixNano()}] = md
 	}
-	if got, ok := m2.of(snap+string(filepath.Separator), broken); ok {
-		t.Fatalf("a directory with an unreadable footer gave a cut: %+v", got)
+	md := cutFooter()
+	md.BinlogFile, md.BinlogPos = "binlog.000047", 900
+	md.LastDumpAt, md.FoldGeneration = cutStamp, 0
+	quiet := views.BaselineTable{Schema: "shop", Table: "quiet", Path: filepath.Join(link, "shop", "quiet.parquet")}
+	got := promoteViaPointer(s, quiet, md)
+	if got.refusal != "" {
+		t.Fatalf("fixture: the table's own cut is refused: %s", got.refusal)
 	}
+	if got.sinceMark {
+		t.Fatalf("a table read through the pointer was moved to a cut: %+v", got)
+	}
+	if len(s.copyRunCuts.dirs) != 0 {
+		t.Fatal("the pointer's directory was remembered")
+	}
+	// The same table through the directory itself is moved: the link is
+	// what refused it above.
+	direct := quiet
+	direct.Path = filepath.Join(filepath.Clean(snap), "shop", "quiet.parquet")
+	for rel, md := range files {
+		p := filepath.Join(filepath.Clean(snap), rel)
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.copyCuts.cuts[copyCutKey{p, fi.Size(), fi.ModTime().UnixNano()}] = md
+	}
+	if got := promoteViaPointer(s, direct, md); !got.sinceMark {
+		t.Fatalf("control: the table through its own directory was not moved: %+v", got)
+	}
+}
+
+// promoteViaPointer runs tailLookupCut with t's footer stubbed as md.
+func promoteViaPointer(s *Server, t views.BaselineTable, md baseline.DumpMetadata) copyCut {
+	cut := copyCutOf(t, func(string) (baseline.DumpMetadata, error) { return md, nil })
+	if cut.refusal != "" {
+		return cut
+	}
+	return s.tailLookupCutFrom(t, cut)
 }
