@@ -484,6 +484,9 @@ type Server struct {
 	// copyCuts memoizes snapshot files' footers for the read router's
 	// "unchanged since the snapshot" question (#2085, copy_unchanged.go).
 	copyCuts copyCutMemo
+	// copyRunCuts remembers each snapshot directory's refresh cut, where a
+	// tail's lookup starts for a table carried unchanged (#2592).
+	copyRunCuts copyRunCutMemo
 	// copyFaults limits the warnings of that question's faults.
 	copyFaults  copyFaultLog
 	copyChanged copyChangedMemo
