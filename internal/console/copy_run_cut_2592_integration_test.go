@@ -115,6 +115,31 @@ func TestIntegrationTailSource_staticTableStartsAtItsDirectorysRefreshCut_2592(t
 		t.Fatalf("the table's own read moved: %v, want %v", c.sourceRead, r.stamp)
 	}
 
+	// The lookup's time is the mark's event's, capped by the run's own
+	// stamp: an event the source ran after the run began (a clock the index
+	// was loaded with by hand) never moves the lookup past the run.
+	cut := r.s.tailLookupCut(quiet)
+	since, why, err := copyLookupSince(ctx, r.db, quiet, cut)
+	if err != nil || why != "" || !since.Equal(now.Add(-15*time.Minute).Truncate(time.Second)) {
+		t.Fatalf("since = %v %q %v, want the mark's event time", since, why, err)
+	}
+	if _, err := r.db.Exec("UPDATE binlog_events SET event_timestamp = ? WHERE event_id = ?",
+		now.Add(time.Hour).Format("2006-01-02 15:04:05"), markID); err != nil {
+		t.Fatal(err)
+	}
+	if since, why, err := copyLookupSince(ctx, r.db, quiet, cut); err != nil || why != "" || !since.Equal(runAt) {
+		t.Fatalf("since = %v %q %v, want the run's stamp %v", since, why, err, runAt)
+	}
+
+	// The mark's id now names another event (an index rebuilt or loaded by
+	// hand): its time places nothing, refused.
+	if _, err := r.db.Exec("UPDATE binlog_events SET end_pos = 501 WHERE event_id = ?", markID); err != nil {
+		t.Fatal(err)
+	}
+	if _, why := fill(); !strings.Contains(why, "is another event in this index") {
+		t.Fatalf("with the mark's id on another event: %q", why)
+	}
+
 	// The mark's event rotated away: no time for the cut, refused, never
 	// read from the table's own older floor.
 	deleteIndexedEvent(t, r, markID)
