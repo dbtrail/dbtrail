@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Fixed
 - **A scheduled full read that fails is followed by an update from the recorded changes at the same slot, instead of being chosen again at every slot.** When the snapshot schedule chose a full read because the update looked more expensive, and the full read failed (mydumper refuses to start while the source runs a statement longer than 60 seconds, which a source used for long reports may do most of the time), every later slot chose the full read again, since the changes behind the update kept growing: the server got no new snapshot for as long as such a statement ran. Now the update runs in its place; it is slower but needs nothing from the source. The log says so. When that update fails too, nothing else is started in the slot.
+- **The copy's lag is known right after a full read.** It showed as unknown until the first update: the empty change file written beside each table after a full read now carries who wrote the table and the event mark beside it, so the lag is known right away (#2587).
 
 ## [0.121.0] - 2026-10-30
 ### Changed

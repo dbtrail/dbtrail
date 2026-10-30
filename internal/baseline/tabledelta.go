@@ -1300,6 +1300,17 @@ func writeEmptyTableDelta(base string) error {
 		MetaKeyDeltaBaseAnchor:   m.BinlogFile + ":" + pos,
 		MetaKeyDeltaBaseSize:     strconv.FormatInt(fi.Size(), 10),
 	}
+	// The empty pair applies nothing: the state it describes IS the base's,
+	// so it says who wrote that state and the event mark beside it, as the
+	// base does (#2587). Without them the copy's lag, read from a table's
+	// newest pair, is unknown from a full read until the first update. A
+	// base that says neither (older than the keys) passes nothing on.
+	if m.Producer != "" {
+		md[MetaKeySnapshotProducer] = m.Producer
+	}
+	if m.EventMark != "" {
+		md[MetaKeyEventMark] = m.EventMark
+	}
 	// The empty pair applies nothing, so the state's rows are the base's
 	// (#2505): the first window's arithmetic starts from this count.
 	if rows, err := TableFileRows(base); err == nil {
