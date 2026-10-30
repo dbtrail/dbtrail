@@ -358,19 +358,17 @@ func TestBackupScheduler_cutsOverToAFullBackupOnTheMeasuredWindow(t *testing.T) 
 	stubIndexMark(t, &mark, true)
 	logs := captureSlogFor(t)
 	fireAt(b, time.Date(2026, 8, 20, 13, 0, 5, 0, time.UTC))
-	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
-	if console.BackupWhyCode(st.LastWhy) != "window_measured" || !strings.Contains(st.LastWhy, "17,000,000 events") {
-		t.Fatalf("the slot did not cut over on the measured window: %+v", st)
-	}
 	// The full read fails here (its source does not parse), and an update
-	// then stands in for it at the same slot (#2586): the full read's record
-	// is the newest dump, not the newest scheduled record.
-	b.watchers.Wait()
+	// then stands in for it at the same slot (#2586). The full read can end
+	// and the update start between two looks at the loop's view, so the
+	// test awaits the update and reads the full read from the record and
+	// the log, never from a view that may already have moved on.
+	waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
 	if run := lastScheduledDump(sup, e.ID); run == nil || run.WhyCode != "window_measured" {
 		t.Fatalf("the full read's record does not carry the reason: %+v", run)
 	}
-	if !strings.Contains(logs.String(), "taking a full read instead of an update") {
-		t.Fatalf("the decision was not logged: %q", logs.String())
+	if !strings.Contains(logs.String(), "taking a full read instead of an update") || !strings.Contains(logs.String(), "17,000,000 events") {
+		t.Fatalf("the slot did not cut over on the measured window: %q", logs.String())
 	}
 	// The same server with a window the model estimates well under the full
 	// backup (200,000 events: about 110 s against 8 minutes) stays an update;
@@ -439,20 +437,15 @@ func TestBackupScheduler_cutsOverOnAgeInTheRealSlot(t *testing.T) {
 	}
 	logs := captureSlogFor(t)
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)) // eight days later, on an hourly schedule (cut-over 6 h)
-	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
-	if console.BackupWhyCode(st.LastWhy) != "window_age" ||
-		!strings.Contains(st.LastWhy, "no count of the changes since it, no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full read on record") {
-		t.Fatalf("the slot did not cut over on age: %+v", st)
-	}
-	// The full read fails here (its source does not parse), and an update
-	// then stands in for it at the same slot (#2586): the full read's record
-	// is the newest dump, not the newest scheduled record.
-	b.watchers.Wait()
+	// The full read fails and an update stands in for it (#2586): awaited
+	// as in the measured-window test above, and for the same reason.
+	waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
 	if run := lastScheduledDump(sup, e.ID); run == nil || run.WhyCode != "window_age" {
 		t.Fatalf("the full read's record does not carry the reason: %+v", run)
 	}
-	if !strings.Contains(logs.String(), "taking a full read instead of an update") {
-		t.Fatalf("the decision was not logged: %q", logs.String())
+	if !strings.Contains(logs.String(), "taking a full read instead of an update") ||
+		!strings.Contains(logs.String(), "no count of the changes since it, no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full read on record") {
+		t.Fatalf("the slot did not cut over on age: %q", logs.String())
 	}
 }
 
