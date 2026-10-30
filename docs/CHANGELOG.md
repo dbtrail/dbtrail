@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.122.0] - 2026-10-30
+
 ### Fixed
 
 - **Fresh mode keeps its latest changes for statements that join a table nobody writes.** Such a table is carried unchanged by every snapshot update, so it kept the cut of its last full read; once the index rotated past that read, the table had no latest changes and, since a statement uses them only when every table it reads has them, every statement that joined it read the published snapshot instead, minutes old. A table carried unchanged by a published update now starts its lookup at that update's cut (#2592).
