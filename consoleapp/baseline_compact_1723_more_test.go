@@ -35,6 +35,12 @@ func TestCompactJob_refusesACorruptInputPair(t *testing.T) {
 	if st := waitCompact(t, sup, "s"); st.State != "succeeded" || len(cs.Calls()) != 1 {
 		t.Fatalf("with a manifest over good files: status = %+v calls = %v", st, cs.Calls())
 	}
+	// The first job marks itself succeeded before it gives back its lane and
+	// writes the resolved pairs, and while it writes them the folder refuses
+	// a compaction (TriggerCompact: ErrBaselineRunning, which waits for the
+	// next refresh). The second run is asked for once the first is all done,
+	// or it can be refused that way and never run (seen on CI).
+	sup.postRefresh.Wait()
 	// The staged result gone (as if adopted) and one input pair rotten.
 	if err := os.RemoveAll(stage); err != nil {
 		t.Fatal(err)
