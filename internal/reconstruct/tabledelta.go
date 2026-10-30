@@ -1482,6 +1482,7 @@ func publishWithTableDelta(ctx context.Context, p tableDeltaPublish, rep *TableR
 		SnapshotDir:      p.cfg.snapshotDir,
 		SnapshotAt:       p.cfg.At,
 		Cut:              p.cfg.cut,
+		GapsAllowed:      p.cfg.AllowGaps,
 		DDLMark:          p.ddlMark,
 		EventMark:        p.cfg.eventMark,
 		CaptureGap:       p.capGap,

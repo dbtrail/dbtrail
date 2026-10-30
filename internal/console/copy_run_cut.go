@@ -74,7 +74,7 @@ func promoteToRunCut(cut copyCut, run runCut) copyCut {
 
 // copyRunCutMemo remembers each directory's refresh cut. A published
 // directory is never written again, so a found cut stands, and so does
-// "none" for a directory that is complete (_SUCCESS); the memo starts over
+// "none" unless the directory is marked incomplete; the memo starts over
 // past copyCutMemoMax directories.
 type copyRunCutMemo struct {
 	mu   sync.Mutex
@@ -107,7 +107,9 @@ func (m *copyRunCutMemo) of(dir string, footer func(path string) (baseline.DumpM
 		if skipped {
 			return runCut{}, false
 		}
-		if _, err := os.Stat(filepath.Join(dir, baseline.SuccessMarker)); err != nil {
+		// A directory a run failed or is still writing says so; a complete
+		// one has _SUCCESS, or no marker at all if older than them.
+		if _, err := os.Stat(filepath.Join(dir, baseline.IncompleteMarker)); err == nil {
 			return runCut{}, false
 		}
 	}

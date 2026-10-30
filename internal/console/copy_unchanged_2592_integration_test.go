@@ -73,6 +73,15 @@ func TestIntegrationCopyUnchanged_staticTableAfterRotation_2592(t *testing.T) {
 	testutil.MustExec(t, r.db, "DELETE FROM schema_changes WHERE table_name = 't1'")
 	r.wantUnchanged(quiet)
 
+	// The source's address changed after the table's own read and long
+	// before the refresh's cut: a refresh only checks the uuid, so this is
+	// still asked from the table's own read.
+	testutil.MustExec(t, r.db, `INSERT INTO bintrail_server_changes (bintrail_id, field_changed, old_value, new_value, detected_at)
+		VALUES ('21870000-0000-0000-0000-000000000000', 'host', 'a', 'b', FROM_UNIXTIME(?))`, now.Add(-24*time.Hour).Unix())
+	r.wantNot("identity changed", quiet)
+	testutil.MustExec(t, r.db, "DELETE FROM bintrail_server_changes")
+	r.wantUnchanged(quiet)
+
 	// A change after the refresh's cut is seen.
 	r.change(quiet.Table, event.EventUpdate, "1", "late", "binlog.000009", 900, now.Add(-2*time.Minute))
 	r.wantNot("changed since its snapshot", quiet)

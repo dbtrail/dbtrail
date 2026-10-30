@@ -181,13 +181,24 @@ func TestCopyRunCutMemo(t *testing.T) {
 		t.Fatal("a complete directory's \"none\" was not remembered")
 	}
 
-	// Without _SUCCESS, "none" is asked again.
+	// With no marker at all (older than them): complete, remembered.
 	snap3, files3 := runCutDir(t, false)
 	files3["shop/busy.000001.upserts"] = carried
 	var m3 copyRunCutMemo
 	m3.of(snap3, footersOf(snap3, files3, reads, nil), noWarn)
 	clear(reads)
 	m3.of(snap3, footersOf(snap3, files3, reads, nil), noWarn)
+	if len(reads) != 0 {
+		t.Fatal("a directory older than the markers was read again for its \"none\"")
+	}
+	// Marked incomplete: "none" is asked again.
+	if err := os.WriteFile(filepath.Join(snap3, baseline.IncompleteMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var m3b copyRunCutMemo
+	m3b.of(snap3, footersOf(snap3, files3, reads, nil), noWarn)
+	clear(reads)
+	m3b.of(snap3, footersOf(snap3, files3, reads, nil), noWarn)
 	if len(reads) == 0 {
 		t.Fatal("an incomplete directory's \"none\" was remembered")
 	}

@@ -1873,6 +1873,7 @@ func ReconstructTable(
 		in.SnapshotDir = cfg.snapshotDir
 		in.SnapshotAt = cfg.At
 		in.Cut = cfg.cut
+		in.GapsAllowed = cfg.AllowGaps
 		in.DDLMark = stampMark
 		in.EventMark = cfg.eventMark
 		in.CaptureGap = capGap
@@ -2112,9 +2113,13 @@ type mergeInput struct {
 	// goes, the instant it is labelled with, the binlog coordinate it is anchored
 	// at (nil = index holds no events, so the source baseline's own anchor
 	// carries over), and the snapshot it was derived from.
-	SnapshotDir    string
-	SnapshotAt     time.Time
-	Cut            *query.BinlogPos
+	SnapshotDir string
+	SnapshotAt  time.Time
+	Cut         *query.BinlogPos
+	// GapsAllowed: the run was told to go on past what it could not read
+	// (AllowGaps), so finding nothing in its window does not mean the table
+	// is unchanged through Cut, and no fold cut is claimed (#2592).
+	GapsAllowed    bool
 	SourceBaseline baselineMeta
 	// PG marks a PostgreSQL source (#1596): the columns are the baseline
 	// file's own (all text), the PK is joined as text, and the footer is

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Fast mode vouches for a table nobody writes again after rotation.** The question "has this table changed since its snapshot" started from the table's last full read, so once rotation dropped that hour every statement over such a table fell back to the age rule. The lookup now starts at the cut of the update that published the snapshot, as fresh mode's does since 0.122.0; schema changes are still checked from the table's own read, because an update carries a table whose definition changed without a row event as it was (#2592).
+- **A run that allowed gaps no longer stands as a cut for tables it carried.** Since 0.122.0 a snapshot update records the cut it read its window through, which fresh mode, and now fast mode, start a carried table's lookup from. A `reconstruct --allow-gaps` run may skip hours it could not read, so its finding nothing does not mean a table was unchanged: it no longer records the cut, and such a table is looked up from its own read again (#2592).
 
 ## [0.122.0] - 2026-10-30
 
