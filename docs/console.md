@@ -1633,9 +1633,14 @@ server's statements instead of serving without it.
   `.env` opts out there).
 - `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` (`router`): same as `router
   --sql-port-max-rows`: the most rows one statement returns on the
-  MySQL port (default `10000`). A result
-  with more is refused with error 1104, not cut. This page's SQL card shows
-  1,000 rows whatever it is. A result is also refused past 64 MB, and is
+  MySQL port (default `10000`) where the copy answers alone. A result
+  with more is refused with error 1104, not cut. Under Engine Routing a
+  result past the copy's memory is sent from a temporary file of up to
+  2 GB instead, with no row cap; this cap then only keeps a statement
+  whose plan estimates more rows on MySQL when there is no room for that
+  file ([details](time-travel-sql.md)). This page's SQL
+  card shows 1,000 rows whatever it is. A result is also refused past
+  64 MB where no file is used, and a result held in memory is
   held in the router while it is sent: at most 256 MB of results over all
   the port's connections, past which a statement is refused with error
   1203 until an answer has been written to its client (one that reads

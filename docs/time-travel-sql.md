@@ -117,7 +117,8 @@ copy, the snapshots and the archived change log, exactly as the console's
 **SQL** card does: same locked DuckDB child process, same views, the same
 2 GB of memory and 60 seconds per statement by default. Two things differ:
 the row cap (10,000 rows on this port by default, where the card shows
-1,000), and how many statements run at once (below).
+1,000; under Engine Routing a large result is sent from a file instead,
+below), and how many statements run at once (below).
 A statement that is not time travel is handed to it:
 
 ```sql
@@ -329,15 +330,40 @@ What to know before relying on it:
   as it always did.
 - **Read-only, one SELECT per statement.** Anything else is refused with
   1064.
-- **A result with more rows than the row cap is an error, not a short
-  answer.** The statement fails with error 1104, which names the cap
+- **Under Engine Routing, a large result is sent from a file.** A
+  statement the router sends to the copy has no row cap: MySQL would
+  return every row. A result up to 64 MB is held in memory (8 MB for a
+  prepared statement, whose binary encoding holds it twice); past that, the
+  copy writes the rest to a file of its own in the system's temporary
+  directory (`TMPDIR`), up to 2 GB, and the router sends it to the client
+  row by row as the client reads it, then removes it. Measured on a
+  100-warehouse CH-benCHmark through the port, end to end: Q10 (about 3
+  million rows, no `LIMIT`) in 18 s, Q18 in 14.6 s, where MySQL took 214 and
+  220 s. The files follow the rules of the copy's temporary space: none in
+  a `tmpfs`, and all those being sent at once within half the free space
+  there. When there is no room for one, a result past the memory is
+  refused on the copy and MySQL answers it, and a statement whose plan
+  estimates more rows than the row cap below goes to MySQL without being
+  tried on the copy (step 5 of the ladder). A result past 2 GB is refused on the copy and MySQL answers it
+  (`copy_refused`). A failure while the rows are being sent (the client
+  stops reading, the file cannot be read) reaches the client as an error
+  after the rows already sent, as one from MySQL does, and the statement is
+  not run again on MySQL: the rows sent cannot be taken back. For a prepared
+  statement whose result has number, date or time columns, the file is read
+  through once before the first row, to declare each column with the type
+  it would have in memory.
+- **Without Engine Routing, a result with more rows than the row cap is an
+  error, not a short answer.** On a connection the copy answers alone (routing off,
+  a `@copy` user, a server that cannot be forwarded for), the statement
+  fails with error 1104, which names the cap
   (10,000 rows by default) and the way out: add a `LIMIT` at or under the
   cap, or narrow the statement. Nothing is returned, so an application
   cannot take the first rows for the whole result. The cap is the port's
   own: `router --sql-port-max-rows` (env `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS`,
   `SQL_PORT_MAX_ROWS` in the compose stack's `.env`) sets it, and the SQL
   card's 1,000 rows do not move with it. A result is also refused, with the
-  same error code, past 64 MB, whatever its row count. The whole result is held by the
+  same error code, past 64 MB, whatever its row count. A result held in
+  memory is held by the
   router while it is sent, and takes a few times its size
   while it is prepared (measured: a 64 MB result of 100,000 rows, about 320
   MB at its peak). The number of workers bounds the statements running, not
@@ -578,10 +604,13 @@ The decision, in order, for every statement:
    `LIMIT` with a filter no index serves. The study of which statements the copy answers the same way
    (the vetoes of step 4) was run against MySQL; on a MariaDB source Engine
    Routing is less measured.
-   Last, for a plan the copy should take, **the size of the result**. The
-   copy returns at most its row cap (10,000 rows by default) and refuses a
-   larger result, so a statement that returns more would run on the copy,
-   be refused, and run again on MySQL. When the plan reads only its result
+   Last, for a plan the copy should take, **the size of the result**. A
+   result past the copy's memory is sent from a file (see the limits
+   above), so this step applies only when the router's temporary directory
+   has no room for one: then the copy returns at most its row cap (10,000
+   rows by default) and refuses a larger result, and a statement that
+   returns more would run on the copy, be refused, and run again on MySQL.
+   When the plan reads only its result
    (as above; here a sort is allowed) and the statement has no aggregate,
    `GROUP BY`, `DISTINCT`, window function or `UNION`, the plan's row
    estimate is an estimate of the result, cut by the statement's own
@@ -1950,8 +1979,8 @@ as the router applies it:
   wait: one longer than the source's `wait_timeout` (8 hours by default)
   loses it, and the client then has to reconnect.
 - **Waiting does not exempt a read from the copy's other refusals.** A read
-  that waited, ran on the copy, and was then refused there (a result over
-  the row cap, a construct DuckDB lacks) is run by MySQL afterwards under
+  that waited, ran on the copy, and was then refused there (a result past
+  2 GB, a construct DuckDB lacks) is run by MySQL afterwards under
   that refusal's own reason: it paid the wait, the attempt and MySQL's time.
 - **On a connection that is not routed** (routing off, a server that cannot
   be forwarded for, a `@copy` user) there is no MySQL behind the statement.
@@ -1990,8 +2019,9 @@ The router does the counting, so the numbers are read from the router:
   nobody ran), and `reason` is one of
   a closed set: `expensive_plan` (the copy answered), `cheap_plan`, `bounded_limit` (a small `LIMIT` MySQL answers
   without reading past it), `result_over_row_cap` (an expensive plan whose
-  result is estimated above the copy's row cap: MySQL answered, and the copy
-  was not tried), `not_a_select`, `write`, `session_setting`,
+  result is estimated above the copy's row cap while the router's temporary
+  directory has no room for a result file: MySQL answered, and the copy was
+  not tried), `not_a_select`, `write`, `session_setting`,
   `session_differs` (the source's session on that connection holds a setting
   the copy does not reproduce; the router's log names the setting and its
   value once per connection), `connection_pinned` (a `CREATE TEMPORARY
@@ -2349,7 +2379,7 @@ one environment file serves both processes.
 | `--route-cost-threshold` | `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` | 10,000 | Under Engine Routing, a `SELECT` whose plan costs at least this goes to the copy. 0 turns the rule off |
 | `--route-scan-rows` | `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` | 100,000 | Under Engine Routing, a `SELECT` whose plan scans a whole table of at least this many rows goes to the copy. 0 turns the rule off |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB | Memory each statement on the copy may use (at least 512MB) |
-| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | 10,000 | Most rows one statement returns. A larger result is refused with error 1104 |
+| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | 10,000 | Most rows one statement returns on a connection the copy answers alone; a larger result is refused with error 1104. Under Engine Routing it only keeps on MySQL a statement whose plan estimates more rows, when there is no room for a result file |
 
 The router refuses to start with both `--route-cost-threshold` and
 `--route-scan-rows` at 0, since no statement could then go to the copy.
