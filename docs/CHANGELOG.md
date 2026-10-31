@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.122.1] - 2026-10-30
+
 ### Fixed
 
 - **Fast mode vouches for a table nobody writes again after rotation.** The question "has this table changed since its snapshot" started from the table's last full read, so once rotation dropped that hour every statement over such a table fell back to the age rule. The lookup now starts at the cut of the update that published the snapshot, as fresh mode's does since 0.122.0; schema changes are still checked from the table's own read, because an update carries a table whose definition changed without a row event as it was (#2592).
