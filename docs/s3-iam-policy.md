@@ -48,7 +48,7 @@ safe; add that action per the table below.
 | `s3:PutObject` | `bintrail rotate --archive-s3`, `bintrail baseline --upload`, `bintrail upload` — writing Parquet archives/baselines to the bucket. Large files stream as S3 multipart uploads, and the `CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload` calls are all authorized by `s3:PutObject` — successful uploads of any size need nothing extra |
 | `s3:GetObject` | `bintrail query`/`recover --archive-s3`, `--baseline-s3`/`reconstruct` reads, the `HeadObject` existence check `bintrail upload --retry` issues (S3 authorizes `HeadObject` under `s3:GetObject` — there's no separate `s3:HeadObject` action), and the read of `<baselines root>/_NEWEST` every baseline upload does before moving that pointer |
 | `s3:ListBucket` | Enumerating archived partitions/baseline snapshots (`ListObjectsV2`), and the bucket-reachability check (`HeadBucket`) `bintrail init --s3-bucket` and `bintrail rotate` run. Also what lets a baseline upload create `<baselines root>/_NEWEST` the first time: without it S3 answers 403 instead of 404 for a key that does not exist yet, so the upload cannot tell "no pointer yet" from "not allowed" and leaves the pointer alone (the snapshot is still published; the upload warns) |
-| `s3:DeleteObject` | Baseline upload's own cleanup of its in-progress `_INCOMPLETE` marker, and `agent --validate` removing its connectivity-probe object. No bintrail command deletes archive data from S3 (`archive reconcile --prune` deletes registry rows only). Optional but recommended — omit it if you'd rather nothing in the bucket ever be deleted by bintrail |
+| `s3:DeleteObject` | Baseline upload's own cleanup of its in-progress `_INCOMPLETE` marker, `agent --validate` removing its connectivity-probe object, and, for a server with **Delete from S3 after** set, the console removing that server's snapshots older than the age (#2596). No bintrail command deletes archive data from S3 (`archive reconcile --prune` deletes registry rows only). Optional but recommended: omit it if you'd rather nothing in the bucket ever be deleted by bintrail, and leave **Delete from S3 after** empty, or each cleanup stops on the refusal and says so in the log |
 | `s3:AbortMultipartUpload` | Cleaning up after a **failed or interrupted** large upload: the SDK automatically aborts the in-progress multipart upload, and without this permission that abort is `AccessDenied` — the orphaned parts stay in the bucket, invisible in listings but billed as storage. Never used on the success path. Pair it with an [`AbortIncompleteMultipartUpload` lifecycle rule](deployment.md#s3-archive-bucket-abort-orphaned-multipart-uploads) on the bucket as the backstop for uploads that die before the abort can run (crash, `SIGKILL`) |
 
 ## Three things this policy deliberately leaves out
@@ -59,9 +59,10 @@ without it that check reports SKIP and everything else works. Add it as a
 bucket-level action (alongside `s3:ListBucket`) if you use the check.
 
 **`s3:GetBucketLifecycleConfiguration`** is only needed to read whether a
-rule in the bucket expires old snapshots. DBTrail never deletes a snapshot
-from S3 and never sets a bucket rule: the web interface writes the rule and
-you apply it. This permission lets two places say whether it is there: the
+rule in the bucket expires old snapshots. DBTrail never sets a bucket rule:
+the web interface writes the rule and you apply it. It deletes snapshots from
+S3 only for a server with **Delete from S3 after** set (see
+[dump-and-baseline.md](dump-and-baseline.md)). This permission lets two places say whether it is there: the
 line above the rule in the Snapshots settings, and the advisory
 check of `bintrail doctor`:
 

@@ -720,7 +720,10 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		// edit must not turn it off by omission.
 		LocalKeepNewest: old.LocalKeepNewest,
 		// So is the SQL mirror's switch (#2302).
-		NoSQLMirror:       old.NoSQLMirror,
+		NoSQLMirror: old.NoSQLMirror,
+		// And the S3 age (#2596), kept while the destination stays: one set
+		// for a prefix must not follow the server to another.
+		BaselineS3Retain:  keepS3Retain(old, strings.TrimSpace(req.BaselineS3)),
 		SourceServerID:    req.SourceServerID,
 		Schemas:           req.Schemas,
 		Flavor:            flavor,
@@ -736,7 +739,14 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 		SSLCert: old.SSLCert,
 		SSLKey:  old.SSLKey,
 	}
-	if err := s.cm.reg.Update(entry); err != nil {
+	s3AgeMu.Lock()
+	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &entry)) {
+		s3AgeMu.Unlock()
+		return
+	}
+	err = s.cm.reg.Update(entry)
+	s3AgeMu.Unlock()
+	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
 	}
@@ -768,7 +778,14 @@ func (s *Server) handleServersDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deleted, _ := s.cm.reg.Get(id)
-	if err := s.cm.reg.Delete(id); err != nil {
+	s3AgeMu.Lock()
+	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, id, nil)) {
+		s3AgeMu.Unlock()
+		return
+	}
+	err := s.cm.reg.Delete(id)
+	s3AgeMu.Unlock()
+	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
 	}
