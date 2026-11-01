@@ -43,6 +43,7 @@ func expiryFunctions(t *testing.T) string {
 	return strings.Join([]string{
 		functionBody(t, js, "function s3Parts("),
 		functionBody(t, js, "function retentionTooShort("),
+		functionBody(t, js, "function s3Cadence("),
 		functionBody(t, js, "function s3PrefixCovers("),
 		functionBody(t, js, "function s3ExpiryWords("),
 		functionBody(t, js, "function s3ExpiryLine("),

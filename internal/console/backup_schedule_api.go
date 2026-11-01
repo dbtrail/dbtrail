@@ -19,6 +19,11 @@ type backupScheduleDTO struct {
 	// UploadEvery is how often a run sends its snapshot to S3 (#2596), empty
 	// for every run.
 	UploadEvery string `json:"upload_every,omitempty"`
+	// SendEveryMinutes is how often a snapshot reaches S3 as Go parses the
+	// schedule: the upload interval, or the update interval when there is
+	// none (#2596). The page judges the age of the newest S3 copy by it and
+	// must not re-parse the grammar.
+	SendEveryMinutes int `json:"send_every_minutes,omitempty"`
 	// NextRun is the next slot on the grid (RFC3339 UTC). Present even when
 	// the schedule is not runnable, so the page can say "would run at X but
 	// cannot, because Y". With a full-copy timetable whose full copies can
@@ -215,6 +220,10 @@ func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.
 		// only for a runnable one, but a client reading the API gets the
 		// grid either way.
 		dto.NextRun = p.NextRun(now).Format(time.RFC3339)
+		dto.SendEveryMinutes = int(p.Every.Minutes())
+		if p.UploadEvery > 0 {
+			dto.SendEveryMinutes = int(p.UploadEvery.Minutes())
+		}
 		if p.FullEvery > 0 {
 			dto.NextFullRun = p.NextFullRun(now).Format(time.RFC3339)
 		}
@@ -472,6 +481,17 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 		uploadEvery = e.BackupSchedule.UploadEvery
 	}
 	sched, err := BackupSchedule{Every: req.Every, At: req.At, FullEvery: fullEvery, UploadEvery: uploadEvery}.Normalized()
+	if err != nil && req.UploadEvery == nil && uploadEvery != "" && strings.TrimSpace(e.BaselineS3) == "" {
+		// The saved upload interval is inert (the server lost its S3
+		// destination) and the page no longer shows the row that sets it, so
+		// a save that does not mention it must not be refused for it. One the
+		// new update interval left too short is dropped; with the destination
+		// still there the refusal stands, and a live setting is never lost
+		// unasked.
+		if dropped, derr := (BackupSchedule{Every: req.Every, At: req.At, FullEvery: fullEvery}).Normalized(); derr == nil {
+			sched, err = dropped, nil
+		}
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return

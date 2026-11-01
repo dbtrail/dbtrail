@@ -866,6 +866,32 @@ saved, shown with the reason `serve` is not running it.
   detail carries the same on `run.why`. The page turns the two permanent
   reasons into the setting to change. The daemon-wide
   `--baseline-refresh-interval` below is independent and can run alongside.
+- **Send to S3 every** (#2596): for a server with an S3 destination, the
+  schedule form has a third row of choices: each update (the default), 1 hour,
+  6 hours or 24 hours. Choices shorter than the update interval are hidden,
+  and a choice that goes out of reach when the update interval changes falls
+  back to each update. The updates in between stay on this machine and are
+  not sent, so the bucket grows more slowly, and if this machine is lost the
+  newest snapshot in S3 can be that much older. The schedule's state line
+  says the interval, a scheduled run that was not sent says so, and the
+  bucket rule check on **Where and how often** counts the snapshots that
+  reach S3 and the shortest rule from this interval, not from the updates.
+  The **In S3** tile at the top shows how old the newest snapshot in S3 is
+  whenever the newest copy is not there yet. It is amber when the bucket
+  could not be read, when S3 is more than two intervals behind (an empty
+  bucket counts from the oldest snapshot here), or when the newest snapshot
+  was kept here for the interval and no schedule is running to send it; the
+  schedule card then says so in red. That last one is said only where the
+  schedules run, since a read-only `serve` sees every schedule as unable to
+  run. A server that loses its S3 destination keeps the saved interval as an
+  inert value, shown as not in use; a save that does not mention it is not
+  refused for it, and one the new update interval left too short is dropped.
+  `GET /api/baselines` carries `s3_destination` and `s3` (`newest`,
+  `newest_age_hours`, `unread` when the bucket could not be listed in full,
+  `held_newer`, and `held_unknown` when that could not be told), read from
+  every listed snapshot rather than the 50 the
+  page shows, since with updates every few minutes the newest S3 copy is
+  usually past them. The setting is stored as `upload_every` in the schedule.
 - **Automatic baseline refresh** — when `--baseline-refresh-interval` is set,
   the panel reports the daemon's last automatic refresh for the selected
   server: how many tables it published, or that it published nothing and why.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -86,6 +87,29 @@ type baselineSnapshotDTO struct {
 	DataAsOf string `json:"data_as_of,omitempty"`
 }
 
+// s3CopyDTO is how old the newest snapshot in S3 is (#2596). With an upload
+// interval the newest snapshot stays on this machine for hours before one
+// reaches the bucket, so the newest row of the listing says nothing about S3,
+// and the page cannot work it out from the rows it gets: on a schedule every
+// 5 minutes sent every 6 hours, the S3 copy is past the first 50.
+type s3CopyDTO struct {
+	// Newest is the newest snapshot found in S3; empty when the bucket was
+	// read and holds none.
+	Newest         string  `json:"newest,omitempty"`
+	NewestAgeHours float64 `json:"newest_age_hours"`
+	// Unread: the bucket could not be listed, or only in part, so no age is
+	// given. A skipped folder may be the newest one.
+	Unread bool `json:"unread,omitempty"`
+	// HeldNewer: the newest local snapshot is newer than the bucket's and the
+	// upload interval kept it here on purpose. Not set for a newer one with
+	// no mark, which is an upload that is pending or failed.
+	HeldNewer bool `json:"held_newer,omitempty"`
+	// HeldUnknown: whether the newest local snapshot is held could not be
+	// told (its mark could not be read, or the local folder could not be
+	// listed in full), so HeldNewer false is not a "no".
+	HeldUnknown bool `json:"held_unknown,omitempty"`
+}
+
 type baselinesResponse struct {
 	// Configured reports whether the selected server has a baseline source at
 	// all (dir or s3). Reconstruct additionally requires archives enabled and
@@ -126,6 +150,14 @@ type baselinesResponse struct {
 	// not only in S3. Here because this page is where the bucket is shown,
 	// and "these snapshots are in S3; can I run SQL on them" is asked here.
 	SQLMirror *sqlMirrorDTO `json:"sql_mirror,omitempty"`
+	// S3Destination says the server's own entry names an S3 destination,
+	// which is the test the schedule's upload interval is refused on
+	// (#2596). Sent rather than read off Sources, so the form never offers
+	// the interval where a save would refuse it.
+	S3Destination bool `json:"s3_destination,omitempty"`
+	// S3 is the bucket's side of the copy (#2596), omitted when no S3
+	// location was consulted.
+	S3 *s3CopyDTO `json:"s3,omitempty"`
 	// Staleness is the panel headline: the worst verdict across each table's
 	// NEWEST snapshot (#1193). An old superseded snapshot being past coverage
 	// is routine — grading every row red on a healthy retention cadence would
@@ -287,6 +319,9 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	resp.SQLMirror = s.sqlMirrorOf(b, s.selectedServerID(r))
 	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
 	resp.LastPrune, resp.LastPruneFailure, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
+	if e, ok := s.cm.reg.Get(s.selectedServerID(r)); ok {
+		resp.S3Destination = strings.TrimSpace(e.BaselineS3) != ""
+	}
 	if b.baselineSrc == "" {
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -356,6 +391,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	files := merged.Files
 
 	now := time.Now().UTC()
+	resp.S3 = s3CopyOf(merged, bundleBaselineDir(b), s.selectedServerID(r), now)
 	// Staleness floor (#1193): best-effort but never silent and never a
 	// fabricated verdict — an unopened bundle connection or an unreadable
 	// index yields the explicit "unknown".
@@ -582,4 +618,65 @@ func (s *Server) handleBaselineLocation(w http.ResponseWriter, r *http.Request) 
 		resp.Configured, resp.Source, resp.Kind = true, src, baselineKind(src)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// s3CopyOf reads the bucket's side of the copy off the whole merged listing,
+// before the page cap: by snapshot time, through Kinds, because the merge
+// keeps the LOCAL path for a file found in both places.
+func s3CopyOf(merged mergedBaselines, localDir, server string, now time.Time) *s3CopyDTO {
+	var s3src, dirsrc *baselineSourceDTO
+	for i := range merged.Sources {
+		switch merged.Sources[i].Kind {
+		case "s3":
+			if s3src == nil {
+				s3src = &merged.Sources[i]
+			}
+		case "dir":
+			if dirsrc == nil {
+				dirsrc = &merged.Sources[i]
+			}
+		}
+	}
+	if s3src == nil {
+		return nil
+	}
+	out := &s3CopyDTO{Unread: s3src.Error != "" || s3src.Skipped > 0}
+	var s3At, dirAt int64
+	var inS3, onDisk bool
+	for ts, kinds := range merged.Kinds {
+		if slices.Contains(kinds, "s3") && (!inS3 || ts > s3At) {
+			s3At, inS3 = ts, true
+		}
+		if slices.Contains(kinds, "dir") && (!onDisk || ts > dirAt) {
+			dirAt, onDisk = ts, true
+		}
+	}
+	if inS3 && !out.Unread {
+		at := time.Unix(0, s3At).UTC()
+		out.Newest = at.Format(consoleTSFormat)
+		out.NewestAgeHours = now.Sub(at).Hours()
+	}
+	// Whether the newest local snapshot is held is this machine's fact and
+	// is told even when the bucket could not be read: it is compared with
+	// what the bucket showed, and a snapshot seen there, even in a partial
+	// listing, is there.
+	if localDir == "" {
+		return out
+	}
+	if dirsrc != nil && (dirsrc.Error != "" || dirsrc.Skipped > 0) {
+		// A skipped folder may be the newest one.
+		out.HeldUnknown = true
+		return out
+	}
+	if onDisk && (!inS3 || dirAt > s3At) {
+		name := reconstruct.SnapshotDirName(time.Unix(0, dirAt).UTC())
+		held, err := baseline.UploadHeld(localDir, name)
+		if err != nil {
+			slog.Warn("console: could not tell whether the newest local snapshot is held for the upload interval",
+				"server", server, "snapshot", name, "error", err)
+			out.HeldUnknown = true
+		}
+		out.HeldNewer = held
+	}
+	return out
 }
