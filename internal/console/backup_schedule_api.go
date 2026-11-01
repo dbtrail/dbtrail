@@ -16,6 +16,9 @@ type backupScheduleDTO struct {
 	At    string `json:"at"`
 	// FullEvery is the full-copy timetable (#1564), empty for none.
 	FullEvery string `json:"full_every,omitempty"`
+	// UploadEvery is how often a run sends its snapshot to S3 (#2596), empty
+	// for every run.
+	UploadEvery string `json:"upload_every,omitempty"`
 	// NextRun is the next slot on the grid (RFC3339 UTC). Present even when
 	// the schedule is not runnable, so the page can say "would run at X but
 	// cannot, because Y". With a full-copy timetable whose full copies can
@@ -106,7 +109,9 @@ type backupScheduleRunDTO struct {
 	Tables       int    `json:"tables,omitempty"`
 	Rows         int64  `json:"rows,omitempty"`
 	Uploaded     int    `json:"uploaded,omitempty"`
-	Carried      int    `json:"carried,omitempty"`
+	// UploadHeld: see BaselineRunRecord.UploadHeld. From the history only.
+	UploadHeld bool `json:"upload_held,omitempty"`
+	Carried    int  `json:"carried,omitempty"`
 	// CarriedCopied narrows Carried to full-byte-copy reuses (no disk saved)
 	// — see BaselineStatus.CarriedCopied.
 	CarriedCopied int `json:"carried_copied,omitempty"`
@@ -162,6 +167,9 @@ type backupScheduleRequest struct {
 	// (a page loaded before an upgrade, a script) must not delete the
 	// operator's full backups by editing the time of the updates.
 	FullEvery *string `json:"full_every"`
+	// UploadEvery is the optional upload interval (#2596), with the same
+	// rule: empty sends at every run again, omitted keeps the saved one.
+	UploadEvery *string `json:"upload_every"`
 }
 
 // scheduleGates resolves what this process can do, for CheckBackupSchedule.
@@ -197,7 +205,7 @@ func (s *Server) scheduleClock() time.Time {
 
 func (s *Server) backupScheduleDTO(ctx context.Context, e ServerEntry, now time.Time) *backupScheduleDTO {
 	sched := *e.BackupSchedule
-	dto := &backupScheduleDTO{Every: sched.Every, At: sched.At, FullEvery: sched.FullEvery}
+	dto := &backupScheduleDTO{Every: sched.Every, At: sched.At, FullEvery: sched.FullEvery, UploadEvery: sched.UploadEvery}
 	if dto.At == "" {
 		dto.At = "00:00"
 	}
@@ -371,6 +379,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		Tables:        run.Tables,
 		Rows:          run.Rows,
 		Uploaded:      run.Uploaded,
+		UploadHeld:    run.UploadHeld,
 		Carried:       run.Carried,
 		CarriedCopied: run.CarriedCopied,
 		S3Copied:      run.S3Copied,
@@ -455,9 +464,23 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 	case e.BackupSchedule != nil:
 		fullEvery = e.BackupSchedule.FullEvery
 	}
-	sched, err := BackupSchedule{Every: req.Every, At: req.At, FullEvery: fullEvery}.Normalized()
+	uploadEvery := ""
+	switch {
+	case req.UploadEvery != nil:
+		uploadEvery = *req.UploadEvery
+	case e.BackupSchedule != nil:
+		uploadEvery = e.BackupSchedule.UploadEvery
+	}
+	sched, err := BackupSchedule{Every: req.Every, At: req.At, FullEvery: fullEvery, UploadEvery: uploadEvery}.Normalized()
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Asked only of a value this save sets: one saved while the server had a
+	// destination stays inert when it loses it, and editing the time of the
+	// updates must not force the operator to delete it first.
+	if req.UploadEvery != nil && sched.UploadEvery != "" && strings.TrimSpace(e.BaselineS3) == "" {
+		writeJSONError(w, http.StatusBadRequest, "send to S3 every: this server has no S3 destination, so there is nothing to send; set one in its snapshot settings first")
 		return
 	}
 	gates := s.scheduleGates()

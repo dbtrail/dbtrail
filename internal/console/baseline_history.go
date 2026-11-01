@@ -89,7 +89,10 @@ type BaselineRunRecord struct {
 	CarriedCopied int   `json:"carried_copied,omitempty"`
 	Rows          int64 `json:"rows,omitempty"`
 	Uploaded      int   `json:"uploaded,omitempty"`
-	Refused       int   `json:"refused,omitempty"`
+	// UploadHeld: the server's upload interval kept this run's snapshot on
+	// this machine on purpose (#2596), so Uploaded is zero and nothing failed.
+	UploadHeld bool `json:"upload_held,omitempty"`
+	Refused    int  `json:"refused,omitempty"`
 	// RefusedTables names the tables behind Refused, up to RefusedTablesCap,
 	// and RefusedTablesOmitted counts the rest (#1653). A run recorded before
 	// the list existed has the count and no list, which is "not recorded",

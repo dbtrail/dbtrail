@@ -645,6 +645,11 @@ func (s *baselineSupervisor) resendLacking(_ context.Context, dir, s3URL, name s
 	if s.isUploading(key, name) {
 		return nil
 	}
+	// The prune never lists a held snapshot as missing (#2596); this is the
+	// belt for a mark written between its listing and this send.
+	if held, _ := baseline.UploadHeld(dir, name); held {
+		return nil
+	}
 	dest := strings.TrimSuffix(s3URL, "/") + "/" + name
 	_, err := s.uploadMarked(key, name, filepath.Join(dir, name), dest, true)
 	return err
@@ -678,6 +683,12 @@ func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, 
 		}
 		seen[name] = true
 		if s.isUploading(req.ServerID, name) {
+			continue
+		}
+		// Kept on this machine by the upload interval (#2596), not a failed
+		// upload: sending it is the burst the interval exists to avoid. A mark
+		// that cannot be read sends it, the behaviour from before the mark.
+		if held, _ := baseline.UploadHeld(req.LocalDir, name); held {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(req.LocalDir, name, baseline.SuccessMarker)); err != nil {
