@@ -997,8 +997,8 @@ func (b *backupScheduler) gates() console.BackupScheduleGates {
 	return g
 }
 
-// startRebuild triggers the fold and records the job as the schedule's.
-func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBackupSchedule, stamp string) error {
+// rebuildRequest is the fold a scheduled update dispatches for e.
+func (b *backupScheduler) rebuildRequest(e console.ServerEntry, p console.ParsedBackupSchedule) refreshRequest {
 	req := refreshRequest{
 		ServerID: e.ID, ServerName: e.Name, IndexDSN: e.DSN, BaselineDir: e.BaselineDir,
 		// The destination this server's backups already go to. Set ONLY here:
@@ -1007,9 +1007,19 @@ func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBa
 		BaselineS3:            e.BaselineS3,
 		CarryForwardUnchanged: effectiveCarryForward(b.reg, b.carryDefault),
 		Trigger:               console.BaselineRunTriggerScheduled,
+		// The upload grid (#2596) shares the schedule's At, like the
+		// full-copy one.
+		UploadEvery: p.UploadEvery,
+		UploadAt:    p.At,
 	}
 	withSource(&req, e)
 	req.PlanNewTables = b.newTablesPlanner(e)
+	return req
+}
+
+// startRebuild triggers the fold and records the job as the schedule's.
+func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBackupSchedule, stamp string) error {
+	req := b.rebuildRequest(e, p)
 	// The interval is what the overrun warning measures against and names;
 	// for a scheduled rebuild that is the schedule's own `every`. Passing the
 	// wrong one here does not only mislabel a log attribute: it decides

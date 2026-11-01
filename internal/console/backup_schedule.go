@@ -109,6 +109,15 @@ type BackupSchedule struct {
 	// than guess. Not part of Identity: saving the same timetable again does
 	// not restart its grid.
 	FullSince string `yaml:"full_since,omitempty"`
+	// UploadEvery is how often a run sends its snapshot to the server's S3
+	// destination (#2596), in the same grammar as Every. Empty means every
+	// run, which is what a schedule saved before it did. Otherwise a run
+	// sends only when the bucket holds no snapshot from the current slot of
+	// this grid (UploadDue), and the snapshots in between stay on this
+	// machine, marked as held there on purpose (baseline.MarkUploadHeld). At
+	// least Every. Not part of Identity: where the snapshots go does not
+	// move when they are made.
+	UploadEvery string `yaml:"upload_every,omitempty"`
 	// Extra preserves future keys the way ServerEntry.Extra does.
 	Extra map[string]any `yaml:",inline"`
 }
@@ -140,6 +149,8 @@ type ParsedBackupSchedule struct {
 	At    time.Duration // offset from midnight UTC
 	// FullEvery is the full-copy timetable (#1564); 0 for none.
 	FullEvery time.Duration
+	// UploadEvery is the upload grid (#2596); 0 sends at every run.
+	UploadEvery time.Duration
 }
 
 // BackupsPer30Days is how many backups this schedule publishes in 30 days:
@@ -194,7 +205,17 @@ func (b BackupSchedule) Parse() (ParsedBackupSchedule, error) {
 				raw, strings.TrimSpace(b.Every), strings.TrimSpace(b.Every), raw)
 		}
 	}
-	return ParsedBackupSchedule{Every: every, At: at, FullEvery: full}, nil
+	var upload time.Duration
+	if raw := strings.TrimSpace(b.UploadEvery); raw != "" {
+		if upload, err = cliutil.ParseInterval(raw); err != nil {
+			return p, fmt.Errorf("send to S3 every: %w", err)
+		}
+		if upload < every {
+			return p, fmt.Errorf("send to S3 every: %s is more often than the schedule runs (every %s); set it to %s or more",
+				raw, strings.TrimSpace(b.Every), strings.TrimSpace(b.Every))
+		}
+	}
+	return ParsedBackupSchedule{Every: every, At: at, FullEvery: full, UploadEvery: upload}, nil
 }
 
 // Normalized returns the schedule with its defaults spelled out, for storage:
@@ -205,11 +226,12 @@ func (b BackupSchedule) Normalized() (BackupSchedule, error) {
 		return BackupSchedule{}, err
 	}
 	return BackupSchedule{
-		Every:     strings.TrimSpace(b.Every),
-		At:        formatClockTime(p.At),
-		FullEvery: strings.TrimSpace(b.FullEvery),
-		FullSince: b.FullSince,
-		Extra:     b.Extra,
+		Every:       strings.TrimSpace(b.Every),
+		At:          formatClockTime(p.At),
+		FullEvery:   strings.TrimSpace(b.FullEvery),
+		FullSince:   b.FullSince,
+		UploadEvery: strings.TrimSpace(b.UploadEvery),
+		Extra:       b.Extra,
 	}, nil
 }
 
@@ -268,6 +290,24 @@ func (p ParsedBackupSchedule) NextFullRun(now time.Time) time.Time {
 		return time.Time{}
 	}
 	return p.FullSlotAtOrBefore(now).Add(p.FullEvery)
+}
+
+// UploadDue reports whether a run publishing the snapshot of instant at sends
+// it to S3 (#2596). newest is the bucket's newest snapshot and listed whether
+// the bucket could be listed at all.
+//
+// Due when the bucket holds nothing from the upload slot at or before at: a
+// fixed grid on the schedule's At, like the full-copy one, so a 1h interval
+// sends at the first run of each hour rather than an hour after the last
+// send, which would slip by one update every time. Compared against the
+// snapshot instant, not the clock, because that is what names the snapshot
+// in the bucket. A bucket that could not be listed, or holds nothing, is due:
+// the doubt goes to sending.
+func (p ParsedBackupSchedule) UploadDue(at, newest time.Time, listed bool) bool {
+	if p.UploadEvery <= 0 || !listed || newest.IsZero() {
+		return true
+	}
+	return newest.Before(gridSlotAtOrBefore(p.At, p.UploadEvery, at))
 }
 
 // FullCopiesPer30Days is how many full copies the full-copy timetable asks

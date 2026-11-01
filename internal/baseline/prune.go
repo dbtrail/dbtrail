@@ -131,6 +131,12 @@ type PruneResult struct {
 	// KeptNotDurable counts snapshots retained because no durable S3 copy was
 	// confirmed (never delete the only copy).
 	KeptNotDurable int
+	// KeptHeld counts snapshots retained that the upload interval kept on this
+	// machine on purpose (#2596, MarkUploadHeld) and that no newer snapshot
+	// confirmed in S3 supersedes yet. Apart from KeptNotDurable: they are not
+	// missing from the destination, so they are neither resent nor reported
+	// as missing.
+	KeptHeld int
 	// NotAtDestination names the snapshots among KeptNotDurable that the
 	// destination ANSWERED it does not have (a probe error is not an
 	// answer): complete local snapshots whose upload never finished, which
@@ -401,11 +407,14 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	}
 	keepers := computeKeepers(snaps, now)
 	keepPointerTarget(opts.LocalDir, keepers)
+	// Read in both modes, so a mark whose snapshot is gone is swept in both.
+	held := heldSnapshots(opts.LocalDir, opts.DryRun)
 
 	if localOnly {
 		newest := computeNewestN(snaps, opts.KeepNewest, now)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, baselinePruneMinAge, now)
-		return withSweep(removePlanned(opts, now, pruneNames, res, "no external destination; keeping the newest "+fmt.Sprint(opts.KeepNewest))), nil
+		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)
+		return withSweep(removePlanned(opts, now, pruneNames, res, func(string) string { return why })), nil
 	}
 
 	// Confirm durability only for snapshots that could actually be pruned —
@@ -415,6 +424,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// durable (keep), never as durable (which could delete the only copy).
 	durable := make(map[string]bool)
 	var probeErrors int
+	var heldCandidates []localSnapshot
 	for _, s := range snaps {
 		if !s.complete || s.unreadable || keepers[s.name] {
 			continue
@@ -422,6 +432,12 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		age := now.Sub(s.ts)
 		if age < opts.Retain || age < baselinePruneMinAge {
 			continue // too recent to prune → no need to confirm durability
+		}
+		if held[s.name] {
+			// Not in S3 by design, so not probed: decided below against the
+			// newest snapshot that is.
+			heldCandidates = append(heldCandidates, s)
+			continue
 		}
 		ok, perr := probe(ctx, s.name)
 		if perr != nil {
@@ -432,8 +448,12 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		}
 		durable[s.name] = ok
 	}
+	superseded := supersededHeld(ctx, snaps, held, heldCandidates, durable, probe, now)
+	for name := range superseded {
+		durable[name] = true
+	}
 
-	pruneNames, res := planPrune(snaps, keepers, durable, opts.Retain, baselinePruneMinAge, now)
+	pruneNames, res := planPruneHeld(snaps, keepers, durable, held, opts.Retain, baselinePruneMinAge, now)
 	res.ProbeErrors = probeErrors
 	if probeErrors > 0 {
 		// One aggregate signal so a systemic S3 outage reads as "retention stalled
@@ -442,14 +462,83 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			"unconfirmed", probeErrors)
 	}
 
-	return withSweep(removePlanned(opts, now, pruneNames, res, "durable copy in S3")), nil
+	return withSweep(removePlanned(opts, now, pruneNames, res, func(name string) string {
+		if superseded[name] {
+			return "kept on this machine by the upload interval, and a newer snapshot is in S3"
+		}
+		return "durable copy in S3"
+	})), nil
+}
+
+// supersededHeldProbes bounds the extra probes supersededHeld makes looking
+// for a newer snapshot in S3. The newest snapshot not held back is normally
+// the one the last due upload sent, so the first probe usually answers.
+const supersededHeldProbes = 3
+
+// supersededHeld returns the held candidates a NEWER snapshot confirmed in S3
+// supersedes (#2596): those the prune may remove past retention. Dani's call
+// (2026-11-01): a snapshot the upload interval kept on this machine is an
+// in-between point, and once a newer one is in S3 it goes with retention like
+// any other, instead of being kept forever as "the only copy" while the disk
+// fills. A held snapshot with nothing newer in S3 is kept.
+//
+// The newest confirmed copy starts as the newest the candidate probes found;
+// then complete, readable, unheld snapshots newer than it are probed newest
+// first (keepers and recent ones included: being kept does not stop them
+// being the proof; one dated after now is not a copy, as in computeNewestN). A probe error stops the search, so an unreachable bucket
+// keeps every held snapshot.
+func supersededHeld(ctx context.Context, snaps []localSnapshot, held map[string]bool, candidates []localSnapshot,
+	durable map[string]bool, probe durableProbe, now time.Time) map[string]bool {
+	if len(candidates) == 0 {
+		return nil
+	}
+	var newestDurable time.Time
+	for _, s := range snaps {
+		if durable[s.name] && s.ts.After(newestDurable) {
+			newestDurable = s.ts
+		}
+	}
+	var newer []localSnapshot
+	for _, s := range snaps {
+		if !s.complete || s.unreadable || held[s.name] || s.ts.After(now) {
+			continue
+		}
+		if _, probed := durable[s.name]; probed || !s.ts.After(newestDurable) {
+			continue
+		}
+		newer = append(newer, s)
+	}
+	sort.Slice(newer, func(i, j int) bool { return newer[i].ts.After(newer[j].ts) })
+	for i, s := range newer {
+		if i == supersededHeldProbes {
+			break
+		}
+		ok, err := probe(ctx, s.name)
+		if err != nil {
+			slog.Warn("baseline prune: could not confirm a newer snapshot in S3; keeping the snapshots the upload interval kept on this machine",
+				"snapshot", s.name, "error", err)
+			break
+		}
+		if ok {
+			newestDurable = s.ts
+			break
+		}
+	}
+	out := map[string]bool{}
+	for _, c := range candidates {
+		if c.ts.Before(newestDurable) {
+			out[c.name] = true
+		}
+	}
+	return out
 }
 
 // removePlanned deletes the planned snapshots, tallies what left the listing,
 // and records the prune beside the snapshots when anything did (#1681). why is
 // the reason each removal is logged under.
-func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res PruneResult, why string) PruneResult {
+func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res PruneResult, whyFor func(string) string) PruneResult {
 	for _, name := range pruneNames {
+		why := whyFor(name)
 		size := reclaimableSize(filepath.Join(opts.LocalDir, name))
 		if opts.DryRun {
 			slog.Info("baseline prune (dry-run): would remove redundant local snapshot",
@@ -472,6 +561,9 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 		// even when the delete below it failed: leaving it out would make a
 		// copy vanish from the page with a count that does not include it.
 		res.Pruned = append(res.Pruned, name)
+		// Its held mark (#2596) goes with it. One left behind is swept by the
+		// next prune (heldSnapshots), so a failure here costs nothing.
+		_ = ClearUploadHeld(opts.LocalDir, name)
 		if err != nil {
 			// Still a failure: the disk it holds is not back, and the record
 			// says so until a cycle deletes the leftover (the sweep).
@@ -565,6 +657,14 @@ func computeNewestN(snaps []localSnapshot, n int, now time.Time) map[string]bool
 // per-reason tally of what was kept. No IO — every invariant lives here so a unit
 // test pins it without a filesystem or S3.
 func planPrune(snaps []localSnapshot, keepers, durable map[string]bool, retain, minAge time.Duration, now time.Time) ([]string, PruneResult) {
+	return planPruneHeld(snaps, keepers, durable, nil, retain, minAge, now)
+}
+
+// planPruneHeld is planPrune with the snapshots the upload interval kept on
+// this machine (#2596): one not confirmed durable is counted as KeptHeld, and
+// never as missing from the destination. The caller has already marked as
+// durable the held snapshots a newer copy in S3 supersedes.
+func planPruneHeld(snaps []localSnapshot, keepers, durable, held map[string]bool, retain, minAge time.Duration, now time.Time) ([]string, PruneResult) {
 	var prune []string
 	var res PruneResult
 	for _, s := range snaps {
@@ -581,6 +681,8 @@ func planPrune(snaps []localSnapshot, keepers, durable map[string]bool, retain, 
 			res.KeptKeeper++
 		case now.Sub(s.ts) < retain || now.Sub(s.ts) < minAge:
 			res.KeptRecent++
+		case held[s.name] && !durable[s.name]:
+			res.KeptHeld++
 		case !durable[s.name]:
 			// No confirmed durable S3 copy → never delete the only copy.
 			res.KeptNotDurable++
