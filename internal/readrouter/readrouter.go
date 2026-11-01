@@ -171,7 +171,10 @@ var vetoes = []struct {
 	re   *regexp.Regexp
 }{
 	{"GROUP_CONCAT", regexp.MustCompile(`(?i)\bgroup_concat\s*\(`)}, // MySQL cuts at group_concat_max_len
-	{"NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP", regexp.MustCompile(`(?i)\b(now|curdate|curtime|current_timestamp|current_date|current_time|sysdate|utc_timestamp|utc_date|utc_time|unix_timestamp|localtime|localtimestamp)\b`)}, // MySQL session time zone
+	{"NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP", regexp.MustCompile(`(?i)\b(now|curdate|curtime|current_timestamp|current_date|current_time|sysdate|utc_timestamp|utc_date|utc_time|localtime|localtimestamp)\b`)}, // MySQL session time zone
+	// UNIX_TIMESTAMP() with no argument is now; with one, the column types
+	// decide (UnixTimeVeto, #2493). Quoted too: MySQL calls the function.
+	{"UNIX_TIMESTAMP() (now, in the MySQL session time zone)", regexp.MustCompile(`(?i)\bunix_timestamp"?\s*\(\s*\)`)},
 	// MySQL numbers weeks by default_week_format (from Sunday by default),
 	// the copy by ISO weeks.
 	{"WEEK/YEARWEEK", regexp.MustCompile(`(?i)\b(week|yearweek)\s*\(`)},

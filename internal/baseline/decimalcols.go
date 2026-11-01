@@ -65,6 +65,14 @@ type TableFooter struct {
 	// keeps a statement that does arithmetic on one, or names a TIME or a
 	// YEAR, on the source (#2133).
 	Temporal []TemporalColumn
+	// UnixTimeSafe are the table's columns UNIX_TIMESTAMP(col) gives the same
+	// number of on the copy as on MySQL, and UnixTimeOther every other column
+	// (UnixTimeColumns, #2493).
+	UnixTimeSafe, UnixTimeOther []string
+	// WholeSafe are the table's columns MySQL types as a whole number, which
+	// FROM_UNIXTIME prints without a fraction as the copy does, and
+	// WholeOther every other column (WholeNumberColumns, #2493).
+	WholeSafe, WholeOther []string
 	// DistinctSafe are the table's columns whose DISTINCT values the copy
 	// counts as MySQL does, a whole number or an exact decimal, and
 	// DistinctOther every other column (DistinctColumns). Read routing lets
@@ -100,6 +108,67 @@ func DistinctColumns(cols []Column) (safe, other []string) {
 		}
 	}
 	return safe, other
+}
+
+// UnixTimeColumns splits a parsed schema into the columns UNIX_TIMESTAMP(col)
+// gives the same number of on the copy as on MySQL, and all the others
+// (#2493). Safe are DATE, and DATETIME and TIMESTAMP declared without
+// fractional seconds: MySQL returns a whole number for those, as the copy's
+// unix_timestamp does, while for a column with fractional seconds it returns
+// a decimal. Not safe: everything else, a value kept verbatim as text
+// (RawText), and a date type whose declaration was not recorded or cannot be
+// read, since its fractional seconds are not known.
+func UnixTimeColumns(cols []Column) (safe, other []string) {
+	for _, c := range cols {
+		ok := false
+		if !c.RawText {
+			switch c.MySQLType {
+			case "date":
+				ok = true
+			case "datetime", "timestamp":
+				ok = wholeSecondsDeclared(c.DeclaredType, c.MySQLType)
+			}
+		}
+		if ok {
+			safe = append(safe, c.Name)
+		} else {
+			other = append(other, c.Name)
+		}
+	}
+	return safe, other
+}
+
+// WholeNumberColumns splits a parsed schema into the columns MySQL types as a
+// whole number and all the others (#2493): TINYINT, SMALLINT, MEDIUMINT, INT
+// and BIGINT, signed. MySQL prints FROM_UNIXTIME with as many fraction digits
+// as its argument's type has, whatever the value, so a DECIMAL(12,2) holding
+// a whole number prints .00 and a DOUBLE .000000, and the copy prints none.
+// Unsigned columns are left out: a subtraction that goes below zero is an
+// error on MySQL and a number on the copy. So are a value kept verbatim as
+// text (RawText), YEAR and BIT, a DECIMAL of any scale, and every other type.
+func WholeNumberColumns(cols []Column) (safe, other []string) {
+	for _, c := range cols {
+		ok := false
+		if !c.RawText && !c.Unsigned {
+			switch c.MySQLType {
+			case "tinyint", "smallint", "mediumint", "int", "integer", "bigint":
+				ok = true
+			}
+		}
+		if ok {
+			safe = append(safe, c.Name)
+		} else {
+			other = append(other, c.Name)
+		}
+	}
+	return safe, other
+}
+
+// wholeSecondsDeclared reports whether a DATETIME or TIMESTAMP declaration
+// says no fractional seconds: the bare type, or the type with (0).
+func wholeSecondsDeclared(declared, typ string) bool {
+	d := strings.ToLower(strings.TrimSpace(declared))
+	return d == typ || d == typ+"(0)"
 }
 
 // TemporalColumn is a column MySQL holds as a date, a time or a year, and the
@@ -445,6 +514,8 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 			NotHeld: notHeld, NotHeldUnread: notHeldUnread, Temporal: TemporalColumns(cols)}
 		f := st.footers[file]
 		f.DistinctSafe, f.DistinctOther = DistinctColumns(cols)
+		f.UnixTimeSafe, f.UnixTimeOther = UnixTimeColumns(cols)
+		f.WholeSafe, f.WholeOther = WholeNumberColumns(cols)
 		st.footers[file] = f
 	}
 	if err := rows.Err(); err != nil {

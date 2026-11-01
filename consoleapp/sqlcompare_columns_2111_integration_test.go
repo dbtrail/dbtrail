@@ -58,7 +58,12 @@ func writeOrderSnapshot(t *testing.T, dir, schema string, tables []orderTable) {
 			rows = tb.rows
 		}
 		for _, r := range rows {
-			if err := w.WriteRow(r, make([]bool, len(r))); err != nil {
+			// \N is a NULL, as in mydumper's files.
+			nulls := make([]bool, len(r))
+			for i, v := range r {
+				nulls[i] = v == `\N`
+			}
+			if err := w.WriteRow(r, nulls); err != nil {
 				t.Fatal(err)
 			}
 		}

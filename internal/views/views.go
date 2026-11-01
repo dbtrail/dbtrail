@@ -184,6 +184,14 @@ type BaselineTable struct {
 	// whose DISTINCT values the copy counts as MySQL does and the rest
 	// (baseline.TableFooter.DistinctSafe, #2532). Set with SchemaKnown.
 	DistinctSafe, DistinctOther []string
+	// UnixTimeSafe and UnixTimeOther split the table's columns into those
+	// UNIX_TIMESTAMP(col) gives the same number of on the copy as on MySQL and
+	// the rest (baseline.TableFooter.UnixTimeSafe, #2493). Set with SchemaKnown.
+	UnixTimeSafe, UnixTimeOther []string
+	// WholeSafe and WholeOther split them into those MySQL types as a whole
+	// number and the rest (baseline.TableFooter.WholeSafe, #2493). Set with
+	// SchemaKnown.
+	WholeSafe, WholeOther []string
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool

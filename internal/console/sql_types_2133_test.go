@@ -142,6 +142,7 @@ func (a *askedTypes) ColumnVeto(dates, whole []string, star bool) string {
 }
 
 func (a *askedTypes) DistinctVeto(safe, other []string) string { return "" }
+func (a *askedTypes) UnixTimeVeto(dates, notDates, whole, notWhole []string) string { return "" }
 
 func (a *askedTypes) NameVeto(names []string) string {
 	a.nameCalls++

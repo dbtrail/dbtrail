@@ -1278,6 +1278,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
+				if msg := sqlUnixTimeRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
 			}
 			if sess.TimeZone != "" {
 				// A session zone other than UTC: every DATETIME the statement
@@ -1602,6 +1606,40 @@ func sqlDistinctRefusalFor(narrowed views.Input, statement string, types sqlsand
 			safe, other = append(safe, t.DistinctSafe...), append(other, t.DistinctOther...)
 		}
 		why = types.DistinctVeto(safe, other)
+	}
+	if why == "" {
+		return ""
+	}
+	return "the copy does not answer this statement: " + why
+}
+
+// sqlUnixTimeRefusalFor says why the copy must not answer a statement because
+// of a UNIX_TIMESTAMP or FROM_UNIXTIME call, or "" when it can (#2493). Over
+// a column of the right type (readrouter.UnixTimeVeto, asked through types,
+// over every table's columns split by baseline.UnixTimeColumns and
+// baseline.WholeNumberColumns) the copy's unix_timestamp is MySQL's number in UTC and in a fixed-offset zone (zone is
+// sqlsandbox.Session.TimeZone: "" for UTC, Etc/GMT... for an offset). A named
+// zone is MySQL's: a wall clock in a clock change's gap or overlap has not
+// been measured to read the same on both sides. FROM_UNIXTIME needs no zone
+// rule: an instant has one wall clock in any zone. With no reading of the
+// statement (types is nil), a statement that may hold a call is refused.
+func sqlUnixTimeRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes, zone string) string {
+	if low := strings.ToLower(statement); !strings.Contains(low, "unix_timestamp") && !strings.Contains(low, "from_unixtime") {
+		return ""
+	}
+	why := ""
+	switch {
+	case types == nil:
+		why = "the statement could not be searched for UNIX_TIMESTAMP and FROM_UNIXTIME"
+	case zone != "" && !strings.HasPrefix(zone, "Etc/GMT") && strings.Contains(strings.ToLower(statement), "unix_timestamp"):
+		why = "UNIX_TIMESTAMP under the named time zone " + zone + " (a wall clock at a clock change may read another way)"
+	default:
+		var dates, notDates, whole, notWhole []string
+		for _, t := range narrowed.SelectedBaselines() {
+			dates, notDates = append(dates, t.UnixTimeSafe...), append(notDates, t.UnixTimeOther...)
+			whole, notWhole = append(whole, t.WholeSafe...), append(notWhole, t.WholeOther...)
+		}
+		why = types.UnixTimeVeto(dates, notDates, whole, notWhole)
 	}
 	if why == "" {
 		return ""

@@ -149,6 +149,10 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		case errors.As(err, &star):
 			// The statement's shape, not a fault of the copy (#2111).
 			return sqlsandbox.Result{}, &sqlsandbox.ColumnsDifferError{Reason: star.Message}
+		case sqlsandbox.DeclinedValue(err):
+			// A value the copy's UNIX_TIMESTAMP or FROM_UNIXTIME would not
+			// answer exactly (#2493): the value, not a fault of the copy.
+			return sqlsandbox.Result{}, &sqlsandbox.ColumnsDifferError{Reason: err.Error()}
 		case errors.As(err, &werr):
 			slog.Error("console: the SQL worker failed", "error", err, "surface", "flashback port")
 			return sqlsandbox.Result{}, errors.New(sqlWorkerFailedMessage)
