@@ -2414,6 +2414,29 @@ func HasReplPrivileges(grants []string) (slave, client bool) {
 	return
 }
 
+// HasGlobalPrivilege reports whether SHOW GRANTS lines grant any of names ON
+// *.*, directly or as ALL PRIVILEGES. For privileges MySQL accepts only at
+// global scope (RELOAD, FLUSH_TABLES, PROCESS), the only scope that counts.
+func HasGlobalPrivilege(grants []string, names ...string) bool {
+	for _, grant := range grants {
+		privs, global := parseGrantLine(grant)
+		if !global {
+			continue
+		}
+		for _, p := range privs {
+			if p == "ALL PRIVILEGES" || p == "ALL" {
+				return true
+			}
+			for _, n := range names {
+				if p == n {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // CanListBinaryLogs reports whether this connection may run SHOW BINARY LOGS,
 // the statement REPLICATION CLIENT (BINLOG MONITOR on MariaDB) exists to allow.
 // It is the capability behind the grant text, so a caller whose SHOW GRANTS
