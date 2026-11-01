@@ -17115,7 +17115,11 @@ function grantBlocks(user, password, hasSavedPassword, managed, connect, schemas
   // SHOW VIEW is on every backup line: mydumper stops at the first view it
   // cannot read ("SHOW VIEW command denied"), so a schema holding one view
   // fails the whole backup on RELOAD alone.
-  const grantBackups = "-- Snapshots (point-consistent by default). SHOW VIEW lets the snapshot copy views.\n";
+  // PROCESS (#2530): a snapshot waits until no long query runs before it
+  // takes the global lock, and only PROCESS lets it see other accounts'
+  // queries. Not on the lock-all lines: lock-all does not wait.
+  const grantBackups = "-- Snapshots (point-consistent by default). SHOW VIEW lets the snapshot copy views.\n" +
+    "-- PROCESS lets it wait until no long query runs, so its lock does not stop your writes.\n";
   // On Amazon RDS or Aurora (#1953) the lock-all line is the live one: the
   // default lock mode cannot work there at all, so offering it would only
   // fail on the first snapshot.
@@ -17128,10 +17132,10 @@ function grantBlocks(user, password, hasSavedPassword, managed, connect, schemas
   } : {
     mysql: grantBase + grantBackups +
       "-- BACKUP_ADMIN is MySQL/Percona 8.0 or later. On MySQL 5.7 run this instead:\n" +
-      "-- GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" +
-      "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS, Aurora or Cloud SQL", "Amazon RDS or Aurora"),
+      "-- GRANT RELOAD, PROCESS, SHOW VIEW ON *.* TO " + acct + ";\n" +
+      "GRANT RELOAD, BACKUP_ADMIN, PROCESS, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS, Aurora or Cloud SQL", "Amazon RDS or Aurora"),
     mariadb: grantBase + grantBackups +
-      "GRANT RELOAD, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS for MariaDB", "Amazon RDS"),
+      "GRANT RELOAD, PROCESS, SHOW VIEW ON *.* TO " + acct + ";\n" + grantLockAll("On Amazon RDS for MariaDB", "Amazon RDS"),
   };
   // Three cases where no line may be runnable, because the block would not
   // create the account the form is about to save.

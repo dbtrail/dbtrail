@@ -78,11 +78,16 @@ console.log(JSON.stringify(grantBlocks("dbtrail", "Ab3-xyzXYZ789_qq")));`
 			t.Errorf("%s: em dash in page copy", flavor)
 		}
 	}
-	if !strings.Contains(mysql, "-- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
+	if !strings.Contains(mysql, "-- GRANT RELOAD, PROCESS, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
 		t.Error("mysql: no MySQL 5.7 line; the 8.0 statement fails whole on 5.7, RELOAD included")
 	}
-	if !activeLine(mysql, "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.*") {
+	if !activeLine(mysql, "GRANT RELOAD, BACKUP_ADMIN, PROCESS, SHOW VIEW ON *.*") {
 		t.Error("mysql: BACKUP_ADMIN is not granted, and MySQL/Percona 8.0+ requires it for the default mode")
+	}
+	// #2530: the default mode waits for a quiet source before its lock, and
+	// sees other accounts' queries only with PROCESS.
+	if !activeLine(mariadb, "GRANT RELOAD, PROCESS, SHOW VIEW ON *.*") {
+		t.Error("mariadb: PROCESS is not granted, so a snapshot cannot see another account's ALTER or long write before its lock")
 	}
 	if strings.Contains(mariadb, "BACKUP_ADMIN") {
 		t.Error("mariadb: BACKUP_ADMIN does not exist on MariaDB, and the GRANT would fail")
