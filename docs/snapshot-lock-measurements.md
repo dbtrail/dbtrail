@@ -17,7 +17,7 @@ One lock is not short: on MySQL 8.0 and 8.4, `ftwrl` first takes `LOCK INSTANCE 
 it for the **whole dump**. It does not stop writes, but no `ALTER TABLE` or other schema change can
 run until the dump ends.
 
-**What can be long is the wait before the lock is granted**, and what stops during that wait depends
+**What can be long is the wait before the lock is granted** (measured before #2530: the `ftwrl` column is what a snapshot that asks for the lock anyway costs, which the compose `baseline` profile still does; see [`ftwrl` waits for a quiet source first](#ftwrl-waits-for-a-quiet-source-first) for what it does now), and what stops during that wait depends
 on the mode and on the server:
 
 | Running on the source when the snapshot starts | `ftwrl` on MySQL 8.0 / 8.4 | `ftwrl` on MariaDB 10.11 | `lock-all` (MySQL, RDS, MariaDB) |
@@ -34,10 +34,51 @@ So:
   per second, within the first second of the dump. It never wrote a snapshot that was not
   point-consistent, and it never finished one either.
 
-The 60 s in the MariaDB case is mydumper's `--long-query-guard` default, which DBTrail does not
+The 60 s in the MariaDB case is mydumper's `--ftwrl-max-wait-time` default, which DBTrail does not
 change: at that point mydumper sends `KILL QUERY` to its own `FLUSH TABLES WITH READ LOCK` and stops
 with `Couldn't acquire global lock, snapshots will not be consistent - ERROR 1317: Query execution
 was interrupted`.
+
+## `ftwrl` waits for a quiet source first
+
+Since #2530, a `ftwrl` snapshot taken by `bintrail dump` or the console does not ask for the lock
+while a statement has been running on the source for 1 s or more. Before it starts mydumper, DBTrail
+reads the source's process list, and while such a statement runs it waits and looks again every
+10 s, for up to 10 minutes. If the source was never quiet in that time, the snapshot fails without
+having locked or read anything, and says why (which connection, which account, for how long; never
+the statement's text). In the console's automatic lock mode, that refusal is retried once with
+`lock-all`, as a refused `ftwrl` is; a lock mode you chose is not. The snapshot's instant is taken
+after the wait, so a snapshot that waited is not labelled with a time before its data. `lock-all`
+does not wait: a running query does not hold it up. The compose `baseline` profile runs mydumper on
+its own and does not wait.
+
+What counts: statements whose command is `Query`, `Execute` (a prepared statement, which is how the
+Go driver, PHP's mysqli and Connector/J with server-side prepare send a statement with parameters;
+mydumper's own check, `--long-query-guard`, counts only `Query`) or `Killed` (a statement killed but
+still rolling back), on the whole server, since `FLUSH TABLES WITH READ LOCK` flushes every table.
+What never counts: idle connections, a binlog dump (DBTrail's own capture among them), a replica's
+own threads and the check's own connection. On MariaDB, whose `FLUSH TABLES WITH READ LOCK` did not
+wait for a running `SELECT` in the measurements above, a statement that only reads (`SELECT`,
+`SHOW`, `EXPLAIN`, `DESCRIBE`, `DO`) does not count; writes and DDL do, and so does a statement
+whose text the account cannot see. Only the `ALTER` case was measured on MariaDB.
+
+Why waiting is the only protection, measured on MySQL 8.0.46 with the mydumper DBTrail ships, a
+blocker `SELECT SLEEP(n) FROM t1 LIMIT 1` started 2 s before the snapshot, and single-row writes into
+`t1` and into a second dumped table `t2`:
+
+| What the snapshot did | Longest write pause on `t1` | On `t2` |
+|---|---|---|
+| Asked for the lock (before #2530), blocker running 100 s | **97.9 s**: the whole blocker. At 60 s mydumper cancelled its first `FLUSH TABLES` and went on to `FLUSH TABLES WITH READ LOCK`, which waited for the rest | 0.5 s |
+| Asked with `lock_wait_timeout = 5` on its sessions, blocker 40 s | **38.0 s**. Each attempt timed out after 5 s and mydumper retried, "continuing anyways" | 0.0 s |
+| Asked, and its lock request was killed after 5 s, mydumper with it, blocker 40 s | **37.9 s**. Once a flush has started, new statements on a table in use wait for the statement using it to end, whether or not the flush is still waiting | 0.0 s |
+| Waited for a quiet source, blocker 30 s | **0.0 s**. The snapshot started when the blocker ended, 30 s later, and finished. Measured with mydumper's own check set to wait the same way; DBTrail now does the check itself, for the reasons above | 0.0 s |
+
+What it does not cover: a statement that started less than 1 s before the lock is asked for and then
+runs long. And the process list shows other accounts' statements only to an account with the
+`PROCESS` privilege: without it, only the snapshot account's own statements are seen, so the
+recommended grants include `PROCESS`, and a snapshot whose account lacks it logs a warning that says
+so. A second full read of the same source by another tool is a long-running statement like any
+other, and is waited for.
 
 ## How it was measured
 

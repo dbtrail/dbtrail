@@ -68,8 +68,9 @@ import "fmt"
 //     blocks schema changes for the whole dump.
 //   - FTWRL on MariaDB ignores running queries but waits for a running ALTER
 //     while blocking every write on the server, until the ALTER ends or, past
-//     mydumper's 60 s --long-query-guard, mydumper cancels it and the dump
-//     fails.
+//     mydumper's 60 s --ftwrl-max-wait-time, mydumper cancels it and the dump
+//     fails. Since #2530 an ftwrl read waits for a quiet source before it
+//     asks (mydumperlock.WaitForQuietSource), so it is not asked behind one.
 //   - LOCK_ALL waits for an uncommitted transaction that wrote to a dumped
 //     table, and on MySQL stops writes to some of the other dumped tables
 //     meanwhile.

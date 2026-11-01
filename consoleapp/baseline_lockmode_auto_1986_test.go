@@ -208,6 +208,7 @@ func TestExecute_retriesWithLockAllOnlyForTheRefusedDefault(t *testing.T) {
 	missing := fmt.Errorf("refused: %w", mydumperlock.ErrFTWRLPrivilegesMissing)
 	other := errors.New("mydumper failed: exit status 1; output: Access denied for user 'u'@'h' (using password: YES)")
 	stop := errors.New("lock-all attempt stopped")
+	neverQuiet := fmt.Errorf("dump: %w", &mydumperlock.QuietWaitError{Waited: 10 * time.Minute})
 	for _, c := range []struct {
 		name      string
 		chosen    bool
@@ -221,6 +222,10 @@ func TestExecute_retriesWithLockAllOnlyForTheRefusedDefault(t *testing.T) {
 		{"(b) but the operator chose ftwrl (env)", true, nil, missing, []baseline.LockMode{"ftwrl"}},
 		{"(a) but the operator saved ftwrl", false, strp("ftwrl"), errDeniedFTWRL, []baseline.LockMode{"ftwrl"}},
 		{"another mydumper failure", false, nil, other, []baseline.LockMode{"ftwrl"}},
+		// #2530: a source never quiet enough for ftwrl, retried like a refusal.
+		{"(c) never quiet, automatic", false, nil, neverQuiet, []baseline.LockMode{"ftwrl", "lock-all"}},
+		{"(c) but the operator chose ftwrl (env)", true, nil, neverQuiet, []baseline.LockMode{"ftwrl"}},
+		{"(c) but the operator saved ftwrl", false, strp("ftwrl"), neverQuiet, []baseline.LockMode{"ftwrl"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			calls, _ := stubRetryDump(t, func(n int, _ baseline.LockMode, _ string) error {
@@ -249,7 +254,11 @@ func TestExecute_retriesWithLockAllOnlyForTheRefusedDefault(t *testing.T) {
 			if len(c.wantModes) == 2 {
 				// The second failure is the one surfaced: the lock-all one,
 				// saying that ftwrl came first.
-				if !errors.Is(err, stop) || !strings.Contains(err.Error(), "ftwrl was refused") {
+				says := "ftwrl was refused"
+				if c.first == neverQuiet {
+					says = "never quiet enough for lock mode ftwrl"
+				}
+				if !errors.Is(err, stop) || !strings.Contains(err.Error(), says) {
 					t.Errorf("err = %v, want the lock-all attempt's error, naming the refused ftwrl", err)
 				}
 			} else if !errors.Is(err, c.first) && !strings.Contains(err.Error(), c.first.Error()) {

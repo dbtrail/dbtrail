@@ -71,6 +71,10 @@ func snapshotFailureOf(err error, req console.BaselineRequest) *console.Snapshot
 		if full := (*workingFolderFullError)(nil); errors.As(err, &full) {
 			f.Summary = full.summary()
 		}
+		// So does a source that was never quiet enough to lock (#2530).
+		if quiet := (*mydumperlock.QuietWaitError)(nil); errors.As(err, &quiet) {
+			f.Summary = quiet.Summary()
+		}
 	}
 	return f
 }

@@ -2,6 +2,7 @@ package cliapp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,23 @@ import (
 // re-introducing #1381 — an operator who selected lock-all gets judged against
 // ftwrl's requirements and told to grant BACKUP_ADMIN, which RDS refuses.
 var checkMydumperPrivileges = mydumperlock.CheckPrivileges
+
+// waitForQuietSource is mydumperlock.WaitForQuietSource on the source (#2530).
+// A source this process cannot open goes ahead, said: mydumper meets the same
+// failure and reports it. Tests replace it.
+var waitForQuietSource = func(ctx context.Context, sourceDSN string, mode baseline.LockMode) error {
+	if mode.MydumperValue() != baseline.LockModeFTWRL.MydumperValue() {
+		return nil
+	}
+	db, err := config.Connect(sourceDSN)
+	if err != nil {
+		slog.Warn("full read: could not connect to check the source for long-running statements before taking the ftwrl lock; going ahead", "error", err)
+		return nil
+	}
+	defer db.Close()
+	_, err = mydumperlock.WaitForQuietSource(ctx, db, mode, mydumperlock.RemedyCLI)
+	return err
+}
 
 var dumpCmd = &cobra.Command{
 	Use:   "dump",
@@ -435,6 +453,13 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// containerized) local time. Recorded as a sidecar below so
 	// `bintrail baseline` can anchor on it instead of re-parsing mydumper's
 	// ambiguous "Started dump at" line (#768).
+	//
+	// An ftwrl dump first waits for a quiet source (#2530), and the wait goes
+	// BEFORE the stamp: taken first, a wait of minutes would anchor the
+	// snapshot minutes before its data.
+	if err := waitForQuietSource(cmd.Context(), dmpSourceDSN, lockMode); err != nil {
+		return err
+	}
 	dumpStartedAt := time.Now().UTC()
 	if runErr := c.Run(); runErr != nil {
 		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {

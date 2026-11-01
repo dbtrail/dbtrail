@@ -619,6 +619,7 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 	// reads as an oversight.
 	missingBackupAdmin := requireBackupAdmin && !g.grantedGlobally("BACKUP_ADMIN")
 	if hasFlush && !missingBackupAdmin {
+		warnQuietWaitBlind(g)
 		return nil
 	}
 
@@ -667,4 +668,28 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 			" GRANT BACKUP_ADMIN ON *.* TO '<user>'@'%%'. NOTE: on managed MySQL such as RDS this grant is REFUSED"+
 			" outright, so ftwrl cannot work there%s%s", alternatives, roleCaveat)
 	}
+}
+
+// warnQuietWaitBlind says when an ftwrl read's wait for a quiet source
+// (WaitForQuietSource, #2530) cannot see other accounts' statements: the wait
+// reads SHOW FULL PROCESSLIST, which shows them only to an account with
+// PROCESS (measured on MySQL 8.0.46: without it, a 20 s SELECT by another
+// account was not listed, so a wait reading the list asked for the lock behind
+// it). A warning, not a refusal: the snapshot it takes is as consistent either
+// way, and an account set up with the grants documented before this existed
+// must keep its full reads. PROCESS is global-only, and ALL PRIVILEGES
+// returned earlier.
+func warnQuietWaitBlind(g *grantSet) {
+	if g.grantedGlobally("PROCESS") {
+		return
+	}
+	account := g.account
+	if account == "" {
+		account = "'<user>'@'%'"
+	}
+	slog.Warn("full read: the source account lacks the PROCESS privilege, so before taking the ftwrl lock it "+
+		"sees only its own statements running; a long query by another account (the application, a report) is "+
+		"not waited for, and while the lock is asked for behind it, writes to the tables that query reads stop "+
+		"until it ends (on MariaDB, behind a write or ALTER TABLE, every write on the server). PROCESS only lets the account see what each connection is running; grant it with GRANT "+
+		"PROCESS ON *.* TO "+account, "account", account)
 }

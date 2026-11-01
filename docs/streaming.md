@@ -13,9 +13,9 @@ CREATE USER 'dbtrail'@'%' IDENTIFIED BY <choose a password>;
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
 -- For the first copy of your tables (the baseline) and every later full read.
 -- MySQL/Percona 8.0 or later:
-GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+GRANT RELOAD, BACKUP_ADMIN, PROCESS, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 -- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:
--- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+-- GRANT RELOAD, PROCESS, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 -- Managed MySQL (RDS, Aurora, Cloud SQL) and RDS for MariaDB: run this
 -- instead of GRANT RELOAD:
 -- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';
@@ -58,11 +58,15 @@ baseline is a `mydumper` run, and it needs:
 
 ```sql
 -- MySQL/Percona 8.0 or later:
-GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+GRANT RELOAD, BACKUP_ADMIN, PROCESS, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 -- MariaDB and MySQL 5.7 (BACKUP_ADMIN does not exist there):
--- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+-- GRANT RELOAD, PROCESS, SHOW VIEW ON *.* TO 'dbtrail'@'%';
 ```
 
+`PROCESS` lets the read see every connection's running statement, so it waits
+until none has run for 1 s or more before it takes the lock: without it, a long
+query by another account is not waited for, and writes to the tables it reads
+stop until it ends ([measurements](snapshot-lock-measurements.md#ftwrl-waits-for-a-quiet-source-first)).
 `SHOW VIEW` lets the dump copy views: mydumper stops the whole baseline at the
 first view it cannot read (`SHOW VIEW command denied`), in every lock mode.
 The lock privilege depends on the lock mode below: managed MySQL cannot use the

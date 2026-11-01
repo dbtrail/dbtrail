@@ -1,10 +1,12 @@
 package cliapp
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
 )
 
@@ -23,5 +25,9 @@ import (
 // restores this one with t.Cleanup.
 func TestMain(m *testing.M) {
 	mydumperlock.ProbeTimeout = 2 * time.Minute
+	// The fake mydumpers here dump sources that do not exist, so the wait for
+	// a quiet source before an ftwrl dump (#2530) answers "quiet" at once
+	// instead of trying each one. Its own tests replace it per test.
+	waitForQuietSource = func(context.Context, string, baseline.LockMode) error { return nil }
 	os.Exit(m.Run())
 }
