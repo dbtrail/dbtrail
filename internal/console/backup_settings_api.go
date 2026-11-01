@@ -148,6 +148,12 @@ type backupSettingsServerDTO struct {
 	// must not re-parse the schedule grammar, or a spelling Go accepts and
 	// the page does not silently turns a warning off.
 	ScheduleEveryMinutes int `json:"schedule_every_minutes,omitempty"`
+	// ScheduleUploadEvery is how often the schedule sends a snapshot to S3
+	// (#2596), empty when every run does, and its minutes as Go parses them.
+	// What reaches the bucket follows it, not the runs: the growth count and
+	// the shortest bucket rule this row hands out are worked out from it.
+	ScheduleUploadEvery        string `json:"schedule_upload_every,omitempty"`
+	ScheduleUploadEveryMinutes int    `json:"schedule_upload_every_minutes,omitempty"`
 	// ArchiveS3 is the server's RAW archive destination (#1622): the S3
 	// retention rule the page generates must never cover it, and the page
 	// can only refuse what it can see.
@@ -352,7 +358,9 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 		}
 		if p, err := e.BackupSchedule.Parse(); err == nil {
 			dto.ScheduleEveryMinutes = int(p.Every.Minutes())
+			dto.ScheduleUploadEveryMinutes = int(p.UploadEvery.Minutes())
 		}
+		dto.ScheduleUploadEvery = e.BackupSchedule.UploadEvery
 	}
 	return dto
 }

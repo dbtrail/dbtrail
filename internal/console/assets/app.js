@@ -7759,11 +7759,33 @@ function snapshotHero(b, cov, cur, acts) {
   // "on" means the newest copy IS there. No copy, or a listing that does
   // not say where the newest one is: the place is set but not lit.
   const kinds = (snap && snap.kinds) || [];
+  // The bucket's own age (#2596). With an S3 interval the newest snapshot
+  // stays on this machine for hours before one reaches S3, so a dim S3 tile
+  // says how old the newest one there is. Amber when the bucket could not be
+  // read, when no schedule will send the one held here, or when S3 is more
+  // than two intervals behind; an empty bucket counts as behind once the
+  // oldest snapshot here is older than that.
+  const s3 = b.s3 || null;
+  let s3Sub = "", s3Late = false;
+  if (s3 && !kinds.includes("s3")) {
+    if (s3.unread) s3Sub = "could not be read";
+    else s3Sub = s3.newest ? "newest " + formatAge(s3.newest_age_hours) + " old" : "none yet";
+    // The age rule holds whoever runs the schedule, so it is not gated on
+    // this process running it.
+    const sendEvery = (sch && sch.send_every_minutes) || 0;
+    const oldest = snaps.length ? snaps[snaps.length - 1].age_hours : 0;
+    const behindHours = s3.newest ? s3.newest_age_hours : oldest;
+    s3Late = s3.unread || heldNotSent(b, sch) ||
+      (sendEvery > 0 && typeof behindHours === "number" && behindHours * 60 > 2 * sendEvery);
+  }
   const tile = (kind, label, off, ico) => {
     const src = srcs.find((x) => x.kind === kind);
-    const state = !src ? "off" : kinds.includes(kind) ? "on" : "dim";
-    return el("div", { class: "hero-card hero-tile " + state, title: src ? src.source : null },
+    const sub = src && kind === "s3" ? s3Sub : "";
+    const state = !src ? "off" : kinds.includes(kind) ? "on" : kind === "s3" && s3Late ? "warn" : "dim";
+    const t = el("div", { class: "hero-card hero-tile " + state, title: src ? src.source : null },
       icon(ico, "hero-ico"), el("span", { class: "hero-tile-t", text: src ? label : off }));
+    if (sub) t.append(el("span", { class: "hero-tile-s", text: sub }));
+    return t;
   };
   hero.append(el("div", { class: "hero-where" },
     tile("dir", "On disk", "No local copy", "folder"),
@@ -8297,6 +8319,24 @@ function s3Parts(url) {
 // newest complete backup before the next one lands, leaving moments with
 // no backup at all. Equal counts: a 1-day rule under a 1-day schedule
 // expires at the very moment the next run is due, not after it.
+// heldNotSent: the newest snapshot is on this machine only, held there by the
+// S3 interval (#2596), and no schedule runs to send it. Asked only where this
+// process runs the schedules: a read-only console sees every schedule as
+// unable to run even while the service beside it sends on time.
+function heldNotSent(b, sch) {
+  return !!(capsCache.backup_schedule && b && b.s3 && b.s3.held_newer && !(sch && sch.runnable));
+}
+
+// s3Cadence is how often a snapshot reaches the bucket: the schedule's S3
+// interval when it has one (#2596), its runs otherwise. minutes is Go's
+// parse of the interval, words the phrase for "With snapshots ...".
+function s3Cadence(srv) {
+  if (srv && srv.schedule_upload_every_minutes > 0) {
+    return { minutes: srv.schedule_upload_every_minutes, every: srv.schedule_upload_every, words: "sent to S3 every " + srv.schedule_upload_every };
+  }
+  return { minutes: (srv && srv.schedule_every_minutes) || 0, every: srv && srv.schedule_every, words: "every " + (srv && srv.schedule_every) };
+}
+
 function retentionTooShort(everyMinutes, days) {
   return everyMinutes > 0 && days * 1440 <= everyMinutes;
 }
@@ -8381,7 +8421,8 @@ function s3ExpiryWords(v, srv, per30) {
   if (state !== "in_force" || !(v.days > 0 || v.expires_on)) {
     return { text: "Could not tell whether old snapshots expire.", warn: false };
   }
-  const minutes = (srv && srv.schedule_every_minutes) || 0;
+  const sent = s3Cadence(srv);
+  const minutes = sent.minutes;
   let text = "", warn = false;
   if (v.days > 0) {
     text = "A rule " + (v.whole_bucket ? "on the whole bucket" : "in the bucket") + named(v.rule_id) +
@@ -8389,7 +8430,7 @@ function s3ExpiryWords(v, srv, per30) {
     if (v.old_versions_stay) text += " If the bucket keeps versions, the old ones stay: this rule does not expire them.";
     if (retentionTooShort(minutes, v.days)) {
       warn = true;
-      text += " That is too short for snapshots every " + srv.schedule_every +
+      text += " That is too short for snapshots " + sent.words +
         ": the newest one expires before the next exists, so there are moments with no snapshot in S3 at all. The rule needs at least " +
         days(Math.floor(minutes / 1440) + 1) + ".";
     }
@@ -8443,13 +8484,17 @@ function s3RetentionBox(srv, servers, daemonS3) {
   // schedule can run right now: a refusal is usually daemon-wide and
   // transient (lock mode, read-only console), and a 1-day rule handed out
   // while it lasts is exactly the rule the gate exists to refuse.
-  const minutes = srv.schedule_every_minutes || 0;
+  // What reaches the bucket follows the S3 interval when the schedule has
+  // one (#2596), not the runs: a 1-day rule against snapshots sent every 2
+  // days would expire the newest before the next one arrives.
+  const sent = s3Cadence(srv);
+  const minutes = sent.minutes;
   const runs = minutes > 0 && !srv.schedule_refusal ? Math.floor(30 * 1440 / minutes) : 0;
   // Full backups the timetable takes between two runs are backups of their
   // own (#1564), counted the way the Snapshots page counts them; one refused
   // takes none.
   const fulls = runs && srv.schedule_full_every && !srv.schedule_full_refusal ? backupsPer30Days(srv.schedule_full_every) : 0;
-  const n = fulls ? runs + fulls - backupsPer30Days(lcmInterval(srv.schedule_every, srv.schedule_full_every)) : runs;
+  const n = fulls ? runs + fulls - backupsPer30Days(lcmInterval(sent.every, srv.schedule_full_every)) : runs;
   wrap.append(el("p", { class: "form-hint", text:
     "Every snapshot sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old snapshots." }));
   if (!s) {
@@ -8502,7 +8547,7 @@ function s3RetentionBox(srv, servers, daemonS3) {
       const least = Math.floor(minutes / 1440) + 1;
       rule.textContent = ""; cmd.textContent = "";
       warn.hidden = false;
-      warn.textContent = "With snapshots every " + srv.schedule_every + (srv.schedule_refusal ? " (the schedule is stored; it cannot run right now)" : "") +
+      warn.textContent = "With snapshots " + sent.words + (srv.schedule_refusal ? " (the schedule is stored; it cannot run right now)" : "") +
         " and this rule at " + d + " day" + (d === 1 ? "" : "s") +
         ", the newest complete snapshot expires before the next one exists: there would be moments with no snapshot in S3 at all. Use at least " + least + " days.";
       return;
@@ -9094,6 +9139,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   if (srv.schedule_every) {
     more.push(p("Scheduled snapshots: every " + srv.schedule_every + (srv.schedule_at ? " at " + srv.schedule_at : "") +
       (srv.schedule_full_every ? ", with a full read every " + srv.schedule_full_every : "") +
+      (srv.schedule_upload_every ? ", sent to S3 every " + srv.schedule_upload_every : "") +
       // Where the timetable is CHANGED, and only where it can be: the card
       // it lives on is drawn for the SELECTED server, and only where this
       // process runs the schedules. Pointing at "the card above" on a
@@ -11513,6 +11559,9 @@ const SCHEDULE_CHOICES = [["5m", "5 min"], ["15m", "15 min"], ["30m", "30 min"],
 // month. Every one is at least the longest interval above, so no pair the two
 // lists can make is refused for asking more full reads than runs.
 const FULL_READ_CHOICES = [["", "Off"], ["1d", "24 h"], ["7d", "7 days"], ["30d", "30 days"]];
+// How often a snapshot is sent to S3 (#2596), when that is less often than
+// the copy updates. Empty sends every update, as before the setting existed.
+const UPLOAD_CHOICES = [["", "Each update"], ["1h", "1 h"], ["6h", "6 h"], ["1d", "24 h"]];
 function scheduleChoice(every) {
   const m = /^(\d+)\s*(m|min|h|d)$/.exec(String(every || "").trim());
   if (!m) return String(every || "");
@@ -11594,8 +11643,14 @@ function choicePills(choices, value, label, onChange) {
   group.addEventListener("keydown", (e) => {
     const i = pills.findIndex((p) => p.dataset.value === current);
     let to = -1;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") to = (i + 1) % pills.length;
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") to = (i - 1 + pills.length) % pills.length;
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (!step) return;
+    // A hidden pill is not a choice (the S3 interval hides the ones shorter
+    // than the updates), so the arrows step over it.
+    for (let k = 1; k <= pills.length; k++) {
+      const j = (i + step * k + pills.length * k) % pills.length;
+      if (!pills[j].hidden) { to = j; break; }
+    }
     if (to < 0) return;
     e.preventDefault();
     pills[to].onclick();
@@ -11828,7 +11883,8 @@ function backupScheduleCard(cur, b) {
     state.textContent = "Not on a schedule. Pick how often the copy updates.";
   } else {
     let line = "Every " + sch.every + " at " + sch.at + " UTC" +
-      (sch.full_every ? ", with a full read every " + sch.full_every : "") + ".";
+      (sch.full_every ? ", with a full read every " + sch.full_every : "") +
+      (sch.upload_every ? ", sent to S3 every " + sch.upload_every + (b.s3_destination ? "" : " (not in use: no S3 destination)") : "") + ".";
     if (sch.runnable && sch.next_run) line += " Next: " + utcLabel(sch.next_run) + ".";
     if (!sch.runnable) {
       // Terminated, the same way the next-run warning below terminates its
@@ -11845,6 +11901,20 @@ function backupScheduleCard(cur, b) {
     // the exact case the comment above says this card exists for.
     if (!sch.runnable) state.classList.add("alarm");
     if (fullWarn) state.classList.add("alarm");
+  }
+
+  // The newest snapshot is on this machine only, held there by the S3
+  // interval (#2596), and no schedule is running to send it: one deleted or
+  // stopped while it was held. Nothing else on the page says so, since the
+  // copy itself is fresh.
+  if (heldNotSent(b, sch)) {
+    body.append(el("p", { class: "form-msg err", text:
+      "The newest snapshot is only on this machine: the S3 interval kept it here, and no schedule is running to send it. " +
+      (b.s3.newest ? "The newest snapshot in S3 is " + formatAge(b.s3.newest_age_hours) + " old." : "S3 holds no snapshot yet.") +
+      (sch ? " It is sent once the schedule runs again." : " Turn the schedule on to send it.") }));
+  } else if (capsCache.backup_schedule && b.s3 && b.s3.held_unknown && !(sch && sch.runnable)) {
+    body.append(el("p", { class: "form-hint", text:
+      "Could not tell whether the newest snapshot is waiting on this machine for the S3 interval: its folder could not be read in full." }));
   }
 
   if (!canEdit) {
@@ -11881,7 +11951,23 @@ function backupScheduleCard(cur, b) {
   // Filled once the form is touched, like the server card's Save (#1950):
   // at rest neither Save on this tab asks for the eye.
   const touched = () => save.classList.add("btn-primary");
-  const every = choicePills(choices, saved, "Update the copy every", () => { syncAt(); touched(); });
+  let upload = null;
+  // The S3 interval cannot be shorter than the updates (the save refuses
+  // it), so the choices shorter than the interval picked above are hidden,
+  // again each time it changes, and a choice that just went out of reach
+  // falls back to each update rather than waiting to be refused.
+  const syncUpload = () => {
+    if (!upload) return;
+    const ev = intervalMinutes(every.value);
+    const pills = Array.from(upload.children);
+    for (const p of pills) {
+      const m = intervalMinutes(p.dataset.value);
+      p.hidden = p.dataset.value !== "" && m > 0 && m < ev;
+    }
+    const lit = pills.find((p) => p.dataset.value === upload.value);
+    if (lit && lit.hidden) upload.value = "";
+  };
+  const every = choicePills(choices, saved, "Update the copy every", () => { syncAt(); syncUpload(); touched(); });
   syncAt();
   const save = el("button", { class: "btn", type: "button", text: sch ? "Save" : "Turn on", "data-save": "schedule" });
   at.addEventListener("input", touched);
@@ -11896,7 +11982,26 @@ function backupScheduleCard(cur, b) {
   const fullWrap = el("div", { class: "bk-sched-full", "data-sched-edit": "1" },
     el("p", { class: "form-hint", text: "Read the whole database again every" }), full,
     el("p", { class: "form-hint", text: "The runs in between update the copy from the recorded changes and do not read your database. A full read does, so it adds load there while it runs." }));
-  save.onclick = () => saveBackupSchedule(cur.id, { every: every.value, at: at.value.trim(), full_every: full.value }, save, msg);
+  // How often a snapshot goes to S3 (#2596), only where the server's own
+  // entry has an S3 destination: the server says so, since that is the test
+  // a save is refused on. Left out of the save otherwise, which keeps
+  // whatever is saved.
+  let uploadWrap = null;
+  if (b.s3_destination) {
+    const savedUp = sch && sch.upload_every ? scheduleChoice(sch.upload_every) : "";
+    const upChoices = UPLOAD_CHOICES.slice();
+    if (!upChoices.some(([v]) => v === savedUp)) upChoices.push([savedUp, sch.upload_every]);
+    upload = choicePills(upChoices, savedUp, "Send to S3 every", touched);
+    uploadWrap = el("div", { class: "bk-sched-full", "data-sched-edit": "1" },
+      el("p", { class: "form-hint", text: "Send a snapshot to S3 every" }), upload,
+      el("p", { class: "form-hint", text: "The updates in between stay on this machine and are not sent. The bucket grows more slowly, and if this machine is lost, the newest snapshot in S3 can be that much older." }));
+    syncUpload();
+  }
+  save.onclick = () => {
+    const req = { every: every.value, at: at.value.trim(), full_every: full.value };
+    if (upload) req.upload_every = upload.value;
+    return saveBackupSchedule(cur.id, req, save, msg);
+  };
   const row = el("div", { class: "bk-restore-row", "data-sched-edit": "1" }, atWrap, save);
   if (sch) {
     const remove = el("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Turn off" });
@@ -11905,7 +12010,9 @@ function backupScheduleCard(cur, b) {
   }
   every.setAttribute("data-sched-edit", "1");
   msg.setAttribute("data-sched-edit", "1");
-  body.append(every, fullWrap, row, msg);
+  body.append(every, fullWrap);
+  if (uploadWrap) body.append(uploadWrap);
+  body.append(row, msg);
 
   // What the schedule will do next, and what it last did. The skip is
   // shown when it is the newest fact: a slot that could not start after
@@ -12005,7 +12112,8 @@ function backupScheduleCard(cur, b) {
           "Last scheduled snapshot finished " + when + " (" + what + "): " + (run.tables || 0) + " table(s)" +
           (reused ? ", " + reused + " unchanged and reused" + reusedCopiedNote(run.carried_copied || 0) : "") +
           s3CopiedNote(run.s3_copied || 0) +
-          (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") + "." }));
+          (run.uploaded ? ", " + run.uploaded + " file(s) uploaded" : "") +
+          (run.upload_held ? ", not sent to S3 (" + (sch.upload_every ? "snapshots go there every " + sch.upload_every : "held by the S3 interval") + ")" : "") + "." }));
       } else {
         alarm = true;
         noteAt(run.finished_at || run.started_at || "",

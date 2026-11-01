@@ -203,3 +203,51 @@ func TestChooseBackupMethod_anchorsOnTheHeldLocalSnapshot(t *testing.T) {
 		t.Fatalf("held: method=%q why=%q err=%v anchor=%v, want an update anchored on the held snapshot", method, why, err, anchors[1])
 	}
 }
+
+// A server that lost its S3 destination keeps its saved upload interval as
+// an inert value, and the page no longer shows the row that sets it. A save
+// that does not mention the interval must not be refused for it: the inert
+// value that the new update interval left too short is dropped, and the rest
+// is saved. With the destination still there, the same save is refused, so
+// a script that omits the field does not lose a live setting unasked.
+func TestBackupScheduleAPI_anInertUploadIntervalDoesNotBlockASave(t *testing.T) {
+	srv, id := newScheduleServer(t, &stubScheduleReporter{full: true})
+	path := "/api/servers/" + id + "/backup-schedule"
+	e, _ := srv.cm.reg.Get(id)
+	fakeSnapshot(t, e.BaselineDir)
+	e.BaselineS3 = "s3://bucket/snaps/"
+	if err := srv.cm.reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	if rec, body := doServersReq(t, srv, "PUT", path, `{"every":"15m","upload_every":"1h"}`); rec.Code != 200 {
+		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
+	}
+	// Live destination: the omitted interval is kept, and too short is refused.
+	if rec, body := doServersReq(t, srv, "PUT", path, `{"every":"6h"}`); rec.Code != 400 ||
+		!strings.Contains(string(body), "more often than the schedule runs") {
+		t.Fatalf("live destination: code=%d body=%s", rec.Code, body)
+	}
+	e, _ = srv.cm.reg.Get(id)
+	e.BaselineS3 = ""
+	if err := srv.cm.reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	// Inert: a longer update interval still fits? No, 1h < 6h: dropped.
+	if rec, body := doServersReq(t, srv, "PUT", path, `{"every":"6h"}`); rec.Code != 200 {
+		t.Fatalf("inert interval blocked the save: code=%d body=%s", rec.Code, body)
+	}
+	if e, _ = srv.cm.reg.Get(id); e.BackupSchedule.Every != "6h" || e.BackupSchedule.UploadEvery != "" {
+		t.Fatalf("stored = %+v, want every 6h and the inert 1h dropped", e.BackupSchedule)
+	}
+	// An inert value that still fits is kept, as before.
+	e.BackupSchedule.UploadEvery = "1d"
+	if err := srv.cm.reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	if rec, body := doServersReq(t, srv, "PUT", path, `{"every":"1h"}`); rec.Code != 200 {
+		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
+	}
+	if e, _ = srv.cm.reg.Get(id); e.BackupSchedule.UploadEvery != "1d" {
+		t.Fatalf("an inert interval that still fits was dropped: %+v", e.BackupSchedule)
+	}
+}
