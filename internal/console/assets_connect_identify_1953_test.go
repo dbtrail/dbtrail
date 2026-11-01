@@ -238,7 +238,7 @@ console.log(JSON.stringify({ mysql: live(m.mysql), mariadb: live(m.mariadb), pla
 	if !strings.Contains(got.Note, "\n-- Amazon RDS and Aurora: this permission lets each snapshot start every table at the same point-in-time.\nGRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';") {
 		t.Errorf("the RDS block does not explain its permission with the agreed line:\n%s", got.Note)
 	}
-	if !strings.Contains(strings.Join(got.Plain, "\n"), "GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW") {
+	if !strings.Contains(strings.Join(got.Plain, "\n"), "GRANT RELOAD, BACKUP_ADMIN, PROCESS, SHOW VIEW") {
 		t.Errorf("a server that is not managed lost its default grant: %v", got.Plain)
 	}
 	// No password: nothing runnable, managed or not.
