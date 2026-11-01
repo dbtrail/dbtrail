@@ -1,9 +1,7 @@
 package console
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -395,19 +393,14 @@ func cpuPriorityOf(root string) (yields bool, read string) {
 		default:
 			continue
 		}
-		own := filepath.Join(base, filepath.Clean("/"+parts[2]), file)
-		b, err := os.ReadFile(own)
-		if errors.Is(err, fs.ErrNotExist) {
-			own = filepath.Join(base, file)
-			b, err = os.ReadFile(own)
-		}
+		own, b, err := ownCgroupFile(root, base, parts[2], file)
 		if err != nil {
-			read = "unknown: " + strings.TrimPrefix(own, root) + " could not be read"
+			read = "unknown: " + own + " could not be read"
 			continue
 		}
 		v, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
 		if err != nil || v <= 0 {
-			read = fmt.Sprintf("unknown: %s holds %q", strings.TrimPrefix(own, root), strings.TrimSpace(string(b)))
+			read = fmt.Sprintf("unknown: %s holds %q", own, strings.TrimSpace(string(b)))
 			continue
 		}
 		return v <= def/2, fmt.Sprintf("%s %d, the default being %d", file, v, def)

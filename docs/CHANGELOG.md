@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A published refresh says whether the machine slowed it down.** The `baseline refresh: published` line now carries `took`, `lane_wait` (time spent waiting for the snapshot lane), and `process_waiting_for_cpu` / `process_waiting_for_disk`: the share of the run during which the process was ready to run but had no free core, or was waiting on storage, read from its own cgroup's pressure stall counters, e.g. `process_waiting_for_cpu="31% of the run (7m26s of 24m0s)"`. Until now a slow refresh under heavy query load could not tell starvation apart from slow work: the per-table lines split each table's time, but nothing said whether the process was waiting for a core. The shares cover the whole process, not only the refresh, and where the counters cannot be read (cgroup v1, no pressure stall information, not Linux) the value is `unknown:` with the reason, never `0%`.
+
 ## [0.122.1] - 2026-10-30
 
 ### Fixed
