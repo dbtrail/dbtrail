@@ -39,7 +39,8 @@ func TestRun_unixTimeFunctions(t *testing.T) {
 		{"Etc/GMT+3", "SELECT unix_timestamp(DATE '2026-01-15')", int64(1768435200 + 3*3600)},
 		{"", "SELECT unix_timestamp(NULL::TIMESTAMP)", "error"}, // a NULL or a zero date, which MySQL reads as 0
 		{"", "SELECT unix_timestamp(NULL::DATE)", "error"},
-		{"", "SELECT unix_timestamp(TIMESTAMP '1970-01-01 00:00:00')", int64(0)},
+		{"", "SELECT unix_timestamp(TIMESTAMP '1970-01-01 00:00:00')", "error"}, // second 0: MariaDB versions part ways
+		{"", "SELECT unix_timestamp(TIMESTAMP '1970-01-01 00:00:01')", int64(1)},
 		// Outside 1970-2038 MySQL and MariaDB answer their own way: MySQL's.
 		{"", "SELECT unix_timestamp(TIMESTAMP '1969-12-31 23:59:59')", "error"},
 		{"", "SELECT unix_timestamp(TIMESTAMP '2038-01-19 03:14:08')", "error"},
@@ -52,7 +53,8 @@ func TestRun_unixTimeFunctions(t *testing.T) {
 		{"", "SELECT CAST(from_unixtime(1768478400) AS VARCHAR)", "2026-01-15 12:00:00"},
 		{"Etc/GMT-5", "SELECT CAST(from_unixtime(1768478400) AS VARCHAR)", "2026-01-15 17:00:00"},
 		{"", "SELECT from_unixtime(NULL)", nil},
-		{"", "SELECT CAST(from_unixtime(0) AS VARCHAR)", "1970-01-01 00:00:00"},
+		{"", "SELECT from_unixtime(0)", "error"}, // NULL on MariaDB 11.8 and 12.3, 1970-01-01 00:00:00 elsewhere
+		{"", "SELECT CAST(from_unixtime(1) AS VARCHAR)", "1970-01-01 00:00:01"},
 		{"", "SELECT from_unixtime(-1)", "error"},
 		{"", "SELECT from_unixtime(1.5)", "error"},        // MySQL prints the fraction's digits; a whole 3600.0 is the router's to keep on MySQL (readrouter TestFromUnixTimeVeto)
 		{"", "SELECT from_unixtime(2147483648)", "error"}, // MariaDB and MySQL part ways
@@ -97,11 +99,11 @@ func TestDeclinedValue2493(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"the FROM_UNIXTIME macro", &QueryError{Message: "Invalid Input Error: FROM_UNIXTIME of a negative, fractional or past-2038 number is not answered by the copy"}, true},
-		{"the UNIX_TIMESTAMP macro", &QueryError{Message: "Invalid Input Error: UNIX_TIMESTAMP of a time before 1970 or after 2038-01-19 03:14:07 UTC is not answered by the copy"}, true},
-		{"wrapped", fmt.Errorf("run: %w", &QueryError{Message: "Invalid Input Error: FROM_UNIXTIME of a negative, fractional or past-2038 number is not answered by the copy"}), true},
+		{"the FROM_UNIXTIME macro", &QueryError{Message: "Invalid Input Error: FROM_UNIXTIME of zero, a negative, fractional or past-2038 number is not answered by the copy"}, true},
+		{"the UNIX_TIMESTAMP macro", &QueryError{Message: "Invalid Input Error: UNIX_TIMESTAMP of a time before 1970-01-01 00:00:01 or after 2038-01-19 03:14:07 UTC is not answered by the copy"}, true},
+		{"wrapped", fmt.Errorf("run: %w", &QueryError{Message: "Invalid Input Error: FROM_UNIXTIME of zero, a negative, fractional or past-2038 number is not answered by the copy"}), true},
 		{"another query error", &QueryError{Message: "Catalog Error: Table with name t does not exist"}, false},
-		{"the marker outside a query error", errors.New("FROM_UNIXTIME of a negative, fractional or past-2038 number is not answered by the copy"), false},
+		{"the marker outside a query error", errors.New("FROM_UNIXTIME of zero, a negative, fractional or past-2038 number is not answered by the copy"), false},
 		{"a refusal", &RefusedError{Reason: "is not answered by the copy"}, false},
 	} {
 		if got := DeclinedValue(c.err); got != c.want {

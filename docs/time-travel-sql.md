@@ -515,7 +515,8 @@ The decision, in order, for every statement:
 
    `UNIX_TIMESTAMP()` (now) is a veto, and the rest stays on MySQL counted
    as `copy_columns_differ`. On the copy, either function errors over a
-   time or number outside 1970 to 2038-01-19 03:14:07 UTC, and
+   time or number outside 1970-01-01 00:00:01 to 2038-01-19 03:14:07 UTC
+   (second 0 is out: MariaDB 11.8 answers `FROM_UNIXTIME(0)` with NULL), and
    `UNIX_TIMESTAMP` over a NULL: the copy holds MySQL's zero date
    (`0000-00-00`) as a NULL, and MySQL's `UNIX_TIMESTAMP` of it is 0. The
    statement then goes to MySQL under the same reason, not as a fault of
