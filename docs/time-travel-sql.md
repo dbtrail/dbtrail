@@ -493,6 +493,35 @@ The decision, in order, for every statement:
    in vain: `LIMIT offset, count`, `ORDER BY NULL` and `_binary'x'` (same
    section below). This step comes before the next two, so a `LIMIT 0, 20`
    the `LIMIT` rules would have kept on MySQL is counted as `veto`.
+
+   `UNIX_TIMESTAMP(column)` and `FROM_UNIXTIME(number)`, the way a report
+   buckets time by hour or day, go to the copy since #2493 when its answer
+   is MySQL's:
+   - `UNIX_TIMESTAMP` over a `DATE`, or a `DATETIME`/`TIMESTAMP` declared
+     without fractional seconds, named as a bare column, under a session
+     zone of UTC or a fixed offset (`+05:00`), not a zone name.
+   - `FROM_UNIXTIME` over an argument MySQL types as a whole number: signed
+     integer columns, integer literals and `UNIX_TIMESTAMP(column)`, joined
+     by `+`, `-` and `*`, and `FLOOR` or `CEIL` of `UNIX_TIMESTAMP(column)`
+     divided by numbers of up to seven digits
+     (`FLOOR(UNIX_TIMESTAMP(created_at) / 3600) * 3600`). A column inside
+     that division stays on MySQL: MySQL divides exactly, the copy as a
+     floating-point number, which rounds past 2^53 (a column of
+     nanoseconds). MySQL
+     prints as many fraction digits as the argument's type has, whatever its
+     value: `FROM_UNIXTIME` of a `DECIMAL(12,2)` holding a whole number
+     prints `.00`, of a `DOUBLE` `.000000`, of `ms / 1000` `.0000`, and the
+     copy prints none, so those stay on MySQL. So does the format form.
+
+   `UNIX_TIMESTAMP()` (now) is a veto, and the rest stays on MySQL counted
+   as `copy_columns_differ`. On the copy, either function errors over a
+   time or number outside 1970-01-01 00:00:01 to 2038-01-19 03:14:07 UTC
+   (second 0 is out: MariaDB 11.8 answers `FROM_UNIXTIME(0)` with NULL), and
+   `UNIX_TIMESTAMP` over a NULL: the copy holds MySQL's zero date
+   (`0000-00-00`) as a NULL, and MySQL's `UNIX_TIMESTAMP` of it is 0. The
+   statement then goes to MySQL under the same reason, not as a fault of
+   the copy, so a statement whose `UNIX_TIMESTAMP` reaches a NULL row goes
+   to MySQL.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):

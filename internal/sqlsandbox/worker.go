@@ -311,6 +311,12 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			missingSchema = job.Schema
 		}
 	}
+	// MySQL's UNIX_TIMESTAMP and FROM_UNIXTIME (#2493), which DuckDB does not
+	// have, as macros on this connection. Before the lock with the rest of the
+	// session's setup.
+	if _, err := conn.ExecContext(ctx, unixTimeMacros); err != nil {
+		return sessionErr("define UNIX_TIMESTAMP and FROM_UNIXTIME: %v", err)
+	}
 	// The client's time zone (the port's SET time_zone), after the views
 	// script, which pins UTC, and before the lock, after which no SET runs. A
 	// zone the engine does not know refuses the statement by name: running it

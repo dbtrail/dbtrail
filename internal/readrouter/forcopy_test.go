@@ -174,6 +174,7 @@ func TestVeto_everyVetoStillFiresOnBacktickStatements(t *testing.T) {
 	cases := map[string]string{
 		"SELECT GROUP_CONCAT(`name`) FROM `t`":                     "GROUP_CONCAT",
 		"SELECT * FROM `t` WHERE `ts` > NOW() - INTERVAL 1 DAY":    "NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP",
+		"SELECT * FROM `t` WHERE `ts` > UNIX_TIMESTAMP() - 60":     "UNIX_TIMESTAMP() (now, in the MySQL session time zone)",
 		"SELECT STR_TO_DATE(`d`, '%Y') FROM `t`":                   "STR_TO_DATE",
 		"SELECT TIMESTAMPDIFF(DAY, `a`, `b`) FROM `t`":             "TIMESTAMPDIFF/DATEDIFF",
 		"SELECT * FROM `t` WHERE `name` = 'x' COLLATE utf8mb4_bin": "COLLATE",

@@ -320,10 +320,16 @@ type Session struct {
 // values the copy counts as MySQL does (whole and exact numbers), other all the
 // rest, and the answer is why an aggregate over DISTINCT values must not be
 // answered by the copy, or "".
+//
+// UnixTimeVeto is the fourth (#2493): dates are the columns UNIX_TIMESTAMP
+// gives MySQL's number of on the copy and notDates the rest, whole the columns
+// MySQL types as a whole number, which FROM_UNIXTIME prints without a
+// fraction as the copy does, and notWhole the rest.
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
 	NameVeto(names []string) string
 	DistinctVeto(safe, other []string) string
+	UnixTimeVeto(dates, notDates, whole, notWhole []string) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
