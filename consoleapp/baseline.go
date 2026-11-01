@@ -46,6 +46,49 @@ var checkMydumperPrivileges = func(ctx context.Context, sourceDSN string, ssl co
 	return mydumperlock.CheckPrivilegesWith(ctx, func() (*sql.DB, error) { return connectSource(sourceDSN, ssl) }, mode, remedy, schemas)
 }
 
+type beforeMydumperKey struct{}
+
+// withBeforeMydumper hands runMydumper a step to take right before it starts
+// mydumper, after every check of its own: dumpAttempt's wait for a quiet
+// source and the stamps that must follow it (#2530).
+func withBeforeMydumper(ctx context.Context, fn func() error) context.Context {
+	return context.WithValue(ctx, beforeMydumperKey{}, fn)
+}
+
+// runBeforeMydumper takes that step, when one was handed.
+func runBeforeMydumper(ctx context.Context) error {
+	if f, ok := ctx.Value(beforeMydumperKey{}).(func() error); ok {
+		return f()
+	}
+	return nil
+}
+
+// consoleRemedy is how the console's messages say to choose a lock mode: the
+// saved setting when that is where the mode in force came from.
+func consoleRemedy(src lockModeSource) mydumperlock.Remedy {
+	if src == lockModeSaved {
+		return mydumperlock.RemedyConsoleSaved
+	}
+	return mydumperlock.RemedyConsole
+}
+
+// waitForQuietSource is mydumperlock.WaitForQuietSource on the source, opened
+// with its TLS settings like the privilege check. A source that cannot be
+// opened goes ahead, said: mydumper meets the same failure and reports it.
+// Tests replace it.
+var waitForQuietSource = func(ctx context.Context, sourceDSN string, ssl config.SSL, mode baseline.LockMode, remedy mydumperlock.Remedy) (time.Duration, error) {
+	if mode.MydumperValue() != baseline.LockModeFTWRL.MydumperValue() {
+		return 0, nil
+	}
+	db, err := connectSource(sourceDSN, ssl)
+	if err != nil {
+		slog.Warn("full read: could not connect to check the source for long-running statements before taking the ftwrl lock; going ahead", "error", err)
+		return 0, nil
+	}
+	defer db.Close()
+	return mydumperlock.WaitForQuietSource(ctx, db, mode, remedy)
+}
+
 // baselineSupervisor implements console.BaselineController by running the
 // dump→convert→upload pipeline IN-PROCESS (#613): the console image bundles
 // mydumper, so a baseline never starts a sibling container and the daemon never
@@ -892,8 +935,20 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 	// retry is lock-all, never a mode without a lock: whether this user has
 	// LOCK TABLES is for lock-all's own privilege check to say. An operator's
 	// explicit ftwrl is never second-guessed.
-	if err != nil && src == lockModeAutomatic && lockMode == baseline.LockModeFTWRL && ftwrlRefused(err) && s.ctx.Err() == nil {
-		slog.Info("console snapshot: lock mode ftwrl was refused by the source; retrying this snapshot once with lock-all",
+	//
+	// A source that was never quiet enough for ftwrl (#2530) is retried the
+	// same way: a running query does not hold lock-all up, so the snapshot
+	// gets taken, at lock-all's own cost (it waits for an uncommitted writer
+	// instead). Without the retry, a source that always has a long query
+	// running would never get a full read in the automatic mode.
+	var quiet *mydumperlock.QuietWaitError
+	neverQuiet := errors.As(err, &quiet)
+	if err != nil && src == lockModeAutomatic && lockMode == baseline.LockModeFTWRL && (ftwrlRefused(err) || neverQuiet) && s.ctx.Err() == nil {
+		why := "lock mode ftwrl was refused by the source"
+		if neverQuiet {
+			why = "the source was never quiet enough for lock mode ftwrl"
+		}
+		slog.Info("console snapshot: "+why+"; retrying this snapshot once with lock-all",
 			"server", req.ServerID, "error", err)
 		first := err
 		att, err = s.dumpAttempt(req, baseline.LockModeLockAll, lockModeAutomatic)
@@ -903,8 +958,8 @@ func (s *baselineSupervisor) execute(req console.BaselineRequest) (dumpOutcome, 
 			// was tried at all.
 			slog.Warn("console snapshot: the automatic retry with lock-all failed too",
 				"server", req.ServerID, "ftwrl_refusal", first, "error", err)
-			err = fmt.Errorf("lock mode ftwrl was refused by the source (%s), and the automatic retry with lock-all failed too: %w",
-				refusalSummary(first), err)
+			err = fmt.Errorf("%s (%s), and the automatic retry with lock-all failed too: %w",
+				why, refusalSummary(first), err)
 		}
 	}
 	if err != nil {
@@ -1066,6 +1121,27 @@ func (s *baselineSupervisor) dumpAttempt(req console.BaselineRequest, lockMode b
 	a.ddlMark = dumpDDLMarkFunc(req)
 	a.eventMark = dumpEventMarkFunc(req)
 	ctx := withTransportNote(s.ctx, func(note string) { s.noteDumpTransport(req.ServerID, note) })
+	// #2530: an ftwrl read waits for a quiet source right before mydumper
+	// starts, after runMydumper's own checks (its version, TLS, the
+	// privileges: a refusal there must reach execute's lock-all retry in
+	// seconds, not after ten minutes of waiting for a lock that could never
+	// be taken), and when it waited at all, the instant and both marks are
+	// taken again after it. They name and date the snapshot: taken only
+	// before, a wait of minutes would label it minutes before its data. A
+	// source quiet at the first look keeps the ones above, milliseconds old.
+	ctx = withBeforeMydumper(ctx, func() error {
+		waited, err := waitForQuietSource(s.ctx, req.SourceDSN, req.SourceSSL, lockMode, consoleRemedy(src))
+		if err != nil {
+			return err
+		}
+		if waited == 0 {
+			return nil
+		}
+		a.startedAt = time.Now().UTC()
+		a.ddlMark = dumpDDLMarkFunc(req)
+		a.eventMark = dumpEventMarkFunc(req)
+		return nil
+	})
 	if err := runMydumperFunc(ctx, req.SourceDSN, req.SourceSSL, req.Schemas, dir, lockMode, src); err != nil {
 		// Read BEFORE the removal (#1938): once the partial dump is gone the
 		// folder has room again, and a disk that filled would read as one
@@ -1553,10 +1629,7 @@ func mydumperBootWarning(lockMode baseline.LockMode, src lockModeSource) string 
 var runMydumperFunc = runMydumper
 
 func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas []string, dumpDir string, lockMode baseline.LockMode, src lockModeSource) error {
-	remedy := mydumperlock.RemedyConsole
-	if src == lockModeSaved {
-		remedy = mydumperlock.RemedyConsoleSaved
-	}
+	remedy := consoleRemedy(src)
 	host, port, user, password, err := config.ParseSourceDSN(sourceDSN)
 	if err != nil {
 		return err
@@ -1688,6 +1761,9 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	args := buildConsoleMydumperArgs(host, port, user, schemas, dumpDir, lockMode, plan.sendLockFlags, tlsArgs, listSchemas)
 	// plan.path, not the bare name: the dump must run the very binary whose
 	// version was just read.
+	if err := runBeforeMydumper(ctx); err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, plan.path, args...)
 	// Deliver the source password out of band via MYSQL_PWD (honored by the
 	// MySQL client library mydumper links against) so it never lands on argv,

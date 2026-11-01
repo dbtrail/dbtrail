@@ -27,10 +27,11 @@ rebuild a row or a table as it was.
   GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'dbtrail'@'%';
   -- For the first copy of your tables (the baseline) and every later full
   -- read. A baseline is point-consistent by default, and that guarantee
-  -- needs a lock. SHOW VIEW lets the dump copy views.
-  GRANT RELOAD, BACKUP_ADMIN, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+  -- needs a lock. SHOW VIEW lets the dump copy views. PROCESS lets the
+  -- read wait until no long query runs, so the lock does not stop writes.
+  GRANT RELOAD, BACKUP_ADMIN, PROCESS, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   -- MariaDB and MySQL 5.7 have no BACKUP_ADMIN; run this instead:
-  -- GRANT RELOAD, SHOW VIEW ON *.* TO 'dbtrail'@'%';
+  -- GRANT RELOAD, PROCESS, SHOW VIEW ON *.* TO 'dbtrail'@'%';
   -- Managed MySQL (RDS, Aurora, Cloud SQL) and RDS for MariaDB: run this
   -- instead of GRANT RELOAD (snapshots pick the matching mode on their own):
   -- GRANT LOCK TABLES, SHOW VIEW ON *.* TO 'dbtrail'@'%';

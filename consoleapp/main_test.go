@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/mydumperlock"
@@ -61,6 +62,13 @@ func TestMain(m *testing.M) {
 	// for them. A test about that decision sets its own answer
 	// (stubSourceEncrypted); the integration tests restore the real probe.
 	sourceEncrypted = func(context.Context, string, config.SSL) (bool, error) { return false, nil }
+	// The same for the wait for a quiet source before an ftwrl read (#2530):
+	// those sources do not exist, so it answers "quiet" at once instead of
+	// trying each one. Its own tests (baseline_quiet_2530_test.go) replace it
+	// per test.
+	waitForQuietSource = func(context.Context, string, config.SSL, baseline.LockMode, mydumperlock.Remedy) (time.Duration, error) {
+		return 0, nil
+	}
 	// Same for the mandatory-TLS check before a Connector/C mydumper.
 	sourceTLSPin = func(context.Context, string, dumpTLS) (string, error) { return "00:11", nil }
 	os.Exit(m.Run())
