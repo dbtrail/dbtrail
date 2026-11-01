@@ -23,6 +23,8 @@ import (
 // mockS3 implements s3API for testing.
 type mockS3 struct {
 	objects map[string][]byte // key → content
+	// deleteInputs records every DeleteObject request, in order.
+	deleteInputs []*s3.DeleteObjectInput
 
 	headBucketErr error
 	putErr        error
@@ -114,6 +116,7 @@ func (m *mockS3) DeleteObject(_ context.Context, input *s3.DeleteObjectInput, _ 
 	if m.deleteErr != nil {
 		return nil, m.deleteErr
 	}
+	m.deleteInputs = append(m.deleteInputs, input)
 	delete(m.objects, *input.Key)
 	return &s3.DeleteObjectOutput{}, nil
 }
@@ -309,6 +312,22 @@ func TestDelete(t *testing.T) {
 
 	if _, ok := mock.objects["doomed.parquet"]; ok {
 		t.Error("Delete did not remove the object")
+	}
+}
+
+// Delete never removes a version for good (#2596): on a versioned bucket it
+// leaves a delete marker and the old versions stay until a bucket rule
+// expires them. The S3 snapshot prune deletes through it, and was decided
+// that way, so a version id here would make every prune permanent.
+func TestDeleteNeverNamesAVersion(t *testing.T) {
+	mock := newMockS3()
+	b := newTestBackend(t, mock, "")
+	mock.objects["doomed.parquet"] = []byte("bye")
+	if err := b.Delete(context.Background(), "doomed.parquet"); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.deleteInputs) != 1 || mock.deleteInputs[0].VersionId != nil || mock.deleteInputs[0].BypassGovernanceRetention != nil {
+		t.Fatalf("delete inputs = %+v, want one with no version and no retention bypass", mock.deleteInputs)
 	}
 }
 

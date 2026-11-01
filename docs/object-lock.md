@@ -104,7 +104,14 @@ and without it the check SKIPs.
   touches data files, locked or not.
 - **Baseline local prune** (`baseline --baseline-retain`): deletes **local**
   directories after confirming a durable S3 copy; it never deletes from S3.
-- The only S3 deletes bintrail ever performs are the best-effort
+- **The S3 snapshot cleanup** (**Delete from S3 after** on a server, #2596,
+  off by default) removes that server's snapshots older than the age. Its
+  deletes name no version, so on a locked bucket each one is a *delete
+  marker*: retention permits it, the snapshot leaves every listing, and the
+  locked versions stay (and are billed) until their retention ends and a
+  noncurrent-version rule expires them. Object Lock does not stop it; leave
+  the age empty to keep every snapshot listed.
+- Otherwise, the only S3 deletes bintrail performs are the best-effort
   `_INCOMPLETE` marker cleanup after a baseline upload and `agent --validate`
   removing its own connectivity-probe object — never archive data. On a
   locked (hence versioned) bucket both are *delete markers* — logical

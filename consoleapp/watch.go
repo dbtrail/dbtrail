@@ -634,6 +634,7 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
 		resendSnapshotFn = baselineSup.resendLacking
+		s3PruneBusyFn = baselineSup.readsS3Now
 		// The retention the #1689 gate bounds a skipped cycle against. Wired
 		// here rather than taken as a constructor argument because it is the
 		// same provider rotation reads, and because a supervisor without one
@@ -974,6 +975,7 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if upConsoleBaselineTrigger || upBaselineRefreshEvery != "" {
 		baselineSup = newBaselineSupervisorFromConfig(ctx, baselineStagingDirFor(registry), registry)
 		resendSnapshotFn = baselineSup.resendLacking
+		s3PruneBusyFn = baselineSup.readsS3Now
 		// The retention the #1689 gate bounds a skipped cycle against. Wired
 		// here rather than taken as a constructor argument because it is the
 		// same provider rotation reads, and because a supervisor without one
@@ -1783,7 +1785,7 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 			"dir", t.dir, "destination", t.s3, "missing", len(res.NotAtDestination))
 		return
 	}
-	sent, tried := map[string]bool{}, 0
+	sent, skipped, tried := map[string]bool{}, map[string]bool{}, 0
 	for _, name := range res.NotAtDestination {
 		if ctx.Err() != nil || tried >= resendPerCycle {
 			break
@@ -1791,8 +1793,21 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 		if _, err := os.Stat(filepath.Join(t.dir, name, baseline.SuccessMarker)); err != nil {
 			continue
 		}
+		err := resendSnapshotFn(ctx, t.dir, t.s3, name)
+		if errors.Is(err, errPastS3Age) {
+			// Not sent, and not counted against the bound; it stays in the
+			// record, since it stays on this disk without a copy in S3.
+			continue
+		}
+		if errors.Is(err, errNotResent) {
+			// Left out for now (held, being sent, or in a folder the S3
+			// cleanup is removing): not a send, not counted against the
+			// bound, and not listed as missing.
+			skipped[name] = true
+			continue
+		}
 		tried++
-		if err := resendSnapshotFn(ctx, t.dir, t.s3, name); err != nil {
+		if err != nil {
 			slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the next cleanup tries again",
 				"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
 			continue
@@ -1802,11 +1817,11 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	}
 	var left []string
 	for _, name := range res.NotAtDestination {
-		if !sent[name] {
+		if !sent[name] && !skipped[name] {
 			left = append(left, name)
 		}
 	}
-	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent), Names: left, Resending: true}
+	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
 	if err := baseline.RewriteNotInDestination(t.dir, rec); err != nil {
 		slog.Warn("snapshot cleanup: the record of snapshots not at the destination could not be updated; the page may say an old count until the next cleanup",
 			"dir", t.dir, "error", err)
@@ -1843,6 +1858,11 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 	// warned inside effectiveRetain; it leaves the age rule off rather than
 	// failing the daemon, because a file edited by hand must never stop
 	// capture.
+	// Before the gate: the two resend paths ask it even on a daemon whose
+	// loop does not start, which then answers "never removed".
+	s3PruneCutFn = func(s3URL string, now time.Time) (time.Time, bool) {
+		return s3PruneCut(reg, globalS3, retainRaw, s3URL, now)
+	}
 	bootRetain, _ := effectiveRetain(reg, retainRaw)
 	if !pruneLoopStarts(reg, bootRetain) {
 		return nil // no registry and no retention — leave baselines untouched
@@ -2329,6 +2349,9 @@ func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, g
 	// retention is set (#1681); a set one still protects younger snapshots.
 	targets = append(targets, localKeepPruneTargets(entries, globalDir)...)
 	runBaselinePruneCycle(ctx, targets, retain, pruneFn)
+	// After the local prune, never before it: that one removes a local
+	// snapshot only while its copy is in S3 (#2596).
+	runS3PruneCycle(ctx, entries, globalS3, retain, time.Now())
 }
 
 // resolveBaselineLockModeEnv reads BINTRAIL_CONSOLE_BASELINE_LOCK_MODE. Empty

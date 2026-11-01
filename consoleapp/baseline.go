@@ -29,6 +29,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/rotation"
 	"github.com/dbtrail/dbtrail/internal/serverid"
+	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
@@ -685,17 +686,56 @@ func (s *baselineSupervisor) resendLacking(_ context.Context, dir, s3URL, name s
 		return fmt.Errorf("the local snapshot has no _SUCCESS marker, so it cannot be sent: %w", err)
 	}
 	key := "dir:" + dir
+	// Already being sent by an earlier resend of this cleanup.
 	if s.isUploading(key, name) {
-		return nil
+		return errNotResent
 	}
 	// The prune never lists a held snapshot as missing (#2596); this is the
 	// belt for a mark written between its listing and this send.
 	if held, _ := baseline.UploadHeld(dir, name); held {
-		return nil
+		return errNotResent
+	}
+	// Removed from the bucket on purpose by its age (#2596): sending it back
+	// would have the next cleanup remove it again, every cycle. The local
+	// prune keeps it (it never removes a copy S3 does not confirm, #616), so
+	// it is listed as not at the destination, to remove by hand.
+	if at, ok := snapshotdir.ParseTime(name); ok && pastS3Cut(s3URL, at, time.Now()) {
+		slog.Info("snapshot cleanup: not sending a snapshot older than the age set for S3, which the S3 cleanup would remove again; it stays on this machine until removed by hand",
+			"dir", dir, "snapshot", name, "destination", s3URL)
+		return errPastS3Age
 	}
 	dest := strings.TrimSuffix(s3URL, "/") + "/" + name
+	switch pruning, err := beingPruned(s.ctx, s3URL, dest); {
+	case err != nil:
+		// A real failure, counted and logged as one by the caller.
+		return fmt.Errorf("could not tell whether the S3 cleanup is removing this snapshot's folder, so it was not sent "+
+			"(a HEAD on a missing key needs s3:ListBucket to answer 404 rather than 403): %w", err)
+	case pruning:
+		return errNotResent
+	}
 	_, err := s.uploadMarked(key, name, filepath.Join(dir, name), dest, true)
 	return err
+}
+
+// errNotResent is the resend left out for now: already being sent, held by
+// the upload interval, or in a folder the S3 cleanup is removing. Not a
+// failure, not a send, not missing.
+var errNotResent = errors.New("snapshot not sent again for now")
+
+// errPastS3Age is the resend left out because the snapshot is past the age
+// the destination keeps (#2596): not a failure and not a send, but it stays
+// on this disk without an S3 copy, so it is still listed as missing.
+var errPastS3Age = errors.New("snapshot past the S3 age, not sent again")
+
+// readsS3Now reports whether a restore or a SQL file build runs now for any
+// of the servers: both read a snapshot the S3 cleanup could remove (#2596).
+func (s *baselineSupervisor) readsS3Now(serverIDs []string) bool {
+	for _, id := range serverIDs {
+		if s.RestoreStatus(id).State == "running" || s.SQLExportStatus(id).State == "running" {
+			return true
+		}
+	}
+	return false
 }
 
 // sweepUnuploaded sends every complete local snapshot other than the one
@@ -713,6 +753,20 @@ func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, 
 	}
 	seen := map[string]bool{own: true}
 	swept := 0
+	now := time.Now()
+	// The newest local snapshot holding each table, dated at or before now:
+	// the copies the S3 cleanup keeps whatever their age.
+	newestAt := map[string]time.Time{}
+	for _, f := range files {
+		k := f.Schema + "/" + f.Table
+		if !f.SnapshotTime.After(now) && f.SnapshotTime.After(newestAt[k]) {
+			newestAt[k] = f.SnapshotTime
+		}
+	}
+	newestOf := map[string]bool{}
+	for _, at := range newestAt {
+		newestOf[reconstruct.SnapshotDirName(at)] = true
+	}
 	for _, f := range files {
 		if s.ctx.Err() != nil {
 			// Shutdown: what is left is the next full backup's, and one line
@@ -734,6 +788,15 @@ func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, 
 		if held, _ := baseline.UploadHeld(req.LocalDir, name); held {
 			continue
 		}
+		// Past the destination's age: the S3 cleanup removes it, so it is
+		// not sent to be removed again (#2596). Unless it is the newest copy
+		// of a table here, which the cleanup keeps however old: without it
+		// the bucket would hold no copy of that table at all.
+		if pastS3Cut(req.S3, f.SnapshotTime, now) && !newestOf[name] {
+			slog.Info("snapshot: not sending a local snapshot older than the age set for S3; the S3 cleanup would remove it again",
+				"server", req.ServerName, "snapshot", name)
+			continue
+		}
 		if _, err := os.Stat(filepath.Join(req.LocalDir, name, baseline.SuccessMarker)); err != nil {
 			// The listing admits a snapshot with NEITHER marker (written
 			// before the markers existed) and the uploader refuses one
@@ -744,6 +807,13 @@ func (s *baselineSupervisor) sweepUnuploaded(req console.BaselineRequest, root, 
 			continue
 		}
 		dest := root + "/" + name
+		if pruning, err := beingPruned(s.ctx, req.S3, dest); err != nil {
+			slog.Warn("snapshot: could not tell whether the S3 cleanup is removing a snapshot's folder; not swept this time (a HEAD on a missing key needs s3:ListBucket to answer 404 rather than 403)",
+				"server", req.ServerName, "snapshot", name, "error", err)
+			continue
+		} else if pruning {
+			continue
+		}
 		present, err := s3ObjectPresent(s.ctx, dest+"/"+baseline.SuccessMarker)
 		if err != nil {
 			slog.Warn("baseline: could not tell whether the destination has a local snapshot; not swept this time (a HEAD on a missing key needs s3:ListBucket to answer 404 rather than 403)",

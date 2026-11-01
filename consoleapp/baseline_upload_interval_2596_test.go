@@ -169,7 +169,7 @@ func TestResendLacking_skipsAHeldSnapshot(t *testing.T) {
 		return 1, nil
 	}
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), "")
-	if err := s.resendLacking(context.Background(), root, "s3://bkt/p/", name); err != nil || sent != 0 {
+	if err := s.resendLacking(context.Background(), root, "s3://bkt/p/", name); !errors.Is(err, errNotResent) || sent != 0 {
 		t.Fatalf("resend of a held snapshot: err %v, uploads %d", err, sent)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 )
@@ -148,6 +149,9 @@ type backupSettingsServerDTO struct {
 	// must not re-parse the schedule grammar, or a spelling Go accepts and
 	// the page does not silently turns a warning off.
 	ScheduleEveryMinutes int `json:"schedule_every_minutes,omitempty"`
+	// BaselineS3Retain is the age past which this server's snapshots are
+	// removed from its S3 destination (#2596), empty when they are not.
+	BaselineS3Retain string `json:"baseline_s3_retain,omitempty"`
 	// ScheduleUploadEvery is how often the schedule sends a snapshot to S3
 	// (#2596), empty when every run does, and its minutes as Go parses them.
 	// What reaches the bucket follows it, not the runs: the growth count and
@@ -305,15 +309,16 @@ func (s *Server) handleBackupSettingsGet(w http.ResponseWriter, r *http.Request)
 // page cannot disagree with what findBaseline will actually open.
 func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO {
 	dto := backupSettingsServerDTO{
-		ID:          e.ID,
-		Name:        e.Name,
-		BaselineDir: e.BaselineDir,
-		BaselineS3:  e.BaselineS3,
-		NoArchive:   e.NoArchive,
-		NoSQLMirror: e.NoSQLMirror,
-		ResolvedDir: e.BaselineDir,
-		ResolvedS3:  e.BaselineS3,
-		ArchiveS3:   e.ArchiveS3,
+		ID:               e.ID,
+		Name:             e.Name,
+		BaselineDir:      e.BaselineDir,
+		BaselineS3:       e.BaselineS3,
+		NoArchive:        e.NoArchive,
+		NoSQLMirror:      e.NoSQLMirror,
+		BaselineS3Retain: e.BaselineS3Retain,
+		ResolvedDir:      e.BaselineDir,
+		ResolvedS3:       e.BaselineS3,
+		ArchiveS3:        e.ArchiveS3,
 	}
 	if e.BaselineDir != "" || e.BaselineS3 != "" {
 		dto.Source = backupSourceServer
@@ -430,6 +435,9 @@ type backupSettingsUpdateRequest struct {
 	// mirror SQL reads for a server whose snapshots are only in S3. Stored
 	// whatever the server keeps now; it applies while it is S3-only.
 	NoSQLMirror *bool `json:"no_sql_mirror"`
+	// BaselineS3Retain is ServerEntry.BaselineS3Retain (#2596); "" turns it
+	// off, omitted keeps it.
+	BaselineS3Retain *string `json:"baseline_s3_retain"`
 }
 
 // handleBackupSettingsServerUpdate serves PUT /api/backup-settings/servers/{id}.
@@ -491,6 +499,36 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	if req.NoSQLMirror != nil {
 		entry.NoSQLMirror = *req.NoSQLMirror
 	}
+	// A save that moves the destination turns the S3 age off: set for one
+	// prefix, it must not start removing snapshots from another unasked.
+	if entry.BaselineS3 != before.BaselineS3 && req.BaselineS3Retain == nil {
+		entry.BaselineS3Retain = ""
+	}
+	// Asked only of a value this save sets, like the schedule's S3 interval:
+	// one saved while the server had a destination stays inert without it.
+	if req.BaselineS3Retain != nil {
+		v := strings.TrimSpace(*req.BaselineS3Retain)
+		if _, err := ParseS3Retain(v); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if v != "" && entry.BaselineS3 == "" {
+			writeJSONError(w, http.StatusBadRequest, "delete from S3 after: this server has no S3 destination, so there is nothing to remove; set one first")
+			return
+		}
+		// Removing data from the bucket is the tier of the daemon-wide
+		// "Delete by age" (settings:write), not this row's: setting or
+		// changing the age, or keeping it across a new destination, asks
+		// for it. Turning it off does not.
+		if v != "" && (v != before.BaselineS3Retain || entry.BaselineS3 != before.BaselineS3) {
+			if pol := policyFrom(r.Context()); pol != nil && !pol.Allows(ext.PermSettingsWrite) {
+				recordConsoleDeny(r, "authz.denied", string(ext.PermSettingsWrite), map[string]string{"field": "baseline_s3_retain"})
+				writeJSONError(w, http.StatusForbidden, "forbidden: removing snapshots from S3 needs the "+string(ext.PermSettingsWrite)+" permission")
+				return
+			}
+		}
+		entry.BaselineS3Retain = v
+	}
 	// A folder this save changes must be one DBTrail can use (#1681). An
 	// unchanged one is not re-checked, so a toggle elsewhere on the row still
 	// saves while the folder is broken.
@@ -507,7 +545,14 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 			}
 		}
 	}
-	if err := s.cm.reg.Update(entry); err != nil {
+	s3AgeMu.Lock()
+	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &entry)) {
+		s3AgeMu.Unlock()
+		return
+	}
+	err := s.cm.reg.Update(entry)
+	s3AgeMu.Unlock()
+	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
 	}

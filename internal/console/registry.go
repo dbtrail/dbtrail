@@ -182,6 +182,13 @@ type ServerEntry struct {
 	// #1681) keeps them all, as before. With a destination set it does
 	// nothing: that mode removes only what the destination confirmed.
 	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
+	// BaselineS3Retain is the age past which the daemon removes this
+	// server's snapshots from BaselineS3 (#2596), "7d" style; empty (every
+	// entry saved before it) never removes anything there. The newest
+	// snapshot of each table is kept whatever its age. See S3RetentionFor
+	// for a destination two servers share. Additive: a binary that predates
+	// it carries it through Extra and removes nothing.
+	BaselineS3Retain string `yaml:"baseline_s3_retain,omitempty"`
 	// NoSQLMirror turns off the local mirror SQL on the copy reads for a
 	// server whose snapshots are only in S3 (#2302): nothing is brought to
 	// this machine for it, and SQL does not run on it. It does nothing for a
