@@ -21,8 +21,10 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 	row := jsFunctionBody(t, js, "backupServerRow")
 
 	for _, want := range []string{
-		"DBTrail never removes one",
-		"DBTrail never deletes from S3 and never changes a bucket's rules",
+		// Since #2596 DBTrail removes old snapshots from S3 where a server
+		// sets Delete from S3 after; where it does not, the promise stands.
+		"DBTrail never removes one unless Delete from S3 after is set below",
+		"DBTrail never changes a bucket's rules",
 		"the second command replaces every rule on the bucket",
 		"cannot spare the only complete copy",
 		"if the schedule stops it keeps expiring until none is left",
@@ -37,7 +39,7 @@ func TestS3RetentionBlockKeepsThePromises(t *testing.T) {
 	// The mount condition IS the behaviour: the block under a server whose
 	// destination is the daemon default (shared by every server) would hand
 	// out a rule on a prefix that is not this row's.
-	if !strings.Contains(row, `if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));`) {
+	if !strings.Contains(row, `if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3, readOnly));`) {
 		t.Error("backupServerRow does not mount the retention block exactly for a server with its own S3 destination")
 	}
 	// The root refusal comes before the form, not instead of it.

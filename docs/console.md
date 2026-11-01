@@ -866,6 +866,31 @@ saved, shown with the reason `serve` is not running it.
   detail carries the same on `run.why`. The page turns the two permanent
   reasons into the setting to change. The daemon-wide
   `--baseline-refresh-interval` below is independent and can run alongside.
+- **Delete from S3 after** (#2596): under **More about this server**, a
+  server with its own S3 destination has a field for the age past which
+  DBTrail removes its snapshots from S3 (whole days; empty, the default,
+  keeps them all). The field is shown to a session with `settings:write`;
+  without it the saved age is shown with that note. The block says whether
+  the cleanup runs and at what age (it can be longer than the one set: never
+  shorter than the local "Delete by age", and the longest among servers
+  sharing the destination), says in red why not when an age is set and
+  nothing is removed (a sharing server with no age or one that cannot be
+  read, the destination DBTrail was started with, a destination that is not
+  `s3://`, an age shorter than a day or one that cannot be read; a
+  standalone `serve` runs no cleanup and cannot see the service's settings,
+  so there it says only that the service runs it, and claims nothing), shows what the last cleanup did
+  since the service started (removed, kept as a table's newest, left for the
+  next ones, skipped for a running restore, or stopped on an error with the
+  permissions it needs), and folds a note on versioned buckets with a rule
+  that expires the old versions a removal leaves. With an age in force, the
+  first line of the S3 block says DBTrail removes old snapshots instead of
+  "never removes one", and "No rule in the bucket expires these snapshots" is
+  no longer a warning. The settings API carries `baseline_s3_retain`,
+  `s3_retain_minutes`, `s3_retain_off`, `s3_retain_shared_with`,
+  `s3_retain_shared_unreadable` and `s3_cleanup`. A saved age that is not a
+  whole number of days shows as an empty field with its saved value beside
+  it, and an empty field is then not a change: only clearing a field that
+  showed a number turns the cleanup off.
 - **Send to S3 every** (#2596): for a server with an S3 destination, the
   schedule form has a third row of choices: each update (the default), 1 hour,
   6 hours or 24 hours. Choices shorter than the update interval are hidden,
