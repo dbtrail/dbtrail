@@ -1,9 +1,13 @@
 package console
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // #2596: send to S3 on its own interval.
@@ -153,5 +157,49 @@ func TestBackupScheduleAPI_uploadEvery(t *testing.T) {
 	if rec, body = doServersReq(t, srv, "PUT", path, `{"every":"10m","upload_every":"1h"}`); rec.Code != 400 ||
 		!strings.Contains(string(body), "no S3 destination") {
 		t.Fatalf("upload interval without a destination: code=%d body=%s", rec.Code, body)
+	}
+}
+
+// The method choice anchors on the snapshot the update will fold from. With
+// the upload interval the bucket's newest ages by up to a whole interval
+// while held snapshots on this machine stay fresh, and the fold reads the
+// newer local one (consoleapp resolveFoldSource). Anchored on the bucket, a
+// busy server with every 15m and upload_every 6h would cut over to a full
+// read of production two hours after each upload.
+func TestChooseBackupMethod_anchorsOnTheHeldLocalSnapshot(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	bucketAt := now.Add(-5 * time.Hour)
+	heldAt := now.Add(-15 * time.Minute)
+	dir := t.TempDir()
+	heldName := reconstruct.SnapshotDirName(heldAt)
+	real := newestSnapshot
+	t.Cleanup(func() { newestSnapshot = real })
+	newestSnapshot = func(_ context.Context, src string) (time.Time, []string, error) {
+		if strings.HasPrefix(src, "s3://") {
+			return bucketAt, []string{"shop.orders"}, nil
+		}
+		return heldAt, []string{"shop.orders"}, nil
+	}
+	var anchors []time.Time
+	probe := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
+		anchors = append(anchors, anchor)
+		return BackupWindow{Anchor: anchor, Events: 5000}
+	}
+	gates := BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: probe}
+	e := ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: dir, BaselineS3: "s3://bucket/snaps/",
+		BackupSchedule: &BackupSchedule{Every: "15m", UploadEvery: "6h"}}
+
+	// Not held: the bucket stays the anchor, as before (a newer local copy
+	// that is not held is a pending or failed upload, not this feature).
+	method, _, err := ChooseBackupMethodAt(context.Background(), e, gates, now)
+	if err != nil || method != BackupMethodFull || !anchors[0].Equal(bucketAt) {
+		t.Fatalf("unheld: method=%q err=%v anchor=%v, want the bucket's 5h-old anchor and a full read", method, err, anchors)
+	}
+	if err := baseline.MarkUploadHeld(dir, heldName); err != nil {
+		t.Fatal(err)
+	}
+	method, why, err := ChooseBackupMethodAt(context.Background(), e, gates, now)
+	if err != nil || method != BackupMethodRefresh || !anchors[1].Equal(heldAt) {
+		t.Fatalf("held: method=%q why=%q err=%v anchor=%v, want an update anchored on the held snapshot", method, why, err, anchors[1])
 	}
 }

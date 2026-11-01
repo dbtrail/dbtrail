@@ -190,7 +190,9 @@ func TestSendOwedHeldUpload(t *testing.T) {
 		{name: "same slot: not yet", now: newestLocal.Add(10 * time.Minute), bucket: newestLocal.Add(-5 * time.Minute), markHeld: true, every: time.Hour},
 		{name: "not held (sent, or a failed upload): left to its own path", now: newestLocal.Add(time.Hour), bucket: newestLocal.Add(-5 * time.Minute), every: time.Hour},
 		{name: "the bucket already has it", now: newestLocal.Add(time.Hour), bucket: newestLocal, markHeld: true, every: time.Hour},
-		{name: "no interval", now: newestLocal.Add(time.Hour), bucket: newestLocal.Add(-5 * time.Minute), markHeld: true},
+		// Cleared after a hold: the held newest still goes, or it would stay
+		// off S3 and out of every resend for as long as the source is quiet.
+		{name: "interval cleared since: sent", now: newestLocal.Add(10 * time.Minute), bucket: newestLocal.Add(-5 * time.Minute), markHeld: true, wantSent: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -766,6 +766,14 @@ func resolveFoldSource(ctx context.Context, req refreshRequest) string {
 		// A full backup published locally whose upload is still in flight, or
 		// failed (#1725): the local copy is AHEAD of the bucket, and folding
 		// from the bucket's older snapshot would redo work the local one has.
+		// Or the upload interval held it there (#2596), which is said as that:
+		// on such a server this is nearly every run, and the general line
+		// would read as an upload failing every five minutes.
+		if held, _ := baseline.UploadHeld(req.BaselineDir, reconstruct.SnapshotDirName(localAt)); held {
+			slog.Debug("snapshot refresh: reading the newest local snapshot, kept on this machine by the upload interval",
+				"server", req.ServerName, "local", localAt.UTC().Format(time.RFC3339), "bucket", remoteAt.UTC().Format(time.RFC3339))
+			return req.BaselineDir
+		}
 		slog.Info("baseline refresh: the local copy is newer than the bucket's newest snapshot (its upload is pending or failed); reading it instead of the bucket",
 			"server", req.ServerName, "local", localAt.UTC().Format(time.RFC3339), "bucket", remoteAt.UTC().Format(time.RFC3339), "dir", req.BaselineDir)
 		return req.BaselineDir
@@ -1175,17 +1183,33 @@ func bucketNewest(ctx context.Context, req refreshRequest) (time.Time, bool) {
 // with the refresh slot still claimed, so no other baseline job runs
 // meanwhile. Failures are logged and left for the next cycle: the snapshot
 // stays held, and therefore out of every resend.
+//
+// Also with NO interval: one cleared after a snapshot was held leaves that
+// snapshot, on a quiet source, as the newest state and out of every resend.
+// UploadDue answers "due" without an interval, so it goes at the next
+// skipped cycle.
 func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Time) {
-	if req.UploadEvery <= 0 || req.BaselineS3 == "" || req.BaselineDir == "" {
+	if req.BaselineS3 == "" || req.BaselineDir == "" {
 		return
 	}
 	local, err := listBaselines(s.ctx, req.BaselineDir)
-	if err != nil || len(local) == 0 {
+	if err != nil {
+		slog.Warn("snapshot refresh: could not list the local snapshots to check for one the upload interval still owes S3",
+			"server", req.ServerName, "dir", req.BaselineDir, "error", err)
+		return
+	}
+	if len(local) == 0 {
 		return
 	}
 	at, _ := newestSnapshotOf(local)
 	name := reconstruct.SnapshotDirName(at)
-	if held, err := baseline.UploadHeld(req.BaselineDir, name); err != nil || !held {
+	held, err := baseline.UploadHeld(req.BaselineDir, name)
+	if err != nil {
+		slog.Warn("snapshot refresh: could not tell whether the newest local snapshot is held for the upload interval; not sending it this cycle",
+			"server", req.ServerName, "snapshot", name, "error", err)
+		return
+	}
+	if !held {
 		return
 	}
 	newest, listed := bucketNewest(s.ctx, req)

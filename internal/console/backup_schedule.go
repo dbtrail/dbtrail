@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
@@ -1012,6 +1013,29 @@ func CheckFullCopy(e ServerEntry, sched BackupSchedule, gates BackupScheduleGate
 // Its instant is the anchor the #1721 window is measured from.
 var newestSnapshot = reconstruct.NewestSnapshot
 
+// heldLocalAnchor moves the method choice's anchor to the server's newest
+// LOCAL snapshot when that one is newer than the bucket's and was held there
+// by the upload interval (#2596). The update folds from it (consoleapp
+// resolveFoldSource reads a newer local copy), so it is the snapshot whose
+// age and event window decide update or full read. Anchored on the bucket,
+// whose newest ages by up to a whole upload interval, a busy server would cut
+// over to a full read of production about two hours after each upload.
+// Only a HELD one: a newer local copy that is not held is a pending or failed
+// upload, whose anchor stays the bucket as before. Any doubt keeps the bucket.
+func heldLocalAnchor(ctx context.Context, e ServerEntry, source string, anchor time.Time, tables []string) (time.Time, []string) {
+	if e.BaselineDir == "" || source == e.BaselineDir {
+		return anchor, tables
+	}
+	localAt, localTables, err := newestSnapshot(ctx, e.BaselineDir)
+	if err != nil || len(localTables) == 0 || !localAt.After(anchor) {
+		return anchor, tables
+	}
+	if held, err := baseline.UploadHeld(e.BaselineDir, reconstruct.SnapshotDirName(localAt)); err != nil || !held {
+		return anchor, tables
+	}
+	return localAt, localTables
+}
+
 // ChooseBackupMethod decides how the next scheduled run for e will be made,
 // and why, on a daemon with these gates. The rule, in order:
 //
@@ -1063,6 +1087,9 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 	// A server with NO local directory is refused above (#2431).
 	source := BaselineFoldSource(e)
 	anchor, tables, listErr := newestSnapshot(ctx, source)
+	if listErr == nil && len(tables) > 0 {
+		anchor, tables = heldLocalAnchor(ctx, e, source, anchor, tables)
+	}
 	if listErr != nil && errors.Is(listErr, fs.ErrNotExist) {
 		// A directory the first full backup has not created yet IS "no
 		// backup yet". Local sources only: an S3 listing answers with an

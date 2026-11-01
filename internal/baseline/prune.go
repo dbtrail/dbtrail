@@ -476,8 +476,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 const supersededHeldProbes = 3
 
 // supersededHeld returns the held candidates a NEWER snapshot confirmed in S3
-// supersedes (#2596): those the prune may remove past retention. Dani's call
-// (2026-11-01): a snapshot the upload interval kept on this machine is an
+// supersedes (#2596): those the prune may remove past retention. Decided on
+// purpose: a snapshot the upload interval kept on this machine is an
 // in-between point, and once a newer one is in S3 it goes with retention like
 // any other, instead of being kept forever as "the only copy" while the disk
 // fills. A held snapshot with nothing newer in S3 is kept.
@@ -485,7 +485,10 @@ const supersededHeldProbes = 3
 // The newest confirmed copy starts as the newest the candidate probes found;
 // then complete, readable, unheld snapshots newer than it are probed newest
 // first (keepers and recent ones included: being kept does not stop them
-// being the proof; one dated after now is not a copy, as in computeNewestN). A probe error stops the search, so an unreachable bucket
+// being the proof; one dated after now is not a copy, as in computeNewestN).
+// The newer one need not hold every table: the newest copy of each table is
+// protected by computeKeepers whatever happens here, so what goes is only an
+// in-between point. A probe error stops the search, so an unreachable bucket
 // keeps every held snapshot.
 func supersededHeld(ctx context.Context, snaps []localSnapshot, held map[string]bool, candidates []localSnapshot,
 	durable map[string]bool, probe durableProbe, now time.Time) map[string]bool {
