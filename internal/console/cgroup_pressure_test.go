@@ -51,6 +51,8 @@ func TestReadPressure(t *testing.T) {
 		wantIO     time.Duration
 		wantCPUErr string // substring; "" means read
 		wantIOErr  string
+		procs      map[string]string // cgroup.procs files; nil = every cgroup lists this process
+		prepare    func(t *testing.T, root string)
 	}{
 		{
 			name:    "own cgroup under a unit",
@@ -86,7 +88,7 @@ func TestReadPressure(t *testing.T) {
 			self:       "12:cpu,cpuacct:/" + svc + "\n0::/" + svc + "\n",
 			files:      map[string]string{svc + "/cpu.pressure": psi("11", ""), "cpu,cpuacct/" + svc + "/cpu.shares": "1024"},
 			wantCPU:    11 * time.Microsecond,
-			wantIOErr:  "io.pressure could not be read",
+			wantIOErr:  svc + "/io.pressure is not present",
 			wantCPUErr: "",
 		},
 		{
@@ -103,7 +105,63 @@ func TestReadPressure(t *testing.T) {
 			name:       "pressure files missing",
 			self:       "0::/" + svc + "\n",
 			files:      map[string]string{svc + "/cpu.weight": "100"},
-			wantCPUErr: "cpu.pressure could not be read", wantIOErr: "io.pressure could not be read",
+			wantCPUErr: svc + "/cpu.pressure is not present", wantIOErr: svc + "/io.pressure is not present",
+		},
+		{
+			// The own cgroup's directory is there without the counter (PSI
+			// switched off for it): the root's file belongs to another cgroup,
+			// the machine's on a host, and must not be read in its place.
+			name:       "own directory without the file does not fall back",
+			self:       "0::/" + svc + "\n",
+			files:      map[string]string{svc + "/cpu.weight": "100", "cpu.pressure": psi("999", ""), "io.pressure": psi("999", "")},
+			wantCPUErr: svc + "/cpu.pressure is not present", wantIOErr: svc + "/io.pressure is not present",
+		},
+		{
+			name:    "own file wins over the root's",
+			self:    "0::/" + svc + "\n",
+			files:   map[string]string{svc + "/cpu.pressure": psi("5", ""), svc + "/io.pressure": psi("6", ""), "cpu.pressure": psi("999", ""), "io.pressure": psi("999", "")},
+			wantCPU: 5 * time.Microsecond, wantIO: 6 * time.Microsecond,
+		},
+		{
+			// The host's /sys/fs/cgroup mounted into a container with its own
+			// namespace: "/" names the host's root, whose counters are the
+			// machine's, and whose cgroup.procs does not list this process.
+			name:       "a root that is not this process's",
+			self:       "0::/\n",
+			files:      map[string]string{"cpu.pressure": psi("999", ""), "io.pressure": psi("999", "")},
+			procs:      map[string]string{"cgroup.procs": "1\n17\n"},
+			wantCPUErr: "is not this process's own cgroup", wantIOErr: "is not this process's own cgroup",
+		},
+		{
+			name:       "no cgroup.procs to check against",
+			self:       "0::/" + svc + "\n",
+			files:      map[string]string{svc + "/cpu.pressure": psi("5", ""), svc + "/io.pressure": psi("6", "")},
+			procs:      map[string]string{},
+			wantCPUErr: "is not this process's own cgroup", wantIOErr: "is not this process's own cgroup",
+		},
+		{
+			// Above the namespace's root: cleaning "/../sibling" would read the
+			// sibling cgroup below the mount.
+			name:       "a path above the namespace",
+			self:       "0::/../sibling\n",
+			files:      map[string]string{"sibling/cpu.pressure": psi("5", ""), "sibling/io.pressure": psi("6", ""), "sibling/cgroup.procs": "4242\n"},
+			wantCPUErr: "outside this process's cgroup namespace", wantIOErr: "outside this process's cgroup namespace",
+		},
+		{
+			name:  "permission denied",
+			self:  "0::/" + svc + "\n",
+			files: map[string]string{svc + "/cpu.pressure": psi("5", ""), svc + "/io.pressure": psi("6", "")},
+			prepare: func(t *testing.T, root string) {
+				if os.Geteuid() == 0 {
+					t.Skip("root reads a mode-000 file")
+				}
+				for _, f := range []string{"cpu.pressure", "io.pressure"} {
+					if err := os.Chmod(filepath.Join(root, "sys/fs/cgroup", svc, f), 0); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			wantCPUErr: "permission denied", wantIOErr: "permission denied",
 		},
 		{
 			name:       "garbled",
@@ -126,8 +184,25 @@ func TestReadPressure(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			root := stagePressureRoot(t, tc.self, tc.files)
-			got := readPressure(root)
+			files := map[string]string{}
+			for k, v := range tc.files {
+				files[k] = v
+			}
+			// This process is listed in its own cgroup, unless the case says
+			// which cgroup.procs files exist.
+			if tc.procs == nil {
+				for _, d := range []string{".", svc} {
+					files[filepath.Join(d, "cgroup.procs")] = "1\n4242\n"
+				}
+			}
+			for k, v := range tc.procs {
+				files[k] = v
+			}
+			root := stagePressureRoot(t, tc.self, files)
+			if tc.prepare != nil {
+				tc.prepare(t, root)
+			}
+			got := readPressure(root, 4242)
 			check := func(what string, d time.Duration, errText string, wantD time.Duration, wantErr string) {
 				t.Helper()
 				if wantErr == "" {
@@ -161,8 +236,10 @@ func TestStallWords(t *testing.T) {
 		{"none", read(5 * time.Second), read(5 * time.Second), 10 * time.Minute, "0% of the run (0s of 10m0s)"},
 		{"a short run keeps milliseconds", read(0), read(450 * time.Millisecond), 1500 * time.Millisecond, "30% of the run (450ms of 1.5s)"},
 		// "some" is wall time with at least one task stalled, so it cannot
-		// pass the run; a reading that does is sampling skew, and says 100.
-		{"capped at the whole run", read(0), read(11 * time.Second), 10 * time.Second, "100% of the run (10s of 10s)"},
+		// pass the run by more than the two reads' skew.
+		{"skew is capped at the whole run", read(0), read(10*time.Second + 50*time.Millisecond), 10 * time.Second, "100% of the run (10s of 10s)"},
+		// More than skew past the run is two counters, or a broken one.
+		{"moved more than the run", read(0), read(11 * time.Second), 10 * time.Second, "unknown: the counter moved more than the run lasted"},
 		{"backwards", read(9 * time.Second), read(time.Second), time.Minute, "unknown: the counter went backwards"},
 		{"zero run", read(0), read(0), 0, "unknown: the run took no measurable time"},
 		{"unreadable before", PressureSample{CPUErr: "unknown: cpu.pressure could not be read", IOErr: "x"}, read(time.Second), time.Minute, "unknown: cpu.pressure could not be read"},

@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,12 +33,12 @@ type PressureSample struct {
 }
 
 // ReadPressure samples this process's own cgroup.
-func ReadPressure() PressureSample { return readPressure("/") }
+func ReadPressure() PressureSample { return readPressure("/", os.Getpid()) }
 
-func readPressure(root string) PressureSample {
+func readPressure(root string, pid int) PressureSample {
 	var s PressureSample
-	s.CPU, s.CPUErr = readStallTotal(root, "cpu.pressure")
-	s.IO, s.IOErr = readStallTotal(root, "io.pressure")
+	s.CPU, s.CPUErr = readStallTotal(root, "cpu.pressure", pid)
+	s.IO, s.IOErr = readStallTotal(root, "io.pressure", pid)
 	return s
 }
 
@@ -45,7 +46,14 @@ func readPressure(root string) PressureSample {
 // process's cgroup v2, found the way cpuPriorityOf finds cpu.weight
 // (ownCgroupFile). PSI exists only under cgroup v2: a v1-only layout has
 // nowhere to read it from.
-func readStallTotal(root, file string) (time.Duration, string) {
+//
+// The cgroup it reads must list pid in its cgroup.procs. A root cgroup's
+// pressure files are the whole machine's, and two layouts reach one with
+// nothing in the path to say so: the host's /sys/fs/cgroup mounted into a
+// container that has its own namespace ("0::/" then names the host's root),
+// and the fallback to the mount root. Without the check either would print
+// the machine's stall as this process's.
+func readStallTotal(root, file string, pid int) (time.Duration, string) {
 	b, err := os.ReadFile(filepath.Join(root, "proc/self/cgroup"))
 	if err != nil {
 		return 0, "unknown: /proc/self/cgroup could not be read"
@@ -57,7 +65,11 @@ func readStallTotal(root, file string) (time.Duration, string) {
 		}
 		path, body, err := ownCgroupFile(root, filepath.Join(root, "sys/fs/cgroup"), parts[2], file)
 		if err != nil {
-			return 0, "unknown: " + path + " could not be read"
+			return 0, "unknown: " + path + " " + readFailure(err)
+		}
+		if !listsPID(filepath.Join(root, filepath.Dir(path), "cgroup.procs"), pid) {
+			return 0, fmt.Sprintf("unknown: %s is not this process's own cgroup (its cgroup.procs does not list it), "+
+				"so its counter would count other processes", filepath.Dir(path))
 		}
 		total, ok := someTotal(body)
 		if !ok {
@@ -68,19 +80,63 @@ func readStallTotal(root, file string) (time.Duration, string) {
 	return 0, "unknown: the stall counter needs cgroup v2, and /proc/self/cgroup has no v2 line"
 }
 
-// ownCgroupFile reads file in the cgroup /proc/self/cgroup names (rel, below
-// base), and when that path does not exist, at base itself: inside a
-// container that shares the host's cgroup namespace the path names the
-// host's view, while the container's own cgroup is mounted at the root. The
-// path it returns is the one it read or failed on, with root trimmed off.
-func ownCgroupFile(root, base, rel, file string) (string, []byte, error) {
-	own := filepath.Join(base, filepath.Clean("/"+rel), file)
-	b, err := os.ReadFile(own)
-	if errors.Is(err, fs.ErrNotExist) {
-		own = filepath.Join(base, file)
-		b, err = os.ReadFile(own)
+// readFailure words why a cgroup file did not read: absent is what a
+// kernel without pressure stall information, or with it switched off for the
+// cgroup, looks like; a refusal is the account's, not the kernel's.
+func readFailure(err error) string {
+	switch {
+	case errors.Is(err, errCgroupOutside):
+		return "is outside this process's cgroup namespace"
+	case errors.Is(err, fs.ErrNotExist):
+		return "is not present"
+	case errors.Is(err, fs.ErrPermission):
+		return "could not be read: permission denied"
+	default:
+		return "could not be read"
 	}
-	return "/" + strings.TrimPrefix(strings.TrimPrefix(own, filepath.Clean(root)), "/"), b, err
+}
+
+// listsPID reports whether a cgroup.procs file lists pid.
+func listsPID(procs string, pid int) bool {
+	b, err := os.ReadFile(procs)
+	if err != nil {
+		return false
+	}
+	want := strconv.Itoa(pid)
+	for _, f := range strings.Fields(string(b)) {
+		if f == want {
+			return true
+		}
+	}
+	return false
+}
+
+// errCgroupOutside: /proc/self/cgroup names a path above the namespace's
+// root ("/../x"), which cleaning would turn into some OTHER cgroup below it.
+var errCgroupOutside = errors.New("cgroup path outside the namespace")
+
+// ownCgroupFile reads file in the cgroup /proc/self/cgroup names (rel, below
+// base), and when that cgroup's DIRECTORY does not exist, at base itself:
+// inside a container that shares the host's cgroup namespace the path names
+// the host's view, while the container's own cgroup is mounted at the root.
+// Only a missing directory falls back. A directory without the file is the
+// right cgroup without that counter, and the root's file would be another
+// cgroup's. The path it returns is the one it read or failed on, with root
+// trimmed off.
+func ownCgroupFile(root, base, rel, file string) (string, []byte, error) {
+	trim := func(p string) string {
+		return "/" + strings.TrimPrefix(strings.TrimPrefix(p, filepath.Clean(root)), "/")
+	}
+	if slices.Contains(strings.Split(rel, "/"), "..") {
+		return trim(filepath.Join(base, file)), nil, errCgroupOutside
+	}
+	dir := filepath.Join(base, filepath.Clean("/"+rel))
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		dir = base
+	}
+	own := filepath.Join(dir, file)
+	b, err := os.ReadFile(own)
+	return trim(own), b, err
 }
 
 // someTotal parses the total= field, in microseconds, of the "some" line.
@@ -112,6 +168,10 @@ func StallWords(before, after PressureSample, took time.Duration) (cpu, io strin
 		stallShare(before.IO, after.IO, before.IOErr, after.IOErr, took)
 }
 
+// stallSkew is how far past the run a difference may go and still be read
+// as the two reads' skew, capped at the whole run.
+const stallSkew = 100 * time.Millisecond
+
 func stallShare(before, after time.Duration, beforeErr, afterErr string, took time.Duration) string {
 	switch {
 	case beforeErr != "":
@@ -124,7 +184,11 @@ func stallShare(before, after time.Duration, beforeErr, afterErr string, took ti
 		return "unknown: the run took no measurable time"
 	}
 	// "some" is wall time with at least one task stalled, so it cannot pass
-	// the run; a difference that does is the two reads' own skew.
+	// the run by more than the two reads' own skew (microseconds). More than
+	// that is two different counters, or a broken one, not a measurement.
+	if after-before > took+stallSkew {
+		return "unknown: the counter moved more than the run lasted"
+	}
 	stalled := min(after-before, took)
 	unit := time.Millisecond
 	if took >= time.Minute {

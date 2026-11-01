@@ -543,9 +543,13 @@ var refreshPressure = console.ReadPressure
 //
 // The per-table lines already split each table's own time between reading
 // the index and folding; these say whether the machine let it go faster.
-// They are the whole daemon's (capture and the console share its cgroup), and
-// a fold blocked on a starved index MySQL waits on a socket, which neither
-// counts, so a slow run with both low points away from this process: to the
+// They are the whole cgroup's, over the whole of took: capture and the
+// console share it, so does another server's refresh running at the same
+// time, and so does the fold this run waited behind in the lane, whose stall
+// lands in this run's share while lane_wait says how long that was. A fold
+// blocked on a starved index MySQL in another container waits on a socket,
+// which neither counts (one in the same container, as in the demo image, is
+// counted), so a slow run with both low points away from this cgroup: to the
 // index, or to the source of its baseline.
 func refreshStallArgs(took, laneWait time.Duration, before, after console.PressureSample) []any {
 	cpu, disk := console.StallWords(before, after, took)

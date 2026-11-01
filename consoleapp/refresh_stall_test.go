@@ -16,15 +16,16 @@ import (
 // A published refresh says how long it took, how much of that it waited for
 // the snapshot lane, and how much of it the process spent stalled on CPU and
 // on storage, sampled on the two sides of the run: the first before the fold,
-// the second after it.
+// the second after the upload to the server's destination.
 func TestRunRefresh_publishedLineCarriesTheStallReadings(t *testing.T) {
 	stubGateReads(t)
-	root := stageBaselineRoot(t)
+	local := t.TempDir()
+	stubS3Fold(t, []string{"shop.orders"}, nil)
 	injectFold(t, 0, nil)
 
 	samples := []console.PressureSample{
-		{CPU: time.Second, IOErr: "unknown: /sys/fs/cgroup/io.pressure could not be read"},
-		{CPU: time.Hour, IO: time.Hour},
+		{CPU: time.Second, IOErr: "unknown: /sys/fs/cgroup/io.pressure is not present"},
+		{CPU: time.Second, IO: time.Hour},
 	}
 	var calls int
 	prevP := refreshPressure
@@ -34,10 +35,15 @@ func TestRunRefresh_publishedLineCarriesTheStallReadings(t *testing.T) {
 		return samples[min(calls, len(samples))-1]
 	}
 	fold := foldTables
-	var callsAtFold int
+	callsAtFold, callsAtUpload := -1, -1
 	foldTables = func(ctx context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		callsAtFold = calls
 		return fold(ctx, cfg)
+	}
+	upload := uploadSnapshot
+	uploadSnapshot = func(ctx context.Context, outputDir, dest, region string, retry bool) (int, error) {
+		callsAtUpload = calls
+		return upload(ctx, outputDir, dest, region, retry)
 	}
 
 	prev := slog.Default()
@@ -48,11 +54,12 @@ func TestRunRefresh_publishedLineCarriesTheStallReadings(t *testing.T) {
 	t.Cleanup(cancel)
 	sup := newBaselineSupervisor(ctx, t.TempDir(), baseline.DefaultLockMode)
 	sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
-	sup.runRefresh(refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d", BaselineDir: root},
-		refreshAt, time.Minute)
+	sup.runRefresh(refreshRequest{ServerID: "s", ServerName: "s", IndexDSN: "d",
+		BaselineDir: local, BaselineS3: "s3://bucket/backups/"}, refreshAt, time.Minute)
 
-	if callsAtFold != 1 || calls != 2 {
-		t.Fatalf("pressure read %d time(s) before the fold and %d in all, want 1 and 2", callsAtFold, calls)
+	if callsAtFold != 1 || callsAtUpload != 1 || calls != 2 {
+		t.Fatalf("pressure read %d time(s) before the fold, %d before the upload and %d in all, want 1, 1 and 2",
+			callsAtFold, callsAtUpload, calls)
 	}
 	var line string
 	for _, l := range strings.Split(buf.String(), "\n") {
@@ -66,11 +73,9 @@ func TestRunRefresh_publishedLineCarriesTheStallReadings(t *testing.T) {
 	t.Logf("published line: %s", line)
 	for _, want := range []string{
 		" took=", " lane_wait=0s",
-		// The fake's CPU counter moved an hour over a run of milliseconds:
-		// capped at the whole run.
-		`process_waiting_for_cpu="100% of the run (`,
-		// An unread counter says why, never 0%.
-		`process_waiting_for_disk="unknown: /sys/fs/cgroup/io.pressure could not be read"`,
+		`process_waiting_for_cpu="0% of the run (`,
+		// An unread counter says why, never 0%: here the first sample's.
+		`process_waiting_for_disk="unknown: /sys/fs/cgroup/io.pressure is not present"`,
 	} {
 		if !strings.Contains(line, want) {
 			t.Errorf("published line lacks %q", want)
