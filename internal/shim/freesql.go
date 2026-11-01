@@ -573,6 +573,20 @@ func (h *Handler) nameAsSource(res *mysql.Result, names []string, err error) {
 	}
 }
 
+// clientProbe reports whether stmt, failed with err, is a statement a client
+// sends on its own and expects to fail (#2565), so that the failure is not
+// counted as one of the source's: the mysql client (8.1 and later) sends
+// "select $$" on every connection to learn whether the server reads $$ as a
+// dollar quote, and ignores the error (client/mysql.cc,
+// server_supports_dollar_quote): 1064 where it does, 1054 (unknown column
+// '$$') on MySQL 8.0. Matched byte for byte and by error code, so a person's
+// own syntax error is never hidden: the client sends exactly these 9 bytes.
+func clientProbe(stmt string, err error) bool {
+	var me *mysql.MyError
+	return stmt == "select $$" && errors.As(err, &me) &&
+		(me.Code == mysql.ER_PARSE_ERROR || me.Code == mysql.ER_BAD_FIELD_ERROR)
+}
+
 // route is the routing ladder, one rung per reason a statement is MySQL's;
 // only an expensive SELECT on a fresh copy reaches the last one.
 func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.Result, error) {
@@ -597,7 +611,9 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 				var me *mysql.MyError
 				timedOut := errors.As(err, &me) && me.Code == mysql.ER_QUERY_INTERRUPTED &&
 					errors.Is(ctx.Err(), context.DeadlineExceeded)
-				answered(RouteMySQL, reason, qstr, took, true, timedOut)
+				// A client's own probe, whose error the client expects and
+				// ignores, is an answer and not a failure (#2565).
+				answered(RouteMySQL, reason, qstr, took, !clientProbe(qstr, err), timedOut)
 			case errors.Is(ctx.Err(), context.DeadlineExceeded):
 				// The statement's time ran out and it could not be stopped
 				// on the source, so the forwarder closed the socket: it
