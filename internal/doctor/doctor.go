@@ -357,6 +357,7 @@ func Build(parent context.Context, sourceDSN, indexDSN, schemasCSV string, index
 	report.add(checkRowMetadata(ctx, sourceDB))
 	report.add(checkBinlogRowValueOptions(ctx, sourceDB))
 	report.add(checkReplicationGrants(ctx, sourceDB))
+	report.add(checkFullReadLockGrants(ctx, sourceDB))
 	report.add(checkServerIDCollision(ctx, sourceDB, sourceDSN, indexDSN))
 	if !cfg.console {
 		report.add(checkFKCascades(sourceDB, schemas))

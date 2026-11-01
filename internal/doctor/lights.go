@@ -39,6 +39,7 @@ var checkLights = map[string]string{
 	"Statement capture (query_text)":               LightRows,
 	"Schema-drift detection (binlog_row_metadata)": LightRows,
 	ReplicationGrantsCheckName:                     LightPermissions,
+	FullReadLockGrantsCheckName:                    LightPermissions,
 	"Schema visibility":                            LightPermissions,
 	SchemaAccessCheckName:                          LightPermissions,
 	PrimaryKeyCheckName:                            LightKeys,
