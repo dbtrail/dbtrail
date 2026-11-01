@@ -320,6 +320,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// move the number this change exists to get right, in either direction.
 	// started stays for the RFC3339 stamp, which wants the wall clock.
 	elapsed := time.Now()
+	// Over the same span as took, upload included: what the published line
+	// says the process spent stalled during the run (refreshStallArgs).
+	stallBefore := refreshPressure()
 	integrityBefore := snapshotIntegrityCounts()
 	req.laneWait = new(time.Duration)
 	// Journaled from here (#2180), below the #1689 gate so a skipped cycle
@@ -403,6 +406,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// instead measures how long it takes to spawn a goroutine, which is
 	// microseconds no matter what the refresh costs.
 	took := time.Since(elapsed)
+	stallAfter := refreshPressure()
 	reportIntegrityChecks(req.ServerName, integrityBefore)
 	if err == nil {
 		gap.action, gap.reason = planNewTables(req, gap.all)
@@ -515,6 +519,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	case req.CarryForwardUnchanged && strings.HasPrefix(baselineFoldSource(req), "s3://"):
 		pub = append(pub, "reuse_unchanged", "not applicable: the previous snapshot is read from S3, and reusing a file means linking it on disk")
 	}
+	pub = append(pub, refreshStallArgs(took, *req.laneWait, stallBefore, stallAfter)...)
 	slog.Info("baseline refresh: published", pub...)
 	// ONE value for both, deliberately. Built twice, the sample this run leaves
 	// and the run it reports could disagree, and the disagreement would only
@@ -525,6 +530,31 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	}
 	reportRefreshDuration(req.ServerName, finished, prevPace)
 	s.refreshPaces[req.ServerID] = refreshSample(finished)
+}
+
+// refreshPressure samples this process's stall counters; tests replace it.
+var refreshPressure = console.ReadPressure
+
+// refreshStallArgs is where a published run's time went, for the line every
+// published run prints: the whole run, the part of it spent waiting for the
+// snapshot lane (behind another server's fold or a check), and the share of
+// it during which the process had a task ready to run but no core to run it
+// on, or waiting on storage.
+//
+// The per-table lines already split each table's own time between reading
+// the index and folding; these say whether the machine let it go faster.
+// They are the whole cgroup's, over the whole of took: capture and the
+// console share it, so does another server's refresh running at the same
+// time, and so does the fold this run waited behind in the lane, whose stall
+// lands in this run's share while lane_wait says how long that was. A fold
+// blocked on a starved index MySQL in another container waits on a socket,
+// which neither counts (one in the same container, as in the demo image, is
+// counted), so a slow run with both low points away from this cgroup: to the
+// index, or to the source of its baseline.
+func refreshStallArgs(took, laneWait time.Duration, before, after console.PressureSample) []any {
+	cpu, disk := console.StallWords(before, after, took)
+	return []any{"took", took, "lane_wait", laneWait,
+		"process_waiting_for_cpu", cpu, "process_waiting_for_disk", disk}
 }
 
 // refreshStatusWritten is called once a cycle's terminal status is written.
