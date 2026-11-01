@@ -27,6 +27,7 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		jsFunctionBody(t, js, "s3OnlyBackupWarning") +
 		jsFunctionBody(t, js, "s3RetentionBox") +
 		jsFunctionBody(t, js, "s3Cadence") +
+		jsFunctionBody(t, js, "s3CleanupBlock") +
 		jsFunctionBody(t, js, "s3RetentionConflicts")
 	// Dotted READS, not bare tokens: "value" also matches dir.value.trim()
 	// and "baseline_dir" matches the input's name: attribute, so a renamed
@@ -48,6 +49,8 @@ func TestBackupSettingsWireNamesMatchTheFrontend(t *testing.T) {
 		"srv.schedule_every_minutes", "srv.archive_s3",
 		// What reaches S3 follows the upload interval (#2596).
 		"srv.schedule_upload_every", "srv.schedule_upload_every_minutes",
+		// The S3 cleanup (#2596).
+		"srv.baseline_s3_retain", "srv.s3_retain_minutes", "srv.s3_retain_off", "srv.s3_retain_shared_with", "srv.s3_cleanup",
 		// How far back the kept count reaches, and a held folder (#1681).
 		"srv.keep_in_force", "srv.snapshot_every_minutes", "srv.prune_retain_minutes", "srv.keep_held",
 	} {

@@ -8410,6 +8410,10 @@ function s3ExpiryWords(v, srv, per30) {
     return { text: "Could not read this bucket's rules" + unknown + (why ? ": " + why : "") +
       ". If access was refused, the missing permission is s3:GetBucketLifecycleConfiguration.", warn: false };
   }
+  if (state === "none" && s3Cleaning(srv) && !(srv.s3_cleanup && srv.s3_cleanup.error)) {
+    // DBTrail removes them itself (#2596): no rule is not unbounded growth.
+    return { warn: false, text: "No rule in the bucket expires these snapshots; DBTrail removes those older than " + daysWords(srv.s3_retain_minutes) + "." };
+  }
   if (state === "none") {
     const c = v.conditional || 0;
     return { warn: true, text: "No rule in the bucket expires these snapshots. " +
@@ -8477,7 +8481,165 @@ function s3ExpiryLine(srv, per30) {
 // Mounted whether or not a schedule runs: the Create backup button, a
 // restore and the daemon-wide refresh all upload too, and a schedule that
 // stopped leaves its backups sitting there.
-function s3RetentionBox(srv, servers, daemonS3) {
+// s3Cleaning reports whether DBTrail removes this server's old snapshots from
+// S3 (#2596): an age set, in force (s3_retain_minutes is only sent when the
+// cleanup runs at it), and this process running the cleanup.
+function s3Cleaning(srv) {
+  return !!(srv && srv.baseline_s3_retain && srv.s3_retain_minutes > 0 && srv.prune_loop);
+}
+
+// daysWords is a minutes count as whole days ("7 days"), or hours below one.
+function daysWords(minutes) {
+  if (minutes >= 1440 && minutes % 1440 === 0) { const d = minutes / 1440; return d + " day" + (d === 1 ? "" : "s"); }
+  const h = Math.round(minutes / 60);
+  return h + " hour" + (h === 1 ? "" : "s");
+}
+
+// s3AgeDays reads a saved S3 age ("7d", "48h") as whole days for the field,
+// or null when it is not a whole number of days.
+function s3AgeDays(raw) {
+  const m = /^\s*(\d+)\s*([dh])\s*$/.exec(String(raw || ""));
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (m[2] === "d") return n;
+  return n % 24 === 0 ? n / 24 : null;
+}
+
+// noncurrentRuleFor is the bucket rule that expires the old versions a
+// removal leaves on a versioned bucket (#2596): DBTrail's deletes name no
+// version, so on such a bucket a removed snapshot stays, billed, as an old
+// version until a rule like this expires it.
+function noncurrentRuleFor(url, days) {
+  const s = s3Parts(url);
+  if (!s || !s.prefix || !Number.isInteger(days) || days < 1) return null;
+  return JSON.stringify({ Rules: [{
+    ID: "dbtrail-snapshots-old-versions-" + days + "d",
+    Status: "Enabled",
+    Filter: { Prefix: s.prefix + "/" },
+    NoncurrentVersionExpiration: { NoncurrentDays: days },
+  }] }, null, 2);
+}
+
+// s3CleanupBlock is "Delete from S3 after" (#2596): whether DBTrail removes
+// this server's old snapshots from S3, why not when the age is set and it
+// does not, what the last cleanup did, what versioning means for it, and
+// the field that sets it (settings:write, the tier of "Delete by age").
+function s3CleanupBlock(srv, readOnly) {
+  const box = el("div", { class: "s3-cleanup" });
+  const set = !!srv.baseline_s3_retain;
+  const on = set && srv.s3_retain_minutes > 0;
+  if (set && !on && srv.s3_retain_off === "no_loop") {
+    // Not a fault: this web interface runs no cleanup and cannot see the
+    // service's settings, so it says nothing about whether one runs.
+    box.append(el("p", { class: "form-hint", text: "Delete from S3 after: " + srv.baseline_s3_retain +
+      ". The DBTrail service runs the cleanup; this web interface does not, and cannot tell whether it removes anything." }));
+  } else if (set && !on) {
+    const names = (list) => list.join(", ");
+    const unset = srv.s3_retain_shared_with || [], unreadable = srv.s3_retain_shared_unreadable || [];
+    let why;
+    switch (srv.s3_retain_off) {
+      case "shared":
+        why = "this destination is shared with " + [
+          unset.length ? names(unset) + (unset.length === 1 ? ", which has" : ", which have") + " no age set" : "",
+          unreadable.length ? names(unreadable) + (unreadable.length === 1 ? ", whose age" : ", whose ages") + " cannot be read" : "",
+        ].filter(Boolean).join("; and with ") + ". Set one there too, or give this server its own prefix.";
+        break;
+      case "startup_destination": why = "this is the destination DBTrail was started with, which is never cleaned."; break;
+      case "not_s3": why = "this destination is not an s3:// one."; break;
+      case "too_short": why = "the saved age, " + srv.baseline_s3_retain + ", is shorter than a day. Type a number of days below and Save."; break;
+      default: why = "the saved age, " + srv.baseline_s3_retain + ", cannot be read. Type a number of days below and Save.";
+    }
+    box.append(el("p", { class: "form-msg err", text: "Delete from S3 after is set, but nothing is removed: " + why }));
+  }
+  if (on) {
+    const setDays = s3AgeDays(srv.baseline_s3_retain);
+    if (setDays !== null && srv.s3_retain_minutes > setDays * 1440) {
+      box.append(el("p", { class: "form-hint", text: "Removed at " + daysWords(srv.s3_retain_minutes) +
+        ", not " + daysWords(setDays * 1440) + ": S3 never keeps less than this machine (Delete by age), or another server sharing the destination asks for longer." }));
+    }
+    if (!srv.prune_loop) {
+      box.append(el("p", { class: "form-hint", text: "The DBTrail service runs the cleanup; this web interface does not." }));
+    }
+    const c = srv.s3_cleanup;
+    if (c) {
+      const when = utcLabel(c.at);
+      if (c.skipped) {
+        box.append(el("p", { class: c.error ? "form-msg err" : "form-hint", text: "Last cleanup " + when + ": skipped, a restore or a SQL file build was reading the destination." +
+          (c.error ? " The one before it stopped: " + firstLine(c.error) + (/[.!?]$/.test(firstLine(c.error)) ? "" : ".") : "") }));
+      } else if (c.error) {
+        box.append(el("p", { class: "form-msg err", text: "Last cleanup " + when + " stopped" + (c.removed ? " after removing " + c.removed + " snapshot(s)" : "") +
+          ": " + firstLine(c.error) + (/[.!?]$/.test(firstLine(c.error)) ? "" : ".") +
+          (c.access_denied ? " Removing needs s3:DeleteObject and s3:PutObject on the prefix." : "") +
+          " A snapshot it stopped in the middle of is finished by the next cleanup." }));
+      } else {
+        box.append(el("p", { class: "form-hint", text: "Last cleanup " + when + ": " +
+          (c.removed ? "removed " + c.removed + " snapshot(s)" : "nothing old enough to remove") +
+          (c.kept_newest ? ", kept " + c.kept_newest + " older one(s) that hold a table's newest copy" : "") +
+          (c.deferred ? "; " + c.deferred + " more " + (c.stopped === "busy" ? "wait for a restore or a SQL file build to finish" : "go in the next cleanups") : "") + "." }));
+      }
+    }
+    const rule = noncurrentRuleFor(srv.baseline_s3, 1);
+    const fold = el("details", { class: "form-advanced" });
+    fold.append(el("summary", { class: "form-adv-summary", text: "On a bucket with versioning" }),
+      el("p", { class: "form-hint", text: "A removed snapshot leaves every listing, but on a bucket with versioning (Object Lock included) it stays as an old version, and is billed, until a bucket rule expires old versions. DBTrail never removes a version." +
+        (rule ? " This rule expires them one day after removal:" : " These snapshots sit at the bucket root, where such a rule would cover everything in the bucket; put them under a prefix first.") }));
+    if (rule) fold.append(el("pre", { class: "stg-code", text: rule }));
+    box.append(fold);
+  }
+  // The field. Shown where a save can work: a registry this process may
+  // write, and a session with both permissions the save needs (the route's
+  // servers:write, the age's settings:write).
+  if (!readOnly && sessionMay("settings:write") && sessionMay("servers:write")) {
+    const days = el("input", { class: "input", type: "number", min: "1", step: "1", placeholder: "off", "aria-label": "Delete from S3 after (days)" });
+    const saved = s3AgeDays(srv.baseline_s3_retain);
+    days.value = saved !== null ? String(saved) : "";
+    const save = el("button", { class: "btn btn-sm", type: "button", text: "Save", "data-save": "s3-retain" });
+    const msg = el("p", { class: "form-msg err" });
+    msg.hidden = true;
+    // A saved age that is not whole days ("36h", or one that cannot be
+    // read) shows as an empty field: the field is then a replacement, and
+    // empty is not a change. Only a field that showed a number, cleared,
+    // turns the cleanup off.
+    const savedAs = saved !== null ? String(saved) : "";
+    const sync = () => { save.disabled = days.value.trim() === savedAs && !(days.validity && days.validity.badInput); };
+    days.addEventListener("input", sync);
+    sync();
+    if (set && saved === null) {
+      box.append(el("p", { class: "form-hint", text: "Saved as " + srv.baseline_s3_retain + ", which is not a whole number of days; type days to replace it." }));
+    }
+    save.onclick = async () => {
+      const t = days.value.trim();
+      // A number field answers "" for what it cannot read ("10d" in
+      // Firefox): that is a typing error, never "turn it off".
+      if ((days.validity && days.validity.badInput) || (t !== "" && (!/^\d+$/.test(t) || Number(t) < 1))) {
+        msg.textContent = "Enter a whole number of days, 1 or more, or nothing to keep every snapshot.";
+        msg.hidden = false;
+        return;
+      }
+      save.disabled = true;
+      msg.hidden = true;
+      try {
+        await saveServerSnapshotSettings(srv.id, { baseline_s3_retain: t === "" ? "" : t + "d" });
+      } catch (err) {
+        msg.textContent = (err && err.message) || String(err);
+        msg.hidden = false;
+        sync();
+        return;
+      }
+      toast("Saved for " + (srv.name || srv.id));
+      await renderSnapshots();
+    };
+    const row = el("label", { class: "field field--sm" }, el("span", { class: "field-label", text: "Delete from S3 after (days)" }), days);
+    box.append(el("div", { class: "bk-restore-row" }, row, save), msg,
+      el("p", { class: "form-hint", text: "Empty keeps every snapshot in S3. DBTrail removes only this server's snapshots under its own prefix, never the newest of a table, and never archived changes." }));
+  } else if (set && srv.s3_retain_off !== "no_loop") {
+    box.append(el("p", { class: "form-hint", text: "Delete from S3 after: " + srv.baseline_s3_retain + "." +
+      (readOnly ? "" : " Setting or raising it needs the settings:write permission.") }));
+  }
+  return box;
+}
+
+function s3RetentionBox(srv, servers, daemonS3, readOnly) {
   const wrap = el("div", { class: "s3-retention" });
   const s = s3Parts(srv.baseline_s3);
   // The stored interval gates the retention check whether or not the
@@ -8495,13 +8657,22 @@ function s3RetentionBox(srv, servers, daemonS3) {
   // takes none.
   const fulls = runs && srv.schedule_full_every && !srv.schedule_full_refusal ? backupsPer30Days(srv.schedule_full_every) : 0;
   const n = fulls ? runs + fulls - backupsPer30Days(lcmInterval(sent.every, srv.schedule_full_every)) : runs;
-  wrap.append(el("p", { class: "form-hint", text:
-    "Every snapshot sent to S3 is a full copy of every table, and DBTrail never removes one: each stays in the bucket until a rule in the bucket expires old snapshots." }));
+  // Whether DBTrail itself removes old snapshots here (#2596): said first,
+  // since the rest of the block (growth, the bucket rule) reads differently
+  // when it does.
+  const cleaning = s3Cleaning(srv);
+  wrap.append(el("p", { class: "form-hint", text: cleaning
+    ? "DBTrail removes this server's snapshots from S3 once they are older than " + daysWords(srv.s3_retain_minutes) +
+      ", and keeps the newest snapshot of each table however old."
+    : "Every snapshot sent to S3 is a full copy of every table, and DBTrail never removes one unless Delete from S3 after is set below: each stays in the bucket until a rule in the bucket expires old snapshots." }));
   if (!s) {
     wrap.append(el("p", { class: "form-msg err", text:
       "This is not an s3://bucket/prefix destination, so no snapshot can be uploaded to it and no bucket rule applies." }));
+    // The age saved for it removes nothing; said and settable here too.
+    wrap.append(s3CleanupBlock(srv, readOnly));
     return wrap;
   }
+  wrap.append(s3CleanupBlock(srv, readOnly));
   // Whether the bucket already expires them (#1680), read after the row is
   // drawn. Before the refusals below: a whole-bucket rule covers a
   // destination this page hands no rule out for.
@@ -8568,10 +8739,11 @@ function s3RetentionBox(srv, servers, daemonS3) {
     el("p", { class: "form-hint", text: "Save the rule as dbtrail-backups-rule.json. The first command shows the rules the bucket already has; merge this one into them, since the second command replaces every rule on the bucket, such as one that aborts unfinished uploads, or the one-year rule that bintrail init --s3-bucket sets when it creates a bucket." }),
     rule, cmd,
     el("p", { class: "form-hint", text:
-      "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on the Snapshots page. It expires by age alone: it cannot spare the only complete copy, nor a snapshot a restore is reading, and if the schedule stops it keeps expiring until none is left." }),
+      "The rule applies to " + s.prefix + "/ only, and to no archived changes configured on the Snapshots page. It expires by age alone: it cannot spare the only complete copy, nor a snapshot a restore is reading, and if the schedule stops it keeps expiring until none is left." +
+      (cleaning ? " With both this rule and Delete from S3 after, the shorter age wins, and the rule can expire the newest copy DBTrail keeps." : "") }),
     el("p", { class: "form-hint", text:
       "On a bucket with versioning the rule also expires old versions after the same number of days; under an Object Lock retention nothing can be expired before that retention ends." }),
-    el("p", { class: "form-hint", text: "DBTrail never deletes from S3 and never changes a bucket's rules; this one is yours to apply." }));
+    el("p", { class: "form-hint", text: "DBTrail never changes a bucket's rules; this one is yours to apply." }));
   details.append(body);
   wrap.append(details);
   return wrap;
@@ -9163,7 +9335,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   // (#1622): say how fast it grows, and hand over the rule to apply. The
   // server's OWN destination only: the daemon default is shared by every
   // server, and a rule on it is not this row's to hand out.
-  if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3));
+  if (srv.source === "server" && srv.baseline_s3) more.push(s3RetentionBox(srv, servers, daemonS3, readOnly));
   more.push(docsMore("settings/backups", "per-server", "snapshot locations per server"),
     // The strategy guide is the page the header table names for Snapshots;
     // the card that linked it from the setup half is gone (#1681).
@@ -9269,10 +9441,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       if (k !== was.keep) body.keep_newest = k;
     }
     try {
-      await api("/api/backup-settings/servers/" + encodeURIComponent(srv.id), {
-        method: "PUT",
-        body: body,
-      });
+      await saveServerSnapshotSettings(srv.id, body);
     } catch (err) {
       msg.textContent = (err && err.message) || String(err);
       msg.hidden = false;
@@ -9291,6 +9460,13 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   if (mayWrite) box.append(el("div", { class: "stg-cardfoot" }, save), msg);
   box.append(cnFine("More about this server", ...more));
   return box;
+}
+
+// saveServerSnapshotSettings is the one write of a server's snapshot settings
+// (PUT /api/backup-settings/servers/{id}): the location Save and the S3 age
+// Save both go through it. Fields left out of body keep their saved value.
+function saveServerSnapshotSettings(id, body) {
+  return api("/api/backup-settings/servers/" + encodeURIComponent(id), { method: "PUT", body: body });
 }
 
 // awsSigningSummary is the one sentence about what signs this machine's S3

@@ -44,6 +44,8 @@ func expiryFunctions(t *testing.T) string {
 		functionBody(t, js, "function s3Parts("),
 		functionBody(t, js, "function retentionTooShort("),
 		functionBody(t, js, "function s3Cadence("),
+		functionBody(t, js, "function s3Cleaning("),
+		functionBody(t, js, "function daysWords("),
 		functionBody(t, js, "function s3PrefixCovers("),
 		functionBody(t, js, "function s3ExpiryWords("),
 		functionBody(t, js, "function s3ExpiryLine("),

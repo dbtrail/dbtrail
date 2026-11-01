@@ -86,6 +86,25 @@ func TestRunS3PruneCycle(t *testing.T) {
 			t.Fatalf("calls = %+v asked %v: want none while busy, asked for both servers", *calls, asked)
 		}
 	})
+	t.Run("each cleanup is recorded for the settings page", func(t *testing.T) {
+		prev, prevBusy := pruneS3Fn, s3PruneBusyFn
+		t.Cleanup(func() { pruneS3Fn, s3PruneBusyFn = prev, prevBusy })
+		s3PruneBusyFn = nil
+		pruneS3Fn = func(_ context.Context, o reconstruct.PruneS3Options) (reconstruct.PruneS3Result, error) {
+			return reconstruct.PruneS3Result{Pruned: []string{"a", "b"}, KeptNewest: 1, Failed: "c"}, errors.New("AccessDenied")
+		}
+		one := []console.ServerEntry{{ID: "r", Name: "r", BaselineS3: "s3://b/rec", BaselineS3Retain: "7d"}}
+		runS3PruneCycle(context.Background(), one, "", 0, now)
+		got := console.LastS3CleanupForTest("s3://b/rec")
+		if got == nil || got.Removed != 2 || got.KeptNewest != 1 || got.Snapshot != "c" || got.Error == "" || got.At != now.UTC().Format(time.RFC3339) || got.AccessDenied {
+			t.Fatalf("recorded %+v", got)
+		}
+		s3PruneBusyFn = func([]string) bool { return true }
+		runS3PruneCycle(context.Background(), one, "", 0, now)
+		if got := console.LastS3CleanupForTest("s3://b/rec"); got == nil || !got.Skipped {
+			t.Fatalf("a skipped cleanup is not recorded: %+v", got)
+		}
+	})
 	t.Run("a failure on one destination does not stop the others", func(t *testing.T) {
 		var got []string
 		prev := pruneS3Fn

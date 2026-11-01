@@ -152,6 +152,19 @@ type backupSettingsServerDTO struct {
 	// BaselineS3Retain is the age past which this server's snapshots are
 	// removed from its S3 destination (#2596), empty when they are not.
 	BaselineS3Retain string `json:"baseline_s3_retain,omitempty"`
+	// S3RetainMinutes is the age the S3 cleanup runs at for this server's
+	// destination, when it runs: the longest among the servers sharing it,
+	// never shorter than the local "Delete by age". S3RetainOff says why it
+	// does not run although BaselineS3Retain is set (s3RetainState lists the
+	// reasons); for "shared", S3RetainSharedWith names the sharers with no
+	// age and S3RetainSharedUnreadable those whose age cannot be read.
+	S3RetainMinutes          int      `json:"s3_retain_minutes,omitempty"`
+	S3RetainOff              string   `json:"s3_retain_off,omitempty"`
+	S3RetainSharedWith       []string `json:"s3_retain_shared_with,omitempty"`
+	S3RetainSharedUnreadable []string `json:"s3_retain_shared_unreadable,omitempty"`
+	// S3Cleanup is what the last cleanup of the destination did, since this
+	// process started; omitted before the first.
+	S3Cleanup *S3CleanupRecord `json:"s3_cleanup,omitempty"`
 	// ScheduleUploadEvery is how often the schedule sends a snapshot to S3
 	// (#2596), empty when every run does, and its minutes as Go parses them.
 	// What reaches the bucket follows it, not the runs: the growth count and
@@ -343,6 +356,10 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending}
 			}
 		}
+	}
+	dto.S3RetainMinutes, dto.S3RetainOff, dto.S3RetainSharedWith, dto.S3RetainSharedUnreadable = s.s3RetainState(e)
+	if e.BaselineS3 != "" {
+		dto.S3Cleanup = lastS3Cleanup(e.BaselineS3)
 	}
 	if r := s.localRetentionOf(e.ID); r != nil {
 		dto.KeepInForce = r.KeepNewest

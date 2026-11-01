@@ -72,12 +72,21 @@ func runS3PruneCycle(ctx context.Context, entries []console.ServerEntry, globalS
 		if s3PruneBusyFn != nil && s3PruneBusyFn(ids) {
 			slog.Info("snapshot S3 cleanup: a restore or a SQL file build is reading this destination; it is cleaned next time",
 				"destination", dest)
+			console.RecordS3Cleanup(dest, console.S3CleanupRecord{At: now.UTC().Format(time.RFC3339), Skipped: true})
 			continue
 		}
 		// Asked again before each snapshot: a run can take minutes, and a
 		// restore that starts in it reads an old snapshot it may be removing.
 		proceed := func() bool { return s3PruneBusyFn == nil || !s3PruneBusyFn(ids) }
 		res, err := pruneS3Fn(ctx, reconstruct.PruneS3Options{S3URL: dest, Retain: age, Now: now, Proceed: proceed})
+		// For the settings page, which shows the last cleanup of the
+		// destination beside the age.
+		rec := console.S3CleanupRecord{At: now.UTC().Format(time.RFC3339), Removed: len(res.Pruned),
+			KeptNewest: res.KeptNewest, Deferred: res.Deferred, Stopped: res.Stopped}
+		if err != nil {
+			rec.Error, rec.Snapshot, rec.AccessDenied = err.Error(), res.Failed, storage.IsAccessDenied(err)
+		}
+		console.RecordS3Cleanup(dest, rec)
 		if res.Deferred > 0 && err == nil {
 			switch res.Stopped {
 			case "busy":
