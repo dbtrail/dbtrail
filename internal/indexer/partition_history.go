@@ -37,7 +37,7 @@ const DDLPartitionHistory = `CREATE TABLE IF NOT EXISTS partition_history (
     history_known      TINYINT UNSIGNED NOT NULL COMMENT '1 = recorded from the creation of binlog_events, so every drop since is in dropped_below; 0 = the history before this row is unknown (a restored index). No row = an index created before this record existed (#2606)',
     created_unix       BIGINT UNSIGNED  NOT NULL COMMENT 'when binlog_events was created, UTC epoch seconds; its first partition is this hour',
     dropped_below_unix BIGINT UNSIGNED  DEFAULT NULL COMMENT 'upper bound of the highest partition rotation ever dropped, UTC epoch seconds, written BEFORE the drop; NULL = none dropped',
-    capture_from_file  VARCHAR(255)     DEFAULT NULL COMMENT 'source binlog coordinate the capture holds every event from: written by a capture that starts with no checkpoint, before its first one, so it only moves forward; NULL = capture never started, or its start was not read',
+    capture_from_file  VARCHAR(255)     DEFAULT NULL COMMENT 'source binlog coordinate the capture holds every event from: written by the last capture that started with no checkpoint, before its first one (a later one replaces it, earlier or later); NULL = capture never started, or its start was not read',
     capture_from_pos   BIGINT UNSIGNED  DEFAULT NULL,
     CONSTRAINT partition_history_single_row CHECK (id = 1)
 ) ENGINE=InnoDB`
@@ -78,7 +78,8 @@ func recordPartitionHistoryIfNew(ctx context.Context, db *sql.DB, now time.Time)
 // starts with no checkpoint holds every event from. It runs BEFORE that
 // capture's first checkpoint: a crash between the two leaves no checkpoint,
 // so the next run starts fresh and records again, and a later fresh start
-// (stream_state lost or reset) moves it forward. An empty file records that
+// (stream_state lost or reset) replaces it with its own start, wherever that
+// is: a start further back reads everything from there again. An empty file records that
 // the coordinate is not known, which readers treat as an index they cannot
 // vouch for. An index with no record (or no table) is left as it is.
 func RecordCaptureStart(ctx context.Context, db *sql.DB, file string, pos uint64) error {

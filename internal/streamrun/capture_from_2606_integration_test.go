@@ -19,6 +19,10 @@ import (
 // the run began (a coordinate before it would vouch for transactions the set
 // already held, which never stream), and not after the position once the run
 // has checkpointed.
+//
+// A row is written to the source right before that read: the recorded
+// coordinate must be past it. The dedup anchor, read before the start set,
+// is not, so a start that reused it fails here.
 func runFreshStartRecordsCaptureFrom(t *testing.T, src dupSource) {
 	t.Helper()
 	ctx := context.Background()
@@ -35,6 +39,14 @@ func runFreshStartRecordsCaptureFrom(t *testing.T, src dupSource) {
 		return query.BinlogPos{File: f, Pos: uint64(p)}
 	}
 	before := pos(src.db)
+	var written query.BinlogPos
+	real := captureFromPosition
+	t.Cleanup(func() { captureFromPosition = real })
+	captureFromPosition = func(db *sql.DB) (string, uint32, error) {
+		testutil.MustExec(t, src.db, "INSERT INTO orders (amount) VALUES (1.00)")
+		written = pos(src.db)
+		return real(db)
+	}
 	cfg := src.config(indexName)
 	cfg.Checkpoint = 3600
 	if err := runOneUntil(t, cfg, false, nil, func() bool {
@@ -55,8 +67,14 @@ func runFreshStartRecordsCaptureFrom(t *testing.T, src dupSource) {
 	if from.File == "" {
 		t.Fatalf("no capture start recorded: %+v", h)
 	}
+	if written.File == "" {
+		t.Fatal("the capture start was not read through captureFromPosition")
+	}
 	if !before.AtOrBefore(from) || !from.AtOrBefore(after) {
 		t.Errorf("capture start %v, want between %v (before the run) and %v (after it)", from, before, after)
+	}
+	if !written.AtOrBefore(from) {
+		t.Errorf("capture start %v is before %v, the row written just before it was read: a coordinate read before the start set", from, written)
 	}
 }
 

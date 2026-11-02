@@ -1230,6 +1230,12 @@ func emptyAsWord(set string) string {
 	return set
 }
 
+// captureFromPosition reads the source's binlog position for the capture
+// start a fresh GTID run records (#2606); a variable so a test can write to
+// the source just before it, which only a read made after the start set
+// sees.
+var captureFromPosition = config.CurrentBinlogPosition
+
 // gtidStartAnchor records the source's binlog coordinates for a fresh
 // GTID-mode start, so its first checkpoint carries a binlog_file. Without one
 // the checkpoint has an empty binlog_file until the first row event, both resume
@@ -3238,7 +3244,7 @@ func oneRun(ctx context.Context, cfg Config) error {
 		fromFile, fromPos := state.safeFile, state.safePos
 		if mode == "gtid" {
 			fromFile, fromPos = "", 0
-			if f, p, err := config.CurrentBinlogPosition(sourceDB); err != nil {
+			if f, p, err := captureFromPosition(sourceDB); err != nil {
 				slog.Warn("could not read the source's binlog position at a fresh GTID start; fresh mode will measure this index by its oldest partition",
 					"error", err)
 			} else {
