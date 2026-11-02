@@ -928,7 +928,10 @@ func (r *renderer) cell(v any, typ string) any {
 			return x.UTC().Format(time.RFC3339Nano)
 		}
 	case []byte:
-		if utf8.Valid(x) {
+		// A GEOMETRY (built into the engine since DuckDB 1.5) arrives as its
+		// WKB bytes, which can be valid UTF-8 (POINT(0 0) is), so it is always
+		// hex rather than read as text.
+		if utf8.Valid(x) && typ != "GEOMETRY" {
 			return r.text(string(x))
 		}
 		return r.text("0x" + strings.ToUpper(hex.EncodeToString(x)))
