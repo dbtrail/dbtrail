@@ -538,7 +538,7 @@ func sessionErr(format string, args ...any) wireResult {
 }
 
 // sandboxSettings are the DuckDB settings the lock-down sets, verified to
-// exist on DuckDB v1.4.5 (TestSandboxSettingsExistInPinnedEngine keeps that
+// exist on DuckDB v1.4.5 and v1.5.6 (TestSandboxSettingsExistInPinnedEngine keeps that
 // true across engine bumps). allowed_paths (single files) also exists there
 // and is not needed: the copy is whole directories.
 var sandboxSettings = []string{
@@ -950,18 +950,22 @@ func (r *renderer) cell(v any, typ string) any {
 			out[k] = r.cell(e, "")
 		}
 		return out
-	case duckdb.Map:
-		// A MAP is the driver's own map type, keyed by any value. Rendered
-		// like a STRUCT, each key by its cell text, so the values inside go
-		// through the same rules (a DECIMAL keeps its scale) and the cell is
-		// the JSON object its column is declared as.
-		out := make(map[string]any, len(x))
-		for k, e := range x {
+	case duckdb.OrderedMap:
+		// A MAP is the driver's own map type, keyed by any value (since
+		// DuckDB 1.5 an OrderedMap; it used to be duckdb.Map, which the
+		// driver no longer hands over). Rendered like a STRUCT, each key by
+		// its cell text, so the values inside go through the same rules (a
+		// DECIMAL keeps its scale) and the cell is the JSON object its column
+		// is declared as. Without this case the value would reach the
+		// fmt.Stringer case below and come out as "OrderedMap{a: 10}".
+		keys, vals := x.Keys(), x.Values()
+		out := make(map[string]any, len(keys))
+		for i, k := range keys {
 			key, ok := r.cell(k, "").(string)
 			if !ok {
 				key = fmt.Sprint(r.cell(k, ""))
 			}
-			out[key] = r.cell(e, "")
+			out[key] = r.cell(vals[i], "")
 		}
 		return out
 	case duckdb.Union:

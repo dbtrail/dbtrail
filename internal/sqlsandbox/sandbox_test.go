@@ -605,12 +605,12 @@ func TestRun_copyDirThatIsASymlinkAdmitsTheResolvedDir(t *testing.T) {
 	}
 }
 
-// Canary for the documented limit: a symbolic link planted INSIDE the copy
-// that points outside is readable through it, because DuckDB compares the
-// path text. This test pins the current engine's behavior so a DuckDB bump
-// that starts resolving links fails loudly here, and the package comment
-// and the PR record get updated instead of silently going stale.
-func TestRun_symlinkInsideCopyIsReadable_knownLimit(t *testing.T) {
+// A symbolic link planted INSIDE the copy that points outside is refused.
+// On DuckDB 1.4 it was readable (allowed_directories compared the path
+// text, the limit PR #1955 documented); 1.5 resolves the path first. This
+// pins the refusal, so an engine that went back to comparing text would
+// fail here instead of reopening the read in silence.
+func TestRun_symlinkInsideCopyIsRefused(t *testing.T) {
 	f := newCopyFixture(t)
 	outsideDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("outside"), 0o600); err != nil {
@@ -621,11 +621,11 @@ func TestRun_symlinkInsideCopyIsReadable_knownLimit(t *testing.T) {
 	}
 	r := newTestRunner(t, testLimits())
 	res, err := r.Run(context.Background(), f.job("SELECT content FROM read_text('"+filepath.Join(f.archiveRoot, "leak", "secret.txt")+"')"))
-	if err != nil {
-		t.Fatalf("DuckDB now refuses a symbolic link inside the copy (%v): the limit documented in the package comment and in PR #1955 no longer holds, update both and turn this test into the refusal assertion", err)
+	if err == nil {
+		t.Fatalf("a symbolic link inside the copy that points outside was read (rows = %#v); want the engine's refusal", res.Rows)
 	}
-	if res.Rows[0][0] != "outside" {
-		t.Errorf("rows = %#v", res.Rows)
+	if !strings.Contains(err.Error(), "Cannot access file") {
+		t.Errorf("err = %v, want DuckDB's refusal to access the file", err)
 	}
 }
 

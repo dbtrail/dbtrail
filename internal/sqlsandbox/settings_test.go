@@ -17,8 +17,8 @@ import (
 // that refuses every query (or, worse, one that silently lost a belt because
 // someone made the SET best-effort).
 //
-// Verified on DuckDB v1.4.5 (the 1.4 LTS line, see TestDuckDBEngineOnLTSLine
-// in internal/duckdbutil).
+// Verified on DuckDB v1.4.5 and v1.5.6 (the pinned line, see
+// TestDuckDBEngineOnPinnedLine in internal/duckdbutil).
 func TestSandboxSettingsExistInPinnedEngine(t *testing.T) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
@@ -116,14 +116,17 @@ func TestLockdownEngineRefusesInstallAndOutsideReads(t *testing.T) {
 }
 
 // knownDuckDBTableFunctions is every duckdb_* table function the pinned
-// engine (v1.4.5) exposes. The allowlist admits that prefix as a whole
+// engine (v1.5.6) exposes. The allowlist admits that prefix as a whole
 // because every one of these is a catalog or introspection read; a future
 // engine that adds a duckdb_* function with a side effect would be admitted
 // by the prefix rule silently, so this test turns the addition into a loud
 // review: check what the new function does, then extend this list.
+// duckdb_coordinate_systems came with 1.5: it lists the coordinate
+// reference systems the engine knows (name, authority, PROJJSON, WKT), a
+// catalog read like the others.
 var knownDuckDBTableFunctions = []string{
 	"duckdb_approx_database_count", "duckdb_columns", "duckdb_connection_count",
-	"duckdb_constraints", "duckdb_databases", "duckdb_dependencies", "duckdb_extensions",
+	"duckdb_constraints", "duckdb_coordinate_systems", "duckdb_databases", "duckdb_dependencies", "duckdb_extensions",
 	"duckdb_external_file_cache", "duckdb_functions", "duckdb_indexes", "duckdb_keywords",
 	"duckdb_log_contexts", "duckdb_logs", "duckdb_memory", "duckdb_optimizers",
 	"duckdb_prepared_statements", "duckdb_schemas", "duckdb_secret_types", "duckdb_secrets",
@@ -172,7 +175,15 @@ func TestDuckDBPrefixedTableFunctionsArePinned(t *testing.T) {
 //
 // ICU stays statically linked: the views read time zones through it (AT TIME
 // ZONE, views.writeLivePreamble), and an air-gapped host cannot download it.
+//
+// HOME points at an empty directory for the check. Since DuckDB 1.5 an icu
+// that the DuckDB CLI installed under ~/.duckdb/extensions/<version> takes
+// the place of the linked one at startup (install_mode REPOSITORY), so on a
+// developer machine with such a copy the check would read that file instead
+// of this binary. 1.4 kept reporting the linked one. The copy is the same
+// signed release, already on disk, so an air-gapped host is not affected.
 func TestLockdown_collationComesFromTheBinary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	stmts := lockdownStatements([]string{t.TempDir()}, spillSpec{})
 	index := func(prefix string) int {
 		for i, s := range stmts {

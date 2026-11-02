@@ -11,8 +11,9 @@
 // child's whole process group. Nothing the child does can reach the parent's
 // memory, file handles or DuckDB sessions.
 //
-// Why the session is locked (all verified on DuckDB v1.4.5, the pinned 1.4
-// LTS line; see lockdownStatements for what each setting blocks): the copy is
+// Why the session is locked (all verified on DuckDB v1.4.5, and the tests
+// that pin it pass on v1.5.6, the pinned line; see lockdownStatements for
+// what each setting blocks): the copy is
 // plain Parquet on the index host's disk, next to credentials, other
 // customers' backups and the operator's home directory. The worker opens an
 // in-memory DuckDB, admits only the copy directories, turns external access
@@ -34,13 +35,12 @@
 // v1 reads a LOCAL copy. A copy that lives only on S3 is refused with
 // ErrCopyNotLocal; the worker never loads httpfs or opens the network.
 //
-// One limit to know: DuckDB checks allowed_directories against the path TEXT,
-// not against where it resolves, so a symbolic link planted INSIDE the copy
-// that points outside is readable through it (verified on 1.4.5). The copy
-// is written by the daemon and owned by the operator, so that link has to be
-// put there on purpose; the parent admits a copy directory that is itself a
-// link by also allowing its resolved path (a linked backup directory is an
-// ordinary setup), and a link below it stays out of scope here.
+// A symbolic link planted INSIDE the copy that points outside is refused:
+// since 1.5 DuckDB checks allowed_directories against where a path resolves
+// (verified on 1.5.6; on 1.4.5 it compared the path text and read through
+// the link, the limit this comment used to document). The parent admits a
+// copy directory that is itself a link by also allowing its resolved path
+// (a linked backup directory is an ordinary setup).
 //
 // Why the process is also bounded from outside DuckDB: memory_limit bounds
 // the buffer manager, not the process (a single huge string is built outside
