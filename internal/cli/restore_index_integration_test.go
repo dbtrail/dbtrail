@@ -97,6 +97,12 @@ func TestIntegrationRestoreIndex_roundTrip(t *testing.T) {
 	if events != 3 {
 		t.Fatalf("restored events = %d, want 3", events)
 	}
+	// An index built from archives holds only their hours: its history is
+	// unknown, never one a reader may treat as complete from its start
+	// (#2606).
+	if h, err := indexer.ReadPartitionHistory(ctx, dstDB, dstName); err != nil || h.Known {
+		t.Fatalf("restored index partition history = %+v, %v; want unknown", h, err)
+	}
 	// event_id identity survives the round trip (MergeResults dedups by it).
 	var maxSrc, maxDst int64
 	if err := srcDB.QueryRow("SELECT MAX(event_id) FROM binlog_events").Scan(&maxSrc); err != nil {

@@ -866,8 +866,15 @@ func listPartitions(ctx context.Context, db *sql.DB, dbName string) ([]partition
 	return partitions, rows.Err()
 }
 
-// dropPartitions drops one or more named partitions in a single ALTER TABLE statement.
+// dropPartitions drops one or more named partitions in a single ALTER TABLE
+// statement. The index's partition history records the drop FIRST (#2606):
+// a reader that finds the record knows the index may lack events before its
+// bound, and one whose drop then failed only refuses more. A drop the record
+// cannot be written for does not run.
 func dropPartitions(ctx context.Context, db *sql.DB, dbName string, names []string, stillSafe func(context.Context) error) error {
+	if err := indexer.MarkPartitionsDropped(ctx, db, dbName, names); err != nil {
+		return err
+	}
 	q := fmt.Sprintf("ALTER TABLE `%s`.`binlog_events` DROP PARTITION %s",
 		dbName, strings.Join(names, ", "))
 	return alterBinlogEvents(ctx, db, q, stillSafe)

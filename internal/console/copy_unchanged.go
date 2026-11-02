@@ -781,9 +781,14 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	if err != nil {
 		return unreadable("the index's partitions", err)
 	}
-	oldest := status.OldestLivePartitionHour(parts)
-	if oldest.IsZero() || oldest.After(floor) {
-		return "the index no longer holds every change since the snapshot (older partitions were rotated out), so it cannot say nothing changed"
+	anchors := make([]query.BinlogPos, len(cuts))
+	for i := range cuts {
+		anchors[i] = cuts[i].anchor
+	}
+	if lacks, err := indexMayLackSince(ctx, b.db, b.dbName, parts, floor, oldestSince, anchors); err != nil {
+		return unreadable("the index's partition history", err)
+	} else if lacks {
+		return "the index no longer holds every change since the snapshot (older partitions were rotated out, or the index began after the snapshot), so it cannot say nothing changed"
 	}
 	// And the hours rotation took from below the floors (#2187). A change
 	// indexed late lands in an old hour, the next one rotation archives and
