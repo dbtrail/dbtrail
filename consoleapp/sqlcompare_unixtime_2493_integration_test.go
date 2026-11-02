@@ -199,6 +199,34 @@ func unixTimeCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	if got := answerText(on, bucket); !strings.HasPrefix(got, "copy|") {
 		t.Errorf("with autocommit on: routed %s, want it answered by the copy", got)
 	}
+	// And within one session, as an application runs it: a COMMIT under
+	// autocommit off starts the next transaction, SET autocommit=1 ends it.
+	one, err := openRaw(t, withZone(portDSN, "+00:00")).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer one.Close()
+	side := func(step string) string {
+		t.Helper()
+		var who string
+		if err := one.QueryRowContext(context.Background(), bucket).Scan(&who, new(sql.NullString), new(sql.NullString)); err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return who
+	}
+	for _, step := range []struct{ stmt, want string }{
+		{"SET autocommit=0", "live"},
+		{"COMMIT", "live"},
+		{"ROLLBACK", "live"},
+		{"SET autocommit=1", "copy"},
+	} {
+		if _, err := one.ExecContext(context.Background(), step.stmt); err != nil {
+			t.Fatalf("%s: %v", step.stmt, err)
+		}
+		if got := side(step.stmt); got != step.want {
+			t.Errorf("one session, after %s: answered by %s, want %s", step.stmt, got, step.want)
+		}
+	}
 
 	// What MySQL answered was the copy's decision every time, never its
 	// fault: the NULL and the zero date the UNIX_TIMESTAMP macro declines
