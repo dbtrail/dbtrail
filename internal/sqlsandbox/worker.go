@@ -325,6 +325,13 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	if _, err := conn.ExecContext(ctx, unixTimeMacros); err != nil {
 		return sessionErr("define UNIX_TIMESTAMP and FROM_UNIXTIME: %v", err)
 	}
+	// And MySQL's NOW(), CURDATE(), UTC_TIMESTAMP() and UTC_DATE() for a
+	// client that writes MySQL (#2611), which replace DuckDB's now().
+	if job.MySQLClock {
+		if _, err := conn.ExecContext(ctx, nowMacros); err != nil {
+			return sessionErr("define NOW, CURDATE, UTC_TIMESTAMP and UTC_DATE: %v", err)
+		}
+	}
 	// The client's time zone (the port's SET time_zone), after the views
 	// script, which pins UTC, and before the lock, after which no SET runs. A
 	// zone the engine does not know refuses the statement by name: running it

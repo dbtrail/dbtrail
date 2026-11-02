@@ -141,8 +141,10 @@ func (a *askedTypes) ColumnVeto(dates, whole []string, star bool) string {
 	return ""
 }
 
-func (a *askedTypes) DistinctVeto(safe, other []string) string { return "" }
+func (a *askedTypes) DistinctVeto(safe, other []string) string                      { return "" }
 func (a *askedTypes) UnixTimeVeto(dates, notDates, whole, notWhole []string) string { return "" }
+func (a *askedTypes) CallsNow() bool                                                { return false }
+func (a *askedTypes) DateComparedColumns() []string                                 { return nil }
 
 func (a *askedTypes) NameVeto(names []string) string {
 	a.nameCalls++

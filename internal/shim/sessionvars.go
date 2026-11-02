@@ -57,7 +57,8 @@ type sessionVars struct {
 
 // session is the copy's side of the settings: what a statement runs under.
 func (v sessionVars) session() sqlsandbox.Session {
-	s := sqlsandbox.Session{TimeZone: v.duckZone}
+	// A MySQL client writes MySQL's NOW() and CURDATE() (#2611).
+	s := sqlsandbox.Session{TimeZone: v.duckZone, MySQLClock: true}
 	if v.selectLimit > 0 {
 		s.SelectLimit = math.MaxInt
 		if v.selectLimit < math.MaxInt {

@@ -233,10 +233,10 @@ func TestVeto_nulByteIsNotAVeto(t *testing.T) {
 // The new vetoes are named after the ones that were already there.
 func TestVeto_2122_olderVetoesAreNamedFirst(t *testing.T) {
 	for stmt, want := range map[string]string{
-		"SELECT NOW() + 0x10":  "NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP",
-		"SELECT CURDATE() + 1": "NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP",
-		"SELECT x'41' || ~1":   "|| (string concatenation on the copy, logical OR on MySQL)",
-		"SELECT x'4\\1'":       vetoBackslash,
+		"SELECT CURTIME() + 0x10": vetoNowKeyword,
+		"SELECT CURRENT_DATE + 1": vetoNowKeyword,
+		"SELECT x'41' || ~1":      "|| (string concatenation on the copy, logical OR on MySQL)",
+		"SELECT x'4\\1'":          vetoBackslash,
 	} {
 		if got := Veto(stmt); got != want {
 			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)

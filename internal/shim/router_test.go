@@ -30,7 +30,15 @@ type fakeRouter struct {
 	// run, as a source whose sessions open with autocommit off reports it
 	// only in the first answer of the connection Decide opens (#2607).
 	inTxnAfterDecide bool
-	useDBErr   error
+	// clockFrozenAt, when set, is the source session's SET timestamp
+	// (#2611); clockOff moves its clock that many seconds from this host's.
+	clockFrozenAt float64
+	clockOff      float64
+	clockProbes   int
+	// clockAnswer, when set, is the probe's answer instead: its rows, or
+	// its failure.
+	clockAnswer func() ([][]any, error)
+	useDBErr    error
 	// forwardErr, when set, is what Forward answers (MySQL's own error).
 	forwardErr error
 	// forwardWaits makes Forward wait for its context to end before it
@@ -207,6 +215,22 @@ func (r *fakeRouter) Forward(ctx context.Context, stmt string, sink readrouter.R
 		}
 		return sourceRows(sink, []string{"tz", "mode", "lim", "lc", "div", "ain", "big", "cs", "csconn", "coll", "probe"}, [][]any{src.sessionRow(stmt)})
 	}
+	if stmt == clockProbeSQL {
+		r.clockProbes++
+		if r.clockAnswer != nil {
+			rows, err := r.clockAnswer()
+			if err != nil {
+				return nil, err
+			}
+			return sourceRows(sink, []string{"lag", "ts"}, rows)
+		}
+		now := float64(time.Now().UnixMicro())/1e6 + r.clockOff
+		lag, ts := 0.0, now
+		if r.clockFrozenAt != 0 {
+			lag, ts = r.clockFrozenAt-now, r.clockFrozenAt
+		}
+		return sourceRows(sink, []string{"lag", "ts"}, [][]any{{[]byte(strconv.FormatFloat(lag, 'f', 6, 64)), []byte(strconv.FormatFloat(ts, 'f', 6, 64))}})
+	}
 	r.forwarded = append(r.forwarded, stmt)
 	if r.forwardErr != nil {
 		return nil, r.forwardErr
@@ -263,7 +287,7 @@ func TestRouter_forwardsEverythingButExpensiveSelects(t *testing.T) {
 		{"not a select", "SHOW TABLES", fakeRouter{toCopy: true}, fresh, time.Minute, "mysql", true},
 		{"a write", "UPDATE t SET a = 1", fakeRouter{toCopy: true}, fresh, time.Minute, "mysql", true},
 		{"handshake noise", "SELECT @@version_comment LIMIT 1", fakeRouter{toCopy: true}, fresh, time.Minute, "mysql", true},
-		{"vetoed", "SELECT NOW()", fakeRouter{toCopy: true}, fresh, time.Minute, "mysql", true},
+		{"vetoed", "SELECT CURTIME()", fakeRouter{toCopy: true}, fresh, time.Minute, "mysql", true},
 		{"in transaction", "SELECT count(*) FROM t", fakeRouter{toCopy: true, inTxn: true}, fresh, time.Minute, "mysql", true},
 		{"copy age unknown", "SELECT count(*) FROM t", fakeRouter{toCopy: true}, time.Time{}, time.Minute, "mysql", false},
 		{"copy too old", "SELECT count(*) FROM t", fakeRouter{toCopy: true}, time.Now().Add(-time.Hour), time.Minute, "mysql", false},

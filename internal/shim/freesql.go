@@ -732,6 +732,13 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if why := h.sessionKeepsCopyFromAnswering(ctx); why != "" {
 		return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
 	}
+	// A statement that reads the copy's clock (#2611) also needs the source's
+	// clock to be the time: asked of every such statement.
+	if readrouter.CallsNow(qstr) {
+		if why := h.clockKeepsCopyFromAnswering(ctx); why != "" {
+			return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
+		}
+	}
 	// And the transaction once more (#2607). The port opens its connection to
 	// the source on demand, so the session's first statement was asked above
 	// with no answer from the source yet. A source whose sessions open with

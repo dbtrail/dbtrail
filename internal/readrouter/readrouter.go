@@ -171,7 +171,13 @@ var vetoes = []struct {
 	re   *regexp.Regexp
 }{
 	{"GROUP_CONCAT", regexp.MustCompile(`(?i)\bgroup_concat\s*\(`)}, // MySQL cuts at group_concat_max_len
-	{"NOW/CURDATE/CURTIME/CURRENT_TIMESTAMP", regexp.MustCompile(`(?i)\b(now|curdate|curtime|current_timestamp|current_date|current_time|sysdate|utc_timestamp|utc_date|utc_time|localtime|localtimestamp)\b`)}, // MySQL session time zone
+	// NOW(), CURDATE(), UTC_TIMESTAMP() and UTC_DATE() the copy has with
+	// MySQL's values (sqlsandbox's macros, #2611), next to no arithmetic but
+	// INTERVAL (nowVeto). Not these: a fraction of a second, the keywords
+	// DuckDB reads as its own (CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME,
+	// LOCALTIMESTAMP, which it types or computes another way), a time of day
+	// (held as text on the copy), and SYSDATE, the time each call runs at.
+	{vetoNowKeyword, regexp.MustCompile(`(?i)\b(now|utc_timestamp)\s*\(\s*[^)\s]|\b(curtime|current_timestamp|current_date|current_time|sysdate|utc_time|localtime|localtimestamp)\b`)},
 	// UNIX_TIMESTAMP() with no argument is now; with one, the column types
 	// decide (UnixTimeVeto, #2493). Quoted too: MySQL calls the function.
 	{"UNIX_TIMESTAMP() (now, in the MySQL session time zone)", regexp.MustCompile(`(?i)\bunix_timestamp"?\s*\(\s*\)`)},
@@ -313,6 +319,9 @@ func VetoOpts(stmt string, o CopyOptions) string {
 		if re.MatchString(sc.blankedCopy) {
 			return v.name
 		}
+	}
+	if why := nowVeto(sc.blankedCopy); why != "" {
+		return why
 	}
 	if why := shapeVeto(sc.blankedCopy); why != "" {
 		return why

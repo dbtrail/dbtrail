@@ -827,6 +827,7 @@ func atoiAll(in []string) []int {
 // settings (StrictStar is the routing connection's own, always on).
 func settings(s sqlsandbox.Session) sqlsandbox.Session {
 	s.StrictStar = false
+	s.MySQLClock = false // set on every port session (sessionVars.session)
 	s.Types = nil
 	return s
 }

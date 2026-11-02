@@ -1283,6 +1283,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
+				if msg := sqlNowRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
 				// The text the statement compares (#2533): refused here
 				// when no value could make the copy's answer MySQL's,
 				// guarded at the end of the script when the values decide.
@@ -1656,6 +1660,74 @@ func sqlUnixTimeRefusalFor(narrowed views.Input, statement string, types sqlsand
 	}
 	return "the copy does not answer this statement: " + why
 }
+
+// sqlNowRefusalFor says why the copy must not answer a routed statement that
+// calls NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE(), or "" when it can
+// (#2611). zone is sqlsandbox.Session.TimeZone: "" for UTC, Etc/GMT... for a
+// fixed offset, a name otherwise. Under a zone with clock changes a wall
+// clock can stand for two instants or none (NOW() - INTERVAL 30 DAY landing
+// in the hour that repeats), and the copy reads it back into an instant
+// where MySQL reads a TIMESTAMP column into a wall clock: their answers
+// differ there. A named zone is MySQL's whether or not it has clock changes,
+// as for UNIX_TIMESTAMP (sqlUnixTimeRefusalFor). And a column CURDATE() or
+// UTC_DATE() is compared with must be a DATE, a DATETIME or a TIMESTAMP of
+// the tables the statement reads, and nothing else in any of them: MySQL
+// compares a date with text that holds a time as a date and time, where the
+// copy drops the time. The statement is read as the router reads it
+// (types, the router's reading of it), so a comment inside NOW( ) is no way
+// past this; with no reading (types is nil), a statement that may call one
+// is refused: not known is never "nothing to find".
+func sqlNowRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes, zone string) string {
+	const refuse = "the copy does not answer this statement: "
+	if types == nil {
+		if mayCallNow.MatchString(statement) {
+			return refuse + "it could not be searched for NOW(), CURDATE(), UTC_TIMESTAMP() and UTC_DATE()"
+		}
+		return ""
+	}
+	if !types.CallsNow() {
+		return ""
+	}
+	if zone != "" && !strings.HasPrefix(zone, "Etc/GMT") {
+		return refuse + "NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE() under the named time zone " + zone +
+			" (a wall clock at a clock change may stand for another instant)"
+	}
+	cols := types.DateComparedColumns()
+	if len(cols) == 0 {
+		return ""
+	}
+	date, other := map[string]bool{}, map[string]bool{}
+	for _, t := range narrowed.SelectedBaselines() {
+		if !t.SchemaKnown {
+			return refuse + fmt.Sprintf("CURDATE() or UTC_DATE() compared with a column of %s.%s, whose column types are not known", t.Schema, t.Table)
+		}
+		isDate := map[string]bool{}
+		for _, c := range t.Temporal {
+			if ty := strings.ToLower(c.Type); strings.HasPrefix(ty, "date") || strings.HasPrefix(ty, "timestamp") {
+				isDate[strings.ToLower(c.Name)] = true
+			}
+		}
+		for _, n := range t.Columns {
+			if f := strings.ToLower(n); isDate[f] {
+				date[f] = true
+			} else {
+				other[f] = true
+			}
+		}
+	}
+	for _, c := range cols {
+		if !date[c] || other[c] {
+			return refuse + "CURDATE() or UTC_DATE() compared with " + c +
+				", which is not a date, a date and time or a timestamp of the tables it reads (MySQL compares a date with text holding a time as a date and time; the copy drops the time)"
+		}
+	}
+	return ""
+}
+
+// mayCallNow is a word of NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE()
+// anywhere in a statement, comments and literals included: with no reading
+// of the statement, a literal can only cost a refusal.
+var mayCallNow = regexp.MustCompile(`(?i)\b(now|curdate|utc_timestamp|utc_date)\b`)
 
 // sqlWordsRefusalFor says why the copy would refuse a statement because of
 // how it writes the name of a column of a table it reads, or "" (#2131):

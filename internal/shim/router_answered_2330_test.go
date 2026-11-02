@@ -60,7 +60,7 @@ func TestRouterAnswered_onceOnTheSideThatRan(t *testing.T) {
 		{"cheap read", "SELECT * FROM t WHERE id = 1", fakeRouter{toCopy: false, reason: "cheap"}, nil, "mysql/ok"},
 		{"a write", "UPDATE t SET a = 1", fakeRouter{toCopy: true}, nil, "mysql/ok"},
 		{"not a select", "SHOW TABLES", fakeRouter{toCopy: true}, nil, "mysql/ok"},
-		{"vetoed", "SELECT NOW()", fakeRouter{toCopy: true}, nil, "mysql/ok"},
+		{"vetoed", "SELECT CURTIME()", fakeRouter{toCopy: true}, nil, "mysql/ok"},
 		{"explain failed", "SELECT * FROM t WHERE id = 1", fakeRouter{decideErr: errors.New("boom")}, nil, "mysql/ok"},
 		{"the copy answers", "SELECT a, count(*) FROM t GROUP BY a", fakeRouter{toCopy: true, reason: "expensive"}, nil, "copy/ok"},
 		{"the copy declines", "SELECT a, count(*) FROM t GROUP BY a", fakeRouter{toCopy: true}, errors.New("Binder Error"), "mysql/ok"},
