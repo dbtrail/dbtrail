@@ -3,12 +3,13 @@ package readrouter
 import "testing"
 
 // UNION, INTERSECT and EXCEPT remove duplicates by comparing rows, and the
-// copy compares them by bytes there where MySQL uses the collation: 'a' and
-// 'A' are one row on MySQL and two on the copy, with no error (#2083). So a
+// copy does not compare them as MySQL's collation does: on DuckDB 1.4 'a' and
+// 'A' were two rows on the copy and one on MySQL; since 1.5 the copy folds
+// case but keeps either spelling, and folds no accents (#2083). So a
 // statement that asks for duplicate removal stays on MySQL. UNION ALL removes
 // nothing and goes on being routed.
 func TestVeto_setOperationsThatRemoveDuplicates(t *testing.T) {
-	const name = "UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)"
+	const name = "UNION/INTERSECT/EXCEPT without ALL (duplicates removed by the copy's rules, not by MySQL's collation)"
 	vetoed := []string{
 		"SELECT a FROM t UNION SELECT a FROM u",
 		"SELECT a FROM t union select a FROM u",

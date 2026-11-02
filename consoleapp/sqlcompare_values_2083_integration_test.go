@@ -24,7 +24,9 @@ import (
 // valuesFixture is one statement of the #2083 comparison: what sql-compare
 // must say about it, and why.
 type valuesFixture struct {
-	stmt    string
+	stmt string
+	// verdict is the answer pinned; empty pins none (the statement is in
+	// the set for what else is asserted about it, such as its route).
 	verdict sqlcompare.Verdict
 	// kind refines DIFFERENT; empty accepts any.
 	kind string
@@ -119,8 +121,8 @@ func TestIntegrationSQLCompareValues(t *testing.T) {
 	fixtures := valuesFixtures()
 	by := compareInHalves(t, sourceDSN, copies, readrouter.Policy{ScanRows: 2}, fixtures)
 	checkValuesFixtures(t, sourceDSN, copies[0], fixtures, by)
-	// The set operations that remove duplicates answer differently on the
-	// copy, and never reach it under routing: the veto names itself.
+	// The set operations that remove duplicates do not answer as MySQL's do
+	// on the copy, and never reach it under routing: the veto names itself.
 	for _, stmt := range []string{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", "SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'"} {
 		if r := by[stmt]; r.Route != "mysql" || r.RouteRule != "veto" || !strings.Contains(r.RouteReason, "UNION/INTERSECT/EXCEPT") {
 			t.Errorf("%q: route=%s rule=%s (%s), want it kept on MySQL by the set-operation veto", stmt, r.Route, r.RouteRule, r.RouteReason)
@@ -189,7 +191,7 @@ func checkValuesFixtures(t *testing.T, sourceDSN, copyDSN string, fixtures []val
 			continue
 		}
 		t.Logf("%-12s %-9s route=%-5s %s\n    %s", r.Verdict, r.Kind, r.Route, f.stmt, r.Detail)
-		if r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind) {
+		if f.verdict != "" && (r.Verdict != f.verdict || (f.kind != "" && r.Kind != f.kind)) {
 			t.Logf("    mysql: %s\n    copy:  %s", rawAnswer(src, f.stmt), rawAnswer(cp, f.stmt))
 			t.Errorf("%q: got %s/%s (%s), want %s/%s: %s", f.stmt, r.Verdict, r.Kind, r.Detail, f.verdict, f.kind, f.why)
 		}
@@ -267,14 +269,14 @@ func valuesFixtures() []valuesFixture {
 		{"SELECT COUNT(DISTINCT id) FROM sales a WHERE EXISTS (SELECT 1 FROM sales b WHERE b.note = a.note AND b.id <> a.id)", diff, "rows", "a join on the column: all four match on MySQL, none on the copy"},
 		// A _bin column next to folded ones, under the new default.
 		{"SELECT COUNT(*) FROM (SELECT code k FROM sales UNION ALL SELECT name FROM sales) t WHERE k = 'ab'", eq, "", "_bin and _ci in one UNION ALL column: bytes on both"},
-		// UNION's own duplicate removal does not fold on the copy, under this
-		// collation or the one before it: the router keeps such a statement
-		// on MySQL (asserted below), and UNION ALL goes on being routed.
-		// INTERSECT folds since DuckDB 1.5 (on 1.4 the copy returned no row)
-		// but keeps the left side's value where MySQL keeps the right's: a
-		// different answer either way, so it stays on MySQL too.
-		{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", diff, "rows", "one row on MySQL ('a' and 'A' are duplicates), two on the copy"},
-		{"SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'", diff, "case", "one row on both: A on MySQL, a on the copy"},
+		// The duplicate removal of UNION and INTERSECT does not answer as
+		// MySQL's does: on DuckDB 1.4 it did not fold case (UNION two rows,
+		// INTERSECT none); on 1.5 it may, and which of 'a' and 'A' it keeps
+		// varies from run to run, so the copy's answer is not pinned. What is
+		// pinned is that the router keeps such a statement on MySQL (asserted
+		// below), and that UNION ALL goes on being routed.
+		{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", "", "", "kept on MySQL by the set-operation veto"},
+		{"SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'", "", "", "kept on MySQL by the set-operation veto"},
 	}
 }
 

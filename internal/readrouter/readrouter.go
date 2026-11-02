@@ -214,16 +214,19 @@ var vetoes = []struct {
 	{"JSON function or -> operator (missing or different on the copy)", regexp.MustCompile(`(?i)\bjson_[a-z_]+\s*\(|->>?`)}, // JSON_UNQUOTE does not exist on the copy; JSON_EXTRACT paths and quoting differ
 	{"^ (power on the copy, bitwise XOR on MySQL)", regexp.MustCompile(`\^`)},
 	{"-- without a space after it (two minus signs on MySQL, a comment on the copy)", regexp.MustCompile(`--`)}, // scrub already removed what MySQL reads as a comment, so any `--` left is arithmetic there (5--3 is 8) and the copy would drop the rest of the line
-	// UNION, INTERSECT and EXCEPT that remove duplicates: the copy compares
-	// the rows by bytes there, whatever its collation ('a' and 'A' stay two
-	// rows; MySQL keeps one). UNION ALL removes nothing and is not matched: a
+	// UNION, INTERSECT and EXCEPT that remove duplicates do not compare the
+	// rows as MySQL's collation does. On DuckDB 1.4 the copy compared them by
+	// bytes ('a' and 'A' stayed two rows; MySQL keeps one). Since 1.5 it folds
+	// case there but keeps whichever spelling it meets ('a' or 'A', from one
+	// run to the next), and still does not fold accents or ß. UNION ALL
+	// removes nothing and is not matched: a
 	// UNION is vetoed when what follows it is DISTINCT or the next query
 	// (SELECT, VALUES, TABLE, an opening parenthesis). INTERSECT and EXCEPT
 	// are vetoed with ALL too, since ALL still pairs rows up by comparing
 	// them. A leading quote (a backtick, or the double quote it is rewritten
 	// to for the copy), word character or dot means a quoted name, a
 	// longer word or a column of that name, not the operator.
-	{"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by bytes on the copy, by collation on MySQL)", regexp.MustCompile(`(?i)(^|[^\x60"\w.])(intersect|except)([^\x60"\w]|$)|(^|[^\x60"\w.])union\s*(distinct\b|select\b|values\b|table\b|\()`)},
+	{"UNION/INTERSECT/EXCEPT without ALL (duplicates removed by the copy's rules, not by MySQL's collation)", regexp.MustCompile(`(?i)(^|[^\x60"\w.])(intersect|except)([^\x60"\w]|$)|(^|[^\x60"\w.])union\s*(distinct\b|select\b|values\b|table\b|\()`)},
 	// MySQL stops a recursion at cte_max_recursion_depth with an error and
 	// MariaDB cuts it at max_recursive_iterations (1000 by default on both);
 	// the copy runs it to the end.
