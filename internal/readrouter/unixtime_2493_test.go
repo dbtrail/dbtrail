@@ -132,7 +132,8 @@ func TestVeto_unixTimestampWithoutAnArgumentOnly(t *testing.T) {
 		"SELECT `unix_timestamp` ( ) FROM t":               true,
 		"SELECT UNIX_TIMESTAMP(o_entry_d) FROM orders":     false,
 		"SELECT FROM_UNIXTIME(n) FROM t":                   false,
-		"SELECT NOW()":                                     true,
+		"SELECT NOW()":                                     false, // #2611: the copy has it
+		"SELECT CURTIME()":                                 true,
 	} {
 		if got := Veto(stmt) != ""; got != vetoed {
 			t.Errorf("%s: vetoed = %v (%q), want %v", stmt, got, Veto(stmt), vetoed)

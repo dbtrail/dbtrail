@@ -35,6 +35,7 @@ type wireJob struct {
 	NoFileReaders bool   `json:"no_file_readers,omitempty"`
 	Schema        string `json:"schema,omitempty"`
 	TimeZone      string `json:"time_zone,omitempty"`
+	MySQLClock    bool   `json:"mysql_clock,omitempty"`
 	SelectLimit   int    `json:"select_limit,omitempty"`
 	// KeepJoinOrder: see Session.KeepJoinOrder.
 	KeepJoinOrder bool   `json:"keep_join_order,omitempty"`

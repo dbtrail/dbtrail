@@ -271,7 +271,17 @@ What to know before relying on it:
   @@time_zone`, `@@sql_mode` and `@@sql_select_limit` answer what the
   connection set:
   - **`time_zone`** becomes the copy's session zone for that connection.
-    `NOW()` and the columns that are instants (a MySQL `TIMESTAMP`, the
+    `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` and `UTC_DATE()` are MySQL's
+    there (#2611): a date and time with no fraction, or a date, on the wall
+    clock of the session's zone (UTC for the last two), from the copy's
+    host clock at the start of the statement. That is on the MySQL port: the
+    SQL card keeps DuckDB's own `now()`. Under Engine Routing a statement
+    that calls them goes to MySQL when the session's zone is a name
+    (`America/New_York`), because near a clock change a wall clock there can
+    stand for two instants or for none; under UTC and a whole-hour offset
+    the copy answers. Without Engine Routing the copy answers them under a
+    name too, and within an hour of a clock change a comparison with a
+    `TIMESTAMP` column can come out an hour away from MySQL's. `NOW()` and the columns that are instants (a MySQL `TIMESTAMP`, the
     `events` view's `event_timestamp` and `commit_time`) are printed in it,
     a literal compared with one is read in it, and a `DATETIME` column stays
     the wall clock MySQL holds, in any zone. Applied: a zone name
@@ -490,7 +500,13 @@ The decision, in order, for every statement:
    sets `autocommit=1` again. A `COMMIT` under autocommit off only starts
    the next transaction (#2607).
 3. A construct the copy would answer *differently* without an error
-   (`GROUP_CONCAT`, `NOW()` and the session-time-zone family, `STR_TO_DATE`,
+   (`GROUP_CONCAT`, `NOW(3)` and the clock forms the copy does not have:
+   `CURRENT_TIMESTAMP`, `CURRENT_DATE`, `LOCALTIME`, `CURTIME`, `SYSDATE`,
+   `UTC_TIME`; `NOW()` or `CURDATE()` next to arithmetic other than
+   `INTERVAL`, which MySQL turns into a number; `CURDATE()` or `UTC_DATE()`
+   stepped by `INTERVAL` anywhere but a comparison (a date on MySQL, a date
+   and time on the copy) or compared with a string (MySQL reads a time in
+   it); `UTC_DATE` and `UTC_TIMESTAMP` without parentheses; `STR_TO_DATE`,
    `DATEDIFF`, `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
    CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
@@ -707,14 +723,15 @@ The decision, in order, for every statement:
    | `lc_time_names` | `en_US` | any other locale (`MONTHNAME`, `DAYNAME`) |
    | `div_precision_increment` | `4` (the default). The copy's `/` and `AVG` still return more decimals than MySQL's there: that is the documented precision difference, not something this setting removes | any other value: it moves MySQL's answer further from the copy's |
    | `sql_auto_is_null` | `0` | `1` |
+   | `timestamp`, asked before each statement that calls `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` or `UTC_DATE()` (#2611) | not set, and the source's clock within a second of DBTrail's host's | set (`SET timestamp = ...`, as replay tools do: MySQL's `NOW()` is that moment), or a source clock more than a second from DBTrail's host's (the copy reads the host's) |
    | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
    | `character_set_results` | `utf8mb4`; `NULL` or `binary` (no conversion: each column comes in its own character set and says so, as from the copy) | `latin1`, `utf8mb3` and the rest: MySQL converts, the copy answers in utf8mb4 |
    | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. The copy itself folds case only: accents, `ß` and full-width letters stay a documented difference under every one of these (see "The copy itself compares text"). Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs` |
 
    These are session settings whose value MySQL reads when it answers a
    `SELECT` the vetoes of step 3 let through. `group_concat_max_len` and
-   `timestamp` are not in the table because step 3 already keeps
-   `GROUP_CONCAT` and `NOW()` and its family on MySQL; `default_week_format`
+   `GROUP_CONCAT` is not in the table because step 3 already keeps it on
+   MySQL; `default_week_format`
    because `WEEK` and `YEARWEEK` stay there too. `max_execution_time` is not
    read: under it MySQL stops a long `SELECT` that the copy would answer.
 
@@ -1090,7 +1107,8 @@ What this is and is not:
   translates nothing: a client there writes the copy's dialect and reads
   the copy's names.
 - **Where the copy answers differently without an error.** The veto list
-  keeps the known cases on MySQL (`GROUP_CONCAT`, the `NOW()` family,
+  keeps the known cases on MySQL (`GROUP_CONCAT`, the clock forms the copy
+  does not have,
   `LIKE`/`REGEXP` (`LIKE` can go to the copy with a server's switch, see
   "LIKE without case" above), `COLLATE`, `DIV`, `||`, `^`, double-quoted string
   literals, a backslash inside a string literal (an escape on MySQL, a
@@ -2342,7 +2360,7 @@ arithmetic, bit operators, `~`, `$$` strings, double-quoted names, a
 backslash in a string, `--` comments, `INSTR` and `POSITION`, and the system
 schemas. `NOW()` and the copy's other clock functions answer in the zone
 the connection set. A statement that DuckDB does not understand at all
-(`CURDATE()`, `UNIX_TIMESTAMP`, `FIELD`, `FIND_IN_SET`) fails with
+(`FIELD`, `FIND_IN_SET`) fails with
 DuckDB's own error.
 
 **Its numbers.** The router has no web page, so it answers for itself.

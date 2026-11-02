@@ -85,8 +85,8 @@ SELECT id FROM orders WHERE status = 'strasse';
 SELECT AVG(id) FROM orders WHERE status <> 'x';
 -- MySQL syntax the copy lacks
 SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s;
--- the router vetoes NOW(): a difference here does not count
-SELECT id, NOW() FROM orders ORDER BY id;
+-- the router vetoes CURRENT_TIMESTAMP: a difference here does not count
+SELECT id, CURRENT_TIMESTAMP FROM orders ORDER BY id;
 UPDATE orders SET status = 'x';
 WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c);
 SELECT * FROM nope;
@@ -142,14 +142,14 @@ SELECT * FROM nope;
 			t.Errorf("%q: got %s/%s route=%s (%s) %q, want %s/%s route=%s", stmt, r.Verdict, r.Kind, r.Route, r.RouteReason, r.Detail, w.verdict, w.kind, w.route)
 		}
 	}
-	// NOW() moves between the two source reads (INCONCLUSIVE: source changed)
+	// CURRENT_TIMESTAMP moves between the two source reads (INCONCLUSIVE: source changed)
 	// or not (DIFFERENT) depending on the second boundary; either way the
 	// router vetoes it, so it never counts.
-	if r := by["SELECT id, NOW() FROM orders ORDER BY id"]; r.Route != "mysql" || !strings.Contains(r.RouteReason, "veto: NOW") || (r.Verdict != sqlcompare.Different && r.Verdict != sqlcompare.Inconclusive) {
-		t.Errorf("NOW(): got %s route=%s (%s), want DIFFERENT or INCONCLUSIVE, vetoed", r.Verdict, r.Route, r.RouteReason)
+	if r := by["SELECT id, CURRENT_TIMESTAMP FROM orders ORDER BY id"]; r.Route != "mysql" || !strings.Contains(r.RouteReason, "veto: NOW") || (r.Verdict != sqlcompare.Different && r.Verdict != sqlcompare.Inconclusive) {
+		t.Errorf("CURRENT_TIMESTAMP: got %s route=%s (%s), want DIFFERENT or INCONCLUSIVE, vetoed", r.Verdict, r.Route, r.RouteReason)
 	}
 	if rep.CopyDiffers != 2 || rep.CopyOrderDiffers != 0 || !rep.Failed() {
-		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 2 and 0: the case difference is gone (the copy folds case), ß/ss is the documented accent difference of the nocase collation (#2532), LIKE and NOW() are vetoed, and the AVG one is the documented remainder the harness must still catch", rep.CopyDiffers, rep.CopyOrderDiffers)
+		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 2 and 0: the case difference is gone (the copy folds case), ß/ss is the documented accent difference of the nocase collation (#2532), LIKE and CURRENT_TIMESTAMP are vetoed, and the AVG one is the documented remainder the harness must still catch", rep.CopyDiffers, rep.CopyOrderDiffers)
 	}
 	// The rule travels beside the reason, so a JSON consumer never parses
 	// prose: a veto, a failed EXPLAIN and the plan's own rule each name

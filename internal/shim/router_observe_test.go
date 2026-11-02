@@ -44,7 +44,7 @@ func TestRouter_observesEveryRungOnce(t *testing.T) {
 		{"a write", "UPDATE t SET a = 1", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/write"},
 		{"a set", "SET time_zone = '+00:00'", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/session_setting"},
 		{"a harmless set", "SET NAMES utf8mb4", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/session_setting"},
-		{"vetoed", "SELECT NOW()", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/veto"},
+		{"vetoed", "SELECT CURTIME()", fakeRouter{toCopy: true}, nil, fresh, time.Minute, "mysql/veto"},
 		// What the copy refuses (#2114) is counted as a veto, not as a copy
 		// that refused: the copy is not tried.
 		{"vetoed: LIMIT offset, count", "SELECT a, count(*) FROM t GROUP BY a ORDER BY a LIMIT 0, 20", fakeRouter{toCopy: true}, errors.New("syntax error"), fresh, time.Minute, "mysql/veto"},

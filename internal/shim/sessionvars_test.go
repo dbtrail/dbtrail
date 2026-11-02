@@ -155,7 +155,7 @@ func TestSessionSet_timeZoneRefused(t *testing.T) {
 		if _, err := h.HandleQuery("SELECT 1 FROM t"); err != nil {
 			t.Fatal(err)
 		}
-		if want := (sqlsandbox.Session{TimeZone: "Asia/Tokyo", SelectLimit: 7}); f.gotSess != want {
+		if want := (sqlsandbox.Session{MySQLClock: true, TimeZone: "Asia/Tokyo", SelectLimit: 7}); f.gotSess != want {
 			t.Errorf("%s: after the refusal the copy runs under %+v, want the earlier %+v", tc.stmt, f.gotSess, want)
 		}
 	}
@@ -317,7 +317,7 @@ func TestSessionSet_selectLimit(t *testing.T) {
 // and one refused assignment refuses the statement and applies none of it.
 func TestSessionSet_combined(t *testing.T) {
 	sess, h := sessAfter(t, "SET time_zone='+02:00', sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE', sql_select_limit=9")
-	if want := (sqlsandbox.Session{TimeZone: "Etc/GMT-2", SelectLimit: 9}); sess != want {
+	if want := (sqlsandbox.Session{MySQLClock: true, TimeZone: "Etc/GMT-2", SelectLimit: 9}); sess != want {
 		t.Errorf("combined SET: the copy runs under %+v, want %+v", sess, want)
 	}
 	if got := sysVar(t, h, "@@sql_mode"); got != "STRICT_TRANS_TABLES,NO_ZERO_DATE" {
@@ -375,7 +375,7 @@ func TestSessionSet_combined(t *testing.T) {
 		if _, err := h.HandleQuery("SELECT 1 FROM t"); err != nil {
 			t.Fatal(err)
 		}
-		if want := (sqlsandbox.Session{TimeZone: "Etc/GMT-1", SelectLimit: 4}); f.gotSess != want {
+		if want := (sqlsandbox.Session{MySQLClock: true, TimeZone: "Etc/GMT-1", SelectLimit: 4}); f.gotSess != want {
 			t.Errorf("%s: a refused statement applied part of itself: the copy runs under %+v, want %+v", tc.stmt, f.gotSess, want)
 		}
 		if got := sysVar(t, h, "@@sql_mode"); got != "NO_ZERO_DATE" {
@@ -413,7 +413,7 @@ func TestSessionSet_otherStatementsUnchanged(t *testing.T) {
 	// With nothing set the copy runs under no session at all, and the
 	// variables answer the port's own values.
 	sess, h2 := sessAfter(t)
-	if sess != (sqlsandbox.Session{}) {
+	if sess != (sqlsandbox.Session{MySQLClock: true}) {
 		t.Errorf("a fresh connection runs under %+v, want the zero session", sess)
 	}
 	if tz, limit := sysVar(t, h2, "@@time_zone"), sysVar(t, h2, "@@sql_select_limit"); tz != "UTC" || limit != "18446744073709551615" {
@@ -497,7 +497,7 @@ func TestSessionSet_prepared(t *testing.T) {
 	if err := run("SELECT x FROM t WHERE y = ?", int64(1)); err != nil {
 		t.Fatal(err)
 	}
-	if want := (sqlsandbox.Session{TimeZone: "Asia/Tokyo", SelectLimit: 6}); f.gotSess != want {
+	if want := (sqlsandbox.Session{MySQLClock: true, TimeZone: "Asia/Tokyo", SelectLimit: 6}); f.gotSess != want {
 		t.Errorf("a prepared statement after prepared SETs runs under %+v, want %+v", f.gotSess, want)
 	}
 	// SELECT @@time_zone, prepared: the binary row carries what was set.
@@ -529,7 +529,7 @@ func TestSessionSet_rewrittenShowStatements(t *testing.T) {
 	if _, err := h.HandleQuery("SHOW COLUMNS FROM orders"); err != nil {
 		t.Fatal(err)
 	}
-	if want := (sqlsandbox.Session{TimeZone: "Asia/Tokyo"}); f.gotSess != want {
+	if want := (sqlsandbox.Session{MySQLClock: true, TimeZone: "Asia/Tokyo"}); f.gotSess != want {
 		t.Errorf("SHOW COLUMNS ran under %+v, want %+v (the zone, no select limit)", f.gotSess, want)
 	}
 	if _, err := h.HandleQuery("SHOW DATABASES"); err != nil {
@@ -541,7 +541,7 @@ func TestSessionSet_rewrittenShowStatements(t *testing.T) {
 	if _, err := h.HandleQuery("SELECT 1 FROM t"); err != nil {
 		t.Fatal(err)
 	}
-	if want := (sqlsandbox.Session{TimeZone: "Asia/Tokyo", SelectLimit: 1}); f.gotSess != want {
+	if want := (sqlsandbox.Session{MySQLClock: true, TimeZone: "Asia/Tokyo", SelectLimit: 1}); f.gotSess != want {
 		t.Errorf("the next SELECT ran under %+v, want %+v", f.gotSess, want)
 	}
 }

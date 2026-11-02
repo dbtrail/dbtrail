@@ -241,6 +241,11 @@ type Session struct {
 	// A name the engine refuses fails the statement as a RefusedError that
 	// names it: the statement never runs under another zone.
 	TimeZone string
+	// MySQLClock gives the statement MySQL's NOW(), CURDATE(), UTC_TIMESTAMP()
+	// and UTC_DATE() (#2611) in place of DuckDB's now(), for a caller whose
+	// client writes MySQL: the MySQL port, routed or not. The SQL card's
+	// reader writes the copy's dialect and keeps DuckDB's.
+	MySQLClock bool
 	// SelectLimit is MySQL's sql_select_limit: the most rows a SELECT with no
 	// LIMIT of its own returns. Zero is no limit. It never raises the cap:
 	// at or under Limits.MaxRows the result is cut at it and NOT reported as
@@ -1536,7 +1541,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	}
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
-		TimeZone: job.Session.TimeZone, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder,
+		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,

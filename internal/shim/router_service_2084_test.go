@@ -79,7 +79,7 @@ func TestRouter_anyCopyAgeLeavesTheOtherRungs(t *testing.T) {
 		{"a cheap plan", "SELECT a FROM t WHERE id = 1", "mysql/cheap_plan", fakeRouter{toCopy: false}},
 		{"a write", "UPDATE t SET a = 1", "mysql/write", fakeRouter{toCopy: true}},
 		{"in a transaction", expensive2084, "mysql/in_transaction", fakeRouter{toCopy: true, inTxn: true}},
-		{"a veto", "SELECT a, NOW() FROM t GROUP BY a", "mysql/veto", fakeRouter{toCopy: true}},
+		{"a veto", "SELECT a, CURTIME() FROM t GROUP BY a", "mysql/veto", fakeRouter{toCopy: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeFreeSQL{updatedAt: time.Now()}

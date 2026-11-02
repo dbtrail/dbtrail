@@ -1283,6 +1283,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
+				if msg := sqlNowRefusalFor(statement, sess.TimeZone); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
 				// The text the statement compares (#2533): refused here
 				// when no value could make the copy's answer MySQL's,
 				// guarded at the end of the script when the values decide.
@@ -1656,6 +1660,28 @@ func sqlUnixTimeRefusalFor(narrowed views.Input, statement string, types sqlsand
 	}
 	return "the copy does not answer this statement: " + why
 }
+
+// sqlNowRefusalFor says why the copy must not answer a routed statement that
+// calls NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE() under the session's
+// zone, or "" when it can (#2611). zone is sqlsandbox.Session.TimeZone: ""
+// for UTC, Etc/GMT... for a fixed offset, a name otherwise. Under a zone with
+// clock changes a wall clock can stand for two instants or none (NOW() -
+// INTERVAL 30 DAY landing in the hour that repeats), and the copy reads it
+// back into an instant where MySQL reads a TIMESTAMP column into a wall
+// clock: their answers differ there. A named zone is MySQL's whether or not
+// it has clock changes, as for UNIX_TIMESTAMP (sqlUnixTimeRefusalFor).
+func sqlNowRefusalFor(statement, zone string) string {
+	if zone == "" || strings.HasPrefix(zone, "Etc/GMT") || !nowCallWord.MatchString(statement) {
+		return ""
+	}
+	return "the copy does not answer this statement: NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE() under the named time zone " + zone +
+		" (a wall clock at a clock change may stand for another instant)"
+}
+
+// nowCallWord is a call of one of the four, as readrouter.CallsNow reads it;
+// matched on the statement written for the copy, where its literals are
+// still in it, so a literal can only cost a refusal.
+var nowCallWord = regexp.MustCompile(`(?i)\b(now|curdate|utc_timestamp|utc_date)\s*\(\s*\)`)
 
 // sqlWordsRefusalFor says why the copy would refuse a statement because of
 // how it writes the name of a column of a table it reads, or "" (#2131):
