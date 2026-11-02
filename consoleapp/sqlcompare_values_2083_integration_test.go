@@ -270,8 +270,11 @@ func valuesFixtures() []valuesFixture {
 		// UNION's own duplicate removal does not fold on the copy, under this
 		// collation or the one before it: the router keeps such a statement
 		// on MySQL (asserted below), and UNION ALL goes on being routed.
+		// INTERSECT folds since DuckDB 1.5 (on 1.4 the copy returned no row)
+		// but keeps the left side's value where MySQL keeps the right's: a
+		// different answer either way, so it stays on MySQL too.
 		{"SELECT note FROM sales WHERE id = 4 UNION SELECT 'A'", diff, "rows", "one row on MySQL ('a' and 'A' are duplicates), two on the copy"},
-		{"SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'", diff, "rows", "one row on MySQL, none on the copy"},
+		{"SELECT note FROM sales WHERE id = 4 INTERSECT SELECT 'A'", diff, "case", "one row on both: A on MySQL, a on the copy"},
 	}
 }
 
