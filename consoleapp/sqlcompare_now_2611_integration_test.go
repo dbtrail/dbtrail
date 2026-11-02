@@ -109,9 +109,15 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT MIN(side), COUNT(*) FROM ev WHERE d >= CURDATE() - INTERVAL 30 DAY", "copy", "a DATE in the last month"},
 		{"SELECT MIN(side), COUNT(*) FROM ev WHERE ts BETWEEN UTC_TIMESTAMP() - INTERVAL 30 DAY AND UTC_TIMESTAMP()", "copy", "UTC_TIMESTAMP"},
 		{"SELECT MIN(side), COUNT(*) FROM ev WHERE d <= UTC_DATE() + INTERVAL 1 DAY", "copy", "UTC_DATE"},
-		{"SELECT MIN(side), YEAR(NOW()) >= 2026, DATE(NOW()) = CURDATE() FROM ev", "copy", "NOW and CURDATE in the select list"},
+		{"SELECT MIN(side), YEAR(NOW()) >= 2026, MONTH(CURDATE()) = MONTH(NOW()) FROM ev", "copy", "NOW and CURDATE in the select list"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE ts >= CURDATE() - INTERVAL 1 DAY", "copy", "a TIMESTAMP against a date"},
+		{"SELECT MIN(side), NOW() > UTC_TIMESTAMP() + INTERVAL 4 HOUR FROM ev", "copy", "NOW() in the session's zone, UTC_TIMESTAMP() in UTC"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt BETWEEN CURDATE() - INTERVAL 7 DAY AND NOW()", "copy", "a DATETIME between a date and now"},
+		{"SELECT MIN(side), SUM(side <= CURDATE()) FROM ev", "live", "CURDATE compared with text"},
+		{"SELECT MIN(side), DATE_ADD(CURDATE(), INTERVAL 1 DAY) FROM ev", "live", "a date stepped through DATE_ADD"},
+		{"SELECT MIN(side), SUM(dt >= NOW() - INTERVAL 1 DAY * 2) FROM ev", "live", "arithmetic after the INTERVAL"},
 		{"SELECT side, k FROM ev WHERE dt < NOW() ORDER BY k", "copy", "a bare comparison"},
-		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= NOW() + 0 - 86400", "live", "NOW() + 0 is a number on the source"},
+		{"SELECT MIN(side), SUM(dt >= NOW() + 0 - 86400) FROM ev", "live", "NOW() + 0 is a number on the source"},
 		{"SELECT MIN(side), CURDATE() - 1 FROM ev", "live", "CURDATE() - 1 is a number on the source, yesterday on the copy"},
 		{"SELECT MIN(side), COUNT(*) FROM ev WHERE ts >= CURRENT_TIMESTAMP - INTERVAL 1 DAY", "live", "CURRENT_TIMESTAMP stays on the source"},
 		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt < NOW(3)", "live", "NOW with a fraction stays on the source"},
@@ -159,7 +165,7 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// Needs the source's time zone tables.
 	var tz sql.NullString
 	if err := srcDB.QueryRowContext(context.Background(), "SELECT CONVERT_TZ('2026-11-02 12:00:00', 'UTC', 'America/New_York')").Scan(&tz); err != nil || !tz.Valid {
-		t.Logf("named zone not compared: the source has no time zone tables (%v)", err)
+		t.Errorf("named zone not compared: the source has no time zone tables (%v); load them (mysql_tzinfo_to_sql)", err)
 	} else {
 		named := openRaw(t, withZone(portDSN, "America/New_York"))
 		if got := answerText(named, "SELECT MIN(side), COUNT(*) FROM ev"); !strings.HasPrefix(got, "copy|") {

@@ -33,7 +33,13 @@ func TestNowMacros_2611(t *testing.T) {
 		{"Etc/GMT+5", "SELECT _bintrail_wall(TIMESTAMPTZ '2026-11-02 03:00:00+00')", [][]any{{"2026-11-01T22:00:00Z"}}},
 		{"America/New_York", "SELECT _bintrail_wall(TIMESTAMPTZ '2026-11-02 17:00:01.9+00')", [][]any{{"2026-11-02T12:00:01Z"}}},
 		{"America/New_York", "SELECT now() - INTERVAL 30 DAY < now(), curdate() <= CAST(now() AS DATE)", [][]any{{true, true}}},
-		{"Etc/GMT+5", "SELECT CAST(utc_timestamp() AS VARCHAR) >= CAST(now() AS VARCHAR)", [][]any{{true}}},
+		// The session's zone, exactly: Etc/GMT+5 is five hours west of UTC,
+		// Etc/GMT-5 five east. One statement reads one instant.
+		{"Etc/GMT+5", "SELECT now() = utc_timestamp() - INTERVAL 5 HOUR, curdate() = CAST(utc_timestamp() - INTERVAL 5 HOUR AS DATE), utc_date() = CAST(utc_timestamp() AS DATE)",
+			[][]any{{true, true, true}}},
+		{"Etc/GMT-5", "SELECT now() = utc_timestamp() + INTERVAL 5 HOUR, curdate() = CAST(utc_timestamp() + INTERVAL 5 HOUR AS DATE), utc_date() = CAST(utc_timestamp() AS DATE)",
+			[][]any{{true, true, true}}},
+		{"Etc/GMT-5", "SELECT utc_timestamp() = CAST(date_trunc('second', current_timestamp AT TIME ZONE 'UTC') AS TIMESTAMP)", [][]any{{true}}},
 	} {
 		got, err := run(c.zone, c.sql)
 		if err != nil {

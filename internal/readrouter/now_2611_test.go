@@ -1,6 +1,9 @@
 package readrouter
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #2611: NOW(), CURDATE(), UTC_TIMESTAMP() and UTC_DATE() reach the copy,
 // which has them with MySQL's values (sqlsandbox's macros), as long as no
@@ -25,6 +28,12 @@ func TestVeto_now_2611(t *testing.T) {
 		"SELECT * FROM t WHERE d BETWEEN UTC_DATE() - INTERVAL 7 DAY AND UTC_DATE()",
 		"SELECT NOW() - INTERVAL 1 DAY FROM t",
 		"SELECT * FROM t WHERE d = CURDATE() AND ts < NOW()",
+		"SELECT * FROM t WHERE t.d >= CURDATE() - INTERVAL 7 DAY ORDER BY t.d",
+		"SELECT * FROM t WHERE (d = CURDATE() OR d = CURDATE() - INTERVAL 1 DAY)",
+		"SELECT * FROM t WHERE d NOT BETWEEN CURDATE() - INTERVAL 7 DAY AND CURDATE() GROUP BY d",
+		"SELECT COUNT(*) FROM t WHERE d = CURDATE() - INTERVAL 1 DAY - INTERVAL 2 HOUR",
+		"SELECT IF(d = CURDATE(), 1, 0) FROM t", "SELECT CURDATE() AS today, COUNT(*) FROM t",
+		"SELECT DAY(CURDATE()), QUARTER(UTC_DATE()) FROM t",
 	} {
 		if got := Veto(stmt); got != "" {
 			t.Errorf("Veto(%q) = %q, want the copy to answer it", stmt, got)
@@ -53,9 +62,43 @@ func TestVeto_now_2611(t *testing.T) {
 		"SELECT * FROM t WHERE CURDATE() IN ('2026-11-02', '2026-11-03')",
 		// Without parentheses, which MySQL takes and the copy reads as a column.
 		"SELECT UTC_DATE", "SELECT UTC_TIMESTAMP FROM t", "SELECT * FROM t WHERE d = UTC_DATE",
+		// A date the copy is not known to answer as MySQL does: stepped
+		// through another function or a group, picked among strings, built
+		// into one, compared with a parameter or with what is not a column.
+		"SELECT DATE_ADD(CURDATE(), INTERVAL 1 DAY)", "SELECT DATE_ADD(UTC_DATE(), INTERVAL 7 DAY) FROM t",
+		"SELECT (CURDATE()) + INTERVAL 1 DAY", "SELECT IFNULL(CURDATE(), d) + INTERVAL 1 DAY FROM t",
+		"SELECT DATE(NOW()) - INTERVAL 1 DAY", "SELECT CAST(NOW() AS DATE) - INTERVAL 1 DAY",
+		"SELECT CURDATE() = CONCAT('2026-11-02', ' 10:00')", "SELECT GREATEST(CURDATE(), '2026-11-02 10:00')",
+		"SELECT * FROM t WHERE CURDATE() = ?", "SELECT * FROM t WHERE ? = CURDATE()",
+		"SELECT COALESCE(s, CURDATE()) FROM t", "SELECT CASE WHEN a THEN CURDATE() ELSE s END FROM t",
+		"SELECT CURDATE() FROM t UNION SELECT s FROM u", "SELECT * FROM t WHERE d = CURDATE() + 0",
+		"SELECT * FROM t WHERE \"d\" = CURDATE()",
+		// Arithmetic after the INTERVAL: MySQL ends the step first, then
+		// multiplies the date as a number; the copy multiplies the INTERVAL.
+		"SELECT NOW() + INTERVAL 1 DAY * 2", "SELECT * FROM t WHERE d >= CURDATE() - INTERVAL 1 DAY * 7",
+		"SELECT * FROM t WHERE ts >= NOW() - INTERVAL 1 DAY / 2", "SELECT NOW() - INTERVAL 1 DAY + 0",
+		"SELECT NOW() - INTERVAL 1 DAY DIV 2", "SELECT * FROM t WHERE ts > NOW() - INTERVAL a DAY",
+		"SELECT * FROM t WHERE CURDATE() BETWEEN '2026-11-02 10:00' AND d", "SELECT * FROM t WHERE CURDATE() IN (d, '2026-11-02 10:00')",
+		"SELECT 2 * UTC_TIMESTAMP()", "SELECT 7 MOD CURDATE()",
 	} {
 		if got := Veto(stmt); got == "" {
 			t.Errorf("Veto(%q) = none, want MySQL to answer it", stmt)
+		}
+	}
+}
+
+// DateComparedColumns names the columns CURDATE() and UTC_DATE() are
+// compared with, for the caller that knows their types: the copy answers only
+// where each is a date, as MySQL compares a date with a string holding a time
+// as a date and time and the copy drops the time.
+func TestDateComparedColumns_2611(t *testing.T) {
+	for stmt, want := range map[string]string{
+		"SELECT * FROM t WHERE t.d >= CURDATE() - INTERVAL 7 DAY AND UTC_DATE() > e": "d,e",
+		"SELECT * FROM t WHERE d BETWEEN CURDATE() - INTERVAL 7 DAY AND CURDATE()":   "d",
+		"SELECT YEAR(CURDATE()), NOW() FROM t WHERE ts < NOW()":                      "",
+	} {
+		if got := strings.Join(DateComparedColumns(stmt), ","); got != want {
+			t.Errorf("DateComparedColumns(%q) = %q, want %q", stmt, got, want)
 		}
 	}
 }
@@ -70,6 +113,7 @@ func TestCallsNow_2611(t *testing.T) {
 		"SELECT * FROM t WHERE note = 'NOW()'": false,
 		"SELECT `now` FROM t":                  false,
 		"SELECT 1 /* NOW() */":                 false,
+		"SELECT NOW(/**/) - INTERVAL 1 DAY":    true,
 	} {
 		if got := CallsNow(stmt); got != want {
 			t.Errorf("CallsNow(%q) = %v, want %v", stmt, got, want)

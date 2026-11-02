@@ -503,10 +503,16 @@ The decision, in order, for every statement:
    (`GROUP_CONCAT`, `NOW(3)` and the clock forms the copy does not have:
    `CURRENT_TIMESTAMP`, `CURRENT_DATE`, `LOCALTIME`, `CURTIME`, `SYSDATE`,
    `UTC_TIME`; `NOW()` or `CURDATE()` next to arithmetic other than
-   `INTERVAL`, which MySQL turns into a number; `CURDATE()` or `UTC_DATE()`
-   stepped by `INTERVAL` anywhere but a comparison (a date on MySQL, a date
-   and time on the copy) or compared with a string (MySQL reads a time in
-   it); `UTC_DATE` and `UTC_TIMESTAMP` without parentheses; `STR_TO_DATE`,
+   `INTERVAL`, which MySQL turns into a number, or after the `INTERVAL`
+   (`NOW() - INTERVAL 1 DAY * 2`); `CURDATE()` or `UTC_DATE()` anywhere but
+   compared with a `DATE`, `DATETIME` or `TIMESTAMP` column (`BETWEEN`
+   included), inside `YEAR`, `MONTH`, `DAY` or `QUARTER`, or as a column of
+   its own: stepped through `DATE_ADD` or outside a comparison (a date on
+   MySQL, a date and time on the copy), compared with a string, a parameter
+   or a text column (MySQL reads a time in it), picked among strings
+   (`GREATEST`, `COALESCE`, `CASE`, `UNION`); `NOW()` made a date and then
+   stepped (`DATE(NOW()) - INTERVAL 1 DAY`); `UTC_DATE` and `UTC_TIMESTAMP`
+   without parentheses; `STR_TO_DATE`,
    `DATEDIFF`, `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
    CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,

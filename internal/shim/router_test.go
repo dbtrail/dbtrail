@@ -35,7 +35,10 @@ type fakeRouter struct {
 	clockFrozenAt float64
 	clockOff      float64
 	clockProbes   int
-	useDBErr      error
+	// clockAnswer, when set, is the probe's answer instead: its rows, or
+	// its failure.
+	clockAnswer func() ([][]any, error)
+	useDBErr    error
 	// forwardErr, when set, is what Forward answers (MySQL's own error).
 	forwardErr error
 	// forwardWaits makes Forward wait for its context to end before it
@@ -214,6 +217,13 @@ func (r *fakeRouter) Forward(ctx context.Context, stmt string, sink readrouter.R
 	}
 	if stmt == clockProbeSQL {
 		r.clockProbes++
+		if r.clockAnswer != nil {
+			rows, err := r.clockAnswer()
+			if err != nil {
+				return nil, err
+			}
+			return sourceRows(sink, []string{"lag", "ts"}, rows)
+		}
 		now := float64(time.Now().UnixMicro())/1e6 + r.clockOff
 		lag, ts := 0.0, now
 		if r.clockFrozenAt != 0 {
