@@ -510,7 +510,9 @@ The decision, in order, for every statement:
    its own: stepped through `DATE_ADD` or outside a comparison (a date on
    MySQL, a date and time on the copy), compared with a string, a parameter
    or a text column (MySQL reads a time in it), picked among strings
-   (`GREATEST`, `COALESCE`, `CASE`, `UNION`); `NOW()` made a date and then
+   (`GREATEST`, `COALESCE`, `CASE`, `UNION`), or in a statement with a
+   subquery, a `WITH` or a `HAVING`, or compared with a name the statement
+   gives itself (`AS d`), which may stand for text; `NOW()` made a date and then
    stepped (`DATE(NOW()) - INTERVAL 1 DAY`); `UTC_DATE` and `UTC_TIMESTAMP`
    without parentheses; `STR_TO_DATE`,
    `DATEDIFF`, `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive

@@ -34,6 +34,9 @@ func TestVeto_now_2611(t *testing.T) {
 		"SELECT COUNT(*) FROM t WHERE d = CURDATE() - INTERVAL 1 DAY - INTERVAL 2 HOUR",
 		"SELECT IF(d = CURDATE(), 1, 0) FROM t", "SELECT CURDATE() AS today, COUNT(*) FROM t",
 		"SELECT DAY(CURDATE()), QUARTER(UTC_DATE()) FROM t",
+		"SELECT d, COUNT(*) FROM t WHERE d >= CURDATE() - INTERVAL 7 DAY GROUP BY d",
+		"SELECT DISTINCT d FROM t WHERE d = CURDATE()", "SELECT ALL d FROM t WHERE d = CURDATE()",
+		"SELECT id, d FROM t WHERE d = CURDATE() ORDER BY d",
 	} {
 		if got := Veto(stmt); got != "" {
 			t.Errorf("Veto(%q) = %q, want the copy to answer it", stmt, got)
@@ -80,6 +83,14 @@ func TestVeto_now_2611(t *testing.T) {
 		"SELECT NOW() - INTERVAL 1 DAY DIV 2", "SELECT * FROM t WHERE ts > NOW() - INTERVAL a DAY",
 		"SELECT * FROM t WHERE CURDATE() BETWEEN '2026-11-02 10:00' AND d", "SELECT * FROM t WHERE CURDATE() IN (d, '2026-11-02 10:00')",
 		"SELECT 2 * UTC_TIMESTAMP()", "SELECT 7 MOD CURDATE()",
+		// A name the statement gives may stand for text: a derived table's
+		// column, a WITH's, a select item read back in HAVING or ORDER BY.
+		"SELECT * FROM (SELECT note AS d FROM ev) x WHERE d = CURDATE()",
+		"SELECT * FROM (SELECT CONCAT(d, ' 10:00') AS d FROM ev) x WHERE d = CURDATE()",
+		"WITH x AS (SELECT CONCAT(d, ' 10:00') AS d FROM ev) SELECT * FROM x WHERE d = CURDATE()",
+		"SELECT note AS d FROM ev HAVING d = CURDATE()", "SELECT note AS d FROM ev WHERE d = CURDATE()",
+		"SELECT note d FROM ev WHERE d = CURDATE()",
+		"SELECT CURDATE() AS x FROM ev HAVING x = '2026-11-02 10:00'", "SELECT CURDATE() AS x, s FROM t ORDER BY x = s",
 	} {
 		if got := Veto(stmt); got == "" {
 			t.Errorf("Veto(%q) = none, want MySQL to answer it", stmt)

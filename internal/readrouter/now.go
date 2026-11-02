@@ -64,6 +64,11 @@ var (
 	datePart        = regexp.MustCompile(`\b(year|month|day|dayofmonth|quarter|dayofyear)\s*\($`)
 	selectItem      = regexp.MustCompile(`(\bselect|,)$`)
 	setOperation    = regexp.MustCompile(`\b(union|intersect|except)\b`)
+	// namesItsOwn is a statement that gives names a comparison may read
+	// back as columns: a derived table, a subquery, a WITH, a HAVING over
+	// select items.
+	namesItsOwn = regexp.MustCompile(`\(\s*select\b|\bwith\b|\bhaving\b`)
+	orderBy     = regexp.MustCompile(`\border\s+by\b`)
 	// wrappedNow is a NOW() or a UTC_TIMESTAMP() made a date (DATE,
 	// LAST_DAY, a CAST AS DATE) and then stepped or added to: a date on
 	// MySQL, and so is the step from it, where the copy's is a date and time.
@@ -85,7 +90,11 @@ func operandBefore(before string, col []int) bool {
 // another function is MySQL's. So the copy takes a date in four places only:
 // compared with a column (d >= CURDATE() - INTERVAL 7 DAY, BETWEEN
 // included), inside YEAR, MONTH, DAY or QUARTER, or a select item of its own
-// outside any parentheses, in a statement with no set operation.
+// outside any parentheses, in a statement with no set operation and no
+// ORDER BY (which may read it back under its alias). A compared name must be
+// a column: in a statement with a derived table, a subquery, a WITH or a
+// HAVING, or one that gives the name to a select item itself, it may stand
+// for text, which the caller's types cannot see.
 func dateUses(b string) (cols []string, ok bool) {
 	seen := map[string]bool{}
 	add := func(c string) {
@@ -95,13 +104,27 @@ func dateUses(b string) (cols []string, ok bool) {
 		}
 	}
 	setOp := setOperation.MatchString(b)
-	for _, l := range dateCall.FindAllStringIndex(b, -1) {
+	locs := dateCall.FindAllStringIndex(b, -1)
+	if len(locs) > 0 && namesItsOwn.MatchString(b) {
+		return nil, false
+	}
+	add = func(c string) {
+		if aliased(b, c) {
+			ok = false
+		}
+		if !seen[c] {
+			seen[c] = true
+			cols = append(cols, c)
+		}
+	}
+	ok = true
+	for _, l := range locs {
 		before := strings.TrimRight(b[:l[0]], " \t\r\n")
 		stepped := steps.FindString(b[l[1]:])
 		after := strings.TrimLeft(b[l[1]+len(stepped):], " \t\r\n")
 		switch {
 		case stepped == "" && datePart.MatchString(before) && strings.HasPrefix(after, ")"):
-		case stepped == "" && !setOp && depth(before) == 0 && selectItem.MatchString(before) && ended.MatchString(after):
+		case stepped == "" && !setOp && !orderBy.MatchString(b) && depth(before) == 0 && selectItem.MatchString(before) && ended.MatchString(after):
 		default:
 			m := columnThenCmp.FindStringSubmatchIndex(before)
 			if m != nil && m[1] == len(before) && !operandBefore(before, m) && ended.MatchString(after) {
@@ -126,8 +149,27 @@ func dateUses(b string) (cols []string, ok bool) {
 			return cols, false
 		}
 	}
-	return cols, true
+	return cols, ok
 }
+
+// aliased says a statement gives name to one of its select items (AS name,
+// or an expression and the name before a comma or FROM).
+func aliased(b, name string) bool {
+	q := regexp.QuoteMeta(name)
+	if regexp.MustCompile(`\bas\s+` + q + `\b`).MatchString(b) {
+		return true
+	}
+	for _, m := range regexp.MustCompile(`(\w+|[)'])\s+`+q+`\s*(,|\bfrom\b)`).FindAllStringSubmatch(b, -1) {
+		if !selectWord[m[1]] {
+			return true
+		}
+	}
+	return false
+}
+
+// selectWord are the words a select item's name may follow without being
+// its alias.
+var selectWord = map[string]bool{"select": true, "distinct": true, "all": true, "by": true}
 
 // depth is how many parentheses are open at the end of s.
 func depth(s string) int {
