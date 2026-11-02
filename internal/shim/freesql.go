@@ -732,6 +732,14 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if why := h.sessionKeepsCopyFromAnswering(ctx); why != "" {
 		return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
 	}
+	// And the transaction once more (#2607). The port opens its connection to
+	// the source on demand, so the session's first statement was asked above
+	// with no answer from the source yet. A source whose sessions open with
+	// autocommit off (its configuration, an init_connect) says so first in
+	// the answer to the EXPLAIN that connection ran.
+	if h.router.InTransaction() {
+		return ops.forward(RouteReasonInTransaction, "in transaction")
+	}
 	res, err := ops.runCopy(d.Reason, unchangedWithin)
 	var changed *sqlsandbox.MayHaveChangedError
 	if errors.As(err, &changed) {

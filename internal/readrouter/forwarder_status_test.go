@@ -68,6 +68,8 @@ func (h *statusSource) HandleQuery(q string) (*mysql.Result, error) {
 		h.set(auto)
 	case "SET autocommit=0":
 		h.conn.UnsetStatus(auto)
+	case "SET autocommit=1":
+		h.conn.SetStatus(auto)
 	case "SET sql_mode='NO_BACKSLASH_ESCAPES'":
 		h.conn.SetStatus(mysql.SERVER_STATUS_NO_BACKSLASH_ESCAPED)
 	case "INSERT fails and opens a transaction":
@@ -223,8 +225,12 @@ func TestForwarder_Status(t *testing.T) {
 		{stmt: "COMMIT", want: auto},
 		{stmt: "START TRANSACTION READ ONLY", want: auto | trans | readOnly, inTrans: true},
 		{stmt: "COMMIT", want: auto},
-		{stmt: "SET autocommit=0", want: 0},
-		{stmt: "SET sql_mode='NO_BACKSLASH_ESCAPES'", want: noBack},
+		// Autocommit off is a transaction from the first statement on
+		// (#2607): MySQL opens one implicitly, before the source sets
+		// IN_TRANS, and the session's reads must keep its snapshot.
+		{stmt: "SET autocommit=0", want: 0, inTrans: true},
+		{stmt: "SET sql_mode='NO_BACKSLASH_ESCAPES'", want: noBack, inTrans: true},
+		{stmt: "SET autocommit=1", want: noBack | auto},
 	} {
 		_, err := f.Forward(ctx, step.stmt, &BufferSink{})
 		if (err != nil) != step.wantErr {
@@ -516,5 +522,25 @@ func TestForwarder_idleTimeoutIsALoss(t *testing.T) {
 				t.Error("a session the source ended reports a transaction")
 			}
 		})
+	}
+}
+
+// A source that opens its sessions with autocommit off (autocommit=0 in its
+// configuration, or an init_connect): every statement of the session is in
+// a transaction, the first one too (#2607).
+func TestForwarder_InTransaction_autocommitOffAtLogin_2607(t *testing.T) {
+	f, err := NewForwarder("u:p@tcp("+newStatusSource(t, 0)+")/db?tls=false", config.SSL{Mode: "disabled"}, DefaultPolicy(), 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if f.InTransaction() {
+		t.Fatal("before the connection is opened: in a transaction")
+	}
+	if _, err := f.Forward(context.Background(), "SELECT 1", &BufferSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if !f.InTransaction() {
+		t.Error("a session the source opened with autocommit off: not in a transaction")
 	}
 }

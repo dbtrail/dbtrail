@@ -1379,13 +1379,21 @@ func (f *Forwarder) UseDB(ctx context.Context, db string) error {
 	return nil
 }
 
-// InTransaction reports whether the upstream connection is inside an
-// explicit transaction, from the status flags MySQL sends with every answer:
-// the authoritative signal, where parsing BEGIN/COMMIT text is a guess.
+// InTransaction reports whether the upstream connection is inside a
+// transaction, from the status flags MySQL sends with every answer: the
+// authoritative signal, where parsing BEGIN/COMMIT text is a guess.
+//
+// Autocommit off counts (#2607). MySQL opens a transaction implicitly with
+// the session's first statement and sets IN_TRANS only in that statement's
+// answer, so a read that opens it saw no flag and was answered by the copy,
+// and the session's later reads then mixed the copy's point in time with
+// MySQL's snapshot. With autocommit off every statement belongs to a
+// transaction, a COMMIT only starting the next one, until the session turns
+// it back on.
 func (f *Forwarder) InTransaction() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.conn != nil && f.conn.IsInTransaction()
+	return f.conn != nil && (f.conn.IsInTransaction() || !f.conn.IsAutoCommit())
 }
 
 // SessionStatusFlags are the MySQL status flags that describe a session and

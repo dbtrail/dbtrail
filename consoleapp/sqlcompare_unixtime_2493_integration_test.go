@@ -188,6 +188,46 @@ func unixTimeCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			}
 		}
 	}
+	// #2607: a session with autocommit off is in a transaction from its
+	// first statement, so the same expensive read is MySQL's, the copy's
+	// again once the session turns autocommit back on.
+	off := openRaw(t, withZone(portDSN, "+00:00")+"&autocommit=0")
+	if got := answerText(off, bucket); !strings.HasPrefix(got, "live|") {
+		t.Errorf("with autocommit off: routed %s, want it answered by MySQL (a transaction)", got)
+	}
+	on := openRaw(t, withZone(portDSN, "+00:00")+"&autocommit=1")
+	if got := answerText(on, bucket); !strings.HasPrefix(got, "copy|") {
+		t.Errorf("with autocommit on: routed %s, want it answered by the copy", got)
+	}
+	// And within one session, as an application runs it: a COMMIT under
+	// autocommit off starts the next transaction, SET autocommit=1 ends it.
+	one, err := openRaw(t, withZone(portDSN, "+00:00")).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer one.Close()
+	side := func(step string) string {
+		t.Helper()
+		var who string
+		if err := one.QueryRowContext(context.Background(), bucket).Scan(&who, new(sql.NullString), new(sql.NullString)); err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return who
+	}
+	for _, step := range []struct{ stmt, want string }{
+		{"SET autocommit=0", "live"},
+		{"COMMIT", "live"},
+		{"ROLLBACK", "live"},
+		{"SET autocommit=1", "copy"},
+	} {
+		if _, err := one.ExecContext(context.Background(), step.stmt); err != nil {
+			t.Fatalf("%s: %v", step.stmt, err)
+		}
+		if got := side(step.stmt); got != step.want {
+			t.Errorf("one session, after %s: answered by %s, want %s", step.stmt, got, step.want)
+		}
+	}
+
 	// What MySQL answered was the copy's decision every time, never its
 	// fault: the NULL and the zero date the UNIX_TIMESTAMP macro declines
 	// count as the copy's columns differing, not as the copy refusing.

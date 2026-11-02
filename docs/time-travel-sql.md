@@ -479,8 +479,13 @@ The decision, in order, for every statement:
    connection, because they change what later statements mean in a way the
    port cannot read back: `CREATE TEMPORARY TABLE`, `LOCK TABLES` and
    `PREPARE`.
-2. Inside an explicit transaction (`BEGIN` ... `COMMIT`): **MySQL**, so a
-   transaction reads its own writes.
+2. Inside a transaction: **MySQL**, so a transaction reads its own writes
+   and one consistent snapshot. That is an explicit one (`BEGIN` ...
+   `COMMIT`), and every statement of a session with autocommit off
+   (`SET autocommit=0`, a driver that starts that way, or a source whose
+   sessions open that way), its first statement included, until the session
+   sets `autocommit=1` again. A `COMMIT` under autocommit off only starts
+   the next transaction (#2607).
 3. A construct the copy would answer *differently* without an error
    (`GROUP_CONCAT`, `NOW()` and the session-time-zone family, `STR_TO_DATE`,
    `DATEDIFF`, `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
