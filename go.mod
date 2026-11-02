@@ -32,15 +32,19 @@ require (
 	// (duckdb/duckdb#28269), and its new partial_aggregate_pushdown misjudges
 	// group counts on our state views. Move to 2.x once #28269 is settled.
 	//
-	// What 1.5 changed for us, checked on the move (dbtrail#<PR>): MAP values
-	// arrive as duckdb.OrderedMap (sqlsandbox.renderer.cell); array, geometry
-	// and type read as typed literals before a string
+	// What 1.5 changed for us, found on the move from 1.4.5: MAP values arrive
+	// as duckdb.OrderedMap and GEOMETRY as WKB bytes (sqlsandbox.renderer.cell);
+	// array, geometry and type read as typed literals before a string
 	// (readrouter.copyTypeWords); a symbolic link inside the copy is now
 	// refused; duckdb_coordinate_systems is a new catalog function; an icu
 	// installed under $HOME/.duckdb takes the place of the linked one. httpfs's
 	// backend is curl since 1.5, which lands on the S3-direct scan (#511),
 	// credential_chain secrets and cross-region resolution — none of which CI
-	// exercises against real S3, so the move ran the real-S3 pre-flight.
+	// exercises against real S3. The move ran the real-S3 pre-flight on 1.4.5
+	// and 1.5.6 side by side (same-region and cross-region buckets, download
+	// and --ultrafast, a role without GetBucketLocation): identical results.
+	// Without GetBucketLocation a cross-region bucket needs its region
+	// configured; that was already true on 1.4.
 	github.com/duckdb/duckdb-go/v2 v2.10506.0
 	// >= v1.15.0 is a data-safety floor, not a preference: through v1.14.0,
 	// MariadbGTIDSet.AddSet stored the EVENT'S OWN *MariadbGTID pointer into
