@@ -35,6 +35,9 @@ func TestCollectRefs_textUse(t *testing.T) {
 			TextUse{Ordered: []ColumnRef{c("", "name"), c("", "d")}}},
 		{"SELECT row_number() OVER (PARTITION BY region ORDER BY name) FROM t",
 			TextUse{Ordered: []ColumnRef{c("", "name")}, Sorted: []ColumnRef{c("", "name")}}},
+		{"SELECT max(name) OVER (PARTITION BY k), min(code) OVER () FROM t",
+			// The PARTITION BY counts too: more than needed, on the safe side.
+			TextUse{Ordered: []ColumnRef{c("", "name"), c("", "k"), c("", "code")}}},
 		{"SELECT string_agg(name, ',' ORDER BY code) FROM t",
 			TextUse{Ordered: []ColumnRef{c("", "code")}, Sorted: []ColumnRef{c("", "code")}, LooseLiteral: true}},
 		// Ordered with no column's name: an ordinal, a star.
@@ -49,11 +52,15 @@ func TestCollectRefs_textUse(t *testing.T) {
 			TextUse{Ordered: []ColumnRef{c("", "k")}, Sorted: []ColumnRef{c("", "k")}, Aliases: []string{"k"}}},
 		{"SELECT x FROM (SELECT a FROM t) AS s(x) ORDER BY x",
 			TextUse{Ordered: []ColumnRef{c("", "x")}, Sorted: []ColumnRef{c("", "x")}, Aliases: []string{"x"}}},
-		// Whole rows compared.
-		{"SELECT DISTINCT name FROM t", TextUse{RowsCompared: true}},
-		{"SELECT name FROM t UNION SELECT name FROM u", TextUse{RowsCompared: true}},
-		{"SELECT name FROM t UNION ALL SELECT name FROM u", TextUse{RowsCompared: true}},
-		{"SELECT name FROM t EXCEPT SELECT name FROM u", TextUse{RowsCompared: true}},
+		// Set operations: the parts share the first part's names.
+		{"SELECT DISTINCT name FROM t", TextUse{}},
+		{"SELECT name FROM t UNION SELECT name FROM u", TextUse{SetOperation: true}},
+		{"SELECT name FROM t UNION ALL SELECT name FROM u", TextUse{SetOperation: true}},
+		{"SELECT name FROM t EXCEPT SELECT name FROM u", TextUse{SetOperation: true}},
+		{"SELECT name FROM t UNION ALL SELECT code FROM u ORDER BY name",
+			TextUse{Ordered: []ColumnRef{c("", "name")}, Sorted: []ColumnRef{c("", "name")}, SetOperation: true}},
+		{"SELECT max(name) FROM (SELECT name FROM t UNION ALL SELECT 'a_b') x",
+			TextUse{Ordered: []ColumnRef{c("", "name")}, SetOperation: true, LooseLiteral: true}},
 		// String literals: one outside printable ASCII, or ending in a space,
 		// anywhere; one outside letters, digits and inner spaces where it is
 		// put in order, with what it is compared with.

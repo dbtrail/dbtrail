@@ -87,6 +87,18 @@ func TestTextColumns(t *testing.T) {
 			if got := TextColumns(c.sql, cols); !slices.Equal(got, c.want) {
 				t.Errorf("got %+v\nwant %+v\n%s", got, c.want, c.sql)
 			}
+			// The guard of a byte-compared kind is right only where the
+			// copy compares the column by its bytes (BinaryText gives it
+			// COLLATE C): the two readings of the collation must agree.
+			binary := map[string]bool{}
+			for _, n := range BinaryCollationColumns(c.sql, cols) {
+				binary[n] = true
+			}
+			for _, tc := range TextColumns(c.sql, cols) {
+				if bytes := tc.Kind == TextBytes || tc.Kind == TextBytesASCII; bytes != binary[tc.Name] {
+					t.Errorf("%s: kind %s, but in BinaryText = %v", tc.Name, tc.Kind, binary[tc.Name])
+				}
+			}
 		})
 	}
 }

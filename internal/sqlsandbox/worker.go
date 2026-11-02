@@ -282,15 +282,17 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return sessionErr("%v", err)
 		}
 	}
+	// The checks that end the script (DeclineSQL, #2533) run after the
+	// views, as the statement's own work: their failure is the statement's.
+	viewsSQL, checks, _ := strings.Cut(viewsSQL, declineMarker)
 	if strings.TrimSpace(viewsSQL) != "" {
 		if _, err := conn.ExecContext(ctx, viewsSQL); err != nil {
-			if msg := err.Error(); strings.Contains(msg, "Invalid Input Error") && strings.Contains(msg, valueDeclinedMark) {
-				// The script's DeclineSQL (error() raises an Invalid Input Error) held (#2533): the copy declines
-				// the statement, as a value it would not answer exactly. The
-				// session did its job, so the worker is kept.
-				return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
-			}
 			return sessionErr("install the copy's views: %v", err)
+		}
+	}
+	if strings.TrimSpace(checks) != "" {
+		if _, err := conn.ExecContext(ctx, checks); err != nil {
+			return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
 		}
 	}
 	// The port's USE, before the lock like every other SET. A schema the

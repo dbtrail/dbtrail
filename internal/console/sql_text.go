@@ -47,7 +47,8 @@ type sqlTextGuard struct {
 //     (sqlsandbox.TextUse.OddLiteral).
 //   - A string literal put in order (a comparison, MIN, MAX, an ORDER BY
 //     expression, or anything at all when the ORDER BY is an ordinal or an
-//     alias): MySQL's, unless it is letters, digits and inner spaces, or its
+//     alias, or the statement holds a UNION, INTERSECT or EXCEPT and puts
+//     anything in order, which then also puts every named column in order): MySQL's, unless it is letters, digits and inner spaces, or its
 //     operand beside it is a bare date or number column.
 //   - GREATEST, LEAST or a row comparison over text or a string: MySQL's.
 //     The copy compares those by bytes, case included, whatever the values.
@@ -110,7 +111,10 @@ func sqlTextCheck(narrowed views.Input, refs sqlsandbox.Refs) (string, []sqlText
 	}
 	ordered, orderedUnsure := in(u.Ordered)
 	sorted, sortedUnsure := in(u.Sorted)
-	orderedAll := u.OrderedUnknown || orderedUnsure
+	// Under a set operation a name stands for every part's column there,
+	// and for a string a part selects: whatever is put in order, everything
+	// may be.
+	orderedAll := u.OrderedUnknown || orderedUnsure || u.SetOperation && len(u.Ordered) > 0
 	sortedAll := u.OrderedUnknown || sortedUnsure
 	for _, c := range u.ByBytes {
 		if f := strings.ToLower(c.Name); !known[f] || isText[f] || aliases[f] {

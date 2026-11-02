@@ -173,6 +173,12 @@ func textCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT side, CONCAT(name, '_') AS c FROM w ORDER BY c", "live", "a sign sorted through an alias"},
 		{"SELECT side, name FROM w WHERE name IN (SELECT name FROM acc) ORDER BY k", "live", "the accented column named in a subquery"},
 		{"SELECT side, k FROM w WHERE name IN (SELECT * FROM tags) ORDER BY k", "live", "a star feeding an IN"},
+		{"SELECT side, MAX(email) OVER () FROM w ORDER BY k", "live", "MAX as a window puts its column in order"},
+		{"SELECT side, status AS s FROM w ORDER BY s, k", "live", "an ENUM sorted through an alias"},
+		{"SELECT side, name AS v FROM w WHERE k < 3 UNION ALL SELECT side, name FROM w WHERE k > 3 ORDER BY v, side", "copy", "letters sorted across a UNION ALL"},
+		{"SELECT side, name AS v FROM w UNION ALL SELECT side, status FROM w ORDER BY v, side", "live", "an ENUM under a sorted name: refused, though the UNION's column sorts as text"},
+		{"SELECT side, name FROM w UNION ALL SELECT side, email FROM w ORDER BY name, side", "live", "signs sorted under the first part's column name"},
+		{"SELECT MIN(side), MAX(v) FROM (SELECT side, name AS v FROM w UNION ALL SELECT side, 'a_b' FROM w) x", "live", "a string with a sign in a UNION ALL under MAX"},
 	}
 	routed := openRaw(t, portDSN)
 	live := openRaw(t, sourceDSN)

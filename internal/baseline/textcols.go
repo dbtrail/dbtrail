@@ -48,16 +48,17 @@ type TextColumn struct {
 }
 
 // foldingCollations are the collations TextFolded names: case-insensitive,
-// no language's rules. Every one but the uca1400 pair and the utf8mb3
-// unicode_520 spelling was measured on MySQL 8.0.46 (#2533); utf8mb4_uca1400
-// is MariaDB's default since 11.5, which the MariaDB integration job compares.
+// no language's rules. Measured on MySQL 8.0.46 (#2533), with two kinds of
+// exception: the utf8 and utf8mb3 spellings of a measured utf8mb4 collation
+// (the same algorithm over a smaller character set), and uca1400_ai_ci,
+// MariaDB's default since 11.5, which the MariaDB integration job compares.
 var foldingCollations = map[string]bool{
 	"utf8mb4_0900_ai_ci": true, "utf8mb4_0900_as_ci": true,
 	"utf8mb4_general_ci": true, "utf8mb4_unicode_ci": true, "utf8mb4_unicode_520_ci": true,
-	"utf8mb4_uca1400_ai_ci": true, "utf8mb4_uca1400_as_ci": true,
-	"utf8mb3_general_ci": true, "utf8mb3_unicode_ci": true, "utf8mb3_unicode_520_ci": true,
-	"utf8mb3_uca1400_ai_ci": true, "utf8mb3_uca1400_as_ci": true,
-	"utf8_general_ci": true, "utf8_unicode_ci": true, "utf8_unicode_520_ci": true,
+	"utf8mb4_uca1400_ai_ci": true,
+	"utf8mb3_general_ci":    true, "utf8mb3_unicode_ci": true, "utf8mb3_unicode_520_ci": true,
+	"utf8mb3_uca1400_ai_ci": true,
+	"utf8_general_ci":       true, "utf8_unicode_ci": true, "utf8_unicode_520_ci": true,
 	"latin1_swedish_ci": true, "latin1_general_ci": true, "ascii_general_ci": true,
 }
 

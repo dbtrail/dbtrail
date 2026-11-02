@@ -29,10 +29,11 @@ type TextUse struct {
 	// them sorts whatever it stands for, which may be a column under another
 	// name.
 	Aliases []string `json:"aliases,omitempty"`
-	// RowsCompared says the statement compares whole rows: DISTINCT, or a
-	// UNION, INTERSECT or EXCEPT (ALL included, which still pairs the column
-	// types). Every column a star brings in is then compared.
-	RowsCompared bool `json:"rows_compared,omitempty"`
+	// SetOperation says the statement holds a UNION, INTERSECT or EXCEPT
+	// (ALL included). Its parts' columns go under the first part's names, so
+	// an ORDER BY or a MIN over one of those names puts in order a column, or
+	// a string, that the name does not say.
+	SetOperation bool `json:"set_operation,omitempty"`
 	// OddLiteral says a string literal holds a character outside printable
 	// ASCII, or ends with a space, which a PAD SPACE collation does not see.
 	OddLiteral bool `json:"odd_literal,omitempty"`
@@ -115,9 +116,8 @@ func walkText(node any, at textWalk, u *TextUse) {
 				}
 			}
 		}
-		switch v["type"] {
-		case "SET_OPERATION_NODE", "DISTINCT_MODIFIER":
-			u.RowsCompared = true
+		if v["type"] == "SET_OPERATION_NODE" {
+			u.SetOperation = true
 		}
 		switch v["class"] {
 		case "COLUMN_REF":
@@ -147,7 +147,8 @@ func walkText(node any, at textWalk, u *TextUse) {
 				orderedHere(v, at, u)
 				return
 			}
-		case "FUNCTION":
+		case "FUNCTION", "WINDOW":
+			// A window is its function too: MAX(x) OVER () puts x in order.
 			f, _ := v["function_name"].(string)
 			if byBytesFunctions[f] {
 				byBytesHere(v, u)

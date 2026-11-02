@@ -1280,7 +1280,7 @@ What this is and is not:
   - an `ENUM` or `SET` column in an `ORDER BY`;
   - a string put in order (`name > 'a_b'`, `ORDER BY COALESCE(name,
     '~')`, or any string at all when the `ORDER BY` is a column number or
-    an alias) that holds anything but letters, digits and inner spaces,
+    an alias, or when a `UNION`, `INTERSECT` or `EXCEPT` sorts its result) that holds anything but letters, digits and inner spaces,
     unless what it is compared with is a date or number column;
   - `GREATEST`, `LEAST` or a row comparison (`(name, id) > ('bob', 2)`)
     over text: the copy compares those by bytes, case included;
@@ -1293,17 +1293,21 @@ What this is and is not:
     `>`, `BETWEEN`, a window's or an aggregate's `ORDER BY`), anything but
     letters, digits and inner spaces. MySQL sorts signs (`_`, `-`, `@`,
     `.`) by weights of its own, and not the same ones in every collation.
-    A `_bin` column is held only to no control character and no trailing
-    space: it compares code points on both sides.
+    A UTF-8 `_bin` column (`utf8mb4_bin`, ...) is held only to no control
+    character and no trailing space: it compares code points on both sides.
+    Another character set's `_bin` (`latin1_bin`) is held to printable
+    ASCII, since its byte order is not Unicode's past it.
 
   Equality and grouping on printable ASCII, and order on letters, digits
   and inner spaces, were measured to agree with the copy on every pair of
   389 strings under `utf8mb4_0900_ai_ci`, `utf8mb4_0900_as_ci`,
   `utf8mb4_general_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`,
   `utf8mb3_general_ci`, `utf8mb3_unicode_ci`, `latin1_swedish_ci`,
-  `latin1_general_ci` and `ascii_general_ci` (MySQL 8.0), and MariaDB's
-  `utf8mb4_uca1400_ai_ci` is compared in its integration tests; any other
-  collation is treated as one with a language's rules. A column a statement
+  `latin1_general_ci` and `ascii_general_ci` (MySQL 8.0). Also trusted:
+  the `utf8mb3` and `utf8` spellings of those (the same rules over fewer
+  characters) and MariaDB's default, `utf8mb4_uca1400_ai_ci`, which its
+  integration tests compare. Any other collation is treated as one with a
+  language's rules. A column a statement
   only shows counts as named: a table of names with accents sends every
   routed statement that names the name column to MySQL. The check reads
   every value of each such column on every statement, about 0.1 to 0.3
