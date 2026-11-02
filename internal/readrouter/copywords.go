@@ -30,14 +30,14 @@ const vetoCopyReserved = "word the copy keeps for itself, written as a name with
 // runs holds them bare before a string; they are listed all the same, so
 // that the list is the engine's and nothing has to be known about a server.
 var copyTypeWords = wordSet(
-	"bigint", "bignum", "bit", "bitstring", "blob", "bool", "boolean", "bpchar",
+	"array", "bigint", "bignum", "bit", "bitstring", "blob", "bool", "boolean", "bpchar",
 	"bytea", "char", "character", "datetime", "dec", "decimal", "double", "enum",
-	"float", "float4", "float8", "guid", "hugeint", "int", "int1", "int128",
+	"float", "float4", "float8", "geometry", "guid", "hugeint", "int", "int1", "int128",
 	"int16", "int2", "int32", "int4", "int64", "int8", "integer", "integral",
 	"json", "list", "logical", "long", "map", "nchar", "null", "numeric",
 	"nvarchar", "oid", "real", "row", "short", "signed", "smallint", "string",
 	"struct", "text", "time_ns", "timestamp_ms", "timestamp_ns", "timestamp_s", "timestamp_us", "timestamptz",
-	"timetz", "tinyint", "ubigint", "uhugeint", "uint128", "uint16", "uint32", "uint64",
+	"timetz", "tinyint", "type", "ubigint", "uhugeint", "uint128", "uint16", "uint32", "uint64",
 	"uint8", "uinteger", "union", "usmallint", "utinyint", "uuid", "varbinary", "varchar",
 	"variant", "varint",
 )

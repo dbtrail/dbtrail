@@ -11,39 +11,43 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
 	github.com/aws/smithy-go v1.25.1
 	github.com/coder/websocket v1.8.14
-	// PINNED to the DuckDB 1.4 "Andium" LTS line. v2.5.6 == DuckDB 1.4.5.
-	// Patch bumps WITHIN the line (v2.5.7, ...) are expected and welcome — they
-	// are where LTS fixes land. What is forbidden is any v2.1xxxx.x, which is
-	// DuckDB >= 1.5: duckdb-go changed versioning at 1.5 and now encodes the
-	// engine version in the minor component (DuckDB 1.5.5 => v2.10505.0), so
-	// under semver v2.10505.0 > v2.5.6 and a plain `go get -u` (or Dependabot,
-	// if it is ever enabled here) walks the build off LTS with no import-path
-	// change to notice. The six duckdb-go-bindings/lib/* modules use the same
-	// encoding and move with this one.
+	// PINNED to the DuckDB 1.5 "Variegata" line. v2.10506.0 == DuckDB 1.5.6.
+	// duckdb-go encodes the engine version in the minor component (DuckDB
+	// 1.5.6 => v2.10506.0, 2.0.0 => v2.20000.0), so patch bumps WITHIN the
+	// line (v2.10507.0, ...) are expected and welcome, and any v2.2xxxx.x is
+	// DuckDB 2.x: under semver it is newer, and a plain `go get -u` (or
+	// Dependabot, if it is ever enabled here) walks the build onto it with no
+	// import-path change to notice. The six duckdb-go-bindings/lib/* modules
+	// use the same encoding and move with this one.
 	//
 	// This comment cannot enforce itself — `go get -u` rewrites the version and
 	// leaves the text byte-identical. The guard that actually fails is
-	// TestDuckDBEngineOnLTSLine in internal/duckdbutil; it also carries the
-	// pre-flight checklist for the day we do move off.
+	// TestDuckDBEngineOnPinnedLine in internal/duckdbutil.
 	//
-	// Nothing in 1.5 is reachable from here. Our surface is read-side only:
-	// parquet_scan (hive_partitioning/union_by_name), glob, parquet metadata
-	// functions, one COPY TO PARQUET, INSTALL/LOAD httpfs+aws, CREATE SECRET
-	// credential_chain, and SET threads/memory_limit/temp_directory/s3_region/
-	// home_directory. Every handle is in-memory (sql.Open("duckdb", "")) and our
-	// durable format is Parquet written by parquet-go, not DuckDB, so 1.5's
-	// storage and type headliners cannot reach us. What 1.5 DOES change is
-	// httpfs's backend, httplib -> curl, landing on the S3-direct scan (#511),
-	// credential_chain secrets, cross-region resolution and the $HOME/.duckdb
-	// extension dir (#610) — none of which CI exercises against real S3.
+	// Why 1.5 and not 1.4 or 2.0: 1.4 LTS support ends 2026-11-17; 1.5's
+	// extended support runs to March 2027 (both per
+	// https://duckdb.org/2026/10/21/announcing-duckdb-200), and on the analytical benchmark it
+	// answers as fast as 1.4. 2.0.0 is the next LTS and is faster on heavy
+	// joins, but slower on mid-size selective joins: its probe-side scans stop
+	// applying the hash join's dynamic min/max filters per row
+	// (duckdb/duckdb#28269), and its new partial_aggregate_pushdown misjudges
+	// group counts on our state views. Move to 2.x once #28269 is settled.
 	//
-	// 1.4 LTS support ENDS 2026-09-16. Past that date this pin is a known
-	// liability rather than a preference: either move to the next LTS or record
-	// an explicit decision to run an unsupported engine. There is no 1.6 on the
-	// release calendar and DuckDB's stated policy is "every other release is
-	// LTS", so the next LTS is EXPECTED to be 2.0.0 (Fall 2026, tentative) —
-	// but 2.0.0 carries no LTS marker yet, so confirm before relying on it.
-	github.com/duckdb/duckdb-go/v2 v2.5.6
+	// What 1.5 changed for us, found on the move from 1.4.5: the 1.5 driver
+	// hands MAP values over as duckdb.OrderedMap and GEOMETRY as WKB bytes
+	// (sqlsandbox.renderer.cell); array, geometry and type are new type names
+	// in the engine, so read routing refuses them before a string
+	// (readrouter.copyTypeWords); a symbolic link inside the copy is now
+	// refused; duckdb_coordinate_systems is a new catalog function; an icu
+	// installed under $HOME/.duckdb takes the place of the linked one. httpfs's
+	// backend is curl since 1.5, which lands on the S3-direct scan (#511),
+	// credential_chain secrets and cross-region resolution — none of which CI
+	// exercises against real S3. The move ran the real-S3 pre-flight on 1.4.5
+	// and 1.5.6 side by side (same-region and cross-region buckets, download
+	// and --ultrafast, a role without GetBucketLocation): identical results.
+	// Without GetBucketLocation a cross-region bucket needs its region
+	// configured; that was already true on 1.4.
+	github.com/duckdb/duckdb-go/v2 v2.10506.0
 	// >= v1.15.0 is a data-safety floor, not a preference: through v1.14.0,
 	// MariadbGTIDSet.AddSet stored the EVENT'S OWN *MariadbGTID pointer into
 	// the syncer's accumulated set on a domain's first appearance, and the
@@ -124,12 +128,12 @@ require (
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/creasty/defaults v1.8.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/duckdb/duckdb-go-bindings v0.3.5 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.3.5 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.3.5 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.3.5 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.3.5 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.3.5 // indirect
+	github.com/duckdb/duckdb-go-bindings v0.10506.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10506.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10506.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10506.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10506.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10506.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.36.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

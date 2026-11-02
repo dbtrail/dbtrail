@@ -538,7 +538,7 @@ func sessionErr(format string, args ...any) wireResult {
 }
 
 // sandboxSettings are the DuckDB settings the lock-down sets, verified to
-// exist on DuckDB v1.4.5 (TestSandboxSettingsExistInPinnedEngine keeps that
+// exist on DuckDB v1.4.5 and v1.5.6 (TestSandboxSettingsExistInPinnedEngine keeps that
 // true across engine bumps). allowed_paths (single files) also exists there
 // and is not needed: the copy is whole directories.
 var sandboxSettings = []string{
@@ -928,7 +928,11 @@ func (r *renderer) cell(v any, typ string) any {
 			return x.UTC().Format(time.RFC3339Nano)
 		}
 	case []byte:
-		if utf8.Valid(x) {
+		// A GEOMETRY (built into the engine since DuckDB 1.5) arrives as its
+		// WKB bytes, which can be valid UTF-8 (POINT(0 0) is), so it is always
+		// hex rather than read as text. typ names it also for an element of a
+		// LIST, STRUCT, MAP or UNION that holds one (see nestedType).
+		if utf8.Valid(x) && !strings.Contains(typ, "GEOMETRY") {
 			return r.text(string(x))
 		}
 		return r.text("0x" + strings.ToUpper(hex.EncodeToString(x)))
@@ -939,39 +943,59 @@ func (r *renderer) cell(v any, typ string) any {
 	case duckdb.UUID:
 		return x.String()
 	case []any:
+		inner := nestedType(typ)
 		out := make([]any, len(x))
 		for i, e := range x {
-			out[i] = r.cell(e, "")
+			out[i] = r.cell(e, inner)
 		}
 		return out
 	case map[string]any:
+		inner := nestedType(typ)
 		out := make(map[string]any, len(x))
 		for k, e := range x {
-			out[k] = r.cell(e, "")
+			out[k] = r.cell(e, inner)
 		}
 		return out
-	case duckdb.Map:
-		// A MAP is the driver's own map type, keyed by any value. Rendered
-		// like a STRUCT, each key by its cell text, so the values inside go
-		// through the same rules (a DECIMAL keeps its scale) and the cell is
-		// the JSON object its column is declared as.
-		out := make(map[string]any, len(x))
-		for k, e := range x {
-			key, ok := r.cell(k, "").(string)
+	case duckdb.OrderedMap:
+		// A MAP is the driver's own map type, keyed by any value (since
+		// duckdb-go v2.105xx, the DuckDB 1.5 driver, an OrderedMap;
+		// duckdb.Map is deprecated and no longer returned). Rendered like a STRUCT, each key by
+		// its cell text, so the values inside go through the same rules (a
+		// DECIMAL keeps its scale) and the cell is the JSON object its column
+		// is declared as. Without this case the value would reach the
+		// fmt.Stringer case below and come out as "OrderedMap{a: 10}".
+		inner := nestedType(typ)
+		keys, vals := x.Keys(), x.Values()
+		out := make(map[string]any, len(keys))
+		for i, k := range keys {
+			key, ok := r.cell(k, inner).(string)
 			if !ok {
-				key = fmt.Sprint(r.cell(k, ""))
+				key = fmt.Sprint(r.cell(k, inner))
 			}
-			out[key] = r.cell(e, "")
+			out[key] = r.cell(vals[i], inner)
 		}
 		return out
 	case duckdb.Union:
 		// A UNION holds one member: the cell is that member's value.
-		return r.cell(x.Value, "")
+		return r.cell(x.Value, nestedType(typ))
 	case fmt.Stringer:
 		return r.text(x.String())
 	default:
 		return r.text(fmt.Sprint(x))
 	}
+}
+
+// nestedType is the type an element of a nested value (LIST, STRUCT, MAP,
+// UNION) is rendered with. The element's own type is not parsed out of the
+// column's: it is "" as before, except that a column whose type holds a
+// GEOMETRY passes its type down, so a GEOMETRY inside it is hex too
+// (['POINT(0 0)'::GEOMETRY] is a GEOMETRY[]). A BLOB beside it in the same
+// STRUCT is then hex as well, which is still its bytes.
+func nestedType(typ string) string {
+	if strings.Contains(typ, "GEOMETRY") {
+		return typ
+	}
+	return ""
 }
 
 func (r *renderer) text(s string) string {

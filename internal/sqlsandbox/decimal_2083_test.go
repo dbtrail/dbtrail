@@ -50,6 +50,15 @@ func TestCell_decimalKeepsItsScale(t *testing.T) {
 	// Inside a LIST, a STRUCT, a MAP or a UNION the element is a Decimal too.
 	ten := duckdb.Decimal{Width: 10, Scale: 2, Value: big.NewInt(1000)}
 	var r renderer
+	// orderedMap builds the MAP value the driver hands over (an OrderedMap
+	// since duckdb-go v2.105xx, the DuckDB 1.5 driver) from key, value pairs.
+	orderedMap := func(kv ...any) duckdb.OrderedMap {
+		var m duckdb.OrderedMap
+		for i := 0; i < len(kv); i += 2 {
+			m.Set(kv[i], kv[i+1])
+		}
+		return m
+	}
 	nested := []struct {
 		name string
 		in   any
@@ -57,10 +66,12 @@ func TestCell_decimalKeepsItsScale(t *testing.T) {
 	}{
 		{"LIST", []any{ten}, []any{"10.00"}},
 		{"STRUCT", map[string]any{"a": ten}, map[string]any{"a": "10.00"}},
-		{"MAP", duckdb.Map{"a": ten}, map[string]any{"a": "10.00"}},
-		{"MAP keyed by a DECIMAL", duckdb.Map{ten: int32(1)}, map[string]any{"10.00": int32(1)}},
+		{"MAP", orderedMap("a", ten), map[string]any{"a": "10.00"}},
+		{"MAP keyed by a DECIMAL", orderedMap(ten, int32(1)), map[string]any{"10.00": int32(1)}},
+		{"MAP with two keys", orderedMap("a", ten, "b", int32(2)), map[string]any{"a": "10.00", "b": int32(2)}},
+		{"empty MAP", orderedMap(), map[string]any{}},
 		{"UNION", duckdb.Union{Tag: "n", Value: ten}, "10.00"},
-		{"LIST of MAP", []any{duckdb.Map{"a": ten}}, []any{map[string]any{"a": "10.00"}}},
+		{"LIST of MAP", []any{orderedMap("a", ten)}, []any{map[string]any{"a": "10.00"}}},
 	}
 	for _, c := range nested {
 		if got := r.cell(c.in, ""); !reflect.DeepEqual(got, c.want) {

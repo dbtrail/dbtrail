@@ -218,9 +218,10 @@ What to know before relying on it:
   `'café' = 'cafe'`, `'ß' = 'ss'`, full-width letters and `'æ' = 'ae'` are
   false here, and punctuation and accented letters sort by code point. The
   full list, and why, is further down this page, at "The copy itself
-  compares text". Not folded either: `LIKE`, `REGEXP`, `count(DISTINCT ...)`,
-  `instr`/`position`/`contains`, and the duplicate removal of `UNION`,
-  `INTERSECT` and `EXCEPT`. A column MySQL
+  compares text". Not folded either: `LIKE`, `REGEXP`, `count(DISTINCT ...)`
+  and `instr`/`position`/`contains`. The duplicate removal of `UNION`,
+  `INTERSECT` and `EXCEPT` folds case but keeps whichever spelling it meets
+  first (`'a'` or `'A'`), and folds no accents. A column MySQL
   declares under a `_bin` collation compares byte by byte here too
   (`code = 'ab'` does not match `'AB'`, and it groups and sorts by code
   point; an `ENUM` or `SET` column is the exception in `ORDER BY`, where
@@ -1129,8 +1130,9 @@ What this is and is not:
   zero date as NULL; a name a subquery or `WITH` defines, or the aggregate in
   `HAVING` or `ORDER BY`, stays on MySQL), `INSTR`/`LOCATE`,
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
-  compares the rows by bytes there, so `SELECT 'a' UNION SELECT 'A'` is one
-  row on MySQL and two on the copy; `UNION ALL` is not kept back),
+  does not compare the rows by MySQL's collation there: `SELECT 'é' UNION
+  SELECT 'e'` is one row on MySQL and two on the copy, and `SELECT 'a' UNION
+  SELECT 'A'` keeps either spelling; `UNION ALL` is not kept back),
   variables, ...). Five more shapes are kept on MySQL, for text and
   prepared statements alike; each was measured on MySQL 8.4 and MariaDB
   11.4 against the copy:
