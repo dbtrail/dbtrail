@@ -188,6 +188,18 @@ func unixTimeCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			}
 		}
 	}
+	// #2607: a session with autocommit off is in a transaction from its
+	// first statement, so the same expensive read is MySQL's, the copy's
+	// again once the session turns autocommit back on.
+	off := openRaw(t, withZone(portDSN, "+00:00")+"&autocommit=0")
+	if got := answerText(off, bucket); !strings.HasPrefix(got, "live|") {
+		t.Errorf("with autocommit off: routed %s, want it answered by MySQL (a transaction)", got)
+	}
+	on := openRaw(t, withZone(portDSN, "+00:00")+"&autocommit=1")
+	if got := answerText(on, bucket); !strings.HasPrefix(got, "copy|") {
+		t.Errorf("with autocommit on: routed %s, want it answered by the copy", got)
+	}
+
 	// What MySQL answered was the copy's decision every time, never its
 	// fault: the NULL and the zero date the UNIX_TIMESTAMP macro declines
 	// count as the copy's columns differing, not as the copy refusing.
