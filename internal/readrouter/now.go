@@ -22,6 +22,15 @@ func CallsNow(stmt string) bool {
 	return nowCall.MatchString(scan(stmt).blankedCopy)
 }
 
+// CallsNow is CallsNow over this shape, for sqlsandbox.Session.Types.
+func (s StatementShape) CallsNow() bool { return nowCall.MatchString(string(s)) }
+
+// DateComparedColumns is DateComparedColumns over this shape.
+func (s StatementShape) DateComparedColumns() []string {
+	cols, _ := dateUses(strings.ToLower(string(s)))
+	return cols
+}
+
 // DateComparedColumns names the columns a statement compares CURDATE() and
 // UTC_DATE() with, lowercased, each once, without its table (#2611). The
 // router lets the copy answer such a comparison whatever the column; the

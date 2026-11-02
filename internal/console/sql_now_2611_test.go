@@ -56,7 +56,7 @@ func TestSQLNowRefusalFor(t *testing.T) {
 		{"SELECT * FROM ev JOIN log USING (id) WHERE d = CURDATE()", "", []string{"ev", "log"}, true},
 		{"SELECT * FROM raw WHERE d = CURDATE()", "", []string{"raw"}, true},
 	} {
-		if got := sqlNowRefusalFor(only(c.tables...), c.stmt, c.zone); (got != "") != c.refused {
+		if got := sqlNowRefusalFor(only(c.tables...), c.stmt, readrouter.ShapeOf(c.stmt), c.zone); (got != "") != c.refused {
 			t.Errorf("sqlNowRefusalFor(%q, %q) = %q, want refused=%v", c.stmt, c.zone, got, c.refused)
 		}
 	}
@@ -65,6 +65,16 @@ func TestSQLNowRefusalFor(t *testing.T) {
 // Through runSQL and the real worker: the refusals above are the ones a
 // caller that asked for MySQL's answer meets, and the copy answers the rest
 // with MySQL's clock functions.
+// With no reading of the statement, one that may call the four is refused.
+func TestSQLNowRefusalFor_noShape(t *testing.T) {
+	if sqlNowRefusalFor(views.Input{}, "SELECT now()", nil, "") == "" {
+		t.Error("no reading, NOW(): not refused")
+	}
+	if got := sqlNowRefusalFor(views.Input{}, "SELECT 1", nil, ""); got != "" {
+		t.Errorf("no reading, no call: %q", got)
+	}
+}
+
 func TestSQL_realWorkerNow_2611(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {

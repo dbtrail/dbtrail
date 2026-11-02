@@ -330,11 +330,18 @@ type Session struct {
 // gives MySQL's number of on the copy and notDates the rest, whole the columns
 // MySQL types as a whole number, which FROM_UNIXTIME prints without a
 // fraction as the copy does, and notWhole the rest.
+//
+// CallsNow and DateComparedColumns are about the statement alone (#2611):
+// whether it calls NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE(), and the
+// names of the columns CURDATE() and UTC_DATE() are compared with, read as
+// the router reads the statement.
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
 	NameVeto(names []string) string
 	DistinctVeto(safe, other []string) string
 	UnixTimeVeto(dates, notDates, whole, notWhole []string) string
+	CallsNow() bool
+	DateComparedColumns() []string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
