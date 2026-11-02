@@ -26,6 +26,10 @@ type fakeRouter struct {
 	resultRows int64
 	decideErr  error
 	inTxn      bool
+	// inTxnAfterDecide: the session is in a transaction once Decide has
+	// run, as a source whose sessions open with autocommit off reports it
+	// only in the first answer of the connection Decide opens (#2607).
+	inTxnAfterDecide bool
 	useDBErr   error
 	// forwardErr, when set, is what Forward answers (MySQL's own error).
 	forwardErr error
@@ -171,6 +175,9 @@ func (r *fakeRouter) Prepare(_ context.Context, stmt string) (readrouter.Stmt, e
 
 func (r *fakeRouter) Decide(_ context.Context, stmt string) (readrouter.Decision, error) {
 	r.explained = append(r.explained, stmt)
+	if r.inTxnAfterDecide {
+		r.inTxn = true
+	}
 	return readrouter.Decision{ToCopy: r.toCopy, Reason: r.reason, Rule: r.rule, ResultRows: r.resultRows}, r.decideErr
 }
 
