@@ -167,6 +167,12 @@ func runRestoreIndex(cmd *cobra.Command, args []string) error {
 	if err := restoreIndexTargetEmpty(ctx, db, dbName); err != nil {
 		return err
 	}
+	// Before the tables (#2606): an index built from archives holds only the
+	// hours they hold, so its history is unknown, and readers must measure
+	// it by its oldest partition. Written first, CreateIndexTables keeps it.
+	if err := indexer.MarkPartitionHistoryUnknown(ctx, db); err != nil {
+		return err
+	}
 	if err := indexer.CreateIndexTables(ctx, db, riPartitions, riEncrypt, nil); err != nil {
 		return err
 	}

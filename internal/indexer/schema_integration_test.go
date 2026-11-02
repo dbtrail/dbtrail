@@ -5,6 +5,7 @@ package indexer
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -12,7 +13,7 @@ import (
 func TestCreateBinlogEventsTable(t *testing.T) {
 	db, dbName := testutil.CreateTestDB(t)
 
-	if err := createBinlogEventsTable(db, 3, false); err != nil {
+	if err := createBinlogEventsTable(db, 3, false, time.Now()); err != nil {
 		t.Fatalf("createBinlogEventsTable failed: %v", err)
 	}
 
