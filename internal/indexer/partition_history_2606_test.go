@@ -27,19 +27,23 @@ func TestPartitionHistory_LossBound(t *testing.T) {
 		since  time.Time
 		want   time.Time
 		ok     bool
+		// notCaptured: capture began after the snapshot's coordinate, or
+		// where it began is not known.
+		notCaptured bool
 	}{
-		{"young, nothing dropped", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-01 23:00"), since, time.Time{}, true},
-		{"a drop recorded", PartitionHistory{Known: true, CreatedAt: born, DroppedBelow: h("2026-11-02 05:00")}, h("2026-11-01 23:00"), since, h("2026-11-02 05:00"), true},
-		{"the bottom moved with nothing recorded: an untracked drop", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-02 03:00"), since, h("2026-11-02 03:00"), true},
-		{"a recorded drop below an untracked one", PartitionHistory{Known: true, CreatedAt: born, DroppedBelow: h("2026-11-02 01:00")}, h("2026-11-02 03:00"), since, h("2026-11-02 03:00"), true},
-		{"a partition added below the first: not the history recorded", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-01 20:00"), since, h("2026-11-01 20:00"), true},
-		{"no record: an older index", PartitionHistory{}, h("2026-11-01 23:00"), since, h("2026-11-01 23:00"), true},
-		{"history unknown: a restored index", PartitionHistory{Known: false, CreatedAt: born}, h("2026-11-01 23:00"), since, h("2026-11-01 23:00"), true},
-		{"created after the lookup start: an index emptied and created again", PartitionHistory{Known: true, CreatedAt: h("2026-11-01 23:40")}, h("2026-11-01 23:00"), since, h("2026-11-01 23:00"), true},
-		{"no lookup start", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-01 23:00"), time.Time{}, h("2026-11-01 23:00"), true},
-		{"no live partition", PartitionHistory{Known: true, CreatedAt: born}, time.Time{}, since, time.Time{}, false},
+		{"young, nothing dropped", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-01 23:00"), since, time.Time{}, true, false},
+		{"a drop recorded", PartitionHistory{Known: true, CreatedAt: born, DroppedBelow: h("2026-11-02 05:00")}, h("2026-11-01 23:00"), since, h("2026-11-02 05:00"), true, false},
+		{"the bottom moved with nothing recorded: an untracked drop", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-02 03:00"), since, h("2026-11-02 03:00"), true, false},
+		{"a recorded drop below an untracked one", PartitionHistory{Known: true, CreatedAt: born, DroppedBelow: h("2026-11-02 01:00")}, h("2026-11-02 03:00"), since, h("2026-11-02 03:00"), true, false},
+		{"a partition added below the first: not the history recorded", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-01 20:00"), since, h("2026-11-01 20:00"), true, false},
+		{"no record: an older index", PartitionHistory{}, h("2026-11-01 23:00"), since, h("2026-11-01 23:00"), true, false},
+		{"history unknown: a restored index", PartitionHistory{Known: false, CreatedAt: born}, h("2026-11-01 23:00"), since, h("2026-11-01 23:00"), true, false},
+		{"created after the lookup start: an index emptied and created again", PartitionHistory{Known: true, CreatedAt: h("2026-11-01 23:40")}, h("2026-11-01 23:00"), since, h("2026-11-01 23:00"), true, false},
+		{"no lookup start", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-01 23:00"), time.Time{}, h("2026-11-01 23:00"), true, false},
+		{"no live partition", PartitionHistory{Known: true, CreatedAt: born}, time.Time{}, since, time.Time{}, false, false},
+		{"capture began after the snapshot: what came between was never read", PartitionHistory{Known: true, CreatedAt: born}, h("2026-11-01 23:00"), since, h("2026-11-01 23:00"), true, true},
 	} {
-		got, ok := c.hist.LossBound(c.oldest, c.since)
+		got, ok := c.hist.LossBound(c.oldest, c.since, !c.notCaptured)
 		if ok != c.ok || !got.Equal(c.want) {
 			t.Errorf("%s: LossBound = %v, %v; want %v, %v", c.name, got, ok, c.want, c.ok)
 		}

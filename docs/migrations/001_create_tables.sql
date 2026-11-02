@@ -191,7 +191,9 @@ CREATE TABLE IF NOT EXISTS rotation_policy (
 -- is created (history_known = 1), moved up by rotation BEFORE every DROP
 -- PARTITION (dropped_below_unix, the dropped partitions' upper bound), and
 -- set to history_known = 0 by restore-index, whose archives may not hold every
--- hour. The oldest partition has no lower bound, so an index that never
+-- hour (and by an init that finds the row but not binlog_events). A capture
+-- that starts with no checkpoint writes capture_from_* before its first one:
+-- the source binlog coordinate it holds every event from. The oldest partition has no lower bound, so an index that never
 -- dropped one still holds every older event: the console's fresh mode and its
 -- "unchanged since the snapshot" check read this to tell a young index from a
 -- rotated one. Times are UTC epoch seconds. NO ROW (or no table) = an index
@@ -203,5 +205,7 @@ CREATE TABLE IF NOT EXISTS partition_history (
     history_known      TINYINT UNSIGNED NOT NULL,
     created_unix       BIGINT UNSIGNED  NOT NULL,
     dropped_below_unix BIGINT UNSIGNED  DEFAULT NULL,
+    capture_from_file  VARCHAR(255)     DEFAULT NULL,
+    capture_from_pos   BIGINT UNSIGNED  DEFAULT NULL,
     CONSTRAINT partition_history_single_row CHECK (id = 1)
 ) ENGINE=InnoDB;

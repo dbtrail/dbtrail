@@ -781,7 +781,11 @@ func (s *Server) copyUnchanged(ctx context.Context, b *bundle, id string, tables
 	if err != nil {
 		return unreadable("the index's partitions", err)
 	}
-	if lacks, err := indexMayLackSince(ctx, b.db, b.dbName, parts, floor, oldestSince); err != nil {
+	anchors := make([]query.BinlogPos, len(cuts))
+	for i := range cuts {
+		anchors[i] = cuts[i].anchor
+	}
+	if lacks, err := indexMayLackSince(ctx, b.db, b.dbName, parts, floor, oldestSince, anchors); err != nil {
 		return unreadable("the index's partition history", err)
 	} else if lacks {
 		return "the index no longer holds every change since the snapshot (older partitions were rotated out, or the index began after the snapshot), so it cannot say nothing changed"

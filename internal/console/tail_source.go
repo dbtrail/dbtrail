@@ -255,7 +255,7 @@ func (x *indexTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo 
 	if err != nil {
 		return "", fmt.Errorf("read the index's partitions: %w", err)
 	}
-	if lacks, err := indexMayLackSince(ctx, db, x.b.dbName, parts, floor, since); err != nil {
+	if lacks, err := indexMayLackSince(ctx, db, x.b.dbName, parts, floor, since, []query.BinlogPos{cut.anchor}); err != nil {
 		return "", err
 	} else if lacks {
 		return "the index no longer holds every change since the snapshot of " + name + " (older partitions were rotated out, or the index began after the snapshot)", nil

@@ -31,6 +31,11 @@ func newYoungRig(t *testing.T) *unchangedRig {
 		anchor: query.BinlogPos{File: "binlog.000007", Pos: 4200}}
 	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, binlog_file, binlog_position, gtid_set, events_indexed, last_checkpoint, server_id, capture_skips)
 		VALUES (1, 'gtid', 'binlog.000009', 100, '3e11fa47-71ca-11e1-9e33-c80aa9429562:1-50', 0, UTC_TIMESTAMP(), 1, '{}')`)
+	// Capture began before the snapshot's coordinate (binlog.000007:4200),
+	// as a server's capture does before its first snapshot.
+	if err := indexer.RecordCaptureStart(context.Background(), db, "binlog.000007", 4); err != nil {
+		t.Fatal(err)
+	}
 	r.wm = &fakeWatermark{ago: 5 * time.Second}
 	r.s = &Server{cm: newConnManager(nil, false), captureStatus: r.wm}
 	r.b = &bundle{db: db, dbName: dbName, engine: query.New(db), baselineSrc: r.root}
@@ -95,6 +100,23 @@ func TestIntegrationIndexCoverage_youngIndex_2606(t *testing.T) {
 		t.Errorf("a recorded drop at the floor: refusal %q, want none", why)
 	}
 	r.wantUnchanged(quiet)
+
+	// Capture began after the snapshot's coordinate, or where it began is
+	// not known: what came between was never read, with no drop and no
+	// recorded loss.
+	testutil.MustExec(t, r.db, "UPDATE partition_history SET capture_from_file = 'binlog.000008', capture_from_pos = 4 WHERE id = 1")
+	if _, why := fill(); !strings.Contains(why, "rotated out") {
+		t.Errorf("capture began after the snapshot: refusal %q, want one", why)
+	}
+	r.wantNot("rotated out", quiet)
+	testutil.MustExec(t, r.db, "UPDATE partition_history SET capture_from_file = NULL, capture_from_pos = NULL WHERE id = 1")
+	if _, why := fill(); !strings.Contains(why, "rotated out") {
+		t.Errorf("capture start not known: refusal %q, want one", why)
+	}
+	testutil.MustExec(t, r.db, "UPDATE partition_history SET capture_from_file = 'binlog.000007', capture_from_pos = 4200 WHERE id = 1")
+	if _, why := fill(); why != "" {
+		t.Errorf("capture began at the snapshot's own coordinate: refusal %q, want none", why)
+	}
 
 	// An index created after the snapshot (emptied and created again): the
 	// events between are not in it.

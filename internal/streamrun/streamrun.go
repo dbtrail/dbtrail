@@ -3226,6 +3226,28 @@ func oneRun(ctx context.Context, cfg Config) error {
 	// a start the source refused must leave nothing behind, so a corrected
 	// --start-* flag is honored on the next run.
 	if saved == nil {
+		// And before it, where this capture holds every event from (#2606):
+		// the console vouches that a young index lacks nothing since a
+		// snapshot only from the snapshot's coordinate on. In position mode
+		// the start is exact. In GTID mode the start is a set, so the
+		// coordinate is read now, after that set was: every transaction
+		// written at or past it is missing from the set and streams (the
+		// anchor seeded above is read BEFORE the set, which suits the dedup
+		// it serves and would claim transactions the set already holds).
+		// Not read, it is recorded as not known.
+		fromFile, fromPos := state.safeFile, state.safePos
+		if mode == "gtid" {
+			fromFile, fromPos = "", 0
+			if f, p, err := config.CurrentBinlogPosition(sourceDB); err != nil {
+				slog.Warn("could not read the source's binlog position at a fresh GTID start; fresh mode will measure this index by its oldest partition",
+					"error", err)
+			} else {
+				fromFile, fromPos = f, uint64(p)
+			}
+		}
+		if err := indexer.RecordCaptureStart(ctx, indexDB, fromFile, fromPos); err != nil {
+			return err
+		}
 		if err := saveCheckpoint(indexDB, state); err != nil {
 			return fmt.Errorf("save the start checkpoint: %w", err)
 		}

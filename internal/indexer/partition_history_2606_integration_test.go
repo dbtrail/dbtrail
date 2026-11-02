@@ -105,6 +105,54 @@ func TestIntegrationPartitionHistory_2606(t *testing.T) {
 		}
 	})
 
+	t.Run("capture start: recorded, replaced by a later fresh start, empty is not known", func(t *testing.T) {
+		db, dbName := testutil.CreateTestDB(t)
+		if err := CreateIndexTables(ctx, db, 3, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := RecordCaptureStart(ctx, db, "binlog.000003", 120); err != nil {
+			t.Fatal(err)
+		}
+		if h, _ := ReadPartitionHistory(ctx, db, dbName); h.CaptureFromFile != "binlog.000003" || h.CaptureFromPos != 120 {
+			t.Errorf("capture start = %s:%d, want binlog.000003:120", h.CaptureFromFile, h.CaptureFromPos)
+		}
+		if err := RecordCaptureStart(ctx, db, "", 0); err != nil {
+			t.Fatal(err)
+		}
+		if h, _ := ReadPartitionHistory(ctx, db, dbName); h.CaptureFromFile != "" {
+			t.Errorf("an unread start left %s:%d, want none", h.CaptureFromFile, h.CaptureFromPos)
+		}
+	})
+
+	t.Run("binlog_events created again under an existing record: unknown", func(t *testing.T) {
+		db, dbName := testutil.CreateTestDB(t)
+		if err := CreateIndexTables(ctx, db, 3, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		testutil.MustExec(t, db, "DROP TABLE binlog_events")
+		if err := CreateIndexTables(ctx, db, 3, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		if h, _ := ReadPartitionHistory(ctx, db, dbName); h.Known {
+			t.Errorf("history = %+v after binlog_events was dropped and created again, want unknown", h)
+		}
+	})
+
+	t.Run("EnsureSchema adds the table, never a row", func(t *testing.T) {
+		db, dbName := testutil.CreateTestDB(t)
+		testutil.InitIndexTables(t, db)
+		if err := EnsureSchema(db); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM partition_history").Scan(&n); err != nil {
+			t.Fatalf("partition_history after EnsureSchema: %v", err)
+		}
+		if h, _ := ReadPartitionHistory(ctx, db, dbName); n != 0 || h.Known {
+			t.Errorf("EnsureSchema wrote %d rows (history %+v), want the table empty", n, h)
+		}
+	})
+
 	t.Run("drops move the bound up only", func(t *testing.T) {
 		db, dbName := testutil.CreateTestDB(t)
 		if err := CreateIndexTables(ctx, db, 3, false, nil); err != nil {

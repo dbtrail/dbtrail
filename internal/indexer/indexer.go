@@ -986,6 +986,19 @@ func EnsureSchema(db *sql.DB) error {
 			return fmt.Errorf("failed to create rotation_policy: %w", err)
 		}
 	}
+	// The partition history the same way (#2606): the table, never a row.
+	// No row reads as an index whose drops are unknown, which is what an
+	// index this build did not create is; a row here would vouch for drops
+	// an older rotate never recorded.
+	hasPartitionHistory, err := tableExists(db, "partition_history")
+	if err != nil {
+		return err
+	}
+	if !hasPartitionHistory {
+		if _, err := db.Exec(DDLPartitionHistory); err != nil {
+			return fmt.Errorf("failed to create partition_history: %w", err)
+		}
+	}
 	// Every --pk lookup reads a table's newest snapshot by (schema_name,
 	// table_name) to tell whether it is system-versioned (#2007); the only
 	// other index on schema_snapshots leads with snapshot_id.
