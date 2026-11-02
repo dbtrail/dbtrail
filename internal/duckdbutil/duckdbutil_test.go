@@ -251,7 +251,7 @@ func TestDuckDBEngineOnPinnedLine(t *testing.T) {
 	if !strings.HasPrefix(got, wantLine) {
 		t.Fatalf("DuckDB engine is %s, want the %sx line.\n"+
 			"If this is a deliberate move, update this test AND the pin "+
-			"rationale in go.mod together — and run the off-line pre-flight "+
+			"rationale in go.mod together — and run the real-S3 pre-flight "+
 			"(real-S3 --ultrafast scan, cross-region read, IAM role without "+
 			"GetBucketLocation).", got, wantLine)
 	}

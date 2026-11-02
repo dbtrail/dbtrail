@@ -51,7 +51,7 @@ func TestCell_decimalKeepsItsScale(t *testing.T) {
 	ten := duckdb.Decimal{Width: 10, Scale: 2, Value: big.NewInt(1000)}
 	var r renderer
 	// orderedMap builds the MAP value the driver hands over (an OrderedMap
-	// since DuckDB 1.5) from key, value pairs.
+	// since duckdb-go v2.105xx, the DuckDB 1.5 driver) from key, value pairs.
 	orderedMap := func(kv ...any) duckdb.OrderedMap {
 		var m duckdb.OrderedMap
 		for i := 0; i < len(kv); i += 2 {

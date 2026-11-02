@@ -25,16 +25,18 @@ require (
 	// TestDuckDBEngineOnPinnedLine in internal/duckdbutil.
 	//
 	// Why 1.5 and not 1.4 or 2.0: 1.4 LTS support ends 2026-11-17; 1.5's
-	// extended support runs to March 2027, and on the analytical benchmark it
+	// extended support runs to March 2027 (both per
+	// https://duckdb.org/2026/10/21/announcing-duckdb-200), and on the analytical benchmark it
 	// answers as fast as 1.4. 2.0.0 is the next LTS and is faster on heavy
 	// joins, but slower on mid-size selective joins: its probe-side scans stop
 	// applying the hash join's dynamic min/max filters per row
 	// (duckdb/duckdb#28269), and its new partial_aggregate_pushdown misjudges
 	// group counts on our state views. Move to 2.x once #28269 is settled.
 	//
-	// What 1.5 changed for us, found on the move from 1.4.5: MAP values arrive
-	// as duckdb.OrderedMap and GEOMETRY as WKB bytes (sqlsandbox.renderer.cell);
-	// array, geometry and type read as typed literals before a string
+	// What 1.5 changed for us, found on the move from 1.4.5: the 1.5 driver
+	// hands MAP values over as duckdb.OrderedMap and GEOMETRY as WKB bytes
+	// (sqlsandbox.renderer.cell); array, geometry and type are new type names
+	// in the engine, so read routing refuses them before a string
 	// (readrouter.copyTypeWords); a symbolic link inside the copy is now
 	// refused; duckdb_coordinate_systems is a new catalog function; an icu
 	// installed under $HOME/.duckdb takes the place of the linked one. httpfs's
