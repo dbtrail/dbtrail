@@ -25,10 +25,19 @@ import (
 //     column compares code points on MySQL as the copy compares its bytes,
 //     but utf8mb4_bin pads with spaces, which a control character sorts
 //     below.
+//
+// Each has a no-space twin for a PAD SPACE column the statement passes
+// through a call that can cut text (sqlsandbox.TextUse.Wrapped): LEFT('Jo
+// Ann', 3) is 'Jo ', which MySQL compares as 'Jo' and the copy does not, so
+// there no space at all qualifies.
 const (
 	sqlTextPrintable = `[^ -~]| $`
 	sqlTextSortable  = `[^A-Za-z0-9 ]| $`
 	sqlTextPadded    = `[\x00-\x1f]| $`
+
+	sqlTextPrintableNoSpace = `[^!-~]`
+	sqlTextSortableNoSpace  = `[^A-Za-z0-9]`
+	sqlTextPaddedNoSpace    = `[\x00-\x20]`
 )
 
 // sqlTextGuard is one column of one view whose values must not match
@@ -109,6 +118,7 @@ func sqlTextCheck(narrowed views.Input, refs sqlsandbox.Refs) (string, []sqlText
 		}
 		return set, unsure
 	}
+	wrapped, _ := in(u.Wrapped)
 	ordered, orderedUnsure := in(u.Ordered)
 	sorted, sortedUnsure := in(u.Sorted)
 	// Under a set operation a name stands for every part's column there,
@@ -190,6 +200,10 @@ func sqlTextCheck(narrowed views.Input, refs sqlsandbox.Refs) (string, []sqlText
 				pattern = sqlTextPadded
 			case tc.Kind == views.TextFolded && (orderedAll || ordered[f]):
 				pattern = sqlTextSortable
+			}
+			if tc.Padded && wrapped[f] {
+				pattern = map[string]string{sqlTextPrintable: sqlTextPrintableNoSpace,
+					sqlTextSortable: sqlTextSortableNoSpace, sqlTextPadded: sqlTextPaddedNoSpace}[pattern]
 			}
 			guards = append(guards, sqlTextGuard{view: sv.Ref, label: label, column: tc.Name, pattern: pattern})
 		}

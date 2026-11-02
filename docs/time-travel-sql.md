@@ -1279,8 +1279,8 @@ What this is and is not:
     `i`, Danish `aa` is a letter of its own), and one that is not known;
   - an `ENUM` or `SET` column in an `ORDER BY`;
   - a string put in order (`name > 'a_b'`, `ORDER BY COALESCE(name,
-    '~')`, or any string at all when the `ORDER BY` is a column number or
-    an alias, or when a `UNION`, `INTERSECT` or `EXCEPT` sorts its result) that holds anything but letters, digits and inner spaces,
+    '~')`, the select item an `ORDER BY` number or alias points at, or any
+    string at all when a `UNION`, `INTERSECT` or `EXCEPT` sorts its result) that holds anything but letters, digits and inner spaces,
     unless what it is compared with is a date or number column;
   - `GREATEST`, `LEAST` or a row comparison (`(name, id) > ('bob', 2)`)
     over text: the copy compares those by bytes, case included;
@@ -1293,6 +1293,11 @@ What this is and is not:
     `>`, `BETWEEN`, a window's or an aggregate's `ORDER BY`), anything but
     letters, digits and inner spaces. MySQL sorts signs (`_`, `-`, `@`,
     `.`) by weights of its own, and not the same ones in every collation.
+    Under a collation that ignores trailing spaces (every one but the `0900`
+    ones on MySQL, every one but the `_nopad_` ones on MariaDB, its default
+    included), a column the statement passes through a call that can cut it
+    (`LEFT`, `SUBSTRING`, `REPLACE`, a `CAST`, ...) is held to no space at
+    all: `LEFT('Jo Ann', 3)` is `'Jo '`, which MySQL compares as `'Jo'`.
     A UTF-8 `_bin` column (`utf8mb4_bin`, ...) is held only to no control
     character and no trailing space: it compares code points on both sides.
     Another character set's `_bin` (`latin1_bin`) is held to printable

@@ -1,6 +1,9 @@
 package sqlsandbox
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // TextUse is how a statement uses the values it compares, read from the parse
 // (#2533). The copy's session folds case and nothing else, where MySQL's
@@ -53,6 +56,26 @@ type TextUse struct {
 	// answer, whatever the values.
 	ByBytes        []ColumnRef `json:"by_bytes,omitempty"`
 	ByBytesLiteral bool        `json:"by_bytes_literal,omitempty"`
+	// Wrapped are the column references inside a call that can cut or
+	// rebuild text (LEFT, SUBSTRING, REPLACE, a CAST, ...: every function
+	// but keepsEnds). What it returns can end with a space the value held
+	// inside ('Jo Ann' cut to three is 'Jo '), which a PAD SPACE collation
+	// does not see and the copy does.
+	Wrapped []ColumnRef `json:"wrapped,omitempty"`
+}
+
+// keepsEnds are the functions whose text answer cannot end with a space
+// their argument held inside: they return it whole, changed letter by
+// letter, joined to others whole or trimmed, or they return a number or a
+// truth value (LIKE is ~~).
+var keepsEnds = map[string]bool{
+	"lower": true, "upper": true, "lcase": true, "ucase": true,
+	"trim": true, "ltrim": true, "rtrim": true,
+	"length": true, "char_length": true, "character_length": true, "octet_length": true, "strlen": true,
+	"count": true, "count_star": true, "coalesce": true, "ifnull": true, "nullif": true, "concat": true,
+	"min": true, "max": true, "any_value": true, "first": true,
+	"sum": true, "avg": true, "string_agg": true, "abs": true, "round": true, "floor": true, "ceil": true,
+	"~~": true, "!~~": true, "~~*": true, "!~~*": true,
 }
 
 // OrderedLiteral is one place that puts in order a string literal the copy
@@ -87,8 +110,8 @@ var orderingComparisons = map[string]bool{
 }
 
 // textWalk is where collectTextUse stands: under something that puts its
-// values in order, and inside an ORDER BY.
-type textWalk struct{ ordered, sorted bool }
+// values in order, inside an ORDER BY, inside a call that can cut text.
+type textWalk struct{ ordered, sorted, wrapped bool }
 
 // collectTextUse fills r.Text from a statement tree.
 func collectTextUse(stmt any, r *Refs) {
@@ -128,6 +151,9 @@ func walkText(node any, at textWalk, u *TextUse) {
 				if at.sorted {
 					u.Sorted = append(u.Sorted, c)
 				}
+				if at.wrapped {
+					u.Wrapped = append(u.Wrapped, c)
+				}
 			}
 		case "CONSTANT":
 			if s, ok := varcharConstant(v); ok {
@@ -147,11 +173,16 @@ func walkText(node any, at textWalk, u *TextUse) {
 				orderedHere(v, at, u)
 				return
 			}
+		case "CAST":
+			at.wrapped = true
 		case "FUNCTION", "WINDOW":
 			// A window is its function too: MAX(x) OVER () puts x in order.
 			f, _ := v["function_name"].(string)
 			if byBytesFunctions[f] {
 				byBytesHere(v, u)
+			}
+			if v["class"] == "FUNCTION" && !keepsEnds[f] && !orderingFunctions[f] && !byBytesFunctions[f] {
+				at.wrapped = true
 			}
 			if orderingFunctions[f] {
 				orderedHere(v, at, u)
@@ -179,33 +210,100 @@ func walkTextKeys(v map[string]any, at textWalk, u *TextUse) {
 				m, _ := it.(map[string]any)
 				e, _ := m["expression"].(map[string]any)
 				if e["class"] != "CONSTANT" {
-					if loose, _, _ := scanOrdered(e); loose {
-						u.OrderedLiterals = append(u.OrderedLiterals, OrderedLiteral{Expression: true})
-					}
+					sortedHere(e, u)
 				}
-				walkText(m["expression"], textWalk{ordered: true, sorted: true}, u)
 			}
 		case "modifiers":
 			mods, _ := v[k].([]any)
+			selectList, _ := v["select_list"].([]any)
 			for _, mod := range mods {
 				m, _ := mod.(map[string]any)
-				if m["type"] == "ORDER_MODIFIER" {
-					items, _ := m["orders"].([]any)
-					for _, it := range items {
-						o, _ := it.(map[string]any)
-						if e, _ := o["expression"].(map[string]any); e["class"] == "CONSTANT" {
-							if _, isText := varcharConstant(e); !isText {
-								u.OrderedUnknown = true
-							}
-						}
+				if m["type"] != "ORDER_MODIFIER" {
+					walkText(mod, at, u)
+					continue
+				}
+				items, _ := m["orders"].([]any)
+				for _, it := range items {
+					o, _ := it.(map[string]any)
+					e, _ := o["expression"].(map[string]any)
+					target, known := sortTarget(e, selectList)
+					switch {
+					case !known:
+						u.OrderedUnknown = true
+					case target != nil:
+						sortedHere(target, u)
 					}
 				}
-				walkText(mod, at, u)
 			}
 		default:
 			walkText(v[k], at, u)
 		}
 	}
+}
+
+// sortTarget is what an item of a statement's ORDER BY sorts: an ordinal
+// is the select item it numbers, a name a select item gives is that item (as
+// on MySQL, which reads the alias before a column of the same name), any
+// other expression is itself. A string constant sorts nothing (nil). known
+// is false for what the walk cannot name: a star, or an ordinal past the
+// list or over a star.
+func sortTarget(e map[string]any, selectList []any) (map[string]any, bool) {
+	switch e["class"] {
+	case "STAR":
+		return nil, false
+	case "CONSTANT":
+		if _, isText := varcharConstant(e); isText {
+			return nil, true
+		}
+		val, _ := e["value"].(map[string]any)
+		n, ok := val["value"].(float64)
+		if !ok || n < 1 || int(n) > len(selectList) || n != float64(int(n)) {
+			return nil, false
+		}
+		item, _ := selectList[int(n)-1].(map[string]any)
+		if item["class"] == "STAR" {
+			return nil, false
+		}
+		return withoutAlias(item), true
+	case "COLUMN_REF":
+		if names, _ := e["column_names"].([]any); len(names) == 1 {
+			name, _ := names[0].(string)
+			for _, it := range selectList {
+				item, _ := it.(map[string]any)
+				if a, _ := item["alias"].(string); a != "" && strings.EqualFold(a, name) {
+					return withoutAlias(item), true
+				}
+			}
+		}
+	}
+	return e, true
+}
+
+// withoutAlias is a select item without its alias, which the walk of the
+// select list has recorded already.
+func withoutAlias(item map[string]any) map[string]any {
+	out := make(map[string]any, len(item))
+	for k, v := range item {
+		if k != "alias" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// sortedHere walks an expression an ORDER BY sorts, and records a string
+// literal in it that only letters, digits and inner spaces keep in MySQL's
+// order.
+func sortedHere(e map[string]any, u *TextUse) {
+	if loose, _, _ := scanOrdered(e); loose {
+		lit := OrderedLiteral{Expression: true}
+		if e["class"] == "COLUMN_REF" {
+			c, _ := columnRefOf(e)
+			lit = OrderedLiteral{Columns: []ColumnRef{c}}
+		}
+		u.OrderedLiterals = append(u.OrderedLiterals, lit)
+	}
+	walkText(e, textWalk{ordered: true, sorted: true}, u)
 }
 
 // orderedHere walks a node that puts its operands in order, and records
@@ -228,7 +326,7 @@ func orderedHere(v map[string]any, at textWalk, u *TextUse) {
 		}
 		u.OrderedLiterals = append(u.OrderedLiterals, lit)
 	}
-	walkTextKeys(v, textWalk{ordered: true, sorted: at.sorted}, u)
+	walkTextKeys(v, textWalk{ordered: true, sorted: at.sorted, wrapped: at.wrapped}, u)
 }
 
 // operands are a comparison's, a BETWEEN's or a function's direct operands.

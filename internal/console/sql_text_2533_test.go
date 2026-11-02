@@ -23,10 +23,14 @@ func TestSQLTextCheck(t *testing.T) {
 		Text: []views.TextColumn{text("name", views.TextFolded), text("email", views.TextFolded),
 			text("code", views.TextBytes), text("tag", views.TextUnlike),
 			{Name: "status", Kind: views.TextFolded, Positional: true}}}
+	padded := views.BaselineTable{Schema: "shop", Table: "padded", Path: "/c/shop/padded.parquet", SchemaKnown: true,
+		DistinctSafe: []string{"id"}, DistinctOther: []string{"full", "nopad", "raw"},
+		Text: []views.TextColumn{{Name: "full", Kind: views.TextFolded, Padded: true}, {Name: "nopad", Kind: views.TextFolded},
+			{Name: "raw", Kind: views.TextBytes, Padded: true}}}
 	legacy := views.BaselineTable{Schema: "shop", Table: "legacy", Path: "/c/shop/legacy.parquet", SchemaKnown: true,
 		DistinctSafe: []string{"id"}, DistinctOther: []string{"ref", "secret"},
 		Text: []views.TextColumn{text("ref", views.TextBytesASCII), text("secret", views.TextFolded)}}
-	in := views.Input{Baselines: []views.BaselineTable{people, legacy}}
+	in := views.Input{Baselines: []views.BaselineTable{people, legacy, padded}}
 	only := func(names ...string) views.Input {
 		var refs sqlsandbox.Refs
 		for _, n := range names {
@@ -51,6 +55,7 @@ func TestSQLTextCheck(t *testing.T) {
 	const (
 		pv = `"shop"."people"`
 		lv = `"shop"."legacy"`
+		dv = `"shop"."padded"`
 	)
 	cases := []struct {
 		name    string
@@ -136,6 +141,14 @@ func TestSQLTextCheck(t *testing.T) {
 		{"a set operation that sorts nothing", []string{"people"},
 			sqlsandbox.Refs{Columns: col("email"), Text: sqlsandbox.TextUse{SetOperation: true, LooseLiteral: true}}, "",
 			[]string{g(pv, "email", sqlTextPrintable)}},
+		{"a PAD SPACE column inside a call that can cut it: no space at all", []string{"padded"},
+			sqlsandbox.Refs{Columns: col("full", "nopad", "raw"), Text: sqlsandbox.TextUse{Wrapped: col("full", "nopad", "raw")}}, "",
+			[]string{g(dv, "full", sqlTextPrintableNoSpace), g(dv, "nopad", sqlTextPrintable), g(dv, "raw", sqlTextPaddedNoSpace)}},
+		{"cut and sorted", []string{"padded"},
+			sqlsandbox.Refs{Columns: col("full"), Text: sqlsandbox.TextUse{Wrapped: col("full"), Ordered: col("full")}}, "",
+			[]string{g(dv, "full", sqlTextSortableNoSpace)}},
+		{"a PAD SPACE column not cut", []string{"padded"},
+			sqlsandbox.Refs{Columns: col("full")}, "", []string{g(dv, "full", sqlTextPrintable)}},
 		{"GREATEST over text: by bytes on the copy", []string{"people"},
 			sqlsandbox.Refs{Columns: col("name"), Text: sqlsandbox.TextUse{Ordered: col("name"), ByBytes: col("name")}}, "case", nil},
 		{"a row compared with a string in it", []string{"people"},
@@ -223,6 +236,12 @@ func TestSQLTextPatterns(t *testing.T) {
 		{sqlTextPadded, "a ", true},
 		{sqlTextPadded, "a\tb", true},
 		{sqlTextPadded, "a\x00", true},
+		{sqlTextPrintableNoSpace, "Jo_Ann.x@y", false},
+		{sqlTextPrintableNoSpace, "Jo Ann", true},
+		{sqlTextSortableNoSpace, "JoAnn2", false},
+		{sqlTextSortableNoSpace, "Jo Ann", true},
+		{sqlTextPaddedNoSpace, "José_ü", false},
+		{sqlTextPaddedNoSpace, "Jo Ann", true},
 	} {
 		if got := matches(c.pattern, c.value); got != c.want {
 			t.Errorf("regexp_matches(%q, %q) = %v, want %v", c.value, c.pattern, got, c.want)

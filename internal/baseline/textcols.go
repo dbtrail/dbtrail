@@ -16,8 +16,8 @@ const (
 	// spaces in the same order too, and nothing else is promised: an accent,
 	// 'ß' or a full-width letter is equal to its plain letter on MySQL and
 	// not on the copy, a sign (_ [ { ...) sorts elsewhere, and under a PAD
-	// SPACE collation (all of these but 0900 and uca1400) a trailing space
-	// is not there for MySQL.
+	// SPACE collation (all of these but the 0900 ones; MariaDB's uca1400 ones
+	// pad too) a trailing space is not there for MySQL.
 	TextFolded TextKind = "folded"
 	// TextBytes is a _bin collation of a UTF-8 character set: MySQL compares
 	// code points, which is the order of the bytes the copy compares under
@@ -40,11 +40,17 @@ const (
 
 // TextColumn is one text column of a table and its TextKind. Positional says
 // it is an ENUM or a SET, which MySQL's ORDER BY sorts by its position in
-// the declared list, where the copy sorts the text.
+// the declared list, where the copy sorts the text. Padded says its collation
+// is, or may be, PAD SPACE: MySQL does not see a trailing space, so a value
+// cut short to end at one of its inner spaces compares as without it. Only
+// the 0900 collations and MariaDB's _nopad_ ones are known not to pad; a
+// character set's default is taken to pad, since which one it is depends on
+// the server.
 type TextColumn struct {
 	Name       string
 	Kind       TextKind
 	Positional bool
+	Padded     bool
 }
 
 // foldingCollations are the collations TextFolded names: case-insensitive,
@@ -85,7 +91,7 @@ func TextColumns(createSQL string, cols []Column) []TextColumn {
 	var out []TextColumn
 	for _, c := range cols {
 		if c.RawText {
-			out = append(out, TextColumn{Name: c.Name, Kind: TextUnlike})
+			out = append(out, TextColumn{Name: c.Name, Kind: TextUnlike, Padded: true})
 			continue
 		}
 		positional := false
@@ -96,18 +102,18 @@ func TextColumns(createSQL string, cols []Column) []TextColumn {
 		default:
 			continue
 		}
-		kind := TextFolded
+		kind, padded := TextFolded, true
 		switch {
 		case c.Collation != "":
-			kind = collationKind(c.Collation)
+			kind, padded = collationKind(c.Collation), pads(c.Collation)
 		case c.Charset != "":
 			kind = charsetKind(c.Charset)
 		case tableCollation != "":
-			kind = collationKind(tableCollation)
+			kind, padded = collationKind(tableCollation), pads(tableCollation)
 		case tableCharset != "":
 			kind = charsetKind(tableCharset)
 		}
-		out = append(out, TextColumn{Name: c.Name, Kind: kind, Positional: positional})
+		out = append(out, TextColumn{Name: c.Name, Kind: kind, Positional: positional, Padded: padded})
 	}
 	return out
 }
@@ -125,6 +131,12 @@ func collationKind(collation string) TextKind {
 		return TextBytesASCII
 	}
 	return TextUnlike
+}
+
+// pads says a collation named in full is PAD SPACE: all but the 0900 ones
+// and MariaDB's _nopad_ ones.
+func pads(collation string) bool {
+	return !strings.Contains(collation, "_0900_") && !strings.Contains(collation, "_nopad_")
 }
 
 // charsetKind is the TextKind of a character set's default collation.

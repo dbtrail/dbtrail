@@ -62,6 +62,10 @@ func textCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			{"4", "4", "S", "dana", "B_c@x.com", "paid", "1999-09-09"},
 			{"5", "5", "S", "Jose", "j@x.com", "pending", "1995-03-04"},
 		}},
+		// PAD SPACE, with inner spaces a call can leave at the end.
+		{"pad2", "CREATE TABLE pad2 (id INT NOT NULL PRIMARY KEY, k INT, side VARCHAR(8), name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci)", [][]string{
+			{"1", "1", "S", "Jo Ann"}, {"2", "2", "S", "Jo"}, {"3", "3", "S", "Ann"},
+		}},
 		// One text column, read only through a star.
 		{"tags", "CREATE TABLE tags (tag VARCHAR(16) NOT NULL PRIMARY KEY)", [][]string{{"José"}, {"x"}}},
 		{"acc", "CREATE TABLE acc (id INT NOT NULL PRIMARY KEY, k INT, side VARCHAR(8), name VARCHAR(32))", [][]string{
@@ -174,6 +178,12 @@ func textCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT side, name FROM w WHERE name IN (SELECT name FROM acc) ORDER BY k", "live", "the accented column named in a subquery"},
 		{"SELECT side, k FROM w WHERE name IN (SELECT * FROM tags) ORDER BY k", "live", "a star feeding an IN"},
 		{"SELECT side, MAX(email) OVER () FROM w ORDER BY k", "live", "MAX as a window puts its column in order"},
+		{"SELECT MIN(side), COUNT(*) FROM pad2 WHERE LEFT(name, 3) = 'Jo'", "live", "a cut value ends with a space PAD SPACE does not see"},
+		{"SELECT MIN(side), COUNT(*) FROM pad2 WHERE name = 'Jo'", "copy", "the same column compared whole"},
+		{"SELECT MIN(side), CAST(born AS DATE) AS d, COUNT(*) FROM w WHERE born >= '1990-01-01' GROUP BY d ORDER BY d", "copy", "a report sorted by an alias of a date"},
+		{"SELECT MIN(side), YEAR(born), COUNT(*) FROM w GROUP BY 2 ORDER BY 2", "copy", "a report sorted by an ordinal"},
+		{"SELECT MIN(side), email, COUNT(*) FROM w GROUP BY email ORDER BY 3, MIN(k)", "copy", "an email grouped, sorted by its count"},
+		{"SELECT MIN(side), email, COUNT(*) FROM w GROUP BY email ORDER BY 2", "live", "an email sorted by its ordinal"},
 		{"SELECT side, status AS s FROM w ORDER BY s, k", "live", "an ENUM sorted through an alias"},
 		{"SELECT side, name AS v FROM w WHERE k < 3 UNION ALL SELECT side, name FROM w WHERE k > 3 ORDER BY v, side", "copy", "letters sorted across a UNION ALL"},
 		{"SELECT side, name AS v FROM w UNION ALL SELECT side, status FROM w ORDER BY v, side", "live", "an ENUM under a sorted name: refused, though the UNION's column sorts as text"},

@@ -40,14 +40,28 @@ func TestCollectRefs_textUse(t *testing.T) {
 			TextUse{Ordered: []ColumnRef{c("", "name"), c("", "k"), c("", "code")}}},
 		{"SELECT string_agg(name, ',' ORDER BY code) FROM t",
 			TextUse{Ordered: []ColumnRef{c("", "code")}, Sorted: []ColumnRef{c("", "code")}, LooseLiteral: true}},
-		// Ordered with no column's name: an ordinal, a star.
-		{"SELECT name, code FROM t ORDER BY 2", TextUse{OrderedUnknown: true}},
+		// An ordinal sorts the select item it numbers; a star, or a number
+		// past the list, sorts what the walk cannot name.
+		{"SELECT name, code FROM t ORDER BY 2", TextUse{Ordered: []ColumnRef{c("", "code")}, Sorted: []ColumnRef{c("", "code")}}},
+		{"SELECT email, count(*) FROM t GROUP BY email ORDER BY 2 DESC", TextUse{}},
+		{"SELECT CAST(born AS DATE) AS d, count(*) FROM t WHERE born >= '2026-01-01' GROUP BY 1 ORDER BY 1",
+			TextUse{Ordered: []ColumnRef{c("", "born"), c("", "born")}, Sorted: []ColumnRef{c("", "born")}, Aliases: []string{"d"},
+				Wrapped: []ColumnRef{c("", "born"), c("", "born")}, OrderedLiterals: []OrderedLiteral{{Columns: []ColumnRef{c("", "born")}}}, LooseLiteral: true}},
+		{"SELECT *, name FROM t ORDER BY 1", TextUse{OrderedUnknown: true}},
+		{"SELECT name FROM t ORDER BY 5", TextUse{OrderedUnknown: true}},
+		{"SELECT CONCAT(name, '_') AS k FROM t ORDER BY 1",
+			TextUse{Ordered: []ColumnRef{c("", "name")}, Sorted: []ColumnRef{c("", "name")}, Aliases: []string{"k"},
+				OrderedLiterals: []OrderedLiteral{{Expression: true}}, LooseLiteral: true}},
 		{"SELECT * FROM t ORDER BY *", TextUse{OrderedUnknown: true}},
 		{"SELECT name FROM t WHERE code > ANY (SELECT code FROM u)", TextUse{OrderedUnknown: true}},
-		// An ORDER BY name that a select item, a WITH or a derived table
-		// defines: the names are reported, the caller matches them.
+		// An ORDER BY name a select item defines sorts that item, as on
+		// MySQL, which reads the alias before a column of the same name. A
+		// WITH's or a derived table's names are reported, the caller
+		// matches them.
 		{"SELECT city AS name FROM t ORDER BY name",
-			TextUse{Ordered: []ColumnRef{c("", "name")}, Sorted: []ColumnRef{c("", "name")}, Aliases: []string{"name"}}},
+			TextUse{Ordered: []ColumnRef{c("", "city")}, Sorted: []ColumnRef{c("", "city")}, Aliases: []string{"name"}}},
+		{"SELECT person, sum(amount) AS total FROM t WHERE note = 'paid-out' GROUP BY person ORDER BY total DESC",
+			TextUse{Ordered: []ColumnRef{c("", "amount")}, Sorted: []ColumnRef{c("", "amount")}, Aliases: []string{"total"}, LooseLiteral: true}},
 		{"WITH w(k) AS (SELECT a FROM t) SELECT k FROM w ORDER BY k",
 			TextUse{Ordered: []ColumnRef{c("", "k")}, Sorted: []ColumnRef{c("", "k")}, Aliases: []string{"k"}}},
 		{"SELECT x FROM (SELECT a FROM t) AS s(x) ORDER BY x",
@@ -80,7 +94,7 @@ func TestCollectRefs_textUse(t *testing.T) {
 				ByBytes: []ColumnRef{c("", "name")}, ByBytesLiteral: true}},
 		{"SELECT 1 FROM t WHERE 'a_b' < 'ab'", TextUse{OrderedLiterals: beside(), LooseLiteral: true}},
 		// A string in an ORDER BY sorts nothing.
-		{"SELECT name FROM t ORDER BY 'x-y'", TextUse{LooseLiteral: true}},
+		{"SELECT name FROM t ORDER BY 'x-y'", TextUse{}},
 		// A string with a sign inside an ORDER BY expression is put in order.
 		{"SELECT name FROM t ORDER BY COALESCE(name, '~')",
 			TextUse{Ordered: []ColumnRef{c("", "name")}, Sorted: []ColumnRef{c("", "name")}, OrderedLiterals: inExpr, LooseLiteral: true}},
@@ -92,6 +106,13 @@ func TestCollectRefs_textUse(t *testing.T) {
 		{"SELECT 1 FROM t WHERE (name, id) > ('bob', 2)",
 			TextUse{Ordered: []ColumnRef{c("", "name"), c("", "id")}, ByBytes: []ColumnRef{c("", "name"), c("", "id")}, ByBytesLiteral: true}},
 		{"SELECT 1 FROM t WHERE (id, k) = (1, 2)", TextUse{ByBytes: []ColumnRef{c("", "id"), c("", "k")}}},
+		// A column inside a call that can cut or rebuild text, which can
+		// leave a trailing space a PAD SPACE collation does not see.
+		{"SELECT count(*) FROM t WHERE LEFT(name, 3) = 'Jo'", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT REPLACE(name, 'x', 'y') FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT CAST(name AS VARCHAR) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
+		{"SELECT lower(name), coalesce(code, 'x'), concat(a, b), length(c) FROM t", TextUse{}},
+		{"SELECT upper(substring(name, 1, 2)) FROM t", TextUse{Wrapped: []ColumnRef{c("", "name")}}},
 		// A comment is not a literal.
 		{"SELECT name FROM t /* José */ WHERE id = 1", TextUse{}},
 	}

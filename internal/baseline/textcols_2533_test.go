@@ -84,7 +84,11 @@ func TestTextColumns(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := TextColumns(c.sql, cols); !slices.Equal(got, c.want) {
+			got := TextColumns(c.sql, cols)
+			for i := range got {
+				got[i].Padded = false // TestTextColumns_padded has it
+			}
+			if !slices.Equal(got, c.want) {
 				t.Errorf("got %+v\nwant %+v\n%s", got, c.want, c.sql)
 			}
 			// The guard of a byte-compared kind is right only where the
@@ -108,7 +112,7 @@ func TestTextColumns(t *testing.T) {
 func TestTextColumns_rawText(t *testing.T) {
 	cols := []Column{{Name: "a", MySQLType: "varchar", RawText: true}, {Name: "n", MySQLType: "int", RawText: true}}
 	got := TextColumns("", cols)
-	want := []TextColumn{{Name: "a", Kind: TextUnlike}, {Name: "n", Kind: TextUnlike}}
+	want := []TextColumn{{Name: "a", Kind: TextUnlike, Padded: true}, {Name: "n", Kind: TextUnlike, Padded: true}}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -130,8 +134,30 @@ func TestTableFootersFor_readsTextColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []TextColumn{{Name: "code", Kind: TextBytes}, {Name: "label", Kind: TextFolded}}
+	want := []TextColumn{{Name: "code", Kind: TextBytes, Padded: true}, {Name: "label", Kind: TextFolded}}
 	if g := got[path].Text; !slices.Equal(g, want) {
 		t.Errorf("Text = %+v, want %+v", g, want)
+	}
+}
+
+// Which collations ignore a trailing space (PAD SPACE), as information_schema
+// .COLLATIONS.PAD_ATTRIBUTE says on MySQL 8.0: every one but the 0900 ones,
+// and on MariaDB every one but the _nopad_ ones. A character set's default
+// depends on the server, so it is taken to pad.
+func TestTextColumns_padded(t *testing.T) {
+	sql := "CREATE TABLE `t` (\n  `id` int NOT NULL,\n" +
+		"  `a` varchar(8) COLLATE utf8mb4_0900_ai_ci,\n  `b` varchar(8) COLLATE utf8mb4_0900_as_ci,\n  `c` varchar(8) COLLATE utf8mb4_0900_bin,\n" +
+		"  `d` varchar(8) COLLATE utf8mb4_general_ci,\n  `e` varchar(8) COLLATE utf8mb4_bin,\n  `f` varchar(8) COLLATE utf8mb4_uca1400_ai_ci,\n" +
+		"  `g` varchar(8) COLLATE utf8mb4_nopad_bin,\n  `h` varchar(8) CHARACTER SET latin1,\n  `i` varchar(8) DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+	cols, err := ParseSchemaText(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"a": false, "b": false, "c": false, "d": true, "e": true, "f": true, "g": false, "h": true, "i": true}
+	for _, tc := range TextColumns(sql, cols) {
+		if tc.Padded != want[tc.Name] {
+			t.Errorf("%s: Padded %v, want %v", tc.Name, tc.Padded, want[tc.Name])
+		}
 	}
 }
