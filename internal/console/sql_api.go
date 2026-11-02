@@ -1213,6 +1213,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			}
 			narrowed := in
 			narrowed.OnlyViews = sqlWantedViews(in, refs)
+			textDecline := ""
 			if sess.UnchangedWithin > 0 {
 				// Before anything else: a statement that is not vouched for
 				// is MySQL's, whatever its stars or its zone.
@@ -1282,6 +1283,15 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
+				// The text the statement compares (#2533): refused here
+				// when no value could make the copy's answer MySQL's,
+				// guarded at the end of the script when the values decide.
+				msg, guards := sqlTextCheck(narrowed, refs)
+				if msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
+				textDecline = sqlTextDeclineSQL(guards)
 			}
 			if sess.TimeZone != "" {
 				// A session zone other than UTC: every DATETIME the statement
@@ -1305,7 +1315,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// where the input is built, which also serves checks that
 			// render no view.
 			markReadTableDeadRows(narrowed.Baselines, readTables)
-			viewsSQL = views.Generate(narrowed) + sqlUsedSchema(in, narrowed.OnlyViews, schema)
+			viewsSQL = views.Generate(narrowed) + sqlUsedSchema(in, narrowed.OnlyViews, schema) + textDecline
 			return viewsSQL, nil
 		},
 		SQL:     statement,

@@ -282,9 +282,17 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return sessionErr("%v", err)
 		}
 	}
+	// The checks that end the script (DeclineSQL, #2533) run after the
+	// views, as the statement's own work: their failure is the statement's.
+	viewsSQL, checks, _ := strings.Cut(viewsSQL, declineMarker)
 	if strings.TrimSpace(viewsSQL) != "" {
 		if _, err := conn.ExecContext(ctx, viewsSQL); err != nil {
 			return sessionErr("install the copy's views: %v", err)
+		}
+	}
+	if strings.TrimSpace(checks) != "" {
+		if _, err := conn.ExecContext(ctx, checks); err != nil {
+			return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
 		}
 	}
 	// The port's USE, before the lock like every other SET. A schema the
@@ -574,6 +582,9 @@ type spillSpec struct {
 //     GROUP BY return more rows, a range (> 'y') takes accented words, and
 //     ORDER BY/LIMIT/MIN/MAX pick other rows (collations_2083_test.go
 //     measures the pairs; docs/time-travel-sql.md lists every effect).
+//     Under read routing a statement whose answer they would change goes
+//     to MySQL instead (#2533): the caller refuses it, or ends the views
+//     script with a check of the values (DeclineSQL).
 //     nocase.icu_noaccent, the default from #2083 to #2532, matched MySQL
 //     on 56 of the 57 measured pairs but cost 1.6-1.8x on the text-grouping
 //     query it was measured on (nocase: 1.1-1.4x), against no collation;

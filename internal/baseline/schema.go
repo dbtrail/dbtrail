@@ -102,6 +102,11 @@ type Column struct {
 	// resolves the three.
 	Collation       string
 	ExplicitCharset bool
+	// Charset is the character set the column's own definition names, lower
+	// case, or "" when it names none (ExplicitCharset is false then).
+	// TextColumns reads it: a character set alone means its default
+	// collation.
+	Charset string
 }
 
 // DecimalColumn names one decimal/numeric column of a baseline table and the
@@ -320,6 +325,7 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 		precision, scale := decimalPrecisionScale(typeToken, m[3])
 		declared := declaredType(line[loc[4]:])
 		collation, explicitCharset := declaredCollation(line[loc[4]+len(declared):])
+		charset := declaredCharset(line[loc[4]+len(declared):])
 		cols = append(cols, Column{
 			Name:             name,
 			MySQLType:        typeToken,
@@ -331,6 +337,7 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 			NotNull:          declaredNotNull(line[loc[4]+len(declared):]),
 			Collation:        collation,
 			ExplicitCharset:  explicitCharset,
+			Charset:          charset,
 		})
 	}
 	if err := scanner.Err(); err != nil {

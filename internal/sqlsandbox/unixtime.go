@@ -55,7 +55,6 @@ CREATE OR REPLACE TEMP MACRO from_unixtime(n) AS (
   END
 );`
 
-
 // valueDeclinedMark ends both macros' error messages: the copy declining a
 // value it would not answer exactly, not failing.
 const valueDeclinedMark = "is not answered by the copy"
@@ -69,4 +68,22 @@ const valueDeclinedMark = "is not answered by the copy"
 func DeclinedValue(err error) bool {
 	var q *QueryError
 	return errors.As(err, &q) && strings.Contains(q.Message, valueDeclinedMark)
+}
+
+// declineMarker opens every DeclineSQL statement.
+const declineMarker = "\n-- copy checks (#2533)\n"
+
+// DeclineSQL is a statement for the end of a views script that declines the
+// statement after it when cond holds over the views (#2533): what says what
+// was found, and the copy declines it as the macros above decline a value
+// (DeclinedValue), so read routing sends the statement to MySQL as the
+// copy's decision, not its fault. cond is SQL the caller builds over the
+// views it installs; the worker runs it in the statement's own session.
+//
+// Each one starts with declineMarker, where the worker splits the script: the
+// views before it are installed as views, and what follows runs as the
+// statement's own work, so any failure there (a decline, or memory run out
+// reading the values) is the statement's error, not a failed session.
+func DeclineSQL(cond, what string) string {
+	return declineMarker + "SELECT CASE WHEN " + cond + " THEN error('" + strings.ReplaceAll(what+" "+valueDeclinedMark, "'", "''") + "') END;\n"
 }
