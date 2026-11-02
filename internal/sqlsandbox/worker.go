@@ -284,6 +284,12 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 	if strings.TrimSpace(viewsSQL) != "" {
 		if _, err := conn.ExecContext(ctx, viewsSQL); err != nil {
+			if msg := err.Error(); strings.Contains(msg, "Invalid Input Error") && strings.Contains(msg, valueDeclinedMark) {
+				// The script's DeclineSQL (error() raises an Invalid Input Error) held (#2533): the copy declines
+				// the statement, as a value it would not answer exactly. The
+				// session did its job, so the worker is kept.
+				return wireResult{Error: &wireError{Kind: errQuery, Message: err.Error()}}
+			}
 			return sessionErr("install the copy's views: %v", err)
 		}
 	}
@@ -574,6 +580,9 @@ type spillSpec struct {
 //     GROUP BY return more rows, a range (> 'y') takes accented words, and
 //     ORDER BY/LIMIT/MIN/MAX pick other rows (collations_2083_test.go
 //     measures the pairs; docs/time-travel-sql.md lists every effect).
+//     Under read routing a statement whose answer they would change goes
+//     to MySQL instead (#2533): the caller refuses it, or ends the views
+//     script with a check of the values (DeclineSQL).
 //     nocase.icu_noaccent, the default from #2083 to #2532, matched MySQL
 //     on 56 of the 57 measured pairs but cost 1.6-1.8x on the text-grouping
 //     query it was measured on (nocase: 1.1-1.4x), against no collation;

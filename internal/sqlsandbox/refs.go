@@ -46,6 +46,9 @@ type Refs struct {
 	// Columns are the column references the statement writes, from the
 	// parse (collectNames).
 	Columns []ColumnRef `json:"columns,omitempty"`
+	// Text is how the statement uses the values it compares (collectTextUse,
+	// #2533).
+	Text TextUse `json:"text"`
 }
 
 // collectRefs walks a json_serialize_sql statement tree. A shape this walk
@@ -71,6 +74,7 @@ func collectRefs(stmt any) Refs {
 	var r Refs
 	walkRefs(stmt, nil, &r)
 	collectNames(stmt, &r)
+	collectTextUse(stmt, &r)
 	return r
 }
 

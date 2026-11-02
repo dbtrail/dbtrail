@@ -227,7 +227,10 @@ What to know before relying on it:
   MySQL sorts it by the position of the value in the column's definition
   and the copy by the text); a `_cs` column is still case-insensitive here. The same applies
   to the SQL card; a DuckDB of your own over the same files (see
-  [Dashboards](dashboards.md)) keeps DuckDB's defaults.
+  [Dashboards](dashboards.md)) keeps DuckDB's defaults. Under Engine
+  Routing none of this reaches a client: a statement whose answer these
+  differences would change goes to MySQL ("Under Engine Routing" in "The
+  copy itself compares text", further down).
 - **`SELECT *` returns a table's columns in the table's own order**, the
   one MySQL returns, and so do `t.*`, a star over a join and `SHOW COLUMNS`.
   The snapshot files hold the columns sorted by name, and the copy used to
@@ -1263,8 +1266,54 @@ What this is and is not:
   value is different. `nocase` cost 1.1 to 1.4 times on the same query.
   Statements over numbers and dates were never affected.
 
-  What differs from MySQL's `utf8mb4_0900_ai_ci`, none of which can be
-  caught per statement:
+  **Under Engine Routing these differences go to MySQL** (#2533). On the
+  MySQL port with routing on, the copy answers a statement that compares
+  text only where its answer is MySQL's, and MySQL answers the rest. These
+  go to MySQL, each counted as `copy_columns_differ`:
+  - a string in the statement with a character beyond plain ASCII (an
+    accent, `ß`, a full-width letter) or a trailing space;
+  - a column the statement names under a collation the copy never compares
+    as MySQL does: one that tells case apart (`_cs`), one with a language's
+    rules (`utf8mb4_tr_0900_ai_ci`, `utf8mb4_danish_ci`,
+    `utf8mb4_spanish2_ci`, `latin1_german2_ci`, ...: Turkish `I` is not
+    `i`, Danish `aa` is a letter of its own), and one that is not known;
+  - an `ENUM` or `SET` column in an `ORDER BY`;
+  - a string put in order (`name > 'a_b'`, `ORDER BY COALESCE(name,
+    '~')`, or any string at all when the `ORDER BY` is a column number or
+    an alias) that holds anything but letters, digits and inner spaces,
+    unless what it is compared with is a date or number column;
+  - `GREATEST`, `LEAST` or a row comparison (`(name, id) > ('bob', 2)`)
+    over text: the copy compares those by bytes, case included;
+  - a table whose column types the copy does not know;
+  - a text column the statement names (or a `SELECT *` brings in) whose
+    values, read on the copy right
+    before the statement runs (fresh-mode changes included), hold a
+    character beyond printable ASCII or a trailing space; or, when the
+    statement puts that column in order (`ORDER BY`, `MIN`, `MAX`, `<`,
+    `>`, `BETWEEN`, a window's or an aggregate's `ORDER BY`), anything but
+    letters, digits and inner spaces. MySQL sorts signs (`_`, `-`, `@`,
+    `.`) by weights of its own, and not the same ones in every collation.
+    A `_bin` column is held only to no control character and no trailing
+    space: it compares code points on both sides.
+
+  Equality and grouping on printable ASCII, and order on letters, digits
+  and inner spaces, were measured to agree with the copy on every pair of
+  389 strings under `utf8mb4_0900_ai_ci`, `utf8mb4_0900_as_ci`,
+  `utf8mb4_general_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`,
+  `utf8mb3_general_ci`, `utf8mb3_unicode_ci`, `latin1_swedish_ci`,
+  `latin1_general_ci` and `ascii_general_ci` (MySQL 8.0), and MariaDB's
+  `utf8mb4_uca1400_ai_ci` is compared in its integration tests; any other
+  collation is treated as one with a language's rules. A column a statement
+  only shows counts as named: a table of names with accents sends every
+  routed statement that names the name column to MySQL. The check reads
+  every value of each such column on every statement, about 0.1 to 0.3
+  seconds per column of ten million rows, more than a light report takes
+  on its own. Without routing (the SQL card, the port with routing off, a
+  DuckDB of your own) nothing changes, and the differences below are the
+  copy's answer.
+
+  What differs from MySQL's `utf8mb4_0900_ai_ci` where the copy answers
+  without routing:
   - **Texts MySQL holds equal and the copy does not (the common case).**
     Of 57 pairs of strings measured against MySQL 8.4, the copy differs on
     36, and on every one MySQL holds the two equal and the copy does not.

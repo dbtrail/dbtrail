@@ -67,6 +67,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		in.Baselines[i].DistinctSafe, in.Baselines[i].DistinctOther = f.DistinctSafe, f.DistinctOther
 		in.Baselines[i].UnixTimeSafe, in.Baselines[i].UnixTimeOther = f.UnixTimeSafe, f.UnixTimeOther
 		in.Baselines[i].WholeSafe, in.Baselines[i].WholeOther = f.WholeSafe, f.WholeOther
+		in.Baselines[i].Text = f.Text
 		in.Baselines[i].SchemaKnown = true
 	}
 }
@@ -278,3 +279,17 @@ func castableDecimal(d DecimalColumn) bool {
 		d.Precision <= baseline.MaxDuckDBDecimalPrecision &&
 		d.Scale >= 0 && d.Scale <= d.Precision
 }
+
+// TextColumn and its kinds are the baseline package's (#2533), named here for
+// the callers that read BaselineTable.Text, as DecimalColumn is.
+type TextColumn = baseline.TextColumn
+
+// TextKind is baseline.TextKind.
+type TextKind = baseline.TextKind
+
+const (
+	TextFolded     = baseline.TextFolded
+	TextBytes      = baseline.TextBytes
+	TextBytesASCII = baseline.TextBytesASCII
+	TextUnlike     = baseline.TextUnlike
+)

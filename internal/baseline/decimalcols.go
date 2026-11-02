@@ -78,6 +78,10 @@ type TableFooter struct {
 	// DistinctOther every other column (DistinctColumns). Read routing lets
 	// the copy answer COUNT(DISTINCT col) only over the first (#2532).
 	DistinctSafe, DistinctOther []string
+	// Text are the table's text columns, each with how MySQL compares it
+	// against the copy (TextColumns, #2533). Read routing holds a statement
+	// that names one to what the copy compares as MySQL does.
+	Text []TextColumn
 }
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
@@ -516,6 +520,7 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		f.DistinctSafe, f.DistinctOther = DistinctColumns(cols)
 		f.UnixTimeSafe, f.UnixTimeOther = UnixTimeColumns(cols)
 		f.WholeSafe, f.WholeOther = WholeNumberColumns(cols)
+		f.Text = TextColumns(string(createSQL), cols)
 		st.footers[file] = f
 	}
 	if err := rows.Err(); err != nil {

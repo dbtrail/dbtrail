@@ -199,6 +199,9 @@ func (in Input) stateLabel(p statePlan) string {
 type StateView struct {
 	// Label is the view exactly as DefinedViews prints it.
 	Label string
+	// Ref is the view as the script creates it, every part quoted: what SQL
+	// appended to the script reads it by.
+	Ref   string
 	Table BaselineTable
 }
 
@@ -209,8 +212,18 @@ func (in Input) StateViews() []StateView {
 	var out []StateView
 	for _, p := range stateViewPlan(in) {
 		if p.skip == "" {
-			out = append(out, StateView{Label: in.stateLabel(p), Table: p.table})
+			out = append(out, StateView{Label: in.stateLabel(p), Ref: in.stateRef(p), Table: p.table})
 		}
+	}
+	return out
+}
+
+// SelectedStateViews is StateViews for the views this render creates,
+// honoring OnlyViews: the ones SQL appended to its script can read (#2533).
+func (in Input) SelectedStateViews() []StateView {
+	var out []StateView
+	for _, p := range selectedStatePlans(in) {
+		out = append(out, StateView{Label: in.stateLabel(p), Ref: in.stateRef(p), Table: p.table})
 	}
 	return out
 }
