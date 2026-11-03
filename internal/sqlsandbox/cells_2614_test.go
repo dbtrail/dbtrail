@@ -50,6 +50,7 @@ func TestRun_cellsPrintAsTheEngine_2614(t *testing.T) {
 		"'12:00:00-03:30'::TIMETZ",
 		"'24:00:00+00'::TIMETZ",
 		"'24:00:00-05'::TIMETZ",
+		"'10:30:00+02:30:15'::TIMETZ",
 		// Unchanged, for contrast.
 		"DATE '2026-01-02'",
 		"'10:30:00'::TIME",
@@ -81,6 +82,8 @@ func TestRun_cellsPrintAsTheEngine_2614(t *testing.T) {
 		MAP {DATE '2026-01-02': 1} AS mk,
 		MAP {'k': {'t': '10:30:00+02'::TIMETZ}} AS ms,
 		union_value(d := DATE '2026-01-02') AS un,
+		union_value(t := TIMESTAMP '2026-01-02 03:04:05')::UNION(d DATE, t TIMESTAMP) AS un2,
+		union_value(d := DATE '2026-01-02')::UNION(t TIMESTAMP, d DATE) AS un3,
 		['10:30:00+02'::TIMETZ] AS lt,
 		['01010101-0101-0101-0101-010101010101'::UUID] AS lu,
 		[INTERVAL '-1 day' + INTERVAL '30 minutes'] AS li,
@@ -100,6 +103,9 @@ func TestRun_cellsPrintAsTheEngine_2614(t *testing.T) {
 		map[string]any{"k": "2026-01-02"},
 		map[string]any{"2026-01-02": json.Number("1")},
 		map[string]any{"k": map[string]any{"t": "10:30:00+02"}},
+		"2026-01-02",
+		// The member's own type, not the first one's.
+		"2026-01-02T03:04:05Z",
 		"2026-01-02",
 		[]any{"10:30:00+02"},
 		[]any{"01010101-0101-0101-0101-010101010101"},
@@ -133,6 +139,9 @@ func TestNestedTypes_2614(t *testing.T) {
 		{typ: `STRUCT("a" DATE)[]`, elem: `STRUCT("a" DATE)`},
 		{typ: `STRUCT("d" DATE, "x, y" DECIMAL(10,2), "u" UUID)`, fields: map[string]string{"d": "DATE", "x, y": "DECIMAL(10,2)", "u": "UUID"}},
 		{typ: `STRUCT("say ""hi""" DATE, "(" INTEGER)`, fields: map[string]string{`say "hi"`: "DATE", "(": "INTEGER"}},
+		// The engine's typeof shapes (unquoted names, ENUM labels): the
+		// driver sends quoted names and a bare ENUM, so these are read but
+		// never arrive.
 		{typ: `STRUCT("e" ENUM('a,b', 'c)'), "t" TIMETZ)`, fields: map[string]string{"e": "ENUM('a,b', 'c)')", "t": "TIMETZ"}},
 		{typ: `STRUCT(a DATE, b INTEGER)`, fields: map[string]string{"a": "DATE", "b": "INTEGER"}},
 		{typ: `UNION("d" DATE, "s" VARCHAR)`, fields: map[string]string{"d": "DATE", "s": "VARCHAR"}},

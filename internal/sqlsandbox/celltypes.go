@@ -72,8 +72,11 @@ func clockText(micros int64) string {
 
 // timeTZText prints a TIMETZ as DuckDB does: the wall clock it holds, then
 // its offset as +HH, +HH:MM or +HH:MM:SS. The driver hands it over as a
-// time.Time on 1 January of year 1 in a fixed zone of that offset; printed
-// in UTC, as other times are, it read as another wall-clock time.
+// time.Time on 1 January of year 1 in a fixed zone of that offset, so it
+// is printed in that zone: in UTC it would show another wall clock. One
+// difference is kept on purpose: an offset with seconds and no minutes
+// (+02:00:15) prints as such, where DuckDB prints +02:15, which reads as
+// another offset. No real zone has such an offset.
 //
 // 24:00:00, which DuckDB allows, reaches Go as hour 24 of 1 January, which
 // time.Date normalizes to midnight of 2 January: the day tells it apart. A
@@ -111,21 +114,23 @@ func timeTZText(t time.Time) string {
 }
 
 // uuidText prints a UUID's 16 bytes in the canonical 8-4-4-4-12 form. The
-// driver hands a UUID over as those bytes, which printed as text when they
-// happened to be valid UTF-8 and as 0x hex otherwise.
+// driver hands a UUID over as those bytes, so by its Go value alone it is
+// a []byte like any BLOB.
 func uuidText(b []byte) string {
 	h := hex.EncodeToString(b)
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
-// The element types of a nested column, read out of the type name DuckDB
-// gives it: DATE[] and DATE[2] (a LIST and an ARRAY of DATE),
-// STRUCT("d" DATE, "x, y" DECIMAL(10,2)), UNION("d" DATE), MAP(VARCHAR,
-// DATE). Names are double quoted with "" for a quote, and a type can hold
-// commas, parentheses and single-quoted text (DECIMAL(10,2), ENUM('a,b')),
-// so the name is split only at the top level. A name that cannot be read
-// gives no element types, and the elements render as they did before: by
-// their Go value alone.
+// The element types of a nested column, read out of the type name the
+// driver builds for it (DatabaseTypeName; duckdb-go's logicalTypeName):
+// DATE[] and DATE[2] (a LIST and an ARRAY of DATE), STRUCT("d" DATE,
+// "x, y" DECIMAL(10,2)), UNION("d" DATE), MAP(VARCHAR, DATE). Field names
+// are always double quoted, with "" for a quote, and a type can hold commas
+// and parentheses (DECIMAL(10,2)), so the name is split only at the top
+// level. Unquoted names and single-quoted text (ENUM('a,b'), as the
+// engine's typeof prints them) are read too, though the driver sends
+// neither: it names an ENUM bare. A name that cannot be read gives no
+// element types, and the elements render by their Go value alone.
 
 // listElemType is the element type of a LIST or ARRAY type, or "".
 func listElemType(typ string) string {

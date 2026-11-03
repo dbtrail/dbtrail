@@ -904,8 +904,8 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 // renderer turns driver values into cells and counts the ones it cut.
 type renderer struct{ truncated int }
 
-// cell renders one value as a JSON-shaped cell (see Result). typ is DuckDB's
-// type name for the value, used where the driver's Go value does not say
+// cell renders one value as a JSON-shaped cell (see Result). typ is the
+// driver's type name for the value (DatabaseTypeName), used where its Go value does not say
 // which type it holds: a DATE, a TIME, a TIMETZ and a TIMESTAMP all arrive
 // as time.Time, a UUID and a GEOMETRY as []byte. An element of a nested
 // value gets the type read out of its column's (listElemType,
@@ -925,7 +925,7 @@ func (r *renderer) cell(v any, typ string) any {
 		switch {
 		case typ == "DATE":
 			return x.Format("2006-01-02")
-		case typ == "TIMETZ" || typ == "TIME WITH TIME ZONE":
+		case typ == "TIMETZ":
 			return timeTZText(x)
 		case typ == "TIME" || strings.HasPrefix(typ, "TIME "):
 			return x.Format("15:04:05.999999")
@@ -939,7 +939,7 @@ func (r *renderer) cell(v any, typ string) any {
 		// A GEOMETRY (built into the engine since DuckDB 1.5) arrives as its
 		// WKB bytes, which can be valid UTF-8 (POINT(0 0) is), so it is always
 		// hex rather than read as text.
-		if utf8.Valid(x) && typ != "GEOMETRY" && !strings.HasPrefix(typ, "GEOMETRY(") {
+		if utf8.Valid(x) && typ != "GEOMETRY" {
 			return r.text(string(x))
 		}
 		return r.text("0x" + strings.ToUpper(hex.EncodeToString(x)))
