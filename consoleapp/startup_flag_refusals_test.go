@@ -56,27 +56,29 @@ func TestWatchFlagRefusalsGetThePage(t *testing.T) {
 	}
 
 	cases := []struct {
-		name   string
-		set    func(t *testing.T)
-		words  string // what the message must still say
-		hidden string // what the page must not show to anyone; "" when the message is shown
+		name  string
+		set   func(t *testing.T)
+		words string // what the message says around the value, on every page
+		value string // what the operator gave: in the log, never on a stranger's page; "" for a number
 	}{
-		{"a DSN pasted into the flavor", func(*testing.T) { upSourceFlavor = "u:Secr3t@tcp(db.internal:3306)/app" }, "--source-flavor", "Secr3t"},
+		{"a DSN pasted into the flavor", func(*testing.T) { upSourceFlavor = "u:Secr3t@tcp(db.internal:3306)/app" }, "--source-flavor: invalid source flavor", "u:Secr3t@tcp(db.internal:3306)/app"},
 		{"a DSN pasted into the memory variable", func(t *testing.T) {
 			t.Setenv("BINTRAIL_CONSOLE_SQL_MEMORY", "u:Secr3t@tcp(db.internal:3306)/app")
-		}, "BINTRAIL_CONSOLE_SQL_MEMORY", "Secr3t"},
-		{"output format", func(*testing.T) { upFormat = "yaml" }, `invalid --format "yaml"`, ""},
-		{"source flavor", func(*testing.T) { upSourceFlavor = "postgres" }, `invalid source flavor "postgres"`, ""},
-		{"rotation retain", func(*testing.T) { upRotateRetain = "seven days" }, "--rotate-retain:", ""},
-		{"rotation interval", func(*testing.T) { upRotateInterval = "hourly" }, "--rotate-interval:", ""},
-		{"rotation interval not positive", func(*testing.T) { upRotateInterval = "-1h" }, "--rotate-interval must be positive", ""},
-		{"rotation future partitions", func(*testing.T) { upRotateAddFuture = -1 }, "--rotate-add-future cannot be negative", ""},
-		{"sql memory variable", func(t *testing.T) { t.Setenv("BINTRAIL_CONSOLE_SQL_MEMORY", "1KB") }, `BINTRAIL_CONSOLE_SQL_MEMORY="1KB"`, ""},
+		}, "BINTRAIL_CONSOLE_SQL_MEMORY=", "u:Secr3t@tcp(db.internal:3306)/app"},
+		{"a short password pasted into the format", func(*testing.T) { upFormat = "hunter2" }, "invalid --format", "hunter2"},
+		{"output format", func(*testing.T) { upFormat = "yaml" }, "invalid --format", "yaml"},
+		{"source flavor", func(*testing.T) { upSourceFlavor = "postgres" }, "invalid source flavor", "postgres"},
+		{"rotation retain", func(*testing.T) { upRotateRetain = "seven days" }, "--rotate-retain:", "seven days"},
+		{"rotation retain unit", func(*testing.T) { upRotateRetain = "7x" }, "--rotate-retain: invalid unit", "7x"},
+		{"rotation interval", func(*testing.T) { upRotateInterval = "hourly" }, "--rotate-interval:", "hourly"},
+		{"rotation interval not positive", func(*testing.T) { upRotateInterval = "-1h" }, "--rotate-interval must be positive", "-1h"},
+		{"rotation future partitions", func(*testing.T) { upRotateAddFuture = -1 }, "--rotate-add-future cannot be negative, got -1", ""},
+		{"sql memory variable", func(t *testing.T) { t.Setenv("BINTRAIL_CONSOLE_SQL_MEMORY", "1KB") }, "BINTRAIL_CONSOLE_SQL_MEMORY=", "1KB"},
 		{"sql memory flag", func(*testing.T) {
 			upSQLMemory = "100MB"
 			watchCmd.Flags().Lookup("sql-memory").Changed = true
-		}, `--sql-memory="100MB"`, ""},
-		{"sql statements at once variable", func(t *testing.T) { t.Setenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT", "zero") }, `BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT="zero"`, ""},
+		}, "--sql-memory=", "100MB"},
+		{"sql statements at once variable", func(t *testing.T) { t.Setenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT", "zero") }, "BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT=", "zero"},
 		{"sql statements at once flag", func(*testing.T) {
 			upSQLMaxInFlight = 0
 			watchCmd.Flags().Lookup("sql-max-in-flight").Changed = true
@@ -108,28 +110,35 @@ func TestWatchFlagRefusalsGetThePage(t *testing.T) {
 			if got := telemetry.ClassifyError(err); got != telemetry.ClassConfigInvalid {
 				t.Errorf("class = %q, want %q (err: %v)", got, telemetry.ClassConfigInvalid, err)
 			}
-			if !strings.Contains(err.Error(), tc.words) {
-				t.Errorf("message lost its words %q: %v", tc.words, err)
+			if !strings.Contains(err.Error(), tc.words) || !strings.Contains(err.Error(), tc.value) {
+				t.Errorf("the log lost words %q or the value %q: %v", tc.words, tc.value, err)
 			}
 			f := watchStartupFailure(err)
 			if f == nil {
 				t.Fatal("no startup page: the process would exit into a restart loop")
 			}
-			if f.message != err.Error() {
-				t.Errorf("page message = %q, want the error itself", f.message)
+			page := func(host string) string {
+				req := httptest.NewRequest("GET", "/", nil)
+				req.Host = host
+				rec := httptest.NewRecorder()
+				f.ServeHTTP(rec, req)
+				return html.UnescapeString(rec.Body.String())
 			}
-			// What a stranger reaching the public address reads.
-			req := httptest.NewRequest("GET", "/", nil)
-			req.Host = "203.0.113.5:18091"
-			rec := httptest.NewRecorder()
-			f.ServeHTTP(rec, req)
-			body := rec.Body.String()
-			if tc.hidden == "" {
-				if !f.public || !strings.Contains(body, html.EscapeString(tc.words)) {
-					t.Errorf("page does not show the message to anyone (public=%v): %s", f.public, body)
-				}
-			} else if f.public || strings.Contains(body, tc.hidden) {
-				t.Errorf("page shows %q to anyone (public=%v)", tc.hidden, f.public)
+			// A stranger reaching the public address: the words, never the value.
+			stranger := page("203.0.113.5:18091")
+			if !strings.Contains(stranger, tc.words) {
+				t.Errorf("a stranger's page does not say %q:\n%s", tc.words, stranger)
+			}
+			if tc.value != "" && strings.Contains(stranger, tc.value) {
+				t.Errorf("a stranger's page shows the value %q", tc.value)
+			}
+			if tc.value != "" && !strings.Contains(stranger, valueGiven) {
+				t.Errorf("a stranger's page does not say a value was taken out")
+			}
+			// The operator on the machine itself (trusted bind, known host) reads it whole.
+			f.trusted = true
+			if own := page("localhost:18091"); !strings.Contains(own, err.Error()) {
+				t.Errorf("the operator's own page lost the message %q", err.Error())
 			}
 		})
 	}
@@ -155,30 +164,24 @@ func TestConfigRefusal(t *testing.T) {
 	if got := configRefusal(pathErr); got != error(pathErr) {
 		t.Errorf("a file error was relabelled: %#v", got)
 	}
-	for _, tc := range []struct {
-		typed  []string
-		public bool
-	}{
-		{nil, true},
-		{[]string{"4GB"}, true},
-		{[]string{"", "-1h"}, true},
-		{[]string{"seven days"}, true},
-		{[]string{"u:pw@tcp(h:3306)/db"}, false},
-		{[]string{"/var/lib/bintrail"}, false},
-		{[]string{"7d", "a-very-long-value-indeed"}, false},
-		{[]string{"line\nbreak"}, false},
-	} {
-		got := configRefusal(errorString("--rotate-interval: bad"), tc.typed...)
-		if got.Error() != "--rotate-interval: bad" {
-			t.Errorf("%q: words changed: %q", tc.typed, got.Error())
-		}
-		if c := telemetry.ClassifyError(got); c != telemetry.ClassConfigInvalid {
-			t.Errorf("%q: class = %q", tc.typed, c)
-		}
-		pub, ok := got.(shownToAnyone)
-		if !ok || pub.ShownToAnyone() != tc.public {
-			t.Errorf("%q: shown to anyone = %v, want %v", tc.typed, ok && pub.ShownToAnyone(), tc.public)
-		}
+	got := configRefusal(errorString(`--source-flavor: invalid source flavor "mysqll": must be "mysql" or "mariadb"`), "mysqll")
+	if got.Error() != `--source-flavor: invalid source flavor "mysqll": must be "mysql" or "mariadb"` {
+		t.Errorf("words changed: %q", got.Error())
+	}
+	if c := telemetry.ClassifyError(got); c != telemetry.ClassConfigInvalid {
+		t.Errorf("class = %q", c)
+	}
+	pm, ok := got.(publicMessenger)
+	if !ok {
+		t.Fatal("no public message")
+	}
+	// The value goes, and so does a fixed word it contains ("mysql" is in
+	// "mysqll"): an odd sentence beats a leak. "mariadb" is not in it, so it stays.
+	if want := `--source-flavor: invalid source flavor (the value given): must be (the value given) or "mariadb"`; pm.PublicMessage() != want {
+		t.Errorf("public message = %q, want %q", pm.PublicMessage(), want)
+	}
+	if p := configRefusal(errorString(`bad "x"`)).(publicMessenger).PublicMessage(); p != `bad "x"` {
+		t.Errorf("with nothing typed, nothing is taken out: %q", p)
 	}
 }
 
