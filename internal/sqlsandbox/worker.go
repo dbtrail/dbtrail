@@ -904,10 +904,13 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 // renderer turns driver values into cells and counts the ones it cut.
 type renderer struct{ truncated int }
 
-// cell renders one value as a JSON-shaped cell (see Result). typ is DuckDB's
-// type name for the column, used to tell a DATE from a TIMESTAMP, both of
-// which the driver hands over as time.Time. Text longer than MaxCellBytes is
-// cut (on a rune boundary) and marked.
+// cell renders one value as a JSON-shaped cell (see Result). typ is the
+// driver's type name for the value (DatabaseTypeName), used where its Go value does not say
+// which type it holds: a DATE, a TIME, a TIMETZ and a TIMESTAMP all arrive
+// as time.Time, a UUID and a GEOMETRY as []byte. An element of a nested
+// value gets the type read out of its column's (listElemType,
+// structFieldTypes, mapTypes), or "" when that cannot be read. Text longer
+// than MaxCellBytes is cut (on a rune boundary) and marked.
 func (r *renderer) cell(v any, typ string) any {
 	switch x := v.(type) {
 	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
@@ -922,17 +925,21 @@ func (r *renderer) cell(v any, typ string) any {
 		switch {
 		case typ == "DATE":
 			return x.Format("2006-01-02")
+		case typ == "TIMETZ":
+			return timeTZText(x)
 		case typ == "TIME" || strings.HasPrefix(typ, "TIME "):
 			return x.Format("15:04:05.999999")
 		default:
 			return x.UTC().Format(time.RFC3339Nano)
 		}
 	case []byte:
+		if typ == "UUID" && len(x) == 16 {
+			return uuidText(x)
+		}
 		// A GEOMETRY (built into the engine since DuckDB 1.5) arrives as its
 		// WKB bytes, which can be valid UTF-8 (POINT(0 0) is), so it is always
-		// hex rather than read as text. typ names it also for an element of a
-		// LIST, STRUCT, MAP or UNION that holds one (see nestedType).
-		if utf8.Valid(x) && !strings.Contains(typ, "GEOMETRY") {
+		// hex rather than read as text.
+		if utf8.Valid(x) && typ != "GEOMETRY" {
 			return r.text(string(x))
 		}
 		return r.text("0x" + strings.ToUpper(hex.EncodeToString(x)))
@@ -940,20 +947,21 @@ func (r *renderer) cell(v any, typ string) any {
 		return x.String()
 	case duckdb.Decimal:
 		return decimalText(x)
-	case duckdb.UUID:
-		return x.String()
+	case duckdb.Interval:
+		return intervalText(x)
 	case []any:
-		inner := nestedType(typ)
+		elem := listElemType(typ)
 		out := make([]any, len(x))
 		for i, e := range x {
-			out[i] = r.cell(e, inner)
+			out[i] = r.cell(e, elem)
 		}
 		return out
 	case map[string]any:
-		inner := nestedType(typ)
+		// A STRUCT: each field by its own type.
+		fields := structFieldTypes(typ)
 		out := make(map[string]any, len(x))
 		for k, e := range x {
-			out[k] = r.cell(e, inner)
+			out[k] = r.cell(e, fields[k])
 		}
 		return out
 	case duckdb.OrderedMap:
@@ -964,38 +972,26 @@ func (r *renderer) cell(v any, typ string) any {
 		// DECIMAL keeps its scale) and the cell is the JSON object its column
 		// is declared as. Without this case the value would reach the
 		// fmt.Stringer case below and come out as "OrderedMap{a: 10}".
-		inner := nestedType(typ)
+		keyType, valType := mapTypes(typ)
 		keys, vals := x.Keys(), x.Values()
 		out := make(map[string]any, len(keys))
 		for i, k := range keys {
-			key, ok := r.cell(k, inner).(string)
+			key, ok := r.cell(k, keyType).(string)
 			if !ok {
-				key = fmt.Sprint(r.cell(k, inner))
+				key = fmt.Sprint(r.cell(k, keyType))
 			}
-			out[key] = r.cell(vals[i], inner)
+			out[key] = r.cell(vals[i], valType)
 		}
 		return out
 	case duckdb.Union:
-		// A UNION holds one member: the cell is that member's value.
-		return r.cell(x.Value, nestedType(typ))
+		// A UNION holds one member: the cell is that member's value, by the
+		// type of that member.
+		return r.cell(x.Value, structFieldTypes(typ)[x.Tag])
 	case fmt.Stringer:
 		return r.text(x.String())
 	default:
 		return r.text(fmt.Sprint(x))
 	}
-}
-
-// nestedType is the type an element of a nested value (LIST, STRUCT, MAP,
-// UNION) is rendered with. The element's own type is not parsed out of the
-// column's: it is "" as before, except that a column whose type holds a
-// GEOMETRY passes its type down, so a GEOMETRY inside it is hex too
-// (['POINT(0 0)'::GEOMETRY] is a GEOMETRY[]). A BLOB beside it in the same
-// STRUCT is then hex as well, which is still its bytes.
-func nestedType(typ string) string {
-	if strings.Contains(typ, "GEOMETRY") {
-		return typ
-	}
-	return ""
 }
 
 func (r *renderer) text(s string) string {
