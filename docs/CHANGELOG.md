@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`watch` shows why it did not start when a setting is wrong, instead of restarting in a loop.** A wrong `--format`, `--source-flavor`, `--rotate-retain`, `--rotate-interval`, `--rotate-add-future`, `--sql-memory` or `--sql-max-in-flight` (or its variable) made the process exit at once, and Docker Compose or the service started it again, over and over, with nothing in the browser. These now get the page that says what to fix, as a wrong `--index-dsn` already did, and reach telemetry as `config_invalid` instead of `unknown`. A page anyone can reach shows the message with the value taken out, in case it is something pasted into the wrong variable (a connection string with its password); the log, and the page opened on the machine itself, show it whole. Not yet covered: a flag the command line itself cannot read (letters where a number goes) still exits before this check.
+
 ## [0.125.0] - 2026-11-02
 
 - **DuckDB 1.5.6** (#2613). DuckDB 1.4 LTS support ends on 2026-11-17, so the engine moves to 1.5.6, whose extended support runs to March 2027. On a 14-query analytical benchmark it answers as fast as 1.4. 2.0 waits for duckdb/duckdb#28269, which makes some mid-size selective joins slower. What the move changes that you can see:

@@ -331,28 +331,32 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// visible here whichever way it was set. Here rather than in init() so the
 	// binary warns once, for the command actually being run.
 	warnSQLPanelRetired()
+	// The refusals up to the index wait are all settings the operator typed,
+	// which no restart fixes: configRefusal gets them the startup page. Each
+	// names the values its message repeats, so the page hides one that is not
+	// plainly a setting.
 	if !cliutil.IsValidOutputFormat(upFormat) {
-		return fmt.Errorf("invalid --format %q; must be text or json", upFormat)
+		return configRefusal(fmt.Errorf("invalid --format %q; must be text or json", upFormat), upFormat)
 	}
 	// Validate the built-in rotation settings up front so a typo fails fast,
 	// before any phase runs. The loop itself starts with phase 3. The Changed
 	// check covers flag and env alike (bindWatchEnv marks env-set flags
 	// Changed); an explicitly-chosen retention disables the upgrade guard.
 	if _, err := metadata.NormalizeDeclaredFlavor(upSourceFlavor); err != nil {
-		return fmt.Errorf("--source-flavor: %w", err)
+		return configRefusal(fmt.Errorf("--source-flavor: %w", err), upSourceFlavor)
 	}
 	var err error
 	upRotationCfg, err = rotation.ParseSettings(upRotateRetain, upRotateInterval, upRotateAddFuture,
 		cmd.Flags().Changed("rotate-retain"))
 	if err != nil {
-		return err
+		return configRefusal(err, upRotateRetain, upRotateInterval)
 	}
 
 	if err := resolveSQLMemory(cmd); err != nil {
-		return err
+		return configRefusal(err, upSQLMemory, os.Getenv("BINTRAIL_CONSOLE_SQL_MEMORY"))
 	}
 	if err := resolveSQLMaxInFlight(cmd); err != nil {
-		return err
+		return configRefusal(err, strconv.Itoa(upSQLMaxInFlight), os.Getenv("BINTRAIL_CONSOLE_SQL_MAX_IN_FLIGHT"))
 	}
 	resolveRouterURL(cmd, os.Stderr)
 	// The port's flags, checked here, before the first connection: a

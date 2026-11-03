@@ -67,6 +67,7 @@ type startupState struct {
 type startupFailure struct {
 	listen       string
 	message      string
+	publicText   string   // message as shown to anyone, when the error offers one
 	public       bool     // the message is one we wrote: shown to anyone
 	checks       []string // the failed preflight checks' names, if that is what failed
 	trusted      bool     // loopback bind, or access control asserted by allow-setup
@@ -78,6 +79,11 @@ type startupFailure struct {
 type shownToAnyone interface{ ShownToAnyone() bool }
 
 func (configError) ShownToAnyone() bool { return true }
+
+// publicMessenger is implemented by the startup errors that repeat a value
+// the operator gave: PublicMessage is the same words without it, for a page
+// anyone can reach.
+type publicMessenger interface{ PublicMessage() string }
 
 // permanentClasses are the failures a restart cannot fix.
 var permanentClasses = map[string]bool{
@@ -133,9 +139,14 @@ func newStartupFailure(err error, st startupState) *startupFailure {
 	if errors.As(err, &pf) {
 		checks = pf.Checks // check names are constants: nothing internal
 	}
+	publicText := err.Error()
+	if pm, ok := err.(publicMessenger); ok {
+		publicText = pm.PublicMessage()
+	}
 	return &startupFailure{
 		listen:       listen,
 		message:      err.Error(),
+		publicText:   publicText,
 		public:       pub != nil && pub.ShownToAnyone(),
 		checks:       checks,
 		trusted:      console.IsLoopbackAddr(listen) || allowSetup,
@@ -200,7 +211,12 @@ p{margin:12px 0}
 </main></body></html>`))
 
 func (f *startupFailure) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	show := f.public || (f.trusted && f.knownHost(r.Host))
+	full := f.trusted && f.knownHost(r.Host)
+	show := f.public || full
+	message := f.publicText
+	if full || message == "" {
+		message = f.message
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	// 503 on every path, /api/healthz included, so a health check reports
@@ -212,7 +228,7 @@ func (f *startupFailure) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Message string
 		Checks  []string
 		Every   string
-	}{show, f.trusted, f.message, f.checks, humanMinutes(startupPageFor)})
+	}{show, f.trusted, message, f.checks, humanMinutes(startupPageFor)})
 }
 
 func humanMinutes(d time.Duration) string {
