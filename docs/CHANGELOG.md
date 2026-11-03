@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.125.0] - 2026-11-02
+
+- **DuckDB 1.5.6** (#2613). DuckDB 1.4 LTS support ends on 2026-11-17, so the engine moves to 1.5.6, whose extended support runs to March 2027. On a 14-query analytical benchmark it answers as fast as 1.4. 2.0 waits for duckdb/duckdb#28269, which makes some mid-size selective joins slower. What the move changes that you can see:
+  - SQL on the copy prints a DECIMAL inside a `MAP` with its scale (`10.00`, not `10`), and a `GEOMETRY` as hex.
+  - With Engine Routing, `array '...'`, `geometry '...'` and `type '...'` go to MySQL, like the other words the copy reads as a type before a string.
+  - A symbolic link inside the copy that points outside it is now refused by the engine.
+  - `UNION`, `INTERSECT` and `EXCEPT` on the copy ignore case when they remove duplicates, but keep either spelling. They already went to MySQL under Engine Routing and still do; `docs/time-travel-sql.md` no longer says the copy compares those rows byte by byte.
+  - The real-S3 reads behave as on 1.4, checked side by side: same-region and cross-region buckets, `--ultrafast`, and a role without `GetBucketLocation`.
+
+- **SQL on the copy prints INTERVAL, UUID, TIMETZ and nested values as DuckDB does** (#2614, #2615). In the console, over MCP and on the MySQL port:
+  - An `INTERVAL` printed as `{0 3 18000000000}` and now prints as `3 months 05:00:00`.
+  - A `UUID` printed as hex or as control characters, and now prints as `a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11`.
+  - A `TIMETZ` of `10:30:00+02` printed as `0001-01-01T08:30:00Z`, another time with a made-up date, and now prints as `10:30:00+02`.
+  - Values inside a `LIST`, `ARRAY`, `STRUCT`, `MAP` or `UNION` are now printed by their own type, so a `DATE` in a list is `2026-01-02` rather than a timestamp.
+
 ## [0.124.0] - 2026-11-02
 
 - **With Engine Routing, "the last N days" reports are answered by the copy** (#2611). A statement such as `SELECT COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL 30 DAY` always went to MySQL, because the copy had no `NOW()` with MySQL's value. On the MySQL port the copy now has `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` and `UTC_DATE()` as MySQL has them: whole seconds on the wall clock of the session's time zone (UTC for the last two), read from DBTrail's host clock when the statement starts. Before each such statement the port asks MySQL for the session's clock: a session that set `SET timestamp = ...` (MySQL's `NOW()` is then that moment), or a source whose clock is more than a second from DBTrail's host's, goes to MySQL. So does a session whose zone is a name such as `America/New_York`, where near a clock change a wall clock can stand for two instants; UTC and whole-hour offsets stay on the copy. Still MySQL's: `NOW(3)`, `CURRENT_TIMESTAMP`, `CURRENT_DATE`, `LOCALTIME`, `LOCALTIMESTAMP`, `CURTIME`, `SYSDATE`, `UTC_TIME`; `NOW()` or `CURDATE()` next to `+ 1`, `* 2`, `DIV`, under `SUM` or `AVG`, or reaching such arithmetic under another name (MySQL turns them into numbers there: `CURDATE() - 1` is `20261101`, where the copy would give yesterday); arithmetic after the `INTERVAL` (`NOW() - INTERVAL 1 DAY * 2`); `CURDATE()` anywhere but compared with a date column, inside `YEAR`, `MONTH`, `DAY` or `QUARTER`, or as a column of its own (so `DATE_ADD(CURDATE(), INTERVAL 1 DAY)`, `CURDATE()` compared with a string, a parameter or a text column, `GREATEST(CURDATE(), ...)` and `CURDATE()` in a statement with a subquery, a `WITH` or a `HAVING` are MySQL's: a date on MySQL, a date and time on the copy, or a time in the string MySQL reads and the copy drops); `DATE(NOW()) - INTERVAL 1 DAY`; `UTC_DATE` without parentheses. Compared through the MySQL port against MySQL 8.0 and MariaDB under `+00:00` and `+05:00`. The SQL card keeps DuckDB's own `now()`.
