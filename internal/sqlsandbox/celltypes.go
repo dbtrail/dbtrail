@@ -74,6 +74,11 @@ func clockText(micros int64) string {
 // its offset as +HH, +HH:MM or +HH:MM:SS. The driver hands it over as a
 // time.Time on 1 January of year 1 in a fixed zone of that offset; printed
 // in UTC, as other times are, it read as another wall-clock time.
+//
+// 24:00:00, which DuckDB allows, reaches Go as hour 24 of 1 January, which
+// time.Date normalizes to midnight of 2 January: the day tells it apart. A
+// TIME of 24:00:00 cannot be told from 00:00:00, since the driver builds it
+// from the hour of a Unix time, which has already wrapped.
 func timeTZText(t time.Time) string {
 	_, off := t.Zone()
 	sign := byte('+')
@@ -81,7 +86,11 @@ func timeTZText(t time.Time) string {
 		sign, off = '-', -off
 	}
 	var b strings.Builder
-	b.WriteString(t.Format("15:04:05.999999"))
+	if t.Day() == 2 {
+		b.WriteString("24:00:00")
+	} else {
+		b.WriteString(t.Format("15:04:05.999999"))
+	}
 	b.WriteByte(sign)
 	two := func(n int) {
 		if n < 10 {

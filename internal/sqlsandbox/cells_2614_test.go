@@ -48,6 +48,8 @@ func TestRun_cellsPrintAsTheEngine_2614(t *testing.T) {
 		"'23:59:59.123456-08'::TIMETZ",
 		"'00:00:00+00'::TIMETZ",
 		"'12:00:00-03:30'::TIMETZ",
+		"'24:00:00+00'::TIMETZ",
+		"'24:00:00-05'::TIMETZ",
 		// Unchanged, for contrast.
 		"DATE '2026-01-02'",
 		"'10:30:00'::TIME",
