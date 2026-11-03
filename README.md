@@ -74,13 +74,10 @@ time:
 | Where the queries ran | Total time |
 |---|---|
 | MySQL | 22 min 28 s |
-| ClickHouse fed by Airbyte CDC | 12.6 s |
 | **DBTrail + DuckDB** | **4.6 s** |
-| MyDuck Server | 2.7 s |
 
 One of the six, a two-table join grouped by district and month, took
-3 min 52 s on MySQL and 0.9 s on the copy. MyDuck was faster on this set: it
-keeps data in DuckDB's own format, which only DuckDB reads.
+3 min 52 s on MySQL and 0.9 s on the copy.
 
 Freshness, measured separately under about 340 transactions per second with a
 5-minute schedule: commit to visible in DuckDB took 2.7 to 13.2 minutes,
@@ -95,6 +92,12 @@ Method, cost comparison and ClickBench results:
 
 - **Heavy queries off your MySQL.** They run in DuckDB, in its own process,
   on the copy. Only the binlog leaves `mysqld`.
+- **One MySQL connection for both, with Engine Routing.** Point a report or a
+  BI tool at DBTrail's MySQL port instead of your MySQL. For each statement it
+  decides who answers: lookups, small reads and anything inside a transaction
+  go to your MySQL, heavy reads go to the copy. No query changes. Off until you
+  turn it on. See
+  [Run MySQL and DuckDB on the same connection](https://www.dbtrail.com/docs/guides/query-with-a-mysql-client/routing/).
 - **DuckDB, ready to open.** One `views.sql`, one view per table. Your DuckDB
   runs it on your machine: a laptop, a notebook, a BI box.
 - **Open files you own.** Plain Parquet on disk or in S3, with a
@@ -163,9 +166,11 @@ A copy you can trust is one whose edges you know.
 - **Cascaded deletes before MySQL 9.6, and on MariaDB.** Rows deleted by a
   foreign key never reach the binlog. `recover-cascade` rebuilds most of them,
   and the copy keeps them until DBTrail next reads the database in full.
-- **Not a MySQL server.** Reports run in DuckDB, not from your MySQL client.
-  The optional MySQL port (beta, no TLS) only answers what a row or table
-  looked like at a past moment, or what changed between two.
+- **The MySQL port is beta, read-only, and has no TLS.** Use it on a private
+  network. It answers reads (routed to the copy or to your MySQL) and
+  time-travel questions; writes are refused unless the router is started to
+  forward them. It does not tune a slow query: a query that needs an index
+  still needs the index.
 - **Yours to operate.** DBTrail and its small index MySQL run on your
   machines. Disk and backups are yours.
 
