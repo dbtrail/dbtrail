@@ -1,7 +1,11 @@
 package consoleapp
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"net"
+	"regexp"
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/telemetry"
@@ -19,6 +23,52 @@ type configError struct{ msg string }
 
 func (e configError) Error() string          { return e.msg }
 func (e configError) TelemetryClass() string { return telemetry.ClassConfigInvalid }
+
+// settingError is a startup refusal of a setting the operator gave (a flag or
+// its variable). Like configError it is config_invalid, which gets watch the
+// startup page instead of a restart loop, but its message repeats the value
+// given, so the page shows it to anyone only when that value is plainly a
+// setting (public); otherwise the page points at the log.
+type settingError struct {
+	msg    string
+	public bool
+}
+
+func (e settingError) Error() string          { return e.msg }
+func (e settingError) TelemetryClass() string { return telemetry.ClassConfigInvalid }
+func (e settingError) ShownToAnyone() bool    { return e.public }
+
+// plainSetting is what a format, a flavor, a size, a count or a duration looks
+// like. A value outside it may be something pasted into the wrong variable (a
+// DSN with its password, a host, a path), which a page anyone can reach must
+// not repeat.
+var plainSetting = regexp.MustCompile(`^[A-Za-z0-9 ._+-]{1,16}$`)
+
+// configRefusal marks err, a refusal of a setting the operator gave, as a
+// settingError, keeping its words. typed are the values the message repeats:
+// the page shows the message only when every one is a plainSetting. An error
+// that already carries its own class, or that comes from the network or the
+// filesystem, is returned unchanged: this is for setting refusals only.
+func configRefusal(err error, typed ...string) error {
+	if err == nil {
+		return nil
+	}
+	var classed telemetry.Classed
+	var netErr net.Error
+	var pathErr *fs.PathError
+	if errors.As(err, &classed) || errors.As(err, &netErr) || errors.As(err, &pathErr) {
+		return err
+	}
+	public := true
+	for _, v := range typed {
+		// An unset source of the setting (the flag when the variable gave
+		// it, or the reverse) repeats nothing.
+		if v != "" && !plainSetting.MatchString(v) {
+			public = false
+		}
+	}
+	return settingError{msg: err.Error(), public: public}
+}
 
 // checkIndexDSN refuses a missing or malformed --index-dsn before anything
 // waits on the network, with a message that says how to write it. The

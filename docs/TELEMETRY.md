@@ -127,7 +127,10 @@ failed: `db_connection` when the source or the index could not be reached,
 `config_invalid` for a server setting (ROW format, row image, `log_bin`) —
 and the `binlog_format` / `binlog_row_image` refusals that
 `stream`, `index --source-dsn` and `agent` run without the doctor in front
-report `config_invalid` too. A server
+report `config_invalid` too, as does a setting `bintrail-console watch`
+refuses before it reaches the index (`--index-dsn`, `--format`,
+`--source-flavor`, the `--rotate-*` settings, `--sql-memory`,
+`--sql-max-in-flight`, or their variables). A server
 identity conflict is `config_invalid`, `binlog_not_found` covers both the
 server's own "binlog purged" error (1236) and the `--no-gap-fill` refusal,
 and `schema_mismatch` is the stale-snapshot guard. `unknown` is what a
