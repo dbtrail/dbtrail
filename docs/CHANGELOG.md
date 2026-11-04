@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Contributing no longer needs a contributor agreement.** The CLA is gone. Each commit in a pull request now carries a `Signed-off-by:` line (`git commit -s`), the [Developer Certificate of Origin](https://github.com/dbtrail/dbtrail/blob/main/.github/DCO.md), and contributions stay under the project's Apache 2.0 license. A check on pull requests from outside contributors lists any commit without the line and says how to add it.
+
 ## [0.125.1] - 2026-11-03
 
 - **`watch` shows why it did not start when a setting is wrong, instead of restarting in a loop.** A wrong `--format`, `--source-flavor`, `--rotate-retain`, `--rotate-interval`, `--rotate-add-future`, `--sql-memory` or `--sql-max-in-flight` (or its variable) made the process exit at once, and Docker Compose or the service started it again, over and over, with nothing in the browser. These now get the page that says what to fix, as a wrong `--index-dsn` already did, and reach telemetry as `config_invalid` instead of `unknown`. A page anyone can reach shows the message with the value taken out, in case it is something pasted into the wrong variable (a connection string with its password); the log, and the page opened on the machine itself, show it whole. Not yet covered: a flag the command line itself cannot read (letters where a number goes) still exits before this check.

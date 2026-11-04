@@ -256,6 +256,7 @@ MySQL.
 - [ ] New behaviour is covered by tests
 - [ ] User-facing docs under `docs/` are updated if behaviour or flags changed
 - [ ] Commit messages are clear and describe *why*, not just *what*
+- [ ] Every commit is signed off (`git commit -s`, see below)
 
 ## Commit style
 
@@ -269,10 +270,23 @@ exact column names and not substrings (e.g. "status" must not match
 "order_status").
 ```
 
-## Contributor License Agreement
+## Developer Certificate of Origin
 
-By opening a pull request, you agree to the terms of the [Contributor License Agreement](https://github.com/dbtrail/dbtrail/blob/main/.github/CLA.md). First-time contributors will be asked to confirm via [CLA Assistant](https://cla-assistant.io/) before their PR can be merged.
+There is no contributor agreement to sign. Instead, every commit carries a sign-off line:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+`git commit -s` adds it for you, with the name and email from your git config. By signing off you certify the [Developer Certificate of Origin](https://github.com/dbtrail/dbtrail/blob/main/.github/DCO.md): that you wrote the change, or otherwise have the right to submit it under the project's open source license.
+
+A check on every pull request lists any commit without the line. To sign off the commits already on your branch:
+
+```
+git rebase --signoff origin/main
+git push --force-with-lease
+```
 
 ## License
 
-This project is licensed under the [Apache License, Version 2.0](https://github.com/dbtrail/dbtrail/blob/main/LICENSE). By contributing, you grant the maintainer the rights described in the [CLA](https://github.com/dbtrail/dbtrail/blob/main/.github/CLA.md), which include the right to use your contributions under the current and future license terms.
+This project is licensed under the [Apache License, Version 2.0](https://github.com/dbtrail/dbtrail/blob/main/LICENSE). Your contributions are accepted under that same license, and you keep the copyright on them.
