@@ -1,0 +1,51 @@
+name: dco
+
+# Contributions are accepted under the Developer Certificate of Origin: every
+# commit in a pull request carries a "Signed-off-by:" line (`git commit -s`).
+# See "Developer Certificate of Origin" in .github/CONTRIBUTING.md.
+#
+# Pull requests from the project's own members and collaborators are not
+# checked; merge commits and bot commits never are (see dco-check.sh).
+
+on:
+  pull_request:
+
+concurrency:
+  group: dco-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  sign-off:
+    if: ${{ !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every commit is signed off
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/commits?per_page=100" > "${RUNNER_TEMP}/commits.json"
+          COMMITS_JSON="${RUNNER_TEMP}/commits.json" bash .github/scripts/dco-check.sh
+
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: shellcheck .github/scripts/dco-check.sh .github/scripts/dco-check_test.sh
+
+      - name: Tests
+        run: bash .github/scripts/dco-check_test.sh
