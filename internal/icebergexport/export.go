@@ -865,6 +865,35 @@ func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.T
 		return res, nil
 	}
 	if binlogBefore(cut.File, cut.Pos, cur.File, cur.Pos) {
+		// Right after a load the cursor is the baseline's anchor, and when no
+		// row event was indexed after the dump the newest indexed event is
+		// older than it: the same shape as a reset or restored index (#2621).
+		// Where capture has read to tells them apart: at or past the anchor,
+		// capture read that stretch and indexed nothing from it, so there is
+		// nothing to fold yet. It shows how far capture read, not that it read
+		// without a break since the dump: a capture started after the dump
+		// with no gap recorded goes unseen here, as on the normal path. The cursor stays on the anchor either way,
+		// so a wrong call here can delay a fold but never skip one. Only for
+		// a baseline cursor: a cut cursor names an event the index held, and
+		// a cut behind it means indexed events are gone.
+		var unproven string
+		if cur.FromBaseline {
+			file, pos, why := streamCheckpoint(ctx, d.db)
+			switch {
+			case why != "":
+				unproven = why
+			case captureReachedAnchor(file, pos, *cur):
+				res.note += fmt.Sprintf("; nothing was indexed after the baseline anchor (%s) yet: capture's checkpoint is at %s:%d, past the anchor, so there is nothing to fold until a change is indexed",
+					cur.String(), file, pos)
+				return res, nil
+			default:
+				unproven = fmt.Sprintf("capture's checkpoint %s:%d is not at or past the anchor under the same binlog name", file, pos)
+			}
+		}
+		if unproven != "" {
+			return nil, fmt.Errorf("%w: the run's cut %s:%d is before %s.%s's cursor %s, and %s, so the index cannot show it simply holds nothing newer; the source's binlogs were reset or the index was restored behind the export, or capture has not read that far yet. Remove the table directory to reload it from a fresh baseline",
+				reconstruct.ErrCaptureGap, cut.File, cut.Pos, schema, tbl, cur.String(), unproven)
+		}
 		return nil, fmt.Errorf("%w: the run's cut %s:%d is before %s.%s's cursor %s; the source's binlogs were reset or the index was restored behind the export, so the events between are not in this index. Remove the table directory to reload it from a fresh baseline",
 			reconstruct.ErrCaptureGap, cut.File, cut.Pos, schema, tbl, cur.String())
 	}
@@ -1032,6 +1061,45 @@ func checkCaptureSkips(ctx context.Context, db *sql.DB, schema, tbl string, sinc
 			reconstruct.ErrCaptureGap, s.Count, reason, s.LastAt.UTC().Format(time.RFC3339), schema, tbl)
 	}
 	return nil
+}
+
+// streamCheckpoint reads where capture has read the source's binary log to
+// (stream_state, written in both position and GTID mode). why is non-empty
+// when there is nothing to compare, and says what: no row (an index built
+// from binlog files), an empty position, or a read error.
+func streamCheckpoint(ctx context.Context, db *sql.DB) (file string, pos uint64, why string) {
+	var f sql.NullString
+	err := db.QueryRowContext(ctx, "SELECT binlog_file, binlog_position FROM stream_state WHERE id = 1").Scan(&f, &pos)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", 0, "the index has no stream checkpoint to compare"
+	case err != nil:
+		return "", 0, fmt.Sprintf("the stream checkpoint could not be read (%v)", err)
+	case !f.Valid || f.String == "":
+		return "", 0, "the stream checkpoint records no binlog position"
+	}
+	return f.String, pos, ""
+}
+
+// captureReachedAnchor reports whether a capture checkpoint at file:pos is
+// at or past the cursor's coordinate (#2621). Binary log names are compared
+// only under one base name: "binlog.000008" and "mysql-bin.000002" are two
+// numbering schemes with no order between them, so that, a name without a
+// number, or an empty one, proves nothing.
+func captureReachedAnchor(file string, pos uint64, cur cursor) bool {
+	base := func(name string) (string, bool) {
+		i := strings.LastIndexByte(name, '.')
+		if i <= 0 || i == len(name)-1 {
+			return "", false
+		}
+		return name[:i], true
+	}
+	fb, ok1 := base(file)
+	cb, ok2 := base(cur.File)
+	if !ok1 || !ok2 || fb != cb {
+		return false
+	}
+	return !binlogBefore(file, pos, cur.File, cur.Pos)
 }
 
 // binlogBefore reports whether a is strictly before b in binlog order: the

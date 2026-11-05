@@ -209,6 +209,12 @@ func TestIntegrationExport_cutBeforeCursorRefuses(t *testing.T) {
 		t.Fatalf("run 1 = %s (%s)", o.Verdict, o.Detail)
 	}
 	testutil.MustExec(t, f.db, `DELETE FROM binlog_events WHERE start_pos >= 300`)
+	// Capture has read far past the cursor (#2621): that excuses a cut behind
+	// a BASELINE anchor, never one behind a cursor a run committed, which
+	// names an event the index held and no longer does.
+	testutil.MustExec(t, f.db, `INSERT INTO stream_state
+		(id, mode, binlog_file, binlog_position, gtid_set, events_indexed, last_checkpoint, server_id)
+		VALUES (1, 'position', 'binlog.000009', 4, '', 3, NOW(), 1)`)
 	o2 := runOne(t, f.config(warehouse, f.base.Add(40*time.Minute)))
 	if o2.Verdict != VerdictRefusedGap || !strings.Contains(o2.Detail, "is before") {
 		t.Errorf("verdict = %s (%s), want refused-gap naming the cut before the cursor", o2.Verdict, o2.Detail)
