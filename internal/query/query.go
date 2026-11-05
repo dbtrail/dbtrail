@@ -278,10 +278,10 @@ func LaterInBinlog(a, b *ResultRow) bool {
 //
 // A "file" with a slash is a PostgreSQL LSN (pgcapture writes the commit LSN
 // as unpadded %X/%X): by length and then name, "1/5" sorts before
-// "0/FFFFFFFF", which is backwards. No fold that calls LaterInBinlog reads
-// PostgreSQL rows today (the full-table reconstruct and the Iceberg export
-// refuse the source first); this keeps a later caller from ordering them by
-// accident. A binary log base name cannot hold a slash: the server stores
+// "0/FFFFFFFF", which is backwards. No fold orders PostgreSQL rows by LaterInBinlog
+// on purpose: the full-table reconstruct folds them on their own path, and the
+// Iceberg export refuses a key change on a "postgres" source (its fold's pg
+// flag); this keeps a later caller from ordering them by accident. A binary log base name cannot hold a slash: the server stores
 // only the name after the last one.
 func hasBinlogCoordinate(r *ResultRow) bool {
 	return r.BinlogFile != "" && r.StartPos < 1<<63 && !strings.Contains(r.BinlogFile, "/")

@@ -41,68 +41,97 @@ func (o *netOp) deleted() bool { return o.Row == nil }
 type fold struct {
 	schema, table string
 	pkCols        []metadata.ColumnMeta
-	ops           map[string]*netOp
-	order         []string
-	events        int64
+	// pg marks a PostgreSQL source: its rows carry no binary log coordinate
+	// to order the two halves of a key change, so such a change is refused.
+	pg     bool
+	ops    map[string]*netOp
+	order  []string
+	events int64
 }
 
-func newFold(schema, table string, pkCols []metadata.ColumnMeta) *fold {
-	return &fold{schema: schema, table: table, pkCols: pkCols, ops: map[string]*netOp{}}
+func newFold(schema, table string, pkCols []metadata.ColumnMeta, pg bool) *fold {
+	return &fold{schema: schema, table: table, pkCols: pkCols, pg: pg, ops: map[string]*netOp{}}
 }
 
-// addPage folds one page. Two guards, per event: an unresolved TOAST marker
-// (#592) and a PK-changing UPDATE (#782) refuse the table, because the
-// alternative is a table that reads cleanly and is wrong. The full-table
-// reconstruct shares the first; since #2501 it folds the second as a DELETE
-// of the old key and an INSERT of the new one instead, which this fold does
-// not (its own guard, unchanged: the export keeps refusing such a window).
+// addPage folds one page. An unresolved TOAST marker (#592) refuses the table,
+// because the alternative is a table that reads cleanly and is wrong. An
+// UPDATE that changes the primary key is folded as what it is, a DELETE of the
+// old key and an INSERT of the new one at the UPDATE's own coordinates
+// (reconstruct.SplitPKChange, the full-table fold's split since #2501), so the
+// exported table equals `reconstruct` at the same cut (#2619). The split keeps
+// its own refusals: a key the index would spell another way, and PostgreSQL.
 func (f *fold) addPage(page []query.ResultRow) error {
 	for i := range page {
 		ev := &page[i]
 		if err := event.CheckUnresolvedToast(ev.SchemaName, ev.TableName, ev.PKValues, ev.RowBefore, ev.RowAfter); err != nil {
 			return err
 		}
-		if before, after, ok := reconstruct.PKChangedInEvent(ev, f.pkCols); ok {
-			return reconstruct.PKChangingUpdateError(f.schema, f.table, before, after)
+		halves, err := reconstruct.SplitPKChange(ev, f.schema, f.table, f.pkCols, f.pg)
+		if err != nil {
+			// The shared message names reconstruct's remedy. Here a new
+			// baseline alone changes nothing: the cursor lives in the table
+			// and the next run reads this window again (#2619).
+			return fmt.Errorf("%w. For the Iceberg export: the table's cursor stays before this change and every run refuses it again; "+
+				"take a baseline at or after the change and remove the table directory (or drop the table from the catalog) so the next run reloads %s.%s from it",
+				err, f.schema, f.table)
 		}
-		var op *netOp
-		switch ev.EventType {
-		case event.EventInsert, event.EventUpdate:
-			if ev.RowAfter == nil {
-				return fmt.Errorf("event %d (type %d) for %s.%s pk %q carries no after-image", ev.EventID, ev.EventType, f.schema, f.table, ev.PKValues)
-			}
-			row := copyMap(ev.RowAfter)
-			pk, err := pkImage(row, f.pkCols)
-			if err != nil {
-				return fmt.Errorf("event %d for %s.%s: %w", ev.EventID, f.schema, f.table, err)
-			}
-			op = &netOp{PK: pk, Row: row}
-		case event.EventDelete:
-			if ev.RowBefore == nil {
-				return fmt.Errorf("DELETE event %d for %s.%s pk %q carries no before-image", ev.EventID, f.schema, f.table, ev.PKValues)
-			}
-			pk, err := pkImage(ev.RowBefore, f.pkCols)
-			if err != nil {
-				return fmt.Errorf("DELETE event %d for %s.%s: %w", ev.EventID, f.schema, f.table, err)
-			}
-			op = &netOp{PK: pk}
-		default:
-			// EventType 0 is the drift shape (#318): a NULL event_type column.
-			// Not skippable: a skipped event is a silently wrong table.
-			return fmt.Errorf("event %d for %s.%s pk %q has event type %d, which the export cannot apply", ev.EventID, f.schema, f.table, ev.PKValues, ev.EventType)
-		}
+		// A key change counts once, as the UPDATE it is: events is what the
+		// binary log holds, not what the fold files.
 		f.events++
-		op.at = query.ResultRow{EventID: ev.EventID, BinlogFile: ev.BinlogFile, StartPos: ev.StartPos}
-		cur, seen := f.ops[ev.PKValues]
-		if !seen {
-			f.order = append(f.order, ev.PKValues)
-		} else if query.LaterInBinlog(&cur.at, &op.at) {
-			// Every guard above has read this event; the key keeps the change
-			// from further on in the binary log.
+		if halves == nil {
+			if err := f.apply(ev); err != nil {
+				return err
+			}
 			continue
 		}
-		f.ops[ev.PKValues] = op
+		for h := range halves {
+			if err := f.apply(&halves[h]); err != nil {
+				return err
+			}
+		}
 	}
+	return nil
+}
+
+// apply files one event's net effect under its key, unless the fold already
+// holds a change of that key from further on in the binary log.
+func (f *fold) apply(ev *query.ResultRow) error {
+	var op *netOp
+	switch ev.EventType {
+	case event.EventInsert, event.EventUpdate:
+		if ev.RowAfter == nil {
+			return fmt.Errorf("event %d (type %d) for %s.%s pk %q carries no after-image", ev.EventID, ev.EventType, f.schema, f.table, ev.PKValues)
+		}
+		row := copyMap(ev.RowAfter)
+		pk, err := pkImage(row, f.pkCols)
+		if err != nil {
+			return fmt.Errorf("event %d for %s.%s: %w", ev.EventID, f.schema, f.table, err)
+		}
+		op = &netOp{PK: pk, Row: row}
+	case event.EventDelete:
+		if ev.RowBefore == nil {
+			return fmt.Errorf("DELETE event %d for %s.%s pk %q carries no before-image", ev.EventID, f.schema, f.table, ev.PKValues)
+		}
+		pk, err := pkImage(ev.RowBefore, f.pkCols)
+		if err != nil {
+			return fmt.Errorf("DELETE event %d for %s.%s: %w", ev.EventID, f.schema, f.table, err)
+		}
+		op = &netOp{PK: pk}
+	default:
+		// EventType 0 is the drift shape (#318): a NULL event_type column.
+		// Not skippable: a skipped event is a silently wrong table.
+		return fmt.Errorf("event %d for %s.%s pk %q has event type %d, which the export cannot apply", ev.EventID, f.schema, f.table, ev.PKValues, ev.EventType)
+	}
+	op.at = query.ResultRow{EventID: ev.EventID, BinlogFile: ev.BinlogFile, StartPos: ev.StartPos}
+	cur, seen := f.ops[ev.PKValues]
+	if !seen {
+		f.order = append(f.order, ev.PKValues)
+	} else if query.LaterInBinlog(&cur.at, &op.at) {
+		// Every guard above has read this event; the key keeps the change
+		// from further on in the binary log.
+		return nil
+	}
+	f.ops[ev.PKValues] = op
 	return nil
 }
 

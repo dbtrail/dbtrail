@@ -880,7 +880,9 @@ func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.T
 		Order:    "ASC",
 	}
 	dec := reconstruct.NewEventDecoder(d.db, schema, tbl, d.resolver)
-	f := newFold(schema, tbl, pkCols)
+	// A PostgreSQL window has no binary log coordinate to order the halves
+	// of a key change, so the fold refuses one there (#2619, as #2501 does).
+	f := newFold(schema, tbl, pkCols, query.SourceFlavor(d.db) == "postgres")
 	var first *query.ResultRow
 	var foldErr error
 	_, err = query.FetchMergedStream(ctx, d.db, d.engine, query.FetchMergedOptions{

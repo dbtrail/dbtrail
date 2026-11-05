@@ -31,7 +31,7 @@ func row(id string, status string) map[string]any {
 }
 
 func TestFold_netEffectPerKey(t *testing.T) {
-	f := newFold("shop", "orders", idPK)
+	f := newFold("shop", "orders", idPK, false)
 	// Page 1: insert 1, insert 2, update 2, insert 3.
 	if err := f.addPage([]query.ResultRow{
 		ev(1, event.EventInsert, "1", nil, row("1", "new")),
@@ -84,7 +84,7 @@ func TestFold_netEffectPerKey(t *testing.T) {
 }
 
 func TestFold_deleteKeyComesFromBeforeImage(t *testing.T) {
-	f := newFold("shop", "orders", idPK)
+	f := newFold("shop", "orders", idPK, false)
 	if err := f.addPage([]query.ResultRow{
 		ev(1, event.EventDelete, "9", map[string]any{"id": json.Number("9"), "status": "gone"}, nil),
 	}); err != nil {
@@ -102,9 +102,6 @@ func TestFold_refusals(t *testing.T) {
 		evs  []query.ResultRow
 		want string
 	}{
-		{"PK-changing UPDATE", []query.ResultRow{
-			ev(1, event.EventUpdate, "1", row("1", "a"), row("2", "a")),
-		}, "PK-changing UPDATE"},
 		{"DELETE without before-image", []query.ResultRow{
 			ev(1, event.EventDelete, "1", nil, nil),
 		}, "carries no before-image"},
@@ -117,7 +114,7 @@ func TestFold_refusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newFold("shop", "orders", idPK)
+			f := newFold("shop", "orders", idPK, false)
 			err := f.addPage(tc.evs)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want containing %q", err, tc.want)
@@ -128,7 +125,7 @@ func TestFold_refusals(t *testing.T) {
 
 func TestFold_compositeKeyImage(t *testing.T) {
 	pk := []metadata.ColumnMeta{{Name: "tenant", IsPK: true, DataType: "int"}, {Name: "id", IsPK: true, DataType: "int"}}
-	f := newFold("shop", "orders", pk)
+	f := newFold("shop", "orders", pk, false)
 	if err := f.addPage([]query.ResultRow{
 		ev(1, event.EventInsert, "7|1", nil, map[string]any{"tenant": json.Number("7"), "id": json.Number("1"), "v": "x"}),
 	}); err != nil {
@@ -162,7 +159,7 @@ func TestFold_keepsTheChangeTheBinlogHoldsLast(t *testing.T) {
 		"two pages": {{b, gone}, {a, back}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFold("shop", "orders", idPK)
+			f := newFold("shop", "orders", idPK, false)
 			for _, p := range pages {
 				if err := f.addPage(p); err != nil {
 					t.Fatal(err)
@@ -181,10 +178,11 @@ func TestFold_keepsTheChangeTheBinlogHoldsLast(t *testing.T) {
 		})
 	}
 
-	// A superseded change is still refused when it is one the export cannot apply.
-	f := newFold("shop", "orders", idPK)
-	moved := at(ev(3, event.EventUpdate, "1", row("1", "new"), row("9", "A")), 100)
-	if err := f.addPage([]query.ResultRow{b, moved}); err == nil {
-		t.Fatal("a PK-changing UPDATE behind a later change of the key was not refused")
+	// A superseded change is still refused when it is one the export cannot
+	// apply: the guards read every event, kept or not.
+	f := newFold("shop", "orders", idPK, false)
+	broken := at(ev(3, event.EventDelete, "1", nil, nil), 100)
+	if err := f.addPage([]query.ResultRow{b, broken}); err == nil {
+		t.Fatal("a DELETE without a before-image behind a later change of the key was not refused")
 	}
 }

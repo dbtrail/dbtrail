@@ -201,14 +201,41 @@ func TestIntegrationExport_matchesReconstructAtTheSameCut(t *testing.T) {
 	}
 	equalRows(t, "after run 2", duckRows(t, ddb, o.Location), []string{"2=paid", "4=shipped", "5=new"})
 
-	// Oracle: bintrail's own full-table reconstruct at the same instant, and
-	// therefore the same positional cut.
+	assertMatchesReconstruct(t, f, ddb, o.Location, at2, 3)
+
+	// Run 3: nothing new. No snapshot, no commit, cursor untouched.
+	var snapshotsBefore int
+	if err := ddb.QueryRow(fmt.Sprintf("SELECT count(*) FROM iceberg_snapshots('%s')", o.Location)).Scan(&snapshotsBefore); err != nil {
+		t.Fatal(err)
+	}
+	o3 := runOne(t, f.config(warehouse, at2.Add(10*time.Minute)))
+	if o3.Verdict != VerdictUnchanged || o3.Events != 0 {
+		t.Fatalf("run 3 = %+v, want unchanged", o3)
+	}
+	var snapshotsAfter int
+	if err := ddb.QueryRow(fmt.Sprintf("SELECT count(*) FROM iceberg_snapshots('%s')", o.Location)).Scan(&snapshotsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotsAfter != snapshotsBefore {
+		t.Fatalf("snapshots %d -> %d across an empty window", snapshotsBefore, snapshotsAfter)
+	}
+	if o3.Cursor != o.Cursor {
+		t.Fatalf("cursor moved on an empty window: %s -> %s", o.Cursor, o3.Cursor)
+	}
+}
+
+// assertMatchesReconstruct checks the exported table against bintrail's own
+// full-table reconstruct at the same instant, and therefore the same
+// positional cut: EXCEPT both ways plus a count on each side, which must be
+// wantRows.
+func assertMatchesReconstruct(t *testing.T, f fixture, ddb *sql.DB, location string, at time.Time, wantRows int) {
+	t.Helper()
 	oracleDir := t.TempDir()
 	_, failures, err := reconstruct.ReconstructTablesDetailed(context.Background(), reconstruct.FullTableConfig{
 		IndexDSN:       f.dsn,
 		BaselineSrc:    f.baseDir,
 		Tables:         []string{f.schema + ".orders"},
-		At:             at2,
+		At:             at,
 		OutputDir:      oracleDir,
 		OutputFormat:   reconstruct.OutputFormatParquet,
 		ArchiveFetcher: parquetquery.Fetch,
@@ -237,7 +264,7 @@ func TestIntegrationExport_matchesReconstructAtTheSameCut(t *testing.T) {
 			t.Fatalf("%s: %v", sql, err)
 		}
 	}
-	q(fmt.Sprintf("CREATE TEMP TABLE ice AS SELECT id, status, amount, updated_at FROM iceberg_scan('%s')", o.Location))
+	q(fmt.Sprintf("CREATE TEMP TABLE ice AS SELECT id, status, amount, updated_at FROM iceberg_scan('%s')", location))
 	// The baseline writer declares its timestamps UTC-adjusted (DuckDB reads
 	// them as TIMESTAMP WITH TIME ZONE); the Iceberg column is a naive
 	// timestamp, the honest shape for a MySQL DATETIME. Same instant, so
@@ -250,30 +277,10 @@ func TestIntegrationExport_matchesReconstructAtTheSameCut(t *testing.T) {
 	if err := ddb.QueryRow("SELECT (SELECT count(*) FROM ice), (SELECT count(*) FROM ora)").Scan(&nIce, &nOra); err != nil {
 		t.Fatal(err)
 	}
-	if diff != 0 || nIce != nOra || nIce != 3 {
-		t.Fatalf("export vs reconstruct: %d differing rows, %d vs %d rows (want 0, 3, 3)\niceberg:\n%s\nreconstruct:\n%s",
-			diff, nIce, nOra, dumpRows(t, ddb, "SELECT id, status, amount, updated_at, typeof(amount), typeof(updated_at) FROM ice ORDER BY id"),
+	if diff != 0 || nIce != nOra || nIce != wantRows {
+		t.Fatalf("export vs reconstruct: %d differing rows, %d vs %d rows (want 0, %d, %d)\niceberg:\n%s\nreconstruct:\n%s",
+			diff, nIce, nOra, wantRows, wantRows, dumpRows(t, ddb, "SELECT id, status, amount, updated_at, typeof(amount), typeof(updated_at) FROM ice ORDER BY id"),
 			dumpRows(t, ddb, "SELECT id, status, amount, updated_at, typeof(amount), typeof(updated_at) FROM ora ORDER BY id"))
-	}
-
-	// Run 3: nothing new. No snapshot, no commit, cursor untouched.
-	var snapshotsBefore int
-	if err := ddb.QueryRow(fmt.Sprintf("SELECT count(*) FROM iceberg_snapshots('%s')", o.Location)).Scan(&snapshotsBefore); err != nil {
-		t.Fatal(err)
-	}
-	o3 := runOne(t, f.config(warehouse, at2.Add(10*time.Minute)))
-	if o3.Verdict != VerdictUnchanged || o3.Events != 0 {
-		t.Fatalf("run 3 = %+v, want unchanged", o3)
-	}
-	var snapshotsAfter int
-	if err := ddb.QueryRow(fmt.Sprintf("SELECT count(*) FROM iceberg_snapshots('%s')", o.Location)).Scan(&snapshotsAfter); err != nil {
-		t.Fatal(err)
-	}
-	if snapshotsAfter != snapshotsBefore {
-		t.Fatalf("snapshots %d -> %d across an empty window", snapshotsBefore, snapshotsAfter)
-	}
-	if o3.Cursor != o.Cursor {
-		t.Fatalf("cursor moved on an empty window: %s -> %s", o.Cursor, o3.Cursor)
 	}
 }
 

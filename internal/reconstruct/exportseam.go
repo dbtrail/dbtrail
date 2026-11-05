@@ -17,17 +17,16 @@ import (
 // package needs the same per-event guards and decoders the full-table fold
 // runs, so that the exported table equals `reconstruct` at the same cut.
 
-// PKChangedInEvent reports whether ev is an UPDATE whose primary key changed
-// (#782). The Iceberg export folds events by the before-image PK exactly like
-// the full-table merge, so it refuses the same events for the same reason.
-func PKChangedInEvent(ev *query.ResultRow, pkCols []metadata.ColumnMeta) (before, after string, changed bool) {
-	return pkChangedInEvent(ev, pkCols)
-}
-
-// PKChangingUpdateError is the refusal message for a PK-changing UPDATE, the
-// same words the full-table reconstruct uses.
-func PKChangingUpdateError(schema, table, before, after string) error {
-	return pkChangingUpdateErr(schema, table, before, after)
+// SplitPKChange is the #2501 split of a PK-changing UPDATE into a DELETE of
+// the old key and an INSERT of the new one, both at the UPDATE's own binary
+// log coordinates, so the fold's "last change per key in binlog order" rule
+// resolves every shape #782 listed. It returns nil halves for any other event,
+// and refuses what the full-table fold refuses: a key whose spelling the index
+// cannot be proven to share, and a PostgreSQL window (pg). The DELETE half
+// keeps the before-image, which the Iceberg export's equality-delete file
+// reads its typed key columns from (#2619).
+func SplitPKChange(ev *query.ResultRow, schema, table string, pkCols []metadata.ColumnMeta, pg bool) ([]query.ResultRow, error) {
+	return splitPKChange(ev, schema, table, pkCols, pg)
 }
 
 // CheckBaselineSchemaCurrent refuses with ErrSchemaChanged when the table's

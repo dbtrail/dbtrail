@@ -307,6 +307,19 @@ in the same commit. A key changed fifty times in the window costs one delete
 row and one data row, not fifty. The table is never rewritten; compaction, if
 you want it, is the reader's concern and any engine can do it.
 
+An UPDATE that changes a row's primary key (`SET id = id + 1000`, or one column
+of a composite key) is a delete of the old key and an insert of the new one.
+When the window holds later changes to either key, the one the binary log holds
+last wins, the same rule `reconstruct` and `baseline refresh` apply, so the
+exported table matches them at the same cut. Two cases are still refused:
+a key whose new value the index would write another way (text that is not
+valid UTF-8, a value stored as JSON, a MariaDB UUID or INET6 key), and a
+PostgreSQL source, whose rows carry no binary log position to order the two
+halves. Such a refusal repeats on every run, because the cursor stays before
+the change: take a baseline at or after it and remove the table directory (with
+Glue or REST, drop the table) so the next run reloads from it. Releases before
+this one refused every key change this way.
+
 The cursor moves to the run's cut in the same commit as the data. It is stored
 in the table's own properties, visible with
 `SELECT * FROM iceberg_table_properties('<table dir>')` as

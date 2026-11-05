@@ -69,7 +69,7 @@ func orderRow(id int64, status, amount, at string) map[string]any {
 // increment does.
 func foldOps(t *testing.T, pk []metadata.ColumnMeta, evs ...query.ResultRow) []*netOp {
 	t.Helper()
-	f := newFold("shop", "orders", pk)
+	f := newFold("shop", "orders", pk, false)
 	if err := f.addPage(evs); err != nil {
 		t.Fatal(err)
 	}

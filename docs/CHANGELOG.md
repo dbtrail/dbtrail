@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The Iceberg export no longer gets stuck on an UPDATE that changes a primary key** (#2619). `bintrail export iceberg` refused the whole table when its window held one (`SET id = id + 1000`, or one column of a composite key changed), and since the cursor did not move, every later run refused again: readers kept seeing the last good snapshot, consistent but frozen, until the table was reloaded from a new baseline. The export now writes such an UPDATE as a delete of the old key and an insert of the new one, the way `reconstruct` and `baseline refresh` have since #2501, so the exported table matches them at the same cut. Still refused, as there: a new key value the index would write another way, and PostgreSQL sources.
+
 - **Contributing no longer needs a contributor agreement.** The CLA is gone. Each commit in a pull request now carries a `Signed-off-by:` line (`git commit -s`), the [Developer Certificate of Origin](https://github.com/dbtrail/dbtrail/blob/main/.github/DCO.md), and contributions stay under the project's Apache 2.0 license. A check on pull requests from outside contributors lists any commit without the line and says how to add it.
 
 ## [0.125.1] - 2026-11-03
