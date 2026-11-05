@@ -3762,7 +3762,7 @@ try {
       rel: a && a.getAttribute("rel"), text: a && a.textContent.trim() };
   });
   const docsVfy = await docsLinkOf();
-  docsVfy.n === 1 && docsVfy.href === "https://www.dbtrail.com/docs/guides/backup-strategy/" && docsVfy.target === "_blank"
+  docsVfy.n === 1 && docsVfy.href === "https://dbtrail.com/docs/guides/backup-strategy/" && docsVfy.target === "_blank"
     && /\bnoopener\b/.test(docsVfy.rel || "") && docsVfy.text === "Docs"
     ? ok("docs link: Snapshots header links to /docs/guides/backup-strategy/ in a new tab")
     : bad("docs link: Snapshots header links to /docs/guides/backup-strategy/ in a new tab", JSON.stringify(docsVfy));
@@ -3770,7 +3770,7 @@ try {
   await page.waitForFunction(() => location.pathname === "/events"
     && Array.from(document.querySelectorAll("h1.page-title")).some((h) => /Events/.test(h.textContent)));
   const docsEvents = await docsLinkOf();
-  docsEvents.n === 1 && docsEvents.href === "https://www.dbtrail.com/docs/guides/recovery/"
+  docsEvents.n === 1 && docsEvents.href === "https://dbtrail.com/docs/guides/recovery/"
     ? ok("docs link: follows the route change to Events")
     : bad("docs link: follows the route change to Events", JSON.stringify(docsEvents));
   // Put the page back: 15v below reads the verification form as it found it.

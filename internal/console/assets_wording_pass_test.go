@@ -306,7 +306,7 @@ func TestWordingPassTheseSentences(t *testing.T) {
 		t.Logf("first run %d: %q %q %+v", i, f.Details, f.Fixes, f.Links)
 		has("first-run fix", f.Fixes, wantFix[i])
 		has("first-run detail", f.Details, "Creating full reads from the web interface is turned off. Restoring a whole table to a past moment needs a full read.")
-		if len(f.Links) != 1 || f.Links[0].Text != "Read the docs ›" || f.Links[0].Href != "https://www.dbtrail.com/docs/settings/backups/#set-at-startup" {
+		if len(f.Links) != 1 || f.Links[0].Text != "Read the docs ›" || f.Links[0].Href != "https://dbtrail.com/docs/settings/backups/#set-at-startup" {
 			t.Errorf("first run %d: links %+v, want one to the docs section", i, f.Links)
 		}
 	}

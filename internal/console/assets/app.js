@@ -89,7 +89,7 @@ const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover",
   // render as themselves again.
   "snapshots"];
 
-// DOCS_PAGES maps a route to its page on www.dbtrail.com/docs (#1450), the
+// DOCS_PAGES maps a route to its page on dbtrail.com/docs (#1450), the
 // separately authored docs site. NOT this repo's docs/*.md: the site does not
 // serve those, and it answers HTTP 200 with a small shell for ANY /docs/
 // path, so neither a repo file nor a status code proves a link resolves.
@@ -101,7 +101,7 @@ const ROUTES = ["overview", "events", "schema-changes", "timetravel", "recover",
 // offline. A view without a page of its own gets NO link on purpose
 // (Overview, Status, SQL): a link to the docs index would teach people the
 // button is noise. Extension views are out of scope.
-const DOCS_BASE = "https://www.dbtrail.com/docs/";
+const DOCS_BASE = "https://dbtrail.com/docs/";
 const DOCS_PAGES = {
   events: "guides/recovery",
   recover: "guides/recovery",

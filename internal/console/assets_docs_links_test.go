@@ -12,7 +12,7 @@ import (
 
 // expectedDocsPages is the route → page table the console must carry (#1450).
 //
-// The docs site, www.dbtrail.com/docs, is a separately authored tree and is
+// The docs site, dbtrail.com/docs, is a separately authored tree and is
 // the SOURCE OF TRUTH for these slugs. It is NOT this repo's docs/*.md: the
 // site does not serve those files, and a first version of this guard that
 // checked docs/<slug>.md passed while every link shipped as a broken page.
@@ -48,7 +48,7 @@ var expectedDocsMoreSlugs = map[string]string{
 	"guides/dashboards": "the Overview's dashboards card links the guide from its panel (#1950); no page header names it",
 }
 
-const docsBaseURL = "https://www.dbtrail.com/docs/"
+const docsBaseURL = "https://dbtrail.com/docs/"
 
 // One `route: "slug",` entry of the DOCS_PAGES literal. Keys are bare route
 // names (the ROUTES vocabulary), values are slugs under DOCS_BASE.
@@ -179,14 +179,14 @@ var docsPageTagRE = regexp.MustCompile(`<meta name="dbtrail-docs-page" content="
 // Network-gated: set BINTRAIL_CHECK_DOCS_LINKS=1 to run it (a daily workflow
 // does). The site is the source of truth for the slugs and nothing in this
 // repo mirrors it, so this is the only check that can see a moved or removed
-// page. A status code cannot: the site returns 200 with a catch-all shell for
-// any /docs/ path. So each page must carry its identity tag naming its own
-// slug; the shell carries none, which a control fetch proves before any real
-// page is judged by the tag. A redirect fails too, naming where the page
+// page. The site now answers a missing /docs/ path with a 404, but it used to
+// answer with a 200 catch-all shell, so each page must still carry its
+// identity tag naming its own slug; a control fetch of a missing page proves
+// the shell (if any) carries none before any real page is judged by the tag. A redirect fails too, naming where the page
 // went: following it would pass a link that works only through the CDN.
 func TestDocsLinksResolveOnTheSite(t *testing.T) {
 	if os.Getenv("BINTRAIL_CHECK_DOCS_LINKS") != "1" {
-		t.Skip("set BINTRAIL_CHECK_DOCS_LINKS=1 to fetch every Docs link from www.dbtrail.com")
+		t.Skip("set BINTRAIL_CHECK_DOCS_LINKS=1 to fetch every Docs link from dbtrail.com")
 	}
 	raw, err := os.ReadFile("assets/app.js")
 	if err != nil {
@@ -219,9 +219,31 @@ func TestDocsLinksResolveOnTheSite(t *testing.T) {
 		return string(body)
 	}
 
-	if m := docsPageTagRE.FindStringSubmatch(fetch(docsBaseURL + "no-such-page-docs-links-guard/")); m != nil {
-		t.Fatalf("the site's catch-all shell carries a page identity tag (%q), so the tag cannot tell a "+
-			"real page from the shell — this check would pass on a missing page", m[1])
+	// Control: a page that does not exist. The site answers it with a real
+	// 404 (since the docs site stopped serving its catch-all shell as a
+	// 200), which fetch would reject for a real page, so this one is read
+	// apart. Should the site go back to a 200 shell, the shell must carry no
+	// identity tag, or the tag could not tell a real page from it.
+	controlURL := docsBaseURL + "no-such-page-docs-links-guard/"
+	control, err := client.Get(controlURL)
+	if err != nil {
+		t.Fatalf("GET %s: %v", controlURL, err)
+	}
+	controlBody, err := io.ReadAll(io.LimitReader(control.Body, 4<<20))
+	control.Body.Close()
+	if err != nil {
+		t.Fatalf("GET %s: reading body: %v", controlURL, err)
+	}
+	switch control.StatusCode {
+	case http.StatusNotFound:
+	case http.StatusOK:
+		if m := docsPageTagRE.FindStringSubmatch(string(controlBody)); m != nil {
+			t.Fatalf("the site's catch-all shell carries a page identity tag (%q), so the tag cannot tell a "+
+				"real page from the shell — this check would pass on a missing page", m[1])
+		}
+	default:
+		t.Fatalf("GET %s (a page that does not exist): HTTP %d %s, want 404 or a 200 shell without an identity tag",
+			controlURL, control.StatusCode, control.Header.Get("Location"))
 	}
 
 	// The pages the headers name, plus the ones only a compact block links
