@@ -850,7 +850,7 @@ func TestConnectScreenWiring(t *testing.T) {
 		t.Logf("RDS fold, as the Connect screen renders it: %q", fd.Pit.Texts)
 	}
 	if p := fd.Pit; p == nil || !p.Shown || p.Open || p.Summary != "How snapshots stay point-in-time" || p.Body != pitBody ||
-		p.Href != "https://www.dbtrail.com/docs/guides/backup-strategy/#how-a-snapshot-stays-point-in-time" {
+		p.Href != "https://dbtrail.com/docs/guides/backup-strategy/#how-a-snapshot-stays-point-in-time" {
 		t.Errorf("RDS ticked from the host name: fold %+v; want it shown, closed, with the agreed title, text and link", p)
 	} else {
 		for _, tx := range p.Texts {
