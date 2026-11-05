@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.125.3] - 2026-11-05
+
+- **The console's Docs links go straight to dbtrail.com** (#2622). They pointed at `www.dbtrail.com`, which now redirects to `dbtrail.com`, so every link took an extra hop.
+
 - **The Iceberg export no longer reports a capture gap after a reload on a quiet source** (#2621). A table loaded from a fresh baseline, with no change indexed since the dump, was refused with `refused-gap` and "the source's binlogs were reset or the index was restored", which had not happened; it healed with the first change, but a non-zero exit read as data loss, and the advice (reload the table) did nothing while the source stayed quiet. The export now checks where capture has read to: at or past the baseline's position, the table is reported with a note and its cursor stays on the baseline until a change arrives. With no checkpoint, one behind the baseline, or one under another binlog base name, the refusal stays.
 
 ## [0.125.2] - 2026-11-05
