@@ -365,7 +365,19 @@ Four more shapes are refused rather than guessed at, all `refused-gap` or
   names no cause) once a table has folded deltas; right after a first load
   it is simply reported `loaded` with a note,
   since a fresh install whose stream has not indexed anything yet has
-  nothing to fold and nothing lost.
+  nothing to fold and nothing lost. The same goes for a table just loaded
+  from a baseline when nothing has been indexed since the dump: the newest
+  indexed event is then older than the baseline's position, which looks like
+  a reset, but capture's own checkpoint (`stream_state`) is at or past that
+  position, so the table is reported with a note and its cursor stays on the
+  baseline until the first change arrives. Without that checkpoint, or with
+  one behind the baseline or under another binlog base name, it is refused
+  as above, and the detail says which. The checkpoint shows how far capture
+  has read, not that it read without a break since the dump: a capture that
+  started after the dump without recording a gap, or a baseline dumped from
+  a replica while capture reads the primary (two servers whose binlog files
+  can share a name), is not detected here, as it is not on the normal path.
+  Start capture before taking the baseline, on the same server.
 - **Skipped events.** When the capture daemon recorded skipped events (a
   column-count mismatch, for example) at or after the window's start, the
   index may not hold every change. The skip tally keeps one timestamp per

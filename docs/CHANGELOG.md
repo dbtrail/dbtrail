@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The Iceberg export no longer reports a capture gap after a reload on a quiet source** (#2621). A table loaded from a fresh baseline, with no change indexed since the dump, was refused with `refused-gap` and "the source's binlogs were reset or the index was restored", which had not happened; it healed with the first change, but a non-zero exit read as data loss, and the advice (reload the table) did nothing while the source stayed quiet. The export now checks where capture has read to: at or past the baseline's position, the table is reported with a note and its cursor stays on the baseline until a change arrives. With no checkpoint, one behind the baseline, or one under another binlog base name, the refusal stays.
+
 ## [0.125.2] - 2026-11-05
 
 - **The Iceberg export no longer gets stuck on an UPDATE that changes a primary key** (#2619). `bintrail export iceberg` refused the whole table when its window held one (`SET id = id + 1000`, or one column of a composite key changed), and since the cursor did not move, every later run refused again: readers kept seeing the last good snapshot, consistent but frozen, until the table was reloaded from a new baseline. The export now writes such an UPDATE as a delete of the old key and an insert of the new one, the way `reconstruct` and `baseline refresh` have since #2501, so the exported table matches them at the same cut. Still refused, as there: a new key value the index would write another way, and PostgreSQL sources.
