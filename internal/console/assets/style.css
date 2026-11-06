@@ -2588,6 +2588,7 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 .cn-sec-k { display: inline-block; padding: 4px 10px; border-radius: 999px; background: var(--pink-tint); color: var(--pink-deep); }
 .cn-sec.is-violet .cn-sec-k { background: var(--violet-tint); color: var(--violet-deep); }
 .cn-sec.is-sun .cn-sec-k { background: var(--sun-tint); color: var(--sun-deep); }
+.cn-sec.is-orange .cn-sec-k { background: var(--orange-tint); color: var(--orange-deep); }
 .cn-sec-t { margin-top: 12px; }
 .cn-sec.is-sun .cn-sec-sub { margin-top: 10px; }
 .cn-term { border: 6px solid transparent; border-radius: 20px; background: linear-gradient(var(--strip), var(--strip)) padding-box, var(--brand-canvas) border-box; }
@@ -2603,6 +2604,9 @@ details.vfy-helpfold > summary:hover { color: var(--accent); }
 }
 .sqlc.cn-routep { background: var(--violet-tint); border-color: var(--violet-line); }
 .sqlc.cn-sqlmem { background: var(--sun-tint); border-color: var(--sun-line); }
+.sqlc.cn-proxyp { background: var(--orange-tint); }
+.cn-proxyp.is-idle .cn-sql-row { margin: 0; color: var(--ink-3); }
+.cn-proxyp .cn-urlrow { flex-wrap: wrap; }
 /* --ink with --on-ink, not --strip: the strip stays dark in dark, where it
    measured 1.18 against the tinted card (floor 3) and the box, the button
    and the lanes' rule all sank into it. --ink turns light there. */

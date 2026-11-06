@@ -55,6 +55,13 @@ export const WRITES = [
   // The MySQL port, turned on and off from the Connect panel (#2101).
   { method: "PUT", path: "/api/flashback", count: 3, kind: "scene", id: "mysql-port" },
   { method: "POST", path: "/api/flashback/password", count: 1, kind: "scene", id: "mysql-port" },
+  // The two logins a proxy needs, on the MySQL clients page: a server's
+  // application login, and the port's monitor login (saved on the second
+  // daemon, whose port this console manages).
+  { method: "PUT", path: "/api/servers/{id}/port-login", count: 1, kind: "scene", id: "proxy-logins" },
+  { method: "DELETE", path: "/api/servers/{id}/port-login", count: 1, kind: "scene", id: "proxy-logins" },
+  { method: "PUT", path: "/api/flashback/monitor-login", count: 1, kind: "scene", id: "mysql-port" },
+  { method: "DELETE", path: "/api/flashback/monitor-login", count: 1, kind: "scene", id: "mysql-port" },
   // The memory for SQL on the copy, Save and Use default (#2210).
   { method: "PUT", path: "/api/sql-settings", count: 2, kind: "scene", id: "sql-memory" },
   { method: "PUT", path: "/api/servers/draft", count: 1, kind: "scene", id: "draft" },
@@ -781,6 +788,58 @@ export async function runSaveScenes(ctx) {
       check("hidden", "emptying both lists removes the rules", !!got, JSON.stringify(got && got.body));
     });
 
+    // ── a server's application login, for a proxy in front ──────────────
+    // On the MySQL clients page, for the server picked in the sidebar: Save
+    // stores it (the list says the username, never the password), a fresh
+    // tab shows it, and Remove removes it.
+    await scene("proxy-logins", async () => {
+      if (!srvId) throw new Error("no server from the server-form scene");
+      const PATH = "/api/servers/" + encodeURIComponent(srvId) + "/port-login";
+      const own = async () => {
+        const listed = await readAs(page, "/api/servers");
+        return ((listed.body && listed.body.servers) || []).find((x) => x.id === srvId) || null;
+      };
+      const sel = (label) => `.cn-proxyp input[aria-label="${label}"]`;
+      const click = (label) => page.evaluate((label) => {
+        const b = Array.from(document.querySelectorAll(".cn-proxyp button")).find((x) => x.textContent === label && !x.disabled);
+        if (b) { b.click(); return true; }
+        return false;
+      }, label);
+      await page.evaluate(async (id) => { await switchServer(id); navigate("mysql-clients"); }, srvId);
+      await page.waitForSelector(sel("Application login username"), { timeout: 15000 });
+      await page.fill(sel("Application login username"), "  e2e_app  ");
+      await page.fill(sel("Application login password"), "e2e-app-pw");
+      const [req] = await Promise.all([
+        page.waitForRequest((r) => r.method() === "PUT" && new URL(r.url()).pathname === PATH, { timeout: 10000 }),
+        click("Save application login"),
+      ]);
+      const sent = req.postData();
+      const stored = await until(async () => { const o = await own(); return o && o.port_user === "e2e_app" ? o : null; });
+      check("proxy-logins", "Save sends the username trimmed with the password, and the server list says the login and never the password",
+        sent === JSON.stringify({ user: "e2e_app", password: "e2e-app-pw" }) && !!stored && stored.has_port_password === true &&
+        !JSON.stringify(stored).includes("e2e-app-pw"), JSON.stringify({ sent, stored }));
+      const drawn = await until(() => page.evaluate(() => {
+        const c = document.querySelector(".cn-proxyp");
+        return c && /e2e_app/.test(c.innerText) && Array.from(c.querySelectorAll("button")).some((b) => b.textContent === "Remove application login") ? c.innerText : "";
+      }));
+      check("proxy-logins", "the panel redraws with the login and a Remove button", !!drawn, JSON.stringify(drawn));
+
+      const tab = await freshTab(srvId);
+      try {
+        await tab.evaluate(() => navigate("mysql-clients"));
+        const seen = await until(() => tab.evaluate(() => {
+          const c = document.querySelector(".cn-proxyp");
+          return c && /e2e_app/.test(c.innerText) ? c.innerText : "";
+        }));
+        check("proxy-logins", "a fresh tab shows the saved login and not its password", !!seen && !seen.includes("e2e-app-pw"), JSON.stringify(seen));
+      } finally { await tab.close(); }
+
+      // Remove asks first (accepted by the page's dialog handler).
+      const removed = await click("Remove application login");
+      const gone = await until(async () => { const o = await own(); return o && !o.port_user ? o : null; });
+      check("proxy-logins", "Remove removes the stored login", !!removed && !!gone, JSON.stringify({ removed, gone }));
+    });
+
     await scene("server-delete", async () => {
       if (!srvId) throw new Error("no server from the server-form scene");
       await page.evaluate(() => openServersModal());
@@ -1108,6 +1167,27 @@ export async function runSaveScenes(ctx) {
         check("mysql-port", "Turn routing on and off saves the switch, says it on the panel, and leaves the port on",
           !!rOn && !!stR1 && stR1.enabled === true && !!saidOn && !!rOff && !!stR2 && stR2.enabled === true && await listening(),
           JSON.stringify({ rOn, stR1, saidOn, rOff, stR2 }));
+
+        // The monitor login, on the same panel: Save stores it (the status
+        // says the username, never the password), and Remove removes it.
+        const monSel = (label) => `.cn-split .cn-proxyp input[aria-label="${label}"]`;
+        // The redraw that follows Turn routing off first, or it would empty
+        // the fields after they are filled.
+        await until(() => tab.evaluate(() => {
+          const p = document.querySelector(".cn-split .cn-route-state");
+          return !!p && p.textContent === "Off";
+        }));
+        await tab.fill(monSel("Monitor login username"), "e2e_monitor");
+        await tab.fill(monSel("Monitor login password"), "e2e-mon-pw");
+        const monSaved = await press("Save monitor login");
+        const stM1 = await until(async () => { const b = await status(); return b && b.monitor_user === "e2e_monitor" ? b : null; });
+        check("mysql-port", "Save monitor login stores it, and the status says the username and never the password",
+          !!monSaved && !!stM1 && stM1.has_monitor_password === true && !JSON.stringify(stM1).includes("e2e-mon-pw"),
+          JSON.stringify({ monSaved, stM1 }));
+        const monRemoved = await press("Remove monitor login");
+        const stM2 = await until(async () => { const b = await status(); return b && !b.monitor_user ? b : null; });
+        check("mysql-port", "Remove monitor login removes it and leaves the port on",
+          !!monRemoved && !!stM2 && stM2.enabled === true, JSON.stringify({ monRemoved, stM2 }));
 
         // And a last press, still on the first panel.
         const off = await press("Turn off");

@@ -5807,22 +5807,24 @@ try {
       ice: !!view.querySelector(".cn-ice")
         || Array.from(view.querySelectorAll(".ov-panel-title")).some((t) => t.textContent === "Keep it current with Iceberg"),
       iceErr: !!view.querySelector(".cn-ice-err"),
-      // Two sections, each under its own heading, so that reading the copy
-      // from a MySQL client is not taken for read routing: the headings,
-      // read routing in a card of its own, and its switch there.
+      // Three sections, each under its own heading, so that reading the copy
+      // from a MySQL client is not taken for read routing, nor either for a
+      // proxy in front: the headings, read routing in a card of its own and
+      // its switch there, and the proxy's logins in a card of their own.
       sections: Array.from(view.querySelectorAll(".cn-split .cn-sec .cn-sec-t")).map((t) => t.textContent),
       routeCard: !!view.querySelector(".cn-split .cn-routep .cn-route-state"),
       routeInPort: !!(sqlPanel && sqlPanel.querySelector(".cn-route")),
       lanes: view.querySelectorAll(".cn-routep .rd-lane").length,
+      proxyCard: !!view.querySelector(".cn-split .cn-proxyp"),
     };
   });
   (sc.title === "MySQL clients" && sc.steps === 0)
     ? ok("sql clients: the page is drawn under its own name, with none of the MCP steps")
     : bad("sql clients: the page is drawn under its own name, with none of the MCP steps", JSON.stringify({ title: sc.title, steps: sc.steps }));
-  (sc.sections.length === 2 && sc.sections[0] === "Read your copy from a MySQL client" && sc.sections[1] === "Run MySQL and DuckDB on one port"
-    && sc.routeCard && !sc.routeInPort && sc.lanes === 2)
-    ? ok("sql clients: two headed sections, with read routing drawn in a card of its own")
-    : bad("sql clients: two headed sections, with read routing drawn in a card of its own", JSON.stringify({ sections: sc.sections, routeCard: sc.routeCard, routeInPort: sc.routeInPort, lanes: sc.lanes }));
+  (sc.sections.length === 3 && sc.sections[0] === "Read your copy from a MySQL client" && sc.sections[1] === "Run MySQL and DuckDB on one port"
+    && sc.sections[2] === "Put ProxySQL in front of the port" && sc.routeCard && !sc.routeInPort && sc.lanes === 2 && sc.proxyCard)
+    ? ok("sql clients: three headed sections, with read routing and the proxy's logins each drawn in a card of its own")
+    : bad("sql clients: three headed sections, with read routing and the proxy's logins each drawn in a card of its own", JSON.stringify({ sections: sc.sections, routeCard: sc.routeCard, routeInPort: sc.routeInPort, lanes: sc.lanes, proxyCard: sc.proxyCard }));
   (sc.mem.present && sc.mem.chars > 0 && sc.mem.chars <= 700 && sc.mem.open === 0)
     ? ok("sql clients: the memory panel stays under its 700-character budget, its notes folded")
     : bad("sql clients: the memory panel stays under its 700-character budget, its notes folded", JSON.stringify(sc.mem));
