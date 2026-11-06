@@ -291,8 +291,9 @@ func (s *Server) sqlOnCopyFor(b *bundle, id string) (*SQLOnCopy, string) {
 
 // ResolveFlashback maps a flashback connection username to its target server's
 // per-source index + baseline, opening the connection lazily via connManager.
-// The username selects the server by registry ID, display Name, or "default"
-// (the boot entry). Returns ErrUnknownServer when the selector matches no
+// The username selects the server by registry ID, display Name, "default"
+// (the boot entry), or a server's application login (FlashbackTarget.ViaLogin);
+// a login that also selects another server is ErrAmbiguousPortLogin. Returns ErrUnknownServer when the selector matches no
 // selectable server — the serving layer turns that into a MySQL "no such
 // database" error on the client's first query. The registry is read live, so
 // servers added in the console mid-session are reachable without a restart.

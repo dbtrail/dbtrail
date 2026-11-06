@@ -457,3 +457,123 @@ func TestServersAPI_nameThatIsALoginIs409(t *testing.T) {
 		t.Errorf("rename to a login = %d %s, want 409", rec.Code, out)
 	}
 }
+
+// The process that saves a login through the API closes the connections
+// opened with it on its own port: a new password, a removal. The same login
+// saved again, or a refused PUT, closes nothing.
+func TestPortLoginAPI_closesItsConnections(t *testing.T) {
+	srv := newRegistryServer(t)
+	id := createHiddenTestServer(t, srv)
+	createNamedTestServer(t, srv, "staging")
+	path := "/api/servers/" + id + "/port-login"
+	if rec, out := doServersReq(t, srv, "PUT", path, `{"user":"app1","password":"pw1"}`); rec.Code != 200 {
+		t.Fatalf("PUT = %d %s", rec.Code, out)
+	}
+	closed := 0
+	track := func() {
+		t.Helper()
+		if _, ok := srv.TrackLoginConn(id, srv.LoginEpoch(), func() { closed++ }); !ok {
+			t.Fatal(err0)
+		}
+	}
+	steps := []struct {
+		method, body string
+		code, closed int
+		why          string
+	}{
+		{"PUT", `{"user":"app1","password":"pw1"}`, 200, 0, "the same login again"},
+		{"PUT", `{"user":"staging","password":"x"}`, 409, 0, "a refused PUT"},
+		// Every connection tracked so far is still open here: all close.
+		{"PUT", `{"user":"app1","password":"pw2"}`, 200, 3, "a new password only"},
+		{"PUT", `{"user":"app9","password":"pw2"}`, 200, 4, "a new username only"},
+		{"DELETE", ``, 200, 5, "a removal"},
+	}
+	for _, st := range steps {
+		track()
+		rec, out := doServersReq(t, srv, st.method, path, st.body)
+		if rec.Code != st.code {
+			t.Fatalf("%s: %d %s, want %d", st.why, rec.Code, out, st.code)
+		}
+		if closed != st.closed {
+			t.Fatalf("%s: %d connections closed in all, want %d", st.why, closed, st.closed)
+		}
+	}
+}
+
+// Followed from the file: a rotated password alone closes the connections,
+// and so does the server's removal, through the API as through the file.
+func TestPortLogin_rotationAndDeletionClose(t *testing.T) {
+	srv := newRegistryServer(t)
+	prod := addLoginTestServer(t, srv.cm.reg, "prod")
+	withLogin := prod
+	withLogin.PortUser, withLogin.PortPassword = "app1", "pw1"
+	rotated := withLogin
+	rotated.PortPassword = "pw2"
+	closed := 0
+	track := func() {
+		t.Helper()
+		if _, ok := srv.TrackLoginConn(prod.ID, srv.LoginEpoch(), func() { closed++ }); !ok {
+			t.Fatal(err0)
+		}
+	}
+	track()
+	srv.applyRegistryChange(RegistryChange{Old: withLogin, New: rotated})
+	if closed != 1 {
+		t.Fatalf("a rotated password closed %d", closed)
+	}
+	track()
+	srv.applyRegistryChange(RegistryChange{Old: rotated})
+	if closed != 2 {
+		t.Fatalf("a server removed from the file closed %d in all, want 2", closed)
+	}
+	id := createNamedTestServer(t, srv, "other")
+	if _, ok := srv.TrackLoginConn(id, srv.LoginEpoch(), func() { closed++ }); !ok {
+		t.Fatal(err0)
+	}
+	if rec, out := doServersReq(t, srv, "DELETE", "/api/servers/"+id, ""); rec.Code/100 != 2 {
+		t.Fatalf("DELETE server = %d %s", rec.Code, out)
+	}
+	if closed != 3 {
+		t.Fatalf("a server deleted through the API closed %d in all, want 3", closed)
+	}
+}
+
+// Which server a username opens: a login opens its own server, marked
+// ViaLogin; the server's name does not count as a login.
+func TestPortLoginTarget_whichServer(t *testing.T) {
+	srv := newRegistryServer(t)
+	prod := addLoginTestServer(t, srv.cm.reg, "prod")
+	addLoginTestServer(t, srv.cm.reg, "staging")
+	if _, err := srv.cm.reg.SetPortLogin(prod.ID, "app1", "pw1"); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok, err := srv.portLoginTarget("app1"); err != nil || !ok || id != prod.ID {
+		t.Fatalf("app1 -> %q %v %v, want %s", id, ok, err, prod.ID)
+	}
+	for _, u := range []string{"prod", "staging", prod.ID} {
+		if _, ok, err := srv.portLoginTarget(u); ok || err != nil {
+			t.Fatalf("%q counted as a login: %v %v", u, ok, err)
+		}
+	}
+	if id, ok := srv.flashbackTarget("app1"); ok {
+		t.Fatalf("flashbackTarget resolved a login by name or id: %q", id)
+	}
+}
+
+// When the registry stops being readable, a connection whose handshake began
+// before is not tracked: the epoch moved.
+func TestFollowFiles_unreadableRegistryMovesTheEpoch(t *testing.T) {
+	owner, srv, prod, path := followerServerWithPath(t)
+	if _, err := owner.SetPortLogin(prod.ID, "app1", "pw1"); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	before := srv.LoginEpoch()
+	if err := os.WriteFile(path, []byte("servers: [nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	if _, ok := srv.TrackLoginConn(prod.ID, before, func() {}); ok {
+		t.Fatal("a connection that began before the registry broke was tracked")
+	}
+}

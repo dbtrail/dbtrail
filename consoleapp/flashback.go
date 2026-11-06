@@ -327,7 +327,10 @@ func flashbackConnPanicked(logger *slog.Logger, remote net.Addr, r any, stack []
 // closeConn closes the client connection. A connection bound to a read router
 // is registered with the console under its server (untrack undoes it), so
 // that a change to the account the port forwards with closes it instead of
-// leaving it on the previous account (#2079).
+// leaving it on the previous account (#2079). A connection opened with a
+// server's application login is registered too, so a change to that login
+// closes it; loginEpoch is console.Server.LoginEpoch read before the
+// handshake.
 func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, loginEpoch uint64, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger, closeConn func()) (untrack func(), err error) {
 	untrack = func() {}
 	user := mysqlConn.GetUser()
@@ -342,11 +345,22 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 			}
 		}
 	}
+	// Resolved, now compare: if any application login changed since the
+	// handshake began, the password just checked may have been a login's
+	// that no longer opens what this username resolves to now (a login
+	// removed and a server renamed to its username in the same moment), so
+	// the connection is not served, whatever it resolved to. Rare, and the
+	// client reconnects. A login connection is checked again, atomically,
+	// when it is tracked below.
+	if srv.LoginEpoch() != loginEpoch {
+		return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: an application login changed while connecting; reconnect")
+	}
 	if err != nil {
 		if errors.Is(err, console.ErrUnknownServer) {
-			// Auth is the token alone (CheckUsername accepts any username), so an
-			// unknown or typo'd server name is the normal way we land here —
-			// report it as a missing database on the client's first query.
+			// Every username gets the port's passwords at the handshake (and a
+			// login its own), so an unknown or typo'd server name is the normal
+			// way we land here — report it as a missing database on the
+			// client's first query.
 			return untrack, gomysql.NewError(gomysql.ER_BAD_DB_ERROR, fmt.Sprintf("flashback: no such server %q", user))
 		}
 		// The connManager already scrubbed DSN secrets from the open error.
@@ -375,9 +389,9 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// streamed rows and go-mysql's trailing EOF share one packet sequence.
 	h.BindConn(mysqlConn)
 	// The flashback port routes BY username: flashbackCreds accepts ANY username
-	// and authenticates on the shared console token alone, so `user` is a server
-	// selector (registry id/name, or the reserved boot id), not a person — every
-	// human holding the token connects under whatever server name they target.
+	// with the port's own passwords, so `user` is a server selector (registry
+	// id/name, or the reserved boot id), not a person — every human holding
+	// the token connects under whatever server name they target.
 	// It is still bound as the audit identity (without it every event from this
 	// port would carry the unbound-actor sentinel), but PREFIXED so a sink
 	// treating Actor as a principal cannot attribute the read to a "person"
@@ -395,7 +409,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		if untrackLogin, ok = srv.TrackLoginConn(tgt.ID, loginEpoch, closeConn); !ok {
 			h.Close()
 			closeConn()
-			return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: this server's application login changed while connecting; reconnect")
+			return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: an application login changed while connecting; reconnect")
 		}
 		untrack = untrackLogin
 	}

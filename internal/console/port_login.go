@@ -28,8 +28,8 @@ import (
 // end in it, or "<login>@copy" would mean two things.
 const CopyOnlySuffix = "@copy"
 
-// maxPortUserLen is MySQL's limit on a username (8.0 and later), which
-// ProxySQL shares. A longer one could never be sent by a client.
+// maxPortUserLen is MySQL's limit on a username (8.0 and later): no
+// application can log into MySQL with a longer one.
 const maxPortUserLen = 32
 
 // maxPortPasswordLen bounds what is kept; it is far above any real password.
@@ -108,20 +108,28 @@ func portLoginConflict(entries []ServerEntry, id, user string) error {
 // ServerEntry.PortUser and PortPassword: an empty user removes the login (and
 // the password must be empty too). It changes nothing else in the entry.
 func (r *Registry) SetPortLogin(id, user, password string) (ServerEntry, error) {
+	e, _, err := r.setPortLogin(id, user, password)
+	return e, err
+}
+
+// setPortLogin is SetPortLogin that also returns the entry as it was before,
+// read under the same lock as the change, so a caller deciding what the
+// change revokes compares against what it actually replaced.
+func (r *Registry) setPortLogin(id, user, password string) (ServerEntry, ServerEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.readOnly {
-		return ServerEntry{}, ErrRegistryReadOnly
+		return ServerEntry{}, ServerEntry{}, ErrRegistryReadOnly
 	}
 	if user != "" {
 		if err := validatePortLoginShape(user, password); err != nil {
-			return ServerEntry{}, err
+			return ServerEntry{}, ServerEntry{}, err
 		}
 		if err := portLoginConflict(r.file.Servers, id, user); err != nil {
-			return ServerEntry{}, err
+			return ServerEntry{}, ServerEntry{}, err
 		}
 	} else if password != "" {
-		return ServerEntry{}, fmt.Errorf("%w: a password was sent with no username; name the login, or send neither to remove it", errPortLoginInvalid)
+		return ServerEntry{}, ServerEntry{}, fmt.Errorf("%w: a password was sent with no username; name the login, or send neither to remove it", errPortLoginInvalid)
 	}
 	for i, old := range r.file.Servers {
 		if old.ID != id {
@@ -130,11 +138,11 @@ func (r *Registry) SetPortLogin(id, user, password string) (ServerEntry, error) 
 		r.file.Servers[i].PortUser, r.file.Servers[i].PortPassword = user, password
 		if err := r.save(); err != nil {
 			r.file.Servers[i] = old // roll back
-			return ServerEntry{}, err
+			return ServerEntry{}, ServerEntry{}, err
 		}
-		return r.file.Servers[i], nil
+		return r.file.Servers[i], old, nil
 	}
-	return ServerEntry{}, ErrUnknownServer
+	return ServerEntry{}, ServerEntry{}, ErrUnknownServer
 }
 
 // portLoginMatch is what a username means as an application login on the
@@ -184,8 +192,9 @@ func (s *Server) portLoginTarget(selector string) (string, bool, error) {
 // FlashbackPasswordsFor is the passwords that authenticate user on the
 // MySQL-protocol port: the port's own (FlashbackPasswords) and, when user is
 // a server's application login, that login's password. A login password is
-// accepted under its own username only, and only while the port is open: a
-// port with no password of its own is closed, and a login does not open it.
+// accepted under its own username only, only while the port is open (a port
+// with no password of its own is closed, and a login does not open it), and
+// only while the followed registry can be read (setLoginsUnreadable).
 // Read per handshake, so a login saved, changed or removed in the web
 // interface is the one the next client needs.
 func (s *Server) FlashbackPasswordsFor(user string) []string {
@@ -227,8 +236,8 @@ func (s *Server) setLoginsUnreadable(unreadable bool) {
 }
 
 // loginConnSet holds the port's open connections opened with an
-// application login, per server, and an epoch that every login change moves
-// on. A connection reads the epoch before its handshake checks its password
+// application login, per server, and an epoch that every login change,
+// server removal, or registry that stops being readable moves on. A connection reads the epoch before its handshake checks its password
 // (LoginEpoch) and is tracked only while the epoch is still that one: a
 // change made in between, to any server's login, refuses it, and a change
 // made after it was tracked closes it. One epoch for every server keeps that
@@ -299,7 +308,9 @@ func (l *loginConnSet) drop(serverID string) int {
 	return len(dropped)
 }
 
-// LoginEpoch is the epoch of the port's application logins. Read it BEFORE
+// LoginEpoch is the epoch of the port's application logins (loginConnSet):
+// any login change, server removal, or registry that stops being readable
+// moves it on. Read it BEFORE
 // a connection's handshake and hand it to TrackLoginConn: the handshake
 // checks the password against the logins as they are then, so any login
 // change after that moment, including a login moved to another server
@@ -357,8 +368,7 @@ func (s *Server) savePortLogin(w http.ResponseWriter, r *http.Request, put bool)
 		writeJSONError(w, http.StatusConflict, portLoginBootRefusal)
 		return
 	}
-	old, ok := s.cm.reg.Get(id)
-	if !ok {
+	if _, ok := s.cm.reg.Get(id); !ok {
 		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
 		return
 	}
@@ -386,7 +396,7 @@ func (s *Server) savePortLogin(w http.ResponseWriter, r *http.Request, put bool)
 		}
 		user, password = *body.User, *body.Password
 	}
-	e, err := s.cm.reg.SetPortLogin(id, user, password)
+	e, old, err := s.cm.reg.setPortLogin(id, user, password)
 	if err != nil {
 		status := registryErrStatus(err)
 		switch {
