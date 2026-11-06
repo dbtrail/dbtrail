@@ -354,6 +354,9 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 			}
 		}
 	}
+	if err != nil && loginServer != "" && errors.Is(err, console.ErrUnknownServer) {
+		return untrack, gomysql.NewError(gomysql.ER_BAD_DB_ERROR, "flashback: the server of this application login was removed while connecting")
+	}
 	if err != nil {
 		if errors.Is(err, console.ErrUnknownServer) {
 			// Every username gets the port's passwords at the handshake (and a
@@ -928,7 +931,9 @@ func (f flashbackCreds) credentialWithLogin(username string) (server.Credential,
 }
 
 // loginCredentialer is what connCreds needs from the port's credentials:
-// the login server behind the passwords it offers.
+// the login server behind the passwords it offers. connCreds calls it INSTEAD
+// of GetCredential: a wrapper of flashbackCreds that changes GetCredential
+// must change credentialWithLogin too, or the promoted one bypasses it.
 type loginCredentialer interface {
 	credentialWithLogin(username string) (server.Credential, bool, string, error)
 }
