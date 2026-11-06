@@ -6,8 +6,10 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
@@ -34,9 +36,9 @@ type changeUserResult struct {
 }
 
 // changeUser sends COM_CHANGE_USER for user/password/schema on c and answers
-// the port's auth switch the way libmysqlclient does. oldAuth is what the
-// client puts in the packet itself, scrambled with the handshake's salt; the
-// port must ignore it and check the answer to its own fresh salt.
+// the port's auth switch the way libmysqlclient does: it scrambles the salt
+// the switch carries. oldAuth stands for what the client puts in the packet
+// itself; the port ignores it and checks only the answer to the switch.
 func changeUser(t *testing.T, c *client.Conn, user, password, schema string) changeUserResult {
 	t.Helper()
 	pkt := []byte{0, 0, 0, 0, gomysql.COM_CHANGE_USER}
@@ -54,6 +56,56 @@ func changeUser(t *testing.T, c *client.Conn, user, password, schema string) cha
 }
 
 func sendChangeUser(t *testing.T, c *client.Conn, pkt []byte, password string) changeUserResult {
+	t.Helper()
+	return sendChangeUserAnswering(t, c, pkt, func(plugin string, salt []byte) []byte {
+		switch plugin {
+		case gomysql.AUTH_NATIVE_PASSWORD:
+			return gomysql.CalcNativePassword(salt, []byte(password))
+		case gomysql.AUTH_CACHING_SHA2_PASSWORD:
+			return gomysql.CalcCachingSha2Password(salt, []byte(password))
+		}
+		t.Fatalf("auth switch to %q", plugin)
+		return nil
+	})
+}
+
+// changeUserLikeProxySQL changes the user the way ProxySQL 3.1.12 does
+// (through its libmariadb): the packet carries the password scrambled with the
+// HANDSHAKE's salt, and the auth switch is answered with those same bytes,
+// whatever salt the switch carries. Seen on the wire on 2026-11-06; a port
+// that switched to a fresh salt refused every change of user with 1045.
+func changeUserLikeProxySQL(t *testing.T, c *client.Conn, user, password, schema string) changeUserResult {
+	t.Helper()
+	scramble := gomysql.CalcNativePassword(clientSalt(t, c), []byte(password))
+	pkt := []byte{0, 0, 0, 0, gomysql.COM_CHANGE_USER}
+	pkt = append(pkt, user...)
+	pkt = append(pkt, 0, byte(len(scramble)))
+	pkt = append(pkt, scramble...)
+	pkt = append(pkt, schema...)
+	pkt = append(pkt, 0, 0x21, 0x00)
+	pkt = append(pkt, gomysql.AUTH_NATIVE_PASSWORD...)
+	pkt = append(pkt, 0)
+	return sendChangeUserAnswering(t, c, pkt, func(string, []byte) []byte { return scramble })
+}
+
+// clientSalt is the salt c received in its handshake. The client library keeps
+// it unexported; a test reads it to scramble the way libmariadb does.
+func clientSalt(t *testing.T, c *client.Conn) []byte {
+	t.Helper()
+	f := reflect.ValueOf(c).Elem().FieldByName("salt")
+	if !f.IsValid() {
+		t.Fatal("go-mysql's client.Conn has no salt field any more")
+	}
+	salt := reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Bytes()
+	if len(salt) != 20 {
+		t.Fatalf("handshake salt of %d bytes", len(salt))
+	}
+	return append([]byte(nil), salt...)
+}
+
+// sendChangeUserAnswering sends pkt and answers each auth switch with what
+// answer returns for the switch's plugin and salt.
+func sendChangeUserAnswering(t *testing.T, c *client.Conn, pkt []byte, answer func(plugin string, salt []byte) []byte) changeUserResult {
 	t.Helper()
 	c.ResetSequence()
 	if err := c.WritePacket(pkt); err != nil {
@@ -75,16 +127,7 @@ func sendChangeUser(t *testing.T, c *client.Conn, pkt []byte, password string) c
 				t.Fatalf("auth switch without a plugin: %q", resp)
 			}
 			salt := []byte(strings.TrimSuffix(rest, "\x00"))
-			var scramble []byte
-			switch plugin {
-			case gomysql.AUTH_NATIVE_PASSWORD:
-				scramble = gomysql.CalcNativePassword(salt, []byte(password))
-			case gomysql.AUTH_CACHING_SHA2_PASSWORD:
-				scramble = gomysql.CalcCachingSha2Password(salt, []byte(password))
-			default:
-				t.Fatalf("auth switch to %q", plugin)
-			}
-			if err := c.WritePacket(append([]byte{0, 0, 0, 0}, scramble...)); err != nil {
+			if err := c.WritePacket(append([]byte{0, 0, 0, 0}, answer(plugin, salt)...)); err != nil {
 				return changeUserResult{closed: true}
 			}
 		case gomysql.MORE_DATE_HEADER: // caching_sha2 fast auth ok: the OK follows
@@ -192,6 +235,54 @@ func TestChangeUser_toAnotherLogin(t *testing.T) {
 	}
 	if got := boundTo(t, c); got != p.a.ID {
 		t.Fatalf("after changing to the same user: %s", got)
+	}
+}
+
+// ProxySQL answers the auth switch with the scramble of the handshake's salt.
+// The port asks with that same salt, as MySQL does, so ProxySQL's answer
+// checks; a wrong password is still refused.
+func TestChangeUser_likeProxySQL(t *testing.T) {
+	p := newTwoServerPort(t)
+	c := p.connect(t, "app1", "pw1")
+	if r := changeUserLikeProxySQL(t, c, "app2", "pw2", ""); r.code != 0 || r.closed {
+		t.Fatalf("change to app2 the way ProxySQL does it: %+v", r)
+	}
+	if got := boundTo(t, c); got != p.b.ID {
+		t.Fatalf("bound to %s, want server-b %s", got, p.b.ID)
+	}
+	if r := changeUserLikeProxySQL(t, c, "app1", "pw1", ""); r.code != 0 || r.closed {
+		t.Fatalf("and back to app1: %+v", r)
+	}
+	if got := boundTo(t, c); got != p.a.ID {
+		t.Fatalf("bound to %s, want server-a %s", got, p.a.ID)
+	}
+	w := p.connect(t, "app1", "pw1")
+	if r := changeUserLikeProxySQL(t, w, "app2", "pw1", ""); r.code != gomysql.ER_ACCESS_DENIED_ERROR {
+		t.Fatalf("wrong password the way ProxySQL sends it: %+v, want 1045", r)
+	}
+}
+
+// The auth switch carries the salt of the connection's handshake, not a new
+// one.
+func TestChangeUser_switchCarriesTheHandshakeSalt(t *testing.T) {
+	p := newTwoServerPort(t)
+	c := p.connect(t, "app1", "pw1")
+	want := clientSalt(t, c)
+	var got []byte
+	pkt := []byte{0, 0, 0, 0, gomysql.COM_CHANGE_USER}
+	pkt = append(pkt, "app2"...)
+	pkt = append(pkt, 0, 1, 'x', 0, 0x21, 0x00)
+	pkt = append(pkt, gomysql.AUTH_NATIVE_PASSWORD...)
+	pkt = append(pkt, 0)
+	r := sendChangeUserAnswering(t, c, pkt, func(_ string, salt []byte) []byte {
+		got = salt
+		return gomysql.CalcNativePassword(salt, []byte("pw2"))
+	})
+	if r.code != 0 || r.closed {
+		t.Fatalf("change to app2: %+v", r)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("the switch carried salt %x, want the handshake's %x", got, want)
 	}
 }
 

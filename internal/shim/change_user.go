@@ -50,9 +50,9 @@ type closeAfter struct{ err error }
 var errChangeUserMalformed = mysql.NewError(mysql.ER_MALFORMED_PACKET, "malformed COM_CHANGE_USER packet")
 
 // changeUserPacket is what the session reads from a COM_CHANGE_USER packet.
-// The auth data in it is ignored: it was scrambled with the handshake's
-// salt, which the library keeps to itself; the session sends a fresh one
-// (an auth switch, which every client that sends COM_CHANGE_USER answers).
+// The auth data in it is ignored: the session asks for the password again
+// with an auth switch, which every client that sends COM_CHANGE_USER answers,
+// and checks only that answer.
 type changeUserPacket struct {
 	user, schema string
 }
@@ -89,7 +89,8 @@ func parseChangeUser(data []byte, capability uint32) (changeUserPacket, error) {
 }
 
 // changeUser answers COM_CHANGE_USER: it reads the packet, asks the handler
-// what authenticates the user, checks the client's answer to a fresh salt,
+// what authenticates the user, checks the client's answer to an auth switch
+// that carries the handshake's salt,
 // and then has the handler bind the connection. Every refusal is a
 // closeAfter.
 func (s *Session) changeUser(uc UserChanger, data []byte) any {
@@ -112,7 +113,12 @@ func (s *Session) changeUser(uc UserChanger, data []byte) any {
 		return closeAfter{mysql.NewError(mysql.ER_NOT_SUPPORTED_AUTH_MODE,
 			fmt.Sprintf("changing the user of a connection is not supported under %s; open a new connection", plugin))}
 	}
-	salt := mysql.RandomBuf(20)
+	// The handshake's salt, as MySQL asks: ProxySQL answers with the scramble
+	// of that salt whatever the switch carries (see handshakeSalt).
+	salt := handshakeSalt(s.conn)
+	if salt == nil {
+		salt = mysql.RandomBuf(20)
+	}
 	sw := make([]byte, 4, 4+1+len(plugin)+1+len(salt)+1)
 	sw = append(sw, mysql.EOF_HEADER)
 	sw = append(sw, plugin...)
