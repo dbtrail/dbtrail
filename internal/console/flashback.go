@@ -93,6 +93,12 @@ type FlashbackTarget struct {
 	// forwarding account as for the source account, or it would cross the
 	// network in clear where capture is encrypted.
 	SourceSSL config.SSL
+	// ViaLogin: the username is the server's application login
+	// (ServerEntry.PortUser), not its id or name. Such a connection is
+	// handed to Server.TrackLoginConn with the login epoch its handshake
+	// started under (Server.LoginEpoch), so a login changed, moved or
+	// removed while it connects is not served.
+	ViaLogin bool
 }
 
 // SQLOnCopy is the free-SQL executor the embedded port hands each connection.
@@ -285,16 +291,54 @@ func (s *Server) sqlOnCopyFor(b *bundle, id string) (*SQLOnCopy, string) {
 
 // ResolveFlashback maps a flashback connection username to its target server's
 // per-source index + baseline, opening the connection lazily via connManager.
-// The username selects the server by registry ID, display Name, or "default"
-// (the boot entry). Returns ErrUnknownServer when the selector matches no
+// The username selects the server by registry ID, display Name, "default"
+// (the boot entry), or a server's application login (FlashbackTarget.ViaLogin);
+// a login that also selects another server is ErrAmbiguousPortLogin. Returns ErrUnknownServer when the selector matches no
 // selectable server — the serving layer turns that into a MySQL "no such
 // database" error on the client's first query. The registry is read live, so
 // servers added in the console mid-session are reachable without a restart.
 func (s *Server) ResolveFlashback(ctx context.Context, selector string) (FlashbackTarget, error) {
+	loginID, viaLogin, err := s.portLoginTarget(selector)
+	if err != nil {
+		return FlashbackTarget{}, err
+	}
 	id, ok := s.flashbackTarget(selector)
+	switch {
+	case ok && viaLogin && id != loginID:
+		// portLoginMatch refuses a username that also selects another
+		// server; this is the same refusal for a registry that changed
+		// between the two reads.
+		return FlashbackTarget{}, ErrAmbiguousPortLogin
+	case !ok && viaLogin:
+		id, ok = loginID, true
+	}
 	if !ok {
 		return FlashbackTarget{}, ErrUnknownServer
 	}
+	tgt, err := s.flashbackTargetFor(ctx, id)
+	tgt.ViaLogin = viaLogin
+	return tgt, err
+}
+
+// ResolveFlashbackLogin is ResolveFlashback for a connection authenticated
+// with server id's application login password: it opens the registry entry
+// with exactly that id or nothing. No name, login or "default" is matched, so
+// a server deleted while the client logged in can never be replaced by
+// another whose name or login happens to read the same.
+func (s *Server) ResolveFlashbackLogin(ctx context.Context, id string) (FlashbackTarget, error) {
+	if _, ok := s.cm.reg.Get(id); !ok || id == "" {
+		return FlashbackTarget{}, ErrUnknownServer
+	}
+	tgt, err := s.flashbackTargetFor(ctx, id)
+	if err != nil {
+		return FlashbackTarget{}, err
+	}
+	tgt.ViaLogin = true
+	return tgt, nil
+}
+
+// flashbackTargetFor builds the target of the server with canonical id.
+func (s *Server) flashbackTargetFor(ctx context.Context, id string) (FlashbackTarget, error) {
 	b, err := s.cm.Resolve(ctx, id)
 	if err != nil {
 		return FlashbackTarget{}, err

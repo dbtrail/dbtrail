@@ -106,6 +106,70 @@ mysql> USE myapp;   -- optional: seeded from the server's source DSN when known
 mysql> SELECT * FROM _flashback.orders AS OF '2026-05-02 10:00:00' WHERE id = 12345;
 ```
 
+<a id="application-login"></a>
+**An application login: a server's own username and password.** A proxy in
+front of your application, such as ProxySQL, logs into every backend with
+the username and password the application logged into it with. With the
+port's password alone, that would mean giving your application's MySQL
+account the port's password. Instead, save the application's username and
+password on its server, and the port takes them for that server:
+
+```sh
+curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: application/json' \
+  http://127.0.0.1:8090/api/servers/7f4d577430b48821/port-login \
+  -d '{"user": "shop_app", "password": "the application password"}'
+mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
+```
+
+- **It opens that server and no other.** Its password is accepted under its
+  own username only: not under another username, not as the port's
+  password. The port's password and the token still work with every
+  username, the login's included.
+- **The username must stay one name on the port.** It cannot be another
+  server's name or id, another server's login (case is ignored for these
+  checks, though MySQL, and the port, compare usernames by case), `default`,
+  or end in `@copy`; and a server cannot be named or renamed after another
+  server's login. At most 32 characters, no spaces at either end. A
+  registry file edited by hand into a username that means two servers is
+  refused at connect time, never resolved by whichever comes first.
+- **Changing or removing it closes its connections.**
+  `DELETE /api/servers/{id}/port-login` removes it; a `PUT` with another
+  username or password replaces it. Either change closes the connections
+  opened with it: at once when
+  the process that saved it serves the port, within a few seconds in the
+  router, which reads the server registry again every two seconds. A
+  connection opened under the login's username with the port's password is
+  closed too, and reconnects. While the router cannot read the server
+  registry (a file broken by a hand edit, or gone), it accepts no
+  application login's password and closes the connections opened with one;
+  the port's own password and the token still work, under any username.
+- **It never opens a closed port**, and the console never returns the
+  password: `GET /api/servers` shows `port_user` and `has_port_password`
+  (both left out when the server has no login).
+  It is kept in `console-servers.yaml`, as typed (MySQL-protocol
+  authentication needs it), in a file only the user DBTrail runs as can
+  read. It is the password of a real account of your application: treat
+  that file as you treat the application's own configuration.
+- **What the port does with it is what it does with any connection** to that
+  server: Engine Routing, the copy, and read-only or not, as the port is
+  configured. `<login>@copy` (the copy alone) is answered only with the
+  port's own password: the login's password opens its exact username. The
+  audit records a login's connections under the server (`server:<id>`), not
+  under the application's username.
+- **It needs the port's default authentication**, `mysql_native_password`,
+  which checks the saved password on every login. Under
+  `caching_sha2_password` a server may accept a user's last good password
+  from its cache, so a rotated login would keep working: there, logins are
+  not offered and only the port's own password opens it.
+- **A login password opens the server it belongs to at that moment, by
+  its id.** The port decides that at login, from the same reading of the
+  registry that offered the password, and never looks the username up
+  again: a login moved, or its server deleted, while a client logs in
+  cannot open any other server (a deleted one answers "removed while
+  connecting").
+- **Who can save it:** the same permission as the port's password
+  (`settings:write`), and never from a session with a data access policy.
+
 <a id="ordinary-sql-on-the-copy-embedded-port-only"></a>
 ### Ordinary SQL on the copy
 

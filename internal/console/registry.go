@@ -44,6 +44,10 @@ var (
 	// different stores (#1575). The store is per bucket, so one of them would
 	// silently get the other's endpoint; the edit is refused instead.
 	ErrS3StoreConflict = errors.New("S3 store conflict")
+	// ErrPortLoginConflict: an application login and a server name or id,
+	// or two application logins, would be the same username on the
+	// MySQL-protocol port, which selects a server by username.
+	ErrPortLoginConflict = errors.New("the name is already a username on the MySQL-protocol port")
 )
 
 // ServerEntry is one named index connection in the registry. DSN holds the
@@ -106,6 +110,18 @@ type ServerEntry struct {
 	// SetSQLMode writes it. The port reads it when a connection
 	// opens (FlashbackTarget).
 	SQLLikeIgnoresCase bool `yaml:"sql_like_ignores_case,omitempty"`
+	// PortUser and PortPassword are the server's application login on the
+	// MySQL-protocol port: a username and password that open the port for
+	// THIS server only, so a proxy in front of the application (ProxySQL)
+	// can reach the port with the credentials the application already uses
+	// on its MySQL. A proxy logs into every backend with the client's own
+	// username and password, so the port's shared password cannot be used
+	// there without changing the application's. The password is kept as
+	// typed, like the port's own (MySQL-protocol authentication needs it),
+	// in a file that is 0600. Registry-owned: only SetPortLogin writes them,
+	// Add never stores them and Update keeps the stored values.
+	PortUser     string `yaml:"port_user,omitempty"`
+	PortPassword string `yaml:"port_password,omitempty"`
 
 	// ── Source family (#1019) ──
 	// Flavor selects the capture engine: "" or "mysql" (MySQL), "mariadb"
@@ -749,10 +765,11 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 		return ServerEntry{}, fmt.Errorf("generate server id: %w", err)
 	}
 	e.ID = id
-	e.LocalKeepHeldDir = ""      // registry-owned; a new entry never starts held
-	e.Hidden = nil               // SetHidden is the only writer (#2529)
-	e.SQLFresh = false           // SetSQLFresh is the only writer (#2546)
-	e.SQLLikeIgnoresCase = false // SetSQLMode is the only writer
+	e.LocalKeepHeldDir = ""             // registry-owned; a new entry never starts held
+	e.Hidden = nil                      // SetHidden is the only writer (#2529)
+	e.SQLFresh = false                  // SetSQLFresh is the only writer (#2546)
+	e.SQLLikeIgnoresCase = false        // SetSQLMode is the only writer
+	e.PortUser, e.PortPassword = "", "" // SetPortLogin is the only writer
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -823,6 +840,8 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 		e.SQLFresh = old.SQLFresh
 		// And the LIKE switch: SetSQLMode is its only writer.
 		e.SQLLikeIgnoresCase = old.SQLLikeIgnoresCase
+		// And the application login: SetPortLogin is its only writer.
+		e.PortUser, e.PortPassword = old.PortUser, old.PortPassword
 		// Within MySQL and MariaDB the Source type is registry-owned too:
 		// capture corrects it (CorrectSourceFlavor), and an edit built from
 		// a copy read before that must not put the old value back. No edit
@@ -1035,6 +1054,12 @@ func (r *Registry) checkName(name, selfID string) error {
 	for _, e := range r.file.Servers {
 		if e.Name == name && e.ID != selfID {
 			return ErrDuplicateName
+		}
+		// On the MySQL-protocol port a username selects a server by its name
+		// or by an application login: a name that is another server's login
+		// would make one username mean two servers.
+		if e.ID != selfID && e.PortUser != "" && strings.EqualFold(e.PortUser, name) {
+			return fmt.Errorf("%w: %q is the application login of server %q", ErrPortLoginConflict, name, e.Name)
 		}
 	}
 	return nil

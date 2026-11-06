@@ -140,7 +140,8 @@ func (s *Server) FollowFiles(ctx context.Context, interval time.Duration) {
 func (s *Server) RefreshFollowedFiles() {
 	s.refreshFlashbackPassword()
 	changes, err := s.cm.reg.Reload()
-	s.noteFollow("registry", "console: the server registry could not be read again; the servers read before stay in force", err)
+	s.noteFollow("registry", "console: the server registry could not be read again; the servers read before stay in force, except their application logins on the MySQL port, which are refused until it can be read", err)
+	s.setLoginsUnreadable(err != nil)
 	for _, c := range changes {
 		s.applyRegistryChange(c)
 	}
@@ -165,6 +166,7 @@ func (s *Server) applyRegistryChange(c RegistryChange) {
 		s.cm.evict(id)
 		s.sessionProfiles.invalidate(id)
 		s.dropRoutedConns(id, "the server was deleted", forwardDSNOf(c.Old), c.Old.SourceSSL())
+		s.dropLoginConns(id, "the server was deleted")
 		slog.Info("console: a server was removed from the registry", "server", c.Old.Name)
 		return
 	}
@@ -173,6 +175,9 @@ func (s *Server) applyRegistryChange(c RegistryChange) {
 	}
 	if c.New.SQLLikeIgnoresCase != c.Old.SQLLikeIgnoresCase {
 		s.closeRoutedConns(id, likeSwitchChanged)
+	}
+	if c.New.PortUser != c.Old.PortUser || c.New.PortPassword != c.Old.PortPassword {
+		s.dropLoginConns(id, "the server's application login changed")
 	}
 	if c.New.DSN != c.Old.DSN {
 		s.cm.evict(id)

@@ -90,6 +90,11 @@ type serverDTO struct {
 	// statements on the SQL port. Edited through /api/servers/{id}/sql-mode
 	// only; applied to connections opened after the change.
 	SQLLikeIgnoresCase bool `json:"sql_like_ignores_case"`
+	// PortUser is the server's application login on the MySQL port, and
+	// HasPortPassword says it has its password; the password itself is
+	// never sent. Edited through /api/servers/{id}/port-login only.
+	PortUser        string `json:"port_user,omitempty"`
+	HasPortPassword bool   `json:"has_port_password,omitempty"`
 	// Flavor is the source family ("mysql" | "mariadb" | "postgres"); the
 	// frontend gates per-server without opening the index. SourceDatabase /
 	// SourceSlot / SourcePublication are the PostgreSQL-only source parts (the
@@ -792,6 +797,7 @@ func (s *Server) handleServersDelete(w http.ResponseWriter, r *http.Request) {
 	s.cm.evict(id)
 	s.sessionProfiles.invalidate(id) // purge its cached profile rules (#1075)
 	s.dropRoutedConns(id, "the server was deleted", forwardDSNOf(deleted), deleted.SourceSSL())
+	s.dropLoginConns(id, "the server was deleted")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1648,6 +1654,8 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		Hidden:               newHiddenListsDTO(e.Hidden),
 		SQLFresh:             e.SQLFresh,
 		SQLLikeIgnoresCase:   e.SQLLikeIgnoresCase,
+		PortUser:             e.PortUser,
+		HasPortPassword:      e.PortPassword != "",
 		Flavor:               e.SourceFlavor(),
 		SourceSlot:           e.SourceSlot,
 		SourcePublication:    e.SourcePublication,
@@ -1764,7 +1772,7 @@ func scrubDSNError(err error, dsn string) string {
 // registryErrStatus maps registry errors onto HTTP statuses.
 func registryErrStatus(err error) int {
 	switch {
-	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly):
+	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict):
 		return http.StatusConflict
 	case errors.Is(err, ErrUnknownServer):
 		return http.StatusNotFound
