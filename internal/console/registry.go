@@ -332,6 +332,9 @@ type Registry struct {
 	// process-wide endpoint (bucket → the setting's name), which no per-server
 	// store may claim; see SetProcessS3Location. Guarded by mu.
 	processBuckets map[string]string
+	// reservedUser, when set, is the port's monitor login username
+	// (Server.monitorUser): no server may be named it. Called under mu.
+	reservedUser func() string
 	// migration is what MigrateProcessBaselineLocation did at this start.
 	// Guarded by mu.
 	migration LocationMigration
@@ -1041,6 +1044,23 @@ func (r *Registry) Delete(id string) error {
 	return ErrUnknownServer
 }
 
+// setReservedUser makes f the username no server may be named (the MySQL
+// port's monitor login). f is called under r.mu, so it must not take it.
+func (r *Registry) setReservedUser(f func() string) {
+	r.mu.Lock()
+	r.reservedUser = f
+	r.mu.Unlock()
+}
+
+// underLock runs f with the registry's lock held, over its entries: a change
+// elsewhere decided against them (the monitor login) cannot race a server
+// added or a login saved in between. f must not call the registry.
+func (r *Registry) underLock(f func(entries []ServerEntry) error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return f(r.file.Servers)
+}
+
 // checkName enforces non-empty unique names; selfID exempts the entry being
 // updated. Callers hold r.mu. The boot entry's reserved id doubles as a
 // reserved name so the switcher never shows two entries labeled "default".
@@ -1050,6 +1070,11 @@ func (r *Registry) checkName(name, selfID string) error {
 	}
 	if name == bootServerID {
 		return fmt.Errorf("%q is reserved for the command-line server", bootServerID)
+	}
+	if r.reservedUser != nil {
+		if u := r.reservedUser(); u != "" && strings.EqualFold(u, name) {
+			return fmt.Errorf("%w: %q is the MySQL port's monitor login", ErrPortLoginConflict, name)
+		}
 	}
 	for _, e := range r.file.Servers {
 		if e.Name == name && e.ID != selfID {

@@ -105,6 +105,8 @@ var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"GET", "/api/sql"},
 	{"PUT", "/api/flashback"},
 	{"POST", "/api/flashback/password"},
+	{"PUT", "/api/flashback/monitor-login"},
+	{"DELETE", "/api/flashback/monitor-login"},
 	{"GET", "/api/sql-settings"},
 	{"PUT", "/api/sql-settings"},
 }

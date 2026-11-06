@@ -188,6 +188,53 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
 
+<a id="monitor-login"></a>
+**A monitor login: for a proxy's health checks.** ProxySQL checks every
+backend with one monitor username and password
+(`mysql-monitor_username` / `mysql-monitor_password`), your MySQL included.
+Without a login for it on the port, every check of the port is refused and
+both sides log the refusal every few seconds. Save on the port the same
+username and password your MySQL monitor account has:
+
+```sh
+curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: application/json' \
+  http://127.0.0.1:8090/api/flashback/monitor-login \
+  -d '{"user": "monitor", "password": "the monitor password"}'
+```
+
+- **It opens no server.** A connection opened with it answers what
+  ProxySQL's monitor sends and nothing else: `PING`, the
+  `SET wait_timeout=N` it sends on each new monitor connection, and the
+  read_only check (`SELECT @@global.read_only read_only` and its
+  variants), answered `1`. That check is only sent when the port is in
+  `mysql_replication_hostgroups`, and a `0` would move the port to the
+  writer hostgroup: the port is a reader. Every other statement answers
+  `1227`. Do not set `max_replication_lag` on the port's entry in
+  `mysql_servers`: the replication-lag check is refused, and so are the
+  Galera and Group Replication checks.
+- **Its username is the monitor's alone.** Only the monitor password opens
+  it (not the port's password), and the monitor password opens no other
+  username. The username follows the same rules as an application login,
+  and no server or application login may take it (nor it theirs); a file
+  edited by hand into a username that also names a server is refused at
+  connect time.
+- **Changing or removing it closes its connections**
+  (`DELETE /api/flashback/monitor-login` removes it), within a few seconds
+  in the router, which reads the port's settings again every two seconds.
+  A port turned off, or a settings file that cannot be read, accepts no
+  monitor login either. Like any login change, it also makes the next
+  `COM_RESET_CONNECTION` on a connection opened with an application login
+  close that connection, which the proxy reopens. A saved monitor login
+  that cannot be used (a file edited by hand into a server's name, say)
+  is refused, logged once, and named in `monitor_error` on
+  `GET /api/flashback`.
+- **The rest is an application login's:** it is kept in the port's
+  settings file (`console-mysql-port.yaml`) as typed, never returned
+  (`GET /api/flashback` shows `monitor_user` and `has_monitor_password`),
+  offered under `mysql_native_password` only, and saved with
+  `settings:write`. A proxy may change a pooled connection's user to the
+  monitor and back (`COM_CHANGE_USER`).
+
 <a id="ordinary-sql-on-the-copy-embedded-port-only"></a>
 ### Ordinary SQL on the copy
 

@@ -209,10 +209,16 @@ func (s *Server) refreshFlashbackPassword() {
 	f, err := LoadFlashbackFile(path)
 	s.noteFollow("port", "console: the MySQL port's saved setting could not be read; the password created in the web interface is not accepted until it can", err)
 	on, password, createdAt, routing := false, "", "", false
+	monitorUser, monitorPassword := "", ""
 	if err == nil && f.Enabled {
 		on, password, createdAt, routing = true, f.Password, f.PasswordCreatedAt, f.Routing
+		// A setting that cannot be read, or a port turned off, holds no
+		// monitor login either.
+		monitorUser, monitorPassword = f.MonitorUser, f.MonitorPassword
 	}
 	fb.mu.Lock()
+	oldMonitorUser, oldMonitorPassword := fb.saved.MonitorUser, fb.saved.MonitorPassword
+	fb.saved.MonitorUser, fb.saved.MonitorPassword = monitorUser, monitorPassword
 	// Replaced counts too: a new password is how a person holding the old
 	// one is put out without turning the port off. So does the port turned
 	// off while a token still opens it: the switch closes the port, whoever
@@ -231,6 +237,7 @@ func (s *Server) refreshFlashbackPassword() {
 	fb.mu.Unlock()
 	// Outside the lock: closing connections waits on handshakes, which read
 	// the passwords under it.
+	s.noteMonitorLoginChange(oldMonitorUser, oldMonitorPassword, monitorUser, monitorPassword)
 	if onWithdrawn == nil {
 		return
 	}
