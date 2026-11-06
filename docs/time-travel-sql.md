@@ -167,6 +167,24 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   again: a login moved, or its server deleted, while a client logs in
   cannot open any other server (a deleted one answers "removed while
   connecting").
+- **A proxy can move a pooled connection to another application.** ProxySQL
+  keeps a pool of connections to each backend and hands one opened for one
+  application to another with `COM_CHANGE_USER`. The port answers it: it
+  asks for the password again with the challenge the connection logged in
+  with, checks the answer against the new user's passwords (its login's, or the port's own), and binds the
+  connection to that user's server as a new connection would be, with the
+  same rule about which server a login password opens. What the previous
+  user had is gone: its prepared statements, its connection to the source
+  and its place in the revocation of its login. A refused change closes
+  the connection, which is never left on the previous user: a wrong
+  password answers `1045`, a malformed packet `1835`, a username that names
+  no server (with the port's password) `1049`.
+  `COM_RESET_CONNECTION` binds the connection afresh to the user it has,
+  in the database it had chosen; a connection opened with a login is
+  refused (and closed) if any login changed since it logged in, since a
+  reset asks for no password. Both work under `mysql_native_password`;
+  under `caching_sha2_password` a change of user takes the port's own
+  password only, as logins are not offered there.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
 

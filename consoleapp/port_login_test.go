@@ -39,6 +39,22 @@ func loginAs(t *testing.T, addr, user, password string) uint16 {
 	return 0
 }
 
+// loginAsQuiet is loginAs for a wait loop: a login refused by the system (the
+// port closed for a moment, as it is when its password is replaced, to put
+// out everyone on it) is 1, not a test failure.
+func loginAsQuiet(addr, user, password string) uint16 {
+	conn, err := client.Connect(addr, user, password, "")
+	if err != nil {
+		var me *gomysql.MyError
+		if errors.As(err, &me) {
+			return me.Code
+		}
+		return 1
+	}
+	conn.Close()
+	return 0
+}
+
 func TestRouterPort_applicationLogin(t *testing.T) {
 	f := newRouterFiles(t)
 	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
@@ -99,7 +115,7 @@ func TestRouterPort_applicationLogin(t *testing.T) {
 
 	// A new port password leaves the logins alone.
 	f.savePortFile(t, true, "port-pw-2")
-	waitUntil(t, "the new port password", func() bool { return loginAs(t, addr, "prod", "port-pw-2") == 0 })
+	waitUntil(t, "the new port password", func() bool { return loginAsQuiet(addr, "prod", "port-pw-2") == 0 })
 	if got := loginAs(t, addr, "app1", "pw-one"); got != 0 {
 		t.Fatalf("a new port password closed a login: %d", got)
 	}

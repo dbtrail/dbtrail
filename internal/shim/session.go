@@ -93,6 +93,21 @@ func (s *Session) HandleCommand() error {
 		c.Conn = nil
 		return nil
 	} else if v := s.dispatch(data[0], data[1:]); v != (noReply{}) {
+		if ca, ok := v.(closeAfter); ok {
+			// A refused change of user: say why, then end the connection,
+			// which is neither on its old user nor on the new one any more.
+			if ca.lost {
+				// The connection broke mid-exchange: nothing to answer, and
+				// nothing was refused.
+				c.Close()
+				c.Conn = nil
+				return fmt.Errorf("connection lost during a change of user: %w", ca.err)
+			}
+			_ = c.WriteValue(ca.err)
+			c.Close()
+			c.Conn = nil
+			return fmt.Errorf("%w (%s): %w", ErrChangeUserRefused, ca.why, ca.err)
+		}
 		// The session's status flags as they are now that the command ran
 		// (#2110): on this answer, and on the connection for the EOF and OK
 		// packets the library writes from it.
@@ -121,6 +136,8 @@ func (s *Session) dispatch(cmd byte, data []byte) any {
 		switch cmd {
 		case mysql.COM_STMT_CLOSE, mysql.COM_STMT_SEND_LONG_DATA:
 			// No answer to put the loss in; a close still frees the statement.
+		case mysql.COM_CHANGE_USER, mysql.COM_RESET_CONNECTION:
+			// They bind the connection afresh, the source connection included.
 		default:
 			statement := cmd == mysql.COM_QUERY || cmd == mysql.COM_STMT_PREPARE || cmd == mysql.COM_STMT_EXECUTE
 			if err := src.SourceLost(statement); err != nil {
@@ -168,6 +185,14 @@ func (s *Session) dispatch(cmd byte, data []byte) any {
 	case mysql.COM_STMT_SEND_LONG_DATA:
 		s.sendLongData(data)
 		return noReply{}
+	case mysql.COM_CHANGE_USER:
+		if uc, ok := s.h.(UserChanger); ok {
+			return s.changeUser(uc, data)
+		}
+	case mysql.COM_RESET_CONNECTION:
+		if uc, ok := s.h.(UserChanger); ok {
+			return s.resetConnection(uc)
+		}
 	case mysql.COM_STMT_RESET:
 		st, _, err := s.lookup(data, "stmt_reset")
 		if err != nil {
