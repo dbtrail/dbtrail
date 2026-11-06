@@ -27,7 +27,8 @@ import (
 // Everything else is refused.
 
 // MonitorLoginKey is the loginServer of a connection opened with the monitor
-// login (FlashbackPasswordsFor's second value for a server's login). No
+// login: what flashbackCreds.credentialWithLogin returns for it, in the slot a
+// server's id takes for an application login. No
 // server id can be it: ids are hex. Monitor connections are tracked under it
 // (TrackLoginConn), so a changed or removed monitor login closes them.
 const MonitorLoginKey = "\x00monitor"
@@ -53,7 +54,8 @@ func (s *Server) monitorUser() string {
 // username, exactly as typed (MySQL compares usernames by case). ok is false
 // when user is not the monitor login, and while the port is closed: the
 // monitor login never opens a closed port. err is ErrAmbiguousMonitorLogin
-// when the username also selects a server; the caller refuses the login.
+// when the saved login cannot be used (monitorProblem: a username that also
+// selects a server, or a shape the API refuses); the caller refuses it.
 // Read per handshake, like the port's own password.
 func (s *Server) MonitorPasswordFor(user string) (password string, ok bool, err error) {
 	if user == "" || len(s.FlashbackPasswords()) == 0 {
@@ -75,8 +77,8 @@ func (s *Server) MonitorPasswordFor(user string) (password string, ok bool, err 
 
 // monitorProblem is why a saved monitor login cannot be used ("" when it
 // can): a username that also selects a server, or one the API would have
-// refused for its shape ("default", "@copy", spaces). Only a file edited by
-// hand, or a server added while the login was saved, gets here.
+// refused for its shape ("default", "@copy", spaces). Only a hand edit (of
+// the port's settings file or of the server registry) gets here.
 func (s *Server) monitorProblem(user, password string) string {
 	if err := portLoginShape(user, password); err != nil {
 		return err.Error()

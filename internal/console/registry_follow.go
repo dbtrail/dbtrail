@@ -114,7 +114,7 @@ const DefaultFollowInterval = 2 * time.Second
 // FollowFiles keeps this server in step with the files another process owns,
 // until ctx ends: the server registry (which must come from
 // LoadRegistryFollower) and the MySQL port's saved setting, for the password
-// the web interface generates. It looks at them at once and then every
+// the web interface generates and the monitor login. It looks at them at once and then every
 // interval (0 means DefaultFollowInterval). A caller that must not serve
 // before the first look calls RefreshFollowedFiles itself first.
 func (s *Server) FollowFiles(ctx context.Context, interval time.Duration) {
@@ -135,8 +135,8 @@ func (s *Server) FollowFiles(ctx context.Context, interval time.Duration) {
 
 // RefreshFollowedFiles reads the followed files once and applies what
 // changed. A file that cannot be read is said once per reason, and what was
-// read before stays in force, except the port's password: see
-// refreshFlashbackPassword.
+// read before stays in force, except the port's password and the monitor
+// login: see refreshFlashbackPassword.
 func (s *Server) RefreshFollowedFiles() {
 	s.refreshFlashbackPassword()
 	changes, err := s.cm.reg.Reload()
@@ -207,7 +207,7 @@ func (s *Server) refreshFlashbackPassword() {
 		return
 	}
 	f, err := LoadFlashbackFile(path)
-	s.noteFollow("port", "console: the MySQL port's saved setting could not be read; the password created in the web interface is not accepted until it can", err)
+	s.noteFollow("port", "console: the MySQL port's saved setting could not be read; the password created in the web interface and the monitor login are not accepted until it can", err)
 	on, password, createdAt, routing := false, "", "", false
 	monitorUser, monitorPassword := "", ""
 	if err == nil && f.Enabled {

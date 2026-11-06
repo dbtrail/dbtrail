@@ -204,7 +204,8 @@ curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: applicat
 
 - **It opens no server.** A connection opened with it answers what
   ProxySQL's monitor sends and nothing else: `PING`, the
-  `SET wait_timeout=N` it sends on each new monitor connection, and the
+  `SET wait_timeout=N` it sends after the first check on each new monitor
+  connection, and the
   read_only check (`SELECT @@global.read_only read_only` and its
   variants), answered `1`. That check is only sent when the port is in
   `mysql_replication_hostgroups`, and a `0` would move the port to the
@@ -215,19 +216,25 @@ curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: applicat
 - **Its username is the monitor's alone.** Only the monitor password opens
   it (not the port's password), and the monitor password opens no other
   username. The username follows the same rules as an application login,
-  and no server or application login may take it (nor it theirs); a file
-  edited by hand into a username that also names a server is refused at
-  connect time.
+  and no server or application login may take it (nor it theirs; the API
+  ignores case for these checks); a file edited by hand into a username
+  that also names a server is refused at connect time.
 - **Changing or removing it closes its connections**
   (`DELETE /api/flashback/monitor-login` removes it), within a few seconds
   in the router, which reads the port's settings again every two seconds.
-  A port turned off, or a settings file that cannot be read, accepts no
-  monitor login either. Like any login change, it also makes the next
+  A hand edit of the file reaches the router the same way; the port inside
+  `watch` reads it at its next change from the web interface, or at
+  restart. A port turned off, or a settings file that cannot be read,
+  accepts no monitor login either. Replacing or removing it, like any
+  login change, also makes the next
   `COM_RESET_CONNECTION` on a connection opened with an application login
   close that connection, which the proxy reopens. A saved monitor login
   that cannot be used (a file edited by hand into a server's name, say)
   is refused, logged once, and named in `monitor_error` on
   `GET /api/flashback`.
+- **Not with an address set at startup.** When the port's address is set
+  where DBTrail is started, the monitor login is not available: the routes
+  answer `409` and the port accepts no monitor login.
 - **The rest is an application login's:** it is kept in the port's
   settings file (`console-mysql-port.yaml`) as typed, never returned
   (`GET /api/flashback` shows `monitor_user` and `has_monitor_password`),

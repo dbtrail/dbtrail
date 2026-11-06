@@ -13,7 +13,7 @@ import (
 // routingHandler.PingSource, and these by monitorAnswer.
 
 // monitorWaitTimeoutRE: `SET wait_timeout=N`, sent on every new monitor
-// connection after its first ping (mysql-monitor_wait_timeout, on by
+// connection after the first check made on it (mysql-monitor_wait_timeout, on by
 // default). Refusing it makes ProxySQL drop the connection and log an error.
 var monitorWaitTimeoutRE = regexp.MustCompile(`(?i)^SET\s+(?:SESSION\s+|@@SESSION\.|@@)?wait_timeout\s*=\s*\d+$`)
 

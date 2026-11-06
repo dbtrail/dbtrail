@@ -1071,7 +1071,16 @@ func (r *Registry) checkName(name, selfID string) error {
 	if name == bootServerID {
 		return fmt.Errorf("%q is reserved for the command-line server", bootServerID)
 	}
-	if r.reservedUser != nil {
+	// The monitor login's username, checked only when the name changes: a
+	// server already called that (a hand edit) must still take other edits,
+	// such as starting its capture. The port refuses the collision itself.
+	renamed := true
+	for _, e := range r.file.Servers {
+		if selfID != "" && e.ID == selfID && strings.EqualFold(e.Name, name) {
+			renamed = false
+		}
+	}
+	if r.reservedUser != nil && renamed {
 		if u := r.reservedUser(); u != "" && strings.EqualFold(u, name) {
 			return fmt.Errorf("%w: %q is the MySQL port's monitor login", ErrPortLoginConflict, name)
 		}

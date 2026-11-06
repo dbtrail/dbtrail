@@ -247,3 +247,23 @@ func TestMonitorLogin_handEditedShapeRefused(t *testing.T) {
 		}
 	}
 }
+
+// A server already named like the monitor login (a hand edit) still takes
+// edits that keep its name; renaming another server to it is refused.
+func TestMonitorLogin_reservationOnlyOnRename(t *testing.T) {
+	reg, err := LoadRegistry(t.TempDir() + "/console-servers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon := addLoginTestServer(t, reg, "monitor")
+	other := addLoginTestServer(t, reg, "other")
+	reg.setReservedUser(func() string { return "monitor" })
+	mon.DSN = "u:p@tcp(h2:3306)/db_monitor"
+	if err := reg.Update(mon); err != nil {
+		t.Fatalf("an edit that keeps the name: %v", err)
+	}
+	other.Name = "Monitor"
+	if err := reg.Update(other); !errors.Is(err, ErrPortLoginConflict) {
+		t.Fatalf("a rename to the monitor login: %v", err)
+	}
+}

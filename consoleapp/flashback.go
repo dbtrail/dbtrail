@@ -397,7 +397,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 			// Like an application login (TrackLoginConn): a connection that
 			// cannot be tracked is not served at all.
 			closeConn()
-			return untrack, gomysql.NewError(gomysql.ER_ACCESS_DENIED_ERROR, "flashback: the monitor login changed while connecting; reconnect")
+			return untrack, gomysql.NewError(gomysql.ER_ACCESS_DENIED_ERROR, "flashback: a login of this port changed while connecting; reconnect")
 		}
 		proxy.monitor = true
 		return u, nil
@@ -1123,7 +1123,8 @@ func (r *routingHandler) ResetConnection() error {
 	// A reset asks for no password, so it must not re-open what a
 	// password would no longer open. Nothing authenticates the user any
 	// more (the port turned off, say): refused. Opened with an application
-	// login, and ANY login changed since its credential was read: refused,
+	// login or the monitor login, and ANY login changed since its credential
+	// was read: refused,
 	// because a connection whose binding failed was never tracked, so a
 	// rotated or revoked login did not close it, and this is where it would
 	// come back. The client reconnects with the password in force.
