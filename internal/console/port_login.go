@@ -128,6 +128,11 @@ func (r *Registry) setPortLogin(id, user, password string) (ServerEntry, ServerE
 		if err := portLoginConflict(r.file.Servers, id, user); err != nil {
 			return ServerEntry{}, ServerEntry{}, err
 		}
+		if r.reservedUser != nil {
+			if u := r.reservedUser(); u != "" && strings.EqualFold(u, user) {
+				return ServerEntry{}, ServerEntry{}, fmt.Errorf("%w: %q is the MySQL port's monitor login", ErrPortLoginConflict, user)
+			}
+		}
 	} else if password != "" {
 		return ServerEntry{}, ServerEntry{}, fmt.Errorf("%w: a password was sent with no username; name the login, or send neither to remove it", errPortLoginInvalid)
 	}

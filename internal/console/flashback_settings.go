@@ -62,6 +62,13 @@ type FlashbackFile struct {
 	// expensive SELECTs. Followed by the router; the port inside watch
 	// still takes its routing from where it is started.
 	Routing bool `yaml:"routing,omitempty"`
+	// MonitorUser and MonitorPassword are the monitor login: the username
+	// and password a proxy's health checks log in with (ProxySQL's
+	// mysql-monitor_username/_password, one pair for every backend). They
+	// open no server; see monitor_login.go. Added without a version bump: an
+	// older binary carries them in Extra.
+	MonitorUser     string `yaml:"monitor_user,omitempty"`
+	MonitorPassword string `yaml:"monitor_password,omitempty"`
 	// Extra preserves unknown top-level fields a newer binary wrote, across
 	// this binary's load and save.
 	Extra map[string]any `yaml:",inline"`

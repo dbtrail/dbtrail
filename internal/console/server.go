@@ -686,6 +686,12 @@ type Server struct {
 	// server's application login, per server, to close them when that
 	// login is changed or removed (port_login.go).
 	loginConns loginConnSet
+	// monitorWarned is the last reason the monitor login was refused for,
+	// said once (warnMonitorProblem).
+	monitorWarned struct {
+		mu   sync.Mutex
+		last string
+	}
 	// loginsUnreadable: the followed registry file could not be read the
 	// last time; no application login opens the port meanwhile
 	// (setLoginsUnreadable).
@@ -963,6 +969,9 @@ func New(cfg Config) (*Server, error) {
 		s.cm.seedBoot(boot, cfg.BootDSN)
 	}
 
+	if cfg.Registry != nil {
+		cfg.Registry.setReservedUser(s.monitorUser)
+	}
 	s.mux = s.buildHandler()
 	// What each server's switch saved before this process started (#2546).
 	// The router reads it again on every registry reading; a switch flipped
@@ -1167,6 +1176,8 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/router", s.handleRouterGet)
 	api.HandleFunc("PUT /api/flashback", s.handleFlashbackPut)
 	api.HandleFunc("POST /api/flashback/password", s.handleFlashbackPassword)
+	api.HandleFunc("PUT /api/flashback/monitor-login", s.handleFlashbackMonitorLogin)
+	api.HandleFunc("DELETE /api/flashback/monitor-login", s.handleFlashbackMonitorLogin)
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /api/healthz", s.handleHealthz) // unauthenticated liveness

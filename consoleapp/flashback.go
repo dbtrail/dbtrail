@@ -307,7 +307,9 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 		// handshake's own default database stays best-effort, as before):
 		// a change of user that answered OK on another schema would send
 		// unqualified statements somewhere the client did not ask for.
-		if schema != "" {
+		// A monitor session opens no database: the schema a proxy names when
+		// it moves a connection to the monitor login is not one to refuse.
+		if schema != "" && !proxy.monitor {
 			if err := proxy.inner.UseDB(schema); err != nil {
 				return err
 			}
@@ -385,6 +387,21 @@ func flashbackConnPanicked(logger *slog.Logger, remote net.Addr, r any, stack []
 // handshake.
 func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, user, loginServer string, loginEpoch uint64, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger, closeConn func()) (untrack func(), err error) {
 	untrack = func() {}
+	proxy.monitor = false
+	if loginServer == console.MonitorLoginKey {
+		// The monitor login (connCreds): a session that opens no server and
+		// answers the proxy's health checks alone (monitorAnswer). Tracked,
+		// so a changed or removed monitor login closes it.
+		u, ok := srv.TrackLoginConn(console.MonitorLoginKey, loginEpoch, closeConn)
+		if !ok {
+			// Like an application login (TrackLoginConn): a connection that
+			// cannot be tracked is not served at all.
+			closeConn()
+			return untrack, gomysql.NewError(gomysql.ER_ACCESS_DENIED_ERROR, "flashback: a login of this port changed while connecting; reconnect")
+		}
+		proxy.monitor = true
+		return u, nil
+	}
 	var tgt console.FlashbackTarget
 	copyOnly := false
 	if loginServer != "" {
@@ -968,6 +985,15 @@ func (f flashbackCreds) credentialWithLogin(username string) (server.Credential,
 	if plugin == "" {
 		plugin = gomysql.AUTH_NATIVE_PASSWORD
 	}
+	// The monitor login's username is the monitor's alone: its password and
+	// nothing else, decided in this same reading (console.MonitorPasswordFor).
+	// Native only, for the same reason as application logins.
+	if mp, ok, err := f.srv.MonitorPasswordFor(username); err != nil || ok {
+		if err != nil || plugin != gomysql.AUTH_NATIVE_PASSWORD {
+			return server.Credential{}, false, "", nil
+		}
+		return server.Credential{Passwords: []string{mp}, AuthPluginName: plugin}, true, console.MonitorLoginKey, nil
+	}
 	// Read per handshake, so a password replaced in the web interface is the
 	// one the next client needs.
 	passwords, loginServer := f.srv.FlashbackPasswordsFor(username)
@@ -1023,6 +1049,10 @@ type routingHandler struct {
 	server.EmptyHandler
 	inner *shim.Handler
 	fail  error
+	// monitor: the connection was opened with the port's monitor login
+	// (bindFlashbackHandler). It is bound to no server and answers only
+	// monitorAnswer's statements and PING.
+	monitor bool
 	// failPing: flashbackConfig.FailedBindFailsPing.
 	failPing bool
 	// onPanic, when set, is run after a panic on this connection's
@@ -1093,7 +1123,8 @@ func (r *routingHandler) ResetConnection() error {
 	// A reset asks for no password, so it must not re-open what a
 	// password would no longer open. Nothing authenticates the user any
 	// more (the port turned off, say): refused. Opened with an application
-	// login, and ANY login changed since its credential was read: refused,
+	// login or the monitor login, and ANY login changed since its credential
+	// was read: refused,
 	// because a connection whose binding failed was never tracked, so a
 	// rotated or revoked login did not close it, and this is where it would
 	// come back. The client reconnects with the password in force.
@@ -1121,6 +1152,8 @@ func (r *routingHandler) ResetConnection() error {
 
 func (r *routingHandler) UseDB(dbName string) error {
 	switch {
+	case r.monitor:
+		return errMonitorOnly
 	case r.inner != nil:
 		err := r.inner.UseDB(dbName)
 		if err == nil {
@@ -1162,6 +1195,9 @@ func (r *routingHandler) SourceLost(statement bool) error {
 }
 
 func (r *routingHandler) PingSource() error {
+	if r.monitor {
+		return nil
+	}
 	if r.inner == nil {
 		if r.failPing {
 			return r.fail
@@ -1181,6 +1217,9 @@ func (r *routingHandler) ReleaseResult() {
 }
 
 func (r *routingHandler) HandleQuery(query string) (*gomysql.Result, error) {
+	if r.monitor {
+		return monitorAnswer(query)
+	}
 	if r.inner == nil {
 		return nil, r.unresolved()
 	}
@@ -1212,6 +1251,9 @@ func (r *routingHandler) HandleStmtClose(context any) error {
 }
 
 func (r *routingHandler) unresolved() error {
+	if r.monitor {
+		return errMonitorOnly
+	}
 	if r.fail != nil {
 		return r.fail
 	}

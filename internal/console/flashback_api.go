@@ -61,6 +61,14 @@ type flashbackStatusDTO struct {
 	// statement. Kept while the port is off. Who answered is the router's
 	// to say (GET /api/router).
 	RoutingOn bool `json:"routing_on"`
+	// MonitorUser is the saved monitor login's username (monitor_login.go);
+	// HasMonitorPassword says it has a password. The password itself is
+	// never sent back.
+	MonitorUser        string `json:"monitor_user,omitempty"`
+	HasMonitorPassword bool   `json:"has_monitor_password,omitempty"`
+	// MonitorError is why the saved monitor login is refused at the port (a
+	// file edited by hand into a server's name, say); empty when it is not.
+	MonitorError string `json:"monitor_error,omitempty"`
 	// Notice, when set, is why nothing answers on the port although it is
 	// on (Config.FlashbackNotice). Only while the port is saved as on.
 	Notice string `json:"notice,omitempty"`
@@ -145,9 +153,14 @@ func (s *Server) flashbackStatus() flashbackStatusDTO {
 		// The file's own word, as flashbackManageable reads it: the router
 		// follows the file, not what this process remembers of it.
 		dto.RoutingOn = saved.Routing
+		dto.MonitorUser, dto.HasMonitorPassword = saved.MonitorUser, saved.MonitorPassword != ""
 		if path != "" {
 			if f, err := LoadFlashbackFile(path); err == nil {
 				dto.RoutingOn = f.Routing
+				dto.MonitorUser, dto.HasMonitorPassword = f.MonitorUser, f.MonitorPassword != ""
+				if f.MonitorUser != "" && f.MonitorPassword != "" {
+					dto.MonitorError = s.monitorProblem(f.MonitorUser, f.MonitorPassword)
+				}
 			}
 		}
 		if saved.Enabled {
@@ -294,9 +307,7 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		fb.mu.Lock()
-		fb.saved = next
-		fb.mu.Unlock()
+		s.publishSaved(next)
 		slog.Info("console: Engine Routing on the MySQL port changed from the web interface", "routing", next.Routing)
 		writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus()})
 		return
@@ -341,9 +352,7 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 		next.Password, next.PasswordCreatedAt = created, time.Now().UTC().Format(time.RFC3339)
 	}
 	// The password is in place before the port accepts its first handshake.
-	fb.mu.Lock()
-	fb.saved = next
-	fb.mu.Unlock()
+	s.publishSaved(next)
 	// restore puts the saved setting back and takes the port's address from
 	// the controller, not from what was asked: a move that was refused can
 	// have cost the old address too (same port number, taken in between).
@@ -456,9 +465,7 @@ func (s *Server) handleFlashbackPassword(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, status, err.Error())
 		return
 	}
-	fb.mu.Lock()
-	fb.saved = next
-	fb.mu.Unlock()
+	s.publishSaved(next)
 	slog.Info("console: MySQL port password replaced from the web interface")
 	writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus(), Password: pw})
 }

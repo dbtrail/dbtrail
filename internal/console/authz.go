@@ -272,6 +272,8 @@ var apiRoutePerms = []routePerm{
 	// mutation, and the response is the one place the password is shown.
 	{"PUT", "/api/flashback", ext.PermSettingsWrite},
 	{"POST", "/api/flashback/password", ext.PermSettingsWrite},
+	{"PUT", "/api/flashback/monitor-login", ext.PermSettingsWrite},
+	{"DELETE", "/api/flashback/monitor-login", ext.PermSettingsWrite},
 
 	// The capabilities oracle and the session's own auth self-management: any
 	// authenticated session, regardless of policy.
