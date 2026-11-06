@@ -170,8 +170,8 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
 - **A proxy can move a pooled connection to another application.** ProxySQL
   keeps a pool of connections to each backend and hands one opened for one
   application to another with `COM_CHANGE_USER`. The port answers it: it
-  sends a fresh password challenge, checks the answer against the new
-  user's passwords (its login's, or the port's own), and binds the
+  asks for the password again with the challenge the connection logged in
+  with, checks the answer against the new user's passwords (its login's, or the port's own), and binds the
   connection to that user's server as a new connection would be, with the
   same rule about which server a login password opens. What the previous
   user had is gone: its prepared statements, its connection to the source

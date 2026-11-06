@@ -12,11 +12,13 @@ import (
 // during the handshake replaced it with (go-mysql keeps the latest in the
 // same field). nil when it cannot be read.
 //
-// A change of user asks for the password again with this same salt, as MySQL
-// does. ProxySQL's client library (libmariadb) answers that question with the
-// scramble it computed against the handshake's salt, whatever salt the
-// question carries; asked with a fresh salt, every change of user ProxySQL
-// made was refused with 1045 (seen on ProxySQL 3.1.12).
+// A change of user asks for the password again with this same salt; MySQL,
+// too, keeps the connection's salt for a change of user rather than drawing a
+// new one. ProxySQL 3.1.12 (through its libmariadb) was seen answering that
+// question with the scramble it computed against the handshake's salt,
+// whatever salt the question carried; asked with a fresh salt, every change
+// of user it made was refused with 1045. This assumes the client, like
+// go-mysql, keeps the latest salt when its login went through an auth switch.
 //
 // go-mysql keeps the salt unexported and has no getter, so it is read through
 // reflection. TestHandshakeSalt_readsTheLibrarysField fails if a go-mysql

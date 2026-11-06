@@ -44,7 +44,7 @@ func changeUser(t *testing.T, c *client.Conn, user, password, schema string) cha
 	pkt := []byte{0, 0, 0, 0, gomysql.COM_CHANGE_USER}
 	pkt = append(pkt, user...)
 	pkt = append(pkt, 0)
-	oldAuth := []byte("scrambled-with-the-old-salt")
+	oldAuth := []byte("ignored-auth-data")
 	pkt = append(pkt, byte(len(oldAuth)))
 	pkt = append(pkt, oldAuth...)
 	pkt = append(pkt, schema...)
@@ -239,7 +239,7 @@ func TestChangeUser_toAnotherLogin(t *testing.T) {
 }
 
 // ProxySQL answers the auth switch with the scramble of the handshake's salt.
-// The port asks with that same salt, as MySQL does, so ProxySQL's answer
+// The port asks with that same salt, so ProxySQL's answer
 // checks; a wrong password is still refused.
 func TestChangeUser_likeProxySQL(t *testing.T) {
 	p := newTwoServerPort(t)
@@ -668,5 +668,36 @@ func TestResetConnection_keepsTheDatabase(t *testing.T) {
 	}
 	if gotSchema != "shop" {
 		t.Fatalf("reset rebound with database %q, want shop", gotSchema)
+	}
+}
+
+// A USE sent as statement text (what JDBC, PHP and Python drivers send) goes
+// to the bound handler, not through the proxy's UseDB; a reset must keep that
+// database too, not the one chosen before it.
+func TestResetConnection_keepsADatabaseChosenByStatement(t *testing.T) {
+	var gotSchema string
+	inner := shim.NewHandler(nil, nil)
+	r := &routingHandler{
+		user:  "server-b",
+		inner: inner,
+		credentials: func(string) (server.Credential, bool, any) {
+			return server.Credential{Passwords: []string{"x"}}, true, changeTicket{}
+		},
+		rebind: func(_ string, schema string, _ changeTicket) error {
+			gotSchema = schema
+			return nil
+		},
+	}
+	if err := r.UseDB("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.HandleQuery("USE b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ResetConnection(); err != nil {
+		t.Fatal(err)
+	}
+	if gotSchema != "b" {
+		t.Fatalf("reset rebound with database %q, want b (chosen by USE b)", gotSchema)
 	}
 }

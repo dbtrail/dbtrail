@@ -96,10 +96,17 @@ func (s *Session) HandleCommand() error {
 		if ca, ok := v.(closeAfter); ok {
 			// A refused change of user: say why, then end the connection,
 			// which is neither on its old user nor on the new one any more.
+			if ca.lost {
+				// The connection broke mid-exchange: nothing to answer, and
+				// nothing was refused.
+				c.Close()
+				c.Conn = nil
+				return fmt.Errorf("connection lost during a change of user: %w", ca.err)
+			}
 			_ = c.WriteValue(ca.err)
 			c.Close()
 			c.Conn = nil
-			return fmt.Errorf("%w: %w", ErrChangeUserRefused, ca.err)
+			return fmt.Errorf("%w (%s): %w", ErrChangeUserRefused, ca.why, ca.err)
 		}
 		// The session's status flags as they are now that the command ran
 		// (#2110): on this answer, and on the connection for the EOF and OK

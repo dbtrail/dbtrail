@@ -562,6 +562,14 @@ func (h *Handler) UseDB(dbName string) error {
 	return nil
 }
 
+// CurrentDB is the database the connection is on now: the last one a USE
+// (COM_INIT_DB or statement text) or the serving layer's seed chose.
+func (h *Handler) CurrentDB() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.db
+}
+
 // HandleQuery dispatches the incoming statement. We first try to
 // parse it as a time-travel query (any of _flashback, _snapshot,
 // _diff); if it's recognised but malformed we return that error to

@@ -5,6 +5,8 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
@@ -43,16 +45,27 @@ var ErrChangeUserRefused = errors.New("connection closed after a refused change 
 
 // closeAfter is a dispatch answer written before the session closes the
 // connection: a change of user that is refused leaves no connection behind,
-// neither on the old user nor half way to the new one.
-type closeAfter struct{ err error }
+// neither on the old user nor half way to the new one. err is what the client
+// reads; why is for the operator's log only (the client reads the same
+// "Access denied" for an unknown user as for a wrong password). lost marks a
+// connection that broke during the exchange: nothing was refused.
+type closeAfter struct {
+	err  error
+	why  string
+	lost bool
+}
+
+// saltFallbackWarned: the warning that the handshake's salt could not be
+// read is given once per process.
+var saltFallbackWarned sync.Once
 
 // errChangeUserMalformed is a COM_CHANGE_USER packet that cannot be read.
 var errChangeUserMalformed = mysql.NewError(mysql.ER_MALFORMED_PACKET, "malformed COM_CHANGE_USER packet")
 
 // changeUserPacket is what the session reads from a COM_CHANGE_USER packet.
 // The auth data in it is ignored: the session asks for the password again
-// with an auth switch, which every client that sends COM_CHANGE_USER answers,
-// and checks only that answer.
+// with an auth switch, which a client with CLIENT_PLUGIN_AUTH (required in
+// changeUser) answers, and checks only that answer.
 type changeUserPacket struct {
 	user, schema string
 }
@@ -90,19 +103,18 @@ func parseChangeUser(data []byte, capability uint32) (changeUserPacket, error) {
 
 // changeUser answers COM_CHANGE_USER: it reads the packet, asks the handler
 // what authenticates the user, checks the client's answer to an auth switch
-// that carries the handshake's salt,
-// and then has the handler bind the connection. Every refusal is a
-// closeAfter.
+// that carries the handshake's salt, and then has the handler bind the
+// connection. Every refusal is a closeAfter.
 func (s *Session) changeUser(uc UserChanger, data []byte) any {
 	p, err := parseChangeUser(data, s.conn.Capability())
 	if err != nil {
-		return closeAfter{err}
+		return closeAfter{err: err, why: "malformed packet"}
 	}
 	if s.conn.Capability()&mysql.CLIENT_PLUGIN_AUTH == 0 {
 		// The password is checked through an auth switch, which such a
 		// client would read as a request for the old (pre-4.1) password.
-		return closeAfter{mysql.NewError(mysql.ER_NOT_SUPPORTED_AUTH_MODE,
-			"changing the user of a connection needs a client that supports authentication plugins; open a new connection")}
+		return closeAfter{err: mysql.NewError(mysql.ER_NOT_SUPPORTED_AUTH_MODE,
+			"changing the user of a connection needs a client that supports authentication plugins; open a new connection"), why: "client without CLIENT_PLUGIN_AUTH"}
 	}
 	cred, found, ticket := uc.ChangeUserCredential(p.user)
 	plugin := cred.AuthPluginName
@@ -110,14 +122,22 @@ func (s *Session) changeUser(uc UserChanger, data []byte) any {
 		plugin = mysql.AUTH_NATIVE_PASSWORD
 	}
 	if plugin != mysql.AUTH_NATIVE_PASSWORD && plugin != mysql.AUTH_CACHING_SHA2_PASSWORD {
-		return closeAfter{mysql.NewError(mysql.ER_NOT_SUPPORTED_AUTH_MODE,
-			fmt.Sprintf("changing the user of a connection is not supported under %s; open a new connection", plugin))}
+		return closeAfter{err: mysql.NewError(mysql.ER_NOT_SUPPORTED_AUTH_MODE,
+			fmt.Sprintf("changing the user of a connection is not supported under %s; open a new connection", plugin)), why: "unsupported auth plugin " + plugin}
 	}
-	// The handshake's salt, as MySQL asks: ProxySQL answers with the scramble
-	// of that salt whatever the switch carries (see handshakeSalt).
+	// The handshake's salt, never a new one (MySQL keeps the connection's
+	// salt for a change of user too): ProxySQL answers with the scramble of
+	// that salt whatever the switch carries (see handshakeSalt).
 	salt := handshakeSalt(s.conn)
 	if salt == nil {
+		// Unreadable only if a go-mysql upgrade moved the field, which
+		// TestHandshakeSalt_readsTheLibrarysField exists to catch first. A
+		// fresh salt still serves clients that scramble the switch's salt;
+		// ProxySQL's changes would fail with 1045.
 		salt = mysql.RandomBuf(20)
+		saltFallbackWarned.Do(func() {
+			slog.Warn("MySQL port: cannot read the connection's handshake salt from go-mysql (the library changed?); a change of user asks with a fresh salt, which ProxySQL answers wrongly, so its changes of user will be refused with 1045")
+		})
 	}
 	sw := make([]byte, 4, 4+1+len(plugin)+1+len(salt)+1)
 	sw = append(sw, mysql.EOF_HEADER)
@@ -126,31 +146,34 @@ func (s *Session) changeUser(uc UserChanger, data []byte) any {
 	sw = append(sw, salt...)
 	sw = append(sw, 0) // as MySQL writes it; the official client needs it
 	if err := s.conn.WritePacket(sw); err != nil {
-		return closeAfter{err}
+		return closeAfter{err: err, lost: true}
 	}
 	answer, err := s.conn.ReadPacket()
 	if err != nil {
-		return closeAfter{err}
+		return closeAfter{err: err, lost: true}
 	}
 	if len(answer) == 1 && answer[0] == 0 {
 		answer = nil // an empty password, sent as a lone NUL
 	}
 	denied := mysql.NewError(mysql.ER_ACCESS_DENIED_ERROR,
 		fmt.Sprintf("Access denied for user '%s'@'%s' (using password: %s)", p.user, s.conn.RemoteAddr(), yesNo(len(answer) > 0)))
-	if !found || !passwordMatches(plugin, salt, answer, cred.Passwords) {
-		return closeAfter{denied}
+	switch {
+	case !found:
+		return closeAfter{err: denied, why: "no password is accepted for this user (unknown user, or the port is off)"}
+	case !passwordMatches(plugin, salt, answer, cred.Passwords):
+		return closeAfter{err: denied, why: "wrong password"}
 	}
 	if plugin == mysql.AUTH_CACHING_SHA2_PASSWORD {
 		// Fast authentication succeeded: the client waits for this before
 		// the OK.
 		if err := s.conn.WritePacket([]byte{0, 0, 0, 0, mysql.MORE_DATE_HEADER, mysql.CACHE_SHA2_FAST_AUTH}); err != nil {
-			return closeAfter{err}
+			return closeAfter{err: err, lost: true}
 		}
 	}
 	// What the old user prepared is not the new user's (MySQL drops it too).
 	s.dropStatements()
 	if err := uc.ChangeUser(p.user, p.schema, ticket); err != nil {
-		return closeAfter{err}
+		return closeAfter{err: err, why: "binding the new user failed"}
 	}
 	return nil
 }
@@ -159,7 +182,7 @@ func (s *Session) changeUser(uc UserChanger, data []byte) any {
 func (s *Session) resetConnection(uc UserChanger) any {
 	s.dropStatements()
 	if err := uc.ResetConnection(); err != nil {
-		return closeAfter{err}
+		return closeAfter{err: err, why: "reset refused"}
 	}
 	return nil
 }

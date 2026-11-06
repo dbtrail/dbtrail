@@ -297,11 +297,21 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 			proxy.inner.Close()
 			proxy.inner = nil
 		}
-		proxy.fail, proxy.onPanic, proxy.pendingDB, proxy.currentDB = nil, nil, schema, schema
+		proxy.fail, proxy.onPanic, proxy.pendingDB, proxy.currentDB = nil, nil, "", ""
 		u, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, user, t.loginServer, t.epoch, gate, cfg, logger, closeConn)
 		proxy.untrack = u
 		if err != nil {
 			return err
+		}
+		// The schema the change asked for, refused as MySQL refuses it (the
+		// handshake's own default database stays best-effort, as before):
+		// a change of user that answered OK on another schema would send
+		// unqualified statements somewhere the client did not ask for.
+		if schema != "" {
+			if err := proxy.inner.UseDB(schema); err != nil {
+				return err
+			}
+			proxy.currentDB = schema
 		}
 		proxy.user, proxy.loginServer, proxy.epoch = user, t.loginServer, t.epoch
 		return nil
@@ -329,7 +339,8 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 					// refused (a wrong password, say) is worth seeing.
 					level = slog.LevelWarn
 				}
-				logger.Log(context.Background(), level, "flashback connection ended", "err", err, "remote", c.RemoteAddr())
+				logger.Log(context.Background(), level, "flashback connection ended", "err", err, "remote", c.RemoteAddr(),
+					"user", proxy.user, "login_server", proxy.loginServer)
 			}
 			return
 		}
@@ -1027,10 +1038,11 @@ type routingHandler struct {
 	// under; loginEpochNow reads the current one (console.Server.LoginEpoch).
 	epoch         uint64
 	loginEpochNow func() uint64
-	// currentDB is the database the client last chose (USE, or the
-	// handshake's); a reset keeps it, as MySQL does, and a proxy that tracks
-	// its backends' database would otherwise send the next statement to
-	// another one.
+	// currentDB is the database the client chose through this proxy
+	// (COM_INIT_DB, the handshake's, or a change of user's). A reset keeps
+	// the database, as MySQL does, and reads it from the bound handler when
+	// there is one, because a USE sent as statement text reaches only that
+	// handler; currentDB is what a reset uses while nothing is bound.
 	currentDB   string
 	credentials func(user string) (server.Credential, bool, any)
 	rebind      func(user, schema string, t changeTicket) error
@@ -1097,7 +1109,14 @@ func (r *routingHandler) ResetConnection() error {
 	// Tracked under the epoch the connection's credential was read with,
 	// not a fresh one: equal here, by the check above.
 	t.epoch = r.epoch
-	return r.rebind(r.user, r.currentDB, t)
+	// The database the bound handler is on: a USE sent as statement text
+	// changes it without passing through UseDB here. currentDB only while
+	// nothing is bound (a failed binding keeps what the client asked for).
+	db := r.currentDB
+	if r.inner != nil {
+		db = r.inner.CurrentDB()
+	}
+	return r.rebind(r.user, db, t)
 }
 
 func (r *routingHandler) UseDB(dbName string) error {
