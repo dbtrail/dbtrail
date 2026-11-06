@@ -15824,21 +15824,28 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
 
 // proxyLoginFacts is what the card says about the two logins, without
 // buttons. cur is the server picked in the sidebar ("" when none; null when
-// it is picked but the server list could not be read); fb is GET
+// one is picked and it is not in the server list this page has: the list
+// could not be read, or the server is gone since); fb is GET
 // /api/flashback. Pure, so it is tested in node.
 function proxyLoginFacts(fb, cur) {
-  const app = cur === null ? { value: "Unknown", cap: "the server list could not be read", can: false, bad: true }
+  const app = cur === null ? { value: "Unknown", cap: "the server picked is not in the server list", can: false, bad: true }
     : !cur ? { value: "None", cap: "no server picked in the sidebar", can: false }
     : cur.kind !== "registry" ? { value: "None", cap: "the command-line server cannot have one", can: false }
     : cur.port_user ? { value: cur.port_user, cap: "for " + cur.name + (cur.has_port_password ? "" : ", with no password saved: the port refuses it"),
       can: true, bad: !cur.has_port_password }
     : { value: "None", cap: "for " + cur.name, can: true };
-  const mon = !fb.can_manage ? { value: "Not here", can: false, error: "", note: fb.source === "startup"
-      ? "The monitor login is not available when the port's address is set where DBTrail is started."
-      : "The monitor login cannot be changed by this DBTrail: the port's saved setting cannot be written.", cap: "not available on this port" }
+  // Not managed here for two reasons: an address set at startup, where the
+  // port takes no monitor login at all, or a settings file a newer DBTrail
+  // wrote, which the port still reads (its monitor login works) and this
+  // page cannot change.
+  const locked = fb.can_manage ? "" : fb.source === "startup"
+    ? "The monitor login is not available when the port's address is set where DBTrail is started."
+    : "The monitor login cannot be changed by this DBTrail: the port's saved setting was written by a newer version.";
+  const mon = locked && fb.source === "startup" ? { value: "Not here", cap: "not available on this port", error: "", note: locked }
     : fb.monitor_user && !fb.has_monitor_password ? { value: fb.monitor_user, cap: "no password saved: the port refuses it", can: true, error: "", bad: true }
-    : fb.monitor_user ? { value: fb.monitor_user, cap: fb.monitor_error ? "refused at the port" : "for every server on the port", can: true, error: fb.monitor_error || "" }
+    : fb.monitor_user ? { value: fb.monitor_user, cap: fb.monitor_error ? "refused at the port" : "answers the proxy's checks on this port", can: true, error: fb.monitor_error || "" }
     : { value: "None", cap: "the proxy's checks are refused", can: true, error: "" };
+  if (locked && !mon.note) { mon.note = locked; mon.can = false; }
   return { app, mon };
 }
 
@@ -15851,18 +15858,19 @@ function proxyLoginFacts(fb, cur) {
 function proxyLoginForm(kind, user, saved, hasPassword, save, remove, done) {
   const u = el("input", { class: "input cn-sql-addr", type: "text", value: user || "", "aria-label": kind + " username", spellcheck: "false", autocomplete: "off" });
   const pw = el("input", { class: "input cn-sql-addr", type: "password", value: "", "aria-label": kind + " password", autocomplete: "new-password",
-    placeholder: saved && hasPassword ? "a new password replaces the saved one" : "" });
+    placeholder: saved && hasPassword ? "a new one replaces it and closes its connections" : "" });
   const msg = el("p", { class: "form-hint" });
   const say = (text, bad) => { msg.textContent = text; msg.className = "form-hint" + (bad ? " cn-sql-err" : ""); };
   const go = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Save " + kind.toLowerCase() });
   const rm = saved ? el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Remove " + kind.toLowerCase() }) : null;
   const busy = (on) => { go.disabled = on; if (rm) rm.disabled = on; };
-  const send = (request) => {
+  const send = (request, did) => {
     busy(true);
     say("", false);
     return request().then((answer) => {
       try { done(answer); } catch (err) {
-        say("Saved, but the page could not be drawn again: reload it.", true);
+        busy(false);
+        say(did + ", but the page could not be drawn again: reload it.", true);
       }
     }, (err) => {
       busy(false);
@@ -15874,14 +15882,14 @@ function proxyLoginForm(kind, user, saved, hasPassword, save, remove, done) {
   go.onclick = () => {
     const user = u.value.trim();
     if (!user || !pw.value) { say("Both the username and the password are needed.", true); return; }
-    send(() => save(user, pw.value));
+    send(() => save(user, pw.value), "Saved");
   };
   const row = el("div", { class: "cn-urlrow" }, el("span", { class: "cn-sql-lbl", text: "User" }), u,
     el("span", { class: "cn-sql-lbl", text: "Password" }), pw, go);
   if (rm) {
     rm.onclick = () => {
       if (typeof window.confirm === "function" && !window.confirm("Remove the " + kind.toLowerCase() + "?\n\nThe connections opened with it are closed.")) return;
-      send(remove);
+      send(remove, "Removed");
     };
     row.append(rm);
   }
@@ -15916,7 +15924,7 @@ function proxyLoginsCard(fb, servers, live, rt, reveal) {
   }
   if (f.mon.note) {
     body.append(el("p", { class: "cn-sql-row", text: f.mon.note }));
-  } else if (write) {
+  } else if (write && f.mon.can) {
     body.append(el("p", { class: "cn-sql-row" }, el("b", { text: "Monitor login. " }),
       "The username and password of your MySQL monitor account, the same pair as ProxySQL's mysql-monitor_username and mysql-monitor_password. It opens no server: it answers the proxy's health checks only."));
     body.append(...proxyLoginForm("Monitor login", fb.monitor_user, !!fb.monitor_user, !!fb.has_monitor_password,
@@ -15924,10 +15932,10 @@ function proxyLoginsCard(fb, servers, live, rt, reveal) {
       () => api("/api/flashback/monitor-login", { method: "DELETE" }),
       (rep) => redraw(rep)));
   }
-  if (!write) body.append(el("p", { class: "cn-sql-row", text: "Someone who can change settings can save them here." }));
+  if (!write && (f.app.can || f.mon.can)) body.append(el("p", { class: "cn-sql-row", text: "Someone who can change settings can save them here." }));
   body.append(cnFine("How the port uses them",
-    el("p", { class: "form-hint", text: "An application login is accepted under its own username only, for its own server. The monitor login answers PING, SET wait_timeout and the read_only check, which it answers 1 so the port stays in the reader hostgroup; any other statement is refused." }),
-    el("p", { class: "form-hint", text: "Changing or removing a login closes the connections opened with it. Both need the port's default authentication, mysql_native_password." }),
+    el("p", { class: "form-hint", text: "An application login is accepted under its own username only, for its own server, and only while the port itself is open. The monitor login answers PING, SET wait_timeout and the read_only check, which it answers 1 so the port stays in the reader hostgroup; any other statement is refused." }),
+    el("p", { class: "form-hint", text: "Changing or removing a login closes the connections opened with it (within a few seconds when the router serves the port). Both need the port's default authentication, mysql_native_password." }),
     el("p", { class: "form-hint", text: "With Engine Routing on, what the port sends on to your MySQL runs as the server's forwarding account, not as the application's: give each server a forwarding account with no more grants than that application has." })));
   return card;
 }

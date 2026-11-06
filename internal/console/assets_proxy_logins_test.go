@@ -43,6 +43,12 @@ const find = (wrap, tag, pred) => { let hit = null; walk(card(wrap), (x) => { if
   out.startup = read(draw(d.servers, d.startup));
   out.noMonitorPassword = read(draw(d.servers, Object.assign({}, d.withMonitor, { has_monitor_password: false })));
   out.listUnread = read(draw([], d.on));
+  out.newerFile = read(draw(d.servers, Object.assign({}, d.withMonitor, { can_manage: false, source: "saved" })));
+  caps({ "settings:write": false });
+  run('currentServer = "default";');
+  out.lockedNothing = read(draw(d.servers.concat([{ id: "default", name: "default", kind: "boot" }]), d.startup));
+  run('currentServer = "' + d.prodID + '";');
+  caps(null);
 
   ctx.__calls = []; ctx.__toasts = []; ctx.__asked = []; ctx.__answer = null; ctx.__fail = null;
   run('api = (p, o) => { if (String(p).endsWith("/route-grants") || p === "/api/router") return Promise.resolve({}); __calls.push([p, o]); return __fail ? Promise.reject(new Error(__fail)) : Promise.resolve(__answer); };');
@@ -65,8 +71,12 @@ const find = (wrap, tag, pred) => { let hit = null; walk(card(wrap), (x) => { if
   out.refused = await step(null, () => fill(live, "Monitor login username", "prod") && fill(live, "Monitor login password", "x") && press(live, "Save monitor login"));
   out.refusedEnabled = !find(live, "button", (x) => x._text === "Save monitor login").disabled;
   ctx.__fail = null;
+  // A monitor login on the live panel, so it has a Remove to press below.
+  out.monSaveAgain = await step(d.withMonitor, () => fill(live, "Monitor login username", "monitor") && fill(live, "Monitor login password", "mon-pw") && press(live, "Save monitor login"));
   run('redrawSQLPanel = () => { throw new Error("draw failed"); };');
   out.drawFailed = await step(d.withMonitor, () => fill(live, "Monitor login username", "monitor") && fill(live, "Monitor login password", "m") && press(live, "Save monitor login"));
+  out.drawFailedEnabled = !find(live, "button", (x) => x._text === "Save monitor login").disabled;
+  out.removeDrawFailed = await step(d.on, () => press(live, "Remove monitor login"));
   console.log(JSON.stringify(out));
 })();
 `
@@ -144,7 +154,10 @@ func TestSQLPortPanel_proxyLogins(t *testing.T) {
 	}
 	var got struct {
 		Off, None, WithLogins, MonitorError, Boot, Locked, Startup, NoMonitorPassword, ListUnread proxyDrawn
+		NewerFile, LockedNothing                                                                  proxyDrawn
+		RemoveDrawFailed                                                                          proxyPressed
 		EmptySave, AppSave, MonSave, AppRemove, MonRemove, EmptyMonitor, Refused, DrawFailed      proxyPressed
+		DrawFailedEnabled                                                                         bool
 		RefusedEnabled                                                                            bool
 	}
 	if err := json.Unmarshal(runNodeConnectArgs(t, renderHarnessJS+proxyLoginsJS, string(arg)), &got); err != nil {
@@ -165,7 +178,7 @@ func TestSQLPortPanel_proxyLogins(t *testing.T) {
 	if len(got.None.Inputs) != 4 || strings.Contains(strings.Join(got.None.Buttons, ","), "Remove") {
 		t.Errorf("no logins: inputs %v buttons %v", got.None.Inputs, got.None.Buttons)
 	}
-	contains("with logins", got.WithLogins.Text, "Application login app1 for prod", "Monitor login monitor for every server on the port")
+	contains("with logins", got.WithLogins.Text, "Application login app1 for prod", "Monitor login monitor answers the proxy's checks on this port")
 	contains("with logins", strings.Join(got.WithLogins.Buttons, ","), "Remove application login", "Remove monitor login")
 	contains("with logins", strings.Join(got.WithLogins.Inputs, ","), "Application login username=app1", "Application login password=", "Monitor login username=monitor")
 	for _, d := range []proxyDrawn{got.WithLogins, got.None, got.Locked} {
@@ -211,9 +224,23 @@ func TestSQLPortPanel_proxyLogins(t *testing.T) {
 		t.Errorf("startup port: buttons %v, want the application login only", got.Startup.Buttons)
 	}
 	contains("monitor login with no password", got.NoMonitorPassword.Text, "no password saved: the port refuses it")
-	contains("server list not read", got.ListUnread.Text, "Application login Unknown the server list could not be read")
+	contains("server list not read", got.ListUnread.Text, "Application login Unknown the server picked is not in the server list")
 	if strings.Contains(got.ListUnread.Text, "no server picked") {
 		t.Errorf("server list not read says no server is picked: %q", got.ListUnread.Text)
+	}
+	contains("newer settings file", got.NewerFile.Text, "Monitor login monitor answers the proxy's checks on this port",
+		"the port's saved setting was written by a newer version")
+	if strings.Contains(strings.Join(got.NewerFile.Buttons, ","), "monitor login") {
+		t.Errorf("newer settings file: a monitor form is offered: %v", got.NewerFile.Buttons)
+	}
+	if strings.Contains(got.LockedNothing.Text, "Someone who can change settings") {
+		t.Errorf("nothing to save, yet the card says someone can save: %q", got.LockedNothing.Text)
+	}
+	if !got.DrawFailedEnabled {
+		t.Error("a save whose drawing failed left the buttons disabled")
+	}
+	if !strings.Contains(got.RemoveDrawFailed.After.Text, "Removed, but the page could not be drawn again") {
+		t.Errorf("a removal that went through and a drawing that failed: %q", got.RemoveDrawFailed.After.Text)
 	}
 	if len(got.EmptyMonitor.Calls) != 0 || !strings.Contains(got.EmptyMonitor.After.Text, "Both the username and the password are needed.") {
 		t.Errorf("an empty monitor save: calls %v, text %q", got.EmptyMonitor.Calls, got.EmptyMonitor.After.Text)

@@ -188,7 +188,7 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
   The MySQL clients page saves it too, under *A proxy in front*, for the
-  server picked in the sidebar.
+  server picked in the sidebar, while the port is on.
 
 <a id="monitor-login"></a>
 **A monitor login: for a proxy's health checks.** ProxySQL checks every
@@ -235,7 +235,7 @@ curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: applicat
   is refused, logged once, and named in `monitor_error` on
   `GET /api/flashback`.
 - **From the web interface:** the MySQL clients page saves and removes
-  it under *A proxy in front*.
+  it under *A proxy in front*, while the port is on.
 - **Not with an address set at startup.** When the port's address is set
   where DBTrail is started, the monitor login is not available: the routes
   answer `409` and the port accepts no monitor login.
