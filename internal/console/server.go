@@ -681,8 +681,12 @@ type Server struct {
 	readRouting ReadRoutingConfig
 	// routed tracks the port's client connections bound to a read router,
 	// per server, to close them when the account they forward with changes.
-	routed  *routedConns
-	routing *routingStats
+	routed *routedConns
+	// loginConns tracks the port's client connections opened with a
+	// server's application login, per server, to close them when that
+	// login is changed or removed (port_login.go).
+	loginConns loginConnSet
+	routing    *routingStats
 	// copyAges is how far behind the copy's answers' data was, per server
 	// (#2369), for the router's status document.
 	copyAges copyAges
@@ -1088,6 +1092,8 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("GET /api/servers/{id}/hidden", s.handleHiddenGet)
 	api.HandleFunc("PUT /api/servers/{id}/hidden", s.recordAction("hidden-rules", s.handleHiddenPut))
 	api.HandleFunc("PUT /api/servers/{id}/sql-mode", s.recordAction("sql-mode", s.handleSQLModePut))
+	api.HandleFunc("PUT /api/servers/{id}/port-login", s.recordAction("port-login", s.handlePortLoginPut))
+	api.HandleFunc("DELETE /api/servers/{id}/port-login", s.recordAction("port-login", s.handlePortLoginDelete))
 	// Monitor verbs: 403 unless this process is a control-plane supervisor
 	// (`bintrail-console watch`). The standalone console stays read-only.
 	api.HandleFunc("POST /api/servers/{id}/monitor/start", s.handleMonitorStart)

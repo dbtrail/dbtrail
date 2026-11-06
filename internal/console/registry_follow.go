@@ -165,6 +165,7 @@ func (s *Server) applyRegistryChange(c RegistryChange) {
 		s.cm.evict(id)
 		s.sessionProfiles.invalidate(id)
 		s.dropRoutedConns(id, "the server was deleted", forwardDSNOf(c.Old), c.Old.SourceSSL())
+		s.dropLoginConns(id, "the server was deleted")
 		slog.Info("console: a server was removed from the registry", "server", c.Old.Name)
 		return
 	}
@@ -173,6 +174,9 @@ func (s *Server) applyRegistryChange(c RegistryChange) {
 	}
 	if c.New.SQLLikeIgnoresCase != c.Old.SQLLikeIgnoresCase {
 		s.closeRoutedConns(id, likeSwitchChanged)
+	}
+	if c.New.PortUser != c.Old.PortUser || c.New.PortPassword != c.Old.PortPassword {
+		s.dropLoginConns(id, "the server's application login changed")
 	}
 	if c.New.DSN != c.Old.DSN {
 		s.cm.evict(id)

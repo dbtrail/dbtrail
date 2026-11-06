@@ -93,6 +93,13 @@ type FlashbackTarget struct {
 	// forwarding account as for the source account, or it would cross the
 	// network in clear where capture is encrypted.
 	SourceSSL config.SSL
+	// ViaLogin: the username is the server's application login
+	// (ServerEntry.PortUser), not its id or name. Such a connection is
+	// handed to Server.TrackLoginConn with LoginEpoch, read before the
+	// login itself, so a login changed or removed while it connects is
+	// not served.
+	ViaLogin   bool
+	LoginEpoch uint64
 }
 
 // SQLOnCopy is the free-SQL executor the embedded port hands each connection.
@@ -291,7 +298,22 @@ func (s *Server) sqlOnCopyFor(b *bundle, id string) (*SQLOnCopy, string) {
 // database" error on the client's first query. The registry is read live, so
 // servers added in the console mid-session are reachable without a restart.
 func (s *Server) ResolveFlashback(ctx context.Context, selector string) (FlashbackTarget, error) {
+	// The epoch first, the login second: see TrackLoginConn.
+	loginEpoch := s.loginConns.current()
+	loginID, viaLogin, err := s.portLoginTarget(selector)
+	if err != nil {
+		return FlashbackTarget{}, err
+	}
 	id, ok := s.flashbackTarget(selector)
+	switch {
+	case ok && viaLogin && id != loginID:
+		// portLoginMatch refuses a username that also selects another
+		// server; this is the same refusal for a registry that changed
+		// between the two reads.
+		return FlashbackTarget{}, ErrAmbiguousPortLogin
+	case !ok && viaLogin:
+		id, ok = loginID, true
+	}
 	if !ok {
 		return FlashbackTarget{}, ErrUnknownServer
 	}
@@ -319,6 +341,8 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 		ForwardGen:      forwardGen,
 		SourceSSL:       s.flashbackSourceSSL(id),
 		LikeIgnoresCase: s.flashbackLikeIgnoresCase(id),
+		ViaLogin:        viaLogin,
+		LoginEpoch:      loginEpoch,
 		TimeTravelRefusal: func() string {
 			return s.timeTravelRefusal(b)
 		},

@@ -379,6 +379,22 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	// treating Actor as a principal cannot attribute the read to a "person"
 	// named after a database (#1123). The standalone shim and the PG front-end
 	// bind their real per-tenant credential, unprefixed.
+	//
+	// A connection opened with a server's application login names the
+	// application's username, not a server: it is bound, and logged, under
+	// the server it opened, and it is tracked so that changing or removing
+	// the login closes it (console.Server.TrackLoginConn).
+	if tgt.ViaLogin {
+		user = tgt.ID
+		var ok bool
+		var untrackLogin func()
+		if untrackLogin, ok = srv.TrackLoginConn(tgt.ID, tgt.LoginEpoch, closeConn); !ok {
+			h.Close()
+			closeConn()
+			return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: this server's application login changed while connecting; reconnect")
+		}
+		untrack = untrackLogin
+	}
 	h.BindActor("server:" + user)
 	// Hidden rules (#2529): time travel reads past the views that apply
 	// them, so a server with rules refuses it, whatever free SQL can do.
@@ -433,7 +449,10 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		// the source, so that a statement in flight when the connection is
 		// dropped is ended there too.
 		var ok bool
-		if untrack, ok = srv.TrackRoutedConn(tgt.ID, tgt.ForwardGen, closeConn, fw.ThreadID); !ok {
+		untrackLogin := untrack
+		untrackRouted, ok := srv.TrackRoutedConn(tgt.ID, tgt.ForwardGen, closeConn, fw.ThreadID)
+		untrack = func() { untrackRouted(); untrackLogin() }
+		if !ok {
 			h.Close()
 			closeConn()
 			return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: this server's forwarding account changed while connecting; reconnect")
@@ -474,7 +493,7 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 // as, asks that this connection be answered from the copy alone while read
 // routing is on for the others: "shop@copy". It can only take a connection
 // out of routing, never put one in.
-const copyOnlySuffix = "@copy"
+const copyOnlySuffix = console.CopyOnlySuffix
 
 // bindReadRouterWhy is bindReadRouter with, when routing is on and the
 // server cannot route, the reason the Connect page is given.
@@ -844,18 +863,23 @@ type flashbackCreds struct {
 	authMethod string
 }
 
-// GetCredential implements server.AuthenticationHandler. It returns the shared
-// console token for EVERY username, so auth turns on the token alone — deciding
-// username validity here would leak which usernames name a real server through
-// the handshake's error code (unknown-user vs bad-password), letting an
-// unauthenticated client enumerate monitored servers; the target server is
-// validated AFTER the handshake instead (bindFlashbackHandler). found=false on
-// an empty token is defence in depth behind serveFlashback's startup guard: an
-// empty token must never authorise a passwordless MySQL handshake.
+// GetCredential implements server.AuthenticationHandler. It returns the port's
+// own passwords (the token, the generated password) for EVERY username, so
+// auth turns on them alone — deciding username validity here would leak which
+// usernames name a real server through the handshake's error code
+// (unknown-user vs bad-password), letting an unauthenticated client enumerate
+// monitored servers; the target server is validated AFTER the handshake
+// instead (bindFlashbackHandler). A username that is a server's application
+// login also gets that login's password, and only that one: a login password
+// opens its own username alone, which resolves to its own server alone
+// (console.Server.FlashbackPasswordsFor). An unknown username and a wrong
+// password still answer alike. found=false with no port password is defence
+// in depth behind serveFlashback's startup guard: nothing may authorise a
+// passwordless MySQL handshake, and a login never opens a closed port.
 func (f flashbackCreds) GetCredential(username string) (server.Credential, bool, error) {
 	// Read per handshake, so a password replaced in the web interface is the
 	// one the next client needs.
-	passwords := f.srv.FlashbackPasswords()
+	passwords := f.srv.FlashbackPasswordsFor(username)
 	if len(passwords) == 0 {
 		return server.Credential{}, false, nil
 	}

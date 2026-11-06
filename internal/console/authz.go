@@ -262,6 +262,11 @@ var apiRoutePerms = []routePerm{
 	{"PUT", "/api/servers/{}/hidden", ext.PermServersWrite},
 	// The SQL port's fresh mode (#2546): per-server, like the hidden rules.
 	{"PUT", "/api/servers/{}/sql-mode", ext.PermServersWrite},
+	// A server's application login on the MySQL port is a credential onto
+	// that server's history, like the port's own password below: the same
+	// tier.
+	{"PUT", "/api/servers/{}/port-login", ext.PermSettingsWrite},
+	{"DELETE", "/api/servers/{}/port-login", ext.PermSettingsWrite},
 	// Turning the port on, off, or giving it a new password opens (or
 	// re-keys) a network door onto every server's history: a settings
 	// mutation, and the response is the one place the password is shown.
