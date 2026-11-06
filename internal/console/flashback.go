@@ -315,6 +315,30 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 	if !ok {
 		return FlashbackTarget{}, ErrUnknownServer
 	}
+	tgt, err := s.flashbackTargetFor(ctx, id)
+	tgt.ViaLogin = viaLogin
+	return tgt, err
+}
+
+// ResolveFlashbackLogin is ResolveFlashback for a connection authenticated
+// with server id's application login password: it opens the registry entry
+// with exactly that id or nothing. No name, login or "default" is matched, so
+// a server deleted while the client logged in can never be replaced by
+// another whose name or login happens to read the same.
+func (s *Server) ResolveFlashbackLogin(ctx context.Context, id string) (FlashbackTarget, error) {
+	if _, ok := s.cm.reg.Get(id); !ok || id == "" {
+		return FlashbackTarget{}, ErrUnknownServer
+	}
+	tgt, err := s.flashbackTargetFor(ctx, id)
+	if err != nil {
+		return FlashbackTarget{}, err
+	}
+	tgt.ViaLogin = true
+	return tgt, nil
+}
+
+// flashbackTargetFor builds the target of the server with canonical id.
+func (s *Server) flashbackTargetFor(ctx context.Context, id string) (FlashbackTarget, error) {
 	b, err := s.cm.Resolve(ctx, id)
 	if err != nil {
 		return FlashbackTarget{}, err
@@ -339,7 +363,6 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 		ForwardGen:      forwardGen,
 		SourceSSL:       s.flashbackSourceSSL(id),
 		LikeIgnoresCase: s.flashbackLikeIgnoresCase(id),
-		ViaLogin:        viaLogin,
 		TimeTravelRefusal: func() string {
 			return s.timeTravelRefusal(b)
 		},

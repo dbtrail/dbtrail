@@ -341,8 +341,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		// The handshake was offered this server's application login
 		// password: the connection opens this server or nothing, whatever
 		// the username resolves to now (connCreds).
-		tgt, err = srv.ResolveFlashback(ctx, loginServer)
-		tgt.ViaLogin = err == nil
+		tgt, err = srv.ResolveFlashbackLogin(ctx, loginServer)
 	} else {
 		tgt, err = srv.ResolveFlashback(ctx, user)
 	}

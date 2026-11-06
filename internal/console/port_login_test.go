@@ -586,3 +586,34 @@ func TestFollowFiles_unreadableRegistryMovesTheEpoch(t *testing.T) {
 		t.Fatal("a connection that began before the registry broke was tracked")
 	}
 }
+
+// A connection authenticated with a login password opens the entry with
+// exactly that id or nothing: a server deleted meanwhile is not replaced by
+// one whose name reads like its id.
+func TestResolveFlashbackLogin_exactIDOnly(t *testing.T) {
+	srv := newRegistryServer(t)
+	prod := addLoginTestServer(t, srv.cm.reg, "prod")
+	// No index database here: an existing id gets as far as opening it.
+	if _, err := srv.ResolveFlashbackLogin(t.Context(), prod.ID); err == nil || errors.Is(err, ErrUnknownServer) {
+		t.Fatalf("existing id: %v, want an attempt to open it", err)
+	}
+	if err := srv.cm.reg.Delete(prod.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.cm.reg.Add(ServerEntry{Name: prod.ID, DSN: "u:p@tcp(h:3306)/other"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.ResolveFlashbackLogin(t.Context(), prod.ID); !errors.Is(err, ErrUnknownServer) {
+		t.Fatalf("a deleted server's id resolved: %v", err)
+	}
+	// The general resolution does match the name, which is why the login
+	// path must not use it.
+	if _, err := srv.ResolveFlashback(t.Context(), prod.ID); err == nil || errors.Is(err, ErrUnknownServer) {
+		t.Fatalf("ResolveFlashback by name: %v, want the impostor opened", err)
+	}
+	for _, sel := range []string{"", "default", "prod"} {
+		if _, err := srv.ResolveFlashbackLogin(t.Context(), sel); !errors.Is(err, ErrUnknownServer) {
+			t.Errorf("ResolveFlashbackLogin(%q) = %v, want unknown", sel, err)
+		}
+	}
+}
