@@ -3,6 +3,7 @@ package shim
 import (
 	"bytes"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -35,6 +36,10 @@ type UserChanger interface {
 	// error closes the connection.
 	ResetConnection() error
 }
+
+// ErrChangeUserRefused is what Session.HandleCommand returns when it closed
+// the connection after refusing a COM_CHANGE_USER or COM_RESET_CONNECTION.
+var ErrChangeUserRefused = errors.New("connection closed after a refused change of user")
 
 // closeAfter is a dispatch answer written before the session closes the
 // connection: a change of user that is refused leaves no connection behind,
@@ -91,6 +96,12 @@ func (s *Session) changeUser(uc UserChanger, data []byte) any {
 	p, err := parseChangeUser(data, s.conn.Capability())
 	if err != nil {
 		return closeAfter{err}
+	}
+	if s.conn.Capability()&mysql.CLIENT_PLUGIN_AUTH == 0 {
+		// The password is checked through an auth switch, which such a
+		// client would read as a request for the old (pre-4.1) password.
+		return closeAfter{mysql.NewError(mysql.ER_NOT_SUPPORTED_AUTH_MODE,
+			"changing the user of a connection needs a client that supports authentication plugins; open a new connection")}
 	}
 	cred, found, ticket := uc.ChangeUserCredential(p.user)
 	plugin := cred.AuthPluginName

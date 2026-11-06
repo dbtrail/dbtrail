@@ -280,6 +280,7 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	// binding, for another user or afresh. Everything the connection held
 	// for its previous user is let go first.
 	proxy.user, proxy.loginServer = mysqlConn.GetUser(), cc.loginServer
+	proxy.epoch, proxy.loginEpochNow = loginEpoch, srv.LoginEpoch
 	proxy.credentials = func(user string) (server.Credential, bool, any) {
 		// The epoch before the credential, and one reading for the
 		// credential and the server a login password opens: the handshake's
@@ -296,13 +297,13 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 			proxy.inner.Close()
 			proxy.inner = nil
 		}
-		proxy.fail, proxy.onPanic, proxy.pendingDB = nil, nil, schema
+		proxy.fail, proxy.onPanic, proxy.pendingDB, proxy.currentDB = nil, nil, schema, schema
 		u, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, user, t.loginServer, t.epoch, gate, cfg, logger, closeConn)
 		proxy.untrack = u
 		if err != nil {
 			return err
 		}
-		proxy.user, proxy.loginServer = user, t.loginServer
+		proxy.user, proxy.loginServer, proxy.epoch = user, t.loginServer, t.epoch
 		return nil
 	}
 	if err != nil {
@@ -322,7 +323,13 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	for {
 		if err := session.HandleCommand(); err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				logger.Debug("flashback connection ended", "err", err, "remote", c.RemoteAddr())
+				level := slog.LevelDebug
+				if errors.Is(err, shim.ErrChangeUserRefused) {
+					// Like a failed handshake: a change of user that was
+					// refused (a wrong password, say) is worth seeing.
+					level = slog.LevelWarn
+				}
+				logger.Log(context.Background(), level, "flashback connection ended", "err", err, "remote", c.RemoteAddr())
 			}
 			return
 		}
@@ -1016,9 +1023,18 @@ type routingHandler struct {
 	// COM_RESET_CONNECTION (UserChanger); untrack ends the current binding's
 	// tracking. All set by handleFlashbackConn.
 	user, loginServer string
-	credentials       func(user string) (server.Credential, bool, any)
-	rebind            func(user, schema string, t changeTicket) error
-	untrack           func()
+	// epoch is the login epoch the current binding's credential was read
+	// under; loginEpochNow reads the current one (console.Server.LoginEpoch).
+	epoch         uint64
+	loginEpochNow func() uint64
+	// currentDB is the database the client last chose (USE, or the
+	// handshake's); a reset keeps it, as MySQL does, and a proxy that tracks
+	// its backends' database would otherwise send the next statement to
+	// another one.
+	currentDB   string
+	credentials func(user string) (server.Credential, bool, any)
+	rebind      func(user, schema string, t changeTicket) error
+	untrack     func()
 	// pendingDB holds a default schema the client sent in the handshake
 	// (CLIENT_CONNECT_WITH_DB): go-mysql invokes UseDB DURING the handshake,
 	// before bindFlashbackHandler binds inner. Stashing it (and returning nil)
@@ -1062,21 +1078,36 @@ func (r *routingHandler) ResetConnection() error {
 	if r.rebind == nil || r.credentials == nil {
 		return gomysql.NewError(gomysql.ER_UNKNOWN_COM_ERROR, "resetting this connection is not supported")
 	}
-	_, _, ticket := r.credentials(r.user)
+	// A reset asks for no password, so it must not re-open what a
+	// password would no longer open. Nothing authenticates the user any
+	// more (the port turned off, say): refused. Opened with an application
+	// login, and ANY login changed since its credential was read: refused,
+	// because a connection whose binding failed was never tracked, so a
+	// rotated or revoked login did not close it, and this is where it would
+	// come back. The client reconnects with the password in force.
+	_, found, ticket := r.credentials(r.user)
 	t := ticket.(changeTicket)
-	if r.loginServer != "" && t.loginServer != r.loginServer {
-		// The login that opened the connection no longer opens this
-		// server: a reset does not re-open what was revoked.
-		return gomysql.NewError(gomysql.ER_ACCESS_DENIED_ERROR, "the application login of this connection changed; reconnect")
+	if !found {
+		return gomysql.NewError(gomysql.ER_ACCESS_DENIED_ERROR, "this connection's user is not accepted any more; reconnect")
+	}
+	if r.loginServer != "" && (t.loginServer != r.loginServer || r.loginEpochNow == nil || r.loginEpochNow() != r.epoch) {
+		return gomysql.NewError(gomysql.ER_ACCESS_DENIED_ERROR, "an application login changed since this connection logged in; reconnect")
 	}
 	t.loginServer = r.loginServer
-	return r.rebind(r.user, "", t)
+	// Tracked under the epoch the connection's credential was read with,
+	// not a fresh one: equal here, by the check above.
+	t.epoch = r.epoch
+	return r.rebind(r.user, r.currentDB, t)
 }
 
 func (r *routingHandler) UseDB(dbName string) error {
 	switch {
 	case r.inner != nil:
-		return r.inner.UseDB(dbName)
+		err := r.inner.UseDB(dbName)
+		if err == nil {
+			r.currentDB = dbName
+		}
+		return err
 	case r.fail != nil:
 		// Routing failed after the handshake; reject a later USE too so the
 		// failure is consistent across commands.
@@ -1085,7 +1116,7 @@ func (r *routingHandler) UseDB(dbName string) error {
 		// Pre-bind: go-mysql calls UseDB during the handshake, before inner is
 		// set. Stash it (bindFlashbackHandler replays it) and let the handshake
 		// complete rather than aborting the connection.
-		r.pendingDB = dbName
+		r.pendingDB, r.currentDB = dbName, dbName
 		return nil
 	}
 }

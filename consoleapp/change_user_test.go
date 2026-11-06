@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/server"
 
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
@@ -272,7 +273,7 @@ func TestChangeUser_stateAndRevocation(t *testing.T) {
 	if _, err := p.f.owner.SetPortLogin(p.a.ID, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, "app1's removal to reach the router", func() bool { return loginAs(t, p.addr, "app1", "pw1") != 0 })
+	waitUntil(t, "app1's removal to reach the router", func() bool { return loginAsQuiet(p.addr, "app1", "pw1") == gomysql.ER_ACCESS_DENIED_ERROR })
 	if err := c.Ping(); err != nil {
 		t.Fatalf("revoking the OLD login closed the changed connection: %v", err)
 	}
@@ -431,5 +432,150 @@ func TestChangeUser_refusalCodes(t *testing.T) {
 	c = p.connect(t, "app1", "pw1")
 	if r := changeUser(t, c, "no-such-server", "port-pw", ""); r.code != gomysql.ER_BAD_DB_ERROR {
 		t.Errorf("a username that names no server: %+v, want 1049", r)
+	}
+}
+
+// A reset asks for no password, so it never re-opens what a password would
+// not: opened with a login, it is refused once any login changed since the
+// connection logged in (a connection whose binding had failed was never
+// tracked, so a rotation did not close it); and refused when nothing
+// authenticates its user any more. Both close the connection.
+func TestResetConnection_refusedAfterALoginChange(t *testing.T) {
+	p := newTwoServerPort(t)
+	c := p.connect(t, "app2", "pw2")
+	if _, err := p.f.owner.SetPortLogin(p.a.ID, "app1", "pw1-rotated"); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the rotation to reach the router", func() bool { return loginAsQuiet(p.addr, "app1", "pw1-rotated") == 0 })
+	r := resetConnection(t, c)
+	if r.code != gomysql.ER_ACCESS_DENIED_ERROR {
+		t.Fatalf("reset after a login change: %+v, want 1045", r)
+	}
+	if err := c.Ping(); err == nil {
+		t.Fatal("the refused reset left the connection open")
+	}
+	// A connection opened with a server's name and the port's password is
+	// no login connection: a login change does not concern its reset.
+	c2 := p.connect(t, "server-b", "port-pw")
+	if _, err := p.f.owner.SetPortLogin(p.a.ID, "app1", "pw1"); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the second rotation", func() bool { return loginAsQuiet(p.addr, "app1", "pw1") == 0 })
+	if r := resetConnection(t, c2); r.code != 0 || r.closed {
+		t.Fatalf("reset of a port-password connection after a login change: %+v", r)
+	}
+}
+
+func TestResetConnection_refusedWhenThePortIsOff(t *testing.T) {
+	p := newTwoServerPort(t)
+	c := p.connect(t, "server-b", "port-pw")
+	p.f.savePortFile(t, false, "port-pw")
+	waitUntil(t, "the port to stop taking logins", func() bool {
+		cc, err := client.Connect(p.addr, "server-b", "port-pw", "")
+		if err == nil {
+			cc.Close()
+		}
+		return err != nil
+	})
+	if r := resetConnection(t, c); r.code == 0 && !r.closed {
+		t.Fatalf("a reset on a port turned off was accepted: %+v", r)
+	}
+}
+
+// The second belt of a reset: nothing authenticates the user any more. (A
+// port turned off already closes every connection, so this is not reached
+// through the port today.)
+func TestResetConnection_refusedWithoutACredential(t *testing.T) {
+	r := &routingHandler{
+		user: "server-b",
+		credentials: func(string) (server.Credential, bool, any) {
+			return server.Credential{}, false, changeTicket{}
+		},
+		rebind: func(string, string, changeTicket) error {
+			t.Fatal("a reset rebound a user nothing authenticates")
+			return nil
+		},
+	}
+	if err := r.ResetConnection(); !isMySQLCode(err, gomysql.ER_ACCESS_DENIED_ERROR) {
+		t.Fatalf("reset with no credential: %v, want 1045", err)
+	}
+}
+
+// The case a reset must not reopen: a connection opened with a login whose
+// first binding failed (this console opens a server's index when it binds,
+// and there is none) is never tracked, so rotating the login does not close
+// it. Its reset is refused because the login changed, not attempted again.
+func TestResetConnection_untrackedLoginAfterRotation(t *testing.T) {
+	f := newRouterFiles(t)
+	a, err := f.owner.Add(console.ServerEntry{Name: "server-a", DSN: "idxuser:idxsecret@tcp(127.0.0.1:1)/idx_a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetPortLogin(a.ID, "app1", "pw1"); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := console.LoadRegistryFollower(f.servers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: follower})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	mysrv, err := shim.NewMySQLServer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := routerFlashbackConfig(routerSettings{Policy: readrouter.DefaultPolicy()})
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleFlashbackConn(context.Background(), srv, c, mysrv, flashbackCreds{srv: srv}, shim.NewGate(0), cfg, slog.Default())
+	}()
+	c, err := client.Connect(ln.Addr().String(), "app1", "pw1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Execute("SHOW ROUTER STATUS"); err == nil {
+		t.Fatal("the binding did not fail: this test needs an untracked connection")
+	}
+	if _, err := f.owner.SetPortLogin(a.ID, "app1", "pw1-rotated"); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	if r := resetConnection(t, c); r.code != gomysql.ER_ACCESS_DENIED_ERROR {
+		t.Fatalf("reset of an untracked login connection after a rotation: %+v, want 1045", r)
+	}
+}
+
+// A reset keeps the database the client chose.
+func TestResetConnection_keepsTheDatabase(t *testing.T) {
+	var gotSchema string
+	r := &routingHandler{
+		user: "server-b",
+		credentials: func(string) (server.Credential, bool, any) {
+			return server.Credential{Passwords: []string{"x"}}, true, changeTicket{}
+		},
+		rebind: func(_ string, schema string, _ changeTicket) error {
+			gotSchema = schema
+			return nil
+		},
+	}
+	if err := r.UseDB("shop"); err != nil { // before the binding: stashed
+		t.Fatal(err)
+	}
+	if err := r.ResetConnection(); err != nil {
+		t.Fatal(err)
+	}
+	if gotSchema != "shop" {
+		t.Fatalf("reset rebound with database %q, want shop", gotSchema)
 	}
 }

@@ -99,7 +99,7 @@ func (s *Session) HandleCommand() error {
 			_ = c.WriteValue(ca.err)
 			c.Close()
 			c.Conn = nil
-			return fmt.Errorf("connection closed after a refused change of user: %w", ca.err)
+			return fmt.Errorf("%w: %w", ErrChangeUserRefused, ca.err)
 		}
 		// The session's status flags as they are now that the command ran
 		// (#2110): on this answer, and on the connection for the EOF and OK

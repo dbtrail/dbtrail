@@ -179,8 +179,12 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   the connection, which is never left on the previous user: a wrong
   password answers `1045`, a malformed packet `1835`, a username that names
   no server (with the port's password) `1049`.
-  `COM_RESET_CONNECTION` binds the connection afresh to the user it has.
-  Both work under `mysql_native_password` and `caching_sha2_password`.
+  `COM_RESET_CONNECTION` binds the connection afresh to the user it has,
+  in the database it had chosen; a connection opened with a login is
+  refused (and closed) if any login changed since it logged in, since a
+  reset asks for no password. Both work under `mysql_native_password`;
+  under `caching_sha2_password` a change of user takes the port's own
+  password only, as logins are not offered there.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
 
