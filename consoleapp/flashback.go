@@ -256,8 +256,9 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	// an application login is served only if no login changed since
 	// (console.Server.LoginEpoch).
 	loginEpoch := srv.LoginEpoch()
+	cc := &connCreds{AuthenticationHandler: creds}
 	// shim.NewConn: the handshake announces autocommit (#2110).
-	mysqlConn, err := shim.NewConn(wc, mysrv, creds, proxy)
+	mysqlConn, err := shim.NewConn(wc, mysrv, cc, proxy)
 	if err != nil {
 		level := slog.LevelWarn
 		if isFlashbackProbe(err) {
@@ -269,7 +270,7 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 		return
 	}
 
-	untrack, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, loginEpoch, gate, cfg, logger, func() { _ = c.Close() })
+	untrack, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, cc.loginServer, loginEpoch, gate, cfg, logger, func() { _ = c.Close() })
 	defer untrack()
 	if err != nil {
 		// Auth already succeeded; surface the routing failure on the client's
@@ -331,29 +332,28 @@ func flashbackConnPanicked(logger *slog.Logger, remote net.Addr, r any, stack []
 // server's application login is registered too, so a change to that login
 // closes it; loginEpoch is console.Server.LoginEpoch read before the
 // handshake.
-func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, loginEpoch uint64, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger, closeConn func()) (untrack func(), err error) {
+func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, loginServer string, loginEpoch uint64, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger, closeConn func()) (untrack func(), err error) {
 	untrack = func() {}
 	user := mysqlConn.GetUser()
-	tgt, err := srv.ResolveFlashback(ctx, user)
+	var tgt console.FlashbackTarget
+	copyOnly := false
+	if loginServer != "" {
+		// The handshake was offered this server's application login
+		// password: the connection opens this server or nothing, whatever
+		// the username resolves to now (connCreds).
+		tgt, err = srv.ResolveFlashback(ctx, loginServer)
+		tgt.ViaLogin = err == nil
+	} else {
+		tgt, err = srv.ResolveFlashback(ctx, user)
+	}
 	// "<server>@copy": this connection asks for the copy alone (#2341). A
 	// server whose own name ends that way is found first, under its name.
-	copyOnly := false
-	if errors.Is(err, console.ErrUnknownServer) {
+	if loginServer == "" && errors.Is(err, console.ErrUnknownServer) {
 		if name, ok := strings.CutSuffix(user, copyOnlySuffix); ok && name != "" {
 			if t, e := srv.ResolveFlashback(ctx, name); !errors.Is(e, console.ErrUnknownServer) {
 				user, tgt, err, copyOnly = name, t, e, true
 			}
 		}
-	}
-	// Resolved, now compare: if any application login changed since the
-	// handshake began, the password just checked may have been a login's
-	// that no longer opens what this username resolves to now (a login
-	// removed and a server renamed to its username in the same moment), so
-	// the connection is not served, whatever it resolved to. Rare, and the
-	// client reconnects. A login connection is checked again, atomically,
-	// when it is tracked below.
-	if srv.LoginEpoch() != loginEpoch {
-		return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: an application login changed while connecting; reconnect")
 	}
 	if err != nil {
 		if errors.Is(err, console.ErrUnknownServer) {
@@ -895,17 +895,61 @@ type flashbackCreds struct {
 // in depth behind serveFlashback's startup guard: nothing may authorise a
 // passwordless MySQL handshake, and a login never opens a closed port.
 func (f flashbackCreds) GetCredential(username string) (server.Credential, bool, error) {
-	// Read per handshake, so a password replaced in the web interface is the
-	// one the next client needs.
-	passwords := f.srv.FlashbackPasswordsFor(username)
-	if len(passwords) == 0 {
-		return server.Credential{}, false, nil
-	}
+	cred, found, _, err := f.credentialWithLogin(username)
+	return cred, found, err
+}
+
+// credentialWithLogin is GetCredential that also says which server's
+// application login password the credential offers ("" when none). Both come
+// from ONE reading of the registry: handleFlashbackConn binds a connection
+// authenticated with a login password to exactly that server, never to what
+// the username resolves to later, so a login changed, moved or removed
+// between the password check and the binding cannot open another server.
+//
+// Login passwords are offered only under mysql_native_password, which checks
+// the stored list on every handshake. caching_sha2_password (and
+// sha256_password) let go-mysql accept a user's last good password from its
+// own cache without asking again, so a rotated or moved login would keep
+// opening its username: under those methods logins are not offered at all.
+func (f flashbackCreds) credentialWithLogin(username string) (server.Credential, bool, string, error) {
 	plugin := f.authMethod
 	if plugin == "" {
 		plugin = gomysql.AUTH_NATIVE_PASSWORD
 	}
-	return server.Credential{Passwords: passwords, AuthPluginName: plugin}, true, nil
+	// Read per handshake, so a password replaced in the web interface is the
+	// one the next client needs.
+	passwords, loginServer := f.srv.FlashbackPasswordsFor(username)
+	if plugin != gomysql.AUTH_NATIVE_PASSWORD && loginServer != "" {
+		passwords, loginServer = passwords[:len(passwords)-1], ""
+	}
+	if len(passwords) == 0 {
+		return server.Credential{}, false, "", nil
+	}
+	return server.Credential{Passwords: passwords, AuthPluginName: plugin}, true, loginServer, nil
+}
+
+// loginCredentialer is what connCreds needs from the port's credentials:
+// the login server behind the passwords it offers.
+type loginCredentialer interface {
+	credentialWithLogin(username string) (server.Credential, bool, string, error)
+}
+
+// connCreds is one connection's credentials: it remembers which server's
+// application login password its handshake was offered (go-mysql asks once
+// per handshake), for bindFlashbackHandler to bind to.
+type connCreds struct {
+	server.AuthenticationHandler
+	loginServer string
+}
+
+func (c *connCreds) GetCredential(username string) (server.Credential, bool, error) {
+	lc, ok := c.AuthenticationHandler.(loginCredentialer)
+	if !ok {
+		return c.AuthenticationHandler.GetCredential(username)
+	}
+	cred, found, loginServer, err := lc.credentialWithLogin(username)
+	c.loginServer = loginServer
+	return cred, found, err
 }
 
 // OnAuthSuccess and OnAuthFailure are server.AuthenticationHandler lifecycle

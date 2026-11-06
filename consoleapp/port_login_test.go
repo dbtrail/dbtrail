@@ -151,12 +151,12 @@ type hookCreds struct {
 	after func()
 }
 
-func (h hookCreds) GetCredential(user string) (server.Credential, bool, error) {
-	cred, found, err := h.flashbackCreds.GetCredential(user)
+func (h hookCreds) credentialWithLogin(user string) (server.Credential, bool, string, error) {
+	cred, found, loginServer, err := h.flashbackCreds.credentialWithLogin(user)
 	if h.after != nil {
 		h.after()
 	}
-	return cred, found, err
+	return cred, found, loginServer, err
 }
 
 // A login removed, and a server renamed to its username, while a client
@@ -225,7 +225,122 @@ func TestFlashbackConn_loginChangedDuringHandshakeIsRefused(t *testing.T) {
 	_, err = conn.Execute("SELECT 1")
 	conn.Close()
 	<-done
-	if err == nil || !strings.Contains(err.Error(), "changed while connecting") {
-		t.Fatalf("a connection authenticated with a removed login's password was served server-b: %v", err)
+	// Bound to server-a (whose password it was), whose login was dropped:
+	// refused when tracked, the socket closed. Never served server-b.
+	if err == nil {
+		t.Fatal("a connection authenticated with a removed login's password was served")
+	}
+}
+
+// The exact window: the registry change is VISIBLE (the router read the file
+// again) but the connections were not dropped yet, so the epoch has not
+// moved. A connection authenticated with A's login password must be bound to
+// A, the server its password was checked for, never to B, which the username
+// names now. Told apart by their index addresses, which a time-travel query
+// reaches and names in its error.
+func TestFlashbackConn_loginPasswordBindsItsOwnServer(t *testing.T) {
+	f := newRouterFiles(t)
+	a, err := f.owner.Add(console.ServerEntry{Name: "server-a", DSN: "u:p@tcp(127.0.0.1:1)/idx_a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := f.owner.Add(console.ServerEntry{Name: "server-b", DSN: "u:p@tcp(127.0.0.1:2)/idx_b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetPortLogin(a.ID, "app", "pw-a"); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := console.LoadRegistryFollower(f.servers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: follower})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	mysrv, err := shim.NewMySQLServer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	once := false
+	creds := hookCreds{flashbackCreds: flashbackCreds{srv: srv}, after: func() {
+		if once {
+			return
+		}
+		once = true
+		if _, err := f.owner.SetPortLogin(a.ID, "", ""); err != nil {
+			t.Error(err)
+		}
+		renamed := b
+		renamed.Name = "app"
+		if err := f.owner.Update(renamed); err != nil {
+			t.Error(err)
+		}
+		// Visible, not applied: no drop, the epoch stays.
+		if _, err := follower.Reload(); err != nil {
+			t.Error(err)
+		}
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		handleFlashbackConn(context.Background(), srv, c, mysrv, creds, shim.NewGate(0), flashbackConfig{}.withDefaults(), slog.Default())
+	}()
+	conn, err := client.Connect(ln.Addr().String(), "app", "pw-a", "")
+	if err != nil {
+		t.Fatalf("handshake with pw-a: %v", err)
+	}
+	_, qerr := conn.Execute("SELECT * FROM _flashback.orders AS OF '2026-01-01 00:00:00' WHERE id = 1")
+	conn.Close()
+	<-done
+	if qerr == nil {
+		t.Fatal("the time-travel query reached no index at all")
+	}
+	if strings.Contains(qerr.Error(), "127.0.0.1:2") || strings.Contains(qerr.Error(), "idx_b") {
+		t.Fatalf("a connection authenticated with server-a's login password reached server-b: %v", qerr)
+	}
+	if !strings.Contains(qerr.Error(), "127.0.0.1:1") && !strings.Contains(qerr.Error(), "idx_a") {
+		t.Fatalf("cannot tell which server answered: %v", qerr)
+	}
+}
+
+// Under caching_sha2_password (and sha256_password) go-mysql may accept a
+// user's last good password from its own cache, so a rotated or moved login
+// would keep opening its username: application logins are offered under
+// mysql_native_password only.
+func TestFlashbackCreds_loginsOnlyUnderNativePassword(t *testing.T) {
+	f := newRouterFiles(t)
+	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:1)/idx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetPortLogin(prod.ID, "app1", "pw1"); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: f.owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{"", gomysql.AUTH_NATIVE_PASSWORD} {
+		cred, found, ls, _ := flashbackCreds{srv: srv, authMethod: m}.credentialWithLogin("app1")
+		if !found || strings.Join(cred.Passwords, ",") != "tok,pw1" || ls != prod.ID {
+			t.Errorf("method %q: %q %v %q, want the login offered", m, cred.Passwords, found, ls)
+		}
+	}
+	for _, m := range []string{gomysql.AUTH_CACHING_SHA2_PASSWORD, gomysql.AUTH_SHA256_PASSWORD} {
+		cred, found, ls, _ := flashbackCreds{srv: srv, authMethod: m}.credentialWithLogin("app1")
+		if !found || strings.Join(cred.Passwords, ",") != "tok" || ls != "" {
+			t.Errorf("method %q: %q %v %q, want only the port's password", m, cred.Passwords, found, ls)
+		}
 	}
 }

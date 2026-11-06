@@ -191,31 +191,31 @@ func (s *Server) portLoginTarget(selector string) (string, bool, error) {
 
 // FlashbackPasswordsFor is the passwords that authenticate user on the
 // MySQL-protocol port: the port's own (FlashbackPasswords) and, when user is
-// a server's application login, that login's password. A login password is
-// accepted under its own username only, only while the port is open (a port
-// with no password of its own is closed, and a login does not open it), and
-// only while the followed registry can be read (setLoginsUnreadable).
-// Read per handshake, so a login saved, changed or removed in the web
-// interface is the one the next client needs.
-func (s *Server) FlashbackPasswordsFor(user string) []string {
+// a server's application login, that login's password; loginServer is that
+// server's id ("" when no login password is offered). Both come from one
+// reading of the registry, and the caller binds a connection authenticated
+// with them to loginServer itself, never to what the username resolves to
+// later. A login password is accepted under its own username only, only
+// while the port is open (a port with no password of its own is closed, and
+// a login does not open it), and only while the followed registry can be
+// read (setLoginsUnreadable). Read per handshake, so a login saved, changed
+// or removed in the web interface is the one the next client needs.
+func (s *Server) FlashbackPasswordsFor(user string) (passwords []string, loginServer string) {
 	out := s.FlashbackPasswords()
 	if len(out) == 0 || s.loginsUnreadable.Load() {
-		return out
+		return out, ""
 	}
-	// One reading of the registry for both the match and the password, so
-	// a login renamed between two readings cannot offer its new password
-	// under its old username.
 	entries := s.cm.reg.List()
 	id, ok, ambiguous := portLoginMatch(entries, user)
 	if !ok || ambiguous {
-		return out
+		return out, ""
 	}
 	for _, e := range entries {
 		if e.ID == id && e.PortPassword != "" {
-			out = append(out, e.PortPassword)
+			return append(out, e.PortPassword), id
 		}
 	}
-	return out
+	return out, ""
 }
 
 // setLoginsUnreadable records whether the registry file this process follows
@@ -310,12 +310,13 @@ func (l *loginConnSet) drop(serverID string) int {
 
 // LoginEpoch is the epoch of the port's application logins (loginConnSet):
 // any login change, server removal, or registry that stops being readable
-// moves it on. Read it BEFORE
-// a connection's handshake and hand it to TrackLoginConn: the handshake
-// checks the password against the logins as they are then, so any login
-// change after that moment, including a login moved to another server
-// between the password check and the binding, refuses the connection
-// instead of serving it a server its password was never checked for.
+// moves it on. Read it BEFORE a connection's handshake and hand it to
+// TrackLoginConn. It is about REVOCATION only: it moves when the connections
+// are dropped, a moment after the change is visible in the registry, and
+// that is enough, because a connection tracked in that moment is in the set
+// the drop closes. Which server a login password opens is not decided by it:
+// the handshake records the server whose password it offered
+// (FlashbackPasswordsFor) and the connection is bound to that server alone.
 func (s *Server) LoginEpoch() uint64 { return s.loginConns.current() }
 
 // TrackLoginConn registers a client connection of the port opened with

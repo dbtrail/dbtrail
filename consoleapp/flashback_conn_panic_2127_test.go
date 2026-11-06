@@ -34,6 +34,15 @@ func (p panickyCreds) GetCredential(username string) (server.Credential, bool, e
 	return p.flashbackCreds.GetCredential(username)
 }
 
+// credentialWithLogin is the path the port's per-connection credentials
+// take (connCreds): it panics for the same user name.
+func (p panickyCreds) credentialWithLogin(username string) (server.Credential, bool, string, error) {
+	if username == "boom" {
+		panic("index out of range [3] with length 2")
+	}
+	return p.flashbackCreds.credentialWithLogin(username)
+}
+
 // syncBuffer is a log sink two goroutines can write and read.
 type syncBuffer struct {
 	mu sync.Mutex

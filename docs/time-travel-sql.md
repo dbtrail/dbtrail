@@ -156,6 +156,16 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   port's own password: the login's password opens its exact username. The
   audit records a login's connections under the server (`server:<id>`), not
   under the application's username.
+- **It needs the port's default authentication**, `mysql_native_password`,
+  which checks the saved password on every login. Under
+  `caching_sha2_password` a server may accept a user's last good password
+  from its cache, so a rotated login would keep working: there, logins are
+  not offered and only the port's own password opens it.
+- **A connection opens the server whose password it logged in with.** The
+  port decides that at login, from the same reading of the registry that
+  offered the password, and never looks the username up again: a login
+  moved to another server while a client logs in cannot open the other
+  server.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
 

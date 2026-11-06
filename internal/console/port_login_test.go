@@ -222,15 +222,24 @@ func TestFlashbackPasswordsFor(t *testing.T) {
 		{"", []string{"t"}},
 	}
 	for _, c := range cases {
-		if got := srv.FlashbackPasswordsFor(c.user); strings.Join(got, ",") != strings.Join(c.want, ",") {
+		if got, _ := srv.FlashbackPasswordsFor(c.user); strings.Join(got, ",") != strings.Join(c.want, ",") {
 			t.Errorf("FlashbackPasswordsFor(%q) = %q, want %q", c.user, got, c.want)
+		}
+	}
+	// The login server comes with the login password, and only with it.
+	if _, ls := srv.FlashbackPasswordsFor("app1"); ls != prod.ID {
+		t.Errorf("login server for app1 = %q, want %s", ls, prod.ID)
+	}
+	for _, u := range []string{"App1", "prod", "nobody"} {
+		if _, ls := srv.FlashbackPasswordsFor(u); ls != "" {
+			t.Errorf("login server for %q = %q, want none", u, ls)
 		}
 	}
 	// A login never opens a closed port.
 	srv.flashback.mu.Lock()
 	srv.flashback.followsSwitch, srv.flashback.saved.Enabled = true, false
 	srv.flashback.mu.Unlock()
-	if got := srv.FlashbackPasswordsFor("app1"); got != nil {
+	if got, _ := srv.FlashbackPasswordsFor("app1"); got != nil {
 		t.Fatalf("port off: FlashbackPasswordsFor(app1) = %q", got)
 	}
 }
@@ -253,7 +262,7 @@ func TestResolveFlashback_loginRefusals(t *testing.T) {
 	if _, err := srv.ResolveFlashback(t.Context(), "app1"); !errors.Is(err, ErrAmbiguousPortLogin) {
 		t.Fatalf("ambiguous: %v", err)
 	}
-	if got := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "t" {
+	if got, _ := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "t" {
 		t.Fatalf("an ambiguous login still authenticates with its password: %q", got)
 	}
 }
@@ -400,7 +409,7 @@ func TestFollowFiles_unreadableRegistryRefusesLogins(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.RefreshFollowedFiles()
-	if got := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok,pw1" {
+	if got, _ := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok,pw1" {
 		t.Fatalf("before: %q", got)
 	}
 	closed := 0
@@ -412,7 +421,7 @@ func TestFollowFiles_unreadableRegistryRefusesLogins(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.RefreshFollowedFiles()
-	if got := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok" {
+	if got, _ := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok" {
 		t.Fatalf("unreadable registry: the login still authenticates: %q", got)
 	}
 	if closed != 1 {
@@ -427,7 +436,7 @@ func TestFollowFiles_unreadableRegistryRefusesLogins(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.RefreshFollowedFiles()
-	if got := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok,pw1" {
+	if got, _ := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok,pw1" {
 		t.Fatalf("readable again: %q", got)
 	}
 }
