@@ -190,24 +190,47 @@ func (s *Server) portLoginTarget(selector string) (string, bool, error) {
 // interface is the one the next client needs.
 func (s *Server) FlashbackPasswordsFor(user string) []string {
 	out := s.FlashbackPasswords()
-	if len(out) == 0 {
-		return nil
+	if len(out) == 0 || s.loginsUnreadable.Load() {
+		return out
 	}
-	id, ok, ambiguous := portLoginMatch(s.cm.reg.List(), user)
+	// One reading of the registry for both the match and the password, so
+	// a login renamed between two readings cannot offer its new password
+	// under its old username.
+	entries := s.cm.reg.List()
+	id, ok, ambiguous := portLoginMatch(entries, user)
 	if !ok || ambiguous {
 		return out
 	}
-	if e, found := s.cm.reg.Get(id); found && e.PortPassword != "" {
-		out = append(out, e.PortPassword)
+	for _, e := range entries {
+		if e.ID == id && e.PortPassword != "" {
+			out = append(out, e.PortPassword)
+		}
 	}
 	return out
 }
 
+// setLoginsUnreadable records whether the registry file this process follows
+// could be read the last time it looked (RefreshFollowedFiles). While it
+// cannot, no application login opens the port: what this process still holds
+// may be a login removed since, and a credential this process cannot read is
+// not one it goes on accepting (the port's own password is handled the same
+// way, refreshFlashbackPassword). The connections opened with a login are
+// closed when that starts. The port's own password and the token still work.
+func (s *Server) setLoginsUnreadable(unreadable bool) {
+	if s.loginsUnreadable.Swap(unreadable) == unreadable || !unreadable {
+		return
+	}
+	if n := s.loginConns.dropAll(); n > 0 {
+		slog.Warn("console: closed the MySQL-protocol port's connections opened with application logins: the server registry cannot be read, so no login is accepted until it can",
+			"connections", n)
+	}
+}
+
 // loginConnSet holds the port's open connections opened with an
 // application login, per server, and an epoch that every login change moves
-// on. A connection reads the epoch before it reads the login it resolves
-// (ResolveFlashback) and is tracked only while the epoch is still that one:
-// a change made in between, to any server's login, refuses it, and a change
+// on. A connection reads the epoch before its handshake checks its password
+// (LoginEpoch) and is tracked only while the epoch is still that one: a
+// change made in between, to any server's login, refuses it, and a change
 // made after it was tracked closes it. One epoch for every server keeps that
 // exact without knowing beforehand which server a username will open. The
 // zero value is ready to use (a Server built without New in a test has one).
@@ -246,6 +269,23 @@ func (l *loginConnSet) track(serverID string, epoch uint64, drop func()) (func()
 	}, true
 }
 
+// dropAll moves the epoch on and closes every tracked connection.
+func (l *loginConnSet) dropAll() int {
+	l.mu.Lock()
+	l.epoch++
+	all := l.conns
+	l.conns = nil
+	l.mu.Unlock()
+	n := 0
+	for _, conns := range all {
+		for _, d := range conns {
+			d()
+			n++
+		}
+	}
+	return n
+}
+
 // drop moves the epoch on and closes serverID's tracked connections.
 func (l *loginConnSet) drop(serverID string) int {
 	l.mu.Lock()
@@ -259,12 +299,20 @@ func (l *loginConnSet) drop(serverID string) int {
 	return len(dropped)
 }
 
+// LoginEpoch is the epoch of the port's application logins. Read it BEFORE
+// a connection's handshake and hand it to TrackLoginConn: the handshake
+// checks the password against the logins as they are then, so any login
+// change after that moment, including a login moved to another server
+// between the password check and the binding, refuses the connection
+// instead of serving it a server its password was never checked for.
+func (s *Server) LoginEpoch() uint64 { return s.loginConns.current() }
+
 // TrackLoginConn registers a client connection of the port opened with
 // server serverID's application login, so it is closed when that login is
 // changed or removed (dropLoginConns): a credential that no longer opens the
 // port must not go on reading through a connection it opened. epoch is
-// FlashbackTarget.LoginEpoch; ok is false when a login changed after the
-// connection's target was read, and the connection must not be served.
+// LoginEpoch read before the connection's handshake; ok is false when a
+// login changed since, and the connection must not be served.
 func (s *Server) TrackLoginConn(serverID string, epoch uint64, drop func()) (untrack func(), ok bool) {
 	return s.loginConns.track(serverID, epoch, drop)
 }

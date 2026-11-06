@@ -1772,7 +1772,7 @@ func scrubDSNError(err error, dsn string) string {
 // registryErrStatus maps registry errors onto HTTP statuses.
 func registryErrStatus(err error) int {
 	switch {
-	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly):
+	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict):
 		return http.StatusConflict
 	case errors.Is(err, ErrUnknownServer):
 		return http.StatusNotFound

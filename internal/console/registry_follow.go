@@ -140,7 +140,8 @@ func (s *Server) FollowFiles(ctx context.Context, interval time.Duration) {
 func (s *Server) RefreshFollowedFiles() {
 	s.refreshFlashbackPassword()
 	changes, err := s.cm.reg.Reload()
-	s.noteFollow("registry", "console: the server registry could not be read again; the servers read before stay in force", err)
+	s.noteFollow("registry", "console: the server registry could not be read again; the servers read before stay in force, except their application logins on the MySQL port, which are refused until it can be read", err)
+	s.setLoginsUnreadable(err != nil)
 	for _, c := range changes {
 		s.applyRegistryChange(c)
 	}

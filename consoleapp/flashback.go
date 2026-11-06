@@ -252,6 +252,10 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	stopCloser := context.AfterFunc(connCtx, func() { _ = c.Close() })
 	defer stopCloser()
 
+	// Before the handshake checks the password: a connection opened with
+	// an application login is served only if no login changed since
+	// (console.Server.LoginEpoch).
+	loginEpoch := srv.LoginEpoch()
 	// shim.NewConn: the handshake announces autocommit (#2110).
 	mysqlConn, err := shim.NewConn(wc, mysrv, creds, proxy)
 	if err != nil {
@@ -265,7 +269,7 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 		return
 	}
 
-	untrack, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, gate, cfg, logger, func() { _ = c.Close() })
+	untrack, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, loginEpoch, gate, cfg, logger, func() { _ = c.Close() })
 	defer untrack()
 	if err != nil {
 		// Auth already succeeded; surface the routing failure on the client's
@@ -324,7 +328,7 @@ func flashbackConnPanicked(logger *slog.Logger, remote net.Addr, r any, stack []
 // is registered with the console under its server (untrack undoes it), so
 // that a change to the account the port forwards with closes it instead of
 // leaving it on the previous account (#2079).
-func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger, closeConn func()) (untrack func(), err error) {
+func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routingHandler, mysqlConn *server.Conn, loginEpoch uint64, gate *shim.Gate, cfg flashbackConfig, logger *slog.Logger, closeConn func()) (untrack func(), err error) {
 	untrack = func() {}
 	user := mysqlConn.GetUser()
 	tgt, err := srv.ResolveFlashback(ctx, user)
@@ -388,7 +392,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		user = tgt.ID
 		var ok bool
 		var untrackLogin func()
-		if untrackLogin, ok = srv.TrackLoginConn(tgt.ID, tgt.LoginEpoch, closeConn); !ok {
+		if untrackLogin, ok = srv.TrackLoginConn(tgt.ID, loginEpoch, closeConn); !ok {
 			h.Close()
 			closeConn()
 			return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, "flashback: this server's application login changed while connecting; reconnect")

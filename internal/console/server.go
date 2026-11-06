@@ -686,7 +686,11 @@ type Server struct {
 	// server's application login, per server, to close them when that
 	// login is changed or removed (port_login.go).
 	loginConns loginConnSet
-	routing    *routingStats
+	// loginsUnreadable: the followed registry file could not be read the
+	// last time; no application login opens the port meanwhile
+	// (setLoginsUnreadable).
+	loginsUnreadable atomic.Bool
+	routing          *routingStats
 	// copyAges is how far behind the copy's answers' data was, per server
 	// (#2369), for the router's status document.
 	copyAges copyAges

@@ -134,9 +134,14 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   refused at connect time, never resolved by whichever comes first.
 - **Changing or removing it closes its connections.**
   `DELETE /api/servers/{id}/port-login` removes it; a new `PUT` replaces it.
-  Either way, the port closes the connections opened with it, so a login
-  you revoke stops reading at once. A connection opened under the login's
-  username with the port's password is closed too, and reconnects.
+  Either way, the port closes the connections opened with it: at once when
+  the process that saved it serves the port, within a few seconds in the
+  router, which reads the server registry again every two seconds. A
+  connection opened under the login's username with the port's password is
+  closed too, and reconnects. While the router cannot read the server
+  registry (a file broken by a hand edit, or gone), it accepts no
+  application login at all and closes the connections opened with one; the
+  port's own password and the token still work.
 - **It never opens a closed port**, and the console never returns the
   password: `GET /api/servers` shows `port_user` and `has_port_password`.
   It is kept in `console-servers.yaml`, as typed (MySQL-protocol
@@ -144,7 +149,8 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   read. It is the password of a real account of your application: treat
   that file as you treat the application's own configuration.
 - **What the port does with it is what it does with any connection** to that
-  server: reads only, Engine Routing and the copy as configured. The
+  server: Engine Routing, the copy, and read-only or not, as the port is
+  configured. The
   audit records a login's connections under the server (`server:<id>`), not
   under the application's username.
 - **Who can save it:** the same permission as the port's password

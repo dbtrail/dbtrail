@@ -95,11 +95,10 @@ type FlashbackTarget struct {
 	SourceSSL config.SSL
 	// ViaLogin: the username is the server's application login
 	// (ServerEntry.PortUser), not its id or name. Such a connection is
-	// handed to Server.TrackLoginConn with LoginEpoch, read before the
-	// login itself, so a login changed or removed while it connects is
-	// not served.
-	ViaLogin   bool
-	LoginEpoch uint64
+	// handed to Server.TrackLoginConn with the login epoch its handshake
+	// started under (Server.LoginEpoch), so a login changed, moved or
+	// removed while it connects is not served.
+	ViaLogin bool
 }
 
 // SQLOnCopy is the free-SQL executor the embedded port hands each connection.
@@ -298,8 +297,6 @@ func (s *Server) sqlOnCopyFor(b *bundle, id string) (*SQLOnCopy, string) {
 // database" error on the client's first query. The registry is read live, so
 // servers added in the console mid-session are reachable without a restart.
 func (s *Server) ResolveFlashback(ctx context.Context, selector string) (FlashbackTarget, error) {
-	// The epoch first, the login second: see TrackLoginConn.
-	loginEpoch := s.loginConns.current()
 	loginID, viaLogin, err := s.portLoginTarget(selector)
 	if err != nil {
 		return FlashbackTarget{}, err
@@ -342,7 +339,6 @@ func (s *Server) ResolveFlashback(ctx context.Context, selector string) (Flashba
 		SourceSSL:       s.flashbackSourceSSL(id),
 		LikeIgnoresCase: s.flashbackLikeIgnoresCase(id),
 		ViaLogin:        viaLogin,
-		LoginEpoch:      loginEpoch,
 		TimeTravelRefusal: func() string {
 			return s.timeTravelRefusal(b)
 		},

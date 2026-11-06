@@ -3,6 +3,8 @@ package console
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -386,4 +388,72 @@ func createNamedTestServer(t *testing.T, srv *Server, name string) string {
 		t.Fatal(err)
 	}
 	return created.ID
+}
+
+// While the followed registry file cannot be read, no application login
+// opens the port and the connections opened with one are closed: what this
+// process still holds may be a login removed since. Once the file reads
+// again, the login works again.
+func TestFollowFiles_unreadableRegistryRefusesLogins(t *testing.T) {
+	owner, srv, prod, path := followerServerWithPath(t)
+	if _, err := owner.SetPortLogin(prod.ID, "app1", "pw1"); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	if got := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok,pw1" {
+		t.Fatalf("before: %q", got)
+	}
+	closed := 0
+	if _, ok := srv.TrackLoginConn(prod.ID, srv.LoginEpoch(), func() { closed++ }); !ok {
+		t.Fatal(err0)
+	}
+	good := mustRead(t, path)
+	if err := os.WriteFile(path, []byte("servers: [this is: not: yaml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	if got := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok" {
+		t.Fatalf("unreadable registry: the login still authenticates: %q", got)
+	}
+	if closed != 1 {
+		t.Fatalf("unreadable registry closed %d login connections, want 1", closed)
+	}
+	// Still unreadable: nothing more happens.
+	srv.RefreshFollowedFiles()
+	if closed != 1 {
+		t.Fatalf("a second look closed again: %d", closed)
+	}
+	if err := os.WriteFile(path, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	if got := srv.FlashbackPasswordsFor("app1"); strings.Join(got, ",") != "tok,pw1" {
+		t.Fatalf("readable again: %q", got)
+	}
+}
+
+// followerServerWithPath is followerServer with the registry file's path.
+func followerServerWithPath(t *testing.T) (*Registry, *Server, ServerEntry, string) {
+	t.Helper()
+	owner, srv, prod, portFile := followerServer(t)
+	return owner, srv, prod, filepath.Join(filepath.Dir(portFile), "console-servers.yaml")
+}
+
+// A server created or renamed through the API with the name of another
+// server's login is a conflict (409), not a server error.
+func TestServersAPI_nameThatIsALoginIs409(t *testing.T) {
+	srv := newRegistryServer(t)
+	id := createHiddenTestServer(t, srv) // "prod"
+	other := createNamedTestServer(t, srv, "staging")
+	if rec, out := doServersReq(t, srv, "PUT", "/api/servers/"+id+"/port-login", `{"user":"app1","password":"pw"}`); rec.Code != 200 {
+		t.Fatalf("PUT login = %d %s", rec.Code, out)
+	}
+	rec, out := doServersReq(t, srv, "POST", "/api/servers", `{"name":"App1","host":"h","user":"u","password":"p","dbname":"db"}`)
+	if rec.Code != 409 {
+		t.Errorf("create named like a login = %d %s, want 409", rec.Code, out)
+	}
+	rec, out = doServersReq(t, srv, "PUT", "/api/servers/"+other, `{"name":"app1","host":"h","user":"u","dbname":"db"}`)
+	if rec.Code != 409 {
+		t.Errorf("rename to a login = %d %s, want 409", rec.Code, out)
+	}
 }
