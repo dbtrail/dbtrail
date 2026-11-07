@@ -54,33 +54,39 @@ func TestDecideStatement_limitsAndResultRows_2115(t *testing.T) {
 		"a03_range_order_indexed_limit500":      {bounded, cheap}, // 1.6 ms on MySQL
 		"a04_range_order_indexed_desc_limit500": {bounded, cheap},
 		// The sort has no index: the source reads the whole range (615 ms on
-		// MySQL) before the first row.
-		"a05_range_order_unindexed_limit500": {toCopy, cheap},
+		// MySQL) before the first row. MariaDB too since range reads count
+		// on a plan with no cost: the sort leaves the LIMIT nothing to stop.
+		"a05_range_order_unindexed_limit500": {toCopy, toCopy},
 		// A second condition no index serves, matching nothing: the source
 		// reads the whole range looking for 500 rows (400 ms). MySQL reports
 		// filtered 10 for the first, and 100 for the function, the arithmetic
 		// and the column compared with a column: only the condition's own text
-		// tells those.
-		"a06_range_residual_absent_limit500":  {toCopy, cheap},
-		"a07_range_residual_func_limit500":    {toCopy, cheap},
-		"a08_range_residual_arith_limit500":   {toCopy, cheap},
-		"a28_range_col_eq_col_limit500":       {toCopy, cheap},
-		"a30_range_estimated_filter_limit500": {toCopy, cheap},
+		// tells those. MariaDB too since range reads count: the condition
+		// names a column the range's key does not cover, so the LIMIT ends
+		// nothing early.
+		"a06_range_residual_absent_limit500":  {toCopy, toCopy},
+		"a07_range_residual_func_limit500":    {toCopy, toCopy},
+		"a08_range_residual_arith_limit500":   {toCopy, toCopy},
+		"a28_range_col_eq_col_limit500":       {toCopy, toCopy},
+		"a30_range_estimated_filter_limit500": {toCopy, toCopy},
 		"a09_range_covering_limit500":         {bounded, cheap}, // the range sits in attached_condition: the index covers the statement
 		"a10_pk_range_limit500":               {bounded, cheap}, // and here: a primary key range
-		"a11_pk_range_residual_limit500":      {toCopy, cheap},  // 294 ms: one million rows read for none
+		"a11_pk_range_residual_limit500":      {toCopy, toCopy}, // 294 ms: one million rows read for none
 		"a12_ref_status_limit500":             {bounded, cheap},
 		"a13_ref_status_order_pk_limit500":    {bounded, cheap},
 		"a14_wide_range_limit500":             {bounded, cheap},
 		// The order comes from the primary key and the filter from another
 		// column: 1,668,158 rows read before the 500 (438 ms on MySQL).
 		"a15_tail_range_order_pk_limit500": {toCopy, cheap},
-		// The source reads offset plus limit rows (163 ms): not a few.
-		"a16_range_limit500_offset100000": {toCopy, cheap},
+		// The source reads offset plus limit rows (163 ms): not a few. On
+		// MariaDB the offset is at the scan threshold, so the range counts.
+		"a16_range_limit500_offset100000": {toCopy, toCopy},
 		// The LIMIT applies after the grouping, the DISTINCT, the aggregate.
+		// On MariaDB the whole range behind them counts (a17's plan reads an
+		// index, not a range, and stays as it was).
 		"a17_group_by_limit500":  {toCopy, cheap},
-		"a18_distinct_limit500":  {toCopy, cheap, toCopy}, // 10.11 walks a whole index for it
-		"a19_aggregate_limit500": {toCopy, cheap},
+		"a18_distinct_limit500":  {toCopy, toCopy}, // 10.11 walks a whole index for it
+		"a19_aggregate_limit500": {toCopy, toCopy},
 		"a20_limit_in_derived":   {toCopy, toCopy}, // the scan rule reads the derived table's 500 rows as the range behind them: as before
 		"a21_union_limit500":     {cheap, cheap},
 		// A join: the rule is for one table read alone. (MariaDB: the full
