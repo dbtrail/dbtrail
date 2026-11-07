@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **The MySQL port reads MySQL's names without routing too.** Backtick-quoted names, which most ORMs and drivers write, reached the copy as written on a port without routing, and the copy refused them. They now reach it in double quotes, and `STRAIGHT_JOIN` as the join it means with the written order kept: the rewrite routing already made. A statement where that rewrite would be a guess runs as written, as before, and so does one with a dollar-quoted string (`$$..$$`), whose content the rewrite would otherwise change.
+- **The MySQL port reads MySQL's names without routing too.** Backtick-quoted names, which most ORMs and drivers write, reached the copy as written on a port without routing, and the copy refused them. They now reach it in double quotes, and `STRAIGHT_JOIN` as the join it means, with the written order kept when every join of the statement is a `STRAIGHT_JOIN`: the rewrite routing already made. A statement where that rewrite would be a guess runs as written, as before, and so does one with a dollar-quoted string (`$$..$$`) or a `--` comment with no space after it, which the copy and MySQL read differently, so the rewrite could otherwise change a string.
 
 ## [0.126.0] - 2026-11-06
 

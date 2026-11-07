@@ -1157,13 +1157,14 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	if h.router == nil && !showRewritten {
 		// The port without routing reads MySQL's names as the routing
 		// ladder does (readrouter.ForCopy): backtick-quoted names in double
-		// quotes, STRAIGHT_JOIN as the join it means, with the written join
-		// order kept. A statement the rewrite would only guess at runs as
+		// quotes, STRAIGHT_JOIN as the join it means, and the written join order
+		// kept when every join is one (readrouter.KeepsJoinOrder). A statement the rewrite would only guess at runs as
 		// written, as it always did here: the refusal is not an error. So
-		// does one with a dollar-quoted string ($$..$$, $tag$..$tag$): a
-		// string on the copy, which MySQL's reading does not know, and a
-		// backtick-quoted word inside it would be rewritten in the string.
-		if !dollarQuote.MatchString(qstr) {
+		// does one the copy reads otherwise than MySQL in a way the rewrite
+		// cannot see (copyReadsOtherwise): a backtick-quoted word inside
+		// what the copy takes for a string or a comment would be rewritten
+		// there.
+		if !copyReadsOtherwise(qstr) {
 			if text, why := readrouter.ForCopyOpts(qstr, readrouter.CopyOptions{}); why == "" && text != qstr {
 				stmt = text
 				keepJoinOrder = readrouter.KeepsJoinOrder(qstr)
@@ -1431,6 +1432,21 @@ func rewriteForDuckDB(qstr, schema string) (string, string) {
 // inside matches, and a match only means the statement runs as written. A
 // plain $ in a string ('$5 and $6') does not match.
 var dollarQuote = regexp.MustCompile(`\$[^\s$]*\$`)
+
+// dashComment finds -- followed by anything but white space, or at the end:
+// a comment on the copy, two minus signs on MySQL, which reads a comment only
+// when white space follows. A quote after it is then a string on one side
+// and comment text on the other.
+var dashComment = regexp.MustCompile(`--(?:[^ \t\n\r\f\v]|$)`)
+
+// copyReadsOtherwise reports whether stmt holds something the copy reads
+// otherwise than MySQL's reading in readrouter.ForCopy: a dollar-quoted
+// string or a -- comment with no space after it. Both err wide on purpose:
+// a match only means the statement runs on the copy as written, as it did
+// before the plain port rewrote names.
+func copyReadsOtherwise(stmt string) bool {
+	return dollarQuote.MatchString(stmt) || dashComment.MatchString(stmt)
+}
 
 // quoteDuckIdent quotes one name the way DuckDB reads identifiers.
 func quoteDuckIdent(name string) string {
