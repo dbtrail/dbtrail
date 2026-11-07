@@ -273,9 +273,15 @@ mysql> SELECT count(*) FROM events WHERE table_name = 'orders';   -- only with t
 What to know before relying on it:
 
 - **The SQL dialect is DuckDB's, not MySQL's.** The client is the transport;
-  the statement is what the SQL card takes. `DATE_FORMAT` and
-  backtick-quoted names are not understood; DuckDB's `strftime` and double
-  quotes are. `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
+  the statement is what the SQL card takes. Backtick-quoted names are read
+  as MySQL reads them and sent in double quotes, and `STRAIGHT_JOIN` as the
+  join it means, as with routing; a statement where that rewrite would be a
+  guess (for example a `#` comment, a MySQL hint or version comment, a
+  double-quoted string, a backslash in a string, a dollar-quoted string, a
+  `--` comment with no space after it; the
+  full list is under "Two things are translated") runs as written. `STRAIGHT_JOIN` is read as MySQL's
+  keyword, so a column named `straight_join` must be quoted. `DATE_FORMAT` is
+  not understood; DuckDB's `strftime` is. `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
   can differ from MySQL's; `string_agg` is DuckDB's own spelling. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it. Schema and table names match
@@ -1123,7 +1129,7 @@ What this is and is not:
   keep the port read-only, as it starts (both below).
 - **Two things are translated: backtick-quoted names and `STRAIGHT_JOIN`.** DuckDB does not read
   MySQL's backtick-quoted names, and most ORMs and drivers quote every name
-  that way. So a routed statement reaches the copy with each
+  that way. So a statement reaches the copy, routed or on the plain port, with each
   `` `name` `` written `"name"`, which is how the copy quotes a name:
   ``SELECT `orders`.`id` FROM `orders` `` is sent as
   `SELECT "orders"."id" FROM "orders"`. Every other byte is the client's.
@@ -1252,9 +1258,9 @@ What this is and is not:
   answered, and has a time limit of its own. If the source
   cannot say (it refuses to prepare the statement, or counts other columns
   than the copy returned), the answer keeps the copy's names and the log
-  says so, once per connection. The plain port without Engine Routing
-  translates nothing: a client there writes the copy's dialect and reads
-  the copy's names.
+  says so, once per connection. The plain port without Engine Routing does
+  not ask the source: a client there reads the copy's column names. It
+  translates only backtick-quoted names and `STRAIGHT_JOIN`, as above.
 - **Where the copy answers differently without an error.** The veto list
   keeps the known cases on MySQL (`GROUP_CONCAT`, the clock forms the copy
   does not have,

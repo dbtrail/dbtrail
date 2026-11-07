@@ -1107,10 +1107,10 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 // runFreeSQLRouted is runFreeSQL with the routing reason when there is one.
 // The copy runs the statement it is given: the routing ladder hands it the
 // client's text with backtick-quoted names and STRAIGHT_JOIN rewritten
-// (copyText), a client on the port without routing its own text. Nothing
-// else is translated from
-// MySQL's dialect, and a statement the copy refuses is the caller's to
-// forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
+// (copyText); a client on the port without routing gets the same rewrite
+// here when it can be made with certainty, and its own text otherwise.
+// Nothing else is translated from MySQL's dialect, and a statement the copy
+// refuses is the caller's to forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
 //
 // types is sqlsandbox.Session.Types: the routing layer's reading of the
 // client's own statement, nil for a port without routing.
@@ -1153,6 +1153,24 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
+	showRewritten := stmt != qstr
+	if h.router == nil && !showRewritten {
+		// The port without routing reads MySQL's names as the routing
+		// ladder does (readrouter.ForCopy): backtick-quoted names in double
+		// quotes, STRAIGHT_JOIN as the join it means, and the written join order
+		// kept when every join is one (readrouter.KeepsJoinOrder). A statement the rewrite would only guess at runs as
+		// written, as it always did here: the refusal is not an error. So
+		// does one the copy reads otherwise than MySQL in a way the rewrite
+		// cannot see (copyReadsOtherwise): a backtick-quoted word inside
+		// what the copy takes for a string or a comment would be rewritten
+		// there.
+		if !copyReadsOtherwise(qstr) {
+			if text, why := readrouter.ForCopyOpts(qstr, readrouter.CopyOptions{}); why == "" && text != qstr {
+				stmt = text
+				keepJoinOrder = readrouter.KeepsJoinOrder(qstr)
+			}
+		}
+	}
 	// What the connection set for itself (#2035). Under routing: the
 	// source's session as read back just before this statement was sent
 	// here (#2082, routedsession.go).
@@ -1160,7 +1178,7 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	vars := h.sessVars
 	h.mu.Unlock()
 	sess := vars.session()
-	if stmt != qstr {
+	if showRewritten {
 		// A SHOW this port rewrote into a SELECT: sql_select_limit limits
 		// SELECTs, and the client did not send one.
 		sess.SelectLimit = 0
@@ -1406,6 +1424,29 @@ func rewriteForDuckDB(qstr, schema string) (string, string) {
 		return "DESCRIBE " + quoteDuckIdent(table), schema
 	}
 	return qstr, schema
+}
+
+// dollarQuote finds what could open a dollar-quoted string on the copy: $$,
+// or $tag$ with a tag of any letters, including ones outside ASCII ($é$),
+// as the copy accepts. It errs wide on purpose: any $..$ with no space or $
+// inside matches, and a match only means the statement runs as written. A
+// plain $ in a string ('$5 and $6') does not match.
+var dollarQuote = regexp.MustCompile(`\$[^\s$]*\$`)
+
+// dashComment finds -- followed by anything but a space, a tab or a newline,
+// or at the end: a comment on the copy, while readrouter's scanner reads a
+// comment only when one of those three follows (forcopy.go). A quote after
+// it is then a string on one side and comment text on the other. Keep the
+// three in step with the scanner.
+var dashComment = regexp.MustCompile(`--(?:[^ \t\n]|$)`)
+
+// copyReadsOtherwise reports whether stmt holds something the copy reads
+// otherwise than MySQL's reading in readrouter.ForCopy: a dollar-quoted
+// string or a -- comment with no space after it. Both err wide on purpose:
+// a match only means the statement runs on the copy as written, as it did
+// before the plain port rewrote names.
+func copyReadsOtherwise(stmt string) bool {
+	return dollarQuote.MatchString(stmt) || dashComment.MatchString(stmt)
 }
 
 // quoteDuckIdent quotes one name the way DuckDB reads identifiers.
