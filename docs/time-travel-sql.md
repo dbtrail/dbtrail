@@ -273,9 +273,13 @@ mysql> SELECT count(*) FROM events WHERE table_name = 'orders';   -- only with t
 What to know before relying on it:
 
 - **The SQL dialect is DuckDB's, not MySQL's.** The client is the transport;
-  the statement is what the SQL card takes. `DATE_FORMAT` and
-  backtick-quoted names are not understood; DuckDB's `strftime` and double
-  quotes are. `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
+  the statement is what the SQL card takes. Backtick-quoted names are read
+  as MySQL reads them and sent in double quotes, and `STRAIGHT_JOIN` as the
+  join it means, as with routing; a statement where that rewrite would be a
+  guess (a `#` comment, a double-quoted string, a backslash in a string, a
+  dollar-quoted string) runs as written. `STRAIGHT_JOIN` is read as MySQL's
+  keyword, so a column named `straight_join` must be quoted. `DATE_FORMAT` is
+  not understood; DuckDB's `strftime` is. `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
   can differ from MySQL's; `string_agg` is DuckDB's own spelling. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it. Schema and table names match

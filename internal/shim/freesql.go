@@ -1107,10 +1107,10 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 // runFreeSQLRouted is runFreeSQL with the routing reason when there is one.
 // The copy runs the statement it is given: the routing ladder hands it the
 // client's text with backtick-quoted names and STRAIGHT_JOIN rewritten
-// (copyText), a client on the port without routing its own text. Nothing
-// else is translated from
-// MySQL's dialect, and a statement the copy refuses is the caller's to
-// forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
+// (copyText); a client on the port without routing gets the same rewrite
+// here when it can be made with certainty, and its own text otherwise.
+// Nothing else is translated from MySQL's dialect, and a statement the copy
+// refuses is the caller's to forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
 //
 // types is sqlsandbox.Session.Types: the routing layer's reading of the
 // client's own statement, nil for a port without routing.
@@ -1153,6 +1153,23 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	ctx, cancel := h.queryContext()
 	defer cancel()
 	stmt, schema := rewriteForDuckDB(qstr, schema)
+	showRewritten := stmt != qstr
+	if h.router == nil && !showRewritten {
+		// The port without routing reads MySQL's names as the routing
+		// ladder does (readrouter.ForCopy): backtick-quoted names in double
+		// quotes, STRAIGHT_JOIN as the join it means, with the written join
+		// order kept. A statement the rewrite would only guess at runs as
+		// written, as it always did here: the refusal is not an error. So
+		// does one with a dollar-quoted string ($$..$$, $tag$..$tag$): a
+		// string on the copy, which MySQL's reading does not know, and a
+		// backtick-quoted word inside it would be rewritten in the string.
+		if !dollarQuote.MatchString(qstr) {
+			if text, why := readrouter.ForCopyOpts(qstr, readrouter.CopyOptions{}); why == "" && text != qstr {
+				stmt = text
+				keepJoinOrder = readrouter.KeepsJoinOrder(qstr)
+			}
+		}
+	}
 	// What the connection set for itself (#2035). Under routing: the
 	// source's session as read back just before this statement was sent
 	// here (#2082, routedsession.go).
@@ -1160,7 +1177,7 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 	vars := h.sessVars
 	h.mu.Unlock()
 	sess := vars.session()
-	if stmt != qstr {
+	if showRewritten {
 		// A SHOW this port rewrote into a SELECT: sql_select_limit limits
 		// SELECTs, and the client did not send one.
 		sess.SelectLimit = 0
@@ -1407,6 +1424,13 @@ func rewriteForDuckDB(qstr, schema string) (string, string) {
 	}
 	return qstr, schema
 }
+
+// dollarQuote finds what could open a dollar-quoted string on the copy: $$,
+// or $tag$ with a tag of any letters, including ones outside ASCII ($é$),
+// as the copy accepts. It errs wide on purpose: any $..$ with no space or $
+// inside matches, and a match only means the statement runs as written. A
+// plain $ in a string ('$5 and $6') does not match.
+var dollarQuote = regexp.MustCompile(`\$[^\s$]*\$`)
 
 // quoteDuckIdent quotes one name the way DuckDB reads identifiers.
 func quoteDuckIdent(name string) string {

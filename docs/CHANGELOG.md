@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The MySQL port reads MySQL's names without routing too.** Backtick-quoted names, which most ORMs and drivers write, reached the copy as written on a port without routing, and the copy refused them. They now reach it in double quotes, and `STRAIGHT_JOIN` as the join it means with the written order kept: the rewrite routing already made. A statement where that rewrite would be a guess runs as written, as before, and so does one with a dollar-quoted string (`$$..$$`), whose content the rewrite would otherwise change.
+
 ## [0.126.0] - 2026-11-06
 
 - **The MySQL clients page saves the two logins a proxy needs.** A new section, "A proxy in front", shows the application login of the server picked in the sidebar and the port's monitor login, and saves or removes each one (the same routes as the API: `PUT`/`DELETE /api/servers/{id}/port-login` and `/api/flashback/monitor-login`). Neither password is ever shown back. The section works while the port is on. Saving needs `settings:write`, and not a session with a data access policy; the monitor login also needs a port this console manages.

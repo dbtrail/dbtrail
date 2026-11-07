@@ -467,9 +467,9 @@ func TestRouter_backtickNames(t *testing.T) {
 	}
 }
 
-// Without routing the port translates nothing: a client there writes the
-// copy's own dialect, and its text reaches the copy untouched.
-func TestRouter_unboundPortDoesNotRewriteNames(t *testing.T) {
+// Without routing the port reads MySQL's names too (plainport_names_test.go
+// has the edge cases): backtick-quoted names reach the copy in double quotes.
+func TestRouter_unboundPortRewritesNames(t *testing.T) {
 	f := &fakeFreeSQL{res: oneCell("x", "INTEGER", json.Number("1"))}
 	h := NewHandler(nil, nil)
 	h.BindFreeSQL(f)
@@ -477,8 +477,8 @@ func TestRouter_unboundPortDoesNotRewriteNames(t *testing.T) {
 	if _, err := h.HandleQuery(stmt); err != nil {
 		t.Fatal(err)
 	}
-	if f.gotStmt != stmt {
-		t.Errorf("copy got %q, want the client's text %q", f.gotStmt, stmt)
+	if want := `SELECT "x" FROM "t" WHERE id = 1`; f.gotStmt != want {
+		t.Errorf("copy got %q, want %q", f.gotStmt, want)
 	}
 }
 
