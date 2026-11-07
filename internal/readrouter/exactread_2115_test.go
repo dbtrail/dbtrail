@@ -61,15 +61,17 @@ func TestDecideStatement_limitsAndResultRows_2115(t *testing.T) {
 		// reads the whole range looking for 500 rows (400 ms). MySQL reports
 		// filtered 10 for the first, and 100 for the function, the arithmetic
 		// and the column compared with a column: only the condition's own text
-		// tells those.
-		"a06_range_residual_absent_limit500":  {toCopy, cheap},
-		"a07_range_residual_func_limit500":    {toCopy, cheap},
-		"a08_range_residual_arith_limit500":   {toCopy, cheap},
-		"a28_range_col_eq_col_limit500":       {toCopy, cheap},
-		"a30_range_estimated_filter_limit500": {toCopy, cheap},
+		// tells those. MariaDB too since range reads count: the condition
+		// names a column the range's key does not cover, so the LIMIT ends
+		// nothing early.
+		"a06_range_residual_absent_limit500":  {toCopy, toCopy},
+		"a07_range_residual_func_limit500":    {toCopy, toCopy},
+		"a08_range_residual_arith_limit500":   {toCopy, toCopy},
+		"a28_range_col_eq_col_limit500":       {toCopy, toCopy},
+		"a30_range_estimated_filter_limit500": {toCopy, toCopy},
 		"a09_range_covering_limit500":         {bounded, cheap}, // the range sits in attached_condition: the index covers the statement
 		"a10_pk_range_limit500":               {bounded, cheap}, // and here: a primary key range
-		"a11_pk_range_residual_limit500":      {toCopy, cheap},  // 294 ms: one million rows read for none
+		"a11_pk_range_residual_limit500":      {toCopy, toCopy}, // 294 ms: one million rows read for none
 		"a12_ref_status_limit500":             {bounded, cheap},
 		"a13_ref_status_order_pk_limit500":    {bounded, cheap},
 		"a14_wide_range_limit500":             {bounded, cheap},
@@ -83,7 +85,7 @@ func TestDecideStatement_limitsAndResultRows_2115(t *testing.T) {
 		// On MariaDB the whole range behind them counts (a17's plan reads an
 		// index, not a range, and stays as it was).
 		"a17_group_by_limit500":  {toCopy, cheap},
-		"a18_distinct_limit500":  {toCopy, toCopy},
+		"a18_distinct_limit500":  {toCopy, toCopy}, // 10.11 walks a whole index for it
 		"a19_aggregate_limit500": {toCopy, toCopy},
 		"a20_limit_in_derived":   {toCopy, toCopy}, // the scan rule reads the derived table's 500 rows as the range behind them: as before
 		"a21_union_limit500":     {cheap, cheap},

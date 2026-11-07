@@ -49,9 +49,16 @@ func TestDecideStatement_mariaDBRangeReads(t *testing.T) {
 		{"page one, offset form", "SELECT id, k FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 LIMIT 40, 20", bigRange, false, "LIMIT 60"},
 		{"prepared page", "SELECT id, k FROM sbtest2 WHERE id > ? ORDER BY id LIMIT ?", bigRange, false, "LIMIT ?"},
 		{"5,000 rows", "SELECT id, k FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 LIMIT 5000", bigRange, false, "LIMIT 5000"},
-		// Known and kept: a filter the index does not serve, under a LIMIT,
-		// may still walk the range; the page stays where it was.
-		{"page one with a residual filter", "SELECT id FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 AND c LIKE '%zz%' LIMIT 20", mariaRange("range", "PRIMARY", 4931532, rangeCond+" and sbtest2.c like '%zz%'", false), false, "LIMIT 20"},
+		// A filter the key does not cover: when few rows pass it the read
+		// walks the whole range, and the LIMIT ends nothing early.
+		{"page one with a residual filter", "SELECT id FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 AND c LIKE '%zz%' LIMIT 20", mariaRange("range", "PRIMARY", 4931532, rangeCond+" and sbtest2.c like '%zz%'", false), true, "range read"},
+		{"residual filter on a bare column", "SELECT id FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 AND pad = 'x' LIMIT 20", mariaRange("range", "PRIMARY", 4931532, rangeCond+" and sbtest2.pad = 'x'", false), true, "range read"},
+		// The range's own bounds, whatever the literals look like.
+		{"date bounds with a fraction", "SELECT id FROM orders WHERE created_at BETWEEN '2026-01-01' AND '2026-03-31' LIMIT 20", mariaRange("range", "PRIMARY", 518956, "orders.id between '2026-01-01 00:00:00.000000' and '2026-03-31 00:00:00.000000'", false), false, "LIMIT 20"},
+		{"decimal bound", "SELECT id FROM sbtest2 WHERE id > 1.5 LIMIT 20", mariaRange("range", "PRIMARY", 4931532, "sbtest2.`id` > 1.5", false), false, "LIMIT 20"},
+		{"a dot inside a string bound", "SELECT id FROM sbtest2 WHERE id > 5 AND id < 9000000 LIMIT 20", mariaRange("range", "PRIMARY", 4931532, "sbtest2.`id` > 5 and sbtest2.`id` <> 'a.b' and sbtest2.`id` < 9000000", false), false, "LIMIT 20"},
+		{"index condition beside an attached one", "SELECT id FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 AND k + 1 = 7 LIMIT 20", `{"query_block":{"select_id":1,"nested_loop":[{"table":{"table_name":"sbtest2","access_type":"range","key":"PRIMARY","used_key_parts":["id"],"rows":4931532,"filtered":100,"index_condition":"sbtest2.id between 1 and 8000000","attached_condition":"sbtest2.k + 1 = 7"}}]}}`, true, "range read"},
+		{"a condition with no column read here", "SELECT id FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 AND @x = 1 LIMIT 20", mariaRange("range", "PRIMARY", 4931532, "@x = 1", false), true, "range read"},
 		// The LIMIT does not end it.
 		{"deep page", "SELECT id, k FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 LIMIT 20 OFFSET 5000000", bigRange, true, "range read"},
 		{"LIMIT at the threshold", "SELECT id, k FROM sbtest2 WHERE id BETWEEN 1 AND 8000000 LIMIT 99990, 10", bigRange, true, "range read"},

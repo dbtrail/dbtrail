@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **On a MariaDB source, a large range read goes to the copy.** A statement that reads a range of an index, such as `WHERE id BETWEEN 1 AND 8000000` with a `GROUP BY`, or a `count(*)` over a year of an indexed date, was called a cheap plan and ran on MariaDB however many rows the range held: its plan carries no cost, and only a full scan or an index walked whole counted. A range of `--route-scan-rows` rows or more (default 100,000) now counts the same, unless a `LIMIT` below that, or `LIMIT ?`, ends it early with no sort, aggregate, `GROUP BY`, `DISTINCT` or `UNION` before it: page one of a large range stays on MariaDB. MySQL sources are unchanged, since their plan's cost already counted the range.
+- **On a MariaDB source, a large range read goes to the copy.** A statement that reads a range of an index, such as `WHERE id BETWEEN 1 AND 8000000` with a `GROUP BY`, or a `count(*)` over a year of an indexed date, was called a cheap plan and ran on MariaDB however many rows the range held: its plan carries no cost, and only a full scan or an index walked whole counted. A range of `--route-scan-rows` rows or more (default 100,000) now counts the same, unless a `LIMIT` below that (offset included), or `LIMIT ?`, ends it early: no sort, aggregate, `GROUP BY`, `DISTINCT`, window function or `UNION` before it (a `UNION ALL` streams and does not count), and no filter on a column the range's key does not cover, which may read the whole range looking for its rows. Page one of a large range stays on MariaDB; `LIMIT 20 OFFSET 5000000` goes to the copy. MySQL sources are unchanged, since their plan's cost already counted the range.
 
 ## [0.127.0] - 2026-11-07
 

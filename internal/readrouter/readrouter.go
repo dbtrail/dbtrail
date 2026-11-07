@@ -394,6 +394,11 @@ type Plan struct {
 	// not shrink for a LIMIT, so DecideStatement says when a LIMIT ends the
 	// read first (rangeStopsEarly).
 	MaxRangeScanRows int64
+	// rangeResidual is true when a range read outside subqueries also
+	// checks, row by row, a column the range's key does not cover: a
+	// LIMIT then ends the read only once that many rows pass the check,
+	// and none may (rangeStopsEarly).
+	rangeResidual bool
 	// Message is the optimizer's shortcut when there is no plan ("no matching
 	// row in const table", "Impossible WHERE"): the query is trivial.
 	Message string
@@ -530,8 +535,13 @@ func walk(v any, p *Plan, inSubquery bool) {
 				if at == "index" && !inSubquery && n > p.MaxIndexScanRows {
 					p.MaxIndexScanRows = n
 				}
-				if at == "range" && !inSubquery && n > p.MaxRangeScanRows {
-					p.MaxRangeScanRows = n
+				if at == "range" && !inSubquery {
+					if n > p.MaxRangeScanRows {
+						p.MaxRangeScanRows = n
+					}
+					if checksOtherColumns(t) {
+						p.rangeResidual = true
+					}
 				}
 			}
 		}
@@ -737,13 +747,12 @@ func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
 // everything first (unboundedWork; a UNION ALL streams its branches and is
 // not that), one LIMIT only, and no sort in the plan (a sort reads the
 // whole range before the first row). The bound is the join rule's
-// (limitEndsJoin): a LIMIT of 5,000 over a range reads 5,000 rows. A filter the index
-// does not serve can still make the read walk the whole range looking for
-// its rows (a11 in testdata/limits); the statement cannot say how rare the
-// value is, and such a page stays on the source as it did before range
-// reads were counted.
+// (limitEndsJoin): a LIMIT of 5,000 over a range reads 5,000 rows. A
+// filter the key does not cover (checksOtherColumns) makes the read walk
+// the whole range when few rows pass it (a11 in testdata/limits: a million
+// rows read for none), so with one a LIMIT ends nothing early.
 func (pol Policy) rangeStopsEarly(stmt string, p Plan) string {
-	if !p.CostUnknown || p.Filesort || p.topSort == sortWholeJoin || hintComment.MatchString(stmt) {
+	if !p.CostUnknown || p.rangeResidual || p.Filesort || p.topSort == sortWholeJoin || hintComment.MatchString(stmt) {
 		return ""
 	}
 	blanked, _, _, _ := scrub(stmt)
@@ -770,6 +779,57 @@ func (pol Policy) rangeStopsEarly(stmt string, p Plan) string {
 		return "LIMIT ? with no sort ends the range read early, by a bound not known here"
 	}
 	return fmt.Sprintf("LIMIT %d with no sort ends the range read early", total)
+}
+
+// conditionColumn finds the columns a MariaDB condition names: a table
+// qualifier that starts with a letter, a dot, then the column, bare or in
+// backticks (sbtest2.k, sbtest2.`id`). A number (1.5) is not one, and the
+// quoted literals are cut out first (conditionLiteral): a date such as
+// '2026-01-01 00:00:00.000000' holds "00.000000".
+var (
+	conditionColumn  = regexp.MustCompile("(?:^|[^A-Za-z0-9_$`])[A-Za-z_$][A-Za-z0-9_$]*\\.(?:`([^`]+)`|([A-Za-z0-9_$]+))")
+	conditionLiteral = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"`)
+)
+
+// checksOtherColumns reports whether a table read by a range also checks,
+// row by row, a column the key it reads does not cover. MariaDB repeats
+// the range itself in attached_condition (`sbtest2.id between 1 and
+// 8000000`), so a condition naming only the key's parts is the range's
+// own bounds; any other column, a pushed-down index_condition beside an
+// attached_condition, or a condition with no column read here, is a
+// filter the LIMIT has to wait on.
+func checksOtherColumns(t map[string]any) bool {
+	attached, _ := t["attached_condition"].(string)
+	index, _ := t["index_condition"].(string)
+	if attached != "" && index != "" {
+		return true
+	}
+	cond := attached + index
+	if cond == "" {
+		return false
+	}
+	parts := map[string]bool{}
+	if list, ok := t["used_key_parts"].([]any); ok {
+		for _, v := range list {
+			if name, ok := v.(string); ok {
+				parts[strings.ToLower(name)] = true
+			}
+		}
+	}
+	found := conditionColumn.FindAllStringSubmatch(conditionLiteral.ReplaceAllString(cond, "''"), -1)
+	if len(found) == 0 {
+		return true
+	}
+	for _, m := range found {
+		name := m[1]
+		if name == "" {
+			name = m[2]
+		}
+		if !parts[strings.ToLower(name)] {
+			return true
+		}
+	}
+	return false
 }
 
 // unionAll is the one UNION that streams: its branches are read in turn

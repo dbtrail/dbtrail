@@ -761,9 +761,10 @@ The decision, in order, for every statement:
    `DISTINCT`, window function or `UNION` (a `UNION ALL` streams and does
    not count), and the plan has no sort. MariaDB does not cut a range's
    row estimate for a `LIMIT`, so page one of a large range, with or
-   without an `ORDER BY` on the key, stays on MariaDB, and so does a page
-   with a filter the index does not serve, which may still read the whole
-   range looking for its rows. And a fourth, for joins: MariaDB answers a
+   without an `ORDER BY` on the key, stays on MariaDB. A page that also
+   filters on a column the range's key does not cover is not ended early:
+   when few rows pass the filter, MariaDB reads the whole range looking for
+   them, so it goes to the copy as MySQL's cost sends it. And a fourth, for joins: MariaDB answers a
    heavy join by walking the small table and reading the big one by key,
    so no table of the plan shows a scan while the join reads millions of
    rows. The rows the plan reads **across its joins** are estimated from
