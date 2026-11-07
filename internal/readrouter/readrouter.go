@@ -386,6 +386,14 @@ type Plan struct {
 	// stops at the first entry, and the plan does not say which kind of
 	// subquery it is. Only consulted when the plan has no cost.
 	MaxIndexScanRows int64
+	// MaxRangeScanRows is the largest row estimate over every table read by
+	// a range of an index (access_type range), outside subqueries. Only
+	// consulted when the plan has no cost: on MySQL the cost already counts
+	// a range read, while MariaDB's plan has nothing else that tells a
+	// range of five million rows from one of five. MariaDB's estimate does
+	// not shrink for a LIMIT, so DecideStatement says when a LIMIT ends the
+	// read first (rangeStopsEarly).
+	MaxRangeScanRows int64
 	// Message is the optimizer's shortcut when there is no plan ("no matching
 	// row in const table", "Impossible WHERE"): the query is trivial.
 	Message string
@@ -521,6 +529,9 @@ func walk(v any, p *Plan, inSubquery bool) {
 				}
 				if at == "index" && !inSubquery && n > p.MaxIndexScanRows {
 					p.MaxIndexScanRows = n
+				}
+				if at == "range" && !inSubquery && n > p.MaxRangeScanRows {
+					p.MaxRangeScanRows = n
 				}
 			}
 		}
@@ -710,12 +721,61 @@ func (pol Policy) DecideStatement(stmt string, p Plan) Decision {
 			return Decision{Reason: fmt.Sprintf("LIMIT %d over one table with no sort and no filter left to check row by row: the read stops once it has %d rows, of about %s behind it", n, n, groupDigits(p.ResultRows)), Rule: RuleBoundedLimit}
 		}
 	}
-	d := pol.decide(p, pol.limitEndsJoin(stmt, p))
+	d := pol.decide(p, pol.limitEndsJoin(stmt, p), pol.rangeStopsEarly(stmt, p))
 	if d.ToCopy {
 		d.ResultRows = resultRows(stmt, p)
 	}
 	return d
 }
+
+// rangeStopsEarly says why a plan with no cost reads only the start of its
+// ranges, or "" when it reads them whole. MariaDB's row estimate for a
+// range does not shrink for a LIMIT (WHERE id BETWEEN 1 AND 8000000 LIMIT
+// 20 says 4,931,532 rows), so the statement says it: a top-level LIMIT
+// under the scan threshold, offset included (a placeholder is taken as
+// under it, which is what an application pages with), nothing that reads
+// everything first (unboundedWork; a UNION ALL streams its branches and is
+// not that), one LIMIT only, and no sort in the plan (a sort reads the
+// whole range before the first row). The bound is the join rule's
+// (limitEndsJoin): a LIMIT of 5,000 over a range reads 5,000 rows. A filter the index
+// does not serve can still make the read walk the whole range looking for
+// its rows (a11 in testdata/limits); the statement cannot say how rare the
+// value is, and such a page stays on the source as it did before range
+// reads were counted.
+func (pol Policy) rangeStopsEarly(stmt string, p Plan) string {
+	if !p.CostUnknown || p.Filesort || p.topSort == sortWholeJoin || hintComment.MatchString(stmt) {
+		return ""
+	}
+	blanked, _, _, _ := scrub(stmt)
+	m := joinLimit.FindStringSubmatch(blanked)
+	if m == nil || unboundedWork.MatchString(unionAll.ReplaceAllString(blanked, " ")) || len(anyLimit.FindAllStringIndex(blanked, 2)) > 1 {
+		return ""
+	}
+	var total int64
+	placeholder := false
+	for _, part := range m[1:] {
+		switch part {
+		case "":
+		case "?":
+			placeholder = true
+		default:
+			n, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || n >= pol.ScanRows || total+n >= pol.ScanRows {
+				return ""
+			}
+			total += n
+		}
+	}
+	if placeholder {
+		return "LIMIT ? with no sort ends the range read early, by a bound not known here"
+	}
+	return fmt.Sprintf("LIMIT %d with no sort ends the range read early", total)
+}
+
+// unionAll is the one UNION that streams: its branches are read in turn
+// and a LIMIT over them stops the read. Cut out before unboundedWork is
+// asked, which matches every UNION.
+var unionAll = regexp.MustCompile(`(?i)\bunion\s+all\b`)
 
 // joinLimit is topLimit accepting a placeholder for either number: the
 // prepared path decides on the statement's text.
@@ -772,11 +832,12 @@ func DefaultPolicy() Policy { return Policy{CostThreshold: 10000, ScanRows: 1000
 
 // Decide reports whether the plan is expensive enough for the copy, and why
 // either way, in words an operator can read in the audit trail.
-func (pol Policy) Decide(p Plan) Decision { return pol.decide(p, "") }
+func (pol Policy) Decide(p Plan) Decision { return pol.decide(p, "", "") }
 
 // decide is Decide; a non-empty rowsLeftOut is why the rows read across
-// joins are not to be counted for this statement (DecideStatement).
-func (pol Policy) decide(p Plan, rowsLeftOut string) Decision {
+// joins are not to be counted for this statement, and a non-empty
+// rangeLeftOut why its range reads are not (DecideStatement).
+func (pol Policy) decide(p Plan, rowsLeftOut, rangeLeftOut string) Decision {
 	if p.Message != "" {
 		return Decision{Reason: "trivial plan: " + p.Message, Rule: RuleTrivial}
 	}
@@ -811,6 +872,17 @@ func (pol Policy) decide(p Plan, rowsLeftOut string) Decision {
 				shown = p.RowsRead // rounding must not print the threshold for a plan under it
 			}
 			cheap += fmt.Sprintf("; about %s rows read across a join", groupDigits(shown))
+		}
+		// After the join rule, which counts a range read with what it
+		// multiplies: here a range of the index over the threshold is the
+		// same work as a full scan (WHERE id BETWEEN 1 AND 8000000 reads
+		// eight million rows whatever access type it is called), unless a
+		// LIMIT ends it early.
+		if pol.ScanRows > 0 && p.MaxRangeScanRows >= pol.ScanRows {
+			if rangeLeftOut == "" {
+				return Decision{ToCopy: true, Reason: fmt.Sprintf("range read over %d rows >= %d", p.MaxRangeScanRows, pol.ScanRows), Rule: RuleScan}
+			}
+			cheap += "; " + rangeLeftOut
 		}
 		return Decision{Reason: cheap, Rule: RuleCheap}
 	}

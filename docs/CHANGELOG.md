@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **On a MariaDB source, a large range read goes to the copy.** A statement that reads a range of an index, such as `WHERE id BETWEEN 1 AND 8000000` with a `GROUP BY`, or a `count(*)` over a year of an indexed date, was called a cheap plan and ran on MariaDB however many rows the range held: its plan carries no cost, and only a full scan or an index walked whole counted. A range of `--route-scan-rows` rows or more (default 100,000) now counts the same, unless a `LIMIT` below that, or `LIMIT ?`, ends it early with no sort, aggregate, `GROUP BY`, `DISTINCT` or `UNION` before it: page one of a large range stays on MariaDB. MySQL sources are unchanged, since their plan's cost already counted the range.
+
 ## [0.127.0] - 2026-11-07
 
 - **The MySQL port reads MySQL's names without routing too.** Backtick-quoted names, which most ORMs and drivers write, reached the copy as written on a port without routing, and the copy refused them. They now reach it in double quotes, and `STRAIGHT_JOIN` as the join it means, with the written order kept when every join of the statement is a `STRAIGHT_JOIN`: the rewrite routing already made. A statement where that rewrite would be a guess runs as written, as before, and so does one with a dollar-quoted string (`$$..$$`) or a `--` comment with no space after it, which the copy and MySQL read differently, so the rewrite could otherwise change a string.

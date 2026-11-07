@@ -753,7 +753,17 @@ The decision, in order, for every statement:
    cannot be compared with. The scan rule applies, and so does one more: an
    index walked end to end over at least `--route-scan-rows` rows is the
    copy's (an index scan inside a subquery is not counted: for `EXISTS` it
-   stops at the first entry). And a third, for joins: MariaDB answers a
+   stops at the first entry), and so is a **range** of an index over at
+   least that many rows (`WHERE id BETWEEN 1 AND 8000000` reads eight
+   million rows whatever the plan calls it), unless a `LIMIT` ends it
+   early: the statement ends in a `LIMIT` (offset included) below
+   `--route-scan-rows`, or `LIMIT ?`, with no aggregate, `GROUP BY`,
+   `DISTINCT`, window function or `UNION` (a `UNION ALL` streams and does
+   not count), and the plan has no sort. MariaDB does not cut a range's
+   row estimate for a `LIMIT`, so page one of a large range, with or
+   without an `ORDER BY` on the key, stays on MariaDB, and so does a page
+   with a filter the index does not serve, which may still read the whole
+   range looking for its rows. And a fourth, for joins: MariaDB answers a
    heavy join by walking the small table and reading the big one by key,
    so no table of the plan shows a scan while the join reads millions of
    rows. The rows the plan reads **across its joins** are estimated from
@@ -773,9 +783,9 @@ The decision, in order, for every statement:
    by country reads about 2,090,000 rows by this count and goes to the
    copy; a join whose first table an index cuts to a few rows reads tens
    and stays on MariaDB. What is not counted:
-   - **One table alone**, however many rows it reads through an index (a
-     `count(*)` over a one-year range of an indexed date stays on MariaDB,
-     where MySQL's cost sends it to the copy). A table the optimizer
+   - **One table alone**: the scan rules above decide it (a `count(*)`
+     over a one-year range of an indexed date goes to the copy by the
+     range rule, as MySQL's cost sends it there). A table the optimizer
      reads before the plan starts (`const`, `system`: a lookup by a whole
      primary key) is a value, not a table of the join: a point lookup
      joined to one large read is still one table.

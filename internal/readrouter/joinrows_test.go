@@ -145,7 +145,8 @@ func TestDecideStatement_limitKeepsEstimateOut(t *testing.T) {
 }
 
 // One table alone, however many rows it reads through an index, is not
-// this rule's: the scan rules decide it, as before.
+// this rule's: the scan rules decide it (a range over the threshold is the
+// copy's by the scan rule, not by this one).
 func TestDecide_singleTableIsNotAJoin(t *testing.T) {
 	for _, name := range []string{"single_range_year", "single_ref_status", "single_range_limit500", "union_single_ranges"} {
 		for _, server := range mariaServers {
@@ -153,8 +154,8 @@ func TestDecide_singleTableIsNotAJoin(t *testing.T) {
 			if p.Joined || p.RowsReadUnknown != "" || p.RowsRead != 0 || p.MaxScanRows < 100000 {
 				t.Errorf("%s/%s: joined=%v unknown=%q rows=%d scan=%d, want a read over the threshold that is no join and counts no rows across one", server, name, p.Joined, p.RowsReadUnknown, p.RowsRead, p.MaxScanRows)
 			}
-			if d := DefaultPolicy().Decide(p); d.ToCopy || d.Rule != RuleCheap || strings.Contains(d.Reason, "join") {
-				t.Errorf("%s/%s: toCopy=%v by %s (%s), want the source, with no join named", server, name, d.ToCopy, d.Rule, d.Reason)
+			if d := DefaultPolicy().Decide(p); d.Rule == RuleJoinRows || strings.Contains(d.Reason, "join") {
+				t.Errorf("%s/%s: toCopy=%v by %s (%s), want no join rule and no join named", server, name, d.ToCopy, d.Rule, d.Reason)
 			}
 		}
 	}
@@ -505,6 +506,12 @@ func TestDecideStatement_joinFixturesOnMariaDB(t *testing.T) {
 		"not_in_subquery":     {RuleScan, RuleScan},
 		"single_full_scan":    {RuleScan, RuleScan},
 		"exists_uncorrelated": {RuleScan, RuleScan},
+		// One table, or a UNION ALL of single tables, read by a range over
+		// the threshold with no LIMIT: a year of orders is counted from
+		// 1,991,571 rows (996,651 by 10.11's estimate). The scan rule's,
+		// as a full scan of that size would be.
+		"single_range_year":   {RuleScan, RuleScan},
+		"union_single_ranges": {RuleScan, RuleScan},
 	}
 	names, stmts := joinStatements(t)
 	if len(names) < 60 {
@@ -674,7 +681,7 @@ func TestParsePlan_constTableIsNotAJoin(t *testing.T) {
 	if p.Joined || p.RowsRead != 0 || p.RowsReadUnknown != "" || p.MaxScanRows != 564692 {
 		t.Errorf("const then range: joined=%v rows=%d unknown=%q scan=%d", p.Joined, p.RowsRead, p.RowsReadUnknown, p.MaxScanRows)
 	}
-	if d := DefaultPolicy().Decide(p); d.ToCopy || strings.Contains(d.Reason, "join") {
+	if d := DefaultPolicy().Decide(p); d.Rule == RuleJoinRows || strings.Contains(d.Reason, "join") {
 		t.Errorf("const then range: toCopy=%v (%s)", d.ToCopy, d.Reason)
 	}
 	keyed := joinPlan(t, "mariadb114", "const_then_range_keyed")
