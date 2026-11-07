@@ -1433,11 +1433,12 @@ func rewriteForDuckDB(qstr, schema string) (string, string) {
 // plain $ in a string ('$5 and $6') does not match.
 var dollarQuote = regexp.MustCompile(`\$[^\s$]*\$`)
 
-// dashComment finds -- followed by anything but white space, or at the end:
-// a comment on the copy, two minus signs on MySQL, which reads a comment only
-// when white space follows. A quote after it is then a string on one side
-// and comment text on the other.
-var dashComment = regexp.MustCompile(`--(?:[^ \t\n\r\f\v]|$)`)
+// dashComment finds -- followed by anything but a space, a tab or a newline,
+// or at the end: a comment on the copy, while readrouter's scanner reads a
+// comment only when one of those three follows (forcopy.go). A quote after
+// it is then a string on one side and comment text on the other. Keep the
+// three in step with the scanner.
+var dashComment = regexp.MustCompile(`--(?:[^ \t\n]|$)`)
 
 // copyReadsOtherwise reports whether stmt holds something the copy reads
 // otherwise than MySQL's reading in readrouter.ForCopy: a dollar-quoted

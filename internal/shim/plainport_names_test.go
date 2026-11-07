@@ -42,6 +42,8 @@ func TestPlainPort_mysqlNamesReachTheCopy(t *testing.T) {
 		// signs on MySQL: a quote inside it would end a string on one side.
 		{"a -- comment with no space", "SELECT count(*) FROM t --don't count drafts\nWHERE tag <> '`draft`.' --'",
 			"SELECT count(*) FROM t --don't count drafts\nWHERE tag <> '`draft`.' --'", false},
+		{"a -- comment opened by a form feed", "SELECT 1 AS a --\f'\n, '`x` + 1' AS c --\f'\n", "SELECT 1 AS a --\f'\n, '`x` + 1' AS c --\f'\n", false},
+		{"a -- comment opened by a vertical tab", "SELECT 1 AS a --\v'\n, '`x` + 1' AS c --\v'\n", "SELECT 1 AS a --\v'\n, '`x` + 1' AS c --\v'\n", false},
 		{"a -- comment with a space is rewritten around", "SELECT `id` FROM `t` -- note\n", "SELECT \"id\" FROM \"t\" -- note\n", false},
 		{"STRAIGHT_JOIN mixed with a comma", "SELECT a.x FROM a STRAIGHT_JOIN b ON a.id = b.id, c", "SELECT a.x FROM a JOIN b ON a.id = b.id, c", false},
 		{"a plain $ in a string is no dollar quote", "SELECT `id` FROM `orders` WHERE note = '$5 and $6'", `SELECT "id" FROM "orders" WHERE note = '$5 and $6'`, false},
