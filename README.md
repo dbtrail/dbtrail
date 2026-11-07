@@ -1,180 +1,108 @@
 <div align="center">
 
-<img src="docs/img/dbtrailheader.png" alt="DBTrail: the open-source analytical replica for MySQL. Reads your binlog, writes Parquet to your bucket, query it with DuckDB." width="100%">
+<img src="docs/img/dbtrailheader.png" alt="Heavy MySQL queries, from minutes to seconds. For your MySQL 8.0+, RDS, Aurora, Percona or MariaDB, and anything else that writes a MySQL binlog: DBTrail follows your binlog and answers from a copy in Parquet with DuckDB. Works with your mysql client and drivers, and installs nothing on your MySQL." width="100%">
 
-**DBTrail keeps your MySQL tables as Parquet files you own, minutes behind the source, with every version of every row. Query them with DuckDB. Production never sees the query.**
+**HTAP for MySQL and MariaDB. Transactions stay on your server; heavy queries come back in seconds from a columnar copy that follows your binlog, routed automatically on the same connection, with no ETL and nothing installed on your MySQL.**
 
 [![Release](https://img.shields.io/github/v/release/dbtrail/dbtrail)](https://github.com/dbtrail/dbtrail/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![CI](https://github.com/dbtrail/dbtrail/actions/workflows/ci.yml/badge.svg)](https://github.com/dbtrail/dbtrail/actions)
 
+[Website](https://dbtrail.com) · [Quick Start](https://www.dbtrail.com/docs/quickstart/) · [Docs](https://www.dbtrail.com/docs/) · [Blog](https://blog.dbtrail.com)
+
 </div>
 
-```
-$ duckdb -init views.sql
-D SELECT c.tier, count(*) AS orders, round(sum(o.total), 2) AS revenue
-  FROM demo.orders o
-  JOIN demo.customers c ON c.id = o.customer_id
-  GROUP BY c.tier ORDER BY revenue DESC;
-┌──────────┬────────┬───────────────┐
-│   tier   │ orders │    revenue    │
-│ varchar  │ int64  │ decimal(38,2) │
-├──────────┼────────┼───────────────┤
-│ platinum │ 539848 │   59426197.40 │
-│ gold     │ 539752 │   59353658.54 │
-│ silver   │ 539056 │   59295443.48 │
-│ bronze   │ 538385 │   59242795.95 │
-└──────────┴────────┴───────────────┘
+```sh
+mysql -h <dbtrail host> -P 3309 -u shop -p
 ```
 
-<p align="center"><em>That query read Parquet files. The MySQL primary never saw it.</em></p>
+```sql
+SELECT c.tier, count(*) AS orders, round(sum(o.total), 2) AS revenue
+FROM orders o JOIN customers c ON c.id = o.customer_id
+GROUP BY c.tier ORDER BY revenue DESC;
+```
 
-<p align="center">
-Minutes behind the source. Not high availability, not a backup.
-<a href="#limits">Limits</a>
-</p>
+<p align="center"><em>The same SQL your application sends. DBTrail answered it from the copy, and your MySQL never ran it.</em></p>
 
 ---
 
-## Why
+## What you can do
 
-Reports, dashboards and ad-hoc analysis compete with your application when
-they run on the primary: a full scan pushes the working set out of the buffer
-pool, a long read holds back purge, and a `GROUP BY` over millions of rows
-spills temp tables to disk. A reporting replica is one more MySQL to pay for
-and patch, and it still answers at row-store speed.
+- **Run heavy queries in seconds.** Totals and rankings over whole tables,
+  trends over years of data, page 5,000 of a listing. In our test, the
+  heaviest of 14 real reports took 225 seconds on a MySQL replica and 7.9 with
+  DBTrail; the 14 ran 6.5 times faster on average.
+  [The numbers](https://www.dbtrail.com/docs/guides/query-with-a-mysql-client/routing/#numbers)
+- **Keep one connection for your application.** With routing on, DBTrail
+  sends writes, transactions and lookups by key to your MySQL, and answers the
+  heavy reads from the copy. Your application's SQL stays as it is. It also
+  works behind ProxySQL.
+  [Connect your application](https://www.dbtrail.com/docs/guides/query-with-a-mysql-client/routing/)
+- **Point dashboards at it.** Metabase, Grafana or any tool that speaks MySQL.
+  [Dashboards](https://www.dbtrail.com/docs/guides/dashboards/)
+- **Undo a wrong change.** DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want.
+  You review it and you run it.
+  [Undo a wrong change](https://www.dbtrail.com/docs/guides/recovery/)
+- **See a table as it was yesterday at 14:30**, or every version of one row,
+  with `AS OF` from your mysql client.
+  [Restore tables to a moment](https://www.dbtrail.com/docs/guides/pitr/)
+- **Ask Claude what changed.** Connect Claude, or any MCP client, and ask in
+  plain words: "what was deleted from orders in the last hour?", "how did
+  customer 42 look on Monday?", "give me the SQL that puts it back". Its tools
+  only read, and it never runs SQL on your MySQL.
+  [Connect Claude](https://www.dbtrail.com/docs/claude/setup/)
 
-DBTrail gives those queries a copy of their own, in a columnar format, outside
-`mysqld`.
+## Where it runs
 
-## How it works
+DBTrail reads your binlog over the replication protocol, the way a replica
+does. Nothing is installed on your MySQL: no plugin, no agent, no triggers.
+You don't move to another database or another cloud. DBTrail runs on your own
+machines, next to MySQL, Percona Server, MariaDB, Amazon RDS or Aurora, and
+the copy is plain Parquet files on your disk or in your S3 bucket.
 
-1. **The first copy reads your tables once** (with mydumper).
-2. **After that, only the binlog.** DBTrail connects over the replication
-   protocol, the way a replica does. No plugin, no agent on the database host,
-   no triggers. That is why Amazon RDS and Aurora work.
-3. **On your schedule, the copy is updated.** DBTrail folds the recorded
-   changes into a new Parquet snapshot, from every 5 minutes to once a day.
-   The source is not read again, unless a table changes shape
-   (see [Limits](#limits)).
-4. **You query it with DuckDB.** A generated `views.sql` gives you one view
-   per table, named like the source table (`shop.orders`), that follows
-   the newest snapshot.
+## Install
 
-One Docker Compose stack, and a folder or an S3 bucket. No pipeline to build,
-no warehouse to run, no Kafka. See [Analytics with DuckDB](docs/analytics.md).
-
-## The numbers
-
-Source: RDS MySQL 8.4, TPC-C dataset, 73 million rows, about 10 GB, under a
-sysbench-tpcc load of 180 transactions per second. Measured 18 to 20 September
-2026 with DBTrail 0.84 refreshing every 5 minutes. Six report queries, total
-time:
-
-| Where the queries ran | Total time |
-|---|---|
-| MySQL | 22 min 28 s |
-| **DBTrail + DuckDB** | **4.6 s** |
-
-One of the six, a two-table join grouped by district and month, took
-3 min 52 s on MySQL and 0.9 s on the copy.
-
-Freshness, measured separately under about 340 transactions per second with a
-5-minute schedule: commit to visible in DuckDB took 2.7 to 13.2 minutes,
-median 5.9.
-
-Method, cost comparison and ClickBench results:
-[Introducing the MySQL Analytical Replica](https://blog.dbtrail.com/introducing-mysql-analytical-replica/).
-
-## What you get
-
-### An analytical copy
-
-- **Heavy queries off your MySQL.** They run in DuckDB, in its own process,
-  on the copy. Only the binlog leaves `mysqld`.
-- **One MySQL connection for both, with Engine Routing.** Point a report or a
-  BI tool at DBTrail's MySQL port instead of your MySQL. For each statement it
-  decides who answers: lookups, small reads and anything inside a transaction
-  go to your MySQL, heavy reads go to the copy. No query changes. Off until you
-  turn it on. See
-  [Run MySQL and DuckDB on the same connection](https://www.dbtrail.com/docs/guides/query-with-a-mysql-client/routing/).
-- **DuckDB, ready to open.** One `views.sql`, one view per table. Your DuckDB
-  runs it on your machine: a laptop, a notebook, a BI box.
-- **Open files you own.** Plain Parquet on disk or in S3, with a
-  Hive-partitioned change history. Nothing proprietary.
-- **Other engines too.** Export a snapshot to Iceberg for Spark, Trino or
-  Athena with `bintrail export iceberg`. See [Iceberg export](docs/iceberg-export.md).
-
-> **Open the copy through `views.sql`.** An engine that reads the Parquet
-> files directly sees each table as of its last full write and can miss the
-> change files stored beside it. The views apply them for you.
-
-### Time travel and recovery, from the same stream
-
-DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want. It reads them from the same
-binlog as the copy, from the day you install it:
-
-- **Every version of every row.** See any row or table as it was at a past
-  moment, from the web interface or the `reconstruct` CLI. An optional MySQL
-  port (beta) answers the same questions with `AS OF` SQL from any `mysql`
-  client. See [Time-Travel SQL](docs/time-travel-sql.md).
-- **Undo precisely.** Generate the SQL that reverses just the damaged rows.
-  `recover-cascade` also rebuilds the child rows an `ON DELETE CASCADE`
-  removed below the binary log. DBTrail writes the SQL. You review it and you
-  run it. See [Query & Recovery](docs/query-and-recovery.md).
-- **Prove it holds.** `bintrail verify` checks, from two snapshots and the
-  index and without touching the source, that a recovery would reproduce it.
-  `bintrail status` flags any gap the capture could not fill.
-  See [Verify](docs/verify.md).
-- **Web interface and MCP.** Add servers, schedule snapshots and browse
-  changes in the browser. Connect Claude Desktop or any MCP client to ask in
-  plain English. Every tool is read-only.
-  See the [5-minute guide](docs/connect-ai.md).
-
-Try time travel in 30 seconds, with nothing of yours connected:
+You need Docker with Compose, and the `mysql` client.
 
 ```sh
-docker run --rm -p 6033:6033 ghcr.io/dbtrail/bintrail-demo
+curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | sh
 ```
 
-See [the demo image](docs/demo.md).
+It starts DBTrail and opens **http://127.0.0.1:8090**. Connect your MySQL in
+the form, take the first copy, turn on the MySQL port, and run a heavy query:
+the five steps are in the [Quick Start](https://www.dbtrail.com/docs/quickstart/).
+
+For a server you keep running, the same setup as a compose file and a few API
+calls you can keep in your automation:
+[In production](https://www.dbtrail.com/docs/production/). Linux packages and
+Amazon ECS too.
+
+To try the time-travel SQL in 30 seconds, with nothing of yours connected:
+`docker run --rm -p 6033:6033 ghcr.io/dbtrail/bintrail-demo`
+([the demo image](docs/demo.md)).
 
 ## Limits
 
-A copy you can trust is one whose edges you know.
-
-- **Not high availability.** Your application never points at the copy.
-  Nothing fails over to it.
-- **Not your backup.** History starts the day you install it. Keep your
-  physical backups.
-- **Minutes behind, not seconds, by default.** The copy refreshes on the
-  schedule you set, and the SQL port answers from it. Its fresh mode, chosen
-  per server in the web interface, also reads what capture has indexed since,
-  usually seconds behind, for some memory and speed.
-- **Needs a ROW binlog with full row images.** `binlog_format=ROW` and
-  `binlog_row_image=FULL`. `bintrail doctor` checks both and prints the fix
-  (on RDS and Aurora, set them in the parameter group).
-- **Some changes mean a full read.** Adding, dropping, renaming or retyping a
-  column, or a `TRUNCATE`, `DROP` or `RENAME` of a table, pauses the scheduled
-  update until DBTrail reads the database again, at most once a day. That read
-  takes a short lock: a global read lock while it starts, or, on RDS and
-  Aurora, a lock on the tables it reads. A new table joins with a read of its
-  own. Index and other everyday changes do not trigger one.
-- **History needs a bucket.** Without S3, row history keeps 48 hours by
-  default (`--rotate-retain` changes it). The copy itself stays: the newest
-  3 snapshots per table on local disk.
-- **Cascaded deletes before MySQL 9.6, and on MariaDB.** Rows deleted by a
-  foreign key never reach the binlog. `recover-cascade` rebuilds most of them,
-  and the copy keeps them until DBTrail next reads the database in full.
-- **The MySQL port is beta, read-only, and has no TLS.** Use it on a private
-  network. It answers reads (routed to the copy or to your MySQL) and
-  time-travel questions; writes are refused unless the router is started to
-  forward them. It does not tune a slow query: a query that needs an index
-  still needs the index.
+- **The copy is behind your MySQL.** By seconds in fresh mode, by minutes
+  otherwise. A query that must see a write made a second ago belongs on your
+  MySQL, and routing keeps transactions there.
+- **Lookups stay on your MySQL.** A read by key takes a few milliseconds on
+  MySQL and about 100 on the copy, so routing leaves it on your MySQL.
+- **Not high availability, and not your backup.** Writes always go to your
+  MySQL and nothing fails over to DBTrail. History starts the day you install
+  it. Keep your replicas and your backups.
+- **Needs a ROW binlog with full row images** (`binlog_format=ROW`,
+  `binlog_row_image=FULL`), and a primary key on every InnoDB table. The
+  connect form checks the binlog settings and shows the fix.
+- **Some schema changes re-read a table.** Adding or dropping a column, or a
+  `TRUNCATE`, makes DBTrail read that table again, with a short lock.
+- **Row history needs a bucket to last.** Without S3 it keeps 48 hours. The
+  copy itself stays.
+- **The MySQL port has no TLS yet.** Use it on a private network.
 - **Yours to operate.** DBTrail and its small index MySQL run on your
-  machines. Disk and backups are yours.
+  machines. Disk, backups and upgrades are yours.
 
-Full list: [Limitations](https://www.dbtrail.com/docs/limitations/).
+All of them: [Limitations](https://www.dbtrail.com/docs/limitations/).
 
 ## What it works with
 
@@ -191,39 +119,6 @@ Full list: [Limitations](https://www.dbtrail.com/docs/limitations/).
 DBTrail never needs the binlog files on disk, which is why managed cloud
 databases work.
 
-## Install
-
-You need Docker with Compose, and DuckDB on the machine where you query.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | sh
-```
-
-This downloads the Docker Compose stack, starts it, waits until DBTrail
-answers, and prints the next steps.
-
-1. **Sign in.** Open **http://127.0.0.1:8090**, create a username and
-   password, and press **Create & sign in**.
-2. **Connect.** Click **+ Add server**, enter the host and port of your MySQL
-   and press **Find it**. The form shows the SQL that creates DBTrail's user.
-   Run it on your MySQL, then press **I ran it**. DBTrail checks the rest and
-   starts on its own.
-3. **First change.** Change a row on your MySQL. It shows under
-   **Recent changes** on the Overview within a minute, with an **Undo** that
-   writes the SQL to reverse it.
-4. **First copy.** On **Snapshots**, press **Read database now**. Normally
-   this is the only time DBTrail reads your tables directly.
-5. **Set a schedule.** On the **Settings** tab of **Snapshots**, under
-   **Update the copy**, pick how often (every 5 minutes, for example) and
-   press **Turn on**. Each run after the first folds the recorded changes
-   instead of reading the source.
-6. **Query it.** On **Snapshots**, press **Download**, then
-   **Download the data**. Unpack the `.tar.gz` and run `duckdb -init views.sql`
-   inside the snapshot folder. To read the copy that keeps updating, see
-   [Query in DuckDB](https://www.dbtrail.com/docs/guides/query-in-duckdb/).
-
-Prefer the command line? See the [command-line quickstart](docs/quickstart.md).
-
 ## Who builds it
 
 DBTrail is built by Daniel Guzman-Burgos, former MySQL Technical Lead at
@@ -231,15 +126,15 @@ Percona.
 
 ## Documentation
 
-| Start here | Reference | Operations |
+The guides live at [dbtrail.com/docs](https://www.dbtrail.com/docs/). This
+repository keeps the reference for the command line and for operators:
+
+| Use it | Operate it | Reference |
 |---|---|---|
-| [Install](docs/install.md) | [Analytics with DuckDB](docs/analytics.md) | [Deployment](docs/deployment.md) · [Capacity](docs/capacity.md) |
-| [Start page](https://www.dbtrail.com/docs/quickstart/) · [Command-line quickstart](docs/quickstart.md) | [Dump & Baseline](docs/dump-and-baseline.md) · [Iceberg export](docs/iceberg-export.md) | [Rotation & Status](docs/rotation-and-status.md) |
-| [DBA guide](docs/guide.md) | [Query & Recovery](docs/query-and-recovery.md) · [Time-Travel SQL](docs/time-travel-sql.md) | [Docker](docs/docker.md) |
-| [30-second demo](docs/demo.md) | [Verify recoveries](docs/verify.md) · [Web interface](docs/console.md) | [Upload to S3](docs/upload.md) · [S3 IAM policy](docs/s3-iam-policy.md) · [Upgrading](docs/upgrade.md) |
-| [Limitations](https://www.dbtrail.com/docs/limitations/) | [Streaming](docs/streaming.md) · [Indexing](docs/indexing.md) · [DDL tracking](docs/ddl-tracking.md) | [Server identity](docs/server-identity.md) |
-| | [Connect an AI assistant](docs/connect-ai.md) · [MCP server](docs/mcp-server.md) | [Parquet debugging](docs/parquet-debugging.md) |
-| | [MariaDB source](docs/mariadb.md) · [PostgreSQL source](docs/postgres.md) | |
+| [Command-line quickstart](docs/quickstart.md) | [Install](docs/install.md) · [Deployment](docs/deployment.md) | [Time-Travel SQL](docs/time-travel-sql.md) |
+| [DBA guide](docs/guide.md) | [Capacity](docs/capacity.md) · [Upgrading](docs/upgrade.md) | [Query & Recovery](docs/query-and-recovery.md) |
+| [Analytics with DuckDB](docs/analytics.md) | [Docker](docs/docker.md) · [Upload to S3](docs/upload.md) | [MCP server](docs/mcp-server.md) |
+| [Iceberg export](docs/iceberg-export.md) | [Rotation & Status](docs/rotation-and-status.md) | [MariaDB source](docs/mariadb.md) · [PostgreSQL source](docs/postgres.md) |
 
 ## Privacy
 
@@ -268,8 +163,9 @@ your deployment.
 ## License
 
 [Apache-2.0](LICENSE): free for any use, including commercial and production.
-Contributions are welcome; see [CONTRIBUTING.md](.github/CONTRIBUTING.md) (a CLA
-is required, prompted automatically on your first PR).
+Contributions are welcome; see [CONTRIBUTING.md](.github/CONTRIBUTING.md). Each
+commit carries a `Signed-off-by` line ([DCO](.github/DCO.md)); `git commit -s`
+adds it.
 
 Want the index server **operated** for you (sized, backed up, upgraded, kept
 alive on-call) instead of running it yourself? That is the managed service at
