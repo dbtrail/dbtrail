@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **Engine Routing keeps `CONCAT`, `LEAST` and `GREATEST` on MySQL** (#2633). With one NULL argument MySQL returns NULL, and the copy skipped the NULL: `CONCAT(first_name, ' ', middle_name)` was `'Ana '` on the copy where MySQL said NULL, and `LEAST(1, NULL)` was 1. A statement that calls one of the three now runs on MySQL, so a report with them is answered right and no longer offloaded. `CONCAT_WS`, which skips a NULL on both, still goes to the copy. A connection without routing is unchanged: it reads the copy's meaning, as this page already said.
+- **Engine Routing sends a statement to MySQL when a date column it names holds a zero date** (#2633). The copy holds `0000-00-00` as NULL, so `MIN`, `ORDER BY`, `IS NULL`, a comparison or a `GROUP BY` over such a column answered differently from MySQL, with no error. A `DATE`, `DATETIME` or `TIMESTAMP` column declared `NOT NULL`, or whose default is the zero date, can only hold a NULL on the copy where the source has a zero date, so before the copy answers a statement that names one (or a star that brings it in), it checks that column for a NULL, as it checks text columns since #2533, and declines to MySQL when it finds one. On a plain file DuckDB answers the check from the file's statistics (about 4 ms over 20 million rows). Not checked: a column that allows NULL and has no zero-date default, whose NULLs may be the source's own; `docs/time-travel-sql.md` says so.
 
 ## [0.128.0] - 2026-11-07
 

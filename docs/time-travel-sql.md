@@ -1289,6 +1289,13 @@ What this is and is not:
   `CONCAT`, `LEAST` and `GREATEST` (one NULL argument makes them NULL on
   MySQL, and the copy skips it: `CONCAT('a', NULL)` is `'a'` there;
   `CONCAT_WS` skips it on both and goes to the copy),
+  a zero date (the copy holds `0000-00-00` as NULL: in a `DATE`, `DATETIME`
+  or `TIMESTAMP` column declared `NOT NULL`, or whose default is the zero
+  date, a NULL on the copy can only be one, and a statement that names such
+  a column, or a star that brings it in, is checked for a NULL there first
+  and goes to MySQL when one is found; a column that allows NULL and has no
+  such default is not checked, since its NULLs may be the source's own, so a
+  source that writes zero dates into one gets the copy's NULL for them),
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   does not compare the rows by MySQL's collation there: `SELECT 'é' UNION
   SELECT 'e'` is one row on MySQL and two on the copy, and `SELECT 'a' UNION

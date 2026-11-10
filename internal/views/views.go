@@ -188,6 +188,10 @@ type BaselineTable struct {
 	// against the copy (baseline.TableFooter.Text, #2533). Set with
 	// SchemaKnown.
 	Text []baseline.TextColumn
+	// ZeroDate are the date columns whose NULL on the copy may be a zero
+	// date the source has (baseline.TableFooter.ZeroDate, #2633). Set with
+	// SchemaKnown.
+	ZeroDate []string
 	// UnixTimeSafe and UnixTimeOther split the table's columns into those
 	// UNIX_TIMESTAMP(col) gives the same number of on the copy as on MySQL and
 	// the rest (baseline.TableFooter.UnixTimeSafe, #2493). Set with SchemaKnown.

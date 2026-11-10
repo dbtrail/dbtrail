@@ -44,6 +44,10 @@ const (
 // pattern for the copy to answer.
 type sqlTextGuard struct {
 	view, label, column, pattern string
+	// zeroDate guards a date column against a NULL instead (#2633): one where
+	// a NULL on the copy may be a zero date (views.BaselineTable.ZeroDate),
+	// which MySQL compares, counts and sorts as a date and the copy as NULL.
+	zeroDate bool
 }
 
 // sqlTextCheck says why the copy must not answer a routed statement because
@@ -207,6 +211,12 @@ func sqlTextCheck(narrowed views.Input, refs sqlsandbox.Refs) (string, []sqlText
 			}
 			guards = append(guards, sqlTextGuard{view: sv.Ref, label: label, column: tc.Name, pattern: pattern})
 		}
+		for _, name := range t.ZeroDate {
+			if !named[strings.ToLower(name)] && !every[sv.Ref] || narrowed.Hidden.ColumnHidden(t.Schema, t.Table, name) {
+				continue
+			}
+			guards = append(guards, sqlTextGuard{view: sv.Ref, label: label, column: name, zeroDate: true})
+		}
 	}
 	return "", guards
 }
@@ -226,13 +236,27 @@ func sqlTextDeclineSQL(guards []sqlTextGuard) string {
 	}
 	var b strings.Builder
 	for _, view := range order {
-		var conds, cols []string
+		var conds, cols, kinds []string
+		text, zero := false, false
 		for _, g := range byView[view] {
-			conds = append(conds, "regexp_matches(CAST("+`"`+strings.ReplaceAll(g.column, `"`, `""`)+`"`+" AS VARCHAR), '"+g.pattern+"')")
+			name := `"` + strings.ReplaceAll(g.column, `"`, `""`) + `"`
+			if g.zeroDate {
+				conds = append(conds, name+" IS NULL")
+				zero = true
+			} else {
+				conds = append(conds, "regexp_matches(CAST("+name+" AS VARCHAR), '"+g.pattern+"')")
+				text = true
+			}
 			cols = append(cols, g.column)
 		}
-		what := fmt.Sprintf("a value in %s (%s) that the copy compares another way than MySQL (a letter with an accent, "+
-			"a sign in a column the statement sorts, a trailing space)", byView[view][0].label, strings.Join(cols, ", "))
+		if text {
+			kinds = append(kinds, "a letter with an accent, a sign in a column the statement sorts, a trailing space")
+		}
+		if zero {
+			kinds = append(kinds, "a zero date (0000-00-00), which the copy holds as NULL")
+		}
+		what := fmt.Sprintf("a value in %s (%s) that the copy compares another way than MySQL (%s)",
+			byView[view][0].label, strings.Join(cols, ", "), strings.Join(kinds, "; "))
 		b.WriteString(sqlsandbox.DeclineSQL("EXISTS (SELECT 1 FROM "+view+" WHERE "+strings.Join(conds, " OR ")+")", what))
 	}
 	return b.String()

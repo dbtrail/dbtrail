@@ -94,6 +94,11 @@ type Column struct {
 	// source's IS_NULLABLE, because a restore loads the carried definition.
 	NotNull bool
 
+	// ZeroDefault is true when the column's definition declares the zero date
+	// as its default (DEFAULT '0000-00-00...', #2633): a NULL the copy holds
+	// for it may be a zero date the source has, NOT NULL or not.
+	ZeroDefault bool
+
 	// Collation is the collation the column's own definition names, lower
 	// case, and ExplicitCharset says it names a character set. SHOW CREATE
 	// TABLE prints a column's collation only when it differs from the
@@ -335,6 +340,7 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 			DecimalScale:     scale,
 			DeclaredType:     declared,
 			NotNull:          declaredNotNull(line[loc[4]+len(declared):]),
+			ZeroDefault:      zeroDefaultRe.MatchString(line[loc[4]+len(declared):]),
 			Collation:        collation,
 			ExplicitCharset:  explicitCharset,
 			Charset:          charset,
@@ -348,6 +354,10 @@ func parseSchemaFrom(r io.Reader) ([]Column, error) {
 	}
 	return cols, nil
 }
+
+// zeroDefaultRe is a DEFAULT of the zero date in a column's attributes. Read
+// over the raw text: a COMMENT that held the words would only add a check.
+var zeroDefaultRe = regexp.MustCompile(`(?i)\bDEFAULT\s+'0000-00-00`)
 
 // declaredNotNull reports whether a column's attributes, the text after its
 // declared type, say NOT NULL. Only words at the top level count: words inside
