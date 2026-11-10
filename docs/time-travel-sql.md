@@ -1286,6 +1286,9 @@ What this is and is not:
   count the same values; a date stays on MySQL, since the copy holds the
   zero date as NULL; a name a subquery or `WITH` defines, or the aggregate in
   `HAVING` or `ORDER BY`, stays on MySQL), `INSTR`/`LOCATE`,
+  `CONCAT`, `LEAST` and `GREATEST` (one NULL argument makes them NULL on
+  MySQL, and the copy skips it: `CONCAT('a', NULL)` is `'a'` there;
+  `CONCAT_WS` skips it on both and goes to the copy),
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   does not compare the rows by MySQL's collation there: `SELECT 'é' UNION
   SELECT 'e'` is one row on MySQL and two on the copy, and `SELECT 'a' UNION

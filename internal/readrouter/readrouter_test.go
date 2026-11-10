@@ -75,6 +75,11 @@ func TestVeto(t *testing.T) {
 		"SELECT * FROM t WHERE name LIKE 'a%'":                          "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
 		"SELECT count(DISTINCT status) FROM t":                          "",
 		"SELECT INSTR(name, 'x') FROM t":                                "INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)",
+		"SELECT concat(first, ' ', middle) FROM t":                      vetoNullArg,
+		"SELECT CONCAT\v(a, b) FROM t":                                  vetoNullArg,
+		"SELECT CONCAT (a, b) FROM t":                                   vetoNullArg,
+		"SELECT least(a, b), greatest(a, b) FROM t":                     vetoNullArg,
+		"SELECT sum(x) FROM t WHERE GREATEST(a,b) > 3":                  vetoNullArg,
 		"SELECT * FROM t WHERE name REGEXP '^a'":                        "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
 		"SELECT * FROM t WHERE x > 5--3 AND y = 1":                      "-- without a space after it (two minus signs on MySQL, a comment on the copy)",
 		"SELECT a --b\n FROM t":                                         "-- without a space after it (two minus signs on MySQL, a comment on the copy)",
@@ -108,6 +113,9 @@ func TestVeto(t *testing.T) {
 		"SELECT * FROM t WHERE path = 'C:/tmp' -- not a\\b", // a backslash in a comment is not in a literal
 		"SELECT `a\\b` FROM t WHERE c = 'x'",                // nor one in a backtick identifier
 		"SELECT json_col, jsonish FROM t",                   // a column named like the functions, no call
+		"SELECT concat_ws(',', a, b) FROM t",                // skips a NULL on both
+		"SELECT concatenated, least_cost, greatest FROM t",  // columns, no call
+		"SELECT * FROM t WHERE note = 'concat(a, NULL)'",    // inside a string literal
 	}
 	if got := LeadingKeyword("/*!40101 drop table t */"); got != "DROP" {
 		t.Errorf("LeadingKeyword = %q", got)

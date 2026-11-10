@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Engine Routing keeps `CONCAT`, `LEAST` and `GREATEST` on MySQL** (#2633). With one NULL argument MySQL returns NULL, and the copy skipped the NULL: `CONCAT(first_name, ' ', middle_name)` was `'Ana '` on the copy where MySQL said NULL, and `LEAST(1, NULL)` was 1. A statement that calls one of the three now runs on MySQL, so a report with them is answered right and no longer offloaded. `CONCAT_WS`, which skips a NULL on both, still goes to the copy. A connection without routing is unchanged: it reads the copy's meaning, as this page already said.
+
 ## [0.128.0] - 2026-11-07
 
 - **On a MariaDB source, a large range read goes to the copy.** A statement that reads a range of an index, such as `WHERE id BETWEEN 1 AND 8000000` with a `GROUP BY`, or a `count(*)` over a year of an indexed date, was called a cheap plan and ran on MariaDB however many rows the range held: its plan carries no cost, and only a full scan or an index walked whole counted. A range of `--route-scan-rows` rows or more (default 100,000) now counts the same, unless a `LIMIT` below that (offset included), or `LIMIT ?`, ends it early: no sort, aggregate, `GROUP BY`, `DISTINCT`, window function or `UNION` before it (a `UNION ALL` streams and does not count), and no filter on a column the range's key does not cover, which may read the whole range looking for its rows. Page one of a large range stays on MariaDB; `LIMIT 20 OFFSET 5000000` goes to the copy. MySQL sources are unchanged, since their plan's cost already counted the range.
