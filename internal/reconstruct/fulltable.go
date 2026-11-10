@@ -3062,13 +3062,17 @@ func reconstructBinlogOnly(
 // reads it the same way, but it names this path's own situation: there is no
 // backup, and the recorded changes still hold the removed rows.
 func binlogOnlyDestructiveDDLErr(schema, table, ddlType string, detectedAt, firstChange time.Time) error {
+	effect := "the rows it removed would come back in the output as if they still existed"
+	if changesRowsWithoutEvents(ddlType) {
+		effect = "the output would not match the table after it"
+	}
 	return fmt.Errorf(
 		"%w: %s.%s has no backup, so it would be rebuilt from its recorded changes alone, starting at %s. "+
-			"A %s at %s lies inside those changes, and it wrote no row changes of its own, so the rows it removed "+
-			"would come back in the output as if they still existed. Rebuild the table to a moment before %s, "+
+			"A %s at %s lies inside those changes, and it wrote no row changes of its own, so %s. "+
+			"Rebuild the table to a moment before %s, "+
 			"or take a backup of it: a backup taken after the %s lets a later moment be rebuilt from that backup",
 		ErrDestructiveDDL, schema, table, firstChange.UTC().Format(time.RFC3339),
-		ddlType, detectedAt.UTC().Format(time.RFC3339), detectedAt.UTC().Format(time.RFC3339), ddlType)
+		ddlType, detectedAt.UTC().Format(time.RFC3339), effect, detectedAt.UTC().Format(time.RFC3339), ddlType)
 }
 
 // binlogOnlySchemaPlaceholder is the schema-file text used when no captured

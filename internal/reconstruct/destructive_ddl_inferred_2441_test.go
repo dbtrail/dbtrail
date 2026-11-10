@@ -36,7 +36,7 @@ func TestCheckDestructiveDDL_inferredBracketOverlappingTheSnapshot(t *testing.T)
 			WithArgs(since, until, "public", "t").
 			// The database's own comparison says "not after since": low is
 			// before the snapshot.
-			WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", low, "0/19DF9E8", 27130344, false, true, marker(high)))
+			WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", low, "0/19DF9E8", 27130344, false, true, marker(high), "", "", ""))
 		return CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until})
 	}
 
@@ -77,7 +77,7 @@ func TestCheckDestructiveDDL_inferredWithoutALowerBound(t *testing.T) {
 	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
 		WithArgs(since, until, "public", "t").
 		// detected_at is the high end: the database says "not before until".
-		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", high, "0/19DF9E8", 27130344, true, false, q))
+		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", high, "0/19DF9E8", 27130344, true, false, q, "", "", ""))
 	err = CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until})
 	if !errors.Is(err, ErrDestructiveDDL) {
 		t.Fatalf("err = %v, want a refusal", err)
@@ -110,7 +110,7 @@ func TestCheckDestructiveDDL_inferredHighKeepsTheFraction(t *testing.T) {
 	q := event.InferredDDLPrefix + " oid=10; instant=at-or-before; low=0/1@" + low.Format(time.RFC3339Nano) + "; high=0/2@" + high.Format(time.RFC3339Nano) + " */ DROP TABLE public.t"
 	mock.ExpectQuery("SELECT id, ddl_type, detected_at, binlog_file, binlog_pos").
 		WithArgs(since, until, "public", "t").
-		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", low, "0/2", 2, false, true, q))
+		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "DROP TABLE", low, "0/2", 2, false, true, q, "", "", ""))
 	if err := CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until}); !errors.Is(err, ErrDestructiveDDL) {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
@@ -135,7 +135,7 @@ func TestCheckDestructiveDDL_addedBackToThePublication(t *testing.T) {
 			"; high=0/19DF9E8@2026-01-01T10:20:00Z */ ALTER PUBLICATION ... ADD TABLE public.t"
 		mock.ExpectQuery("ddl_type IN \\('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE', 'ALTER PUBLICATION'\\)").
 			WithArgs(since, until, "public", "t").
-			WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "ALTER PUBLICATION", low, "0/19DF9E8", 27130344, true, true, q))
+			WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "ALTER PUBLICATION", low, "0/19DF9E8", 27130344, true, true, q, "", "", ""))
 		return CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until})
 	}
 	err := run("gap=uncaptured; ")
@@ -162,7 +162,7 @@ func TestCheckDestructiveDDL_addedBackToThePublication(t *testing.T) {
 	defer db.Close()
 	mock.ExpectQuery("SELECT id, ddl_type, detected_at").WithArgs(since, until, "public", "t").
 		WillReturnRows(sqlmock.NewRows(ddlCols).AddRow(9, "ALTER PUBLICATION", low, "0/19DF9E8", 27130344, true, true,
-			event.InferredDDLPrefix+" oid=10; gap=uncaptured; low=garbled */ ALTER PUBLICATION"))
+			event.InferredDDLPrefix+" oid=10; gap=uncaptured; low=garbled */ ALTER PUBLICATION", "", "", ""))
 	if err := CheckDestructiveDDL(context.Background(), db, "public", "t", DDLWindow{Since: since, Until: until}); !errors.Is(err, ErrDestructiveDDL) {
 		t.Fatalf("an unreadable marker: err = %v, want a refusal", err)
 	}

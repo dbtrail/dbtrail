@@ -61,6 +61,13 @@ func Normalize(queryStr string) string {
 // statement is only worth building once it is known to be a DROP or RENAME,
 // whose tail is nothing but the names it acts on.
 func NormalizeUpTo(queryStr string, limit int) string {
+	return normalize(queryStr, limit, true)
+}
+
+// normalize is NormalizeUpTo, reading a backslash inside a quote as an
+// escape only when backslash is set: under NO_BACKSLASH_ESCAPES it is a
+// plain character, and the quote after it closes the string.
+func normalize(queryStr string, limit int, backslash bool) string {
 	var b strings.Builder
 	pending := false // a space is owed before the next copied byte
 	open := 0        // executable comments whose closing */ is still ahead
@@ -103,7 +110,7 @@ func NormalizeUpTo(queryStr string, limit int) string {
 			}
 			j := i + 1
 			for j < len(queryStr) {
-				if queryStr[j] == '\\' && c != '`' {
+				if backslash && queryStr[j] == '\\' && c != '`' {
 					j += 2
 					continue
 				}
