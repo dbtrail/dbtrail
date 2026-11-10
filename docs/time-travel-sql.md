@@ -1634,9 +1634,10 @@ What this is and is not:
     an interval is how most reports write a range, and keeping it back
     would keep them all off the copy.
   - **A `DATETIME` or a `TIMESTAMP` column turned into text.**
-    `CONCAT(dt, '')` and `CAST(dt AS CHAR)` are `2026-01-01 10:00:00` on
+    `CAST(dt AS CHAR)` is `2026-01-01 10:00:00` on
     MySQL and `2026-01-01 10:00:00+00` on the copy, which holds the column
-    as a moment with a zone. A `DATE` column gives the same text on both,
+    as a moment with a zone (`CONCAT(dt, '')` is too, but `CONCAT` is kept
+    on MySQL for its NULLs, #2633). A `DATE` column gives the same text on both,
     and `LEFT`, `SUBSTRING` and `DATE_FORMAT` over a date are refused by
     the copy, so MySQL answers those.
   - **A `DATETIME(6)` or `TIMESTAMP(6)` value, selected.** MySQL prints
