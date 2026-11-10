@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/ddltext"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/query"
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -18,7 +19,8 @@ import (
 
 // ErrDestructiveDDL is wrapped into the error CheckDestructiveDDL returns
 // when it finds a TRUNCATE/DROP/RENAME/CREATE OR REPLACE on the target table
-// inside the reconstruction window (#764).
+// inside the reconstruction window (#764), or an ALTER TABLE that changed its
+// rows with no row events, such as DROP PARTITION (#2632).
 var ErrDestructiveDDL = errors.New("destructive DDL in reconstruction window")
 
 // DDLWindow is the stretch of the source's history a replay covers, stated
@@ -180,6 +182,12 @@ func sameBinlogSequence(a, b string) bool {
 // MariaDB's CREATE OR REPLACE TABLE is included because on an existing table
 // it drops the rows with no row events, exactly like DROP then CREATE (#1664).
 //
+// An ALTER TABLE is included when a clause of it changes rows with no row
+// events (#2632, ddltext.RowsChangedWithoutEvents): DROP, TRUNCATE, EXCHANGE
+// or CONVERT of a partition, DISCARD or IMPORT of a tablespace. The columns
+// stay the same, so the shape check lets it through. An EXCHANGE refuses the
+// table it names after WITH TABLE too.
+//
 // A missing schema_changes table (a pre-DDL-tracking index, or a caller that
 // hasn't run indexer.EnsureSchema) is treated as "nothing to check" rather
 // than a hard failure: this is an additive safety net on top of the existing
@@ -260,6 +268,9 @@ func destructiveDDLErr(schema, table string, f ddlFinding, w DDLWindow) error {
 		lies = "may lie between the snapshot this starts from and the requested point in time (the change stream only says it happened inside that range)"
 	}
 	why := "It wrote no row changes to replay, so the result would keep the rows it removed as if they still existed."
+	if changesRowsWithoutEvents(d.Type) {
+		why = "It changed the table's rows without writing row changes to replay, so the result would not match the table after it."
+	}
 	if d.Type == string(event.DDLAlterPublication) {
 		why = "The table may have been out of the publication before it, so changes made to it then may never have been captured, and the result would miss them."
 	}
@@ -374,11 +385,22 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 	if w.sinceInclusive {
 		sinceOp = ">="
 	}
+	//
+	// The second arm is an ALTER TABLE that may change rows with no row
+	// events (#2632): ddltext.RowsChangedWithoutEvents decides from its text,
+	// below. It is read for EVERY table, not this one alone: an EXCHANGE
+	// PARTITION is recorded under the partitioned table only, and changes the
+	// table it names after WITH TABLE just as much. Those statements are few,
+	// and the LIKE keeps the rest of the ALTERs out of the result. LOWER
+	// makes it match whatever the column's collation.
 	q := `SELECT id, ddl_type, detected_at, binlog_file, binlog_pos,
-			detected_at ` + sinceOp + ` ?, detected_at <= ?, LEFT(ddl_query, 400)
+			detected_at ` + sinceOp + ` ?, detected_at <= ?, LEFT(ddl_query, 400),
+			schema_name, table_name, IF(ddl_type = 'ALTER TABLE', ddl_query, '')
 		FROM schema_changes
-		WHERE (schema_name = ? OR schema_name = '') AND table_name = ?
-		AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE', 'ALTER PUBLICATION')
+		WHERE ((schema_name = ? OR schema_name = '') AND table_name = ?
+			AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE', 'ALTER PUBLICATION'))
+		OR (ddl_type = 'ALTER TABLE'
+			AND (LOWER(ddl_query) LIKE '%partition%' OR LOWER(ddl_query) LIKE '%tablespace%'))
 		ORDER BY detected_at ASC, id ASC`
 
 	rows, err := db.QueryContext(ctx, q, w.Since, w.Until, schema, table)
@@ -400,9 +422,17 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 	var out []destructiveDDL
 	for rows.Next() {
 		var d destructiveDDL
-		var head string
-		if err := rows.Scan(&d.ID, &d.Type, &d.DetectedAt, &d.File, &d.Pos, &d.AfterSince, &d.AtOrBeforeUntil, &head); err != nil {
+		var head, rowSchema, rowTable, alterText string
+		if err := rows.Scan(&d.ID, &d.Type, &d.DetectedAt, &d.File, &d.Pos, &d.AfterSince, &d.AtOrBeforeUntil, &head,
+			&rowSchema, &rowTable, &alterText); err != nil {
 			return nil, fmt.Errorf("check schema_changes for destructive DDL on %s.%s: %w", schema, table, err)
+		}
+		if d.Type == string(event.DDLAlterTable) {
+			op, ok := alterChangesRowsOf(alterText, rowSchema, rowTable, schema, table)
+			if !ok {
+				continue
+			}
+			d.Type = alterRowsPrefix + op
 		}
 		// An inferred row committed somewhere in its bracket, so it is in the
 		// window whenever the bracket overlaps it: its low end at or before
@@ -429,4 +459,59 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 		return nil, fmt.Errorf("check schema_changes for destructive DDL on %s.%s: %w", schema, table, err)
 	}
 	return out, nil
+}
+
+// alterRowsPrefix starts the Type of an ALTER TABLE that changed rows with no
+// row events, which is then named by its clause: "ALTER TABLE ... DROP
+// PARTITION". The refusals say it, and changesRowsWithoutEvents tells them
+// apart from the statements that remove a whole table.
+const alterRowsPrefix = "ALTER TABLE ... "
+
+// changesRowsWithoutEvents reports whether a destructive statement's Type is
+// an ALTER TABLE clause (alterRowsPrefix), which may have removed, swapped or
+// brought in rows, rather than a statement that removed them all.
+func changesRowsWithoutEvents(ddlType string) bool {
+	return strings.HasPrefix(ddlType, alterRowsPrefix)
+}
+
+// alterChangesRowsOf says whether the ALTER TABLE recorded under
+// rowSchema.rowTable changed rows of schema.table with no row events, and
+// by which clause. The table may be the altered one or the one the clause
+// names (EXCHANGE PARTITION ... WITH TABLE). Names are compared without
+// case and a row with no schema matches any, as everywhere else this table
+// is read: counting a statement once too often refuses a run, missing one
+// keeps rows the source no longer has.
+//
+// A name the clause does not qualify belongs to the session's default
+// database, which the row holds only when the ALTER did not qualify its own
+// table either; otherwise it matches any schema.
+func alterChangesRowsOf(text, rowSchema, rowTable, schema, table string) (string, bool) {
+	op, tables := ddltext.RowsChangedWithoutEvents(text)
+	if op == "" {
+		return "", false
+	}
+	if strings.EqualFold(rowTable, table) && (rowSchema == "" || strings.EqualFold(rowSchema, schema)) {
+		return op, true
+	}
+	// The altered table as read from the text as well: the capture parser
+	// records `a``b` as a, so the row's name may not be the table's.
+	if own := tables[0]; strings.EqualFold(own.Table, table) {
+		s := own.Schema
+		if s == "" {
+			s = rowSchema
+		}
+		if s == "" || strings.EqualFold(s, schema) {
+			return op, true
+		}
+	}
+	for _, t := range tables[1:] {
+		s := t.Schema
+		if s == "" && tables[0].Schema == "" {
+			s = rowSchema
+		}
+		if strings.EqualFold(t.Table, table) && (s == "" || strings.EqualFold(s, schema)) {
+			return op, true
+		}
+	}
+	return "", false
 }

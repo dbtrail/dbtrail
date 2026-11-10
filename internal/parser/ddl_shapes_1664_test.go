@@ -38,6 +38,10 @@ func TestParseDDL_shapesItUsedToMiss(t *testing.T) {
 		{"schema quoted, table not", "ALTER TABLE `db`.t ADD COLUMN c INT", DDLAlterTable, "db", "t"},
 		{"schema not quoted, table quoted", "ALTER TABLE db.`t` ADD COLUMN c INT", DDLAlterTable, "db", "t"},
 		{"dollar sign in a name", "ALTER TABLE db.t$1 ADD COLUMN c INT", DDLAlterTable, "db", "t$1"},
+		// #2632: recorded as ALTER TABLE under the partitioned table; the
+		// read side finds the clause in the text.
+		{"drop partition", "ALTER TABLE shop.orders DROP PARTITION p2020", DDLAlterTable, "shop", "orders"},
+		{"exchange partition is recorded under the partitioned table", "ALTER TABLE orders EXCHANGE PARTITION p0 WITH TABLE orders_old", DDLAlterTable, "", "orders"},
 		{"a comment where the name starts", "ALTER TABLE /* x */ t ADD COLUMN c INT", DDLAlterTable, "", "t"},
 		{"a comment with no space around it", "ALTER/**/TABLE t ADD COLUMN c INT", DDLAlterTable, "", "t"},
 		{"mysqldump executable comment around IF NOT EXISTS", "CREATE TABLE /*!32312 IF NOT EXISTS*/ `t` (id INT)", DDLCreateTable, "", "t"},

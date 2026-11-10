@@ -55,7 +55,10 @@ func AddedColumns(queryStr, defaultSchema string) (tbl event.DDLTable, cols []st
 	// A text stored cut short can end inside a comment, and what the comment
 	// hides may be the clause that matters: the index server, outside strict
 	// mode, cuts a value at the first byte that is not valid UTF-8.
-	if !utf8.ValidString(queryStr) || strings.Contains(queryStr, "#") || strings.Contains(queryStr, "--") ||
+	// U+FFFD: the index repaired bytes that were not UTF-8 (#2632), so a
+	// name may not be the one the server read.
+	if !utf8.ValidString(queryStr) || strings.ContainsRune(queryStr, utf8.RuneError) ||
+		strings.Contains(queryStr, "#") || strings.Contains(queryStr, "--") ||
 		!blockCommentsClosed(queryStr) {
 		return none, nil, false
 	}

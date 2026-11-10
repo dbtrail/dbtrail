@@ -1160,7 +1160,8 @@ const maxDDLQueryBytes = 65535
 // at that row, so a DROP of hundreds of tables neither repeats its text
 // hundreds of times nor floods the lists that show it. A DROP or RENAME's
 // text is cut to what the column holds: past that length it is only more
-// names, and every name has its own row.
+// names, and every name has its own row. An ALTER TABLE's is cut too, and
+// bytes that are not UTF-8 replaced, so its row is not lost (#2632).
 //
 // Several rows go in chunks, without a transaction on purpose: each row is a
 // fact of its own ("this table was dropped at this position"), so a failure
@@ -1173,7 +1174,13 @@ func InsertSchemaChange(db *sql.DB, ev event.Event, snapshotID *int) error {
 	}
 	tables := schemaChangeTables(ev)
 	text := ev.DDLQuery
-	if ev.DDLType == event.DDLDropTable || ev.DDLType == event.DDLRenameTable {
+	// An ALTER TABLE too (#2632): its text decides whether a snapshot update
+	// refuses (a DROP PARTITION), so a row lost to an INSERT the column
+	// refuses (too long, or bytes that are not UTF-8 under strict mode) is
+	// a refusal lost. Its clause is at the head, and the readers of its
+	// text refuse to read one cut short or repaired. CREATE TABLE is not
+	// cut: its text is used as the table's definition.
+	if ev.DDLType == event.DDLDropTable || ev.DDLType == event.DDLRenameTable || ev.DDLType == event.DDLAlterTable {
 		text = capDDLQuery(text)
 	}
 	pointer := fmt.Sprintf("(same %s statement as the row for %s.%s)", ev.DDLType, tables[0].Schema, tables[0].Table)
