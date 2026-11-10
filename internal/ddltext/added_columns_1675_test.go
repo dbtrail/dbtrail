@@ -61,6 +61,14 @@ func TestAddedColumns_readable(t *testing.T) {
 	}
 }
 
+// TestAddedColumns_repairedText: a text whose bytes the index replaced
+// (U+FFFD, #2632) may name another column than the server read.
+func TestAddedColumns_repairedText(t *testing.T) {
+	if _, _, ok := AddedColumns("ALTER TABLE t ADD COLUMN migraci\uFFFDn INT", "shop"); ok {
+		t.Error("a repaired text was read as proof")
+	}
+}
+
 // TestAddedColumns_notReadable: a statement that is not, with certainty, an
 // ALTER TABLE that only adds columns is not read at all. A partial answer
 // ("it adds c, and something else") would be taken for the whole statement.

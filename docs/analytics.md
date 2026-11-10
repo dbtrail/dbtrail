@@ -62,7 +62,13 @@ command line, the same fold is
 
 Some changes cannot be folded. A column added, dropped or retyped, or a
 `TRUNCATE`, `DROP` or `RENAME` in the window, refuses the table, and so does a
-capture gap. On the Snapshots page a failed update falls back to a full backup
+capture gap. So does an `ALTER TABLE` that drops, truncates, exchanges or
+converts a partition, or discards or imports a tablespace: it changes rows
+without writing them to the binary log, and the columns stay the same
+([#2632](https://github.com/dbtrail/dbtrail/issues/2632)). An `EXCHANGE
+PARTITION` refuses both tables. The full read that cures it reads the whole
+server, at most once a day, so a table whose partitions are dropped every
+hour brings that server's copy up to date once a day. On the Snapshots page a failed update falls back to a full backup
 at the same slot when the daemon may take one. A run publishes all of its
 tables or none, so a snapshot never mixes two points in time.
 
@@ -303,6 +309,14 @@ edges you know.
   your setting, 5 minutes at the shortest from the web interface. The SQL
   port's fresh mode (per server on the Snapshots page) also reads what capture has indexed
   since, usually seconds behind.
+- **Blind to rows a foreign key cascades to.** On MariaDB, and on MySQL before
+  9.6, the server deletes or updates the child rows of an `ON DELETE CASCADE`
+  (or `ON UPDATE CASCADE`) itself and writes nothing for them to the binary
+  log. The copy keeps those rows as they were until its next full read, so a
+  count over a child table can include rows the source no longer has. Capture
+  warns at startup when the source has such keys. On that source, give the
+  schedule a full read (**Full read every** on the Snapshots page), and the
+  copy is exact again after each one.
 - **The price of entry.** `binlog_format=ROW` and `binlog_row_image=FULL` on
   the source, and a primary key on every table you want refreshed.
   `bintrail doctor` checks the binlog settings and prints the fix.
