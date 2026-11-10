@@ -82,6 +82,9 @@ type TableFooter struct {
 	// against the copy (TextColumns, #2533). Read routing holds a statement
 	// that names one to what the copy compares as MySQL does.
 	Text []TextColumn
+	// ZeroDate are the date columns whose NULL on the copy may be a zero
+	// date (ZeroDateColumns, #2633).
+	ZeroDate []string
 }
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
@@ -521,6 +524,7 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		f.UnixTimeSafe, f.UnixTimeOther = UnixTimeColumns(cols)
 		f.WholeSafe, f.WholeOther = WholeNumberColumns(cols)
 		f.Text = TextColumns(string(createSQL), cols)
+		f.ZeroDate = ZeroDateColumns(cols)
 		st.footers[file] = f
 	}
 	if err := rows.Err(); err != nil {
@@ -552,6 +556,24 @@ func DecimalColumns(cols []Column) []DecimalColumn {
 			Precision: c.DecimalPrecision,
 			Scale:     c.DecimalScale,
 		})
+	}
+	return out
+}
+
+// ZeroDateColumns picks the DATE, DATETIME and TIMESTAMP columns whose NULL
+// on the copy may be a zero date (#2633): the copy holds 0000-00-00 as NULL,
+// so one in a NOT NULL column can only be a zero date, and so can one in a
+// column whose default is the zero date. A nullable column's NULL may be the
+// source's own, and it is not listed.
+func ZeroDateColumns(cols []Column) []string {
+	var out []string
+	for _, c := range cols {
+		switch c.MySQLType {
+		case "date", "datetime", "timestamp":
+			if c.NotNull || c.ZeroDefault {
+				out = append(out, c.Name)
+			}
+		}
 	}
 	return out
 }

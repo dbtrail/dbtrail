@@ -227,7 +227,9 @@ func textCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_refused"] != 0 || reasons["copy_columns_differ"] < uint64(lived) {
-		t.Errorf("reasons = %v, want copy_refused 0 and copy_columns_differ at least %d (each statement the source answered)", reasons, lived)
+	// GREATEST and CONCAT are vetoed from the text since #2633, before the
+	// copy is asked: those two count as veto.
+	if reasons["copy_refused"] != 0 || reasons["veto"] != 2 || reasons["copy_columns_differ"]+reasons["veto"] < uint64(lived) {
+		t.Errorf("reasons = %v, want copy_refused 0, veto 2 (GREATEST, CONCAT) and copy_columns_differ plus veto at least %d (each statement the source answered)", reasons, lived)
 	}
 }

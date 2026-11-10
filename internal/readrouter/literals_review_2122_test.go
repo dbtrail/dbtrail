@@ -229,12 +229,12 @@ func TestVeto_dateInsideAGroup(t *testing.T) {
 		"SELECT AVG(amount) + 1 FROM t WHERE d = DATE '2026-01-01'":                                            "",
 		"SELECT CASE WHEN d > DATE '2026-01-03' THEN 1 ELSE 0 END, a + 1 FROM t":                               "",
 		"SELECT CASE WHEN a THEN 1 END + 1, DATE(ts) FROM t":                                                   "",
-		"SELECT GREATEST(DATE '2026-02-01', DATE '2026-01-01') + INTERVAL 1 DAY":                               "",
+		"SELECT GREATEST(DATE '2026-02-01', DATE '2026-01-01') + INTERVAL 1 DAY":                               vetoNullArg, // not the date veto; the call is #2633's, checked last
 		"SELECT COUNT(*) FROM t WHERE d IN (DATE '2026-01-01', DATE '2026-01-02')":                             "",
 		"SELECT a - 1 FROM (SELECT a FROM t WHERE d > DATE '2026-01-01') x":                                    "",
 		"SELECT t.end - 1, DATE(ts) FROM t":                                                                    "", // a column named end
 		"SELECT DATE_FORMAT(DATE(ts), '%Y') FROM t ORDER BY 1":                                                 "",
-		"SELECT CONCAT(DATE '2026-01-01', 'x'), a - 1 FROM t":                                                  "",
+		"SELECT CONCAT(DATE '2026-01-01', 'x'), a - 1 FROM t":                                                  vetoNullArg, // not the date veto; the call is #2633's, checked last
 		"SELECT xavg(DATE(ts)), avg_d(DATE(ts)) FROM t":                                                        "",
 		"SELECT $date(ts) + 1, édate(ts) - 1 FROM t":                                                           "",                 // other names
 		"SELECT CASE WHEN t.end THEN DATE(ts) END + 1 FROM t":                                                  vetoDateArithmetic, // t.end is a column
@@ -246,7 +246,7 @@ func TestVeto_dateInsideAGroup(t *testing.T) {
 		"SELECT MAX(DATE(ts)) OVERT - 1 FROM t":                                                                "",
 		"SELECT MAX(DATE(ts)) OVER (PARTITION BY a) x, b - 1 FROM t":                                           "",
 		"SELECT GREATEST(DATE(a), b) + intervals FROM t":                                                       vetoDateArithmetic,
-		"SELECT GREATEST(DATE '2026-02-01', (a":                                                                "",
+		"SELECT GREATEST(DATE '2026-02-01', (a":                                                                vetoNullArg, // the group is left open, so not the date veto; the call is GREATEST's (#2633)
 		"SELECT CASE WHEN a THEN DATE(ts) + ":                                                                  vetoDateArithmetic,
 		"SELECT ) + 1, DATE(ts) FROM t":                                                                        "",
 	} {

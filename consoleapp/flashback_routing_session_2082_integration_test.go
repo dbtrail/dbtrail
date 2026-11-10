@@ -97,14 +97,14 @@ func directConn(t *testing.T, dsn string) *sql.Conn {
 // A full scan (the copy's, by the scan rule at 2 rows): the times, and the
 // CHAR column with a mark after it, which is where PAD_CHAR_TO_FULL_LENGTH
 // shows.
-const visitsScan = "SELECT side, seen_at, stamped, CONCAT(code, '|'), count(*) FROM visits GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
+const visitsScan = "SELECT side, seen_at, stamped, LENGTH(code), count(*) FROM visits GROUP BY side, seen_at, stamped, code ORDER BY seen_at"
 
 // The same three rows as primary-key lookups, which MySQL always answers.
 func visitsByLookup(t *testing.T, c *sql.Conn) [][]string {
 	t.Helper()
 	var out [][]string
 	for _, r := range visitRows {
-		rows := connStrings(t, c, "SELECT side, seen_at, stamped, CONCAT(code, '|'), 1 FROM visits WHERE id = "+r[0])
+		rows := connStrings(t, c, "SELECT side, seen_at, stamped, LENGTH(code), 1 FROM visits WHERE id = "+r[0])
 		if len(rows) != 1 {
 			t.Fatalf("lookup of visit %s: %d rows", r[0], len(rows))
 		}
@@ -284,7 +284,7 @@ func inZone(t *testing.T, zone string) [][]string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out = append(out, []string{r[1], at.In(loc).Format("2006-01-02 15:04:05"), "ab|", "1"})
+		out = append(out, []string{r[1], at.In(loc).Format("2006-01-02 15:04:05"), "2", "1"})
 	}
 	return out
 }
@@ -394,7 +394,7 @@ func TestIntegrationFlashbackRoutedSessionSettings(t *testing.T) {
 		c := rig.conn(t, "")
 		must(t, c, "SET sql_mode = CONCAT(@@sql_mode, ',PAD_CHAR_TO_FULL_LENGTH')")
 		got := rig.scan(t, c, "live")
-		if got[0][2] != "ab    |" {
+		if got[0][2] != "6" {
 			t.Errorf("under PAD_CHAR_TO_FULL_LENGTH MySQL answered %q for the CHAR(6), want it padded", got[0][2])
 		}
 		// It came with a zone the copy does reproduce: still MySQL's.
@@ -732,7 +732,7 @@ func TestIntegrationFlashbackRoutedSessionSourceDefaults(t *testing.T) {
 
 	setGlobal("sql_mode", mode+",PAD_CHAR_TO_FULL_LENGTH")
 	c = rig.conn(t, "")
-	if got := rig.scan(t, c, "live"); got[0][2] != "ab    |" {
+	if got := rig.scan(t, c, "live"); got[0][2] != "6" {
 		t.Errorf("global PAD_CHAR_TO_FULL_LENGTH, no SET: %v", got)
 	}
 	// A SET of something else does not make the copy answer under it.

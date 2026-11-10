@@ -339,8 +339,23 @@ func VetoOpts(stmt string, o CopyOptions) string {
 		// MySQL and the table's second column, named alpha, on the copy.
 		return vetoHash
 	}
+	if nullArgCall.MatchString(sc.blankedCopy) {
+		return vetoNullArg
+	}
 	return ""
 }
+
+// vetoNullArg keeps CONCAT, LEAST and GREATEST on MySQL (#2633): one NULL
+// argument makes all three NULL there, and the copy skips it, so
+// CONCAT('a', NULL) is 'a' and LEAST(1, NULL) and GREATEST(1, NULL) are 1
+// (measured on MySQL 8.0.46 and DuckDB 1.5.6). CONCAT_WS skips a NULL on
+// both and is not matched, nor GROUP_CONCAT, which has its own veto: the \b
+// and the parenthesis keep both out. Checked last, so a statement another
+// veto already keeps on MySQL is still named by that one.
+const vetoNullArg = "CONCAT/LEAST/GREATEST (NULL on MySQL when an argument is NULL; the copy skips it)"
+
+// \v too: Go's \s leaves it out, and MySQL reads it as a space.
+var nullArgCall = regexp.MustCompile(`(?i)\b(concat|least|greatest)[\s\v]*\(`)
 
 // Scrub is scrub for other packages: the statement with comments removed
 // and string literals blanked, for structural checks such as "is there an

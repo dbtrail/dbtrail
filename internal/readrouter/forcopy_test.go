@@ -226,6 +226,7 @@ func TestVeto_everyVetoStillFiresOnBacktickStatements(t *testing.T) {
 		"SELECT `a` FROM `t` WHERE `b` = \"x\"":             "double-quoted string literal",
 		"SELECT `a`, current_user FROM `t`":                 vetoCurrentUser,
 		"SELECT `a` FROM `t` WHERE `b` = 'a\\\\b'":          "backslash in a string literal (an escape on MySQL, a plain character on the copy)",
+		"SELECT concat(`first`, ' ', `middle`) FROM `t`":    vetoNullArg,
 	}
 	seen := map[string]bool{}
 	for stmt, want := range cases {

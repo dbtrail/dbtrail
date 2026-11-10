@@ -63,7 +63,7 @@ func TestDecideStatement_acrossServers(t *testing.T) {
 		{"exists_subquery", "SELECT * FROM customers WHERE id = 5 AND EXISTS (SELECT 1 FROM orders)", toCopy, RuleCost, toMySQL, RuleCheap},
 		// An index walked with no condition and no sort stops at the LIMIT
 		// (#2115); the plan still counts the whole index.
-		{"index_limit_no_order", "SELECT concat(customer_id) FROM orders LIMIT 10", toMySQL, RuleBoundedLimit, toMySQL, RuleBoundedLimit},
+		{"index_limit_no_order", "SELECT abs(customer_id) FROM orders LIMIT 10", toMySQL, RuleBoundedLimit, toMySQL, RuleBoundedLimit},
 		{"scalar_subquery_no_tables", "SELECT (SELECT count(*) FROM orders WHERE note = 'x')", toMySQL, RuleTrivial, toMySQL, RuleTrivial},
 		{"semi_join_in", "SELECT * FROM customers c WHERE c.id IN (SELECT customer_id FROM orders) AND c.id < 3", toMySQL, RuleCheap, toMySQL, RuleCheap},
 		// MariaDB reports the few groups the LIMIT needs; MySQL's cost is

@@ -1286,6 +1286,16 @@ What this is and is not:
   count the same values; a date stays on MySQL, since the copy holds the
   zero date as NULL; a name a subquery or `WITH` defines, or the aggregate in
   `HAVING` or `ORDER BY`, stays on MySQL), `INSTR`/`LOCATE`,
+  `CONCAT`, `LEAST` and `GREATEST` (one NULL argument makes them NULL on
+  MySQL, and the copy skips it: `CONCAT('a', NULL)` is `'a'` there;
+  `CONCAT_WS` skips it on both and goes to the copy),
+  a zero date (the copy holds `0000-00-00` as NULL: in a `DATE`, `DATETIME`
+  or `TIMESTAMP` column declared `NOT NULL`, or whose default is the zero
+  date, a NULL on the copy can only be one, and a statement that names such
+  a column, or a star that brings it in, is checked for a NULL there first
+  and goes to MySQL when one is found; a column that allows NULL and has no
+  such default is not checked, since its NULLs may be the source's own, so a
+  source that writes zero dates into one gets the copy's NULL for them),
   `UNION`, `INTERSECT` and `EXCEPT` when they remove duplicates (the copy
   does not compare the rows by MySQL's collation there: `SELECT 'é' UNION
   SELECT 'e'` is one row on MySQL and two on the copy, and `SELECT 'a' UNION
@@ -1624,9 +1634,10 @@ What this is and is not:
     an interval is how most reports write a range, and keeping it back
     would keep them all off the copy.
   - **A `DATETIME` or a `TIMESTAMP` column turned into text.**
-    `CONCAT(dt, '')` and `CAST(dt AS CHAR)` are `2026-01-01 10:00:00` on
+    `CAST(dt AS CHAR)` is `2026-01-01 10:00:00` on
     MySQL and `2026-01-01 10:00:00+00` on the copy, which holds the column
-    as a moment with a zone. A `DATE` column gives the same text on both,
+    as a moment with a zone (`CONCAT(dt, '')` is too, but `CONCAT` is kept
+    on MySQL for its NULLs, #2633). A `DATE` column gives the same text on both,
     and `LEFT`, `SUBSTRING` and `DATE_FORMAT` over a date are refused by
     the copy, so MySQL answers those.
   - **A `DATETIME(6)` or `TIMESTAMP(6)` value, selected.** MySQL prints
