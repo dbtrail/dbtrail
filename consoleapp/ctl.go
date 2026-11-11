@@ -36,6 +36,8 @@ import (
 //  2. BINTRAIL_CONSOLE_TOKEN, the operator's own token, with the address
 //     from --url, BINTRAIL_CONSOLE_LISTEN or the default. For a daemon too
 //     old to write the file, or one on another machine.
+//
+// Both from the process's own environment only: see resolveCtl.
 
 // packagedStateDir is where the Linux packages keep the daemon's files. A
 // shell there has none of the service's environment, so the path the
@@ -69,12 +71,21 @@ func addCtlFlags(cmd *cobra.Command, url, accessFile *string) {
 	cmd.PersistentFlags().StringVar(accessFile, "access-file", "", "The file a running DBTrail writes for commands on its machine (default: "+console.LocalAccessFileName+" beside its login file)")
 }
 
+// ownEnv is a variable of the environment the process was started with. One
+// that an env file put there reads as unset.
+func ownEnv(key string) string {
+	if cli.FromEnvFile(key) {
+		return ""
+	}
+	return os.Getenv(key)
+}
+
 // localAccessCandidates lists where the daemon's LocalAccess file may be.
 func localAccessCandidates(explicit string) []string {
 	if explicit != "" {
 		return []string{explicit}
 	}
-	out := []string{console.LocalAccessPath(os.Getenv("BINTRAIL_CONSOLE_AUTH"))}
+	out := []string{console.LocalAccessPath(ownEnv("BINTRAIL_CONSOLE_AUTH"))}
 	if p := packagedStateDir + "/" + console.LocalAccessFileName; p != out[0] {
 		out = append(out, p)
 	}
@@ -82,8 +93,17 @@ func localAccessCandidates(explicit string) []string {
 }
 
 // resolveCtl works out which daemon to talk to and with what.
+//
+// It believes the environment the process was started with and nothing an
+// env file added to it (ownEnv). .bintrail.env in the working directory is
+// loaded when the program starts, for every command; here it would say where
+// the access file is, or what the token and the address are, and a command
+// run in a folder another user of this machine prepared would hand its
+// token, and then a database password, to whatever that user left
+// listening. For the same reason an address from a file or the environment
+// must be this machine, and the token of this machine's DBTrail goes nowhere
+// else.
 func resolveCtl(url, accessFile string) (*ctlClient, error) {
-	cli.LoadEnvFile()
 	paths := localAccessCandidates(accessFile)
 	var acc console.LocalAccess
 	var accPath string
@@ -102,6 +122,8 @@ func resolveCtl(url, accessFile string) (*ctlClient, error) {
 			return nil, err
 		}
 	}
+	envToken := ownEnv("BINTRAIL_CONSOLE_TOKEN")
+	url = strings.TrimRight(url, "/")
 	c := &ctlClient{hc: &http.Client{
 		Timeout: ctlTimeout,
 		// DBTrail never redirects its API. Followed, a redirect would turn a
@@ -109,11 +131,19 @@ func resolveCtl(url, accessFile string) (*ctlClient, error) {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
 	switch {
+	case url != "" && (accPath == "" || url != strings.TrimRight(acc.URL, "/")):
+		// A DBTrail other than the one whose file was found (or none was).
+		// The file's token is that one's alone: sent here it would give this
+		// other address full access to the local DBTrail.
+		if envToken == "" {
+			return nil, fmt.Errorf("--url %s is not the DBTrail running on this machine, so its token is not sent there. Set BINTRAIL_CONSOLE_TOKEN to the token that DBTrail was started with", url)
+		}
+		c.token, c.base = envToken, url
 	case accPath != "":
 		c.token, c.accessFile, c.base = acc.Token, accPath, acc.URL
-	case os.Getenv("BINTRAIL_CONSOLE_TOKEN") != "":
-		c.token = os.Getenv("BINTRAIL_CONSOLE_TOKEN")
-		c.base = "http://" + listenToLocal(os.Getenv("BINTRAIL_CONSOLE_LISTEN"))
+	case envToken != "":
+		c.token = envToken
+		c.base = "http://" + listenToLocal(ownEnv("BINTRAIL_CONSOLE_LISTEN"))
 	case len(denied) > 0:
 		return nil, fmt.Errorf("this account may not read %s, the file DBTrail wrote for commands on its machine.\nRun the command with sudo, or as the account the service runs as", strings.Join(denied, " or "))
 	default:
@@ -124,21 +154,16 @@ It looked for %s, which DBTrail writes when it starts.
       docker compose exec bintrail bintrail-console %s
   With the Linux packages, check the service is running:
       systemctl status bintrail-console
-  Anywhere else, set BINTRAIL_CONSOLE_TOKEN to the token DBTrail was started with`,
+  Anywhere else, set BINTRAIL_CONSOLE_TOKEN to the token DBTrail was started with,
+  or name the file with --access-file if DBTrail keeps its login file elsewhere`,
 			strings.Join(paths, " or "), strings.Join(os.Args[1:], " "))
 	}
-	if url != "" {
-		c.base = url
-	} else if !onThisMachine(c.base) {
-		// The address came from a file or from the environment, and
-		// .bintrail.env in the working directory feeds the environment. A
-		// command run in a folder someone else prepared must not send a
-		// token, and then a database password, wherever that folder says.
+	if url == "" && !onThisMachine(c.base) {
 		from := "BINTRAIL_CONSOLE_LISTEN"
 		if accPath != "" {
 			from = accPath
 		}
-		return nil, fmt.Errorf("%s says DBTrail is at %s, which is not this machine. These commands only go to another machine when told to: --url %s", from, c.base, c.base)
+		return nil, fmt.Errorf("%s says DBTrail is at %s, which is not this machine. These commands only go to another machine when told to, with --url and BINTRAIL_CONSOLE_TOKEN", from, c.base)
 	}
 	c.base = strings.TrimRight(c.base, "/")
 	return c, nil

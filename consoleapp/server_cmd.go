@@ -210,7 +210,9 @@ func passwordOnCommandLine(args []string) bool {
 		if a == "--" {
 			return false
 		}
-		if strings.HasPrefix(a, "--password=") {
+		// --password-stdin=X too: the parser's error for a switch given a
+		// value repeats the value.
+		if strings.HasPrefix(a, "--password=") || strings.HasPrefix(a, "--password-stdin=") {
 			return true
 		}
 		if !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
@@ -443,6 +445,9 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 		"source_host": in.Host, "source_port": in.Port,
 		"source_user": in.User, "source_password": in.Password,
 		"schemas": in.Schemas,
+		// Not the Connect screen: leave the form someone may be filling in
+		// a browser as it is.
+		"no_draft": true,
 	}, &res)
 	if err != nil {
 		return err

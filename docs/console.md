@@ -545,11 +545,21 @@ file and the saved database passwords. On the API the token is as strong as
 `BINTRAIL_CONSOLE_TOKEN`: full access, outside any session policy. It is
 accepted there as a Bearer only, never as a browser session, on `/mcp` or on
 the MySQL port, and it does not close first-run setup. In the audit trail its
-actor is `local-cli`, apart from `token`. `--url` and `--access-file` point a
-command at another DBTrail; with no file, `BINTRAIL_CONSOLE_TOKEN` is used.
-Without `--url` a command only talks to this machine: an address from the
-file or the environment that names another one is refused, so a `.bintrail.env`
-in a folder someone else prepared cannot send your database password elsewhere.
+actor is `local-cli`, apart from `token`. With no file, `BINTRAIL_CONSOLE_TOKEN` is used, with the address from
+`BINTRAIL_CONSOLE_LISTEN`. `--access-file` names the file when DBTrail keeps
+its login file somewhere a command would not look.
+
+These commands send a database password, so they are strict about where:
+
+- They read the environment of the shell they run in, and not `.bintrail.env`
+  or `~/.config/bintrail/config.env`, which every other command loads. A file
+  in the folder you happen to be in does not get to say where DBTrail is.
+- Without `--url` they only talk to this machine.
+- `--url` reaches a DBTrail on another machine, with `BINTRAIL_CONSOLE_TOKEN`
+  as its token. The token in `console-cli.json` belongs to the DBTrail of this
+  machine and is never sent to another address.
+
+What that does not cover: an `--access-file` you name yourself is believed.
 When DBTrail serves HTTPS, give the name on its certificate:
 `--url https://dbtrail.example.com`.
 

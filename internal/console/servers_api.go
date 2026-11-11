@@ -205,6 +205,12 @@ type serverRequest struct {
 	SourceDatabase    string `json:"source_database"`
 	SourceSlot        string `json:"source_slot"`
 	SourcePublication string `json:"source_publication"`
+	// NoDraft is read by POST /api/servers/check only: the caller is not the
+	// Connect screen, so the form that screen keeps for a reload is neither
+	// replaced with this request nor thrown away when it succeeds. Set by
+	// `bintrail-console server add`, which must not eat what someone is
+	// typing in a browser.
+	NoDraft bool `json:"no_draft"`
 }
 
 // testResponse is the probe result. HasIndex/SchemaCurrent are tri-state

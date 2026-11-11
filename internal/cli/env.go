@@ -75,6 +75,43 @@ var EnvBindings = []EnvBinding{
 
 var envOnce sync.Once
 
+// envFromFile holds the variables an env file put into the environment, as
+// opposed to the ones the process was started with. See FromEnvFile.
+var envFromFile sync.Map
+
+// FromEnvFile reports whether key is in the environment because an env file
+// set it (.bintrail.env in the working directory, or config.env), and not
+// because the process was started with it.
+//
+// The env file is loaded when the program starts, for every command, and the
+// first one looked for is in the working directory: whoever prepared the
+// folder a command is run in chooses its values. That is a convenience for
+// where an index lives. It is not acceptable for what decides where a
+// command sends a password, and such a command asks here first.
+func FromEnvFile(key string) bool {
+	_, ok := envFromFile.Load(key)
+	return ok
+}
+
+// ApplyEnvFileForTest applies data as an env file would be, and returns the
+// function that takes it back. The real load happens once, before any test
+// runs, so a test about a variable that came from a file has no other way to
+// make one.
+func ApplyEnvFileForTest(data string) (undo func()) {
+	before := map[any]bool{}
+	envFromFile.Range(func(k, _ any) bool { before[k] = true; return true })
+	parseAndSetEnv(data)
+	return func() {
+		envFromFile.Range(func(k, _ any) bool {
+			if !before[k] {
+				os.Unsetenv(k.(string))
+				envFromFile.Delete(k)
+			}
+			return true
+		})
+	}
+}
+
 // LoadEnvFile loads the env file once per process. It is the whole API other
 // binaries in this module need (#963): bintrail-console used to carry a
 // byte-for-byte copy of loadEnvFile/parseAndSetEnv plus its own sync.Once, so
@@ -143,6 +180,7 @@ func parseAndSetEnv(data string) {
 		// Don't overwrite already-set env vars.
 		if _, exists := os.LookupEnv(key); !exists {
 			os.Setenv(key, val)
+			envFromFile.Store(key, true)
 		}
 	}
 	if err := scanner.Err(); err != nil {

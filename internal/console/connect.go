@@ -172,7 +172,9 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 	// TYPED name goes into it: stored, an automatic name would come back as
 	// typed, and a retry would be refused as a duplicate the moment any server
 	// already held it.
-	s.saveConnectDraft(req, entry.Name)
+	if !req.NoDraft {
+		s.saveConnectDraft(req, entry.Name)
+	}
 
 	report, err := s.monitorCtrl.DoctorUnsaved(r.Context(), entry)
 	if err != nil {
@@ -199,10 +201,13 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Capture is running, so the saved form is finished business.
-	if err := s.drafts.Discard(); err != nil {
-		slog.Warn("connect: capture started but the saved form could not be removed",
-			"server", added.Name, "error", err.Error())
+	// Capture is running, so the saved form is finished business. Not when
+	// the request never was that form (NoDraft): it is someone else's.
+	if !req.NoDraft {
+		if err := s.drafts.Discard(); err != nil {
+			slog.Warn("connect: capture started but the saved form could not be removed",
+				"server", added.Name, "error", err.Error())
+		}
 	}
 	dto := s.entryDTO(added)
 	status := res.Status

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
 )
 
@@ -272,6 +273,9 @@ func TestServerAddSuccess(t *testing.T) {
 	want := map[string]any{
 		"flavor": "mariadb", "name": "shop", "source_host": "db1", "source_port": "3306",
 		"source_user": "dbtrail", "source_password": "s3cret#1", "schemas": "a,b",
+	}
+	if got["no_draft"] != true {
+		t.Errorf("check body lacks no_draft: the Connect screen's saved form would be replaced: %v", got)
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -622,6 +626,8 @@ func TestPasswordOnCommandLine(t *testing.T) {
 		{"server add -vpX", true},
 		{"server add --password=SECRET", true},
 		{"server add --password=", true},
+		{"server add --password-stdin=SECRET", true},
+		{"server add -h db1 --password-stdin", false},
 	} {
 		if got := passwordOnCommandLine(strings.Fields(c.args)); got != c.want {
 			t.Errorf("%q: got %v, want %v", c.args, got, c.want)
@@ -829,16 +835,68 @@ func TestResolveCtl(t *testing.T) {
 			t.Errorf("got %+v", c)
 		}
 	})
-	t.Run("the file wins over the environment's token, --url over the file's address", func(t *testing.T) {
+	t.Run("the file wins over the environment's token", func(t *testing.T) {
 		state := isolate(t)
 		write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "filetok"})
 		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
+		c, err := resolveCtl("", "")
+		if err != nil || c.token != "filetok" {
+			t.Fatalf("got %+v, %v", c, err)
+		}
+		// --url naming that same DBTrail changes nothing.
+		c, err = resolveCtl("http://127.0.0.1:8090/", "")
+		if err != nil || c.token != "filetok" || c.base != "http://127.0.0.1:8090" {
+			t.Fatalf("same address by --url: got %+v, %v", c, err)
+		}
+	})
+	// The file's token opens the DBTrail of this machine, all of it. Sent to
+	// the address of --url it would hand that to whoever answers there.
+	t.Run("--url to another DBTrail never carries the file's token", func(t *testing.T) {
+		state := isolate(t)
+		write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "filetok"})
+		if c, err := resolveCtl("https://dbtrail.example.com/", ""); err == nil || !strings.Contains(err.Error(), "BINTRAIL_CONSOLE_TOKEN") {
+			t.Fatalf("no token of its own: got %+v, %v", c, err)
+		}
+		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
 		c, err := resolveCtl("https://dbtrail.example.com/", "")
-		if err != nil {
+		if err != nil || c.base != "https://dbtrail.example.com" || c.token != "envtok" || c.accessFile != "" {
+			t.Fatalf("got %+v, %v", c, err)
+		}
+	})
+	// The attack: a folder another user prepared, with a .bintrail.env that
+	// points at an access file of theirs, or at a token and a port of
+	// theirs. Every other command loads that file; these must not.
+	t.Run("a .bintrail.env in the working directory decides nothing", func(t *testing.T) {
+		state := isolate(t)
+		evil := t.TempDir()
+		write(t, evil, console.LocalAccess{URL: "http://127.0.0.1:9999", Token: "theirs"})
+		env := "BINTRAIL_CONSOLE_AUTH=" + filepath.Join(evil, "console-auth.yaml") + "\n" +
+			"BINTRAIL_CONSOLE_TOKEN=theirs\nBINTRAIL_CONSOLE_LISTEN=127.0.0.1:9999\n"
+		// The victim's shell sets none of the three, which is what lets the
+		// folder's file fill them in. (isolate set them; t.Setenv puts them
+		// back after the test.)
+		for _, k := range []string{"BINTRAIL_CONSOLE_AUTH", "BINTRAIL_CONSOLE_TOKEN", "BINTRAIL_CONSOLE_LISTEN"} {
+			os.Unsetenv(k)
+		}
+		// Applied as the program applies .bintrail.env when it starts.
+		t.Cleanup(cli.ApplyEnvFileForTest(env))
+		if os.Getenv("BINTRAIL_CONSOLE_TOKEN") != "theirs" {
+			t.Fatal("the folder's file was not applied, so nothing below is checked")
+		}
+		// With no DBTrail of the victim's own: nothing to reach, not theirs.
+		if c, err := resolveCtl("", ""); err == nil {
+			t.Fatalf("followed the folder's file to %+v", c)
+		}
+		// With one, where a DBTrail run by this account keeps it: the
+		// victim's own, untouched.
+		mine := filepath.Join(filepath.Dir(state), ".config", "bintrail")
+		if err := os.MkdirAll(mine, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if c.base != "https://dbtrail.example.com" || c.token != "filetok" {
-			t.Errorf("got %+v", c)
+		write(t, mine, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "mine"})
+		c, err := resolveCtl("", "")
+		if err != nil || c.token != "mine" || c.base != "http://127.0.0.1:8090" {
+			t.Fatalf("got %+v, %v", c, err)
 		}
 	})
 	t.Run("no file: the environment's token and listen address", func(t *testing.T) {
@@ -884,8 +942,9 @@ func TestResolveCtl(t *testing.T) {
 	t.Run("--url may name another machine: it was typed", func(t *testing.T) {
 		state := isolate(t)
 		write(t, state, console.LocalAccess{URL: "http://203.0.113.9:8090", Token: "filetok"})
+		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
 		c, err := resolveCtl("https://dbtrail.example.com", "")
-		if err != nil || c.base != "https://dbtrail.example.com" {
+		if err != nil || c.base != "https://dbtrail.example.com" || c.token != "envtok" {
 			t.Fatalf("got %+v, %v", c, err)
 		}
 	})
