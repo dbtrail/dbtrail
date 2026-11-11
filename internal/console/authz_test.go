@@ -59,6 +59,7 @@ var registeredAPIPatterns = []struct{ method, pattern string }{
 	{"DELETE", "/api/servers/draft"},
 	{"GET", "/api/servers/{}"},
 	{"PUT", "/api/servers/{}"},
+	{"PATCH", "/api/servers/{}"},
 	{"DELETE", "/api/servers/{}"},
 	{"POST", "/api/servers/{}/test"},
 	{"GET", "/api/servers/{}/route-grants"},

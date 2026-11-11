@@ -151,6 +151,7 @@ var apiRoutePerms = []routePerm{
 	{"POST", "/api/servers/{}/test", ext.PermServersRead},
 	{"GET", "/api/servers/{}", ext.PermServersRead},
 	{"PUT", "/api/servers/{}", ext.PermServersWrite},
+	{"PATCH", "/api/servers/{}", ext.PermServersWrite},
 	{"DELETE", "/api/servers/{}", ext.PermServersDelete},
 	{"GET", "/api/servers", ext.PermServersRead},
 	{"POST", "/api/servers", ext.PermServersWrite},
