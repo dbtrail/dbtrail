@@ -59,7 +59,7 @@ console.log(why ? flat(why).join(" ").replace(/\s+/g, " ") : "<no Why each side>
 	text := string(raw)
 	t.Logf("drawn: %s", text)
 	for _, want := range []string{"Why each side", "3 × an expensive plan: the copy answered", "4 × the copy declined it", "SELECT *", "NATURAL JOIN", "a column the copy lacks", "+ or -, or AVG, on a date column or one of unknown type", "anywhere beside a subquery over such a table",
-		"a TIME or YEAR column named", "a column's name right before a string", "a date column named that holds a zero date (0000-00-00)", "no table definition", "take a new full snapshot"} {
+		"a TIME or YEAR column named", "a column's name right before a string", "a date column named that holds a zero date (0000-00-00)", "ROUND of a FLOAT, a DOUBLE or an expression", "no table definition", "take a new full snapshot"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in: %s", want, text)
 		}

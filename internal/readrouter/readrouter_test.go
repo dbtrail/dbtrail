@@ -80,6 +80,8 @@ func TestVeto(t *testing.T) {
 		"SELECT CONCAT (a, b) FROM t":                                   vetoNullArg,
 		"SELECT least(a, b), greatest(a, b) FROM t":                     vetoNullArg,
 		"SELECT sum(x) FROM t WHERE GREATEST(a,b) > 3":                  vetoNullArg,
+		"SELECT SUBSTRING(name, 0, 2) FROM t":                           vetoSubstring,
+		"SELECT * FROM t WHERE substr(code FROM -2) = 'x'":              vetoSubstring,
 		"SELECT * FROM t WHERE name REGEXP '^a'":                        "LIKE/REGEXP (case-sensitive on the copy, case-insensitive on MySQL)",
 		"SELECT * FROM t WHERE x > 5--3 AND y = 1":                      "-- without a space after it (two minus signs on MySQL, a comment on the copy)",
 		"SELECT a --b\n FROM t":                                         "-- without a space after it (two minus signs on MySQL, a comment on the copy)",
@@ -116,6 +118,7 @@ func TestVeto(t *testing.T) {
 		"SELECT concat_ws(',', a, b) FROM t",                // skips a NULL on both
 		"SELECT concatenated, least_cost, greatest FROM t",  // columns, no call
 		"SELECT * FROM t WHERE note = 'concat(a, NULL)'",    // inside a string literal
+		"SELECT mid(a, 1, 2), ROUND(price) FROM t",          // ROUND is left to the types (RoundVeto)
 	}
 	if got := LeadingKeyword("/*!40101 drop table t */"); got != "DROP" {
 		t.Errorf("LeadingKeyword = %q", got)
