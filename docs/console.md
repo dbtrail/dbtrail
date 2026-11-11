@@ -658,7 +658,6 @@ dbtrail snapshot location shop                                   # where they ar
 dbtrail snapshot location shop --s3 s3://bucket/snapshots/       # also send snapshots there
 dbtrail snapshot location shop --s3 s3://bucket/snapshots/ --s3-delete-after 30d
 dbtrail snapshot location shop --dir /data/snapshots --keep-newest 3
-dbtrail snapshot location shop --s3-only                         # no folder on this machine
 dbtrail server edit shop --archive-s3 s3://bucket/archive/       # the hours that leave the index
 ```
 

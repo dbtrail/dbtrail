@@ -236,6 +236,27 @@ func TestServerEditOfTheLoginOnAStoppedServer(t *testing.T) {
 	}
 }
 
+// What an edit says it changed names each field, tells a cleared setting
+// from a set one, and never carries a secret.
+func TestEditedText(t *testing.T) {
+	before := ctlServer{Name: "shop"}
+	saved := ctlServer{Name: "store", SourceHost: "db2", SourcePort: "3307", SourceUser: "dbt"}
+	got := editedText(before, saved, map[string]any{
+		"name": "store", "source_host": "db2", "source_user": "dbt", "source_password": "s3cret",
+		"schemas": "", "archive_s3": "", "s3_region": "", "s3_endpoint": "https://minio.example.com",
+		"s3_access_key_id": "", "s3_secret_access_key": "sec2",
+	})
+	for _, want := range []string{`Changed "shop"`, `renamed to "store"`, "address db2:3307", "user dbt", "a new password",
+		"every schema", "no S3 archive", "S3 region cleared", "S3 endpoint https://minio.example.com", "the machine's own S3 credentials"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "s3cret") || strings.Contains(got, "sec2") {
+		t.Errorf("carries a secret: %s", got)
+	}
+}
+
 func TestServerStartStop(t *testing.T) {
 	d, c := newFakeDaemon(t)
 	editServers(d, "stopped")
@@ -298,7 +319,7 @@ func TestSnapshotLocation(t *testing.T) {
 			t.Errorf("output:\n%s", out.String())
 		}
 	})
-	t.Run("stop sending to S3, keep-newest 0, S3 only", func(t *testing.T) {
+	t.Run("stop sending to S3, keep-newest 0", func(t *testing.T) {
 		d, c := newFakeDaemon(t)
 		editServers(d, "running")
 		d.on("PUT /api/backup-settings/servers/id1", 200, map[string]any{"id": "id1", "resolved_dir": "/data/s"})
@@ -309,12 +330,6 @@ func TestSnapshotLocation(t *testing.T) {
 		if len(body) != 2 || body["baseline_s3"] != "" || body["keep_newest"] != float64(0) {
 			t.Errorf("body = %v", body)
 		}
-		if err := runSnapshotLocation(context.Background(), c, "shop", locFlags{S3Only: true}, namedFlags("s3-only"), io.Discard); err != nil {
-			t.Fatal(err)
-		}
-		if body := d.bodies["PUT /api/backup-settings/servers/id1"]; len(body) != 1 || body["local_copy"] != false {
-			t.Errorf("s3-only body = %v", body)
-		}
 	})
 	t.Run("refusals", func(t *testing.T) {
 		for name, c := range map[string]struct {
@@ -323,8 +338,7 @@ func TestSnapshotLocation(t *testing.T) {
 			want  string
 		}{
 			"not an s3 address":    {locFlags{S3: "bucket/prefix"}, []string{"s3"}, "s3://bucket/prefix/"},
-			"empty folder":         {locFlags{}, []string{"dir"}, "--s3-only"},
-			"a folder and S3 only": {locFlags{Dir: "/d", S3Only: true}, []string{"dir", "s3-only"}, "use one"},
+			"empty folder":         {locFlags{}, []string{"dir"}, "every server keeps its snapshots in a folder"},
 			"negative keep-newest": {locFlags{KeepNewest: -1}, []string{"keep-newest"}, "0 (keep every snapshot)"},
 		} {
 			d, cl := newFakeDaemon(t)

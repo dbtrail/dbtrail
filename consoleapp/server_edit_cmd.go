@@ -132,7 +132,6 @@ option, changes that one setting and leaves the others.
   bintrail-console snapshot location shop --s3 s3://bucket/snapshots/ --s3-delete-after 30d
   bintrail-console snapshot location shop --dir /data/snapshots --keep-newest 3
   bintrail-console snapshot location shop --s3 ""        stop sending them to S3
-  bintrail-console snapshot location shop --s3-only      keep them in S3 only
 
 The credentials for that bucket are the machine's own, or the ones set with
 "bintrail-console server edit <server> --s3-access-key".`,
@@ -150,7 +149,6 @@ The credentials for that bucket are the machine's own, or the ones set with
 	lf.StringVar(&snapLoc.S3, "s3", "", `Where the snapshots are also sent, as s3://bucket/prefix/; "" stops sending them`)
 	lf.StringVar(&snapLoc.S3DeleteAfter, "s3-delete-after", "", `Delete a snapshot from S3 once it is this old: 30d, 12h; "" never deletes`)
 	lf.IntVar(&snapLoc.KeepNewest, "keep-newest", 0, "How many snapshots to keep in the folder; 0 keeps every one")
-	lf.BoolVar(&snapLoc.S3Only, "s3-only", false, "Keep the snapshots in S3 only, with no folder on DBTrail's machine")
 	snapshotCmd.AddCommand(loc)
 }
 
@@ -347,9 +345,17 @@ func editedText(before, saved ctlServer, body map[string]any) string {
 			parts = append(parts, "archive "+v)
 		}
 	}
-	say("s3_endpoint", "S3 endpoint")
-	say("s3_region", "S3 region")
-	say("s3_path_style", "S3 addressing")
+	for _, f := range []struct{ field, what string }{
+		{"s3_endpoint", "S3 endpoint"}, {"s3_region", "S3 region"}, {"s3_path_style", "S3 addressing"},
+	} {
+		if v, ok := body[f.field].(string); ok {
+			if v == "" {
+				parts = append(parts, f.what+" cleared")
+			} else {
+				parts = append(parts, f.what+" "+v)
+			}
+		}
+	}
 	if v, ok := body["s3_access_key_id"].(string); ok {
 		if v == "" {
 			parts = append(parts, "the machine's own S3 credentials")
@@ -415,7 +421,6 @@ const (
 type locFlags struct {
 	Dir, S3, S3DeleteAfter string
 	KeepNewest             int
-	S3Only                 bool
 }
 
 var snapLoc locFlags
@@ -457,16 +462,9 @@ func runSnapshotLocation(ctx context.Context, c *ctlClient, name string, f locFl
 	body := map[string]any{}
 	if named("dir") {
 		if strings.TrimSpace(f.Dir) == "" {
-			return errors.New("--dir is empty. To keep snapshots in S3 only, use --s3-only")
+			return errors.New("--dir is empty: every server keeps its snapshots in a folder on DBTrail's machine, with S3 beside it when set")
 		}
 		body[locKeyDir] = strings.TrimSpace(f.Dir)
-	}
-	if named("s3-only") {
-		if named("dir") && f.S3Only {
-			return errors.New("--dir names a folder and --s3-only says there is none: use one")
-		}
-		// false puts the folder back, the default one unless --dir names it.
-		body["local_copy"] = !f.S3Only
 	}
 	if named("s3") {
 		v := strings.TrimSpace(f.S3)
