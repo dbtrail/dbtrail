@@ -622,7 +622,9 @@ msg=status service=capture server=shop interval=1m0s changes=321 errors=2 behind
 - The numbers are per interval, not since the service started. A minute with
   nothing to say still writes a line, so silence means the service stopped.
 - `BINTRAIL_STATUS_LOG_INTERVAL` sets the interval (`30s`, `5m`); `off` writes
-  none. With `--log-format json` the same fields are JSON.
+  none. With Docker Compose it is `STATUS_LOG_INTERVAL` in `.env`; with the
+  Linux packages, a line of `/etc/bintrail/bintrail-console.env`. With
+  `--log-format json` the same fields are JSON.
 
 Errors are in the same logs, at their own level:
 
