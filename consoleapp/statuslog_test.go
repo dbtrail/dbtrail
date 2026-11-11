@@ -126,6 +126,17 @@ func TestPortCountsOf(t *testing.T) {
 		got.copySecs != 2.5 || got.mysqlSecs != 0.5 || got.behind == nil || *got.behind != 12 {
 		t.Errorf("got %+v", got)
 	}
+	// With Engine Routing off the copy answers every statement and nothing
+	// is routed: those are DBTrail's answers too, added to the routed ones.
+	n.Unrouted = &console.RouteAnswers{Count: 7, Errors: 1, Seconds: 1.5}
+	got = portCountsOf(n)
+	if got.copy != 17 || got.copyErr != 2 || got.copySecs != 4 || got.mysql != 3 {
+		t.Errorf("with unrouted answers: %+v", got)
+	}
+	only := portCountsOf(console.RouterServerNumbers{Unrouted: &console.RouteAnswers{Count: 4, Seconds: 0.4}})
+	if line := lineOf(portStatusAttrs("shop", time.Minute, only, portCounts{})); !strings.Contains(line, "queries=4 dbtrail=4 mysql=0") || !strings.Contains(line, "dbtrail_avg_ms=100") {
+		t.Errorf("a port that never routed: %s", line)
+	}
 	if empty := portCountsOf(console.RouterServerNumbers{}); empty.copy != 0 || empty.behind != nil {
 		t.Errorf("a server with no answers: %+v", empty)
 	}

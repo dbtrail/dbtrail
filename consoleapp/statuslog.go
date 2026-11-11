@@ -110,6 +110,14 @@ func portCountsOf(n console.RouterServerNumbers) portCounts {
 	if a, ok := n.Answers["mysql"]; ok {
 		c.mysql, c.mysqlErr, c.mysqlSecs = a.Count, a.Errors, a.Seconds
 	}
+	// With Engine Routing off, which is how the port starts, the copy
+	// answers every statement and nothing is "routed": those are counted on
+	// their own and are DBTrail's answers all the same.
+	if a := n.Unrouted; a != nil {
+		c.copy += a.Count
+		c.copyErr += a.Errors
+		c.copySecs += a.Seconds
+	}
 	return c
 }
 
