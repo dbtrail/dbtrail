@@ -94,6 +94,9 @@ const (
 	// environment variable, so naming the variable would send the operator
 	// to a knob that changes nothing; the remedy is the saved setting.
 	RemedyConsoleSaved Remedy = "console-saved"
+	// RemedyCompose marks the compose file's `baseline` profile, whose knob
+	// is the BASELINE_LOCK_MODE variable (.env, or set for the one run).
+	RemedyCompose Remedy = "compose"
 )
 
 // SavedLockModeEndpoint is how the console's saved lock mode is changed or
@@ -105,6 +108,8 @@ func (r Remedy) forMode(m baseline.LockMode) string {
 	switch r {
 	case RemedyCLI:
 		return "pass --lock-mode " + string(m)
+	case RemedyCompose:
+		return "set BASELINE_LOCK_MODE=" + string(m)
 	case RemedyConsoleSaved:
 		return "save lock mode " + string(m) + " instead (" + SavedLockModeEndpoint + ` with {"value":"` + string(m) +
 			`"}; {"use_startup":true} clears the saved one)`
@@ -679,6 +684,26 @@ func checkPrivilegesDB(ctx context.Context, db *sql.DB, mode baseline.LockMode, 
 // way, and an account set up with the grants documented before this existed
 // must keep its full reads. PROCESS is global-only, and ALL PRIVILEGES
 // returned earlier.
+//
+// WarnQuietWaitBlind is the same warning for a caller that waits without
+// running CheckPrivileges first: the compose `baseline` profile's step, where
+// mydumper itself is what meets a missing lock privilege. Grants that cannot
+// be read are said too, since the wait may then be the blind one.
+func WarnQuietWaitBlind(ctx context.Context, db *sql.DB) {
+	g, err := parseGrants(ctx, db)
+	if err != nil {
+		if ctx.Err() != nil {
+			// A shutdown, not unreadable grants: the caller's next step
+			// reports it, and "going ahead" here would be false.
+			return
+		}
+		slog.Warn("full read: could not read the source account's privileges, so it is not known whether the wait "+
+			"before the ftwrl lock sees other accounts' statements (that takes the PROCESS privilege); going ahead", "error", err)
+		return
+	}
+	warnQuietWaitBlind(g)
+}
+
 func warnQuietWaitBlind(g *grantSet) {
 	if g.grantedGlobally("PROCESS") {
 		return

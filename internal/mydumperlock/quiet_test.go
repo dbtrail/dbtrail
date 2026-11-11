@@ -285,3 +285,130 @@ func TestWaitForQuietSource_cancelledDuringALook(t *testing.T) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
+
+// The compose `baseline` profile's refusal names that profile's variable: its
+// operator never typed a --lock-mode flag, and the console's variable does
+// nothing there.
+func TestQuietWaitError_composeNamesTheProfileVariable(t *testing.T) {
+	e := &QuietWaitError{Waited: QuietWaitLimit, Busy: []Busy{{ID: 42, User: "app", Command: "Execute", Seconds: 611}}, remedy: RemedyCompose}
+	for _, msg := range []string{e.Error(), e.Summary()} {
+		t.Logf("as the operator reads it: %s", msg)
+		if !strings.Contains(msg, "set BASELINE_LOCK_MODE=lock-all") {
+			t.Errorf("does not name the profile's variable: %s", msg)
+		}
+		for _, wrong := range []string{"--lock-mode", "BINTRAIL_CONSOLE_BASELINE_LOCK_MODE"} {
+			if strings.Contains(msg, wrong) {
+				t.Errorf("names %s, which the compose profile does not have: %s", wrong, msg)
+			}
+		}
+	}
+}
+
+// The standalone PROCESS warning (the compose profile's step, which does not
+// run CheckPrivileges): said without PROCESS, silent with it or with ALL
+// PRIVILEGES, and grants that cannot be read are said rather than taken as
+// "sees everything".
+func TestWarnQuietWaitBlind(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		grants []string
+		fail   bool
+		want   string // "" = no warning
+	}{
+		{"without PROCESS", []string{"GRANT RELOAD, BACKUP_ADMIN, SELECT ON *.* TO `dbtrail`@`%`"}, false, "lacks the PROCESS privilege"},
+		{"with PROCESS", []string{"GRANT RELOAD, PROCESS, SELECT ON *.* TO `dbtrail`@`%`"}, false, ""},
+		{"ALL PRIVILEGES", []string{"GRANT ALL PRIVILEGES ON *.* TO `root`@`%`"}, false, ""},
+		{"PROCESS on one schema is not PROCESS", []string{"GRANT SELECT ON *.* TO `dbtrail`@`%`", "GRANT PROCESS ON `app`.* TO `dbtrail`@`%`"}, false, "lacks the PROCESS privilege"},
+		{"grants unreadable", nil, true, "could not read the source account's privileges"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if tc.fail {
+				mock.ExpectQuery("SHOW GRANTS").WillReturnError(errors.New("connection reset"))
+			} else {
+				mock.ExpectQuery("SHOW GRANTS").WillReturnRows(grantRows(tc.grants...))
+			}
+			prev := slog.Default()
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			var buf bytes.Buffer
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			WarnQuietWaitBlind(context.Background(), db)
+			got := buf.String()
+			if tc.want == "" && got != "" {
+				t.Errorf("warned with nothing to warn about: %s", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("log = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The compose step end to end on one connection: an account without PROCESS
+// and a source that never goes quiet. Both halves must happen: the warning
+// (nothing else in that profile says the wait is blind) and a refusal that
+// names the profile's variable.
+func TestWaitForQuietSourceCompose_warnsThenRefusesWithTheProfileVariable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(grantRows("GRANT RELOAD, BACKUP_ADMIN, SELECT ON *.* TO `dbtrail`@`%`"))
+	expectStart(mock, 7, "8.0.46")
+	for range 3 {
+		expectPoll(mock, plRow{9, "app", "Query", 300, "SELECT 1"})
+	}
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	err = waitCompose(context.Background(), db, baseline.LockModeFTWRL, fakeWait(t, 10*time.Second, 20*time.Second))
+	var qe *QuietWaitError
+	if !errors.As(err, &qe) {
+		t.Fatalf("err = %v, want the refusal", err)
+	}
+	if !strings.Contains(err.Error(), "set BASELINE_LOCK_MODE=lock-all") || strings.Contains(err.Error(), "--lock-mode") {
+		t.Errorf("the refusal does not name the profile's variable: %v", err)
+	}
+	if !strings.Contains(buf.String(), "lacks the PROCESS privilege") {
+		t.Errorf("an account without PROCESS waited with no warning: %q", buf.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// A mode that does not wait asks the source nothing, grants included.
+func TestWaitForQuietSourceCompose_otherModesAskNothing(t *testing.T) {
+	for _, m := range []baseline.LockMode{baseline.LockModeLockAll, baseline.LockModeSafeNoLock, baseline.LockModeNoLock} {
+		db, _, _ := sqlmock.New() // any query is an unexpected one and fails
+		if err := waitCompose(context.Background(), db, m, fakeWait(t, time.Second, time.Second)); err != nil {
+			t.Errorf("%s: %v", m, err)
+		}
+		db.Close()
+	}
+}
+
+// A shutdown while the grants are being read is not "could not read the
+// privileges, going ahead": nothing goes ahead.
+func TestWarnQuietWaitBlind_silentOnShutdown(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	mock.ExpectQuery("SHOW GRANTS").WillReturnError(context.Canceled)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	WarnQuietWaitBlind(ctx, db)
+	if buf.Len() != 0 {
+		t.Errorf("warned during a shutdown: %s", buf.String())
+	}
+}

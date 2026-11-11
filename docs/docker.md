@@ -567,6 +567,33 @@ Notes:
   non-transactional tables (MyISAM), the binlog coordinates embedded in the
   snapshot may not exactly match those tables' data — the same caveat as
   `bintrail dump`.
+- With `ftwrl`, the run first waits until the source has no statement that
+  has been running for 1 s or more (step `baseline-quiet`): the lock has to
+  wait for every statement already running, and from the moment it is asked
+  for, writes to the tables that statement reads stop until it ends. It
+  looks every 10 s for up to 10 minutes. If the source was never quiet, the
+  run stops with `service "baseline-quiet" didn't complete successfully`
+  before anything is locked or read. Run it again at a quieter time, or set
+  `BASELINE_LOCK_MODE=lock-all`, which a running query does not hold up. See
+  [`ftwrl` waits for a quiet source first](snapshot-lock-measurements.md#ftwrl-waits-for-a-quiet-source-first).
+  - **Where it speaks.** `docker compose run` does not show this step's
+    output. It is in `docker compose --profile baseline logs baseline-quiet`
+    (every run's lines, oldest first): after a refusal, which connection
+    held the run back (never the statement's text). Read it once after a run
+    that worked too, because when the step cannot see the source it says why
+    there and lets the dump go ahead without waiting.
+  - **When it cannot see.** The source account sees other accounts'
+    statements only with the `PROCESS` privilege
+    (`GRANT PROCESS ON *.* TO ...`); without it the step waits only for the
+    account's own. It also goes ahead when it cannot connect (it connects
+    the way capture does, so a source that requires TLS needs it in the DSN
+    even where mydumper negotiates it alone) or cannot read the process
+    list.
+  - **It needs a `bintrail` image newer than 0.128.0.** An older one fails
+    at this step with `required flag(s) "output" not set`, and that includes
+    a `latest` already on the machine: `docker compose pull` without the
+    profile does not refresh the images only this profile uses. Run
+    `docker compose --profile baseline pull`.
 - If the run fails with `service "baseline-dump" didn't complete
   successfully`, the cause (a mydumper error, a FATAL from the DSN/schema
   guards) is in `docker compose --profile baseline logs baseline-dump`.
