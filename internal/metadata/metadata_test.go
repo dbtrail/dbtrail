@@ -361,13 +361,17 @@ func TestCoerceTextEncoding(t *testing.T) {
 		{"invalid utf8 latin1 transcoded", "Jos" + string([]byte{0xE9}), ColumnMeta{DataType: "varchar", CharacterSet: "latin1"}, "José", false},
 		{"invalid utf8 empty charset fails", invalid, ColumnMeta{DataType: "varchar"}, nil, true},
 		{"invalid utf8 unsupported charset fails", invalid, ColumnMeta{DataType: "char", CharacterSet: "koi8r"}, nil, true},
-		// charmap.Windows1252's decoder is total (never returns an error), so
-		// the 5 cp1252-undefined byte positions (0x81, 0x8D, 0x8F, 0x90, 0x9D)
-		// would otherwise decode "successfully" straight to U+FFFD — the exact
-		// silent-corruption class #756 exists to close. coerceTextEncoding
-		// must catch this itself and fail loud instead.
-		{"latin1 undefined cp1252 byte 0x81 fails loud", string([]byte{0x81}), ColumnMeta{DataType: "varchar", CharacterSet: "latin1"}, nil, true},
-		{"latin1 undefined cp1252 byte 0x9d fails loud", string([]byte{0x9D}), ColumnMeta{DataType: "char", CharacterSet: "latin1"}, nil, true},
+		// The 5 bytes Windows-1252 leaves undefined (0x81, 0x8D, 0x8F, 0x90,
+		// 0x9D) are C1 control characters in MySQL's latin1 (measured on
+		// 8.0.46, #2634: CONVERT(_latin1 0x81 USING utf8mb4) is C2 81). They
+		// used to be refused, which skipped the row; they now decode as MySQL
+		// decodes them, as a full read does.
+		{"latin1 cp1252-undefined byte 0x81 decodes as MySQL does", string([]byte{0x81}), ColumnMeta{DataType: "varchar", CharacterSet: "latin1"}, "\u0081", false},
+		{"latin1 cp1252-undefined byte 0x9d decodes as MySQL does", string([]byte{0x9D}), ColumnMeta{DataType: "char", CharacterSet: "latin1"}, "\u009d", false},
+		// latin1 bytes that also read as UTF-8 are still latin1: C3 A9 is "Ã©"
+		// on MySQL and in a full read, never "é" (#2634).
+		{"latin1 bytes that look like UTF-8 still decoded", "\xc3\xa9", ColumnMeta{DataType: "varchar", CharacterSet: "latin1"}, "Ã©", false},
+		{"latin1 ascii unchanged", valid, ColumnMeta{DataType: "varchar", CharacterSet: "LATIN1"}, valid, false},
 		// The reverse of the above: genuine cp1252-only printable characters
 		// (0x80-0x9F range that diverges from plain ISO-8859-1, e.g. the euro
 		// sign and a left double quotation mark) must transcode cleanly, not

@@ -474,6 +474,17 @@ func processTable(ctx context.Context, tf TableFiles, outPath string, cfg Writer
 		return 0, fmt.Errorf("parse schema: %w", err)
 	}
 
+	// latin1 text columns are decoded to UTF-8 on the way into the Parquet
+	// file (#2634), when the dump holds them as stored bytes.
+	var isLatin1 []bool
+	if dumpIsBinary(tf) {
+		createSQL, err := os.ReadFile(tf.SchemaFile)
+		if err != nil {
+			return 0, fmt.Errorf("read schema for its character sets: %w", err)
+		}
+		isLatin1 = Latin1Columns(string(createSQL), cols)
+	}
+
 	// Create writer.
 	w, err := NewWriter(outPath, cols, cfg)
 	if err != nil {
@@ -522,7 +533,7 @@ func processTable(ctx context.Context, tf TableFiles, outPath string, cfg Writer
 				"(generated columns are excluded from both) — dump/schema mismatch for %s.%s",
 				len(values), tf.SchemaFile, len(cols), tf.Database, tf.Table)
 		}
-		if err := w.WriteRow(values, nulls); err != nil {
+		if err := w.WriteRow(decodeLatin1Row(values, nulls, isLatin1), nulls); err != nil {
 			return err
 		}
 		hasher.AddStrings(values, nulls)
