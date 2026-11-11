@@ -472,6 +472,12 @@ services:
       # a baseline dir/S3 configured (baseline-anchored) or a source DSN
       # (live-source) before the button does anything.
       BINTRAIL_CONSOLE_VERIFY_TRIGGER: ${VERIFY_TRIGGER:-1}
+      # Webhook for alerts (#2635): set NOTIFY_WEBHOOK=https://... in .env to
+      # get a JSON POST when capture of a source stops for 10 minutes, when
+      # capture lost events, when verification finds problems, when rotation
+      # stalls, or when the newest backup is too old to restore from. Slack,
+      # PagerDuty and any URL that takes a POST work. Empty = off.
+      BINTRAIL_CONSOLE_NOTIFY_WEBHOOK: ${NOTIFY_WEBHOOK:-}
       # Password login (persists next to the registry). On first run the
       # console serves a "create your password" screen; later visits sign in.
       # There is deliberately NO password env var: docker inspect must never

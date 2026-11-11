@@ -112,7 +112,7 @@ default-time-zone='+00:00'
 innodb_buffer_pool_size=2G
 EOF
 systemctl restart mysql
-mysql -e "CREATE USER 'bt'@'127.0.0.1' IDENTIFIED BY 'CHANGE_ME';
+mysql -e "CREATE USER 'bt'@'127.0.0.1' IDENTIFIED BY <CHANGE_ME, in single quotes>;
           GRANT ALL ON *.* TO 'bt'@'127.0.0.1' WITH GRANT OPTION;"
 
 cd /tmp

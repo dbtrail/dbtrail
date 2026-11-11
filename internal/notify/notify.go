@@ -26,7 +26,7 @@ import (
 // changes only.
 type Event struct {
 	// Event names the condition: continuity_gap_lost, verify_problem,
-	// rotation_unhealthy.
+	// rotation_unhealthy, baseline_stale, capture_stopped.
 	Event    string `json:"event"`
 	Severity string `json:"severity"` // info | warning | critical
 	Server   string `json:"server,omitempty"`
@@ -46,6 +46,10 @@ const (
 	EventVerifyProblem     = "verify_problem"
 	EventRotationUnhealthy = "rotation_unhealthy"
 	EventBaselineStale     = "baseline_stale"
+	// EventCaptureStopped: a supervised source has not been capturing for a
+	// while (failing, wedged, or given up). Sent BEFORE the loss, while the
+	// source still holds the binlogs a restart needs.
+	EventCaptureStopped = "capture_stopped"
 
 	SeverityInfo     = "info"
 	SeverityWarning  = "warning"
@@ -76,8 +80,8 @@ type Webhook struct {
 // NewWebhook starts the delivery worker on ctx (the daemon lifetime).
 func NewWebhook(ctx context.Context, url string) *Webhook {
 	w := &Webhook{
-		url:     url,
-		client:  &http.Client{Timeout: sendTimeout},
+		url:      url,
+		client:   &http.Client{Timeout: sendTimeout},
 		ch:       make(chan Event, queueSize),
 		backoff:  defaultBackoff,
 		lastWarn: make(map[string]time.Time),
