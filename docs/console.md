@@ -547,6 +547,9 @@ accepted there as a Bearer only, never as a browser session, on `/mcp` or on
 the MySQL port, and it does not close first-run setup. In the audit trail its
 actor is `local-cli`, apart from `token`. `--url` and `--access-file` point a
 command at another DBTrail; with no file, `BINTRAIL_CONSOLE_TOKEN` is used.
+Without `--url` a command only talks to this machine: an address from the
+file or the environment that names another one is refused, so a `.bintrail.env`
+in a folder someone else prepared cannot send your database password elsewhere.
 When DBTrail serves HTTPS, give the name on its certificate:
 `--url https://dbtrail.example.com`.
 

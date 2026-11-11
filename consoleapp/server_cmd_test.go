@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -860,6 +861,34 @@ func TestResolveCtl(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+	// A folder someone else prepared can feed the environment through
+	// .bintrail.env. Neither a file nor the environment may send a command,
+	// with its token and then a database password, to another machine.
+	t.Run("a file that names another machine is refused", func(t *testing.T) {
+		state := isolate(t)
+		for _, u := range []string{"http://203.0.113.9:8090", "https://dbtrail.example.com", "ftp://127.0.0.1", "127.0.0.1:8090"} {
+			write(t, state, console.LocalAccess{URL: u, Token: "filetok"})
+			if c, err := resolveCtl("", ""); err == nil || !strings.Contains(err.Error(), "--url") {
+				t.Errorf("%s: got %+v, %v", u, c, err)
+			}
+		}
+	})
+	t.Run("a listen address in the environment that names another machine is refused", func(t *testing.T) {
+		isolate(t)
+		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
+		t.Setenv("BINTRAIL_CONSOLE_LISTEN", "203.0.113.9:8090")
+		if c, err := resolveCtl("", ""); err == nil || !strings.Contains(err.Error(), "not this machine") {
+			t.Fatalf("got %+v, %v", c, err)
+		}
+	})
+	t.Run("--url may name another machine: it was typed", func(t *testing.T) {
+		state := isolate(t)
+		write(t, state, console.LocalAccess{URL: "http://203.0.113.9:8090", Token: "filetok"})
+		c, err := resolveCtl("https://dbtrail.example.com", "")
+		if err != nil || c.base != "https://dbtrail.example.com" {
+			t.Fatalf("got %+v, %v", c, err)
+		}
+	})
 	t.Run("--access-file is the only place looked", func(t *testing.T) {
 		state := isolate(t)
 		write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "default"})
@@ -897,6 +926,39 @@ func TestResolveCtl(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+}
+
+func TestOnThisMachine(t *testing.T) {
+	for in, want := range map[string]bool{
+		"http://127.0.0.1:8090":      true,
+		"https://127.0.0.1:8443":     true,
+		"http://[::1]:8090":          true,
+		"http://localhost:8090":      true,
+		"http://LOCALHOST:8090":      true,
+		"http://203.0.113.9:8090":    false,
+		"http://dbtrail.example.com": false,
+		"http://127.0.0.1.evil.test": false,
+		"http://localhost.evil.test": false,
+		"http://evil.test/127.0.0.1": false,
+		"http://127.0.0.1@evil.test": false,
+		"":                           false,
+		"127.0.0.1:8090":             false,
+		"file:///etc/passwd":         false,
+	} {
+		if got := onThisMachine(in); got != want {
+			t.Errorf("onThisMachine(%q) = %v, want %v", in, got, want)
+		}
+	}
+	// An address this machine holds on one of its interfaces counts.
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.IP.To4() != nil {
+			if u := "http://" + net.JoinHostPort(n.IP.String(), "8090"); !onThisMachine(u) {
+				t.Errorf("%s is this machine's own address and was refused", u)
+			}
+			break
+		}
+	}
 }
 
 func TestListenToLocal(t *testing.T) {

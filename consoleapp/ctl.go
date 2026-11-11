@@ -12,7 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"net/url"
+	neturl "net/url"
 	"os"
 	"strings"
 	"time"
@@ -129,9 +129,51 @@ It looked for %s, which DBTrail writes when it starts.
 	}
 	if url != "" {
 		c.base = url
+	} else if !onThisMachine(c.base) {
+		// The address came from a file or from the environment, and
+		// .bintrail.env in the working directory feeds the environment. A
+		// command run in a folder someone else prepared must not send a
+		// token, and then a database password, wherever that folder says.
+		from := "BINTRAIL_CONSOLE_LISTEN"
+		if accPath != "" {
+			from = accPath
+		}
+		return nil, fmt.Errorf("%s says DBTrail is at %s, which is not this machine. These commands only go to another machine when told to: --url %s", from, c.base, c.base)
 	}
 	c.base = strings.TrimRight(c.base, "/")
 	return c, nil
+}
+
+// onThisMachine reports whether base, an http(s) address, names this machine
+// by a loopback address, by localhost, or by an address one of its own
+// network interfaces holds (a daemon bound to one writes that one down). Any
+// other host name is not trusted to be: a name resolves wherever DNS says.
+func onThisMachine(base string) bool {
+	u, err := neturl.Parse(base)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // listenToLocal turns a bind address into one to dial from this machine.
@@ -174,7 +216,7 @@ func (c *ctlClient) do(ctx context.Context, method, path string, body, out any) 
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		var certErr *tls.CertificateVerificationError
-		var uerr *url.Error
+		var uerr *neturl.Error
 		switch {
 		case errors.As(err, &certErr):
 			return fmt.Errorf("%s answered with a certificate this machine does not accept for that address: %w\nGive the name the certificate was issued for: --url https://<name>", c.base, err)
