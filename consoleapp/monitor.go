@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/pgstreamrun"
 	"github.com/dbtrail/dbtrail/internal/rotation"
+	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/streamdeps"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
@@ -109,7 +110,7 @@ type monitorJob struct {
 	done   chan struct{}
 	// indexDSN is the entry's per-source index database — set once at job
 	// creation (before the job is published), immutable after. Stop uses it
-	// to clear the durable gap-loss record with its own short-lived
+	// to acknowledge the durable gap-loss record with its own short-lived
 	// connection (the capture lock belongs to the run goroutine; sharing it
 	// from Stop would race Start's provisioning window).
 	indexDSN string
@@ -162,8 +163,8 @@ type monitorJob struct {
 	// forced an auto-advance: events were permanently lost. The fact is
 	// also persisted in stream_state (gap_lost_at/_detail) and re-hydrated
 	// by Start, so it survives daemon restarts; only an explicit Stop (the
-	// operator's acknowledgment) clears it — feeds the derived
-	// "lost_position" state.
+	// operator's acknowledgment) silences it, by stamping gap_acked_at beside
+	// the record, which stays — feeds the derived "lost_position" state.
 	lostPosition string
 }
 
@@ -598,19 +599,19 @@ func (m *monitorSupervisor) start(ctx context.Context, e console.ServerEntry, ex
 	// Re-hydrate a durable gap-loss record (#402): once the stream persisted
 	// its advanced checkpoint, a restarted daemon sees no gap and the hook
 	// never re-fires — the lost_position state must be restored from
-	// stream_state or the data loss silently un-surfaces. Cleared only by an
-	// explicit Stop (the operator's acknowledgment). ErrNoRows is the normal
-	// fresh-start case; any other error means a recorded loss may go
-	// un-surfaced this run, which deserves a breadcrumb.
-	var gapDetail sql.NullString
-	err = idxDB.QueryRowContext(ctx,
-		`SELECT gap_lost_detail FROM stream_state WHERE id = 1`).Scan(&gapDetail)
+	// stream_state or the data loss silently un-surfaces. Silenced only by an
+	// explicit Stop (the operator's acknowledgment), which leaves the record in
+	// place: an ACKNOWLEDGED loss is not re-raised here, and is still refused
+	// by every reader that decides whether a window is complete. An empty
+	// stream_state is the normal fresh-start case; an error means a recorded
+	// loss may go un-surfaced this run, which deserves a breadcrumb.
+	gapDetail, err := unacknowledgedGapDetail(ctx, idxDB)
 	switch {
-	case err == nil && gapDetail.Valid && gapDetail.String != "":
-		job.markLostPosition(gapDetail.String)
-	case err != nil && !errors.Is(err, sql.ErrNoRows):
+	case err != nil:
 		slog.Warn("could not re-hydrate gap-loss record; a recorded data loss may not be re-surfaced this run",
 			"entry", e.ID, "error", config.ScrubDSNError(err, e.SourceDSN, e.DSN))
+	case gapDetail != "":
+		job.markLostPosition(gapDetail)
 	}
 	idxDB.Close()
 
@@ -1174,12 +1175,12 @@ const monitorPhaseLockWaiting = "lock_waiting"
 // restarts — without this, a "refresh the schema snapshot" action would leave
 // capture skipping exactly the tables it was asked to fix.
 //
-// Deliberately NOT Stop+Start. Stop clears the durable gap-loss record as the
-// operator's acknowledgment of permanently lost events; routing a schema
-// refresh through it would erase a data-loss alarm as a side effect of pressing
-// an unrelated button. This cancels the job and relaunches it, leaving
-// stream_state.gap_lost_at untouched — Start then re-hydrates lost_position
-// from it, so the alarm survives.
+// Deliberately NOT Stop+Start. Stop acknowledges the durable gap-loss record
+// (it stamps stream_state.gap_acked_at) as the operator's acknowledgment of
+// permanently lost events; routing a schema refresh through it would silence a
+// data-loss alarm as a side effect of pressing an unrelated button. This
+// cancels the job and relaunches it, leaving the record unacknowledged — Start
+// then re-hydrates lost_position from it, so the alarm survives.
 //
 // reloaded is false with a nil error when this process does not supervise the
 // entry: there is no stream here to reload, which is not an error (the snapshot
@@ -1243,10 +1244,13 @@ func (m *monitorSupervisor) ReloadSchema(ctx context.Context, e console.ServerEn
 
 // Stop implements console.MonitorController. Idempotent; waits briefly for
 // the stream to flush its final checkpoint. An explicit Stop is also the
-// operator's acknowledgment of a recorded data loss: it clears the durable
-// gap-loss record so the next Start begins clean. Daemon shutdown does NOT
-// come through here (Shutdown cancels jobs directly), so a restart preserves
-// the record.
+// operator's acknowledgment of a recorded data loss: it stamps gap_acked_at
+// beside the durable gap-loss record, so the next Start does not raise the
+// alarm again. The record itself (gap_lost_at) is never cleared here: snapshot
+// updates, reconstruct and verify keep refusing a window that spans the loss
+// until a full snapshot is taken after it. Daemon shutdown does NOT come
+// through here (Shutdown cancels jobs directly), so a restart leaves the loss
+// unacknowledged.
 func (m *monitorSupervisor) Stop(ctx context.Context, entryID string) error {
 	m.mu.Lock()
 	job, ok := m.jobs[entryID]
@@ -1257,18 +1261,20 @@ func (m *monitorSupervisor) Stop(ctx context.Context, entryID string) error {
 	if !ok {
 		return nil
 	}
-	// Clear with a short-lived connection of our own: the lock belongs to the
-	// run goroutine (reading it here would race Start's provisioning window,
-	// and it is already closed when the stream gave up or exited). On
-	// failure the record survives — the next Start re-raises lost_position,
-	// which fails safe: a real past loss is re-surfaced, never dropped.
+	// Acknowledge with a short-lived connection of our own: the lock belongs
+	// to the run goroutine (reading it here would race Start's provisioning
+	// window, and it is already closed when the stream gave up or exited). On
+	// failure the record stays unacknowledged — the next Start re-raises
+	// lost_position, which fails safe: a real past loss is re-surfaced, never
+	// dropped. Done BEFORE the cancel on purpose: a loss the stream stamps
+	// between here and its exit NULLs the acknowledgement again, so a loss
+	// nobody saw is never acknowledged.
 	if job.indexDSN != "" {
 		if db, err := config.Connect(job.indexDSN); err != nil {
-			slog.Warn("could not clear gap-loss record on stop", "entry", entryID, "error", config.ScrubDSNText(err.Error(), job.indexDSN))
+			slog.Warn("could not acknowledge gap-loss record on stop", "entry", entryID, "error", config.ScrubDSNText(err.Error(), job.indexDSN))
 		} else {
-			if _, err := db.ExecContext(ctx, `UPDATE stream_state
-				SET gap_lost_at = NULL, gap_lost_detail = NULL WHERE id = 1`); err != nil {
-				slog.Warn("could not clear gap-loss record on stop", "entry", entryID, "error", config.ScrubDSNText(err.Error(), job.indexDSN))
+			if err := acknowledgeGapLoss(ctx, db); err != nil {
+				slog.Warn("could not acknowledge gap-loss record on stop", "entry", entryID, "error", config.ScrubDSNText(err.Error(), job.indexDSN))
 			}
 			db.Close()
 		}
@@ -1282,6 +1288,48 @@ func (m *monitorSupervisor) Stop(ctx context.Context, entryID string) error {
 		return ctx.Err()
 	}
 	return nil
+}
+
+// acknowledgeGapLossSQL records the operator's acknowledgement of a recorded
+// permanent capture loss. It touches gap_acked_at ONLY. gap_lost_at and
+// gap_lost_detail are the fact that events are gone, and the readers that
+// refuse a window spanning the loss (snapshot updates, reconstruct, verify)
+// must keep seeing it: clearing them here is what let a scheduled update
+// publish a snapshot missing the lost changes. The WHERE keeps an
+// acknowledgement from being recorded when no loss is; a row with no loss
+// would not read as acknowledged either way (status.GapLossAcknowledged), but
+// a stray timestamp there would be a lie about what an operator saw.
+const acknowledgeGapLossSQL = `UPDATE stream_state SET gap_acked_at = UTC_TIMESTAMP() WHERE id = 1 AND gap_lost_at IS NOT NULL`
+
+// acknowledgeGapLoss runs acknowledgeGapLossSQL. Idempotent: acknowledging
+// twice moves the timestamp forward and changes no verdict.
+func acknowledgeGapLoss(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, acknowledgeGapLossSQL)
+	return err
+}
+
+// unacknowledgedGapDetail returns the detail of a recorded permanent capture
+// loss nobody has acknowledged, or "" when there is none to raise: no row, no
+// loss, a loss with no detail (the lost_position state is keyed on the detail
+// text, as before), or a loss an operator acknowledged. The rule for
+// "acknowledged" is status.GapLossAcknowledged, the same one every other
+// alarm surface applies. Start runs the schema migration before calling this,
+// so gap_acked_at exists; a read error is returned and the caller warns.
+func unacknowledgedGapDetail(ctx context.Context, db *sql.DB) (string, error) {
+	var lostAt, ackedAt sql.NullTime
+	var detail sql.NullString
+	err := db.QueryRowContext(ctx,
+		`SELECT gap_lost_at, gap_lost_detail, gap_acked_at FROM stream_state WHERE id = 1`).
+		Scan(&lostAt, &detail, &ackedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", err
+	case status.GapLossAcknowledged(lostAt, ackedAt):
+		return "", nil
+	}
+	return detail.String, nil
 }
 
 // ActiveJob pairs a supervised entry's id with its per-source index DSN, so the

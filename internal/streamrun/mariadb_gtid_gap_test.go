@@ -483,7 +483,12 @@ func TestPersistGapAutoAdvance_stampsBeforeAdvance(t *testing.T) {
 // loss record (a bare UPDATE would match zero rows and the subsequent checkpoint
 // upsert would seed a fresh row with NULL gap_lost_* columns). The end-anchored
 // regex also pins that the existing-row arm touches ONLY the gap_lost_* columns
-// — the checkpoint advance must land exclusively in the second statement.
+// and gap_acked_at — the checkpoint advance must land exclusively in the
+// second statement.
+//
+// gap_acked_at = NULL is part of the stamp on purpose: a new loss withdraws the
+// acknowledgement of an earlier one in the same statement, so a second loss in
+// the same second as that acknowledgement is not born acknowledged.
 func TestPersistGapAutoAdvance_stampIsUpsert(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -493,7 +498,7 @@ func TestPersistGapAutoAdvance_stampIsUpsert(t *testing.T) {
 
 	mock.ExpectExec(`(?s)INSERT INTO stream_state\s+\(id, mode,.*gap_lost_at, gap_lost_detail\)`+
 		`.*ON DUPLICATE KEY UPDATE\s+`+
-		`gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = VALUES\(gap_lost_detail\)\s*$`).
+		`gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = VALUES\(gap_lost_detail\),\s+gap_acked_at\s+= NULL\s*$`).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
 			sqlmock.AnyArg(), sqlmock.AnyArg(), "events lost").
@@ -505,7 +510,7 @@ func TestPersistGapAutoAdvance_stampIsUpsert(t *testing.T) {
 		t.Fatalf("persistGapAutoAdvance: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("stamp must be an upsert whose UPDATE arm touches only gap_lost_*: %v", err)
+		t.Errorf("stamp must be an upsert whose UPDATE arm touches only gap_lost_* and NULLs gap_acked_at: %v", err)
 	}
 }
 

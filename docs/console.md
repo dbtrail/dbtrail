@@ -842,12 +842,16 @@ saved, shown with the reason `serve` is not running it.
   source ahead; a source that does not answer; an index with no live
   capture). An index that records nothing while the source keeps writing
   is a capture that stopped, and a full backup is the one producer that
-  does not depend on it. One limit: stopping a source from the web interface
-  clears its capture-gap record (the Stop is the acknowledgement of the
-  loss), so a gap acknowledged that way before the cut-over no longer
-  keeps the full backup, and the rows it lost stay out of the backups
-  until a full backup reads them: the full-backup timetable, or one taken
-  by hand after acknowledging the loss. After a full backup the
+  does not depend on it. Stopping a source from the web interface
+  acknowledges its capture-gap record and does not erase it: the Stop
+  stamps the time of the acknowledgement beside the record
+  (`stream_state.gap_acked_at`), which silences the alarm (the
+  `lost_position` state, the `GAP LOST` verdict, the webhook and the
+  Prometheus gauge) and nothing else. A gap acknowledged that way still
+  keeps the full backup, and an update whose window spans it is still
+  refused, until one full backup is taken after the gap; from then on the
+  gap is behind that backup and updates resume. A second gap raises the
+  alarm again. After a full backup the
   model may not choose another one until an update after it has been
   measured (it may still choose an update): each full backup records the
   index's high-water mark before it starts, so the update that follows it
@@ -2078,7 +2082,10 @@ per server as `source` in [`/api/capabilities`](#api), derived from
 - **Permanent-loss badge.** The Status page surfaces the durable loss record
   (`stream_state.gap_lost_at`) — for PostgreSQL, an invalidated/lost replication
   slot; for MySQL, an unfillable binlog gap. The index is valid only up to that
-  point and capture must be re-baselined to resume.
+  point and capture must be re-baselined to resume. Stopping the server
+  acknowledges the record: the badge goes away and the record stays, so a
+  snapshot update or a reconstruction whose window spans the loss is still
+  refused until a full snapshot is taken after it.
 - **Connection-id note.** PostgreSQL logical replication (`pgoutput`) carries
   no backend connection id, so `connection_id` is empty for PostgreSQL sources
   and no setting, in the web interface or in capture, can add it. The Events page says so for

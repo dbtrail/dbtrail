@@ -47,9 +47,11 @@ func TestPersistSlotLostPG(t *testing.T) {
 	}
 
 	// (2) Existing checkpoint row → the stamp must preserve the position/checkpoint and
-	// only update gap_lost_*. Write a real checkpoint first.
+	// only update gap_lost_*. Write a real checkpoint first, and acknowledge the loss
+	// from (1): the second stamp is a NEW loss and must withdraw that acknowledgement
+	// in the same statement, even though both land in the same second.
 	if _, err := indexDB.ExecContext(ctx,
-		`UPDATE stream_state SET binlog_position=999, binlog_file='5/ABC', gap_lost_at=NULL, gap_lost_detail=NULL WHERE id=1`); err != nil {
+		`UPDATE stream_state SET binlog_position=999, binlog_file='5/ABC', gap_acked_at=UTC_TIMESTAMP() WHERE id=1`); err != nil {
 		t.Fatalf("seed checkpoint: %v", err)
 	}
 	persistSlotLostPG(indexDB, 51, "lost again", logger)
@@ -66,6 +68,15 @@ func TestPersistSlotLostPG(t *testing.T) {
 	}
 	if gapDetail.String != "lost again" {
 		t.Errorf("gap_lost_detail not updated on the existing row: %q", gapDetail.String)
+	}
+	var lostSet, ackSet bool
+	if err := indexDB.QueryRowContext(ctx,
+		"SELECT gap_lost_at IS NOT NULL, gap_acked_at IS NOT NULL FROM stream_state WHERE id=1").
+		Scan(&lostSet, &ackSet); err != nil {
+		t.Fatalf("read back the acknowledgement: %v", err)
+	}
+	if !lostSet || ackSet {
+		t.Errorf("a new loss must not be born acknowledged: loss on record=%v acknowledged=%v", lostSet, ackSet)
 	}
 }
 

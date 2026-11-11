@@ -93,8 +93,22 @@ type StreamStateInfo struct {
 	// capture must be re-baselined to resume; status surfaces them loudly. GapLostAt is
 	// authoritative (the badge is gated on it alone); GapLostDetail is supplementary
 	// human-readable context and may be absent. Both writers set them atomically.
+	//
+	// Nothing clears them. An operator's acknowledgement (stopping the source in
+	// the console) is recorded BESIDE the loss, in GapAckedAt, so the readers
+	// that decide whether a window can be trusted (reconstruct, snapshot
+	// updates, verify) keep seeing the loss after the alarm is silenced. Those
+	// readers use GapLostAt; the alarm surfaces use GapUnacknowledged.
 	GapLostAt     sql.NullTime
 	GapLostDetail sql.NullString
+	// GapAckedAt is when an operator acknowledged the loss in GapLostAt
+	// (stream_state.gap_acked_at). Every writer that stamps a loss sets it back
+	// to NULL in the same statement, so a new loss is never born acknowledged.
+	// Invalid on an index without the column (older than this field), which
+	// reads as "not acknowledged": the alarm then behaves as it did before
+	// acknowledgements were recorded. Read it through GapAcknowledged /
+	// GapUnacknowledged, never directly.
+	GapAckedAt sql.NullTime
 	// GapColumnsPresent is true when the gap_lost_* columns existed and were read
 	// (the normal, migrated index). It is false only on a legacy index whose
 	// schema predates those columns, read before any migration — there the gap
@@ -527,6 +541,20 @@ func LoadStreamState(ctx context.Context, db *sql.DB) (*StreamStateInfo, error) 
 	// load already proved the DB reachable; any hard error here is logged and ignored,
 	// keeping the already-loaded stream state (including gap_lost) visible rather than
 	// discarding it — that would re-hide the very GAP LOST banner #815 exists to surface.
+	//
+	// gap_acked_at is loaded the same way and for the same reason: folded into
+	// the core SELECT, an index that has gap_lost_* but not yet gap_acked_at
+	// would fall back to the base columns and read as unevaluable, refusing
+	// every reconstruction. Skipped on that base fallback (no loss columns, so
+	// nothing to acknowledge). The direction it fails in is the safe one: an
+	// unreadable acknowledgement leaves the loss UNACKNOWLEDGED, so the alarm
+	// stays up, and the readers that refuse on the loss never consult it.
+	if s.GapColumnsPresent {
+		if err := loadGapAckedAt(ctx, db, s); err != nil {
+			s.GapAckedAt = sql.NullTime{}
+			slog.Warn("could not load gap_acked_at; a recorded capture loss will read as unacknowledged", "error", err)
+		}
+	}
 	if err := loadSourceHealth(ctx, db, s); err != nil {
 		slog.Warn("could not load source_health; keeping stream state without it", "error", err)
 	}
@@ -549,6 +577,48 @@ func LoadStreamState(ctx context.Context, db *sql.DB) (*StreamStateInfo, error) 
 		slog.Warn("could not load the newest schema snapshot time; capture skips will not be dated against it", "error", err)
 	}
 	return s, nil
+}
+
+// GapLossAcknowledged is THE rule for whether a recorded permanent capture loss
+// has been acknowledged: a loss is stamped, an acknowledgement is recorded, and
+// the acknowledgement is not older than the loss. Same second counts as
+// acknowledged (both columns have one-second resolution, and an operator who
+// stops a source in the second it lost events did see the loss); a second loss
+// in that same second is still unacknowledged because every writer that stamps
+// a loss also NULLs the acknowledgement. Exported so the two readers with
+// their own SQL (the console supervisor and the continuity watch) apply the
+// same rule to the same three columns.
+func GapLossAcknowledged(lostAt, ackedAt sql.NullTime) bool {
+	return lostAt.Valid && ackedAt.Valid && !ackedAt.Time.Before(lostAt.Time)
+}
+
+// GapAcknowledged reports whether a loss is on record AND an operator
+// acknowledged it. It says nothing about the data: the events are still gone,
+// and a window spanning GapLostAt is still incomplete.
+func (s *StreamStateInfo) GapAcknowledged() bool {
+	return s != nil && GapLossAcknowledged(s.GapLostAt, s.GapAckedAt)
+}
+
+// GapUnacknowledged reports whether a loss is on record that nobody has
+// acknowledged: the condition every ALARM surface keys on (the continuity
+// verdict, the status banner, --fail-on-gap, the console's lost_position
+// state, the webhook and the Prometheus gauge). Readers that decide whether a
+// window is complete must NOT use it: they read GapLostAt, which an
+// acknowledgement leaves in place.
+func (s *StreamStateInfo) GapUnacknowledged() bool {
+	return s != nil && s.GapLostAt.Valid && !GapLossAcknowledged(s.GapLostAt, s.GapAckedAt)
+}
+
+// loadGapAckedAt augments an already-loaded StreamStateInfo with the
+// gap_acked_at column. Same tolerance contract as loadSourceHealth: only the
+// unknown-column error (an index that has gap_lost_* but predates this column)
+// and an empty row leave GapAckedAt invalid, which reads as unacknowledged.
+func loadGapAckedAt(ctx context.Context, db *sql.DB, s *StreamStateInfo) error {
+	err := db.QueryRowContext(ctx, `SELECT gap_acked_at FROM stream_state WHERE id = 1`).Scan(&s.GapAckedAt)
+	if isUnknownColumnErr(err) || errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 // loadSchemaSnapshotTime augments an already-loaded StreamStateInfo with the
@@ -1032,11 +1102,24 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 		// stopped or behind. "not evaluated" guards a legacy index that never had
 		// the gap_lost_* columns, so a clean verdict is never asserted from
 		// un-evaluated data.
+		// An ACKNOWLEDGED loss reads here as a cleared one used to (that is
+		// what acknowledging means for an alarm), and prints one more line
+		// below: the events are still gone, and the readers that refuse on the
+		// loss still do.
 		switch {
-		case stream.GapLostAt.Valid:
+		case stream.GapUnacknowledged():
 			fmt.Fprintf(w, "  Continuity:      ⚠ GAP LOST at %s\n", stream.GapLostAt.Time.Format(TSFmt))
 		case !stream.GapColumnsPresent:
 			fmt.Fprintln(w, "  Continuity:      not evaluated (legacy index — migrate the schema to enable gap detection)")
+		case stream.GapAcknowledged():
+			// Not "no gaps": the next line says events were lost, and the two
+			// together read as a contradiction. The verdict for scripts
+			// (--fail-on-gap, the JSON status) is the cleared one all the same.
+			fmt.Fprintf(w, "  Continuity:      no gaps since the loss acknowledged below (not a liveness check)\n")
+			fmt.Fprintf(w, "  Acknowledged loss: capture permanently lost events at %s (acknowledged %s).\n",
+				stream.GapLostAt.Time.Format(TSFmt), stream.GapAckedAt.Time.Format(TSFmt))
+			fmt.Fprintln(w, "  Snapshot updates and reconstructions whose window spans that moment are")
+			fmt.Fprintln(w, "  still refused until a full snapshot is taken after it.")
 		default:
 			fmt.Fprintln(w, "  Continuity:      no gaps in the captured range (not a liveness check)")
 		}
@@ -1091,7 +1174,7 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 		// binlog gap, or an invalidated/lost PostgreSQL replication slot — #532). This
 		// is the only way index-only `status` can show a lost stream after the capture
 		// process has exited; the index up to the gap is still valid for recovery.
-		if stream.GapLostAt.Valid {
+		if stream.GapUnacknowledged() {
 			fmt.Fprintln(w, "=== ⚠ EVENTS PERMANENTLY LOST ===")
 			fmt.Fprintf(w, "  Detected:  %s\n", stream.GapLostAt.Time.Format(TSFmt))
 			if stream.GapLostDetail.Valid && stream.GapLostDetail.String != "" {
@@ -1487,6 +1570,16 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		At     string `json:"at"`
 		Detail string `json:"detail,omitempty"`
 	}
+	// jsonGapAcknowledged is a recorded permanent loss an operator has
+	// acknowledged: gap_lost is then omitted and continuity.status reads "ok",
+	// exactly as when an acknowledgement used to erase the record. The loss
+	// itself is not gone: snapshot updates and reconstructions whose window
+	// spans `at` are still refused until a full snapshot is taken after it.
+	type jsonGapAcknowledged struct {
+		At             string `json:"at"`
+		AcknowledgedAt string `json:"acknowledged_at"`
+		Detail         string `json:"detail,omitempty"`
+	}
 	// jsonContinuity is the always-present, machine-readable continuity verdict —
 	// the affirmative counterpart to gap_lost. status is one of:
 	//   "ok"       — no gap in the captured range (NOT a liveness/lag assertion;
@@ -1583,6 +1676,8 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		Continuity     jsonContinuity `json:"continuity"`
 		Freshness      jsonFreshness  `json:"freshness"`
 		GapLost        *jsonGapLost   `json:"gap_lost,omitempty"`
+		// GapAcknowledged replaces GapLost once the loss is acknowledged.
+		GapAcknowledged *jsonGapAcknowledged `json:"gap_acknowledged,omitempty"`
 		// SourceHealth is the raw source_health JSON passed through verbatim (#599):
 		// the console knows its shape (slot wal_status/lag, replica_identity_not_full,
 		// checked_at), this layer does not. Omitted when no daemon has polled.
@@ -1744,8 +1839,15 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 			secs := int64(age.Seconds())
 			jstr.Freshness.NewestEventSecs = &secs
 		}
-		if stream.GapLostAt.Valid {
+		switch {
+		case stream.GapUnacknowledged():
 			jstr.GapLost = &jsonGapLost{At: stream.GapLostAt.Time.Format(TSFmt), Detail: stream.GapLostDetail.String}
+		case stream.GapAcknowledged():
+			jstr.GapAcknowledged = &jsonGapAcknowledged{
+				At:             stream.GapLostAt.Time.Format(TSFmt),
+				AcknowledgedAt: stream.GapAckedAt.Time.Format(TSFmt),
+				Detail:         stream.GapLostDetail.String,
+			}
 		}
 		if stream.SourceHealth.Valid && stream.SourceHealth.String != "" {
 			jstr.SourceHealth = json.RawMessage(stream.SourceHealth.String)

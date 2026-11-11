@@ -222,7 +222,9 @@ func TestClearCheckpoint_RealCheckpointStampsLoss(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT flavor, binlog_position FROM stream_state.*FOR UPDATE").
 		WillReturnRows(sqlmock.NewRows([]string{"flavor", "binlog_position"}).AddRow("postgres", uint64(0x1A2B3C4)))
-	mock.ExpectExec(`UPDATE stream_state SET\s+gap_lost_at\s+= UTC_TIMESTAMP\(\)`).
+	// The stamp withdraws any acknowledgement of an earlier loss in the SAME
+	// statement: the discard is a new loss and must not be born acknowledged.
+	mock.ExpectExec(`UPDATE stream_state SET\s+gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = \?,\s+gap_acked_at\s+= NULL,\s+binlog_file`).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -238,6 +240,60 @@ func TestClearCheckpoint_RealCheckpointStampsLoss(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("a real checkpoint must be stamped as lost while clearing: %v", err)
+	}
+}
+
+// TestClearCheckpoint_IndexWithoutGapAckedAt: reset does not migrate the index,
+// so it can meet a stream_state without gap_acked_at. The stamp must still
+// land (the loss is the part that cannot be skipped): on the unknown-column
+// error, and only on it, the same statement runs without the acknowledgement
+// assignment, inside the same transaction.
+func TestClearCheckpoint_IndexWithoutGapAckedAt(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT flavor, binlog_position FROM stream_state.*FOR UPDATE").
+		WillReturnRows(sqlmock.NewRows([]string{"flavor", "binlog_position"}).AddRow("postgres", uint64(0x1A2B3C4)))
+	mock.ExpectExec(`UPDATE stream_state SET\s+gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = \?,\s+gap_acked_at`).
+		WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'gap_acked_at' in 'field list'"})
+	mock.ExpectExec(`UPDATE stream_state SET\s+gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = \?,\s+binlog_file`).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	res, err := clearCheckpoint(context.Background(), db)
+	if err != nil || res.rows != 1 || res.lossDetail == "" {
+		t.Fatalf("clearCheckpoint = (%+v, %v), want the discard stamped", res, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the loss must be stamped on an index without gap_acked_at: %v", err)
+	}
+}
+
+// TestClearCheckpoint_StampFailureIsNotRetried: any error other than the
+// unknown column fails the reset; nothing is committed un-stamped.
+func TestClearCheckpoint_StampFailureIsNotRetried(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT flavor, binlog_position FROM stream_state.*FOR UPDATE").
+		WillReturnRows(sqlmock.NewRows([]string{"flavor", "binlog_position"}).AddRow("postgres", uint64(7)))
+	mock.ExpectExec(`UPDATE stream_state SET\s+gap_lost_at`).WillReturnError(errors.New("lock wait timeout"))
+	mock.ExpectRollback()
+
+	if _, err := clearCheckpoint(context.Background(), db); err == nil {
+		t.Fatal("a failed stamp must fail the reset")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("a failed stamp must roll back, not retry or commit: %v", err)
 	}
 }
 

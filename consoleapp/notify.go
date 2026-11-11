@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/notify"
@@ -187,7 +189,7 @@ func (n *watchNotifier) Continuity(server, edgeKey string, gapLost bool, detail 
 		if n.edge.Resolve(key) {
 			n.send.Notify(notify.Event{
 				Event: notify.EventContinuityGapLost, Severity: notify.SeverityInfo, Server: server, Resolved: true,
-				Summary: "capture continuity restored (the stream was re-baselined)",
+				Summary: "capture loss acknowledged: this alarm is cleared; snapshot updates and reconstructions whose window spans the loss are still refused until a full snapshot is taken after it",
 			})
 		}
 		return
@@ -598,7 +600,7 @@ type continuityTarget struct {
 }
 
 // startContinuityWatch polls each index's stream_state for a stamped
-// gap_lost_at, publishes the verdict as a Prometheus gauge (#1203), and —
+// gap_lost_at nobody has acknowledged, publishes the verdict as a Prometheus gauge (#1203), and —
 // when a notifier is configured — edge-notifies transitions. Its own loop,
 // deliberately NOT piggybacked on rotation (rotation can be off) or the
 // metrics scraper (it lives in the capture plane). n may be nil: the watch
@@ -737,10 +739,33 @@ func readGapLost(ctx context.Context, dsn string) (gapLost bool, detail string, 
 		return false, "", err
 	}
 	defer db.Close()
-	var lost bool
+	return readGapLostFrom(ctx, db)
+}
+
+// readGapLostFrom is readGapLost on an open connection. gapLost is true for a
+// loss on record that nobody has acknowledged (status.GapLossAcknowledged):
+// this is an alarm reader, and an acknowledged loss reads here as a cleared
+// record used to. The loss itself stays in gap_lost_at for the readers that
+// refuse on it.
+//
+// An index that has gap_lost_* but not gap_acked_at (the capture daemon adds
+// the column when it starts; the console never migrates a registry index)
+// cannot hold an acknowledgement, so the read falls back to the meaning the
+// stamp had before the column existed: lost iff gap_lost_at is set. Only the
+// unknown-column error takes that fallback, and if the fallback fails too
+// (a legacy schema without gap_lost_at either) the error is returned:
+// unknown, never "no gap".
+func readGapLostFrom(ctx context.Context, db *sql.DB) (gapLost bool, detail string, err error) {
+	var lostAt, ackedAt sql.NullTime
 	var d sql.NullString
 	err = db.QueryRowContext(ctx,
-		"SELECT gap_lost_at IS NOT NULL, gap_lost_detail FROM stream_state WHERE id = 1").Scan(&lost, &d)
+		"SELECT gap_lost_at, gap_lost_detail, gap_acked_at FROM stream_state WHERE id = 1").Scan(&lostAt, &d, &ackedAt)
+	var me *mysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1054 {
+		ackedAt = sql.NullTime{}
+		err = db.QueryRowContext(ctx,
+			"SELECT gap_lost_at, gap_lost_detail FROM stream_state WHERE id = 1").Scan(&lostAt, &d)
+	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// Empty stream_state = no capture ran = genuinely no continuity to
@@ -749,5 +774,8 @@ func readGapLost(ctx context.Context, dsn string) (gapLost bool, detail string, 
 	case err != nil:
 		return false, "", err
 	}
-	return lost, d.String, nil
+	if !lostAt.Valid || status.GapLossAcknowledged(lostAt, ackedAt) {
+		return false, "", nil
+	}
+	return true, d.String, nil
 }

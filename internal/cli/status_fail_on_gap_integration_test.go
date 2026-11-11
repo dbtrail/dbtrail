@@ -112,6 +112,30 @@ func TestRunStatus_failOnGap_exitCode(t *testing.T) {
 	}
 	stFormat = "text"
 
+	// The same gap, ACKNOWLEDGED (what stopping the server in the console
+	// writes): --fail-on-gap passes, the loud verdict is gone, and the report
+	// says the loss is still on record and still refused where it matters.
+	if _, err := db.ExecContext(ctx,
+		"UPDATE stream_state SET gap_acked_at = UTC_TIMESTAMP() WHERE id = 1 AND gap_lost_at IS NOT NULL"); err != nil {
+		t.Fatalf("acknowledge gap: %v", err)
+	}
+	stFailOnGap = true
+	ackOut := captureStdout(t, func() {
+		if err := runStatus(statusCmd, nil); err != nil {
+			t.Errorf("an acknowledged gap must not fail --fail-on-gap, got: %v", err)
+		}
+	})
+	if strings.Contains(ackOut, "GAP LOST") || strings.Contains(ackOut, "EVENTS PERMANENTLY LOST") {
+		t.Errorf("an acknowledged gap must not print the alarm:\n%s", ackOut)
+	}
+	if !strings.Contains(ackOut, "Acknowledged loss:") || !strings.Contains(ackOut, "still refused until a full snapshot is taken after it") {
+		t.Errorf("an acknowledged gap must print the acknowledged-loss line:\n%s", ackOut)
+	}
+	var lostSet bool
+	if err := db.QueryRowContext(ctx, "SELECT gap_lost_at IS NOT NULL FROM stream_state WHERE id = 1").Scan(&lostSet); err != nil || !lostSet {
+		t.Errorf("the loss record must survive the acknowledgement: set=%v err=%v", lostSet, err)
+	}
+
 	// Healthy stream + --fail-on-gap ON → exit 0 (no false alarm).
 	if _, err := db.ExecContext(ctx,
 		"UPDATE stream_state SET gap_lost_at=NULL, gap_lost_detail=NULL WHERE id=1"); err != nil {
@@ -141,8 +165,11 @@ func TestRunStatus_failOnGap_exitCode(t *testing.T) {
 
 	// Drops AND a stamped gap: the gap error wins (its remediation —
 	// re-baseline — subsumes the drop one).
+	// The stamp withdraws the earlier acknowledgement, as every writer of a
+	// loss does: without that, a loss stamped in the same second as the
+	// acknowledgement above would read as acknowledged.
 	if _, err := db.ExecContext(ctx,
-		`UPDATE stream_state SET gap_lost_at=UTC_TIMESTAMP(), gap_lost_detail='unfillable binlog gap' WHERE id=1`); err != nil {
+		`UPDATE stream_state SET gap_lost_at=UTC_TIMESTAMP(), gap_lost_detail='unfillable binlog gap', gap_acked_at=NULL WHERE id=1`); err != nil {
 		t.Fatalf("re-stamp gap: %v", err)
 	}
 	captureStdout(t, func() {

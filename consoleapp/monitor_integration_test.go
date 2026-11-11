@@ -14,6 +14,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgstreamrun"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -602,8 +604,9 @@ func TestIntegrationDDLThenImmediateInserts(t *testing.T) {
 // TestIntegrationLostPositionDurable verifies the #402 lost-position cycle
 // end to end: a recorded gap loss survives a supervisor restart (re-hydrated
 // from stream_state at Start), is presented as the derived "lost_position"
-// state, and is cleared only by an explicit Stop — the operator's
-// acknowledgment. The gap record itself is simulated (real binlog purging is
+// state, and is silenced only by an explicit Stop — the operator's
+// acknowledgment, which stamps gap_acked_at and leaves the record in place for
+// the readers that refuse on it. The gap record itself is simulated (real binlog purging is
 // not reproducible on the shared test container); the streamrun.One write path
 // for it is the same UPDATE this test issues.
 func TestIntegrationLostPositionDurable(t *testing.T) {
@@ -685,7 +688,7 @@ func TestIntegrationLostPositionDurable(t *testing.T) {
 	// Simulate what streamrun.One persists on an unfillable-gap auto-advance.
 	const gapDetail = "simulated: binlogs purged past saved position; events lost"
 	if _, err := idxDB.Exec(`UPDATE stream_state
-		SET gap_lost_at = UTC_TIMESTAMP(), gap_lost_detail = ? WHERE id = 1`, gapDetail); err != nil {
+		SET gap_lost_at = UTC_TIMESTAMP(), gap_lost_detail = ?, gap_acked_at = NULL WHERE id = 1`, gapDetail); err != nil {
 		t.Fatal(err)
 	}
 
@@ -699,16 +702,42 @@ func TestIntegrationLostPositionDurable(t *testing.T) {
 		t.Errorf("LastError = %q, want the hydrated gap detail", st.LastError)
 	}
 
-	// Explicit Stop acknowledges: the durable record must be cleared.
+	// Explicit Stop acknowledges: the alarm is silenced, and the durable record
+	// of the loss STAYS. gap_acked_at is stamped beside it.
 	if err := sup.Stop(ctx, entry.ID); err != nil {
 		t.Fatalf("Stop (ack): %v", err)
 	}
-	var at, detail sql.NullString
-	if err := idxDB.QueryRow("SELECT gap_lost_at, gap_lost_detail FROM stream_state WHERE id = 1").Scan(&at, &detail); err != nil {
+	var at, detail, acked sql.NullString
+	if err := idxDB.QueryRow("SELECT gap_lost_at, gap_lost_detail, gap_acked_at FROM stream_state WHERE id = 1").Scan(&at, &detail, &acked); err != nil {
 		t.Fatal(err)
 	}
-	if at.Valid || detail.Valid {
-		t.Errorf("gap record not cleared on explicit Stop: at=%v detail=%v", at, detail)
+	if !at.Valid || detail.String != gapDetail {
+		t.Fatalf("an explicit Stop must NOT erase the loss record: at=%v detail=%v", at, detail)
+	}
+	if !acked.Valid {
+		t.Fatalf("an explicit Stop must stamp gap_acked_at: %v", acked)
+	}
+	// The readers that decide whether a window is complete still see it: this
+	// is the defect the acknowledgement column exists to close.
+	typed, err := config.Connect(derived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer typed.Close()
+	ss, err := status.LoadStreamState(ctx, typed)
+	if err != nil || ss == nil {
+		t.Fatalf("LoadStreamState = (%v, %v)", ss, err)
+	}
+	if !ss.GapAcknowledged() || ss.GapUnacknowledged() || !ss.GapLostAt.Valid {
+		t.Errorf("after Stop: acknowledged=%v unacknowledged=%v lost=%v, want an acknowledged loss still on record",
+			ss.GapAcknowledged(), ss.GapUnacknowledged(), ss.GapLostAt)
+	}
+	gap, err := reconstruct.CaptureGapStatus(ctx, typed, ss.GapLostAt.Time.Add(-time.Hour), ss.GapLostAt.Time.Add(time.Hour))
+	if err != nil || gap == nil || gap.Unevaluable {
+		t.Errorf("an acknowledged loss inside the window must still be a capture gap: gap=%+v err=%v", gap, err)
+	}
+	if gap, err := reconstruct.CaptureGapStatus(ctx, typed, ss.GapLostAt.Time.Add(time.Second), ss.GapLostAt.Time.Add(time.Hour)); err != nil || gap != nil {
+		t.Errorf("a window that starts after the loss (a full snapshot taken after it) must be clean: gap=%+v err=%v", gap, err)
 	}
 
 	// Run 3: a fresh start after acknowledgment is plain running again.
@@ -718,6 +747,35 @@ func TestIntegrationLostPositionDurable(t *testing.T) {
 	waitState("running", 30*time.Second)
 	if st := sup.Status(entry.ID); st.State != "running" || st.LastError != "" {
 		t.Errorf("post-ack status = %+v, want clean running", st)
+	}
+
+	// Acknowledging twice changes nothing: stop again (the loss is still on
+	// record, still acknowledged), start again, still plain running.
+	if err := sup.Stop(ctx, entry.ID); err != nil {
+		t.Fatalf("Stop (second ack): %v", err)
+	}
+	if err := sup.Start(ctx, entry); err != nil {
+		t.Fatalf("Start (run 4): %v", err)
+	}
+	waitState("running", 30*time.Second)
+	if err := sup.Stop(ctx, entry.ID); err != nil {
+		t.Fatalf("Stop (before the second loss): %v", err)
+	}
+
+	// A SECOND loss, stamped the way every writer stamps one: the stamp NULLs
+	// the earlier acknowledgement in the same statement, so the alarm returns
+	// even if both land in the same second.
+	const secondDetail = "simulated: a second purge after the acknowledgement"
+	if _, err := idxDB.Exec(`UPDATE stream_state
+		SET gap_lost_at = UTC_TIMESTAMP(), gap_lost_detail = ?, gap_acked_at = NULL WHERE id = 1`, secondDetail); err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.Start(ctx, entry); err != nil {
+		t.Fatalf("Start (run 5): %v", err)
+	}
+	waitState("lost_position", 30*time.Second)
+	if st := sup.Status(entry.ID); st.LastError != secondDetail {
+		t.Errorf("LastError = %q, want the second loss's detail", st.LastError)
 	}
 }
 

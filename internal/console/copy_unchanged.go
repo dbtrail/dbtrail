@@ -431,7 +431,8 @@ func newestEventOlderThan(ctx context.Context, db *sql.DB, floor time.Time) (at 
 
 // captureLossSince says why the capture's own record rules out vouching for
 // tables last read from the source at sourceRead, or "": a loss on record at
-// or after it, or a record that cannot be read. The rule is the snapshot
+// or after it (acknowledged by an operator or not: GapLostAt outlives the
+// acknowledgement), or a record that cannot be read. The rule is the snapshot
 // schedule's (consoleapp.captureComparable): a dropped event is dated against
 // the last read of the SOURCE, because a refresh is built from the index and
 // never brings one back.

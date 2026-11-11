@@ -377,6 +377,7 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		binlog_file_identity VARCHAR(64) DEFAULT NULL,
 		gap_lost_at      DATETIME        DEFAULT NULL,
 		gap_lost_detail  TEXT            DEFAULT NULL,
+		gap_acked_at     DATETIME        DEFAULT NULL,
 		source_health    JSON            DEFAULT NULL,
 		capture_skips    JSON            DEFAULT NULL,
 		capture_skips_ack JSON           DEFAULT NULL,

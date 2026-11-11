@@ -90,3 +90,55 @@ func TestLoadStreamState_SourceHealth(t *testing.T) {
 		t.Errorf("a legacy index has no source_health; want invalid, got %+v", st)
 	}
 }
+
+// TestLoadStreamState_GapAckedAt pins the acknowledgement read path against a
+// real index: a loss on record with gap_acked_at set reads as acknowledged
+// (and stays loaded); a second loss stamped the way the writers stamp it
+// (gap_acked_at = NULL in the same statement) is unacknowledged again; and an
+// index that has gap_lost_* but not yet gap_acked_at still loads as EVALUABLE
+// and unacknowledged, instead of falling back to the base columns.
+func TestLoadStreamState_GapAckedAt(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx := context.Background()
+	db, _ := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(ctx, db, 4, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, server_id, last_checkpoint, gap_lost_at, gap_lost_detail)
+		VALUES (1, 'gtid', 7, UTC_TIMESTAMP(), UTC_TIMESTAMP(), 'purged')`)
+	load := func() *status.StreamStateInfo {
+		t.Helper()
+		st, err := status.LoadStreamState(ctx, db)
+		if err != nil || st == nil {
+			t.Fatalf("LoadStreamState = (%v, %v)", st, err)
+		}
+		return st
+	}
+
+	if st := load(); !st.GapUnacknowledged() || st.GapAcknowledged() {
+		t.Errorf("a fresh loss must be unacknowledged: %+v", st)
+	}
+	// No-op acknowledgement on a row with a loss, in the same second.
+	testutil.MustExec(t, db, `UPDATE stream_state SET gap_acked_at = UTC_TIMESTAMP() WHERE id = 1 AND gap_lost_at IS NOT NULL`)
+	if st := load(); !st.GapAcknowledged() || st.GapUnacknowledged() || !st.GapLostAt.Valid || !st.GapColumnsPresent {
+		t.Errorf("an acknowledged loss must stay on record and read as acknowledged: %+v", st)
+	}
+	if got := status.ContinuityStatus(load(), nil); got != status.ContinuityOK {
+		t.Errorf("continuity after the acknowledgement = %q, want ok", got)
+	}
+	// A second loss in the same second as the acknowledgement.
+	testutil.MustExec(t, db, `UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP(), gap_lost_detail = 'second', gap_acked_at = NULL WHERE id = 1`)
+	if st := load(); !st.GapUnacknowledged() {
+		t.Errorf("a loss stamped after an acknowledgement must be unacknowledged: %+v", st)
+	}
+
+	// An index with the loss record and no acknowledgement column.
+	testutil.MustExec(t, db, `ALTER TABLE stream_state DROP COLUMN gap_acked_at`)
+	st := load()
+	if !st.GapColumnsPresent {
+		t.Error("a missing gap_acked_at must not make the gap state unevaluable")
+	}
+	if !st.GapLostAt.Valid || !st.GapUnacknowledged() {
+		t.Errorf("want the loss loaded and unacknowledged, got %+v", st)
+	}
+}

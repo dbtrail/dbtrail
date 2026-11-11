@@ -339,8 +339,8 @@ Under the hood it is the two-system teardown that otherwise has to be done by ha
 position/counter columns of the `stream_state` row on the index — the row is
 never DELETEd, so a recorded `gap_lost_at`/`gap_lost_detail` continuity-loss
 record is never erased by a reset; a real-checkpoint reset replaces the
-record's detail with the reset's own, a no-checkpoint reset preserves it
-verbatim).
+record's detail with the reset's own and withdraws any acknowledgement of the
+earlier loss, a no-checkpoint reset preserves it verbatim).
 
 **A reset that discards a real checkpoint is itself recorded as a permanent
 continuity loss**: dropping and recreating the slot skips whatever the old slot

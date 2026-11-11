@@ -800,12 +800,22 @@ func EnsureSchema(db *sql.DB) error {
 	// the only trace of the permanently lost events would be an in-memory
 	// flag that a daemon restart silently discards.
 	if err := ensureColumn(db, "stream_state", "gap_lost_at",
-		`ALTER TABLE stream_state ADD COLUMN gap_lost_at DATETIME DEFAULT NULL COMMENT 'when an unfillable binlog gap forced an auto-advance (events permanently lost); cleared only by an explicit monitor Stop; --reset re-stamps or preserves it' AFTER bintrail_id`,
+		`ALTER TABLE stream_state ADD COLUMN gap_lost_at DATETIME DEFAULT NULL COMMENT 'when capture permanently lost events (an unfillable binlog gap forced an auto-advance, or a replication slot was lost); never cleared: an operator acknowledges it in gap_acked_at; --reset re-stamps or preserves it' AFTER bintrail_id`,
 	); err != nil {
 		return err
 	}
 	if err := ensureColumn(db, "stream_state", "gap_lost_detail",
 		`ALTER TABLE stream_state ADD COLUMN gap_lost_detail TEXT DEFAULT NULL COMMENT 'human-readable description of the lost gap' AFTER gap_lost_at`,
+	); err != nil {
+		return err
+	}
+	// gap_acked_at records an operator's acknowledgement of the loss above. It
+	// exists so the acknowledgement does not have to erase the loss: the alarm
+	// surfaces read "unacknowledged", while snapshot updates, reconstruct and
+	// verify keep reading gap_lost_at and keep refusing a window that spans it.
+	// Every statement that stamps gap_lost_at sets this back to NULL.
+	if err := ensureColumn(db, "stream_state", "gap_acked_at",
+		`ALTER TABLE stream_state ADD COLUMN gap_acked_at DATETIME DEFAULT NULL COMMENT 'when an operator acknowledged the loss in gap_lost_at (stopping the source in the console); silences the alarm only: gap_lost_at stays and still refuses a snapshot update or reconstruction whose window spans it; every loss stamp sets this back to NULL; acknowledged iff gap_acked_at >= gap_lost_at' AFTER gap_lost_detail`,
 	); err != nil {
 		return err
 	}

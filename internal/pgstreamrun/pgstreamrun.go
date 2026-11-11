@@ -244,6 +244,12 @@ func One(ctx context.Context, cfg Config) error {
 // (mode/flavor/server_id/last_checkpoint are NOT NULL); ON DUPLICATE KEY preserves an
 // existing checkpoint and only stamps the loss (it does not touch last_checkpoint or
 // the position columns — saveCheckpointPG owns those, so a real checkpoint survives).
+// The stamp also sets gap_acked_at = NULL: a new loss is never born acknowledged, even
+// in the same second as the acknowledgement of an earlier one. (The supervisor re-runs
+// One after a lost slot, so the same loss is re-stamped on every retry and an operator's
+// acknowledgement of it lasts only while the source stays stopped; that is the honest
+// reading of a capture that cannot resume. One migrates the schema before this runs, so
+// the column exists.)
 //
 // Best-effort, layered on an ALREADY-fatal lost-slot error (no checkpoint is advanced —
 // we are aborting): if the stamp fails we log and let the original fatal error
@@ -260,7 +266,8 @@ func persistSlotLostPG(db *sql.DB, serverID uint32, detail string, logger *slog.
 		VALUES (1, 'gtid', ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), ?)
 		ON DUPLICATE KEY UPDATE
 			gap_lost_at     = UTC_TIMESTAMP(),
-			gap_lost_detail = VALUES(gap_lost_detail)`,
+			gap_lost_detail = VALUES(gap_lost_detail),
+			gap_acked_at    = NULL`,
 		pgFlavor, serverID, detail)
 	if err != nil {
 		logger.Error("pgstreamrun: could not persist lost-slot record; `status` will not show the permanent-loss banner",

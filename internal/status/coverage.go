@@ -16,8 +16,11 @@ import (
 // buckets from the same StreamStateInfo fields for their own wording/exit
 // concerns; the wire vocabulary lives here.
 //
-//	"ok"          — no gap in the captured range (NOT a liveness assertion)
-//	"gap_lost"    — an unfillable gap was stamped: events permanently lost
+//	"ok"          — no gap in the captured range (NOT a liveness assertion),
+//	                or a recorded loss an operator acknowledged (the alarm is
+//	                silenced; the loss still refuses the windows it falls in)
+//	"gap_lost"    — an unfillable gap was stamped and not acknowledged:
+//	                events permanently lost
 //	"unknown"     — legacy index without the gap columns; never a false "ok"
 //	"unavailable" — stream_state could not be read; never a false "ok"
 //	"none"        — no stream row (file-mode index): no capture ran, so no
@@ -28,7 +31,7 @@ func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 		return ContinuityUnavailable
 	case stream == nil:
 		return ContinuityNone
-	case stream.GapLostAt.Valid:
+	case stream.GapUnacknowledged():
 		return ContinuityGapLost
 	case !stream.GapColumnsPresent:
 		return ContinuityUnknown

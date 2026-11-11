@@ -446,7 +446,8 @@ var _ tailSource = (*indexTailSource)(nil)
 // to compare a watermark with the source: a tail compares nothing with the
 // source, so a capture in position mode has one too. A loss on record since
 // the table's rows were last read from the source, or a record that cannot
-// be read, still refuses.
+// be read, still refuses. So does a loss an operator acknowledged: the
+// acknowledgement is beside the record (GapAckedAt), not in place of it.
 func tailCaptureLoss(st *status.StreamStateInfo, sourceRead time.Time) string {
 	switch {
 	case st == nil:
