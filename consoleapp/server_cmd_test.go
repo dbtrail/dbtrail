@@ -948,6 +948,32 @@ func TestResolveCtl(t *testing.T) {
 			t.Fatalf("got %+v, %v", c, err)
 		}
 	})
+	// With no home folder the default path is anchored in the working
+	// directory, and an env file can also name a home: both would make the
+	// folder the command is run in the place its access file is looked for.
+	t.Run("a folder cannot stand in for the home folder", func(t *testing.T) {
+		isolate(t)
+		evil := t.TempDir()
+		dir := filepath.Join(evil, ".config", "bintrail")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		write(t, dir, console.LocalAccess{URL: "http://127.0.0.1:9999", Token: "theirs"})
+		t.Chdir(evil)
+		os.Unsetenv("BINTRAIL_CONSOLE_AUTH")
+
+		os.Unsetenv("HOME") // t.Setenv in isolate puts it back
+		if c, err := resolveCtl("", ""); err == nil {
+			t.Fatalf("no home folder: took the working directory's file: %+v", c)
+		}
+		t.Cleanup(cli.ApplyEnvFileForTest("HOME=" + evil + "\n"))
+		if os.Getenv("HOME") != evil {
+			t.Fatal("the env file's HOME was not applied, so nothing below is checked")
+		}
+		if c, err := resolveCtl("", ""); err == nil {
+			t.Fatalf("a home folder named by an env file: took its file: %+v", c)
+		}
+	})
 	t.Run("--access-file is the only place looked", func(t *testing.T) {
 		state := isolate(t)
 		write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "default"})

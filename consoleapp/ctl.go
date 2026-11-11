@@ -80,16 +80,40 @@ func ownEnv(key string) string {
 	return os.Getenv(key)
 }
 
-// localAccessCandidates lists where the daemon's LocalAccess file may be.
+// localAccessCandidates lists where the daemon's LocalAccess file may be:
+// beside the login file the process's own environment names, else beside the
+// default one under the home folder, then where the Linux packages keep it.
+//
+// The home folder counts only when the process was started with one. With
+// none, the default path falls back to the working directory, and an env
+// file can name a home too: either way the folder a command is run in would
+// be where the file is looked for, which is the thing ownEnv exists to stop.
 func localAccessCandidates(explicit string) []string {
 	if explicit != "" {
 		return []string{explicit}
 	}
-	out := []string{console.LocalAccessPath(ownEnv("BINTRAIL_CONSOLE_AUTH"))}
-	if p := packagedStateDir + "/" + console.LocalAccessFileName; p != out[0] {
+	var out []string
+	if auth := ownEnv("BINTRAIL_CONSOLE_AUTH"); auth != "" {
+		out = append(out, console.LocalAccessPath(auth))
+	} else if ownHome() {
+		out = append(out, console.LocalAccessPath(""))
+	}
+	if p := packagedStateDir + "/" + console.LocalAccessFileName; len(out) == 0 || p != out[0] {
 		out = append(out, p)
 	}
 	return out
+}
+
+// ownHome reports whether the home folder is one the process was started
+// with: resolvable, and not named by an env file.
+func ownHome() bool {
+	for _, k := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "home"} {
+		if cli.FromEnvFile(k) {
+			return false
+		}
+	}
+	home, err := os.UserHomeDir()
+	return err == nil && home != ""
 }
 
 // resolveCtl works out which daemon to talk to and with what.
