@@ -150,6 +150,22 @@ func TestResolveAddInput(t *testing.T) {
 		{name: "host and port in one word", flags: addFlags{Host: "db1:3307", User: "u", PasswordStdin: true}, stdin: "pw\n", wantErr: "-P"},
 		{name: "a URL as the host", flags: addFlags{Host: "mysql://db1", User: "u", PasswordStdin: true}, stdin: "pw\n", wantErr: "not a host"},
 		{name: "user@host as the host", flags: addFlags{Host: "root@db1", User: "u", PasswordStdin: true}, stdin: "pw\n", wantErr: "not a host"},
+		{
+			name:  "the option file on stdin",
+			flags: addFlags{DefaultsFile: "-"}, stdin: full,
+			want: addInput{Host: "cnfhost", Port: "3310", User: "cnfuser", Password: "cnfpass"},
+		},
+		{
+			name:  "the option file on stdin, the command line still wins",
+			flags: addFlags{DefaultsFile: "-", Host: "flaghost"}, stdin: full,
+			want: addInput{Host: "flaghost", Port: "3310", User: "cnfuser", Password: "cnfpass"},
+		},
+		// Stdin is spent on the file: nothing may be asked for, even on a terminal.
+		{name: "option file on stdin with no password never asks", flags: addFlags{DefaultsFile: "-"}, ask: fakeAsker{tty: true}, stdin: "[client]\nhost=h\nuser=u\n", wantErr: "add a password line"},
+		{name: "option file on stdin with no host never asks", flags: addFlags{DefaultsFile: "-"}, ask: fakeAsker{tty: true}, stdin: "[client]\nuser=u\npassword=p\n", wantErr: "-h"},
+		{name: "option file on stdin and -p", flags: addFlags{DefaultsFile: "-", AskPassword: true}, ask: fakeAsker{tty: true}, stdin: full, wantErr: "add a password line"},
+		{name: "option file on stdin and --password-stdin", flags: addFlags{DefaultsFile: "-", PasswordStdin: true}, stdin: full, wantErr: "both read stdin"},
+		{name: "empty stdin as the option file", flags: addFlags{DefaultsFile: "-"}, stdin: "", wantErr: "-h"},
 		{name: "no host, not a terminal", flags: addFlags{User: "u"}, wantErr: "-h"},
 		{name: "no user, not a terminal", flags: addFlags{Host: "db1"}, wantErr: "-u"},
 		{name: "no password, not a terminal", flags: addFlags{Host: "db1", User: "u"}, wantErr: "--password-stdin"},
@@ -170,7 +186,7 @@ func TestResolveAddInput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := c.flags
-			if c.cnf != "" {
+			if c.cnf != "" && f.DefaultsFile == "" {
 				f.DefaultsFile = writeCnf(t, c.cnf)
 			}
 			ask := c.ask
@@ -915,7 +931,7 @@ func TestResolveCtl(t *testing.T) {
 		state := isolate(t)
 		_, err := resolveCtl("", "")
 		if err == nil || !strings.Contains(err.Error(), filepath.Join(state, console.LocalAccessFileName)) ||
-			!strings.Contains(err.Error(), "docker compose exec") {
+			!strings.Contains(err.Error(), "./dbtrail ") {
 			t.Fatalf("err = %v", err)
 		}
 	})

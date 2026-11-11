@@ -466,16 +466,32 @@ already running, over the API the web interface uses, so a server added here
 goes through the same checks and is saved in the same place.
 
 ```
-bintrail-console server add -h db1.example.com -P 3306 -u dbtrail -p
-bintrail-console server list
-bintrail-console server remove shop
+dbtrail server add -h db1.example.com -P 3306 -u dbtrail -p
+dbtrail server list
+dbtrail server remove shop
 ```
 
-With Docker Compose, run them inside the container:
+`dbtrail` is the program the service runs, `bintrail-console`, under the name
+people type. Both names take the same commands, and each says its own name in
+its help and in the commands it suggests.
 
-```
-docker compose exec bintrail bintrail-console server add -h host.docker.internal -u dbtrail -p
-```
+- **Linux packages:** `dbtrail` is in `/usr/bin`. It reads a file only the
+  service's account can read, so run it with `sudo`.
+- **Docker Compose:** the installer leaves `dbtrail` beside
+  `docker-compose.yml`. It runs the command inside the container, and sends a
+  `--defaults-file` of this machine along with it. Run it as `./dbtrail` from
+  that folder, or link it once to type `dbtrail` anywhere:
+
+  ```
+  sudo ln -s "$PWD/dbtrail" /usr/local/bin/dbtrail
+  ```
+
+  An install made before this command existed gets it with one download,
+  from the folder of `docker-compose.yml`:
+
+  ```
+  curl -fsSL -o dbtrail https://raw.githubusercontent.com/dbtrail/dbtrail/main/dbtrail.sh && chmod +x dbtrail
+  ```
 
 **`server add`** takes the mysql client's options. On a terminal, what you
 leave out is asked for.
@@ -487,7 +503,7 @@ leave out is asked for.
 | `-u`, `--user` | The user DBTrail logs in as |
 | `-p`, `--password` | Ask for the password. It takes no value: a password on the command line stays in the shell history and in `ps` |
 | `--password-stdin` | Read the password from the first line of stdin, for scripts |
-| `--defaults-file` | Read host, port, user and password from a MySQL option file |
+| `--defaults-file` | Read host, port, user and password from a MySQL option file. `-` reads it from standard input |
 | `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
 | `--schemas` | Comma-separated schemas to record (default: every user schema) |
 | `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
@@ -538,9 +554,9 @@ was already recorded and copied is kept.
 reach a query answered on port 3309, with no web interface:
 
 ```
-bintrail-console snapshot run shop                   # read every table once, and wait
-bintrail-console snapshot schedule shop --every 1h   # keep the copy current
-bintrail-console port on                             # turn the MySQL port on
+dbtrail snapshot run shop                   # read every table once, and wait
+dbtrail snapshot schedule shop --every 1h   # keep the copy current
+dbtrail port on                             # turn the MySQL port on
 mysql -h 127.0.0.1 -P 3309 -u shop -p
 ```
 

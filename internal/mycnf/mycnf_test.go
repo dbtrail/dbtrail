@@ -197,3 +197,22 @@ func TestLoad(t *testing.T) {
 		t.Fatal("a directory must be an error")
 	}
 }
+
+func TestRead(t *testing.T) {
+	got, err := Read(strings.NewReader("[client]\nuser=u\npassword=p\n"), "on stdin", "client")
+	if err != nil || got.User != "u" || got.Password != "p" {
+		t.Fatalf("Read = %+v, %v", got, err)
+	}
+	if _, err := Read(strings.NewReader("[client\n"), "on stdin", "client"); err == nil || !strings.Contains(err.Error(), "on stdin") {
+		t.Fatalf("a broken stream must be an error naming it, got %v", err)
+	}
+	// Exactly at the bound is read; one byte over is refused, not cut: a cut
+	// file would lose whatever group came last, without a word.
+	pad := strings.Repeat("#", maxOptionFile-len("[client]\nuser=u\n")-1) + "\n"
+	if got, err := Read(strings.NewReader(pad+"[client]\nuser=u\n"), "x", "client"); err != nil || got.User != "u" {
+		t.Fatalf("at the bound: %+v, %v", got, err)
+	}
+	if _, err := Read(strings.NewReader("#"+pad+"[client]\nuser=u\n"), "x", "client"); err == nil {
+		t.Fatal("one byte over the bound was read")
+	}
+}

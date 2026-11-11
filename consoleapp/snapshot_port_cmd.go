@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -72,7 +71,7 @@ on, and "snapshot status" says how it ended. --no-wait starts it and returns.`,
 			if err != nil {
 				return err
 			}
-			return runSnapshotRun(cmd.Context(), c, args[0], !snapNoWait, os.Stdout)
+			return runSnapshotRun(cmd.Context(), c, args[0], !snapNoWait, cmdOut())
 		},
 	}
 	run.Flags().BoolVar(&snapNoWait, "no-wait", false, "Start the read and return without waiting for it")
@@ -86,7 +85,7 @@ on, and "snapshot status" says how it ended. --no-wait starts it and returns.`,
 			if err != nil {
 				return err
 			}
-			return runSnapshotStatus(cmd.Context(), c, args[0], os.Stdout)
+			return runSnapshotStatus(cmd.Context(), c, args[0], cmdOut())
 		},
 	}
 
@@ -104,7 +103,7 @@ recorded, without reading the database again. --off stops the updates.`,
 			if err != nil {
 				return err
 			}
-			return runSnapshotSchedule(cmd.Context(), c, args[0], snapEvery, os.Stdout)
+			return runSnapshotSchedule(cmd.Context(), c, args[0], snapEvery, cmdOut())
 		},
 	}
 	schedule.Flags().StringVar(&snapEvery, "every", "", "How often to update the copy: 30m, 1h, 6h, 1d...")
@@ -122,7 +121,7 @@ recorded, without reading the database again. --off stops the updates.`,
 				if err != nil {
 					return err
 				}
-				return run(cmd.Context(), c, os.Stdout)
+				return run(cmd.Context(), c, cmdOut())
 			},
 		}
 	}
@@ -136,7 +135,7 @@ recorded, without reading the database again. --off stops the updates.`,
 			if err != nil {
 				return err
 			}
-			return runPortRouting(cmd.Context(), c, args[0] == "on", os.Stdout)
+			return runPortRouting(cmd.Context(), c, args[0] == "on", cmdOut())
 		},
 	}
 	addCtlFlags(portCmd, &srvURL, &srvAccessFile)

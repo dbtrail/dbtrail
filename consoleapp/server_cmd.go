@@ -39,9 +39,10 @@ web interface's "+ Add server" does: the same checks, the same result.
   bintrail-console server list
   bintrail-console server remove shop
 
-With Docker, run them inside the container:
+With Docker Compose, the installer leaves a dbtrail command beside
+docker-compose.yml that runs these inside the container:
 
-  docker compose exec bintrail bintrail-console server add -h host.docker.internal -u dbtrail -p`,
+  ./dbtrail server add -h host.docker.internal -u dbtrail -p`,
 }
 
 var (
@@ -123,10 +124,14 @@ the last line is these two instead:
 			return err
 		}
 		if in.IncludesSkipped > 0 {
+			file := srvAdd.DefaultsFile
+			if file == "-" {
+				file = "the option file"
+			}
 			fmt.Fprintf(os.Stderr, "note: %s has %s, which DBTrail does not follow. Only that file was read.\n",
-				srvAdd.DefaultsFile, plural(in.IncludesSkipped, "!include line"))
+				file, plural(in.IncludesSkipped, "!include line"))
 		}
-		return runServerAdd(cmd.Context(), c, in, srvVerbose, os.Stdout)
+		return runServerAdd(cmd.Context(), c, in, srvVerbose, cmdOut())
 	},
 }
 
@@ -143,7 +148,7 @@ var serverListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return runServerList(cmd.Context(), c, srvFormat, os.Stdout)
+		return runServerList(cmd.Context(), c, srvFormat, cmdOut())
 	},
 }
 
@@ -161,7 +166,7 @@ Asks before doing it; --yes does not ask.`,
 		if err != nil {
 			return err
 		}
-		return runServerRemove(cmd.Context(), c, args[0], srvYes, newTerminalAsker(), os.Stdout)
+		return runServerRemove(cmd.Context(), c, args[0], srvYes, newTerminalAsker(), cmdOut())
 	},
 }
 
@@ -177,7 +182,7 @@ func init() {
 	f.StringVarP(&srvAdd.User, "user", "u", "", "User DBTrail logs in as")
 	f.BoolVarP(&srvAdd.AskPassword, "password", "p", false, "Ask for the password (it is never taken on the command line)")
 	f.BoolVar(&srvAdd.PasswordStdin, "password-stdin", false, "Read the password from the first line of stdin (for scripts)")
-	f.StringVar(&srvAdd.DefaultsFile, "defaults-file", "", "Read host, port, user and password from this MySQL option file: [client], then [dbtrail]")
+	f.StringVar(&srvAdd.DefaultsFile, "defaults-file", "", "Read host, port, user and password from this MySQL option file: [client], then [dbtrail]. - reads it from stdin")
 	f.StringVar(&srvAdd.Name, "name", "", "What to call the server (default: made from its address). It is the user name on DBTrail's MySQL port")
 	f.StringVar(&srvAdd.Schemas, "schemas", "", "Comma-separated schemas to record (default: every user schema)")
 	f.StringVar(&srvAdd.Flavor, "flavor", "", "mysql or mariadb (default: asked of the server)")
@@ -267,8 +272,21 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 		return addInput{}, errors.New("-p and --password-stdin both say where the password comes from: use one")
 	}
 
+	// "-" is the option file on stdin, for a caller whose file is not on the
+	// disk this program sees (the dbtrail command of a Docker install runs it
+	// in a container). Stdin is then spent: nothing can be asked for.
+	fileOnStdin := f.DefaultsFile == "-"
+	if fileOnStdin && f.PasswordStdin {
+		return addInput{}, errors.New("--defaults-file - and --password-stdin both read stdin: put the password in the option file")
+	}
 	if f.DefaultsFile != "" {
-		cnf, err := mycnf.Load(f.DefaultsFile, "client", "dbtrail")
+		var cnf mycnf.Client
+		var err error
+		if fileOnStdin {
+			cnf, err = mycnf.Read(stdin, "on stdin", "client", "dbtrail")
+		} else {
+			cnf, err = mycnf.Load(f.DefaultsFile, "client", "dbtrail")
+		}
 		if err != nil {
 			return addInput{}, err
 		}
@@ -291,7 +309,7 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 		}
 	}
 
-	interactive := ask.Interactive() && !f.PasswordStdin
+	interactive := ask.Interactive() && !f.PasswordStdin && !fileOnStdin
 	var err error
 	if in.Host == "" {
 		if !interactive {
@@ -340,6 +358,9 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 		}
 		in.Password = strings.TrimRight(line, "\r\n")
 	case in.Password == "":
+		if fileOnStdin {
+			return addInput{}, errors.New("the option file has no password. It was read from stdin, so the password cannot be asked for: add a password line to it")
+		}
 		if !ask.Interactive() {
 			return addInput{}, errors.New("no password: this is not a terminal, so it cannot be asked for. Use --password-stdin or --defaults-file")
 		}

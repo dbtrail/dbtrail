@@ -28,7 +28,22 @@ func TestPackaging_everyFileTheReleaseConfigNamesExists(t *testing.T) {
 	re := regexp.MustCompile(`(?m)^\s+(?:- src|preinstall|postinstall|preremove|postremove):\s+(\S+)\s*$`)
 	found := re.FindAllStringSubmatch(cfg, -1)
 	var scripts int
+	// A link's src is where it points on the installed machine, not a file
+	// of this tree. It is checked as that: it must point at a program this
+	// same config installs, or the package ships a link to nothing.
+	links := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^\s+- src:\s+(/\S+)\n\s+dst:\s+(/\S+)\n\s+type:\s+symlink\s*$`).FindAllStringSubmatch(cfg, -1) {
+		links[m[1]] = true
+		bindir, name := filepath.Dir(m[1]), filepath.Base(m[1])
+		if !regexp.MustCompile(`(?m)^\s+bindir:\s+`+regexp.QuoteMeta(bindir)+`\s*$`).MatchString(cfg) ||
+			!regexp.MustCompile(`(?m)^\s+binary:\s+`+regexp.QuoteMeta(name)+`\s*$`).MatchString(cfg) {
+			t.Errorf("build/.goreleaser.yaml links %s to %s, and no package here installs a program there", m[2], m[1])
+		}
+	}
 	for _, m := range found {
+		if links[m[1]] {
+			continue
+		}
 		if _, err := os.Stat(filepath.Join("../..", m[1])); err != nil {
 			t.Errorf("build/.goreleaser.yaml names %s: %v", m[1], err)
 		}
@@ -467,6 +482,27 @@ func TestPackaging_preremoveStopsTheRouterOnARemoval(t *testing.T) {
 		// install after this removal must start it again.
 		if !regexp.MustCompile(`(?m)^rm -f \S*router-started`).MatchString(calls) {
 			t.Errorf("preremove %s must remove the started-once marker, got:\n%s", arg, calls)
+		}
+	}
+}
+
+// `dbtrail` is the name people type. The package and both images must carry
+// it as a link to the one program, or the commands the program suggests
+// ("dbtrail snapshot run shop") name something that is not installed.
+func TestPackaging_dbtrailIsInstalledBesideTheProgram(t *testing.T) {
+	cfg := read(t, "../../build/.goreleaser.yaml")
+	if !regexp.MustCompile(`(?m)^\s+- src:\s+/usr/bin/bintrail-console\n\s+dst:\s+/usr/bin/dbtrail\n\s+type:\s+symlink\s*$`).MatchString(cfg) {
+		t.Error("the bintrail-console package does not install /usr/bin/dbtrail as a link to /usr/bin/bintrail-console")
+	}
+	for _, f := range []string{"../../build/Dockerfile.bintrail-console", "../../build/Dockerfile.bintrail-console.goreleaser"} {
+		df := read(t, f)
+		// Made as root, then back to the service's account: the base image
+		// already runs as that account, which cannot write to /usr/local/bin.
+		if !regexp.MustCompile(`(?m)^USER root\nRUN ln -s bintrail-console /usr/local/bin/dbtrail\nUSER bintrail\n`).MatchString(df) {
+			t.Errorf("%s does not link /usr/local/bin/dbtrail to bintrail-console as root and return to the bintrail user", f)
+		}
+		if !strings.Contains(df, "/usr/local/bin/bintrail-console") {
+			t.Errorf("%s no longer installs /usr/local/bin/bintrail-console, which the dbtrail link points at", f)
 		}
 	}
 }

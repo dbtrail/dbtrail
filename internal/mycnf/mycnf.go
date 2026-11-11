@@ -10,6 +10,7 @@ package mycnf
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -35,6 +36,27 @@ func Load(path string, groups ...string) (Client, error) {
 	if err != nil {
 		return Client{}, fmt.Errorf("read option file %s: %w", path, err)
 	}
+	return parseNamed(path, data, groups...)
+}
+
+// maxOptionFile bounds an option file read from a stream. A real one is a
+// few hundred bytes.
+const maxOptionFile = 1 << 20
+
+// Read reads an option file from r, for a caller whose file is not on this
+// machine's disk. name is what errors call it.
+func Read(r io.Reader, name string, groups ...string) (Client, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxOptionFile+1))
+	if err != nil {
+		return Client{}, fmt.Errorf("read option file %s: %w", name, err)
+	}
+	if len(data) > maxOptionFile {
+		return Client{}, fmt.Errorf("option file %s is larger than 1 MB: that is not an option file", name)
+	}
+	return parseNamed(name, data, groups...)
+}
+
+func parseNamed(path string, data []byte, groups ...string) (Client, error) {
 	c, err := Parse(data, groups...)
 	if err != nil {
 		return Client{}, fmt.Errorf("option file %s: %w", path, err)

@@ -21,5 +21,9 @@ COPY bintrail-console /usr/local/bin/bintrail-console
 # context via the `dockers.*.extra_files` entries in build/.goreleaser.yaml.
 COPY LICENSE NOTICE build/THIRD-PARTY-NOTICES /usr/share/doc/bintrail-console/
 
+# `dbtrail` is the name people type; bintrail-console is the one the service
+# runs as. One program, two names.
+USER root
+RUN ln -s bintrail-console /usr/local/bin/dbtrail
 USER bintrail
 ENTRYPOINT ["bintrail-console"]

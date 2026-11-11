@@ -174,8 +174,9 @@ func resolveCtl(url, accessFile string) (*ctlClient, error) {
 		return nil, fmt.Errorf(`this command asks the running DBTrail, and found no way to reach it.
 It looked for %s, which DBTrail writes when it starts.
 
-  With Docker, run the command inside the container:
-      docker compose exec bintrail bintrail-console %s
+  With Docker Compose, run it with the dbtrail command beside docker-compose.yml,
+  which runs it inside the container:
+      ./dbtrail %s
   With the Linux packages, check the service is running:
       systemctl status bintrail-console
   Anywhere else, set BINTRAIL_CONSOLE_TOKEN to the token DBTrail was started with,

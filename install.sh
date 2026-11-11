@@ -25,6 +25,9 @@ REF="${DBTRAIL_REF:-main}"
 PORT="${DBTRAIL_PORT:-8090}"
 MPORT="${DBTRAIL_METRICS_PORT:-9090}"
 COMPOSE_URL="https://raw.githubusercontent.com/dbtrail/dbtrail/${REF}/docker-compose.yml"
+# The `dbtrail` command of this install (dbtrail.sh): it runs DBTrail's own
+# command inside the container.
+CLI_URL="https://raw.githubusercontent.com/dbtrail/dbtrail/${REF}/dbtrail.sh"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/healthz"
 CONSOLE_URL="http://127.0.0.1:${PORT}"
 START_PAGE="https://www.dbtrail.com/docs/quickstart/"
@@ -355,6 +358,16 @@ else
   say "${DIM}    Docker did not say how much memory it has, so DBTrail's MySQL keeps the 128 MB memory default (set INDEX_BUFFER_POOL in .env to change it)${RST}"
 fi
 
+# The dbtrail command, beside docker-compose.yml. Fetched on every run: it is
+# ours, holds nothing of the person's, and an older one may not know an option
+# the container has. Without it the install still works, from the browser.
+CLI=""
+if fetch "$CLI_URL" dbtrail.new 2>/dev/null && [ -s dbtrail.new ] && head -n 1 dbtrail.new | grep -q '^#!/bin/sh'; then
+  mv dbtrail.new dbtrail && chmod +x dbtrail && CLI=1
+fi
+rm -f dbtrail.new
+[ -n "$CLI" ] || warn "could not download the dbtrail command; DBTrail works without it, from the browser."
+
 # ── 3. bring it up ──────────────────────────────────────────────────────
 step "Downloading the newest images (the first run can take a minute)"
 # `up -d` starts whatever image this machine already has under the tag, so a
@@ -426,6 +439,14 @@ say "  ${B}4. First copy.${RST} On Snapshots, press Read database now. DBTrail r
 say "     tables once, as Parquet files you open in DuckDB; the start page below"
 say "     shows how to query them."
 say ""
+if [ -n "$CLI" ]; then
+  say "${B}Or from this terminal${RST}, with no browser. The same steps as commands:"
+  say "  ${DIR}/dbtrail server add -h <host> -u dbtrail -p   ${DIM}# connect your MySQL${RST}"
+  say "  ${DIR}/dbtrail snapshot run <name>                  ${DIM}# first copy${RST}"
+  say "  ${DIR}/dbtrail port on                              ${DIM}# the MySQL port${RST}"
+  say "  ${DIR}/dbtrail --help"
+  say ""
+fi
 say "Your change history lives on this machine, in this stack's Docker volumes,"
 say "with your login and your saved servers. Back them up. To keep the history on"
 say "a MySQL server of your own instead, set INDEX_DSN in ${DIR}/.env."
@@ -434,7 +455,11 @@ say "From ${B}${DIR}${RST}:"
 say "  ${COMPOSE} down                 ${DIM}# stop DBTrail; your history stays in the volumes${RST}"
 say "  ${COMPOSE} up -d                ${DIM}# start it again${RST}"
 say "  ${COMPOSE} logs -f bintrail     ${DIM}# see what it is doing${RST}"
-say "  ${COMPOSE} exec -it bintrail bintrail-console user set-password  ${DIM}# reset the login${RST}"
+if [ -n "$CLI" ]; then
+  say "  ./dbtrail user set-password     ${DIM}# reset the login${RST}"
+else
+  say "  ${COMPOSE} exec -it bintrail bintrail-console user set-password  ${DIM}# reset the login${RST}"
+fi
 say "Adding -v to down deletes the volumes, and your history with them."
 say ""
 say "Every step in detail: ${B}${START_PAGE}${RST}"
