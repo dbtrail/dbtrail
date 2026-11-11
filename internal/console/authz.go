@@ -151,6 +151,7 @@ var apiRoutePerms = []routePerm{
 	{"POST", "/api/servers/{}/test", ext.PermServersRead},
 	{"GET", "/api/servers/{}", ext.PermServersRead},
 	{"PUT", "/api/servers/{}", ext.PermServersWrite},
+	{"PATCH", "/api/servers/{}", ext.PermServersWrite},
 	{"DELETE", "/api/servers/{}", ext.PermServersDelete},
 	{"GET", "/api/servers", ext.PermServersRead},
 	{"POST", "/api/servers", ext.PermServersWrite},
@@ -256,6 +257,11 @@ var apiRoutePerms = []routePerm{
 	// What the forwarding account may do on the source (SHOW GRANTS):
 	// shown beside the router's numbers, read on the same tier.
 	{"GET", "/api/servers/{}/route-grants", ext.PermSettingsRead},
+	// The forwarding account alone. The same field is part of
+	// PUT /api/servers/{id}, so it sits on that route's tier: no session
+	// gains or loses the ability to change it.
+	{"PUT", "/api/servers/{}/route", ext.PermServersWrite},
+	{"DELETE", "/api/servers/{}/route", ext.PermServersWrite},
 	// The hidden rules (#2529) are per-server configuration of what the
 	// analytical surfaces show, edited like the server itself.
 	{"GET", "/api/servers/{}/hidden", ext.PermServersRead},

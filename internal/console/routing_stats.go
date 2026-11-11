@@ -43,6 +43,11 @@ type routingStats struct {
 	// session changes to the port's connections (#2127), as the last
 	// connection that asked found it. Cleared when a connection is tracked.
 	sessionUntracked map[string]string
+	// alone is what the copy answered, per server id, on connections that do
+	// not route: with Engine Routing off, or for a server that cannot route.
+	// Kept apart from perServer, whose counts are routing decisions: a
+	// statement with nothing to decide must not show up as one.
+	alone map[string]*routingAnswers
 }
 
 // routingTally is one server's counts.
@@ -82,6 +87,38 @@ type RouteAnswers struct {
 
 func newRoutingStats(now time.Time, shape func(string) string) *routingStats {
 	return &routingStats{since: now, statementsOn: shape != nil, shape: shape, perServer: map[string]*routingTally{}, unavailable: map[string]string{}, accountRefused: map[string]string{}, sessionUntracked: map[string]string{}}
+}
+
+// answeredAlone tallies one statement the copy finished on a connection that
+// does not route. refused says the client got an error for it.
+func (r *routingStats) answeredAlone(serverID string, took time.Duration, refused bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.alone == nil {
+		r.alone = map[string]*routingAnswers{}
+	}
+	a := r.alone[serverID]
+	if a == nil {
+		a = &routingAnswers{}
+		r.alone[serverID] = a
+	}
+	a.count++
+	if refused {
+		a.failed++
+	}
+	a.total += took
+	a.slowest = max(a.slowest, took)
+}
+
+// aloneSnapshot copies the counts of answeredAlone.
+func (r *routingStats) aloneSnapshot() map[string]RouteAnswers {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]RouteAnswers, len(r.alone))
+	for id, a := range r.alone {
+		out[id] = RouteAnswers{Count: a.count, Errors: a.failed, Seconds: a.total.Seconds(), SlowestSeconds: a.slowest.Seconds()}
+	}
+	return out
 }
 
 // record tallies one decision. route is "copy", "mysql" or "refused" (the

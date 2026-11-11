@@ -547,3 +547,41 @@ func TestCheckRollbackOutlivesACancelledRequest(t *testing.T) {
 		t.Error("the rollback's context has no deadline of its own; a stuck index server would hold it forever")
 	}
 }
+
+// A check that is not the Connect screen's (`bintrail-console server add`)
+// says so with no_draft, and the form someone is filling in a browser is
+// neither replaced by it nor thrown away when it succeeds.
+func TestCheckWithNoDraftLeavesTheSavedFormAlone(t *testing.T) {
+	const cliBody = `{"source_host":"other.example.com","source_user":"dbtrail","source_password":"Ab3-xyz","no_draft":true}`
+	mine := ConnectDraft{SourceHost: "typing.example.com", SourcePort: "3306", SourceUser: "half"}
+	for _, fails := range []bool{true, false} {
+		srv, ctrl := newSupervisorServer(t)
+		if fails {
+			ctrl.report = &DoctorReport{Failed: 1, Checks: []DoctorCheck{{Name: "x", Status: "fail"}}}
+		}
+		if err := srv.drafts.Save(mine); err != nil {
+			t.Fatal(err)
+		}
+		rec, body := doServersReq(t, srv, "POST", "/api/servers/check", cliBody)
+		if rec.Code != 200 {
+			t.Fatalf("fails=%v: code=%d body=%s", fails, rec.Code, body)
+		}
+		if got := decodeCheck(t, body); got.OK == fails {
+			t.Fatalf("fails=%v: ok=%v: %s", fails, got.OK, body)
+		}
+		got, ok, err := srv.drafts.Load()
+		if err != nil || !ok || got.SourceHost != mine.SourceHost || got.SourceUser != mine.SourceUser {
+			t.Errorf("fails=%v: the saved form is now %+v (present=%v, err=%v), want it untouched", fails, got, ok, err)
+		}
+	}
+	// And without no_draft it is replaced, as before: the control.
+	srv, ctrl := newSupervisorServer(t)
+	ctrl.report = &DoctorReport{Failed: 1, Checks: []DoctorCheck{{Name: "x", Status: "fail"}}}
+	if err := srv.drafts.Save(mine); err != nil {
+		t.Fatal(err)
+	}
+	doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
+	if got, _, _ := srv.drafts.Load(); got.SourceHost != "db.example.com" {
+		t.Errorf("control: the Connect screen's own check no longer saves its form: %+v", got)
+	}
+}

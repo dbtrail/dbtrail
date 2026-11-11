@@ -26,3 +26,7 @@ const (
 // onPage is the suffix an error carries to say where it is fixed, as in
 // " (Snapshots page)".
 func onPage(name string) string { return " (" + name + " page)" }
+
+// OnPage is onPage for the commands in consoleapp, whose messages name the
+// web interface's pages through the same constants.
+func OnPage(name string) string { return onPage(name) }

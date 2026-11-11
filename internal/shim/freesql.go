@@ -280,6 +280,13 @@ type answerNoter interface {
 	NoteRoute(side string)
 }
 
+// answerCounter is the optional half of a FreeSQL that counts the
+// statements of a connection that does not route: how long the copy took,
+// and whether the client got an error.
+type answerCounter interface {
+	NoteAnswered(took time.Duration, refused bool)
+}
+
 // noteAnswer tells the FreeSQL what answered this connection's statement,
 // if it keeps that.
 func (h *Handler) noteAnswer(side string) {
@@ -1128,12 +1135,16 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// copy's when it is served, a refusal otherwise, including one made
 		// after the copy ran (the row cap, the results held). A routing
 		// connection's answer is the ladder's decision (observeRoute).
+		started := time.Now()
 		defer func() {
 			side := string(RouteCopy)
 			if refused != nil {
 				side = string(RouteRefused)
 			}
 			h.noteAnswer(side)
+			if c, ok := h.freeSQL.(answerCounter); ok {
+				c.NoteAnswered(time.Since(started), refused != nil)
+			}
 		}()
 	}
 	if h.router == nil {

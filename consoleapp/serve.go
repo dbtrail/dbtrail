@@ -267,11 +267,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		BaselineDir:   conBaselineDir,
 		BaselineS3:    conBaselineS3,
 		AuthPath:      conAuthFile,
-		MCPTokenPath:  conMCPTokenFile,
-		TLSCert:       conTLSCert,
-		TLSKey:        conTLSKey,
-		AllowSetup:    conAllowSetup,
-		Version:       appVersion,
+		// Lets `bintrail-console server list` and the like reach this process.
+		LocalAccessPath: console.LocalAccessPath(conAuthFile),
+		MCPTokenPath:    conMCPTokenFile,
+		TLSCert:         conTLSCert,
+		TLSKey:          conTLSKey,
+		AllowSetup:      conAllowSetup,
+		Version:         appVersion,
 		// MonitorCtrl is intentionally left nil: bintrail-console serve is the
 		// read-only standalone console. A write-capable control-plane daemon
 		// wires a supervisor here instead; with nil, /api/capabilities reports

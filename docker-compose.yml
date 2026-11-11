@@ -478,6 +478,10 @@ services:
       # stalls, or when the newest backup is too old to restore from. Slack,
       # PagerDuty and any URL that takes a POST work. Empty = off.
       BINTRAIL_CONSOLE_NOTIFY_WEBHOOK: ${NOTIFY_WEBHOOK:-}
+      # The status log: one line a minute per server of what was recorded
+      # (docker compose logs -f bintrail | grep msg=status). Set
+      # STATUS_LOG_INTERVAL in .env to change how often (30s, 5m), or to off.
+      BINTRAIL_STATUS_LOG_INTERVAL: ${STATUS_LOG_INTERVAL:-}
       # Password login (persists next to the registry). On first run the
       # console serves a "create your password" screen; later visits sign in.
       # There is deliberately NO password env var: docker inspect must never
@@ -663,6 +667,10 @@ services:
       # Memory each statement on the copy may use, and the most rows one
       # returns: the same two settings as `bintrail`, from the same .env.
       BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # The status log: one line a minute per server of the statements the
+      # port saw and who answered them (docker compose logs -f router | grep
+      # msg=status). STATUS_LOG_INTERVAL in .env changes how often, or off.
+      BINTRAIL_STATUS_LOG_INTERVAL: ${STATUS_LOG_INTERVAL:-}
       # The fraction of this machine's memory the router plans with (#2513):
       # the tails it keeps and the statements it runs then come out of that
       # one number. Empty (the default) is the whole machine, as before: half

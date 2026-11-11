@@ -217,6 +217,11 @@ type RouterServerNumbers struct {
 	// Answers is what each side ("copy", "mysql") finished: counts and
 	// times. Absent until a statement finishes.
 	Answers map[string]RouteAnswers `json:"answers,omitempty"`
+	// Unrouted is what the copy finished on connections that do not route
+	// (Engine Routing off, or a server that cannot route): nothing was
+	// decided for them, so they are in none of the counts above. Errors are
+	// the statements the client got an error for. Absent until one finishes.
+	Unrouted *RouteAnswers `json:"unrouted,omitempty"`
 	// Statements is the per-statement table (#2360), present only when
 	// StatementTable is: unlike the rest of this document, its rows name
 	// tables and columns (never a value, which is blanked).
@@ -268,6 +273,16 @@ func (s *Server) RouterNumbers() RouterNumbers {
 				}
 			}
 		}
+		out.Servers[id] = n
+	}
+	// What the copy answered with nothing to route, for servers above and
+	// for those that only ever answered that way.
+	for id, a := range s.routing.aloneSnapshot() {
+		n, ok := out.Servers[id]
+		if !ok {
+			n = RouterServerNumbers{Reasons: map[string]uint64{}}
+		}
+		n.Unrouted = &a
 		out.Servers[id] = n
 	}
 	// A server in fresh mode is listed before its first statement: that it

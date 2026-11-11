@@ -82,6 +82,13 @@ type Config struct {
 	// with no token and no password, a loopback bind (or AllowSetup) enters
 	// first-run setup, and a non-loopback bind is refused.
 	Token string
+	// LocalAccessPath, when set, makes New write a LocalAccess file there: a
+	// token generated for this run plus the address to reach it, for commands
+	// on this machine (see LocalAccess). Empty writes nothing and accepts no
+	// such token. Serve writes it once the port is open and removes it when
+	// it returns. A file that cannot be written is a warning, never a refusal
+	// to start: the web interface does not depend on it.
+	LocalAccessPath string
 	// NoArchive disables Parquet archive auto-discovery on the boot entry.
 	// The caller forces this true when a profile is active (archives do not
 	// enforce RBAC). Registry entries carry their own per-server flag.
@@ -498,10 +505,15 @@ type Server struct {
 	// has no registry.
 	tailCapturesHook func(id string) (func(schema, table string) bool, bool)
 
-	listen     string
-	token      string
-	denyTables []query.SchemaTable
-	redactCols []query.SchemaTableColumn
+	listen string
+	token  string
+	// localToken is the LocalAccess token of this run, accepted by
+	// tokenMiddleware only while localAccessPath, the file it was written to,
+	// is set; both "" when there is none.
+	localToken      string
+	localAccessPath string
+	denyTables      []query.SchemaTable
+	redactCols      []query.SchemaTableColumn
 	// profileActive is true when a profile NAME was supplied (even zero-rule).
 	// buildOptions threads it into query.Options.ProfileActive so query_text is
 	// withheld under every named profile (#699/#838).
@@ -977,6 +989,15 @@ func New(cfg Config) (*Server, error) {
 	// The router reads it again on every registry reading; a switch flipped
 	// in this process applies it when it saves.
 	s.applySQLFresh()
+	if cfg.LocalAccessPath != "" {
+		// Made here, written by Serve once the port is open (publishLocalAccess).
+		tok, err := newLocalToken()
+		if err != nil {
+			slog.Warn("no token could be made for commands on this machine; `bintrail-console server` and the like will need BINTRAIL_CONSOLE_TOKEN", "error", err.Error())
+		} else {
+			s.localToken, s.localAccessPath = tok, cfg.LocalAccessPath
+		}
+	}
 	return s, nil
 }
 
@@ -1099,9 +1120,12 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("DELETE /api/servers/draft", s.handleConnectDraftDelete)
 	api.HandleFunc("GET /api/servers/{id}", s.handleServersGet)
 	api.HandleFunc("PUT /api/servers/{id}", s.handleServersUpdate)
+	api.HandleFunc("PATCH /api/servers/{id}", s.handleServersPatch)
 	api.HandleFunc("DELETE /api/servers/{id}", s.handleServersDelete)
 	api.HandleFunc("POST /api/servers/{id}/test", s.handleServersTest)
 	api.HandleFunc("GET /api/servers/{id}/route-grants", s.handleRouteGrants)
+	api.HandleFunc("PUT /api/servers/{id}/route", s.recordAction("route-user", s.handleRouteUserPut))
+	api.HandleFunc("DELETE /api/servers/{id}/route", s.recordAction("route-user", s.handleRouteUserDelete))
 	api.HandleFunc("GET /api/servers/{id}/hidden", s.handleHiddenGet)
 	api.HandleFunc("PUT /api/servers/{id}/hidden", s.recordAction("hidden-rules", s.handleHiddenPut))
 	api.HandleFunc("PUT /api/servers/{id}/sql-mode", s.recordAction("sql-mode", s.handleSQLModePut))
@@ -1329,6 +1353,8 @@ func (s *Server) httpServer() *http.Server {
 // entry's db belongs to the cmd layer and its deferred Close.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	defer s.cm.CloseAll()
+	s.publishLocalAccess()
+	defer s.withdrawLocalAccess()
 	srv := s.httpServer()
 	if s.series != nil {
 		go s.series.Run(ctx)

@@ -53,6 +53,10 @@ func bearerToken(r *http.Request) string {
 // nothing new is persisted server-side.
 const sessionCookieName = "bintrail_session"
 
+// localCLICtxKey marks a request let in by the LocalAccess token, so the
+// audit trail can say a command on the machine made it (localCLIActor).
+type localCLICtxKey struct{}
+
 // sessionCookieToken returns the session cookie's value, or "" when absent.
 func sessionCookieToken(r *http.Request) string {
 	c, err := r.Cookie(sessionCookieName)
@@ -194,6 +198,13 @@ func (s *Server) tokenMiddleware(next http.Handler) http.Handler {
 		}
 		if s.token != "" && subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1 {
 			admit(context.WithValue(r.Context(), authKindCtxKey{}, authKindToken))
+			return
+		}
+		// The token of this run's LocalAccess file: a command on this machine.
+		// A Bearer only: it has no business in a browser's cookie.
+		if !viaCookie && s.localAccessPath != "" && s.localToken != "" && subtle.ConstantTimeCompare([]byte(got), []byte(s.localToken)) == 1 {
+			ctx := context.WithValue(r.Context(), authKindCtxKey{}, authKindToken)
+			admit(context.WithValue(ctx, localCLICtxKey{}, true))
 			return
 		}
 		if identity, policy, ok := s.sessions.Lookup(got); ok {

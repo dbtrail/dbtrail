@@ -205,6 +205,12 @@ type serverRequest struct {
 	SourceDatabase    string `json:"source_database"`
 	SourceSlot        string `json:"source_slot"`
 	SourcePublication string `json:"source_publication"`
+	// NoDraft is read by POST /api/servers/check only: the caller is not the
+	// Connect screen, so the form that screen keeps for a reload is neither
+	// replaced with this request nor thrown away when it succeeds. Set by
+	// `bintrail-console server add`, which must not eat what someone is
+	// typing in a browser.
+	NoDraft bool `json:"no_draft"`
 }
 
 // testResponse is the probe result. HasIndex/SchemaCurrent are tri-state
@@ -589,6 +595,63 @@ func newEntryErrStatus(err error) int {
 // DSN-affecting change evicts (and closes) the cached connection; a
 // baseline/no-archive-only change rebuilds the derived flags in place.
 func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
+	s.updateServer(w, r, false)
+}
+
+// handleServersPatch serves PATCH /api/servers/{id}: the same edit, where a
+// field the body leaves out keeps its stored value.
+//
+// PUT is the edit form's route. The form always sends every field, so there
+// a missing field means "cleared", and a caller that sends two fields to
+// change two things clears the rest: the schema filter, the archive bucket,
+// the S3 store. PATCH is for that caller, a script or a command.
+func (s *Server) handleServersPatch(w http.ResponseWriter, r *http.Request) {
+	s.updateServer(w, r, true)
+}
+
+// keepUnsent gives req the stored value of every field the body did not
+// name and that PUT would otherwise clear. The fields with a keep rule of
+// their own (the two DSNs and their passwords, the S3 secret, the snapshot
+// fields, the forwarding account, the flavor) are left to those rules.
+func keepUnsent(req *serverRequest, old ServerEntry, sent map[string]json.RawMessage) {
+	has := func(field string) bool { _, ok := sent[field]; return ok }
+	if !has("name") {
+		req.Name = old.Name
+	}
+	if !has("archive_s3") {
+		req.ArchiveS3 = old.ArchiveS3
+	}
+	if !has("s3_endpoint") {
+		req.S3Endpoint = old.S3Endpoint
+	}
+	if !has("s3_path_style") {
+		req.S3PathStyle = old.S3PathStyle
+	}
+	if !has("s3_region") {
+		req.S3Region = old.S3Region
+	}
+	// An access key left out keeps the pair; resolveS3Keys then keeps the
+	// stored secret for the same key.
+	if !has("s3_access_key_id") {
+		req.S3AccessKeyID = old.S3AccessKeyID
+	}
+	if !has("source_server_id") {
+		req.SourceServerID = old.SourceServerID
+	}
+	if !has("schemas") {
+		req.Schemas = old.Schemas
+	}
+	if !has("source_slot") {
+		req.SourceSlot = old.SourceSlot
+	}
+	if !has("source_publication") {
+		req.SourcePublication = old.SourcePublication
+	}
+}
+
+// updateServer is PUT and PATCH /api/servers/{id}. patch says a field the
+// body leaves out keeps its stored value (keepUnsent).
+func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool) {
 	id := r.PathValue("id")
 	if id == bootServerID {
 		writeJSONError(w, http.StatusConflict, "the command-line server cannot be edited; it mirrors --index-dsn")
@@ -614,6 +677,14 @@ func (s *Server) handleServersUpdate(w http.ResponseWriter, r *http.Request) {
 	// form opened before a folder change cannot put the old folder back.
 	var sent map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &sent)
+	if patch {
+		// An edit that names nothing is a mistake, not "change nothing".
+		if len(sent) == 0 {
+			writeJSONError(w, http.StatusBadRequest, "name at least one field to change")
+			return
+		}
+		keepUnsent(&req, old, sent)
+	}
 	if _, ok := sent["baseline_dir"]; !ok {
 		req.BaselineDir = old.BaselineDir
 	} else if strings.TrimSpace(req.BaselineDir) == "" && old.BaselineDir != "" {

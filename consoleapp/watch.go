@@ -721,6 +721,8 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// One line a minute of what capture did (statuslog.go).
+	startCaptureStatusLog(ctx, srv.ServerName)
 	wireSQLChainLine(baselineSup, srv)
 	ln, err := srv.Listen()
 	if err != nil {
@@ -1077,6 +1079,8 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// One line a minute of what capture did (statuslog.go).
+	startCaptureStatusLog(ctx, srv.ServerName)
 	wireSQLChainLine(baselineSup, srv)
 
 	// Bind synchronously so a port conflict fails `watch` fast — otherwise the
@@ -2068,8 +2072,11 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		FillsCopyMirrors: opts.FillsCopyMirrors,
 		CopyMirror:       opts.CopyMirror,
 		AuthPath:         opts.AuthFile,
-		MCPTokenPath:     opts.MCPTokenFile,
-		FlashbackPath:    flashbackFilePath(opts),
+		// Lets `bintrail-console server add` and the like reach this daemon
+		// with nothing to configure (console.LocalAccess).
+		LocalAccessPath: console.LocalAccessPath(opts.AuthFile),
+		MCPTokenPath:    opts.MCPTokenFile,
+		FlashbackPath:   flashbackFilePath(opts),
 		// The SQL memory saved in the web interface (#2210), beside the
 		// servers file like the port's setting.
 		SQLSettingsPath: sqlSettingsFilePath(opts.ServersFile),
