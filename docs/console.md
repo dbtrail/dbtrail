@@ -633,8 +633,51 @@ journalctl -u bintrail-console -u bintrail-router -f | grep -E 'level=(ERROR|WAR
 docker compose logs -f bintrail router | grep -E 'level=(ERROR|WARN)'
 ```
 
-What still needs the web interface or the API: an S3 destination, and editing
-a server that is already added.
+**Changing a server.** `server edit` changes what you name and leaves the
+rest as it is:
+
+```
+dbtrail server edit shop -p                       # a new password for DBTrail's user
+dbtrail server edit shop -h db2.example.com       # the database moved
+dbtrail server edit shop --name store             # rename it
+dbtrail server edit shop --schemas shop,billing   # record these schemas only
+dbtrail server edit shop --schemas ""             # every schema again
+```
+
+A change of address, user or password stops recording, saves, runs the checks
+against the new login and starts again. If a check fails the change stays
+saved and recording stays stopped, with the fix printed; `dbtrail server start
+shop` starts it once fixed. `server stop` and `server start` do just that. The
+name is also the user name on the MySQL port, so a rename changes what clients
+log in as.
+
+**S3.** Two places, each optional:
+
+```
+dbtrail snapshot location shop                                   # where they are kept now
+dbtrail snapshot location shop --s3 s3://bucket/snapshots/       # also send snapshots there
+dbtrail snapshot location shop --s3 s3://bucket/snapshots/ --s3-delete-after 30d
+dbtrail snapshot location shop --dir /data/snapshots --keep-newest 3
+dbtrail snapshot location shop --s3-only                         # no folder on this machine
+dbtrail server edit shop --archive-s3 s3://bucket/archive/       # the hours that leave the index
+```
+
+DBTrail signs with the machine's own AWS credentials (an instance role, or
+`AWS_*` in its settings). Give a server others, or an S3-compatible store,
+for its own buckets:
+
+```
+echo "$SECRET" | dbtrail server edit shop --s3-access-key AKIA... --s3-secret-stdin
+dbtrail server edit shop --s3-endpoint https://minio.example.com --s3-region us-east-1
+```
+
+Those apply to a server that has a bucket set, so set the bucket first, and
+clear them before removing the last one. A snapshot that is complete on the
+machine and could not be sent says so, and the next one sends it.
+
+Behind `server edit` is `PATCH /api/servers/{id}`: only the fields in the body
+change. `PUT` on the same address replaces the server, which is what the edit
+form needs and not what a script wants.
 
 **How a command is let in.** Once its port is open, DBTrail writes
 `console-cli.json` beside its login file (`~/.config/bintrail/`, or

@@ -402,6 +402,15 @@ func runServerStartStop(ctx context.Context, c *ctlClient, name string, start bo
 	return nil
 }
 
+// The daemon's route and fields for where snapshots are kept keep the names
+// they had before the product said "snapshot" (#1573). Spelled once each.
+const (
+	snapshotSettingsRoute = "/api/backup-settings"
+	locKeyDir             = "baseline_dir"
+	locKeyS3              = "baseline_s3"
+	locKeyS3Retain        = "baseline_s3_retain"
+)
+
 // locFlags is what `snapshot location` was given.
 type locFlags struct {
 	Dir, S3, S3DeleteAfter string
@@ -450,7 +459,7 @@ func runSnapshotLocation(ctx context.Context, c *ctlClient, name string, f locFl
 		if strings.TrimSpace(f.Dir) == "" {
 			return errors.New("--dir is empty. To keep snapshots in S3 only, use --s3-only")
 		}
-		body["baseline_dir"] = strings.TrimSpace(f.Dir)
+		body[locKeyDir] = strings.TrimSpace(f.Dir)
 	}
 	if named("s3-only") {
 		if named("dir") && f.S3Only {
@@ -464,10 +473,10 @@ func runSnapshotLocation(ctx context.Context, c *ctlClient, name string, f locFl
 		if v != "" && !strings.HasPrefix(v, "s3://") {
 			return fmt.Errorf("--s3 is s3://bucket/prefix/, not %q", v)
 		}
-		body["baseline_s3"] = v
+		body[locKeyS3] = v
 	}
 	if named("s3-delete-after") {
-		body["baseline_s3_retain"] = strings.TrimSpace(f.S3DeleteAfter)
+		body[locKeyS3Retain] = strings.TrimSpace(f.S3DeleteAfter)
 	}
 	if named("keep-newest") {
 		if f.KeepNewest < 0 {
@@ -479,7 +488,7 @@ func runSnapshotLocation(ctx context.Context, c *ctlClient, name string, f locFl
 		var all struct {
 			Servers *[]ctlLocation `json:"servers"`
 		}
-		if err := c.do(ctx, http.MethodGet, "/api/backup-settings", nil, &all); err != nil {
+		if err := c.do(ctx, http.MethodGet, snapshotSettingsRoute, nil, &all); err != nil {
 			return err
 		}
 		if all.Servers == nil {
@@ -494,14 +503,14 @@ func runSnapshotLocation(ctx context.Context, c *ctlClient, name string, f locFl
 		return fmt.Errorf("DBTrail lists no snapshot settings for %q", s.Name)
 	}
 	var saved ctlLocation
-	if err := c.do(ctx, http.MethodPut, "/api/backup-settings/servers/"+s.ID, body, &saved); err != nil {
+	if err := c.do(ctx, http.MethodPut, snapshotSettingsRoute+"/servers/"+s.ID, body, &saved); err != nil {
 		return err
 	}
 	if saved.ID == "" {
 		return fmt.Errorf("%s answered, and not with %q's snapshot settings. See `bintrail-console snapshot location %s`", c.base, s.Name, s.Name)
 	}
 	fmt.Fprintln(out, saved.text(s.Name))
-	if v, ok := body["baseline_s3_retain"].(string); ok {
+	if v, ok := body[locKeyS3Retain].(string); ok {
 		if v == "" {
 			fmt.Fprintln(out, "Snapshots in S3 are never deleted by DBTrail.")
 		} else {
