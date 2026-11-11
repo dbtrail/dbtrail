@@ -325,7 +325,8 @@ edges you know.
   count over a child table can include rows the source no longer has. Capture
   warns at startup when the source has such keys. On that source, give the
   schedule a full read (**Full read every** on the Snapshots page), and the
-  copy is exact again after each one.
+  copy is exact again after each one. Every other case in which DBTrail reads
+  the whole database again is in [When DBTrail reads your whole database](full-reads.md).
 - **The price of entry.** `binlog_format=ROW` and `binlog_row_image=FULL` on
   the source, and a primary key on every table you want refreshed.
   `bintrail doctor` checks the binlog settings and prints the fix.
