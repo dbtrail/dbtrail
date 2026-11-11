@@ -37,6 +37,12 @@ func TestRoundVeto(t *testing.T) {
 		"SELECT * FROM t WHERE note = 'round(price)'":                                   false, // inside a string
 		"SELECT * FROM t ORDER BY total":                                                false,
 		"SELECT ROUND(total, 2) FROM t ORDER BY id":                                     false, // the call is before ORDER BY
+		// 38 digits in all is the widest DECIMAL the copy reads a literal as;
+		// one more and it is a DOUBLE (measured on DuckDB 1.5.6: 39 digits
+		// .5 is 1.2345678901234568e+38 where MySQL keeps every digit).
+		"SELECT ROUND(1234567890123456789012345678901234567.5)":     false, // 38 digits
+		"SELECT ROUND(12345678901234567890123456789012345678.5)":    true,  // 39
+		"SELECT ROUND(00000000000000000000000000000000000000001.5)": true,  // leading zeros count too
 		// Kept on MySQL.
 		"SELECT ROUND(price) FROM t":                           true, // a DOUBLE
 		"SELECT ROUND(price, 2) FROM t":                        true,

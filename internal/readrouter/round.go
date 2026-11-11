@@ -28,6 +28,10 @@ var (
 	roundDigits = regexp.MustCompile(`^[+-]?\s*\d+$`)
 )
 
+// maxExactLiteralDigits is the widest number, in digits, the copy reads as a
+// DECIMAL: DECIMAL(38).
+const maxExactLiteralDigits = 38
+
 // RoundVeto says why the copy must not answer a statement because of a ROUND
 // call, or "" when it can (#2641). Over a FLOAT or a DOUBLE MySQL rounds a
 // half to even and the copy away from zero: ROUND(2.5e0) is 2 on MySQL and
@@ -110,7 +114,16 @@ func (s StatementShape) RoundVeto(safe, other []string) string {
 // in exact, or SUM, MIN or MAX of such a column.
 func exactArgument(arg string, exact map[string]bool) bool {
 	if exactNumber.MatchString(arg) {
-		return true
+		// Past 38 digits in all (leading zeros and decimals included) the
+		// copy reads the literal as a DOUBLE, where MySQL keeps a DECIMAL of
+		// up to 65 (measured on DuckDB 1.5.6).
+		digits := 0
+		for _, r := range arg {
+			if r >= '0' && r <= '9' {
+				digits++
+			}
+		}
+		return digits <= maxExactLiteralDigits
 	}
 	if m := exactAggregate.FindStringIndex(arg); m != nil {
 		body, ok := closingBody(arg, m[1])
