@@ -1,7 +1,7 @@
 # Benchmark: ClickHouse reading DBTrail's Iceberg export
 
 This is the full procedure behind the blog post
-[Querying a live MySQL copy from ClickHouse: it works, with one workaround](https://blog.dbtrail.com/clickhouse-live-mysql-copy/).
+[ClickHouse on a live Iceberg copy of MySQL: exact rows, slower reads, an Athena fix](https://blog.dbtrail.com/clickhouse-live-mysql-copy/).
 It sets up MySQL, DBTrail and ClickHouse on one EC2 machine, exports two tables to Iceberg
 every minute under a steady write load, measures how far behind ClickHouse is and how long a
 report query takes, compacts with Athena, and compares the result with MySQL row by row.
