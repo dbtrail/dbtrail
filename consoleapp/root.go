@@ -91,8 +91,10 @@ func Main(version, commitSHA, buildDate string) int {
 	views.SetProducerVersion(version)
 	// Access profiles stay out of help unless the build shows them.
 	cli.HideAccessProfileHelp(rootCmd)
+	// Started as dbtrail, it says dbtrail (progname.go).
+	applyProgName(rootCmd)
 	if err := tel.Execute(rootCmd); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, useProgName(err.Error()))
 		// A watch that failed on its configuration before its web interface
 		// opened shows why on that port instead of exiting into a restart loop.
 		if f := watchStartupFailure(err); f != nil {

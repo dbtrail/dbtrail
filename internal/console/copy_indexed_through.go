@@ -342,6 +342,17 @@ func (q *SQLOnCopy) NoteRoute(side string) {
 	q.last.pending = nil
 }
 
+// NoteAnswered counts one statement of a connection that does not route:
+// the copy answered it alone, in took; refused says the client got an error.
+// The routing connections' statements are counted by their own hooks
+// (RecordRouteAnswer), never here.
+func (q *SQLOnCopy) NoteAnswered(took time.Duration, refused bool) {
+	if q == nil || q.s == nil {
+		return
+	}
+	q.s.routing.answeredAlone(q.id, took, refused)
+}
+
 func (q *SQLOnCopy) lastAnswer() copyAnswer {
 	if q == nil {
 		return copyAnswer{}

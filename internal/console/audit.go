@@ -21,6 +21,12 @@ const tokenActor = "token"
 // mirroring the shim's "mysql:unbound".
 const sessionUnidentifiedActor = "session:unidentified"
 
+// localCLIActor is the audit identity of a command run on DBTrail's own
+// machine with the LocalAccess token (`bintrail-console server add`). Apart
+// from tokenActor on purpose: the operator's token can come from anywhere,
+// this one only from an account that reads DBTrail's folder.
+const localCLIActor = "local-cli"
+
 // consoleActor is the audit identity of one HTTP request, decided by which
 // credential authenticated it (authKindFrom, stamped by tokenMiddleware): a
 // session records its verified login identity (or sessionUnidentifiedActor
@@ -29,6 +35,9 @@ const sessionUnidentifiedActor = "session:unidentified"
 // it records its authenticated user, never ext.ProcessActor (the daemon's OS
 // owner says nothing about who made the request).
 func consoleActor(r *http.Request) string {
+	if local, _ := r.Context().Value(localCLICtxKey{}).(bool); local {
+		return localCLIActor
+	}
 	if authKindFrom(r.Context()) != authKindSession {
 		return tokenActor
 	}

@@ -459,6 +459,254 @@ newer DBTrail survive load→edit→save round-trips on an older binary, and a
 file written by a newer *schema* version loads read-only rather than being
 rewritten lossily.
 
+### From the terminal
+
+Everything "+ Add server" does, as commands. They ask the DBTrail that is
+already running, over the API the web interface uses, so a server added here
+goes through the same checks and is saved in the same place.
+
+```
+dbtrail server add -h db1.example.com -P 3306 -u dbtrail -p
+dbtrail server list
+dbtrail server remove shop
+```
+
+`dbtrail` is the program the service runs, `bintrail-console`, under the name
+people type. Both names take the same commands, and each says its own name in
+its help and in the commands it suggests.
+
+- **Linux packages:** `dbtrail` is in `/usr/bin`. It reads a file only the
+  service's account can read, so run it with `sudo`.
+- **Docker Compose:** the installer leaves `dbtrail` beside
+  `docker-compose.yml`. It runs the command inside the container, and sends a
+  `--defaults-file` of this machine along with it. Run it as `./dbtrail` from
+  that folder, or link it once to type `dbtrail` anywhere:
+
+  ```
+  sudo ln -s "$PWD/dbtrail" /usr/local/bin/dbtrail
+  ```
+
+  An install made before this command existed gets it with one download,
+  from the folder of `docker-compose.yml`:
+
+  ```
+  curl -fsSL -o dbtrail https://raw.githubusercontent.com/dbtrail/dbtrail/main/dbtrail.sh && chmod +x dbtrail
+  ```
+
+**`server add`** takes the mysql client's options. On a terminal, what you
+leave out is asked for.
+
+| Option | |
+|---|---|
+| `-h`, `--host` | Host of the database |
+| `-P`, `--port` | Its port (default 3306) |
+| `-u`, `--user` | The user DBTrail logs in as |
+| `-p`, `--password` | Ask for the password. It takes no value: a password on the command line stays in the shell history and in `ps` |
+| `--password-stdin` | Read the password from the first line of stdin, for scripts |
+| `--defaults-file` | Read host, port, user and password from a MySQL option file. `-` reads it from standard input |
+| `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
+| `--schemas` | Comma-separated schemas to record (default: every user schema) |
+| `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
+| `-v`, `--verbose` | Also print how to turn on each optional improvement |
+
+`--defaults-file` reads the format of `~/.my.cnf`. It reads `[client]`, then
+`[dbtrail]`, which wins, so one file can hold your own login and DBTrail's:
+
+```ini
+[client]
+host=db1.example.com
+user=root
+password=...
+
+[dbtrail]
+user=dbtrail
+password="a password with a # in it"
+```
+
+Only the file you name is read: never `/etc/my.cnf` or `~/.my.cnf` by
+themselves, and `!include` lines are not followed. An option on the command
+line wins over the file. A file that connects through a `socket` and names no
+host is refused: DBTrail connects over the network.
+
+Each check is printed as it would be on the Connect screen. One that fails
+comes with its fix, nothing is saved, and the command exits 1:
+
+```
+Checking db1.example.com:3306 as dbtrail ...
+  FAIL  Source MySQL connection
+        failed to ping MySQL: Error 1045 (28000): Access denied for user 'dbtrail'@'10.0.0.7' (using password: YES)
+        Check that your MySQL answers from the machine DBTrail runs on:
+          mysql -h <host> -P <port> -u <user> -p
+        On RDS or Aurora, its security group must allow inbound connections from that machine on the database's port.
+the database was not added: 1 check failed. Fix it and run the command again
+```
+
+`tip` marks something optional, which DBTrail works without.
+
+**`server list`** prints each server's name, address, user and whether its
+changes are being recorded (`running`, `pending`, `stopped`, `failed`, ...;
+`set at startup` for the one DBTrail was started with, which is not removed
+here); `--format json` for scripts. **`server remove <name>`** stops recording a
+server and takes it off the list, after asking (`--yes` does not ask). What
+was already recorded and copied is kept.
+
+**The first copy and the MySQL port.** After `server add`, two more commands
+reach a query answered on port 3309, with no web interface:
+
+```
+dbtrail snapshot run shop                   # read every table once, and wait
+dbtrail snapshot schedule shop --every 1h   # keep the copy current
+dbtrail port on                             # turn the MySQL port on
+mysql -h 127.0.0.1 -P 3309 -u shop -p
+```
+
+- `snapshot run <server>` starts the full read and waits until the copy is
+  ready, or says why it failed and exits 1. Ctrl-C stops the waiting, not the
+  read; `--no-wait` starts it and returns. `snapshot status <server>` says how
+  the last one ended. A read whose copy is complete on this machine and whose
+  copy to S3 failed is reported as that, not as "no copy".
+- `snapshot schedule <server> --every 1h` updates the copy from the recorded
+  changes, without reading the database again; `--off` stops it.
+- `port on` turns the MySQL port on and prints its password, which is shown
+  only then, with the `mysql` line to connect. Run again it does not print the
+  password: `port new-password` makes another, and the old one stops working
+  within a few seconds. `port status`, `port off`, and `port routing on|off`
+  for Engine Routing complete it. A port saved as on that is not answering
+  (the router is not running) exits 1 and says so.
+
+**The forwarding user.** With Engine Routing on (`dbtrail port routing on`),
+a statement the copy cannot answer runs on your MySQL, as a user you name per
+server. Without one the port refuses those statements, and it never forwards
+as the user DBTrail records changes with.
+
+```
+dbtrail server forward-user shop -u shop_fwd -p
+dbtrail server forward-user shop --remove
+```
+
+Give that user the grants of the application that connects to the port, and
+no more. `server list` shows it under FORWARDS AS, and `port routing on` names
+each server that has none. The command changes this one setting; the API
+behind it is `PUT` and `DELETE /api/servers/{id}/route` (`{"user": ...,
+"password": ...}`).
+
+Use that route in scripts, not `PUT /api/servers/{id}` with a few fields. That
+one is the edit form's: it replaces the server, so a field the body leaves out
+is cleared, the schema filter and the S3 store among them.
+
+**The status log.** Once a minute each service writes one line per server to
+its own log, of what it did in that minute:
+
+```
+journalctl -u bintrail-router -f | grep msg=status      # Linux packages
+docker compose logs -f router | grep msg=status         # Docker Compose
+```
+
+```
+msg=status service=port server=shop interval=1m0s queries=124 dbtrail=110 mysql=12 refused=2 errors=2 dbtrail_avg_ms=420 mysql_avg_ms=30 copy_behind_s=45
+msg=status service=capture server=shop interval=1m0s changes=321 errors=2 behind_s=2 since_last_save_s=60
+```
+
+- `service=port` is written by the router (`bintrail-router`, the `router`
+  container). `queries` is every statement the port finished or refused in
+  the interval; `dbtrail` were answered by the copy, `mysql` by your MySQL.
+  `errors` counts the ones a client got an error for. The averages are per
+  statement, in milliseconds, and are left out of a minute with none.
+  `copy_behind_s` is how far the copy was behind your MySQL at its last
+  answer, left out when that is not known.
+- `service=capture` is written by the service that records changes
+  (`bintrail-console`, the `bintrail` container). `changes` is the row changes
+  saved in the interval. `behind_s` is the time from a commit on your MySQL to
+  that change being readable here, at the last save. `since_last_save_s`
+  keeps growing when capture stops, which `behind_s` does not: watch that one.
+- The numbers are per interval, not since the service started. A minute with
+  nothing to say still writes a line, so silence means the service stopped.
+- `BINTRAIL_STATUS_LOG_INTERVAL` sets the interval (`30s`, `5m`); `off` writes
+  none. With Docker Compose it is `STATUS_LOG_INTERVAL` in `.env`; with the
+  Linux packages, a line of `/etc/bintrail/bintrail-console.env`. With
+  `--log-format json` the same fields are JSON.
+
+Errors are in the same logs, at their own level:
+
+```
+journalctl -u bintrail-console -u bintrail-router -f | grep -E 'level=(ERROR|WARN)'
+docker compose logs -f bintrail router | grep -E 'level=(ERROR|WARN)'
+```
+
+**Changing a server.** `server edit` changes what you name and leaves the
+rest as it is:
+
+```
+dbtrail server edit shop -p                       # a new password for DBTrail's user
+dbtrail server edit shop -h db2.example.com       # the database moved
+dbtrail server edit shop --name store             # rename it
+dbtrail server edit shop --schemas shop,billing   # record these schemas only
+dbtrail server edit shop --schemas ""             # every schema again
+```
+
+A change of address, user or password stops recording, saves, runs the checks
+against the new login and starts again. If a check fails the change stays
+saved and recording stays stopped, with the fix printed; `dbtrail server start
+shop` starts it once fixed. `server stop` and `server start` do just that. The
+name is also the user name on the MySQL port, so a rename changes what clients
+log in as.
+
+**S3.** Two places, each optional:
+
+```
+dbtrail snapshot location shop                                   # where they are kept now
+dbtrail snapshot location shop --s3 s3://bucket/snapshots/       # also send snapshots there
+dbtrail snapshot location shop --s3 s3://bucket/snapshots/ --s3-delete-after 30d
+dbtrail snapshot location shop --dir /data/snapshots --keep-newest 3
+dbtrail server edit shop --archive-s3 s3://bucket/archive/       # the hours that leave the index
+```
+
+DBTrail signs with the machine's own AWS credentials (an instance role, or
+`AWS_*` in its settings). Give a server others, or an S3-compatible store,
+for its own buckets:
+
+```
+echo "$SECRET" | dbtrail server edit shop --s3-access-key AKIA... --s3-secret-stdin
+dbtrail server edit shop --s3-endpoint https://minio.example.com --s3-region us-east-1
+```
+
+Those apply to a server that has a bucket set, so set the bucket first, and
+clear them before removing the last one. A snapshot that is complete on the
+machine and could not be sent says so, and the next one sends it.
+
+Behind `server edit` is `PATCH /api/servers/{id}`: only the fields in the body
+change. `PUT` on the same address replaces the server, which is what the edit
+form needs and not what a script wants.
+
+**How a command is let in.** Once its port is open, DBTrail writes
+`console-cli.json` beside its login file (`~/.config/bintrail/`, or
+`/var/lib/bintrail/` in the Docker image and the Linux packages): its address
+and a token made for that run, readable only by the account DBTrail runs as
+(mode 0600). It removes the file when it stops. A command reads it, so there
+is nothing to configure, and with the Linux packages it needs `sudo`. The
+file gives nothing its reader did not have: the same folder holds the login
+file and the saved database passwords. On the API the token is as strong as
+`BINTRAIL_CONSOLE_TOKEN`: full access, outside any session policy. It is
+accepted there as a Bearer only, never as a browser session, on `/mcp` or on
+the MySQL port, and it does not close first-run setup. In the audit trail its
+actor is `local-cli`, apart from `token`. With no file, `BINTRAIL_CONSOLE_TOKEN` is used, with the address from
+`BINTRAIL_CONSOLE_LISTEN`. `--access-file` names the file when DBTrail keeps
+its login file somewhere a command would not look.
+
+These commands send a database password, so they are strict about where:
+
+- They read the environment of the shell they run in, and not `.bintrail.env`
+  or `~/.config/bintrail/config.env`, which every other command loads. A file
+  in the folder you happen to be in does not get to say where DBTrail is.
+- Without `--url` they only talk to this machine.
+- `--url` reaches a DBTrail on another machine, with `BINTRAIL_CONSOLE_TOKEN`
+  as its token. The token in `console-cli.json` belongs to the DBTrail of this
+  machine and is never sent to another address.
+
+What that does not cover: an `--access-file` you name yourself is believed.
+When DBTrail serves HTTPS, give the name on its certificate:
+`--url https://dbtrail.example.com`.
+
 ### Monitoring a source from the UI (the control plane)
 
 Under **`bintrail-console watch`**, and only there, the web interface is also a

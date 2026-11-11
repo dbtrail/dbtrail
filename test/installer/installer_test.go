@@ -38,7 +38,10 @@ out=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in -o) out=$2; shift 2;; -*) shift;; *) url=$1; shift;; esac
 done
-case "$url" in *docker-compose.yml) cp "$COMPOSE_SRC" "$out";; esac
+case "$url" in
+  *docker-compose.yml) cp "$COMPOSE_SRC" "$out";;
+  *dbtrail.sh) [ -n "$STUB_NO_CLI" ] && exit 22; cp "$CLI_SRC" "$out";;
+esac
 exit 0
 `,
 }
@@ -91,6 +94,7 @@ func installWith(t *testing.T, prep func(dir string), env ...string) run {
 		"DBTRAIL_NO_OPEN=1",
 		"STUB_LOG=" + log,
 		"COMPOSE_SRC=" + filepath.Join(root, "docker-compose.yml"),
+		"CLI_SRC=" + filepath.Join(root, "dbtrail.sh"),
 	}, env...)
 	out, err := cmd.CombinedOutput()
 	calls, _ := os.ReadFile(log)

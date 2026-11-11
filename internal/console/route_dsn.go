@@ -407,9 +407,9 @@ func forwardDSNOf(e ServerEntry) string {
 // was refused is not one the port closes when the account is set, so each
 // ends on "reconnect".
 const (
-	RouteRefusedNoAccount  = "the server has no forwarding account, and this port never forwards with the account DBTrail captures with. On the source, create a MySQL user with SELECT on what this port should read, set it as the server's forwarding user (in the web interface, edit the server), then reconnect"
-	RouteRefusedIsCapture  = "the server's saved forwarding account is the account DBTrail captures with, and this port never forwards with that one. Set another forwarding user on the server (in the web interface, edit the server), then reconnect"
-	RouteRefusedUnreadable = "the server's saved forwarding account cannot be read. Edit the server in the web interface and type the forwarding user and password again, then reconnect"
+	RouteRefusedNoAccount  = "the server has no forwarding account, and this port never forwards with the account DBTrail captures with. On the source, create a MySQL user with SELECT on what this port should read, set it as the server's forwarding user (`dbtrail server forward-user <server> -u <user> -p`, or in the web interface, edit the server), then reconnect"
+	RouteRefusedIsCapture  = "the server's saved forwarding account is the account DBTrail captures with, and this port never forwards with that one. Set another forwarding user on the server (`dbtrail server forward-user <server> -u <user> -p`, or in the web interface, edit the server), then reconnect"
+	RouteRefusedUnreadable = "the server's saved forwarding account cannot be read. Set the forwarding user and password again (`dbtrail server forward-user <server> -u <user> -p`, or in the web interface, edit the server), then reconnect"
 	// RouteRefusedNotMySQL: a source the port has nothing to forward to in
 	// its own protocol. No account would change that, so none is asked for.
 	RouteRefusedNotMySQL = "the server's source is PostgreSQL, and this port forwards to MySQL and MariaDB sources only"
