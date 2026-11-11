@@ -531,7 +531,7 @@ func TestNotDBTrailAnswering(t *testing.T) {
 func twoServers(d *fakeDaemon) {
 	d.on("GET /api/servers", 200, map[string]any{"servers": []map[string]any{
 		{"id": "boot", "name": "boot", "kind": "ephemeral"},
-		{"id": "id1", "name": "shop", "kind": "registry", "has_source": true, "source_host": "db1", "source_port": "3306", "source_user": "dbtrail", "monitor_state": "running"},
+		{"id": "id1", "name": "shop", "kind": "registry", "has_source": true, "source_host": "db1", "source_port": "3306", "source_user": "dbtrail", "monitor_state": "running", "has_route": true, "route_user": "shop_fwd"},
 		{"id": "id2", "name": "Billing", "kind": "registry", "has_source": true, "source_host": "2001:db8::1", "source_port": "3307", "source_user": "dbtrail"},
 		{"id": "id3", "name": "old-index", "kind": "registry", "has_source": false},
 	}})
@@ -546,11 +546,11 @@ func TestServerList(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	want := []string{
-		"NAME       ADDRESS             USER     RECORDING",
-		"boot       -                   -        set at startup",
-		"shop       db1:3306            dbtrail  running",
-		"Billing    [2001:db8::1]:3307  dbtrail  not by this DBTrail",
-		"old-index  -                   -        -",
+		"NAME       ADDRESS             USER     RECORDING            FORWARDS AS",
+		"boot       -                   -        set at startup       -",
+		"shop       db1:3306            dbtrail  running              shop_fwd",
+		"Billing    [2001:db8::1]:3307  dbtrail  not by this DBTrail  -",
+		"old-index  -                   -        -                    -",
 	}
 	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
 		t.Errorf("got:\n%s\nwant:\n%s", out.String(), strings.Join(want, "\n"))
@@ -1074,5 +1074,139 @@ func TestListenToLocal(t *testing.T) {
 		if got := listenToLocal(in); got != want {
 			t.Errorf("listenToLocal(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestServerForwardUser(t *testing.T) {
+	saved := map[string]any{"id": "id1", "name": "shop", "has_source": true, "has_route": true, "route_user": "shop_fwd"}
+	t.Run("set, password asked", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("PUT /api/servers/id1/route", 200, saved)
+		var out bytes.Buffer
+		ask := &fakeAsker{t: t, tty: true, secret: "Fw9 #abc"}
+		if err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: " shop_fwd "}, ask, strings.NewReader(""), &out); err != nil {
+			t.Fatal(err)
+		}
+		// Only the two fields of this one setting travel: nothing here can
+		// clear another field of the server.
+		body := d.bodies["PUT /api/servers/id1/route"]
+		if len(body) != 2 || body["user"] != "shop_fwd" || body["password"] != "Fw9 #abc" {
+			t.Errorf("body = %v", body)
+		}
+		if !strings.Contains(out.String(), `"shop" forwards as shop_fwd`) || strings.Contains(out.String(), "Fw9") {
+			t.Errorf("output:\n%s", out.String())
+		}
+		for _, call := range d.calls {
+			if call == "PUT /api/servers/id1" {
+				t.Error("used the edit route, which replaces the whole server")
+			}
+		}
+	})
+	t.Run("password from stdin", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("PUT /api/servers/id1/route", 200, saved)
+		if err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "shop_fwd", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\r\nmore\n"), io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if got := d.bodies["PUT /api/servers/id1/route"]["password"]; got != "pw" {
+			t.Errorf("password = %q", got)
+		}
+	})
+	t.Run("remove", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("DELETE /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop"})
+		var out bytes.Buffer
+		if err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{Remove: true}, &fakeAsker{t: t}, strings.NewReader(""), &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "has no forwarding user now") {
+			t.Errorf("output:\n%s", out.String())
+		}
+	})
+	t.Run("the user DBTrail captures with is saved and said to be of no use", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("PUT /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop", "has_route": true, "route_user": "dbtrail", "route_is_capture": true})
+		err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "dbtrail", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\n"), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "never forwards as that one") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("the daemon took it and the user is not the one asked for", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("PUT /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop"})
+		err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "shop_fwd", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\n"), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "does not forward as shop_fwd") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("the daemon refuses in its own words", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("PUT /api/servers/id1/route", 400, map[string]any{"error": "a forwarding account applies to MySQL and MariaDB sources only"})
+		err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "u", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\n"), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "MySQL and MariaDB sources only") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	for name, c := range map[string]struct {
+		f     fwdFlags
+		tty   bool
+		stdin string
+		want  string
+	}{
+		"no user":                    {fwdFlags{}, true, "", "-u"},
+		"remove with a user":         {fwdFlags{Remove: true, User: "u"}, true, "", "--remove takes nothing else"},
+		"remove with -p":             {fwdFlags{Remove: true, AskPassword: true}, true, "", "--remove takes nothing else"},
+		"-p and --password-stdin":    {fwdFlags{User: "u", AskPassword: true, PasswordStdin: true}, true, "", "use one"},
+		"no terminal, no stdin flag": {fwdFlags{User: "u"}, false, "", "--password-stdin"},
+		"empty password typed":       {fwdFlags{User: "u"}, true, "", "empty"},
+		"empty stdin":                {fwdFlags{User: "u", PasswordStdin: true}, false, "", "stdin"},
+		"stdin is only a newline":    {fwdFlags{User: "u", PasswordStdin: true}, false, "\n", "empty"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, cl := newFakeDaemon(t)
+			twoServers(d)
+			err := runServerForwardUser(context.Background(), cl, "shop", c.f, &fakeAsker{t: t, tty: c.tty}, strings.NewReader(c.stdin), io.Discard)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want one with %q", err, c.want)
+			}
+			for _, call := range d.calls {
+				if strings.HasSuffix(call, "/route") {
+					t.Errorf("made %s", call)
+				}
+			}
+		})
+	}
+}
+
+// Engine Routing on is not enough: a server with no user to forward as, or
+// with the capture user saved as one, refuses those statements. Said, with
+// the command that fixes it; one that is set is not mentioned.
+func TestPortRoutingOnNamesServersThatCannotForward(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("PUT /api/flashback", 200, map[string]any{"enabled": true, "routing_on": true})
+	d.on("GET /api/servers", 200, map[string]any{"servers": []map[string]any{
+		{"id": "a", "name": "shop", "has_source": true, "has_route": true, "route_user": "shop_fwd"},
+		{"id": "b", "name": "billing", "has_source": true},
+		{"id": "c", "name": "crm", "has_source": true, "has_route": true, "route_user": "dbtrail", "route_is_capture": true},
+		{"id": "d", "name": "old-index"},
+	}})
+	var out bytes.Buffer
+	if err := runPortRouting(context.Background(), c, true, &out); err != nil {
+		t.Fatal(err)
+	}
+	o := out.String()
+	for _, want := range []string{"server forward-user billing -u <user> -p", "server forward-user crm -u <user> -p"} {
+		if !strings.Contains(o, want) {
+			t.Errorf("output lacks %q:\n%s", want, o)
+		}
+	}
+	if strings.Contains(o, "forward-user shop") || strings.Contains(o, "old-index") {
+		t.Errorf("names a server that needs nothing:\n%s", o)
 	}
 }

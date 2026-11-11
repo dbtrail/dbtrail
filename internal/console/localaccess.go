@@ -139,3 +139,13 @@ func ReadLocalAccess(path string) (LocalAccess, error) {
 	}
 	return a, nil
 }
+
+// ServerName is the name of the registry server with this id, for a log line
+// a person reads. An id the registry does not hold (the server DBTrail was
+// started with, or one removed since) is returned as it is.
+func (s *Server) ServerName(id string) string {
+	if e, ok := s.cm.reg.Get(id); ok && e.Name != "" {
+		return e.Name
+	}
+	return id
+}

@@ -574,9 +574,65 @@ mysql -h 127.0.0.1 -P 3309 -u shop -p
   for Engine Routing complete it. A port saved as on that is not answering
   (the router is not running) exits 1 and says so.
 
-What still needs the web interface or the API: the forwarding user Engine
-Routing runs statements as on your MySQL, per server (`route_user`), an S3
-destination, and editing a server that is already added.
+**The forwarding user.** With Engine Routing on (`dbtrail port routing on`),
+a statement the copy cannot answer runs on your MySQL, as a user you name per
+server. Without one the port refuses those statements, and it never forwards
+as the user DBTrail records changes with.
+
+```
+dbtrail server forward-user shop -u shop_fwd -p
+dbtrail server forward-user shop --remove
+```
+
+Give that user the grants of the application that connects to the port, and
+no more. `server list` shows it under FORWARDS AS, and `port routing on` names
+each server that has none. The command changes this one setting; the API
+behind it is `PUT` and `DELETE /api/servers/{id}/route` (`{"user": ...,
+"password": ...}`).
+
+Use that route in scripts, not `PUT /api/servers/{id}` with a few fields. That
+one is the edit form's: it replaces the server, so a field the body leaves out
+is cleared, the schema filter and the S3 store among them.
+
+**The status log.** Once a minute each service writes one line per server to
+its own log, of what it did in that minute:
+
+```
+journalctl -u bintrail-router -f | grep msg=status      # Linux packages
+docker compose logs -f router | grep msg=status         # Docker Compose
+```
+
+```
+msg=status service=port server=shop interval=1m0s queries=124 dbtrail=110 mysql=12 refused=2 errors=2 dbtrail_avg_ms=420 mysql_avg_ms=30 copy_behind_s=45
+msg=status service=capture server=shop interval=1m0s changes=321 errors=2 behind_s=2 since_last_save_s=60
+```
+
+- `service=port` is written by the router (`bintrail-router`, the `router`
+  container). `queries` is every statement the port finished or refused in
+  the interval; `dbtrail` were answered by the copy, `mysql` by your MySQL.
+  `errors` counts the ones a client got an error for. The averages are per
+  statement, in milliseconds, and are left out of a minute with none.
+  `copy_behind_s` is how far the copy was behind your MySQL at its last
+  answer, left out when that is not known.
+- `service=capture` is written by the service that records changes
+  (`bintrail-console`, the `bintrail` container). `changes` is the row changes
+  saved in the interval. `behind_s` is the time from a commit on your MySQL to
+  that change being readable here, at the last save. `since_last_save_s`
+  keeps growing when capture stops, which `behind_s` does not: watch that one.
+- The numbers are per interval, not since the service started. A minute with
+  nothing to say still writes a line, so silence means the service stopped.
+- `BINTRAIL_STATUS_LOG_INTERVAL` sets the interval (`30s`, `5m`); `off` writes
+  none. With `--log-format json` the same fields are JSON.
+
+Errors are in the same logs, at their own level:
+
+```
+journalctl -u bintrail-console -u bintrail-router -f | grep -E 'level=(ERROR|WARN)'
+docker compose logs -f bintrail router | grep -E 'level=(ERROR|WARN)'
+```
+
+What still needs the web interface or the API: an S3 destination, and editing
+a server that is already added.
 
 **How a command is let in.** Once its port is open, DBTrail writes
 `console-cli.json` beside its login file (`~/.config/bintrail/`, or

@@ -721,6 +721,8 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// One line a minute of what capture did (statuslog.go).
+	startCaptureStatusLog(ctx, srv.ServerName)
 	wireSQLChainLine(baselineSup, srv)
 	ln, err := srv.Listen()
 	if err != nil {
@@ -1077,6 +1079,8 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// One line a minute of what capture did (statuslog.go).
+	startCaptureStatusLog(ctx, srv.ServerName)
 	wireSQLChainLine(baselineSup, srv)
 
 	// Bind synchronously so a port conflict fails `watch` fast — otherwise the

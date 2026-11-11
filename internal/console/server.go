@@ -1123,6 +1123,8 @@ func (s *Server) buildHandler() http.Handler {
 	api.HandleFunc("DELETE /api/servers/{id}", s.handleServersDelete)
 	api.HandleFunc("POST /api/servers/{id}/test", s.handleServersTest)
 	api.HandleFunc("GET /api/servers/{id}/route-grants", s.handleRouteGrants)
+	api.HandleFunc("PUT /api/servers/{id}/route", s.recordAction("route-user", s.handleRouteUserPut))
+	api.HandleFunc("DELETE /api/servers/{id}/route", s.recordAction("route-user", s.handleRouteUserDelete))
 	api.HandleFunc("GET /api/servers/{id}/hidden", s.handleHiddenGet)
 	api.HandleFunc("PUT /api/servers/{id}/hidden", s.recordAction("hidden-rules", s.handleHiddenPut))
 	api.HandleFunc("PUT /api/servers/{id}/sql-mode", s.recordAction("sql-mode", s.handleSQLModePut))

@@ -199,7 +199,19 @@ func init() {
 	serverListCmd.Flags().StringVar(&srvFormat, "format", "text", "Output format: text or json")
 	serverRemoveCmd.Flags().BoolVar(&srvYes, "yes", false, "Do not ask for confirmation")
 
-	serverCmd.AddCommand(serverAddCmd, serverListCmd, serverRemoveCmd)
+	fu := serverForwardUserCmd.Flags()
+	fu.StringVarP(&srvFwd.User, "user", "u", "", "The user on your MySQL that DBTrail forwards statements as")
+	fu.BoolVarP(&srvFwd.AskPassword, "password", "p", false, "Ask for the password (it is never taken on the command line)")
+	fu.BoolVar(&srvFwd.PasswordStdin, "password-stdin", false, "Read the password from the first line of stdin (for scripts)")
+	fu.BoolVar(&srvFwd.Remove, "remove", false, "Remove the forwarding user")
+	serverForwardUserCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if passwordOnCommandLine(os.Args[1:]) {
+			return errors.New(noPasswordOnCommandLine)
+		}
+		return err
+	})
+
+	serverCmd.AddCommand(serverAddCmd, serverListCmd, serverRemoveCmd, serverForwardUserCmd)
 	rootCmd.AddCommand(serverCmd)
 }
 
@@ -236,6 +248,108 @@ func passwordOnCommandLine(args []string) bool {
 		}
 	}
 	return false
+}
+
+// fwdFlags is what `server forward-user` was given on its command line.
+type fwdFlags struct {
+	User          string
+	AskPassword   bool
+	PasswordStdin bool
+	Remove        bool
+}
+
+var srvFwd fwdFlags
+
+var serverForwardUserCmd = &cobra.Command{
+	Use:   "forward-user <server>",
+	Short: "Name the user DBTrail runs statements as on your MySQL when the copy cannot answer",
+	Long: `With Engine Routing on (bintrail-console port routing on), a statement the
+copy cannot answer runs on your MySQL. It runs as this user, one per server.
+Give it the grants of the application that connects to the port, and no more:
+whoever has the port's password can run what this user can.
+
+  bintrail-console server forward-user shop -u shop_fwd -p
+  echo "$PASSWORD" | bintrail-console server forward-user shop -u shop_fwd --password-stdin
+  bintrail-console server forward-user shop --remove
+
+On your MySQL, for an application that reads the shop schema:
+
+  CREATE USER 'shop_fwd'@'%' IDENTIFIED BY <a password>;
+  GRANT SELECT ON shop.* TO 'shop_fwd'@'%';
+
+It changes this one setting and leaves the rest of the server as it is.`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return errors.New("name one server: server forward-user <server> -u <user> -p\n" + noPasswordOnCommandLine)
+		}
+		return nil
+	},
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if passwordOnCommandLine(os.Args[1:]) {
+			return errors.New(noPasswordOnCommandLine)
+		}
+		c, err := resolveCtl(srvURL, srvAccessFile)
+		if err != nil {
+			return err
+		}
+		return runServerForwardUser(cmd.Context(), c, args[0], srvFwd, newTerminalAsker(), os.Stdin, cmdOut())
+	},
+}
+
+func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdFlags, ask asker, stdin io.Reader, out io.Writer) error {
+	user := strings.TrimSpace(f.User)
+	switch {
+	case f.Remove && (user != "" || f.AskPassword || f.PasswordStdin):
+		return errors.New("--remove takes nothing else: it removes the forwarding user")
+	case !f.Remove && user == "":
+		return errors.New("which user? Give it with -u, or --remove to remove the one set")
+	case f.AskPassword && f.PasswordStdin:
+		return errors.New("-p and --password-stdin both say where the password comes from: use one")
+	}
+	s, err := serverByName(ctx, c, name)
+	if err != nil {
+		return err
+	}
+	path := "/api/servers/" + s.ID + "/route"
+	if f.Remove {
+		if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "%q has no forwarding user now: with Engine Routing on, a statement the copy cannot answer is refused.\n", s.Name)
+		return nil
+	}
+	var password string
+	switch {
+	case f.PasswordStdin:
+		line, rerr := bufio.NewReader(stdin).ReadString('\n')
+		if rerr != nil && line == "" {
+			return fmt.Errorf("--password-stdin: nothing to read on stdin (%v)", rerr)
+		}
+		password = strings.TrimRight(line, "\r\n")
+	case !ask.Interactive():
+		return errors.New("no password: this is not a terminal, so it cannot be asked for. Use --password-stdin")
+	default:
+		if password, err = ask.Secret(fmt.Sprintf("Password of %s on your MySQL", user)); err != nil {
+			return err
+		}
+	}
+	if password == "" {
+		return errors.New("the password is empty")
+	}
+	var saved ctlServer
+	if err := c.do(ctx, http.MethodPut, path, map[string]string{"user": user, "password": password}, &saved); err != nil {
+		return err
+	}
+	if !saved.HasRoute || saved.RouteUser != user {
+		return fmt.Errorf("DBTrail took the request and %q does not forward as %s. See `bintrail-console server list`", s.Name, user)
+	}
+	// Saved, and of no use: the port never forwards with the account DBTrail
+	// records changes with, which can read every schema and the binlog.
+	if saved.RouteIsCapture {
+		return fmt.Errorf("%s is the user DBTrail reads %q with, and the port never forwards as that one: it can read far more than an application should. Create another user on your MySQL, with the application's grants, and set that one", user, s.Name)
+	}
+	fmt.Fprintf(out, "%q forwards as %s. Engine Routing uses it once it is on:  bintrail-console port routing on\n", s.Name, user)
+	return nil
 }
 
 func newTerminalAsker() asker {
@@ -392,6 +506,12 @@ type ctlServer struct {
 	SourcePort string `json:"source_port"`
 	SourceUser string `json:"source_user"`
 	Schemas    string `json:"schemas,omitempty"`
+	// HasRoute and RouteUser are the forwarding account, when one is set.
+	HasRoute  bool   `json:"has_route,omitempty"`
+	RouteUser string `json:"route_user,omitempty"`
+	// RouteIsCapture: the saved forwarding account is the one DBTrail
+	// captures with, which the port refuses to forward as.
+	RouteIsCapture bool `json:"route_is_capture,omitempty"`
 	// MonitorState is whether its changes are being recorded: running,
 	// pending, stopped, failed... Empty for a server with no source, and on
 	// a DBTrail that records nothing itself (`serve`).
@@ -575,13 +695,20 @@ func runServerList(ctx context.Context, c *ctlClient, format string, out io.Writ
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tADDRESS\tUSER\tRECORDING")
+	fmt.Fprintln(tw, "NAME\tADDRESS\tUSER\tRECORDING\tFORWARDS AS")
 	for _, s := range servers {
 		user := s.SourceUser
 		if user == "" {
 			user = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Name, s.address(), user, s.recording())
+		fwd := s.RouteUser
+		switch {
+		case !s.HasRoute || fwd == "":
+			fwd = "-"
+		case s.RouteIsCapture:
+			fwd += " (refused: it is the user above)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", s.Name, s.address(), user, s.recording(), fwd)
 	}
 	return tw.Flush()
 }

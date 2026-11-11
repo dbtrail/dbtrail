@@ -458,6 +458,16 @@ func runPortRouting(ctx context.Context, c *ctlClient, on bool, out io.Writer) e
 	}
 	if on {
 		fmt.Fprintln(out, "Engine Routing is on: what the copy cannot answer goes to MySQL.")
+		// On is not enough: each server forwards as a user of its own, and
+		// one without it refuses those statements. The list not loading must
+		// not turn a change that was made into a failure.
+		if servers, err := listServers(ctx, c); err == nil {
+			for _, s := range servers {
+				if s.HasSource && (!s.HasRoute || s.RouteIsCapture) {
+					fmt.Fprintf(out, "%q has no user to forward as yet, so it refuses those statements:  bintrail-console server forward-user %s -u <user> -p\n", s.Name, s.Name)
+				}
+			}
+		}
 		if !*p.Enabled {
 			fmt.Fprintln(out, "The MySQL port is off, so it applies from the moment it is turned on:  bintrail-console port on")
 		}

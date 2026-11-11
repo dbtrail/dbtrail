@@ -956,6 +956,8 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	// The copy answers' lag is placed in the index here, every 30 seconds,
 	// never by a statement (#2369); with or without a status document, so
 	// what waits on it does not pile up.
+	// One line a minute of what the port did (statuslog.go).
+	startPortStatusLog(ctx, srv.RouterNumbers, srv.ServerName)
 	go resolveCopyAgesEvery(ctx, func(ctx context.Context) {
 		srv.ResolveCopyAges(ctx)
 		// The tails' housekeeping rides the same clock (#2407).
