@@ -534,6 +534,34 @@ here); `--format json` for scripts. **`server remove <name>`** stops recording a
 server and takes it off the list, after asking (`--yes` does not ask). What
 was already recorded and copied is kept.
 
+**The first copy and the MySQL port.** After `server add`, two more commands
+reach a query answered on port 3309, with no web interface:
+
+```
+bintrail-console snapshot run shop                   # read every table once, and wait
+bintrail-console snapshot schedule shop --every 1h   # keep the copy current
+bintrail-console port on                             # turn the MySQL port on
+mysql -h 127.0.0.1 -P 3309 -u shop -p
+```
+
+- `snapshot run <server>` starts the full read and waits until the copy is
+  ready, or says why it failed and exits 1. Ctrl-C stops the waiting, not the
+  read; `--no-wait` starts it and returns. `snapshot status <server>` says how
+  the last one ended. A read whose copy is complete on this machine and whose
+  copy to S3 failed is reported as that, not as "no copy".
+- `snapshot schedule <server> --every 1h` updates the copy from the recorded
+  changes, without reading the database again; `--off` stops it.
+- `port on` turns the MySQL port on and prints its password, which is shown
+  only then, with the `mysql` line to connect. Run again it does not print the
+  password: `port new-password` makes another, and the old one stops working
+  within a few seconds. `port status`, `port off`, and `port routing on|off`
+  for Engine Routing complete it. A port saved as on that is not answering
+  (the router is not running) exits 1 and says so.
+
+What still needs the web interface or the API: the forwarding user Engine
+Routing runs statements as on your MySQL, per server (`route_user`), an S3
+destination, and editing a server that is already added.
+
 **How a command is let in.** Once its port is open, DBTrail writes
 `console-cli.json` beside its login file (`~/.config/bintrail/`, or
 `/var/lib/bintrail/` in the Docker image and the Linux packages): its address

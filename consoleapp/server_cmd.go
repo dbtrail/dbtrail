@@ -456,7 +456,7 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 	switch {
 	case res.OK:
 		fmt.Fprintf(out, "\nAdded %q. DBTrail is recording its changes.\n", res.Name)
-		fmt.Fprintf(out, "Next, the first copy of its tables: Snapshots, Read database now, in the web interface.\n")
+		fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
 		return nil
 	case failed > 0:
 		it := "them"
