@@ -63,6 +63,13 @@ func (g *CaptureGap) Reason() string {
 // carry the finding into their payload (the MCP reconstruct tool) call this
 // directly. A nil result means "no permanent loss in scope, and that verdict
 // was actually evaluated".
+//
+// An operator's ACKNOWLEDGEMENT of the loss (stream_state.gap_acked_at, stamped
+// when the source is stopped in the console) is deliberately not consulted: it
+// silences the alarm surfaces, and the events are as gone as before. A window
+// spanning the loss stays a gap until the window no longer spans it, which is
+// what a full snapshot taken after the loss achieves (its anchor is the new
+// `since`).
 func CaptureGapStatus(ctx context.Context, db *sql.DB, since, until time.Time) (*CaptureGap, error) {
 	ss, err := status.LoadStreamState(ctx, db)
 	if err != nil {

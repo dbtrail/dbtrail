@@ -121,6 +121,24 @@ func TestCollectCoverageSummary(t *testing.T) {
 		}
 	})
 
+	t.Run("acknowledged gap is gap_acknowledged with both instants, never ok", func(t *testing.T) {
+		db, mock := newDB(t)
+		mock.MatchExpectationsInOrder(false)
+		expectWindow(mock)
+		lost := latest.Add(-time.Hour)
+		mock.ExpectQuery("SELECT mode, binlog_file").WillReturnRows(sqlmock.NewRows(covStreamCols).
+			AddRow("gtid", "", 0, "uuid:1-9", 100, latest, latest, 7, "id-1", lost, "auto-advance"))
+		mock.ExpectQuery("SELECT gap_acked_at FROM stream_state").
+			WillReturnRows(sqlmock.NewRows([]string{"gap_acked_at"}).AddRow(lost.Add(10 * time.Minute)))
+		sum, err := CollectCoverageSummary(context.Background(), db, "binlog_index", now)
+		if err != nil || sum.Continuity != "gap_acknowledged" {
+			t.Fatalf("continuity=%q err=%v, want gap_acknowledged", sum.Continuity, err)
+		}
+		if !sum.GapLostAt.Equal(lost) || !sum.GapAckedAt.Equal(lost.Add(10*time.Minute)) {
+			t.Fatalf("lost=%v acked=%v", sum.GapLostAt, sum.GapAckedAt)
+		}
+	})
+
 	t.Run("stream read failure degrades to unavailable, not an error", func(t *testing.T) {
 		db, mock := newDB(t)
 		expectWindow(mock)

@@ -149,3 +149,34 @@ func TestTablesCreatedSince_readsSchemaChanges(t *testing.T) {
 		t.Fatalf("a CREATE after the snapshot: got %v, %v", got, err)
 	}
 }
+
+// The quiet-server gate's other index read, against a real stream_state: a
+// capture loss on record at or after the last snapshot is found, acknowledged
+// or not; one before it is not; and an index that cannot say (no row, or no
+// loss columns) adds no reason to run.
+func TestLossOnRecordSince_readsStreamState(t *testing.T) {
+	db, name := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	dsn := testutil.IntegrationDSN(name)
+	since := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	ask := func(what string, want bool) {
+		t.Helper()
+		if got, err := realLossOnRecordSince(ctx, dsn, since); err != nil || got != want {
+			t.Fatalf("%s: got %v, %v; want %v", what, got, err, want)
+		}
+	}
+	ask("no stream_state row", false)
+	testutil.MustExec(t, db, "INSERT INTO stream_state (id, mode, server_id, last_checkpoint) VALUES (1, 'gtid', 7, UTC_TIMESTAMP())")
+	ask("no loss on record", false)
+	testutil.MustExec(t, db, "UPDATE stream_state SET gap_lost_at = ?, gap_lost_detail = 'purged', gap_acked_at = NULL WHERE id = 1", since.Add(-time.Hour))
+	ask("a loss before the snapshot", false)
+	testutil.MustExec(t, db, "UPDATE stream_state SET gap_lost_at = ?, gap_acked_at = NULL WHERE id = 1", since.Add(time.Hour))
+	ask("a loss after the snapshot", true)
+	testutil.MustExec(t, db, "UPDATE stream_state SET gap_acked_at = ? WHERE id = 1 AND gap_lost_at IS NOT NULL", since.Add(2*time.Hour))
+	ask("the same loss, acknowledged", true)
+	testutil.MustExec(t, db, "ALTER TABLE stream_state DROP COLUMN gap_acked_at")
+	ask("an index without the acknowledgement column", true)
+	testutil.MustExec(t, db, "ALTER TABLE stream_state DROP COLUMN gap_lost_at, DROP COLUMN gap_lost_detail")
+	ask("an index older than the loss record", false)
+}

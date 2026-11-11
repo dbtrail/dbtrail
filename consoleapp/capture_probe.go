@@ -40,7 +40,8 @@ import (
 //     gap");
 //   - a loss stamped at or after the anchor: a capture that auto-advanced
 //     past an unfillable gap reaches the head with the gap's events gone,
-//     and only a full backup reads them again;
+//     and only a full backup reads them again. Acknowledged or not: this
+//     reads GapLostAt, which an acknowledgement (GapAckedAt) leaves set;
 //   - a skip ledger that is unreadable (not clean: unevaluable), or holds a
 //     skip no full backup has read the source after: a capture that drops
 //     every row it reads (#1034) advances its checkpoint all the same and

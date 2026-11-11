@@ -370,7 +370,8 @@ func gapLostInWindow(gapLostAt sql.NullTime, windowStart time.Time) bool {
 //     behind index surfaces as a (conclusive, investigable) mismatch rather
 //     than being silently masked.
 //
-// Hard stops stay hard: a stamped permanent loss (gap_lost_at) means events
+// Hard stops stay hard: a stamped permanent loss (gap_lost_at, which an
+// operator's acknowledgement leaves in place) means events
 // in the window may be gone — inconclusive, never a false mismatch — and a
 // missing/foreign-flavor/zero checkpoint means no PG stream has ever
 // checkpointed here, so there is nothing to assume "caught up".

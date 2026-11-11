@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/status"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -47,9 +48,15 @@ func TestPersistSlotLostPG(t *testing.T) {
 	}
 
 	// (2) Existing checkpoint row → the stamp must preserve the position/checkpoint and
-	// only update gap_lost_*. Write a real checkpoint first.
+	// only update gap_lost_*. Write a real checkpoint first, date the loss from (1) in
+	// the past and acknowledge it NOW: the second stamp is a NEW loss, so it must move
+	// gap_lost_at forward (an old fixed time is what makes that visible: a stamp that
+	// left the time alone would still read "set") and withdraw the acknowledgement in
+	// the same statement. Left in place, that acknowledgement would be newer than or
+	// equal to the new loss and the new loss would read as acknowledged.
 	if _, err := indexDB.ExecContext(ctx,
-		`UPDATE stream_state SET binlog_position=999, binlog_file='5/ABC', gap_lost_at=NULL, gap_lost_detail=NULL WHERE id=1`); err != nil {
+		`UPDATE stream_state SET binlog_position=999, binlog_file='5/ABC',
+			gap_lost_at='2020-01-02 03:04:05', gap_acked_at=UTC_TIMESTAMP() WHERE id=1`); err != nil {
 		t.Fatalf("seed checkpoint: %v", err)
 	}
 	persistSlotLostPG(indexDB, 51, "lost again", logger)
@@ -66,6 +73,22 @@ func TestPersistSlotLostPG(t *testing.T) {
 	}
 	if gapDetail.String != "lost again" {
 		t.Errorf("gap_lost_detail not updated on the existing row: %q", gapDetail.String)
+	}
+	var restamped, ackSet bool
+	if err := indexDB.QueryRowContext(ctx,
+		"SELECT gap_lost_at > '2020-01-02 03:04:05', gap_acked_at IS NOT NULL FROM stream_state WHERE id=1").
+		Scan(&restamped, &ackSet); err != nil {
+		t.Fatalf("read back the acknowledgement: %v", err)
+	}
+	if !restamped {
+		t.Error("the stamp on an existing row must move gap_lost_at to now; it still reads the old time")
+	}
+	if ackSet {
+		t.Error("a new loss must not be born acknowledged: gap_acked_at survived the stamp")
+	}
+	// Through the reader every surface uses: on record, and not acknowledged.
+	if st, err := status.LoadStreamState(ctx, indexDB); err != nil || st == nil || !st.GapUnacknowledged() {
+		t.Errorf("after the second stamp the loss must read as unacknowledged: %+v, %v", st, err)
 	}
 }
 

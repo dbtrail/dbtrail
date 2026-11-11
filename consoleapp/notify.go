@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/notify"
@@ -177,21 +179,45 @@ func (n *watchNotifier) RotationCycle(failed bool, deferred int) {
 	})
 }
 
+// gapReading is what one read of an index's stream_state says about a
+// permanent capture loss, as far as the alarm is concerned.
+type gapReading struct {
+	// lost: a loss is on record and nobody has acknowledged it. The alarm.
+	lost bool
+	// acknowledged: a loss is on record and an operator acknowledged it. Not
+	// an alarm; kept apart from "no loss on record" because the two end the
+	// alarm with different facts, and the message must not state the wrong one.
+	acknowledged bool
+	// detail is the loss's recorded description; set only with lost.
+	detail string
+}
+
 // Continuity reports one index's stream continuity. gap_lost is critical:
 // events in the gap are permanently unrecoverable. edgeKey identifies the
 // index (the target DSN — unique after dedup, unlike display names, which a
 // registry entry could share with the reserved boot label).
-func (n *watchNotifier) Continuity(server, edgeKey string, gapLost bool, detail string) {
+//
+// The alarm ends two ways, and the resolved message says which. An operator
+// acknowledged the loss: the record is still there and still refuses the
+// windows that span it. Or no loss is on record any more: the row is gone, the
+// index was replaced, or a console older than the acknowledgement column
+// stopped the source and cleared the record.
+func (n *watchNotifier) Continuity(server, edgeKey string, r gapReading) {
 	key := "continuity:" + edgeKey
-	if !gapLost {
+	if !r.lost {
 		if n.edge.Resolve(key) {
+			summary := continuityRestoredSummary
+			if r.acknowledged {
+				summary = continuityAcknowledgedSummary
+			}
 			n.send.Notify(notify.Event{
 				Event: notify.EventContinuityGapLost, Severity: notify.SeverityInfo, Server: server, Resolved: true,
-				Summary: "capture continuity restored (the stream was re-baselined)",
+				Summary: summary,
 			})
 		}
 		return
 	}
+	detail := r.detail
 	// The detail rides the edge: a DIFFERENT gap while the first is still
 	// active (re-baseline plus a second loss inside one repeat window) is a
 	// new data-loss event — Edge.Fire bypasses the suppression window on a
@@ -208,6 +234,12 @@ func (n *watchNotifier) Continuity(server, edgeKey string, gapLost bool, detail 
 	}
 	n.send.Notify(ev)
 }
+
+// The two resolved messages of continuity_gap_lost (see Continuity).
+const (
+	continuityAcknowledgedSummary = "capture loss acknowledged: this alarm is cleared; snapshot updates and reconstructions whose window spans the loss are still refused until a full snapshot is taken after it"
+	continuityRestoredSummary     = "capture continuity restored: this index no longer has a capture loss on record"
+)
 
 // bootContinuityName labels the command-line boot index in continuity/verify
 // gauges and webhook events.
@@ -598,7 +630,7 @@ type continuityTarget struct {
 }
 
 // startContinuityWatch polls each index's stream_state for a stamped
-// gap_lost_at, publishes the verdict as a Prometheus gauge (#1203), and —
+// gap_lost_at nobody has acknowledged, publishes the verdict as a Prometheus gauge (#1203), and —
 // when a notifier is configured — edge-notifies transitions. Its own loop,
 // deliberately NOT piggybacked on rotation (rotation can be off) or the
 // metrics scraper (it lives in the capture plane). n may be nil: the watch
@@ -648,7 +680,7 @@ type continuityWatcher struct {
 	// (a stale gap_lost=1 would alert forever; a stale gap_lost=0 would read
 	// "evaluated, healthy" for an index nobody evaluates).
 	prevNames map[string]bool
-	readGap   func(ctx context.Context, dsn string) (gapLost bool, detail string, err error)
+	readGap   func(ctx context.Context, dsn string) (gapReading, error)
 }
 
 func (w *continuityWatcher) runCycle(ctx context.Context) {
@@ -669,7 +701,7 @@ func (w *continuityWatcher) runCycle(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		gapLost, detail, err := w.readGap(ctx, t.dsn)
+		reading, err := w.readGap(ctx, t.dsn)
 		if err != nil {
 			// Unknown is never "no gap" — and never silent either: a watcher
 			// that cannot watch is itself a coverage hole. The gauge is
@@ -683,9 +715,10 @@ func (w *continuityWatcher) runCycle(ctx context.Context) {
 			continue
 		}
 		w.unknownEdge.Resolve("continuity-unknown:" + t.dsn)
-		observe.SetContinuityGapLost(t.name, gapLost)
+		// The gauge is the alarm: 1 only for a loss nobody has acknowledged.
+		observe.SetContinuityGapLost(t.name, reading.lost)
 		if w.n != nil {
-			w.n.Continuity(t.name, t.dsn, gapLost, detail)
+			w.n.Continuity(t.name, t.dsn, reading)
 		}
 	}
 }
@@ -731,23 +764,50 @@ func continuityTargets(registry *console.Registry, bootDSN string) []continuityT
 // non-nil error means the state is unknowable right now (index unreachable,
 // or a legacy schema without the gap columns) — the caller must treat it as
 // unknown, never as "no gap", and must say so.
-func readGapLost(ctx context.Context, dsn string) (gapLost bool, detail string, err error) {
+func readGapLost(ctx context.Context, dsn string) (gapReading, error) {
 	db, err := config.Connect(dsn)
 	if err != nil {
-		return false, "", err
+		return gapReading{}, err
 	}
 	defer db.Close()
-	var lost bool
+	return readGapLostFrom(ctx, db)
+}
+
+// readGapLostFrom is readGapLost on an open connection. lost is true for a
+// loss on record that nobody has acknowledged (status.GapLossAcknowledged):
+// this is an alarm reader. acknowledged is true for a loss on record that an
+// operator acknowledged, so the caller can tell that from no record at all.
+// The loss itself stays in gap_lost_at for the readers that refuse on it.
+//
+// An index that has gap_lost_* but not gap_acked_at (the capture daemon adds
+// the column when it starts; the console never migrates a registry index)
+// cannot hold an acknowledgement, so the read falls back to the meaning the
+// stamp had before the column existed: lost iff gap_lost_at is set. Only the
+// unknown-column error takes that fallback, and if the fallback fails too
+// (a legacy schema without gap_lost_at either) the error is returned:
+// unknown, never "no gap".
+func readGapLostFrom(ctx context.Context, db *sql.DB) (gapReading, error) {
+	var lostAt, ackedAt sql.NullTime
 	var d sql.NullString
-	err = db.QueryRowContext(ctx,
-		"SELECT gap_lost_at IS NOT NULL, gap_lost_detail FROM stream_state WHERE id = 1").Scan(&lost, &d)
+	err := db.QueryRowContext(ctx,
+		"SELECT gap_lost_at, gap_lost_detail, gap_acked_at FROM stream_state WHERE id = 1").Scan(&lostAt, &d, &ackedAt)
+	var me *mysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1054 {
+		ackedAt = sql.NullTime{}
+		err = db.QueryRowContext(ctx,
+			"SELECT gap_lost_at, gap_lost_detail FROM stream_state WHERE id = 1").Scan(&lostAt, &d)
+	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// Empty stream_state = no capture ran = genuinely no continuity to
 		// break (same rule as verify's gap evaluation).
-		return false, "", nil
+		return gapReading{}, nil
 	case err != nil:
-		return false, "", err
+		return gapReading{}, err
+	case !lostAt.Valid:
+		return gapReading{}, nil
+	case status.GapLossAcknowledged(lostAt, ackedAt):
+		return gapReading{acknowledged: true}, nil
 	}
-	return lost, d.String, nil
+	return gapReading{lost: true, detail: d.String}, nil
 }

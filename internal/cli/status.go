@@ -217,16 +217,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// so status keeps exiting 0 as before (break-nothing for existing scripts).
 	if stFailOnGap {
 		cmd.SilenceUsage = true
-		switch {
-		case data.StreamErr != nil:
-			return fmt.Errorf("stream continuity: could not read stream state (%w); failing closed under --fail-on-gap", data.StreamErr)
-		case data.Stream == nil:
-			return fmt.Errorf("stream continuity: could not confirm gap state (no stream state loaded); failing closed under --fail-on-gap")
-		case !data.Stream.GapColumnsPresent:
-			return fmt.Errorf("stream continuity: could not confirm gap state (legacy index missing gap-detection columns; migrate the schema); failing closed under --fail-on-gap")
-		case data.Stream.GapLostAt.Valid:
-			return fmt.Errorf("stream continuity: events permanently lost (gap detected at %s); index is valid only up to the gap, resume requires re-baseline",
-				data.Stream.GapLostAt.Time.Format(status.TSFmt))
+		if err := continuityFailure(data.Stream, data.StreamErr); err != nil {
+			return err
 		}
 		// #999: a non-zero IN-SCOPE statement-format DML count is the same loss
 		// class as gap_lost — those changes are permanently absent from the
@@ -434,4 +426,30 @@ func statusRetention(ctx context.Context, db *sql.DB, dbName string) *status.Ret
 		info.OldestHistory = g.Oldest.UTC().Format("2006-01-02 15:04 UTC")
 	}
 	return info
+}
+
+// continuityFailure is the continuity half of --fail-on-gap: the error for a
+// recorded permanent loss, or for a gap state that could not be confirmed
+// (which fails closed), and nil otherwise.
+//
+// An ACKNOWLEDGED loss does not fail the flag. Acknowledging used to erase the
+// record, which passed this check; it now keeps the record and stamps
+// gap_acked_at beside it, and the alarm must read the same. The continuity
+// verdict in the report is "gap_acknowledged", not "ok": this flag is an
+// alarm and decides on GapUnacknowledged, not on that word. The loss is still
+// refused where it matters (a reconstruction or snapshot update whose window
+// spans it), and a later loss NULLs the acknowledgement and fails here again.
+func continuityFailure(stream *status.StreamStateInfo, streamErr error) error {
+	switch {
+	case streamErr != nil:
+		return fmt.Errorf("stream continuity: could not read stream state (%w); failing closed under --fail-on-gap", streamErr)
+	case stream == nil:
+		return fmt.Errorf("stream continuity: could not confirm gap state (no stream state loaded); failing closed under --fail-on-gap")
+	case !stream.GapColumnsPresent:
+		return fmt.Errorf("stream continuity: could not confirm gap state (legacy index missing gap-detection columns; migrate the schema); failing closed under --fail-on-gap")
+	case stream.GapUnacknowledged():
+		return fmt.Errorf("stream continuity: events permanently lost (gap detected at %s); index is valid only up to the gap, resume requires re-baseline",
+			stream.GapLostAt.Time.Format(status.TSFmt))
+	}
+	return nil
 }

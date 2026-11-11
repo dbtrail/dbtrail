@@ -139,23 +139,23 @@ func TestWatchNotifier_RotationCycle(t *testing.T) {
 
 func TestWatchNotifier_Continuity(t *testing.T) {
 	n, f := testNotifier()
-	n.Continuity("wp", "dsn-wp", true, "binlog gap at file 42")
-	n.Continuity("wp", "dsn-wp", true, "binlog gap at file 42")
+	n.Continuity("wp", "dsn-wp", gapReading{lost: true, detail: "binlog gap at file 42"})
+	n.Continuity("wp", "dsn-wp", gapReading{lost: true, detail: "binlog gap at file 42"})
 	if len(f.events) != 1 || f.events[0].Severity != "critical" || f.events[0].Details["detail"] != "binlog gap at file 42" {
 		t.Fatalf("want one critical continuity event, got %+v", f.events)
 	}
 	// A DIFFERENT gap while the first is active is a new data-loss event —
 	// the changed detail bypasses the repeat window.
-	n.Continuity("wp", "dsn-wp", true, "binlog gap at file 99")
+	n.Continuity("wp", "dsn-wp", gapReading{lost: true, detail: "binlog gap at file 99"})
 	if len(f.events) != 2 || f.events[1].Details["detail"] != "binlog gap at file 99" {
 		t.Fatalf("changed gap detail must re-notify, got %+v", f.events)
 	}
 	// A different index is its own edge key.
-	n.Continuity("other", "dsn-other", true, "")
+	n.Continuity("other", "dsn-other", gapReading{lost: true, detail: ""})
 	if len(f.events) != 3 {
 		t.Fatalf("second index must fire independently, got %+v", f.events)
 	}
-	n.Continuity("wp", "dsn-wp", false, "")
+	n.Continuity("wp", "dsn-wp", gapReading{})
 	if len(f.events) != 4 || !f.events[3].Resolved {
 		t.Fatalf("recovery must resolve once, got %+v", f.events)
 	}

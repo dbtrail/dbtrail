@@ -120,11 +120,11 @@ func TestContinuityWatcher_runCycle(t *testing.T) {
 		registry:    reg, // n is nil: the Prometheus-only deployment must not panic
 		unknownEdge: notify.NewEdge(0),
 		prevNames:   make(map[string]bool),
-		readGap: func(_ context.Context, dsn string) (bool, string, error) {
+		readGap: func(_ context.Context, dsn string) (gapReading, error) {
 			if dsn == "dsn-cw-b" {
-				return false, "", errors.New("unknown column 'gap_lost_at'")
+				return gapReading{}, errors.New("unknown column 'gap_lost_at'")
 			}
-			return true, "binlog gap", nil
+			return gapReading{lost: true, detail: "binlog gap"}, nil
 		},
 	}
 	w.runCycle(context.Background())

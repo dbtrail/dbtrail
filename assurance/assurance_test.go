@@ -56,6 +56,7 @@ func TestConstantsMatchTheCore(t *testing.T) {
 	}{
 		{"ContinuityOK", ContinuityOK, status.ContinuityOK},
 		{"ContinuityGapLost", ContinuityGapLost, status.ContinuityGapLost},
+		{"ContinuityGapAcknowledged", ContinuityGapAcknowledged, status.ContinuityGapAcknowledged},
 		{"ContinuityUnknown", ContinuityUnknown, status.ContinuityUnknown},
 		{"ContinuityUnavailable", ContinuityUnavailable, status.ContinuityUnavailable},
 		{"ContinuityNone", ContinuityNone, status.ContinuityNone},

@@ -301,7 +301,10 @@ func captureGapInWindow(ctx context.Context, db *sql.DB, since, until time.Time)
 	return v, why, nil
 }
 
-// classifyCaptureGap is the pure half of captureGapInWindow.
+// classifyCaptureGap is the pure half of captureGapInWindow. It reads GapLostAt
+// only: an operator's acknowledgement (GapAckedAt) silences the alarm and
+// leaves the loss on record, so an acknowledged loss inside the window is
+// still inconclusive.
 func classifyCaptureGap(ss *status.StreamStateInfo, since, until time.Time) (captureGapVerdict, string) {
 	switch {
 	case ss == nil:

@@ -634,6 +634,13 @@ try {
     okStrip.remove();
     const gapBox = continuityBox({ gap_lost: { at: "2026-06-22 12:00:00", detail: "unfillable binlog gap" } }, false);
     const gapWins = continuityBox({ gap_lost: { at: "t", detail: "d" }, continuity: { status: "ok" } }, false);
+    // A loss an operator acknowledged: on record. Neutral, never green.
+    const ackedStream = { continuity: { status: "gap_acknowledged" }, gap_acknowledged: { at: "2026-06-22 12:00:00", acknowledged_at: "2026-06-22 13:00:00", detail: "unfillable binlog gap" } };
+    const ackedBox = continuityBox(ackedStream, false);
+    const ackedModel = statusFlowModel({ stream: ackedStream }, null, {});
+    const ackedCard = covCard({ delta_from: "2026-06-20 00:00:00", delta_to: "2026-06-22 14:00:00", freshness: "current", lag_seconds: 3,
+      continuity: "gap_acknowledged", gap_acknowledged: { at: "2026-06-22 12:00:00", acknowledged_at: "2026-06-22 13:00:00" } }, { at: "12:00:00 UTC" });
+    const ackedChips = [...ackedCard.querySelectorAll(".cov-chip")].map((c) => ({ cls: c.className, text: c.textContent }));
     const unknownBox = continuityBox({ continuity: { status: "unknown" } }, false);
     const missingBox = continuityBox({ mode: "gtid" }, false); // legacy backend: no continuity field
     const nilBox = continuityBox(null, false);
@@ -647,6 +654,11 @@ try {
       unknownStation: unknownModel.pieces[2].tone === "none",
       gapRed: !!gapBox && gapBox.classList.contains("error-box") && /permanently lost/i.test(gapBox.textContent),
       gapPrecedence: !!gapWins && gapWins.classList.contains("error-box"),
+      ackedBoxMuted: !!ackedBox && ackedBox.classList.contains("muted-box") && /Changes were lost at 2026-06-22 12:00:00 UTC and that was acknowledged at 2026-06-22 13:00:00 UTC/.test(ackedBox.textContent)
+        && /refused until the database is read in full again/.test(ackedBox.textContent),
+      ackedStation: ackedModel.pieces[2].tone === "none" && ackedModel.pieces[2].line === "changes lost, on record",
+      ackedChip: ackedChips.some((c) => c.text === "changes lost, on record" && !/\b(ok|bad)\b/.test(c.cls)) && !ackedChips.some((c) => /^continuity /.test(c.text)),
+      ackedCardLine: /Changes were lost at 2026-06-22 12:00:00 UTC and that was acknowledged/.test(ackedCard.textContent),
       unknownNeither: unknownBox === null,
       missingNeither: missingBox === null,
       nilNeither: nilBox === null,
@@ -661,6 +673,12 @@ try {
   cont.unknownStation ? ok("continuity: unknown draws no verdict on the station") : bad("continuity: unknown draws no verdict on the station", "station claimed a verdict for unknown");
   cont.gapRed ? ok("continuity: gap_lost renders the red error-box") : bad("continuity: gap_lost renders the red error-box", "no .error-box");
   cont.gapPrecedence ? ok("continuity: gap_lost takes precedence over a stale ok") : bad("continuity: gap_lost takes precedence over a stale ok", "green won over a gap");
+  (cont.ackedBoxMuted && cont.ackedStation)
+    ? ok("continuity: an acknowledged loss is a muted on-record box and a neutral station, never green")
+    : bad("continuity: an acknowledged loss is a muted on-record box and a neutral station, never green", JSON.stringify(cont));
+  (cont.ackedChip && cont.ackedCardLine)
+    ? ok("continuity: the coverage card says an acknowledged loss in words, with no continuity chip")
+    : bad("continuity: the coverage card says an acknowledged loss in words, with no continuity chip", JSON.stringify(cont));
   cont.unknownNeither ? ok("continuity: unknown shows neither box") : bad("continuity: unknown shows neither box", "rendered a box for unknown");
   cont.missingNeither ? ok("continuity: missing continuity (legacy backend) shows no green") : bad("continuity: missing continuity (legacy backend) shows no green", "rendered green without continuity");
   cont.nilNeither ? ok("continuity: nil stream shows neither box") : bad("continuity: nil stream shows neither box", "rendered a box for nil stream");

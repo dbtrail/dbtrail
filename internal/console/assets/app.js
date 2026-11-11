@@ -1467,10 +1467,25 @@ function ovCaptureAsk(c, draw) {
   ask(true);
 }
 
+// gapAcknowledgedText says a capture loss that an operator acknowledged: when
+// changes were lost, that it was acknowledged, and what is still refused
+// because of it. One sentence builder for the two places that show it (the
+// Restore coverage card and the Status page), so they cannot tell two stories.
+// g is {at, acknowledged_at}; either may be missing on an older daemon.
+function gapAcknowledgedText(g) {
+  const at = g && g.at ? " at " + utcLabel(g.at) : "";
+  const acked = g && g.acknowledged_at ? " at " + utcLabel(g.acknowledged_at) : "";
+  return "Changes were lost" + at + " and that was acknowledged" + acked + ". " +
+    "Updates of the copy and time travel across that moment are refused until the database is read in full again " +
+    "(Read database now, on the Snapshots page).";
+}
+
 // covCard renders the live RPO statement (#1194). The window's upper edge is
 // the last INDEXED event on purpose — "restorable up to now" with a dead
 // stream would be false assurance; the lag chip is what says "now". Degrades
-// loudly: gap_lost/unavailable red, unknown amber, empty index explicit.
+// loudly: gap_lost/unavailable red, unknown amber, empty index explicit. A
+// loss an operator acknowledged ("gap_acknowledged") is on record: neutral,
+// never green, with the sentence that says what it still refuses.
 function covCard(c, stamp) {
   const card = el("section", { class: "ov-panel cov-card" });
   card.append(el("div", { class: "ov-panel-head" },
@@ -1480,6 +1495,7 @@ function covCard(c, stamp) {
   const cont = c.continuity || "unknown";
   const bad = cont === "gap_lost" || cont === "unavailable";
   const warn = cont === "unknown";
+  const onRecord = cont === "gap_acknowledged";
   if (bad && !c.delta_to) {
     // Unreachable/broken backend: say nothing about the window — "no events
     // yet" would be a positive factual claim about an index we couldn't read.
@@ -1522,10 +1538,16 @@ function covCard(c, stamp) {
     : el("span", { class: "cov-chip" + freshTone, text: "capture " + fresh }));
   // "none" (file-mode: no capture ran) stays NEUTRAL — green would paint a
   // non-claim as assurance.
-  chips.append(el("span", { class: "cov-chip" + (bad ? " bad" : warn ? " warn" : cont === "ok" ? " ok" : ""), text: "continuity " + cont }));
+  // An acknowledged loss says what it is, in words: neutral like "none", and
+  // never the verdict word, which would read as a state to look up.
+  chips.append(onRecord
+    ? el("span", { class: "cov-chip", text: "changes lost, on record" })
+    : el("span", { class: "cov-chip" + (bad ? " bad" : warn ? " warn" : cont === "ok" ? " ok" : ""), text: "continuity " + cont }));
   card.append(chips);
   if (cont === "gap_lost") {
     card.append(el("p", { class: "cov-line bad", text: "Events were lost for good: the window has a hole, and points past it need a fresh snapshot." }));
+  } else if (onRecord) {
+    card.append(el("p", { class: "cov-line warn", text: gapAcknowledgedText(c.gap_acknowledged) }));
   } else if (cont === "unavailable") {
     card.append(el("p", { class: "cov-line bad", text: "Continuity could not be read. Treat the window as unverified." }));
   } else if (warn) {
@@ -2015,6 +2037,11 @@ function ovFlowModel(inp) {
   } else {
     const fresh = cov.freshness || "";
     const cont = cov.continuity || "";
+    // "gap_acknowledged" is deliberately not a branch here: this piece says
+    // whether capture is reading NOW, and after an acknowledged loss it is
+    // (the freshness words below). The loss itself is said on the Restore
+    // coverage card beside it, and the copy's own piece turns red when an
+    // update is refused because of it.
     if (cont === "gap_lost") {
       capture = piece("binlog", "bad", "changes lost for good", lastIndexed ? "last change " + lastIndexed : "");
       cut = { at: lastIndexed, piece: "capture" };
@@ -6028,8 +6055,12 @@ function statusFlowModel(data, capacity, caps, copy) {
   const held = (exact ? "" : "about ") + n(events) + " events · " + parts + " hour" + (parts === 1 ? "" : "s");
   const ch = stream && stream.capture_health;
   let dbt;
+  // A loss an operator acknowledged is on record: neutral, and never "no
+  // gaps". Either field says so (the verdict word, or the object beside it).
+  const gapOnRecord = !!stream && (!!stream.gap_acknowledged || (!!stream.continuity && stream.continuity.status === "gap_acknowledged"));
   if (stream && stream.gap_lost) dbt = piece("DBTrail", "bad", "events permanently lost", held);
   else if (ch && ch.status === "degraded" && !ch.acknowledged) dbt = piece("DBTrail", "warn", n(ch.total_skipped) + " changes skipped", held);
+  else if (gapOnRecord) dbt = piece("DBTrail", "none", "changes lost, on record", held);
   else if (stream && stream.continuity && stream.continuity.status === "ok") dbt = piece("DBTrail", "ok", "no gaps", held);
   else if (stream) dbt = piece("DBTrail", "none", "gaps not checkable", held);
   else dbt = piece("DBTrail", "none", held, "");
@@ -6827,7 +6858,9 @@ function capacityBox(cap) {
 // (PostgreSQL, #532); the index is valid only up to that point and capture must
 // be re-baselined to resume. It keys on gap_lost, emitted independently of
 // continuity — so a legacy backend that omits continuity still shows it on a lost
-// stream. The affirmative counterpart (continuity.status === "ok") is the
+// stream. A loss an operator acknowledged (gap_acknowledged) is a muted box:
+// on record, with what it still refuses. The affirmative counterpart
+// (continuity.status === "ok") is the
 // strip's DBTrail station since #1950, not a box; "unknown" (legacy index)
 // and a missing continuity field draw no verdict anywhere. Pure and
 // fixture-drivable, mirroring pgHealthCard: the console-e2e harness pins the
@@ -6842,6 +6875,17 @@ function continuityBox(stream, pg) {
           : "A gap in the binlog can't be filled; some history is permanently missing. To keep capturing changes, create a new snapshot and start over.") }));
     lost.append(el("div", { text: "Detected: " + utcLabel(stream.gap_lost.at) }));
     return lost;
+  }
+  // The same loss after an operator acknowledged it (stopping the server):
+  // on record, like an acknowledged capture-skip tally. Muted, not red and
+  // not green, and it says what is still refused because of it.
+  if (stream.gap_acknowledged || (stream.continuity && stream.continuity.status === "gap_acknowledged")) {
+    const g = stream.gap_acknowledged || {};
+    const rec = el("div", { class: "muted-box" });
+    rec.append(el("b", { text: "Changes lost, on record (acknowledged)" }));
+    rec.append(el("div", { text: gapAcknowledgedText(g) }));
+    if (g.detail) rec.append(el("div", { text: "What capture recorded: " + g.detail }));
+    return rec;
   }
   // A clean verdict is a STATE, and states live on the strip: the DBTrail
   // station says "no gaps" while the capture arrow says whether capture is
@@ -7655,6 +7699,10 @@ function snapshotHeroTone(b, cov, cur) {
   if (!cov || cov.continuity === "unavailable" || cov.freshness === "unavailable" || cov.freshness === "unknown") {
     return { tone: "warn", why: "Capture state could not be read.", link: "overview" };
   }
+  // "gap_acknowledged" is not "lost": capture reads again after an
+  // acknowledged loss. Whether the copy is good is decided below, by its own
+  // last run: an update the loss refuses fails, and that is what turns this
+  // red, with the run's own reason.
   if (cov.freshness === "stalled" || cov.continuity === "gap_lost") {
     return { tone: "bad", why: "Capture is " + (cov.continuity === "gap_lost" ? "lost" : "stalled") + ", so nothing new reaches the copy.", link: "overview" };
   }

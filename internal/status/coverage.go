@@ -16,20 +16,35 @@ import (
 // buckets from the same StreamStateInfo fields for their own wording/exit
 // concerns; the wire vocabulary lives here.
 //
-//	"ok"          — no gap in the captured range (NOT a liveness assertion)
-//	"gap_lost"    — an unfillable gap was stamped: events permanently lost
-//	"unknown"     — legacy index without the gap columns; never a false "ok"
-//	"unavailable" — stream_state could not be read; never a false "ok"
-//	"none"        — no stream row (file-mode index): no capture ran, so no
-//	                continuity could break — a genuine no-claim, not a hole
+//	"ok"               — no loss on record for the captured range (NOT a
+//	                     liveness assertion)
+//	"gap_lost"         — an unfillable gap was stamped and nobody has
+//	                     acknowledged it: events permanently lost
+//	"gap_acknowledged" — an unfillable gap was stamped and an operator
+//	                     acknowledged it. The alarm is silenced; the events
+//	                     are as lost as under "gap_lost", and a window that
+//	                     spans the loss is still refused. Never "ok"
+//	"unknown"          — legacy index without the gap columns; never a false
+//	                     "ok"
+//	"unavailable"      — stream_state could not be read; never a false "ok"
+//	"none"             — no stream row (file-mode index): no capture ran, so
+//	                     no continuity could break — a genuine no-claim, not
+//	                     a hole
 func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 	switch {
 	case stream == nil && streamErr != nil:
 		return ContinuityUnavailable
 	case stream == nil:
 		return ContinuityNone
-	case stream.GapLostAt.Valid:
+	case stream.GapUnacknowledged():
 		return ContinuityGapLost
+	case stream.GapAcknowledged():
+		// Its own verdict, never ContinuityOK: "ok" over a hole this index
+		// knows about is what a consumer paints green. What an
+		// acknowledgement silences is the ALARM (--fail-on-gap, the webhook,
+		// the gauge, lost_position), and each of those decides on
+		// GapUnacknowledged, not on this string.
+		return ContinuityGapAcknowledged
 	case !stream.GapColumnsPresent:
 		return ContinuityUnknown
 	default:
@@ -38,16 +53,20 @@ func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 }
 
 // The continuity verdict vocabulary, named so a consumer branches on a symbol
-// instead of a literal. Only ContinuityGapLost and ContinuityOK are claims
-// about the captured range; a consumer that treats everything-but-gap_lost as
-// healthy folds the two "never a false ok" verdicts into a pass, which is the
-// error this vocabulary exists to prevent.
+// instead of a literal. Only ContinuityGapLost, ContinuityGapAcknowledged and
+// ContinuityOK are claims about the captured range, and only ContinuityOK says
+// nothing is known to be missing; a consumer that treats everything-but-gap_lost
+// as healthy folds an acknowledged loss and the two "never a false ok" verdicts
+// into a pass, which is the error this vocabulary exists to prevent.
 const (
-	ContinuityOK          = "ok"
-	ContinuityGapLost     = "gap_lost"
-	ContinuityUnknown     = "unknown"
-	ContinuityUnavailable = "unavailable"
-	ContinuityNone        = "none"
+	ContinuityOK      = "ok"
+	ContinuityGapLost = "gap_lost"
+	// ContinuityGapAcknowledged: a loss is on record and an operator
+	// acknowledged it. Not healthy and not alarming: on record.
+	ContinuityGapAcknowledged = "gap_acknowledged"
+	ContinuityUnknown         = "unknown"
+	ContinuityUnavailable     = "unavailable"
+	ContinuityNone            = "none"
 )
 
 // CoverageSummary is the lean live-RPO view behind the console's coverage
@@ -78,6 +97,12 @@ type CoverageSummary struct {
 	// measure, and an empty index has no edge to measure from.
 	LagSeconds *int64
 	Continuity string
+	// GapLostAt and GapAckedAt are the recorded loss and its acknowledgement,
+	// set only when Continuity is ContinuityGapAcknowledged: what a surface
+	// needs to say WHEN changes were lost and that someone acknowledged it,
+	// instead of a bare verdict word.
+	GapLostAt  time.Time
+	GapAckedAt time.Time
 	// Freshness is the LIVENESS verdict (#1226/#1227), computed here from the
 	// same stream row Continuity uses so the console cannot reach a different
 	// answer than `bintrail status`. It is what disambiguates LagSeconds: a big
@@ -92,6 +117,23 @@ type CoverageSummary struct {
 	// folded into this summary — they are a capture-plane verdict with their
 	// own surface (status Capture health, --fail-on-gap). The delta window
 	// here is about what the index CONTAINS.
+}
+
+// acknowledgedLossInWindow is the continuity verdict of a summary whose
+// stream holds an ACKNOWLEDGED loss stamped at lostAt: still on record while
+// the loss is inside the window the summary describes, which starts at the
+// delta-coverage floor (the oldest hour of changes still held), and ok once
+// the window starts after it. The record itself is never erased, so without
+// this a loss from years ago would keep every later summary off "ok" although
+// nothing it covers spans that moment. A loss AT the floor counts as inside.
+// With no floor, or a floor that archives may extend further back
+// (BelowIsUnknown), the window's start is not known and the loss stays on
+// record: "ok" is never asserted from a start that could not be established.
+func acknowledgedLossInWindow(lostAt time.Time, floor DeltaFloor) string {
+	if !floor.Hour.IsZero() && !floor.BelowIsUnknown && lostAt.Before(floor.Hour) {
+		return ContinuityOK
+	}
+	return ContinuityGapAcknowledged
 }
 
 // CollectCoverageSummary computes the summary against one index. The floor
@@ -116,6 +158,12 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 		slog.Warn("could not load stream state for the coverage summary", "db", dbName, "error", streamErr)
 	}
 	sum.Continuity = ContinuityStatus(stream, streamErr)
+	if sum.Continuity == ContinuityGapAcknowledged {
+		sum.Continuity = acknowledgedLossInWindow(stream.GapLostAt.Time, sum.Floor)
+	}
+	if sum.Continuity == ContinuityGapAcknowledged {
+		sum.GapLostAt, sum.GapAckedAt = stream.GapLostAt.Time, stream.GapAckedAt.Time
+	}
 	sum.Freshness = FreshnessStatus(stream, streamErr, now, 0, 0)
 	if age, ok := CheckpointAge(stream, now); ok {
 		secs := int64(age / time.Second)

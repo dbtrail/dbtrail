@@ -37,9 +37,10 @@ slot had not yet streamed, so discarding a real checkpoint is durably recorded
 as a permanent continuity loss (gap_lost_at/gap_lost_detail in stream_state,
 naming the discarded LSN) — 'bintrail status' shows the EVENTS PERMANENTLY LOST
 banner and 'status --fail-on-gap' exits non-zero. The loss always remains
-recorded: a real-checkpoint reset replaces a prior unacknowledged record's
-detail with its own; only a no-checkpoint reset preserves a prior record
-verbatim. Run reset with the stream stopped.
+recorded: a real-checkpoint reset replaces a prior record's detail with its
+own and, being a new loss, withdraws any acknowledgement of the prior one; only
+a no-checkpoint reset preserves a prior record verbatim. Run reset with the
+stream stopped.
 
 The slot is dropped first: if the run is interrupted between the two steps, the
 safe state is "slot gone, checkpoint stale" (the next stream fails loud) rather
@@ -193,7 +194,8 @@ type clearOutcome struct {
 // clearCheckpoint clears the stream_state checkpoint so the next `bintrail-pg stream`
 // starts fresh, WITHOUT DELETEing the row (#1082): a blind DELETE would also erase any
 // recorded gap_lost_at/gap_lost_detail continuity-loss record, letting a reset silently
-// launder a real, still-unacknowledged loss out of `bintrail status --fail-on-gap`.
+// launder a real loss out of `bintrail status --fail-on-gap` and out of every check
+// that refuses a window spanning it.
 //
 // It loads the existing row first and branches on whether a real checkpoint (a non-zero
 // LSN cursor — saveCheckpointPG never writes 0) is being discarded:
@@ -203,8 +205,9 @@ type clearOutcome struct {
 //     THE SAME STATEMENT that clears the cursor — one atomic write, which satisfies the
 //     safety property PR #1080's MySQL --reset enforces by ordering (stamp before
 //     advance): the clear can never become durable without the stamp. A prior
-//     unacknowledged record's detail is replaced by the reset detail (#1080 jump
-//     semantics); the loss flag itself is never cleared here.
+//     record's detail is replaced by the reset detail (#1080 jump semantics) and
+//     any acknowledgement of it is withdrawn (gap_acked_at = NULL: the discard is
+//     a new loss); the loss flag itself is never cleared here.
 //   - no checkpoint (row seeded by a lost-slot stamp or a pre-commit health snapshot,
 //     or an earlier reset): nothing is discarded — clear only the position/counter
 //     columns and leave any prior gap_lost_* record untouched (#1080's no-op path).
@@ -277,23 +280,54 @@ func clearCheckpoint(ctx context.Context, db *sql.DB) (clearOutcome, error) {
 	detail := fmt.Sprintf(
 		"checkpoint discarded via `bintrail-pg reset`: was LSN %s; the replication slot is (or was already) dropped and will be recreated, so events past that LSN not yet streamed by the old slot are permanently lost",
 		pglogrepl.LSN(pos))
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE stream_state SET
-			gap_lost_at     = UTC_TIMESTAMP(),
-			gap_lost_detail = ?,
-			binlog_file     = '',
-			binlog_position = 0,
-			gtid_set        = NULL,
-			events_indexed  = 0,
-			last_event_time = NULL,
-			last_checkpoint = UTC_TIMESTAMP()
-		WHERE id = 1`, detail); err != nil {
+	// The stamp withdraws any acknowledgement of an earlier loss in the same
+	// statement (gap_acked_at = NULL): this discard is a new loss, and it must
+	// not be born acknowledged.
+	_, err = tx.ExecContext(ctx, stampDiscardSQL(true), detail)
+	if isUnknownColumnErr(err) {
+		// An index whose stream_state has no gap_acked_at yet (the stream adds
+		// the column when it starts; reset does not migrate). No
+		// acknowledgement can be on record there, so the stamp without that
+		// assignment means the same thing. A failed statement does not end
+		// the transaction, and the row lock is still held.
+		_, err = tx.ExecContext(ctx, stampDiscardSQL(false), detail)
+	}
+	if err != nil {
 		return clearOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return clearOutcome{}, err
 	}
 	return clearOutcome{rows: 1, lossDetail: detail}, nil
+}
+
+// stampDiscardSQL is the one statement that both records a discarded checkpoint
+// as a permanent loss and clears the cursor. withAck adds gap_acked_at = NULL;
+// false is only for an index that does not have that column.
+func stampDiscardSQL(withAck bool) string {
+	ack := ""
+	if withAck {
+		ack = `
+			gap_acked_at    = NULL,`
+	}
+	return `
+		UPDATE stream_state SET
+			gap_lost_at     = UTC_TIMESTAMP(),
+			gap_lost_detail = ?,` + ack + `
+			binlog_file     = '',
+			binlog_position = 0,
+			gtid_set        = NULL,
+			events_indexed  = 0,
+			last_event_time = NULL,
+			last_checkpoint = UTC_TIMESTAMP()
+		WHERE id = 1`
+}
+
+// isUnknownColumnErr reports whether err is MySQL error 1054
+// (ER_BAD_FIELD_ERROR): the index predates a column this build writes.
+func isUnknownColumnErr(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && me.Number == 1054
 }
 
 // isTableMissingErr reports whether err is MySQL error 1146 (ER_NO_SUCH_TABLE), i.e.

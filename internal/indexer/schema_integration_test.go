@@ -96,6 +96,44 @@ func TestEnsureSchemaAddsSourceHealthColumn(t *testing.T) {
 	}
 }
 
+// TestEnsureSchemaAddsGapAckedAtColumn: an index that has the loss record but
+// predates its acknowledgement column gains stream_state.gap_acked_at as a
+// nullable DATETIME, idempotently, and a loss already on record reads as NOT
+// acknowledged (the column is born NULL).
+func TestEnsureSchemaAddsGapAckedAtColumn(t *testing.T) {
+	db, _ := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+
+	testutil.MustExec(t, db, `ALTER TABLE stream_state DROP COLUMN gap_acked_at`)
+	testutil.MustExec(t, db, `INSERT INTO stream_state (id, mode, server_id, last_checkpoint, gap_lost_at, gap_lost_detail)
+		VALUES (1, 'gtid', 7, UTC_TIMESTAMP(), UTC_TIMESTAMP(), 'purged')`)
+
+	if err := EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var dataType, isNullable string
+	if err := db.QueryRow(`SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stream_state'
+		  AND COLUMN_NAME = 'gap_acked_at'`).Scan(&dataType, &isNullable); err != nil {
+		t.Fatalf("read gap_acked_at column: %v", err)
+	}
+	if dataType != "datetime" || isNullable != "YES" {
+		t.Errorf("gap_acked_at = %s nullable=%s, want datetime YES", dataType, isNullable)
+	}
+	var lostSet, ackSet bool
+	if err := db.QueryRow(`SELECT gap_lost_at IS NOT NULL, gap_acked_at IS NOT NULL FROM stream_state WHERE id = 1`).Scan(&lostSet, &ackSet); err != nil {
+		t.Fatal(err)
+	}
+	if !lostSet || ackSet {
+		t.Errorf("after the migration: loss on record=%v acknowledged=%v, want the loss kept and unacknowledged", lostSet, ackSet)
+	}
+
+	if err := EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema (second run): %v", err)
+	}
+}
+
 // TestEnsureSchemaAddsFKRuleColumns pins the cascade-recovery migration: a
 // pre-cascade install must gain fk_constraints.delete_rule/update_rule as
 // NOT NULL DEFAULT ” (existing rows backfill to "" = unknown), idempotently.

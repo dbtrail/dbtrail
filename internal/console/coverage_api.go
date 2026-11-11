@@ -37,9 +37,14 @@ type coverageResponse struct {
 	// INDEXED event, never the wall clock — the lag is what says how close
 	// to "now" that edge is.
 	LagSeconds *int64 `json:"lag_seconds,omitempty"`
-	// Continuity: ok | gap_lost | unknown | unavailable | none — the exact
-	// status.ContinuityStatus rule, never recomputed here.
+	// Continuity: ok | gap_lost | gap_acknowledged | unknown | unavailable |
+	// none — the exact status.ContinuityStatus rule, never recomputed here.
 	Continuity string `json:"continuity"`
+	// GapAcknowledged is set with continuity "gap_acknowledged": when changes
+	// were lost and when an operator acknowledged it, so the card can say both
+	// instead of showing a bare verdict word. The same shape /api/status
+	// carries under stream.gap_acknowledged, without the capture detail text.
+	GapAcknowledged *gapAcknowledgedDTO `json:"gap_acknowledged,omitempty"`
 	// Freshness: current | idle | stalled | unknown | unavailable | none — the
 	// exact status.FreshnessStatus rule, never recomputed here either (#1227).
 	// It is the LIVENESS half continuity is not, and it is what makes
@@ -65,6 +70,12 @@ type coverageResponse struct {
 	// is what tells a quiet source (stamped about every 30 to 40 seconds)
 	// from capture fallen behind, which lag_seconds cannot.
 	CaughtUpAgoSeconds *int64 `json:"caught_up_ago_seconds,omitempty"`
+}
+
+// gapAcknowledgedDTO is a recorded capture loss an operator acknowledged.
+type gapAcknowledgedDTO struct {
+	At             string `json:"at"`
+	AcknowledgedAt string `json:"acknowledged_at"`
 }
 
 // serverID labels log lines with the request's selected server — a
@@ -98,6 +109,12 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Continuity = sum.Continuity
+	if sum.Continuity == status.ContinuityGapAcknowledged {
+		resp.GapAcknowledged = &gapAcknowledgedDTO{
+			At:             sum.GapLostAt.Format(consoleTSFormat),
+			AcknowledgedAt: sum.GapAckedAt.Format(consoleTSFormat),
+		}
+	}
 	resp.Freshness = sum.Freshness
 	resp.CheckpointAgeSeconds = sum.CheckpointAgeSeconds
 	resp.LagSeconds = sum.LagSeconds

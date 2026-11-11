@@ -678,9 +678,17 @@ func splitBinlogName(name string) (base, suffix string) {
 // healthy RUNNING badge over a stream that skipped data (#402). Both writes fail
 // loud; a failed stamp aborts startup with the OLD checkpoint intact, so the gap
 // is re-detected and re-recorded on the next start. saveCheckpoint's upsert does
-// not touch the gap_lost_* columns, so the stamp survives it. Cleared by an
-// explicit monitor Stop; a jumping --reset re-stamps it with the discarded
-// range (#1079) and a same-position --reset leaves it intact.
+// not touch the gap_lost_* columns, so the stamp survives it. Nothing clears
+// it: an explicit monitor Stop ACKNOWLEDGES it (gap_acked_at) and the record
+// stays for the readers that refuse a window spanning the loss; a jumping
+// --reset re-stamps it with the discarded range (#1079) and a same-position
+// --reset leaves it intact.
+//
+// The stamp also sets gap_acked_at = NULL, in the same statement: a new loss
+// is never born acknowledged. Without it, a loss stamped in the same second as
+// (or, on a skewed clock, before) the acknowledgement of an EARLIER loss would
+// read as acknowledged and no alarm would ever fire for it. The column exists
+// here because oneRun migrates the schema before any path reaches this.
 //
 // The stamp is an INSERT…ON DUPLICATE KEY UPDATE, not a bare UPDATE (#1081): the
 // stream_state row can vanish between loadStreamState and this stamp (operator
@@ -688,7 +696,7 @@ func splitBinlogName(name string) (base, suffix string) {
 // shared index) — a bare UPDATE would match zero rows without error and the
 // subsequent saveCheckpoint would seed a fresh row with NULL gap_lost_* columns:
 // checkpoint advanced, loss unrecorded. The existing-row arm updates ONLY the
-// gap_lost_* columns — the checkpoint advance still lands exclusively in the
+// gap_lost_* columns and gap_acked_at — the checkpoint advance still lands exclusively in the
 // second statement, preserving the stamp-before-advance ordering; the
 // missing-row arm seeds the advanced state and the stamp atomically, so on that
 // arm the advance cannot land without the stamp. That guarantee is per-arm, not
@@ -715,7 +723,8 @@ func persistGapAutoAdvance(db *sql.DB, advanced *streamState, gapMessage string)
 		VALUES (1, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?, UTC_TIMESTAMP(), ?)
 		ON DUPLICATE KEY UPDATE
 		    gap_lost_at     = UTC_TIMESTAMP(),
-		    gap_lost_detail = VALUES(gap_lost_detail)`,
+		    gap_lost_detail = VALUES(gap_lost_detail),
+		    gap_acked_at    = NULL`,
 		append(args, gapMessage)...); err != nil {
 		return fmt.Errorf("failed to persist gap-loss record before auto-advance: %w", err)
 	}
@@ -802,8 +811,9 @@ func classifyResetDiscard(old *streamState, flavor, mode, file string, pos uint3
 // user-visible output and the supervisor hook only after the record is
 // durable. A no-op discard skipped nothing, so only the fresh checkpoint is
 // written and any prior gap_lost record is left untouched; a jump replaces a
-// prior record's detail with the reset detail (the loss flag itself never
-// clears here — monitor Stop remains the acknowledgment path).
+// prior record's detail with the reset detail and, being a new loss, withdraws
+// any acknowledgement of the prior one (the loss flag itself never clears
+// here or anywhere — monitor Stop is the acknowledgment path).
 func persistResetDiscard(db *sql.DB, fresh *streamState, noop bool, detail string, hooks *Hooks) error {
 	if noop {
 		fresh.clearCaughtUp = true // #2556: the reset starts a new capture

@@ -3,6 +3,7 @@ package reconstruct
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -289,5 +290,115 @@ func TestCaptureGapStatus_emptyStreamState_noVerdict(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// An operator's acknowledgement of a capture loss (stream_state.gap_acked_at,
+// stamped when the source is stopped in the console) silences the ALARM. It
+// must change nothing here: the events are still gone, so a window that spans
+// the loss is still a capture gap. Before the acknowledgement was a column,
+// acknowledging erased gap_lost_at and this check went blind: a scheduled
+// snapshot update whose window spanned the loss published a snapshot missing
+// the lost changes.
+func TestCaptureGapStatus_acknowledgedLoss(t *testing.T) {
+	since := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name    string
+		gapAt   time.Time
+		ackedAt any // time.Time, or nil for never acknowledged
+		wantGap bool
+	}{
+		{"acknowledged loss INSIDE the window is still a gap", since.Add(24 * time.Hour), since.Add(25 * time.Hour), true},
+		{"acknowledged in the same second, inside the window", since.Add(24 * time.Hour), since.Add(24 * time.Hour), true},
+		{"acknowledged long after the window closed", since.Add(24 * time.Hour), until.Add(30 * 24 * time.Hour), true},
+		{"unacknowledged loss inside the window (the twin)", since.Add(24 * time.Hour), nil, true},
+		{"acknowledged loss BEFORE the window (a full snapshot was taken after it)", since.Add(-time.Hour), since.Add(-time.Minute), false},
+		{"acknowledged loss exactly at the window start (exclusive)", since, since.Add(time.Minute), false},
+		{"acknowledged loss AFTER the window", until.Add(time.Hour), until.Add(2 * time.Hour), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.MatchExpectationsInOrder(false)
+			mock.ExpectQuery("SELECT mode, binlog_file").
+				WillReturnRows(streamStateRows(c.gapAt, "binlogs purged before stream caught up"))
+			mock.ExpectQuery("SELECT gap_acked_at FROM stream_state").
+				WillReturnRows(sqlmock.NewRows([]string{"gap_acked_at"}).AddRow(c.ackedAt))
+
+			gap, err := CaptureGapStatus(context.Background(), db, since, until)
+			if err != nil {
+				t.Fatalf("CaptureGapStatus: %v", err)
+			}
+			if (gap != nil) != c.wantGap {
+				t.Fatalf("gap = %+v, want a gap: %v", gap, c.wantGap)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+			if gap == nil {
+				return
+			}
+			if gap.Unevaluable || !gap.At.Equal(c.gapAt) {
+				t.Errorf("gap = %+v, want the stamped loss at %v", gap, c.gapAt)
+			}
+			t.Logf("refusal: %s", gap.Reason())
+
+			// And the strict policy on top refuses, acknowledged or not.
+			mock.ExpectQuery("SELECT mode, binlog_file").
+				WillReturnRows(streamStateRows(c.gapAt, "binlogs purged before stream caught up"))
+			mock.ExpectQuery("SELECT gap_acked_at FROM stream_state").
+				WillReturnRows(sqlmock.NewRows([]string{"gap_acked_at"}).AddRow(c.ackedAt))
+			if err := CheckCaptureGap(context.Background(), db, "mydb", "orders", since, until, false); !errors.Is(err, ErrCaptureGap) {
+				t.Errorf("CheckCaptureGap = %v, want ErrCaptureGap", err)
+			}
+		})
+	}
+}
+
+// An index that has gap_lost_* but not the acknowledgement column is still
+// EVALUABLE: the missing column must not push it to the unevaluable arm (which
+// would refuse every window), and a loss inside the window is still a gap.
+func TestCaptureGapStatus_noAckColumn_stillEvaluable(t *testing.T) {
+	since := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name    string
+		gapAt   any
+		wantGap bool
+	}{
+		{"loss inside the window", since.Add(time.Hour), true},
+		{"no loss", nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.MatchExpectationsInOrder(false)
+			var detail any
+			if c.gapAt != nil {
+				detail = "purged"
+			}
+			mock.ExpectQuery("SELECT mode, binlog_file").WillReturnRows(streamStateRows(c.gapAt, detail))
+			mock.ExpectQuery("SELECT gap_acked_at FROM stream_state").
+				WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'gap_acked_at' in 'field list'"})
+			gap, err := CaptureGapStatus(context.Background(), db, since, until)
+			if err != nil {
+				t.Fatalf("CaptureGapStatus: %v", err)
+			}
+			if (gap != nil) != c.wantGap {
+				t.Fatalf("gap = %+v, want a gap: %v", gap, c.wantGap)
+			}
+			if gap != nil && gap.Unevaluable {
+				t.Error("a missing gap_acked_at must not read as an unevaluable index")
+			}
+		})
 	}
 }
