@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -424,28 +425,70 @@ func (l *lockedWriter) String() string {
 	return l.sb.String()
 }
 
-// TestBackupScheduler_cutsOverOnAgeInTheRealSlot: nothing measured (no
-// memo, empty history) and a previous backup weeks older than the slot: the
-// slot starts a full backup whose reason names the age and what was missing.
-func TestBackupScheduler_cutsOverOnAgeInTheRealSlot(t *testing.T) {
+// TestBackupScheduler_anOldSnapshotAloneUpdatesInTheRealSlot (#2659):
+// nothing measured (no memo, empty history, so no count, no rate and no
+// full read on record) and a previous backup weeks older than the slot: the
+// slot starts the UPDATE. The snapshot's age alone chose a full read here
+// before.
+func TestBackupScheduler_anOldSnapshotAloneUpdatesInTheRealSlot(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
 	b.window = b.measureWindow
 	e := addScheduled(t, reg, true) // the fake snapshot at snapshotAnchor (2026-08-20)
-	e.SourceDSN = "not a dsn"
+	var folds atomic.Int32
+	countFolds(t, &folds)
+	stubCoverage(t, true, true)
+	logs := captureSlogFor(t)
+	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)) // eight days later, on an hourly schedule (cut-over 6 h)
+	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
+	if st.LastWhy != "" || st.LastFallbackAt != "" {
+		t.Fatalf("the slot's job: %+v, want an update with no full read before or after it", st)
+	}
+	if folds.Load() != 1 {
+		t.Fatalf("%d folds ran, want the slot's one update", folds.Load())
+	}
+	if run := lastScheduledDump(sup, e.ID); run != nil {
+		t.Fatalf("a full read was recorded: %+v", run)
+	}
+	if strings.Contains(logs.String(), "taking a full read") {
+		t.Fatalf("the slot cut over to a full read: %q", logs.String())
+	}
+}
+
+// TestBackupScheduler_cutsOverInTheRealSlotWhenTheIndexIsInDoubt: nothing
+// indexed since a previous backup weeks older than the slot, and a source
+// that cannot be asked whether it wrote anything: the slot starts a full
+// backup whose reason says the index may be missing changes.
+func TestBackupScheduler_cutsOverInTheRealSlotWhenTheIndexIsInDoubt(t *testing.T) {
+	b, reg, sup := newScheduleFixture(t, true)
+	b.window = b.measureWindow
+	e := addScheduled(t, reg, true) // the fake snapshot at snapshotAnchor (2026-08-20)
+	e.SourceDSN = "not a dsn"       // the full backup fails fast; that it STARTED is the point
 	if err := reg.Update(e); err != nil {
 		t.Fatal(err)
 	}
+	sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: 1000}, publishedAt: snapshotAnchor, indexDSN: e.DSN}
+	mark := indexMark{events: 1000} // nothing indexed since the anchor
+	stubIndexMark(t, &mark, true)
+	stubCaptureProbe(t, captureProbeResult{detail: "the source did not answer"})
 	logs := captureSlogFor(t)
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)) // eight days later, on an hourly schedule (cut-over 6 h)
-	// The full read fails and an update stands in for it (#2586): awaited
-	// as in the measured-window test above, and for the same reason.
-	waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
-	if run := lastScheduledDump(sup, e.ID); run == nil || run.WhyCode != "window_age" {
+	// The full read fails, and no update stands in for it (#2586): an
+	// update over the same index cannot settle what the capture missed.
+	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodFull)
+	if console.BackupWhyCode(st.LastWhy) != "window_age" {
+		t.Fatalf("the slot's job: %+v, want the full read chosen because the index is in doubt", st)
+	}
+	run := lastScheduledDump(sup, e.ID)
+	if run == nil || run.WhyCode != "window_age" {
 		t.Fatalf("the full read's record does not carry the reason: %+v", run)
 	}
-	if !strings.Contains(logs.String(), "taking a full read instead of an update") ||
-		!strings.Contains(logs.String(), "no count of the changes since it, no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full read on record") {
-		t.Fatalf("the slot did not cut over on age: %q", logs.String())
+	t.Log(run.Why)
+	if !strings.HasPrefix(run.Why, "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken ") ||
+		!strings.HasSuffix(run.Why, "ago, and whether the source changed could not be checked (the source did not answer)") {
+		t.Fatalf("the reason on record: %q", run.Why)
+	}
+	if !strings.Contains(logs.String(), "taking a full read instead of an update from the recorded changes; nothing was indexed since the previous snapshot") {
+		t.Fatalf("the slot did not say why it cut over: %q", logs.String())
 	}
 }
 

@@ -17,7 +17,8 @@ import (
 // Whether the capture has everything the source wrote (#1791).
 //
 // The backup schedule asks this in one case only: nothing has been indexed
-// since the previous snapshot and that snapshot is past the cut-over age.
+// since the previous snapshot and that snapshot is past the cut-over age
+// (console.BackupCutoverAge).
 // There, a full backup used to follow at every slot, because from the index
 // alone "the source wrote nothing" and "the capture stopped" read the same
 // (#1223): the binlog syncer retries without limit (MaxReconnectAttempts 0)

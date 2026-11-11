@@ -1054,7 +1054,11 @@ saved, shown with the reason `serve` is not running it.
   was not possible when it ran (`last_run.why`, with a stable `why_code`:
   `no_index`, `no_local_dir`, `first_backup`, `previous_unreadable`,
   `fold_refused`, `fold_crashed`, `window_measured`, `window_age`). The
-  last two are the cut-over after a long stop (#1721): before each slot the
+  last two are the only cases in which the daemon chooses a full backup
+  over an update that could run. A full backup reads every row of the
+  source and takes a lock, so it is chosen on evidence, never because the
+  previous snapshot is old (#2659). `window_measured` is the cut-over on
+  cost (#1721): before each slot the
   daemon measures what an update would have to fold (how far the index's
   high-water mark moved since the previous snapshot, against a cost model
   fitted on its last five measured updates, a fixed cost plus a per-event
@@ -1069,15 +1073,23 @@ saved, shown with the reason `serve` is not running it.
   update; two minutes against 6 s is a full read). When one of the three
   is unknown (no full backup on record, no rate yet because the recent
   updates differ too little to read a per-event cost from, an index that
-  did not answer the probe) it cuts over on age alone, once the previous
-  snapshot is older than two hours or six schedule intervals, whichever is
-  longer (counted from when the full backup that made it finished, when a
-  full backup did: its own duration is not the schedule falling behind),
-  and the reason names what was missing. One exception (#1791): when
-  nothing at all was indexed since the previous snapshot, the daemon asks
+  did not answer the probe), when the estimate is inside the margin, or
+  when no update has been measured since the last full backup, the update
+  runs, however old the previous snapshot is: its age says nothing about
+  the size of the source, which is what a full backup costs. After a long
+  stop that update applies everything recorded since the previous
+  snapshot. It reads those changes a page at a time and keeps the changed
+  rows on disk past a limit, so its memory stays bounded, and it refuses
+  on its own terms (a capture gap, a schema change, too many changed rows
+  in one table), each of which the schedule answers as before.
+  `window_age` is not about cost. It is taken when the index recorded
+  nothing since a previous snapshot older than two hours or six schedule
+  intervals, whichever is longer (counted from when the full backup that
+  made it finished, when a full backup did), so the index may be missing
+  changes (#1791). The daemon then asks
   the source whether it wrote anything the capture has not recorded, and
-  updates when it did not, since there is nothing to fold. The answer is
-  yes only when the capture's checkpointed GTID set is EQUAL to the
+  updates when it did not, since there is nothing to fold. The source
+  confirms that only when the capture's checkpointed GTID set is EQUAL to the
   source's `@@GLOBAL.gtid_executed` (a capture holding more than its source
   means the source was reset, restored or replaced), with no capture gap
   recorded since the previous snapshot, and no dropped rows (the capture's

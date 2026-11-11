@@ -6,8 +6,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Each reason a scheduled run takes a full backup maps to one stable code,
@@ -25,7 +27,10 @@ func TestBackupWhyCode(t *testing.T) {
 		{BackupWhyFoldRefusedPrefix + " (capture gap)", "fold_refused"},
 		{BackupWhyFoldCrashedPrefix + " (internal error: nil map)", "fold_crashed"},
 		{BackupWhyWindowPrefix + ": 17,000,000 events since the previous snapshot would take about 1h 10m to apply at the measured rate, and the last full read took 8m", "window_measured"},
-		{BackupWhyStaleAnchorPrefix + ": it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age"},
+		{BackupWhyIndexDoubtPrefix + ": nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked (the source did not answer)", "window_age"},
+		// A record written before #2659, when the snapshot's age alone
+		// chose a full read: it keeps its code.
+		{backupWhyStaleAnchorPrefixOld + ": it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age"},
 		{"no load on your database", ""},
 		{"some wording a newer daemon wrote", ""},
 	}
@@ -107,7 +112,7 @@ func TestBackupWhyRemedyKeysMatchTheCodes(t *testing.T) {
 	produced := map[string]bool{}
 	for _, why := range []string{BackupWhyNoIndex, BackupWhyNoLocalDir, BackupWhyNoStagingPrefix + "; x", BackupWhyFirstBackup,
 		BackupWhyUnreadablePrefix + " (x)", BackupWhyFoldRefusedPrefix + " (x)", BackupWhyFoldCrashedPrefix + " (x)",
-		BackupWhyWindowPrefix + ": x", BackupWhyStaleAnchorPrefix + ": x"} {
+		BackupWhyWindowPrefix + ": x", BackupWhyIndexDoubtPrefix + ": x"} {
 		produced[BackupWhyCode(why)] = true
 	}
 	// Every code has a rendering: a fixed remedy, or its own sentence.
@@ -194,6 +199,10 @@ func TestBackupWhyLineExecuted(t *testing.T) {
 		t.Fatal(err)
 	}
 	js := string(raw)
+	// The reason the rule itself writes for an index in doubt, not a copy
+	// of it.
+	doubtNow := time.Date(2026, 11, 11, 10, 30, 0, 0, time.UTC)
+	doubt := CutoverToFull(BackupWindow{Anchor: doubtNow.Add(-5*time.Hour - 30*time.Minute), Events: 0, Capture: CaptureBehind}, 5*time.Minute, doubtNow)
 	block := func(name string) string {
 		i := strings.Index(js, "const "+name+" = {")
 		if i < 0 {
@@ -218,7 +227,8 @@ const out = {
   unknown: backupWhyLine("something a newer daemon wrote", "", true),
   empty: backupWhyLine("", "no_index", true),
   window: backupWhyLine("` + BackupWhyWindowPrefix + `: 17,000,000 events since the previous snapshot would take about 1h 10m to apply at the measured rate, and the last full read took 8m", "window_measured", true),
-  age: backupWhyLine("` + BackupWhyStaleAnchorPrefix + `: it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age", false),
+  age: backupWhyLine("` + backupWhyStaleAnchorPrefixOld + `: it is 5h 30m old and the cut-over is 2h (no count of the changes since it, so the update could not be estimated)", "window_age", false),
+  doubt: backupWhyLine(` + strconv.Quote(doubt) + `, "window_age", true),
 };
 console.log(JSON.stringify(out));
 `
@@ -230,7 +240,7 @@ console.log(JSON.stringify(out));
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}
-	var got struct{ Remedy, Fact, StagingRemedy, StagingFact, Unreadable, Gap, Crash, Unknown, Empty, Window, Age string }
+	var got struct{ Remedy, Fact, StagingRemedy, StagingFact, Unreadable, Gap, Crash, Unknown, Empty, Window, Age, Doubt string }
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
 	}
@@ -267,10 +277,19 @@ console.log(JSON.stringify(out));
 		!strings.Contains(got.Window, "17,000,000 events") || !strings.HasSuffix(got.Window, "took 8m.") {
 		t.Errorf("window = %q", got.Window)
 	}
+	// A record from before #2659 (the snapshot's age alone chose the full
+	// read) is still said as recorded.
 	if !strings.HasPrefix(got.Age, "Full read instead of an update: the previous snapshot is too old") || !strings.HasSuffix(got.Age, "estimated).") {
 		t.Errorf("age = %q", got.Age)
 	}
-	for k, v := range map[string]string{"remedy": got.Remedy, "fact": got.Fact, "unreadable": got.Unreadable, "gap": got.Gap, "crash": got.Crash, "unknown": got.Unknown, "window": got.Window, "age": got.Age} {
+	// The one reason a current daemon codes window_age, as the rule itself
+	// words it: the index may be missing changes.
+	t.Logf("window_age: %s", got.Doubt)
+	if got.Doubt != "Full read instead of an update: the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, "+
+		"but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind." {
+		t.Errorf("doubt = %q", got.Doubt)
+	}
+	for k, v := range map[string]string{"remedy": got.Remedy, "fact": got.Fact, "unreadable": got.Unreadable, "gap": got.Gap, "crash": got.Crash, "unknown": got.Unknown, "window": got.Window, "age": got.Age, "doubt": got.Doubt} {
 		if strings.Contains(v, "..") || strings.Contains(v, "\u2014") {
 			t.Errorf("%s: double period or em dash: %q", k, v)
 		}

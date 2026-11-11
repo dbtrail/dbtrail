@@ -29,33 +29,42 @@ func TestCutoverToFull(t *testing.T) {
 		{"the fixed cost alone is clearly dearer than the full read: full", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 17 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
 		// #2181: dearer, but within the margin; a full read would load the source.
 		{"the fixed cost a little over the full read: update", BackupWindow{Anchor: fresh, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
-		{"within the margin, old anchor: full on age", BackupWindow{Anchor: old, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_age"},
+		{"within the margin, old anchor: update (#2659)", BackupWindow{Anchor: old, Events: 1, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		// Evidence beats the model: an update this size was done cheaper.
 		{"dearer by the model but proven cheaper: update", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 4000, Proven: 20_000_000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		// A tiny rate and a long stop: the estimate overflows a Duration,
 		// and must not wrap into "cheaper than a full read".
 		{"estimate past what a Duration holds: full", BackupWindow{Anchor: fresh, Events: 17_000_000, FoldRate: 0.0000001, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_measured"},
-		// A quiet server has a fixed cost and no rate: the age rule, and a
-		// fresh anchor after a burst is an update.
+		// A quiet server has a fixed cost and no rate: a burst after it is
+		// an update, since that cost is under the full read.
 		{"fixed cost, no rate, fresh anchor after a burst: update", BackupWindow{Anchor: fresh, Events: 60_000, FoldFixed: 90 * time.Second, LastFull: 40 * time.Minute}, 5 * time.Minute, ""},
 		// The estimate is the better evidence: an old anchor with a cheap
 		// update is updated, and a fresh one with a dear update is not.
 		{"old anchor but measured cheaper: update", BackupWindow{Anchor: old, Events: 1000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		{"estimate exactly the full read: update", BackupWindow{Anchor: fresh, Events: 480_000, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
 		{"nothing to fold: update", BackupWindow{Anchor: old, Events: 0, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
-		// Without one of the three the age rule decides.
-		{"events unknown, old anchor: full on age", BackupWindow{Anchor: old, Events: -1, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_age"},
-		{"no rate, old anchor: full on age", BackupWindow{Anchor: old, Events: 100, LastFull: 8 * time.Minute}, 5 * time.Minute, "window_age"},
-		{"no full read on record, old anchor: full on age", BackupWindow{Anchor: old, Events: 100, FoldRate: 1000}, 5 * time.Minute, "window_age"},
+		// Without one of the three the estimate cannot be made, and the
+		// update runs however old the anchor (#2659): its age is not
+		// evidence of what the update or the full read would cost.
+		{"events unknown, old anchor: update", BackupWindow{Anchor: old, Events: -1, FoldRate: 1000, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
+		{"no rate, old anchor: update", BackupWindow{Anchor: old, Events: 100, LastFull: 8 * time.Minute}, 5 * time.Minute, ""},
+		{"no full read on record, old anchor: update", BackupWindow{Anchor: old, Events: 100, FoldRate: 1000}, 5 * time.Minute, ""},
 		{"events unknown, fresh anchor: update", BackupWindow{Anchor: fresh, Events: -1}, 5 * time.Minute, ""},
-		{"anchor exactly at the cut-over age: update", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge), Events: -1}, 5 * time.Minute, ""},
-		{"anchor a second past it: full on age", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge - time.Second), Events: -1}, 5 * time.Minute, "window_age"},
-		{"no interval known: the floor applies", BackupWindow{Anchor: old, Events: -1}, 0, "window_age"},
-		// Six intervals: a daily schedule's normal window is never too old.
-		{"daily schedule, one-day-old anchor: update", BackupWindow{Anchor: now.Add(-25 * time.Hour), Events: -1}, 24 * time.Hour, ""},
-		{"daily schedule, week-old anchor: full on age", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: -1}, 24 * time.Hour, "window_age"},
-		{"hourly schedule, five-hour-old anchor: update", BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: -1}, time.Hour, ""},
+		{"events unknown, anchor a second past the cut-over age: update", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge - time.Second), Events: -1}, 5 * time.Minute, ""},
+		{"events unknown, no interval known: update", BackupWindow{Anchor: old, Events: -1}, 0, ""},
+		{"events unknown, daily schedule, week-old anchor: update", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: -1}, 24 * time.Hour, ""},
 		{"no anchor: update", BackupWindow{Events: -1}, 5 * time.Minute, ""},
+		// The cut-over age still bounds one thing: how old the anchor has
+		// to be before an index that recorded NOTHING since it is doubted
+		// (#1791; here the source could not be asked).
+		{"nothing indexed, anchor exactly at the cut-over age: update", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge), Events: 0}, 5 * time.Minute, ""},
+		{"nothing indexed, anchor a second past it: full", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge - time.Second), Events: 0}, 5 * time.Minute, "window_age"},
+		{"nothing indexed, no interval known: the floor applies", BackupWindow{Anchor: old, Events: 0}, 0, "window_age"},
+		// Six intervals: a daily schedule's normal window is never old.
+		{"nothing indexed, daily schedule, one-day-old anchor: update", BackupWindow{Anchor: now.Add(-25 * time.Hour), Events: 0}, 24 * time.Hour, ""},
+		{"nothing indexed, daily schedule, week-old anchor: full", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: 0}, 24 * time.Hour, "window_age"},
+		{"nothing indexed, hourly schedule, five-hour-old anchor: update", BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0}, time.Hour, ""},
+		{"nothing indexed, no anchor: update", BackupWindow{Events: 0}, 5 * time.Minute, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -72,20 +81,11 @@ func TestCutoverToFull(t *testing.T) {
 			t.Errorf("measured reason %q lacks %q", why, want)
 		}
 	}
-	// The age reason names what was missing, and only that: after a restart
-	// the history still has the rate and the full backup.
-	why = CutoverToFull(BackupWindow{Anchor: old, Events: -1, FoldRate: 4000, LastFull: 8 * time.Minute}, 5*time.Minute, now)
-	for _, want := range []string{"5h 30m old", "cut-over is 2h", "no count of the changes since it"} {
-		if !strings.Contains(why, want) {
-			t.Errorf("age reason %q lacks %q", why, want)
-		}
-	}
-	if strings.Contains(why, "no usable update rate") || strings.Contains(why, "no full read") {
-		t.Errorf("age reason %q claims something the history has", why)
-	}
-	why = CutoverToFull(BackupWindow{Anchor: old, Events: 100}, 5*time.Minute, now)
-	if !strings.Contains(why, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from), no full read on record") || strings.Contains(why, "no count") {
-		t.Errorf("age reason %q, want the two missing measurements named", why)
+	// The one reason that still names the anchor's age says what is in
+	// doubt, the index, and how long nothing was indexed.
+	why = CutoverToFull(BackupWindow{Anchor: old, Events: 0, LastFull: 8 * time.Minute}, 5*time.Minute, now)
+	if want := "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked"; why != want {
+		t.Errorf("reason %q, want %q", why, want)
 	}
 	if got := roundSeconds(1e30); got != roundDuration(time.Duration(1<<63-1)) {
 		t.Errorf("roundSeconds past the Duration range = %q", got)
@@ -93,21 +93,32 @@ func TestCutoverToFull(t *testing.T) {
 }
 
 // The schedule's interval scales the cut-over age: the same seven-hour-old
-// anchor with nothing measured is an update on a daily schedule (cut-over
-// six days) and a full backup on an hourly one (six hours).
+// anchor with nothing indexed since it, and a source that could not be
+// asked, is an update on a daily schedule (cut-over six days) and a full
+// backup on an hourly one (six hours). With the count unknown it is an
+// update on both: the anchor's age alone chooses nothing (#2659).
 func TestChooseBackupMethod_intervalScalesTheCutoverAge(t *testing.T) {
 	dir := t.TempDir()
 	fakeSnapshot(t, dir)
 	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
-	sevenHours := func(_ context.Context, _ ServerEntry, _ time.Time) BackupWindow {
-		return BackupWindow{Anchor: now.Add(-7 * time.Hour), Events: -1}
+	sevenHours := func(events int64) BackupWindowProbe {
+		return func(_ context.Context, _ ServerEntry, _ time.Time) BackupWindow {
+			return BackupWindow{Anchor: now.Add(-7 * time.Hour), Events: events}
+		}
 	}
-	gates := BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: sevenHours}
-	for every, want := range map[string]string{"1d": BackupMethodRefresh, "1h": BackupMethodFull} {
-		e := ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: dir, BackupSchedule: &BackupSchedule{Every: every}}
+	for _, c := range []struct {
+		events      int64
+		every, want string
+	}{
+		{0, "1d", BackupMethodRefresh}, {0, "1h", BackupMethodFull},
+		{-1, "1d", BackupMethodRefresh}, {-1, "1h", BackupMethodRefresh},
+		{500, "1d", BackupMethodRefresh}, {500, "1h", BackupMethodRefresh},
+	} {
+		gates := BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: sevenHours(c.events)}
+		e := ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: dir, BackupSchedule: &BackupSchedule{Every: c.every}}
 		method, why, err := ChooseBackupMethodAt(context.Background(), e, gates, now)
-		if err != nil || method != want {
-			t.Fatalf("every %s: method=%q why=%q err=%v, want %s", every, method, why, err, want)
+		if err != nil || method != c.want {
+			t.Fatalf("events %d, every %s: method=%q why=%q err=%v, want %s", c.events, c.every, method, why, err, c.want)
 		}
 	}
 }
@@ -308,12 +319,22 @@ func TestChooseBackupMethod_cutsOverOnTheMeasuredWindow(t *testing.T) {
 		t.Fatalf("with nothing measured: method=%q err=%v", method, err)
 	}
 	// The snapshot on disk IS old (2026-08-27): with the probe returning it
-	// as the anchor and nothing measured, the age rule fires.
+	// as the anchor and nothing measured, the update still runs. Its age
+	// alone chooses nothing (#2659).
 	byAge := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
 		return BackupWindow{Anchor: anchor, Events: -1}
 	}
 	method, why, err = ChooseBackupMethod(context.Background(), e, BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: byAge})
+	if err != nil || method != BackupMethodRefresh {
+		t.Fatalf("old anchor, nothing measured: method=%q why=%q err=%v, want the update", method, why, err)
+	}
+	// Nothing indexed since that old snapshot, and no word from the source:
+	// the index may be missing writes, which only a full read settles.
+	quiet := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
+		return BackupWindow{Anchor: anchor, Events: 0}
+	}
+	method, why, err = ChooseBackupMethod(context.Background(), e, BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: quiet})
 	if err != nil || method != BackupMethodFull || BackupWhyCode(why) != "window_age" {
-		t.Fatalf("old anchor, nothing measured: method=%q why=%q err=%v", method, why, err)
+		t.Fatalf("old anchor, nothing indexed, the source not asked: method=%q why=%q err=%v", method, why, err)
 	}
 }

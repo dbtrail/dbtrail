@@ -414,11 +414,8 @@ type BackupWindow struct {
 	// finished, when one did and this daemon recorded it; zero otherwise. A
 	// full backup's snapshot is named for the instant its dump STARTED, so
 	// its anchor is already as old as the backup took when the next slot
-	// comes, and the age rule counts from here instead (#1737): the time a
-	// full backup took is not time the schedule fell behind. Without this a
-	// full backup longer than the cut-over age was followed by another one
-	// on age at every slot, and the update that would correct the model
-	// never ran.
+	// comes, and the anchor's age is counted from here instead (#1737): the
+	// time a full backup took is not time the schedule fell behind.
 	AnchorFullFinished time.Time
 	// Capture says whether the source has written anything the capture has
 	// not checkpointed (#1791): CaptureCaughtUp, CaptureBehind, or empty when
@@ -494,16 +491,17 @@ const (
 // cheap and must answer "unknown" rather than block.
 type BackupWindowProbe func(ctx context.Context, e ServerEntry, anchor time.Time) BackupWindow
 
-// BackupCutoverMinAge is the floor of the age rule: an update whose anchor is
-// older than this (or than six schedule intervals, whichever is longer) is
-// replaced by a full backup when nothing was measured. Six intervals so a
-// daily schedule's normal one-day window is never "too old"; two hours so a
-// five-minute schedule that fell hours behind (a long stop, #1721) does
-// not fold the whole gap one page at a time.
+// BackupCutoverMinAge is the floor of BackupCutoverAge: two hours, so a
+// five-minute schedule is not asked about its capture at every quiet slot;
+// six intervals above that, so a daily schedule's normal one-day window is
+// never "old".
 const BackupCutoverMinAge = 2 * time.Hour
 
-// BackupCutoverAge is the anchor age past which the age rule cuts over, for
-// a schedule that fires every interval (zero interval: the floor).
+// BackupCutoverAge is how old the previous snapshot has to be, on a schedule
+// that fires every interval (zero interval: the floor), before an index that
+// recorded nothing since it is doubted (CutoverToFull). It was once the age
+// past which any unmeasured update became a full read (#1721); age alone no
+// longer chooses one (#2659).
 func BackupCutoverAge(interval time.Duration) time.Duration {
 	return max(BackupCutoverMinAge, 6*interval)
 }
@@ -546,27 +544,41 @@ func updateClearlyDearer(updateSec, fullSec float64) bool {
 	return updateSec > BackupFullCostFactor*fullSec && updateSec > fullSec+BackupFullCostFloor.Seconds()
 }
 
-// CutoverToFull is the #1721 rule: the why for a FULL backup instead of an
-// update, or "" to update. Measured first: with the events since the
-// anchor, a measured fold rate and a last full backup on record, the
-// update is cut over when its estimate is clearly dearer than the full
-// backup (updateClearlyDearer, #2181), and NOT cut over otherwise, however old the anchor (the estimate is the
-// better evidence). Only without one of the three does the age rule apply:
-// an anchor older than BackupCutoverAge(interval), counted from when the
-// full backup that published it finished when one did (AnchorFullFinished).
-// The estimate is crude on
-// purpose (events × rate, as the issue asked): it decides between two
-// producers, not a schedule.
+// CutoverToFull is the why for a FULL backup instead of an update, or "" to
+// update. A full read reads every row of the source and takes a lock, so it
+// is chosen on evidence only (#2659), and there are three kinds:
+//
+//   - the estimate (#1721): with the events since the anchor, a measured
+//     fold rate and a last full backup on record, the update is cut over when
+//     its estimate is clearly dearer than that full backup
+//     (updateClearlyDearer, #2181) and no update of about this size was done
+//     cheaper (BackupProvenMargin, #1736). The estimate is crude on purpose
+//     (events x rate): it decides between two producers, not a schedule;
+//   - the fixed cost (#1736): with no rate, when even the cheapest measured
+//     update took clearly longer than the last full backup;
+//   - an index that may be missing writes (#1791): nothing was indexed since
+//     an anchor older than BackupCutoverAge(interval), counted from when the
+//     full backup that published it finished when one did
+//     (AnchorFullFinished), and the source does not confirm that the capture
+//     holds everything it wrote. This one is not about cost: an update over
+//     that index would publish the previous snapshot's rows under a new
+//     date, and only a read of the source settles what the capture missed.
+//
+// Everything else is an update, however old the anchor: an estimate that
+// cannot be made (no count, no rate, no full backup on record), one within
+// the margin, and one made on numbers older than the last full backup. The
+// age of the anchor says nothing about the size of the source, which is
+// what a full read costs. An update that turns out wrong or too large
+// refuses on its own terms (a capture gap, a schema change, too many
+// changed rows) and the schedule handles each of those.
 //
 // While no update has been measured since the last full backup
-// (UnmeasuredSinceFull, #1737) the model may still say "update", and that
-// stands; what it may not do is choose a full backup, since the numbers it
-// would choose one on are the ones that chose the last. The age rule still
-// applies. On a server whose updates really do cost more than a full
+// (UnmeasuredSinceFull, #1737) neither measured rule may choose a full
+// backup, since the numbers it would choose one on are the ones that chose
+// the last. On a server whose updates really do cost more than a full
 // backup that is one update after each full backup, the price of a model
 // that can notice when they stop.
 func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string {
-	withinMargin := false
 	if w.Events >= 0 && w.FoldRate > 0 && w.LastFull > 0 {
 		// Compared in float seconds: a Duration conversion of a huge
 		// estimate (a tiny rate, a long stop) overflows to a NEGATIVE
@@ -575,35 +587,39 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 		if estSec <= w.LastFull.Seconds() {
 			return ""
 		}
-		if !updateClearlyDearer(estSec, w.LastFull.Seconds()) {
-			// Dearer, but within the margin (#2181): about the cost of a
-			// full read, which would load the source. Not a full read on
-			// cost; the age rule below still applies, as it does when the
-			// estimate is not trusted.
-			withinMargin = true
-		} else if float64(w.Events) <= BackupProvenMargin*float64(w.Proven) {
-			// Evidence over the model, said so: the two disagree by a
-			// lot here, and which one to believe is what an operator
-			// reading the log would want to know.
-			slog.Info("snapshot schedule: updating although the estimate exceeds the last full read; an update of about this size was done cheaper",
-				"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
-			return ""
-		} else if !w.UnmeasuredSinceFull {
-			return fmt.Sprintf("%s: %s events since the previous snapshot would take about %s to apply at the measured rate, %s the last full read, which took %s",
-				BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), backupFullCostMarginWords, roundDuration(w.LastFull))
+		if updateClearlyDearer(estSec, w.LastFull.Seconds()) {
+			if float64(w.Events) <= BackupProvenMargin*float64(w.Proven) {
+				// Evidence over the model, said so: the two disagree by a
+				// lot here, and which one to believe is what an operator
+				// reading the log would want to know.
+				slog.Info("snapshot schedule: updating although the estimate exceeds the last full read; an update of about this size was done cheaper",
+					"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
+				return ""
+			}
+			if !w.UnmeasuredSinceFull {
+				return fmt.Sprintf("%s: %s events since the previous snapshot would take about %s to apply at the measured rate, %s the last full read, which took %s",
+					BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), backupFullCostMarginWords, roundDuration(w.LastFull))
+			}
 		}
+		// Not a full read on cost: the estimate is dearer but within the
+		// margin (#2181), about the cost of a full read, which would load
+		// the source; or it rests on numbers older than the last full
+		// backup (#1737).
 	}
 	// No rate, but the fixed cost alone decides (#1736's review): when even
 	// the cheapest measured update took longer than the last full backup,
-	// no estimate is needed, and the age rule below could never say so on
-	// a server whose every update succeeds (each one renews the anchor).
+	// no estimate is needed.
 	// Only ever a full backup, so not on a model older than the last one.
 	if !w.UnmeasuredSinceFull && w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 &&
 		updateClearlyDearer(w.FoldFixed.Seconds(), w.LastFull.Seconds()) {
 		return fmt.Sprintf("%s: the cheapest recent update took %s, %s the last full read, which took %s",
 			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), backupFullCostMarginWords, roundDuration(w.LastFull))
 	}
-	if w.Anchor.IsZero() {
+	// From here on only one thing chooses a full read: an index that
+	// recorded nothing since an old anchor, which the source does not
+	// vouch for. With events to apply, or a count that is unknown, the
+	// update runs whatever the anchor's age (#2659).
+	if w.Events != 0 || w.Anchor.IsZero() {
 		return ""
 	}
 	since := w.Anchor
@@ -619,50 +635,20 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	// the #1689 gate skips the cycle while the snapshot is covered and
 	// re-anchors it before retention drops its window. A full backup here
 	// would read production to copy what the backup already holds.
-	if w.Events == 0 && w.Capture == CaptureCaughtUp {
+	if w.Capture == CaptureCaughtUp {
 		return ""
 	}
-	if w.Events == 0 {
-		// The rate is beside the point with nothing to fold; what is in
-		// question is whether "nothing" is true. Said as that.
-		what := "and whether the source changed could not be checked"
-		if w.CaptureDetail != "" {
-			what += " (" + w.CaptureDetail + ")"
-		}
-		if w.Capture == CaptureBehind {
-			// The detail would only repeat this.
-			what = "but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"
-		}
-		return fmt.Sprintf("%s: it is %s old and the cut-over is %s; %s, %s",
-			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), BackupWhyNothingIndexedWords, what)
+	// What is in question is whether "nothing" is true. Said as that.
+	what := "and whether the source changed could not be checked"
+	if w.CaptureDetail != "" {
+		what += " (" + w.CaptureDetail + ")"
 	}
-	// The parenthetical names what is actually missing: the history keeps
-	// the rate, the full backup and (IndexMark) the count's base across
-	// restarts, so "no rate" would be false on the common shape, an anchor
-	// no update of this build published (the count alone is unknown).
-	var missing []string
-	if w.Events < 0 {
-		missing = append(missing, "no count of the changes since it")
+	if w.Capture == CaptureBehind {
+		// The detail would only repeat this.
+		what = "but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"
 	}
-	if w.FoldRate <= 0 {
-		missing = append(missing, "no usable update rate (none measured, or the measured updates differ too little to read a per-event cost from)")
-	}
-	if w.LastFull <= 0 {
-		missing = append(missing, "no full read on record")
-	}
-	if len(missing) == 0 && withinMargin && !w.UnmeasuredSinceFull {
-		return fmt.Sprintf("%s: it is %s old and the cut-over is %s (the update is estimated at about the cost of a full read, not %s it, so the estimate does not decide)",
-			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), backupFullCostMarginWords)
-	}
-	if len(missing) == 0 {
-		// Everything was measured and the estimate called the update
-		// dearer, but on numbers older than the last full backup, which
-		// the rule above does not act on (#1737): the anchor's age decides.
-		return fmt.Sprintf("%s: it is %s old and the cut-over is %s (no update has been measured since the last full read, so the estimate from before it is not used)",
-			BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)))
-	}
-	return fmt.Sprintf("%s: it is %s old and the cut-over is %s (%s, so the update could not be estimated)",
-		BackupWhyStaleAnchorPrefix, roundDuration(age), roundDuration(BackupCutoverAge(interval)), strings.Join(missing, ", "))
+	return fmt.Sprintf("%s: %s was taken %s ago, %s",
+		BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age), what)
 }
 
 // roundSeconds is roundDuration for a float second count, clamped so a
@@ -780,8 +766,8 @@ func RebuildPossible(e ServerEntry, gates BackupScheduleGates) error {
 	return rebuildPossible(e, gates)
 }
 
-// BackupWhyNothingIndexedWords is in the age rule's reason when nothing was
-// indexed since the previous snapshot: the full read was chosen because
+// BackupWhyNothingIndexedWords is in the reason of a full read taken when
+// nothing was indexed since the previous snapshot: it was chosen because
 // "nothing" could not be trusted (the capture may have stopped, or the
 // source could not be checked), which only a read of the source settles.
 // An update cannot stand in for that one (#2586).
@@ -820,12 +806,20 @@ const (
 	// crashed (the rest names the refusal or the panic).
 	BackupWhyFoldRefusedPrefix = "the update from the recorded changes was refused"
 	BackupWhyFoldCrashedPrefix = "the update from the recorded changes hit an internal error"
-	// BackupWhyWindowPrefix / BackupWhyStaleAnchorPrefix start the reason for
-	// a full backup chosen over an update the daemon measured (#1721): the
-	// update was estimated dearer than a full backup, or its anchor is past
-	// the cut-over age with nothing measured. The rest carries the numbers.
-	BackupWhyWindowPrefix      = "an update from the recorded changes would take longer than a full read"
-	BackupWhyStaleAnchorPrefix = "the previous snapshot is too old to update from"
+	// BackupWhyWindowPrefix starts the reason for a full backup chosen over
+	// an update the daemon measured as clearly dearer (#1721). The rest
+	// carries the numbers.
+	BackupWhyWindowPrefix = "an update from the recorded changes would take longer than a full read"
+	// BackupWhyIndexDoubtPrefix starts the reason for a full backup chosen
+	// because nothing was indexed since an old snapshot and the source does
+	// not confirm the capture holds everything it wrote (#1791). The rest
+	// says how old and what the source answered.
+	BackupWhyIndexDoubtPrefix = "the index may be missing changes made since the previous snapshot"
+	// backupWhyStaleAnchorPrefixOld started the reason of a full backup
+	// chosen on the previous snapshot's age, when age alone could choose one
+	// (before #2659). Recognized for run records written then, never
+	// written now.
+	backupWhyStaleAnchorPrefixOld = "the previous snapshot is too old to update from"
 	// BackupWhyFullCopyPrefix starts the reason for a full backup the
 	// schedule's own full-copy timetable asked for (#1564); the rest names
 	// the cadence. Not a fault, and the page does not treat it as one.
@@ -939,7 +933,7 @@ func BackupWhyCode(why string) string {
 		return "fold_crashed"
 	case strings.HasPrefix(why, BackupWhyWindowPrefix):
 		return "window_measured"
-	case strings.HasPrefix(why, BackupWhyStaleAnchorPrefix):
+	case strings.HasPrefix(why, BackupWhyIndexDoubtPrefix), strings.HasPrefix(why, backupWhyStaleAnchorPrefixOld):
 		return "window_age"
 	case strings.HasPrefix(why, BackupWhyFullCopyPrefix):
 		return BackupWhyCodeFullCopy
@@ -1047,12 +1041,13 @@ func heldLocalAnchor(ctx context.Context, e ServerEntry, source string, anchor t
 //     cannot be READ is its own error, never "no snapshot yet". The previous
 //     backup is looked for where the fold would READ it (BaselineFoldSource),
 //     which is the bucket on an S3-backed server;
-//   - a server whose update the daemon measured as dearer than a full
-//     backup, or whose previous backup is past the cut-over age with
-//     nothing measured (#1721, CutoverToFull), gets a FULL backup with the
-//     numbers as the why — only when a full backup can start; otherwise
-//     the update runs, slow as it may be, because it is the producer that
-//     can;
+//   - a server whose update the daemon measured as clearly dearer than a
+//     full backup (#1721), or whose index recorded nothing since an old
+//     snapshot while the source does not confirm the capture is caught up
+//     (#1791), gets a FULL backup with the numbers as the why
+//     (CutoverToFull), only when a full backup can start; otherwise the
+//     update runs, slow as it may be, because it is the producer that can.
+//     The previous backup's age alone never chooses one (#2659);
 //   - otherwise the newest backup is UPDATED from the recorded changes, with
 //     no load on the source. If that update fails (a capture gap, a schema
 //     change, a crash), the loop takes a full backup at the same slot when
@@ -1065,8 +1060,8 @@ func ChooseBackupMethod(ctx context.Context, e ServerEntry, gates BackupSchedule
 }
 
 // ChooseBackupMethodAt is ChooseBackupMethod deciding for a slot at now: the
-// loop passes its tick, so the age rule reads the slot's clock and a test
-// can pin it.
+// loop passes its tick, so the previous snapshot's age is read on the slot's
+// clock and a test can pin it.
 func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupScheduleGates, now time.Time) (method, why string, err error) {
 	if werr := gates.writeRefused(e); werr != nil {
 		return BackupMethodFull, "", werr

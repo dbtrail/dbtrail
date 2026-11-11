@@ -24,10 +24,12 @@ func TestUpdateStandsIn(t *testing.T) {
 	measured = console.BackupWhyWindowPrefix + ": " + measured[len("the measured window: "):]
 	failed := console.BaselineStatus{State: "failed", LastError: "mydumper: queries running longer than 60s"}
 	full := scheduledStart{method: console.BackupMethodFull, why: measured}
-	aged := scheduledStart{method: console.BackupMethodFull, why: console.BackupWhyStaleAnchorPrefix + ": it is 49h old and the cut-over is 48h; the full read costs less"}
 	// Nothing indexed may mean the capture stopped: only a read of the
 	// source settles that, an update over the same index cannot.
-	doubted := scheduledStart{method: console.BackupMethodFull, why: console.BackupWhyStaleAnchorPrefix + ": it is 49h old and the cut-over is 48h; " + console.BackupWhyNothingIndexedWords + ", the source could not be checked"}
+	doubted := scheduledStart{method: console.BackupMethodFull, why: console.BackupWhyIndexDoubtPrefix + ": " + console.BackupWhyNothingIndexedWords + " was taken 49h ago, and whether the source changed could not be checked"}
+	// A reason recorded before #2659, when the snapshot's age alone chose a
+	// full read: still coded window_age, and no longer stood in for.
+	aged := scheduledStart{method: console.BackupMethodFull, why: "the previous snapshot is too old to update from: it is 49h old and the cut-over is 48h (no count of the changes since it, so the update could not be estimated)"}
 	for _, s := range []scheduledStart{aged, doubted} {
 		if console.BackupWhyCode(s.why) != "window_age" {
 			t.Fatalf("the fixture's reason codes as %q", console.BackupWhyCode(s.why))
@@ -52,7 +54,7 @@ func TestUpdateStandsIn(t *testing.T) {
 		{"published, its upload failed", full, console.BaselineStatus{State: "failed", Published: true}, false},
 		{"refused on the disk", full, console.BaselineStatus{State: "failed", DiskRefused: true}, false},
 		{"another writer's destination", full, console.BaselineStatus{State: "failed", ForeignSource: true}, false},
-		{"chosen on the snapshot's age", aged, failed, true},
+		{"chosen on the snapshot's age, by an older build", aged, failed, false},
 		{"chosen because nothing was indexed", doubted, failed, false},
 	}
 	for _, c := range cases {

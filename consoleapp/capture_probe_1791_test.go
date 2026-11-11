@@ -467,7 +467,7 @@ func TestReportCaptureProbe(t *testing.T) {
 	}
 	b.reportCaptureProbe(e, anchor, captureProbeResult{verdict: console.CaptureCaughtUp})
 	b.reportCaptureProbe(e, anchor, captureProbeResult{verdict: console.CaptureCaughtUp})
-	if out := logs.String(); strings.Count(out, "updating instead of taking a full read on age") != 1 {
+	if out := logs.String(); strings.Count(out, "updating instead of taking a full read\"") != 1 {
 		t.Fatalf("caught up twice for one anchor: %q, want one Info line", out)
 	}
 	// Behind again after caught up is said again, even with the reason it
