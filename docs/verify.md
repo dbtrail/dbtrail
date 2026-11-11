@@ -640,6 +640,12 @@ one side only. Without this pin, every non-ASCII row of a legacy-charset
 restore — a permanent, conclusive false **MISMATCH**. The pin removes the
 charset dependency by construction.
 
+A `latin1` column is the one exception on the copy's side: the snapshot and
+the index hold its text as UTF-8 (the copy cannot read anything else), so
+verify renders it back into the `latin1` bytes before hashing. Both sides
+then hash `0xE9` for `é`, as before. The digest a snapshot records when it is
+written is taken over the dump's stored bytes, before the conversion.
+
 ### Digest version tag
 
 Each digest carries a leading version tag (currently `v2:`) recording the

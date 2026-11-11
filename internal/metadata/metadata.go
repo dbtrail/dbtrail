@@ -13,7 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-sql-driver/mysql"
-	"golang.org/x/text/encoding/charmap"
+
+	"github.com/dbtrail/dbtrail/internal/latin1"
 )
 
 // latestPerTableLoadTimeout bounds NewLatestPerTableResolver's union query.
@@ -594,24 +595,18 @@ func (r *Resolver) MapRow(schema, table string, row []any) (map[string]any, erro
 //     error, the same handling as a column-count mismatch, so this turns
 //     silent corruption into a loud, actionable warning instead.
 //
-// TEXT/BLOB/JSON/GEOMETRY are unaffected: go-mysql already delivers those as
-// []byte, so they never reach this function as a string.
+// TEXT/BLOB/JSON/GEOMETRY arrive from go-mysql as []byte, never as a string.
+// A latin1 TEXT is decoded to UTF-8 and kept []byte (#2634); the others pass
+// through unchanged.
 //
 // MariaDB's UUID/INET4/INET6 take the BINARY route plus a width pad (see
 // padFixedBinary), and VECTOR takes the BINARY route when it arrives as a
 // string (MySQL 9's VECTOR already arrives as []byte, so this is a no-op there).
 //
-// Residual, accepted ambiguity (same class as marshalRow's
-// looksLikeJSONContainer gate, and #736's bool/json.Number repair): a
-// latin1/cp1252 value whose raw bytes happen to ALSO form valid UTF-8 (e.g.
-// latin1 bytes 0xC3 0xA9, which decode as UTF-8 "é") passes the
-// utf8.ValidString check and is left as-is — silently misread as the
-// wrong text, with no error, since bintrail cannot tell "genuinely UTF-8"
-// from "coincidentally valid UTF-8" from the bytes alone. Only reachable
-// content-sniffing, not a per-value type tag, distinguishes the two; a full
-// fix would need to carry the source encoding out-of-band, which is out of
-// scope for #756's reported corruption class (the common case — genuinely
-// mis-set charsets producing INVALID UTF-8 — is what this function fixes).
+// A latin1 CHAR/VARCHAR is decoded always, not only when its bytes are not
+// UTF-8 (#2634): the character set is known, so latin1 bytes that also read
+// as UTF-8 (C3 A9, "Ã©" on MySQL) decode as MySQL reads them.
+//
 // Charset support beyond latin1 is deliberately out of scope too: the issue
 // this closes only reports latin1, and its accepted "at minimum" fallback is
 // exactly the fail-loud default branch below — not silent corruption, and
@@ -625,32 +620,32 @@ func coerceTextEncoding(v any, col ColumnMeta) (any, error) {
 		return v, nil
 	case "uuid", "inet4", "inet6":
 		return padFixedBinary(v, mariaDBFixedWidth[dt]), nil
+	case "tinytext", "text", "mediumtext", "longtext":
+		// A latin1 TEXT arrives as its stored bytes (#2634). Decoded to UTF-8
+		// like CHAR/VARCHAR above, but always: the character set is known
+		// here, and every byte has a latin1 character (latin1.Decode is
+		// total, matching MySQL's own conversion). Kept []byte, so it is
+		// stored base64 as every TEXT value is and its readers do not change.
+		if b, ok := v.([]byte); ok && latin1.IsLatin1(col.CharacterSet) {
+			return []byte(latin1.Decode(string(b))), nil
+		}
+		return v, nil
 	case "char", "varchar":
 		s, ok := v.(string)
+		if ok && latin1.IsLatin1(col.CharacterSet) {
+			// Always decoded, whatever the bytes (#2634): go-mysql hands back
+			// the stored latin1 bytes, and a full read decodes them the same
+			// way. Decoding only invalid UTF-8 left latin1 bytes C3 A9 ("Ã©"
+			// on MySQL) as "é" here and "Ã©" in the snapshot, so the same
+			// row had two keys and two values. latin1.Decode is total and
+			// matches MySQL for the five bytes Windows-1252 leaves empty,
+			// which the older decoder refused (the row was skipped).
+			return latin1.Decode(s), nil
+		}
 		if !ok || utf8.ValidString(s) {
 			return v, nil
 		}
 		switch strings.ToLower(col.CharacterSet) {
-		case "latin1":
-			decoded, err := charmap.Windows1252.NewDecoder().String(s)
-			if err != nil {
-				return nil, fmt.Errorf("failed to transcode latin1 (cp1252) value: %w", err)
-			}
-			// charmap.Windows1252's decoder is total — it never returns a
-			// non-nil error, even for the 5 cp1252 code points cp1252 itself
-			// leaves undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D): those silently
-			// decode to U+FFFD instead. Left unchecked, that's the exact
-			// silent-corruption failure mode #756 exists to close, just
-			// narrowed to 5 specific bytes. A genuine latin1/cp1252 value
-			// never legitimately contains U+FFFD (MySQL's latin1 has no
-			// character at those 5 positions either), so its presence here
-			// means the source byte was one of the 5 undefined points, not a
-			// real transcoding — fail loud instead of embedding it.
-			if strings.ContainsRune(decoded, utf8.RuneError) {
-				return nil, fmt.Errorf(
-					"value contains a byte with no latin1 (cp1252) character assignment — cannot transcode without further corruption")
-			}
-			return decoded, nil
 		case "":
 			return nil, fmt.Errorf(
 				"value is not valid UTF-8 and the schema snapshot has no captured character set for this column (pre-#756 snapshot) — re-run `bintrail snapshot` to enable safe decoding")

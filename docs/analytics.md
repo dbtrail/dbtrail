@@ -150,6 +150,15 @@ long to arrive, see the notes on `bintrail archive reconcile` in the
 Everything DBTrail writes for analytics is plain Parquet: no catalog, no table
 format, nothing that needs DBTrail running to be read.
 
+Text in the files is UTF-8, whatever the column's character set on the source.
+A `latin1` column is converted as MySQL converts it (MySQL's `latin1` is
+Windows-1252), so `café` reads as `café` in any engine, and a restore with
+`reconstruct --output-format mydumper` writes the `latin1` bytes back. Other
+character sets that are not UTF-8 (`cp1250`, `sjis`, `gbk`, ...) are not
+converted: a table that holds non-ASCII text in such a column cannot be read
+from the copy (DuckDB refuses the file), and with Engine Routing MySQL answers
+its statements.
+
 **Snapshots**, one folder per moment, because a snapshot is read whole:
 
 ```
