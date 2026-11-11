@@ -42,6 +42,14 @@ func NewEdge(repeatEvery time.Duration) *Edge {
 	return &Edge{repeatEvery: repeatEvery, now: time.Now, active: make(map[string]edgeState)}
 }
 
+// NewEdgeWithClock is NewEdge reading the time from now, so a caller's tests
+// can move through the repeat window without sleeping through it.
+func NewEdgeWithClock(repeatEvery time.Duration, now func() time.Time) *Edge {
+	e := NewEdge(repeatEvery)
+	e.now = now
+	return e
+}
+
 // Fire reports whether the caller should notify for key being in a bad state
 // now: true on the transition into it, and again each repeatEvery while it
 // persists. detail (optional) carries the condition's identity — a CHANGED

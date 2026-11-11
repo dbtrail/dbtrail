@@ -309,7 +309,7 @@ func init() {
 	watchCmd.Flags().StringVar(&upRotateInterval, "rotate-interval", "1h", "Built-in rotation: how often to run a rotation cycle")
 	watchCmd.Flags().StringVar(&upVerifyInterval, "verify-interval", "", "Scheduled verification: how often to verify every registry server (e.g. 24h, 7d); empty disables")
 	watchCmd.Flags().StringVar(&upVerifyTables, "verify-tables", "", "Scheduled verification: comma-separated schema.table filter (default: all tables)")
-	watchCmd.Flags().StringVar(&upNotifyWebhook, "notify-webhook", "", "Webhook URL for JSON notifications on lost capture continuity, verify problems, and unhealthy rotation; empty disables")
+	watchCmd.Flags().StringVar(&upNotifyWebhook, "notify-webhook", "", "Webhook URL for JSON notifications on stopped capture, lost capture continuity, verify problems, unhealthy rotation, and snapshots too old to restore from; empty disables")
 	watchCmd.Flags().IntVar(&upRotateAddFuture, "rotate-add-future", 3, "Built-in rotation: keep at least N future hourly partitions ready")
 	// --source-dsn is deliberately NOT required: the daemon may start
 	// source-less (zero-config install) and sources are added from the UI.
@@ -681,6 +681,9 @@ func runUpConsoleOnly(cmd *cobra.Command) error {
 	if notifier != nil {
 		startStalenessWatch(ctx, notifier, registry, upIndexDSN, upConsoleBaselineDir, upConsoleBaselineS3)
 	}
+	// Stopped capture (#2635) is webhook-only too: the console shows each
+	// source's state, the channel gets the outage that outlasts the window.
+	startCaptureWatch(ctx, notifier, registry, supervisor)
 
 	// Built-in rotation covers the boot index plus every per-source database
 	// the control plane provisions — the unattended quickstart's real data
@@ -1022,6 +1025,9 @@ func runUpStreamWithConsole(cmd *cobra.Command, args []string) error {
 	if notifier != nil {
 		startStalenessWatch(ctx, notifier, registry, upIndexDSN, upConsoleBaselineDir, upConsoleBaselineS3)
 	}
+	// Stopped capture (#2635) is webhook-only too: the console shows each
+	// source's state, the channel gets the outage that outlasts the window.
+	startCaptureWatch(ctx, notifier, registry, supervisor)
 
 	// Built-in rotation: boot index + every per-source database the control
 	// plane provisions, on the daemon lifecycle. Live settings provider so the

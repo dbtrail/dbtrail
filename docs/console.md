@@ -1668,8 +1668,9 @@ server's statements instead of serving without it.
   explicitly. An unrecognized value disables baseline DUMPS only — capture and
   the periodic refresh keep running.
 - `BINTRAIL_CONSOLE_NOTIFY_WEBHOOK` (`watch` only) — same as
-  `--notify-webhook`: URL for JSON notifications on lost continuity, verify
-  problems, and unhealthy rotation (see
+  `--notify-webhook`: URL for JSON notifications on stopped capture, lost
+  continuity, verify problems, unhealthy rotation, and stale baselines (in
+  Docker Compose, `NOTIFY_WEBHOOK` in `.env`; see
   [Alerts](https://www.dbtrail.com/docs/monitoring/alerts/#webhook)).
 - `BINTRAIL_CONSOLE_VERIFY_INTERVAL` (`watch` only) — same as
   `--verify-interval`: enables scheduled verification on that cadence
