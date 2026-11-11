@@ -860,9 +860,10 @@ services:
   # ── Baselines (one-shot, opt-in `baseline` profile) ──────
   # Produces the full-table Parquet snapshots Time-travel reconstructs from
   # (baseline + binlog deltas → complete rows, not just rows with binlog
-  # activity). Two one-shot steps: the official mydumper image dumps the
-  # source over the network into a transient volume, then the core bintrail
-  # CLI image converts the dump to Parquet in the state volume. Run on demand
+  # activity). Three one-shot steps: the core bintrail CLI image waits for a
+  # quiet source (below), the official mydumper image dumps the source over
+  # the network into a transient volume, then the core image converts the
+  # dump to Parquet in the state volume. Run on demand
   # (or from cron):
   #
   #   BASELINE_SOURCE_DSN="user:pass@tcp(db.example.com:3306)/" \
@@ -873,8 +874,45 @@ services:
   # /var/lib/bintrail/baselines (the bintrail-state volume); point the
   # console at them per server (Edit → Advanced → "Baseline dir") or via
   # BASELINE_DIR for the boot entry. See docs/docker.md.
+  #
+  # First step, before mydumper (#2530): with lock mode ftwrl, wait until the
+  # source has no statement that has been running for 1 s or more. The lock
+  # has to wait for every statement already running, and from the moment it
+  # is asked for, writes to the tables that statement reads stop until it
+  # ends; cancelling the request does not release them, so the only
+  # protection is not asking. It looks every 10 s for up to 10 minutes, then
+  # refuses, and mydumper never starts. The other lock modes do not wait.
+  # The same wait `bintrail dump` and the console's snapshots make.
+  #
+  # What this step says is in `docker compose --profile baseline logs
+  # baseline-quiet`, and `run` does not show it. Read it after a refusal, and
+  # once after a run that worked: when the step cannot see the source it says
+  # why there and lets the dump go ahead without waiting (the account lacks
+  # the PROCESS privilege and so sees only its own statements; or it could
+  # not connect, or could not read the process list).
+  #
+  # Needs a bintrail image newer than 0.128.0. An older one, including a
+  # `latest` already on this machine (`docker compose pull` without the
+  # profile does not refresh it), fails here with
+  # `required flag(s) "output" not set`; the fix is
+  # `docker compose --profile baseline pull`.
+  baseline-quiet:
+    profiles: ["baseline"]
+    image: ghcr.io/dbtrail/bintrail:${BINTRAIL_TAG:-latest}
+    # Same mapping as the bintrail service: host.docker.internal on Linux too.
+    extra_hosts:
+      - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
+    environment:
+      # The same source as baseline-dump below, in the variable the command
+      # reads.
+      BINTRAIL_SOURCE_DSN: ${BASELINE_SOURCE_DSN:-${SOURCE_DSN:-}}
+    command: ["dump", "wait-quiet", "--lock-mode", "${BASELINE_LOCK_MODE:-ftwrl}"]
+
   baseline-dump:
     profiles: ["baseline"]
+    depends_on:
+      baseline-quiet:
+        condition: service_completed_successfully
     # Pinned upstream image (the light-locking flags below need mydumper
     # >= 0.18; distro-apt builds are older and would reject them).
     image: mydumper/mydumper:v1.0.3-1
