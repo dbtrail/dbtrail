@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dbtrail/dbtrail/internal/latin1"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 )
 
@@ -85,6 +86,24 @@ func renderCell(v any, col metadata.ColumnMeta) []byte {
 			return padFixedBinary(x, col)
 		case string:
 			return padFixedBinary([]byte(x), col)
+		}
+	}
+	// A latin1 text column: the copy and the index hold its text as UTF-8
+	// (#2634), the source and its checksum (character_set_results = binary)
+	// the stored latin1 bytes. Render those bytes. Text latin1 has no byte
+	// for is left as it is, and cannot match: an honest mismatch.
+	if isLatin1Text(col) {
+		var s string
+		switch x := v.(type) {
+		case string:
+			s = x
+		case []byte:
+			s = string(x)
+		}
+		if s != "" {
+			if enc, err := latin1.ToStored(s); err == nil {
+				return []byte(enc)
+			}
 		}
 	}
 	switch x := v.(type) {
@@ -607,4 +626,14 @@ func canonicalFloatText(b []byte, bitSize int) []byte {
 		return b
 	}
 	return []byte(strconv.FormatFloat(f, 'g', -1, bitSize))
+}
+
+// isLatin1Text reports whether col is a text column (CHAR, VARCHAR, the TEXT
+// types, ENUM, SET) whose character set is latin1.
+func isLatin1Text(col metadata.ColumnMeta) bool {
+	switch strings.ToLower(strings.TrimSpace(col.DataType)) {
+	case "char", "varchar", "tinytext", "text", "mediumtext", "longtext", "enum", "set":
+		return latin1.IsLatin1(col.CharacterSet)
+	}
+	return false
 }

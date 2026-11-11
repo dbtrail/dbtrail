@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/latin1"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/recovery"
 )
@@ -51,6 +53,12 @@ type MydumperWriter struct {
 	// to its data type, set by SetColumnTypes from the index's schema
 	// snapshot. Those values are written as X'..' (see writeMariaDBFixed).
 	fixed map[int]string
+
+	// latin1 marks the position of each latin1 text column in cols, set by
+	// SetColumnTypes. The copy holds their text as UTF-8 (#2634) and the dump
+	// loads under SET NAMES binary, so their values are written back as
+	// latin1 bytes (see latin1Value).
+	latin1 map[int]bool
 
 	files       []string // written file names, for TableReport
 	rowsWritten int64    // row tuples written across all chunks — the load expectation drill checks against
@@ -126,7 +134,36 @@ func (w *MydumperWriter) WriteSchema(createSQL string) error {
 	if err := os.WriteFile(path, []byte(createSQL), 0o644); err != nil {
 		return fmt.Errorf("write schema file %s: %w", path, err)
 	}
+	w.latin1FromCreate(createSQL)
 	return nil
+}
+
+// latin1FromCreate sets which columns get latin1 bytes from the CREATE TABLE
+// the dump carries (#2634): the dump loads into the table that text makes,
+// under SET NAMES binary, so its character sets are the ones that count. The
+// index's schema snapshot (SetColumnTypes) can disagree, after an ALTER ...
+// CONVERT TO CHARACTER SET or on a snapshot that never recorded character
+// sets, and decides only when the text cannot be read (a placeholder on the
+// binlog-only path).
+func (w *MydumperWriter) latin1FromCreate(createSQL string) {
+	cols, err := baseline.ParseSchemaText(createSQL)
+	if err != nil || len(cols) == 0 {
+		return
+	}
+	isLatin1 := baseline.Latin1Columns(createSQL, cols)
+	byName := make(map[string]bool, len(cols))
+	for i, c := range cols {
+		byName[strings.ToLower(c.Name)] = isLatin1[i]
+	}
+	w.latin1 = nil
+	for i, name := range w.cols {
+		if byName[strings.ToLower(name)] {
+			if w.latin1 == nil {
+				w.latin1 = make(map[int]bool)
+			}
+			w.latin1[i] = true
+		}
+	}
 }
 
 // SetColumnTypes records which columns are MariaDB UUID/INET4/INET6, from the
@@ -137,8 +174,22 @@ func (w *MydumperWriter) WriteSchema(createSQL string) error {
 // one-line statement or a placeholder the schema parser cannot read.
 func (w *MydumperWriter) SetColumnTypes(cols []metadata.ColumnMeta) {
 	types := make(map[string]string, len(cols))
+	charsets := make(map[string]string, len(cols))
 	for _, c := range cols {
 		types[strings.ToLower(c.Name)] = c.DataType
+		charsets[strings.ToLower(c.Name)] = c.CharacterSet
+	}
+	w.latin1 = nil
+	for i, name := range w.cols {
+		switch strings.ToLower(strings.TrimSpace(types[strings.ToLower(name)])) {
+		case "char", "varchar", "tinytext", "text", "mediumtext", "longtext", "enum", "set":
+			if latin1.IsLatin1(charsets[strings.ToLower(name)]) {
+				if w.latin1 == nil {
+					w.latin1 = make(map[int]bool)
+				}
+				w.latin1[i] = true
+			}
+		}
 	}
 	w.fixed = nil
 	for i, name := range w.cols {
@@ -220,6 +271,13 @@ func (w *MydumperWriter) WriteRow(values []any) error {
 			}
 			parts[i] = s
 			continue
+		}
+		if w.latin1[i] {
+			lv, err := latin1Value(w.cols[i], v)
+			if err != nil {
+				return fmt.Errorf("%s.%s: %w", w.schema, w.table, err)
+			}
+			v = lv
 		}
 		parts[i] = recovery.FormatSQLValue(v)
 	}
@@ -455,4 +513,25 @@ func WriteMetadataFile(outputDir string, at time.Time, gtid, binlogFile string, 
 		return fmt.Errorf("write metadata file %s: %w", path, err)
 	}
 	return nil
+}
+
+// latin1Value turns one latin1 column's value into the latin1 bytes MySQL
+// stores (latin1.ToStored). Text latin1 has no byte for cannot have come from
+// a latin1 column, and writing anything for it would restore a different
+// value, so it is refused.
+func latin1Value(col string, v any) (any, error) {
+	var s string
+	switch val := v.(type) {
+	case string:
+		s = val
+	case []byte:
+		s = string(val)
+	default:
+		return v, nil
+	}
+	enc, err := latin1.ToStored(s)
+	if err != nil {
+		return nil, fmt.Errorf("column %q is latin1 and its value cannot be written in latin1: %w", col, err)
+	}
+	return enc, nil
 }

@@ -335,6 +335,10 @@ type Session struct {
 // whether it calls NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE(), and the
 // names of the columns CURDATE() and UTC_DATE() are compared with, read as
 // the router reads the statement.
+//
+// RoundVeto is about ROUND (#2641): safe are the same columns as
+// DistinctVeto's (whole and exact numbers), other all the rest, and the
+// answer is why a ROUND call must not be answered by the copy, or "".
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
 	NameVeto(names []string) string
@@ -342,6 +346,7 @@ type ColumnTypes interface {
 	UnixTimeVeto(dates, notDates, whole, notWhole []string) string
 	CallsNow() bool
 	DateComparedColumns() []string
+	RoundVeto(safe, other []string) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,

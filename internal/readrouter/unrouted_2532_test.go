@@ -114,6 +114,9 @@ func TestUnroutedVeto(t *testing.T) {
 		// A backslash is a character in the copy's strings.
 		`SELECT replace(p, '\', '/') FROM f WHERE q = 'a/b'`,
 		`SELECT 'x\' AS a, b FROM t`,
+		// ROUND and SUBSTRING in the copy's meaning (#2641 holds them to
+		// MySQL's only under Engine Routing).
+		"SELECT ROUND(2.5e0), SUBSTRING(name, 0, 2) FROM t",
 	}
 	for _, stmt := range answered {
 		if r, ok := UnroutedVeto(stmt); ok {
