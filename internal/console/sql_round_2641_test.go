@@ -73,4 +73,24 @@ func TestSQLRoundRefusalFor(t *testing.T) {
 	if got := sqlStrictRefusalFor(in, only("orders"), sqlsandbox.Refs{}, stmt, readrouter.ShapeOf(stmt)); !strings.Contains(got, "ROUND") {
 		t.Errorf("sqlStrictRefusalFor does not ask about ROUND: %q", got)
 	}
+	// A table whose snapshot carries no table definition: its total may be
+	// a DOUBLE, though orders' is exact. Not known is never exact.
+	legacy := views.BaselineTable{Schema: "shop", Table: "legacy", Path: "/c/shop/legacy.parquet"}
+	withLegacy := in
+	withLegacy.Baselines = append(append([]views.BaselineTable{}, in.Baselines...), legacy)
+	narrowed := withLegacy
+	var refs sqlsandbox.Refs
+	for _, n := range []string{"orders", "legacy"} {
+		refs.Tables = append(refs.Tables, sqlsandbox.TableRef{Schema: "shop", Name: n})
+	}
+	narrowed.OnlyViews = sqlWantedViews(withLegacy, refs)
+	stmt = "SELECT ROUND(l.total, 2) FROM orders o JOIN legacy l ON l.id = o.id"
+	if got := sqlRoundRefusalFor(narrowed, stmt, readrouter.ShapeOf(stmt)); got == "" {
+		t.Error("ROUND of a column of a table with no definition, yet the copy answers")
+	}
+	// A number written in the statement is exact whatever the tables are.
+	stmt = "SELECT ROUND(2.5), l.id FROM orders o JOIN legacy l ON l.id = o.id"
+	if got := sqlRoundRefusalFor(narrowed, stmt, readrouter.ShapeOf(stmt)); got != "" {
+		t.Errorf("ROUND(2.5) beside a table with no definition: %q", got)
+	}
 }

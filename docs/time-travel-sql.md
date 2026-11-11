@@ -1297,7 +1297,9 @@ What this is and is not:
   argument is such a column, `SUM`, `MIN` or `MAX` of one, or a number
   written without an exponent, and the digits are a whole number written in
   the statement; `ROUND(AVG(total), 2)`, `ROUND(SUM(qty * price), 2)` and
-  any other expression go to MySQL, even where the two would agree),
+  any other expression go to MySQL, even where the two would agree, and so
+  does `ROUND` of any column beside a table whose snapshot has no table
+  definition),
   `SUBSTRING`, `SUBSTR` and `MID` unless the position is a positive whole
   number or `-1` and the length a whole number, both written in the
   statement (`SUBSTRING('abc', 0, 2)` is `''` on MySQL and `'a'` on the

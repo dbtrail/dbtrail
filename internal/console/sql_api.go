@@ -1648,8 +1648,16 @@ func sqlRoundRefusalFor(narrowed views.Input, statement string, types sqlsandbox
 		why = "the statement could not be searched for ROUND"
 	case types != nil:
 		var safe, other []string
+		unknown := false
 		for _, t := range narrowed.SelectedBaselines() {
+			unknown = unknown || !t.SchemaKnown
 			safe, other = append(safe, t.DistinctSafe...), append(other, t.DistinctOther...)
+		}
+		if unknown {
+			// A table whose column types are not known can hold a DOUBLE
+			// under any name: no column is known to be exact. A number
+			// written in the statement still is.
+			safe = nil
 		}
 		why = types.RoundVeto(safe, other)
 	}
