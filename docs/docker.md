@@ -229,8 +229,10 @@ together. `docker compose pull && docker compose up -d` upgrades the first and
 never touches the second. All three steps:
 
 ```bash
-# 1. the images
+# 1. the images. Name the profiles you use: without them, the images only a
+#    profile runs (baseline, iceberg-export) are not refreshed
 docker compose pull
+docker compose --profile baseline pull     # if you run the baseline profile
 
 # 2. the compose file, which nothing else updates for you. It downloads NEXT
 #    to yours, never over it, so your own edits are still there to carry over
@@ -259,6 +261,7 @@ What a stale compose file costs:
 | the `router` service on port 3309 (file version 4) | nothing answers on the MySQL port. This version serves it from the `router` service only; the `bintrail` service no longer opens it | MySQL clients that connected to 3309 are refused. With the port turned on, `bintrail` prints a `WARNING` at startup that says so (below) |
 | the state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The web interface comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
+| the `baseline-quiet` step of the `baseline` profile | an `ftwrl` dump from that profile asks for its lock while a long query runs, and writes to the tables that query reads stop until it ends | **Silent.** The dump works; the application's writes wait behind it. The step needs a `bintrail` image newer than 0.128.0 (step 1 above) |
 | the `iceberg-export` profile and its volume | there is no one-shot Iceberg export to run | `docker compose --profile iceberg-export run ...` says the service does not exist |
 | the `host.docker.internal` mapping (`extra_hosts`) | on Linux, a database on this same machine cannot be reached by that name | Adding the server fails with `lookup host.docker.internal: no such host` |
 | `cpu_shares` on the `router` service (file version 7) | statements on the copy run with half the machine's cores, about half as fast on an analytical query (a full-table aggregate over 78 M rows: 7 to 10 s against 3 s on 4 cores) | the router's startup line and its card in the web interface say "statements use 2 of this machine's 4 cores". Taking the version 7 file gives them all |
@@ -498,9 +501,10 @@ The web interface's **Time-travel** tab reconstructs complete rows (baseline
 snapshot + binlog deltas), so it needs **baseline Parquet snapshots**, and the
 `bintrail-console` image deliberately ships without the `dump`/`baseline` commands. The
 compose file includes an opt-in one-shot profile that produces them with zero
-extra installs: the official `mydumper` image dumps the source over the
-network into a transient volume, then the core `bintrail` CLI image converts
-the dump to Parquet inside the `bintrail-state` volume.
+extra installs: the core `bintrail` CLI image first waits until the source
+has no long-running statement (see the notes below), the official `mydumper`
+image dumps the source over the network into a transient volume, then the
+core image converts the dump to Parquet inside the `bintrail-state` volume.
 
 Run it on demand (or from cron on the host):
 
@@ -578,7 +582,8 @@ Notes:
   [`ftwrl` waits for a quiet source first](snapshot-lock-measurements.md#ftwrl-waits-for-a-quiet-source-first).
   - **Where it speaks.** `docker compose run` does not show this step's
     output. It is in `docker compose --profile baseline logs baseline-quiet`
-    (every run's lines, oldest first): after a refusal, which connection
+    (the lines of every run since the step's container was last
+    recreated, which a change of source or lock mode does): after a refusal, which connection
     held the run back (never the statement's text). Read it once after a run
     that worked too, because when the step cannot see the source it says why
     there and lets the dump go ahead without waiting.

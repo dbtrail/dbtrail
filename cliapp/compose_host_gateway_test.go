@@ -47,7 +47,7 @@ func TestComposeSourceServicesMapHostDockerInternal(t *testing.T) {
 			t.Errorf("service %q connects to the user's database but does not map host.docker.internal; on Linux the name the installer recommends does not resolve", name)
 		}
 	}
-	// bintrail, shim, baseline-dump and iceberg-export today. Fewer means the
+	// bintrail, shim, baseline-quiet, baseline-dump and iceberg-export today. Fewer means the
 	// guard stopped recognising the services it exists for.
 	if checked < 4 {
 		t.Fatalf("only %d services read a *_DSN variable; this guard covers less than it should", checked)

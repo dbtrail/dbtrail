@@ -860,9 +860,10 @@ services:
   # ── Baselines (one-shot, opt-in `baseline` profile) ──────
   # Produces the full-table Parquet snapshots Time-travel reconstructs from
   # (baseline + binlog deltas → complete rows, not just rows with binlog
-  # activity). Two one-shot steps: the official mydumper image dumps the
-  # source over the network into a transient volume, then the core bintrail
-  # CLI image converts the dump to Parquet in the state volume. Run on demand
+  # activity). Three one-shot steps: the core bintrail CLI image waits for a
+  # quiet source (below), the official mydumper image dumps the source over
+  # the network into a transient volume, then the core image converts the
+  # dump to Parquet in the state volume. Run on demand
   # (or from cron):
   #
   #   BASELINE_SOURCE_DSN="user:pass@tcp(db.example.com:3306)/" \

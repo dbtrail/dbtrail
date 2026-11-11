@@ -64,20 +64,41 @@ func realWaitQuietForCompose(ctx context.Context, sourceDSN string, mode baselin
 }
 
 // composeSourceDSN is the DSN the step checks: the flag, else the variable the
-// profile sets. Read here and not only through the flag's env binding, which
-// happens once at init and which no test of this command would miss. The
-// profile's shell accepts a DSN that ends at ")", with no "/" after it; the Go
-// driver does not, so the "/" is added: otherwise that DSN would dump fine and
-// skip the wait on every run.
-func composeSourceDSN() string {
-	dsn := strings.TrimSpace(dwqSourceDSN)
+// profile sets (the only way it arrives there; the flag has no env binding).
+//
+// It reads the DSN the way the profile's shell does, and for the same DSNs:
+// the address is what follows the LAST "@tcp(" up to the next ")", and it
+// must hold a ":" (host:port). A DSN the shell will refuse is not checked
+// (ok false, with why): connecting to it could wait ten minutes for a run
+// that then stops at the dump step. The shell needs nothing after the ")",
+// while the Go driver needs a "/" there, so one is added when it is missing
+// ("...3306)" and "...3306)?tls=true" alike): without it such a DSN would
+// dump fine and skip the wait on every run.
+func composeSourceDSN() (dsn string, ok bool, why string) {
+	dsn = strings.TrimSpace(dwqSourceDSN)
 	if dsn == "" {
 		dsn = strings.TrimSpace(os.Getenv("BINTRAIL_SOURCE_DSN"))
 	}
-	if strings.HasSuffix(dsn, ")") {
-		dsn += "/"
+	if dsn == "" {
+		return "", false, "no source DSN"
 	}
-	return dsn
+	const open = "@tcp("
+	at := strings.LastIndex(dsn, open)
+	if at < 0 {
+		return "", false, "the source DSN is not user:pass@tcp(host:port)/"
+	}
+	end := strings.Index(dsn[at:], ")")
+	if end < 0 {
+		return "", false, "the source DSN is not user:pass@tcp(host:port)/"
+	}
+	end += at
+	if !strings.Contains(dsn[at+len(open):end], ":") {
+		return "", false, "the source DSN has no host:port"
+	}
+	if rest := dsn[end+1:]; !strings.HasPrefix(rest, "/") {
+		dsn = dsn[:end+1] + "/" + rest
+	}
+	return dsn, true, ""
 }
 
 func runDumpWaitQuiet(cmd *cobra.Command, _ []string) error {
@@ -96,9 +117,9 @@ func runDumpWaitQuiet(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "lock mode %s is not held up by a running statement: nothing to wait for\n", mode)
 		return nil
 	}
-	dsn := composeSourceDSN()
-	if dsn == "" {
-		fmt.Fprintln(out, "no source DSN: nothing checked (the dump step says how to set it)")
+	dsn, ok, why := composeSourceDSN()
+	if !ok {
+		fmt.Fprintln(out, why+": nothing checked (the dump step refuses it and says how to set it)")
 		return nil
 	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)

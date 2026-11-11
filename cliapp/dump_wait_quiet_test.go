@@ -85,18 +85,28 @@ func TestDumpWaitQuiet_refusesAModeTheDumpStepWouldRefuse(t *testing.T) {
 	}
 }
 
-// With no DSN the dump step is the one that says how to set it (it has the
-// example); this step must not fail first with a poorer message, and must not
-// try to connect to nothing.
-func TestDumpWaitQuiet_noDSNLeavesTheRefusalToTheDumpStep(t *testing.T) {
+// A DSN the dump step will refuse (none, no @tcp(...), no port) is the dump
+// step's to refuse: it has the example. This step must not fail first with a
+// poorer message, and must not connect: without a port the Go driver would
+// reach 3306 and could wait ten minutes for a run that then stops anyway.
+func TestDumpWaitQuiet_aDSNTheDumpStepRefusesIsNotChecked(t *testing.T) {
 	t.Setenv("BINTRAIL_SOURCE_DSN", "")
-	for _, dsn := range []string{"", "  ", "\n"} {
-		reached, _, _, stderr, err := runWaitQuiet(t, dsn, "ftwrl", nil)
+	for _, tc := range []struct{ dsn, says string }{
+		{"", "no source DSN"},
+		{"  ", "no source DSN"},
+		{"\n", "no source DSN"},
+		{"u:p@tcp(db.example.com)/", "no host:port"},
+		{"u:p@tcp()/", "no host:port"},
+		{"u:p@unix(/tmp/mysql.sock)/", "not user:pass@tcp(host:port)/"},
+		{"u:p@tcp(h:3306", "not user:pass@tcp(host:port)/"},
+		{"mysql://u:p@h:3306/", "not user:pass@tcp(host:port)/"},
+	} {
+		reached, _, _, stderr, err := runWaitQuiet(t, tc.dsn, "ftwrl", nil)
 		if err != nil || reached {
-			t.Errorf("dsn %q: err = %v, wait reached = %v", dsn, err, reached)
+			t.Errorf("dsn %q: err = %v, wait reached = %v", tc.dsn, err, reached)
 		}
-		if !strings.Contains(stderr, "no source DSN") {
-			t.Errorf("dsn %q: nothing said: %q", dsn, stderr)
+		if !strings.Contains(stderr, tc.says) || !strings.Contains(stderr, "nothing checked") {
+			t.Errorf("dsn %q: said %q, want %q", tc.dsn, stderr, tc.says)
 		}
 	}
 }
@@ -129,6 +139,10 @@ func TestDumpWaitQuiet_readsTheProfileVariable(t *testing.T) {
 	for _, tc := range []struct{ flag, env, want string }{
 		{"", "u:p@tcp(h:3306)/", "u:p@tcp(h:3306)/"},
 		{"", "u:p@tcp(h:3306)", "u:p@tcp(h:3306)/"},
+		{"", "u:p@tcp(h:3306)?tls=true", "u:p@tcp(h:3306)/?tls=true"},
+		{"", "u:p@tcp(h:3306)/?tls=true", "u:p@tcp(h:3306)/?tls=true"},
+		// A password holding "@tcp(" and ")": the shell splits on the LAST "@tcp(".
+		{"", "u:a@tcp(x)b@tcp(h:3306)", "u:a@tcp(x)b@tcp(h:3306)/"},
 		{"", " u:p@tcp(h:3306)/db\n", "u:p@tcp(h:3306)/db"},
 		{"f:p@tcp(h:1)/", "u:p@tcp(h:3306)/", "f:p@tcp(h:1)/"},
 	} {
