@@ -317,3 +317,26 @@ func TestWriteStatusJSON_acknowledgedLoss(t *testing.T) {
 		t.Errorf("a stream with no loss must omit gap_acknowledged:\n%s", raw)
 	}
 }
+
+// An acknowledged loss stays on record in a coverage summary only while the
+// summary's window still contains it. The record is never erased, so the
+// window's start is what lets a summary say ok again.
+func TestAcknowledgedLossInWindow(t *testing.T) {
+	lost := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		floor DeltaFloor
+		want  string
+	}{
+		{"window starts before the loss", DeltaFloor{Hour: lost.Add(-48 * time.Hour)}, ContinuityGapAcknowledged},
+		{"window starts at the loss", DeltaFloor{Hour: lost}, ContinuityGapAcknowledged},
+		{"window starts one second after the loss", DeltaFloor{Hour: lost.Add(time.Second)}, ContinuityOK},
+		{"window starts long after the loss", DeltaFloor{Hour: lost.Add(90 * 24 * time.Hour)}, ContinuityOK},
+		{"window start unknown", DeltaFloor{}, ContinuityGapAcknowledged},
+		{"archives may reach further back than the floor", DeltaFloor{Hour: lost.Add(time.Hour), BelowIsUnknown: true}, ContinuityGapAcknowledged},
+	} {
+		if got := acknowledgedLossInWindow(lost, tc.floor); got != tc.want {
+			t.Errorf("%s: %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}

@@ -119,6 +119,23 @@ type CoverageSummary struct {
 	// here is about what the index CONTAINS.
 }
 
+// acknowledgedLossInWindow is the continuity verdict of a summary whose
+// stream holds an ACKNOWLEDGED loss stamped at lostAt: still on record while
+// the loss is inside the window the summary describes, which starts at the
+// delta-coverage floor (the oldest hour of changes still held), and ok once
+// the window starts after it. The record itself is never erased, so without
+// this a loss from years ago would keep every later summary off "ok" although
+// nothing it covers spans that moment. A loss AT the floor counts as inside.
+// With no floor, or a floor that archives may extend further back
+// (BelowIsUnknown), the window's start is not known and the loss stays on
+// record: "ok" is never asserted from a start that could not be established.
+func acknowledgedLossInWindow(lostAt time.Time, floor DeltaFloor) string {
+	if !floor.Hour.IsZero() && !floor.BelowIsUnknown && lostAt.Before(floor.Hour) {
+		return ContinuityOK
+	}
+	return ContinuityGapAcknowledged
+}
+
 // CollectCoverageSummary computes the summary against one index. The floor
 // degrades to unknown on error (warn-and-degrade, CollectStatus's stance),
 // as does a stream_state read failure ("unavailable"); a failure to read the
@@ -141,6 +158,9 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 		slog.Warn("could not load stream state for the coverage summary", "db", dbName, "error", streamErr)
 	}
 	sum.Continuity = ContinuityStatus(stream, streamErr)
+	if sum.Continuity == ContinuityGapAcknowledged {
+		sum.Continuity = acknowledgedLossInWindow(stream.GapLostAt.Time, sum.Floor)
+	}
 	if sum.Continuity == ContinuityGapAcknowledged {
 		sum.GapLostAt, sum.GapAckedAt = stream.GapLostAt.Time, stream.GapAckedAt.Time
 	}
