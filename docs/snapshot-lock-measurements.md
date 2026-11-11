@@ -17,7 +17,7 @@ One lock is not short: on MySQL 8.0 and 8.4, `ftwrl` first takes `LOCK INSTANCE 
 it for the **whole dump**. It does not stop writes, but no `ALTER TABLE` or other schema change can
 run until the dump ends.
 
-**What can be long is the wait before the lock is granted** (measured before #2530: the `ftwrl` column is what a snapshot that asks for the lock anyway costs, which the compose `baseline` profile still does; see [`ftwrl` waits for a quiet source first](#ftwrl-waits-for-a-quiet-source-first) for what it does now), and what stops during that wait depends
+**What can be long is the wait before the lock is granted** (measured before #2530: the `ftwrl` column is what a snapshot that asks for the lock anyway costs; see [`ftwrl` waits for a quiet source first](#ftwrl-waits-for-a-quiet-source-first) for what it does now), and what stops during that wait depends
 on the mode and on the server:
 
 | Running on the source when the snapshot starts | `ftwrl` on MySQL 8.0 / 8.4 | `ftwrl` on MariaDB 10.11 | `lock-all` (MySQL, RDS, MariaDB) |
@@ -41,7 +41,8 @@ was interrupted`.
 
 ## `ftwrl` waits for a quiet source first
 
-Since #2530, a `ftwrl` snapshot taken by `bintrail dump` or the console does not ask for the lock
+Since #2530, a `ftwrl` snapshot taken by `bintrail dump`, the console or the compose `baseline`
+profile does not ask for the lock
 while a statement has been running on the source for 1 s or more. Before it starts mydumper, DBTrail
 reads the source's process list, and while such a statement runs it waits and looks again every
 10 s, for up to 10 minutes. If the source was never quiet in that time, the snapshot fails without
@@ -49,8 +50,16 @@ having locked or read anything, and says why (which connection, which account, f
 the statement's text). In the console's automatic lock mode, that refusal is retried once with
 `lock-all`, as a refused `ftwrl` is; a lock mode you chose is not. The snapshot's instant is taken
 after the wait, so a snapshot that waited is not labelled with a time before its data. `lock-all`
-does not wait: a running query does not hold it up. The compose `baseline` profile runs mydumper on
-its own and does not wait.
+does not wait: a running query does not hold it up.
+
+The compose `baseline` profile runs mydumper from mydumper's own image, so its wait is a step of its
+own, `baseline-quiet`, that runs before the dump. A refusal there stops the run before mydumper
+starts. What the step says, the refusal's reason and the cases where it could not see the source and
+let the dump go ahead (no `PROCESS`, no connection, an unreadable process list), is in
+`docker compose --profile baseline logs baseline-quiet`, which `docker compose run` does not show.
+Between that step ending and mydumper asking for the lock a container has to start, a second or two
+in which a statement that begins and then runs long is not seen. The step needs a `bintrail` image
+newer than 0.128.0 ([docker.md](docker.md) has the symptom of an older one).
 
 What counts: statements whose command is `Query`, `Execute` (a prepared statement, which is how the
 Go driver, PHP's mysqli and Connector/J with server-side prepare send a statement with parameters;

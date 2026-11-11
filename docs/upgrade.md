@@ -32,6 +32,8 @@ entries.
 
 ```sh
 docker compose pull
+# Images only a profile runs are not pulled without naming it:
+docker compose --profile baseline pull     # if you run the baseline profile
 
 # The compose file is yours and nothing updates it for you. Take the current
 # one BESIDE it, carry your own edits across, then move it into place.

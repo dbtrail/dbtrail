@@ -107,6 +107,23 @@ func WaitForQuietSource(ctx context.Context, db *sql.DB, mode baseline.LockMode,
 	return w.waited, err
 }
 
+// WaitForQuietSourceCompose is the wait as the compose file's `baseline`
+// profile runs it, in a step of its own before mydumper's container: it first
+// says when the account cannot see other accounts' statements (no
+// CheckPrivileges runs in that profile to say it), and a refusal names the
+// profile's variable.
+func WaitForQuietSourceCompose(ctx context.Context, db *sql.DB, mode baseline.LockMode) error {
+	return waitCompose(ctx, db, mode, &quietWait{interval: QuietInterval, total: QuietWaitLimit, sleep: sleepCtx})
+}
+
+func waitCompose(ctx context.Context, db *sql.DB, mode baseline.LockMode, w *quietWait) error {
+	if mode.MydumperValue() != "FTWRL" {
+		return nil
+	}
+	WarnQuietWaitBlind(ctx, db)
+	return w.run(ctx, db, mode, RemedyCompose)
+}
+
 type quietWait struct {
 	interval, total time.Duration
 	sleep           func(context.Context, time.Duration) error
