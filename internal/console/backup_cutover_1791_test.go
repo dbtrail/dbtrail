@@ -38,6 +38,15 @@ func TestCutoverToFull_nothingIndexedAndTheSourceConfirmsIt(t *testing.T) {
 		// The measured rule decides first, as before: with a rate, nothing
 		// to fold is an update whatever the source says.
 		{"a rate and nothing to fold, the source ahead: update", BackupWindow{Anchor: old, Events: 0, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, ""},
+		// The same with the fixed cost of an update on record, under the
+		// last full read: the usual shape of a server with a rate.
+		{"a rate, a fixed cost under the full read, the source ahead: update", BackupWindow{Anchor: old, Events: 0, FoldFixed: 90 * time.Second, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, ""},
+		{"a rate, a fixed cost clearly over the full read, the source ahead: update", BackupWindow{Anchor: old, Events: 0, FoldFixed: 20 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, ""},
+		// The one shape with a rate that reaches the question: a fixed cost
+		// over the last full read but within the margin, where the estimate
+		// settles nothing.
+		{"a rate, a fixed cost a little over the full read, the source ahead: full", BackupWindow{Anchor: old, Events: 0, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, "window_age"},
+		{"a rate and no full read on record, the source ahead: full", BackupWindow{Anchor: old, Events: 0, FoldRate: 4000, Capture: CaptureBehind}, "window_age"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

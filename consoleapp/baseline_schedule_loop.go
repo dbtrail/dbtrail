@@ -297,7 +297,7 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 	}
 	b.mu.Unlock()
 	w := console.BackupWindow{Anchor: anchor, Events: -1}
-	base, known := b.windowBase(e, anchor)
+	base, known, countUnknown := b.windowBase(e, anchor)
 	if b.sup.history != nil {
 		w.FoldFixed, w.FoldRate = b.sup.history.UpdateModel(e.ID)
 		w.LastFull = b.sup.history.LastFullBackup(e.ID)
@@ -314,10 +314,16 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 		defer cancel()
 		cur, answered := readIndexMark(ctx, probeDSN(e.DSN))
 		b.reportWindowBlind(e, answered)
-		if answered && cur.events >= base {
+		switch {
+		case !answered:
+			// Said by reportWindowBlind.
+		case cur.events < base:
+			countUnknown = countUnknownWentBackwards
+		default:
 			w.Events = int64(cur.events - base)
 		}
 	}
+	b.reportCountUnknown(e, anchor, countUnknown)
 	if w.Events == 0 && pastCutover(e, w, time.Now()) {
 		var sourceRead time.Time
 		if b.sup.history != nil {
@@ -400,7 +406,7 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	if r.verdict == console.CaptureCaughtUp {
 		b.sup.gateEdge.Resolve(loud)
 		if b.sup.gateEdge.Fire(quiet, anchor.UTC().Format(time.RFC3339)) {
-			slog.Info("snapshot schedule: nothing was indexed since the previous snapshot and the source confirms it wrote nothing the capture has not recorded; updating instead of taking a full read",
+			slog.Info("snapshot schedule: nothing was indexed since the previous snapshot, and the source confirms it wrote nothing the capture has not recorded",
 				"server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339))
 		}
 		return
@@ -413,7 +419,11 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	if r.cause != "" {
 		args = append(args, "error", r.cause)
 	}
-	msg := "snapshot schedule: nothing was indexed since the previous snapshot, but the source could not confirm it wrote nothing, so the index may be missing changes; the schedule takes a full read instead of an update"
+	// What was found, and no more: this runs wherever nothing was indexed
+	// since an old snapshot, on a page load as well as at a slot, and on a
+	// server whose measured rate makes the slot an update whatever the
+	// source says. The line that takes a full read on it (fire) says so.
+	msg := "snapshot schedule: nothing was indexed since the previous snapshot, and the source does not confirm that capture recorded everything it wrote, so the index may be missing changes"
 	if r.cause != "" || r.verdict == console.CaptureBehind {
 		slog.Warn(msg, args...)
 		return
@@ -445,23 +455,72 @@ func probeDSN(dsn string) string {
 // a full backup published it, #1737). Like measuredEvents, a memo on another
 // index means the server was re-pointed since this daemon's last fold, and
 // no recorded mark can be trusted to come from the current one.
-func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (uint64, bool) {
+//
+// Without a base, why says which of the count's causes for being unknown
+// this is (reportCountUnknown); empty with no anchor, where there is no
+// snapshot to count from and nothing to say.
+func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (base uint64, known bool, why string) {
 	if anchor.IsZero() {
-		return 0, false
+		return 0, false, ""
 	}
 	b.sup.mu.Lock()
 	memo, seen := b.sup.foldedMarks[e.ID]
 	b.sup.mu.Unlock()
 	if seen && memo.indexDSN != e.DSN {
-		return 0, false
+		return 0, false, countUnknownOtherIndex
 	}
 	if seen && reconstruct.SnapshotDirName(memo.publishedAt) == reconstruct.SnapshotDirName(anchor) {
-		return memo.mark.events, true
+		return memo.mark.events, true, ""
 	}
 	if b.sup.history != nil {
-		return b.sup.history.IndexMarkFor(e.ID, anchor.UTC().Format(time.RFC3339))
+		if mark, ok := b.sup.history.IndexMarkFor(e.ID, anchor.UTC().Format(time.RFC3339)); ok {
+			return mark, true, ""
+		}
 	}
-	return 0, false
+	return 0, false, countUnknownNoBase
+}
+
+// Why the number of changes since the previous snapshot is unknown, besides
+// an index that did not answer (reportWindowBlind): the reason attribute of
+// reportCountUnknown's line.
+const (
+	countUnknownNoBase        = "nothing on record says how far the index had been written when that snapshot was made: the run history does not hold it, or another process made the snapshot"
+	countUnknownOtherIndex    = "this server was pointed at another index since the last update made here"
+	countUnknownWentBackwards = "the index's event counter is below the one recorded when that snapshot was made, so the index was rebuilt or replaced"
+)
+
+// windowNoEstimateWords is what an unknown count means for the choice, in
+// the two lines that report one. The age of the previous snapshot no longer
+// chooses a full read (#2659), so the update is what runs, and nothing
+// estimated its cost. The exception is console.CutoverToFull's fixed-cost
+// rule, which needs no count.
+const windowNoEstimateWords = "the schedule's choice is the update, with no estimate of what it will cost; " +
+	"the exception is a server with no per-event rate whose cheapest recent update took clearly longer than its last full read, where a full read is still chosen"
+
+// reportCountUnknown says, once per cause and server, that the changes since
+// the previous snapshot could not be counted, and what the schedule does
+// without the count. Before #2659 an unknown count on an old snapshot was a
+// full read whose reason said so; now the update runs, and without this line
+// nothing would say its cost was never estimated. Warn for the two causes
+// that mean the index is not the one the snapshot was made from; Info for a
+// missing record, which the next update's own record ends. An empty why
+// resolves the condition.
+func (b *backupScheduler) reportCountUnknown(e console.ServerEntry, anchor time.Time, why string) {
+	key := "window-count:" + e.ID
+	if why == "" {
+		b.sup.gateEdge.Resolve(key)
+		return
+	}
+	if !b.sup.gateEdge.Fire(key, why) {
+		return
+	}
+	msg := "snapshot schedule: the number of changes since the previous snapshot could not be established; " + windowNoEstimateWords
+	args := []any{"server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339), "reason", why}
+	if why == countUnknownNoBase {
+		slog.Info(msg, args...)
+		return
+	}
+	slog.Warn(msg, args...)
 }
 
 // reportWindowBlind says once, at Warn, that the index stopped answering
@@ -476,8 +535,7 @@ func (b *backupScheduler) reportWindowBlind(e console.ServerEntry, answered bool
 		return
 	}
 	if b.sup.gateEdge.Fire(key, "") {
-		slog.Warn("snapshot schedule: the index did not answer the update-size probe in time; until it does, the cost of an update "+
-			"cannot be estimated, so the schedule takes the update and no full read is chosen on cost",
+		slog.Warn("snapshot schedule: the index did not answer the update-size probe in time, so the number of changes since the previous snapshot is unknown; "+windowNoEstimateWords,
 			"server", e.Name, "id", e.ID, "timeout", windowProbeTimeout)
 	}
 }

@@ -1072,21 +1072,43 @@ saved, shown with the reason `serve` is not running it.
   same the update is preferred (on a small source, 15 s against 6 s is an
   update; two minutes against 6 s is a full read). When one of the three
   is unknown (no full backup on record, no rate yet because the recent
-  updates differ too little to read a per-event cost from, an index that
-  did not answer the probe), when the estimate is inside the margin, or
-  when no update has been measured since the last full backup, the update
-  runs, however old the previous snapshot is: its age says nothing about
-  the size of the source, which is what a full backup costs. After a long
-  stop that update applies everything recorded since the previous
-  snapshot. It reads those changes a page at a time and keeps the changed
-  rows on disk past a limit, so its memory stays bounded, and it refuses
-  on its own terms (a capture gap, a schema change, too many changed rows
-  in one table), each of which the schedule answers as before.
+  updates differ too little to read a per-event cost from, no count of
+  the changes since the previous snapshot), when the estimate is inside
+  the margin, or when no update has been measured since the last full
+  backup, no full backup is chosen on the estimate and the update runs,
+  however old the previous snapshot is: its age says nothing about the
+  size of the source, which is what a full backup costs. The rule of the
+  cheapest recent update, above, needs neither a rate nor a count, so it
+  still applies with an unknown count. The count is unknown when the
+  index does not answer the probe, when nothing on record says how far
+  the index had been written at the previous snapshot (the run history
+  does not hold it, or another process made the snapshot), when the
+  server was pointed at another index, or when the index was rebuilt;
+  the daemon log says which, once per cause, and that the update runs
+  with no estimate of its cost. After a long stop that update applies
+  everything recorded since the previous snapshot. It reads those changes
+  a page at a time and keeps the changed rows on disk past a limit, so
+  its memory stays bounded, and nothing bounds how long it runs. It is
+  refused on its own terms (a capture gap, a schema change, too many
+  changed rows in one table, hours the index no longer keeps). A refused
+  update is answered by a full backup at the same slot, and that one
+  counts against the limit of one full backup a day in place of a failed
+  update: with one already taken in the last 24 hours the slot is skipped,
+  the card and the log say so, and the copy stays at its last snapshot
+  until the limit passes. Before #2659 a long stop with nothing measured
+  went to a full backup the schedule planned, which that limit does not
+  count.
   `window_age` is not about cost. It is taken when the index recorded
   nothing since a previous snapshot older than two hours or six schedule
   intervals, whichever is longer (counted from when the full backup that
   made it finished, when a full backup did), so the index may be missing
-  changes (#1791). The daemon then asks
+  changes (#1791), and only where the estimate has not already settled
+  the slot. That is a server with no usable per-event rate or no full
+  backup on record, and one whose cheapest update takes a little longer
+  than its last full backup, inside the margin. On a server with a rate
+  whose cheapest update is shorter than its last full backup, an update
+  with nothing to apply is estimated cheaper than a full backup and runs,
+  whatever the source says. Where it does apply, the daemon asks
   the source whether it wrote anything the capture has not recorded, and
   updates when it did not, since there is nothing to fold. The source
   confirms that only when the capture's checkpointed GTID set is EQUAL to the
@@ -1106,7 +1128,10 @@ saved, shown with the reason `serve` is not running it.
   source ahead; a source that does not answer; an index with no live
   capture). An index that records nothing while the source keeps writing
   is a capture that stopped, and a full backup is the one producer that
-  does not depend on it. Stopping a source from the web interface
+  does not depend on it. A source that can never be asked (the list just
+  given) leaves one case open: a quiet server of that kind with no usable
+  rate is read in full each time its snapshot passes that age with
+  nothing indexed, though nothing may have changed. Stopping a source from the web interface
   acknowledges its capture-gap record and does not erase it: the Stop
   stamps the time of the acknowledgement beside the record
   (`stream_state.gap_acked_at`), which silences the alarm (the
@@ -1114,8 +1139,10 @@ saved, shown with the reason `serve` is not running it.
   Prometheus gauge) and nothing else. The verdict becomes
   `gap_acknowledged`, never `ok`, and the page shows the gap as on record
   (see the Restore coverage card and the Status page). A gap acknowledged that way still
-  keeps the full backup, and an update whose window spans it is still
-  refused, until one full backup is taken after the gap; from then on the
+  keeps the `window_age` full backup where that rule applies, and
+  everywhere else an update whose window spans it is still refused (with
+  nothing new indexed too: such a cycle is not skipped while a gap is on
+  record since the snapshot), until one full backup is taken after the gap; from then on the
   gap is behind that backup and updates resume. A second gap raises the
   alarm again. After a full backup the
   model may not choose another one until an update after it has been

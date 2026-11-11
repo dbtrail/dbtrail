@@ -303,7 +303,7 @@ func TestCaptureVerdict_aCancelledCallerLogsNothing(t *testing.T) {
 		t.Fatalf("a cancelled caller logged %q", out)
 	}
 	b.captureVerdict(context.Background(), e, time.Now().Add(-3*time.Hour), time.Time{})
-	if out := logs.String(); !strings.Contains(out, "could not confirm it wrote nothing") {
+	if out := logs.String(); !strings.Contains(out, "does not confirm that capture recorded everything it wrote") {
 		t.Fatalf("a live caller logged %q, want the line", out)
 	}
 }
@@ -452,7 +452,7 @@ func TestReportCaptureProbe(t *testing.T) {
 	structural := captureProbeResult{detail: "the capture runs in binlog-position mode, which is not compared"}
 	b.reportCaptureProbe(e, anchor, structural)
 	b.reportCaptureProbe(e, anchor, structural)
-	if out := logs.String(); strings.Count(out, "could not confirm it wrote nothing") != 1 || !strings.Contains(out, "level=INFO") || strings.Contains(out, "level=WARN") {
+	if out := logs.String(); strings.Count(out, "does not confirm that capture recorded everything it wrote") != 1 || !strings.Contains(out, "level=INFO") || strings.Contains(out, "level=WARN") {
 		t.Fatalf("a structural reason twice: %q, want one Info line", out)
 	}
 	failed := captureProbeResult{detail: "the source did not answer", cause: "dial tcp 10.0.0.1:3306: i/o timeout"}
@@ -467,7 +467,7 @@ func TestReportCaptureProbe(t *testing.T) {
 	}
 	b.reportCaptureProbe(e, anchor, captureProbeResult{verdict: console.CaptureCaughtUp})
 	b.reportCaptureProbe(e, anchor, captureProbeResult{verdict: console.CaptureCaughtUp})
-	if out := logs.String(); strings.Count(out, "updating instead of taking a full read\"") != 1 {
+	if out := logs.String(); strings.Count(out, "the source confirms it wrote nothing the capture has not recorded") != 1 {
 		t.Fatalf("caught up twice for one anchor: %q, want one Info line", out)
 	}
 	// Behind again after caught up is said again, even with the reason it

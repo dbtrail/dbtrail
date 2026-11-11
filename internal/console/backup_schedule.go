@@ -563,14 +563,24 @@ func updateClearlyDearer(updateSec, fullSec float64) bool {
 //     holds everything it wrote. This one is not about cost: an update over
 //     that index would publish the previous snapshot's rows under a new
 //     date, and only a read of the source settles what the capture missed.
+//     It is reached only where the estimate did not settle the slot first,
+//     which narrows it to a server with no rate or no full backup on
+//     record, and one whose fixed cost is over its last full backup but
+//     within the margin. With a rate and a fixed cost under the last full
+//     backup, zero events estimate at that fixed cost and the update runs
+//     without the source being consulted here; this rule is not widened to
+//     that server.
 //
 // Everything else is an update, however old the anchor: an estimate that
 // cannot be made (no count, no rate, no full backup on record), one within
-// the margin, and one made on numbers older than the last full backup. The
-// age of the anchor says nothing about the size of the source, which is
-// what a full read costs. An update that turns out wrong or too large
-// refuses on its own terms (a capture gap, a schema change, too many
-// changed rows) and the schedule handles each of those.
+// the margin, and one made on numbers older than the last full backup. An
+// unknown count (Events < 0) rules out the estimate and not the fixed-cost
+// rule, which needs no count. The age of the anchor says nothing about the
+// size of the source, which is what a full read costs. An update that
+// turns out wrong or too large refuses on its own terms (a capture gap, a
+// schema change, too many changed rows), and the schedule answers a
+// refusal with a full read through its fallback, which is capped at one a
+// day: under the cap the slot is skipped.
 //
 // While no update has been measured since the last full backup
 // (UnmeasuredSinceFull, #1737) neither measured rule may choose a full
