@@ -1289,6 +1289,23 @@ What this is and is not:
   `CONCAT`, `LEAST` and `GREATEST` (one NULL argument makes them NULL on
   MySQL, and the copy skips it: `CONCAT('a', NULL)` is `'a'` there;
   `CONCAT_WS` skips it on both and goes to the copy),
+  `ROUND` of a `FLOAT`, a `DOUBLE` or text (a half rounds to even on
+  MySQL and away from zero on the copy: `ROUND(2.5e0)` is `2` on MySQL and
+  `3` on the copy, `ROUND(0.125e0, 2)` is `0.12` and `0.13`; over a whole
+  number or an exact `DECIMAL` both agree, so `ROUND(SUM(total), 2)` over a
+  `DECIMAL` column goes to the copy. The copy answers only when the first
+  argument is such a column, `SUM`, `MIN` or `MAX` of one, or a number
+  written without an exponent, and the digits are a whole number written in
+  the statement; `ROUND(AVG(total), 2)`, `ROUND(SUM(qty * price), 2)` and
+  any other expression go to MySQL, even where the two would agree),
+  `SUBSTRING`, `SUBSTR` and `MID` unless the position is a positive whole
+  number or `-1` and the length a whole number, both written in the
+  statement (`SUBSTRING('abc', 0, 2)` is `''` on MySQL and `'a'` on the
+  copy; so is a negative position that reaches before the start, `-4` over
+  `'abc'`, and a negative length, `SUBSTRING('abc', 2, -1)`; every negative
+  position but `-1` goes to MySQL, since how long the text is depends on the
+  row, and so does a position from a column or a placeholder; the copy has
+  no `MID`, so MySQL answers that one anyway),
   a zero date (the copy holds `0000-00-00` as NULL: in a `DATE`, `DATETIME`
   or `TIMESTAMP` column declared `NOT NULL`, or whose default is the zero
   date, a NULL on the copy can only be one, and a statement that names such
@@ -1612,7 +1629,8 @@ What this is and is not:
     `DECIMAL` with four decimals more than the operand has (for `DECIMAL`
     and integer operands; a `DOUBLE` operand gives a double on both):
     `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
-    `1.800000` on MySQL, `ROUND(AVG(points), 1)` is `0` and `0.0`,
+    `1.800000` on MySQL, `ROUND(AVG(points), 1)` is `0` and `0.0` (Engine
+    Routing keeps that one on MySQL since #2641),
     `qty / 3` is `1.3333333333333333` and `1.3333`. The same value in a
     different text and under a different column type, exact to about 15
     significant digits on the copy. It stays this way because nothing is
@@ -2527,6 +2545,7 @@ Or turn on Engine Routing, and MySQL answers them. The list is of
 constructs only MySQL's SQL holds; it does not make the copy MySQL. Every
 other difference this page lists still holds on such a connection (text
 compared by case only, `CONCAT` skipping a NULL where MySQL returns NULL,
+`ROUND` of a `DOUBLE` half away from zero, `SUBSTRING` from position 0,
 and the rest). Answered with the copy's own meaning, because it is also how
 DuckDB SQL is written or because it is a difference listed above: a string
 that reads as a date with a two-digit year (`'26-01-15'` is year 26 here,

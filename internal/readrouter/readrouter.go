@@ -342,7 +342,96 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	if nullArgCall.MatchString(sc.blankedCopy) {
 		return vetoNullArg
 	}
+	if !substringsAgree(sc.blankedCopy) {
+		return vetoSubstring
+	}
 	return ""
+}
+
+// vetoSubstring keeps SUBSTRING, SUBSTR and MID on MySQL when the copy could
+// cut the text another way (#2641). Measured on MySQL 8.0.46 and DuckDB
+// 1.5.6 over 'abc': a position of 0 is empty on MySQL and counts from before
+// the first character on the copy (SUBSTRING('abc', 0, 2) is 'a' there); a
+// negative position that reaches before the start is empty on MySQL and the
+// copy's text from its start (-4, 2 is 'a'); a negative length is empty on
+// MySQL and the characters before the position on the copy (2, -1 is 'a').
+// Both agree on a positive position, past the end too, on a negative one
+// inside the text, and on a length of 0 or more. A negative position other
+// than -1 is kept on MySQL whatever its value, since how long the text is
+// depends on the row (-2 over 'a' is empty on MySQL and 'a' on the copy); -1
+// is the last character on both, and empty over an empty text. Checked after
+// vetoNullArg, which names a statement with both.
+const vetoSubstring = "SUBSTRING/SUBSTR/MID with a position other than a positive whole number or -1, or a length other than a whole number, written in the statement (0, a negative position or a negative length cut another way on the copy)"
+
+var (
+	// substringCall opens a call, the name bare or quoted: a quoted name is
+	// an error on MySQL and an answer on the copy. \v too: Go's \s leaves it
+	// out, and MySQL reads it as a space. A dot before it is matched: a
+	// qualified name is a stored function on MySQL.
+	substringCall = regexp.MustCompile(`(?i)"?(?:substring|substr|mid)"?[\s\v]*\(`)
+	// substringFrom is the FROM ... FOR form: SUBSTRING(s FROM p FOR n).
+	substringFrom = regexp.MustCompile(`(?i)^(.*?)\bfrom\b(.*?)(?:\bfor\b(.*))?$`)
+	// substringPos and substringLen are what the copy may be given: a
+	// positive whole number or -1 for the position, a whole number for the
+	// length.
+	substringPos = regexp.MustCompile(`^(?:[1-9]\d*|-\s*1)$`)
+	substringLen = regexp.MustCompile(`^\d+$`)
+)
+
+// substringsAgree reports whether every SUBSTRING, SUBSTR and MID call in
+// blanked has a position and a length (if any) both engines read the same
+// way (vetoSubstring). A call it cannot read, or one MySQL does not take,
+// does not agree.
+func substringsAgree(blanked string) bool {
+	for _, l := range callsOf(substringCall, blanked) {
+		body, ok := closingBody(blanked, l[1])
+		if !ok {
+			return false
+		}
+		var pos, length string
+		if m := substringFrom.FindStringSubmatchIndex(body); m != nil && depthZero(body, m[3]) {
+			if strings.TrimSpace(body[m[2]:m[3]]) == "" {
+				return false
+			}
+			pos = strings.TrimSpace(body[m[4]:m[5]])
+			if m[6] >= 0 {
+				// FOR was written: its length must be there.
+				if length = strings.TrimSpace(body[m[6]:m[7]]); length == "" {
+					return false
+				}
+			}
+		} else {
+			args, ok := topLevelArgs(body)
+			if !ok || len(args) < 2 || len(args) > 3 {
+				return false
+			}
+			pos = args[1]
+			if len(args) == 3 {
+				length = args[2]
+			}
+		}
+		if !substringPos.MatchString(unwrap(pos)) {
+			return false
+		}
+		if length != "" && !substringLen.MatchString(unwrap(length)) {
+			return false
+		}
+	}
+	return true
+}
+
+// depthZero reports whether position i of s is outside every parenthesis.
+func depthZero(s string, i int) bool {
+	depth := 0
+	for j := 0; j < i && j < len(s); j++ {
+		switch s[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+	}
+	return depth == 0
 }
 
 // vetoNullArg keeps CONCAT, LEAST and GREATEST on MySQL (#2633): one NULL

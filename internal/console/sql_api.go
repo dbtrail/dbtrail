@@ -1544,6 +1544,8 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //   - a name could bind to something else (sqlNamesRefusalFor, #2123);
 //   - a date, time or year column is used where the copy's type for it
 //     answers differently (sqlTypesRefusalFor, #2133);
+//   - an aggregate over DISTINCT text (sqlDistinctRefusalFor, #2532), or a
+//     ROUND of something not known to be exact (sqlRoundRefusalFor, #2641);
 //   - a column's name stands right before a string, which the copy reads
 //     as a constant of a type called that (sqlWordsRefusalFor, #2131).
 //
@@ -1563,6 +1565,9 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 		return msg
 	}
 	if msg := sqlDistinctRefusalFor(narrowed, statement, types); msg != "" {
+		return msg
+	}
+	if msg := sqlRoundRefusalFor(narrowed, statement, types); msg != "" {
 		return msg
 	}
 	if msg := sqlBinaryILikeRefusalFor(narrowed, statement, types); msg != "" {
@@ -1620,6 +1625,33 @@ func sqlDistinctRefusalFor(narrowed views.Input, statement string, types sqlsand
 			safe, other = append(safe, t.DistinctSafe...), append(other, t.DistinctOther...)
 		}
 		why = types.DistinctVeto(safe, other)
+	}
+	if why == "" {
+		return ""
+	}
+	return "the copy does not answer this statement: " + why
+}
+
+// sqlRoundRefusalFor says why the copy must not answer a statement because of
+// a ROUND call, or "" when it can (#2641). Over a FLOAT or a DOUBLE MySQL
+// rounds a half to even and the copy away from zero (ROUND(2.5e0) is 2 on
+// MySQL and 3 on the copy); over a whole number or an exact DECIMAL both
+// agree. The rule is the routing layer's (readrouter.RoundVeto, asked through
+// types), over the same split of every table's columns DISTINCT uses. With
+// no reading of the statement (types is nil) the copy does not answer a
+// statement that holds the word ROUND anywhere: not known is never "nothing
+// to find".
+func sqlRoundRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes) string {
+	why := ""
+	switch {
+	case types == nil && strings.Contains(strings.ToLower(statement), "round"):
+		why = "the statement could not be searched for ROUND"
+	case types != nil:
+		var safe, other []string
+		for _, t := range narrowed.SelectedBaselines() {
+			safe, other = append(safe, t.DistinctSafe...), append(other, t.DistinctOther...)
+		}
+		why = types.RoundVeto(safe, other)
 	}
 	if why == "" {
 		return ""
