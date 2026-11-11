@@ -194,7 +194,8 @@ type clearOutcome struct {
 // clearCheckpoint clears the stream_state checkpoint so the next `bintrail-pg stream`
 // starts fresh, WITHOUT DELETEing the row (#1082): a blind DELETE would also erase any
 // recorded gap_lost_at/gap_lost_detail continuity-loss record, letting a reset silently
-// launder a real, still-unacknowledged loss out of `bintrail status --fail-on-gap`.
+// launder a real loss out of `bintrail status --fail-on-gap` and out of every check
+// that refuses a window spanning it.
 //
 // It loads the existing row first and branches on whether a real checkpoint (a non-zero
 // LSN cursor — saveCheckpointPG never writes 0) is being discarded:

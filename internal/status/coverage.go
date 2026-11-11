@@ -16,15 +16,20 @@ import (
 // buckets from the same StreamStateInfo fields for their own wording/exit
 // concerns; the wire vocabulary lives here.
 //
-//	"ok"          — no gap in the captured range (NOT a liveness assertion),
-//	                or a recorded loss an operator acknowledged (the alarm is
-//	                silenced; the loss still refuses the windows it falls in)
-//	"gap_lost"    — an unfillable gap was stamped and not acknowledged:
-//	                events permanently lost
-//	"unknown"     — legacy index without the gap columns; never a false "ok"
-//	"unavailable" — stream_state could not be read; never a false "ok"
-//	"none"        — no stream row (file-mode index): no capture ran, so no
-//	                continuity could break — a genuine no-claim, not a hole
+//	"ok"               — no loss on record for the captured range (NOT a
+//	                     liveness assertion)
+//	"gap_lost"         — an unfillable gap was stamped and nobody has
+//	                     acknowledged it: events permanently lost
+//	"gap_acknowledged" — an unfillable gap was stamped and an operator
+//	                     acknowledged it. The alarm is silenced; the events
+//	                     are as lost as under "gap_lost", and a window that
+//	                     spans the loss is still refused. Never "ok"
+//	"unknown"          — legacy index without the gap columns; never a false
+//	                     "ok"
+//	"unavailable"      — stream_state could not be read; never a false "ok"
+//	"none"             — no stream row (file-mode index): no capture ran, so
+//	                     no continuity could break — a genuine no-claim, not
+//	                     a hole
 func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 	switch {
 	case stream == nil && streamErr != nil:
@@ -33,6 +38,13 @@ func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 		return ContinuityNone
 	case stream.GapUnacknowledged():
 		return ContinuityGapLost
+	case stream.GapAcknowledged():
+		// Its own verdict, never ContinuityOK: "ok" over a hole this index
+		// knows about is what a consumer paints green. What an
+		// acknowledgement silences is the ALARM (--fail-on-gap, the webhook,
+		// the gauge, lost_position), and each of those decides on
+		// GapUnacknowledged, not on this string.
+		return ContinuityGapAcknowledged
 	case !stream.GapColumnsPresent:
 		return ContinuityUnknown
 	default:
@@ -41,16 +53,20 @@ func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 }
 
 // The continuity verdict vocabulary, named so a consumer branches on a symbol
-// instead of a literal. Only ContinuityGapLost and ContinuityOK are claims
-// about the captured range; a consumer that treats everything-but-gap_lost as
-// healthy folds the two "never a false ok" verdicts into a pass, which is the
-// error this vocabulary exists to prevent.
+// instead of a literal. Only ContinuityGapLost, ContinuityGapAcknowledged and
+// ContinuityOK are claims about the captured range, and only ContinuityOK says
+// nothing is known to be missing; a consumer that treats everything-but-gap_lost
+// as healthy folds an acknowledged loss and the two "never a false ok" verdicts
+// into a pass, which is the error this vocabulary exists to prevent.
 const (
-	ContinuityOK          = "ok"
-	ContinuityGapLost     = "gap_lost"
-	ContinuityUnknown     = "unknown"
-	ContinuityUnavailable = "unavailable"
-	ContinuityNone        = "none"
+	ContinuityOK      = "ok"
+	ContinuityGapLost = "gap_lost"
+	// ContinuityGapAcknowledged: a loss is on record and an operator
+	// acknowledged it. Not healthy and not alarming: on record.
+	ContinuityGapAcknowledged = "gap_acknowledged"
+	ContinuityUnknown         = "unknown"
+	ContinuityUnavailable     = "unavailable"
+	ContinuityNone            = "none"
 )
 
 // CoverageSummary is the lean live-RPO view behind the console's coverage
@@ -81,6 +97,12 @@ type CoverageSummary struct {
 	// measure, and an empty index has no edge to measure from.
 	LagSeconds *int64
 	Continuity string
+	// GapLostAt and GapAckedAt are the recorded loss and its acknowledgement,
+	// set only when Continuity is ContinuityGapAcknowledged: what a surface
+	// needs to say WHEN changes were lost and that someone acknowledged it,
+	// instead of a bare verdict word.
+	GapLostAt  time.Time
+	GapAckedAt time.Time
 	// Freshness is the LIVENESS verdict (#1226/#1227), computed here from the
 	// same stream row Continuity uses so the console cannot reach a different
 	// answer than `bintrail status`. It is what disambiguates LagSeconds: a big
@@ -119,6 +141,9 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 		slog.Warn("could not load stream state for the coverage summary", "db", dbName, "error", streamErr)
 	}
 	sum.Continuity = ContinuityStatus(stream, streamErr)
+	if sum.Continuity == ContinuityGapAcknowledged {
+		sum.GapLostAt, sum.GapAckedAt = stream.GapLostAt.Time, stream.GapAckedAt.Time
+	}
 	sum.Freshness = FreshnessStatus(stream, streamErr, now, 0, 0)
 	if age, ok := CheckpointAge(stream, now); ok {
 		secs := int64(age / time.Second)

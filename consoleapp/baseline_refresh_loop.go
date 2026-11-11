@@ -19,6 +19,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/rotation"
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // refreshRequest is one server's periodic baseline refresh.
@@ -845,6 +846,10 @@ var errSnapshotNotUploaded = errors.New("the snapshot was not sent to the snapsh
 //  2. The snapshot that fold published is still inside the window the index can
 //     fold from, so not republishing it costs nothing later.
 //
+// Two things move neither mark and are asked for after those: a table created
+// since the snapshot (#1993), and a capture loss on record since it. Either
+// one runs the cycle.
+//
 // The order is the cheap question first: the second one goes back to the index,
 // and it is only worth asking about a cycle that would otherwise be skipped.
 //
@@ -915,7 +920,65 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 		}
 		return false
 	}
+	// A capture loss writes no row and no schema change either, so it moves
+	// neither mark: capture that lost events and has indexed nothing since
+	// would be skipped here as "nothing indexed since the last snapshot",
+	// which is true and is not the news. With a loss on record at or after
+	// the snapshot the update would start from, the cycle runs: the fold
+	// refuses with the capture-gap verdict, the run is recorded with that
+	// reason, and the schedule takes a full read in its place where it may.
+	// Acknowledged or not: an acknowledgement silences the alarm, and the
+	// copy is as far behind the source as before.
+	if lost, err := lossOnRecordSince(ctx, req.IndexDSN, prev.publishedAt); err != nil || lost {
+		if err != nil {
+			slog.Debug("snapshot refresh: could not ask the index whether capture lost events since the last snapshot; folding", "server", req.ServerName, "error", err)
+		} else if s.gateEdge.Fire("loss:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
+			// Behind an edge, like the re-anchor line above: the condition
+			// holds every cycle until a full read is taken after the loss,
+			// and each of those cycles records its own refused run.
+			slog.Info("snapshot refresh: nothing has been indexed, but capture lost events since the last snapshot; not skipping, so the update is refused with that reason",
+				"server", req.ServerName, "id", req.ServerID,
+				"last_backup", prev.publishedAt.UTC().Format(time.RFC3339))
+		}
+		return false
+	}
+	s.gateEdge.Resolve("loss:" + req.ServerID)
 	return true
+}
+
+// lossOnRecordSince asks the index whether a permanent capture loss is on
+// record at or after since. Indirected for tests, like tablesCreatedSince.
+// An error means the question could not be asked, and the caller folds.
+var lossOnRecordSince = func(ctx context.Context, indexDSN string, since time.Time) (bool, error) {
+	db, err := config.Connect(indexDSN)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(ctx, sourceTablesTimeout)
+	defer cancel()
+	st, err := status.LoadStreamState(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	return lossSince(st, since), nil
+}
+
+// lossSince is the rule behind lossOnRecordSince: a loss stamped at or after
+// since. It reads GapLostAt and never the acknowledgement, like every reader
+// that decides whether a window is complete.
+//
+// False for an index with no capture on record (no row) and for one that
+// predates the loss record (GapColumnsPresent false). Neither can say a loss
+// happened, and this gate only ADDS a reason to run: for those two it changes
+// nothing, and a cycle that does run still meets the fold's own check, which
+// refuses an index that cannot rule a loss out.
+//
+// At or after, where the fold's window is (since, until]: a loss in the very
+// second the snapshot is named for is not skipped here and is not refused
+// there, so that cycle runs once, publishes, and moves since past the loss.
+func lossSince(st *status.StreamStateInfo, since time.Time) bool {
+	return st != nil && st.GapColumnsPresent && st.GapLostAt.Valid && !st.GapLostAt.Time.Before(since)
 }
 
 // retainPolicy is the retention the operator has CONFIGURED, or zero when

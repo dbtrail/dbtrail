@@ -92,25 +92,35 @@ const (
 // Continuity verdicts, as returned by ContinuityStatus and carried in
 // CoverageSummary.Continuity:
 //
-//	ContinuityOK          — no gap in the captured range. NOT a liveness
-//	                        claim: it says nothing about the stream running
-//	                        now (CoverageSummary.LagSeconds is that signal).
-//	ContinuityGapLost     — an unfillable gap was stamped: events are
-//	                        permanently lost.
+//	ContinuityOK          — no loss on record for the captured range. NOT a
+//	                        liveness claim: it says nothing about the stream
+//	                        running now (CoverageSummary.LagSeconds is that
+//	                        signal).
+//	ContinuityGapLost     — an unfillable gap was stamped and nobody has
+//	                        acknowledged it: events are permanently lost.
+//	ContinuityGapAcknowledged — an unfillable gap was stamped and an operator
+//	                        acknowledged it. The events are exactly as lost
+//	                        as under ContinuityGapLost and a window spanning
+//	                        the loss is incomplete; only the alarm is
+//	                        silenced. CoverageSummary.GapLostAt and
+//	                        GapAckedAt carry the two instants. Never treat it
+//	                        as ContinuityOK.
 //	ContinuityUnknown     — a legacy index without the gap columns: whether a
 //	                        gap happened is unevaluable, never a false "ok".
 //	ContinuityUnavailable — stream_state could not be read, likewise.
 //	ContinuityNone        — no stream row (file-mode index): no capture ran,
 //	                        so no continuity could break. A genuine no-claim.
 //
-// Branching on "not gap_lost" folds the two unevaluable verdicts into a pass,
-// which is the error this vocabulary exists to prevent.
+// Branching on "not gap_lost" folds an acknowledged loss and the two
+// unevaluable verdicts into a pass, which is the error this vocabulary exists
+// to prevent. Only ContinuityOK says nothing is known to be missing.
 const (
-	ContinuityOK          = status.ContinuityOK
-	ContinuityGapLost     = status.ContinuityGapLost
-	ContinuityUnknown     = status.ContinuityUnknown
-	ContinuityUnavailable = status.ContinuityUnavailable
-	ContinuityNone        = status.ContinuityNone
+	ContinuityOK              = status.ContinuityOK
+	ContinuityGapLost         = status.ContinuityGapLost
+	ContinuityGapAcknowledged = status.ContinuityGapAcknowledged
+	ContinuityUnknown         = status.ContinuityUnknown
+	ContinuityUnavailable     = status.ContinuityUnavailable
+	ContinuityNone            = status.ContinuityNone
 )
 
 // Verify run triggers and the VerifyStatus.State vocabulary. "Not skipped" is

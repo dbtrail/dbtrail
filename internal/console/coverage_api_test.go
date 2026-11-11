@@ -44,6 +44,15 @@ func coverageMockDBArchives(t *testing.T, part string, latest time.Time, archErr
 	return db
 }
 
+func coverageGetBody(t *testing.T, body []byte) coverageResponse {
+	t.Helper()
+	var got coverageResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 func coverageGet(t *testing.T, srv *Server) coverageResponse {
 	t.Helper()
 	rec, body := doServersReq(t, srv, "GET", "/api/coverage", "")
@@ -94,6 +103,62 @@ func TestCoverageAPI(t *testing.T) {
 			t.Fatalf("checkpoint_age_seconds = %v, want omitted with no checkpoint", *got.CheckpointAgeSeconds)
 		}
 	})
+
+	// What the Restore coverage card is fed for a capture loss, before and
+	// after an operator acknowledged it: the verdict word, and for an
+	// acknowledged loss the two instants the card's sentence is built from.
+	for _, c := range []struct {
+		name     string
+		acked    any // gap_acked_at: a time, or nil
+		wantCont string
+		wantObj  bool
+	}{
+		{"acknowledged loss: gap_acknowledged with both instants", latest.Add(-10 * time.Minute), "gap_acknowledged", true},
+		{"unacknowledged loss: gap_lost, no acknowledged object", nil, "gap_lost", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			lost := latest.Add(-time.Hour)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			mock.MatchExpectationsInOrder(false)
+			mock.ExpectQuery("PARTITION_NAME FROM information_schema.PARTITIONS").
+				WillReturnRows(sqlmock.NewRows([]string{"PARTITION_NAME"}).AddRow(part))
+			mock.ExpectQuery(`MIN\(partition_name\)`).
+				WillReturnRows(sqlmock.NewRows([]string{"min", "max", "sources"}).AddRow(nil, nil, 0))
+			mock.ExpectQuery("PARTITION_NAME FROM information_schema.PARTITIONS").
+				WillReturnRows(sqlmock.NewRows([]string{"PARTITION_NAME"}).AddRow(part))
+			mock.ExpectQuery(`MAX\(event_timestamp\) FROM binlog_events PARTITION`).
+				WillReturnRows(sqlmock.NewRows([]string{"max"}).AddRow(latest))
+			mock.ExpectQuery("SELECT mode, binlog_file").WillReturnRows(sqlmock.NewRows([]string{
+				"mode", "binlog_file", "binlog_position", "gtid_set", "events_indexed", "last_event_time",
+				"last_checkpoint", "server_id", "bintrail_id", "gap_lost_at", "gap_lost_detail"}).
+				AddRow("gtid", "", 0, "uuid:1-9", 100, latest, now, 7, "id-1", lost, "binlogs purged"))
+			mock.ExpectQuery("SELECT gap_acked_at FROM stream_state").
+				WillReturnRows(sqlmock.NewRows([]string{"gap_acked_at"}).AddRow(c.acked))
+			srv := newBaselineServer(t, dir, true)
+			srv.cm.boot.db = db
+			srv.cm.boot.dbName = "binlog_index"
+			rec, body := doServersReq(t, srv, "GET", "/api/coverage", "")
+			if rec.Code != 200 {
+				t.Fatalf("code = %d, body = %s", rec.Code, body)
+			}
+			t.Logf("/api/coverage: %s", body)
+			got := coverageGetBody(t, body)
+			if got.Continuity != c.wantCont {
+				t.Fatalf("continuity = %q, want %q", got.Continuity, c.wantCont)
+			}
+			if (got.GapAcknowledged != nil) != c.wantObj {
+				t.Fatalf("gap_acknowledged = %+v, want present: %v", got.GapAcknowledged, c.wantObj)
+			}
+			if c.wantObj && (got.GapAcknowledged.At != lost.Format(consoleTSFormat) ||
+				got.GapAcknowledged.AcknowledgedAt != latest.Add(-10*time.Minute).Format(consoleTSFormat)) {
+				t.Fatalf("gap_acknowledged = %+v", got.GapAcknowledged)
+			}
+		})
+	}
 
 	t.Run("no full-table fields, with a backup location configured", func(t *testing.T) {
 		srv := newBaselineServer(t, dir, true)

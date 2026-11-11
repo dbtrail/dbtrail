@@ -123,8 +123,8 @@ func TestLoadStreamState_GapAckedAt(t *testing.T) {
 	if st := load(); !st.GapAcknowledged() || st.GapUnacknowledged() || !st.GapLostAt.Valid || !st.GapColumnsPresent {
 		t.Errorf("an acknowledged loss must stay on record and read as acknowledged: %+v", st)
 	}
-	if got := status.ContinuityStatus(load(), nil); got != status.ContinuityOK {
-		t.Errorf("continuity after the acknowledgement = %q, want ok", got)
+	if got := status.ContinuityStatus(load(), nil); got != status.ContinuityGapAcknowledged {
+		t.Errorf("continuity after the acknowledgement = %q, want gap_acknowledged", got)
 	}
 	// A second loss in the same second as the acknowledgement.
 	testutil.MustExec(t, db, `UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP(), gap_lost_detail = 'second', gap_acked_at = NULL WHERE id = 1`)

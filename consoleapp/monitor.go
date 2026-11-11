@@ -1266,9 +1266,11 @@ func (m *monitorSupervisor) Stop(ctx context.Context, entryID string) error {
 	// window, and it is already closed when the stream gave up or exited). On
 	// failure the record stays unacknowledged — the next Start re-raises
 	// lost_position, which fails safe: a real past loss is re-surfaced, never
-	// dropped. Done BEFORE the cancel on purpose: a loss the stream stamps
-	// between here and its exit NULLs the acknowledgement again, so a loss
-	// nobody saw is never acknowledged.
+	// dropped. It acknowledges whatever loss is on record at this moment,
+	// whether or not anyone looked at it: Stop is the acknowledgement, and it
+	// asks no question. Done BEFORE the cancel so that a loss the stream
+	// stamps between here and its exit, which NULLs the acknowledgement, is
+	// left unacknowledged and raises the alarm at the next Start.
 	if job.indexDSN != "" {
 		if db, err := config.Connect(job.indexDSN); err != nil {
 			slog.Warn("could not acknowledge gap-loss record on stop", "entry", entryID, "error", config.ScrubDSNText(err.Error(), job.indexDSN))

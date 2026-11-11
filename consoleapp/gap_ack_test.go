@@ -68,14 +68,15 @@ var gapAckCases = []struct {
 	lost, ack any // time.Time or nil
 	detail    any
 	wantLoud  bool
+	wantAcked bool // a loss is on record and acknowledged: quiet, and not "no record"
 }{
-	{"no loss", nil, nil, nil, false},
-	{"acknowledgement with no loss stamped", nil, gapAckLost, nil, false},
-	{"loss, never acknowledged", gapAckLost, nil, "binlogs purged", true},
-	{"loss, acknowledged later", gapAckLost, gapAckLost.Add(time.Hour), "binlogs purged", false},
-	{"loss and acknowledgement in the same second", gapAckLost, gapAckLost, "binlogs purged", false},
-	{"second loss after the acknowledgement (the stamp nulled it)", gapAckLost.Add(2 * time.Hour), nil, "second purge", true},
-	{"acknowledgement older than the loss", gapAckLost, gapAckLost.Add(-time.Second), "binlogs purged", true},
+	{"no loss", nil, nil, nil, false, false},
+	{"acknowledgement with no loss stamped", nil, gapAckLost, nil, false, false},
+	{"loss, never acknowledged", gapAckLost, nil, "binlogs purged", true, false},
+	{"loss, acknowledged later", gapAckLost, gapAckLost.Add(time.Hour), "binlogs purged", false, true},
+	{"loss and acknowledgement in the same second", gapAckLost, gapAckLost, "binlogs purged", false, true},
+	{"second loss after the acknowledgement (the stamp nulled it)", gapAckLost.Add(2 * time.Hour), nil, "second purge", true, false},
+	{"acknowledgement older than the loss", gapAckLost, gapAckLost.Add(-time.Second), "binlogs purged", true, false},
 }
 
 func gapAckMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
@@ -139,15 +140,15 @@ func TestReadGapLostFrom(t *testing.T) {
 			db, mock := gapAckMock(t)
 			mock.ExpectQuery(regexp.QuoteMeta(gapAckSelect)).WillReturnRows(
 				sqlmock.NewRows([]string{"gap_lost_at", "gap_lost_detail", "gap_acked_at"}).AddRow(c.lost, c.detail, c.ack))
-			lost, detail, err := readGapLostFrom(context.Background(), db)
+			reading, err := readGapLostFrom(context.Background(), db)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if lost != c.wantLoud {
-				t.Fatalf("gapLost = %v, want %v", lost, c.wantLoud)
+			if reading.lost != c.wantLoud || reading.acknowledged != c.wantAcked {
+				t.Fatalf("reading = %+v, want lost=%v acknowledged=%v", reading, c.wantLoud, c.wantAcked)
 			}
-			if !lost && detail != "" {
-				t.Errorf("a quiet verdict must carry no detail, got %q", detail)
+			if !reading.lost && reading.detail != "" {
+				t.Errorf("a quiet verdict must carry no detail, got %q", reading.detail)
 			}
 
 			// Drive the real watcher cycle with this verdict.
@@ -156,7 +157,7 @@ func TestReadGapLostFrom(t *testing.T) {
 			n, sent := testNotifier()
 			w := &continuityWatcher{
 				n: n, registry: reg, unknownEdge: notify.NewEdge(0), prevNames: make(map[string]bool),
-				readGap: func(context.Context, string) (bool, string, error) { return lost, detail, nil },
+				readGap: func(context.Context, string) (gapReading, error) { return reading, nil },
 			}
 			w.runCycle(context.Background())
 			got, ok := gatherGauge(t, "bintrail_continuity_gap_lost", map[string]string{"server": name})
@@ -176,23 +177,70 @@ func TestReadGapLostFrom(t *testing.T) {
 		})
 	}
 
-	t.Run("acknowledging a loud loss sends the cleared notification", func(t *testing.T) {
+	// The alarm ends two ways, and each resolved message states its own fact.
+	t.Run("acknowledged: the resolved message says the loss is still refused", func(t *testing.T) {
 		n, sent := testNotifier()
-		n.Continuity("srv", "dsn", true, "binlogs purged")
-		n.Continuity("srv", "dsn", false, "")
+		n.Continuity("srv", "dsn", gapReading{lost: true, detail: "binlogs purged"})
+		n.Continuity("srv", "dsn", gapReading{acknowledged: true})
 		if len(sent.events) != 2 || !sent.events[1].Resolved {
 			t.Fatalf("events = %+v, want the loss then its resolution", sent.events)
 		}
-		t.Logf("webhook after the acknowledgement: %q", sent.events[1].Summary)
-		for _, want := range []string{"acknowledged", "still refused until a full snapshot is taken after it"} {
-			if !strings.Contains(sent.events[1].Summary, want) {
-				t.Errorf("resolution summary %q missing %q", sent.events[1].Summary, want)
-			}
-		}
-		if strings.Contains(sent.events[1].Summary, "re-baselined") {
-			t.Errorf("an acknowledgement re-baselines nothing: %q", sent.events[1].Summary)
+		got := sent.events[1].Summary
+		t.Logf("webhook, loss acknowledged (record still there): %q", got)
+		if got != "capture loss acknowledged: this alarm is cleared; snapshot updates and reconstructions whose window spans the loss are still refused until a full snapshot is taken after it" {
+			t.Errorf("resolution summary = %q", got)
 		}
 	})
+	t.Run("record gone: the resolved message does not claim an acknowledgement", func(t *testing.T) {
+		n, sent := testNotifier()
+		n.Continuity("srv", "dsn", gapReading{lost: true, detail: "binlogs purged"})
+		n.Continuity("srv", "dsn", gapReading{})
+		if len(sent.events) != 2 || !sent.events[1].Resolved {
+			t.Fatalf("events = %+v, want the loss then its resolution", sent.events)
+		}
+		got := sent.events[1].Summary
+		t.Logf("webhook, no loss on record any more: %q", got)
+		if got != "capture continuity restored: this index no longer has a capture loss on record" {
+			t.Errorf("resolution summary = %q", got)
+		}
+		for _, banned := range []string{"acknowledged", "still refused"} {
+			if strings.Contains(got, banned) {
+				t.Errorf("no loss is on record, so nothing was acknowledged and nothing is refused for it: %q", got)
+			}
+		}
+	})
+	// End to end from the index: a record that is there and acknowledged, and
+	// one cleared (what a console older than gap_acked_at does on Stop) or gone.
+	for _, c := range []struct {
+		name string
+		rows *sqlmock.Rows
+		err  error
+		want string
+	}{
+		{"acknowledged row", sqlmock.NewRows([]string{"gap_lost_at", "gap_lost_detail", "gap_acked_at"}).AddRow(gapAckLost, "binlogs purged", gapAckLost.Add(time.Hour)), nil, continuityAcknowledgedSummary},
+		{"record cleared by an older console", sqlmock.NewRows([]string{"gap_lost_at", "gap_lost_detail", "gap_acked_at"}).AddRow(nil, nil, nil), nil, continuityRestoredSummary},
+		{"stream_state row gone", nil, sql.ErrNoRows, continuityRestoredSummary},
+	} {
+		t.Run("from the index: "+c.name, func(t *testing.T) {
+			db, mock := gapAckMock(t)
+			q := mock.ExpectQuery(regexp.QuoteMeta(gapAckSelect))
+			if c.err != nil {
+				q.WillReturnError(c.err)
+			} else {
+				q.WillReturnRows(c.rows)
+			}
+			reading, err := readGapLostFrom(context.Background(), db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n, sent := testNotifier()
+			n.Continuity("srv", "dsn", gapReading{lost: true, detail: "binlogs purged"})
+			n.Continuity("srv", "dsn", reading)
+			if len(sent.events) != 2 || sent.events[1].Summary != c.want {
+				t.Fatalf("events = %+v, want a resolution reading %q", sent.events, c.want)
+			}
+		})
+	}
 
 	unknownCol := &mysql.MySQLError{Number: 1054, Message: "Unknown column 'gap_acked_at' in 'field list'"}
 	const oldSelect = "SELECT gap_lost_at, gap_lost_detail FROM stream_state WHERE id = 1"
@@ -202,9 +250,9 @@ func TestReadGapLostFrom(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta(gapAckSelect)).WillReturnError(unknownCol)
 		mock.ExpectQuery(regexp.QuoteMeta(oldSelect)).WillReturnRows(
 			sqlmock.NewRows([]string{"gap_lost_at", "gap_lost_detail"}).AddRow(gapAckLost, "binlogs purged"))
-		lost, detail, err := readGapLostFrom(context.Background(), db)
-		if err != nil || !lost || detail != "binlogs purged" {
-			t.Errorf("= (%v, %q, %v), want (true, \"binlogs purged\", nil)", lost, detail, err)
+		r, err := readGapLostFrom(context.Background(), db)
+		if err != nil || !r.lost || r.acknowledged || r.detail != "binlogs purged" {
+			t.Errorf("= (%+v, %v), want lost with \"binlogs purged\"", r, err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Error(err)
@@ -215,8 +263,8 @@ func TestReadGapLostFrom(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta(gapAckSelect)).WillReturnError(unknownCol)
 		mock.ExpectQuery(regexp.QuoteMeta(oldSelect)).WillReturnRows(
 			sqlmock.NewRows([]string{"gap_lost_at", "gap_lost_detail"}).AddRow(nil, nil))
-		if lost, _, err := readGapLostFrom(context.Background(), db); err != nil || lost {
-			t.Errorf("= (%v, %v), want (false, nil)", lost, err)
+		if r, err := readGapLostFrom(context.Background(), db); err != nil || r.lost || r.acknowledged {
+			t.Errorf("= (%+v, %v), want nothing on record", r, err)
 		}
 	})
 	t.Run("legacy index with neither column is unknown, never 'no gap'", func(t *testing.T) {
@@ -224,22 +272,22 @@ func TestReadGapLostFrom(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta(gapAckSelect)).WillReturnError(unknownCol)
 		mock.ExpectQuery(regexp.QuoteMeta(oldSelect)).WillReturnError(
 			&mysql.MySQLError{Number: 1054, Message: "Unknown column 'gap_lost_at' in 'field list'"})
-		if _, _, err := readGapLostFrom(context.Background(), db); err == nil {
+		if _, err := readGapLostFrom(context.Background(), db); err == nil {
 			t.Error("want an error: the caller must treat this index as unknown")
 		}
 	})
 	t.Run("any other failure is unknown, and does not take the fallback", func(t *testing.T) {
 		db, mock := gapAckMock(t)
 		mock.ExpectQuery(regexp.QuoteMeta(gapAckSelect)).WillReturnError(errors.New("conn reset"))
-		if _, _, err := readGapLostFrom(context.Background(), db); err == nil {
+		if _, err := readGapLostFrom(context.Background(), db); err == nil {
 			t.Error("want an error")
 		}
 	})
 	t.Run("empty stream_state: no capture ran, no gap", func(t *testing.T) {
 		db, mock := gapAckMock(t)
 		mock.ExpectQuery(regexp.QuoteMeta(gapAckSelect)).WillReturnError(sql.ErrNoRows)
-		if lost, _, err := readGapLostFrom(context.Background(), db); err != nil || lost {
-			t.Errorf("= (%v, %v), want (false, nil)", lost, err)
+		if r, err := readGapLostFrom(context.Background(), db); err != nil || r.lost || r.acknowledged {
+			t.Errorf("= (%+v, %v), want nothing on record", r, err)
 		}
 	})
 }

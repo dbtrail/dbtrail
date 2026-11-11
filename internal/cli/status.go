@@ -434,7 +434,9 @@ func statusRetention(ctx context.Context, db *sql.DB, dbName string) *status.Ret
 //
 // An ACKNOWLEDGED loss does not fail the flag. Acknowledging used to erase the
 // record, which passed this check; it now keeps the record and stamps
-// gap_acked_at beside it, and the alarm must read the same. The loss is still
+// gap_acked_at beside it, and the alarm must read the same. The continuity
+// verdict in the report is "gap_acknowledged", not "ok": this flag is an
+// alarm and decides on GapUnacknowledged, not on that word. The loss is still
 // refused where it matters (a reconstruction or snapshot update whose window
 // spans it), and a later loss NULLs the acknowledgement and fails here again.
 func continuityFailure(stream *status.StreamStateInfo, streamErr error) error {

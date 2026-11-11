@@ -186,8 +186,15 @@ func ackedLostStream() *StreamStateInfo {
 }
 
 func TestContinuityStatus_acknowledgedLoss(t *testing.T) {
-	if got := ContinuityStatus(ackedLostStream(), nil); got != ContinuityOK {
-		t.Errorf("acknowledged loss = %q, want %q (what a cleared record read as)", got, ContinuityOK)
+	// Its own verdict. "ok" over a hole the index knows about is the one
+	// answer an acknowledged loss must never give.
+	if got := ContinuityStatus(ackedLostStream(), nil); got != "gap_acknowledged" {
+		t.Errorf("acknowledged loss = %q, want %q", got, "gap_acknowledged")
+	}
+	sameSecond := ackedLostStream()
+	sameSecond.GapAckedAt = sameSecond.GapLostAt
+	if got := ContinuityStatus(sameSecond, nil); got != ContinuityGapAcknowledged {
+		t.Errorf("loss acknowledged in the same second = %q, want %q", got, ContinuityGapAcknowledged)
 	}
 	loud := gapLostStream()
 	loud.GapColumnsPresent = true
@@ -283,8 +290,8 @@ func TestWriteStatusJSON_acknowledgedLoss(t *testing.T) {
 	}
 
 	d, raw := render(ackedLostStream())
-	if d.Stream.Continuity.Status != ContinuityOK || d.Stream.GapLost != nil {
-		t.Errorf("acknowledged loss: continuity=%q gap_lost=%v, want ok and no gap_lost\n%s",
+	if d.Stream.Continuity.Status != "gap_acknowledged" || d.Stream.GapLost != nil {
+		t.Errorf("acknowledged loss: continuity=%q gap_lost=%v, want gap_acknowledged and no gap_lost\n%s",
 			d.Stream.Continuity.Status, d.Stream.GapLost, raw)
 	}
 	if d.Stream.GapAcknowledged == nil {

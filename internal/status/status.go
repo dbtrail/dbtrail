@@ -90,9 +90,11 @@ type StreamStateInfo struct {
 	// GapLostAt / GapLostDetail record that the stream permanently lost data it could
 	// not recover — an unfillable binlog gap (MySQL) or an invalidated/lost replication
 	// slot (PostgreSQL, #532). When set, the index is valid only up to the gap and
-	// capture must be re-baselined to resume; status surfaces them loudly. GapLostAt is
-	// authoritative (the badge is gated on it alone); GapLostDetail is supplementary
-	// human-readable context and may be absent. Both writers set them atomically.
+	// capture must be re-baselined to resume; status surfaces them loudly until an
+	// operator acknowledges the loss (GapAckedAt below), and as "on record" after.
+	// GapLostAt is authoritative for whether a loss happened; GapLostDetail is
+	// supplementary human-readable context and may be absent. Every writer sets
+	// the two in one statement.
 	//
 	// Nothing clears them. An operator's acknowledgement (stopping the source in
 	// the console) is recorded BESIDE the loss, in GapAckedAt, so the readers
@@ -1102,10 +1104,9 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 		// stopped or behind. "not evaluated" guards a legacy index that never had
 		// the gap_lost_* columns, so a clean verdict is never asserted from
 		// un-evaluated data.
-		// An ACKNOWLEDGED loss reads here as a cleared one used to (that is
-		// what acknowledging means for an alarm), and prints one more line
-		// below: the events are still gone, and the readers that refuse on the
-		// loss still do.
+		// An ACKNOWLEDGED loss is neither the alarm nor a clean verdict: its
+		// line says nothing was lost SINCE that loss, and the lines under it
+		// say when it happened and what it still refuses.
 		switch {
 		case stream.GapUnacknowledged():
 			fmt.Fprintf(w, "  Continuity:      ⚠ GAP LOST at %s\n", stream.GapLostAt.Time.Format(TSFmt))
@@ -1113,8 +1114,9 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 			fmt.Fprintln(w, "  Continuity:      not evaluated (legacy index — migrate the schema to enable gap detection)")
 		case stream.GapAcknowledged():
 			// Not "no gaps": the next line says events were lost, and the two
-			// together read as a contradiction. The verdict for scripts
-			// (--fail-on-gap, the JSON status) is the cleared one all the same.
+			// together read as a contradiction. For scripts, --fail-on-gap
+			// passes (the alarm is silenced) and the JSON verdict is
+			// "gap_acknowledged", never "ok".
 			fmt.Fprintf(w, "  Continuity:      no gaps since the loss acknowledged below (not a liveness check)\n")
 			fmt.Fprintf(w, "  Acknowledged loss: capture permanently lost events at %s (acknowledged %s).\n",
 				stream.GapLostAt.Time.Format(TSFmt), stream.GapAckedAt.Time.Format(TSFmt))
@@ -1571,10 +1573,10 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 		Detail string `json:"detail,omitempty"`
 	}
 	// jsonGapAcknowledged is a recorded permanent loss an operator has
-	// acknowledged: gap_lost is then omitted and continuity.status reads "ok",
-	// exactly as when an acknowledgement used to erase the record. The loss
-	// itself is not gone: snapshot updates and reconstructions whose window
-	// spans `at` are still refused until a full snapshot is taken after it.
+	// acknowledged: gap_lost is then omitted and continuity.status reads
+	// "gap_acknowledged". The loss itself is not gone: snapshot updates and
+	// reconstructions whose window spans `at` are still refused until a full
+	// snapshot is taken after it.
 	type jsonGapAcknowledged struct {
 		At             string `json:"at"`
 		AcknowledgedAt string `json:"acknowledged_at"`
@@ -1582,12 +1584,17 @@ func writeStatusJSONFull(w io.Writer, files []IndexStateRow, parts []PartitionSt
 	}
 	// jsonContinuity is the always-present, machine-readable continuity verdict —
 	// the affirmative counterpart to gap_lost. status is one of:
-	//   "ok"       — no gap in the captured range (NOT a liveness/lag assertion;
-	//                a contiguous stream may still be stopped or behind)
-	//   "gap_lost" — an unfillable gap was stamped (see the gap_lost object)
+	//   "ok"       — no loss on record (NOT a liveness/lag assertion; a
+	//                contiguous stream may still be stopped or behind)
+	//   "gap_lost" — an unfillable gap was stamped and not acknowledged (see
+	//                the gap_lost object)
+	//   "gap_acknowledged" — an unfillable gap was stamped and an operator
+	//                acknowledged it (see the gap_acknowledged object). The
+	//                events are still lost; never reported as "ok"
 	//   "unknown"  — a legacy index without the gap_lost_* columns; the gap state
 	//                was never evaluable, so "ok" is not asserted from absent data
-	// The console green badge keys on "ok"; gap_lost stays for the loud red detail.
+	// The console green badge keys on "ok"; gap_lost stays for the loud red
+	// detail and gap_acknowledged for the neutral "on record" one.
 	type jsonContinuity struct {
 		Status string `json:"status"`
 	}

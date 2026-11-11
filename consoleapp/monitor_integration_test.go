@@ -765,6 +765,12 @@ func TestIntegrationLostPositionDurable(t *testing.T) {
 	// A SECOND loss, stamped the way every writer stamps one: the stamp NULLs
 	// the earlier acknowledgement in the same statement, so the alarm returns
 	// even if both land in the same second.
+	// Hand-written because the real writers are unexported in packages this
+	// one cannot call into. Each production statement is pinned where it
+	// lives: streamrun's by TestPersistGapAutoAdvance_stampIsUpsert,
+	// pgstreamrun's by TestPersistSlotLostPG_stampWithdrawsAcknowledgement
+	// (and, against a real index, TestPersistSlotLostPG), and bintrail-pg
+	// reset's by TestClearCheckpoint_RealCheckpointStampsLoss.
 	const secondDetail = "simulated: a second purge after the acknowledgement"
 	if _, err := idxDB.Exec(`UPDATE stream_state
 		SET gap_lost_at = UTC_TIMESTAMP(), gap_lost_detail = ?, gap_acked_at = NULL WHERE id = 1`, secondDetail); err != nil {
