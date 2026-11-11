@@ -2062,8 +2062,11 @@ func upConsoleConfigFor(db *sql.DB, indexDSN string, opts consoleOpts, reg *cons
 		FillsCopyMirrors: opts.FillsCopyMirrors,
 		CopyMirror:       opts.CopyMirror,
 		AuthPath:         opts.AuthFile,
-		MCPTokenPath:     opts.MCPTokenFile,
-		FlashbackPath:    flashbackFilePath(opts),
+		// Lets `bintrail-console server add` and the like reach this daemon
+		// with nothing to configure (console.LocalAccess).
+		LocalAccessPath: console.LocalAccessPath(opts.AuthFile),
+		MCPTokenPath:    opts.MCPTokenFile,
+		FlashbackPath:   flashbackFilePath(opts),
 		// The SQL memory saved in the web interface (#2210), beside the
 		// servers file like the port's setting.
 		SQLSettingsPath: sqlSettingsFilePath(opts.ServersFile),

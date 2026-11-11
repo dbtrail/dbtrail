@@ -1,0 +1,915 @@
+package consoleapp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/dbtrail/dbtrail/internal/console"
+)
+
+// fakeAsker answers for the person at the terminal. A question with no
+// prepared answer fails the test: a command must not ask what it was told.
+type fakeAsker struct {
+	t       *testing.T
+	tty     bool
+	lines   map[string]string // question -> answer ("" = take the default)
+	secret  string
+	asked   []string
+	secrets int
+}
+
+func (a *fakeAsker) Interactive() bool { return a.tty }
+
+func (a *fakeAsker) Line(q, def string) (string, error) {
+	a.asked = append(a.asked, q)
+	ans, ok := a.lines[q]
+	if !ok {
+		a.t.Fatalf("asked %q, which the test did not expect", q)
+	}
+	if ans == "" {
+		return def, nil
+	}
+	return ans, nil
+}
+
+func (a *fakeAsker) Secret(q string) (string, error) {
+	a.secrets++
+	return a.secret, nil
+}
+
+func writeCnf(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "my.cnf")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestResolveAddInput(t *testing.T) {
+	full := "[client]\nhost=cnfhost\nport=3310\nuser=cnfuser\npassword=cnfpass\n"
+	cases := []struct {
+		name    string
+		flags   addFlags
+		cnf     string
+		ask     fakeAsker
+		stdin   string
+		want    addInput
+		wantErr string
+		secrets int
+	}{
+		{
+			name:  "everything on the command line, password asked",
+			flags: addFlags{Host: " db1 ", Port: "3307", User: "u", AskPassword: true},
+			ask:   fakeAsker{tty: true, secret: "pw"},
+			want:  addInput{Host: "db1", Port: "3307", User: "u", Password: "pw"}, secrets: 1,
+		},
+		{
+			name:  "password is asked without -p when nothing else gives it",
+			flags: addFlags{Host: "db1", User: "u"},
+			ask:   fakeAsker{tty: true, secret: "pw"},
+			want:  addInput{Host: "db1", Port: "3306", User: "u", Password: "pw"}, secrets: 1,
+		},
+		{
+			name:  "the option file alone",
+			flags: addFlags{},
+			cnf:   full,
+			want:  addInput{Host: "cnfhost", Port: "3310", User: "cnfuser", Password: "cnfpass"},
+		},
+		{
+			name:  "the command line wins over the option file",
+			flags: addFlags{Host: "flaghost", User: "flaguser"},
+			cnf:   full,
+			want:  addInput{Host: "flaghost", Port: "3310", User: "flaguser", Password: "cnfpass"},
+		},
+		{
+			name:  "-p means not the file's password",
+			flags: addFlags{AskPassword: true},
+			cnf:   full,
+			ask:   fakeAsker{tty: true, secret: "typed"},
+			want:  addInput{Host: "cnfhost", Port: "3310", User: "cnfuser", Password: "typed"}, secrets: 1,
+		},
+		{
+			name:  "[dbtrail] wins over [client]",
+			flags: addFlags{},
+			cnf:   "[client]\nhost=h\nuser=root\npassword=rootpw\n[dbtrail]\nuser=dbtrail\npassword=dpw\n",
+			want:  addInput{Host: "h", Port: "3306", User: "dbtrail", Password: "dpw"},
+		},
+		{
+			name:  "password from stdin, one line, its newline dropped, spaces kept",
+			flags: addFlags{Host: "db1", User: "u", PasswordStdin: true},
+			stdin: " p w \r\nsecond line\n",
+			want:  addInput{Host: "db1", Port: "3306", User: "u", Password: " p w "},
+		},
+		{
+			name:  "password from stdin with no newline at the end",
+			flags: addFlags{Host: "db1", User: "u", PasswordStdin: true},
+			stdin: "pw",
+			want:  addInput{Host: "db1", Port: "3306", User: "u", Password: "pw"},
+		},
+		{
+			name:  "on a terminal, what is missing is asked, with defaults",
+			flags: addFlags{},
+			ask:   fakeAsker{tty: true, lines: map[string]string{"Host": "db9", "Port": "", "User": ""}, secret: "pw"},
+			want:  addInput{Host: "db9", Port: "3306", User: "dbtrail", Password: "pw"}, secrets: 1,
+		},
+		{
+			name:  "a host given means the port is not asked",
+			flags: addFlags{Host: "db1"},
+			ask:   fakeAsker{tty: true, lines: map[string]string{"User": "u"}, secret: "pw"},
+			want:  addInput{Host: "db1", Port: "3306", User: "u", Password: "pw"}, secrets: 1,
+		},
+		{
+			name:  "name, schemas and flavor pass through, trimmed and lowered",
+			flags: addFlags{Host: "db1", User: "u", Name: " shop ", Schemas: " a,b ", Flavor: " MariaDB ", PasswordStdin: true},
+			stdin: "pw\n",
+			want:  addInput{Host: "db1", Port: "3306", User: "u", Password: "pw", Name: "shop", Schemas: "a,b", Flavor: "mariadb"},
+		},
+
+		{
+			name:  "an IPv6 address in brackets loses them",
+			flags: addFlags{Host: "[2001:db8::1]", User: "u", PasswordStdin: true}, stdin: "pw\n",
+			want: addInput{Host: "2001:db8::1", Port: "3306", User: "u", Password: "pw"},
+		},
+		{
+			name:  "the option file's include lines are counted",
+			flags: addFlags{}, cnf: "!includedir /etc/mysql/conf.d/\n" + full,
+			want: addInput{Host: "cnfhost", Port: "3310", User: "cnfuser", Password: "cnfpass", IncludesSkipped: 1},
+		},
+		{name: "host and port in one word", flags: addFlags{Host: "db1:3307", User: "u", PasswordStdin: true}, stdin: "pw\n", wantErr: "-P"},
+		{name: "a URL as the host", flags: addFlags{Host: "mysql://db1", User: "u", PasswordStdin: true}, stdin: "pw\n", wantErr: "not a host"},
+		{name: "user@host as the host", flags: addFlags{Host: "root@db1", User: "u", PasswordStdin: true}, stdin: "pw\n", wantErr: "not a host"},
+		{name: "no host, not a terminal", flags: addFlags{User: "u"}, wantErr: "-h"},
+		{name: "no user, not a terminal", flags: addFlags{Host: "db1"}, wantErr: "-u"},
+		{name: "no password, not a terminal", flags: addFlags{Host: "db1", User: "u"}, wantErr: "--password-stdin"},
+		{name: "-p, not a terminal", flags: addFlags{Host: "db1", User: "u", AskPassword: true}, wantErr: "not a terminal"},
+		{name: "empty password typed", flags: addFlags{Host: "db1", User: "u"}, ask: fakeAsker{tty: true}, wantErr: "empty", secrets: 1},
+		{name: "empty stdin", flags: addFlags{Host: "db1", User: "u", PasswordStdin: true}, wantErr: "stdin"},
+		{name: "stdin is only a newline", flags: addFlags{Host: "db1", User: "u", PasswordStdin: true}, stdin: "\n", wantErr: "empty"},
+		{name: "stdin password never asks for the rest", flags: addFlags{PasswordStdin: true}, ask: fakeAsker{tty: true}, stdin: "pw\n", wantErr: "-h"},
+		{name: "-p and --password-stdin", flags: addFlags{Host: "db1", User: "u", AskPassword: true, PasswordStdin: true}, wantErr: "use one"},
+		{name: "port is not a number", flags: addFlags{Host: "db1", Port: "33o6", User: "u"}, wantErr: "1 to 65535"},
+		{name: "port is zero", flags: addFlags{Host: "db1", Port: "0", User: "u"}, wantErr: "1 to 65535"},
+		{name: "port is too big", flags: addFlags{Host: "db1", Port: "70000", User: "u"}, wantErr: "1 to 65535"},
+		{name: "bad port in the option file", flags: addFlags{}, cnf: "[client]\nhost=h\nport=abc\nuser=u\npassword=p\n", wantErr: "1 to 65535"},
+		{name: "postgres", flags: addFlags{Host: "db1", User: "u", Flavor: "postgres"}, wantErr: "mysql or mariadb"},
+		{name: "option file with a socket and no host", flags: addFlags{}, cnf: "[client]\nsocket=/tmp/mysql.sock\nuser=u\npassword=p\n", wantErr: "socket"},
+		{name: "host typed as nothing", flags: addFlags{}, ask: fakeAsker{tty: true, lines: map[string]string{"Host": ""}}, wantErr: "no host"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := c.flags
+			if c.cnf != "" {
+				f.DefaultsFile = writeCnf(t, c.cnf)
+			}
+			ask := c.ask
+			ask.t = t
+			got, err := resolveAddInput(f, &ask, strings.NewReader(c.stdin))
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("got %+v, %v; want an error with %q", got, err, c.wantErr)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != c.want {
+					t.Fatalf("got %+v\nwant %+v", got, c.want)
+				}
+			}
+			if ask.secrets != c.secrets {
+				t.Errorf("asked for the password %d times, want %d", ask.secrets, c.secrets)
+			}
+		})
+	}
+}
+
+func TestResolveAddInputMissingOptionFile(t *testing.T) {
+	_, err := resolveAddInput(addFlags{DefaultsFile: "/no/such/my.cnf"}, &fakeAsker{t: t}, strings.NewReader(""))
+	if err == nil || !strings.Contains(err.Error(), "/no/such/my.cnf") {
+		t.Fatalf("got %v, want an error naming the file", err)
+	}
+}
+
+// fakeDaemon stands in for the running DBTrail: it checks the token and
+// records what it was asked.
+type fakeDaemon struct {
+	t        *testing.T
+	token    string
+	handlers map[string]func(body map[string]any) (int, any)
+	calls    []string
+	bodies   map[string]map[string]any
+}
+
+func newFakeDaemon(t *testing.T) (*fakeDaemon, *ctlClient) {
+	d := &fakeDaemon{t: t, token: "tok", handlers: map[string]func(map[string]any) (int, any){}, bodies: map[string]map[string]any{}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+d.token {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized: missing or invalid token"})
+			return
+		}
+		key := r.Method + " " + r.URL.Path
+		d.calls = append(d.calls, key)
+		var body map[string]any
+		if raw, _ := io.ReadAll(r.Body); len(raw) > 0 {
+			if r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("%s: a body with Content-Type %q", key, r.Header.Get("Content-Type"))
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Errorf("%s: body is not JSON: %v", key, err)
+			}
+		}
+		d.bodies[key] = body
+		h, ok := d.handlers[key]
+		if !ok {
+			t.Errorf("unexpected call %s", key)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		status, out := h(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if out != nil {
+			_ = json.NewEncoder(w).Encode(out)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	return d, &ctlClient{base: ts.URL, token: d.token, hc: ts.Client()}
+}
+
+func (d *fakeDaemon) on(key string, status int, out any) {
+	d.handlers[key] = func(map[string]any) (int, any) { return status, out }
+}
+
+func passReport() map[string]any {
+	return map[string]any{"passed": 2, "failed": 0, "checks": []map[string]any{
+		{"name": "Connects to the database", "status": "pass"},
+		{"name": "binlog_format is ROW", "status": "pass"},
+	}}
+}
+
+func TestServerAddSuccess(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"addr": "db1:3306", "flavor": "mariadb", "version": "11.4.2"})
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": true, "name": "shop", "started": true, "doctor": passReport()})
+	var out bytes.Buffer
+	in := addInput{Host: "db1", Port: "3306", User: "dbtrail", Password: "s3cret#1", Name: "shop", Schemas: "a,b"}
+	if err := runServerAdd(context.Background(), c, in, false, &out); err != nil {
+		t.Fatalf("err = %v\n%s", err, out.String())
+	}
+	got := d.bodies["POST /api/servers/check"]
+	want := map[string]any{
+		"flavor": "mariadb", "name": "shop", "source_host": "db1", "source_port": "3306",
+		"source_user": "dbtrail", "source_password": "s3cret#1", "schemas": "a,b",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("check body %s = %v, want %v", k, got[k], v)
+		}
+	}
+	for _, s := range []string{"Checking db1:3306 as dbtrail", "ok    Connects to the database", `Added "shop"`} {
+		if !strings.Contains(out.String(), s) {
+			t.Errorf("output lacks %q:\n%s", s, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "s3cret") {
+		t.Errorf("the password was printed:\n%s", out.String())
+	}
+}
+
+// --flavor overrides what the server is taken for, not the look at the
+// address: the loopback-in-a-container fix must still happen.
+func TestServerAddFlavorGivenWinsOverIdentify(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"kind": "loopback_in_container", "suggest": "host.docker.internal:3306", "flavor": "mysql"})
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": true, "name": "db1", "doctor": passReport()})
+	in := addInput{Host: "127.0.0.1", Port: "3306", User: "u", Password: "p", Flavor: "mariadb"}
+	if err := runServerAdd(context.Background(), c, in, false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	body := d.bodies["POST /api/servers/check"]
+	if body["flavor"] != "mariadb" || body["source_host"] != "host.docker.internal" {
+		t.Errorf("check body = %v", body)
+	}
+}
+
+// Anything but "that is not an address" from the first call ends the command:
+// going on would bury the real reason under the checks.
+func TestServerAddIdentifyFailureStops(t *testing.T) {
+	for _, status := range []int{403, 500} {
+		d, c := newFakeDaemon(t)
+		d.on("POST /api/servers/identify", status, map[string]any{"error": "this console is read-only"})
+		err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("status %d: err = %v", status, err)
+		}
+		if len(d.calls) != 1 {
+			t.Errorf("status %d: went on to %v", status, d.calls)
+		}
+	}
+}
+
+func TestServerAddUnknownFlavorIsMySQL(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"addr": "db1:3306", "kind": "unreachable"})
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": true, "name": "db1", "doctor": passReport()})
+	if err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if f := d.bodies["POST /api/servers/check"]["flavor"]; f != "mysql" {
+		t.Errorf("flavor = %v, want mysql", f)
+	}
+}
+
+// A 127.0.0.1 typed for a DBTrail in a container: the daemon says where a
+// database does answer, and the command uses it and says so.
+func TestServerAddLoopbackInContainerUsesTheSuggestion(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"addr": "127.0.0.1:3306", "kind": "loopback_in_container", "suggest": "host.docker.internal:3306", "flavor": "mysql"})
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": true, "name": "x", "doctor": passReport()})
+	var out bytes.Buffer
+	if err := runServerAdd(context.Background(), c, addInput{Host: "127.0.0.1", Port: "3306", User: "u", Password: "p"}, false, &out); err != nil {
+		t.Fatal(err)
+	}
+	if h := d.bodies["POST /api/servers/check"]["source_host"]; h != "host.docker.internal" {
+		t.Errorf("source_host = %v, want host.docker.internal", h)
+	}
+	if !strings.Contains(out.String(), "host.docker.internal:3306") {
+		t.Errorf("the change of address was not said:\n%s", out.String())
+	}
+}
+
+// An identify that the daemon refuses for a reason of its own (a bad
+// address) must not stop the checks, which explain it better.
+func TestServerAddIdentifyRefusalGoesOnToTheChecks(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 400, map[string]any{"error": "bad address"})
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": true, "name": "x", "doctor": passReport()})
+	if err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServerAddFailedChecks(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"flavor": "mysql"})
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": false, "name": "db1", "doctor": map[string]any{
+		"passed": 1, "failed": 2, "checks": []map[string]any{
+			{"name": "Connects to the database", "status": "pass"},
+			{"name": "binlog_format", "status": "fail", "detail": "binlog_format is MIXED", "remediation": "Run:\n  SET PERSIST binlog_format = ROW;"},
+			{"name": "Every table has a key", "status": "fail", "detail": "2 tables have none", "statements": []string{"ALTER TABLE a.t ADD PRIMARY KEY (id);", "ALTER TABLE a.u ADD PRIMARY KEY (id);"}},
+			{"name": "GTID", "status": "warn", "detail": "gtid_mode is OFF"},
+		}}})
+	var out bytes.Buffer
+	err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, &out)
+	if !errors.Is(err, errNotAdded) {
+		t.Fatalf("err = %v, want errNotAdded", err)
+	}
+	for _, s := range []string{
+		"FAIL  binlog_format", "binlog_format is MIXED", "SET PERSIST binlog_format = ROW;",
+		"ALTER TABLE a.u ADD PRIMARY KEY (id);", "warn  GTID", "gtid_mode is OFF",
+	} {
+		if !strings.Contains(out.String(), s) {
+			t.Errorf("output lacks %q:\n%s", s, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "Added") {
+		t.Errorf("a failed add says Added:\n%s", out.String())
+	}
+	if want := "the database was not added: 2 checks failed. Fix them and run the command again"; err.Error() != want {
+		t.Errorf("err = %q\nwant  %q", err, want)
+	}
+}
+
+// A warning about something optional keeps to one line, as the web interface
+// folds it; -v prints the rest. A warning that is not optional always prints.
+func TestServerAddFoldsOptionalWarnings(t *testing.T) {
+	report := map[string]any{"passed": 1, "failed": 0, "checks": []map[string]any{
+		{"name": "Connects", "status": "pass"},
+		{"name": "Statement capture", "status": "warn", "optional": true, "detail": "binlog_rows_query_log_events=OFF", "remediation": "SET PERSIST binlog_rows_query_log_events = ON;"},
+		{"name": "Full read lock permissions", "status": "warn", "detail": "missing: PROCESS", "remediation": "GRANT PROCESS ON *.* TO `dbtrail`@`%`;"},
+	}}
+	for _, verbose := range []bool{false, true} {
+		d, c := newFakeDaemon(t)
+		d.on("POST /api/servers/identify", 200, map[string]any{"flavor": "mysql"})
+		d.on("POST /api/servers/check", 200, map[string]any{"ok": true, "name": "x", "doctor": report})
+		var out bytes.Buffer
+		if err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p", Flavor: "mysql"}, verbose, &out); err != nil {
+			t.Fatal(err)
+		}
+		o := out.String()
+		if !strings.Contains(o, "tip   Statement capture") || !strings.Contains(o, "warn  Full read lock permissions") || !strings.Contains(o, "GRANT PROCESS") {
+			t.Errorf("verbose=%v:\n%s", verbose, o)
+		}
+		if got := strings.Contains(o, "SET PERSIST binlog_rows_query_log_events"); got != verbose {
+			t.Errorf("verbose=%v: optional fix printed = %v:\n%s", verbose, got, o)
+		}
+		if got := strings.Contains(o, "-v prints"); got == verbose {
+			t.Errorf("verbose=%v: the pointer to -v printed = %v:\n%s", verbose, got, o)
+		}
+	}
+}
+
+func TestServerAddOneFailedCheckIsSingular(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"flavor": "mysql"})
+	d.on("POST /api/servers/check", 200, map[string]any{"ok": false, "doctor": map[string]any{
+		"failed": 1, "checks": []map[string]any{{"name": "Login", "status": "fail", "detail": "access denied"}}}})
+	err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "1 check failed. Fix it and") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestServerAddChecksPassedAndCaptureDidNotStart(t *testing.T) {
+	for _, kept := range []bool{false, true} {
+		d, c := newFakeDaemon(t)
+		d.on("POST /api/servers/identify", 200, map[string]any{"flavor": "mysql"})
+		d.on("POST /api/servers/check", 200, map[string]any{"ok": false, "name": "db1", "doctor": passReport(), "error": "index database could not be created", "kept": kept})
+		err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, io.Discard)
+		// Whether anything was left behind is the whole point of the two
+		// sentinels: a script must be able to tell them apart.
+		want, other := errNotAdded, errAddedStopped
+		if kept {
+			want, other = errAddedStopped, errNotAdded
+		}
+		if !errors.Is(err, want) || errors.Is(err, other) {
+			t.Fatalf("kept=%v: err = %v", kept, err)
+		}
+		if !strings.Contains(err.Error(), "index database could not be created") {
+			t.Errorf("kept=%v: the reason is missing: %v", kept, err)
+		}
+	}
+}
+
+func TestServerAddAnswerThatSaysNothingIsAnError(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"flavor": "mysql"})
+	d.on("POST /api/servers/check", 200, map[string]any{})
+	if err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, io.Discard); err == nil {
+		t.Fatal("an answer with neither ok nor a reason passed as success")
+	}
+}
+
+func TestServerAddDaemonRefusal(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("POST /api/servers/identify", 200, map[string]any{"flavor": "mysql"})
+	d.on("POST /api/servers/check", 409, map[string]any{"error": `a server named "shop" already exists`})
+	err := runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p", Name: "shop"}, false, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("err = %v, want the daemon's own sentence", err)
+	}
+}
+
+func TestStaleTokenIsExplained(t *testing.T) {
+	_, c := newFakeDaemon(t)
+	c.token = "from-a-previous-run"
+	c.accessFile = "/var/lib/bintrail/console-cli.json"
+	err := runServerList(context.Background(), c, "text", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "/var/lib/bintrail/console-cli.json") || !strings.Contains(err.Error(), "each time it starts") {
+		t.Fatalf("err = %v", err)
+	}
+	// Also when the very first call of `add` is the one refused.
+	err = runServerAdd(context.Background(), c, addInput{Host: "db1", Port: "3306", User: "u", Password: "p"}, false, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "did not accept the token") {
+		t.Fatalf("add: err = %v", err)
+	}
+}
+
+func TestNothingListening(t *testing.T) {
+	c := &ctlClient{base: "http://127.0.0.1:1", token: "x", hc: &http.Client{}}
+	err := runServerList(context.Background(), c, "text", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "Is DBTrail running?") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNotDBTrailAnswering(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, "<html>nginx</html>")
+	}))
+	defer ts.Close()
+	c := &ctlClient{base: ts.URL, token: "x", hc: ts.Client()}
+	err := runServerList(context.Background(), c, "text", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "502") || strings.Contains(err.Error(), "nginx") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func twoServers(d *fakeDaemon) {
+	d.on("GET /api/servers", 200, map[string]any{"servers": []map[string]any{
+		{"id": "boot", "name": "boot", "kind": "ephemeral"},
+		{"id": "id1", "name": "shop", "kind": "registry", "has_source": true, "source_host": "db1", "source_port": "3306", "source_user": "dbtrail", "monitor_state": "running"},
+		{"id": "id2", "name": "Billing", "kind": "registry", "has_source": true, "source_host": "2001:db8::1", "source_port": "3307", "source_user": "dbtrail"},
+		{"id": "id3", "name": "old-index", "kind": "registry", "has_source": false},
+	}})
+}
+
+func TestServerList(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	twoServers(d)
+	var out bytes.Buffer
+	if err := runServerList(context.Background(), c, "text", &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	want := []string{
+		"NAME       ADDRESS             USER     RECORDING",
+		"boot       -                   -        set at startup",
+		"shop       db1:3306            dbtrail  running",
+		"Billing    [2001:db8::1]:3307  dbtrail  not by this DBTrail",
+		"old-index  -                   -        -",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got:\n%s\nwant:\n%s", out.String(), strings.Join(want, "\n"))
+	}
+}
+
+func TestServerListEmptyAndJSON(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("GET /api/servers", 200, map[string]any{"servers": []any{}})
+	var out bytes.Buffer
+	if err := runServerList(context.Background(), c, "text", &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "No servers yet") || !strings.Contains(out.String(), "server add") {
+		t.Errorf("empty list:\n%s", out.String())
+	}
+	out.Reset()
+	if err := runServerList(context.Background(), c, "json", &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(out.String()) != "[]" {
+		t.Errorf("empty json = %q, want []", out.String())
+	}
+
+	twoServers(d)
+	out.Reset()
+	if err := runServerList(context.Background(), c, "json", &out); err != nil {
+		t.Fatal(err)
+	}
+	var got []ctlServer
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got) != 4 || got[1].MonitorState != "running" {
+		t.Errorf("json = %s (%v)", out.String(), err)
+	}
+}
+
+// A 200 that carries no list is not "no servers": it is not DBTrail.
+func TestServerListAnswerWithoutAList(t *testing.T) {
+	d, c := newFakeDaemon(t)
+	d.on("GET /api/servers", 200, map[string]any{})
+	var out bytes.Buffer
+	err := runServerList(context.Background(), c, "text", &out)
+	if err == nil || strings.Contains(out.String(), "No servers yet") {
+		t.Fatalf("err = %v, out = %q", err, out.String())
+	}
+}
+
+// A redirect is not followed: the POST would become a GET of somewhere else.
+func TestRedirectIsNotFollowed(t *testing.T) {
+	hits := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	defer ts.Close()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BINTRAIL_CONSOLE_AUTH", filepath.Join(t.TempDir(), "console-auth.yaml"))
+	t.Setenv("BINTRAIL_CONSOLE_TOKEN", "tok")
+	if _, err := os.Stat(packagedStateDir + "/" + console.LocalAccessFileName); err == nil {
+		t.Skip("this machine runs a packaged DBTrail")
+	}
+	c, err := resolveCtl(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runServerList(context.Background(), c, "text", io.Discard); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("err = %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("made %d requests, want 1", hits)
+	}
+}
+
+func TestPasswordOnCommandLine(t *testing.T) {
+	for _, c := range []struct {
+		args string
+		want bool
+	}{
+		{"server add -h db1 -u dbtrail -p", false},
+		{"server add -h db1 -u dbtrail --password", false},
+		{"server add -vp -h db1", false},
+		{"server add -hpepe -upaul -P3306", false}, // a p inside another option's value
+		{"server add --defaults-file /p/my.cnf", false},
+		{"server add -h db1 -- -pX", false},
+		{"server add -h db1 -u dbtrail -phunter2", true}, // would parse as -p -h unter2
+		{"server add -pPass", true},                      // would parse as -p -P ass
+		{"server add -puser1", true},                     // would parse as -p -u ser1
+		{"server add -pSECRET", true},
+		{"server add -pv", true},
+		{"server add -vpX", true},
+		{"server add --password=SECRET", true},
+		{"server add --password=", true},
+	} {
+		if got := passwordOnCommandLine(strings.Fields(c.args)); got != c.want {
+			t.Errorf("%q: got %v, want %v", c.args, got, c.want)
+		}
+	}
+	if strings.Contains(noPasswordOnCommandLine, "%") {
+		t.Error("the refusal must be a fixed sentence: it may never repeat what was typed")
+	}
+}
+
+// What the parser would have done with `-phunter2` had it not been caught:
+// this is the reason passwordOnCommandLine runs before the values are used.
+func TestAttachedPasswordWouldBecomeAHost(t *testing.T) {
+	fs := serverAddCmd.Flags()
+	t.Cleanup(func() { srvAdd = addFlags{} })
+	if err := fs.Parse([]string{"-h", "db1", "-phunter2"}); err != nil {
+		t.Skipf("the parser now refuses it by itself: %v", err)
+	}
+	if srvAdd.Host != "unter2" {
+		t.Skipf("the parser reads it differently now (host %q)", srvAdd.Host)
+	}
+	if !passwordOnCommandLine([]string{"-h", "db1", "-phunter2"}) {
+		t.Fatal("a piece of a password would be used as the host")
+	}
+}
+
+func TestFindServer(t *testing.T) {
+	servers := []ctlServer{{ID: "id1", Name: "shop"}, {ID: "id2", Name: "Shop"}, {ID: "id3", Name: "Billing"}}
+	for _, c := range []struct{ name, wantID, wantErr string }{
+		{"shop", "id1", ""},
+		{"Shop", "id2", ""},
+		{"id3", "id3", ""},
+		{"billing", "id3", ""},
+		{"SHOP", "", "capital letters"},
+		{"nope", "", "shop, Shop, Billing"},
+		{"", "", "there is no server"},
+	} {
+		got, err := findServer(servers, c.name)
+		if c.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("%q: got %+v, %v; want error with %q", c.name, got, err, c.wantErr)
+			}
+			continue
+		}
+		if err != nil || got.ID != c.wantID {
+			t.Errorf("%q: got %+v, %v; want %s", c.name, got, err, c.wantID)
+		}
+	}
+	if _, err := findServer(nil, "x"); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Errorf("empty list: %v", err)
+	}
+}
+
+func TestServerRemove(t *testing.T) {
+	t.Run("yes stops then deletes", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("POST /api/servers/id1/monitor/stop", 200, map[string]any{})
+		d.on("DELETE /api/servers/id1", 204, nil)
+		var out bytes.Buffer
+		if err := runServerRemove(context.Background(), c, "shop", true, &fakeAsker{t: t}, &out); err != nil {
+			t.Fatal(err)
+		}
+		n := len(d.calls)
+		if n < 2 || d.calls[n-2] != "POST /api/servers/id1/monitor/stop" || d.calls[n-1] != "DELETE /api/servers/id1" {
+			t.Errorf("calls = %v", d.calls)
+		}
+		if !strings.Contains(out.String(), `Removed "shop"`) {
+			t.Errorf("output: %s", out.String())
+		}
+	})
+	t.Run("a server with no source is deleted without a stop", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("DELETE /api/servers/id3", 204, nil)
+		if err := runServerRemove(context.Background(), c, "old-index", true, &fakeAsker{t: t}, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, answer := range []string{"", "n", "nope", "maybe"} {
+		t.Run("answer "+answer+" changes nothing", func(t *testing.T) {
+			d, c := newFakeDaemon(t)
+			twoServers(d)
+			ask := &fakeAsker{t: t, tty: true, lines: map[string]string{}}
+			ask.lines[`Stop recording "shop" (db1:3306) and take it off the list? What was already recorded is kept. [y/N]`] = answer
+			var out bytes.Buffer
+			if err := runServerRemove(context.Background(), c, "shop", false, ask, &out); err != nil {
+				t.Fatal(err)
+			}
+			for _, call := range d.calls {
+				if strings.HasPrefix(call, "DELETE") || strings.HasSuffix(call, "/stop") {
+					t.Errorf("made %s after the answer %q", call, answer)
+				}
+			}
+			if !strings.Contains(out.String(), "Nothing was changed") {
+				t.Errorf("output: %s", out.String())
+			}
+		})
+	}
+	t.Run("answer YES removes", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("POST /api/servers/id1/monitor/stop", 200, map[string]any{})
+		d.on("DELETE /api/servers/id1", 204, nil)
+		ask := &fakeAsker{t: t, tty: true, lines: map[string]string{
+			`Stop recording "shop" (db1:3306) and take it off the list? What was already recorded is kept. [y/N]`: "YES"}}
+		if err := runServerRemove(context.Background(), c, "shop", false, ask, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("no terminal and no --yes is refused before anything", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		err := runServerRemove(context.Background(), c, "shop", false, &fakeAsker{t: t}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "--yes") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("a stop that fails removes nothing", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("POST /api/servers/id1/monitor/stop", 500, map[string]any{"error": "stop monitoring: busy"})
+		err := runServerRemove(context.Background(), c, "shop", true, &fakeAsker{t: t}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "busy") || !strings.Contains(err.Error(), "was not removed") || !strings.Contains(err.Error(), "may now be marked as stopped") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("a DBTrail that records nothing has nothing to stop: the delete goes on", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("POST /api/servers/id2/monitor/stop", 403, map[string]any{"error": "this console is read-only"})
+		d.on("DELETE /api/servers/id2", 204, nil)
+		var out bytes.Buffer
+		if err := runServerRemove(context.Background(), c, "Billing", true, &fakeAsker{t: t}, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), `Removed "Billing"`) {
+			t.Errorf("output: %s", out.String())
+		}
+	})
+	t.Run("the server DBTrail was started with is refused in its own words", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("DELETE /api/servers/boot", 409, map[string]any{"error": "the command-line server cannot be deleted; stop the console instead"})
+		err := runServerRemove(context.Background(), c, "boot", true, &fakeAsker{t: t}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "cannot be deleted") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("a delete that fails after the stop says both", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("POST /api/servers/id1/monitor/stop", 200, map[string]any{})
+		d.on("DELETE /api/servers/id1", 409, map[string]any{"error": "registry is locked"})
+		err := runServerRemove(context.Background(), c, "shop", true, &fakeAsker{t: t}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "was stopped") || !strings.Contains(err.Error(), "registry is locked") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("unknown name", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		err := runServerRemove(context.Background(), c, "nope", true, &fakeAsker{t: t}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "boot, shop, Billing, old-index") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestResolveCtl(t *testing.T) {
+	write := func(t *testing.T, dir string, a console.LocalAccess) string {
+		t.Helper()
+		p := filepath.Join(dir, console.LocalAccessFileName)
+		data, _ := json.Marshal(a)
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// Keep the machine's own files out of every case.
+	isolate := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		t.Setenv("BINTRAIL_CONSOLE_AUTH", filepath.Join(dir, "state", "console-auth.yaml"))
+		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "")
+		t.Setenv("BINTRAIL_CONSOLE_LISTEN", "")
+		if err := os.MkdirAll(filepath.Join(dir, "state"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(dir, "state")
+	}
+	if _, err := os.Stat(packagedStateDir + "/" + console.LocalAccessFileName); err == nil {
+		t.Skip("this machine runs a packaged DBTrail; its file would answer for every case")
+	}
+
+	t.Run("the daemon's file, found beside the login file", func(t *testing.T) {
+		state := isolate(t)
+		p := write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "filetok"})
+		c, err := resolveCtl("", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.base != "http://127.0.0.1:8090" || c.token != "filetok" || c.accessFile != p {
+			t.Errorf("got %+v", c)
+		}
+	})
+	t.Run("the file wins over the environment's token, --url over the file's address", func(t *testing.T) {
+		state := isolate(t)
+		write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "filetok"})
+		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
+		c, err := resolveCtl("https://dbtrail.example.com/", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.base != "https://dbtrail.example.com" || c.token != "filetok" {
+			t.Errorf("got %+v", c)
+		}
+	})
+	t.Run("no file: the environment's token and listen address", func(t *testing.T) {
+		isolate(t)
+		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
+		t.Setenv("BINTRAIL_CONSOLE_LISTEN", "0.0.0.0:9000")
+		c, err := resolveCtl("", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.base != "http://127.0.0.1:9000" || c.token != "envtok" || c.accessFile != "" {
+			t.Errorf("got %+v", c)
+		}
+	})
+	t.Run("no file, no token: says where it looked and what to do", func(t *testing.T) {
+		state := isolate(t)
+		_, err := resolveCtl("", "")
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(state, console.LocalAccessFileName)) ||
+			!strings.Contains(err.Error(), "docker compose exec") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("--access-file is the only place looked", func(t *testing.T) {
+		state := isolate(t)
+		write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "default"})
+		other := t.TempDir()
+		p := write(t, other, console.LocalAccess{URL: "http://127.0.0.1:7000", Token: "other"})
+		c, err := resolveCtl("", p)
+		if err != nil || c.token != "other" || c.base != "http://127.0.0.1:7000" {
+			t.Fatalf("got %+v, %v", c, err)
+		}
+		if _, err := resolveCtl("", filepath.Join(other, "missing.json")); err == nil {
+			t.Fatal("a missing --access-file fell back to somewhere else")
+		}
+	})
+	t.Run("a broken file is an error, not a fall through to the token", func(t *testing.T) {
+		state := isolate(t)
+		if err := os.WriteFile(filepath.Join(state, console.LocalAccessFileName), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BINTRAIL_CONSOLE_TOKEN", "envtok")
+		if c, err := resolveCtl("", ""); err == nil {
+			t.Fatalf("got %+v, want an error", c)
+		}
+	})
+	t.Run("a file this account may not read says so", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads everything")
+		}
+		state := isolate(t)
+		p := write(t, state, console.LocalAccess{URL: "http://127.0.0.1:8090", Token: "filetok"})
+		if err := os.Chmod(p, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, err := resolveCtl("", "")
+		if err == nil || !strings.Contains(err.Error(), "sudo") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestListenToLocal(t *testing.T) {
+	for in, want := range map[string]string{
+		"":               "127.0.0.1:8090",
+		"0.0.0.0:8090":   "127.0.0.1:8090",
+		":8090":          "127.0.0.1:8090",
+		"[::]:8090":      "[::1]:8090",
+		"10.0.0.5:9000":  "10.0.0.5:9000",
+		"localhost:8090": "localhost:8090",
+	} {
+		if got := listenToLocal(in); got != want {
+			t.Errorf("listenToLocal(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

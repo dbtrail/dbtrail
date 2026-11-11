@@ -459,6 +459,97 @@ newer DBTrail survive load→edit→save round-trips on an older binary, and a
 file written by a newer *schema* version loads read-only rather than being
 rewritten lossily.
 
+### From the terminal
+
+Everything "+ Add server" does, as commands. They ask the DBTrail that is
+already running, over the API the web interface uses, so a server added here
+goes through the same checks and is saved in the same place.
+
+```
+bintrail-console server add -h db1.example.com -P 3306 -u dbtrail -p
+bintrail-console server list
+bintrail-console server remove shop
+```
+
+With Docker Compose, run them inside the container:
+
+```
+docker compose exec bintrail bintrail-console server add -h host.docker.internal -u dbtrail -p
+```
+
+**`server add`** takes the mysql client's options. On a terminal, what you
+leave out is asked for.
+
+| Option | |
+|---|---|
+| `-h`, `--host` | Host of the database |
+| `-P`, `--port` | Its port (default 3306) |
+| `-u`, `--user` | The user DBTrail logs in as |
+| `-p`, `--password` | Ask for the password. It takes no value: a password on the command line stays in the shell history and in `ps` |
+| `--password-stdin` | Read the password from the first line of stdin, for scripts |
+| `--defaults-file` | Read host, port, user and password from a MySQL option file |
+| `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
+| `--schemas` | Comma-separated schemas to record (default: every user schema) |
+| `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
+| `-v`, `--verbose` | Also print how to turn on each optional improvement |
+
+`--defaults-file` reads the format of `~/.my.cnf`. It reads `[client]`, then
+`[dbtrail]`, which wins, so one file can hold your own login and DBTrail's:
+
+```ini
+[client]
+host=db1.example.com
+user=root
+password=...
+
+[dbtrail]
+user=dbtrail
+password="a password with a # in it"
+```
+
+Only the file you name is read: never `/etc/my.cnf` or `~/.my.cnf` by
+themselves, and `!include` lines are not followed. An option on the command
+line wins over the file. A file that connects through a `socket` and names no
+host is refused: DBTrail connects over the network.
+
+Each check is printed as it would be on the Connect screen. One that fails
+comes with its fix, nothing is saved, and the command exits 1:
+
+```
+Checking db1.example.com:3306 as dbtrail ...
+  FAIL  Source MySQL connection
+        failed to ping MySQL: Error 1045 (28000): Access denied for user 'dbtrail'@'10.0.0.7' (using password: YES)
+        Check that your MySQL answers from the machine DBTrail runs on:
+          mysql -h <host> -P <port> -u <user> -p
+        On RDS or Aurora, its security group must allow inbound connections from that machine on the database's port.
+the database was not added: 1 check failed. Fix it and run the command again
+```
+
+`tip` marks something optional, which DBTrail works without.
+
+**`server list`** prints each server's name, address, user and whether its
+changes are being recorded (`running`, `pending`, `stopped`, `failed`, ...;
+`set at startup` for the one DBTrail was started with, which is not removed
+here); `--format json` for scripts. **`server remove <name>`** stops recording a
+server and takes it off the list, after asking (`--yes` does not ask). What
+was already recorded and copied is kept.
+
+**How a command is let in.** Once its port is open, DBTrail writes
+`console-cli.json` beside its login file (`~/.config/bintrail/`, or
+`/var/lib/bintrail/` in the Docker image and the Linux packages): its address
+and a token made for that run, readable only by the account DBTrail runs as
+(mode 0600). It removes the file when it stops. A command reads it, so there
+is nothing to configure, and with the Linux packages it needs `sudo`. The
+file gives nothing its reader did not have: the same folder holds the login
+file and the saved database passwords. On the API the token is as strong as
+`BINTRAIL_CONSOLE_TOKEN`: full access, outside any session policy. It is
+accepted there as a Bearer only, never as a browser session, on `/mcp` or on
+the MySQL port, and it does not close first-run setup. In the audit trail its
+actor is `local-cli`, apart from `token`. `--url` and `--access-file` point a
+command at another DBTrail; with no file, `BINTRAIL_CONSOLE_TOKEN` is used.
+When DBTrail serves HTTPS, give the name on its certificate:
+`--url https://dbtrail.example.com`.
+
 ### Monitoring a source from the UI (the control plane)
 
 Under **`bintrail-console watch`**, and only there, the web interface is also a
