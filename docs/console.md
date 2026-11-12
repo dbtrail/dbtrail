@@ -1083,7 +1083,8 @@ saved, shown with the reason `serve` is not running it.
   still applies with an unknown count. The count is unknown when the
   index does not answer the probe, when nothing on record says how far
   the index had been written at the previous snapshot (the run history
-  does not hold it, or another process made the snapshot), when the
+  does not hold it, or another process made the snapshot; an index that
+  held no event then is on record as zero, and counts), when the
   server was pointed at another index, or when the index was rebuilt;
   the daemon log says which, once per cause, and that the update runs
   with no estimate of its cost. After a long stop that update applies
@@ -1120,19 +1121,34 @@ saved, shown with the reason `serve` is not running it.
   are dated against a full backup, not against the previous snapshot,
   because an update is folded from the index, which never received them:
   only a read of the source brings them back, and with no full backup in
-  the run history any dropped row keeps the full backup. Everything else
-  keeps the full backup and the reason says why: the source is ahead (the
-  capture may have stopped), or it cannot be asked (a capture in
-  binlog-position mode, which is what a source without GTIDs runs, since
-  its checkpoint stops short of each commit; PostgreSQL; MariaDB GTIDs; an
-  index on the source server itself, whose own checkpoint writes keep the
-  source ahead; a source that does not answer; an index with no live
-  capture). An index that records nothing while the source keeps writing
-  is a capture that stopped, and a full backup is the one producer that
-  does not depend on it. A source that can never be asked (the list just
-  given) leaves one case open: a quiet server of that kind with no usable
-  rate is read in full each time its snapshot passes that age with
-  nothing indexed, though nothing may have changed. Stopping a source from the web interface
+  the run history any dropped row keeps the full backup. Evidence that
+  capture is missing changes keeps the full backup, and the reason says
+  which: the source is ahead (the capture may have stopped), a capture gap
+  is on record since the previous snapshot, the capture dropped rows no
+  full backup has read since, or the capture holds transactions the source
+  does not have. An index that records nothing while the source keeps
+  writing is a capture that stopped, and a full backup is the one producer
+  that does not depend on it. A source that cannot be asked is not
+  evidence (#2659): a capture in binlog-position mode, which is what a
+  source without GTIDs runs, since its checkpoint stops short of each
+  commit; PostgreSQL; MariaDB GTIDs; an index on the source server itself,
+  whose own checkpoint writes keep the source ahead; a source that does
+  not answer; an index with no live capture. There the slot makes no
+  snapshot at all: no full backup, since nothing says a change was missed,
+  and no update, which would publish the previous rows under a new date.
+  The slot is recorded as skipped with that reason (one record for the
+  whole quiet stretch, its time moving to the latest slot), the card shows
+  it and says the next run will make no snapshot
+  (`schedule.next_method` is `skip`, with the reason in
+  `next_method_why`), and the daemon log says it once when it starts, once
+  a day while it lasts and once when it ends. It ends when a change is
+  indexed or the source can be asked. It applies on a daemon that may not
+  take full backups too. The skip gives way to the update when the
+  snapshot cannot wait: its readers start close to the oldest hour the
+  index keeps (the line the quiet-cycle gate re-anchors a snapshot on,
+  #1689), a table was created since it, a capture loss is on record since
+  it, or one of those could not be read; `next_method_why` then says
+  which. Stopping a source from the web interface
   acknowledges its capture-gap record and does not erase it: the Stop
   stamps the time of the acknowledgement beside the record
   (`stream_state.gap_acked_at`), which silences the alarm (the

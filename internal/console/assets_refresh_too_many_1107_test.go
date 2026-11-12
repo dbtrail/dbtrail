@@ -40,7 +40,7 @@ func TestBudgetRefusalLines(t *testing.T) {
 	js := readAsset(t, "app.js")
 	var script strings.Builder
 	for _, fn := range []string{"function baselineRefreshNote(", "function backupFoldError(", "function budgetRefusedTail(",
-		"function touchedRowBudgetText(", "function restoreRefusedLine(", "function scheduleSkipTail("} {
+		"function touchedRowBudgetText(", "function restoreRefusedLine(", "function unconfirmedSkipText(", "function scheduleSkipTail("} {
 		script.WriteString(functionBody(t, js, fn) + "\n")
 	}
 	script.WriteString(`
