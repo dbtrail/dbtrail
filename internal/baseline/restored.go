@@ -194,7 +194,9 @@ func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until
 // Restored is the snapshot under root the prune keeps as the last restore's
 // result and until when, "" when there is none, for the listing. It removes
 // nothing.
-func Restored(root string) (name string, until time.Time) { return lastRestored(root, true, time.Time{}) }
+func Restored(root string) (name string, until time.Time) {
+	return lastRestored(root, true, time.Time{})
+}
 
 func clearRestored(root, name string, dryRun bool) {
 	if dryRun {

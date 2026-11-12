@@ -373,12 +373,12 @@ func TestCleanupWaitingOf_onlyAWaitWorthSaying(t *testing.T) {
 func TestDownloadRuleFor(t *testing.T) {
 	week := 7 * 24 * time.Hour
 	for _, c := range []struct {
-		what               string
-		keep               int
-		inRegistry         bool
-		serverS3, bootS3   string
-		wantKeep           int
-		wantRetain         time.Duration
+		what             string
+		keep             int
+		inRegistry       bool
+		serverS3, bootS3 string
+		wantKeep         int
+		wantRetain       time.Duration
 	}{
 		{"a count", 3, true, "", "", 3, week},
 		{"no count, a destination of its own", 0, true, "s3://b/p/", "", 0, week},
