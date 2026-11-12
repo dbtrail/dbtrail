@@ -17,7 +17,7 @@ The machine that runs the stack (capture, the index MySQL and the router that an
 ### Memory
 
 - **32 GB** is what we recommend for a database of tens of GB under constant writes: capture, the index MySQL and the SQL statements each get room, and the router can keep the fresh mode's newest changes in memory beside its statements.
-- **16 GB** is the smallest amount we support. Give the router's statements less memory there, and keep fresh mode for the servers that need it.
+- **16 GB** is the smallest amount we support. Give the router's statements less memory there, and save Fast for the servers whose reports can be minutes old: fresh mode, the default, takes a fifth of the router's memory while any server uses it.
 - **8 GB is for evaluation on a small database only.** With a database of tens of GB under constant writes, an 8 GB machine runs out of memory: capture is the first process to stop, and a stopped capture is a gap in what you can recover. Below 16 GB, a problem caused by memory is not something we tune for.
 
 The machine's memory is shared: the index MySQL's buffer pool, capture, and the router's statements all come out of it. How the router splits its part is in [Docker](docker.md) (`ROUTER_MEMORY`, `SQL_MEMORY`, `ROUTER_MEMORY_SHARE`).
