@@ -141,10 +141,10 @@ func TestEntries(t *testing.T) {
 	}
 	// What each kind of name must be, for the ones whose purpose is known.
 	for env, want := range map[string]settings.Kind{
-		"BINTRAIL_SQL_SANDBOX_WORKER": settings.Internal,
-		"BINTRAIL_COMPOSE_VERSION":    settings.Internal,
-		"BINTRAIL_TEST_DSN":           settings.Test,
-		"BINTRAIL_CONSOLE_SQL_PANEL":  settings.Retired,
+		"BINTRAIL_SQL_SANDBOX_WORKER":  settings.Internal,
+		"BINTRAIL_COMPOSE_VERSION":     settings.Internal,
+		"BINTRAIL_TEST_DSN":            settings.Test,
+		"BINTRAIL_CONSOLE_SQL_PANEL":   settings.Retired,
 		"BINTRAIL_STATUS_LOG_INTERVAL": settings.Setting,
 	} {
 		if e, ok := settings.Lookup(env); !ok || e.Kind != want {
