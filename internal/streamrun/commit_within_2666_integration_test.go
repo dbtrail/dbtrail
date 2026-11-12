@@ -52,7 +52,11 @@ func TestIntegrationAQuietSourcesTransactionIsVisibleWithinTheWait_2666(t *testi
 	l.send(t, floorCommit(2, ""))
 	l.settle(t)
 	waitRows(t, db, 1, 10*time.Second)
-	if st := savedCheckpoint(t, db); st != nil {
+	st, err := loadStreamState(db)
+	if err != nil {
+		t.Fatalf("loadStreamState: %v", err)
+	}
+	if st != nil {
 		t.Fatalf("the commit after the wait saved a position (%s:%d); only the checkpoint saves one", st.binlogFile, st.binlogPos)
 	}
 
