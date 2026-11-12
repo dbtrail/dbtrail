@@ -395,7 +395,11 @@ A table has no snapshot at or before the moment when:
 
 The snapshot is looked up per table, when that table starts. In a run over several tables, a snapshot removed between two of them leaves the later table without one, and that table is refused the same way.
 
-The error has one line per refused table. It says which of these cases the location shows and names the table's earliest snapshot when it has one. When it cannot tell, because the location could not be listed or shows a snapshot of the table that the lookup did not use, it says that the reason is not known; find it out before adding the flag. What to do:
+The error has one line per refused table. It says which of these cases the location shows and names the table's earliest snapshot when it has one. When it cannot tell, because the location could not be listed or shows a snapshot of the table that the lookup did not use, it says that the reason is not known; find it out before adding the flag.
+
+A snapshot folder from at or before `--at` that could not be read (its permissions, a mount that is gone) is a different case ([#2684](https://github.com/dbtrail/dbtrail/issues/2684)). The lookup passes over such a folder when a newer one was read, so a newer snapshot that lacks the table leaves it with "no snapshot", while the table may be in the folder that could not be read. The error then names that snapshot and its error, says it may hold the table, and does not offer `--allow-changes-only`: make the folder readable and run again. Single-row `reconstruct` says the same. A folder of another schema, or a snapshot after `--at`, cannot hold what was asked for and changes nothing. The S3 listing has no such case: it answers whole or fails.
+
+What to do:
 
 - Take a snapshot that includes the table. It answers moments from then on, not earlier ones.
 - Ask for a moment at or after the table's earliest snapshot.
@@ -421,7 +425,7 @@ With the flag:
 - the output directory is marked `_SUCCESS`, because the run wrote what was asked for;
 - the output directory holds a file named `_CHANGES_ONLY` that lists those tables, one JSON object per line (`{"schema":"shop","table":"orders"}`).
 
-The data files of such a table are ordinary `INSERT` files. When the schema file carries the `CREATE TABLE` the index recorded, a loader such as myloader creates the table and loads those rows like any other table, so keep a changes-only dump apart from complete ones.
+The data files of such a table are ordinary `INSERT` files. The schema file carries the newest `CREATE TABLE` the index recorded for the table, with a `CREATE OR REPLACE TABLE` or a `CREATE TABLE IF NOT EXISTS` written as a plain `CREATE TABLE`: on a target that already has the table, the first would drop it and the second would load the rows into it, where a plain `CREATE TABLE` stops at "table exists" as a mydumper schema file does. A statement whose clause it cannot take out (a comment between its words) gets the explanatory comment instead of a definition, as when the index recorded none. When the schema file carries the `CREATE TABLE` the index recorded, a loader such as myloader creates the table and loads those rows like any other table, so keep a changes-only dump apart from complete ones.
 
 `bintrail baseline` does not convert such a table into a snapshot. A snapshot is what every later reconstruct starts from, so a changes-only table converted into one would come back as a complete table with no flag and no warning. The conversion reads `_CHANGES_ONLY`, and the first line of each schema file in case that file was lost in a copy, and when a table it was asked to convert is one of them it converts nothing, exits non-zero and names the table. Name the other tables of the folder with `--tables` to convert those. It also refuses a folder marked `_INCOMPLETE`, which is what a reconstruct that failed or was stopped leaves behind.
 
@@ -446,6 +450,14 @@ To close this, `reconstruct --output-format mydumper` writes a completeness mark
 Under `--output-format parquet` the same discipline applies to the **snapshot** directory (`<output>/<timestamp>/`) rather than to `--output` itself: that is the directory baseline discovery reads, so a run killed mid-write is never discoverable as a baseline. There, a re-run into an existing snapshot directory is refused outright instead of clearing the stale marker: two runs sharing one timestamp would interleave tables folded at different points under a single anchor.
 
 A directory with neither marker (pre-#842 output, or any other mydumper-shaped dump) is treated as complete by convention — only an explicit `_INCOMPLETE` (with no `_SUCCESS`) signals a genuinely partial run. Re-run `reconstruct` into a fresh directory, or the same one, to retry.
+
+#### Running again into the same folder
+
+A loader such as myloader reads every file in the folder and looks at neither marker. So before writing anything, and after writing `_INCOMPLETE`, a run removes from `--output` the files it writes for each table it was asked for: the table's `<schema>.<table>-schema.sql` and its `<schema>.<table>.NNNNN.sql` data files (with `--output-format psql`, the table's one `.sql` file) ([#2684](https://github.com/dbtrail/dbtrail/issues/2684)). Without that, a table this run refuses or fails on kept the files an earlier run wrote for it, under an error that says nothing was written for it, and a table written again with fewer data files than before kept the earlier run's higher-numbered ones, under `_SUCCESS`; either way a loader loaded rows from another moment as part of the table. The names are compared exactly: files of other tables (`orders_archive`, `Orders`), and files `reconstruct` never writes (`-schema-triggers.sql`, `.sql.gz`, `notes.txt`), stay. The run logs the files it removed.
+
+A consequence: a run that fails leaves no files for the tables it names, where an earlier run's files used to stay. Keep a folder you need elsewhere, or point `--output` at a new one.
+
+Files of tables the run was not asked for stay, and the run warns with their schema files: a loader reads them with this run's tables, though they come from the moment an earlier run wrote them.
 
 ### DuckDB resource tuning (`--ultrafast`)
 

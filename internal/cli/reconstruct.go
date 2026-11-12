@@ -97,6 +97,11 @@ command then exits 0, and the summary, the table's schema file and a
 _CHANGES_ONLY file in the output say which tables are changes only.
 "bintrail baseline" does not convert such a table into a snapshot.
 
+--output can be a folder an earlier run wrote into. Before writing anything,
+the run removes from it the files it writes for the tables it names (their
+schema file and data files), so that no table holds rows of the earlier run,
+even one this run refuses or fails on. Files of other tables stay.
+
 Examples:
   # Current state of a row (baseline + all binlog events up to now)
   bintrail reconstruct --index-dsn "..." --schema mydb --table orders \
