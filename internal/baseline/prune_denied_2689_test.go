@@ -313,6 +313,9 @@ func TestDenied_theRestoreResultIsUnaffected(t *testing.T) {
 	if !res.DestinationSilent || !res.DestinationDenied || len(res.NotAsked) != 1 || res.NotAsked[0] != restored {
 		t.Fatalf("want the general stop for the ordinary one, the restore's result still on its own rule: %+v", res)
 	}
+	if want := []string{s2[0], s2[1], restored}; !slices.Equal(b2.asked, want) || len(res.Pruned) != 0 {
+		t.Fatalf("asked %v, pruned %v: want %v (the newest as the check, then the restore's result), nothing removed", b2.asked, res.Pruned, want)
+	}
 }
 
 // With no S3 destination nobody is asked anything: the count alone.
