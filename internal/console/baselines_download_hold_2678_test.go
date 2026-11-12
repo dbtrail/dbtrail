@@ -234,78 +234,71 @@ func TestBaselineDownload_aSlowClientThatKeepsReadingIsNotCut(t *testing.T) {
 	}
 }
 
-// Downloads repeated at will cannot hold back every old snapshot: at most
-// as many snapshots PAST the count as the count itself are held for
-// downloads at once, and one more is refused. A download of a snapshot the
-// cleanup keeps anyway is never refused, whatever else is being downloaded,
-// and a folder with no count has no cap.
-func TestPinForDownload_capsOnlySnapshotsPastTheCount(t *testing.T) {
+// What the handler does with the cap: one of the newest is let in, an old
+// one is let in up to the count and refused past it, a folder nothing
+// prunes has no cap, and the refusal says what is true.
+func TestPinForDownload(t *testing.T) {
 	dir := newDetailFixture(t)
 	older := []string{"2026-06-06T12-00-00Z", "2026-06-07T12-00-00Z", "2026-06-08T12-00-00Z"}
 	for _, n := range older {
 		olderSnapshot(t, dir, n)
 	}
 	const keep = 1 // the fixture's snapshot is the newest: the one kept
-	// One person downloads the newest for hours: nobody else is refused it.
-	r0, ok := pinForDownload(dir, detailSnapDir, keep, time.Hour)
+	r0, ok := pinForDownload(dir, detailSnapDir, keep, 0, time.Hour)
 	defer r0()
-	r0b, ok2 := pinForDownload(dir, detailSnapDir, keep, time.Hour)
+	r0b, ok2 := pinForDownload(dir, detailSnapDir, keep, 0, time.Hour)
 	defer r0b()
 	if !ok || !ok2 {
 		t.Fatal("a download of the newest snapshot was refused")
 	}
-	// One old snapshot may be held for a download; a second is refused.
-	r1, ok := pinForDownload(dir, older[0], keep, time.Hour)
+	r1, ok := pinForDownload(dir, older[0], keep, 0, time.Hour)
 	if !ok {
 		t.Fatal("the first download of a snapshot past the count was refused, with only the newest being downloaded")
 	}
-	if _, ok := pinForDownload(dir, older[1], keep, time.Hour); ok {
+	if _, ok := pinForDownload(dir, older[1], keep, 0, time.Hour); ok {
 		t.Fatal("a second snapshot past the count was held for a download against a count of 1")
 	}
-	if got := baseline.Pinned(dir); !slices.Equal(got, []string{older[0], detailSnapDir}) {
-		t.Fatalf("pinned %v", got)
-	}
 	r1()
-	if r, ok := pinForDownload(dir, older[1], keep, time.Hour); !ok {
+	if r, ok := pinForDownload(dir, older[1], keep, 0, time.Hour); !ok {
 		t.Fatal("the place a finished download freed was not given")
 	} else {
 		r()
 	}
-	// No count (a console that prunes nothing, a server that keeps all).
+	// No count and no age (a console that prunes nothing, a server that
+	// keeps all): no cap.
 	for _, n := range older {
-		r, ok := pinForDownload(dir, n, 0, time.Hour)
+		r, ok := pinForDownload(dir, n, 0, 0, time.Hour)
 		if !ok {
 			t.Fatalf("a download was refused on a folder nothing prunes: %s", n)
 		}
 		defer r()
 	}
-	for _, n := range []int{1, 3} {
-		t.Logf("the refusal with a count of %d: %s", n, downloadsBusyMessage(n))
+	if downloadCap(0) != DefaultLocalKeepNewest || downloadCap(5) != 5 {
+		t.Fatalf("the cap: %d with no count, %d with 5", downloadCap(0), downloadCap(5))
 	}
-	if got := downloadsBusyMessage(1); strings.Contains(got, "1 older snapshots") || !strings.Contains(got, "Try again shortly") {
+	for _, n := range []int{1, 3} {
+		t.Logf("the refusal with a cap of %d: %s", n, downloadsBusyMessage(n))
+	}
+	if got := downloadsBusyMessage(1); !strings.Contains(got, "holding 1 or more older snapshots") || !strings.Contains(got, "Try again shortly") {
 		t.Fatalf("the refusal: %s", got)
 	}
 }
 
-// The cap counts different snapshots, per kind of reader.
-func TestPinSnapshotCapped(t *testing.T) {
-	root := t.TempDir()
-	r1, ok1 := baseline.PinSnapshotCapped(root, "2026-06-06T12-00-00Z", "a snapshot download", time.Hour, 2)
-	r2, ok2 := baseline.PinSnapshotCapped(root, "2026-06-07T12-00-00Z", "a snapshot download", time.Hour, 2)
-	_, ok3 := baseline.PinSnapshotCapped(root, "2026-06-08T12-00-00Z", "a snapshot download", time.Hour, 2)
-	again, ok4 := baseline.PinSnapshotCapped(root, "2026-06-06T12-00-00Z", "a snapshot download", time.Hour, 2)
-	if !ok1 || !ok2 || ok3 || !ok4 {
-		t.Fatalf("two, a third and a second reader of the first: %v %v %v %v; want true true false true", ok1, ok2, ok3, ok4)
+// Through the handler: a download over the cap answers 429 with Retry-After.
+func TestBaselineDownload_overTheCapIs429(t *testing.T) {
+	dir := newDetailFixture(t)
+	olderSnapshot(t, dir, "2026-06-12T12-00-00Z") // newer: the fixture's is now past a count of 1
+	other := "2026-06-06T12-00-00Z"
+	olderSnapshot(t, dir, other)
+	srv := newBaselineServer(t, dir, true)
+	prev := downloadRule
+	t.Cleanup(func() { downloadRule = prev })
+	downloadRule = func(*Server, *http.Request) (int, time.Duration) { return 1, 0 }
+	defer baseline.PinSnapshot(dir, other, "a snapshot download", time.Hour)()
+	w := httptest.NewRecorder()
+	srv.handleBaselineDownload(w, httptest.NewRequest("GET", "/api/baselines/download"+detailQuery(detailSnapAt), nil))
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "60" {
+		t.Fatalf("a download over the cap: code %d, Retry-After %q; want 429 and 60", w.Code, w.Header().Get("Retry-After"))
 	}
-	if got := baseline.Pinned(root); len(got) != 2 {
-		t.Fatalf("pinned %v, want two snapshots", got)
-	}
-	r1()
-	again()
-	r4, ok := baseline.PinSnapshotCapped(root, "2026-06-08T12-00-00Z", "a snapshot download", time.Hour, 2)
-	if !ok {
-		t.Fatal("a place freed by the downloads that ended was not given")
-	}
-	r2()
-	r4()
+	t.Logf("the refusal as the client reads it: %s", w.Body.String())
 }

@@ -217,22 +217,27 @@ func RestoredLocalOnly(root, name string) bool {
 	return err == nil
 }
 
-// KeptByCount reports whether the cleanup keeps root/name whatever readers
-// there are: it is one of the newest n holding a table, the newest copy of
-// one, the `current` target or the last restore's result. A snapshot it
-// keeps anyway is not held back by a reader's pin, so it does not count
-// toward a cap on pins. A folder that cannot be read answers false.
-func KeptByCount(root, name string, n int) bool {
+// KeptNow returns the snapshots of root the cleanup keeps now whatever
+// readers there are, under the rule that prunes the folder: a count n (the
+// newest n holding each table), an age retain (younger than it, and never
+// younger than the age mode's hour), or both. In every mode: the newest copy
+// of each table, the `current` target, the last restore's result, and the
+// snapshots it never touches (incomplete, unreadable, dated after now).
+// With neither rule nothing is pruned and every snapshot is kept. A pin on a
+// snapshot in this set holds nothing back; one on a snapshot outside it is
+// the only thing keeping that snapshot on the disk.
+func KeptNow(root string, n int, retain time.Duration) (map[string]bool, error) {
 	snaps, err := enumerateLocalSnapshots(root)
 	if err != nil {
-		return false
+		return nil, err
 	}
+	kept := map[string]bool{}
 	restored, _ := lastRestored(root, true)
-	if name == restored {
-		return true
-	}
 	var countable []localSnapshot
 	for _, s := range snaps {
+		if s.name == restored || !s.complete || s.unreadable || (n <= 0 && retain <= 0) {
+			kept[s.name] = true
+		}
 		if s.name != restored {
 			countable = append(countable, s)
 		}
@@ -240,5 +245,20 @@ func KeptByCount(root, name string, n int) bool {
 	now := time.Now().UTC()
 	keepers := computeKeepers(countable, now)
 	keepPointerTarget(root, keepers)
-	return keepers[name] || computeNewestN(countable, n, now)[name]
+	for name := range keepers {
+		kept[name] = true
+	}
+	for name := range computeNewestN(countable, n, now) {
+		kept[name] = true
+	}
+	floor := retain
+	if n <= 0 && floor < baselinePruneMinAge {
+		floor = baselinePruneMinAge
+	}
+	for _, s := range snaps {
+		if (retain > 0 || n <= 0) && now.Sub(s.ts) < floor {
+			kept[s.name] = true
+		}
+	}
+	return kept, nil
 }

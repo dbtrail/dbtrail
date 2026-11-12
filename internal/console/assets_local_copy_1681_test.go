@@ -105,7 +105,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("s3CountedHeld", Object.assign({}, s3c, { schedule_every: "5m", schedule_upload_every: "1d", schedule_upload_every_minutes: 1440 }), null);
   await step("s3CountedAge", Object.assign({}, s3c, { delete_after_minutes: 7 * 1440, prune_retain_minutes: 7 * 1440 }), null);
   await step("s3CountedNotIn", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true } }), null);
-  await step("s3CountedNotInWaiting", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z" } }), null);
+  await step("s3CountedWaits", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z" } }), null);
   await step("s3CountedNoLoop", Object.assign({}, s3c, { prune_loop: false, keep_in_force: 0 }), null);
   await step("s3CountedBlocked", Object.assign({}, s3c, { keep_blocked: true, keep_in_force: 0 }), null);
   await step("s3CountedKeep5", s3c, (r) => type(r, "keep_newest", "5"));
@@ -268,7 +268,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		"s3Counted":        "Older ones past that number are removed from this folder after each new snapshot, once S3 has them.",
 		"s3CountedHeld":    "An update the schedule did not send to S3 goes past that number without waiting for S3.",
 		"s3CountedAge":     "Older ones past that number and older than 7 days are removed from this folder after each new snapshot, once S3 has them.",
-		"s3CountedNotInWaiting": "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
+		"s3CountedWaits":   "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
 		"s3CountedNotIn":   "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
 		"s3CountedNoLoop":  "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
 		"s3CountedBlocked": "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",

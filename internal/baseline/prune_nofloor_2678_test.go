@@ -633,7 +633,8 @@ func TestNoFloor_theCapHoldsUnderConcurrentPins(t *testing.T) {
 			defer wg.Done()
 			<-start
 			name := snapName(time.Duration(i+1) * time.Minute)
-			release, ok := PinSnapshotCapped(root, name, "a snapshot download", time.Hour, max)
+			// None of them is one the cleanup keeps: each counts.
+			release, ok := PinDownload(root, name, time.Hour, nil, max, 2*max)
 			if !ok {
 				return
 			}
@@ -868,19 +869,123 @@ func TestNoFloor_theRestoreResultExpiresAfterADay(t *testing.T) {
 	})
 }
 
-// A download is refused only when it would hold back a snapshot PAST the
-// count beyond the cap; one of a snapshot the cleanup keeps anyway never is.
-func TestNoFloor_keptByCount(t *testing.T) {
+// What the cleanup keeps now, whatever readers there are, in each mode.
+func TestNoFloor_keptNow(t *testing.T) {
+	now := time.Now().UTC()
+	name := func(d time.Duration) string { return strings.ReplaceAll(now.Add(-d).Truncate(time.Second).Format(time.RFC3339), ":", "-") }
+	old, mid, young, newest := name(5*time.Hour), name(3*time.Hour), name(30*time.Minute), name(time.Minute)
 	root := t.TempDir()
-	s := minutes(t, root, 15, 10, 5)
-	restored := snapName(3 * time.Hour)
+	for _, n := range []string{old, mid, young, newest} {
+		makeSnapshot(t, root, n, true, "shop/orders")
+	}
+	restored := name(9 * time.Hour)
 	makeSnapshot(t, root, restored, true, "shop/orders")
 	if err := MarkRestored(root, restored); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]bool{s[2]: true, s[1]: true, s[0]: false, restored: true} {
-		if got := KeptByCount(root, name, 2); got != want {
-			t.Errorf("KeptByCount(%s, 2) = %v, want %v", name, got, want)
+	check := func(what string, n int, retain time.Duration, want ...string) {
+		t.Helper()
+		kept, err := KeptNow(root, n, retain)
+		if err != nil {
+			t.Fatal(err)
 		}
+		var got []string
+		for k := range kept {
+			got = append(got, k)
+		}
+		slices.Sort(got)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: kept %v, want %v", what, got, want)
+		}
+	}
+	check("a count of 2", 2, 0, newest, young, restored)
+	check("a count of 1 and an age of 4 hours", 1, 4*time.Hour, newest, young, mid, restored)
+	check("an age of 4 hours alone", 0, 4*time.Hour, newest, young, mid, restored)
+	check("a sub-hour age alone keeps its hour", 0, time.Minute, newest, young, restored)
+	check("no rule: nothing is pruned", 0, 0, newest, young, mid, old, restored)
+}
+
+// The cap on what downloads hold back, worked out on the CURRENT state. A
+// download is started on the then-newest snapshot at each schedule tick
+// (count 2): each holds nothing back when it starts and one snapshot past
+// the count a tick later. Counted by their state when taken, none ever
+// counted and any number were held; counted now, never more than twice the
+// count, and the download over that is refused.
+func TestNoFloor_downloadsStartedOnTheNewestAtEachTickAreCapped(t *testing.T) {
+	root := t.TempDir()
+	const n = 2
+	now := time.Now().UTC()
+	var names []string
+	var mostPast, mostHeld, refused int
+	for tick := 12; tick >= 1; tick-- {
+		name := strings.ReplaceAll(now.Add(-time.Duration(tick)*5*time.Minute).Truncate(time.Second).Format(time.RFC3339), ":", "-")
+		makeSnapshot(t, root, name, true, "shop/orders")
+		names = append(names, name)
+		kept, err := KeptNow(root, n, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release, ok := PinDownload(root, name, time.Hour, kept, n, 2*n)
+		if !ok {
+			refused++
+		}
+		defer release()
+		past := 0
+		for _, p := range Pinned(root) {
+			if !kept[p] {
+				past++
+			}
+		}
+		mostPast, mostHeld = max(mostPast, past), max(mostHeld, len(Pinned(root)))
+	}
+	t.Logf("12 downloads, one per tick, count %d: at most %d snapshots past the count held, %d pinned in all, %d downloads refused", n, mostPast, mostHeld, refused)
+	if mostHeld > 2*n {
+		t.Fatalf("downloads pinned %d different snapshots, more than twice the count (%d)", mostHeld, 2*n)
+	}
+	if refused == 0 {
+		t.Fatal("no download was refused: the ones that fell past the count were not counted")
+	}
+	// A snapshot past the count is refused while that many are held.
+	kept, _ := KeptNow(root, n, 0)
+	if _, ok := PinDownload(root, names[0], time.Hour, kept, n, 2*n); ok && !slices.Contains(Pinned(root), names[0]) {
+		t.Fatal("a download of one more old snapshot was let in over the cap")
+	}
+	// Another download of a snapshot already pinned keeps nothing more.
+	if r, ok := PinDownload(root, Pinned(root)[0], time.Hour, kept, n, 2*n); !ok {
+		t.Fatal("a second download of a snapshot already pinned was refused")
+	} else {
+		r()
+	}
+}
+
+// By age alone: a pin on a snapshot past the age is what counts.
+func TestNoFloor_downloadsAreCappedInTheAgeModeToo(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC()
+	name := func(d time.Duration) string { return strings.ReplaceAll(now.Add(-d).Truncate(time.Second).Format(time.RFC3339), ":", "-") }
+	var old []string
+	for h := 10; h >= 6; h-- {
+		old = append(old, name(time.Duration(h)*time.Hour))
+		makeSnapshot(t, root, old[len(old)-1], true, "shop/orders")
+	}
+	young := name(time.Hour)
+	makeSnapshot(t, root, young, true, "shop/orders")
+	kept, err := KeptNow(root, 0, 4*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const max = 3
+	for i, n := range old {
+		release, ok := PinDownload(root, n, time.Hour, kept, max, 2*max)
+		defer release()
+		if ok != (i < max) {
+			t.Fatalf("download %d of a snapshot past the age: let in %v, want %v", i+1, ok, i < max)
+		}
+	}
+	if r, ok := PinDownload(root, young, time.Hour, kept, max, 2*max); !ok {
+		t.Fatal("a download of a snapshot inside the age was refused with room under the ceiling")
+	} else {
+		defer r()
 	}
 }

@@ -147,7 +147,7 @@ func PinSnapshot(root, name, what string, limit time.Duration) (release func()) 
 }
 
 // insertPinLocked adds one pin and returns what releases it. The caller
-// holds readsMu, so a check made under the same lock (PinSnapshotCapped)
+// holds readsMu, so a check made under the same lock (PinDownload)
 // and this insert are one step.
 func insertPinLocked(key, name, what string, limit time.Duration) (release func()) {
 	if limit <= 0 {
@@ -209,36 +209,63 @@ func Pinned(root string) []string {
 	return out
 }
 
-// PinSnapshotCapped is PinSnapshot for readers anyone allowed can start as
-// many of as they like (a snapshot download): it refuses, with ok false, a
-// pin that would make more than max DIFFERENT snapshots of root pinned by
-// readers of the same kind (what). Another reader of a snapshot already
-// pinned is always let in: it keeps nothing more on the disk. So downloads
-// repeated at will keep at most max snapshots past the count, not every
-// snapshot there is.
-func PinSnapshotCapped(root, name, what string, limit time.Duration, max int) (release func(), ok bool) {
+// downloadReader names a snapshot download's pin: the kind of reader the cap
+// below counts.
+const downloadReader = "a snapshot download"
+
+// PinDownload pins the snapshot a download streams, under a cap on what the
+// downloads of one folder hold back from the cleanup together (#2678).
+// Anyone allowed to download can start as many as they like, and a download
+// lasts as long as its client takes, so without a cap downloads repeated at
+// will keep any number of old snapshots on the disk.
+//
+// kept are the snapshots the cleanup keeps NOW whatever readers there are
+// (KeptNow), read just before this call. The cap is worked out on that
+// current state, not on what a snapshot was when its download started: a
+// download of the newest snapshot holds nothing back at first, and five
+// minutes later it is the only thing keeping a snapshot past the count.
+//
+//   - Another download of a snapshot a download already pins: let in. It
+//     keeps nothing more on the disk.
+//   - A snapshot past what the cleanup keeps: let in while fewer than max
+//     such snapshots are pinned by downloads.
+//   - A snapshot the cleanup keeps anyway: let in while fewer than max past
+//     ones are pinned; once that many are, only while the downloads pin
+//     fewer than ceiling different snapshots in all, since each of these
+//     will be past the count a few minutes on.
+//
+// So the downloads of a folder never hold back more than ceiling snapshots.
+// The count and the insert are ONE step under the lock: requests arriving
+// together must not all pass the check before any of them is counted.
+func PinDownload(root, name string, limit time.Duration, kept map[string]bool, max, ceiling int) (release func(), ok bool) {
 	if root == "" || name == "" || strings.HasPrefix(root, "s3://") {
 		return func() {}, true
 	}
 	key := readKey(root)
 	now := time.Now()
-	// The count and the insert are ONE step under the lock: counted, then
-	// unlocked, then inserted, requests arriving together all passed the
-	// check before any of them was counted, and the cap did not hold.
 	readsMu.Lock()
 	defer readsMu.Unlock()
-	distinct, already := 0, false
+	total, past, already := 0, 0, false
 	for n, set := range pins[key] {
 		for p := range set {
-			if p.what == what && now.Before(p.until) {
-				distinct++
+			if p.what == downloadReader && now.Before(p.until) {
+				total++
+				if !kept[n] {
+					past++
+				}
 				already = already || n == name
 				break
 			}
 		}
 	}
-	if !already && distinct >= max {
+	switch {
+	case already:
+	case !kept[name]:
+		if past >= max {
+			return func() {}, false
+		}
+	case past >= max && total >= ceiling:
 		return func() {}, false
 	}
-	return insertPinLocked(key, name, what, limit), true
+	return insertPinLocked(key, name, downloadReader, limit), true
 }
