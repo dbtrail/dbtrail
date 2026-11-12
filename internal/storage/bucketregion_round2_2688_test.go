@@ -212,7 +212,7 @@ func TestNewAWSOnlyS3Client_onlyDiscoveryCallsIt_2688(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed := map[string]bool{
-		filepath.Join("internal", "storage", "s3url.go"):                true, // the definition
+		filepath.Join("internal", "storage", "s3url.go"):                 true, // the definition
 		filepath.Join("internal", "storage", "bucketregion_discover.go"): true, // the one caller
 	}
 	var offenders []string
