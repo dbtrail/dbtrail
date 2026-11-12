@@ -3,6 +3,7 @@ package baseline
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -231,6 +232,11 @@ type PruneResult struct {
 	// marker (an in-progress write or a partial run resumable via --retry — never
 	// our business).
 	KeptIncomplete int
+	// RemovedEmpty names the empty snapshot folders this cleanup removed
+	// (#2691): folders named as a snapshot that held no file at all, in
+	// them or below, for emptySnapshotDirAge. Not counted in Pruned: no
+	// snapshot was in them.
+	RemovedEmpty []string
 	// KeptUnreadable counts complete snapshots kept because their directory could
 	// not be fully enumerated (a transient os.ReadDir failure: fd exhaustion, an
 	// NFS/permission blip). We cannot prove such a snapshot is redundant, so the
@@ -546,6 +552,10 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
 	sweepFailures, firstSweepErr := sweepPruningLeftovers(opts.LocalDir)
+	var removedEmpty []string
+	if !opts.DryRun {
+		removedEmpty = sweepEmptySnapshotDirs(opts.LocalDir, pinnedNow(opts.LocalDir, time.Now()), time.Now())
+	}
 
 	snaps, err := enumerateLocalSnapshots(opts.LocalDir)
 	if err != nil {
@@ -590,6 +600,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// deleted is a failure even in a cycle that has nothing new to remove.
 	withSweep := func(res PruneResult) PruneResult {
 		res.SweepFailures, res.firstSweepErr = sweepFailures, firstSweepErr
+		res.RemovedEmpty = removedEmpty
 		res.KeptPinned += keptPinned
 		for _, s := range all {
 			if s.unreadable {
@@ -1362,6 +1373,98 @@ func sweepPruningLeftovers(dir string) (failures int, firstErr string) {
 		}
 	}
 	return failures, firstErr
+}
+
+// emptySnapshotDirAge is how long a folder named as a snapshot must have held
+// no file at all before the cleanup removes it (#2691). Every writer creates
+// the folder and writes _INCOMPLETE into it in the next statement
+// (internal/baseline, internal/pgbaseline, reconstruct's fold), so a folder
+// still empty after a few seconds is one whose writer stopped in between.
+// The hour is margin, not a measured run time: it is the age mode's floor
+// (baselinePruneMinAge), and an empty folder takes no disk while it waits.
+// The age is the folder's own modification time, and that of every
+// directory under it, never the time in its name: a restore's folder is
+// named for a past moment and created now.
+const emptySnapshotDirAge = time.Hour
+
+// emptyDirRemoveHook runs between finding a folder empty and removing it. A
+// no-op, replaced only by the test that writes into the folder in that gap.
+var emptyDirRemoveHook = func(string) {}
+
+// sweepEmptySnapshotDirs removes the folders under dir that are named as a
+// snapshot and hold no file, in them or below, and whose directories have
+// not changed for emptySnapshotDirAge, and returns their names. The
+// `current` target and a pinned snapshot are left alone. The removal is one
+// rmdir per directory, the deepest first, never a recursive delete: a
+// directory that is not empty refuses it, so a file a writer puts in the
+// folder meanwhile stays, with the folder.
+func sweepEmptySnapshotDirs(dir string, pinned map[string]string, now time.Time) (removed []string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil // the enumeration right after reports this
+	}
+	current, _ := ResolveCurrentPointer(dir)
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || name == current || pinned[name] != "" {
+			continue
+		}
+		if _, ok := parseBaselineDirTimestamp(name); !ok {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		dirs, newest, empty := emptyTree(p)
+		if !empty || now.Sub(newest) < emptySnapshotDirAge {
+			continue
+		}
+		emptyDirRemoveHook(p)
+		gone := true
+		for i := len(dirs) - 1; i >= 0; i-- {
+			if err := os.Remove(dirs[i]); err != nil {
+				// Not empty any more (a writer came back), or not removable:
+				// it is kept, and asked about again at the next cleanup.
+				slog.Info("baseline prune: an empty snapshot folder was not removed; it is kept",
+					"dir", dir, "snapshot", name, "error", err)
+				gone = false
+				break
+			}
+		}
+		if gone {
+			slog.Info("baseline prune: removed an empty snapshot folder; the run that created it stopped before writing anything in it",
+				"dir", dir, "snapshot", name, "empty_since", newest.UTC().Format(time.RFC3339))
+			removed = append(removed, name)
+		}
+	}
+	return removed
+}
+
+// emptyTree walks root and reports its directories in walk order (parents
+// first), the newest modification time among them, and whether it holds no
+// entry other than directories. A walk that fails reports not empty.
+func emptyTree(root string) (dirs []string, newest time.Time, empty bool) {
+	empty = true
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			empty = false
+			return filepath.SkipAll
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+		dirs = append(dirs, p)
+		return nil
+	})
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	return dirs, newest, empty
 }
 
 // hasSuccessMarker reports whether snapDir carries _SUCCESS itself, which

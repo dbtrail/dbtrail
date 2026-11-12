@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An empty snapshot folder left by a stopped run is removed** (#2691). A run that stopped between creating a snapshot's folder and writing its first file left an empty folder that every cleanup kept as a snapshot being written. The cleanup now removes a folder named as a snapshot that has held no file at all for an hour, in every mode, and logs it. It removes empty directories only, so a file written into the folder meanwhile is never removed.
 - **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in
