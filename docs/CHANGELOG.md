@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Adding the first server turns the MySQL port on, with Engine Routing on** (#2686). `dbtrail server add` and the web interface's Connect screen used to leave nothing answering on port 3309: turning the port on and turning Engine Routing on were two more steps.
+  - **What happens now.** When a server is added and nothing was ever saved about the port, the port is turned on with Engine Routing on, and the answer shows the `mysql` line and the port's password. That is the only time the password is shown.
+  - **What does not change.** Only the first server does it. A port that was turned off stays off. An installation that already has servers and never turned the port on keeps it off when it adds one more after the upgrade. The web interface's long form does not turn it on. The port is still reachable from the machine only (`127.0.0.1:3309`), still read-only, and a server still needs a forwarding user before anything is sent to MySQL.
+  - **`dbtrail port on` by hand** also starts with Engine Routing on the first time. A saved setting keeps what it says.
+  - **Permissions.** The port is turned on only for a session that may change settings and has no data access policy, the two things the port's own page asks for. Otherwise the server is added, the port is left as it was, and the answer says why.
+
 - **A snapshot S3 refuses to answer for no longer stops the count for the whole folder** (#2689). With an S3 destination and **Keep by count**, a failed question about one snapshot stopped every removal of the cleanup. Credentials without `s3:ListBucket` make S3 answer 403 instead of 404 for a copy it does not have, so a snapshot whose upload failed was refused at every cleanup, was never re-sent, and the folder grew by one snapshot per schedule interval. Now a 403 on one snapshot keeps that snapshot, lists it to be sent again, and lets the others go. When S3 refuses every question, the newest snapshots included, nothing is removed and the page says so, as for a bucket that does not answer. Network errors, timeouts and other failures still stop the cleanup as before.
   - Sending a snapshot again no longer fails on a 403 when it checks which files are already in S3: it sends them.
   - The Snapshots page now says "S3 could not be asked whether it has it" for such a snapshot instead of "S3 does not have it complete", and shows when the next send is tried after one failed. Both were in the cleanup's record and did not reach the page.

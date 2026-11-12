@@ -187,7 +187,9 @@ func TestSQLPortPanel_TurnedOnFromTheWebInterface(t *testing.T) {
 		return got
 	}
 	grab("off", "GET", "/api/flashback", "")
-	created := grab("created", "PUT", "/api/flashback", `{"enabled":true}`)
+	// Routing said off: a port turned on for the first time starts with it
+	// on (#2686), and these scenes begin with it off.
+	created := grab("created", "PUT", "/api/flashback", `{"enabled":true,"routing":false}`)
 	pw, _ := created["password"].(string)
 	if pw == "" {
 		t.Fatal("setup: turning the port on returned no password")

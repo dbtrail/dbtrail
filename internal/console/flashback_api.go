@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/dbtrail/dbtrail/ext"
 )
 
 // flashbackStatusDTO is the wire view of the embedded MySQL-protocol
@@ -298,6 +300,11 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	next := saved
 	if req.Routing != nil {
 		next.Routing = *req.Routing
+	} else if req.Enabled != nil && *req.Enabled && !flashbackFileExists(path) {
+		// The port is turned on for the first time and nothing was ever
+		// saved about it: Engine Routing starts on (#2686). A setting that
+		// exists keeps what it says, off included.
+		next.Routing = true
 	}
 	if req.Enabled == nil {
 		// Read routing alone: the port stays as it is, on or off, and the
@@ -386,6 +393,109 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	fb.mu.Unlock()
 	slog.Info("console: MySQL port turned on from the web interface", "listen", listen, "password_created", created != "")
 	writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus(), Password: created})
+}
+
+// flashbackFileExists reports whether a port setting was ever saved at path.
+// An error other than "no such file" counts as existing: a setting that
+// cannot be looked at is not replaced by a default.
+func flashbackFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// newServerPortDTO is what adding a server says about the MySQL port
+// (#2686): its state, whether this request turned it on, and, only then,
+// the password that was made for it. NotTurnedOn is why a port with nothing
+// saved about it was left off.
+type newServerPortDTO struct {
+	flashbackStatusDTO
+	TurnedOn    bool   `json:"turned_on"`
+	Password    string `json:"password,omitempty"`
+	NotTurnedOn string `json:"not_turned_on,omitempty"`
+}
+
+// portOnForNewServer turns the MySQL port on, with Engine Routing on, when the
+// FIRST server was just added (first: DBTrail had no server before it, in the
+// registry or given on the command line) and NOTHING was ever saved about the
+// port (#2686): the step that used to be `port on` and `port routing on`.
+//
+// Everything else is left as it is. A setting that exists is the operator's,
+// off included, so a port turned off stays off however many servers are
+// added. An installation that already had servers and never turned the port
+// on keeps it off when it adds another one after an upgrade: the port opens
+// only where nobody could have been relying on it being closed. The password
+// is made here and returned in this one answer.
+//
+// It never fails the request that added the server: what stopped it is in
+// NotTurnedOn, and the server stays added.
+//
+// A session that may not change the port by its own routes turns nothing on
+// here either: one without settings:write, and one with a data access policy
+// (the port reads every server without that session's redaction,
+// flashbackRefuseRestricted). One without settings:read, which GET
+// /api/flashback asks for, is told whether the port is on and nothing more.
+func (s *Server) portOnForNewServer(r *http.Request, first bool) *newServerPortDTO {
+	fb := &s.flashback
+	fb.mutate.Lock()
+	defer fb.mutate.Unlock()
+	pol := policyFrom(r.Context())
+	// answer is the port as it is now, with why it was not turned on.
+	answer := func(why string) *newServerPortDTO {
+		st := s.flashbackStatus()
+		out := &newServerPortDTO{flashbackStatusDTO: st}
+		if !st.Enabled {
+			out.NotTurnedOn = why
+		}
+		if !pol.Allows(ext.PermSettingsRead) {
+			out.flashbackStatusDTO = flashbackStatusDTO{Enabled: st.Enabled}
+		}
+		return out
+	}
+	path, control, saved, _, refusal := s.flashbackManageable()
+	if refusal != "" {
+		return answer(refusal)
+	}
+	if flashbackFileExists(path) {
+		return answer("")
+	}
+	if !first {
+		return answer("DBTrail already had servers when this one was added, and the port turns on by itself only with the first. Turn it on:  dbtrail port on")
+	}
+	// The port's own routes need settings:write and refuse a session with a
+	// data access policy. Adding a server needs servers:write only, so the
+	// same two gates stand here, before anything is saved, opened or made:
+	// without them this would hand the port's password, which reads every
+	// server, to a session that may not change the port.
+	if !pol.Allows(ext.PermSettingsWrite) {
+		return answer("this session may add servers and may not change settings, which turning the port on needs. Someone who may turns it on")
+	}
+	if pol.DataRestricted() {
+		return answer("this session has a data access policy, and the port reads every server without it. An operator without data restrictions turns it on")
+	}
+	next := saved
+	next.Enabled, next.Routing = true, true
+	if next.Listen == "" {
+		next.Listen = defaultFlashbackListen(s.listen)
+	}
+	created := ""
+	if next.Password == "" {
+		pw, err := newFlashbackPassword()
+		if err != nil {
+			return answer("its password could not be made: " + err.Error())
+		}
+		created = pw
+		next.Password, next.PasswordCreatedAt = pw, time.Now().UTC().Format(time.RFC3339)
+	}
+	if err := saveFlashbackFile(path, &next); err != nil {
+		return answer("its setting could not be saved: " + err.Error())
+	}
+	_ = control.Apply(next.Listen)
+	fb.mu.Lock()
+	fb.saved, fb.listen, fb.lastErr = next, control.Listening(), ""
+	fb.mu.Unlock()
+	slog.Info("console: the MySQL port was turned on, with Engine Routing on, as the first server was added",
+		"listen", next.Listen, "password_created", created != "")
+	return &newServerPortDTO{flashbackStatusDTO: s.flashbackStatus(), TurnedOn: true, Password: created}
 }
 
 // EnsureFlashbackOn saves the port as on when NO setting was ever saved,

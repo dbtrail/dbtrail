@@ -84,7 +84,8 @@ installer. `DBTRAIL_PORT` also points the startup banner (in
 Prometheus's own default port; when 9090 is taken the installer moves the
 metrics to the next free port and says so. Choose one yourself with
 `DBTRAIL_METRICS_PORT`. The stack also publishes the MySQL port on 3309 (it
-answers nothing until you turn it on in the web interface). When 3309 is
+answers nothing until the port is on: adding the first server turns it on,
+or turn it on in the web interface). When 3309 is
 taken, the installer leaves that port unpublished and says so; add a `ports:`
 line to the `router` service of `docker-compose.yml` to use it. Prefer to drive Compose yourself?
 
@@ -314,7 +315,8 @@ open it.
 
 The package enables and starts it, on a first install and on the first
 upgrade that brings it. It needs no settings to start, and it accepts no
-connection until you turn the MySQL port on in the web interface.
+connection until the MySQL port is on: adding the first server turns it on,
+or turn it on in the web interface.
 
 ```sh
 systemctl status bintrail-router
@@ -340,8 +342,8 @@ journalctl -u bintrail-router -f
   (**Settings**, **MySQL clients**, **Connect a SQL client**), with the password
   created there. `BINTRAIL_CONSOLE_TOKEN` in the settings file is accepted
   as a password too while the port is on; it does not open it.
-- As it comes, **the copy answers every statement**. With Engine Routing turned
-  on (a saved setting, off by default, see
+- As it comes, **the copy answers every statement**. With Engine Routing on (a saved setting, on from the moment the port is
+  first turned on, see
   [Engine Routing](./time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads)),
   statements are forwarded to **the source itself, live**, with each server's
   forwarding account: a MySQL user of its own, set on the server's page in
