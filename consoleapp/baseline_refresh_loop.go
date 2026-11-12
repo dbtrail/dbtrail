@@ -929,7 +929,14 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	// reason, and the schedule takes a full read in its place where it may.
 	// Acknowledged or not: an acknowledgement silences the alarm, and the
 	// copy is as far behind the source as before.
-	if lost, err := lossOnRecordSince(ctx, req.IndexDSN, prev.publishedAt); err != nil || lost {
+	lost, err := lossOnRecordSince(ctx, req.IndexDSN, prev.publishedAt)
+	// Blind like the mark and coverage questions above, and said the same
+	// way (#2664): with stream_state unreadable every cycle folds, and at
+	// Debug nothing told the operator why a quiet server is never skipped.
+	s.reportGateBlind("loss", err == nil, req,
+		"cannot tell whether capture lost events since the last snapshot, so every cycle folds; this server is not "+
+			"being skipped and will not be until the index answers")
+	if err != nil || lost {
 		if err != nil {
 			slog.Debug("snapshot refresh: could not ask the index whether capture lost events since the last snapshot; folding", "server", req.ServerName, "error", err)
 		} else if s.gateEdge.Fire("loss:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {

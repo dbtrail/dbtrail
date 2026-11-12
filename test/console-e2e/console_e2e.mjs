@@ -655,7 +655,8 @@ try {
       gapRed: !!gapBox && gapBox.classList.contains("error-box") && /permanently lost/i.test(gapBox.textContent),
       gapPrecedence: !!gapWins && gapWins.classList.contains("error-box"),
       ackedBoxMuted: !!ackedBox && ackedBox.classList.contains("muted-box") && /Changes were lost at 2026-06-22 12:00:00 UTC and that was acknowledged at 2026-06-22 13:00:00 UTC/.test(ackedBox.textContent)
-        && /refused until the database is read in full again/.test(ackedBox.textContent),
+        && /cross it are refused\. A full read taken after it \(Read database now, on the Snapshots page\) is not affected\./.test(ackedBox.textContent)
+        && !/until the database is read in full again/.test(ackedBox.textContent),
       ackedStation: ackedModel.pieces[2].tone === "none" && ackedModel.pieces[2].line === "changes lost, on record",
       ackedChip: ackedChips.some((c) => c.text === "changes lost, on record" && !/\b(ok|bad)\b/.test(c.cls)) && !ackedChips.some((c) => /^continuity /.test(c.text)),
       ackedCardLine: /Changes were lost at 2026-06-22 12:00:00 UTC and that was acknowledged/.test(ackedCard.textContent),

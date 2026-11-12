@@ -2,6 +2,7 @@ package assurance
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -107,6 +108,41 @@ func TestContinuityStatusReachesTheOneRule(t *testing.T) {
 	if got := ContinuityStatus(nil, errors.New("boom")); got != ContinuityUnavailable {
 		t.Fatalf("unreadable stream state = %q, want %q", got, ContinuityUnavailable)
 	}
+}
+
+// #2664: the window of an acknowledged loss has to survive the trip through
+// the facade, in both directions, with the conservative default a consumer
+// gets when it never fills the floor.
+func TestContinuityStatusNarrowsAnAcknowledgedLossToTheWindow(t *testing.T) {
+	lost := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	acked := func(floor DeltaFloor) *StreamStateInfo {
+		return &StreamStateInfo{GapColumnsPresent: true,
+			GapLostAt:  sql.NullTime{Time: lost, Valid: true},
+			GapAckedAt: sql.NullTime{Time: lost.Add(time.Hour), Valid: true},
+			Floor:      floor}
+	}
+	for _, c := range []struct {
+		name  string
+		floor DeltaFloor
+		want  string
+	}{
+		{"floor never filled", DeltaFloor{}, ContinuityGapAcknowledged},
+		{"floor before the loss", DeltaFloor{Hour: lost.Add(-time.Hour)}, ContinuityGapAcknowledged},
+		{"floor at the loss", DeltaFloor{Hour: lost}, ContinuityGapAcknowledged},
+		{"floor after the loss", DeltaFloor{Hour: lost.Add(time.Hour)}, ContinuityOK},
+		{"floor after the loss, archives may reach further back", DeltaFloor{Hour: lost.Add(time.Hour), BelowIsUnknown: true}, ContinuityGapAcknowledged},
+	} {
+		if got := ContinuityStatus(acked(c.floor), nil); got != c.want {
+			t.Errorf("%s: acknowledged loss = %q, want %q", c.name, got, c.want)
+		}
+		unacked := acked(c.floor)
+		unacked.GapAckedAt = sql.NullTime{}
+		if got := ContinuityStatus(unacked, nil); got != ContinuityGapLost {
+			t.Errorf("%s: unacknowledged loss = %q, want %q", c.name, got, ContinuityGapLost)
+		}
+	}
+	// No query and no panic on the nil value a file-mode index loads as.
+	LoadGapWindow(context.Background(), nil, "binlog_index", nil)
 }
 
 // The #1219 demotion has to survive the trip through the facade: below an

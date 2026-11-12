@@ -1468,16 +1468,22 @@ function ovCaptureAsk(c, draw) {
 }
 
 // gapAcknowledgedText says a capture loss that an operator acknowledged: when
-// changes were lost, that it was acknowledged, and what is still refused
-// because of it. One sentence builder for the two places that show it (the
-// Restore coverage card and the Status page), so they cannot tell two stories.
+// changes were lost, that it was acknowledged, and what is refused because of
+// it. One sentence builder for the two places that show it (the Restore
+// coverage card and the Status page), so they cannot tell two stories.
 // g is {at, acknowledged_at}; either may be missing on an older daemon.
+//
+// It states the rule and gives no step to take (#2664): both endpoints keep
+// sending this loss after the operator read the database in full, until the
+// changes still held start after it, and neither knows whether that read was
+// taken. "Refused until the database is read in full again" stayed on screen
+// as an instruction already followed.
 function gapAcknowledgedText(g) {
   const at = g && g.at ? " at " + utcLabel(g.at) : "";
   const acked = g && g.acknowledged_at ? " at " + utcLabel(g.acknowledged_at) : "";
   return "Changes were lost" + at + " and that was acknowledged" + acked + ". " +
-    "Updates of the copy and time travel across that moment are refused until the database is read in full again " +
-    "(Read database now, on the Snapshots page).";
+    "Updates of the copy and time travel that start from a full read of the database older than that moment and cross it are refused. " +
+    "A full read taken after it (Read database now, on the Snapshots page) is not affected.";
 }
 
 // covCard renders the live RPO statement (#1194). The window's upper edge is

@@ -92,19 +92,24 @@ const (
 // Continuity verdicts, as returned by ContinuityStatus and carried in
 // CoverageSummary.Continuity:
 //
-//	ContinuityOK          — no loss on record for the captured range. NOT a
-//	                        liveness claim: it says nothing about the stream
-//	                        running now (CoverageSummary.LagSeconds is that
-//	                        signal).
+//	ContinuityOK          — no loss on record in the changes still held.
+//	                        NOT a liveness claim: it says nothing about the
+//	                        stream running now (CoverageSummary.LagSeconds is
+//	                        that signal).
 //	ContinuityGapLost     — an unfillable gap was stamped and nobody has
 //	                        acknowledged it: events are permanently lost.
-//	ContinuityGapAcknowledged — an unfillable gap was stamped and an operator
-//	                        acknowledged it. The events are exactly as lost
-//	                        as under ContinuityGapLost and a window spanning
-//	                        the loss is incomplete; only the alarm is
-//	                        silenced. CoverageSummary.GapLostAt and
-//	                        GapAckedAt carry the two instants. Never treat it
-//	                        as ContinuityOK.
+//	                        However old the loss is.
+//	ContinuityGapAcknowledged — an unfillable gap was stamped, an operator
+//	                        acknowledged it, and the changes still held reach
+//	                        it. The events are exactly as lost as under
+//	                        ContinuityGapLost and a window spanning the loss
+//	                        is incomplete; only the alarm is silenced.
+//	                        CoverageSummary.GapLostAt and GapAckedAt carry
+//	                        the two instants. Never treat it as ContinuityOK.
+//	                        Once the changes still held start after the loss
+//	                        (the delta floor passes it), the verdict is
+//	                        ContinuityOK again; see ContinuityStatus for the
+//	                        window and its conservative cases.
 //	ContinuityUnknown     — a legacy index without the gap columns: whether a
 //	                        gap happened is unevaluable, never a false "ok".
 //	ContinuityUnavailable — stream_state could not be read, likewise.
@@ -195,8 +200,28 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 // LoadStreamState alongside the value — ContinuityUnavailable is reachable
 // only through that error, so dropping it renders an unreadable checkpoint as
 // ContinuityNone, a genuine no-claim.
+//
+// An ACKNOWLEDGED loss grades ContinuityGapAcknowledged while the changes
+// still held reach it and ContinuityOK once they start after it. That window
+// is StreamStateInfo.Floor, which LoadStreamState does not fill: call
+// LoadGapWindow on the value first, as `bintrail status` and
+// CollectCoverageSummary do, to get the verdict they report. Without it the
+// floor is unknown and an acknowledged loss stays ContinuityGapAcknowledged
+// however old it is, which is also the answer under a floor that could not be
+// read or that archives may extend further back (DeltaFloor.BelowIsUnknown).
+// The window never applies to an unacknowledged loss.
 func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 	return status.ContinuityStatus(stream, streamErr)
+}
+
+// LoadGapWindow fills stream.Floor with the delta floor (OldestDeltaFromDB)
+// when the stream holds an acknowledged loss, so ContinuityStatus can tell a
+// loss the changes still held reach from one they no longer do. It runs no
+// query for any other stream, is safe on the nil value LoadStreamState returns
+// for a file-mode index, and on a failed floor read logs a warning and leaves
+// the loss on record.
+func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *StreamStateInfo) {
+	status.LoadGapWindow(ctx, db, dbName, stream)
 }
 
 // LoadStreamState reads the single-row capture checkpoint. A nil value with a
