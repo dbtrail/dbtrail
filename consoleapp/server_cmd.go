@@ -495,6 +495,17 @@ type ctlCheckResponse struct {
 	Doctor *console.DoctorReport `json:"doctor"`
 	Error  string                `json:"error"`
 	Kept   bool                  `json:"kept"`
+	// Port is the MySQL port after the server was added (#2686). Absent
+	// from a DBTrail older than that, which says nothing about the port.
+	Port *ctlNewServerPort `json:"port"`
+}
+
+// ctlNewServerPort is the port as the answer to an added server gives it:
+// its state and, when this add turned it on, the password made for it.
+type ctlNewServerPort struct {
+	ctlPort
+	TurnedOn    bool   `json:"turned_on"`
+	NotTurnedOn string `json:"not_turned_on"`
 }
 
 type ctlServer struct {
@@ -597,6 +608,7 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 	switch {
 	case res.OK:
 		fmt.Fprintf(out, "\nAdded %q. DBTrail is recording its changes.\n", res.Name)
+		printNewServerPort(out, res.Port, res.Name)
 		fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
 		return nil
 	case failed > 0:
@@ -612,6 +624,44 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 	default:
 		return errors.New("DBTrail did not say whether the database was added. See `bintrail-console server list`")
 	}
+}
+
+// printNewServerPort says where the MySQL port stands after a server was
+// added (#2686). Adding the first server turns the port on, with Engine
+// Routing on, and this is the one place its password is shown. Nothing is
+// printed for a DBTrail that says nothing about the port (an older one): the
+// lines after it are then the ones it always printed.
+func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string) {
+	if p == nil || p.Enabled == nil {
+		return
+	}
+	user := mysqlLineUser(name)
+	switch {
+	case p.TurnedOn:
+		fmt.Fprintf(out, "\nThe MySQL port is on now, with Engine Routing on. The user is the server's name:\n\n  mysql -h %s -u %s -p\n\n", p.where(), user)
+		if p.Password != "" {
+			fmt.Fprintf(out, "Password (shown only now, keep it): %s\n", p.Password)
+		} else {
+			// Turned on by this request and no password in the answer: the
+			// person must not be left thinking one was shown.
+			fmt.Fprintln(out, "No password came with the answer. Make one:  bintrail-console port new-password")
+		}
+		fmt.Fprintf(out, "It answers for %q once the first copy is ready. Until %q has a forwarding user, the copy answers alone:\n  bintrail-console server forward-user %s -u <user> -p\n", name, name, user)
+	case *p.Enabled:
+		routing := "off"
+		if p.RoutingOn {
+			routing = "on"
+		}
+		fmt.Fprintf(out, "\nThe MySQL port is on, with Engine Routing %s, and takes the password it already has:\n\n  mysql -h %s -u %s -p\n", routing, p.where(), user)
+	case p.NotTurnedOn != "":
+		fmt.Fprintf(out, "\nThe MySQL port was not turned on: %s.\n", strings.TrimRight(p.NotTurnedOn, "."))
+	default:
+		fmt.Fprintln(out, "\nThe MySQL port is off, as it was saved. Turn it on:  bintrail-console port on")
+	}
+	if p.Error != "" && *p.Enabled {
+		fmt.Fprintf(out, "It is not answering: %s\n", p.Error)
+	}
+	fmt.Fprintln(out)
 }
 
 // printChecks prints the report: a line per check and, under one that failed

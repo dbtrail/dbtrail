@@ -298,6 +298,11 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	next := saved
 	if req.Routing != nil {
 		next.Routing = *req.Routing
+	} else if req.Enabled != nil && *req.Enabled && !flashbackFileExists(path) {
+		// The port is turned on for the first time and nothing was ever
+		// saved about it: Engine Routing starts on (#2686). A setting that
+		// exists keeps what it says, off included.
+		next.Routing = true
 	}
 	if req.Enabled == nil {
 		// Read routing alone: the port stays as it is, on or off, and the
@@ -386,6 +391,86 @@ func (s *Server) handleFlashbackPut(w http.ResponseWriter, r *http.Request) {
 	fb.mu.Unlock()
 	slog.Info("console: MySQL port turned on from the web interface", "listen", listen, "password_created", created != "")
 	writeJSON(w, http.StatusOK, flashbackChangeDTO{flashbackStatusDTO: s.flashbackStatus(), Password: created})
+}
+
+// flashbackFileExists reports whether a port setting was ever saved at path.
+// An error other than "no such file" counts as existing: a setting that
+// cannot be looked at is not replaced by a default.
+func flashbackFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// newServerPortDTO is what adding a server says about the MySQL port
+// (#2686): its state, whether this request turned it on, and, only then,
+// the password that was made for it. NotTurnedOn is why a port with nothing
+// saved about it was left off.
+type newServerPortDTO struct {
+	flashbackStatusDTO
+	TurnedOn    bool   `json:"turned_on"`
+	Password    string `json:"password,omitempty"`
+	NotTurnedOn string `json:"not_turned_on,omitempty"`
+}
+
+// portOnForNewServer turns the MySQL port on, with Engine Routing on, when a
+// server was just added and NOTHING was ever saved about the port (#2686):
+// the step that used to be `port on` and `port routing on`. A setting that
+// exists is the operator's and is left as it is, off included, so an upgrade
+// opens nothing and a port turned off stays off however many servers are
+// added. The password is made here and returned in this one answer.
+//
+// It never fails the request that added the server: what stopped it is
+// reported in NotTurnedOn, and the server stays added.
+//
+// A session with a data access policy turns nothing on: the port reads every
+// server without that session's redaction, and it may not change the port by
+// any other road either (flashbackRefuseRestricted).
+func (s *Server) portOnForNewServer(r *http.Request) *newServerPortDTO {
+	fb := &s.flashback
+	fb.mutate.Lock()
+	defer fb.mutate.Unlock()
+	left := func(why string) *newServerPortDTO {
+		st := s.flashbackStatus()
+		out := &newServerPortDTO{flashbackStatusDTO: st}
+		if !st.Enabled {
+			out.NotTurnedOn = why
+		}
+		return out
+	}
+	path, control, saved, _, refusal := s.flashbackManageable()
+	if refusal != "" {
+		return left(refusal)
+	}
+	if flashbackFileExists(path) {
+		return &newServerPortDTO{flashbackStatusDTO: s.flashbackStatus()}
+	}
+	if pol := policyFrom(r.Context()); pol.DataRestricted() {
+		return left("this session has a data access policy, and the port reads every server without it. An operator without data restrictions turns it on")
+	}
+	next := saved
+	next.Enabled, next.Routing = true, true
+	if next.Listen == "" {
+		next.Listen = defaultFlashbackListen(s.listen)
+	}
+	created := ""
+	if next.Password == "" {
+		pw, err := newFlashbackPassword()
+		if err != nil {
+			return left("its password could not be made: " + err.Error())
+		}
+		created = pw
+		next.Password, next.PasswordCreatedAt = pw, time.Now().UTC().Format(time.RFC3339)
+	}
+	if err := saveFlashbackFile(path, &next); err != nil {
+		return left("its setting could not be saved: " + err.Error())
+	}
+	_ = control.Apply(next.Listen)
+	fb.mu.Lock()
+	fb.saved, fb.listen, fb.lastErr = next, control.Listening(), ""
+	fb.mu.Unlock()
+	slog.Info("console: the MySQL port was turned on, with Engine Routing on, when the first server was added",
+		"listen", next.Listen, "password_created", created != "")
+	return &newServerPortDTO{flashbackStatusDTO: s.flashbackStatus(), TurnedOn: true, Password: created}
 }
 
 // EnsureFlashbackOn saves the port as on when NO setting was ever saved,

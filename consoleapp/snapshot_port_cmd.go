@@ -373,7 +373,12 @@ func portUser(ctx context.Context, c *ctlClient) string {
 		}
 		name = s.Name
 	}
-	// A name the shell would split or expand is left for the person to quote.
+	return mysqlLineUser(name)
+}
+
+// mysqlLineUser is name as the user of a printed mysql line. A name the
+// shell would split or expand is left for the person to quote.
+func mysqlLineUser(name string) string {
 	if name == "" || strings.ContainsAny(name, " \t'\"$`\\!*?;&|<>()") {
 		return "<server name>"
 	}
