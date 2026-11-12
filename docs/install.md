@@ -101,8 +101,14 @@ or turn it on in the web interface). When 3309 is
 taken, the installer leaves that port unpublished and says so; add a `ports:`
 line to the `router` service of `docker-compose.yml` to use it. Prefer to drive Compose yourself?
 
+Take the compose file of one release and write its version down, so a later
+`docker compose pull` stays on it. Set `V` to the newest version on the
+[releases page](https://github.com/dbtrail/dbtrail/releases), without the `v`:
+
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml
+V=0.130.0
+curl -fsSLO https://raw.githubusercontent.com/dbtrail/dbtrail/v$V/docker-compose.yml
+echo "BINTRAIL_TAG=$V" >> .env
 docker compose up -d
 docker compose logs -f bintrail
 ```
