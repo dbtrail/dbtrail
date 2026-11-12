@@ -4,12 +4,16 @@
 package testutil
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
@@ -18,6 +22,39 @@ import (
 
 // dbCounter ensures unique database names across calls within the same test.
 var dbCounter atomic.Int64
+
+// runToken tells this test process's databases from those of another process
+// running the same test at the same time against the same server (two
+// checkouts, two CI jobs, one box shared by several people). Without it both
+// derive the same name from the test name and the counter, and one drops or
+// fills the other's database mid-test. Eight hex characters, read once per
+// process.
+var runToken = sync.OnceValue(func() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand does not fail on the platforms Go supports; the time
+		// still differs between two processes.
+		return fmt.Sprintf("%08x", uint32(time.Now().UnixNano()))
+	}
+	return hex.EncodeToString(b[:])
+})
+
+// testDBName is the database name for the calling test: the test name made
+// valid (sanitiseDBName), this process's runToken and the counter. The
+// sanitised part is cut to dbNamePrefixMax so that the whole name stays as
+// long as it was before the token existed: some tests append a suffix of
+// their own to it, and a MySQL database name stops at 64 characters.
+func testDBName(testName string) string {
+	prefix := sanitiseDBName(testName)
+	if len(prefix) > dbNamePrefixMax {
+		prefix = prefix[:dbNamePrefixMax]
+	}
+	return fmt.Sprintf("%s_%s_%d", prefix, runToken(), dbCounter.Add(1))
+}
+
+// dbNamePrefixMax is sanitiseDBName's 50 characters less the "_" and the
+// eight characters of runToken.
+const dbNamePrefixMax = 50 - 1 - 8
 
 // DefaultDSN is the base DSN used when BINTRAIL_TEST_DSN is not set.
 // It assumes a local Docker container on port 13306 with root:testroot.
@@ -84,8 +121,9 @@ func CreateTestDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	SkipIfNoMySQL(t)
 
-	// Build a unique name: test name (sanitised) + atomic counter for uniqueness.
-	name := fmt.Sprintf("%s_%d", sanitiseDBName(t.Name()), dbCounter.Add(1))
+	// Unique within this process (the counter) and across processes running
+	// the same test at once (runToken).
+	name := testDBName(t.Name())
 
 	// Connect without a specific database to create one.
 	rootDB, err := sql.Open("mysql", BaseDSN()+"/?parseTime=true")
@@ -94,7 +132,9 @@ func CreateTestDB(t *testing.T) (*sql.DB, string) {
 	}
 	defer rootDB.Close()
 
-	// Drop first in case a previous test run left it behind.
+	// Drop first, in case a database of this exact name exists. Since the
+	// name carries runToken, a database a killed run left behind is no longer
+	// dropped here by the next run: drop leftover bt_* databases by hand.
 	rootDB.Exec("DROP DATABASE IF EXISTS `" + name + "`")
 	if _, err := rootDB.Exec("CREATE DATABASE `" + name + "`"); err != nil {
 		t.Fatalf("failed to create test database %q: %v", name, err)
@@ -226,7 +266,7 @@ func CreateTestMariaDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	SkipIfNoMariaDB(t)
 
-	name := fmt.Sprintf("%s_%d", sanitiseDBName(t.Name()), dbCounter.Add(1))
+	name := testDBName(t.Name())
 
 	rootDB, err := sql.Open("mysql", MariaDBBaseDSN()+"/?parseTime=true")
 	if err != nil {
