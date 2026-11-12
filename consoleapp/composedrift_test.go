@@ -534,7 +534,7 @@ func TestUpgradeRecipeFetchesBesideTheOperatorsFile(t *testing.T) {
 	}
 	// The runtime line the daemon logs carries the same recipe.
 	t.Run("composeDownload", func(t *testing.T) {
-		assertNonDestructiveFetch(t, "composeDownload", composeDownload)
+		assertNonDestructiveFetch(t, "composeDownload", composeDownload())
 	})
 }
 
@@ -809,5 +809,50 @@ func TestConsoleStateFindingReportsAResolvedPathWithNoFileYet(t *testing.T) {
 	attrs := fmt.Sprint(got[0].attrs)
 	if !strings.Contains(attrs, "the AI connection token") || !strings.Contains(attrs, "console-mcp-token.yaml") {
 		t.Errorf("the finding does not name the state path that will not survive: %s", attrs)
+	}
+}
+
+// The recipe names the compose file of the release this daemon is (#2638):
+// the installer pins the images with BINTRAIL_TAG, and main's file can be
+// ahead of them. A build that is not a release names main's.
+func TestComposeDownload_namesTheFileOfThisRelease(t *testing.T) {
+	const raw = "https://raw.githubusercontent.com/dbtrail/dbtrail/"
+	for _, tc := range []struct{ version, ref string }{
+		{"", "main"},
+		{"dev", "main"},
+		{"0.130.0", "v0.130.0"},
+		// git describe exactly on a tag
+		{"v0.130.0", "v0.130.0"},
+		// stray whitespace from -ldflags
+		{" 0.130.0\n", "v0.130.0"},
+		// a published prerelease has its tag
+		{"0.130.0-rc1", "v0.130.0-rc1"},
+		// describe off a tag: a commit, not a release
+		{"v0.130.0-3-gabc1234", "main"},
+		{"v0.130.0-dirty", "main"},
+		{"0.130.0-dirty", "main"},
+		{"0.130.1-SNAPSHOT-abc1234", "main"},
+		{"0.130", "main"},
+		{"abc1234", "main"},
+		{"vv0.130.0", "main"},
+		// git tags are case-sensitive and the repository uses a lowercase v
+		{"V0.130.0", "main"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			got := composeDownloadFor(tc.version)
+			if !strings.Contains(got, raw+tc.ref+"/docker-compose.yml") {
+				t.Errorf("composeDownloadFor(%q) = %q, want the file of %s", tc.version, got, tc.ref)
+			}
+			if tc.ref != "main" && !strings.Contains(got, "the docker-compose.yml of "+tc.ref) {
+				t.Errorf("composeDownloadFor(%q) does not say which release's file: %q", tc.version, got)
+			}
+			assertNonDestructiveFetch(t, "composeDownloadFor("+tc.version+")", got)
+		})
+	}
+	// The package-level recipe follows the version Main was given.
+	defer func(v string) { appVersion = v }(appVersion)
+	appVersion = "0.131.0"
+	if !strings.Contains(composeDownload(), raw+"v0.131.0/docker-compose.yml") {
+		t.Errorf("composeDownload() does not follow appVersion: %q", composeDownload())
 	}
 }
