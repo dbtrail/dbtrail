@@ -946,16 +946,16 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		At:                 req.At.UTC(),
 		OutputDir:          dir,
 		OutputFormat:       reconstruct.OutputFormatMydumper,
-		// Not an opt-in to a partial file: sqlExportRunError fails the build
-		// for any table the engine wrote from its changes alone, under the
-		// console's own wording.
-		AllowChangesOnly:   true,
 		Parallelism:        daemonFoldParallelism,
 		WarnEventThreshold: daemonFoldWarnEventThreshold,
 		MaxTouchedRows:     daemonFoldMaxTouchedRows,
 		MaxChangeBytes:     daemonFoldMaxChangeBytes,
 		RemediationHint:    daemonFoldRemediation,
 		SpaceCheck:         newDiskSpaceCheck(),
+		// Not an opt-in to a partial file: sqlExportRunError fails the build
+		// for any table the engine wrote from its changes alone, under the
+		// console's own wording.
+		AllowChangesOnly: true,
 		// AllowGaps stays FALSE: a dump the operator will load somewhere is
 		// the last artifact that may be knowingly incomplete.
 	}

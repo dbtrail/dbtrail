@@ -3177,7 +3177,7 @@ func binlogOnlyDestructiveDDLErr(schema, table, ddlType string, detectedAt, firs
 func binlogOnlySchemaPlaceholder(schema, table string) string {
 	marker := changesOnlyMarker(schema, table)
 	schema, table = recovery.SanitizeForComment(schema), recovery.SanitizeForComment(table)
-	return marker(schema, table) + fmt.Sprintf(
+	return marker + fmt.Sprintf(
 		"-- bintrail: no baseline snapshot exists for %s.%s (table created after the last\n"+
 			"-- `bintrail baseline` run, or never baselined), and no CREATE TABLE statement for\n"+
 			"-- it was found in schema_changes either. The rows in the accompanying data\n"+
