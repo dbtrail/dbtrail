@@ -14,8 +14,9 @@ import (
 // (#1681) in node, clicks through it the way a reader does, and captures what
 // Save sends and what the row says. It exists for the failure a CSS-hidden
 // field invites: an input the reader cannot see still carries its value, so a
-// save must never send a count for a server that has an S3 destination, where
-// the count does nothing. Every save says local_copy true (#2431).
+// save must never send a count from a field that is hidden (a server with S3
+// and no folder yet). With an S3 destination the count is shown and sent like
+// without (#2658). Every save says local_copy true (#2431).
 func TestBackupServerRow_localCopyInEveryMode(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -91,6 +92,17 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("reachNotApplied", Object.assign({}, fresh, { snapshot_every_minutes: 60 }), null);
   await step("noLocation", { source: "none" }, null);
   await step("oldLocalBothYes", { baseline_dir: "/srv/snaps", baseline_s3: "s3://b/p/", local_copy: true, source: "server" }, null);
+  // A server with S3 and a count in force (#2658), from the fields the
+  // settings API sends for it.
+  const s3c = { baseline_dir: "/state/snapshots/s1", baseline_s3: "s3://b/p/", local_copy: true, keep_newest: 3, keep_in_force: 3, source: "server", snapshot_every_minutes: 5 };
+  await step("s3Counted", s3c, null);
+  await step("s3CountedHeld", Object.assign({}, s3c, { schedule_every: "5m", schedule_upload_every: "1d", schedule_upload_every_minutes: 1440 }), null);
+  await step("s3CountedAge", Object.assign({}, s3c, { delete_after_minutes: 7 * 1440, prune_retain_minutes: 7 * 1440 }), null);
+  await step("s3CountedNotIn", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true } }), null);
+  await step("s3CountedNoLoop", Object.assign({}, s3c, { prune_loop: false, keep_in_force: 0 }), null);
+  await step("s3CountedBlocked", Object.assign({}, s3c, { keep_blocked: true, keep_in_force: 0 }), null);
+  await step("s3CountedKeep5", s3c, (r) => type(r, "keep_newest", "5"));
+  await step("s3CountedKeepAll", s3c, (r) => type(r, "keep_newest", ""));
   // The schedule card's rate sentence follows the listing's local_retention.
   vm.runInContext("capsCache.backup_schedule = true;", ctx);
   const text = (n) => { let t = ""; walk(n, (x) => { if (x.tag === "p" && x._text) t += x._text + " | "; }); return t; };
@@ -206,17 +218,65 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if got["freshKeepBad"].Body != nil {
 		t.Errorf("a count that is not a whole number was sent: %+v", got["freshKeepBad"].Body)
 	}
-	// A bucket typed beside the folder: the folder stays shown and is sent
-	// with local_copy true, and the count, hidden by the bucket, is not sent.
+	// A bucket typed beside the folder: the folder and the count stay shown
+	// (#2658), both are sent with local_copy true, and the row says what the
+	// count will mean once saved.
 	ws := got["freshWithS3"]
-	if !b(ws.After.DirShown) || b(ws.After.KeepShown) {
-		t.Errorf("with S3 the folder is hidden or the count is shown: %+v", ws.After)
+	if !b(ws.After.DirShown) || !b(ws.After.KeepShown) {
+		t.Errorf("with S3 the folder or the count is hidden: %+v", ws.After)
 	}
-	if ws.Body["local_copy"] != true || ws.Body["baseline_s3"] != "s3://b/p/" || ws.Body["baseline_dir"] != "/state/snapshots/s1" {
-		t.Errorf("folder + S3 sent %+v", ws.Body)
+	if ws.Body["local_copy"] != true || ws.Body["baseline_s3"] != "s3://b/p/" || ws.Body["baseline_dir"] != "/state/snapshots/s1" || ws.Body["keep_newest"] != float64(9) {
+		t.Errorf("folder + S3 + count sent %+v", ws.Body)
 	}
-	if _, ok := ws.Body["keep_newest"]; ok {
-		t.Errorf("the hidden count was sent: %+v", ws.Body)
+	if !strings.Contains(joined(ws.After), "After you save, older ones past that number are removed once S3 has them.") {
+		t.Errorf("a bucket typed beside a count does not say what the count will do: %q", joined(ws.After))
+	}
+	// A server with S3 and a count in force: every sentence it can say,
+	// rendered from the fields the API sends, logged as the page shows them.
+	for _, name := range []string{"s3Counted", "s3CountedHeld", "s3CountedAge", "s3CountedNotIn", "s3CountedNoLoop", "s3CountedBlocked", "s3CountedKeep5", "s3CountedKeepAll"} {
+		r := got[name]
+		t.Logf("%s (at rest):\n  %s", name, strings.Join(r.Before.Words, "\n  "))
+		if name == "s3CountedKeep5" || name == "s3CountedKeepAll" {
+			t.Logf("%s (after typing):\n  %s", name, strings.Join(r.After.Words, "\n  "))
+		}
+		if !b(r.Before.KeepShown) {
+			t.Errorf("%s: the count is hidden on a server with S3", name)
+		}
+	}
+	for name, want := range map[string]string{
+		"s3Counted":        "Older ones past that number are removed from this folder at the next hourly cleanup, once S3 has them.",
+		"s3CountedHeld":    "Updates not sent to S3 stay here until a newer snapshot is in S3.",
+		"s3CountedAge":     "Older ones past that number and older than 7 days are removed from this folder at the next hourly cleanup, once S3 has them.",
+		"s3CountedNotIn":   "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
+		"s3CountedNoLoop":  "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
+		"s3CountedBlocked": "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",
+	} {
+		if w := joined(got[name].Before); !strings.Contains(w, want) {
+			t.Errorf("%s: %q does not say %q", name, w, want)
+		}
+	}
+	// What a server with S3 must never be told: that a table's only copy is
+	// what bounds the removal (S3 having it is), or that the count is idle.
+	for _, name := range []string{"s3Counted", "s3CountedHeld", "s3CountedAge", "s3CountedNotIn"} {
+		w := joined(got[name].Before)
+		if strings.Contains(w, "never a table's only copy") || strings.Contains(w, "Delete by age applies") || strings.Contains(w, "only costs the tables that changed") {
+			t.Errorf("%s: a server with S3 is told %q", name, w)
+		}
+		if !strings.Contains(w, "You can restore back to about 1 hour ago") {
+			t.Errorf("%s: no reach line: %q", name, w)
+		}
+	}
+	if w := joined(got["s3Counted"].Before); strings.Contains(w, "Updates not sent to S3") {
+		t.Errorf("a server whose schedule sends every update is told about updates kept here: %q", w)
+	}
+	if w := joined(got["s3CountedBlocked"].Before); strings.Contains(w, "hourly cleanup") || strings.Contains(w, "nothing in it is removed") {
+		t.Errorf("a blocked folder with S3: %q", w)
+	}
+	if k := got["s3CountedKeep5"].Body["keep_newest"]; k != float64(5) {
+		t.Errorf("a count typed on a server with S3 sent %+v", got["s3CountedKeep5"].Body)
+	}
+	if k := got["s3CountedKeepAll"].Body["keep_newest"]; k != float64(0) || !strings.Contains(joined(got["s3CountedKeepAll"].After), "Every snapshot stays on this machine") {
+		t.Errorf("an emptied count on a server with S3: sent %+v, says %q", got["s3CountedKeepAll"].Body, joined(got["s3CountedKeepAll"].After))
 	}
 	// The "no" answer left the page (#2431): no hidden radio carries one.
 	if strings.Contains(jsFunctionSpan(t, readAsset(t, "app.js"), "backupServerRow"), "body.local_copy = false") {
@@ -234,10 +294,10 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if b(so.Before.KeepShown) || so.Before.SaveDisabled != true {
 		t.Errorf("an S3-only server at rest: the count is shown or Save is awake: %+v", so.Before)
 	}
-	// A count typed and then hidden by an S3 destination is neither checked
-	// nor sent: hidden, it does nothing.
-	if st := got["s3TypedAfterBadCount"]; st.Body == nil || st.Body["keep_newest"] != nil {
-		t.Errorf("a hidden count blocked the save or was sent: %+v", st.Body)
+	// A count that is not a whole number blocks the save with an S3
+	// destination typed too: the field is shown, so it is checked (#2658).
+	if st := got["s3TypedAfterBadCount"]; st.Body != nil {
+		t.Errorf("a count that is not a number was saved beside a bucket: %+v", st.Body)
 	}
 	// A folder the prune never counts says so instead of promising the count.
 	if w := joined(got["blocked"].Before); !strings.Contains(w, "nothing in it is removed, whatever the count says") || strings.Contains(w, "hourly cleanup") {

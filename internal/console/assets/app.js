@@ -9145,44 +9145,58 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
   // First, and whatever the answers below are: it is about the place as
   // saved, local or S3, and it is the one line here that is about data.
   for (const w of was.shared || []) say(sharedLocationWords(w), true);
-  if (s3) {
-    // With S3 the count does not apply: age does ("Delete by age"), and only
-    // to a local copy S3 has confirmed (2026-10-01). Said for the place as
-    // saved; a destination typed and not saved yet gets the rule, no numbers.
-    const age = was.age || {};
-    if (age.s3Only) say("No copy on this machine yet.");
-    else if (!age.asSaved) say("After you save, Delete by age applies here.");
-    else if (!loop) say("Kept here: this DBTrail removes nothing.");
-    else if (age.minutes > 0) say("Deleted here when older than " + exactSpan(age.minutes) + ", once S3 has it. DBTrail leaves S3 alone.");
-    else say("Kept here: Delete by age is empty.");
-    // The count is the last age prune's, so it is shown only where that
-    // prune still runs (this daemon prunes, an age is set) and with its date:
-    // with no age prune nothing refreshes it, and an old number would read
-    // as today's.
-    const live = age.asSaved && loop && age.minutes > 0;
-    const n = live && age.notIn ? age.notIn.count : 0;
-    if (n > 0) say(notInS3Words(n, age.notIn), true);
-    if (live && age.notInError) say("S3 state unknown: " + age.notInError, true);
+  // One rule for every server (#2658): the count governs the folder with or
+  // without S3. With S3, what is past the count goes only once S3 has it.
+  // "Delete by age" still reaches a server with S3 (age.minutes): alone
+  // where there is no count, and on top of the count where there is one.
+  // Said for the place as saved; a destination typed and not saved yet gets
+  // the rule, no numbers.
+  const age = was.age || {};
+  if (s3 && age.s3Only) {
+    say("No copy on this machine yet.");
     return out;
   }
-  if (reuse) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
+  if (reuse && !s3) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
+  const stuck = was.held || was.blocked;
+  const none = s3 ? "the count does not apply to it" : "nothing in it is removed, whatever the count says";
   if (was.held) {
-    say("Another server's snapshots are still in this folder, so nothing here is removed. To keep only the newest, use a new empty folder.");
+    say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {
-    say("This folder is shared with another server or is DBTrail's startup folder, so nothing in it is removed, whatever the count says.");
-  } else if (!keep) {
-    say("Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.");
-  } else if (loop) {
+    say("This folder is shared with another server or is DBTrail's startup folder, so " + none + ".");
+  }
+  const n = stuck ? 0 : keep;
+  const mins = s3 && age.asSaved ? age.minutes : 0;
+  if (s3 && !age.asSaved) {
+    say(n ? "After you save, older ones past that number are removed once S3 has them." : "After you save, Delete by age applies here.");
+  } else if (!loop) {
+    if (n) say("Keeps the newest " + n + " where DBTrail takes the snapshots. This copy of DBTrail removes nothing.");
+    else if (s3) say("Kept here: this DBTrail removes nothing.");
+    else if (!stuck) say("Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.");
+  } else if (n) {
     // Said even when only the count changed: saving a number over a folder
     // that already holds snapshots IS the choice to prune them (a new folder
     // or a moved one is refused instead), so the row says what that means.
     // The number itself is in the field beside this and, once in force, in
     // the line above the snapshot list (snapshotRetentionLines); said a third
     // time here it would only be the same fact again.
-    say("Older ones past that number are removed from this folder at the next hourly cleanup, never a table's only copy.");
-    say(localReachWords(keep, reach || {}));
-  } else {
-    say("Keeps the newest " + keep + " where DBTrail takes the snapshots. This copy of DBTrail removes nothing.");
+    say("Older ones past that number " + (mins ? "and older than " + exactSpan(mins) + " " : "") +
+      "are removed from this folder at the next hourly cleanup, " + (s3 ? "once S3 has them." : "never a table's only copy."));
+    if (s3 && reach && reach.held) say("Updates not sent to S3 stay here until a newer snapshot is in S3.");
+    say(localReachWords(n, reach || {}));
+  } else if (mins) {
+    say("Deleted here when older than " + exactSpan(mins) + ", once S3 has it. DBTrail leaves S3 alone.");
+  } else if (!stuck || s3) {
+    say("Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.");
+  }
+  if (s3) {
+    // The count of copies S3 lacks is the last prune's against S3, so it is
+    // shown only where that prune still runs (this daemon prunes, by a count
+    // or an age) and with its date: with no such prune nothing refreshes it,
+    // and an old number would read as today's.
+    const live = age.asSaved && loop && (mins > 0 || n > 0);
+    const lacking = live && age.notIn ? age.notIn.count : 0;
+    if (lacking > 0) say(notInS3Words(lacking, age.notIn), true);
+    if (live && age.notInError) say("S3 state unknown: " + age.notInError, true);
   }
   return out;
 }
@@ -9299,9 +9313,9 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
   const minus = el("button", { class: "btn btn-icon keep-btn", type: "button", "aria-label": "Keep one fewer", text: "\u2212", onclick: () => step(-1) });
   const plus = el("button", { class: "btn btn-icon keep-btn", type: "button", "aria-label": "Keep one more", text: "+", onclick: () => step(1) });
   const unit = el("span", { class: "keep-unit", text: "snapshots" });
-  // One card, one rule (2026-10-01): a count where the copies live only on
-  // this machine, age (Delete by age) where they also go to S3. The title and
-  // the stepper follow the mode, so a server never shows a rule it does not obey.
+  // One card, one rule (#2658): the count, for every server. With S3 it
+  // removes what is past it only once S3 has it, and the words say so. Only
+  // a server with no folder at all (S3 alone, at rest) has no count to show.
   const keepTitle = el("span", { class: "field-label", text: "Keep by count" });
   const keepStep = el("div", { class: "keep-step" }, el("span", { class: "keep-lead", text: "the newest" }), minus, keep, plus, unit);
   const keepField = el("div", { class: "stg-card keep-card" },
@@ -9429,15 +9443,15 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     const ownDir = dir.value.trim() !== "" && (was.rawDir !== "" || dir.value.trim() !== (srv.default_dir || "").trim());
     dirField.classList.toggle("on", ownDir);
     s3Field.classList.toggle("on", !!s3v);
-    // With S3 the count does nothing (S3 keeps everything), so the stepper
-    // goes and the words say what happens instead.
-    minus.hidden = plus.hidden = keep.hidden = unit.hidden = !!s3v;
-    keepStep.hidden = keep.hidden;
     // Saved with S3 and no folder of its own, untouched: the folder field
     // shows the default only as a suggestion (Save stays asleep), so nothing
     // is on this machine and the card must not promise "after you save".
     const s3OnlyAtRest = !was.rawDir && !!was.s3 && s3v === was.s3 && dir.value.trim() === was.dir;
-    keepTitle.textContent = s3OnlyAtRest ? "Only in S3" : s3v ? "On this machine" : "Keep by count";
+    // The count governs the folder with or without S3 (#2658), so the
+    // stepper stays; it goes only where there is no folder to count in.
+    minus.hidden = plus.hidden = keep.hidden = unit.hidden = s3OnlyAtRest;
+    keepStep.hidden = keep.hidden;
+    keepTitle.textContent = s3OnlyAtRest ? "Only in S3" : "Keep by count";
     clear(words);
     // The reach is said for the count as it applies to the folder as saved:
     // a typed folder or destination makes it a number that does not apply yet.
@@ -9453,7 +9467,9 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
         age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
-        every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0 });
+        every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0,
+        // The schedule keeps updates off S3 between sends (upload_every).
+        held: asSaved && (srv.schedule_upload_every_minutes || 0) > 0 });
     const infos = said.filter((w) => !w.err);
     said.forEach((w) => {
       const keepHere = w.err || w === infos[infos.length - 1];
@@ -9476,9 +9492,9 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // local_copy true always, so an emptied folder means "the default one"
     // and never "no copy anywhere".
     const body = { baseline_s3: s3.value.trim(), no_archive: noArch.checked, local_copy: true, baseline_dir: dir.value.trim() };
-    // The count only while its field is shown (no S3): hidden, it does
-    // nothing, so it is neither checked nor sent.
-    if (!s3.value.trim()) {
+    // The count only while its field is shown: hidden (a server with S3 and
+    // no folder yet), it is neither checked nor sent.
+    if (!keep.hidden) {
       const k = keepNow();
       if (k === null) {
         msg.textContent = "Keep the newest takes a whole number, or nothing to keep them all.";
@@ -10733,7 +10749,10 @@ function snapshotRetentionLines(b) {
   const keep = b.local_retention && b.local_retention.keep_newest;
   const facts = [];
   if (keep > 0) {
-    facts.push(keep === 1 ? "Keeps only the newest snapshot on this machine." : "Keeps the newest " + keep + " snapshots on this machine.");
+    // With S3 the count is the same; what is past it waits for its copy
+    // there (#2658).
+    facts.push((keep === 1 ? "Keeps only the newest snapshot on this machine" : "Keeps the newest " + keep + " snapshots on this machine") +
+      (b.s3_destination ? "; older ones are removed once S3 has them." : "."));
   }
   const lp = b.last_prune;
   if (lp && lp.removed > 0 && lp.at) {
@@ -10892,7 +10911,9 @@ function baselinesPanel(b, servers, opts) {
     // The count in force (Settings, "Keep by count"): every local copy past
     // it goes at the next hourly cleanup, and the row says so instead of
     // sitting in the list as if it were staying. Copies only in S3 are not
-    // touched by the cleanup, so they are not marked.
+    // touched by the cleanup, so they are not marked. On a server with an S3
+    // destination (#2658) a local copy past the count goes only once S3 has
+    // it, so only the rows the listing found in both places are marked.
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
     let localSeen = 0;
     const goingIdx = new Set();
@@ -10900,7 +10921,7 @@ function baselinesPanel(b, servers, opts) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
         localSeen++;
-        if (localSeen > keepInForce) goingIdx.add(i);
+        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3"))) goingIdx.add(i);
       });
     }
     const total = b.snapshots.length;
@@ -10953,7 +10974,7 @@ function baselinesPanel(b, servers, opts) {
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
-        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." }));
+        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, " + (b.s3_destination ? "now that S3 has it." : "never a table's only copy.") }));
       }
       // With skipped views the row says both counts (#1879), whether or not
       // the table count varies: the views are what the row is there to show.
