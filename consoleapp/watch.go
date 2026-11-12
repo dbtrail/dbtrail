@@ -2013,6 +2013,11 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 		}
 	}
 	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
+	for _, name := range left {
+		if name == res.RestoredUnasked {
+			rec.Unasked = name
+		}
+	}
 	if !next.IsZero() {
 		// The page says when, instead of "at the next cleanup".
 		at := next.UTC()

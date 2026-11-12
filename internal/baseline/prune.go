@@ -144,6 +144,11 @@ type PruneResult struct {
 	// than the age the destination keeps (PruneOptions.S3Cut): kept here
 	// only, not asked about, not sent.
 	RestoredPastS3Age string
+	// RestoredUnasked names the last restore's result when the question to
+	// the destination about it FAILED: listed in NotAtDestination so it is
+	// sent again, and the page says "could not be asked", not "S3 does not
+	// have it".
+	RestoredUnasked string
 	// KeptPinned counts snapshots kept because a reader of this process is
 	// on that one snapshot now (PinSnapshot, #2678): a download, a SQL
 	// statement, an Explain. The rest of the folder is pruned as usual.
@@ -373,7 +378,7 @@ func recordNotInDestination(opts PruneOptions, res PruneResult, err error, now t
 	if len(names) > notInDestinationNamesKept {
 		names = names[:notInDestinationNamesKept]
 	}
-	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n, Names: names}); werr != nil {
+	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n, Names: names, Unasked: res.RestoredUnasked}); werr != nil {
 		slog.Error("baseline prune: snapshots the destination does not have were kept, and the record of them could not be written; the page will not say it",
 			"dir", opts.LocalDir, "kept", n, "error", werr)
 	}
@@ -506,7 +511,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// the keepers and the newest N are worked out WITHOUT it (countable), and
 	// it is kept by its own rule below (restoredKept).
 	all := snaps
-	restored, _ := lastRestored(opts.LocalDir, opts.DryRun)
+	restored, _ := lastRestored(opts.LocalDir, opts.DryRun, opts.S3Cut)
 	var countable []localSnapshot
 	var restoredSnap *localSnapshot
 	for i := range all {
@@ -581,6 +586,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 				"snapshot", restoredSnap.name, "error", perr)
 			res.KeptNotDurable++
 			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
+			res.RestoredUnasked = restoredSnap.name
 		case !ok:
 			res.KeptNotDurable++
 			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)

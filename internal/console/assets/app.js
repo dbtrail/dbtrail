@@ -9152,7 +9152,17 @@ function notInS3Words(n, rec) {
     : n + " older " + (n === 1 ? "copy" : "copies") + (names.length ? " (" + names.map(at).join(", ") + (n > names.length ? " and " + (n - names.length) + " more" : "") + ")"
       : " (checked " + utcLabel(rec && rec.at) + ")");
   const it = n === 1 ? "it" : "them";
-  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete; " +
+  // The last restore's result when S3 could not be ASKED about it: sent
+  // again in case it is missing, and never said to be missing.
+  const unasked = rec && typeof rec.unasked === "string" && rec.unasked ? rec.unasked : "";
+  if (unasked && n === 1) {
+    return "Kept here: " + what + ". S3 could not be asked whether it has it; " +
+      (rec.resending === true
+        ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends it again at the next cleanup.")
+        : "send it to S3 again, or remove it by hand if not needed.");
+  }
+  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete" +
+    (unasked ? " (it could not be asked about the copy of " + at(unasked) + ")" : "") + "; " +
     (rec && rec.resending === true
       ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
       : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");

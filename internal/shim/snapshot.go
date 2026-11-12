@@ -199,8 +199,14 @@ func (h *Handler) noBaselineWhy(ctx context.Context, schema, table string, at ti
 		return head + "no snapshot holds this table yet (the first one is not finished, or the table was created after the newest one), " +
 			"and the next snapshot will include it. Until then use _flashback for the recorded changes only"
 	}
-	if h.cfg.BaselineS3 != "" || h.cfg.BaselineBucket {
+	if h.cfg.BaselineBucket {
+		// A folder and a bucket (the console's port).
 		return head + "that moment is older than the oldest snapshot of this table, on this machine and in the S3 destination. " +
+			"Ask for a later moment, or use _flashback for the recorded changes only"
+	}
+	if h.cfg.BaselineS3 != "" {
+		// A bucket alone: there is no folder on this machine to speak of.
+		return head + "that moment is older than the oldest snapshot of this table in the S3 destination. " +
 			"Ask for a later moment, or use _flashback for the recorded changes only"
 	}
 	return head + "that moment is older than the oldest snapshot of this table kept. " +
@@ -358,11 +364,11 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 			// configured a baseline for full-table completeness, fail loud with an
 			// actionable wire error instead (#822) — mirroring the strict
 			// AllowGaps / 1104 row-cap contract.
+			// The same words as the single-row refusal (noBaselineWhy says
+			// which case it is), and the one fact this shape adds.
 			return nil, mysql.NewError(mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE, fmt.Sprintf(
-				"resolve %s: no baseline for %s.%s at or before %s; _snapshot cannot return a complete table "+
-					"(never-touched rows would be omitted) — take a baseline (`bintrail baseline`), "+
-					"or use _flashback for a binlog-only view",
-				q.Type, q.Schema, q.Table, q.AsOf.UTC().Format(time.RFC3339)))
+				"resolve %s: %s. A full-table _snapshot answered from the recorded changes alone would leave out every row that no change touched",
+				q.Type, h.noBaselineWhy(ctx, q.Schema, q.Table, q.AsOf)))
 		}
 		// A real baseline-source failure is a server-side fault, same as the
 		// single-row path: plain error → ER_UNKNOWN_ERROR (1105).

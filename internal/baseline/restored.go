@@ -59,13 +59,22 @@ func markRestoredAt(root, name string, at time.Time) error {
 	return nil
 }
 
-// restoredAt is when the restore that left the mark p finished: the time
-// written in it; for a mark with none (written by a build before the time
-// was kept) or one that cannot be read, the file's modification time; with
-// neither, ok is false and the mark is taken for expired, never for one to
-// keep for ever. A time after now (the clock was moved back) counts as now,
-// so nothing is kept longer than RestoredKeep from now.
-func restoredAt(p string, now time.Time) (at time.Time, ok bool) {
+// restoredAt is when the restore that left root/name's mark finished: the
+// time written in it; for a mark with none (written by a build before the
+// time was kept) or one that cannot be read, the file's modification time;
+// with neither, ok is false and the mark is taken for expired, never for
+// one to keep for ever.
+//
+// A time after now (the clock was moved back) is replaced by now, and the
+// mark is REWRITTEN with it once, unless dryRun: counted as now on every
+// read without rewriting, the deadline moved forward with the clock and the
+// result never expired. A dry run (the listing) reads it as now and leaves
+// the rewriting to the next cleanup.
+func restoredAt(root, name string, now time.Time, dryRun bool) (at time.Time, ok bool) {
+	p, err := restoredPath(root, name)
+	if err != nil {
+		return time.Time{}, false
+	}
 	if b, err := os.ReadFile(p); err == nil {
 		if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b))); perr == nil {
 			at, ok = t, true
@@ -80,9 +89,19 @@ func restoredAt(p string, now time.Time) (at time.Time, ok bool) {
 	}
 	if at.After(now) {
 		at = now
+		if !dryRun {
+			if werr := markRestoredAt(root, name, now); werr != nil {
+				slog.Warn("baseline prune: a restore's mark is dated in the future and could not be rewritten with the time now; it is read as now until it can be",
+					"dir", root, "snapshot", name, "error", werr)
+			}
+		}
 	}
 	return at, true
 }
+
+// restoredExpiryHook runs between finding a mark expired and removing it.
+// A no-op, replaced only by the test that puts a new restore in that gap.
+var restoredExpiryHook = func() {}
 
 // lastRestored returns the snapshot under root that the most recent restore
 // published, while it is younger than RestoredKeep, and until when it is
@@ -92,13 +111,16 @@ func restoredAt(p string, now time.Time) (at time.Time, ok bool) {
 // and the operator who asked for a moment finds it when they come back.
 //
 // Marks are removed here, unless dryRun: one whose snapshot directory is
-// gone, one of an earlier restore, and one that expired. A result that
-// expires while marked "on this machine only" (older than the age its S3
-// destination keeps) is handed to the count as a snapshot not meant for the
-// bucket (MarkUploadHeld), so it goes by the count and is not kept for ever
-// for lack of a copy in S3 that will never be made. A root that cannot be
+// gone, one of an earlier restore, and one that expired. s3Cut is THIS
+// cleanup's S3 age rule (PruneOptions.S3Cut, zero for none): a result that
+// expires while older than it is handed to the count as a snapshot not
+// meant for the bucket (MarkUploadHeld), so it goes by the count and is not
+// kept for ever for lack of a copy in S3 that will never be made. The rule
+// in force now decides, not the "on this machine only" note the previous
+// cleanup left: with the rule turned off or lengthened since, the result is
+// an ordinary snapshot the bucket is asked about. A root that cannot be
 // read returns none; the enumeration right after reports it.
-func lastRestored(root string, dryRun bool) (name string, until time.Time) {
+func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until time.Time) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return "", time.Time{}
@@ -112,7 +134,8 @@ func lastRestored(root string, dryRun bool) (name string, until time.Time) {
 		if !ok || e.IsDir() {
 			continue
 		}
-		if _, ok := parseBaselineDirTimestamp(n); !ok {
+		ts, ok := parseBaselineDirTimestamp(n)
+		if !ok {
 			// The "on this machine only" note of a result that is gone.
 			if base, isNote := strings.CutSuffix(n, restoredLocalOnlySuffix); isNote && !dryRun {
 				if _, err := os.Stat(filepath.Join(root, base)); errors.Is(err, os.ErrNotExist) {
@@ -125,20 +148,31 @@ func lastRestored(root string, dryRun bool) (name string, until time.Time) {
 			clearRestored(root, n, dryRun)
 			continue
 		}
-		at, ok := restoredAt(filepath.Join(root, e.Name()), now)
-		if !ok || now.Sub(at) >= RestoredKeep {
-			if !dryRun {
-				if RestoredLocalOnly(root, n) {
+		expired := func() bool {
+			at, ok := restoredAt(root, n, now, dryRun)
+			return !ok || now.Sub(at) >= RestoredKeep
+		}
+		if expired() {
+			if dryRun {
+				continue
+			}
+			restoredExpiryHook()
+			// Read again right before removing it: a restore of the same
+			// moment that finished since wrote a fresh mark into this very
+			// file, and removing it would hand that new result to the count.
+			if expired() {
+				if !s3Cut.IsZero() && ts.Before(s3Cut) {
 					if herr := MarkUploadHeld(root, n); herr != nil {
 						slog.Warn("baseline prune: a restore's result past its day could not be handed to the count; it stays until the bucket is asked about it",
 							"dir", root, "snapshot", n, "error", herr)
 					}
 				}
 				slog.Info("baseline prune: a restore's result is a day old; it is an ordinary snapshot from now on", "dir", root, "snapshot", n)
+				clearRestored(root, n, dryRun)
+				continue
 			}
-			clearRestored(root, n, dryRun)
-			continue
 		}
+		at, _ := restoredAt(root, n, now, dryRun)
 		live = append(live, n)
 		// The later restore; on the same instant, the later name, so the
 		// answer does not depend on the listing's order.
@@ -160,7 +194,7 @@ func lastRestored(root string, dryRun bool) (name string, until time.Time) {
 // Restored is the snapshot under root the prune keeps as the last restore's
 // result and until when, "" when there is none, for the listing. It removes
 // nothing.
-func Restored(root string) (name string, until time.Time) { return lastRestored(root, true) }
+func Restored(root string) (name string, until time.Time) { return lastRestored(root, true, time.Time{}) }
 
 func clearRestored(root, name string, dryRun bool) {
 	if dryRun {
@@ -232,7 +266,7 @@ func KeptNow(root string, n int, retain time.Duration) (map[string]bool, error) 
 		return nil, err
 	}
 	kept := map[string]bool{}
-	restored, _ := lastRestored(root, true)
+	restored, _ := lastRestored(root, true, time.Time{})
 	var countable []localSnapshot
 	for _, s := range snaps {
 		if s.name == restored || !s.complete || s.unreadable || (n <= 0 && retain <= 0) {

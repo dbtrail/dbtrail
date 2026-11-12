@@ -1030,3 +1030,139 @@ func TestNoFloor_theDownloadCeilingHoldsWhateverIsKept(t *testing.T) {
 	}
 	t.Logf("worst case with a count of %d: downloads hold %d snapshots past the count, never more", max, ceiling)
 }
+
+// The rule in force NOW decides what an expired result becomes, not the note
+// the previous cleanup left. A result older than the S3 age is noted as on
+// this machine only; the operator turns the age rule off; the mark expires.
+// It is then an ordinary snapshot: the bucket is asked, answers it does not
+// have it, and it stays (to be sent), instead of being removed unasked.
+func TestNoFloor_anExpiredResultFollowsTheS3RuleInForceNow(t *testing.T) {
+	now := time.Now()
+	prev := restoredNow
+	t.Cleanup(func() { restoredNow = prev })
+	restoredNow = func() time.Time { return now }
+	root := t.TempDir()
+	s := minutes(t, root, 15, 10, 5)
+	restored := snapName(days(40))
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := markRestoredAt(root, restored, now.Add(-23*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	opts := PruneOptions{LocalDir: root, S3URL: "s3://b/p", KeepNewest: 3, Now: kn, S3Cut: kn.Add(-days(30))}
+	var asked []string
+	if _, err := pruneWithProbe(context.Background(), opts, answers(&asked, s...)); err != nil {
+		t.Fatal(err)
+	}
+	if !RestoredLocalOnly(root, restored) {
+		t.Fatal("the first cleanup did not note it as on this machine only")
+	}
+	opts.S3Cut = time.Time{} // the age rule is turned off
+	restoredNow = func() time.Time { return now.Add(2 * time.Hour) }
+	asked = nil
+	res, err := pruneWithProbe(context.Background(), opts, answers(&asked, s...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(res.Pruned, restored) || !slices.Contains(asked, restored) || !slices.Contains(res.NotAtDestination, restored) {
+		t.Fatalf("pruned %v, asked %v, missing %v: want it asked about, kept and listed as to send", res.Pruned, asked, res.NotAtDestination)
+	}
+	if held, _ := UploadHeld(root, restored); held {
+		t.Fatal("it was handed to the count by a rule that is no longer in force")
+	}
+}
+
+// A mark dated in the future (the clock was moved back) is rewritten once
+// with the time now, and expires a day after THAT: followed across time, not
+// read at one instant.
+func TestNoFloor_aFutureMarkIsRewrittenAndExpires(t *testing.T) {
+	now := time.Now()
+	prev := restoredNow
+	t.Cleanup(func() { restoredNow = prev })
+	restoredNow = func() time.Time { return now }
+	root := t.TempDir()
+	s := minutes(t, root, 15, 10, 5)
+	restored := snapName(3 * time.Hour)
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := markRestoredAt(root, restored, now.Add(72*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	keepNewest(t, root, 3)
+	_, until := Restored(root)
+	if !until.Equal(now.Add(RestoredKeep)) {
+		t.Fatalf("after the first cleanup it is kept until %s, want %s", until, now.Add(RestoredKeep))
+	}
+	// Twelve hours on: the deadline has not moved.
+	restoredNow = func() time.Time { return now.Add(12 * time.Hour) }
+	keepNewest(t, root, 3)
+	if _, later := Restored(root); !later.Equal(until) {
+		t.Fatalf("twelve hours later the deadline moved from %s to %s", until, later)
+	}
+	wantOnDisk(t, root, append(slices.Clone(s), restored)...)
+	// A day and a minute on: gone, with its mark.
+	restoredNow = func() time.Time { return now.Add(RestoredKeep + time.Minute) }
+	if res := keepNewest(t, root, 3); !slices.Equal(res.Pruned, []string{restored}) {
+		t.Fatalf("a day and a minute later pruned %v, want [%s]", res.Pruned, restored)
+	}
+	if _, err := os.Stat(filepath.Join(root, restoredPrefix+restored)); !os.IsNotExist(err) {
+		t.Fatalf("its mark stayed behind: %v", err)
+	}
+}
+
+// A restore of the SAME moment that finishes between the cleanup reading the
+// old mark as expired and removing it: the fresh mark is left alone.
+func TestNoFloor_aRestoreFinishingDuringTheCleanupKeepsItsMark(t *testing.T) {
+	now := time.Now()
+	prevNow, prevHook := restoredNow, restoredExpiryHook
+	t.Cleanup(func() { restoredNow, restoredExpiryHook = prevNow, prevHook })
+	restoredNow = func() time.Time { return now }
+	root := t.TempDir()
+	s := minutes(t, root, 15, 10, 5)
+	restored := snapName(3 * time.Hour)
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := markRestoredAt(root, restored, now.Add(-RestoredKeep-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	restoredExpiryHook = func() {
+		calls++
+		if err := MarkRestored(root, restored); err != nil { // the new restore finishes here
+			t.Fatal(err)
+		}
+	}
+	res := keepNewest(t, root, 3)
+	if calls != 1 || len(res.Pruned) != 0 {
+		t.Fatalf("the hook ran %d times, pruned %v: the fresh restore's result was handed to the count", calls, res.Pruned)
+	}
+	if name, until := Restored(root); name != restored || !until.Equal(now.Add(RestoredKeep)) {
+		t.Fatalf("kept %q until %s, want %q for a full day", name, until, restored)
+	}
+	wantOnDisk(t, root, append(slices.Clone(s), restored)...)
+}
+
+// A failed question about the restore's result is on record as "could not
+// be asked", for the page.
+func TestNoFloor_aFailedQuestionAboutTheRestoreResultIsOnRecord(t *testing.T) {
+	root := t.TempDir()
+	minutes(t, root, 10, 5)
+	restored := snapName(7 * time.Minute)
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := MarkRestored(root, restored); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(_ context.Context, name string) (bool, error) {
+		if name == restored {
+			return false, errors.New("403 forbidden")
+		}
+		return true, nil
+	}
+	res := s3Count(t, root, 1, probe)
+	rec, ok, err := ReadNotInDestination(root)
+	if err != nil || !ok || rec.Unasked != restored || res.RestoredUnasked != restored {
+		t.Fatalf("record %+v ok=%v err=%v, result unasked %q: want %s on record as not asked", rec, ok, err, res.RestoredUnasked, restored)
+	}
+	// Asked and answered "not here": no such note.
+	res = s3Count(t, root, 1, answers(nil))
+	if rec, _, _ := ReadNotInDestination(root); rec.Unasked != "" || res.RestoredUnasked != "" {
+		t.Fatalf("an answered question is on record as not asked: %+v", rec)
+	}
+}

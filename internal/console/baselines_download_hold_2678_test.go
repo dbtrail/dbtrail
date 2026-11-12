@@ -366,3 +366,29 @@ func TestCleanupWaitingOf_onlyAWaitWorthSaying(t *testing.T) {
 		t.Fatalf("a job 25 minutes old is not said: %+v", got)
 	}
 }
+
+// The rule the download cap is worked out from, per kind of server. The
+// daemon's own server is not in the registry, and its folder is pruned by
+// age when the daemon has a bucket: its downloads are capped too.
+func TestDownloadRuleFor(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	for _, c := range []struct {
+		what               string
+		keep               int
+		inRegistry         bool
+		serverS3, bootS3   string
+		wantKeep           int
+		wantRetain         time.Duration
+	}{
+		{"a count", 3, true, "", "", 3, week},
+		{"no count, a destination of its own", 0, true, "s3://b/p/", "", 0, week},
+		{"no count, no destination: keeps all", 0, true, "", "s3://boot/", 0, 0},
+		{"the daemon's own server, with the daemon's bucket", 0, false, "", "s3://boot/", 0, week},
+		{"the daemon's own server, no bucket", 0, false, "", "  ", 0, 0},
+	} {
+		k, r := downloadRuleFor(c.keep, week, c.inRegistry, c.serverS3, c.bootS3)
+		if k != c.wantKeep || r != c.wantRetain {
+			t.Errorf("%s: rule (%d, %s), want (%d, %s)", c.what, k, r, c.wantKeep, c.wantRetain)
+		}
+	}
+}

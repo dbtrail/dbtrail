@@ -108,6 +108,9 @@ type NotInDestination struct {
 	// (#2563); false, or absent, when nothing here will, and the page says
 	// to send or remove them by hand.
 	Resending bool `json:"resending,omitempty"`
+	// Unasked names the one among them (the last restore's result) the
+	// destination could not be ASKED about: not known to be missing.
+	Unasked string `json:"unasked,omitempty"`
 	// NextSend, when set, is when the next send is tried: an hour after a
 	// round in which one failed (#2678). Absent: at the next cleanup.
 	NextSend *time.Time `json:"next_send,omitempty"`

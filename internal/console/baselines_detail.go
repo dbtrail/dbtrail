@@ -564,17 +564,33 @@ var downloadRule = func(s *Server, r *http.Request) (keep int, retain time.Durat
 		keep = lr.KeepNewest
 	}
 	retain = time.Duration(s.pruneRetainMinutes()) * time.Minute
-	if keep <= 0 {
-		// The age alone prunes only a folder whose snapshots go to S3; one
-		// with neither a count nor a destination keeps every snapshot.
-		if s.cm.reg == nil {
-			return 0, 0
-		}
-		if e, ok := s.cm.reg.Get(id); !ok || strings.TrimSpace(e.BaselineS3) == "" {
-			return 0, 0
+	inRegistry, serverS3 := false, ""
+	if s.cm.reg != nil {
+		if e, ok := s.cm.reg.Get(id); ok {
+			inRegistry, serverS3 = true, e.BaselineS3
 		}
 	}
-	return keep, retain
+	return downloadRuleFor(keep, retain, inRegistry, serverS3, s.cm.defaultBaselineS3)
+}
+
+// downloadRuleFor is the rule for one server. With a count, the count and
+// the age. Without one, the age alone prunes only a folder whose snapshots
+// go to S3: a server of the registry with a destination of its own, or the
+// daemon's own server (not in the registry: its folder is --baseline-dir),
+// pruned by age when the daemon has a bucket (--baseline-s3). A folder with
+// neither a count nor a destination keeps every snapshot: no rule.
+func downloadRuleFor(keep int, retain time.Duration, inRegistry bool, serverS3, bootS3 string) (int, time.Duration) {
+	if keep > 0 {
+		return keep, retain
+	}
+	dest := bootS3
+	if inRegistry {
+		dest = serverS3
+	}
+	if strings.TrimSpace(dest) == "" {
+		return 0, 0
+	}
+	return 0, retain
 }
 
 // downloadCeilingPerCap is how many different snapshots the downloads of one

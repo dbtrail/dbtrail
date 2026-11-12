@@ -3105,6 +3105,32 @@ func TestRunSnapshotSingleRow_NoSnapshotAtOrBeforeIsRefused(t *testing.T) {
 	if strings.Contains(olderS3, "add an S3 destination") || strings.Contains(olderS3, "keep more snapshots") || !strings.Contains(olderS3, "on this machine and in the S3 destination") {
 		t.Errorf("with S3: %s", olderS3)
 	}
+	// A bucket alone, no folder on this machine: nothing is said of one.
+	h.cfg.BaselineBucket, h.cfg.BaselineS3 = false, "s3://bkt/shop/"
+	onlyS3 := h.noBaselineWhy(context.Background(), "myapp", "users", at)
+	t.Logf("older than the oldest, S3 only: %s", onlyS3)
+	if strings.Contains(onlyS3, "on this machine") || !strings.Contains(onlyS3, "in the S3 destination") || strings.Contains(onlyS3, "add an S3 destination") {
+		t.Errorf("S3 only: %s", onlyS3)
+	}
+	// The full-table query says the same case in the same words, and the one
+	// fact of its own; no "take a baseline", no em dash.
+	h.cfg.BaselineS3, h.cfg.FindBaseline = "", nil
+	_, ferr := h.runSnapshotFullTable(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", AsOf: at})
+	var fullErr *gomysql.MyError
+	if !errors.As(ferr, &fullErr) || fullErr.Code != gomysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+		t.Fatalf("full-table: %T %v, want 1526", ferr, ferr)
+	}
+	t.Logf("full-table, the client reads: ERROR %d: %s", fullErr.Code, fullErr.Message)
+	for _, want := range []string{"no baseline for myapp.users at or before 2026-11-12T09:30:00Z", "no snapshot holds this table yet", "would leave out every row that no change touched"} {
+		if !strings.Contains(fullErr.Message, want) {
+			t.Errorf("full-table does not say %q: %s", want, fullErr.Message)
+		}
+	}
+	for _, not := range []string{"take a baseline", "—", "keep more snapshots"} {
+		if strings.Contains(fullErr.Message, not) {
+			t.Errorf("full-table says %q: %s", not, fullErr.Message)
+		}
+	}
 	// The wire-neutral seam the PostgreSQL front-end shares classifies it.
 	_, rerr := h.ResolveSnapshotRow(context.Background(), TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: at})
 	var re *ResolveError

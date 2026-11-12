@@ -67,7 +67,8 @@ func (s *baselineSupervisor) runRestore(req console.BaselineRestoreRequest) {
 		// The snapshot is named for the moment restored, which is in the
 		// past, so nothing in its name keeps it: without this mark the count
 		// removed it at the first cleanup after it was written (#2678). The
-		// cleanup keeps the last restore's result until the next restore.
+		// cleanup keeps the last restore's result for 24 hours, or until the
+		// next restore.
 		if merr := baseline.MarkRestored(req.BaselineDir, reconstruct.SnapshotDirName(req.At.UTC())); merr != nil {
 			slog.Warn("restore to a moment: the snapshot was published, but it could not be marked as a restore's result, so the cleanup may remove it as an old snapshot",
 				"server", req.ServerName, "id", req.ServerID, "error", merr)
