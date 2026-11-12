@@ -271,19 +271,19 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		}
 	}
 	for name, want := range map[string]string{
-		"s3Counted":            "Older ones past that number are removed from this folder after each new snapshot, once S3 has them.",
-		"s3CountedHeld":        "An update the schedule did not send to S3 goes past that number without waiting for S3.",
-		"s3CountedAge":         "Older ones past that number and older than 7 days are removed from this folder after each new snapshot, once S3 has them.",
-		"s3CountedUnasked":     "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup.",
-		"s3CountedUnaskedTwo":  "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 could not be asked whether it has them; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
+		"s3Counted":               "Older ones past that number are removed from this folder after each new snapshot, once S3 has them.",
+		"s3CountedHeld":           "An update the schedule did not send to S3 goes past that number without waiting for S3.",
+		"s3CountedAge":            "Older ones past that number and older than 7 days are removed from this folder after each new snapshot, once S3 has them.",
+		"s3CountedUnasked":        "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup.",
+		"s3CountedUnaskedTwo":     "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 could not be asked whether it has them; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
 		"s3CountedReadRefusedAll": "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm they are there, and does not send them again.",
 		"s3CountedReadRefusedOne": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup. Not sent again: the copy of 2026-11-10 03:05:00 UTC, which S3 took but refuses to read back (s3:GetObject).",
 		"s3CountedWaitsForAnswer": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; the last ones sent could not be confirmed, and DBTrail sends again after 2026-11-11 04:00:00 UTC.",
-		"s3CountedSomeUnasked": "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have the copy of 2026-11-10 03:00:00 UTC complete, and could not be asked about the copy of 2026-11-10 03:05:00 UTC; DBTrail sends them again at the next cleanup.",
-		"s3CountedWaits":       "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
-		"s3CountedNotIn":       "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
-		"s3CountedNoLoop":      "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
-		"s3CountedBlocked":     "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",
+		"s3CountedSomeUnasked":    "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have the copy of 2026-11-10 03:00:00 UTC complete, and could not be asked about the copy of 2026-11-10 03:05:00 UTC; DBTrail sends them again at the next cleanup.",
+		"s3CountedWaits":          "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
+		"s3CountedNotIn":          "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
+		"s3CountedNoLoop":         "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
+		"s3CountedBlocked":        "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",
 	} {
 		if w := joined(got[name].Before); !strings.Contains(w, want) {
 			t.Errorf("%s: %q does not say %q", name, w, want)

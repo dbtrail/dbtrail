@@ -35,7 +35,9 @@ func TestResendOfNotAskedWaitsAnHour(t *testing.T) {
 	prune := func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error) {
 		return baseline.PruneResult{KeptNotDurable: 4, Denied: 4, NotAtDestination: names, NotAsked: names}, nil
 	}
-	run := func() { runBaselinePruneCycle(context.Background(), []baselinePruneTarget{{dir: d, s3: "s3://bkt/p/"}}, 4*time.Hour, prune) }
+	run := func() {
+		runBaselinePruneCycle(context.Background(), []baselinePruneTarget{{dir: d, s3: "s3://bkt/p/"}}, 4*time.Hour, prune)
+	}
 	var total []int
 	for i := 0; i < 5; i++ {
 		run()
