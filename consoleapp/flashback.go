@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -90,6 +91,10 @@ type flashbackConfig struct {
 	// the port's own numbers (console.Server.RouterStatus). The router sets
 	// it: it has no web page to show them on.
 	RouteStatus bool
+	// TLS is the certificate the port offers to a client that asks for
+	// encryption (#2636). nil: the one go-mysql makes up at start, which no
+	// client can verify (shim.NewMySQLServer).
+	TLS *shim.PortTLS
 	// ResultBudget bounds the SQL-on-the-copy results the port holds while
 	// it sends them (#2241). nil = withDefaults makes one of
 	// defaultFlashbackResultBudget; a test passes its own to read it.
@@ -165,7 +170,11 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 	// One *server.Server for the whole port: it owns the caching_sha2_password
 	// cache and the RSA keypair (see shim.NewMySQLServer). One shared *Gate so
 	// the full-table cap is process-wide, not per-connection.
-	mysrv, err := shim.NewMySQLServer(cfg.AuthMethod)
+	var cert *tls.Config
+	if cfg.TLS != nil {
+		cert = cfg.TLS.Config
+	}
+	mysrv, err := shim.NewMySQLServerWithTLS(cfg.AuthMethod, cert)
 	if err != nil {
 		// ln is already bound by the caller; close it so a construction failure
 		// (an unsupported auth method) doesn't leak the listener nor leave the

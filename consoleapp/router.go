@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
+	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
@@ -93,6 +94,8 @@ func addRouterFlags(cmd *cobra.Command) {
 	f.String("max-wait", "", "How long a statement waits for its turn on the copy when every worker is busy, e.g. 30s or 2m; past it the client gets an error (1040 on a routed connection, 1203 on one that is not). Empty or 0: no limit, it waits for as long as its client stays connected. Env BINTRAIL_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused with error 1104, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 	f.Bool("statement-table", false, "Keep a table of every statement shape each side answered, with how many times, how long and how many failed (values blanked, table and column names kept), and publish it on --metrics-addr /status, which asks for no password: whoever reaches that address then reads the names of the tables and columns your clients query. The web interface shows it only to sessions with no data profile. Env BINTRAIL_ROUTER_STATEMENT_TABLE.")
+	f.String("tls-cert", "", "Certificate file (PEM, its chain after it if it has one) the MySQL port offers to clients that ask for encryption, so they can verify it (--ssl-mode=VERIFY_CA or VERIFY_IDENTITY). Requires --tls-key. Unset, the port still encrypts for a client that asks, with a certificate made up at start that no client can verify. Read when the router starts: restart it to serve a renewed certificate. Env BINTRAIL_ROUTER_TLS_CERT.")
+	f.String("tls-key", "", "Private key file (PEM, not encrypted) of --tls-cert. Requires --tls-cert. Env BINTRAIL_ROUTER_TLS_KEY.")
 	f.Bool("route-read-only", true, "On unless set to false (--route-read-only=false, BINTRAIL_CONSOLE_ROUTE_READ_ONLY=0). Refuse every statement that is not a read, and never send it to the source. It reads the statement's text, so it cannot see a stored function that writes: the forwarding account's grants are the guard for that. Env BINTRAIL_CONSOLE_ROUTE_READ_ONLY.")
 	f.Float64("route-cost-threshold", def.CostThreshold, "A SELECT whose plan query_cost is at least this goes to the copy (a point lookup costs about 1; a full scan over 200k rows about 20000). 0 disables the cost rule. Env BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD.")
 	f.Int64("route-scan-rows", def.ScanRows, "A SELECT whose plan has a full table scan over at least this many rows goes to the copy (on a MariaDB source, whose plans carry no comparable cost, a full index scan too, a range of an index over at least this many rows unless a LIMIT under it ends the read, and a plan whose joins read at least this many rows in all). 0 disables the scan rule. Env BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS.")
@@ -119,6 +122,9 @@ type routerSettings struct {
 	ReadOnly bool
 	// StatementTable keeps and publishes the per-statement table (#2360).
 	StatementTable bool
+	// TLS is the certificate the port offers (#2636), nil when none is set:
+	// the port then offers one made up at start.
+	TLS *shim.PortTLS
 }
 
 // routerSettingsFrom resolves the router's flags with the environment, a
@@ -215,7 +221,51 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 	if st.Policy.CostThreshold <= 0 && st.Policy.ScanRows <= 0 {
 		return st, fmt.Errorf("--route-cost-threshold and --route-scan-rows are both 0, so no statement could ever go to the copy; set one of them")
 	}
+	// named is str with the name the value came from, for a refusal: the
+	// flag when it was given, else the variable when it is set.
+	named := func(flag, env string) (name, v string) {
+		v = str(flag, env)
+		switch {
+		case f.Changed(flag):
+			return "--" + flag, v
+		case os.Getenv(env) != "":
+			return env, v
+		}
+		return "--" + flag + " (" + env + ")", v
+	}
+	certName, cert := named("tls-cert", "BINTRAIL_ROUTER_TLS_CERT")
+	keyName, key := named("tls-key", "BINTRAIL_ROUTER_TLS_KEY")
+	if st.TLS, err = routerPortTLS(certName, cert, keyName, key); err != nil {
+		return st, err
+	}
 	return st, nil
+}
+
+// routerPortTLS loads the certificate the port offers (#2636): none when
+// neither file is given, a refusal when one is given without the other or
+// either cannot be used. A refusal stops the router before it listens: a
+// port that silently served the made-up certificate instead of the one set
+// would look encrypted to an operator and fail every client that verifies.
+func routerPortTLS(certName, cert, keyName, key string) (*shim.PortTLS, error) {
+	for _, v := range []struct{ name, val string }{{certName, cert}, {keyName, key}} {
+		if v.val != "" && strings.TrimSpace(v.val) == "" {
+			return nil, fmt.Errorf("%s is only spaces: give the path of a PEM file, or leave it unset", v.name)
+		}
+	}
+	cert, key = strings.TrimSpace(cert), strings.TrimSpace(key)
+	switch {
+	case cert == "" && key == "":
+		return nil, nil
+	case key == "":
+		return nil, fmt.Errorf("%s is set and %s is not: the MySQL port needs both, the certificate and its private key", certName, keyName)
+	case cert == "":
+		return nil, fmt.Errorf("%s is set and %s is not: the MySQL port needs both, the certificate and its private key", keyName, certName)
+	}
+	t, err := shim.LoadPortTLS(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("the MySQL port's certificate (%s, %s) cannot be used: %w", certName, keyName, err)
+	}
+	return t, nil
 }
 
 // routerFlashbackConfig is how the router's port serves: routing always on,
@@ -229,6 +279,7 @@ func routerFlashbackConfig(st routerSettings) flashbackConfig {
 		RouteBusyRefuses:    true,
 		RouteStatus:         true,
 		FailedBindFailsPing: true,
+		TLS:                 st.TLS,
 	}
 }
 
@@ -742,6 +793,10 @@ type routerStartup struct {
 	// where it is published.
 	StatementTable bool
 	MetricsAddr    string
+	// TLS is the certificate the port offers, nil for the one made up at
+	// start; Now is when its dates are checked (zero: the time of the call).
+	TLS *shim.PortTLS
+	Now time.Time
 }
 
 // routerStartupLines says, at startup, where the port will be, which files
@@ -800,10 +855,29 @@ func routerStartupLines(u routerStartup) string {
 			fmt.Fprintf(&b, "Router: the statement table is ON. http://%s/status lists each statement shape your clients sent, which names tables and columns (values are blanked), and that address asks for no password. The web interface shows it only to sessions with no data profile.\n", u.MetricsAddr)
 		}
 	}
+	b.WriteString(routerTLSLine(u.TLS, u.Now))
 	for _, line := range u.Ignored {
 		b.WriteString("Router: " + line + ".\n")
 	}
 	return b.String()
+}
+
+// routerTLSLine says what a client that asks the port for encryption gets
+// (#2636), and that one that asks for none is answered in clear text: the
+// port offers TLS and never requires it.
+func routerTLSLine(t *shim.PortTLS, now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if t == nil {
+		return "Router: TLS: no certificate is set (--tls-cert and --tls-key, or BINTRAIL_ROUTER_TLS_CERT and BINTRAIL_ROUTER_TLS_KEY). A client that asks for encryption gets it, with a certificate made up at start that it cannot verify: the rows are encrypted, but the client cannot tell this port from something that impersonates it. A client that asks for none is answered in clear text.\n"
+	}
+	line := fmt.Sprintf("Router: TLS: a client that asks for encryption gets the certificate %s (valid until %s); to verify it, the client needs the CA that signed it (--ssl-mode=VERIFY_CA or VERIFY_IDENTITY with --ssl-ca). A client that asks for no encryption is still answered, in clear text: --ssl-mode=REQUIRED or stricter on the client is what makes it encrypted or nothing. A renewed certificate is served after the router restarts.\n",
+		t.CertFile, t.NotAfter.UTC().Format("2006-01-02"))
+	if p := t.ValidityProblem(now); p != "" {
+		line += "Router: WARNING: " + p + ".\n"
+	}
+	return line
 }
 
 // inContainer reports whether this process runs in a Docker or Podman
@@ -997,8 +1071,12 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, MemoryFrom: memoryFrom, MemoryErr: savedErr, Cfg: cfg,
 		ServersFile: st.ServersFile, ServersExists: statErr == nil, Servers: srv.ServerCount(),
 		PortFile: routerPortFile(st), Token: st.Token != "", MaxWait: st.MaxWait, Ignored: routerIgnoredEnv(), InContainer: inContainer(),
-		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr,
+		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr, TLS: st.TLS,
 	}))
+	if p := st.TLS.ValidityProblem(time.Now()); p != "" {
+		// In the log as well: the startup lines are plain text on stderr.
+		slog.Warn("router: " + p)
+	}
 	fmt.Fprint(os.Stderr, routerFreshnessLine(console.SQLModeSetting()))
 	fmt.Fprint(os.Stderr, routerFreshServersLine(srv.FreshServerNames(), pool.Workers, pool.FreshWorkers))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
