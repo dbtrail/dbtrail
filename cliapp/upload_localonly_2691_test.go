@@ -48,3 +48,32 @@ func TestWalkUploadable_skipsTheFoldersOwnEntries(t *testing.T) {
 		t.Fatalf("would upload %v, want %v", got, want)
 	}
 }
+
+// Any other tree is sent as before, dot-named directories included: they
+// are the operator's data there, not a snapshots folder's own entries.
+func TestWalkUploadable_otherTreesAreSentWhole(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{
+		".archive/bintrail_id=abc/event_date=2026-10-04/event_hour=12/events.parquet",
+		"bintrail_id=abc/event_date=2026-10-04/event_hour=13/events.parquet",
+	} {
+		p := filepath.Join(root, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	if err := walkUploadable(root, func(p string) error {
+		rel, _ := filepath.Rel(root, p)
+		got = append(got, rel)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("would upload %v, want both archive files, the dot-named one included", got)
+	}
+}

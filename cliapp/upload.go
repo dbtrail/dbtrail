@@ -231,9 +231,15 @@ func runUpload(cmd *cobra.Command, args []string) error {
 // snapshots root sent the Parquet of an interrupted prune's leftover
 // (.<snapshot>.pruning) and of the daemon's work directories under names no
 // reader knows.
+//
+// Only on a folder of snapshots (baseline.IsSnapshotsRoot): `bintrail upload`
+// also sends archives and any other Parquet tree, where a dot-named
+// directory is the operator's own data and is sent as before.
 func walkUploadable(root string, fn func(path string) error) error {
+	snapshots := baseline.IsSnapshotsRoot(root)
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr == nil && baseline.IsLocalOnly(root, path) {
+		if walkErr == nil && snapshots && baseline.IsLocalOnly(root, path) {
+			slog.Info("upload: not sent; it belongs to the snapshots folder itself, not to a snapshot", "path", path)
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

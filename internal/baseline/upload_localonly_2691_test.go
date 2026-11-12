@@ -145,3 +145,23 @@ func TestUploadLocalOnly_theRule(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadLocalOnly_isSnapshotsRoot(t *testing.T) {
+	root := t.TempDir()
+	if IsSnapshotsRoot(root) {
+		t.Fatal("an empty folder is not a folder of snapshots")
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if IsSnapshotsRoot(root) {
+		t.Fatal("a folder with no snapshot directory was taken for a folder of snapshots")
+	}
+	snap := mkUploadSnapshot(t, root, "2026-10-04T12-00-03Z")
+	if !IsSnapshotsRoot(root) {
+		t.Fatal("a folder holding a snapshot is a folder of snapshots")
+	}
+	if IsSnapshotsRoot(snap) {
+		t.Fatal("a snapshot is not a folder of snapshots")
+	}
+}

@@ -572,6 +572,27 @@ func IsLocalOnly(root, path string) bool {
 	return !rootIsSnapshot(root)
 }
 
+// IsSnapshotsRoot reports whether root is a folder of snapshots: not a
+// snapshot itself, and holding at least one directory named as a snapshot.
+// A generic uploader (`bintrail upload`) applies IsLocalOnly only to such a
+// folder: on any other tree a dot-named directory is the operator's data.
+func IsSnapshotsRoot(root string) bool {
+	root = filepath.Clean(root)
+	if rootIsSnapshot(root) {
+		return false
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if _, ok := parseBaselineDirTimestamp(e.Name()); ok && e.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
 // isPointerArtifact reports whether path is the baselines root's `current`
 // pointer or a staging link left by an interrupted publish (see pointer.go).
 // Both are symlinks directly under the root, both are local conveniences that
