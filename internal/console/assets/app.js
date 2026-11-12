@@ -18812,6 +18812,49 @@ function readConnectStash() {
   } catch (_) { return null; }
 }
 
+// newServerPortBlock (#2686): what adding a server did to the MySQL port.
+// Adding the first one turns the port on, with Engine Routing on, and this
+// answer is the only place its password is ever shown, so it is drawn
+// whenever the answer carries one. Nothing is drawn for a port that was
+// already on or was saved as off: nothing about it changed. Pure, so every
+// state can be rendered with node.
+function newServerPortBlock(res) {
+  const p = res && res.port;
+  if (!p || typeof p.enabled !== "boolean") return null;
+  const box = el("div", { class: "cn-newport" });
+  if (p.turned_on) {
+    const line = "mysql -h " + (p.host || "127.0.0.1") + " -P " + (p.port || "3309") + " -u " + mysqlLineUser(res.name) + " -p";
+    box.append(el("p", { class: "cn-sql-row", text: "The MySQL port is on now, with Engine Routing on. Connect with the mysql client; the user is the server's name:" }));
+    box.append(el("div", { class: "cn-term" },
+      el("div", { class: "cn-urlrow" },
+        el("code", { class: "stg-code cn-url cn-term-line", text: line }),
+        el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") }))));
+    if (p.password) {
+      box.append(el("p", { class: "cn-sql-row cn-reveal-k", text: "Password, shown only now. Copy it and keep it somewhere safe:" }));
+      box.append(el("div", { class: "cn-term cn-term-pass" },
+        el("div", { class: "cn-urlrow" },
+          el("code", { class: "stg-code cn-url cn-term-line", text: p.password }),
+          el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(p.password, "Port password") }))));
+    } else {
+      box.append(el("p", { class: "cn-sql-row", text: "No password came with the answer. Make one on the MySQL clients page." }));
+    }
+    box.append(el("p", { class: "form-hint", text: "It answers for " + res.name + " once the first copy is ready. Until the server has a forwarding user (MySQL clients page), the copy answers alone." }));
+    if (p.error) box.append(el("p", { class: "cn-sql-row cn-sql-err", text: "It is not answering: " + p.error }));
+    return box;
+  }
+  if (!p.enabled && p.not_turned_on) {
+    box.append(el("p", { class: "form-hint", text: "The MySQL port was not turned on: " + String(p.not_turned_on).replace(/\.+$/, "") + "." }));
+    return box;
+  }
+  return null;
+}
+
+// mysqlLineUser is a server's name as the user of a mysql command line: a
+// name the shell would split or expand is left for the person to quote.
+function mysqlLineUser(name) {
+  return !name || /[\s'"$`\\!*?;&|<>()]/.test(name) ? "<server name>" : name;
+}
+
 // connectNotice is the answer to a check that got past every light: capture
 // started (with what to look at when there is time), or it did not start.
 // The findings on top in plain words, every check one click away.
@@ -18826,11 +18869,11 @@ function connectNotice(res) {
     if (!warns.length) {
       return { tone: "ok", title: "Capture started", summary: "Capture started",
         lines: ["Capture started for " + res.name + ". Changes appear within a minute."],
-        content: [opt, all].filter(Boolean), button: "OK" };
+        content: [newServerPortBlock(res), opt, all].filter(Boolean), button: "OK" };
     }
     return { tone: "warn", title: "Capture started", summary: "Capture started, with " + count(warns.length, "warning", "warnings"),
       lines: [warns.length === 1 ? "Check this when you can:" : "Check these when you can:"],
-      content: [connectFindings(warns), opt, all].filter(Boolean), button: "OK" };
+      content: [newServerPortBlock(res), connectFindings(warns), opt, all].filter(Boolean), button: "OK" };
   }
   if (res.error) {
     // Every check passed and the start itself failed. Say so, and say whether

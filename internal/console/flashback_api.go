@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/dbtrail/dbtrail/ext"
 )
 
 // flashbackStatusDTO is the wire view of the embedded MySQL-protocol
@@ -422,9 +424,10 @@ type newServerPortDTO struct {
 // It never fails the request that added the server: what stopped it is
 // reported in NotTurnedOn, and the server stays added.
 //
-// A session with a data access policy turns nothing on: the port reads every
-// server without that session's redaction, and it may not change the port by
-// any other road either (flashbackRefuseRestricted).
+// A session that may not change the port by its own routes turns nothing on
+// here either: one without settings:write, and one with a data access policy
+// (the port reads every server without that session's redaction,
+// flashbackRefuseRestricted).
 func (s *Server) portOnForNewServer(r *http.Request) *newServerPortDTO {
 	fb := &s.flashback
 	fb.mutate.Lock()
@@ -444,7 +447,16 @@ func (s *Server) portOnForNewServer(r *http.Request) *newServerPortDTO {
 	if flashbackFileExists(path) {
 		return &newServerPortDTO{flashbackStatusDTO: s.flashbackStatus()}
 	}
-	if pol := policyFrom(r.Context()); pol.DataRestricted() {
+	// The port's own routes need settings:write and refuse a session with a
+	// data access policy. Adding a server needs servers:write only, so the
+	// same two gates stand here, before anything is saved, opened or made:
+	// without them this would hand the port's password, which reads every
+	// server, to a session that may not change the port.
+	pol := policyFrom(r.Context())
+	if !pol.Allows(ext.PermSettingsWrite) {
+		return left("this session may add servers and may not change settings, which turning the port on needs. Someone who may turns it on")
+	}
+	if pol.DataRestricted() {
 		return left("this session has a data access policy, and the port reads every server without it. An operator without data restrictions turns it on")
 	}
 	next := saved

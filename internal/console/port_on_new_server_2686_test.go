@@ -100,6 +100,30 @@ func TestPortOnForNewServer_aSessionWithADataPolicyTurnsNothingOn(t *testing.T) 
 	}
 }
 
+// Adding a server needs servers:write; the port needs settings:write. A
+// session with the first and not the second adds its server and gets neither
+// an open port nor its password.
+func TestPortOnForNewServer_withoutSettingsWriteTurnsNothingOn(t *testing.T) {
+	s, ctl, path := newManagedFlashback(t, Config{})
+	req := newServerRequest()
+	req = req.WithContext(context.WithValue(req.Context(), policyCtxKey{},
+		&ext.AccessPolicy{Permissions: []ext.Permission{ext.PermServersWrite, ext.PermSettingsRead}}))
+	got := s.portOnForNewServer(req)
+	if got.TurnedOn || got.Enabled || got.Password != "" || !strings.Contains(got.NotTurnedOn, "may not change settings") {
+		t.Fatalf("servers:write without settings:write: %+v", got)
+	}
+	if _, err := os.Stat(path); err == nil || len(ctl.calls) != 0 {
+		t.Fatalf("something was saved or opened: stat err %v, calls %v", err, ctl.calls)
+	}
+	// With settings:write and no data policy it is turned on.
+	ok := newServerRequest()
+	ok = ok.WithContext(context.WithValue(ok.Context(), policyCtxKey{},
+		&ext.AccessPolicy{Permissions: []ext.Permission{ext.PermServersWrite, ext.PermSettingsWrite}}))
+	if next := s.portOnForNewServer(ok); !next.TurnedOn || next.Password == "" {
+		t.Fatalf("servers:write and settings:write: %+v", next)
+	}
+}
+
 // A console that does not run the port says so instead of failing the add.
 func TestPortOnForNewServer_whereThePortIsNotManagedHere(t *testing.T) {
 	s, err := New(Config{Listen: "127.0.0.1:8090", Token: fbTok})
