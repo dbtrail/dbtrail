@@ -407,11 +407,12 @@ func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
 	s.mu.Unlock()
 
 	slog.Info("baseline: starting in-process snapshot", "server", req.ServerName, "id", req.ServerID)
+	// A full read's upload and its sweep read snapshots of this folder (the
+	// PostgreSQL one walks all of them), so the cleanup stands still until
+	// they are done, then applies the count (#2678). Registered here, before
+	// the goroutine exists: a cleanup between the two would not see the job.
+	end := baseline.BeginRead(req.LocalDir, "a full read and its upload")
 	go func() {
-		// A full read's upload and its sweep read snapshots of this folder
-		// (the PostgreSQL one walks all of them), so the cleanup stands
-		// still until they are done, then applies the count (#2678).
-		end := baseline.BeginRead(req.LocalDir, "a full read and its upload")
 		defer s.pruneAfterPublish(req.LocalDir)
 		defer end()
 		s.run(req)

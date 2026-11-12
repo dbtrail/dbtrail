@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -287,6 +288,9 @@ func TestCountAfterPublish_theCleanupWaitsForARestore(t *testing.T) {
 			reg, id, dir, old := countedServer(t, 1, 4)
 			at := time.Now().UTC().Add(-7 * 24 * time.Hour).Truncate(time.Second)
 			hold := make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(hold) }) }
+			t.Cleanup(release) // a failed assertion must not leave the fold waiting
 			var foldErr error
 			if outcome == "fails" {
 				foldErr = os.ErrInvalid
@@ -301,7 +305,7 @@ func TestCountAfterPublish_theCleanupWaitsForARestore(t *testing.T) {
 			if what := baseline.Reading(dir); !strings.Contains(what, "restore") {
 				t.Fatalf("the folder's reader is %q, want the restore", what)
 			}
-			close(hold)
+			release()
 			waitForTerminalState(t, func() console.BaselineStatus { return sup.RestoreStatus(id) })
 			want := 2 // the newest, and the restore's result
 			if outcome == "fails" {
@@ -318,30 +322,24 @@ func TestCountAfterPublish_theCleanupWaitsForARestore(t *testing.T) {
 	}
 }
 
-// A .sql build stops the cleanup of the folder it reads for as long as it
-// runs, and no longer.
+// A .sql build stops the cleanup of the folder it reads from the moment it
+// is asked for until it ends, and no longer.
 func TestCountAfterPublish_theCleanupWaitsForASQLBuild(t *testing.T) {
 	at := time.Date(2026, 6, 10, 11, 0, 0, 0, time.UTC)
 	src := writeSQLExportBaseline(t, at.Add(-time.Hour))
-	realFold := foldTables
-	t.Cleanup(func() { foldTables = realFold })
-	during := make(chan string, 1)
-	foldTables = func(context.Context, reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
-		during <- baseline.Reading(src)
-		return nil, nil, os.ErrInvalid
-	}
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
 	if err := sup.TriggerSQLExport(console.SQLExportRequest{ServerID: "srv1", ServerName: "wp",
 		IndexDSN: "i:p@tcp(127.0.0.1:1)/idx", BaselineSrc: src, At: at}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case what := <-during:
-		if !strings.Contains(what, ".sql build") {
-			t.Fatalf("while the build ran the folder's reader was %q", what)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the build never reached its fold")
+	// The build cannot write its outcome while this is held, so it is still
+	// running here whatever it did so far.
+	sup.mu.Lock()
+	what := baseline.Reading(src)
+	state := sup.exports["srv1"].State
+	sup.mu.Unlock()
+	if state != "running" || !strings.Contains(what, ".sql build") {
+		t.Fatalf("while the build ran (state %q) the folder's reader was %q", state, what)
 	}
 	waitForTerminalState(t, func() console.BaselineStatus { return sup.SQLExportStatus("srv1") })
 	deadline := time.Now().Add(10 * time.Second)

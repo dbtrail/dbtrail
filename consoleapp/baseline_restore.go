@@ -35,12 +35,13 @@ func (s *baselineSupervisor) TriggerRestore(req console.BaselineRestoreRequest) 
 
 	slog.Info("baseline restore: starting", "server", req.ServerName, "id", req.ServerID,
 		"at", req.At.UTC().Format(time.RFC3339))
+	// With no S3 destination the fold reads an older snapshot of this folder
+	// for as long as it runs: the cleanup stands still until it ends, then
+	// applies the count (#2678). Registered before the goroutine exists, so
+	// no cleanup falls between the two. The result is kept by its mark
+	// (runRestore).
+	end := baseline.BeginRead(req.BaselineDir, "a restore to a moment")
 	go func() {
-		// With no S3 destination the fold reads an older snapshot of this
-		// folder for as long as it runs: the cleanup stands still until it
-		// ends, then applies the count (#2678). The result is kept by its
-		// mark (runRestore).
-		end := baseline.BeginRead(req.BaselineDir, "a restore to a moment")
 		defer s.pruneAfterPublish(req.BaselineDir)
 		defer end()
 		s.runRestore(req)
