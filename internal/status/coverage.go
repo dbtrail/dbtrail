@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -171,17 +172,20 @@ func (s *StreamStateInfo) GapOnRecord() bool {
 // other verdict depends on it, and CollectStatus runs on a timer. Then
 // lookBelowFloor checks what the floor cannot see.
 //
-// A floor that cannot be read is logged and left unknown, which keeps the
-// loss on record. Safe on a nil stream.
+// A floor that cannot be read is left unknown, which keeps the loss on record,
+// and is said once per condition (floorWarnings). Safe on a nil stream.
 func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *StreamStateInfo) {
 	if !stream.GapAcknowledged() {
 		return
 	}
 	floor, err := OldestDeltaFromDB(ctx, db, dbName)
 	if err != nil {
-		slog.Warn("could not determine the delta-coverage floor; the acknowledged capture loss stays on record", "db", dbName, "error", err)
+		floorWarnings.failed(ctx, "gap-window:"+dbName,
+			"could not determine the delta-coverage floor; the acknowledged capture loss stays on record", dbName, err)
 		return
 	}
+	floorWarnings.answered("gap-window:"+dbName,
+		"the delta-coverage floor can be read again; the acknowledged capture loss is graded against it", dbName)
 	stream.Floor = floor
 	lookBelowFloor(ctx, db, dbName, stream)
 }
@@ -212,11 +216,55 @@ func lookBelowFloor(ctx context.Context, db *sql.DB, dbName string, stream *Stre
 	held, err := heldAtOrBefore(ctx, db, stream.GapLostAt.Time)
 	if err != nil {
 		stream.Floor = DeltaFloor{}
-		slog.Warn("could not check whether changes from before the acknowledged capture loss are still held; it stays on record", "db", dbName, "error", err)
+		floorWarnings.failed(ctx, "gap-below:"+dbName,
+			"could not check whether changes from before the acknowledged capture loss are still held; it stays on record", dbName, err)
 		return
 	}
+	floorWarnings.answered("gap-below:"+dbName,
+		"changes from before the acknowledged capture loss can be checked again", dbName)
 	if !held.IsZero() {
 		stream.Floor.Hour = held.UTC().Truncate(time.Hour)
+	}
+}
+
+// floorWarnings says a failed read of the window's start at Warn once per
+// condition: on the first failure for an index, and again only after a read of
+// it has worked (#2669). The readers run on timers and on every page load, so
+// a Warn per read turned one outage into a line per request. A read whose own
+// request was cancelled (a browser that navigated away, a daemon stopping) is
+// not a condition of the index and is logged at Debug only, without touching
+// the state. Keyed by the index's database name, which is all these readers
+// are given: two index servers using the same name share one condition.
+var floorWarnings = &onceWarner{failing: map[string]bool{}}
+
+type onceWarner struct {
+	mu      sync.Mutex
+	failing map[string]bool
+}
+
+func (w *onceWarner) failed(ctx context.Context, key, msg, dbName string, err error) {
+	if ctx.Err() != nil {
+		slog.Debug(msg, "db", dbName, "error", err, "cancelled", ctx.Err())
+		return
+	}
+	w.mu.Lock()
+	first := !w.failing[key]
+	w.failing[key] = true
+	w.mu.Unlock()
+	if first {
+		slog.Warn(msg, "db", dbName, "error", err)
+		return
+	}
+	slog.Debug(msg, "db", dbName, "error", err)
+}
+
+func (w *onceWarner) answered(key, msg, dbName string) {
+	w.mu.Lock()
+	was := w.failing[key]
+	delete(w.failing, key)
+	w.mu.Unlock()
+	if was {
+		slog.Info(msg, "db", dbName)
 	}
 }
 
@@ -279,8 +327,11 @@ func heldAtOrBefore(ctx context.Context, db *sql.DB, at time.Time) (time.Time, e
 func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now time.Time) (*CoverageSummary, error) {
 	sum := &CoverageSummary{}
 	if floor, err := OldestDeltaFromDB(ctx, db, dbName); err != nil {
-		slog.Warn("could not determine the delta-coverage floor; coverage window start is unknown", "db", dbName, "error", err)
+		floorWarnings.failed(ctx, "coverage:"+dbName,
+			"could not determine the delta-coverage floor; coverage window start is unknown", dbName, err)
 	} else {
+		floorWarnings.answered("coverage:"+dbName,
+			"the delta-coverage floor can be read again; the coverage window has a start", dbName)
 		sum.Floor = floor
 	}
 	latest, err := NewestIndexedEvent(ctx, db, dbName)
