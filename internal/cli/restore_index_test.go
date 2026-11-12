@@ -139,7 +139,7 @@ func TestNewestSidecarLocal(t *testing.T) {
 	write("old", "2026-01-01T00:00:00Z", "")
 	write("new", "2026-06-01T00:00:00Z", "")
 	ids := map[string]bool{"old": true, "new": true, "absent": true}
-	m, warnings := newestSidecar(context.Background(), nil, ids)
+	m, warnings := newestSidecar(context.Background(), newBucketClients(""), ids)
 	if m == nil || !m.WrittenAt.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("newest sidecar must win: %+v", m)
 	}
@@ -148,7 +148,7 @@ func TestNewestSidecarLocal(t *testing.T) {
 	}
 	// Corrupt the newest: the older one is returned, but WITH a warning.
 	write("new", "", "{not json")
-	m, warnings = newestSidecar(context.Background(), nil, ids)
+	m, warnings = newestSidecar(context.Background(), newBucketClients(""), ids)
 	if m == nil || !m.WrittenAt.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("older sidecar must be the fallback: %+v", m)
 	}
