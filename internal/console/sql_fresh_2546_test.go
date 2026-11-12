@@ -309,7 +309,7 @@ func TestSQLFresh_removingTheSavedChoiceIsFreshAgain(t *testing.T) {
 	}
 	var kept []string
 	for _, line := range strings.SplitAfter(string(data), "\n") {
-		if !strings.Contains(line, "sql_fresh") {
+		if !strings.Contains(line, "sql_fresh") && !strings.Contains(line, "sql_mode") {
 			kept = append(kept, line)
 		}
 	}

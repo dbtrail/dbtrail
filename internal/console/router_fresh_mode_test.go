@@ -52,13 +52,15 @@ func TestRouterLines_sayTheMode(t *testing.T) {
 	perServerFast := view(&fast)
 	perServerFast.Status.PerServerMode = true
 	payload, err := json.Marshal(map[string]routerViewDTO{
-		"fast":     perServerFast,
-		"older":    view(&fast),
-		"warming":  warming,
-		"fresh":    view(&fresh),
-		"old":      view(nil),
-		"switched": switched,
-		"byDefault": byDefault, "forcedFast": forcedFast, "fastSaved": fastSaved,
+		"fast":       perServerFast,
+		"older":      view(&fast),
+		"warming":    warming,
+		"fresh":      view(&fresh),
+		"old":        view(nil),
+		"switched":   switched,
+		"byDefault":  byDefault,
+		"forcedFast": forcedFast,
+		"fastSaved":  fastSaved,
 	})
 	if err != nil {
 		t.Fatal(err)

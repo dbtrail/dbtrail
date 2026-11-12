@@ -1,9 +1,9 @@
 package console
 
 import (
-	"strconv"
 	"encoding/json"
 	"os"
+	"strconv"
 	"testing"
 )
 
