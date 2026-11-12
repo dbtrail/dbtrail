@@ -684,12 +684,14 @@ services:
       # where the kernel stops DBTrail's processes for memory; under
       # ROUTER_MEMORY (a ceiling) the share applies to that ceiling.
       BINTRAIL_MEMORY_SHARE: ${ROUTER_MEMORY_SHARE:-}
-      # Fast mode by default: a statement on the copy is answered from each
-      # table's last snapshot, as old as its last refresh (set the cadence on
-      # the Snapshots page). SQL_FRESH=on in .env is the fresh mode: each
-      # table's newest captured changes are laid over its snapshot, so
-      # answers are about as far behind as capture, at the cost of a fifth of
-      # the router's memory and an update of them every second.
+      # Fresh mode by default: each table's newest captured changes are laid
+      # over its snapshot, so answers are about as far behind as capture, at
+      # the cost of a fifth of the router's memory and an update of them
+      # every second. Each server's choice is on its Snapshots page.
+      # SQL_FRESH=off in .env is the fast mode for every server: a statement
+      # on the copy is answered from each table's last snapshot, as old as
+      # its last refresh (set the cadence on the Snapshots page).
+      # SQL_FRESH=on is the fresh mode for every server.
       BINTRAIL_SQL_TAILS: ${SQL_FRESH:-}
       BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS: ${SQL_PORT_MAX_ROWS:-}
       # How many statements run on the copy at once (1 to 64). Empty = the

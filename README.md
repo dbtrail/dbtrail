@@ -83,8 +83,8 @@ To try the time-travel SQL in 30 seconds, with nothing of yours connected:
 
 ## Limits
 
-- **The copy is behind your MySQL.** By seconds in fresh mode, by minutes
-  otherwise. A query that must see a write made a second ago belongs on your
+- **The copy is behind your MySQL.** By seconds in fresh mode, the default,
+  and by minutes in fast mode. A query that must see a write made a second ago belongs on your
   MySQL, and routing keeps transactions there.
 - **Lookups stay on your MySQL.** A read by key takes a few milliseconds on
   MySQL and about 100 on the copy, so routing leaves it on your MySQL.

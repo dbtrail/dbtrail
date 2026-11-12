@@ -10,8 +10,9 @@ import (
 // statements on the SQL port read its newest captured changes over its
 // snapshot (fresh) or the snapshot alone (fast). It is what is SAVED: the
 // router applies it when it reads the registry again, and says what it
-// applies in its status document (sql_mode per server). BINTRAIL_SQL_TAILS=on
-// where the router starts overrides every server's.
+// applies in its status document (sql_mode per server). A server with
+// nothing saved is fresh. BINTRAIL_SQL_TAILS=on or =off where the router
+// starts overrides every server's.
 //
 // like_ignores_case is the server's LIKE switch: on, statements with LIKE go
 // to the copy, written ILIKE there (MySQL compares LIKE without case under
@@ -19,7 +20,10 @@ import (
 // port reads it when a connection opens. Each field is saved only when it
 // is sent, so one choice never resets the other.
 type sqlModeDTO struct {
-	Fresh           bool `json:"fresh"`
+	Fresh bool `json:"fresh"`
+	// FreshSaved: a choice is saved for the server, as opposed to fresh by
+	// the default. Only in the answer.
+	FreshSaved      bool `json:"fresh_saved"`
 	LikeIgnoresCase bool `json:"like_ignores_case"`
 }
 
@@ -70,7 +74,7 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Fresh != nil {
 		mode := "fast"
-		if e.SQLFresh {
+		if e.SQLFreshOn() {
 			mode = "fresh"
 		}
 		slog.Info("console: SQL mode saved", "actor", consoleActor(r), "server", e.Name, "id", id, "mode", mode)
@@ -88,5 +92,5 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 	// does, and reads the registry again within seconds), but one that does
 	// applies it now.
 	s.applySQLFresh()
-	writeJSON(w, http.StatusOK, sqlModeDTO{Fresh: e.SQLFresh, LikeIgnoresCase: e.SQLLikeIgnoresCase})
+	writeJSON(w, http.StatusOK, sqlModeDTO{Fresh: e.SQLFreshOn(), FreshSaved: e.SQLFreshSaved(), LikeIgnoresCase: e.SQLLikeIgnoresCase})
 }

@@ -49,8 +49,8 @@ gets every 5 minutes once its first snapshot is taken; one with an S3
 location also sends a snapshot there every 24 hours. The interval is
 the ceiling on how fresh a report can be: at `5m` a dashboard sees this
 morning; at `1d` it sees yesterday. The SQL port answers from the same
-snapshots by default. Its fresh mode (chosen per server on the Snapshots
-page, or `SQL_FRESH=on` for every server) is the exception: it
+snapshots in its fast mode. In its fresh mode, the default (each server's
+choice is on its Snapshots page, `SQL_FRESH` decides for every server), it
 also reads what capture has indexed since each table's snapshot, so it
 answers about as far behind as capture, usually seconds, for some memory and
 speed (see [No maximum copy age](time-travel-sql.md#no-maximum-copy-age)). From the

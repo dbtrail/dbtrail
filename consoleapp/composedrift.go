@@ -69,7 +69,7 @@ var composeVersionAdded = map[int]string{
 	5: "the usage telemetry choice is kept on the state volume (BINTRAIL_TELEMETRY_DIR) and read by the router and shim services too: with an older file it lives inside the container, so telemetry turned off in the web interface is back on after the next upgrade, and those two services never follow it",
 	6: "the bundled index MySQL sizes its buffer pool to the machine when INDEX_BUFFER_POOL is unset: with an older file it keeps InnoDB's 128 MB default, which caps capture at about 1,400 row changes per second on a busy server",
 	7: "the router runs at a lower CPU priority than capture (cpu_shares), so statements on the copy use every core instead of half of them: with an older file they run with half the machine's cores unless ROUTER_CPUS is set",
-	8: "SQL_FRESH in .env reaches the router: with an older file the fresh mode (answers about as far behind as capture instead of as old as each table's last snapshot) cannot be turned on from .env",
+	8: "SQL_FRESH in .env reaches the router: with an older file the mode cannot be set for every server from .env (off: answers as old as each table's last snapshot; on: about as far behind as capture), and each server answers in its own, fresh unless Fast was saved for it",
 }
 
 // composeIndexHost is the bundled index MySQL's service name in

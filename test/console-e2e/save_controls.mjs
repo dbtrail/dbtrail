@@ -686,7 +686,9 @@ export async function runSaveScenes(ctx) {
       const saved = async () => {
         const r = await readAs(page, "/api/servers");
         const s = r.body && (r.body.servers || []).find((x) => x.id === srvId);
-        return s ? s.sql_fresh : undefined;
+        // What is SAVED: with nothing saved the list says fresh by the
+        // default, which a save that wrote nothing would also show.
+        return s ? (s.sql_fresh_saved ? s.sql_fresh : null) : undefined;
       };
       const pick = async (v) => {
         await page.click(".sql-mode-card .sch-pill[data-value='" + v + "']");

@@ -3,8 +3,11 @@ package console
 import (
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v2"
 )
 
 // #2546: fresh mode per server, saved on its registry entry and applied by
@@ -41,48 +44,91 @@ func freshTestServer(t *testing.T, reg *Registry, fast, fresh int) (*Server, *fa
 	return s, p
 }
 
-func TestSQLFresh_anEntryWithoutTheFieldIsFast_2546(t *testing.T) {
+// An entry with no choice saved is fresh: the pool is lowered for it before
+// its statements read tails. With Fast saved it is fast and the pool is not
+// touched.
+func TestSQLFresh_anEntryWithoutTheFieldIsFresh(t *testing.T) {
 	reg, ids := freshTestRegistry(t, "a")
 	s, p := freshTestServer(t, reg, 4, 3)
 	s.applySQLFresh()
+	if !s.tailsOnFor(ids[0]) {
+		t.Fatal("a server with no choice saved does not read tails; fresh is the default")
+	}
+	if !slices.Equal(p.set, []int{3}) {
+		t.Fatalf("the pool was set %v for the first fresh server, want [3]", p.set)
+	}
+	if mode, from := s.SQLModeOf(ids[0]); mode != "fresh" || from != SQLModeFromDefault {
+		t.Fatalf("mode %q from %q, want fresh by default", mode, from)
+	}
+}
+
+func TestSQLFresh_anEntryWithFastSavedIsFast(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a")
+	if _, err := reg.SetSQLFresh(ids[0], false); err != nil {
+		t.Fatal(err)
+	}
+	s, p := freshTestServer(t, reg, 4, 3)
+	s.applySQLFresh()
 	if s.tailsOnFor(ids[0]) {
-		t.Fatal("a server never switched reads tails")
+		t.Fatal("a server with Fast saved reads tails")
 	}
 	if len(p.set) != 0 {
 		t.Fatalf("the pool was resized with no server fresh: %v", p.set)
+	}
+	if mode, from := s.SQLModeOf(ids[0]); mode != "fast" || from != SQLModeFromSaved {
+		t.Fatalf("mode %q from %q, want fast as saved", mode, from)
+	}
+}
+
+// The server given on the command line has no entry: fast unless the
+// setting says on.
+func TestSQLFresh_aServerWithNoEntryIsFast(t *testing.T) {
+	reg, _ := freshTestRegistry(t, "a")
+	s, _ := freshTestServer(t, reg, 4, 3)
+	s.applySQLFresh()
+	if s.tailsOnFor(bootServerID) {
+		t.Fatal("the command-line server reads tails with nothing set")
+	}
+	if mode, from := s.SQLModeOf(bootServerID); mode != "fast" || from != SQLModeFromDefault {
+		t.Fatalf("mode %q from %q, want fast by default", mode, from)
 	}
 }
 
 func TestSQLFresh_setAndClearAreTheOnlyWriter_2546(t *testing.T) {
 	reg, ids := freshTestRegistry(t, "a")
-	if _, err := reg.SetSQLFresh(ids[0], true); err != nil {
+	if _, err := reg.SetSQLFresh(ids[0], false); err != nil {
 		t.Fatal(err)
 	}
-	// A console edit built from any copy keeps the saved mode.
-	e, _ := reg.Get(ids[0])
-	e.SQLFresh = false
-	e.Name = "renamed"
-	if err := reg.Update(e); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := reg.Get(ids[0]); !got.SQLFresh {
-		t.Fatal("an edit that did not mean to change the mode turned it off")
+	// A console edit built from any copy keeps the saved mode: here Fast,
+	// which is not the default, against an edit that says nothing and one
+	// that says Fresh.
+	for _, sent := range [][2]any{{"", false}, {"fresh", true}, {"", true}} {
+		e, _ := reg.Get(ids[0])
+		e.SQLMode, e.SQLFresh = sent[0].(string), sent[1].(bool)
+		e.Name = "renamed"
+		if err := reg.Update(e); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := reg.Get(ids[0]); got.SQLFreshOn() || !got.SQLFreshSaved() {
+			t.Fatalf("an edit that sent %v and did not mean to change the mode changed it: sql_mode %q sql_fresh %v", sent, got.SQLMode, got.SQLFresh)
+		}
 	}
 	// Survives a reload from disk.
 	again, err := LoadRegistry(reg.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := again.Get(ids[0]); !got.SQLFresh {
-		t.Fatal("the saved mode did not survive a reload")
+	if got, _ := again.Get(ids[0]); got.SQLFreshOn() || !got.SQLFreshSaved() {
+		t.Fatal("a saved Fast did not survive a reload: it must be written to the file, not left absent")
 	}
-	// A new entry never starts fresh, whatever it was built from.
-	n, err := reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", SQLFresh: true})
+	// A new entry never starts with a saved choice, whatever it was built
+	// from: it is fresh by the default.
+	n, err := reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", SQLMode: "fast", SQLFresh: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := reg.Get(n.ID); got.SQLFresh {
-		t.Fatal("Add stored fresh mode; SetSQLFresh is its only writer")
+	if got, _ := reg.Get(n.ID); got.SQLFreshSaved() || !got.SQLFreshOn() {
+		t.Fatal("Add stored a mode; SetSQLFresh is its only writer")
 	}
 	if _, err := reg.SetSQLFresh("nope", true); err != ErrUnknownServer {
 		t.Fatalf("an unknown server: %v, want ErrUnknownServer", err)
@@ -94,6 +140,11 @@ func TestSQLFresh_setAndClearAreTheOnlyWriter_2546(t *testing.T) {
 // raise it; the last one does, after it stopped reading them.
 func TestSQLFresh_thePoolMovesOnTheFirstAndTheLast_2546(t *testing.T) {
 	reg, ids := freshTestRegistry(t, "a", "b")
+	for _, id := range ids { // both fast to begin with: Fast saved
+		if _, err := reg.SetSQLFresh(id, false); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, p := freshTestServer(t, reg, 4, 3)
 	var seenOn bool
 	p2 := &orderPool{fakePool: p, before: func() { seenOn = s.tailsOnFor(ids[0]) }}
@@ -195,36 +246,84 @@ func TestSQLFresh_samePoolEitherWayIsNotTouched_2546(t *testing.T) {
 	}
 }
 
-// BINTRAIL_SQL_TAILS=on makes every server fresh and the switches decide
-// nothing; any other value (off, a typo) leaves each server's switch to
-// decide. The pool is planned for fresh mode at startup then, never moved.
-func TestSQLFresh_theEnvironmentDecidesOnlyWhenOn_2546(t *testing.T) {
-	reg, ids := freshTestRegistry(t, "a", "b")
+// BINTRAIL_SQL_TAILS=on makes every server fresh and =off every server
+// fast, the entries deciding nothing; unset or a typo leaves each entry to
+// decide, fresh when it saved nothing. Three servers: nothing saved, Fresh
+// saved, Fast saved.
+func TestSQLFresh_theEnvironmentDecidesWhenOnOrOff(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a", "b", "c")
 	if _, err := reg.SetSQLFresh(ids[1], true); err != nil {
 		t.Fatal(err)
 	}
-	for v, want := range map[string][2]bool{
-		"on": {true, true}, "fresh": {true, true},
-		"off": {false, true}, "onn": {false, true}, "": {false, true},
+	if _, err := reg.SetSQLFresh(ids[2], false); err != nil {
+		t.Fatal(err)
+	}
+	own := [3]bool{true, true, false}
+	ownFrom := [3]string{SQLModeFromDefault, SQLModeFromSaved, SQLModeFromSaved}
+	for v, forced := range map[string]string{
+		"on": "fresh", "fresh": "fresh", "off": "fast", "fast": "fast", "0": "fast",
+		"onn": "", "": "",
 	} {
 		s, _ := freshTestServer(t, reg, 0, 0)
 		t.Setenv("BINTRAIL_SQL_TAILS", v)
 		s.applySQLFresh()
-		got := [2]bool{s.tailsOnFor(ids[0]), s.tailsOnFor(ids[1])}
-		if got != want {
-			t.Errorf("BINTRAIL_SQL_TAILS=%q: tails %v, want %v", v, got, want)
-		}
-		mode, from := s.SQLModeOf(ids[0])
-		if v == "on" || v == "fresh" {
-			if mode != "fresh" || from != SQLModeFromEnvironment {
-				t.Errorf("BINTRAIL_SQL_TAILS=%q: mode %q from %q, want fresh from the environment", v, mode, from)
+		for i, id := range ids {
+			wantOn, wantFrom := own[i], ownFrom[i]
+			switch forced {
+			case "fresh":
+				wantOn, wantFrom = true, SQLModeFromEnvironment
+			case "fast":
+				wantOn, wantFrom = false, SQLModeFromEnvironment
 			}
-		} else if mode != "fast" || from != SQLModeFromDefault {
-			t.Errorf("BINTRAIL_SQL_TAILS=%q: unswitched server mode %q from %q, want fast by default", v, mode, from)
+			wantMode := "fast"
+			if wantOn {
+				wantMode = "fresh"
+			}
+			if got := s.tailsOnFor(id); got != wantOn {
+				t.Errorf("BINTRAIL_SQL_TAILS=%q server %d: reads tails %v, want %v", v, i, got, wantOn)
+			}
+			if mode, from := s.SQLModeOf(id); mode != wantMode || from != wantFrom {
+				t.Errorf("BINTRAIL_SQL_TAILS=%q server %d: mode %q from %q, want %q from %q", v, i, mode, from, wantMode, wantFrom)
+			}
 		}
-		if mode, from := s.SQLModeOf(ids[1]); v != "on" && v != "fresh" && (mode != "fresh" || from != SQLModeFromSaved) {
-			t.Errorf("BINTRAIL_SQL_TAILS=%q: switched server mode %q from %q, want fresh as saved", v, mode, from)
+	}
+}
+
+// The setting turned to off under a running process is not a case: it is
+// read from the environment, which does not change. What does change is the
+// list: a server whose Fresh was saved turns fast when Fast is saved, and a
+// server whose saved choice is removed from the file by hand is fresh again.
+func TestSQLFresh_removingTheSavedChoiceIsFreshAgain(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a")
+	if _, err := reg.SetSQLFresh(ids[0], false); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := freshTestServer(t, reg, 0, 0)
+	s.applySQLFresh()
+	if s.tailsOnFor(ids[0]) {
+		t.Fatal("Fast saved, and the server reads tails")
+	}
+	data, err := os.ReadFile(reg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, line := range strings.SplitAfter(string(data), "\n") {
+		if !strings.Contains(line, "sql_fresh") && !strings.Contains(line, "sql_mode") {
+			kept = append(kept, line)
 		}
+	}
+	if err := os.WriteFile(reg.Path(), []byte(strings.Join(kept, "")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	again, err := LoadRegistry(reg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := freshTestServer(t, again, 0, 0)
+	s2.applySQLFresh()
+	if !s2.tailsOnFor(ids[0]) {
+		t.Fatal("with the saved choice gone from the file the server is not fresh")
 	}
 }
 
@@ -338,5 +437,145 @@ func TestSQLFresh_settleWaitsForBuildsWithinTheBound_2546(t *testing.T) {
 	settleWithin([]*tailKeeper{stuck}, 80*time.Millisecond)
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("a stuck build held it %v, past the bound", d)
+	}
+}
+
+// What a server's entry says, as the file holds it. sql_mode is the choice;
+// sql_fresh is the key builds before the default changed wrote, read when
+// sql_mode says nothing; a sql_mode this build does not know is no choice.
+func TestSQLFresh_whatTheFileSays(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		on, saved  bool
+	}{
+		{"nothing saved", "", true, false},
+		{"fresh saved", "sql_mode: fresh\n", true, true},
+		{"fast saved", "sql_mode: fast\n", false, true},
+		{"fresh saved by an older build", "sql_fresh: true\n", true, true},
+		{"a false an older build never wrote", "sql_fresh: false\n", true, false},
+		{"fast here, then Fresh chosen on an older build", "sql_mode: fast\nSAME sql_fresh: true\n", false, true},
+		{"a mode this build does not know", "sql_mode: slow\n", true, false},
+		{"a mode in capitals is not one", "sql_mode: FAST\n", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The file a registry writes, with the line put in by hand the
+			// way an older or a newer build would have left it.
+			made, ids := freshTestRegistry(t, "a")
+			data, err := os.ReadFile(made.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "sql_fresh") {
+				t.Fatalf("a new entry's file already holds sql_fresh:\n%s", data)
+			}
+			var out []string
+			for _, line := range strings.SplitAfter(string(data), "\n") {
+				out = append(out, line)
+				if trimmed := strings.TrimLeft(line, " "); tc.line != "" && strings.HasPrefix(trimmed, "name: ") {
+					indent := line[:len(line)-len(trimmed)]
+					// "SAME " marks a second key, at the same indentation.
+					out = append(out, indent+strings.ReplaceAll(tc.line, "SAME ", indent))
+				}
+			}
+			if err := os.WriteFile(made.Path(), []byte(strings.Join(out, "")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reg, err := LoadRegistry(made.Path())
+			if err != nil {
+				t.Fatalf("%v\n%s", err, strings.Join(out, ""))
+			}
+			e, ok := reg.Get(ids[0])
+			if !ok {
+				t.Fatal("the entry was not read")
+			}
+			if e.SQLFreshOn() != tc.on || e.SQLFreshSaved() != tc.saved {
+				t.Fatalf("on=%v saved=%v, want on=%v saved=%v", e.SQLFreshOn(), e.SQLFreshSaved(), tc.on, tc.saved)
+			}
+		})
+	}
+	// Saving writes sql_mode either way. Fresh also writes sql_fresh: true,
+	// for a router of an older build; Fast leaves that key out.
+	reg, ids := freshTestRegistry(t, "a")
+	for _, on := range []bool{false, true, false} {
+		if _, err := reg.SetSQLFresh(ids[0], on); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(reg.Path())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[bool]string{true: "sql_mode: fresh", false: "sql_mode: fast"}[on]
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("after saving %v the file does not hold %q:\n%s", on, want, data)
+		}
+		if strings.Contains(string(data), "sql_fresh: true") != on || strings.Contains(string(data), "sql_fresh: false") {
+			t.Fatalf("after saving %v, sql_fresh in the file:\n%s", on, data)
+		}
+	}
+}
+
+// A build from before the default changed re-saves the file: it knows
+// sql_fresh, writes it only when true, and keeps every key it does not know.
+// A Fast saved here survives that, which a false in sql_fresh would not.
+func TestSQLFresh_fastSurvivesAnOlderBuildsSave(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a")
+	if _, err := reg.SetSQLFresh(ids[0], false); err != nil {
+		t.Fatal(err)
+	}
+	type olderEntry struct {
+		ID       string         `yaml:"id"`
+		SQLFresh bool           `yaml:"sql_fresh,omitempty"`
+		Extra    map[string]any `yaml:",inline"`
+	}
+	type olderFile struct {
+		Version int            `yaml:"version"`
+		Servers []olderEntry   `yaml:"servers"`
+		Extra   map[string]any `yaml:",inline"`
+	}
+	data, err := os.ReadFile(reg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f olderFile
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	resaved, err := yaml.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reg.Path(), resaved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	again, err := LoadRegistry(reg.Path())
+	if err != nil {
+		t.Fatalf("%v\n%s", err, resaved)
+	}
+	if e, _ := again.Get(ids[0]); e.SQLFreshOn() || !e.SQLFreshSaved() {
+		t.Fatalf("after an older build's save the server is no longer Fast saved:\n%s", resaved)
+	}
+}
+
+// BINTRAIL_SQL_TAILS as SQLModeSetting reads it.
+func TestSQLModeSetting(t *testing.T) {
+	for _, tc := range []struct{ value, forced string }{
+		{"", ""}, {"   ", ""},
+		{"on", SQLModeForcedFresh}, {"ON", SQLModeForcedFresh}, {"true", SQLModeForcedFresh},
+		{"1", SQLModeForcedFresh}, {"yes", SQLModeForcedFresh}, {" Fresh ", SQLModeForcedFresh},
+		{"off", SQLModeForcedFast}, {"OFF", SQLModeForcedFast}, {"false", SQLModeForcedFast},
+		{"0", SQLModeForcedFast}, {"no", SQLModeForcedFast}, {" fast ", SQLModeForcedFast},
+		{"onn", ""}, {"of", ""}, {"on off", ""}, {"on\noff", ""}, {"2", ""},
+	} {
+		t.Setenv("BINTRAIL_SQL_TAILS", tc.value)
+		forced, read := SQLModeSetting()
+		if forced != tc.forced || read != strings.TrimSpace(tc.value) {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: forced %q read %q, want forced %q", tc.value, forced, read, tc.forced)
+		}
+		if on, _ := TailsSetting(); on != (tc.forced == SQLModeForcedFresh) {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: TailsSetting on=%v", tc.value, on)
+		}
+		if tailsForcedOff() != (tc.forced == SQLModeForcedFast) {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: tailsForcedOff=%v", tc.value, tailsForcedOff())
+		}
 	}
 }
