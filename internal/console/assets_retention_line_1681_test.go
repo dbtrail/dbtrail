@@ -56,10 +56,10 @@ console.log(JSON.stringify(out));
 		Text string `json:"text"`
 	}
 	cases := map[string]any{
-		"none":         map[string]any{},
-		"keepMany":     map[string]any{"local_retention": map[string]any{"keep_newest": 7}},
-		"keepOne":      map[string]any{"local_retention": map[string]any{"keep_newest": 1}},
-		"keepZero":     map[string]any{"local_retention": map[string]any{"keep_newest": 0}},
+		"none":     map[string]any{},
+		"keepMany": map[string]any{"local_retention": map[string]any{"keep_newest": 7}},
+		"keepOne":  map[string]any{"local_retention": map[string]any{"keep_newest": 1}},
+		"keepZero": map[string]any{"local_retention": map[string]any{"keep_newest": 0}},
 		// #2658: the same count on a server with an S3 destination.
 		"keepManyS3": map[string]any{"local_retention": map[string]any{"keep_newest": 3}, "s3_destination": true},
 		"keepOneS3":  map[string]any{"local_retention": map[string]any{"keep_newest": 1}, "s3_destination": true},
@@ -112,12 +112,12 @@ console.log(JSON.stringify(out));
 	}
 	const at = "2026-09-23 03:10:00 UTC"
 	want := map[string][]line{
-		"none":         {},
-		"keepMany":     {{false, "Keeps the newest 7 snapshots on this machine."}},
-		"keepOne":      {{false, "Keeps only the newest snapshot on this machine."}},
-		"keepZero":     {},
-		"keepManyS3":   {{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them."}},
-		"keepOneS3":    {{false, "Keeps only the newest snapshot on this machine; older ones are removed once S3 has them."}},
+		"none":       {},
+		"keepMany":   {{false, "Keeps the newest 7 snapshots on this machine."}},
+		"keepOne":    {{false, "Keeps only the newest snapshot on this machine."}},
+		"keepZero":   {},
+		"keepManyS3": {{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them."}},
+		"keepOneS3":  {{false, "Keeps only the newest snapshot on this machine; older ones are removed once S3 has them."}},
 		"failSilentS3": {
 			{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them."},
 			{true, "Removing older copies failed on " + at + ": | The S3 destination could not be asked, so nothing was removed from this folder in this cleanup. DBTrail asks again at the next one."},
