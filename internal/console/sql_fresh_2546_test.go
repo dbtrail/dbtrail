@@ -3,6 +3,8 @@ package console
 import (
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,34 +57,39 @@ func TestSQLFresh_anEntryWithoutTheFieldIsFast_2546(t *testing.T) {
 
 func TestSQLFresh_setAndClearAreTheOnlyWriter_2546(t *testing.T) {
 	reg, ids := freshTestRegistry(t, "a")
-	if _, err := reg.SetSQLFresh(ids[0], true); err != nil {
+	if _, err := reg.SetSQLFresh(ids[0], false); err != nil {
 		t.Fatal(err)
 	}
-	// A console edit built from any copy keeps the saved mode.
-	e, _ := reg.Get(ids[0])
-	e.SQLFresh = false
-	e.Name = "renamed"
-	if err := reg.Update(e); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := reg.Get(ids[0]); !got.SQLFresh {
-		t.Fatal("an edit that did not mean to change the mode turned it off")
+	// A console edit built from any copy keeps the saved mode: here Fast,
+	// which is not the default, against an edit that says nothing and one
+	// that says Fresh.
+	for _, sent := range []*bool{nil, ptrTo(true)} {
+		e, _ := reg.Get(ids[0])
+		e.SQLFresh = sent
+		e.Name = "renamed"
+		if err := reg.Update(e); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := reg.Get(ids[0]); got.SQLFreshOn() || !got.SQLFreshSaved() {
+			t.Fatalf("an edit that did not mean to change the mode changed it: %v", got.SQLFresh)
+		}
 	}
 	// Survives a reload from disk.
 	again, err := LoadRegistry(reg.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := again.Get(ids[0]); !got.SQLFresh {
-		t.Fatal("the saved mode did not survive a reload")
+	if got, _ := again.Get(ids[0]); got.SQLFreshOn() || !got.SQLFreshSaved() {
+		t.Fatal("a saved Fast did not survive a reload: it must be written to the file, not left absent")
 	}
-	// A new entry never starts fresh, whatever it was built from.
-	n, err := reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", SQLFresh: true})
+	// A new entry never starts with a saved choice, whatever it was built
+	// from: it is fresh by the default.
+	n, err := reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", SQLFresh: ptrTo(false)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := reg.Get(n.ID); got.SQLFresh {
-		t.Fatal("Add stored fresh mode; SetSQLFresh is its only writer")
+	if got, _ := reg.Get(n.ID); got.SQLFreshSaved() || !got.SQLFreshOn() {
+		t.Fatal("Add stored a mode; SetSQLFresh is its only writer")
 	}
 	if _, err := reg.SetSQLFresh("nope", true); err != ErrUnknownServer {
 		t.Fatalf("an unknown server: %v, want ErrUnknownServer", err)
@@ -338,5 +345,94 @@ func TestSQLFresh_settleWaitsForBuildsWithinTheBound_2546(t *testing.T) {
 	settleWithin([]*tailKeeper{stuck}, 80*time.Millisecond)
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("a stuck build held it %v, past the bound", d)
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }
+
+// The three states of a server's entry, as the file holds them: nothing is
+// fresh by the default, true is Fresh saved, false is Fast saved. An entry
+// written before fresh was the default has either nothing or true.
+func TestSQLFresh_theThreeStatesInTheFile(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		on, saved  bool
+	}{
+		{"nothing saved", "", true, false},
+		{"fresh saved", "sql_fresh: true\n", true, true},
+		{"fast saved", "sql_fresh: false\n", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The file a registry writes, with the line put in by hand the
+			// way an older or a newer build would have left it.
+			made, ids := freshTestRegistry(t, "a")
+			data, err := os.ReadFile(made.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "sql_fresh") {
+				t.Fatalf("a new entry's file already holds sql_fresh:\n%s", data)
+			}
+			var out []string
+			for _, line := range strings.SplitAfter(string(data), "\n") {
+				out = append(out, line)
+				if trimmed := strings.TrimLeft(line, " "); tc.line != "" && strings.HasPrefix(trimmed, "name: ") {
+					out = append(out, line[:len(line)-len(trimmed)]+tc.line)
+				}
+			}
+			if err := os.WriteFile(made.Path(), []byte(strings.Join(out, "")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reg, err := LoadRegistry(made.Path())
+			if err != nil {
+				t.Fatalf("%v\n%s", err, strings.Join(out, ""))
+			}
+			e, ok := reg.Get(ids[0])
+			if !ok {
+				t.Fatal("the entry was not read")
+			}
+			if e.SQLFreshOn() != tc.on || e.SQLFreshSaved() != tc.saved {
+				t.Fatalf("on=%v saved=%v, want on=%v saved=%v", e.SQLFreshOn(), e.SQLFreshSaved(), tc.on, tc.saved)
+			}
+		})
+	}
+	// Saving Fast writes it; saving Fresh after it writes that.
+	reg, ids := freshTestRegistry(t, "a")
+	for _, on := range []bool{false, true, false} {
+		if _, err := reg.SetSQLFresh(ids[0], on); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(reg.Path())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "sql_fresh: " + strconv.FormatBool(on)
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("after saving %v the file does not hold %q:\n%s", on, want, data)
+		}
+	}
+}
+
+// BINTRAIL_SQL_TAILS as SQLModeSetting reads it.
+func TestSQLModeSetting(t *testing.T) {
+	for _, tc := range []struct{ value, forced string }{
+		{"", ""}, {"   ", ""},
+		{"on", SQLModeForcedFresh}, {"ON", SQLModeForcedFresh}, {"true", SQLModeForcedFresh},
+		{"1", SQLModeForcedFresh}, {"yes", SQLModeForcedFresh}, {" Fresh ", SQLModeForcedFresh},
+		{"off", SQLModeForcedFast}, {"OFF", SQLModeForcedFast}, {"false", SQLModeForcedFast},
+		{"0", SQLModeForcedFast}, {"no", SQLModeForcedFast}, {" fast ", SQLModeForcedFast},
+		{"onn", ""}, {"of", ""}, {"on off", ""}, {"on\noff", ""}, {"2", ""},
+	} {
+		t.Setenv("BINTRAIL_SQL_TAILS", tc.value)
+		forced, read := SQLModeSetting()
+		if forced != tc.forced || read != strings.TrimSpace(tc.value) {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: forced %q read %q, want forced %q", tc.value, forced, read, tc.forced)
+		}
+		if on, _ := TailsSetting(); on != (tc.forced == SQLModeForcedFresh) {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: TailsSetting on=%v", tc.value, on)
+		}
+		if tailsForcedOff() != (tc.forced == SQLModeForcedFast) {
+			t.Errorf("BINTRAIL_SQL_TAILS=%q: tailsForcedOff=%v", tc.value, tailsForcedOff())
+		}
 	}
 }

@@ -27,7 +27,7 @@ func TestSQLModeAPI_likeIgnoresCase(t *testing.T) {
 	if d := put(`{"like_ignores_case":true}`); !d.Fresh || !d.LikeIgnoresCase {
 		t.Fatalf("LIKE alone must keep fresh: %+v", d)
 	}
-	if e, _ := srv.cm.reg.Get(id); !e.SQLFresh || !e.SQLLikeIgnoresCase {
+	if e, _ := srv.cm.reg.Get(id); !e.SQLFreshOn() || !e.SQLLikeIgnoresCase {
 		t.Fatalf("stored %+v", e)
 	}
 	if d := put(`{"fresh":false}`); d.Fresh || !d.LikeIgnoresCase {
@@ -62,7 +62,7 @@ func TestSQLModeAPI_likeIgnoresCase(t *testing.T) {
 		if rec.Code != 400 {
 			t.Errorf("body %q answered %d %s, want 400", bad, rec.Code, out)
 		}
-		if e, _ := srv.cm.reg.Get(id); !e.SQLLikeIgnoresCase || !e.SQLFresh {
+		if e, _ := srv.cm.reg.Get(id); !e.SQLLikeIgnoresCase || !e.SQLFreshOn() {
 			t.Fatalf("body %q changed the saved choices: %+v", bad, e)
 		}
 	}

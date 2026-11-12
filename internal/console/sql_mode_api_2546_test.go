@@ -32,7 +32,7 @@ func TestSQLModeAPI_savesAndTheListSaysIt_2546(t *testing.T) {
 		if rec.Code != 200 || decodeSQLMode(t, out).Fresh != on {
 			t.Fatalf("PUT %s = %d %s", body, rec.Code, out)
 		}
-		if e, _ := srv.cm.reg.Get(id); e.SQLFresh != on {
+		if e, _ := srv.cm.reg.Get(id); e.SQLFreshOn() != on || !e.SQLFreshSaved() {
 			t.Fatalf("PUT %s stored %v", body, e.SQLFresh)
 		}
 		// Applied in this process too, not only at the next reading.
@@ -71,7 +71,7 @@ func TestSQLModeAPI_strictBody_2546(t *testing.T) {
 		if rec.Code != 400 {
 			t.Errorf("body %q answered %d %s, want 400", bad, rec.Code, out)
 		}
-		if e, _ := srv.cm.reg.Get(id); !e.SQLFresh {
+		if e, _ := srv.cm.reg.Get(id); !e.SQLFreshOn() {
 			t.Fatalf("body %q turned fresh mode off", bad)
 		}
 	}
