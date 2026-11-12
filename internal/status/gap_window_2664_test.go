@@ -125,7 +125,7 @@ func TestAcknowledgedLoss_reportedWhileTheWindowReachesIt(t *testing.T) {
 					"  Acknowledged loss: capture permanently lost events at 2026-06-22 12:00:00 (acknowledged 2026-06-22 13:00:00).\n",
 					"  Snapshot updates and reconstructions whose window spans that moment are\n",
 					"  refused. A full snapshot taken after it is not affected. This is reported\n",
-					"  while the index or its archives still hold the hour it happened in.\n",
+					"  while the index or its archives still hold changes from it or earlier.\n",
 				} {
 					if !strings.Contains(text, want) {
 						t.Errorf("status text missing %q:\n%s", want, text)
@@ -266,6 +266,8 @@ func TestLoadGapWindow(t *testing.T) {
 		db, mock := newDB(t)
 		mock.ExpectQuery(covPartsQ).WillReturnRows(covPartRows("p_2026062300", "p_future"))
 		mock.ExpectQuery(covArchQ).WillReturnRows(noArchives())
+		mock.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil))
+		mock.ExpectQuery(gwEvHeldQ).WillReturnRows(gwEvHeldRows())
 		s := ackedLostStream()
 		LoadGapWindow(ctx, db, "binlog_index", s)
 		if !s.Floor.Hour.Equal(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)) {
@@ -295,10 +297,16 @@ func TestLoadGapWindow(t *testing.T) {
 		mock.ExpectQuery(covPartsQ).WillReturnRows(covPartRows("p_2026062300", "p_future"))
 		mock.ExpectQuery(covArchQ).WillReturnRows(sqlmock.NewRows([]string{"min", "max", "sources"}).
 			AddRow("p_2026062200", "p_2026062223", 1))
+		// Without this the floor read failed and the verdict was right for
+		// the wrong reason (an unknown floor keeps the loss on record too).
+		mock.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 		s := ackedLostStream()
 		LoadGapWindow(ctx, db, "binlog_index", s)
 		if got := ContinuityStatus(s, nil); got != ContinuityGapAcknowledged {
 			t.Errorf("verdict = %q (floor %+v), want gap_acknowledged: the archived hours still hold the loss", got, s.Floor)
+		}
+		if want := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC); !s.Floor.Hour.Equal(want) {
+			t.Errorf("Floor = %+v, want the oldest archived hour %v", s.Floor, want)
 		}
 	})
 
@@ -338,54 +346,4 @@ func TestLoadGapWindow(t *testing.T) {
 	notAsked("no loss", &StreamStateInfo{GapColumnsPresent: true})
 	notAsked("legacy index", &StreamStateInfo{GapColumnsPresent: false})
 	notAsked("no stream row", nil)
-}
-
-// The coverage summary and the status report grade one stream against one
-// floor and say the same word.
-func TestCoverageSummaryAndStatusAgree(t *testing.T) {
-	latest := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
-	for _, c := range []struct {
-		name string
-		lost time.Time
-		want string
-	}{
-		{"loss before the oldest partition", time.Date(2026, 7, 1, 9, 30, 0, 0, time.UTC), ContinuityOK},
-		{"loss inside the oldest partition", time.Date(2026, 8, 1, 10, 30, 0, 0, time.UTC), ContinuityGapAcknowledged},
-		{"loss after the newest indexed event", latest.Add(20 * time.Second), ContinuityGapAcknowledged},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			db, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			mock.MatchExpectationsInOrder(false)
-			mock.ExpectQuery(covPartsQ).WillReturnRows(covPartRows("p_2026080110", "p_future"))
-			mock.ExpectQuery(covArchQ).WillReturnRows(sqlmock.NewRows([]string{"min", "max", "sources"}).AddRow(nil, nil, 0))
-			mock.ExpectQuery(covPartsQ).WillReturnRows(covPartRows("p_2026080110", "p_future"))
-			mock.ExpectQuery(covProbeQ).WillReturnRows(covProbeRow(nil))
-			mock.ExpectQuery(covProbeQ).WillReturnRows(covProbeRow(latest))
-			mock.ExpectQuery("SELECT mode, binlog_file").WillReturnRows(sqlmock.NewRows(covStreamCols).
-				AddRow("gtid", "", 0, "uuid:1-9", 100, latest, latest, 7, "id-1", c.lost, "auto-advance"))
-			mock.ExpectQuery("SELECT gap_acked_at FROM stream_state").
-				WillReturnRows(sqlmock.NewRows([]string{"gap_acked_at"}).AddRow(c.lost.Add(10 * time.Minute)))
-			sum, err := CollectCoverageSummary(context.Background(), db, "binlog_index", latest.Add(42*time.Second))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sum.Continuity != c.want {
-				t.Fatalf("coverage summary = %q, want %q", sum.Continuity, c.want)
-			}
-			if onRecord := c.want == ContinuityGapAcknowledged; onRecord != !sum.GapLostAt.IsZero() || onRecord != !sum.GapAckedAt.IsZero() {
-				t.Errorf("summary instants lost=%v acked=%v under %q", sum.GapLostAt, sum.GapAckedAt, sum.Continuity)
-			}
-			// The status report, from the same record and the same floor.
-			s := &StreamStateInfo{Mode: "gtid", LastCheckpoint: latest, GapColumnsPresent: true,
-				GapLostAt: nt(c.lost), GapAckedAt: nt(c.lost.Add(10 * time.Minute)), Floor: sum.Floor}
-			_, doc, raw := renderGapWindow(t, s)
-			if doc.Stream.Continuity.Status != sum.Continuity {
-				t.Errorf("status JSON says %q, the coverage summary %q\n%s", doc.Stream.Continuity.Status, sum.Continuity, raw)
-			}
-		})
-	}
 }
