@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -155,7 +156,15 @@ func TestChangesOnly_whatEachCreateShapeRecords(t *testing.T) {
 	cp := exec.Command("docker", "cp",
 		fmt.Sprintf("bintrail-test-mysql:/var/lib/mysql/%s", binlog), filepath.Join(tmpDir, binlog))
 	if out, err := cp.CombinedOutput(); err != nil {
-		t.Fatalf("docker cp %s: %v\n%s", binlog, err, out)
+		// docker cp does not see a data directory mounted as tmpfs; reading
+		// the file from inside the container does.
+		raw, catErr := exec.Command("docker", "exec", "bintrail-test-mysql", "cat", "/var/lib/mysql/"+binlog).Output()
+		if catErr != nil {
+			t.Fatalf("docker cp %s: %v\n%s\ndocker exec cat: %v", binlog, err, out, catErr)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, binlog), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	p := parser.New(tmpDir, res, parser.Filters{Schemas: map[string]bool{src: true}}, nil)
 	evCh := make(chan event.Event, 100)
