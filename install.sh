@@ -441,9 +441,9 @@ say "     shows how to query them."
 say ""
 if [ -n "$CLI" ]; then
   say "${B}Or from this terminal${RST}, with no browser. The same steps as commands:"
-  say "  ${DIR}/dbtrail server add -h <host> -u dbtrail -p   ${DIM}# connect your MySQL${RST}"
+  say "  ${DIR}/dbtrail server add -h <host> -u dbtrail -p   ${DIM}# connect your MySQL; turns the MySQL port on${RST}"
   say "  ${DIR}/dbtrail snapshot run <name>                  ${DIM}# first copy${RST}"
-  say "  ${DIR}/dbtrail port on                              ${DIM}# the MySQL port${RST}"
+  say "  mysql -h 127.0.0.1 -P 3309 -u <name> -p               ${DIM}# query it${RST}"
   say "  ${DIR}/dbtrail --help"
   say ""
 fi
