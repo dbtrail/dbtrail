@@ -25,10 +25,11 @@ The intermediate dump lives in a temp directory: removed on success, **kept
 on failure** so you can inspect exactly what didn't load. `--output DIR`
 pins it and always keeps it.
 
-A table with **no usable baseline** (drill would fall back to binlog-only
-reconstruction, i.e. an empty starting table) always **fails** with an
+A table with **no usable baseline** (rebuilding it would start from an
+empty table and replay only the recorded changes) always **fails** with an
 explicit reason — a rehearsal that never touched a baseline must not read
-PASS.
+PASS. Nothing is written or loaded for that table, and the dump folder is
+left marked `_INCOMPLETE`.
 
 ## What drill proves — and what it doesn't
 

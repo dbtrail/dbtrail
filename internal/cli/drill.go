@@ -33,9 +33,9 @@ var drillCmd = &cobra.Command{
   3. Loads the dump into the target and checks each loaded table's row
      count against the exact number of rows the dump writer emitted,
      reporting per-table timings; a measured restore duration is an RTO
-     data point. A table that fell back to binlog-only reconstruction (no
-     usable baseline) FAILS: that rehearsal would start from an empty
-     table, and passing it would be false assurance.
+     data point. A table with no usable baseline FAILS and nothing is
+     written for it: that rehearsal would start from an empty table, and
+     passing it would be false assurance.
 
 Exit is non-zero if any table fails. The intermediate dump lives in a temp
 directory, removed on success and KEPT on failure for inspection (--output
@@ -324,26 +324,18 @@ func runDrill(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	reports, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
-		IndexDSN:    drlIndexDSN,
-		BaselineSrc: baselineSrc,
-		Tables:      tables,
-		At:          at,
-		OutputDir:   outDir,
-		// The format the target loads: a mydumper dump into MySQL, psql's
-		// SQL into PostgreSQL.
-		OutputFormat: target.OutputFormat(),
-		// Each chunk is applied to the scratch as ONE statement, so it must
-		// fit the target's max_allowed_packet. Chunks can overshoot by one
-		// row tuple (rotation triggers after the threshold), so the ~48MiB
-		// headroom under the stock 64M default is the real margin
-		// (reconstruct's own 256MiB default assumes myloader, which the
-		// operator tunes).
-		ChunkSize:          16 << 20,
-		WarnEventThreshold: 5_000_000,
-		ArchiveFetcher:     TunedArchiveFetcher(duckTuning),
-		DuckDBTuning:       duckTuning,
-	})
+	cfg := drillFoldConfig(drlIndexDSN, baselineSrc, tables, at, outDir, target.OutputFormat())
+	cfg.ArchiveFetcher = TunedArchiveFetcher(duckTuning)
+	cfg.DuckDBTuning = duckTuning
+	reports, _, err := drillFold(ctx, cfg)
+	// A table with no snapshot is refused by the engine before anything is
+	// written for it. That refusal is the table's verdict here, not the end
+	// of the rehearsal: the other tables are still loaded and checked, and
+	// the dump folder stays marked _INCOMPLETE.
+	noSnapshot, otherErrs := reconstruct.SplitChangesOnly(err)
+	if len(otherErrs) == 0 {
+		err = nil
+	}
 	if err != nil {
 		if derr := drillReconstructError(err); derr != nil {
 			// Every table was refused before writing: nothing to keep.
@@ -364,6 +356,10 @@ func runDrill(cmd *cobra.Command, args []string) error {
 
 	report := &drillReport{At: at}
 	anyFail := false
+	for _, e := range noSnapshot {
+		anyFail = true
+		report.Tables = append(report.Tables, drillNoSnapshotResult(e.Schema, e.Table))
+	}
 	for _, rep := range reports {
 		// Audit BEFORE the load: the dump on disk is already served
 		// historical row state, and a partial or failed load must not leave
@@ -403,6 +399,44 @@ func runDrill(cmd *cobra.Command, args []string) error {
 	return exitErr
 }
 
+// drillFoldConfig is what a rehearsal folds with, less the DuckDB budget the
+// flags give. format is what the target loads: a mydumper dump into MySQL,
+// psql's SQL into PostgreSQL.
+func drillFoldConfig(indexDSN, baselineSrc string, tables []string, at time.Time, outDir, format string) reconstruct.FullTableConfig {
+	return reconstruct.FullTableConfig{
+		IndexDSN:     indexDSN,
+		BaselineSrc:  baselineSrc,
+		Tables:       tables,
+		At:           at,
+		OutputDir:    outDir,
+		OutputFormat: format,
+		// Each chunk is applied to the scratch as ONE statement, so it must
+		// fit the target's max_allowed_packet. Chunks can overshoot by one
+		// row tuple (rotation triggers after the threshold), so the ~48MiB
+		// headroom under the stock 64M default is the real margin
+		// (reconstruct's own 256MiB default assumes myloader, which the
+		// operator tunes).
+		ChunkSize:          16 << 20,
+		WarnEventThreshold: 5_000_000,
+	}
+}
+
+// drillFold is the engine behind a seam, so a test can hand runDrill's
+// second half a set of reports and an error without an index.
+var drillFold = reconstruct.ReconstructTablesDetailed
+
+// drillNoSnapshotError is the verdict of a table with no snapshot to start
+// from, however drill learned it.
+const drillNoSnapshotError = "no usable baseline for this table; the dump was rebuilt from binlog deltas alone (an EMPTY starting table); a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)"
+
+// drillNoSnapshotResult is the FAIL of a table the engine refused because it
+// has no snapshot. Nothing was written or loaded for it. binlog_only stays
+// set, as it was when drill had the table built first, so nothing that reads
+// the report changes.
+func drillNoSnapshotResult(schema, table string) drillTableResult {
+	return drillTableResult{Schema: schema, Table: table, Status: "fail", BinlogOnly: true, Error: drillNoSnapshotError}
+}
+
 // drillTable runs one table's load-and-check half and produces its verdict —
 // extracted so the verdict wiring (fail-by-default, binlog-only refusal,
 // count comparison) is unit-testable without a real reconstruct.
@@ -419,7 +453,7 @@ func drillTable(ctx context.Context, target DrillTarget, outDir string, rep *rec
 		// Not even loaded: a rehearsal that never touched a baseline starts
 		// from an EMPTY table — passing it would be false assurance, and
 		// loading it would leave misleading partial data on the scratch.
-		res.Error = "no usable baseline for this table; the dump was rebuilt from binlog deltas alone (an EMPTY starting table); a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)"
+		res.Error = drillNoSnapshotError
 		return res
 	}
 	loadStart := time.Now()

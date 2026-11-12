@@ -94,6 +94,8 @@ func TestBinlogOnly_destructiveDDLInsideTheWindowRefuses(t *testing.T) {
 			Tables:      []string{"shop.t"},
 			At:          at,
 			OutputDir:   t.TempDir(),
+			// This test is about what the fallback refuses once it is asked for.
+			AllowChangesOnly: true,
 		})
 		for _, f := range failures {
 			if f.Table == "t" {

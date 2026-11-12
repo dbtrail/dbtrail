@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
@@ -168,4 +169,35 @@ func TestDrillReportExitError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "1 of 2") || !strings.Contains(err.Error(), "/tmp/d") {
 		t.Fatalf("failure must name counts and the kept dump: %v", err)
 	}
+}
+
+// drill does not ask the engine to build a table that has no snapshot. Built
+// first and failed afterwards, the table's partial files stayed in the dump
+// folder under a _SUCCESS marker, ready to be converted into a snapshot.
+func TestDrillFoldConfig_neverAsksForAChangesOnlyTable(t *testing.T) {
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cfg := drillFoldConfig("dsn", "/snapshots", []string{"shop.orders"}, at, "/out", reconstruct.OutputFormatMydumper)
+	if cfg.AllowChangesOnly {
+		t.Error("drill asks for a table with no snapshot to be written from its changes alone")
+	}
+	if cfg.ChunkSize != 16<<20 || cfg.OutputFormat != reconstruct.OutputFormatMydumper || !cfg.At.Equal(at) ||
+		cfg.IndexDSN != "dsn" || cfg.BaselineSrc != "/snapshots" || cfg.OutputDir != "/out" || len(cfg.Tables) != 1 {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+// The engine's refusal becomes the same FAIL drill gave when it had the table
+// built first: same status, same binlog_only, same words.
+func TestDrillNoSnapshotResult_sameVerdictAsBefore(t *testing.T) {
+	got := drillNoSnapshotResult("shop", "orders")
+	rep := &reconstruct.TableReport{Schema: "shop", Table: "orders", BinlogOnly: true}
+	built := drillTable(context.Background(), nil, "", rep)
+	if got != built {
+		t.Errorf("refused = %+v\nbuilt   = %+v", got, built)
+	}
+	if got.Status != "fail" || !got.BinlogOnly ||
+		got.Error != "no usable baseline for this table; the dump was rebuilt from binlog deltas alone (an EMPTY starting table); a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)" {
+		t.Errorf("verdict changed: %+v", got)
+	}
+	t.Logf("rendered: %s", got.Error)
 }

@@ -197,6 +197,13 @@ func Run(ctx context.Context, cfg Config) (Stats, error) {
 			return Stats{}, fmt.Errorf("--tables filter %v matched none of the %d table(s) in the dump", cfg.Tables, discovered)
 		}
 	}
+	// Before anything is converted: a folder a reconstruct did not finish,
+	// and a table it wrote from recorded changes alone, never become a
+	// snapshot.
+	if err := refuseUnconvertibleDump(cfg.InputDir, tables); err != nil {
+		return Stats{}, err
+	}
+
 	// Under --tables the caller chose what to copy, so what was left out is
 	// not news: the views are reported only for a run that takes everything.
 	var stats Stats
