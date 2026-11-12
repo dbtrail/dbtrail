@@ -13,13 +13,18 @@ import (
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
-// baselinePruneMinAge is a safety floor on how young a snapshot may be and still
-// be pruned, independent of the retention window. A just-completed snapshot is
-// the most likely to be the target of an in-flight reconstruct read; the floor
-// keeps it on disk for at least an hour regardless of how aggressive Retain is.
-// In practice Retain (parsed via cliutil.ParseRetain, whose smallest unit is 1h)
-// already subsumes this, so it is belt-and-suspenders against a future caller
-// that passes a sub-hour Retain programmatically.
+// baselinePruneMinAge is the floor of the AGE mode only (S3URL set, no
+// count): a snapshot younger than this is never removed by its age, however
+// short Retain is. Retain's smallest unit is already one hour
+// (cliutil.ParseRetain), so it is a belt against a caller that passes a
+// sub-hour Retain.
+//
+// The count modes have no time floor (#2678): the folder holds the newest
+// KeepNewest, for real. What a just-made snapshot needs is already given by
+// the count itself (it is the newest), and what a long reader of an older one
+// needs is given by BeginRead, which stops the prune while it runs. An hour
+// by the folder's NAME protected neither: it is the instant the snapshot is
+// dated, not when it was written or when a reader opened it.
 const baselinePruneMinAge = time.Hour
 
 // pruningSuffix marks a snapshot directory that has been renamed aside for
@@ -124,6 +129,11 @@ type PruneResult struct {
 	// Busy reports that another prune held this directory's lock, so this one
 	// did nothing. Not an error: the other prune is doing the same job.
 	Busy bool
+	// Reading names the job of this process that reads older snapshots of
+	// this directory now (BeginRead, #2678), so this prune did nothing: a
+	// snapshot is not removed under a reader. Not an error and not recorded
+	// as one; the prune after the job ends does the work. Empty when none.
+	Reading string
 	// Unremoved counts snapshots the prune planned to remove and could not
 	// move aside; they are still listed, and the attempt is recorded as a
 	// failure (LastPruneFailureFile).
@@ -289,7 +299,7 @@ func PruneLocalAsking(ctx context.Context, opts PruneOptions, has func(ctx conte
 // attempt's own result is returned unchanged.
 func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) (PruneResult, error) {
 	res, err := pruneAttempt(ctx, opts, probe)
-	if opts.DryRun || res.Busy {
+	if opts.DryRun || res.Busy || res.Reading != "" {
 		return res, err
 	}
 	now := opts.Now
@@ -427,6 +437,21 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	if _, err := os.Stat(opts.LocalDir); os.IsNotExist(err) {
 		return PruneResult{}, nil
 	}
+	// A snapshot is not removed under a reader (#2678): while a job of this
+	// process reads older snapshots of this folder, nothing is removed from
+	// it, in any mode. A dry run removes nothing and still says its plan.
+	if !opts.DryRun {
+		what, stuck := readingNow(opts.LocalDir, time.Now())
+		if stuck > 0 {
+			slog.Warn("baseline prune: a job has been reading this folder's older snapshots for longer than any such job runs, so the cleanup no longer waits for it",
+				"dir", opts.LocalDir, "jobs", stuck, "waited", readHoldLimit)
+		}
+		if what != "" {
+			slog.Info("baseline prune: a job is reading this folder's older snapshots; nothing is removed from it until the job ends",
+				"dir", opts.LocalDir, "job", what)
+			return PruneResult{Reading: what}, nil
+		}
+	}
 	unlock, busy, err := lockPrune(opts.LocalDir)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("baseline prune: %w", err)
@@ -459,12 +484,16 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	}
 	keepers := computeKeepers(snaps, now)
 	keepPointerTarget(opts.LocalDir, keepers)
+	// The last restore's result, whatever moment it is named for (#2678).
+	if name := lastRestored(opts.LocalDir, opts.DryRun); name != "" {
+		keepers[name] = true
+	}
 	// Read in both modes, so a mark whose snapshot is gone is swept in both.
 	held := heldSnapshots(opts.LocalDir, opts.DryRun)
 
 	if localOnly {
 		newest := computeNewestN(snaps, opts.KeepNewest, now)
-		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, baselinePruneMinAge, now)
+		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, 0, now)
 		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)
 		return withSweep(removePlanned(opts, now, pruneNames, res, func(string) string { return why })), nil
 	}
@@ -474,8 +503,12 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// destination says about them. nil without a count.
 	counted := opts.KeepNewest > 0
 	var newest map[string]bool
+	// The hour is the age mode's alone (#2678): with a count, the count
+	// decides, and a set Retain still keeps what is younger than it.
+	minAge := baselinePruneMinAge
 	if counted {
 		newest = computeNewestN(snaps, opts.KeepNewest, now)
+		minAge = 0
 	}
 
 	// Confirm durability only for snapshots that could actually be pruned —
@@ -495,7 +528,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			continue
 		}
 		age := now.Sub(s.ts)
-		if age < opts.Retain || age < baselinePruneMinAge {
+		if age < opts.Retain || age < minAge {
 			continue // too recent to prune → no need to confirm durability
 		}
 		if held[s.name] {
@@ -536,7 +569,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		durable[name] = true
 	}
 
-	pruneNames, res := planPruneHeld(snaps, keepers, newest, durable, held, opts.Retain, baselinePruneMinAge, now)
+	pruneNames, res := planPruneHeld(snaps, keepers, newest, durable, held, opts.Retain, minAge, now)
 	res.ProbeErrors = probeErrors
 	if counted && probeErrors > 0 {
 		// By count, a destination that cannot be asked removes nothing that
@@ -856,6 +889,15 @@ func enumerateLocalSnapshots(dir string) ([]localSnapshot, error) {
 			s.tables = tables
 			s.unreadable = readErr != ""
 			s.readErr = readErr
+			// A folder with neither marker and no table yet is one a writer
+			// has just created: every producer makes the folder and then
+			// writes _INCOMPLETE into it. Between the two it reads as a
+			// complete snapshot that holds nothing, which no rule keeps now
+			// that the count has no time floor (#2678), and removing it would
+			// fail that run. Not a copy of anything: left alone.
+			if readErr == "" && len(tables) == 0 && !hasSuccessMarker(snapDir) {
+				s.complete = false
+			}
 		}
 		out = append(out, s)
 	}
@@ -1010,4 +1052,11 @@ func sweepPruningLeftovers(dir string) (failures int, firstErr string) {
 		}
 	}
 	return failures, firstErr
+}
+
+// hasSuccessMarker reports whether snapDir carries _SUCCESS itself, which
+// SnapshotComplete does not tell apart from a folder with no marker at all.
+func hasSuccessMarker(snapDir string) bool {
+	_, err := os.Stat(filepath.Join(snapDir, SuccessMarker))
+	return err == nil
 }

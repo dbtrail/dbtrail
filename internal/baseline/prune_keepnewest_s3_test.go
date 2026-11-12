@@ -205,7 +205,7 @@ func TestS3Count_heldSnapshotsGoByTheCount(t *testing.T) {
 		}
 	})
 
-	t.Run("younger than an hour: kept", func(t *testing.T) {
+	t.Run("minutes old: no hour keeps them", func(t *testing.T) {
 		root := t.TempDir()
 		var s []string
 		for _, d := range []time.Duration{50 * time.Minute, 40 * time.Minute, 30 * time.Minute, 20 * time.Minute} {
@@ -216,10 +216,15 @@ func TestS3Count_heldSnapshotsGoByTheCount(t *testing.T) {
 			}
 			s = append(s, n)
 		}
-		if res := s3Count(t, root, 1, answers(nil)); len(res.Pruned) != 0 {
-			t.Fatalf("pruned %v: held snapshots younger than an hour", res.Pruned)
+		// No time floor (#2678): past the count they go by the count alone,
+		// and the bucket is not asked about any of them.
+		var asked []string
+		res := s3Count(t, root, 1, answers(&asked))
+		slices.Sort(res.Pruned)
+		if !slices.Equal(res.Pruned, s[:3]) || len(asked) != 0 {
+			t.Fatalf("pruned %v (want %v), asked %v (want none)", res.Pruned, s[:3], asked)
 		}
-		wantOnDisk(t, root, s...)
+		wantOnDisk(t, root, s[3])
 	})
 
 	t.Run("the only copy of a table, the current target and an incomplete one: kept", func(t *testing.T) {
@@ -316,8 +321,8 @@ func TestS3Count_heldSnapshotsGoByTheCount(t *testing.T) {
 }
 
 // Cycle after cycle of a 5-minute schedule that sends to S3 once a day: the
-// disk ends each cleanup with the count's snapshots and the ones still
-// younger than an hour, never with the held ones of the day, and the bucket
+// disk ends each cleanup with the count's snapshots, never with the held
+// ones of the day, and the bucket
 // keeps the last snapshot that was sent. A run whose upload failed leaves a
 // snapshot that is never removed until the bucket has it.
 func TestS3Count_cyclesOfASpacedSchedule(t *testing.T) {
@@ -393,9 +398,9 @@ func TestS3Count_cyclesOfASpacedSchedule(t *testing.T) {
 }
 
 // The guarantees of the local-only count hold with a destination: an
-// _INCOMPLETE snapshot, the `current` pointer's target, anything younger
-// than an hour, an unreadable snapshot and the newest copy of each table all
-// stay even when the bucket says it has every one of them.
+// _INCOMPLETE snapshot, the `current` pointer's target, an unreadable
+// snapshot and the newest copy of each table all stay even when the bucket
+// says it has every one of them. No hour is one of them (#2678).
 func TestS3Count_localGuaranteesHold(t *testing.T) {
 	everything := func(context.Context, string) (bool, error) { return true, nil }
 
@@ -432,7 +437,7 @@ func TestS3Count_localGuaranteesHold(t *testing.T) {
 		}
 	})
 
-	t.Run("younger than an hour", func(t *testing.T) {
+	t.Run("minutes old: the count and the bucket decide, not an hour", func(t *testing.T) {
 		root := t.TempDir()
 		var s []string
 		for _, d := range []time.Duration{50 * time.Minute, 40 * time.Minute, 30 * time.Minute, 20 * time.Minute} {
@@ -440,10 +445,23 @@ func TestS3Count_localGuaranteesHold(t *testing.T) {
 			makeSnapshot(t, root, n, true, "shop/orders")
 			s = append(s, n)
 		}
+		// The bucket has the three past the count: they go, each asked about
+		// once, and the newest is not asked about.
 		var asked []string
 		res := s3Count(t, root, 1, answers(&asked, s...))
-		if len(res.Pruned) != 0 || len(asked) != 0 {
-			t.Fatalf("pruned %v, asked %v: nothing younger than an hour goes or is asked about", res.Pruned, asked)
+		slices.Sort(res.Pruned)
+		slices.Sort(asked)
+		if !slices.Equal(res.Pruned, s[:3]) || !slices.Equal(asked, s[:3]) {
+			t.Fatalf("pruned %v, asked %v: want both %v", res.Pruned, asked, s[:3])
+		}
+		wantOnDisk(t, root, s[3])
+		// The bucket has none of them: all stay.
+		root2 := t.TempDir()
+		for _, n := range s {
+			makeSnapshot(t, root2, n, true, "shop/orders")
+		}
+		if res := s3Count(t, root2, 1, answers(nil)); len(res.Pruned) != 0 || res.KeptNotDurable != 3 {
+			t.Fatalf("the bucket has none: %+v", res)
 		}
 	})
 
