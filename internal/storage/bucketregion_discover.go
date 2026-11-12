@@ -66,7 +66,7 @@ var headBucketRegion = func(ctx context.Context, cfg aws.Config, bucket string) 
 	// question is only ever asked of AWS. The hint picks the partition (a
 	// cn- or us-gov- region answers for its own buckets only); us-east-1 when
 	// nothing is configured.
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+	client := newAWSOnlyS3Client(cfg, func(o *s3.Options) {
 		if o.Region == "" {
 			o.Region = "us-east-1"
 		}
@@ -105,7 +105,7 @@ func customEndpointConfigured(cfg aws.Config) bool {
 	if aws.ToString(cfg.BaseEndpoint) != "" {
 		return true
 	}
-	return aws.ToString(s3.NewFromConfig(cfg, S3ClientOptions()...).Options().BaseEndpoint) != ""
+	return sdkResolvedEndpoint(cfg) != ""
 }
 
 // DiscoverBucketRegion returns the region bucket lives in, asking S3 with an
