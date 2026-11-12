@@ -310,7 +310,7 @@ func runSnapshotSchedule(ctx context.Context, c *ctlClient, name, every string, 
 	}
 	fmt.Fprintf(out, "The copy of %q is updated every %s.\n", s.Name, strings.TrimSpace(every))
 	if up := strings.TrimSpace(saved.Schedule.UploadEvery); up != "" {
-		fmt.Fprintf(out, "A snapshot is sent to S3 every %s. The updates in between stay on DBTrail's machine. Change it on the %s page.\n", up, console.PageSnapshots)
+		fmt.Fprintf(out, "A snapshot is sent to S3 every %s. The updates in between are not sent, and DBTrail's machine keeps only the newest of them. Change it on the %s page.\n", up, console.PageSnapshots)
 	}
 	return nil
 }

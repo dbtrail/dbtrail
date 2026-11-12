@@ -88,7 +88,13 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 		t.Fatalf("the listing: retention %+v, s3_destination %v, %d snapshots", listed.LocalRetention, listed.S3Destination, len(listed.Snapshots))
 	}
 	// The same folder with no destination, by hand: every row is local.
+	// Three more made in the last hour come first: two are the count, and
+	// the third is past the count and too young to go at the next cleanup.
 	var local []map[string]any
+	for _, m := range []int{10, 20, 30} {
+		local = append(local, map[string]any{"time": now.Add(-time.Duration(m) * time.Minute).Format(consoleTSFormat), "age_hours": float64(m) / 60,
+			"tables": []string{"shop.orders"}, "kinds": []string{"dir"}})
+	}
 	for h := 1; h <= 5; h++ {
 		local = append(local, map[string]any{"time": at(h).Format(consoleTSFormat), "age_hours": h, "tables": []string{"shop.orders"}, "kinds": []string{"dir"}})
 	}
@@ -133,29 +139,31 @@ console.log(JSON.stringify({
 	t.Logf("no S3:   line %q, %d rows going, hover %q", got.Local.Line, got.Local.Chips, got.Local.Titles)
 	t.Logf("with S3: line %q, %d rows going, hover %q", got.S3.Line, got.S3.Chips, got.S3.Titles)
 
-	// No S3: the three local snapshots past the newest two go.
-	if got.Local.Chips != 3 || got.Local.Going != 3 {
-		t.Errorf("no S3: %d chips on %d rows, want the 3 local snapshots past the count", got.Local.Chips, got.Local.Going)
+	// No S3: the five local snapshots past the newest two and older than an
+	// hour go. The one made 30 minutes ago is past the count and is not
+	// marked: nothing younger than an hour goes at the next cleanup.
+	if got.Local.Chips != 5 || got.Local.Going != 5 {
+		t.Errorf("no S3: %d chips on %d rows, want the 5 past the count and older than an hour", got.Local.Chips, got.Local.Going)
 	}
 	for _, title := range got.Local.Titles {
 		if title != "Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." {
 			t.Errorf("no S3: hover text %q", title)
 		}
 	}
-	if len(got.Local.Line) != 1 || got.Local.Line[0] != "Keeps the newest 2 snapshots on this machine." {
+	if len(got.Local.Line) != 1 || got.Local.Line[0] != "Keeps the newest 2 snapshots on this machine, and any made in the last hour." {
 		t.Errorf("no S3: retention line %q", got.Local.Line)
 	}
 	// With S3: the one S3 also has, and the one held on purpose. The one
 	// whose upload failed is not marked, and neither is the held one inside
 	// the count.
 	wantTitles := []string{
-		"Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, now that S3 has it.",
-		"Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, the schedule did not send it to S3, so it does not wait for S3.",
+		"Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup that finds its complete copy in S3.",
+		"Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup: the schedule did not send it to S3, so it does not wait for S3.",
 	}
 	if got.S3.Chips != 2 || got.S3.Going != 2 || !slices.Equal(got.S3.Titles, wantTitles) {
 		t.Errorf("with S3: %d chips on %d rows, hover %q\nwant %q", got.S3.Chips, got.S3.Going, got.S3.Titles, wantTitles)
 	}
-	if len(got.S3.Line) != 1 || got.S3.Line[0] != "Keeps the newest 2 snapshots on this machine; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting." {
+	if len(got.S3.Line) != 1 || got.S3.Line[0] != "Keeps the newest 2 snapshots on this machine, and any made in the last hour; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting." {
 		t.Errorf("with S3: retention line %q", got.S3.Line)
 	}
 	for _, s := range append(append(got.S3.Line, got.S3.Titles...), got.Local.Line...) {

@@ -340,13 +340,16 @@ func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int 
 	}
 	blocked := map[string]bool{}
 	for _, d := range excluded {
-		if d != "" {
+		if d != "" && !isS3Location(d) {
 			blocked[canonicalDir(d)] = true
 		}
 	}
 	out := map[string]int{}
 	for _, e := range entries {
 		if e.BaselineDir == "" || e.LocalKeepNewest <= 0 || heldNow(e) {
+			continue
+		}
+		if LocalKeepSharedS3(entries, e, excluded...) {
 			continue
 		}
 		dir := canonicalDir(e.BaselineDir)
@@ -356,6 +359,40 @@ func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int 
 		out[dir] = e.LocalKeepNewest
 	}
 	return out
+}
+
+// isS3Location tells an S3 location from a folder among the excluded values.
+func isS3Location(s string) bool { return strings.HasPrefix(strings.TrimSpace(s), "s3://") }
+
+// LocalKeepSharedS3 reports whether e's S3 destination is also another
+// server's, or one of excluded (the daemon's own --baseline-s3, passed among
+// the excluded values as an s3:// location): the same prefix, trailing
+// slashes aside, the comparison the write refusal uses (#1684, sameS3).
+//
+// Such a folder is never pruned to a count (#2658). The prune asks the
+// bucket for <prefix>/<snapshot name>/_SUCCESS, and a snapshot name is the
+// second its run started, with no per-server segment: two servers on one
+// prefix and the same schedule write the same names, so the bucket would
+// answer "I have it" for the OTHER server's upload, and a local snapshot
+// whose own upload failed would be removed with no copy of it anywhere.
+// Writes into a shared location are refused, but two entries can still be
+// saved that way.
+func LocalKeepSharedS3(entries []ServerEntry, e ServerEntry, excluded ...string) bool {
+	mine := strings.TrimSpace(e.BaselineS3)
+	if mine == "" {
+		return false
+	}
+	for _, d := range excluded {
+		if isS3Location(d) && sameS3(mine, strings.TrimSpace(d)) {
+			return true
+		}
+	}
+	for _, o := range entries {
+		if o.ID != e.ID && sameS3(mine, strings.TrimSpace(o.BaselineS3)) {
+			return true
+		}
+	}
+	return false
 }
 
 // LocalKeepServer is the ONE server that keeps its snapshots in dir, a folder
@@ -382,9 +419,12 @@ func LocalKeepBlocked(entries []ServerEntry, e ServerEntry, excluded ...string) 
 	if heldNow(e) {
 		return true
 	}
+	if LocalKeepSharedS3(entries, e, excluded...) {
+		return true
+	}
 	dir := canonicalDir(e.BaselineDir)
 	for _, d := range excluded {
-		if d != "" && canonicalDir(d) == dir {
+		if d != "" && !isS3Location(d) && canonicalDir(d) == dir {
 			return true
 		}
 	}

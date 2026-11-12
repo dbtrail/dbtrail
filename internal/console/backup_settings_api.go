@@ -194,6 +194,10 @@ type backupSettingsServerDTO struct {
 	// the daemon's own, so console.LocalKeepTargets never prunes it,
 	// whatever KeepNewest says. The row says that instead of the count.
 	KeepBlocked bool `json:"keep_blocked,omitempty"`
+	// KeepSharedS3: of those, the folder is blocked because the server's S3
+	// destination is also another server's, or the daemon's own (#2658,
+	// LocalKeepSharedS3). The way out is a prefix of its own.
+	KeepSharedS3 bool `json:"keep_shared_s3,omitempty"`
 	// KeepHeld: of those, the folder is blocked because it once was shared
 	// and still holds the other server's snapshots (heldNow). The way
 	// out differs (a new empty folder), so the row says which.
@@ -227,6 +231,11 @@ type backupSettingsServerDTO struct {
 	// else refreshes the record.
 	NotInS3      *notInS3DTO `json:"not_in_s3,omitempty"`
 	NotInS3Error string      `json:"not_in_s3_error,omitempty"`
+	// ScheduleUploadSet is set only in the answer to the save that gave this
+	// server its FIRST S3 destination while its schedule had no upload
+	// interval (#2658): the interval that save started, so the page and the
+	// terminal can say it where the destination was saved.
+	ScheduleUploadSet string `json:"schedule_upload_set,omitempty"`
 	// SnapshotEveryMinutes is how often this server gets a snapshot without
 	// a click (#1681): its schedule (with the full copies off its grid),
 	// where the schedule can run in this process, and the daemon-wide
@@ -347,7 +356,8 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	dto.DefaultDir = s.cm.reg.DefaultBaselineDir(e.ID)
 	dto.KeepNewest = e.LocalKeepNewest
 	dto.PruneLoop = s.localPruneLoop
-	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
+	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir, s.cm.defaultBaselineS3)
+	dto.KeepSharedS3 = LocalKeepSharedS3(s.cm.reg.List(), e, s.cm.defaultBaselineS3)
 	dto.KeepHeld = heldNow(e)
 	inForce := s.localRetentionOf(e.ID)
 	if e.BaselineDir != "" && e.BaselineS3 != "" {
@@ -606,8 +616,18 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	// The DSN did not change, so the connection stays; the baseline and
 	// no-archive gates are derived state and must be recomputed — same tail
 	// as a baseline-only edit through the servers form.
+	// As saved: the registry may have started the schedule's upload interval
+	// in the same write (a first S3 destination, #2658).
+	if saved, ok := s.cm.reg.Get(entry.ID); ok {
+		entry = saved
+	}
 	s.cm.rebuildDerived(entry)
-	writeJSON(w, http.StatusOK, s.backupSettingsServerDTO(entry))
+	dto := s.backupSettingsServerDTO(entry)
+	if strings.TrimSpace(before.BaselineS3) == "" && entry.BaselineS3 != "" && entry.BackupSchedule != nil && entry.BackupSchedule.UploadEvery != "" &&
+		(before.BackupSchedule == nil || strings.TrimSpace(before.BackupSchedule.UploadEvery) == "") && before.BackupSchedule != nil {
+		dto.ScheduleUploadSet = entry.BackupSchedule.UploadEvery
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // The two provenances a daemon-wide row can have.

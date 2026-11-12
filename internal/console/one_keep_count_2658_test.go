@@ -197,3 +197,179 @@ func TestOneKeepCount_notInS3IsShownUnderACountAlone(t *testing.T) {
 		t.Fatal("no count and no age: a frozen record is shown as today's")
 	}
 }
+
+// A server that gets its FIRST S3 destination while its schedule has no
+// upload interval starts sending once a day, in the same write, through
+// every path that can set the destination. Without it the schedule's empty
+// interval, which was never a choice (there was no bucket), would mean a
+// snapshot in the bucket at every update. A server that already had a
+// destination keeps "each update", and so does one whose destination moves.
+func TestOneKeepCount_aFirstDestinationStartsTheUploadInterval(t *testing.T) {
+	setup := func(t *testing.T, s3, upload string) (*Server, string) {
+		srv, id := newScheduleServer(t, &stubScheduleReporter{full: true})
+		e, _ := srv.cm.reg.Get(id)
+		fakeSnapshot(t, e.BaselineDir)
+		e.BaselineS3 = s3
+		e.BackupSchedule = &BackupSchedule{Every: "5m", At: "00:00", UploadEvery: upload}
+		if err := srv.cm.reg.Update(e); err != nil {
+			t.Fatal(err)
+		}
+		return srv, id
+	}
+	upload := func(srv *Server, id string) string {
+		e, _ := srv.cm.reg.Get(id)
+		return e.BackupSchedule.UploadEvery
+	}
+	settings := func(t *testing.T, srv *Server, id, body string) backupSettingsServerDTO {
+		t.Helper()
+		rec := putBackupSettings(t, srv, id, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT settings %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+		var dto backupSettingsServerDTO
+		if err := json.Unmarshal(rec.Body.Bytes(), &dto); err != nil {
+			t.Fatal(err)
+		}
+		return dto
+	}
+	form := func(t *testing.T, srv *Server, id, s3 string) {
+		t.Helper()
+		e, _ := srv.cm.reg.Get(id)
+		body := `{"name":"wp","host":"127.0.0.1","port":"3306","user":"idx","dbname":"idx","baseline_dir":"` + e.BaselineDir + `","baseline_s3":"` + s3 + `"}`
+		if rec, out := doServersReq(t, srv, "PUT", "/api/servers/"+id, body); rec.Code != 200 {
+			t.Fatalf("PUT server: %d %s", rec.Code, out)
+		}
+	}
+
+	t.Run("the snapshot settings (the page, and dbtrail snapshot location --s3)", func(t *testing.T) {
+		srv, id := setup(t, "", "")
+		dto := settings(t, srv, id, `{"baseline_s3":"s3://bucket/first/"}`)
+		if got := upload(srv, id); got != DefaultUploadEvery {
+			t.Fatalf("after the first destination the schedule sends every %q, want %s", got, DefaultUploadEvery)
+		}
+		if dto.ScheduleUploadSet != DefaultUploadEvery || dto.ScheduleUploadEvery != DefaultUploadEvery {
+			t.Fatalf("the answer does not say the interval it started: set %q, schedule %q", dto.ScheduleUploadSet, dto.ScheduleUploadEvery)
+		}
+		t.Log(uploadIntervalStartedMsg(DefaultUploadEvery))
+		// A later save says nothing: nothing started.
+		if dto := settings(t, srv, id, `{"no_archive":true}`); dto.ScheduleUploadSet != "" {
+			t.Fatalf("a save that started nothing says %q", dto.ScheduleUploadSet)
+		}
+	})
+	t.Run("the server form and PUT /api/servers", func(t *testing.T) {
+		srv, id := setup(t, "", "")
+		form(t, srv, id, "s3://bucket/first/")
+		if got := upload(srv, id); got != DefaultUploadEvery {
+			t.Fatalf("after the first destination the schedule sends every %q, want %s", got, DefaultUploadEvery)
+		}
+	})
+	t.Run("a server that already had a destination keeps each update", func(t *testing.T) {
+		srv, id := setup(t, "s3://bucket/had/", "")
+		settings(t, srv, id, `{"no_archive":true}`)
+		form(t, srv, id, "s3://bucket/had/")
+		if got := upload(srv, id); got != "" {
+			t.Fatalf("a server that already sent each update now sends every %q", got)
+		}
+	})
+	t.Run("moving to another bucket keeps the schedule as it is", func(t *testing.T) {
+		srv, id := setup(t, "s3://bucket/had/", "")
+		if dto := settings(t, srv, id, `{"baseline_s3":"s3://bucket/moved/"}`); dto.ScheduleUploadSet != "" {
+			t.Fatalf("a moved destination says it started %q", dto.ScheduleUploadSet)
+		}
+		form(t, srv, id, "s3://bucket/again/")
+		if got := upload(srv, id); got != "" {
+			t.Fatalf("a moved destination changed each update into %q", got)
+		}
+	})
+	t.Run("no schedule: nothing to start, and no server without a bucket gets one", func(t *testing.T) {
+		srv, id := newScheduleServer(t, &stubScheduleReporter{full: true})
+		if dto := settings(t, srv, id, `{"baseline_s3":"s3://bucket/first/"}`); dto.ScheduleUploadSet != "" {
+			t.Fatalf("no schedule, and the answer says %q", dto.ScheduleUploadSet)
+		}
+		if e, _ := srv.cm.reg.Get(id); e.BackupSchedule != nil {
+			t.Fatalf("a destination created a schedule: %+v", e.BackupSchedule)
+		}
+		srv2, id2 := setup(t, "", "")
+		settings(t, srv2, id2, `{"no_archive":true}`)
+		if got := upload(srv2, id2); got != "" {
+			t.Fatalf("a server with no bucket got an upload interval %q", got)
+		}
+	})
+}
+
+// The documented downgrade case, pinned as it behaves: a registry that
+// already records the migration and holds a server with an S3 destination
+// and a count (an older version saved the 3 it does not use, after a
+// downgrade) is read with that count in force. docs/upgrade.md says to empty
+// Keep by count on such a server before upgrading again.
+func TestOneKeepCount_aCountSavedAfterADowngradeApplies(t *testing.T) {
+	clearStores(t)
+	path := writeRegistryFile(t, `version: 1
+local_keep_with_s3:
+  at: "2026-11-11T00:00:00Z"
+servers:
+  - id: aaaaaaaaaaaaaaa1
+    name: added-on-the-old-version
+    index_dsn: u:p@tcp(h:3306)/one
+    baseline_dir: /srv/one
+    baseline_s3: s3://bucket/one/
+    local_keep_newest: 3
+`)
+	r := loadReg(t, path)
+	if e := mustGet(t, r, "aaaaaaaaaaaaaaa1"); e.LocalKeepNewest != 3 {
+		t.Fatalf("count %d, want the stored 3 (the migration ran before this server existed)", e.LocalKeepNewest)
+	}
+	if got := LocalKeepTargets(r.List()); got["/srv/one"] != 3 {
+		t.Fatalf("folders pruned to a count = %v, want /srv/one at 3", got)
+	}
+}
+
+// Two servers whose S3 destinations are the same prefix are never pruned to a
+// count. The prune asks the bucket for <prefix>/<snapshot name>/_SUCCESS and
+// the name carries no server, so the bucket would answer for the OTHER
+// server's upload and a local snapshot whose own upload failed would be
+// removed with no copy anywhere. The daemon's own --baseline-s3 counts as
+// another writer of that prefix.
+func TestOneKeepCount_aSharedS3DestinationIsNotCounted(t *testing.T) {
+	entries := []ServerEntry{
+		{ID: "a", Name: "a", BaselineDir: "/srv/a", BaselineS3: "s3://bucket/shared/", LocalKeepNewest: 3},
+		{ID: "b", Name: "b", BaselineDir: "/srv/b", BaselineS3: "s3://bucket/shared", LocalKeepNewest: 3},
+		{ID: "c", Name: "c", BaselineDir: "/srv/c", BaselineS3: "s3://bucket/own/", LocalKeepNewest: 3},
+		{ID: "d", Name: "d", BaselineDir: "/srv/d", BaselineS3: "s3://bucket/daemon/", LocalKeepNewest: 3},
+		{ID: "e", Name: "e", BaselineDir: "/srv/e", BaselineS3: "s3://bucket/shared/sub/", LocalKeepNewest: 3},
+		{ID: "f", Name: "f", BaselineDir: "/srv/f", LocalKeepNewest: 3},
+	}
+	got := LocalKeepTargets(entries, "/var/lib/startup", "s3://bucket/daemon")
+	if len(got) != 3 || got["/srv/c"] != 3 || got["/srv/e"] != 3 || got["/srv/f"] != 3 {
+		t.Fatalf("folders pruned to a count = %v, want only /srv/c, /srv/e (a nested prefix is its own) and /srv/f", got)
+	}
+	for _, e := range entries[:2] {
+		if !LocalKeepSharedS3(entries, e) || !LocalKeepBlocked(entries, e, "/var/lib/startup", "s3://bucket/daemon") {
+			t.Errorf("%s: two servers on one prefix, and its folder is not reported as never counted", e.Name)
+		}
+	}
+	if !LocalKeepSharedS3(entries, entries[3], "s3://bucket/daemon") || LocalKeepSharedS3(entries, entries[3]) {
+		t.Error("the daemon's own S3 location is not counted as another writer of that prefix, or is without being passed")
+	}
+	for _, e := range entries[4:] {
+		if LocalKeepSharedS3(entries, e, "s3://bucket/daemon") || LocalKeepBlocked(entries, e, "/var/lib/startup", "s3://bucket/daemon") {
+			t.Errorf("%s: a destination of its own is reported shared", e.Name)
+		}
+	}
+
+	// Through the server: the settings row carries it, and the listing
+	// announces no count for either.
+	srv, _ := newLocalCopyServer(t)
+	_, one := createServer(t, srv, newServerBody+`,"baseline_s3":"s3://bucket/shared/"}`)
+	two, err := srv.cm.reg.Add(ServerEntry{Name: "two", DSN: "u:p@tcp(h:3306)/two", BaselineDir: t.TempDir(), BaselineS3: "s3://bucket/shared", LocalKeepNewest: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{one.ID, two.ID} {
+		e, _ := srv.cm.reg.Get(id)
+		row := srv.backupSettingsServerDTO(e)
+		if !row.KeepSharedS3 || !row.KeepBlocked || row.KeepInForce != 0 || srv.localRetentionOf(id) != nil {
+			t.Fatalf("%s: shared %v, blocked %v, in force %d, announced %+v", e.Name, row.KeepSharedS3, row.KeepBlocked, row.KeepInForce, srv.localRetentionOf(id))
+		}
+	}
+}

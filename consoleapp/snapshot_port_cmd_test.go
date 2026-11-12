@@ -243,7 +243,7 @@ func TestSnapshotSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("with an S3 destination:\n%s", out.String())
-	if want := "The copy of \"shop\" is updated every 5m.\nA snapshot is sent to S3 every 1d. The updates in between stay on DBTrail's machine. Change it on the Snapshots page.\n"; out.String() != want {
+	if want := "The copy of \"shop\" is updated every 5m.\nA snapshot is sent to S3 every 1d. The updates in between are not sent, and DBTrail's machine keeps only the newest of them. Change it on the Snapshots page.\n"; out.String() != want {
 		t.Errorf("output = %q, want %q", out.String(), want)
 	}
 	d.on("PUT /api/servers/id1/backup-schedule", 200, map[string]any{})

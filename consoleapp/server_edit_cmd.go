@@ -431,6 +431,9 @@ type ctlLocation struct {
 	Name        string `json:"name"`
 	BaselineDir string `json:"baseline_dir"`
 	BaselineS3  string `json:"baseline_s3"`
+	// ScheduleUploadSet: this save gave the server its first S3 destination
+	// and the daemon started its schedule's upload interval (#2658).
+	ScheduleUploadSet string `json:"schedule_upload_set"`
 	ResolvedDir string `json:"resolved_dir"`
 	ResolvedS3  string `json:"resolved_s3"`
 }
@@ -508,6 +511,9 @@ func runSnapshotLocation(ctx context.Context, c *ctlClient, name string, f locFl
 		return fmt.Errorf("%s answered, and not with %q's snapshot settings. See `bintrail-console snapshot location %s`", c.base, s.Name, s.Name)
 	}
 	fmt.Fprintln(out, saved.text(s.Name))
+	if saved.ScheduleUploadSet != "" {
+		fmt.Fprintf(out, "Its schedule now sends a snapshot to S3 every %s, not at each update. Change it on the %s page.\n", saved.ScheduleUploadSet, console.PageSnapshots)
+	}
 	if v, ok := body[locKeyS3Retain].(string); ok {
 		if v == "" {
 			fmt.Fprintln(out, "Snapshots in S3 are never deleted by DBTrail.")

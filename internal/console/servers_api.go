@@ -532,6 +532,49 @@ func defaultUploadEvery(e ServerEntry, every string) string {
 	return DefaultUploadEvery
 }
 
+// startUploadIntervalWithFirstDestination gives the schedule of a server that
+// just got its FIRST S3 destination the default upload interval (#2658),
+// inside the registry's own write, so every path that can set a destination
+// (the snapshot settings, the server form, the API, the terminal) does it,
+// and none can save the destination without it.
+//
+// Without this, the common path uploaded at every update: a server is added
+// with no bucket, its default schedule starts with no interval (there is
+// nothing to send), and days later the operator adds the bucket. The
+// schedule "already exists" and its empty interval now means each update: a
+// snapshot in the bucket every 5 minutes, which is what the default exists
+// to prevent.
+//
+// It overrides nothing anyone chose: an interval cannot be set on a server
+// with no destination, so an empty one there was never a choice. A server
+// that ALREADY had a destination keeps its empty interval (each update was
+// chosen, or was the default it was saved under), and so does one whose
+// destination only moves to another bucket.
+func startUploadIntervalWithFirstDestination(old ServerEntry, e *ServerEntry) {
+	if strings.TrimSpace(old.BaselineS3) != "" || strings.TrimSpace(e.BaselineS3) == "" {
+		return
+	}
+	if e.BackupSchedule == nil || strings.TrimSpace(e.BackupSchedule.UploadEvery) != "" {
+		return
+	}
+	every := defaultUploadEvery(*e, e.BackupSchedule.Every)
+	if every == "" {
+		return
+	}
+	// A copy: the schedule the caller holds is not this entry's to change.
+	sched := *e.BackupSchedule
+	sched.UploadEvery = every
+	e.BackupSchedule = &sched
+	slog.Info(uploadIntervalStartedMsg(every), "server", e.Name, "every", sched.Every, "destination", e.BaselineS3)
+}
+
+// uploadIntervalStartedMsg is the daemon's line when a first S3 destination
+// starts the upload interval of a schedule that had none.
+func uploadIntervalStartedMsg(every string) string {
+	return "console: this server got its first S3 destination, so its schedule now sends a snapshot there every " + every +
+		", not at each update; change it on the " + PageSnapshots + " page"
+}
+
 // defaultScheduleBounded says a server's local copies stay bounded under a
 // schedule: only its newest LocalKeepNewest are kept. With an S3
 // destination too since #2658: the count governs the folder there as well,

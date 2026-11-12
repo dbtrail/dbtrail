@@ -224,7 +224,7 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 	if !ok || e.BaselineDir == "" {
 		return nil
 	}
-	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir)[canonicalDir(e.BaselineDir)]
+	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir, s.cm.defaultBaselineS3)[canonicalDir(e.BaselineDir)]
 	if n <= 0 {
 		return nil
 	}

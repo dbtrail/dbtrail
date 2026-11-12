@@ -1697,8 +1697,8 @@ func baselinePruneTargets(entries []console.ServerEntry, globalDir, globalS3 str
 // covered are the folders named, symlinks resolved: prunePlan leaves the age
 // target of such a folder out, since the count target is pruned with the age
 // too.
-func localKeepPruneTargets(entries []console.ServerEntry, globalDir string) (out []baselinePruneTarget, covered map[string]bool) {
-	keep := console.LocalKeepTargets(entries, globalDir)
+func localKeepPruneTargets(entries []console.ServerEntry, globalDir string, globalS3 ...string) (out []baselinePruneTarget, covered map[string]bool) {
+	keep := console.LocalKeepTargets(entries, append([]string{globalDir}, globalS3...)...)
 	dirs := make([]string, 0, len(keep))
 	for d := range keep {
 		dirs = append(dirs, d)
@@ -1735,7 +1735,7 @@ func localKeepPruneTargets(entries []console.ServerEntry, globalDir string) (out
 // is past the count AND older than the age), where two prunes in a row would
 // let the age alone take the folder under its count.
 func prunePlan(entries []console.ServerEntry, globalDir, globalS3 string, retain time.Duration) []baselinePruneTarget {
-	byCount, covered := localKeepPruneTargets(entries, globalDir)
+	byCount, covered := localKeepPruneTargets(entries, globalDir, globalS3)
 	var targets []baselinePruneTarget
 	if retain > 0 {
 		for _, t := range baselinePruneTargets(entries, globalDir, globalS3) {
@@ -1873,6 +1873,14 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 		}
 		sent[name] = true
 		slog.Info("snapshot cleanup: sent again a local snapshot the destination lacked", "dir", t.dir, "snapshot", name, "destination", t.s3)
+	}
+	if res.DestinationSilent {
+		// The destination failed to answer for some snapshots in this pass
+		// (#2658), so how many it lacks is not known: the prune left the
+		// record of its last full answer in place, and a count worked out
+		// from this partial one would shrink it, or remove it, and read as
+		// "S3 has them". The ones it did answer for were still sent above.
+		return
 	}
 	var left []string
 	for _, name := range res.NotAtDestination {

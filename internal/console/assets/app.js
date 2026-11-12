@@ -9165,7 +9165,9 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
   if (reuse && !s3) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
   const stuck = was.held || was.blocked;
   const none = s3 ? "the count does not apply to it" : "nothing in it is removed, whatever the count says";
-  if (was.held) {
+  if (was.sharedS3) {
+    say("Another server sends its snapshots to this S3 location too, so " + none + ". Give each server its own S3 prefix.");
+  } else if (was.held) {
     say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {
     say("This folder is shared with another server or is DBTrail's startup folder, so " + none + ".");
@@ -9469,7 +9471,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // back can I go"; the rest of what the count means waits under "More
     // about this server", so the card is read at a glance.
     const said = localCopyWords(s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
-      { source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held,
+      { source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held, sharedS3: asSaved && !!srv.keep_shared_s3,
         age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
@@ -9510,15 +9512,21 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       }
       if (k !== was.keep) body.keep_newest = k;
     }
+    let answer;
     try {
-      await saveServerSnapshotSettings(srv.id, body);
+      answer = await saveServerSnapshotSettings(srv.id, body);
     } catch (err) {
       msg.textContent = (err && err.message) || String(err);
       msg.hidden = false;
       sync();
       return;
     }
-    toast("Saved for " + (srv.name || srv.id));
+    // A first S3 destination starts the schedule's S3 interval (#2658): said
+    // here, where the destination was saved, since the schedule changed too.
+    const upSet = answer && answer.schedule_upload_set;
+    toast("Saved for " + (srv.name || srv.id) + (upSet
+      ? ". Its schedule now sends a snapshot to S3 every " + upSet + ", not at each update. Change it under Update the copy."
+      : ""));
     // Repaint from the server's answer, not from what was clicked: the
     // provenance row depends on the resolution the daemon just recomputed.
     // renderSnapshots(), like the daemon-row Save beside it: the route path
@@ -10757,7 +10765,11 @@ function snapshotRetentionLines(b) {
   if (keep > 0) {
     // With S3 the count is the same; what is past it waits for its copy
     // there (#2658).
+    // The hour is said with the count, not after it: nothing made in the
+    // last hour is ever removed, so a 5-minute schedule keeps about a dozen
+    // more than the number.
     facts.push((keep === 1 ? "Keeps only the newest snapshot on this machine" : "Keeps the newest " + keep + " snapshots on this machine") +
+      ", and any made in the last hour" +
       (b.s3_destination ? "; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting." : "."));
   }
   const lp = b.last_prune;
@@ -10929,7 +10941,9 @@ function baselinesPanel(b, servers, opts) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
         localSeen++;
-        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
+        // Nothing younger than an hour goes at the next cleanup, so it is
+        // not marked, whatever its place in the count.
+        if (localSeen > keepInForce && !(sn.age_hours < 1) && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
       });
     }
     const total = b.snapshots.length;
@@ -10982,7 +10996,11 @@ function baselinesPanel(b, servers, opts) {
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
-        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, " + (!b.s3_destination ? "never a table's only copy." : (sn.kinds || []).includes("s3") ? "now that S3 has it." : "the schedule did not send it to S3, so it does not wait for S3.") }));
+        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup" +
+          // The list saw this snapshot in S3; the cleanup asks S3 itself for
+          // the complete copy before it removes anything, so the hover says
+          // the condition, not that it is met.
+          (!b.s3_destination ? ", never a table's only copy." : (sn.kinds || []).includes("s3") ? " that finds its complete copy in S3." : ": the schedule did not send it to S3, so it does not wait for S3.") }));
       }
       // With skipped views the row says both counts (#1879), whether or not
       // the table count varies: the views are what the row is there to show.
@@ -12255,7 +12273,7 @@ function backupScheduleCard(cur, b) {
     upload = choicePills(upChoices, savedUp, "Send to S3 every", touched);
     uploadWrap = el("div", { class: "bk-sched-full", "data-sched-edit": "1" },
       el("p", { class: "form-hint", text: "Send a snapshot to S3 every" }), upload,
-      el("p", { class: "form-hint", text: "The updates in between stay on this machine and are not sent. The bucket grows more slowly, and if this machine is lost, the newest snapshot in S3 can be that much older." }));
+      el("p", { class: "form-hint", text: "The updates in between are not sent to S3, and this machine keeps only the newest of them. The bucket grows more slowly, and if this machine is lost, the newest snapshot in S3 can be that much older." }));
     syncUpload();
   }
   save.onclick = () => {

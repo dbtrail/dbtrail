@@ -118,6 +118,26 @@ func TestDefaultSchedule(t *testing.T) {
 			t.Fatalf("an unreadable every: default upload interval %q", got)
 		}
 	})
+	t.Run("a bucket set between the check and the write: no schedule for the old location", func(t *testing.T) {
+		// The check ran on the entry without a bucket; the settings saved one
+		// before the write. The schedule checked (no upload interval) is not
+		// written over a location it was not checked for. The mark is
+		// cleared all the same: it is a one-time offer.
+		rep := &stubScheduleReporter{full: true}
+		srv, added := create(t, rep, "")
+		rep.onGates = func() {
+			cur, _ := srv.cm.reg.Get(added.ID)
+			cur.BaselineS3 = "s3://b/later/"
+			if err := srv.cm.reg.Update(cur); err != nil {
+				t.Fatal(err)
+			}
+		}
+		srv.ActivateDefaultSchedule(added.ID)
+		got, _ := srv.cm.reg.Get(added.ID)
+		if got.BackupSchedule != nil || got.DefaultScheduleOnFirst || len(rep.observed) != 0 {
+			t.Fatalf("schedule %+v, mark %v, loop told %v: want none, written for a location that changed", got.BackupSchedule, got.DefaultScheduleOnFirst, rep.observed)
+		}
+	})
 	t.Run("an existing server with S3 is never given one", func(t *testing.T) {
 		// Saved before the change: no mark (an S3 server never got one) and,
 		// read by this build, no count.

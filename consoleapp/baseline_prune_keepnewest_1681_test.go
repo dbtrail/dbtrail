@@ -358,3 +358,22 @@ func TestLocalKeepPruneTargets_aBlankDestinationIsLeftAlone(t *testing.T) {
 		}
 	}
 }
+
+// Two servers on one S3 prefix: neither folder is pruned by its count, with
+// or without an age, and with an age each is still pruned by the age alone,
+// as before.
+func TestPrunePlan_aSharedS3DestinationIsNeverPrunedByCount(t *testing.T) {
+	entries := []console.ServerEntry{
+		{ID: "a", Name: "a", BaselineDir: "/srv/a", BaselineS3: "s3://bucket/shared/", LocalKeepNewest: 3},
+		{ID: "b", Name: "b", BaselineDir: "/srv/b", BaselineS3: "s3://bucket/shared", LocalKeepNewest: 3},
+		{ID: "c", Name: "c", BaselineDir: "/srv/c", BaselineS3: "s3://bucket/global/", LocalKeepNewest: 3},
+	}
+	if plan := prunePlan(entries, "/global", "s3://bucket/global", 0); len(plan) != 0 {
+		t.Fatalf("plan with no age = %+v, want nothing: every destination here is shared", plan)
+	}
+	for _, tgt := range prunePlan(entries, "/global", "s3://bucket/global", 24*time.Hour) {
+		if tgt.keepNewest != 0 {
+			t.Errorf("a folder whose S3 destination is shared is pruned by a count: %+v", tgt)
+		}
+	}
+}

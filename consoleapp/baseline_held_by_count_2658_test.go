@@ -181,3 +181,42 @@ func TestHeldByCount_aFailedUploadIsNotHeld(t *testing.T) {
 		t.Fatalf("with the copy confirmed: pruned %v, want %s", res.Pruned, failed)
 	}
 }
+
+// A bucket that answers for some snapshots and times out for others leaves
+// the record of what S3 lacks as the last full answer left it. The prune
+// does not touch it, and neither does the resend that follows: the one
+// snapshot the bucket did answer for is sent again, and the count on the
+// page stays at 10, where 10 - 9 unanswered - 1 resent would have removed
+// the record and read as "S3 has them all".
+func TestPruneCycle_aHalfSilentBucketKeepsTheRecordOfWhatS3Lacks(t *testing.T) {
+	for _, resendFails := range []bool{false, true} {
+		dir := t.TempDir()
+		name := "2026-01-01T00-00-00Z"
+		writeSnapshotFiles(t, filepath.Join(dir, name), baseline.SuccessMarker)
+		before := baseline.NotInDestination{At: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC), Count: 10, Names: []string{name}}
+		if err := baseline.RewriteNotInDestination(dir, before); err != nil {
+			t.Fatal(err)
+		}
+		var resent []string
+		prev := resendSnapshotFn
+		t.Cleanup(func() { resendSnapshotFn = prev })
+		resendSnapshotFn = func(_ context.Context, _, _, n string) error {
+			resent = append(resent, n)
+			if resendFails {
+				return errors.New("network")
+			}
+			return nil
+		}
+		prune := func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error) {
+			return baseline.PruneResult{DestinationSilent: true, KeptNotDurable: 10, ProbeErrors: 9, NotAtDestination: []string{name}}, nil
+		}
+		runBaselinePruneCycle(context.Background(), []baselinePruneTarget{{dir: dir, s3: "s3://b/p", keepNewest: 3}}, 0, prune)
+		if !slices.Equal(resent, []string{name}) {
+			t.Fatalf("resend fails=%v: resent %v, want the one snapshot the bucket said it lacks", resendFails, resent)
+		}
+		rec, ok, err := baseline.ReadNotInDestination(dir)
+		if err != nil || !ok || rec.Count != 10 || !rec.At.Equal(before.At) {
+			t.Fatalf("resend fails=%v: record %+v ok=%v err=%v, want the 10 of the last full answer, untouched", resendFails, rec, ok, err)
+		}
+	}
+}

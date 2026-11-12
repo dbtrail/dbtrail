@@ -34,7 +34,10 @@ FakeEl.prototype.addEventListener = function (t, f) { (this._l = this._l || {})[
 const fire = (n, t) => { for (const f of ((n._l || {})[t] || [])) f({ key: "" }); };
 const calls = [];
 ctx.__calls = calls;
-vm.runInContext("api = (u, o) => { __calls.push({ u, body: o.body }); return Promise.resolve({}); }; renderSnapshots = () => Promise.resolve(); toast = () => {}; capsCache.monitor = true;", ctx);
+const toasts = [];
+ctx.__toasts = toasts;
+ctx.__answer = {};
+vm.runInContext("api = (u, o) => { __calls.push({ u, body: o.body }); return Promise.resolve(__answer); }; renderSnapshots = () => Promise.resolve(); toast = (m) => { __toasts.push(m); }; capsCache.monitor = true;", ctx);
 const walk = (n, f) => { if (!n || n.nodeType !== 1) return; f(n); for (const c of n.children) walk(c, f); };
 const find = (root, pred) => { let hit = null; walk(root, (n) => { if (!hit && pred(n)) hit = n; }); return hit; };
 const byName = (root, name, value) => find(root, (n) => n.tag === "input" && n.attrs.name === name && (value == null || n.attrs.value === value));
@@ -106,6 +109,18 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("s3CountedBlocked", Object.assign({}, s3c, { keep_blocked: true, keep_in_force: 0 }), null);
   await step("s3CountedKeep5", s3c, (r) => type(r, "keep_newest", "5"));
   await step("s3CountedKeepAll", s3c, (r) => type(r, "keep_newest", ""));
+  // Two servers on one S3 prefix (#2658): the count does not apply.
+  await step("s3SharedS3", Object.assign({}, s3c, { keep_blocked: true, keep_shared_s3: true, keep_in_force: 0 }), null);
+  // The save that gives a server its first S3 destination: the daemon
+  // answers with the S3 interval it started on the schedule.
+  toasts.length = 0;
+  ctx.__answer = { schedule_upload_set: "1d" };
+  await step("firstS3", fresh, (r) => type(r, "baseline_s3", "s3://b/p/"));
+  out.firstS3.toast = toasts.slice();
+  toasts.length = 0;
+  ctx.__answer = {};
+  await step("laterSave", fresh, (r) => type(r, "keep_newest", "5"));
+  out.laterSave.toast = toasts.slice();
   // The schedule card's rate sentence follows the listing's local_retention.
   vm.runInContext("capsCache.backup_schedule = true;", ctx);
   const text = (n) => { let t = ""; walk(n, (x) => { if (x.tag === "p" && x._text) t += x._text + " | "; }); return t; };
@@ -142,6 +157,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		Before view           `json:"before"`
 		After  view           `json:"after"`
 		Body   map[string]any `json:"body"`
+		Toast  []string       `json:"toast"`
 		// locked only
 		Disabled     bool `json:"disabled"`
 		SaveDisabled bool `json:"saveDisabled"`
@@ -283,6 +299,23 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	}
 	if w := joined(got["s3CountedBlocked"].Before); strings.Contains(w, "hourly cleanup") || strings.Contains(w, "nothing in it is removed") || strings.Contains(w, "Set a number") {
 		t.Errorf("a blocked folder with S3: %q", w)
+	}
+	// A destination another server also sends to: said, with the way out,
+	// and no removal is promised.
+	sh := joined(got["s3SharedS3"].Before)
+	t.Logf("s3SharedS3 (at rest):\n  %s", strings.Join(got["s3SharedS3"].Before.Words[:1], "\n  "))
+	if !strings.Contains(sh, "Another server sends its snapshots to this S3 location too, so the count does not apply to it. Give each server its own S3 prefix.") ||
+		strings.Contains(sh, "hourly cleanup") || strings.Contains(sh, "Set a number") {
+		t.Errorf("a destination shared with another server: %q", sh)
+	}
+	// The first S3 destination: the save's own message says what the
+	// schedule now does. A save that started nothing says only that it saved.
+	t.Logf("firstS3 toast: %q; laterSave toast: %q", got["firstS3"].Toast, got["laterSave"].Toast)
+	if tt := got["firstS3"].Toast; len(tt) != 1 || tt[0] != "Saved for prod. Its schedule now sends a snapshot to S3 every 1d, not at each update. Change it under Update the copy." {
+		t.Errorf("the save that set a first S3 destination said %q", tt)
+	}
+	if tt := got["laterSave"].Toast; len(tt) != 1 || tt[0] != "Saved for prod" {
+		t.Errorf("a save that started nothing said %q", tt)
 	}
 	if k := got["s3CountedKeep5"].Body["keep_newest"]; k != float64(5) {
 		t.Errorf("a count typed on a server with S3 sent %+v", got["s3CountedKeep5"].Body)
