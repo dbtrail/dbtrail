@@ -425,7 +425,7 @@ func TestChooseBackupMethod_updatesAQuietServerTheSourceConfirms(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
 	b.window = b.measureWindow
 	e := addScheduled(t, reg, true) // the fake snapshot at snapshotAnchor (weeks old), an hourly schedule (cut-over 6h)
-	sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: 1000}, publishedAt: snapshotAnchor, indexDSN: e.DSN}
+	sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: 1000}, publishedAt: snapshotAnchor, indexDSN: e.DSN, readsFrom: snapshotAnchor, readsFromKnown: true}
 	mark := indexMark{events: 1000}
 	stubIndexMark(t, &mark, true)
 	now := snapshotAnchor.Add(8 * time.Hour)
