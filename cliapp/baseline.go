@@ -56,7 +56,7 @@ func init() {
 	baselineCmd.Flags().StringVar(&bslCompression, "compression", "zstd", "Parquet compression codec: zstd, snappy, gzip, none")
 	baselineCmd.Flags().IntVar(&bslRowGroupSize, "row-group-size", 500_000, "Rows per Parquet row group")
 	baselineCmd.Flags().StringVar(&bslUpload, "upload", "", "S3 destination URL to upload Parquet files after generation (e.g. s3://my-bucket/baselines/). One writer per prefix")
-	baselineCmd.Flags().StringVar(&bslUploadRegion, "upload-region", "", "AWS region for --upload (default: from AWS_REGION env var or ~/.aws/config)")
+	baselineCmd.Flags().StringVar(&bslUploadRegion, "upload-region", "", "AWS region for --upload (default: the bucket's own region, found automatically; AWS_REGION or ~/.aws/config with a custom S3 endpoint)")
 	baselineCmd.Flags().StringVar(&bslBaselineRetain, "baseline-retain", "", "Prune local snapshots older than this (Nd/Nh) once a durable S3 copy exists (requires --upload; never deletes the only copy or the newest snapshot per table)")
 	baselineCmd.Flags().StringVar(&bslFormat, "format", "text", "Output format: text or json")
 	baselineCmd.Flags().BoolVar(&bslRetry, "retry", false, "Skip tables whose output Parquet file already exists and S3 objects that were already uploaded")

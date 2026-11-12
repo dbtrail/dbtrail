@@ -164,7 +164,26 @@ func newS3Client(ctx context.Context, cfg S3Config) (*s3.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: %w", err)
 	}
-	return NewS3ClientFromConfig(awsCfg), nil
+	return NewS3ClientFromConfig(withBucketRegion(ctx, awsCfg, cfg.Bucket, cfg.Region)), nil
+}
+
+// withBucketRegion is awsCfg signing for bucket's own region when the caller
+// named none (#2688). The region the environment resolves (AWS_REGION, the
+// shared config, the instance's region) is where this PROCESS runs, not
+// where the bucket is, and a bucket elsewhere answers every request with
+// 301 PermanentRedirect. A region the caller passed (an --*-s3-region flag)
+// is the operator's and is kept, and so is the configured one whenever the
+// bucket's region cannot be discovered (see DiscoverBucketRegion).
+func withBucketRegion(ctx context.Context, awsCfg aws.Config, bucket, explicit string) aws.Config {
+	if explicit != "" {
+		return awsCfg
+	}
+	if r, ok := DiscoverBucketRegion(ctx, awsCfg, bucket); ok && r != awsCfg.Region {
+		slog.Debug("S3 bucket is in another region than the configured one; using the bucket's",
+			"bucket", bucket, "bucket_region", r, "configured_region", awsCfg.Region)
+		awsCfg.Region = r
+	}
+	return awsCfg
 }
 
 // newS3BackendFromClient creates an S3Backend from an existing s3API client.

@@ -45,9 +45,9 @@ import (
 // OpenS3Object fetches an S3 object as a byte stream. It is a package variable
 // ONLY so the read-path wiring tests can stub S3 without a mock server;
 // production code never reassigns it. The default implementation uses the AWS
-// SDK default credential chain with the shared IMDS region fallback
-// (storage.NewS3Client) — the same resolution every other SDK-side S3 caller
-// in this codebase uses.
+// SDK default credential chain and signs for the bucket's own region
+// (storage.NewS3ClientForBucket), the same resolution every other SDK-side
+// S3 caller that knows its bucket uses.
 var OpenS3Object = sdkOpenS3Object
 
 // Caching policy. ValidateS3File sits on hot paths that loop — the shim
@@ -318,44 +318,38 @@ func crc32cS3Object(ctx context.Context, bucket, key string) (string, error) {
 
 var (
 	s3ClientMu sync.Mutex
-	s3Client   *s3.Client
+	s3Clients  = map[string]*s3.Client{}
 )
 
-// sharedS3Client lazily builds one process-wide S3 client on the DEFAULT
-// credential-chain region (env/config/IMDS via storage.NewS3Client). It
-// deliberately does NOT chase a bucket's region across a 301 redirect: the
-// baseline READ paths this validator guards resolve region the same way
-// (duckdbutil.EnableS3CredentialChain pins no region either), so a
-// cross-region baseline bucket fails the read itself — this is validator
-// parity, not a new gap, and a redirect failure degrades to the logged skip
-// like any other validator-side read error. If the read side ever grows
-// region pinning for baselines (the #511 EnableS3CredentialChainRegion
-// treatment), thread the same region in here. A failed build is not cached,
-// so a transient config error doesn't pin validation off forever.
-func sharedS3Client(ctx context.Context) (*s3.Client, error) {
+// sharedS3Client lazily builds this process's client for bucket, once per
+// bucket, through storage.NewS3ClientForBucket: a bucket with its own store
+// (#1575) gets that store's endpoint and region, and any other bucket signs
+// for its own region, discovered once (#2688). One client for every bucket,
+// on the environment's region, answered 301 for a bucket elsewhere, and the
+// validator then skipped the check with only a log line, while the read it
+// guards succeeded. A store-routed bucket is built per call, not kept: its
+// store is a console setting that can change under a running process. A
+// failed build is not cached, so a transient config error doesn't pin
+// validation off forever.
+func sharedS3Client(ctx context.Context, bucket string) (*s3.Client, error) {
+	if _, routed := storage.BucketStoreFor(bucket); routed {
+		return storage.NewS3ClientForBucket(ctx, bucket, "")
+	}
 	s3ClientMu.Lock()
 	defer s3ClientMu.Unlock()
-	if s3Client != nil {
-		return s3Client, nil
+	if c := s3Clients[bucket]; c != nil {
+		return c, nil
 	}
-	c, err := storage.NewS3Client(ctx, "")
+	c, err := storage.NewS3ClientForBucket(ctx, bucket, "")
 	if err != nil {
 		return nil, err
 	}
-	s3Client = c
+	s3Clients[bucket] = c
 	return c, nil
 }
 
 func sdkOpenS3Object(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
-	var client *s3.Client
-	var err error
-	if _, routed := storage.BucketStoreFor(bucket); routed {
-		// A bucket with its own store (#1575) cannot share the default-region
-		// client: it has its own endpoint and region.
-		client, err = storage.NewS3ClientForBucket(ctx, bucket, "")
-	} else {
-		client, err = sharedS3Client(ctx)
-	}
+	client, err := sharedS3Client(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -364,6 +358,17 @@ func sdkOpenS3Object(ctx context.Context, bucket, key string) (io.ReadCloser, er
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		// A client built while the bucket's region could not be discovered
+		// signs for the environment's; dropped, so the next call builds one
+		// that asks again instead of keeping the wrong region for good.
+		var mismatch *storage.RegionMismatchError
+		if errors.As(err, &mismatch) {
+			s3ClientMu.Lock()
+			if s3Clients[bucket] == client {
+				delete(s3Clients, bucket)
+			}
+			s3ClientMu.Unlock()
+		}
 		return nil, err
 	}
 	return out.Body, nil

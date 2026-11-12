@@ -1,6 +1,8 @@
 package console
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -9,6 +11,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/storage"
 )
 
 // TestMain isolates the package from the developer's real home directory:
@@ -27,6 +30,12 @@ func TestMain(m *testing.M) {
 	// login that sets or upgrades a password costs seconds under -race. Tests
 	// about the cost itself put the shipped value back (useShippedBcryptCost).
 	SetBcryptCostForTest(bcrypt.MinCost)
+	// Off the network: a client built for a bucket asks S3 where it lives
+	// (#2688), and what AWS answers for a made-up bucket name must not decide
+	// a test here.
+	storage.SetBucketRegionDiscoveryForTest(func(context.Context, string, string) (string, error) {
+		return "", errors.New("bucket region discovery is disabled in this package's tests")
+	})
 	tmp, err := os.MkdirTemp("", "console-test-home-*")
 	if err == nil {
 		os.Setenv("HOME", tmp)

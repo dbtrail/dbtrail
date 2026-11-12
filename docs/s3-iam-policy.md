@@ -83,16 +83,16 @@ Add it as a bucket-level action (alongside `s3:ListBucket`) if you want the
 answer. Some S3-compatible stores do not implement the call; they get the
 third row too.
 
-**`s3:GetBucketLocation`** is not in the policy above. It's only needed if
-your archive/baseline bucket lives in a **different AWS region** than the
-one DBTrail otherwise resolves for its credentials (env vars, `~/.aws`
-profile, or EC2/ECS/EKS instance metadata). Without it, `bintrail query
---archive-s3` just uses the region it already resolved — same-region setups
-(the common case) work fine. See [S3
-Prerequisites](query-and-recovery.md#s3-prerequisites) for the full
-explanation, or add `"s3:GetBucketLocation"` to the `Action` list above (as
-a bucket-level permission, alongside `s3:ListBucket`) if your bucket is
-cross-region.
+**`s3:GetBucketLocation`** is not in the policy above, and a bucket in
+another region than the one DBTrail resolves for its credentials does not
+need it: DBTrail finds the bucket's region with a HEAD request on the bucket
+that carries no credentials, which S3 answers with the region whatever the
+policy says (see [A bucket in another
+region](upload.md#a-bucket-in-another-region)). DBTrail asks
+`s3:GetBucketLocation` only when that HEAD gets no answer (a custom endpoint,
+or a VPC endpoint policy that refuses requests without credentials); adding
+it to the `Action` list above, as a bucket-level permission alongside
+`s3:ListBucket`, is then what lets the region be found.
 
 ## Read-only access for people who query the Parquet copy
 
@@ -159,8 +159,9 @@ Two things a reader with this policy can still see, stated plainly:
 - **What changed between two snapshots.** Comparing two consecutive snapshots
   of a table shows which rows changed, even without the archives.
 
-Add `s3:GetBucketLocation` on `arn:aws:s3:::my-bucket` if the reader's
-credentials resolve to a different region than the bucket.
+If the reader's credentials resolve to a different region than the bucket,
+the `views.sql` file the web interface writes names the bucket's region when DBTrail could find
+it. Otherwise, set `AWS_REGION` to the bucket's region on the reader's machine.
 
 ## Tighter scope (optional)
 

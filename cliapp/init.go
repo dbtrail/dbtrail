@@ -159,7 +159,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 		if initFormat != "json" {
 			fmt.Printf("\nVerifying existing S3 bucket...\n")
 		}
-		if err := verifyS3Bucket(cmd.Context(), s3ARNBucket, initS3Region); err != nil {
+		// No region: --s3-region is documented as ignored with --s3-arn, and
+		// its us-east-1 default passed here signed every check of a bucket
+		// elsewhere for the wrong region. The bucket's own is found (#2688).
+		if err := verifyS3Bucket(cmd.Context(), s3ARNBucket, ""); err != nil {
 			// See above: an IAM policy is not what is wrong here.
 			if errors.Is(err, storage.ErrS3EndpointConfig) {
 				return err
@@ -314,7 +317,7 @@ func parseS3ARN(arn string) (bucket, partition string, err error) {
 // verifyS3Bucket checks that an S3 bucket exists and is accessible by the
 // current AWS credentials using a HeadBucket request.
 func verifyS3Bucket(ctx context.Context, bucket, region string) error {
-	client, err := storage.NewS3Client(ctx, region)
+	client, err := storage.NewS3ClientForBucket(ctx, bucket, region)
 	if err != nil {
 		return err
 	}
