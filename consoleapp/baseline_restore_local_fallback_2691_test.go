@@ -81,32 +81,38 @@ func TestRestoreFallback_anEmptyBucketRestoresFromTheLocalCopy(t *testing.T) {
 	t.Logf("source note: %s", st.SourceNote)
 }
 
+// A bucket that cannot be listed may still hold a complete snapshot of this
+// very second, which the collision check could not see: the result is
+// published locally and NOT uploaded in this run, and the status says so.
+// The cleanup asks the bucket about it later and sends it only if missing.
 func TestRestoreFallback_anUnreachableBucketRestoresFromTheLocalCopyAndSaysSo(t *testing.T) {
-	for _, upload := range []string{"upload works", "upload fails"} {
-		t.Run(upload, func(t *testing.T) {
-			local := t.TempDir()
-			writeSnapshotFiles(t, filepath.Join(local, "2026-08-28T09-00-00Z"), baseline.SuccessMarker)
-			folded, _, upErr := stubBucket(t, nil, time.Time{}, errBucketDown)
-			if upload == "upload fails" {
-				*upErr = errBucketDown
-			}
-			_, st, _ := restoreS3Server(t, local)
-			if !st.Published {
-				t.Fatalf("status = %+v, want the local result published", st)
-			}
-			if upload == "upload fails" && st.State != "failed" {
-				t.Fatalf("status = %+v, want failed: the result is not in S3", st)
-			}
-			if len(*folded) != 1 || (*folded)[0].BaselineSrc != local {
-				t.Fatalf("fold config = %+v, want the local folder", *folded)
-			}
-			want := "The S3 location " + fallbackBucket + " could not be read (" + errBucketDown.Error() + "), so this restore started from the snapshot at 2026-08-28 09:00:00 in this server's local folder. A newer snapshot may be in S3."
-			if st.SourceNote != want {
-				t.Fatalf("source note = %q, want %q", st.SourceNote, want)
-			}
-			t.Logf("source note (%s): %s", upload, st.SourceNote)
-		})
+	local := t.TempDir()
+	writeSnapshotFiles(t, filepath.Join(local, "2026-08-28T09-00-00Z"), baseline.SuccessMarker)
+	folded, uploads, _ := stubBucket(t, nil, time.Time{}, errBucketDown)
+	_, st, rec := restoreS3Server(t, local)
+	if !st.Published || st.State != "failed" {
+		t.Fatalf("status = %+v, want published here and not sent", st)
 	}
+	if len(*folded) != 1 || (*folded)[0].BaselineSrc != local {
+		t.Fatalf("fold config = %+v, want the local folder", *folded)
+	}
+	if len(*uploads) != 0 {
+		t.Fatalf("uploaded %+v to a bucket that could not be listed: a complete snapshot of that second there would be overwritten", *uploads)
+	}
+	stamp := reconstruct.SnapshotDirName(restoreAt)
+	wantErr := "the snapshot was not sent to the snapshot destination: it was written to " + filepath.Join(local, stamp) + " and not sent to " + fallbackBucket + ", because " + fallbackBucket + " could not be read, so it is not known whether it already holds a snapshot of that second; the cleanup sends it once S3 answers and does not have it"
+	if st.LastError != wantErr {
+		t.Fatalf("last error = %q, want %q", st.LastError, wantErr)
+	}
+	want := "The S3 location " + fallbackBucket + " could not be read (" + errBucketDown.Error() + "), so this restore started from the snapshot at 2026-08-28 09:00:00 in this server's local folder. A newer snapshot may be in S3."
+	if st.SourceNote != want {
+		t.Fatalf("source note = %q, want %q", st.SourceNote, want)
+	}
+	if rec == nil || rec.SnapshotTime == "" {
+		t.Fatalf("history record = %+v, want the snapshot time of the local result", rec)
+	}
+	t.Logf("source note: %s", st.SourceNote)
+	t.Logf("last error: %s", st.LastError)
 }
 
 // Never from a snapshot newer than the moment: a local folder whose only

@@ -82,6 +82,12 @@ console.log(JSON.stringify({
 	if s := got["both"]; s == nil || strings.Contains(s.Text, "starts from a snapshot in this server's folder") {
 		t.Errorf("with a snapshot in S3 the card still says it reads the folder: %+v", s)
 	}
+	// The folder's own snapshot is not out of reach any more: the card must
+	// not say it "cannot start from" it.
+	both := "1 snapshot is kept only on this host, not in S3. A restore starts from S3, and from this host's folder only for a moment S3 has no snapshot at or before."
+	if s := got["both"]; s == nil || !strings.Contains(s.Text, both) || strings.Contains(s.Text, "cannot start from") {
+		t.Errorf("both: %+v, want %q", s, both)
+	}
 	for _, name := range []string{"succeeded", "notSent"} {
 		if s := got[name]; s == nil || !strings.Contains(s.Text, note) {
 			t.Errorf("%s: %+v, want the last restore's line to carry %q", name, s, note)

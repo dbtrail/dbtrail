@@ -12817,7 +12817,15 @@ function backupRestoreCard(cur, b, restoreSt) {
   go.onclick = () => startBackupRestore(cur.id, input.value.trim(), go, msg);
   body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
   if (fromFolder) body.append(el("p", { class: "form-hint bk-restore-from-folder", text: fromFolder }));
-  const elsewhere = backupElsewhereNote(b, usable, fromFolder ? "dir" : reads);
+  // On an S3 server the folder's own snapshots are no longer out of reach
+  // (#2691): a moment S3 has nothing at or before starts from the folder,
+  // so the shared "cannot start from those" line would be false here.
+  const localOnly = reads === "s3" && !fromFolder
+    ? ((b && b.snapshots) || []).filter((x) => x.kinds && x.kinds.length && !x.kinds.includes("s3")).length : 0;
+  const elsewhere = reads === "s3" && !fromFolder
+    ? (localOnly ? el("p", { class: "form-hint", text: localOnly + " snapshot" + (localOnly === 1 ? " is" : "s are") +
+        " kept only on this host, not in S3. A restore starts from S3, and from this host's folder only for a moment S3 has no snapshot at or before." }) : null)
+    : backupElsewhereNote(b, usable, fromFolder ? "dir" : reads);
   if (elsewhere) body.append(elsewhere);
   // Why the last restore read the folder instead of S3 (#2691), on every
   // outcome: a result that could not be sent to S3 still came from there.
