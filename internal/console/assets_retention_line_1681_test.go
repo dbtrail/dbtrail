@@ -73,6 +73,9 @@ console.log(JSON.stringify(out));
 		"pruneNothing": map[string]any{"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 0}},
 		"keepAndPrune": map[string]any{"local_retention": map[string]any{"keep_newest": 7},
 			"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 2}},
+		// #2678: the cleanup stands still for a job reading older snapshots.
+		"waiting": map[string]any{"local_retention": map[string]any{"keep_newest": 3},
+			"cleanup_waiting": map[string]any{"since": "2026-09-23T03:10:00Z", "what": "a restore to a moment"}},
 		"recordErr": map[string]any{"last_prune_error": "open /snap/.prune: permission denied\nsecond line"},
 		"failOne": map[string]any{"local_retention": map[string]any{"keep_newest": 7},
 			"last_prune_failure": map[string]any{"at": "2026-09-23T03:10:00Z", "reason": "remove /snap/2026-09-01: busy"}},
@@ -126,6 +129,10 @@ console.log(JSON.stringify(out));
 		"pruneOne":     {{false, "Removed 1 older copy on " + at + "."}},
 		"pruneNothing": {},
 		"keepAndPrune": {{false, "Keeps the newest 7 snapshots on this machine. Removed 2 older copies on " + at + "."}},
+		"waiting": {
+			{false, "Keeps the newest 3 snapshots on this machine."},
+			{false, "Older copies stay until a restore to a moment ends (running since " + at + "): the cleanup removes nothing from this folder while it reads them."},
+		},
 		"recordErr":    {{true, "The record of older copies removed here could not be read: open /snap/.prune: permission denied"}},
 		"failOne": {
 			{false, "Keeps the newest 7 snapshots on this machine."},
