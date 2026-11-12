@@ -64,7 +64,7 @@ var (
 func init() {
 	uploadCmd.Flags().StringVar(&uplSource, "source", "", "Local directory containing Parquet files to upload (required)")
 	uploadCmd.Flags().StringVar(&uplDestination, "destination", "", "S3 destination URL (e.g. s3://my-bucket/archives/) (required)")
-	uploadCmd.Flags().StringVar(&uplRegion, "region", "", "AWS region (default: from AWS_REGION env var or ~/.aws/config)")
+	uploadCmd.Flags().StringVar(&uplRegion, "region", "", "AWS region of the --destination bucket (default: the bucket's own region, found automatically; AWS_REGION or ~/.aws/config with a custom S3 endpoint)")
 	uploadCmd.Flags().StringVar(&uplIndexDSN, "index-dsn", "", "Update archive_state table with S3 metadata after upload")
 	uploadCmd.Flags().StringVar(&uplFormat, "format", "text", "Output format: text or json")
 	uploadCmd.Flags().BoolVar(&uplRetry, "retry", false, "Skip files that already exist in S3 (via HeadObject check)")
@@ -96,7 +96,9 @@ func runUpload(cmd *cobra.Command, args []string) error {
 
 	ctx := cmd.Context()
 
-	client, err := storage.NewS3Client(ctx, uplRegion)
+	// For the bucket: it signs for the bucket's own region when --region is
+	// not given (#2688).
+	client, err := storage.NewS3ClientForBucket(ctx, bucket, uplRegion)
 	if err != nil {
 		return err
 	}

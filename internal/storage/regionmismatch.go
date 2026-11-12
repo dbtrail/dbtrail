@@ -27,7 +27,11 @@ type RegionMismatchError struct {
 	Bucket       string // "" when the request named none
 	BucketRegion string // "" when S3 did not say
 	Region       string // the region this process signed the request for
-	Err          error
+	// Store is set when the bucket has a store of its own in the web
+	// interface: its region comes from that store, so AWS_REGION is not the
+	// remedy and the message points at the store instead.
+	Store bool
+	Err   error
 }
 
 func (e *RegionMismatchError) Error() string {
@@ -38,6 +42,14 @@ func (e *RegionMismatchError) Error() string {
 	region := e.Region
 	if region == "" {
 		region = "none"
+	}
+	if e.Store {
+		if e.BucketRegion != "" {
+			return fmt.Sprintf("%s is in region %s, and its S3 store in the web interface signs for region %s: "+
+				"set that store's region to %s: %v", bucket, e.BucketRegion, region, e.BucketRegion, e.Err)
+		}
+		return fmt.Sprintf("%s is in another region than the one its S3 store in the web interface signs for (%s), "+
+			"so S3 answered 301 PermanentRedirect: set that store's region to the bucket's: %v", bucket, region, e.Err)
 	}
 	if e.BucketRegion != "" {
 		return fmt.Sprintf("%s is in region %s, and this process uses region %s: "+
@@ -74,10 +86,13 @@ func (regionMismatchMiddleware) HandleInitialize(ctx context.Context, in middlew
 	if !errors.As(err, &re) || re.Response == nil || re.Response.StatusCode != http.StatusMovedPermanently {
 		return out, md, err
 	}
+	bucket := inputBucket(in.Parameters)
+	_, routed := BucketStoreFor(bucket)
 	return out, md, &RegionMismatchError{
-		Bucket:       inputBucket(in.Parameters),
+		Bucket:       bucket,
 		BucketRegion: re.Response.Header.Get("X-Amz-Bucket-Region"),
 		Region:       awsmiddleware.GetRegion(ctx),
+		Store:        routed && bucket != "",
 		Err:          err,
 	}
 }

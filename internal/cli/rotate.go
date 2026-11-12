@@ -80,7 +80,7 @@ func init() {
 	rotateCmd.Flags().StringVar(&rotArchiveCompression, "archive-compression", "zstd", "Compression for archive Parquet files (zstd, snappy, gzip, none)")
 	rotateCmd.Flags().StringVar(&rotBintrailID, "bintrail-id", "", "Server identity UUID for archive paths (bintrail_id=<uuid>/event_date=<date>/). When --archive-dir is set and this is omitted, the bintrail_id recorded in stream_state is used; an explicit value always wins")
 	rotateCmd.Flags().StringVar(&rotArchiveS3, "archive-s3", "", "S3 destination URL to upload Parquet archives after writing (requires --archive-dir; e.g. s3://my-bucket/archives/)")
-	rotateCmd.Flags().StringVar(&rotArchiveS3Region, "archive-s3-region", "", "AWS region for --archive-s3 (default: from AWS_REGION env var or ~/.aws/config)")
+	rotateCmd.Flags().StringVar(&rotArchiveS3Region, "archive-s3-region", "", "AWS region for --archive-s3 (default: the bucket's own region, found automatically; AWS_REGION or ~/.aws/config with a custom S3 endpoint)")
 	rotateCmd.Flags().BoolVar(&rotDaemon, "daemon", false, "Run continuously, repeating rotation on the --interval schedule until SIGINT/SIGTERM")
 	rotateCmd.Flags().StringVar(&rotInterval, "interval", "1h", "How often to run rotation in daemon mode (e.g. 1h, 30m)")
 	rotateCmd.Flags().StringVar(&rotFormat, "format", "text", "Output format: text or json")

@@ -105,7 +105,7 @@ func init() {
 	agentCmd.Flags().StringVar(&agtTables, "tables", "", "Comma-separated list of tables to index (empty = all)")
 	agentCmd.Flags().StringVar(&agtStartGTID, "start-gtid", "", "GTID set to start streaming from (first run only)")
 	agentCmd.Flags().StringVar(&agtS3Bucket, "s3-bucket", "", "S3 bucket for BYOS payload storage")
-	agentCmd.Flags().StringVar(&agtS3Region, "s3-region", "", "AWS region for the S3 bucket")
+	agentCmd.Flags().StringVar(&agtS3Region, "s3-region", "", "AWS region for the S3 bucket (default: the bucket's own region, found automatically; AWS_REGION or ~/.aws/config with a custom S3 endpoint)")
 	agentCmd.Flags().StringVar(&agtS3Prefix, "s3-prefix", "bintrail/", "Key prefix within the S3 bucket")
 	agentCmd.Flags().StringVar(&agtFlushInterval, "flush-interval", "5s", "Max time between metadata/payload flushes (e.g. 5s, 10s)")
 	agentCmd.Flags().IntVar(&agtBufferMaxEvents, "buffer-max-events", 0, "Max events in the in-memory buffer (0 = unlimited)")

@@ -46,14 +46,16 @@ type discoveredRegion struct {
 }
 
 var (
-	discoverMu    sync.Mutex
-	discoverCache = map[string]discoveredRegion{}
+	discoverMu       sync.Mutex
+	discoverCache    = map[string]discoveredRegion{}
+	discoverInflight = map[string]chan struct{}{} // closed when that question is answered
 )
 
 func resetDiscoveredRegions() {
 	discoverMu.Lock()
 	defer discoverMu.Unlock()
 	discoverCache = map[string]discoveredRegion{}
+	discoverInflight = map[string]chan struct{}{}
 }
 
 // headBucketRegion asks S3 for bucket's region with an unsigned HEAD from
@@ -125,28 +127,56 @@ func DiscoverBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (s
 		return "", false
 	}
 	key := partitionOf(cfg.Region) + "\x00" + bucket
-	discoverMu.Lock()
-	e, cached := discoverCache[key]
-	discoverMu.Unlock()
-	if cached && (e.ok || bucketRegionClock().Sub(e.at) < bucketRegionMissTTL) {
-		return e.region, e.ok
-	}
-	region, err := headBucketRegion(ctx, cfg, bucket)
-	ok := err == nil && region != ""
-	if !ok {
-		// A cancelled caller learned nothing about the bucket: not remembered,
-		// so the next caller asks.
-		if ctx.Err() != nil {
-			return "", false
+	for {
+		discoverMu.Lock()
+		e, cached := discoverCache[key]
+		if cached && (e.ok || bucketRegionClock().Sub(e.at) < bucketRegionMissTTL) {
+			discoverMu.Unlock()
+			return e.region, e.ok
 		}
+		// One question per bucket at a time: twenty connections arriving at
+		// once on a cold process wait for the first one's answer instead of
+		// asking twenty times, each up to bucketRegionProbeTimeout.
+		if wait, asking := discoverInflight[key]; asking {
+			discoverMu.Unlock()
+			select {
+			case <-wait:
+				continue // answered (or the asker gave up): look again
+			case <-ctx.Done():
+				return "", false
+			}
+		}
+		done := make(chan struct{})
+		discoverInflight[key] = done
+		discoverMu.Unlock()
+
+		region, ok := askBucketRegion(ctx, cfg, bucket)
+
+		discoverMu.Lock()
+		// A cancelled caller learned nothing about the bucket: not remembered,
+		// so the next caller (a waiter included) asks.
+		if ok || ctx.Err() == nil {
+			discoverCache[key] = discoveredRegion{region: region, ok: ok, at: bucketRegionClock()}
+		}
+		delete(discoverInflight, key)
+		close(done)
+		discoverMu.Unlock()
+		return region, ok
+	}
+}
+
+// askBucketRegion is one question, its answer normalized: "" and false
+// unless S3 named a region.
+func askBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (string, bool) {
+	region, err := headBucketRegion(ctx, cfg, bucket)
+	if err == nil && region != "" {
+		return region, true
+	}
+	if ctx.Err() == nil {
 		slog.Debug("S3 bucket region not discovered; requests use the configured region",
 			"bucket", bucket, "configured_region", cfg.Region, "error", err)
-		region = ""
 	}
-	discoverMu.Lock()
-	discoverCache[key] = discoveredRegion{region: region, ok: ok, at: bucketRegionClock()}
-	discoverMu.Unlock()
-	return region, ok
+	return "", false
 }
 
 // SetBucketRegionDiscoveryForTest replaces the unsigned HEAD that discovery
