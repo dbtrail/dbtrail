@@ -995,6 +995,12 @@ func fullTableError(ctx context.Context, cmd *cobra.Command, err error, location
 func changesOnlyAdvice(ctx context.Context, cmd *cobra.Command, e *reconstruct.ChangesOnlyError, location string) string {
 	name := e.Schema + "." + e.Table
 	why, cause := noSnapshotWhy(ctx, cmd, e.Schema, e.Table, e.At, location)
+	if cause == noSnapshotUnreadable {
+		// No flag and no date of a CREATE: both are advice for a table that
+		// has no snapshot, and this one may have one.
+		return fmt.Sprintf("%s: no snapshot that could be read was found at or before %s to start it from, "+
+			"so nothing was written for it. %s", name, e.At.UTC().Format(time.RFC3339), why)
+	}
 	var b strings.Builder
 	b.WriteString(name + ": " + e.Error() + ". " + why + ". ")
 	// The engine's own lookup found no snapshot, so the flag is still what
@@ -1165,9 +1171,9 @@ type noSnapshotError struct {
 func (e *noSnapshotError) Error() string { return e.msg }
 func (e *noSnapshotError) Unwrap() error { return e.err }
 
-// listSnapshots lists a snapshot location; a variable so a test can make the
-// listing fail.
-var listSnapshots = reconstruct.ListBaselines
+// listSnapshots lists a snapshot location, with the snapshot folders it could
+// not read; a variable so a test can make the listing fail.
+var listSnapshots = reconstruct.ListBaselinesUnreadable
 
 // noSnapshotBeforeError is the refusal when the location holds no snapshot
 // of the table from at or before the moment. The lookup cannot say why, so
@@ -1188,6 +1194,7 @@ const (
 	noSnapshotCaseKnown     = iota // one of the three cases, named in the text
 	noSnapshotListingFailed        // the location could not be listed
 	noSnapshotNotAccepted          // it shows such a snapshot, and the lookup did not use it
+	noSnapshotUnreadable           // a snapshot from at or before the moment could not be read
 )
 
 // noSnapshotWhy is the part of noSnapshotBeforeError that tells the cases
@@ -1197,7 +1204,7 @@ func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string
 	name := schema + "." + table
 	when := at.UTC().Format(time.RFC3339)
 	take := snapshotCommand(cmd)
-	files, listErr := listSnapshots(ctx, location)
+	files, unreadable, listErr := listSnapshots(ctx, location)
 	snapshots := map[time.Time]bool{}
 	var earliest time.Time
 	ofTable, beforeAt := 0, false
@@ -1214,7 +1221,29 @@ func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string
 			earliest = f.SnapshotTime
 		}
 	}
+	// A snapshot folder from at or before the moment that could not be read
+	// may hold the table, whatever the folders that could be read say. The
+	// lookup skips such a folder when a newer one was read, so it answers "no
+	// snapshot" while the table may have one. A folder of another schema
+	// cannot hold it.
+	var blind *reconstruct.UnreadableSnapshot
+	if listErr == nil {
+		for i := range unreadable {
+			u := &unreadable[i]
+			if u.SnapshotTime.After(at) || (u.Schema != "" && u.Schema != schema) {
+				continue
+			}
+			if blind == nil || u.SnapshotTime.After(blind.SnapshotTime) {
+				blind = u
+			}
+		}
+	}
 	switch {
+	case blind != nil:
+		cause = noSnapshotUnreadable
+		why = fmt.Sprintf("The snapshot taken at %s could not be read (%s: %v), and it may hold %s. "+
+			"Make it readable and run again",
+			blind.SnapshotTime.UTC().Format(time.RFC3339), blind.Path, blind.Err, name)
 	case listErr != nil || beforeAt:
 		cause = noSnapshotNotAccepted
 		if listErr != nil {

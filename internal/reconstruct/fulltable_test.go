@@ -682,6 +682,43 @@ func TestFindCapturedCreateTableDDL_replaceIsWrittenAsCreate(t *testing.T) {
 	}
 }
 
+// TestFindCapturedCreateTableDDL_ifNotExistsIsWrittenAsCreate is #2684: the
+// newest recorded CREATE can be the CREATE TABLE IF NOT EXISTS an application
+// runs at every start. As a schema file it would make a loader put the rows
+// into a table already on the target instead of stopping, so it is written as
+// the plain CREATE TABLE a mydumper schema file holds.
+func TestFindCapturedCreateTableDDL_ifNotExistsIsWrittenAsCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name, logged, want string
+		found              bool
+	}{
+		{"plain", "CREATE TABLE IF NOT EXISTS `orders` (`id` int)", "CREATE TABLE `orders` (`id` int)", true},
+		{"lower case and line breaks", "create table\nif not\texists orders (id int)", "CREATE TABLE orders (id int)", true},
+		{"leading comments kept", "/* app */ CREATE TABLE IF NOT EXISTS orders (id int)", "/* app */ CREATE TABLE orders (id int)", true},
+		{"executable comment", "CREATE TABLE /*!32312 IF NOT EXISTS*/ `orders` (`id` int)", "CREATE TABLE `orders` (`id` int)", true},
+		{"the words in a default stay", "CREATE TABLE IF NOT EXISTS orders (n varchar(9) DEFAULT 'IF NOT EXISTS')",
+			"CREATE TABLE orders (n varchar(9) DEFAULT 'IF NOT EXISTS')", true},
+		{"a shape it cannot rewrite gets the placeholder", "CREATE TABLE /* x */ IF NOT EXISTS orders (id int)", "", false},
+		{"a plain CREATE is kept as it is", "CREATE TABLE orders (n varchar(9) DEFAULT 'IF NOT EXISTS')",
+			"CREATE TABLE orders (n varchar(9) DEFAULT 'IF NOT EXISTS')", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").
+				WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "ddl_query"}).
+					AddRow(string(event.DDLCreateTable), tc.logged))
+			ddl, found, err := findCapturedCreateTableDDL(context.Background(), db, "mydb", "orders", time.Now())
+			if err != nil || found != tc.found || ddl != tc.want {
+				t.Errorf("findCapturedCreateTableDDL = %q found=%v err=%v, want %q found=%v", ddl, found, err, tc.want, tc.found)
+			}
+		})
+	}
+}
+
 // TestFindCapturedCreateTableDDL_notFound verifies that no matching row
 // (sql.ErrNoRows) reports found=false with a nil error, so the caller falls
 // back to the placeholder rather than treating "never captured" as a fault.

@@ -879,6 +879,15 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	if err := markRunIncomplete(markerDir); err != nil {
 		return nil, fmt.Errorf("could not write incomplete-dump marker in %s (refusing to reconstruct without the crash-safety marker): %w", markerDir, err)
 	}
+	// After the marker, so a run killed while it removes still leaves the
+	// folder _INCOMPLETE. See leftovers.go.
+	if !parquetMode {
+		left, err := removeTableLeftovers(cfg.OutputDir, cfg.OutputFormat, cfg.Tables)
+		if err != nil {
+			return nil, err
+		}
+		logTableLeftovers(left)
+	}
 
 	db, err := config.Connect(cfg.IndexDSN)
 	if err != nil {
@@ -3289,7 +3298,9 @@ func binlogOnlySchemaPlaceholder(schema, table string) string {
 
 // findCapturedCreateTableDDL looks up the most recent CREATE TABLE statement
 // (a CREATE OR REPLACE TABLE counts, rewritten to a plain CREATE TABLE so that
-// loading the schema file cannot drop a table that already exists)
+// loading the schema file cannot drop a table that already exists, and so does
+// a CREATE TABLE IF NOT EXISTS, rewritten the same way so that loading it
+// cannot put the rows into a table that already exists)
 // the schema-drift guard (#700) recorded for schema.table at-or-before at, in
 // schema_changes.ddl_query. found is false (with a nil error) when no such
 // row exists — the caller falls back to binlogOnlySchemaPlaceholder.
@@ -3308,6 +3319,20 @@ func findCapturedCreateTableDDL(ctx context.Context, db *sql.DB, schema, table s
 			return "", false, nil
 		}
 		return "", false, err
+	}
+	if kind == string(event.DDLCreateTable) {
+		// A CREATE TABLE IF NOT EXISTS (an application that runs it at every
+		// start records one per start) is written as the plain CREATE TABLE.
+		// With the clause, a loader whose target already has the table loads
+		// the rows into it instead of stopping at "table exists". A clause
+		// the rewrite cannot take out gets the placeholder.
+		if plain, ok := ddltext.WithoutIfNotExists(ddl); ok {
+			return plain, true, nil
+		}
+		if ddltext.HasIfNotExists(ddl) {
+			return "", false, nil
+		}
+		return ddl, true, nil
 	}
 	if kind == string(event.DDLReplaceTable) {
 		// The fallback writes this statement as the schema file myloader runs.
