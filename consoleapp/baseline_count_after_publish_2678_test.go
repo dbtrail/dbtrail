@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -359,13 +360,41 @@ func TestCountAfterPublish_theCleanupWaitsForARestore(t *testing.T) {
 func TestCountAfterPublish_theCleanupWaitsForASQLBuild(t *testing.T) {
 	at := time.Date(2026, 6, 10, 11, 0, 0, 0, time.UTC)
 	src := writeSQLExportBaseline(t, at.Add(-time.Hour))
-	sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
-	if err := sup.TriggerSQLExport(console.SQLExportRequest{ServerID: "srv1", ServerName: "wp",
-		IndexDSN: "i:p@tcp(127.0.0.1:1)/idx", BaselineSrc: src, At: at}); err != nil {
+	// An index that accepts the connection and never greets: the build waits
+	// in the handshake until the test lets go, so it is still running when
+	// it is looked at. A refused port made the build fail before the test
+	// could look, and the test then saw "failed" (a flake, 1 run in 50).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	// The build cannot write its outcome while this is held, so it is still
-	// running here whatever it did so far.
+	var connsMu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			connsMu.Lock()
+			conns = append(conns, c)
+			connsMu.Unlock()
+		}
+	}()
+	letGo := sync.OnceFunc(func() {
+		ln.Close()
+		connsMu.Lock()
+		for _, c := range conns {
+			c.Close()
+		}
+		connsMu.Unlock()
+	})
+	t.Cleanup(letGo)
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
+	if err := sup.TriggerSQLExport(console.SQLExportRequest{ServerID: "srv1", ServerName: "wp",
+		IndexDSN: "i:p@tcp(" + ln.Addr().String() + ")/idx", BaselineSrc: src, At: at}); err != nil {
+		t.Fatal(err)
+	}
 	sup.mu.Lock()
 	what := baseline.Reading(src)
 	state := sup.exports["srv1"].State
@@ -373,6 +402,7 @@ func TestCountAfterPublish_theCleanupWaitsForASQLBuild(t *testing.T) {
 	if state != "running" || !strings.Contains(what, ".sql build") {
 		t.Fatalf("while the build ran (state %q) the folder's reader was %q", state, what)
 	}
+	letGo() // the handshake fails now and the build ends
 	waitForTerminalState(t, func() console.BaselineStatus { return sup.SQLExportStatus("srv1") })
 	deadline := time.Now().Add(10 * time.Second)
 	for baseline.Reading(src) != "" {
