@@ -117,6 +117,10 @@ func TestPruneEmpty_whatStays(t *testing.T) {
 		}},
 		{"the current target", func(t *testing.T, root string) string {
 			p := emptyFolder(t, root, snapName(3*time.Hour), old)
+			// Publishing the newest snapshot set the pointer; point it here.
+			if err := os.Remove(filepath.Join(root, CurrentLinkName)); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Symlink(filepath.Base(p), filepath.Join(root, CurrentLinkName)); err != nil {
 				t.Fatal(err)
 			}
