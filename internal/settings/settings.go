@@ -99,6 +99,71 @@ func Lookup(env string) (Entry, bool) {
 	return lookupLocked(env)
 }
 
+// ByOption finds a name by how an option file writes it (see Entry.Option).
+// The name is matched in lower case with every _ read as -.
+func ByOption(option string) (Entry, bool) {
+	option = strings.ToLower(strings.ReplaceAll(option, "_", "-"))
+	if option == "" {
+		return Entry{}, false
+	}
+	for _, e := range All() {
+		if e.Option() == option {
+			return e, true
+		}
+	}
+	return Entry{}, false
+}
+
+// Nearest is the operator setting whose option name is closest to option,
+// for a "did you mean" after a typo, or "" when none is close. A name written
+// the way the environment writes it (BINTRAIL_COMMIT_WITHIN) is matched
+// without its prefix.
+func Nearest(option string) string {
+	option = strings.ToLower(strings.ReplaceAll(option, "_", "-"))
+	option = strings.TrimPrefix(option, "bintrail-")
+	if option == "" {
+		return ""
+	}
+	best, bestDist := "", 0
+	for _, e := range All() {
+		if e.Kind != Setting {
+			continue
+		}
+		name := e.Option()
+		d := distance(option, name)
+		// A typo is a few letters; past a third of the name it is another word.
+		if d > max(1, len(name)/3) {
+			continue
+		}
+		if best == "" || d < bestDist || (d == bestDist && name < best) {
+			best, bestDist = name, d
+		}
+	}
+	return best
+}
+
+// distance is the number of single-letter insertions, deletions and
+// replacements that turn a into b.
+func distance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
+}
+
 func lookupLocked(env string) (Entry, bool) {
 	for _, list := range [][]Entry{table, added} {
 		for _, e := range list {

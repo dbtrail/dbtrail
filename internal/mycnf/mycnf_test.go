@@ -216,3 +216,39 @@ func TestRead(t *testing.T) {
 		t.Fatal("one byte over the bound was read")
 	}
 }
+
+func TestOptions(t *testing.T) {
+	data := "\xef\xbb\xbfstray = 1\n!include /x.cnf\n[client]\nuser = u\n[ DBTrail ] # main\nCommit_Within = 2s # c\nloose-Batch_Size='5'\nultrafast # a switch\n= 3\n[other]\nschemas = a\n[dbtrail]\nschemas = \"a, b\"\r\n"
+	got, err := Options([]byte(data), "dbtrail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Option{
+		{Name: "commit-within", HasValue: true, Value: "2s", Line: 6},
+		{Name: "batch-size", Loose: true, HasValue: true, Value: "5", Line: 7},
+		{Name: "ultrafast", Line: 8},
+		{Name: "", HasValue: true, Value: "3", Line: 9},
+		{Name: "schemas", HasValue: true, Value: "a, b", Line: 13},
+	}
+	if len(got.Options) != len(want) {
+		t.Fatalf("got %+v", got.Options)
+	}
+	for i := range want {
+		if got.Options[i] != want[i] {
+			t.Errorf("option %d = %+v, want %+v", i, got.Options[i], want[i])
+		}
+	}
+	if len(got.Ungrouped) != 1 || got.Ungrouped[0] != 1 {
+		t.Errorf("ungrouped = %v", got.Ungrouped)
+	}
+	if len(got.Includes) != 1 || got.Includes[0] != 2 {
+		t.Errorf("includes = %v", got.Includes)
+	}
+}
+
+func TestOptions_brokenGroupNamesTheLineOnly(t *testing.T) {
+	_, err := Options([]byte("[dbtrail]\n[client password=hunter2\n"), "dbtrail")
+	if err == nil || err.Error() != "line 2: a group name is missing its closing ]" {
+		t.Fatalf("err = %v", err)
+	}
+}

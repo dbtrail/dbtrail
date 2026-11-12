@@ -220,3 +220,77 @@ func parseValue(s string) string {
 	}
 	return b.String()
 }
+
+// Option is one option line of a group, as Options reads it.
+type Option struct {
+	// Name is the option as written, in lower case, with every _ read as -
+	// and a loose- prefix taken off.
+	Name string
+	// Loose: the line had the loose- prefix, which in MySQL means "do not
+	// complain if this option is unknown".
+	Loose bool
+	// HasValue is false for a line with no = sign (a switch, in MySQL).
+	HasValue bool
+	Value    string
+	// Line is the line number, from 1.
+	Line int
+}
+
+// Lines is what Options found in a file.
+type Lines struct {
+	Options []Option
+	// Includes are the !include and !includedir lines, with their numbers.
+	// They were not followed.
+	Includes []int
+	// Ungrouped are the numbers of option lines that sit before any group.
+	Ungrouped []int
+}
+
+// Options reads every option line of the named group, in file order. It
+// reads any option, unlike Parse, which reads the connection options only;
+// what an option means is the caller's to decide. An error is about the
+// shape of the file, and names the line by number without quoting it.
+func Options(data []byte, group string) (Lines, error) {
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	var out Lines
+	inGroup, seenGroup := false, false
+	for n, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		if line[0] == '!' {
+			out.Includes = append(out.Includes, n+1)
+			continue
+		}
+		if line[0] == '[' {
+			end := strings.IndexByte(line, ']')
+			if end < 0 {
+				return Lines{}, fmt.Errorf("line %d: a group name is missing its closing ]", n+1)
+			}
+			inGroup, seenGroup = strings.EqualFold(strings.TrimSpace(line[1:end]), group), true
+			continue
+		}
+		if !seenGroup {
+			out.Ungrouped = append(out.Ungrouped, n+1)
+			continue
+		}
+		if !inGroup {
+			continue
+		}
+		name, rest, hasValue := strings.Cut(line, "=")
+		if i := strings.IndexByte(name, '#'); i >= 0 && !hasValue {
+			name = name[:i]
+		}
+		name = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "_", "-"))
+		o := Option{Name: name, HasValue: hasValue, Line: n + 1}
+		if after, ok := strings.CutPrefix(name, "loose-"); ok {
+			o.Name, o.Loose = after, true
+		}
+		if hasValue {
+			o.Value = parseValue(rest)
+		}
+		out.Options = append(out.Options, o)
+	}
+	return out, nil
+}
