@@ -255,8 +255,8 @@ func TestMeasureWindow_asksTheSourceOnlyWhenNothingWasIndexedOnAnOldAnchor(t *te
 		pg := e
 		pg.Flavor = console.FlavorPostgres
 		w, asked := run(t, pg, old, 1000, 1000, caughtUp)
-		if len(asked) != 0 || w.Capture != "" || w.CaptureDetail == "" {
-			t.Fatalf("window=%+v asked=%v, want no probe and a reason", w, asked)
+		if len(asked) != 0 || w.Capture != console.CaptureUnaskable || w.CaptureDetail == "" {
+			t.Fatalf("window=%+v asked=%v, want no probe, a source that cannot be asked and a reason", w, asked)
 		}
 	})
 	t.Run("no source configured: not asked", func(t *testing.T) {

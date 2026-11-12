@@ -259,7 +259,7 @@ func TestBackupScheduler_updatesWhenTheSnapshotCannotWait_2659(t *testing.T) {
 			c.setup(t)
 			now := time.Date(2026, 8, 28, 10, 0, 5, 0, time.UTC)
 			w := b.measureWindow(context.Background(), e, snapshotAnchor)
-			if w.Events != 0 || w.Capture != "" || w.CanWait || w.CannotWaitWhy != c.whyNot {
+			if w.Events != 0 || w.Capture != console.CaptureUnaskable || w.CanWait || w.CannotWaitWhy != c.whyNot {
 				t.Fatalf("window = %+v, want a known zero, a source that cannot be asked and a snapshot that cannot wait because %q", w, c.whyNot)
 			}
 			method, why := freshDecision(t, b, e, now)
@@ -467,24 +467,38 @@ func TestBackupScheduler_aSkippedSlotSendsTheOwedHeldSnapshot_2659(t *testing.T)
 	if err := reg.Update(e); err != nil {
 		t.Fatal(err)
 	}
-	// The bucket's newest is the one sent at 12:10, in the 12:00 upload slot.
+	// The bucket's newest is the one sent at 12:10, in the 12:00 upload
+	// slot, until an upload puts a newer one there.
+	var sentMu sync.Mutex
+	var sent []string
 	bucketAt := snapshotAnchor.Add(10 * time.Minute)
-	stubBucketNewest(t, bucketAt, nil)
+	inBucket := func() time.Time {
+		sentMu.Lock()
+		defer sentMu.Unlock()
+		return bucketAt
+	}
+	realList := listBaselines
+	t.Cleanup(func() { listBaselines = realList })
+	listBaselines = func(ctx context.Context, src string) ([]reconstruct.BaselineFile, error) {
+		if !strings.HasPrefix(src, "s3://") {
+			return realList(ctx, src)
+		}
+		return []reconstruct.BaselineFile{{Schema: "shop", Table: "orders", SnapshotTime: inBucket()}}, nil
+	}
 	realNewest := reconstruct.NewestSnapshot
 	t.Cleanup(console.SetNewestSnapshotForTest(func(ctx context.Context, src string) (time.Time, []string, error) {
 		if strings.HasPrefix(src, "s3://") {
-			return bucketAt, []string{"shop.orders"}, nil
+			return inBucket(), []string{"shop.orders"}, nil
 		}
 		return realNewest(ctx, src)
 	}))
-	var sent []string
 	prevUpload := uploadSnapshot
 	t.Cleanup(func() { uploadSnapshot = prevUpload })
-	var sentMu sync.Mutex
 	uploadSnapshot = func(_ context.Context, dir, dest, _ string, _ bool) (int, error) {
 		sentMu.Lock()
 		defer sentMu.Unlock()
 		sent = append(sent, dir+" -> "+dest)
+		bucketAt = held
 		return 1, nil
 	}
 	uploads := func() int {

@@ -545,7 +545,7 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	// server whose measured rate makes the slot an update whatever the
 	// source says. The line that takes a full read on it (fire) says so.
 	msg := "snapshot schedule: nothing was indexed since the previous snapshot, and the source does not confirm that capture recorded everything it wrote, so the index may be missing changes"
-	if r.cause != "" || r.verdict != console.CaptureUnaskable || r.detail == captureDetailNoCapture {
+	if r.cause != "" || captureClassOf(r.detail) != captureCannotAsk || r.detail == captureDetailNoCapture {
 		slog.Warn(msg, args...)
 		return
 	}
