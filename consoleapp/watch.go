@@ -1770,12 +1770,21 @@ func runBaselinePruneCycle(ctx context.Context, targets []baselinePruneTarget, r
 		sharedDir[d] = len(set) > 1
 	}
 	for _, t := range targets {
-		res, err := pruneFn(ctx, baseline.PruneOptions{
-			LocalDir:   t.dir,
-			S3URL:      t.s3,
-			Retain:     retain,
-			KeepNewest: t.keepNewest,
-		})
+		opts := baseline.PruneOptions{
+			LocalDir:     t.dir,
+			S3URL:        t.s3,
+			Retain:       retain,
+			KeepNewest:   t.keepNewest,
+			CleanupEvery: pruneCleanupEvery,
+		}
+		if t.s3 != "" && s3PruneCutFn != nil {
+			// What the S3 age rule removes from this destination is not
+			// asked about nor sent back (the last restore's result).
+			if cut, on := s3PruneCutFn(t.s3, time.Now()); on {
+				opts.S3Cut = cut
+			}
+		}
+		res, err := pruneFn(ctx, opts)
 		if err != nil {
 			slog.Warn("baseline prune cycle failed", "dir", t.dir, "error", err)
 			continue
@@ -1853,7 +1862,7 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	// is how often these were tried before.
 	round := resendRoundFor(t.dir)
 	if !round.begin() {
-		noteResending(t, res, nil, nil)
+		noteResending(t, res, nil, nil, round.waitsUntil())
 		return
 	}
 	defer round.end()
@@ -1899,7 +1908,18 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	if round.finished(failed > 0, tried > 0) {
 		slog.Info("snapshot cleanup: sending the snapshots the destination lacked works again", "dir", t.dir, "destination", t.s3)
 	}
-	noteResending(t, res, sent, skipped)
+	noteResending(t, res, sent, skipped, round.waitsUntil())
+}
+
+// waitsUntil is when the next round may start, or the zero time when
+// nothing makes it wait.
+func (r *resendRound) waitsUntil() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if resendNow().Before(r.nextTry) {
+		return r.nextTry
+	}
+	return time.Time{}
 }
 
 // resendBackoff is how long a folder's re-sends wait after a round in which
@@ -1977,7 +1997,7 @@ func (r *resendRound) finished(failed, tried bool) (recovered bool) {
 // noteResending rewrites the folder's record of snapshots the destination
 // lacks after a round (sent and skipped are what it did), or with nothing
 // done when the round did not start: they are still going to be sent.
-func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool) {
+func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time) {
 	if res.DestinationSilent {
 		// The destination failed to answer for some snapshots in this pass
 		// (#2658), so how many it lacks is not known: the prune left the
@@ -1993,11 +2013,21 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 		}
 	}
 	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
+	if !next.IsZero() {
+		// The page says when, instead of "at the next cleanup".
+		at := next.UTC()
+		rec.NextSend = &at
+	}
 	if err := baseline.RewriteNotInDestination(t.dir, rec); err != nil {
 		slog.Warn("snapshot cleanup: the record of snapshots not at the destination could not be updated; the page may say an old count until the next cleanup",
 			"dir", t.dir, "error", err)
 	}
 }
+
+// pruneCleanupEvery is the periodic cleanup's interval in force
+// (--rotate-interval), for how long a "waiting for a job" record is
+// believed. Set by startBaselinePruneLoop; zero reads as one hour.
+var pruneCleanupEvery time.Duration
 
 // pruneAfterPublishFn prunes one server's folder to its count right after a
 // job published a snapshot into it (#2678), instead of leaving the folder
@@ -2101,6 +2131,7 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 	if interval <= 0 {
 		interval = time.Hour
 	}
+	pruneCleanupEvery = interval
 	slog.Info("baseline prune loop enabled", "retain", bootRetain, "interval", interval)
 	if bootRetain > 0 {
 		// Said once, at startup (#2658): the age still prunes, and it is no

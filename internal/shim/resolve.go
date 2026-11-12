@@ -323,7 +323,7 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	}
 
 	// Stale-fallback warning (#466) discarded here — see the full-table path.
-	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, src, q.Schema, q.Table, q.AsOf)
+	baselinePath, snapshotTime, _, err := h.findBaseline(ctx, q.Schema, q.Table, q.AsOf)
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			// A location is configured and holds no snapshot of this table
@@ -336,12 +336,8 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 			// the count times the schedule, not an hour (#2678), so it is
 			// refused, as the full-table shape is (#822). With NO location
 			// configured the answer stays changes-only, as documented.
-			return nil, nil, &ResolveError{Class: ResolveNoSnapshot, QType: q.Type, Err: fmt.Errorf(
-				"no baseline for %s.%s at or before %s; _snapshot cannot tell whether the row existed then "+
-					"(a row that no recorded change touched would read as absent). Ask for a moment at or after "+
-					"the oldest snapshot kept, keep more snapshots or add an S3 destination, "+
-					"or use _flashback for a binlog-only view",
-				q.Schema, q.Table, q.AsOf.UTC().Format(time.RFC3339))}
+			return nil, nil, &ResolveError{Class: ResolveNoSnapshot, QType: q.Type,
+				Err: errors.New(h.noBaselineWhy(ctx, q.Schema, q.Table, q.AsOf))}
 		}
 		// A real baseline-source failure (unreadable dir, S3 outage) is a
 		// server-side fault: raw error → the caller's "internal fault" branch.

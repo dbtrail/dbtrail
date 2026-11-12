@@ -88,6 +88,16 @@ type PruneOptions struct {
 	// kept by its own rule and never displaces a real copy. 0 = no pruning by
 	// count.
 	KeepNewest int
+	// S3Cut, when set, is the instant before which the destination's own
+	// cleanup removes snapshots (the S3 age rule). The last restore's result
+	// dated before it is not asked about and not listed as missing: it was
+	// removed from the bucket on purpose and is not sent back, so asking
+	// would have it reported as "to send" at every cleanup, for ever.
+	S3Cut time.Time
+	// CleanupEvery is how often the periodic cleanup of this folder runs,
+	// for how long the "waiting for a job" record is believed (twice this).
+	// Zero is one hour.
+	CleanupEvery time.Duration
 	// Now is an injectable clock for tests; the zero value means time.Now().UTC().
 	Now time.Time
 	// DryRun logs what would be pruned without deleting anything. NOTE: the zero
@@ -130,6 +140,10 @@ type PruneResult struct {
 	// Busy reports that another prune held this directory's lock, so this one
 	// did nothing. Not an error: the other prune is doing the same job.
 	Busy bool
+	// RestoredPastS3Age names the last restore's result when it is older
+	// than the age the destination keeps (PruneOptions.S3Cut): kept here
+	// only, not asked about, not sent.
+	RestoredPastS3Age string
 	// KeptPinned counts snapshots kept because a reader of this process is
 	// on that one snapshot now (PinSnapshot, #2678): a download, a SQL
 	// statement, an Explain. The rest of the folder is pruned as usual.
@@ -308,7 +322,7 @@ func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) 
 		// For the page: a folder over its count because the cleanup waits
 		// for a job says so, and stops saying so at the first cleanup that
 		// ran.
-		noteCleanupWaiting(opts.LocalDir, res.Reading)
+		noteCleanupWaiting(opts.LocalDir, res.Reading, opts.CleanupEvery)
 	}
 	if opts.DryRun || res.Busy || (res.Reading != "" && len(res.Pruned) == 0) {
 		return res, err
@@ -492,7 +506,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// the keepers and the newest N are worked out WITHOUT it (countable), and
 	// it is kept by its own rule below (restoredKept).
 	all := snaps
-	restored := lastRestored(opts.LocalDir, opts.DryRun)
+	restored, _ := lastRestored(opts.LocalDir, opts.DryRun)
 	var countable []localSnapshot
 	var restoredSnap *localSnapshot
 	for i := range all {
@@ -543,13 +557,30 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			res.KeptKeeper++
 			return res
 		}
+		past := !opts.S3Cut.IsZero() && restoredSnap.ts.Before(opts.S3Cut)
+		if !opts.DryRun {
+			noteRestoredLocalOnly(opts.LocalDir, restoredSnap.name, past)
+		}
+		if past {
+			// Past the age S3 keeps: on this machine only, by that rule.
+			res.KeptKeeper++
+			res.RestoredPastS3Age = restoredSnap.name
+			return res
+		}
 		ok, perr := probe(ctx, restoredSnap.name)
 		switch {
 		case perr != nil:
-			slog.Warn("baseline prune: could not confirm that the last restore's snapshot is in S3; it is kept either way",
+			// NOT counted in probeErrors. This snapshot is never removed, so
+			// the answer about it decides no removal; counted, one failed
+			// question about it stopped every other removal of the cycle
+			// (the silent-destination guard), and with an error that does
+			// not pass (a policy without s3:ListBucket answers 403 for a
+			// missing object) the folder grew without bound. It is not known
+			// to be in the bucket, so it is listed as to send.
+			slog.Warn("baseline prune: could not confirm that the last restore's snapshot is in S3; it is kept either way, and listed as to send",
 				"snapshot", restoredSnap.name, "error", perr)
-			*probeErrors++
 			res.KeptNotDurable++
+			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
 		case !ok:
 			res.KeptNotDurable++
 			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)

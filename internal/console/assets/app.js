@@ -9153,7 +9153,9 @@ function notInS3Words(n, rec) {
       : " (checked " + utcLabel(rec && rec.at) + ")");
   const it = n === 1 ? "it" : "them";
   return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete; " +
-    (rec && rec.resending === true ? "DBTrail sends " + it + " again at the next cleanup." : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
+    (rec && rec.resending === true
+      ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
+      : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
 }
 
 function localCopyWords(s3, keep, loop, reuse, was, reach) {
@@ -11070,8 +11072,9 @@ function baselinesPanel(b, servers, opts) {
       }
       if (sn.restored) {
         // Why a snapshot dated in the past is still here (#2678).
-        what.append(el("span", { class: "chip chip-unknown", text: "last restore, kept",
-          title: "The result of the last restore to a moment. Kept until the next restore, on top of the newest kept." }));
+        what.append(el("span", { class: "chip chip-unknown", text: "last restore, kept" + (sn.restored_until ? " until " + utcLabel(sn.restored_until) : ""),
+          title: "The result of the last restore to a moment. Kept for 24 hours after the restore, or until the next restore, on top of the newest kept; then it goes like any older snapshot." +
+            (sn.restored_local_only ? " It is older than the age S3 keeps, so it is on this machine only and is not sent to S3." : "") }));
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");

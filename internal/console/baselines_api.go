@@ -73,6 +73,12 @@ type baselineSnapshotDTO struct {
 	// date and it takes no place in the count, so the list never marks it
 	// as going. False when the mark could not be read.
 	Restored bool `json:"restored,omitempty"`
+	// RestoredUntil is until when it is kept outside the count: a day after
+	// the restore finished (baseline.RestoredKeep).
+	RestoredUntil string `json:"restored_until,omitempty"`
+	// RestoredLocalOnly: that result is older than the age the server's S3
+	// destination keeps, so it is on this machine only and is not sent.
+	RestoredLocalOnly bool `json:"restored_local_only,omitempty"`
 	// ViewsSkipped counts the views the source held and this snapshot left
 	// out (#1879), omitted when nothing is recorded: a snapshot from before
 	// the record, or a source with no views. Never zero on the wire.
@@ -246,6 +252,13 @@ type cleanupWaitingDTO struct {
 	What  string `json:"what"`
 }
 
+// cleanupWaitWorthSaying is how long a job must have held its folder before
+// the page says the cleanup waits for it: two of the shortest schedule
+// intervals (5 minutes). An update holds its folder for its whole cycle, so
+// a cleanup that falls inside a routine one waits for seconds; a line saying
+// so would be about nothing an operator has to wonder about.
+const cleanupWaitWorthSaying = 10 * time.Minute
+
 // cleanupWaitingOf reads the folder's "the cleanup is waiting for a job"
 // record: the job, and when that job started. A record no cleanup has
 // rewritten for two hours is not reported (baseline.ReadCleanupWaiting), so
@@ -255,7 +268,7 @@ func cleanupWaitingOf(dir string) *cleanupWaitingDTO {
 		return nil
 	}
 	rec, ok := baseline.ReadCleanupWaiting(dir)
-	if !ok {
+	if !ok || time.Since(rec.Since) < cleanupWaitWorthSaying {
 		return nil
 	}
 	return &cleanupWaitingDTO{Since: rec.Since.UTC().Format(time.RFC3339), What: rec.What}
@@ -478,7 +491,11 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 				if held, err := baseline.UploadHeld(localDir, reconstruct.SnapshotDirName(f.SnapshotTime)); err == nil {
 					dto.Held = held
 				}
-				dto.Restored = baseline.Restored(localDir) == reconstruct.SnapshotDirName(f.SnapshotTime)
+				if name, until := baseline.Restored(localDir); name == reconstruct.SnapshotDirName(f.SnapshotTime) {
+					dto.Restored = true
+					dto.RestoredUntil = until.UTC().Format(consoleTSFormat)
+					dto.RestoredLocalOnly = baseline.RestoredLocalOnly(localDir, name)
+				}
 			}
 			// Keyed on the file's OWN path, not on the primary source's kind:
 			// with two locations merged, the primary being S3 says nothing about

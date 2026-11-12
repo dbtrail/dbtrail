@@ -661,6 +661,16 @@ services:
       # All interfaces INSIDE the container; the `ports` mapping above is what
       # controls exposure on the host.
       BINTRAIL_ROUTER_LISTEN: 0.0.0.0:3309
+      # The same S3 access the `bintrail` service is given: a `_snapshot`
+      # query for a moment older than the snapshots in the local folder is
+      # answered from the server's S3 destination, read by THIS process.
+      # Without access the query fails with an error that names the bucket.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-}
+      BINTRAIL_S3_ENDPOINT: ${BINTRAIL_S3_ENDPOINT:-}
+      BINTRAIL_S3_PATH_STYLE: ${BINTRAIL_S3_PATH_STYLE:-}
       BINTRAIL_CONSOLE_TOKEN: ${CONSOLE_TOKEN:-}
       # The same three paths the `bintrail` service is given: the servers it
       # routes for, and the two files a statement must never read through a

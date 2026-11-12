@@ -108,6 +108,9 @@ type NotInDestination struct {
 	// (#2563); false, or absent, when nothing here will, and the page says
 	// to send or remove them by hand.
 	Resending bool `json:"resending,omitempty"`
+	// NextSend, when set, is when the next send is tried: an hour after a
+	// round in which one failed (#2678). Absent: at the next cleanup.
+	NextSend *time.Time `json:"next_send,omitempty"`
 }
 
 // RewriteNotInDestination replaces dir's record after the cleanup's resends
@@ -239,13 +242,16 @@ type CleanupWaiting struct {
 	Since time.Time `json:"since"`
 	At    time.Time `json:"at"`
 	What  string    `json:"what"`
+	// ValidUntil is until when the record speaks for now: twice the
+	// periodic cleanup's interval after it was written. A daemon that
+	// waits rewrites it at every cleanup, and removes it at the first one
+	// that runs; one past this was left by a process that stopped, or is
+	// read by a console whose own process prunes nothing.
+	ValidUntil time.Time `json:"valid_until"`
 }
 
-// cleanupWaitingFresh is how long a record is believed after it was written.
-// A daemon that waits rewrites it at every cleanup (hourly, and after each
-// job that ends), and removes it at the first one that runs. One older than
-// two of those hours was left by a process that stopped, or is read by a
-// console whose own process prunes nothing: it says nothing about now.
+// cleanupWaitingFresh is how long a record with no ValidUntil of its own is
+// believed after it was written: two of the default hourly cleanups.
 const cleanupWaitingFresh = 2 * time.Hour
 
 // ReadCleanupWaiting reads dir's record; ok is false when the last cleanup
@@ -259,7 +265,11 @@ func ReadCleanupWaiting(dir string) (rec CleanupWaiting, ok bool) {
 	if err := json.Unmarshal(b, &rec); err != nil || rec.Since.IsZero() || rec.At.IsZero() || rec.What == "" {
 		return CleanupWaiting{}, false
 	}
-	if time.Since(rec.At) > cleanupWaitingFresh {
+	until := rec.ValidUntil
+	if until.IsZero() {
+		until = rec.At.Add(cleanupWaitingFresh)
+	}
+	if time.Now().After(until) {
 		return CleanupWaiting{}, false
 	}
 	return rec, true
@@ -268,7 +278,7 @@ func ReadCleanupWaiting(dir string) (rec CleanupWaiting, ok bool) {
 // noteCleanupWaiting keeps the record in step with one cleanup: rewritten
 // with the job it waits for now and that job's own start when it stood
 // still for what, removed when it ran.
-func noteCleanupWaiting(dir, what string) {
+func noteCleanupWaiting(dir, what string, every time.Duration) {
 	path := filepath.Join(dir, CleanupWaitingFile)
 	if what == "" {
 		if err := removeRecord(path); err != nil && !os.IsNotExist(err) {
@@ -286,6 +296,10 @@ func noteCleanupWaiting(dir, what string) {
 		return
 	}
 	rec.What, rec.Since = cur, since.UTC()
+	if every <= 0 {
+		every = time.Hour
+	}
+	rec.ValidUntil = now.Add(2 * every)
 	b, err := json.Marshal(rec)
 	if err == nil {
 		err = writeFileAtomic0600(dir, CleanupWaitingFile, b)

@@ -100,6 +100,7 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 		local = append(local, map[string]any{"time": at(h).Format(consoleTSFormat), "age_hours": h, "tables": []string{"shop.orders"}, "kinds": []string{"dir"}})
 	}
 	local[len(local)-1]["restored"] = true
+	local[len(local)-1]["restored_until"] = "2026-11-13 09:30:00"
 	raw, _ := json.Marshal(local)
 	script := renderHarnessJS + `
 vm.runInContext("capsCache = { backup_schedule: true };", ctx);
@@ -114,7 +115,7 @@ const draw = (b) => {
     going: rows.length,
     chips: chips.length,
     titles: chips.map((n) => (n.attrs && n.attrs.title) || n.title || ""),
-    kept: nodes.filter((n) => n.textContent === "last restore, kept").map((n) => (n.attrs && n.attrs.title) || n.title || ""),
+    kept: nodes.filter((n) => typeof n.textContent === "string" && n.textContent.startsWith("last restore, kept")).map((n) => n.textContent + " | " + ((n.attrs && n.attrs.title) || n.title || "")),
     line: nodes.filter((n) => / bk-retention /.test(" " + (n.className || "") + " ")).map((n) => n.textContent),
   };
 };
@@ -155,8 +156,8 @@ console.log(JSON.stringify({
 		}
 	}
 	// The restore's result says why it is still there.
-	t.Logf("the restore's row: chip %q, hover %q", "last restore, kept", got.Local.Kept)
-	if len(got.Local.Kept) != 1 || got.Local.Kept[0] != "The result of the last restore to a moment. Kept until the next restore, on top of the newest kept." {
+	t.Logf("the restore's row, label | hover: %q", got.Local.Kept)
+	if len(got.Local.Kept) != 1 || got.Local.Kept[0] != "last restore, kept until 2026-11-13 09:30:00 UTC | The result of the last restore to a moment. Kept for 24 hours after the restore, or until the next restore, on top of the newest kept; then it goes like any older snapshot." {
 		t.Errorf("no S3: the restore's result is labelled %q", got.Local.Kept)
 	}
 	if len(got.S3.Kept) != 0 {

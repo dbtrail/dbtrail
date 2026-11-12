@@ -552,9 +552,30 @@ func (s *Server) snapshotViewsRelative(ctx context.Context, ss *snapshotSource, 
 // save the truncated archive as a success (the console's own fetch+blob
 // rejects on a cut body either way), and the operator would learn it is
 // garbage at extraction time, plausibly mid-incident.
+// pinForDownload pins the snapshot a download streams. keep is the count the
+// cleanup prunes this server's folder to, 0 where nothing prunes it by a
+// count (a `serve` console, a server that keeps every snapshot).
+//
+// Only a snapshot PAST the count is held back from removal by a pin, so
+// only those count toward the cap, which is the count itself: without it, a
+// user allowed to download could keep every old snapshot on the disk by
+// asking for each. A download of a snapshot the cleanup keeps anyway (one
+// of the newest, the last restore's result), or on a folder with no count,
+// holds nothing back and is never refused.
+func pinForDownload(root, name string, keep int, limit time.Duration) (release func(), ok bool) {
+	if keep <= 0 || baseline.KeptByCount(root, name, keep) {
+		return baseline.PinSnapshot(root, name, "a snapshot download", limit), true
+	}
+	return baseline.PinSnapshotCapped(root, name, "a download of a snapshot past the count", limit, keep)
+}
+
 // downloadsBusyMessage is the refusal of a download past the cap.
 func downloadsBusyMessage(max int) string {
-	return fmt.Sprintf("%d other snapshots of this server are being downloaded, which is as many as it keeps. Try again shortly, when one of them ends.", max)
+	what := fmt.Sprintf("%d older snapshots of this server, past the number it keeps, are", max)
+	if max == 1 {
+		what = "1 older snapshot of this server, past the number it keeps, is"
+	}
+	return what + " being downloaded, and no more than that are held for downloads at once. Try again shortly, when a download ends."
 }
 
 // downloadStallTimeout is how long one write of the archive may wait for the
@@ -608,17 +629,14 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 		for _, f := range files {
 			total += f.Size
 		}
-		// At most as many different snapshots as the server keeps are held
-		// for downloads at once: without a cap, a user allowed to download
-		// could keep every snapshot there is on the disk by asking for each.
-		max := DefaultLocalKeepNewest
-		if lr := s.localRetentionOf(s.selectedServerID(r)); lr != nil && lr.KeepNewest > 0 {
-			max = lr.KeepNewest
+		keep := 0
+		if lr := s.localRetentionOf(s.selectedServerID(r)); lr != nil {
+			keep = lr.KeepNewest
 		}
-		release, ok := baseline.PinSnapshotCapped(ss.localRoot, dirName, "a snapshot download", downloadPinLimit(total), max)
+		release, ok := pinForDownload(ss.localRoot, dirName, keep, downloadPinLimit(total))
 		if !ok {
 			w.Header().Set("Retry-After", "60")
-			writeJSONError(w, http.StatusTooManyRequests, downloadsBusyMessage(max))
+			writeJSONError(w, http.StatusTooManyRequests, downloadsBusyMessage(keep))
 			return
 		}
 		defer release()

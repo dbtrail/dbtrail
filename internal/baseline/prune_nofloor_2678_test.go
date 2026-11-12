@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -340,7 +341,7 @@ func TestNoFloor_theLastRestoreResultStays(t *testing.T) {
 	// The next restore replaces it.
 	second := snapName(5 * time.Hour)
 	makeSnapshot(t, root, second, true, "shop/orders")
-	if err := os.Chtimes(filepath.Join(root, restoredPrefix+restored), kn.Add(-time.Hour), kn.Add(-time.Hour)); err != nil {
+	if err := markRestoredAt(root, restored, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := MarkRestored(root, second); err != nil {
@@ -382,7 +383,7 @@ func TestNoFloor_theLastRestoreResultStays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res4.Pruned) != 0 || res4.ProbeErrors != 1 {
+	if len(res4.Pruned) != 0 || res4.ProbeErrors != 0 || !slices.Equal(res4.NotAtDestination, []string{second}) {
 		t.Fatalf("a bucket that cannot be asked about the restore's result: %+v", res4)
 	}
 	wantOnDisk(t, root, s[2], second)
@@ -654,5 +655,232 @@ func TestNoFloor_theCapHoldsUnderConcurrentPins(t *testing.T) {
 	}
 	if got := Pinned(root); len(got) != 0 {
 		t.Fatalf("every reader ended and %v is still pinned", got)
+	}
+}
+
+// One failed question about the restore's result does not stop the count:
+// five snapshots with a count of 1 and a restored one, the bucket answering
+// yes for all and an error only for the restored one. The four past the
+// count go; the restored one stays and is listed as to send. Counted as a
+// silent destination, the four stayed, at every cleanup, for ever.
+func TestNoFloor_anErrorAboutTheRestoreResultDoesNotStopTheCount(t *testing.T) {
+	root := t.TempDir()
+	s := minutes(t, root, 25, 20, 15, 10, 5)
+	restored := snapName(7 * time.Minute)
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := MarkRestored(root, restored); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(_ context.Context, name string) (bool, error) {
+		if name == restored {
+			return false, errors.New("403 forbidden")
+		}
+		return true, nil
+	}
+	res := s3Count(t, root, 1, probe)
+	slices.Sort(res.Pruned)
+	t.Logf("pruned=%v silent=%v probeErrors=%d keptUnasked=%d missing=%v", res.Pruned, res.DestinationSilent, res.ProbeErrors, res.KeptUnasked, res.NotAtDestination)
+	if !slices.Equal(res.Pruned, s[:4]) || res.DestinationSilent || res.KeptUnasked != 0 {
+		t.Fatalf("pruned %v silent %v: want the four past the count %v and no silent destination", res.Pruned, res.DestinationSilent, s[:4])
+	}
+	if !slices.Equal(res.NotAtDestination, []string{restored}) {
+		t.Fatalf("the restore's result is not listed as to send: %v", res.NotAtDestination)
+	}
+	wantOnDisk(t, root, s[4], restored)
+}
+
+// A restore's result older than the age S3 keeps is not asked about and not
+// listed as missing: the bucket's own cleanup removed it on purpose. It is
+// noted as on this machine only, for the page.
+func TestNoFloor_aRestoreResultPastTheS3AgeIsNotAskedAbout(t *testing.T) {
+	root := t.TempDir()
+	s := minutes(t, root, 10, 5)
+	restored := snapName(days(40))
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := MarkRestored(root, restored); err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	opts := PruneOptions{LocalDir: root, S3URL: "s3://b/p", KeepNewest: 1, Now: kn, S3Cut: kn.Add(-days(30))}
+	res, err := pruneWithProbe(context.Background(), opts, answers(&asked, s[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(asked, restored) || len(res.NotAtDestination) != 0 || res.RestoredPastS3Age != restored {
+		t.Fatalf("asked %v, missing %v, past the age %q", asked, res.NotAtDestination, res.RestoredPastS3Age)
+	}
+	if _, ok, _ := ReadNotInDestination(root); ok {
+		t.Fatal("the page would say DBTrail sends it again")
+	}
+	if !RestoredLocalOnly(root, restored) {
+		t.Fatal("the page is not told it is on this machine only")
+	}
+	wantOnDisk(t, root, s[1], restored)
+	// Inside the age again (the rule was lengthened): asked about, the note goes.
+	opts.S3Cut = kn.Add(-days(60))
+	if _, err := pruneWithProbe(context.Background(), opts, answers(&asked, restored)); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(asked, restored) || RestoredLocalOnly(root, restored) {
+		t.Fatalf("inside the age: asked %v, still noted local-only %v", asked, RestoredLocalOnly(root, restored))
+	}
+}
+
+// A restore's result is kept outside the count for 24 hours from when the
+// restore finished, then it is an ordinary snapshot.
+func TestNoFloor_theRestoreResultExpiresAfterADay(t *testing.T) {
+	now := time.Now()
+	prev := restoredNow
+	t.Cleanup(func() { restoredNow = prev })
+	restoredNow = func() time.Time { return now }
+	setup := func(t *testing.T) (root, restored string, s []string) {
+		root = t.TempDir()
+		s = minutes(t, root, 15, 10, 5)
+		restored = snapName(3 * time.Hour)
+		makeSnapshot(t, root, restored, true, "shop/orders")
+		return root, restored, s
+	}
+	mark := func(root, name string) string { return filepath.Join(root, restoredPrefix+name) }
+
+	t.Run("23 h 59 min: kept outside the count", func(t *testing.T) {
+		root, restored, s := setup(t)
+		if err := markRestoredAt(root, restored, now.Add(-RestoredKeep+time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if res := keepNewest(t, root, 3); len(res.Pruned) != 0 {
+			t.Fatalf("pruned %v", res.Pruned)
+		}
+		wantOnDisk(t, root, append(slices.Clone(s), restored)...)
+		name, until := Restored(root)
+		if name != restored || !until.Equal(now.Add(time.Minute)) {
+			t.Fatalf("kept %q until %s, want %q until %s", name, until, restored, now.Add(time.Minute))
+		}
+	})
+	t.Run("24 h 1 min: counted, removed, and its mark with it", func(t *testing.T) {
+		root, restored, s := setup(t)
+		if err := markRestoredAt(root, restored, now.Add(-RestoredKeep-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		res := keepNewest(t, root, 3)
+		if !slices.Equal(res.Pruned, []string{restored}) {
+			t.Fatalf("pruned %v, want the expired result [%s]", res.Pruned, restored)
+		}
+		wantOnDisk(t, root, s...)
+		if _, err := os.Stat(mark(root, restored)); !os.IsNotExist(err) {
+			t.Fatalf("the expired mark stayed behind: %v", err)
+		}
+	})
+	t.Run("a mark with no time: the file's own time decides", func(t *testing.T) {
+		root, restored, s := setup(t)
+		if err := os.WriteFile(mark(root, restored), nil, 0o644); err != nil { // as the earlier build wrote it
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(mark(root, restored), now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if res := keepNewest(t, root, 3); len(res.Pruned) != 0 {
+			t.Fatalf("an hour old by its file time: pruned %v", res.Pruned)
+		}
+		if err := os.WriteFile(mark(root, restored), []byte("not a time"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(mark(root, restored), now.Add(-25*time.Hour), now.Add(-25*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if res := keepNewest(t, root, 3); !slices.Equal(res.Pruned, []string{restored}) {
+			t.Fatalf("25 hours old by its file time, content unreadable: pruned %v", res.Pruned)
+		}
+		wantOnDisk(t, root, s...)
+	})
+	t.Run("a time in the future is now: never more than a day from now", func(t *testing.T) {
+		root, restored, _ := setup(t)
+		if err := markRestoredAt(root, restored, now.Add(72*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if _, until := Restored(root); !until.Equal(now.Add(RestoredKeep)) {
+			t.Fatalf("kept until %s, want %s", until, now.Add(RestoredKeep))
+		}
+	})
+	t.Run("expired and read by a reader or a download: stays until released", func(t *testing.T) {
+		root, restored, s := setup(t)
+		if err := markRestoredAt(root, restored, now.Add(-RestoredKeep-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		release := PinSnapshot(root, restored, "a snapshot download", time.Hour)
+		if res := keepNewest(t, root, 3); len(res.Pruned) != 0 || res.KeptPinned != 1 {
+			t.Fatalf("pinned: %+v", res)
+		}
+		release()
+		end := BeginRead(root, "a check of the snapshots")
+		if res := keepNewest(t, root, 3); len(res.Pruned) != 0 {
+			t.Fatalf("under a reader: pruned %v", res.Pruned)
+		}
+		end()
+		keepNewest(t, root, 3)
+		wantOnDisk(t, root, s...)
+	})
+	t.Run("a newer restore replaces one that has not expired", func(t *testing.T) {
+		root, restored, s := setup(t)
+		if err := markRestoredAt(root, restored, now.Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		second := snapName(5 * time.Hour)
+		makeSnapshot(t, root, second, true, "shop/orders")
+		if err := markRestoredAt(root, second, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if res := keepNewest(t, root, 3); !slices.Equal(res.Pruned, []string{restored}) {
+			t.Fatalf("pruned %v, want the earlier restore's result", res.Pruned)
+		}
+		wantOnDisk(t, root, append(slices.Clone(s), second)...)
+	})
+	t.Run("expired and older than the age S3 keeps: goes by the count, not kept for lack of an S3 copy", func(t *testing.T) {
+		root := t.TempDir()
+		s := minutes(t, root, 10, 5)
+		restored := snapName(days(40))
+		makeSnapshot(t, root, restored, true, "shop/orders")
+		if err := markRestoredAt(root, restored, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		opts := PruneOptions{LocalDir: root, S3URL: "s3://b/p", KeepNewest: 1, Now: kn, S3Cut: kn.Add(-days(30))}
+		var asked []string
+		if _, err := pruneWithProbe(context.Background(), opts, answers(&asked, s[0])); err != nil {
+			t.Fatal(err)
+		}
+		// A day later.
+		if err := markRestoredAt(root, restored, now.Add(-RestoredKeep-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		asked = nil
+		res, err := pruneWithProbe(context.Background(), opts, answers(&asked))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(res.Pruned, []string{restored}) || slices.Contains(asked, restored) || len(res.NotAtDestination) != 0 {
+			t.Fatalf("pruned %v, asked %v, missing %v: want it gone by the count, unasked", res.Pruned, asked, res.NotAtDestination)
+		}
+		entries, _ := os.ReadDir(root)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), restoredPrefix) || strings.HasPrefix(e.Name(), uploadHeldPrefix) {
+				t.Errorf("a mark outlived the snapshot: %s", e.Name())
+			}
+		}
+	})
+}
+
+// A download is refused only when it would hold back a snapshot PAST the
+// count beyond the cap; one of a snapshot the cleanup keeps anyway never is.
+func TestNoFloor_keptByCount(t *testing.T) {
+	root := t.TempDir()
+	s := minutes(t, root, 15, 10, 5)
+	restored := snapName(3 * time.Hour)
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := MarkRestored(root, restored); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{s[2]: true, s[1]: true, s[0]: false, restored: true} {
+		if got := KeptByCount(root, name, 2); got != want {
+			t.Errorf("KeptByCount(%s, 2) = %v, want %v", name, got, want)
+		}
 	}
 }

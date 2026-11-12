@@ -26,6 +26,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 func mustFormatText(t *testing.T, v any) string {
@@ -3073,10 +3074,36 @@ func TestRunSnapshotSingleRow_NoSnapshotAtOrBeforeIsRefused(t *testing.T) {
 		t.Fatalf("error = %T %v, want *mysql.MyError 1526", err, err)
 	}
 	t.Logf("the client reads: ERROR %d: %s", myErr.Code, myErr.Message)
-	for _, want := range []string{"no baseline for myapp.users at or before 2026-11-12T09:30:00Z", "would read as absent", "_flashback"} {
+	// An empty location: no snapshot of the table exists yet. The message
+	// says that, and recommends neither more snapshots nor an S3 destination.
+	for _, want := range []string{"no baseline for myapp.users at or before 2026-11-12T09:30:00Z", "no snapshot holds this table yet", "the next snapshot will include it", "_flashback"} {
 		if !strings.Contains(myErr.Message, want) {
 			t.Errorf("the message does not say %q: %s", want, myErr.Message)
 		}
+	}
+	for _, not := range []string{"keep more snapshots", "add an S3 destination", "older than the oldest"} {
+		if strings.Contains(myErr.Message, not) {
+			t.Errorf("with no snapshot of the table at all the message says %q: %s", not, myErr.Message)
+		}
+	}
+	// The three wordings, from the lookup's two answers and the bucket flag.
+	exists := func(_ context.Context, _, _ string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+		if at.Before(time.Now().Add(-time.Minute)) {
+			return "", time.Time{}, reconstruct.StaleWarning{}, reconstruct.ErrNoBaseline
+		}
+		return "/x/2026/myapp/users.parquet", at, reconstruct.StaleWarning{}, nil
+	}
+	h.cfg.FindBaseline = exists
+	older := h.noBaselineWhy(context.Background(), "myapp", "users", at)
+	h.cfg.BaselineBucket = true
+	olderS3 := h.noBaselineWhy(context.Background(), "myapp", "users", at)
+	t.Logf("older than the oldest, no S3:   %s", older)
+	t.Logf("older than the oldest, with S3: %s", olderS3)
+	if !strings.Contains(older, "keep more snapshots or add an S3 destination") || strings.Contains(older, "no snapshot holds this table yet") {
+		t.Errorf("no S3: %s", older)
+	}
+	if strings.Contains(olderS3, "add an S3 destination") || strings.Contains(olderS3, "keep more snapshots") || !strings.Contains(olderS3, "on this machine and in the S3 destination") {
+		t.Errorf("with S3: %s", olderS3)
 	}
 	// The wire-neutral seam the PostgreSQL front-end shares classifies it.
 	_, rerr := h.ResolveSnapshotRow(context.Background(), TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: at})

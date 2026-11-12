@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	drivermysql "github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/config"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -43,6 +45,13 @@ type FlashbackTarget struct {
 	// (see docs/time-travel-sql.md).
 	BaselineDir string
 	BaselineS3  string
+	// FindBaseline is the server's own snapshot lookup (#2678): the local
+	// folder, then its S3 destination when the folder holds no snapshot of
+	// the table that old, the order the Time-travel tab uses
+	// (bundle.findBaseline). Nil for a server with one location, which the
+	// two fields above already name. BaselineBucket says it covers a bucket.
+	FindBaseline   func(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error)
+	BaselineBucket bool
 	// NoArchive disables archive auto-discovery for this server.
 	NoArchive bool
 	// DefaultSchema is the source database name (from the registry SourceDSN),
@@ -354,6 +363,8 @@ func (s *Server) flashbackTargetFor(ctx context.Context, id string) (FlashbackTa
 		IndexDBName:     b.dbName,
 		BaselineDir:     dir,
 		BaselineS3:      s3,
+		FindBaseline:    portFindBaseline(b.findBaseline, b.baselineSrc, b.baselineFallbackSrc),
+		BaselineBucket:  strings.HasPrefix(b.baselineFallbackSrc, "s3://"),
 		NoArchive:       b.noArchive,
 		DefaultSchema:   s.flashbackDefaultSchema(id),
 		SQL:             sqlOnCopy,
@@ -448,12 +459,47 @@ func timeTravelBaseline(b *bundle) (dir, s3 string) {
 	return splitBaselineSource(b.baselineSrc)
 }
 
+// portFindBaseline is the lookup the port hands the shim for a server with a
+// local folder AND a second location (its S3 destination): find is the
+// bundle's own findBaseline, which reads the folder and falls back to the
+// other one, exactly as the Time-travel tab and the console's MCP do (#766).
+// Nil with no second location: the shim then reads its one location itself.
+//
+// It exists because the folder now holds the newest N and nothing more
+// (#2678): a moment older than that is in the bucket, and a port that read
+// the folder alone would refuse it, on a server that has the snapshot.
+//
+// It adds one thing to find: a second location that could not be READ is
+// said as such, naming it. find returns that failure bare, and the client
+// would be told about a network error with nothing saying which bucket, or
+// worse take it for "no snapshot".
+func portFindBaseline(find func(context.Context, string, string, time.Time) (string, time.Time, reconstruct.StaleWarning, error),
+	src, fallback string) func(context.Context, string, string, time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+	if fallback == "" || find == nil {
+		return nil
+	}
+	return func(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+		path, when, stale, err := find(ctx, schema, table, at)
+		if err == nil || errors.Is(err, reconstruct.ErrNoBaseline) {
+			return path, when, stale, err
+		}
+		// A folder that holds a snapshot that old answered above; reaching
+		// here, the folder had none (or could not be read) and the other
+		// location failed.
+		if _, _, _, lerr := reconstruct.FindBaseline(ctx, src, schema, table, at); errors.Is(lerr, reconstruct.ErrNoBaseline) {
+			return "", time.Time{}, stale, fmt.Errorf(
+				"the snapshot folder holds no snapshot of %s.%s at or before %s, and the snapshot location %s could not be read "+
+					"(check that this process can reach it and has credentials for it): %w",
+				schema, table, at.UTC().Format(time.RFC3339), fallback, err)
+		}
+		return path, when, stale, err
+	}
+}
+
 // splitBaselineSource maps a resolved baseline source (the console bundle's
 // already dir-preferred baselineSrc) onto the shim's dir/S3 config fields by
-// scheme. The #766 local→S3 fallback the console bundle also carries is
-// deliberately NOT represented — a documented single-source-parity limitation
-// for the embedded port: a server with BOTH a local dir and an S3 copy reads
-// `_snapshot` only from the local dir here (see docs/time-travel-sql.md).
+// scheme. A server with BOTH a local dir and an S3 copy gets the local dir
+// here and the folder-then-bucket lookup beside it (portFindBaseline).
 func splitBaselineSource(src string) (dir, s3 string) {
 	if strings.HasPrefix(src, "s3://") {
 		return "", src

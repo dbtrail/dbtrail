@@ -234,36 +234,56 @@ func TestBaselineDownload_aSlowClientThatKeepsReadingIsNotCut(t *testing.T) {
 	}
 }
 
-// Downloads repeated at will cannot pin every snapshot there is: at most as
-// many different snapshots as the server keeps (3 with no count of its own)
-// are held for downloads at once. One more is refused with a message that
-// says to try again; another download of a snapshot already held is let in.
-func TestBaselineDownload_cappedAtTheSnapshotsTheServerKeeps(t *testing.T) {
+// Downloads repeated at will cannot hold back every old snapshot: at most
+// as many snapshots PAST the count as the count itself are held for
+// downloads at once, and one more is refused. A download of a snapshot the
+// cleanup keeps anyway is never refused, whatever else is being downloaded,
+// and a folder with no count has no cap.
+func TestPinForDownload_capsOnlySnapshotsPastTheCount(t *testing.T) {
 	dir := newDetailFixture(t)
-	others := []string{"2026-06-06T12-00-00Z", "2026-06-07T12-00-00Z", "2026-06-08T12-00-00Z"}
-	for _, n := range others {
+	older := []string{"2026-06-06T12-00-00Z", "2026-06-07T12-00-00Z", "2026-06-08T12-00-00Z"}
+	for _, n := range older {
 		olderSnapshot(t, dir, n)
-		defer baseline.PinSnapshot(dir, n, "a snapshot download", time.Hour)()
 	}
-	srv := newBaselineServer(t, dir, true)
-	w := httptest.NewRecorder()
-	srv.handleBaselineDownload(w, httptest.NewRequest("GET", "/api/baselines/download"+detailQuery(detailSnapAt), nil))
-	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
-		t.Fatalf("a fourth snapshot's download: code %d, Retry-After %q; want 429", w.Code, w.Header().Get("Retry-After"))
+	const keep = 1 // the fixture's snapshot is the newest: the one kept
+	// One person downloads the newest for hours: nobody else is refused it.
+	r0, ok := pinForDownload(dir, detailSnapDir, keep, time.Hour)
+	defer r0()
+	r0b, ok2 := pinForDownload(dir, detailSnapDir, keep, time.Hour)
+	defer r0b()
+	if !ok || !ok2 {
+		t.Fatal("a download of the newest snapshot was refused")
 	}
-	t.Logf("the refusal as the client reads it: %s", w.Body.String())
-	if want := downloadsBusyMessage(3); !strings.Contains(w.Body.String(), "Try again shortly") || want == "" {
-		t.Fatalf("the refusal does not say to try again: %s", w.Body.String())
+	// One old snapshot may be held for a download; a second is refused.
+	r1, ok := pinForDownload(dir, older[0], keep, time.Hour)
+	if !ok {
+		t.Fatal("the first download of a snapshot past the count was refused, with only the newest being downloaded")
 	}
-	if got := baseline.Pinned(dir); slices.Contains(got, detailSnapDir) || len(got) != 3 {
-		t.Fatalf("the refused download left %v pinned", got)
+	if _, ok := pinForDownload(dir, older[1], keep, time.Hour); ok {
+		t.Fatal("a second snapshot past the count was held for a download against a count of 1")
 	}
-	// A reader pinning for another reason does not use up the downloads.
-	defer baseline.PinSnapshot(dir, detailSnapDir, "a SQL statement", time.Hour)()
-	w = httptest.NewRecorder()
-	srv.handleBaselineDownload(w, httptest.NewRequest("GET", "/api/baselines/download"+detailQuery(detailSnapAt), nil))
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("a statement's pin was counted as a download's: code %d", w.Code)
+	if got := baseline.Pinned(dir); !slices.Equal(got, []string{older[0], detailSnapDir}) {
+		t.Fatalf("pinned %v", got)
+	}
+	r1()
+	if r, ok := pinForDownload(dir, older[1], keep, time.Hour); !ok {
+		t.Fatal("the place a finished download freed was not given")
+	} else {
+		r()
+	}
+	// No count (a console that prunes nothing, a server that keeps all).
+	for _, n := range older {
+		r, ok := pinForDownload(dir, n, 0, time.Hour)
+		if !ok {
+			t.Fatalf("a download was refused on a folder nothing prunes: %s", n)
+		}
+		defer r()
+	}
+	for _, n := range []int{1, 3} {
+		t.Logf("the refusal with a count of %d: %s", n, downloadsBusyMessage(n))
+	}
+	if got := downloadsBusyMessage(1); strings.Contains(got, "1 older snapshots") || !strings.Contains(got, "Try again shortly") {
+		t.Fatalf("the refusal: %s", got)
 	}
 }
 
