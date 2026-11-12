@@ -297,6 +297,22 @@ func TestSQLExportBootSweep(t *testing.T) {
 	}
 }
 
+// The build asks the engine to fold a table that lost its snapshot, so that
+// sqlExportRunError can fail the build naming that table in the console's own
+// words. It never ships such a table: TestSQLExportRunError covers that half.
+func TestSQLExportFoldConfig_foldsATableWithNoSnapshotToNameIt(t *testing.T) {
+	cfg := sqlExportFoldConfig(console.SQLExportRequest{ServerID: "s1", IndexDSN: "dsn", At: time.Now()},
+		"/build", []string{"shop.orders"})
+	if !cfg.AllowChangesOnly {
+		t.Error("the engine would refuse the table under its own wording, and sqlExportRunError would never see it")
+	}
+	err := sqlExportRunError([]*reconstruct.TableReport{{Schema: "shop", Table: "users", BinlogOnly: true}}, nil)
+	if err == nil {
+		t.Fatal("a table rebuilt from its changes alone did not fail the build")
+	}
+	t.Logf("rendered: %s", err)
+}
+
 // TestSQLExportFoldConfig_sharesTheDaemonBounds pins the SQL export build to
 // the same in-daemon posture as the refresh and restore folds.
 //

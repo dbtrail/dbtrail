@@ -862,19 +862,20 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 	}
 	reports, failures, err := reconstructTablesDetailed(cmd.Context(), cfg)
 	if err != nil {
-		// A table with no snapshot was refused (no --allow-changes-only):
-		// the engine says what it would have held, this says what to do.
-		if advice := changesOnlyAdvice(cmd.Context(), cmd, failures, baselineSrc); advice != "" {
-			return fmt.Errorf("full-table reconstruct: %w\n%s", err, advice)
-		}
+		wrapped := fmt.Errorf("full-table reconstruct: %w", err)
 		// Same CLI-layer hint as single-row reconstruct (the %w chain
 		// survives ReconstructTables' errors.Join, so errors.As still
 		// unwraps the library type).
 		var emptyErr *query.SourceEmptyError
 		if errors.As(err, &emptyErr) {
-			return fmt.Errorf("full-table reconstruct: %w; "+sourceEmptyHint, err)
+			wrapped = fmt.Errorf("full-table reconstruct: %w; "+sourceEmptyHint, err)
 		}
-		return fmt.Errorf("full-table reconstruct: %w", err)
+		// A table with no snapshot was refused (no --allow-changes-only):
+		// the engine says what it would have held, this says what to do.
+		if advice := changesOnlyAdvice(cmd.Context(), cmd, failures, baselineSrc); advice != "" {
+			wrapped = fmt.Errorf("%w\n%s", wrapped, advice)
+		}
+		return wrapped
 	}
 
 	// ── Summary ────────────────────────────────────────────────────────────

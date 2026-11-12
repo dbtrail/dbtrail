@@ -196,8 +196,11 @@ func TestReconstructFullTable_changesOnlyIsNeverAQuietSuccess(t *testing.T) {
 		}
 		var summary string
 		for _, line := range strings.Split(output, "\n") {
-			if strings.Contains(line, "changes only") && strings.Contains(line, "table=orders") {
+			if strings.Contains(line, "table dump holds changes only") && strings.Contains(line, "table=orders") {
 				summary = line
+			}
+			if strings.Contains(line, "table dump complete") && strings.Contains(line, "table=orders") {
+				t.Errorf("testdb.orders is reported as a complete dump: %s", line)
 			}
 			if strings.Contains(line, "changes only") && strings.Contains(line, "table=items") {
 				t.Errorf("testdb.items was built from its snapshot but the summary calls it changes only: %s", line)

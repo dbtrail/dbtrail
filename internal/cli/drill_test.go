@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
@@ -167,5 +168,22 @@ func TestDrillReportExitError(t *testing.T) {
 	err := r.ExitError()
 	if err == nil || !strings.Contains(err.Error(), "1 of 2") || !strings.Contains(err.Error(), "/tmp/d") {
 		t.Fatalf("failure must name counts and the kept dump: %v", err)
+	}
+}
+
+// A table with no snapshot must reach drillTable, which fails it without
+// loading it and says why. The engine refuses such a table unless the caller
+// opts in, and a refusal there would end the rehearsal with no per-table
+// report, so drill opts in. The chunk size is pinned beside it because it is
+// the other value this configuration exists to carry.
+func TestDrillFoldConfig_foldsATableWithNoSnapshotForItsOwnVerdict(t *testing.T) {
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cfg := drillFoldConfig("dsn", "/snapshots", []string{"shop.orders"}, at, "/out", reconstruct.OutputFormatMydumper)
+	if !cfg.AllowChangesOnly {
+		t.Error("drill does not ask for a table with no snapshot to be folded: the engine would refuse it and the rehearsal would end with no report")
+	}
+	if cfg.ChunkSize != 16<<20 || cfg.OutputFormat != reconstruct.OutputFormatMydumper || !cfg.At.Equal(at) ||
+		cfg.IndexDSN != "dsn" || cfg.BaselineSrc != "/snapshots" || cfg.OutputDir != "/out" || len(cfg.Tables) != 1 {
+		t.Errorf("cfg = %+v", cfg)
 	}
 }

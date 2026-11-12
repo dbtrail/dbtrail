@@ -324,30 +324,10 @@ func runDrill(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	reports, err := reconstruct.ReconstructTables(ctx, reconstruct.FullTableConfig{
-		IndexDSN:    drlIndexDSN,
-		BaselineSrc: baselineSrc,
-		Tables:      tables,
-		At:          at,
-		OutputDir:   outDir,
-		// The format the target loads: a mydumper dump into MySQL, psql's
-		// SQL into PostgreSQL.
-		OutputFormat: target.OutputFormat(),
-		// A table with no snapshot is still folded, so that it gets its own
-		// verdict: drillTable fails it without loading it. Refused in the
-		// engine, it would end the whole rehearsal with no report.
-		AllowChangesOnly: true,
-		// Each chunk is applied to the scratch as ONE statement, so it must
-		// fit the target's max_allowed_packet. Chunks can overshoot by one
-		// row tuple (rotation triggers after the threshold), so the ~48MiB
-		// headroom under the stock 64M default is the real margin
-		// (reconstruct's own 256MiB default assumes myloader, which the
-		// operator tunes).
-		ChunkSize:          16 << 20,
-		WarnEventThreshold: 5_000_000,
-		ArchiveFetcher:     TunedArchiveFetcher(duckTuning),
-		DuckDBTuning:       duckTuning,
-	})
+	cfg := drillFoldConfig(drlIndexDSN, baselineSrc, tables, at, outDir, target.OutputFormat())
+	cfg.ArchiveFetcher = TunedArchiveFetcher(duckTuning)
+	cfg.DuckDBTuning = duckTuning
+	reports, err := reconstruct.ReconstructTables(ctx, cfg)
 	if err != nil {
 		if derr := drillReconstructError(err); derr != nil {
 			// Every table was refused before writing: nothing to keep.
@@ -405,6 +385,32 @@ func runDrill(cmd *cobra.Command, args []string) error {
 	}
 	cmd.SilenceUsage = true
 	return exitErr
+}
+
+// drillFoldConfig is what a rehearsal folds with, less the DuckDB budget the
+// flags give. format is what the target loads: a mydumper dump into MySQL,
+// psql's SQL into PostgreSQL.
+func drillFoldConfig(indexDSN, baselineSrc string, tables []string, at time.Time, outDir, format string) reconstruct.FullTableConfig {
+	return reconstruct.FullTableConfig{
+		IndexDSN:     indexDSN,
+		BaselineSrc:  baselineSrc,
+		Tables:       tables,
+		At:           at,
+		OutputDir:    outDir,
+		OutputFormat: format,
+		// A table with no snapshot is still folded, so that it gets its own
+		// verdict: drillTable fails it without loading it. Refused in the
+		// engine, it would end the whole rehearsal with no report.
+		AllowChangesOnly: true,
+		// Each chunk is applied to the scratch as ONE statement, so it must
+		// fit the target's max_allowed_packet. Chunks can overshoot by one
+		// row tuple (rotation triggers after the threshold), so the ~48MiB
+		// headroom under the stock 64M default is the real margin
+		// (reconstruct's own 256MiB default assumes myloader, which the
+		// operator tunes).
+		ChunkSize:          16 << 20,
+		WarnEventThreshold: 5_000_000,
+	}
 }
 
 // drillTable runs one table's load-and-check half and produces its verdict —
