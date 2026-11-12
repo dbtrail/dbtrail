@@ -52,7 +52,7 @@ bintrail config init
 # Edit .bintrail.env and set BINTRAIL_INDEX_DSN and BINTRAIL_SOURCE_DSN
 ```
 
-All commands load it automatically; CLI flags take precedence. Use `--global` to write `~/.config/bintrail/config.env` instead.
+All commands load it automatically; CLI flags take precedence. Use `--global` to write `~/.config/bintrail/config.env` instead. For settings shared by every program on a host, use [`/etc/dbtrail/dbtrail.cnf`](option-file.md), written like MySQL's `my.cnf`.
 
 ---
 
