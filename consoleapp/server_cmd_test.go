@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -200,6 +201,9 @@ func TestResolveAddInput(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// The forwarding account has its own test
+				// (TestResolveForward); this one is about the capture login.
+				got.FwdAsk, got.ask = false, nil
 				if got != c.want {
 					t.Fatalf("got %+v\nwant %+v", got, c.want)
 				}
@@ -1126,11 +1130,23 @@ func TestServerForwardUser(t *testing.T) {
 			t.Errorf("output:\n%s", out.String())
 		}
 	})
-	t.Run("the user DBTrail captures with is saved and said to be of no use", func(t *testing.T) {
+	t.Run("the user DBTrail captures with is refused before anything is saved", func(t *testing.T) {
 		d, c := newFakeDaemon(t)
 		twoServers(d)
 		d.on("PUT /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop", "has_route": true, "route_user": "dbtrail", "route_is_capture": true})
 		err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "dbtrail", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\n"), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "never forwards as that one") {
+			t.Fatalf("err = %v", err)
+		}
+		if slices.Contains(d.calls, "PUT /api/servers/id1/route") {
+			t.Fatal("the capture user was sent to be saved")
+		}
+	})
+	t.Run("the daemon says it is the capture user under another spelling", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("PUT /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop", "has_route": true, "route_user": "DBTrail", "route_is_capture": true})
+		err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "DBTrail", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\n"), io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "never forwards as that one") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1208,5 +1224,111 @@ func TestPortRoutingOnNamesServersThatCannotForward(t *testing.T) {
 	}
 	if strings.Contains(o, "forward-user shop") || strings.Contains(o, "old-index") {
 		t.Errorf("names a server that needs nothing:\n%s", o)
+	}
+}
+
+// #2686: what `server add` says about the MySQL port, from the answer of the
+// DBTrail that added the server.
+func TestServerAddSaysWhereThePortStands(t *testing.T) {
+	on, off := true, false
+	port := func(m map[string]any) map[string]any {
+		return map[string]any{"ok": true, "name": "shop", "started": true, "doctor": passReport(), "port": m}
+	}
+	for _, tc := range []struct {
+		name    string
+		answer  map[string]any
+		want    []string
+		wantNot []string
+	}{
+		{"turned on by this add",
+			port(map[string]any{"enabled": on, "turned_on": true, "routing_on": true, "host": "", "port": "3309", "password": "bfp_abc123"}),
+			[]string{"The MySQL port is on now, with Engine Routing on.", "mysql -h 127.0.0.1 -P 3309 -u shop -p",
+				"Password (shown only now, keep it): bfp_abc123", `Statements for "shop" are answered once its first copy is ready.`,
+				"server forward-user shop -u <user> -p", "snapshot run shop"},
+			[]string{"port new-password", "was not turned on", "is off"}},
+		{"turned on and no password in the answer",
+			port(map[string]any{"enabled": on, "turned_on": true, "routing_on": true, "port": "3309"}),
+			[]string{"The MySQL port is on now", "No password came with the answer. Make one:", "port new-password"},
+			[]string{"shown only now"}},
+		{"already on, routing on",
+			port(map[string]any{"enabled": on, "turned_on": false, "routing_on": true, "host": "10.0.0.5", "port": "3310", "has_password": true}),
+			[]string{"The MySQL port is on, with Engine Routing on, and takes the password it already has:", "mysql -h 10.0.0.5 -P 3310 -u shop -p"},
+			[]string{"shown only now", "on now", "new-password"}},
+		{"already on, routing off",
+			port(map[string]any{"enabled": on, "routing_on": false, "port": "3309", "has_password": true}),
+			[]string{"with Engine Routing off, and takes the password it already has"},
+			[]string{"shown only now"}},
+		{"on and not answering",
+			port(map[string]any{"enabled": on, "turned_on": true, "routing_on": true, "port": "3309", "password": "bfp_x", "error": "address already in use"}),
+			[]string{"Password (shown only now, keep it): bfp_x", "It is not answering: address already in use"}, nil},
+		{"on and nothing answers it (an older compose file)",
+			port(map[string]any{"enabled": on, "turned_on": true, "routing_on": true, "port": "3309", "password": "bfp_x", "notice": "NOTHING ANSWERS ON IT: this docker-compose.yml has no router service."}),
+			[]string{"Password (shown only now, keep it): bfp_x", "NOTHING ANSWERS ON IT: this docker-compose.yml has no router service."}, nil},
+		{"could not be turned on",
+			port(map[string]any{"enabled": off, "not_turned_on": "its setting could not be saved: read-only file system."}),
+			[]string{"The MySQL port was not turned on: its setting could not be saved: read-only file system.\n"},
+			[]string{"shown only now", "mysql -h", "system..", "Turn it on"}},
+		{"saved as off",
+			port(map[string]any{"enabled": off}),
+			[]string{"The MySQL port is off, as it was saved. Turn it on:", "port on"},
+			[]string{"shown only now", "mysql -h", "was not turned on"}},
+		{"a DBTrail that says nothing about the port",
+			map[string]any{"ok": true, "name": "shop", "started": true, "doctor": passReport()},
+			[]string{`Added "shop"`, "snapshot run shop"},
+			[]string{"MySQL port", "mysql -h", "Password"}},
+		{"an answer about the port that does not say whether it is on",
+			port(map[string]any{"turned_on": true, "password": "bfp_x"}),
+			[]string{`Added "shop"`},
+			[]string{"MySQL port", "bfp_x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, c := newFakeDaemon(t)
+			d.on("POST /api/servers/identify", 200, map[string]any{"addr": "db1:3306", "flavor": "mysql", "version": "8.4.3"})
+			d.on("POST /api/servers/check", 200, tc.answer)
+			var out bytes.Buffer
+			in := addInput{Host: "db1", Port: "3306", User: "dbtrail", Password: "s3cret#1", Name: "shop"}
+			if err := runServerAdd(context.Background(), c, in, false, &out); err != nil {
+				t.Fatalf("err = %v\n%s", err, out.String())
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(out.String(), w) {
+					t.Errorf("output lacks %q:\n%s", w, out.String())
+				}
+			}
+			for _, w := range tc.wantNot {
+				if strings.Contains(out.String(), w) {
+					t.Errorf("output says %q:\n%s", w, out.String())
+				}
+			}
+			if strings.Contains(out.String(), "s3cret") {
+				t.Errorf("the source's password was printed:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// A server name the shell would split is not put in the mysql line as it is.
+func TestServerAddPortLineLeavesAnUnsafeNameToThePerson(t *testing.T) {
+	on := true
+	var out bytes.Buffer
+	printNewServerPort(&out, &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, RoutingOn: true, Password: "bfp_x"}, TurnedOn: true}, "my shop; rm", true)
+	if !strings.Contains(out.String(), "-u <server name> -p") || strings.Contains(out.String(), "-u my shop") {
+		t.Fatalf("the mysql line:\n%s", out.String())
+	}
+}
+
+// Only a name the shell reads as one plain word goes into the mysql line.
+func TestMysqlLineUser(t *testing.T) {
+	for name, want := range map[string]string{
+		"shop": "shop", "db1.example.com:3306": "db1.example.com:3306", "a_b-c@d": "a_b-c@d", "Shop2": "Shop2",
+		"": "<server name>", "my shop": "<server name>", "a\tb": "<server name>", "a\nb": "<server name>",
+		"a;b": "<server name>", "$(id)": "<server name>", "a`b`": "<server name>", "a'b": "<server name>",
+		`a"b`: "<server name>", "a{b,c}": "<server name>", "a[bc]": "<server name>", "a#b": "<server name>",
+		"~root": "<server name>", "a%b": "<server name>", "a*": "<server name>", "a\\b": "<server name>",
+		"tienda-ñ": "<server name>", "a\u00a0b": "<server name>", "a=b": "<server name>", "a/b": "<server name>",
+	} {
+		if got := mysqlLineUser(name); got != want {
+			t.Errorf("mysqlLineUser(%q) = %q, want %q", name, got, want)
+		}
 	}
 }

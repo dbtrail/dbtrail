@@ -511,6 +511,8 @@ leave out is asked for.
 | `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
 | `--schemas` | Comma-separated schemas to record (default: every user schema) |
 | `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
+| `--forward-user` | The forwarding user: what the MySQL port runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
+| `--no-forward` | Do not ask for a forwarding user |
 | `-v`, `--verbose` | Also print how to turn on each optional improvement |
 
 `--defaults-file` reads the format of `~/.my.cnf`. It reads `[client]`, then
@@ -525,6 +527,16 @@ password=...
 [dbtrail]
 user=dbtrail
 password="a password with a # in it"
+```
+
+The forwarding user goes in a group of its own, `[dbtrail-forward]`. Only
+that group is read for it, never `[client]` or `[dbtrail]`, whose user is the
+one DBTrail records changes with:
+
+```ini
+[dbtrail-forward]
+user=shop_fwd
+password=...
 ```
 
 Only the file you name is read: never `/etc/my.cnf` or `~/.my.cnf` by
@@ -554,15 +566,28 @@ here); `--format json` for scripts. **`server remove <name>`** stops recording a
 server and takes it off the list, after asking (`--yes` does not ask). What
 was already recorded and copied is kept.
 
-**The first copy and the MySQL port.** After `server add`, two more commands
-reach a query answered on port 3309, with no web interface:
+**The first copy and the MySQL port.** `server add` leaves the MySQL port on:
+adding a server when nothing was ever saved about the port turns it on, with
+Engine Routing on, and prints the `mysql` line and the port's password, which
+is shown only then. After it, one more command reaches a query answered on
+port 3309, with no web interface:
 
 ```
 dbtrail snapshot run shop                   # read every table once, and wait
 dbtrail snapshot schedule shop --every 1h   # keep the copy current
-dbtrail port on                             # turn the MySQL port on
 mysql -h 127.0.0.1 -P 3309 -u shop -p
 ```
+
+Only the first server does it, and only when nothing was ever saved about
+the port. A port that was turned off stays off when another server is added,
+and an installation that already had servers keeps a port it never turned on
+off when it adds one more after an upgrade. A session that may not
+change settings, or that has a data access policy, adds its server and the
+port is left as it was; the command says so. The web interface's Connect
+screen does the same and shows the same password. The web interface's long
+form (**Add server**, all fields) and `POST /api/servers` do not turn the port
+on: turn it on afterwards with `dbtrail port on` or on the MySQL clients
+page.
 
 - `snapshot run <server>` starts the full read and waits until the copy is
   ready, or says why it failed and exits 1. Ctrl-C stops the waiting, not the
@@ -571,17 +596,31 @@ mysql -h 127.0.0.1 -P 3309 -u shop -p
   copy to S3 failed is reported as that, not as "no copy".
 - `snapshot schedule <server> --every 1h` updates the copy from the recorded
   changes, without reading the database again; `--off` stops it.
-- `port on` turns the MySQL port on and prints its password, which is shown
-  only then, with the `mysql` line to connect. Run again it does not print the
+- `port on` turns the MySQL port on by hand: for an installation whose port
+  was never on, or was turned off. The first time, it starts with Engine
+  Routing on and prints the port's password, which is shown only then, with
+  the `mysql` line to connect. Run again it does not print the
   password: `port new-password` makes another, and the old one stops working
   within a few seconds. `port status`, `port off`, and `port routing on|off`
   for Engine Routing complete it. A port saved as on that is not answering
   (the router is not running) exits 1 and says so.
 
-**The forwarding user.** With Engine Routing on (`dbtrail port routing on`),
-a statement the copy cannot answer runs on your MySQL, as a user you name per
-server. Without one the port refuses those statements, and it never forwards
-as the user DBTrail records changes with.
+**The forwarding user.** With Engine Routing on, a statement the copy cannot
+answer runs on your MySQL, as a user you name per server. Without one the copy
+answers every statement of that server alone, and the port never forwards as
+the user DBTrail records changes with.
+
+`server add` asks for it once the server is added, on a terminal, after it
+printed the port's password: Enter skips it. Without a terminal it is taken
+from `--forward-user` and `[dbtrail-forward]`, and never asked for; with the
+Docker command, which sends the option file on standard input, that group is
+the way. Everything about it is checked before the server is saved: the
+capture user is refused, and so is a user with no password and nobody to ask.
+If DBTrail refuses the user itself (it cannot log in, or it lacks grants), the
+server stays added and recording, the command says so and exits 1, and
+`server forward-user` sets it once that is fixed.
+
+To set or change it later:
 
 ```
 dbtrail server forward-user shop -u shop_fwd -p
@@ -2115,8 +2154,8 @@ server's statements instead of serving without it.
   [Upgrading](time-travel-sql.md#upgrading-from-a-version-with-the-port-inside-watch).
 - `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` (`watch` only): same as
   `--route-max-copy-age`. It no longer turns Engine Routing on and only prints
-  a warning at startup. Engine Routing is a saved setting, off by default, and
-  there is no maximum copy age any more. See
+  a warning at startup. Engine Routing is a saved setting, on from the moment
+  the port is first turned on, and there is no maximum copy age any more. See
   [time-travel-sql.md](time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads).
 - `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD`, `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS`
   and `BINTRAIL_CONSOLE_ROUTE_READ_ONLY` (`router`): the router's

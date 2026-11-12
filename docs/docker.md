@@ -712,8 +712,8 @@ on this machine, delete the whole `ports:` line of the `router` service
 (`_flashback`, `_snapshot`, `_diff`) and ordinary SQL over the captured
 tables. Nothing is sent to your MySQL.
 
-**Engine Routing (off by default).** Engine Routing is a saved
-setting, off until it is turned on
+**Engine Routing.** Engine Routing is a saved setting, on from the
+moment the port is first turned on (adding the first server does it)
 ([Engine Routing](time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads)).
 With it on, each statement goes to the server's source MySQL, except a
 `SELECT` whose plan says it is expensive, which runs on the copy. Statements

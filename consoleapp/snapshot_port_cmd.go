@@ -234,7 +234,7 @@ func snapshotDoneText(name string, b console.BaselineStatus) string {
 	if n := len(b.LeftOutTables) + b.LeftOutTablesOmitted; n > 0 {
 		text += fmt.Sprintf(" %s left out: the web interface names each and says why"+console.OnPage(console.PageSnapshots)+".", plural(n, "table"))
 	}
-	return text + fmt.Sprintf("\nKeep it current:  bintrail-console snapshot schedule %s --every 1h\nThen the MySQL port:  bintrail-console port on", name)
+	return text + fmt.Sprintf("\nKeep it current:  bintrail-console snapshot schedule %s --every 1h\nThe MySQL port:  bintrail-console port status", name)
 }
 
 // snapshotFailure says why a read failed. A read can fail AFTER leaving a
@@ -373,9 +373,24 @@ func portUser(ctx context.Context, c *ctlClient) string {
 		}
 		name = s.Name
 	}
-	// A name the shell would split or expand is left for the person to quote.
-	if name == "" || strings.ContainsAny(name, " \t'\"$`\\!*?;&|<>()") {
+	return mysqlLineUser(name)
+}
+
+// mysqlLineUser is name as the user of a printed mysql line, which people
+// copy into a shell. Only a name made of letters, digits and . _ @ : - is
+// printed as it is: anything else (a space, a quote, a character the shell
+// expands) is left for the person to type and quote.
+func mysqlLineUser(name string) string {
+	if name == "" {
 		return "<server name>"
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '@', c == ':', c == '-':
+		default:
+			return "<server name>"
+		}
 	}
 	return name
 }

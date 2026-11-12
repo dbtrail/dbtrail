@@ -371,7 +371,7 @@ for the service give it more workers. In the capture process,
 <a id="read-routing-bintrail_read_routing_decisions_total"></a>
 ## Engine Routing (`bintrail_read_routing_decisions_total`)
 
-With Engine Routing on (a saved setting of the MySQL port, off by default),
+With Engine Routing on (a saved setting of the MySQL port, on from the moment the port is first turned on),
 every routed statement is one decision, counted once by the router:
 
 | Metric | Type | Meaning |

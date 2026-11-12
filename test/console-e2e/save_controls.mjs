@@ -1155,20 +1155,28 @@ export async function runSaveScenes(ctx) {
             !!seen && seen.includes("-P " + sqlPort + " ") && !seen.includes(pw1) && !seen.includes(pw2), JSON.stringify({ seen }));
         } finally { await other.close(); }
 
-        // Read routing, on the same panel: the saved switch, on and back
-        // off, with the port left as it is. Turning it on asks first (the
-        // dialog is accepted by this scene's handler).
+        // Read routing, on the same panel. A port turned on for the first
+        // time starts with it on (#2686); then the saved switch off, on and
+        // off again, with the port left as it is. Turning it on asks first
+        // (the dialog is accepted by this scene's handler).
+        const routeSays = (word) => until(() => tab.evaluate((w) => {
+          const p = document.querySelector(".cn-split .cn-route-state");
+          return !!p && p.textContent === w;
+        }, word));
+        const firstOn = st1 && st1.routing_on === true && await routeSays("On");
+        check("mysql-port", "A port turned on for the first time starts with Engine Routing on, and the panel says so",
+          !!firstOn, JSON.stringify({ st1 }));
+        const rOff0 = await press("Turn routing off");
+        const stR0 = await until(async () => { const b = await status(); return b && b.routing_on === false ? b : null; });
+        await routeSays("Off");
         const rOn = await press("Turn routing on");
         const stR1 = await until(async () => { const b = await status(); return b && b.routing_on === true ? b : null; });
-        const saidOn = await until(() => tab.evaluate(() => {
-          const p = document.querySelector(".cn-split .cn-route-state");
-          return !!p && p.textContent === "On";
-        }));
+        const saidOn = await routeSays("On");
         const rOff = await press("Turn routing off");
         const stR2 = await until(async () => { const b = await status(); return b && b.routing_on === false ? b : null; });
-        check("mysql-port", "Turn routing on and off saves the switch, says it on the panel, and leaves the port on",
-          !!rOn && !!stR1 && stR1.enabled === true && !!saidOn && !!rOff && !!stR2 && stR2.enabled === true && await listening(),
-          JSON.stringify({ rOn, stR1, saidOn, rOff, stR2 }));
+        check("mysql-port", "Turn routing off, on and off saves the switch, says it on the panel, and leaves the port on",
+          !!rOff0 && !!stR0 && !!rOn && !!stR1 && stR1.enabled === true && !!saidOn && !!rOff && !!stR2 && stR2.enabled === true && await listening(),
+          JSON.stringify({ rOff0, stR0, rOn, stR1, saidOn, rOff, stR2 }));
 
         // The monitor login, on the same panel: Save stores it (the status
         // says the username, never the password), and Remove removes it.

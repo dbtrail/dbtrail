@@ -32,11 +32,45 @@ type Client struct {
 
 // Load reads the file at path. See Parse for groups.
 func Load(path string, groups ...string) (Client, error) {
+	f, err := Open(path)
+	if err != nil {
+		return Client{}, err
+	}
+	return f.Client(groups...)
+}
+
+// File is an option file read once, whose groups are then read apart: a
+// caller that needs two logins from one file (one per group) reads it once,
+// which matters when it came on a stream that cannot be read again.
+type File struct {
+	name string
+	data []byte
+}
+
+// Open reads the file at path.
+func Open(path string) (File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Client{}, fmt.Errorf("read option file %s: %w", path, err)
+		return File{}, fmt.Errorf("read option file %s: %w", path, err)
 	}
-	return parseNamed(path, data, groups...)
+	return File{name: path, data: data}, nil
+}
+
+// ReadFile reads an option file from r. name is what errors call it.
+func ReadFile(r io.Reader, name string) (File, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxOptionFile+1))
+	if err != nil {
+		return File{}, fmt.Errorf("read option file %s: %w", name, err)
+	}
+	if len(data) > maxOptionFile {
+		return File{}, fmt.Errorf("option file %s is larger than 1 MB: that is not an option file", name)
+	}
+	return File{name: name, data: data}, nil
+}
+
+// Client reads the options of the named groups only. See Parse.
+func (f File) Client(groups ...string) (Client, error) {
+	return parseNamed(f.name, f.data, groups...)
 }
 
 // maxOptionFile bounds an option file read from a stream. A real one is a
@@ -46,14 +80,11 @@ const maxOptionFile = 1 << 20
 // Read reads an option file from r, for a caller whose file is not on this
 // machine's disk. name is what errors call it.
 func Read(r io.Reader, name string, groups ...string) (Client, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxOptionFile+1))
+	f, err := ReadFile(r, name)
 	if err != nil {
-		return Client{}, fmt.Errorf("read option file %s: %w", name, err)
+		return Client{}, err
 	}
-	if len(data) > maxOptionFile {
-		return Client{}, fmt.Errorf("option file %s is larger than 1 MB: that is not an option file", name)
-	}
-	return parseNamed(name, data, groups...)
+	return f.Client(groups...)
 }
 
 func parseNamed(path string, data []byte, groups ...string) (Client, error) {
