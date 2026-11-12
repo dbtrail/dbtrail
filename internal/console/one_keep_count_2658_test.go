@@ -209,7 +209,13 @@ func TestOneKeepCount_aFirstDestinationStartsTheUploadInterval(t *testing.T) {
 		srv, id := newScheduleServer(t, &stubScheduleReporter{full: true})
 		e, _ := srv.cm.reg.Get(id)
 		fakeSnapshot(t, e.BaselineDir)
+		// The destination first, the schedule after: a server that had its
+		// bucket before its schedule (one write with both is a first
+		// destination, and starts the interval).
 		e.BaselineS3 = s3
+		if err := srv.cm.reg.Update(e); err != nil {
+			t.Fatal(err)
+		}
 		e.BackupSchedule = &BackupSchedule{Every: "5m", At: "00:00", UploadEvery: upload}
 		if err := srv.cm.reg.Update(e); err != nil {
 			t.Fatal(err)

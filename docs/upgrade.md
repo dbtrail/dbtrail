@@ -184,7 +184,7 @@ Servers you already have keep what they have:
   have.
 
 A server added after the upgrade with an S3 destination keeps its 3 newest
-local snapshots (an older one that was sent to S3 goes once S3 has it, and an
+local snapshots and everything made in the last hour (an older one that was sent to S3 goes once S3 has it, and an
 update the schedule did not send goes by the count alone), starts updating every 5
 minutes after its first snapshot, and sends one snapshot to S3 every 24
 hours. Change either on the Snapshots page.

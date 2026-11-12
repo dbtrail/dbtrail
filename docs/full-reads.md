@@ -22,9 +22,11 @@ A snapshot is the state of every table at one moment, one Parquet file per table
 
 **Sending a snapshot to S3 does not remove the local one.** How many stay on the local disk is one setting, per server, with or without an S3 destination: **Keep by count** on the Snapshots page (`local_keep_newest`). A server added from the web interface starts at 3.
 
+**The folder holds the count and everything made in the last hour.** Nothing younger than an hour is ever removed, so with the default 5-minute schedule and a count of 3 the folder holds about 13 snapshots, not 3: the 12 or so of the last hour and the newest ones before it. Tables that did not change are shared between them, so each costs only what changed.
+
 - **Without an S3 destination**, a snapshot past the count is removed at the next hourly cleanup.
 - **With an S3 destination**, a snapshot past the count is removed only once its copy is confirmed in the bucket. One the bucket does not have (not uploaded yet, or an upload that failed) stays on the local disk, the Snapshots page counts it ("Not in S3 yet, so kept here"), and DBTrail sends it again. When the bucket cannot be asked, that cleanup removes no snapshot that was sent to S3, and the page says so.
-- **An update the schedule did not send to S3** (see the next paragraph) was never meant to be in the bucket, so removing it loses nothing that was meant to be kept there. Past the count it is removed by the count alone, as on a server without S3: the bucket is not asked, and nothing waits for the next upload. The bucket keeps the last snapshot that was sent, and the disk keeps the newest 3.
+- **An update the schedule did not send to S3** (see the next paragraph) was never meant to be in the bucket, so removing it loses nothing that was meant to be kept there. Past the count it is removed by the count alone, as on a server without S3: the bucket is not asked, and nothing waits for the next upload. The bucket keeps the last snapshot that was sent, and the disk keeps the newest 3 and everything made in the last hour.
 
 In both cases these always stay: for every table, the newest snapshots holding it, up to the count; a snapshot that is still being written; the snapshot `current` points at; and anything younger than an hour.
 
@@ -38,9 +40,9 @@ The local cleanup never removes a snapshot from the bucket. See [Pruning old loc
 
 ## The schedule a new server starts with
 
-A server added from the web interface starts updating every 5 minutes by itself as soon as its first snapshot exists, when it keeps only its newest snapshots (**Keep by count** has a number, 3 by default). With an S3 destination it also starts, and sends a snapshot to S3 every 24 hours.
+A server added from the web interface starts updating every 5 minutes by itself as soon as its first snapshot exists, when it keeps only its newest snapshots (**Keep by count** has a number, 3 by default). With an S3 destination it also starts, and sends a snapshot to S3 every 24 hours. A server that gets its first S3 destination later, with a schedule already running, starts sending every 24 hours at that moment too, and the page says so when the destination is saved; one that already had a destination keeps what its schedule says.
 
-That is how DBTrail knows the snapshots cannot pile up: with a count, the local folder is bounded, and with one upload a day the bucket grows by one snapshot a day. A server whose folder already held snapshots when you added it gets no count, so those are not removed, and no schedule by itself either. A server saved before this rule never starts a schedule by itself.
+That is how DBTrail knows the snapshots cannot pile up: with a count, the local folder is bounded (the count, and the last hour), and with one upload a day the bucket grows by one snapshot a day. A server whose folder already held snapshots when you added it gets no count, so those are not removed, and no schedule by itself either. A server saved before this rule never starts a schedule by itself.
 
 ## Every case
 

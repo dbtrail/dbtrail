@@ -9524,9 +9524,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // A first S3 destination starts the schedule's S3 interval (#2658): said
     // here, where the destination was saved, since the schedule changed too.
     const upSet = answer && answer.schedule_upload_set;
-    toast("Saved for " + (srv.name || srv.id) + (upSet
-      ? ". Its schedule now sends a snapshot to S3 every " + upSet + ", not at each update. Change it under Update the copy."
-      : ""));
+    if (upSet) toast("Saved for " + (srv.name || srv.id) + ". Its schedule now sends a snapshot to S3 every " + upSet + ", not at each update. Change it under Update the copy.");
+    else toast("Saved for " + (srv.name || srv.id));
     // Repaint from the server's answer, not from what was clicked: the
     // provenance row depends on the resolution the daemon just recomputed.
     // renderSnapshots(), like the daemon-row Save beside it: the route path

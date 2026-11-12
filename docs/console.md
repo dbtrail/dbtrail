@@ -1283,15 +1283,20 @@ longer drawn on the page.
   the server list, `/var/lib/bintrail` in the compose stack), created `0700`
   and named by the server's id, so renaming the server moves nothing. The
   row also asks how many to keep, with or without an S3 destination (#2658):
-  a new server keeps the newest 3 and older ones are removed; empty keeps
-  every snapshot. Older snapshots go at the next hourly cleanup, never the
+  a new server keeps the newest 3, and everything made in the last hour,
+  and older ones are removed; empty keeps every snapshot. Older snapshots go at the next hourly cleanup, never the
   only copy of a table. With an S3 destination a snapshot past the count goes
   only once S3 has it: one S3 does not have stays, is counted on the card
   ("Not in S3 yet, so kept here") and is sent again; an update the schedule
   did not send to S3 was never meant for the bucket, so it goes by the count
   alone, without waiting for S3; and when S3 cannot be asked the cleanup
   removes no snapshot that was sent to S3 and the list says so in red. The
-  list marks each snapshot that goes at the next cleanup. A server
+  list marks each snapshot that goes at the next cleanup. A server whose S3
+  location is also another server's is not pruned to a count, since S3 could
+  answer for the other server's snapshot: its card says so and names the way
+  out, a prefix of its own. Giving a server its first S3 destination while
+  its schedule runs starts **Send to S3 every** at 24 hours in the same
+  save, and the save's message says so. A server
   saved with an S3 destination before this rule has no count (the one it had
   did nothing and was cleared on upgrade), so it keeps every snapshot until
   one is set. The daemon's **Delete by age** (`--baseline-retain`) is the
