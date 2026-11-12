@@ -1190,8 +1190,9 @@ saved, shown with the reason `serve` is not running it.
   it, and an empty field is then not a change: only clearing a field that
   showed a number turns the cleanup off.
 - **Send to S3 every** (#2596): for a server with an S3 destination, the
-  schedule form has a third row of choices: each update (the default), 1 hour,
-  6 hours or 24 hours. Choices shorter than the update interval are hidden,
+  schedule form has a third row of choices: each update, 1 hour, 6 hours or
+  24 hours. A new schedule starts at 24 hours (#2658); one that exists shows
+  what it has, each update included. Choices shorter than the update interval are hidden,
   and a choice that goes out of reach when the update interval changes falls
   back to each update. The updates in between stay on this machine and are
   not sent, so the bucket grows more slowly, and if this machine is lost the
@@ -1279,10 +1280,21 @@ longer drawn on the page.
   and the answer is yes. A server added from the web interface gets one of its own,
   `<state dir>/snapshots/<server id>` (the state directory is the one holding
   the server list, `/var/lib/bintrail` in the compose stack), created `0700`
-  and named by the server's id, so renaming the server moves nothing. With no
-  S3 destination, the row also asks how many to keep: a new server keeps the
-  newest 3 and older ones are removed; empty keeps every snapshot. Older
-  snapshots go at the next hourly cleanup, never the only copy of a table.
+  and named by the server's id, so renaming the server moves nothing. The
+  row also asks how many to keep, with or without an S3 destination (#2658):
+  a new server keeps the newest 3 and older ones are removed; empty keeps
+  every snapshot. Older snapshots go at the next hourly cleanup, never the
+  only copy of a table. With an S3 destination a snapshot past the count goes
+  only once S3 has it: one S3 does not have stays, is counted on the card
+  ("Not in S3 yet, so kept here") and is sent again; an update the schedule
+  did not send to S3 goes once a newer snapshot is in S3; and when S3 cannot
+  be asked the cleanup removes nothing and the list says so in red. A server
+  saved with an S3 destination before this rule has no count (the one it had
+  did nothing and was cleared on upgrade), so it keeps every snapshot until
+  one is set. The daemon's **Delete by age** (`--baseline-retain`) is the
+  old way: it still removes by age where it is set, and on a server with a
+  count a snapshot goes only when it is past the count and older than the
+  age.
   Changing only the count on a server's own folder is the choice to remove
   the older ones there, so it is not refused. Moving a server that has a
   count to another folder that already holds snapshots is refused (from

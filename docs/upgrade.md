@@ -164,6 +164,34 @@ upgrade that adds a column. This is the same architectural boundary described in
 [console.md](./console.md) (`connManager` never runs `EnsureSchema` on a
 registry DSN).
 
+### One count for the snapshots on the local disk
+
+From this version, each server's **Keep by count** (`local_keep_newest`)
+bounds its local snapshot folder whether or not the server has an S3
+destination ([#2658](https://github.com/dbtrail/dbtrail/issues/2658)).
+Servers you already have keep what they have:
+
+- A server with an S3 destination had a count saved that did nothing (3 on
+  every server added from the web interface). The first start of this
+  version sets it to 0 and logs the servers it touched, so they keep every
+  local snapshot, as before. Set **Keep by count** on the Snapshots page to
+  bound one.
+- `--baseline-retain` (**Delete by age**) still works and is the old way. A
+  server with no count is pruned by the age alone, once S3 has each
+  snapshot. The daemon says so once at startup.
+- A schedule you already saved keeps sending to S3 as often as it did, each
+  update included, and no schedule starts by itself on a server you already
+  have.
+
+A server added after the upgrade with an S3 destination keeps its 3 newest
+local snapshots (older ones go once S3 has them), starts updating every 5
+minutes after its first snapshot, and sends one snapshot to S3 every 24
+hours. Change either on the Snapshots page.
+
+If you downgrade and add a server with an S3 destination on the older
+version, set its **Keep by count** to empty before upgrading again: the
+older version saves a 3 it does not use, and this version would apply it.
+
 ### The event-type index (`idx_type_lookup`)
 
 `binlog_events` has a fourth secondary index, `idx_type_lookup (event_type,

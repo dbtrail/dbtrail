@@ -296,10 +296,22 @@ func runSnapshotSchedule(ctx context.Context, c *ctlClient, name, every string, 
 		fmt.Fprintf(out, "The copy of %q is no longer updated by itself.\n", s.Name)
 		return nil
 	}
-	if err := c.do(ctx, http.MethodPut, path, map[string]string{"every": strings.TrimSpace(every)}, nil); err != nil {
+	// The answer carries the schedule as saved. A new schedule on a server
+	// with an S3 destination sends there once a day unless told otherwise
+	// (#2658), and this command does not name the interval, so it says what
+	// the daemon chose. An older daemon answers without it: nothing is said.
+	var saved struct {
+		Schedule struct {
+			UploadEvery string `json:"upload_every"`
+		} `json:"schedule"`
+	}
+	if err := c.do(ctx, http.MethodPut, path, map[string]string{"every": strings.TrimSpace(every)}, &saved); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "The copy of %q is updated every %s.\n", s.Name, strings.TrimSpace(every))
+	if up := strings.TrimSpace(saved.Schedule.UploadEvery); up != "" {
+		fmt.Fprintf(out, "A snapshot is sent to S3 every %s. The updates in between stay on DBTrail's machine. Change it on the %s page.\n", up, console.PageSnapshots)
+	}
 	return nil
 }
 
