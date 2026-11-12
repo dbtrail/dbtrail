@@ -434,8 +434,8 @@ type ctlLocation struct {
 	// ScheduleUploadSet: this save gave the server its first S3 destination
 	// and the daemon started its schedule's upload interval (#2658).
 	ScheduleUploadSet string `json:"schedule_upload_set"`
-	ResolvedDir string `json:"resolved_dir"`
-	ResolvedS3  string `json:"resolved_s3"`
+	ResolvedDir       string `json:"resolved_dir"`
+	ResolvedS3        string `json:"resolved_s3"`
 }
 
 func (l ctlLocation) text(name string) string {
