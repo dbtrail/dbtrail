@@ -73,10 +73,22 @@ func detectBucketRegionWith(ctx context.Context, cfg aws.Config, bucket string,
 	return r, true
 }
 
-// bucketLocation asks S3 for a bucket's LocationConstraint, from us-east-1
-// (the only region that answers for every bucket). A variable so tests count
-// the questions without a network.
+// bucketLocation answers where a bucket lives: first the unsigned HEAD of
+// DiscoverBucketRegion (#2688), which needs no IAM permission and is cached
+// per bucket, then, when that cannot answer (a custom endpoint, or S3 did not
+// say), the bucket's LocationConstraint. A variable so tests count the
+// questions without a network.
 var bucketLocation = func(ctx context.Context, cfg aws.Config, bucket string) (string, error) {
+	if r, ok := DiscoverBucketRegion(ctx, cfg, bucket); ok {
+		return r, nil
+	}
+	return getBucketLocation(ctx, cfg, bucket)
+}
+
+// getBucketLocation asks S3 for a bucket's LocationConstraint, from us-east-1
+// (the only region that answers for every bucket). It needs
+// s3:GetBucketLocation, which the minimal policy does not grant.
+var getBucketLocation = func(ctx context.Context, cfg aws.Config, bucket string) (string, error) {
 	locClient := NewS3ClientFromConfig(cfg, func(o *s3.Options) {
 		o.Region = "us-east-1"
 	})

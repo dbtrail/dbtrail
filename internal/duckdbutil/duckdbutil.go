@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -152,7 +153,7 @@ func EnableS3CredentialChainFor(ctx context.Context, db *sql.DB, region string, 
 		return err
 	}
 
-	stores := storage.BucketStores()
+	stores := withDiscoveredRegions(ctx, region, ep, paths, storage.BucketStores())
 	if os.Getenv("BINTRAIL_DUCKDB_NO_AWS_EXT") != "" || !targetsNeedChain(paths, stores) {
 		return applyBucketStoreSecrets(ctx, execOn(db), stores, false)
 	}
@@ -184,6 +185,75 @@ func EnableS3CredentialChainFor(ctx context.Context, db *sql.DB, region string, 
 			"error", err)
 	}
 	return applyBucketStoreSecrets(ctx, execOn(db), stores, true)
+}
+
+// withDiscoveredRegions adds a region pin, a store with only a Region, for
+// every s3:// bucket in paths that lives in another region than the one the
+// session's credential_chain secret signs for (#2688). Without it, a bucket
+// outside AWS_REGION answers every DuckDB read with 301 PermanentRedirect:
+// httpfs does not follow the redirect, and the chain secret takes its region
+// from the environment, not from the bucket. Each pin becomes a secret scoped
+// to s3://<bucket>/, like a console bucket store, so it outranks the chain
+// secret for that bucket's paths only, and two buckets in two regions each
+// get their own.
+//
+// Nothing is discovered when the caller pinned a region (it detected or was
+// given one), when a custom endpoint is configured (an S3-compatible store
+// has no regions, and the question would go to AWS), for a bucket that has a
+// store of its own, or when the paths name no bucket. A bucket whose region
+// equals the environment's gets no pin, so a same-region session renders
+// exactly the statements it did before. stores is never modified.
+func withDiscoveredRegions(ctx context.Context, region string, ep storage.S3Endpoint, paths []string, stores map[string]storage.BucketStore) map[string]storage.BucketStore {
+	if region != "" || ep.Set() {
+		return stores
+	}
+	chain := os.Getenv("AWS_REGION")
+	if chain == "" {
+		chain = os.Getenv("AWS_DEFAULT_REGION")
+	}
+	var out map[string]storage.BucketStore
+	for _, b := range pathBuckets(paths) {
+		if _, has := stores[b]; has {
+			continue
+		}
+		if _, has := out[b]; has {
+			continue
+		}
+		r, ok := storage.DiscoverBucketRegionFrom(ctx, chain, b)
+		if !ok || r == chain {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]storage.BucketStore, len(stores)+1)
+			for k, v := range stores {
+				out[k] = v
+			}
+		}
+		out[b] = storage.BucketStore{Region: r}
+	}
+	if out == nil {
+		return stores
+	}
+	return out
+}
+
+// pathBuckets lists the buckets of the s3://<bucket>/... paths, in order and
+// once each. A bare s3://<bucket> is left out, as in targetsNeedChain: a
+// secret scoped to s3://<bucket>/ would not match it.
+func pathBuckets(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		rest, ok := strings.CutPrefix(p, "s3://")
+		if !ok {
+			continue
+		}
+		bucket, _, slash := strings.Cut(rest, "/")
+		if !slash || bucket == "" || slices.Contains(out, bucket) {
+			continue
+		}
+		out = append(out, bucket)
+	}
+	return out
 }
 
 // targetsNeedChain reports whether a session reading paths can use the

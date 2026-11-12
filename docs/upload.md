@@ -102,6 +102,34 @@ The AWS region is resolved in this order:
 3. `AWS_DEFAULT_REGION` environment variable
 4. `~/.aws/config` region setting for the active profile
 
+### A bucket in another region
+
+A bucket only answers requests signed for its own region. When the region
+above is not the bucket's (say `AWS_REGION=us-west-2` on the host and the
+bucket in `us-east-1`), bintrail finds the bucket's region on its own and uses
+it for that bucket: uploads, listings, downloads and the DuckDB reads of
+`s3://` paths alike, so one process can work with buckets in several regions.
+
+- **How**: one HEAD request on the bucket, without credentials. S3 names the
+  bucket's region in that answer even when it refuses or redirects the
+  request, so no IAM permission is needed for it (not even
+  `s3:GetBucketLocation`). It is asked once per bucket per process and
+  remembered; a question that gets no answer is asked again after a minute,
+  never on every query.
+- **A region you pass yourself wins**: a `--region`/`--*-s3-region` flag is
+  used as given.
+- **Not with a custom endpoint**: with `BINTRAIL_S3_ENDPOINT`,
+  `AWS_ENDPOINT_URL_S3`/`AWS_ENDPOINT_URL`, an `endpoint_url` in
+  `~/.aws/config`, or a bucket that has a store of its own in the web
+  interface, nothing is asked: an S3-compatible store has no regions to find,
+  and the question would go to AWS. The configured region is used.
+- **When the region cannot be found** (for example a VPC endpoint whose
+  policy refuses requests without credentials, or a proxy in the way), the
+  configured region is used, and a request S3 redirects fails with an error
+  that says so: `the S3 bucket "my-bucket" is in region us-east-1, and this
+  process uses region us-west-2: set the S3 region to us-east-1 (AWS_REGION,
+  or the command's S3 region option)`.
+
 ### S3-compatible stores (MinIO, Wasabi, LocalStack)
 
 Every S3 path in bintrail, the SDK uploads and the DuckDB reads alike, can

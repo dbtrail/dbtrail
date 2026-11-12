@@ -116,7 +116,8 @@ func NewS3ClientFromConfig(cfg aws.Config, extra ...func(*s3.Options)) *s3.Clien
 // IS mirrored to DuckDB, as a secret scoped to the bucket, so the warning
 // would be false there.
 func newS3ClientRouted(cfg aws.Config, extra ...func(*s3.Options)) *s3.Client {
-	return s3.NewFromConfig(cfg, append(S3ClientOptions(), extra...)...)
+	opts := append([]func(*s3.Options){explainRegionMismatch}, S3ClientOptions()...)
+	return s3.NewFromConfig(cfg, append(opts, extra...)...)
 }
 
 // warnIfEndpointUnmirrored reports an endpoint the SDK resolved that bintrail
