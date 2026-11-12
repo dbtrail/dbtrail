@@ -265,6 +265,23 @@ func PruneLocal(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 	return pruneWithProbe(ctx, opts, probe)
 }
 
+// PruneLocalAsking is PruneLocal with the question "does the destination
+// hold this snapshot" answered by has instead of an S3 client: for a caller
+// that proves a snapshot durable some other way, and for tests outside this
+// package that drive a prune against a destination with real files. has
+// returns an error when the destination could not be asked, never false.
+// opts.S3URL must be set: with none, there is nobody to ask and PruneLocal
+// is the call.
+func PruneLocalAsking(ctx context.Context, opts PruneOptions, has func(ctx context.Context, snapshotName string) (bool, error)) (PruneResult, error) {
+	if opts.LocalDir == "" || opts.S3URL == "" || has == nil {
+		return PruneResult{}, fmt.Errorf("baseline prune: a folder, a destination and a way to ask it are required")
+	}
+	if opts.KeepNewest < 0 || opts.Retain < 0 || (opts.Retain == 0 && opts.KeepNewest == 0) {
+		return PruneResult{}, fmt.Errorf("baseline prune: a count or an age is required, neither negative")
+	}
+	return pruneWithProbe(ctx, opts, has)
+}
+
 // pruneWithProbe runs one prune attempt and records its outcome beside the
 // snapshots (#1681): a failed attempt writes .last-prune-failure.json (when,
 // and why), a successful one removes it. A dry run and a prune that stepped
