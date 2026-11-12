@@ -184,7 +184,13 @@ volume mounted at the same path: the router reads the servers file and
 ```
 
 - Put a **Network** Load Balancer in front of `3309`: it is plain TCP, which
-  an ALB does not carry. The port has no TLS: keep the NLB internal.
+  an ALB does not carry. Keep the NLB internal. The port offers TLS with a
+  certificate made up at start, which clients cannot verify; for one they
+  can, give the router its own with `BINTRAIL_ROUTER_TLS_CERT` and
+  `BINTRAIL_ROUTER_TLS_KEY` pointing at files it can read (see
+  [TLS on the port](time-travel-sql.md#tls-on-the-port)). A TLS listener on
+  the NLB does not work: the MySQL protocol starts TLS inside the
+  connection, after the server's first packet.
 - The port turns on when the first server is added; otherwise turn it on in
   the web interface (**Settings → MySQL clients → Connect a SQL client**,
   **Turn on**). The setting and its

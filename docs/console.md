@@ -2141,6 +2141,13 @@ server's statements instead of serving without it.
   address: `BINTRAIL_METRICS_ADDR` is the capture process's, and two processes
   cannot serve one address. The compose stack sets `:9091` and the packages
   `127.0.0.1:9091`.
+- `BINTRAIL_ROUTER_TLS_CERT` and `BINTRAIL_ROUTER_TLS_KEY` (`router` only):
+  same as `router --tls-cert` and `--tls-key`: a certificate and its key (PEM
+  files) the MySQL port offers to clients that ask for TLS, so they can
+  verify it. Both or neither; a pair that cannot be used stops the router
+  at startup. Unset, the port offers TLS with a certificate made up at start,
+  which no client can verify. See
+  [TLS on the port](time-travel-sql.md#tls-on-the-port).
 - `BINTRAIL_CONSOLE_ROUTER_URL` (`watch` only): same as `--router-url`: the
   address the router serves its metrics on (e.g. `http://127.0.0.1:9091`).
   Given it, the MySQL clients page shows the router's numbers for the server
