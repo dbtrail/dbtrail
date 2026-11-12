@@ -38,6 +38,17 @@ func TestRouterLines_sayTheMode(t *testing.T) {
 	warming := view(&fast)
 	warming.Status.PerServerMode = true
 	warming.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fresh", SQLModeFrom: SQLModeFromSaved, SQLModeWarming: true}}
+	// Fresh is the default: nothing saved for the server.
+	byDefault := view(&fast)
+	byDefault.Status.PerServerMode, byDefault.Status.FreshByDefault = true, true
+	byDefault.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fresh", SQLModeFrom: SQLModeFromDefault}}
+	// The router's setting makes every server fast.
+	forcedFast := view(&fast)
+	forcedFast.Status.PerServerMode, forcedFast.Status.FreshByDefault, forcedFast.Status.SQLModeForced = true, true, SQLModeForcedFast
+	forcedFast.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fast", SQLModeFrom: SQLModeFromEnvironment}}
+	fastSaved := view(&fast)
+	fastSaved.Status.PerServerMode, fastSaved.Status.FreshByDefault = true, true
+	fastSaved.Status.Servers = map[string]RouterServerNumbers{"s1": {SQLMode: "fast", SQLModeFrom: SQLModeFromSaved}}
 	perServerFast := view(&fast)
 	perServerFast.Status.PerServerMode = true
 	payload, err := json.Marshal(map[string]routerViewDTO{
@@ -47,6 +58,7 @@ func TestRouterLines_sayTheMode(t *testing.T) {
 		"fresh":    view(&fresh),
 		"old":      view(nil),
 		"switched": switched,
+		"byDefault": byDefault, "forcedFast": forcedFast, "fastSaved": fastSaved,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +104,20 @@ console.log(JSON.stringify(out));
 	}
 	if has("switched", "Fresh mode for shop, chosen on its Snapshots page. It has not answered") {
 		t.Errorf("caught up yet said as catching up: %q", got["switched"])
+	}
+	if !has("byDefault", "Fresh mode for shop, the default: each table's newest captured changes") {
+		t.Errorf("fresh with nothing saved is said as the default, not as chosen: %q", got["byDefault"])
+	}
+	if !has("forcedFast", "Fast mode, for every server: answers come from each table's last snapshot, as old as its last refresh. It is set where the router starts") {
+		t.Errorf("every server fast by the router's setting: %q", got["forcedFast"])
+	}
+	for _, l := range got["forcedFast"] {
+		if strings.Contains(l, "choose Fresh on") {
+			t.Errorf("a locked choice is offered: %q", l)
+		}
+	}
+	if !has("fastSaved", "Fast mode for shop, chosen on its Snapshots page: answers come from each table's last snapshot") {
+		t.Errorf("Fast saved for the server: %q", got["fastSaved"])
 	}
 	// A router older than the per-server switch (v0.116, v0.117): one mode
 	// for all, and never sent to a Snapshots choice it ignores.

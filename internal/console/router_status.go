@@ -294,6 +294,15 @@ func (s *Server) RouterNumbers() RouterNumbers {
 	listed := s.fresh.ids()
 	if !tailsOff() {
 		listed = s.copyAges.answered()
+	} else if s.cm != nil && s.cm.reg != nil {
+		// And one with a choice saved that is not fresh now (Fast saved, or
+		// every server fast by the setting): listed so its mode comes with
+		// where it is from, not as an unlisted server's default.
+		for _, e := range s.cm.reg.List() {
+			if e.SQLFreshSaved() && !slices.Contains(listed, e.ID) {
+				listed = append(listed, e.ID)
+			}
+		}
 	}
 	for _, id := range listed {
 		if _, ok := out.Servers[id]; !ok {

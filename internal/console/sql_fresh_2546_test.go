@@ -3,10 +3,11 @@ package console
 import (
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v2"
 )
 
 // #2546: fresh mode per server, saved on its registry entry and applied by
@@ -101,15 +102,15 @@ func TestSQLFresh_setAndClearAreTheOnlyWriter_2546(t *testing.T) {
 	// A console edit built from any copy keeps the saved mode: here Fast,
 	// which is not the default, against an edit that says nothing and one
 	// that says Fresh.
-	for _, sent := range []*bool{nil, ptrTo(true)} {
+	for _, sent := range [][2]any{{"", false}, {"fresh", true}, {"", true}} {
 		e, _ := reg.Get(ids[0])
-		e.SQLFresh = sent
+		e.SQLMode, e.SQLFresh = sent[0].(string), sent[1].(bool)
 		e.Name = "renamed"
 		if err := reg.Update(e); err != nil {
 			t.Fatal(err)
 		}
 		if got, _ := reg.Get(ids[0]); got.SQLFreshOn() || !got.SQLFreshSaved() {
-			t.Fatalf("an edit that did not mean to change the mode changed it: %v", got.SQLFresh)
+			t.Fatalf("an edit that sent %v and did not mean to change the mode changed it: sql_mode %q sql_fresh %v", sent, got.SQLMode, got.SQLFresh)
 		}
 	}
 	// Survives a reload from disk.
@@ -122,7 +123,7 @@ func TestSQLFresh_setAndClearAreTheOnlyWriter_2546(t *testing.T) {
 	}
 	// A new entry never starts with a saved choice, whatever it was built
 	// from: it is fresh by the default.
-	n, err := reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", SQLFresh: ptrTo(false)})
+	n, err := reg.Add(ServerEntry{Name: "b", DSN: "u:p@tcp(h:3306)/b", SQLMode: "fast", SQLFresh: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,19 +440,22 @@ func TestSQLFresh_settleWaitsForBuildsWithinTheBound_2546(t *testing.T) {
 	}
 }
 
-func ptrTo[T any](v T) *T { return &v }
-
-// The three states of a server's entry, as the file holds them: nothing is
-// fresh by the default, true is Fresh saved, false is Fast saved. An entry
-// written before fresh was the default has either nothing or true.
-func TestSQLFresh_theThreeStatesInTheFile(t *testing.T) {
+// What a server's entry says, as the file holds it. sql_mode is the choice;
+// sql_fresh is the key builds before the default changed wrote, read when
+// sql_mode says nothing; a sql_mode this build does not know is no choice.
+func TestSQLFresh_whatTheFileSays(t *testing.T) {
 	for _, tc := range []struct {
 		name, line string
 		on, saved  bool
 	}{
 		{"nothing saved", "", true, false},
-		{"fresh saved", "sql_fresh: true\n", true, true},
-		{"fast saved", "sql_fresh: false\n", false, true},
+		{"fresh saved", "sql_mode: fresh\n", true, true},
+		{"fast saved", "sql_mode: fast\n", false, true},
+		{"fresh saved by an older build", "sql_fresh: true\n", true, true},
+		{"a false an older build never wrote", "sql_fresh: false\n", true, false},
+		{"fast here, then Fresh chosen on an older build", "sql_mode: fast\nSAME sql_fresh: true\n", false, true},
+		{"a mode this build does not know", "sql_mode: slow\n", true, false},
+		{"a mode in capitals is not one", "sql_mode: FAST\n", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The file a registry writes, with the line put in by hand the
@@ -468,7 +472,9 @@ func TestSQLFresh_theThreeStatesInTheFile(t *testing.T) {
 			for _, line := range strings.SplitAfter(string(data), "\n") {
 				out = append(out, line)
 				if trimmed := strings.TrimLeft(line, " "); tc.line != "" && strings.HasPrefix(trimmed, "name: ") {
-					out = append(out, line[:len(line)-len(trimmed)]+tc.line)
+					indent := line[:len(line)-len(trimmed)]
+					// "SAME " marks a second key, at the same indentation.
+					out = append(out, indent+strings.ReplaceAll(tc.line, "SAME ", indent))
 				}
 			}
 			if err := os.WriteFile(made.Path(), []byte(strings.Join(out, "")), 0o600); err != nil {
@@ -487,7 +493,8 @@ func TestSQLFresh_theThreeStatesInTheFile(t *testing.T) {
 			}
 		})
 	}
-	// Saving Fast writes it; saving Fresh after it writes that.
+	// Saving writes sql_mode either way. Fresh also writes sql_fresh: true,
+	// for a router of an older build; Fast leaves that key out.
 	reg, ids := freshTestRegistry(t, "a")
 	for _, on := range []bool{false, true, false} {
 		if _, err := reg.SetSQLFresh(ids[0], on); err != nil {
@@ -497,10 +504,55 @@ func TestSQLFresh_theThreeStatesInTheFile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "sql_fresh: " + strconv.FormatBool(on)
+		want := map[bool]string{true: "sql_mode: fresh", false: "sql_mode: fast"}[on]
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("after saving %v the file does not hold %q:\n%s", on, want, data)
 		}
+		if strings.Contains(string(data), "sql_fresh: true") != on || strings.Contains(string(data), "sql_fresh: false") {
+			t.Fatalf("after saving %v, sql_fresh in the file:\n%s", on, data)
+		}
+	}
+}
+
+// A build from before the default changed re-saves the file: it knows
+// sql_fresh, writes it only when true, and keeps every key it does not know.
+// A Fast saved here survives that, which a false in sql_fresh would not.
+func TestSQLFresh_fastSurvivesAnOlderBuildsSave(t *testing.T) {
+	reg, ids := freshTestRegistry(t, "a")
+	if _, err := reg.SetSQLFresh(ids[0], false); err != nil {
+		t.Fatal(err)
+	}
+	type olderEntry struct {
+		ID       string         `yaml:"id"`
+		SQLFresh bool           `yaml:"sql_fresh,omitempty"`
+		Extra    map[string]any `yaml:",inline"`
+	}
+	type olderFile struct {
+		Version int            `yaml:"version"`
+		Servers []olderEntry   `yaml:"servers"`
+		Extra   map[string]any `yaml:",inline"`
+	}
+	data, err := os.ReadFile(reg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f olderFile
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	resaved, err := yaml.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reg.Path(), resaved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	again, err := LoadRegistry(reg.Path())
+	if err != nil {
+		t.Fatalf("%v\n%s", err, resaved)
+	}
+	if e, _ := again.Get(ids[0]); e.SQLFreshOn() || !e.SQLFreshSaved() {
+		t.Fatalf("after an older build's save the server is no longer Fast saved:\n%s", resaved)
 	}
 }
 

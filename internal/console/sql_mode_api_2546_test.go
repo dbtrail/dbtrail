@@ -1,6 +1,7 @@
 package console
 
 import (
+	"strconv"
 	"encoding/json"
 	"os"
 	"testing"
@@ -33,7 +34,7 @@ func TestSQLModeAPI_savesAndTheListSaysIt_2546(t *testing.T) {
 			t.Fatalf("PUT %s = %d %s", body, rec.Code, out)
 		}
 		if e, _ := srv.cm.reg.Get(id); e.SQLFreshOn() != on || !e.SQLFreshSaved() {
-			t.Fatalf("PUT %s stored %v", body, e.SQLFresh)
+			t.Fatalf("PUT %s stored sql_mode %q", body, e.SQLMode)
 		}
 		// Applied in this process too, not only at the next reading.
 		if srv.tailsOnFor(id) != on {
@@ -62,17 +63,22 @@ func TestSQLModeAPI_strictBody_2546(t *testing.T) {
 	srv := newRegistryServer(t)
 	id := createHiddenTestServer(t, srv)
 	path := "/api/servers/" + id + "/sql-mode"
-	if rec, out := doServersReq(t, srv, "PUT", path, `{"fresh":true}`); rec.Code != 200 {
-		t.Fatalf("seed = %d %s", rec.Code, out)
-	}
-	for _, bad := range []string{``, `null`, `{}`, `{"fresh":null}`, `{"fresh":"false"}`, `{"fresh":0}`,
-		`{"Fresh":false,"mode":"fast"}`, `{"fresh":false,"extra":1}`, `{"fresh":false} {"fresh":false}`} {
-		rec, out := doServersReq(t, srv, "PUT", path, bad)
-		if rec.Code != 400 {
-			t.Errorf("body %q answered %d %s, want 400", bad, rec.Code, out)
+	// Over each saved choice: a refused body must leave it saved as it was,
+	// not turn it to the other and not clear it to the default.
+	for _, seed := range []bool{true, false} {
+		if rec, out := doServersReq(t, srv, "PUT", path, `{"fresh":`+strconv.FormatBool(seed)+`}`); rec.Code != 200 {
+			t.Fatalf("seed = %d %s", rec.Code, out)
 		}
-		if e, _ := srv.cm.reg.Get(id); !e.SQLFreshOn() {
-			t.Fatalf("body %q turned fresh mode off", bad)
+		for _, bad := range []string{``, `null`, `{}`, `{"fresh":null}`, `{"fresh":"false"}`, `{"fresh":0}`, `{"fresh":"true"}`, `{"fresh":1}`,
+			`{"Fresh":false,"mode":"fast"}`, `{"fresh":false,"extra":1}`, `{"fresh":false} {"fresh":false}`,
+			`{"fresh":true,"extra":1}`, `{"fresh":true} {"fresh":true}`} {
+			rec, out := doServersReq(t, srv, "PUT", path, bad)
+			if rec.Code != 400 {
+				t.Errorf("body %q answered %d %s, want 400", bad, rec.Code, out)
+			}
+			if e, _ := srv.cm.reg.Get(id); e.SQLFreshOn() != seed || !e.SQLFreshSaved() {
+				t.Fatalf("over fresh=%v saved, body %q left sql_mode %q", seed, bad, e.SQLMode)
+			}
 		}
 	}
 }

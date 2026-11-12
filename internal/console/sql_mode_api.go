@@ -20,7 +20,10 @@ import (
 // port reads it when a connection opens. Each field is saved only when it
 // is sent, so one choice never resets the other.
 type sqlModeDTO struct {
-	Fresh           bool `json:"fresh"`
+	Fresh bool `json:"fresh"`
+	// FreshSaved: a choice is saved for the server, as opposed to fresh by
+	// the default. Only in the answer.
+	FreshSaved      bool `json:"fresh_saved"`
 	LikeIgnoresCase bool `json:"like_ignores_case"`
 }
 
@@ -89,5 +92,5 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 	// does, and reads the registry again within seconds), but one that does
 	// applies it now.
 	s.applySQLFresh()
-	writeJSON(w, http.StatusOK, sqlModeDTO{Fresh: e.SQLFreshOn(), LikeIgnoresCase: e.SQLLikeIgnoresCase})
+	writeJSON(w, http.StatusOK, sqlModeDTO{Fresh: e.SQLFreshOn(), FreshSaved: e.SQLFreshSaved(), LikeIgnoresCase: e.SQLLikeIgnoresCase})
 }

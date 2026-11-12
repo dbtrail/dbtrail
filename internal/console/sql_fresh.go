@@ -207,15 +207,22 @@ func (s *Server) applySQLFresh() {
 	}
 	left := len(f.on)
 	f.mu.Unlock()
+	// A process with no pool serves no port (capture, the web interface): it
+	// keeps the list so a statement it does run reads right, and says
+	// nothing, or every start would announce a port it does not have.
+	say := slog.Info
+	if f.pool == nil {
+		say = slog.Debug
+	}
 	for _, id := range on {
-		slog.Info("Engine Routing: fresh mode on: this server's statements read its newest captured changes over its snapshot", "server", s.serverName(id))
+		say("Engine Routing: fresh mode on: this server's statements read its newest captured changes over its snapshot", "server", s.serverName(id))
 	}
 	var dropped []*tailKeeper
 	for _, id := range off {
 		if k := s.dropTailKeeper(id); k != nil {
 			dropped = append(dropped, k)
 		}
-		slog.Info("Engine Routing: fresh mode off: this server's statements read its snapshot alone", "server", s.serverName(id))
+		say("Engine Routing: fresh mode off: this server's statements read its snapshot alone", "server", s.serverName(id))
 	}
 	if left == 0 && f.lowered {
 		// The dropped keepers' builds were told to end; what they read
