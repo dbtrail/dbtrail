@@ -10,7 +10,10 @@
 #
 # Knobs (all optional, set them before the pipe — e.g.  DBTRAIL_DIR=/opt/dbtrail sh):
 #   DBTRAIL_DIR      where to put the stack        (default: ./dbtrail)
-#   DBTRAIL_REF      git ref for the compose file  (default: main)
+#   DBTRAIL_REF      git ref for the compose file and the dbtrail command
+#                    (default: the newest release, see "which version" below).
+#                    A release tag (v0.130.0) also pins the images to it; any
+#                    other ref (main, a branch) leaves them on `latest`.
 #   DBTRAIL_PORT     host port the console answers  (default: 8090)
 #   DBTRAIL_METRICS_PORT  host port for Prometheus /metrics (default: 9090,
 #                    or the next free one when 9090 is taken)
@@ -21,13 +24,12 @@
 set -eu
 
 DIR="${DBTRAIL_DIR:-./dbtrail}"
-REF="${DBTRAIL_REF:-main}"
 PORT="${DBTRAIL_PORT:-8090}"
 MPORT="${DBTRAIL_METRICS_PORT:-9090}"
-COMPOSE_URL="https://raw.githubusercontent.com/dbtrail/dbtrail/${REF}/docker-compose.yml"
-# The `dbtrail` command of this install (dbtrail.sh): it runs DBTrail's own
-# command inside the container.
-CLI_URL="https://raw.githubusercontent.com/dbtrail/dbtrail/${REF}/dbtrail.sh"
+# REF (the git ref the compose file and the dbtrail command come from) is
+# chosen below, once the installer knows which version it installs.
+RAW_URL="https://raw.githubusercontent.com/dbtrail/dbtrail"
+RELEASE_API="https://api.github.com/repos/dbtrail/dbtrail/releases/latest"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/healthz"
 CONSOLE_URL="http://127.0.0.1:${PORT}"
 START_PAGE="https://www.dbtrail.com/docs/quickstart/"
@@ -166,10 +168,10 @@ first_free_port() {
 # reads them (on `curl` they never reach the installer, #1768), and the knobs
 # the operator already set ride along.
 rerun_cmd() {
-  envs="DBTRAIL_PORT=$1"
+  envs="$1"
   [ "$DIR" != "./dbtrail" ] && envs="DBTRAIL_DIR=$DIR $envs"
-  [ "$REF" != "main" ] && envs="DBTRAIL_REF=$REF $envs"
-  printf 'curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/%s/install.sh | %s sh' "$REF" "$envs"
+  [ -n "${DBTRAIL_REF:-}" ] && [ "$DBTRAIL_REF" != "main" ] && envs="DBTRAIL_REF=$DBTRAIL_REF $envs"
+  printf 'curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/%s/install.sh | %s sh' "${DBTRAIL_REF:-main}" "$envs"
 }
 
 if [ ! -f "$DIR/docker-compose.yml" ]; then
@@ -177,7 +179,7 @@ if [ ! -f "$DIR/docker-compose.yml" ]; then
     free=$(first_free_port 8091 8099 "$PORT") || free=8091
     die "Port ${PORT} is already in use on this machine, so DBTrail can't use it.
     Run the installer with DBTrail on port ${free} instead:
-        $(rerun_cmd "$free")"
+        $(rerun_cmd "DBTRAIL_PORT=$free")"
   fi
   # The stack also publishes Prometheus /metrics on 9090, which is also
   # Prometheus's own default port. Metrics are secondary, so a taken 9090 moves
@@ -204,12 +206,154 @@ fi
 # Need curl or wget to fetch the compose file.
 if command -v curl >/dev/null 2>&1; then
   fetch() { curl -fsSL "$1" -o "$2"; }
+  fetch_stdout() { curl -fsSL --max-time 30 "$1"; }
 elif command -v wget >/dev/null 2>&1; then
   fetch() { wget -qO "$2" "$1"; }
+  fetch_stdout() { wget -qO- -T 30 "$1"; }
 else
   die "Need curl or wget to download the compose file."
 fi
 say "${DIM}    docker ✓   ${COMPOSE} ✓   Docker running ✓${RST}"
+
+# ── which version: one release, written down ────────────────────────────
+# The images are `${BINTRAIL_TAG:-latest}` in the compose file. Following
+# `latest` (and taking the compose file from main) meant a re-run or a
+# `docker compose pull` jumped over every release since the install, with
+# nothing saying which version it had been on (#2638). So the installer
+# installs ONE release: the compose file and the dbtrail command come from
+# its git tag, and a fresh install writes BINTRAIL_TAG to .env.
+#
+# Images are tagged without the git tag's v (GoReleaser's {{ .Version }}:
+# git tag v0.130.0 -> image 0.130.0), so BINTRAIL_TAG never carries it.
+#
+# Which version, first match wins:
+#   1. DBTRAIL_REF. A release tag (v0.130.0, or a v0.130.0-rc1 prerelease)
+#      is that version. Any other ref (main, a branch, a commit) has no
+#      image of its own: the images stay on `latest` and nothing is written.
+#   2. A BINTRAIL_TAG already set, in this shell (it beats .env in compose)
+#      or in .env. A version number is that version, so a re-run, or an
+#      upgrade done by changing BINTRAIL_TAG and deleting the compose file,
+#      gets the compose file that matches the images. Never changed.
+#   3. The newest release, from GitHub's API (no token; it allows 60 lookups
+#      an hour per address). /releases/latest skips drafts and prereleases,
+#      the same rule that moves the `latest` image.
+# A fresh install whose lookup fails STOPS: falling back to main is the
+# drift this exists to end. A re-run over an existing stack only needs the
+# answer for the dbtrail command, so there a failed lookup keeps the one
+# already here.
+
+# env_has KEY FILE: FILE sets KEY, in any form compose's .env reader takes
+# (KEY=, KEY:, export KEY=, a bare KEY). An empty value is still set.
+env_has() {
+  [ -f "$2" ] && grep -Eq "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*([=:]|\$)" "$2"
+}
+# env_value KEY FILE prints the value of the last line that sets KEY, without
+# its quotes, a trailing comment or a CR. Only called after env_has.
+env_value() {
+  grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*([=:]|\$)" "$2" | tail -n 1 | tr -d '\r' |
+    sed -e "s/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}$1[[:space:]]*[=:]\{0,1\}[[:space:]]*//" \
+        -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//' \
+        -e 's/^"\(.*\)"$/\1/' -e "s/^'\\(.*\\)'\$/\\1/"
+}
+is_version()     { printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; }
+is_release_tag() { printf '%s' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; }
+
+# newest_release prints the tag of the newest release: 1 when GitHub did not
+# answer, 2 when the answer holds no release tag (an empty body, a proxy's
+# HTML page). The JSON is read with sed, with no jq: split on commas first,
+# so a body on one line reads the same as an indented one.
+newest_release() {
+  body=$(fetch_stdout "$RELEASE_API" 2>/dev/null) || return 1
+  tag=$(printf '%s\n' "$body" | tr ',' '\n' |
+    sed -n 's/^[[:space:]{]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || return 2
+  printf '%s' "$tag"
+}
+
+step "Choosing the version"
+REF=""          # git ref the compose file and the dbtrail command come from
+WRITE_TAG=""    # the BINTRAIL_TAG a fresh install writes to .env
+PIN=""          # the BINTRAIL_TAG already set, and where: shell or .env
+PIN_FROM=""
+if [ -n "${BINTRAIL_TAG+set}" ]; then
+  PIN=$BINTRAIL_TAG; PIN_FROM="this shell"
+elif env_has BINTRAIL_TAG "$DIR/.env"; then
+  PIN=$(env_value BINTRAIL_TAG "$DIR/.env"); PIN_FROM=.env
+fi
+case "$PIN" in
+  v[0-9]*) is_version "${PIN#v}" && die \
+    "BINTRAIL_TAG=${PIN} (in ${PIN_FROM}) starts with a v, and DBTrail's images are tagged without it.
+    Change it to BINTRAIL_TAG=${PIN#v} and re-run." ;;
+esac
+
+if [ -n "${DBTRAIL_REF:-}" ]; then
+  REF=$DBTRAIL_REF
+  if is_release_tag "$REF"; then
+    WRITE_TAG=${REF#v}
+  fi
+elif [ -n "$PIN_FROM" ] && is_version "$PIN"; then
+  REF="v$PIN"
+else
+  rc=0
+  REF=$(newest_release) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    REF=""
+    if [ "$rc" -eq 1 ]; then
+      why="GitHub did not answer (no network to api.github.com, or its limit of 60 lookups an hour from this address)."
+    else
+      why="GitHub's answer did not name a release (a network proxy may have answered instead)."
+    fi
+    if [ -f "$DIR/docker-compose.yml" ]; then
+      warn "Couldn't find the newest DBTrail release: $why"
+    else
+      envs="DBTRAIL_REF=vX.Y.Z"
+      [ "$PORT" != "8090" ] && envs="$envs DBTRAIL_PORT=$PORT"
+      [ -n "${DBTRAIL_METRICS_PORT:-}" ] && envs="$envs DBTRAIL_METRICS_PORT=$DBTRAIL_METRICS_PORT"
+      die "Couldn't find the newest DBTrail release, so nothing was installed.
+    $why
+    Try again in a few minutes, or choose the version yourself: take one from
+    https://github.com/dbtrail/dbtrail/releases and run, with it in place of vX.Y.Z:
+        $(rerun_cmd "$envs")"
+    fi
+  fi
+  [ -n "$PIN_FROM" ] || WRITE_TAG=${REF#v}
+fi
+COMPOSE_URL="${RAW_URL}/${REF}/docker-compose.yml"
+CLI_URL="${RAW_URL}/${REF}/dbtrail.sh"
+
+# What this install runs, said once here and once in the end text.
+if [ -n "$PIN_FROM" ] && is_version "$PIN"; then
+  VERSION="$PIN"
+  if [ "$PIN_FROM" = "this shell" ]; then
+    say "${DIM}    BINTRAIL_TAG=${PIN} is set in this shell, so .env was left alone. The value lasts for this run only: put it in .env to keep it${RST}"
+  else
+    say "${DIM}    BINTRAIL_TAG=${PIN} is already in .env, so this install stays on version ${PIN}${RST}"
+  fi
+  if [ -n "${DBTRAIL_REF:-}" ] && [ "$DBTRAIL_REF" != "v$PIN" ]; then
+    warn "DBTRAIL_REF=${DBTRAIL_REF} gives the compose file of ${DBTRAIL_REF}, but BINTRAIL_TAG=${PIN} keeps the images on ${PIN}. Make the two name the same version."
+  fi
+elif [ -n "$PIN_FROM" ]; then
+  VERSION=""
+  if [ -z "$PIN" ]; then
+    say "${DIM}    BINTRAIL_TAG is set but empty (in ${PIN_FROM}), so it was left alone and the images are the newest ones, tagged latest${RST}"
+  else
+    say "${DIM}    BINTRAIL_TAG=${PIN} (in ${PIN_FROM}) is not a version number, so it was left alone and the images are the ones tagged ${PIN}${RST}"
+  fi
+elif [ -f "$DIR/docker-compose.yml" ]; then
+  # A re-run over a stack installed before versions were written: its
+  # compose file is reused and .env is not written on a re-run, so it keeps
+  # following latest until someone chooses a version.
+  VERSION=""
+  suggest=${WRITE_TAG:-<version>}
+  WRITE_TAG=""
+  warn "This stack has no BINTRAIL_TAG in .env, so it runs the newest images each time they are downloaded. To stay on one version, add BINTRAIL_TAG=${suggest} to ${DIR}/.env (docs/upgrade.md)."
+elif [ -n "$WRITE_TAG" ]; then
+  VERSION="$WRITE_TAG"
+  say "${DIM}    version ${WRITE_TAG}${RST}"
+else
+  VERSION=""
+  say "${DIM}    DBTRAIL_REF=${DBTRAIL_REF} is not a release, so the images are the newest ones, tagged latest, and no version is written to .env${RST}"
+fi
 
 # ── 2. download the compose file into a self-contained directory ────────
 step "Setting up the stack in ${B}${DIR}${RST}"
@@ -290,6 +434,21 @@ grep -q '^services:' docker-compose.yml || die \
   "${DIR}/docker-compose.yml doesn't look like a compose file (truncated download,
     or a network proxy/captive portal returned something else). Delete it and re-run."
 
+# The version this install runs, written down (see "which version" above).
+# Only a fresh install writes, and only a compose file that reads the value
+# (every one since the images split; an older DBTRAIL_REF may not): a line
+# nothing reads would claim a version the stack does not run.
+if [ -n "$WRITE_TAG" ] && [ -n "${FRESH:-}" ]; then
+  if grep -q 'BINTRAIL_TAG' docker-compose.yml; then
+    if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then printf '\n' >> .env; fi
+    printf 'BINTRAIL_TAG=%s\n' "$WRITE_TAG" >> .env || die "Couldn't write ${DIR}/.env."
+    say "${DIM}    BINTRAIL_TAG=${WRITE_TAG} written to .env, so the images stay on this version${RST}"
+  else
+    VERSION=""
+    say "${DIM}    this docker-compose.yml does not read BINTRAIL_TAG, so its images are the newest ones, tagged latest${RST}"
+  fi
+fi
+
 # ── memory for the MySQL that keeps the history ─────────────────────────
 # InnoDB's buffer pool defaults to 128 MB on any machine, which caps capture
 # at about 1,400 row changes per second on a busy server (#2141). The compose
@@ -362,19 +521,25 @@ fi
 # ours, holds nothing of the person's, and an older one may not know an option
 # the container has. Without it the install still works, from the browser.
 CLI=""
-if fetch "$CLI_URL" dbtrail.new 2>/dev/null && [ -s dbtrail.new ] && head -n 1 dbtrail.new | grep -q '^#!/bin/sh'; then
+# It comes from the same ref as the compose file. With no ref (a re-run whose
+# release lookup failed) the one already here is kept rather than taking main.
+if [ -n "$REF" ] && fetch "$CLI_URL" dbtrail.new 2>/dev/null && [ -s dbtrail.new ] && head -n 1 dbtrail.new | grep -q '^#!/bin/sh'; then
   mv dbtrail.new dbtrail && chmod +x dbtrail && CLI=1
 fi
 rm -f dbtrail.new
+if [ -z "$CLI" ] && [ -z "$REF" ] && [ -x dbtrail ]; then
+  CLI=1
+  warn "kept the dbtrail command already here, since the version to take a new one from is not known."
+fi
 [ -n "$CLI" ] || warn "could not download the dbtrail command; DBTrail works without it, from the browser."
 
 # ── 3. bring it up ──────────────────────────────────────────────────────
-step "Downloading the newest images (the first run can take a minute)"
+step "Downloading the images (the first run can take a minute)"
 # `up -d` starts whatever image this machine already has under the tag, so a
 # machine that pulled "latest" once would start that old version for good.
 # A failed pull (offline, a registry hiccup) is not fatal: the images already
 # here still run, and the message says so.
-$COMPOSE pull || warn "could not download the newest images; starting with the ones already on this machine, which may be an older version."
+$COMPOSE pull || warn "could not download the images; starting with the ones already on this machine, which may be a different version."
 
 step "Starting containers"
 $COMPOSE up -d || die "\`$COMPOSE up -d\` failed. Check the output above.
@@ -461,6 +626,23 @@ else
   say "  ${COMPOSE} exec -it bintrail bintrail-console user set-password  ${DIM}# reset the login${RST}"
 fi
 say "Adding -v to down deletes the volumes, and your history with them."
+say ""
+# Which version runs, and how to change it, in the words of docs/upgrade.md.
+if [ -n "$VERSION" ]; then
+  if [ "$PIN_FROM" = "this shell" ]; then
+    say "This is version ${B}${VERSION}${RST}, set by BINTRAIL_TAG in this shell, for this run only."
+  else
+    say "This is version ${B}${VERSION}${RST}, set by BINTRAIL_TAG in ${DIR}/.env."
+  fi
+  say "To upgrade, set BINTRAIL_TAG to the new version, then run ${COMPOSE} pull && ${COMPOSE} up -d"
+  say "(a release that changes docker-compose.yml needs its new file too: docs/upgrade.md)."
+elif [ -n "$PIN" ]; then
+  say "This stack runs the images tagged ${PIN}, as BINTRAIL_TAG says, not a version number."
+  say "To stay on one version, set BINTRAIL_TAG to it in ${DIR}/.env (docs/upgrade.md)."
+else
+  say "This stack runs the newest images, tagged latest, and no version is set."
+  say "To stay on one version, set BINTRAIL_TAG in ${DIR}/.env (docs/upgrade.md)."
+fi
 say ""
 say "Every step in detail: ${B}${START_PAGE}${RST}"
 

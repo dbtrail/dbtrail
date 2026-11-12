@@ -32,6 +32,20 @@ func envFile(t *testing.T, r run) string {
 	return string(b)
 }
 
+// poolEnv is .env without the BINTRAIL_TAG line a fresh install also
+// writes (version_test.go holds that line to its own cases), so the tests
+// here see only what the buffer pool rule did.
+func poolEnv(t *testing.T, r run) string {
+	t.Helper()
+	var kept []string
+	for _, l := range strings.SplitAfter(envFile(t, r), "\n") {
+		if !strings.HasPrefix(l, "BINTRAIL_TAG=") {
+			kept = append(kept, l)
+		}
+	}
+	return strings.Join(kept, "")
+}
+
 func poolLines(env string) []string {
 	var out []string
 	for _, l := range strings.Split(env, "\n") {
@@ -152,7 +166,7 @@ func TestInstaller_anExistingEnvIsOnlyAddedTo(t *testing.T) {
 			if r.failed {
 				t.Fatalf("install failed:\n%s", r.out)
 			}
-			if got := envFile(t, r); got != tc.after {
+			if got := poolEnv(t, r); got != tc.after {
 				t.Fatalf(".env = %q, want %q\n%s", got, tc.after, r.out)
 			}
 			if tc.before == tc.after && !strings.Contains(r.out, "left as you set it") {
@@ -169,7 +183,7 @@ func TestInstaller_aValueInTheShellIsLeftToTheShell(t *testing.T) {
 	if r.failed {
 		t.Fatalf("install failed:\n%s", r.out)
 	}
-	if got := envFile(t, r); got != "" {
+	if got := poolEnv(t, r); got != "" {
 		t.Fatalf(".env = %q, want none", got)
 	}
 	if !strings.Contains(r.out, "INDEX_BUFFER_POOL is set in this shell") || !strings.Contains(r.out, "put it in .env to keep it") {
@@ -184,7 +198,7 @@ func TestInstaller_anEmptyShellValueIsStillTheShells(t *testing.T) {
 	if r.failed {
 		t.Fatalf("install failed:\n%s", r.out)
 	}
-	if got := envFile(t, r); got != "" {
+	if got := poolEnv(t, r); got != "" {
 		t.Fatalf(".env = %q, want none", got)
 	}
 	if strings.Contains(r.out, "of memory, a quarter") {
@@ -219,7 +233,7 @@ func TestInstaller_anOlderComposeGetsNoLine(t *testing.T) {
 	if r.failed {
 		t.Fatalf("install failed:\n%s", r.out)
 	}
-	if got := envFile(t, r); got != "" {
+	if got := poolEnv(t, r); got != "" {
 		t.Fatalf(".env = %q, want none", got)
 	}
 	if !strings.Contains(r.out, "does not pass INDEX_BUFFER_POOL on") || strings.Contains(r.out, "of memory, a quarter") {
