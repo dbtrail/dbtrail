@@ -33,7 +33,7 @@ func TestRouterFreshServersLine_2546(t *testing.T) {
 		t.Fatalf("no fresh server: %q, want nothing", got)
 	}
 	got := routerFreshServersLine([]string{"shop", "billing"}, 4, 3)
-	for _, want := range []string{"2 servers are", "their own switch: billing, shop.", "3 statements run at once instead of 4"} {
+	for _, want := range []string{"2 servers are", "in fresh mode: billing, shop.", "3 statements run at once instead of 4"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q does not say %q", got, want)
 		}
@@ -42,7 +42,7 @@ func TestRouterFreshServersLine_2546(t *testing.T) {
 		t.Errorf("%q does not end the line", got)
 	}
 	one := routerFreshServersLine([]string{"shop"}, 2, 2)
-	if !strings.Contains(one, "1 server is in fresh mode by its own switch: shop. Its statements") {
+	if !strings.Contains(one, "1 server is in fresh mode: shop. Its statements") {
 		t.Errorf("one server: %q", one)
 	}
 	if lone := routerFreshServersLine([]string{"shop"}, 4, 1); !strings.Contains(lone, "1 statement runs at once instead of 4") {
