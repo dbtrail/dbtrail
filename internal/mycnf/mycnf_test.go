@@ -224,7 +224,7 @@ func TestOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Option{
-		{Name: "commit-within", HasValue: true, Value: "2s", Line: 6},
+		{Name: "commit-within", HasValue: true, Value: "2s", CommentCut: true, Line: 6},
 		{Name: "batch-size", Loose: true, HasValue: true, Value: "5", Line: 7},
 		{Name: "ultrafast", Line: 8},
 		{Name: "", HasValue: true, Value: "3", Line: 9},

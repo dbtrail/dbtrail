@@ -85,8 +85,9 @@ func TestOptionFile_readsTheDbtrailGroup(t *testing.T) {
 	if _, ok := got["BINTRAIL_BATCH_SIZE"]; ok {
 		t.Error("an option of another group was used")
 	}
-	if len(r.Problems) != 0 {
-		t.Errorf("no problems expected: %q", r.Problems)
+	// The one problem is that # (line 7), which the operator is told about.
+	if len(r.Problems) != 1 || !strings.HasPrefix(r.Problems[0], "line 7: the value of index-dsn ends at a # that is not in quotes") {
+		t.Errorf("problems: %q", r.Problems)
 	}
 }
 
