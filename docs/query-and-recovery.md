@@ -357,7 +357,7 @@ A statement is also inside the window by its **binlog position** ([#1912](https:
 
 A table with **no baseline** is rebuilt by `reconstruct --output-format mydumper` from its recorded changes alone (the binlog-only fallback), and it gets the same refusal ([#1674](https://github.com/dbtrail/dbtrail/issues/1674)). Its window starts at the oldest change the index or its archives still hold, so a statement older than that is no reason to refuse: nothing it removed is left to bring back. The window starts one second before that oldest change, because both times are whole seconds and a statement in the same second may follow it.
 
-The shim's binlog-only answers do **not** run this check yet: `_flashback` (single-row and full-table), and `_snapshot` when it has no baseline to start from. Over a window holding one of these statements they can still show rows it removed. Use `reconstruct`, which refuses, for those tables and moments.
+The shim's binlog-only answers do **not** run this check yet: `_flashback` (single-row and full-table), and `_snapshot` when no snapshot location is configured (with one configured and no snapshot at or before the moment asked for, `_snapshot` refuses instead). Over a window holding one of these statements they can still show rows it removed. Use `reconstruct`, which refuses, for those tables and moments.
 
 `bintrail query` and `recover` are not affected at all: they read the row-event history directly and never claim a never-touched row still exists. `_flashback` reads it directly too, but it can be asked to rebuild a whole table from it — see the paragraph above for what that cannot see.
 

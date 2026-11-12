@@ -1357,10 +1357,12 @@ longer drawn on the page.
   `--baseline-refresh-interval` loop together, since both write into the
   folder (for example 3 daily snapshots reach back up to about 3 days, but
   only about 3 hours if an hourly refresh also runs, and 3 snapshots every
-  5 minutes reach back 15 minutes), and never less
+  5 minutes reach back up to 15 minutes; "up to", because right after a
+  new snapshot the oldest kept is one interval younger), and never less
   than the `--baseline-retain` age, which keeps younger snapshots past the
   count. For a server with an S3 destination the row says instead that a
-  restore reads S3, back to its oldest snapshot, and, when the schedule
+  restore reads S3, back to the oldest snapshot sent there (a restore fails
+  while nothing has been sent, whatever the folder holds), and, when the schedule
   sends to S3 less often than it updates, how much of the recorded changes
   a moment between two sends replays at most. When nothing takes snapshots on a timer it names no number, since
   the reach then depends on when snapshots are taken. The count it uses is the one the Snapshots
