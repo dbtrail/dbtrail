@@ -50,7 +50,7 @@ case "$url" in
   https://api.github.com/repos/dbtrail/dbtrail/releases/latest)
     [ -n "$STUB_RELEASE_FAIL" ] && exit 22
     if [ -n "$out" ]; then printf '%s' "$STUB_RELEASE_BODY" > "$out"; else printf '%s' "$STUB_RELEASE_BODY"; fi;;
-  *docker-compose.yml) cp "$COMPOSE_SRC" "$out";;
+  *docker-compose.yml) [ -n "$STUB_COMPOSE_FAIL" ] && exit 22; cp "$COMPOSE_SRC" "$out";;
   *dbtrail.sh) [ -n "$STUB_NO_CLI" ] && exit 22; cp "$CLI_SRC" "$out";;
 esac
 exit 0

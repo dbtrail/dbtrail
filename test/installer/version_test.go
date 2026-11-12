@@ -415,33 +415,61 @@ func TestVersion_aComposeThatDoesNotReadTheTagGetsNoLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := strings.ReplaceAll(string(b), "${BINTRAIL_TAG:-latest}", "latest")
-	old = regexp.MustCompile(`(?m)^.*BINTRAIL_TAG.*\n`).ReplaceAllString(old, "")
-	src := filepath.Join(t.TempDir(), "docker-compose.yml")
-	writeFile(t, src, old, 0o644)
-	r := install(t, "COMPOSE_SRC="+src)
-	if r.failed {
-		t.Fatalf("install failed:\n%s", r.out)
+	// The file's comments still name BINTRAIL_TAG, as an edited copy of the
+	// current file would: only the image: lines decide.
+	all := strings.ReplaceAll(string(b), "${BINTRAIL_TAG:-latest}", "latest")
+	one := strings.Replace(string(b), "bintrail-console:${BINTRAIL_TAG:-latest}", "bintrail-console:0.120.0", 1)
+	if !strings.Contains(all, "BINTRAIL_TAG") || one == string(b) {
+		t.Fatal("could not build the edited compose files")
 	}
-	if got := envFile(t, r); got != "" {
-		t.Errorf(".env = %q, want none", got)
-	}
-	if !strings.Contains(r.out, "does not read BINTRAIL_TAG") || strings.Contains(r.out, "This is version") {
-		t.Errorf("wrong words for a compose file without BINTRAIL_TAG:\n%s", r.out)
-	}
-	noBannedWords(t, r)
+	for name, body := range map[string]string{"no image reads it": all, "one image fixed by hand": one} {
+		t.Run(name, func(t *testing.T) {
+			src := filepath.Join(t.TempDir(), "docker-compose.yml")
+			writeFile(t, src, body, 0o644)
+			r := install(t, "COMPOSE_SRC="+src)
+			if r.failed {
+				t.Fatalf("install failed:\n%s", r.out)
+			}
+			if got := envFile(t, r); got != "" {
+				t.Errorf(".env = %q, want none", got)
+			}
+			if !strings.Contains(r.out, "does not take its image versions from BINTRAIL_TAG") || strings.Contains(r.out, "This is version") {
+				t.Errorf("wrong words for a compose file whose images ignore BINTRAIL_TAG:\n%s", r.out)
+			}
+			noBannedWords(t, r)
 
-	// A version already in .env is not claimed either: this file ignores it.
-	r = installWith(t, withEnv("BINTRAIL_TAG=0.128.0\n"), "COMPOSE_SRC="+src)
-	if r.failed {
-		t.Fatalf("install failed:\n%s", r.out)
+			// A version already in .env is not claimed either: this file ignores it.
+			r = installWith(t, withEnv("BINTRAIL_TAG=0.128.0\n"), "COMPOSE_SRC="+src)
+			if r.failed {
+				t.Fatalf("install failed:\n%s", r.out)
+			}
+			if got := envFile(t, r); got != "BINTRAIL_TAG=0.128.0\n" {
+				t.Errorf(".env changed to %q", got)
+			}
+			if strings.Contains(r.out, "This is version") {
+				t.Errorf("a version this compose file ignores is claimed:\n%s", r.out)
+			}
+		})
 	}
-	if got := envFile(t, r); got != "BINTRAIL_TAG=0.128.0\n" {
+}
+
+// A BINTRAIL_TAG shaped like a version that no release has (a typo) stops
+// with the cause named, not only a failed download.
+func TestVersion_aKeptVersionWithNoReleaseSaysSo(t *testing.T) {
+	r := installWith(t, withEnv("BINTRAIL_TAG=0.13.0\n"), "STUB_COMPOSE_FAIL=1")
+	if !r.failed || r.upCalls != 0 {
+		t.Fatalf("the install went on:\n%s", r.out)
+	}
+	if !strings.Contains(r.out, "BINTRAIL_TAG=0.13.0 (in .env) names no DBTrail release") {
+		t.Errorf("the cause is not named:\n%s", r.out)
+	}
+	if _, err := os.Stat(filepath.Join(r.dir, "docker-compose.yml")); err == nil {
+		t.Error("a failed download left a docker-compose.yml behind")
+	}
+	if got := envFile(t, r); got != "BINTRAIL_TAG=0.13.0\n" {
 		t.Errorf(".env changed to %q", got)
 	}
-	if !strings.Contains(r.out, "does not read BINTRAIL_TAG") || strings.Contains(r.out, "This is version") {
-		t.Errorf("a version this compose file ignores is claimed:\n%s", r.out)
-	}
+	noBannedWords(t, r)
 }
 
 // What the line the installer writes rests on: every DBTrail image in the

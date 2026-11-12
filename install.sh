@@ -281,10 +281,13 @@ elif env_has BINTRAIL_TAG "$DIR/.env"; then
   PIN=$(env_value BINTRAIL_TAG "$DIR/.env"); PIN_FROM=.env
 fi
 case "$PIN" in
-  v[0-9]*) is_version "${PIN#v}" && die \
-    "BINTRAIL_TAG=${PIN} (in ${PIN_FROM}) starts with a v, and DBTrail's images are tagged without it.
-    Change it to BINTRAIL_TAG=${PIN#v} and re-run." ;;
+  v[0-9]*)
+    if is_version "${PIN#v}"; then
+      die "BINTRAIL_TAG=${PIN} (in ${PIN_FROM}) starts with a v, and DBTrail's images are tagged without it.
+    Change it to BINTRAIL_TAG=${PIN#v} and re-run."
+    fi ;;
 esac
+REF_FROM_PIN=""
 
 if [ -n "${DBTRAIL_REF:-}" ]; then
   REF=$DBTRAIL_REF
@@ -293,6 +296,7 @@ if [ -n "${DBTRAIL_REF:-}" ]; then
   fi
 elif [ -n "$PIN_FROM" ] && is_version "$PIN"; then
   REF="v$PIN"
+  REF_FROM_PIN=1
 else
   rc=0
   REF=$(newest_release) || rc=$?
@@ -369,8 +373,12 @@ if [ -f docker-compose.yml ]; then
     "DBTRAIL_METRICS_PORT=${DBTRAIL_METRICS_PORT} ignored: the existing docker-compose.yml is reused (edit its ports: line by hand)."
 else
   FRESH=1
-  fetch "$COMPOSE_URL" docker-compose.yml \
-    || die "Failed to download $COMPOSE_URL"
+  if ! fetch "$COMPOSE_URL" docker-compose.yml; then
+    rm -f docker-compose.yml
+    [ -n "$REF_FROM_PIN" ] && die "BINTRAIL_TAG=${PIN} (in ${PIN_FROM}) names no DBTrail release: there is no ${REF}/docker-compose.yml.
+    Check the version against the list of releases and change it, then re-run."
+    die "Failed to download $COMPOSE_URL"
+  fi
   say "${DIM}    downloaded docker-compose.yml${RST}"
 
   # The compose file publishes the console on 127.0.0.1:8090. If the operator
@@ -438,11 +446,18 @@ grep -q '^services:' docker-compose.yml || die \
 # Only a fresh install writes, and only a compose file that reads the value
 # (every one since the images split; an older DBTRAIL_REF may not): a line
 # nothing reads would claim a version the stack does not run.
-if ! grep -q 'BINTRAIL_TAG' docker-compose.yml; then
+# compose_reads_tag: every DBTrail image: line (comments aside) takes its tag
+# from BINTRAIL_TAG. The file's own comments name the variable, so a bare grep
+# would pass a file edited to `image: ...:latest` or a fixed number.
+compose_reads_tag() {
+  grep -Eq '^[^#]*image:[[:space:]]*ghcr\.io/dbtrail/' docker-compose.yml || return 1
+  ! grep -E '^[^#]*image:[[:space:]]*ghcr\.io/dbtrail/' docker-compose.yml | grep -vq 'BINTRAIL_TAG'
+}
+if ! compose_reads_tag; then
   # Whether downloaded or reused: a version it does not read is not the one
   # it runs, so none is written or claimed.
   if [ -n "$VERSION" ] || [ -n "$WRITE_TAG" ]; then
-    say "${DIM}    this docker-compose.yml does not read BINTRAIL_TAG, so its images are the newest ones, tagged latest${RST}"
+    say "${DIM}    this docker-compose.yml does not take its image versions from BINTRAIL_TAG, so they are the ones its image: lines name${RST}"
   fi
   VERSION=""
   WRITE_TAG=""
@@ -530,9 +545,13 @@ if [ -n "$REF" ] && fetch "$CLI_URL" dbtrail.new 2>/dev/null && [ -s dbtrail.new
   mv dbtrail.new dbtrail && chmod +x dbtrail && CLI=1
 fi
 rm -f dbtrail.new
-if [ -z "$CLI" ] && [ -z "$REF" ] && [ -x dbtrail ]; then
+if [ -z "$CLI" ] && [ -x dbtrail ]; then
   CLI=1
-  warn "kept the dbtrail command already here, since the version to take a new one from is not known."
+  if [ -z "$REF" ]; then
+    warn "kept the dbtrail command already here, since the version to take a new one from is not known."
+  else
+    warn "could not download the dbtrail command of ${REF}; kept the one already here."
+  fi
 fi
 [ -n "$CLI" ] || warn "could not download the dbtrail command; DBTrail works without it, from the browser."
 
