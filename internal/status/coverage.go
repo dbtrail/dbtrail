@@ -9,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // ContinuityStatus is the single rule for the machine-readable continuity
@@ -180,11 +182,11 @@ func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *Strea
 	}
 	floor, err := OldestDeltaFromDB(ctx, db, dbName)
 	if err != nil {
-		floorWarnings.failed(ctx, "gap-window:"+dbName,
+		floorWarnings.failed(ctx, db, "gap-window",
 			"could not determine the delta-coverage floor; the acknowledged capture loss stays on record", dbName, err)
 		return
 	}
-	floorWarnings.answered("gap-window:"+dbName,
+	floorWarnings.answered(db, "gap-window",
 		"the delta-coverage floor can be read again; the acknowledged capture loss is graded against it", dbName)
 	stream.Floor = floor
 	lookBelowFloor(ctx, db, dbName, stream)
@@ -216,11 +218,11 @@ func lookBelowFloor(ctx context.Context, db *sql.DB, dbName string, stream *Stre
 	held, err := heldAtOrBefore(ctx, db, stream.GapLostAt.Time)
 	if err != nil {
 		stream.Floor = DeltaFloor{}
-		floorWarnings.failed(ctx, "gap-below:"+dbName,
+		floorWarnings.failed(ctx, db, "gap-below",
 			"could not check whether changes from before the acknowledged capture loss are still held; it stays on record", dbName, err)
 		return
 	}
-	floorWarnings.answered("gap-below:"+dbName,
+	floorWarnings.answered(db, "gap-below",
 		"changes from before the acknowledged capture loss can be checked again", dbName)
 	if !held.IsZero() {
 		stream.Floor.Hour = held.UTC().Truncate(time.Hour)
@@ -233,20 +235,32 @@ func lookBelowFloor(ctx context.Context, db *sql.DB, dbName string, stream *Stre
 // a Warn per read turned one outage into a line per request. A read whose own
 // request was cancelled (a browser that navigated away, a daemon stopping) is
 // not a condition of the index and is logged at Debug only, without touching
-// the state. Keyed by the index's database name, which is all these readers
-// are given: two index servers using the same name share one condition.
-var floorWarnings = &onceWarner{failing: map[string]bool{}}
+// the state; one that ran out of time is.
+var floorWarnings = &onceWarner{failing: map[warnKey]bool{}}
+
+// warnKey is one condition: one question asked of one index connection. The
+// *sql.DB tells apart two index servers whose databases share a name; every
+// caller holds its handle for the life of the index (the console's bundle,
+// the MCP target, one `bintrail status` run). An entry lives only while its
+// condition stands, so a handle that is gone leaves at most one behind.
+type warnKey struct {
+	db       *sql.DB
+	question string
+}
 
 type onceWarner struct {
 	mu      sync.Mutex
-	failing map[string]bool
+	failing map[warnKey]bool
 }
 
-func (w *onceWarner) failed(ctx context.Context, key, msg, dbName string, err error) {
-	if ctx.Err() != nil {
+func (w *onceWarner) failed(ctx context.Context, db *sql.DB, question, msg, dbName string, err error) {
+	// Only a cancellation is the caller going away. A deadline is a read that
+	// did not answer in time, which is exactly what this exists to report.
+	if errors.Is(ctx.Err(), context.Canceled) {
 		slog.Debug(msg, "db", dbName, "error", err, "cancelled", ctx.Err())
 		return
 	}
+	key := warnKey{db, question}
 	w.mu.Lock()
 	first := !w.failing[key]
 	w.failing[key] = true
@@ -258,7 +272,8 @@ func (w *onceWarner) failed(ctx context.Context, key, msg, dbName string, err er
 	slog.Debug(msg, "db", dbName, "error", err)
 }
 
-func (w *onceWarner) answered(key, msg, dbName string) {
+func (w *onceWarner) answered(db *sql.DB, question, msg, dbName string) {
+	key := warnKey{db, question}
 	w.mu.Lock()
 	was := w.failing[key]
 	delete(w.failing, key)
@@ -281,29 +296,12 @@ func (w *onceWarner) answered(key, msg, dbName string) {
 // tier.
 func heldAtOrBefore(ctx context.Context, db *sql.DB, at time.Time) (time.Time, error) {
 	at = at.UTC()
-	var minPartition sql.NullString
-	var minEvent sql.NullTime
-	err := db.QueryRowContext(ctx, `SELECT MIN(partition_name), MIN(min_event_ts) FROM archive_state WHERE partition_name <= ? OR min_event_ts <= ?`,
-		at.Format("p_2006010215"), at).Scan(&minPartition, &minEvent)
-	switch {
-	case err == nil:
-		var held time.Time
-		if minPartition.Valid {
-			t, ok := parsePartitionName(minPartition.String)
-			if !ok {
-				return time.Time{}, fmt.Errorf("archive_state partition_name %q is unparseable", minPartition.String)
-			}
-			held = t
-		}
-		if minEvent.Valid && (held.IsZero() || minEvent.Time.Before(held)) {
-			held = minEvent.Time
-		}
-		if !held.IsZero() {
-			return held, nil
-		}
-	case isMissingTableErr(err):
-	default:
-		return time.Time{}, fmt.Errorf("look for archived changes from before %s: %w", at.Format(TSFmt), err)
+	held, err := archivedAtOrBefore(ctx, db, at)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !held.IsZero() {
+		return held, nil
 	}
 	var ev sql.NullTime
 	err = db.QueryRowContext(ctx, `SELECT MIN(event_timestamp) FROM binlog_events WHERE event_timestamp <= ? GROUP BY schema_name, table_name LIMIT 1`, at).Scan(&ev)
@@ -313,10 +311,55 @@ func heldAtOrBefore(ctx context.Context, db *sql.DB, at time.Time) (time.Time, e
 	if err != nil {
 		return time.Time{}, fmt.Errorf("look for indexed changes from before %s: %w", at.Format(TSFmt), err)
 	}
-	if !ev.Valid {
+	if !ev.Valid || ev.Time.IsZero() || ev.Time.After(at) {
 		return time.Time{}, nil
 	}
 	return ev.Time, nil
+}
+
+// archivedAtOrBefore is heldAtOrBefore's question to archive_state, zero when
+// no archived change at or before at is known. Only values at or before at
+// count: the MIN over the matching rows can be a later hour's name when a row
+// matched by its recorded oldest event.
+//
+// A min_event_ts stored as the zero date (a non-strict sql_mode, or old data)
+// is not an event time. It is left out in the query, so it can neither win the
+// MIN over a real recorded event nor match the row by itself, and ignored here
+// as a second belt; that row still counts by its hour's name. An archive_state
+// without the column (1054: created before it and not migrated, as the
+// planner allows for) is asked by hour names only.
+func archivedAtOrBefore(ctx context.Context, db *sql.DB, at time.Time) (time.Time, error) {
+	hour := at.Format("p_2006010215")
+	var minPartition sql.NullString
+	var minEvent sql.NullTime
+	err := db.QueryRowContext(ctx, `SELECT MIN(partition_name), MIN(CASE WHEN min_event_ts > '1000-01-01' THEN min_event_ts END) FROM archive_state WHERE partition_name <= ? OR (min_event_ts <= ? AND min_event_ts > '1000-01-01')`,
+		hour, at).Scan(&minPartition, &minEvent)
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1054 {
+		minEvent = sql.NullTime{}
+		err = db.QueryRowContext(ctx, `SELECT MIN(partition_name) FROM archive_state WHERE partition_name <= ?`, hour).Scan(&minPartition)
+	}
+	switch {
+	case err == nil:
+	case isMissingTableErr(err):
+		return time.Time{}, nil
+	default:
+		return time.Time{}, fmt.Errorf("look for archived changes from before %s: %w", at.Format(TSFmt), err)
+	}
+	var held time.Time
+	if minPartition.Valid {
+		t, ok := parsePartitionName(minPartition.String)
+		if !ok {
+			return time.Time{}, fmt.Errorf("archive_state partition_name %q is unparseable", minPartition.String)
+		}
+		if !t.After(at) {
+			held = t
+		}
+	}
+	if minEvent.Valid && !minEvent.Time.IsZero() && !minEvent.Time.After(at) && (held.IsZero() || minEvent.Time.Before(held)) {
+		held = minEvent.Time
+	}
+	return held, nil
 }
 
 // CollectCoverageSummary computes the summary against one index. The floor
@@ -327,10 +370,10 @@ func heldAtOrBefore(ctx context.Context, db *sql.DB, at time.Time) (time.Time, e
 func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now time.Time) (*CoverageSummary, error) {
 	sum := &CoverageSummary{}
 	if floor, err := OldestDeltaFromDB(ctx, db, dbName); err != nil {
-		floorWarnings.failed(ctx, "coverage:"+dbName,
+		floorWarnings.failed(ctx, db, "coverage",
 			"could not determine the delta-coverage floor; coverage window start is unknown", dbName, err)
 	} else {
-		floorWarnings.answered("coverage:"+dbName,
+		floorWarnings.answered(db, "coverage",
 			"the delta-coverage floor can be read again; the coverage window has a start", dbName)
 		sum.Floor = floor
 	}

@@ -389,11 +389,13 @@ of it:
 - an hour still in the index, from the hour of the loss on;
 - an archived hour from the hour of the loss or before, even when a stretch
   that was never archived separates it from the hours still in the index;
-- an event dated at or before the loss, wherever it is stored. The oldest
+- an event dated at or before the loss, in the index, or in an archived file
+  that recorded its oldest event (`archive_state.min_event_ts`). The oldest
   partition of the index takes every event older than its name, so indexing an
   old binlog after rotation puts such events under a later hour. An archived
-  file is checked the same way through the oldest event recorded for it
-  (`archive_state.min_event_ts`).
+  file with no recorded oldest event (archived before that column existed, or
+  registered by `upload` or `archive reconcile --repair` without reading the
+  file) counts by its hour's name only, so such events in it are not seen.
 
 Once none of them is, the report takes that moment as outside what is held:
 `status` prints `no gaps in the captured range`, the JSON verdict is `ok` with
@@ -405,8 +407,9 @@ that `/api/coverage` reports, which is where snapshots can still be updated
 from without a break, never later. The loss stays reported when that start
 cannot be read, and on an index with archives that is shared by more than one
 source, where it cannot be told whose archived hours reach further back. With
-archiving on, that can be for as long as the archives are kept: nothing
-removes an archived hour from the record. A loss nobody acknowledged is never
+archiving on, that can be for as long as the archives are kept: an archived
+hour that the index no longer holds stays on record until `archive reconcile
+--prune` removes it, which it does only for a row whose files are gone. A loss nobody acknowledged is never
 dropped from the report this way: it stays `gap_lost` until it is
 acknowledged.
 

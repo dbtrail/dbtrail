@@ -28,7 +28,9 @@ import (
 
 var (
 	gwSrvQ      = regexp.QuoteMeta("SELECT COUNT(*) FROM bintrail_servers")
-	gwArchHeldQ = regexp.QuoteMeta("FROM archive_state WHERE partition_name <= ? OR min_event_ts <= ?")
+	gwArchHeldQ = regexp.QuoteMeta("FROM archive_state WHERE partition_name <= ? OR (min_event_ts <= ?")
+	// The legacy form, for an archive_state without min_event_ts (1054).
+	gwArchHeldLegacyQ = regexp.QuoteMeta("SELECT MIN(partition_name) FROM archive_state WHERE partition_name <= ?") + `\s*$`
 	gwEvHeldQ   = regexp.QuoteMeta("FROM binlog_events WHERE event_timestamp <= ?")
 )
 
@@ -152,6 +154,55 @@ func TestLoadGapWindow_looksBelowTheFloor(t *testing.T) {
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows(nil, nil, 0)) },
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil)) },
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwEvHeldQ).WillReturnError(errors.New("lock wait timeout")) },
+		}, ContinuityGapAcknowledged},
+		{"archive_state without min_event_ts, an archived hour before the loss", lost, []step{
+			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(june()) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwArchHeldQ).WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'min_event_ts'"})
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwArchHeldLegacyQ).WithArgs("p_2026062212").
+					WillReturnRows(sqlmock.NewRows([]string{"p"}).AddRow("p_2026060100"))
+			},
+		}, ContinuityGapAcknowledged},
+		{"archive_state without min_event_ts, nothing before the loss", lost, []step{
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026063000", "p_2026070500", 1))
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwArchHeldQ).WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'min_event_ts'"})
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwArchHeldLegacyQ).WillReturnRows(sqlmock.NewRows([]string{"p"}).AddRow(nil))
+			},
+			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwEvHeldQ).WillReturnRows(gwEvHeldRows()) },
+		}, ContinuityOK},
+		{"a zero-date min_event_ts does not erase the archived hour", lost, []step{
+			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(june()) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows("p_2026060100", time.Time{}))
+			},
+		}, ContinuityGapAcknowledged},
+		{"an archived hour after the loss is not a change held before it", lost, []step{
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026063000", "p_2026070500", 1))
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
+			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows("p_2026063000", nil)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwEvHeldQ).WillReturnRows(gwEvHeldRows(time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)))
+			},
 		}, ContinuityGapAcknowledged},
 		{"archives of more than one source: on record, nothing more asked", lost, []step{
 			func(m sqlmock.Sqlmock) {

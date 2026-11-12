@@ -92,6 +92,10 @@ func TestAcknowledgedLossWindow_belowTheFloor(t *testing.T) {
 			nil, F.Add(-10 * day), F.Add(-15 * day), status.ContinuityOK},
 		{"an archived hour holds re-indexed changes older than the loss",
 			[]archived{{hour: F.Add(-48 * time.Hour), minEvent: F.Add(-20 * day)}}, time.Time{}, F.Add(-10 * day), status.ContinuityGapAcknowledged},
+		{"an event at the very second of the loss",
+			nil, F.Add(-10 * day), F.Add(-10 * day), status.ContinuityGapAcknowledged},
+		{"an event one second after the loss",
+			nil, F.Add(-10*day + time.Second), F.Add(-10 * day), status.ContinuityOK},
 		{"nothing older than the loss anywhere",
 			[]archived{{hour: F.Add(-48 * time.Hour), minEvent: F.Add(-47 * time.Hour)}}, time.Time{}, F.Add(-10 * day), status.ContinuityOK},
 	} {
@@ -180,5 +184,78 @@ func explain(t *testing.T, db *sql.DB, q string, args ...any) {
 			parts = append(parts, c+"="+string(vals[i]))
 		}
 		t.Logf("plan: %s", strings.Join(parts, " "))
+	}
+}
+
+// A min_event_ts stored as the zero date (non-strict sql_mode, old data) is
+// not an event time. It must neither erase an archived hour found before the
+// loss nor hide a real oldest event recorded for another file (review of
+// #2711).
+func TestAcknowledgedLossWindow_zeroDateMinEvent(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	ctx := context.Background()
+	db, dbName := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(ctx, db, 4, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	live, err := status.OldestDeltaFromDB(ctx, db, dbName)
+	if err != nil || live.Hour.IsZero() {
+		t.Fatalf("fixture: floor %+v, %v", live, err)
+	}
+	F := live.Hour
+	day := 24 * time.Hour
+	pname := func(t time.Time) string { return t.UTC().Format("p_2006010215") }
+	ts := func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04:05") }
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	exec("SET SESSION sql_mode = ''")
+	exec("INSERT INTO stream_state (id, mode, server_id, last_checkpoint) VALUES (1, 'gtid', 7, UTC_TIMESTAMP())")
+	for _, c := range []struct {
+		name string
+		rows [][2]any // partition_name, min_event_ts
+		lost time.Time
+	}{
+		{"an archived hour before the loss beside a zero-date row",
+			[][2]any{{pname(F.Add(-30 * day)), nil}, {pname(F.Add(-48 * time.Hour)), "0000-00-00 00:00:00"}}, F.Add(-25 * day)},
+		{"a recorded oldest event before the loss beside a zero-date row",
+			[][2]any{{pname(F.Add(-48 * time.Hour)), ts(F.Add(-20 * day))}, {pname(F.Add(-47 * time.Hour)), "0000-00-00 00:00:00"}}, F.Add(-10 * day)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			exec("DELETE FROM archive_state")
+			for _, r := range c.rows {
+				exec("INSERT INTO archive_state (partition_name, bintrail_id, local_path, min_event_ts) VALUES (?, 'id-1', '/tmp/x', ?)", r[0], r[1])
+			}
+			var zeros int
+			if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM archive_state WHERE min_event_ts = '0000-00-00 00:00:00'").Scan(&zeros); err != nil || zeros != 1 {
+				t.Fatalf("fixture: %d zero-date rows, err %v", zeros, err)
+			}
+			exec("UPDATE stream_state SET gap_lost_at = ?, gap_lost_detail = 'binlogs purged', gap_acked_at = ? WHERE id = 1",
+				ts(c.lost), ts(c.lost.Add(time.Hour)))
+			data, err := status.CollectStatus(ctx, db, dbName)
+			if err != nil {
+				t.Fatalf("CollectStatus: %v", err)
+			}
+			got := status.ContinuityStatus(data.Stream, data.StreamErr)
+			sum, err := status.CollectCoverageSummary(ctx, db, dbName, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("loss %s: status %q, coverage %q", ts(c.lost), got, sum.Continuity)
+			if got != status.ContinuityGapAcknowledged || sum.Continuity != got {
+				t.Errorf("status %q, coverage %q; want gap_acknowledged from both", got, sum.Continuity)
+			}
+		})
 	}
 }

@@ -180,3 +180,54 @@ func TestCollectCoverageSummary_warnsOncePerCondition_2669(t *testing.T) {
 		t.Errorf("no line when the floor could be read again: %q", log.String())
 	}
 }
+
+// A deadline is a read that did not answer in time: a failure to warn about.
+// Only a cancellation is the caller going away (review of #2711).
+func TestLoadGapWindow_deadlineIsACondition_2669(t *testing.T) {
+	log := captureStatusLog(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(covPartsQ).WillDelayFor(time.Second).WillReturnRows(covPartRows("p_2026062300"))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	LoadGapWindow(ctx, db, "idx_2669_deadline", ackedLostStream())
+	t.Logf("the line: %s", strings.TrimSpace(log.String()))
+	if got := strings.Count(log.String(), "level=WARN"); got != 1 {
+		t.Errorf("%d Warn line(s) after a read that ran out of time, want 1: %q", got, log.String())
+	}
+}
+
+// Two index servers whose databases have the same name are two conditions:
+// one failing while the other answers must not alternate Warn and "can be
+// read again" lines (review of #2711).
+func TestLoadGapWindow_twoIndexesWithOneName_2669(t *testing.T) {
+	log := captureStatusLog(t)
+	const dbName = "idx_2669_shared_name"
+	bad, badMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bad.Close()
+	good, goodMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer good.Close()
+	for range 3 {
+		badMock.ExpectQuery(covPartsQ).WillReturnError(errors.New("i/o timeout"))
+		LoadGapWindow(context.Background(), bad, dbName, ackedLostStream())
+		goodMock.ExpectQuery(covPartsQ).WillReturnRows(covPartRows("p_2026062200", "p_future"))
+		goodMock.ExpectQuery(covArchQ).WillReturnRows(gwArchRows(nil, nil, 0))
+		goodMock.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil))
+		LoadGapWindow(context.Background(), good, dbName, ackedLostStream())
+	}
+	if got := strings.Count(log.String(), "level=WARN"); got != 1 {
+		t.Errorf("%d Warn line(s), want 1: %q", got, log.String())
+	}
+	if strings.Contains(log.String(), "can be read again") {
+		t.Errorf("the index that answers said the other one recovered: %q", log.String())
+	}
+}
