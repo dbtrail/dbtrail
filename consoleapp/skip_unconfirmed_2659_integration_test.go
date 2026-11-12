@@ -22,8 +22,6 @@ import (
 func TestIntegrationQuietSnapshotCanWait_2659(t *testing.T) {
 	db, name := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, db)
-	testutil.MustExec(t, db, `CREATE TABLE IF NOT EXISTS schema_changes (id BIGINT AUTO_INCREMENT PRIMARY KEY, detected_at DATETIME NOT NULL,
-		schema_name VARCHAR(64), table_name VARCHAR(64), ddl_type VARCHAR(50) NOT NULL, ddl_query TEXT)`)
 	now := time.Now().UTC()
 	// The index keeps 48 hours: its oldest partition is the hour 48 hours ago.
 	oldest := now.Add(-48 * time.Hour).Truncate(time.Hour)
@@ -65,7 +63,7 @@ func TestIntegrationQuietSnapshotCanWait_2659(t *testing.T) {
 	}
 
 	// A table created an hour ago, after the recent snapshot.
-	testutil.MustExec(t, db, "INSERT INTO schema_changes (detected_at, schema_name, table_name, ddl_type) VALUES (?, 'shop', 'new', 'CREATE TABLE')", now.Add(-time.Hour))
+	testutil.MustExec(t, db, "INSERT INTO schema_changes (detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query) VALUES (?, 'binlog.000001', 4, 'shop', 'new', 'CREATE TABLE', 'CREATE TABLE new (id INT PRIMARY KEY)')", now.Add(-time.Hour))
 	if ok, why := canWait(recent); ok || why != "a table was created since the previous snapshot" {
 		t.Fatalf("a table created since: ok=%v why=%q", ok, why)
 	}
