@@ -681,10 +681,36 @@ type ctlServer struct {
 	// RouteIsCapture: the saved forwarding account is the one DBTrail
 	// captures with, which the port refuses to forward as.
 	RouteIsCapture bool `json:"route_is_capture,omitempty"`
+	// SQLFresh is the mode this server's entry asks for on the MySQL port
+	// (fresh, or fast); SQLFreshSaved says it was chosen, as opposed to the
+	// default. What the router applies is `port mode`'s to say.
+	SQLFresh      bool `json:"sql_fresh"`
+	SQLFreshSaved bool `json:"sql_fresh_saved"`
 	// MonitorState is whether its changes are being recorded: running,
 	// pending, stopped, failed... Empty for a server with no source, and on
 	// a DBTrail that records nothing itself (`serve`).
 	MonitorState string `json:"monitor_state,omitempty"`
+}
+
+// mode is how `server list` shows the mode saved for the server's statements
+// on the MySQL port: fresh or fast, "(default)" when nothing was chosen. The
+// server DBTrail was started with has no choice of its own and is fast; one
+// with no source is not answered on the port.
+func (s ctlServer) mode() string {
+	switch {
+	case s.Kind == "ephemeral":
+		return "fast"
+	case !s.HasSource:
+		return "-"
+	}
+	m := "fast"
+	if s.SQLFresh {
+		m = "fresh"
+	}
+	if !s.SQLFreshSaved {
+		m += " (default)"
+	}
+	return m
 }
 
 // recording is the word `server list` shows for the server's state.
@@ -921,7 +947,7 @@ func runServerList(ctx context.Context, c *ctlClient, format string, out io.Writ
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tADDRESS\tUSER\tRECORDING\tFORWARDS AS")
+	fmt.Fprintln(tw, "NAME\tADDRESS\tUSER\tRECORDING\tFORWARDS AS\tMODE")
 	for _, s := range servers {
 		user := s.SourceUser
 		if user == "" {
@@ -934,7 +960,7 @@ func runServerList(ctx context.Context, c *ctlClient, format string, out io.Writ
 		case s.RouteIsCapture:
 			fwd += " (refused: it is the user above)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", s.Name, s.address(), user, s.recording(), fwd)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", s.Name, s.address(), user, s.recording(), fwd, s.mode())
 	}
 	return tw.Flush()
 }
