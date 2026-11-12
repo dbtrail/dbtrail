@@ -723,12 +723,16 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// more question it did not answer.
 	var deniedAll bool
 	if len(denied) > 0 {
-		if probeErrors == 0 && (answered || bucketAnswers(ctx, snaps, held, asked, probe, now)) {
+		answers, refused := answered, probeErrors == 0
+		if probeErrors == 0 && !answered {
+			answers, refused = bucketAnswers(ctx, snaps, held, asked, probe, now)
+		}
+		if probeErrors == 0 && answers {
 			for _, name := range denied {
 				durable[name] = false // kept, and listed to be sent again
 			}
 		} else {
-			deniedAll = probeErrors == 0
+			deniedAll = refused
 			probeErrors += len(denied)
 			denied = nil
 		}
@@ -796,8 +800,9 @@ const bucketChecks = 3
 // now and not asked already, newest first, at most bucketChecks of them. Those
 // were sent, so S3 should have them. Any answer, "here" or "not here", means
 // it answers, and the refusals are about those snapshots alone. A refusal of
-// each, any other failure, or nothing to ask means it does not.
-func bucketAnswers(ctx context.Context, snaps []localSnapshot, held, asked map[string]bool, probe durableProbe, now time.Time) bool {
+// each, any other failure, or nothing to ask means it does not; refused
+// reports that no failure but refusals was met, for the page's words.
+func bucketAnswers(ctx context.Context, snaps []localSnapshot, held, asked map[string]bool, probe durableProbe, now time.Time) (answers, refused bool) {
 	var check []localSnapshot
 	for _, s := range snaps {
 		if s.complete && !s.unreadable && !held[s.name] && !asked[s.name] && !s.ts.After(now) {
@@ -812,14 +817,14 @@ func bucketAnswers(ctx context.Context, snaps []localSnapshot, held, asked map[s
 		_, err := probe(ctx, s.name)
 		switch {
 		case err == nil:
-			return true
+			return true, false
 		case !storage.IsAccessDenied(err):
 			slog.Warn("baseline prune: could not ask S3 about a newer snapshot to tell whether it answers at all",
 				"snapshot", s.name, "error", err)
-			return false
+			return false, false
 		}
 	}
-	return false
+	return false, true
 }
 
 // supersededHeldProbes bounds the extra probes supersededHeld makes looking
