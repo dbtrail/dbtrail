@@ -82,10 +82,13 @@ type serverDTO struct {
 	// Hidden are the tables and columns the analytical surfaces leave out
 	// for this server (#2529). Edited through /api/servers/{id}/hidden only.
 	Hidden *hiddenListsDTO `json:"hidden,omitempty"`
-	// SQLFresh is the fresh mode SAVED for this server's statements on the
-	// SQL port (#2546). What the router applies is its own status document's
-	// sql_mode. Edited through /api/servers/{id}/sql-mode only.
-	SQLFresh bool `json:"sql_fresh"`
+	// SQLFresh is the mode this server's entry asks for on the SQL port
+	// (#2546): its saved choice, and fresh when none is saved
+	// (SQLFreshSaved tells the two apart). What the router applies is its
+	// own status document's sql_mode. Edited through
+	// /api/servers/{id}/sql-mode only.
+	SQLFresh      bool `json:"sql_fresh"`
+	SQLFreshSaved bool `json:"sql_fresh_saved"`
 	// SQLLikeIgnoresCase is the LIKE switch SAVED for this server's
 	// statements on the SQL port. Edited through /api/servers/{id}/sql-mode
 	// only; applied to connections opened after the change.
@@ -1723,7 +1726,8 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		Schemas:              e.Schemas,
 		MonitorDesired:       e.MonitorDesired,
 		Hidden:               newHiddenListsDTO(e.Hidden),
-		SQLFresh:             e.SQLFresh,
+		SQLFresh:             e.SQLFreshOn(),
+		SQLFreshSaved:        e.SQLFreshSaved(),
 		SQLLikeIgnoresCase:   e.SQLLikeIgnoresCase,
 		PortUser:             e.PortUser,
 		HasPortPassword:      e.PortPassword != "",

@@ -1013,25 +1013,30 @@ expensive read goes to the copy whatever the age of its snapshot. Earlier
 versions had a limit (`--route-max-copy-age`) and, past it, a check of which
 tables had changed since their snapshot. Both are gone.
 
-**Fast mode, the default: the copy answers with its last snapshot.** Each
+**Fresh mode, the default: the copy answers with what capture has indexed.**
+A server answers in fresh mode unless Fast is saved for it.
+
+**Fast mode: the copy answers with its last snapshot.** Each
 table is as old as its last refresh, so the refresh cadence on the
 Snapshots page (every 5 minutes, 15, an hour...) is how far behind the
 answers may be. Nothing is laid over the snapshot, so the router's memory all
 goes to the statements and nothing runs in the background between
-statements.
+statements. Choose it for a server whose reports can be minutes old and that
+needs the memory or the speed.
 
-**Fresh mode, opt-in: the copy answers with what capture has indexed.**
-Choose it for one server on that server's Snapshots page in the web
+Choose either for one server on that server's Snapshots page in the web
 interface (Settings, How current SQL answers are, then Save). The router
 reads the choice within a few seconds, with no restart, and the card says
-when it is applied. Right after that it says the server has not answered with
+when it is applied. Right after a server turns fresh it says the server has not answered with
 the newest changes yet: those of a table are gathered after the first
 statement that reads it, so until a statement reads every table it asks for
 with them, answers can be as old as the snapshot. `/status` says the same as
-`sql_mode_warming`, which clears at the first such answer. To make every server fresh instead, set `SQL_FRESH=on` in
+`sql_mode_warming`, which clears at the first such answer. To decide for every server instead, set `SQL_FRESH=on` or `SQL_FRESH=off` in
 the compose `.env` (then `docker compose up -d router`), or
-`BINTRAIL_SQL_TAILS=on` outside Compose: that setting decides for every
-server, and the Snapshots page shows the choice locked while it is there.
+`BINTRAIL_SQL_TAILS` outside Compose: that setting decides for every
+server, fresh or fast, and the Snapshots page shows the choice locked while it is there.
+The server given on the command line, which has no entry of its own, is fast
+unless that setting is `on`.
 The router's startup lines, its card on the MySQL clients page and its
 `/status` document (`sql_mode` per server) say which mode each server is in.
 Fresh mode costs memory taken from the statements: while at least one server
@@ -1070,9 +1075,10 @@ row of an hour ago. A table has no tail when:
 A statement whose tables the port cannot tell apart (a `WITH` that reads
 another `WITH`, for one) reads no tails either.
 
-Without the fresh mode (unset, `off`, or any value other than `on`, `true`,
-`1`, `yes` or `fresh`, which the startup line names) the copy answers as it
-was at its last snapshot. The console's own SQL card always reads the snapshot.
+In fast mode (saved for the server, or `off`, `false`, `0`, `no` or `fast`
+in the setting for every server) the copy answers as it
+was at its last snapshot. A value of the setting that is neither on nor off is named in the
+startup line and decides nothing. The console's own SQL card always reads the snapshot.
 
 Two budgets bound the tails, because they live in the router's memory:
 

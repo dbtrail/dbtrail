@@ -357,17 +357,17 @@ func exportCopySnapshots(ctx context.Context, read func(context.Context) map[str
 // the metrics are on.
 const routerStatusPath = "/status"
 
-// routerFreshServersLine names the servers in fresh mode by their own switch
-// (#2546), read from the registry before the port opened; "" for none. The
-// line above it says the router's default. fast and fresh are the pool's two
+// routerFreshServersLine names the servers in fresh mode by their own entry
+// (#2546: no choice saved, or Fresh saved), read from the registry before the
+// port opened; "" for none. The line above it says who decides. fast and fresh are the pool's two
 // counts: when they differ the line says the pool moved, and to what.
 func routerFreshServersLine(names []string, fast, fresh int) string {
 	if len(names) == 0 {
 		return ""
 	}
-	noun, whose, verb := "servers are", "their", "Their statements read"
+	noun, verb := "servers are", "Their statements read"
 	if len(names) == 1 {
-		noun, whose, verb = "server is", "its", "Its statements read"
+		noun, verb = "server is", "Its statements read"
 	}
 	sorted := slices.Clone(names)
 	slices.Sort(sorted)
@@ -379,25 +379,29 @@ func routerFreshServersLine(names []string, fast, fresh int) string {
 		}
 		pool = fmt.Sprintf(" While any server is in fresh mode, %s %s at once instead of %d, to leave memory for those changes.", countOfStatements(fresh), runs, fast)
 	}
-	return fmt.Sprintf("Router: %d %s in fresh mode by %s own switch: %s. %s each table's newest captured changes over its snapshot.%s\n",
-		len(names), noun, whose, strings.Join(sorted, ", "), verb, pool)
+	return fmt.Sprintf("Router: %d %s in fresh mode: %s. %s each table's newest captured changes over its snapshot.%s\n",
+		len(names), noun, strings.Join(sorted, ", "), verb, pool)
 }
 
-// routerFreshnessLine says which answers the port gives: each table's last
-// snapshot (the default, fast mode) or that snapshot with the newest captured
-// changes laid over it (fresh mode, BINTRAIL_SQL_TAILS=on), and how to switch.
-// read is the variable as set, named when it is set but not understood.
-func routerFreshnessLine(on bool, read string) string {
-	if on {
-		return "Router: fresh mode (BINTRAIL_SQL_TAILS=" + read + "): each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture, at the cost of memory set aside for them and an update every second. Unset it (SQL_FRESH in the compose .env, then docker compose up -d router) to choose each server's mode on its " + console.PageSnapshots + " page.\n"
+// routerFreshnessLine says which answers the port gives and who decides:
+// BINTRAIL_SQL_TAILS for every server (on: each table's snapshot with the
+// newest captured changes laid over it, fresh mode; off: the snapshot alone,
+// fast mode), or, with it unset, each server's own choice, fresh when it
+// saved none. forced and read are console.SQLModeSetting's: a value that is
+// set and not understood is named, and decides nothing.
+func routerFreshnessLine(forced, read string) string {
+	const unset = "Unset it (SQL_FRESH in the compose .env, then docker compose up -d router) to choose each server's mode on its "
+	switch forced {
+	case console.SQLModeForcedFresh:
+		return "Router: fresh mode for every server (BINTRAIL_SQL_TAILS=" + read + "): each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture, at the cost of memory set aside for them and an update every second. " + unset + console.PageSnapshots + " page.\n"
+	case console.SQLModeForcedFast:
+		return "Router: fast mode for every server (BINTRAIL_SQL_TAILS=" + read + "): answers come from each table's last snapshot, as old as its last refresh, whatever is saved for a server. " + unset + console.PageSnapshots + " page.\n"
 	}
 	unknown := ""
-	switch strings.ToLower(read) {
-	case "", "off", "false", "0", "no":
-	default:
-		unknown = fmt.Sprintf(" (BINTRAIL_SQL_TAILS=%q is not on or off, and is read as off)", read)
+	if read != "" {
+		unknown = fmt.Sprintf(" (BINTRAIL_SQL_TAILS=%q is not on or off, and decides nothing)", read)
 	}
-	return "Router: fast mode" + unknown + ": answers come from each table's last snapshot, as old as its last refresh. For answers about as far behind as capture, choose Fresh for a server on its " + console.PageSnapshots + " page in the web interface, or for every server set BINTRAIL_SQL_TAILS=on (SQL_FRESH=on in the compose .env, then docker compose up -d router).\n"
+	return "Router: each server answers in its own mode, fresh unless Fast was saved for it" + unknown + ". Fresh: each table's newest captured changes are laid over its snapshot, so answers are about as far behind as capture, at the cost of memory set aside for them and an update every second. Fast: answers come from each table's last snapshot, as old as its last refresh. Choose for a server on its " + console.PageSnapshots + " page in the web interface, or for every server set BINTRAIL_SQL_TAILS=on or =off (SQL_FRESH in the compose .env, then docker compose up -d router).\n"
 }
 
 // routerStatus builds the document from the numbers and the last reading of
@@ -410,8 +414,11 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 		CostThreshold: st.Policy.CostThreshold, ScanRows: st.Policy.ScanRows,
 		RouterNumbers: numbers,
 	}
-	fresh, _ := console.TailsSetting()
+	forced, _ := console.SQLModeSetting()
+	fresh := forced == console.SQLModeForcedFresh
 	doc.Fresh = &fresh
+	doc.SQLModeForced = forced
+	doc.FreshByDefault = true
 	doc.PerServerMode = true
 	if doc.Servers == nil {
 		doc.Servers = map[string]console.RouterServerNumbers{}
@@ -432,12 +439,16 @@ func routerStatus(st routerSettings, numbers console.RouterNumbers, last *router
 		doc.Servers[id] = n
 	}
 	// A server the numbers did not list is not in fresh mode by its own
-	// switch (those are always listed): its mode is the environment's.
+	// entry (those are always listed): its mode is the environment's, or it
+	// has no entry (the command-line server, fast with nothing set).
 	for id, n := range doc.Servers {
 		if n.SQLMode != "" {
 			continue
 		}
 		n.SQLMode, n.SQLModeFrom = "fast", console.SQLModeFromDefault
+		if forced == console.SQLModeForcedFast {
+			n.SQLModeFrom = console.SQLModeFromEnvironment
+		}
 		if fresh {
 			// Not in the numbers, which list every server the copy answered
 			// for: no answer since this router started, so its tails have
@@ -820,8 +831,10 @@ func routerWaitText(maxWait time.Duration) string {
 //
 // With no BINTRAIL_SQL_TAILS=on it is planned twice (#2546): for fast mode,
 // which is what it starts with, and with the copy's tails set aside, which
-// is what it moves to while a server's own switch has it in fresh mode
-// (FreshWorkers). With it on, it is planned for the tails and never moves.
+// is what it moves to while a server is in fresh mode by its own entry
+// (FreshWorkers): at once when a server with no saved choice, or with Fresh
+// saved, is in the list. With it on, it is planned for the tails and never
+// moves.
 func routerPool(st routerSettings, memoryLimit string) console.SQLPool {
 	envFresh, _ := console.TailsSetting()
 	plan := func(withTails bool) console.SQLPool {
@@ -986,7 +999,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		PortFile: routerPortFile(st), Token: st.Token != "", MaxWait: st.MaxWait, Ignored: routerIgnoredEnv(), InContainer: inContainer(),
 		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr,
 	}))
-	fmt.Fprint(os.Stderr, routerFreshnessLine(console.TailsSetting()))
+	fmt.Fprint(os.Stderr, routerFreshnessLine(console.SQLModeSetting()))
 	fmt.Fprint(os.Stderr, routerFreshServersLine(srv.FreshServerNames(), pool.Workers, pool.FreshWorkers))
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)
