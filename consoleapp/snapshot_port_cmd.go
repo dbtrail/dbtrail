@@ -376,11 +376,21 @@ func portUser(ctx context.Context, c *ctlClient) string {
 	return mysqlLineUser(name)
 }
 
-// mysqlLineUser is name as the user of a printed mysql line. A name the
-// shell would split or expand is left for the person to quote.
+// mysqlLineUser is name as the user of a printed mysql line, which people
+// copy into a shell. Only a name made of letters, digits and . _ @ : - is
+// printed as it is: anything else (a space, a quote, a character the shell
+// expands) is left for the person to type and quote.
 func mysqlLineUser(name string) string {
-	if name == "" || strings.ContainsAny(name, " \t'\"$`\\!*?;&|<>()") {
+	if name == "" {
 		return "<server name>"
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '@', c == ':', c == '-':
+		default:
+			return "<server name>"
+		}
 	}
 	return name
 }

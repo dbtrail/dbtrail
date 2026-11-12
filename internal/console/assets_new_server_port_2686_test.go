@@ -35,6 +35,9 @@ const cases = {
   turnedOnNoPassword: res({ enabled: true, turned_on: true, routing_on: true, port: "3309" }),
   turnedOnNotAnswering: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x", error: "address already in use" }),
   unsafeName: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x" }, "my shop; rm"),
+  expandedName: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x" }, "a{b,c}$(id)"),
+  newlineName: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x" }, "shop\nrm -rf x"),
+  plainName: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x" }, "db1.example.com:3306"),
   alreadyOn: res({ enabled: true, turned_on: false, routing_on: true, port: "3309", has_password: true }),
   savedOff: res({ enabled: false }),
   notTurnedOn: res({ enabled: false, not_turned_on: "its setting could not be saved: read-only file system." }),
@@ -96,6 +99,10 @@ console.log(JSON.stringify(out));
 	has("turnedOnNotAnswering", "bfp_x", "It is not answering: address already in use")
 	has("unsafeName", "-u <server name> -p")
 	hasNot("unsafeName", "-u my shop")
+	has("expandedName", "-u <server name> -p")
+	hasNot("expandedName", "-u a{b")
+	has("newlineName", "-u <server name> -p")
+	has("plainName", "-u db1.example.com:3306 -p")
 	has("notTurnedOn", "The MySQL port was not turned on: its setting could not be saved: read-only file system.")
 	hasNot("notTurnedOn", "system..", "mysql -h", "shown only now")
 	for _, k := range []string{"alreadyOn", "savedOff", "olderDaemon", "noWordOnEnabled"} {

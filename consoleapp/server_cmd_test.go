@@ -1297,3 +1297,19 @@ func TestServerAddPortLineLeavesAnUnsafeNameToThePerson(t *testing.T) {
 		t.Fatalf("the mysql line:\n%s", out.String())
 	}
 }
+
+// Only a name the shell reads as one plain word goes into the mysql line.
+func TestMysqlLineUser(t *testing.T) {
+	for name, want := range map[string]string{
+		"shop": "shop", "db1.example.com:3306": "db1.example.com:3306", "a_b-c@d": "a_b-c@d", "Shop2": "Shop2",
+		"": "<server name>", "my shop": "<server name>", "a\tb": "<server name>", "a\nb": "<server name>",
+		"a;b": "<server name>", "$(id)": "<server name>", "a`b`": "<server name>", "a'b": "<server name>",
+		`a"b`: "<server name>", "a{b,c}": "<server name>", "a[bc]": "<server name>", "a#b": "<server name>",
+		"~root": "<server name>", "a%b": "<server name>", "a*": "<server name>", "a\\b": "<server name>",
+		"tienda-ñ": "<server name>", "a\u00a0b": "<server name>", "a=b": "<server name>", "a/b": "<server name>",
+	} {
+		if got := mysqlLineUser(name); got != want {
+			t.Errorf("mysqlLineUser(%q) = %q, want %q", name, got, want)
+		}
+	}
+}

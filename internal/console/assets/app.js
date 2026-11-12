@@ -18849,11 +18849,12 @@ function newServerPortBlock(res) {
   return null;
 }
 
-// mysqlLineUser is a server's name as the user of a mysql command line: a
-// name the shell would split or expand is left for the person to quote.
+// mysqlLineUser is a server's name as the user of a mysql command line that
+// people copy into a shell. Only a name made of letters, digits and . _ @ : -
+// is put there as it is: anything else (a space, a quote, a character the
+// shell expands) is left for the person to type and quote.
 function mysqlLineUser(name) {
-  const unsafe = " \t\n'\"$`\\!*?;&|<>()";
-  return !name || [...name].some((c) => unsafe.includes(c)) ? "<server name>" : name;
+  return /^[A-Za-z0-9._@:-]+$/.test(name || "") ? name : "<server name>";
 }
 
 // connectNotice is the answer to a check that got past every light: capture
