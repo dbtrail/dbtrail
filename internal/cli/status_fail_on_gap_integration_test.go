@@ -128,7 +128,7 @@ func TestRunStatus_failOnGap_exitCode(t *testing.T) {
 	if strings.Contains(ackOut, "GAP LOST") || strings.Contains(ackOut, "EVENTS PERMANENTLY LOST") {
 		t.Errorf("an acknowledged gap must not print the alarm:\n%s", ackOut)
 	}
-	if !strings.Contains(ackOut, "Acknowledged loss:") || !strings.Contains(ackOut, "still refused until a full snapshot is taken after it") {
+	if !strings.Contains(ackOut, "Acknowledged loss:") || !strings.Contains(ackOut, "refused. A full snapshot taken after it is not affected.") {
 		t.Errorf("an acknowledged gap must print the acknowledged-loss line:\n%s", ackOut)
 	}
 	var lostSet bool
