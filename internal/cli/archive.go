@@ -383,10 +383,11 @@ func scanS3Archive(ctx context.Context, s3URL, region string, deep bool) ([]arch
 	// session — otherwise every remaining probe would 403 once the original
 	// credentials expire, degrading into the exact DeepUnverified symptom
 	// #807 was filed to fix.
+	footerRegion := client.Options().Region // the listing's, so footers sign the same way
 	var footerDB *sql.DB
 	var secretIssuedAt time.Time
 	if deep {
-		fdb, err := openS3FooterSession(ctx, client.Options().Region)
+		fdb, err := openS3FooterSession(ctx, footerRegion)
 		if err != nil {
 			slog.Warn("reconcile: cannot open DuckDB session for --deep footer reads; row counts left unset", "error", err)
 		} else {
@@ -426,7 +427,7 @@ func scanS3Archive(ctx context.Context, s3URL, region string, deep bool) ([]arch
 			}
 			if deep && footerDB != nil {
 				if dueForS3SecretRefresh(secretIssuedAt, time.Now(), s3FooterSecretRefreshInterval) {
-					if err := duckdbutil.EnableS3CredentialChainRegion(ctx, footerDB, cfg.Region); err != nil {
+					if err := duckdbutil.EnableS3CredentialChainRegion(ctx, footerDB, footerRegion); err != nil {
 						return nil, err
 					}
 					secretIssuedAt = time.Now()
