@@ -116,7 +116,25 @@ func NewS3ClientFromConfig(cfg aws.Config, extra ...func(*s3.Options)) *s3.Clien
 // IS mirrored to DuckDB, as a secret scoped to the bucket, so the warning
 // would be false there.
 func newS3ClientRouted(cfg aws.Config, extra ...func(*s3.Options)) *s3.Client {
-	return s3.NewFromConfig(cfg, append(S3ClientOptions(), extra...)...)
+	opts := append([]func(*s3.Options){explainRegionMismatch}, S3ClientOptions()...)
+	return s3.NewFromConfig(cfg, append(opts, extra...)...)
+}
+
+// newAWSOnlyS3Client is a client that ignores bintrail's endpoint settings,
+// for the one question that is only ever asked of AWS: the unsigned HEAD that
+// discovers a bucket's region (#2688), which is never made when a custom
+// endpoint is configured (customEndpointConfigured). Kept here, beside the
+// shared constructor, so the chokepoint guard still sees one place.
+func newAWSOnlyS3Client(cfg aws.Config, opts ...func(*s3.Options)) *s3.Client {
+	return s3.NewFromConfig(cfg, opts...)
+}
+
+// sdkResolvedEndpoint is the endpoint a client built from cfg would use, ""
+// for AWS's own. It builds a throwaway client because the SDK resolves a
+// service-specific endpoint (AWS_ENDPOINT_URL_S3, endpoint_url in
+// ~/.aws/config) only then; no request is made.
+func sdkResolvedEndpoint(cfg aws.Config) string {
+	return aws.ToString(s3.NewFromConfig(cfg, S3ClientOptions()...).Options().BaseEndpoint)
 }
 
 // warnIfEndpointUnmirrored reports an endpoint the SDK resolved that bintrail

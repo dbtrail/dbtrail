@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A bucket in another region than the host's works** (#2688). With
+  `AWS_REGION` (or the instance's region) set to one region and the bucket in
+  another, every request bintrail made for the bucket through the AWS SDK
+  answered `301 PermanentRedirect`, including the snapshot listing behind time
+  travel through the MySQL port, and the snapshot check before each S3
+  snapshot read (which then skipped the check with only a log line). bintrail
+  now finds the bucket's region with one HEAD request on the bucket that
+  carries no credentials (S3 names the region in its answer, so no IAM
+  permission is needed; the bucket owner's logs show it as an anonymous
+  refused request), asks it once per bucket even when many connections arrive
+  at once, remembers it for the life of the process, and signs that bucket's
+  requests for it. This covers `upload`, `rotate`'s archive upload, `baseline
+  --upload` and pruning, the agent's payload uploads, the archive and snapshot
+  reads of `query`, `recover`, `reconstruct` and the web interface, `doctor`'s
+  lifecycle and Object Lock checks, and `init --s3-arn`'s bucket check, which
+  no longer signs for `--s3-region`'s `us-east-1` default that its help calls
+  ignored. `init --s3-bucket`, `restore-index`, `archive reconcile` and
+  `export iceberg` keep the configured region. DuckDB reads
+  of `s3://` paths were not affected: DuckDB follows the redirect on its own.
+  A region passed with a flag is kept as given. With a custom endpoint
+  (`BINTRAIL_S3_ENDPOINT`, the AWS SDK's endpoint settings, a bucket store of
+  the web interface) nothing is asked and the configured region stays. Where
+  the region cannot be found, a redirect now says that the region is the
+  cause: `the S3 bucket "my-bucket" is in region us-east-1, and this process
+  uses region us-west-2: set the S3 region to us-east-1 (AWS_REGION, or the
+  command's S3 region option)`, or, for a bucket with its own store in the web
+  interface, `... and its S3 store in the web interface signs for region
+  eu-west-1: set that store's region to us-east-1`. The region flags' help
+  now says their default is the bucket's own region.
 - **Adding the first server turns the MySQL port on, with Engine Routing on** (#2686). `dbtrail server add` and the web interface's Connect screen used to leave nothing answering on port 3309: turning the port on and turning Engine Routing on were two more steps.
   - **What happens now.** When a server is added and nothing was ever saved about the port, the port is turned on with Engine Routing on, and the answer shows the `mysql` line and the port's password. That is the only time the password is shown.
   - **What does not change.** Only the first server does it. A port that was turned off stays off. An installation that already has servers and never turned the port on keeps it off when it adds one more after the upgrade. The web interface's long form does not turn it on. The port is still reachable from the machine only (`127.0.0.1:3309`), still read-only, and a server still needs a forwarding user before anything is sent to MySQL.

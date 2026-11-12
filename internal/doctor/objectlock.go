@@ -178,7 +178,7 @@ func CheckArchiveObjectLock(ctx context.Context, archiveS3, region string, retai
 	}
 	ctx, cancel := context.WithTimeout(ctx, objectLockBudget)
 	defer cancel()
-	client, err := storage.NewS3Client(ctx, region)
+	client, err := storage.NewS3ClientForBucket(ctx, bucket, region)
 	if err != nil {
 		return objectLockVerdict(bucket, objectLockState{queryErr: err}, retain)
 	}
