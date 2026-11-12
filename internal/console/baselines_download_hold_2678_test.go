@@ -37,14 +37,11 @@ func (h *pinWatcher) Write(b []byte) (int, error) {
 	return h.ResponseRecorder.Write(b)
 }
 
-// olderSnapshot adds a complete snapshot of the fixture's table named name.
+// olderSnapshot adds a complete snapshot named name holding every table the
+// fixture's snapshot holds, so neither is the only copy of a table.
 func olderSnapshot(t *testing.T, root, name string) {
 	t.Helper()
-	dir := filepath.Join(root, name, "shop")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "orders.parquet"), []byte("rows"), 0o644); err != nil {
+	if err := os.CopyFS(filepath.Join(root, name), os.DirFS(filepath.Join(root, detailSnapDir))); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, name, baseline.SuccessMarker), nil, 0o644); err != nil {
@@ -214,17 +211,19 @@ func TestBaselineDownload_aSlowClientThatKeepsReadingIsNotCut(t *testing.T) {
 	defer resp.Body.Close()
 	start := time.Now()
 	var total int64
-	buf := make([]byte, 4<<20)
+	buf := make([]byte, 1<<20)
 	for {
-		n, err := resp.Body.Read(buf)
+		// A mebibyte, then a pause well inside one stall timeout: slow,
+		// and never stopped.
+		n, err := io.ReadFull(resp.Body, buf)
 		total += int64(n)
-		if err == io.EOF {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
 			t.Fatalf("the download was cut after %d bytes and %s: %v", total, time.Since(start), err)
 		}
-		time.Sleep(100 * time.Millisecond) // well inside one stall timeout
+		time.Sleep(40 * time.Millisecond)
 	}
 	if took := time.Since(start); took < 2*downloadStallTimeout {
 		t.Fatalf("the download took %s, not long enough to prove a slow reader outlives the stall timeout (%s)", took, downloadStallTimeout)
