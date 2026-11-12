@@ -1860,6 +1860,13 @@ var (
 	maxTxnOpen = indexer.DefaultMaxTxnOpen
 )
 
+// commitWithin is how long complete transactions wait for a batch to fill
+// before they are committed anyway (#2666): see indexer.DefaultCommitWithin.
+// Called when a capture loop starts, never at package initialization: an env
+// file's BINTRAIL_COMMIT_WITHIN is applied to the environment after that. A
+// variable so a test can change it.
+var commitWithin = indexer.CommitWithinFromEnv
+
 // streamLoop consumes parser events, flushes batches to MySQL, and writes
 // checkpoints to stream_state at the given interval.
 //
@@ -1946,6 +1953,7 @@ func streamLoop(
 		},
 	})
 	defer w.Close()
+	w.SetCommitWithin(commitWithin())
 
 	// ddlClaimed: in GTID mode, the transaction being read began with a DDL
 	// whose GTID is already in the durable set (CREATE TABLE ... SELECT logs
@@ -2053,6 +2061,14 @@ func streamLoop(
 
 		case <-w.CapC():
 			if err := w.OnCap(); err != nil {
+				return err
+			}
+
+		case <-w.WithinC():
+			// Complete transactions have waited long enough for a batch to
+			// fill (#2666). Their rows become visible now; the position is
+			// saved at the checkpoint, as after a full batch.
+			if err := w.CommitComplete(); err != nil {
 				return err
 			}
 
