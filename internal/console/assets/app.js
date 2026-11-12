@@ -8980,7 +8980,7 @@ function backupDaemonEditRow(row, locked) {
   if (locked) input.disabled = true;
   wrap.append(el("div", { class: "bks-erow-in" }, input, locked ? null : save, locked ? null : revert));
   if (row.key === "baseline_retain") {
-    wrap.append(el("p", { class: "form-hint", text: "The old way to bound the snapshots on this machine. Each server's count (Keep by count) does that now. Days or hours: 7d, 36h. It deletes only where snapshots also go to S3, once S3 has each one. On a server with a count, a snapshot goes only when it is past the count and older than this." }));
+    wrap.append(el("p", { class: "form-hint", text: "The old way: each server's count (Keep by count) bounds this machine now. Days or hours: 7d, 36h. Deletes only where snapshots also go to S3, once S3 has each one. With a count, only when past the count and older than this." }));
   }
   // The one row whose name cannot say what it holds (#1938): full reads
   // and .sql builds write here, and it has to fit the largest of them.
