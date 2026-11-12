@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -329,6 +331,17 @@ func (s *verifySupervisor) Explain(serverID, schema, table string) (*console.Ver
 			return
 		}
 		defer release()
+		// Explain reads the two snapshots the last check compared for this
+		// table, which can be past the count: the cleanup keeps those two
+		// while it runs (#2678). If one was removed before the click, the
+		// read fails and the check has to run again.
+		for _, p := range []string{pair.PrevPath, pair.NewPath} {
+			if p == "" || strings.HasPrefix(p, "s3://") {
+				continue
+			}
+			snap := filepath.Dir(filepath.Dir(p))
+			defer baseline.PinSnapshot(filepath.Dir(snap), filepath.Base(snap), "the Explain of a check", 0)()
+		}
 		res, err := run(laneCtx(ctx, laneCheck), indexDSN, noArchive, schema, table, pair)
 		s.finishExplain(key, job, res, err)
 	}()
@@ -523,13 +536,28 @@ func (s *verifySupervisor) run(req console.VerifyRequest, baselineSrc string) {
 	s.finish(req.ServerID, runErr)
 }
 
+// findBaselinePair is verify.FindBaselinePairWith, replaced in tests.
+var findBaselinePair = verify.FindBaselinePairWith
+
 func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baselineSrc string, indexDB *sql.DB, resolver *metadata.Resolver, dbName, flavor string) error {
 	ctx := s.ctx
+	// A check compares, table by table, two snapshots that can be far past
+	// the count, for as long as the run lasts: the cleanup of the folder
+	// stands still until it ends (#2678).
+	end := baseline.BeginRead(baselineSrc, "a check of the snapshots")
+	defer func() {
+		end()
+		// The folder was held still for the whole check and is over its
+		// count now: applied here, not at the next snapshot.
+		if fn := loadPruneAfterPublish(); fn != nil && baselineSrc != "" && !strings.HasPrefix(baselineSrc, "s3://") {
+			fn(baselineSrc)
+		}
+	}()
 	// The folder on this machine is the one listed; a snapshot a table's pair
 	// needs and the folder no longer keeps (deleted by age) is looked for in
 	// the server's S3 destination. Nothing is left on disk: see
 	// verify.FindBaselinePairWith.
-	pairs, prevOnly, err := verify.FindBaselinePairWith(ctx, baselineSrc, req.BaselineS3)
+	pairs, prevOnly, err := findBaselinePair(ctx, baselineSrc, req.BaselineS3)
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		// #1639: a folder the walk could not read sits at or after the second
 		// newest snapshot, so no pair can be trusted (an older one is each

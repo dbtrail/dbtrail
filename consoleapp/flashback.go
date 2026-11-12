@@ -448,6 +448,9 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		// `_snapshot` matches the console's Time-travel tab.
 		BaselineDir: tgt.BaselineDir,
 		BaselineS3:  tgt.BaselineS3,
+		// The folder, then the server's S3 destination (#2678).
+		FindBaseline:   tgt.FindBaseline,
+		BaselineBucket: tgt.BaselineBucket,
 	}
 
 	h := shim.NewHandlerWithConfig(tgt.IndexDB, shimCfg, logger)

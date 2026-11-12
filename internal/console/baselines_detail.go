@@ -552,10 +552,155 @@ func (s *Server) snapshotViewsRelative(ctx context.Context, ss *snapshotSource, 
 // save the truncated archive as a success (the console's own fetch+blob
 // rejects on a cut body either way), and the operator would learn it is
 // garbage at extraction time, plausibly mid-incident.
+// downloadRule is the rule the cleanup prunes the selected server's folder
+// by: its count and the age, both 0 where this process prunes nothing. A
+// var for the tests.
+var downloadRule = func(s *Server, r *http.Request) (keep int, retain time.Duration) {
+	if !s.localPruneLoop {
+		return 0, 0
+	}
+	id := s.selectedServerID(r)
+	if lr := s.localRetentionOf(id); lr != nil {
+		keep = lr.KeepNewest
+	}
+	retain = time.Duration(s.pruneRetainMinutes()) * time.Minute
+	inRegistry, serverS3 := false, ""
+	if s.cm.reg != nil {
+		if e, ok := s.cm.reg.Get(id); ok {
+			inRegistry, serverS3 = true, e.BaselineS3
+		}
+	}
+	return downloadRuleFor(keep, retain, inRegistry, serverS3, s.cm.defaultBaselineS3)
+}
+
+// downloadRuleFor is the rule for one server. With a count, the count and
+// the age. Without one, the age alone prunes only a folder whose snapshots
+// go to S3: a server of the registry with a destination of its own, or the
+// daemon's own server (not in the registry: its folder is --baseline-dir),
+// pruned by age when the daemon has a bucket (--baseline-s3). A folder with
+// neither a count nor a destination keeps every snapshot: no rule.
+func downloadRuleFor(keep int, retain time.Duration, inRegistry bool, serverS3, bootS3 string) (int, time.Duration) {
+	if keep > 0 {
+		return keep, retain
+	}
+	dest := bootS3
+	if inRegistry {
+		dest = serverS3
+	}
+	if strings.TrimSpace(dest) == "" {
+		return 0, 0
+	}
+	return 0, retain
+}
+
+// downloadCeilingPerCap is how many different snapshots the downloads of one
+// server may pin in all, as a multiple of the cap on old ones: twice. The
+// cap (the server's count N, or 3 where the folder is pruned by age alone)
+// bounds the snapshots that are past what the cleanup keeps; a download of
+// one it keeps anyway is past the count a few minutes later, so those are
+// bounded too: N more, the number of snapshots the count keeps at any
+// moment. In all, downloads never pin, and so never hold back, more than
+// 2 x N snapshots, each for no longer than its own time limit
+// (downloadPinLimit).
+const downloadCeilingPerCap = 2
+
+// downloadCap is how many snapshots past what the cleanup keeps may be held
+// for downloads at once: the server's count, or the default count where the
+// folder is pruned by age alone.
+func downloadCap(keep int) int {
+	if keep > 0 {
+		return keep
+	}
+	return DefaultLocalKeepNewest
+}
+
+// pinForDownload pins the snapshot a download streams. keep is the count
+// the cleanup prunes this server's folder to and retain the age it prunes
+// by, both 0 where no cleanup removes anything from it (a `serve` console, a
+// server that keeps every snapshot): there a pin holds nothing back and no
+// download is refused. Elsewhere the cap is worked out on what the cleanup
+// keeps NOW (baseline.PinDownload), so a download that started on the
+// newest snapshot counts once that snapshot is past the count.
+func pinForDownload(root, name string, keep int, retain, limit time.Duration) (release func(), ok bool) {
+	if keep <= 0 && retain <= 0 {
+		return baseline.PinSnapshot(root, name, "a snapshot download", limit), true
+	}
+	kept, err := baseline.KeptNow(root, keep, retain)
+	if err != nil {
+		// The folder cannot be listed: nothing is known to be kept, so
+		// every pin counts toward the cap.
+		kept = nil
+	}
+	max := downloadCap(keep)
+	return baseline.PinDownload(root, name, limit, kept, max, max*downloadCeilingPerCap)
+}
+
+// downloadsBusyMessage is the refusal of a download past the cap. It
+// states both limits, so it is true whichever of the two refused.
+func downloadsBusyMessage(max, ceiling int) string {
+	return fmt.Sprintf("Downloads of this server's snapshots are at their limit: they may hold %d snapshots at once, "+
+		"and %d of those that the cleanup would have removed. Try again shortly, when a download ends.", ceiling, max)
+}
+
+// downloadStallTimeout is how long one write of the archive may wait for the
+// client before the download is dropped. A write hands the connection at
+// most a few tens of kilobytes (gzip's output buffer), so a client that has
+// not taken that much in a minute is not reading. A var for the tests.
+var downloadStallTimeout = time.Minute
+
+// downloadMinBytesPerSecond sizes the pin of a download: the snapshot is
+// kept for the time its bytes take at this rate, plus one stall timeout.
+// 1 MiB/s is a tenth of a 100 Mbit link: a 10 GiB snapshot is kept for
+// under three hours, a 100 MiB one for under three minutes. A client slower
+// than that keeps its connection, and loses the protection.
+const downloadMinBytesPerSecond = 1 << 20
+
+func downloadPinLimit(totalBytes int64) time.Duration {
+	return downloadStallTimeout + time.Duration(totalBytes/downloadMinBytesPerSecond)*time.Second
+}
+
+// stallWriter gives every write of a streamed response its own deadline.
+type stallWriter struct {
+	w  http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func (s *stallWriter) Write(b []byte) (int, error) {
+	// Not supported by the writer (a test recorder): no deadline, as before.
+	_ = s.rc.SetWriteDeadline(time.Now().Add(downloadStallTimeout))
+	return s.w.Write(b)
+}
+
+// done clears the deadline, so it does not outlive this response on a
+// connection that is used again.
+func (s *stallWriter) done() { _ = s.rc.SetWriteDeadline(time.Time{}) }
+
 func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) {
 	ss, dirName, files := s.resolveSnapshotRequest(w, r, "baseline-download")
 	if files == nil {
 		return
+	}
+	if ss.localRoot != "" {
+		// The files are opened one by one while the archive streams, so the
+		// cleanup keeps THIS snapshot while it does, and goes on removing
+		// the others past the count (#2678). For a bounded time, sized by
+		// what is streamed (downloadPinLimit): how long the client takes is
+		// the client's choice, and it must not decide how long a snapshot
+		// stays on the disk. Past it the stream goes on unprotected; if the
+		// cleanup then removes the snapshot, the next file fails to open and
+		// the connection is cut, as for any file unreadable mid-stream.
+		var total int64
+		for _, f := range files {
+			total += f.Size
+		}
+		keep, retain := downloadRule(s, r)
+		release, ok := pinForDownload(ss.localRoot, dirName, keep, retain, downloadPinLimit(total))
+		if !ok {
+			w.Header().Set("Retry-After", "60")
+			writeJSONError(w, http.StatusTooManyRequests, downloadsBusyMessage(downloadCap(keep), downloadCap(keep)*downloadCeilingPerCap))
+			return
+		}
+		defer release()
 	}
 	if snapshotIncomplete(files) {
 		writeJSONError(w, http.StatusConflict,
@@ -614,7 +759,14 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 		panic(http.ErrAbortHandler)
 	}
 
-	gz := gzip.NewWriter(w)
+	// A client that stops reading is dropped (#2678): the server has no
+	// write timeout, on purpose, so without this a connection opened and
+	// never read holds the handler, and the snapshot it pins, for as long
+	// as the client likes. The deadline moves forward with every write that
+	// goes through, so a slow client that keeps reading is never cut.
+	stall := &stallWriter{w: w, rc: http.NewResponseController(w)}
+	defer stall.done()
+	gz := gzip.NewWriter(stall)
 	tw := tar.NewWriter(gz)
 	for _, f := range files {
 		// The stored views file never rides along (#1583): its paths name

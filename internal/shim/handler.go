@@ -25,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/stmtclock"
 )
 
@@ -403,6 +404,17 @@ type Config struct {
 	// _flashback).
 	BaselineDir string
 	BaselineS3  string
+	// FindBaseline, when set, is how _snapshot finds the snapshot of a table
+	// at or before a moment, in place of reconstruct.FindBaseline over the
+	// one location above (#2678). The console sets it for a server with a
+	// local folder AND an S3 destination: the folder first, the bucket when
+	// the folder holds none that old, the order its Time-travel tab uses.
+	// The path it returns may be local or s3://; every read below takes
+	// either. A location above must still be set for _snapshot to be on.
+	FindBaseline func(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error)
+	// BaselineBucket says the lookup above also covers an S3 destination,
+	// for the refusal's wording only.
+	BaselineBucket bool
 	// QueryTimeout bounds each time-travel query end-to-end — planner,
 	// index fetch, archive/DuckDB fetch, and (for full-table queries)
 	// the wait for a FullTableGate slot (#823). Zero disables the

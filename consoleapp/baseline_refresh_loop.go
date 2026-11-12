@@ -155,8 +155,18 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 
 	slog.Info("baseline refresh: starting", "server", req.ServerName, "id", req.ServerID)
 	s.postRefresh.Add(1)
+	// The merge that follows the update reads the snapshot BEFORE the newest,
+	// which a count of 1 does not keep. Registered here, before the
+	// goroutine and so before the publish, the upload and the compaction:
+	// registered only inside the merge, an hourly cleanup falling in that
+	// gap removed that snapshot, and the merge then wrote each table in
+	// full instead of linking to it (#2678).
+	endRead := baseline.BeginRead(req.BaselineDir, "an update and the merge of its changes")
 	go func() {
 		defer s.postRefresh.Done()
+		// Runs before Done (deferred later), after everything below.
+		defer s.pruneAfterPublish(req.BaselineDir)
+		defer endRead()
 		// Once per server and process, before the fold: a daemon stopped
 		// between a refresh and the pass that follows it left the newest
 		// snapshot with no resolved pairs, and this refresh would hold

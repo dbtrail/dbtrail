@@ -156,6 +156,10 @@ func pgResolveError(err error) *pgErr {
 			return &pgErr{"22023", fmt.Sprintf(
 				"resolve %s: %s — the AS OF instant is outside the history this index retains (rotated and not archived)",
 				re.QType, re.Err)}
+		case shim.ResolveNoSnapshot:
+			// invalid_parameter_value, like a coverage gap: the instant asked
+			// for is one this server cannot answer for.
+			return &pgErr{"22023", re.Error()}
 		case shim.ResolveTimeout:
 			return &pgErr{"57014", fmt.Sprintf(
 				"resolve %s: query exceeded --query-timeout and was aborted; narrow the AS OF range, filter by PK, or raise --query-timeout",

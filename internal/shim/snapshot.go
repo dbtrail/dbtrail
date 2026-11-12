@@ -179,6 +179,40 @@ func (h *Handler) runSnapshot(q TimeTravelQuery) (*mysql.Result, error) {
 // the S3 prefix over the local directory when both are set. Empty means
 // no baseline source is configured — _snapshot then degrades to the
 // binlog-only _flashback behaviour.
+// findBaseline is the snapshot of schema.table at or before at: through the
+// configured lookup when there is one (Config.FindBaseline), else in the one
+// location configured.
+func (h *Handler) findBaseline(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+	if h.cfg.FindBaseline != nil {
+		return h.cfg.FindBaseline(ctx, schema, table, at)
+	}
+	return reconstruct.FindBaseline(ctx, h.baselineSource(), schema, table, at)
+}
+
+// noBaselineWhy says why no snapshot answers for schema.table at at, in the
+// words of what is true (#2678): no snapshot of the table exists yet, or the
+// moment is older than the oldest one kept. It asks once more, for now, to
+// tell the two apart; a lookup that fails there is taken for the second.
+func (h *Handler) noBaselineWhy(ctx context.Context, schema, table string, at time.Time) string {
+	head := fmt.Sprintf("no baseline for %s.%s at or before %s; ", schema, table, at.UTC().Format(time.RFC3339))
+	if _, _, _, err := h.findBaseline(ctx, schema, table, time.Now().UTC()); errors.Is(err, reconstruct.ErrNoBaseline) {
+		return head + "no snapshot holds this table yet (the first one is not finished, or the table was created after the newest one), " +
+			"and the next snapshot will include it. Until then use _flashback for the recorded changes only"
+	}
+	if h.cfg.BaselineBucket {
+		// A folder and a bucket (the console's port).
+		return head + "that moment is older than the oldest snapshot of this table, on this machine and in the S3 destination. " +
+			"Ask for a later moment, or use _flashback for the recorded changes only"
+	}
+	if h.cfg.BaselineS3 != "" {
+		// A bucket alone: there is no folder on this machine to speak of.
+		return head + "that moment is older than the oldest snapshot of this table in the S3 destination. " +
+			"Ask for a later moment, or use _flashback for the recorded changes only"
+	}
+	return head + "that moment is older than the oldest snapshot of this table kept. " +
+		"Ask for a later moment, keep more snapshots or add an S3 destination, or use _flashback for the recorded changes only"
+}
+
 func (h *Handler) baselineSource() string {
 	if h.cfg.BaselineS3 != "" {
 		return h.cfg.BaselineS3
@@ -319,7 +353,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// Shim handling of the stale-fallback warning (#466) is intentionally
 	// minimal: FindBaseline already logs it server-side and an in-band MySQL
 	// signal needs design (deferred by #466), so we discard it here.
-	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, src, q.Schema, q.Table, q.AsOf)
+	baselinePath, snapshotTime, _, err := h.findBaseline(ctx, q.Schema, q.Table, q.AsOf)
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			// Source configured but no baseline exists for this table at-or-before
@@ -330,11 +364,11 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 			// configured a baseline for full-table completeness, fail loud with an
 			// actionable wire error instead (#822) — mirroring the strict
 			// AllowGaps / 1104 row-cap contract.
+			// The same words as the single-row refusal (noBaselineWhy says
+			// which case it is), and the one fact this shape adds.
 			return nil, mysql.NewError(mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE, fmt.Sprintf(
-				"resolve %s: no baseline for %s.%s at or before %s; _snapshot cannot return a complete table "+
-					"(never-touched rows would be omitted) — take a baseline (`bintrail baseline`), "+
-					"or use _flashback for a binlog-only view",
-				q.Type, q.Schema, q.Table, q.AsOf.UTC().Format(time.RFC3339)))
+				"resolve %s: %s. A full-table _snapshot answered from the recorded changes alone would leave out every row that no change touched",
+				q.Type, h.noBaselineWhy(ctx, q.Schema, q.Table, q.AsOf)))
 		}
 		// A real baseline-source failure is a server-side fault, same as the
 		// single-row path: plain error → ER_UNKNOWN_ERROR (1105).
