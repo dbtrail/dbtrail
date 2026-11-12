@@ -316,7 +316,7 @@ func TestInstaller_leavesTheDbtrailCommand(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(r.dir, "dbtrail.new")); err == nil {
 		t.Error("the download's temporary file was left behind")
 	}
-	for _, s := range []string{"/dbtrail server add -h <host> -u dbtrail -p", "/dbtrail snapshot run <name>", "turns the MySQL port on", "mysql -h 127.0.0.1 -P 3309 -u <name> -p", "./dbtrail user set-password"} {
+	for _, s := range []string{"/dbtrail server add -h <host> -u dbtrail -p", "/dbtrail snapshot run <name>", "turns the MySQL port on", "/dbtrail port status", "./dbtrail user set-password"} {
 		if !strings.Contains(r.out, s) {
 			t.Errorf("the end text lacks %q:\n%s", s, r.out)
 		}
