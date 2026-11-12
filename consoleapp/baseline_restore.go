@@ -81,7 +81,7 @@ func (s *baselineSupervisor) runRestore(req console.BaselineRestoreRequest) {
 	tables, refused, reuse, err := s.executeRestore(req)
 	if err == nil {
 		if merr := baseline.MarkRestored(req.BaselineDir, result); merr != nil {
-			slog.Warn("restore to a moment: the snapshot was published, but it could not be marked as a restore's result, so the cleanup may remove it as an old snapshot",
+			slog.Warn("restore to a moment: the snapshot was published, but its mark could not be rewritten as finished; the mark written when the restore started keeps it for a day from then, and if that one is missing too the cleanup may remove it as an old snapshot",
 				"server", req.ServerName, "id", req.ServerID, "error", merr)
 		}
 	} else {

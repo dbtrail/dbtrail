@@ -241,7 +241,7 @@ func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until
 			// moment that finished since wrote a fresh mark into this very
 			// file, and removing it would hand that new result to the count.
 			if expired() {
-				if !missing && !s3Cut.IsZero() && ts.Before(s3Cut) {
+				if !missing && !(pending && !hasSuccessMarker(filepath.Join(root, n))) && !s3Cut.IsZero() && ts.Before(s3Cut) {
 					if herr := MarkUploadHeld(root, n); herr != nil {
 						slog.Warn("baseline prune: a restore's result past its day could not be handed to the count; it stays until the bucket is asked about it",
 							"dir", root, "snapshot", n, "error", herr)
@@ -252,10 +252,13 @@ func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until
 				continue
 			}
 		}
-		if pending && (missing || !SnapshotComplete(filepath.Join(root, n))) {
+		if pending && (missing || !hasSuccessMarker(filepath.Join(root, n))) {
 			// A restore still running, or one that died before its result
 			// was complete: its mark stays until its day ends, and it takes
-			// nothing from the previous restore's result meanwhile.
+			// nothing from the previous restore's result meanwhile. Only
+			// _SUCCESS counts here, not SnapshotComplete: a folder the fold
+			// has just created carries no marker yet, and SnapshotComplete
+			// reads that as a complete snapshot of an earlier build.
 			continue
 		}
 		at, _, _ := restoredAt(root, n, now, dryRun)

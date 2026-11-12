@@ -70,7 +70,7 @@ func TestRestoring_aPendingMarkWithNoFolderStays(t *testing.T) {
 // result keeps its mark and its place until the new one is complete, so a
 // restore that fails midway (or dies) leaves it protected.
 func TestRestoring_thePreviousResultKeepsItsMarkWhileANewOneRuns(t *testing.T) {
-	for _, folder := range []string{"none", "incomplete"} {
+	for _, folder := range []string{"none", "incomplete", "just created"} {
 		t.Run(folder, func(t *testing.T) {
 			root := t.TempDir()
 			s := minutes(t, root, 15, 10, 5)
@@ -83,8 +83,15 @@ func TestRestoring_thePreviousResultKeepsItsMarkWhileANewOneRuns(t *testing.T) {
 			if err := MarkRestoring(root, second); err != nil {
 				t.Fatal(err)
 			}
-			if folder == "incomplete" {
+			switch folder {
+			case "incomplete":
 				makeSnapshot(t, root, second, false, "shop/orders")
+			case "just created":
+				// The fold has made the folder and not yet written
+				// _INCOMPLETE into it: no marker at all.
+				if err := os.MkdirAll(filepath.Join(root, second), 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			res := keepNewest(t, root, 1)
 			if slices.Contains(res.Pruned, first) {
@@ -97,7 +104,7 @@ func TestRestoring_thePreviousResultKeepsItsMarkWhileANewOneRuns(t *testing.T) {
 				t.Fatalf("Restored = %q, want the previous result %q", name, first)
 			}
 			want := []string{s[2], first}
-			if folder == "incomplete" {
+			if folder != "none" {
 				want = append(want, second)
 			}
 			wantOnDisk(t, root, want...)

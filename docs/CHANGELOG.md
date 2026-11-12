@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **A restore's result is marked before it is written** (#2691). The mark that keeps a restore's result for 24 hours was written after the snapshot, so a daemon that stopped between the two left the result unmarked and the next cleanup removed it by the count. The mark is now written when the restore starts. Until the snapshot is complete it keeps nothing and the previous restore's result keeps its own mark; a restore that writes nothing removes it.
+- **A restore's result is marked before it is written** (#2691). The mark that keeps a restore's result for 24 hours was written after the snapshot, so a daemon that stopped between the two left the result unmarked and the next cleanup removed it by the count. The mark is now written when the restore starts. Until the snapshot is complete it keeps nothing and the previous restore's result keeps its own mark; a restore that ends without writing its snapshot removes it.
 - **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in
