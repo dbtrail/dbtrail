@@ -113,8 +113,18 @@ func TestRouterPort_applicationLogin(t *testing.T) {
 		}
 	}
 
-	// A new port password leaves the logins alone.
+	// A new port password leaves the logins alone. Replacing it closes the
+	// port for a moment to put out everyone on it, and the new password is
+	// taken before that, so a login can succeed on the old listener and the
+	// next one land while the port is closed. A connection held across the
+	// change shows the close happened; only then is the port waited for.
+	held, err := client.Connect(addr, "prod", "port-pw", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
 	f.savePortFile(t, true, "port-pw-2")
+	waitUntil(t, "the connections on the port to be closed", func() bool { return held.Ping() != nil })
 	waitUntil(t, "the new port password", func() bool { return loginAsQuiet(addr, "prod", "port-pw-2") == 0 })
 	if got := loginAs(t, addr, "app1", "pw-one"); got != 0 {
 		t.Fatalf("a new port password closed a login: %d", got)
