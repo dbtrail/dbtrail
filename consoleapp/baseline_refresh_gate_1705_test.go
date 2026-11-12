@@ -55,7 +55,7 @@ func TestTriggerRefresh_aStatementTheMarksCountIsInsideTheFoldWindow(t *testing.
 	mark := indexMark{events: 100, schemaChanges: 8}
 	prevMark := readIndexMark
 	t.Cleanup(func() { readIndexMark = prevMark })
-	readIndexMark = func(context.Context, string) (indexMark, bool) {
+	readIndexMark = func(context.Context, string) (indexMark, error) {
 		// The pauses keep the three instants apart on a coarse clock: the
 		// claim, the statement, and the return of this read.
 		time.Sleep(3 * time.Millisecond)
@@ -63,7 +63,7 @@ func TestTriggerRefresh_aStatementTheMarksCountIsInsideTheFoldWindow(t *testing.
 		truncatedAt = time.Now().UTC()
 		mu.Unlock()
 		time.Sleep(3 * time.Millisecond)
-		return mark, true
+		return mark, nil
 	}
 	prevFold := foldTables
 	t.Cleanup(func() { foldTables = prevFold })
@@ -238,10 +238,10 @@ func TestRefreshCanSkip_aHungCoverageReadBlocksNoOtherJob(t *testing.T) {
 	var once, freed sync.Once
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
-	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) {
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, error) {
 		once.Do(func() { close(reading) })
 		<-release
-		return true, true
+		return true, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

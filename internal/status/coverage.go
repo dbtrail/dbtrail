@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -168,18 +169,62 @@ func (s *StreamStateInfo) GapOnRecord() bool {
 // (OldestDeltaFromDB) only when the stream holds an acknowledged loss: no
 // other verdict depends on it, and CollectStatus runs on a timer.
 //
-// A floor that cannot be read is logged and left unknown, which keeps the
-// loss on record. Safe on a nil stream.
+// A floor that cannot be read is left unknown, which keeps the loss on record,
+// and is said once per condition (floorWarnings). Safe on a nil stream.
 func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *StreamStateInfo) {
 	if !stream.GapAcknowledged() {
 		return
 	}
 	floor, err := OldestDeltaFromDB(ctx, db, dbName)
 	if err != nil {
-		slog.Warn("could not determine the delta-coverage floor; the acknowledged capture loss stays on record", "db", dbName, "error", err)
+		floorWarnings.failed(ctx, "gap-window:"+dbName,
+			"could not determine the delta-coverage floor; the acknowledged capture loss stays on record", dbName, err)
 		return
 	}
+	floorWarnings.answered("gap-window:"+dbName,
+		"the delta-coverage floor can be read again; the acknowledged capture loss is graded against it", dbName)
 	stream.Floor = floor
+}
+
+// floorWarnings says a floor read failure at Warn once per condition: on the
+// first failure for an index, and again only after a read of it has worked
+// (#2669). The readers run on timers and on every page load, so a Warn per
+// read turned one outage into a line per request. A read whose own request was
+// cancelled (a browser that navigated away, a daemon stopping) is not a
+// condition of the index at all and is logged at Debug only, without touching
+// the state. Keyed by the index's database name, which is all these readers
+// are given: two index servers using the same name share one condition.
+var floorWarnings = &onceWarner{failing: map[string]bool{}}
+
+type onceWarner struct {
+	mu      sync.Mutex
+	failing map[string]bool
+}
+
+func (w *onceWarner) failed(ctx context.Context, key, msg, dbName string, err error) {
+	if ctx.Err() != nil {
+		slog.Debug(msg, "db", dbName, "error", err, "cancelled", ctx.Err())
+		return
+	}
+	w.mu.Lock()
+	first := !w.failing[key]
+	w.failing[key] = true
+	w.mu.Unlock()
+	if first {
+		slog.Warn(msg, "db", dbName, "error", err)
+		return
+	}
+	slog.Debug(msg, "db", dbName, "error", err)
+}
+
+func (w *onceWarner) answered(key, msg, dbName string) {
+	w.mu.Lock()
+	was := w.failing[key]
+	delete(w.failing, key)
+	w.mu.Unlock()
+	if was {
+		slog.Info(msg, "db", dbName)
+	}
 }
 
 // CollectCoverageSummary computes the summary against one index. The floor
@@ -190,8 +235,11 @@ func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *Strea
 func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now time.Time) (*CoverageSummary, error) {
 	sum := &CoverageSummary{}
 	if floor, err := OldestDeltaFromDB(ctx, db, dbName); err != nil {
-		slog.Warn("could not determine the delta-coverage floor; coverage window start is unknown", "db", dbName, "error", err)
+		floorWarnings.failed(ctx, "coverage:"+dbName,
+			"could not determine the delta-coverage floor; coverage window start is unknown", dbName, err)
 	} else {
+		floorWarnings.answered("coverage:"+dbName,
+			"the delta-coverage floor can be read again; the coverage window has a start", dbName)
 		sum.Floor = floor
 	}
 	latest, err := NewestIndexedEvent(ctx, db, dbName)
