@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -277,9 +278,9 @@ func TestPinForDownload(t *testing.T) {
 		t.Fatalf("the cap: %d with no count, %d with 5", downloadCap(0), downloadCap(5))
 	}
 	for _, n := range []int{1, 3} {
-		t.Logf("the refusal with a cap of %d: %s", n, downloadsBusyMessage(n))
+		t.Logf("the refusal with a count of %d: %s", n, downloadsBusyMessage(n, n*downloadCeilingPerCap))
 	}
-	if got := downloadsBusyMessage(1); !strings.Contains(got, "holding 1 or more older snapshots") || !strings.Contains(got, "Try again shortly") {
+	if got := downloadsBusyMessage(3, 6); !strings.Contains(got, "may hold 6 snapshots at once, and 3 of those that the cleanup would have removed") || !strings.Contains(got, "Try again shortly") {
 		t.Fatalf("the refusal: %s", got)
 	}
 }
@@ -301,4 +302,67 @@ func TestBaselineDownload_overTheCapIs429(t *testing.T) {
 		t.Fatalf("a download over the cap: code %d, Retry-After %q; want 429 and 60", w.Code, w.Header().Get("Retry-After"))
 	}
 	t.Logf("the refusal as the client reads it: %s", w.Body.String())
+}
+
+// The port's lookup is wired: a server with a folder and an S3 destination
+// gets the folder-then-bucket lookup on its port target; one with a folder
+// alone gets none, and the shim reads the folder itself.
+func TestResolveFlashback_handsThePortTheBucketLookup(t *testing.T) {
+	clearStores(t)
+	reg, err := LoadRegistry(filepath.Join(t.TempDir(), "console-servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Add(ServerEntry{Name: "both", DSN: "u:p@tcp(127.0.0.1:1)/idx?timeout=2s", BaselineDir: t.TempDir(), BaselineS3: "s3://bkt/both/"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Add(ServerEntry{Name: "folder", DSN: "u:p@tcp(127.0.0.1:1)/idx2?timeout=2s", BaselineDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, LazyIndex: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.cm.CloseAll)
+	both, err := srv.ResolveFlashback(context.Background(), "both")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if both.FindBaseline == nil || !both.BaselineBucket || both.BaselineDir == "" {
+		t.Fatalf("a server with a folder and S3: lookup %v, bucket %v, dir %q; the port would read the folder alone", both.FindBaseline != nil, both.BaselineBucket, both.BaselineDir)
+	}
+	folder, err := srv.ResolveFlashback(context.Background(), "folder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if folder.FindBaseline != nil || folder.BaselineBucket {
+		t.Fatal("a server with a folder alone got a bucket lookup")
+	}
+}
+
+// The page says the cleanup waits only for a job that has run for more than
+// ten minutes: a cleanup that falls inside a routine update is not a wait an
+// operator has to wonder about.
+func TestCleanupWaitingOf_onlyAWaitWorthSaying(t *testing.T) {
+	write := func(dir string, since time.Duration) {
+		now := time.Now().UTC()
+		rec := baseline.CleanupWaiting{Since: now.Add(-since), At: now, What: "an update and the merge of its changes", ValidUntil: now.Add(2 * time.Hour)}
+		b, _ := json.Marshal(rec)
+		if err := os.WriteFile(filepath.Join(dir, baseline.CleanupWaitingFile), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := t.TempDir()
+	if cleanupWaitingOf(dir) != nil {
+		t.Fatal("a folder with no record says it waits")
+	}
+	write(dir, 3*time.Minute)
+	if got := cleanupWaitingOf(dir); got != nil {
+		t.Fatalf("a job three minutes old is said to hold the cleanup: %+v", got)
+	}
+	write(dir, 25*time.Minute)
+	got := cleanupWaitingOf(dir)
+	if got == nil || got.What != "an update and the merge of its changes" || got.Since == "" {
+		t.Fatalf("a job 25 minutes old is not said: %+v", got)
+	}
 }

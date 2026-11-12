@@ -581,11 +581,11 @@ var downloadRule = func(s *Server, r *http.Request) (keep int, retain time.Durat
 // server may pin in all, as a multiple of the cap on old ones: twice. The
 // cap (the server's count N, or 3 where the folder is pruned by age alone)
 // bounds the snapshots that are past what the cleanup keeps; a download of
-// one it keeps anyway is let in beyond that, and it too is past the count a
-// few minutes later, so those are bounded as well: N more, the number of
-// snapshots the count keeps at any moment. In all, downloads never hold
-// back more than 2 x N snapshots, each for no longer than its own time
-// limit (downloadPinLimit).
+// one it keeps anyway is past the count a few minutes later, so those are
+// bounded too: N more, the number of snapshots the count keeps at any
+// moment. In all, downloads never pin, and so never hold back, more than
+// 2 x N snapshots, each for no longer than its own time limit
+// (downloadPinLimit).
 const downloadCeilingPerCap = 2
 
 // downloadCap is how many snapshots past what the cleanup keeps may be held
@@ -619,10 +619,11 @@ func pinForDownload(root, name string, keep int, retain, limit time.Duration) (r
 	return baseline.PinDownload(root, name, limit, kept, max, max*downloadCeilingPerCap)
 }
 
-// downloadsBusyMessage is the refusal of a download past the cap.
-func downloadsBusyMessage(max int) string {
-	return fmt.Sprintf("Downloads are already holding %d or more older snapshots of this server that the cleanup would have removed, "+
-		"which is the most held for downloads at once. Try again shortly, when a download ends.", max)
+// downloadsBusyMessage is the refusal of a download past the cap. It
+// states both limits, so it is true whichever of the two refused.
+func downloadsBusyMessage(max, ceiling int) string {
+	return fmt.Sprintf("Downloads of this server's snapshots are at their limit: they may hold %d snapshots at once, "+
+		"and %d of those that the cleanup would have removed. Try again shortly, when a download ends.", ceiling, max)
 }
 
 // downloadStallTimeout is how long one write of the archive may wait for the
@@ -680,7 +681,7 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 		release, ok := pinForDownload(ss.localRoot, dirName, keep, retain, downloadPinLimit(total))
 		if !ok {
 			w.Header().Set("Retry-After", "60")
-			writeJSONError(w, http.StatusTooManyRequests, downloadsBusyMessage(downloadCap(keep)))
+			writeJSONError(w, http.StatusTooManyRequests, downloadsBusyMessage(downloadCap(keep), downloadCap(keep)*downloadCeilingPerCap))
 			return
 		}
 		defer release()

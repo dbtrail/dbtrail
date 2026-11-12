@@ -989,3 +989,40 @@ func TestNoFloor_downloadsAreCappedInTheAgeModeToo(t *testing.T) {
 		defer r()
 	}
 }
+
+// The ceiling is a rule of its own: downloads never pin more than ceiling
+// different snapshots, whatever the cleanup keeps and however many are past
+// the count. Four pins on snapshots the cleanup keeps, none past the count,
+// a ceiling of 4: a fifth snapshot is refused; a second download of one of
+// the four is let in.
+func TestNoFloor_theDownloadCeilingHoldsWhateverIsKept(t *testing.T) {
+	root := t.TempDir()
+	kept := map[string]bool{}
+	var names []string
+	for i := range 6 {
+		n := snapName(time.Duration(i+1) * time.Minute)
+		names = append(names, n)
+		kept[n] = true
+	}
+	const max, ceiling = 2, 4
+	for i, n := range names[:5] {
+		release, ok := PinDownload(root, n, time.Hour, kept, max, ceiling)
+		defer release()
+		if ok != (i < ceiling) {
+			t.Fatalf("download %d of a kept snapshot: let in %v, want %v", i+1, ok, i < ceiling)
+		}
+	}
+	if got := len(Pinned(root)); got != ceiling {
+		t.Fatalf("%d snapshots pinned, want the ceiling %d", got, ceiling)
+	}
+	r, ok := PinDownload(root, names[0], time.Hour, kept, max, ceiling)
+	defer r()
+	if !ok {
+		t.Fatal("a second download of a snapshot already pinned was refused at the ceiling")
+	}
+	// Every one of them falls past the count: still 4 held, and no new one.
+	if _, ok := PinDownload(root, names[5], time.Hour, nil, max, ceiling); ok {
+		t.Fatal("a download was let in over the ceiling")
+	}
+	t.Logf("worst case with a count of %d: downloads hold %d snapshots past the count, never more", max, ceiling)
+}

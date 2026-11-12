@@ -227,14 +227,15 @@ const downloadReader = "a snapshot download"
 //
 //   - Another download of a snapshot a download already pins: let in. It
 //     keeps nothing more on the disk.
-//   - A snapshot past what the cleanup keeps: let in while fewer than max
-//     such snapshots are pinned by downloads.
-//   - A snapshot the cleanup keeps anyway: let in while fewer than max past
-//     ones are pinned; once that many are, only while the downloads pin
-//     fewer than ceiling different snapshots in all, since each of these
-//     will be past the count a few minutes on.
+//   - Any other snapshot: refused once the downloads pin ceiling different
+//     snapshots in all. A snapshot the cleanup keeps today is past the
+//     count a few minutes on, so every pin counts toward this.
+//   - A snapshot past what the cleanup keeps: also refused once max such
+//     snapshots are pinned by downloads.
 //
-// So the downloads of a folder never hold back more than ceiling snapshots.
+// So the downloads of a folder never pin more than ceiling snapshots, and
+// that is the most they can hold back from the cleanup, however many
+// requests are made and for however long.
 // The count and the insert are ONE step under the lock: requests arriving
 // together must not all pass the check before any of them is counted.
 func PinDownload(root, name string, limit time.Duration, kept map[string]bool, max, ceiling int) (release func(), ok bool) {
@@ -260,11 +261,12 @@ func PinDownload(root, name string, limit time.Duration, kept map[string]bool, m
 	}
 	switch {
 	case already:
-	case !kept[name]:
-		if past >= max {
-			return func() {}, false
-		}
-	case past >= max && total >= ceiling:
+		// Holds nothing more.
+	case total >= ceiling:
+		// A rule of its own, asked first and of every snapshot not already
+		// pinned: downloads never pin more than ceiling snapshots.
+		return func() {}, false
+	case !kept[name] && past >= max:
 		return func() {}, false
 	}
 	return insertPinLocked(key, name, downloadReader, limit), true
