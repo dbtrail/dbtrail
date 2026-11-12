@@ -134,7 +134,9 @@ to the bucket's region by itself.)
   another region): the first request S3 redirects drops the region bintrail
   had found, and the error says to retry; the bucket's region is looked up
   again the next time bintrail opens the bucket, once. The agent's payload
-  uploads keep the client they started with, so the agent needs a restart.
+  uploads keep the client they started with: until the agent restarts, each
+  payload batch fails its retries and is dropped (counted as lost in the
+  agent's heartbeat), so restart the agent.
 - **A region you pass yourself wins**: a `--region`/`--*-s3-region` flag is
   used as given.
 - **Not with a custom endpoint**: with `BINTRAIL_S3_ENDPOINT`,
