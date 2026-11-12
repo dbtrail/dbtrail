@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.129.0] - 2026-11-11
+
 - **The SQL port answers in fresh mode by default.**
   - **What changed.** A server with no choice saved now answers in fresh mode: each table's newest captured changes are laid over its snapshot, so an answer is about as far behind your MySQL as capture, usually seconds. Before, it answered from the snapshot alone (fast mode), as old as the last refresh, and fresh was opt-in.
   - **What it costs.** While at least one server is fresh the router sets aside a fifth of its memory for those changes, may run fewer statements at once, and looks for new changes every second while statements arrive.
