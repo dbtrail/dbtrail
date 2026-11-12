@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -193,7 +194,7 @@ func TestCountAfterPublish_withS3AsksOncePerCandidate(t *testing.T) {
 
 // restoreInto runs a restore to `at` on a supervisor whose fold writes the
 // snapshot and, when hold is given, waits on it first.
-func restoreInto(t *testing.T, id, dir string, at time.Time, hold chan struct{}, foldErr error) *baselineSupervisor {
+func restoreInto(t *testing.T, id, dir string, at time.Time, hold chan struct{}, foldErr error) (*baselineSupervisor, func()) {
 	t.Helper()
 	realList, realFold := snapshotAt, foldTables
 	t.Cleanup(func() { snapshotAt, foldTables = realList, realFold })
@@ -216,12 +217,39 @@ func restoreInto(t *testing.T, id, dir string, at time.Time, hold chan struct{},
 		}
 		return nil, nil, baseline.WriteSuccessMarker(snap)
 	}
+	// The restore's goroutine goes on after its status turns terminal: its
+	// last step is the prune after the publish, which still writes in dir.
+	// Wait for that step before the test ends, or t.TempDir's RemoveAll can
+	// race it ("directory not empty"). The prune is the goroutine's outermost
+	// defer, so once it has returned nothing of this restore touches dir.
+	prev := loadPruneAfterPublish()
+	t.Cleanup(func() { setPruneAfterPublish(prev) })
+	done := make(chan struct{}, 8)
+	setPruneAfterPublish(func(d string) {
+		defer func() {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}()
+		if prev != nil {
+			prev(d)
+		}
+	})
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	sup.history = openHistoryForTest(t)
 	if err := sup.TriggerRestore(console.BaselineRestoreRequest{ServerID: id, ServerName: "shop", IndexDSN: "d", BaselineDir: dir, At: at}); err != nil {
 		t.Fatal(err)
 	}
-	return sup
+	waitDone := sync.OnceFunc(func() {
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("the restore's prune after the publish never ran")
+		}
+	})
+	t.Cleanup(waitDone)
+	return sup, waitDone
 }
 
 // The defect, and the fix. A restore publishes a snapshot named for a past
@@ -234,8 +262,9 @@ func TestCountAfterPublish_aRestoreKeepsItsResult(t *testing.T) {
 	at := time.Now().UTC().Add(-7 * 24 * time.Hour).Truncate(time.Second)
 	result := reconstruct.SnapshotDirName(at)
 
-	sup := restoreInto(t, id, dir, at, nil, nil)
+	sup, waitDone := restoreInto(t, id, dir, at, nil, nil)
 	waitForTerminalState(t, func() console.BaselineStatus { return sup.RestoreStatus(id) })
+	waitDone() // its last step done, before a second restore wraps the hook again
 	got := waitSnapshots(t, dir, 3)
 	want := []string{result, old[2], old[3]}
 	slices.Sort(want)
@@ -270,7 +299,7 @@ func TestCountAfterPublish_aRestoreKeepsItsResult(t *testing.T) {
 	at2 := at.Add(-24 * time.Hour)
 	// The mark's time has one-second steps on some filesystems.
 	time.Sleep(1100 * time.Millisecond)
-	sup2 := restoreInto(t, id, dir, at2, nil, nil)
+	sup2, _ := restoreInto(t, id, dir, at2, nil, nil)
 	waitForTerminalState(t, func() console.BaselineStatus { return sup2.RestoreStatus(id) })
 	deadline := time.Now().Add(10 * time.Second)
 	for slices.Contains(snapshotsIn(t, dir), result) {
@@ -299,7 +328,7 @@ func TestCountAfterPublish_theCleanupWaitsForARestore(t *testing.T) {
 			if outcome == "fails" {
 				foldErr = os.ErrInvalid
 			}
-			sup := restoreInto(t, id, dir, at, hold, foldErr)
+			sup, _ := restoreInto(t, id, dir, at, hold, foldErr)
 			// Both cleanups, while the restore is on.
 			pruneFolderToCount(context.Background(), reg, "", "", "", dir, baseline.PruneLocal)
 			baselinePruneSweep(context.Background(), reg, "", "", "", baseline.PruneLocal)
@@ -331,13 +360,41 @@ func TestCountAfterPublish_theCleanupWaitsForARestore(t *testing.T) {
 func TestCountAfterPublish_theCleanupWaitsForASQLBuild(t *testing.T) {
 	at := time.Date(2026, 6, 10, 11, 0, 0, 0, time.UTC)
 	src := writeSQLExportBaseline(t, at.Add(-time.Hour))
-	sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
-	if err := sup.TriggerSQLExport(console.SQLExportRequest{ServerID: "srv1", ServerName: "wp",
-		IndexDSN: "i:p@tcp(127.0.0.1:1)/idx", BaselineSrc: src, At: at}); err != nil {
+	// An index that accepts the connection and never greets: the build waits
+	// in the handshake until the test lets go, so it is still running when
+	// it is looked at. A refused port made the build fail before the test
+	// could look, and the test then saw "failed" (a flake, 1 run in 50).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	// The build cannot write its outcome while this is held, so it is still
-	// running here whatever it did so far.
+	var connsMu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			connsMu.Lock()
+			conns = append(conns, c)
+			connsMu.Unlock()
+		}
+	}()
+	letGo := sync.OnceFunc(func() {
+		ln.Close()
+		connsMu.Lock()
+		for _, c := range conns {
+			c.Close()
+		}
+		connsMu.Unlock()
+	})
+	t.Cleanup(letGo)
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
+	if err := sup.TriggerSQLExport(console.SQLExportRequest{ServerID: "srv1", ServerName: "wp",
+		IndexDSN: "i:p@tcp(" + ln.Addr().String() + ")/idx", BaselineSrc: src, At: at}); err != nil {
+		t.Fatal(err)
+	}
 	sup.mu.Lock()
 	what := baseline.Reading(src)
 	state := sup.exports["srv1"].State
@@ -345,6 +402,7 @@ func TestCountAfterPublish_theCleanupWaitsForASQLBuild(t *testing.T) {
 	if state != "running" || !strings.Contains(what, ".sql build") {
 		t.Fatalf("while the build ran (state %q) the folder's reader was %q", state, what)
 	}
+	letGo() // the handshake fails now and the build ends
 	waitForTerminalState(t, func() console.BaselineStatus { return sup.SQLExportStatus("srv1") })
 	deadline := time.Now().Add(10 * time.Second)
 	for baseline.Reading(src) != "" {
