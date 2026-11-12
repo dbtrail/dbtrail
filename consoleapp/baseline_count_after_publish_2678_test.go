@@ -369,8 +369,16 @@ func TestCountAfterPublish_anUpdateHoldsTheFolderThroughItsMerge(t *testing.T) {
 	t.Cleanup(release)
 	foldTables = func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
 		<-hold
-		writeSnapshotFiles(t, filepath.Join(cfg.OutputDir, reconstruct.SnapshotDirName(cfg.At)), baseline.SuccessMarker)
-		return nil, nil, nil
+		// The same table the older snapshots hold, so none of them is its
+		// only copy.
+		snap := filepath.Join(cfg.OutputDir, reconstruct.SnapshotDirName(cfg.At))
+		if err := os.MkdirAll(filepath.Join(snap, "shop"), 0o700); err != nil {
+			return nil, nil, err
+		}
+		if err := os.WriteFile(filepath.Join(snap, "shop", "orders.parquet"), []byte("rows"), 0o600); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, baseline.WriteSuccessMarker(snap)
 	}
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	sup.history = openHistoryForTest(t)
