@@ -22,7 +22,7 @@ func TestNotInS3_rowCarriesNotAskedAndNextSend(t *testing.T) {
 	next := time.Date(2026, 11, 11, 4, 0, 0, 0, time.FixedZone("COT", -5*3600))
 	rec := baseline.NotInDestination{At: time.Date(2026, 11, 11, 3, 0, 0, 0, time.UTC), Count: 2,
 		Names: []string{"2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"}, Resending: true,
-		NotAsked: []string{"2026-11-10T03-05-00Z"}, NextSend: &next}
+		NotAsked: []string{"2026-11-10T03-05-00Z"}, NextSend: &next, ReadRefused: []string{"2026-11-10T03-05-00Z"}, WaitsForAnswer: true}
 	if err := baseline.RewriteNotInDestination(e.BaselineDir, rec); err != nil {
 		t.Fatal(err)
 	}
@@ -32,16 +32,17 @@ func TestNotInS3_rowCarriesNotAskedAndNextSend(t *testing.T) {
 	if row.NotInS3 == nil || !slices.Equal(row.NotInS3.NotAsked, rec.NotAsked) || row.NotInS3.NextSend != "2026-11-11T09:00:00Z" {
 		t.Fatalf("the row does not carry what S3 could not be asked about, or when the next send is: %s", raw)
 	}
-	if !strings.Contains(string(raw), `"not_asked":["2026-11-10T03-05-00Z"]`) || !strings.Contains(string(raw), `"next_send":"2026-11-11T09:00:00Z"`) {
+	if !strings.Contains(string(raw), `"not_asked":["2026-11-10T03-05-00Z"]`) || !strings.Contains(string(raw), `"next_send":"2026-11-11T09:00:00Z"`) ||
+		!strings.Contains(string(raw), `"read_refused":["2026-11-10T03-05-00Z"]`) || !strings.Contains(string(raw), `"waits_for_answer":true`) {
 		t.Fatalf("the wire names are not the ones the page reads: %s", raw)
 	}
 	// A record with neither says neither.
-	rec.NotAsked, rec.NextSend = nil, nil
+	rec.NotAsked, rec.NextSend, rec.ReadRefused, rec.WaitsForAnswer = nil, nil, nil, false
 	if err := baseline.RewriteNotInDestination(e.BaselineDir, rec); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ = json.Marshal(srv.backupSettingsServerDTO(e).NotInS3)
-	if strings.Contains(string(raw), "not_asked") || strings.Contains(string(raw), "next_send") {
+	if strings.Contains(string(raw), "not_asked") || strings.Contains(string(raw), "next_send") || strings.Contains(string(raw), "read_refused") || strings.Contains(string(raw), "waits_for_answer") {
 		t.Fatalf("fields with nothing to say are sent: %s", raw)
 	}
 }

@@ -167,6 +167,17 @@ type PruneResult struct {
 	// none is listed as missing. A HEAD carries no error body, so expired,
 	// invalid and unauthorized credentials all look like this.
 	DestinationDenied bool
+	// ReadRefused names the snapshots among Denied that the cleanup had sent
+	// again, which S3 accepted, and that S3 refused again (#2696): it takes
+	// uploads to them and refuses to read them back (no s3:GetObject). Kept,
+	// listed, and not sent again: sending would succeed and change nothing,
+	// at every cleanup, for ever.
+	ReadRefused []string
+	// DestinationWriteOnly reports that every refused question was about such
+	// a snapshot and that S3 confirmed none, the check of the newest included
+	// (#2696): a destination that accepts uploads and refuses every read.
+	// Nothing that needed its answer is removed, nothing is sent again.
+	DestinationWriteOnly bool
 	// KeptPinned counts snapshots kept because a reader of this process is
 	// on that one snapshot now (PinSnapshot, #2678): a download, a SQL
 	// statement, an Explain. The rest of the folder is pruned as usual.
@@ -397,7 +408,7 @@ func recordNotInDestination(opts PruneOptions, res PruneResult, err error, now t
 	if len(names) > notInDestinationNamesKept {
 		names = names[:notInDestinationNamesKept]
 	}
-	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n, Names: names, NotAsked: res.NotAsked}); werr != nil {
+	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n, Names: names, NotAsked: res.NotAsked, ReadRefused: res.ReadRefused}); werr != nil {
 		slog.Error("baseline prune: snapshots the destination does not have were kept, and the record of them could not be written; the page will not say it",
 			"dir", opts.LocalDir, "kept", n, "error", werr)
 	}
@@ -437,14 +448,23 @@ func pruneFailureReason(res PruneResult, err error) string {
 	if res.DestinationDenied {
 		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they may read this S3 prefix.")
 	}
-	if res.Denied > 0 {
+	if n := res.Denied - len(res.ReadRefused); n > 0 {
 		itIs, it := "it is", "it"
-		if res.Denied > 1 {
+		if n > 1 {
 			itIs, it = "they are", "them"
 		}
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination: S3 refused the question (access denied), so %s kept here until S3 confirms it has %s. "+
 			"Without permission to list the bucket (s3:ListBucket), S3 answers that way about a copy it does not have.",
-			snapshotsWord(res.Denied), itIs, it))
+			snapshotsWord(n), itIs, it))
+	}
+	switch n := len(res.ReadRefused); {
+	case res.DestinationWriteOnly:
+		why = append(why, "S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm any snapshot is there and keeps them here. "+
+			"It does not send them again: S3 took each one and then refused to read it.")
+	case n == 1:
+		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again.")
+	case n > 1:
+		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back (s3:GetObject), so they are kept here and not sent again.", n))
 	}
 	// One cause per line, and "\n" only: the page renders them line by line,
 	// and a path or an error can itself contain "; " or ", ".
@@ -667,7 +687,11 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// at least one question got an answer.
 	var denied []string
 	asked := map[string]bool{}
-	answered := false
+	answered, confirmed := false, false
+	// The snapshots sent again and not confirmed since (#2696), and those S3
+	// answered about in this cycle, whose marks go.
+	marks := resentMarks(opts.LocalDir)
+	answeredNames := map[string]bool{}
 	var heldCandidates []localSnapshot
 	for _, s := range snaps {
 		if !s.complete || s.unreadable || keepers[s.name] || newest[s.name] {
@@ -714,6 +738,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			continue // absent from `durable` → planPrune keeps it
 		}
 		answered = true
+		confirmed = confirmed || ok
+		answeredNames[s.name] = true
 		durable[s.name] = ok
 	}
 	// A refusal is about one snapshot only when S3 answers for others
@@ -721,21 +747,44 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// were sent, are asked as the check. A failure that is not a refusal
 	// means the bucket cannot be asked at all, and then a refusal is one
 	// more question it did not answer.
-	var deniedAll bool
+	//
+	// A refused snapshot the cleanup had sent again (#2696) is a write S3
+	// accepted and a read it refuses: listed, never sent again. When every
+	// refusal is one of those and S3 confirms nothing, the check included,
+	// the destination takes uploads and refuses reads, which is said as such.
+	var deniedAll, writeOnly bool
+	var readRefused []string
 	if len(denied) > 0 {
-		answers, refused := answered, probeErrors == 0
-		if probeErrors == 0 && !answered {
-			answers, refused = bucketAnswers(ctx, snaps, held, asked, probe, now)
+		for _, name := range denied {
+			if _, sent := marks[name]; sent {
+				readRefused = append(readRefused, name)
+			}
 		}
-		if probeErrors == 0 && answers {
+		perObject := false
+		switch {
+		case probeErrors > 0:
+		case len(readRefused) == len(denied) && !confirmed:
+			answers, ok, failed := bucketAnswers(ctx, snaps, held, asked, probe, now)
+			perObject = !failed
+			writeOnly = !failed && !(answers && ok)
+		case answered:
+			perObject = true
+		default:
+			answers, _, failed := bucketAnswers(ctx, snaps, held, asked, probe, now)
+			perObject = answers
+			deniedAll = !answers && !failed
+		}
+		if perObject {
 			for _, name := range denied {
-				durable[name] = false // kept, and listed to be sent again
+				durable[name] = false // kept, and listed
 			}
 		} else {
-			deniedAll = refused
 			probeErrors += len(denied)
-			denied = nil
+			denied, readRefused = nil, nil
 		}
+	}
+	if !opts.DryRun {
+		forgetAnsweredResends(opts.LocalDir, marks, answeredNames, all)
 	}
 	// Without a count, a held snapshot waits for a newer one confirmed in
 	// S3 (#2596). With one there are no such candidates: byCount took them.
@@ -749,6 +798,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 
 	pruneNames, res := planPruneHeld(snaps, keepers, newest, durable, held, opts.Retain, minAge, now)
 	res.NotAsked, res.Denied, res.DestinationDenied = denied, len(denied), deniedAll
+	res.ReadRefused, res.DestinationWriteOnly = readRefused, writeOnly
 	res = restoredKept(res, &probeErrors)
 	res.ProbeErrors = probeErrors
 	if counted && probeErrors > 0 {
@@ -799,10 +849,11 @@ const bucketChecks = 3
 // complete, readable snapshots not held on this machine, dated at or before
 // now and not asked already, newest first, at most bucketChecks of them. Those
 // were sent, so S3 should have them. Any answer, "here" or "not here", means
-// it answers, and the refusals are about those snapshots alone. A refusal of
-// each, any other failure, or nothing to ask means it does not; refused
-// reports that no failure but refusals was met, for the page's words.
-func bucketAnswers(ctx context.Context, snaps []localSnapshot, held, asked map[string]bool, probe durableProbe, now time.Time) (answers, refused bool) {
+// it answers, and the refusals are about those snapshots alone; confirmed is
+// that the answer was "here" (S3 reads at least that one, #2696). A refusal
+// of each, or nothing to ask, means it does not; failed reports a failure
+// that is not a refusal, which ends the check.
+func bucketAnswers(ctx context.Context, snaps []localSnapshot, held, asked map[string]bool, probe durableProbe, now time.Time) (answers, confirmed, failed bool) {
 	var check []localSnapshot
 	for _, s := range snaps {
 		if s.complete && !s.unreadable && !held[s.name] && !asked[s.name] && !s.ts.After(now) {
@@ -814,17 +865,43 @@ func bucketAnswers(ctx context.Context, snaps []localSnapshot, held, asked map[s
 		if i == bucketChecks {
 			break
 		}
-		_, err := probe(ctx, s.name)
+		ok, err := probe(ctx, s.name)
 		switch {
 		case err == nil:
-			return true, false
+			return true, ok, false
 		case !storage.IsAccessDenied(err):
 			slog.Warn("baseline prune: could not ask S3 about a newer snapshot to tell whether it answers at all",
 				"snapshot", s.name, "error", err)
-			return false, false
+			return false, false, true
 		}
 	}
-	return false, true
+	return false, false, false
+}
+
+// forgetAnsweredResends removes from the record of snapshots sent again
+// (ResentFile) the ones S3 answered about in this cycle and the ones no
+// longer on disk: the evidence is about a refusal that followed a send.
+func forgetAnsweredResends(dir string, marks map[string]time.Time, answered map[string]bool, all []localSnapshot) {
+	if len(marks) == 0 {
+		return
+	}
+	present := map[string]bool{}
+	for _, s := range all {
+		present[s.name] = true
+	}
+	changed := false
+	for name := range marks {
+		if answered[name] || !present[name] {
+			delete(marks, name)
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	if err := writeResent(dir, marks); err != nil {
+		slog.Warn("baseline prune: the record of snapshots sent again could not be updated", "dir", dir, "error", err)
+	}
 }
 
 // supersededHeldProbes bounds the extra probes supersededHeld makes looking

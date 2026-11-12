@@ -9152,15 +9152,39 @@ function notInS3Words(n, rec) {
     : n + " older " + (n === 1 ? "copy" : "copies") + (names.length ? " (" + names.map(at).join(", ") + (n > names.length ? " and " + (n - names.length) + " more" : "") + ")"
       : " (checked " + utcLabel(rec && rec.at) + ")");
   const it = n === 1 ? "it" : "them";
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : []);
+  const copiesOf = (l) => (l.length === 1 ? "the copy of " : "the copies of ") + l.map(at).join(", ");
+  // What happens next: sent at the next cleanup, after a wait (a failed
+  // send, or a send S3 could not confirm, #2696), or by hand.
+  const tail = (them) => rec && rec.resending === true
+    ? (rec.next_send
+      ? (rec.waits_for_answer === true
+        ? "the last ones sent could not be confirmed, and DBTrail sends again after " + utcLabel(rec.next_send) + "."
+        : "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + ".")
+      : "DBTrail sends " + them + " again at the next cleanup.")
+    : "send " + them + " to S3 again, or remove " + them + " by hand if not needed.";
+  // The ones S3 took when sent again and then refused to read (#2696): not
+  // sent again, and the permission named.
+  const readRefused = list(rec && rec.read_refused);
+  if (readRefused.length) {
+    const k = readRefused.length;
+    if (k >= n) {
+      return "Kept here: " + what + ". S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm " +
+        (n === 1 ? "it is" : "they are") + " there, and does not send " + it + " again.";
+    }
+    const rest = Object.assign({}, rec, {
+      names: list(rec.names).filter((x) => !readRefused.includes(x)),
+      not_asked: list(rec.not_asked).filter((x) => !readRefused.includes(x)),
+      read_refused: [],
+    });
+    return notInS3Words(n - k, rest) + " Not sent again: " + copiesOf(readRefused) + ", which S3 took but refuses to read back (s3:GetObject).";
+  }
   // The ones S3 could not be ASKED about (the last restore's result whose
   // question failed, a copy S3 refused, #2689): sent again in case they are
   // missing, and never said to be missing.
-  const notAsked = Array.isArray(rec && rec.not_asked) ? rec.not_asked.filter((x) => typeof x === "string" && x) : [];
+  const notAsked = list(rec && rec.not_asked);
   if (notAsked.length && notAsked.length >= n) {
-    return "Kept here: " + what + ". S3 could not be asked whether it has " + it + "; " +
-      (rec.resending === true
-        ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
-        : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
+    return "Kept here: " + what + ". S3 could not be asked whether it has " + it + "; " + tail(it);
   }
   if (notAsked.length) {
     // Some S3 lacks, some it could not be asked about: each said of its own.
@@ -9168,16 +9192,9 @@ function notInS3Words(n, rec) {
     const lacked = names.filter((x) => !notAsked.includes(x));
     const lacks = m === 1 && lacked.length === 1 ? "the copy of " + at(lacked[0])
       : m + " older " + (m === 1 ? "copy" : "copies") + (lacked.length ? " (" + lacked.map(at).join(", ") + (m > lacked.length ? " and " + (m - lacked.length) + " more" : "") + ")" : "");
-    const unasked = (notAsked.length === 1 ? "the copy of " : "the copies of ") + notAsked.map(at).join(", ");
-    return "Kept here: " + what + ". S3 does not have " + lacks + " complete, and could not be asked about " + unasked + "; " +
-      (rec.resending === true
-        ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
-        : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
+    return "Kept here: " + what + ". S3 does not have " + lacks + " complete, and could not be asked about " + copiesOf(notAsked) + "; " + tail(it);
   }
-  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete; " +
-    (rec && rec.resending === true
-      ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
-      : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
+  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete; " + tail(it);
 }
 
 function localCopyWords(s3, keep, loop, reuse, was, reach) {
