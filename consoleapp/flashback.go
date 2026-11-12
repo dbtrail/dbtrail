@@ -625,6 +625,9 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 		}
 		warn("Engine Routing off for this server's connections: it has no account this port may forward with. Said once; SHOW ROUTER STATUS says it on each connection", "server", user, "reason", tgt.ForwardRefused)
 		unavailable = tgt.ForwardRefused
+		// A statement that needed forwarding is told so, not refused by
+		// the copy in words about SELECT.
+		h.SetCopyOnlyReason(tgt.ForwardRefused)
 		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	case tgt.ForwardDSN == "":
 		logger.Warn("Engine Routing off for this connection: the server has no source DSN to forward to", "server", user)

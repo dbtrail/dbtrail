@@ -18134,6 +18134,19 @@ let connectDraftQueued = false;
 // connectBody is what the check and the draft send. The name is only what was
 // typed: the placeholder holds the automatic name, and sent as typed it would
 // be refused as a duplicate once another server took it.
+// connectForwardProblem is why the Connect screen's forwarding user cannot be
+// sent, "" when it can (#2686): a password with no user, a user with no
+// password, or the capture user, which the port never forwards as.
+function connectForwardProblem(form) {
+  const f = form.elements;
+  if (!f.route_user) return "";
+  const user = f.route_user.value.trim(), pw = f.route_password.value;
+  if (!user && pw) return "The forwarding password has no user: fill in Forwarding user, or clear the password.";
+  if (user && !pw) return "Fill in the forwarding user's password, or clear Forwarding user.";
+  if (user && user === f.source_user.value.trim()) return user + " is the user DBTrail reads this database with, and the port never forwards as that one. Name another user, with your application's grants.";
+  return "";
+}
+
 function connectBody(form, withPassword) {
   const f = form.elements;
   const body = {
@@ -18143,7 +18156,12 @@ function connectBody(form, withPassword) {
     source_host: f.source_host.value.trim(), source_port: f.source_port.value.trim(),
     source_user: f.source_user.value.trim(),
   };
-  if (withPassword) body.source_password = f.source_password.value;
+  if (withPassword) {
+    body.source_password = f.source_password.value;
+    // The forwarding user travels with the check only, never in the draft.
+    const ru = f.route_user ? f.route_user.value.trim() : "";
+    if (ru) { body.route_user = ru; body.route_password = f.route_password.value; }
+  }
   // What step 1 found goes into the draft only: a reload comes back to step 2
   // with it instead of probing again (#1953).
   else if (connectIdentity.get(form)) body.identified = connectIdentityBody(form);
@@ -18361,6 +18379,17 @@ function buildConnectForm() {
   acct.append(srvField("User", "source_user", { placeholder: "dbtrail" }));
   acct.append(srvField("Password", "source_password", { type: "password", autocomplete: "new-password" }));
   s2.append(acct);
+  // The forwarding user (#2686): optional, folded, and checked with the
+  // server. Without it the MySQL port answers this server from the copy
+  // alone. Never in the draft: it carries a password.
+  const fwd = el("div", { class: "form-grid" });
+  fwd.append(srvField("Forwarding user", "route_user", { placeholder: "shop_fwd", autocomplete: "off" }));
+  fwd.append(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }));
+  s2.append(el("details", { class: "form-advanced cx-fwd" },
+    el("summary", { class: "form-adv-summary", text: "Forwarding user (optional)" }),
+    el("p", { class: "form-hint", text: "What DBTrail's MySQL port runs statements as on this database when the copy cannot answer them. " +
+      "Give it your application's grants and no more, never the user above. Left empty, the copy answers this server alone until you set one on the MySQL clients page." }),
+    fwd));
   // Shown only when the form came back from a draft: the password is not in it.
   s2.append(el("p", { class: "form-hint", id: "connect-pw-again", hidden: true,
     text: "Type the password again. It is not kept after a reload. Lost it? Type a new one and run the ALTER USER line above." }));
@@ -18677,6 +18706,8 @@ async function runConnectCheck(form, pressed) {
   refreshGrants(form);
   if (!f.source_user.value.trim()) { setConnectStep(form, 2); formMsg("Fill in User.", true); f.source_user.focus(); return; }
   if (!f.source_password.value) { setConnectStep(form, 2); formMsg("Fill in Password. It is not kept after a reload.", true); f.source_password.focus(); return; }
+  const fwdProblem = connectForwardProblem(form);
+  if (fwdProblem) { setConnectStep(form, 2); formMsg(fwdProblem, true); return; }
   const body = connectBody(form, true);
   const asked = connectAddr(form);
   const btn = form.querySelector("button[type=submit]");
@@ -18896,7 +18927,8 @@ function newServerPortBlock(res) {
     } else {
       box.append(el("p", { class: "cn-sql-row", text: "No password came with the answer. Make one on the MySQL clients page." }));
     }
-    box.append(el("p", { class: "form-hint", text: "Statements for " + res.name + " are answered once its first copy is ready. Until it has a forwarding user (MySQL clients page), the copy answers them alone." }));
+    box.append(el("p", { class: "form-hint", text: "Statements for " + res.name + " are answered once its first copy is ready." +
+      (res.server && res.server.has_route ? "" : " Until it has a forwarding user (MySQL clients page), the copy answers them alone.") }));
     if (p.error) box.append(el("p", { class: "cn-sql-row cn-sql-err", text: "It is not answering: " + p.error }));
     if (p.notice) box.append(el("p", { class: "cn-sql-row cn-sql-err", text: p.notice }));
     return box;

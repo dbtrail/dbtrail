@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -200,6 +201,9 @@ func TestResolveAddInput(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// The forwarding account has its own test
+				// (TestResolveForward); this one is about the capture login.
+				got.FwdAsk, got.ask = false, nil
 				if got != c.want {
 					t.Fatalf("got %+v\nwant %+v", got, c.want)
 				}
@@ -1126,11 +1130,23 @@ func TestServerForwardUser(t *testing.T) {
 			t.Errorf("output:\n%s", out.String())
 		}
 	})
-	t.Run("the user DBTrail captures with is saved and said to be of no use", func(t *testing.T) {
+	t.Run("the user DBTrail captures with is refused before anything is saved", func(t *testing.T) {
 		d, c := newFakeDaemon(t)
 		twoServers(d)
 		d.on("PUT /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop", "has_route": true, "route_user": "dbtrail", "route_is_capture": true})
 		err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "dbtrail", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\n"), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "never forwards as that one") {
+			t.Fatalf("err = %v", err)
+		}
+		if slices.Contains(d.calls, "PUT /api/servers/id1/route") {
+			t.Fatal("the capture user was sent to be saved")
+		}
+	})
+	t.Run("the daemon says it is the capture user under another spelling", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		twoServers(d)
+		d.on("PUT /api/servers/id1/route", 200, map[string]any{"id": "id1", "name": "shop", "has_route": true, "route_user": "DBTrail", "route_is_capture": true})
+		err := runServerForwardUser(context.Background(), c, "shop", fwdFlags{User: "DBTrail", PasswordStdin: true}, &fakeAsker{t: t}, strings.NewReader("pw\n"), io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "never forwards as that one") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1295,7 +1311,7 @@ func TestServerAddSaysWhereThePortStands(t *testing.T) {
 func TestServerAddPortLineLeavesAnUnsafeNameToThePerson(t *testing.T) {
 	on := true
 	var out bytes.Buffer
-	printNewServerPort(&out, &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, RoutingOn: true, Password: "bfp_x"}, TurnedOn: true}, "my shop; rm")
+	printNewServerPort(&out, &ctlNewServerPort{ctlPort: ctlPort{Enabled: &on, RoutingOn: true, Password: "bfp_x"}, TurnedOn: true}, "my shop; rm", true)
 	if !strings.Contains(out.String(), "-u <server name> -p") || strings.Contains(out.String(), "-u my shop") {
 		t.Fatalf("the mysql line:\n%s", out.String())
 	}
