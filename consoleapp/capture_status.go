@@ -245,7 +245,7 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 		defer func() {
 			if p := recover(); p != nil {
 				slog.Error("capture status: the read of the source panicked", "server", e.Name, "id", e.ID, "panic", p, "stack", string(debug.Stack()))
-				r = captureProbeResult{detail: "the source could not be read", cause: "panic"}
+				r = captureProbeResult{detail: captureDetailPanicked, cause: "panic"}
 			}
 		}()
 		return read(ctx, e.DSN, source)
@@ -450,12 +450,12 @@ func countGTIDs(s *gomysql.MysqlGTIDSet) int64 {
 func captureHeadFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
-		return captureProbeResult{detail: "the index did not answer", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	defer idx.Close()
 	st, err := status.LoadStreamState(ctx, idx)
 	if err != nil {
-		return captureProbeResult{detail: "the capture's checkpoint could not be read", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+		return captureProbeResult{detail: captureDetailCheckpointUnread, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	r, err := headFromState(ctx, idx, st, func() (*sql.DB, error) {
 		return connectSource(sourceProbeDSN(sourceDSN), ssl)
@@ -476,12 +476,12 @@ func headFromState(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo,
 	// The binary log's filters ride along with the GTID sets: a source that
 	// leaves writes out of its binlog has no watermark (#2085).
 	logsAll, logFilter := false, ""
-	r, err := compareWithSource(ctx, idx, st, openSource, func(ctx context.Context, db *sql.DB) (string, string, error) {
-		executed, purged, err := readExecutedAndPurgedGTIDs(ctx, db)
+	r, err := compareWithSource(ctx, idx, st, openSource, func(ctx context.Context, db *sql.DB) (sourceGTIDs, error) {
+		got, err := readExecutedAndPurgedGTIDs(ctx, db)
 		if err == nil {
 			logsAll, logFilter = readBinlogFilters(ctx, db)
 		}
-		return executed, purged, err
+		return got, err
 	})
 	r.logsAll, r.logFilter = logsAll, logFilter
 	return r, err

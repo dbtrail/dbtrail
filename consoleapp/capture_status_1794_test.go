@@ -517,8 +517,8 @@ func TestHeadFromState(t *testing.T) {
 			detail: "the capture runs in binlog-position mode"},
 		{name: "no capture on record: the source never opened", st: nil, detail: "the index has no live capture on record"},
 		{name: "no GTID checkpoint: the source never opened", st: state("  ", nil), detail: "the capture has no GTID checkpoint"},
-		{name: "a MariaDB set in the checkpoint", st: state("0-1-100", nil), gtidOff: true, detail: "the source reported no GTID set", opened: true},
-		{name: "GTIDs off on the source", st: state(uuidB+":1-10", nil), gtidOff: true, detail: "the source reported no GTID set", opened: true},
+		{name: "a MariaDB set in the checkpoint", st: state("0-1-100", nil), gtidOff: true, detail: "GTIDs are off on the source (gtid_mode=OFF) while capture follows it by GTID", opened: true},
+		{name: "GTIDs off on the source", st: state(uuidB+":1-10", nil), gtidOff: true, detail: "GTIDs are off on the source (gtid_mode=OFF) while capture follows it by GTID", opened: true},
 		{name: "the index on the source server", st: state(uuidB+":1-10", nil), sameHost: true, detail: "the index lives on the source server", opened: true},
 		{name: "the source does not answer", st: state(uuidB+":1-10", nil), openFails: true, detail: "the source did not answer", wantErr: true, opened: true},
 	}

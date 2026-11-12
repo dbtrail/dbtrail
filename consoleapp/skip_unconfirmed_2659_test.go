@@ -28,7 +28,7 @@ import (
 
 const (
 	unconfirmedSkipLine   = "no snapshot is made at this slot, nor at the following ones while this lasts"
-	unconfirmedUpdateLine = "updating the snapshot instead of skipping the slot"
+	unconfirmedUpdateLine = "an update runs at this slot instead of skipping it"
 	unconfirmedEndedLine  = "scheduled slots are no longer skipped"
 	positionMode          = "the capture runs in binlog-position mode, which is not compared"
 )
@@ -494,9 +494,13 @@ func TestBackupScheduler_aSkippedSlotSendsTheOwedHeldSnapshot_2659(t *testing.T)
 	}))
 	prevUpload := uploadSnapshot
 	t.Cleanup(func() { uploadSnapshot = prevUpload })
+	var whileSending console.BaselineStatus
 	uploadSnapshot = func(_ context.Context, dir, dest, _ string, _ bool) (int, error) {
+		// What the page is told while the upload runs.
+		during := sup.RefreshStatus(e.ID)
 		sentMu.Lock()
 		defer sentMu.Unlock()
+		whileSending = during
 		sent = append(sent, dir+" -> "+dest)
 		bucketAt = held
 		return 1, nil
@@ -545,6 +549,14 @@ func TestBackupScheduler_aSkippedSlotSendsTheOwedHeldSnapshot_2659(t *testing.T)
 	}
 	if stillHeld, _ := baseline.UploadHeld(e.BaselineDir, heldName); stillHeld {
 		t.Fatal("the mark outlived the upload")
+	}
+	// While it ran the slot was busy and said what it was busy with: a
+	// send, not an update. Afterwards neither.
+	if whileSending.State != "running" || !whileSending.SendingHeld {
+		t.Fatalf("the status during the upload: %+v, want running and marked as sending a kept snapshot", whileSending)
+	}
+	if after := sup.RefreshStatus(e.ID); after.State == "running" || after.SendingHeld {
+		t.Fatalf("the status after the upload: %+v", after)
 	}
 	if folds.Load() != 0 || lastScheduledDump(sup, e.ID) != nil {
 		t.Fatalf("%d folds, a full read %+v: the upload must not start a run", folds.Load(), lastScheduledDump(sup, e.ID))
@@ -655,7 +667,7 @@ func TestBackupScheduler_theLogOfAStretchInterruptedByAnUpdate_2659(t *testing.T
 	if folds.Load() != 1 {
 		t.Fatalf("%d folds, want the one re-anchoring update", folds.Load())
 	}
-	const endedByUpdate = "scheduled slots are no longer skipped: the snapshot is updated at this slot because it cannot wait"
+	const endedByUpdate = "scheduled slots are no longer skipped: an update runs at this slot instead"
 	var seq []string
 	for _, l := range strings.Split(logs.String(), "\n") {
 		switch {
@@ -664,8 +676,16 @@ func TestBackupScheduler_theLogOfAStretchInterruptedByAnUpdate_2659(t *testing.T
 		case strings.Contains(l, endedByUpdate):
 			seq = append(seq, "end-by-update")
 			t.Logf("log: %s", l)
-			if !strings.Contains(l, "Slots are skipped again once the new snapshot is old enough") || !strings.Contains(l, "close to the oldest change the index still keeps") {
-				t.Errorf("the end line does not say why, or that the skipping resumes: %q", l)
+			// True whether the update publishes a snapshot or its own gate
+			// finds nothing to add and publishes none.
+			for _, want := range []string{"If it publishes a snapshot, slots are skipped again once that snapshot is old enough", "if it finds nothing to add, from the next slot",
+				"only while nothing is indexed and the source still cannot be asked", "close to the oldest change the index still keeps"} {
+				if !strings.Contains(l, want) {
+					t.Errorf("the end line lacks %q: %q", want, l)
+				}
+			}
+			if strings.Contains(l, "the snapshot is updated at this slot") || strings.Contains(l, "once the new snapshot") {
+				t.Errorf("the end line promises a snapshot the update may not publish: %q", l)
 			}
 		case strings.Contains(l, unconfirmedEndedLine):
 			seq = append(seq, "end")
@@ -678,10 +698,21 @@ func TestBackupScheduler_theLogOfAStretchInterruptedByAnUpdate_2659(t *testing.T
 	}
 }
 
+// captureReasonFuncs are the functions that return a reason and nothing
+// else that could be mistaken for one: the pure halves of the probe. Their
+// returns are checked below, and a probe result may take its detail from a
+// call to one of them.
+var captureReasonFuncs = map[string]bool{
+	"captureComparable": true, "checkpointComparable": true, "compareGTIDSets": true,
+	"gtidModeRefusal": true, "compareMariaDBPositions": true,
+}
+
 // Every reason the probe can return is a constant with a decision
 // (captureClasses), and no code path returns a reason written as a bare
 // string. A reason added without a decision fails here, and until then it
-// gets the default: the full read, never the skip.
+// gets the default: the full read, never the skip. Read from EVERY file of
+// the package that ships, not from the probe's file alone: a constant or a
+// probe result declared anywhere else is held to the same rule.
 func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 	type decided struct {
 		text  string
@@ -693,18 +724,22 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 		"captureDetailNoSource":         {"this server has no source to ask", captureCannotAsk},
 		"captureDetailPositionMode":     {"the capture runs in binlog-position mode, which is not compared", captureCannotAsk},
 		"captureDetailNoCheckpoint":     {"the capture has no GTID checkpoint", captureCannotAsk},
-		"captureDetailNoSourceGTIDs":    {"the source reported no GTID set", captureCannotAsk},
+		"captureDetailNoGTIDMode":       {"the source has no gtid_mode (a MariaDB source), which is not compared", captureCannotAsk},
 		"captureDetailSameServer":       {"the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture", captureCannotAsk},
 		"captureDetailNotToldApart":     {"the index and the source could not be told apart", captureCannotAsk},
 		"captureDetailSourceSilent":     {"the source did not answer", captureCannotAsk},
 		"captureDetailSourceGTIDUnread": {"the source did not report its GTID set", captureCannotAsk},
-		"captureDetailTimedOut":         {"the probe did not finish in time", captureCannotAsk},
+		"captureDetailSourceSlow":       {"the source did not answer in time", captureCannotAsk},
 		"captureDetailNoCapture":        {"the index has no live capture on record", captureCannotAsk},
-		// Evidence that changes are missing: the full read.
-		"captureDetailLost":     {"the capture lost events to a binlog gap after the previous snapshot", captureEvidence},
-		"captureDetailDropped":  {"the capture dropped events that no full read has read from the source since", captureEvidence},
-		"captureDetailDiverged": {"the capture holds transactions the source does not have: the source may have been reset, restored or replaced", captureEvidence},
-		"captureDetailBehind":   {"the source reports transactions the capture's checkpoint does not include", captureEvidence},
+		// Evidence that changes are missing, or are about to be: the full read.
+		"captureDetailLost":              {"the capture lost events to a binlog gap after the previous snapshot", captureEvidence},
+		"captureDetailDropped":           {"the capture dropped events that no full read has read from the source since", captureEvidence},
+		"captureDetailDiverged":          {"the capture holds transactions the source does not have: the source may have been reset, restored or replaced", captureEvidence},
+		"captureDetailBehind":            {"the source reports transactions the capture's checkpoint does not include", captureEvidence},
+		"captureDetailGTIDModeOff":       {"GTIDs are off on the source (gtid_mode=OFF) while capture follows it by GTID, so capture cannot read from it", captureEvidence},
+		"captureDetailGTIDOffPermissive": {"the source's gtid_mode is OFF_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it", captureEvidence},
+		"captureDetailGTIDOnPermissive":  {"the source's gtid_mode is ON_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it", captureEvidence},
+		"captureDetailGTIDModeOther":     {"the source's gtid_mode is not ON while capture follows it by GTID, so capture cannot read from it", captureEvidence},
 		// A loss cannot be ruled out: the full read.
 		"captureDetailSkipsUnreadable": {"the capture's record of dropped events is not readable", captureUnsettled},
 		"captureDetailNoLossRecord":    {"the index predates the capture's loss record", captureUnsettled},
@@ -712,43 +747,75 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 		"captureDetailSourceUnparsed":  {"the source's GTID set does not parse", captureUnsettled},
 		// The index did not give the capture's record: the update.
 		"captureDetailIndexSilent":      {"the index did not answer", captureIndexUnread},
+		"captureDetailIndexSlow":        {"the index did not answer in time", captureIndexUnread},
 		"captureDetailCheckpointUnread": {"the capture's checkpoint could not be read", captureIndexUnread},
 		"captureDetailCancelled":        {"the request that asked was cancelled", captureIndexUnread},
+		"captureDetailTimedOut":         {"the probe did not finish in time", captureIndexUnread},
+		// The capture status read's own, never returned to the schedule:
+		// decided like a reason nobody listed, the full read.
+		"captureDetailMariaDBNoPositionVar":  {"the source has no MariaDB GTID position: is it a MariaDB server?", captureUnsettled},
+		"captureDetailMariaDBPositionUnread": {"the source did not report its GTID position", captureUnsettled},
+		"captureDetailMariaDBNoPosition":     {"the source reported no GTID position", captureUnsettled},
+		"captureDetailMariaDBSourceUnparsed": {"the source's GTID position does not parse", captureUnsettled},
+		"captureDetailMariaDBAhead":          {"the source is ahead of the capture's checkpoint; a MariaDB source is only compared for an exact match", captureUnsettled},
+		"captureDetailMariaDBMismatch":       {"the capture's checkpoint and the source's GTID position do not match: the source may have been reset, restored or replaced", captureUnsettled},
+		"captureDetailPanicked":              {"the source could not be read", captureUnsettled},
 	}
 	fset := token.NewFileSet()
-	probe, err := parser.ParseFile(fset, "capture_probe.go", nil, 0)
+	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop, err := parser.ParseFile(fset, "baseline_schedule_loop.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
+	var files []*ast.File
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
 	}
-	// 1. The constants in the code are exactly the ones decided here, with
-	// these texts and these classes, and each is in the table explicitly.
+	if len(files) < 20 {
+		t.Fatalf("only %d files of the package were read", len(files))
+	}
+	where := func(n ast.Node) string { return fset.Position(n.Pos()).String() }
+	// 1. The constants in the code, in whatever file, are exactly the ones
+	// decided here, with these texts and these classes, and each is in the
+	// table explicitly.
 	declared := map[string]string{}
-	ast.Inspect(probe, func(n ast.Node) bool {
-		vs, ok := n.(*ast.ValueSpec)
-		if !ok {
-			return true
-		}
-		for i, name := range vs.Names {
-			if !strings.HasPrefix(name.Name, "captureDetail") || i >= len(vs.Values) {
-				continue
-			}
-			lit, ok := vs.Values[i].(*ast.BasicLit)
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			vs, ok := n.(*ast.ValueSpec)
 			if !ok {
-				t.Errorf("%s is not a plain string constant", name.Name)
-				continue
+				return true
 			}
-			text, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				t.Fatal(err)
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "captureDetail") {
+					continue
+				}
+				if i >= len(vs.Values) {
+					t.Errorf("%s: %s has no value of its own", where(vs), name.Name)
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok {
+					t.Errorf("%s: %s is not a plain string constant", where(vs), name.Name)
+					continue
+				}
+				text, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, twice := declared[name.Name]; twice {
+					t.Errorf("%s: %s is declared twice", where(vs), name.Name)
+				}
+				declared[name.Name] = text
 			}
-			declared[name.Name] = text
-		}
-		return true
-	})
+			return true
+		})
+	}
 	for name, text := range declared {
 		w, ok := want[name]
 		if !ok {
@@ -768,7 +835,7 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 	}
 	for name := range want {
 		if _, ok := declared[name]; !ok {
-			t.Errorf("%s is decided here and gone from capture_probe.go", name)
+			t.Errorf("%s is decided here and declared in no file of the package", name)
 		}
 	}
 	if len(captureClasses) != len(want) {
@@ -778,62 +845,127 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 	if got := captureClassOf("a refusal nobody classified yet"); got != captureUnsettled || captureUnsettled != 0 {
 		t.Fatalf("an unknown reason is classed %d; the zero value must be the full read", got)
 	}
-	// 3. No reason is written as a bare string where the probe's result is
-	// built: every `detail:` field, every assignment to a .detail, and
-	// every reason the three pure functions return is one of the constants.
-	isReason := func(e ast.Expr) bool {
+	// 3. No reason is written as a bare string, in any file: every detail
+	// of a probe result (in its literal, or assigned to its field) is one
+	// of the constants, or a variable that the same function filled from a
+	// call to one of the reason functions; and each of those functions
+	// returns constants only.
+	isConst := func(e ast.Expr) bool {
 		id, ok := e.(*ast.Ident)
 		return ok && strings.HasPrefix(id.Name, "captureDetail")
 	}
-	where := func(n ast.Node) string { return fset.Position(n.Pos()).String() }
-	found := 0
-	for _, f := range []*ast.File{probe, loop} {
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.KeyValueExpr:
-				if k, ok := x.Key.(*ast.Ident); ok && k.Name == "detail" {
-					found++
-					// `detail: detail` passes a verdict's own reason on.
-					if id, ok := x.Value.(*ast.Ident); ok && id.Name == "detail" {
-						return true
-					}
-					if !isReason(x.Value) {
-						t.Errorf("%s: a probe result's detail is not one of the captureDetail constants", where(x))
-					}
+	// fromReasonFunc reports whether the identifier name is assigned, in
+	// fn, from a call to a reason function and from nothing else.
+	fromReasonFunc := func(fn *ast.FuncDecl, name string) bool {
+		good, bad := 0, 0
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range as.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name != name {
+					continue
 				}
-			case *ast.AssignStmt:
-				for i, lhs := range x.Lhs {
-					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "detail" && i < len(x.Rhs) {
-						found++
-						if !isReason(x.Rhs[i]) {
-							t.Errorf("%s: a probe result's detail is assigned something that is not a captureDetail constant", where(x))
-						}
-					}
+				call, ok := as.Rhs[0].(*ast.CallExpr)
+				callee, isIdent := ast.Expr(nil), false
+				if ok {
+					callee = call.Fun
+					_, isIdent = callee.(*ast.Ident)
 				}
-			case *ast.FuncDecl:
-				if x.Name.Name != "captureComparable" && x.Name.Name != "checkpointComparable" && x.Name.Name != "compareGTIDSets" {
-					return true
+				if ok && isIdent && len(as.Rhs) == 1 && captureReasonFuncs[callee.(*ast.Ident).Name] {
+					good++
+				} else {
+					bad++
 				}
-				ast.Inspect(x.Body, func(m ast.Node) bool {
-					ret, ok := m.(*ast.ReturnStmt)
-					if !ok || len(ret.Results) != 2 {
-						return true
-					}
-					found++
-					if lit, ok := ret.Results[1].(*ast.BasicLit); ok && lit.Value == `""` {
-						return true
-					}
-					if !isReason(ret.Results[1]) {
-						t.Errorf("%s: %s returns a reason that is not a captureDetail constant", where(ret), x.Name.Name)
-					}
-					return true
-				})
 			}
 			return true
 		})
+		return good > 0 && bad == 0
 	}
-	if found < 20 {
-		t.Fatalf("only %d places that build a reason were found; this check no longer reads the code it guards", found)
+	okDetail := func(fn *ast.FuncDecl, e ast.Expr) bool {
+		if isConst(e) {
+			return true
+		}
+		id, ok := e.(*ast.Ident)
+		return ok && fn != nil && fromReasonFunc(fn, id.Name)
+	}
+	results, returns := 0, 0
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CompositeLit:
+					if id, ok := x.Type.(*ast.Ident); !ok || id.Name != "captureProbeResult" {
+						return true
+					}
+					for _, el := range x.Elts {
+						kv, ok := el.(*ast.KeyValueExpr)
+						if !ok {
+							t.Errorf("%s: a probe result built without field names", where(x))
+							continue
+						}
+						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "detail" {
+							results++
+							if !okDetail(fn, kv.Value) {
+								t.Errorf("%s: in %s, a probe result's detail is neither a captureDetail constant nor the answer of a reason function", where(kv), fn.Name.Name)
+							}
+						}
+					}
+				case *ast.AssignStmt:
+					for i, lhs := range x.Lhs {
+						sel, ok := lhs.(*ast.SelectorExpr)
+						if !ok || sel.Sel.Name != "detail" || i >= len(x.Rhs) {
+							continue
+						}
+						results++
+						if !okDetail(fn, x.Rhs[i]) {
+							t.Errorf("%s: in %s, a .detail is assigned something that is neither a captureDetail constant nor the answer of a reason function", where(x), fn.Name.Name)
+						}
+					}
+				case *ast.ReturnStmt:
+					if !captureReasonFuncs[fn.Name.Name] || len(x.Results) == 0 {
+						return true
+					}
+					returns++
+					last := x.Results[len(x.Results)-1]
+					if lit, ok := last.(*ast.BasicLit); ok && lit.Value == `""` {
+						return true
+					}
+					// `return checkpointComparable(st)`: another reason function.
+					if call, ok := last.(*ast.CallExpr); ok && len(x.Results) == 1 {
+						if id, ok := call.Fun.(*ast.Ident); ok && captureReasonFuncs[id.Name] {
+							return true
+						}
+					}
+					if !isConst(last) {
+						t.Errorf("%s: %s returns a reason that is not a captureDetail constant", where(x), fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	for name := range captureReasonFuncs {
+		found := false
+		for _, f := range files {
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == name {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("the reason function %s is gone; this check names a function that no longer exists", name)
+		}
+	}
+	if results < 20 || returns < 20 {
+		t.Fatalf("%d probe results and %d returns of reason functions were found; this check no longer reads the code it guards", results, returns)
 	}
 }
 
@@ -865,12 +997,12 @@ func TestCaptureClasses_whatTheSlotDoes_2659(t *testing.T) {
 					t.Errorf("an unsettled reason reads %q", why)
 				}
 			case captureIndexUnread:
-				if why != console.UnconfirmedUpdateWhy(text, "the index could not be read to tell whether the snapshot can stay as it is") {
+				if why != console.IndexUnreadUpdateWhy(text) || strings.Contains(why, "the source cannot confirm") {
 					t.Errorf("the update's why reads %q", why)
 				}
 			case captureCannotAsk:
 				if text == captureDetailNoCapture {
-					if !strings.Contains(why, "(the index has no live capture on record: capture has never recorded anything for this server, so check that capture is running)") {
+					if !strings.Contains(why, "(the index has no live capture on record: no streaming capture has run against this index; if you expect one, check that it is running)") {
 						t.Errorf("the reason for an index with no capture does not say what to check: %q", why)
 					}
 				} else if why != console.SkipUnconfirmedReason(text) {

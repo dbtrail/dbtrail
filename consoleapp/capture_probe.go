@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/config"
@@ -106,10 +107,12 @@ func checkpointComparable(st *status.StreamStateInfo) (ok bool, detail string) {
 // the same, and holding more means the source's history changed under it
 // (reset, restored, or replaced by a server that has not written those
 // transactions), which is the stuck capture this check exists to catch.
+//
+// An EMPTY set on the source is a set like any other, and the caller hands
+// one over only for a source with GTIDs fully on (gtidModeRefusal): a
+// capture that holds transactions beside it holds what the source does not
+// have, which is what a source after RESET MASTER looks like.
 func compareGTIDSets(captured, executed string) (verdict, detail string) {
-	if strings.TrimSpace(executed) == "" {
-		return "", captureDetailNoSourceGTIDs
-	}
 	have, err := gomysql.ParseMysqlGTIDSet(captured)
 	if err != nil {
 		return "", captureDetailCaptureUnparsed
@@ -147,14 +150,31 @@ const (
 	captureDetailPositionMode    = "the capture runs in binlog-position mode, which is not compared"
 	captureDetailNoCheckpoint    = "the capture has no GTID checkpoint"
 	// What comparing the two GTID sets found.
-	captureDetailNoSourceGTIDs   = "the source reported no GTID set"
+	// The source's gtid_mode, read with its executed set (gtidModeRefusal).
+	// The probe gets this far only for a capture that follows the source by
+	// GTID and has a GTID position saved. MariaDB has no such variable. A
+	// MySQL source serves a reader by GTID only with gtid_mode=ON (the
+	// manual, CHANGE REPLICATION SOURCE TO, SOURCE_AUTO_POSITION:
+	// "GTID_MODE=ON on the source"), so under any other value the capture
+	// cannot read from it while the source keeps writing.
+	captureDetailNoGTIDMode        = "the source has no gtid_mode (a MariaDB source), which is not compared"
+	captureDetailGTIDModeOff       = "GTIDs are off on the source (gtid_mode=OFF) while capture follows it by GTID, so capture cannot read from it"
+	captureDetailGTIDOffPermissive = "the source's gtid_mode is OFF_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it"
+	captureDetailGTIDOnPermissive  = "the source's gtid_mode is ON_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it"
+	captureDetailGTIDModeOther     = "the source's gtid_mode is not ON while capture follows it by GTID, so capture cannot read from it"
 	captureDetailCaptureUnparsed = "the capture's GTID set does not parse"
 	captureDetailSourceUnparsed  = "the source's GTID set does not parse"
 	captureDetailBehind          = "the source reports transactions the capture's checkpoint does not include"
 	captureDetailDiverged        = "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
 	// What reaching the two servers ran into.
 	captureDetailCancelled        = "the request that asked was cancelled"
+	// captureDetailTimedOut is the bound on the whole probe running out
+	// with nothing said about how far it got. The schedule's own probe
+	// never returns it: it says which side was being read
+	// (probeCaptureFromDBs). The capture status read does.
 	captureDetailTimedOut         = "the probe did not finish in time"
+	captureDetailIndexSlow        = "the index did not answer in time"
+	captureDetailSourceSlow       = "the source did not answer in time"
 	captureDetailIndexSilent      = "the index did not answer"
 	captureDetailCheckpointUnread = "the capture's checkpoint could not be read"
 	captureDetailSourceSilent     = "the source did not answer"
@@ -164,6 +184,17 @@ const (
 	// The schedule's own, before the probe is tried (captureVerdict).
 	captureDetailNoSource = "this server has no source to ask"
 	captureDetailPostgres = "PostgreSQL sources are not compared yet"
+	// The capture status read's own (#1794: its MariaDB comparison and its
+	// panic guard). The snapshot schedule's probe never returns them; they
+	// are constants here so that every reason is, and are decided like any
+	// reason nobody listed.
+	captureDetailMariaDBNoPositionVar  = "the source has no MariaDB GTID position: is it a MariaDB server?"
+	captureDetailMariaDBPositionUnread = "the source did not report its GTID position"
+	captureDetailMariaDBNoPosition     = "the source reported no GTID position"
+	captureDetailMariaDBSourceUnparsed = "the source's GTID position does not parse"
+	captureDetailMariaDBAhead          = "the source is ahead of the capture's checkpoint; a MariaDB source is only compared for an exact match"
+	captureDetailMariaDBMismatch       = "the capture's checkpoint and the source's GTID position do not match: the source may have been reset, restored or replaced"
+	captureDetailPanicked              = "the source could not be read"
 )
 
 // captureClass is what the snapshot schedule does with a quiet index whose
@@ -195,8 +226,8 @@ var captureClasses = map[string]captureClass{
 	captureDetailNoCapture:        captureCannotAsk,
 	captureDetailPositionMode:     captureCannotAsk,
 	captureDetailNoCheckpoint:     captureCannotAsk,
-	captureDetailNoSourceGTIDs:    captureCannotAsk,
-	captureDetailTimedOut:         captureCannotAsk,
+	captureDetailNoGTIDMode:       captureCannotAsk,
+	captureDetailSourceSlow:       captureCannotAsk,
 	captureDetailSourceSilent:     captureCannotAsk,
 	captureDetailSourceGTIDUnread: captureCannotAsk,
 	captureDetailNotToldApart:     captureCannotAsk,
@@ -210,6 +241,12 @@ var captureClasses = map[string]captureClass{
 	// The verdict console.CaptureBehind decides this one before any class
 	// is read; listed so that it is decided here too.
 	captureDetailBehind: captureEvidence,
+	// A capture by GTID that the source refuses to serve, while the source
+	// keeps writing: what was found, and a loss in the making.
+	captureDetailGTIDModeOff:       captureEvidence,
+	captureDetailGTIDOffPermissive: captureEvidence,
+	captureDetailGTIDOnPermissive:  captureEvidence,
+	captureDetailGTIDModeOther:     captureEvidence,
 
 	captureDetailNoLossRecord:    captureUnsettled,
 	captureDetailSkipsUnreadable: captureUnsettled,
@@ -217,8 +254,41 @@ var captureClasses = map[string]captureClass{
 	captureDetailSourceUnparsed:  captureUnsettled,
 
 	captureDetailIndexSilent:      captureIndexUnread,
+	captureDetailIndexSlow:        captureIndexUnread,
 	captureDetailCheckpointUnread: captureIndexUnread,
 	captureDetailCancelled:        captureIndexUnread,
+	// The time ran out and nothing says on which side: the index's record
+	// of the capture, where evidence of a loss would be, may not have been
+	// read. Never the skip.
+	captureDetailTimedOut: captureIndexUnread,
+
+	// The capture status read's own. Not reachable from the schedule.
+	captureDetailMariaDBNoPositionVar:  captureUnsettled,
+	captureDetailMariaDBPositionUnread: captureUnsettled,
+	captureDetailMariaDBNoPosition:     captureUnsettled,
+	captureDetailMariaDBSourceUnparsed: captureUnsettled,
+	captureDetailMariaDBAhead:          captureUnsettled,
+	captureDetailMariaDBMismatch:       captureUnsettled,
+	captureDetailPanicked:              captureUnsettled,
+}
+
+// gtidModeRefusal is why a source with this gtid_mode is not compared, or
+// "" for ON, the one mode whose executed set is compared. mode is the
+// source's @@GLOBAL.gtid_mode, empty for a server with no such variable.
+func gtidModeRefusal(mode string) string {
+	switch strings.ToUpper(strings.TrimSpace(mode)) {
+	case "ON":
+		return ""
+	case "":
+		return captureDetailNoGTIDMode
+	case "OFF":
+		return captureDetailGTIDModeOff
+	case "OFF_PERMISSIVE":
+		return captureDetailGTIDOffPermissive
+	case "ON_PERMISSIVE":
+		return captureDetailGTIDOnPermissive
+	}
+	return captureDetailGTIDModeOther
 }
 
 // captureClassOf is the class of a probe reason; one that is not in the
@@ -266,10 +336,33 @@ var probeCapture = probeCaptureFromDBs
 // then answers slowly would otherwise hold a page for several of them. The
 // probe keeps running in the background after that, until those same
 // bounds end it; its answer is then dropped.
+//
+// When the bound runs out, which side was being read decides what the
+// schedule does (#2659): the index's record of the capture is where a loss
+// shows (dropped rows, a gap), so a probe that ran out before that record
+// was read learned nothing and must not read as "the source cannot be
+// asked". Only once the index's part is done is it the source that did not
+// answer in time.
 func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time) captureProbeResult {
-	return boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) captureProbeResult {
-		return captureFromDBs(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead)
+	var indexRead atomic.Bool
+	r := boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) captureProbeResult {
+		return captureFromDBs(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, &indexRead)
 	})
+	return timedOutSide(r, indexRead.Load())
+}
+
+// timedOutSide names the side a timed-out probe was reading: indexRead says
+// whether the index's record of the capture had been read by then.
+func timedOutSide(r captureProbeResult, indexRead bool) captureProbeResult {
+	if r.detail != captureDetailTimedOut {
+		return r
+	}
+	if indexRead {
+		r.detail = captureDetailSourceSlow
+	} else {
+		r.detail = captureDetailIndexSlow
+	}
+	return r
 }
 
 // boundedCaptureProbe runs probe and waits at most within for it. The
@@ -299,7 +392,7 @@ func boundedCaptureProbe(parent context.Context, within time.Duration, probe fun
 // Unknown on any failure: the caller keeps the full backup. Each connection
 // is bounded like the window probe (windowProbeTimeout, dial and reads),
 // and its queries by ctx; a failure's cause is scrubbed of both DSNs.
-func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time) captureProbeResult {
+func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time, indexRead *atomic.Bool) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -308,6 +401,10 @@ func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.
 	st, err := status.LoadStreamState(ctx, idx)
 	if err != nil {
 		return captureProbeResult{detail: captureDetailCheckpointUnread, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+	}
+	// The capture's record is read: from here on only the source is slow.
+	if indexRead != nil {
+		indexRead.Store(true)
 	}
 	r, err := compareCapture(ctx, idx, st, anchor, sourceRead, func() (*sql.DB, error) {
 		return connectSource(sourceProbeDSN(sourceDSN), ssl)
@@ -331,15 +428,24 @@ func compareCapture(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo
 	return compareWithSource(ctx, idx, st, openSource, readExecutedOnly)
 }
 
-// sourceGTIDReader reads the source's executed GTID set, and, where the
-// caller uses it, its purged set.
-type sourceGTIDReader func(ctx context.Context, db *sql.DB) (executed, purged string, err error)
+// sourceGTIDs is what a source says about its GTIDs: its gtid_mode as
+// reported (empty for a server with no such variable, MariaDB's 1193), its
+// executed set and, where the caller reads it, its purged set, both with
+// their whitespace removed. The three states that used to read alike as "no
+// GTID set" are told apart by mode: no variable, a mode that is not ON, and
+// ON with an empty set.
+type sourceGTIDs struct {
+	mode, executed, purged string
+}
+
+// sourceGTIDReader reads the source's gtid_mode and executed GTID set, and,
+// where the caller uses it, its purged set.
+type sourceGTIDReader func(ctx context.Context, db *sql.DB) (sourceGTIDs, error)
 
 // readExecutedOnly is the snapshot schedule's reader: it reads no purged
 // set, since there "behind" keeps the full backup, the safe direction.
-func readExecutedOnly(ctx context.Context, db *sql.DB) (string, string, error) {
-	executed, err := readExecutedGTIDs(ctx, db)
-	return executed, "", err
+func readExecutedOnly(ctx context.Context, db *sql.DB) (sourceGTIDs, error) {
+	return readExecutedGTIDs(ctx, db)
 }
 
 // compareWithSource is the half of compareCapture that reaches the source,
@@ -363,55 +469,59 @@ func compareWithSource(ctx context.Context, idx *sql.DB, st *status.StreamStateI
 	if same {
 		return captureProbeResult{detail: captureDetailSameServer}, nil
 	}
-	executed, purged, err := read(ctx, src)
+	got, err := read(ctx, src)
 	if err != nil {
 		return captureProbeResult{detail: captureDetailSourceGTIDUnread}, err
 	}
-	verdict, detail := compareGTIDSets(st.GTIDSet.String, executed)
-	return captureProbeResult{verdict: verdict, detail: detail,
-		captured: strings.Join(strings.Fields(st.GTIDSet.String), ""), executed: executed, purged: purged, checkpoint: st.LastCheckpoint}, nil
+	// Only a source with GTIDs fully on has an executed set to compare. The
+	// capture's checkpoint is a GTID set here (checkpointComparable), so a
+	// source in any other mode is one the capture cannot be reading.
+	if refusal := gtidModeRefusal(got.mode); refusal != "" {
+		return captureProbeResult{detail: refusal}, nil
+	}
+	verdict, why := compareGTIDSets(st.GTIDSet.String, got.executed)
+	r := captureProbeResult{verdict: verdict, captured: strings.Join(strings.Fields(st.GTIDSet.String), ""),
+		executed: got.executed, purged: got.purged, checkpoint: st.LastCheckpoint}
+	r.detail = why
+	return r, nil
 }
 
-// readExecutedGTIDs is the source's @@GLOBAL.gtid_executed with its
-// whitespace removed, or "" when GTIDs are not fully on (or the server has no
-// gtid_mode at all, MariaDB's 1193): config.CurrentGTIDExecuted's answer, read
-// here instead because that helper is the stream's start-position discovery.
-// It warns about starting in position mode on an empty set, which is not
-// this probe's news, and it takes no context.
-func readExecutedGTIDs(ctx context.Context, db *sql.DB) (string, error) {
-	var gtidMode, executed string
-	err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed").Scan(&gtidMode, &executed)
+// readExecutedGTIDs is the source's @@GLOBAL.gtid_mode and
+// @@GLOBAL.gtid_executed, read in one statement. A server with no gtid_mode
+// at all (MariaDB's 1193) answers with an empty mode and no error. Not
+// config.CurrentGTIDExecuted: that helper is the stream's start-position
+// discovery, it warns about starting in position mode on an empty set, which
+// is not this probe's news, and it takes no context.
+func readExecutedGTIDs(ctx context.Context, db *sql.DB) (sourceGTIDs, error) {
+	var got sourceGTIDs
+	err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed").Scan(&got.mode, &got.executed)
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 { // ER_UNKNOWN_SYSTEM_VARIABLE
-		return "", nil
+		return sourceGTIDs{}, nil
 	}
 	if err != nil {
-		return "", err
+		return sourceGTIDs{}, err
 	}
-	if !strings.EqualFold(gtidMode, "ON") {
-		return "", nil
-	}
-	return strings.Join(strings.Fields(executed), ""), nil
+	got.executed = strings.Join(strings.Fields(got.executed), "")
+	return got, nil
 }
 
 // readExecutedAndPurgedGTIDs is readExecutedGTIDs plus @@GLOBAL.gtid_purged,
-// in the same statement so both sets are of one instant. Both come back
-// empty when GTIDs are not fully on or the server has none (MariaDB, 1193).
-// Only the capture status read (#1794) uses it.
-func readExecutedAndPurgedGTIDs(ctx context.Context, db *sql.DB) (executed, purged string, err error) {
-	var gtidMode string
-	err = db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged").Scan(&gtidMode, &executed, &purged)
+// in the same statement so both sets are of one instant. Only the capture
+// status read (#1794) uses it.
+func readExecutedAndPurgedGTIDs(ctx context.Context, db *sql.DB) (sourceGTIDs, error) {
+	var got sourceGTIDs
+	err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged").Scan(&got.mode, &got.executed, &got.purged)
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 { // ER_UNKNOWN_SYSTEM_VARIABLE
-		return "", "", nil
+		return sourceGTIDs{}, nil
 	}
 	if err != nil {
-		return "", "", err
+		return sourceGTIDs{}, err
 	}
-	if !strings.EqualFold(gtidMode, "ON") {
-		return "", "", nil
-	}
-	return strings.Join(strings.Fields(executed), ""), strings.Join(strings.Fields(purged), ""), nil
+	got.executed = strings.Join(strings.Fields(got.executed), "")
+	got.purged = strings.Join(strings.Fields(got.purged), "")
+	return got, nil
 }
 
 // sameServer reports whether a and b are the same MySQL server, by

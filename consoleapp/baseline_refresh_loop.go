@@ -1294,6 +1294,14 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 		return
 	}
 	dest := strings.TrimSuffix(req.BaselineS3, "/") + "/" + name
+	// Said on the slot for as long as the upload takes: what holds the
+	// server is this send, not an update. The claim is replaced when the
+	// caller gives the slot back, and the mark goes with it.
+	s.mu.Lock()
+	if claim := s.refreshes[req.ServerID]; claim != nil && claim.State == "running" {
+		claim.SendingHeld = true
+	}
+	s.mu.Unlock()
 	n, err := s.uploadMarked(req.ServerID, name, filepath.Join(req.BaselineDir, name), dest, false)
 	if err != nil {
 		slog.Warn("snapshot refresh: could not send the newest snapshot the upload interval kept on this machine; the next cycle tries again",

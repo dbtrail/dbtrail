@@ -10291,6 +10291,16 @@ function newTablesBlock(run, snap) {
   return el("p", { class: d.warn ? "form-msg err" : "form-hint", text: d.text });
 }
 
+// refreshRunningText: what holds the refresh slot. Usually an update; with
+// sending_held, only the send to S3 of a snapshot the upload interval kept
+// on this machine (#2596), from a quiet cycle or from a slot the schedule
+// skipped (#2659): no update is running then, and "refresh running" beside
+// "no snapshot was made" would read as a contradiction.
+function refreshRunningText(rf) {
+  const since = rf.since ? " since " + utcLabel(rf.since) : "";
+  return (rf.sending_held ? "Sending a snapshot kept on this machine to S3" : "Automatic refresh running") + since + "…";
+}
+
 function baselineRefreshNote(rf) {
   // finished_at/since are RFC3339 UTC on the wire; utcLabel renders them in
   // the console's labeled shape ("YYYY-MM-DD HH:MM:SS UTC", #1354).
@@ -10298,7 +10308,7 @@ function baselineRefreshNote(rf) {
   let text;
   switch (rf.state) {
     case "running":
-      text = "Automatic refresh running" + (rf.since ? " since " + utcLabel(rf.since) : "") + "…";
+      text = refreshRunningText(rf);
       break;
     case "succeeded":
       // The two numbers PARTITION the run: rf.tables is every table, rf.carried
@@ -11724,7 +11734,7 @@ function backupRunsInFlight(dumpSt, restoreSt, b, sqlSt) {
   }
   const rf = b && !b.error && b.refresh;
   if (rf && rf.state === "running") {
-    running.push({ kind: "refresh", text: "Automatic refresh running" + (rf.since ? " since " + utcLabel(rf.since) : "") + "…" });
+    running.push({ kind: "refresh", text: refreshRunningText(rf) });
   }
   return running;
 }

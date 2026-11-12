@@ -518,6 +518,12 @@ const (
 	// state in which a slot is skipped (WindowChoice). Never the default:
 	// the daemon sets it only for a reason on its list.
 	CaptureUnaskable = "unaskable"
+	// CaptureUnread: the index did not give the capture's record (it did
+	// not answer, or the read failed), so nothing was learned about the
+	// source, and the record is where a loss would show. The update runs,
+	// as it did before the skip existed, and its why says it was the index
+	// that was not read.
+	CaptureUnread = "unread"
 )
 
 // BackupWindowProbe measures the window for e whose previous snapshot is
@@ -737,6 +743,8 @@ func WindowChoice(w BackupWindow, interval time.Duration, now time.Time) (method
 	case CaptureUnaskable:
 		// Below: no evidence that the index is missing anything, and none
 		// that it is not (#2659).
+	case CaptureUnread:
+		return BackupMethodRefresh, IndexUnreadUpdateWhy(w.CaptureDetail)
 	default:
 		// Not confirmed, and not for a reason on the daemon's list of
 		// sources that cannot be asked: a loss cannot be ruled out, so the
@@ -910,6 +918,28 @@ func UnconfirmedUpdateWhy(detail, whyNot string) string {
 		whyNot = "whether the previous snapshot can stay as it is could not be established"
 	}
 	return unconfirmedLead(detail) + ", but " + whyNot + ", so the snapshot is updated from the recorded changes instead of the slot being skipped"
+}
+
+// BackupIndexUnreadPrefix starts the why of the update WindowChoice takes
+// when the index did not give the capture's record (CaptureUnread).
+const BackupIndexUnreadPrefix = "nothing was indexed since the previous snapshot, and the index did not give capture's record"
+
+// IndexUnreadUpdateWhy is that why; detail is what the read of the index
+// ran into. It names the index, not the source: the source was never asked.
+func IndexUnreadUpdateWhy(detail string) string {
+	lead := BackupIndexUnreadPrefix
+	if detail != "" {
+		lead += " (" + detail + ")"
+	}
+	return lead + ", so whether capture recorded everything the source wrote is not known; the snapshot is updated from the recorded changes instead of the slot being skipped"
+}
+
+// IsUnconfirmedUpdate reports whether why is the why of an update taken
+// where the slot would otherwise have been skipped (UnconfirmedUpdateWhy,
+// IndexUnreadUpdateWhy).
+func IsUnconfirmedUpdate(why string) bool {
+	return strings.HasPrefix(why, BackupIndexUnreadPrefix) ||
+		(strings.HasPrefix(why, BackupSkipUnconfirmedPrefix) && !IsUnconfirmedSkip(why))
 }
 
 // IsUnconfirmedSkip reports whether a recorded skip reason is WindowChoice's.

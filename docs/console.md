@@ -1136,12 +1136,18 @@ saved, shown with the reason `serve` is not running it.
   evidence (#2659), for these reasons only: a capture in binlog-position
   mode, which is what a source without GTIDs runs, since its checkpoint
   stops short of each commit, or one with no GTID checkpoint; PostgreSQL;
-  a source that reports no GTID set (MariaDB); an index on the source
+  a MariaDB source (no `gtid_mode`); an index on the source
   server itself, whose own checkpoint writes keep the source ahead, or
   one that cannot be told apart from it; a server with no source; a
-  source that does not answer in time; an index with no live capture on
-  record, where the reason adds that capture has never recorded anything
-  for this server and to check that it is running. There the slot makes no
+  source that does not answer, or not in time, or fails the read of its
+  GTID set; an index with no live capture on record, where the reason
+  adds that no streaming capture has run against this index and, if one
+  is expected, to check that it is running. A MySQL source whose
+  `gtid_mode` is `OFF`, `OFF_PERMISSIVE` or `ON_PERMISSIVE` while the
+  capture follows it by GTID is not one of them: it serves no reader by
+  GTID, so the capture cannot be reading it, and the full backup stays;
+  a source with GTIDs on and an empty executed set beside a capture that
+  holds transactions is the reset source above. There the slot makes no
   snapshot at all: no full backup, since nothing says a change was missed,
   and no update, which would publish the previous rows under a new date.
   The slot is recorded as skipped with that reason (one record for the
@@ -1162,8 +1168,14 @@ saved, shown with the reason `serve` is not running it.
   is said before the run, in `next_method_why`, and once in the daemon
   log, which words it as the end of the skipped stretch; the update's own
   run record carries no reason (`last_run.why` is for full backups). The
-  same update runs when the index itself did not give the capture's
-  record. Stopping a source from the web interface
+  update also runs when the index itself did not give the capture's
+  record (it did not answer, or not in time, or `stream_state` could not
+  be read; the probe's time limit covers both servers, and it says which
+  one was being read when it ran out): its reason names the index, and
+  an update with nothing to add publishes no snapshot, so the next slot
+  asks again. While a kept snapshot is being sent to S3 the refresh slot
+  is busy and the page says "Sending a snapshot kept on this machine to
+  S3" (`refresh.sending_held`). Stopping a source from the web interface
   acknowledges its capture-gap record and does not erase it: the Stop
   stamps the time of the acknowledgement beside the record
   (`stream_state.gap_acked_at`), which silences the alarm (the

@@ -31,15 +31,15 @@ var cannotBeAsked = []string{
 	"this server has no source to ask",
 	"the capture runs in binlog-position mode, which is not compared",
 	"the capture has no GTID checkpoint",
-	"the source reported no GTID set",
+	"the source has no gtid_mode (a MariaDB source), which is not compared",
 	"the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture",
 	"the index and the source could not be told apart",
 	"the source did not answer",
 	"the source did not report its GTID set",
-	"the probe did not finish in time",
-	// An index that never had a capture: the one whose fix is on the
-	// operator's side, and whose reason says so.
-	"the index has no live capture on record: capture has never recorded anything for this server, so check that capture is running",
+	"the source did not answer in time",
+	// An index with no capture on record: a streaming capture that never
+	// ran, or an index loaded from binary log files. Worded for both.
+	"the index has no live capture on record: no streaming capture has run against this index; if you expect one, check that it is running",
 	"",
 }
 
@@ -49,6 +49,12 @@ var evidenceFound = []string{
 	"the capture lost events to a binlog gap after the previous snapshot",
 	"the capture dropped events that no full read has read from the source since",
 	"the capture holds transactions the source does not have: the source may have been reset, restored or replaced",
+	// A source that does not serve a reader by GTID while capture follows
+	// it by GTID: capture cannot be reading it.
+	"GTIDs are off on the source (gtid_mode=OFF) while capture follows it by GTID, so capture cannot read from it",
+	"the source's gtid_mode is OFF_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it",
+	"the source's gtid_mode is ON_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it",
+	"the source's gtid_mode is not ON while capture follows it by GTID, so capture cannot read from it",
 }
 
 // lossNotRuledOut: not confirmed, and not for a reason on the list above. A
@@ -65,8 +71,11 @@ var lossNotRuledOut = []string{
 // indexNotRead: the index did not give the capture's record. The update.
 var indexNotRead = []string{
 	"the index did not answer",
+	"the index did not answer in time",
 	"the capture's checkpoint could not be read",
 	"the request that asked was cancelled",
+	"the probe did not finish in time",
+	"",
 }
 
 // dearer is the margin an update must pass to be read in full on cost
@@ -86,8 +95,8 @@ func TestWindowChoice_everyState_2659(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	now := time.Date(2026, 11, 11, 10, 30, 0, 0, time.UTC)
 	const interval = 5 * time.Minute // cut-over age: the two-hour floor
-	n, skips, fulls, forced, measured := 0, 0, 0, 0, 0
-	for _, capture := range []string{"", CaptureBehind, CaptureSuspect, CaptureUnaskable, CaptureCaughtUp} {
+	n, skips, fulls, forced, measured, unread := 0, 0, 0, 0, 0, 0
+	for _, capture := range []string{"", CaptureBehind, CaptureSuspect, CaptureUnaskable, CaptureUnread, CaptureCaughtUp} {
 		for _, rate := range []float64{0, 1000} {
 			for _, lastFull := range []time.Duration{0, 8 * time.Minute} {
 				// No fixed cost on record, one under the last full read, one
@@ -127,6 +136,12 @@ func TestWindowChoice_everyState_2659(t *testing.T) {
 									wantMethod, wantWhy = BackupMethodFull, BackupWhyWindowPrefix
 									measured++
 								case !doubt || capture == CaptureCaughtUp:
+								case capture == CaptureUnread:
+									// The index did not give the capture's
+									// record: the update, whether or not the
+									// snapshot could wait.
+									wantMethod, wantWhy = BackupMethodRefresh, BackupIndexUnreadPrefix
+									unread++
 								case capture != CaptureUnaskable:
 									// Behind, suspect, and not confirmed for no
 									// listed reason: the full read.
@@ -157,8 +172,14 @@ func TestWindowChoice_everyState_2659(t *testing.T) {
 									if IsUnconfirmedSkip(why) {
 										t.Fatalf("%s: an update whose why %q reads as a skip", desc, why)
 									}
-									if why != "" && !strings.Contains(why, "the snapshot cannot wait") {
+									if why != "" && !IsUnconfirmedUpdate(why) {
+										t.Fatalf("%s: the update's why %q is not recognized as the update taken in place of a skip", desc, why)
+									}
+									if why != "" && capture == CaptureUnaskable && !strings.Contains(why, "the snapshot cannot wait") {
 										t.Fatalf("%s: the update's why %q does not say what stopped the skip", desc, why)
+									}
+									if capture == CaptureUnread && strings.Contains(why, "the source cannot confirm") {
+										t.Fatalf("%s: the why %q blames the source for an index that was not read", desc, why)
 									}
 								case BackupMethodFull:
 									if code := BackupWhyCode(why); (cost && code != "window_measured") || (!cost && code != "window_age") {
@@ -173,7 +194,7 @@ func TestWindowChoice_everyState_2659(t *testing.T) {
 		}
 	}
 	t.Logf("%d windows: %d skipped, %d read in full on evidence or doubt, %d read in full on cost, %d updated because the snapshot could not wait", n, skips, fulls, measured, forced)
-	if skips == 0 || fulls == 0 || forced == 0 || measured == 0 {
+	if skips == 0 || fulls == 0 || forced == 0 || measured == 0 || unread == 0 {
 		t.Fatal("one of the outcomes was never reached, so the matrix proves nothing about it")
 	}
 }
@@ -218,7 +239,6 @@ func TestSkipUnconfirmedReason_asRendered_2659(t *testing.T) {
 		"capture lost changes since the previous snapshot",
 		"how far back the index still keeps changes could not be read",
 		"the index did not answer within 3s, so whether a table was created since the previous snapshot is not known",
-		"the index could not be read to tell whether the snapshot can stay as it is",
 		"",
 	} {
 		w := BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CannotWaitWhy: whyNot}
@@ -231,15 +251,23 @@ func TestSkipUnconfirmedReason_asRendered_2659(t *testing.T) {
 			t.Errorf("the update's why reads %q", why)
 		}
 	}
-	// The index did not give the capture's record: the update, with the
-	// reason the daemon sets for it.
+	// The index did not give the capture's record: the update, and a why
+	// that names the index. The source was never asked, so it is not said
+	// to be unable to confirm anything.
 	for _, detail := range indexNotRead {
-		w := BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnaskable, CaptureDetail: detail,
-			CannotWaitWhy: "the index could not be read to tell whether the snapshot can stay as it is"}
+		w := BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnread, CaptureDetail: detail, CanWait: true}
 		method, why := WindowChoice(w, 5*time.Minute, now)
 		t.Logf("update: %s", why)
-		if method != BackupMethodRefresh || !strings.Contains(why, "("+detail+")") {
-			t.Fatalf("detail %q: method=%q why=%q, want the update", detail, method, why)
+		want := "nothing was indexed since the previous snapshot, and the index did not give capture's record"
+		if detail != "" {
+			want += " (" + detail + ")"
+		}
+		want += ", so whether capture recorded everything the source wrote is not known; the snapshot is updated from the recorded changes instead of the slot being skipped"
+		if method != BackupMethodRefresh || why != want || !IsUnconfirmedUpdate(why) || IsUnconfirmedSkip(why) {
+			t.Fatalf("detail %q: method=%q why=%q, want the update reading %q", detail, method, why, want)
+		}
+		if strings.Contains(why, "the source cannot confirm") || strings.Contains(why, "()") {
+			t.Errorf("the why %q blames the source, or has an empty detail", why)
 		}
 	}
 	// Evidence: the full read, worded as what was found. Nothing here "could
@@ -305,6 +333,8 @@ func TestChooseBackupMethod_skipsWhenTheSourceCannotBeAsked_2659(t *testing.T) {
 			BackupMethodFull, BackupMethodRefresh, ""},
 		{"the source confirms capture is caught up", BackupWindow{Events: 0, Capture: CaptureCaughtUp, CanWait: true},
 			BackupMethodRefresh, BackupMethodRefresh, ""},
+		{"the index did not give capture's record", BackupWindow{Events: 0, Capture: CaptureUnread, CaptureDetail: "the index did not answer", CanWait: true},
+			BackupMethodRefresh, BackupMethodRefresh, BackupIndexUnreadPrefix},
 		{"not confirmed, for a reason nobody classified", BackupWindow{Events: 0, CaptureDetail: "a refusal nobody classified yet", CanWait: true},
 			BackupMethodFull, BackupMethodRefresh, ""},
 		{"the count unknown", BackupWindow{Events: -1, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true},
@@ -462,8 +492,15 @@ func TestUnconfirmedSkipOnThePage_executed_2659(t *testing.T) {
 		functionBody(t, js, "function unconfirmedNextLine("),
 		functionBody(t, js, "function unconfirmedSkipLine("),
 		functionBody(t, js, "function scheduleSkipTail("),
+		functionBody(t, js, "function refreshRunningText("),
 	}, "\n") + `
+const utcLabel = (s) => s;
 const cases = ` + string(payload) + `;
+console.error(JSON.stringify({
+  update: refreshRunningText({ state: "running", since: "2026-11-11 18:00:05 UTC" }),
+  sending: refreshRunningText({ state: "running", since: "2026-11-11 18:00:05 UTC", sending_held: true }),
+  undated: refreshRunningText({ state: "running", sending_held: true }),
+}));
 console.log(JSON.stringify(cases.map((c) => ({
   name: c.Name,
   is: unconfirmedSkipText(c.Reason),
@@ -478,9 +515,28 @@ console.log(JSON.stringify(cases.map((c) => ({
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(node, path).CombinedOutput()
+	cmd := exec.Command(node, path)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
+		t.Fatalf("node: %v\n%s\n%s", err, out, stderr.String())
+	}
+	// What holds the refresh slot, as the page words it: an update, or only
+	// the send to S3 of a snapshot kept on this machine.
+	var running struct{ Update, Sending, Undated string }
+	if err := json.Unmarshal([]byte(stderr.String()), &running); err != nil {
+		t.Fatalf("decode %q: %v", stderr.String(), err)
+	}
+	t.Logf("slot: %s", running.Update)
+	t.Logf("slot: %s", running.Sending)
+	if running.Update != "Automatic refresh running since 2026-11-11 18:00:05 UTC\u2026" ||
+		running.Sending != "Sending a snapshot kept on this machine to S3 since 2026-11-11 18:00:05 UTC\u2026" ||
+		running.Undated != "Sending a snapshot kept on this machine to S3\u2026" {
+		t.Errorf("the running slot reads %+v", running)
+	}
+	if strings.Count(js, "refreshRunningText(rf)") != 2 || strings.Count(js, `"Automatic refresh running"`) != 1 {
+		t.Error("a place that says the refresh slot is running does not go through refreshRunningText")
 	}
 	var got []struct {
 		Name, Card, Next, Alone string

@@ -329,16 +329,8 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 		if b.sup.history != nil {
 			sourceRead = b.sup.history.LastSourceRead(e.ID, anchor)
 		}
-		var indexUnread bool
-		w.Capture, w.CaptureDetail, indexUnread = b.captureVerdict(ctx, e, anchor, sourceRead)
-		switch {
-		case w.Capture != console.CaptureUnaskable:
-		case indexUnread:
-			// The index did not give the capture's record: nothing was
-			// learned about the source, and the reads below go to the same
-			// index. The update runs, as it did before the skip existed.
-			w.CannotWaitWhy = "the index could not be read to tell whether the snapshot can stay as it is"
-		default:
+		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e, anchor, sourceRead)
+		if w.Capture == console.CaptureUnaskable {
 			// The source cannot be asked, so the slot may be skipped
 			// (#2659): only while the snapshot loses nothing by waiting.
 			w.CanWait, w.CannotWaitWhy = b.sup.quietSnapshotCanWait(ctx, e, anchor, time.Now().UTC(), scheduleEvery(e))
@@ -471,7 +463,7 @@ func (s *baselineSupervisor) snapshotReadersStart(ctx context.Context, e console
 // sourceRead is when the newest full backup that read the source started,
 // which the capture's dropped rows are dated against. A caller that went
 // away mid-probe learned nothing about the source, so nothing is logged.
-func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry, anchor, sourceRead time.Time) (verdict, detail string, indexUnread bool) {
+func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry, anchor, sourceRead time.Time) (verdict, detail string) {
 	var r captureProbeResult
 	switch {
 	case e.SourceDSN == "":
@@ -484,33 +476,35 @@ func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEn
 	// What the schedule does with an answer that is neither caught up nor
 	// behind is decided by its reason (captureClasses, #2659). A reason
 	// that is not on that list stays an empty verdict: the full read.
-	class := captureClassOf(r.detail)
 	if r.verdict == "" {
-		switch class {
+		switch captureClassOf(r.detail) {
 		case captureEvidence:
 			r.verdict = console.CaptureSuspect
-		case captureCannotAsk, captureIndexUnread:
+		case captureCannotAsk:
 			r.verdict = console.CaptureUnaskable
+		case captureIndexUnread:
+			r.verdict = console.CaptureUnread
 		}
 	}
 	detail = r.detail
 	if detail == captureDetailNoCapture {
-		// The one of these whose fix is on the operator's side.
+		// The one of these whose fix may be on the operator's side.
 		detail += captureNoCaptureAdvice
 	}
-	indexUnread = r.verdict == console.CaptureUnaskable && class == captureIndexUnread
 	if ctx.Err() != nil {
-		return r.verdict, detail, indexUnread
+		return r.verdict, detail
 	}
 	b.reportCaptureProbe(e, anchor, r)
-	return r.verdict, detail, indexUnread
+	return r.verdict, detail
 }
 
 // captureNoCaptureAdvice follows captureDetailNoCapture in the reason of a
-// skipped slot: nothing was ever captured for this server, so the quiet
-// index is not a quiet source, and the slots stay skipped until capture
-// runs.
-const captureNoCaptureAdvice = ": capture has never recorded anything for this server, so check that capture is running"
+// skipped slot. An index with no capture on record is two different
+// servers: one whose streaming capture never ran, where the quiet index is
+// not a quiet source and the slots stay skipped until capture runs, and one
+// loaded from binary log files (bintrail index), where no streaming capture
+// is expected and the record is empty by design. Worded for both.
+const captureNoCaptureAdvice = ": no streaming capture has run against this index; if you expect one, check that it is running"
 
 // reportCaptureProbe says, once per condition and server (gateEdge), what
 // the source answered about a server that indexed nothing since an old
@@ -1657,7 +1651,8 @@ const (
 // indexed, or the source answered), and the update taken because the
 // snapshot cannot wait. After that update the snapshot is new, the slots
 // are decided as usual until it passes the cut-over age, and the skipping
-// starts again then if nothing else changed; the line says so.
+// starts again then if nothing else changed; the line says so, and says
+// what happens when that update publishes nothing.
 func (b *backupScheduler) reportUnconfirmed(e console.ServerEntry, method, why string) {
 	skipKey, updateKey := unconfirmedSkipKey+e.ID, unconfirmedUpdateKey+e.ID
 	switch {
@@ -1667,15 +1662,19 @@ func (b *backupScheduler) reportUnconfirmed(e console.ServerEntry, method, why s
 			slog.Info("snapshot schedule: no snapshot is made at this slot, nor at the following ones while this lasts; the copy keeps the data it has. This line repeats once a day while it lasts, not at every slot",
 				"server", e.Name, "id", e.ID, "reason", why)
 		}
-	case method == console.BackupMethodRefresh && strings.HasPrefix(why, console.BackupSkipUnconfirmedPrefix):
+	case method == console.BackupMethodRefresh && console.IsUnconfirmedUpdate(why):
 		ended := b.sup.gateEdge.Resolve(skipKey)
 		fresh := b.sup.gateEdge.Fire(updateKey, why)
+		// What the update does is not known here: it publishes a snapshot
+		// (the re-anchoring fold), or its own gate finds nothing to add and
+		// publishes none (the usual outcome when the reason is an index
+		// that did not answer this probe). The line is true of both.
 		switch {
 		case ended:
-			slog.Info("snapshot schedule: scheduled slots are no longer skipped: the snapshot is updated at this slot because it cannot wait. Slots are skipped again once the new snapshot is old enough, if nothing is indexed and the source still cannot be asked",
+			slog.Info("snapshot schedule: scheduled slots are no longer skipped: an update runs at this slot instead. If it publishes a snapshot, slots are skipped again once that snapshot is old enough; if it finds nothing to add, from the next slot. Either way only while nothing is indexed and the source still cannot be asked",
 				"server", e.Name, "id", e.ID, "reason", why)
 		case fresh:
-			slog.Info("snapshot schedule: updating the snapshot instead of skipping the slot",
+			slog.Info("snapshot schedule: an update runs at this slot instead of skipping it",
 				"server", e.Name, "id", e.ID, "reason", why)
 		}
 	default:

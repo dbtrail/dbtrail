@@ -5,9 +5,11 @@ package consoleapp
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -84,6 +86,17 @@ func TestIntegrationQuietSnapshotCanWait_2659(t *testing.T) {
 		t.Fatalf("a capture loss before the snapshot stopped it: %q", why)
 	}
 	testutil.MustExec(t, db, "DELETE FROM stream_state")
+
+	// How far the probe got, for a probe that then runs out of time: the
+	// index's record of the capture is read before the source is tried.
+	var read atomic.Bool
+	if r := captureFromDBs(context.Background(), e.DSN, testutil.DefaultDSN+"/", config.SSL{}, recent, time.Time{}, &read); !read.Load() {
+		t.Fatalf("a probe that read stream_state (%+v) did not say the index's part was done", r)
+	}
+	read.Store(false)
+	if r := captureFromDBs(context.Background(), testutil.IntegrationDSN(name+"_gone"), testutil.DefaultDSN+"/", config.SSL{}, recent, time.Time{}, &read); read.Load() || (r.detail != captureDetailIndexSilent && r.detail != captureDetailCheckpointUnread) {
+		t.Fatalf("a probe whose index is not there: %+v, index part done = %v", r, read.Load())
+	}
 
 	// An index that cannot be reached: not a verdict, and never "can wait".
 	gone := e
