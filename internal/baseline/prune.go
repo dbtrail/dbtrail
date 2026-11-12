@@ -298,6 +298,12 @@ func recordNotInDestination(opts PruneOptions, res PruneResult, err error, now t
 	if err != nil {
 		return
 	}
+	if res.DestinationSilent {
+		// The destination did not answer: what it lacked at the last
+		// attempt that asked is still the newest answer there is. Removing
+		// the record would read as "S3 has them all" (#2658).
+		return
+	}
 	path := filepath.Join(opts.LocalDir, NotInDestinationFile)
 	n := res.KeptNotDurable - res.ProbeErrors
 	if opts.S3URL == "" || n <= 0 {

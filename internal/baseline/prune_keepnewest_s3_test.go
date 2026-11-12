@@ -132,6 +132,19 @@ func TestS3Count_unreachableBucketRemovesNothing(t *testing.T) {
 	if _, ok, _ := ReadNotInDestination(root); ok {
 		t.Fatal("snapshots reported as not in S3 by a bucket that did not answer")
 	}
+	// And what an earlier attempt learned stays: a bucket that goes silent
+	// must not read as "S3 has them all".
+	root3 := t.TempDir()
+	five(t, root3)
+	s3Count(t, root3, 1, answers(nil))
+	before, ok, _ := ReadNotInDestination(root3)
+	if !ok || before.Count != 4 {
+		t.Fatalf("setup: record %+v ok=%v, want 4 not in S3", before, ok)
+	}
+	s3Count(t, root3, 1, unreachable)
+	if after, ok, _ := ReadNotInDestination(root3); !ok || after.Count != 4 {
+		t.Fatalf("a silent bucket changed the record of what S3 lacks: %+v ok=%v", after, ok)
+	}
 
 	// The same, with every question failing.
 	root2 := t.TempDir()

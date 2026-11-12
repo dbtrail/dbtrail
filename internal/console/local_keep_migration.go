@@ -42,7 +42,9 @@ func clearInertKeepCounts(f *registryFile) (cleared []string, ran bool) {
 	}
 	rec := &localKeepWithS3{At: time.Now().UTC().Format(time.RFC3339)}
 	for i, e := range f.Servers {
-		if strings.TrimSpace(e.BaselineS3) == "" || e.LocalKeepNewest <= 0 {
+		// The value as written, blanks included: before #2658 any non-empty
+		// destination made the count do nothing.
+		if e.BaselineS3 == "" || e.LocalKeepNewest <= 0 {
 			continue
 		}
 		f.Servers[i].LocalKeepNewest = 0

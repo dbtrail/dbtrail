@@ -336,3 +336,25 @@ func TestLocalKeepPruneTargets_aFolderThatWasSharedStaysUncounted(t *testing.T) 
 		t.Fatalf("the sweep removed snapshots from a folder that held another server's: %v", got)
 	}
 }
+
+// A destination that is only blanks (a registry edited by hand) is never read
+// as "no destination": the count would then delete without asking anyone.
+// The folder is left alone, and is not handed to the age rule either.
+func TestLocalKeepPruneTargets_aBlankDestinationIsLeftAlone(t *testing.T) {
+	entries := []console.ServerEntry{
+		{Name: "blank", BaselineDir: "/blank", BaselineS3: "  ", LocalKeepNewest: 2},
+		{Name: "spaced", BaselineDir: "/spaced", BaselineS3: " s3://b/p/ ", LocalKeepNewest: 2},
+	}
+	targets, covered := localKeepPruneTargets(entries, "")
+	if len(targets) != 1 || targets[0] != (baselinePruneTarget{dir: "/spaced", s3: "s3://b/p/", keepNewest: 2}) {
+		t.Fatalf("targets = %+v, want only /spaced against its trimmed bucket", targets)
+	}
+	if !covered["/blank"] {
+		t.Error("the blank-destination folder is left to the age rule")
+	}
+	for _, tgt := range prunePlan(entries, "", "", 24*time.Hour) {
+		if tgt.dir == "/blank" {
+			t.Fatalf("the blank-destination folder is pruned: %+v", tgt)
+		}
+	}
+}

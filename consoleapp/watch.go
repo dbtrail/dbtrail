@@ -1708,8 +1708,19 @@ func localKeepPruneTargets(entries []console.ServerEntry, globalDir string) (out
 	covered = make(map[string]bool, len(dirs))
 	for _, d := range dirs {
 		t := baselinePruneTarget{dir: d, keepNewest: keep[d]}
-		if e, ok := console.LocalKeepServer(entries, d); ok && strings.TrimSpace(e.BaselineS3) != "" {
-			t.dir, t.s3 = e.BaselineDir, e.BaselineS3
+		// The destination decides whether the count may delete without
+		// asking, so doubt never falls to "no destination": a folder whose
+		// server cannot be named again (a link that moved between the two
+		// lookups), or whose destination is only blanks (a file edited by
+		// hand), is left alone this cycle.
+		e, ok := console.LocalKeepServer(entries, d)
+		if !ok || (e.BaselineS3 != "" && strings.TrimSpace(e.BaselineS3) == "") {
+			slog.Warn("snapshot cleanup: this folder's server or its S3 destination could not be read, so nothing is removed from it in this cycle", "dir", d)
+			covered[d] = true
+			continue
+		}
+		if e.BaselineS3 != "" {
+			t.dir, t.s3 = e.BaselineDir, strings.TrimSpace(e.BaselineS3)
 		}
 		covered[d] = true
 		out = append(out, t)
