@@ -97,12 +97,15 @@ type ServerEntry struct {
 	Hidden *hiderules.Rules `yaml:"hidden,omitempty"`
 	// SQLFresh is the server's fresh mode on the SQL port (#2546): its
 	// statements read each table's newest captured changes over its
-	// snapshot ("tails") instead of the snapshot alone. Absent is fast, as
-	// before the switch. Registry-owned like Hidden: only SetSQLFresh writes
-	// it, Add never stores it and Update keeps the stored value. The process
-	// that serves the port applies it when it reads the registry again
-	// (Server.applySQLFresh); BINTRAIL_SQL_TAILS=on overrides it.
-	SQLFresh bool `yaml:"sql_fresh,omitempty"`
+	// snapshot ("tails") instead of the snapshot alone. Three states: absent
+	// is no choice saved, which is fresh, the default (SQLFreshOn); true and
+	// false are a saved choice, fresh and fast. A pointer so that a saved
+	// "fast" is written to the file and told apart from no choice.
+	// Registry-owned like Hidden: only SetSQLFresh writes it, Add never
+	// stores it and Update keeps the stored value. The process that serves
+	// the port applies it when it reads the registry again
+	// (Server.applySQLFresh); BINTRAIL_SQL_TAILS=on or =off overrides it.
+	SQLFresh *bool `yaml:"sql_fresh,omitempty"`
 	// SQLLikeIgnoresCase sends this server's statements with LIKE to the
 	// copy on the SQL port, written ILIKE there (readrouter.CopyOptions).
 	// Absent keeps them on MySQL, as before the switch: MySQL compares LIKE
@@ -770,7 +773,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	e.ID = id
 	e.LocalKeepHeldDir = ""             // registry-owned; a new entry never starts held
 	e.Hidden = nil                      // SetHidden is the only writer (#2529)
-	e.SQLFresh = false                  // SetSQLFresh is the only writer (#2546)
+	e.SQLFresh = nil                    // SetSQLFresh is the only writer (#2546)
 	e.SQLLikeIgnoresCase = false        // SetSQLMode is the only writer
 	e.PortUser, e.PortPassword = "", "" // SetPortLogin is the only writer
 	r.file.Servers = append(r.file.Servers, e)
@@ -902,9 +905,20 @@ func (r *Registry) SetHidden(id string, set *hiderules.Set) (ServerEntry, error)
 	return ServerEntry{}, ErrUnknownServer
 }
 
+// SQLFreshOn is whether this server's statements on the SQL port read tails
+// as far as its own entry says: its saved choice, and fresh when none is
+// saved. The process that serves the port may still be told otherwise for
+// every server (BINTRAIL_SQL_TAILS).
+func (e ServerEntry) SQLFreshOn() bool { return e.SQLFresh == nil || *e.SQLFresh }
+
+// SQLFreshSaved is whether a choice was saved for this server, as opposed to
+// the default applying.
+func (e ServerEntry) SQLFreshSaved() bool { return e.SQLFresh != nil }
+
 // SetSQLFresh saves whether entry id's statements on the SQL port read
 // tails (#2546). It is the only writer of ServerEntry.SQLFresh, and it
-// changes nothing else in the entry.
+// changes nothing else in the entry. Either value is a saved choice: fast
+// is stored, not left absent.
 func (r *Registry) SetSQLFresh(id string, on bool) (ServerEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -915,7 +929,7 @@ func (r *Registry) SetSQLFresh(id string, on bool) (ServerEntry, error) {
 		if old.ID != id {
 			continue
 		}
-		r.file.Servers[i].SQLFresh = on
+		r.file.Servers[i].SQLFresh = &on
 		if err := r.save(); err != nil {
 			r.file.Servers[i].SQLFresh = old.SQLFresh // roll back
 			return ServerEntry{}, err
@@ -941,7 +955,8 @@ func (r *Registry) SetSQLMode(id string, fresh, like *bool) (ServerEntry, error)
 			continue
 		}
 		if fresh != nil {
-			r.file.Servers[i].SQLFresh = *fresh
+			v := *fresh // a copy: the caller's variable is not kept
+			r.file.Servers[i].SQLFresh = &v
 		}
 		if like != nil {
 			r.file.Servers[i].SQLLikeIgnoresCase = *like

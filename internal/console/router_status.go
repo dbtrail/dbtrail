@@ -184,8 +184,9 @@ type RouterServerNumbers struct {
 	// SQLMode is how this server's statements answer now (#2546): "fresh"
 	// (its newest captured changes over its snapshot) or "fast" (the
 	// snapshot alone); SQLModeFrom where that comes from: "environment"
-	// (BINTRAIL_SQL_TAILS=on, every server), "saved" (its own switch) or
-	// "default". Absent from a router older than the switch.
+	// (BINTRAIL_SQL_TAILS=on or =off, every server), "saved" (its own
+	// switch) or "default" (nothing saved: fresh). Absent from a router
+	// older than the switch.
 	SQLMode     string `json:"sql_mode,omitempty"`
 	SQLModeFrom string `json:"sql_mode_from,omitempty"`
 	// SQLModeWarming: fresh mode applies and is still catching up with
@@ -335,11 +336,19 @@ type RouterStatusDoc struct {
 	// and the snapshot times are then the last ones known, not the
 	// current ones.
 	CopySnapshotsReadAt string `json:"copy_snapshots_read_at,omitempty"`
-	// Fresh says the port lays each table's newest captured changes over its
-	// snapshot (BINTRAIL_SQL_TAILS=on, the fresh mode); false is the default
-	// fast mode, answers from the snapshot alone. Absent from a router older
-	// than the switch.
+	// Fresh says BINTRAIL_SQL_TAILS=on puts every server in fresh mode: the
+	// port lays each table's newest captured changes over its snapshot.
+	// False says it does not, and each server's sql_mode is then its own.
+	// Absent from a router older than the switch.
 	Fresh *bool `json:"fresh,omitempty"`
+	// SQLModeForced is "fresh" or "fast" when BINTRAIL_SQL_TAILS decides for
+	// every server, absent when each server's choice applies. A router that
+	// does not send it and lists a server with no saved choice as fast is
+	// older than fresh being the default.
+	SQLModeForced string `json:"sql_mode_forced,omitempty"`
+	// FreshByDefault says a server with no saved choice is fresh on this
+	// router. Absent from an older one, where it is fast.
+	FreshByDefault bool `json:"fresh_by_default,omitempty"`
 	// PerServerMode says this router reads each server's own fresh-mode
 	// switch (#2546) and gives every server in Servers its sql_mode. Absent
 	// from an older router, which answers every server in one mode whatever
