@@ -162,12 +162,12 @@ const (
 	captureDetailGTIDOffPermissive = "the source's gtid_mode is OFF_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it"
 	captureDetailGTIDOnPermissive  = "the source's gtid_mode is ON_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it"
 	captureDetailGTIDModeOther     = "the source's gtid_mode is not ON while capture follows it by GTID, so capture cannot read from it"
-	captureDetailCaptureUnparsed = "the capture's GTID set does not parse"
-	captureDetailSourceUnparsed  = "the source's GTID set does not parse"
-	captureDetailBehind          = "the source reports transactions the capture's checkpoint does not include"
-	captureDetailDiverged        = "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
+	captureDetailCaptureUnparsed   = "the capture's GTID set does not parse"
+	captureDetailSourceUnparsed    = "the source's GTID set does not parse"
+	captureDetailBehind            = "the source reports transactions the capture's checkpoint does not include"
+	captureDetailDiverged          = "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
 	// What reaching the two servers ran into.
-	captureDetailCancelled        = "the request that asked was cancelled"
+	captureDetailCancelled = "the request that asked was cancelled"
 	// captureDetailTimedOut is the bound on the whole probe running out
 	// with nothing said about how far it got. The schedule's own probe
 	// never returns it: it says which side was being read
