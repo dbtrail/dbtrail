@@ -54,8 +54,8 @@ type backupScheduler struct {
 	// window is the probe both the loop's and the API's gates carry:
 	// measureWindow in the daemon; nil in the scheduler tests whose fixture
 	// snapshot is dated weeks before their slots (with nothing indexed
-	// since it and no source to ask, every one of their updates would be a
-	// full backup), set back by the tests OF the cut-over.
+	// since it and no source to ask, a measured zero would make their updates
+	// full backups), set back by the tests OF the cut-over.
 	window console.BackupWindowProbe
 	// fullBackups: the daemon's baseline-creation opt-in. Without it a slot
 	// whose chosen producer is a full backup is skipped and recorded as
@@ -484,9 +484,9 @@ func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (b
 // an index that did not answer (reportWindowBlind): the reason attribute of
 // reportCountUnknown's line.
 const (
-	countUnknownNoBase        = "nothing on record says how far the index had been written when that snapshot was made: the run history does not hold it, or another process made the snapshot"
+	countUnknownNoBase        = "nothing on record says how far the index had been written when that snapshot was made: the run history does not hold it, another process made the snapshot, or the index held no event then"
 	countUnknownOtherIndex    = "this server was pointed at another index since the last update made here"
-	countUnknownWentBackwards = "the index's event counter is below the one recorded when that snapshot was made, so the index was rebuilt or replaced"
+	countUnknownWentBackwards = "the index's event counter is below the one recorded when that snapshot was made: the index was rebuilt or replaced, or rotation dropped every hour it held"
 )
 
 // windowNoEstimateWords is what an unknown count means for the choice, in
@@ -495,7 +495,7 @@ const (
 // estimated its cost. The exception is console.CutoverToFull's fixed-cost
 // rule, which needs no count.
 const windowNoEstimateWords = "the schedule's choice is the update, with no estimate of what it will cost; " +
-	"the exception is a server with no per-event rate whose cheapest recent update took clearly longer than its last full read, where a full read is still chosen"
+	"the exception is a server with no per-event rate whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen"
 
 // reportCountUnknown says, once per cause and server, that the changes since
 // the previous snapshot could not be counted, and what the schedule does

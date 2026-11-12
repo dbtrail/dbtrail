@@ -1078,7 +1078,8 @@ saved, shown with the reason `serve` is not running it.
   backup, no full backup is chosen on the estimate and the update runs,
   however old the previous snapshot is: its age says nothing about the
   size of the source, which is what a full backup costs. The rule of the
-  cheapest recent update, above, needs neither a rate nor a count, so it
+  cheapest recent update, above, needs no count, so on a server with no
+  per-event rate that has measured an update since its last full backup it
   still applies with an unknown count. The count is unknown when the
   index does not answer the probe, when nothing on record says how far
   the index had been written at the previous snapshot (the run history
