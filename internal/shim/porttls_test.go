@@ -35,6 +35,14 @@ func TestLoadPortTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(dir, "missing.pem")
+	encrypted := filepath.Join(dir, "encrypted.pem")
+	if err := os.WriteFile(encrypted, []byte("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIBvTBXBgkqhkiG9w0BBQ0wSjApBgkqhkiG9w0BBQwwHAQI\n-----END ENCRYPTED PRIVATE KEY-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(dir, "legacy-encrypted.pem")
+	if err := os.WriteFile(legacy, []byte("-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF\n\nAAAA\n-----END RSA PRIVATE KEY-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	ok := []struct{ name, cert, key string }{
 		{"an RSA certificate and its key", rsaCert.CertFile, rsaCert.KeyFile},
@@ -75,6 +83,8 @@ func TestLoadPortTLS(t *testing.T) {
 		{"a certificate file that is not PEM", notPEM, rsaCert.KeyFile, []string{notPEM}},
 		{"a key file that is not PEM", rsaCert.CertFile, notPEM, []string{notPEM}},
 		{"the two files swapped", rsaCert.KeyFile, rsaCert.CertFile, []string{rsaCert.KeyFile}},
+		{"a PKCS#8 key encrypted with a passphrase", rsaCert.CertFile, encrypted, []string{encrypted, "encrypted with a passphrase"}},
+		{"a legacy key encrypted with a passphrase", rsaCert.CertFile, legacy, []string{legacy, "encrypted with a passphrase"}},
 	}
 	keyBytes := keyMaterial(t, rsaCert.KeyFile, other.KeyFile, ecCert.KeyFile)
 	for _, c := range bad {

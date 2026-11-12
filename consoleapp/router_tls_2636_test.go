@@ -148,7 +148,8 @@ func TestRouterTLSLine(t *testing.T) {
 	t.Logf("\n%s%s%s", none, set, expired)
 }
 
-// The router's port, started from its settings, serves the certificate they
+// The router's port, started from its settings through the config runRouter
+// builds (routerPortConfig), serves the certificate they
 // name: a client that trusts only the test CA and checks the name logs in,
 // and a client that asks for no TLS logs in too. Without the settings, the
 // client that verifies is refused.
@@ -183,7 +184,7 @@ func TestRouterPort_servesTheCertificateSet(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			go srv.FollowFiles(ctx, 20*time.Millisecond)
 			addr := freeAddr(t)
-			rt := &routerPort{srv: srv, addr: addr, cfg: routerFlashbackConfig(st), poll: 20 * time.Millisecond, out: &lockedBuffer{}}
+			rt := &routerPort{srv: srv, addr: addr, cfg: routerPortConfig(st, func() bool { return false }), poll: 20 * time.Millisecond, out: &lockedBuffer{}}
 			done := make(chan error, 1)
 			go func() { done <- rt.serve(ctx) }()
 			t.Cleanup(func() {

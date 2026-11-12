@@ -3,8 +3,11 @@ package shim
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -48,6 +51,9 @@ func LoadPortTLS(certFile, keyFile string) (*PortTLS, error) {
 	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
+		if keyIsEncrypted(keyFile) {
+			return nil, fmt.Errorf("the key %s is encrypted with a passphrase, which the port cannot ask for: write it out without one (openssl pkey -in <key> -out <new key>) and keep that file readable only by the user the port runs as", keyFile)
+		}
 		return nil, fmt.Errorf("load the certificate %s with the key %s: %w", certFile, keyFile, err)
 	}
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
@@ -65,6 +71,26 @@ func LoadPortTLS(certFile, keyFile string) (*PortTLS, error) {
 		NotBefore: leaf.NotBefore,
 		NotAfter:  leaf.NotAfter,
 	}, nil
+}
+
+// keyIsEncrypted says whether keyFile holds a passphrase-protected PEM key:
+// PKCS#8 "ENCRYPTED PRIVATE KEY", or a legacy key with Proc-Type 4,ENCRYPTED.
+// Only the headers are looked at.
+func keyIsEncrypted(keyFile string) bool {
+	data, err := os.ReadFile(keyFile)
+	if err != nil {
+		return false
+	}
+	for {
+		var b *pem.Block
+		b, data = pem.Decode(data)
+		if b == nil {
+			return false
+		}
+		if b.Type == "ENCRYPTED PRIVATE KEY" || strings.Contains(b.Headers["Proc-Type"], "ENCRYPTED") {
+			return true
+		}
+	}
 }
 
 // ValidityProblem says what is wrong with the certificate's dates at now, ""
