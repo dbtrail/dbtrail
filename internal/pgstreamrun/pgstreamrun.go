@@ -369,6 +369,11 @@ var (
 	maxTxnOpen = indexer.DefaultMaxTxnOpen
 )
 
+// commitWithin is how long complete transactions wait for a batch to fill
+// before they are committed anyway (#2666): see indexer.DefaultCommitWithin.
+// Read once from BINTRAIL_COMMIT_WITHIN; a variable so a test can change it.
+var commitWithin = indexer.CommitWithinFromEnv()
+
 // streamLoopPG batches row events into the indexer and checkpoints the durable LSN.
 //
 // The checkpoint cursor is the last COMPLETE transaction's commit LSN (lastCommitLSN)
@@ -470,6 +475,7 @@ func streamLoopPG(
 		},
 	})
 	defer w.Close()
+	w.SetCommitWithin(commitWithin)
 
 	// checkpoint commits the rows of complete transactions, then persists the
 	// last commit LSN. The order is commit → saveCheckpointPG → AckCommitted:
@@ -517,6 +523,14 @@ func streamLoopPG(
 
 		case <-w.CapC():
 			if err := w.OnCap(); err != nil {
+				return err
+			}
+
+		case <-w.WithinC():
+			// Complete transactions have waited long enough for a batch to
+			// fill (#2666). Their rows become visible now; the position is
+			// saved at the checkpoint, as after a full batch.
+			if err := w.CommitComplete(); err != nil {
 				return err
 			}
 
