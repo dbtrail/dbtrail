@@ -234,7 +234,7 @@ func snapshotDoneText(name string, b console.BaselineStatus) string {
 	if n := len(b.LeftOutTables) + b.LeftOutTablesOmitted; n > 0 {
 		text += fmt.Sprintf(" %s left out: the web interface names each and says why"+console.OnPage(console.PageSnapshots)+".", plural(n, "table"))
 	}
-	return text + fmt.Sprintf("\nKeep it current:  bintrail-console snapshot schedule %s --every 1h\nThen the MySQL port:  bintrail-console port on", name)
+	return text + fmt.Sprintf("\nKeep it current:  bintrail-console snapshot schedule %s --every 1h\nThe MySQL port:  bintrail-console port status", name)
 }
 
 // snapshotFailure says why a read failed. A read can fail AFTER leaving a

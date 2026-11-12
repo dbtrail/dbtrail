@@ -646,7 +646,7 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string) {
 			// person must not be left thinking one was shown.
 			fmt.Fprintln(out, "No password came with the answer. Make one:  bintrail-console port new-password")
 		}
-		fmt.Fprintf(out, "It answers for %q once the first copy is ready. Until %q has a forwarding user, the copy answers alone:\n  bintrail-console server forward-user %s -u <user> -p\n", name, name, user)
+		fmt.Fprintf(out, "Statements for %q are answered once its first copy is ready. Until it has a forwarding user, the copy answers them alone:\n  bintrail-console server forward-user %s -u <user> -p\n", name, user)
 	case *p.Enabled:
 		routing := "off"
 		if p.RoutingOn {
@@ -660,6 +660,11 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string) {
 	}
 	if p.Error != "" && *p.Enabled {
 		fmt.Fprintf(out, "It is not answering: %s\n", p.Error)
+	}
+	// What the daemon knows stops the port from answering (an older compose
+	// file with no router): said, never left out after "it is on now".
+	if p.Notice != "" && *p.Enabled {
+		fmt.Fprintf(out, "%s\n", p.Notice)
 	}
 	fmt.Fprintln(out)
 }

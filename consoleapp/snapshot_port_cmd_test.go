@@ -44,7 +44,7 @@ func TestSnapshotRunWaitsForTheCopy(t *testing.T) {
 	if err := runSnapshotRun(context.Background(), c, "shop", true, &out); err != nil {
 		t.Fatalf("err = %v\n%s", err, out.String())
 	}
-	for _, s := range []string{`The copy of "shop" is ready: 12 tables.`, "snapshot schedule shop --every 1h", "port on"} {
+	for _, s := range []string{`The copy of "shop" is ready: 12 tables.`, "snapshot schedule shop --every 1h", "port status"} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("output lacks %q:\n%s", s, out.String())
 		}

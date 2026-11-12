@@ -42,6 +42,7 @@ const cases = {
   savedOff: res({ enabled: false }),
   notTurnedOn: res({ enabled: false, not_turned_on: "its setting could not be saved: read-only file system." }),
   olderDaemon: res(undefined),
+  noticeOn: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x", notice: "NOTHING ANSWERS ON IT: no router." }),
   noWordOnEnabled: res({ turned_on: true, password: "bfp_x" }),
 };
 const out = {};
@@ -92,7 +93,7 @@ console.log(JSON.stringify(out));
 		}
 	}
 	has("turnedOn", "The MySQL port is on now, with Engine Routing on.", "mysql -h 127.0.0.1 -P 3309 -u shop -p",
-		"Password, shown only now.", "bfp_abc123", "It answers for shop once the first copy is ready.")
+		"Password, shown only now.", "bfp_abc123", "Statements for shop are answered once its first copy is ready.")
 	has("turnedOnOtherAddress", "mysql -h 10.0.0.5 -P 3310 -u shop -p")
 	has("turnedOnNoPassword", "No password came with the answer.")
 	hasNot("turnedOnNoPassword", "shown only now")
@@ -103,6 +104,7 @@ console.log(JSON.stringify(out));
 	hasNot("expandedName", "-u a{b")
 	has("newlineName", "-u <server name> -p")
 	has("plainName", "-u db1.example.com:3306 -p")
+	has("noticeOn", "bfp_x", "NOTHING ANSWERS ON IT: no router.")
 	has("notTurnedOn", "The MySQL port was not turned on: its setting could not be saved: read-only file system.")
 	hasNot("notTurnedOn", "system..", "mysql -h", "shown only now")
 	for _, k := range []string{"alreadyOn", "savedOff", "olderDaemon", "noWordOnEnabled"} {

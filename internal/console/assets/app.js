@@ -18815,9 +18815,10 @@ function readConnectStash() {
 // newServerPortBlock (#2686): what adding a server did to the MySQL port.
 // Adding the first one turns the port on, with Engine Routing on, and this
 // answer is the only place its password is ever shown, so it is drawn
-// whenever the answer carries one. Nothing is drawn for a port that was
-// already on or was saved as off: nothing about it changed. Pure, so every
-// state can be rendered with node.
+// whenever the port was turned on by this add. Nothing is drawn for a port that was
+// already on or was saved as off: nothing about it changed, and nothing for an
+// answer that does not say whether the port is on (an older DBTrail, or a
+// reply that is not one). Pure, so every state can be rendered with node.
 function newServerPortBlock(res) {
   const p = res && res.port;
   if (!p || typeof p.enabled !== "boolean") return null;
@@ -18838,8 +18839,9 @@ function newServerPortBlock(res) {
     } else {
       box.append(el("p", { class: "cn-sql-row", text: "No password came with the answer. Make one on the MySQL clients page." }));
     }
-    box.append(el("p", { class: "form-hint", text: "It answers for " + res.name + " once the first copy is ready. Until the server has a forwarding user (MySQL clients page), the copy answers alone." }));
+    box.append(el("p", { class: "form-hint", text: "Statements for " + res.name + " are answered once its first copy is ready. Until it has a forwarding user (MySQL clients page), the copy answers them alone." }));
     if (p.error) box.append(el("p", { class: "cn-sql-row cn-sql-err", text: "It is not answering: " + p.error }));
+    if (p.notice) box.append(el("p", { class: "cn-sql-row cn-sql-err", text: p.notice }));
     return box;
   }
   if (!p.enabled && p.not_turned_on) {

@@ -199,6 +199,11 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read after the slow checks, right before the save: whether this is the
+	// first server decides whether the MySQL port turns on by itself (#2686).
+	// Two first servers added at once both read true; the port's own lock
+	// makes one password of it.
+	first := s.cm.reg.Len() == 0 && !s.cm.bootSelectable()
 	added, created, err := s.persistNewEntry(entry, deriveIndex, base, localCopyOf(req))
 	if err != nil {
 		writeJSONError(w, newEntryErrStatus(err), err.Error())
@@ -224,7 +229,7 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 	slog.Info("connect: capture started", "server", added.Name, "id", added.ID)
 	writeJSON(w, http.StatusOK, connectCheckResponse{
 		OK: true, Name: added.Name, Doctor: report, Started: true, Server: &dto, Monitor: &status,
-		Port: s.portOnForNewServer(r),
+		Port: s.portOnForNewServer(r, first),
 	})
 }
 

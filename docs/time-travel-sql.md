@@ -25,8 +25,9 @@ There are three ways to put `AS OF` SQL in front of your data; they differ only
 in *how the client connects*:
 
 1. **The MySQL port of `bintrail-console`: one port for every monitored
-   server (multi-source).** If you already run `bintrail-console watch`, turn
-   the port on in the web interface (**Connect a SQL client**). It serves
+   server (multi-source).** If you already run `bintrail-console watch`, the port
+   turns on when the first server is added; otherwise turn it on in the web
+   interface (**Connect a SQL client**) or with `dbtrail port on`. It serves
    `_flashback` / `_snapshot` / `_diff` for *every* server in the
    web interface, routed by the connection username. No separate `bintrail shim`
    process, no hand-built index DSN. See [the MySQL port](#the-mysql-port-multi-source)
@@ -578,8 +579,10 @@ What to know before relying on it:
 
 <a id="read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental"></a>
 ### Engine Routing: MySQL answers, the copy takes the heavy reads
-Engine Routing is off until it is turned on. Off, the copy answers every
-statement on the port, as described above, and nothing is sent to MySQL.
+Engine Routing is on from the moment the port is first turned on (it was
+off until turned on in earlier versions), and stays as it was saved after
+that. Off, the copy answers every statement on the port, as described above,
+and nothing is sent to MySQL.
 
 A server's hidden tables and columns apply to what the copy answers. What the
 port sends to MySQL runs under the forwarding account's grants instead, so
@@ -1135,9 +1138,8 @@ What this is and is not:
   fresh mode.** A heavy read served from the copy sees what the last
   snapshots hold, however long ago that was, and in the fresh mode what
   capture has indexed, except over a table that has no tail ([No maximum copy age](#no-maximum-copy-age) above).
-  That is why Engine Routing is off until you turn it on. A `SELECT` that
-  must see the last second belongs in a transaction, which MySQL always
-  answers.
+  A `SELECT` that must see the last second belongs in a transaction, which
+  MySQL always answers.
 - **The copy's grants are nobody's; the forwarded ones are the forwarding
   account's.** Forwarded statements run with the server's forwarding
   account, never with the account DBTrail captures with. Give this port
