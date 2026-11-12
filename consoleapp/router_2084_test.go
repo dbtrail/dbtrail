@@ -830,6 +830,13 @@ func TestPortsNeverForwardWithTheCaptureAccount_2317(t *testing.T) {
 			for _, stmt := range []string{"SELECT 1", "DELETE FROM t", "SELECT * FROM mysql.user"} {
 				_, _ = h.HandleQuery(stmt)
 			}
+			// A statement that needed forwarding says why it was not
+			// (#2686), with this server's own reason.
+			_, err = h.HandleQuery("INSERT INTO t VALUES (1)")
+			var me *gomysql.MyError
+			if !errors.As(err, &me) || me.Code != gomysql.ER_OPTION_PREVENTS_STATEMENT || !strings.Contains(me.Message, refusal) {
+				t.Errorf("%s, %s: an INSERT got %v; want 1290 with the server's reason", port, name, err)
+			}
 			if _, routing := h.RouterConfig(); routing {
 				t.Errorf("%s, %s: a router is bound on a refused server", port, name)
 			}
