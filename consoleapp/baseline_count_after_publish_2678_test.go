@@ -483,8 +483,13 @@ func TestResendLacking_oneRoundAtATimeAndAnHourAfterAFailure(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("inside the hour after a failed round %d more sends were tried", calls-2)
 	}
-	if rec, ok, _ := baseline.ReadNotInDestination(dir); !ok || rec.Count != 2 || !rec.Resending {
-		t.Fatalf("the record while waiting: %+v ok=%v", rec, ok)
+	rec, ok, _ := baseline.ReadNotInDestination(dir)
+	if !ok || rec.Count != 2 || !rec.Resending || rec.NextSend == nil {
+		t.Fatalf("the record while waiting: %+v ok=%v, want the two listed and when the next send is", rec, ok)
+	}
+	// An hour after the round that failed, which is what the page says.
+	if d := rec.NextSend.Sub(now); d < 4*time.Minute || d > 6*time.Minute {
+		t.Fatalf("the next send is %s from now, want the 5 minutes left of the hour", d)
 	}
 	// Past the hour it is tried again; still failing, and said once only.
 	now = now.Add(6 * time.Minute)
