@@ -535,7 +535,8 @@ console.log(JSON.stringify(cases.map((c) => ({
 		running.Undated != "Sending a snapshot kept on this machine to S3\u2026" {
 		t.Errorf("the running slot reads %+v", running)
 	}
-	if strings.Count(js, "refreshRunningText(rf)") != 2 || strings.Count(js, `"Automatic refresh running"`) != 1 {
+	// Its declaration and its two callers; the words themselves once.
+	if strings.Count(js, "refreshRunningText(rf)") != 3 || strings.Count(js, `"Automatic refresh running"`) != 1 {
 		t.Error("a place that says the refresh slot is running does not go through refreshRunningText")
 	}
 	var got []struct {
