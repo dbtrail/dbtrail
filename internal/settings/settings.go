@@ -142,6 +142,9 @@ func Nearest(option string) string {
 	return best
 }
 
+// EditDistance is distance, for a caller that suggests other names.
+func EditDistance(a, b string) int { return distance(a, b) }
+
 // distance is the number of single-letter insertions, deletions and
 // replacements that turn a into b.
 func distance(a, b string) int {

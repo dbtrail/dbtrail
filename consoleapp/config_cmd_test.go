@@ -82,3 +82,39 @@ func TestConfigCheck_isACommand(t *testing.T) {
 		t.Fatalf("dbtrail config check is not a command: %v", err)
 	}
 }
+
+// TestOwnEnv_optionFile: the commands that talk to a running DBTrail believe
+// /etc/dbtrail/dbtrail.cnf about where it is, and still never an env file,
+// including when the env file hides the option file's line.
+func TestOwnEnv_optionFile(t *testing.T) {
+	for _, k := range []string{"BINTRAIL_CONSOLE_LISTEN", "BINTRAIL_CONSOLE_AUTH"} {
+		if _, set := os.LookupEnv(k); set {
+			t.Skipf("%s is set in this test's environment", k)
+		}
+	}
+	undoEnv := cli.ApplyEnvFileForTest("BINTRAIL_CONSOLE_LISTEN=10.9.9.9:1\n")
+	defer undoEnv()
+	p := filepath.Join(t.TempDir(), "dbtrail.cnf")
+	if err := os.WriteFile(p, []byte("[dbtrail]\nconsole-listen = 127.0.0.1:8090\nconsole-auth = /srv/auth.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer cli.LoadOptionFileForTest(p)()
+
+	if got := ownEnv("BINTRAIL_CONSOLE_LISTEN"); got != "127.0.0.1:8090" {
+		t.Errorf("an env file hid the option file's line; ownEnv must use the line: %q", got)
+	}
+	if got := ownEnv("BINTRAIL_CONSOLE_AUTH"); got != "/srv/auth.yaml" {
+		t.Errorf("a line no env file hid: %q", got)
+	}
+}
+
+func TestOwnEnv_envFileAloneStillReadsAsUnset(t *testing.T) {
+	if _, set := os.LookupEnv("BINTRAIL_CONSOLE_LISTEN"); set {
+		t.Skip("BINTRAIL_CONSOLE_LISTEN is set in this test's environment")
+	}
+	defer cli.ApplyEnvFileForTest("BINTRAIL_CONSOLE_LISTEN=10.9.9.9:1\n")()
+	defer cli.LoadOptionFileForTest(filepath.Join(t.TempDir(), "none.cnf"))()
+	if got := ownEnv("BINTRAIL_CONSOLE_LISTEN"); got != "" {
+		t.Errorf("an env file must never say where DBTrail is: %q", got)
+	}
+}

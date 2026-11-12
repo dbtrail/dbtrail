@@ -30,7 +30,12 @@ an option with no value, an option the environment already sets, an include.
 It never prints a value.
 
 Exits 1 when it finds one, so a deploy can stop on it. A program that starts
-with such a line starts anyway and prints the same warning.`,
+with such a line starts anyway and prints the same warning.
+
+Whether a line is hidden by the environment depends on the environment, so
+run it where DBTrail runs: with the Docker install, the dbtrail command already
+runs it inside the container. Under systemd, the service's environment is not
+the one of your shell.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		cli.LoadEnvFile()

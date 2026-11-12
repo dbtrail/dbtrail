@@ -18,8 +18,9 @@ import (
 // OptionFilePath is the option file every DBTrail program reads when it
 // starts (#2671). It is the only place one is looked for: never the current
 // folder, so what decides where a command sends a password cannot be chosen
-// by whoever prepared the folder it is run in. The compose file mounts the
-// operator's dbtrail.cnf here.
+// by whoever prepared the folder it is run in. In the Docker install it is
+// read inside the container, so the file must be mounted there; the compose
+// file does not mount one yet.
 const OptionFilePath = "/etc/dbtrail/dbtrail.cnf"
 
 // OptionGroup is the group of the file DBTrail reads. Other groups are left
@@ -50,7 +51,15 @@ type OptionReport struct {
 	Notes []string
 
 	values map[string]string
+	// shadowed are values an env file hid. See OptionFileValue.
+	shadowed map[string]string
 }
+
+// daemonAddressKeys are what say where the running DBTrail is and how to log
+// in to it. The commands that talk to it ignore an env file for these
+// (consoleapp's ownEnv), so a line of the option file an env file hides is
+// still theirs.
+var daemonAddressKeys = []string{"BINTRAIL_CONSOLE_TOKEN", "BINTRAIL_CONSOLE_LISTEN", "BINTRAIL_CONSOLE_AUTH"}
 
 // AppliedOption is one setting the file set.
 type AppliedOption struct {
@@ -103,13 +112,30 @@ func ReadOptionFile(path string, lookupEnv func(string) (string, bool), fromEnvF
 		r.Problems = append(r.Problems, fmt.Sprintf("line %d is an include, and DBTrail does not follow includes, so the file it names is not read.", n))
 	}
 
-	// The last line of an option wins, as in MySQL; an earlier one is a note.
+	for _, n := range lines.AfterGroup {
+		r.Problems = append(r.Problems, fmt.Sprintf("line %d has text after the ] of its group, and that text is not read. Put each option on a line of its own.", n))
+	}
+	if !slices.ContainsFunc(lines.Groups, func(g string) bool { return strings.EqualFold(g, OptionGroup) }) {
+		for _, g := range lines.Groups {
+			if lg := strings.ToLower(g); lg == "bintrail" || lg == "dbtrail-ee" || settings.EditDistance(lg, OptionGroup) <= 2 {
+				r.Problems = append(r.Problems, fmt.Sprintf("the file has no [%s] group, which is the only one DBTrail reads, and has a [%s] group: did you mean [%s]?", OptionGroup, g, OptionGroup))
+				break
+			}
+		}
+	}
+
+	// The last line of an option wins, as in MySQL; an earlier one is a
+	// note. Only a line that could be used counts: one with no value, or a
+	// name DBTrail does not take, must not hide a good line above it.
 	last := map[string]int{}
 	for i, o := range lines.Options {
-		last[o.Name] = i
+		if e, ok := settings.ByOption(o.Name); ok && e.Kind == settings.Setting && o.HasValue {
+			last[o.Name] = i
+		}
 	}
 	secretsRead := []string{}
 	r.values = map[string]string{}
+	r.shadowed = map[string]string{}
 	for i, o := range lines.Options {
 		if o.Name == "" {
 			r.Problems = append(r.Problems, fmt.Sprintf("line %d has no option name before the = sign, so it is ignored.", o.Line))
@@ -154,11 +180,23 @@ func ReadOptionFile(path string, lookupEnv func(string) (string, bool), fromEnvF
 		// many as ${NAME:-}, empty when the operator chose nothing.
 		if v, set := lookupEnv(e.Env); set && v != "" {
 			where := "the environment DBTrail was started with"
+			msg := fmt.Sprintf("line %d: %s is not used, because %s sets %s, and that comes first.", o.Line, o.Name, where, e.Env)
 			if fromEnvFile(e.Env) {
 				where = "an env file (.bintrail.env or config.env)"
+				msg = fmt.Sprintf("line %d: %s is not used, because %s sets %s, and that comes first.", o.Line, o.Name, where, e.Env)
+				// The commands that talk to a running DBTrail never believe
+				// an env file about where it is, so for them this line is
+				// the one used.
+				if slices.Contains(daemonAddressKeys, e.Env) {
+					msg += " The dbtrail commands that talk to a running DBTrail (server, port, snapshot) do not read env files for it, and use this line."
+					r.shadowed[e.Env] = o.Value
+				}
 			}
-			r.Problems = append(r.Problems, fmt.Sprintf("line %d: %s is not used, because %s sets %s, and that comes first.", o.Line, o.Name, where, e.Env))
+			r.Problems = append(r.Problems, msg)
 			continue
+		}
+		if e.Secret && o.CommentCut {
+			r.Problems = append(r.Problems, fmt.Sprintf("line %d: the value of %s ends at a # that is not in quotes, and what follows it is read as a comment. If the # belongs to the value, put the value in quotes.", o.Line, o.Name))
 		}
 		r.Applied = append(r.Applied, AppliedOption{Env: e.Env, Option: o.Name, Line: o.Line})
 		r.values[e.Env] = o.Value
@@ -231,6 +269,19 @@ func FromOptionFile(key string) (line int, ok bool) {
 	return optionLoaded.Applied[i].Line, true
 }
 
+// OptionFileValue is the value the option file gave key when an env file
+// hid it, for a reader that does not believe env files (consoleapp's
+// ownEnv). It is only kept for daemonAddressKeys.
+func OptionFileValue(key string) (string, bool) {
+	if !slices.Contains(daemonAddressKeys, key) {
+		return "", false
+	}
+	optionMu.Lock()
+	defer optionMu.Unlock()
+	v, ok := optionLoaded.shadowed[key]
+	return v, ok
+}
+
 // CheckOptionFile reads the option file again, as the program would if it
 // started now, for `config check`. A setting the file itself set when this
 // process started is not counted as set by the environment.
@@ -242,6 +293,26 @@ func CheckOptionFile() OptionReport {
 		return os.LookupEnv(k)
 	}
 	return ReadOptionFile(optionFilePath, lookup, FromEnvFile)
+}
+
+// LoadOptionFileForTest loads the option file at path as a program start
+// does, after whatever env file the test applied, and returns the function
+// that takes back what it set.
+func LoadOptionFileForTest(path string) (undo func()) {
+	restorePath := UseOptionFileForTest(path)
+	loadOptionFile()
+	optionMu.Lock()
+	r := optionLoaded
+	optionMu.Unlock()
+	return func() {
+		for _, a := range r.Applied {
+			os.Unsetenv(a.Env)
+		}
+		optionMu.Lock()
+		optionLoaded = OptionReport{}
+		optionMu.Unlock()
+		restorePath()
+	}
 }
 
 // UseOptionFileForTest points the option file at path, and returns the

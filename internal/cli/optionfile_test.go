@@ -372,3 +372,76 @@ func TestOptionFile_nameThatIsNotANameIsNotQuoted(t *testing.T) {
 	r := readFile(t, "[dbtrail]\nroot:pw@tcp(db)/x = 1\n")
 	problemsContain(t, r, "line 2, whose name is not made of letters, digits and dashes, is not a DBTrail option, so it is ignored.")
 }
+
+func TestOptionFile_yamlColonDoesNotPrintTheDSN(t *testing.T) {
+	r := readFile(t, "[dbtrail]\nindex-dsn: root:hunter2@tcp(db:3306)/idx?parseTime=true\nindex-dsn root:hunter2@tcp(db)/x?tls=true\n")
+	if strings.Contains(strings.Join(r.Lines(), "\n"), "hunter2") {
+		t.Fatalf("a DSN was printed: %q", r.Lines())
+	}
+	problemsContain(t, r, "line 2, whose name is not made of letters", "line 3, whose name is not made of letters")
+}
+
+func TestOptionFile_unusableLaterLineDoesNotHideAGoodOne(t *testing.T) {
+	for _, later := range []string{"commit-within", "commit-within # old", "loose-commit-within"} {
+		r := readFile(t, "[dbtrail]\ncommit-within = 2s\n\n\n"+later+"\n")
+		if got := applied(r)["BINTRAIL_COMMIT_WITHIN"]; got != "2s" {
+			t.Errorf("%q after a good line: commit-within = %q, notes %q", later, got, r.Notes)
+		}
+		if len(r.Notes) != 0 {
+			t.Errorf("%q: no line overrides line 2: %q", later, r.Notes)
+		}
+	}
+}
+
+func TestOptionFile_hashCutsASecret(t *testing.T) {
+	r := readFile(t, "[dbtrail]\nindex-dsn = root:p#ss@tcp(x)/y\nsource-dsn = \"root:p#ss@tcp(x)/y\"\nbatch-size = 10 # rows\n")
+	problemsContain(t, r, "line 2: the value of index-dsn ends at a # that is not in quotes")
+	all := strings.Join(r.Problems, "\n")
+	if strings.Contains(all, "line 3") || strings.Contains(all, "line 4") {
+		t.Errorf("a quoted # and a comment after a value that is not a secret are fine: %q", r.Problems)
+	}
+	if strings.Contains(all, "p#ss") || strings.Contains(all, "root:p") {
+		t.Errorf("a value was printed: %q", r.Problems)
+	}
+}
+
+func TestOptionFile_groupMistakes(t *testing.T) {
+	r := readFile(t, "[bintrail]\ncommit-within = 2s\n")
+	problemsContain(t, r, "the file has no [dbtrail] group, which is the only one DBTrail reads, and has a [bintrail] group: did you mean [dbtrail]?")
+	r = readFile(t, "[dbtrial]\ncommit-within = 2s\n")
+	problemsContain(t, r, "has a [dbtrial] group: did you mean [dbtrail]?")
+	r = readFile(t, "[client]\nuser = x\n[mysqld]\nport = 1\n")
+	if len(r.Problems) != 0 {
+		t.Errorf("other programs' groups alone are not a problem: %q", r.Problems)
+	}
+	r = readFile(t, "[dbtrail] commit-within = 2s\nbatch-size = 3\n[client] # the mysql client\n")
+	problemsContain(t, r, "line 1 has text after the ] of its group, and that text is not read.")
+	if strings.Contains(strings.Join(r.Problems, "\n"), "line 3") {
+		t.Errorf("a comment after ] is fine: %q", r.Problems)
+	}
+}
+
+func TestOptionFile_daemonAddressHiddenByAnEnvFile(t *testing.T) {
+	env := map[string]string{"BINTRAIL_CONSOLE_LISTEN": "10.9.9.9:1", "BINTRAIL_SCHEMAS": "a"}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	fromFile := func(k string) bool { return true }
+	r := ReadOptionFile(writeOptionFile(t, "[dbtrail]\nconsole-listen = 127.0.0.1:8090\nschemas = b\n"), lookup, fromFile)
+	problemsContain(t, r, "line 2: console-listen is not used, because an env file (.bintrail.env or config.env) sets BINTRAIL_CONSOLE_LISTEN, and that comes first. The dbtrail commands that talk to a running DBTrail (server, port, snapshot) do not read env files for it, and use this line.")
+	if strings.Contains(strings.Join(r.Problems, "\n"), "schemas is not used, because an env file (.bintrail.env or config.env) sets BINTRAIL_SCHEMAS, and that comes first. The dbtrail") {
+		t.Error("only the daemon's address gets the note")
+	}
+	if r.shadowed["BINTRAIL_CONSOLE_LISTEN"] != "127.0.0.1:8090" {
+		t.Errorf("shadowed = %v", r.shadowed)
+	}
+
+	optionMu.Lock()
+	optionLoaded = r
+	optionMu.Unlock()
+	t.Cleanup(func() { optionMu.Lock(); optionLoaded = OptionReport{}; optionMu.Unlock() })
+	if v, ok := OptionFileValue("BINTRAIL_CONSOLE_LISTEN"); !ok || v != "127.0.0.1:8090" {
+		t.Errorf("OptionFileValue = %q %v", v, ok)
+	}
+	if _, ok := OptionFileValue("BINTRAIL_SCHEMAS"); ok {
+		t.Error("only the daemon's address is kept")
+	}
+}
