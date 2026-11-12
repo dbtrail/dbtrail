@@ -2,6 +2,7 @@ package baseline
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -111,4 +112,92 @@ func readingNow(root string, now time.Time) (what string, stuck int) {
 func Reading(root string) string {
 	what, _ := readingNow(root, time.Now())
 	return what
+}
+
+// A reader that is on ONE known snapshot pins that snapshot instead of
+// stopping the folder's prune (#2678): a snapshot download, a SQL statement,
+// the Explain of a check. The prune goes on, keeps the pinned snapshot
+// (PruneResult.KeptPinned) and removes the others past the count, so however
+// many such readers there are, and however long one of them takes, the
+// folder holds at most the snapshots they are reading on top of its count.
+//
+// Every pin has a deadline, given by who takes it from what it reads (a
+// download: the size of the snapshot). Past it the pin no longer keeps the
+// snapshot: a reader whose length someone else decides (an HTTP client)
+// must not decide how long a snapshot stays on the disk.
+
+type snapshotPin struct {
+	what  string
+	until time.Time
+}
+
+var pins = map[string]map[string]map[*snapshotPin]struct{}{} // root -> snapshot name -> pins; under readsMu
+
+// PinSnapshot keeps the snapshot root/name from the prune until release is
+// called or limit has passed, whichever is first. limit <= 0 is
+// readHoldLimit. release is safe to call more than once.
+func PinSnapshot(root, name, what string, limit time.Duration) (release func()) {
+	if root == "" || name == "" || strings.HasPrefix(root, "s3://") {
+		return func() {}
+	}
+	if limit <= 0 {
+		limit = readHoldLimit
+	}
+	key := readKey(root)
+	p := &snapshotPin{what: what, until: time.Now().Add(limit)}
+	readsMu.Lock()
+	if pins[key] == nil {
+		pins[key] = map[string]map[*snapshotPin]struct{}{}
+	}
+	if pins[key][name] == nil {
+		pins[key][name] = map[*snapshotPin]struct{}{}
+	}
+	pins[key][name][p] = struct{}{}
+	readsMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			readsMu.Lock()
+			delete(pins[key][name], p)
+			if len(pins[key][name]) == 0 {
+				delete(pins[key], name)
+			}
+			if len(pins[key]) == 0 {
+				delete(pins, key)
+			}
+			readsMu.Unlock()
+		})
+	}
+}
+
+// pinnedNow returns the snapshots of root a pin still keeps at now, each
+// with the reader that pins it.
+func pinnedNow(root string, now time.Time) map[string]string {
+	key := readKey(root)
+	readsMu.Lock()
+	defer readsMu.Unlock()
+	var out map[string]string
+	for name, set := range pins[key] {
+		for p := range set {
+			if now.Before(p.until) {
+				if out == nil {
+					out = map[string]string{}
+				}
+				out[name] = p.what
+				break
+			}
+		}
+	}
+	return out
+}
+
+// Pinned reports the snapshots of root a reader pins now, for tests and
+// listings.
+func Pinned(root string) []string {
+	var out []string
+	for name := range pinnedNow(root, time.Now()) {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -177,24 +177,25 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if !b(f.Before.DirShown) || !b(f.Before.KeepShown) || !f.Before.SaveDisabled {
 		t.Errorf("fresh server: folder/count not shown or Save awake with nothing changed: %+v", f.Before)
 	}
-	if !strings.Contains(joined(f.Before), "Older ones past that number are removed from this folder at the next hourly cleanup, never a table's only copy.") {
+	if !strings.Contains(joined(f.Before), "Older ones past that number are removed from this folder after each new snapshot, never a table's only copy.") {
 		t.Errorf("fresh server does not say when older snapshots go: %q", joined(f.Before))
 	}
 	// Saving a number over a folder that already holds snapshots is the
 	// choice to prune them (only a new or moved folder is refused), so the
 	// sentence is there for a count that is only typed, too.
-	if !strings.Contains(joined(got["freshKeep5"].After), "Older ones past that number are removed from this folder at the next hourly cleanup") {
-		t.Errorf("a typed count does not say older snapshots go at the next hourly cleanup: %q", joined(got["freshKeep5"].After))
+	if !strings.Contains(joined(got["freshKeep5"].After), "Older ones past that number are removed from this folder after each new snapshot") {
+		t.Errorf("a typed count does not say older snapshots go after each new snapshot: %q", joined(got["freshKeep5"].After))
 	}
-	// How far back: the count x the schedule, never under the hour the prune
-	// leaves alone nor under the age retention; "once" while the number is
+	// How far back: the count x the schedule and nothing more (#2678: 15
+	// minutes for 3 every 5, where it said an hour), never under the age
+	// retention; "once" while the number is
 	// not the one in force; no number without a schedule that runs.
 	for name, want := range map[string]string{
-		"reach5m":           "You can restore back to about 1 hour ago: the oldest of the 3 kept is that old.",
+		"reach5m":           "You can restore back to about 15 minutes ago, the oldest of the 3 kept.",
 		"reachHourly":       "You can restore back to about 3 hours ago",
 		"reachDaily":        "You can restore back to about 3 days ago",
 		"reachDailyTyped1":  "After you save, you can restore back to about 1 day ago",
-		"reachNone":         "You can restore back to the oldest of the 3 kept. Put the copy on a schedule (Update the copy, above) and this becomes a number of hours.",
+		"reachNone":         "You can restore back to the oldest of the 3 kept. Put the copy on a schedule (Update the copy, above) and this becomes a length of time.",
 		"reachNoneOne":      "You can restore back to the one snapshot kept.",
 		"reachRetain":       "You can restore back to about 7 days ago",
 		"reachScheduleOnly": "You can restore back to the oldest of the 3 kept.",
@@ -263,9 +264,9 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		}
 	}
 	for name, want := range map[string]string{
-		"s3Counted":        "Older ones past that number are removed from this folder at the next hourly cleanup, once S3 has them.",
+		"s3Counted":        "Older ones past that number are removed from this folder after each new snapshot, once S3 has them.",
 		"s3CountedHeld":    "An update the schedule did not send to S3 goes past that number without waiting for S3.",
-		"s3CountedAge":     "Older ones past that number and older than 7 days are removed from this folder at the next hourly cleanup, once S3 has them.",
+		"s3CountedAge":     "Older ones past that number and older than 7 days are removed from this folder after each new snapshot, once S3 has them.",
 		"s3CountedNotIn":   "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
 		"s3CountedNoLoop":  "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
 		"s3CountedBlocked": "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",
@@ -281,15 +282,20 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		if strings.Contains(w, "never a table's only copy") || strings.Contains(w, "Delete by age applies") || strings.Contains(w, "only costs the tables that changed") {
 			t.Errorf("%s: a server with S3 is told %q", name, w)
 		}
-		// The age keeps younger snapshots outside the count, so it
-		// stretches the reach, as it does without S3.
-		reach := "You can restore back to about 1 hour ago"
-		if name == "s3CountedAge" {
-			reach = "You can restore back to about 7 days ago"
+		// With S3 a restore reads the bucket, so the count is not what
+		// bounds it (#2678): the line says so, and how much a moment
+		// between two sends replays when the schedule spaces them.
+		reach := "A restore reads S3: back to its oldest snapshot."
+		if name == "s3CountedHeld" {
+			reach = "A restore reads S3: back to its oldest snapshot, replaying up to 1 day of changes."
 		}
 		if !strings.Contains(w, reach) {
 			t.Errorf("%s: does not say %q: %q", name, reach, w)
 		}
+		if strings.Contains(w, "You can restore back to about") {
+			t.Errorf("%s: a server with S3 is told its reach is the local count's: %q", name, w)
+		}
+		t.Logf("%s reach line: %s", name, reach)
 	}
 	if w := joined(got["s3CountedHeld"].Before); strings.Contains(w, "stay here until a newer snapshot") {
 		t.Errorf("the row still says held updates wait for a newer snapshot in S3: %q", w)
@@ -297,7 +303,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if w := joined(got["s3Counted"].Before); strings.Contains(w, "not sent to S3") {
 		t.Errorf("a server whose schedule sends every update is told about updates kept here: %q", w)
 	}
-	if w := joined(got["s3CountedBlocked"].Before); strings.Contains(w, "hourly cleanup") || strings.Contains(w, "nothing in it is removed") || strings.Contains(w, "Set a number") {
+	if w := joined(got["s3CountedBlocked"].Before); strings.Contains(w, "after each new snapshot") || strings.Contains(w, "nothing in it is removed") || strings.Contains(w, "Set a number") {
 		t.Errorf("a blocked folder with S3: %q", w)
 	}
 	// A destination another server also sends to: said, with the way out,
@@ -305,7 +311,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	sh := joined(got["s3SharedS3"].Before)
 	t.Logf("s3SharedS3 (at rest):\n  %s", strings.Join(got["s3SharedS3"].Before.Words[:1], "\n  "))
 	if !strings.Contains(sh, "Another server sends its snapshots to this S3 location too, so the count does not apply to it. Give each server its own S3 prefix.") ||
-		strings.Contains(sh, "hourly cleanup") || strings.Contains(sh, "Set a number") {
+		strings.Contains(sh, "after each new snapshot") || strings.Contains(sh, "Set a number") {
 		t.Errorf("a destination shared with another server: %q", sh)
 	}
 	// The first S3 destination: the save's own message says what the
@@ -345,7 +351,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		t.Errorf("a count that is not a number was saved beside a bucket: %+v", st.Body)
 	}
 	// A folder the prune never counts says so instead of promising the count.
-	if w := joined(got["blocked"].Before); !strings.Contains(w, "nothing in it is removed, whatever the count says") || strings.Contains(w, "hourly cleanup") {
+	if w := joined(got["blocked"].Before); !strings.Contains(w, "nothing in it is removed, whatever the count says") || strings.Contains(w, "after each new snapshot") {
 		t.Errorf("a blocked folder: %q", w)
 	}
 	// A server with no location is not told about DBTrail's startup folder:

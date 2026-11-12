@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -330,6 +331,17 @@ func (s *verifySupervisor) Explain(serverID, schema, table string) (*console.Ver
 			return
 		}
 		defer release()
+		// Explain reads the two snapshots the last check compared for this
+		// table, which can be past the count: the cleanup keeps those two
+		// while it runs (#2678). If one was removed before the click, the
+		// read fails and the check has to run again.
+		for _, p := range []string{pair.PrevPath, pair.NewPath} {
+			if p == "" || strings.HasPrefix(p, "s3://") {
+				continue
+			}
+			snap := filepath.Dir(filepath.Dir(p))
+			defer baseline.PinSnapshot(filepath.Dir(snap), filepath.Base(snap), "the Explain of a check", 0)()
+		}
 		res, err := run(laneCtx(ctx, laneCheck), indexDSN, noArchive, schema, table, pair)
 		s.finishExplain(key, job, res, err)
 	}()

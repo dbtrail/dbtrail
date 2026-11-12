@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,7 +209,7 @@ func isPruneArtifact(root, path string) bool {
 		return false
 	}
 	name := filepath.Base(path)
-	for _, rec := range []string{LastPruneFile, LastPruneFailureFile, NotInDestinationFile} {
+	for _, rec := range []string{LastPruneFile, LastPruneFailureFile, NotInDestinationFile, CleanupWaitingFile} {
 		if name == rec || strings.HasPrefix(name, rec+".tmp-") {
 			return true
 		}
@@ -222,4 +223,56 @@ func isPruneArtifact(root, path string) bool {
 func CountLocalSnapshots(dir string) (int, error) {
 	snaps, err := enumerateLocalSnapshots(dir)
 	return len(snaps), err
+}
+
+// CleanupWaitingFile records, beside the snapshots, that the cleanup of this
+// folder is standing still for a job that reads its older snapshots (#2678):
+// which job, since when, and when it was last found still running. Removed
+// by the first cleanup that runs. Without it a folder over its count while a
+// long restore or check runs is unexplained on the page.
+const CleanupWaitingFile = ".cleanup-waiting.json"
+
+// CleanupWaiting is that record.
+type CleanupWaiting struct {
+	// Since is the first cleanup that stood still; At the latest one.
+	Since time.Time `json:"since"`
+	At    time.Time `json:"at"`
+	What  string    `json:"what"`
+}
+
+// ReadCleanupWaiting reads dir's record; ok is false when the last cleanup
+// ran. An unreadable record reads as none: it explains, it decides nothing.
+func ReadCleanupWaiting(dir string) (rec CleanupWaiting, ok bool) {
+	b, err := os.ReadFile(filepath.Join(dir, CleanupWaitingFile))
+	if err != nil {
+		return CleanupWaiting{}, false
+	}
+	if err := json.Unmarshal(b, &rec); err != nil || rec.Since.IsZero() || rec.What == "" {
+		return CleanupWaiting{}, false
+	}
+	return rec, true
+}
+
+// noteCleanupWaiting keeps the record in step with one cleanup: written (the
+// first Since kept) when it stood still for what, removed when it ran.
+func noteCleanupWaiting(dir, what string) {
+	path := filepath.Join(dir, CleanupWaitingFile)
+	if what == "" {
+		if err := removeRecord(path); err != nil && !os.IsNotExist(err) {
+			slog.Warn("baseline prune: the cleanup ran, but the record saying it was waiting could not be removed; the page may go on saying it waits", "dir", dir, "error", err)
+		}
+		return
+	}
+	now := time.Now().UTC()
+	rec := CleanupWaiting{Since: now, At: now, What: what}
+	if prev, ok := ReadCleanupWaiting(dir); ok {
+		rec.Since = prev.Since
+	}
+	b, err := json.Marshal(rec)
+	if err == nil {
+		err = writeFileAtomic0600(dir, CleanupWaitingFile, b)
+	}
+	if err != nil {
+		slog.Warn("baseline prune: the cleanup is waiting for a job, and the record of it could not be written; the page will not say why the folder is over its count", "dir", dir, "error", err)
+	}
 }

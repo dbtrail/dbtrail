@@ -21,6 +21,7 @@ import (
 	"github.com/dbtrail/dbtrail/ext"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/observe"
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -992,6 +993,12 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 	return older, nil
 }
 
+// sqlPinLimit is how long a statement keeps its snapshot from the cleanup:
+// the statement's own time limit (sqlsandbox, 60 seconds by default), the
+// seconds the sandbox adds to stop it (7), and as much again for a result
+// still being read. A statement cannot run longer than the first two.
+const sqlPinLimit = 2*time.Minute + 14*time.Second
+
 // sqlCopyGone reports whether the snapshot folder a statement was pinned to
 // is no longer there. "" (the run never got as far as a snapshot) is not gone.
 func sqlCopyGone(dir string) bool {
@@ -1159,6 +1166,12 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		// For the caller's one retry when this snapshot is removed under
 		// the statement (runSQLVouched).
 		*used = filepath.Join(in.BaselineSource, reconstruct.SnapshotDirName(in.BaselineSnapshot))
+	}
+	if !in.BaselineSnapshot.IsZero() && in.BaselineSource != "" {
+		// The cleanup keeps the one snapshot this statement reads until it
+		// ends (#2678), the newest or an earlier copy alike, and no longer
+		// than a statement can last.
+		defer baseline.PinSnapshot(in.BaselineSource, reconstruct.SnapshotDirName(in.BaselineSnapshot), "a SQL statement", sqlPinLimit)()
 	}
 	if why := viewsLeftOutMessage(in); why != "" {
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, why}

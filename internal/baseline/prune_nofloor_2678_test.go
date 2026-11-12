@@ -395,3 +395,110 @@ func TestNoFloor_theRestoreMarkIsNotSnapshotData(t *testing.T) {
 		t.Fatalf("the listing counts %d snapshots (err %v), want 1", got, err)
 	}
 }
+
+// A reader on ONE snapshot pins it: the prune keeps that snapshot, counts it,
+// and removes the others past the count. Many readers of one snapshot pin
+// one snapshot. When the pin is released, or its deadline passes, the
+// snapshot goes like any other.
+func TestNoFloor_aPinKeepsOneSnapshotAndNothingElse(t *testing.T) {
+	root := t.TempDir()
+	s := minutes(t, root, 25, 20, 15, 10, 5)
+	var releases []func()
+	for range 50 {
+		releases = append(releases, PinSnapshot(root, s[1], "a snapshot download", time.Hour))
+	}
+	if got := Pinned(root); !slices.Equal(got, []string{s[1]}) {
+		t.Fatalf("50 downloads of one snapshot pin %v, want only %s", got, s[1])
+	}
+	res := keepNewest(t, root, 1)
+	slices.Sort(res.Pruned)
+	if !slices.Equal(res.Pruned, []string{s[0], s[2], s[3]}) || res.KeptPinned != 1 || res.Reading != "" {
+		t.Fatalf("pruned %v, KeptPinned %d, Reading %q: want the three others past the count, 1, and no stand-still", res.Pruned, res.KeptPinned, res.Reading)
+	}
+	wantOnDisk(t, root, s[1], s[4])
+	if _, ok, _ := ReadLastPruneFailure(root); ok {
+		t.Fatal("a pinned snapshot was recorded as a failed cleanup")
+	}
+	// All but one released: still pinned.
+	for _, r := range releases[1:] {
+		r()
+	}
+	if res := keepNewest(t, root, 1); len(res.Pruned) != 0 || res.KeptPinned != 1 {
+		t.Fatalf("one reader left: %+v", res)
+	}
+	releases[0]()
+	releases[0]()
+	if res := keepNewest(t, root, 1); !slices.Equal(res.Pruned, []string{s[1]}) || res.KeptPinned != 0 {
+		t.Fatalf("after the last release: %+v", res)
+	}
+	wantOnDisk(t, root, s[4])
+}
+
+// With a destination a pinned snapshot is not asked about and is not
+// reported as missing from the bucket.
+func TestNoFloor_aPinnedSnapshotIsNotAskedAbout(t *testing.T) {
+	root := t.TempDir()
+	s := minutes(t, root, 15, 10, 5)
+	defer PinSnapshot(root, s[0], "a SQL statement", time.Hour)()
+	var asked []string
+	res := s3Count(t, root, 1, answers(&asked, s[1]))
+	if !slices.Equal(res.Pruned, []string{s[1]}) || !slices.Equal(asked, []string{s[1]}) || res.KeptPinned != 1 || res.KeptNotDurable != 0 {
+		t.Fatalf("pruned %v, asked %v, %+v", res.Pruned, asked, res)
+	}
+}
+
+// A pin past its deadline keeps nothing: a reader whose length someone else
+// decides cannot keep a snapshot on the disk.
+func TestNoFloor_aPinPastItsDeadlineKeepsNothing(t *testing.T) {
+	root := t.TempDir()
+	s := minutes(t, root, 15, 10, 5)
+	release := PinSnapshot(root, s[0], "a snapshot download", 50*time.Millisecond)
+	defer release()
+	if res := keepNewest(t, root, 2); len(res.Pruned) != 0 || res.KeptPinned != 1 {
+		t.Fatalf("inside the deadline: %+v", res)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if got := Pinned(root); len(got) != 0 {
+		t.Fatalf("past the deadline the pin still counts: %v", got)
+	}
+	res := keepNewest(t, root, 2)
+	if !slices.Equal(res.Pruned, []string{s[0]}) || res.KeptPinned != 0 {
+		t.Fatalf("past the deadline: %+v", res)
+	}
+	// The default is the folder-wide limit, not forever.
+	defer PinSnapshot(root, s[1], "the Explain of a check", 0)()
+	if got := pinnedNow(root, time.Now().Add(readHoldLimit+time.Minute)); len(got) != 0 {
+		t.Fatalf("a pin with no limit of its own outlives the limit: %v", got)
+	}
+}
+
+// A cleanup that stands still for a job leaves a record saying which and
+// since when; the next one that waits keeps the first time; the first one
+// that runs removes it. The record is not snapshot data.
+func TestNoFloor_theWaitIsRecordedForThePage(t *testing.T) {
+	root := t.TempDir()
+	minutes(t, root, 15, 10, 5)
+	if _, ok := ReadCleanupWaiting(root); ok {
+		t.Fatal("a record before any cleanup")
+	}
+	end := BeginRead(root, "a restore to a moment")
+	keepNewest(t, root, 1)
+	first, ok := ReadCleanupWaiting(root)
+	if !ok || first.What != "a restore to a moment" || !first.At.Equal(first.Since) {
+		t.Fatalf("after one cleanup that waited: %+v ok=%v", first, ok)
+	}
+	time.Sleep(10 * time.Millisecond)
+	keepNewest(t, root, 1)
+	second, ok := ReadCleanupWaiting(root)
+	if !ok || !second.Since.Equal(first.Since) || !second.At.After(second.Since) {
+		t.Fatalf("after a second cleanup that waited: %+v, first %+v", second, first)
+	}
+	if !isPruneArtifact(root, filepath.Join(root, CleanupWaitingFile)) {
+		t.Fatal("the record would be uploaded as snapshot data")
+	}
+	end()
+	keepNewest(t, root, 1)
+	if _, ok := ReadCleanupWaiting(root); ok {
+		t.Fatal("the cleanup ran and the record still says it waits")
+	}
+}

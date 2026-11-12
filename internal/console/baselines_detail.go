@@ -552,18 +552,58 @@ func (s *Server) snapshotViewsRelative(ctx context.Context, ss *snapshotSource, 
 // save the truncated archive as a success (the console's own fetch+blob
 // rejects on a cut body either way), and the operator would learn it is
 // garbage at extraction time, plausibly mid-incident.
+// downloadStallTimeout is how long one write of the archive may wait for the
+// client before the download is dropped. A write hands the connection at
+// most a few tens of kilobytes (gzip's output buffer), so a client that has
+// not taken that much in a minute is not reading. A var for the tests.
+var downloadStallTimeout = time.Minute
+
+// downloadMinBytesPerSecond sizes the pin of a download: the snapshot is
+// kept for the time its bytes take at this rate, plus one stall timeout.
+// 1 MiB/s is a tenth of a 100 Mbit link: a 10 GiB snapshot is kept for
+// under three hours, a 100 MiB one for under three minutes. A client slower
+// than that keeps its connection, and loses the protection.
+const downloadMinBytesPerSecond = 1 << 20
+
+func downloadPinLimit(totalBytes int64) time.Duration {
+	return downloadStallTimeout + time.Duration(totalBytes/downloadMinBytesPerSecond)*time.Second
+}
+
+// stallWriter gives every write of a streamed response its own deadline.
+type stallWriter struct {
+	w  http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func (s *stallWriter) Write(b []byte) (int, error) {
+	// Not supported by the writer (a test recorder): no deadline, as before.
+	_ = s.rc.SetWriteDeadline(time.Now().Add(downloadStallTimeout))
+	return s.w.Write(b)
+}
+
+// done clears the deadline, so it does not outlive this response on a
+// connection that is used again.
+func (s *stallWriter) done() { _ = s.rc.SetWriteDeadline(time.Time{}) }
+
 func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) {
 	ss, dirName, files := s.resolveSnapshotRequest(w, r, "baseline-download")
 	if files == nil {
 		return
 	}
 	if ss.localRoot != "" {
-		// The files are opened one by one while the archive streams, for as
-		// long as the client takes: the cleanup of the folder stands still
-		// until the download ends or the client goes (#2678). A snapshot
-		// removed between the listing above and this line fails the stream
-		// at its first file, as before.
-		defer baseline.BeginRead(ss.localRoot, "a snapshot download")()
+		// The files are opened one by one while the archive streams, so the
+		// cleanup keeps THIS snapshot while it does, and goes on removing
+		// the others past the count (#2678). For a bounded time, sized by
+		// what is streamed (downloadPinLimit): how long the client takes is
+		// the client's choice, and it must not decide how long a snapshot
+		// stays on the disk. Past it the stream goes on unprotected; if the
+		// cleanup then removes the snapshot, the next file fails to open and
+		// the connection is cut, as for any file unreadable mid-stream.
+		var total int64
+		for _, f := range files {
+			total += f.Size
+		}
+		defer baseline.PinSnapshot(ss.localRoot, dirName, "a snapshot download", downloadPinLimit(total))()
 	}
 	if snapshotIncomplete(files) {
 		writeJSONError(w, http.StatusConflict,
@@ -622,7 +662,14 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 		panic(http.ErrAbortHandler)
 	}
 
-	gz := gzip.NewWriter(w)
+	// A client that stops reading is dropped (#2678): the server has no
+	// write timeout, on purpose, so without this a connection opened and
+	// never read holds the handler, and the snapshot it pins, for as long
+	// as the client likes. The deadline moves forward with every write that
+	// goes through, so a slow client that keeps reading is never cut.
+	stall := &stallWriter{w: w, rc: http.NewResponseController(w)}
+	defer stall.done()
+	gz := gzip.NewWriter(stall)
 	tw := tar.NewWriter(gz)
 	for _, f := range files {
 		// The stored views file never rides along (#1583): its paths name

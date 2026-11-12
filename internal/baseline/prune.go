@@ -100,7 +100,8 @@ type PruneOptions struct {
 // The Kept* counters are FIRST-MATCH reason codes, not independent set
 // memberships: a snapshot that is both a keeper and recent counts once, as
 // KeptKeeper (the order is incomplete > unreadable > keeper > newest > recent
-// > not-durable). Together with len(Pruned) and KeptUnasked they partition the
+// > not-durable; a pinned snapshot is counted as KeptPinned alone). Together
+// with len(Pruned) and KeptUnasked they partition the
 // enumerated snapshot set — every snapshot lands in exactly one bucket.
 type PruneResult struct {
 	// Pruned holds the snapshot directory names actually removed (or, under
@@ -129,6 +130,10 @@ type PruneResult struct {
 	// Busy reports that another prune held this directory's lock, so this one
 	// did nothing. Not an error: the other prune is doing the same job.
 	Busy bool
+	// KeptPinned counts snapshots kept because a reader of this process is
+	// on that one snapshot now (PinSnapshot, #2678): a download, a SQL
+	// statement, an Explain. The rest of the folder is pruned as usual.
+	KeptPinned int
 	// Reading names the job of this process that reads older snapshots of
 	// this directory now (BeginRead, #2678), so this prune did nothing: a
 	// snapshot is not removed under a reader. Not an error and not recorded
@@ -299,6 +304,12 @@ func PruneLocalAsking(ctx context.Context, opts PruneOptions, has func(ctx conte
 // attempt's own result is returned unchanged.
 func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) (PruneResult, error) {
 	res, err := pruneAttempt(ctx, opts, probe)
+	if !opts.DryRun && !res.Busy {
+		// For the page: a folder over its count because the cleanup waits
+		// for a job says so, and stops saying so at the first cleanup that
+		// ran.
+		noteCleanupWaiting(opts.LocalDir, res.Reading)
+	}
 	if opts.DryRun || res.Busy || res.Reading != "" {
 		return res, err
 	}
@@ -470,11 +481,29 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("baseline prune: %w", err)
 	}
+	// What a reader is on now is neither planned nor asked about: taken out
+	// of the list the plan is made from, after the keepers and the newest N
+	// were worked out from all of it, so a pin never changes which
+	// snapshots are the count's.
+	all := snaps
+	var keptPinned int
+	if pinned := pinnedNow(opts.LocalDir, time.Now()); len(pinned) > 0 && !opts.DryRun {
+		snaps = nil
+		for _, s := range all {
+			if what, ok := pinned[s.name]; ok {
+				keptPinned++
+				slog.Info("baseline prune: a reader is on this snapshot; it stays until the reader ends", "dir", opts.LocalDir, "snapshot", s.name, "reader", what)
+				continue
+			}
+			snaps = append(snaps, s)
+		}
+	}
 	// Carried on the result whatever the plan says: a leftover that cannot be
 	// deleted is a failure even in a cycle that has nothing new to remove.
 	withSweep := func(res PruneResult) PruneResult {
 		res.SweepFailures, res.firstSweepErr = sweepFailures, firstSweepErr
-		for _, s := range snaps {
+		res.KeptPinned = keptPinned
+		for _, s := range all {
 			if s.unreadable {
 				res.firstUnreadable = s.readErr
 				break
@@ -482,7 +511,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		}
 		return res
 	}
-	keepers := computeKeepers(snaps, now)
+	keepers := computeKeepers(all, now)
 	keepPointerTarget(opts.LocalDir, keepers)
 	// The last restore's result, whatever moment it is named for (#2678).
 	if name := lastRestored(opts.LocalDir, opts.DryRun); name != "" {
@@ -492,7 +521,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	held := heldSnapshots(opts.LocalDir, opts.DryRun)
 
 	if localOnly {
-		newest := computeNewestN(snaps, opts.KeepNewest, now)
+		newest := computeNewestN(all, opts.KeepNewest, now)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, 0, now)
 		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)
 		return withSweep(removePlanned(opts, now, pruneNames, res, func(string) string { return why })), nil
@@ -507,7 +536,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// decides, and a set Retain still keeps what is younger than it.
 	minAge := baselinePruneMinAge
 	if counted {
-		newest = computeNewestN(snaps, opts.KeepNewest, now)
+		newest = computeNewestN(all, opts.KeepNewest, now)
 		minAge = 0
 	}
 

@@ -197,6 +197,11 @@ type baselinesResponse struct {
 	// folder that stops shrinking shows only in the daemon's log while the
 	// retention line says how many snapshots it keeps.
 	LastPruneFailure *pruneFailureDTO `json:"last_prune_failure,omitempty"`
+	// CleanupWaiting says the cleanup of that folder has stood still for
+	// more than one cleanup because a job reads its older snapshots (#2678):
+	// which job, and since when. Omitted when the last cleanup ran, or when
+	// only one has waited so far.
+	CleanupWaiting *cleanupWaitingDTO `json:"cleanup_waiting,omitempty"`
 }
 
 type pruneFailureDTO struct {
@@ -234,6 +239,26 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 		return nil
 	}
 	return &localRetentionDTO{KeepNewest: n}
+}
+
+// cleanupWaitingDTO is baseline.CleanupWaiting on the wire.
+type cleanupWaitingDTO struct {
+	Since string `json:"since"`
+	What  string `json:"what"`
+}
+
+// cleanupWaitingOf reads the folder's "the cleanup is waiting for a job"
+// record, and reports it only once a second cleanup found the same job still
+// running: one cleanup that waited is routine, and gone at the next.
+func cleanupWaitingOf(dir string) *cleanupWaitingDTO {
+	if dir == "" {
+		return nil
+	}
+	rec, ok := baseline.ReadCleanupWaiting(dir)
+	if !ok || !rec.At.After(rec.Since) {
+		return nil
+	}
+	return &cleanupWaitingDTO{Since: rec.Since.UTC().Format(time.RFC3339), What: rec.What}
 }
 
 // lastPruneOf reads the two prune records of the bundle's local folder: the
@@ -332,6 +357,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	resp.SQLMirror = s.sqlMirrorOf(b, s.selectedServerID(r))
 	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
 	resp.LastPrune, resp.LastPruneFailure, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
+	resp.CleanupWaiting = cleanupWaitingOf(bundleBaselineDir(b))
 	if e, ok := s.cm.reg.Get(s.selectedServerID(r)); ok {
 		resp.S3Destination = strings.TrimSpace(e.BaselineS3) != ""
 	}

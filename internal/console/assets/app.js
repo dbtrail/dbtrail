@@ -10840,6 +10840,14 @@ function snapshotRetentionLines(b) {
     out.push(el("p", { class: "form-msg err bk-retention-err", text:
       "The record of older copies removed here could not be read: " + firstLine(b.last_prune_error) }));
   }
+  // A folder over its count because the cleanup stands still for a job
+  // (#2678): said, so it is not taken for a cleanup that stopped working.
+  const wait = b.cleanup_waiting;
+  if (wait && wait.what) {
+    out.push(el("p", { class: "form-hint bk-retention-wait", text:
+      "Older copies stay until " + wait.what + " ends" + (wait.since ? " (running since " + utcLabel(wait.since) + ")" : "") +
+      ": the cleanup removes nothing from this folder while it reads them." }));
+  }
   const fail = b.last_prune_failure;
   if (fail) {
     const causes = String(fail.reason || "").split("\n").map((c) => c.trim()).filter(Boolean);
