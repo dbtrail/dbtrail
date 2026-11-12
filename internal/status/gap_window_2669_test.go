@@ -154,7 +154,9 @@ func TestLoadGapWindow_looksBelowTheFloor(t *testing.T) {
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwEvHeldQ).WillReturnError(errors.New("lock wait timeout")) },
 		}, ContinuityGapAcknowledged},
 		{"archives of more than one source: on record, nothing more asked", lost, []step{
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026063000", "p_2026070500", 2)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026063000", "p_2026070500", 2))
+			},
 		}, ContinuityGapAcknowledged},
 	} {
 		t.Run(c.name, func(t *testing.T) {
