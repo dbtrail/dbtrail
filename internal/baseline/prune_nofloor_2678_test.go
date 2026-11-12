@@ -872,7 +872,9 @@ func TestNoFloor_theRestoreResultExpiresAfterADay(t *testing.T) {
 // What the cleanup keeps now, whatever readers there are, in each mode.
 func TestNoFloor_keptNow(t *testing.T) {
 	now := time.Now().UTC()
-	name := func(d time.Duration) string { return strings.ReplaceAll(now.Add(-d).Truncate(time.Second).Format(time.RFC3339), ":", "-") }
+	name := func(d time.Duration) string {
+		return strings.ReplaceAll(now.Add(-d).Truncate(time.Second).Format(time.RFC3339), ":", "-")
+	}
 	old, mid, young, newest := name(5*time.Hour), name(3*time.Hour), name(30*time.Minute), name(time.Minute)
 	root := t.TempDir()
 	for _, n := range []string{old, mid, young, newest} {
@@ -963,7 +965,9 @@ func TestNoFloor_downloadsStartedOnTheNewestAtEachTickAreCapped(t *testing.T) {
 func TestNoFloor_downloadsAreCappedInTheAgeModeToo(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now().UTC()
-	name := func(d time.Duration) string { return strings.ReplaceAll(now.Add(-d).Truncate(time.Second).Format(time.RFC3339), ":", "-") }
+	name := func(d time.Duration) string {
+		return strings.ReplaceAll(now.Add(-d).Truncate(time.Second).Format(time.RFC3339), ":", "-")
+	}
 	var old []string
 	for h := 10; h >= 6; h-- {
 		old = append(old, name(time.Duration(h)*time.Hour))
