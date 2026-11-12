@@ -1288,8 +1288,10 @@ longer drawn on the page.
   only copy of a table. With an S3 destination a snapshot past the count goes
   only once S3 has it: one S3 does not have stays, is counted on the card
   ("Not in S3 yet, so kept here") and is sent again; an update the schedule
-  did not send to S3 goes once a newer snapshot is in S3; and when S3 cannot
-  be asked the cleanup removes nothing and the list says so in red. A server
+  did not send to S3 was never meant for the bucket, so it goes by the count
+  alone, without waiting for S3; and when S3 cannot be asked the cleanup
+  removes no snapshot that was sent to S3 and the list says so in red. The
+  list marks each snapshot that goes at the next cleanup. A server
   saved with an S3 destination before this rule has no count (the one it had
   did nothing and was cleared on upgrade), so it keeps every snapshot until
   one is set. The daemon's **Delete by age** (`--baseline-retain`) is the

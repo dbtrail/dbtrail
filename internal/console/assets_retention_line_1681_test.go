@@ -116,10 +116,10 @@ console.log(JSON.stringify(out));
 		"keepMany":   {{false, "Keeps the newest 7 snapshots on this machine."}},
 		"keepOne":    {{false, "Keeps only the newest snapshot on this machine."}},
 		"keepZero":   {},
-		"keepManyS3": {{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them."}},
-		"keepOneS3":  {{false, "Keeps only the newest snapshot on this machine; older ones are removed once S3 has them."}},
+		"keepManyS3": {{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting."}},
+		"keepOneS3":  {{false, "Keeps only the newest snapshot on this machine; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting."}},
 		"failSilentS3": {
-			{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them."},
+			{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting."},
 			{true, "Removing older copies failed on " + at + ": | The S3 destination could not be asked, so nothing was removed from this folder in this cleanup. DBTrail asks again at the next one."},
 		},
 		"pruneOnly":    {{false, "Removed 3 older copies on " + at + "."}},

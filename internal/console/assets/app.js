@@ -9187,7 +9187,7 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
     // time here it would only be the same fact again.
     say("Older ones past that number " + (mins ? "and older than " + exactSpan(mins) + " " : "") +
       "are removed from this folder at the next hourly cleanup, " + (s3 ? "once S3 has them." : "never a table's only copy."));
-    if (s3 && reach && reach.held) say("An update that was not sent to S3 goes past that number without waiting for S3.");
+    if (s3 && reach && reach.held) say("An update the schedule did not send to S3 goes past that number without waiting for S3.");
     say(localReachWords(n, reach || {}));
   } else if (mins) {
     say("Deleted here when older than " + exactSpan(mins) + ", once S3 has it. DBTrail leaves S3 alone.");
@@ -10758,7 +10758,7 @@ function snapshotRetentionLines(b) {
     // With S3 the count is the same; what is past it waits for its copy
     // there (#2658).
     facts.push((keep === 1 ? "Keeps only the newest snapshot on this machine" : "Keeps the newest " + keep + " snapshots on this machine") +
-      (b.s3_destination ? "; older ones are removed once S3 has them." : "."));
+      (b.s3_destination ? "; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting." : "."));
   }
   const lp = b.last_prune;
   if (lp && lp.removed > 0 && lp.at) {
@@ -10982,7 +10982,7 @@ function baselinesPanel(b, servers, opts) {
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
-        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, " + (!b.s3_destination ? "never a table's only copy." : (sn.kinds || []).includes("s3") ? "now that S3 has it." : "it was not sent to S3, so it does not wait for S3.") }));
+        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, " + (!b.s3_destination ? "never a table's only copy." : (sn.kinds || []).includes("s3") ? "now that S3 has it." : "the schedule did not send it to S3, so it does not wait for S3.") }));
       }
       // With skipped views the row says both counts (#1879), whether or not
       // the table count varies: the views are what the row is there to show.
