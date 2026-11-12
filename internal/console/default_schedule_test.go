@@ -99,10 +99,8 @@ func TestDefaultSchedule(t *testing.T) {
 			t.Errorf("the daemon's line names S3 for a server without it: %q", msg)
 		}
 	})
-	t.Run("a bucket set between the check and the write: no schedule from a stale check", func(t *testing.T) {
-		// The mark is cleared whatever happens; the location the check saw
-		// is the one the schedule is written for.
-		srv, added := create(t, &stubScheduleReporter{full: true}, "")
+	t.Run("the upload interval a new schedule starts with", func(t *testing.T) {
+		_, added := create(t, &stubScheduleReporter{full: true}, "")
 		if got := defaultUploadEvery(added, DefaultBackupEvery); got != "" {
 			t.Fatalf("no S3: default upload interval %q", got)
 		}
