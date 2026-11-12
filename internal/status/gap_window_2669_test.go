@@ -200,7 +200,9 @@ func TestLoadGapWindow_looksBelowTheFloor(t *testing.T) {
 			func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 			},
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows("p_2026063000", nil)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows("p_2026063000", nil))
+			},
 			func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(gwEvHeldQ).WillReturnRows(gwEvHeldRows(time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)))
 			},
