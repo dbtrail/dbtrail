@@ -166,8 +166,8 @@ func TestBackupScheduleAPI_uploadEvery(t *testing.T) {
 // newer local one (consoleapp resolveFoldSource). Anchored on the bucket, a
 // server with every 15m and upload_every 6h would have its index doubted,
 // and production read in full, two hours after each upload whenever nothing
-// was indexed since that upload (the probe below: no events, the source not
-// asked), while the snapshot it really updates from is minutes old.
+// was indexed since that upload (the probe below: no events, the source
+// ahead of capture), while the snapshot it really updates from is minutes old.
 func TestChooseBackupMethod_anchorsOnTheHeldLocalSnapshot(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	bucketAt := now.Add(-5 * time.Hour)
@@ -185,7 +185,7 @@ func TestChooseBackupMethod_anchorsOnTheHeldLocalSnapshot(t *testing.T) {
 	var anchors []time.Time
 	probe := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
 		anchors = append(anchors, anchor)
-		return BackupWindow{Anchor: anchor, Events: 0}
+		return BackupWindow{Anchor: anchor, Events: 0, Capture: CaptureBehind}
 	}
 	gates := BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: probe}
 	e := ServerEntry{DSN: "idx", SourceDSN: "src", BaselineDir: dir, BaselineS3: "s3://bucket/snaps/",

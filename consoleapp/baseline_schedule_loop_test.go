@@ -50,9 +50,9 @@ func newScheduleFixture(t *testing.T, fullBackups bool) (*backupScheduler, *cons
 	b := newBackupScheduler(sup, reg, fullBackups, false)
 	// The fixture snapshot (writeFakeSnapshot) is dated 2026-08-20 and the
 	// slots fire weeks later: with the #1721 probe on, nothing indexed since
-	// so old a snapshot and no source to ask would make every scheduled
-	// update here a full backup. Off by default; the cut-over's own tests
-	// turn it back on.
+	// so old a snapshot and no source to ask would skip every slot here
+	// (#2659) instead of running the scheduled update. Off by default; the
+	// cut-over's own tests turn it back on.
 	b.window = nil
 	return b, reg, sup
 }

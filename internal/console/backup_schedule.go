@@ -55,6 +55,11 @@ const (
 	// a server whose backups go to S3 the scheduled path uploads its result
 	// there afterwards (#1539).
 	BackupMethodRefresh = "refresh"
+	// BackupMethodSkip is no run at all: the slot makes neither a full
+	// backup nor an update, and the previous snapshot stays the newest
+	// (#2659). Chosen only by WindowChoice, for a quiet index the source
+	// cannot vouch for; the reason travels as the choice's why.
+	BackupMethodSkip = "skip"
 )
 
 // BackupScheduleMinEvery is the shortest interval a schedule accepts: a
@@ -418,8 +423,11 @@ type BackupWindow struct {
 	// time a full backup took is not time the schedule fell behind.
 	AnchorFullFinished time.Time
 	// Capture says whether the source has written anything the capture has
-	// not checkpointed (#1791): CaptureCaughtUp, CaptureBehind, or empty when
-	// not known. The daemon asks only when it matters, nothing indexed since
+	// not checkpointed (#1791): CaptureCaughtUp, CaptureBehind,
+	// CaptureSuspect, CaptureUnaskable, or empty when the capture was not
+	// confirmed and none of those was established. Empty is decided like
+	// evidence, the full read: it is what a reason nobody classified gets.
+	// The daemon asks only when it matters, nothing indexed since
 	// the anchor (Events == 0) on an anchor past the cut-over age, because
 	// from the index alone "the source wrote nothing" and "the capture
 	// stopped" are the same observation (#1223): the binlog syncer retries
@@ -427,6 +435,18 @@ type BackupWindow struct {
 	// CaptureDetail says why, for the reason line, when not caught up.
 	Capture       string
 	CaptureDetail string
+	// CanWait says that leaving the previous snapshot as it is costs
+	// nothing later (#2659): its readers start safely inside the hours the
+	// index still keeps, no table was created since it and no capture loss
+	// is on record since it. The daemon establishes it only where the slot
+	// could be skipped (nothing indexed since an anchor past the cut-over
+	// age, and CaptureUnaskable). False when any of the three
+	// fails or could not be read, with CannotWaitWhy saying which: the
+	// update then runs, as it does under the daemon-wide refresh gate
+	// (#1689), since a snapshot left to fall out of the index's retention
+	// could not be updated when a change finally arrives.
+	CanWait       bool
+	CannotWaitWhy string
 	// Events is how far the index's high-water mark has moved since the
 	// anchor; negative when unknown (no mark on record for THIS anchor, or
 	// the index did not answer). It counts every source writing to that
@@ -484,6 +504,26 @@ const (
 	CaptureCaughtUp = "caught_up"
 	// CaptureBehind: the source has written past the capture's checkpoint.
 	CaptureBehind = "behind"
+	// CaptureSuspect: the capture is not confirmed caught up, and something
+	// on record says the index is missing changes: a capture loss since the
+	// previous snapshot, rows the capture dropped that no full backup has
+	// read since, or a capture holding transactions the source does not
+	// have. Evidence like CaptureBehind, and decided like it.
+	CaptureSuspect = "suspect"
+	// CaptureUnaskable: the source cannot be asked whether the capture holds
+	// everything it wrote, for one of the reasons the daemon lists for that
+	// (a PostgreSQL or MariaDB source, a position-mode capture, an index on
+	// the source server, a source that did not answer, an index with no
+	// capture on record), and nothing says a change was missed. The one
+	// state in which a slot is skipped (WindowChoice). Never the default:
+	// the daemon sets it only for a reason on its list.
+	CaptureUnaskable = "unaskable"
+	// CaptureUnread: the index did not give the capture's record (it did
+	// not answer, or the read failed), so nothing was learned about the
+	// source, and the record is where a loss would show. The update runs,
+	// as it did before the skip existed, and its why says it was the index
+	// that was not read.
+	CaptureUnread = "unread"
 )
 
 // BackupWindowProbe measures the window for e whose previous snapshot is
@@ -556,13 +596,20 @@ func updateClearlyDearer(updateSec, fullSec float64) bool {
 //     (events x rate): it decides between two producers, not a schedule;
 //   - the fixed cost (#1736): with no rate, when even the cheapest measured
 //     update took clearly longer than the last full backup;
-//   - an index that may be missing writes (#1791): nothing was indexed since
-//     an anchor older than BackupCutoverAge(interval), counted from when the
-//     full backup that published it finished when one did
-//     (AnchorFullFinished), and the source does not confirm that the capture
-//     holds everything it wrote. This one is not about cost: an update over
-//     that index would publish the previous snapshot's rows under a new
-//     date, and only a read of the source settles what the capture missed.
+//   - an index that is missing writes as far as the evidence goes (#1791):
+//     nothing was indexed since an anchor older than
+//     BackupCutoverAge(interval), counted from when the full backup that
+//     published it finished when one did (AnchorFullFinished), and the
+//     source reports transactions the capture has not recorded
+//     (CaptureBehind) or the capture's own record says it lost some
+//     (CaptureSuspect). This one is not about cost: an update over that
+//     index would publish the previous snapshot's rows under a new date,
+//     and only a read of the source settles what the capture missed. The
+//     same goes for a capture that was not confirmed for a reason nobody
+//     classified (Capture empty): a loss cannot be ruled out. A source that
+//     cannot be asked for a listed reason (CaptureUnaskable) is no evidence
+//     either way, and chooses no full read: that slot is skipped
+//     (WindowChoice, #2659).
 //     It is reached only where the estimate did not settle the slot first,
 //     which narrows it to a server with no rate or no full backup on
 //     record, and one whose fixed cost is over its last full backup but
@@ -589,13 +636,44 @@ func updateClearlyDearer(updateSec, fullSec float64) bool {
 // backup that is one update after each full backup, the price of a model
 // that can notice when they stop.
 func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string {
+	if method, why := WindowChoice(w, interval, now); method == BackupMethodFull {
+		return why
+	}
+	return ""
+}
+
+// WindowChoice is what a slot does with the window w, and why: a full
+// backup (BackupMethodFull, on CutoverToFull's three kinds of evidence), no
+// run at all (BackupMethodSkip), or the update (BackupMethodRefresh, with an
+// empty why except in the one case below).
+//
+// The skip (#2659) is the index-doubt condition without the evidence:
+// nothing was indexed since an anchor past BackupCutoverAge(interval), the
+// estimate did not settle the slot, and the source cannot be asked whether
+// the capture holds everything it wrote (CaptureUnaskable). A full read there
+// would read every row of the source on no evidence, at every such slot of
+// a quiet server; an update would publish the previous snapshot's rows
+// under a new date, which says the copy is current when nobody checked. So
+// neither runs, the previous snapshot stays the newest, and the reason says
+// so. It ends by itself: the first indexed event makes Events non-zero, and
+// a source that answers makes Capture a verdict.
+//
+// The skip gives way to the update when the snapshot cannot wait (CanWait
+// false: it is close to the oldest hour the index keeps, a table was
+// created, a capture loss is on record, or one of those could not be
+// read). That update is the one the daemon-wide gate takes to re-anchor a
+// quiet snapshot (#1689), or the one that finds the new table or is refused
+// for the loss; its why says what stopped the skip. Skipping forever would
+// let rotation drop the hours the snapshot reads from, and the update after
+// the next change would be refused for them.
+func WindowChoice(w BackupWindow, interval time.Duration, now time.Time) (method, why string) {
 	if w.Events >= 0 && w.FoldRate > 0 && w.LastFull > 0 {
 		// Compared in float seconds: a Duration conversion of a huge
 		// estimate (a tiny rate, a long stop) overflows to a NEGATIVE
 		// value, which would read as cheaper than any full backup.
 		estSec := w.FoldFixed.Seconds() + float64(w.Events)/w.FoldRate
 		if estSec <= w.LastFull.Seconds() {
-			return ""
+			return BackupMethodRefresh, ""
 		}
 		if updateClearlyDearer(estSec, w.LastFull.Seconds()) {
 			if float64(w.Events) <= BackupProvenMargin*float64(w.Proven) {
@@ -604,10 +682,10 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 				// reading the log would want to know.
 				slog.Info("snapshot schedule: updating although the estimate exceeds the last full read; an update of about this size was done cheaper",
 					"events", w.Events, "estimate", roundSeconds(estSec), "last_full", roundDuration(w.LastFull), "proven_events", w.Proven)
-				return ""
+				return BackupMethodRefresh, ""
 			}
 			if !w.UnmeasuredSinceFull {
-				return fmt.Sprintf("%s: %s events since the previous snapshot would take about %s to apply at the measured rate, %s the last full read, which took %s",
+				return BackupMethodFull, fmt.Sprintf("%s: %s events since the previous snapshot would take about %s to apply at the measured rate, %s the last full read, which took %s",
 					BackupWhyWindowPrefix, formatCount(w.Events), roundSeconds(estSec), backupFullCostMarginWords, roundDuration(w.LastFull))
 			}
 		}
@@ -622,15 +700,15 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	// Only ever a full backup, so not on a model older than the last one.
 	if !w.UnmeasuredSinceFull && w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 &&
 		updateClearlyDearer(w.FoldFixed.Seconds(), w.LastFull.Seconds()) {
-		return fmt.Sprintf("%s: the cheapest recent update took %s, %s the last full read, which took %s",
+		return BackupMethodFull, fmt.Sprintf("%s: the cheapest recent update took %s, %s the last full read, which took %s",
 			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), backupFullCostMarginWords, roundDuration(w.LastFull))
 	}
 	// From here on only one thing chooses a full read: an index that
-	// recorded nothing since an old anchor, which the source does not
-	// vouch for. With events to apply, or a count that is unknown, the
-	// update runs whatever the anchor's age (#2659).
+	// recorded nothing since an old anchor, with evidence that it is
+	// missing changes. With events to apply, or a count that is unknown,
+	// the update runs whatever the anchor's age (#2659).
 	if w.Events != 0 || w.Anchor.IsZero() {
-		return ""
+		return BackupMethodRefresh, ""
 	}
 	since := w.Anchor
 	if w.AnchorFullFinished.After(since) {
@@ -638,7 +716,7 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	}
 	age := now.Sub(since)
 	if age <= BackupCutoverAge(interval) {
-		return ""
+		return BackupMethodRefresh, ""
 	}
 	// Nothing indexed since the anchor, and the source confirms it wrote
 	// nothing the capture has not recorded (#1791): there is nothing to fold,
@@ -646,19 +724,43 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 	// re-anchors it before retention drops its window. A full backup here
 	// would read production to copy what the backup already holds.
 	if w.Capture == CaptureCaughtUp {
-		return ""
+		return BackupMethodRefresh, ""
 	}
-	// What is in question is whether "nothing" is true. Said as that.
-	what := "and whether the source changed could not be checked"
-	if w.CaptureDetail != "" {
-		what += " (" + w.CaptureDetail + ")"
-	}
-	if w.Capture == CaptureBehind {
+	switch w.Capture {
+	case CaptureBehind:
 		// The detail would only repeat this.
-		what = "but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"
+		return BackupMethodFull, fmt.Sprintf("%s: %s was taken %s ago, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind",
+			BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age))
+	case CaptureSuspect:
+		// Evidence, said as what was found: here the capture's record, or
+		// the source itself, did answer.
+		what := "and the capture's own record says changes were lost"
+		if w.CaptureDetail != "" {
+			what = "and " + w.CaptureDetail
+		}
+		return BackupMethodFull, fmt.Sprintf("%s: %s was taken %s ago, %s",
+			BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age), what)
+	case CaptureUnaskable:
+		// Below: no evidence that the index is missing anything, and none
+		// that it is not (#2659).
+	case CaptureUnread:
+		return BackupMethodRefresh, IndexUnreadUpdateWhy(w.CaptureDetail)
+	default:
+		// Not confirmed, and not for a reason on the daemon's list of
+		// sources that cannot be asked: a loss cannot be ruled out, so the
+		// full read stays, as before the skip existed. What is in question
+		// is whether "nothing" is true. Said as that.
+		what := "and whether the source changed could not be checked"
+		if w.CaptureDetail != "" {
+			what += " (" + w.CaptureDetail + ")"
+		}
+		return BackupMethodFull, fmt.Sprintf("%s: %s was taken %s ago, %s",
+			BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age), what)
 	}
-	return fmt.Sprintf("%s: %s was taken %s ago, %s",
-		BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age), what)
+	if !w.CanWait {
+		return BackupMethodRefresh, UnconfirmedUpdateWhy(w.CaptureDetail, w.CannotWaitWhy)
+	}
+	return BackupMethodSkip, SkipUnconfirmedReason(w.CaptureDetail)
 }
 
 // roundSeconds is roundDuration for a float second count, clamped so a
@@ -782,6 +884,68 @@ func RebuildPossible(e ServerEntry, gates BackupScheduleGates) error {
 // source could not be checked), which only a read of the source settles.
 // An update cannot stand in for that one (#2586).
 const BackupWhyNothingIndexedWords = "nothing new was indexed since it"
+
+// BackupSkipUnconfirmedPrefix starts the reason of a slot skipped because
+// nothing was indexed since an old snapshot and the source cannot be asked
+// whether capture recorded everything it wrote (#2659, WindowChoice). The
+// same words start the why of the update taken in its place when the
+// snapshot cannot wait. The page matches these words (unconfirmedSkipText in
+// app.js, pinned by a test fed this text) so that it does not promise a
+// retry at the next slot.
+const BackupSkipUnconfirmedPrefix = "nothing was indexed since the previous snapshot, and the source cannot confirm that capture recorded everything it wrote"
+
+// unconfirmedLead is the prefix with why the source cannot be asked.
+func unconfirmedLead(detail string) string {
+	if detail == "" {
+		return BackupSkipUnconfirmedPrefix
+	}
+	return BackupSkipUnconfirmedPrefix + " (" + detail + ")"
+}
+
+// SkipUnconfirmedReason is the reason recorded for a slot WindowChoice
+// skips; detail is why the source cannot be asked. It carries no age or
+// time, so every slot of one quiet stretch records the same reason and the
+// history keeps one record for it (AppendSkip).
+func SkipUnconfirmedReason(detail string) string {
+	return unconfirmedLead(detail) + ", so no snapshot is made at this slot; " +
+		"the copy keeps the data it has until a change is indexed or the source can be asked"
+}
+
+// UnconfirmedUpdateWhy is the why of the update WindowChoice takes where it
+// would have skipped the slot, when the snapshot cannot wait (whyNot).
+func UnconfirmedUpdateWhy(detail, whyNot string) string {
+	if whyNot == "" {
+		whyNot = "whether the previous snapshot can stay as it is could not be established"
+	}
+	return unconfirmedLead(detail) + ", but " + whyNot + ", so the snapshot is updated from the recorded changes instead of the slot being skipped"
+}
+
+// BackupIndexUnreadPrefix starts the why of the update WindowChoice takes
+// when the index did not give the capture's record (CaptureUnread).
+const BackupIndexUnreadPrefix = "nothing was indexed since the previous snapshot, and the index did not give capture's record"
+
+// IndexUnreadUpdateWhy is that why; detail is what the read of the index
+// ran into. It names the index, not the source: the source was never asked.
+func IndexUnreadUpdateWhy(detail string) string {
+	lead := BackupIndexUnreadPrefix
+	if detail != "" {
+		lead += " (" + detail + ")"
+	}
+	return lead + ", so whether capture recorded everything the source wrote is not known; the snapshot is updated from the recorded changes instead of the slot being skipped"
+}
+
+// IsUnconfirmedUpdate reports whether why is the why of an update taken
+// where the slot would otherwise have been skipped (UnconfirmedUpdateWhy,
+// IndexUnreadUpdateWhy).
+func IsUnconfirmedUpdate(why string) bool {
+	return strings.HasPrefix(why, BackupIndexUnreadPrefix) ||
+		(strings.HasPrefix(why, BackupSkipUnconfirmedPrefix) && !IsUnconfirmedSkip(why))
+}
+
+// IsUnconfirmedSkip reports whether a recorded skip reason is WindowChoice's.
+func IsUnconfirmedSkip(reason string) bool {
+	return strings.HasPrefix(reason, BackupSkipUnconfirmedPrefix) && strings.Contains(reason, "so no snapshot is made at this slot")
+}
 
 // The reasons a scheduled run takes a FULL backup instead of updating the
 // previous one (#1604). They are persisted on the run record at run time,
@@ -1053,11 +1217,17 @@ func heldLocalAnchor(ctx context.Context, e ServerEntry, source string, anchor t
 //     which is the bucket on an S3-backed server;
 //   - a server whose update the daemon measured as clearly dearer than a
 //     full backup (#1721), or whose index recorded nothing since an old
-//     snapshot while the source does not confirm the capture is caught up
-//     (#1791), gets a FULL backup with the numbers as the why
-//     (CutoverToFull), only when a full backup can start; otherwise the
-//     update runs, slow as it may be, because it is the producer that can.
-//     The previous backup's age alone never chooses one (#2659);
+//     snapshot while the source reports transactions the capture has not
+//     recorded, or the capture's own record says it lost some (#1791), gets
+//     a FULL backup with the numbers as the why (CutoverToFull), only when
+//     a full backup can start; otherwise the update runs, slow as it may
+//     be, because it is the producer that can. The previous backup's age
+//     alone never chooses one (#2659);
+//   - a server whose index recorded nothing since an old snapshot while the
+//     source cannot be asked gets NO run (BackupMethodSkip, with the reason
+//     as the why), whether or not a full backup could start, unless the
+//     snapshot cannot wait, where the update runs and its why says so
+//     (WindowChoice, #2659);
 //   - otherwise the newest backup is UPDATED from the recorded changes, with
 //     no load on the source. If that update fails (a capture gap, a schema
 //     change, a crash), the loop takes a full backup at the same slot when
@@ -1136,7 +1306,7 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 		}
 		return BackupMethodFull, BackupWhyFirstBackup, nil
 	}
-	if gates.Window != nil && fullErr == nil {
+	if gates.Window != nil {
 		var interval time.Duration
 		if e.BackupSchedule != nil {
 			// Both callers validated the schedule already; a parse failure
@@ -1148,9 +1318,16 @@ func ChooseBackupMethodAt(ctx context.Context, e ServerEntry, gates BackupSchedu
 			}
 			interval = p.Every
 		}
-		if why := CutoverToFull(gates.Window(ctx, e, anchor), interval, now); why != "" {
+		switch choice, why := WindowChoice(gates.Window(ctx, e, anchor), interval, now); {
+		case choice == BackupMethodFull && fullErr == nil:
 			return BackupMethodFull, why, nil
+		case choice == BackupMethodSkip:
+			return BackupMethodSkip, why, nil
+		case choice == BackupMethodRefresh && why != "":
+			return BackupMethodRefresh, why, nil
 		}
+		// A full backup this daemon cannot start is the update, as before:
+		// it is the producer that can.
 	}
 	return BackupMethodRefresh, "no load on your database", nil
 }

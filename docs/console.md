@@ -1083,7 +1083,8 @@ saved, shown with the reason `serve` is not running it.
   still applies with an unknown count. The count is unknown when the
   index does not answer the probe, when nothing on record says how far
   the index had been written at the previous snapshot (the run history
-  does not hold it, or another process made the snapshot), when the
+  does not hold it, or another process made the snapshot; an index that
+  held no event then is on record as zero, and counts), when the
   server was pointed at another index, or when the index was rebuilt;
   the daemon log says which, once per cause, and that the update runs
   with no estimate of its cost. After a long stop that update applies
@@ -1120,19 +1121,61 @@ saved, shown with the reason `serve` is not running it.
   are dated against a full backup, not against the previous snapshot,
   because an update is folded from the index, which never received them:
   only a read of the source brings them back, and with no full backup in
-  the run history any dropped row keeps the full backup. Everything else
-  keeps the full backup and the reason says why: the source is ahead (the
-  capture may have stopped), or it cannot be asked (a capture in
-  binlog-position mode, which is what a source without GTIDs runs, since
-  its checkpoint stops short of each commit; PostgreSQL; MariaDB GTIDs; an
-  index on the source server itself, whose own checkpoint writes keep the
-  source ahead; a source that does not answer; an index with no live
-  capture). An index that records nothing while the source keeps writing
-  is a capture that stopped, and a full backup is the one producer that
-  does not depend on it. A source that can never be asked (the list just
-  given) leaves one case open: a quiet server of that kind with no usable
-  rate is read in full each time its snapshot passes that age with
-  nothing indexed, though nothing may have changed. Stopping a source from the web interface
+  the run history any dropped row keeps the full backup. Evidence that
+  capture is missing changes keeps the full backup, and the reason says
+  what was found: the source is ahead (the capture may have stopped), a
+  capture gap is on record since the previous snapshot, the capture
+  dropped rows no full backup has read since, or the capture holds
+  transactions the source does not have. So does an answer under which a
+  loss cannot be ruled out (the record of dropped rows is unreadable, the
+  index predates the capture's loss record, a GTID set does not parse),
+  and any reason that is on neither list: the full backup is the default.
+  An index that records nothing while the source keeps
+  writing is a capture that stopped, and a full backup is the one producer
+  that does not depend on it. A source that cannot be asked is not
+  evidence (#2659), for these reasons only: a capture in binlog-position
+  mode, which is what a source without GTIDs runs, since its checkpoint
+  stops short of each commit, or one with no GTID checkpoint; PostgreSQL;
+  a MariaDB source (no `gtid_mode`); an index on the source
+  server itself, whose own checkpoint writes keep the source ahead, or
+  one that cannot be told apart from it; a server with no source; a
+  source that does not answer, or not in time, or fails the read of its
+  GTID set; an index with no live capture on record, where the reason
+  adds that no streaming capture has run against this index and, if one
+  is expected, to check that it is running. A MySQL source whose
+  `gtid_mode` is `OFF`, `OFF_PERMISSIVE` or `ON_PERMISSIVE` while the
+  capture follows it by GTID is not one of them: it serves no reader by
+  GTID, so the capture cannot be reading it, and the full backup stays;
+  a source with GTIDs on and an empty executed set beside a capture that
+  holds transactions is the reset source above. There the slot makes no
+  snapshot at all: no full backup, since nothing says a change was missed,
+  and no update, which would publish the previous rows under a new date.
+  The slot is recorded as skipped with that reason (one record for the
+  whole quiet stretch, its time moving to the latest slot), the card shows
+  it and says the next run will make no snapshot
+  (`schedule.next_method` is `skip`, with the reason in
+  `next_method_why`), and the daemon log says it once when it starts, once
+  a day while it lasts and once when it ends. It ends when a change is
+  indexed or the source can be asked. It applies on a daemon that may not
+  take full backups too. A skipped slot still sends to S3 the newest
+  snapshot the upload interval kept on the local disk, once its upload
+  slot comes, as a quiet update does. The skip gives way to the update
+  when the snapshot cannot wait: its readers start close to the oldest
+  hour the index keeps (the line the quiet-cycle gate re-anchors a
+  snapshot on, #1689), a table was created since it, a capture loss is on
+  record since it, or one of those could not be read (the reason tells an
+  index that did not answer in time from a read that failed). Which one
+  is said before the run, in `next_method_why`, and once in the daemon
+  log, which words it as the end of the skipped stretch; the update's own
+  run record carries no reason (`last_run.why` is for full backups). The
+  update also runs when the index itself did not give the capture's
+  record (it did not answer, or not in time, or `stream_state` could not
+  be read; the probe's time limit covers both servers, and it says which
+  one was being read when it ran out): its reason names the index, and
+  an update with nothing to add publishes no snapshot, so the next slot
+  asks again. While a kept snapshot is being sent to S3 the refresh slot
+  is busy and the page says "Sending a snapshot kept on this machine to
+  S3" (`refresh.sending_held`). Stopping a source from the web interface
   acknowledges its capture-gap record and does not erase it: the Stop
   stamps the time of the acknowledgement beside the record
   (`stream_state.gap_acked_at`), which silences the alarm (the

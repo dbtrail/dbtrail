@@ -51,7 +51,8 @@ func TestIntegrationFlashbackCaptureWatermark_realGTIDSets_2085(t *testing.T) {
 		t.Helper()
 		n++
 		testutil.MustExec(t, src, "CREATE TABLE `"+srcName+"`.wm_"+string(rune('a'+n))+" (id INT PRIMARY KEY)")
-		executed, err := readExecutedGTIDs(ctx, src)
+		got, err := readExecutedGTIDs(ctx, src)
+		executed := got.executed
 		if err != nil || executed == "" {
 			t.Fatalf("the source's executed set = %q, %v", executed, err)
 		}
@@ -72,7 +73,8 @@ func TestIntegrationFlashbackCaptureWatermark_realGTIDSets_2085(t *testing.T) {
 	// source has executed is read from it each time, never assumed.
 	executedNow := func() string {
 		t.Helper()
-		executed, err := readExecutedGTIDs(ctx, src)
+		got, err := readExecutedGTIDs(ctx, src)
+		executed := got.executed
 		if err != nil || executed == "" {
 			t.Fatalf("the source's executed set = %q, %v", executed, err)
 		}

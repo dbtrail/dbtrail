@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Upgrade note.** Servers you already have keep what they have. A server with an S3 destination had a count saved that did nothing; the first start of this version sets it to 0 and logs which servers it touched, so they keep every local snapshot until you set **Keep by count** on them. `--baseline-retain` (**Delete by age**) still works and is the old way: a server with no count is pruned by the age alone once S3 has each snapshot, a server with a count loses a snapshot only when it is past the count and older than the age, and the daemon says so once at startup. A schedule saved before this keeps its **Send to S3 every**, "each update" included, and no schedule starts by itself on an existing server. A server added after the upgrade with an S3 destination prunes its local folder to the newest 3 plus the last hour, and uploads once a day unless told otherwise. If you use `--baseline-refresh-interval`, the snapshots it writes on such a server are now sent to the bucket by the cleanup, up to three per cleanup.
 
+- **A quiet server whose source cannot be asked is no longer read in full: the slot makes no snapshot** (#2659). When nothing was indexed since a snapshot older than two hours or six schedule intervals, whichever is longer, and the source could not be asked whether capture had recorded everything it wrote, the schedule read the whole source at every such slot, though nothing may have changed. Now that slot makes no snapshot: no full read, since nothing says a change was missed, and no update, which would publish the previous rows under a new date. The copy keeps the data it has. This applies to a fixed list of reasons and to no other: a PostgreSQL source, a MariaDB source, capture in binlog-position mode or with no GTID position saved, an index on the same server as the source or one that cannot be told apart from it, a server with no source connection, a source that does not answer (or not in time, or fails the read of its GTID set), and an index with no capture on record (its reason adds that no streaming capture has run against this index and, if one is expected, to check that it is running). The Snapshots page shows the slot with its reason ("No snapshot was made at ...: nothing was indexed since the previous snapshot, and the source cannot confirm that capture recorded everything it wrote (...), so no snapshot is made at this slot; the copy keeps the data it has until a change is indexed or the source can be asked") and says the next run will make none either; the API reports `next_method: "skip"`. The daemon log says it once when it starts, once a day while it lasts and once when it ends, not at every slot. It ends when a change is indexed or the source can be asked. A skipped slot still sends to S3 a snapshot that **Send to S3 every** kept on the local disk, once its upload time comes. The update still runs when the snapshot cannot wait: it is close to the oldest change the index keeps, a table was created since it, or a capture loss is on record since it; left alone past that point it could not be updated when a change did arrive. Which of those it was is said before the run, as the next run's reason on the page, and once in the daemon log; the run itself is recorded as an ordinary update. A full read is still taken where there is evidence that capture is missing changes (the source reports transactions capture has not recorded, a capture gap is on record since the snapshot, capture dropped rows no full read has read since, capture holds transactions the source does not have), where the source does not serve capture by GTID while capture follows it by GTID (its `gtid_mode` is `OFF`, `OFF_PERMISSIVE` or `ON_PERMISSIVE`), and where a loss cannot be ruled out (the record of dropped rows cannot be read, the index is older than the record of capture gaps, a GTID set does not parse, or any reason that is neither on the list above nor one of the three that follow). Three reasons lead to the update instead, because the index did not give capture's own record and nothing was learned about the source: the index did not answer (or not in time), capture's checkpoint could not be read, and the request that asked was cancelled; that update's reason names the index, and when it has nothing to add it publishes no snapshot and the next slot asks again. A source that used to answer "the source reported no GTID set" now gets one of three answers: a MariaDB source (skipped), a `gtid_mode` that is not `ON` (read in full), or GTIDs on with an empty set beside a capture that holds transactions (read in full, as a source that was reset or replaced); the capture status on the Overview shows the same texts. While a snapshot kept on the local disk is being sent to S3, the page says "Sending a snapshot kept on this machine to S3" where it said "Automatic refresh running". The reason of a full read taken on evidence now says what was found ("... nothing new was indexed since it was taken 5h ago, and the capture lost events to a binlog gap after the previous snapshot") where it said the source could not be checked. The skip applies on a daemon that may not take full reads too, where that slot used to update. Also: an index that held no event when a snapshot was made is now recorded as such, so the count of changes since that snapshot is known after a daemon restart (it was unknown after every restart, and this rule never applied there); snapshots recorded by earlier versions keep their meaning.
+
 ## [0.129.0] - 2026-11-11
 
 - **The SQL port answers in fresh mode by default.**
@@ -183,7 +185,6 @@ was published and runs the same code.
 ### Fixed
 - **A snapshot whose upload to S3 did not finish is sent again (#2563).** A complete local snapshot that the S3 destination does not have complete (an update's or a full read's upload that was cut short) used to wait for the next full read to be sent again; with full reads off it stayed on the machine for good. Each cleanup now sends such snapshots again, up to three per folder at a time, and deletes them locally once S3 has them; an older build's snapshot with no `_SUCCESS` marker is not tried, and a folder used with two different destinations sends nothing (with a warning). The Snapshots settings card names them ("Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC ... DBTrail sends it again at the next cleanup", or, where nothing here resends, to send or remove them by hand) instead of "The log says why", and is updated right after the resends.
 
-
 ## [0.118.0] - 2026-10-25
 ### Added
 - **The web interface says how far behind your MySQL the last SQL answer was (#2556).** The router card and the Snapshots card ("How current SQL answers are") say it in one sentence per server, "The last query read data 0 seconds behind your MySQL", from the router's `behind_source_seconds`; on the router card it replaces the lag and max lag, which read an hour behind on a source that was only quiet. A router older than this release keeps today's words. On a quiet server whose source just told capture it had nothing more to send, the Overview's "Your MySQL" box and the Status page's coverage card say "up to date", as they do when the source is asked, instead of "DBTrail cannot tell which"; while recent changes are being indexed the stamp is not used, so it cannot hide a backlog. The coverage document carries `caught_up_ago_seconds`.
@@ -224,7 +225,6 @@ was published and runs the same code.
   - **Also on such a server.** The `events` view drops the hidden tables' changes and removes hidden columns from the row images. Statements that read the copy's files directly are refused. Time travel on the MySQL port (`_flashback`, `_snapshot`, `_diff`) is off.
   - **What it does not cover.** Only those three places hide. The index and the copy's files keep everything, and so do the downloads, including the views files. The rest of the web interface (change history, recovery, reconstruct, flashback, schema changes) and the AI connector's other tools follow the access profiles and return full rows. What Engine Routing forwards to MySQL runs under the forwarding account's grants; the same panel lists what those grants can still read.
   - **Downgrading.** Versions before 0.116.0 ignore the rules and hide nothing. 0.116.0 hides as described, without the panel, `hidden_from_sql` or the grants check.
-
 
 ## [0.116.0] - 2026-10-24
 
@@ -323,7 +323,6 @@ was published and runs the same code.
   - When a newer snapshot arrives, the overlay a table already has is trimmed in memory to what the snapshot does not hold, instead of being rebuilt (#2485).
   - The rebuilds still needed (a new table, an overlay that grew past its budget, a snapshot it cannot be trimmed to) run in the background, with retries. No statement waits for them (#2486). Until a rebuild is ready, a statement reads that table as of its snapshot, or keeps the previous overlay where that is still exact.
 - **The GROUP BY key rewrite from 0.111.0 is removed** (#2488). It was faster on a synthetic copy. On real copies, the per-group check that keeps it safe made the statement it targets 16–22% slower than running it as written, so the 2.21 s → 1.29 s figure in the 0.111.0 notes does not hold.
-
 
 ## [0.111.0] - 2026-10-20
 ### Changed
@@ -924,7 +923,6 @@ the CI one had. The demo image `0.108.0` was published and runs the same code.
   blank, and the first-run Connect screen, show the global grant as before:
   such a server captures every schema. An account created with the earlier
   block keeps working; nothing checks or changes its grants.
-
 
 ## [0.103.1] - 2026-10-10
 
@@ -3531,7 +3529,6 @@ differently because of them.
   the cleartext connection has actually been made; a retry that fails no
   longer logs that it is reading without encryption.
 
-
 ## [0.94.0] - 2026-10-01
 ### Fixed
 - **Sources that only accept encrypted connections can be added from the
@@ -5126,7 +5123,6 @@ differently because of them.
   unreadable version runs the preflight, and the `--lock-mode` refusal says
   which of the two it is about.
 
-
 ## [0.82.0] - 2026-09-15
 
 ### Added
@@ -5716,7 +5712,6 @@ differently because of them.
   machine dbtrail runs on. A scheduled backup on a server that has a Backup S3
   reuses nothing and writes every table. The card says which, and the daemon
   log has been saying so on every published run.
-
 
 ## [0.75.0] - 2026-09-01
 ### Fixed
@@ -8306,8 +8301,6 @@ what was lost.
 
 ### Added
 - **UI-managed MCP access token — generate, rotate, and revoke from Settings → Connect AI** (#1053, closes #1052): a fresh install now needs zero out-of-UI configuration to connect an AI client. The Connect AI page grows an **Access token** card: **Generate** mints a cryptographically random `bmt_`-prefixed token from an authenticated browser session and shows the plaintext exactly once (it is never stored — only its SHA-256 is persisted, in `~/.config/bintrail/console-mcp-token.yaml`, `0600`, atomic write, versioned envelope with the registry's read-only-if-newer contract); **Rotate**/**Revoke** apply immediately, with no restart, including to sibling console processes sharing the file (every check re-reads it, so a revoke that reports success actually revokes everywhere). The managed token is **scoped to `/mcp` alone** — it authenticates the read-only MCP tools and nothing else (not the browser API, not server registry CRUD, not its own rotation), so handing it to an AI client grants exactly what the UI says it grants. `--token` / `BINTRAIL_CONSOLE_TOKEN` keep working unchanged and are reported as environment-owned; the flashback MySQL-protocol port still requires the static token (a hash-only store cannot drive `mysql_native_password`). New `GET/POST/DELETE /api/mcp-token` endpoints (values never serialized; the plaintext appears only in the generate response). A corrupt or newer-version token file never blocks daemon startup — the managed token degrades with a loud log and the Generate button self-heals malformed files, while unreadable ones are refused rather than destroyed.
-
-
 
 ### Added
 - **Privacy policy** (#1048): `PRIVACY.md` documents the Claude Desktop extension's data handling — the bundle is a local bridge that connects only to the user-configured endpoint, the token lives in the OS credential store, and the project collects nothing (no telemetry). Linked from the README and declared in the `.mcpb` manifest (`privacy_policies`), as required for Claude Connectors Directory listing of local extensions. `.mcpb` release assets now cover macOS too (`dbtrail-darwin-{arm64,amd64}.mcpb`, built natively per release since v0.39.0's post-release assets).

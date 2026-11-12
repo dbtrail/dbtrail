@@ -38,12 +38,12 @@ import (
 func captureHeadFromDBsMariaDB(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
-		return captureProbeResult{detail: "the index did not answer", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	defer idx.Close()
 	st, err := status.LoadStreamState(ctx, idx)
 	if err != nil {
-		return captureProbeResult{detail: "the capture's checkpoint could not be read", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+		return captureProbeResult{detail: captureDetailCheckpointUnread, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	r, err := headFromStateMariaDB(ctx, st, func() (*sql.DB, error) {
 		return connectSource(sourceProbeDSN(sourceDSN), ssl)
@@ -65,7 +65,7 @@ func headFromStateMariaDB(ctx context.Context, st *status.StreamStateInfo, openS
 	}
 	src, err := openSource()
 	if err != nil {
-		return captureProbeResult{detail: "the source did not answer"}, err
+		return captureProbeResult{detail: captureDetailSourceSilent}, err
 	}
 	defer src.Close()
 	var pos sql.NullString
@@ -74,10 +74,10 @@ func headFromStateMariaDB(ctx context.Context, st *status.StreamStateInfo, openS
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 { // ER_UNKNOWN_SYSTEM_VARIABLE
 		// Registered as MariaDB, answers as something else. Not a failure
 		// to read, and not an answer either.
-		return captureProbeResult{detail: "the source has no MariaDB GTID position: is it a MariaDB server?"}, nil
+		return captureProbeResult{detail: captureDetailMariaDBNoPositionVar}, nil
 	}
 	if err != nil {
-		return captureProbeResult{detail: "the source did not report its GTID position"}, err
+		return captureProbeResult{detail: captureDetailMariaDBPositionUnread}, err
 	}
 	executed := strings.Join(strings.Fields(pos.String), "")
 	verdict, detail := compareMariaDBPositions(st.GTIDSet.String, executed)
@@ -91,15 +91,15 @@ func headFromStateMariaDB(ctx context.Context, st *status.StreamStateInfo, openS
 // It never returns console.CaptureBehind.
 func compareMariaDBPositions(captured, executed string) (verdict, detail string) {
 	if strings.TrimSpace(executed) == "" {
-		return "", "the source reported no GTID position"
+		return "", captureDetailMariaDBNoPosition
 	}
 	have, err := parser.ParseMariaDBPosition(captured)
 	if err != nil {
-		return "", "the capture's GTID set does not parse"
+		return "", captureDetailCaptureUnparsed
 	}
 	wrote, err := parser.ParseMariaDBPosition(executed)
 	if err != nil {
-		return "", "the source's GTID position does not parse"
+		return "", captureDetailMariaDBSourceUnparsed
 	}
 	equal := len(have) == len(wrote)
 	sourceAhead := true
@@ -124,7 +124,7 @@ func compareMariaDBPositions(captured, executed string) (verdict, detail string)
 		return console.CaptureCaughtUp, ""
 	case sourceAhead:
 		// Not said as behind: see the rules at the top of this file.
-		return "", "the source is ahead of the capture's checkpoint; a MariaDB source is only compared for an exact match"
+		return "", captureDetailMariaDBAhead
 	}
-	return "", "the capture's checkpoint and the source's GTID position do not match: the source may have been reset, restored or replaced"
+	return "", captureDetailMariaDBMismatch
 }

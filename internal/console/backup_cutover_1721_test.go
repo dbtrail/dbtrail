@@ -56,15 +56,23 @@ func TestCutoverToFull(t *testing.T) {
 		{"no anchor: update", BackupWindow{Events: -1}, 5 * time.Minute, ""},
 		// The cut-over age still bounds one thing: how old the anchor has
 		// to be before an index that recorded NOTHING since it is doubted
-		// (#1791; here the source could not be asked).
-		{"nothing indexed, anchor exactly at the cut-over age: update", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge), Events: 0}, 5 * time.Minute, ""},
-		{"nothing indexed, anchor a second past it: full", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge - time.Second), Events: 0}, 5 * time.Minute, "window_age"},
-		{"nothing indexed, no interval known: the floor applies", BackupWindow{Anchor: old, Events: 0}, 0, "window_age"},
+		// (#1791; here the source reports transactions capture has not
+		// recorded, the evidence a full read is still taken on).
+		{"nothing indexed, anchor exactly at the cut-over age: update", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge), Events: 0, Capture: CaptureBehind}, 5 * time.Minute, ""},
+		{"nothing indexed, anchor a second past it: full", BackupWindow{Anchor: now.Add(-BackupCutoverMinAge - time.Second), Events: 0, Capture: CaptureBehind}, 5 * time.Minute, "window_age"},
+		{"nothing indexed, no interval known: the floor applies", BackupWindow{Anchor: old, Events: 0, Capture: CaptureBehind}, 0, "window_age"},
 		// Six intervals: a daily schedule's normal window is never old.
-		{"nothing indexed, daily schedule, one-day-old anchor: update", BackupWindow{Anchor: now.Add(-25 * time.Hour), Events: 0}, 24 * time.Hour, ""},
-		{"nothing indexed, daily schedule, week-old anchor: full", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: 0}, 24 * time.Hour, "window_age"},
-		{"nothing indexed, hourly schedule, five-hour-old anchor: update", BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0}, time.Hour, ""},
-		{"nothing indexed, no anchor: update", BackupWindow{Events: 0}, 5 * time.Minute, ""},
+		{"nothing indexed, daily schedule, one-day-old anchor: update", BackupWindow{Anchor: now.Add(-25 * time.Hour), Events: 0, Capture: CaptureBehind}, 24 * time.Hour, ""},
+		{"nothing indexed, daily schedule, week-old anchor: full", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: 0, Capture: CaptureBehind}, 24 * time.Hour, "window_age"},
+		{"nothing indexed, hourly schedule, five-hour-old anchor: update", BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0, Capture: CaptureBehind}, time.Hour, ""},
+		{"nothing indexed, no anchor: update", BackupWindow{Events: 0, Capture: CaptureBehind}, 5 * time.Minute, ""},
+		// A source that cannot be asked is no evidence: never a full read,
+		// at any age (#2659; the slot is skipped, see WindowChoice).
+		{"nothing indexed, the source cannot be asked, anchor past the age: no full read", BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnaskable}, 5 * time.Minute, ""},
+		{"nothing indexed, the source cannot be asked, week-old anchor: no full read", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: 0, Capture: CaptureUnaskable, CanWait: true}, 24 * time.Hour, ""},
+		// Not confirmed, and for no reason on the list of sources that
+		// cannot be asked: the full read, as before the skip existed.
+		{"nothing indexed, the capture not confirmed and no listed reason: full", BackupWindow{Anchor: old, Events: 0}, 5 * time.Minute, "window_age"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -93,17 +101,18 @@ func TestCutoverToFull(t *testing.T) {
 }
 
 // The schedule's interval scales the cut-over age: the same seven-hour-old
-// anchor with nothing indexed since it, and a source that could not be
-// asked, is an update on a daily schedule (cut-over six days) and a full
-// backup on an hourly one (six hours). With the count unknown it is an
-// update on both: the anchor's age alone chooses nothing (#2659).
+// anchor with nothing indexed since it, and a source that reports
+// transactions capture has not recorded, is an update on a daily schedule
+// (cut-over six days) and a full backup on an hourly one (six hours). With
+// the count unknown it is an update on both: the anchor's age alone chooses
+// nothing (#2659).
 func TestChooseBackupMethod_intervalScalesTheCutoverAge(t *testing.T) {
 	dir := t.TempDir()
 	fakeSnapshot(t, dir)
 	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
 	sevenHours := func(events int64) BackupWindowProbe {
 		return func(_ context.Context, _ ServerEntry, _ time.Time) BackupWindow {
-			return BackupWindow{Anchor: now.Add(-7 * time.Hour), Events: events}
+			return BackupWindow{Anchor: now.Add(-7 * time.Hour), Events: events, Capture: CaptureBehind}
 		}
 	}
 	for _, c := range []struct {
@@ -328,13 +337,14 @@ func TestChooseBackupMethod_cutsOverOnTheMeasuredWindow(t *testing.T) {
 	if err != nil || method != BackupMethodRefresh {
 		t.Fatalf("old anchor, nothing measured: method=%q why=%q err=%v, want the update", method, why, err)
 	}
-	// Nothing indexed since that old snapshot, and no word from the source:
-	// the index may be missing writes, which only a full read settles.
+	// Nothing indexed since that old snapshot, and the source reports
+	// transactions capture has not recorded: the index is missing writes,
+	// which only a full read settles.
 	quiet := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
-		return BackupWindow{Anchor: anchor, Events: 0}
+		return BackupWindow{Anchor: anchor, Events: 0, Capture: CaptureBehind}
 	}
 	method, why, err = ChooseBackupMethod(context.Background(), e, BackupScheduleGates{LoopRunning: true, FullBackups: true, Window: quiet})
 	if err != nil || method != BackupMethodFull || BackupWhyCode(why) != "window_age" {
-		t.Fatalf("old anchor, nothing indexed, the source not asked: method=%q why=%q err=%v", method, why, err)
+		t.Fatalf("old anchor, nothing indexed, the source ahead: method=%q why=%q err=%v", method, why, err)
 	}
 }

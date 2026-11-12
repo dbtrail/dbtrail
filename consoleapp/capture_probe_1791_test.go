@@ -158,7 +158,9 @@ func TestCompareGTIDSets(t *testing.T) {
 		{"the capture holds more than the source (a reset)", uuidA + ":1-1000", uuidA + ":1-5", ""},
 		{"the capture holds another server's transactions", uuidA + ":1-10," + uuidB + ":1-3", uuidA + ":1-10", ""},
 		{"disjoint sets (another server entirely)", uuidA + ":1-10", uuidB + ":1-10", ""},
-		{"the source reported no set (gtid_mode not ON)", uuidA + ":1-10", "", ""},
+		// An empty set on a source with GTIDs on (the only source whose set
+		// reaches this comparison): the capture holds what it does not have.
+		{"the source's set is empty (after a reset)", uuidA + ":1-10", "", ""},
 		{"an unparsable capture set", "not a gtid", uuidA + ":1-10", ""},
 		{"an unparsable source set", uuidA + ":1-10", "junk", ""},
 		{"a MariaDB set", "0-1-100", "0-1-100", ""},
@@ -169,10 +171,10 @@ func TestCompareGTIDSets(t *testing.T) {
 			if got != c.want {
 				t.Fatalf("verdict %q (%s), want %q", got, detail, c.want)
 			}
-			// An empty source set would also read as unknown through the
-			// comparison below it; the reason is what pins the check.
-			if c.executed == "" && detail != "the source reported no GTID set" {
-				t.Fatalf("empty source set: detail %q", detail)
+			// An empty source set is a set: a capture holding transactions
+			// beside it holds what the source does not have (#2659).
+			if c.executed == "" && detail != captureDetailDiverged {
+				t.Fatalf("empty source set: detail %q, want the capture holding what the source does not", detail)
 			}
 			if got != console.CaptureCaughtUp && detail == "" {
 				t.Fatal("a verdict other than caught up must say why")
@@ -255,8 +257,8 @@ func TestMeasureWindow_asksTheSourceOnlyWhenNothingWasIndexedOnAnOldAnchor(t *te
 		pg := e
 		pg.Flavor = console.FlavorPostgres
 		w, asked := run(t, pg, old, 1000, 1000, caughtUp)
-		if len(asked) != 0 || w.Capture != "" || w.CaptureDetail == "" {
-			t.Fatalf("window=%+v asked=%v, want no probe and a reason", w, asked)
+		if len(asked) != 0 || w.Capture != console.CaptureUnaskable || w.CaptureDetail == "" {
+			t.Fatalf("window=%+v asked=%v, want no probe, a source that cannot be asked and a reason", w, asked)
 		}
 	})
 	t.Run("no source configured: not asked", func(t *testing.T) {
@@ -425,13 +427,17 @@ func TestChooseBackupMethod_updatesAQuietServerTheSourceConfirms(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
 	b.window = b.measureWindow
 	e := addScheduled(t, reg, true) // the fake snapshot at snapshotAnchor (weeks old), an hourly schedule (cut-over 6h)
-	sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: 1000}, publishedAt: snapshotAnchor, indexDSN: e.DSN}
+	sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: 1000}, publishedAt: snapshotAnchor, indexDSN: e.DSN, readsFrom: snapshotAnchor, readsFromKnown: true}
 	mark := indexMark{events: 1000}
 	stubIndexMark(t, &mark, true)
 	now := snapshotAnchor.Add(8 * time.Hour)
 	for _, c := range []struct {
 		verdict, want string
-	}{{console.CaptureCaughtUp, console.BackupMethodRefresh}, {console.CaptureBehind, console.BackupMethodFull}, {"", console.BackupMethodFull}} {
+	}{{console.CaptureCaughtUp, console.BackupMethodRefresh}, {console.CaptureBehind, console.BackupMethodFull},
+		// Not confirmed, for a reason that is on no list ("x"): the full
+		// read, as before the skip existed (#2659).
+		{"", console.BackupMethodFull}} {
+		stubCoverage(t, true, true)
 		stubCaptureProbe(t, captureProbeResult{verdict: c.verdict, detail: "x"})
 		b.mu.Lock()
 		b.windows = nil
@@ -535,27 +541,40 @@ func TestSourceProbeDSN(t *testing.T) {
 // between UUID blocks, which the single-UUID test server never shows.
 func TestReadExecutedGTIDs(t *testing.T) {
 	q := regexp.QuoteMeta("SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed")
+	// The mode is returned as the server says it, with the set: what a
+	// mode other than ON means is gtidModeRefusal's to say, and three
+	// states that used to come back as one empty string stay apart.
 	cases := []struct {
 		name    string
 		setup   func(sqlmock.Sqlmock)
-		want    string
+		want    sourceGTIDs
+		refusal string
 		wantErr bool
 	}{
 		{"GTIDs on, several servers", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON", uuidA+":1-10,\n"+uuidB+":1-3"))
-		}, uuidA + ":1-10," + uuidB + ":1-3", false},
+		}, sourceGTIDs{mode: "ON", executed: uuidA + ":1-10," + uuidB + ":1-3"}, "", false},
+		{"GTIDs on, an empty set (after a reset)", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON", ""))
+		}, sourceGTIDs{mode: "ON"}, "", false},
 		{"GTIDs off", func(m sqlmock.Sqlmock) {
-			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("OFF", uuidA+":1-10"))
-		}, "", false},
+			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("OFF", ""))
+		}, sourceGTIDs{mode: "OFF"}, captureDetailGTIDModeOff, false},
+		{"OFF_PERMISSIVE is not on", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("OFF_PERMISSIVE", ""))
+		}, sourceGTIDs{mode: "OFF_PERMISSIVE"}, captureDetailGTIDOffPermissive, false},
 		{"on the way up (ON_PERMISSIVE) is not on", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("ON_PERMISSIVE", uuidA+":1-10"))
-		}, "", false},
+		}, sourceGTIDs{mode: "ON_PERMISSIVE", executed: uuidA + ":1-10"}, captureDetailGTIDOnPermissive, false},
+		{"a mode this build does not know", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(q).WillReturnRows(sqlmock.NewRows([]string{"m", "e"}).AddRow("UPGRADE_STEP_1", ""))
+		}, sourceGTIDs{mode: "UPGRADE_STEP_1"}, captureDetailGTIDModeOther, false},
 		{"MariaDB: no such variable", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(q).WillReturnError(&mysql.MySQLError{Number: 1193, Message: "Unknown system variable 'gtid_mode'"})
-		}, "", false},
+		}, sourceGTIDs{}, captureDetailNoGTIDMode, false},
 		{"a real failure", func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(q).WillReturnError(&mysql.MySQLError{Number: 1227, Message: "Access denied"})
-		}, "", true},
+		}, sourceGTIDs{}, "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -567,7 +586,10 @@ func TestReadExecutedGTIDs(t *testing.T) {
 			c.setup(m)
 			got, err := readExecutedGTIDs(context.Background(), db)
 			if (err != nil) != c.wantErr || got != c.want {
-				t.Fatalf("got %q err=%v, want %q err=%v", got, err, c.want, c.wantErr)
+				t.Fatalf("got %+v err=%v, want %+v err=%v", got, err, c.want, c.wantErr)
+			}
+			if err == nil && gtidModeRefusal(got.mode) != c.refusal {
+				t.Fatalf("mode %q is refused with %q, want %q", got.mode, gtidModeRefusal(got.mode), c.refusal)
 			}
 		})
 	}

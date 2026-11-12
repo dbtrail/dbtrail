@@ -31,7 +31,7 @@ func TestIntegrationProbeCapture(t *testing.T) {
 
 	probe := func() captureProbeResult {
 		t.Helper()
-		return captureFromDBs(ctx, indexDSN, sourceDSN, config.SSL{}, anchor, time.Time{})
+		return captureFromDBs(ctx, indexDSN, sourceDSN, config.SSL{}, anchor, time.Time{}, nil)
 	}
 	// A file-mode index: no stream_state row.
 	if r := probe(); r.verdict != "" || r.detail != "the index has no live capture on record" {
@@ -78,9 +78,10 @@ func TestIntegrationProbeCapture(t *testing.T) {
 	}
 	testutil.MustExec(t, db, "UPDATE stream_state SET gap_lost_at = NULL, gap_lost_detail = NULL WHERE id = 1")
 
-	// The source's GTID read, for real: empty with GTIDs off, a
-	// whitespace-free set that compares with itself once they are on.
-	executed, err := readExecutedGTIDs(ctx, db)
+	// The source's GTID read, for real: the server's own gtid_mode, which
+	// is what tells a source with GTIDs off from one with an empty set, and
+	// a whitespace-free set that compares with itself once they are on.
+	first, err := readExecutedGTIDs(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,25 +89,27 @@ func TestIntegrationProbeCapture(t *testing.T) {
 	if err := db.QueryRow("SELECT @@GLOBAL.gtid_mode").Scan(&mode); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.EqualFold(mode, "ON") && executed != "" {
-		t.Fatalf("gtid_mode=%s but the read returned %q, want empty", mode, executed)
+	if first.mode != mode || (gtidModeRefusal(first.mode) == "") != strings.EqualFold(mode, "ON") {
+		t.Fatalf("gtid_mode=%s, the read returned mode %q and refusal %q", mode, first.mode, gtidModeRefusal(first.mode))
 	}
 	if !stepGTIDModeOnForProbe(t, db) {
 		return
 	}
 	testutil.MustExec(t, db, "CREATE TABLE owns_a_gtid (id INT PRIMARY KEY)")
-	before, err := readExecutedGTIDs(ctx, db)
-	if err != nil || before == "" || strings.ContainsAny(before, " \n\t") {
+	beforeRead, err := readExecutedGTIDs(ctx, db)
+	before := beforeRead.executed
+	if err != nil || beforeRead.mode != "ON" || before == "" || strings.ContainsAny(before, " \n\t") {
 		t.Fatalf("executed set with GTIDs on = %q, %v; want a non-empty set with no whitespace", before, err)
 	}
 	if v, d := compareGTIDSets(before, before); v != console.CaptureCaughtUp {
 		t.Fatalf("the server's own set against itself: %q (%s)", v, d)
 	}
 	testutil.MustExec(t, db, "CREATE TABLE owns_another (id INT PRIMARY KEY)")
-	after, err := readExecutedGTIDs(ctx, db)
+	afterRead, err := readExecutedGTIDs(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
+	after := afterRead.executed
 	if v, d := compareGTIDSets(before, after); v != console.CaptureBehind {
 		t.Fatalf("a capture holding the set from before a write: %q (%s), want behind", v, d)
 	}

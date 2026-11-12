@@ -2188,8 +2188,12 @@ function ovFlowModel(inp) {
     // that fails at run time can still fall back to a read, as the schedule
     // card says. A run that cannot start gets no time at all, because the
     // daemon fills next_method even then (next_method_error says why).
+    // "skip" (#2659): as things stand the next slot makes no snapshot, so
+    // no time is promised for one.
     const nextWord = sch && sch.next_method === "refresh" ? "next refresh " : sch && sch.next_method ? "next read " : "next ";
-    const nextPart = sch && sch.next_method_error ? "next run cannot start" : nextAt ? nextWord + nextAt : "";
+    const nextPart = sch && sch.next_method_error ? "next run cannot start"
+      : sch && sch.next_method === "skip" ? (nextAt ? "no snapshot at the next slot" : "")
+      : nextAt ? nextWord + nextAt : "";
     // "written" only when the files are a minute or more younger than the
     // data: otherwise the two times are one.
     const asOfAt = data ? flowHHMM(data.asOf) : snapAt;
@@ -6469,6 +6473,7 @@ function runningWithModel(inp) {
           : row("full read", rwEvery(sch.full_every)));
       }
       if (sch.next_method_error) cp.push(row("next run", "cannot start", sch.next_method_error));
+      else if (sch.next_method === "skip") cp.push(row("next run", "no snapshot", sch.next_method_why || ""));
       else if (sch.next_method) cp.push(row("next run", sch.next_method === "refresh" ? "an update from the recorded changes" : "a full read of the database", sch.next_method_why || ""));
     }
     const keep = bl.local_retention && bl.local_retention.keep_newest;
@@ -7728,6 +7733,12 @@ function snapshotHeroTone(b, cov, cur) {
   }
   const skip = sch && sch.last_skipped;
   if (skip && (!lastRun || (skip.at || "") >= (lastRun.finished_at || ""))) {
+    // #2659: a slot skipped because nothing was indexed and the source
+    // cannot confirm capture is not a fault of the schedule. Amber, with
+    // the reason, and never graded "later than its schedule" below.
+    if (unconfirmedSkipText(skip.reason)) {
+      return { tone: "warn", why: "No snapshot was made at the last scheduled time: " + plainWords(skip.reason), link: "settings" };
+    }
     return { tone: "bad", why: "A scheduled run did not start: " + plainWords(skip.reason || "unknown reason"), link: "settings" };
   }
   const every = sch ? flowEveryMinutes(sch.every) : 0;
@@ -10053,6 +10064,33 @@ function scheduleSkipTail(reason) {
     : " It will try again at the next scheduled time.";
 }
 
+// unconfirmedSkipText: the skip the schedule records when nothing was indexed
+// since the previous snapshot and the source cannot confirm that capture
+// recorded everything it wrote (#2659). Matched on the reason's fixed words
+// (console.SkipUnconfirmedReason), pinned by a test that feeds this the Go
+// text.
+function unconfirmedSkipText(s) {
+  return /^nothing was indexed since the previous snapshot, and the source cannot confirm/.test(s || "") &&
+    /so no snapshot is made at this slot/.test(s || "");
+}
+
+// unconfirmedNextLine: what the schedule card says about the next run when
+// the daemon's plan for it is that skip.
+function unconfirmedNextLine(why) {
+  const w = plainWords(why || "");
+  return "Next run will make no snapshot" + (w ? ": " + w + (/[.!?]$/.test(w) ? "" : ".") : ".");
+}
+
+// unconfirmedSkipLine: the schedule card's line for a slot skipped that way,
+// at `when` (a time as the card prints it). Not "did not run ... it will try
+// again": the schedule decided to make no snapshot, and while this lasts the
+// next slot makes none either (nextToo: the daemon's plan for it is the same
+// skip), which a promised retry would contradict.
+function unconfirmedSkipLine(when, reason, nextToo) {
+  return "No snapshot was made at " + when + ": " + backupFoldError(reason) +
+    (nextToo ? " As things stand, the next run will make none either." : "");
+}
+
 // touchedRowBudgetText: the schedule's skips keep only the error text, not
 // the status flag, so the skip line matches the refusal's fixed opening (reconstruct.ErrTouchedRowBudget), pinned by a test that
 // feeds this the Go error.
@@ -10276,6 +10314,16 @@ function newTablesBlock(run, snap) {
   return el("p", { class: d.warn ? "form-msg err" : "form-hint", text: d.text });
 }
 
+// refreshRunningText: what holds the refresh slot. Usually an update; with
+// sending_held, only the send to S3 of a snapshot the upload interval kept
+// on this machine (#2596), from a quiet cycle or from a slot the schedule
+// skipped (#2659): no update is running then, and "refresh running" beside
+// "no snapshot was made" would read as a contradiction.
+function refreshRunningText(rf) {
+  const since = rf.since ? " since " + utcLabel(rf.since) : "";
+  return (rf.sending_held ? "Sending a snapshot kept on this machine to S3" : "Automatic refresh running") + since + "…";
+}
+
 function baselineRefreshNote(rf) {
   // finished_at/since are RFC3339 UTC on the wire; utcLabel renders them in
   // the console's labeled shape ("YYYY-MM-DD HH:MM:SS UTC", #1354).
@@ -10283,7 +10331,7 @@ function baselineRefreshNote(rf) {
   let text;
   switch (rf.state) {
     case "running":
-      text = "Automatic refresh running" + (rf.since ? " since " + utcLabel(rf.since) : "") + "…";
+      text = refreshRunningText(rf);
       break;
     case "succeeded":
       // The two numbers PARTITION the run: rf.tables is every table, rf.carried
@@ -11726,7 +11774,7 @@ function backupRunsInFlight(dumpSt, restoreSt, b, sqlSt) {
   }
   const rf = b && !b.error && b.refresh;
   if (rf && rf.state === "running") {
-    running.push({ kind: "refresh", text: "Automatic refresh running" + (rf.since ? " since " + utcLabel(rf.since) : "") + "…" });
+    running.push({ kind: "refresh", text: refreshRunningText(rf) });
   }
   return running;
 }
@@ -12359,6 +12407,16 @@ function backupScheduleCard(cur, b) {
       alarmNote = "The next run cannot start.";
       body.append(el("p", { class: "form-msg err", text:
         "The next run cannot start: " + plainWords(sch.next_method_error) + (/[.!?]$/.test(sch.next_method_error) ? "" : ".") }));
+    } else if (sch.runnable && sch.next_method === "skip") {
+      // #2659: nothing was indexed since the previous snapshot and the
+      // source cannot confirm capture, so as things stand the next slot
+      // makes no snapshot. Said as a sentence, never drawn as a link of the
+      // chain: nothing is added to it. Not an alarm: nothing is known to be
+      // wrong. When the last slot was skipped for the same reason, its line
+      // below says both, so the reason is not printed twice.
+      const ls = sch.last_skipped, lr = sch.last_run;
+      const saidBelow = ls && unconfirmedSkipText(ls.reason) && (!lr || ls.at >= (lr.finished_at || ""));
+      if (!saidBelow) body.append(el("p", { class: "form-hint", text: unconfirmedNextLine(sch.next_method_why) }));
     } else if (sch.runnable && sch.next_method) {
       const how = sch.next_method === "refresh" ? "will refresh the latest snapshot from the recorded changes" : "will read your whole database";
       // A setting that makes EVERY run a full read (no Backup dir, no index
@@ -12534,7 +12592,13 @@ function backupScheduleCard(cur, b) {
     // >= not >: the stamps are whole seconds, and a skip recorded in the
     // same second a run finished (the fallback's collision case) is the
     // newer fact, not an older one.
-    if (skip && (!run || skip.at >= (run.finished_at || ""))) {
+    if (skip && unconfirmedSkipText(skip.reason) && (!run || skip.at >= (run.finished_at || ""))) {
+      // #2659: nothing was indexed and the source cannot confirm capture,
+      // so the schedule made no snapshot. In grey, not red: no run failed
+      // and nothing is known to be wrong; the copy's headline says it in
+      // amber (snapshotHeroTone).
+      body.append(el("p", { class: "form-hint", text: unconfirmedSkipLine(utcLabel(skip.at), skip.reason, sch.runnable && sch.next_method === "skip") }));
+    } else if (skip && (!run || skip.at >= (run.finished_at || ""))) {
       alarm = true;
       // The daily cap on full reads the schedule takes on its own (#2006):
       // the update DID run; what waits is the full read in its place.

@@ -458,15 +458,16 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	// by the next update without being counted, reading the rate too slow,
 	// which is the direction that cuts over to full backups (#1737). Read
 	// earlier, the few events in between are counted and not applied.
-	mark := s.dumpIndexMark(req)
+	mark, markKnown := s.dumpIndexMark(req)
 	out, err := produce(req)
-	out.indexMark = mark
+	out.indexMark, out.indexMarkKnown = mark, markKnown
 	s.completeDump(req, started, out, err, &own)
 }
 
 // dumpIndexMark is the index's event high-water mark as a full backup
-// starts, or zero when the request names no index or the index does not
-// answer. Bounded like the window probe (windowProbeTimeout, dial included):
+// starts, and whether it was read: not when the request names no index or
+// the index does not answer. A mark read as zero is a mark (an index that
+// holds no event yet, #2659). Bounded like the window probe (windowProbeTimeout, dial included):
 // it delays a full backup, and an index that has gone silent must cost
 // seconds and a missing measurement, never the backup.
 //
@@ -477,9 +478,9 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 // and the size the history proves an update can do, read too high for as
 // long as that update stays in the model's sample. That errs toward
 // updates, which put no load on the source.
-func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) uint64 {
+func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) (uint64, bool) {
 	if req.IndexDSN == "" {
-		return 0
+		return 0, false
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, windowProbeTimeout)
 	defer cancel()
@@ -490,9 +491,9 @@ func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) uint64 {
 		slog.Info("baseline: could not read the index before the full read; the update after it will not be measured, "+
 			"so the snapshot schedule's cost model waits one more update before it can choose a full read again",
 			"server", req.ServerName, "id", req.ServerID)
-		return 0
+		return 0, false
 	}
-	return mark.events
+	return mark.events, true
 }
 
 // dumpOwn is what a full backup owns once it has published: its status
@@ -553,8 +554,9 @@ type dumpOutcome struct {
 	snapDir string
 	at      time.Time
 	// indexMark is the index's event high-water mark read before the dump
-	// started (dumpIndexMark); zero when unknown.
-	indexMark uint64
+	// started (dumpIndexMark), and indexMarkKnown whether it was read.
+	indexMark      uint64
+	indexMarkKnown bool
 }
 
 // completeDump is the second half of a full backup: publish, upload, record.
@@ -877,7 +879,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	// (#1737): whenever a snapshot was published, including one whose
 	// upload failed, since the next update folds from that local copy.
 	if rec.SnapshotTime != "" {
-		rec.IndexMark = out.indexMark
+		rec.IndexMark, rec.IndexMarkKnown = out.indexMark, out.indexMarkKnown
 	}
 	// Why it failed, as data, for the page's plain-words card (#1986). Only
 	// when nothing was published: a snapshot whose upload failed exists, and
