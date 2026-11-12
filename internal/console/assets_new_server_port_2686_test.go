@@ -44,6 +44,7 @@ const cases = {
   olderDaemon: res(undefined),
   noticeOn: res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x", notice: "NOTHING ANSWERS ON IT: no router." }),
   noWordOnEnabled: res({ turned_on: true, password: "bfp_x" }),
+  withRoute: Object.assign(res({ enabled: true, turned_on: true, routing_on: true, port: "3309", password: "bfp_x" }), { server: { id: "s1", has_route: true } }),
 };
 const out = {};
 for (const [k, r] of Object.entries(cases)) {
@@ -104,6 +105,9 @@ console.log(JSON.stringify(out));
 	hasNot("expandedName", "-u a{b")
 	has("newlineName", "-u <server name> -p")
 	has("plainName", "-u db1.example.com:3306 -p")
+	has("withRoute", "Statements for shop are answered once its first copy is ready.")
+	hasNot("withRoute", "Until it has a forwarding user")
+	has("turnedOn", "Until it has a forwarding user")
 	has("noticeOn", "bfp_x", "NOTHING ANSWERS ON IT: no router.")
 	has("notTurnedOn", "The MySQL port was not turned on: its setting could not be saved: read-only file system.")
 	hasNot("notTurnedOn", "system..", "mysql -h", "shown only now")
