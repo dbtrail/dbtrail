@@ -858,8 +858,9 @@ const BackupWhyNothingIndexedWords = "nothing new was indexed since it"
 // nothing was indexed since an old snapshot and the source cannot be asked
 // whether capture recorded everything it wrote (#2659, WindowChoice). The
 // same words start the why of the update taken in its place when the
-// snapshot cannot wait. The page keys on it (IsUnconfirmedSkip) to say what
-// ends the skip instead of "it will try again".
+// snapshot cannot wait. The page matches these words (unconfirmedSkipText in
+// app.js, pinned by a test fed this text) so that it does not promise a
+// retry at the next slot.
 const BackupSkipUnconfirmedPrefix = "nothing was indexed since the previous snapshot, and the source cannot confirm that capture recorded everything it wrote"
 
 // unconfirmedLead is the prefix with why the source cannot be asked.

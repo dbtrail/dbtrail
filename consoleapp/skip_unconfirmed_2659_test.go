@@ -21,7 +21,7 @@ import (
 const (
 	unconfirmedSkipLine   = "no snapshot is made at this slot, nor at the following ones while this lasts"
 	unconfirmedUpdateLine = "updating the snapshot instead of skipping the slot"
-	unconfirmedEndedLine  = "scheduled snapshots are made again"
+	unconfirmedEndedLine  = "scheduled slots are no longer skipped"
 	positionMode          = "the capture runs in binlog-position mode, which is not compared"
 )
 

@@ -1615,7 +1615,7 @@ func (b *backupScheduler) reportUnconfirmed(e console.ServerEntry, method, why s
 		b.sup.gateEdge.Resolve(updateKey)
 	}
 	if !skipping && b.sup.gateEdge.Resolve(skipKey) && !updating {
-		slog.Info("snapshot schedule: scheduled snapshots are made again; the slots were skipped while nothing was indexed and the source could not confirm that capture recorded everything it wrote",
+		slog.Info("snapshot schedule: scheduled slots are no longer skipped; they were while nothing was indexed and the source could not confirm that capture recorded everything it wrote",
 			"server", e.Name, "id", e.ID, "next", jobNoun(method))
 	}
 	switch {
