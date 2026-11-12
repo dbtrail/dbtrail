@@ -104,6 +104,27 @@ func TestReconstruct2684_reusedFolderAndIfNotExists(t *testing.T) {
 		}
 	})
 
+	t.Run("a run refused before any table starts leaves the folder as it was", func(t *testing.T) {
+		seed(t)
+		_, _, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
+			IndexDSN:     testutil.BaseDSN() + "/" + dbName,
+			BaselineSrc:  t.TempDir(),
+			Tables:       []string{"shop.t", "shop."},
+			At:           at,
+			OutputDir:    out,
+			OutputFormat: reconstruct.OutputFormatMydumper,
+		})
+		if err == nil || !strings.Contains(err.Error(), "invalid --tables entry") {
+			t.Fatalf("err = %v, want the bad entry refused", err)
+		}
+		got := names(t)
+		for _, n := range earlier {
+			if !slices.Contains(got, n) {
+				t.Errorf("%s was removed by a run that was refused before it started", n)
+			}
+		}
+	})
+
 	if _, err := db.Exec(`INSERT INTO schema_changes
 		(detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)
 		VALUES (?, 'binlog.000001', 50, 'shop', 't', 'CREATE TABLE', 'CREATE TABLE t (id int NOT NULL, v varchar(16), PRIMARY KEY (id))'),
@@ -143,6 +164,9 @@ func TestReconstruct2684_reusedFolderAndIfNotExists(t *testing.T) {
 		t.Logf("rendered:\n%s", schemaFile)
 		if strings.Contains(strings.ToUpper(string(schemaFile)), "IF NOT EXISTS") {
 			t.Error("the schema file still carries IF NOT EXISTS")
+		}
+		if !strings.Contains(string(schemaFile), "at\n-- the source it may have created nothing") {
+			t.Error("the schema file does not say the definition came from an IF NOT EXISTS")
 		}
 		if !strings.Contains(string(schemaFile), "CREATE TABLE t (id int NOT NULL, v varchar(16), PRIMARY KEY (id))") {
 			t.Error("the schema file lost the recorded definition")
