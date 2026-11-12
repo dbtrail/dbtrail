@@ -6,7 +6,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/utils"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsglue "github.com/aws/aws-sdk-go-v2/service/glue"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -127,5 +131,53 @@ func TestOpenCatalog_glueFilesSignForTheBucket_2698(t *testing.T) {
 			t.Fatal("no file IO config in the context")
 		}
 		t.Fatalf("file IO config region = %q, want us-east-1", cfg.Region)
+	}
+}
+
+// The Glue catalog reads a table's metadata with the config it was given,
+// not the one in the context (it wraps the context again when it loads a
+// table). That config signs S3 for the bucket and Glue for the catalog.
+func TestGlueCatalogConfig_s3ForTheBucketGlueForTheCatalog_2698(t *testing.T) {
+	regionEnv2698(t)
+	t.Setenv(storage.EnvS3Endpoint, "http://127.0.0.1:9000")
+	files, cat, err := awsConfigs(context.Background(), "", "", "set a region")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files.Region = "us-east-1" // as discovery leaves it for a bucket elsewhere
+	cfg := glueCatalogConfig(files, cat)
+
+	g := awsglue.NewFromConfig(cfg).Options()
+	if g.Region != "us-west-2" || g.BaseEndpoint != nil {
+		t.Errorf("Glue client: region %q endpoint %v; want the catalog's us-west-2 and AWS's own endpoint", g.Region, g.BaseEndpoint)
+	}
+	o := s3.NewFromConfig(cfg).Options()
+	if o.Region != "us-east-1" || aws.ToString(o.BaseEndpoint) != "http://127.0.0.1:9000" {
+		t.Errorf("S3 client from the catalog's config: region %q endpoint %q; want the bucket's us-east-1 and the S3 endpoint", o.Region, aws.ToString(o.BaseEndpoint))
+	}
+	if len(files.ServiceOptions) != 0 {
+		t.Error("the files config was changed in place")
+	}
+}
+
+// openCatalog hands the Glue catalog that config, not the catalog-only one.
+func TestOpenCatalog_glueGetsTheBucketConfig_2698(t *testing.T) {
+	regionEnv2698(t)
+	fakeRegions2698(t, map[string]string{"wh": "us-east-1"})
+	orig := newGlueCatalog
+	t.Cleanup(func() { newGlueCatalog = orig })
+	var got aws.Config
+	newGlueCatalog = func(cfg aws.Config) catalog.Catalog {
+		got = cfg
+		return orig(cfg)
+	}
+	_, release, _, err := openCatalog(context.Background(), CatalogConfig{Kind: CatalogGlue}, "s3://wh/iceberg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if s3.NewFromConfig(got).Options().Region != "us-east-1" || awsglue.NewFromConfig(got).Options().Region != "us-west-2" {
+		t.Errorf("Glue catalog config: S3 %q, Glue %q; want us-east-1 and us-west-2",
+			s3.NewFromConfig(got).Options().Region, awsglue.NewFromConfig(got).Options().Region)
 	}
 }
