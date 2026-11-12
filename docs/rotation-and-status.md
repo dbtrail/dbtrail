@@ -335,9 +335,9 @@ The verdict is one of five states:
 
 | Text | JSON `stream.continuity.status` | Meaning |
 |---|---|---|
-| `no gaps in the captured range` | `ok` | The captured range is contiguous — nothing was dropped |
-| `no gaps since the loss acknowledged below` | `gap_acknowledged` | A recorded loss has been acknowledged (see below): an `Acknowledged loss:` line follows with when it happened, and nothing was dropped since. Not `ok`: the events of that loss are still missing |
-| `⚠ GAP LOST at <ts>` | `gap_lost` | An unfillable gap was stamped and nobody has acknowledged it; the index is valid only up to the gap |
+| `no gaps in the captured range` | `ok` | The changes the index still holds are contiguous: nothing in them was dropped. Also the verdict for an acknowledged loss older than those changes (see below) |
+| `no gaps since the loss acknowledged below` | `gap_acknowledged` | A recorded loss has been acknowledged and the index still holds changes from the hour it happened in (see below): an `Acknowledged loss:` line follows with when it happened, and nothing was dropped since. Not `ok`: the events of that loss are still missing |
+| `⚠ GAP LOST at <ts>` | `gap_lost` | An unfillable gap was stamped and nobody has acknowledged it; the index is valid only up to the gap. It stays `gap_lost` however old the loss is, until it is acknowledged |
 | `not evaluated (legacy index …)` | `unknown` | A legacy index without the gap-detection columns — the state can't be confirmed (never a false "ok") |
 | `⚠ unavailable (could not read stream state: <err>)` | `unavailable`, under top-level `stream_error` (not `stream`) | `stream_state` could not be **read** (e.g. transient timeout) — distinct from an empty table, which shows no Stream block. The verdict, and any permanent-loss banner, could not be evaluated; re-run `status` to retry |
 
@@ -358,23 +358,41 @@ PostgreSQL replication slot (#532) after the capture process has exited.
 acknowledgement. It records when the loss was acknowledged
 (`stream_state.gap_acked_at`) and leaves the loss itself on record
 (`gap_lost_at`, `gap_lost_detail`). From then on the verdict reads
-`gap_acknowledged`, never `ok`. The alarms go quiet: the banner is not printed,
+`gap_acknowledged`, and not `ok`, for as long as the index still holds changes
+from the hour of the loss. The alarms go quiet: the banner is not printed,
 `--fail-on-gap` does not fail on it, the web interface does not show
 `lost_position`, and the webhook and the Prometheus gauge stop firing. The web
 interface shows the loss as on record, in neutral colour and not in green: the
 Restore coverage card says `changes lost, on record`, and the Status page says
 the same on its DBTrail station, with a box that reads "Changes were lost at
 <time> and that was acknowledged at <time>. Updates of the copy and time travel
-across that moment are refused until the database is read in full again (Read
-database now, on the Snapshots page)." It stays that way after the full read
-too, because the record is kept. `status` prints this in place of the banner:
+that start from a full read of the database older than that moment and cross it
+are refused. A full read taken after it (Read database now, on the Snapshots
+page) is not affected." The text is the same before and after that full read:
+it states what is refused and asks for nothing. `status` prints this in place
+of the banner:
 
 ```
   Continuity:      no gaps since the loss acknowledged below (not a liveness check)
   Acknowledged loss: capture permanently lost events at 2026-02-19 11:30:00 (acknowledged 2026-02-19 14:02:11).
   Snapshot updates and reconstructions whose window spans that moment are
-  still refused until a full snapshot is taken after it.
+  refused. A full snapshot taken after it is not affected. This is reported
+  while the index still holds the hour it happened in.
 ```
+
+**When an acknowledged loss stops being reported.** The record in
+`stream_state` is never erased, and the report follows the changes the index
+still holds. Once rotation has dropped the hour of the loss, and no archived
+hour reaches back to it, nothing still held spans that moment: `status` prints
+`no gaps in the captured range`, the JSON verdict is `ok` with no
+`gap_acknowledged` object, and the web interface shows the green `no gaps`
+and `continuity ok` again. `bintrail status`, `GET /api/status`, the Status
+page and the Restore coverage card (`GET /api/coverage`) all apply this one
+rule, against the same start of held changes that `/api/coverage` reports as
+`delta_from`. The loss stays reported when that start cannot be read, and on an
+index shared by more than one source, where it cannot be told whose archived
+hours reach further back. A loss nobody acknowledged is never dropped from the
+report this way: it stays `gap_lost` until it is acknowledged.
 
 An acknowledgement does not bring the events back. `reconstruct`, a snapshot
 update (`baseline refresh`, or a scheduled update on the Snapshots page),
@@ -473,13 +491,18 @@ Under `--format json` the verdict is **nested in the `stream` object** as
 `stream.gap_lost` object carrying the detail when applicable. A loss that has
 been acknowledged is reported as `stream.gap_acknowledged`
 (`{"at", "acknowledged_at", "detail"}`) in place of `stream.gap_lost`, with
-`stream.continuity.status` at `gap_acknowledged`. It is present
+`stream.continuity.status` at `gap_acknowledged`, while the index still holds
+changes from the hour of the loss; after that the object is omitted and the
+status is `ok` (see "When an acknowledged loss stops being reported" above).
+`stream.continuity` is present
 whenever the `stream` object is — i.e. once a checkpoint exists — so a
 CI check uses `jq -e '.stream.continuity.status == "ok"'` (a `null` from a
 missing `stream` is itself a "can't confirm" signal). That check fails on an
 acknowledged loss, where `--fail-on-gap` passes: use the flag for an alarm an
 acknowledgement silences, and the `jq` check to require that nothing is known
-to be missing. The green "no gaps" badge
+to be missing from the changes the index still holds. The `jq` check passes
+again once rotation has dropped the hour of the acknowledged loss, which takes
+as long as the index's retention. The green "no gaps" badge
 in the [web interface](console.md) keys on `stream.continuity.status == "ok"`.
 
 When `stream_state` could not be **read**, the JSON output instead carries a

@@ -12,24 +12,33 @@ import (
 // ContinuityStatus is the single rule for the machine-readable continuity
 // verdict STRINGS — the status JSON and GET /api/coverage (#1194) both call
 // it, so those two surfaces can never disagree (the Report.ExitError()
-// discipline). The text renderer and --fail-on-gap re-derive equivalent
-// buckets from the same StreamStateInfo fields for their own wording/exit
-// concerns; the wire vocabulary lives here.
+// discipline). The text renderer branches on the same StreamStateInfo
+// predicates (GapUnacknowledged, GapOnRecord) for its own wording, and
+// --fail-on-gap on GapUnacknowledged alone; the wire vocabulary lives here.
 //
-//	"ok"               — no loss on record for the captured range (NOT a
-//	                     liveness assertion)
+//	"ok"               — no loss on record for the range of changes still
+//	                     held (NOT a liveness assertion)
 //	"gap_lost"         — an unfillable gap was stamped and nobody has
-//	                     acknowledged it: events permanently lost
-//	"gap_acknowledged" — an unfillable gap was stamped and an operator
-//	                     acknowledged it. The alarm is silenced; the events
-//	                     are as lost as under "gap_lost", and a window that
-//	                     spans the loss is still refused. Never "ok"
+//	                     acknowledged it: events permanently lost. However
+//	                     old the loss is: the window below never applies to it
+//	"gap_acknowledged" — an unfillable gap was stamped, an operator
+//	                     acknowledged it, and it is inside the window of
+//	                     changes still held (see GapOnRecord). The alarm is
+//	                     silenced; the events are as lost as under "gap_lost",
+//	                     and a window that spans the loss is still refused.
+//	                     Never "ok" while the window reaches it
 //	"unknown"          — legacy index without the gap columns; never a false
 //	                     "ok"
 //	"unavailable"      — stream_state could not be read; never a false "ok"
 //	"none"             — no stream row (file-mode index): no capture ran, so
 //	                     no continuity could break — a genuine no-claim, not
 //	                     a hole
+//
+// The window is stream.Floor, which only a collector fills (CollectStatus,
+// CollectCoverageSummary, or LoadGapWindow after a bare LoadStreamState). A
+// stream without it grades an acknowledged loss "gap_acknowledged" however
+// old it is: the conservative answer, and the one this function gave before
+// the window existed.
 func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 	switch {
 	case stream == nil && streamErr != nil:
@@ -38,7 +47,7 @@ func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 		return ContinuityNone
 	case stream.GapUnacknowledged():
 		return ContinuityGapLost
-	case stream.GapAcknowledged():
+	case stream.GapOnRecord():
 		// Its own verdict, never ContinuityOK: "ok" over a hole this index
 		// knows about is what a consumer paints green. What an
 		// acknowledgement silences is the ALARM (--fail-on-gap, the webhook,
@@ -119,21 +128,58 @@ type CoverageSummary struct {
 	// here is about what the index CONTAINS.
 }
 
-// acknowledgedLossInWindow is the continuity verdict of a summary whose
-// stream holds an ACKNOWLEDGED loss stamped at lostAt: still on record while
-// the loss is inside the window the summary describes, which starts at the
-// delta-coverage floor (the oldest hour of changes still held), and ok once
-// the window starts after it. The record itself is never erased, so without
-// this a loss from years ago would keep every later summary off "ok" although
-// nothing it covers spans that moment. A loss AT the floor counts as inside.
-// With no floor, or a floor that archives may extend further back
-// (BelowIsUnknown), the window's start is not known and the loss stays on
-// record: "ok" is never asserted from a start that could not be established.
+// acknowledgedLossInWindow is the continuity verdict of a stream that holds an
+// ACKNOWLEDGED loss stamped at lostAt: still on record while the loss is
+// inside the window of changes still held, which starts at the delta-coverage
+// floor (the oldest hour of changes still held), and ok once the window starts
+// after it. The record itself is never erased, so without this a loss from
+// years ago would keep every later verdict off "ok" although nothing still
+// held spans that moment. A loss AT the floor counts as inside. With no
+// floor, or a floor that archives may extend further back (BelowIsUnknown),
+// the window's start is not known and the loss stays on record: "ok" is never
+// asserted from a start that could not be established.
+//
+// The ONLY implementation of that rule: every surface reaches it through
+// StreamStateInfo.GapOnRecord.
 func acknowledgedLossInWindow(lostAt time.Time, floor DeltaFloor) string {
 	if !floor.Hour.IsZero() && !floor.BelowIsUnknown && lostAt.Before(floor.Hour) {
 		return ContinuityOK
 	}
 	return ContinuityGapAcknowledged
+}
+
+// GapOnRecord reports whether an acknowledged loss is still reported: one is
+// recorded, an operator acknowledged it, and it is inside the window of
+// changes still held (s.Floor, through acknowledgedLossInWindow). It is what
+// every DISPLAY of an acknowledged loss keys on: the continuity verdict, the
+// status text and JSON, the coverage summary.
+//
+// False for an unacknowledged loss, which is GapUnacknowledged's and is never
+// narrowed by the window. Readers that decide whether a window is complete
+// must not use it either: they read GapLostAt against their own window.
+func (s *StreamStateInfo) GapOnRecord() bool {
+	return s.GapAcknowledged() &&
+		acknowledgedLossInWindow(s.GapLostAt.Time, s.Floor) == ContinuityGapAcknowledged
+}
+
+// LoadGapWindow fills stream.Floor, the start of the window of changes still
+// held, so the continuity verdict of an ACKNOWLEDGED loss can tell a loss
+// that window still reaches from one it no longer does. It reads the floor
+// (OldestDeltaFromDB) only when the stream holds an acknowledged loss: no
+// other verdict depends on it, and CollectStatus runs on a timer.
+//
+// A floor that cannot be read is logged and left unknown, which keeps the
+// loss on record. Safe on a nil stream.
+func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *StreamStateInfo) {
+	if !stream.GapAcknowledged() {
+		return
+	}
+	floor, err := OldestDeltaFromDB(ctx, db, dbName)
+	if err != nil {
+		slog.Warn("could not determine the delta-coverage floor; the acknowledged capture loss stays on record", "db", dbName, "error", err)
+		return
+	}
+	stream.Floor = floor
 }
 
 // CollectCoverageSummary computes the summary against one index. The floor
@@ -157,10 +203,13 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 	if streamErr != nil {
 		slog.Warn("could not load stream state for the coverage summary", "db", dbName, "error", streamErr)
 	}
-	sum.Continuity = ContinuityStatus(stream, streamErr)
-	if sum.Continuity == ContinuityGapAcknowledged {
-		sum.Continuity = acknowledgedLossInWindow(stream.GapLostAt.Time, sum.Floor)
+	if stream != nil {
+		// The floor this summary already read is the window: one read, and
+		// the verdict cannot be graded against a different floor than the
+		// delta_from beside it.
+		stream.Floor = sum.Floor
 	}
+	sum.Continuity = ContinuityStatus(stream, streamErr)
 	if sum.Continuity == ContinuityGapAcknowledged {
 		sum.GapLostAt, sum.GapAckedAt = stream.GapLostAt.Time, stream.GapAckedAt.Time
 	}
