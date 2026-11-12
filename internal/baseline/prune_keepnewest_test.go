@@ -429,9 +429,10 @@ func TestKeepNewest_retainProtectsYoungerSnapshots(t *testing.T) {
 	}
 }
 
-// With an external destination set, keep-newest does not apply: that mode
-// deletes only what the destination confirmed, by age.
-func TestKeepNewest_ignoredWhenThereIsAnExternalDestination(t *testing.T) {
+// With an external destination set, the count never removes a copy the
+// destination did not confirm (#2658; prune_keepnewest_s3_test.go has the
+// rest of that mode).
+func TestKeepNewest_withADestinationRemovesOnlyWhatItConfirmed(t *testing.T) {
 	root := t.TempDir()
 	for i := 5; i >= 1; i-- {
 		makeSnapshot(t, root, snapName(days(10*i)), true, "shop/orders")
