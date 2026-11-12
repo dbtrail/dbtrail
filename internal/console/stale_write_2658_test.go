@@ -123,7 +123,7 @@ func TestSavesNeverPutAStaleCountBack(t *testing.T) {
 			t.Fatalf("count %d, schedule %+v, no_archive %v: a save that did not mention the count put it back, or lost the schedule", got.LocalKeepNewest, got.BackupSchedule, got.NoArchive)
 		}
 	})
-	t.Run("stopping capture", func(t *testing.T) {
+	t.Run("starting capture", func(t *testing.T) {
 		srv, id := setup(t)
 		e, _ := srv.cm.reg.Get(id)
 		// The entry as a request read it before the other save.
