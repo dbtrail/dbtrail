@@ -60,6 +60,14 @@ console.log(JSON.stringify(out));
 		"keepMany":     map[string]any{"local_retention": map[string]any{"keep_newest": 7}},
 		"keepOne":      map[string]any{"local_retention": map[string]any{"keep_newest": 1}},
 		"keepZero":     map[string]any{"local_retention": map[string]any{"keep_newest": 0}},
+		// #2658: the same count on a server with an S3 destination.
+		"keepManyS3": map[string]any{"local_retention": map[string]any{"keep_newest": 3}, "s3_destination": true},
+		"keepOneS3":  map[string]any{"local_retention": map[string]any{"keep_newest": 1}, "s3_destination": true},
+		// The record a prune by count writes when the bucket cannot be asked
+		// (baseline.pruneFailureReason), as the listing carries it.
+		"failSilentS3": map[string]any{"local_retention": map[string]any{"keep_newest": 3}, "s3_destination": true,
+			"last_prune_failure": map[string]any{"at": "2026-09-23T03:10:00Z",
+				"reason": "The S3 destination could not be asked, so nothing was removed from this folder in this cleanup. DBTrail asks again at the next one."}},
 		"pruneOnly":    map[string]any{"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 3}},
 		"pruneOne":     map[string]any{"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 1}},
 		"pruneNothing": map[string]any{"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 0}},
@@ -108,6 +116,12 @@ console.log(JSON.stringify(out));
 		"keepMany":     {{false, "Keeps the newest 7 snapshots on this machine."}},
 		"keepOne":      {{false, "Keeps only the newest snapshot on this machine."}},
 		"keepZero":     {},
+		"keepManyS3":   {{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them."}},
+		"keepOneS3":    {{false, "Keeps only the newest snapshot on this machine; older ones are removed once S3 has them."}},
+		"failSilentS3": {
+			{false, "Keeps the newest 3 snapshots on this machine; older ones are removed once S3 has them."},
+			{true, "Removing older copies failed on " + at + ": | The S3 destination could not be asked, so nothing was removed from this folder in this cleanup. DBTrail asks again at the next one."},
+		},
 		"pruneOnly":    {{false, "Removed 3 older copies on " + at + "."}},
 		"pruneOne":     {{false, "Removed 1 older copy on " + at + "."}},
 		"pruneNothing": {},
