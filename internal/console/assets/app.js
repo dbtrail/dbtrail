@@ -2182,8 +2182,12 @@ function ovFlowModel(inp) {
     // that fails at run time can still fall back to a read, as the schedule
     // card says. A run that cannot start gets no time at all, because the
     // daemon fills next_method even then (next_method_error says why).
+    // "skip" (#2659): as things stand the next slot makes no snapshot, so
+    // no time is promised for one.
     const nextWord = sch && sch.next_method === "refresh" ? "next refresh " : sch && sch.next_method ? "next read " : "next ";
-    const nextPart = sch && sch.next_method_error ? "next run cannot start" : nextAt ? nextWord + nextAt : "";
+    const nextPart = sch && sch.next_method_error ? "next run cannot start"
+      : sch && sch.next_method === "skip" ? (nextAt ? "no snapshot at the next slot" : "")
+      : nextAt ? nextWord + nextAt : "";
     // "written" only when the files are a minute or more younger than the
     // data: otherwise the two times are one.
     const asOfAt = data ? flowHHMM(data.asOf) : snapAt;
@@ -6463,6 +6467,7 @@ function runningWithModel(inp) {
           : row("full read", rwEvery(sch.full_every)));
       }
       if (sch.next_method_error) cp.push(row("next run", "cannot start", sch.next_method_error));
+      else if (sch.next_method === "skip") cp.push(row("next run", "no snapshot", sch.next_method_why || ""));
       else if (sch.next_method) cp.push(row("next run", sch.next_method === "refresh" ? "an update from the recorded changes" : "a full read of the database", sch.next_method_why || ""));
     }
     const keep = bl.local_retention && bl.local_retention.keep_newest;
@@ -7722,6 +7727,12 @@ function snapshotHeroTone(b, cov, cur) {
   }
   const skip = sch && sch.last_skipped;
   if (skip && (!lastRun || (skip.at || "") >= (lastRun.finished_at || ""))) {
+    // #2659: a slot skipped because nothing was indexed and the source
+    // cannot confirm capture is not a fault of the schedule. Amber, with
+    // the reason, and never graded "later than its schedule" below.
+    if (unconfirmedSkipText(skip.reason)) {
+      return { tone: "warn", why: "No snapshot was made at the last scheduled time: " + plainWords(skip.reason), link: "settings" };
+    }
     return { tone: "bad", why: "A scheduled run did not start: " + plainWords(skip.reason || "unknown reason"), link: "settings" };
   }
   const every = sch ? flowEveryMinutes(sch.every) : 0;
@@ -10019,9 +10030,30 @@ function budgetRefusedTail() {
 // budget refusal whose full backup cannot start here: its reason already says
 // why, so the tail does not repeat it.
 function scheduleSkipTail(reason) {
+  // #2659: a slot skipped because nothing was indexed and the source cannot
+  // confirm capture. Its reason already says what ends it, and "it will try
+  // again" would promise a snapshot at the next slot that is not coming.
+  if (unconfirmedSkipText(reason)) return "";
   return touchedRowBudgetText(reason) && /a full (backup|read) cannot start here/.test(reason || "")
     ? " Until a newer full read exists, every scheduled update is refused the same way."
     : " It will try again at the next scheduled time.";
+}
+
+// unconfirmedSkipText: the skip the schedule records when nothing was indexed
+// since the previous snapshot and the source cannot confirm that capture
+// recorded everything it wrote (#2659). Matched on the reason's fixed words
+// (console.SkipUnconfirmedReason), pinned by a test that feeds this the Go
+// text.
+function unconfirmedSkipText(s) {
+  return /^nothing was indexed since the previous snapshot, and the source cannot confirm/.test(s || "") &&
+    /so no snapshot is made at this slot/.test(s || "");
+}
+
+// unconfirmedNextLine: what the schedule card says about the next run when
+// the daemon's plan for it is that skip.
+function unconfirmedNextLine(why) {
+  const w = plainWords(why || "");
+  return "Next run will make no snapshot" + (w ? ": " + w + (/[.!?]$/.test(w) ? "" : ".") : ".");
 }
 
 // touchedRowBudgetText: the schedule's skips keep only the error text, not
@@ -12287,6 +12319,13 @@ function backupScheduleCard(cur, b) {
       alarmNote = "The next run cannot start.";
       body.append(el("p", { class: "form-msg err", text:
         "The next run cannot start: " + plainWords(sch.next_method_error) + (/[.!?]$/.test(sch.next_method_error) ? "" : ".") }));
+    } else if (sch.runnable && sch.next_method === "skip") {
+      // #2659: nothing was indexed since the previous snapshot and the
+      // source cannot confirm capture, so as things stand the next slot
+      // makes no snapshot. Said as a sentence, never drawn as a link of the
+      // chain: nothing is added to it. Not an alarm of its own; the skipped
+      // slot below is.
+      body.append(el("p", { class: "form-hint", text: unconfirmedNextLine(sch.next_method_why) }));
     } else if (sch.runnable && sch.next_method) {
       const how = sch.next_method === "refresh" ? "will refresh the latest snapshot from the recorded changes" : "will read your whole database";
       // A setting that makes EVERY run a full read (no Backup dir, no index
@@ -12467,7 +12506,9 @@ function backupScheduleCard(cur, b) {
       // The daily cap on full reads the schedule takes on its own (#2006):
       // the update DID run; what waits is the full read in its place.
       const capped = /at most once a day/.test(skip.reason || "");
-      noteAt(skip.at, capped ? "A full read was held back: at most one a day." : "A scheduled run did not start.");
+      noteAt(skip.at, capped ? "A full read was held back: at most one a day."
+        : unconfirmedSkipText(skip.reason) ? "No snapshot was made: the source cannot confirm capture."
+        : "A scheduled run did not start.");
       // backupFoldError, not plainWords: a fold error rides in here too,
       // with its bare --allow-gaps hint.
       body.append(el("p", { class: "form-msg err", text: capped

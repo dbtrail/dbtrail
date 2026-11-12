@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -315,5 +316,145 @@ func TestIndexMarkFor_aRecordedZeroIsAMark_2659(t *testing.T) {
 	raw, _ = json.Marshal(BaselineRunRecord{ServerID: "s", Kind: BaselineRunDump})
 	if strings.Contains(string(raw), "index_mark") {
 		t.Errorf("a record with no mark is written as %s", raw)
+	}
+}
+
+// The page's own code, EXECUTED over the reasons the daemon writes: the
+// skipped slot's line on the schedule card, the next-run line, and the
+// copy's headline. A skip of this kind does not promise a retry at the next
+// slot (none is coming while it lasts), and no other skip loses that
+// promise.
+func TestUnconfirmedSkipOnThePage_executed_2659(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv(requireNodeEnv) != "" {
+			t.Fatalf("%s is set and node is not on PATH", requireNodeEnv)
+		}
+		t.Skip("node is not installed")
+	}
+	raw, err := os.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	type in struct{ Name, Reason string }
+	var cases []in
+	for _, d := range cannotBeAsked {
+		cases = append(cases, in{"skip: " + d, SkipUnconfirmedReason(d)})
+	}
+	others := []in{
+		{"the quiet slot the gate skips", "nothing had been indexed since the last snapshot, so this slot had nothing to add to it"},
+		{"a collision", "another snapshot job was running for this server at the scheduled time"},
+		{"the update taken where the skip would be", UnconfirmedUpdateWhy("PostgreSQL sources are not compared yet", "a table was created since the previous snapshot")},
+	}
+	cases = append(cases, others...)
+	payload, err := json.Marshal(cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := strings.Join([]string{
+		functionBody(t, js, "function plainWords("),
+		functionBody(t, js, "function backupFoldError("),
+		functionBody(t, js, "function touchedRowBudgetText("),
+		functionBody(t, js, "function unconfirmedSkipText("),
+		functionBody(t, js, "function unconfirmedNextLine("),
+		functionBody(t, js, "function scheduleSkipTail("),
+	}, "\n") + `
+const cases = ` + string(payload) + `;
+console.log(JSON.stringify(cases.map((c) => ({
+  name: c.Name,
+  is: unconfirmedSkipText(c.Reason),
+  card: "Did not run at 2026-11-11 10:30 UTC: " + backupFoldError(c.Reason) + scheduleSkipTail(c.Reason),
+  next: unconfirmedNextLine(c.Reason),
+}))));
+`
+	path := filepath.Join(t.TempDir(), "skip.js")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	var got []struct {
+		Name, Card, Next string
+		Is               bool
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if len(got) != len(cases) {
+		t.Fatalf("%d answers for %d cases", len(got), len(cases))
+	}
+	for i, g := range got {
+		own := i < len(cannotBeAsked)
+		t.Logf("card: %s", g.Card)
+		if g.Is != own {
+			t.Errorf("%s: recognized as this skip = %v, want %v", g.Name, g.Is, own)
+		}
+		if retry := strings.Contains(g.Card, "It will try again at the next scheduled time."); retry == own {
+			t.Errorf("%s: the card promises a retry = %v: %q", g.Name, retry, g.Card)
+		}
+		if own {
+			t.Logf("next: %s", g.Next)
+			if !strings.HasPrefix(g.Next, "Next run will make no snapshot: nothing was indexed since the previous snapshot") ||
+				!strings.HasSuffix(g.Next, "until a change is indexed or the source can be asked.") ||
+				!strings.HasSuffix(g.Card, "until a change is indexed or the source can be asked.") {
+				t.Errorf("%s: next=%q card=%q", g.Name, g.Next, g.Card)
+			}
+		}
+		for _, v := range []string{g.Card, g.Next} {
+			if strings.Contains(v, "..") || strings.Contains(v, "—") || strings.Contains(v, "()") {
+				t.Errorf("%s: a double period, an em dash or an empty detail: %q", g.Name, v)
+			}
+		}
+	}
+	// Every place that reads next_method treats "skip" as its own answer:
+	// a page that fell through to "anything but refresh is a full read"
+	// would announce a read of the whole database that is not coming.
+	for _, want := range []string{
+		`sch.next_method === "skip" ? (nextAt ? "no snapshot at the next slot" : "")`,
+		`else if (sch.next_method === "skip") cp.push(row("next run", "no snapshot", sch.next_method_why || ""));`,
+		`} else if (sch.runnable && sch.next_method === "skip") {`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js no longer handles a skipped next run at: %s", want)
+		}
+	}
+	// The drawing of the chain reads anything but "refresh" as a full read,
+	// so it must stay behind the branch that handles the skip first.
+	skipBranch := strings.Index(js, `} else if (sch.runnable && sch.next_method === "skip") {`)
+	chain := strings.Index(js, "body.append(scheduleChainDraw(sch, nextLine));")
+	if skipBranch < 0 || chain < 0 || chain < skipBranch {
+		t.Error("the chain drawing is reachable before the skipped next run is handled")
+	}
+}
+
+// The page is told the truth about the next run in this state: the API
+// answers next_method "skip" with the reason the skip will record, no
+// full-read code and no error, on the save and on the listing alike.
+func TestBackupScheduleAPI_aSkippedNextRunReachesTheWire_2659(t *testing.T) {
+	quiet := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
+		return BackupWindow{Anchor: anchor, Events: 0, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true}
+	}
+	srv, id := newScheduleServer(t, &stubScheduleReporter{full: true, probe: quiet})
+	e, _ := srv.cm.reg.Get(id)
+	fakeSnapshot(t, e.BaselineDir) // dated 2026-08-27: far past any cut-over age
+	rec, body := doServersReq(t, srv, "PUT", "/api/servers/"+id+"/backup-schedule", `{"every":"1h","at":"00:00"}`)
+	if rec.Code != 200 {
+		t.Fatalf("PUT code=%d body=%s", rec.Code, body)
+	}
+	want := SkipUnconfirmedReason("PostgreSQL sources are not compared yet")
+	check := func(where string, got *backupScheduleDTO) {
+		t.Helper()
+		if got == nil || !got.Runnable || got.NextMethod != BackupMethodSkip || got.NextMethodWhy != want || got.NextMethodWhyCode != "" || got.NextMethodError != "" {
+			t.Fatalf("%s: schedule = %+v, want a runnable schedule whose next run is a skip with its reason", where, got)
+		}
+	}
+	check("PUT", scheduleOf(t, body))
+	_, body = doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
+	check("GET /api/baselines", scheduleOf(t, body))
+	if !strings.Contains(string(body), `"next_method":"skip"`) {
+		t.Fatalf("the wire does not carry next_method skip: %s", body)
 	}
 }
