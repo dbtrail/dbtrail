@@ -735,7 +735,7 @@ func (s *baselineSupervisor) resendLacking(_ context.Context, dir, s3URL, name s
 // whose cleanup loop does not run has no pruneAfterPublishFn and removes
 // nothing, here as there.
 func (s *baselineSupervisor) pruneAfterPublish(dir string) {
-	if fn := pruneAfterPublishFn; fn != nil && dir != "" && !strings.HasPrefix(dir, "s3://") {
+	if fn := loadPruneAfterPublish(); fn != nil && dir != "" && !strings.HasPrefix(dir, "s3://") {
 		fn(dir)
 	}
 }

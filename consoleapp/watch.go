@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -2038,8 +2039,27 @@ var pruneCleanupEvery time.Duration
 // job published a snapshot into it (#2678), instead of leaving the folder
 // over its count until the hourly cleanup. Set by startBaselinePruneLoop, so
 // it is nil exactly where that loop does not run; the supervisor's jobs call
-// it through baselineSupervisor.pruneAfterPublish.
-var pruneAfterPublishFn func(dir string)
+// it through baselineSupervisor.pruneAfterPublish. Held in an atomic pointer:
+// a job's goroutine reads it while the loop (or a test) may be setting it, so
+// a plain variable would be a data race.
+var pruneAfterPublishFn atomic.Pointer[func(dir string)]
+
+// setPruneAfterPublish arms (or, with nil, disarms) the prune after a publish.
+func setPruneAfterPublish(fn func(dir string)) {
+	if fn == nil {
+		pruneAfterPublishFn.Store(nil)
+		return
+	}
+	pruneAfterPublishFn.Store(&fn)
+}
+
+// loadPruneAfterPublish is the armed prune after a publish, nil when none is.
+func loadPruneAfterPublish() func(dir string) {
+	if p := pruneAfterPublishFn.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 // pruneFolderToCount is the hourly cleanup's own prune, for ONE folder: the
 // same plan (prunePlan, so a shared folder, the daemon's own folder and two
@@ -2124,9 +2144,9 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 	}
 	// After the gate: only a daemon whose cleanup runs prunes after a
 	// publish (#2678).
-	pruneAfterPublishFn = func(dir string) {
+	setPruneAfterPublish(func(dir string) {
 		pruneFolderToCount(ctx, reg, globalDir, globalS3, retainRaw, dir, baseline.PruneLocal)
-	}
+	})
 	if bootRetain > 0 && globalDir != "" && globalS3 == "" {
 		// The operator pointed retention at a local dir with no durable S3 source;
 		// warn once so the global dir not being reclaimed isn't a silent surprise.

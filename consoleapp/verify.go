@@ -549,7 +549,7 @@ func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baseli
 		end()
 		// The folder was held still for the whole check and is over its
 		// count now: applied here, not at the next snapshot.
-		if fn := pruneAfterPublishFn; fn != nil && baselineSrc != "" && !strings.HasPrefix(baselineSrc, "s3://") {
+		if fn := loadPruneAfterPublish(); fn != nil && baselineSrc != "" && !strings.HasPrefix(baselineSrc, "s3://") {
 			fn(baselineSrc)
 		}
 	}()

@@ -35,11 +35,11 @@ func countedServer(t *testing.T, keep, n int) (reg *console.Registry, id, dir st
 		t.Fatal(err)
 	}
 	old = makeLocalSnapshots(t, dir, n)
-	prev := pruneAfterPublishFn
-	t.Cleanup(func() { pruneAfterPublishFn = prev })
-	pruneAfterPublishFn = func(d string) {
+	prev := loadPruneAfterPublish()
+	t.Cleanup(func() { setPruneAfterPublish(prev) })
+	setPruneAfterPublish(func(d string) {
 		pruneFolderToCount(context.Background(), reg, "", "", "", d, baseline.PruneLocal)
-	}
+	})
 	return reg, e.ID, dir, old
 }
 
@@ -60,21 +60,21 @@ func waitSnapshots(t *testing.T, dir string, want int) []string {
 
 // The daemon arms the prune exactly where its cleanup loop runs.
 func TestCountAfterPublish_armedWithTheCleanupLoop(t *testing.T) {
-	prev, prevCut := pruneAfterPublishFn, s3PruneCutFn
-	t.Cleanup(func() { pruneAfterPublishFn, s3PruneCutFn = prev, prevCut })
+	prev, prevCut := loadPruneAfterPublish(), s3PruneCutFn
+	t.Cleanup(func() { setPruneAfterPublish(prev); s3PruneCutFn = prevCut })
 	done, cancel := context.WithCancel(context.Background())
 	cancel() // no startup sweep, no ticker: only the wiring
-	pruneAfterPublishFn = nil
+	setPruneAfterPublish(nil)
 	if err := startBaselinePruneLoop(done, nil, "", "", "", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if pruneAfterPublishFn != nil {
+	if loadPruneAfterPublish() != nil {
 		t.Fatal("armed on a daemon whose cleanup loop does not run (no registry, no age)")
 	}
 	if err := startBaselinePruneLoop(done, liveRegistry(t), "", "", "", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if pruneAfterPublishFn == nil {
+	if loadPruneAfterPublish() == nil {
 		t.Fatal("a daemon with a registry runs the cleanup loop and did not arm the prune after a publish")
 	}
 }
@@ -409,7 +409,7 @@ func TestCountAfterPublish_aCheckHoldsTheFolderAndAppliesTheCountAtItsEnd(t *tes
 	findBaselinePair = func(_ context.Context, src, _ string) ([]verify.BaselinePair, []query.SchemaTable, error) {
 		during = baseline.Reading(src)
 		// A cleanup in the middle of the check: it waits, and says so.
-		pruneAfterPublishFn(src)
+		loadPruneAfterPublish()(src)
 		return nil, nil, os.ErrInvalid
 	}
 	s := &verifySupervisor{ctx: context.Background()}
@@ -429,10 +429,10 @@ func TestCountAfterPublish_aCheckHoldsTheFolderAndAppliesTheCountAtItsEnd(t *tes
 func TestCountAfterPublish_aSQLBuildAppliesTheCountAtItsEnd(t *testing.T) {
 	at := time.Date(2026, 6, 10, 11, 0, 0, 0, time.UTC)
 	src := writeSQLExportBaseline(t, at.Add(-time.Hour))
-	prev := pruneAfterPublishFn
-	t.Cleanup(func() { pruneAfterPublishFn = prev })
+	prev := loadPruneAfterPublish()
+	t.Cleanup(func() { setPruneAfterPublish(prev) })
 	called := make(chan [2]string, 1)
-	pruneAfterPublishFn = func(d string) { called <- [2]string{d, baseline.Reading(d)} }
+	setPruneAfterPublish(func(d string) { called <- [2]string{d, baseline.Reading(d)} })
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
 	if err := sup.TriggerSQLExport(console.SQLExportRequest{ServerID: "srv1", ServerName: "wp",
 		IndexDSN: "i:p@tcp(127.0.0.1:1)/idx", BaselineSrc: src, At: at}); err != nil {
