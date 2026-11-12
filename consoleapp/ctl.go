@@ -71,11 +71,15 @@ func addCtlFlags(cmd *cobra.Command, url, accessFile *string) {
 	cmd.PersistentFlags().StringVar(accessFile, "access-file", "", "The file a running DBTrail writes for commands on its machine (default: "+console.LocalAccessFileName+" beside its login file)")
 }
 
-// ownEnv is a variable of the environment the process was started with. One
-// that an env file put there reads as unset.
+// ownEnv is a variable of the environment the process was started with, or
+// the line /etc/dbtrail/dbtrail.cnf gave it. One that an env file put there
+// reads as unset, or as the option file's line when the env file hid one.
 func ownEnv(key string) string {
 	if cli.FromEnvFile(key) {
-		return ""
+		// The env file hid a line of /etc/dbtrail/dbtrail.cnf, which is
+		// not in the current folder and is believed.
+		v, _ := cli.OptionFileValue(key)
+		return v
 	}
 	return os.Getenv(key)
 }
