@@ -609,8 +609,10 @@ page.
 
 **The forwarding user.** With Engine Routing on, a statement the copy cannot
 answer runs on your MySQL, as a user you name per server. Without one the copy
-answers every statement of that server alone, and the port never forwards as
-the user DBTrail records changes with.
+answers every statement of that server alone, and a statement it cannot run
+(an `INSERT`, an `UPDATE`, a `SELECT ... FOR UPDATE`) gets error 1290 saying
+the server has no forwarding user and how to set it. The port never forwards
+as the user DBTrail records changes with.
 
 `server add` asks for it once the server is added, on a terminal, after it
 printed the port's password: Enter skips it. Without a terminal it is taken
