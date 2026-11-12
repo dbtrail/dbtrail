@@ -219,6 +219,9 @@ type Handler struct {
 	// statement got, "" when it got none: what SHOW WARNINGS answers next,
 	// here, since the refused statement never reached the source.
 	routeRefusal string
+	// copyOnlyWhy: Engine Routing is on and this connection's server has no
+	// account to forward with (SetCopyOnlyReason). Guarded by mu.
+	copyOnlyWhy string
 	routeWarned  map[string]bool
 
 	// allowedSchemas is the authenticated tenant's opt-in schema
@@ -783,6 +786,9 @@ func (h *Handler) HandleQuery(qstr string) (*mysql.Result, error) {
 		return &mysql.Result{Status: 2}, nil
 	}
 	if h.freeSQL != nil {
+		if err := h.copyOnlyRefusal(qstr); err != nil {
+			return nil, err
+		}
 		return h.runFreeSQL(currentDB, qstr)
 	}
 
