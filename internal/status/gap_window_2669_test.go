@@ -214,30 +214,31 @@ func TestLoadGapWindow_leavesTheSnapshotFloorAlone(t *testing.T) {
 func TestCollectStatus_readsTheGapWindow(t *testing.T) {
 	latest := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
 	before := time.Date(2026, 7, 1, 9, 30, 0, 0, time.UTC)
+	noArch := func() *sqlmock.Rows { return gwArchRows(nil, nil, 0) }
 	for _, c := range []struct {
 		name   string
 		lost   time.Time
 		below  func(m sqlmock.Sqlmock) // the reads below the floor, when they run
-		arch   *sqlmock.Rows
+		arch   func() *sqlmock.Rows
 		want   string
 		inText string
 	}{
 		{"acknowledged loss older than everything held", before, func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil))
 			m.ExpectQuery(gwEvHeldQ).WillReturnRows(gwEvHeldRows())
-		}, gwArchRows(nil, nil, 0), ContinuityOK, "no gaps in the captured range"},
+		}, noArch, ContinuityOK, "no gaps in the captured range"},
 		{"acknowledged loss inside the oldest partition", time.Date(2026, 8, 1, 10, 30, 0, 0, time.UTC), func(sqlmock.Sqlmock) {},
-			gwArchRows(nil, nil, 0), ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
+			noArch, ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
 		{"acknowledged loss after the newest indexed event", latest.Add(20 * time.Second), func(sqlmock.Sqlmock) {},
-			gwArchRows(nil, nil, 0), ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
+			noArch, ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
 		{"archives separated from the index reach past the loss", before, func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 			m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows("p_2026060100", nil))
-		}, gwArchRows("p_2026060100", "p_2026062223", 1), ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
+		}, func() *sqlmock.Rows { return gwArchRows("p_2026060100", "p_2026062223", 1) }, ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
 		{"an event older than the loss sits in the oldest partition", before, func(m sqlmock.Sqlmock) {
 			m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil))
 			m.ExpectQuery(gwEvHeldQ).WillReturnRows(gwEvHeldRows(time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)))
-		}, gwArchRows(nil, nil, 0), ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
+		}, noArch, ContinuityGapAcknowledged, "no gaps since the loss acknowledged below"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			stream := func(m sqlmock.Sqlmock) {
@@ -248,7 +249,7 @@ func TestCollectStatus_readsTheGapWindow(t *testing.T) {
 			}
 			floor := func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(covPartsQ).WillReturnRows(covPartRows("p_2026080110", "p_future"))
-				m.ExpectQuery(covArchQ).WillReturnRows(c.arch)
+				m.ExpectQuery(covArchQ).WillReturnRows(c.arch())
 			}
 
 			// The status report, through the collector.
