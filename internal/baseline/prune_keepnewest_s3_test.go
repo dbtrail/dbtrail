@@ -253,7 +253,11 @@ func TestS3Count_localGuaranteesHold(t *testing.T) {
 		root := t.TempDir()
 		s := five(t, root)
 		// The pointer lags on the oldest snapshot (a publication that failed).
-		if err := os.Symlink(s[0], filepath.Join(root, CurrentLinkName)); err != nil {
+		link := filepath.Join(root, CurrentLinkName)
+		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(s[0], link); err != nil {
 			t.Fatal(err)
 		}
 		res := s3Count(t, root, 1, everything)
