@@ -63,7 +63,7 @@ const out = {
   listError: shape(card(reg, { error: ` + string(errJSON) + ` }, null)),
   listMissing: shape(card(reg, null, null)),
   noSnapshot: shape(card(reg, { configured: true, source: "/srv/snaps", kind: "dir", snapshots: [] }, null)),
-  noSnapshotS3: shape(card(Object.assign({}, reg, { baseline_s3: "s3://b/p/" }), b, null)),
+  noSnapshotS3: shape(card(Object.assign({}, reg, { baseline_s3: "s3://b/p/" }), { configured: true, source: "/srv/snaps", kind: "dir", snapshots: [] }, null)),
   enabled: shape(card(reg, b, null)),
 };
 // A session that may not restore gets no switched-off control at all.

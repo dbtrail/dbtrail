@@ -12778,11 +12778,26 @@ function backupRestoreCard(cur, b, restoreSt) {
   // scheduled update follows (BaselineFoldSource), and the same one the
   // coverage card reports as restore_reads. Offering the local-only rows on an
   // S3-backed server would prefill a moment the fold then refuses.
-  const reads = cur.baseline_s3 ? "s3" : "dir";
-  const usable = backupSnapshotsFor(b, reads);
+  let reads = cur.baseline_s3 ? "s3" : "dir";
+  let usable = backupSnapshotsFor(b, reads);
+  // An S3 location with no snapshot, or one that could not be read, while
+  // the folder holds some (#2691): the restore then starts from the folder,
+  // and the card says so instead of switching off.
+  let fromFolder = "";
+  if (!usable.length && reads === "s3") {
+    const local = backupSnapshotsFor(b, "dir");
+    if (local.length) {
+      const s3src = ((b && b.sources) || []).find((s) => s.kind === "s3");
+      fromFolder = (s3src && s3src.error)
+        ? "This server's S3 location could not be read, so a restore starts from a snapshot in this server's folder. A newer snapshot may be in S3."
+        : "This server's S3 location holds no snapshot yet, so a restore starts from a snapshot in this server's folder.";
+      reads = "dir";
+      usable = local;
+    }
+  }
   if (!usable.length) {
     return off("no-snapshot", "There is no snapshot to restore from yet" +
-      (reads === "s3" ? " in this server's S3 location" : " in this server's folder") + ". Take one on Snapshots.");
+      (reads === "s3" ? " in this server's S3 location or in its folder" : " in this server's folder") + ". Take one on Snapshots.");
   }
   const rst = restoreSt && restoreSt.restore;
   if (rst && rst.state === "running") return null; // the run region owns it
@@ -12802,8 +12817,12 @@ function backupRestoreCard(cur, b, restoreSt) {
   msg.hidden = true;
   go.onclick = () => startBackupRestore(cur.id, input.value.trim(), go, msg);
   body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
+  if (fromFolder) body.append(el("p", { class: "form-hint bk-restore-from-folder", text: fromFolder }));
   const elsewhere = backupElsewhereNote(b, usable, reads);
   if (elsewhere) body.append(elsewhere);
+  // Why the last restore read the folder instead of S3 (#2691), on every
+  // outcome: a result that could not be sent to S3 still came from there.
+  const sourceNote = rst && rst.source_note ? " " + rst.source_note : "";
   if (rst && rst.state === "failed") {
     // published means the fold finished and the snapshot is on disk, and only
     // sending it to S3 failed (#1541). "Published nothing" there is false: the
@@ -12811,8 +12830,8 @@ function backupRestoreCard(cur, b, restoreSt) {
     state.hidden = false;
     state.classList.add("alarm");
     state.textContent = rst.published
-      ? "Last restore wrote the snapshot on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The snapshot is in the list below. A full read sends it along with the rest."
-      : restoreRefusedLine(rst);
+      ? "Last restore wrote the snapshot on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The snapshot is in the list below. A full read sends it along with the rest." + sourceNote
+      : restoreRefusedLine(rst) + sourceNote;
   } else if (rst && rst.state === "succeeded") {
     // The reused count belongs here for the same reason it belongs on the
     // refresh note: a restore consumes the same reuse setting, and without the
@@ -12820,7 +12839,8 @@ function backupRestoreCard(cur, b, restoreSt) {
     state.hidden = false;
     state.textContent =
       "Last restore finished" + (rst.at ? ": the snapshot at " + utcLabel(rst.at) : "") + " is in the list below." +
-      (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "");
+      (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "") +
+      sourceNote;
   }
   if (!mayCreate) {
     // Only the outcome line, and no card at all when there is none: an
