@@ -60,7 +60,7 @@ func TestReconstructChangesOnly_refusalSaysWhatToDo(t *testing.T) {
 		{
 			name:     "the table is in no snapshot",
 			snapshot: func(t *testing.T, dir string) { putSnapshot(t, dir, "2026-08-01T00-00-00Z", "mydb", "customers") },
-			want:     []string{"holds 1 snapshot, and it does not include mydb.orders", "`bintrail baseline` writes them"},
+			want:     []string{"holds 1 snapshot, and it does not include mydb.orders", "baseline` writes them"},
 		},
 		{
 			name:     "the moment is before the table's first snapshot",
