@@ -219,10 +219,11 @@ type Handler struct {
 	// statement got, "" when it got none: what SHOW WARNINGS answers next,
 	// here, since the refused statement never reached the source.
 	routeRefusal string
+	routeWarned  map[string]bool
+
 	// copyOnlyWhy: Engine Routing is on and this connection's server has no
 	// account to forward with (SetCopyOnlyReason). Guarded by mu.
 	copyOnlyWhy string
-	routeWarned  map[string]bool
 
 	// allowedSchemas is the authenticated tenant's opt-in schema
 	// allowlist (issue #824), bound by BindAllowedSchemas after the

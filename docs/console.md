@@ -584,7 +584,9 @@ and an installation that already had servers keeps a port it never turned on
 off when it adds one more after an upgrade. A session that may not
 change settings, or that has a data access policy, adds its server and the
 port is left as it was; the command says so. The web interface's Connect
-screen does the same and shows the same password. The web interface's long
+screen does the same and shows the same password. Its step 2 has an optional
+**Forwarding user**, folded, saved with the server; the capture user is
+refused there too. The web interface's long
 form (**Add server**, all fields) and `POST /api/servers` do not turn the port
 on: turn it on afterwards with `dbtrail port on` or on the MySQL clients
 page.

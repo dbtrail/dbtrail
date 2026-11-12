@@ -173,6 +173,15 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 			"fill in the address, user and password of the database you want DBTrail to read")
 		return
 	}
+	// The forwarding user (#2686) is never the capture user: the port would
+	// refuse to forward as it, and the server would be saved with an account
+	// that does nothing. Refused before the checks, with nothing saved.
+	if req.RouteUser != nil && strings.TrimSpace(*req.RouteUser) != "" &&
+		strings.TrimSpace(*req.RouteUser) == strings.TrimSpace(req.SourceUser) {
+		writeJSONError(w, http.StatusBadRequest, strings.TrimSpace(*req.RouteUser)+
+			" is the user DBTrail reads this database with, and the MySQL port never forwards as that one: name another forwarding user, with your application's grants")
+		return
+	}
 	base := DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor())
 	name := s.cm.reg.NameFor(entry.Name, base)
 
