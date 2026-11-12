@@ -12,7 +12,7 @@ func TestAWSConfigs_endpointReachesTheFilesNotTheCatalog(t *testing.T) {
 	t.Setenv("BINTRAIL_S3_ENDPOINT", "http://127.0.0.1:9000")
 	t.Setenv("AWS_REGION", "us-west-2")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
-	files, cat, err := awsConfigs(context.Background(), "", "set a region")
+	files, cat, err := awsConfigs(context.Background(), "", "", "set a region")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestAWSConfigs_noRegionRefused(t *testing.T) {
 	t.Setenv("AWS_CONFIG_FILE", "/nonexistent")
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
-	if _, _, err := awsConfigs(context.Background(), "", "set a region"); err == nil {
+	if _, _, err := awsConfigs(context.Background(), "", "", "set a region"); err == nil {
 		t.Fatal("no region anywhere: want a refusal")
 	}
 }
