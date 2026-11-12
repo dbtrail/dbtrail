@@ -134,7 +134,16 @@ to the bucket's region by itself.)
   request, so no IAM permission is needed for it (not even
   `s3:GetBucketLocation`). It is asked once per bucket per process and
   remembered; a question that gets no answer is asked again after a minute,
-  never on every query.
+  never on every query. A command with a short time limit does not cut the
+  question short: it goes on with the configured region, and the answer is
+  kept for the next one.
+- **A bucket that moves while bintrail runs** (deleted and created again in
+  another region): the first request S3 redirects drops the region bintrail
+  had found, and the error says to retry; the bucket's region is looked up
+  again the next time bintrail opens the bucket, once. The agent's payload
+  uploads keep the client they started with: until the agent restarts, each
+  payload batch fails its retries and is dropped (counted as lost in the
+  agent's heartbeat), so restart the agent.
 - **A region you pass yourself wins**: a `--region`/`--*-s3-region` flag is
   used as given.
 - **Not with a custom endpoint**: with `BINTRAIL_S3_ENDPOINT`,

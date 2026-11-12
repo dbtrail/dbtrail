@@ -31,7 +31,12 @@ type RegionMismatchError struct {
 	// interface: its region comes from that store, so AWS_REGION is not the
 	// remedy and the message points at the store instead.
 	Store bool
-	Err   error
+	// Forgotten is set when Region was the one this process had discovered
+	// for the bucket, and that answer was dropped (#2698): the bucket moved,
+	// and the next client built for it asks S3 again. The remedy is then a
+	// retry, not a setting.
+	Forgotten bool
+	Err       error
 }
 
 func (e *RegionMismatchError) Error() string {
@@ -50,6 +55,15 @@ func (e *RegionMismatchError) Error() string {
 		}
 		return fmt.Sprintf("%s is in another region than the one its S3 store in the web interface signs for (%s), "+
 			"so S3 answered 301 PermanentRedirect: set that store's region to the bucket's: %v", bucket, region, e.Err)
+	}
+	if e.Forgotten {
+		if e.BucketRegion != "" {
+			return fmt.Sprintf("%s is now in region %s, not in region %s, which this process had found for it earlier: "+
+				"its region is looked up again the next time bintrail opens the bucket, so retry: %v",
+				bucket, e.BucketRegion, region, e.Err)
+		}
+		return fmt.Sprintf("%s is no longer in region %s, which this process had found for it earlier, so S3 answered 301 PermanentRedirect: "+
+			"its region is looked up again the next time bintrail opens the bucket, so retry: %v", bucket, region, e.Err)
 	}
 	if e.BucketRegion != "" {
 		return fmt.Sprintf("%s is in region %s, and this process uses region %s: "+
@@ -88,12 +102,16 @@ func (regionMismatchMiddleware) HandleInitialize(ctx context.Context, in middlew
 	}
 	bucket := inputBucket(in.Parameters)
 	_, routed := BucketStoreFor(bucket)
+	region := awsmiddleware.GetRegion(ctx)
+	store := routed && bucket != ""
 	return out, md, &RegionMismatchError{
 		Bucket:       bucket,
 		BucketRegion: re.Response.Header.Get("X-Amz-Bucket-Region"),
-		Region:       awsmiddleware.GetRegion(ctx),
-		Store:        routed && bucket != "",
-		Err:          err,
+		Region:       region,
+		Store:        store,
+		// A store's region is its own setting, never a discovery.
+		Forgotten: !store && forgetDiscoveredRegion(bucket, region),
+		Err:       err,
 	}
 }
 

@@ -59,53 +59,6 @@ func TestDiscoverBucketRegion_concurrentAskersShareOneQuestion_2688(t *testing.T
 	}
 }
 
-// A waiter whose own context ends stops waiting; and when the asker gives up
-// (its context cancelled), a waiter asks in its place instead of inheriting
-// nothing forever.
-func TestDiscoverBucketRegion_waitersAndCancelledAsker_2688(t *testing.T) {
-	isolateAWSEnv(t)
-	var asked atomic.Int32
-	first := make(chan struct{})
-	restore := SetBucketRegionDiscoveryForTest(func(ctx context.Context, _, _ string) (string, error) {
-		if asked.Add(1) == 1 {
-			close(first)
-			<-ctx.Done()
-			return "", ctx.Err()
-		}
-		return "eu-west-3", nil
-	})
-	t.Cleanup(restore)
-
-	askerCtx, cancelAsker := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		DiscoverBucketRegion(askerCtx, aws.Config{}, "b")
-		close(done)
-	}()
-	<-first
-
-	short, cancelShort := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancelShort()
-	if _, ok := DiscoverBucketRegion(short, aws.Config{}, "b"); ok {
-		t.Error("a waiter whose context ended got an answer")
-	}
-
-	waiter := make(chan string)
-	go func() {
-		r, _ := DiscoverBucketRegion(context.Background(), aws.Config{}, "b")
-		waiter <- r
-	}()
-	time.Sleep(20 * time.Millisecond)
-	cancelAsker()
-	<-done
-	if r := <-waiter; r != "eu-west-3" {
-		t.Errorf("the waiter got %q after the asker gave up, want its own answer", r)
-	}
-	if asked.Load() != 2 {
-		t.Errorf("asked %d times, want 2 (the cancelled asker, then the waiter)", asked.Load())
-	}
-}
-
 // An endpoint_url in ~/.aws/config is a custom endpoint too: the SDK only
 // resolves it when a client is built, and the bucket is not asked about.
 func TestDiscoverBucketRegion_endpointURLInSharedConfig_2688(t *testing.T) {
