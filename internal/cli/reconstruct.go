@@ -92,8 +92,10 @@ destination. Two output formats:
 A table with no snapshot at or before --at fails the run: without a snapshot
 only the rows its recorded changes touched can be written, and every other
 row would be missing. Nothing is written for that table. Pass
---allow-changes-only (mydumper output only) to write those rows anyway; the
-summary and the table's schema file then say the output is changes only.
+--allow-changes-only (mydumper output only) to write those rows anyway: the
+command then exits 0, and the summary, the table's schema file and a
+_CHANGES_ONLY file in the output say which tables are changes only.
+"bintrail baseline" does not convert such a table into a snapshot.
 
 Examples:
   # Current state of a row (baseline + all binlog events up to now)
@@ -860,22 +862,9 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 		// defaulted to ~80% of host RAM regardless of what the operator set.
 		DuckDBTuning: duckTuning,
 	}
-	reports, failures, err := reconstructTablesDetailed(cmd.Context(), cfg)
+	reports, _, err := reconstructTablesDetailed(cmd.Context(), cfg)
 	if err != nil {
-		wrapped := fmt.Errorf("full-table reconstruct: %w", err)
-		// Same CLI-layer hint as single-row reconstruct (the %w chain
-		// survives ReconstructTables' errors.Join, so errors.As still
-		// unwraps the library type).
-		var emptyErr *query.SourceEmptyError
-		if errors.As(err, &emptyErr) {
-			wrapped = fmt.Errorf("full-table reconstruct: %w; "+sourceEmptyHint, err)
-		}
-		// A table with no snapshot was refused (no --allow-changes-only):
-		// the engine says what it would have held, this says what to do.
-		if advice := changesOnlyAdvice(cmd.Context(), cmd, failures, baselineSrc); advice != "" {
-			wrapped = fmt.Errorf("%w\n%s", wrapped, advice)
-		}
-		return wrapped
+		return fullTableError(cmd.Context(), cmd, err, baselineSrc)
 	}
 
 	// ── Summary ────────────────────────────────────────────────────────────
@@ -962,32 +951,69 @@ func changesOnlyTables(reports []*reconstruct.TableReport) []string {
 	return names
 }
 
-// changesOnlyAdvice is what the command adds to the engine's refusal of each
-// table that has no snapshot (reconstruct.ChangesOnlyError): why the location
-// had none, as the single-row refusal tells it, and the flag that writes the
-// changed rows anyway. One line per table, sorted; "" when no table was
-// refused on that ground.
-func changesOnlyAdvice(ctx context.Context, cmd *cobra.Command, failures []reconstruct.TableFailure, location string) string {
+// fullTableRefusal is a failed full-table run worded by the command, with the
+// engine's error still reachable (errors.Is, errors.As).
+type fullTableRefusal struct {
+	msg string
+	err error
+}
+
+func (e *fullTableRefusal) Error() string { return e.msg }
+func (e *fullTableRefusal) Unwrap() error { return e.err }
+
+// fullTableError words a failed full-table run. A table refused because it
+// has no snapshot (reconstruct.ChangesOnlyError, no --allow-changes-only)
+// gets one line: the table, said once, what its output would have held, why
+// the location had no snapshot for it, and the flag. Every other failure
+// keeps the engine's words. One line per failure, so a run with a single
+// refused table reads as one line, in the text form and inside the JSON one.
+func fullTableError(ctx context.Context, cmd *cobra.Command, err error, location string) error {
+	// Same CLI-layer hint as single-row reconstruct (the %w chain survives
+	// ReconstructTables' errors.Join, so errors.As still unwraps the library
+	// type).
+	hint := ""
+	var emptyErr *query.SourceEmptyError
+	if errors.As(err, &emptyErr) {
+		hint = "; " + sourceEmptyHint
+	}
+	refused, rest := reconstruct.SplitChangesOnly(err)
+	if len(refused) == 0 {
+		return fmt.Errorf("full-table reconstruct: %w"+hint, err)
+	}
 	var lines []string
-	for _, f := range failures {
-		var e *reconstruct.ChangesOnlyError
-		if !errors.As(f.Err, &e) {
-			continue
-		}
-		name := e.Schema + "." + e.Table
-		var b strings.Builder
-		b.WriteString(name + ": " + noSnapshotWhy(ctx, cmd, e.Schema, e.Table, e.At, location) + ". ")
-		if !e.CreateRecordedAt.IsZero() {
-			fmt.Fprintf(&b, "The index recorded a CREATE TABLE for it at %s: if the table was created then "+
-				"and every change since is still recorded, its changes are the whole table. ",
-				e.CreateRecordedAt.UTC().Format(time.RFC3339))
-		}
-		fmt.Fprintf(&b, "To write only the changed rows of %s anyway, add --allow-changes-only; "+
-			"the summary then reports it as changes only", name)
-		lines = append(lines, b.String())
+	for _, e := range refused {
+		lines = append(lines, changesOnlyAdvice(ctx, cmd, e, location))
 	}
 	slices.Sort(lines)
-	return strings.Join(lines, "\n")
+	for _, e := range rest {
+		lines = append(lines, e.Error())
+	}
+	return &fullTableRefusal{msg: "full-table reconstruct: " + strings.Join(lines, "\n") + hint, err: err}
+}
+
+// changesOnlyAdvice is the line for one refused table.
+func changesOnlyAdvice(ctx context.Context, cmd *cobra.Command, e *reconstruct.ChangesOnlyError, location string) string {
+	name := e.Schema + "." + e.Table
+	why, cause := noSnapshotWhy(ctx, cmd, e.Schema, e.Table, e.At, location)
+	var b strings.Builder
+	b.WriteString(name + ": " + e.Error() + ". " + why + ". ")
+	// The engine's own lookup found no snapshot, so the flag is still what
+	// writes the table. What is said here is what the listing could not
+	// tell, so that the flag is not added on a guess.
+	switch cause {
+	case noSnapshotListingFailed:
+		b.WriteString("Why there is none is not known, because the location could not be listed. Find that out before adding the flag. ")
+	case noSnapshotNotAccepted:
+		b.WriteString("Why there is none is not known: the location shows a snapshot of it from at or before that moment, " +
+			"and the lookup did not use it. Find that out before adding the flag. ")
+	}
+	if !e.CreateRecordedAt.IsZero() {
+		fmt.Fprintf(&b, "If %s did not exist before %s, when the index recorded the newest CREATE TABLE for it, "+
+			"and every change since then is still recorded, those rows are the whole table; the statement alone proves neither. ",
+			name, e.CreateRecordedAt.UTC().Format(time.RFC3339))
+	}
+	b.WriteString("To write only those rows anyway, add --allow-changes-only; the summary then reports the table as changes only")
+	return b.String()
 }
 
 // auditReconstruct reports a completed point-in-time reconstruction to the
@@ -1152,17 +1178,25 @@ var listSnapshots = reconstruct.ListBaselines
 // claims no case.
 func noSnapshotBeforeError(ctx context.Context, cmd *cobra.Command, schema, table string, at time.Time,
 	location string, baselineOnly bool, err error) error {
-	return &noSnapshotError{err: err, msg: needsSnapshot(schema+"."+table, at, baselineOnly) + " " +
-		noSnapshotWhy(ctx, cmd, schema, table, at, location)}
+	why, _ := noSnapshotWhy(ctx, cmd, schema, table, at, location)
+	return &noSnapshotError{err: err, msg: needsSnapshot(schema+"."+table, at, baselineOnly) + " " + why}
 }
 
+// What noSnapshotWhy could tell about a location with no snapshot of a table
+// from at or before a moment.
+const (
+	noSnapshotCaseKnown     = iota // one of the three cases, named in the text
+	noSnapshotListingFailed        // the location could not be listed
+	noSnapshotNotAccepted          // it shows such a snapshot, and the lookup did not use it
+)
+
 // noSnapshotWhy is the part of noSnapshotBeforeError that tells the cases
-// apart and says what to do, shared with the full-table refusal.
-func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string, at time.Time, location string) string {
+// apart and says what to do, shared with the full-table refusal. cause says
+// whether it could tell them apart.
+func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string, at time.Time, location string) (why string, cause int) {
 	name := schema + "." + table
 	when := at.UTC().Format(time.RFC3339)
 	take := snapshotCommand(cmd)
-	var why string
 	files, listErr := listSnapshots(ctx, location)
 	snapshots := map[time.Time]bool{}
 	var earliest time.Time
@@ -1182,6 +1216,10 @@ func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string
 	}
 	switch {
 	case listErr != nil || beforeAt:
+		cause = noSnapshotNotAccepted
+		if listErr != nil {
+			cause = noSnapshotListingFailed
+		}
 		why = fmt.Sprintf("No snapshot of %s from at or before %s was found in %q. "+
 			"A snapshot only answers moments at or after it was taken (`%s` writes them)",
 			name, when, location, take)
@@ -1202,5 +1240,5 @@ func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string
 		why = fmt.Sprintf("%q holds no snapshots. Take one (`%s` writes them); "+
 			"it answers moments from then on, not earlier ones", location, take)
 	}
-	return why
+	return why, cause
 }

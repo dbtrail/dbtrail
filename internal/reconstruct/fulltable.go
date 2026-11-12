@@ -26,6 +26,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baselineintegrity"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/duckdbutil"
+	"github.com/dbtrail/dbtrail/internal/ddltext"
 	"github.com/dbtrail/dbtrail/internal/event"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -156,10 +157,14 @@ type FullTableConfig struct {
 	// written from its recorded changes alone (reconstructBinlogOnly). Such
 	// output holds the rows those changes touched and nothing else, so the
 	// zero value refuses the table with a ChangesOnlyError and writes nothing
-	// for it. Set it only where the caller says what the output is: the CLI
-	// behind --allow-changes-only, and the callers that grade
-	// TableReport.BinlogOnly themselves (drill, the console's .sql build).
-	// It changes nothing for OutputFormatParquet, which always refuses.
+	// for it. Only the CLI sets it, behind --allow-changes-only. A caller
+	// that gives such a table a verdict of its own (drill, the console's
+	// .sql build) reads the refusal with SplitChangesOnly and leaves this
+	// off: built first and failed afterwards, the table's files would stay
+	// on disk in a folder marked complete. A table written this way is
+	// listed in the folder's baseline.ChangesOnlyMarkerFile, which
+	// `bintrail baseline` reads. It changes nothing for OutputFormatParquet,
+	// which always refuses.
 	AllowChangesOnly bool
 
 	// WriterID is the identity a Parquet snapshot is signed with (#1762).
@@ -1245,6 +1250,11 @@ func markRunIncomplete(outputDir string) error {
 	// exists to close.
 	if err := os.Remove(filepath.Join(outputDir, baseline.SuccessMarker)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("could not remove stale %s marker from a prior run in %s (refusing to reconstruct with a completeness marker that could mask this run's own incomplete output): %w", baseline.SuccessMarker, outputDir, err)
+	}
+	// The list of tables an earlier run wrote from changes alone describes
+	// that run's files, not this one's.
+	if err := baseline.RemoveChangesOnlyMarker(outputDir); err != nil {
+		return err
 	}
 	return baseline.WriteIncompleteMarker(outputDir)
 }
@@ -2916,56 +2926,141 @@ var ErrChangesOnly = errors.New("table could only be rebuilt from its recorded c
 
 // ChangesOnlyError is the refusal of a full-table reconstruct for a table
 // with no snapshot at or before At, when FullTableConfig.AllowChangesOnly is
-// off. Its text names no flag and no parameter, because each surface has its
-// own way to opt in (or none); the surface adds that.
+// off. Its text names no table, no flag and no parameter: the run puts
+// "schema.table: " in front of every table's failure, and each surface has
+// its own way to opt in (or none) and adds that.
 type ChangesOnlyError struct {
 	Schema, Table string
 	At            time.Time
-	// CreateRecordedAt is when the index recorded a CREATE TABLE for the
-	// table at or before At, zero when it holds none. A table created after
-	// the newest snapshot is the one case where the changes can be the whole
-	// table, and only if every change since that moment is still recorded.
+	// CreateRecordedAt is when the index recorded the statement that last
+	// made the table new at or before At (see recordedCreateTableAt), zero
+	// when it cannot say. A table created after the newest snapshot is the
+	// one case where the changes can be the whole table, and only if every
+	// change since that moment is still recorded. It is a hint for the
+	// operator, never proof: the index may have started recording after the
+	// table existed under another history.
 	CreateRecordedAt time.Time
 }
 
 func (e *ChangesOnlyError) Error() string {
-	return fmt.Sprintf("%s.%s has no snapshot at or before %s to start from. "+
+	return fmt.Sprintf("there is no snapshot at or before %s to start it from. "+
 		"Its recorded changes alone give only the rows they touched, with every other row missing, "+
 		"so nothing was written for it",
-		e.Schema, e.Table, e.At.UTC().Format(time.RFC3339))
+		e.At.UTC().Format(time.RFC3339))
 }
 
 func (e *ChangesOnlyError) Unwrap() error { return ErrChangesOnly }
 
-// recordedCreateTableAt is when the index recorded the newest CREATE TABLE
-// for the table at or before at: the statement findCapturedCreateTableDDL
-// would ship as the schema file. Zero when there is none or the lookup fails;
-// it only adds a sentence to a refusal, so a failure is not worth reporting.
+// SplitChangesOnly separates what a run's joined error holds: the tables
+// refused with a ChangesOnlyError, and every other error, each in the order
+// the run joined them. A caller that gives such a table its own verdict
+// (drill, the console's .sql build, the command's advice) reads the first and
+// must not lose the second.
+func SplitChangesOnly(err error) (refused []*ChangesOnlyError, rest []error) {
+	if err == nil {
+		return nil, nil
+	}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range j.Unwrap() {
+			r, o := SplitChangesOnly(e)
+			refused, rest = append(refused, r...), append(rest, o...)
+		}
+		return refused, rest
+	}
+	var e *ChangesOnlyError
+	if errors.As(err, &e) {
+		return []*ChangesOnlyError{e}, nil
+	}
+	return nil, []error{err}
+}
+
+// createLookback is how many of a table's newest schema_changes rows
+// recordedCreateTableAt reads before it gives up.
+const createLookback = 50
+
+// recordedCreateTableAt is when the index recorded the statement after which
+// the table was new, at or before at. Zero when it cannot say, which is
+// every case but one: walking the table's recorded statements from the
+// newest, the first that is not a plain ALTER TABLE is a CREATE TABLE or
+// CREATE OR REPLACE TABLE without IF NOT EXISTS.
+//
+// What makes it zero, and why:
+//   - CREATE TABLE IF NOT EXISTS: the server logs it whether or not the table
+//     was there, so an application that runs it at every start records one
+//     per start for a table that may be years old.
+//   - a RENAME, DROP or TRUNCATE newer than the CREATE: after a rename into
+//     this name (an online schema change's swap) the rows were written under
+//     the other name, and the recorded changes of this one do not hold them.
+//   - an ALTER TABLE that moves rows without row events (EXCHANGE PARTITION
+//     and the like), or one whose text cannot be read.
+//   - a statement whose text is not on the row, was cut, or does not read as
+//     one of these shapes.
+//   - a failed lookup: it only adds a sentence to a refusal.
 func recordedCreateTableAt(ctx context.Context, db *sql.DB, schema, table string, at time.Time) time.Time {
 	if db == nil {
 		return time.Time{}
 	}
-	var detected sql.NullTime
-	err := db.QueryRowContext(ctx, `
-		SELECT detected_at FROM schema_changes
-		WHERE schema_name = ? AND table_name = ? AND ddl_type IN (?, ?) AND detected_at <= ?
-		  AND ddl_query NOT LIKE ?
+	rows, err := db.QueryContext(ctx, `
+		SELECT ddl_type, ddl_query, detected_at FROM schema_changes
+		WHERE schema_name = ? AND table_name = ? AND detected_at <= ?
 		ORDER BY detected_at DESC, id DESC
-		LIMIT 1`,
-		schema, table, event.DDLCreateTable, event.DDLReplaceTable, at, event.InferredDDLPrefix+"%").Scan(&detected)
-	if err != nil || !detected.Valid {
+		LIMIT ?`,
+		schema, table, at, createLookback)
+	if err != nil {
 		return time.Time{}
 	}
-	return detected.Time.UTC()
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			kind     string
+			text     sql.NullString
+			detected sql.NullTime
+		)
+		if err := rows.Scan(&kind, &text, &detected); err != nil {
+			return time.Time{}
+		}
+		if created, decided := createdByStatement(kind, text.String); decided {
+			if !created || !detected.Valid {
+				return time.Time{}
+			}
+			return detected.Time.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+// createdByStatement reads one recorded statement of a table, newest first.
+// decided is false for a statement that leaves the question to the one before
+// it: an ALTER TABLE that changes no rows. Otherwise created says whether the
+// table was new after it.
+func createdByStatement(kind, text string) (created, decided bool) {
+	// An inferred PostgreSQL row (#2441) is prose, never a statement.
+	if strings.HasPrefix(text, event.InferredDDLPrefix) {
+		return false, true
+	}
+	switch event.DDLKind(kind) {
+	case event.DDLAlterTable:
+		if strings.TrimSpace(text) == "" {
+			return false, true
+		}
+		if op, _ := ddltext.RowsChangedWithoutEvents(text); op != "" {
+			return false, true
+		}
+		return false, false
+	case event.DDLCreateTable, event.DDLReplaceTable:
+		return ddltext.CreatesNewTable(text), true
+	}
+	return false, true
 }
 
 // changesOnlyMarker opens the schema file of a table written from its
 // recorded changes alone. The schema file is the one file of the table a
-// loader always reads first, and this is its first line.
+// loader always reads first, and this is its first line. `bintrail baseline`
+// reads it too, as its second check after the folder's marker file.
 func changesOnlyMarker(schema, table string) string {
 	schema, table = recovery.SanitizeForComment(schema), recovery.SanitizeForComment(table)
 	return fmt.Sprintf(
-		"-- bintrail: CHANGES ONLY. The data file(s) of %s.%s hold only the rows its recorded\n"+
+		baseline.ChangesOnlySchemaPrefix+" The data file(s) of %s.%s hold only the rows its recorded\n"+
 			"-- changes touched. A row that no recorded change touched is missing. This is not\n"+
 			"-- the whole table unless every row of it was written inside the recorded changes.\n",
 		schema, table)
@@ -3125,6 +3220,11 @@ func reconstructBinlogOnly(
 	}
 
 	rep.BinlogOnly = true
+	// Listed before its first file exists, so that a run killed in between
+	// leaves a folder that lists the table rather than one that hides it.
+	if err := baseline.AppendChangesOnlyTable(cfg.OutputDir, schema, table); err != nil {
+		return nil, err
+	}
 	if err := writeBinlogOnlyChanges(cfg.OutputDir, schema, table, pkCols, tm.Columns, colNames, cfg.ChunkSize, cfg.SpaceCheck, createSQL, changes, rep); err != nil {
 		return nil, err
 	}

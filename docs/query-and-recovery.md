@@ -395,22 +395,44 @@ A table has no snapshot at or before the moment when:
 
 The snapshot is looked up per table, when that table starts. In a run over several tables, a snapshot removed between two of them leaves the later table without one, and that table is refused the same way.
 
-The error names each refused table, says which of these cases the location shows, and names the table's earliest snapshot when it has one. What to do:
+The error has one line per refused table. It says which of these cases the location shows and names the table's earliest snapshot when it has one. When it cannot tell, because the location could not be listed or shows a snapshot of the table that the lookup did not use, it says that the reason is not known; find it out before adding the flag. What to do:
 
 - Take a snapshot that includes the table. It answers moments from then on, not earlier ones.
 - Ask for a moment at or after the table's earliest snapshot.
 - Pass `--allow-changes-only` to write the table from its recorded changes alone.
 
-`--allow-changes-only` is for when the changed rows are the output you want. They are the whole table in one case: the table was created after the newest snapshot, and every change since its creation is still in the index or its archives. When the index recorded a `CREATE TABLE` for the table, the error says when, so that you can judge this. With the flag:
+`--allow-changes-only` is for when the changed rows are the output you want. They are the whole table in one case: the table was created after the newest snapshot, and every change since its creation is still in the index or its archives.
 
+To help you judge that, the error gives the moment of the newest `CREATE TABLE` the index recorded for the table, as a condition and not as a fact: "If the table did not exist before that moment, and every change since then is still recorded, those rows are the whole table". The date is left out whenever the recorded statements cannot support it:
+
+- the statement is `CREATE TABLE IF NOT EXISTS`. The server writes it to the binary log whether or not the table was there, so an application that runs it at every start records it again each time, for a table that may be years old;
+- a `RENAME`, `DROP` or `TRUNCATE` of the table is newer than the `CREATE TABLE`. After a rename into this name, which is how an online schema change swaps its copy in, the rows were written under the copy's name and are not among the changes recorded for this one;
+- an `ALTER TABLE` that moves rows without row events (`EXCHANGE PARTITION` and similar) is newer than it;
+- the statement's text is missing, cut short, or not one this reads.
+
+`CREATE TABLE ... LIKE` and `CREATE TABLE ... SELECT` keep the date: the first makes an empty table, and with row-based logging the rows of the second follow as ordinary row changes. A temporary table is never recorded.
+
+With the flag:
+
+- the command exits 0, which is what a script checks, so the script must read the summary or the marker file to know;
 - the table's summary line is a warning, `table dump holds changes only: a row that no recorded change touched is missing`, in place of `table dump complete`;
 - the closing line lists those tables as `changes_only_tables`;
 - the table's schema file opens with a comment that starts `-- bintrail: CHANGES ONLY.`;
-- the output directory is marked `_SUCCESS`, because the run wrote what was asked for.
+- the output directory is marked `_SUCCESS`, because the run wrote what was asked for;
+- the output directory holds a file named `_CHANGES_ONLY` that lists those tables, one JSON object per line (`{"schema":"shop","table":"orders"}`).
 
-The data files of such a table are ordinary `INSERT` files. When the schema file carries the `CREATE TABLE` the index recorded, a loader creates the table and loads those rows like any other table, so keep a changes-only dump apart from complete ones.
+The data files of such a table are ordinary `INSERT` files. When the schema file carries the `CREATE TABLE` the index recorded, a loader such as myloader creates the table and loads those rows like any other table, so keep a changes-only dump apart from complete ones.
 
-The flag applies to `--output-format mydumper` only and is refused with any other mode. `--output-format parquet` and the scheduled snapshot update always refuse a table with no snapshot, `drill` fails that table without loading it, the console's `.sql` build fails, and a full-table `_snapshot` query through the shim returns an error. To undo particular changes rather than rebuild a table, use `recover`, which needs no snapshot.
+`bintrail baseline` does not convert such a table into a snapshot. A snapshot is what every later reconstruct starts from, so a changes-only table converted into one would come back as a complete table with no flag and no warning. The conversion reads `_CHANGES_ONLY`, and the first line of each schema file in case that file was lost in a copy, and when a table it was asked to convert is one of them it converts nothing, exits non-zero and names the table. Name the other tables of the folder with `--tables` to convert those. It also refuses a folder marked `_INCOMPLETE`, which is what a reconstruct that failed or was stopped leaves behind.
+
+The flag applies to `--output-format mydumper` only and is refused with any other mode. Elsewhere a table with no snapshot is handled as follows:
+
+- `--output-format parquet` and the scheduled snapshot update always refuse it;
+- `drill` fails that table, writes nothing for it and loads nothing, and leaves its dump folder marked `_INCOMPLETE`;
+- the console's `.sql` build fails and writes nothing for it;
+- a full-table `_snapshot` query through the shim returns an error when the shim was started with a snapshot location. Started with none, `_snapshot` answers from recorded changes alone, exactly like `_flashback`, as described above.
+
+To undo particular changes rather than rebuild a table, use `recover`, which needs no snapshot.
 
 ### Completeness marker
 

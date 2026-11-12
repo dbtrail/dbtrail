@@ -80,15 +80,9 @@ func TestReconstructFullTable_changesOnlyIsNeverAQuietSuccess(t *testing.T) {
 		"testdb", "items", 2 /* UPDATE */, "10", nil,
 		[]byte(`{"id":10,"status":"ten"}`), []byte(`{"id":10,"status":"TEN"}`))
 
-	// run executes `bintrail reconstruct` in full-table mode and returns the
-	// output directory, what it printed and its exit status.
-	run := func(t *testing.T, snapshots, format, tables string, extra ...string) (outDir, output string, status int) {
+	// bintrail runs the binary and returns what it printed and its exit status.
+	bintrail := func(t *testing.T, args ...string) (output string, status int) {
 		t.Helper()
-		outDir = t.TempDir()
-		args := append([]string{"reconstruct",
-			"--index-dsn", indexDSN, "--baseline-dir", snapshots,
-			"--tables", tables, "--at", at.Format(time.RFC3339),
-			"--output-format", format, "--output", outDir, "--parallelism", "1"}, extra...)
 		cmd := exec.Command(binPath, args...)
 		var buf bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &buf, &buf
@@ -101,10 +95,43 @@ func TestReconstructFullTable_changesOnlyIsNeverAQuietSuccess(t *testing.T) {
 		default:
 			t.Fatalf("run bintrail: %v", err)
 		}
-		output = strings.ReplaceAll(buf.String(), indexDSN, "<index-dsn>")
+		return strings.ReplaceAll(buf.String(), indexDSN, "<index-dsn>"), status
+	}
+	// run executes `bintrail reconstruct` in full-table mode and returns the
+	// output directory, what it printed and its exit status.
+	run := func(t *testing.T, snapshots, format, tables string, extra ...string) (outDir, output string, status int) {
+		t.Helper()
+		outDir = t.TempDir()
+		output, status = bintrail(t, append([]string{"reconstruct",
+			"--index-dsn", indexDSN, "--baseline-dir", snapshots,
+			"--tables", tables, "--at", at.Format(time.RFC3339),
+			"--output-format", format, "--output", outDir, "--parallelism", "1"}, extra...)...)
 		t.Logf("bintrail reconstruct --tables %s --output-format %s %s\nexit status: %d\nfiles: %v\n%s",
 			tables, format, strings.Join(extra, " "), status, listFiles(t, outDir), output)
 		return outDir, output, status
+	}
+	// convert executes `bintrail baseline` over a dump folder and returns the
+	// new snapshots folder, what it printed and its exit status.
+	convert := func(t *testing.T, dump string, extra ...string) (snapshots, output string, status int) {
+		t.Helper()
+		snapshots = t.TempDir()
+		output, status = bintrail(t, append([]string{"baseline", "--input", dump, "--output", snapshots}, extra...)...)
+		output = strings.ReplaceAll(output, dump, "<dump>")
+		t.Logf("bintrail baseline --input <dump> %s\nexit status: %d\nfiles: %v\n%s",
+			strings.Join(extra, " "), status, listFiles(t, snapshots), output)
+		return snapshots, output, status
+	}
+	// marked fails unless dir holds the marker file `have` and lacks `lack`.
+	// Both are checked: a folder with neither reads as complete by the rule
+	// for folders older than the markers.
+	marked := func(t *testing.T, dir, have, lack string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(dir, have)); err != nil {
+			t.Errorf("the output directory is not marked %s: %v", have, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, lack)); err == nil {
+			t.Errorf("the output directory is marked %s", lack)
+		}
 	}
 
 	t.Run("with a snapshot the table is complete", func(t *testing.T) {
@@ -128,12 +155,22 @@ func TestReconstructFullTable_changesOnlyIsNeverAQuietSuccess(t *testing.T) {
 		if files := tableFiles(t, outDir, "testdb.orders"); len(files) != 0 {
 			t.Errorf("refused table left files a loader would take for the table: %v", files)
 		}
-		if _, err := os.Stat(filepath.Join(outDir, baseline.SuccessMarker)); err == nil {
-			t.Errorf("the output directory is marked %s", baseline.SuccessMarker)
-		}
-		for _, want := range []string{"testdb.orders", "every other row", "--allow-changes-only", "does not include testdb.orders"} {
+		marked(t, outDir, baseline.IncompleteMarker, baseline.SuccessMarker)
+		for _, want := range []string{"testdb.orders: there is no snapshot", "every other row", "--allow-changes-only", "does not include testdb.orders"} {
 			if !strings.Contains(output, want) {
 				t.Errorf("refusal does not say %q", want)
+			}
+		}
+		// The binary prints the error inside JSON: one refused table must be
+		// one line there, with no line break shown as \n, and the table is
+		// not named twice in a row.
+		if i := strings.Index(output, `{"error"`); i < 0 {
+			t.Errorf("no error was printed")
+		} else {
+			for _, bad := range []string{`\n`, "testdb.orders: testdb.orders"} {
+				if strings.Contains(output[i:], bad) {
+					t.Errorf("the printed error holds %q", bad)
+				}
 			}
 		}
 	})
@@ -162,11 +199,18 @@ func TestReconstructFullTable_changesOnlyIsNeverAQuietSuccess(t *testing.T) {
 		if data := tableData(t, outDir, "testdb.items"); !strings.Contains(data, "(10, 'TEN')") || !strings.Contains(data, "(11, 'eleven')") {
 			t.Errorf("testdb.items, which has its snapshot, was not written in full:\n%s", data)
 		}
-		if _, err := os.Stat(filepath.Join(outDir, baseline.SuccessMarker)); err == nil {
-			t.Errorf("the output directory is marked %s", baseline.SuccessMarker)
-		}
+		marked(t, outDir, baseline.IncompleteMarker, baseline.SuccessMarker)
 		if !strings.Contains(output, "testdb.orders") || !strings.Contains(output, "--allow-changes-only") {
 			t.Errorf("refusal does not name the table and the flag")
+		}
+		// The folder holds one complete table and is not finished: it is not
+		// converted into a snapshot, which would be published as complete.
+		snapshots, converted, status := convert(t, outDir)
+		if status == 0 || !strings.Contains(converted, "_INCOMPLETE") {
+			t.Errorf("exit status = %d: a folder its run did not finish was converted into a snapshot", status)
+		}
+		if files := listFiles(t, snapshots); len(files) != 0 {
+			t.Errorf("the refused conversion wrote %v", files)
 		}
 	})
 
@@ -211,6 +255,45 @@ func TestReconstructFullTable_changesOnlyIsNeverAQuietSuccess(t *testing.T) {
 		}
 		if !strings.Contains(output, "changes_only_tables=testdb.orders") {
 			t.Errorf("the closing line does not list the changes-only table")
+		}
+		// As documented: the run wrote what was asked for, so the folder is
+		// marked complete and carries the position of the tables that had a
+		// snapshot. It also lists the table that is changes only.
+		marked(t, outDir, baseline.SuccessMarker, baseline.IncompleteMarker)
+		if _, err := os.Stat(filepath.Join(outDir, "metadata")); err != nil {
+			t.Errorf("no metadata file: %v", err)
+		}
+		listed, err := baseline.ReadChangesOnlyTables(outDir)
+		if err != nil || len(listed) != 1 || !listed["testdb.orders"] {
+			t.Errorf("%s lists %v (err %v), want testdb.orders alone", baseline.ChangesOnlyMarkerFile, listed, err)
+		}
+
+		// That folder looks like any dump. Converted into a snapshot, the
+		// two-row testdb.orders would be what every later reconstruct starts
+		// from, with no flag and no warning. `bintrail baseline` refuses it.
+		snapshots, converted, status := convert(t, outDir)
+		if status == 0 {
+			t.Errorf("exit status = 0: the changes-only table was converted into a snapshot")
+		}
+		for _, want := range []string{"testdb.orders in <dump>", "missing every other row", "Nothing was converted", "--tables"} {
+			if !strings.Contains(converted, want) {
+				t.Errorf("the conversion's refusal does not say %q", want)
+			}
+		}
+		if files := listFiles(t, snapshots); len(files) != 0 {
+			t.Errorf("the refused conversion wrote %v", files)
+		}
+		// The complete table of the same folder converts when it is named.
+		if _, _, status := convert(t, outDir, "--tables", "testdb.items"); status != 0 {
+			t.Errorf("exit status = %d: testdb.items, built from its snapshot, was not converted when named", status)
+		}
+		// A copy of the folder that lost the marker file is still refused,
+		// by the first line of the table's schema file.
+		if err := os.Remove(filepath.Join(outDir, baseline.ChangesOnlyMarkerFile)); err != nil {
+			t.Fatal(err)
+		}
+		if _, converted, status := convert(t, outDir); status == 0 || !strings.Contains(converted, "testdb.orders in <dump>") {
+			t.Errorf("exit status = %d: without the marker file the changes-only table was converted", status)
 		}
 	})
 

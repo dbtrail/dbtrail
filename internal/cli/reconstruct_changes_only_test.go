@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/audittest"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
@@ -76,8 +78,8 @@ func TestReconstructChangesOnly_refusalSaysWhatToDo(t *testing.T) {
 			name:     "the index recorded the table's CREATE TABLE",
 			snapshot: func(t *testing.T, dir string) { putSnapshot(t, dir, "2026-08-01T00-00-00Z", "mydb", "customers") },
 			created:  time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC),
-			want: []string{"The index recorded a CREATE TABLE for it at 2026-08-20T09:30:00Z",
-				"every change since is still recorded"},
+			want: []string{"If mydb.orders did not exist before 2026-08-20T09:30:00Z, when the index recorded the newest CREATE TABLE for it, " +
+				"and every change since then is still recorded, those rows are the whole table; the statement alone proves neither."},
 		},
 	}
 	for _, tc := range cases {
@@ -102,14 +104,26 @@ func TestReconstructChangesOnly_refusalSaysWhatToDo(t *testing.T) {
 			msg := strings.ReplaceAll(err.Error(), dir, "<snapshots>")
 			t.Logf("rendered:\n%s", msg)
 			for _, want := range append(tc.want,
-				"mydb.orders has no snapshot at or before 2026-09-01T12:00:00Z to start from",
+				"full-table reconstruct: mydb.orders: there is no snapshot at or before 2026-09-01T12:00:00Z to start it from",
 				"only the rows they touched, with every other row missing",
 				"nothing was written for it",
-				"To write only the changed rows of mydb.orders anyway, add --allow-changes-only",
+				"To write only those rows anyway, add --allow-changes-only",
 			) {
 				if !strings.Contains(msg, want) {
 					t.Errorf("refusal does not say %q", want)
 				}
+			}
+			// One table, one line: the binary prints the error inside JSON,
+			// where a line break shows as a literal \n. And the table is
+			// named once before the colon, not twice.
+			if strings.Contains(msg, "\n") {
+				t.Error("the refusal of a single table spans more than one line")
+			}
+			if strings.Contains(msg, "mydb.orders: mydb.orders") {
+				t.Error("the refusal names the table twice in a row")
+			}
+			if strings.Contains(msg, "is not known") {
+				t.Error("the refusal says the reason is not known although the listing told the case")
 			}
 			if tc.created.IsZero() && strings.Contains(msg, "CREATE TABLE") {
 				t.Error("refusal speaks of a CREATE TABLE the index did not record")
@@ -139,16 +153,18 @@ func TestReconstructChangesOnly_eachRefusedTableIsNamed(t *testing.T) {
 	}
 	msg := err.Error()
 	t.Logf("rendered:\n%s", msg)
-	for _, name := range []string{"mydb.orders", "mydb.users"} {
-		if !strings.Contains(msg, "To write only the changed rows of "+name+" anyway") {
-			t.Errorf("no advice line for %s", name)
+	lines := strings.Split(msg, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("%d lines, want one per failed table", len(lines))
+	}
+	for i, name := range []string{"mydb.orders", "mydb.users"} {
+		line := strings.TrimPrefix(lines[i], "full-table reconstruct: ")
+		if !strings.HasPrefix(line, name+": there is no snapshot") || !strings.HasSuffix(line, "reports the table as changes only") {
+			t.Errorf("line %d is not the refusal and the advice for %s: %s", i+1, name, line)
 		}
 	}
-	if strings.Contains(msg, "changed rows of mydb.items") {
-		t.Error("mydb.items failed for another reason and was offered --allow-changes-only")
-	}
-	if !strings.Contains(msg, "mydb.items: no primary key") {
-		t.Error("the other table's failure was dropped")
+	if lines[2] != "mydb.items: no primary key" {
+		t.Errorf("the other table's failure was not kept as the engine worded it: %s", lines[2])
 	}
 }
 
@@ -175,6 +191,7 @@ func TestReconstructChangesOnly_summaryMarksTheTable(t *testing.T) {
 		{Schema: "mydb", Table: "users", BaselineRows: 10},
 		{Schema: "mydb", Table: "orders", BinlogOnly: true, InsertsEmitted: 2, EventsApplied: 2},
 	}, nil)
+	audit := audittest.Install(t)
 
 	var logs bytes.Buffer
 	prev := slog.Default()
@@ -210,6 +227,25 @@ func TestReconstructChangesOnly_summaryMarksTheTable(t *testing.T) {
 	}
 	if !strings.Contains(closing, "changes_only_tables=mydb.orders") {
 		t.Errorf("the closing line does not list the changes-only table: %s", closing)
+	}
+
+	// The audit record of each table says which kind of output was read: a
+	// reader of the trail must be able to tell a whole table from the
+	// changed rows alone.
+	got := map[string]string{}
+	for _, ev := range audit.Events() {
+		if ev.Action != "reconstruct.run" || ev.Detail["mode"] != "full-table" {
+			t.Errorf("unexpected audit event %+v", ev)
+			continue
+		}
+		v, ok := ev.Detail["changes_only"]
+		if !ok {
+			v = "(absent)"
+		}
+		got[ev.Schema+"."+ev.Table] = v
+	}
+	if len(got) != 2 || got["mydb.orders"] != "true" || got["mydb.users"] != "(absent)" {
+		t.Errorf("audit changes_only by table = %v, want mydb.orders=true and mydb.users without the key", got)
 	}
 }
 
@@ -267,5 +303,69 @@ func TestReconstructChangesOnly_flagHelp(t *testing.T) {
 	}
 	if !strings.Contains(reconstructCmd.Long, "--allow-changes-only") {
 		t.Error("the command's long help does not mention the flag")
+	}
+}
+
+// When the location cannot be listed, or shows a snapshot the lookup did not
+// use, the command cannot say why the table has none. It says that, before
+// the flag, so the flag is not added on a guess.
+func TestReconstructChangesOnly_saysWhenTheReasonIsNotKnown(t *testing.T) {
+	t.Run("the location could not be listed", func(t *testing.T) {
+		resetMydumperFlags(t)
+		recBaselineDir = t.TempDir()
+		recAt = changesOnlyAt.Format(time.RFC3339)
+		orig := listSnapshots
+		t.Cleanup(func() { listSnapshots = orig })
+		listSnapshots = func(context.Context, string) ([]reconstruct.BaselineFile, error) {
+			return nil, errors.New("listing refused")
+		}
+		stubEngine(t, nil, []reconstruct.TableFailure{refusedTable("mydb", "orders", time.Time{})})
+		err := runReconstruct(reconstructCmd, nil)
+		if err == nil {
+			t.Fatal("the command succeeded")
+		}
+		msg := strings.ReplaceAll(err.Error(), recBaselineDir, "<snapshots>")
+		t.Logf("rendered:\n%s", msg)
+		unknown := "Why there is none is not known, because the location could not be listed. Find that out before adding the flag."
+		if !strings.Contains(msg, unknown) {
+			t.Errorf("refusal does not say %q", unknown)
+		}
+		if strings.Index(msg, unknown) > strings.Index(msg, "--allow-changes-only") {
+			t.Error("the flag is offered before what is not known")
+		}
+	})
+	t.Run("the location shows a snapshot the lookup did not use", func(t *testing.T) {
+		resetMydumperFlags(t)
+		dir := t.TempDir()
+		putSnapshot(t, dir, "2026-08-01T00-00-00Z", "mydb", "orders")
+		recBaselineDir = dir
+		recAt = changesOnlyAt.Format(time.RFC3339)
+		stubEngine(t, nil, []reconstruct.TableFailure{refusedTable("mydb", "orders", time.Time{})})
+		err := runReconstruct(reconstructCmd, nil)
+		if err == nil {
+			t.Fatal("the command succeeded")
+		}
+		msg := strings.ReplaceAll(err.Error(), dir, "<snapshots>")
+		t.Logf("rendered:\n%s", msg)
+		unknown := "Why there is none is not known: the location shows a snapshot of it from at or before that moment, and the lookup did not use it. Find that out before adding the flag."
+		if !strings.Contains(msg, unknown) {
+			t.Errorf("refusal does not say %q", unknown)
+		}
+	})
+}
+
+// The hint for an index that holds no events is kept when the same run also
+// refuses a table with no snapshot.
+func TestReconstructChangesOnly_keepsTheEmptyIndexHint(t *testing.T) {
+	resetMydumperFlags(t)
+	recBaselineDir = t.TempDir()
+	recTables = "mydb.orders,mydb.items"
+	stubEngine(t, nil, []reconstruct.TableFailure{
+		refusedTable("mydb", "orders", time.Time{}),
+		{Schema: "mydb", Table: "items", Err: &query.SourceEmptyError{}},
+	})
+	err := runReconstruct(reconstructCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), sourceEmptyHint) || !strings.Contains(err.Error(), "--allow-changes-only") {
+		t.Fatalf("err = %v, want the refusal's advice and the empty-index hint", err)
 	}
 }

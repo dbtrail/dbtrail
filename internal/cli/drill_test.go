@@ -171,19 +171,33 @@ func TestDrillReportExitError(t *testing.T) {
 	}
 }
 
-// A table with no snapshot must reach drillTable, which fails it without
-// loading it and says why. The engine refuses such a table unless the caller
-// opts in, and a refusal there would end the rehearsal with no per-table
-// report, so drill opts in. The chunk size is pinned beside it because it is
-// the other value this configuration exists to carry.
-func TestDrillFoldConfig_foldsATableWithNoSnapshotForItsOwnVerdict(t *testing.T) {
+// drill does not ask the engine to build a table that has no snapshot. Built
+// first and failed afterwards, the table's partial files stayed in the dump
+// folder under a _SUCCESS marker, ready to be converted into a snapshot.
+func TestDrillFoldConfig_neverAsksForAChangesOnlyTable(t *testing.T) {
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	cfg := drillFoldConfig("dsn", "/snapshots", []string{"shop.orders"}, at, "/out", reconstruct.OutputFormatMydumper)
-	if !cfg.AllowChangesOnly {
-		t.Error("drill does not ask for a table with no snapshot to be folded: the engine would refuse it and the rehearsal would end with no report")
+	if cfg.AllowChangesOnly {
+		t.Error("drill asks for a table with no snapshot to be written from its changes alone")
 	}
 	if cfg.ChunkSize != 16<<20 || cfg.OutputFormat != reconstruct.OutputFormatMydumper || !cfg.At.Equal(at) ||
 		cfg.IndexDSN != "dsn" || cfg.BaselineSrc != "/snapshots" || cfg.OutputDir != "/out" || len(cfg.Tables) != 1 {
 		t.Errorf("cfg = %+v", cfg)
 	}
+}
+
+// The engine's refusal becomes the same FAIL drill gave when it had the table
+// built first: same status, same binlog_only, same words.
+func TestDrillNoSnapshotResult_sameVerdictAsBefore(t *testing.T) {
+	got := drillNoSnapshotResult("shop", "orders")
+	rep := &reconstruct.TableReport{Schema: "shop", Table: "orders", BinlogOnly: true}
+	built := drillTable(context.Background(), nil, "", rep)
+	if got != built {
+		t.Errorf("refused = %+v\nbuilt   = %+v", got, built)
+	}
+	if got.Status != "fail" || !got.BinlogOnly ||
+		got.Error != "no usable baseline for this table; the dump was rebuilt from binlog deltas alone (an EMPTY starting table); a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)" {
+		t.Errorf("verdict changed: %+v", got)
+	}
+	t.Logf("rendered: %s", got.Error)
 }

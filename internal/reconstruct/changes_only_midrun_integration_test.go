@@ -120,6 +120,9 @@ func TestReconstructTables_snapshotRemovedBetweenTwoTables(t *testing.T) {
 	if failures[0].Table == reports[0].Table {
 		t.Fatalf("table %s both succeeded and failed", failures[0].Table)
 	}
+	if _, statErr := os.Stat(filepath.Join(out, baseline.IncompleteMarker)); statErr != nil {
+		t.Errorf("the output directory is not marked %s: %v", baseline.IncompleteMarker, statErr)
+	}
 	ents, rdErr := os.ReadDir(out)
 	if rdErr != nil {
 		t.Fatalf("ReadDir: %v", rdErr)
