@@ -140,12 +140,20 @@ func PinSnapshot(root, name, what string, limit time.Duration) (release func()) 
 	if root == "" || name == "" || strings.HasPrefix(root, "s3://") {
 		return func() {}
 	}
+	key := readKey(root)
+	readsMu.Lock()
+	defer readsMu.Unlock()
+	return insertPinLocked(key, name, what, limit)
+}
+
+// insertPinLocked adds one pin and returns what releases it. The caller
+// holds readsMu, so a check made under the same lock (PinSnapshotCapped)
+// and this insert are one step.
+func insertPinLocked(key, name, what string, limit time.Duration) (release func()) {
 	if limit <= 0 {
 		limit = readHoldLimit
 	}
-	key := readKey(root)
 	p := &snapshotPin{what: what, until: time.Now().Add(limit)}
-	readsMu.Lock()
 	if pins[key] == nil {
 		pins[key] = map[string]map[*snapshotPin]struct{}{}
 	}
@@ -153,7 +161,6 @@ func PinSnapshot(root, name, what string, limit time.Duration) (release func()) 
 		pins[key][name] = map[*snapshotPin]struct{}{}
 	}
 	pins[key][name][p] = struct{}{}
-	readsMu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -215,7 +222,11 @@ func PinSnapshotCapped(root, name, what string, limit time.Duration, max int) (r
 	}
 	key := readKey(root)
 	now := time.Now()
+	// The count and the insert are ONE step under the lock: counted, then
+	// unlocked, then inserted, requests arriving together all passed the
+	// check before any of them was counted, and the cap did not hold.
 	readsMu.Lock()
+	defer readsMu.Unlock()
 	distinct, already := 0, false
 	for n, set := range pins[key] {
 		for p := range set {
@@ -226,9 +237,8 @@ func PinSnapshotCapped(root, name, what string, limit time.Duration, max int) (r
 			}
 		}
 	}
-	readsMu.Unlock()
 	if !already && distinct >= max {
 		return func() {}, false
 	}
-	return PinSnapshot(root, name, what, limit), true
+	return insertPinLocked(key, name, what, limit), true
 }

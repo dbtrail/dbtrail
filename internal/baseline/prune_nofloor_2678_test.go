@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -613,4 +615,44 @@ func TestNoFloor_aReaderThatArrivesDuringTheCleanupIsHonoured(t *testing.T) {
 			t.Fatalf("the wait is not on record: %+v ok=%v", rec, ok)
 		}
 	})
+}
+
+// The cap holds when the requests arrive together: 64 goroutines pin 64
+// different snapshots at once against a cap of 3, and never more than 3 are
+// pinned. Run with -race.
+func TestNoFloor_theCapHoldsUnderConcurrentPins(t *testing.T) {
+	root := t.TempDir()
+	const max = 3
+	var wg sync.WaitGroup
+	var granted, over atomic.Int32
+	start := make(chan struct{})
+	for i := range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			name := snapName(time.Duration(i+1) * time.Minute)
+			release, ok := PinSnapshotCapped(root, name, "a snapshot download", time.Hour, max)
+			if !ok {
+				return
+			}
+			granted.Add(1)
+			if n := len(Pinned(root)); n > max {
+				over.Store(int32(n))
+			}
+			time.Sleep(5 * time.Millisecond)
+			release()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if n := over.Load(); n != 0 {
+		t.Fatalf("%d different snapshots were pinned at once against a cap of %d", n, max)
+	}
+	if granted.Load() < max {
+		t.Fatalf("only %d pins were granted; the cap of %d was never reached", granted.Load(), max)
+	}
+	if got := Pinned(root); len(got) != 0 {
+		t.Fatalf("every reader ended and %v is still pinned", got)
+	}
 }
