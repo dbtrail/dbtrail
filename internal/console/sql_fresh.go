@@ -10,7 +10,9 @@ import (
 
 // Fresh mode per server (#2546). A server's statements on the SQL port read
 // tails when BINTRAIL_SQL_TAILS=on (every server, the switches deciding
-// nothing) or when its registry entry says so (ServerEntry.SQLFresh). The
+// nothing) or when its registry entry says so (ServerEntry.SQLFreshOn: its
+// saved choice, fresh when it saved none), unless BINTRAIL_SQL_TAILS=off
+// (no server). The
 // entry is applied by applySQLFresh, which the process serving the port runs
 // every time it reads the registry again, so a switch saved elsewhere takes
 // effect within one follow interval, never for a statement before the pool
@@ -118,15 +120,27 @@ func (s *Server) tailsOnFor(id string) bool {
 }
 
 // SQLModeOf is server id's mode as its statements run it now, "fresh" or
-// "fast", and where it comes from (SQLModeFrom*).
+// "fast", and where it comes from (SQLModeFrom*): the setting that decides
+// for every server, the choice saved for this one, or the default. A server
+// with no entry (the one given on the command line) has no switch and is
+// fast by default.
 func (s *Server) SQLModeOf(id string) (mode, from string) {
 	switch {
 	case !tailsOff():
 		return "fresh", SQLModeFromEnvironment
-	case s.fresh.isOn(id):
-		return "fresh", SQLModeFromSaved
+	case tailsForcedOff():
+		return "fast", SQLModeFromEnvironment
 	}
-	return "fast", SQLModeFromDefault
+	mode = "fast"
+	if s.fresh.isOn(id) {
+		mode = "fresh"
+	}
+	if s.cm != nil && s.cm.reg != nil {
+		if e, ok := s.cm.reg.Get(id); ok && e.SQLFreshSaved() {
+			return mode, SQLModeFromSaved
+		}
+	}
+	return mode, SQLModeFromDefault
 }
 
 // applySQLFresh brings the servers that read tails to what the registry
@@ -137,7 +151,8 @@ func (s *Server) SQLModeOf(id string) (mode, from string) {
 // runner is closing) leaves the servers fast. A server turned fast, or
 // deleted, has its keeper dropped, so nothing follows its index any more.
 // With BINTRAIL_SQL_TAILS=on there is nothing to do: every server reads
-// tails and the pool was planned for it at startup.
+// tails and the pool was planned for it at startup. With =off no server is
+// wanted, whatever its entry says.
 func (s *Server) applySQLFresh() {
 	f := &s.fresh
 	f.apply.Lock()
@@ -146,9 +161,9 @@ func (s *Server) applySQLFresh() {
 		return
 	}
 	want := map[string]bool{}
-	if s.cm != nil && s.cm.reg != nil {
+	if s.cm != nil && s.cm.reg != nil && !tailsForcedOff() {
 		for _, e := range s.cm.reg.List() {
-			if e.SQLFresh {
+			if e.SQLFreshOn() {
 				want[e.ID] = true
 			}
 		}
@@ -170,7 +185,7 @@ func (s *Server) applySQLFresh() {
 
 	if len(on) > 0 && none && f.resizes() && !f.lowered {
 		if err := f.pool.SetMaxInFlight(f.freshWorkers); err != nil {
-			slog.Warn("Engine Routing: fresh mode was saved for a server, but the statements that run at once could not be lowered to make room for its tails, so it stays in fast mode", "error", err)
+			slog.Warn("Engine Routing: a server is in fresh mode, but the statements that run at once could not be lowered to make room for its tails, so it stays in fast mode", "error", err)
 			on = nil
 		} else {
 			f.lowered = true
@@ -192,15 +207,22 @@ func (s *Server) applySQLFresh() {
 	}
 	left := len(f.on)
 	f.mu.Unlock()
+	// A process with no pool serves no port (capture, the web interface): it
+	// keeps the list so a statement it does run reads right, and says
+	// nothing, or every start would announce a port it does not have.
+	say := slog.Info
+	if f.pool == nil {
+		say = slog.Debug
+	}
 	for _, id := range on {
-		slog.Info("Engine Routing: fresh mode on: this server's statements read its newest captured changes over its snapshot", "server", s.serverName(id))
+		say("Engine Routing: fresh mode on: this server's statements read its newest captured changes over its snapshot", "server", s.serverName(id))
 	}
 	var dropped []*tailKeeper
 	for _, id := range off {
 		if k := s.dropTailKeeper(id); k != nil {
 			dropped = append(dropped, k)
 		}
-		slog.Info("Engine Routing: fresh mode off: this server's statements read its snapshot alone", "server", s.serverName(id))
+		say("Engine Routing: fresh mode off: this server's statements read its snapshot alone", "server", s.serverName(id))
 	}
 	if left == 0 && f.lowered {
 		// The dropped keepers' builds were told to end; what they read

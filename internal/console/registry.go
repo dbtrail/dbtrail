@@ -95,14 +95,25 @@ type ServerEntry struct {
 	// Registry-owned: only SetHidden writes it, and Update keeps the stored
 	// value, so an edit built from an older read cannot put old rules back.
 	Hidden *hiderules.Rules `yaml:"hidden,omitempty"`
-	// SQLFresh is the server's fresh mode on the SQL port (#2546): its
-	// statements read each table's newest captured changes over its
-	// snapshot ("tails") instead of the snapshot alone. Absent is fast, as
-	// before the switch. Registry-owned like Hidden: only SetSQLFresh writes
-	// it, Add never stores it and Update keeps the stored value. The process
-	// that serves the port applies it when it reads the registry again
-	// (Server.applySQLFresh); BINTRAIL_SQL_TAILS=on overrides it.
-	SQLFresh bool `yaml:"sql_fresh,omitempty"`
+	// SQLMode is the mode saved for the server's statements on the SQL port
+	// (#2546): "fresh" (each table's newest captured changes, its "tails",
+	// laid over its snapshot) or "fast" (the snapshot alone). Absent is no
+	// choice saved, which is fresh, the default (SQLFreshOn). Any other
+	// value, one a newer build wrote, is read as no choice.
+	//
+	// SQLFresh is the key builds before the default changed saved, where
+	// absent meant fast. It is still read (true with no sql_mode is Fresh
+	// saved) and still written beside "fresh", so a router of such a build
+	// honors a Fresh saved here. Fast is NOT written there: such a build
+	// re-saving the file drops a false, and keeps a key it does not know
+	// (Extra), which is why the choice lives in sql_mode.
+	//
+	// Registry-owned like Hidden: only SetSQLFresh and SetSQLMode write the
+	// two, Add never stores them and Update keeps the stored values. The
+	// process that serves the port applies them when it reads the registry
+	// again (Server.applySQLFresh); BINTRAIL_SQL_TAILS=on or =off overrides.
+	SQLMode  string `yaml:"sql_mode,omitempty"`
+	SQLFresh bool   `yaml:"sql_fresh,omitempty"`
 	// SQLLikeIgnoresCase sends this server's statements with LIKE to the
 	// copy on the SQL port, written ILIKE there (readrouter.CopyOptions).
 	// Absent keeps them on MySQL, as before the switch: MySQL compares LIKE
@@ -770,7 +781,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	e.ID = id
 	e.LocalKeepHeldDir = ""             // registry-owned; a new entry never starts held
 	e.Hidden = nil                      // SetHidden is the only writer (#2529)
-	e.SQLFresh = false                  // SetSQLFresh is the only writer (#2546)
+	e.SQLMode, e.SQLFresh = "", false   // SetSQLFresh is the only writer (#2546)
 	e.SQLLikeIgnoresCase = false        // SetSQLMode is the only writer
 	e.PortUser, e.PortPassword = "", "" // SetPortLogin is the only writer
 	r.file.Servers = append(r.file.Servers, e)
@@ -840,7 +851,7 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 		// So are the hidden rules (#2529): SetHidden is their only writer.
 		e.Hidden = old.Hidden
 		// And the fresh mode (#2546): SetSQLFresh is its only writer.
-		e.SQLFresh = old.SQLFresh
+		e.SQLMode, e.SQLFresh = old.SQLMode, old.SQLFresh
 		// And the LIKE switch: SetSQLMode is its only writer.
 		e.SQLLikeIgnoresCase = old.SQLLikeIgnoresCase
 		// And the application login: SetPortLogin is its only writer.
@@ -902,9 +913,36 @@ func (r *Registry) SetHidden(id string, set *hiderules.Set) (ServerEntry, error)
 	return ServerEntry{}, ErrUnknownServer
 }
 
+// The values of ServerEntry.SQLMode.
+const (
+	sqlModeFresh = "fresh"
+	sqlModeFast  = "fast"
+)
+
+// SQLFreshOn is whether this server's statements on the SQL port read tails
+// as far as its own entry says: its saved choice, and fresh when none is
+// saved. The process that serves the port may still be told otherwise for
+// every server (BINTRAIL_SQL_TAILS).
+func (e ServerEntry) SQLFreshOn() bool { return e.SQLMode != sqlModeFast }
+
+// SQLFreshSaved is whether a choice was saved for this server, as opposed to
+// the default applying.
+func (e ServerEntry) SQLFreshSaved() bool {
+	return e.SQLMode == sqlModeFresh || e.SQLMode == sqlModeFast || e.SQLFresh
+}
+
+// setSQLFresh writes a saved choice into the entry.
+func (e *ServerEntry) setSQLFresh(on bool) {
+	e.SQLMode, e.SQLFresh = sqlModeFast, false
+	if on {
+		e.SQLMode, e.SQLFresh = sqlModeFresh, true
+	}
+}
+
 // SetSQLFresh saves whether entry id's statements on the SQL port read
 // tails (#2546). It is the only writer of ServerEntry.SQLFresh, and it
-// changes nothing else in the entry.
+// changes nothing else in the entry. Either value is a saved choice: fast
+// is stored, not left absent.
 func (r *Registry) SetSQLFresh(id string, on bool) (ServerEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -915,9 +953,9 @@ func (r *Registry) SetSQLFresh(id string, on bool) (ServerEntry, error) {
 		if old.ID != id {
 			continue
 		}
-		r.file.Servers[i].SQLFresh = on
+		r.file.Servers[i].setSQLFresh(on)
 		if err := r.save(); err != nil {
-			r.file.Servers[i].SQLFresh = old.SQLFresh // roll back
+			r.file.Servers[i].SQLMode, r.file.Servers[i].SQLFresh = old.SQLMode, old.SQLFresh // roll back
 			return ServerEntry{}, err
 		}
 		return r.file.Servers[i], nil
@@ -941,7 +979,7 @@ func (r *Registry) SetSQLMode(id string, fresh, like *bool) (ServerEntry, error)
 			continue
 		}
 		if fresh != nil {
-			r.file.Servers[i].SQLFresh = *fresh
+			r.file.Servers[i].setSQLFresh(*fresh)
 		}
 		if like != nil {
 			r.file.Servers[i].SQLLikeIgnoresCase = *like

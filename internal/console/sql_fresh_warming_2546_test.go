@@ -67,9 +67,10 @@ func TestSQLFreshWarming_2546(t *testing.T) {
 	if !s.SQLModeWarming(id) {
 		t.Fatal("turned fresh again: the answer from the earlier time still counts")
 	}
-	// The other server was never switched.
-	if s.SQLModeWarming(ids[1]) {
-		t.Fatal("a server never switched is catching up")
+	// The other server has nothing saved: fresh by the default, and it has
+	// not answered yet.
+	if !s.SQLModeWarming(ids[1]) {
+		t.Fatal("a server with nothing saved is fresh and has not answered: it is catching up")
 	}
 }
 

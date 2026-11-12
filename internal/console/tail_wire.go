@@ -20,8 +20,10 @@ import (
 // (#2369): what capture has indexed since the snapshot, so a statement on the
 // copy is as current as the index, not only as the last refresh. Only the
 // port's statements (SQLOnCopy.Run) do; the console's own SQL card reads
-// the published copy. Tails are the opt-in fresh mode: BINTRAIL_SQL_TAILS=on
-// for every server (tailsOff), or one server's switch (#2546, tailsOnFor).
+// the published copy. Tails are the fresh mode, the default: each server's
+// switch decides (#2546, tailsOnFor), fresh when it saved none, unless
+// BINTRAIL_SQL_TAILS decides for every server (on: tailsOff is false; off:
+// tailsForcedOff).
 
 // Tail budgets: keys one tail may hold and memory all of them may (#2494,
 // tailBudgetFor), how long a replaced version stays for a statement that may
@@ -74,25 +76,49 @@ func tailsFor(ctx context.Context) (string, bool) {
 	return id, ok && id != ""
 }
 
-// tailsOff says the port answers from each table's snapshot alone, which is
-// the default: fast answers first. Tails are opt-in, the "fresh
-// mode": BINTRAIL_SQL_TAILS=on (or true, 1, yes, fresh, in any case). Any
-// other value, a typo included, keeps them off; TailsSetting says what was
-// read so the router can show it.
+// The setting that decides for every server, BINTRAIL_SQL_TAILS, as
+// SQLModeSetting reads it.
+const (
+	SQLModeForcedFresh = "fresh"
+	SQLModeForcedFast  = "fast"
+)
+
+// SQLModeSetting reads BINTRAIL_SQL_TAILS: forced is SQLModeForcedFresh for
+// on, true, 1, yes or fresh, SQLModeForcedFast for off, false, 0, no or fast
+// (in any case), and "" when it is unset or says anything else: then each
+// server's own choice applies, fresh when it saved none. read is the value,
+// trimmed, so the router can show one it did not understand.
+func SQLModeSetting() (forced, read string) {
+	read = strings.TrimSpace(os.Getenv("BINTRAIL_SQL_TAILS"))
+	switch strings.ToLower(read) {
+	case "on", "true", "1", "yes", "fresh":
+		return SQLModeForcedFresh, read
+	case "off", "false", "0", "no", "fast":
+		return SQLModeForcedFast, read
+	}
+	return "", read
+}
+
+// tailsOff says the setting does NOT put every server in fresh mode: each
+// server's switch decides then (tailsOnFor), unless the setting puts every
+// server in fast mode (tailsForcedOff).
 func tailsOff() bool {
 	on, _ := TailsSetting()
 	return !on
 }
 
-// TailsSetting is whether tails are on and the BINTRAIL_SQL_TAILS value read,
-// trimmed ("" when unset).
+// tailsForcedOff says the setting puts every server in fast mode, whatever
+// its entry says.
+func tailsForcedOff() bool {
+	forced, _ := SQLModeSetting()
+	return forced == SQLModeForcedFast
+}
+
+// TailsSetting is whether the setting puts every server in fresh mode, and
+// the BINTRAIL_SQL_TAILS value read, trimmed ("" when unset).
 func TailsSetting() (on bool, read string) {
-	read = strings.TrimSpace(os.Getenv("BINTRAIL_SQL_TAILS"))
-	switch strings.ToLower(read) {
-	case "on", "true", "1", "yes", "fresh":
-		return true, read
-	}
-	return false, read
+	forced, read := SQLModeSetting()
+	return forced == SQLModeForcedFresh, read
 }
 
 // tailKeeperFor is server id's keeper over b, nil when the server can have no
