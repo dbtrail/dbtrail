@@ -424,10 +424,10 @@ type BackupWindow struct {
 	AnchorFullFinished time.Time
 	// Capture says whether the source has written anything the capture has
 	// not checkpointed (#1791): CaptureCaughtUp, CaptureBehind,
-	// CaptureSuspect, or empty when the source could not be asked (a
-	// PostgreSQL or MariaDB source, a position-mode capture, an index on
-	// the source server, a source that did not answer). The daemon asks only
-	// when it matters, nothing indexed since
+	// CaptureSuspect, CaptureUnaskable, or empty when the capture was not
+	// confirmed and none of those was established. Empty is decided like
+	// evidence, the full read: it is what a reason nobody classified gets.
+	// The daemon asks only when it matters, nothing indexed since
 	// the anchor (Events == 0) on an anchor past the cut-over age, because
 	// from the index alone "the source wrote nothing" and "the capture
 	// stopped" are the same observation (#1223): the binlog syncer retries
@@ -440,7 +440,7 @@ type BackupWindow struct {
 	// index still keeps, no table was created since it and no capture loss
 	// is on record since it. The daemon establishes it only where the slot
 	// could be skipped (nothing indexed since an anchor past the cut-over
-	// age, and a source that cannot be asked). False when any of the three
+	// age, and CaptureUnaskable). False when any of the three
 	// fails or could not be read, with CannotWaitWhy saying which: the
 	// update then runs, as it does under the daemon-wide refresh gate
 	// (#1689), since a snapshot left to fall out of the index's retention
@@ -508,9 +508,16 @@ const (
 	// on record says the index is missing changes: a capture loss since the
 	// previous snapshot, rows the capture dropped that no full backup has
 	// read since, or a capture holding transactions the source does not
-	// have. Evidence like CaptureBehind, and decided like it; not the same
-	// as a source that cannot be asked (empty).
+	// have. Evidence like CaptureBehind, and decided like it.
 	CaptureSuspect = "suspect"
+	// CaptureUnaskable: the source cannot be asked whether the capture holds
+	// everything it wrote, for one of the reasons the daemon lists for that
+	// (a PostgreSQL or MariaDB source, a position-mode capture, an index on
+	// the source server, a source that did not answer, an index with no
+	// capture on record), and nothing says a change was missed. The one
+	// state in which a slot is skipped (WindowChoice). Never the default:
+	// the daemon sets it only for a reason on its list.
+	CaptureUnaskable = "unaskable"
 )
 
 // BackupWindowProbe measures the window for e whose previous snapshot is
@@ -591,9 +598,12 @@ func updateClearlyDearer(updateSec, fullSec float64) bool {
 //     (CaptureBehind) or the capture's own record says it lost some
 //     (CaptureSuspect). This one is not about cost: an update over that
 //     index would publish the previous snapshot's rows under a new date,
-//     and only a read of the source settles what the capture missed. A
-//     source that cannot be asked is no evidence either way, and chooses no
-//     full read: that slot is skipped (WindowChoice, #2659).
+//     and only a read of the source settles what the capture missed. The
+//     same goes for a capture that was not confirmed for a reason nobody
+//     classified (Capture empty): a loss cannot be ruled out. A source that
+//     cannot be asked for a listed reason (CaptureUnaskable) is no evidence
+//     either way, and chooses no full read: that slot is skipped
+//     (WindowChoice, #2659).
 //     It is reached only where the estimate did not settle the slot first,
 //     which narrows it to a server with no rate or no full backup on
 //     record, and one whose fixed cost is over its last full backup but
@@ -634,7 +644,7 @@ func CutoverToFull(w BackupWindow, interval time.Duration, now time.Time) string
 // The skip (#2659) is the index-doubt condition without the evidence:
 // nothing was indexed since an anchor past BackupCutoverAge(interval), the
 // estimate did not settle the slot, and the source cannot be asked whether
-// the capture holds everything it wrote (Capture empty). A full read there
+// the capture holds everything it wrote (CaptureUnaskable). A full read there
 // would read every row of the source on no evidence, at every such slot of
 // a quiet server; an update would publish the previous snapshot's rows
 // under a new date, which says the copy is current when nobody checked. So
@@ -716,7 +726,22 @@ func WindowChoice(w BackupWindow, interval time.Duration, now time.Time) (method
 		return BackupMethodFull, fmt.Sprintf("%s: %s was taken %s ago, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind",
 			BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age))
 	case CaptureSuspect:
-		// What is in question is whether "nothing" is true. Said as that.
+		// Evidence, said as what was found: here the capture's record, or
+		// the source itself, did answer.
+		what := "and the capture's own record says changes were lost"
+		if w.CaptureDetail != "" {
+			what = "and " + w.CaptureDetail
+		}
+		return BackupMethodFull, fmt.Sprintf("%s: %s was taken %s ago, %s",
+			BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age), what)
+	case CaptureUnaskable:
+		// Below: no evidence that the index is missing anything, and none
+		// that it is not (#2659).
+	default:
+		// Not confirmed, and not for a reason on the daemon's list of
+		// sources that cannot be asked: a loss cannot be ruled out, so the
+		// full read stays, as before the skip existed. What is in question
+		// is whether "nothing" is true. Said as that.
 		what := "and whether the source changed could not be checked"
 		if w.CaptureDetail != "" {
 			what += " (" + w.CaptureDetail + ")"
@@ -724,8 +749,6 @@ func WindowChoice(w BackupWindow, interval time.Duration, now time.Time) (method
 		return BackupMethodFull, fmt.Sprintf("%s: %s was taken %s ago, %s",
 			BackupWhyIndexDoubtPrefix, BackupWhyNothingIndexedWords, roundDuration(age), what)
 	}
-	// The source cannot be asked: no evidence that the index is missing
-	// anything, and none that it is not (#2659).
 	if !w.CanWait {
 		return BackupMethodRefresh, UnconfirmedUpdateWhy(w.CaptureDetail, w.CannotWaitWhy)
 	}
@@ -877,7 +900,7 @@ func unconfirmedLead(detail string) string {
 // history keeps one record for it (AppendSkip).
 func SkipUnconfirmedReason(detail string) string {
 	return unconfirmedLead(detail) + ", so no snapshot is made at this slot; " +
-		"the copy stays at its last snapshot until a change is indexed or the source can be asked"
+		"the copy keeps the data it has until a change is indexed or the source can be asked"
 }
 
 // UnconfirmedUpdateWhy is the why of the update WindowChoice takes where it

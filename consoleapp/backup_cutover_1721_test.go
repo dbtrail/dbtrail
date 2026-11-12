@@ -486,7 +486,7 @@ func TestBackupScheduler_cutsOverInTheRealSlotWhenTheIndexIsInDoubt(t *testing.T
 	}
 	t.Log(run.Why)
 	if !strings.HasPrefix(run.Why, "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken ") ||
-		!strings.HasSuffix(run.Why, "ago, and whether the source changed could not be checked (the capture lost events to a binlog gap after the previous snapshot)") {
+		!strings.HasSuffix(run.Why, "ago, and the capture lost events to a binlog gap after the previous snapshot") {
 		t.Fatalf("the reason on record: %q", run.Why)
 	}
 	if !strings.Contains(logs.String(), "taking a full read instead of an update from the recorded changes; nothing was indexed since the previous snapshot") {

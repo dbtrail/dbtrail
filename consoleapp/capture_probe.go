@@ -25,10 +25,12 @@ import (
 // and the stream's checkpoint ticker keeps stamping stream_state while it
 // does, so a fresh checkpoint proves the loop runs, not that it captures.
 // The source is what can tell: has it written past the capture's checkpoint?
-// Only a definite "no" lets the update run. A source that is ahead, and a
-// capture whose own record says it lost changes, keep the full backup. A
-// source that cannot be asked is no evidence either way, and that slot is
-// skipped (#2659, console.WindowChoice).
+// Only a definite "no" lets the update run. A source that is ahead, a
+// capture whose own record says it lost changes, and any answer under which
+// a loss cannot be ruled out keep the full backup. A source that cannot be
+// asked, for one of the reasons listed for it (captureClasses), is no
+// evidence either way, and that slot is skipped (#2659,
+// console.WindowChoice).
 
 // captureComparable reports whether st can be compared with the source at
 // all, and why not: every condition that rules "caught up" out without
@@ -36,8 +38,7 @@ import (
 // the previous snapshot's instant, sourceRead when the newest full backup
 // that read the source started (BaselineRunHistory.LastSourceRead; zero:
 // none on record). No refusal lets the update run as if capture were
-// confirmed; the ones that say changes were lost keep the full backup
-// (captureEvidence), the others skip the slot (#2659):
+// confirmed; what the schedule does with each is captureClasses (#2659):
 //
 //   - no live capture on record (a file-mode index), or a loss record this
 //     index does not have (GapColumnsPresent false: unevaluable, not "no
@@ -62,15 +63,15 @@ import (
 func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time) (ok bool, detail string) {
 	switch {
 	case st == nil:
-		return false, "the index has no live capture on record"
+		return false, captureDetailNoCapture
 	case !st.GapColumnsPresent:
-		return false, "the index predates the capture's loss record"
+		return false, captureDetailNoLossRecord
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(anchor):
 		return false, captureDetailLost
 	}
 	skips, readable := st.ParseCaptureSkips()
 	if !readable {
-		return false, "the capture's record of dropped events is not readable"
+		return false, captureDetailSkipsUnreadable
 	}
 	for _, sk := range skips {
 		if sk.Count > 0 && (sourceRead.IsZero() || sk.LastAt.IsZero() || !sk.LastAt.Before(sourceRead)) {
@@ -87,13 +88,13 @@ func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time)
 // said by the page's own continuity and capture health lines.
 func checkpointComparable(st *status.StreamStateInfo) (ok bool, detail string) {
 	if st == nil {
-		return false, "the index has no live capture on record"
+		return false, captureDetailNoCapture
 	}
 	if st.Mode != "gtid" {
-		return false, "the capture runs in binlog-position mode, which is not compared"
+		return false, captureDetailPositionMode
 	}
 	if !st.GTIDSet.Valid || strings.TrimSpace(st.GTIDSet.String) == "" {
-		return false, "the capture has no GTID checkpoint"
+		return false, captureDetailNoCheckpoint
 	}
 	return true, ""
 }
@@ -107,15 +108,15 @@ func checkpointComparable(st *status.StreamStateInfo) (ok bool, detail string) {
 // transactions), which is the stuck capture this check exists to catch.
 func compareGTIDSets(captured, executed string) (verdict, detail string) {
 	if strings.TrimSpace(executed) == "" {
-		return "", "the source reported no GTID set"
+		return "", captureDetailNoSourceGTIDs
 	}
 	have, err := gomysql.ParseMysqlGTIDSet(captured)
 	if err != nil {
-		return "", "the capture's GTID set does not parse"
+		return "", captureDetailCaptureUnparsed
 	}
 	wrote, err := gomysql.ParseMysqlGTIDSet(executed)
 	if err != nil {
-		return "", "the source's GTID set does not parse"
+		return "", captureDetailSourceUnparsed
 	}
 	switch {
 	case have.Equal(wrote):
@@ -126,30 +127,104 @@ func compareGTIDSets(captured, executed string) (verdict, detail string) {
 		// the parser commits with the next GTID) or a tagged GTID (8.3+,
 		// which the parser does not record) read this way too. The
 		// direction is safe: the full backup stays.
-		return console.CaptureBehind, "the source reports transactions the capture's checkpoint does not include"
+		return console.CaptureBehind, captureDetailBehind
 	}
 	return "", captureDetailDiverged
 }
 
-// The refusals that are evidence, not only an unanswered question: each
-// says the index is missing changes of the source, or holds some the
-// source does not have, which a source that cannot be asked does not say.
-// The snapshot schedule keeps its full read on these (captureEvidence,
-// console.CaptureSuspect) and skips the slot on every other refusal (#2659).
+// Every reason the capture probe gives for not answering "caught up"
+// (#1791), as constants: the snapshot schedule decides on them
+// (captureClassOf), and a reason written as a bare string would be decided
+// by nobody. A test reads this file and the schedule loop and fails on a
+// detail that is not one of these, or on one of these with no class.
 const (
-	captureDetailLost     = "the capture lost events to a binlog gap after the previous snapshot"
-	captureDetailDropped  = "the capture dropped events that no full read has read from the source since"
-	captureDetailDiverged = "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
+	// What the index's own record of the capture says.
+	captureDetailNoCapture       = "the index has no live capture on record"
+	captureDetailNoLossRecord    = "the index predates the capture's loss record"
+	captureDetailLost            = "the capture lost events to a binlog gap after the previous snapshot"
+	captureDetailSkipsUnreadable = "the capture's record of dropped events is not readable"
+	captureDetailDropped         = "the capture dropped events that no full read has read from the source since"
+	captureDetailPositionMode    = "the capture runs in binlog-position mode, which is not compared"
+	captureDetailNoCheckpoint    = "the capture has no GTID checkpoint"
+	// What comparing the two GTID sets found.
+	captureDetailNoSourceGTIDs   = "the source reported no GTID set"
+	captureDetailCaptureUnparsed = "the capture's GTID set does not parse"
+	captureDetailSourceUnparsed  = "the source's GTID set does not parse"
+	captureDetailBehind          = "the source reports transactions the capture's checkpoint does not include"
+	captureDetailDiverged        = "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
+	// What reaching the two servers ran into.
+	captureDetailCancelled        = "the request that asked was cancelled"
+	captureDetailTimedOut         = "the probe did not finish in time"
+	captureDetailIndexSilent      = "the index did not answer"
+	captureDetailCheckpointUnread = "the capture's checkpoint could not be read"
+	captureDetailSourceSilent     = "the source did not answer"
+	captureDetailNotToldApart     = "the index and the source could not be told apart"
+	captureDetailSameServer       = "the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture"
+	captureDetailSourceGTIDUnread = "the source did not report its GTID set"
+	// The schedule's own, before the probe is tried (captureVerdict).
+	captureDetailNoSource = "this server has no source to ask"
+	captureDetailPostgres = "PostgreSQL sources are not compared yet"
 )
 
-// captureEvidence reports whether detail, the reason of a probe that did
-// not answer caught up or behind, is one of the refusals above.
-func captureEvidence(detail string) bool {
-	switch detail {
-	case captureDetailLost, captureDetailDropped, captureDetailDiverged:
-		return true
-	}
-	return false
+// captureClass is what the snapshot schedule does with a quiet index whose
+// capture was not confirmed caught up, by the reason (#2659).
+type captureClass int
+
+const (
+	// captureUnsettled is the zero value on purpose: a reason nobody
+	// classified, one added tomorrow included, keeps what the schedule did
+	// before the skip existed, the full read. Also the explicit class of
+	// the reasons under which a loss cannot be ruled out.
+	captureUnsettled captureClass = iota
+	// captureEvidence: something on record says the index is missing
+	// changes, or holds some the source does not have. The full read, with
+	// the reason worded as what was found.
+	captureEvidence
+	// captureCannotAsk: the source cannot be asked, and nothing says a
+	// change was missed. The slot is skipped (console.WindowChoice).
+	captureCannotAsk
+	// captureIndexUnread: the index itself could not be read for the
+	// capture's record, so nothing was learned about the source or about
+	// what the snapshot would lose by waiting. The update runs.
+	captureIndexUnread
+)
+
+// captureClasses is the decision for each reason. Only the reasons the
+// decision on #2659 names skip the slot; the rest keep the full read.
+var captureClasses = map[string]captureClass{
+	captureDetailNoCapture:        captureCannotAsk,
+	captureDetailPositionMode:     captureCannotAsk,
+	captureDetailNoCheckpoint:     captureCannotAsk,
+	captureDetailNoSourceGTIDs:    captureCannotAsk,
+	captureDetailTimedOut:         captureCannotAsk,
+	captureDetailSourceSilent:     captureCannotAsk,
+	captureDetailSourceGTIDUnread: captureCannotAsk,
+	captureDetailNotToldApart:     captureCannotAsk,
+	captureDetailSameServer:       captureCannotAsk,
+	captureDetailNoSource:         captureCannotAsk,
+	captureDetailPostgres:         captureCannotAsk,
+
+	captureDetailLost:     captureEvidence,
+	captureDetailDropped:  captureEvidence,
+	captureDetailDiverged: captureEvidence,
+	// The verdict console.CaptureBehind decides this one before any class
+	// is read; listed so that it is decided here too.
+	captureDetailBehind: captureEvidence,
+
+	captureDetailNoLossRecord:    captureUnsettled,
+	captureDetailSkipsUnreadable: captureUnsettled,
+	captureDetailCaptureUnparsed: captureUnsettled,
+	captureDetailSourceUnparsed:  captureUnsettled,
+
+	captureDetailIndexSilent:      captureIndexUnread,
+	captureDetailCheckpointUnread: captureIndexUnread,
+	captureDetailCancelled:        captureIndexUnread,
+}
+
+// captureClassOf is the class of a probe reason; one that is not in the
+// table is captureUnsettled, the full read.
+func captureClassOf(detail string) captureClass {
+	return captureClasses[detail]
 }
 
 // captureProbeResult is one answer of the capture probe: the verdict and
@@ -212,9 +287,9 @@ func boundedCaptureProbe(parent context.Context, within time.Duration, probe fun
 		return r
 	case <-ctx.Done():
 		if parent.Err() != nil {
-			return captureProbeResult{detail: "the request that asked was cancelled"}
+			return captureProbeResult{detail: captureDetailCancelled}
 		}
-		return captureProbeResult{detail: "the probe did not finish in time", cause: "timed out after " + within.String()}
+		return captureProbeResult{detail: captureDetailTimedOut, cause: "timed out after " + within.String()}
 	}
 }
 
@@ -227,12 +302,12 @@ func boundedCaptureProbe(parent context.Context, within time.Duration, probe fun
 func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
-		return captureProbeResult{detail: "the index did not answer", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	defer idx.Close()
 	st, err := status.LoadStreamState(ctx, idx)
 	if err != nil {
-		return captureProbeResult{detail: "the capture's checkpoint could not be read", cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
+		return captureProbeResult{detail: captureDetailCheckpointUnread, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	r, err := compareCapture(ctx, idx, st, anchor, sourceRead, func() (*sql.DB, error) {
 		return connectSource(sourceProbeDSN(sourceDSN), ssl)
@@ -274,7 +349,7 @@ func readExecutedOnly(ctx context.Context, db *sql.DB) (string, string, error) {
 func compareWithSource(ctx context.Context, idx *sql.DB, st *status.StreamStateInfo, openSource func() (*sql.DB, error), read sourceGTIDReader) (captureProbeResult, error) {
 	src, err := openSource()
 	if err != nil {
-		return captureProbeResult{detail: "the source did not answer"}, err
+		return captureProbeResult{detail: captureDetailSourceSilent}, err
 	}
 	defer src.Close()
 	// An index on the source server writes its own checkpoints there: each
@@ -283,14 +358,14 @@ func compareWithSource(ctx context.Context, idx *sql.DB, st *status.StreamStateI
 	// said about a healthy capture forever.
 	same, err := sameServer(ctx, idx, src)
 	if err != nil {
-		return captureProbeResult{detail: "the index and the source could not be told apart"}, err
+		return captureProbeResult{detail: captureDetailNotToldApart}, err
 	}
 	if same {
-		return captureProbeResult{detail: "the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture"}, nil
+		return captureProbeResult{detail: captureDetailSameServer}, nil
 	}
 	executed, purged, err := read(ctx, src)
 	if err != nil {
-		return captureProbeResult{detail: "the source did not report its GTID set"}, err
+		return captureProbeResult{detail: captureDetailSourceGTIDUnread}, err
 	}
 	verdict, detail := compareGTIDSets(st.GTIDSet.String, executed)
 	return captureProbeResult{verdict: verdict, detail: detail,

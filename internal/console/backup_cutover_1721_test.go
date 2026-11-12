@@ -68,8 +68,11 @@ func TestCutoverToFull(t *testing.T) {
 		{"nothing indexed, no anchor: update", BackupWindow{Events: 0, Capture: CaptureBehind}, 5 * time.Minute, ""},
 		// A source that cannot be asked is no evidence: never a full read,
 		// at any age (#2659; the slot is skipped, see WindowChoice).
-		{"nothing indexed, the source cannot be asked, anchor past the age: no full read", BackupWindow{Anchor: old, Events: 0}, 5 * time.Minute, ""},
-		{"nothing indexed, the source cannot be asked, week-old anchor: no full read", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: 0, CanWait: true}, 24 * time.Hour, ""},
+		{"nothing indexed, the source cannot be asked, anchor past the age: no full read", BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnaskable}, 5 * time.Minute, ""},
+		{"nothing indexed, the source cannot be asked, week-old anchor: no full read", BackupWindow{Anchor: now.Add(-7 * 24 * time.Hour), Events: 0, Capture: CaptureUnaskable, CanWait: true}, 24 * time.Hour, ""},
+		// Not confirmed, and for no reason on the list of sources that
+		// cannot be asked: the full read, as before the skip existed.
+		{"nothing indexed, the capture not confirmed and no listed reason: full", BackupWindow{Anchor: old, Events: 0}, 5 * time.Minute, "window_age"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -88,7 +91,7 @@ func TestCutoverToFull(t *testing.T) {
 	}
 	// The one reason that still names the anchor's age says what is in
 	// doubt, the index, and how long nothing was indexed.
-	why = CutoverToFull(BackupWindow{Anchor: old, Events: 0, LastFull: 8 * time.Minute, Capture: CaptureSuspect}, 5*time.Minute, now)
+	why = CutoverToFull(BackupWindow{Anchor: old, Events: 0, LastFull: 8 * time.Minute}, 5*time.Minute, now)
 	if want := "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked"; why != want {
 		t.Errorf("reason %q, want %q", why, want)
 	}

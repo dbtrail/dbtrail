@@ -3,13 +3,21 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/notify"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // #2659, the remaining case, in the real slot: nothing indexed since an old
@@ -109,7 +117,7 @@ func TestBackupScheduler_skipsTheSlotWhenTheSourceCannotBeAsked_2659(t *testing.
 	if strings.Count(out, unconfirmedSkipLine) != 1 {
 		t.Fatalf("the skip was logged %d times over five slots, want once: %q", strings.Count(out, unconfirmedSkipLine), out)
 	}
-	if !strings.Contains(line, "level=INFO") || !strings.Contains(line, positionMode) || !strings.Contains(line, "the copy stays at its last snapshot") {
+	if !strings.Contains(line, "level=INFO") || !strings.Contains(line, positionMode) || !strings.Contains(line, "the copy keeps the data it has") {
 		t.Fatalf("the skip's line reads %q", line)
 	}
 	for _, never := range []string{"scheduled snapshot did not start", "taking a full read", unconfirmedUpdateLine, unconfirmedEndedLine} {
@@ -175,9 +183,14 @@ func TestBackupScheduler_evidenceStillReadsInFull_2659(t *testing.T) {
 	}{
 		{"the source is ahead", captureProbeResult{verdict: console.CaptureBehind, detail: "the source reports transactions the capture's checkpoint does not include"},
 			"but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"},
-		{"a capture loss on record", captureProbeResult{detail: captureDetailLost}, "could not be checked (" + captureDetailLost + ")"},
-		{"dropped rows no full read has read since", captureProbeResult{detail: captureDetailDropped}, "could not be checked (" + captureDetailDropped + ")"},
-		{"the capture holds what the source does not", captureProbeResult{detail: captureDetailDiverged}, "could not be checked (" + captureDetailDiverged + ")"},
+		{"a capture loss on record", captureProbeResult{detail: captureDetailLost}, "ago, and " + captureDetailLost},
+		{"dropped rows no full read has read since", captureProbeResult{detail: captureDetailDropped}, "ago, and " + captureDetailDropped},
+		{"the capture holds what the source does not", captureProbeResult{detail: captureDetailDiverged}, "ago, and " + captureDetailDiverged},
+		// A loss that cannot be ruled out, and a reason nobody classified.
+		{"the record of dropped rows is unreadable", captureProbeResult{detail: captureDetailSkipsUnreadable}, "could not be checked (" + captureDetailSkipsUnreadable + ")"},
+		{"an index older than the loss record", captureProbeResult{detail: captureDetailNoLossRecord}, "could not be checked (" + captureDetailNoLossRecord + ")"},
+		{"a GTID set that does not parse", captureProbeResult{detail: captureDetailSourceUnparsed}, "could not be checked (" + captureDetailSourceUnparsed + ")"},
+		{"a reason added tomorrow", captureProbeResult{detail: "a refusal nobody classified yet"}, "could not be checked (a refusal nobody classified yet)"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b, sup, e, _, folds := quietUnconfirmed(t, c.probe)
@@ -429,5 +442,476 @@ func TestDumpIndexMark_saysWhetherItWasRead_2659(t *testing.T) {
 	stubIndexMark(t, &mark, false)
 	if _, known := sup.dumpIndexMark(console.BaselineRequest{IndexDSN: "idx:pw@tcp(127.0.0.1:3306)/idx"}); known {
 		t.Fatal("an index that did not answer reads as a known mark")
+	}
+}
+
+// A skipped slot starts no cycle, and a cycle's quiet gate is what sends a
+// snapshot the upload interval (#2596) kept on this machine once its upload
+// slot comes. So the skipped slot sends it itself. The schedule runs every
+// 15 minutes and sends to S3 every 6 hours: the snapshot of 12:15 is held,
+// the slots are skipped from 14:15 (two hours old, nothing indexed, a
+// source that cannot be asked), and at 18:00 the upload is due. It is sent
+// once, at that slot, and at no slot before or after.
+func TestBackupScheduler_aSkippedSlotSendsTheOwedHeldSnapshot_2659(t *testing.T) {
+	b, reg, sup := newScheduleFixture(t, true)
+	b.window = b.measureWindow
+	e := addScheduled(t, reg, true) // a snapshot at snapshotAnchor, 2026-08-20 12:00
+	held := snapshotAnchor.Add(15 * time.Minute)
+	heldName := reconstruct.SnapshotDirName(held)
+	writeSnapshotFiles(t, filepath.Join(e.BaselineDir, heldName), baseline.SuccessMarker)
+	if err := baseline.MarkUploadHeld(e.BaselineDir, heldName); err != nil {
+		t.Fatal(err)
+	}
+	e.BaselineS3 = "s3://bkt/p/"
+	e.BackupSchedule = &console.BackupSchedule{Every: "15m", At: "00:00", UploadEvery: "6h"}
+	if err := reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	// The bucket's newest is the one sent at 12:10, in the 12:00 upload slot.
+	bucketAt := snapshotAnchor.Add(10 * time.Minute)
+	stubBucketNewest(t, bucketAt, nil)
+	realNewest := reconstruct.NewestSnapshot
+	t.Cleanup(console.SetNewestSnapshotForTest(func(ctx context.Context, src string) (time.Time, []string, error) {
+		if strings.HasPrefix(src, "s3://") {
+			return bucketAt, []string{"shop.orders"}, nil
+		}
+		return realNewest(ctx, src)
+	}))
+	var sent []string
+	prevUpload := uploadSnapshot
+	t.Cleanup(func() { uploadSnapshot = prevUpload })
+	var sentMu sync.Mutex
+	uploadSnapshot = func(_ context.Context, dir, dest, _ string, _ bool) (int, error) {
+		sentMu.Lock()
+		defer sentMu.Unlock()
+		sent = append(sent, dir+" -> "+dest)
+		return 1, nil
+	}
+	uploads := func() int {
+		sentMu.Lock()
+		defer sentMu.Unlock()
+		return len(sent)
+	}
+	sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: 1000}, publishedAt: held, indexDSN: e.DSN,
+		destination: refreshDestination(b.rebuildRequest(e, mustParse(t, e))), readsFrom: held, readsFromKnown: true}
+	mark := indexMark{events: 1000}
+	stubIndexMark(t, &mark, true)
+	stubCaptureProbe(t, captureProbeResult{detail: positionMode})
+	stubCoverage(t, true, true)
+	var folds atomic.Int32
+	countFolds(t, &folds)
+	logs := captureSlogFor(t)
+
+	day := time.Date(2026, 8, 20, 0, 0, 5, 0, time.UTC)
+	at := func(h, m int) time.Time { return day.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute) }
+	b.tick(context.Background(), at(14, 0)) // the observation; nothing fires
+	want := console.SkipUnconfirmedReason(positionMode)
+	for slot := at(14, 15); !slot.After(at(18, 45)); slot = slot.Add(15 * time.Minute) {
+		forgetWindow(b)
+		b.tick(context.Background(), slot)
+		sup.postRefresh.Wait()
+		st := b.ScheduleState(e.ID)
+		if st.LastSkipReason != want || st.LastStartedAt != "" {
+			t.Fatalf("%s: state %+v, want the slot skipped and no job started", slot.Format("15:04"), st)
+		}
+		wantSent := 0
+		if !slot.Before(at(18, 0)) {
+			wantSent = 1
+		}
+		if got := uploads(); got != wantSent {
+			t.Fatalf("%s: %d uploads so far (%v), want %d: the held snapshot goes once, when the 18:00 upload slot comes", slot.Format("15:04"), got, sent, wantSent)
+		}
+		// The slot is given back each time: nothing is left running.
+		if rs := sup.RefreshStatus(e.ID); rs.State == "running" {
+			t.Fatalf("%s: the refresh slot was left claimed: %+v", slot.Format("15:04"), rs)
+		}
+	}
+	if wantDest := filepath.Join(e.BaselineDir, heldName) + " -> s3://bkt/p/" + heldName; sent[0] != wantDest {
+		t.Fatalf("sent %q, want %q", sent[0], wantDest)
+	}
+	if stillHeld, _ := baseline.UploadHeld(e.BaselineDir, heldName); stillHeld {
+		t.Fatal("the mark outlived the upload")
+	}
+	if folds.Load() != 0 || lastScheduledDump(sup, e.ID) != nil {
+		t.Fatalf("%d folds, a full read %+v: the upload must not start a run", folds.Load(), lastScheduledDump(sup, e.ID))
+	}
+	line := logLine(logs.String(), "sent the newest snapshot the upload interval had kept on this machine")
+	t.Logf("log: %s", line)
+	if line == "" || strings.Count(logs.String(), "sent the newest snapshot the upload interval had kept on this machine") != 1 {
+		t.Fatalf("the upload was not said once: %q", logs.String())
+	}
+}
+
+// What sendOwedForSkippedSlot does not do: nothing for a server with no S3
+// destination (the slot is not even taken), nothing to send when the newest
+// snapshot is not held, and nothing at all while another snapshot job holds
+// the server.
+func TestSendOwedForSkippedSlot_whenThereIsNothingToSend_2659(t *testing.T) {
+	var sent atomic.Int32
+	prevUpload := uploadSnapshot
+	t.Cleanup(func() { uploadSnapshot = prevUpload })
+	uploadSnapshot = func(context.Context, string, string, string, bool) (int, error) {
+		sent.Add(1)
+		return 1, nil
+	}
+	local := t.TempDir()
+	newest := time.Date(2026, 11, 1, 10, 5, 0, 0, time.UTC)
+	name := reconstruct.SnapshotDirName(newest)
+	writeSnapshotFiles(t, filepath.Join(local, name), baseline.SuccessMarker)
+	stubBucketNewest(t, newest.Add(-7*time.Hour), nil)
+	now := newest.Add(7 * time.Hour)
+	s := newBaselineSupervisor(context.Background(), t.TempDir(), "")
+	req := refreshRequest{ServerID: "s", ServerName: "s", BaselineDir: local, BaselineS3: "s3://bkt/p/", UploadEvery: 6 * time.Hour}
+
+	noS3 := req
+	noS3.BaselineS3 = ""
+	if s.sendOwedForSkippedSlot(noS3, now) {
+		t.Fatal("a server with no S3 destination took the refresh slot")
+	}
+	// Not held: the slot is taken and given back, and nothing is sent.
+	if !s.sendOwedForSkippedSlot(req, now) {
+		t.Fatal("the slot was not taken on a free server")
+	}
+	s.postRefresh.Wait()
+	if sent.Load() != 0 || s.RefreshStatus("s").State == "running" {
+		t.Fatalf("nothing held: %d uploads, status %+v", sent.Load(), s.RefreshStatus("s"))
+	}
+	// Held and due, but a full read is running: left for the next slot.
+	if err := baseline.MarkUploadHeld(local, name); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.jobs["s"] = &console.BaselineStatus{State: "running", Since: "2026-11-01T17:00:00Z"}
+	s.mu.Unlock()
+	if s.sendOwedForSkippedSlot(req, now) {
+		t.Fatal("the slot was taken while a full read was running")
+	}
+	s.postRefresh.Wait()
+	if sent.Load() != 0 {
+		t.Fatalf("%d uploads beside a running full read", sent.Load())
+	}
+	// The same server once the full read is done: sent, once, and the
+	// status the slot held before is put back.
+	s.mu.Lock()
+	delete(s.jobs, "s")
+	prior := &console.BaselineStatus{State: "succeeded", Since: "2026-11-01T10:05:00Z"}
+	s.refreshes["s"] = prior
+	s.mu.Unlock()
+	if !s.sendOwedForSkippedSlot(req, now) {
+		t.Fatal("the slot was not taken")
+	}
+	s.postRefresh.Wait()
+	if rs := s.RefreshStatus("s"); sent.Load() != 1 || rs.State != "succeeded" || rs.Since != prior.Since {
+		t.Fatalf("held and due: %d uploads, status %+v, want one upload and the previous status back", sent.Load(), rs)
+	}
+}
+
+// The log over a stretch that a re-anchoring update interrupts reads as it
+// happened: a start, an end that says the snapshot is updated because it
+// cannot wait, and a new start when the skipping resumes. Never two starts
+// with no end between them.
+func TestBackupScheduler_theLogOfAStretchInterruptedByAnUpdate_2659(t *testing.T) {
+	b, sup, e, _, folds := quietUnconfirmed(t, captureProbeResult{detail: "PostgreSQL sources are not compared yet"})
+	covered := true
+	prevCov := snapshotStillCovered
+	t.Cleanup(func() { snapshotStillCovered = prevCov })
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) { return covered, true }
+	memo := sup.foldedMarks[e.ID]
+	logs := captureSlogFor(t)
+	t0 := time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)
+	b.tick(context.Background(), t0)
+	slot := func(i int) {
+		t.Helper()
+		// The fold seam publishes nothing: the memo is put back on the
+		// snapshot that is still the newest.
+		sup.mu.Lock()
+		sup.foldedMarks[e.ID] = memo
+		sup.mu.Unlock()
+		forgetWindow(b)
+		b.tick(context.Background(), t0.Add(time.Duration(i)*time.Hour))
+	}
+	slot(1) // skipped: the start
+	slot(2) // skipped: nothing said
+	covered = false
+	slot(3) // the snapshot nears what the index keeps: the update
+	waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
+	covered = true
+	slot(4) // skipped again: a new start
+	slot(5)
+	if folds.Load() != 1 {
+		t.Fatalf("%d folds, want the one re-anchoring update", folds.Load())
+	}
+	const endedByUpdate = "scheduled slots are no longer skipped: the snapshot is updated at this slot because it cannot wait"
+	var seq []string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		switch {
+		case strings.Contains(l, unconfirmedSkipLine):
+			seq = append(seq, "start")
+		case strings.Contains(l, endedByUpdate):
+			seq = append(seq, "end-by-update")
+			t.Logf("log: %s", l)
+			if !strings.Contains(l, "Slots are skipped again once the new snapshot is old enough") || !strings.Contains(l, "close to the oldest change the index still keeps") {
+				t.Errorf("the end line does not say why, or that the skipping resumes: %q", l)
+			}
+		case strings.Contains(l, unconfirmedEndedLine):
+			seq = append(seq, "end")
+		case strings.Contains(l, unconfirmedUpdateLine):
+			seq = append(seq, "update")
+		}
+	}
+	if got := strings.Join(seq, ", "); got != "start, end-by-update, start" {
+		t.Fatalf("the log reads %q, want start, end-by-update, start", got)
+	}
+}
+
+// Every reason the probe can return is a constant with a decision
+// (captureClasses), and no code path returns a reason written as a bare
+// string. A reason added without a decision fails here, and until then it
+// gets the default: the full read, never the skip.
+func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
+	type decided struct {
+		text  string
+		class captureClass
+	}
+	want := map[string]decided{
+		// The source cannot be asked: the slot is skipped.
+		"captureDetailPostgres":         {"PostgreSQL sources are not compared yet", captureCannotAsk},
+		"captureDetailNoSource":         {"this server has no source to ask", captureCannotAsk},
+		"captureDetailPositionMode":     {"the capture runs in binlog-position mode, which is not compared", captureCannotAsk},
+		"captureDetailNoCheckpoint":     {"the capture has no GTID checkpoint", captureCannotAsk},
+		"captureDetailNoSourceGTIDs":    {"the source reported no GTID set", captureCannotAsk},
+		"captureDetailSameServer":       {"the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture", captureCannotAsk},
+		"captureDetailNotToldApart":     {"the index and the source could not be told apart", captureCannotAsk},
+		"captureDetailSourceSilent":     {"the source did not answer", captureCannotAsk},
+		"captureDetailSourceGTIDUnread": {"the source did not report its GTID set", captureCannotAsk},
+		"captureDetailTimedOut":         {"the probe did not finish in time", captureCannotAsk},
+		"captureDetailNoCapture":        {"the index has no live capture on record", captureCannotAsk},
+		// Evidence that changes are missing: the full read.
+		"captureDetailLost":     {"the capture lost events to a binlog gap after the previous snapshot", captureEvidence},
+		"captureDetailDropped":  {"the capture dropped events that no full read has read from the source since", captureEvidence},
+		"captureDetailDiverged": {"the capture holds transactions the source does not have: the source may have been reset, restored or replaced", captureEvidence},
+		"captureDetailBehind":   {"the source reports transactions the capture's checkpoint does not include", captureEvidence},
+		// A loss cannot be ruled out: the full read.
+		"captureDetailSkipsUnreadable": {"the capture's record of dropped events is not readable", captureUnsettled},
+		"captureDetailNoLossRecord":    {"the index predates the capture's loss record", captureUnsettled},
+		"captureDetailCaptureUnparsed": {"the capture's GTID set does not parse", captureUnsettled},
+		"captureDetailSourceUnparsed":  {"the source's GTID set does not parse", captureUnsettled},
+		// The index did not give the capture's record: the update.
+		"captureDetailIndexSilent":      {"the index did not answer", captureIndexUnread},
+		"captureDetailCheckpointUnread": {"the capture's checkpoint could not be read", captureIndexUnread},
+		"captureDetailCancelled":        {"the request that asked was cancelled", captureIndexUnread},
+	}
+	fset := token.NewFileSet()
+	probe, err := parser.ParseFile(fset, "capture_probe.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop, err := parser.ParseFile(fset, "baseline_schedule_loop.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1. The constants in the code are exactly the ones decided here, with
+	// these texts and these classes, and each is in the table explicitly.
+	declared := map[string]string{}
+	ast.Inspect(probe, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+		for i, name := range vs.Names {
+			if !strings.HasPrefix(name.Name, "captureDetail") || i >= len(vs.Values) {
+				continue
+			}
+			lit, ok := vs.Values[i].(*ast.BasicLit)
+			if !ok {
+				t.Errorf("%s is not a plain string constant", name.Name)
+				continue
+			}
+			text, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			declared[name.Name] = text
+		}
+		return true
+	})
+	for name, text := range declared {
+		w, ok := want[name]
+		if !ok {
+			t.Errorf("%s (%q) is a new reason with no decision in this test: decide whether a quiet slot is skipped, read in full or updated on it", name, text)
+			continue
+		}
+		if w.text != text {
+			t.Errorf("%s reads %q, decided here as %q", name, text, w.text)
+		}
+		class, listed := captureClasses[text]
+		if !listed {
+			t.Errorf("%s (%q) is not in captureClasses: it gets the full read by default, and nobody decided that", name, text)
+		}
+		if class != w.class || captureClassOf(text) != w.class {
+			t.Errorf("%s (%q) is classed %d, decided here as %d", name, text, class, w.class)
+		}
+	}
+	for name := range want {
+		if _, ok := declared[name]; !ok {
+			t.Errorf("%s is decided here and gone from capture_probe.go", name)
+		}
+	}
+	if len(captureClasses) != len(want) {
+		t.Errorf("captureClasses holds %d reasons, %d are decided here", len(captureClasses), len(want))
+	}
+	// 2. A reason that is in no table, one added tomorrow, is never a skip.
+	if got := captureClassOf("a refusal nobody classified yet"); got != captureUnsettled || captureUnsettled != 0 {
+		t.Fatalf("an unknown reason is classed %d; the zero value must be the full read", got)
+	}
+	// 3. No reason is written as a bare string where the probe's result is
+	// built: every `detail:` field, every assignment to a .detail, and
+	// every reason the three pure functions return is one of the constants.
+	isReason := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && strings.HasPrefix(id.Name, "captureDetail")
+	}
+	where := func(n ast.Node) string { return fset.Position(n.Pos()).String() }
+	found := 0
+	for _, f := range []*ast.File{probe, loop} {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.KeyValueExpr:
+				if k, ok := x.Key.(*ast.Ident); ok && k.Name == "detail" {
+					found++
+					// `detail: detail` passes a verdict's own reason on.
+					if id, ok := x.Value.(*ast.Ident); ok && id.Name == "detail" {
+						return true
+					}
+					if !isReason(x.Value) {
+						t.Errorf("%s: a probe result's detail is not one of the captureDetail constants", where(x))
+					}
+				}
+			case *ast.AssignStmt:
+				for i, lhs := range x.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "detail" && i < len(x.Rhs) {
+						found++
+						if !isReason(x.Rhs[i]) {
+							t.Errorf("%s: a probe result's detail is assigned something that is not a captureDetail constant", where(x))
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if x.Name.Name != "captureComparable" && x.Name.Name != "checkpointComparable" && x.Name.Name != "compareGTIDSets" {
+					return true
+				}
+				ast.Inspect(x.Body, func(m ast.Node) bool {
+					ret, ok := m.(*ast.ReturnStmt)
+					if !ok || len(ret.Results) != 2 {
+						return true
+					}
+					found++
+					if lit, ok := ret.Results[1].(*ast.BasicLit); ok && lit.Value == `""` {
+						return true
+					}
+					if !isReason(ret.Results[1]) {
+						t.Errorf("%s: %s returns a reason that is not a captureDetail constant", where(ret), x.Name.Name)
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+	if found < 20 {
+		t.Fatalf("only %d places that build a reason were found; this check no longer reads the code it guards", found)
+	}
+}
+
+// Each class, through the schedule's own probe and decision: what the slot
+// does, for every reason there is.
+func TestCaptureClasses_whatTheSlotDoes_2659(t *testing.T) {
+	now := snapshotAnchor.Add(8 * 24 * time.Hour)
+	for text, class := range captureClasses {
+		if text == captureDetailBehind {
+			continue // a verdict of its own, tested beside the evidence
+		}
+		t.Run(text, func(t *testing.T) {
+			b, _, e, _, _ := quietUnconfirmed(t, captureProbeResult{detail: text})
+			stubCoverage(t, true, true)
+			method, why := freshDecision(t, b, e, now)
+			t.Logf("%s: %s", method, why)
+			wantMethod := map[captureClass]string{captureCannotAsk: console.BackupMethodSkip, captureEvidence: console.BackupMethodFull,
+				captureUnsettled: console.BackupMethodFull, captureIndexUnread: console.BackupMethodRefresh}[class]
+			if method != wantMethod {
+				t.Fatalf("method=%q why=%q, want %q", method, why, wantMethod)
+			}
+			switch class {
+			case captureEvidence:
+				if !strings.HasSuffix(why, "ago, and "+text) {
+					t.Errorf("evidence is not worded as what was found: %q", why)
+				}
+			case captureUnsettled:
+				if !strings.HasSuffix(why, "could not be checked ("+text+")") {
+					t.Errorf("an unsettled reason reads %q", why)
+				}
+			case captureIndexUnread:
+				if why != console.UnconfirmedUpdateWhy(text, "the index could not be read to tell whether the snapshot can stay as it is") {
+					t.Errorf("the update's why reads %q", why)
+				}
+			case captureCannotAsk:
+				if text == captureDetailNoCapture {
+					if !strings.Contains(why, "(the index has no live capture on record: capture has never recorded anything for this server, so check that capture is running)") {
+						t.Errorf("the reason for an index with no capture does not say what to check: %q", why)
+					}
+				} else if why != console.SkipUnconfirmedReason(text) {
+					t.Errorf("the skip's reason reads %q", why)
+				}
+			}
+		})
+	}
+	// A reason that is in no table: the full read.
+	b, _, e, _, _ := quietUnconfirmed(t, captureProbeResult{detail: "a refusal nobody classified yet"})
+	stubCoverage(t, true, true)
+	if method, why := freshDecision(t, b, e, now); method != console.BackupMethodFull || console.BackupWhyCode(why) != "window_age" {
+		t.Fatalf("an unclassified reason: method=%q why=%q, want the full read", method, why)
+	}
+	// The two the schedule gives without trying the probe.
+	b, _, e, _, _ = quietUnconfirmed(t, captureProbeResult{verdict: console.CaptureCaughtUp})
+	stubCoverage(t, true, true)
+	pg := e
+	pg.Flavor = "postgres"
+	if !pg.IsPostgres() {
+		t.Fatal("the fixture's PostgreSQL entry is not one")
+	}
+	if method, why := freshDecision(t, b, pg, now); method != console.BackupMethodSkip || why != console.SkipUnconfirmedReason(captureDetailPostgres) {
+		t.Fatalf("a PostgreSQL source: method=%q why=%q", method, why)
+	}
+	none := e
+	none.SourceDSN = ""
+	if method, why := freshDecision(t, b, none, now); method != console.BackupMethodSkip || why != console.SkipUnconfirmedReason(captureDetailNoSource) {
+		t.Fatalf("a server with no source: method=%q why=%q", method, why)
+	}
+}
+
+// A slow index is not a broken one: when the budget the reads share runs
+// out, the update's reason says the index did not answer in time, not that
+// something could not be read.
+func TestQuietSnapshotCanWait_saysWhenTheIndexWasSlow_2659(t *testing.T) {
+	_, sup, e, _, _ := quietUnconfirmed(t, captureProbeResult{detail: positionMode})
+	prevCov := snapshotStillCovered
+	t.Cleanup(func() { snapshotStillCovered = prevCov })
+	// The coverage read outlives the budget.
+	snapshotStillCovered = func(ctx context.Context, _ string, _, _ time.Time, _ coverageRule) (bool, bool) {
+		<-ctx.Done()
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ok, why := sup.quietSnapshotCanWait(ctx, e, snapshotAnchor, snapshotAnchor.Add(8*24*time.Hour), time.Hour)
+	t.Log(why)
+	if ok || why != "the index did not answer within 3s, so how far back the index still keeps changes is not known" {
+		t.Fatalf("ok=%v why=%q", ok, why)
+	}
+	// The same read failing at once is said as a failed read.
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) { return false, false }
+	ok, why = sup.quietSnapshotCanWait(context.Background(), e, snapshotAnchor, snapshotAnchor.Add(8*24*time.Hour), time.Hour)
+	if ok || why != "how far back the index still keeps changes could not be read" {
+		t.Fatalf("ok=%v why=%q", ok, why)
 	}
 }

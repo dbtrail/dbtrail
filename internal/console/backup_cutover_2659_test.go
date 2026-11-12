@@ -94,7 +94,7 @@ func TestCutoverToFull_everyCombination_2659(t *testing.T) {
 	fulls := []time.Duration{0, 6 * time.Second, 8 * time.Minute, 9 * time.Hour}
 	fixeds := []time.Duration{0, 15 * time.Second, 20 * time.Minute}
 	provens := []int64{0, 15_000_000}
-	captures := []string{"", CaptureBehind, CaptureSuspect, CaptureCaughtUp}
+	captures := []string{"", CaptureBehind, CaptureSuspect, CaptureUnaskable, CaptureCaughtUp}
 	intervals := []time.Duration{0, 5 * time.Minute, 24 * time.Hour}
 	// Anchor ages: none, fresh, between the two-hour floor and a daily
 	// schedule's six days, and past both.
@@ -155,11 +155,12 @@ func TestCutoverToFull_everyCombination_2659(t *testing.T) {
 												if w.AnchorFullFinished.After(since) {
 													since = w.AnchorFullFinished
 												}
-												// Evidence only: a source that is ahead, or a
-												// capture whose own record says it lost
-												// changes. A source that cannot be asked
-												// (capture "") chooses no full read.
-												if ev != 0 || (capture != CaptureBehind && capture != CaptureSuspect) || w.Anchor.IsZero() || now.Sub(since) <= BackupCutoverAge(interval) {
+												// A source that is ahead, a capture whose
+												// own record says it lost changes, or one
+												// not confirmed for no listed reason (""). A
+												// source that cannot be asked chooses no
+												// full read, and a confirmed one neither.
+												if ev != 0 || capture == CaptureUnaskable || capture == CaptureCaughtUp || w.Anchor.IsZero() || now.Sub(since) <= BackupCutoverAge(interval) {
 													t.Fatalf("%s: a full read on the snapshot's age (%q); only nothing indexed since an old snapshot with evidence against the capture may", desc, why)
 												}
 												if !strings.Contains(why, BackupWhyNothingIndexedWords) {
@@ -237,7 +238,7 @@ func TestCutoverToFull_reasons_2659(t *testing.T) {
 		{behind,
 			"the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"},
 		{unknown,
-			"the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked (the capture dropped events that no full read has read from the source since)"},
+			"the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, and the capture dropped events that no full read has read from the source since"},
 	} {
 		why := CutoverToFull(c.w, 5*time.Minute, now)
 		t.Log(why)

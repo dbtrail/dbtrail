@@ -432,8 +432,9 @@ func TestChooseBackupMethod_updatesAQuietServerTheSourceConfirms(t *testing.T) {
 	for _, c := range []struct {
 		verdict, want string
 	}{{console.CaptureCaughtUp, console.BackupMethodRefresh}, {console.CaptureBehind, console.BackupMethodFull},
-		// A source that cannot be asked: the slot is skipped (#2659).
-		{"", console.BackupMethodSkip}} {
+		// Not confirmed, for a reason that is on no list ("x"): the full
+		// read, as before the skip existed (#2659).
+		{"", console.BackupMethodFull}} {
 		stubCoverage(t, true, true)
 		stubCaptureProbe(t, captureProbeResult{verdict: c.verdict, detail: "x"})
 		b.mu.Lock()

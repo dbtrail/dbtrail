@@ -21,85 +21,149 @@ import (
 // that answers "behind", and a capture whose own record says it lost
 // changes, keep the full read.
 
-// The details the capture probe gives for a source that cannot be asked, as
-// the daemon words them (consoleapp captureComparable, compareWithSource,
-// captureVerdict).
+// Every reason the capture probe can give for not confirming the capture,
+// as the daemon words them (consoleapp captureClasses, where a test pins
+// these texts and their classes against the code that returns them).
+
+// cannotBeAsked: the source cannot be asked, and the slot is skipped.
 var cannotBeAsked = []string{
 	"PostgreSQL sources are not compared yet",
+	"this server has no source to ask",
 	"the capture runs in binlog-position mode, which is not compared",
 	"the capture has no GTID checkpoint",
-	"the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture",
-	"the source did not answer",
 	"the source reported no GTID set",
-	"this server has no source to ask",
+	"the index lives on the source server, whose own checkpoint writes keep the source ahead of the capture",
+	"the index and the source could not be told apart",
+	"the source did not answer",
+	"the source did not report its GTID set",
+	"the probe did not finish in time",
+	// An index that never had a capture: the one whose fix is on the
+	// operator's side, and whose reason says so.
+	"the index has no live capture on record: capture has never recorded anything for this server, so check that capture is running",
 	"",
 }
 
+// evidenceFound: something on record says the index is missing changes. A
+// full read, worded as what was found.
+var evidenceFound = []string{
+	"the capture lost events to a binlog gap after the previous snapshot",
+	"the capture dropped events that no full read has read from the source since",
+	"the capture holds transactions the source does not have: the source may have been reset, restored or replaced",
+}
+
+// lossNotRuledOut: not confirmed, and not for a reason on the list above. A
+// full read, as before the skip existed; a reason added tomorrow lands here.
+var lossNotRuledOut = []string{
+	"the capture's record of dropped events is not readable",
+	"the index predates the capture's loss record",
+	"the capture's GTID set does not parse",
+	"the source's GTID set does not parse",
+	"a refusal nobody classified yet",
+	"",
+}
+
+// indexNotRead: the index did not give the capture's record. The update.
+var indexNotRead = []string{
+	"the index did not answer",
+	"the capture's checkpoint could not be read",
+	"the request that asked was cancelled",
+}
+
+// dearer is the margin an update must pass to be read in full on cost
+// (#2181), written again here so the oracle below does not call the rule.
+func dearer(update, full time.Duration) bool {
+	return update > 2*full && update > full+30*time.Second
+}
+
 // Every capture state, with and without a rate, with and without a full
-// read on record, with the count known zero, unknown and positive, with the
-// snapshot below and above the cut-over age, and with a snapshot that can
-// wait and one that cannot: the choice against an oracle written from the
-// rule's statement, not from its code.
+// read on record, with each kind of fixed cost, with the count known zero,
+// unknown and positive, with the snapshot below and above the cut-over age,
+// and with a snapshot that can wait and one that cannot: the choice against
+// an oracle written from the rule's statement, not from its code.
 func TestWindowChoice_everyState_2659(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	now := time.Date(2026, 11, 11, 10, 30, 0, 0, time.UTC)
 	const interval = 5 * time.Minute // cut-over age: the two-hour floor
-	n, skips, fulls, forced := 0, 0, 0, 0
-	for _, capture := range []string{"", CaptureBehind, CaptureSuspect, CaptureCaughtUp} {
+	n, skips, fulls, forced, measured := 0, 0, 0, 0, 0
+	for _, capture := range []string{"", CaptureBehind, CaptureSuspect, CaptureUnaskable, CaptureCaughtUp} {
 		for _, rate := range []float64{0, 1000} {
 			for _, lastFull := range []time.Duration{0, 8 * time.Minute} {
-				for _, events := range []int64{-1, 0, 40} {
-					for _, age := range []time.Duration{5 * time.Minute, 2 * time.Hour, 2*time.Hour + time.Second, 30 * 24 * time.Hour} {
-						for _, canWait := range []bool{false, true} {
-							w := BackupWindow{Anchor: now.Add(-age), Events: events, FoldRate: rate, LastFull: lastFull,
-								Capture: capture, CaptureDetail: "the detail", CanWait: canWait, CannotWaitWhy: "the snapshot cannot wait"}
-							method, why := WindowChoice(w, interval, now)
-							n++
-							desc := fmt.Sprintf("capture=%q rate=%v lastFull=%s events=%d age=%s canWait=%v", capture, rate, lastFull, events, age, canWait)
-							// The doubt applies with a known zero, past the
-							// cut-over age, where the estimate (a rate and a
-							// full read on record: zero events cost nothing,
-							// under any full read) did not settle the slot.
-							doubt := events == 0 && age > 2*time.Hour && !(rate > 0 && lastFull > 0)
-							wantMethod, wantWhy := BackupMethodRefresh, ""
-							switch {
-							case !doubt || capture == CaptureCaughtUp:
-							case capture == CaptureBehind || capture == CaptureSuspect:
-								wantMethod, wantWhy = BackupMethodFull, BackupWhyIndexDoubtPrefix
-								fulls++
-							case canWait:
-								wantMethod, wantWhy = BackupMethodSkip, BackupSkipUnconfirmedPrefix
-								skips++
-							default:
-								wantMethod, wantWhy = BackupMethodRefresh, BackupSkipUnconfirmedPrefix
-								forced++
-							}
-							if method != wantMethod || !strings.HasPrefix(why, wantWhy) || (wantWhy == "" && why != "") {
-								t.Fatalf("%s: method=%q why=%q, want %q with a why starting %q", desc, method, why, wantMethod, wantWhy)
-							}
-							// CutoverToFull is the same choice, saying only
-							// the full read.
-							full := CutoverToFull(w, interval, now)
-							if (method == BackupMethodFull) != (full != "") || (full != "" && full != why) {
-								t.Fatalf("%s: CutoverToFull=%q beside WindowChoice %q %q", desc, full, method, why)
-							}
-							switch method {
-							case BackupMethodSkip:
-								if !IsUnconfirmedSkip(why) || BackupWhyCode(why) != "" {
-									t.Fatalf("%s: the skip reason %q is not recognized as one, or is coded as a full read", desc, why)
+				// No fixed cost on record, one under the last full read, one
+				// a little over it (inside the margin) and one clearly over.
+				for _, fixed := range []time.Duration{0, 90 * time.Second, 9 * time.Minute, 20 * time.Minute} {
+					for _, events := range []int64{-1, 0, 40} {
+						for _, age := range []time.Duration{5 * time.Minute, 2 * time.Hour, 2*time.Hour + time.Second, 30 * 24 * time.Hour} {
+							for _, canWait := range []bool{false, true} {
+								w := BackupWindow{Anchor: now.Add(-age), Events: events, FoldRate: rate, FoldFixed: fixed, LastFull: lastFull,
+									Capture: capture, CaptureDetail: "the detail", CanWait: canWait, CannotWaitWhy: "the snapshot cannot wait"}
+								method, why := WindowChoice(w, interval, now)
+								n++
+								desc := fmt.Sprintf("capture=%q rate=%v lastFull=%s fixed=%s events=%d age=%s canWait=%v", capture, rate, lastFull, fixed, events, age, canWait)
+								// The measured rules first, whatever the capture
+								// says: an estimate (a count, a rate, a full read)
+								// clearly over the last full read, or with no rate
+								// a fixed cost clearly over it and something, or
+								// an unknown amount, to apply.
+								cost := false
+								switch {
+								case events > 0 && rate > 0 && lastFull > 0:
+									cost = dearer(fixed+time.Duration(float64(events)/rate*float64(time.Second)), lastFull)
+								case events != 0 && rate == 0 && fixed > 0 && lastFull > 0:
+									cost = dearer(fixed, lastFull)
 								}
-							case BackupMethodRefresh:
-								if IsUnconfirmedSkip(why) {
-									t.Fatalf("%s: an update whose why %q reads as a skip", desc, why)
+								// With nothing to apply, a rate and a full read on
+								// record settle the slot as an update when the
+								// estimate (the fixed cost alone) is under the full
+								// read, or so far over it that the evidence of an
+								// update that size done cheaper applies (zero
+								// events are never more than what was proven).
+								settled := rate > 0 && lastFull > 0 && (fixed <= lastFull || dearer(fixed, lastFull))
+								doubt := events == 0 && age > 2*time.Hour && !settled
+								wantMethod, wantWhy := BackupMethodRefresh, ""
+								switch {
+								case cost:
+									wantMethod, wantWhy = BackupMethodFull, BackupWhyWindowPrefix
+									measured++
+								case !doubt || capture == CaptureCaughtUp:
+								case capture != CaptureUnaskable:
+									// Behind, suspect, and not confirmed for no
+									// listed reason: the full read.
+									wantMethod, wantWhy = BackupMethodFull, BackupWhyIndexDoubtPrefix
+									fulls++
+								case canWait:
+									wantMethod, wantWhy = BackupMethodSkip, BackupSkipUnconfirmedPrefix
+									skips++
+								default:
+									wantMethod, wantWhy = BackupMethodRefresh, BackupSkipUnconfirmedPrefix
+									forced++
 								}
-								if why != "" && !strings.Contains(why, "the snapshot cannot wait") {
-									t.Fatalf("%s: the update's why %q does not say what stopped the skip", desc, why)
+								if method != wantMethod || !strings.HasPrefix(why, wantWhy) || (wantWhy == "" && why != "") {
+									t.Fatalf("%s: method=%q why=%q, want %q with a why starting %q", desc, method, why, wantMethod, wantWhy)
 								}
-							case BackupMethodFull:
-								if BackupWhyCode(why) != "window_age" {
-									t.Fatalf("%s: the full read's why %q is not coded window_age", desc, why)
+								// CutoverToFull is the same choice, saying only
+								// the full read.
+								full := CutoverToFull(w, interval, now)
+								if (method == BackupMethodFull) != (full != "") || (full != "" && full != why) {
+									t.Fatalf("%s: CutoverToFull=%q beside WindowChoice %q %q", desc, full, method, why)
+								}
+								switch method {
+								case BackupMethodSkip:
+									if !IsUnconfirmedSkip(why) || BackupWhyCode(why) != "" {
+										t.Fatalf("%s: the skip reason %q is not recognized as one, or is coded as a full read", desc, why)
+									}
+								case BackupMethodRefresh:
+									if IsUnconfirmedSkip(why) {
+										t.Fatalf("%s: an update whose why %q reads as a skip", desc, why)
+									}
+									if why != "" && !strings.Contains(why, "the snapshot cannot wait") {
+										t.Fatalf("%s: the update's why %q does not say what stopped the skip", desc, why)
+									}
+								case BackupMethodFull:
+									if code := BackupWhyCode(why); (cost && code != "window_measured") || (!cost && code != "window_age") {
+										t.Fatalf("%s: the full read's why %q is coded %q", desc, why, code)
+									}
 								}
 							}
 						}
@@ -108,30 +172,32 @@ func TestWindowChoice_everyState_2659(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("%d windows: %d skipped, %d read in full on evidence, %d updated because the snapshot could not wait", n, skips, fulls, forced)
-	if skips == 0 || fulls == 0 || forced == 0 {
-		t.Fatal("one of the three outcomes was never reached, so the matrix proves nothing about it")
+	t.Logf("%d windows: %d skipped, %d read in full on evidence or doubt, %d read in full on cost, %d updated because the snapshot could not wait", n, skips, fulls, measured, forced)
+	if skips == 0 || fulls == 0 || forced == 0 || measured == 0 {
+		t.Fatal("one of the outcomes was never reached, so the matrix proves nothing about it")
 	}
 }
 
-// The reasons as the operator reads them, generated with every real detail.
-// The skip's reason carries no time, so each slot of one quiet stretch
-// records the same text and the history keeps one record for it.
+// The reasons as the operator reads them, generated with every real detail
+// of every class. The skip's reason carries no time, so each slot of one
+// quiet stretch records the same text and the history keeps one record for
+// it.
 func TestSkipUnconfirmedReason_asRendered_2659(t *testing.T) {
 	now := time.Date(2026, 11, 11, 10, 30, 0, 0, time.UTC)
+	old := now.Add(-5 * time.Hour)
 	for _, detail := range cannotBeAsked {
-		w := BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0, CaptureDetail: detail, CanWait: true}
+		w := BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnaskable, CaptureDetail: detail, CanWait: true}
 		method, why := WindowChoice(w, 5*time.Minute, now)
 		if method != BackupMethodSkip {
 			t.Fatalf("detail %q: method=%q why=%q, want the skip", detail, method, why)
 		}
 		t.Logf("skip:   %s", why)
-		later, laterWhy := WindowChoice(BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0, CaptureDetail: detail, CanWait: true}, 5*time.Minute, now.Add(49*time.Hour))
+		later, laterWhy := WindowChoice(w, 5*time.Minute, now.Add(49*time.Hour))
 		if later != BackupMethodSkip || laterWhy != why {
 			t.Fatalf("detail %q: two days later the reason reads %q, want the same text %q", detail, laterWhy, why)
 		}
 		for _, want := range []string{"nothing was indexed since the previous snapshot", "the source cannot confirm that capture recorded everything it wrote",
-			"so no snapshot is made at this slot", "the copy stays at its last snapshot until a change is indexed or the source can be asked"} {
+			"so no snapshot is made at this slot", "the copy keeps the data it has until a change is indexed or the source can be asked"} {
 			if !strings.Contains(why, want) {
 				t.Errorf("the reason %q lacks %q", why, want)
 			}
@@ -139,18 +205,23 @@ func TestSkipUnconfirmedReason_asRendered_2659(t *testing.T) {
 		if detail != "" && !strings.Contains(why, "("+detail+")") {
 			t.Errorf("the reason %q lacks the detail %q", why, detail)
 		}
-		if strings.Contains(why, "()") || strings.Contains(why, "full read") || strings.Contains(why, "—") {
-			t.Errorf("the reason %q has an empty detail, names a full read, or carries a dash", why)
+		// "at its last snapshot" would be false: the snapshot is replaced,
+		// with the same data, each time it nears what the index keeps.
+		if strings.Contains(why, "()") || strings.Contains(why, "full read") || strings.Contains(why, "\u2014") || strings.Contains(why, "stays at its last snapshot") {
+			t.Errorf("the reason %q has an empty detail, names a full read, carries a dash, or says the snapshot stays", why)
 		}
 	}
+	// The same source, a snapshot that cannot wait: the update, and why.
 	for _, whyNot := range []string{
 		"the previous snapshot is close to the oldest change the index still keeps, and could not be updated once rotation drops those hours",
 		"a table was created since the previous snapshot",
 		"capture lost changes since the previous snapshot",
 		"how far back the index still keeps changes could not be read",
+		"the index did not answer within 3s, so whether a table was created since the previous snapshot is not known",
+		"the index could not be read to tell whether the snapshot can stay as it is",
 		"",
 	} {
-		w := BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0, CaptureDetail: "PostgreSQL sources are not compared yet", CannotWaitWhy: whyNot}
+		w := BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CannotWaitWhy: whyNot}
 		method, why := WindowChoice(w, 5*time.Minute, now)
 		if method != BackupMethodRefresh || why == "" {
 			t.Fatalf("whyNot %q: method=%q why=%q, want the update with its reason", whyNot, method, why)
@@ -160,17 +231,46 @@ func TestSkipUnconfirmedReason_asRendered_2659(t *testing.T) {
 			t.Errorf("the update's why reads %q", why)
 		}
 	}
-	// The two full reads that stay, as worded.
-	_, behind := WindowChoice(BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0, Capture: CaptureBehind, CaptureDetail: "ignored"}, 5*time.Minute, now)
-	_, suspect := WindowChoice(BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 0, Capture: CaptureSuspect,
-		CaptureDetail: "the capture lost events to a binlog gap after the previous snapshot"}, 5*time.Minute, now)
-	t.Logf("behind:  %s", behind)
-	t.Logf("suspect: %s", suspect)
+	// The index did not give the capture's record: the update, with the
+	// reason the daemon sets for it.
+	for _, detail := range indexNotRead {
+		w := BackupWindow{Anchor: old, Events: 0, Capture: CaptureUnaskable, CaptureDetail: detail,
+			CannotWaitWhy: "the index could not be read to tell whether the snapshot can stay as it is"}
+		method, why := WindowChoice(w, 5*time.Minute, now)
+		t.Logf("update: %s", why)
+		if method != BackupMethodRefresh || !strings.Contains(why, "("+detail+")") {
+			t.Fatalf("detail %q: method=%q why=%q, want the update", detail, method, why)
+		}
+	}
+	// Evidence: the full read, worded as what was found. Nothing here "could
+	// not be checked": the capture's record, or the source, did answer.
+	for _, detail := range evidenceFound {
+		method, why := WindowChoice(BackupWindow{Anchor: old, Events: 0, Capture: CaptureSuspect, CaptureDetail: detail, CanWait: true}, 5*time.Minute, now)
+		t.Logf("full:   %s", why)
+		if want := "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h ago, and " + detail; method != BackupMethodFull || why != want {
+			t.Errorf("evidence %q: method=%q why=%q, want %q", detail, method, why, want)
+		}
+		if strings.Contains(why, "could not be checked") {
+			t.Errorf("evidence %q is worded as a question that was not answered: %q", detail, why)
+		}
+	}
+	// A loss that cannot be ruled out, a reason nobody classified: the full
+	// read, as before the skip existed.
+	for _, detail := range lossNotRuledOut {
+		method, why := WindowChoice(BackupWindow{Anchor: old, Events: 0, CaptureDetail: detail, CanWait: true}, 5*time.Minute, now)
+		t.Logf("full:   %s", why)
+		want := "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h ago, and whether the source changed could not be checked"
+		if detail != "" {
+			want += " (" + detail + ")"
+		}
+		if method != BackupMethodFull || why != want {
+			t.Errorf("unsettled %q: method=%q why=%q, want %q", detail, method, why, want)
+		}
+	}
+	_, behind := WindowChoice(BackupWindow{Anchor: old, Events: 0, Capture: CaptureBehind, CaptureDetail: "ignored"}, 5*time.Minute, now)
+	t.Logf("full:   %s", behind)
 	if behind != "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h ago, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind" {
 		t.Errorf("the behind reason changed: %q", behind)
-	}
-	if suspect != "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h ago, and whether the source changed could not be checked (the capture lost events to a binlog gap after the previous snapshot)" {
-		t.Errorf("the suspect reason changed: %q", suspect)
 	}
 }
 
@@ -195,9 +295,9 @@ func TestChooseBackupMethod_skipsWhenTheSourceCannotBeAsked_2659(t *testing.T) {
 		noFull    string
 		whyPrefix string
 	}{
-		{"cannot be asked, the snapshot can wait", BackupWindow{Events: 0, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true},
+		{"cannot be asked, the snapshot can wait", BackupWindow{Events: 0, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true},
 			BackupMethodSkip, BackupMethodSkip, BackupSkipUnconfirmedPrefix},
-		{"cannot be asked, the snapshot cannot wait", BackupWindow{Events: 0, CaptureDetail: "PostgreSQL sources are not compared yet", CannotWaitWhy: "a table was created since the previous snapshot"},
+		{"cannot be asked, the snapshot cannot wait", BackupWindow{Events: 0, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CannotWaitWhy: "a table was created since the previous snapshot"},
 			BackupMethodRefresh, BackupMethodRefresh, BackupSkipUnconfirmedPrefix},
 		{"the source is ahead", BackupWindow{Events: 0, Capture: CaptureBehind, CanWait: true},
 			BackupMethodFull, BackupMethodRefresh, ""},
@@ -205,9 +305,11 @@ func TestChooseBackupMethod_skipsWhenTheSourceCannotBeAsked_2659(t *testing.T) {
 			BackupMethodFull, BackupMethodRefresh, ""},
 		{"the source confirms capture is caught up", BackupWindow{Events: 0, Capture: CaptureCaughtUp, CanWait: true},
 			BackupMethodRefresh, BackupMethodRefresh, ""},
-		{"the count unknown", BackupWindow{Events: -1, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true},
+		{"not confirmed, for a reason nobody classified", BackupWindow{Events: 0, CaptureDetail: "a refusal nobody classified yet", CanWait: true},
+			BackupMethodFull, BackupMethodRefresh, ""},
+		{"the count unknown", BackupWindow{Events: -1, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true},
 			BackupMethodRefresh, BackupMethodRefresh, ""},
-		{"changes to apply", BackupWindow{Events: 12, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true},
+		{"changes to apply", BackupWindow{Events: 12, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true},
 			BackupMethodRefresh, BackupMethodRefresh, ""},
 	} {
 		for _, fullReads := range []bool{true, false} {
@@ -445,7 +547,7 @@ console.log(JSON.stringify(cases.map((c) => ({
 // full-read code and no error, on the save and on the listing alike.
 func TestBackupScheduleAPI_aSkippedNextRunReachesTheWire_2659(t *testing.T) {
 	quiet := func(_ context.Context, _ ServerEntry, anchor time.Time) BackupWindow {
-		return BackupWindow{Anchor: anchor, Events: 0, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true}
+		return BackupWindow{Anchor: anchor, Events: 0, Capture: CaptureUnaskable, CaptureDetail: "PostgreSQL sources are not compared yet", CanWait: true}
 	}
 	srv, id := newScheduleServer(t, &stubScheduleReporter{full: true, probe: quiet})
 	e, _ := srv.cm.reg.Get(id)

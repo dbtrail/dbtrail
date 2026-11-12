@@ -68,6 +68,10 @@ func TestBcryptCostHookIsTestOnly(t *testing.T) {
 		if strings.Contains(src, "SetBcryptCostForTest") {
 			t.Errorf("%s names SetBcryptCostForTest: shipped code must hash at consoleBcryptCost (keep even comments out, so a real call cannot hide)", path)
 		}
+		// The same file's other hook, under the same rule.
+		if strings.Contains(src, "SetNewestSnapshotForTest") {
+			t.Errorf("%s names SetNewestSnapshotForTest: shipped code must list snapshots through reconstruct.NewestSnapshot", path)
+		}
 		for _, line := range strings.Split(src, "\n") {
 			l := strings.TrimSpace(line)
 			if strings.HasPrefix(l, "bcryptCost =") || strings.HasPrefix(l, "bcryptCost=") {

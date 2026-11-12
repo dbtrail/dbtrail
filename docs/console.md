@@ -1123,17 +1123,25 @@ saved, shown with the reason `serve` is not running it.
   only a read of the source brings them back, and with no full backup in
   the run history any dropped row keeps the full backup. Evidence that
   capture is missing changes keeps the full backup, and the reason says
-  which: the source is ahead (the capture may have stopped), a capture gap
-  is on record since the previous snapshot, the capture dropped rows no
-  full backup has read since, or the capture holds transactions the source
-  does not have. An index that records nothing while the source keeps
+  what was found: the source is ahead (the capture may have stopped), a
+  capture gap is on record since the previous snapshot, the capture
+  dropped rows no full backup has read since, or the capture holds
+  transactions the source does not have. So does an answer under which a
+  loss cannot be ruled out (the record of dropped rows is unreadable, the
+  index predates the capture's loss record, a GTID set does not parse),
+  and any reason that is on neither list: the full backup is the default.
+  An index that records nothing while the source keeps
   writing is a capture that stopped, and a full backup is the one producer
   that does not depend on it. A source that cannot be asked is not
-  evidence (#2659): a capture in binlog-position mode, which is what a
-  source without GTIDs runs, since its checkpoint stops short of each
-  commit; PostgreSQL; MariaDB GTIDs; an index on the source server itself,
-  whose own checkpoint writes keep the source ahead; a source that does
-  not answer; an index with no live capture. There the slot makes no
+  evidence (#2659), for these reasons only: a capture in binlog-position
+  mode, which is what a source without GTIDs runs, since its checkpoint
+  stops short of each commit, or one with no GTID checkpoint; PostgreSQL;
+  a source that reports no GTID set (MariaDB); an index on the source
+  server itself, whose own checkpoint writes keep the source ahead, or
+  one that cannot be told apart from it; a server with no source; a
+  source that does not answer in time; an index with no live capture on
+  record, where the reason adds that capture has never recorded anything
+  for this server and to check that it is running. There the slot makes no
   snapshot at all: no full backup, since nothing says a change was missed,
   and no update, which would publish the previous rows under a new date.
   The slot is recorded as skipped with that reason (one record for the
@@ -1143,12 +1151,19 @@ saved, shown with the reason `serve` is not running it.
   `next_method_why`), and the daemon log says it once when it starts, once
   a day while it lasts and once when it ends. It ends when a change is
   indexed or the source can be asked. It applies on a daemon that may not
-  take full backups too. The skip gives way to the update when the
-  snapshot cannot wait: its readers start close to the oldest hour the
-  index keeps (the line the quiet-cycle gate re-anchors a snapshot on,
-  #1689), a table was created since it, a capture loss is on record since
-  it, or one of those could not be read; `next_method_why` then says
-  which. Stopping a source from the web interface
+  take full backups too. A skipped slot still sends to S3 the newest
+  snapshot the upload interval kept on the local disk, once its upload
+  slot comes, as a quiet update does. The skip gives way to the update
+  when the snapshot cannot wait: its readers start close to the oldest
+  hour the index keeps (the line the quiet-cycle gate re-anchors a
+  snapshot on, #1689), a table was created since it, a capture loss is on
+  record since it, or one of those could not be read (the reason tells an
+  index that did not answer in time from a read that failed). Which one
+  is said before the run, in `next_method_why`, and once in the daemon
+  log, which words it as the end of the skipped stretch; the update's own
+  run record carries no reason (`last_run.why` is for full backups). The
+  same update runs when the index itself did not give the capture's
+  record. Stopping a source from the web interface
   acknowledges its capture-gap record and does not erase it: the Stop
   stamps the time of the acknowledgement beside the record
   (`stream_state.gap_acked_at`), which silences the alarm (the

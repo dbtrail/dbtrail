@@ -27,7 +27,9 @@ func TestCutoverToFull_nothingIndexedAndTheSourceConfirmsIt(t *testing.T) {
 		{"nothing indexed, the capture's own record says it lost changes: full", quiet(0, CaptureSuspect), "window_age"},
 		// A source that cannot be asked is no evidence: no full read
 		// (#2659; that slot is skipped, see WindowChoice).
-		{"nothing indexed, the source could not be asked: no full read", quiet(0, ""), ""},
+		{"nothing indexed, the source could not be asked: no full read", quiet(0, CaptureUnaskable), ""},
+		// Not confirmed for a reason nobody listed: the full read, as before.
+		{"nothing indexed, the capture not confirmed and no listed reason: full", quiet(0, ""), "window_age"},
 		// Only a zero count puts the index in doubt: with an unknown one
 		// (-1) or a real one the update runs whatever the source says, since
 		// the anchor's age alone chooses nothing (#2659).
@@ -67,10 +69,10 @@ func TestCutoverToFull_nothingIndexedAndTheSourceConfirmsIt(t *testing.T) {
 	if want := "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"; why != want {
 		t.Errorf("behind reason %q, want %q", why, want)
 	}
-	w = quiet(0, CaptureSuspect)
-	w.CaptureDetail = "the capture lost events to a binlog gap after the previous snapshot"
+	w = quiet(0, "")
+	w.CaptureDetail = "the source's GTID set does not parse"
 	why = CutoverToFull(w, 5*time.Minute, now)
-	if !strings.Contains(why, "nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked (the capture lost events to a binlog gap after the previous snapshot)") ||
+	if !strings.Contains(why, "nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked (the source's GTID set does not parse)") ||
 		strings.Contains(why, "update rate") {
 		t.Errorf("unknown reason %q, want the capture question and no rate talk", why)
 	}
