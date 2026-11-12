@@ -555,7 +555,14 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 	}
 	e.BackupSchedule = &sched
 	e.DefaultScheduleOnFirst = false // the operator chose: no default later
-	if err := s.cm.reg.Update(e); err != nil {
+	// The schedule and its mark only, on the entry as it is now (#2658): a
+	// whole-entry write would put back a count of snapshots to keep, or a
+	// location, that the snapshot settings saved since this request read
+	// the entry, and the count deletes.
+	if err := s.cm.reg.UpdateWith(e.ID, func(cur ServerEntry) (ServerEntry, bool) {
+		cur.BackupSchedule, cur.DefaultScheduleOnFirst = &sched, false
+		return cur, true
+	}); err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
 	}
@@ -594,7 +601,10 @@ func (s *Server) handleBackupScheduleDelete(w http.ResponseWriter, r *http.Reque
 		// Turned off before the first snapshot too: no default schedule
 		// starts later.
 		e.BackupSchedule, e.DefaultScheduleOnFirst = nil, false
-		if err := s.cm.reg.Update(e); err != nil {
+		if err := s.cm.reg.UpdateWith(e.ID, func(cur ServerEntry) (ServerEntry, bool) {
+			cur.BackupSchedule, cur.DefaultScheduleOnFirst = nil, false
+			return cur, true
+		}); err != nil {
 			writeJSONError(w, registryErrStatus(err), err.Error())
 			return
 		}

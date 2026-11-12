@@ -859,7 +859,16 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 		s3AgeMu.Unlock()
 		return
 	}
-	err = s.cm.reg.Update(entry)
+	// The fields this form does not own are taken from the entry as it is
+	// now, not as this request read it (#2658): the count of snapshots to
+	// keep and the schedule have their own saves, and a whole-entry write
+	// would put a stale count back, which deletes.
+	err = s.cm.reg.UpdateWith(id, func(cur ServerEntry) (ServerEntry, bool) {
+		entry.LocalKeepNewest = cur.LocalKeepNewest
+		entry.BackupSchedule = cur.BackupSchedule
+		entry.DefaultScheduleOnFirst = cur.DefaultScheduleOnFirst
+		return entry, true
+	})
 	s3AgeMu.Unlock()
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
@@ -1057,7 +1066,13 @@ func (s *Server) handleMonitorStop(w http.ResponseWriter, r *http.Request) {
 	// must not resurrect a stream the operator asked to stop.
 	if e.MonitorDesired {
 		e.MonitorDesired = false
-		if err := s.cm.reg.Update(e); err != nil {
+		// Only this handler's field, on the entry as it is now (#2658): a
+		// whole-entry write would put back whatever a save made since this
+		// request read the entry, a count of snapshots to keep included.
+		if err := s.cm.reg.UpdateWith(e.ID, func(cur ServerEntry) (ServerEntry, bool) {
+			cur.MonitorDesired = false
+			return cur, true
+		}); err != nil {
 			writeJSONError(w, registryErrStatus(err), err.Error())
 			return
 		}

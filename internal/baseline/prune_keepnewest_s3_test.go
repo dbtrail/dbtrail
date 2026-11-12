@@ -125,8 +125,8 @@ func TestS3Count_unreachableBucketRemovesNothing(t *testing.T) {
 		t.Fatalf("no failure record: ok=%v err=%v", ok, err)
 	}
 	t.Logf("failure record, as the page shows it:\n%s", rec.Reason)
-	if !strings.Contains(rec.Reason, "The S3 destination could not be asked, so nothing was removed from this folder in this cleanup.") {
-		t.Fatalf("the record does not say nothing was removed: %q", rec.Reason)
+	if !strings.Contains(rec.Reason, "The S3 destination could not be asked, so no snapshot that was sent to S3 was removed from this folder in this cleanup.") {
+		t.Fatalf("the record does not say nothing sent to S3 was removed: %q", rec.Reason)
 	}
 	// Nothing is reported as missing from the bucket: it did not answer.
 	if _, ok, _ := ReadNotInDestination(root); ok {
@@ -155,10 +155,13 @@ func TestS3Count_unreachableBucketRemovesNothing(t *testing.T) {
 	wantOnDisk(t, root2, s2...)
 }
 
-// A snapshot the upload interval kept here on purpose is not in the bucket by
-// design. Past the count it goes only once a NEWER snapshot is confirmed
-// there; until then it stays, and it is never reported as missing.
-func TestS3Count_heldSnapshots(t *testing.T) {
+// A snapshot the upload interval kept here on purpose (#2596) is by its own
+// definition not meant to be in the bucket, so removing it loses nothing that
+// was meant to be durable. With a count it goes by the count alone, like on
+// a server with no destination: the bucket is not asked about it and nothing
+// newer has to be confirmed there first. The bucket keeps the last snapshot
+// that was sent; the disk keeps the newest N.
+func TestS3Count_heldSnapshotsGoByTheCount(t *testing.T) {
 	setup := func(t *testing.T, held ...int) (string, []string) {
 		root := t.TempDir()
 		s := five(t, root)
@@ -170,77 +173,223 @@ func TestS3Count_heldSnapshots(t *testing.T) {
 		return root, s
 	}
 
-	t.Run("nothing newer in the bucket: kept, not asked about, not reported", func(t *testing.T) {
+	t.Run("past the count: removed with its mark, the bucket not asked", func(t *testing.T) {
 		root, s := setup(t, 0, 1, 2, 3, 4)
 		var asked []string
-		res := s3Count(t, root, 1, answers(&asked))
-		if len(res.Pruned) != 0 || res.KeptHeld != 4 || res.KeptNotDurable != 0 || len(res.NotAtDestination) != 0 {
-			t.Fatalf("held with nothing newer in S3: %+v", res)
+		res := s3Count(t, root, 3, answers(&asked)) // the bucket holds nothing
+		slices.Sort(res.Pruned)
+		if !slices.Equal(res.Pruned, s[:2]) {
+			t.Fatalf("pruned %v, want the two held past the count %v", res.Pruned, s[:2])
 		}
 		if len(asked) != 0 {
 			t.Fatalf("asked the bucket about held snapshots: %v", asked)
 		}
-		wantOnDisk(t, root, s...)
-	})
-
-	t.Run("a newer one confirmed in the bucket: the older held ones go", func(t *testing.T) {
-		root, s := setup(t, 0, 1, 3)
-		// s[2] was sent; s[3] is held and newer than it; s[4] is the newest.
-		res := s3Count(t, root, 1, answers(nil, s[2]))
-		slices.Sort(res.Pruned)
-		if !slices.Equal(res.Pruned, []string{s[0], s[1], s[2]}) || res.KeptHeld != 1 {
-			t.Fatalf("pruned %v, held %d; want the two superseded and the confirmed one gone, one held kept", res.Pruned, res.KeptHeld)
-		}
-		wantOnDisk(t, root, s[3], s[4])
-		for _, i := range []int{0, 1} {
-			if held, _ := UploadHeld(root, s[i]); held {
-				t.Errorf("%s: its mark outlived it", s[i])
+		wantOnDisk(t, root, s[2:]...)
+		for _, n := range s[:2] {
+			if held, _ := UploadHeld(root, n); held {
+				t.Errorf("%s: its mark outlived it", n)
 			}
 		}
+		// Inside the count: kept, and still marked (the newest may be owed
+		// to the bucket; its mark is what the owed upload reads).
+		for _, n := range s[2:] {
+			if held, _ := UploadHeld(root, n); !held {
+				t.Errorf("%s: kept, but its mark is gone", n)
+			}
+		}
+		if res.KeptNotDurable != 0 || len(res.NotAtDestination) != 0 || res.KeptHeld != 0 {
+			t.Fatalf("held snapshots reported as missing or as waiting: %+v", res)
+		}
+		if _, ok, _ := ReadNotInDestination(root); ok {
+			t.Fatal("the page's 'not in S3' record counts snapshots held on purpose")
+		}
 	})
 
-	t.Run("the proof is the newest snapshot, kept by the count, not past it", func(t *testing.T) {
-		// Every snapshot past the count is held; the one that reached the
-		// bucket is the newest, which the count keeps. It is asked about,
-		// and it is the proof.
-		root, s := setup(t, 0, 1, 2, 3)
-		var asked []string
-		res := s3Count(t, root, 1, answers(&asked, s[4]))
-		if len(res.Pruned) != 4 {
-			t.Fatalf("pruned %v, want the four held ones", res.Pruned)
+	t.Run("younger than an hour: kept", func(t *testing.T) {
+		root := t.TempDir()
+		var s []string
+		for _, d := range []time.Duration{50 * time.Minute, 40 * time.Minute, 30 * time.Minute, 20 * time.Minute} {
+			n := snapName(d)
+			makeSnapshot(t, root, n, true, "shop/orders")
+			if err := MarkUploadHeld(root, n); err != nil {
+				t.Fatal(err)
+			}
+			s = append(s, n)
 		}
-		if !slices.Equal(asked, []string{s[4]}) {
-			t.Fatalf("asked about %v, want only the newest %s", asked, s[4])
-		}
-		wantOnDisk(t, root, s[4])
-	})
-
-	t.Run("the bucket cannot be asked about the newer one: nothing goes", func(t *testing.T) {
-		root, s := setup(t, 0, 1, 2, 3)
-		res := s3Count(t, root, 1, unreachable)
-		if len(res.Pruned) != 0 || !res.DestinationSilent {
-			t.Fatalf("an unreachable bucket with held snapshots: %+v", res)
+		if res := s3Count(t, root, 1, answers(nil)); len(res.Pruned) != 0 {
+			t.Fatalf("pruned %v: held snapshots younger than an hour", res.Pruned)
 		}
 		wantOnDisk(t, root, s...)
+	})
+
+	t.Run("the only copy of a table, the current target and an incomplete one: kept", func(t *testing.T) {
+		root := t.TempDir()
+		full := snapName(days(60))
+		makeSnapshot(t, root, full, true, "shop/orders", "shop/customers")
+		part := snapName(days(55))
+		makeSnapshot(t, root, part, false, "shop/orders")
+		s := five(t, root)
+		for _, n := range append([]string{full, part}, s...) {
+			if err := MarkUploadHeld(root, n); err != nil {
+				t.Fatal(err)
+			}
+		}
+		link := filepath.Join(root, CurrentLinkName)
+		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(s[0], link); err != nil {
+			t.Fatal(err)
+		}
+		s3Count(t, root, 1, answers(nil))
+		// full holds the only shop/customers; part is being written; s[0] is
+		// what `current` points at; s[4] is the newest.
+		wantOnDisk(t, root, full, part, s[0], s[4])
+	})
+
+	t.Run("a mark is not a copy in S3: an unheld snapshot the bucket lacks stays", func(t *testing.T) {
+		// s[1] was meant for the bucket and is not there (its upload
+		// failed). The held ones around it go; it does not, whatever marks
+		// its neighbours carry, and it is the one named for a resend.
+		root, s := setup(t, 0, 2, 3, 4)
+		var asked []string
+		res := s3Count(t, root, 1, answers(&asked))
+		slices.Sort(res.Pruned)
+		if !slices.Equal(res.Pruned, []string{s[0], s[2], s[3]}) {
+			t.Fatalf("pruned %v, want only the held ones", res.Pruned)
+		}
+		if !slices.Equal(asked, []string{s[1]}) || !slices.Equal(res.NotAtDestination, []string{s[1]}) || res.KeptNotDurable != 1 {
+			t.Fatalf("asked %v, not at destination %v: want only %s", asked, res.NotAtDestination, s[1])
+		}
+		wantOnDisk(t, root, s[1], s[4])
+	})
+
+	t.Run("the bucket cannot be asked: held ones still go, the rest stay", func(t *testing.T) {
+		// A held snapshot needs no answer, so a bucket that gives none does
+		// not keep it. What does need an answer stays, every one of it.
+		root, s := setup(t, 0, 2)
+		res := s3Count(t, root, 1, unreachable)
+		slices.Sort(res.Pruned)
+		if !slices.Equal(res.Pruned, []string{s[0], s[2]}) {
+			t.Fatalf("pruned %v, want only the two held ones", res.Pruned)
+		}
+		wantOnDisk(t, root, s[1], s[3], s[4])
+		if !res.DestinationSilent || res.ProbeErrors != 2 {
+			t.Fatalf("want a silent destination with 2 unchecked: %+v", res)
+		}
+		rec, ok, err := ReadLastPruneFailure(root)
+		if err != nil || !ok {
+			t.Fatalf("no failure record: ok=%v err=%v", ok, err)
+		}
+		t.Logf("failure record, as the page shows it:\n%s", rec.Reason)
+		if rec.Reason != "The S3 destination could not be asked, so no snapshot that was sent to S3 was removed from this folder in this cleanup. DBTrail asks again at the next one." {
+			t.Fatalf("the record: %q", rec.Reason)
+		}
+	})
+
+	t.Run("with an age too: a held snapshot younger than the age stays", func(t *testing.T) {
+		root, s := setup(t, 0, 1, 2, 3) // 50, 40, 30, 20 days, held
+		res, err := pruneWithProbe(context.Background(), PruneOptions{LocalDir: root, S3URL: "s3://b/p", KeepNewest: 1, Retain: days(35), Now: kn}, answers(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(res.Pruned)
+		if !slices.Equal(res.Pruned, s[:2]) {
+			t.Fatalf("count 1, age 35d: pruned %v, want only the two held ones older than the age", res.Pruned)
+		}
+	})
+
+	t.Run("dry run removes no folder and no mark", func(t *testing.T) {
+		root, s := setup(t, 0, 1)
+		res, err := pruneWithProbe(context.Background(), PruneOptions{LocalDir: root, S3URL: "s3://b/p", KeepNewest: 3, Now: kn, DryRun: true}, answers(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Pruned) != 2 {
+			t.Fatalf("a dry run would remove %v, want the two held", res.Pruned)
+		}
+		wantOnDisk(t, root, s...)
+		if held, _ := UploadHeld(root, s[0]); !held {
+			t.Fatal("a dry run removed a mark")
+		}
 	})
 }
 
-// A held snapshot is not an uploaded one: with the count at 1 and the bucket
-// holding nothing, the mark alone never makes a snapshot removable.
-func TestS3Count_heldIsNotUploaded(t *testing.T) {
+// Cycle after cycle of a 5-minute schedule that sends to S3 once a day: the
+// disk ends each cleanup with the count's snapshots and the ones still
+// younger than an hour, never with the held ones of the day, and the bucket
+// keeps the last snapshot that was sent. A run whose upload failed leaves a
+// snapshot that is never removed until the bucket has it.
+func TestS3Count_cyclesOfASpacedSchedule(t *testing.T) {
 	root := t.TempDir()
-	s := five(t, root)
-	for _, n := range s {
-		if err := MarkUploadHeld(root, n); err != nil {
+	bucket := map[string]bool{}
+	probe := func(_ context.Context, name string) (bool, error) { return bucket[name], nil }
+	start := kn.Add(-48 * time.Hour)
+	name := func(at time.Time) string { return strings.ReplaceAll(at.Format(time.RFC3339), ":", "-") }
+	publish := func(at time.Time, sent, held bool) string {
+		n := name(at)
+		makeSnapshot(t, root, n, true, "shop/orders")
+		if sent {
+			bucket[n] = true
+		}
+		if held {
+			if err := MarkUploadHeld(root, n); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return n
+	}
+	prune := func(now time.Time) PruneResult {
+		res, err := pruneWithProbe(context.Background(), PruneOptions{LocalDir: root, S3URL: "s3://b/p", KeepNewest: 3, Now: now}, probe)
+		if err != nil {
 			t.Fatal(err)
 		}
+		return res
 	}
-	for range 3 { // cycle after cycle
-		if res := s3Count(t, root, 1, answers(nil)); len(res.Pruned) != 0 {
-			t.Fatalf("pruned %v: a mark was taken for a copy in S3", res.Pruned)
+	// The full read, sent. Then an update every hour, held, with a cleanup
+	// after each; one run's upload was due and failed (not held, not sent);
+	// the next day's first run is sent.
+	first := publish(start, true, false)
+	var failed, lastSent string
+	lastSent = first
+	for h := 1; h <= 30; h++ {
+		at := start.Add(time.Duration(h) * time.Hour)
+		switch h {
+		case 10:
+			failed = publish(at, false, false)
+		case 24:
+			lastSent = publish(at, true, false)
+		default:
+			publish(at, false, true)
+		}
+		res := prune(at.Add(30 * time.Minute))
+		for _, p := range res.Pruned {
+			if p == failed {
+				t.Fatalf("hour %d: removed %s, whose upload failed and which S3 does not have", h, p)
+			}
 		}
 	}
-	wantOnDisk(t, root, s...)
+	end := start.Add(30 * time.Hour)
+	prune(end.Add(2 * time.Hour))
+	left := onDisk(t, root)
+	want := sorted(failed, name(end.Add(-2*time.Hour)), name(end.Add(-time.Hour)), name(end))
+	if !slices.Equal(left, want) {
+		t.Fatalf("on disk after the cycles: %v\nwant the newest 3 and the one S3 lacks: %v", left, want)
+	}
+	if !bucket[lastSent] || !bucket[first] || len(bucket) != 2 {
+		t.Fatalf("the bucket holds %v, want the two snapshots that were sent", bucket)
+	}
+	// No mark points at a folder that is gone.
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if n, ok := strings.CutPrefix(e.Name(), uploadHeldPrefix); ok && !slices.Contains(left, n) {
+			t.Errorf("a held mark outlived its snapshot: %s", e.Name())
+		}
+	}
+	// The bucket gets it at last: the next cleanup removes it.
+	bucket[failed] = true
+	prune(end.Add(3 * time.Hour))
+	wantOnDisk(t, root, want[1:]...)
 }
 
 // The guarantees of the local-only count hold with a destination: an

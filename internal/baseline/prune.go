@@ -55,7 +55,10 @@ var readDir = os.ReadDir
 //     and each of those goes only once its copy is confirmed at the
 //     destination. Retain is optional and, when set, only keeps more. In
 //     this mode a destination that fails to answer ANY question removes
-//     nothing in that attempt (PruneResult.DestinationSilent).
+//     nothing that needed its answer in that attempt
+//     (PruneResult.DestinationSilent). A snapshot the upload interval held
+//     on this machine on purpose needs no answer: past the count it goes by
+//     the count alone, as with no destination.
 //
 // S3URL empty and KeepNewest zero is a deliberate no-op, logged loudly.
 type PruneOptions struct {
@@ -111,9 +114,10 @@ type PruneResult struct {
 	KeptNewest int
 	// DestinationSilent reports that, in a prune by count against a
 	// destination (#2658), the destination failed to answer at least one
-	// question, so this attempt removed NOTHING: what it had confirmed until
-	// then is counted in KeptUnasked instead of removed. A failure, recorded
-	// in words. Never set in the other two modes.
+	// question, so this attempt removed NOTHING that needed its answer: what
+	// it had confirmed until then is counted in KeptUnasked instead of
+	// removed. Snapshots held on purpose need no answer and still go. A
+	// failure, recorded in words. Never set in the other two modes.
 	DestinationSilent bool
 	// KeptUnasked counts the snapshots such an attempt would have removed.
 	KeptUnasked int
@@ -350,7 +354,7 @@ func pruneFailureReason(res PruneResult, err error) string {
 	}
 	switch {
 	case res.DestinationSilent:
-		why = append(why, "The S3 destination could not be asked, so nothing was removed from this folder in this cleanup. DBTrail asks again at the next one.")
+		why = append(why, "The S3 destination could not be asked, so no snapshot that was sent to S3 was removed from this folder in this cleanup. DBTrail asks again at the next one.")
 	case res.ProbeErrors > 0:
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination, so they were kept.", snapshotsWord(res.ProbeErrors)))
 	}
@@ -464,6 +468,9 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// error is fail-safe: treat as NOT durable (keep), never as durable (which
 	// could delete the only copy).
 	durable := make(map[string]bool)
+	// byCount are the held snapshots past the count, which go without the
+	// destination's answer (counted mode only).
+	byCount := map[string]bool{}
 	var probeErrors int
 	var heldCandidates []localSnapshot
 	for _, s := range snaps {
@@ -475,6 +482,19 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			continue // too recent to prune → no need to confirm durability
 		}
 		if held[s.name] {
+			if counted {
+				// Held on this machine on purpose (#2596), so by its own
+				// definition not meant to be in the bucket: removing it
+				// loses nothing that was meant to be durable. Past the
+				// count it goes by the count alone, as on a server with no
+				// destination (#2658): not asked about, and waiting for
+				// nothing newer in S3. The bucket keeps the last snapshot
+				// that was sent; the disk keeps the newest N. A snapshot
+				// whose upload was TRIED and failed carries no mark, and is
+				// kept until the bucket has it.
+				byCount[s.name] = true
+				continue
+			}
 			// Not in S3 by design, so not probed: decided below against the
 			// newest snapshot that is.
 			heldCandidates = append(heldCandidates, s)
@@ -489,24 +509,36 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		}
 		durable[s.name] = ok
 	}
-	superseded, heldProbeFailed := supersededHeld(ctx, snaps, held, heldCandidates, durable, probe, now)
+	// Without a count, a held snapshot waits for a newer one confirmed in
+	// S3 (#2596). With one there are no such candidates: byCount took them.
+	superseded, _ := supersededHeld(ctx, snaps, held, heldCandidates, durable, probe, now)
 	for name := range superseded {
+		durable[name] = true
+	}
+	for name := range byCount {
 		durable[name] = true
 	}
 
 	pruneNames, res := planPruneHeld(snaps, keepers, newest, durable, held, opts.Retain, baselinePruneMinAge, now)
 	res.ProbeErrors = probeErrors
-	if counted && (probeErrors > 0 || heldProbeFailed) {
-		// By count, a destination that cannot be asked removes nothing
-		// (#2658), not even what it confirmed before the question that
-		// failed: the count runs every cycle on every new server, and a
-		// bucket that answers some questions and fails others is not one to
-		// delete against. The attempt is recorded as failed, in words.
-		slog.Warn("baseline prune: the S3 destination could not be asked, so nothing is removed from this folder in this cycle",
-			"dir", opts.LocalDir, "held_back", len(pruneNames), "unchecked", probeErrors)
+	if counted && probeErrors > 0 {
+		// By count, a destination that cannot be asked removes nothing that
+		// needed its answer (#2658), not even what it confirmed before the
+		// question that failed: the count runs every cycle on every new
+		// server, and a bucket that answers some questions and fails others
+		// is not one to delete against. The held snapshots needed no answer
+		// and still go. The attempt is recorded as failed, in words.
+		var free []string
+		for _, name := range pruneNames {
+			if byCount[name] {
+				free = append(free, name)
+			}
+		}
+		slog.Warn("baseline prune: the S3 destination could not be asked, so no snapshot that was sent to it is removed from this folder in this cycle",
+			"dir", opts.LocalDir, "held_back", len(pruneNames)-len(free), "unchecked", probeErrors)
 		res.DestinationSilent = true
-		res.KeptUnasked = len(pruneNames)
-		pruneNames = nil
+		res.KeptUnasked = len(pruneNames) - len(free)
+		pruneNames = free
 	}
 	if probeErrors > 0 {
 		// One aggregate signal so a systemic S3 outage reads as "retention stalled
@@ -518,6 +550,9 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	return withSweep(removePlanned(opts, now, pruneNames, res, func(name string) string {
 		if superseded[name] {
 			return "kept on this machine by the upload interval, and a newer snapshot is in S3"
+		}
+		if byCount[name] {
+			return "kept on this machine by the upload interval, and past the newest " + fmt.Sprint(opts.KeepNewest)
 		}
 		if counted {
 			return "past the newest " + fmt.Sprint(opts.KeepNewest) + ", and its copy is in S3"
@@ -545,8 +580,7 @@ const supersededHeldProbes = 3
 // The newer one need not hold every table: the newest copy of each table is
 // protected by computeKeepers whatever happens here, so what goes is only an
 // in-between point. A probe error stops the search, so an unreachable bucket
-// keeps every held snapshot; probeFailed reports it, for the mode that then
-// removes nothing at all.
+// keeps every held snapshot; probeFailed reports it.
 func supersededHeld(ctx context.Context, snaps []localSnapshot, held map[string]bool, candidates []localSnapshot,
 	durable map[string]bool, probe durableProbe, now time.Time) (superseded map[string]bool, probeFailed bool) {
 	if len(candidates) == 0 {

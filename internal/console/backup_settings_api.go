@@ -573,7 +573,31 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		s3AgeMu.Unlock()
 		return
 	}
-	err := s.cm.reg.Update(entry)
+	// Only what this save changed, on the entry as it is now (#2658): the
+	// schedule, the monitoring intent and every field this request left
+	// alone keep the value a save made since this request read the entry.
+	err := s.cm.reg.UpdateWith(entry.ID, func(cur ServerEntry) (ServerEntry, bool) {
+		if entry.BaselineDir != before.BaselineDir {
+			cur.BaselineDir = entry.BaselineDir
+		}
+		if entry.BaselineS3 != before.BaselineS3 {
+			cur.BaselineS3 = entry.BaselineS3
+		}
+		if entry.NoArchive != before.NoArchive {
+			cur.NoArchive = entry.NoArchive
+		}
+		if req.KeepNewest != nil {
+			cur.LocalKeepNewest = entry.LocalKeepNewest
+		}
+		if entry.NoSQLMirror != before.NoSQLMirror {
+			cur.NoSQLMirror = entry.NoSQLMirror
+		}
+		if entry.BaselineS3Retain != before.BaselineS3Retain {
+			cur.BaselineS3Retain = entry.BaselineS3Retain
+		}
+		entry = cur
+		return cur, true
+	})
 	s3AgeMu.Unlock()
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
