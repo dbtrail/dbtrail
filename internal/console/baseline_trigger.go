@@ -237,6 +237,12 @@ type BaselineStatus struct {
 	// destination is still in flight (#1725). The server's job slot is
 	// already free; Uploaded is filled in when the copy completes.
 	Uploading bool `json:"uploading,omitempty"`
+	// SendingHeld: the refresh slot is held only to send to S3 a snapshot
+	// the upload interval (#2596) kept on this machine. No update is
+	// running and none will publish: a quiet cycle, or a slot the schedule
+	// skipped (#2659), found that snapshot's upload due. The page says that
+	// instead of "refresh running"; the slot is busy all the same.
+	SendingHeld bool `json:"sending_held,omitempty"`
 	// Swept counts OTHER local snapshots a full backup sent to the destination
 	// because the destination lacked them (a refresh whose upload failed).
 	Swept  int `json:"swept,omitempty"`

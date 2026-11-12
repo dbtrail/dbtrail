@@ -149,7 +149,7 @@ func TestCaptureReads_TLSOnlySource(t *testing.T) {
 			return captureHeadFromDBsMariaDB(ctx, gtidIndex(t, console.FlavorMariaDB), src, config.SSL{})
 		}},
 		{"window probe (#1791)", func() captureProbeResult {
-			return captureFromDBs(ctx, gtidIndex(t, "mysql"), src, config.SSL{}, time.Now().Add(-time.Hour), time.Time{})
+			return captureFromDBs(ctx, gtidIndex(t, "mysql"), src, config.SSL{}, time.Now().Add(-time.Hour), time.Time{}, nil)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

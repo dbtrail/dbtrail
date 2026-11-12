@@ -77,7 +77,8 @@ func TestChooseBackupMethod_aLongStopWithNoRateUpdates_2659(t *testing.T) {
 //   - window_measured: the update is clearly dearer than the last full read,
 //     on numbers measured since that full read;
 //   - window_age: nothing indexed since a snapshot past the cut-over age, and
-//     the capture not confirmed caught up.
+//     evidence that the capture is missing changes (the source ahead, or
+//     the capture's own record of a loss).
 //
 // And the age of the snapshot changes nothing while there are events to
 // apply, or while their count is unknown.
@@ -93,7 +94,7 @@ func TestCutoverToFull_everyCombination_2659(t *testing.T) {
 	fulls := []time.Duration{0, 6 * time.Second, 8 * time.Minute, 9 * time.Hour}
 	fixeds := []time.Duration{0, 15 * time.Second, 20 * time.Minute}
 	provens := []int64{0, 15_000_000}
-	captures := []string{"", CaptureBehind, CaptureCaughtUp}
+	captures := []string{"", CaptureBehind, CaptureSuspect, CaptureUnaskable, CaptureCaughtUp}
 	intervals := []time.Duration{0, 5 * time.Minute, 24 * time.Hour}
 	// Anchor ages: none, fresh, between the two-hour floor and a daily
 	// schedule's six days, and past both.
@@ -154,8 +155,13 @@ func TestCutoverToFull_everyCombination_2659(t *testing.T) {
 												if w.AnchorFullFinished.After(since) {
 													since = w.AnchorFullFinished
 												}
-												if ev != 0 || capture == CaptureCaughtUp || w.Anchor.IsZero() || now.Sub(since) <= BackupCutoverAge(interval) {
-													t.Fatalf("%s: a full read on the snapshot's age (%q); only nothing indexed since an old snapshot with the capture unconfirmed may", desc, why)
+												// A source that is ahead, a capture whose
+												// own record says it lost changes, or one
+												// not confirmed for no listed reason (""). A
+												// source that cannot be asked chooses no
+												// full read, and a confirmed one neither.
+												if ev != 0 || capture == CaptureUnaskable || capture == CaptureCaughtUp || w.Anchor.IsZero() || now.Sub(since) <= BackupCutoverAge(interval) {
+													t.Fatalf("%s: a full read on the snapshot's age (%q); only nothing indexed since an old snapshot with evidence against the capture may", desc, why)
 												}
 												if !strings.Contains(why, BackupWhyNothingIndexedWords) {
 													t.Fatalf("%s: the reason %q does not say nothing was indexed", desc, why)
@@ -220,7 +226,7 @@ func TestCutoverToFull_reasons_2659(t *testing.T) {
 	now := time.Date(2026, 11, 11, 10, 30, 0, 0, time.UTC)
 	old := now.Add(-5*time.Hour - 30*time.Minute)
 	behind := BackupWindow{Anchor: old, Events: 0, LastFull: 40 * time.Minute, Capture: CaptureBehind}
-	unknown := BackupWindow{Anchor: old, Events: 0, LastFull: 40 * time.Minute, CaptureDetail: "the source did not answer"}
+	unknown := BackupWindow{Anchor: old, Events: 0, LastFull: 40 * time.Minute, Capture: CaptureSuspect, CaptureDetail: "the capture dropped events that no full read has read from the source since"}
 	for _, c := range []struct {
 		w    BackupWindow
 		want string
@@ -232,7 +238,7 @@ func TestCutoverToFull_reasons_2659(t *testing.T) {
 		{behind,
 			"the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"},
 		{unknown,
-			"the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked (the source did not answer)"},
+			"the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, and the capture dropped events that no full read has read from the source since"},
 	} {
 		why := CutoverToFull(c.w, 5*time.Minute, now)
 		t.Log(why)

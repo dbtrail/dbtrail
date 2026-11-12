@@ -455,9 +455,11 @@ func TestBackupScheduler_anOldSnapshotAloneUpdatesInTheRealSlot(t *testing.T) {
 }
 
 // TestBackupScheduler_cutsOverInTheRealSlotWhenTheIndexIsInDoubt: nothing
-// indexed since a previous backup weeks older than the slot, and a source
-// that cannot be asked whether it wrote anything: the slot starts a full
-// backup whose reason says the index may be missing changes.
+// indexed since a previous backup weeks older than the slot, and a capture
+// whose own record says it lost changes: the slot starts a full backup
+// whose reason says the index may be missing changes. (A source that
+// cannot be asked, with nothing on record against the capture, skips the
+// slot instead: skip_unconfirmed_2659_test.go.)
 func TestBackupScheduler_cutsOverInTheRealSlotWhenTheIndexIsInDoubt(t *testing.T) {
 	b, reg, sup := newScheduleFixture(t, true)
 	b.window = b.measureWindow
@@ -469,7 +471,7 @@ func TestBackupScheduler_cutsOverInTheRealSlotWhenTheIndexIsInDoubt(t *testing.T
 	sup.foldedMarks[e.ID] = foldMemo{mark: indexMark{events: 1000}, publishedAt: snapshotAnchor, indexDSN: e.DSN}
 	mark := indexMark{events: 1000} // nothing indexed since the anchor
 	stubIndexMark(t, &mark, true)
-	stubCaptureProbe(t, captureProbeResult{detail: "the source did not answer"})
+	stubCaptureProbe(t, captureProbeResult{detail: captureDetailLost})
 	logs := captureSlogFor(t)
 	fireAt(b, time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)) // eight days later, on an hourly schedule (cut-over 6 h)
 	// The full read fails, and no update stands in for it (#2586): an
@@ -484,7 +486,7 @@ func TestBackupScheduler_cutsOverInTheRealSlotWhenTheIndexIsInDoubt(t *testing.T
 	}
 	t.Log(run.Why)
 	if !strings.HasPrefix(run.Why, "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken ") ||
-		!strings.HasSuffix(run.Why, "ago, and whether the source changed could not be checked (the source did not answer)") {
+		!strings.HasSuffix(run.Why, "ago, and the capture lost events to a binlog gap after the previous snapshot") {
 		t.Fatalf("the reason on record: %q", run.Why)
 	}
 	if !strings.Contains(logs.String(), "taking a full read instead of an update from the recorded changes; nothing was indexed since the previous snapshot") {

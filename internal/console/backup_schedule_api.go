@@ -39,7 +39,9 @@ type backupScheduleDTO struct {
 	// NextMethod is how the next run will be made, as decided right now
 	// (BackupMethodFull or BackupMethodRefresh), with NextMethodWhy the
 	// one-line reason. The page says it so the operator is never surprised
-	// by which producer ran.
+	// by which producer ran. BackupMethodSkip: as things stand the next slot
+	// makes no snapshot (#2659), and NextMethodWhy is the reason the skip
+	// will record.
 	NextMethod    string `json:"next_method,omitempty"`
 	NextMethodWhy string `json:"next_method_why,omitempty"`
 	// NextMethodWhyCode is BackupWhyCode(NextMethodWhy): the page warns on

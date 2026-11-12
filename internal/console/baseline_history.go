@@ -138,9 +138,16 @@ type BaselineRunRecord struct {
 	// names it, and the update after it goes unmeasured (the one after that
 	// is measured from the daemon's memo). Zero when not measured (a
 	// restore, a fold with no previous mark, an index that did not answer).
-	Events        int64   `json:"events,omitempty"`
-	UpdateSeconds float64 `json:"update_seconds,omitempty"`
-	IndexMark     uint64  `json:"index_mark,omitempty"`
+	//
+	// IndexMarkKnown says IndexMark was read, which is what tells a mark of
+	// zero (an index that held no event when the snapshot was made) from no
+	// mark at all (#2659). Builds before it wrote zero for both and never
+	// wrote this field, so a record without it and with a zero mark keeps
+	// meaning "no mark"; a non-zero mark is a mark either way.
+	Events         int64   `json:"events,omitempty"`
+	UpdateSeconds  float64 `json:"update_seconds,omitempty"`
+	IndexMark      uint64  `json:"index_mark,omitempty"`
+	IndexMarkKnown bool    `json:"index_mark_known,omitempty"`
 }
 
 // measuredFoldRuns is how many recent updates the update model fits.
@@ -290,9 +297,14 @@ func (h *BaselineRunHistory) ProvenUpdate(serverID string, within time.Duration)
 // (resolveFoldSource prefers it when it is ahead of the bucket), so its
 // mark is the right base. An update's record counts only without an error.
 // No other record counts (a skip names no snapshot at all).
+//
+// A mark of zero is on record only when the record says it was read
+// (IndexMarkKnown, #2659): an index that held no event then, from which
+// every event it holds now was indexed since. A zero without that is a
+// record from a build that wrote zero for "not read" too, and is no mark.
 func (h *BaselineRunHistory) IndexMarkFor(serverID, snapshotTime string) (uint64, bool) {
 	rec := h.FindBySnapshot(serverID, snapshotTime)
-	if rec == nil || rec.IndexMark == 0 {
+	if rec == nil || (rec.IndexMark == 0 && !rec.IndexMarkKnown) {
 		return 0, false
 	}
 	if rec.Kind == BaselineRunDump || (rec.Kind == BaselineRunRefresh && rec.Error == "") {

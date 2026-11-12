@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -443,7 +444,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		rec.Events = s.measuredEvents(req, mark, known, prev)
 		rec.UpdateSeconds = (took - *req.laneWait).Seconds()
 		if known {
-			rec.IndexMark = mark.events
+			rec.IndexMark, rec.IndexMarkKnown = mark.events, true
 		}
 	}
 	if rec.SnapshotTime != "" && !prev.IsZero() {
@@ -1293,6 +1294,14 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 		return
 	}
 	dest := strings.TrimSuffix(req.BaselineS3, "/") + "/" + name
+	// Said on the slot for as long as the upload takes: what holds the
+	// server is this send, not an update. The claim is replaced when the
+	// caller gives the slot back, and the mark goes with it.
+	s.mu.Lock()
+	if claim := s.refreshes[req.ServerID]; claim != nil && claim.State == "running" {
+		claim.SendingHeld = true
+	}
+	s.mu.Unlock()
 	n, err := s.uploadMarked(req.ServerID, name, filepath.Join(req.BaselineDir, name), dest, false)
 	if err != nil {
 		slog.Warn("snapshot refresh: could not send the newest snapshot the upload interval kept on this machine; the next cycle tries again",
@@ -1305,6 +1314,54 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 	}
 	slog.Info("snapshot refresh: nothing new to fold, so sent the newest snapshot the upload interval had kept on this machine",
 		"server", req.ServerName, "snapshot", name, "uploaded", n)
+}
+
+// sendOwedForSkippedSlot is sendOwedHeldUpload for a slot the snapshot
+// schedule skips before any cycle starts (#2659: nothing indexed since an old
+// snapshot and a source that cannot be asked). The gate's own skip is the
+// only other caller, and that slot never reaches the gate: without this, a
+// quiet server whose source cannot be asked would keep its newest snapshot
+// off the bucket for as long as the skipping lasts, with nothing said.
+//
+// It takes the refresh slot exactly as a cycle does (TriggerRefresh: the
+// same single-flight, the same saved status) and gives it back the way a
+// cycle the gate skips does (releaseRefreshSlot), so no other snapshot job
+// runs while it sends, a job already running is left alone (the next slot
+// looks again), and no run that did not happen is reported. In its own
+// goroutine, like a cycle: an upload can take minutes and the schedule's
+// tick serves every server. Reports whether it took the slot.
+func (s *baselineSupervisor) sendOwedForSkippedSlot(req refreshRequest, now time.Time) bool {
+	if req.BaselineS3 == "" || strings.TrimSpace(req.BaselineDir) == "" {
+		return false
+	}
+	s.mu.Lock()
+	if s.busyLocked(req.ServerID) {
+		s.mu.Unlock()
+		slog.Debug("snapshot schedule: another snapshot job holds the server; a snapshot the upload interval owes S3 waits for the next slot",
+			"server", req.ServerName, "id", req.ServerID)
+		return false
+	}
+	s.refreshPrior[req.ServerID] = s.refreshes[req.ServerID]
+	delete(s.refreshGateSkips, req.ServerID)
+	next := &console.BaselineStatus{State: "running", Since: nowStamp()}
+	carryNewTables(next, s.refreshes[req.ServerID])
+	s.refreshes[req.ServerID] = next
+	s.mu.Unlock()
+	s.postRefresh.Add(1)
+	go func() {
+		defer s.postRefresh.Done()
+		// LAST, for the reason the gate's skip releases last: the slot going
+		// terminal is what every observer waits on.
+		defer s.releaseRefreshSlot(req.ServerID)
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("snapshot schedule: sending a snapshot the upload interval owes S3 panicked",
+					"server", req.ServerName, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
+		s.sendOwedHeldUpload(req, now)
+	}()
+	return true
 }
 
 // refreshSnapshotDir names the directory one refresh cycle folds into: the
