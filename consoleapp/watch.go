@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1863,17 +1864,23 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	// is how often these were tried before.
 	round := resendRoundFor(t.dir)
 	if !round.begin() {
-		noteResending(t, res, nil, nil, round.waitsUntil())
+		noteResending(t, res, nil, nil, round.waitsUntil(), round.waitIsForAnswer())
 		return
 	}
 	defer round.end()
-	sent, skipped, tried, failed := map[string]bool{}, map[string]bool{}, 0, 0
+	sent, skipped, tried, failed, unasked := map[string]bool{}, map[string]bool{}, 0, 0, 0
 	wasFailing := round.isFailing()
 	for _, name := range res.NotAtDestination {
 		if ctx.Err() != nil || tried >= resendPerCycle {
 			break
 		}
 		if _, err := os.Stat(filepath.Join(t.dir, name, baseline.SuccessMarker)); err != nil {
+			continue
+		}
+		// Sent before, taken by S3, and refused again since (#2696): S3
+		// accepts the upload and refuses the read, so sending it again
+		// changes nothing. It stays listed, for the page.
+		if slices.Contains(res.ReadRefused, name) {
 			continue
 		}
 		err := resendSnapshotFn(ctx, t.dir, t.s3, name)
@@ -1890,6 +1897,9 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 			continue
 		}
 		tried++
+		if slices.Contains(res.NotAsked, name) {
+			unasked++
+		}
 		if err != nil {
 			failed++
 			// Said once when the sending starts to fail, not at every
@@ -1904,12 +1914,23 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 			continue
 		}
 		sent[name] = true
+		// The evidence a later refusal is about the read (#2696).
+		if err := baseline.MarkResent(t.dir, name, time.Now()); err != nil {
+			slog.Warn("snapshot cleanup: a snapshot was sent again, and the note saying so could not be written; the hour's wait still bounds the sends",
+				"dir", t.dir, "snapshot", name, "error", err)
+		}
 		slog.Info("snapshot cleanup: sent again a local snapshot the destination lacked", "dir", t.dir, "snapshot", name, "destination", t.s3)
 	}
 	if round.finished(failed > 0, tried > 0) {
 		slog.Info("snapshot cleanup: sending the snapshots the destination lacked works again", "dir", t.dir, "destination", t.s3)
 	}
-	noteResending(t, res, sent, skipped, round.waitsUntil())
+	if unasked > 0 {
+		// Sending a snapshot S3 could not be asked about may succeed and
+		// change nothing (it refuses the read, #2696), so it waits like a
+		// failed send: at most one such send per snapshot an hour.
+		round.holdForAnswer()
+	}
+	noteResending(t, res, sent, skipped, round.waitsUntil(), round.waitIsForAnswer())
 }
 
 // waitsUntil is when the next round may start, or the zero time when
@@ -1937,6 +1958,9 @@ type resendRound struct {
 	running bool
 	failing bool
 	nextTry time.Time
+	// forAnswer: the wait is after sending snapshots S3 could not be asked
+	// about (#2696), not after a failure.
+	forAnswer bool
 }
 
 var (
@@ -1986,19 +2010,42 @@ func (r *resendRound) finished(failed, tried bool) (recovered bool) {
 	switch {
 	case failed:
 		r.failing = true
+		r.forAnswer = false
 		r.nextTry = resendNow().Add(resendBackoff)
 	case tried:
 		recovered = r.failing
 		r.failing = false
+		r.forAnswer = false
 		r.nextTry = time.Time{}
 	}
 	return recovered
 }
 
+// holdForAnswer makes the next round wait resendBackoff after a round that
+// sent snapshots S3 could not be asked about (#2696). A failure in the same
+// round already set that wait, and says so instead.
+func (r *resendRound) holdForAnswer() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failing {
+		return
+	}
+	r.nextTry = resendNow().Add(resendBackoff)
+	r.forAnswer = true
+}
+
+// waitIsForAnswer reports whether the wait in force follows sends S3 could
+// not be asked about rather than a failure.
+func (r *resendRound) waitIsForAnswer() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.forAnswer && resendNow().Before(r.nextTry)
+}
+
 // noteResending rewrites the folder's record of snapshots the destination
 // lacks after a round (sent and skipped are what it did), or with nothing
 // done when the round did not start: they are still going to be sent.
-func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time) {
+func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time, forAnswer bool) {
 	if res.DestinationSilent {
 		// The destination failed to answer for some snapshots in this pass
 		// (#2658), so how many it lacks is not known: the prune left the
@@ -2015,14 +2062,18 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 	}
 	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
 	for _, name := range left {
-		if name == res.RestoredUnasked {
-			rec.Unasked = name
+		if slices.Contains(res.NotAsked, name) {
+			rec.NotAsked = append(rec.NotAsked, name)
+		}
+		if slices.Contains(res.ReadRefused, name) {
+			rec.ReadRefused = append(rec.ReadRefused, name)
 		}
 	}
 	if !next.IsZero() {
 		// The page says when, instead of "at the next cleanup".
 		at := next.UTC()
 		rec.NextSend = &at
+		rec.WaitsForAnswer = forAnswer
 	}
 	if err := baseline.RewriteNotInDestination(t.dir, rec); err != nil {
 		slog.Warn("snapshot cleanup: the record of snapshots not at the destination could not be updated; the page may say an old count until the next cleanup",

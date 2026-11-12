@@ -105,7 +105,12 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("s3CountedHeld", Object.assign({}, s3c, { schedule_every: "5m", schedule_upload_every: "1d", schedule_upload_every_minutes: 1440 }), null);
   await step("s3CountedAge", Object.assign({}, s3c, { delete_after_minutes: 7 * 1440, prune_retain_minutes: 7 * 1440 }), null);
   await step("s3CountedNotIn", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true } }), null);
-  await step("s3CountedUnasked", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 1, names: ["2026-11-10T03-00-00Z"], resending: true, unasked: "2026-11-10T03-00-00Z" } }), null);
+  await step("s3CountedUnasked", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 1, names: ["2026-11-10T03-00-00Z"], resending: true, not_asked: ["2026-11-10T03-00-00Z"] } }), null);
+  await step("s3CountedUnaskedTwo", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, not_asked: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], next_send: "2026-11-11T04:00:00Z" } }), null);
+  await step("s3CountedReadRefusedAll", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, not_asked: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], read_refused: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"] } }), null);
+  await step("s3CountedReadRefusedOne", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, not_asked: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], read_refused: ["2026-11-10T03-05-00Z"] } }), null);
+  await step("s3CountedWaitsForAnswer", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 1, names: ["2026-11-10T03-00-00Z"], resending: true, not_asked: ["2026-11-10T03-00-00Z"], next_send: "2026-11-11T04:00:00Z", waits_for_answer: true } }), null);
+  await step("s3CountedSomeUnasked", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, not_asked: ["2026-11-10T03-05-00Z"] } }), null);
   await step("s3CountedWaits", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z" } }), null);
   await step("s3CountedNoLoop", Object.assign({}, s3c, { prune_loop: false, keep_in_force: 0 }), null);
   await step("s3CountedBlocked", Object.assign({}, s3c, { keep_blocked: true, keep_in_force: 0 }), null);
@@ -255,7 +260,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	}
 	// A server with S3 and a count in force: every sentence it can say,
 	// rendered from the fields the API sends, logged as the page shows them.
-	for _, name := range []string{"s3Counted", "s3CountedHeld", "s3CountedAge", "s3CountedNotIn", "s3CountedNoLoop", "s3CountedBlocked", "s3CountedKeep5", "s3CountedKeepAll"} {
+	for _, name := range []string{"s3Counted", "s3CountedHeld", "s3CountedAge", "s3CountedNotIn", "s3CountedUnasked", "s3CountedUnaskedTwo", "s3CountedSomeUnasked", "s3CountedReadRefusedAll", "s3CountedReadRefusedOne", "s3CountedWaitsForAnswer", "s3CountedNoLoop", "s3CountedBlocked", "s3CountedKeep5", "s3CountedKeepAll"} {
 		r := got[name]
 		t.Logf("%s (at rest):\n  %s", name, strings.Join(r.Before.Words, "\n  "))
 		if name == "s3CountedKeep5" || name == "s3CountedKeepAll" {
@@ -266,17 +271,28 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		}
 	}
 	for name, want := range map[string]string{
-		"s3Counted":        "Older ones past that number are removed from this folder after each new snapshot, once S3 has them.",
-		"s3CountedHeld":    "An update the schedule did not send to S3 goes past that number without waiting for S3.",
-		"s3CountedAge":     "Older ones past that number and older than 7 days are removed from this folder after each new snapshot, once S3 has them.",
-		"s3CountedUnasked": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup.",
-		"s3CountedWaits":   "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
-		"s3CountedNotIn":   "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
-		"s3CountedNoLoop":  "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
-		"s3CountedBlocked": "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",
+		"s3Counted":               "Older ones past that number are removed from this folder after each new snapshot, once S3 has them.",
+		"s3CountedHeld":           "An update the schedule did not send to S3 goes past that number without waiting for S3.",
+		"s3CountedAge":            "Older ones past that number and older than 7 days are removed from this folder after each new snapshot, once S3 has them.",
+		"s3CountedUnasked":        "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup.",
+		"s3CountedUnaskedTwo":     "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 could not be asked whether it has them; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
+		"s3CountedReadRefusedAll": "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm they are there, and does not send them again.",
+		"s3CountedReadRefusedOne": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup. Not sent again: the copy of 2026-11-10 03:05:00 UTC, which S3 took but refuses to read back (s3:GetObject).",
+		"s3CountedWaitsForAnswer": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; the last ones sent could not be confirmed, and DBTrail sends again after 2026-11-11 04:00:00 UTC.",
+		"s3CountedSomeUnasked":    "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have the copy of 2026-11-10 03:00:00 UTC complete, and could not be asked about the copy of 2026-11-10 03:05:00 UTC; DBTrail sends them again at the next cleanup.",
+		"s3CountedWaits":          "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
+		"s3CountedNotIn":          "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
+		"s3CountedNoLoop":         "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
+		"s3CountedBlocked":        "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",
 	} {
 		if w := joined(got[name].Before); !strings.Contains(w, want) {
 			t.Errorf("%s: %q does not say %q", name, w, want)
+		}
+	}
+	// A copy S3 could not be asked about is never said to be missing (#2689).
+	for _, name := range []string{"s3CountedUnasked", "s3CountedUnaskedTwo", "s3CountedSomeUnasked", "s3CountedReadRefusedAll", "s3CountedReadRefusedOne", "s3CountedWaitsForAnswer"} {
+		if w := joined(got[name].Before); strings.Contains(w, "Not in S3 yet") || strings.Contains(w, "does not have them") || strings.Contains(w, "does not have it ") {
+			t.Errorf("%s: a copy S3 could not be asked about is said to be missing: %q", name, w)
 		}
 	}
 	// What a server with S3 must never be told: that a table's only copy is

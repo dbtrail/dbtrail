@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -108,9 +109,22 @@ type NotInDestination struct {
 	// (#2563); false, or absent, when nothing here will, and the page says
 	// to send or remove them by hand.
 	Resending bool `json:"resending,omitempty"`
-	// Unasked names the one among them (the last restore's result) the
-	// destination could not be ASKED about: not known to be missing.
+	// NotAsked names those among them the destination could not be ASKED
+	// about: not known to be missing (the last restore's result whose
+	// question failed, a snapshot S3 refused, #2689).
+	NotAsked []string `json:"not_asked,omitempty"`
+	// Unasked is how a build before #2689 named the one such snapshot it
+	// could have (the last restore's result). Written as the first of
+	// NotAsked, so a record an older build reads after a downgrade still
+	// names one; read back into NotAsked by ReadNotInDestination.
 	Unasked string `json:"unasked,omitempty"`
+	// ReadRefused names those among them that were sent again, which S3
+	// accepted, and that S3 then refused to read back (#2696): a destination
+	// that takes uploads without s3:GetObject. They are not sent again.
+	ReadRefused []string `json:"read_refused,omitempty"`
+	// WaitsForAnswer says NextSend is the wait after sending again snapshots
+	// S3 could not be asked about (#2696), not after a send that failed.
+	WaitsForAnswer bool `json:"waits_for_answer,omitempty"`
 	// NextSend, when set, is when the next send is tried: an hour after a
 	// round in which one failed (#2678). Absent: at the next cleanup.
 	NextSend *time.Time `json:"next_send,omitempty"`
@@ -150,11 +164,19 @@ func ReadNotInDestination(dir string) (rec NotInDestination, ok bool, err error)
 	if err := json.Unmarshal(b, &rec); err != nil || rec.At.IsZero() || rec.Count <= 0 {
 		return NotInDestination{}, false, fmt.Errorf("the record of snapshots not at the destination %s cannot be read", filepath.Join(dir, NotInDestinationFile))
 	}
+	if rec.Unasked != "" && len(rec.NotAsked) == 0 {
+		rec.NotAsked = []string{rec.Unasked}
+	}
+	rec.Unasked = ""
 	return rec, true, nil
 }
 
 func writeNotInDestination(dir string, rec NotInDestination) error {
 	rec.At = rec.At.UTC()
+	rec.Unasked = ""
+	if len(rec.NotAsked) > 0 {
+		rec.Unasked = rec.NotAsked[0]
+	}
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -215,7 +237,7 @@ func isPruneArtifact(root, path string) bool {
 		return false
 	}
 	name := filepath.Base(path)
-	for _, rec := range []string{LastPruneFile, LastPruneFailureFile, NotInDestinationFile, CleanupWaitingFile} {
+	for _, rec := range []string{LastPruneFile, LastPruneFailureFile, NotInDestinationFile, CleanupWaitingFile, ResentFile} {
 		if name == rec || strings.HasPrefix(name, rec+".tmp-") {
 			return true
 		}
@@ -310,4 +332,67 @@ func noteCleanupWaiting(dir, what string, every time.Duration) {
 	if err != nil {
 		slog.Warn("baseline prune: the cleanup is waiting for a job, and the record of it could not be written; the page will not say why the folder is over its count", "dir", dir, "error", err)
 	}
+}
+
+// ResentFile records, beside the snapshots, the ones the cleanup sent again
+// whose copy S3 has not confirmed since (#2696), and when: name -> time. A
+// snapshot on it that S3 then refuses to read is the evidence of a
+// destination that accepts uploads and refuses reads (no s3:GetObject), so
+// it is not sent again; without the record, each cleanup would send it again,
+// S3 would take it, and the next question would be refused again, for ever.
+// Cleared for a snapshot S3 answers about, and for one no longer on disk.
+const ResentFile = ".resent-unconfirmed.json"
+
+// MarkResent notes that name was sent again just now. Called by the cleanup's
+// resend after a send S3 accepted. Not under the prune's lock: a prune that
+// rewrites the record meanwhile may drop the mark, which costs one more send
+// (the hour's wait after sending a snapshot S3 could not be asked about
+// bounds it), never a removal.
+func MarkResent(dir, name string, at time.Time) error {
+	marks := resentMarks(dir)
+	marks[name] = at.UTC()
+	return writeResent(dir, marks)
+}
+
+// ResentUnconfirmed lists the snapshots on that record, sorted.
+func ResentUnconfirmed(dir string) []string {
+	var out []string
+	for name := range resentMarks(dir) {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// resentMarks reads the record; a missing or unreadable one is empty (an
+// unreadable one is logged): the evidence is lost, and the hour's wait still
+// bounds the sends.
+func resentMarks(dir string) map[string]time.Time {
+	marks := map[string]time.Time{}
+	b, err := os.ReadFile(filepath.Join(dir, ResentFile))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("baseline prune: the record of snapshots sent again could not be read", "dir", dir, "error", err)
+		}
+		return marks
+	}
+	if err := json.Unmarshal(b, &marks); err != nil {
+		slog.Warn("baseline prune: the record of snapshots sent again cannot be read; it is replaced", "dir", dir, "error", err)
+		return map[string]time.Time{}
+	}
+	return marks
+}
+
+func writeResent(dir string, marks map[string]time.Time) error {
+	if len(marks) == 0 {
+		if err := removeRecord(filepath.Join(dir, ResentFile)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	b, err := json.Marshal(marks)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic0600(dir, ResentFile, b)
 }
