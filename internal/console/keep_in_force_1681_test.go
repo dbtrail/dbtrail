@@ -54,8 +54,14 @@ func TestKeepInForce_isTheListingsNumber(t *testing.T) {
 				if r := srv.localRetentionOf(row.ID); r != nil {
 					listing = r.KeepNewest
 				}
-				if row.KeepInForce != listing || listing != 0 {
-					t.Errorf("loop=%v %s: with a destination keep_in_force = %d, retention = %d; want both 0", loop, row.Name, row.KeepInForce, listing)
+				// The count is in force with a destination too (#2658),
+				// where a loop runs.
+				want := 0
+				if loop {
+					want = 3
+				}
+				if row.KeepInForce != listing || listing != want {
+					t.Errorf("loop=%v %s: with a destination keep_in_force = %d, retention = %d; want both %d", loop, row.Name, row.KeepInForce, listing, want)
 				}
 				continue
 			}

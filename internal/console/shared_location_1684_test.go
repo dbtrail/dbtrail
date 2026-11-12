@@ -215,10 +215,12 @@ servers:
 	if n, ok := LocalKeepTargets(r2.List())[canonicalDir("/startup/baselines")]; ok {
 		t.Errorf("the startup folder is pruned to %d without the flag", n)
 	}
-	// An S3-only default writes no folder, so its count stays as it was.
+	// An S3-only default writes no folder, and clears the count all the same
+	// (#2658): the server gets a folder of its own next, and a count saved
+	// when it did nothing beside a bucket must not start applying there.
 	r3 := loadReg(t, writeRegistryFile(t, "version: 1\nservers:\n  - id: aaaaaaaaaaaaaaa2\n    name: s3only\n    index_dsn: u:p@tcp(h:3306)/two\n    local_keep_newest: 3\n"))
 	r3.MigrateProcessBaselineLocation("", "s3://startup/b/")
-	if e := mustGet(t, r3, "aaaaaaaaaaaaaaa2"); e.LocalKeepNewest != 3 || e.BaselineDir != "" {
+	if e := mustGet(t, r3, "aaaaaaaaaaaaaaa2"); e.LocalKeepNewest != 0 || e.BaselineDir != "" {
 		t.Errorf("s3-only default: dir=%q keep=%d", e.BaselineDir, e.LocalKeepNewest)
 	}
 }
