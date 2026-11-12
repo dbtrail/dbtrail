@@ -29,10 +29,11 @@ import (
 var (
 	gwSrvQ      = regexp.QuoteMeta("SELECT COUNT(*) FROM bintrail_servers")
 	gwArchHeldQ = regexp.QuoteMeta("FROM archive_state WHERE partition_name <= ? OR (min_event_ts <= ?")
-	// The legacy form, for an archive_state without min_event_ts (1054).
-	gwArchHeldLegacyQ = regexp.QuoteMeta("SELECT MIN(partition_name) FROM archive_state WHERE partition_name <= ?") + `\s*$`
 	gwEvHeldQ   = regexp.QuoteMeta("FROM binlog_events WHERE event_timestamp <= ?")
 )
+
+// gwArchHeldLegacyQ is the form for an archive_state without min_event_ts (1054).
+var gwArchHeldLegacyQ = regexp.QuoteMeta("SELECT MIN(partition_name) FROM archive_state WHERE partition_name <= ?") + `\s*$`
 
 func gwArchRows(min, max any, sources int) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"min", "max", "sources"}).AddRow(min, max, sources)
@@ -362,5 +363,20 @@ func TestCollectStatus_readsTheGapWindow(t *testing.T) {
 				t.Errorf("coverage summary = %q, status = %q", sum.Continuity, doc.Stream.Continuity.Status)
 			}
 		})
+	}
+}
+
+// The second belt behind the query's own exclusion: a zero date that still
+// reaches Go never replaces an archived hour already found (review of #2711).
+func TestArchivedAtOrBefore_ignoresAZeroDate(t *testing.T) {
+	db, mock := gwNewDB(t)
+	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows("p_2026060100", time.Time{}))
+	held, err := archivedAtOrBefore(context.Background(), db, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC); !held.Equal(want) {
+		t.Errorf("held = %v, want the archived hour %v", held, want)
 	}
 }

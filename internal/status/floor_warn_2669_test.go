@@ -221,11 +221,13 @@ func TestLoadGapWindow_twoIndexesWithOneName_2669(t *testing.T) {
 		LoadGapWindow(context.Background(), bad, dbName, ackedLostStream())
 		goodMock.ExpectQuery(covPartsQ).WillReturnRows(covPartRows("p_2026062200", "p_future"))
 		goodMock.ExpectQuery(covArchQ).WillReturnRows(gwArchRows(nil, nil, 0))
-		goodMock.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil))
 		LoadGapWindow(context.Background(), good, dbName, ackedLostStream())
 	}
 	if got := strings.Count(log.String(), "level=WARN"); got != 1 {
 		t.Errorf("%d Warn line(s), want 1: %q", got, log.String())
+	}
+	if err := goodMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the answering index did not read as expected: %v", err)
 	}
 	if strings.Contains(log.String(), "can be read again") {
 		t.Errorf("the index that answers said the other one recovered: %q", log.String())
