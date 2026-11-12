@@ -265,10 +265,11 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// as before. It does SAY so: at Info here, and as the schedule's own skip
 	// reason.
 	mark, markErr := readIndexMark(s.ctx, req.IndexDSN)
+	known := markErr == nil
 	s.reportGateBlind("mark", markErr, req,
 		"cannot tell whether anything has been indexed, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
-	if markErr == nil && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC(), interval) {
+	if known && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC(), interval) {
 		// FIRST, before the log line and before anything can return early
 		// around it: until this runs, this server's dump, restore and SQL
 		// export are all refused as well.
