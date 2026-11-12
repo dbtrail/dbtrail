@@ -69,7 +69,7 @@ func ackedAt(lost time.Time) *StreamStateInfo {
 func TestLoadGapWindow_looksBelowTheFloor(t *testing.T) {
 	ctx := context.Background()
 	lost := gapLostStream().GapLostAt.Time // 2026-06-22 12:00:00
-	live := covPartRows("p_2026071100", "p_2026071101", "p_future")
+	live := func() *sqlmock.Rows { return covPartRows("p_2026071100", "p_2026071101", "p_future") }
 	june := func() *sqlmock.Rows { return gwArchRows("p_2026060100", "p_2026062223", 1) }
 
 	type step func(mock sqlmock.Sqlmock)
@@ -81,34 +81,48 @@ func TestLoadGapWindow_looksBelowTheFloor(t *testing.T) {
 	}{
 		{"archives separated from the index, older than the loss", lost, []step{
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(june()) },
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
 			func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(gwArchHeldQ).WithArgs("p_2026062212", lost).WillReturnRows(gwArchHeldRows("p_2026060100", nil))
 			},
 		}, ContinuityGapAcknowledged},
 		{"loss in the stretch nobody archived", time.Date(2026, 6, 25, 3, 0, 0, 0, time.UTC), []step{
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(june()) },
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+			},
 			func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(gwArchHeldQ).WithArgs("p_2026062503", sqlmock.AnyArg()).WillReturnRows(gwArchHeldRows("p_2026060100", nil))
 			},
 		}, ContinuityGapAcknowledged},
 		{"loss in the very hour of the oldest archive", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), []step{
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(june()) },
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
 			func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(gwArchHeldQ).WithArgs("p_2026060100", sqlmock.AnyArg()).WillReturnRows(gwArchHeldRows("p_2026060100", nil))
 			},
 		}, ContinuityGapAcknowledged},
 		{"every archive after the loss, nothing older in the index", lost, []step{
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026063000", "p_2026070500", 1)) },
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026063000", "p_2026070500", 1))
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil)) },
 			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwEvHeldQ).WithArgs(lost).WillReturnRows(gwEvHeldRows()) },
 		}, ContinuityOK},
 		{"an archived hour named after the loss holds re-indexed older changes", lost, []step{
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026070100", "p_2026070500", 1)) },
-			func(m sqlmock.Sqlmock) { m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1)) },
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(covArchQ).WillReturnRows(gwArchRows("p_2026070100", "p_2026070500", 1))
+			},
+			func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(gwSrvQ).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+			},
 			func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows("p_2026070100", time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)))
 			},
@@ -145,7 +159,7 @@ func TestLoadGapWindow_looksBelowTheFloor(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			db, mock := gwNewDB(t)
-			mock.ExpectQuery(covPartsQ).WillReturnRows(live)
+			mock.ExpectQuery(covPartsQ).WillReturnRows(live())
 			for _, s := range c.steps {
 				s(mock)
 			}
@@ -177,7 +191,7 @@ func TestLoadGapWindow_looksBelowTheFloor(t *testing.T) {
 
 	t.Run("cancelled read: stays on record", func(t *testing.T) {
 		db, mock := gwNewDB(t)
-		mock.ExpectQuery(covPartsQ).WillReturnRows(live)
+		mock.ExpectQuery(covPartsQ).WillReturnRows(live())
 		mock.ExpectQuery(covArchQ).WillReturnRows(gwArchRows(nil, nil, 0))
 		mock.ExpectQuery(gwArchHeldQ).WillReturnRows(gwArchHeldRows(nil, nil))
 		mock.ExpectQuery(gwEvHeldQ).WillReturnRows(gwEvHeldRows())
