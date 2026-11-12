@@ -330,6 +330,9 @@ journalctl -u bintrail-router -f
 - It reads **the same settings file** as the capture service, so it serves the
   servers that one manages. Its own settings are at the end of that file,
   commented out: `BINTRAIL_ROUTER_LISTEN` (`127.0.0.1:3309` unless set),
+  `BINTRAIL_ROUTER_TLS_CERT` and `BINTRAIL_ROUTER_TLS_KEY` (a certificate of
+  your own for the port's TLS, see
+  [TLS on the port](./time-travel-sql.md#tls-on-the-port)),
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY`, `BINTRAIL_ROUTER_METRICS_ADDR` and
   `BINTRAIL_CONSOLE_ROUTER_URL`.
 - **Its numbers are on by default.** The router's unit sets
