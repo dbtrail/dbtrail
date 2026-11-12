@@ -54,7 +54,10 @@ async function step(name, o, act, reuse) {
   const s = saveBtn(r);
   const after = { words: visible(r), reds: reds(r), dirShown: shown(r, "baseline_dir"), keepShown: shown(r, "keep_newest"), saveDisabled: s.disabled };
   if (!s.disabled) { await s.onclick(); }
-  out[name] = { before, after, body: calls.length ? calls[0].body : null };
+  // The save is the PUT of the server's snapshot settings; a row with a
+  // bucket also asks about the bucket's rules when it is drawn.
+  const puts = calls.filter((c) => /\/api\/backup-settings\/servers\//.test(c.u));
+  out[name] = { before, after, body: puts.length ? puts[puts.length - 1].body : null };
 }
 const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "input"); };
 (async () => {
@@ -262,14 +265,20 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		if strings.Contains(w, "never a table's only copy") || strings.Contains(w, "Delete by age applies") || strings.Contains(w, "only costs the tables that changed") {
 			t.Errorf("%s: a server with S3 is told %q", name, w)
 		}
-		if !strings.Contains(w, "You can restore back to about 1 hour ago") {
-			t.Errorf("%s: no reach line: %q", name, w)
+		// The age keeps younger snapshots outside the count, so it
+		// stretches the reach, as it does without S3.
+		reach := "You can restore back to about 1 hour ago"
+		if name == "s3CountedAge" {
+			reach = "You can restore back to about 7 days ago"
+		}
+		if !strings.Contains(w, reach) {
+			t.Errorf("%s: does not say %q: %q", name, reach, w)
 		}
 	}
 	if w := joined(got["s3Counted"].Before); strings.Contains(w, "Updates not sent to S3") {
 		t.Errorf("a server whose schedule sends every update is told about updates kept here: %q", w)
 	}
-	if w := joined(got["s3CountedBlocked"].Before); strings.Contains(w, "hourly cleanup") || strings.Contains(w, "nothing in it is removed") {
+	if w := joined(got["s3CountedBlocked"].Before); strings.Contains(w, "hourly cleanup") || strings.Contains(w, "nothing in it is removed") || strings.Contains(w, "Set a number") {
 		t.Errorf("a blocked folder with S3: %q", w)
 	}
 	if k := got["s3CountedKeep5"].Body["keep_newest"]; k != float64(5) {

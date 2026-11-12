@@ -9185,7 +9185,7 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
     say(localReachWords(n, reach || {}));
   } else if (mins) {
     say("Deleted here when older than " + exactSpan(mins) + ", once S3 has it. DBTrail leaves S3 alone.");
-  } else if (!stuck || s3) {
+  } else if (!stuck) {
     say("Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.");
   }
   if (s3) {
