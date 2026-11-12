@@ -482,6 +482,10 @@ services:
       # (docker compose logs -f bintrail | grep msg=status). Set
       # STATUS_LOG_INTERVAL in .env to change how often (30s, 5m), or to off.
       BINTRAIL_STATUS_LOG_INTERVAL: ${STATUS_LOG_INTERVAL:-}
+      # How soon a change on a source with little traffic is written to the
+      # index: one second after it was read. COMMIT_WITHIN in .env changes it
+      # (500ms, 2s); off waits for the checkpoint, up to 10 seconds.
+      BINTRAIL_COMMIT_WITHIN: ${COMMIT_WITHIN:-}
       # Password login (persists next to the registry). On first run the
       # console serves a "create your password" screen; later visits sign in.
       # There is deliberately NO password env var: docker inspect must never

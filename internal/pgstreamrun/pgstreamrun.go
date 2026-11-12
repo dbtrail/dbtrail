@@ -371,8 +371,10 @@ var (
 
 // commitWithin is how long complete transactions wait for a batch to fill
 // before they are committed anyway (#2666): see indexer.DefaultCommitWithin.
-// Read once from BINTRAIL_COMMIT_WITHIN; a variable so a test can change it.
-var commitWithin = indexer.CommitWithinFromEnv()
+// Called when a capture loop starts, never at package initialization: an env
+// file's BINTRAIL_COMMIT_WITHIN is applied to the environment after that. A
+// variable so a test can change it.
+var commitWithin = indexer.CommitWithinFromEnv
 
 // streamLoopPG batches row events into the indexer and checkpoints the durable LSN.
 //
@@ -475,7 +477,7 @@ func streamLoopPG(
 		},
 	})
 	defer w.Close()
-	w.SetCommitWithin(commitWithin)
+	w.SetCommitWithin(commitWithin())
 
 	// checkpoint commits the rows of complete transactions, then persists the
 	// last commit LSN. The order is commit → saveCheckpointPG → AckCommitted:
@@ -528,9 +530,12 @@ func streamLoopPG(
 
 		case <-w.WithinC():
 			// Complete transactions have waited long enough for a batch to
-			// fill (#2666). Their rows become visible now; the position is
-			// saved at the checkpoint, as after a full batch.
-			if err := w.CommitComplete(); err != nil {
+			// fill (#2666). The whole checkpoint, not the commit alone: a
+			// resume here deletes nothing, PostgreSQL sends again whatever is
+			// after the saved LSN, so rows committed without it would be
+			// indexed twice after a crash. With the LSN saved in the same
+			// step that window stays as short as it was on a quiet source.
+			if err := checkpoint(); err != nil {
 				return err
 			}
 
