@@ -12778,7 +12778,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   // scheduled update follows (BaselineFoldSource), and the same one the
   // coverage card reports as restore_reads. Offering the local-only rows on an
   // S3-backed server would prefill a moment the fold then refuses.
-  let reads = cur.baseline_s3 ? "s3" : "dir";
+  const reads = cur.baseline_s3 ? "s3" : "dir";
   let usable = backupSnapshotsFor(b, reads);
   // An S3 location with no snapshot, or one that could not be read, while
   // the folder holds some (#2691): the restore then starts from the folder,
@@ -12791,7 +12791,6 @@ function backupRestoreCard(cur, b, restoreSt) {
       fromFolder = (s3src && s3src.error)
         ? "This server's S3 location could not be read, so a restore starts from a snapshot in this server's folder. A newer snapshot may be in S3."
         : "This server's S3 location holds no snapshot yet, so a restore starts from a snapshot in this server's folder.";
-      reads = "dir";
       usable = local;
     }
   }
@@ -12818,7 +12817,7 @@ function backupRestoreCard(cur, b, restoreSt) {
   go.onclick = () => startBackupRestore(cur.id, input.value.trim(), go, msg);
   body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
   if (fromFolder) body.append(el("p", { class: "form-hint bk-restore-from-folder", text: fromFolder }));
-  const elsewhere = backupElsewhereNote(b, usable, reads);
+  const elsewhere = backupElsewhereNote(b, usable, fromFolder ? "dir" : reads);
   if (elsewhere) body.append(elsewhere);
   // Why the last restore read the folder instead of S3 (#2691), on every
   // outcome: a result that could not be sent to S3 still came from there.
@@ -13263,7 +13262,7 @@ function backupSQLLane(cur, b, sqlSt) {
   if (mayCreate) {
     body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
     if (b.kind === "dir") {
-      const elsewhere = backupElsewhereNote(b, usable, reads);
+      const elsewhere = backupElsewhereNote(b, usable, fromFolder ? "dir" : reads);
       if (elsewhere) body.append(elsewhere);
     }
   }
