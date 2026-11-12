@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in
-  another, every S3 request for the bucket answered `301 PermanentRedirect`:
-  uploads, listings, downloads, and the DuckDB reads behind time travel through
-  the MySQL port. bintrail now finds the bucket's region with one HEAD request
-  on the bucket that carries no credentials (S3 names the region in its
-  answer, so no IAM permission is needed), remembers it per bucket for the
-  life of the process, and signs that bucket's requests and DuckDB reads for
-  it. A region passed with a flag is kept as given. With a custom endpoint
+  another, every request bintrail made for the bucket through the AWS SDK
+  answered `301 PermanentRedirect`: uploads, listings and downloads, including
+  the snapshot listing behind time travel through the MySQL port, and the
+  snapshot check before each S3 snapshot read (which then skipped the check
+  with only a log line). bintrail now finds the bucket's region with one HEAD
+  request on the bucket that carries no credentials (S3 names the region in
+  its answer, so no IAM permission is needed), remembers it per bucket for the
+  life of the process, and signs that bucket's requests for it. DuckDB reads
+  of `s3://` paths were not affected: DuckDB follows the redirect on its own.
+  A region passed with a flag is kept as given. With a custom endpoint
   (`BINTRAIL_S3_ENDPOINT`, the AWS SDK's endpoint settings, a bucket store of
   the web interface) nothing is asked and the configured region stays. Where
   the region cannot be found, a redirect now says that the region is the

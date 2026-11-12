@@ -107,8 +107,9 @@ The AWS region is resolved in this order:
 A bucket only answers requests signed for its own region. When the region
 above is not the bucket's (say `AWS_REGION=us-west-2` on the host and the
 bucket in `us-east-1`), bintrail finds the bucket's region on its own and uses
-it for that bucket: uploads, listings, downloads and the DuckDB reads of
-`s3://` paths alike, so one process can work with buckets in several regions.
+it for that bucket's uploads, listings and downloads, so one process can work
+with buckets in several regions. (DuckDB, which reads the Parquet files of
+`s3://` paths, follows S3's redirect to the bucket's region by itself.)
 
 - **How**: one HEAD request on the bucket, without credentials. S3 names the
   bucket's region in that answer even when it refuses or redirects the

@@ -164,10 +164,3 @@ func SetBucketRegionDiscoveryForTest(fn func(ctx context.Context, hint, bucket s
 		resetDiscoveredRegions()
 	}
 }
-
-// DiscoverBucketRegionFrom is DiscoverBucketRegion for a caller with no AWS
-// config at hand (the DuckDB session setup): hint is the region the question
-// is asked from, which only picks the partition ("" is us-east-1's).
-func DiscoverBucketRegionFrom(ctx context.Context, hint, bucket string) (string, bool) {
-	return DiscoverBucketRegion(ctx, aws.Config{Region: hint}, bucket)
-}
