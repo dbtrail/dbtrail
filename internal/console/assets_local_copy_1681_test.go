@@ -191,15 +191,15 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	// retention; "once" while the number is
 	// not the one in force; no number without a schedule that runs.
 	for name, want := range map[string]string{
-		"reach5m":           "You can restore back to about 15 minutes ago, the oldest of the 3 kept.",
-		"reachHourly":       "You can restore back to about 3 hours ago",
-		"reachDaily":        "You can restore back to about 3 days ago",
-		"reachDailyTyped1":  "After you save, you can restore back to about 1 day ago",
+		"reach5m":           "You can restore back up to about 15 minutes, to the oldest of the 3 kept.",
+		"reachHourly":       "You can restore back up to about 3 hours, to the oldest of the 3 kept.",
+		"reachDaily":        "You can restore back up to about 3 days",
+		"reachDailyTyped1":  "After you save, you can restore back up to about 1 day, to the one snapshot kept.",
 		"reachNone":         "You can restore back to the oldest of the 3 kept. Put the copy on a schedule (Update the copy, above) and this becomes a length of time.",
 		"reachNoneOne":      "You can restore back to the one snapshot kept.",
-		"reachRetain":       "You can restore back to about 7 days ago",
+		"reachRetain":       "You can restore back up to about 7 days",
 		"reachScheduleOnly": "You can restore back to the oldest of the 3 kept.",
-		"reachNotApplied":   "After you save, you can restore back to about 3 hours ago",
+		"reachNotApplied":   "After you save, you can restore back up to about 3 hours",
 	} {
 		r := got[name]
 		w := joined(r.Before)
@@ -285,14 +285,14 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		// With S3 a restore reads the bucket, so the count is not what
 		// bounds it (#2678): the line says so, and how much a moment
 		// between two sends replays when the schedule spaces them.
-		reach := "A restore reads S3: back to its oldest snapshot."
+		reach := "A restore reads S3: back to the oldest snapshot sent there."
 		if name == "s3CountedHeld" {
-			reach = "A restore reads S3: back to its oldest snapshot, replaying up to 1 day of changes."
+			reach = "A restore reads S3: back to the oldest snapshot sent there, replaying up to 1 day of changes."
 		}
 		if !strings.Contains(w, reach) {
 			t.Errorf("%s: does not say %q: %q", name, reach, w)
 		}
-		if strings.Contains(w, "You can restore back to about") {
+		if strings.Contains(w, "You can restore back") {
 			t.Errorf("%s: a server with S3 is told its reach is the local count's: %q", name, w)
 		}
 		t.Logf("%s reach line: %s", name, reach)

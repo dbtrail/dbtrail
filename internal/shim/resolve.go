@@ -53,6 +53,11 @@ const (
 	// ResolveCanceled is a client-disconnect / shutdown cancel. MySQL →
 	// ER_QUERY_INTERRUPTED (1317); PG → SQLSTATE 57014.
 	ResolveCanceled
+	// ResolveNoSnapshot is a single-row _snapshot with a snapshot location
+	// configured and no snapshot of the table at or before the AS OF instant
+	// (#2678). MySQL → ER_NO_PARTITION_FOR_GIVEN_VALUE (1526), the full-table
+	// path's code for the same cause (#822); PG → SQLSTATE 22023.
+	ResolveNoSnapshot
 )
 
 // ResolveError wraps a classified single-row resolve failure so both wire
@@ -109,6 +114,9 @@ func mysqlResolveError(rerr *ResolveError) error {
 		// nil Err formats safely instead of panicking — the PG renderer's Gap
 		// branch is already nil-robust this way. Byte-identical for the reachable
 		// case (classifyFetchError always sets a non-nil Err).
+		return mysql.NewError(mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE,
+			fmt.Sprintf("resolve %s: %s", rerr.QType, rerr.Err))
+	case ResolveNoSnapshot:
 		return mysql.NewError(mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE,
 			fmt.Sprintf("resolve %s: %s", rerr.QType, rerr.Err))
 	case ResolveTimeout:
@@ -318,9 +326,22 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, src, q.Schema, q.Table, q.AsOf)
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
-			h.logger.Debug("shim: _snapshot found no baseline at-or-before AsOf; using binlog-only path",
-				"schema", q.Schema, "table", q.Table)
-			return withNotes(h.resolveFlashbackRow(ctx, q))
+			// A location is configured and holds no snapshot of this table
+			// at or before AsOf (the moment is older than the oldest snapshot
+			// kept, or the table was created after the last one). Answering
+			// from the recorded changes alone would say "no such row" for a
+			// row that existed and that no change touched inside the retained
+			// window: a wrong answer the caller cannot tell from a right one.
+			// It was reachable before, and the local folder now reaches back
+			// the count times the schedule, not an hour (#2678), so it is
+			// refused, as the full-table shape is (#822). With NO location
+			// configured the answer stays changes-only, as documented.
+			return nil, nil, &ResolveError{Class: ResolveNoSnapshot, QType: q.Type, Err: fmt.Errorf(
+				"no baseline for %s.%s at or before %s; _snapshot cannot tell whether the row existed then "+
+					"(a row that no recorded change touched would read as absent). Ask for a moment at or after "+
+					"the oldest snapshot kept, keep more snapshots or add an S3 destination, "+
+					"or use _flashback for a binlog-only view",
+				q.Schema, q.Table, q.AsOf.UTC().Format(time.RFC3339))}
 		}
 		// A real baseline-source failure (unreadable dir, S3 outage) is a
 		// server-side fault: raw error → the caller's "internal fault" branch.

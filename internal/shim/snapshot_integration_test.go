@@ -1223,6 +1223,48 @@ func TestSnapshotBaseline_FullTableNoBaselineAtOrBeforeAsOfRefuses(t *testing.T)
 	}
 }
 
+// A single-row _snapshot of a row no recorded change touched (#2678). With a
+// location configured and the only snapshot dated AFTER the moment asked
+// for, it is refused with 1526: before, it answered "no such row". At a
+// moment at or after that snapshot the row is there.
+func TestSnapshotBaseline_SingleRowNoBaselineAtOrBeforeAsOfRefuses(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	hourTop := time.Now().UTC().Truncate(time.Hour)
+	addHourlyPartition(t, db, hourTop)
+	seedUsersSnapshot(t, db, hourTop.Add(1*time.Minute))
+	before := hourTop.Add(10 * time.Minute)
+	snapAt := hourTop.Add(20 * time.Minute)
+	after := hourTop.Add(30 * time.Minute)
+	baselineDir := writeBaselineSnapshot(t, snapAt, "myapp", "users", usersBaselineCols(), [][]string{
+		{"1", "untouched"},
+	})
+	h := NewHandlerWithConfig(db, Config{
+		AllowGaps: true, NoArchive: true, IndexDBName: dbName, BaselineDir: baselineDir,
+	}, slog.Default())
+	q := TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1"}
+
+	q.AsOf = before
+	_, err := h.runSnapshot(q)
+	me, ok := err.(*mysql.MyError)
+	if !ok || me.Code != mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+		t.Fatalf("before the oldest snapshot: err = %v, want 1526 (it used to answer no such row)", err)
+	}
+	t.Logf("before the oldest snapshot the client reads: ERROR %d: %s", me.Code, me.Message)
+
+	q.AsOf = after
+	res, err := h.runSnapshot(q)
+	if err != nil {
+		t.Fatalf("at a moment after the snapshot: %v", err)
+	}
+	if cells := rowCells(t, res.Resultset); len(cells) != 1 || !slices.Equal(cells[0], []string{"1", "untouched"}) {
+		t.Fatalf("at a moment after the snapshot the row is %v, want [[1 untouched]]", cells)
+	}
+}
+
 // TestSnapshotBaseline_EnumLabelsAcrossBaselineAndDeltas pins #472 on
 // both _snapshot paths. A baseline row carries the ENUM value as a label
 // string (the mydumper dump shape) and must pass through the mapper

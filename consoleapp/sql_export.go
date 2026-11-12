@@ -167,6 +167,9 @@ func (s *baselineSupervisor) TriggerSQLExport(req console.SQLExportRequest) erro
 	// goroutine exists.
 	end := baseline.BeginRead(req.BaselineSrc, "a .sql build")
 	go func() {
+		// When the build lets go of the folder it has held still, the
+		// folder is over its count: applied now, not at the next snapshot.
+		defer s.pruneAfterPublish(req.BaselineSrc)
 		defer end()
 		s.runSQLExport(req, dir)
 	}()

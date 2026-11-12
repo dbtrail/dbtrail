@@ -9252,7 +9252,7 @@ function keepShapeDraw(box, keep, everyMin, retainMin) {
   box.append(row);
   const mins = keep && everyMin ? Math.max(keep * everyMin, retainMin || 0) : 0;
   box.append(el("div", { class: "ks-axis" },
-    el("span", { class: "ks-left", text: all ? "every snapshot, kept" : (mins ? "about " + reachSpan(mins) + " ago" : "the oldest kept") }),
+    el("span", { class: "ks-left", text: all ? "every snapshot, kept" : (mins ? "up to " + reachSpan(mins) + " ago" : "the oldest kept") }),
     el("span", { class: "ks-right", text: "now" })));
 }
 
@@ -9283,7 +9283,10 @@ function keepShapeDraw(box, keep, everyMin, retainMin) {
 // which is at most the time between two sends.
 function localReachWords(keep, reach) {
   if (reach.s3) {
-    return "A restore reads S3: back to its oldest snapshot" +
+    // "Sent there", not "S3's oldest": with nothing sent yet a restore has
+    // nothing to read, whatever this folder holds, and the line must not
+    // promise a reach the bucket cannot give.
+    return "A restore reads S3: back to the oldest snapshot sent there" +
       (reach.sendEvery ? ", replaying up to " + exactSpan(reach.sendEvery) + " of changes." : ".");
   }
   // "After you save" while the typed number is not the one in force yet.
@@ -9293,7 +9296,9 @@ function localReachWords(keep, reach) {
       ". Put the copy on a schedule (Update the copy, above) and this becomes a length of time.";
   }
   const mins = Math.max(keep * reach.every, reach.retain || 0);
-  return lead + " restore back to about " + reachSpan(mins) + " ago, " + (keep === 1 ? "the one snapshot kept." : "the oldest of the " + keep + " kept.");
+  // "Up to": that is the oldest kept just before the next snapshot; right
+  // after one it is an interval less.
+  return lead + " restore back up to about " + reachSpan(mins) + ", to " + (keep === 1 ? "the one snapshot kept." : "the oldest of the " + keep + " kept.");
 }
 
 // reachSpan says a number of minutes the way a person would: minutes below
@@ -11062,6 +11067,11 @@ function baselinesPanel(b, servers, opts) {
       } else {
         if (newest) row.append(newest);
         row.append(when, rel);
+      }
+      if (sn.restored) {
+        // Why a snapshot dated in the past is still here (#2678).
+        what.append(el("span", { class: "chip chip-unknown", text: "last restore, kept",
+          title: "The result of the last restore to a moment. Kept until the next restore, on top of the newest kept." }));
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");

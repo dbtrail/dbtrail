@@ -2,17 +2,21 @@ package consoleapp
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/verify"
 )
 
 // The count applied after each snapshot (#2678), on real folders: a job that
@@ -348,5 +352,176 @@ func TestCountAfterPublish_theCleanupWaitsForASQLBuild(t *testing.T) {
 			t.Fatalf("the build is over and %q still stops the cleanup", baseline.Reading(src))
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The update registers with its folder before its goroutine starts and until
+// the merge of its changes is over, so no cleanup falls between the publish
+// and the merge (which reads the snapshot before the newest).
+func TestCountAfterPublish_anUpdateHoldsTheFolderThroughItsMerge(t *testing.T) {
+	_, id, dir, _ := countedServer(t, 1, 3)
+	stubGateReads(t)
+	prev := foldTables
+	t.Cleanup(func() { foldTables = prev })
+	hold := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(hold) }) }
+	t.Cleanup(release)
+	foldTables = func(_ context.Context, cfg reconstruct.FullTableConfig) ([]*reconstruct.TableReport, []reconstruct.TableFailure, error) {
+		<-hold
+		writeSnapshotFiles(t, filepath.Join(cfg.OutputDir, reconstruct.SnapshotDirName(cfg.At)), baseline.SuccessMarker)
+		return nil, nil, nil
+	}
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
+	sup.history = openHistoryForTest(t)
+	if _, err := sup.TriggerRefresh(refreshRequest{ServerID: id, ServerName: "shop", IndexDSN: "d", BaselineDir: dir}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// Right after the trigger returns, whatever the goroutine has done.
+	if what := baseline.Reading(dir); !strings.Contains(what, "update") {
+		t.Fatalf("right after the update was triggered the folder's reader is %q", what)
+	}
+	release()
+	sup.postRefresh.Wait()
+	if what := baseline.Reading(dir); what != "" {
+		t.Fatalf("the update is over and %q still stops the cleanup", what)
+	}
+	if got := snapshotsIn(t, dir); len(got) != 1 {
+		t.Fatalf("after the update the folder holds %v, want the count of 1", got)
+	}
+}
+
+// A check holds its folder still while it runs, and applies the count when
+// it ends, which also clears the page's "waiting" record.
+func TestCountAfterPublish_aCheckHoldsTheFolderAndAppliesTheCountAtItsEnd(t *testing.T) {
+	_, _, dir, old := countedServer(t, 1, 3)
+	prev := findBaselinePair
+	t.Cleanup(func() { findBaselinePair = prev })
+	var during string
+	findBaselinePair = func(_ context.Context, src, _ string) ([]verify.BaselinePair, []query.SchemaTable, error) {
+		during = baseline.Reading(src)
+		// A cleanup in the middle of the check: it waits, and says so.
+		pruneAfterPublishFn(src)
+		return nil, nil, os.ErrInvalid
+	}
+	s := &verifySupervisor{ctx: context.Background()}
+	_ = s.runBaselineAnchored(console.VerifyRequest{}, dir, nil, nil, "", "")
+	if !strings.Contains(during, "check") {
+		t.Fatalf("while the check ran the folder's reader was %q", during)
+	}
+	if got := snapshotsIn(t, dir); len(got) != 1 || got[0] != old[2] {
+		t.Fatalf("after the check the folder holds %v, want only %s", got, old[2])
+	}
+	if rec, ok := baseline.ReadCleanupWaiting(dir); ok {
+		t.Fatalf("the check ended and the page would still say the cleanup waits: %+v", rec)
+	}
+}
+
+// A .sql build applies the count when it ends, after it let go of the folder.
+func TestCountAfterPublish_aSQLBuildAppliesTheCountAtItsEnd(t *testing.T) {
+	at := time.Date(2026, 6, 10, 11, 0, 0, 0, time.UTC)
+	src := writeSQLExportBaseline(t, at.Add(-time.Hour))
+	prev := pruneAfterPublishFn
+	t.Cleanup(func() { pruneAfterPublishFn = prev })
+	called := make(chan [2]string, 1)
+	pruneAfterPublishFn = func(d string) { called <- [2]string{d, baseline.Reading(d)} }
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), "")
+	if err := sup.TriggerSQLExport(console.SQLExportRequest{ServerID: "srv1", ServerName: "wp",
+		IndexDSN: "i:p@tcp(127.0.0.1:1)/idx", BaselineSrc: src, At: at}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-called:
+		if got[0] != src || got[1] != "" {
+			t.Fatalf("the count was applied to %q while %q still held the folder; want %q and nobody", got[0], got[1], src)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the .sql build ended and the count was never applied")
+	}
+}
+
+// Re-sends of what the bucket lacks: one round per folder at a time, and
+// after a round that failed none for an hour, whatever the number of
+// cleanups in between.
+func TestResendLacking_oneRoundAtATimeAndAnHourAfterAFailure(t *testing.T) {
+	dir := t.TempDir()
+	names := makeLocalSnapshots(t, dir, 2)
+	prevFn, prevNow := resendSnapshotFn, resendNow
+	t.Cleanup(func() { resendSnapshotFn, resendNow = prevFn, prevNow })
+	now := time.Now()
+	resendNow = func() time.Time { return now }
+	var calls int
+	fail := true
+	resendSnapshotFn = func(context.Context, string, string, string) error {
+		calls++
+		if fail {
+			return os.ErrPermission
+		}
+		return nil
+	}
+	target := baselinePruneTarget{dir: dir, s3: "s3://bucket/shop/", keepNewest: 1}
+	res := baseline.PruneResult{KeptNotDurable: 2, NotAtDestination: names}
+	logs := captureLog(t, slog.LevelInfo)
+
+	resendLacking(context.Background(), target, res, false)
+	if calls != 2 {
+		t.Fatalf("the first round tried %d sends, want 2", calls)
+	}
+	// Five more cleanups in the next 55 minutes: nothing is tried.
+	for i := 1; i <= 5; i++ {
+		now = now.Add(11 * time.Minute)
+		resendLacking(context.Background(), target, res, false)
+	}
+	if calls != 2 {
+		t.Fatalf("inside the hour after a failed round %d more sends were tried", calls-2)
+	}
+	if rec, ok, _ := baseline.ReadNotInDestination(dir); !ok || rec.Count != 2 || !rec.Resending {
+		t.Fatalf("the record while waiting: %+v ok=%v", rec, ok)
+	}
+	// Past the hour it is tried again; still failing, and said once only.
+	now = now.Add(6 * time.Minute)
+	resendLacking(context.Background(), target, res, false)
+	if calls != 4 {
+		t.Fatalf("past the hour %d sends were tried in all, want 4", calls)
+	}
+	if n := strings.Count(logs.String(), "could not be sent again; the snapshots stay on this disk"); n != 1 {
+		t.Fatalf("the failure was warned %d times, want once for the whole streak", n)
+	}
+	// It works again: said once, and the wait is over.
+	now = now.Add(61 * time.Minute)
+	fail = false
+	resendLacking(context.Background(), target, res, false)
+	if calls != 6 || strings.Count(logs.String(), "works again") != 1 {
+		t.Fatalf("after the bucket accepted the sends: %d calls, log %q", calls, logs.String())
+	}
+	if _, ok, _ := baseline.ReadNotInDestination(dir); ok {
+		t.Fatal("both were sent and the record still says the bucket lacks them")
+	}
+
+	// One round at a time: a second cleanup while a round is sending tries
+	// nothing.
+	other := t.TempDir()
+	onames := makeLocalSnapshots(t, other, 1)
+	started, hold := make(chan struct{}), make(chan struct{})
+	var inFlight, most int32
+	resendSnapshotFn = func(context.Context, string, string, string) error {
+		if n := atomic.AddInt32(&inFlight, 1); n > atomic.LoadInt32(&most) {
+			atomic.StoreInt32(&most, n)
+		}
+		close(started)
+		<-hold
+		atomic.AddInt32(&inFlight, -1)
+		return nil
+	}
+	ot := baselinePruneTarget{dir: other, s3: "s3://bucket/other/", keepNewest: 1}
+	ores := baseline.PruneResult{KeptNotDurable: 1, NotAtDestination: onames}
+	done := make(chan struct{})
+	go func() { resendLacking(context.Background(), ot, ores, false); close(done) }()
+	<-started
+	resendLacking(context.Background(), ot, ores, false) // returns at once: a round is running
+	close(hold)
+	<-done
+	if most != 1 {
+		t.Fatalf("%d sends of one folder ran at once", most)
 	}
 }

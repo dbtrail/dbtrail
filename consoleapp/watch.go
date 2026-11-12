@@ -1844,7 +1844,21 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 			"dir", t.dir, "destination", t.s3, "missing", len(res.NotAtDestination))
 		return
 	}
-	sent, skipped, tried := map[string]bool{}, map[string]bool{}, 0
+	// One round per folder at a time, and none for an hour after a round
+	// that failed (#2678). The cleanup now follows every snapshot, so
+	// without this a bucket that answers "not here" and refuses the upload
+	// (no write permission) was tried three times every few minutes, two
+	// rounds could send different snapshots at once, and the log filled
+	// with the same warning. An hour is the hourly cleanup's own pace, which
+	// is how often these were tried before.
+	round := resendRoundFor(t.dir)
+	if !round.begin() {
+		noteResending(t, res, nil, nil)
+		return
+	}
+	defer round.end()
+	sent, skipped, tried, failed := map[string]bool{}, map[string]bool{}, 0, 0
+	wasFailing := round.isFailing()
 	for _, name := range res.NotAtDestination {
 		if ctx.Err() != nil || tried >= resendPerCycle {
 			break
@@ -1867,13 +1881,103 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 		}
 		tried++
 		if err != nil {
-			slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the next cleanup tries again",
-				"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
+			failed++
+			// Said once when the sending starts to fail, not at every
+			// attempt of a failure that goes on.
+			if !wasFailing && failed == 1 {
+				slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the snapshots stay on this disk, and sending them is tried again in an hour, not after every snapshot",
+					"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
+			} else {
+				slog.Debug("snapshot cleanup: a local snapshot the destination lacks could not be sent again",
+					"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
+			}
 			continue
 		}
 		sent[name] = true
 		slog.Info("snapshot cleanup: sent again a local snapshot the destination lacked", "dir", t.dir, "snapshot", name, "destination", t.s3)
 	}
+	if round.finished(failed > 0, tried > 0) {
+		slog.Info("snapshot cleanup: sending the snapshots the destination lacked works again", "dir", t.dir, "destination", t.s3)
+	}
+	noteResending(t, res, sent, skipped)
+}
+
+// resendBackoff is how long a folder's re-sends wait after a round in which
+// one failed: the hourly cleanup's pace.
+const resendBackoff = time.Hour
+
+// resendNow is the clock of the re-send rounds, replaced in tests.
+var resendNow = time.Now
+
+// resendRound is one folder's re-send state: whether a round runs now,
+// whether the last one failed, and when the next may start.
+type resendRound struct {
+	mu      sync.Mutex
+	running bool
+	failing bool
+	nextTry time.Time
+}
+
+var (
+	resendRoundsMu sync.Mutex
+	resendRounds   = map[string]*resendRound{}
+)
+
+func resendRoundFor(dir string) *resendRound {
+	key := console.CanonicalDir(dir)
+	resendRoundsMu.Lock()
+	defer resendRoundsMu.Unlock()
+	if resendRounds[key] == nil {
+		resendRounds[key] = &resendRound{}
+	}
+	return resendRounds[key]
+}
+
+// begin claims the folder's round; false while another runs or the wait
+// after a failed one is not over.
+func (r *resendRound) begin() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.running || resendNow().Before(r.nextTry) {
+		return false
+	}
+	r.running = true
+	return true
+}
+
+func (r *resendRound) end() {
+	r.mu.Lock()
+	r.running = false
+	r.mu.Unlock()
+}
+
+func (r *resendRound) isFailing() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.failing
+}
+
+// finished records how the round went, and reports whether sending just
+// started to work again after failing.
+func (r *resendRound) finished(failed, tried bool) (recovered bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case failed:
+		r.failing = true
+		r.nextTry = resendNow().Add(resendBackoff)
+	case tried:
+		recovered = r.failing
+		r.failing = false
+		r.nextTry = time.Time{}
+	}
+	return recovered
+}
+
+// noteResending rewrites the folder's record of snapshots the destination
+// lacks after a round (sent and skipped are what it did), or with nothing
+// done when the round did not start: they are still going to be sent.
+func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool) {
 	if res.DestinationSilent {
 		// The destination failed to answer for some snapshots in this pass
 		// (#2658), so how many it lacks is not known: the prune left the

@@ -227,34 +227,47 @@ func CountLocalSnapshots(dir string) (int, error) {
 
 // CleanupWaitingFile records, beside the snapshots, that the cleanup of this
 // folder is standing still for a job that reads its older snapshots (#2678):
-// which job, since when, and when it was last found still running. Removed
-// by the first cleanup that runs. Without it a folder over its count while a
-// long restore or check runs is unexplained on the page.
+// which job, when that job started, and when a cleanup last found it
+// running. Removed by the first cleanup that runs. Without it a folder over
+// its count while a long restore or check runs is unexplained on the page.
 const CleanupWaitingFile = ".cleanup-waiting.json"
 
 // CleanupWaiting is that record.
 type CleanupWaiting struct {
-	// Since is the first cleanup that stood still; At the latest one.
+	// Since is when the job named started (its registration, not the first
+	// cleanup that waited); At is when a cleanup last found it running.
 	Since time.Time `json:"since"`
 	At    time.Time `json:"at"`
 	What  string    `json:"what"`
 }
 
+// cleanupWaitingFresh is how long a record is believed after it was written.
+// A daemon that waits rewrites it at every cleanup (hourly, and after each
+// job that ends), and removes it at the first one that runs. One older than
+// two of those hours was left by a process that stopped, or is read by a
+// console whose own process prunes nothing: it says nothing about now.
+const cleanupWaitingFresh = 2 * time.Hour
+
 // ReadCleanupWaiting reads dir's record; ok is false when the last cleanup
-// ran. An unreadable record reads as none: it explains, it decides nothing.
+// ran, or the record is too old to speak for now. An unreadable record
+// reads as none: it explains, it decides nothing.
 func ReadCleanupWaiting(dir string) (rec CleanupWaiting, ok bool) {
 	b, err := os.ReadFile(filepath.Join(dir, CleanupWaitingFile))
 	if err != nil {
 		return CleanupWaiting{}, false
 	}
-	if err := json.Unmarshal(b, &rec); err != nil || rec.Since.IsZero() || rec.What == "" {
+	if err := json.Unmarshal(b, &rec); err != nil || rec.Since.IsZero() || rec.At.IsZero() || rec.What == "" {
+		return CleanupWaiting{}, false
+	}
+	if time.Since(rec.At) > cleanupWaitingFresh {
 		return CleanupWaiting{}, false
 	}
 	return rec, true
 }
 
-// noteCleanupWaiting keeps the record in step with one cleanup: written (the
-// first Since kept) when it stood still for what, removed when it ran.
+// noteCleanupWaiting keeps the record in step with one cleanup: rewritten
+// with the job it waits for now and that job's own start when it stood
+// still for what, removed when it ran.
 func noteCleanupWaiting(dir, what string) {
 	path := filepath.Join(dir, CleanupWaitingFile)
 	if what == "" {
@@ -265,9 +278,14 @@ func noteCleanupWaiting(dir, what string) {
 	}
 	now := time.Now().UTC()
 	rec := CleanupWaiting{Since: now, At: now, What: what}
-	if prev, ok := ReadCleanupWaiting(dir); ok {
-		rec.Since = prev.Since
+	// The job's own start. Asked again here: the job may have ended since
+	// the cleanup saw it, and then the record is not written at all.
+	cur, since, _ := readingNow(dir, time.Now())
+	if cur == "" {
+		_ = removeRecord(path)
+		return
 	}
+	rec.What, rec.Since = cur, since.UTC()
 	b, err := json.Marshal(rec)
 	if err == nil {
 		err = writeFileAtomic0600(dir, CleanupWaitingFile, b)

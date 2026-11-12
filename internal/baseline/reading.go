@@ -88,29 +88,29 @@ func BeginRead(root, what string) (end func()) {
 }
 
 // readingNow reports the reader that stops a prune of root now: the one
-// registered longest ago among those inside readHoldLimit. stuck counts the
-// registrations past the limit, which no longer stop it.
-func readingNow(root string, now time.Time) (what string, stuck int) {
+// registered longest ago among those inside readHoldLimit, and when it
+// registered. stuck counts the registrations past the limit, which no longer
+// stop it.
+func readingNow(root string, now time.Time) (what string, since time.Time, stuck int) {
 	key := readKey(root)
 	readsMu.Lock()
 	defer readsMu.Unlock()
-	var oldest time.Time
 	for h := range reads[key] {
 		if now.Sub(h.since) > readHoldLimit {
 			stuck++
 			continue
 		}
-		if what == "" || h.since.Before(oldest) {
-			what, oldest = h.what, h.since
+		if what == "" || h.since.Before(since) {
+			what, since = h.what, h.since
 		}
 	}
-	return what, stuck
+	return what, since, stuck
 }
 
 // Reading names the job that stops a prune of root now, "" when none does:
 // what PruneLocal would report as PruneResult.Reading.
 func Reading(root string) string {
-	what, _ := readingNow(root, time.Now())
+	what, _, _ := readingNow(root, time.Now())
 	return what
 }
 
@@ -200,4 +200,35 @@ func Pinned(root string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// PinSnapshotCapped is PinSnapshot for readers anyone allowed can start as
+// many of as they like (a snapshot download): it refuses, with ok false, a
+// pin that would make more than max DIFFERENT snapshots of root pinned by
+// readers of the same kind (what). Another reader of a snapshot already
+// pinned is always let in: it keeps nothing more on the disk. So downloads
+// repeated at will keep at most max snapshots past the count, not every
+// snapshot there is.
+func PinSnapshotCapped(root, name, what string, limit time.Duration, max int) (release func(), ok bool) {
+	if root == "" || name == "" || strings.HasPrefix(root, "s3://") {
+		return func() {}, true
+	}
+	key := readKey(root)
+	now := time.Now()
+	readsMu.Lock()
+	distinct, already := 0, false
+	for n, set := range pins[key] {
+		for p := range set {
+			if p.what == what && now.Before(p.until) {
+				distinct++
+				already = already || n == name
+				break
+			}
+		}
+	}
+	readsMu.Unlock()
+	if !already && distinct >= max {
+		return func() {}, false
+	}
+	return PinSnapshot(root, name, what, limit), true
 }

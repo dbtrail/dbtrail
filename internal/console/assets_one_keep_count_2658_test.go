@@ -114,6 +114,7 @@ const draw = (b) => {
     going: rows.length,
     chips: chips.length,
     titles: chips.map((n) => (n.attrs && n.attrs.title) || n.title || ""),
+    kept: nodes.filter((n) => n.textContent === "last restore, kept").map((n) => (n.attrs && n.attrs.title) || n.title || ""),
     line: nodes.filter((n) => / bk-retention /.test(" " + (n.className || "") + " ")).map((n) => n.textContent),
   };
 };
@@ -133,6 +134,7 @@ console.log(JSON.stringify({
 	type view struct {
 		Going, Chips int
 		Titles, Line []string
+		Kept         []string
 	}
 	var got struct{ Local, S3 view }
 	if err := json.Unmarshal(out, &got); err != nil {
@@ -151,6 +153,14 @@ console.log(JSON.stringify({
 		if title != "Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next cleanup, which follows each new snapshot, never a table's only copy." {
 			t.Errorf("no S3: hover text %q", title)
 		}
+	}
+	// The restore's result says why it is still there.
+	t.Logf("the restore's row: chip %q, hover %q", "last restore, kept", got.Local.Kept)
+	if len(got.Local.Kept) != 1 || got.Local.Kept[0] != "The result of the last restore to a moment. Kept until the next restore, on top of the newest kept." {
+		t.Errorf("no S3: the restore's result is labelled %q", got.Local.Kept)
+	}
+	if len(got.S3.Kept) != 0 {
+		t.Errorf("with S3: a row that is not a restore's result is labelled %q", got.S3.Kept)
 	}
 	if len(got.Local.Line) != 1 || got.Local.Line[0] != "Keeps the newest 2 snapshots on this machine." {
 		t.Errorf("no S3: retention line %q", got.Local.Line)

@@ -310,7 +310,7 @@ func pruneWithProbe(ctx context.Context, opts PruneOptions, probe durableProbe) 
 		// ran.
 		noteCleanupWaiting(opts.LocalDir, res.Reading)
 	}
-	if opts.DryRun || res.Busy || res.Reading != "" {
+	if opts.DryRun || res.Busy || (res.Reading != "" && len(res.Pruned) == 0) {
 		return res, err
 	}
 	now := opts.Now
@@ -452,7 +452,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// process reads older snapshots of this folder, nothing is removed from
 	// it, in any mode. A dry run removes nothing and still says its plan.
 	if !opts.DryRun {
-		what, stuck := readingNow(opts.LocalDir, time.Now())
+		what, _, stuck := readingNow(opts.LocalDir, time.Now())
 		if stuck > 0 {
 			slog.Warn("baseline prune: a job has been reading this folder's older snapshots for longer than any such job runs, so the cleanup no longer waits for it",
 				"dir", opts.LocalDir, "jobs", stuck, "waited", readHoldLimit)
@@ -485,24 +485,42 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// of the list the plan is made from, after the keepers and the newest N
 	// were worked out from all of it, so a pin never changes which
 	// snapshots are the count's.
+	//
+	// The last restore's result is outside the count altogether (#2678): it
+	// is named for a past moment, and when that moment falls among the newest
+	// N it would take one of their places and push a real snapshot out. So
+	// the keepers and the newest N are worked out WITHOUT it (countable), and
+	// it is kept by its own rule below (restoredKept).
 	all := snaps
-	var keptPinned int
-	if pinned := pinnedNow(opts.LocalDir, time.Now()); len(pinned) > 0 && !opts.DryRun {
-		snaps = nil
-		for _, s := range all {
-			if what, ok := pinned[s.name]; ok {
-				keptPinned++
-				slog.Info("baseline prune: a reader is on this snapshot; it stays until the reader ends", "dir", opts.LocalDir, "snapshot", s.name, "reader", what)
-				continue
-			}
-			snaps = append(snaps, s)
+	restored := lastRestored(opts.LocalDir, opts.DryRun)
+	var countable []localSnapshot
+	var restoredSnap *localSnapshot
+	for i := range all {
+		if all[i].name == restored && all[i].complete && !all[i].unreadable {
+			restoredSnap = &all[i]
+			continue
 		}
+		countable = append(countable, all[i])
+	}
+	var keptPinned int
+	pinned := map[string]string{}
+	if !opts.DryRun {
+		pinned = pinnedNow(opts.LocalDir, time.Now())
+	}
+	snaps = nil
+	for _, s := range countable {
+		if what, ok := pinned[s.name]; ok {
+			keptPinned++
+			slog.Info("baseline prune: a reader is on this snapshot; it stays until the reader ends", "dir", opts.LocalDir, "snapshot", s.name, "reader", what)
+			continue
+		}
+		snaps = append(snaps, s)
 	}
 	// Carried on the result whatever the plan says: a leftover that cannot be
 	// deleted is a failure even in a cycle that has nothing new to remove.
 	withSweep := func(res PruneResult) PruneResult {
 		res.SweepFailures, res.firstSweepErr = sweepFailures, firstSweepErr
-		res.KeptPinned = keptPinned
+		res.KeptPinned += keptPinned
 		for _, s := range all {
 			if s.unreadable {
 				res.firstUnreadable = s.readErr
@@ -511,18 +529,42 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		}
 		return res
 	}
-	keepers := computeKeepers(all, now)
+	keepers := computeKeepers(countable, now)
 	keepPointerTarget(opts.LocalDir, keepers)
-	// The last restore's result, whatever moment it is named for (#2678).
-	if name := lastRestored(opts.LocalDir, opts.DryRun); name != "" {
-		keepers[name] = true
+	// restoredKept adds the last restore's result to a plan's tally: always
+	// kept. With a destination it is asked about like a snapshot that could
+	// go, so one whose upload failed is listed as missing there and sent
+	// again (resendLacking) instead of staying on this disk alone for good.
+	restoredKept := func(res PruneResult, probeErrors *int) PruneResult {
+		if restoredSnap == nil {
+			return res
+		}
+		if localOnly {
+			res.KeptKeeper++
+			return res
+		}
+		ok, perr := probe(ctx, restoredSnap.name)
+		switch {
+		case perr != nil:
+			slog.Warn("baseline prune: could not confirm that the last restore's snapshot is in S3; it is kept either way",
+				"snapshot", restoredSnap.name, "error", perr)
+			*probeErrors++
+			res.KeptNotDurable++
+		case !ok:
+			res.KeptNotDurable++
+			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
+		default:
+			res.KeptKeeper++
+		}
+		return res
 	}
 	// Read in both modes, so a mark whose snapshot is gone is swept in both.
 	held := heldSnapshots(opts.LocalDir, opts.DryRun)
 
 	if localOnly {
-		newest := computeNewestN(all, opts.KeepNewest, now)
+		newest := computeNewestN(countable, opts.KeepNewest, now)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, 0, now)
+		res = restoredKept(res, nil)
 		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)
 		return withSweep(removePlanned(opts, now, pruneNames, res, func(string) string { return why })), nil
 	}
@@ -536,7 +578,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// decides, and a set Retain still keeps what is younger than it.
 	minAge := baselinePruneMinAge
 	if counted {
-		newest = computeNewestN(all, opts.KeepNewest, now)
+		newest = computeNewestN(countable, opts.KeepNewest, now)
 		minAge = 0
 	}
 
@@ -599,6 +641,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	}
 
 	pruneNames, res := planPruneHeld(snaps, keepers, newest, durable, held, opts.Retain, minAge, now)
+	res = restoredKept(res, &probeErrors)
 	res.ProbeErrors = probeErrors
 	if counted && probeErrors > 0 {
 		// By count, a destination that cannot be asked removes nothing that
@@ -719,6 +762,23 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 				"snapshot", name, "bytes", size, "reason", why)
 			res.Pruned = append(res.Pruned, name)
 			res.ReclaimedBytes += size
+			continue
+		}
+		// Looked at again right before each removal (#2678): the plan was
+		// made from the readers and the pins as they were then, and with a
+		// destination the bucket was asked in between, which takes seconds.
+		// A reader that registered meanwhile is honoured: a job on the
+		// folder stops the rest of this cleanup, a pin keeps its snapshot.
+		if what, _, _ := readingNow(opts.LocalDir, time.Now()); what != "" {
+			slog.Info("baseline prune: a job started reading this folder's older snapshots during the cleanup; the rest stay until it ends",
+				"dir", opts.LocalDir, "job", what)
+			res.Reading = what
+			break
+		}
+		if what, ok := pinnedNow(opts.LocalDir, time.Now())[name]; ok {
+			slog.Info("baseline prune: a reader took this snapshot during the cleanup; it stays until the reader ends",
+				"dir", opts.LocalDir, "snapshot", name, "reader", what)
+			res.KeptPinned++
 			continue
 		}
 		staged, err := removeSnapshot(opts.LocalDir, name)

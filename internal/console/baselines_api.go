@@ -197,10 +197,9 @@ type baselinesResponse struct {
 	// folder that stops shrinking shows only in the daemon's log while the
 	// retention line says how many snapshots it keeps.
 	LastPruneFailure *pruneFailureDTO `json:"last_prune_failure,omitempty"`
-	// CleanupWaiting says the cleanup of that folder has stood still for
-	// more than one cleanup because a job reads its older snapshots (#2678):
-	// which job, and since when. Omitted when the last cleanup ran, or when
-	// only one has waited so far.
+	// CleanupWaiting says the last cleanup of that folder stood still
+	// because a job reads its older snapshots (#2678): which job, and when
+	// that job started. Omitted when the last cleanup ran.
 	CleanupWaiting *cleanupWaitingDTO `json:"cleanup_waiting,omitempty"`
 }
 
@@ -248,14 +247,15 @@ type cleanupWaitingDTO struct {
 }
 
 // cleanupWaitingOf reads the folder's "the cleanup is waiting for a job"
-// record, and reports it only once a second cleanup found the same job still
-// running: one cleanup that waited is routine, and gone at the next.
+// record: the job, and when that job started. A record no cleanup has
+// rewritten for two hours is not reported (baseline.ReadCleanupWaiting), so
+// a console that prunes nothing itself does not show a stale one for ever.
 func cleanupWaitingOf(dir string) *cleanupWaitingDTO {
 	if dir == "" {
 		return nil
 	}
 	rec, ok := baseline.ReadCleanupWaiting(dir)
-	if !ok || !rec.At.After(rec.Since) {
+	if !ok {
 		return nil
 	}
 	return &cleanupWaitingDTO{Since: rec.Since.UTC().Format(time.RFC3339), What: rec.What}

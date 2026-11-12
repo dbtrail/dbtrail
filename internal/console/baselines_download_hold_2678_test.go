@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,4 +232,60 @@ func TestBaselineDownload_aSlowClientThatKeepsReadingIsNotCut(t *testing.T) {
 	if total < 48<<20 {
 		t.Fatalf("the download delivered %d bytes, less than the snapshot", total)
 	}
+}
+
+// Downloads repeated at will cannot pin every snapshot there is: at most as
+// many different snapshots as the server keeps (3 with no count of its own)
+// are held for downloads at once. One more is refused with a message that
+// says to try again; another download of a snapshot already held is let in.
+func TestBaselineDownload_cappedAtTheSnapshotsTheServerKeeps(t *testing.T) {
+	dir := newDetailFixture(t)
+	others := []string{"2026-06-06T12-00-00Z", "2026-06-07T12-00-00Z", "2026-06-08T12-00-00Z"}
+	for _, n := range others {
+		olderSnapshot(t, dir, n)
+		defer baseline.PinSnapshot(dir, n, "a snapshot download", time.Hour)()
+	}
+	srv := newBaselineServer(t, dir, true)
+	w := httptest.NewRecorder()
+	srv.handleBaselineDownload(w, httptest.NewRequest("GET", "/api/baselines/download"+detailQuery(detailSnapAt), nil))
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("a fourth snapshot's download: code %d, Retry-After %q; want 429", w.Code, w.Header().Get("Retry-After"))
+	}
+	t.Logf("the refusal as the client reads it: %s", w.Body.String())
+	if want := downloadsBusyMessage(3); !strings.Contains(w.Body.String(), "Try again shortly") || want == "" {
+		t.Fatalf("the refusal does not say to try again: %s", w.Body.String())
+	}
+	if got := baseline.Pinned(dir); slices.Contains(got, detailSnapDir) || len(got) != 3 {
+		t.Fatalf("the refused download left %v pinned", got)
+	}
+	// A reader pinning for another reason does not use up the downloads.
+	defer baseline.PinSnapshot(dir, detailSnapDir, "a SQL statement", time.Hour)()
+	w = httptest.NewRecorder()
+	srv.handleBaselineDownload(w, httptest.NewRequest("GET", "/api/baselines/download"+detailQuery(detailSnapAt), nil))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("a statement's pin was counted as a download's: code %d", w.Code)
+	}
+}
+
+// The cap counts different snapshots, per kind of reader.
+func TestPinSnapshotCapped(t *testing.T) {
+	root := t.TempDir()
+	r1, ok1 := baseline.PinSnapshotCapped(root, "2026-06-06T12-00-00Z", "a snapshot download", time.Hour, 2)
+	r2, ok2 := baseline.PinSnapshotCapped(root, "2026-06-07T12-00-00Z", "a snapshot download", time.Hour, 2)
+	_, ok3 := baseline.PinSnapshotCapped(root, "2026-06-08T12-00-00Z", "a snapshot download", time.Hour, 2)
+	again, ok4 := baseline.PinSnapshotCapped(root, "2026-06-06T12-00-00Z", "a snapshot download", time.Hour, 2)
+	if !ok1 || !ok2 || ok3 || !ok4 {
+		t.Fatalf("two, a third and a second reader of the first: %v %v %v %v; want true true false true", ok1, ok2, ok3, ok4)
+	}
+	if got := baseline.Pinned(root); len(got) != 2 {
+		t.Fatalf("pinned %v, want two snapshots", got)
+	}
+	r1()
+	again()
+	r4, ok := baseline.PinSnapshotCapped(root, "2026-06-08T12-00-00Z", "a snapshot download", time.Hour, 2)
+	if !ok {
+		t.Fatal("a place freed by the downloads that ended was not given")
+	}
+	r2()
+	r4()
 }

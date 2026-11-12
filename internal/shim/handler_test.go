@@ -3046,6 +3046,46 @@ func TestMapEventImagesDecodesExactlyOnce_boolRepair(t *testing.T) {
 	}
 }
 
+// A single-row _snapshot with a snapshot location configured and no snapshot
+// of the table at or before the moment asked for is refused with 1526 and a
+// message a client can read (#2678). Before, it answered from the recorded
+// changes alone, and a row no change touched read as "no such row". DB-free:
+// the refusal comes before the index is read.
+func TestRunSnapshotSingleRow_NoSnapshotAtOrBeforeIsRefused(t *testing.T) {
+	silent := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := &Handler{
+		logger: silent,
+		cfg:    Config{BaselineDir: t.TempDir()}, // configured, and empty
+		resolverFn: func() (*metadata.Resolver, error) {
+			return metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{
+				"myapp.users": {Schema: "myapp", Table: "users", PKColumns: []string{"id"},
+					Columns: []metadata.ColumnMeta{
+						{Name: "id", OrdinalPosition: 1, DataType: "int", IsPK: true},
+						{Name: "name", OrdinalPosition: 2, DataType: "varchar"},
+					}},
+			}), nil
+		},
+	}
+	at := time.Date(2026, 11, 12, 9, 30, 0, 0, time.UTC)
+	_, err := h.runSnapshot(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: at})
+	var myErr *gomysql.MyError
+	if !errors.As(err, &myErr) || myErr.Code != gomysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+		t.Fatalf("error = %T %v, want *mysql.MyError 1526", err, err)
+	}
+	t.Logf("the client reads: ERROR %d: %s", myErr.Code, myErr.Message)
+	for _, want := range []string{"no baseline for myapp.users at or before 2026-11-12T09:30:00Z", "would read as absent", "_flashback"} {
+		if !strings.Contains(myErr.Message, want) {
+			t.Errorf("the message does not say %q: %s", want, myErr.Message)
+		}
+	}
+	// The wire-neutral seam the PostgreSQL front-end shares classifies it.
+	_, rerr := h.ResolveSnapshotRow(context.Background(), TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: at})
+	var re *ResolveError
+	if !errors.As(rerr, &re) || re.Class != ResolveNoSnapshot {
+		t.Fatalf("ResolveSnapshotRow error = %T %v, want a ResolveNoSnapshot", rerr, rerr)
+	}
+}
+
 // TestRunSnapshotFullTable_BaselineConfiguredRefusesWireError pins #822: when a
 // baseline source IS configured (the operator explicitly opted into full-table
 // completeness) but the baseline merge cannot run, full-table _snapshot must

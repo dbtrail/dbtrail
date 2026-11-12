@@ -552,6 +552,11 @@ func (s *Server) snapshotViewsRelative(ctx context.Context, ss *snapshotSource, 
 // save the truncated archive as a success (the console's own fetch+blob
 // rejects on a cut body either way), and the operator would learn it is
 // garbage at extraction time, plausibly mid-incident.
+// downloadsBusyMessage is the refusal of a download past the cap.
+func downloadsBusyMessage(max int) string {
+	return fmt.Sprintf("%d other snapshots of this server are being downloaded, which is as many as it keeps. Try again shortly, when one of them ends.", max)
+}
+
 // downloadStallTimeout is how long one write of the archive may wait for the
 // client before the download is dropped. A write hands the connection at
 // most a few tens of kilobytes (gzip's output buffer), so a client that has
@@ -603,7 +608,20 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 		for _, f := range files {
 			total += f.Size
 		}
-		defer baseline.PinSnapshot(ss.localRoot, dirName, "a snapshot download", downloadPinLimit(total))()
+		// At most as many different snapshots as the server keeps are held
+		// for downloads at once: without a cap, a user allowed to download
+		// could keep every snapshot there is on the disk by asking for each.
+		max := DefaultLocalKeepNewest
+		if lr := s.localRetentionOf(s.selectedServerID(r)); lr != nil && lr.KeepNewest > 0 {
+			max = lr.KeepNewest
+		}
+		release, ok := baseline.PinSnapshotCapped(ss.localRoot, dirName, "a snapshot download", downloadPinLimit(total), max)
+		if !ok {
+			w.Header().Set("Retry-After", "60")
+			writeJSONError(w, http.StatusTooManyRequests, downloadsBusyMessage(max))
+			return
+		}
+		defer release()
 	}
 	if snapshotIncomplete(files) {
 		writeJSONError(w, http.StatusConflict,
