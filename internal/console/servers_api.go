@@ -20,6 +20,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -503,12 +504,41 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 // another on the Snapshots page.
 const DefaultBackupEvery = "5m"
 
+// DefaultUploadEvery is how often a NEW schedule on a server with an S3
+// destination sends a snapshot there (#2658): once a day, not at each
+// update. A schedule of minutes that uploaded every run filled the bucket
+// with snapshots nobody asked for, and DBTrail does not remove them unless
+// told to. Spelled as the Snapshots page's own choice spells 24 hours.
+const DefaultUploadEvery = "1d"
+
+// defaultUploadEvery is the upload interval a new schedule running every
+// `every` starts with on e when nobody chose one: DefaultUploadEvery on a
+// server with an S3 destination, "" (each update) on one without, where
+// there is nothing to send. An `every` longer than a day gets "" too: each
+// run is already rarer than the default, and an upload interval shorter
+// than the runs is refused. One that does not parse gets "": the schedule's
+// own check then names the fault.
+func defaultUploadEvery(e ServerEntry, every string) string {
+	if strings.TrimSpace(e.BaselineS3) == "" {
+		return ""
+	}
+	want, err := cliutil.ParseInterval(DefaultUploadEvery)
+	if err != nil {
+		return ""
+	}
+	if d, err := cliutil.ParseInterval(strings.TrimSpace(every)); err != nil || d > want {
+		return ""
+	}
+	return DefaultUploadEvery
+}
+
 // defaultScheduleBounded says a server's local copies stay bounded under a
-// schedule: only its newest LocalKeepNewest are kept and it has no S3
-// location (an S3 server's local folder is pruned only under
-// --baseline-retain, and its bucket never).
+// schedule: only its newest LocalKeepNewest are kept. With an S3
+// destination too since #2658: the count governs the folder there as well,
+// and the default schedule sends to the bucket once a day
+// (DefaultUploadEvery), so neither side grows by a snapshot every run.
 func defaultScheduleBounded(e ServerEntry) bool {
-	return e.BaselineS3 == "" && e.LocalKeepNewest > 0
+	return e.LocalKeepNewest > 0
 }
 
 // ActivateDefaultSchedule starts a snapshot every DefaultBackupEvery on a
@@ -522,7 +552,7 @@ func (s *Server) ActivateDefaultSchedule(id string) {
 	if !ok || !e.DefaultScheduleOnFirst {
 		return
 	}
-	sched := BackupSchedule{Every: DefaultBackupEvery}
+	sched := BackupSchedule{Every: DefaultBackupEvery, UploadEvery: defaultUploadEvery(e, DefaultBackupEvery)}
 	start := e.BackupSchedule == nil && defaultScheduleBounded(e)
 	if start {
 		// Outside the registry's lock: the gates read the registry too.
@@ -541,7 +571,7 @@ func (s *Server) ActivateDefaultSchedule(id string) {
 		}
 		cur.DefaultScheduleOnFirst = false
 		if start && cur.BackupSchedule == nil && defaultScheduleBounded(cur) &&
-			cur.BaselineDir == e.BaselineDir && cur.DSN == e.DSN && cur.SourceDSN == e.SourceDSN {
+			cur.BaselineDir == e.BaselineDir && cur.BaselineS3 == e.BaselineS3 && cur.DSN == e.DSN && cur.SourceDSN == e.SourceDSN {
 			cur.BackupSchedule = &sched
 			started = true
 		}
@@ -555,8 +585,19 @@ func (s *Server) ActivateDefaultSchedule(id string) {
 		if s.backupSchedules != nil {
 			s.backupSchedules.Observe(id, sched, time.Now().UTC())
 		}
-		slog.Info("console: first snapshot taken, a snapshot every "+DefaultBackupEvery+" starts now; change it on the "+PageSnapshots+" page", "server", e.Name)
+		slog.Info(defaultScheduleStartedMsg(sched), "server", e.Name)
 	}
+}
+
+// defaultScheduleStartedMsg is the daemon's line when the default schedule
+// starts: how often the copy updates and, with an S3 destination, how often
+// a snapshot is sent there.
+func defaultScheduleStartedMsg(sched BackupSchedule) string {
+	msg := "console: first snapshot taken, a snapshot every " + sched.Every + " starts now"
+	if sched.UploadEvery != "" {
+		msg += ", and one is sent to S3 every " + sched.UploadEvery
+	}
+	return msg + "; change it on the " + PageSnapshots + " page"
 }
 
 // dirExists reports whether path names something already there. Anything but

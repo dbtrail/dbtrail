@@ -8974,7 +8974,7 @@ function backupDaemonEditRow(row, locked) {
   if (locked) input.disabled = true;
   wrap.append(el("div", { class: "bks-erow-in" }, input, locked ? null : save, locked ? null : revert));
   if (row.key === "baseline_retain") {
-    wrap.append(el("p", { class: "form-hint", text: "Days or hours: 7d, 36h. Empty keeps them all. Deletes only where snapshots also go to S3, once S3 has each one. Without S3, copies younger than this stay even past the count." }));
+    wrap.append(el("p", { class: "form-hint", text: "The old way to bound the snapshots on this machine. Each server's count (Keep by count) does that now. Days or hours: 7d, 36h. It deletes only where snapshots also go to S3, once S3 has each one. On a server with a count, a snapshot goes only when it is past the count and older than this." }));
   }
   // The one row whose name cannot say what it holds (#1938): full reads
   // and .sql builds write here, and it has to fit the largest of them.
@@ -11810,6 +11810,8 @@ const FULL_READ_CHOICES = [["", "Off"], ["1d", "24 h"], ["7d", "7 days"], ["30d"
 // How often a snapshot is sent to S3 (#2596), when that is less often than
 // the copy updates. Empty sends every update, as before the setting existed.
 const UPLOAD_CHOICES = [["", "Each update"], ["1h", "1 h"], ["6h", "6 h"], ["1d", "24 h"]];
+// What a new schedule sends to S3 with: once a day (console.DefaultUploadEvery).
+const NEW_UPLOAD_CHOICE = "1d";
 function scheduleChoice(every) {
   const m = /^(\d+)\s*(m|min|h|d)$/.exec(String(every || "").trim());
   if (!m) return String(every || "");
@@ -12236,7 +12238,10 @@ function backupScheduleCard(cur, b) {
   // whatever is saved.
   let uploadWrap = null;
   if (b.s3_destination) {
-    const savedUp = sch && sch.upload_every ? scheduleChoice(sch.upload_every) : "";
+    // A schedule that exists shows what it has, each update included. A new
+    // one starts at 24 hours (#2658): a snapshot in the bucket at every
+    // update is the costly choice, so it is one the operator picks.
+    const savedUp = sch ? (sch.upload_every ? scheduleChoice(sch.upload_every) : "") : NEW_UPLOAD_CHOICE;
     const upChoices = UPLOAD_CHOICES.slice();
     if (!upChoices.some(([v]) => v === savedUp)) upChoices.push([savedUp, sch.upload_every]);
     upload = choicePills(upChoices, savedUp, "Send to S3 every", touched);

@@ -172,7 +172,9 @@ type backupScheduleRequest struct {
 	// (a page loaded before an upgrade, a script) must not delete the
 	// operator's full backups by editing the time of the updates.
 	FullEvery *string `json:"full_every"`
-	// UploadEvery is the optional upload interval (#2596), with the same
+	// UploadEvery is the optional upload interval (#2596). Omitted on a NEW
+	// schedule of a server with an S3 destination it is DefaultUploadEvery
+	// (#2658); sent empty it is each update. Otherwise, with the same
 	// rule: empty sends at every run again, omitted keeps the saved one.
 	UploadEvery *string `json:"upload_every"`
 }
@@ -473,12 +475,19 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 	case e.BackupSchedule != nil:
 		fullEvery = e.BackupSchedule.FullEvery
 	}
+	// The upload interval: what the request says, "" included (each update
+	// is a choice, and a script that sends it gets it); with no field, what
+	// the saved schedule has, "" included (a schedule saved before #2658
+	// keeps sending each update); and only for a NEW schedule that does not
+	// mention it, the default: once a day on a server with an S3 destination.
 	uploadEvery := ""
 	switch {
 	case req.UploadEvery != nil:
 		uploadEvery = *req.UploadEvery
 	case e.BackupSchedule != nil:
 		uploadEvery = e.BackupSchedule.UploadEvery
+	default:
+		uploadEvery = defaultUploadEvery(e, req.Every)
 	}
 	sched, err := BackupSchedule{Every: req.Every, At: req.At, FullEvery: fullEvery, UploadEvery: uploadEvery}.Normalized()
 	if err != nil && req.UploadEvery == nil && uploadEvery != "" && strings.TrimSpace(e.BaselineS3) == "" {

@@ -253,3 +253,95 @@ func TestBackupScheduleAPI_anInertUploadIntervalDoesNotBlockASave(t *testing.T) 
 		t.Fatalf("an inert interval that still fits was dropped: %+v", e.BackupSchedule)
 	}
 }
+
+// #2658: a NEW schedule on a server with an S3 destination starts sending to
+// S3 once a day when the request does not say. What a script sends
+// explicitly, the empty value included, is what it gets, and a schedule that
+// exists keeps what it has.
+func TestBackupScheduleAPI_uploadEveryDefaultsToADayOnANewSchedule(t *testing.T) {
+	rep := &stubScheduleReporter{full: true}
+	srv, id := newScheduleServer(t, rep)
+	path := "/api/servers/" + id + "/backup-schedule"
+	e, _ := srv.cm.reg.Get(id)
+	fakeSnapshot(t, e.BaselineDir)
+	stored := func() *BackupSchedule {
+		t.Helper()
+		got, _ := srv.cm.reg.Get(id)
+		return got.BackupSchedule
+	}
+	put := func(body string) {
+		t.Helper()
+		if rec, out := doServersReq(t, srv, "PUT", path, body); rec.Code != 200 {
+			t.Fatalf("PUT %s: code=%d body=%s", body, rec.Code, out)
+		}
+	}
+	del := func() {
+		t.Helper()
+		if rec, out := doServersReq(t, srv, "DELETE", path, ""); rec.Code != 200 {
+			t.Fatalf("DELETE: code=%d body=%s", rec.Code, out)
+		}
+	}
+
+	// No S3 destination: nothing to send, so no interval, as before.
+	put(`{"every":"5m"}`)
+	if got := stored(); got.UploadEvery != "" {
+		t.Fatalf("a new schedule on a server without S3 got upload_every %q", got.UploadEvery)
+	}
+	del()
+
+	e, _ = srv.cm.reg.Get(id)
+	e.BaselineS3 = "s3://bucket/snaps/"
+	if err := srv.cm.reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+
+	// New schedule, field absent: once a day.
+	put(`{"every":"5m"}`)
+	if got := stored(); got.UploadEvery != DefaultUploadEvery || got.Every != "5m" {
+		t.Fatalf("a new schedule without the field = %+v, want upload_every %s", got, DefaultUploadEvery)
+	}
+	// The schedule exists now: a save that does not mention the field keeps
+	// what it has.
+	put(`{"every":"10m"}`)
+	if got := stored(); got.UploadEvery != DefaultUploadEvery {
+		t.Fatalf("an edit that did not mention the field changed it to %q", got.UploadEvery)
+	}
+	// Each update, chosen: saved, and kept by a later save that does not
+	// mention it. An explicit choice is never overwritten by the default.
+	put(`{"every":"10m","upload_every":""}`)
+	if got := stored(); got.UploadEvery != "" {
+		t.Fatalf("an explicit each-update was saved as %q", got.UploadEvery)
+	}
+	put(`{"every":"15m"}`)
+	if got := stored(); got.UploadEvery != "" {
+		t.Fatalf("an existing schedule's each-update became %q on an edit that did not mention it", got.UploadEvery)
+	}
+	del()
+
+	// New schedule, field sent empty: a script that asks for each update
+	// gets each update.
+	put(`{"every":"5m","upload_every":""}`)
+	if got := stored(); got.UploadEvery != "" {
+		t.Fatalf("a new schedule with an explicit empty upload_every got %q", got.UploadEvery)
+	}
+	del()
+
+	// New schedule, another interval sent: that one.
+	put(`{"every":"5m","upload_every":"6h"}`)
+	if got := stored(); got.UploadEvery != "6h" {
+		t.Fatalf("a new schedule with upload_every 6h got %q", got.UploadEvery)
+	}
+	del()
+
+	// A schedule saved before the change has no upload_every in the file:
+	// it keeps sending each update, whatever is edited around it.
+	e, _ = srv.cm.reg.Get(id)
+	e.BackupSchedule = &BackupSchedule{Every: "5m", At: "00:00"}
+	if err := srv.cm.reg.Update(e); err != nil {
+		t.Fatal(err)
+	}
+	put(`{"every":"5m","at":"03:00"}`)
+	if got := stored(); got.UploadEvery != "" {
+		t.Fatalf("a schedule saved before the change now sends every %q", got.UploadEvery)
+	}
+}
