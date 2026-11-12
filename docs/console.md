@@ -744,9 +744,10 @@ its login file somewhere a command would not look.
 
 These commands send a database password, so they are strict about where:
 
-- They read the environment of the shell they run in, and not `.bintrail.env`
-  or `~/.config/bintrail/config.env`, which every other command loads. A file
-  in the folder you happen to be in does not get to say where DBTrail is.
+- They read the environment of the shell they run in and
+  [`/etc/dbtrail/dbtrail.cnf`](./option-file.md), and not `.bintrail.env` or
+  `~/.config/bintrail/config.env`, which every other command loads. A file in
+  the folder you happen to be in does not get to say where DBTrail is.
 - Without `--url` they only talk to this machine.
 - `--url` reaches a DBTrail on another machine, with `BINTRAIL_CONSOLE_TOKEN`
   as its token. The token in `console-cli.json` belongs to the DBTrail of this
