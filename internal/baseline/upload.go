@@ -124,6 +124,21 @@ func SetSnapshotViewsRespeller(f func(ctx context.Context, snapshotDir, root str
 // file is skipped, with only a per-upload warning to say so.
 func SnapshotViewsRespellerArmed() bool { return snapshotViewsRespeller != nil }
 
+// retryExists is the retry's "is this object there already" (#2689). A
+// refusal (403) is "cannot tell", and the object is sent: credentials without
+// s3:ListBucket refuse a HEAD of a key that does not exist instead of
+// answering 404, so failing on it would make a snapshot whose upload failed
+// impossible to send again, and sending a file that is there already
+// rewrites the same bytes. Any other failure stays a failure.
+func retryExists(ctx context.Context, ops s3UploadOps, key string) (bool, error) {
+	exists, err := ops.objectExists(ctx, key)
+	if err != nil && storage.IsAccessDenied(err) {
+		slog.Debug("S3 refused the question whether this object is there (access denied); sending it", "key", key, "error", err)
+		return false, nil
+	}
+	return exists, err
+}
+
 // uploadWithOps performs the crash-safe upload ordering against ops. See the
 // Upload doc for the four-step contract it guarantees.
 func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, ops s3UploadOps) (int, error) {
@@ -133,7 +148,7 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 			return err
 		}
 		if retry {
-			exists, err := ops.objectExists(ctx, key)
+			exists, err := retryExists(ctx, ops, key)
 			if err != nil {
 				return err
 			}
@@ -421,7 +436,7 @@ func uploadRespelledViews(ctx context.Context, localPath, outputDir, prefix stri
 		return false, err
 	}
 	if retry {
-		exists, err := ops.objectExists(ctx, key)
+		exists, err := retryExists(ctx, ops, key)
 		if err != nil {
 			return false, err
 		}

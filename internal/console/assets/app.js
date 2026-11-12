@@ -9152,17 +9152,19 @@ function notInS3Words(n, rec) {
     : n + " older " + (n === 1 ? "copy" : "copies") + (names.length ? " (" + names.map(at).join(", ") + (n > names.length ? " and " + (n - names.length) + " more" : "") + ")"
       : " (checked " + utcLabel(rec && rec.at) + ")");
   const it = n === 1 ? "it" : "them";
-  // The last restore's result when S3 could not be ASKED about it: sent
-  // again in case it is missing, and never said to be missing.
-  const unasked = rec && typeof rec.unasked === "string" && rec.unasked ? rec.unasked : "";
-  if (unasked && n === 1) {
-    return "Kept here: " + what + ". S3 could not be asked whether it has it; " +
+  // The ones S3 could not be ASKED about (the last restore's result whose
+  // question failed, a copy S3 refused, #2689): sent again in case they are
+  // missing, and never said to be missing.
+  const notAsked = Array.isArray(rec && rec.not_asked) ? rec.not_asked.filter((x) => typeof x === "string" && x) : [];
+  if (notAsked.length && notAsked.length >= n) {
+    return "Kept here: " + what + ". S3 could not be asked whether it has " + it + "; " +
       (rec.resending === true
-        ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends it again at the next cleanup.")
-        : "send it to S3 again, or remove it by hand if not needed.");
+        ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
+        : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
   }
+  const copiesOf = (list) => (list.length === 1 ? "the copy of " : "the copies of ") + list.map(at).join(", ");
   return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete" +
-    (unasked ? " (it could not be asked about the copy of " + at(unasked) + ")" : "") + "; " +
+    (notAsked.length ? " (it could not be asked about " + copiesOf(notAsked) + ")" : "") + "; " +
     (rec && rec.resending === true
       ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
       : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");

@@ -1157,12 +1157,12 @@ func TestNoFloor_aFailedQuestionAboutTheRestoreResultIsOnRecord(t *testing.T) {
 	}
 	res := s3Count(t, root, 1, probe)
 	rec, ok, err := ReadNotInDestination(root)
-	if err != nil || !ok || rec.Unasked != restored || res.RestoredUnasked != restored {
+	if err != nil || !ok || !slices.Equal(rec.NotAsked, []string{restored}) || res.RestoredUnasked != restored {
 		t.Fatalf("record %+v ok=%v err=%v, result unasked %q: want %s on record as not asked", rec, ok, err, res.RestoredUnasked, restored)
 	}
 	// Asked and answered "not here": no such note.
 	res = s3Count(t, root, 1, answers(nil))
-	if rec, _, _ := ReadNotInDestination(root); rec.Unasked != "" || res.RestoredUnasked != "" {
+	if rec, _, _ := ReadNotInDestination(root); len(rec.NotAsked) != 0 || res.RestoredUnasked != "" {
 		t.Fatalf("an answered question is on record as not asked: %+v", rec)
 	}
 }

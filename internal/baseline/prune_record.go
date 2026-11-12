@@ -108,8 +108,13 @@ type NotInDestination struct {
 	// (#2563); false, or absent, when nothing here will, and the page says
 	// to send or remove them by hand.
 	Resending bool `json:"resending,omitempty"`
-	// Unasked names the one among them (the last restore's result) the
-	// destination could not be ASKED about: not known to be missing.
+	// NotAsked names those among them the destination could not be ASKED
+	// about: not known to be missing (the last restore's result whose
+	// question failed, a snapshot S3 refused, #2689).
+	NotAsked []string `json:"not_asked,omitempty"`
+	// Unasked is how a build before #2689 named the one such snapshot it
+	// could have (the last restore's result). Read only: ReadNotInDestination
+	// moves it into NotAsked.
 	Unasked string `json:"unasked,omitempty"`
 	// NextSend, when set, is when the next send is tried: an hour after a
 	// round in which one failed (#2678). Absent: at the next cleanup.
@@ -150,6 +155,10 @@ func ReadNotInDestination(dir string) (rec NotInDestination, ok bool, err error)
 	if err := json.Unmarshal(b, &rec); err != nil || rec.At.IsZero() || rec.Count <= 0 {
 		return NotInDestination{}, false, fmt.Errorf("the record of snapshots not at the destination %s cannot be read", filepath.Join(dir, NotInDestinationFile))
 	}
+	if rec.Unasked != "" && len(rec.NotAsked) == 0 {
+		rec.NotAsked = []string{rec.Unasked}
+	}
+	rec.Unasked = ""
 	return rec, true, nil
 }
 

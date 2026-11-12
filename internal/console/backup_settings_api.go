@@ -370,7 +370,10 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
 				dto.NotInS3Error = err.Error()
 			} else if ok {
-				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending}
+				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending, NotAsked: rec.NotAsked}
+				if rec.NextSend != nil {
+					dto.NotInS3.NextSend = rec.NextSend.UTC().Format(time.RFC3339)
+				}
 			}
 		}
 	}
@@ -738,4 +741,10 @@ type notInS3DTO struct {
 	Names []string `json:"names,omitempty"`
 	// Resending: this daemon sends them again after each cleanup (#2563).
 	Resending bool `json:"resending,omitempty"`
+	// NotAsked are those among them S3 could not be asked about (#2689), so
+	// the page does not say S3 lacks them.
+	NotAsked []string `json:"not_asked,omitempty"`
+	// NextSend, RFC3339 UTC, is when the next send is tried after one failed
+	// (#2678); absent: at the next cleanup.
+	NextSend string `json:"next_send,omitempty"`
 }

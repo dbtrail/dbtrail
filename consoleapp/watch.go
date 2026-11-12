@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2015,8 +2016,8 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 	}
 	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
 	for _, name := range left {
-		if name == res.RestoredUnasked {
-			rec.Unasked = name
+		if slices.Contains(res.NotAsked, name) {
+			rec.NotAsked = append(rec.NotAsked, name)
 		}
 	}
 	if !next.IsZero() {

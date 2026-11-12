@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A snapshot S3 refuses to answer for no longer stops the count for the whole folder** (#2689). With an S3 destination and **Keep by count**, a failed question about one snapshot stopped every removal of the cleanup. Credentials without `s3:ListBucket` make S3 answer 403 instead of 404 for a copy it does not have, so a snapshot whose upload failed was refused at every cleanup, was never re-sent, and the folder grew by one snapshot per schedule interval. Now a 403 on one snapshot keeps that snapshot, lists it to be sent again, and lets the others go. When S3 refuses every question, the newest snapshots included, nothing is removed and the page says so, as for a bucket that does not answer. Network errors, timeouts and other failures still stop the cleanup as before.
+  - Sending a snapshot again no longer fails on a 403 when it checks which files are already in S3: it sends them.
+  - The Snapshots page now says "S3 could not be asked whether it has it" for such a snapshot instead of "S3 does not have it complete", and shows when the next send is tried after one failed. Both were in the cleanup's record and did not reach the page.
+
 ## [0.130.0] - 2026-11-12
 
 - **A server keeps exactly the number of local snapshots you set** (#2678).
