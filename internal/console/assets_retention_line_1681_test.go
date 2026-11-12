@@ -133,7 +133,7 @@ console.log(JSON.stringify(out));
 			{false, "Keeps the newest 3 snapshots on this machine."},
 			{false, "Older copies stay until a restore to a moment ends (running since " + at + "): the cleanup removes nothing from this folder while it reads them."},
 		},
-		"recordErr":    {{true, "The record of older copies removed here could not be read: open /snap/.prune: permission denied"}},
+		"recordErr": {{true, "The record of older copies removed here could not be read: open /snap/.prune: permission denied"}},
 		"failOne": {
 			{false, "Keeps the newest 7 snapshots on this machine."},
 			{true, "Removing older copies failed on " + at + ": | remove /snap/2026-09-01: busy"},

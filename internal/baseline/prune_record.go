@@ -52,10 +52,10 @@ func ReadLastPrune(dir string) (rec LastPrune, ok bool, err error) {
 // writeRecord, writeFailureRecord and removeRecord are indirected only so a
 // test can fail the write and see the stale record go.
 var (
-	writeRecord        = writeLastPrune
-	writeFailureRecord = writePruneFailure
+	writeRecord          = writeLastPrune
+	writeFailureRecord   = writePruneFailure
 	writeNotInDestRecord = writeNotInDestination
-	removeRecord       = os.Remove
+	removeRecord         = os.Remove
 )
 
 // LastPruneFailureFile records, beside the snapshots, the last prune attempt
