@@ -233,9 +233,9 @@ type PruneResult struct {
 	// our business).
 	KeptIncomplete int
 	// RemovedEmpty names the empty snapshot folders this cleanup removed
-	// (#2691): folders named as a snapshot that held no file at all, in
-	// them or below, for emptySnapshotDirAge. Not counted in Pruned: no
-	// snapshot was in them.
+	// (#2691), or would remove in a dry run: folders named as a snapshot
+	// that held no file at all, in them or below, for emptySnapshotDirAge.
+	// Not counted in Pruned: no snapshot was in them.
 	RemovedEmpty []string
 	// KeptUnreadable counts complete snapshots kept because their directory could
 	// not be fully enumerated (a transient os.ReadDir failure: fd exhaustion, an
@@ -552,10 +552,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
 	sweepFailures, firstSweepErr := sweepPruningLeftovers(opts.LocalDir)
-	var removedEmpty []string
-	if !opts.DryRun {
-		removedEmpty = sweepEmptySnapshotDirs(opts.LocalDir, pinnedNow(opts.LocalDir, time.Now()), time.Now())
-	}
+	removedEmpty := sweepEmptySnapshotDirs(opts.LocalDir, pinnedNow(opts.LocalDir, time.Now()), time.Now(), opts.DryRun)
 
 	snaps, err := enumerateLocalSnapshots(opts.LocalDir)
 	if err != nil {
@@ -1397,8 +1394,9 @@ var emptyDirRemoveHook = func(string) {}
 // `current` target and a pinned snapshot are left alone. The removal is one
 // rmdir per directory, the deepest first, never a recursive delete: a
 // directory that is not empty refuses it, so a file a writer puts in the
-// folder meanwhile stays, with the folder.
-func sweepEmptySnapshotDirs(dir string, pinned map[string]string, now time.Time) (removed []string) {
+// folder meanwhile stays, with the folder. A dry run removes nothing and
+// returns what it would remove.
+func sweepEmptySnapshotDirs(dir string, pinned map[string]string, now time.Time, dryRun bool) (removed []string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil // the enumeration right after reports this
@@ -1415,6 +1413,10 @@ func sweepEmptySnapshotDirs(dir string, pinned map[string]string, now time.Time)
 		p := filepath.Join(dir, name)
 		dirs, newest, empty := emptyTree(p)
 		if !empty || now.Sub(newest) < emptySnapshotDirAge {
+			continue
+		}
+		if dryRun {
+			removed = append(removed, name)
 			continue
 		}
 		emptyDirRemoveHook(p)

@@ -168,7 +168,7 @@ func TestPruneEmpty_aFileWrittenDuringTheRemovalStays(t *testing.T) {
 }
 
 // The other modes: a destination and the age rule remove it too, and a dry
-// run removes nothing.
+// run removes nothing and names what it would remove.
 func TestPruneEmpty_everyModeAndTheDryRun(t *testing.T) {
 	old := emptySnapshotDirAge + time.Minute
 	t.Run("destination", func(t *testing.T) {
@@ -185,8 +185,8 @@ func TestPruneEmpty_everyModeAndTheDryRun(t *testing.T) {
 		minutes(t, root, 5)
 		p := emptyFolder(t, root, snapName(3*time.Hour), old)
 		res, err := PruneLocal(context.Background(), PruneOptions{LocalDir: root, KeepNewest: 1, Now: kn, DryRun: true})
-		if err != nil || !exists(p) || len(res.RemovedEmpty) != 0 {
-			t.Fatalf("a dry run: err=%v exists=%v removed=%v", err, exists(p), res.RemovedEmpty)
+		if err != nil || !exists(p) || !slices.Equal(res.RemovedEmpty, []string{filepath.Base(p)}) {
+			t.Fatalf("a dry run must name the folder it would remove and keep it: err=%v exists=%v removed=%v", err, exists(p), res.RemovedEmpty)
 		}
 	})
 }
