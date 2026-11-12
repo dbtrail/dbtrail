@@ -375,7 +375,9 @@ func TestCheckRoute_theCaptureUserAsForwardingUserIsRefused_2686(t *testing.T) {
 	srv, ctrl, fc, path := newSupervisorWithPort(t)
 	body := `{"source_host":"db.example.com","source_user":"dbtrail","source_password":"Ab3-xyz","route_user":" dbtrail ","route_password":"x"}`
 	rec, out := doServersReq(t, srv, "POST", "/api/servers/check", body)
-	if rec.Code != 400 || !strings.Contains(string(out), "never forwards as that one") {
+	// Refused where every new entry is built (buildNewEntry), before the
+	// checks run.
+	if rec.Code != 400 || !strings.Contains(string(out), "account DBTrail captures with") {
 		t.Fatalf("capture user as forwarding user: %d %s", rec.Code, out)
 	}
 	if srv.cm.reg.Len() != 0 || len(ctrl.unsaved) != 0 || len(fc.calls) != 0 {
