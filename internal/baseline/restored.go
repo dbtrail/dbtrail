@@ -21,8 +21,21 @@ import (
 // the count it went at the first cleanup after it was written: the operator
 // asked for a copy of a moment and found it gone. Nothing in the folder's
 // name can say "this one was asked for by hand, minutes ago", so the mark
-// does. The mark holds the time the restore finished.
+// does. The mark holds the time the restore finished, or, while the restore
+// runs, the word restoringWord and the time it started (MarkRestoring).
 const restoredPrefix = ".restored."
+
+// restoringWord starts the mark of a restore that has not ended (#2691). The
+// mark is written BEFORE the restore publishes anything: written after, a
+// daemon that died between the publish and the mark left the result
+// unmarked, and the next cleanup removed it by the count. While the
+// restore's snapshot is not complete the mark is pending: it is not swept
+// for lack of a folder, it names no result, and it does not take the place
+// of the previous restore's mark, so a restore that fails or dies midway
+// leaves the previous result protected. Once the snapshot is complete it is
+// the last restore's result whether or not the restore lived to rewrite the
+// mark as finished; it is then kept a day from when the restore started.
+const restoringWord = "restoring"
 
 func restoredPath(root, name string) (string, error) {
 	if _, ok := parseBaselineDirTimestamp(name); !ok || filepath.Base(name) != name {
@@ -49,54 +62,117 @@ func MarkRestored(root, name string) error {
 }
 
 func markRestoredAt(root, name string, at time.Time) error {
+	return writeRestoredMark(root, name, at, false)
+}
+
+// MarkRestoring records that a restore to a moment, whose result will be the
+// snapshot root/name, starts now. Called before the restore writes anything,
+// so no moment exists in which its result is complete and unmarked. The
+// restore ends with MarkRestored when it published, ForgetRestoring when it
+// did not. root is created when it does not exist yet: the restore would
+// create it a moment later, and the mark must be there first.
+func MarkRestoring(root, name string) error {
+	return markRestoringAt(root, name, restoredNow())
+}
+
+func markRestoringAt(root, name string, at time.Time) error {
+	if _, err := restoredPath(root, name); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("baseline: mark snapshot %s as a running restore's result: %w", name, err)
+	}
+	return writeRestoredMark(root, name, at, true)
+}
+
+func writeRestoredMark(root, name string, at time.Time, pending bool) error {
 	p, err := restoredPath(root, name)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(p, []byte(at.UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
-		return fmt.Errorf("baseline: mark snapshot %s as a restore's result: %w", name, err)
+	body := at.UTC().Format(time.RFC3339Nano) + "\n"
+	what := "a restore's result"
+	if pending {
+		body = restoringWord + " " + body
+		what = "a running restore's result"
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		return fmt.Errorf("baseline: mark snapshot %s as %s: %w", name, what, err)
 	}
 	return nil
 }
 
-// restoredAt is when the restore that left root/name's mark finished: the
-// time written in it; for a mark with none (written by a build before the
-// time was kept) or one that cannot be read, the file's modification time;
-// with neither, ok is false and the mark is taken for expired, never for
-// one to keep for ever.
-//
-// A time after now (the clock was moved back) is replaced by now, and the
-// mark is REWRITTEN with it once, unless dryRun: counted as now on every
-// read without rewriting, the deadline moved forward with the clock and the
-// result never expired. A dry run (the listing) reads it as now and leaves
-// the rewriting to the next cleanup.
-func restoredAt(root, name string, now time.Time, dryRun bool) (at time.Time, ok bool) {
+// ForgetRestoring removes the mark MarkRestoring wrote for root/name, for a
+// restore that ended without publishing its result. A finished mark is left
+// alone: it is not this restore's.
+func ForgetRestoring(root, name string) {
 	p, err := restoredPath(root, name)
 	if err != nil {
-		return time.Time{}, false
+		return
 	}
-	if b, err := os.ReadFile(p); err == nil {
-		if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b))); perr == nil {
-			at, ok = t, true
-		}
+	if _, pending, ok := readRestoredMark(p); !ok || !pending {
+		return
 	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("restore to a moment: could not remove the mark of a restore that published nothing; it goes by itself after a day",
+			"dir", root, "snapshot", name, "error", err)
+	}
+}
+
+// readRestoredMark reads the time and the state written in the mark at p.
+// ok is false when the file cannot be read or holds no time (a mark an
+// early build wrote empty).
+func readRestoredMark(p string) (at time.Time, pending, ok bool) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return time.Time{}, false, false
+	}
+	text := strings.TrimSpace(string(b))
+	if rest, cut := strings.CutPrefix(text, restoringWord+" "); cut {
+		text, pending = strings.TrimSpace(rest), true
+	}
+	t, perr := time.Parse(time.RFC3339Nano, text)
+	if perr != nil {
+		return time.Time{}, false, false
+	}
+	return t, pending, true
+}
+
+// restoredAt is when the restore that left root/name's mark finished (or,
+// pending, started): the time written in it; for a mark with none (written
+// by a build before the time was kept) or one that cannot be read, the
+// file's modification time; with neither, ok is false and the mark is taken
+// for expired, never for one to keep for ever. pending is a mark
+// MarkRestoring wrote and the restore has not rewritten yet.
+//
+// A time after now (the clock was moved back) is replaced by now, and the
+// mark is REWRITTEN with it once, in the state it had, unless dryRun:
+// counted as now on every read without rewriting, the deadline moved forward
+// with the clock and the result never expired. A dry run (the listing) reads
+// it as now and leaves the rewriting to the next cleanup.
+func restoredAt(root, name string, now time.Time, dryRun bool) (at time.Time, pending, ok bool) {
+	p, err := restoredPath(root, name)
+	if err != nil {
+		return time.Time{}, false, false
+	}
+	at, pending, ok = readRestoredMark(p)
 	if !ok {
 		info, err := os.Stat(p)
 		if err != nil || info.ModTime().IsZero() {
-			return time.Time{}, false
+			return time.Time{}, false, false
 		}
 		at, ok = info.ModTime(), true
 	}
 	if at.After(now) {
 		at = now
 		if !dryRun {
-			if werr := markRestoredAt(root, name, now); werr != nil {
+			if werr := writeRestoredMark(root, name, now, pending); werr != nil {
 				slog.Warn("baseline prune: a restore's mark is dated in the future and could not be rewritten with the time now; it is read as now until it can be",
 					"dir", root, "snapshot", name, "error", werr)
 			}
 		}
 	}
-	return at, true
+	return at, pending, true
 }
 
 // restoredExpiryHook runs between finding a mark expired and removing it.
@@ -144,12 +220,16 @@ func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until
 			}
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(root, n)); errors.Is(err, os.ErrNotExist) {
+		_, statErr := os.Stat(filepath.Join(root, n))
+		missing := errors.Is(statErr, os.ErrNotExist)
+		_, pending, _ := restoredAt(root, n, now, true)
+		if missing && !pending {
+			// The result was removed by hand.
 			clearRestored(root, n, dryRun)
 			continue
 		}
 		expired := func() bool {
-			at, ok := restoredAt(root, n, now, dryRun)
+			at, _, ok := restoredAt(root, n, now, dryRun)
 			return !ok || now.Sub(at) >= RestoredKeep
 		}
 		if expired() {
@@ -161,7 +241,7 @@ func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until
 			// moment that finished since wrote a fresh mark into this very
 			// file, and removing it would hand that new result to the count.
 			if expired() {
-				if !s3Cut.IsZero() && ts.Before(s3Cut) {
+				if !missing && !s3Cut.IsZero() && ts.Before(s3Cut) {
 					if herr := MarkUploadHeld(root, n); herr != nil {
 						slog.Warn("baseline prune: a restore's result past its day could not be handed to the count; it stays until the bucket is asked about it",
 							"dir", root, "snapshot", n, "error", herr)
@@ -172,7 +252,13 @@ func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until
 				continue
 			}
 		}
-		at, _ := restoredAt(root, n, now, dryRun)
+		if pending && (missing || !SnapshotComplete(filepath.Join(root, n))) {
+			// A restore still running, or one that died before its result
+			// was complete: its mark stays until its day ends, and it takes
+			// nothing from the previous restore's result meanwhile.
+			continue
+		}
+		at, _, _ := restoredAt(root, n, now, dryRun)
 		live = append(live, n)
 		// The later restore; on the same instant, the later name, so the
 		// answer does not depend on the listing's order.
