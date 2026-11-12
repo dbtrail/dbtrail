@@ -96,10 +96,67 @@ func writeRestoredMark(root, name string, at time.Time, pending bool) error {
 		body = restoringWord + " " + body
 		what = "a running restore's result"
 	}
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+	if err := writeFileAtomic(root, p, []byte(body)); err != nil {
 		return fmt.Errorf("baseline: mark snapshot %s as %s: %w", name, what, err)
 	}
 	return nil
+}
+
+// restoredTmpPrefix names the temporary file a mark is written to before it
+// is renamed over the mark. A prune in another process (`bintrail baseline
+// --baseline-retain` on a folder `watch` also prunes) reads the marks at any
+// moment; written in place, a mark is empty for an instant, and an empty
+// mark read as a finished one made a restore that had published nothing the
+// last restore (#2691). The name does not start with restoredPrefix, so a
+// temporary file is never read as a mark; one a process left behind when it
+// died is removed by the cleanup after restoredTmpMaxAge.
+const restoredTmpPrefix = ".restore-mark-tmp-"
+
+// restoredTmpMaxAge is how old a temporary mark file must be before the
+// cleanup removes it: a write takes microseconds, so an hour old is a write
+// that never finished.
+const restoredTmpMaxAge = time.Hour
+
+// writeFileAtomic writes data to a temporary file in dir and renames it over
+// p, so a reader sees the old content or the new one, never a part.
+func writeFileAtomic(dir, p string, data []byte) error {
+	f, err := os.CreateTemp(dir, restoredTmpPrefix+"*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, p)
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+	}
+	return werr
+}
+
+// sweepRestoredTmp removes the temporary mark files under root older than
+// restoredTmpMaxAge, left by a process that died mid-write.
+func sweepRestoredTmp(root string, entries []os.DirEntry, now time.Time) {
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), restoredTmpPrefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < restoredTmpMaxAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(root, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("baseline prune: could not remove a temporary file a restore's mark was being written to",
+				"dir", root, "file", e.Name(), "error", err)
+		}
+	}
 }
 
 // ForgetRestoring removes the mark MarkRestoring wrote for root/name, for a
@@ -110,7 +167,7 @@ func ForgetRestoring(root, name string) {
 	if err != nil {
 		return
 	}
-	if _, pending, ok := readRestoredMark(p); !ok || !pending {
+	if _, pending, _ := readRestoredMark(p); !pending {
 		return
 	}
 	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -120,8 +177,12 @@ func ForgetRestoring(root, name string) {
 }
 
 // readRestoredMark reads the time and the state written in the mark at p.
-// ok is false when the file cannot be read or holds no time (a mark an
-// early build wrote empty).
+// ok is false when the file cannot be read or holds no time. A mark that is
+// read and holds no time (empty: an early build wrote them so, or a write
+// another build made in place caught midway; or not a time) is pending: it
+// protects like a running restore's mark, and counts as a result only once
+// its snapshot is complete, rather than taking the previous result's place
+// on a guess. Its age is then its file time (restoredAt).
 func readRestoredMark(p string) (at time.Time, pending, ok bool) {
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -133,7 +194,7 @@ func readRestoredMark(p string) (at time.Time, pending, ok bool) {
 	}
 	t, perr := time.Parse(time.RFC3339Nano, text)
 	if perr != nil {
-		return time.Time{}, false, false
+		return time.Time{}, true, false
 	}
 	return t, pending, true
 }
@@ -202,6 +263,9 @@ func lastRestored(root string, dryRun bool, s3Cut time.Time) (name string, until
 		return "", time.Time{}
 	}
 	now := restoredNow()
+	if !dryRun {
+		sweepRestoredTmp(root, entries, time.Now())
+	}
 	var best string
 	var bestAt time.Time
 	var live []string
