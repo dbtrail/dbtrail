@@ -306,7 +306,16 @@ func (s *Server) RouterNumbers() RouterNumbers {
 	}
 	for _, id := range listed {
 		if _, ok := out.Servers[id]; !ok {
-			n := RouterServerNumbers{Reasons: map[string]uint64{}}
+			out.Servers[id] = RouterServerNumbers{Reasons: map[string]uint64{}}
+		}
+	}
+	// Every server listed says its mode, however it got here. One the copy
+	// only ever answered with nothing to route is listed by the loop over
+	// those answers, which knows no mode: left empty, the caller reads it as
+	// a server this process does not list, fast by default, which is wrong
+	// for a fresh server and for one with Fast saved (#2682).
+	for id, n := range out.Servers {
+		if n.SQLMode == "" {
 			n.SQLMode, n.SQLModeFrom = s.SQLModeOf(id)
 			n.SQLModeWarming = n.SQLMode == "fresh" && s.SQLModeWarming(id)
 			out.Servers[id] = n
