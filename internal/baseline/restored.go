@@ -102,6 +102,10 @@ func lastRestored(root string, dryRun bool) string {
 	return best
 }
 
+// Restored is the snapshot under root the prune keeps as the last restore's
+// result, "" when there is none, for the listing. It removes nothing.
+func Restored(root string) string { return lastRestored(root, true) }
+
 func clearRestored(root, name string, dryRun bool) {
 	if dryRun {
 		return

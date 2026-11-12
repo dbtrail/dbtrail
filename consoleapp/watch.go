@@ -1895,6 +1895,48 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	}
 }
 
+// pruneAfterPublishFn prunes one server's folder to its count right after a
+// job published a snapshot into it (#2678), instead of leaving the folder
+// over its count until the hourly cleanup. Set by startBaselinePruneLoop, so
+// it is nil exactly where that loop does not run; the supervisor's jobs call
+// it through baselineSupervisor.pruneAfterPublish.
+var pruneAfterPublishFn func(dir string)
+
+// pruneFolderToCount is the hourly cleanup's own prune, for ONE folder: the
+// same plan (prunePlan, so a shared folder, the daemon's own folder and two
+// servers on one S3 prefix are left out exactly as there), the same cycle
+// (runBaselinePruneCycle: the same lock, records, resends and the silent
+// destination guard), narrowed to the targets that are this folder and have
+// a count. A folder pruned by age alone has no count to apply and waits for
+// the hourly cleanup, which also remains the net under this one. The S3
+// cleanup is not run here.
+func pruneFolderToCount(ctx context.Context, reg *console.Registry, globalDir, globalS3, retainRaw, dir string,
+	pruneFn func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error)) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("snapshot cleanup after a new snapshot panicked; the hourly cleanup still runs", "dir", dir, "panic", r)
+		}
+	}()
+	if reg == nil || strings.TrimSpace(dir) == "" || ctx.Err() != nil {
+		return
+	}
+	retain, on := effectiveRetain(reg, retainRaw)
+	if !on {
+		retain = 0
+	}
+	want := console.CanonicalDir(dir)
+	var targets []baselinePruneTarget
+	for _, t := range prunePlan(reg.List(), globalDir, globalS3, retain) {
+		if t.keepNewest > 0 && console.CanonicalDir(t.dir) == want {
+			targets = append(targets, t)
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	runBaselinePruneCycle(ctx, targets, retain, pruneFn)
+}
+
 // baselineRetainOldWayMsg is what the daemon says once at startup when an age
 // retention is set (#2658).
 const baselineRetainOldWayMsg = "--baseline-retain (Delete by age) still removes local snapshots by age, and it is the old way: " +
@@ -1941,6 +1983,11 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 	if !pruneLoopStarts(reg, bootRetain) {
 		return nil // no registry and no retention — leave baselines untouched
 	}
+	// After the gate: only a daemon whose cleanup runs prunes after a
+	// publish (#2678).
+	pruneAfterPublishFn = func(dir string) {
+		pruneFolderToCount(ctx, reg, globalDir, globalS3, retainRaw, dir, baseline.PruneLocal)
+	}
 	if bootRetain > 0 && globalDir != "" && globalS3 == "" {
 		// The operator pointed retention at a local dir with no durable S3 source;
 		// warn once so the global dir not being reclaimed isn't a silent surprise.
@@ -1958,8 +2005,7 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 	}
 	runOnce := func() { baselinePruneSweep(ctx, reg, globalDir, globalS3, retainRaw, baseline.PruneLocal) }
 	go func() {
-		// One sweep shortly after startup (the min-age floor protects any
-		// just-created snapshot), then on the interval — unless the daemon is
+		// One sweep shortly after startup, then on the interval — unless the daemon is
 		// already shutting down.
 		if ctx.Err() == nil {
 			runOnce()

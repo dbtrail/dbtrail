@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -525,6 +526,10 @@ func (s *verifySupervisor) run(req console.VerifyRequest, baselineSrc string) {
 
 func (s *verifySupervisor) runBaselineAnchored(req console.VerifyRequest, baselineSrc string, indexDB *sql.DB, resolver *metadata.Resolver, dbName, flavor string) error {
 	ctx := s.ctx
+	// A check compares, table by table, two snapshots that can be far past
+	// the count, for as long as the run lasts: the cleanup of the folder
+	// stands still until it ends (#2678).
+	defer baseline.BeginRead(baselineSrc, "a check of the snapshots")()
 	// The folder on this machine is the one listed; a snapshot a table's pair
 	// needs and the folder no longer keeps (deleted by age) is looked for in
 	// the server's S3 destination. Nothing is left on disk: see

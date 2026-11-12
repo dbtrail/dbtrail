@@ -68,6 +68,11 @@ type baselineSnapshotDTO struct {
 	// removes it by the count alone (#2658). False when the mark could not
 	// be read, which leaves the row unmarked rather than announce a removal.
 	Held bool `json:"held,omitempty"`
+	// Restored: this local snapshot is the result of the last restore to a
+	// moment (baseline.Restored, #2678). The cleanup keeps it whatever its
+	// date and it takes no place in the count, so the list never marks it
+	// as going. False when the mark could not be read.
+	Restored bool `json:"restored,omitempty"`
 	// ViewsSkipped counts the views the source held and this snapshot left
 	// out (#1879), omitted when nothing is recorded: a snapshot from before
 	// the record, or a source with no views. Never zero on the wire.
@@ -447,6 +452,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 				if held, err := baseline.UploadHeld(localDir, reconstruct.SnapshotDirName(f.SnapshotTime)); err == nil {
 					dto.Held = held
 				}
+				dto.Restored = baseline.Restored(localDir) == reconstruct.SnapshotDirName(f.SnapshotTime)
 			}
 			// Keyed on the file's OWN path, not on the primary source's kind:
 			// with two locations merged, the primary being S3 says nothing about

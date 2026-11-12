@@ -557,6 +557,14 @@ func (s *Server) handleBaselineDownload(w http.ResponseWriter, r *http.Request) 
 	if files == nil {
 		return
 	}
+	if ss.localRoot != "" {
+		// The files are opened one by one while the archive streams, for as
+		// long as the client takes: the cleanup of the folder stands still
+		// until the download ends or the client goes (#2678). A snapshot
+		// removed between the listing above and this line fails the stream
+		// at its first file, as before.
+		defer baseline.BeginRead(ss.localRoot, "a snapshot download")()
+	}
 	if snapshotIncomplete(files) {
 		writeJSONError(w, http.StatusConflict,
 			"this snapshot is marked incomplete (a failed or unfinished run); refusing to download it")

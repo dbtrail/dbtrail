@@ -2,6 +2,7 @@ package baseline
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,11 +24,12 @@ import (
 // readHoldLimit is how long one registration stops the prune. Past it the
 // reader is taken for stuck and the prune goes on: a job that never ends
 // must not let a folder that gets a snapshot every few minutes fill the
-// disk. It is the longest a reader here declares it may run: the .sql build
-// (consoleapp.sqlExportMaxRun) and the restore fold end within it, a check
-// (verify) and a statement on an earlier copy end in minutes. A download of
-// a snapshot slower than this loses the rest of its file and is started
-// again.
+// disk. None of these jobs declares a run time of its own (a restore, a
+// .sql build, a check and a download are bounded only by the daemon's
+// life), so this is not sized against one: it is a day, the longest
+// interval a schedule can have, so a reader still registered after it has
+// outlived every slot of every schedule. A job that really runs longer
+// loses the snapshot it is on, fails, and is started again.
 const readHoldLimit = 24 * time.Hour
 
 type readHold struct {
@@ -59,7 +61,8 @@ func readKey(root string) string {
 // nothing from root and reports PruneResult.Reading. end is safe to call
 // more than once; call it on every exit (defer), a panic included.
 func BeginRead(root, what string) (end func()) {
-	if root == "" {
+	if root == "" || strings.HasPrefix(root, "s3://") {
+		// Nothing local to protect: the S3 cleanup has its own rule.
 		return func() {}
 	}
 	key := readKey(root)
@@ -101,4 +104,11 @@ func readingNow(root string, now time.Time) (what string, stuck int) {
 		}
 	}
 	return what, stuck
+}
+
+// Reading names the job that stops a prune of root now, "" when none does:
+// what PruneLocal would report as PruneResult.Reading.
+func Reading(root string) string {
+	what, _ := readingNow(root, time.Now())
+	return what
 }

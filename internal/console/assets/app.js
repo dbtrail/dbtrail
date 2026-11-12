@@ -9199,9 +9199,9 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
     // the line above the snapshot list (snapshotRetentionLines); said a third
     // time here it would only be the same fact again.
     say("Older ones past that number " + (mins ? "and older than " + exactSpan(mins) + " " : "") +
-      "are removed from this folder at the next hourly cleanup, " + (s3 ? "once S3 has them." : "never a table's only copy."));
+      "are removed from this folder after each new snapshot, " + (s3 ? "once S3 has them." : "never a table's only copy."));
     if (s3 && reach && reach.held) say("An update the schedule did not send to S3 goes past that number without waiting for S3.");
-    say(localReachWords(n, reach || {}));
+    say(localReachWords(n, Object.assign({}, reach || {}, { s3: !!s3 })));
   } else if (mins) {
     say("Deleted here when older than " + exactSpan(mins) + ", once S3 has it. DBTrail leaves S3 alone.");
   } else if (!stuck) {
@@ -9250,7 +9250,7 @@ function keepShapeDraw(box, keep, everyMin, retainMin) {
   if (extra > 0) row.append(el("span", { class: "ks-more", text: "+" + extra }));
   for (let i = 0; i < shown; i++) row.append(el("span", { class: "ks-tile" + (i === shown - 1 ? " ks-newest" : "") + (all && i === 0 ? " ks-open" : "") }));
   box.append(row);
-  const mins = keep && everyMin ? Math.max(keep * everyMin, 60, retainMin || 0) : 0;
+  const mins = keep && everyMin ? Math.max(keep * everyMin, retainMin || 0) : 0;
   box.append(el("div", { class: "ks-axis" },
     el("span", { class: "ks-left", text: all ? "every snapshot, kept" : (mins ? "about " + reachSpan(mins) + " ago" : "the oldest kept") }),
     el("span", { class: "ks-right", text: "now" })));
@@ -9267,25 +9267,38 @@ function keepShapeDraw(box, keep, everyMin, retainMin) {
 //             schedule and the refresh loop together, from the server
 //             (snapshot_every_minutes); 0 = nothing takes them on its own
 //   retain    the age retention in minutes (0 = none)
+//   s3        the server sends its snapshots to S3 (as saved)
+//   sendEvery minutes between two sends to S3 (Send to S3 every); 0 = every
+//             update is sent
 //
-// keep x every, but never under the hour the prune always leaves alone, nor
-// under the age retention, which keeps younger snapshots outside the count.
-// "Up to": with one kept, right after a new snapshot the window is shorter.
+// Without S3: keep x every, and no less than the age retention, which keeps
+// younger snapshots outside the count. Nothing else adds to it (#2678): the
+// folder holds the newest `keep`, so this is 15 minutes for 3 every 5.
 // Without a schedule there is no number to give, and the line says what
 // decides it instead.
+//
+// With S3 a restore reads the bucket, not this folder, so the count is not
+// what bounds it: it goes back to the oldest snapshot there, and a moment
+// between two snapshots there replays the changes since the earlier one,
+// which is at most the time between two sends.
 function localReachWords(keep, reach) {
+  if (reach.s3) {
+    return "A restore reads S3: back to its oldest snapshot" +
+      (reach.sendEvery ? ", replaying up to " + exactSpan(reach.sendEvery) + " of changes." : ".");
+  }
   // "After you save" while the typed number is not the one in force yet.
   const lead = reach.inForce === keep ? "You can" : "After you save, you can";
   if (!reach.every) {
     return lead + " restore back to " + (keep === 1 ? "the one snapshot kept" : "the oldest of the " + keep + " kept") +
-      ". Put the copy on a schedule (Update the copy, above) and this becomes a number of hours.";
+      ". Put the copy on a schedule (Update the copy, above) and this becomes a length of time.";
   }
-  const mins = Math.max(keep * reach.every, 60, reach.retain || 0);
-  return lead + " restore back to about " + reachSpan(mins) + " ago: the oldest of the " + keep + " kept is that old.";
+  const mins = Math.max(keep * reach.every, reach.retain || 0);
+  return lead + " restore back to about " + reachSpan(mins) + " ago, " + (keep === 1 ? "the one snapshot kept." : "the oldest of the " + keep + " kept.");
 }
 
-// reachSpan says a number of minutes the way a person would: hours below a
-// day, whole days as days, hours again up to two days, days above.
+// reachSpan says a number of minutes the way a person would: minutes below
+// an hour, hours below a day, whole days as days, hours again up to two
+// days, days above.
 // exactSpan states a threshold the prune applies exactly (Delete by age), so
 // it never rounds: whole days only when the value is whole days, else hours,
 // else minutes. reachSpan below is the rounded "about how far back" wording.
@@ -9298,6 +9311,7 @@ function exactSpan(mins) {
 
 function reachSpan(mins) {
   const day = 24 * 60;
+  if (mins < 60) return mins + (mins === 1 ? " minute" : " minutes");
   if (mins < day || (mins % day !== 0 && mins < 2 * day)) {
     const h = Math.max(1, Math.round(mins / 60));
     return h + (h === 1 ? " hour" : " hours");
@@ -9488,7 +9502,8 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
         every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0,
         // The schedule keeps updates off S3 between sends (upload_every).
-        held: asSaved && (srv.schedule_upload_every_minutes || 0) > 0 });
+        held: asSaved && (srv.schedule_upload_every_minutes || 0) > 0,
+        sendEvery: asSaved ? (srv.schedule_upload_every_minutes || 0) : 0 });
     const infos = said.filter((w) => !w.err);
     said.forEach((w) => {
       const keepHere = w.err || w === infos[infos.length - 1];
@@ -10811,12 +10826,9 @@ function snapshotRetentionLines(b) {
   const facts = [];
   if (keep > 0) {
     // With S3 the count is the same; what is past it waits for its copy
-    // there (#2658).
-    // The hour is said with the count, not after it: nothing made in the
-    // last hour is ever removed, so a 5-minute schedule keeps about a dozen
-    // more than the number.
+    // there (#2658). The number is the whole rule (#2678): no hour adds to
+    // it.
     facts.push((keep === 1 ? "Keeps only the newest snapshot on this machine" : "Keeps the newest " + keep + " snapshots on this machine") +
-      ", and any made in the last hour" +
       (b.s3_destination ? "; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting." : "."));
   }
   const lp = b.last_prune;
@@ -10974,7 +10986,8 @@ function baselinesPanel(b, servers, opts) {
     // is a fact about the collection and lives in the context strip.
     const uniformTables = snapshotTablesUniform(b.snapshots, b.truncated);
     // The count in force (Settings, "Keep by count"): every local copy past
-    // it goes at the next hourly cleanup, and the row says so instead of
+    // it goes at the next cleanup (one follows each new snapshot, and one
+    // runs every hour), and the row says so instead of
     // sitting in the list as if it were staying. Copies only in S3 are not
     // touched by the cleanup, so they are not marked. On a server with an S3
     // destination (#2658) a local copy past the count goes once S3 has it,
@@ -10988,9 +11001,10 @@ function baselinesPanel(b, servers, opts) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
         localSeen++;
-        // Nothing younger than an hour goes at the next cleanup, so it is
-        // not marked, whatever its place in the count.
-        if (localSeen > keepInForce && !(sn.age_hours < 1) && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
+        // The last restore's result is kept whatever its date, and takes
+        // no place in the count (#2678).
+        if (sn.restored) { localSeen--; return; }
+        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
       });
     }
     const total = b.snapshots.length;
@@ -11043,11 +11057,11 @@ function baselinesPanel(b, servers, opts) {
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
-        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup" +
+        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next cleanup, which follows each new snapshot" +
           // The list saw this snapshot in S3; the cleanup asks S3 itself for
           // the complete copy before it removes anything, so the hover says
           // the condition, not that it is met.
-          (!b.s3_destination ? ", never a table's only copy." : (sn.kinds || []).includes("s3") ? " that finds its complete copy in S3." : ": the schedule did not send it to S3, so it does not wait for S3.") }));
+          (!b.s3_destination ? ", never a table's only copy." : (sn.kinds || []).includes("s3") ? ", once it finds its complete copy in S3." : ": the schedule did not send it to S3, so it does not wait for S3.") }));
       }
       // With skipped views the row says both counts (#1879), whether or not
       // the table count varies: the views are what the row is there to show.

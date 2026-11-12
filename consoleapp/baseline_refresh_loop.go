@@ -179,6 +179,9 @@ func (s *baselineSupervisor) TriggerRefresh(req refreshRequest, interval time.Du
 		// And the chains of the snapshot just published are merged into the
 		// pairs the console's statements read (#2231), in no slot at all.
 		s.maybeResolve(req)
+		// Last, the count (#2678): after the merge above, which reads the
+		// snapshot before the newest and would lose it to a count of 1.
+		s.pruneAfterPublish(req.BaselineDir)
 	}()
 	return since, nil
 }
