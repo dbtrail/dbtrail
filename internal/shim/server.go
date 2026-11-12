@@ -45,10 +45,32 @@ import (
 // Returns an error rather than panicking on an unsupported method so
 // the CLI can surface the message via cobra rather than fataling
 // inside go-mysql's NewServer panic.
+//
+// Every server it returns offers TLS, with a certificate made up at start
+// that no client can verify (go-mysql's NewDefaultServer, or the
+// self-signed one below). NewMySQLServerWithTLS serves the operator's
+// certificate instead (#2636).
 func NewMySQLServer(authMethod string) (*server.Server, error) {
+	return NewMySQLServerWithTLS(authMethod, nil)
+}
+
+// NewMySQLServerWithTLS is NewMySQLServer serving cert to the clients that
+// ask for TLS (#2636). A nil cert is NewMySQLServer exactly: the same
+// constructor, so the handshake of a port with no certificate set does not
+// change by a byte.
+//
+// With a cert, the RSA key the SHA2 methods decrypt a password with on a
+// connection WITHOUT TLS is still made up here, apart from the certificate:
+// an operator's key may be ECDSA, and go-mysql only looks for an RSA key in
+// the certificate when it is handed none, so an ECDSA certificate would
+// otherwise leave those clients unable to log in. The native method gets
+// one too, as go-mysql's NewDefaultServer gives it one.
+func NewMySQLServerWithTLS(authMethod string, cert *tls.Config) (*server.Server, error) {
 	switch authMethod {
 	case "", mysql.AUTH_NATIVE_PASSWORD:
-		return server.NewDefaultServer(), nil
+		if cert == nil {
+			return server.NewDefaultServer(), nil
+		}
 	case mysql.AUTH_CACHING_SHA2_PASSWORD, mysql.AUTH_SHA256_PASSWORD:
 		// fall through
 	default:
@@ -59,11 +81,22 @@ func NewMySQLServer(authMethod string) (*server.Server, error) {
 			mysql.AUTH_SHA256_PASSWORD)
 	}
 
-	priv, tlsConfig, err := generateSelfSignedTLS()
-	if err != nil {
-		return nil, fmt.Errorf("shim: generate self-signed cert for %s: %w", authMethod, err)
+	if cert == nil {
+		priv, tlsConfig, err := generateSelfSignedTLS()
+		if err != nil {
+			return nil, fmt.Errorf("shim: generate self-signed cert for %s: %w", authMethod, err)
+		}
+		return server.NewServer(portServerVersion, mysql.DEFAULT_COLLATION_ID, authMethod, priv, tlsConfig), nil
 	}
-	return server.NewServer(portServerVersion, mysql.DEFAULT_COLLATION_ID, authMethod, priv, tlsConfig), nil
+	method := authMethod
+	if method == "" {
+		method = mysql.AUTH_NATIVE_PASSWORD
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("shim: generate the RSA key for %s: %w", method, err)
+	}
+	return server.NewServer(portServerVersion, mysql.DEFAULT_COLLATION_ID, method, priv, cert), nil
 }
 
 // generateSelfSignedTLS builds an RSA-2048 keypair and wraps it in a
@@ -80,8 +113,8 @@ func NewMySQLServer(authMethod string) (*server.Server, error) {
 // with (go-mysql server's RSA-OAEP branch in handleAuthSwitchResponse).
 //
 // Kept under 30 lines using stdlib helpers; do NOT grow this into a
-// general-purpose CA / cert-rotation framework. Operators who need
-// real TLS termination put a TLS-aware proxy in front of the shim.
+// general-purpose CA / cert-rotation framework. A certificate clients can
+// verify is the operator's, loaded by LoadPortTLS (#2636).
 func generateSelfSignedTLS() (priv *rsa.PrivateKey, tlsConfig *tls.Config, err error) {
 	priv, err = rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

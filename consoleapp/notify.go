@@ -237,7 +237,7 @@ func (n *watchNotifier) Continuity(server, edgeKey string, r gapReading) {
 
 // The two resolved messages of continuity_gap_lost (see Continuity).
 const (
-	continuityAcknowledgedSummary = "capture loss acknowledged: this alarm is cleared; snapshot updates and reconstructions whose window spans the loss are still refused until a full snapshot is taken after it"
+	continuityAcknowledgedSummary = "capture loss acknowledged: this alarm is cleared; snapshot updates and reconstructions whose window spans the loss are still refused, and a full snapshot taken after it is not affected"
 	continuityRestoredSummary     = "capture continuity restored: this index no longer has a capture loss on record"
 )
 

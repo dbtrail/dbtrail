@@ -264,8 +264,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// refuses nothing, and the next cycle with something in it behaves exactly
 	// as before. It does SAY so: at Info here, and as the schedule's own skip
 	// reason.
-	mark, known := readIndexMark(s.ctx, req.IndexDSN)
-	s.reportGateBlind("mark", known, req,
+	mark, markErr := readIndexMark(s.ctx, req.IndexDSN)
+	known := markErr == nil
+	s.reportGateBlind("mark", markErr, req,
 		"cannot tell whether anything has been indexed, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
 	if known && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC(), interval) {
@@ -597,14 +598,16 @@ var refreshStatusWritten = func(refreshRequest) {}
 // early leaves the day cap, which is today's behaviour, and the gate, blind on
 // the same read, folds every cycle and says so too.
 func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, interval time.Duration) time.Time {
-	floor, known := readLiveFloor(s.ctx, req.IndexDSN)
+	floor, err := readLiveFloor(s.ctx, req.IndexDSN)
 	line, ok := s.coverageRuleFor(s.ctx, req, interval).reanchorBy(floor, at)
-	known = known && ok
-	s.reportGateBlind("chain-floor", known, req,
+	if err == nil && !ok {
+		err = errNoLiveFloor
+	}
+	s.reportGateBlind("chain-floor", err, req,
 		"cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas "+
 			"early: a table is written in full only when its chain is a day old, and a restore of a quiet "+
 			"table can come to need events the index has already dropped")
-	if !known {
+	if err != nil {
 		return time.Time{}
 	}
 	return line
@@ -624,15 +627,10 @@ func (s *baselineSupervisor) publishedReadsFrom(req refreshRequest, at time.Time
 		return at, true
 	}
 	from, err := snapshotReadsFrom(s.ctx, req.BaselineDir, at)
-	known := err == nil
-	why := ""
+	s.reportGateBlind("reads-from", err, req,
+		"cannot tell where the readers of the snapshot just published start, so the next cycle folds "+
+			"instead of skipping; this repeats until a snapshot whose table deltas can all be read is published")
 	if err != nil {
-		why = "cannot tell where the readers of the snapshot just published start (" + err.Error() +
-			"), so the next cycle folds instead of skipping; this repeats until a snapshot whose table " +
-			"deltas can all be read is published"
-	}
-	s.reportGateBlind("reads-from", known, req, why)
-	if !known {
 		return time.Time{}, false
 	}
 	return from, true
@@ -890,12 +888,12 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	// what the operator has told it to hold. A skip needs both. The rule is
 	// the one the fold ends chains with, so the fold this releases moves the
 	// instant graded here.
-	covered, known := snapshotStillCovered(ctx, req.IndexDSN, prev.readsFrom, now,
+	covered, err := snapshotStillCovered(ctx, req.IndexDSN, prev.readsFrom, now,
 		s.coverageRuleFor(ctx, req, interval))
-	s.reportGateBlind("coverage", known, req,
+	s.reportGateBlind("coverage", err, req,
 		"cannot tell how far the index still reaches, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
-	if !known {
+	if err != nil {
 		return false
 	}
 	if !covered {
@@ -922,10 +920,14 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	s.gateEdge.Resolve("reanchor:" + req.ServerID)
 	// A CREATE TABLE writes no row, so it does not move the mark: a table
 	// created on a quiet server would otherwise never be looked for (#1993).
-	if created, err := tablesCreatedSince(ctx, req.IndexDSN, prev.publishedAt); err != nil || created {
-		if err != nil {
-			slog.Debug("snapshot refresh: could not ask the index whether tables were created since the last snapshot; folding", "server", req.ServerName, "error", err)
-		} else {
+	created, err := tablesCreatedSince(ctx, req.IndexDSN, prev.publishedAt)
+	// Blind like the questions above, and said the same way (#2669): a
+	// failing read here folds every cycle too.
+	s.reportGateBlind("tables-created", err, req,
+		"cannot tell whether a table was created since the last snapshot, so every cycle folds; this server is not "+
+			"being skipped and will not be until the index answers")
+	if err != nil || created {
+		if err == nil {
 			slog.Info("snapshot refresh: nothing has been indexed, but a table was created since the last snapshot; folding to look for it",
 				"server", req.ServerName, "id", req.ServerID)
 		}
@@ -944,13 +946,11 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	// Blind like the mark and coverage questions above, and said the same
 	// way (#2664): with stream_state unreadable every cycle folds, and at
 	// Debug nothing told the operator why a quiet server is never skipped.
-	s.reportGateBlind("loss", err == nil, req,
+	s.reportGateBlind("loss", err, req,
 		"cannot tell whether capture lost events since the last snapshot, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
 	if err != nil || lost {
-		if err != nil {
-			slog.Debug("snapshot refresh: could not ask the index whether capture lost events since the last snapshot; folding", "server", req.ServerName, "error", err)
-		} else if s.gateEdge.Fire("loss:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
+		if err == nil && s.gateEdge.Fire("loss:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
 			// Behind an edge, like the re-anchor line above: the condition
 			// holds every cycle until a full read is taken after the loss,
 			// and each of those cycles records its own refused run.
@@ -1023,9 +1023,10 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 		return rule
 	}
 	asked, unreadable := false, false
+	var readErr error
 	rule.dropsAfter, _ = rotation.DropWindow(s.rotationInForce(), func() rotation.Effective {
 		e := readIndexRetention(ctx, req.IndexDSN)
-		asked, unreadable = true, e.Source == rotation.RetainUnreadable
+		asked, unreadable, readErr = true, e.Source == rotation.RetainUnreadable, e.Err
 		return e
 	})
 	if asked {
@@ -1034,7 +1035,14 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 		if s.tableDeltas {
 			why += "; on an index that new, every update writes its tables in full"
 		}
-		s.reportGateBlind("retention", !unreadable, req, why)
+		var cause error
+		if unreadable {
+			cause = readErr
+			if cause == nil {
+				cause = errors.New("the index did not say")
+			}
+		}
+		s.reportGateBlind("retention", cause, req, why)
 	}
 	return rule
 }
@@ -1061,8 +1069,8 @@ func (s *baselineSupervisor) followRotation(settings func() rotation.Settings) {
 }
 
 // reportGateBlind says, at most once a day per server, that the gate cannot
-// answer one of its questions — and resolves the condition when it can
-// again.
+// answer one of its questions, with the cause (#2669), and resolves the
+// condition when it can again. A nil cause is an answered question.
 //
 // At Warn, and this is the whole point of it. Failing toward folding is safe,
 // so nothing is lost; what IS lost is the feature, permanently and with no
@@ -1072,9 +1080,13 @@ func (s *baselineSupervisor) followRotation(settings func() rotation.Settings) {
 // servers. Folding every cycle on an idle one then reads as the gate being
 // broken, and the one line that explains it would be at Debug, which the
 // default log level does not print.
-func (s *baselineSupervisor) reportGateBlind(question string, known bool, req refreshRequest, why string) {
+//
+// The cause rides as the line's error and never in the edge's detail: a
+// timeout's text differs from read to read, and as a detail it would make
+// every cycle a new condition.
+func (s *baselineSupervisor) reportGateBlind(question string, cause error, req refreshRequest, why string) {
 	key := "gate-blind:" + question + ":" + req.ServerID
-	if known {
+	if cause == nil {
 		s.gateEdge.Resolve(key)
 		return
 	}
@@ -1087,7 +1099,7 @@ func (s *baselineSupervisor) reportGateBlind(question string, known bool, req re
 	}
 	if s.gateEdge.Fire(key, "") {
 		slog.Warn("baseline refresh: "+why, "server", req.ServerName, "id", req.ServerID,
-			"question", question)
+			"question", question, "error", cause)
 	}
 }
 
