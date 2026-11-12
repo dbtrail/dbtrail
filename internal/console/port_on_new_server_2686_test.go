@@ -355,3 +355,33 @@ func TestCheckRoute_anInstallationWithServersKeepsTheNeverSavedPortOff_2686(t *t
 		t.Fatalf("the port was saved or opened: stat %v, calls %v", err, fc.calls)
 	}
 }
+
+// The Connect screen's forwarding user travels with the check (#2686): saved
+// with the server, and the capture user refused before anything is saved.
+func TestCheckRoute_theForwardingUserIsSavedWithTheServer_2686(t *testing.T) {
+	srv, _, _, _ := newSupervisorWithPort(t)
+	body := `{"source_host":"db.example.com","source_user":"dbtrail","source_password":"Ab3-xyz","route_user":"shop_fwd","route_password":"Fw9-xyz"}`
+	rec, out := doServersReq(t, srv, "POST", "/api/servers/check", body)
+	got := decodeCheck(t, out)
+	if rec.Code != 200 || !got.Started || got.Server == nil || !got.Server.HasRoute || got.Server.RouteUser != "shop_fwd" {
+		t.Fatalf("add with a forwarding user: %d %s", rec.Code, out)
+	}
+	if strings.Contains(string(out), "Fw9-xyz") {
+		t.Fatalf("the answer carries the forwarding password: %s", out)
+	}
+}
+
+func TestCheckRoute_theCaptureUserAsForwardingUserIsRefused_2686(t *testing.T) {
+	srv, ctrl, fc, path := newSupervisorWithPort(t)
+	body := `{"source_host":"db.example.com","source_user":"dbtrail","source_password":"Ab3-xyz","route_user":" dbtrail ","route_password":"x"}`
+	rec, out := doServersReq(t, srv, "POST", "/api/servers/check", body)
+	if rec.Code != 400 || !strings.Contains(string(out), "never forwards as that one") {
+		t.Fatalf("capture user as forwarding user: %d %s", rec.Code, out)
+	}
+	if srv.cm.reg.Len() != 0 || len(ctrl.unsaved) != 0 || len(fc.calls) != 0 {
+		t.Fatalf("something ran or was saved: servers %d, checks %d, port %v", srv.cm.reg.Len(), len(ctrl.unsaved), fc.calls)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the port was saved")
+	}
+}
