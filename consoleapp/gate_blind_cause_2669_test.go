@@ -11,7 +11,9 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/notify"
+	"github.com/dbtrail/dbtrail/internal/rotation"
 )
 
 // #2669 point 3. The gate's Warn when it cannot answer one of its questions
@@ -155,5 +157,81 @@ func TestGateReads_returnTheCause_2669(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "read the index partitions: gone away") {
 			t.Errorf("err = %v, want the cause", err)
 		}
+	})
+}
+
+// The other blind questions of the refresh cycle say their cause the same way:
+// the chain floor, where a published snapshot's readers start, the retention
+// the index was created under, and the schedule's update-size probe.
+func TestOtherBlindLinesCarryTheCause_2669(t *testing.T) {
+	req := refreshRequest{ServerID: "s", ServerName: "shop", IndexDSN: "d"}
+	newSup := func(t *testing.T) *baselineSupervisor {
+		sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
+		sup.gateEdge = notify.NewEdge(time.Hour)
+		return sup
+	}
+	check := func(t *testing.T, log *lockedBuf, wants ...string) {
+		t.Helper()
+		out := log.String()
+		t.Logf("the line: %s", strings.TrimSpace(out))
+		if got := strings.Count(out, "level=WARN"); got != 1 {
+			t.Fatalf("%d Warn line(s), want 1: %q", got, out)
+		}
+		for _, want := range wants {
+			if !strings.Contains(out, want) {
+				t.Errorf("the line does not carry %q: %q", want, out)
+			}
+		}
+	}
+
+	t.Run("chain floor, the read fails", func(t *testing.T) {
+		log := captureLog(t, slog.LevelInfo)
+		stubLiveFloor(t, time.Time{}, false)
+		newSup(t).chainStartFloor(req, refreshAt, time.Hour)
+		check(t, log, "cannot tell how far back the index keeps events", "question=chain-floor", `error="stub: the index did not answer"`)
+	})
+	t.Run("chain floor, no partition to measure from", func(t *testing.T) {
+		log := captureLog(t, slog.LevelInfo)
+		stubLiveFloor(t, time.Time{}, true)
+		newSup(t).chainStartFloor(req, refreshAt, time.Hour)
+		check(t, log, "question=chain-floor", `error="the index has no partition to measure coverage from"`)
+	})
+	t.Run("where the readers start", func(t *testing.T) {
+		log := captureLog(t, slog.LevelInfo)
+		stubReadsFrom(t, time.Time{}, errors.New("read orders.parquet footer: unexpected EOF"))
+		sup := newSup(t)
+		sup.tableDeltas = true
+		if _, ok := sup.publishedReadsFrom(req, refreshAt); ok {
+			t.Fatal("the start is known although its read failed")
+		}
+		check(t, log, "cannot tell where the readers of the snapshot just published start, so the next cycle folds instead of skipping",
+			"question=reads-from", `error="read orders.parquet footer: unexpected EOF"`)
+	})
+	for _, c := range []struct {
+		name string
+		e    rotation.Effective
+		want string
+	}{
+		{"retention, the read fails", rotation.Effective{Source: rotation.RetainUnreadable, Err: errors.New("Error 1142: SELECT command denied")},
+			`error="Error 1142: SELECT command denied"`},
+		{"retention, unreadable without an error", rotation.Effective{Source: rotation.RetainUnreadable},
+			`error="the index did not say"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			log := captureLog(t, slog.LevelInfo)
+			stubIndexRetention(t, c.e)
+			sup := newSup(t)
+			sup.followRotation(func() rotation.Settings { return rotation.Settings{Enabled: true, Retain: 12 * time.Hour} })
+			sup.coverageRuleFor(context.Background(), req, time.Hour)
+			check(t, log, "cannot read the retention this index was created under", "question=retention", c.want)
+		})
+	}
+	t.Run("update-size probe", func(t *testing.T) {
+		log := captureLog(t, slog.LevelInfo)
+		b, _, _ := newScheduleFixture(t, false)
+		b.sup.gateEdge = notify.NewEdge(time.Hour)
+		b.reportWindowBlind(console.ServerEntry{ID: "s", Name: "shop"}, context.DeadlineExceeded)
+		check(t, log, "snapshot schedule: the index did not answer the update-size probe in time", "server=shop",
+			`error="context deadline exceeded"`)
 	})
 }
