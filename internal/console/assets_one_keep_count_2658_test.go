@@ -5,17 +5,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 // TestSnapshotList_goingRowsWithS3 draws the real snapshot list (#2658) for
 // a server keeping its newest 2, without and with an S3 destination. Without
 // one, every local snapshot past the count is marked as going at the next
-// cleanup. With one, only those the listing also found in S3 are: a snapshot
-// that is only on this machine stays until S3 has it, and a mark on it would
-// announce a removal that does not happen.
+// cleanup. With one, the marked ones are those the listing also found in S3
+// and those the S3 interval kept here on purpose, which go by the count
+// alone. A snapshot that was meant for S3 and is not there (an upload that
+// failed) stays until S3 has it, and a mark on it would announce a removal
+// that does not happen. The S3 case is drawn from GET /api/baselines itself,
+// with the held marks on disk.
 func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -28,38 +35,84 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	at := func(h int) string {
-		return time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC).Add(-time.Duration(h) * time.Hour).Format(consoleTSFormat)
+	now := time.Now().UTC().Truncate(time.Second)
+	at := func(h int) time.Time { return now.Add(-time.Duration(h) * time.Hour) }
+	// Newest first. 1 and 2 are inside the count. 3 is past it and in both
+	// places. 4 is past it, only here, held on purpose. 5 is past it, only
+	// here, NOT held: its upload failed. 6 is only in S3.
+	srv, id, dir := s3CopyServerWith(t, &stubScheduleReporter{full: true}, true)
+	srv.localPruneLoop = true
+	e, _ := srv.cm.reg.Get(id)
+	e.LocalKeepNewest = 2
+	if err := srv.cm.reg.Update(e); err != nil {
+		t.Fatal(err)
 	}
-	// Newest first, as the API lists them. The third is past the count and
-	// in both places; the fourth is past the count and only on this machine
-	// (held by the S3 interval, or an upload that failed); the fifth is only
-	// in S3, which the cleanup never touches.
-	snaps := []map[string]any{
-		{"time": at(1), "age_hours": 1, "tables": []string{"shop.orders"}, "kinds": []string{"dir"}},
-		{"time": at(2), "age_hours": 2, "tables": []string{"shop.orders"}, "kinds": []string{"dir", "s3"}},
-		{"time": at(3), "age_hours": 3, "tables": []string{"shop.orders"}, "kinds": []string{"dir", "s3"}},
-		{"time": at(4), "age_hours": 4, "tables": []string{"shop.orders"}, "kinds": []string{"dir"}},
-		{"time": at(5), "age_hours": 5, "tables": []string{"shop.orders"}, "kinds": []string{"s3"}},
+	stubListings(map[string]s3CopyListing{
+		dir:              {snaps: []time.Time{at(1), at(2), at(3), at(4), at(5)}},
+		"s3://bkt/snaps": {snaps: []time.Time{at(2), at(3), at(6)}},
+	})
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(snaps)
+	for _, h := range []int{1, 4} {
+		if err := baseline.MarkUploadHeld(dir, reconstruct.SnapshotDirName(at(h))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, withS3 := doServersReqHeader(t, srv, "GET", "/api/baselines", "", id)
+	if rec.Code != 200 {
+		t.Fatalf("GET /api/baselines: %d %s", rec.Code, withS3)
+	}
+	var listed struct {
+		Snapshots []struct {
+			Time  string
+			Held  bool
+			Kinds []string
+		}
+		LocalRetention *localRetentionDTO `json:"local_retention"`
+		S3Destination  bool               `json:"s3_destination"`
+	}
+	if err := json.Unmarshal(withS3, &listed); err != nil {
+		t.Fatal(err)
+	}
+	var heldRows []string
+	for _, sn := range listed.Snapshots {
+		if sn.Held {
+			heldRows = append(heldRows, sn.Time)
+		}
+	}
+	if want := []string{at(1).Format(consoleTSFormat), at(4).Format(consoleTSFormat)}; !slices.Equal(heldRows, want) {
+		t.Fatalf("rows the API says are held: %v, want %v", heldRows, want)
+	}
+	if listed.LocalRetention == nil || listed.LocalRetention.KeepNewest != 2 || !listed.S3Destination || len(listed.Snapshots) != 6 {
+		t.Fatalf("the listing: retention %+v, s3_destination %v, %d snapshots", listed.LocalRetention, listed.S3Destination, len(listed.Snapshots))
+	}
+	// The same folder with no destination, by hand: every row is local.
+	var local []map[string]any
+	for h := 1; h <= 5; h++ {
+		local = append(local, map[string]any{"time": at(h).Format(consoleTSFormat), "age_hours": h, "tables": []string{"shop.orders"}, "kinds": []string{"dir"}})
+	}
+	raw, _ := json.Marshal(local)
 	script := renderHarnessJS + `
 vm.runInContext("capsCache = { backup_schedule: true };", ctx);
 const cur = { id: "a", name: "a", kind: "registry", baseline_dir: "/var/lib/dbtrail/snapshots/a" };
-const snaps = ` + string(raw) + `;
 const all = (n, out = []) => { if (!n || typeof n !== "object") return out; out.push(n); for (const c of n.children || []) all(c, out); return out; };
-const draw = (extra) => {
-  const panel = vm.runInContext("baselinesPanel", ctx)(Object.assign({ configured: true, snapshots: snaps, local_retention: { keep_newest: 2 } }, extra), [cur], {});
+const draw = (b) => {
+  const panel = vm.runInContext("baselinesPanel", ctx)(b, [cur], {});
   const nodes = all(panel);
+  const rows = nodes.filter((n) => / stg-row-going /.test(" " + (n.className || "") + " "));
   const chips = nodes.filter((n) => n.textContent === "goes at the next cleanup");
   return {
-    going: nodes.filter((n) => / stg-row-going /.test(" " + (n.className || "") + " ")).length,
+    going: rows.length,
     chips: chips.length,
     titles: chips.map((n) => (n.attrs && n.attrs.title) || n.title || ""),
     line: nodes.filter((n) => / bk-retention /.test(" " + (n.className || "") + " ")).map((n) => n.textContent),
   };
 };
-console.log(JSON.stringify({ local: draw({}), s3: draw({ s3_destination: true }) }));
+console.log(JSON.stringify({
+  local: draw({ configured: true, snapshots: ` + string(raw) + `, local_retention: { keep_newest: 2 } }),
+  s3: draw(` + string(withS3) + `),
+}));
 `
 	path := filepath.Join(t.TempDir(), "going.js")
 	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
@@ -80,9 +133,9 @@ console.log(JSON.stringify({ local: draw({}), s3: draw({ s3_destination: true })
 	t.Logf("no S3:   line %q, %d rows going, hover %q", got.Local.Line, got.Local.Chips, got.Local.Titles)
 	t.Logf("with S3: line %q, %d rows going, hover %q", got.S3.Line, got.S3.Chips, got.S3.Titles)
 
-	// No S3: the two local snapshots past the newest two go.
-	if got.Local.Chips != 2 || got.Local.Going != 2 {
-		t.Errorf("no S3: %d chips on %d rows, want the 2 local snapshots past the count", got.Local.Chips, got.Local.Going)
+	// No S3: the three local snapshots past the newest two go.
+	if got.Local.Chips != 3 || got.Local.Going != 3 {
+		t.Errorf("no S3: %d chips on %d rows, want the 3 local snapshots past the count", got.Local.Chips, got.Local.Going)
 	}
 	for _, title := range got.Local.Titles {
 		if title != "Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, never a table's only copy." {
@@ -92,15 +145,15 @@ console.log(JSON.stringify({ local: draw({}), s3: draw({ s3_destination: true })
 	if len(got.Local.Line) != 1 || got.Local.Line[0] != "Keeps the newest 2 snapshots on this machine." {
 		t.Errorf("no S3: retention line %q", got.Local.Line)
 	}
-	// With S3: only the one that is also in S3. The one only on this
-	// machine is not marked.
-	if got.S3.Chips != 1 || got.S3.Going != 1 {
-		t.Errorf("with S3: %d chips on %d rows, want only the snapshot S3 also has", got.S3.Chips, got.S3.Going)
+	// With S3: the one S3 also has, and the one held on purpose. The one
+	// whose upload failed is not marked, and neither is the held one inside
+	// the count.
+	wantTitles := []string{
+		"Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, now that S3 has it.",
+		"Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, it was not sent to S3, so it does not wait for S3.",
 	}
-	for _, title := range got.S3.Titles {
-		if title != "Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, now that S3 has it." {
-			t.Errorf("with S3: hover text %q", title)
-		}
+	if got.S3.Chips != 2 || got.S3.Going != 2 || !slices.Equal(got.S3.Titles, wantTitles) {
+		t.Errorf("with S3: %d chips on %d rows, hover %q\nwant %q", got.S3.Chips, got.S3.Going, got.S3.Titles, wantTitles)
 	}
 	if len(got.S3.Line) != 1 || got.S3.Line[0] != "Keeps the newest 2 snapshots on this machine; older ones are removed once S3 has them." {
 		t.Errorf("with S3: retention line %q", got.S3.Line)

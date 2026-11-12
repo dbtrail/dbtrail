@@ -9187,7 +9187,7 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
     // time here it would only be the same fact again.
     say("Older ones past that number " + (mins ? "and older than " + exactSpan(mins) + " " : "") +
       "are removed from this folder at the next hourly cleanup, " + (s3 ? "once S3 has them." : "never a table's only copy."));
-    if (s3 && reach && reach.held) say("Updates not sent to S3 stay here until a newer snapshot is in S3.");
+    if (s3 && reach && reach.held) say("An update that was not sent to S3 goes past that number without waiting for S3.");
     say(localReachWords(n, reach || {}));
   } else if (mins) {
     say("Deleted here when older than " + exactSpan(mins) + ", once S3 has it. DBTrail leaves S3 alone.");
@@ -10918,8 +10918,10 @@ function baselinesPanel(b, servers, opts) {
     // it goes at the next hourly cleanup, and the row says so instead of
     // sitting in the list as if it were staying. Copies only in S3 are not
     // touched by the cleanup, so they are not marked. On a server with an S3
-    // destination (#2658) a local copy past the count goes only once S3 has
-    // it, so only the rows the listing found in both places are marked.
+    // destination (#2658) a local copy past the count goes once S3 has it,
+    // so the rows the listing found in both places are marked, and so are
+    // the ones the S3 interval kept here on purpose (held), which go by the
+    // count alone. One that was meant for S3 and is not there is not marked.
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
     let localSeen = 0;
     const goingIdx = new Set();
@@ -10927,7 +10929,7 @@ function baselinesPanel(b, servers, opts) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
         localSeen++;
-        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3"))) goingIdx.add(i);
+        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
       });
     }
     const total = b.snapshots.length;
@@ -10980,7 +10982,7 @@ function baselinesPanel(b, servers, opts) {
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
-        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, " + (b.s3_destination ? "now that S3 has it." : "never a table's only copy.") }));
+        what.append(el("span", { class: "chip chip-unknown", text: "goes at the next cleanup", title: "Past the newest " + keepInForce + " kept (Settings, Keep by count). Removed from this machine at the next hourly cleanup, " + (!b.s3_destination ? "never a table's only copy." : (sn.kinds || []).includes("s3") ? "now that S3 has it." : "it was not sent to S3, so it does not wait for S3.") }));
       }
       // With skipped views the row says both counts (#1879), whether or not
       // the table count varies: the views are what the row is there to show.

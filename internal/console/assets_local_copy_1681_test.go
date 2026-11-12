@@ -248,7 +248,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	}
 	for name, want := range map[string]string{
 		"s3Counted":        "Older ones past that number are removed from this folder at the next hourly cleanup, once S3 has them.",
-		"s3CountedHeld":    "Updates not sent to S3 stay here until a newer snapshot is in S3.",
+		"s3CountedHeld":    "An update that was not sent to S3 goes past that number without waiting for S3.",
 		"s3CountedAge":     "Older ones past that number and older than 7 days are removed from this folder at the next hourly cleanup, once S3 has them.",
 		"s3CountedNotIn":   "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
 		"s3CountedNoLoop":  "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
@@ -275,7 +275,10 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 			t.Errorf("%s: does not say %q: %q", name, reach, w)
 		}
 	}
-	if w := joined(got["s3Counted"].Before); strings.Contains(w, "Updates not sent to S3") {
+	if w := joined(got["s3CountedHeld"].Before); strings.Contains(w, "stay here until a newer snapshot") {
+		t.Errorf("the row still says held updates wait for a newer snapshot in S3: %q", w)
+	}
+	if w := joined(got["s3Counted"].Before); strings.Contains(w, "not sent to S3") {
 		t.Errorf("a server whose schedule sends every update is told about updates kept here: %q", w)
 	}
 	if w := joined(got["s3CountedBlocked"].Before); strings.Contains(w, "hourly cleanup") || strings.Contains(w, "nothing in it is removed") || strings.Contains(w, "Set a number") {
