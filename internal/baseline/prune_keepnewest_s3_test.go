@@ -393,6 +393,9 @@ func TestS3Count_neverFewerThanNNorUnconfirmed(t *testing.T) {
 				}
 				left := onDisk(t, root)
 				keep := min(n, total)
+				if len(left) < keep {
+					t.Fatalf("total %d n %d mask %b: %d left on disk, fewer than the count %d: %v", total, n, mask, len(left), keep, left)
+				}
 				if tail := names[total-keep:]; !slices.Equal(left[len(left)-keep:], tail) {
 					t.Fatalf("total %d n %d mask %b: the newest %d are %v, left on disk %v", total, n, mask, keep, tail, left)
 				}
