@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,6 +295,37 @@ func TestSQLExportBootSweep(t *testing.T) {
 	newBaselineSupervisor(context.Background(), staging, "")
 	if _, err := os.Stat(filepath.Join(staging, "sql-export")); !os.IsNotExist(err) {
 		t.Fatalf("stale sql-export staging survived construction (err=%v)", err)
+	}
+}
+
+// The build does not ask the engine to write a table that lost its snapshot:
+// the engine refuses it before anything is written, and sqlExportRunError
+// gives that refusal the console's words, the same ones as before, keeping
+// every other error of the run.
+func TestSQLExport_aTableThatLostItsSnapshotFailsTheBuildUnwritten(t *testing.T) {
+	cfg := sqlExportFoldConfig(console.SQLExportRequest{ServerID: "s1", IndexDSN: "dsn", At: time.Now()},
+		"/build", []string{"shop.orders"})
+	if cfg.AllowChangesOnly {
+		t.Error("the build asks for a table with no snapshot to be written from its changes alone")
+	}
+	const want = "table shop.users lost its snapshot mid-build and was rebuilt from recorded changes only; that dump would silently miss every row those changes never touched"
+	engine := errors.Join(
+		fmt.Errorf("shop.users: %w", &reconstruct.ChangesOnlyError{Schema: "shop", Table: "users", At: time.Now()}),
+		errors.New("shop.items: no primary key"),
+	)
+	err := sqlExportRunError(nil, engine)
+	if err == nil {
+		t.Fatal("the refusal did not fail the build")
+	}
+	t.Logf("rendered: %s", err)
+	if err.Error() != "shop.items: no primary key\n"+want {
+		t.Errorf("err = %q", err)
+	}
+	if strings.Contains(err.Error(), "there is no snapshot") {
+		t.Error("the engine's wording reached the console beside its own")
+	}
+	if only := sqlExportRunError(nil, fmt.Errorf("shop.users: %w", &reconstruct.ChangesOnlyError{Schema: "shop", Table: "users"})); only == nil || only.Error() != want {
+		t.Errorf("a build whose only failure is the refusal: %v", only)
 	}
 }
 

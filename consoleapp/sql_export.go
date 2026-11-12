@@ -952,22 +952,38 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		MaxChangeBytes:     daemonFoldMaxChangeBytes,
 		RemediationHint:    daemonFoldRemediation,
 		SpaceCheck:         newDiskSpaceCheck(),
+		// AllowChangesOnly stays FALSE too: a table that lost its snapshot is
+		// refused by the engine before anything is written for it, and
+		// sqlExportRunError words that refusal.
 		// AllowGaps stays FALSE: a dump the operator will load somewhere is
 		// the last artifact that may be knowingly incomplete.
 	}
 }
 
-// sqlExportRunError folds the engine's per-table reports into the run
-// verdict. The engine's binlog-only fallback (baseline vanished mid-build)
-// warns and keeps going in mydumper mode; here it must fail the run: such a
-// table holds only the rows the window touched, and drill's doctrine
-// applies — a dump without its baseline is never a PASS.
+// sqlExportRunError folds the engine's verdict into the run verdict. A table
+// with no snapshot to start from (it vanished mid-build) is refused by the
+// engine, which writes nothing for it; here that refusal gets the console's
+// own words, and every other error is kept as it is. A report marked
+// BinlogOnly fails the run as well: the build never asks for one, so it would
+// mean the engine wrote a table from its changes alone, and drill's doctrine
+// applies. A dump without its baseline is never a PASS.
 func sqlExportRunError(reports []*reconstruct.TableReport, runErr error) error {
+	refused, rest := reconstruct.SplitChangesOnly(runErr)
+	if len(refused) > 0 {
+		runErr = errors.Join(rest...)
+		for _, e := range refused {
+			runErr = errors.Join(runErr, sqlExportNoSnapshotError(e.Schema, e.Table))
+		}
+	}
 	for _, rep := range reports {
 		if rep.BinlogOnly {
-			runErr = errors.Join(runErr, fmt.Errorf(
-				"table %s.%s lost its snapshot mid-build and was rebuilt from recorded changes only; that dump would silently miss every row those changes never touched", rep.Schema, rep.Table))
+			runErr = errors.Join(runErr, sqlExportNoSnapshotError(rep.Schema, rep.Table))
 		}
 	}
 	return runErr
+}
+
+func sqlExportNoSnapshotError(schema, table string) error {
+	return fmt.Errorf(
+		"table %s.%s lost its snapshot mid-build and was rebuilt from recorded changes only; that dump would silently miss every row those changes never touched", schema, table)
 }

@@ -355,7 +355,7 @@ An `ALTER TABLE` refuses the same way when one of its clauses changes rows witho
 
 A statement is also inside the window by its **binlog position** ([#1912](https://github.com/dbtrail/dbtrail/issues/1912)). The time recorded for a statement is when it ran on the source, not when it was indexed. When capture is behind, a `TRUNCATE` can be indexed after a snapshot was published, with a time from before that snapshot: by time it belongs to no later window. So the check also refuses a statement recorded after the snapshot's own binlog position, and the error says which of the two placed it. A statement recorded at or before the snapshot's position, with a time at or before the snapshot's, is part of what the snapshot already holds and refuses nothing. A snapshot that recorded no position is checked by time alone. Positions compare within one source's sequence of binlog files. A statement recorded under another binlog file name than the snapshot's comes from a source the index followed before, and is checked by time alone. A sequence that started over under the same name (a failover to a server whose files are also `binlog.N`, `RESET MASTER`) cannot be told apart by position. For that, a snapshot records which statements were already in the index when it was checked, or, for a full backup taken by the daemon, when the dump started (the footer key `bintrail.ddl_mark`). A statement that was already there is never counted by its position alone, so an old one from the previous numbering stops refusing as soon as the daemon takes a full backup of the new source. A statement indexed after that still refuses. Snapshots made by `bintrail baseline` from a dump carry no such record, and an index that no stream writes gets none either. When a refusal cannot be cleared that way, it names the rows and the `DELETE` statement that removes them from the index.
 
-A table with **no baseline** is rebuilt by `reconstruct --output-format mydumper` from its recorded changes alone (the binlog-only fallback), and it gets the same refusal ([#1674](https://github.com/dbtrail/dbtrail/issues/1674)). Its window starts at the oldest change the index or its archives still hold, so a statement older than that is no reason to refuse: nothing it removed is left to bring back. The window starts one second before that oldest change, because both times are whole seconds and a statement in the same second may follow it.
+A table with **no baseline**, when `reconstruct --output-format mydumper --allow-changes-only` writes it from its recorded changes alone (the binlog-only fallback, see [A table with no snapshot fails the run](#a-table-with-no-snapshot-fails-the-run)), gets the same refusal ([#1674](https://github.com/dbtrail/dbtrail/issues/1674)). Its window starts at the oldest change the index or its archives still hold, so a statement older than that is no reason to refuse: nothing it removed is left to bring back. The window starts one second before that oldest change, because both times are whole seconds and a statement in the same second may follow it.
 
 The shim's binlog-only answers do **not** run this check yet: `_flashback` (single-row and full-table), and `_snapshot` when it has no baseline to start from. Over a window holding one of these statements they can still show rows it removed. Use `reconstruct`, which refuses, for those tables and moments.
 
@@ -380,6 +380,59 @@ Three paths **still refuse** every PK-changing `UPDATE`, by design: the shim's `
 Full-table `reconstruct` can write its result as a **baseline snapshot** rather than a SQL dump ([#1169](https://github.com/dbtrail/dbtrail/issues/1169)): same layout, same metadata and same `_SUCCESS`/`_MANIFEST` files `bintrail baseline` produces, so the next reconstruct discovers it as the newest baseline with no configuration change. That closes the loop: a fresher snapshot no longer requires re-dumping a source the index has already recorded every change to. `--output` is the baselines **root** in this mode, and the snapshot lands in a `<timestamp>/` subdirectory under it.
 
 Every limit and refusal described above applies unchanged, plus two of its own: a table with no baseline is refused rather than degraded to the binlog-only fallback (a snapshot folded from deltas alone would omit every row the window never touched), and the emitted snapshot carries **no content digest** — the digest certifies fidelity against the live source, which a reconstructed snapshot never read. See [Dump and Baseline](dump-and-baseline.md#step-3-optional-a-newer-baseline-without-a-new-dump) for the full contract, including how the binlog coordinate the next reconstruct resumes from is chosen.
+
+### A table with no snapshot fails the run
+
+`reconstruct --output-format mydumper` fails when a table in `--tables` has no snapshot at or before `--at`. The command exits non-zero, writes no file for that table and leaves the output directory marked `_INCOMPLETE`. The other tables are still written.
+
+Without a snapshot the only source for the table is its recorded changes. They hold the rows that were inserted, updated or deleted while capture ran. A row that was already in the table and that no recorded change touched is in none of them, so a dump made from the changes alone is missing that row, and nothing in its data files says so. Earlier versions wrote that dump, logged one warning and exited 0.
+
+A table has no snapshot at or before the moment when:
+
+- it is in no snapshot: it was created after the newest one, or the full read left it out;
+- `--at` is earlier than the table's first snapshot;
+- the snapshot it had is no longer in the location given. Retention removes old snapshots from the local folder; if a copy is in S3, point `--baseline-s3` at it.
+
+The snapshot is looked up per table, when that table starts. In a run over several tables, a snapshot removed between two of them leaves the later table without one, and that table is refused the same way.
+
+The error has one line per refused table. It says which of these cases the location shows and names the table's earliest snapshot when it has one. When it cannot tell, because the location could not be listed or shows a snapshot of the table that the lookup did not use, it says that the reason is not known; find it out before adding the flag. What to do:
+
+- Take a snapshot that includes the table. It answers moments from then on, not earlier ones.
+- Ask for a moment at or after the table's earliest snapshot.
+- Pass `--allow-changes-only` to write the table from its recorded changes alone.
+
+`--allow-changes-only` is for when the changed rows are the output you want. They are the whole table in one case: the table was created after the newest snapshot, and every change since its creation is still in the index or its archives.
+
+To help you judge that, the error gives the moment of the newest `CREATE TABLE` the index recorded for the table, as a condition and not as a fact: "If the table did not exist before that moment, and every change since then is still recorded, those rows are the whole table". The date is left out whenever the recorded statements cannot support it:
+
+- the statement is `CREATE TABLE IF NOT EXISTS`. The server writes it to the binary log whether or not the table was there, so an application that runs it at every start records it again each time, for a table that may be years old;
+- a `RENAME`, `DROP` or `TRUNCATE` of the table is newer than the `CREATE TABLE`. After a rename into this name, which is how an online schema change swaps its copy in, the rows were written under the copy's name and are not among the changes recorded for this one;
+- an `ALTER TABLE` that moves rows without row events (`EXCHANGE PARTITION` and similar) is newer than it;
+- the statement's text is missing, cut short, or not one this reads.
+
+`CREATE TABLE ... LIKE` and `CREATE TABLE ... SELECT` keep the date: the first makes an empty table, and with row-based logging the rows of the second follow as ordinary row changes. A temporary table is never recorded.
+
+With the flag:
+
+- the command exits 0, which is what a script checks, so the script must read the summary or the marker file to know;
+- the table's summary line is a warning, `table dump holds changes only: a row that no recorded change touched is missing`, in place of `table dump complete`;
+- the closing line lists those tables as `changes_only_tables`;
+- the table's schema file opens with a comment that starts `-- bintrail: CHANGES ONLY.`;
+- the output directory is marked `_SUCCESS`, because the run wrote what was asked for;
+- the output directory holds a file named `_CHANGES_ONLY` that lists those tables, one JSON object per line (`{"schema":"shop","table":"orders"}`).
+
+The data files of such a table are ordinary `INSERT` files. When the schema file carries the `CREATE TABLE` the index recorded, a loader such as myloader creates the table and loads those rows like any other table, so keep a changes-only dump apart from complete ones.
+
+`bintrail baseline` does not convert such a table into a snapshot. A snapshot is what every later reconstruct starts from, so a changes-only table converted into one would come back as a complete table with no flag and no warning. The conversion reads `_CHANGES_ONLY`, and the first line of each schema file in case that file was lost in a copy, and when a table it was asked to convert is one of them it converts nothing, exits non-zero and names the table. Name the other tables of the folder with `--tables` to convert those. It also refuses a folder marked `_INCOMPLETE`, which is what a reconstruct that failed or was stopped leaves behind.
+
+The flag applies to `--output-format mydumper` only and is refused with any other mode. Elsewhere a table with no snapshot is handled as follows:
+
+- `--output-format parquet` and the scheduled snapshot update always refuse it;
+- `drill` fails that table, writes nothing for it and loads nothing, and leaves its dump folder marked `_INCOMPLETE`;
+- the console's `.sql` build fails and writes nothing for it;
+- a full-table `_snapshot` query through the shim returns an error when the shim was started with a snapshot location. Started with none, `_snapshot` answers from recorded changes alone, exactly like `_flashback`, as described above.
+
+To undo particular changes rather than rebuild a table, use `recover`, which needs no snapshot.
 
 ### Completeness marker
 
