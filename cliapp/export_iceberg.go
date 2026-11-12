@@ -53,8 +53,9 @@ CATALOGS
                    EMR Spark, Trino and Snowflake read them by name. The
                    database is the source schema. Credentials and region come
                    from the AWS default chain (AWS_REGION, a profile, an
-                   instance role). Names must be lowercase letters, digits and
-                   underscores, the only names Glue keeps as given.
+                   instance role); the files are written in the bucket's own
+                   region, found on its own. Names must be lowercase letters,
+                   digits and underscores, the only names Glue keeps as given.
   rest             An Iceberg REST catalog at --catalog-uri. --catalog-warehouse
                    is the identifier the server expects (a catalog name, an AWS
                    account id, an S3 Tables bucket ARN); --warehouse is an

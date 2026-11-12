@@ -493,13 +493,12 @@ func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) (uint64,
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, windowProbeTimeout)
 	defer cancel()
-	mark, known := readIndexMark(ctx, probeDSN(req.IndexDSN))
-	if !known {
+	mark, err := readIndexMark(ctx, probeDSN(req.IndexDSN))
+	if err != nil {
 		// Once per full backup, which is rare enough not to rate-limit.
-		// Without it the only trace is a Debug line worded for a refresh.
 		slog.Info("baseline: could not read the index before the full read; the update after it will not be measured, "+
 			"so the snapshot schedule's cost model waits one more update before it can choose a full read again",
-			"server", req.ServerName, "id", req.ServerID)
+			"server", req.ServerName, "id", req.ServerID, "error", err)
 		return 0, false
 	}
 	return mark.events, true

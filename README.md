@@ -98,7 +98,12 @@ To try the time-travel SQL in 30 seconds, with nothing of yours connected:
   `TRUNCATE`, makes DBTrail read that table again, with a short lock.
 - **Row history needs a bucket to last.** Without S3 it keeps 48 hours. The
   copy itself stays.
-- **The MySQL port has no TLS yet.** Use it on a private network.
+- **The MySQL port's TLS is verifiable only with your certificate.** Without
+  one, a client that asks for TLS gets it, with a certificate made up at
+  start that it cannot verify. Give the router yours (`--tls-cert`,
+  `--tls-key`) and clients can connect with `--ssl-mode=VERIFY_IDENTITY`.
+  The port offers TLS and does not require it. See
+  [TLS on the port](docs/time-travel-sql.md#tls-on-the-port).
 - **Yours to operate.** DBTrail and its small index MySQL run on your
   machines. Disk, backups and upgrades are yours.
 
