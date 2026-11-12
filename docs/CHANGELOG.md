@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Uploads no longer send the snapshot folder's own files** (#2691). An upload of a whole folder of snapshots (the PostgreSQL baseline's `--upload`, `bintrail baseline --upload`, `bintrail upload --source`) sent the upload interval's marks (`.upload-held.<snapshot>`), and could send the Parquet of an interrupted cleanup's leftover (`.<snapshot>.pruning`) under a name no reader knows. Every upload now leaves out anything directly under a folder of snapshots whose name starts with a dot, which covers every mark, record, lock and work directory the folder uses, and any added later. A schema whose name starts with a dot, inside a snapshot, is still sent.
 - **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in

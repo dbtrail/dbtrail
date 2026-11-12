@@ -12,7 +12,7 @@ bintrail upload \
   --destination s3://my-bucket/archives/
 ```
 
-This recursively walks the source directory and uploads every `*.parquet` file to S3, preserving the directory structure as key prefixes.
+This recursively walks the source directory and uploads every `*.parquet` file to S3, preserving the directory structure as key prefixes. On a folder of snapshots, nothing directly under the folder whose name starts with a dot is sent: those are the folder's own marks, records, locks and work directories (`.upload-held.*`, `.restored.*`, `.last-prune.json`, `.resolved`, the `.<snapshot>.pruning` leftover of an interrupted cleanup, and so on), and the same rule applies to every upload DBTrail makes (#2691).
 
 ---
 
