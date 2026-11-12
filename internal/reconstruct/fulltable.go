@@ -2965,12 +2965,9 @@ func recordedCreateTableAt(ctx context.Context, db *sql.DB, schema, table string
 func changesOnlyMarker(schema, table string) string {
 	schema, table = recovery.SanitizeForComment(schema), recovery.SanitizeForComment(table)
 	return fmt.Sprintf(
-		"-- bintrail: CHANGES ONLY. The data file(s) of %s.%s hold only the rows its recorded
-"+
-			"-- changes touched. A row that no recorded change touched is missing. This is not
-"+
-			"-- the whole table unless every row of it was written inside the recorded changes.
-",
+		"-- bintrail: CHANGES ONLY. The data file(s) of %s.%s hold only the rows its recorded\n"+
+			"-- changes touched. A row that no recorded change touched is missing. This is not\n"+
+			"-- the whole table unless every row of it was written inside the recorded changes.\n",
 		schema, table)
 }
 
