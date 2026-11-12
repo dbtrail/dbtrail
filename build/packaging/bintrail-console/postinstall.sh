@@ -66,8 +66,8 @@ elif [ ! -e "$marker" ]; then
         router_check=yes
         touch "$marker" 2>/dev/null || true
         echo "The MySQL port (3309) is answered by the bintrail-router service,"
-        echo "started now. It accepts no connection until you turn the port on in"
-        echo "the web interface."
+        echo "started now. It accepts no connection until the port is on: adding"
+        echo "the first server turns it on (sudo dbtrail server add ...)."
     else
         echo "WARNING: the bintrail-router service could not be enabled."
         echo "Nothing answers on the MySQL port (3309) until it runs:"

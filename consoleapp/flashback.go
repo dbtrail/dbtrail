@@ -585,6 +585,18 @@ func bindReadRouter(h *shim.Handler, srv *console.Server, tgt console.FlashbackT
 // out of routing, never put one in.
 const copyOnlySuffix = console.CopyOnlySuffix
 
+// forwardRefusedSaid remembers, per server, the reason its connections were
+// last told there is no account to forward with, so the router's log says it
+// once (forwardRefusedOnce) instead of once per connection.
+var forwardRefusedSaid sync.Map
+
+// forwardRefusedOnce reports whether this reason, for this server, is new to
+// this process: the first time, and again after it changed.
+func forwardRefusedOnce(id, reason string) bool {
+	prev, loaded := forwardRefusedSaid.Swap(id, reason)
+	return !loaded || prev.(string) != reason
+}
+
 // bindReadRouterWhy is bindReadRouter with, when routing is on and the
 // server cannot route, the reason the Connect page is given.
 func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.FlashbackTarget, user string, cfg flashbackConfig, logger *slog.Logger) (bound *readrouter.Forwarder, unavailable string) {
@@ -603,7 +615,15 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 		// The server has a source and no account of its own for this port
 		// (#2317). Ahead of the empty-DSN case below: the DSN is empty
 		// here too, and "no source" would send the reader to the wrong fix.
-		logger.Warn("Engine Routing off for this connection: the server has no account this port may forward with", "server", user, "reason", tgt.ForwardRefused)
+		// Once per server and reason in this process, then at debug: with
+		// Engine Routing on from the start (#2686), a server added with no
+		// forwarding account is the common case, and a line per connection
+		// would bury the log. SHOW ROUTER STATUS says it on every connection.
+		warn := logger.Debug
+		if forwardRefusedOnce(tgt.ID, tgt.ForwardRefused) {
+			warn = logger.Warn
+		}
+		warn("Engine Routing off for this server's connections: it has no account this port may forward with. Said once; SHOW ROUTER STATUS says it on each connection", "server", user, "reason", tgt.ForwardRefused)
 		unavailable = tgt.ForwardRefused
 		srv.RecordRouteUnavailable(tgt.ID, unavailable)
 	case tgt.ForwardDSN == "":

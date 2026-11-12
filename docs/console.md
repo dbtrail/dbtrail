@@ -554,15 +554,28 @@ here); `--format json` for scripts. **`server remove <name>`** stops recording a
 server and takes it off the list, after asking (`--yes` does not ask). What
 was already recorded and copied is kept.
 
-**The first copy and the MySQL port.** After `server add`, two more commands
-reach a query answered on port 3309, with no web interface:
+**The first copy and the MySQL port.** `server add` leaves the MySQL port on:
+adding a server when nothing was ever saved about the port turns it on, with
+Engine Routing on, and prints the `mysql` line and the port's password, which
+is shown only then. After it, one more command reaches a query answered on
+port 3309, with no web interface:
 
 ```
 dbtrail snapshot run shop                   # read every table once, and wait
 dbtrail snapshot schedule shop --every 1h   # keep the copy current
-dbtrail port on                             # turn the MySQL port on
 mysql -h 127.0.0.1 -P 3309 -u shop -p
 ```
+
+Only the first server does it, and only when nothing was ever saved about
+the port. A port that was turned off stays off when another server is added,
+and an installation that already had servers keeps a port it never turned on
+off when it adds one more after an upgrade. A session that may not
+change settings, or that has a data access policy, adds its server and the
+port is left as it was; the command says so. The web interface's Connect
+screen does the same and shows the same password. The web interface's long
+form (**Add server**, all fields) and `POST /api/servers` do not turn the port
+on: turn it on afterwards with `dbtrail port on` or on the MySQL clients
+page.
 
 - `snapshot run <server>` starts the full read and waits until the copy is
   ready, or says why it failed and exits 1. Ctrl-C stops the waiting, not the
@@ -571,8 +584,10 @@ mysql -h 127.0.0.1 -P 3309 -u shop -p
   copy to S3 failed is reported as that, not as "no copy".
 - `snapshot schedule <server> --every 1h` updates the copy from the recorded
   changes, without reading the database again; `--off` stops it.
-- `port on` turns the MySQL port on and prints its password, which is shown
-  only then, with the `mysql` line to connect. Run again it does not print the
+- `port on` turns the MySQL port on by hand: for an installation whose port
+  was never on, or was turned off. The first time, it starts with Engine
+  Routing on and prints the port's password, which is shown only then, with
+  the `mysql` line to connect. Run again it does not print the
   password: `port new-password` makes another, and the old one stops working
   within a few seconds. `port status`, `port off`, and `port routing on|off`
   for Engine Routing complete it. A port saved as on that is not answering
@@ -2115,8 +2130,8 @@ server's statements instead of serving without it.
   [Upgrading](time-travel-sql.md#upgrading-from-a-version-with-the-port-inside-watch).
 - `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` (`watch` only): same as
   `--route-max-copy-age`. It no longer turns Engine Routing on and only prints
-  a warning at startup. Engine Routing is a saved setting, off by default, and
-  there is no maximum copy age any more. See
+  a warning at startup. Engine Routing is a saved setting, on from the moment
+  the port is first turned on, and there is no maximum copy age any more. See
   [time-travel-sql.md](time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads).
 - `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD`, `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS`
   and `BINTRAIL_CONSOLE_ROUTE_READ_ONLY` (`router`): the router's
