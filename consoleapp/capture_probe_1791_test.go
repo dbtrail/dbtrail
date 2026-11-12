@@ -431,7 +431,10 @@ func TestChooseBackupMethod_updatesAQuietServerTheSourceConfirms(t *testing.T) {
 	now := snapshotAnchor.Add(8 * time.Hour)
 	for _, c := range []struct {
 		verdict, want string
-	}{{console.CaptureCaughtUp, console.BackupMethodRefresh}, {console.CaptureBehind, console.BackupMethodFull}, {"", console.BackupMethodFull}} {
+	}{{console.CaptureCaughtUp, console.BackupMethodRefresh}, {console.CaptureBehind, console.BackupMethodFull},
+		// A source that cannot be asked: the slot is skipped (#2659).
+		{"", console.BackupMethodSkip}} {
+		stubCoverage(t, true, true)
 		stubCaptureProbe(t, captureProbeResult{verdict: c.verdict, detail: "x"})
 		b.mu.Lock()
 		b.windows = nil

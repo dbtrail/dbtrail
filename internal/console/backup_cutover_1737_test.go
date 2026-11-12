@@ -158,7 +158,9 @@ func TestCutoverToFull_ageCountsFromTheFullBackupsFinish(t *testing.T) {
 	}
 	// Nothing indexed since the full backup, and the source not asked.
 	quiet := func(started time.Time) BackupWindow {
-		return BackupWindow{Anchor: started, Events: 0, LastFull: took}
+		// The source reports transactions capture has not recorded: the
+		// evidence the doubt still reads in full on (#2659).
+		return BackupWindow{Anchor: started, Events: 0, LastFull: took, Capture: CaptureBehind}
 	}
 	recent := now.Add(-5*time.Minute - took) // started 2h 35m ago, finished five minutes ago
 	stopped := now.Add(-3*time.Hour - took)  // finished three hours ago: the daemon stopped since
