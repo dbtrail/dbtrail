@@ -45,9 +45,8 @@ every version of every row next to the current state.
 
 The schedule is set per server on the **Snapshots** page of the web interface.
 It can be as often as every 5 minutes or as rare as once a day. A new server
-that keeps its snapshots on this machine only gets every 5 minutes once its
-first snapshot is taken; one with an S3 location gets none, since its copies
-there are never removed automatically. The interval is
+gets every 5 minutes once its first snapshot is taken; one with an S3
+location also sends a snapshot there every 24 hours. The interval is
 the ceiling on how fresh a report can be: at `5m` a dashboard sees this
 morning; at `1d` it sees yesterday. The SQL port answers from the same
 snapshots in its fast mode. In its fresh mode, the default (each server's

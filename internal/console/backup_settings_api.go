@@ -183,8 +183,9 @@ type backupSettingsServerDTO struct {
 	// <state dir>/snapshots/<id>. Empty where the registry has no file.
 	DefaultDir string `json:"default_dir,omitempty"`
 	// KeepNewest is the saved local retention (0 = keep every snapshot).
-	// It removes anything only while LocalCopy is on, BaselineS3 is empty
-	// and PruneLoop is true; the page says which of those holds.
+	// It removes anything only while LocalCopy is on and PruneLoop is true;
+	// the page says which of those holds. With an S3 destination it removes
+	// a snapshot past the count only once S3 confirms its copy (#2658).
 	KeepNewest int `json:"keep_newest"`
 	// PruneLoop is whether this process runs the loop that applies
 	// KeepNewest. A read-only console never removes anything.
@@ -193,6 +194,10 @@ type backupSettingsServerDTO struct {
 	// the daemon's own, so console.LocalKeepTargets never prunes it,
 	// whatever KeepNewest says. The row says that instead of the count.
 	KeepBlocked bool `json:"keep_blocked,omitempty"`
+	// KeepSharedS3: of those, the folder is blocked because the server's S3
+	// destination is also another server's, or the daemon's own (#2658,
+	// LocalKeepSharedS3). The way out is a prefix of its own.
+	KeepSharedS3 bool `json:"keep_shared_s3,omitempty"`
 	// KeepHeld: of those, the folder is blocked because it once was shared
 	// and still holds the other server's snapshots (heldNow). The way
 	// out differs (a new empty folder), so the row says which.
@@ -202,11 +207,11 @@ type backupSettingsServerDTO struct {
 	// local_retention.keep_newest, so the row's "how far back" line and the
 	// listing's retention line can never name two numbers. 0 where nothing
 	// is pruned. KeepNewest is the saved setting; the two differ where the
-	// setting does not apply (blocked, a destination, no loop).
+	// setting does not apply (blocked, no loop).
 	KeepInForce int `json:"keep_in_force,omitempty"`
 	// PruneRetainMinutes is the age retention the same loop reads
-	// (--baseline-retain or its saved value), in minutes. In a folder with no
-	// S3 destination it deletes nothing; there a snapshot
+	// (--baseline-retain or its saved value), in minutes. In a folder pruned
+	// to a count it deletes nothing by itself; there a snapshot
 	// younger than it is kept even outside the newest KeepInForce, so it
 	// stretches how far back this server can go. 0 = none, or unreadable
 	// (the loop then applies none either).
@@ -214,14 +219,23 @@ type backupSettingsServerDTO struct {
 	// DeleteAfterMinutes is "Delete by age" as it reaches THIS server
 	// (2026-10-01): set only where the server has both a folder and an S3
 	// destination, the one place age retention deletes (it removes a local
-	// copy once S3 confirms it). 0 where it deletes nothing here.
+	// copy once S3 confirms it). 0 where it deletes nothing here. With a
+	// count in force too (KeepInForce, #2658) a snapshot goes only when it
+	// is past the count AND older than this.
 	DeleteAfterMinutes int `json:"delete_after_minutes,omitempty"`
 	// NotInS3 is the last prune's count of old snapshots the S3 destination
 	// answered it does not have (baseline.NotInDestinationFile): the only
 	// copy, so they stay on this machine. NotInS3Error says the record would
-	// not read, never "they are all there".
+	// not read, never "they are all there". Read only where a prune against
+	// S3 runs for this folder (an age, or a count in force), since nothing
+	// else refreshes the record.
 	NotInS3      *notInS3DTO `json:"not_in_s3,omitempty"`
 	NotInS3Error string      `json:"not_in_s3_error,omitempty"`
+	// ScheduleUploadSet is set only in the answer to the save that gave this
+	// server its FIRST S3 destination while its schedule had no upload
+	// interval (#2658): the interval that save started, so the page and the
+	// terminal can say it where the destination was saved.
+	ScheduleUploadSet string `json:"schedule_upload_set,omitempty"`
 	// SnapshotEveryMinutes is how often this server gets a snapshot without
 	// a click (#1681): its schedule (with the full copies off its grid),
 	// where the schedule can run in this process, and the daemon-wide
@@ -342,13 +356,16 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	dto.DefaultDir = s.cm.reg.DefaultBaselineDir(e.ID)
 	dto.KeepNewest = e.LocalKeepNewest
 	dto.PruneLoop = s.localPruneLoop
-	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
+	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir, s.cm.defaultBaselineS3)
+	dto.KeepSharedS3 = LocalKeepSharedS3(s.cm.reg.List(), e, s.cm.defaultBaselineS3)
 	dto.KeepHeld = heldNow(e)
+	inForce := s.localRetentionOf(e.ID)
 	if e.BaselineDir != "" && e.BaselineS3 != "" {
 		dto.DeleteAfterMinutes = s.pruneRetainMinutes()
-		// With no age set, no prune refreshes the record: what it says is
-		// frozen, so it is not read (the card would show a stale count).
-		if dto.DeleteAfterMinutes > 0 && s.localPruneLoop {
+		// With no age set and no count in force, no prune refreshes the
+		// record: what it says is frozen, so it is not read (the card would
+		// show a stale count).
+		if (dto.DeleteAfterMinutes > 0 || inForce != nil) && s.localPruneLoop {
 			if rec, ok, err := baseline.ReadNotInDestination(e.BaselineDir); err != nil {
 				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
 				dto.NotInS3Error = err.Error()
@@ -361,7 +378,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	if e.BaselineS3 != "" {
 		dto.S3Cleanup = lastS3Cleanup(e.BaselineS3)
 	}
-	if r := s.localRetentionOf(e.ID); r != nil {
+	if r := inForce; r != nil {
 		dto.KeepInForce = r.KeepNewest
 		dto.PruneRetainMinutes = s.pruneRetainMinutes()
 		dto.SnapshotEveryMinutes = s.snapshotEveryMinutes(e)
@@ -554,12 +571,11 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// A count only removes anything without an S3 destination.
-		if entry.BaselineS3 == "" {
-			if err := adoptsSnapshots(entry.BaselineDir, entry.LocalKeepNewest); err != nil {
-				writeJSONError(w, http.StatusBadRequest, err.Error())
-				return
-			}
+		// With or without an S3 destination (#2658): the count governs the
+		// folder either way.
+		if err := adoptsSnapshots(entry.BaselineDir, entry.LocalKeepNewest); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 	s3AgeMu.Lock()
@@ -567,7 +583,31 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		s3AgeMu.Unlock()
 		return
 	}
-	err := s.cm.reg.Update(entry)
+	// Only what this save changed, on the entry as it is now (#2658): the
+	// schedule, the monitoring intent and every field this request left
+	// alone keep the value a save made since this request read the entry.
+	err := s.cm.reg.UpdateWith(entry.ID, func(cur ServerEntry) (ServerEntry, bool) {
+		if entry.BaselineDir != before.BaselineDir {
+			cur.BaselineDir = entry.BaselineDir
+		}
+		if entry.BaselineS3 != before.BaselineS3 {
+			cur.BaselineS3 = entry.BaselineS3
+		}
+		if entry.NoArchive != before.NoArchive {
+			cur.NoArchive = entry.NoArchive
+		}
+		if req.KeepNewest != nil {
+			cur.LocalKeepNewest = entry.LocalKeepNewest
+		}
+		if entry.NoSQLMirror != before.NoSQLMirror {
+			cur.NoSQLMirror = entry.NoSQLMirror
+		}
+		if entry.BaselineS3Retain != before.BaselineS3Retain {
+			cur.BaselineS3Retain = entry.BaselineS3Retain
+		}
+		entry = cur
+		return cur, true
+	})
 	s3AgeMu.Unlock()
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
@@ -576,8 +616,18 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 	// The DSN did not change, so the connection stays; the baseline and
 	// no-archive gates are derived state and must be recomputed — same tail
 	// as a baseline-only edit through the servers form.
+	// As saved: the registry may have started the schedule's upload interval
+	// in the same write (a first S3 destination, #2658).
+	if saved, ok := s.cm.reg.Get(entry.ID); ok {
+		entry = saved
+	}
 	s.cm.rebuildDerived(entry)
-	writeJSON(w, http.StatusOK, s.backupSettingsServerDTO(entry))
+	dto := s.backupSettingsServerDTO(entry)
+	if strings.TrimSpace(before.BaselineS3) == "" && entry.BaselineS3 != "" && entry.BackupSchedule != nil && entry.BackupSchedule.UploadEvery != "" &&
+		(before.BackupSchedule == nil || strings.TrimSpace(before.BackupSchedule.UploadEvery) == "") && before.BackupSchedule != nil {
+		dto.ScheduleUploadSet = entry.BackupSchedule.UploadEvery
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // The two provenances a daemon-wide row can have.

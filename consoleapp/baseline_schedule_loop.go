@@ -729,8 +729,8 @@ func (b *backupScheduler) noteFullMissedWhileDown(e console.ServerEntry, p conso
 
 // warnBackupScheduleRate is the schedule's version of the refresh loop's
 // disk warning: every backup it publishes is a full-table snapshot, and
-// PruneLocal only removes what it confirmed durable in S3, so on a server
-// without an S3 destination nothing ever removes them. Logged at boot and
+// what bounds them on this machine is the server's own count (Keep by count):
+// a server saved without one keeps every snapshot. Logged at boot and
 // at save, with the 30-day count, so the operator reads the rate before
 // the disk does.
 func warnBackupScheduleRate(e console.ServerEntry, p console.ParsedBackupSchedule) {

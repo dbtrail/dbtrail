@@ -62,6 +62,12 @@ type baselineSnapshotDTO struct {
 	// exactly what it claims and no more — a snapshot listing both was seen in
 	// both places, not necessarily with every table in each.
 	Kinds []string `json:"kinds,omitempty"`
+	// Held: this snapshot is on this machine and the schedule's S3 interval
+	// kept it from the bucket on purpose (baseline.UploadHeld, #2596). The
+	// list marks such a snapshot past the count as going: the cleanup
+	// removes it by the count alone (#2658). False when the mark could not
+	// be read, which leaves the row unmarked rather than announce a removal.
+	Held bool `json:"held,omitempty"`
 	// ViewsSkipped counts the views the source held and this snapshot left
 	// out (#1879), omitted when nothing is recorded: a snapshot from before
 	// the record, or a source with no views. Never zero on the wire.
@@ -207,7 +213,9 @@ type lastPruneDTO struct {
 // localRetentionOf is the selected server's local retention as the prune loop
 // applies it: the same console.LocalKeepTargets rule, over the same entries,
 // with the same folder excluded (the daemon's own --baseline-dir). nil where
-// nothing local is pruned.
+// nothing local is pruned to a count. A server with an S3 destination has
+// one too since #2658: the count is what it keeps, and what is past it goes
+// once S3 confirms it.
 func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 	if !s.localPruneLoop || s.cm.reg == nil {
 		return nil
@@ -216,7 +224,7 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 	if !ok || e.BaselineDir == "" {
 		return nil
 	}
-	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir)[canonicalDir(e.BaselineDir)]
+	n := LocalKeepTargets(s.cm.reg.List(), s.cm.defaultBaselineDir, s.cm.defaultBaselineS3)[canonicalDir(e.BaselineDir)]
 	if n <= 0 {
 		return nil
 	}
@@ -391,7 +399,8 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	files := merged.Files
 
 	now := time.Now().UTC()
-	resp.S3 = s3CopyOf(merged, bundleBaselineDir(b), s.selectedServerID(r), now)
+	localDir := bundleBaselineDir(b)
+	resp.S3 = s3CopyOf(merged, localDir, s.selectedServerID(r), now)
 	// Staleness floor (#1193): best-effort but never silent and never a
 	// fabricated verdict — an unopened bundle connection or an unreadable
 	// index yields the explicit "unknown".
@@ -434,6 +443,11 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 				dto.ReadsFrom = row.readsFrom.Format(consoleTSFormat)
 			}
 			dto.Kinds = merged.Kinds[f.SnapshotTime.UnixNano()]
+			if localDir != "" && slices.Contains(dto.Kinds, "dir") {
+				if held, err := baseline.UploadHeld(localDir, reconstruct.SnapshotDirName(f.SnapshotTime)); err == nil {
+					dto.Held = held
+				}
+			}
 			// Keyed on the file's OWN path, not on the primary source's kind:
 			// with two locations merged, the primary being S3 says nothing about
 			// whether THIS snapshot came off local disk, and the reverse would

@@ -20,6 +20,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/storage"
 )
@@ -506,12 +507,84 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 // another on the Snapshots page.
 const DefaultBackupEvery = "5m"
 
+// DefaultUploadEvery is how often a NEW schedule on a server with an S3
+// destination sends a snapshot there (#2658): once a day, not at each
+// update. A schedule of minutes that uploaded every run filled the bucket
+// with snapshots nobody asked for, and DBTrail does not remove them unless
+// told to. Spelled as the Snapshots page's own choice spells 24 hours.
+const DefaultUploadEvery = "1d"
+
+// defaultUploadEvery is the upload interval a new schedule running every
+// `every` starts with on e when nobody chose one: DefaultUploadEvery on a
+// server with an S3 destination, "" (each update) on one without, where
+// there is nothing to send. An `every` longer than a day gets "" too: each
+// run is already rarer than the default, and an upload interval shorter
+// than the runs is refused. One that does not parse gets "": the schedule's
+// own check then names the fault.
+func defaultUploadEvery(e ServerEntry, every string) string {
+	if strings.TrimSpace(e.BaselineS3) == "" {
+		return ""
+	}
+	want, err := cliutil.ParseInterval(DefaultUploadEvery)
+	if err != nil {
+		return ""
+	}
+	if d, err := cliutil.ParseInterval(strings.TrimSpace(every)); err != nil || d > want {
+		return ""
+	}
+	return DefaultUploadEvery
+}
+
+// startUploadIntervalWithFirstDestination gives the schedule of a server that
+// just got its FIRST S3 destination the default upload interval (#2658),
+// inside the registry's own write, so every path that can set a destination
+// (the snapshot settings, the server form, the API, the terminal) does it,
+// and none can save the destination without it.
+//
+// Without this, the common path uploaded at every update: a server is added
+// with no bucket, its default schedule starts with no interval (there is
+// nothing to send), and days later the operator adds the bucket. The
+// schedule "already exists" and its empty interval now means each update: a
+// snapshot in the bucket every 5 minutes, which is what the default exists
+// to prevent.
+//
+// It overrides nothing anyone chose: an interval cannot be set on a server
+// with no destination, so an empty one there was never a choice. A server
+// that ALREADY had a destination keeps its empty interval (each update was
+// chosen, or was the default it was saved under), and so does one whose
+// destination only moves to another bucket.
+func startUploadIntervalWithFirstDestination(old ServerEntry, e *ServerEntry) {
+	if strings.TrimSpace(old.BaselineS3) != "" || strings.TrimSpace(e.BaselineS3) == "" {
+		return
+	}
+	if e.BackupSchedule == nil || strings.TrimSpace(e.BackupSchedule.UploadEvery) != "" {
+		return
+	}
+	every := defaultUploadEvery(*e, e.BackupSchedule.Every)
+	if every == "" {
+		return
+	}
+	// A copy: the schedule the caller holds is not this entry's to change.
+	sched := *e.BackupSchedule
+	sched.UploadEvery = every
+	e.BackupSchedule = &sched
+	slog.Info(uploadIntervalStartedMsg(every), "server", e.Name, "every", sched.Every, "destination", e.BaselineS3)
+}
+
+// uploadIntervalStartedMsg is the daemon's line when a first S3 destination
+// starts the upload interval of a schedule that had none.
+func uploadIntervalStartedMsg(every string) string {
+	return "console: this server got its first S3 destination, so its schedule now sends a snapshot there every " + every +
+		", not at each update; change it on the " + PageSnapshots + " page"
+}
+
 // defaultScheduleBounded says a server's local copies stay bounded under a
-// schedule: only its newest LocalKeepNewest are kept and it has no S3
-// location (an S3 server's local folder is pruned only under
-// --baseline-retain, and its bucket never).
+// schedule: only its newest LocalKeepNewest are kept. With an S3
+// destination too since #2658: the count governs the folder there as well,
+// and the default schedule sends to the bucket once a day
+// (DefaultUploadEvery), so neither side grows by a snapshot every run.
 func defaultScheduleBounded(e ServerEntry) bool {
-	return e.BaselineS3 == "" && e.LocalKeepNewest > 0
+	return e.LocalKeepNewest > 0
 }
 
 // ActivateDefaultSchedule starts a snapshot every DefaultBackupEvery on a
@@ -525,7 +598,7 @@ func (s *Server) ActivateDefaultSchedule(id string) {
 	if !ok || !e.DefaultScheduleOnFirst {
 		return
 	}
-	sched := BackupSchedule{Every: DefaultBackupEvery}
+	sched := BackupSchedule{Every: DefaultBackupEvery, UploadEvery: defaultUploadEvery(e, DefaultBackupEvery)}
 	start := e.BackupSchedule == nil && defaultScheduleBounded(e)
 	if start {
 		// Outside the registry's lock: the gates read the registry too.
@@ -544,7 +617,7 @@ func (s *Server) ActivateDefaultSchedule(id string) {
 		}
 		cur.DefaultScheduleOnFirst = false
 		if start && cur.BackupSchedule == nil && defaultScheduleBounded(cur) &&
-			cur.BaselineDir == e.BaselineDir && cur.DSN == e.DSN && cur.SourceDSN == e.SourceDSN {
+			cur.BaselineDir == e.BaselineDir && cur.BaselineS3 == e.BaselineS3 && cur.DSN == e.DSN && cur.SourceDSN == e.SourceDSN {
 			cur.BackupSchedule = &sched
 			started = true
 		}
@@ -558,8 +631,19 @@ func (s *Server) ActivateDefaultSchedule(id string) {
 		if s.backupSchedules != nil {
 			s.backupSchedules.Observe(id, sched, time.Now().UTC())
 		}
-		slog.Info("console: first snapshot taken, a snapshot every "+DefaultBackupEvery+" starts now; change it on the "+PageSnapshots+" page", "server", e.Name)
+		slog.Info(defaultScheduleStartedMsg(sched), "server", e.Name)
 	}
+}
+
+// defaultScheduleStartedMsg is the daemon's line when the default schedule
+// starts: how often the copy updates and, with an S3 destination, how often
+// a snapshot is sent there.
+func defaultScheduleStartedMsg(sched BackupSchedule) string {
+	msg := "console: first snapshot taken, a snapshot every " + sched.Every + " starts now"
+	if sched.UploadEvery != "" {
+		msg += ", and one is sent to S3 every " + sched.UploadEvery
+	}
+	return msg + "; change it on the " + PageSnapshots + " page"
 }
 
 // dirExists reports whether path names something already there. Anything but
@@ -764,11 +848,9 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if strings.TrimSpace(req.BaselineS3) == "" {
-			if err := adoptsSnapshots(req.BaselineDir, old.LocalKeepNewest); err != nil {
-				writeJSONError(w, http.StatusBadRequest, err.Error())
-				return
-			}
+		if err := adoptsSnapshots(req.BaselineDir, old.LocalKeepNewest); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 	entry := ServerEntry{
@@ -823,7 +905,16 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 		s3AgeMu.Unlock()
 		return
 	}
-	err = s.cm.reg.Update(entry)
+	// The fields this form does not own are taken from the entry as it is
+	// now, not as this request read it (#2658): the count of snapshots to
+	// keep and the schedule have their own saves, and a whole-entry write
+	// would put a stale count back, which deletes.
+	err = s.cm.reg.UpdateWith(id, func(cur ServerEntry) (ServerEntry, bool) {
+		entry.LocalKeepNewest = cur.LocalKeepNewest
+		entry.BackupSchedule = cur.BackupSchedule
+		entry.DefaultScheduleOnFirst = cur.DefaultScheduleOnFirst
+		return entry, true
+	})
 	s3AgeMu.Unlock()
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
@@ -1021,7 +1112,13 @@ func (s *Server) handleMonitorStop(w http.ResponseWriter, r *http.Request) {
 	// must not resurrect a stream the operator asked to stop.
 	if e.MonitorDesired {
 		e.MonitorDesired = false
-		if err := s.cm.reg.Update(e); err != nil {
+		// Only this handler's field, on the entry as it is now (#2658): a
+		// whole-entry write would put back whatever a save made since this
+		// request read the entry, a count of snapshots to keep included.
+		if err := s.cm.reg.UpdateWith(e.ID, func(cur ServerEntry) (ServerEntry, bool) {
+			cur.MonitorDesired = false
+			return cur, true
+		}); err != nil {
 			writeJSONError(w, registryErrStatus(err), err.Error())
 			return
 		}

@@ -87,6 +87,9 @@ func (r *Registry) Reload() ([]RegistryChange, error) {
 	if next.Version == 0 {
 		next.Version = registryVersion
 	}
+	// The same step LoadRegistry applies (#2658): a file its owner has not
+	// saved since the upgrade reads here as it reads there.
+	clearInertKeepCounts(&next)
 	old := make(map[string]ServerEntry, len(r.file.Servers))
 	for _, e := range r.file.Servers {
 		old[e.ID] = e

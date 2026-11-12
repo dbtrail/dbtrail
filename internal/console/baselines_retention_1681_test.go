@@ -168,11 +168,12 @@ func TestBaselinesRetention_noLoopNoPolicyButThePruneStillShows(t *testing.T) {
 	}
 }
 
-// With an external destination, the count does nothing, so it is not
-// announced; the same server without one announces it. Asserted on the helper
-// the handler calls, because the handler's S3 listing cannot run offline and a
-// 502 body would pass a "field absent" check for the wrong reason.
-func TestBaselinesRetention_destinationMeansNoCountAnnounced(t *testing.T) {
+// With an external destination the count is in force too (#2658), so it is
+// announced; the same server without one announces it as well. Asserted on
+// the helper the handler calls, because the handler's S3 listing cannot run
+// offline and a 502 body would pass a "field absent" check for the wrong
+// reason.
+func TestBaselinesRetention_destinationKeepsTheCountAnnounced(t *testing.T) {
 	state := t.TempDir()
 	path := filepath.Join(state, "console-servers.yaml")
 	reg, _ := LoadRegistry(path)
@@ -181,8 +182,8 @@ func TestBaselinesRetention_destinationMeansNoCountAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := retentionServer(t, path, true)
-	if got := srv.localRetentionOf(e.ID); got != nil {
-		t.Errorf("a server with a destination announced %+v", *got)
+	if got := srv.localRetentionOf(e.ID); got == nil || got.KeepNewest != 3 {
+		t.Errorf("a server with a destination: %+v, want keep 3", got)
 	}
 	e.BaselineS3 = ""
 	if err := srv.cm.reg.Update(e); err != nil {

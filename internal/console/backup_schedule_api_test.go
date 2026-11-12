@@ -19,12 +19,21 @@ type stubScheduleReporter struct {
 	state     map[string]BackupScheduleState
 	observed  []string // "<id> <identity>" per Observe call
 	forgotten []string // ids per Forget call
+	// onGates runs once, when the gates are next read: the moment between
+	// a handler's check and its write.
+	onGates func()
 }
 
 func (s *stubScheduleReporter) ScheduleState(id string) BackupScheduleState {
 	return s.state[id]
 }
-func (s *stubScheduleReporter) FullBackups() (bool, error)     { return s.full, s.refusal }
+func (s *stubScheduleReporter) FullBackups() (bool, error) {
+	if f := s.onGates; f != nil {
+		s.onGates = nil
+		f()
+	}
+	return s.full, s.refusal
+}
 func (s *stubScheduleReporter) WindowProbe() BackupWindowProbe { return s.probe }
 func (s *stubScheduleReporter) Observe(id string, sched BackupSchedule, _ time.Time) {
 	s.observed = append(s.observed, id+" "+sched.Identity())

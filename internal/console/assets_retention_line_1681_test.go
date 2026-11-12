@@ -56,10 +56,18 @@ console.log(JSON.stringify(out));
 		Text string `json:"text"`
 	}
 	cases := map[string]any{
-		"none":         map[string]any{},
-		"keepMany":     map[string]any{"local_retention": map[string]any{"keep_newest": 7}},
-		"keepOne":      map[string]any{"local_retention": map[string]any{"keep_newest": 1}},
-		"keepZero":     map[string]any{"local_retention": map[string]any{"keep_newest": 0}},
+		"none":     map[string]any{},
+		"keepMany": map[string]any{"local_retention": map[string]any{"keep_newest": 7}},
+		"keepOne":  map[string]any{"local_retention": map[string]any{"keep_newest": 1}},
+		"keepZero": map[string]any{"local_retention": map[string]any{"keep_newest": 0}},
+		// #2658: the same count on a server with an S3 destination.
+		"keepManyS3": map[string]any{"local_retention": map[string]any{"keep_newest": 3}, "s3_destination": true},
+		"keepOneS3":  map[string]any{"local_retention": map[string]any{"keep_newest": 1}, "s3_destination": true},
+		// The record a prune by count writes when the bucket cannot be asked
+		// (baseline.pruneFailureReason), as the listing carries it.
+		"failSilentS3": map[string]any{"local_retention": map[string]any{"keep_newest": 3}, "s3_destination": true,
+			"last_prune_failure": map[string]any{"at": "2026-09-23T03:10:00Z",
+				"reason": "The S3 destination could not be asked, so nothing was removed from this folder in this cleanup. DBTrail asks again at the next one."}},
 		"pruneOnly":    map[string]any{"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 3}},
 		"pruneOne":     map[string]any{"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 1}},
 		"pruneNothing": map[string]any{"last_prune": map[string]any{"at": "2026-09-23T03:10:00Z", "removed": 0}},
@@ -104,17 +112,23 @@ console.log(JSON.stringify(out));
 	}
 	const at = "2026-09-23 03:10:00 UTC"
 	want := map[string][]line{
-		"none":         {},
-		"keepMany":     {{false, "Keeps the newest 7 snapshots on this machine."}},
-		"keepOne":      {{false, "Keeps only the newest snapshot on this machine."}},
-		"keepZero":     {},
+		"none":       {},
+		"keepMany":   {{false, "Keeps the newest 7 snapshots on this machine, and any made in the last hour."}},
+		"keepOne":    {{false, "Keeps only the newest snapshot on this machine, and any made in the last hour."}},
+		"keepZero":   {},
+		"keepManyS3": {{false, "Keeps the newest 3 snapshots on this machine, and any made in the last hour; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting."}},
+		"keepOneS3":  {{false, "Keeps only the newest snapshot on this machine, and any made in the last hour; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting."}},
+		"failSilentS3": {
+			{false, "Keeps the newest 3 snapshots on this machine, and any made in the last hour; older ones are removed once S3 has them. An update the schedule did not send to S3 is removed without waiting."},
+			{true, "Removing older copies failed on " + at + ": | The S3 destination could not be asked, so nothing was removed from this folder in this cleanup. DBTrail asks again at the next one."},
+		},
 		"pruneOnly":    {{false, "Removed 3 older copies on " + at + "."}},
 		"pruneOne":     {{false, "Removed 1 older copy on " + at + "."}},
 		"pruneNothing": {},
-		"keepAndPrune": {{false, "Keeps the newest 7 snapshots on this machine. Removed 2 older copies on " + at + "."}},
+		"keepAndPrune": {{false, "Keeps the newest 7 snapshots on this machine, and any made in the last hour. Removed 2 older copies on " + at + "."}},
 		"recordErr":    {{true, "The record of older copies removed here could not be read: open /snap/.prune: permission denied"}},
 		"failOne": {
-			{false, "Keeps the newest 7 snapshots on this machine."},
+			{false, "Keeps the newest 7 snapshots on this machine, and any made in the last hour."},
 			{true, "Removing older copies failed on " + at + ": | remove /snap/2026-09-01: busy"},
 		},
 		"failMany":     {{true, "Removing older copies failed on " + at + ": | remove /snap/a; b: busy | leftover /snap/.old still there | cannot read /snap: check read permissions"}},

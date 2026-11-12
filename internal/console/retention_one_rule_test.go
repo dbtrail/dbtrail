@@ -100,8 +100,10 @@ func TestBackupSettings_ageAndNotInS3(t *testing.T) {
 	}
 }
 
-// The retention card shows the ONE rule the server obeys: a count without
-// S3, age with it, and the copies S3 does not have.
+// The retention card shows the ONE rule every server obeys (#2658): its
+// count, with or without S3. These are the servers with S3 and NO count (the
+// ones saved before the change): the count is offered, empty, Delete by age
+// still says what it removes, and the copies S3 does not have are named.
 func TestBackupServerRow_oneRulePerServer(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -172,26 +174,29 @@ console.log(JSON.stringify(out));
 	hasRed := func(v view, s string) bool { return strings.Contains(strings.Join(v.Reds, " | "), s) }
 	off := func(v view) bool { return v.Step != nil && !*v.Step }
 	for name, c := range map[string]struct{ title, says, red, never string }{
-		"age7d":    {"On this machine", "Deleted here when older than 7 days, once S3 has it. DBTrail leaves S3 alone.", "", "Keep the newest"},
-		"age60h":   {"On this machine", "Deleted here when older than 60 hours, once S3 has it.", "", "3 days"},
-		"age90m":   {"On this machine", "Deleted here when older than 90 minutes, once S3 has it.", "", ""},
-		"ageEmpty": {"On this machine", "Kept here: Delete by age is empty.", "", "Deleted here"},
-		"noLoop":   {"On this machine", "Kept here: this DBTrail removes nothing.", "", "Deleted here"},
-		"notIn3":   {"On this machine", "Deleted here when older than 1 hour", "Not in S3 yet, so kept here: 3 older copies (checked 2026-10-01 10:00:00 UTC). S3 does not have them complete; send them to S3 again, or remove them by hand if not needed.", ""},
-		"notIn1":   {"On this machine", "", "Not in S3 yet, so kept here: 1 older copy (checked 2026-10-01 10:00:00 UTC). S3 does not have it complete; send it to S3 again, or remove it by hand if not needed.", ""},
-		"notIn1Named": {"On this machine", "", "Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC. S3 does not have it complete; DBTrail sends it again at the next cleanup.", ""},
-		"notIn7Named": {"On this machine", "", "Not in S3 yet, so kept here: 7 older copies (2026-10-19 03:15:06 UTC, 2026-10-20 00:00:00 UTC and 5 more). S3 does not have them complete; DBTrail sends them again at the next cleanup.", ""},
+		"age7d":       {"Keep by count", "Deleted here when older than 7 days, once S3 has it. DBTrail leaves S3 alone.", "", "Keep the newest"},
+		"age60h":      {"Keep by count", "Deleted here when older than 60 hours, once S3 has it.", "", "3 days"},
+		"age90m":      {"Keep by count", "Deleted here when older than 90 minutes, once S3 has it.", "", ""},
+		"ageEmpty":    {"Keep by count", "Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.", "", "Deleted here"},
+		"noLoop":      {"Keep by count", "Kept here: this DBTrail removes nothing.", "", "Deleted here"},
+		"notIn3":      {"Keep by count", "Deleted here when older than 1 hour", "Not in S3 yet, so kept here: 3 older copies (checked 2026-10-01 10:00:00 UTC). S3 does not have them complete; send them to S3 again, or remove them by hand if not needed.", ""},
+		"notIn1":      {"Keep by count", "", "Not in S3 yet, so kept here: 1 older copy (checked 2026-10-01 10:00:00 UTC). S3 does not have it complete; send it to S3 again, or remove it by hand if not needed.", ""},
+		"notIn1Named": {"Keep by count", "", "Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC. S3 does not have it complete; DBTrail sends it again at the next cleanup.", ""},
+		"notIn7Named": {"Keep by count", "", "Not in S3 yet, so kept here: 7 older copies (2026-10-19 03:15:06 UTC, 2026-10-20 00:00:00 UTC and 5 more). S3 does not have them complete; DBTrail sends them again at the next cleanup.", ""},
 		// A count no prune refreshes is not shown: age empty, or this daemon
 		// does not prune, or the destination was just edited.
-		"ageEmptyStale": {"On this machine", "Kept here: Delete by age is empty.", "", "Not in S3"},
-		"noLoopStale":   {"On this machine", "Kept here: this DBTrail removes nothing.", "", "Not known what S3 has"},
-		"editedS3":      {"On this machine", "After you save, Delete by age applies here.", "", "Not in S3"},
+		"ageEmptyStale": {"Keep by count", "Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.", "", "Not in S3"},
+		"noLoopStale":   {"Keep by count", "Kept here: this DBTrail removes nothing.", "", "Not known what S3 has"},
+		"editedS3":      {"Keep by count", "After you save, Delete by age applies here.", "", "Not in S3"},
 		"s3OnlyAtRest":  {"Only in S3", "No copy on this machine yet.", "", "Not in S3"},
-		"notInErr":      {"On this machine", "", "S3 state unknown: the record cannot be read", ""},
-		"typedS3":       {"On this machine", "After you save, Delete by age applies here.", "", "Not in S3"},
+		"notInErr":      {"Keep by count", "", "S3 state unknown: the record cannot be read", ""},
+		// A count typed before the bucket: the rule after the save is the count.
+		"typedS3": {"Keep by count", "After you save, older ones past that number are removed once S3 has them.", "", "Not in S3"},
 	} {
 		v := got[name]
-		if v.Title != c.title || !off(v) || (c.says != "" && !has(v, c.says)) || (c.red != "" && !hasRed(v, c.red)) || (c.never != "" && (has(v, c.never) || hasRed(v, c.never))) {
+		// The count is offered to every server with a folder (#2658); only
+		// one with S3 and no folder yet has nothing to count.
+		if v.Title != c.title || off(v) != (name == "s3OnlyAtRest") || (c.says != "" && !has(v, c.says)) || (c.red != "" && !hasRed(v, c.red)) || (c.never != "" && (has(v, c.never) || hasRed(v, c.never))) {
 			t.Errorf("%s: %+v (step shown %v)", name, v, v.Step)
 		}
 		for _, w := range append(v.Words, v.Reds...) {

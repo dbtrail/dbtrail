@@ -319,6 +319,19 @@ func TestSnapshotLocation(t *testing.T) {
 			t.Errorf("output:\n%s", out.String())
 		}
 	})
+	t.Run("a first S3 destination: the schedule's new S3 interval is said", func(t *testing.T) {
+		d, c := newFakeDaemon(t)
+		editServers(d, "running")
+		d.on("PUT /api/backup-settings/servers/id1", 200, map[string]any{"id": "id1", "resolved_dir": "/data/s", "resolved_s3": "s3://b/s/", "schedule_upload_set": "1d"})
+		var out bytes.Buffer
+		if err := runSnapshotLocation(context.Background(), c, "shop", locFlags{S3: "s3://b/s/"}, namedFlags("s3"), &out); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("output:\n%s", out.String())
+		if !strings.Contains(out.String(), "Its schedule now sends a snapshot to S3 every 1d, not at each update. Change it on the Snapshots page.\n") {
+			t.Errorf("output does not say the interval the daemon started:\n%s", out.String())
+		}
+	})
 	t.Run("stop sending to S3, keep-newest 0", func(t *testing.T) {
 		d, c := newFakeDaemon(t)
 		editServers(d, "running")

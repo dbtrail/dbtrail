@@ -89,6 +89,10 @@ func TestSnapshotsPage_uploadInterval(t *testing.T) {
 	// No schedule and nothing held: the unread bucket is the only reason to be amber.
 	unread, _ := sceneWith(true, "", 0, false, &s3CopyListing{err: errors.New("AccessDenied")})
 	_, dailyRow := scene(true, `{"every":"15m","at":"00:00","upload_every":"1d"}`, time.Hour, false)
+	// #2658: a schedule saved with each update chosen, and one saved by a
+	// request that did not name the interval (it takes the default).
+	eachUpdate, _ := scene(true, `{"every":"15m","at":"00:00","upload_every":""}`, time.Hour, false)
+	apiDefault, _ := scene(true, `{"every":"15m","at":"00:00"}`, time.Hour, false)
 
 	appJS, err := filepath.Abs("assets/app.js")
 	if err != nil {
@@ -124,7 +128,7 @@ const save = async (b, everyTo) => {
   const card = vm.runInContext("backupScheduleCard", ctx)(cur, b);
   const up = group(card, "Send to S3 every");
   if (everyTo) group(card, "Update the copy every").children.find((p) => text(p) === everyTo).onclick();
-  const btn = byClass(card, "btn").find((n) => n.tag === "button" && text(n) === "Save");
+  const btn = byClass(card, "btn").find((n) => n.tag === "button" && (text(n) === "Save" || text(n) === "Turn on"));
   await btn.onclick();
   return { body: calls[0], upPills: up ? up.children.filter((p) => !p.hidden).map(text) : null };
 };
@@ -143,6 +147,11 @@ const save = async (b, everyTo) => {
     save: await save(` + string(onTime) + `),
     saveDaily: await save(` + string(onTime) + `, "24 h"),
     saveNoS3: await save(` + string(noS3) + `),
+    eachUpdate: draw(` + string(eachUpdate) + `),
+    apiDefault: draw(` + string(apiDefault) + `),
+    saveNew: await save(` + string(notHeld) + `),
+    saveNew5m: await save(` + string(notHeld) + `, "5 min"),
+    saveEach: await save(` + string(eachUpdate) + `),
     expiry: vm.runInContext("s3ExpiryWords", ctx)({ state: "in_force", days: 1 }, ` + string(dailyRow) + `, 0),
   };
   console.log(JSON.stringify(out));
@@ -172,7 +181,9 @@ const save = async (b, everyTo) => {
 	var got struct {
 		OnTime, Late, Deleted, NotHeld, NoS3, LastRun drawn
 		ReadOnly, EmptyBucket, Unread                 drawn
+		EachUpdate, APIDefault                        drawn
 		Save, SaveDaily, SaveNoS3                     saved
+		SaveNew, SaveNew5m, SaveEach                  saved
 		Expiry                                        struct {
 			Text string
 			Warn bool
@@ -246,6 +257,34 @@ const save = async (b, everyTo) => {
 	}
 	if _, ok := got.SaveNoS3.Body["upload_every"]; ok {
 		t.Errorf("saveNoS3 sent upload_every %v: with no S3 row, the save must keep what is saved", got.SaveNoS3.Body)
+	}
+	// #2658. A new schedule on a server with S3 starts at 24 hours: the pill
+	// is lit before anything is touched, and Turn on sends it, whatever
+	// interval the updates are moved to.
+	for name, d := range map[string]drawn{"deleted": got.Deleted, "notHeld": got.NotHeld} {
+		if d.Up == nil || *d.Up != "1d" {
+			t.Errorf("%s: a new schedule's S3 interval starts at %v, want 1d (24 h)", name, d.Up)
+		}
+	}
+	if v := got.SaveNew.Body["upload_every"]; v != "1d" || got.SaveNew.Body["every"] != "1d" {
+		t.Errorf("turning on a new schedule sent %v, want upload_every 1d", got.SaveNew.Body)
+	}
+	if v := got.SaveNew5m.Body["upload_every"]; v != "1d" || got.SaveNew5m.Body["every"] != "5m" || strings.Join(got.SaveNew5m.UpPills, "|") != "Each update|1 h|6 h|24 h" {
+		t.Errorf("a new schedule every 5 min sent %v with pills %v, want upload_every 1d and every choice offered", got.SaveNew5m.Body, got.SaveNew5m.UpPills)
+	}
+	// A schedule that exists keeps what it has: each update stays lit, is
+	// said nowhere as an S3 interval, and a save sends it back unchanged.
+	t.Logf("eachUpdate state: %s | pills %v", got.EachUpdate.State, got.EachUpdate.UpPills)
+	if d := got.EachUpdate; d.Up == nil || *d.Up != "" || strings.Contains(d.State, "sent to S3 every") {
+		t.Errorf("a schedule saved with each update: lit %v, state %q", d.Up, d.State)
+	}
+	if v, ok := got.SaveEach.Body["upload_every"]; !ok || v != "" {
+		t.Errorf("saving a schedule that sends each update sent %v, want upload_every empty", got.SaveEach.Body)
+	}
+	// One saved by a request that did not name the interval took the default.
+	t.Logf("apiDefault state: %s | pills %v", got.APIDefault.State, got.APIDefault.UpPills)
+	if d := got.APIDefault; d.Up == nil || *d.Up != "1d" || !strings.Contains(d.State, ", sent to S3 every 1d.") {
+		t.Errorf("a schedule saved without the interval on a server with S3: lit %v, state %q", d.Up, d.State)
 	}
 	if !got.Expiry.Warn || !strings.Contains(got.Expiry.Text, "That is too short for snapshots sent to S3 every 1d: ") || !strings.Contains(got.Expiry.Text, "at least 2 days") {
 		t.Errorf("expiry = %+v, want a 1-day rule refused against a 1d S3 interval", got.Expiry)

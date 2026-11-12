@@ -15,7 +15,9 @@ import (
 
 // Every server keeps a local copy of its snapshots by default (#1681), in a
 // folder of its own under DBTrail's state directory, and keeps the newest
-// DefaultLocalKeepNewest of them when it has no external destination.
+// DefaultLocalKeepNewest of them, with or without an external destination
+// (#2658: with one, a snapshot past the count goes only once the destination
+// confirms its copy).
 //
 // DefaultLocalKeepNewest is 3: two is the least that keeps a comparison
 // possible (the verify check that compares one snapshot with the one before
@@ -24,12 +26,14 @@ import (
 // Unchanged tables are shared between snapshots as hard links, so each extra
 // snapshot costs only the tables that changed.
 //
-// Only NEW servers get it, at creation. An entry saved before this release
-// has LocalKeepNewest 0 and keeps every local snapshot exactly as it always
-// did: what happens to existing servers is a separate decision, and until it
-// is made nothing changes for them. This constant is also the one switch that
-// turns pruning off for new servers: 0 here means they are created with no
-// local retention.
+// Only NEW servers get it, at creation. An entry saved before #1681 has
+// LocalKeepNewest 0 and keeps every local snapshot exactly as it always
+// did, and so does one saved with an S3 destination before #2658, whose
+// count did nothing and was cleared on upgrade (clearInertKeepCounts): what
+// happens to existing servers is a separate decision, and until it is made
+// nothing changes for them. This constant is also the one switch that turns
+// pruning off for new servers: 0 here means they are created with no local
+// retention.
 const DefaultLocalKeepNewest = 3
 
 // maxLocalKeepNewest bounds the saved count. Past it the number stops being a
@@ -279,7 +283,9 @@ func (r *Registry) GiveEveryServerALocalCopy() []LocalCopyAssignment {
 // folder that already holds some (#1681): the next prune would remove every
 // one past the count, and nobody chose that for those copies. A folder that
 // cannot be listed is refused the same way, since whether it holds any is
-// unknown. keep <= 0 (keep everything) never refuses.
+// unknown. keep <= 0 (keep everything) never refuses. It is asked with or
+// without an S3 destination (#2658): with one, the snapshots already there
+// would be sent to it and then removed, which nobody chose either.
 func adoptsSnapshots(dir string, keep int) error {
 	if keep <= 0 {
 		return nil
@@ -313,9 +319,12 @@ func validLocalKeepNewest(n int) error {
 // it does.
 //
 // A folder qualifies when exactly ONE server keeps its snapshots there
-// (BaselineDir), that server has no external destination (BaselineS3 empty)
-// and a count (LocalKeepNewest > 0), and the folder is not one of excluded
-// (the daemon's own --baseline-dir). A folder two servers share is never
+// (BaselineDir), that server has a count (LocalKeepNewest > 0), and the
+// folder is not one of excluded (the daemon's own --baseline-dir). Whether
+// the server also has an external destination does not matter (#2658): the
+// count names the snapshots past it either way, and LocalKeepServer names
+// the destination each of those must be confirmed against before it goes. A
+// folder two servers share is never
 // pruned: a snapshot does not record which server wrote it, so one server's
 // newer copy of a table would count as the newest copy of the other's.
 // Folders are compared after resolving symlinks, so a second spelling of the
@@ -331,13 +340,16 @@ func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int 
 	}
 	blocked := map[string]bool{}
 	for _, d := range excluded {
-		if d != "" {
+		if d != "" && !isS3Location(d) {
 			blocked[canonicalDir(d)] = true
 		}
 	}
 	out := map[string]int{}
 	for _, e := range entries {
-		if e.BaselineDir == "" || e.BaselineS3 != "" || e.LocalKeepNewest <= 0 || heldNow(e) {
+		if e.BaselineDir == "" || e.LocalKeepNewest <= 0 || heldNow(e) {
+			continue
+		}
+		if LocalKeepSharedS3(entries, e, excluded...) {
 			continue
 		}
 		dir := canonicalDir(e.BaselineDir)
@@ -347,6 +359,53 @@ func LocalKeepTargets(entries []ServerEntry, excluded ...string) map[string]int 
 		out[dir] = e.LocalKeepNewest
 	}
 	return out
+}
+
+// isS3Location tells an S3 location from a folder among the excluded values.
+func isS3Location(s string) bool { return strings.HasPrefix(strings.TrimSpace(s), "s3://") }
+
+// LocalKeepSharedS3 reports whether e's S3 destination is also another
+// server's, or one of excluded (the daemon's own --baseline-s3, passed among
+// the excluded values as an s3:// location): the same prefix, trailing
+// slashes aside, the comparison the write refusal uses (#1684, sameS3).
+//
+// Such a folder is never pruned to a count (#2658). The prune asks the
+// bucket for <prefix>/<snapshot name>/_SUCCESS, and a snapshot name is the
+// second its run started, with no per-server segment: two servers on one
+// prefix and the same schedule write the same names, so the bucket would
+// answer "I have it" for the OTHER server's upload, and a local snapshot
+// whose own upload failed would be removed with no copy of it anywhere.
+// Writes into a shared location are refused, but two entries can still be
+// saved that way.
+func LocalKeepSharedS3(entries []ServerEntry, e ServerEntry, excluded ...string) bool {
+	mine := strings.TrimSpace(e.BaselineS3)
+	if mine == "" {
+		return false
+	}
+	for _, d := range excluded {
+		if isS3Location(d) && sameS3(mine, strings.TrimSpace(d)) {
+			return true
+		}
+	}
+	for _, o := range entries {
+		if o.ID != e.ID && sameS3(mine, strings.TrimSpace(o.BaselineS3)) {
+			return true
+		}
+	}
+	return false
+}
+
+// LocalKeepServer is the ONE server that keeps its snapshots in dir, a folder
+// LocalKeepTargets named, in the spelling it returned. Its S3 destination,
+// when it has one, is what a snapshot past the count must be confirmed
+// against before it is removed (#2658).
+func LocalKeepServer(entries []ServerEntry, dir string) (ServerEntry, bool) {
+	for _, e := range entries {
+		if e.BaselineDir != "" && canonicalDir(e.BaselineDir) == dir {
+			return e, true
+		}
+	}
+	return ServerEntry{}, false
 }
 
 // LocalKeepBlocked reports whether e's folder is one LocalKeepTargets refuses
@@ -360,9 +419,12 @@ func LocalKeepBlocked(entries []ServerEntry, e ServerEntry, excluded ...string) 
 	if heldNow(e) {
 		return true
 	}
+	if LocalKeepSharedS3(entries, e, excluded...) {
+		return true
+	}
 	dir := canonicalDir(e.BaselineDir)
 	for _, d := range excluded {
-		if d != "" && canonicalDir(d) == dir {
+		if d != "" && !isS3Location(d) && canonicalDir(d) == dir {
 			return true
 		}
 	}
@@ -409,6 +471,10 @@ func markHeldFolders(before, after []ServerEntry) {
 func heldNow(e ServerEntry) bool {
 	return e.BaselineDir != "" && e.LocalKeepHeldDir != "" && canonicalDir(e.BaselineDir) == canonicalDir(e.LocalKeepHeldDir)
 }
+
+// CanonicalDir is canonicalDir for the callers outside this package that
+// compare a folder with the ones LocalKeepTargets names.
+func CanonicalDir(p string) string { return canonicalDir(p) }
 
 // canonicalDir is the folder a path names, symlinks resolved; a path that
 // cannot be resolved (not created yet) is compared as cleaned text.

@@ -83,7 +83,13 @@ type startOutcome struct {
 // still resumes.
 func (s *Server) startEntry(ctx context.Context, e ServerEntry) error {
 	e.MonitorDesired = true
-	if err := s.cm.reg.Update(e); err != nil {
+	// Only the intent, on the entry as it is now (#2658): the checks before
+	// this can take a while, and a whole-entry write would undo a save made
+	// meanwhile.
+	if err := s.cm.reg.UpdateWith(e.ID, func(cur ServerEntry) (ServerEntry, bool) {
+		cur.MonitorDesired = true
+		return cur, true
+	}); err != nil {
 		return err
 	}
 	if err := s.monitorCtrl.Start(ctx, e); err != nil {
