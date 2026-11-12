@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
@@ -104,26 +105,41 @@ func TestReconstruct2684_reusedFolderAndIfNotExists(t *testing.T) {
 		}
 	})
 
-	t.Run("a run refused before any table starts leaves the folder as it was", func(t *testing.T) {
-		seed(t)
-		_, _, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
-			IndexDSN:     testutil.BaseDSN() + "/" + dbName,
-			BaselineSrc:  t.TempDir(),
-			Tables:       []string{"shop.t", "shop."},
-			At:           at,
-			OutputDir:    out,
-			OutputFormat: reconstruct.OutputFormatMydumper,
-		})
-		if err == nil || !strings.Contains(err.Error(), "invalid --tables entry") {
-			t.Fatalf("err = %v, want the bad entry refused", err)
-		}
-		got := names(t)
-		for _, n := range earlier {
-			if !slices.Contains(got, n) {
-				t.Errorf("%s was removed by a run that was refused before it started", n)
+	// A complete dump of an earlier run, markers included, stays complete
+	// after a run refused before any table starts: its files AND its markers.
+	for _, refused := range []struct {
+		name, baselineSrc, wantErr string
+		tables                     []string
+	}{
+		{"a bad --tables entry", t.TempDir(), "invalid --tables entry", []string{"shop.t", "shop."}},
+		{"a snapshot folder that does not exist", filepath.Join(t.TempDir(), "typo"), "cannot be read", []string{"shop.t"}},
+	} {
+		t.Run("a run refused up front by "+refused.name+" leaves the folder as it was", func(t *testing.T) {
+			seed(t)
+			os.Remove(filepath.Join(out, baseline.IncompleteMarker))
+			for _, m := range []string{baseline.SuccessMarker, baseline.ChangesOnlyMarkerFile} {
+				if err := os.WriteFile(filepath.Join(out, m), []byte("{\"schema\":\"shop\",\"table\":\"x\"}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
-	})
+			before := names(t)
+			_, _, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
+				IndexDSN:     testutil.BaseDSN() + "/" + dbName,
+				BaselineSrc:  refused.baselineSrc,
+				Tables:       refused.tables,
+				At:           at,
+				OutputDir:    out,
+				OutputFormat: reconstruct.OutputFormatMydumper,
+			})
+			if err == nil || !strings.Contains(err.Error(), refused.wantErr) {
+				t.Fatalf("err = %v, want %q", err, refused.wantErr)
+			}
+			t.Logf("rendered: %s", err)
+			if after := names(t); !slices.Equal(after, before) {
+				t.Errorf("the folder changed:\nbefore %v\nafter  %v", before, after)
+			}
+		})
+	}
 
 	if _, err := db.Exec(`INSERT INTO schema_changes
 		(detected_at, binlog_file, binlog_pos, schema_name, table_name, ddl_type, ddl_query)

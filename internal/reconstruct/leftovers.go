@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -108,4 +109,39 @@ func logTableLeftovers(left tableLeftovers) {
 	if len(left.Others) > 0 {
 		slog.Warn(leftoversOtherTablesMsg, "schema_files", strings.Join(left.Others, ","))
 	}
+}
+
+// listS3Location reads an s3:// snapshot location once, for
+// checkSnapshotLocation; a variable so a test can stand in for the bucket.
+var listS3Location = func(ctx context.Context, source string) error {
+	_, _, _, err := ListBaselinesNewestReport(ctx, source, 1)
+	return err
+}
+
+// checkSnapshotLocation says whether a snapshot location can be read at all:
+// a local folder that exists and lists, or an s3:// location whose listing
+// answers. An empty one can be read. It is the run's only check of the
+// location before the output folder changes; the lookup per table reads it
+// again, after.
+func checkSnapshotLocation(ctx context.Context, source string) error {
+	refuse := func(err error) error {
+		return fmt.Errorf("the snapshot location %q cannot be read: %w; nothing in the output folder was changed", source, err)
+	}
+	if strings.HasPrefix(source, "s3://") {
+		if err := listS3Location(ctx, source); err != nil {
+			return refuse(err)
+		}
+		return nil
+	}
+	fi, err := os.Stat(source)
+	if err != nil {
+		return refuse(err)
+	}
+	if !fi.IsDir() {
+		return refuse(fmt.Errorf("%s is not a folder", source))
+	}
+	if _, err := os.ReadDir(source); err != nil {
+		return refuse(err)
+	}
+	return nil
 }

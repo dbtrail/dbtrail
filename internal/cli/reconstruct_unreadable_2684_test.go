@@ -149,3 +149,31 @@ func TestReconstruct1807_anUnreadableOlderSnapshotIsNamed(t *testing.T) {
 		t.Error("the message says the table is in no snapshot")
 	}
 }
+
+// When a readable snapshot of the table from at or before the moment exists
+// and the lookup did not use it, an older folder that could not be read is
+// not the reason: the refusal says the reason is not known, and does not send
+// the operator to fix a permission that changes nothing.
+func TestReconstructChangesOnly_anUnreadableFolderIsNotBlamedWhenAReadableSnapshotExists(t *testing.T) {
+	resetMydumperFlags(t)
+	dir := t.TempDir()
+	putSnapshot(t, dir, "2026-08-01T00-00-00Z", "mydb", "orders")
+	putSnapshot(t, dir, "2026-08-15T00-00-00Z", "mydb", "orders")
+	unreadableFolder(t, filepath.Join(dir, "2026-08-01T00-00-00Z"))
+	recBaselineDir = dir
+	recAt = changesOnlyAt.Format(time.RFC3339)
+	stubEngine(t, nil, []reconstruct.TableFailure{refusedTable("mydb", "orders", time.Time{})})
+	err := runReconstruct(reconstructCmd, nil)
+	if err == nil {
+		t.Fatal("the command succeeded")
+	}
+	msg := strings.ReplaceAll(err.Error(), dir, "<snapshots>")
+	t.Logf("rendered:\n%s", msg)
+	if strings.Contains(msg, "could not be read") || strings.Contains(msg, "Make it readable") {
+		t.Error("the refusal blames the unreadable folder although a readable snapshot of the table exists")
+	}
+	unknown := "Why there is none is not known: the location shows a snapshot of it from at or before that moment, and the lookup did not use it. Find that out before adding the flag."
+	if !strings.Contains(msg, unknown) {
+		t.Errorf("refusal does not say %q", unknown)
+	}
+}

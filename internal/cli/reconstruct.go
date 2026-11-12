@@ -1230,9 +1230,12 @@ func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string
 	// may hold the table, whatever the folders that could be read say. The
 	// lookup skips such a folder when a newer one was read, so it answers "no
 	// snapshot" while the table may have one. A folder of another schema
-	// cannot hold it.
+	// cannot hold it. And when the listing shows a readable snapshot of the
+	// table from at or before the moment, an unreadable folder explains
+	// nothing: the lookup had that snapshot and did not use it, which is the
+	// "not known" case below, not a permission to fix.
 	var blind *reconstruct.UnreadableSnapshot
-	if listErr == nil {
+	if listErr == nil && !beforeAt {
 		for i := range unreadable {
 			u := &unreadable[i]
 			if u.SnapshotTime.After(at) || (u.Schema != "" && u.Schema != schema) {

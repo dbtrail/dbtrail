@@ -823,6 +823,33 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	parquetMode := cfg.OutputFormat == OutputFormatParquet
 	psqlMode := cfg.OutputFormat == OutputFormatPsql
 
+	// The checks that need nothing but the configuration come first, before
+	// anything on disk changes (#2684): a run refused by one of them leaves
+	// the output folder as it found it. Every entry is checked before any
+	// table starts: a bad one found mid-loop returned while the tables before
+	// it were still folding.
+	for _, entry := range cfg.Tables {
+		if _, _, ok := splitSchemaTable(entry); !ok {
+			return nil, fmt.Errorf("invalid --tables entry %q: must be schema.table", entry)
+		}
+	}
+	if psqlMode {
+		if err := pgFileCollisions(cfg.Tables); err != nil {
+			return nil, err
+		}
+	}
+	// A dump folder's earlier files are removed before any table is looked
+	// up (removeTableLeftovers below), and the lookup is what reads the
+	// snapshot location, per table. A location that cannot be read at all (a
+	// typo, a bucket that does not exist) would remove the earlier dump and
+	// then fail every table, so it is read once here. An empty one passes:
+	// every table is then refused for having no snapshot.
+	if !parquetMode {
+		if err := checkSnapshotLocation(ctx, cfg.BaselineSrc); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
@@ -876,8 +903,17 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// baseline.go: proceeding without the crash-safety net deployed and then
 	// dying uncatchably mid-run would leave a markerless partial dump that the
 	// marker-absent-is-complete legacy-compat rule reads as complete.
-	if err := markRunIncomplete(markerDir); err != nil {
-		return nil, fmt.Errorf("could not write incomplete-dump marker in %s (refusing to reconstruct without the crash-safety marker): %w", markerDir, err)
+	//
+	// For a dump folder (mydumper, psql) the marker is written further down,
+	// after every check that can refuse the run before a table starts: that
+	// folder may hold a complete dump of an earlier run, and a run refused up
+	// front must leave it complete (#2684). A Parquet snapshot directory is
+	// new, so it is marked as soon as it exists: left without a marker, an
+	// empty one would read as a complete legacy snapshot.
+	if parquetMode {
+		if err := markRunIncomplete(markerDir); err != nil {
+			return nil, fmt.Errorf("could not write incomplete-dump marker in %s (refusing to reconstruct without the crash-safety marker): %w", markerDir, err)
+		}
 	}
 
 	db, err := config.Connect(cfg.IndexDSN)
@@ -1039,24 +1075,16 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	sem := make(chan struct{}, cfg.Parallelism)
 	var wg sync.WaitGroup
 
-	// Every entry is checked before any table starts: a bad one found
-	// mid-loop returned while the tables before it were still folding.
-	for _, entry := range cfg.Tables {
-		if _, _, ok := splitSchemaTable(entry); !ok {
-			return nil, fmt.Errorf("invalid --tables entry %q: must be schema.table", entry)
-		}
-	}
-	if psqlMode {
-		if err := pgFileCollisions(cfg.Tables); err != nil {
-			return nil, err
-		}
-	}
-	// The earlier run's files of these tables go now: after _INCOMPLETE, so
-	// a run killed while it removes still leaves the folder marked, and after
-	// every check that can refuse the run before a table starts (the index,
-	// its schema, the --tables entries), so a run refused up front leaves the
-	// folder as it found it. See leftovers.go.
+	// A dump folder changes only now, after every check that can refuse the
+	// run before a table starts (the configuration, the snapshot location,
+	// the index and its schema), so a run refused up front leaves it as it
+	// found it, markers included. First the marker, so a run killed while it
+	// removes still leaves the folder marked; then the earlier run's files of
+	// these tables. See leftovers.go.
 	if !parquetMode {
+		if err := markRunIncomplete(markerDir); err != nil {
+			return nil, fmt.Errorf("could not write incomplete-dump marker in %s (refusing to reconstruct without the crash-safety marker): %w", markerDir, err)
+		}
 		left, err := removeTableLeftovers(cfg.OutputDir, cfg.OutputFormat, cfg.Tables)
 		if err != nil {
 			return nil, err
