@@ -2363,8 +2363,7 @@ func reportRefreshDuration(server string, run refreshRun, prev refreshPace) {
 			"while it ran. Taking a full read does change it, because a full read reads the source instead "+
 			"of folding, and the refreshes after it start from the moment that snapshot BEGAN, which means the "+
 			"first of them still folds the time the snapshot itself took; the snapshot schedule does this on its "+
-			"own once an update is measured to cost more than a full read, or when its starting point is "+
-			"past the cut-over age with nothing measured. Otherwise reduce what a run costs, "+
+			"own once an update is measured to cost clearly more than a full read. Otherwise reduce what a run costs, "+
 			"and start where growth_mostly_in on this line points: this reading is over the whole run, so a "+
 			"destination that slowed down reaches it exactly as a fold that did, and fold_grew_by against "+
 			"upload_grew_by is which of the two actually happened here.", attrs...)

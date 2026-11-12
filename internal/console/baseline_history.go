@@ -384,8 +384,8 @@ func (h *BaselineRunHistory) MeasuredSinceFull(serverID string) bool {
 
 // FullBackupFinished is when the full backup that published the snapshot
 // named snapshotTime (RFC3339 UTC) finished, zero when no full backup on
-// record published it or its stamp does not parse: what the age rule counts
-// an anchor's age from (BackupWindow.AnchorFullFinished).
+// record published it or its stamp does not parse: what an anchor's age is
+// counted from (BackupWindow.AnchorFullFinished).
 func (h *BaselineRunHistory) FullBackupFinished(serverID, snapshotTime string) time.Time {
 	rec := h.FindBySnapshot(serverID, snapshotTime)
 	if rec == nil || rec.Kind != BaselineRunDump {

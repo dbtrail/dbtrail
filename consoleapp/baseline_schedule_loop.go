@@ -53,9 +53,9 @@ type backupScheduler struct {
 	windows map[string]windowSample
 	// window is the probe both the loop's and the API's gates carry:
 	// measureWindow in the daemon; nil in the scheduler tests whose fixture
-	// snapshot is dated weeks before their slots (the age rule would turn
-	// every one of their updates into a full backup), set back by the
-	// tests OF the cut-over.
+	// snapshot is dated weeks before their slots (with nothing indexed
+	// since it and no source to ask, a measured zero would make their updates
+	// full backups), set back by the tests OF the cut-over.
 	window console.BackupWindowProbe
 	// fullBackups: the daemon's baseline-creation opt-in. Without it a slot
 	// whose chosen producer is a full backup is skipped and recorded as
@@ -287,9 +287,9 @@ type windowSample struct {
 //     model then abstains on until an update is measured again.
 func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEntry, anchor time.Time) console.BackupWindow {
 	b.mu.Lock()
-	// Not across the cut-over (#1791): a window cached just before the anchor
-	// passed it carries no capture verdict, and reused past it would take a
-	// full backup the source could have ruled out.
+	// Not across the cut-over age (#1791): a window cached just before the
+	// anchor passed it carries no capture verdict, and reused past it would
+	// take a full backup the source could have ruled out.
 	if c, ok := b.windows[e.ID]; ok && c.anchor.Equal(anchor) && time.Since(c.at) < windowCacheFor &&
 		!(c.w.Events == 0 && c.w.Capture == "" && c.w.CaptureDetail == "" && pastCutover(e, c.w, time.Now())) {
 		b.mu.Unlock()
@@ -297,7 +297,7 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 	}
 	b.mu.Unlock()
 	w := console.BackupWindow{Anchor: anchor, Events: -1}
-	base, known := b.windowBase(e, anchor)
+	base, known, countUnknown := b.windowBase(e, anchor)
 	if b.sup.history != nil {
 		w.FoldFixed, w.FoldRate = b.sup.history.UpdateModel(e.ID)
 		w.LastFull = b.sup.history.LastFullBackup(e.ID)
@@ -314,10 +314,16 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 		defer cancel()
 		cur, answered := readIndexMark(ctx, probeDSN(e.DSN))
 		b.reportWindowBlind(e, answered)
-		if answered && cur.events >= base {
+		switch {
+		case !answered:
+			// Said by reportWindowBlind.
+		case cur.events < base:
+			countUnknown = countUnknownWentBackwards
+		default:
 			w.Events = int64(cur.events - base)
 		}
 	}
+	b.reportCountUnknown(e, anchor, countUnknown)
 	if w.Events == 0 && pastCutover(e, w, time.Now()) {
 		var sourceRead time.Time
 		if b.sup.history != nil {
@@ -340,8 +346,9 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 	return w
 }
 
-// pastCutover reports whether w's anchor is older than e's cut-over age,
-// counted the way console.CutoverToFull counts it: the only case in which
+// pastCutover reports whether w's anchor is older than e's cut-over age
+// (console.BackupCutoverAge), counted the way console.CutoverToFull counts
+// it. With nothing indexed since the anchor that is the only case in which
 // the capture verdict can change a decision, and so the only one in which
 // the source is asked. A schedule that does not parse counts as no interval
 // (the two-hour floor), which asks earlier, never later.
@@ -386,8 +393,8 @@ func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEn
 }
 
 // reportCaptureProbe says, once per condition and server (gateEdge), why a
-// server that indexed nothing still takes a full backup on age, or that it
-// no longer does. The window probe runs on page loads too, so an unlimited
+// server that indexed nothing since an old snapshot still takes a full
+// backup, or that it no longer does. The window probe runs on page loads too, so an unlimited
 // line would repeat every minute. Warn when a read failed or the source is
 // ahead, which is worth a look; Info when the reason is structural (a
 // position-mode capture, a PostgreSQL source), since those hold for the
@@ -399,7 +406,7 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	if r.verdict == console.CaptureCaughtUp {
 		b.sup.gateEdge.Resolve(loud)
 		if b.sup.gateEdge.Fire(quiet, anchor.UTC().Format(time.RFC3339)) {
-			slog.Info("snapshot schedule: nothing was indexed since the previous snapshot and the source confirms it wrote nothing the capture has not recorded; updating instead of taking a full read on age",
+			slog.Info("snapshot schedule: nothing was indexed since the previous snapshot, and the source confirms it wrote nothing the capture has not recorded",
 				"server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339))
 		}
 		return
@@ -412,7 +419,11 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	if r.cause != "" {
 		args = append(args, "error", r.cause)
 	}
-	msg := "snapshot schedule: nothing was indexed since the previous snapshot, but the source could not confirm it wrote nothing; the full read on age stays in place"
+	// What was found, and no more: this runs wherever nothing was indexed
+	// since an old snapshot, on a page load as well as at a slot, and on a
+	// server whose measured rate makes the slot an update whatever the
+	// source says. The line that takes a full read on it (fire) says so.
+	msg := "snapshot schedule: nothing was indexed since the previous snapshot, and the source does not confirm that capture recorded everything it wrote, so the index may be missing changes"
 	if r.cause != "" || r.verdict == console.CaptureBehind {
 		slog.Warn(msg, args...)
 		return
@@ -444,29 +455,79 @@ func probeDSN(dsn string) string {
 // a full backup published it, #1737). Like measuredEvents, a memo on another
 // index means the server was re-pointed since this daemon's last fold, and
 // no recorded mark can be trusted to come from the current one.
-func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (uint64, bool) {
+//
+// Without a base, why says which of the count's causes for being unknown
+// this is (reportCountUnknown); empty with no anchor, where there is no
+// snapshot to count from and nothing to say.
+func (b *backupScheduler) windowBase(e console.ServerEntry, anchor time.Time) (base uint64, known bool, why string) {
 	if anchor.IsZero() {
-		return 0, false
+		return 0, false, ""
 	}
 	b.sup.mu.Lock()
 	memo, seen := b.sup.foldedMarks[e.ID]
 	b.sup.mu.Unlock()
 	if seen && memo.indexDSN != e.DSN {
-		return 0, false
+		return 0, false, countUnknownOtherIndex
 	}
 	if seen && reconstruct.SnapshotDirName(memo.publishedAt) == reconstruct.SnapshotDirName(anchor) {
-		return memo.mark.events, true
+		return memo.mark.events, true, ""
 	}
 	if b.sup.history != nil {
-		return b.sup.history.IndexMarkFor(e.ID, anchor.UTC().Format(time.RFC3339))
+		if mark, ok := b.sup.history.IndexMarkFor(e.ID, anchor.UTC().Format(time.RFC3339)); ok {
+			return mark, true, ""
+		}
 	}
-	return 0, false
+	return 0, false, countUnknownNoBase
+}
+
+// Why the number of changes since the previous snapshot is unknown, besides
+// an index that did not answer (reportWindowBlind): the reason attribute of
+// reportCountUnknown's line.
+const (
+	countUnknownNoBase        = "nothing on record says how far the index had been written when that snapshot was made: the run history does not hold it, another process made the snapshot, or the index held no event then"
+	countUnknownOtherIndex    = "this server was pointed at another index since the last update made here"
+	countUnknownWentBackwards = "the index's event counter is below the one recorded when that snapshot was made: the index was rebuilt or replaced, or rotation dropped every hour it held"
+)
+
+// windowNoEstimateWords is what an unknown count means for the choice, in
+// the two lines that report one. The age of the previous snapshot no longer
+// chooses a full read (#2659), so the update is what runs, and nothing
+// estimated its cost. The exception is console.CutoverToFull's fixed-cost
+// rule, which needs no count.
+const windowNoEstimateWords = "the schedule's choice is the update, with no estimate of what it will cost; " +
+	"the exception is a server with no per-event rate whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen"
+
+// reportCountUnknown says, once per cause and server, that the changes since
+// the previous snapshot could not be counted, and what the schedule does
+// without the count. Before #2659 an unknown count on an old snapshot was a
+// full read whose reason said so; now the update runs, and without this line
+// nothing would say its cost was never estimated. Warn for the two causes
+// that mean the index is not the one the snapshot was made from; Info for a
+// missing record, which the next update's own record ends. An empty why
+// resolves the condition.
+func (b *backupScheduler) reportCountUnknown(e console.ServerEntry, anchor time.Time, why string) {
+	key := "window-count:" + e.ID
+	if why == "" {
+		b.sup.gateEdge.Resolve(key)
+		return
+	}
+	if !b.sup.gateEdge.Fire(key, why) {
+		return
+	}
+	msg := "snapshot schedule: the number of changes since the previous snapshot could not be established; " + windowNoEstimateWords
+	args := []any{"server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339), "reason", why}
+	if why == countUnknownNoBase {
+		slog.Info(msg, args...)
+		return
+	}
+	slog.Warn(msg, args...)
 }
 
 // reportWindowBlind says once, at Warn, that the index stopped answering
-// the window probe: from then on the cut-over runs on the age of the
-// previous backup alone, and a full read of production on age would
-// otherwise be diagnosed as the rule misfiring. Resolved when it answers.
+// the window probe: from then on the size of an update is unknown, so the
+// schedule takes the update whatever it would cost (#2659), and a long
+// one would otherwise be diagnosed as the rule misfiring. Resolved when it
+// answers.
 func (b *backupScheduler) reportWindowBlind(e console.ServerEntry, answered bool) {
 	key := "window-probe:" + e.ID
 	if answered {
@@ -474,8 +535,7 @@ func (b *backupScheduler) reportWindowBlind(e console.ServerEntry, answered bool
 		return
 	}
 	if b.sup.gateEdge.Fire(key, "") {
-		slog.Warn("snapshot schedule: the index did not answer the update-size probe in time; until it does, the choice between "+
-			"an update and a full read falls back to the age of the previous snapshot alone",
+		slog.Warn("snapshot schedule: the index did not answer the update-size probe in time, so the number of changes since the previous snapshot is unknown; "+windowNoEstimateWords,
 			"server", e.Name, "id", e.ID, "timeout", windowProbeTimeout)
 	}
 }
@@ -922,16 +982,20 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 		slog.Warn("snapshot schedule: taking a full read because the previous one could not be read",
 			"server", e.Name, "id", e.ID, "reason", why)
 	}
-	// The #1721 cut-over is the plan working as designed, not a degradation,
-	// but it is the expensive producer replacing the cheap one, so it is
-	// said in the log with the numbers the decision was made on, before the
-	// run starts and not only on the page afterwards.
-	if code := console.BackupWhyCode(why); method == console.BackupMethodFull && (code == "window_measured" || code == "window_age") {
-		args := []any{"server", e.Name, "id", e.ID, "reason", why}
-		if code == "window_measured" {
-			args = append(args, b.modelLogArgs(e.ID, now)...)
+	// The cut-over is the plan working as designed, not a degradation, but
+	// it is the expensive producer replacing the cheap one, so it is said in
+	// the log with what the decision was made on, before the run starts and
+	// not only on the page afterwards.
+	if method == console.BackupMethodFull {
+		switch console.BackupWhyCode(why) {
+		case "window_measured":
+			args := append([]any{"server", e.Name, "id", e.ID, "reason", why}, b.modelLogArgs(e.ID, now)...)
+			slog.Info("snapshot schedule: taking a full read instead of an update from the recorded changes; the update was measured to cost clearly more", args...)
+		case "window_age":
+			slog.Info("snapshot schedule: taking a full read instead of an update from the recorded changes; nothing was indexed since the previous snapshot "+
+				"and the source does not confirm that capture is caught up, so the index may be missing changes",
+				"server", e.Name, "id", e.ID, "reason", why)
 		}
-		slog.Info("snapshot schedule: taking a full read instead of an update from the recorded changes; the update would cost more, or its starting point is too old to fold cheaply", args...)
 	}
 	stamp := now.Format(time.RFC3339)
 	if method == console.BackupMethodRefresh {
@@ -1260,9 +1324,11 @@ func fullReadStandsIn(last console.BaselineStatus) bool {
 
 // updateStandsIn reports whether a failed scheduled full read is one an
 // update from the recorded changes can stand in for (#2586): one the
-// cut-over chose over a possible update because it looked cheaper, or
-// because the snapshot it builds on was old, and that failed without
-// publishing anything. Not a first backup, a full read standing in for a
+// cut-over chose over a possible update because it was measured cheaper,
+// and that failed without publishing anything. Not one chosen because the
+// index may be missing writes of the source ("window_age"): an update over
+// the same index cannot settle that. Not a first backup, a full read
+// standing in for a
 // failed update (that update is what just failed), a full copy the
 // timetable asked for, or a read refused on the disk or the destination,
 // which an update writing to the same place would meet too.
@@ -1270,15 +1336,7 @@ func updateStandsIn(own scheduledStart, last console.BaselineStatus) bool {
 	if own.method != console.BackupMethodFull || own.fallback || own.fullCopy {
 		return false
 	}
-	switch console.BackupWhyCode(own.why) {
-	case "window_measured":
-	case "window_age":
-		if strings.Contains(own.why, console.BackupWhyNothingIndexedWords) {
-			// Chosen because the index may be missing writes of the
-			// source: an update over the same index cannot settle that.
-			return false
-		}
-	default:
+	if console.BackupWhyCode(own.why) != "window_measured" {
 		return false
 	}
 	return last.State == "failed" && !last.Published && !last.DiskRefused && !last.ForeignSource

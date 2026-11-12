@@ -18,8 +18,9 @@ import (
 
 // Whether capture is caught up, for the Overview (#1794).
 //
-// The snapshot schedule asks the source this before a full read on age
-// (#1791, capture_probe.go). The Overview asks the same question for a
+// The snapshot schedule asks the source this before a full read of a
+// server that indexed nothing since an old snapshot (#1791,
+// capture_probe.go). The Overview asks the same question for a
 // different reason: a server nobody wrote to and a capture that fell behind
 // look the same from the index, and the page can only tell them apart by
 // asking. The read is the schedule's (compareWithSource); what is added here

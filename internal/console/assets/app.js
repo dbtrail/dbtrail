@@ -11269,8 +11269,11 @@ function backupWhyLine(why, code, remedy) {
     // full backup" would say the words twice.
     out = why.charAt(0).toUpperCase() + why.slice(1);
   } else if (code === "window_measured" || code === "window_age") {
-    // The daemon's own numbers (#1721): events, the estimate, the last full
-    // backup's duration or the anchor's age. Said as recorded.
+    // The daemon's own words: the measured cost (#1721: events, the
+    // estimate, the last full read's duration), or an index that recorded
+    // nothing since an old snapshot while the source does not vouch for
+    // capture (#1791). A record from before #2659 may say the snapshot was
+    // too old. Said as recorded.
     out = "Full read instead of an update: " + why;
   } else {
     out = "Full read because " + why;

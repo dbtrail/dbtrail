@@ -104,8 +104,8 @@ func TestBaselineHistory_indexMarkForAFullBackup(t *testing.T) {
 }
 
 // With no update measured since the last full backup the model may not
-// choose a full backup, but its "update" stands; the age rule still applies,
-// and says what it acted on.
+// choose a full backup, and its "update" stands. The anchor's age does not
+// choose one in its place (#2659).
 func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T) {
 	now := time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC)
 	fresh := now.Add(-5 * time.Minute)
@@ -124,8 +124,8 @@ func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T)
 		{"cheap by the rate, old anchor (a full read longer than the cut-over)", BackupWindow{Anchor: old, Events: 5000, FoldRate: 20_000, LastFull: 5*time.Hour + 20*time.Minute}, "", ""},
 		{"nothing to fold, old anchor (a quiet server)", BackupWindow{Anchor: old, Events: 0, FoldRate: 4000, LastFull: 8 * time.Minute}, "", ""},
 		{"proven cheaper, old anchor", BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, Proven: 12_000_000, LastFull: 8 * time.Minute}, "", ""},
-		{"dear by the rate, old anchor", BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, "window_age", "window_measured"},
-		{"count unknown, old anchor", BackupWindow{Anchor: old, Events: -1, FoldRate: 4000, LastFull: 8 * time.Minute}, "window_age", "window_age"},
+		{"dear by the rate, old anchor", BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute}, "", "window_measured"},
+		{"count unknown, old anchor", BackupWindow{Anchor: old, Events: -1, FoldRate: 4000, LastFull: 8 * time.Minute}, "", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -139,25 +139,15 @@ func TestCutoverToFull_aStaleModelMayUpdateButNotChooseAFullBackup(t *testing.T)
 			}
 		})
 	}
-	// With everything measured, the age reason says the estimate was not
-	// used, never that it could not be made.
-	w := BackupWindow{Anchor: old, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute, UnmeasuredSinceFull: true}
-	why := CutoverToFull(w, 5*time.Minute, now)
-	if !strings.Contains(why, "(no update has been measured since the last full read, so the estimate from before it is not used)") ||
-		strings.Contains(why, "could not be estimated") {
-		t.Fatalf("age reason %q, want the stale model named as what was not used", why)
-	}
-	// With a measurement missing, it says that, as before.
-	w.Events = -1
-	if why := CutoverToFull(w, 5*time.Minute, now); !strings.Contains(why, "(no count of the changes since it, so the update could not be estimated)") {
-		t.Fatalf("age reason %q, want the missing count named", why)
-	}
 }
 
-// The age rule counts a full backup's anchor from when that backup finished
-// (the second pass's case): its snapshot is named for the instant its dump
-// started, so a full backup longer than the cut-over age left an anchor
-// already past it, and every slot after took another full backup on age.
+// The anchor's age is counted from when the full backup that published it
+// finished (the second pass's case): its snapshot is named for the instant
+// its dump started, so a full backup longer than the cut-over age left an
+// anchor already past it. The age matters in one case only since #2659,
+// nothing indexed since the anchor with the capture unconfirmed, so that is
+// the case these are told on; with events to apply the update runs at any
+// age.
 func TestCutoverToFull_ageCountsFromTheFullBackupsFinish(t *testing.T) {
 	now := time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC)
 	const took = 2*time.Hour + 30*time.Minute
@@ -165,6 +155,10 @@ func TestCutoverToFull_ageCountsFromTheFullBackupsFinish(t *testing.T) {
 	// full backup, so only the stale flag keeps the rate from choosing.
 	dear := func(started time.Time) BackupWindow {
 		return BackupWindow{Anchor: started, Events: 50_000_000, FoldRate: 4000, LastFull: took, UnmeasuredSinceFull: true}
+	}
+	// Nothing indexed since the full backup, and the source not asked.
+	quiet := func(started time.Time) BackupWindow {
+		return BackupWindow{Anchor: started, Events: 0, LastFull: took}
 	}
 	recent := now.Add(-5*time.Minute - took) // started 2h 35m ago, finished five minutes ago
 	stopped := now.Add(-3*time.Hour - took)  // finished three hours ago: the daemon stopped since
@@ -175,13 +169,19 @@ func TestCutoverToFull_ageCountsFromTheFullBackupsFinish(t *testing.T) {
 		finished time.Time
 		want     string
 	}{
-		{"stale model, dear rate, finished five minutes ago: update", dear(recent), recent.Add(took), ""},
-		{"count unknown, finished five minutes ago: update", unknownCount, recent.Add(took), ""},
-		{"no finish on record: the anchor's age, as before", dear(recent), time.Time{}, "window_age"},
-		{"finished three hours ago (a stop since): full on age", dear(stopped), stopped.Add(took), "window_age"},
+		{"nothing indexed, finished five minutes ago: update", quiet(recent), recent.Add(took), ""},
+		{"nothing indexed, no finish on record: the anchor's own age", quiet(recent), time.Time{}, "window_age"},
+		{"nothing indexed, finished three hours ago (a stop since): full", quiet(stopped), stopped.Add(took), "window_age"},
 		// An hour-old anchor whose recorded finish reads three hours ago:
 		// believed, the finish would make it too old; the anchor decides.
-		{"a finish before the anchor (a clock step) is not believed", dear(now.Add(-time.Hour)), now.Add(-3 * time.Hour), ""},
+		{"nothing indexed, a finish before the anchor (a clock step) is not believed", quiet(now.Add(-time.Hour)), now.Add(-3 * time.Hour), ""},
+		// With events to apply, or a count that is unknown, no age chooses
+		// a full backup (#2659).
+		{"stale model, dear rate, finished five minutes ago: update", dear(recent), recent.Add(took), ""},
+		{"count unknown, finished five minutes ago: update", unknownCount, recent.Add(took), ""},
+		{"stale model, dear rate, no finish on record: update", dear(recent), time.Time{}, ""},
+		{"stale model, dear rate, finished three hours ago (a stop since): update", dear(stopped), stopped.Add(took), ""},
+		{"count unknown, finished three hours ago: update", BackupWindow{Anchor: stopped, Events: -1}, stopped.Add(took), ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -192,10 +192,10 @@ func TestCutoverToFull_ageCountsFromTheFullBackupsFinish(t *testing.T) {
 			}
 		})
 	}
-	w := dear(stopped)
+	w := quiet(stopped)
 	w.AnchorFullFinished = stopped.Add(took)
-	if why := CutoverToFull(w, 5*time.Minute, now); !strings.Contains(why, "it is 3h old and the cut-over is 2h") {
-		t.Fatalf("age reason %q, want the age since the full read finished", why)
+	if why := CutoverToFull(w, 5*time.Minute, now); !strings.Contains(why, "nothing new was indexed since it was taken 3h ago") {
+		t.Fatalf("reason %q, want the age since the full read finished", why)
 	}
 }
 

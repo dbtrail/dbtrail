@@ -71,14 +71,15 @@ func TestCutoverToFull_slotAfterAFullReadUpdates_2181(t *testing.T) {
 	}
 }
 
-// Within the margin the estimate does not decide, so an old anchor still
-// cuts over on age, and the reason says the estimate was close, not that no
-// update was measured.
-func TestCutoverToFull_withinTheMarginAnOldAnchorStillCutsOverOnAge_2181(t *testing.T) {
+// Within the margin the estimate does not choose a full read, and neither
+// does the anchor's age (#2659): an update estimated at about the cost of a
+// full read runs, since it does not load the source.
+func TestCutoverToFull_withinTheMarginAnOldAnchorUpdates_2181(t *testing.T) {
 	now := time.Date(2026, 10, 7, 10, 30, 0, 0, time.UTC)
-	w := BackupWindow{Anchor: now.Add(-5 * time.Hour), Events: 720_000, FoldRate: 1000, LastFull: 8 * time.Minute}
-	why := CutoverToFull(w, 5*time.Minute, now)
-	if BackupWhyCode(why) != "window_age" || !strings.Contains(why, "about the cost of a full read") {
-		t.Fatalf("got %q, want a full read on age that says the estimate was within the margin", why)
+	for _, age := range []time.Duration{5 * time.Hour, 30 * 24 * time.Hour} {
+		w := BackupWindow{Anchor: now.Add(-age), Events: 720_000, FoldRate: 1000, LastFull: 8 * time.Minute}
+		if why := CutoverToFull(w, 5*time.Minute, now); why != "" {
+			t.Fatalf("anchor %s old: got %q, want the update", age, why)
+		}
 	}
 }

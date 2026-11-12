@@ -23,17 +23,30 @@ func TestCutoverToFull_nothingIndexedAndTheSourceConfirmsIt(t *testing.T) {
 		want string
 	}{
 		{"nothing indexed, the source confirms: update", quiet(0, CaptureCaughtUp), ""},
-		{"nothing indexed, the source is ahead: full on age", quiet(0, CaptureBehind), "window_age"},
-		{"nothing indexed, the source could not be asked: full on age, as before", quiet(0, ""), "window_age"},
-		// Only a zero count is "nothing to fold": an unknown one (-1) and a
-		// real one keep the age rule whatever the source says.
-		{"count unknown, the source confirms: full on age", quiet(-1, CaptureCaughtUp), "window_age"},
-		{"five events, the source confirms: full on age", quiet(5, CaptureCaughtUp), "window_age"},
+		{"nothing indexed, the source is ahead: full", quiet(0, CaptureBehind), "window_age"},
+		{"nothing indexed, the source could not be asked: full, as before", quiet(0, ""), "window_age"},
+		// Only a zero count puts the index in doubt: with an unknown one
+		// (-1) or a real one the update runs whatever the source says, since
+		// the anchor's age alone chooses nothing (#2659).
+		{"count unknown, the source confirms: update", quiet(-1, CaptureCaughtUp), ""},
+		{"five events, the source confirms: update", quiet(5, CaptureCaughtUp), ""},
+		{"count unknown, the source is ahead: update", quiet(-1, CaptureBehind), ""},
+		{"five events, the source is ahead: update", quiet(5, CaptureBehind), ""},
+		{"five events, the source could not be asked: update", quiet(5, ""), ""},
 		// A fresh anchor never reaches the question.
 		{"fresh anchor, the source ahead: update", BackupWindow{Anchor: fresh, Events: 0, Capture: CaptureBehind}, ""},
 		// The measured rule decides first, as before: with a rate, nothing
 		// to fold is an update whatever the source says.
 		{"a rate and nothing to fold, the source ahead: update", BackupWindow{Anchor: old, Events: 0, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, ""},
+		// The same with the fixed cost of an update on record, under the
+		// last full read: the usual shape of a server with a rate.
+		{"a rate, a fixed cost under the full read, the source ahead: update", BackupWindow{Anchor: old, Events: 0, FoldFixed: 90 * time.Second, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, ""},
+		{"a rate, a fixed cost clearly over the full read, the source ahead: update", BackupWindow{Anchor: old, Events: 0, FoldFixed: 20 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, ""},
+		// The one shape with a rate that reaches the question: a fixed cost
+		// over the last full read but within the margin, where the estimate
+		// settles nothing.
+		{"a rate, a fixed cost a little over the full read, the source ahead: full", BackupWindow{Anchor: old, Events: 0, FoldFixed: 9 * time.Minute, FoldRate: 4000, LastFull: 8 * time.Minute, Capture: CaptureBehind}, "window_age"},
+		{"a rate and no full read on record, the source ahead: full", BackupWindow{Anchor: old, Events: 0, FoldRate: 4000, Capture: CaptureBehind}, "window_age"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -48,13 +61,13 @@ func TestCutoverToFull_nothingIndexedAndTheSourceConfirmsIt(t *testing.T) {
 	w := quiet(0, CaptureBehind)
 	w.CaptureDetail = "the source reports transactions the capture's checkpoint does not include"
 	why := CutoverToFull(w, 5*time.Minute, now)
-	if want := "it is 5h 30m old and the cut-over is 2h; nothing new was indexed since it, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"; !strings.HasSuffix(why, want) {
-		t.Errorf("behind reason %q, want it to end %q", why, want)
+	if want := "the index may be missing changes made since the previous snapshot: nothing new was indexed since it was taken 5h 30m ago, but the source reports transactions the capture's checkpoint does not include, so the capture may have stopped or fallen behind"; why != want {
+		t.Errorf("behind reason %q, want %q", why, want)
 	}
 	w = quiet(0, "")
 	w.CaptureDetail = "the source did not answer"
 	why = CutoverToFull(w, 5*time.Minute, now)
-	if !strings.Contains(why, "nothing new was indexed since it, and whether the source changed could not be checked (the source did not answer)") ||
+	if !strings.Contains(why, "nothing new was indexed since it was taken 5h 30m ago, and whether the source changed could not be checked (the source did not answer)") ||
 		strings.Contains(why, "update rate") {
 		t.Errorf("unknown reason %q, want the capture question and no rate talk", why)
 	}
