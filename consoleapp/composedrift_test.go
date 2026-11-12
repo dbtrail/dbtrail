@@ -556,8 +556,10 @@ func textSpan(text, from, to string) (string, bool) {
 // the URL rather than on the word "curl" is what keeps this from passing on
 // PROSE: "re-download docker-compose.yml (the curl in Quick start)" contains
 // both words, names no command, and once satisfied the found counter it let a
-// whole page with no recipe in it read as covered.
-const composeFileURL = "https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml"
+// whole page with no recipe in it read as covered. Any ref of the repository
+// counts: the upgrade recipes take the file of the release being moved to
+// (#2638), and the daemon's own line still names main.
+var composeFileURL = regexp.MustCompile(`https://raw\.githubusercontent\.com/dbtrail/dbtrail/[^/\s]+/docker-compose\.yml`)
 
 // assertNonDestructiveFetch fails when a curl of the compose file in this text
 // would land on docker-compose.yml itself.
@@ -565,7 +567,7 @@ func assertNonDestructiveFetch(t *testing.T, where, text string) {
 	t.Helper()
 	found := 0
 	for _, line := range strings.Split(text, "\n") {
-		if !strings.Contains(line, "curl") || !strings.Contains(line, composeFileURL) {
+		if !strings.Contains(line, "curl") || !composeFileURL.MatchString(line) {
 			continue
 		}
 		found++

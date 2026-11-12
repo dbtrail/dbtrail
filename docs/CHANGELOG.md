@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The installer installs one release and writes it down** (#2638).
+  `install.sh` took `docker-compose.yml` from `main` and left every image on
+  `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
+  over every release since the install, and nothing recorded which version
+  it had been. It now looks up the newest release (GitHub's
+  `releases/latest`, which skips drafts and prereleases; no token, no `jq`),
+  takes the compose file and the `dbtrail` command from that tag, and a fresh
+  install writes `BINTRAIL_TAG=<version>` to `.env` before it pulls. The value
+  is the image tag, the git tag **without the `v`** (`v0.130.0` →
+  `0.130.0`): the images are published under GoReleaser's `{{ .Version }}`,
+  and no `v`-prefixed image exists. A `BINTRAIL_TAG` already set, in `.env`
+  or in the installing shell, is never changed and chooses the compose file
+  (a version number) or is left as it is (empty, `latest`, a tag of one's
+  own); one with a `v` stops the install and says what to write instead.
+  `DBTRAIL_REF` still overrides: a release tag is that version, written to
+  `.env`; any other ref (`main`, a branch) writes nothing and says the images
+  follow `latest`. When GitHub does not answer (no network, its limit of 60
+  lookups an hour per address) or answers without a release tag, a fresh
+  install stops before creating anything and prints the command to name the
+  version with `DBTRAIL_REF`; it never falls back to `main`. A re-run over an
+  existing stack writes nothing to `.env` (as for `INDEX_BUFFER_POOL`), keeps
+  its `dbtrail` command when the lookup fails, and says how to pin a stack
+  installed before this. The end text names the version and the upgrade:
+  change `BINTRAIL_TAG`, then `docker compose pull && docker compose up -d`,
+  plus the release's compose file when it changed. `docs/upgrade.md`,
+  `docs/docker.md` and `docs/install.md` now take that file from the release
+  tag instead of `main`, and the `BINTRAIL_TAG=v0.26.0` example in
+  `docs/upgrade.md` (and `v0.9.0` in `.env.example`), which named images that
+  do not exist, is corrected.
+
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in
   another, every request bintrail made for the bucket through the AWS SDK
