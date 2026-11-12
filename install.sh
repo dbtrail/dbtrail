@@ -438,15 +438,18 @@ grep -q '^services:' docker-compose.yml || die \
 # Only a fresh install writes, and only a compose file that reads the value
 # (every one since the images split; an older DBTRAIL_REF may not): a line
 # nothing reads would claim a version the stack does not run.
-if [ -n "$WRITE_TAG" ] && [ -n "${FRESH:-}" ]; then
-  if grep -q 'BINTRAIL_TAG' docker-compose.yml; then
-    if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then printf '\n' >> .env; fi
-    printf 'BINTRAIL_TAG=%s\n' "$WRITE_TAG" >> .env || die "Couldn't write ${DIR}/.env."
-    say "${DIM}    BINTRAIL_TAG=${WRITE_TAG} written to .env, so the images stay on this version${RST}"
-  else
-    VERSION=""
+if ! grep -q 'BINTRAIL_TAG' docker-compose.yml; then
+  # Whether downloaded or reused: a version it does not read is not the one
+  # it runs, so none is written or claimed.
+  if [ -n "$VERSION" ] || [ -n "$WRITE_TAG" ]; then
     say "${DIM}    this docker-compose.yml does not read BINTRAIL_TAG, so its images are the newest ones, tagged latest${RST}"
   fi
+  VERSION=""
+  WRITE_TAG=""
+elif [ -n "$WRITE_TAG" ] && [ -n "${FRESH:-}" ]; then
+  if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then printf '\n' >> .env; fi
+  printf 'BINTRAIL_TAG=%s\n' "$WRITE_TAG" >> .env || die "Couldn't write ${DIR}/.env."
+  say "${DIM}    BINTRAIL_TAG=${WRITE_TAG} written to .env, so the images stay on this version${RST}"
 fi
 
 # ── memory for the MySQL that keeps the history ─────────────────────────

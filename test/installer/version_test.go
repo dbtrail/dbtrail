@@ -430,6 +430,18 @@ func TestVersion_aComposeThatDoesNotReadTheTagGetsNoLine(t *testing.T) {
 		t.Errorf("wrong words for a compose file without BINTRAIL_TAG:\n%s", r.out)
 	}
 	noBannedWords(t, r)
+
+	// A version already in .env is not claimed either: this file ignores it.
+	r = installWith(t, withEnv("BINTRAIL_TAG=0.128.0\n"), "COMPOSE_SRC="+src)
+	if r.failed {
+		t.Fatalf("install failed:\n%s", r.out)
+	}
+	if got := envFile(t, r); got != "BINTRAIL_TAG=0.128.0\n" {
+		t.Errorf(".env changed to %q", got)
+	}
+	if !strings.Contains(r.out, "does not read BINTRAIL_TAG") || strings.Contains(r.out, "This is version") {
+		t.Errorf("a version this compose file ignores is claimed:\n%s", r.out)
+	}
 }
 
 // What the line the installer writes rests on: every DBTrail image in the
