@@ -13262,7 +13262,7 @@ function backupSQLLane(cur, b, sqlSt) {
   if (mayCreate) {
     body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
     if (b.kind === "dir") {
-      const elsewhere = backupElsewhereNote(b, usable, fromFolder ? "dir" : reads);
+      const elsewhere = backupElsewhereNote(b, usable, reads);
       if (elsewhere) body.append(elsewhere);
     }
   }
