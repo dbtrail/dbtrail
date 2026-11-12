@@ -187,9 +187,9 @@ func TestMeasureWindow(t *testing.T) {
 		t.Cleanup(func() { readIndexMark = prev })
 		var deadline time.Time
 		var hasDeadline bool
-		readIndexMark = func(ctx context.Context, _ string) (indexMark, bool) {
+		readIndexMark = func(ctx context.Context, _ string) (indexMark, error) {
 			deadline, hasDeadline = ctx.Deadline()
-			return indexMark{events: 18_000}, true
+			return indexMark{events: 18_000}, nil
 		}
 		before := time.Now()
 		b.measureWindow(context.Background(), e, anchor)
