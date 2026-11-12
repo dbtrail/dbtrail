@@ -356,6 +356,37 @@ func (h *Handler) RouterConfig() (cfg RouterConfig, routing bool) {
 	return h.routerCfg, h.router != nil
 }
 
+// SetCopyOnlyReason says why this connection is answered from the copy alone
+// although Engine Routing is on (#2686): its server has no account the port
+// may forward with. A statement the copy cannot run then gets that reason
+// instead of the copy's own refusal, which says nothing about forwarding.
+// Empty, the default, changes nothing.
+func (h *Handler) SetCopyOnlyReason(why string) {
+	h.mu.Lock()
+	h.copyOnlyWhy = why
+	h.mu.Unlock()
+}
+
+// copyOnlyRefusal is the error for a statement that is not a read on a
+// connection SetCopyOnlyReason marked: MySQL's "an option prevents the
+// statement" (1290), naming why nothing forwards and how to change it. A
+// read, and the session and transaction control around reads, pass on to
+// the copy as before (readrouter.ReadOnlyRefusal's allowlist).
+func (h *Handler) copyOnlyRefusal(qstr string) error {
+	h.mu.Lock()
+	why := h.copyOnlyWhy
+	h.mu.Unlock()
+	if why == "" {
+		return nil
+	}
+	what := readrouter.ReadOnlyRefusal(qstr)
+	if what == "" {
+		return nil
+	}
+	return mysql.NewError(mysql.ER_OPTION_PREVENTS_STATEMENT,
+		"this server's statements are answered from its copy alone, which cannot run this one ("+what+"): "+why+". Nothing was sent to your MySQL.")
+}
+
 // BindRouter turns this connection into a routing one. Call once after the
 // handshake, with a FreeSQL already bound; r must be non-nil.
 func (h *Handler) BindRouter(r Router, cfg RouterConfig) {

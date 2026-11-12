@@ -804,7 +804,8 @@ func TestConnectScreenWiring(t *testing.T) {
 	if !f.Connect || f.Step != "1" || !f.Step2Hidden || !f.Step3Hidden || f.Focused != "source_host" || f.Submit != "Find it" || !f.PwAgainHidden {
 		t.Errorf("fresh screen: %+v", f)
 	}
-	if strings.Join(f.Fields, ",") != "cx_managed,source_host,source_password,source_port,source_user" {
+	// route_user and route_password: the optional, folded forwarding user (#2686).
+	if strings.Join(f.Fields, ",") != "cx_managed,route_password,route_user,source_host,source_password,source_port,source_user" {
 		t.Errorf("Connect fields = %v", f.Fields)
 	}
 	if len(f.Banned) > 0 {

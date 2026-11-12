@@ -584,7 +584,9 @@ and an installation that already had servers keeps a port it never turned on
 off when it adds one more after an upgrade. A session that may not
 change settings, or that has a data access policy, adds its server and the
 port is left as it was; the command says so. The web interface's Connect
-screen does the same and shows the same password. The web interface's long
+screen does the same and shows the same password. Its step 2 has an optional
+**Forwarding user**, folded, saved with the server; the capture user is
+refused there too. The web interface's long
 form (**Add server**, all fields) and `POST /api/servers` do not turn the port
 on: turn it on afterwards with `dbtrail port on` or on the MySQL clients
 page.
@@ -607,8 +609,10 @@ page.
 
 **The forwarding user.** With Engine Routing on, a statement the copy cannot
 answer runs on your MySQL, as a user you name per server. Without one the copy
-answers every statement of that server alone, and the port never forwards as
-the user DBTrail records changes with.
+answers every statement of that server alone, and a statement it cannot run
+(an `INSERT`, an `UPDATE`, a `SELECT ... FOR UPDATE`) gets error 1290 saying
+the server has no forwarding user and how to set it. The port never forwards
+as the user DBTrail records changes with.
 
 `server add` asks for it once the server is added, on a terminal, after it
 printed the port's password: Enter skips it. Without a terminal it is taken
