@@ -83,8 +83,8 @@ func TestUploadLocalOnly_noDotEntryOfTheRootIsSent(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := uploadedKeys(b)
-	if !slices.Equal(keys, []string{"p/" + snap + "/shop/orders.parquet"}) {
-		t.Fatalf("uploaded %v, want the snapshot's table only (root dot entries: %v)", keys, dots)
+	if !slices.Equal(keys, []string{"p/" + snap + "/" + SuccessMarker, "p/" + snap + "/shop/orders.parquet"}) {
+		t.Fatalf("uploaded %v, want the snapshot's table and its marker only (root dot entries: %v)", keys, dots)
 	}
 	for _, c := range b.calls {
 		if strings.Contains(c, "p/.") {
