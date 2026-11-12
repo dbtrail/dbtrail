@@ -288,7 +288,7 @@ esac
 
 if [ -n "${DBTRAIL_REF:-}" ]; then
   REF=$DBTRAIL_REF
-  if is_release_tag "$REF"; then
+  if is_release_tag "$REF" && [ -z "$PIN_FROM" ]; then
     WRITE_TAG=${REF#v}
   fi
 elif [ -n "$PIN_FROM" ] && is_version "$PIN"; then
