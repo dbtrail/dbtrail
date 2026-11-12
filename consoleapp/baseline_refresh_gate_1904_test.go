@@ -284,9 +284,12 @@ func stubLiveFloor(t *testing.T, floor time.Time, known bool) *atomic.Int32 {
 	var n atomic.Int32
 	prev := readLiveFloor
 	t.Cleanup(func() { readLiveFloor = prev })
-	readLiveFloor = func(context.Context, string) (time.Time, bool) {
+	readLiveFloor = func(context.Context, string) (time.Time, error) {
 		n.Add(1)
-		return floor, known
+		if !known {
+			return floor, errGateBlindStub
+		}
+		return floor, nil
 	}
 	return &n
 }
@@ -457,9 +460,9 @@ func TestLiveFloorIn_readsOnlyTheLivePartitions(t *testing.T) {
 			AddRow("p_"+now.Format("2006010215"), "", 2, 0).
 			AddRow("p_future", "MAXVALUE", 3, 0))
 	mock.ExpectQuery(".*").WillReturnError(errors.New("a second query was issued"))
-	floor, known := liveFloorIn(context.Background(), db, "idx")
-	if !known || !floor.Equal(oldest) {
-		t.Errorf("floor = %s known=%v, want %s", floor, known, oldest)
+	floor, err := liveFloorIn(context.Background(), db, "idx")
+	if err != nil || !floor.Equal(oldest) {
+		t.Errorf("floor = %s err=%v, want %s", floor, err, oldest)
 	}
 	if err := mock.ExpectationsWereMet(); err == nil {
 		t.Error("a second query ran: the floor is the live partitions and nothing else")

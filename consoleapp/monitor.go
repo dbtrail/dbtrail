@@ -1247,8 +1247,8 @@ func (m *monitorSupervisor) ReloadSchema(ctx context.Context, e console.ServerEn
 // operator's acknowledgment of a recorded data loss: it stamps gap_acked_at
 // beside the durable gap-loss record, so the next Start does not raise the
 // alarm again. The record itself (gap_lost_at) is never cleared here: snapshot
-// updates, reconstruct and verify keep refusing a window that spans the loss
-// until a full snapshot is taken after it. Daemon shutdown does NOT come
+// updates, reconstruct and verify keep refusing a window that spans the loss;
+// a full snapshot taken after it gives windows that do not. Daemon shutdown does NOT come
 // through here (Shutdown cancels jobs directly), so a restart leaves the loss
 // unacknowledged.
 func (m *monitorSupervisor) Stop(ctx context.Context, entryID string) error {

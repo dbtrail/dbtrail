@@ -312,10 +312,10 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 	if known {
 		ctx, cancel := context.WithTimeout(ctx, windowProbeTimeout)
 		defer cancel()
-		cur, answered := readIndexMark(ctx, probeDSN(e.DSN))
-		b.reportWindowBlind(e, answered)
+		cur, markErr := readIndexMark(ctx, probeDSN(e.DSN))
+		b.reportWindowBlind(e, markErr)
 		switch {
-		case !answered:
+		case markErr != nil:
 			// Said by reportWindowBlind.
 		case cur.events < base:
 			countUnknown = countUnknownWentBackwards
@@ -420,8 +420,8 @@ func (s *baselineSupervisor) quietSnapshotCanWait(ctx context.Context, e console
 		return false, unread("where the readers of the previous snapshot start")
 	}
 	rule := s.coverageRuleFor(ctx, refreshRequest{ServerID: e.ID, ServerName: e.Name, IndexDSN: dsn}, interval)
-	switch covered, known := snapshotStillCovered(ctx, dsn, readsFrom, now, rule); {
-	case !known:
+	switch covered, err := snapshotStillCovered(ctx, dsn, readsFrom, now, rule); {
+	case err != nil:
 		return false, unread("how far back the index still keeps changes")
 	case !covered:
 		return false, "the previous snapshot is close to the oldest change the index still keeps, and could not be updated once rotation drops those hours"
@@ -643,15 +643,15 @@ func (b *backupScheduler) reportCountUnknown(e console.ServerEntry, anchor time.
 // schedule takes the update whatever it would cost (#2659), and a long
 // one would otherwise be diagnosed as the rule misfiring. Resolved when it
 // answers.
-func (b *backupScheduler) reportWindowBlind(e console.ServerEntry, answered bool) {
+func (b *backupScheduler) reportWindowBlind(e console.ServerEntry, cause error) {
 	key := "window-probe:" + e.ID
-	if answered {
+	if cause == nil {
 		b.sup.gateEdge.Resolve(key)
 		return
 	}
 	if b.sup.gateEdge.Fire(key, "") {
 		slog.Warn("snapshot schedule: the index did not answer the update-size probe in time, so the number of changes since the previous snapshot is unknown; "+windowNoEstimateWords,
-			"server", e.Name, "id", e.ID, "timeout", windowProbeTimeout)
+			"server", e.Name, "id", e.ID, "timeout", windowProbeTimeout, "error", cause)
 	}
 }
 
