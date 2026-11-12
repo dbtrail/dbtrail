@@ -162,8 +162,12 @@ func TestReconstruct2684_reusedFolderAndIfNotExists(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("rendered:\n%s", schemaFile)
-		if strings.Contains(strings.ToUpper(string(schemaFile)), "IF NOT EXISTS") {
-			t.Error("the schema file still carries IF NOT EXISTS")
+		// The comment above the definition names the clause on purpose; the
+		// statement a loader runs must not carry it.
+		for _, line := range strings.Split(string(schemaFile), "\n") {
+			if !strings.HasPrefix(line, "--") && strings.Contains(strings.ToUpper(line), "IF NOT EXISTS") {
+				t.Errorf("the statement still carries IF NOT EXISTS: %q", line)
+			}
 		}
 		if !strings.Contains(string(schemaFile), "at\n-- the source it may have created nothing") {
 			t.Error("the schema file does not say the definition came from an IF NOT EXISTS")
