@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`restore-index`, `archive reconcile` and `export iceberg` work with a bucket in another region than the host's** (#2698). They signed for the configured region, so a bucket elsewhere answered `301 PermanentRedirect`. They now use the bucket's own region, found the same way as the other S3 commands since #2688: `restore-index` keeps one client per bucket it reads, `archive reconcile` lists (and, with `--deep`, reads footers) at the bucket's region, and `export iceberg` writes its data files at the warehouse bucket's region while Glue or the REST catalog keep the configured one. A `--region` flag is still used as given, and nothing is asked with a custom endpoint. Not covered: `export iceberg --catalog rest` without `--warehouse` or without `--catalog-sigv4`, where the bucket is not known in advance or the catalog supplies the S3 settings.
 - **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in

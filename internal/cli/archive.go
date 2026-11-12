@@ -162,7 +162,7 @@ func init() {
 	archiveReconcileCmd.Flags().StringVar(&arcIndexDSN, "index-dsn", "", "DSN for the index MySQL database (required)")
 	archiveReconcileCmd.Flags().StringVar(&arcDir, "archive-dir", "", "Local archive root to scan (the directory given to rotate --archive-dir)")
 	archiveReconcileCmd.Flags().StringVar(&arcS3, "archive-s3", "", "S3 archive root to scan (e.g. s3://bucket/prefix/); uses the standard AWS credential chain")
-	archiveReconcileCmd.Flags().StringVar(&arcRegion, "region", "", "AWS region (default: from AWS_REGION env var or ~/.aws/config)")
+	archiveReconcileCmd.Flags().StringVar(&arcRegion, "region", "", "AWS region for --archive-s3 (default: the bucket's own region, found on its own; else AWS_REGION or ~/.aws/config)")
 	archiveReconcileCmd.Flags().BoolVar(&arcRepair, "repair", false, "Execute inserts/updates that bring archive_state in line with the scanned files")
 	archiveReconcileCmd.Flags().BoolVar(&arcPrune, "prune", false, "Delete registry rows whose every referenced backend was scanned and holds no file (data files are never touched)")
 	archiveReconcileCmd.Flags().BoolVar(&arcDeep, "deep", false, "Also verify row counts (reads Parquet footers; one metadata GET per S3 object)")
@@ -337,6 +337,12 @@ func localParquetFooter(path string, size int64) (int64, string, error) {
 	return pf.NumRows(), archive.ColumnSetOf(names), nil
 }
 
+// s3ClientForBucket is the client for one bucket that archive reconcile and
+// restore-index read through: the bucket's own region unless region (their
+// --region flag) is given (#2698). A variable so tests see which client a
+// command built without a network.
+var s3ClientForBucket = storage.NewS3ClientForBucket
+
 // scanS3Archive lists the prefix for Hive-layout parquet objects. Size and
 // LastModified come free with the listing; row counts cost one metadata
 // read per object and are only fetched under --deep.
@@ -351,11 +357,13 @@ func scanS3Archive(ctx context.Context, s3URL, region string, deep bool) ([]arch
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := storage.LoadAWSConfig(ctx, region)
+	// The bucket's own client (#2698): it signs for the bucket's region
+	// unless --region was given, so a bucket in another region than the
+	// environment's is listed instead of answering 301.
+	client, err := s3ClientForBucket(ctx, bucket, region)
 	if err != nil {
 		return nil, err
 	}
-	client := storage.NewS3ClientFromConfig(cfg)
 
 	// ONE DuckDB session serves every --deep footer probe of the scan (#807):
 	// extension install and credential-chain resolution happen once, not per
@@ -378,7 +386,7 @@ func scanS3Archive(ctx context.Context, s3URL, region string, deep bool) ([]arch
 	var footerDB *sql.DB
 	var secretIssuedAt time.Time
 	if deep {
-		fdb, err := openS3FooterSession(ctx, cfg.Region)
+		fdb, err := openS3FooterSession(ctx, client.Options().Region)
 		if err != nil {
 			slog.Warn("reconcile: cannot open DuckDB session for --deep footer reads; row counts left unset", "error", err)
 		} else {

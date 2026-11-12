@@ -180,7 +180,10 @@ AWS_REGION=us-west-2 bintrail export iceberg \
   is written under `<warehouse>/<schema>/<table>/`.
 - Credentials and the region come from the usual AWS chain: environment
   variables, a profile, SSO, or the instance role. With no region the command
-  stops and says so. Keep the bucket in the catalog's region.
+  stops and says so. That region is the catalog's; the data files are
+  written in the bucket's own region, which bintrail finds on its own (see
+  "A bucket in another region" in upload.md), so the bucket may be in
+  another region than the catalog.
 - The identity needs, on Glue, the calls the export makes: `GetDatabase`,
   `CreateDatabase`, `GetTable`, `CreateTable` and `UpdateTable`; on the
   bucket, reading and writing objects under the prefix. This list comes from
