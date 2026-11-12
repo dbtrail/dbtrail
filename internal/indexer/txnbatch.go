@@ -2,6 +2,8 @@ package indexer
 
 import (
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/event"
@@ -23,6 +25,38 @@ const (
 	DefaultMaxTxnRows int64 = 100_000
 	DefaultMaxTxnOpen       = 10 * time.Second
 )
+
+// DefaultCommitWithin is how long complete transactions wait for more rows to
+// share a batch with before they are committed anyway (#2666). A busy source
+// fills batches and never waits this long; a quiet one used to wait for the
+// checkpoint, ten seconds by default, before a reader of the index could see
+// a change.
+const DefaultCommitWithin = time.Second
+
+// CommitWithinEnv names the setting CommitWithinFromEnv reads.
+const CommitWithinEnv = "BINTRAIL_COMMIT_WITHIN"
+
+// CommitWithinFromEnv is the wait a capture loop gives its TxnBatcher:
+// BINTRAIL_COMMIT_WITHIN as a duration ("500ms", "2s"), DefaultCommitWithin
+// when unset. "off" or "0" turns the wait off: complete transactions then
+// commit when a batch fills or at the checkpoint, as before. A value that is
+// not a duration, or is negative, is reported and the default used.
+func CommitWithinFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(CommitWithinEnv))
+	switch strings.ToLower(raw) {
+	case "":
+		return DefaultCommitWithin
+	case "off", "0":
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		slog.Warn(CommitWithinEnv+" is not a duration such as 500ms or 2s, nor off; using the default",
+			"value", raw, "default", DefaultCommitWithin)
+		return DefaultCommitWithin
+	}
+	return d
+}
 
 // CommitStamp is the part of a written row the commit-side metrics need. Rows
 // waiting in an open index transaction keep only this until it commits, not
@@ -79,6 +113,12 @@ type TxnBatcher struct {
 	txStamps []CommitStamp
 	capTimer *time.Timer
 	splits   int
+
+	// within is how long complete transactions may wait in batch; zero, no
+	// limit. withinTimer runs from the end of the OLDEST of them, so later
+	// ones never postpone it: whenever it is set, done > 0.
+	within      time.Duration
+	withinTimer *time.Timer
 }
 
 // NewTxnBatcher returns a batcher writing through idx. maxRows and maxOpen
@@ -91,6 +131,29 @@ func NewTxnBatcher(idx *Indexer, maxRows int64, maxOpen time.Duration, hooks Txn
 // InTxn reports whether a source transaction is being read: rows arrived
 // since the last End.
 func (b *TxnBatcher) InTxn() bool { return b.inTxn }
+
+// SetCommitWithin sets how long complete transactions wait before the caller
+// is told to commit them (WithinC). Zero, the value a new batcher has, never
+// tells: they commit when a batch fills or when the caller decides. It applies
+// from the next transaction that ends.
+func (b *TxnBatcher) SetCommitWithin(d time.Duration) { b.within = max(d, 0) }
+
+// WithinC fires when the oldest complete transaction not yet committed has
+// waited the SetCommitWithin time; the caller then calls CommitComplete. Nil
+// (never fires) when none is waiting or no time was set.
+func (b *TxnBatcher) WithinC() <-chan time.Time {
+	if b.withinTimer == nil {
+		return nil
+	}
+	return b.withinTimer.C
+}
+
+func (b *TxnBatcher) stopWithin() {
+	if b.withinTimer != nil {
+		b.withinTimer.Stop()
+		b.withinTimer = nil
+	}
+}
 
 // CapC fires when the open index transaction reaches the time cap; the
 // caller then calls OnCap. Nil (never fires) when none is open.
@@ -167,7 +230,8 @@ func (b *TxnBatcher) Add(ev event.Event) error {
 
 // End says the transaction being read ended (a commit, or a DDL that ends
 // whatever came before it). Its rows become visible now if they were already
-// in an index transaction, or at the latest when the batch fills.
+// in an index transaction; otherwise when the batch fills, when WithinC fires
+// or when the caller commits, whichever is first.
 func (b *TxnBatcher) End() error {
 	b.inTxn, b.splits = false, 0
 	if b.tx != nil {
@@ -177,6 +241,9 @@ func (b *TxnBatcher) End() error {
 	b.done = len(b.batch)
 	if len(b.batch) >= b.idx.BatchSize() {
 		return b.CommitComplete()
+	}
+	if b.done > 0 && b.within > 0 && b.withinTimer == nil {
+		b.withinTimer = time.NewTimer(b.within)
 	}
 	return nil
 }
@@ -218,6 +285,7 @@ func (b *TxnBatcher) CommitComplete() error {
 	b.published(n, appendStamps(nil, rows))
 	b.batch = b.batch[:copy(b.batch, b.batch[b.done:])]
 	b.done = 0
+	b.stopWithin()
 	return nil
 }
 
