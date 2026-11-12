@@ -70,7 +70,8 @@ console.log(JSON.stringify({
 	if h := got["verify"].Hints; len(h) != 1 || strings.Contains(h[0], "temporary files") {
 		t.Errorf("another row carries a hint it never had: %q", h)
 	}
-	if h := got["retain"].Hints; len(h) != 2 || !strings.HasPrefix(h[0], "Days or hours") || strings.Contains(strings.Join(h, " "), "temporary files") {
+	// The age is the old way since #2658, and its row says so first.
+	if h := got["retain"].Hints; len(h) != 2 || !strings.HasPrefix(h[0], "The old way to bound the snapshots on this machine. Each server's count (Keep by count) does that now. Days or hours") || strings.Contains(strings.Join(h, " "), "temporary files") {
 		t.Errorf("the retention row's own hints changed: %q", h)
 	}
 }

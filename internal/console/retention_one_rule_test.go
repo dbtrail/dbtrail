@@ -174,13 +174,13 @@ console.log(JSON.stringify(out));
 	hasRed := func(v view, s string) bool { return strings.Contains(strings.Join(v.Reds, " | "), s) }
 	off := func(v view) bool { return v.Step != nil && !*v.Step }
 	for name, c := range map[string]struct{ title, says, red, never string }{
-		"age7d":    {"Keep by count", "Deleted here when older than 7 days, once S3 has it. DBTrail leaves S3 alone.", "", "Keep the newest"},
-		"age60h":   {"Keep by count", "Deleted here when older than 60 hours, once S3 has it.", "", "3 days"},
-		"age90m":   {"Keep by count", "Deleted here when older than 90 minutes, once S3 has it.", "", ""},
-		"ageEmpty": {"Keep by count", "Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.", "", "Deleted here"},
-		"noLoop":   {"Keep by count", "Kept here: this DBTrail removes nothing.", "", "Deleted here"},
-		"notIn3":   {"Keep by count", "Deleted here when older than 1 hour", "Not in S3 yet, so kept here: 3 older copies (checked 2026-10-01 10:00:00 UTC). S3 does not have them complete; send them to S3 again, or remove them by hand if not needed.", ""},
-		"notIn1":   {"Keep by count", "", "Not in S3 yet, so kept here: 1 older copy (checked 2026-10-01 10:00:00 UTC). S3 does not have it complete; send it to S3 again, or remove it by hand if not needed.", ""},
+		"age7d":       {"Keep by count", "Deleted here when older than 7 days, once S3 has it. DBTrail leaves S3 alone.", "", "Keep the newest"},
+		"age60h":      {"Keep by count", "Deleted here when older than 60 hours, once S3 has it.", "", "3 days"},
+		"age90m":      {"Keep by count", "Deleted here when older than 90 minutes, once S3 has it.", "", ""},
+		"ageEmpty":    {"Keep by count", "Every snapshot stays on this machine; nothing removes them. Set a number to keep only the newest.", "", "Deleted here"},
+		"noLoop":      {"Keep by count", "Kept here: this DBTrail removes nothing.", "", "Deleted here"},
+		"notIn3":      {"Keep by count", "Deleted here when older than 1 hour", "Not in S3 yet, so kept here: 3 older copies (checked 2026-10-01 10:00:00 UTC). S3 does not have them complete; send them to S3 again, or remove them by hand if not needed.", ""},
+		"notIn1":      {"Keep by count", "", "Not in S3 yet, so kept here: 1 older copy (checked 2026-10-01 10:00:00 UTC). S3 does not have it complete; send it to S3 again, or remove it by hand if not needed.", ""},
 		"notIn1Named": {"Keep by count", "", "Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC. S3 does not have it complete; DBTrail sends it again at the next cleanup.", ""},
 		"notIn7Named": {"Keep by count", "", "Not in S3 yet, so kept here: 7 older copies (2026-10-19 03:15:06 UTC, 2026-10-20 00:00:00 UTC and 5 more). S3 does not have them complete; DBTrail sends them again at the next cleanup.", ""},
 		// A count no prune refreshes is not shown: age empty, or this daemon
