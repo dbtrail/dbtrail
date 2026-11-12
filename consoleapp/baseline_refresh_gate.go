@@ -365,8 +365,8 @@ func snapshotCoveredBy(liveFloor, readsFrom, now time.Time, rule coverageRule) b
 var readIndexMark = readIndexMarkFromDB
 
 // readIndexMarkFromDB opens the index and reads both marks. The error is set,
-// and says why, when the answer could not be READ — the index cannot be opened,
-// or a query fails — and every caller must then FOLD.
+// and says why, when the answer could not be READ (the index cannot be opened,
+// or a query fails), and every caller must then FOLD.
 //
 // Failing toward folding is the only safe direction here. A false "nothing
 // changed" skips a refresh that was owed and the backup silently stops moving;
