@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Adding the first server turns the MySQL port on, with Engine Routing on** (#2686). `dbtrail server add` and the web interface's Connect screen used to leave nothing answering on port 3309: turning the port on and turning Engine Routing on were two more steps.
+  - **What happens now.** When a server is added and nothing was ever saved about the port, the port is turned on with Engine Routing on, and the answer shows the `mysql` line and the port's password. That is the only time the password is shown.
+  - **What does not change.** Only the first server does it. A port that was turned off stays off. An installation that already has servers and never turned the port on keeps it off when it adds one more after the upgrade. The web interface's long form does not turn it on. The port is still reachable from the machine only (`127.0.0.1:3309`), still read-only, and a server still needs a forwarding user before anything is sent to MySQL.
+  - **`dbtrail port on` by hand** also starts with Engine Routing on the first time. A saved setting keeps what it says.
+  - **Permissions.** The port is turned on only for a session that may change settings and has no data access policy, the two things the port's own page asks for. Otherwise the server is added, the port is left as it was, and the answer says why.
+
 ## [0.130.0] - 2026-11-12
 
 - **A server keeps exactly the number of local snapshots you set** (#2678).
@@ -22,11 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **"Delete by age" keeps its hour.** On a server pruned by age alone, a snapshot younger than an hour is still never removed.
   - The Snapshots page no longer says "and any made in the last hour", says a snapshot past the count goes at the next cleanup "which follows each new snapshot", and states the reach in minutes when it is under an hour. For a server with an S3 destination it says that a restore reads S3.
 
-- **Adding the first server turns the MySQL port on, with Engine Routing on** (#2686). `dbtrail server add` and the web interface's Connect screen used to leave nothing answering on port 3309: turning the port on and turning Engine Routing on were two more steps.
-  - **What happens now.** When a server is added and nothing was ever saved about the port, the port is turned on with Engine Routing on, and the answer shows the `mysql` line and the port's password. That is the only time the password is shown.
-  - **What does not change.** Only the first server does it. A port that was turned off stays off. An installation that already has servers and never turned the port on keeps it off when it adds one more after the upgrade. The web interface's long form does not turn it on. The port is still reachable from the machine only (`127.0.0.1:3309`), still read-only, and a server still needs a forwarding user before anything is sent to MySQL.
-  - **`dbtrail port on` by hand** also starts with Engine Routing on the first time. A saved setting keeps what it says.
-  - **Permissions.** The port is turned on only for a session that may change settings and has no data access policy, the two things the port's own page asks for. Otherwise the server is added, the port is left as it was, and the answer says why.
 - **The router says the right mode for a server it answers with Engine Routing off** (#2682). A server whose statements all ran on the copy with nothing to route was reported in the router's status as fast by default, whatever its mode: a fresh server was shown as fast, and the Snapshots card said the router "still answers in fast mode". The answers themselves were right; only the report was wrong.
 - **`reconstruct --output-format mydumper` fails for a table with no snapshot instead of writing only its changed rows** (#2679). A table with no snapshot at or before `--at` can only be rebuilt from its recorded changes, which hold the rows that changed and none of the rows that did not. The command wrote that as the table's dump, logged one warning, marked the directory `_SUCCESS` and exited 0, so a script or a loader took a partial table for a complete one. This happens when the table is in no snapshot, when `--at` is earlier than its first snapshot, and when retention removes its snapshot from the local folder between two tables of the same run. Now the run exits non-zero, writes nothing for that table, leaves the directory `_INCOMPLETE`, and the error has one line per refused table: why the location has no snapshot for it, or that this could not be told, and what to do.
 
