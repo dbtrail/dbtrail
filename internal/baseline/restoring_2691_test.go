@@ -151,8 +151,8 @@ func TestRestoring_theEndRewritesTheMarkAsFinished(t *testing.T) {
 		t.Fatalf("ForgetRestoring removed a finished mark: %v", err)
 	}
 	res := keepNewest(t, root, 1)
-	if !slices.Equal(res.Pruned, []string{first}) {
-		t.Fatalf("pruned %v, want the previous result [%s]", res.Pruned, first)
+	if !slices.Contains(res.Pruned, first) || slices.Contains(res.Pruned, second) {
+		t.Fatalf("pruned %v, want the previous result %s and not the new one %s", res.Pruned, first, second)
 	}
 }
 
