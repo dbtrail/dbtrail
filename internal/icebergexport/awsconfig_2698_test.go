@@ -123,6 +123,9 @@ func TestOpenCatalog_glueFilesSignForTheBucket_2698(t *testing.T) {
 	defer release()
 	cfg := utils.GetAwsConfig(ctx)
 	if cfg == nil || cfg.Region != "us-east-1" {
-		t.Fatalf("file IO config = %+v, want region us-east-1", cfg)
+		if cfg == nil {
+			t.Fatal("no file IO config in the context")
+		}
+		t.Fatalf("file IO config region = %q, want us-east-1", cfg.Region)
 	}
 }
