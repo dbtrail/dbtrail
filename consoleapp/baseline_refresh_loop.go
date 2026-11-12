@@ -443,7 +443,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		rec.Events = s.measuredEvents(req, mark, known, prev)
 		rec.UpdateSeconds = (took - *req.laneWait).Seconds()
 		if known {
-			rec.IndexMark = mark.events
+			rec.IndexMark, rec.IndexMarkKnown = mark.events, true
 		}
 	}
 	if rec.SnapshotTime != "" && !prev.IsZero() {

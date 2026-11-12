@@ -25,16 +25,19 @@ import (
 // and the stream's checkpoint ticker keeps stamping stream_state while it
 // does, so a fresh checkpoint proves the loop runs, not that it captures.
 // The source is what can tell: has it written past the capture's checkpoint?
-// Only a definite "no" lets the update run; anything unanswered keeps the
-// full backup, which is what happened before.
+// Only a definite "no" lets the update run. A source that is ahead, and a
+// capture whose own record says it lost changes, keep the full backup. A
+// source that cannot be asked is no evidence either way, and that slot is
+// skipped (#2659, console.WindowChoice).
 
 // captureComparable reports whether st can be compared with the source at
 // all, and why not: every condition that rules "caught up" out without
 // asking the source. st is the index's stream_state (nil: no row), anchor
 // the previous snapshot's instant, sourceRead when the newest full backup
 // that read the source started (BaselineRunHistory.LastSourceRead; zero:
-// none on record). Each refusal keeps the full backup, the direction that
-// cannot lose data:
+// none on record). No refusal lets the update run as if capture were
+// confirmed; the ones that say changes were lost keep the full backup
+// (captureEvidence), the others skip the slot (#2659):
 //
 //   - no live capture on record (a file-mode index), or a loss record this
 //     index does not have (GapColumnsPresent false: unevaluable, not "no
@@ -63,7 +66,7 @@ func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time)
 	case !st.GapColumnsPresent:
 		return false, "the index predates the capture's loss record"
 	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(anchor):
-		return false, "the capture lost events to a binlog gap after the previous snapshot"
+		return false, captureDetailLost
 	}
 	skips, readable := st.ParseCaptureSkips()
 	if !readable {
@@ -71,7 +74,7 @@ func captureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time)
 	}
 	for _, sk := range skips {
 		if sk.Count > 0 && (sourceRead.IsZero() || sk.LastAt.IsZero() || !sk.LastAt.Before(sourceRead)) {
-			return false, "the capture dropped events that no full read has read from the source since"
+			return false, captureDetailDropped
 		}
 	}
 	return checkpointComparable(st)
@@ -125,7 +128,28 @@ func compareGTIDSets(captured, executed string) (verdict, detail string) {
 		// direction is safe: the full backup stays.
 		return console.CaptureBehind, "the source reports transactions the capture's checkpoint does not include"
 	}
-	return "", "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
+	return "", captureDetailDiverged
+}
+
+// The refusals that are evidence, not only an unanswered question: each
+// says the index is missing changes of the source, or holds some the
+// source does not have, which a source that cannot be asked does not say.
+// The snapshot schedule keeps its full read on these (captureEvidence,
+// console.CaptureSuspect) and skips the slot on every other refusal (#2659).
+const (
+	captureDetailLost     = "the capture lost events to a binlog gap after the previous snapshot"
+	captureDetailDropped  = "the capture dropped events that no full read has read from the source since"
+	captureDetailDiverged = "the capture holds transactions the source does not have: the source may have been reset, restored or replaced"
+)
+
+// captureEvidence reports whether detail, the reason of a probe that did
+// not answer caught up or behind, is one of the refusals above.
+func captureEvidence(detail string) bool {
+	switch detail {
+	case captureDetailLost, captureDetailDropped, captureDetailDiverged:
+		return true
+	}
+	return false
 }
 
 // captureProbeResult is one answer of the capture probe: the verdict and
