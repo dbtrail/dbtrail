@@ -128,6 +128,9 @@ func LoadEnvFile() { envOnce.Do(loadEnvFile) }
 // Locations tried in order:
 //  1. .bintrail.env in the current directory
 //  2. ~/.config/bintrail/config.env
+//
+// Then it reads the option file (/etc/dbtrail/dbtrail.cnf), for what is
+// still unset.
 func loadEnvFile() {
 	paths := []string{".bintrail.env"}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -142,8 +145,9 @@ func loadEnvFile() {
 			continue
 		}
 		parseAndSetEnv(string(data))
-		return // use first found
+		break // use first found
 	}
+	loadOptionFile()
 }
 
 // parseAndSetEnv parses key=value lines from data and sets them as
