@@ -1326,9 +1326,9 @@ longer drawn on the page.
   the server list, `/var/lib/bintrail` in the compose stack), created `0700`
   and named by the server's id, so renaming the server moves nothing. The
   row also asks how many to keep, with or without an S3 destination (#2658):
-  a new server keeps the newest 3, and everything made in the last hour,
-  and older ones are removed; empty keeps every snapshot. Older snapshots go at the next hourly cleanup, never the
-  only copy of a table. With an S3 destination a snapshot past the count goes
+  a new server keeps the newest 3,
+  and older ones are removed; empty keeps every snapshot. Older snapshots go after each new snapshot, and at the hourly cleanup, never the
+  only copy of a table. No snapshot is kept for being recent (#2678). With an S3 destination a snapshot past the count goes
   only once S3 has it: one S3 does not have stays, is counted on the card
   ("Not in S3 yet, so kept here") and is sent again; an update the schedule
   did not send to S3 was never meant for the bucket, so it goes by the count
@@ -1356,11 +1356,15 @@ longer drawn on the page.
   (including full backups that fall between its runs) and the
   `--baseline-refresh-interval` loop together, since both write into the
   folder (for example 3 daily snapshots reach back up to about 3 days, but
-  only about 3 hours if an hourly refresh also runs), never less than an
-  hour, because
-  the cleanup leaves snapshots younger than an hour alone, and never less
+  only about 3 hours if an hourly refresh also runs, and 3 snapshots every
+  5 minutes reach back up to 15 minutes; "up to", because right after a
+  new snapshot the oldest kept is one interval younger), and never less
   than the `--baseline-retain` age, which keeps younger snapshots past the
-  count. When nothing takes snapshots on a timer it names no number, since
+  count. For a server with an S3 destination the row says instead that a
+  restore reads S3, back to the oldest snapshot sent there (a restore fails
+  while nothing has been sent, whatever the folder holds), and, when the schedule
+  sends to S3 less often than it updates, how much of the recorded changes
+  a moment between two sends replays at most. When nothing takes snapshots on a timer it names no number, since
   the reach then depends on when snapshots are taken. The count it uses is the one the Snapshots
   listing reports (`local_retention.keep_newest`); a number typed and not
   yet saved or applied reads "Once this number applies". Past the oldest

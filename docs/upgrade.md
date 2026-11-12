@@ -184,7 +184,7 @@ Servers you already have keep what they have:
   have.
 
 A server added after the upgrade with an S3 destination keeps its 3 newest
-local snapshots and everything made in the last hour (an older one that was sent to S3 goes once S3 has it, and an
+local snapshots (an older one that was sent to S3 goes once S3 has it, and an
 update the schedule did not send goes by the count alone), starts updating every 5
 minutes after its first snapshot, and sends one snapshot to S3 every 24
 hours. Change either on the Snapshots page.
@@ -192,6 +192,30 @@ hours. Change either on the Snapshots page.
 If you downgrade and add a server with an S3 destination on the older
 version, set its **Keep by count** to empty before upgrading again: the
 older version saves a 3 it does not use, and this version would apply it.
+
+### The count is the whole rule: no extra hour of snapshots
+
+Every server with **Keep by count** set keeps exactly that many snapshots on
+DBTrail's disk after the upgrade. Before, it kept that many and every
+snapshot made in the last hour: a server on the default 5-minute schedule
+with a count of 3 held about 13, and holds 3 after the first cleanup of the
+new version. Nothing is asked and no setting changes: a count you saved keeps
+its number.
+
+- **Without an S3 destination**, time travel and a restore from the local
+  folder reach back the count times the schedule's interval: 15 minutes at
+  the defaults, where they reached an hour. Raise **Keep by count** on the
+  Snapshots page before you upgrade if you need more (12 keeps an hour on a
+  5-minute schedule), or add an S3 destination.
+- **With an S3 destination** a restore reads the bucket, as before: back to
+  its oldest snapshot, replaying the changes recorded since the last
+  snapshot sent before the moment you ask for.
+- **Tools that read the local folder from another process**
+  (`bintrail reconstruct --baseline-dir`, `bintrail export iceberg`, a
+  standalone shim) get the same reach, and are not waited for by the
+  cleanup.
+- **"Delete by age"** (`--baseline-retain`) is unchanged, its one-hour
+  minimum included.
 
 ### The event-type index (`idx_type_lookup`)
 

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/ext"
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/observe"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
@@ -944,7 +945,20 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 	// both runs and the search for that copy in between.
 	wallStart := time.Now()
 	var heavy *sqlHeavyRun
-	out, err := s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, time.Time{}, wallStart, nil, &heavy)
+	var used string
+	out, err := s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, time.Time{}, wallStart, nil, &heavy, &used)
+	if err != nil && heavy == nil && ctx.Err() == nil && sqlCopyGone(used) {
+		// The snapshot this statement was reading left the folder while it
+		// ran (#2678): the count has no time floor, so with a count of 1 the
+		// snapshot a statement started on goes when the next one is
+		// published. The statement asked for the newest copy, and there is
+		// a newer one now: it runs once more, on that one. Once only, so a
+		// folder that loses snapshots for another reason still answers with
+		// the error.
+		slog.Info("console: sql: the snapshot the statement was reading was removed by the cleanup while it ran; running it once more on the newest one",
+			"user", user, "snapshot", used)
+		out, err = s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, time.Time{}, wallStart, nil, &heavy, nil)
+	}
 	if heavy == nil || !sqlMayAnswerOlder(statement, sess) {
 		return out, err
 	}
@@ -958,7 +972,7 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 		return out, err
 	}
 	var again *sqlHeavyRun
-	older, oerr := s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, at, wallStart, &heavy.phases, &again)
+	older, oerr := s.runSQLAt(ctx, b, user, statement, schema, maxRows, sess, unchanged, at, wallStart, &heavy.phases, &again, nil)
 	if oerr != nil {
 		// Whatever stopped the run on the earlier copy (busy, its own time
 		// cap, a column that copy does not have yet, the copy removed in
@@ -977,6 +991,22 @@ func (s *Server) runSQLVouched(ctx context.Context, b *bundle, user, statement, 
 		"user", user, "copy", at.UTC().Format(time.RFC3339), "newest", heavy.newest.UTC().Format(time.RFC3339),
 		"table", heavy.chain.Table, "unmerged_mb", (heavy.chain.Total+(1<<20)-1)>>20, "limit_mb", heavy.limit>>20)
 	return older, nil
+}
+
+// sqlPinLimit is how long a statement keeps its snapshot from the cleanup:
+// the statement's own time limit (sqlsandbox, 60 seconds by default), the
+// seconds the sandbox adds to stop it (7), and as much again for a result
+// still being read. A statement cannot run longer than the first two.
+const sqlPinLimit = 2*time.Minute + 14*time.Second
+
+// sqlCopyGone reports whether the snapshot folder a statement was pinned to
+// is no longer there. "" (the run never got as far as a snapshot) is not gone.
+func sqlCopyGone(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(dir)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // sqlHeavyRun is what a statement refused for unmerged changes leaves for
@@ -1084,7 +1114,7 @@ func sqlOlderCopyNote(h *sqlHeavyRun, at time.Time) string {
 // wallStart is when the statement was accepted, before any run; first, when
 // not nil, is the clocks of an earlier run of the same statement that was
 // refused for unmerged changes (#2210), added to this run's before observing.
-func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session, unchanged sqlUnchanged, at time.Time, wallStart time.Time, first *sqlParentPhases, heavy **sqlHeavyRun) (sqlOutcome, error) {
+func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schema string, maxRows int, sess sqlsandbox.Session, unchanged sqlUnchanged, at time.Time, wallStart time.Time, first *sqlParentPhases, heavy **sqlHeavyRun, used *string) (sqlOutcome, error) {
 	// What is known without any I/O is refused before the slot: a copy that
 	// lives only on S3 is never served here, and listing it would hold one
 	// of the daemon's two slots while it waits on the network. A local
@@ -1131,6 +1161,17 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, hiddenErr.Error()}
 	case err != nil:
 		return sqlOutcome{}, &sqlRefusal{http.StatusBadGateway, err.Error()}
+	}
+	if used != nil && !in.BaselineSnapshot.IsZero() && in.BaselineSource != "" {
+		// For the caller's one retry when this snapshot is removed under
+		// the statement (runSQLVouched).
+		*used = filepath.Join(in.BaselineSource, reconstruct.SnapshotDirName(in.BaselineSnapshot))
+	}
+	if !in.BaselineSnapshot.IsZero() && in.BaselineSource != "" {
+		// The cleanup keeps the one snapshot this statement reads until it
+		// ends (#2678), the newest or an earlier copy alike, and no longer
+		// than a statement can last.
+		defer baseline.PinSnapshot(in.BaselineSource, reconstruct.SnapshotDirName(in.BaselineSnapshot), "a SQL statement", sqlPinLimit)()
 	}
 	if why := viewsLeftOutMessage(in); why != "" {
 		return sqlOutcome{}, &sqlRefusal{http.StatusConflict, why}

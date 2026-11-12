@@ -407,7 +407,16 @@ func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
 	s.mu.Unlock()
 
 	slog.Info("baseline: starting in-process snapshot", "server", req.ServerName, "id", req.ServerID)
-	go s.run(req)
+	// A full read's upload and its sweep read snapshots of this folder (the
+	// PostgreSQL one walks all of them), so the cleanup stands still until
+	// they are done, then applies the count (#2678). Registered here, before
+	// the goroutine exists: a cleanup between the two would not see the job.
+	end := baseline.BeginRead(req.LocalDir, "a full read and its upload")
+	go func() {
+		defer s.pruneAfterPublish(req.LocalDir)
+		defer end()
+		s.run(req)
+	}()
 	return nil
 }
 
@@ -717,6 +726,18 @@ func (s *baselineSupervisor) resendLacking(_ context.Context, dir, s3URL, name s
 	}
 	_, err := s.uploadMarked(key, name, filepath.Join(dir, name), dest, true)
 	return err
+}
+
+// pruneAfterPublish applies the count to a server's folder once a job that
+// may have published a snapshot into it is over (#2678): a full read, an
+// update, a restore. Called from the job's own goroutine after everything
+// that reads the folder for that job has ended, never under s.mu. A daemon
+// whose cleanup loop does not run has no pruneAfterPublishFn and removes
+// nothing, here as there.
+func (s *baselineSupervisor) pruneAfterPublish(dir string) {
+	if fn := loadPruneAfterPublish(); fn != nil && dir != "" && !strings.HasPrefix(dir, "s3://") {
+		fn(dir)
+	}
 }
 
 // errNotResent is the resend left out for now: already being sent, held by

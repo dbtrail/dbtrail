@@ -19,8 +19,7 @@ import (
 // the proof — the directories left on disk are.
 
 // kn is the "now" every keep-newest test prunes at. Snapshots are days old
-// unless a test says otherwise, so the one-hour floor never decides a case by
-// accident.
+// unless a test says otherwise.
 var kn = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 
 // snapName is the on-disk directory name of a snapshot taken d before kn.
@@ -401,15 +400,18 @@ func TestKeepNewest_unreadableIsKeptAndDoesNotTakeASlot(t *testing.T) {
 	}
 }
 
-// The one-hour floor still holds: two snapshots minutes old are both kept at N=1.
-func TestKeepNewest_minAgeFloorHolds(t *testing.T) {
+// No time floor in the count mode (#2678): of two snapshots minutes old, the
+// one past the count goes. prune_nofloor_2678_test.go has the rest.
+func TestKeepNewest_minutesOldPastTheCountGoes(t *testing.T) {
 	root := t.TempDir()
 	a, b := snapName(20*time.Minute), snapName(10*time.Minute)
 	makeSnapshot(t, root, a, true, "shop/orders")
 	makeSnapshot(t, root, b, true, "shop/orders")
-	if res := keepNewest(t, root, 1); len(res.Pruned) != 0 {
-		t.Fatalf("pruned %v younger than an hour", res.Pruned)
+	res := keepNewest(t, root, 1)
+	if !slices.Equal(res.Pruned, []string{a}) {
+		t.Fatalf("pruned %v, want [%s]: the count is 1 and no hour keeps the other", res.Pruned, a)
 	}
+	wantOnDisk(t, root, b)
 }
 
 // A configured age retention still protects younger snapshots in this mode:

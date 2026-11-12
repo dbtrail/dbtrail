@@ -68,6 +68,17 @@ type baselineSnapshotDTO struct {
 	// removes it by the count alone (#2658). False when the mark could not
 	// be read, which leaves the row unmarked rather than announce a removal.
 	Held bool `json:"held,omitempty"`
+	// Restored: this local snapshot is the result of the last restore to a
+	// moment (baseline.Restored, #2678). The cleanup keeps it whatever its
+	// date and it takes no place in the count, so the list never marks it
+	// as going. False when the mark could not be read.
+	Restored bool `json:"restored,omitempty"`
+	// RestoredUntil is until when it is kept outside the count: a day after
+	// the restore finished (baseline.RestoredKeep).
+	RestoredUntil string `json:"restored_until,omitempty"`
+	// RestoredLocalOnly: that result is older than the age the server's S3
+	// destination keeps, so it is on this machine only and is not sent.
+	RestoredLocalOnly bool `json:"restored_local_only,omitempty"`
 	// ViewsSkipped counts the views the source held and this snapshot left
 	// out (#1879), omitted when nothing is recorded: a snapshot from before
 	// the record, or a source with no views. Never zero on the wire.
@@ -192,6 +203,10 @@ type baselinesResponse struct {
 	// folder that stops shrinking shows only in the daemon's log while the
 	// retention line says how many snapshots it keeps.
 	LastPruneFailure *pruneFailureDTO `json:"last_prune_failure,omitempty"`
+	// CleanupWaiting says the last cleanup of that folder stood still
+	// because a job reads its older snapshots (#2678): which job, and when
+	// that job started. Omitted when the last cleanup ran.
+	CleanupWaiting *cleanupWaitingDTO `json:"cleanup_waiting,omitempty"`
 }
 
 type pruneFailureDTO struct {
@@ -229,6 +244,34 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 		return nil
 	}
 	return &localRetentionDTO{KeepNewest: n}
+}
+
+// cleanupWaitingDTO is baseline.CleanupWaiting on the wire.
+type cleanupWaitingDTO struct {
+	Since string `json:"since"`
+	What  string `json:"what"`
+}
+
+// cleanupWaitWorthSaying is how long a job must have held its folder before
+// the page says the cleanup waits for it: two of the shortest schedule
+// intervals (5 minutes). An update holds its folder for its whole cycle, so
+// a cleanup that falls inside a routine one waits for seconds; a line saying
+// so would be about nothing an operator has to wonder about.
+const cleanupWaitWorthSaying = 10 * time.Minute
+
+// cleanupWaitingOf reads the folder's "the cleanup is waiting for a job"
+// record: the job, and when that job started. A record no cleanup has
+// rewritten for two hours is not reported (baseline.ReadCleanupWaiting), so
+// a console that prunes nothing itself does not show a stale one for ever.
+func cleanupWaitingOf(dir string) *cleanupWaitingDTO {
+	if dir == "" {
+		return nil
+	}
+	rec, ok := baseline.ReadCleanupWaiting(dir)
+	if !ok || time.Since(rec.Since) < cleanupWaitWorthSaying {
+		return nil
+	}
+	return &cleanupWaitingDTO{Since: rec.Since.UTC().Format(time.RFC3339), What: rec.What}
 }
 
 // lastPruneOf reads the two prune records of the bundle's local folder: the
@@ -327,6 +370,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	resp.SQLMirror = s.sqlMirrorOf(b, s.selectedServerID(r))
 	resp.LocalRetention = s.localRetentionOf(s.selectedServerID(r))
 	resp.LastPrune, resp.LastPruneFailure, resp.LastPruneError = lastPruneOf(b, s.selectedServerID(r))
+	resp.CleanupWaiting = cleanupWaitingOf(bundleBaselineDir(b))
 	if e, ok := s.cm.reg.Get(s.selectedServerID(r)); ok {
 		resp.S3Destination = strings.TrimSpace(e.BaselineS3) != ""
 	}
@@ -446,6 +490,11 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 			if localDir != "" && slices.Contains(dto.Kinds, "dir") {
 				if held, err := baseline.UploadHeld(localDir, reconstruct.SnapshotDirName(f.SnapshotTime)); err == nil {
 					dto.Held = held
+				}
+				if name, until := baseline.Restored(localDir); name == reconstruct.SnapshotDirName(f.SnapshotTime) {
+					dto.Restored = true
+					dto.RestoredUntil = until.UTC().Format(consoleTSFormat)
+					dto.RestoredLocalOnly = baseline.RestoredLocalOnly(localDir, name)
 				}
 			}
 			// Keyed on the file's OWN path, not on the primary source's kind:

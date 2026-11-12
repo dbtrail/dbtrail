@@ -212,7 +212,7 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 		// opens the path, follows it, and fails with "is a directory" — taking
 		// the whole upload down. It is a local convenience that means nothing
 		// in S3, so skip it by name.
-		if isPointerArtifact(outputDir, path, d) || isPointerLock(outputDir, path) || isPruneArtifact(outputDir, path) {
+		if isPointerArtifact(outputDir, path, d) || isPointerLock(outputDir, path) || isPruneArtifact(outputDir, path) || isRestoredMark(outputDir, path) {
 			return nil
 		}
 		// The key index beside a table (#2496) and a build's .tmp stay

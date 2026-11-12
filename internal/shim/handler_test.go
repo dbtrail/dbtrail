@@ -26,6 +26,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parser"
 	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
 func mustFormatText(t *testing.T, v any) string {
@@ -3043,6 +3044,98 @@ func TestMapEventImagesDecodesExactlyOnce_boolRepair(t *testing.T) {
 	h.mapEventImages("appdb", "docs", rows)
 	if got := rows[0].RowAfter["flag"]; got != "true" {
 		t.Errorf("flag = %#v, want \"true\" (repaired once, not corrupted by a second decode pass)", got)
+	}
+}
+
+// A single-row _snapshot with a snapshot location configured and no snapshot
+// of the table at or before the moment asked for is refused with 1526 and a
+// message a client can read (#2678). Before, it answered from the recorded
+// changes alone, and a row no change touched read as "no such row". DB-free:
+// the refusal comes before the index is read.
+func TestRunSnapshotSingleRow_NoSnapshotAtOrBeforeIsRefused(t *testing.T) {
+	silent := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := &Handler{
+		logger: silent,
+		cfg:    Config{BaselineDir: t.TempDir()}, // configured, and empty
+		resolverFn: func() (*metadata.Resolver, error) {
+			return metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{
+				"myapp.users": {Schema: "myapp", Table: "users", PKColumns: []string{"id"},
+					Columns: []metadata.ColumnMeta{
+						{Name: "id", OrdinalPosition: 1, DataType: "int", IsPK: true},
+						{Name: "name", OrdinalPosition: 2, DataType: "varchar"},
+					}},
+			}), nil
+		},
+	}
+	at := time.Date(2026, 11, 12, 9, 30, 0, 0, time.UTC)
+	_, err := h.runSnapshot(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: at})
+	var myErr *gomysql.MyError
+	if !errors.As(err, &myErr) || myErr.Code != gomysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+		t.Fatalf("error = %T %v, want *mysql.MyError 1526", err, err)
+	}
+	t.Logf("the client reads: ERROR %d: %s", myErr.Code, myErr.Message)
+	// An empty location: no snapshot of the table exists yet. The message
+	// says that, and recommends neither more snapshots nor an S3 destination.
+	for _, want := range []string{"no baseline for myapp.users at or before 2026-11-12T09:30:00Z", "no snapshot holds this table yet", "the next snapshot will include it", "_flashback"} {
+		if !strings.Contains(myErr.Message, want) {
+			t.Errorf("the message does not say %q: %s", want, myErr.Message)
+		}
+	}
+	for _, not := range []string{"keep more snapshots", "add an S3 destination", "older than the oldest"} {
+		if strings.Contains(myErr.Message, not) {
+			t.Errorf("with no snapshot of the table at all the message says %q: %s", not, myErr.Message)
+		}
+	}
+	// The three wordings, from the lookup's two answers and the bucket flag.
+	exists := func(_ context.Context, _, _ string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+		if at.Before(time.Now().Add(-time.Minute)) {
+			return "", time.Time{}, reconstruct.StaleWarning{}, reconstruct.ErrNoBaseline
+		}
+		return "/x/2026/myapp/users.parquet", at, reconstruct.StaleWarning{}, nil
+	}
+	h.cfg.FindBaseline = exists
+	older := h.noBaselineWhy(context.Background(), "myapp", "users", at)
+	h.cfg.BaselineBucket = true
+	olderS3 := h.noBaselineWhy(context.Background(), "myapp", "users", at)
+	t.Logf("older than the oldest, no S3:   %s", older)
+	t.Logf("older than the oldest, with S3: %s", olderS3)
+	if !strings.Contains(older, "keep more snapshots or add an S3 destination") || strings.Contains(older, "no snapshot holds this table yet") {
+		t.Errorf("no S3: %s", older)
+	}
+	if strings.Contains(olderS3, "add an S3 destination") || strings.Contains(olderS3, "keep more snapshots") || !strings.Contains(olderS3, "on this machine and in the S3 destination") {
+		t.Errorf("with S3: %s", olderS3)
+	}
+	// A bucket alone, no folder on this machine: nothing is said of one.
+	h.cfg.BaselineBucket, h.cfg.BaselineS3 = false, "s3://bkt/shop/"
+	onlyS3 := h.noBaselineWhy(context.Background(), "myapp", "users", at)
+	t.Logf("older than the oldest, S3 only: %s", onlyS3)
+	if strings.Contains(onlyS3, "on this machine") || !strings.Contains(onlyS3, "in the S3 destination") || strings.Contains(onlyS3, "add an S3 destination") {
+		t.Errorf("S3 only: %s", onlyS3)
+	}
+	// The full-table query says the same case in the same words, and the one
+	// fact of its own; no "take a baseline", no em dash.
+	h.cfg.BaselineS3, h.cfg.FindBaseline = "", nil
+	_, ferr := h.runSnapshotFullTable(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", AsOf: at})
+	var fullErr *gomysql.MyError
+	if !errors.As(ferr, &fullErr) || fullErr.Code != gomysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+		t.Fatalf("full-table: %T %v, want 1526", ferr, ferr)
+	}
+	t.Logf("full-table, the client reads: ERROR %d: %s", fullErr.Code, fullErr.Message)
+	for _, want := range []string{"no baseline for myapp.users at or before 2026-11-12T09:30:00Z", "no snapshot holds this table yet", "would leave out every row that no change touched"} {
+		if !strings.Contains(fullErr.Message, want) {
+			t.Errorf("full-table does not say %q: %s", want, fullErr.Message)
+		}
+	}
+	for _, not := range []string{"take a baseline", "—", "keep more snapshots"} {
+		if strings.Contains(fullErr.Message, not) {
+			t.Errorf("full-table says %q: %s", not, fullErr.Message)
+		}
+	}
+	// The wire-neutral seam the PostgreSQL front-end shares classifies it.
+	_, rerr := h.ResolveSnapshotRow(context.Background(), TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: at})
+	var re *ResolveError
+	if !errors.As(rerr, &re) || re.Class != ResolveNoSnapshot {
+		t.Fatalf("ResolveSnapshotRow error = %T %v, want a ResolveNoSnapshot", rerr, rerr)
 	}
 }
 

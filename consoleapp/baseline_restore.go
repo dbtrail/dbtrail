@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
@@ -34,7 +35,17 @@ func (s *baselineSupervisor) TriggerRestore(req console.BaselineRestoreRequest) 
 
 	slog.Info("baseline restore: starting", "server", req.ServerName, "id", req.ServerID,
 		"at", req.At.UTC().Format(time.RFC3339))
-	go s.runRestore(req)
+	// With no S3 destination the fold reads an older snapshot of this folder
+	// for as long as it runs: the cleanup stands still until it ends, then
+	// applies the count (#2678). Registered before the goroutine exists, so
+	// no cleanup falls between the two. The result is kept by its mark
+	// (runRestore).
+	end := baseline.BeginRead(req.BaselineDir, "a restore to a moment")
+	go func() {
+		defer s.pruneAfterPublish(req.BaselineDir)
+		defer end()
+		s.runRestore(req)
+	}()
 	return nil
 }
 
@@ -52,6 +63,17 @@ func (s *baselineSupervisor) runRestore(req console.BaselineRestoreRequest) {
 	defer s.recoverBaselineJob(baselineJobRestore, req.ServerID, req.ServerName)
 	started := time.Now().UTC()
 	tables, refused, reuse, err := s.executeRestore(req)
+	if err == nil {
+		// The snapshot is named for the moment restored, which is in the
+		// past, so nothing in its name keeps it: without this mark the count
+		// removed it at the first cleanup after it was written (#2678). The
+		// cleanup keeps the last restore's result for 24 hours, or until the
+		// next restore.
+		if merr := baseline.MarkRestored(req.BaselineDir, reconstruct.SnapshotDirName(req.At.UTC())); merr != nil {
+			slog.Warn("restore to a moment: the snapshot was published, but it could not be marked as a restore's result, so the cleanup may remove it as an old snapshot",
+				"server", req.ServerName, "id", req.ServerID, "error", merr)
+		}
+	}
 	// Same rule as runRefresh, for the same reason: on a server whose backups
 	// go to S3, a snapshot that exists on one box is not where the backups
 	// live, and a restore that stopped there would be the one Parquet

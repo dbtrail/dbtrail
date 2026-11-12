@@ -161,7 +161,18 @@ func (s *baselineSupervisor) TriggerSQLExport(req console.SQLExportRequest) erro
 
 	slog.Info("sql export: starting", "server", req.ServerName, "id", req.ServerID,
 		"at", req.At.UTC().Format(time.RFC3339))
-	go s.runSQLExport(req, dir)
+	// The build folds from the snapshot at or before the moment asked for,
+	// which can be past the count, for as long as it runs: the cleanup of
+	// that folder stands still until it ends (#2678). Registered before the
+	// goroutine exists.
+	end := baseline.BeginRead(req.BaselineSrc, "a .sql build")
+	go func() {
+		// When the build lets go of the folder it has held still, the
+		// folder is over its count: applied now, not at the next snapshot.
+		defer s.pruneAfterPublish(req.BaselineSrc)
+		defer end()
+		s.runSQLExport(req, dir)
+	}()
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,10 +52,10 @@ func ReadLastPrune(dir string) (rec LastPrune, ok bool, err error) {
 // writeRecord, writeFailureRecord and removeRecord are indirected only so a
 // test can fail the write and see the stale record go.
 var (
-	writeRecord        = writeLastPrune
-	writeFailureRecord = writePruneFailure
+	writeRecord          = writeLastPrune
+	writeFailureRecord   = writePruneFailure
 	writeNotInDestRecord = writeNotInDestination
-	removeRecord       = os.Remove
+	removeRecord         = os.Remove
 )
 
 // LastPruneFailureFile records, beside the snapshots, the last prune attempt
@@ -107,6 +108,12 @@ type NotInDestination struct {
 	// (#2563); false, or absent, when nothing here will, and the page says
 	// to send or remove them by hand.
 	Resending bool `json:"resending,omitempty"`
+	// Unasked names the one among them (the last restore's result) the
+	// destination could not be ASKED about: not known to be missing.
+	Unasked string `json:"unasked,omitempty"`
+	// NextSend, when set, is when the next send is tried: an hour after a
+	// round in which one failed (#2678). Absent: at the next cleanup.
+	NextSend *time.Time `json:"next_send,omitempty"`
 }
 
 // RewriteNotInDestination replaces dir's record after the cleanup's resends
@@ -208,7 +215,7 @@ func isPruneArtifact(root, path string) bool {
 		return false
 	}
 	name := filepath.Base(path)
-	for _, rec := range []string{LastPruneFile, LastPruneFailureFile, NotInDestinationFile} {
+	for _, rec := range []string{LastPruneFile, LastPruneFailureFile, NotInDestinationFile, CleanupWaitingFile} {
 		if name == rec || strings.HasPrefix(name, rec+".tmp-") {
 			return true
 		}
@@ -222,4 +229,85 @@ func isPruneArtifact(root, path string) bool {
 func CountLocalSnapshots(dir string) (int, error) {
 	snaps, err := enumerateLocalSnapshots(dir)
 	return len(snaps), err
+}
+
+// CleanupWaitingFile records, beside the snapshots, that the cleanup of this
+// folder is standing still for a job that reads its older snapshots (#2678):
+// which job, when that job started, and when a cleanup last found it
+// running. Removed by the first cleanup that runs. Without it a folder over
+// its count while a long restore or check runs is unexplained on the page.
+const CleanupWaitingFile = ".cleanup-waiting.json"
+
+// CleanupWaiting is that record.
+type CleanupWaiting struct {
+	// Since is when the job named started (its registration, not the first
+	// cleanup that waited); At is when a cleanup last found it running.
+	Since time.Time `json:"since"`
+	At    time.Time `json:"at"`
+	What  string    `json:"what"`
+	// ValidUntil is until when the record speaks for now: twice the
+	// periodic cleanup's interval after it was written. A daemon that
+	// waits rewrites it at every cleanup, and removes it at the first one
+	// that runs; one past this was left by a process that stopped, or is
+	// read by a console whose own process prunes nothing.
+	ValidUntil time.Time `json:"valid_until"`
+}
+
+// cleanupWaitingFresh is how long a record with no ValidUntil of its own is
+// believed after it was written: two of the default hourly cleanups.
+const cleanupWaitingFresh = 2 * time.Hour
+
+// ReadCleanupWaiting reads dir's record; ok is false when the last cleanup
+// ran, or the record is too old to speak for now. An unreadable record
+// reads as none: it explains, it decides nothing.
+func ReadCleanupWaiting(dir string) (rec CleanupWaiting, ok bool) {
+	b, err := os.ReadFile(filepath.Join(dir, CleanupWaitingFile))
+	if err != nil {
+		return CleanupWaiting{}, false
+	}
+	if err := json.Unmarshal(b, &rec); err != nil || rec.Since.IsZero() || rec.At.IsZero() || rec.What == "" {
+		return CleanupWaiting{}, false
+	}
+	until := rec.ValidUntil
+	if until.IsZero() {
+		until = rec.At.Add(cleanupWaitingFresh)
+	}
+	if time.Now().After(until) {
+		return CleanupWaiting{}, false
+	}
+	return rec, true
+}
+
+// noteCleanupWaiting keeps the record in step with one cleanup: rewritten
+// with the job it waits for now and that job's own start when it stood
+// still for what, removed when it ran.
+func noteCleanupWaiting(dir, what string, every time.Duration) {
+	path := filepath.Join(dir, CleanupWaitingFile)
+	if what == "" {
+		if err := removeRecord(path); err != nil && !os.IsNotExist(err) {
+			slog.Warn("baseline prune: the cleanup ran, but the record saying it was waiting could not be removed; the page may go on saying it waits", "dir", dir, "error", err)
+		}
+		return
+	}
+	now := time.Now().UTC()
+	rec := CleanupWaiting{Since: now, At: now, What: what}
+	// The job's own start. Asked again here: the job may have ended since
+	// the cleanup saw it, and then the record is not written at all.
+	cur, since, _ := readingNow(dir, time.Now())
+	if cur == "" {
+		_ = removeRecord(path)
+		return
+	}
+	rec.What, rec.Since = cur, since.UTC()
+	if every <= 0 {
+		every = time.Hour
+	}
+	rec.ValidUntil = now.Add(2 * every)
+	b, err := json.Marshal(rec)
+	if err == nil {
+		err = writeFileAtomic0600(dir, CleanupWaitingFile, b)
+	}
+	if err != nil {
+		slog.Warn("baseline prune: the cleanup is waiting for a job, and the record of it could not be written; the page will not say why the folder is over its count", "dir", dir, "error", err)
+	}
 }

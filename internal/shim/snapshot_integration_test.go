@@ -3,13 +3,16 @@
 package shim
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
 
@@ -1220,6 +1224,137 @@ func TestSnapshotBaseline_FullTableNoBaselineAtOrBeforeAsOfRefuses(t *testing.T)
 	}
 	if me, ok := err.(*mysql.MyError); !ok || me.Code != mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
 		t.Errorf("no-baseline-at-or-before-AsOf full-table _snapshot error = %v, want ER_NO_PARTITION_FOR_GIVEN_VALUE (1526)", err)
+	}
+}
+
+// A single-row _snapshot of a row no recorded change touched (#2678). With a
+// location configured and the only snapshot dated AFTER the moment asked
+// for, it is refused with 1526: before, it answered "no such row". At a
+// moment at or after that snapshot the row is there.
+func TestSnapshotBaseline_SingleRowNoBaselineAtOrBeforeAsOfRefuses(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	hourTop := time.Now().UTC().Truncate(time.Hour)
+	addHourlyPartition(t, db, hourTop)
+	seedUsersSnapshot(t, db, hourTop.Add(1*time.Minute))
+	before := hourTop.Add(10 * time.Minute)
+	snapAt := hourTop.Add(20 * time.Minute)
+	after := hourTop.Add(30 * time.Minute)
+	baselineDir := writeBaselineSnapshot(t, snapAt, "myapp", "users", usersBaselineCols(), [][]string{
+		{"1", "untouched"},
+	})
+	h := NewHandlerWithConfig(db, Config{
+		AllowGaps: true, NoArchive: true, IndexDBName: dbName, BaselineDir: baselineDir,
+	}, slog.Default())
+	q := TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1"}
+
+	q.AsOf = before
+	_, err := h.runSnapshot(q)
+	me, ok := err.(*mysql.MyError)
+	if !ok || me.Code != mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+		t.Fatalf("before the oldest snapshot: err = %v, want 1526 (it used to answer no such row)", err)
+	}
+	t.Logf("before the oldest snapshot the client reads: ERROR %d: %s", me.Code, me.Message)
+
+	q.AsOf = after
+	res, err := h.runSnapshot(q)
+	if err != nil {
+		t.Fatalf("at a moment after the snapshot: %v", err)
+	}
+	if cells := rowCells(t, res.Resultset); len(cells) != 1 || !slices.Equal(cells[0], []string{"1", "untouched"}) {
+		t.Fatalf("at a moment after the snapshot the row is %v, want [[1 untouched]]", cells)
+	}
+}
+
+// The console's port on a server with a folder AND an S3 destination
+// (#2678): the folder holds only a recent snapshot, the bucket an older one.
+// A _snapshot query for a moment only the bucket covers is answered from it,
+// single-row and full-table, through the lookup the console hands the shim
+// (Config.FindBaseline: the folder, then the bucket). The bucket is stood in
+// for by a second folder, which is what the lookup's result is to every read
+// below it: a path. With no such lookup the same query is refused (1526).
+func TestSnapshotBaseline_FolderThenBucketLookupAnswersOlderMoments(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	hourTop := time.Now().UTC().Truncate(time.Hour)
+	addHourlyPartition(t, db, hourTop)
+	seedUsersSnapshot(t, db, hourTop.Add(1*time.Minute))
+	bucketAt := hourTop.Add(5 * time.Minute)
+	asOf := hourTop.Add(10 * time.Minute) // only the bucket's snapshot is at or before it
+	folderAt := hourTop.Add(20 * time.Minute)
+	folder := writeBaselineSnapshot(t, folderAt, "myapp", "users", usersBaselineCols(), [][]string{{"1", "newer"}})
+	bucket := writeBaselineSnapshot(t, bucketAt, "myapp", "users", usersBaselineCols(), [][]string{{"1", "older"}})
+
+	var fromBucket int
+	lookup := func(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+		path, when, stale, err := reconstruct.FindBaseline(ctx, folder, schema, table, at)
+		if errors.Is(err, reconstruct.ErrNoBaseline) {
+			fromBucket++
+			return reconstruct.FindBaseline(ctx, bucket, schema, table, at)
+		}
+		return path, when, stale, err
+	}
+	cfg := Config{AllowGaps: true, NoArchive: true, IndexDBName: dbName, BaselineDir: folder, FindBaseline: lookup, BaselineBucket: true}
+	h := NewHandlerWithConfig(db, cfg, slog.Default())
+
+	one, err := h.runSnapshot(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: asOf})
+	if err != nil {
+		t.Fatalf("single-row, a moment only the bucket covers: %v", err)
+	}
+	if cells := rowCells(t, one.Resultset); len(cells) != 1 || !slices.Equal(cells[0], []string{"1", "older"}) {
+		t.Fatalf("single-row answered %v, want the bucket's row [[1 older]]", cells)
+	}
+	all, err := h.runSnapshot(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", AsOf: asOf})
+	if err != nil {
+		t.Fatalf("full-table, a moment only the bucket covers: %v", err)
+	}
+	if cells := rowCells(t, all.Resultset); len(cells) != 1 || !slices.Equal(cells[0], []string{"1", "older"}) {
+		t.Fatalf("full-table answered %v, want the bucket's row [[1 older]]", cells)
+	}
+	if fromBucket != 2 {
+		t.Fatalf("the bucket was read %d times, want once per query", fromBucket)
+	}
+	// A moment the folder covers is answered from the folder.
+	recent, err := h.runSnapshot(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: hourTop.Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cells := rowCells(t, recent.Resultset); len(cells) != 1 || !slices.Equal(cells[0], []string{"1", "newer"}) || fromBucket != 2 {
+		t.Fatalf("a recent moment answered %v (bucket reads %d), want the folder's row", cells, fromBucket)
+	}
+
+	// The bucket cannot be read: an error that names it, not "no snapshot".
+	cfg.FindBaseline = func(context.Context, string, string, time.Time) (string, time.Time, reconstruct.StaleWarning, error) {
+		return "", time.Time{}, reconstruct.StaleWarning{}, errors.New("the snapshot folder holds no snapshot of myapp.users at or before then, and the snapshot location s3://bkt/shop/ could not be read: AccessDenied")
+	}
+	h = NewHandlerWithConfig(db, cfg, slog.Default())
+	for _, q := range []TimeTravelQuery{
+		{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: asOf},
+		{Type: TypeSnapshot, Schema: "myapp", Table: "users", AsOf: asOf},
+	} {
+		_, err := h.runSnapshot(q)
+		if err == nil || !strings.Contains(err.Error(), "s3://bkt/shop/") || strings.Contains(err.Error(), "no baseline for") {
+			t.Fatalf("an unreadable bucket (pk %q): %v, want an error naming the bucket", q.PKColumn, err)
+		}
+		if me, ok := err.(*mysql.MyError); ok && me.Code == mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+			t.Fatalf("an unreadable bucket was reported as no snapshot (1526): %v", err)
+		}
+		t.Logf("an unreadable bucket, as the client reads it: %v", err)
+	}
+
+	// No bucket: the folder alone, and the refusal.
+	h = NewHandlerWithConfig(db, Config{AllowGaps: true, NoArchive: true, IndexDBName: dbName, BaselineDir: folder}, slog.Default())
+	_, err = h.runSnapshot(TimeTravelQuery{Type: TypeSnapshot, Schema: "myapp", Table: "users", PKColumn: "id", PKValue: "1", AsOf: asOf})
+	if me, ok := err.(*mysql.MyError); !ok || me.Code != mysql.ER_NO_PARTITION_FOR_GIVEN_VALUE {
+		t.Fatalf("with the folder alone: %v, want 1526", err)
+	} else {
+		t.Logf("with the folder alone the client reads: ERROR %d: %s", me.Code, me.Message)
 	}
 }
 

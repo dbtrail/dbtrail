@@ -79,6 +79,9 @@ func resolveRetryKey(serverID, base string) string {
 // lands while a run is writing is not lost: the run looks again when it is
 // done and goes on with the snapshot that is the newest by then.
 func (s *baselineSupervisor) maybeResolve(req refreshRequest) {
+	// It reads the snapshot before the newest, which a count of 1 does not
+	// keep: the cleanup stands still while it runs (#2678).
+	defer baseline.BeginRead(req.BaselineDir, "the merge of a snapshot's changes")()
 	// On the refresh's goroutine, after the refresh's own guard has returned:
 	// a panic here would end the process, which is also the capture.
 	defer func() {
