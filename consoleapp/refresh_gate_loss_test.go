@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/notify"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
 
@@ -91,5 +94,84 @@ func TestLossSince(t *testing.T) {
 				t.Errorf("lossSince = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// #2664. When stream_state cannot be read the gate folds every cycle, which is
+// safe, and said so only at Debug: on a quiet server the operator saw updates
+// run every cycle with nothing at the default log level to explain it. The
+// mark and coverage questions in the same gate say it at Warn, once per
+// condition; this one now does the same.
+func TestRefreshCanSkip_saysWhenItCannotAskAboutALoss(t *testing.T) {
+	mark := indexMark{events: 100, schemaChanges: 7}
+	req := refreshRequest{ServerID: "s", ServerName: "shop", IndexDSN: "d"}
+	log := captureLog(t, slog.LevelInfo) // the default level: Debug is not printed
+	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
+	sup.gateEdge = notify.NewEdge(time.Hour)
+	seedQuietServer(sup, req, mark)
+	stubCoverage(t, true, true)
+	prev := lossOnRecordSince
+	t.Cleanup(func() { lossOnRecordSince = prev })
+	warns := func() int { return strings.Count(log.String(), "level=WARN") }
+
+	lossOnRecordSince = func(context.Context, string, time.Time) (bool, error) { return false, nil }
+	if !sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0) {
+		t.Fatal("fixture: a quiet server with no loss on record was not skipped")
+	}
+	if got := warns(); got != 0 {
+		t.Fatalf("%d Warn line(s) while the index answers, want 0: %q", got, log.String())
+	}
+
+	lossOnRecordSince = func(context.Context, string, time.Time) (bool, error) { return false, errors.New("index down") }
+	if sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0) {
+		t.Fatal("skipped although the index could not say whether capture lost events")
+	}
+	if got := warns(); got != 1 {
+		t.Fatalf("%d Warn line(s) on the first blind cycle, want 1: %q", got, log.String())
+	}
+	t.Logf("the line: %s", strings.TrimSpace(log.String()))
+	for _, want := range []string{
+		"baseline refresh: cannot tell whether capture lost events since the last snapshot, so every cycle folds; " +
+			"this server is not being skipped and will not be until the index answers",
+		"server=shop", "id=s", "question=loss",
+	} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("the line does not carry %q: %q", want, log.String())
+		}
+	}
+	for range 5 {
+		sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0)
+	}
+	if got := warns(); got != 1 {
+		t.Errorf("%d Warn line(s) after six blind cycles, want still 1", got)
+	}
+	if !sup.gateEdge.Active("gate-blind:loss:s") {
+		t.Error("the blind condition is not standing while the read keeps failing")
+	}
+
+	// The index answers again: the condition ends without a line, and a
+	// later failure is a new one.
+	lossOnRecordSince = func(context.Context, string, time.Time) (bool, error) { return false, nil }
+	if !sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0) {
+		t.Fatal("not skipped once the index answers again")
+	}
+	if got := warns(); got != 1 || sup.gateEdge.Active("gate-blind:loss:s") {
+		t.Errorf("after the read worked again: %d Warn line(s), condition standing = %v; want 1 and false",
+			got, sup.gateEdge.Active("gate-blind:loss:s"))
+	}
+	lossOnRecordSince = func(context.Context, string, time.Time) (bool, error) { return false, errors.New("index down") }
+	sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0)
+	if got := warns(); got != 2 {
+		t.Errorf("%d Warn line(s) after the read failed again, want 2", got)
+	}
+
+	// A loss the index DID report is an answer, not blindness: no Warn.
+	lossOnRecordSince = func(context.Context, string, time.Time) (bool, error) { return true, nil }
+	if sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0) {
+		t.Fatal("skipped although capture lost events since the last snapshot")
+	}
+	if got := warns(); got != 2 || sup.gateEdge.Active("gate-blind:loss:s") {
+		t.Errorf("a reported loss: %d Warn line(s), blind condition standing = %v; want 2 and false",
+			got, sup.gateEdge.Active("gate-blind:loss:s"))
 	}
 }
