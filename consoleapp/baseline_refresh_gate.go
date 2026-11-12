@@ -3,6 +3,8 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"time"
@@ -202,7 +204,7 @@ func (r coverageRule) floorHolds(liveFloor, now time.Time) bool {
 }
 
 // readLiveFloor reads the oldest hour the index's live partitions still hold,
-// and whether it could; a package variable so the refresh cycle's use of it can
+// or why it could not; a package variable so the refresh cycle's use of it can
 // be driven without an index.
 var readLiveFloor = readLiveFloorFromDB
 
@@ -220,11 +222,10 @@ func readIndexRetentionFromDB(ctx context.Context, dsn string) rotation.Effectiv
 	return rotation.ResolveEffective(ctx, db, indexDBName(dsn))
 }
 
-func readLiveFloorFromDB(ctx context.Context, dsn string) (time.Time, bool) {
+func readLiveFloorFromDB(ctx context.Context, dsn string) (time.Time, error) {
 	db, err := config.Connect(dsn)
 	if err != nil {
-		slog.Debug("baseline refresh: could not open the index to read how far back it keeps events", "error", err)
-		return time.Time{}, false
+		return time.Time{}, fmt.Errorf("open the index: %w", err)
 	}
 	defer db.Close()
 	return liveFloorIn(ctx, db, indexDBName(dsn))
@@ -295,11 +296,10 @@ func readLiveFloorFromDB(ctx context.Context, dsn string) (time.Time, bool) {
 // in which a restore refused.
 var snapshotStillCovered = snapshotStillCoveredInDB
 
-func snapshotStillCoveredInDB(ctx context.Context, dsn string, readsFrom, now time.Time, rule coverageRule) (covered, known bool) {
+func snapshotStillCoveredInDB(ctx context.Context, dsn string, readsFrom, now time.Time, rule coverageRule) (covered bool, err error) {
 	db, err := config.Connect(dsn)
 	if err != nil {
-		slog.Debug("baseline refresh: could not open the index to check how far it still reaches", "error", err)
-		return false, false
+		return false, fmt.Errorf("open the index: %w", err)
 	}
 	defer db.Close()
 	return snapshotCoveredIn(ctx, db, indexDBName(dsn), readsFrom, now, rule)
@@ -308,22 +308,25 @@ func snapshotStillCoveredInDB(ctx context.Context, dsn string, readsFrom, now ti
 // snapshotCoveredIn is the half that runs the query, split from the connect so
 // it can be tested. It reads the LIVE partitions and nothing else — a test can
 // hold it to that, which is the point: reaching for the archive-extended floor
-// here is the mistake this split exists to make visible.
-func snapshotCoveredIn(ctx context.Context, db *sql.DB, dbName string, readsFrom, now time.Time, rule coverageRule) (covered, known bool) {
-	floor, known := liveFloorIn(ctx, db, dbName)
-	if !known {
-		return false, false
+// here is the mistake this split exists to make visible. A non-nil error is why
+// the answer is not known.
+func snapshotCoveredIn(ctx context.Context, db *sql.DB, dbName string, readsFrom, now time.Time, rule coverageRule) (covered bool, err error) {
+	floor, err := liveFloorIn(ctx, db, dbName)
+	if err != nil {
+		return false, err
 	}
-	return snapshotCoveredBy(floor, readsFrom, now, rule), true
+	return snapshotCoveredBy(floor, readsFrom, now, rule), nil
 }
 
-// liveFloorIn is the oldest hour the live partitions hold, and whether there is
-// one: the floor both the gate and the fold's chain line are drawn from.
-func liveFloorIn(ctx context.Context, db *sql.DB, dbName string) (time.Time, bool) {
+// errNoLiveFloor is why the floor is not known when the read itself worked.
+var errNoLiveFloor = errors.New("the index has no partition to measure coverage from")
+
+// liveFloorIn is the oldest hour the live partitions hold, or why there is
+// none: the floor both the gate and the fold's chain line are drawn from.
+func liveFloorIn(ctx context.Context, db *sql.DB, dbName string) (time.Time, error) {
 	parts, err := status.LoadPartitionStats(ctx, db, dbName)
 	if err != nil {
-		slog.Debug("baseline refresh: could not read how far the index still reaches", "error", err)
-		return time.Time{}, false
+		return time.Time{}, fmt.Errorf("read the index partitions: %w", err)
 	}
 	floor := status.OldestLivePartitionHour(parts)
 	if floor.IsZero() {
@@ -333,10 +336,9 @@ func liveFloorIn(ctx context.Context, db *sql.DB, dbName string) (time.Time, boo
 		// covered": both fold, so nothing changes behaviourally, but only this
 		// one reaches reportGateBlind and says so out loud. Grading it would be
 		// the last silent way for the gate to be permanently inert.
-		slog.Debug("baseline refresh: the index has no partition to measure coverage from")
-		return time.Time{}, false
+		return time.Time{}, errNoLiveFloor
 	}
-	return floor, true
+	return floor, nil
 }
 
 // snapshotCoveredBy is the verdict itself, split from the read so the threshold
@@ -362,19 +364,18 @@ func snapshotCoveredBy(liveFloor, readsFrom, now time.Time, rule coverageRule) b
 // finished — the cycles run in their own goroutines.
 var readIndexMark = readIndexMarkFromDB
 
-// readIndexMarkFromDB opens the index and reads both marks. known is false when
-// the answer could not be READ — the index cannot be opened, or a query fails —
-// and every caller must then FOLD.
+// readIndexMarkFromDB opens the index and reads both marks. The error is set,
+// and says why, when the answer could not be READ (the index cannot be opened,
+// or a query fails), and every caller must then FOLD.
 //
 // Failing toward folding is the only safe direction here. A false "nothing
 // changed" skips a refresh that was owed and the backup silently stops moving;
 // a false "something changed" costs one fold that applies nothing, which is now
 // cheap (#1697, #1701). The asymmetry is the whole design of this gate.
-func readIndexMarkFromDB(ctx context.Context, dsn string) (mark indexMark, known bool) {
+func readIndexMarkFromDB(ctx context.Context, dsn string) (mark indexMark, err error) {
 	db, err := config.Connect(dsn)
 	if err != nil {
-		slog.Debug("baseline refresh: could not open the index to check for new data; folding", "error", err)
-		return indexMark{}, false
+		return indexMark{}, fmt.Errorf("open the index: %w", err)
 	}
 	defer db.Close()
 	return readIndexMarkFrom(ctx, db)
@@ -383,16 +384,16 @@ func readIndexMarkFromDB(ctx context.Context, dsn string) (mark indexMark, known
 // readIndexMarkFrom is the half that runs the queries, split from the connect so
 // it can be tested: readIndexMarkFromDB takes a DSN and opens its own handle, so
 // there is no seam to hand a stub to.
-func readIndexMarkFrom(ctx context.Context, db *sql.DB) (mark indexMark, known bool) {
-	events, ok := readMaxID(ctx, db, "SELECT MAX(event_id) FROM binlog_events")
-	if !ok {
-		return indexMark{}, false
+func readIndexMarkFrom(ctx context.Context, db *sql.DB) (mark indexMark, err error) {
+	events, err := readMaxID(ctx, db, "SELECT MAX(event_id) FROM binlog_events")
+	if err != nil {
+		return indexMark{}, err
 	}
-	changes, ok := readMaxID(ctx, db, "SELECT MAX(id) FROM schema_changes")
-	if !ok {
-		return indexMark{}, false
+	changes, err := readMaxID(ctx, db, "SELECT MAX(id) FROM schema_changes")
+	if err != nil {
+		return indexMark{}, err
 	}
-	return indexMark{events: events, schemaChanges: changes}, true
+	return indexMark{events: events, schemaChanges: changes}, nil
 }
 
 // readMaxID reads one high-water mark. A NULL — an empty table — is a mark of
@@ -414,23 +415,21 @@ func readIndexMarkFrom(ctx context.Context, db *sql.DB) (mark indexMark, known b
 // gate needs, and the first row ever written moves the mark off zero and folds.
 // The same holds for an index that has captured nothing yet — no rows means
 // nothing a fold could apply, and the first captured event lifts the mark.
-func readMaxID(ctx context.Context, db *sql.DB, q string) (uint64, bool) {
+func readMaxID(ctx context.Context, db *sql.DB, q string) (uint64, error) {
 	var v sql.NullInt64
 	if err := db.QueryRowContext(ctx, q).Scan(&v); err != nil {
-		slog.Debug("baseline refresh: could not read the index high-water mark; folding", "query", q, "error", err)
-		return 0, false
+		return 0, fmt.Errorf("%s: %w", q, err)
 	}
 	if !v.Valid {
-		return 0, true // empty table: a mark of zero, and it is known
+		return 0, nil // empty table: a mark of zero, and it is known
 	}
 	if v.Int64 < 0 {
 		// Both columns are UNSIGNED, so this is not a value this can compare
 		// against a later one — it is a read that did not come back meaning
 		// what it says. Treated as unreadable so the cycle folds.
-		slog.Debug("baseline refresh: index high-water mark is negative; folding", "query", q, "value", v.Int64)
-		return 0, false
+		return 0, fmt.Errorf("%s returned %d, a negative high-water mark", q, v.Int64)
 	}
-	return uint64(v.Int64), true
+	return uint64(v.Int64), nil
 }
 
 // unchangedSince reports whether nothing has been indexed since prev.
