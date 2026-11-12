@@ -41,6 +41,7 @@ var portCmd = &cobra.Command{
   bintrail-console port status
   bintrail-console port new-password  replace the password
   bintrail-console port routing on    send what the copy cannot answer to MySQL
+  bintrail-console port mode shop fast  answer shop from its last snapshot alone
   bintrail-console port off
 
 Connect with the mysql client. The user is the server's name:
@@ -138,8 +139,44 @@ recorded, without reading the database again. --off stops the updates.`,
 			return runPortRouting(cmd.Context(), c, args[0] == "on", cmdOut())
 		},
 	}
+	mode := &cobra.Command{
+		Use:   "mode <server> [fresh|fast]",
+		Short: "Say or choose how current a server's answers on the MySQL port are: fresh or fast",
+		Long: `Say or choose how current a server's answers on the MySQL port are.
+
+  bintrail-console port mode shop          what is saved, and what the router applies
+  bintrail-console port mode shop fast     answer from the last snapshot alone
+  bintrail-console port mode shop fresh    lay the newest captured changes over it
+
+Fresh, the default, answers about as far behind your MySQL as capture,
+usually seconds, and keeps those changes in the router's memory. Fast answers
+as of the copy's last update, and leaves that memory to the statements.
+
+BINTRAIL_SQL_TAILS (SQL_FRESH in the compose .env), when it says on or off,
+decides for every server: a choice saved here then applies once it is removed.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) < 1 || len(args) > 2 {
+				return errors.New("name one server, and fresh or fast to choose: port mode <server> [fresh|fast]")
+			}
+			if len(args) == 2 && args[1] != "fresh" && args[1] != "fast" {
+				return fmt.Errorf("the mode is fresh or fast, not %q", args[1])
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := resolveCtl(srvURL, srvAccessFile)
+			if err != nil {
+				return err
+			}
+			want := ""
+			if len(args) == 2 {
+				want = args[1]
+			}
+			return runPortMode(cmd.Context(), c, args[0], want, portModeWait, cmdOut())
+		},
+	}
 	addCtlFlags(portCmd, &srvURL, &srvAccessFile)
-	portCmd.AddCommand(
+	portCmd.AddCommand(mode,
 		portVerb("on", "Turn the MySQL port on. Prints its password when one is made", func(ctx context.Context, c *ctlClient, w io.Writer) error {
 			return runPortSet(ctx, c, true, w)
 		}),
@@ -502,4 +539,125 @@ func runPortRouting(ctx context.Context, c *ctlClient, on bool, out io.Writer) e
 		fmt.Fprintln(out, "Engine Routing is off: every statement runs on the copy.")
 	}
 	return nil
+}
+
+// portModeWait is how long `port mode <server> <mode>` waits for the router
+// to say it applies the choice. It reads the server list every two seconds.
+var (
+	portModeWait = 8 * time.Second
+	portModePoll = 2 * time.Second
+)
+
+// ctlRouterView is GET /api/router, as `port mode` reads it: whether this
+// DBTrail knows its router, and the router's own status document.
+type ctlRouterView struct {
+	Configured bool   `json:"configured"`
+	Error      string `json:"error"`
+	Status     *struct {
+		Fresh          *bool  `json:"fresh"`
+		SQLModeForced  string `json:"sql_mode_forced"`
+		PerServerMode  bool   `json:"per_server_mode"`
+		FreshByDefault bool   `json:"fresh_by_default"`
+		Servers        map[string]struct {
+			SQLMode     string `json:"sql_mode"`
+			SQLModeFrom string `json:"sql_mode_from"`
+		} `json:"servers"`
+	} `json:"status"`
+}
+
+// routerApplies is the mode the router answers server s in, and why it is
+// that one: "" when the router cannot be read or says nothing about modes,
+// with what to say instead.
+func (v ctlRouterView) routerApplies(s ctlServer) (mode, note string) {
+	switch {
+	case !v.Configured:
+		return "", "This DBTrail does not know where its router runs (ROUTER_URL in the compose .env), so what it applies cannot be said here. A router reads the saved choice within a few seconds."
+	case v.Status == nil:
+		why := v.Error
+		if why == "" {
+			why = "it gave no status"
+		}
+		return "", "The router could not be read (" + strings.TrimRight(why, ".") + "), so what it applies cannot be said here."
+	case v.Status.SQLModeForced == "fresh" || v.Status.Fresh != nil && *v.Status.Fresh:
+		return "fresh", "The router answers every server in fresh mode: SQL_FRESH=on in the compose .env (BINTRAIL_SQL_TAILS=on elsewhere) decides. The saved choice applies once that is removed (then docker compose up -d router)."
+	case v.Status.SQLModeForced == "fast":
+		return "fast", "The router answers every server in fast mode: SQL_FRESH=off in the compose .env (BINTRAIL_SQL_TAILS=off elsewhere) decides. The saved choice applies once that is removed (then docker compose up -d router)."
+	case !v.Status.PerServerMode:
+		return "fast", "The router is older than the per-server choice and answers every server in fast mode. Update the router to choose here."
+	case !v.Status.FreshByDefault && !s.SQLFreshSaved:
+		return "fast", "The router is older than fresh being the default, and answers a server with nothing saved in fast mode. Save fresh here, or update the router."
+	}
+	if n, ok := v.Status.Servers[s.ID]; ok && n.SQLMode != "" {
+		return n.SQLMode, ""
+	}
+	// A router that reads the choice lists every server that is fresh: one
+	// it does not list answers in fast mode.
+	return "fast", ""
+}
+
+// runPortMode says, or sets and then says, server name's mode on the port.
+func runPortMode(ctx context.Context, c *ctlClient, name, want string, wait time.Duration, out io.Writer) error {
+	s, err := serverByName(ctx, c, name)
+	if err != nil {
+		return err
+	}
+	switch {
+	case s.Kind == "ephemeral":
+		return fmt.Errorf("%q was given where DBTrail starts and has no choice of its own: it answers in fast mode unless SQL_FRESH=on (BINTRAIL_SQL_TAILS=on) says fresh for every server. Add it as a server (dbtrail server add) to choose", s.Name)
+	case !s.HasSource:
+		return fmt.Errorf("%q has no source database, so the MySQL port does not answer for it", s.Name)
+	}
+	if want != "" {
+		var saved struct {
+			Fresh      bool `json:"fresh"`
+			FreshSaved bool `json:"fresh_saved"`
+		}
+		if err := c.do(ctx, http.MethodPut, "/api/servers/"+s.ID+"/sql-mode", map[string]bool{"fresh": want == "fresh"}, &saved); err != nil {
+			return err
+		}
+		if saved.Fresh != (want == "fresh") {
+			return fmt.Errorf("DBTrail took the request and %q is still saved as %s", s.Name, map[bool]string{true: "fresh", false: "fast"}[saved.Fresh])
+		}
+		s.SQLFresh, s.SQLFreshSaved = saved.Fresh, true
+	}
+	savedMode := map[bool]string{true: "fresh", false: "fast"}[s.SQLFresh]
+	if s.SQLFreshSaved {
+		fmt.Fprintf(out, "Saved for %q: %s.\n", s.Name, savedMode)
+	} else {
+		fmt.Fprintf(out, "Nothing is saved for %q: it is %s, the default.\n", s.Name, savedMode)
+	}
+	// What the router applies: read until it agrees with what was just
+	// saved, for a little while, since it reads the choice every few
+	// seconds. A plain look reads once.
+	deadline := time.Now().Add(wait)
+	for {
+		var v ctlRouterView
+		if err := c.do(ctx, http.MethodGet, "/api/router", nil, &v); err != nil {
+			fmt.Fprintf(out, "The router could not be read (%v), so what it applies cannot be said here.\n", err)
+			return nil
+		}
+		applied, note := v.routerApplies(s)
+		forced := v.Status != nil && (v.Status.SQLModeForced != "" || v.Status.Fresh != nil && *v.Status.Fresh)
+		if applied == savedMode || applied == "" || forced || want == "" || !time.Now().Before(deadline) {
+			switch {
+			case applied == "":
+				fmt.Fprintln(out, note)
+			case applied == savedMode:
+				fmt.Fprintf(out, "The router answers it in %s mode.\n", applied)
+				if note != "" {
+					fmt.Fprintln(out, note)
+				}
+			case note != "":
+				fmt.Fprintf(out, "The router answers it in %s mode. %s\n", applied, note)
+			default:
+				fmt.Fprintf(out, "The router still answers it in %s mode. It reads the choice every few seconds:  bintrail-console port mode %s\n", applied, mysqlLineUser(s.Name))
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(portModePoll):
+		}
+	}
 }

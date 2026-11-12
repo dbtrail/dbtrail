@@ -604,7 +604,9 @@ page.
   the `mysql` line to connect. Run again it does not print the
   password: `port new-password` makes another, and the old one stops working
   within a few seconds. `port status`, `port off`, and `port routing on|off`
-  for Engine Routing complete it. A port saved as on that is not answering
+  for Engine Routing complete it. `port mode <server>` says whether a
+  server's answers are fresh or fast, and what the router applies; `port mode
+  <server> fresh|fast` saves the choice (what the Snapshots page saves). A port saved as on that is not answering
   (the router is not running) exits 1 and says so.
 
 **The forwarding user.** With Engine Routing on, a statement the copy cannot
