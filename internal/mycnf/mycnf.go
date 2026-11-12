@@ -170,8 +170,16 @@ func Parse(data []byte, groups ...string) (Client, error) {
 // the middle of a value is a character, an escaped space at the end
 // survives, and a quote that is never closed is part of the value.
 func parseValue(s string) string {
+	v, _ := parseValueCut(s)
+	return v
+}
+
+// parseValueCut is parseValue, and says whether a # outside quotes ended the
+// value: a password with a # in it, written without quotes, is cut there.
+func parseValueCut(s string) (string, bool) {
 	s = strings.TrimLeft(s, " \t")
 	end := len(s)
+	cut := false
 	quote := byte(0)
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
@@ -185,7 +193,7 @@ func parseValue(s string) string {
 		case ch == '"' || ch == '\'':
 			quote = ch
 		case ch == '#':
-			end = i
+			end, cut = i, true
 			i = len(s)
 		}
 	}
@@ -218,5 +226,93 @@ func parseValue(s string) string {
 			b.WriteByte(s[i])
 		}
 	}
-	return b.String()
+	return b.String(), cut
+}
+
+// Option is one option line of a group, as Options reads it.
+type Option struct {
+	// Name is the option as written, in lower case, with every _ read as -
+	// and a loose- prefix taken off.
+	Name string
+	// Loose: the line had the loose- prefix, which in MySQL means "do not
+	// complain if this option is unknown".
+	Loose bool
+	// HasValue is false for a line with no = sign (a switch, in MySQL).
+	HasValue bool
+	Value    string
+	// CommentCut: a # outside quotes ended the value, so what followed it
+	// was read as a comment.
+	CommentCut bool
+	// Line is the line number, from 1.
+	Line int
+}
+
+// Lines is what Options found in a file.
+type Lines struct {
+	Options []Option
+	// Includes are the !include and !includedir lines, with their numbers.
+	// They were not followed.
+	Includes []int
+	// Ungrouped are the numbers of option lines that sit before any group.
+	Ungrouped []int
+	// Groups are the names of every group the file has, as written.
+	Groups []string
+	// AfterGroup are the numbers of group lines with text after the ]
+	// that is not a comment ("[dbtrail] commit-within = 2s"): that text is
+	// not read.
+	AfterGroup []int
+}
+
+// Options reads every option line of the named group, in file order. It
+// reads any option, unlike Parse, which reads the connection options only;
+// what an option means is the caller's to decide. An error is about the
+// shape of the file, and names the line by number without quoting it.
+func Options(data []byte, group string) (Lines, error) {
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	var out Lines
+	inGroup, seenGroup := false, false
+	for n, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		if line[0] == '!' {
+			out.Includes = append(out.Includes, n+1)
+			continue
+		}
+		if line[0] == '[' {
+			end := strings.IndexByte(line, ']')
+			if end < 0 {
+				return Lines{}, fmt.Errorf("line %d: a group name is missing its closing ]", n+1)
+			}
+			name := strings.TrimSpace(line[1:end])
+			inGroup, seenGroup = strings.EqualFold(name, group), true
+			out.Groups = append(out.Groups, name)
+			if after := strings.TrimSpace(line[end+1:]); after != "" && after[0] != '#' && after[0] != ';' {
+				out.AfterGroup = append(out.AfterGroup, n+1)
+			}
+			continue
+		}
+		if !seenGroup {
+			out.Ungrouped = append(out.Ungrouped, n+1)
+			continue
+		}
+		if !inGroup {
+			continue
+		}
+		name, rest, hasValue := strings.Cut(line, "=")
+		if i := strings.IndexByte(name, '#'); i >= 0 && !hasValue {
+			name = name[:i]
+		}
+		name = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "_", "-"))
+		o := Option{Name: name, HasValue: hasValue, Line: n + 1}
+		if after, ok := strings.CutPrefix(name, "loose-"); ok {
+			o.Name, o.Loose = after, true
+		}
+		if hasValue {
+			o.Value, o.CommentCut = parseValueCut(rest)
+		}
+		out.Options = append(out.Options, o)
+	}
+	return out, nil
 }
