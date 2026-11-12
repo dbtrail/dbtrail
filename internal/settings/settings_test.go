@@ -180,3 +180,35 @@ func TestRegister(t *testing.T) {
 		t.Fatal("Register replaced a listed name")
 	}
 }
+
+func TestByOption(t *testing.T) {
+	for _, in := range []string{"commit-within", "commit_within", "COMMIT-WITHIN"} {
+		e, ok := settings.ByOption(in)
+		if !ok || e.Env != "BINTRAIL_COMMIT_WITHIN" {
+			t.Errorf("ByOption(%q) = %+v, %v", in, e, ok)
+		}
+	}
+	for _, in := range []string{"", "bintrail-commit-within", "commit-with"} {
+		if e, ok := settings.ByOption(in); ok {
+			t.Errorf("ByOption(%q) = %+v, want none", in, e)
+		}
+	}
+}
+
+func TestNearest(t *testing.T) {
+	cases := map[string]string{
+		"comit-within":           "commit-within",
+		"commit_withn":           "commit-within",
+		"BINTRAIL_COMMIT_WITHIN": "commit-within",
+		"bintrail-index-dsn":     "index-dsn",
+		"index-dns":              "index-dsn",
+		"nothing-like-this":      "",
+		"":                       "",
+		"sql-sandbox-workr":      "", // internal names are never suggested
+	}
+	for in, want := range cases {
+		if got := settings.Nearest(in); got != want {
+			t.Errorf("Nearest(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
