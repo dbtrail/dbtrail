@@ -1620,7 +1620,7 @@ func (b *backupScheduler) reportUnconfirmed(e console.ServerEntry, method, why s
 	}
 	switch {
 	case skipping && b.sup.gateEdge.Fire(skipKey, why):
-		slog.Info("snapshot schedule: no snapshot is made at this slot, nor at the following ones while this lasts; the copy stays at its last snapshot. This is logged once, not at every slot",
+		slog.Info("snapshot schedule: no snapshot is made at this slot, nor at the following ones while this lasts; the copy stays at its last snapshot. This line repeats once a day while it lasts, not at every slot",
 			"server", e.Name, "id", e.ID, "reason", why)
 	case updating && b.sup.gateEdge.Fire(updateKey, why):
 		slog.Info("snapshot schedule: updating the snapshot instead of skipping the slot",

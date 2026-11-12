@@ -10030,10 +10030,6 @@ function budgetRefusedTail() {
 // budget refusal whose full backup cannot start here: its reason already says
 // why, so the tail does not repeat it.
 function scheduleSkipTail(reason) {
-  // #2659: a slot skipped because nothing was indexed and the source cannot
-  // confirm capture. Its reason already says what ends it, and "it will try
-  // again" would promise a snapshot at the next slot that is not coming.
-  if (unconfirmedSkipText(reason)) return "";
   return touchedRowBudgetText(reason) && /a full (backup|read) cannot start here/.test(reason || "")
     ? " Until a newer full read exists, every scheduled update is refused the same way."
     : " It will try again at the next scheduled time.";
@@ -10054,6 +10050,16 @@ function unconfirmedSkipText(s) {
 function unconfirmedNextLine(why) {
   const w = plainWords(why || "");
   return "Next run will make no snapshot" + (w ? ": " + w + (/[.!?]$/.test(w) ? "" : ".") : ".");
+}
+
+// unconfirmedSkipLine: the schedule card's line for a slot skipped that way,
+// at `when` (a time as the card prints it). Not "did not run ... it will try
+// again": the schedule decided to make no snapshot, and while this lasts the
+// next slot makes none either (nextToo: the daemon's plan for it is the same
+// skip), which a promised retry would contradict.
+function unconfirmedSkipLine(when, reason, nextToo) {
+  return "No snapshot was made at " + when + ": " + backupFoldError(reason) +
+    (nextToo ? " As things stand, the next run will make none either." : "");
 }
 
 // touchedRowBudgetText: the schedule's skips keep only the error text, not
@@ -12323,9 +12329,12 @@ function backupScheduleCard(cur, b) {
       // #2659: nothing was indexed since the previous snapshot and the
       // source cannot confirm capture, so as things stand the next slot
       // makes no snapshot. Said as a sentence, never drawn as a link of the
-      // chain: nothing is added to it. Not an alarm of its own; the skipped
-      // slot below is.
-      body.append(el("p", { class: "form-hint", text: unconfirmedNextLine(sch.next_method_why) }));
+      // chain: nothing is added to it. Not an alarm: nothing is known to be
+      // wrong. When the last slot was skipped for the same reason, its line
+      // below says both, so the reason is not printed twice.
+      const ls = sch.last_skipped, lr = sch.last_run;
+      const saidBelow = ls && unconfirmedSkipText(ls.reason) && (!lr || ls.at >= (lr.finished_at || ""));
+      if (!saidBelow) body.append(el("p", { class: "form-hint", text: unconfirmedNextLine(sch.next_method_why) }));
     } else if (sch.runnable && sch.next_method) {
       const how = sch.next_method === "refresh" ? "will refresh the latest snapshot from the recorded changes" : "will read your whole database";
       // A setting that makes EVERY run a full read (no Backup dir, no index
@@ -12501,14 +12510,18 @@ function backupScheduleCard(cur, b) {
     // >= not >: the stamps are whole seconds, and a skip recorded in the
     // same second a run finished (the fallback's collision case) is the
     // newer fact, not an older one.
-    if (skip && (!run || skip.at >= (run.finished_at || ""))) {
+    if (skip && unconfirmedSkipText(skip.reason) && (!run || skip.at >= (run.finished_at || ""))) {
+      // #2659: nothing was indexed and the source cannot confirm capture,
+      // so the schedule made no snapshot. In grey, not red: no run failed
+      // and nothing is known to be wrong; the copy's headline says it in
+      // amber (snapshotHeroTone).
+      body.append(el("p", { class: "form-hint", text: unconfirmedSkipLine(utcLabel(skip.at), skip.reason, sch.runnable && sch.next_method === "skip") }));
+    } else if (skip && (!run || skip.at >= (run.finished_at || ""))) {
       alarm = true;
       // The daily cap on full reads the schedule takes on its own (#2006):
       // the update DID run; what waits is the full read in its place.
       const capped = /at most once a day/.test(skip.reason || "");
-      noteAt(skip.at, capped ? "A full read was held back: at most one a day."
-        : unconfirmedSkipText(skip.reason) ? "No snapshot was made: the source cannot confirm capture."
-        : "A scheduled run did not start.");
+      noteAt(skip.at, capped ? "A full read was held back: at most one a day." : "A scheduled run did not start.");
       // backupFoldError, not plainWords: a fold error rides in here too,
       // with its bare --allow-gaps hint.
       body.append(el("p", { class: "form-msg err", text: capped

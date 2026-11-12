@@ -319,11 +319,11 @@ func TestIndexMarkFor_aRecordedZeroIsAMark_2659(t *testing.T) {
 	}
 }
 
-// The page's own code, EXECUTED over the reasons the daemon writes: the
-// skipped slot's line on the schedule card, the next-run line, and the
-// copy's headline. A skip of this kind does not promise a retry at the next
-// slot (none is coming while it lasts), and no other skip loses that
-// promise.
+// The page's own code, EXECUTED over the reasons the daemon writes: which
+// skips the page recognizes as this one, the skipped slot's line on the
+// schedule card and the next-run line. A skip of this kind is not worded as
+// a run that failed to start and promises no retry at the next slot (none
+// is coming while it lasts); every other skip keeps its line.
 func TestUnconfirmedSkipOnThePage_executed_2659(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -358,13 +358,17 @@ func TestUnconfirmedSkipOnThePage_executed_2659(t *testing.T) {
 		functionBody(t, js, "function touchedRowBudgetText("),
 		functionBody(t, js, "function unconfirmedSkipText("),
 		functionBody(t, js, "function unconfirmedNextLine("),
+		functionBody(t, js, "function unconfirmedSkipLine("),
 		functionBody(t, js, "function scheduleSkipTail("),
 	}, "\n") + `
 const cases = ` + string(payload) + `;
 console.log(JSON.stringify(cases.map((c) => ({
   name: c.Name,
   is: unconfirmedSkipText(c.Reason),
-  card: "Did not run at 2026-11-11 10:30 UTC: " + backupFoldError(c.Reason) + scheduleSkipTail(c.Reason),
+  // The card's own branch: this skip has its line, any other the old one.
+  card: unconfirmedSkipText(c.Reason) ? unconfirmedSkipLine("2026-11-11 10:30 UTC", c.Reason, true)
+    : "Did not run at 2026-11-11 10:30 UTC: " + backupFoldError(c.Reason) + scheduleSkipTail(c.Reason),
+  alone: unconfirmedSkipLine("2026-11-11 10:30 UTC", c.Reason, false),
   next: unconfirmedNextLine(c.Reason),
 }))));
 `
@@ -377,8 +381,8 @@ console.log(JSON.stringify(cases.map((c) => ({
 		t.Fatalf("node: %v\n%s", err, out)
 	}
 	var got []struct {
-		Name, Card, Next string
-		Is               bool
+		Name, Card, Next, Alone string
+		Is                      bool
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("decode %q: %v", out, err)
@@ -399,8 +403,10 @@ console.log(JSON.stringify(cases.map((c) => ({
 			t.Logf("next: %s", g.Next)
 			if !strings.HasPrefix(g.Next, "Next run will make no snapshot: nothing was indexed since the previous snapshot") ||
 				!strings.HasSuffix(g.Next, "until a change is indexed or the source can be asked.") ||
-				!strings.HasSuffix(g.Card, "until a change is indexed or the source can be asked.") {
-				t.Errorf("%s: next=%q card=%q", g.Name, g.Next, g.Card)
+				!strings.HasPrefix(g.Card, "No snapshot was made at 2026-11-11 10:30 UTC: nothing was indexed since the previous snapshot") ||
+				!strings.HasSuffix(g.Card, "until a change is indexed or the source can be asked. As things stand, the next run will make none either.") ||
+				!strings.HasSuffix(g.Alone, "until a change is indexed or the source can be asked.") || strings.Contains(g.Card, "Did not run") {
+				t.Errorf("%s: next=%q card=%q alone=%q", g.Name, g.Next, g.Card, g.Alone)
 			}
 		}
 		for _, v := range []string{g.Card, g.Next} {
@@ -416,6 +422,10 @@ console.log(JSON.stringify(cases.map((c) => ({
 		`sch.next_method === "skip" ? (nextAt ? "no snapshot at the next slot" : "")`,
 		`else if (sch.next_method === "skip") cp.push(row("next run", "no snapshot", sch.next_method_why || ""));`,
 		`} else if (sch.runnable && sch.next_method === "skip") {`,
+		// The skipped slot's own line, in grey and ahead of the red branch.
+		`if (skip && unconfirmedSkipText(skip.reason) && (!run || skip.at >= (run.finished_at || ""))) {`,
+		// The copy's headline: amber with the reason, not "did not start".
+		`return { tone: "warn", why: "No snapshot was made at the last scheduled time: " + plainWords(skip.reason), link: "settings" };`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js no longer handles a skipped next run at: %s", want)
