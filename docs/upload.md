@@ -98,9 +98,10 @@ No environment variables or config files needed — the SDK discovers credential
 The AWS region is resolved in this order:
 
 1. `--region` flag (if provided)
-2. `AWS_REGION` environment variable
-3. `AWS_DEFAULT_REGION` environment variable
-4. `~/.aws/config` region setting for the active profile
+2. the bucket's own region, found as described in the next section
+3. `AWS_REGION` environment variable
+4. `AWS_DEFAULT_REGION` environment variable
+5. `~/.aws/config` region setting for the active profile
 
 ### A bucket in another region
 
@@ -116,11 +117,17 @@ to the bucket's region by itself.)
   archive and snapshot reads of `query`, `recover`, `reconstruct` and the
   web interface (time travel through the MySQL port included), the check of a
   snapshot before it is read, and `doctor`'s lifecycle and Object Lock checks
-  and `init --s3-arn`'s bucket check.
-- **Where it does not, yet**: `init --s3-bucket` (it creates the bucket in
-  `--s3-region`), `restore-index`, `archive reconcile` and `export iceberg`
-  use the configured region; for a bucket elsewhere, pass its region with
-  their region flag.
+  and `init --s3-arn`'s bucket check, `restore-index` (one client per bucket
+  it reads), `archive reconcile`, and the data files `export iceberg` writes
+  under an `s3://` `--warehouse` (with `--catalog glue`, or `--catalog rest`
+  with `--catalog-sigv4`; the catalog itself keeps the configured region).
+- **Where it does not**: `init --s3-bucket` uses `--s3-region` on purpose, as
+  it creates the bucket there. `export iceberg` with `--catalog rest` and no
+  `--warehouse` (the server places the tables, so the bucket is not known
+  in advance), or with an OAuth credential or a token instead of
+  `--catalog-sigv4` (the files then sign with what the catalog hands out, or
+  the configured region), and with `AWS_S3_ENDPOINT` set. A 301 from the
+  Iceberg file writes is not reworded: it is S3's own message.
 
 - **How**: one HEAD request on the bucket, without credentials. S3 names the
   bucket's region in that answer even when it refuses or redirects the
