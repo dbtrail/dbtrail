@@ -233,6 +233,8 @@ func TestOptionFile_neverPrintsAValue(t *testing.T) {
 		secret + " = 1\n",
 		"[dbtrail]\n" + secret + "\n",
 		"[dbtrail]\nindex-dsn = a\nindex-dsn = root:" + secret + "\n",
+		"[dbtrail]\nroot:" + secret + "@tcp(db:3306)/x = 1\n",
+		"[dbtrail]\n" + secret + " " + secret + " = 1\n",
 	}
 	for _, f := range files {
 		p := writeOptionFile(t, f)
@@ -364,4 +366,9 @@ func TestOptionFile_loadSetsOnlyWhatIsUnset(t *testing.T) {
 func TestOptionFile_unknownLineWithoutEqualsIsNotQuoted(t *testing.T) {
 	r := readFile(t, "[dbtrail]\nultrafst\n")
 	problemsContain(t, r, "line 2, which has no = sign, is not a DBTrail option, so it is ignored. Did you mean ultrafast?")
+}
+
+func TestOptionFile_nameThatIsNotANameIsNotQuoted(t *testing.T) {
+	r := readFile(t, "[dbtrail]\nroot:pw@tcp(db)/x = 1\n")
+	problemsContain(t, r, "line 2, whose name is not made of letters, digits and dashes, is not a DBTrail option, so it is ignored.")
 }

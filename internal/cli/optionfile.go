@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -24,6 +25,10 @@ const OptionFilePath = "/etc/dbtrail/dbtrail.cnf"
 // OptionGroup is the group of the file DBTrail reads. Other groups are left
 // alone, so one file can hold sections for other programs.
 const OptionGroup = "dbtrail"
+
+// optionNameShape is what an option name can be. Only a name of this shape
+// is quoted in a warning.
+var optionNameShape = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
 // optionFilePath is OptionFilePath, changed only by tests.
 var optionFilePath = OptionFilePath
@@ -117,9 +122,14 @@ func ReadOptionFile(path string, lookupEnv func(string) (string, bool), fromEnvF
 			}
 			// A line with no = sign is not quoted: it may be a password
 			// pasted on a line of its own.
+			// Nor is a name that cannot be an option name: what sits before
+			// the = sign may be a DSN pasted where a name belongs.
 			what := fmt.Sprintf("line %d: %q", o.Line, o.Name)
-			if !o.HasValue {
+			switch {
+			case !o.HasValue:
 				what = fmt.Sprintf("line %d, which has no = sign,", o.Line)
+			case !optionNameShape.MatchString(o.Name):
+				what = fmt.Sprintf("line %d, whose name is not made of letters, digits and dashes,", o.Line)
 			}
 			msg := fmt.Sprintf("%s is not a DBTrail option, so it is ignored.", what)
 			if near := settings.Nearest(o.Name); near != "" {
