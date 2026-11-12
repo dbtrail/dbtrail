@@ -18852,7 +18852,8 @@ function newServerPortBlock(res) {
 // mysqlLineUser is a server's name as the user of a mysql command line: a
 // name the shell would split or expand is left for the person to quote.
 function mysqlLineUser(name) {
-  return !name || /[\s'"$`\\!*?;&|<>()]/.test(name) ? "<server name>" : name;
+  const unsafe = " \t\n'\"$`\\!*?;&|<>()";
+  return !name || [...name].some((c) => unsafe.includes(c)) ? "<server name>" : name;
 }
 
 // connectNotice is the answer to a check that got past every light: capture
