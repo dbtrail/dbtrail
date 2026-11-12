@@ -1141,7 +1141,7 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 				stream.GapLostAt.Time.Format(TSFmt), stream.GapAckedAt.Time.Format(TSFmt))
 			fmt.Fprintln(w, "  Snapshot updates and reconstructions whose window spans that moment are")
 			fmt.Fprintln(w, "  refused. A full snapshot taken after it is not affected. This is reported")
-			fmt.Fprintln(w, "  while the index still holds the hour it happened in.")
+			fmt.Fprintln(w, "  while the index or its archives still hold the hour it happened in.")
 		default:
 			fmt.Fprintln(w, "  Continuity:      no gaps in the captured range (not a liveness check)")
 		}

@@ -125,7 +125,7 @@ func TestAcknowledgedLoss_reportedWhileTheWindowReachesIt(t *testing.T) {
 					"  Acknowledged loss: capture permanently lost events at 2026-06-22 12:00:00 (acknowledged 2026-06-22 13:00:00).\n",
 					"  Snapshot updates and reconstructions whose window spans that moment are\n",
 					"  refused. A full snapshot taken after it is not affected. This is reported\n",
-					"  while the index still holds the hour it happened in.\n",
+					"  while the index or its archives still hold the hour it happened in.\n",
 				} {
 					if !strings.Contains(text, want) {
 						t.Errorf("status text missing %q:\n%s", want, text)

@@ -377,21 +377,24 @@ of the banner:
   Acknowledged loss: capture permanently lost events at 2026-02-19 11:30:00 (acknowledged 2026-02-19 14:02:11).
   Snapshot updates and reconstructions whose window spans that moment are
   refused. A full snapshot taken after it is not affected. This is reported
-  while the index still holds the hour it happened in.
+  while the index or its archives still hold the hour it happened in.
 ```
 
 **When an acknowledged loss stops being reported.** The record in
 `stream_state` is never erased, and the report follows the changes the index
-still holds. Once rotation has dropped the hour of the loss, and no archived
-hour reaches back to it, nothing still held spans that moment: `status` prints
+still holds. Once rotation has dropped the hour of the loss, and the archived
+hours do not reach back to it without a break from the hours still in the
+index, the report takes that moment as outside what is held: `status` prints
 `no gaps in the captured range`, the JSON verdict is `ok` with no
 `gap_acknowledged` object, and the web interface shows the green `no gaps`
 and `continuity ok` again. `bintrail status`, `GET /api/status`, the Status
 page and the Restore coverage card (`GET /api/coverage`) all apply this one
 rule, against the same start of held changes that `/api/coverage` reports as
 `delta_from`. The loss stays reported when that start cannot be read, and on an
-index shared by more than one source, where it cannot be told whose archived
-hours reach further back. A loss nobody acknowledged is never dropped from the
+index with archives that is shared by more than one source, where it cannot
+be told whose archived hours reach further back. With archiving on, that can
+be for as long as the archives are kept: nothing removes an archived hour
+from the record. A loss nobody acknowledged is never dropped from the
 report this way: it stays `gap_lost` until it is acknowledged.
 
 An acknowledgement does not bring the events back. `reconstruct`, a snapshot
@@ -502,7 +505,8 @@ acknowledged loss, where `--fail-on-gap` passes: use the flag for an alarm an
 acknowledgement silences, and the `jq` check to require that nothing is known
 to be missing from the changes the index still holds. The `jq` check passes
 again once rotation has dropped the hour of the acknowledged loss, which takes
-as long as the index's retention. The green "no gaps" badge
+as long as the index's retention, or as long as the archives are kept when
+archived hours still reach back to it. The green "no gaps" badge
 in the [web interface](console.md) keys on `stream.continuity.status == "ok"`.
 
 When `stream_state` could not be **read**, the JSON output instead carries a

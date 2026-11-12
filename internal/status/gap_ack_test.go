@@ -226,7 +226,7 @@ func TestWriteStatus_acknowledgedLoss(t *testing.T) {
 		"acknowledged 2026-06-22 13:00:00",
 		"Snapshot updates and reconstructions whose window spans that moment are",
 		"refused. A full snapshot taken after it is not affected. This is reported",
-		"while the index still holds the hour it happened in.",
+		"while the index or its archives still hold the hour it happened in.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("acknowledged status text missing %q:\n%s", want, out)
