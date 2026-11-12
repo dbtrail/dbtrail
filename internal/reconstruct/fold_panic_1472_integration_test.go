@@ -82,6 +82,8 @@ func TestReconstructTables_containsAPanicInOneTablesFold(t *testing.T) {
 		OutputFormat: OutputFormatMydumper,
 		Parallelism:  2,
 		AllowGaps:    true, // an empty index must not refuse before the fold runs
+		// The surviving table must fold for real, not be refused up front.
+		AllowChangesOnly: true,
 	})
 
 	// 1. The run failed. A panicked table must never be folded into a run that

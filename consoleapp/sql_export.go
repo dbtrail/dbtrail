@@ -946,6 +946,10 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 		At:                 req.At.UTC(),
 		OutputDir:          dir,
 		OutputFormat:       reconstruct.OutputFormatMydumper,
+		// Not an opt-in to a partial file: sqlExportRunError fails the build
+		// for any table the engine wrote from its changes alone, under the
+		// console's own wording.
+		AllowChangesOnly:   true,
 		Parallelism:        daemonFoldParallelism,
 		WarnEventThreshold: daemonFoldWarnEventThreshold,
 		MaxTouchedRows:     daemonFoldMaxTouchedRows,
@@ -958,8 +962,9 @@ func sqlExportFoldConfig(req console.SQLExportRequest, dir string, tableList []s
 }
 
 // sqlExportRunError folds the engine's per-table reports into the run
-// verdict. The engine's binlog-only fallback (baseline vanished mid-build)
-// warns and keeps going in mydumper mode; here it must fail the run: such a
+// verdict. The engine's binlog-only fallback (baseline vanished mid-build),
+// which sqlExportFoldConfig asks for so that the table is named here, warns
+// and keeps going in mydumper mode; here it must fail the run: such a
 // table holds only the rows the window touched, and drill's doctrine
 // applies — a dump without its baseline is never a PASS.
 func sqlExportRunError(reports []*reconstruct.TableReport, runErr error) error {

@@ -152,6 +152,16 @@ type FullTableConfig struct {
 	// anchoring contract.
 	OutputFormat string
 
+	// AllowChangesOnly lets a table with no snapshot at or before At be
+	// written from its recorded changes alone (reconstructBinlogOnly). Such
+	// output holds the rows those changes touched and nothing else, so the
+	// zero value refuses the table with a ChangesOnlyError and writes nothing
+	// for it. Set it only where the caller says what the output is: the CLI
+	// behind --allow-changes-only, and the callers that grade
+	// TableReport.BinlogOnly themselves (drill, the console's .sql build).
+	// It changes nothing for OutputFormatParquet, which always refuses.
+	AllowChangesOnly bool
+
 	// WriterID is the identity a Parquet snapshot is signed with (#1762).
 	// Empty means "ask the index": the run reads the source's bintrail_id
 	// from the index it folds (serverid.SnapshotWriterID), which is the
@@ -1348,6 +1358,16 @@ func ReconstructTable(
 					"a snapshot derived only from binlog deltas would omit every row the window never touched — "+
 					"take a real snapshot for this table first (`bintrail dump` + `bintrail baseline`)",
 				schema, table, cfg.At.UTC().Format(time.RFC3339))
+		}
+		// Every other output is a dump an operator loads somewhere. Written
+		// from the changes alone it looks like the table and is not, so it is
+		// refused before anything is fetched or written unless the caller
+		// asked for exactly that.
+		if !cfg.AllowChangesOnly {
+			return nil, &ChangesOnlyError{
+				Schema: schema, Table: table, At: cfg.At,
+				CreateRecordedAt: recordedCreateTableAt(ctx, db, schema, table, cfg.At),
+			}
 		}
 		return reconstructBinlogOnly(ctx, cfg, schema, table, db, engine, resolver, dbName, rep, start)
 	}
@@ -2889,8 +2909,73 @@ func warnUndetectableBinaryPK(schema, table string, pkCols []metadata.ColumnMeta
 	}
 }
 
+// ErrChangesOnly marks a table refused because it has no snapshot to start
+// from and the caller did not ask for changes-only output. It is deliberately
+// not ErrNoBaseline: nothing should answer it by looking somewhere else.
+var ErrChangesOnly = errors.New("table could only be rebuilt from its recorded changes")
+
+// ChangesOnlyError is the refusal of a full-table reconstruct for a table
+// with no snapshot at or before At, when FullTableConfig.AllowChangesOnly is
+// off. Its text names no flag and no parameter, because each surface has its
+// own way to opt in (or none); the surface adds that.
+type ChangesOnlyError struct {
+	Schema, Table string
+	At            time.Time
+	// CreateRecordedAt is when the index recorded a CREATE TABLE for the
+	// table at or before At, zero when it holds none. A table created after
+	// the newest snapshot is the one case where the changes can be the whole
+	// table, and only if every change since that moment is still recorded.
+	CreateRecordedAt time.Time
+}
+
+func (e *ChangesOnlyError) Error() string {
+	return fmt.Sprintf("%s.%s has no snapshot at or before %s to start from. "+
+		"Its recorded changes alone give only the rows they touched, with every other row missing, "+
+		"so nothing was written for it",
+		e.Schema, e.Table, e.At.UTC().Format(time.RFC3339))
+}
+
+func (e *ChangesOnlyError) Unwrap() error { return ErrChangesOnly }
+
+// recordedCreateTableAt is when the index recorded the newest CREATE TABLE
+// for the table at or before at: the statement findCapturedCreateTableDDL
+// would ship as the schema file. Zero when there is none or the lookup fails;
+// it only adds a sentence to a refusal, so a failure is not worth reporting.
+func recordedCreateTableAt(ctx context.Context, db *sql.DB, schema, table string, at time.Time) time.Time {
+	if db == nil {
+		return time.Time{}
+	}
+	var detected sql.NullTime
+	err := db.QueryRowContext(ctx, `
+		SELECT detected_at FROM schema_changes
+		WHERE schema_name = ? AND table_name = ? AND ddl_type IN (?, ?) AND detected_at <= ?
+		  AND ddl_query NOT LIKE ?
+		ORDER BY detected_at DESC, id DESC
+		LIMIT 1`,
+		schema, table, event.DDLCreateTable, event.DDLReplaceTable, at, event.InferredDDLPrefix+"%").Scan(&detected)
+	if err != nil || !detected.Valid {
+		return time.Time{}
+	}
+	return detected.Time.UTC()
+}
+
+// changesOnlyMarker opens the schema file of a table written from its
+// recorded changes alone. The schema file is the one file of the table a
+// loader always reads first, and this is its first line.
+func changesOnlyMarker(schema, table string) string {
+	schema, table = recovery.SanitizeForComment(schema), recovery.SanitizeForComment(table)
+	return fmt.Sprintf(
+		"-- bintrail: CHANGES ONLY. The data file(s) of %s.%s hold only the rows its recorded
+"+
+			"-- changes touched. A row that no recorded change touched is missing. This is not
+"+
+			"-- the whole table unless every row of it was written inside the recorded changes.
+",
+		schema, table)
+}
+
 // reconstructBinlogOnly is the ErrNoBaseline fallback for full-table
-// reconstruct (#766). A table created after the last baseline snapshot has no
+// reconstruct (#766), reached only with FullTableConfig.AllowChangesOnly. A table created after the last baseline snapshot has no
 // Parquet to merge against; previously ReconstructTable stopped there and
 // returned an empty report, silently discarding every row that only ever
 // existed in the binlog — even a table with thousands of rows. This mirrors
@@ -3033,7 +3118,8 @@ func reconstructBinlogOnly(
 		// applied later, up to cfg.At (that class of point-in-time schema
 		// drift is the separately-tracked #600/#601/#602 family). Label it so
 		// a reader doesn't mistake it for a verified-current definition.
-		createSQL = "-- bintrail: CREATE TABLE captured from schema_changes at table-creation time\n" +
+		createSQL = changesOnlyMarker(schema, table) +
+			"-- bintrail: CREATE TABLE captured from schema_changes at table-creation time\n" +
 			"-- (binlog-only fallback, #766). If the table was ALTERed afterwards, this may\n" +
 			"-- not match the columns in the accompanying data file(s) — verify before loading.\n" +
 			createSQL
@@ -3047,8 +3133,8 @@ func reconstructBinlogOnly(
 	}
 	rep.Duration = time.Since(start)
 
-	slog.Warn("full-table reconstruct: no baseline found for table; recovered via binlog-only fallback "+
-		"(rows outside the retained binlog window, if any, are not included)",
+	slog.Warn("full-table reconstruct: table written from its recorded changes only; "+
+		"a row that no recorded change touched is not in the output",
 		"schema", schema, "table", table,
 		"events_applied", rep.EventsApplied,
 		"inserts_emitted", rep.InsertsEmitted,
@@ -3092,8 +3178,9 @@ func binlogOnlyDestructiveDDLErr(schema, table, ddlType string, detectedAt, firs
 // the name a break-bearing table shows up under stays recoverable from the text,
 // instead of silently becoming a different, plausible-looking one.
 func binlogOnlySchemaPlaceholder(schema, table string) string {
+	marker := changesOnlyMarker(schema, table)
 	schema, table = recovery.SanitizeForComment(schema), recovery.SanitizeForComment(table)
-	return fmt.Sprintf(
+	return marker(schema, table) + fmt.Sprintf(
 		"-- bintrail: no baseline snapshot exists for %s.%s (table created after the last\n"+
 			"-- `bintrail baseline` run, or never baselined), and no CREATE TABLE statement for\n"+
 			"-- it was found in schema_changes either. The rows in the accompanying data\n"+

@@ -89,6 +89,12 @@ destination. Two output formats:
                              coordinate where the next reconstruct resumes,
                              so it can anchor the one after it.
 
+A table with no snapshot at or before --at fails the run: without a snapshot
+only the rows its recorded changes touched can be written, and every other
+row would be missing. Nothing is written for that table. Pass
+--allow-changes-only (mydumper output only) to write those rows anyway; the
+summary and the table's schema file then say the output is changes only.
+
 Examples:
   # Current state of a row (baseline + all binlog events up to now)
   bintrail reconstruct --index-dsn "..." --schema mydb --table orders \
@@ -145,14 +151,15 @@ var (
 	recAllowGaps    bool
 
 	// Full-table mydumper output mode (#187).
-	recOutputFormat string
-	recCarryForward bool
-	recOutputDir    string
-	recTables       string
-	recChunkSize    string
-	recParallelism  int
-	recWarnEvents   int64
-	recFetchBatch   int
+	recOutputFormat     string
+	recAllowChangesOnly bool
+	recCarryForward     bool
+	recOutputDir        string
+	recTables           string
+	recChunkSize        string
+	recParallelism      int
+	recWarnEvents       int64
+	recFetchBatch       int
 )
 
 func init() {
@@ -172,6 +179,7 @@ func init() {
 	reconstructCmd.Flags().BoolVar(&recAllowGaps, "allow-gaps", false, "Proceed even when the event index has missing hours in the baseline-to-target range (may produce incomplete reconstruction)")
 	// Full-table mydumper mode (#187).
 	reconstructCmd.Flags().StringVar(&recOutputFormat, "output-format", "", "Output format for full-table mode: 'mydumper' for a mydumper-compatible dump directory, 'parquet' for a discoverable baseline snapshot, 'psql' for one SQL file per table that psql loads (PostgreSQL sources) (default: single-row mode)")
+	reconstructCmd.Flags().BoolVar(&recAllowChangesOnly, "allow-changes-only", false, "With --output-format mydumper, write a table that has no snapshot at or before --at from its recorded changes alone: only the rows those changes touched, every other row missing. Without it such a table fails the run")
 	reconstructCmd.Flags().BoolVar(&recCarryForward, "carry-forward-unchanged", false, "Off by default. With --output-format parquet, publish a table that had no changes by reusing the previous snapshot's file (hard link where possible) instead of writing it again")
 	AddOutputFlag(reconstructCmd, &recOutputDir, "", "Output directory for full-table mode (created if missing); with --output-format=parquet this is the baselines root and the snapshot lands in a <timestamp>/ subdirectory", OutputDirAlias)
 	reconstructCmd.Flags().StringVar(&recTables, "tables", "", "Comma-separated schema.table list for full-table mode (e.g. mydb.orders,mydb.users)")
@@ -186,6 +194,10 @@ func init() {
 
 func runReconstruct(cmd *cobra.Command, args []string) error {
 	start := time.Now()
+
+	if recAllowChangesOnly && recOutputFormat != reconstruct.OutputFormatMydumper {
+		return errors.New(allowChangesOnlyMisuse)
+	}
 
 	// ── --output-format mydumper mode: full-table reconstruct (#187) ───────────
 	if recOutputFormat != "" {
@@ -835,6 +847,7 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 		// without it the one surface an operator drives by hand is the one
 		// that can never reuse a file.
 		CarryForwardUnchanged: recCarryForward,
+		AllowChangesOnly:      recAllowChangesOnly,
 		ChunkSize:             chunkSize,
 		Parallelism:           recParallelism,
 		AllowGaps:             recAllowGaps,
@@ -847,8 +860,13 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 		// defaulted to ~80% of host RAM regardless of what the operator set.
 		DuckDBTuning: duckTuning,
 	}
-	reports, err := reconstruct.ReconstructTables(cmd.Context(), cfg)
+	reports, failures, err := reconstructTablesDetailed(cmd.Context(), cfg)
 	if err != nil {
+		// A table with no snapshot was refused (no --allow-changes-only):
+		// the engine says what it would have held, this says what to do.
+		if advice := changesOnlyAdvice(cmd.Context(), cmd, failures, baselineSrc); advice != "" {
+			return fmt.Errorf("full-table reconstruct: %w\n%s", err, advice)
+		}
 		// Same CLI-layer hint as single-row reconstruct (the %w chain
 		// survives ReconstructTables' errors.Join, so errors.As still
 		// unwraps the library type).
@@ -864,7 +882,8 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 	for _, rep := range reports {
 		totalRows += rep.BaselineRows + rep.UpdatesApplied + rep.InsertsEmitted
 		totalEvents += rep.EventsApplied
-		slog.Info("table dump complete",
+		level, msg := tableSummary(rep)
+		slog.Log(cmd.Context(), level, msg,
 			"schema", rep.Schema, "table", rep.Table,
 			"baseline_rows", rep.BaselineRows,
 			"updates_applied", rep.UpdatesApplied,
@@ -878,22 +897,96 @@ func runReconstructFullTable(cmd *cobra.Command, start time.Time) error {
 	// unit is "who read which table's historical rows", and a --tables run
 	// materializes each of them in full.
 	for _, rep := range reports {
-		auditReconstruct(cmd.Context(), "full-table", rep.Schema, rep.Table, map[string]string{
+		detail := map[string]string{
 			"at":            recAt,
 			"rows":          strconv.FormatInt(rep.BaselineRows+rep.UpdatesApplied+rep.InsertsEmitted, 10),
 			"events":        strconv.FormatInt(rep.EventsApplied, 10),
 			"output_dir":    recOutputDir,
 			"output_format": recOutputFormat,
-		})
+		}
+		if rep.BinlogOnly {
+			detail["changes_only"] = "true"
+		}
+		auditReconstruct(cmd.Context(), "full-table", rep.Schema, rep.Table, detail)
 	}
 
-	slog.Info("full-table reconstruct complete",
+	closing := []any{
 		"tables", len(reports),
 		"total_rows", totalRows,
 		"total_events_applied", totalEvents,
 		"output_dir", recOutputDir,
-		"duration_ms", time.Since(start).Milliseconds())
+		"duration_ms", time.Since(start).Milliseconds(),
+	}
+	// Listed on the last line too: it is the line a reader of a long run
+	// sees, and the per-table lines above it may have scrolled away.
+	if names := changesOnlyTables(reports); len(names) > 0 {
+		closing = append(closing, "changes_only_tables", strings.Join(names, ","))
+	}
+	slog.Info("full-table reconstruct complete", closing...)
 	return nil
+}
+
+// reconstructTablesDetailed is the engine behind a seam, so a test can hand
+// the command a set of reports and failures without an index.
+var reconstructTablesDetailed = reconstruct.ReconstructTablesDetailed
+
+// allowChangesOnlyMisuse refuses --allow-changes-only outside the one mode it
+// changes. Accepted in silence elsewhere, it would read as honored.
+const allowChangesOnlyMisuse = "--allow-changes-only applies only to --output-format mydumper. " +
+	"No other mode writes a row or a table from recorded changes alone"
+
+// changesOnlySummaryMsg is the per-table summary line of a table written with
+// --allow-changes-only in place of "table dump complete".
+const changesOnlySummaryMsg = "table dump holds changes only: a row that no recorded change touched is missing"
+
+// tableSummary is the level and message of a table's summary line. A table
+// written from its recorded changes alone is not reported as a complete dump.
+func tableSummary(rep *reconstruct.TableReport) (slog.Level, string) {
+	if rep.BinlogOnly {
+		return slog.LevelWarn, changesOnlySummaryMsg
+	}
+	return slog.LevelInfo, "table dump complete"
+}
+
+// changesOnlyTables is the sorted schema.table names of the reports written
+// from recorded changes alone.
+func changesOnlyTables(reports []*reconstruct.TableReport) []string {
+	var names []string
+	for _, rep := range reports {
+		if rep.BinlogOnly {
+			names = append(names, rep.Schema+"."+rep.Table)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// changesOnlyAdvice is what the command adds to the engine's refusal of each
+// table that has no snapshot (reconstruct.ChangesOnlyError): why the location
+// had none, as the single-row refusal tells it, and the flag that writes the
+// changed rows anyway. One line per table, sorted; "" when no table was
+// refused on that ground.
+func changesOnlyAdvice(ctx context.Context, cmd *cobra.Command, failures []reconstruct.TableFailure, location string) string {
+	var lines []string
+	for _, f := range failures {
+		var e *reconstruct.ChangesOnlyError
+		if !errors.As(f.Err, &e) {
+			continue
+		}
+		name := e.Schema + "." + e.Table
+		var b strings.Builder
+		b.WriteString(name + ": " + noSnapshotWhy(ctx, cmd, e.Schema, e.Table, e.At, location) + ". ")
+		if !e.CreateRecordedAt.IsZero() {
+			fmt.Fprintf(&b, "The index recorded a CREATE TABLE for it at %s: if the table was created then "+
+				"and every change since is still recorded, its changes are the whole table. ",
+				e.CreateRecordedAt.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintf(&b, "To write only the changed rows of %s anyway, add --allow-changes-only; "+
+			"the summary then reports it as changes only", name)
+		lines = append(lines, b.String())
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "\n")
 }
 
 // auditReconstruct reports a completed point-in-time reconstruction to the
@@ -1058,6 +1151,13 @@ var listSnapshots = reconstruct.ListBaselines
 // claims no case.
 func noSnapshotBeforeError(ctx context.Context, cmd *cobra.Command, schema, table string, at time.Time,
 	location string, baselineOnly bool, err error) error {
+	return &noSnapshotError{err: err, msg: needsSnapshot(schema+"."+table, at, baselineOnly) + " " +
+		noSnapshotWhy(ctx, cmd, schema, table, at, location)}
+}
+
+// noSnapshotWhy is the part of noSnapshotBeforeError that tells the cases
+// apart and says what to do, shared with the full-table refusal.
+func noSnapshotWhy(ctx context.Context, cmd *cobra.Command, schema, table string, at time.Time, location string) string {
 	name := schema + "." + table
 	when := at.UTC().Format(time.RFC3339)
 	take := snapshotCommand(cmd)
@@ -1101,5 +1201,5 @@ func noSnapshotBeforeError(ctx context.Context, cmd *cobra.Command, schema, tabl
 		why = fmt.Sprintf("%q holds no snapshots. Take one (`%s` writes them); "+
 			"it answers moments from then on, not earlier ones", location, take)
 	}
-	return &noSnapshotError{err: err, msg: needsSnapshot(name, at, baselineOnly) + " " + why}
+	return why
 }

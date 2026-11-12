@@ -333,6 +333,10 @@ func runDrill(cmd *cobra.Command, args []string) error {
 		// The format the target loads: a mydumper dump into MySQL, psql's
 		// SQL into PostgreSQL.
 		OutputFormat: target.OutputFormat(),
+		// A table with no snapshot is still folded, so that it gets its own
+		// verdict: drillTable fails it without loading it. Refused in the
+		// engine, it would end the whole rehearsal with no report.
+		AllowChangesOnly: true,
 		// Each chunk is applied to the scratch as ONE statement, so it must
 		// fit the target's max_allowed_packet. Chunks can overshoot by one
 		// row tuple (rotation triggers after the threshold), so the ~48MiB

@@ -68,7 +68,7 @@ func TestReconstructTable_generatedPKRefusal_baselinePath(t *testing.T) {
 // fail loudly, so without the gate a versioned table's history-row inserts
 // would be emitted as duplicate live rows.
 func TestReconstructTable_generatedPKRefusal_binlogOnlyPath(t *testing.T) {
-	cfg := FullTableConfig{BaselineSrc: t.TempDir(), At: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)}
+	cfg := FullTableConfig{BaselineSrc: t.TempDir(), At: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), AllowChangesOnly: true}
 
 	_, err := ReconstructTable(context.Background(), cfg, "svdb", "orders", nil, nil, nil, svResolver1266(), "")
 	if err == nil {

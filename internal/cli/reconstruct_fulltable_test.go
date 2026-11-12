@@ -23,8 +23,10 @@ func resetMydumperFlags(t *testing.T) {
 	origTables := recTables
 	origChunkSize := recChunkSize
 	origParallelism := recParallelism
+	origAllowChangesOnly := recAllowChangesOnly
 	t.Cleanup(func() {
 		applyRecFlags(origSnap)
+		recAllowChangesOnly = origAllowChangesOnly
 		recOutputFormat = origOutputFormat
 		recOutputDir = origOutputDir
 		recTables = origTables
@@ -54,6 +56,7 @@ func resetMydumperFlags(t *testing.T) {
 	recChunkSize = "256MB"
 	recParallelism = 1
 	recFetchBatch = 0
+	recAllowChangesOnly = false
 }
 
 // TestRunReconstructFullTable_rejectsNegativeFetchBatch pins the validation on
