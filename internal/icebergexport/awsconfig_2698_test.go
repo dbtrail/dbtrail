@@ -3,6 +3,8 @@ package icebergexport
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -179,5 +181,45 @@ func TestOpenCatalog_glueGetsTheBucketConfig_2698(t *testing.T) {
 	if s3.NewFromConfig(got).Options().Region != "us-east-1" || awsglue.NewFromConfig(got).Options().Region != "us-west-2" {
 		t.Errorf("Glue catalog config: S3 %q, Glue %q; want us-east-1 and us-west-2",
 			s3.NewFromConfig(got).Options().Region, awsglue.NewFromConfig(got).Options().Region)
+	}
+}
+
+// The operator's own Glue endpoint (a VPC endpoint without private DNS, a
+// test Glue) is kept: the Glue client the catalog builds goes where it went
+// before #2698, whatever the source of that endpoint. Only S3 changes.
+func TestGlueCatalogConfig_keepsTheOperatorsGlueEndpoint_2698(t *testing.T) {
+	const vpce = "https://vpce-0abc.glue.us-west-2.vpce.amazonaws.com"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T)
+		want  string // "" = AWS's own endpoint for the catalog's region
+	}{
+		{"AWS_ENDPOINT_URL_GLUE", func(t *testing.T) { t.Setenv("AWS_ENDPOINT_URL_GLUE", vpce) }, vpce},
+		{"services section in ~/.aws/config", func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "config")
+			body := "[default]\nservices = local-glue\n\n[services local-glue]\nglue =\n  endpoint_url = " + vpce + "\n"
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AWS_CONFIG_FILE", p)
+		}, vpce},
+		{"none", func(*testing.T) {}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			regionEnv2698(t)
+			t.Setenv("AWS_ENDPOINT_URL_GLUE", "")
+			tc.setup(t)
+			files, cat, err := awsConfigs(context.Background(), "", "", "set a region")
+			if err != nil {
+				t.Fatal(err)
+			}
+			files.Region = "us-east-1"
+			g := awsglue.NewFromConfig(glueCatalogConfig(files, cat)).Options()
+			if got := aws.ToString(g.BaseEndpoint); got != tc.want || g.Region != "us-west-2" {
+				t.Errorf("Glue endpoint %q region %q; want %q and the catalog's us-west-2", got, g.Region, tc.want)
+			}
+			t.Logf("Glue endpoint: %q", aws.ToString(g.BaseEndpoint))
+		})
 	}
 }

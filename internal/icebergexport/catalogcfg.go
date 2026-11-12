@@ -418,15 +418,22 @@ var newGlueCatalog = func(cfg aws.Config) catalog.Catalog {
 // in the context: it wraps the context again when it loads a table, right
 // after creating it and on every commit. So it is the FILES config (the
 // warehouse bucket's region, the S3 endpoint), with the Glue client pinned
-// to the catalog's region and AWS's own endpoint through a per-service
-// option, which the SDK applies only when it builds the Glue client.
+// to the catalog's region and to the endpoint the catalog-only config gives
+// it, through a per-service option the SDK applies only when it builds the
+// Glue client. That endpoint is computed from the catalog config as the SDK
+// resolves it (an AWS_ENDPOINT_URL_GLUE, a glue endpoint_url in a services
+// section of ~/.aws/config, else AWS's own): the option runs AFTER the SDK
+// resolved the endpoint from the files config, so clearing it would drop an
+// operator's Glue endpoint (a VPC endpoint without private DNS, a test Glue)
+// and send the catalog calls to AWS's public Glue.
 func glueCatalogConfig(files, catalogCfg aws.Config) aws.Config {
 	c := files.Copy()
 	region := catalogCfg.Region
+	endpoint := awsglue.NewFromConfig(catalogCfg).Options().BaseEndpoint
 	c.ServiceOptions = append(slices.Clone(c.ServiceOptions), func(service string, o any) {
 		if g, ok := o.(*awsglue.Options); ok && service == awsglue.ServiceID {
 			g.Region = region
-			g.BaseEndpoint = nil
+			g.BaseEndpoint = endpoint
 		}
 	})
 	return c
