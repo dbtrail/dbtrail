@@ -287,7 +287,7 @@ func init() {
 			"day old, or the chain's start comes close to the oldest events the index keeps. The generated DuckDB views read the chain; every other reader uses the table file and the index, as before. A snapshot written this way "+
 			"must not be read by a bintrail older than this one. Turning it off needs nothing else: the next refresh writes every table in full. A DuckDB view that follows the newest snapshot keeps working when a pair appears or goes away, except over a table whose schema it could not read, or when another table in the same schema is named after it plus a dot (orders and orders.old): the generated file names those, and they refuse once a pair appears, until the views are generated again.")
 	watchCmd.Flags().StringVar(&upBaselineRefreshEvery, "baseline-refresh-interval", "", "Periodically refresh each server's newest baseline snapshot from the index (Nm/Nh/Nd; default: off). Runs with the conservative DuckDB budget, folds at most 2 tables at a time, and never publishes over a known capture gap.")
-	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "Periodically prune local --baseline-dir snapshots older than this (Nd/Nh) once a durable copy exists in --baseline-s3 (never deletes the only copy or the newest snapshot per table)")
+	watchCmd.Flags().StringVar(&upConsoleBaselineRetain, "baseline-retain", "", "The old way to bound local snapshots, still honored: prune those older than this (Nd/Nh) once a durable copy exists in S3 (never the only copy or the newest snapshot per table). Each server's own count, Keep by count on the Snapshots page, is the control now")
 	watchCmd.Flags().StringVar(&upConsoleServersFile, "console-servers-file", "", "Path to the server registry YAML managed by the web interface (default ~/.config/bintrail/console-servers.yaml)")
 	watchCmd.Flags().StringVar(&upConsoleAuthFile, "console-auth-file", "", "Path to the web interface auth file enabling password login (default ~/.config/bintrail/console-auth.yaml; created with `bintrail-console user set-password`)")
 	watchCmd.Flags().StringVar(&upConsoleMCPTokenFile, "console-mcp-token-file", "", "Path to the managed MCP token file written by Settings → MCP Server (default ~/.config/bintrail/console-mcp-token.yaml). Point it at persistent storage when the daemon runs in a container.")
@@ -1646,9 +1646,10 @@ func recordVerifySkip(history *console.VerifyHistory, e console.ServerEntry, rea
 type baselinePruneTarget struct {
 	dir string
 	s3  string
-	// keepNewest > 0 marks a local-only target (#1681): no destination, so
-	// the prune keeps the newest keepNewest snapshots instead of confirming
-	// copies. s3 is empty on such a target.
+	// keepNewest > 0 is a server's own count (#1681): the prune keeps the
+	// newest keepNewest snapshots of the folder. With s3 empty that is the
+	// whole rule; with s3 set (#2658) a snapshot past the count goes only
+	// once that destination confirms its copy.
 	keepNewest int
 }
 
@@ -1686,21 +1687,54 @@ func baselinePruneTargets(entries []console.ServerEntry, globalDir, globalS3 str
 	return targets
 }
 
-// localKeepPruneTargets are the local-only targets (#1681): every folder
-// console.LocalKeepTargets names, with the daemon's own --baseline-dir
-// excluded (its snapshots follow the global rule). Sorted for a stable order.
-func localKeepPruneTargets(entries []console.ServerEntry, globalDir string) []baselinePruneTarget {
+// localKeepPruneTargets are the targets pruned to a server's own count
+// (#1681): every folder console.LocalKeepTargets names, with the daemon's own
+// --baseline-dir excluded (its snapshots follow the global rule). A server
+// with an S3 destination is one of them since #2658, and its target carries
+// the destination, in the server's own spelling of both, like the age
+// targets. Sorted for a stable order.
+//
+// covered are the folders named, symlinks resolved: prunePlan leaves the age
+// target of such a folder out, since the count target is pruned with the age
+// too.
+func localKeepPruneTargets(entries []console.ServerEntry, globalDir string) (out []baselinePruneTarget, covered map[string]bool) {
 	keep := console.LocalKeepTargets(entries, globalDir)
 	dirs := make([]string, 0, len(keep))
 	for d := range keep {
 		dirs = append(dirs, d)
 	}
 	sort.Strings(dirs)
-	out := make([]baselinePruneTarget, 0, len(dirs))
+	out = make([]baselinePruneTarget, 0, len(dirs))
+	covered = make(map[string]bool, len(dirs))
 	for _, d := range dirs {
-		out = append(out, baselinePruneTarget{dir: d, keepNewest: keep[d]})
+		t := baselinePruneTarget{dir: d, keepNewest: keep[d]}
+		if e, ok := console.LocalKeepServer(entries, d); ok && strings.TrimSpace(e.BaselineS3) != "" {
+			t.dir, t.s3 = e.BaselineDir, e.BaselineS3
+		}
+		covered[d] = true
+		out = append(out, t)
 	}
-	return out
+	return out, covered
+}
+
+// prunePlan is what one cycle prunes (#2658): the folders with a count of
+// their own, each once, and, where an age is set, every other folder with an
+// S3 destination by that age, as before. A folder with a count is never also
+// an age target: one prune of it applies both rules (a snapshot goes when it
+// is past the count AND older than the age), where two prunes in a row would
+// let the age alone take the folder under its count.
+func prunePlan(entries []console.ServerEntry, globalDir, globalS3 string, retain time.Duration) []baselinePruneTarget {
+	byCount, covered := localKeepPruneTargets(entries, globalDir)
+	var targets []baselinePruneTarget
+	if retain > 0 {
+		for _, t := range baselinePruneTargets(entries, globalDir, globalS3) {
+			if covered[console.CanonicalDir(t.dir)] {
+				continue
+			}
+			targets = append(targets, t)
+		}
+	}
+	return append(targets, byCount...)
 }
 
 // runBaselinePruneCycle prunes each target via pruneFn, one (dir + S3) pair at a
@@ -1842,6 +1876,13 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	}
 }
 
+// baselineRetainOldWayMsg is what the daemon says once at startup when an age
+// retention is set (#2658).
+const baselineRetainOldWayMsg = "--baseline-retain (Delete by age) still removes local snapshots by age, and it is the old way: " +
+	"each server's own count (Keep by count on the " + console.PageSnapshots + " page) is what bounds its local folder now. " +
+	"A server with no count is pruned by this age alone, once S3 has its snapshots; " +
+	"on a server with a count a snapshot is removed only when it is past the count and older than this age"
+
 // startBaselinePruneLoop launches a periodic prune of local baseline snapshots
 // across every (dir + S3) target — the daemon-global pair plus every registry
 // server's per-server baseline dir (#616). Each target is reclaimed only where a
@@ -1891,6 +1932,11 @@ func startBaselinePruneLoop(ctx context.Context, reg *console.Registry, globalDi
 		interval = time.Hour
 	}
 	slog.Info("baseline prune loop enabled", "retain", bootRetain, "interval", interval)
+	if bootRetain > 0 {
+		// Said once, at startup (#2658): the age still prunes, and it is no
+		// longer what bounds a server's folder.
+		slog.Warn(baselineRetainOldWayMsg, "retain", bootRetain)
+	}
 	runOnce := func() { baselinePruneSweep(ctx, reg, globalDir, globalS3, retainRaw, baseline.PruneLocal) }
 	go func() {
 		// One sweep shortly after startup (the min-age floor protects any
@@ -2349,7 +2395,6 @@ func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, g
 	if reg != nil {
 		entries = reg.List()
 	}
-	var targets []baselinePruneTarget
 	if retain > 0 {
 		// A per-server local baseline dir with no S3 prefix and no count is
 		// the only copy — skipped, but warn (matching the global/CLI signal)
@@ -2360,12 +2405,11 @@ func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, g
 					"server", e.Name, "dir", e.BaselineDir)
 			}
 		}
-		targets = baselinePruneTargets(entries, globalDir, globalS3)
 	}
-	// Local-only folders prune to their count whether or not an age
-	// retention is set (#1681); a set one still protects younger snapshots.
-	targets = append(targets, localKeepPruneTargets(entries, globalDir)...)
-	runBaselinePruneCycle(ctx, targets, retain, pruneFn)
+	// A folder with a count prunes to it whether or not an age retention is
+	// set (#1681, and with an S3 destination since #2658); a set one still
+	// protects younger snapshots.
+	runBaselinePruneCycle(ctx, prunePlan(entries, globalDir, globalS3, retain), retain, pruneFn)
 	// After the local prune, never before it: that one removes a local
 	// snapshot only while its copy is in S3 (#2596).
 	runS3PruneCycle(ctx, entries, globalS3, retain, time.Now())

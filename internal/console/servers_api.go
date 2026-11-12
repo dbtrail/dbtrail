@@ -761,11 +761,9 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if strings.TrimSpace(req.BaselineS3) == "" {
-			if err := adoptsSnapshots(req.BaselineDir, old.LocalKeepNewest); err != nil {
-				writeJSONError(w, http.StatusBadRequest, err.Error())
-				return
-			}
+		if err := adoptsSnapshots(req.BaselineDir, old.LocalKeepNewest); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 	entry := ServerEntry{

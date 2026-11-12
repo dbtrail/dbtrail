@@ -192,11 +192,13 @@ type ServerEntry struct {
 	// the source on its own: the first snapshot is the operator's.
 	DefaultScheduleOnFirst bool `yaml:"default_schedule_on_first,omitempty"`
 	// LocalKeepNewest is this server's local snapshot retention (#1681):
-	// while it has a local folder (BaselineDir) and no external destination
-	// (BaselineS3), the daemon keeps the newest LocalKeepNewest complete
-	// snapshots there and removes older ones. 0 (every entry saved before
-	// #1681) keeps them all, as before. With a destination set it does
-	// nothing: that mode removes only what the destination confirmed.
+	// the daemon keeps the newest LocalKeepNewest complete snapshots in its
+	// local folder (BaselineDir) and removes older ones. 0 (every entry
+	// saved before #1681) keeps them all, as before. With an external
+	// destination (BaselineS3) the count governs the folder too (#2658),
+	// and a snapshot past it is removed only once the destination confirms
+	// its copy; a count saved before #2658 beside a destination did nothing
+	// and was cleared on upgrade (clearInertKeepCounts).
 	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
 	// BaselineS3Retain is the age past which the daemon removes this
 	// server's snapshots from BaselineS3 (#2596), "7d" style; empty (every
@@ -303,7 +305,11 @@ type registryFile struct {
 	// process-wide snapshot location were given it as their own (#1684),
 	// so the migration never runs twice. Additive, like the sections above.
 	BaselineLocationMigrated *baselineLocationMigrated `yaml:"baseline_location_migrated,omitempty"`
-	Servers                  []ServerEntry             `yaml:"servers"`
+	// LocalKeepWithS3 records that keep-newest counts saved while they did
+	// nothing for a server with an S3 destination were cleared (#2658,
+	// clearInertKeepCounts), so the step never runs twice. Additive.
+	LocalKeepWithS3 *localKeepWithS3 `yaml:"local_keep_with_s3,omitempty"`
+	Servers         []ServerEntry    `yaml:"servers"`
 	// Extra preserves any FUTURE envelope-level key a (future) older binary
 	// doesn't model, exactly as ServerEntry.Extra does at the entry level — so
 	// the next additive envelope field is downgrade-safe from here on. (It does
@@ -341,6 +347,11 @@ type Registry struct {
 	// cliWriter is the command-line server's location when this process
 	// writes snapshots for it (SetCommandLineWriter). Guarded by mu.
 	cliWriter CommandLineWriter
+	// keepMigrationPending: clearInertKeepCounts ran at this load and the
+	// file does not hold its record yet; keepMigrationCleared names the
+	// servers it touched (SaveLocalKeepMigration). Guarded by mu.
+	keepMigrationPending bool
+	keepMigrationCleared []string
 }
 
 // DefaultRegistryPath returns ~/.config/bintrail/console-servers.yaml, with
@@ -359,10 +370,15 @@ func DefaultRegistryPath() string {
 func LoadRegistry(path string) (*Registry, error) {
 	r := &Registry{path: path, file: registryFile{Version: registryVersion}}
 	if path == "" {
+		// A registry that starts empty has no count saved under the old
+		// rule: it records the step as done, so a server added with an S3
+		// destination keeps its count (#2658).
+		clearInertKeepCounts(&r.file)
 		return r, nil
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		clearInertKeepCounts(&r.file)
 		return r, nil
 	}
 	if err != nil {
@@ -378,6 +394,8 @@ func LoadRegistry(path string) (*Registry, error) {
 		// Unset/zero version: a hand-written file; normalize on the next save.
 		r.file.Version = registryVersion
 	}
+	// Counts saved while they did nothing beside an S3 destination (#2658).
+	r.keepMigrationCleared, r.keepMigrationPending = clearInertKeepCounts(&r.file)
 	// An operator who turned reuse off in the old console has that choice in
 	// this file, and this build does not read it (#1681). Say so once, where
 	// the file is read: the daemon otherwise reuses files that operator asked

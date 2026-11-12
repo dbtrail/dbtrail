@@ -207,7 +207,9 @@ type lastPruneDTO struct {
 // localRetentionOf is the selected server's local retention as the prune loop
 // applies it: the same console.LocalKeepTargets rule, over the same entries,
 // with the same folder excluded (the daemon's own --baseline-dir). nil where
-// nothing local is pruned.
+// nothing local is pruned to a count. A server with an S3 destination has
+// one too since #2658: the count is what it keeps, and what is past it goes
+// once S3 confirms it.
 func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 	if !s.localPruneLoop || s.cm.reg == nil {
 		return nil

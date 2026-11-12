@@ -183,8 +183,9 @@ type backupSettingsServerDTO struct {
 	// <state dir>/snapshots/<id>. Empty where the registry has no file.
 	DefaultDir string `json:"default_dir,omitempty"`
 	// KeepNewest is the saved local retention (0 = keep every snapshot).
-	// It removes anything only while LocalCopy is on, BaselineS3 is empty
-	// and PruneLoop is true; the page says which of those holds.
+	// It removes anything only while LocalCopy is on and PruneLoop is true;
+	// the page says which of those holds. With an S3 destination it removes
+	// a snapshot past the count only once S3 confirms its copy (#2658).
 	KeepNewest int `json:"keep_newest"`
 	// PruneLoop is whether this process runs the loop that applies
 	// KeepNewest. A read-only console never removes anything.
@@ -202,11 +203,11 @@ type backupSettingsServerDTO struct {
 	// local_retention.keep_newest, so the row's "how far back" line and the
 	// listing's retention line can never name two numbers. 0 where nothing
 	// is pruned. KeepNewest is the saved setting; the two differ where the
-	// setting does not apply (blocked, a destination, no loop).
+	// setting does not apply (blocked, no loop).
 	KeepInForce int `json:"keep_in_force,omitempty"`
 	// PruneRetainMinutes is the age retention the same loop reads
-	// (--baseline-retain or its saved value), in minutes. In a folder with no
-	// S3 destination it deletes nothing; there a snapshot
+	// (--baseline-retain or its saved value), in minutes. In a folder pruned
+	// to a count it deletes nothing by itself; there a snapshot
 	// younger than it is kept even outside the newest KeepInForce, so it
 	// stretches how far back this server can go. 0 = none, or unreadable
 	// (the loop then applies none either).
@@ -214,12 +215,16 @@ type backupSettingsServerDTO struct {
 	// DeleteAfterMinutes is "Delete by age" as it reaches THIS server
 	// (2026-10-01): set only where the server has both a folder and an S3
 	// destination, the one place age retention deletes (it removes a local
-	// copy once S3 confirms it). 0 where it deletes nothing here.
+	// copy once S3 confirms it). 0 where it deletes nothing here. With a
+	// count in force too (KeepInForce, #2658) a snapshot goes only when it
+	// is past the count AND older than this.
 	DeleteAfterMinutes int `json:"delete_after_minutes,omitempty"`
 	// NotInS3 is the last prune's count of old snapshots the S3 destination
 	// answered it does not have (baseline.NotInDestinationFile): the only
 	// copy, so they stay on this machine. NotInS3Error says the record would
-	// not read, never "they are all there".
+	// not read, never "they are all there". Read only where a prune against
+	// S3 runs for this folder (an age, or a count in force), since nothing
+	// else refreshes the record.
 	NotInS3      *notInS3DTO `json:"not_in_s3,omitempty"`
 	NotInS3Error string      `json:"not_in_s3_error,omitempty"`
 	// SnapshotEveryMinutes is how often this server gets a snapshot without
@@ -344,11 +349,13 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	dto.PruneLoop = s.localPruneLoop
 	dto.KeepBlocked = LocalKeepBlocked(s.cm.reg.List(), e, s.cm.defaultBaselineDir)
 	dto.KeepHeld = heldNow(e)
+	inForce := s.localRetentionOf(e.ID)
 	if e.BaselineDir != "" && e.BaselineS3 != "" {
 		dto.DeleteAfterMinutes = s.pruneRetainMinutes()
-		// With no age set, no prune refreshes the record: what it says is
-		// frozen, so it is not read (the card would show a stale count).
-		if dto.DeleteAfterMinutes > 0 && s.localPruneLoop {
+		// With no age set and no count in force, no prune refreshes the
+		// record: what it says is frozen, so it is not read (the card would
+		// show a stale count).
+		if (dto.DeleteAfterMinutes > 0 || inForce != nil) && s.localPruneLoop {
 			if rec, ok, err := baseline.ReadNotInDestination(e.BaselineDir); err != nil {
 				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
 				dto.NotInS3Error = err.Error()
@@ -361,7 +368,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	if e.BaselineS3 != "" {
 		dto.S3Cleanup = lastS3Cleanup(e.BaselineS3)
 	}
-	if r := s.localRetentionOf(e.ID); r != nil {
+	if r := inForce; r != nil {
 		dto.KeepInForce = r.KeepNewest
 		dto.PruneRetainMinutes = s.pruneRetainMinutes()
 		dto.SnapshotEveryMinutes = s.snapshotEveryMinutes(e)
@@ -554,12 +561,11 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// A count only removes anything without an S3 destination.
-		if entry.BaselineS3 == "" {
-			if err := adoptsSnapshots(entry.BaselineDir, entry.LocalKeepNewest); err != nil {
-				writeJSONError(w, http.StatusBadRequest, err.Error())
-				return
-			}
+		// With or without an S3 destination (#2658): the count governs the
+		// folder either way.
+		if err := adoptsSnapshots(entry.BaselineDir, entry.LocalKeepNewest); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 	s3AgeMu.Lock()

@@ -39,6 +39,9 @@ func loadConsoleRegistry(path string, cliRefreshes, takesSnapshots bool, baselin
 		reg.SetCommandLineWriter(baselineDir, "")
 	}
 	reg.MigrateProcessBaselineLocation(baselineDir, baselineS3)
+	// Counts saved while they did nothing beside an S3 destination were
+	// cleared when the file was read (#2658); this writes the record of it.
+	reg.SaveLocalKeepMigration()
 	if takesSnapshots {
 		logLocalCopyAssignments(reg.GiveEveryServerALocalCopy())
 	}
