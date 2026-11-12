@@ -66,6 +66,11 @@ type addFlags struct {
 	Name          string
 	Schemas       string
 	Flavor        string
+	// ForwardUser is the forwarding account (#2686): the user the MySQL port
+	// runs statements as on this database when the copy cannot answer.
+	// NoForward: do not ask for one.
+	ForwardUser string
+	NoForward   bool
 }
 
 var serverAddCmd = &cobra.Command{
@@ -89,6 +94,18 @@ wins over the file.
 The password is never taken on the command line, where the shell history
 and ps would keep it: -p asks for it, --password-stdin reads it from a
 pipe, --defaults-file reads it from a file.
+
+The forwarding user is asked for once the server is added, on a terminal:
+the user DBTrail's MySQL port runs statements as on this database when the
+copy cannot answer them. Give it your application's grants and no more.
+Enter skips it. Without a terminal, put it in the option file:
+
+  [dbtrail-forward]
+  user=shop_fwd
+  password=<its password>
+
+--forward-user names it on the command line (its password is then asked
+for, or read from that group); --no-forward does not ask.
 
 DBTrail's user on your database, if it does not exist yet:
 
@@ -186,6 +203,8 @@ func init() {
 	f.StringVar(&srvAdd.Name, "name", "", "What to call the server (default: made from its address). It is the user name on DBTrail's MySQL port")
 	f.StringVar(&srvAdd.Schemas, "schemas", "", "Comma-separated schemas to record (default: every user schema)")
 	f.StringVar(&srvAdd.Flavor, "flavor", "", "mysql or mariadb (default: asked of the server)")
+	f.StringVar(&srvAdd.ForwardUser, "forward-user", "", "The user the MySQL port runs statements as on this database when the copy cannot answer (default: asked, or [dbtrail-forward] in --defaults-file)")
+	f.BoolVar(&srvAdd.NoForward, "no-forward", false, "Do not ask for a forwarding user")
 	f.BoolVarP(&srvVerbose, "verbose", "v", false, "Also print how to turn on each optional improvement")
 	serverAddCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		// `-pSECRET` and `--password=SECRET` are what a mysql user types, and
@@ -336,19 +355,80 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 	if password == "" {
 		return errors.New("the password is empty")
 	}
+	if err := setForwardUser(ctx, c, s, user, password); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "%q forwards as %s. Engine Routing uses it once it is on:  bintrail-console port routing on\n", s.Name, user)
+	return nil
+}
+
+// setForwardUser saves user as server s's forwarding account and checks
+// that DBTrail says so. The capture user is refused before anything is sent:
+// the port never forwards as it, and saving it would leave an account that
+// does nothing. Shared by `server forward-user` and `server add`.
+func setForwardUser(ctx context.Context, c *ctlClient, s ctlServer, user, password string) error {
+	if s.SourceUser != "" && user == s.SourceUser {
+		return fmt.Errorf("%s is the user DBTrail reads %q with, and the port never forwards as that one: it can read far more than an application should. Create another user on your MySQL, with the application's grants, and set that one", user, s.Name)
+	}
 	var saved ctlServer
-	if err := c.do(ctx, http.MethodPut, path, map[string]string{"user": user, "password": password}, &saved); err != nil {
+	if err := c.do(ctx, http.MethodPut, "/api/servers/"+s.ID+"/route", map[string]string{"user": user, "password": password}, &saved); err != nil {
 		return err
 	}
 	if !saved.HasRoute || saved.RouteUser != user {
 		return fmt.Errorf("DBTrail took the request and %q does not forward as %s. See `bintrail-console server list`", s.Name, user)
 	}
-	// Saved, and of no use: the port never forwards with the account DBTrail
-	// records changes with, which can read every schema and the binlog.
+	// Saved, and of no use: the daemon knows the capture user better than
+	// this command does (a name the list did not carry).
 	if saved.RouteIsCapture {
 		return fmt.Errorf("%s is the user DBTrail reads %q with, and the port never forwards as that one: it can read far more than an application should. Create another user on your MySQL, with the application's grants, and set that one", user, s.Name)
 	}
-	fmt.Fprintf(out, "%q forwards as %s. Engine Routing uses it once it is on:  bintrail-console port routing on\n", s.Name, user)
+	return nil
+}
+
+// addForwardUser sets the forwarding account of a server `server add` just
+// added (#2686): the one resolveForward settled, or one asked for now.
+// Enter at the question skips it. A failure leaves the server added and
+// recording, and says so (errAddedNoForward).
+func addForwardUser(ctx context.Context, c *ctlClient, in addInput, res ctlCheckResponse, out io.Writer) error {
+	user, password := in.FwdUser, in.FwdPassword
+	if user == "" {
+		if !in.FwdAsk || in.ask == nil {
+			return nil
+		}
+		fmt.Fprintf(out, "\nThe forwarding user: what DBTrail's MySQL port runs statements as on this database when the copy cannot answer. Give it your application's grants and no more.\n")
+		var err error
+		if user, err = in.ask.Line("Forwarding user (Enter to skip)", ""); err != nil {
+			return fmt.Errorf("%w: %v", errAddedNoForward, err)
+		}
+		if user = strings.TrimSpace(user); user == "" {
+			fmt.Fprintf(out, "Skipped. Set it later:  bintrail-console server forward-user %s -u <user> -p\n\n", mysqlLineUser(res.Name))
+			return nil
+		}
+		if user == in.User {
+			return fmt.Errorf("%w. %s is the user DBTrail reads %q with, and the port never forwards as that one. Set another one:  bintrail-console server forward-user %s -u <user> -p",
+				errAddedNoForward, user, res.Name, mysqlLineUser(res.Name))
+		}
+		if password, err = in.ask.Secret(fmt.Sprintf("Password of %s", user)); err != nil {
+			return fmt.Errorf("%w: %v", errAddedNoForward, err)
+		}
+		if password == "" {
+			return fmt.Errorf("%w: the password is empty. Set it:  bintrail-console server forward-user %s -u %s -p", errAddedNoForward, mysqlLineUser(res.Name), user)
+		}
+	}
+	if res.Server == nil || res.Server.ID == "" {
+		return fmt.Errorf("%w: DBTrail did not say which server it saved. Set it:  bintrail-console server forward-user %s -u %s -p", errAddedNoForward, mysqlLineUser(res.Name), user)
+	}
+	s := *res.Server
+	if s.Name == "" {
+		s.Name = res.Name
+	}
+	if s.SourceUser == "" {
+		s.SourceUser = in.User
+	}
+	if err := setForwardUser(ctx, c, s, user, password); err != nil {
+		return fmt.Errorf("%w: %v\nSet it once that is fixed:  bintrail-console server forward-user %s -u %s -p", errAddedNoForward, err, mysqlLineUser(res.Name), user)
+	}
+	fmt.Fprintf(out, "%q forwards as %s.\n\n", res.Name, user)
 	return nil
 }
 
@@ -364,6 +444,13 @@ func newTerminalAsker() asker {
 type addInput struct {
 	Host, Port, User, Password string
 	Name, Schemas, Flavor      string
+	// FwdUser and FwdPassword are the forwarding account, when it is known
+	// before the server is added (a flag, the option file, or both).
+	// FwdAsk: none is known, and there is someone to ask once the server is
+	// added. ask is who is asked; nil asks nobody.
+	FwdUser, FwdPassword string
+	FwdAsk               bool
+	ask                  asker
 	// IncludesSkipped counts the option file's !include lines, which were
 	// not followed: worth saying when what they hold is what is missing.
 	IncludesSkipped int
@@ -393,15 +480,26 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	if fileOnStdin && f.PasswordStdin {
 		return addInput{}, errors.New("--defaults-file - and --password-stdin both read stdin: put the password in the option file")
 	}
+	var fwdFile mycnf.Client
 	if f.DefaultsFile != "" {
-		var cnf mycnf.Client
+		var file mycnf.File
 		var err error
 		if fileOnStdin {
-			cnf, err = mycnf.Read(stdin, "on stdin", "client", "dbtrail")
+			file, err = mycnf.ReadFile(stdin, "on stdin")
 		} else {
-			cnf, err = mycnf.Load(f.DefaultsFile, "client", "dbtrail")
+			file, err = mycnf.Open(f.DefaultsFile)
 		}
 		if err != nil {
+			return addInput{}, err
+		}
+		cnf, err := file.Client("client", "dbtrail")
+		if err != nil {
+			return addInput{}, err
+		}
+		// The forwarding account is its own group and nothing else: read
+		// with [client], it would take the capture user, which the port
+		// never forwards as.
+		if fwdFile, err = file.Client("dbtrail-forward"); err != nil {
 			return addInput{}, err
 		}
 		if in.Host == "" {
@@ -485,7 +583,64 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	if in.Password == "" {
 		return addInput{}, errors.New("the password is empty. DBTrail needs a user with a password")
 	}
+	if err := resolveForward(&in, f, fwdFile, ask, ask.Interactive() && !f.PasswordStdin && !fileOnStdin); err != nil {
+		return addInput{}, err
+	}
 	return in, nil
+}
+
+// resolveForward settles the forwarding account before anything is checked
+// or saved (#2686): from --forward-user, from the option file's
+// [dbtrail-forward], or, when neither names one, to be asked for once the
+// server is added. Every refusal here happens with nothing saved.
+func resolveForward(in *addInput, f addFlags, file mycnf.Client, ask asker, canAsk bool) error {
+	flagUser := strings.TrimSpace(f.ForwardUser)
+	if f.NoForward && (flagUser != "" || file.User != "") {
+		named := "--forward-user"
+		if flagUser == "" {
+			named = "[dbtrail-forward] in the option file"
+		}
+		return fmt.Errorf("--no-forward and %s say opposite things: use one", named)
+	}
+	if f.NoForward {
+		return nil
+	}
+	in.FwdUser = flagUser
+	if in.FwdUser == "" {
+		in.FwdUser = file.User
+	}
+	if in.FwdUser == "" {
+		if file.Password != "" {
+			return errors.New("[dbtrail-forward] in the option file has a password and no user: add a user line")
+		}
+		if canAsk {
+			in.FwdAsk, in.ask = true, ask
+		}
+		return nil
+	}
+	if in.FwdUser == in.User {
+		return fmt.Errorf("%s is the user DBTrail reads this database with, and the port never forwards as that one: it can read far more than an application should. Name another user, with your application's grants", in.FwdUser)
+	}
+	// The file's password goes with the file's user, not with a different
+	// user named on the command line.
+	if file.User == "" || file.User == in.FwdUser {
+		in.FwdPassword = file.Password
+	}
+	if in.FwdPassword != "" {
+		return nil
+	}
+	if !canAsk {
+		return fmt.Errorf("no password for the forwarding user %s: this is not a terminal, so it cannot be asked for. Put it under [dbtrail-forward] in the option file, or use --no-forward", in.FwdUser)
+	}
+	pw, err := ask.Secret(fmt.Sprintf("Password of the forwarding user %s", in.FwdUser))
+	if err != nil {
+		return err
+	}
+	if pw == "" {
+		return errors.New("the forwarding user's password is empty")
+	}
+	in.FwdPassword = pw
+	return nil
 }
 
 // What the daemon answers, as far as these commands read it.
@@ -498,6 +653,9 @@ type ctlCheckResponse struct {
 	// Port is the MySQL port after the server was added (#2686). Absent
 	// from a DBTrail older than that, which says nothing about the port.
 	Port *ctlNewServerPort `json:"port"`
+	// Server is the server as it was saved; its id is where the forwarding
+	// account goes.
+	Server *ctlServer `json:"server"`
 }
 
 // ctlNewServerPort is the port as the answer to an added server gives it:
@@ -556,6 +714,9 @@ func (s ctlServer) address() string {
 var (
 	errNotAdded     = errors.New("the database was not added")
 	errAddedStopped = errors.New("the database is on the list, stopped")
+	// errAddedNoForward: the database was added and is recording, and its
+	// forwarding user was not set.
+	errAddedNoForward = errors.New("the database was added and is recording, without a forwarding user")
 )
 
 func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, out io.Writer) error {
@@ -608,7 +769,14 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 	switch {
 	case res.OK:
 		fmt.Fprintf(out, "\nAdded %q. DBTrail is recording its changes.\n", res.Name)
-		printNewServerPort(out, res.Port, res.Name)
+		// The port's password exists in this answer only: printed before the
+		// forwarding user is asked for or set, so neither a Ctrl-C at the
+		// question nor a refused account loses it.
+		printNewServerPort(out, res.Port, res.Name, in.FwdUser == "")
+		if err := addForwardUser(ctx, c, in, res, out); err != nil {
+			fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
+			return err
+		}
 		fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
 		return nil
 	case failed > 0:
@@ -631,7 +799,7 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 // Routing on, and this is the one place its password is shown. Nothing is
 // printed for a DBTrail that says nothing about the port (an older one): the
 // lines after it are then the ones it always printed.
-func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string) {
+func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string, noForwardYet bool) {
 	if p == nil || p.Enabled == nil {
 		return
 	}
@@ -646,7 +814,10 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string) {
 			// person must not be left thinking one was shown.
 			fmt.Fprintln(out, "No password came with the answer. Make one:  bintrail-console port new-password")
 		}
-		fmt.Fprintf(out, "Statements for %q are answered once its first copy is ready. Until it has a forwarding user, the copy answers them alone:\n  bintrail-console server forward-user %s -u <user> -p\n", name, user)
+		fmt.Fprintf(out, "Statements for %q are answered once its first copy is ready.\n", name)
+		if noForwardYet {
+			fmt.Fprintf(out, "Until it has a forwarding user, the copy answers them alone:\n  bintrail-console server forward-user %s -u <user> -p\n", user)
+		}
 	case *p.Enabled:
 		routing := "off"
 		if p.RoutingOn {

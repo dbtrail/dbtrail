@@ -511,6 +511,8 @@ leave out is asked for.
 | `--name` | What to call the server (default: made from its address). It is the user name on the MySQL port |
 | `--schemas` | Comma-separated schemas to record (default: every user schema) |
 | `--flavor` | `mysql` or `mariadb` (default: asked of the server) |
+| `--forward-user` | The forwarding user: what the MySQL port runs statements as on this database when the copy cannot answer (default: asked on a terminal, or `[dbtrail-forward]` in `--defaults-file`) |
+| `--no-forward` | Do not ask for a forwarding user |
 | `-v`, `--verbose` | Also print how to turn on each optional improvement |
 
 `--defaults-file` reads the format of `~/.my.cnf`. It reads `[client]`, then
@@ -525,6 +527,16 @@ password=...
 [dbtrail]
 user=dbtrail
 password="a password with a # in it"
+```
+
+The forwarding user goes in a group of its own, `[dbtrail-forward]`. Only
+that group is read for it, never `[client]` or `[dbtrail]`, whose user is the
+one DBTrail records changes with:
+
+```ini
+[dbtrail-forward]
+user=shop_fwd
+password=...
 ```
 
 Only the file you name is read: never `/etc/my.cnf` or `~/.my.cnf` by
@@ -593,10 +605,22 @@ page.
   for Engine Routing complete it. A port saved as on that is not answering
   (the router is not running) exits 1 and says so.
 
-**The forwarding user.** With Engine Routing on (`dbtrail port routing on`),
-a statement the copy cannot answer runs on your MySQL, as a user you name per
-server. Without one the port refuses those statements, and it never forwards
-as the user DBTrail records changes with.
+**The forwarding user.** With Engine Routing on, a statement the copy cannot
+answer runs on your MySQL, as a user you name per server. Without one the copy
+answers every statement of that server alone, and the port never forwards as
+the user DBTrail records changes with.
+
+`server add` asks for it once the server is added, on a terminal, after it
+printed the port's password: Enter skips it. Without a terminal it is taken
+from `--forward-user` and `[dbtrail-forward]`, and never asked for; with the
+Docker command, which sends the option file on standard input, that group is
+the way. Everything about it is checked before the server is saved: the
+capture user is refused, and so is a user with no password and nobody to ask.
+If DBTrail refuses the user itself (it cannot log in, or it lacks grants), the
+server stays added and recording, the command says so and exits 1, and
+`server forward-user` sets it once that is fixed.
+
+To set or change it later:
 
 ```
 dbtrail server forward-user shop -u shop_fwd -p
