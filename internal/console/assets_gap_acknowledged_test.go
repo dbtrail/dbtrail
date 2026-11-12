@@ -1,12 +1,17 @@
 package console
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/status"
 )
 
 // gapAckHarnessJS runs the real covCard, statusFlowModel and continuityBox
@@ -81,6 +86,39 @@ func TestAcknowledgedGapIsOnRecordNotGreen(t *testing.T) {
 		{"cov": window(c{"continuity": "gap_acknowledged", "gap_acknowledged": acked}),
 			"stream": c{"continuity": c{"status": "ok"}, "gap_acknowledged": ackedStream}},
 	}
+	// 5 and 6 (#2664): the stream object GET /api/status really sends for an
+	// acknowledged loss, produced by the status writer and not typed by hand,
+	// beside the coverage document GET /api/coverage sends for the same index.
+	// 5: the changes still held start AFTER the loss. 6: they still reach it.
+	lost := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	realStream := func(floor status.DeltaFloor) (c, string) {
+		t.Helper()
+		st := &status.StreamStateInfo{Mode: "gtid", ServerID: 7, LastCheckpoint: lost.Add(2 * time.Hour), GapColumnsPresent: true,
+			GapLostAt:     sql.NullTime{Time: lost, Valid: true},
+			GapAckedAt:    sql.NullTime{Time: lost.Add(time.Hour), Valid: true},
+			GapLostDetail: sql.NullString{String: "binlogs purged past the saved position", Valid: true},
+			Floor:         floor}
+		var buf bytes.Buffer
+		if err := (&status.StatusData{Stream: st}).WriteJSON(&buf); err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Stream c `json:"stream"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil || doc.Stream == nil {
+			t.Fatalf("status JSON: %v\n%s", err, buf.String())
+		}
+		return doc.Stream, status.ContinuityStatus(st, nil)
+	}
+	outStream, outVerdict := realStream(status.DeltaFloor{Hour: lost.Add(time.Hour)})
+	inStream, inVerdict := realStream(status.DeltaFloor{Hour: lost.Add(-48 * time.Hour)})
+	if outVerdict != status.ContinuityOK || inVerdict != status.ContinuityGapAcknowledged {
+		t.Fatalf("fixture: verdicts out=%q in=%q, want ok and gap_acknowledged", outVerdict, inVerdict)
+	}
+	cases = append(cases,
+		c{"cov": window(c{"continuity": outVerdict, "delta_from": "2026-06-22 13:00:00"}), "stream": outStream},
+		c{"cov": window(c{"continuity": inVerdict, "gap_acknowledged": acked}), "stream": inStream})
+
 	payload, err := json.Marshal(cases)
 	if err != nil {
 		t.Fatal(err)
@@ -128,16 +166,17 @@ func TestAcknowledgedGapIsOnRecordNotGreen(t *testing.T) {
 			t.Logf("%s | Status box [%s]:\n    %s", name, r.Box.Cls, strings.Join(r.Box.Text, "\n    "))
 		}
 	}
-	names := []string{"acknowledged", "not acknowledged", "no loss", "acknowledged, verdict only", "acknowledged, object under a stale ok"}
+	names := []string{"acknowledged", "not acknowledged", "no loss", "acknowledged, verdict only", "acknowledged, object under a stale ok",
+		"acknowledged, older than the changes still held (real status JSON)", "acknowledged, inside the changes still held (real status JSON)"}
 	for i, r := range got {
 		show(names[i], r)
 	}
 
 	const sentence = "Changes were lost at 2026-06-22 12:00:00 UTC and that was acknowledged at 2026-06-22 13:00:00 UTC. " +
-		"Updates of the copy and time travel across that moment are refused until the database is read in full again " +
-		"(Read database now, on the Snapshots page)."
+		"Updates of the copy and time travel that start from a full read of the database older than that moment and cross it are refused. " +
+		"A full read taken after it (Read database now, on the Snapshots page) is not affected."
 
-	for _, i := range []int{0, 3, 4} {
+	for _, i := range []int{0, 3, 4, 6} {
 		r := got[i]
 		for _, ch := range r.Chips {
 			if strings.Contains(ch.Text, "continuity") {
@@ -167,7 +206,7 @@ func TestAcknowledgedGapIsOnRecordNotGreen(t *testing.T) {
 		}
 	}
 	// With the two instants, the sentence is exact, on both pages.
-	for _, i := range []int{0, 4} {
+	for _, i := range []int{0, 4, 6} {
 		if l := lineOf(got[i], "Changes were lost"); l != "cov-line warn | "+sentence {
 			t.Errorf("%s: card line = %q\nwant %q", names[i], l, "cov-line warn | "+sentence)
 		}
@@ -187,7 +226,33 @@ func TestAcknowledgedGapIsOnRecordNotGreen(t *testing.T) {
 			if strings.ContainsAny(l.Text, "—–") {
 				t.Errorf("a dash in operator text: %q", l.Text)
 			}
+			// The sentence is shown before and after the operator read the
+			// database in full, so it must not ask for that read (#2664).
+			if strings.Contains(l.Text, "until the database is read in full again") {
+				t.Errorf("the card gives an instruction that may already be followed: %q", l.Text)
+			}
 		}
+		if r.Box != nil && strings.Contains(strings.Join(r.Box.Text, " "), "until the database is read in full again") {
+			t.Errorf("the Status box gives an instruction that may already be followed: %q", r.Box.Text)
+		}
+	}
+
+	// #2664: once the changes still held start after an acknowledged loss,
+	// both pages read like an index with no loss. The Status page used to
+	// keep "changes lost, on record" there forever while the Overview's card
+	// said "continuity ok".
+	gone := got[5]
+	if cls, _ := chipOf(gone, "continuity ok"); !strings.Contains(cls, "ok") {
+		t.Errorf("older than the window: chips = %+v, want a green \"continuity ok\"", gone.Chips)
+	}
+	if gone.Station == nil || gone.Station.Tone != "ok" || gone.Station.Line != "no gaps" {
+		t.Errorf("older than the window: DBTrail station = %+v, want the green \"no gaps\" the card agrees with", gone.Station)
+	}
+	if gone.Box != nil {
+		t.Errorf("older than the window: the Status page still shows a box: %+v", gone.Box)
+	}
+	if l := lineOf(gone, "Changes were lost"); l != "" {
+		t.Errorf("older than the window: the card still says %q", l)
 	}
 
 	// The twins: an unacknowledged loss stays red, no loss stays green.
