@@ -92,7 +92,6 @@ func TestSQLFresh_aServerWithNoEntryIsFast(t *testing.T) {
 		t.Fatalf("mode %q from %q, want fast by default", mode, from)
 	}
 }
-}
 
 func TestSQLFresh_setAndClearAreTheOnlyWriter_2546(t *testing.T) {
 	reg, ids := freshTestRegistry(t, "a")
