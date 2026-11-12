@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.130.0] - 2026-11-12
+
 - **A server keeps exactly the number of local snapshots you set** (#2678).
 
   **Upgrade note.** Every server with **Keep by count** set now keeps exactly that many snapshots on DBTrail's disk. Until this version it kept that many and every snapshot made in the last hour, so a server on the default 5-minute schedule with a count of 3 held about 13 and will hold 3 after the first cleanup of this version. Without an S3 destination, time travel and a restore from the local folder now reach back up to the count times the schedule's interval: 15 minutes at the defaults, where they reached an hour. Raise **Keep by count** to reach further, or add an S3 destination. With an S3 destination nothing changes for a restore: it reads the bucket, back to its oldest snapshot, and a moment between two snapshots there replays the changes recorded since the earlier one. A count you saved keeps its number.
