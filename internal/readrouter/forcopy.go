@@ -75,6 +75,13 @@ type CopyOptions struct {
 	// does (limitOffsetComma). Only the port without routing sets it: a
 	// routed statement with the comma stays on MySQL.
 	LimitOffsetComma bool
+	// MySQLDateFunctions writes MySQL's DATE_FORMAT(d, 'format') as
+	// strftime(d, format) and DATEDIFF(a, b) as date_diff('day', CAST(b AS
+	// DATE), CAST(a AS DATE)), two functions the copy does not have (#2628),
+	// where the rewrite gives MySQL's answer (mysqlDateCall). Only the port
+	// without routing sets it: under routing the copy refuses both, and MySQL
+	// answers.
+	MySQLDateFunctions bool
 }
 
 // ForCopy returns the statement the copy is sent: every backtick-quoted name
@@ -100,8 +107,10 @@ func ForCopy(stmt string) (text, refusal string) {
 }
 
 // ForCopyOpts is ForCopy under a server's CopyOptions: with LikeIgnoresCase,
-// every LIKE keyword is also written ILIKE, and with LimitOffsetComma every
-// LIMIT offset, count it can rewrite with certainty LIMIT count OFFSET offset.
+// every LIKE keyword is also written ILIKE, with LimitOffsetComma every
+// LIMIT offset, count it can rewrite with certainty LIMIT count OFFSET offset,
+// and with MySQLDateFunctions every DATE_FORMAT and DATEDIFF it can rewrite
+// with certainty the copy's call that answers the same.
 func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 	if hintComment.MatchString(stmt) {
 		return stmt, vetoHintComment
@@ -457,7 +466,7 @@ func wordByte(c byte) bool {
 }
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
-var rewrittenKeywords = []string{"straight_join", "like", "limit"}
+var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff"}
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
 // copy (cp) and in the blanked text (bl).
@@ -472,8 +481,12 @@ type keywordAt struct {
 // side, and a CROSS JOIN when none does (MySQL then filters in WHERE). As a
 // SELECT modifier (SELECT STRAIGHT_JOIN, SELECT DISTINCT STRAIGHT_JOIN) it
 // only orders MySQL's plan and is dropped. With o.LikeIgnoresCase each LIKE
-// is written ILIKE, and with o.LimitOffsetComma each LIMIT offset, count
-// that limitOffsetComma reads is written LIMIT count OFFSET offset.
+// is written ILIKE, with o.LimitOffsetComma each LIMIT offset, count
+// that limitOffsetComma reads is written LIMIT count OFFSET offset, and with
+// o.MySQLDateFunctions each DATE_FORMAT and DATEDIFF call mysqlDateCall reads
+// is written as the copy's call. The keywords are taken from the last one
+// back, so a call inside another one's arguments is rewritten first, and the
+// outer one reads its arguments from the text already rewritten.
 //
 // Which of the two joins is read from the blanked text, where comments are
 // gone and string literals are ”, so an ON inside either is not seen. A
@@ -495,6 +508,16 @@ func (sc scanned) copyText(o CopyOptions) string {
 		}
 		var repl string
 		switch {
+		case j.word == "date_format" || j.word == "datediff":
+			if !o.MySQLDateFunctions {
+				continue
+			}
+			call, n, ok := mysqlDateCall(j.word, cp[j.cp+kw:])
+			if !ok {
+				continue
+			}
+			cp = cp[:j.cp] + call + cp[j.cp+kw+n:]
+			continue
 		case j.word == "limit":
 			if !o.LimitOffsetComma {
 				continue

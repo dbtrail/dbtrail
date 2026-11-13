@@ -58,11 +58,15 @@ var unroutedVetoes = []struct {
 	{regexp.MustCompile(`(?i)\bgroup_concat\s*\(`), "GROUP_CONCAT (cut at group_concat_max_len on MySQL)", "string_agg(x, ',')"},
 	{regexp.MustCompile(`(?i)\b(week|yearweek)\s*\(|\bextract\s*\(\s*week\b`), "WEEK, YEARWEEK and EXTRACT(WEEK) (weeks from Sunday on MySQL, ISO weeks on the copy)", "weekofyear(d) for ISO weeks, strftime(d, '%U') for weeks from Sunday"},
 	{regexp.MustCompile(`(?i)\bstr_to_date\s*\(`), "STR_TO_DATE (NULL on MySQL for a bad date)", "strptime(text, format), or try_strptime for NULL on a bad date"},
-	// The copy's own datediff takes a quoted unit first, which MySQL's
-	// never does: datediff('day', a, b) is answered.
-	{regexp.MustCompile(`(?i)\b(timestampdiff|timediff)\s*\(|\bdatediff\s*\(\s*[^'\s]`), "DATEDIFF, TIMESTAMPDIFF and TIMEDIFF (days and units counted another way)", "date_diff('day', start, end) for a count, end - start for a time"},
+	// DATEDIFF is written for the copy before it runs, or refused then
+	// (ForCopyOpts, UnroutedFunctionVeto, #2628).
+	{regexp.MustCompile(`(?i)\b(timestampdiff|timediff)\s*\(`), "TIMESTAMPDIFF and TIMEDIFF (units counted another way)", "date_diff('day', start, end) for a count, end - start for a time"},
 	{regexp.MustCompile(`(?i)\bas\s+(un)?signed\b`), "CAST AS SIGNED or UNSIGNED (overflow and truncation differ)", "CAST(x AS BIGINT) or CAST(x AS UBIGINT)"},
-	{regexp.MustCompile(`(?i)\bdiv\b`), "DIV (integer division)", "a // b"},
+	// The copy's // matches DIV between two whole numbers (toward zero, NULL
+	// for 0), and divides without truncating a DECIMAL or a DOUBLE: 7.5 // 2
+	// is 3.75 there and 7.5 DIV 2 is 3 on MySQL (MySQL 8.0.46, DuckDB 1.5.6,
+	// #2628). The types are not known here, so DIV stays refused, with both.
+	{regexp.MustCompile(`(?i)\bdiv\b`), "DIV (integer division; the copy's // truncates only whole numbers)", "a // b for two whole numbers, CAST(trunc(a / nullif(b, 0)) AS BIGINT) when either is a DECIMAL or a DOUBLE"},
 	{regexp.MustCompile(`(?i)\b(found_rows|last_insert_id|row_count)\s*\(|\bsql_calc_found_rows\b`), "FOUND_ROWS, LAST_INSERT_ID and ROW_COUNT (MySQL's session counters)", "the copy has none: run it on MySQL"},
 	{regexp.MustCompile(`(?i)\b(connection_id|current_user|session_user|system_user|user|database|schema|version)\s*\(|(^|[^"\w.])(current_user|current_role)\b`),
 		"DATABASE(), USER(), VERSION() and the other session functions (the source's own on MySQL)", "current_database(), current_schema(), or library_version FROM pragma_version()"},
