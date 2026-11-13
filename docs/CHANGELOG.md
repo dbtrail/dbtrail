@@ -30,7 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   twice fails with "the snapshot of <schema>.<table> was removed by the
   cleanup twice while this read started; run it again". Not covered: a
   snapshot with no `_SUCCESS` file, one read from S3, and a DuckDB session of
-  your own over an older snapshot's `views.sql`.
+  your own over an older snapshot's `views.sql`. The local mirror of an
+  S3-only server's snapshots (SQL on the copy) no longer removes, past its
+  two, a mirrored snapshot a SQL statement is reading; it goes in the first
+  round after the statement ends.
 
 - **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
   snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
