@@ -13,8 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without an S3 destination the count removed both about 15 minutes after
   the full read (a snapshot every 5 minutes, a count of 3), so a check run
   later found nothing to compare. The cleanup of a folder with a count and no
-  S3 destination now keeps that pair on top of the count until the next full
-  read, and the Snapshots page marks the two rows "kept for the check". At
+  S3 destination now keeps one pair on top of the count: the read of the
+  database most tables of the newest snapshot come from (on a tie, the
+  oldest), usually the last full read, and the snapshot before it, until
+  another read takes its place. The Snapshots page marks the two rows "kept
+  for the check". A table read again on its own since, or one with no
+  recorded read (built from the changes alone), has no pair kept. At
   most two extra snapshots per folder: the one before the read costs a whole
   snapshot of disk, the read itself only the tables changed since it (the
   others are hard links shared with the newer snapshots). Servers with S3

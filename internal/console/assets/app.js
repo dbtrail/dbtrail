@@ -11129,7 +11129,7 @@ function baselinesPanel(b, servers, opts) {
       }
       if (checkKeptIdx.has(idx)) {
         what.append(el("span", { class: "chip chip-unknown", text: "kept for the check",
-          title: "The last full read of the database and the snapshot before it, which a check of the snapshots compares. Kept on top of the newest kept until the next full read, since S3 does not hold them." }));
+          title: "The read of the database most tables of the newest snapshot come from (usually the last full read), or the snapshot before it: the two a check of the snapshots compares for those tables. Kept on top of the newest kept, since S3 does not hold them, until another read takes its place. A table read on its own since then has no pair kept." }));
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");

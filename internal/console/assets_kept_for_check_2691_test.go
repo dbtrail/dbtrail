@@ -59,7 +59,7 @@ console.log(JSON.stringify({
 		t.Fatalf("decode %q: %v", out, err)
 	}
 	t.Logf("kept for the check: %d rows, hover %q; going: %d", len(got.Kept), got.Kept, got.Going)
-	const hover = "The last full read of the database and the snapshot before it, which a check of the snapshots compares. Kept on top of the newest kept until the next full read, since S3 does not hold them."
+	const hover = "The read of the database most tables of the newest snapshot come from (usually the last full read), or the snapshot before it: the two a check of the snapshots compares for those tables. Kept on top of the newest kept, since S3 does not hold them, until another read takes its place. A table read on its own since then has no pair kept."
 	if len(got.Kept) != 2 || got.Kept[0] != hover || got.Kept[1] != hover || got.Going != 2 {
 		t.Fatalf("%d rows kept for the check (%q) and %d going, want 2 kept and the other 2 past the count going", len(got.Kept), got.Kept, got.Going)
 	}

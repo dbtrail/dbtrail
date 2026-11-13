@@ -91,3 +91,85 @@ func TestCheckPair_nothingToKeep(t *testing.T) {
 		t.Errorf("a lone full read: %q, %q", r, b)
 	}
 }
+
+// The pair kept is the read most tables of the newest snapshot come from,
+// not the first table's (#2691 review). accounts, first by name, is read
+// again on its own after the full read both tables shared: the full read's
+// pair is kept, orders keeps its check, and accounts' own re-read pair is
+// not kept.
+func TestCheckPair_theReadMostTablesShare(t *testing.T) {
+	root := t.TempDir()
+	at := func(h int) time.Time { return lr0.Add(time.Duration(h) * time.Hour) }
+	tables := []string{"accounts", "orders", "payments"}
+	for _, tb := range tables {
+		lrWrite(t, root, at(0), tb, lrDump(at(0), 100))
+		lrWrite(t, root, at(1), tb, lrFold(at(1), at(0), at(0), 1, 110))
+		lrWrite(t, root, at(2), tb, lrDump(at(2), 120)) // the full read
+		lrWrite(t, root, at(3), tb, lrFold(at(3), at(2), at(2), 1, 130))
+	}
+	lrWrite(t, root, at(4), "accounts", lrDump(at(4), 140)) // read again on its own
+	for _, tb := range tables[1:] {
+		lrWrite(t, root, at(4), tb, lrFold(at(4), at(3), at(2), 2, 140))
+	}
+	for h := 5; h <= 6; h++ {
+		lrWrite(t, root, at(h), "accounts", lrFold(at(h), at(h-1), at(4), h-4, int64(100+10*h)))
+		for _, tb := range tables[1:] {
+			lrWrite(t, root, at(h), tb, lrFold(at(h), at(h-1), at(2), h-2, int64(100+10*h)))
+		}
+	}
+	name := func(h int) string { return reconstruct.SnapshotDirName(at(h)) }
+	if r, b := baseline.CheckPair(root); r != name(2) || b != name(1) {
+		t.Fatalf("CheckPair = %s, %s; want the full read most tables share, %s, and %s", r, b, name(2), name(1))
+	}
+	if _, err := baseline.PruneLocal(context.Background(), baseline.PruneOptions{LocalDir: root, KeepNewest: 3}); err != nil {
+		t.Fatal(err)
+	}
+	pairs, _, err := FindBaselinePair(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tb := range tables[1:] {
+		if p := lrOne(t, pairs, tb); p.Settled != nil {
+			t.Fatalf("%s, read by the full read, lost its pair after the cleanup: %s", tb, p.Settled.Detail)
+		}
+	}
+	if p := lrOne(t, pairs, "accounts"); p.Settled == nil {
+		t.Logf("accounts compares %s with %s", p.PrevSnapshot, p.NewSnapshot)
+	} else {
+		t.Logf("accounts, read on its own since, as documented: %s", p.Settled.Detail)
+	}
+}
+
+// A table with no recorded read (built from the changes alone, created after
+// the full read) is skipped: the others still have their pair kept, even
+// when it sorts first.
+func TestCheckPair_aTableWithoutARecordedReadIsSkipped(t *testing.T) {
+	root := t.TempDir()
+	at := func(h int) time.Time { return lr0.Add(time.Duration(h) * time.Hour) }
+	lrWrite(t, root, at(0), "orders", lrDump(at(0), 100))
+	lrWrite(t, root, at(1), "orders", lrFold(at(1), at(0), at(0), 1, 110))
+	lrWrite(t, root, at(2), "orders", lrDump(at(2), 120))
+	for h := 3; h <= 6; h++ {
+		lrWrite(t, root, at(h), "orders", lrFold(at(h), at(h-1), at(2), h-2, int64(100+10*h)))
+		lrWrite(t, root, at(h), "accounts", lrFold(at(h), at(h-1), time.Time{}, 0, int64(100+10*h)))
+	}
+	if r, b := baseline.CheckPair(root); r != reconstruct.SnapshotDirName(at(2)) || b != reconstruct.SnapshotDirName(at(1)) {
+		t.Fatalf("CheckPair = %q, %q; want orders' full read and the snapshot before it", r, b)
+	}
+}
+
+// A tie goes to the oldest read: the full read a table read on its own
+// since came after.
+func TestCheckPair_aTieGoesToTheOldestRead(t *testing.T) {
+	root := t.TempDir()
+	at := func(h int) time.Time { return lr0.Add(time.Duration(h) * time.Hour) }
+	for _, tb := range []string{"accounts", "orders"} {
+		lrWrite(t, root, at(0), tb, lrDump(at(0), 100))
+		lrWrite(t, root, at(1), tb, lrDump(at(1), 110))
+	}
+	lrWrite(t, root, at(2), "accounts", lrDump(at(2), 120))
+	lrWrite(t, root, at(2), "orders", lrFold(at(2), at(1), at(1), 1, 120))
+	if r, b := baseline.CheckPair(root); r != reconstruct.SnapshotDirName(at(1)) || b != reconstruct.SnapshotDirName(at(0)) {
+		t.Fatalf("CheckPair = %s, %s; want the older of the two reads, %s", r, b, reconstruct.SnapshotDirName(at(1)))
+	}
+}
