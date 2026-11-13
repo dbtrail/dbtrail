@@ -196,7 +196,7 @@ func TestNoteResending_nextSendOnlyWhenAllWait(t *testing.T) {
 	target := baselinePruneTarget{dir: d, s3: "s3://bkt/p/"}
 	until := time.Date(2026, 11, 12, 11, 0, 0, 0, time.UTC)
 	res := baseline.PruneResult{KeptNotDurable: 2, NotAtDestination: []string{"a", "b"}}
-	noteResending(target, res, nil, nil, map[string]resendWait{"a": {until: until}}, time.Time{})
+	noteResending(target, res, nil, nil, map[string]resendWait{"a": {until: until}}, time.Time{}, false)
 	rec, ok, err := baseline.ReadNotInDestination(d)
 	if err != nil || !ok || rec.NextSend != nil || len(rec.Waiting) != 1 || rec.Waiting[0].Name != "a" {
 		t.Fatalf("record %+v ok=%v err=%v, want a waiting and no next_send", rec, ok, err)
