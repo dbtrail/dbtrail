@@ -1,3 +1,8 @@
+	// A file: URL (a reader that resolves it itself) is not a local path to
+	// hold either, and must never read as gone.
+	if release, gone := HoldSnapshotOfTable("file://" + filepath.Join(root, legacy, "shop", "orders.parquet")); gone || release == nil {
+		t.Error("a file:// table path is held or gone")
+	}
 //go:build unix
 
 package baseline

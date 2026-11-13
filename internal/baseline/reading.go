@@ -1,4 +1,7 @@
-package baseline
+func HoldSnapshotOfTable(tablePath string) (release func(), gone bool) {
+	// Any URL (s3://, file://, http://) is read unheld: only a plain local
+	// path names a folder whose marker can be held.
+	if tablePath == "" || strings.Contains(tablePath, "://") {package baseline
 
 import (
 	"path/filepath"

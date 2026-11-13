@@ -1,4 +1,7 @@
-//go:build unix
+	if snapDir == "" || strings.Contains(snapDir, "://") {
+		return noop, false
+	}
+	f, err := openMarker//go:build unix
 
 package baseline
 
