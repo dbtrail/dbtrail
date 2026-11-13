@@ -62,9 +62,11 @@ command line, the same fold is
 Some changes cannot be folded. A column added, dropped, retyped or given another character set,
 or a `TRUNCATE`, `DROP` or `RENAME` in the window, refuses the table, and so does a
 capture gap. So does an `ALTER TABLE` that drops, truncates, exchanges or
-converts a partition, or discards or imports a tablespace: it changes rows
+converts a partition, or discards or imports a tablespace, and a MariaDB
+`ALTER IGNORE TABLE` that adds a unique key or changes a column: it changes rows
 without writing them to the binary log, and the columns stay the same
-([#2632](https://github.com/dbtrail/dbtrail/issues/2632)). An `EXCHANGE
+([#2632](https://github.com/dbtrail/dbtrail/issues/2632),
+[#2640](https://github.com/dbtrail/dbtrail/issues/2640)). An `EXCHANGE
 PARTITION` refuses both tables. The full read that cures it reads the whole
 server, at most once a day, so a table whose partitions are dropped every
 hour brings that server's copy up to date once a day. On the Snapshots page a failed update falls back to a full backup
