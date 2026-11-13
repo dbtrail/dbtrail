@@ -290,11 +290,11 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		"s3CountedWaits":          "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
 		"s3CountedNotIn":          "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; DBTrail sends them again at the next cleanup.",
 		"s3CountedEachOwnWait": "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; " +
-			"sending the copy of 2026-11-10 03:00:00 UTC failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC; DBTrail sends the other again at the next cleanup.",
+			"sending the copy of 2026-11-10 03:00:00 UTC failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC; DBTrail sends the other again at the next cleanup, unless it is older than the age S3 keeps.",
 		"s3CountedEachOwnWaitAnswer": "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have the copy of 2026-11-10 03:00:00 UTC complete, and could not be asked about the copy of 2026-11-10 03:05:00 UTC; " +
 			"sending the copy of 2026-11-10 03:00:00 UTC failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC; the copy of 2026-11-10 03:05:00 UTC was sent but could not be confirmed, and DBTrail sends it again after 2026-11-11 04:10:00 UTC.",
 		"s3CountedEachOwnWaitThree": "Not in S3 yet, so kept here: 3 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC, 2026-11-10 03:10:00 UTC). S3 does not have them complete; " +
-			"sending the copy of 2026-11-10 03:05:00 UTC failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC; DBTrail sends the others again at the next cleanup.",
+			"sending the copy of 2026-11-10 03:05:00 UTC failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC; DBTrail sends the others again from the next cleanup on, 3 at most per cleanup, except any older than the age S3 keeps.",
 		"s3CountedEachOwnWaitSame": "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
 		"s3CountedNoLoop":          "Keeps the newest 3 where DBTrail takes the snapshots. This copy of DBTrail removes nothing.",
 		"s3CountedBlocked":         "This folder is shared with another server or is DBTrail's startup folder, so the count does not apply to it.",

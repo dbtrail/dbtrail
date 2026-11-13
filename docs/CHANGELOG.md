@@ -17,8 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credentials, the network) still makes the folder wait, since every other
   send would meet it. The bounds of #2696 hold per snapshot: one S3 could not
   be asked about is sent at most once an hour, and one S3 refuses to read
-  back is not sent again. The Backup settings card names the copies that
-  wait, and until when, and says the others go at the next cleanup.
+  back is not sent again. When the copies on the Backup settings card are
+  not all in the same case, the card names the ones that wait, with why and
+  until when, and says the others are sent from the next cleanup on, 3 at
+  most per cleanup, except any older than the age S3 keeps; when they are
+  all in the same case it says what it said before.
 
 - **`bintrail export iceberg` compacts its own tables** (#2719). Every
   run adds one delete file per table it changed, and DuckDB and ClickHouse
