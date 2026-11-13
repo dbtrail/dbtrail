@@ -746,6 +746,57 @@ arrays beyond the tested `integer[]`/`text[]` (multi-dimensional, `NULL`-contain
 are not yet in the round-trip suite — they are captured as text and are expected to
 coerce, but verify your own round-trip.
 
+### How each type reads in SQL on the copy
+
+A snapshot of a PostgreSQL source holds every value as the text PostgreSQL
+wrote, which is what keeps recovery exact. SQL on the copy (the web
+interface's SQL page, `bintrail views`, the views file inside each snapshot)
+reads each column as the type the table declares, in the table's own column
+order, from the shape the snapshot records beside the data. Nothing is
+rewritten: a snapshot taken by an earlier version reads the same way.
+
+| PostgreSQL type | Reads as |
+|---|---|
+| `smallint`, `integer`, `bigint` | whole numbers of the same width |
+| `numeric(p,s)` up to 38 digits | exact decimal with that precision and scale |
+| `numeric` with no precision | exact decimal with 20 digits before the point and 18 after |
+| `real`, `double precision` | floating point, `NaN` and `Infinity` included |
+| `boolean` | boolean |
+| `date`, `timestamp`, `timestamptz` | date and timestamps; `infinity` included |
+| `uuid` | uuid |
+| `bytea` | bytes |
+| `text`, `varchar(n)`, `char(n)` | text compared byte by byte, so `'Lima'` is not `'lima'` |
+| everything else | the text PostgreSQL wrote |
+
+"Everything else" is `json` and `jsonb`, `time` and `timetz`, `interval`,
+arrays, enums, domains, ranges, a `numeric` wider than 38 digits or with a
+negative scale, and every extension type. `->>` reads a `json` column as it
+is; an array is the text `{a,b}`, so `labels[1]` is its first character, not
+its first element. Each view names the columns it left as text.
+
+A value its type here cannot hold fails the statement that reads it, with an
+error that says so. It is never rounded and never read as NULL:
+
+- `NaN` or `Infinity` in a `numeric` column.
+- A `numeric` with no precision holding more than 18 decimals or more than
+  20 digits before the point.
+- A `timestamp` before the common era.
+
+A statement that does not read that column is not affected, and neither is
+recovery, which works from the text.
+
+Three things still answer differently from PostgreSQL, with no error:
+
+- `ORDER BY` puts NULL first where PostgreSQL puts it last, and `/` between
+  two integers keeps the fraction (`9 / 2` is `4.5`).
+- Text sorts by bytes. PostgreSQL sorts by the collation the database was
+  created with, which for anything but `C` orders letters differently.
+- `char(n)` compares with its padding, where PostgreSQL ignores trailing
+  blanks.
+
+A numeric with no precision prints with all 18 decimals (`12345.678` as
+`12345.678000000000000000`); it compares, sorts and sums as the same number.
+
 ---
 
 ## Extensions and custom types

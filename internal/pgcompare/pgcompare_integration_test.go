@@ -292,7 +292,7 @@ func expectations() []expectation {
 		eq(`SELECT * FROM ` + c),
 		// A numeric declared without precision is an exact DECIMAL(38,18) on
 		// the copy: it sorts, sums and compares as on the source.
-		eq(`SELECT id FROM ` + odd + ` WHERE free > 12345 ORDER BY free`),
+		eq(`SELECT id FROM ` + odd + ` WHERE fixed > 2 ORDER BY fixed`),
 		eq(`SELECT sum(fixed) FROM ` + odd),
 		eq(`SELECT id, fixed FROM ` + odd),
 		// It prints with 18 decimals, where the source prints the digits
@@ -302,6 +302,7 @@ func expectations() []expectation {
 		// it, and only that one.
 		refused("NaN", "by design: NaN is not a DECIMAL", `SELECT free FROM `+odd+` WHERE id = 1`),
 		refused("more than 18 decimals", "by design: never rounded", `SELECT free FROM `+odd+` WHERE id = 2`),
+		refused("pgcmp_odd: column free holds", "by design: a statement that reads the whole column meets those values", `SELECT id FROM `+odd+` WHERE free > 12345`),
 		// Not compared.
 		{stmt: `SELECT * FROM pgcmp_missing`, verdict: sqlcompare.SourceError},
 		{stmt: `DELETE FROM ` + o, verdict: sqlcompare.Skipped, kind: "not_a_query"},
