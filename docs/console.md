@@ -1787,9 +1787,12 @@ The limits, so a query can never hurt capture:
   `duckdb_tables()`), or that names a table the copy does not have, gets
   every table, so the list is complete and a misspelled name is still
   answered with the closest real one.
-- Text ignores case as MySQL's default collation does (`'Paid' = 'paid'`
+- On a MySQL or MariaDB server, text ignores case as MySQL's default
+  collation does (`'Paid' = 'paid'`
   is true, `GROUP BY` and `SELECT DISTINCT` fold case), and NULLs sort first
-  on an ascending `ORDER BY`, last on a descending one. Accents are NOT
+  on an ascending `ORDER BY`, last on a descending one. A PostgreSQL server
+  runs by PostgreSQL's rules instead
+  ([how each type reads](postgres.md#how-each-type-reads-in-sql-on-the-copy)). Accents are NOT
   ignored: `'café' = 'cafe'`, `'ß' = 'ss'` and full-width letters are false
   here and true on MySQL (docs/time-travel-sql.md lists every difference).
   Not folded: `LIKE`, `REGEXP`, `count(DISTINCT ...)`, `instr`/`position`,

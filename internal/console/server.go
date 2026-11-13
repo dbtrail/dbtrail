@@ -978,6 +978,9 @@ func New(cfg Config) (*Server, error) {
 		// own wiring (connManager.buildBundle) never reaches it.
 		boot.sqlMirrorDir = cfg.Registry.BootCopyMirrorDir(cfg.BaselineDir, cfg.BaselineS3)
 		boot.resolver, boot.resolverUnavailable = loadResolver(cfg.DB)
+		// Read here, once, and not per statement: a statement refused as
+		// busy, or one that reads tables alone, sends the index nothing.
+		boot.pgSource = flavorIsPostgres(query.SourceFlavor(cfg.DB))
 		s.cm.seedBoot(boot, cfg.BootDSN)
 	}
 

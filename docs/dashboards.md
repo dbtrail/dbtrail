@@ -191,6 +191,10 @@ To match them, run `SET default_collation = 'nocase'; SET
 default_null_order = 'nulls_first_on_asc_last_on_desc';` in your session
 before the views; the state views themselves compare keys as bytes
 (`COLLATE C`) either way, so no row is lost under a folding collation.
+That is for a MySQL or MariaDB server. The SQL card of a PostgreSQL server
+runs by PostgreSQL's rules, and
+[three other lines](postgres.md#how-each-type-reads-in-sql-on-the-copy)
+match it.
 `nocase` is DuckDB's built-in collation: it folds case and nothing else,
 so `'café'` and `'cafe'` stay two values there as on the console.
 One thing does not carry over: the console gives a column MySQL declares
