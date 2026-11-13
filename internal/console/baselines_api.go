@@ -72,6 +72,7 @@ type baselineSnapshotDTO struct {
 	// moment (baseline.Restored, #2678). The cleanup keeps it whatever its
 	// date and it takes no place in the count, so the list never marks it
 	// as going. False when the mark could not be read.
+	Restored bool `json:"restored,omitempty"`
 	// Going: this local snapshot is one the cleanup removes at its next run
 	// (#2675): outside what baseline.KeptNow keeps under the rule in force
 	// for the folder, the count AND the age, the newest of each table, the
@@ -81,7 +82,6 @@ type baselineSnapshotDTO struct {
 	// could not be read, which leaves the row unmarked rather than announce a
 	// removal.
 	Going bool `json:"going,omitempty"`
-	Restored bool `json:"restored,omitempty"`
 	// RestoredUntil is until when it is kept outside the count: a day after
 	// the restore finished (baseline.RestoredKeep).
 	RestoredUntil string `json:"restored_until,omitempty"`
