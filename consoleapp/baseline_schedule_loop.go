@@ -323,6 +323,14 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 			w.Events = int64(cur.events - base)
 		}
 	}
+	// No record names how far the index had been written for this snapshot
+	// (a `bintrail baseline` run from a shell, another process, a lost
+	// history): its own binary log coordinates can still say that capture
+	// recorded nothing since it (#2674). Asked only where the zero changes
+	// the decision, past the cut-over age.
+	if countUnknown == countUnknownNoBase && pastCutover(e, w, time.Now()) && b.nothingCapturedSinceAnchor(ctx, e, anchor) {
+		w.Events, countUnknown = 0, ""
+	}
 	b.reportCountUnknown(e, anchor, countUnknown)
 	if w.Events == 0 && pastCutover(e, w, time.Now()) {
 		var sourceRead time.Time
