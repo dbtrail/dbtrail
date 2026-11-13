@@ -25,6 +25,7 @@ const (
 	itOrders    = "pgcmp_orders"
 	itOdd       = "pgcmp_odd"
 	itArrays    = "pgcmp_arrays"
+	itTimes     = "pgcmp_times"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -60,7 +61,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays+", "+itTimes)
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -212,12 +213,20 @@ func seedSQL() []string {
 			    ARRAY[1, NULL, 7], ARRAY[DATE '2026-01-31', NULL], ARRAY[true, false, NULL], NULL),
 			(2, '{}', '{}', '{}', '{}', NULL),
 			(3, NULL, NULL, NULL, NULL, '{{1,2},{3,4}}')`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays,
+		`CREATE TABLE ` + itTimes + ` (id int PRIMARY KEY, starts time, startz timetz, span interval, late time, latez timetz)`,
+		`INSERT INTO ` + itTimes + ` VALUES
+			(1, '10:00:00',        '10:00:00+00',    '1 year 2 mons 3 days 04:05:06.789',   NULL,       NULL),
+			(2, '23:59:59.999999', '08:30:00-05:30', '-1 years -2 mons +3 days -04:05:06', NULL,       NULL),
+			(3, '00:00:00',        '00:00:00+14',    '00:00:00',                            NULL,       NULL),
+			(4, '12:00:00.5',      '12:00:00+00',    '-3 days +01:00:00',                   NULL,       NULL),
+			(5, NULL,              NULL,             '100:00:00',                           '24:00:00', '24:00:00+00'),
+			(6, '06:00:00',        '06:00:00+02',    '-1 mons',                             NULL,       NULL)`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays + `, ` + itTimes,
 	}
 }
 
 func expectations() []expectation {
-	o, c, odd, arr := itOrders, itCustomers, itOdd, itArrays
+	o, c, odd, arr, tm := itOrders, itCustomers, itOdd, itArrays, itTimes
 	eq := func(stmt string) expectation { return expectation{stmt: stmt, verdict: sqlcompare.Equal} }
 	// What still differs, each with the issue it belongs to. still is a
 	// statement the copy answers differently, refused one it cannot run.
@@ -311,6 +320,18 @@ func expectations() []expectation {
 		eq(`SELECT id, nums[1], tags[3], flags[2] FROM ` + arr),
 		eq(`SELECT id FROM ` + arr + ` WHERE 7 = ANY(nums)`),
 		eq(`SELECT id FROM ` + arr + ` WHERE 'two words' = ANY(tags)`),
+		// Times and intervals (#2787).
+		eq(`SELECT id, starts, startz, span FROM ` + tm),
+		eq(`SELECT id FROM ` + tm + ` WHERE starts < TIME '12:00:00'`),
+		eq(`SELECT id FROM ` + tm + ` ORDER BY starts NULLS LAST, id`),
+		eq(`SELECT id FROM ` + tm + ` WHERE span > INTERVAL '1 day'`),
+		eq(`SELECT id FROM ` + tm + ` WHERE span < INTERVAL '0 seconds'`),
+		eq(`SELECT id FROM ` + tm + ` ORDER BY span, id`),
+		eq(`SELECT id, DATE '2026-01-31' + span FROM ` + tm + ` WHERE id IN (1, 6)`),
+		eq(`SELECT min(starts), max(starts) FROM ` + tm),
+		// 24:00:00 is a time on the source and not on the copy.
+		refused("24:00:00", "by design: never read as midnight", `SELECT late FROM `+tm),
+		eq(`SELECT id, latez FROM ` + tm),
 		// More than one dimension does not fit a list: the statement that
 		// reads the column fails, and one that does not is answered.
 		refused("more than one dimension", "by design: never read as something else", `SELECT grid FROM `+arr),

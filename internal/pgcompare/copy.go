@@ -142,6 +142,9 @@ func CellText(typ string, v any) *string {
 		if typ == "BLOB" {
 			s = pgBytea(x)
 		}
+		if typ == "INTERVAL" {
+			s = pgInterval(x)
+		}
 		if strings.HasPrefix(typ, "TIMESTAMP") {
 			if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
 				s = pgTimestamp(t)
@@ -259,4 +262,85 @@ func pgTimestamp(t time.Time) string {
 		s += strings.TrimRight(fmt.Sprintf(".%06d", us), "0")
 	}
 	return s
+}
+
+// pgInterval writes an INTERVAL cell, which the sandbox prints as the engine
+// does ("1 year 2 months -3 days 04:05:06"), the way PostgreSQL does under
+// IntervalStyle postgres: mon and mons for months, a plural for every count
+// but 1 (so "-1 years"), and a plus on a part that follows a negative one
+// ("-1 years +3 days"). Text it does not recognise is returned as it is, so
+// the comparison shows it.
+func pgInterval(cell string) string {
+	fields := strings.Fields(cell)
+	var years, months, days int64
+	seen := 0
+	clock := ""
+	for i := 0; i < len(fields); {
+		if strings.Contains(fields[i], ":") {
+			if clock != "" || i != len(fields)-1 {
+				return cell
+			}
+			clock = fields[i]
+			i++
+			continue
+		}
+		if i+1 >= len(fields) {
+			return cell
+		}
+		n, err := strconv.ParseInt(fields[i], 10, 64)
+		if err != nil {
+			return cell
+		}
+		// The engine writes each unit once, in this order; anything else
+		// is not its text.
+		unit := strings.TrimSuffix(fields[i+1], "s")
+		switch {
+		case unit == "year" && seen < 1:
+			years, seen = n, 1
+		case unit == "month" && seen < 2:
+			months, seen = n, 2
+		case unit == "day" && seen < 3:
+			days, seen = n, 3
+		default:
+			return cell
+		}
+		i += 2
+	}
+	var b strings.Builder
+	before := false
+	part := func(n int64, unit string) {
+		if n == 0 {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		if before && n > 0 {
+			b.WriteByte('+')
+		}
+		b.WriteString(strconv.FormatInt(n, 10))
+		b.WriteByte(' ')
+		b.WriteString(unit)
+		if n != 1 {
+			b.WriteByte('s')
+		}
+		before = n < 0
+	}
+	part(years, "year")
+	part(months, "mon")
+	part(days, "day")
+	zeroClock := clock == "" || strings.Trim(clock, "-0:.") == ""
+	if b.Len() == 0 || !zeroClock {
+		if clock == "" {
+			clock = "00:00:00"
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+			if before && !strings.HasPrefix(clock, "-") {
+				b.WriteByte('+')
+			}
+		}
+		b.WriteString(clock)
+	}
+	return b.String()
 }

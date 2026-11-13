@@ -766,16 +766,18 @@ tables once.
 | `real`, `double precision` | floating point, `NaN` and `Infinity` included |
 | `boolean` | boolean |
 | `date`, `timestamp`, `timestamptz` | date and timestamps; `infinity` included |
+| `time`, `timetz` | time of day, with its offset for `timetz` |
+| `interval` | interval, with its months, days and time kept apart as PostgreSQL keeps them |
 | `uuid` | uuid |
 | `bytea` | bytes |
 | `text`, `varchar(n)`, `char(n)` | text compared byte by byte, so `'Lima'` is not `'lima'` |
-| an array of any type above but `bytea` and `numeric` with no precision (`text[]`, `integer[]`, `date[]`, ...) | a list of that type: `labels[1]` is the first element, `'red' = ANY(labels)` works |
+| an array of any type above but `bytea`, `numeric` with no precision, `time`, `timetz` and `interval` (`text[]`, `integer[]`, `date[]`, ...) | a list of that type: `labels[1]` is the first element, `'red' = ANY(labels)` works |
 | everything else | the text PostgreSQL wrote |
 
-"Everything else" is `json` and `jsonb`, `time` and `timetz`, `interval`,
-enums, domains, ranges, a `numeric` wider than 38 digits, with a
-negative scale or with a scale above its precision, every extension type,
-and an array of any of these, of `bytea` or of `numeric` with no precision.
+"Everything else" is `json` and `jsonb`, enums, domains, ranges, a `numeric`
+wider than 38 digits, with a negative scale or with a scale above its
+precision, every extension type, and an array of any of these, of `bytea`,
+of `numeric` with no precision, of `time`, `timetz` or `interval`.
 `->>` reads a `json` column as it is; an array left as text is the text
 `{a,b}`, so `labels[1]` is its first character, not its first element. A
 column left as text still compares byte by byte. Each view names the columns
@@ -796,6 +798,9 @@ error that says so. It is never rounded and never read as NULL:
 - A `date`, `timestamp` or `timestamptz` before the common era, or beyond the
   years the copy's types reach.
 - A `bytea` not written as `\x` and hex digits.
+- The `time` `24:00:00`, which the copy would show as midnight. A `timetz`
+  of `24:00:00` reads as it is.
+- An `interval` of `infinity` (PostgreSQL 17).
 - An array of more than one dimension (`'{{1,2},{3,4}}'`), or one whose
   first element is not numbered 1 (`'[0:1]={1,2}'`).
 
