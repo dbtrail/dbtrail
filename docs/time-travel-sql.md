@@ -665,7 +665,8 @@ The decision, in order, for every statement:
    `INTERVAL`, which MySQL turns into a number, or after the `INTERVAL`
    (`NOW() - INTERVAL 1 DAY * 2`); `CURDATE()` or `UTC_DATE()` anywhere but
    compared with a `DATE`, `DATETIME` or `TIMESTAMP` column (`BETWEEN`
-   included), inside `YEAR`, `MONTH`, `DAY` or `QUARTER`, or as a column of
+   included), inside `YEAR`, `MONTH`, `DAY` or `QUARTER`, as a whole
+   argument of `DATEDIFF` or the date of `DATE_FORMAT`, or as a column of
    its own: stepped through `DATE_ADD` or outside a comparison (a date on
    MySQL, a date and time on the copy), compared with a string, a parameter
    or a text column (MySQL reads a time in it), picked among strings
@@ -674,7 +675,8 @@ The decision, in order, for every statement:
    gives itself (`AS d`), which may stand for text; `NOW()` made a date and then
    stepped (`DATE(NOW()) - INTERVAL 1 DAY`); `UTC_DATE` and `UTC_TIMESTAMP`
    without parentheses; `STR_TO_DATE`,
-   `DATEDIFF`, `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
+   `TIMESTAMPDIFF`, `TIMEDIFF`, a `DATEDIFF` that is not two arguments
+   (see below), `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
    CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
    JSON functions and the `->`/`->>` operators, a backslash inside a string
@@ -713,6 +715,52 @@ The decision, in order, for every statement:
    statement then goes to MySQL under the same reason, not as a fault of
    the copy, so a statement whose `UNIX_TIMESTAMP` reaches a NULL row goes
    to MySQL.
+
+   `DATE_FORMAT(d, 'format')` and `DATEDIFF(a, b)`, the way a report
+   buckets and ages its rows, go to the copy since #2611 when its answer is
+   MySQL's. The copy has neither function: it is sent the rewrite the port
+   without routing has (#2628), `strftime(d, format)` with MySQL's
+   specifiers in the copy's spelling and `date_diff('day', CAST(b AS
+   DATE), CAST(a AS DATE))`. So the issue's report, `SELECT
+   DATE_FORMAT(created_at, '%Y-%m') AS month, COUNT(*) FROM orders WHERE
+   created_at >= NOW() - INTERVAL 30 DAY GROUP BY month ORDER BY month`,
+   is the copy's. The rules:
+   - Each date the call is given (the first argument of `DATE_FORMAT`,
+     both of `DATEDIFF`) is a `DATE`, `DATETIME` or `TIMESTAMP` column of
+     the tables the statement reads, named as a bare column, or `NOW()`,
+     `CURDATE()`, `UTC_TIMESTAMP()`, `UTC_DATE()` or a keyword the port
+     writes as one of them (held to their rules above). A text column, a
+     string, a number, a placeholder or an expression stays on MySQL,
+     counted as `copy_columns_differ`: MySQL reads text into a date its
+     own way (it takes `20260115` for a date, and reads an offset written
+     in the text, `'2026-01-15 02:00:00+05:00'`, into the session's zone),
+     where the copy refuses the first and casts the second to another
+     day. So does a column whose name the statement also gives a select
+     item, bare, quoted or as a string (`SELECT note AS d2, DATEDIFF(d,
+     d2)`), and a statement with a
+     subquery, a derived table or a `WITH`.
+   - The format of `DATE_FORMAT` is one string written in the statement,
+     with the specifiers the port without routing writes (all of MySQL's
+     but `%D`, `%u`, `%V` and `%X`); any other format, a placeholder among
+     them, is sent as written, the copy refuses it, and MySQL answers. Days
+     and months are named in English, which is what the session's
+     `lc_time_names` must be for the copy to answer at all.
+   - Sorted by its text (an `ORDER BY` of its alias, of its position or
+     of the call): the copy answers when every text the format
+     writes has the same length, and the same characters outside its
+     specifiers, so that two of them first differ in a digit or a letter.
+     `%Y-%m` and `%Y-%m-%d %H:%i` are such formats: the `-` between the
+     numbers, which MySQL and the copy weigh differently, is never what
+     decides. A format with a specifier of no fixed width (`%e`, `%c`,
+     `%k`, `%l`, `%M`, `%W`) is MySQL's in a statement that sorts by it,
+     or by any alias or position. Only texts of one format sorted against
+     each other: compared with a string, a text column or another format
+     (`DATE_FORMAT(dt, '%H:%i') < '1045'`, `MIN`, `MAX`, a `CASE` that is
+     sorted, a `UNION`), the format stays MySQL's, because there the `:`
+     can stand against a digit, which MySQL sorts after it and the copy
+     before it.
+   - `TIMESTAMPDIFF` and `TIMEDIFF` stay on MySQL, and so does a `DATEDIFF`
+     with another number of arguments.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
@@ -1166,23 +1214,8 @@ that far behind the source. Past it:
   server's limit of 300 s (max_behind_source_seconds), so it does not answer
   this statement`.
 
-Save it from the terminal, on the machine DBTrail runs on:
-
-```sh
-dbtrail port max-behind shop 5m     # or 300, in seconds
-dbtrail port max-behind shop        # say the limit saved, or off
-dbtrail port max-behind shop off    # remove it (the same as 0)
-```
-
-It takes whole seconds (`300`) or a duration (`90s`, `5m`, `1h30m`), and
-refuses a negative value, a fraction of a second and anything else. A limit
-under 90 seconds is saved, and the command says why it is not kept to the
-second (below). It changes only the limit: the server's fresh or fast mode
-and its LIKE switch stay as they were. `dbtrail port status` lists the limit
-of each server, `off` when there is none.
-
-Or with the web interface's API, beside the server's other choices for the
-port (there is no control for it on the page yet):
+Save it with the web interface's API, beside the server's other choices for
+the port (there is no control for it on the page yet):
 
 ```sh
 curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: application/json' \
@@ -1779,7 +1812,7 @@ What this is and is not:
     MySQL and `2026-01-01 10:00:00+00` on the copy, which holds the column
     as a moment with a zone (`CONCAT(dt, '')` is too, but `CONCAT` is kept
     on MySQL for its NULLs, #2633). A `DATE` column gives the same text on both,
-    and `LEFT`, `SUBSTRING` and `DATE_FORMAT` over a date are refused by
+    and `LEFT` and `SUBSTRING` over a date are refused by
     the copy, so MySQL answers those.
   - **A `DATETIME(6)` or `TIMESTAMP(6)` value, selected.** MySQL prints
     every decimal the column declares (`10:00:00.600000`) and the copy

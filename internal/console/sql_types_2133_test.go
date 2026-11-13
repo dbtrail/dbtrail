@@ -146,6 +146,7 @@ func (a *askedTypes) UnixTimeVeto(dates, notDates, whole, notWhole []string) str
 func (a *askedTypes) CallsNow() bool                                                { return false }
 func (a *askedTypes) DateComparedColumns() []string                                 { return nil }
 func (a *askedTypes) RoundVeto(safe, other []string) string                         { return "" }
+func (a *askedTypes) DateFunctionVeto(dates, notDates []string) string              { return "" }
 
 func (a *askedTypes) NameVeto(names []string) string {
 	a.nameCalls++

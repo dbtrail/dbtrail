@@ -82,9 +82,10 @@ type CopyOptions struct {
 	// MySQLDateFunctions writes MySQL's DATE_FORMAT(d, 'format') as
 	// strftime(d, format) and DATEDIFF(a, b) as date_diff('day', CAST(b AS
 	// DATE), CAST(a AS DATE)), two functions the copy does not have (#2628),
-	// where the rewrite gives MySQL's answer (mysqlDateCall). Only the port
-	// without routing sets it: under routing the copy refuses both, and MySQL
-	// answers.
+	// where the rewrite gives MySQL's answer (mysqlDateCall). Both ports set
+	// it. Under routing (#2611) it also lets a DATEDIFF the rewrite writes
+	// past the veto list (VetoOpts), and the caller keeps on MySQL a call
+	// whose date is not a date column or a clock call (DateFunctionVeto).
 	MySQLDateFunctions bool
 	// MySQLClockKeywords writes CURRENT_TIMESTAMP, LOCALTIME and
 	// LOCALTIMESTAMP as now(), and CURRENT_DATE as curdate(), the calls they

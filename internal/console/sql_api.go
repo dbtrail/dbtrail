@@ -1346,6 +1346,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
+				if msg := sqlDateFunctionRefusalFor(narrowed, statement, sess.Types); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
 				// The text the statement compares (#2533): refused here
 				// when no value could make the copy's answer MySQL's,
 				// guarded at the end of the script when the values decide.
@@ -1822,6 +1826,58 @@ func sqlNowRefusalFor(narrowed views.Input, statement string, types sqlsandbox.C
 	}
 	return ""
 }
+
+// sqlDateFunctionRefusalFor says why the copy must not answer a routed
+// statement because of what its DATE_FORMAT and DATEDIFF calls are given, or
+// "" when it can (#2611). Under routing the copy is sent them as strftime and
+// date_diff, which give MySQL's answer over a date; over text MySQL reads the
+// date its own way. The rule is the routing layer's
+// (readrouter.DateFunctionVeto, asked through types) over the DATE, DATETIME
+// and TIMESTAMP columns of the tables the statement reads and the rest of
+// their columns. A table whose column types are not known can hold text
+// under any name: refused when the statement calls one of the two. With no
+// reading of the statement (types is nil), a statement that may call one, or
+// the copy's spelling of one, is refused: not known is never "nothing to
+// find".
+func sqlDateFunctionRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes) string {
+	const refuse = "the copy does not answer this statement: "
+	if !mayCallDateFunction.MatchString(statement) {
+		return ""
+	}
+	if types == nil {
+		return refuse + "it could not be searched for DATE_FORMAT and DATEDIFF"
+	}
+	var dates, other []string
+	for _, t := range narrowed.SelectedBaselines() {
+		if !t.SchemaKnown {
+			if why := types.DateFunctionVeto(nil, nil); why != "" {
+				return refuse + fmt.Sprintf("DATE_FORMAT or DATEDIFF over %s.%s, whose column types are not known", t.Schema, t.Table)
+			}
+			continue
+		}
+		isDate := map[string]bool{}
+		for _, c := range t.Temporal {
+			if ty := strings.ToLower(c.Type); strings.HasPrefix(ty, "date") || strings.HasPrefix(ty, "timestamp") {
+				isDate[strings.ToLower(c.Name)] = true
+			}
+		}
+		for _, n := range t.Columns {
+			if isDate[strings.ToLower(n)] {
+				dates = append(dates, n)
+			} else {
+				other = append(other, n)
+			}
+		}
+	}
+	if why := types.DateFunctionVeto(dates, other); why != "" {
+		return refuse + why
+	}
+	return ""
+}
+
+// mayCallDateFunction is a word of DATE_FORMAT or DATEDIFF, or of the copy's
+// calls the router writes them as, anywhere in a statement.
+var mayCallDateFunction = regexp.MustCompile(`(?i)\b(date_format|datediff|strftime|date_diff)\b`)
 
 // mayCallNow is a word of NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE(),
 // or of a keyword the router writes as one of them (CURRENT_TIMESTAMP,

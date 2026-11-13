@@ -116,6 +116,35 @@ type textWalk struct{ ordered, sorted, wrapped bool }
 // collectTextUse fills r.Text from a statement tree.
 func collectTextUse(stmt any, r *Refs) {
 	walkText(stmt, textWalk{}, &r.Text)
+	if r.Text.SetOperation && holdsFixedStrftime(stmt) {
+		// Under a set operation the parts' texts share one column, and
+		// another part may write another format there: the format is read
+		// as a string again (fixedStrftime).
+		r.Text.LooseLiteral = true
+	}
+}
+
+// holdsFixedStrftime reports whether a tree holds a call fixedStrftime
+// takes.
+func holdsFixedStrftime(n any) bool {
+	switch x := n.(type) {
+	case []any:
+		for _, e := range x {
+			if holdsFixedStrftime(e) {
+				return true
+			}
+		}
+	case map[string]any:
+		if _, ok := fixedStrftime(x); ok {
+			return true
+		}
+		for _, e := range x {
+			if holdsFixedStrftime(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func walkText(node any, at textWalk, u *TextUse) {
@@ -178,6 +207,19 @@ func walkText(node any, at textWalk, u *TextUse) {
 		case "FUNCTION", "WINDOW":
 			// A window is its function too: MAX(x) OVER () puts x in order.
 			f, _ := v["function_name"].(string)
+			if date, ok := fixedStrftime(v); ok {
+				// Its format is not a string the statement compares, so it
+				// is no LooseLiteral: an ORDER BY of the call itself (by
+				// alias or position too) sorts texts of that one format,
+				// which sort as MySQL sorts them (fixedFormat, sortedHere).
+				// Compared with anything else (a string, a column, another
+				// format: <, BETWEEN, MIN, MAX, GREATEST) the format is still
+				// read as a string with a sign by orderedHere, and so is a
+				// CASE or a COALESCE an ORDER BY sorts, and a set operation
+				// (collectTextUse). Its date is walked as any argument.
+				walkText(date, textWalk{ordered: at.ordered, sorted: at.sorted, wrapped: true}, u)
+				return
+			}
 			if byBytesFunctions[f] {
 				byBytesHere(v, u)
 			}
@@ -295,6 +337,12 @@ func withoutAlias(item map[string]any) map[string]any {
 // literal in it that only letters, digits and inner spaces keep in MySQL's
 // order.
 func sortedHere(e map[string]any, u *TextUse) {
+	if date, ok := fixedStrftime(e); ok {
+		// The ORDER BY sorts that call's own texts against each other: all
+		// of one format, which sort as MySQL sorts them (fixedFormat).
+		walkText(date, textWalk{ordered: true, sorted: true, wrapped: true}, u)
+		return
+	}
 	if loose, _, _ := scanOrdered(e); loose {
 		lit := OrderedLiteral{Expression: true}
 		if e["class"] == "COLUMN_REF" {
@@ -410,6 +458,65 @@ func varcharConstant(v map[string]any) (string, bool) {
 	}
 	s, ok := val["value"].(string)
 	return s, ok
+}
+
+// fixedStrftime reports whether v is a call strftime(date, 'format') whose
+// format fixedFormat accepts, and returns its date (#2611). Only texts of
+// that one format sort alike: '10:30' against '1045' first differs at the
+// ':', which MySQL sorts before a digit and the copy after one. The router
+// writes MySQL's DATE_FORMAT that way under routing, and a report sorts or
+// groups by what it writes (GROUP BY month ORDER BY month, the alias of
+// DATE_FORMAT(created_at, '%Y-%m')). The format is a string literal, so the
+// walk would take it for a string put in order that holds a sign, and keep
+// every such report on MySQL.
+func fixedStrftime(v map[string]any) (map[string]any, bool) {
+	if v["class"] != "FUNCTION" || v["function_name"] != "strftime" {
+		return nil, false
+	}
+	ch, _ := v["children"].([]any)
+	if len(ch) != 2 {
+		return nil, false
+	}
+	date, _ := ch[0].(map[string]any)
+	format, _ := ch[1].(map[string]any)
+	if date == nil || format == nil || format["class"] != "CONSTANT" {
+		return nil, false
+	}
+	s, ok := varcharConstant(format)
+	if !ok || !fixedFormat(s) {
+		return nil, false
+	}
+	return date, true
+}
+
+// fixedFormat reports whether every text strftime writes with format f has
+// the same length and the same characters outside its specifiers, each
+// specifier the same number of digits or of letters: %Y %y %m %d %H %I %M %S
+// %f %j %U %V %G %w (digits, zero-padded), %a %b %p (three-letter English
+// names, AM and PM) and %% (#2611). Two such texts then first differ inside a
+// specifier, digit against digit or letter against letter, where MySQL's
+// folding collations and the copy's session order them alike: the sign
+// between them (the - of 2026-01), which the two weigh their own ways, is
+// never what decides. Printable ASCII only, and no space at the end, which a
+// PAD SPACE collation does not see. %-m, %-d and the other unpadded forms,
+// %B and %A (names of another length each) are not fixed.
+func fixedFormat(f string) bool {
+	if f == "" || f[len(f)-1] == ' ' {
+		return false
+	}
+	for i := 0; i < len(f); i++ {
+		if f[i] < 0x20 || f[i] > 0x7e {
+			return false
+		}
+		if f[i] != '%' {
+			continue
+		}
+		if i+1 == len(f) || !strings.ContainsRune("YymdHIMSfjUVGwabp%", rune(f[i+1])) {
+			return false
+		}
+		i++
+	}
+	return true
 }
 
 // oddLiteral says a literal holds a character outside printable ASCII or ends
