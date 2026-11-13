@@ -16,6 +16,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/query"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/go-sql-driver/mysql"
 )
 
 // PGSourceChecksum fingerprints one live PostgreSQL table at a consistent
@@ -420,6 +421,13 @@ type pgStreamPoint struct {
 	// lastEvent is the source's stamp of the newest change the capture
 	// indexed (zero when none).
 	lastEvent time.Time
+	// sentThrough is stream_state.pg_sent_through_lsn (#2746): every commit
+	// of the source database below it is indexed. sentKnown is false when the
+	// column is NULL or missing (a capture that predates #2746) or when the
+	// last save was not one that wrote it (see readPGStreamPoint); 0 with
+	// sentKnown is a capture that has not saved a position yet.
+	sentThrough uint64
+	sentKnown   bool
 }
 
 // readPGStreamPoint reads pgStreamPoint. Its errors are already worded as
@@ -433,9 +441,22 @@ func readPGStreamPoint(ctx context.Context, indexDB *sql.DB) (pgStreamPoint, err
 		savedAt   sql.NullString
 		lastEvent sql.NullTime
 	)
+	// The sent position (#2746) is read in the same statement, so it is from
+	// the same save as the checkpoint, and only while pg_sent_through_at is
+	// that save's last_checkpoint: another writer's save (an older capture,
+	// bintrail-pg reset) unties it. An index without the columns (error 1054:
+	// the console reads indexes it never migrates) is read without them, as
+	// one with no sent position.
+	const pgPointCols = "flavor, binlog_position, gap_lost_at, gap_lost_detail, TIMESTAMPDIFF(SECOND, last_checkpoint, UTC_TIMESTAMP()), CAST(last_checkpoint AS CHAR), last_event_time"
+	var sent sql.NullInt64
 	err := indexDB.QueryRowContext(ctx,
-		"SELECT flavor, binlog_position, gap_lost_at, gap_lost_detail, TIMESTAMPDIFF(SECOND, last_checkpoint, UTC_TIMESTAMP()), CAST(last_checkpoint AS CHAR), last_event_time FROM stream_state WHERE id = 1").
-		Scan(&flavor, &pos, &st.gapLostAt, &gapDetail, &st.age, &savedAt, &lastEvent)
+		"SELECT "+pgPointCols+", IF(pg_sent_through_at <=> last_checkpoint, pg_sent_through_lsn, NULL) FROM stream_state WHERE id = 1").
+		Scan(&flavor, &pos, &st.gapLostAt, &gapDetail, &st.age, &savedAt, &lastEvent, &sent)
+	if me := (*mysql.MySQLError)(nil); errors.As(err, &me) && me.Number == 1054 {
+		sent = sql.NullInt64{}
+		err = indexDB.QueryRowContext(ctx, "SELECT "+pgPointCols+" FROM stream_state WHERE id = 1").
+			Scan(&flavor, &pos, &st.gapLostAt, &gapDetail, &st.age, &savedAt, &lastEvent)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return st, errors.New("index has no stream state yet (DBTrail not running or never checkpointed)")
 	}
@@ -448,6 +469,9 @@ func readPGStreamPoint(ctx context.Context, indexDB *sql.DB) (pgStreamPoint, err
 	}
 	if pos.Valid && pos.Int64 > 0 {
 		st.checkpoint = uint64(pos.Int64)
+	}
+	if sent.Valid && sent.Int64 >= 0 {
+		st.sentThrough, st.sentKnown = uint64(sent.Int64), true
 	}
 	return st, nil
 }
@@ -467,19 +491,28 @@ func (st pgStreamPoint) verdict(anchorLSN uint64, windowStart time.Time) (bool, 
 //
 // That same branch is also the steady state of a quiet database: the anchor
 // is past the last commit there (creating the slot writes WAL) and other
-// databases move it on, so no checkpoint ever reaches it. The wait therefore
-// ends, with the verdict as it is (covered, with the note), once the capture
-// has saved its position twice during the wait without it moving. That is
-// not a proof: a capture held up before delivering a commit below the anchor
-// (a large transaction still being decoded, heavy WAL elsewhere) saves the
-// same position too, and the note says so; it is the trade-off this verdict
-// already makes for an unpinned read (#2746 tracks the proof: the
-// walsender's sent position). A capture that is still moving its
-// position when the wait runs out is behind, provably, and the check is
-// inconclusive. A capture that is not running (no save within coverageStale)
-// is not waited for. A wait that ended on an unmoved position is remembered
+// databases move it on, so no checkpoint ever reaches it. There the proof is
+// the walsender's sent position the capture saves (#2746,
+// pg_sent_through_lsn): every commit below it is indexed, so once it reaches
+// the anchor the snapshot's changes are all in the index, with no commit
+// needed near the anchor. With that position saved, the wait ends only on the
+// proof; at the deadline without it the check is inconclusive, because a
+// capture held up before delivering a commit below the anchor (a large
+// transaction still being decoded, heavy WAL elsewhere, network lag) looks the
+// same as a quiet one from the checkpoint alone. A sent position that a whole
+// wait did not move is remembered, and later tables of the same run that
+// find it unmoved are inconclusive without waiting again.
+//
+// A capture built before #2746 saves no sent position. For it the wait ends,
+// with the verdict as it is (covered, with the note), once the capture has
+// saved its position twice during the wait without it moving, which is not a
+// proof, and the note says so. A wait that ended that way is remembered
 // (stuckCheckpoints), and later tables of the same run whose wait would start
 // from it do not wait again.
+//
+// Either way, a capture that is still moving its position when the wait runs
+// out is behind, provably, and the check is inconclusive, and a capture that
+// is not running (no save within coverageStale) is not waited for.
 func waitIndexCoversPG(ctx context.Context, indexDB *sql.DB, anchorLSN uint64, windowStart time.Time, wait time.Duration) (bool, string, time.Time, error) {
 	return waitPGCoverage(ctx, func() (pgStreamPoint, error) { return readPGStreamPoint(ctx, indexDB) },
 		indexDB, anchorLSN, windowStart, wait)
@@ -490,11 +523,13 @@ func waitIndexCoversPG(ctx context.Context, indexDB *sql.DB, anchorLSN uint64, w
 func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stuck *sql.DB, anchorLSN uint64, windowStart time.Time, wait time.Duration) (bool, string, time.Time, error) {
 	deadline := time.Now().Add(wait)
 	var (
-		started  bool
-		from     uint64 // the checkpoint the wait started from
-		lastSave string
-		lastLSN  uint64
-		unmoved  int // saves seen during the wait that left the position where it was
+		started   bool
+		from      uint64 // the checkpoint the wait started from
+		fromSent  uint64 // the sent position the wait started from (#2746)
+		sentMoved bool   // the sent position, or whether it is known, changed during the wait
+		lastSave  string
+		lastLSN   uint64
+		unmoved   int // saves seen during the wait that left the position where it was
 	)
 	for {
 		st, err := read()
@@ -505,6 +540,10 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 			return false, err.Error(), time.Time{}, nil
 		}
 		covered, note := st.verdict(anchorLSN, windowStart)
+		if covered && note != "" && st.sentKnown && st.sentThrough >= anchorLSN {
+			// Proven without a commit near the anchor (#2746).
+			return true, "", st.lastEvent, nil
+		}
 		if !covered || note == "" || wait < 0 {
 			return covered, note, st.lastEvent, nil
 		}
@@ -516,7 +555,11 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 		}
 		if !started {
 			started, from, lastSave, lastLSN = true, st.checkpoint, st.savedAt, st.checkpoint
-			if stuckCheckpoints.is(stuck, formatLSN(from)) {
+			fromSent = st.sentThrough
+			if st.sentKnown && stuckCheckpoints.is(stuck, stuckSentKey(st.sentThrough)) {
+				return false, pgSentNotProven(st.sentThrough, anchorLSN, 0), st.lastEvent, nil
+			}
+			if !st.sentKnown && stuckCheckpoints.is(stuck, formatLSN(from)) {
 				return covered, note + ". The capture's saved position did not move during an earlier wait of this run, so it was not waited for again", st.lastEvent, nil
 			}
 		} else if st.savedAt != lastSave {
@@ -527,7 +570,10 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 			}
 			lastSave, lastLSN = st.savedAt, st.checkpoint
 		}
-		if unmoved >= 2 {
+		if !st.sentKnown || st.sentThrough != fromSent {
+			sentMoved = true
+		}
+		if unmoved >= 2 && !st.sentKnown {
 			stuckCheckpoints.set(stuck, formatLSN(st.checkpoint))
 			return covered, note + ". The capture saved its position twice during the wait without it moving: no change of this database was committed between it and the snapshot, or the capture is held up before delivering one", st.lastEvent, nil
 		}
@@ -535,6 +581,15 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 			if st.checkpoint != from {
 				return false, fmt.Sprintf("%s: the capture's saved position moved from %s to %s during a %s wait and is still before the snapshot's %s, so it has not indexed every change the snapshot holds; run the check again",
 					indexBehind, formatLSN(from), formatLSN(st.checkpoint), wait, formatLSN(anchorLSN)), st.lastEvent, nil
+			}
+			if st.sentKnown {
+				// Remembered only when the whole wait left it where it was: a
+				// position that moved is a capture making progress, and the
+				// next table may well find it past its snapshot.
+				if !sentMoved {
+					stuckCheckpoints.set(stuck, stuckSentKey(st.sentThrough))
+				}
+				return false, pgSentNotProven(st.sentThrough, anchorLSN, wait), st.lastEvent, nil
 			}
 			stuckCheckpoints.set(stuck, formatLSN(from))
 			return covered, note, st.lastEvent, nil
@@ -546,6 +601,27 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 		}
 	}
 }
+
+// pgSentNotProven is the inconclusive reason when the capture saves the
+// walsender's sent position (#2746) but it did not reach the snapshot within
+// the wait. wait 0 means the table was not waited for: an earlier table of
+// the run waited its full time on the same position.
+func pgSentNotProven(sent, anchorLSN uint64, wait time.Duration) string {
+	got := "it has not saved one yet"
+	if sent != 0 {
+		got = "it saved " + formatLSN(sent)
+	}
+	within := fmt.Sprintf("within a %s wait", wait)
+	if wait == 0 {
+		within = "during an earlier wait of this run, which this table did not repeat"
+	}
+	return fmt.Sprintf("coverage not proven: %s, the capture did not confirm that PostgreSQL had sent it every change committed before the snapshot's %s (%s), so a change the snapshot holds may not be indexed yet and a difference would not be conclusive; run the check again, and if this repeats, check the capture's replication lag",
+		within, formatLSN(anchorLSN), got)
+}
+
+// stuckSentKey is the stuckCheckpoints entry for a sent position a whole
+// wait did not move; it cannot equal an entry of a checkpoint.
+func stuckSentKey(sent uint64) string { return "sent " + formatLSN(sent) }
 
 // gapLostInWindow reports whether a stamped permanent loss falls inside the
 // comparison window (at-or-after its start). Pure — see indexCoversPG for why

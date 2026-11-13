@@ -64,6 +64,17 @@ const (
 	// binlog_events: the stream consumer handles it out of band, like
 	// EventRelation. A consumer that does not know it must skip it.
 	EventCaughtUp EventType = 9
+	// EventSentThrough carries, in EndPos, the WAL position a PostgreSQL
+	// walsender reported in a keepalive (#2746). The walsender sends its
+	// decoded-and-sent position there, so every transaction of the database
+	// that committed below it was sent BEFORE the keepalive, and the marker is
+	// emitted in stream order, after the events that came before it. A
+	// consumer that has indexed every event received before the marker may
+	// therefore say that every commit below EndPos is indexed, even when no
+	// commit of the database is near that position (a quiet database). Only
+	// pgcapture emits it; like EventCaughtUp it is never written to
+	// binlog_events, and a consumer that does not know it must skip it.
+	EventSentThrough EventType = 10
 )
 
 // Event is a fully resolved change event with column names attached. It carries
