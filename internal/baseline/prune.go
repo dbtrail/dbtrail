@@ -174,14 +174,20 @@ type PruneResult struct {
 	// listed, and not sent again: sending would succeed and change nothing,
 	// at every cleanup, for ever.
 	ReadRefused []string
+	// restoredReadRefused: the last restore's result is among ReadRefused
+	// (#2701). It was asked on its own rule, so it is not among Denied.
+	restoredReadRefused bool
 	// DestinationWriteOnly reports that every refused question was about such
 	// a snapshot and that S3 confirmed none, the check of the newest included
 	// (#2696): a destination that accepts uploads and refuses every read.
 	// Nothing that needed its answer is removed, nothing is sent again.
 	DestinationWriteOnly bool
-	// KeptPinned counts snapshots kept because a reader of this process is
-	// on that one snapshot now (PinSnapshot, #2678): a download, a SQL
-	// statement, an Explain. The rest of the folder is pruned as usual.
+	// KeptPinned counts snapshots kept because a reader is on that one
+	// snapshot now: one of this process (PinSnapshot, #2678: a download, a
+	// SQL statement, an Explain), or of any process that holds it
+	// (HoldSnapshot, #2675: an Iceberg export, a verify run, a full-table
+	// reconstruct, a cascade lookup). The rest of the folder is pruned as
+	// usual.
 	KeptPinned int
 	// Reading names the job of this process that reads older snapshots of
 	// this directory now (BeginRead, #2678), so this prune did nothing: a
@@ -452,25 +458,33 @@ func pruneFailureReason(res PruneResult, err error) string {
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination, so they were kept.", snapshotsWord(res.ProbeErrors)))
 	}
 	if res.DestinationDenied {
-		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they may read this S3 prefix.")
+		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they have s3:GetObject on this S3 prefix.")
 	}
-	if n := res.Denied - len(res.ReadRefused); n > 0 {
+	deniedRead := len(res.ReadRefused)
+	if res.restoredReadRefused {
+		deniedRead-- // not among Denied
+	}
+	if n := res.Denied - deniedRead; n > 0 {
 		itIs, it := "it is", "it"
 		if n > 1 {
 			itIs, it = "they are", "them"
 		}
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination: S3 refused the question (access denied), so %s kept here until S3 confirms it has %s. "+
-			"Without permission to list the bucket (s3:ListBucket), S3 answers that way about a copy it does not have.",
+			"S3 answers that way about a copy it does not have when the credentials lack s3:ListBucket, and about every copy when they lack s3:GetObject.",
 			snapshotsWord(n), itIs, it))
 	}
+	// Refused after a send S3 took (#2696): S3's 403 does not say whether
+	// s3:GetObject is missing or the credentials stopped working (#2701),
+	// so both are named.
+	const readCauses = "either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both."
 	switch n := len(res.ReadRefused); {
 	case res.DestinationWriteOnly:
-		why = append(why, "S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm any snapshot is there and keeps them here. "+
-			"It does not send them again: S3 took each one and then refused to read it.")
+		why = append(why, "S3 refuses to read back what it accepted: "+readCauses+
+			" DBTrail cannot confirm any snapshot is there, so it keeps them here, and it does not send them again: S3 took each one and then refused to read it.")
 	case n == 1:
-		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again.")
+		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back: "+readCauses+" It is kept here and not sent again.")
 	case n > 1:
-		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back (s3:GetObject), so they are kept here and not sent again.", n))
+		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back: %s They are kept here and not sent again.", n, readCauses))
 	}
 	// One cause per line, and "\n" only: the page renders them line by line,
 	// and a path or an error can itself contain "; " or ", ".
@@ -552,6 +566,10 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
 	sweepFailures, firstSweepErr := sweepPruningLeftovers(opts.LocalDir)
+	if !opts.DryRun {
+		// Records of reads whose snapshot is gone (#2675).
+		sweepHoldRecords(opts.LocalDir)
+	}
 	removedEmpty := sweepEmptySnapshotDirs(opts.LocalDir, pinnedNow(opts.LocalDir, time.Now()), time.Now(), opts.DryRun)
 
 	snaps, err := enumerateLocalSnapshots(opts.LocalDir)
@@ -632,7 +650,30 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			return res
 		}
 		ok, perr := probe(ctx, restoredSnap.name)
+		_, resent := resentMarks(opts.LocalDir)[restoredSnap.name]
+		if perr == nil && resent && !opts.DryRun {
+			// S3 answered about it: the mark's evidence is spent (#2701).
+			forgetResent(opts.LocalDir, restoredSnap.name)
+		}
+		// Refused after a send S3 took: a read it refuses, whether for a
+		// missing s3:GetObject or for credentials that stopped working; S3's
+		// 403 does not say which (a HEAD needs s3:GetObject, so without it
+		// every key answers 403, one that does not exist included).
+		refusedRead := perr != nil && resent && storage.IsAccessDenied(perr)
 		switch {
+		case refusedRead:
+			// Sent again by the cleanup, taken by S3, and refused since
+			// (#2701, as #2696 for the others): S3 takes uploads here and
+			// refuses to read them, so sending it again changes nothing.
+			// Kept, listed as refused to read, and not sent again.
+			slog.Warn("baseline prune: S3 took the last restore's snapshot when it was sent again and refuses to read it back; it is kept, and not sent again",
+				"snapshot", restoredSnap.name, "error", perr)
+			res.KeptNotDurable++
+			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
+			res.NotAsked = append(res.NotAsked, restoredSnap.name)
+			res.ReadRefused = append(res.ReadRefused, restoredSnap.name)
+			res.restoredReadRefused = true
+			res.RestoredUnasked = restoredSnap.name
 		case perr != nil:
 			// NOT counted in probeErrors. This snapshot is never removed, so
 			// the answer about it decides no removal; counted, one failed
@@ -660,6 +701,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 
 	if localOnly {
 		newest := computeNewestN(countable, opts.KeepNewest, now)
+		// The pair a check compares, which only this folder holds (#2691).
+		keepCheckPair(opts.LocalDir, keepers)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, 0, now)
 		res = restoredKept(res, nil)
 		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)
@@ -1010,7 +1053,17 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 			res.KeptPinned++
 			continue
 		}
-		staged, err := removeSnapshot(opts.LocalDir, name)
+		// A reader of any process that holds this snapshot (HoldSnapshot,
+		// #2675) keeps it. The marker stays locked until the snapshot is out
+		// of its path, so a reader that comes after finds it gone.
+		unlock, held := lockForRemoval(filepath.Join(opts.LocalDir, name))
+		if held {
+			slog.Info("baseline prune: another reader, in this process or another one, is on this snapshot; it stays until that reader ends",
+				"dir", opts.LocalDir, "snapshot", name)
+			res.KeptPinned++
+			continue
+		}
+		staged, err := removeSnapshot(opts.LocalDir, name, unlock)
 		if !staged {
 			slog.Warn("baseline prune: could not remove snapshot; it will be retried next cycle",
 				"snapshot", name, "error", err)
@@ -1331,11 +1384,17 @@ var (
 // is harmless (invisible to readers) and swept next cycle.
 //
 // staged reports whether the rename happened, which is what decides whether
-// the snapshot left the listing; err may still be set when it did.
-func removeSnapshot(dir, name string) (staged bool, err error) {
+// the snapshot left the listing; err may still be set when it did. afterRename
+// runs once the rename has been tried, either way.
+func removeSnapshot(dir, name string, afterRename func()) (staged bool, err error) {
 	src := filepath.Join(dir, name)
 	stagedPath := filepath.Join(dir, "."+name+pruningSuffix)
-	if err := renameAside(src, stagedPath); err != nil {
+	err = renameAside(src, stagedPath)
+	// The marker lock (lockForRemoval) is let go as soon as the folder has
+	// moved or failed to: holding it through the delete below would keep a
+	// reader waiting only to learn the snapshot is gone.
+	afterRename()
+	if err != nil {
 		return false, fmt.Errorf("stage snapshot %q for removal: %w", name, err)
 	}
 	if err := removeAll(stagedPath); err != nil {

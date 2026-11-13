@@ -17,10 +17,10 @@ import (
 // and a .sql build (consoleapp s3PruneBusyFn); this is the same rule for the
 // local folder, asked by the prune itself so that no caller of it can forget.
 //
-// In memory, on purpose: a reader that dies with the process holds nothing,
-// and one in ANOTHER process is not seen (the command-line tools reading a
-// folder the daemon prunes get an error when their snapshot goes, and run
-// again).
+// In memory, on purpose: a reader that dies with the process holds nothing.
+// A reader in ANOTHER process is not seen here; it holds the one snapshot it
+// reads with HoldSnapshot (readhold_unix.go, #2675), which the prune of any
+// process honours.
 
 // readHoldLimit is how long one registration stops the prune. Past it the
 // reader is taken for stuck and the prune goes on: a job that never ends
@@ -281,4 +281,16 @@ func PinCounted(root, name, what string, limit time.Duration, kept map[string]bo
 		return func() {}, false
 	}
 	return insertPinLocked(key, name, what, limit, true), true
+}
+
+// HoldSnapshotOfTable is HoldSnapshot for the snapshot a table file of it
+// lives in: <root>/<snapshot>/<schema>/<table>.parquet, the path
+// reconstruct.FindBaseline returns.
+func HoldSnapshotOfTable(tablePath string) (release func(), gone bool) {
+	// Any URL (s3://, file://, http://) is read unheld: only a plain local
+	// path names a folder whose marker can be held.
+	if tablePath == "" || strings.Contains(tablePath, "://") {
+		return func() {}, false
+	}
+	return HoldSnapshot(filepath.Dir(filepath.Dir(tablePath)))
 }
