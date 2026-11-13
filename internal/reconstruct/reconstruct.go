@@ -54,17 +54,30 @@ type StateEntry struct {
 // the reconstructed state would silently carry the marker instead of the real
 // value. Events after `at` are never inspected — they are not folded.
 func ApplyAt(initialState map[string]any, events []query.ResultRow, at time.Time) (map[string]any, error) {
+	state, _, err := applyAtFrom(initialState, events, at)
+	return state, err
+}
+
+// applyAtFrom is ApplyAt, also returning the change the state was written
+// by: the last INSERT or UPDATE folded, nil when the state is initialState
+// passed through (or nil itself). A check that asks when a value was written
+// (CharsetNarrowings.CheckFold, #2750) reads it here, from the same fold, and
+// not from a second walk of the events that could stop agreeing with this one.
+func applyAtFrom(initialState map[string]any, events []query.ResultRow, at time.Time) (map[string]any, *query.ResultRow, error) {
 	state := copyMap(initialState)
-	for _, ev := range events {
+	var src *query.ResultRow
+	for i := range events {
+		ev := &events[i]
 		if ev.EventTimestamp.After(at) {
 			break
 		}
-		if err := checkEventToast(ev); err != nil {
-			return nil, err
+		if err := checkEventToast(*ev); err != nil {
+			return nil, nil, err
 		}
-		state = applyEvent(state, ev)
+		state = applyEvent(state, *ev)
+		src = eventSource(src, ev)
 	}
-	return state, nil
+	return state, src, nil
 }
 
 // BuildHistory applies events chronologically up to at and returns a StateEntry
@@ -400,6 +413,21 @@ func applyEvent(state map[string]any, ev query.ResultRow) map[string]any {
 		return state
 	default:
 		return state
+	}
+}
+
+// eventSource is the change the state is written by after applyEvent folded
+// ev onto a state written by src. It follows applyEvent case by case: an
+// INSERT or UPDATE writes the state, a DELETE leaves none, and anything
+// applyEvent leaves the state alone for leaves its source alone too.
+func eventSource(src, ev *query.ResultRow) *query.ResultRow {
+	switch ev.EventType {
+	case event.EventInsert, event.EventUpdate:
+		return ev
+	case event.EventDelete:
+		return nil
+	default:
+		return src
 	}
 }
 

@@ -69,3 +69,27 @@ func TestToStored(t *testing.T) {
 		t.Error("ToStored(日本): want an error")
 	}
 }
+
+// Holds against what MySQL 8.0.46 and MariaDB 11.4 measured for #2735:
+// CONVERT(_utf32 0x80 USING latin1) is '?' while 0x81 and 0x9D keep their
+// byte, and the Windows-1252 letters (€, Ÿ) are latin1's.
+func TestHolds(t *testing.T) {
+	for r, want := range map[rune]bool{
+		'a': true, 0: true, 'Ñ': true, 'ÿ': true, '€': true, 'Ÿ': true, 'š': true,
+		0x81: true, 0x8d: true, 0x8f: true, 0x90: true, 0x9d: true,
+		0x80: false, 0x9f: false, '✓': false, '😀': false, 'ł': false, utf8.RuneError: false,
+	} {
+		if got := Holds(r); got != want {
+			t.Errorf("Holds(%U) = %v, want %v", r, got, want)
+		}
+	}
+	n := 0
+	for r := rune(0); r <= 0x10ffff; r++ {
+		if Holds(r) {
+			n++
+		}
+	}
+	if n != 256 {
+		t.Errorf("latin1 holds %d characters, want 256 (one per byte)", n)
+	}
+}

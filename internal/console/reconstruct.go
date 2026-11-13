@@ -496,9 +496,9 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	//     the statement's type, table, time and position, never its text, so
 	//     nothing a data profile hides can reach it (profiled sessions are
 	//     refused above in any case).
-	if err := reconstruct.CheckDestructiveDDL(ctx, b.db, schema, table,
-		reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
-			Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
+	ddlWin := reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
+		Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}
+	if err := reconstruct.CheckDestructiveDDL(ctx, b.db, schema, table, ddlWin); err != nil {
 		if errors.Is(err, reconstruct.ErrDestructiveDDL) {
 			writeJSONError(w, http.StatusUnprocessableEntity, "time-travel stopped: "+err.Error())
 			return
@@ -661,6 +661,28 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	}
 	if warn := reconstruct.PastCutWarning(order, at != nil); warn != "" {
 		resp.Warnings = append(resp.Warnings, "cut_by_statement_time: "+warn)
+	}
+	// An ALTER in the window that narrowed a column's character set wrote '?'
+	// for what the new set cannot hold, with no row event (#2750): the row is
+	// refused when a value it carries from before that ALTER lost a
+	// character, in history mode too (its last entry is the row at `at`).
+	// Same 422 as the destructive-DDL refusal above; the message names the
+	// column and the statement, never the value.
+	narrowings, err := reconstruct.FindCharsetNarrowings(ctx, b.db, schema, table, ddlWin)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, note := range narrowings.Notes() {
+		resp.Warnings = append(resp.Warnings, "charset_narrowing_unchecked: "+note)
+	}
+	if err := narrowings.CheckFold(baselineRow, ordered, atTime); err != nil {
+		msg := err.Error()
+		if errors.Is(err, reconstruct.ErrDestructiveDDL) {
+			msg = "time-travel stopped: " + msg
+		}
+		writeJSONError(w, http.StatusUnprocessableEntity, msg)
+		return
 	}
 	if history {
 		entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, ordered, atTime)

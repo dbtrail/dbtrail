@@ -454,7 +454,7 @@ func (d *deps) runTable(ctx context.Context, schema, tbl string) Outcome {
 		}
 	}
 
-	res, err := d.increment(ctx, schema, tbl, tm, pkCols, icetbl, cur)
+	res, err := d.increment(ctx, schema, tbl, tm, pkCols, icetbl, cur, out.Verdict == VerdictLoaded)
 	if err != nil {
 		o := refusal(schema, tbl, err)
 		if out.Verdict == VerdictLoaded {
@@ -584,7 +584,20 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 	}
 	defer cleanup()
 
-	files, rows, err := d.writeBaselineRows(ctx, icetbl, arrowSchema, cols, pkCols, local)
+	// The run folds (baseline, --at] right after this load, so a narrowing
+	// ALTER in that window is checked against every baseline row here, before
+	// anything commits (#2735); the increment then checks the rows it writes.
+	// Run always opens the index; only the catalog-side unit tests build a
+	// deps with none, and they hold no schema_changes to read.
+	var narrow *reconstruct.CharsetNarrowings
+	if d.db != nil {
+		narrow, err = reconstruct.FindCharsetNarrowings(ctx, d.db, schema, tbl, reconstruct.DDLWindow{
+			Since: snapTime, Until: d.cfg.At, Anchor: &query.BinlogPos{File: meta.BinlogFile, Pos: uint64(meta.BinlogPos)}})
+		if err != nil {
+			return nil, nil, none, err
+		}
+	}
+	files, rows, err := d.writeBaselineRows(ctx, icetbl, arrowSchema, cols, pkCols, local, narrow)
 	if err != nil {
 		return nil, nil, none, fmt.Errorf("load baseline %s: %w", path, err)
 	}
@@ -661,8 +674,11 @@ func (d *deps) committed(c Commit) {
 // carries (#1155), key or not, and every JSON column's text (MySQL's own
 // rendering, as the dump printed it) is parsed and re-emitted through the
 // encoder the delta path uses (#1508).
+//
+// narrow, when set, refuses a row holding a value a narrowing ALTER after the
+// baseline replaced with '?' (#2735): every baseline row is from before it.
 func (d *deps) writeBaselineRows(ctx context.Context, icetbl *table.Table, arrowSchema *arrow.Schema, cols []column,
-	pkCols []metadata.ColumnMeta, local string) ([]iceberg.DataFile, int64, error) {
+	pkCols []metadata.ColumnMeta, local string, narrow *reconstruct.CharsetNarrowings) ([]iceberg.DataFile, int64, error) {
 
 	ddb, err := sql.Open("duckdb", "")
 	if err != nil {
@@ -721,6 +737,10 @@ func (d *deps) writeBaselineRows(ctx context.Context, icetbl *table.Table, arrow
 			row := make(map[string]any, len(dcols))
 			for i, name := range dcols {
 				row[name] = scan[i]
+			}
+			if err := narrow.CheckRow(row, nil); err != nil {
+				yield(nil, err)
+				return
 			}
 			canon, err := reconstruct.CanonicalizePKMap(row, pkCols)
 			if err != nil {
@@ -818,8 +838,11 @@ type incrementResult struct {
 // a restored copy of the index) or a cut resolved on an index with nothing
 // live would otherwise commit an empty window and move the cursor over events
 // that were never folded.
+//
+// justLoaded says this run's first load wrote every row the table holds, and
+// checked them against the same window (#2735), so no row is left unchecked.
 func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.TableMeta, pkCols []metadata.ColumnMeta,
-	icetbl *table.Table, cur *cursor) (*incrementResult, error) {
+	icetbl *table.Table, cur *cursor, justLoaded bool) (*incrementResult, error) {
 
 	res := &incrementResult{cursor: *cur, location: icetbl.Location(), snapshotID: snapshotIDOf(icetbl), table: icetbl}
 	at := d.cfg.At
@@ -860,6 +883,26 @@ func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.T
 	}
 	if err := reconstruct.CheckDestructiveDDL(ctx, d.db, schema, tbl, ddlWindow); err != nil {
 		return nil, err
+	}
+	// A narrowing ALTER (#2735) replaced with '?' every character its new set
+	// cannot hold, with no row events. The rows this window writes are checked
+	// below; the rows it leaves in the table were written by earlier runs and
+	// are not read back, so those are a warning in the outcome, not a guess.
+	// After this run's own first load they were all just checked.
+	narrowings, err := reconstruct.FindCharsetNarrowings(ctx, d.db, schema, tbl, ddlWindow)
+	if err != nil {
+		return nil, err
+	}
+	untouched := narrowings.UntouchedNote()
+	if justLoaded {
+		untouched = ""
+	}
+	for _, note := range append(narrowings.Notes(), untouched) {
+		if note == "" {
+			continue
+		}
+		slog.Warn("iceberg export: "+note, "schema", schema, "table", tbl)
+		res.note += "; " + note
 	}
 	if _, err := reconstruct.CheckCaptureGapStatus(ctx, d.db, schema, tbl, cur.At, at, false); err != nil {
 		return nil, err
@@ -983,7 +1026,7 @@ func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.T
 		bmeta := baseline.DumpMetadata{BinlogFile: cur.File, BinlogPos: int64(cur.Pos)}
 		start, startOK := query.OldestIndexedEvent(d.db)
 		if reconstruct.DecideBaselineGap(query.SourceFlavor(d.db), bmeta, *first, start, startOK) == reconstruct.GapVerdictUnproven {
-			res.note = fmt.Sprintf("; the index's oldest surviving event does not reach back to the baseline anchor (%s), so coverage between the dump and the start of capture is unproven", cur.String())
+			res.note += fmt.Sprintf("; the index's oldest surviving event does not reach back to the baseline anchor (%s), so coverage between the dump and the start of capture is unproven", cur.String())
 			slog.Warn("iceberg export: coverage between the baseline anchor and the first indexed event is unproven",
 				"schema", schema, "table", tbl, "anchor", cur.String(), "first_event", fmt.Sprintf("%s:%d", first.BinlogFile, first.StartPos))
 		}
@@ -992,6 +1035,15 @@ func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.T
 	newCur := cursor{File: cut.File, Pos: cut.Pos, At: at}
 	res.events = f.events
 	ops := f.touched()
+	for _, op := range ops {
+		if err := narrowings.CheckRow(op.Row, &op.at); err != nil {
+			// The cursor stays before the ALTER, so a new baseline alone
+			// changes nothing, as for the fold's own refusals (#2619).
+			return nil, fmt.Errorf("%w. For the Iceberg export: the table's cursor stays before this change and every run refuses it again; "+
+				"take a baseline after the change and remove the table directory (or drop the table from the catalog) so the next run reloads %s.%s from it",
+				err, schema, tbl)
+		}
+	}
 	for _, op := range ops {
 		if op.deleted() {
 			res.deletes++
