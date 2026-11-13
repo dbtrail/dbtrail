@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The installer installs one release and writes it down** (#2638).
+  `install.sh` took `docker-compose.yml` from `main` and left every image on
+  `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
+  over every release since the install, and nothing recorded which version
+  it had been. It now looks up the newest release (GitHub's
+  `releases/latest`, which skips drafts and prereleases; no token, no `jq`),
+  takes the compose file and the `dbtrail` command from that tag, and a fresh
+  install writes `BINTRAIL_TAG=<version>` to `.env` before it pulls. The value
+  is the image tag, the git tag **without the `v`** (`v0.130.0` →
+  `0.130.0`): the images are published under GoReleaser's `{{ .Version }}`,
+  and no `v`-prefixed image exists. A `BINTRAIL_TAG` already set, in `.env`
+  or in the installing shell, is never changed and chooses the compose file
+  (a version number) or is left as it is (empty, `latest`, a tag of one's
+  own); one with a `v` stops the install and says what to write instead.
+  `DBTRAIL_REF` still overrides: a release tag is that version, written to
+  `.env`; any other ref (`main`, a branch) writes nothing and says the images
+  follow `latest`. When GitHub does not answer (no network, its limit of 60
+  lookups an hour per address) or answers without a release tag, a fresh
+  install stops before creating anything and prints the command to name the
+  version with `DBTRAIL_REF`; it never falls back to `main`. A re-run over an
+  existing stack writes nothing to `.env` (as for `INDEX_BUFFER_POOL`), keeps
+  its `dbtrail` command when the lookup fails, and says how to pin a stack
+  installed before this. The end text names the version and the upgrade:
+  change `BINTRAIL_TAG`, then `docker compose pull && docker compose up -d`,
+  plus the release's compose file when it changed. `docs/upgrade.md`,
+  `docs/docker.md` and `docs/install.md` now take that file from the release
+  tag instead of `main`, and the `BINTRAIL_TAG=v0.26.0` example in
+  `docs/upgrade.md` (and `v0.9.0` in `.env.example`), which named images that
+  do not exist, is corrected.
+
 - **A full-table reconstruct into a folder used before no longer leaves an earlier run's rows in it** (#2684). A loader reads every file of a folder and looks at no marker. A table the run refused (no snapshot) or failed on kept the files an earlier run wrote for it, under an error that says nothing was written for it, and a table written again with fewer data files than before kept the earlier run's higher-numbered data files, under `_SUCCESS`. Now, after writing `_INCOMPLETE` and after the checks that can refuse the run before any table starts, `reconstruct --output-format mydumper` removes the schema file and the data files of each table it was asked for (`--output-format psql`: the table's one file), compared by exact name, and logs what it removed; files of other tables and files it never writes stay, and the schema files of tables it was not asked for are named in a warning. **A run that fails after those checks now leaves no files for the tables it names**, where the earlier run's used to stay. A run refused by those checks (a bad `--tables` entry, a snapshot location that cannot be read, an index it cannot reach) now leaves the folder as it was, markers included; before, it removed an earlier complete dump's `_SUCCESS` and wrote `_INCOMPLETE`, so `bintrail baseline` then refused that dump. A mistyped `--baseline-dir` or a bucket that does not exist is now refused up front, instead of failing every table.
 - **A snapshot folder that could not be read is named instead of "no snapshot"** (#2684). When a snapshot folder from at or before `--at` could not be read and a newer one that lacks the table was, `reconstruct` said the table had no snapshot and, with `--output-format mydumper`, offered `--allow-changes-only`, although the table may be in the folder it could not read. The error now names that snapshot and its error, says it may hold the table, and offers no flag. Single-row `reconstruct` names it too. A run given `--allow-changes-only` still writes the table.
 - **The schema file of a changes-only table holds a plain `CREATE TABLE`** (#2684). With `--allow-changes-only`, the schema file carried the newest recorded `CREATE TABLE` as written, and that can be the `CREATE TABLE IF NOT EXISTS` an application runs at every start. Loaded into a target that already had the table, it loaded the rows into that table instead of stopping. It is now written without the clause, as `CREATE OR REPLACE TABLE` already was, under a comment that says the statement may have created nothing at the source; a statement whose clause cannot be taken out gets a comment that names it instead of a definition.
@@ -17,7 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`/etc/dbtrail/dbtrail.cnf`** (#2671). Every DBTrail program but the standalone `bintrail-mcp` reads it when it starts (the compose file does not mount it yet; docs/option-file.md shows the line): options under `[dbtrail]`, written like MySQL's `my.cnf`, with the environment variable's name without `BINTRAIL_` (`commit-within = 2s`). The environment and `.bintrail.env` come first; an empty variable does not count. A line that is not used (an unknown option, with the nearest one named; no value; an internal name; one the environment already sets; an include) is a warning at start, never a refusal, and `loose-` silences an unknown option. A file every user can change is not used, as in MySQL. `dbtrail config check` lists what the file sets and every line that is not used, and exits 1 when it finds one. See docs/option-file.md.
 - **`restore-index`, `archive reconcile` and `export iceberg` work with a bucket in another region than the host's** (#2698). They signed for the configured region, so a bucket elsewhere answered `301 PermanentRedirect`. They now use the bucket's own region, found the same way as the other S3 commands since #2688: `restore-index` keeps one client per bucket it reads, `archive reconcile` lists (and, with `--deep`, reads footers) at the bucket's region, and `export iceberg` reads and writes the warehouse bucket (data and metadata files, including the metadata the Glue catalog reads back itself) at that bucket's region while the Glue or REST catalog API keeps the configured one. A `--region` flag is still used as given, and nothing is asked with a custom endpoint. Not covered: `export iceberg --catalog rest` without `--warehouse` or without `--catalog-sigv4`, where the bucket is not known in advance or the catalog supplies the S3 settings.
 - **Uploads no longer send the snapshot folder's own files** (#2691). An upload of a whole folder of snapshots (the PostgreSQL baseline's `--upload`, `bintrail baseline --upload`, `bintrail upload --source`) sent the upload interval's marks (`.upload-held.<snapshot>`), and could send the Parquet of an interrupted cleanup's leftover (`.<snapshot>.pruning`) under a name no reader knows. Every upload now leaves out anything directly under a folder of snapshots whose name starts with a dot, which covers every mark, record, lock and work directory the folder uses, and any added later. A schema whose name starts with a dot, inside a snapshot, is still sent.
+- **An empty snapshot folder left by a stopped run is removed** (#2691). A run that stopped between creating a snapshot's folder and writing its first file left an empty folder that every cleanup kept as a snapshot being written. The cleanup now removes a folder named as a snapshot that has held no file at all for an hour, in every mode, and logs it. It removes empty directories only, so a file written into the folder meanwhile is never removed.
 - **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
+
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in
   another, every request bintrail made for the bucket through the AWS SDK
