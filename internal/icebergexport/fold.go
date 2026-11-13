@@ -17,7 +17,8 @@ type netOp struct {
 	PK  map[string]any
 	Row map[string]any
 	// at is where the event this op came from starts in the binary log, kept
-	// so a later page can tell whether its change of the key is the newer one.
+	// so a later page can tell whether its change of the key is the newer one,
+	// and when it ran, so a narrowing ALTER can be placed against it (#2735).
 	at query.ResultRow
 }
 
@@ -122,7 +123,7 @@ func (f *fold) apply(ev *query.ResultRow) error {
 		// Not skippable: a skipped event is a silently wrong table.
 		return fmt.Errorf("event %d for %s.%s pk %q has event type %d, which the export cannot apply", ev.EventID, f.schema, f.table, ev.PKValues, ev.EventType)
 	}
-	op.at = query.ResultRow{EventID: ev.EventID, BinlogFile: ev.BinlogFile, StartPos: ev.StartPos}
+	op.at = query.ResultRow{EventID: ev.EventID, BinlogFile: ev.BinlogFile, StartPos: ev.StartPos, EventTimestamp: ev.EventTimestamp}
 	cur, seen := f.ops[ev.PKValues]
 	if !seen {
 		f.order = append(f.order, ev.PKValues)

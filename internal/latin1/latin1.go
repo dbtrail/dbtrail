@@ -65,6 +65,14 @@ func Decode(b string) string {
 	return sb.String()
 }
 
+// Holds reports whether latin1 has a byte for r, which is whether MySQL keeps
+// r when it converts text to latin1 rather than writing '?' in its place
+// (#2735).
+func Holds(r rune) bool {
+	_, ok := fromRune[r]
+	return ok
+}
+
 // Encode turns UTF-8 text back into latin1 bytes. It fails on text that is not
 // valid UTF-8 or holds a character latin1 has no byte for: writing either
 // would store something other than the text.
