@@ -8,7 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **The MySQL port without Engine Routing answers `LIMIT offset, count`** (part of #2628). It used to refuse `LIMIT 10, 5` and ask for `LIMIT 5 OFFSET 10`; it now writes it that way for the copy itself, so deep pagination from an ORM or a BI tool (`LIMIT ?, ?` from SQLAlchemy too) runs as written. The rows are the ones MySQL returns, checked against MySQL 8.0.46 for an offset of 0, an offset past the last row, a count of 0, leading zeros, and a `LIMIT` in a subquery, a CTE and either side of a `UNION`. A form it cannot write with certainty is still refused with how to write it: a number past 9223372036854775807, a comment between the two numbers, or a prepared argument that is not a whole number; a DOUBLE or DECIMAL argument to a prepared `LIMIT ?` gets MySQL's own error 1210, as on MySQL. And a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery is now refused on that port, as MySQL refuses it (error 1235); the copy used to answer it. Engine Routing is unchanged.
+- **Live-source `verify` on a PostgreSQL table with writes compares equal**
+  (#2198). The table was read inside one snapshot, but the reconstruction
+  was cut at the time the scan ended, so every write committed while the
+  table was read was in the reconstruction and not in the snapshot: a
+  MISMATCH on a table that was fine. Now, when the source role has the
+  `REPLICATION` attribute (`rds_replication` on Amazon RDS), the table is
+  read at the snapshot of a temporary logical slot made for the read (the
+  built-in `pgoutput`, nothing installed in the source; the slot goes away
+  as soon as the read has started), and the reconstruction stops strictly
+  before that slot's consistent point, on the index and on the archives.
+  The check waits up to 60 seconds for a running capture to reach that
+  point (a capture still catching up when the wait runs out makes the table
+  `inconclusive`), and stops waiting early on a quiet database. Creating the slot
+  waits for the write transactions open on the server; one still open
+  after 10 seconds makes the table `inconclusive`, naming the oldest one.
+  Without `REPLICATION`, a free slot, or a replication entry in
+  `pg_hba.conf`, the check runs as before and the result says the read was
+  not cut and why. The baseline it starts from is now the newest one taken
+  before the read opened, as on MySQL since #2150.
 - **A snapshot update refuses a table whose column changed character set** (#2723). The update compared each column's type and NULL-ness with the schema snapshot taken after a DDL, but not its character set, which `COLUMN_TYPE` does not show. Two cases went wrong. An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column, under a non-strict `sql_mode` or as `CONVERT TO CHARACTER SET latin1`, turns every character latin1 cannot hold into `?` and writes no row event, so the update kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. A `CONVERT TO CHARACTER SET utf8mb4` on a latin1 table keeps every value, but the updated snapshot kept declaring the column latin1, and a restore from it created a column that cannot hold what was written after the change. Both now refuse the table like a type change, naming the column and both character sets (`name (varchar(20) CHARACTER SET utf8mb4 -> varchar(20) CHARACTER SET latin1)`), and a full read follows. The character set of the snapshot's `CREATE TABLE` is read as the server wrote it: the column's own, else the one its collation belongs to, else the table's default; `utf8` and `utf8mb3` are the same set. Nothing is compared, and nothing refused, when either side does not say: a schema snapshot with no character set recorded (every non-text column, a PostgreSQL source, a snapshot older than the record of character sets), or a `CREATE TABLE` that names none for the column or its table. A collation change within the same character set is still not seen, since schema snapshots do not record collations (#2083).
+- **Tests: the boot server's download cap through its call site, and the
+  "Not in S3" line in every combination** (#2691). No behavior change. A test
+  drives a download of the daemon's own server through the real handler and
+  fails if the cap is worked out from anything but the daemon's
+  `--baseline-s3`; a node test renders the Backup settings card's "Not in S3"
+  line for every record the cleanup can write (which copies S3 lacks, could
+  not be asked about, or refuses to read back, with and without a resend and
+  a wait), and a Go test follows the case of several copies and a restore's
+  result S3 could not be asked about from the real cleanup's record to the
+  line the page draws.
 
 - **`bintrail export iceberg` compacts its own tables** (#2719). Every
   run adds one delete file per table it changed, and DuckDB and ClickHouse
@@ -164,6 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The connection form writes only the fields it changed, on the entry as it is now. It wrote most of the entry as it had read it, so a save made in between was undone: a folder changed on the Snapshots page came back, a capture stopped meanwhile was marked to run again, the SQL mirror's switch was put back. The folder it moves to is checked under the lock too.
   - Stopping capture writes only its own field, now with a test of its own.
 - **A count of local snapshots saved by an older version is no longer applied after an upgrade** (#2675). A version from before the single count (0.129.0 and older) saves a **Keep by count** of 3 it does not use on a server it adds with an S3 destination. After a downgrade and an upgrade, that count applied and the server's local folder was pruned to 3. Every count beside an S3 destination now carries the count and the destination it was saved with (`local_keep_saved_with` in the server registry), and a count without that mark is cleared at start, as the upgrade to 0.130.0 cleared the counts that did nothing: the server keeps every local snapshot until you set **Keep by count**, and the daemon log names it (`servers with an S3 destination had a number of local snapshots to keep that never applied to them; it was cleared, so they keep every local snapshot as before. Set Keep by count on the Snapshots page to keep only the newest on this machine`). The registry's version does not change: an older version still reads and writes the file, keeps the mark on the servers it edits and writes none on the servers it adds. The first start of this version marks every count it finds as it is, so a downgrade made before it, or one that went through 0.130.0 to an older version, is not covered.
+- **A snapshot made from a shell is no longer published again under a new date while capture is stopped** (#2674). A snapshot made by `bintrail baseline` from a shell, or by another process, has no run record in the daemon, so its first scheduled update ran with the number of changes since it unknown, and with capture stopped that update published the snapshot's rows again under a new date. When that snapshot is past the age at which a quiet index is doubted (two hours or six schedule intervals), the daemon now compares the binary log coordinates its table files recorded (the GTID set, or the file and position) with capture's checkpoint. A checkpoint at or before them means capture recorded nothing since the snapshot, and the slot is decided as for a server that indexed nothing: the source is asked, comparing it with the snapshot's own GTID set (capture may have stopped before the snapshot was taken), so a source that wrote nothing past the snapshot gets the update, a source that wrote past it takes a full read, and a slot whose source cannot be asked is skipped. The log says it once: `snapshot schedule: the previous snapshot has no run record here, but the binary log position it was read at shows capture recorded nothing since it, so nothing was indexed since it; the slot is decided as for a quiet server`. A checkpoint past the snapshot, or coordinates that cannot be compared (a PostgreSQL source, a MariaDB GTID set, a snapshot with none, two binary logs of different names), leave the count unknown and the update runs, as before.
 
 ## [0.130.0] - 2026-11-12
 
