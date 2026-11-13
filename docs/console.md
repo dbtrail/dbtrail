@@ -1388,7 +1388,10 @@ longer drawn on the page.
   did not send to S3 was never meant for the bucket, so it goes by the count
   alone, without waiting for S3; and when S3 cannot be asked the cleanup
   removes no snapshot that was sent to S3 and the list says so in red. The
-  list marks each snapshot that goes at the next cleanup. A server whose S3
+  list marks each snapshot that goes at the next cleanup, worked out by the
+  cleanup's own rule (#2675): past the count and, with **Delete by age**
+  set, older than that age too, never the newest copy of a table, the
+  `current` target or the last restore's result. A server whose S3
   location is also another server's is not pruned to a count, since S3 could
   answer for the other server's snapshot: its card says so and names the way
   out, a prefix of its own. Giving a server its first S3 destination while

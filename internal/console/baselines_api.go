@@ -72,6 +72,15 @@ type baselineSnapshotDTO struct {
 	// moment (baseline.Restored, #2678). The cleanup keeps it whatever its
 	// date and it takes no place in the count, so the list never marks it
 	// as going. False when the mark could not be read.
+	// Going: this local snapshot is one the cleanup removes at its next run
+	// (#2675): outside what baseline.KeptNow keeps under the rule in force
+	// for the folder, the count AND the age, the newest of each table, the
+	// `current` target and what it never touches. Set only where a count is
+	// in force (LocalRetention); with an S3 destination the page marks it
+	// only when S3 has it or the schedule held it. False when the folder
+	// could not be read, which leaves the row unmarked rather than announce a
+	// removal.
+	Going bool `json:"going,omitempty"`
 	Restored bool `json:"restored,omitempty"`
 	// RestoredUntil is until when it is kept outside the count: a day after
 	// the restore finished (baseline.RestoredKeep).
@@ -463,6 +472,15 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 	bounds := pageReadBounds(bctx, files)
 	bcancel()
 	rows := gradeSnapshotRows(files, bounds, floor, now)
+	// What the next cleanup removes, by the cleanup's own rule (#2675).
+	var keptNow map[string]bool
+	if lr := s.localRetentionOf(serverID); lr != nil && localDir != "" {
+		if k, err := baseline.KeptNow(localDir, lr.KeepNewest, time.Duration(s.pruneRetainMinutes())*time.Minute); err != nil {
+			slog.Warn("console: could not tell which local snapshots the next cleanup removes; none is marked", "server", serverID, "dir", localDir, "error", err)
+		} else {
+			keptNow = k
+		}
+	}
 	var cur *baselineSnapshotDTO
 	var curTime time.Time
 	// curViews: the record of skipped views was looked for in this
@@ -488,6 +506,9 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 			}
 			dto.Kinds = merged.Kinds[f.SnapshotTime.UnixNano()]
 			if localDir != "" && slices.Contains(dto.Kinds, "dir") {
+				if keptNow != nil {
+					dto.Going = !keptNow[reconstruct.SnapshotDirName(f.SnapshotTime)]
+				}
 				if held, err := baseline.UploadHeld(localDir, reconstruct.SnapshotDirName(f.SnapshotTime)); err == nil {
 					dto.Held = held
 				}

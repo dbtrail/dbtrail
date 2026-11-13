@@ -54,6 +54,11 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// On disk too: which ones go is worked out from the folder itself
+	// (baseline.KeptNow, #2675).
+	for h := 1; h <= 5; h++ {
+		writeKeepSnapshot(t, dir, at(h))
+	}
 	for _, h := range []int{1, 4} {
 		if err := baseline.MarkUploadHeld(dir, reconstruct.SnapshotDirName(at(h))); err != nil {
 			t.Fatal(err)
@@ -100,6 +105,11 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 		local = append(local, map[string]any{"time": at(h).Format(consoleTSFormat), "age_hours": h, "tables": []string{"shop.orders"}, "kinds": []string{"dir"}})
 	}
 	local[len(local)-1]["restored"] = true
+	// What the server answers for each (going, #2675): past the newest two,
+	// the restore's result excepted.
+	for i := 2; i < len(local)-1; i++ {
+		local[i]["going"] = true
+	}
 	local[len(local)-1]["restored_until"] = "2026-11-13 09:30:00"
 	raw, _ := json.Marshal(local)
 	script := renderHarnessJS + `

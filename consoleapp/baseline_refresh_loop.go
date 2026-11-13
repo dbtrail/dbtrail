@@ -1320,6 +1320,19 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 	if !grid.UploadDue(now, newest, listed) {
 		return
 	}
+	// After a send that failed, the next try waits an hour (#2675), as a
+	// failed re-send does: the cycles that call this follow the schedule
+	// (every 5 minutes by default), and each try sends the whole snapshot
+	// again and logs a warning. It is the newest snapshot, which the count
+	// never removes, so nothing is lost by waiting; only how soon S3 has it.
+	s.mu.Lock()
+	retryAt := s.owedRetryAt[req.ServerID]
+	s.mu.Unlock()
+	if now.Before(retryAt) {
+		slog.Debug("snapshot refresh: the last send of the snapshot the upload interval owes S3 failed; trying again after the wait",
+			"server", req.ServerName, "snapshot", name, "next_try", retryAt)
+		return
+	}
 	dest := strings.TrimSuffix(req.BaselineS3, "/") + "/" + name
 	// Said on the slot for as long as the upload takes: what holds the
 	// server is this send, not an update. The claim is replaced when the
@@ -1331,10 +1344,19 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 	s.mu.Unlock()
 	n, err := s.uploadMarked(req.ServerID, name, filepath.Join(req.BaselineDir, name), dest, false)
 	if err != nil {
-		slog.Warn("snapshot refresh: could not send the newest snapshot the upload interval kept on this machine; the next cycle tries again",
+		s.mu.Lock()
+		if s.owedRetryAt == nil {
+			s.owedRetryAt = map[string]time.Time{}
+		}
+		s.owedRetryAt[req.ServerID] = now.Add(owedRetryWait)
+		s.mu.Unlock()
+		slog.Warn("snapshot refresh: could not send the newest snapshot the upload interval kept on this machine; it stays here, and sending it is tried again in an hour",
 			"server", req.ServerName, "snapshot", name, "destination", dest, "error", err)
 		return
 	}
+	s.mu.Lock()
+	delete(s.owedRetryAt, req.ServerID)
+	s.mu.Unlock()
 	if err := baseline.ClearUploadHeld(req.BaselineDir, name); err != nil {
 		slog.Warn("snapshot refresh: sent a held snapshot but could not remove its mark; it is in S3 all the same",
 			"server", req.ServerName, "snapshot", name, "error", err)
@@ -1342,6 +1364,10 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 	slog.Info("snapshot refresh: nothing new to fold, so sent the newest snapshot the upload interval had kept on this machine",
 		"server", req.ServerName, "snapshot", name, "uploaded", n)
 }
+
+// owedRetryWait is how long the owed upload waits after a send that failed
+// (#2675): the hourly pace of the cleanup's failed re-sends (resendBackoff).
+const owedRetryWait = resendBackoff
 
 // sendOwedForSkippedSlot is sendOwedHeldUpload for a slot the snapshot
 // schedule skips before any cycle starts (#2659: nothing indexed since an old

@@ -11055,17 +11055,18 @@ function baselinesPanel(b, servers, opts) {
     // so the rows the listing found in both places are marked, and so are
     // the ones the S3 interval kept here on purpose (held), which go by the
     // count alone. One that was meant for S3 and is not there is not marked.
+    // Which ones is the server's answer (sn.going, #2675), worked out by the
+    // cleanup's own rule: the count AND "Delete by age" when it is set (a
+    // snapshot past the count and younger than the age stays), the newest
+    // of each table, the `current` target, the last restore's result.
+    // Counting positions here could not see the age, and marked rows the
+    // cleanup keeps.
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
-    let localSeen = 0;
     const goingIdx = new Set();
     if (keepInForce > 0) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
-        localSeen++;
-        // The last restore's result is kept whatever its date, and takes
-        // no place in the count (#2678).
-        if (sn.restored) { localSeen--; return; }
-        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
+        if (sn.going === true && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
       });
     }
     const total = b.snapshots.length;
