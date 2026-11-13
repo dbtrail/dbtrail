@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Full reads work on sources with `explain_format=TREE`** (#2211). On a
+  MySQL 9.x source whose `explain_format` is `TREE` (the default on Percona
+  Server 9.7) or `JSON`, mydumper crashed with a segmentation fault within
+  seconds while it sized tables, so no copy could be made. The console's full
+  read and `bintrail dump` now read the source's `explain_format` first and,
+  when the variable exists, give mydumper an option file whose
+  `[mydumper_session_variables]` section sets `explain_format = TRADITIONAL`
+  for mydumper's own sessions. The server's global setting is not touched.
+  Sources without the variable (MariaDB, MySQL before 8.0.32) get nothing,
+  since mydumper exits 1 on a session variable the server does not know.
+  The file goes only to mydumper 0.16.1 or newer (the oldest build measured
+  to take it). With an older build, or one whose version cannot be read, or
+  when the source cannot be asked, the cause and the remedy are logged and
+  added to the error if mydumper then crashes, instead of a bare segmentation
+  fault. On the console, the TLS pin and the session section share one
+  `--defaults-extra-file`, because mydumper keeps only the last one it is
+  given. The `baseline` profile of `docker-compose.yml` is not covered yet
+  (#2733).
 - **Live-source `verify` on a PostgreSQL table with writes compares equal**
   (#2198). The table was read inside one snapshot, but the reconstruction
   was cut at the time the scan ended, so every write committed while the
