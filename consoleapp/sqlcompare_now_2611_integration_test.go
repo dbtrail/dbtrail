@@ -119,8 +119,18 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT side, k FROM ev WHERE dt < NOW() ORDER BY k", "copy", "a bare comparison"},
 		{"SELECT MIN(side), SUM(dt >= NOW() + 0 - 86400) FROM ev", "live", "NOW() + 0 is a number on the source"},
 		{"SELECT MIN(side), CURDATE() - 1 FROM ev", "live", "CURDATE() - 1 is a number on the source, yesterday on the copy"},
-		{"SELECT MIN(side), COUNT(*) FROM ev WHERE ts >= CURRENT_TIMESTAMP - INTERVAL 1 DAY", "live", "CURRENT_TIMESTAMP stays on the source"},
 		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt < NOW(3)", "live", "NOW with a fraction stays on the source"},
+		// The keywords that mean NOW() and CURDATE() on MySQL, written as the
+		// calls for the copy.
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE ts >= CURRENT_TIMESTAMP - INTERVAL 1 DAY", "copy", "CURRENT_TIMESTAMP"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= LOCALTIMESTAMP() - INTERVAL 7 DAY", "copy", "LOCALTIMESTAMP()"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= LOCALTIME - INTERVAL 1 DAY", "copy", "LOCALTIME"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE d >= CURRENT_DATE - INTERVAL 30 DAY", "copy", "CURRENT_DATE"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE d BETWEEN CURRENT_DATE() - INTERVAL 7 DAY AND CURRENT_DATE", "copy", "CURRENT_DATE() and CURRENT_DATE"},
+		{"SELECT MIN(side), CURRENT_DATE = CURDATE(), CURRENT_TIMESTAMP = NOW(), YEAR(CURRENT_DATE) >= 2026 FROM ev", "copy", "the keywords in the select list"},
+		{"SELECT MIN(side), CURRENT_DATE - 1 FROM ev", "live", "CURRENT_DATE - 1 is a number on the source"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt < CURRENT_TIMESTAMP(3)", "live", "CURRENT_TIMESTAMP with a fraction stays on the source"},
+		{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt < CURRENT_TIME", "live", "CURRENT_TIME, a time of day, stays on the source"},
 	}
 	for _, zone := range []string{"+00:00", "+05:00"} {
 		routed := openRaw(t, withZone(portDSN, zone))
@@ -136,6 +146,14 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			if strings.ReplaceAll(got, "copy|", "live|") != want {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want %s, the source's own answer", zone, c.stmt, c.why, got, want)
 			}
+		}
+		// A prepared statement: the template is rewritten one piece at a
+		// time, between its placeholders.
+		const prepared = "SELECT MIN(side), COUNT(*) FROM ev WHERE d >= CURRENT_DATE - INTERVAL 30 DAY AND k > ?"
+		got := answerText(routed, prepared, 0)
+		t.Logf("[%s] routed %-40s %s (prepared)", zone, got, prepared)
+		if want := answerText(live, prepared, 0); !strings.HasPrefix(got, "copy|") || strings.ReplaceAll(got, "copy|", "live|") != want {
+			t.Errorf("[%s] prepared %q:\n  got  %s\n  want the copy to answer %s", zone, prepared, got, want)
 		}
 	}
 
@@ -158,6 +176,13 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	if who != "live" || n != 3 {
 		t.Errorf("a frozen clock: answered by %s with %d rows, want MySQL's 3", who, n)
 	}
+	// CURRENT_DATE reads the same frozen clock on MySQL.
+	if err := one.QueryRowContext(context.Background(), "SELECT MIN(side), COUNT(*) FROM ev WHERE d >= CURRENT_DATE - INTERVAL 1 DAY").Scan(&who, &n); err != nil {
+		t.Fatal(err)
+	}
+	if who != "live" || n != 3 {
+		t.Errorf("a frozen clock, CURRENT_DATE: answered by %s with %d rows, want MySQL's 3", who, n)
+	}
 
 	// A named zone: the copy takes the zone (a statement without the
 	// four answers there), and a statement that calls one goes to MySQL,
@@ -173,6 +198,9 @@ func nowCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		}
 		if got := answerText(named, "SELECT MIN(side), COUNT(*) FROM ev WHERE ts >= NOW() - INTERVAL 7 DAY"); !strings.HasPrefix(got, "live|") {
 			t.Errorf("[America/New_York] NOW() under a named zone: %s, want MySQL to answer it", got)
+		}
+		if got := answerText(named, "SELECT MIN(side), COUNT(*) FROM ev WHERE ts >= CURRENT_TIMESTAMP - INTERVAL 7 DAY"); !strings.HasPrefix(got, "live|") {
+			t.Errorf("[America/New_York] CURRENT_TIMESTAMP under a named zone: %s, want MySQL to answer it", got)
 		}
 	}
 
