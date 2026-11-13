@@ -353,6 +353,16 @@ func TestInstaller_aTakenMySQLPortIsLeftUnpublished(t *testing.T) {
 	if !strings.Contains(r.out, "port 3309 is taken, so the MySQL port is not published") {
 		t.Errorf("the skip is not said:\n%s", r.out)
 	}
+	// The next steps then end on a mysql line that would reach whatever holds
+	// 3309, so they say to publish another port and use it after -P (#2637).
+	// Putting the same 3309 line back would only fail again.
+	if !strings.Contains(r.out, "publish another free port, such as 127.0.0.1:3310:3309") ||
+		!strings.Contains(r.out, "use that number after -P") {
+		t.Errorf("the next steps do not say how to reach the port when 3309 is taken:\n%s", r.out)
+	}
+	for _, h := range sentenceHits(t, r.out, r.dir) {
+		t.Errorf("banned in a sentence the installer prints: %s", h)
+	}
 	// Docker Compose refuses a file where a service has a "ports:" key and no
 	// entries under it ("services.router.ports must be a array"), and then
 	// nothing starts, capture included. The mapping was the router's only one.

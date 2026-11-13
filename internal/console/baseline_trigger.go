@@ -277,6 +277,11 @@ type BaselineStatus struct {
 	// only) — the UI's download confirm and Ready line read it.
 	Bytes    int64 `json:"bytes,omitempty"`
 	Uploaded int   `json:"uploaded,omitempty"`
+	// SourceNote (restore only, #2691) says the restore started from this
+	// server's local folder instead of its S3 location, and why: the bucket
+	// held no snapshot at or before the moment, or could not be read. Empty
+	// when the restore read where it normally reads.
+	SourceNote string `json:"source_note,omitempty"`
 	// At is the anchor instant of a refresh or restore run (RFC3339 UTC): the
 	// moment the published snapshot represents, which is also its directory
 	// name. A sql-export build stamps it too (the instant the dump
