@@ -225,8 +225,25 @@ bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
   is refused.
 
 Glue's endpoint and Glue's API register the same tables, so a table written
-with one is read with the other. The S3 Tables endpoint is wired the same way
-but was not part of this release's tests.
+with one is read with the other.
+
+S3 Tables: give the endpoint, the table bucket's ARN as the warehouse, and no
+`--warehouse`, so S3 Tables picks where the files go:
+
+```bash
+bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
+  --catalog rest \
+  --catalog-uri https://s3tables.us-west-2.amazonaws.com/iceberg \
+  --catalog-warehouse arn:aws:s3tables:us-west-2:123456789012:bucket/my-table-bucket \
+  --catalog-sigv4
+```
+
+Each source schema becomes a namespace (created if missing) and the identity
+needs `s3tables` permissions on the bucket. Tested on 0.130.0: 128 runs per
+table a minute apart with no refusals, and the rows matched the source; read
+back with ClickHouse's `DataLakeCatalog` (`catalog_type = 's3tables'`). S3
+Tables' automatic compaction did not run on that table (about 2.5 MB) in two
+hours, so do not count on it to keep a small, often-exported table fast.
 
 ### Secrets
 
@@ -307,8 +324,11 @@ one Iceberg snapshot:
 
 An update is therefore a delete of the old row plus an insert of the new one,
 in the same commit. A key changed fifty times in the window costs one delete
-row and one data row, not fifty. The table is never rewritten; compaction, if
-you want it, is the reader's concern and any engine can do it.
+row and one data row, not fifty. The table is never rewritten, so it gets
+slower to read with every run until something compacts it. Athena
+(`OPTIMIZE ... REWRITE DATA USING BIN_PACK`) and Spark can; ClickHouse and
+DuckDB cannot (ClickHouse refuses `overwrite` snapshots). Compaction by the
+export itself is #2719.
 
 An UPDATE that changes a row's primary key (`SET id = id + 1000`, or one column
 of a composite key) is a delete of the old key and an insert of the new one.

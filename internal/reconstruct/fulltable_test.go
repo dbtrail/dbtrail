@@ -682,6 +682,83 @@ func TestFindCapturedCreateTableDDL_replaceIsWrittenAsCreate(t *testing.T) {
 	}
 }
 
+// TestFindCapturedCreateTableDDL_ifNotExistsIsWrittenAsCreate is #2684: the
+// newest recorded CREATE can be the CREATE TABLE IF NOT EXISTS an application
+// runs at every start. As a schema file it would make a loader put the rows
+// into a table already on the target instead of stopping, so it is written as
+// the plain CREATE TABLE a mydumper schema file holds.
+func TestFindCapturedCreateTableDDL_ifNotExistsIsWrittenAsCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name, logged, want string
+		found              bool
+	}{
+		{"plain", "CREATE TABLE IF NOT EXISTS `orders` (`id` int)", "CREATE TABLE `orders` (`id` int)", true},
+		{"lower case and line breaks", "create table\nif not\texists orders (id int)", "CREATE TABLE orders (id int)", true},
+		{"leading comments kept", "/* app */ CREATE TABLE IF NOT EXISTS orders (id int)", "/* app */ CREATE TABLE orders (id int)", true},
+		{"executable comment", "CREATE TABLE /*!32312 IF NOT EXISTS*/ `orders` (`id` int)", "CREATE TABLE `orders` (`id` int)", true},
+		{"the words in a default stay", "CREATE TABLE IF NOT EXISTS orders (n varchar(9) DEFAULT 'IF NOT EXISTS')",
+			"CREATE TABLE orders (n varchar(9) DEFAULT 'IF NOT EXISTS')", true},
+		{"a shape it cannot rewrite gets the placeholder", "CREATE TABLE /* x */ IF NOT EXISTS orders (id int)", "", false},
+		{"a plain CREATE is kept as it is", "CREATE TABLE orders (n varchar(9) DEFAULT 'IF NOT EXISTS')",
+			"CREATE TABLE orders (n varchar(9) DEFAULT 'IF NOT EXISTS')", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").
+				WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "ddl_query"}).
+					AddRow(string(event.DDLCreateTable), tc.logged))
+			ddl, found, err := findCapturedCreateTableDDL(context.Background(), db, "mydb", "orders", time.Now())
+			if err != nil || found != tc.found || ddl != tc.want {
+				t.Errorf("findCapturedCreateTableDDL = %q found=%v err=%v, want %q found=%v", ddl, found, err, tc.want, tc.found)
+			}
+		})
+	}
+}
+
+// What the caller needs to label the schema file truthfully (#2684): a
+// definition rewritten from IF NOT EXISTS says so, and a statement that could
+// not be rewritten is named, so the placeholder does not claim nothing was
+// recorded.
+func TestFindCapturedCreate_labels(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, logged string
+		want               capturedCreate
+	}{
+		{"plain", "CREATE TABLE", "CREATE TABLE t (id int)", capturedCreate{DDL: "CREATE TABLE t (id int)", Found: true}},
+		{"if not exists", "CREATE TABLE", "CREATE TABLE IF NOT EXISTS t (id int)", capturedCreate{DDL: "CREATE TABLE t (id int)", Found: true, FromIfNotExists: true}},
+		{"if not exists it cannot rewrite", "CREATE TABLE", "CREATE /* x */ TABLE IF NOT EXISTS t (id int)", capturedCreate{Unrewritable: "CREATE TABLE IF NOT EXISTS"}},
+		{"replace it cannot rewrite", string(event.DDLReplaceTable), "CREATE /* x */ OR REPLACE TABLE t (id int)", capturedCreate{Unrewritable: "CREATE OR REPLACE TABLE"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT ddl_type, ddl_query FROM schema_changes").
+				WillReturnRows(sqlmock.NewRows([]string{"ddl_type", "ddl_query"}).AddRow(tc.kind, tc.logged))
+			got, err := findCapturedCreate(context.Background(), db, "mydb", "orders", time.Now())
+			if err != nil || got != tc.want {
+				t.Errorf("findCapturedCreate = %+v, %v; want %+v", got, err, tc.want)
+			}
+		})
+	}
+	placeholder := binlogOnlySchemaPlaceholderUnrewritable("my\ndb", "orders", "CREATE TABLE IF NOT EXISTS")
+	t.Logf("rendered:\n%s\n%s", ifNotExistsHeader, placeholder)
+	if strings.Contains(placeholder, "was found in schema_changes either") || !strings.Contains(placeholder, "a CREATE TABLE IF NOT EXISTS that could") {
+		t.Error("the placeholder says nothing was recorded, or does not name the statement")
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(placeholder+ifNotExistsHeader, "\n"), "\n") {
+		if !strings.HasPrefix(line, "--") {
+			t.Errorf("a line of the schema file is not a comment: %q", line)
+		}
+	}
+}
+
 // TestFindCapturedCreateTableDDL_notFound verifies that no matching row
 // (sql.ErrNoRows) reports found=false with a nil error, so the caller falls
 // back to the placeholder rather than treating "never captured" as a fault.
