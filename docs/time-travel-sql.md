@@ -283,8 +283,11 @@ What to know before relying on it:
   double-quoted string, a backslash in a string, a dollar-quoted string, a
   `--` comment with no space after it; the
   full list is under "Two things are translated") runs as written. `STRAIGHT_JOIN` is read as MySQL's
-  keyword, so a column named `straight_join` must be quoted. `DATE_FORMAT` is
-  not understood; DuckDB's `strftime` is. `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
+  keyword, so a column named `straight_join` must be quoted. `DATE_FORMAT`
+  and MySQL's two-argument `DATEDIFF`, which DuckDB does not have, are
+  written as DuckDB's `strftime` and `date_diff` where the answer is the
+  same, and refused with how to write them otherwise (under "What a
+  connection the copy answers alone refuses"). `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
   can differ from MySQL's; `string_agg` is DuckDB's own spelling. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it. Schema and table names match
@@ -2560,9 +2563,9 @@ error 1235, which names the construct and how to write it for the copy:
 | `WEEK`, `YEARWEEK`, `EXTRACT(WEEK ...)` | `weekofyear(d)` (ISO weeks), `strftime(d, '%U')` (weeks from Sunday) |
 | `DAYOFWEEK`, `WEEKDAY`, `MICROSECOND` | `isodow(d) % 7 + 1` (MySQL's `DAYOFWEEK`), `isodow(d) - 1` (`WEEKDAY`), `microsecond(ts) % 1000000` |
 | `STR_TO_DATE` | `strptime(text, format)`, `try_strptime` for NULL on a bad date |
-| `DATEDIFF`, `TIMESTAMPDIFF`, `TIMEDIFF` | `date_diff('day', start, end)` for a count, `end - start` for a time (the copy's own `datediff('day', a, b)` is answered) |
+| `TIMESTAMPDIFF`, `TIMEDIFF` | `date_diff('day', start, end)` for a count, `end - start` for a time |
 | `CAST(x AS SIGNED)`, `AS UNSIGNED` | `CAST(x AS BIGINT)`, `CAST(x AS UBIGINT)` |
-| `a DIV b` | `a // b` |
+| `a DIV b` | `a // b` for two whole numbers; `CAST(trunc(a / nullif(b, 0)) AS BIGINT)` when either is a `DECIMAL` or a `DOUBLE`, since the copy's `//` truncates only whole numbers (`7.5 // 2` is `3.75` there, `7.5 DIV 2` is `3` on MySQL) |
 | `REGEXP`, `RLIKE` | `regexp_matches(x, 'pattern', 'i')` |
 | `DATABASE()`, `USER()`, `VERSION()`, `CURRENT_USER` and the like | `current_database()`, `current_schema()`, `library_version FROM pragma_version()` |
 | `FOUND_ROWS()`, `LAST_INSERT_ID()`, `ROW_COUNT()`, `@x` and `@@x` variables | nothing on the copy: run it on MySQL (`abs(x)` for the copy's `@x`) |
@@ -2584,12 +2587,51 @@ past that (MySQL takes up to 18446744073709551615, the copy fails), a
 comment between the two, or a prepared argument that is not a whole number
 (MySQL reads a NULL offset as 0; this port does not guess it).
 
+`DATE_FORMAT(d, format)` and `DATEDIFF(a, b)`, two functions the copy does
+not have, are written for it the same way (#2628), in the statement and in a
+prepared statement once its arguments are written in:
+
+- `DATE_FORMAT(d, '%Y-%m')` is sent as `strftime(d, '%Y-%m')`, each of
+  MySQL's specifiers in the copy's spelling (`%i` is `%M`, `%M` is `%B`,
+  `%e` is `%-d`, `%r` is `%I:%M:%S %p`). The text is MySQL's, measured on
+  MySQL 8.0.46 for a `DATE`, a `DATETIME`, a `DATETIME(6)` and a `TIMESTAMP`,
+  under a session time zone too, at midnight and noon, on February 29 and at
+  the turn of a year: `%a %b %c %d %e %f %H %h %I %i %j %k %l %M %m %p %r %S
+  %s %T %U %v %W %w %x %Y %y %%`. Names of days and months are English, as
+  `MONTHNAME` and `DAYNAME` are on this port, whatever `lc_time_names` the
+  connection set. It is rewritten only when the format is one string written
+  in the statement, not empty. Otherwise it is refused with error 1235 and
+  the copy's spelling: a format from a column or a `NULL`, `%D` (`29th`, which
+  the copy cannot write), `%u`, `%V` and `%X` (weeks the copy does not count
+  that way), a letter that is not one of MySQL's specifiers (MySQL prints
+  the letter), and a statement this port sends as written (see the start of
+  this page). A zero date is a NULL on the copy, so its `DATE_FORMAT` is NULL
+  where MySQL writes `0000-00-00`.
+- `DATEDIFF(a, b)` is sent as `date_diff('day', CAST(b AS DATE), CAST(a AS
+  DATE))`: the days between the two dates, their times left out, in the
+  connection's time zone, as on MySQL, for a column, a string with or
+  without a time, and `NULL`. The copy's own `datediff('day', a, b)`, with a
+  unit first, is answered as it is. A `DATEDIFF` this port sends as written
+  is refused with that spelling.
+
 Or turn on Engine Routing, and MySQL answers them. The list is of
 constructs only MySQL's SQL holds; it does not make the copy MySQL. Every
 other difference this page lists still holds on such a connection (text
 compared by case only, `CONCAT` skipping a NULL where MySQL returns NULL,
 `ROUND` of a `DOUBLE` half away from zero, `SUBSTRING` from position 0,
-and the rest). Answered with the copy's own meaning, because it is also how
+and the rest). Three more, measured on MySQL 8.0.46 for `IFNULL`, `IF` and
+`CONCAT_WS`, which answer as MySQL does otherwise (a NULL argument of
+`CONCAT_WS` skipped on both, a NULL separator NULL on both): a string read
+as a condition (`IF('true', 1, 2)` is `1` on the copy and `2` on MySQL,
+which reads the string as the number 0; a string the copy cannot read as
+true or false, `IF('abc', 1, 2)`, fails there); an `IF` whose two values are
+a whole number and a `DECIMAL` (the same values, written `7` on MySQL and
+`7.00` on the copy); and a value turned into text, in `CONCAT_WS` too: a
+`DOUBLE` (`0` and `1e20` on MySQL, `0.0` and `1e+20` on the copy), a
+comparison (`1` and `true`) and a `DATETIME` or a `TIMESTAMP` (with its
+zone, `+00`, on the copy).
+`IFNULL` and `IF` over a number and a string (`IFNULL(n, 'none')`) fail on
+the copy, where MySQL answers with text. Answered with the copy's own meaning, because it is also how
 DuckDB SQL is written or because it is a difference listed above: a string
 that reads as a date with a two-digit year (`'26-01-15'` is year 26 here,
 2026 on MySQL; any text of that shape would otherwise be refused), a
@@ -3351,6 +3393,7 @@ The DBTrail index retains the most recent hours via partition rotation; older da
 - **Full-table `_flashback`, and any `LIMIT`ed full-table query, is buffered.** These paths buffer up to 100,000 rows per query and surface overflow as `ER_TOO_BIG_SELECT` (1104). Full-table `_snapshot` with no `LIMIT` streams instead and has no row cap ([#998](https://github.com/dbtrail/dbtrail/issues/998), see [Step 6](#step-6--run-a-time-travel-query)); without a baseline source it degrades to the binlog-only path and the cap applies. PK-filtered point-lookups are unaffected.
 - **`_snapshot` and `_flashback` take each row's latest change in binary log order.** That is commit order, not the time a change's statement started, so a row that two sessions changed at once (one waited on the other's row lock) comes back with the value the database holds ([#2156](https://github.com/dbtrail/dbtrail/issues/2156)). Where the index cannot show that order for some rows (see [query-and-recovery.md](query-and-recovery.md), "Most recent" is the order of the binary log), those rows are taken at their latest change by time and the result carries one warning: the client's "1 warning", and `SHOW WARNINGS` answers it with code 1105 and a text that starts with `order of changes unproven`. The single-row `_snapshot` read and both `_flashback` reads (one row or the whole table) take a row's changes in the same order, with the same warning where it cannot be shown. `AS OF` still selects changes by the time their statement started: a change that started before the instant and was committed after it is part of the answer, and with binary log order it is applied last. `_diff` lists a row's changes by statement time.
 - **`_snapshot` refuses across a TRUNCATE/DROP/RENAME.** `TRUNCATE TABLE`/`DROP TABLE`/`RENAME TABLE`, MariaDB's `CREATE OR REPLACE TABLE`, an `ALTER TABLE` that drops, truncates or exchanges a partition ([#2632](https://github.com/dbtrail/dbtrail/issues/2632)), and MariaDB's `ALTER IGNORE TABLE` that adds a unique key or changes a column ([#2640](https://github.com/dbtrail/dbtrail/issues/2640)) emit no row events, so a baseline merge spanning one of these statements would silently resurrect pre-DDL rows as if they still existed at AS OF. Both the single-row and full-table `_snapshot` paths check `schema_changes` for such a statement between the baseline snapshot and AS OF, by its time and by its binlog position (a statement indexed late carries a time from before the snapshot, [#1912](https://github.com/dbtrail/dbtrail/issues/1912)), and return `ER_UNKNOWN_ERROR` (1105) naming the DDL type and timestamp instead ([#764](https://github.com/dbtrail/dbtrail/issues/764)); re-baseline the table after the DDL to resume. `_flashback` is unaffected: it never reads a baseline.
+- **Full-table `_snapshot` refuses a value an ALTER replaced with `?`.** An `ALTER TABLE` that narrowed a column's character set (utf8mb4 to latin1) under a non-strict `sql_mode` turns each character the new set cannot hold into `?` with no row events. The full-table `_snapshot` checks every value it takes from before that statement and returns `ER_UNKNOWN_ERROR` (1105) naming the column, the statement and both sets when one holds such a character; a value the new set holds, and a change to a wider set, answer as before ([#2735](https://github.com/dbtrail/dbtrail/issues/2735), details in [the reconstruction window](query-and-recovery.md#truncate--drop--rename-in-the-reconstruction-window)). A change it cannot check (another character set, a statement with no schema snapshot) is a `SHOW WARNINGS` note, code 1105. The single-row `_snapshot` does not check it yet.
 - **`_snapshot` refuses when the source's binary log started again after the baseline.** Both `_snapshot` paths read the changes since the baseline from its binlog position. After a `RESET MASTER` (`RESET BINARY LOGS AND GTIDS`) or a failover to another server, every later change sorts before that position, so the answer would be the baseline's old rows. When the baseline records the newest change the index held (every snapshot written since [#2160](https://github.com/dbtrail/dbtrail/issues/2160)), the single-row and full-table paths run the same check as a snapshot update and return `ER_NO_PARTITION_FOR_GIVEN_VALUE` (1526), the code of the other unreadable-history refusals, with "the changes since the snapshot cannot be found by binlog position", "A new full snapshot is needed.", how to take one, and `_flashback` as the read that still answers (it reads by time) ([#2174](https://github.com/dbtrail/dbtrail/issues/2174)). The check asks one question of what the query reads: is there a change of this table, indexed after the baseline's mark, recorded between the earliest time the query reaches back to (an hour or more before the baseline) and AS OF, that sorts before the mark in the binary log? The query would drop such a change. A restart after AS OF, or one whose later changes touched only other tables, refuses nothing, so the history before it stays readable. Capture moving to another server refuses only when capture recorded the move after the baseline was taken and at or before AS OF (a new `server_uuid` at the same address, or a new server record on the way to the one capture reads now); with no record of when, it refuses. That record is the time capture noticed the new server, not the time of the switch: a failover while capture was behind, to a server whose files are numbered higher, is not seen. The first statement for a baseline and table reads that table's changes since the baseline once; later ones ask only about what was indexed since. Hours of the window that rotation already moved into Parquet archives are checked too ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)), since the query reads them from the archives with the same position filter: an archive whose newest change was indexed at or before the baseline's mark is skipped (`archive_state` records it), and every other archive file of the window is read for this table, only the columns the question needs. A file found clean is not read again for the same baseline and table. An archive with no `archive_state` row is not checked: `bintrail archive reconcile --prune` removes the row of an archive whose file is gone from every backend, and from then on nothing records that the hour held a change. Not checked: a baseline without that record, which includes every snapshot made with the CLI `bintrail baseline` (only the web interface's and the daemon's snapshots and snapshot updates record it). A failed read of whether `bintrail index` wrote into the index is an error, not a skip. When the check cannot tell whether the binary log started again (`bintrail index` also wrote into the index; the event the baseline's mark names was deleted while older ones remain, as a restarted capture's cleanup does; the mark's id now names another event, after the index was rebuilt; the mark does not read; an archived hour of the window has no file the port can open), the statement answers as before and carries a warning that `SHOW WARNINGS` returns, code 1105, starting "binlog numbering not checked:" with the reason ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)). The PostgreSQL wire front-end logs that note instead. The PostgreSQL wire front-end returns the same refusal with SQLSTATE `22023`, as for a coverage gap. `_flashback` is unaffected: it never reads a baseline.
 - **No JOINs, aggregations, or non-PK WHERE filters inside the shim.** Run them outside on the resultset (`duckdb`, `pandas`, `awk`). The shim's job is to deliver correct historical row state; SQL execution against that state is the operator's tool of choice.
 - **ENUM/SET labels are decoded with the snapshot in effect at each event.** Binlog row images store ENUMs as ordinals and SETs as bitmasks; the shim (and the web interface's Time-travel tab and `bintrail reconstruct`) map them back to labels using the schema snapshot whose capture time most recently precedes the event, so an enum reshaped between two events renders each event under its own definition. Remaining caveats: events older than the *first* snapshot decode with that first snapshot, and a change made between an ALTER and the next snapshot decodes with the pre-ALTER definition (stream mode auto-snapshots on DDL, so that window is normally seconds). An ordinal beyond the selected definition is returned as the raw number: the forensic ground truth, also visible in `bintrail query`'s JSON output, which is deliberately left unmapped.

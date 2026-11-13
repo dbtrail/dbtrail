@@ -118,7 +118,7 @@ So it is not the number of rows that forces a full read. It is that the table wa
 
 - Expect one full read of the whole server at the next scheduled run after it. With the default lock mode it first waits for the source to have no long-running statement ([`ftwrl` waits for a quiet source first](snapshot-lock-measurements.md#ftwrl-waits-for-a-quiet-source-first)).
 - Group them. Two schema changes hours apart on the same day are one full read and then a copy that stays at that snapshot until the next day, because of the once-a-day rule; done together they are one full read and an up-to-date copy.
-- A plain `ALTER TABLE` that adds, drops or retypes a column, or changes its character set (`CONVERT TO CHARACTER SET` too), has the same result as the tool: the update is refused and a full read follows.
+- A plain `ALTER TABLE` that adds, drops or retypes a column, or changes its character set (`CONVERT TO CHARACTER SET` too), has the same result as the tool: the update is refused and a full read follows. A full-table `reconstruct` to a dump and the SQL port's `_snapshot` are not refused by a character set change unless a value lost a character in it ([#2735](https://github.com/dbtrail/dbtrail/issues/2735)).
 
 ## What does not cause a full read
 

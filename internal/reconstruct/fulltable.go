@@ -1630,6 +1630,17 @@ func ReconstructTable(
 		return nil, err
 	}
 	afterDestructiveDDLCheck()
+	// An ALTER that narrowed a column's character set (#2735) changed values
+	// with no row events only where a value held a character the new set
+	// cannot: the merge checks each value it carries from before it
+	// (mergeCore.Narrowings), and what cannot be checked is said here.
+	narrowings, err := FindCharsetNarrowings(ctx, db, schema, table, ddlWin)
+	if err != nil {
+		return nil, err
+	}
+	for _, note := range narrowings.Notes() {
+		slog.Warn("reconstruct: "+note, "schema", schema, "table", table)
+	}
 	stampMark := markToStamp(cfg.ddlMark, ddlWin)
 
 	// ── 3b'. Refuse when the source's binlog numbering started over (#2160) ──
@@ -1867,6 +1878,14 @@ func ReconstructTable(
 	// ── 5a. Table deltas (#1638) take over publication entirely ────────────
 	// Behind every refusal above, for the reason 5b states for itself.
 	if cfg.TableDeltas && cfg.OutputFormat == OutputFormatParquet {
+		// A table delta keeps the base's rows without reading them, so a
+		// value a narrowing ALTER replaced with '?' cannot be checked there
+		// (#2735), and a published snapshot is the next run's start.
+		if narrowings.Checked() {
+			return nil, fmt.Errorf("%w: %s.%s: %s. A table delta does not read those rows, so it cannot tell; "+
+				"take a full snapshot of the table, which will hold it as it is after the alter table",
+				ErrSchemaChanged, schema, table, narrowings.UntouchedNote())
+		}
 		err := publishWithTableDelta(ctx, tableDeltaPublish{
 			cfg: cfg, schema: schema, table: table,
 			basePath: baselinePath, chainStart: snapshotTime, baseMeta: bmeta, anchorMeta: anchorMeta,
@@ -1893,7 +1912,9 @@ func ReconstructTable(
 	// capGap is passed in because step 3c does NOT refuse under --allow-gaps:
 	// it returns the finding and lets the run proceed. See carryForwardEligible
 	// for why a known gap disqualifies a table from being carried at all.
-	if carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, baselinePath, fold.changeCount(), capGap) {
+	// Not across a narrowing ALTER (#2735): carrying the file forward keeps
+	// every row without reading it, and the merge below checks each one.
+	if !narrowings.Checked() && carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, baselinePath, fold.changeCount(), capGap) {
 		linked, cerr := carryForward(ctx, baselinePath, cfg.snapshotDir, schema, table)
 		if cerr != nil {
 			return nil, fmt.Errorf("carry %s.%s forward unchanged: %w", schema, table, cerr)
@@ -1937,6 +1958,7 @@ func ReconstructTable(
 		ImageColumns:      fold.ImageColumns,
 		SawImage:          fold.SawImage,
 		CurrentGenerated:  generatedByName(tm.Columns),
+		Narrowings:        narrowings,
 		OutputDir:         cfg.OutputDir,
 		ChunkSize:         cfg.ChunkSize,
 		SpaceCheck:        cfg.SpaceCheck,
@@ -2144,6 +2166,9 @@ type mergeInput struct {
 	Schema            string
 	Table             string
 	PKCols            []metadata.ColumnMeta
+	// Narrowings checks each emitted row against the narrowing ALTERs in the
+	// window (#2735); nil checks nothing.
+	Narrowings *CharsetNarrowings
 	// Columns is the table's column metadata from the index's schema
 	// snapshot; the mydumper writer reads MariaDB UUID/INET types from it.
 	Columns []metadata.ColumnMeta
@@ -2332,6 +2357,7 @@ func mergeBaselineIntoWriter(ctx context.Context, in mergeInput, rep *TableRepor
 		PKCols:            in.PKCols,
 		Changes:           in.Changes,
 		Spill:             in.Spill,
+		Narrowings:        in.Narrowings,
 		CheckPass: func(m map[string]*query.ResultRow) error {
 			return checkPostBaselineColumns(in, m, colNames)
 		},
@@ -2377,6 +2403,10 @@ type mergeCore struct {
 	// PGTextPK skips the MySQL PK canonicalizer for a PostgreSQL source (text
 	// PK on both baseline and delta sides). See SnapshotFullTableInput.PGTextPK.
 	PGTextPK bool
+	// Narrowings, when set, checks every row before it is emitted against the
+	// narrowing ALTERs in the window (#2735, CharsetNarrowings.CheckRow). nil
+	// checks nothing and costs nothing per row.
+	Narrowings *CharsetNarrowings
 	// DuckDBTuning sets the resource budget for the DuckDB session this
 	// function opens to scan the baseline (#842). Zero value → the
 	// container-safe default; see effectiveDuckDBTuning.
@@ -2662,12 +2692,18 @@ func scanBaselineQuery(ctx context.Context, ddb *sql.DB, q string, in mergeCore,
 						"event_type", ev.EventType, "event_id", ev.EventID)
 					continue
 				}
+				if err := in.Narrowings.CheckRow(ev.RowAfter, ev); err != nil {
+					return read, err
+				}
 				if err := emit(ev.RowAfter); err != nil {
 					return read, err
 				}
 				stats.UpdatesApplied++
 			}
 		} else {
+			if err := in.Narrowings.CheckRow(rowMap, nil); err != nil {
+				return read, err
+			}
 			if err := emit(rowMap); err != nil {
 				return read, err
 			}
@@ -2699,6 +2735,9 @@ func emitLeftoverChanges(in mergeCore, changes map[string]*query.ResultRow, emit
 				"schema", in.Schema, "table", in.Table, "pk", pk,
 				"event_type", ev.EventType, "event_id", ev.EventID)
 			continue
+		}
+		if err := in.Narrowings.CheckRow(ev.RowAfter, ev); err != nil {
+			return err
 		}
 		if err := emit(ev.RowAfter); err != nil {
 			return err
@@ -2735,6 +2774,10 @@ type SnapshotFullTableInput struct {
 	// caller that sets this must have skipped the SupportedPKType precondition
 	// accordingly. Zero value (false) preserves the MySQL path verbatim.
 	PGTextPK bool
+	// Narrowings, from FindCharsetNarrowings over the same window, refuses a
+	// row carrying a value a narrowing ALTER replaced with '?' (#2735). nil
+	// checks nothing: verify, which compares with a real read, sets none.
+	Narrowings *CharsetNarrowings
 	// DuckDBTuning sets the resource budget for the DuckDB sessions this call
 	// opens (materializeBaselineLocal, mergeBaselineImages) (#842). Zero value
 	// → the container-safe default (see effectiveDuckDBTuning) — the right
@@ -2790,6 +2833,7 @@ func SnapshotFullTableImages(ctx context.Context, in SnapshotFullTableInput, emi
 		PKCols:            in.PKCols,
 		Changes:           in.Changes,
 		PGTextPK:          in.PGTextPK,
+		Narrowings:        in.Narrowings,
 		DuckDBTuning:      in.DuckDBTuning,
 	}, emit)
 	return err

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"maps"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -513,4 +514,69 @@ func TestCompact_sentThenConflictKeepsTheFiles(t *testing.T) {
 	if after := dataDirFiles(t, tbl); after != before+1 {
 		t.Fatalf("data files on disk %d -> %d, want the compacted file kept", before, after)
 	}
+}
+
+// manifestCount is the number of manifests the current snapshot's manifest
+// list holds: what a reader opens before it reads a single row.
+func manifestCount(t *testing.T, tbl *table.Table) int {
+	t.Helper()
+	fsys, err := tbl.FS(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := tbl.CurrentSnapshot().Manifests(fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(m)
+}
+
+// #2728: a compaction writes manifests that hold only DELETED entries (the
+// files it replaced). The next delta's append carries them, and the next
+// compaction must drop them, or the manifest list grows by two per
+// compaction forever (iceberg-go v0.6.0 kept them). Cycle 3 commits two
+// deltas before its compaction, so more than one inherited generation is in
+// play there. The keys rotate over 1..3, so every delta deletes rows a
+// compaction rewrote.
+func TestCompact_manifestCountStaysFlatAcrossCompactions(t *testing.T) {
+	ctx := context.Background()
+	_, tbl, cols := loadedTable(t)
+	status := map[int64]string{1: "new", 2: "new", 3: "new"}
+	evID, pos := uint64(10), uint64(100)
+	delta := func(i int) {
+		id := int64(i%3 + 1)
+		next := fmt.Sprintf("s%d", i)
+		evID++
+		pos += 100
+		tbl = commit(t, tbl, cols, foldOps(t, ordersPK,
+			ev(evID, event.EventUpdate, fmt.Sprint(id),
+				orderRow(id, status[id], "10.00", "2026-08-28 12:00:00"),
+				orderRow(id, next, "10.00", "2026-08-28 12:00:00")),
+		), cursor{File: "binlog.000001", Pos: pos, At: t0.Add(time.Duration(evID) * time.Minute)})
+		status[id] = next
+	}
+	var counts []int
+	for i := range 6 {
+		delta(i)
+		if i == 3 {
+			delta(i + 10)
+		}
+		got, c := compactTable(ctx, tbl, 1, nil)
+		if c == nil || c.Err != nil {
+			t.Fatalf("cycle %d: compaction = %+v, want one that committed", i, c)
+		}
+		tbl = got
+		counts = append(counts, manifestCount(t, tbl))
+	}
+	for _, n := range counts {
+		if n != counts[0] {
+			t.Fatalf("manifests after each compaction = %v, want the same count every time (a compaction's deleted-only manifests must not be carried past the next one)", counts)
+		}
+	}
+	want := make([]string, 0, len(status))
+	for id, s := range status {
+		want = append(want, fmt.Sprintf("%d=%s", id, s))
+	}
+	sort.Strings(want)
+	equalRows(t, "after the last compaction", scanRows(t, tbl), want)
 }
