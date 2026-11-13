@@ -220,4 +220,7 @@ func TestHoldSnapshot_anotherProcessAndItsDeath(t *testing.T) {
 		t.Fatalf("after the reader was killed the prune removed %v, want [%s]", res.Pruned, s[0])
 	}
 	wantOnDisk(t, root, s[2])
+	if left, _ := filepath.Glob(filepath.Join(root, holdRecordPrefix+"*")); len(left) != 0 {
+		t.Errorf("records of the dead reader left beside the snapshots: %v", left)
+	}
 }

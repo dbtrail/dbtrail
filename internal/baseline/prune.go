@@ -555,6 +555,10 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
 	sweepFailures, firstSweepErr := sweepPruningLeftovers(opts.LocalDir)
+	if !opts.DryRun {
+		// Records of reads whose snapshot is gone (#2675).
+		sweepHoldRecords(opts.LocalDir)
+	}
 	removedEmpty := sweepEmptySnapshotDirs(opts.LocalDir, pinnedNow(opts.LocalDir, time.Now()), time.Now(), opts.DryRun)
 
 	snaps, err := enumerateLocalSnapshots(opts.LocalDir)

@@ -8,3 +8,6 @@ func HoldSnapshot(string) (release func(), gone bool) { return func() {}, false 
 
 // lockForRemoval is a no-op where flock is unavailable.
 func lockForRemoval(string) (unlock func(), held bool) { return func() {}, false }
+
+// sweepHoldRecords is a no-op where no hold writes a record.
+func sweepHoldRecords(string) {}
