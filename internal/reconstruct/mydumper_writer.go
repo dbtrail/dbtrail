@@ -81,6 +81,47 @@ type MydumperWriter struct {
 	finalized bool
 }
 
+// mydumperSchemaFile is the name of a table's schema file in a mydumper
+// folder: <db>.<table>-schema.sql.
+func mydumperSchemaFile(schema, table string) string {
+	return schema + "." + table + "-schema.sql"
+}
+
+// mydumperChunkFile is the name of a table's data file number idx in a
+// mydumper folder: <db>.<table>.NNNNN.sql, five digits or more.
+func mydumperChunkFile(schema, table string, idx int) string {
+	return fmt.Sprintf("%s.%s.%05d.sql", schema, table, idx)
+}
+
+// isMydumperTableFile says whether name is one of the files MydumperWriter
+// writes for schema.table: its schema file or one of its data files. The
+// comparison is exact, byte for byte, so `orders_archive`, `Orders`, the
+// table `orders.00001` and files mydumper writes beside a table
+// (-schema-triggers.sql, a .sql.gz) are never taken for `orders`.
+//
+// One case cannot be told apart by name: schema `a.b` with table `c` and
+// schema `a` with table `b.c` have the same files. mydumper's naming has the
+// same ambiguity, and a snapshot refuses a schema name with a dot.
+func isMydumperTableFile(name, schema, table string) bool {
+	if name == mydumperSchemaFile(schema, table) {
+		return true
+	}
+	rest, ok := strings.CutPrefix(name, schema+"."+table+".")
+	if !ok {
+		return false
+	}
+	digits, ok := strings.CutSuffix(rest, ".sql")
+	if !ok || len(digits) < 5 {
+		return false
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // NewMydumperWriter creates a writer for a single table. The directory must
 // already exist; the caller is expected to pass a freshly-created output
 // directory (e.g. from t.TempDir() or the CLI's --output).
@@ -120,7 +161,7 @@ func (w *MydumperWriter) WriteSchema(createSQL string) error {
 	if w.closed {
 		return ErrWriterClosed
 	}
-	name := fmt.Sprintf("%s.%s-schema.sql", w.schema, w.table)
+	name := mydumperSchemaFile(w.schema, w.table)
 	path := filepath.Join(w.outputDir, name)
 	// Track the name BEFORE writing (same order as openChunk): os.WriteFile
 	// opens with O_CREATE|O_TRUNC, so a failure mid-write (ENOSPC, EIO) has
@@ -394,7 +435,7 @@ func (w *MydumperWriter) openChunk() error {
 			return err
 		}
 	}
-	name := fmt.Sprintf("%s.%s.%05d.sql", w.schema, w.table, w.chunkIdx)
+	name := mydumperChunkFile(w.schema, w.table, w.chunkIdx)
 	path := filepath.Join(w.outputDir, name)
 	f, err := os.Create(path)
 	if err != nil {

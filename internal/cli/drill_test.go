@@ -196,7 +196,7 @@ func TestDrillNoSnapshotResult_sameVerdictAsBefore(t *testing.T) {
 		t.Errorf("refused = %+v\nbuilt   = %+v", got, built)
 	}
 	if got.Status != "fail" || !got.BinlogOnly ||
-		got.Error != "no usable baseline for this table; the dump was rebuilt from binlog deltas alone (an EMPTY starting table); a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)" {
+		got.Error != "no usable baseline for this table; built from binlog deltas alone it would start from an EMPTY table, so it was not loaded; a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)" {
 		t.Errorf("verdict changed: %+v", got)
 	}
 	t.Logf("rendered: %s", got.Error)

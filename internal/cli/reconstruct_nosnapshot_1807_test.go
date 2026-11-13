@@ -206,8 +206,8 @@ func TestReconstruct1807_unlistableLocationClaimsNoCase(t *testing.T) {
 	dir := t.TempDir()
 	orig := listSnapshots
 	t.Cleanup(func() { listSnapshots = orig })
-	listSnapshots = func(context.Context, string) ([]reconstruct.BaselineFile, error) {
-		return nil, errors.New("listing refused")
+	listSnapshots = func(context.Context, string) ([]reconstruct.BaselineFile, []reconstruct.UnreadableSnapshot, error) {
+		return nil, nil, errors.New("listing refused")
 	}
 	setSingleRow(t, dir, false)
 	err := runReconstruct(reconstructCmd, nil)
@@ -252,11 +252,11 @@ func TestReconstruct1807_aListedEarlierSnapshotClaimsNoCase(t *testing.T) {
 	dir := t.TempDir()
 	orig := listSnapshots
 	t.Cleanup(func() { listSnapshots = orig })
-	listSnapshots = func(context.Context, string) ([]reconstruct.BaselineFile, error) {
+	listSnapshots = func(context.Context, string) ([]reconstruct.BaselineFile, []reconstruct.UnreadableSnapshot, error) {
 		return []reconstruct.BaselineFile{
 			{SnapshotTime: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Schema: "mydb", Table: "orders"},
 			{SnapshotTime: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), Schema: "mydb", Table: "orders"},
-		}, nil
+		}, nil, nil
 	}
 	setSingleRow(t, dir, false)
 	err := runReconstruct(reconstructCmd, nil)
