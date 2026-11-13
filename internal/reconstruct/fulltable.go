@@ -823,6 +823,33 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	parquetMode := cfg.OutputFormat == OutputFormatParquet
 	psqlMode := cfg.OutputFormat == OutputFormatPsql
 
+	// The checks that need nothing but the configuration come first, before
+	// anything on disk changes (#2684): a run refused by one of them leaves
+	// the output folder as it found it. Every entry is checked before any
+	// table starts: a bad one found mid-loop returned while the tables before
+	// it were still folding.
+	for _, entry := range cfg.Tables {
+		if _, _, ok := splitSchemaTable(entry); !ok {
+			return nil, fmt.Errorf("invalid --tables entry %q: must be schema.table", entry)
+		}
+	}
+	if psqlMode {
+		if err := pgFileCollisions(cfg.Tables); err != nil {
+			return nil, err
+		}
+	}
+	// A dump folder's earlier files are removed before any table is looked
+	// up (removeTableLeftovers below), and the lookup is what reads the
+	// snapshot location, per table. A location that cannot be read at all (a
+	// typo, a bucket that does not exist) would remove the earlier dump and
+	// then fail every table, so it is read once here. An empty one passes:
+	// every table is then refused for having no snapshot.
+	if !parquetMode {
+		if err := checkSnapshotLocation(ctx, cfg.BaselineSrc); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
@@ -876,8 +903,17 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	// baseline.go: proceeding without the crash-safety net deployed and then
 	// dying uncatchably mid-run would leave a markerless partial dump that the
 	// marker-absent-is-complete legacy-compat rule reads as complete.
-	if err := markRunIncomplete(markerDir); err != nil {
-		return nil, fmt.Errorf("could not write incomplete-dump marker in %s (refusing to reconstruct without the crash-safety marker): %w", markerDir, err)
+	//
+	// For a dump folder (mydumper, psql) the marker is written further down,
+	// after every check that can refuse the run before a table starts: that
+	// folder may hold a complete dump of an earlier run, and a run refused up
+	// front must leave it complete (#2684). A Parquet snapshot directory is
+	// new, so it is marked as soon as it exists: left without a marker, an
+	// empty one would read as a complete legacy snapshot.
+	if parquetMode {
+		if err := markRunIncomplete(markerDir); err != nil {
+			return nil, fmt.Errorf("could not write incomplete-dump marker in %s (refusing to reconstruct without the crash-safety marker): %w", markerDir, err)
+		}
 	}
 
 	db, err := config.Connect(cfg.IndexDSN)
@@ -1039,17 +1075,21 @@ func reconstructTables(ctx context.Context, cfg FullTableConfig, failures *[]Tab
 	sem := make(chan struct{}, cfg.Parallelism)
 	var wg sync.WaitGroup
 
-	// Every entry is checked before any table starts: a bad one found
-	// mid-loop returned while the tables before it were still folding.
-	for _, entry := range cfg.Tables {
-		if _, _, ok := splitSchemaTable(entry); !ok {
-			return nil, fmt.Errorf("invalid --tables entry %q: must be schema.table", entry)
+	// A dump folder changes only now, after every check that can refuse the
+	// run before a table starts (the configuration, the snapshot location,
+	// the index and its schema), so a run refused up front leaves it as it
+	// found it, markers included. First the marker, so a run killed while it
+	// removes still leaves the folder marked; then the earlier run's files of
+	// these tables. See leftovers.go.
+	if !parquetMode {
+		if err := markRunIncomplete(markerDir); err != nil {
+			return nil, fmt.Errorf("could not write incomplete-dump marker in %s (refusing to reconstruct without the crash-safety marker): %w", markerDir, err)
 		}
-	}
-	if psqlMode {
-		if err := pgFileCollisions(cfg.Tables); err != nil {
+		left, err := removeTableLeftovers(cfg.OutputDir, cfg.OutputFormat, cfg.Tables)
+		if err != nil {
 			return nil, err
 		}
+		logTableLeftovers(left)
 	}
 	for _, entry := range cfg.Tables {
 		schema, table, _ := splitSchemaTable(entry)
@@ -3200,12 +3240,16 @@ func reconstructBinlogOnly(
 	// back to the explanatory placeholder when no such record exists (e.g.
 	// the table predates schema_changes, or genuinely was never baselined
 	// for another reason).
-	createSQL, ddlFound, err := findCapturedCreateTableDDL(ctx, db, schema, table, cfg.At)
+	captured, err := findCapturedCreate(ctx, db, schema, table, cfg.At)
 	if err != nil {
 		slog.Warn("could not query schema_changes for a captured CREATE TABLE; using placeholder schema file",
 			"schema", schema, "table", table, "error", err)
 	}
-	if ddlFound {
+	createSQL, ddlFound := captured.DDL, captured.Found
+	switch {
+	case captured.FromIfNotExists:
+		createSQL = changesOnlyMarker(schema, table) + ifNotExistsHeader + createSQL
+	case ddlFound:
 		// The captured DDL is from CREATE time; it does not reflect any ALTER
 		// applied later, up to cfg.At (that class of point-in-time schema
 		// drift is the separately-tracked #600/#601/#602 family). Label it so
@@ -3215,7 +3259,12 @@ func reconstructBinlogOnly(
 			"-- (binlog-only fallback, #766). If the table was ALTERed afterwards, this may\n" +
 			"-- not match the columns in the accompanying data file(s) — verify before loading.\n" +
 			createSQL
-	} else {
+	case captured.Unrewritable != "":
+		slog.Warn("the newest CREATE TABLE recorded for the table could not be written as a plain CREATE TABLE; "+
+			"the schema file holds no definition",
+			"schema", schema, "table", table, "statement", captured.Unrewritable)
+		createSQL = binlogOnlySchemaPlaceholderUnrewritable(schema, table, captured.Unrewritable)
+	default:
 		createSQL = binlogOnlySchemaPlaceholder(schema, table)
 	}
 
@@ -3287,13 +3336,66 @@ func binlogOnlySchemaPlaceholder(schema, table string) string {
 		schema, table)
 }
 
+// ifNotExistsHeader labels a schema file whose definition is a recorded
+// CREATE TABLE IF NOT EXISTS written without the clause.
+const ifNotExistsHeader = "-- bintrail: the newest CREATE TABLE recorded in schema_changes for this table was\n" +
+	"-- a CREATE TABLE IF NOT EXISTS, written here without the clause (binlog-only\n" +
+	"-- fallback, #766). An application may run that statement at every start, so at\n" +
+	"-- the source it may have created nothing: the table can have been defined by an\n" +
+	"-- earlier statement or altered since. Verify it against the data file(s) before loading.\n"
+
+// binlogOnlySchemaPlaceholderUnrewritable is the placeholder for a table whose
+// newest recorded CREATE TABLE is a form that cannot be written as it is
+// (stmt: CREATE OR REPLACE TABLE, CREATE TABLE IF NOT EXISTS) and could not be
+// rewritten. Unlike binlogOnlySchemaPlaceholder it does not say that nothing
+// was recorded: the statement is in schema_changes, where the operator can
+// read it.
+func binlogOnlySchemaPlaceholderUnrewritable(schema, table, stmt string) string {
+	marker := changesOnlyMarker(schema, table)
+	schema, table = recovery.SanitizeForComment(schema), recovery.SanitizeForComment(table)
+	return marker + fmt.Sprintf(
+		"-- bintrail: no baseline snapshot exists for %s.%s. The newest CREATE TABLE\n"+
+			"-- statement recorded for it in schema_changes is a %s that could\n"+
+			"-- not be rewritten as a plain CREATE TABLE, and as written it could drop or fill\n"+
+			"-- a table already on the target, so it is not used here. The rows in the\n"+
+			"-- accompanying data file(s) were recovered entirely from the binlog (binlog-only\n"+
+			"-- fallback, #766). Create the table structure yourself before loading them.\n",
+		schema, table, stmt)
+}
+
 // findCapturedCreateTableDDL looks up the most recent CREATE TABLE statement
 // (a CREATE OR REPLACE TABLE counts, rewritten to a plain CREATE TABLE so that
-// loading the schema file cannot drop a table that already exists)
+// loading the schema file cannot drop a table that already exists, and so does
+// a CREATE TABLE IF NOT EXISTS, rewritten the same way so that loading it
+// cannot put the rows into a table that already exists)
 // the schema-drift guard (#700) recorded for schema.table at-or-before at, in
 // schema_changes.ddl_query. found is false (with a nil error) when no such
 // row exists — the caller falls back to binlogOnlySchemaPlaceholder.
 func findCapturedCreateTableDDL(ctx context.Context, db *sql.DB, schema, table string, at time.Time) (ddl string, found bool, err error) {
+	c, err := findCapturedCreate(ctx, db, schema, table, at)
+	return c.DDL, c.Found, err
+}
+
+// capturedCreate is what findCapturedCreate read for a table.
+type capturedCreate struct {
+	// DDL is the statement to write as the table's definition, Found whether
+	// there is one.
+	DDL   string
+	Found bool
+	// FromIfNotExists: DDL is a CREATE TABLE IF NOT EXISTS written without
+	// the clause. At the source such a statement may have created nothing.
+	FromIfNotExists bool
+	// Unrewritable names the form of the newest recorded statement when it
+	// was one that cannot be written as it is (CREATE OR REPLACE TABLE,
+	// CREATE TABLE IF NOT EXISTS) and the rewrite could not read it. Found is
+	// false then: the caller writes the placeholder, and must not say that
+	// nothing was recorded.
+	Unrewritable string
+}
+
+// findCapturedCreate is findCapturedCreateTableDDL with what the caller needs
+// to label the schema file truthfully.
+func findCapturedCreate(ctx context.Context, db *sql.DB, schema, table string, at time.Time) (capturedCreate, error) {
 	row := db.QueryRowContext(ctx, `
 		SELECT ddl_type, ddl_query FROM schema_changes
 		WHERE schema_name = ? AND table_name = ? AND ddl_type IN (?, ?) AND detected_at <= ?
@@ -3302,26 +3404,38 @@ func findCapturedCreateTableDDL(ctx context.Context, db *sql.DB, schema, table s
 		LIMIT 1`,
 		// An inferred PostgreSQL CREATE (#2441) is prose, not a statement.
 		schema, table, event.DDLCreateTable, event.DDLReplaceTable, at, event.InferredDDLPrefix+"%")
-	var kind string
+	var kind, ddl string
 	if err := row.Scan(&kind, &ddl); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, nil
+			return capturedCreate{}, nil
 		}
-		return "", false, err
+		return capturedCreate{}, err
 	}
-	if kind == string(event.DDLReplaceTable) {
-		// The fallback writes this statement as the schema file myloader runs.
-		// As logged, on MariaDB it would drop a table that already exists on
-		// the target, rows included; as a plain CREATE TABLE it defines the same
-		// table and stops at "table exists". A shape the rewrite cannot read
-		// gets the placeholder rather than a statement that can drop a table.
-		loc := replaceTableHeadRe.FindStringSubmatchIndex(ddl)
-		if loc == nil {
-			return "", false, nil
+	if kind == string(event.DDLCreateTable) {
+		// A CREATE TABLE IF NOT EXISTS (an application that runs it at every
+		// start records one per start) is written as the plain CREATE TABLE.
+		// With the clause, a loader whose target already has the table loads
+		// the rows into it instead of stopping at "table exists". A clause
+		// the rewrite cannot take out gets the placeholder.
+		if plain, ok := ddltext.WithoutIfNotExists(ddl); ok {
+			return capturedCreate{DDL: plain, Found: true, FromIfNotExists: true}, nil
 		}
-		ddl = ddl[:loc[3]] + "CREATE TABLE" + ddl[loc[1]:]
+		if ddltext.HasIfNotExists(ddl) {
+			return capturedCreate{Unrewritable: "CREATE TABLE IF NOT EXISTS"}, nil
+		}
+		return capturedCreate{DDL: ddl, Found: true}, nil
 	}
-	return ddl, true, nil
+	// CREATE OR REPLACE TABLE. The fallback writes this statement as the
+	// schema file myloader runs. As logged, on MariaDB it would drop a table
+	// that already exists on the target, rows included; as a plain CREATE
+	// TABLE it defines the same table and stops at "table exists". A shape the
+	// rewrite cannot read gets the placeholder rather than a statement that
+	// can drop a table.
+	loc := replaceTableHeadRe.FindStringSubmatchIndex(ddl)
+	if loc == nil {
+		return capturedCreate{Unrewritable: "CREATE OR REPLACE TABLE"}, nil
+	}
+	return capturedCreate{DDL: ddl[:loc[3]] + "CREATE TABLE" + ddl[loc[1]:], Found: true}, nil
 }
 
 // replaceTableHeadRe matches MariaDB's CREATE OR REPLACE TABLE at the start of a

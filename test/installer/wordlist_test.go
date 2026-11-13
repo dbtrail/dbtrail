@@ -210,7 +210,11 @@ func TestInstaller_refusalsAndWarningsSpeakTheWordList(t *testing.T) {
 		{"chosen metrics port taken", []string{"BUSY_PORTS=9095", "DBTRAIL_METRICS_PORT=9095"}, "already in use"},
 		{"Docker stopped", []string{"STUB_DOCKER_DOWN=1"}, "Docker isn't running"},
 		{"Compose missing", []string{"STUB_NO_COMPOSE=1"}, "Docker Compose is not available"},
-		{"image download failed", []string{"STUB_PULL_FAIL=1"}, "could not download the newest images"},
+		{"image download failed", []string{"STUB_PULL_FAIL=1"}, "could not download the images"},
+		{"newest release not found", []string{"STUB_RELEASE_FAIL=1"}, "Couldn't find the newest DBTrail release"},
+		{"newest release unreadable", []string{"STUB_RELEASE_BODY=<html>sign in</html>"}, "did not name a release"},
+		{"tag with a v", []string{"BINTRAIL_TAG=v0.128.0"}, "tagged without it"},
+		{"a branch for DBTRAIL_REF", []string{"DBTRAIL_REF=main"}, "is not a release"},
 		{"re-run over an existing stack", []string{"DBTRAIL_DIR=" + existing, "DBTRAIL_PORT=8095", "DBTRAIL_METRICS_PORT=9095"}, "ignored"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
