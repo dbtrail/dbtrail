@@ -358,6 +358,7 @@ was published and runs the same code.
 ### Fixed
 - **A snapshot whose upload to S3 did not finish is sent again (#2563).** A complete local snapshot that the S3 destination does not have complete (an update's or a full read's upload that was cut short) used to wait for the next full read to be sent again; with full reads off it stayed on the machine for good. Each cleanup now sends such snapshots again, up to three per folder at a time, and deletes them locally once S3 has them; an older build's snapshot with no `_SUCCESS` marker is not tried, and a folder used with two different destinations sends nothing (with a warning). The Snapshots settings card names them ("Not in S3 yet, so kept here: the copy of 2026-10-19 03:15:06 UTC ... DBTrail sends it again at the next cleanup", or, where nothing here resends, to send or remove them by hand) instead of "The log says why", and is updated right after the resends.
 
+
 ## [0.118.0] - 2026-10-25
 ### Added
 - **The web interface says how far behind your MySQL the last SQL answer was (#2556).** The router card and the Snapshots card ("How current SQL answers are") say it in one sentence per server, "The last query read data 0 seconds behind your MySQL", from the router's `behind_source_seconds`; on the router card it replaces the lag and max lag, which read an hour behind on a source that was only quiet. A router older than this release keeps today's words. On a quiet server whose source just told capture it had nothing more to send, the Overview's "Your MySQL" box and the Status page's coverage card say "up to date", as they do when the source is asked, instead of "DBTrail cannot tell which"; while recent changes are being indexed the stamp is not used, so it cannot hide a backlog. The coverage document carries `caught_up_ago_seconds`.
@@ -398,6 +399,7 @@ was published and runs the same code.
   - **Also on such a server.** The `events` view drops the hidden tables' changes and removes hidden columns from the row images. Statements that read the copy's files directly are refused. Time travel on the MySQL port (`_flashback`, `_snapshot`, `_diff`) is off.
   - **What it does not cover.** Only those three places hide. The index and the copy's files keep everything, and so do the downloads, including the views files. The rest of the web interface (change history, recovery, reconstruct, flashback, schema changes) and the AI connector's other tools follow the access profiles and return full rows. What Engine Routing forwards to MySQL runs under the forwarding account's grants; the same panel lists what those grants can still read.
   - **Downgrading.** Versions before 0.116.0 ignore the rules and hide nothing. 0.116.0 hides as described, without the panel, `hidden_from_sql` or the grants check.
+
 
 ## [0.116.0] - 2026-10-24
 
@@ -496,6 +498,7 @@ was published and runs the same code.
   - When a newer snapshot arrives, the overlay a table already has is trimmed in memory to what the snapshot does not hold, instead of being rebuilt (#2485).
   - The rebuilds still needed (a new table, an overlay that grew past its budget, a snapshot it cannot be trimmed to) run in the background, with retries. No statement waits for them (#2486). Until a rebuild is ready, a statement reads that table as of its snapshot, or keeps the previous overlay where that is still exact.
 - **The GROUP BY key rewrite from 0.111.0 is removed** (#2488). It was faster on a synthetic copy. On real copies, the per-group check that keeps it safe made the statement it targets 16–22% slower than running it as written, so the 2.21 s → 1.29 s figure in the 0.111.0 notes does not hold.
+
 
 ## [0.111.0] - 2026-10-20
 ### Changed
@@ -1096,6 +1099,7 @@ the CI one had. The demo image `0.108.0` was published and runs the same code.
   blank, and the first-run Connect screen, show the global grant as before:
   such a server captures every schema. An account created with the earlier
   block keeps working; nothing checks or changes its grants.
+
 
 ## [0.103.1] - 2026-10-10
 
@@ -3702,6 +3706,7 @@ differently because of them.
   the cleartext connection has actually been made; a retry that fails no
   longer logs that it is reading without encryption.
 
+
 ## [0.94.0] - 2026-10-01
 ### Fixed
 - **Sources that only accept encrypted connections can be added from the
@@ -5296,6 +5301,7 @@ differently because of them.
   unreadable version runs the preflight, and the `--lock-mode` refusal says
   which of the two it is about.
 
+
 ## [0.82.0] - 2026-09-15
 
 ### Added
@@ -5885,6 +5891,7 @@ differently because of them.
   machine dbtrail runs on. A scheduled backup on a server that has a Backup S3
   reuses nothing and writes every table. The card says which, and the daemon
   log has been saying so on every published run.
+
 
 ## [0.75.0] - 2026-09-01
 ### Fixed
@@ -8474,6 +8481,8 @@ what was lost.
 
 ### Added
 - **UI-managed MCP access token — generate, rotate, and revoke from Settings → Connect AI** (#1053, closes #1052): a fresh install now needs zero out-of-UI configuration to connect an AI client. The Connect AI page grows an **Access token** card: **Generate** mints a cryptographically random `bmt_`-prefixed token from an authenticated browser session and shows the plaintext exactly once (it is never stored — only its SHA-256 is persisted, in `~/.config/bintrail/console-mcp-token.yaml`, `0600`, atomic write, versioned envelope with the registry's read-only-if-newer contract); **Rotate**/**Revoke** apply immediately, with no restart, including to sibling console processes sharing the file (every check re-reads it, so a revoke that reports success actually revokes everywhere). The managed token is **scoped to `/mcp` alone** — it authenticates the read-only MCP tools and nothing else (not the browser API, not server registry CRUD, not its own rotation), so handing it to an AI client grants exactly what the UI says it grants. `--token` / `BINTRAIL_CONSOLE_TOKEN` keep working unchanged and are reported as environment-owned; the flashback MySQL-protocol port still requires the static token (a hash-only store cannot drive `mysql_native_password`). New `GET/POST/DELETE /api/mcp-token` endpoints (values never serialized; the plaintext appears only in the generate response). A corrupt or newer-version token file never blocks daemon startup — the managed token degrades with a loud log and the Generate button self-heals malformed files, while unreadable ones are refused rather than destroyed.
+
+
 
 ### Added
 - **Privacy policy** (#1048): `PRIVACY.md` documents the Claude Desktop extension's data handling — the bundle is a local bridge that connects only to the user-configured endpoint, the token lives in the OS credential store, and the project collects nothing (no telemetry). Linked from the README and declared in the `.mcpb` manifest (`privacy_policies`), as required for Claude Connectors Directory listing of local extensions. `.mcpb` release assets now cover macOS too (`dbtrail-darwin-{arm64,amd64}.mcpb`, built natively per release since v0.39.0's post-release assets).
