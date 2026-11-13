@@ -255,6 +255,7 @@ MySQL.
 - [ ] `go vet ./...` is clean
 - [ ] New behaviour is covered by tests
 - [ ] User-facing docs under `docs/` are updated if behaviour or flags changed
+- [ ] A user-facing change has its changelog entry in `docs/changelog.d/<PR or issue number>.md`, not in `docs/CHANGELOG.md` (see [docs/changelog.d](../docs/changelog.d/README.md))
 - [ ] Commit messages are clear and describe *why*, not just *what*
 - [ ] Every commit is signed off (`git commit -s`, see below)
 
