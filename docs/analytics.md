@@ -59,8 +59,8 @@ command line, the same fold is
 --baseline-refresh-interval` runs it from the daemon. See
 [Refreshing on a schedule](dump-and-baseline.md#refreshing-on-a-schedule).
 
-Some changes cannot be folded. A column added, dropped or retyped, or a
-`TRUNCATE`, `DROP` or `RENAME` in the window, refuses the table, and so does a
+Some changes cannot be folded. A column added, dropped, retyped or given another character set,
+or a `TRUNCATE`, `DROP` or `RENAME` in the window, refuses the table, and so does a
 capture gap. So does an `ALTER TABLE` that drops, truncates, exchanges or
 converts a partition, or discards or imports a tablespace: it changes rows
 without writing them to the binary log, and the columns stay the same

@@ -53,7 +53,7 @@ That is how DBTrail knows the snapshots cannot pile up: with a count, the local 
 | there is no snapshot to update | the first run of a server | nothing; it happens once |
 | you asked for one | the **Read database now** button, or **Read the whole database again every** on the schedule | leave the timetable empty unless you need it (see [foreign keys](#what-does-not-cause-a-full-read)) |
 | the previous snapshot could not be listed in S3 | the bucket answered with an error: permissions changed, credentials expired, the network. Only for a server whose snapshots go to S3; an unreadable local folder skips the run and says so | fix the access; the run's reason carries the bucket's error |
-| a table was recreated, renamed, truncated or changed shape | `ALTER TABLE` that adds, drops or retypes a column, `TRUNCATE`, `DROP`, `RENAME`, a partition dropped, truncated or exchanged. This is what an online schema change tool and a restore do: see [the next section](#operations-that-end-in-a-full-read) | plan for one full read after it |
+| a table was recreated, renamed, truncated or changed shape | `ALTER TABLE` that adds, drops or retypes a column or changes its character set, `TRUNCATE`, `DROP`, `RENAME`, a partition dropped, truncated or exchanged. This is what an online schema change tool and a restore do: see [the next section](#operations-that-end-in-a-full-read) | plan for one full read after it |
 | some changes were never recorded (a capture gap) | DBTrail was stopped longer than MySQL keeps its binary logs, so MySQL removed changes before they were read | keep binary logs longer than DBTrail could be down (`binlog_expire_logs_seconds`, or `binlog retention hours` on RDS). Stopping and starting the server in the web interface acknowledges the loss: that silences the alarm and does not make the update skip the gap. One full read after the gap does, and the updates after it are not refused for it |
 | the binary log started again from another numbering | `RESET MASTER` (`RESET BINARY LOGS AND GTIDS`), a failover to another server, a new `log_bin` name | nothing; one full read after it |
 | tables were created after the previous snapshot | a `CREATE TABLE`. An update leaves a new table out, since there is no earlier copy of it to update | nothing; one full read brings them in |
@@ -118,7 +118,7 @@ So it is not the number of rows that forces a full read. It is that the table wa
 
 - Expect one full read of the whole server at the next scheduled run after it. With the default lock mode it first waits for the source to have no long-running statement ([`ftwrl` waits for a quiet source first](snapshot-lock-measurements.md#ftwrl-waits-for-a-quiet-source-first)).
 - Group them. Two schema changes hours apart on the same day are one full read and then a copy that stays at that snapshot until the next day, because of the once-a-day rule; done together they are one full read and an up-to-date copy.
-- A plain `ALTER TABLE` that adds, drops or retypes a column has the same result as the tool: the update is refused and a full read follows.
+- A plain `ALTER TABLE` that adds, drops or retypes a column, or changes its character set (`CONVERT TO CHARACTER SET` too), has the same result as the tool: the update is refused and a full read follows.
 
 ## What does not cause a full read
 
