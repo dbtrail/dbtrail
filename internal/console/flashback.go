@@ -52,6 +52,9 @@ type FlashbackTarget struct {
 	// two fields above already name. BaselineBucket says it covers a bucket.
 	FindBaseline   func(ctx context.Context, schema, table string, at time.Time) (string, time.Time, reconstruct.StaleWarning, error)
 	BaselineBucket bool
+	// PinBaseline keeps the snapshot a `_snapshot` query reads from this
+	// process's cleanup of the folder until the query ends (#2691).
+	PinBaseline reconstruct.PinFunc
 	// NoArchive disables archive auto-discovery for this server.
 	NoArchive bool
 	// DefaultSchema is the source database name (from the registry SourceDSN),
@@ -365,6 +368,7 @@ func (s *Server) flashbackTargetFor(ctx context.Context, id string) (FlashbackTa
 		BaselineS3:      s3,
 		FindBaseline:    portFindBaseline(b.findBaseline, b.baselineSrc, b.baselineFallbackSrc),
 		BaselineBucket:  strings.HasPrefix(b.baselineFallbackSrc, "s3://"),
+		PinBaseline:     pinBaselineRead(s, id),
 		NoArchive:       b.noArchive,
 		DefaultSchema:   s.flashbackDefaultSchema(id),
 		SQL:             sqlOnCopy,

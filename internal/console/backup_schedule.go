@@ -124,6 +124,14 @@ type BackupSchedule struct {
 	// least Every. Not part of Identity: where the snapshots go does not
 	// move when they are made.
 	UploadEvery string `yaml:"upload_every,omitempty"`
+	// UploadEachUpdate records that an empty UploadEvery, each update, was
+	// in force beside an S3 destination when the destination was removed
+	// (#2675, rememberEachUpdate). Without a destination an empty interval
+	// is no choice, since there is nothing to send, so a destination added
+	// later starts the default interval (startUploadIntervalWithFirstDestination);
+	// this keeps each update for a server that had it. Only meaningful with
+	// UploadEvery empty: Normalized drops it otherwise.
+	UploadEachUpdate bool `yaml:"upload_each_update,omitempty"`
 	// Extra preserves future keys the way ServerEntry.Extra does.
 	Extra map[string]any `yaml:",inline"`
 }
@@ -237,7 +245,10 @@ func (b BackupSchedule) Normalized() (BackupSchedule, error) {
 		FullEvery:   strings.TrimSpace(b.FullEvery),
 		FullSince:   b.FullSince,
 		UploadEvery: strings.TrimSpace(b.UploadEvery),
-		Extra:       b.Extra,
+		// The record that each update was chosen (#2675) means nothing
+		// beside an interval.
+		UploadEachUpdate: b.UploadEachUpdate && strings.TrimSpace(b.UploadEvery) == "",
+		Extra:            b.Extra,
 	}, nil
 }
 

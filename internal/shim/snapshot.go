@@ -353,7 +353,11 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// Shim handling of the stale-fallback warning (#466) is intentionally
 	// minimal: FindBaseline already logs it server-side and an in-band MySQL
 	// signal needs design (deferred by #466), so we discard it here.
-	baselinePath, snapshotTime, _, err := h.findBaseline(ctx, q.Schema, q.Table, q.AsOf)
+	// Pinned until the result has been sent (#2691): a streamed result reads
+	// the snapshot's files as the client takes its rows.
+	baselinePath, snapshotTime, _, release, err := reconstruct.FindPinned(ctx, h.findBaseline, h.cfg.PinBaseline,
+		q.Schema, q.Table, q.AsOf, "a _snapshot query")
+	defer release()
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			// Source configured but no baseline exists for this table at-or-before
