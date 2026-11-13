@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **The MySQL port without Engine Routing answers `LIMIT offset, count`** (part of #2628). It used to refuse `LIMIT 10, 5` and ask for `LIMIT 5 OFFSET 10`; it now writes it that way for the copy itself, so deep pagination from an ORM or a BI tool (`LIMIT ?, ?` from SQLAlchemy too) runs as written. The rows are the ones MySQL returns, checked against MySQL 8.0.46 for an offset of 0, an offset past the last row, a count of 0, leading zeros, and a `LIMIT` in a subquery, a CTE and either side of a `UNION`. A form it cannot write with certainty is still refused with how to write it: a number past 9223372036854775807, a comment between the two numbers, or a prepared argument that is not a whole number; a DOUBLE or DECIMAL argument to a prepared `LIMIT ?` gets MySQL's own error 1210, as on MySQL. And a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery is now refused on that port, as MySQL refuses it (error 1235); the copy used to answer it. Engine Routing is unchanged.
+- **`bintrail export iceberg` compacts its own tables** (#2719). Every
+  run adds one delete file per table it changed, and DuckDB and ClickHouse
+  pay for each one on every read without being able to compact the table
+  themselves, so reads got slower run after run. Now, once a table holds
+  `--compact-after` delete files (default 10), the run rewrites the table's
+  live rows into new data files and drops every delete file, in one Iceberg
+  commit of type `replace` that changes neither the rows nor the cursor.
+  On a 100,000-row table changed every run, a DuckDB 1.5.6 read took 9.1 s
+  after 30 runs without it, and at most 3.1 s with the default (about 0.01 s
+  right after each compaction); a million-row table compacts in about 1.5 s.
+  Each compaction still leaves two small manifests that later commits keep
+  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A
+  compaction that does not finish, or that another writer's commit overtakes,
+  is not applied and is retried by the next run; the table's verdict stays
+  what its delta made it. `--compact-after 0` turns it off. The
+  JSON report carries a `compaction` object per compacted table, and the audit
+  trail records the commit as `commit: compact`.
 - **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
   snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
   each duplicate and deletes the others, and the deletes are not written to
