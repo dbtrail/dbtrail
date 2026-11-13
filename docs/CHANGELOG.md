@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The compose `baseline` profile works on sources with
+  `explain_format=TREE`** (#2733). Its mydumper step runs from mydumper's own
+  image, with no MySQL client to ask the source first, so the #2211 fix did
+  not reach it and mydumper still crashed with a segmentation fault (exit
+  139) on MySQL 9.x with `TREE` or `JSON`. Step `baseline-quiet` (`bintrail
+  dump wait-quiet`) now reads the source's `explain_format` in every lock
+  mode and, when the variable exists, writes
+  `[mydumper_session_variables] explain_format = TRADITIONAL` to
+  `/dump/mydumper-session.cnf`; the dump step passes it with
+  `--defaults-extra-file` and removes it when it ends, so a MariaDB run after
+  a MySQL 9.x run does not inherit it. Sources without the variable (MariaDB,
+  MySQL before 8.0.32) get no file. A leftover file that cannot be removed,
+  or a file that cannot be written for a `TREE`/`JSON` source, stops the run
+  with the cause. `baseline-quiet` now runs as root and mounts the
+  `bintrail-dump` volume, whose root uid 999 cannot write. A 139 exit
+  without the file prints what to check. The mydumper image stays at
+  1.0.3-1, the build every other path ships.
+
 - **Full reads work on sources with `explain_format=TREE`** (#2211). On a
   MySQL 9.x source whose `explain_format` is `TREE` (the default on Percona
   Server 9.7) or `JSON`, mydumper crashed with a segmentation fault within
