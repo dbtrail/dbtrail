@@ -426,7 +426,7 @@ func captureGapLines(in mergeInput) string {
 // re-dump is the only correct answer, so the message says so instead of
 // offering a flag.
 //
-// Column TYPES (#1651) and NULL-ness (#1665) are compared against typesTM, not tm, and only when the
+// Column TYPES (#1651), character sets (#2723) and NULL-ness (#1665) are compared against typesTM, not tm, and only when the
 // caller has one: the schema snapshot in effect at the fold's target instant,
 // and only when that snapshot was taken after the baseline. An older snapshot
 // says nothing about the baseline's types (the baseline's own CREATE TABLE,
@@ -467,12 +467,13 @@ func checkBaselineSchema(createSQL string, tm, typesTM *metadata.TableMeta, sche
 	// retyped is in typesTM's ordinal order, which is already stable.
 	var retyped []string
 	if typesTM != nil {
+		charsets := baseline.ColumnCharsets(createSQL, cols)
 		for _, c := range typesTM.Columns {
 			if c.IsGenerated {
 				continue
 			}
 			if b, ok := inBaseline[strings.ToLower(c.Name)]; ok {
-				if change, changed := columnDefinitionChanged(b, c); changed {
+				if change, changed := columnDefinitionChanged(b, charsets[b.Name], c); changed {
 					retyped = append(retyped, fmt.Sprintf("%s (%s)", c.Name, change))
 				}
 			}
@@ -548,14 +549,18 @@ func columnTypeChanged(declared string, c metadata.ColumnMeta) (was, now string,
 }
 
 // columnDefinitionChanged is one column's entry in the type-change refusal:
-// its declared type (columnTypeChanged) and whether it allows NULL
-// (columnNullabilityChanged, #1665), as "was -> now". When only the NULL-ness
-// moved, the type is shown unchanged on both sides as each side spells it, or
-// left out when the snapshot carries no type.
-func columnDefinitionChanged(b baseline.Column, c metadata.ColumnMeta) (string, bool) {
+// its declared type (columnTypeChanged), its character set
+// (columnCharsetChanged, #2723) and whether it allows NULL
+// (columnNullabilityChanged, #1665), as "was -> now". When only the character
+// set or the NULL-ness moved, the type is shown unchanged on both sides as each
+// side spells it, or left out when the snapshot carries no type. charset is
+// the column's character set as the baseline's CREATE TABLE resolves it
+// (baseline.ColumnCharsets), "" when it does not.
+func columnDefinitionChanged(b baseline.Column, charset string, c metadata.ColumnMeta) (string, bool) {
 	was, now, typeChanged := columnTypeChanged(b.DeclaredType, c)
+	csWas, csNow, csChanged := columnCharsetChanged(charset, c)
 	nullWas, nullNow, nullChanged := columnNullabilityChanged(b.NotNull, c)
-	if !typeChanged && !nullChanged {
+	if !typeChanged && !csChanged && !nullChanged {
 		return "", false
 	}
 	if !typeChanged {
@@ -564,10 +569,39 @@ func columnDefinitionChanged(b baseline.Column, c metadata.ColumnMeta) (string, 
 			was = ""
 		}
 	}
+	if csChanged {
+		was, now = strings.TrimSpace(was+" CHARACTER SET "+csWas), strings.TrimSpace(now+" CHARACTER SET "+csNow)
+	}
 	if nullChanged {
 		was, now = strings.TrimSpace(was+" "+nullWas), strings.TrimSpace(now+" "+nullNow)
 	}
 	return was + " -> " + now, true
+}
+
+// columnCharsetChanged reports whether a text column's character set in the
+// schema snapshot is no longer the one its baseline's CREATE TABLE gives it
+// (#2723). Two things go wrong when a refresh carries that CREATE TABLE across
+// such a change. An ALTER that narrowed the character set where the server
+// does not refuse it (MariaDB's ALTER IGNORE, a non-strict sql_mode, CONVERT
+// TO) replaced the characters the new one cannot hold with '?' and wrote no
+// row event, so the copy keeps values the source no longer has. One that
+// widened it (latin1 to utf8mb4) kept every value, and the carried CREATE TABLE
+// still declares the old character set, so a restore from it creates a column
+// that cannot hold, or changes, what was written after the change.
+//
+// Both sides are read as baseline.ComparableCharset spells them, so utf8 and
+// utf8mb3 are one. Nothing is compared when either side does not know: a
+// baseline whose CREATE TABLE names no character set for the column or its
+// table (one no server printed), and a snapshot with no CHARACTER_SET_NAME, as
+// every non-text column, a PostgreSQL snapshot and a snapshot written before
+// #756 have. A collation change within the same character set is not seen,
+// because a schema snapshot does not record collations (#2083).
+func columnCharsetChanged(charset string, c metadata.ColumnMeta) (was, now string, changed bool) {
+	now = baseline.ComparableCharset(c.CharacterSet)
+	if charset == "" || now == "" {
+		return "", "", false
+	}
+	return charset, now, charset != now
 }
 
 // columnNullabilityChanged reports whether a column's IS_NULLABLE in the
