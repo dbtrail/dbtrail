@@ -370,7 +370,7 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
 				dto.NotInS3Error = err.Error()
 			} else if ok {
-				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending, NotAsked: rec.NotAsked, ReadRefused: rec.ReadRefused, WaitsForAnswer: rec.WaitsForAnswer}
+				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending, NotAsked: rec.NotAsked, ReadRefused: rec.ReadRefused, WaitsForAnswer: rec.WaitsForAnswer, NotAskedCount: rec.NotAskedCount, ReadRefusedCount: rec.ReadRefusedCount, NeedsListBucket: rec.NeedsListBucket}
 				if rec.NextSend != nil {
 					dto.NotInS3.NextSend = rec.NextSend.UTC().Format(time.RFC3339)
 				}
@@ -752,4 +752,12 @@ type notInS3DTO struct {
 	// sends, not a failure.
 	ReadRefused    []string `json:"read_refused,omitempty"`
 	WaitsForAnswer bool     `json:"waits_for_answer,omitempty"`
+	// NotAskedCount, ReadRefusedCount: how many those two lists name in all;
+	// the lists are cut like Names (#2701). Absent: the lists are whole.
+	NotAskedCount    int `json:"not_asked_count,omitempty"`
+	ReadRefusedCount int `json:"read_refused_count,omitempty"`
+	// NeedsListBucket: the last send was refused because S3 would not say
+	// whether its cleanup is removing the folder, which needs s3:ListBucket
+	// while "Delete from S3 after" is set (#2701).
+	NeedsListBucket bool `json:"needs_list_bucket,omitempty"`
 }

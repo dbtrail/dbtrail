@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The cleanup's re-sends under partial S3 permissions** (#2701).
+  - The last restore's result, in a bucket that takes uploads and refuses to
+    read them back, was sent again at every round (an hour apart), because
+    its own rule never read the record of snapshots sent again. It is now
+    sent once; after S3 takes it and refuses to read it, it is listed as
+    refused to read and not sent again, and the failure record says "1
+    snapshot was sent again, and S3 took it but refuses to read it back
+    (s3:GetObject), so it is kept here and not sent again." An answer from S3
+    about it clears its mark.
+  - With **Delete from S3 after** set and no `s3:ListBucket`, a re-send asks
+    whether the S3 cleanup is removing the snapshot's folder and is refused.
+    It still does not send: a folder an earlier S3 cleanup marked and did not
+    finish is finished by a later one whatever its age, so a copy sent there
+    could be removed after the local copy went on the strength of it. The
+    Snapshots page now says why instead of "sending failed": "DBTrail does
+    not send them: S3 will not say whether its own cleanup is removing their
+    folder, which with Delete from S3 after set needs s3:ListBucket on this
+    prefix. Add that permission, or clear Delete from S3 after; DBTrail asks
+    again after ...".
+  - Credentials S3 refuses altogether right after a re-send it took read as
+    "S3 accepts uploads to this prefix but refuses to read them back
+    (s3:GetObject)". The cleanup now asks about a key no snapshot has: a
+    destination that only refuses reads answers "not here" for it, refused
+    credentials refuse it too, and the cleanup then says "S3 refused every
+    question about these snapshots (access denied) ... Check that the
+    credentials are valid and that they may read this S3 prefix.", removes
+    nothing, sends nothing and keeps the marks until S3 answers. Without
+    `s3:ListBucket` the two cannot be told apart and read as credentials.
+  - The record of what S3 lacks cut its list of names to five and kept the
+    "could not be asked" and "refused to read" lists whole, so with many
+    snapshots the page's mixed sentence counted wrong. All three are cut
+    to five now, with their counts kept, and the page counts with those
+    ("... could not be asked about the copies of A, B and 7 more").
+
 - **Engine Routing keeps `LEFT` and `RIGHT` with a negative length on MySQL** (#2652). `LEFT('abc', -1)` is `''` on MySQL and `'ab'` on the copy, and `RIGHT('abc', -1)` is `''` and `'bc'`, with no error on either side. `LEFT` and `RIGHT` now go to the copy only when the length is a whole number written in the statement; a length from a column, a placeholder or an expression goes to MySQL, since it may be negative on some row. A length of 0 or more, past the end of the text too, agrees on both and still goes to the copy.
 - **Engine Routing keeps a statement with a Unicode space outside its strings on MySQL** (#2652). MySQL reads a no-break space (U+00A0), an ideographic space (U+3000), a zero-width space (U+200B) and the other Unicode spaces the copy takes for white space as part of a name. Over a table with columns `a`, `b` and one named `a`, no-break space, `b`, writing that last name unquoted returned that column on MySQL and column `a` under the alias `b` on the copy: another value, with no error. Such a statement now runs on MySQL. Where the character made the statement an error on MySQL, for example a no-break space between `ROUND` and its parenthesis, the statement already went to MySQL, because MySQL could not explain it. Inside a string or a quoted name the character is the same text on both sides, with one exception that also goes to MySQL: the copy turns it into a plain space wherever it does not find a quote around it, and a quote inside a `/* */` comment or a `$` makes it find the quotes elsewhere, so `SELECT /* ' */ 'a b'` written with a no-break space was `'a b'` with a plain space on the copy. The plain port without Engine Routing is unchanged.
 - **The installer, `--help` and the first lines of the docs open with the

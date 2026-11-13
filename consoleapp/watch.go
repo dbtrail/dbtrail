@@ -1864,11 +1864,12 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	// is how often these were tried before.
 	round := resendRoundFor(t.dir)
 	if !round.begin() {
-		noteResending(t, res, nil, nil, round.waitsUntil(), round.waitIsForAnswer())
+		noteResending(t, res, nil, nil, round.waitsUntil(), round.waitIsForAnswer(), round.lastNeedsList())
 		return
 	}
 	defer round.end()
 	sent, skipped, tried, failed, unasked := map[string]bool{}, map[string]bool{}, 0, 0, 0
+	needsList := false
 	wasFailing := round.isFailing()
 	for _, name := range res.NotAtDestination {
 		if ctx.Err() != nil || tried >= resendPerCycle {
@@ -1900,6 +1901,9 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 		if slices.Contains(res.NotAsked, name) {
 			unasked++
 		}
+		if errors.Is(err, errResendNeedsList) {
+			needsList = true
+		}
 		if err != nil {
 			failed++
 			// Said once when the sending starts to fail, not at every
@@ -1930,7 +1934,10 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 		// failed send: at most one such send per snapshot an hour.
 		round.holdForAnswer()
 	}
-	noteResending(t, res, sent, skipped, round.waitsUntil(), round.waitIsForAnswer())
+	if tried > 0 {
+		round.setNeedsList(needsList)
+	}
+	noteResending(t, res, sent, skipped, round.waitsUntil(), round.waitIsForAnswer(), round.lastNeedsList())
 }
 
 // waitsUntil is when the next round may start, or the zero time when
@@ -1961,6 +1968,9 @@ type resendRound struct {
 	// forAnswer: the wait is after sending snapshots S3 could not be asked
 	// about (#2696), not after a failure.
 	forAnswer bool
+	// needsList: the last round that sent anything had a send refused for
+	// s3:ListBucket (errResendNeedsList, #2701), for the page.
+	needsList bool
 }
 
 var (
@@ -2045,7 +2055,7 @@ func (r *resendRound) waitIsForAnswer() bool {
 // noteResending rewrites the folder's record of snapshots the destination
 // lacks after a round (sent and skipped are what it did), or with nothing
 // done when the round did not start: they are still going to be sent.
-func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time, forAnswer bool) {
+func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time, forAnswer, needsList bool) {
 	if res.DestinationSilent {
 		// The destination failed to answer for some snapshots in this pass
 		// (#2658), so how many it lacks is not known: the prune left the
@@ -2060,7 +2070,7 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 			left = append(left, name)
 		}
 	}
-	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
+	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true, NeedsListBucket: needsList}
 	for _, name := range left {
 		if slices.Contains(res.NotAsked, name) {
 			rec.NotAsked = append(rec.NotAsked, name)
@@ -2899,4 +2909,19 @@ func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
 		sup.sqlChainLine.Store(&line)
 		sup.sqlChainLimit.Store(&limit)
 	}
+}
+
+// setNeedsList records whether the round that just ended had a send refused
+// for s3:ListBucket (#2701).
+func (r *resendRound) setNeedsList(v bool) {
+	r.mu.Lock()
+	r.needsList = v
+	r.mu.Unlock()
+}
+
+// lastNeedsList is that, for the record the page reads.
+func (r *resendRound) lastNeedsList() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.needsList
 }

@@ -111,6 +111,12 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("s3CountedReadRefusedOne", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, not_asked: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], read_refused: ["2026-11-10T03-05-00Z"] } }), null);
   await step("s3CountedWaitsForAnswer", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 1, names: ["2026-11-10T03-00-00Z"], resending: true, not_asked: ["2026-11-10T03-00-00Z"], next_send: "2026-11-11T04:00:00Z", waits_for_answer: true } }), null);
   await step("s3CountedSomeUnasked", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, not_asked: ["2026-11-10T03-05-00Z"] } }), null);
+  // #2701: a record whose lists were cut, with the counts kept: 15 copies,
+  // 12 not asked about (3 of them refused to read), five names each.
+  await step("s3CountedCutLists", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 15, names: ["2026-11-01T00-00-00Z", "2026-11-02T00-00-00Z", "2026-11-03T00-00-00Z", "2026-11-04T00-00-00Z", "2026-11-05T00-00-00Z"], resending: true, not_asked: ["2026-11-04T00-00-00Z", "2026-11-05T00-00-00Z", "2026-11-15T00-00-00Z", "2026-11-14T00-00-00Z", "2026-11-13T00-00-00Z"], not_asked_count: 12, read_refused: ["2026-11-15T00-00-00Z", "2026-11-14T00-00-00Z", "2026-11-04T00-00-00Z"], read_refused_count: 3 } }), null);
+  // #2701: a send refused because S3 will not say whether its cleanup is
+  // removing the folder (no s3:ListBucket with Delete from S3 after set).
+  await step("s3CountedNeedsList", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z", needs_list_bucket: true } }), null);
   await step("s3CountedWaits", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z" } }), null);
   await step("s3CountedNoLoop", Object.assign({}, s3c, { prune_loop: false, keep_in_force: 0 }), null);
   await step("s3CountedBlocked", Object.assign({}, s3c, { keep_blocked: true, keep_in_force: 0 }), null);
@@ -288,6 +294,16 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		if w := joined(got[name].Before); !strings.Contains(w, want) {
 			t.Errorf("%s: %q does not say %q", name, w, want)
 		}
+	}
+	for _, name := range []string{"s3CountedCutLists", "s3CountedNeedsList"} {
+		t.Logf("%s (at rest):\n  %s", name, strings.Join(got[name].Before.Words, "\n  "))
+	}
+	if w := joined(got["s3CountedCutLists"].Before); !strings.Contains(w, "Kept here: 12 older copies") || !strings.Contains(w, "could not be asked about the copies of 2026-11-05 00:00:00 UTC, 2026-11-13 00:00:00 UTC and 7 more") ||
+		!strings.Contains(w, "Not sent again: the copies of 2026-11-15 00:00:00 UTC, 2026-11-14 00:00:00 UTC, 2026-11-04 00:00:00 UTC, which S3 took") || strings.Contains(w, "S3 does not have the copy of 2026-11-05") {
+		t.Errorf("a record with cut lists: %q", w)
+	}
+	if w := joined(got["s3CountedNeedsList"].Before); !strings.Contains(w, "s3:ListBucket") || !strings.Contains(w, "Add that permission, or clear Delete from S3 after; DBTrail asks again after 2026-11-11 04:00:00 UTC.") || strings.Contains(w, "sending failed") {
+		t.Errorf("a send refused for s3:ListBucket: %q", w)
 	}
 	// A copy S3 could not be asked about is never said to be missing (#2689).
 	for _, name := range []string{"s3CountedUnasked", "s3CountedUnaskedTwo", "s3CountedSomeUnasked", "s3CountedReadRefusedAll", "s3CountedReadRefusedOne", "s3CountedWaitsForAnswer"} {

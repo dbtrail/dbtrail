@@ -174,6 +174,9 @@ type PruneResult struct {
 	// listed, and not sent again: sending would succeed and change nothing,
 	// at every cleanup, for ever.
 	ReadRefused []string
+	// restoredReadRefused: the last restore's result is among ReadRefused
+	// (#2701). It was asked on its own rule, so it is not among Denied.
+	restoredReadRefused bool
 	// DestinationWriteOnly reports that every refused question was about such
 	// a snapshot and that S3 confirmed none, the check of the newest included
 	// (#2696): a destination that accepts uploads and refuses every read.
@@ -454,7 +457,11 @@ func pruneFailureReason(res PruneResult, err error) string {
 	if res.DestinationDenied {
 		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they may read this S3 prefix.")
 	}
-	if n := res.Denied - len(res.ReadRefused); n > 0 {
+	deniedRead := len(res.ReadRefused)
+	if res.restoredReadRefused {
+		deniedRead-- // not among Denied
+	}
+	if n := res.Denied - deniedRead; n > 0 {
 		itIs, it := "it is", "it"
 		if n > 1 {
 			itIs, it = "they are", "them"
@@ -613,6 +620,26 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// kept. With a destination it is asked about like a snapshot that could
 	// go, so one whose upload failed is listed as missing there and sent
 	// again (resendLacking) instead of staying on this disk alone for good.
+	// refusesAllNow asks S3, once per cleanup, about a key no snapshot has
+	// (absentSnapshot, #2701): all reports that S3 refused that too, which
+	// is credentials it refuses, not a destination that only refuses reads;
+	// failed reports a failure that is not a refusal.
+	var refusesAllAsked, refusesAllAnswer, refusesAllFailed bool
+	refusesAllNow := func() (all, failed bool) {
+		if !refusesAllAsked {
+			refusesAllAsked = true
+			_, err := probe(ctx, absentSnapshot)
+			switch {
+			case err == nil:
+			case storage.IsAccessDenied(err):
+				refusesAllAnswer = true
+			default:
+				slog.Warn("baseline prune: could not ask S3 about a key no snapshot has, to tell refused credentials from refused reads", "error", err)
+				refusesAllFailed = true
+			}
+		}
+		return refusesAllAnswer, refusesAllFailed
+	}
 	restoredKept := func(res PruneResult, probeErrors *int) PruneResult {
 		if restoredSnap == nil {
 			return res
@@ -632,7 +659,32 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			return res
 		}
 		ok, perr := probe(ctx, restoredSnap.name)
+		_, resent := resentMarks(opts.LocalDir)[restoredSnap.name]
+		if perr == nil && resent && !opts.DryRun {
+			// S3 answered about it: the mark's evidence is spent (#2701).
+			forgetResent(opts.LocalDir, restoredSnap.name)
+		}
+		refusedRead := perr != nil && resent && storage.IsAccessDenied(perr)
+		if refusedRead {
+			// Not when S3 refuses everything, a key no snapshot has
+			// included: then it is the credentials, not the read (#2701).
+			all, failed := refusesAllNow()
+			refusedRead = !all && !failed
+		}
 		switch {
+		case refusedRead:
+			// Sent again by the cleanup, taken by S3, and refused since
+			// (#2701, as #2696 for the others): S3 takes uploads here and
+			// refuses to read them, so sending it again changes nothing.
+			// Kept, listed as refused to read, and not sent again.
+			slog.Warn("baseline prune: S3 took the last restore's snapshot when it was sent again and refuses to read it back; it is kept, and not sent again",
+				"snapshot", restoredSnap.name, "error", perr)
+			res.KeptNotDurable++
+			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
+			res.NotAsked = append(res.NotAsked, restoredSnap.name)
+			res.ReadRefused = append(res.ReadRefused, restoredSnap.name)
+			res.restoredReadRefused = true
+			res.RestoredUnasked = restoredSnap.name
 		case perr != nil:
 			// NOT counted in probeErrors. This snapshot is never removed, so
 			// the answer about it decides no removal; counted, one failed
@@ -773,8 +825,21 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		case probeErrors > 0:
 		case len(readRefused) == len(denied) && !confirmed:
 			answers, ok, failed := bucketAnswers(ctx, snaps, held, asked, probe, now)
-			perObject = !failed
-			writeOnly = !failed && !(answers && ok)
+			if !failed && !answers {
+				// The newest were refused too, which a destination with no
+				// s3:GetObject does to the snapshots it holds (#2701). Told
+				// apart by a key no snapshot has: S3 answers "not here" when
+				// only reads are refused, and refuses that too when the
+				// credentials are refused (expired, revoked).
+				switch all, f := refusesAllNow(); {
+				case f:
+					failed = true
+				case all:
+					deniedAll = true
+				}
+			}
+			perObject = !failed && !deniedAll
+			writeOnly = perObject && !(answers && ok)
 		case answered:
 			perObject = true
 		default:
@@ -1475,3 +1540,10 @@ func hasSuccessMarker(snapDir string) bool {
 	_, err := os.Stat(filepath.Join(snapDir, SuccessMarker))
 	return err == nil
 }
+
+// absentSnapshot is a snapshot name no snapshot has: the epoch, which no run
+// is named for. The cleanup asks S3 about it to tell a destination that
+// refuses reads (it answers "not here" for a missing key, given
+// s3:ListBucket) from credentials S3 refuses (it refuses that question too,
+// #2701).
+const absentSnapshot = "1970-01-01T00-00-00Z"
