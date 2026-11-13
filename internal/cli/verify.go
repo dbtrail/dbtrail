@@ -225,7 +225,10 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 // (verify.FindBaselinePairWith). It reads no live source. baselineOther is a
 // second location holding the same snapshots for longer ("" for none).
 func runVerifyBaselinePair(cmd *cobra.Command, indexDB *sql.DB, resolver *metadata.Resolver, indexDBName, baselineSrc, baselineOther string, duckTuning duckdbutil.Tuning, flavor string) error {
-	pairs, prevOnly, err := verify.FindBaselinePairWith(cmd.Context(), baselineSrc, baselineOther)
+	// Every local snapshot of the pairs is held against the daemon's cleanup
+	// until the run ends (#2675): this command is a process of its own.
+	pairs, prevOnly, releasePairs, err := verify.FindBaselinePairHeld(cmd.Context(), baselineSrc, baselineOther)
+	defer releasePairs()
 	if errors.Is(err, reconstruct.ErrUnreadableSnapshot) {
 		return emitUnreadablePairReport(cmd, resolver, baselineSrc, err)
 	}

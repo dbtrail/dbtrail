@@ -86,7 +86,9 @@ does not ask for an address: its ready-to-copy `mysql` line carries the one
 the router says it listens on. When the router cannot be asked, the line
 carries the usual port, 3309, and the panel says it is not a confirmed one.
 The Docker Compose stack publishes the port on the host loopback as 3309:
-connect from that machine, or through a tunnel from another one.
+connect from that machine, or through a tunnel from another one. For clients
+on other machines that verify the port's certificate, see
+[TLS on the port](#tls-on-the-port).
 
 **Engine Routing.** The same panel has its switch (**Turn routing on**, **Turn
 routing off**), and shows who answered for the server picked in the sidebar:
@@ -1316,6 +1318,20 @@ What this is and is not:
   position but `-1` goes to MySQL, since how long the text is depends on the
   row, and so does a position from a column or a placeholder; the copy has
   no `MID`, so MySQL answers that one anyway),
+  `LEFT` and `RIGHT` unless the length is a whole number written in the
+  statement (a negative length is `''` on MySQL and cuts from the other end
+  on the copy: `LEFT('abc', -1)` is `'ab'` there and `RIGHT('abc', -1)` is
+  `'bc'`; a length from a column or a placeholder goes to MySQL, since it may
+  be negative on some row),
+  a space character outside ASCII outside the statement's strings, quoted
+  names and comments (a no-break space, an ideographic space, a zero-width
+  space and the other Unicode spaces the copy reads as white space: MySQL
+  reads them as part of a name, so over a column whose name holds a no-break
+  space between `a` and `b`, writing that name unquoted reads the column on
+  MySQL and column `a` under the alias `b` on the copy; the same character
+  anywhere in a statement goes to MySQL too when a `/* */` comment holds a
+  quote or the statement holds a `$`, since the copy then may take a string's
+  character for one outside it and turn it into a plain space),
   a zero date (the copy holds `0000-00-00` as NULL: in a `DATE`, `DATETIME`
   or `TIMESTAMP` column declared `NOT NULL`, or whose default is the zero
   date, a NULL on the copy can only be one, and a statement that names such
@@ -2553,7 +2569,20 @@ error 1235, which names the construct and how to write it for the copy:
 | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `INTO OUTFILE` | drop the clause; the copy takes no locks and writes no files |
 | `MATCH ... AGAINST`, `BINARY x` | `ILIKE` or `regexp_matches`; compare the copy's way |
 | `0x10`, `0b101`, `x'41'`, `b'1'` | the number in decimal, `'\x41'::BLOB` |
-| `LIMIT 10, 5`, `_binary'x'`, `/*! ... */` | `LIMIT 5 OFFSET 10`, the string alone, the statement without the comment |
+| `_binary'x'`, `/*! ... */` | the string alone, the statement without the comment |
+| a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery (MySQL itself refuses it with error 1235) | the `LIMIT` in a derived table: `IN (SELECT a FROM (SELECT a FROM t LIMIT 2) AS d)` |
+
+`LIMIT offset, count` is written for the copy before it runs: `LIMIT 10, 5`
+is sent as `LIMIT 5 OFFSET 10`, the only spelling the copy reads, in the
+statement, in a subquery, in a CTE and on either side of a `UNION`, and in a
+prepared `LIMIT ?, ?` once its arguments are written in. The rows are the
+ones MySQL returns, offset 0 and an offset past the last row included
+(measured on MySQL 8.0.46). It is rewritten only when both are whole numbers
+of at most 9223372036854775807 with nothing but white space around the comma.
+Otherwise it is refused with error 1235 and the copy's spelling: a number
+past that (MySQL takes up to 18446744073709551615, the copy fails), a
+comment between the two, or a prepared argument that is not a whole number
+(MySQL reads a NULL offset as 0; this port does not guess it).
 
 Or turn on Engine Routing, and MySQL answers them. The list is of
 constructs only MySQL's SQL holds; it does not make the copy MySQL. Every
@@ -2700,6 +2729,8 @@ one environment file serves both processes.
 | `--route-cost-threshold` | `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD` | 10,000 | Under Engine Routing, a `SELECT` whose plan costs at least this goes to the copy. 0 turns the rule off |
 | `--route-scan-rows` | `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS` | 100,000 | Under Engine Routing, a `SELECT` whose plan scans a whole table of at least this many rows goes to the copy. 0 turns the rule off |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB | Memory each statement on the copy may use (at least 512MB) |
+| `--tls-cert` | `BINTRAIL_ROUTER_TLS_CERT` | none | Certificate file (PEM) the port offers to clients that ask for TLS. Requires `--tls-key`. See [TLS on the port](#tls-on-the-port) |
+| `--tls-key` | `BINTRAIL_ROUTER_TLS_KEY` | none | Its private key (PEM, not encrypted). Requires `--tls-cert` |
 | `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | 10,000 | Most rows one statement returns on a connection the copy answers alone; a larger result is refused with error 1104. Under Engine Routing it only keeps on MySQL a statement whose plan estimates more rows, when there is no room for a result file |
 
 The router refuses to start with both `--route-cost-threshold` and
@@ -2721,6 +2752,79 @@ default is used.
 Forwarding to a replica is not something the router does. To read from
 replicas, put ProxySQL in front of the source and point the server's source
 address at it.
+
+#### TLS on the port
+
+**What a client gets with nothing set.** The port offers TLS to every client
+that asks for it, with a certificate the router makes up when it starts. The
+`mysql` client asks by default (`--ssl-mode=PREFERRED`), so its rows travel
+encrypted, and `--ssl-mode=REQUIRED` connects too. What no client can do is
+verify that certificate: `--ssl-mode=VERIFY_CA` and `VERIFY_IDENTITY` are
+refused, so a client cannot tell the port from something in the middle that
+impersonates it.
+
+**A certificate of your own.** Start the router with a certificate and its
+key, both PEM files:
+
+```sh
+bintrail-console router --tls-cert /etc/bintrail/tls/port-cert.pem \
+  --tls-key /etc/bintrail/tls/port-key.pem
+```
+
+or with `BINTRAIL_ROUTER_TLS_CERT` and `BINTRAIL_ROUTER_TLS_KEY`. A client that
+trusts the CA that signed it then verifies it:
+
+```sh
+mysql -h db-copy.example.com -P 3309 -u prod -p \
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=/path/to/ca.pem
+```
+
+- **Both or neither.** One without the other, a file that does not exist or
+  cannot be read, a file that is not PEM, or a key that is not the
+  certificate's: the router refuses to start and says which setting and which
+  file. It never falls back to the made-up certificate in silence.
+- The certificate file may hold its chain after it (a `fullchain.pem`), and
+  one file holding both the certificate and the key can be given to both
+  settings. RSA and ECDSA keys both work. An encrypted key does not: the
+  router asks for no passphrase.
+- **The port offers TLS, it does not require it.** A client that asks for no
+  encryption (`--ssl-mode=DISABLED`) is answered in clear text, as before.
+  What keeps a client encrypted is its own setting: `--ssl-mode=REQUIRED` or
+  stricter, which also keeps something in the middle from talking it out of
+  TLS. The password itself is never sent in clear (`mysql_native_password`
+  sends a hash).
+- **Renewing.** The files are read when the router starts. After renewing
+  the certificate, restart the router (`systemctl restart bintrail-router`,
+  or `docker compose restart router`); capture is a process of its own and
+  does not stop. A certificate that has expired, or is not valid yet, is
+  served all the same, since clients that do not verify still connect, and
+  the router's startup lines and log say so in a `WARNING`.
+- The startup lines say which certificate the port offers, and until when it
+  is valid, or that none is set.
+- The key file must be readable by the user the router runs as: `bintrail`
+  in the packages, uid 999 in the image. Its content is never logged.
+
+**With Docker Compose**, mount the files into the `router` service and point
+the two variables at them, in a `docker-compose.override.yml` beside the
+stack's file:
+
+```yaml
+services:
+  router:
+    environment:
+      BINTRAIL_ROUTER_TLS_CERT: /etc/bintrail/tls/port-cert.pem
+      BINTRAIL_ROUTER_TLS_KEY: /etc/bintrail/tls/port-key.pem
+    volumes:
+      - ./tls:/etc/bintrail/tls:ro
+```
+
+then `docker compose up -d router`. The stack publishes the port on
+`127.0.0.1` only; to reach it from other machines, also change its `ports:`
+line, behind a firewall.
+
+`bintrail shim`, the single-source port behind ProxySQL, takes no certificate
+of its own: it listens on `127.0.0.1` for ProxySQL, and ProxySQL is where
+clients' TLS is set up.
 
 ### Upgrading from a version with the port inside `watch`
 
@@ -3242,11 +3346,11 @@ The DBTrail index retains the most recent hours via partition rotation; older da
 ## Limitations
 
 - **Single source MySQL per shim.** The current `bintrail shim` is one-tenant-per-instance. If you have multiple source MySQLs you want time-travel SQL against, run one shim per instance with separate listen ports and separate ProxySQL hostgroups.
-- **No TLS termination on the shim port.** `bintrail shim` accepts plain MySQL protocol on `127.0.0.1:3308` by default. If you need TLS between ProxySQL and the shim, terminate at ProxySQL or via an `stunnel` sidecar.
+- **No certificate of your own on the shim port.** `bintrail shim` listens on `127.0.0.1:3308` by default and offers TLS only with a certificate it makes up at start, which no client can verify. If you need verified TLS between ProxySQL and the shim, use an `stunnel` sidecar; for clients, set up TLS on ProxySQL's frontend. The router's port takes a certificate of its own: see [TLS on the port](#tls-on-the-port).
 - **`_snapshot` is baseline-aware; `_flashback` is binlog-only.** Start `bintrail shim` with `--baseline-dir <dir>` or `--baseline-s3 s3://bucket/prefix/` (the snapshots produced by `bintrail baseline`) to enable it. Both the **single-row** (`WHERE <pk> = <value>`) and **full-table** (no WHERE) `_snapshot` shapes then seed row state from the baseline at-or-before the AS OF instant and apply post-snapshot binlog events on top, so a row that existed at AS OF but was never touched within the retained binlog window still resolves, and full-table `_snapshot` returns the table's complete row state at AS OF (never-touched baseline rows, rows updated/inserted after the baseline, with rows deleted after it dropped). `_flashback` deliberately stays binlog-only (its full-table form returns only rows with binlog activity in the retained window), so the two schemas have distinct, observable semantics. With no baseline source configured, `_snapshot` degrades to the binlog-only `_flashback` behaviour (a `Debug` log notes the fallback). On the MySQL port of the web interface, a server with a local folder and an S3 destination is read folder first and bucket second: a moment older than the snapshots in the folder is answered from the bucket, by the process that serves the port (`bintrail-console router` in the compose stack, which needs the same S3 access as the daemon; if it cannot read the bucket the query fails with an error that names it). With a location configured and no snapshot of the table at or before the AS OF instant anywhere it reads (the instant is older than the oldest snapshot, or the table has no snapshot yet), both shapes refuse with error 1526 and do not answer from the recorded changes alone: a row that no recorded change touched would read as absent, and a table would come back partial. Until [#2678](https://github.com/dbtrail/dbtrail/issues/2678) the single-row shape answered from the changes alone in that case. The baseline match is supported for **integer, `YEAR`, `DECIMAL`/`NUMERIC`, string (`CHAR`/`VARCHAR`/`TEXT`/`ENUM`/`SET`), and `DATETIME`/`TIMESTAMP`/`DATE` PKs** (the shim pins the DuckDB session to UTC so temporal-PK matches resolve deterministically on any host timezone). **`FLOAT`/`DOUBLE`, `TIME`, `BIT`, `JSON`, and spatial PK types can't be matched against the baseline** (their round-trip between the stored key and the Parquet column is unverified, so the match is refused rather than risked), and neither can a table whose primary key can't be resolved from the indexed snapshot. **`BINARY`/`VARBINARY`/`BLOB` PKs are full-table only**: the full-table shape canonicalizes keys through the offline merge and handles them since [#1155](https://github.com/dbtrail/dbtrail/issues/1155), but the single-row shape has no width to pad a fixed `BINARY(n)` key to: that key is stored padded and captured stripped, so it keeps falling back to binlog-only for the whole family (a `Warn` notes it) rather than risk silently missing a row. Use `bintrail reconstruct --pk`, which reconciles both spellings, for a single binary-keyed row. The **single-row** shape still falls back to binlog-only in these cases (a `Warn` notes the unsupported PK type). The **full-table** shape does not: with a baseline source configured, it **refuses with `ER_NO_PARTITION_FOR_GIVEN_VALUE` (1526)** instead of silently returning a partial table (only rows with binlog activity in the window, indistinguishable from a complete one); the error message points at `_flashback` for a binlog-only view. Full-table `_snapshot` also refuses with the same code when **no baseline snapshot exists at-or-before the AS OF instant**: take a baseline covering that instant (`bintrail baseline`), or query `_flashback`. For tables keyed by an unsupported PK type, or to write the reconstructed table to mydumper-format files, use the offline `bintrail reconstruct` command (its full-table mode streams the window a page at a time and keeps a per-touched-row change map, warning past `--warn-event-threshold`; see [Memory Footprint](query-and-recovery.md#memory-footprint)). Full-table `_snapshot` with no `LIMIT` streams the reconstructed table row by row and is not row-capped; with a `LIMIT` it is buffered and bounded by the same row cap as `_flashback` (see the next limitation).
 - **Full-table `_flashback`, and any `LIMIT`ed full-table query, is buffered.** These paths buffer up to 100,000 rows per query and surface overflow as `ER_TOO_BIG_SELECT` (1104). Full-table `_snapshot` with no `LIMIT` streams instead and has no row cap ([#998](https://github.com/dbtrail/dbtrail/issues/998), see [Step 6](#step-6--run-a-time-travel-query)); without a baseline source it degrades to the binlog-only path and the cap applies. PK-filtered point-lookups are unaffected.
 - **`_snapshot` and `_flashback` take each row's latest change in binary log order.** That is commit order, not the time a change's statement started, so a row that two sessions changed at once (one waited on the other's row lock) comes back with the value the database holds ([#2156](https://github.com/dbtrail/dbtrail/issues/2156)). Where the index cannot show that order for some rows (see [query-and-recovery.md](query-and-recovery.md), "Most recent" is the order of the binary log), those rows are taken at their latest change by time and the result carries one warning: the client's "1 warning", and `SHOW WARNINGS` answers it with code 1105 and a text that starts with `order of changes unproven`. The single-row `_snapshot` read and both `_flashback` reads (one row or the whole table) take a row's changes in the same order, with the same warning where it cannot be shown. `AS OF` still selects changes by the time their statement started: a change that started before the instant and was committed after it is part of the answer, and with binary log order it is applied last. `_diff` lists a row's changes by statement time.
-- **`_snapshot` refuses across a TRUNCATE/DROP/RENAME.** `TRUNCATE TABLE`/`DROP TABLE`/`RENAME TABLE`, MariaDB's `CREATE OR REPLACE TABLE`, and an `ALTER TABLE` that drops, truncates or exchanges a partition ([#2632](https://github.com/dbtrail/dbtrail/issues/2632)) emit no row events, so a baseline merge spanning one of these statements would silently resurrect pre-DDL rows as if they still existed at AS OF. Both the single-row and full-table `_snapshot` paths check `schema_changes` for such a statement between the baseline snapshot and AS OF, by its time and by its binlog position (a statement indexed late carries a time from before the snapshot, [#1912](https://github.com/dbtrail/dbtrail/issues/1912)), and return `ER_UNKNOWN_ERROR` (1105) naming the DDL type and timestamp instead ([#764](https://github.com/dbtrail/dbtrail/issues/764)); re-baseline the table after the DDL to resume. `_flashback` is unaffected: it never reads a baseline.
+- **`_snapshot` refuses across a TRUNCATE/DROP/RENAME.** `TRUNCATE TABLE`/`DROP TABLE`/`RENAME TABLE`, MariaDB's `CREATE OR REPLACE TABLE`, an `ALTER TABLE` that drops, truncates or exchanges a partition ([#2632](https://github.com/dbtrail/dbtrail/issues/2632)), and MariaDB's `ALTER IGNORE TABLE` that adds a unique key or changes a column ([#2640](https://github.com/dbtrail/dbtrail/issues/2640)) emit no row events, so a baseline merge spanning one of these statements would silently resurrect pre-DDL rows as if they still existed at AS OF. Both the single-row and full-table `_snapshot` paths check `schema_changes` for such a statement between the baseline snapshot and AS OF, by its time and by its binlog position (a statement indexed late carries a time from before the snapshot, [#1912](https://github.com/dbtrail/dbtrail/issues/1912)), and return `ER_UNKNOWN_ERROR` (1105) naming the DDL type and timestamp instead ([#764](https://github.com/dbtrail/dbtrail/issues/764)); re-baseline the table after the DDL to resume. `_flashback` is unaffected: it never reads a baseline.
 - **`_snapshot` refuses when the source's binary log started again after the baseline.** Both `_snapshot` paths read the changes since the baseline from its binlog position. After a `RESET MASTER` (`RESET BINARY LOGS AND GTIDS`) or a failover to another server, every later change sorts before that position, so the answer would be the baseline's old rows. When the baseline records the newest change the index held (every snapshot written since [#2160](https://github.com/dbtrail/dbtrail/issues/2160)), the single-row and full-table paths run the same check as a snapshot update and return `ER_NO_PARTITION_FOR_GIVEN_VALUE` (1526), the code of the other unreadable-history refusals, with "the changes since the snapshot cannot be found by binlog position", "A new full snapshot is needed.", how to take one, and `_flashback` as the read that still answers (it reads by time) ([#2174](https://github.com/dbtrail/dbtrail/issues/2174)). The check asks one question of what the query reads: is there a change of this table, indexed after the baseline's mark, recorded between the earliest time the query reaches back to (an hour or more before the baseline) and AS OF, that sorts before the mark in the binary log? The query would drop such a change. A restart after AS OF, or one whose later changes touched only other tables, refuses nothing, so the history before it stays readable. Capture moving to another server refuses only when capture recorded the move after the baseline was taken and at or before AS OF (a new `server_uuid` at the same address, or a new server record on the way to the one capture reads now); with no record of when, it refuses. That record is the time capture noticed the new server, not the time of the switch: a failover while capture was behind, to a server whose files are numbered higher, is not seen. The first statement for a baseline and table reads that table's changes since the baseline once; later ones ask only about what was indexed since. Hours of the window that rotation already moved into Parquet archives are checked too ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)), since the query reads them from the archives with the same position filter: an archive whose newest change was indexed at or before the baseline's mark is skipped (`archive_state` records it), and every other archive file of the window is read for this table, only the columns the question needs. A file found clean is not read again for the same baseline and table. An archive with no `archive_state` row is not checked: `bintrail archive reconcile --prune` removes the row of an archive whose file is gone from every backend, and from then on nothing records that the hour held a change. Not checked: a baseline without that record, which includes every snapshot made with the CLI `bintrail baseline` (only the web interface's and the daemon's snapshots and snapshot updates record it). A failed read of whether `bintrail index` wrote into the index is an error, not a skip. When the check cannot tell whether the binary log started again (`bintrail index` also wrote into the index; the event the baseline's mark names was deleted while older ones remain, as a restarted capture's cleanup does; the mark's id now names another event, after the index was rebuilt; the mark does not read; an archived hour of the window has no file the port can open), the statement answers as before and carries a warning that `SHOW WARNINGS` returns, code 1105, starting "binlog numbering not checked:" with the reason ([#2186](https://github.com/dbtrail/dbtrail/issues/2186)). The PostgreSQL wire front-end logs that note instead. The PostgreSQL wire front-end returns the same refusal with SQLSTATE `22023`, as for a coverage gap. `_flashback` is unaffected: it never reads a baseline.
 - **No JOINs, aggregations, or non-PK WHERE filters inside the shim.** Run them outside on the resultset (`duckdb`, `pandas`, `awk`). The shim's job is to deliver correct historical row state; SQL execution against that state is the operator's tool of choice.
 - **ENUM/SET labels are decoded with the snapshot in effect at each event.** Binlog row images store ENUMs as ordinals and SETs as bitmasks; the shim (and the web interface's Time-travel tab and `bintrail reconstruct`) map them back to labels using the schema snapshot whose capture time most recently precedes the event, so an enum reshaped between two events renders each event under its own definition. Remaining caveats: events older than the *first* snapshot decode with that first snapshot, and a change made between an ALTER and the next snapshot decodes with the pre-ALTER definition (stream mode auto-snapshots on DDL, so that window is normally seconds). An ordinal beyond the selected definition is returned as the raw number: the forensic ground truth, also visible in `bintrail query`'s JSON output, which is deliberately left unmapped.

@@ -126,6 +126,11 @@ type Target struct {
 	// which binds a source from the tool parameters or the environment instead
 	// — see resolveBaselineLookup.
 	FindBaseline FindBaselineFunc
+	// PinBaseline keeps the snapshot the reconstruct tool found from the
+	// cleanup of its folder until the call ends (#2691). Set by the console,
+	// whose process prunes that folder; nil elsewhere, where a pin in this
+	// process would keep nothing.
+	PinBaseline reconstruct.PinFunc
 	// BaselineConfigured gates the reconstruct tool for THIS target on surfaces
 	// that own baseline routing: the console's per-server signal, which already
 	// folds in "a baseline location is set" AND "archives are enabled" AND "no

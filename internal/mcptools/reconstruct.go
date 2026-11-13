@@ -286,7 +286,11 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		}
 
 		// 1. Locate the baseline at-or-before `at` and read the row's initial state.
-		path, snapshotTime, stale, err := find(ctx, args.Schema, args.Table, atTime)
+		// Pinned until the call ends (#2691), the reads of its files below
+		// included.
+		path, snapshotTime, stale, release, err := reconstruct.FindPinned(ctx, reconstruct.FindFunc(find), t.PinBaseline,
+			args.Schema, args.Table, atTime, "the MCP reconstruct tool")
+		defer release()
 		if err != nil {
 			if errors.Is(err, reconstruct.ErrNoBaseline) {
 				return ErrorResult(fmt.Errorf(

@@ -259,17 +259,18 @@ func tlsFingerprint(der []byte) string {
 	return strings.Join(parts, ":")
 }
 
-// writeMydumperTLSPin writes a defaults file holding the pin, for mydumper's
-// --defaults-extra-file, in dir (the staging folder, never the dump folder
-// the conversion reads). The returned func removes it.
-func writeMydumperTLSPin(dir, fp string) (string, func(), error) {
-	f, err := os.CreateTemp(dir, "mydumper-tls-*.cnf")
+// writeMydumperOptions writes the option file given to mydumper with
+// --defaults-extra-file (the TLS pin, the session variables), in dir (the
+// staging folder, never the dump folder the conversion reads). The returned
+// func removes it.
+func writeMydumperOptions(dir, content string) (string, func(), error) {
+	f, err := os.CreateTemp(dir, "mydumper-options-*.cnf")
 	if err != nil {
 		return "", func() {}, err
 	}
 	path := f.Name()
 	remove := func() { _ = os.Remove(path) }
-	if _, err := f.WriteString("[client]\nssl-fp=" + fp + "\n"); err != nil {
+	if _, err := f.WriteString(content); err != nil {
 		f.Close()
 		remove()
 		return "", func() {}, err

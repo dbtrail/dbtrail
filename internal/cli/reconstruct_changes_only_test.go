@@ -316,8 +316,8 @@ func TestReconstructChangesOnly_saysWhenTheReasonIsNotKnown(t *testing.T) {
 		recAt = changesOnlyAt.Format(time.RFC3339)
 		orig := listSnapshots
 		t.Cleanup(func() { listSnapshots = orig })
-		listSnapshots = func(context.Context, string) ([]reconstruct.BaselineFile, error) {
-			return nil, errors.New("listing refused")
+		listSnapshots = func(context.Context, string) ([]reconstruct.BaselineFile, []reconstruct.UnreadableSnapshot, error) {
+			return nil, nil, errors.New("listing refused")
 		}
 		stubEngine(t, nil, []reconstruct.TableFailure{refusedTable("mydb", "orders", time.Time{})})
 		err := runReconstruct(reconstructCmd, nil)

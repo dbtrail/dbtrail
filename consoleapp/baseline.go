@@ -261,6 +261,10 @@ type baselineSupervisor struct {
 	// taking the server. The skip is right and the reason is wrong, so what
 	// this carries is the reason.
 	refreshGateSkips map[string]string
+	// owedRetryAt is, per server, when the upload the interval still owes S3
+	// (sendOwedHeldUpload) may be tried again after one that failed: an hour
+	// later, the failed re-sends' pace (#2675). Under s.mu.
+	owedRetryAt map[string]time.Time
 	// refreshChecked is when a refresh cycle for each server last ENDED, whether
 	// it folded or the gate skipped it (#1705), as RefreshStatus reports it.
 	//
@@ -400,8 +404,9 @@ func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
 	// while a refresh folds the newest one forward would leave the refresh
 	// anchored on a snapshot being written underneath it.
 	if s.busyLocked(req.ServerID) {
+		err := s.busyErrLocked(req.ServerID)
 		s.mu.Unlock()
-		return console.ErrBaselineRunning
+		return err
 	}
 	s.jobs[req.ServerID] = &console.BaselineStatus{State: "running", Since: nowStamp()}
 	s.mu.Unlock()
@@ -493,13 +498,12 @@ func (s *baselineSupervisor) dumpIndexMark(req console.BaselineRequest) (uint64,
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, windowProbeTimeout)
 	defer cancel()
-	mark, known := readIndexMark(ctx, probeDSN(req.IndexDSN))
-	if !known {
+	mark, err := readIndexMark(ctx, probeDSN(req.IndexDSN))
+	if err != nil {
 		// Once per full backup, which is rare enough not to rate-limit.
-		// Without it the only trace is a Debug line worded for a refresh.
 		slog.Info("baseline: could not read the index before the full read; the update after it will not be measured, "+
 			"so the snapshot schedule's cost model waits one more update before it can choose a full read again",
-			"server", req.ServerName, "id", req.ServerID)
+			"server", req.ServerName, "id", req.ServerID, "error", err)
 		return 0, false
 	}
 	return mark.events, true
@@ -717,6 +721,13 @@ func (s *baselineSupervisor) resendLacking(_ context.Context, dir, s3URL, name s
 	}
 	dest := strings.TrimSuffix(s3URL, "/") + "/" + name
 	switch pruning, err := beingPruned(s.ctx, s3URL, dest); {
+	case err != nil && storage.IsAccessDenied(err):
+		// Still a failure, and kept one on purpose (#2701): a folder an
+		// earlier S3 cleanup marked and did not finish is finished by a later
+		// one whatever its age, so a copy sent into it would be removed after
+		// the local copy went on the strength of it. The page says which
+		// permission, from errResendCleanupRefused.
+		return fmt.Errorf("%w: %w", errResendCleanupRefused, err)
 	case err != nil:
 		// A real failure, counted and logged as one by the caller.
 		return fmt.Errorf("could not tell whether the S3 cleanup is removing this snapshot's folder, so it was not sent "+
@@ -749,6 +760,15 @@ var errNotResent = errors.New("snapshot not sent again for now")
 // the destination keeps (#2596): not a failure and not a send, but it stays
 // on this disk without an S3 copy, so it is still listed as missing.
 var errPastS3Age = errors.New("snapshot past the S3 age, not sent again")
+
+// errResendCleanupRefused is the resend refused because S3 refused the question
+// whether its own cleanup is removing the snapshot's folder (#2701): with
+// "Delete from S3 after" set, a HEAD on the missing _PRUNING mark is
+// answered 403 when the credentials lack s3:GetObject (a HEAD needs it) or
+// s3:ListBucket (a missing key needs it to answer 404); the 403 does not say
+// which, so both are named. A failure, retried at the failed rounds'
+// hourly pace, and named on the page.
+var errResendCleanupRefused = errors.New("S3 refused to say whether its cleanup is removing this snapshot's folder (with \"Delete from S3 after\" set, that question needs s3:GetObject and s3:ListBucket on the prefix), so it was not sent")
 
 // readsS3Now reports whether a restore or a SQL file build runs now for any
 // of the servers: both read a snapshot the S3 cleanup could remove (#2596).
@@ -1584,6 +1604,20 @@ var sourceServerVersion = func(ctx context.Context, dsn string, ssl config.SSL) 
 	return v, err
 }
 
+// sourceExplainFormat reads the source's explain_format (#2211), with the
+// connection settings of the other pre-dump reads. A seam, so the tests need
+// no server.
+var sourceExplainFormat = func(ctx context.Context, dsn string, ssl config.SSL) (string, bool, error) {
+	db, err := connectSource(dsn, ssl)
+	if err != nil {
+		return "", false, err
+	}
+	defer db.Close()
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return mydumperlock.SourceExplainFormat(qctx, db)
+}
+
 // planMydumper reads the version of the mydumper on PATH and decides, the way
 // `bintrail dump` does (#219, #460, #1686), what this run can ask of it.
 //
@@ -1806,6 +1840,11 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	}
 
 	tlsArgs := mydumperTLSArgs(tlsPlan, plan.lib)
+	// What goes in the one option file mydumper is given with
+	// --defaults-extra-file. One file, because mydumper keeps only the last
+	// --defaults-extra-file it is passed: a second flag would drop the TLS pin
+	// without a word.
+	var options strings.Builder
 	// A build linked against the MySQL client library enforces --ssl-mode
 	// REQUIRED itself. Any other does not reliably (Connector/C, measured:
 	// it dumps in cleartext from a server without TLS), so the dump is
@@ -1817,12 +1856,7 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			return fmt.Errorf("the full read must reach the source encrypted, and a connection with TLS required failed: %w", err)
 		}
 		if plan.lib == mydumperlock.LibMariaDB {
-			pin, remove, err := writeMydumperTLSPin(filepath.Dir(dumpDir), fp)
-			if err != nil {
-				return fmt.Errorf("could not write the TLS settings file for mydumper: %w", err)
-			}
-			defer remove()
-			tlsArgs = append(tlsArgs, "--defaults-extra-file", pin)
+			options.WriteString("[client]\nssl-fp=" + fp + "\n")
 		} else {
 			// Unknown library: the check proved the server encrypts, but
 			// mydumper is not pinned, so an attacker between the check
@@ -1832,6 +1866,33 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			reportTransportNote(ctx, "Encrypted, not pinned: mydumper's client library could not be identified, so the "+
 				"source was checked to encrypt but mydumper was not tied to its certificate.")
 		}
+	}
+	// explain_format other than TRADITIONAL (TREE is the default on Percona
+	// Server 9.7) makes mydumper segfault while it sizes tables (#2211). Its
+	// own sessions are told TRADITIONAL; the server's setting is not touched.
+	// explainNote, when set, is added to the run's error if mydumper fails:
+	// a crash prints almost nothing, and the card is where the operator looks.
+	var explainNote string
+	if value, present, err := sourceExplainFormat(ctx, sourceDSN, ssl); err != nil {
+		explainNote = "the source's explain_format could not be read (" + err.Error() + "), so mydumper was not told to use " +
+			"TRADITIONAL; if the source runs with TREE or JSON, mydumper crashes. Setting explain_format=TRADITIONAL on the source avoids it"
+		slog.Warn("console snapshot: "+explainNote, "host", host)
+	} else {
+		ef := mydumperlock.PlanExplainFormat(present, value, plan.versionKnown, plan.version)
+		if ef.Send {
+			options.WriteString(mydumperlock.ExplainFormatSection)
+		} else if ef.Warning != "" {
+			explainNote = ef.Warning
+			slog.Warn("console snapshot: "+ef.Warning, "host", host, "mydumper", plan.path)
+		}
+	}
+	if options.Len() > 0 {
+		path, remove, err := writeMydumperOptions(filepath.Dir(dumpDir), options.String())
+		if err != nil {
+			return fmt.Errorf("could not write the settings file for mydumper: %w", err)
+		}
+		defer remove()
+		tlsArgs = append(tlsArgs, "--defaults-extra-file", path)
 	}
 	// A list of schemas goes as --database a,b on a mydumper measured to write
 	// each schema's CREATE DATABASE that way (1.0.3-1): under --regex it
@@ -1876,7 +1937,13 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			if strings.Contains(msg, mydumperNoSpaceText) {
 				return &mydumperNoSpaceError{err: fmt.Errorf("mydumper failed: %w; output: %s", err, msg)}
 			}
+			if explainNote != "" {
+				return fmt.Errorf("mydumper failed: %w: %s; output: %s", err, explainNote, msg)
+			}
 			return fmt.Errorf("mydumper failed: %w; output: %s", err, msg)
+		}
+		if explainNote != "" {
+			return fmt.Errorf("mydumper failed: %w: %s", err, explainNote)
 		}
 		return fmt.Errorf("mydumper failed: %w", err)
 	}
@@ -2026,6 +2093,51 @@ func countDumpableTables(ctx context.Context, db *sql.DB, schemas []string) (int
 
 // nowStamp is the RFC3339 timestamp used in job status fields.
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// busyError is console.ErrBaselineRunning with what holds the server (#2674):
+// the button that starts a full read answered "a baseline is already running"
+// while the only job was the send to S3 of a snapshot kept on this machine,
+// which the page names differently and which nobody calls a baseline. It is
+// still ErrBaselineRunning to errors.Is, so every caller keeps its 409.
+type busyError struct{ what string }
+
+func (e *busyError) Error() string        { return e.what }
+func (e *busyError) Is(target error) bool { return target == console.ErrBaselineRunning }
+
+// busyErrLocked says which job holds serverID, for a full read refused by the
+// one-job-per-server rule; s.mu held, and busyLocked true. The job kinds are
+// busyLocked's, in its order.
+func (s *baselineSupervisor) busyErrLocked(serverID string) error {
+	since := func(st *console.BaselineStatus) string {
+		t, err := time.Parse(time.RFC3339, st.Since)
+		if err != nil {
+			return ""
+		}
+		return " since " + t.UTC().Format("2006-01-02 15:04:05") + " UTC"
+	}
+	running := func(m map[string]*console.BaselineStatus) *console.BaselineStatus {
+		if st, ok := m[serverID]; ok && st.State == "running" {
+			return st
+		}
+		return nil
+	}
+	const after = "; the full read can start once it finishes"
+	switch {
+	case running(s.jobs) != nil:
+		return &busyError{"a full read of this server is already running" + since(running(s.jobs))}
+	case running(s.refreshes) != nil && running(s.refreshes).SendingHeld:
+		return &busyError{"a snapshot kept on this machine is being sent to S3" + since(running(s.refreshes)) + after}
+	case running(s.refreshes) != nil:
+		return &busyError{"an update of this server's snapshot from the recorded changes is running" + since(running(s.refreshes)) + after}
+	case running(s.restores) != nil:
+		return &busyError{"a snapshot restore for this server is running" + since(running(s.restores)) + after}
+	case running(s.exports) != nil:
+		return &busyError{"a SQL export of this server's snapshot is running" + since(running(s.exports)) + after}
+	case running(s.compacts) != nil:
+		return &busyError{"the table changes of this server's snapshots are being merged" + since(running(s.compacts)) + after}
+	}
+	return console.ErrBaselineRunning
+}
 
 // recordRun appends one finished run to the history (no-op without one).
 // finishedAt is stamped here so every producer records the same clock.

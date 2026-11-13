@@ -120,9 +120,9 @@ func TestDump_recordsTheIndexMarkReadBeforeTheDump(t *testing.T) {
 		t.Cleanup(func() { readIndexMark = prev })
 		var deadline time.Time
 		var hasDeadline bool
-		readIndexMark = func(ctx context.Context, _ string) (indexMark, bool) {
+		readIndexMark = func(ctx context.Context, _ string) (indexMark, error) {
 			deadline, hasDeadline = ctx.Deadline()
-			return indexMark{events: 1}, true
+			return indexMark{events: 1}, nil
 		}
 		sup.produce = func(console.BaselineRequest) (dumpOutcome, error) { return dumpOutcomeAt(t, local, at), nil }
 		before := time.Now()

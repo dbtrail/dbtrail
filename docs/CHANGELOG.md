@@ -7,6 +7,303 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **"Goes at the next cleanup" follows the cleanup's own rule, and a failed
+  owed upload waits an hour** (#2675). The Snapshots list marked every local
+  snapshot past the count, counting positions, so with **Delete by age** set
+  it marked snapshots the cleanup keeps (past the count and younger than the
+  age), and it could mark the newest copy of a table or the `current`
+  target. Each row now carries `going` from `GET /api/baselines`, worked out
+  by the cleanup's rule (`baseline.KeptNow`, with the count and the age in
+  force), and the list marks only those. Separately, the newest snapshot the
+  upload interval kept on this machine, sent by a cycle with nothing new to
+  fold, was tried again at every such cycle when its send failed (every 5
+  minutes by default), each time sending the whole snapshot and logging a
+  warning; after a failure it now waits an hour, the cleanup's pace for
+  failed re-sends, and the log says "it stays here, and sending it is tried
+  again in an hour". It keeps its hold mark and stays on disk meanwhile.
+- **The cleanup's re-sends under partial S3 permissions** (#2701).
+  - The last restore's result, in a bucket that takes uploads and refuses to
+    read them back, was sent again at every round (an hour apart), because
+    its own rule never read the record of snapshots sent again. It is now
+    sent once; after S3 takes it and refuses to read it, it is listed as
+    refused to read and not sent again, and the failure record says "1
+    snapshot was sent again, and S3 took it but refuses to read it back:
+    either the credentials lack s3:GetObject on this prefix, or they are no
+    longer valid; check both. It is kept here and not sent again." An answer
+    from S3 about it clears its mark.
+  - A refusal after a send S3 took was said to be a missing s3:GetObject. S3
+    authorizes every HEAD under s3:GetObject, so without it every question
+    is refused, a key that does not exist included, and that looks the same
+    as credentials that stopped working. Every message about it now names
+    both causes; the one for a destination that refuses every read is "S3
+    refuses to read back what it accepted: either the credentials lack
+    s3:GetObject on this prefix, or they are no longer valid; check both.",
+    and the one for every question refused ends "Check that the credentials
+    are valid and that they have s3:GetObject on this S3 prefix."
+  - With **Delete from S3 after** set, a re-send asks whether the S3 cleanup
+    is removing the snapshot's folder, and S3 refuses that question without
+    s3:ListBucket or without s3:GetObject. It still does not send: a folder
+    an earlier S3 cleanup marked and did not finish is finished by a later
+    one whatever its age, so a copy sent there could be removed after the
+    local copy went on the strength of it. The Snapshots page now says why
+    instead of "sending failed": "DBTrail does not send them: S3 will not
+    say whether its own cleanup is removing their folder, which with Delete
+    from S3 after set needs s3:GetObject and s3:ListBucket on this prefix.
+    Add the one that is missing, or clear Delete from S3 after; DBTrail asks
+    again after ...".
+  - The record of what S3 lacks cut its list of names to five and kept the
+    "could not be asked" and "refused to read" lists whole, so with many
+    snapshots the page's mixed sentence counted wrong. All three are cut
+    to five now, with their counts kept, and the page counts with those
+    ("... could not be asked about the copies of A, B and 7 more").
+
+- **The MySQL port without Engine Routing answers `LIMIT offset, count`** (part of #2628). It used to refuse `LIMIT 10, 5` and ask for `LIMIT 5 OFFSET 10`; it now writes it that way for the copy itself, so deep pagination from an ORM or a BI tool (`LIMIT ?, ?` from SQLAlchemy too) runs as written. The rows are the ones MySQL returns, checked against MySQL 8.0.46 for an offset of 0, an offset past the last row, a count of 0, leading zeros, and a `LIMIT` in a subquery, a CTE and either side of a `UNION`. A form it cannot write with certainty is still refused with how to write it: a number past 9223372036854775807, a comment between the two numbers, or a prepared argument that is not a whole number; a DOUBLE or DECIMAL argument to a prepared `LIMIT ?` gets MySQL's own error 1210, as on MySQL. And a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery is now refused on that port, as MySQL refuses it (error 1235); the copy used to answer it. Engine Routing is unchanged.
+- **A shared S3 prefix is not pruned by age either** (#2675). With
+  `--baseline-retain` (**Delete by age**) and no count, the cleanup removed a
+  local snapshot once the bucket had `<prefix>/<snapshot name>/_SUCCESS`. A
+  snapshot name has no server in it, and two servers on one prefix and one
+  schedule write the same names, so the bucket confirmed the other server's
+  upload, and a snapshot whose own upload had failed could be removed with no
+  copy anywhere. A count already left such a folder alone (#2658); the age
+  now does too. A folder whose S3 prefix another server sends to, from
+  another folder or from none, keeps every local snapshot; the hourly
+  cleanup logs each one, and the settings card says "Another server sends
+  its snapshots to this S3 location too, so nothing here is removed. Give
+  each server its own S3 prefix."
+  Servers that share both the folder and the prefix, which is what the
+  startup migration gives them, are one set of snapshots and are pruned by
+  age as before. `bintrail baseline --upload --baseline-retain` names one folder and
+  one prefix and cannot see other servers; it is unchanged.
+- **A reader in another process keeps the snapshot it reads** (#2675). The
+  readers the cleanup waits for were known only inside the process that runs
+  them, so `bintrail export iceberg`, `bintrail verify` and `bintrail
+  reconstruct` lost an older snapshot to the cleanup of `watch` while they
+  read it, and failed. Each now holds the snapshot it reads with a shared lock
+  on that snapshot's `_SUCCESS` file (the first load of each table for the
+  export; each table checked, and every pair's snapshots for the default
+  check, for verify; each table of a full-table run for reconstruct; each
+  lookup of a cascade recovery), and the cleanup of any process takes the
+  file exclusively right before it removes a snapshot: when it cannot, the
+  snapshot stays and the rest of the folder is cleaned. The lock needs only
+  read access and ends with the process, killed included. A hold stops the
+  cleanup for at most 24 hours, like a job of `watch`, counted from the
+  earlier of the start the reader records beside the snapshot (0600, never
+  through a link) and the first time the cleanup found it held; past that the
+  cleanup removes the snapshot and logs once "a reader has held this snapshot
+  for longer than any read is allowed to, so the cleanup no longer waits for
+  it and removes it; that reader will fail". A reader that cannot get the
+  lock within 5 seconds reads without it and says so. A reader that
+  reaches its snapshot just as it is removed looks it up once more, and
+  twice fails with "the snapshot of <schema>.<table> was removed by the
+  cleanup twice while this read started; run it again". Not covered: a
+  snapshot with no `_SUCCESS` file, one read from S3, and a DuckDB session of
+  your own over an older snapshot's `views.sql`. The local mirror of an
+  S3-only server's snapshots (SQL on the copy) no longer removes, past its
+  two, a mirrored snapshot a SQL statement is reading; it goes in the first
+  round after the statement ends. Only live readers count: each reader also
+  locks its own record, so a killed reader's age is never charged to the
+  reader after it. On NFS (EFS included) the cleanup opens `_SUCCESS`
+  read-write, since an exclusive lock there needs it, and a lock refused for
+  any other reason than a reader holding it is logged once per folder as a
+  warning instead of passing in silence; two holders in one process do not
+  exclude each other on NFS. A `_SUCCESS` that is not a regular file (a FIFO)
+  is not waited on.
+
+- **Full reads work on sources with `explain_format=TREE`** (#2211). On a
+  MySQL 9.x source whose `explain_format` is `TREE` (the default on Percona
+  Server 9.7) or `JSON`, mydumper crashed with a segmentation fault within
+  seconds while it sized tables, so no copy could be made. The console's full
+  read and `bintrail dump` now read the source's `explain_format` first and,
+  when the variable exists, give mydumper an option file whose
+  `[mydumper_session_variables]` section sets `explain_format = TRADITIONAL`
+  for mydumper's own sessions. The server's global setting is not touched.
+  Sources without the variable (MariaDB, MySQL before 8.0.32) get nothing,
+  since mydumper exits 1 on a session variable the server does not know.
+  The file goes only to mydumper 0.16.1 or newer (the oldest build measured
+  to take it). With an older build, or one whose version cannot be read, or
+  when the source cannot be asked, the cause and the remedy are logged and
+  added to the error if mydumper then crashes, instead of a bare segmentation
+  fault. On the console, the TLS pin and the session section share one
+  `--defaults-extra-file`, because mydumper keeps only the last one it is
+  given. The `baseline` profile of `docker-compose.yml` is not covered yet
+  (#2733).
+- **Live-source `verify` on a PostgreSQL table with writes compares equal**
+  (#2198). The table was read inside one snapshot, but the reconstruction
+  was cut at the time the scan ended, so every write committed while the
+  table was read was in the reconstruction and not in the snapshot: a
+  MISMATCH on a table that was fine. Now, when the source role has the
+  `REPLICATION` attribute (`rds_replication` on Amazon RDS), the table is
+  read at the snapshot of a temporary logical slot made for the read (the
+  built-in `pgoutput`, nothing installed in the source; the slot goes away
+  as soon as the read has started), and the reconstruction stops strictly
+  before that slot's consistent point, on the index and on the archives.
+  The check waits up to 60 seconds for a running capture to reach that
+  point (a capture still catching up when the wait runs out makes the table
+  `inconclusive`), and stops waiting early on a quiet database. Creating the slot
+  waits for the write transactions open on the server; one still open
+  after 10 seconds makes the table `inconclusive`, naming the oldest one.
+  Without `REPLICATION`, a free slot, or a replication entry in
+  `pg_hba.conf`, the check runs as before and the result says the read was
+  not cut and why. The baseline it starts from is now the newest one taken
+  before the read opened, as on MySQL since #2150.
+- **A snapshot that fails to send on a file of its own no longer holds back
+  the others** (#2691). When sending again a snapshot the bucket lacks
+  failed, the whole folder waited an hour, so one snapshot with a file that
+  would not read held back every other snapshot the bucket lacked. A send
+  that fails on a file of the snapshot itself now makes that snapshot alone
+  wait the hour; the others are still sent at each cleanup, at most 3 per
+  cleanup as before. A failure at the destination (the bucket, the
+  credentials, the network) still makes the folder wait, since every other
+  send would meet it. The bounds of #2696 hold per snapshot: one S3 could not
+  be asked about is sent at most once an hour, and one S3 refuses to read
+  back is not sent again. When the copies on the Backup settings card are
+  not all in the same case, the card names the ones that wait, with why and
+  until when, and says the others are sent from the next cleanup on, 3 at
+  most per cleanup, except any older than the age S3 keeps; when they are
+  all in the same case it says what it said before.
+- **Without S3, the cleanup keeps the two snapshots a check compares**
+  (#2691). A check of the snapshots, and its Explain, compares each table's
+  last full read of the database with the snapshot before it. On a server
+  without an S3 destination the count removed both about 15 minutes after
+  the full read (a snapshot every 5 minutes, a count of 3), so a check run
+  later found nothing to compare. The cleanup of a folder with a count and no
+  S3 destination now keeps one pair on top of the count: the read of the
+  database most tables of the newest snapshot come from (on a tie, the
+  oldest), usually the last full read, and the snapshot before it, until
+  another read takes its place. The Snapshots page marks the two rows "kept
+  for the check". A table read again on its own since, or one with no
+  recorded read (built from the changes alone), has no pair kept. At
+  most two extra snapshots per folder: the one before the read costs a whole
+  snapshot of disk, the read itself only the tables changed since it (the
+  others are hard links shared with the newer snapshots). Servers with S3
+  keep nothing extra.
+
+- **A snapshot update refuses a table whose column changed character set** (#2723). The update compared each column's type and NULL-ness with the schema snapshot taken after a DDL, but not its character set, which `COLUMN_TYPE` does not show. Two cases went wrong. An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column, under a non-strict `sql_mode` or as `CONVERT TO CHARACTER SET latin1`, turns every character latin1 cannot hold into `?` and writes no row event, so the update kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. A `CONVERT TO CHARACTER SET utf8mb4` on a latin1 table keeps every value, but the updated snapshot kept declaring the column latin1, and a restore from it created a column that cannot hold what was written after the change. Both now refuse the table like a type change, naming the column and both character sets (`name (varchar(20) CHARACTER SET utf8mb4 -> varchar(20) CHARACTER SET latin1)`), and a full read follows. The character set of the snapshot's `CREATE TABLE` is read as the server wrote it: the column's own, else the one its collation belongs to, else the table's default; `utf8` and `utf8mb3` are the same set. Nothing is compared, and nothing refused, when either side does not say: a schema snapshot with no character set recorded (every non-text column, a PostgreSQL source, a snapshot older than the record of character sets), or a `CREATE TABLE` that names none for the column or its table. A collation change within the same character set is still not seen, since schema snapshots do not record collations (#2083).
+- **Tests: the boot server's download cap through its call site, and the
+  "Not in S3" line in every combination** (#2691). No behavior change. A test
+  drives a download of the daemon's own server through the real handler and
+  fails if the cap is worked out from anything but the daemon's
+  `--baseline-s3`; a node test renders the Backup settings card's "Not in S3"
+  line for every record the cleanup can write (which copies S3 lacks, could
+  not be asked about, or refuses to read back, with and without a resend and
+  a wait), and a Go test follows the case of several copies and a restore's
+  result S3 could not be asked about from the real cleanup's record to the
+  line the page draws.
+- **A read of one table at a past moment keeps its snapshot while it runs**
+  (#2691). `/api/reconstruct`, the MCP `reconstruct` tool of the console and
+  a `_snapshot` query through the MySQL port of `watch` (one row or the whole
+  table) read an older snapshot after looking it up, and the cleanup after a
+  publish could remove it in between, so the read failed. They now pin that
+  snapshot until they end, like a snapshot download, for no longer than a
+  download of the table's files would keep it (their bytes at 1 MiB/s plus
+  one minute), or than the query's own time limit when that is longer: a
+  whole table goes out at the pace of the MySQL client, and a client must not
+  decide how long a snapshot stays. They count toward the downloads' limit,
+  together with the downloads: past it a read is not refused, it runs without
+  a pin as before, and a warning says so at most once every 10 minutes per
+  server. A snapshot removed between the
+  lookup and the pin is looked up once more. The Explain of a check, which
+  already pinned its two snapshots, has a test of its own.
+
+- **`bintrail export iceberg` compacts its own tables** (#2719). Every
+  run adds one delete file per table it changed, and DuckDB and ClickHouse
+  pay for each one on every read without being able to compact the table
+  themselves, so reads got slower run after run. Now, once a table holds
+  `--compact-after` delete files (default 10), the run rewrites the table's
+  live rows into new data files and drops every delete file, in one Iceberg
+  commit of type `replace` that changes neither the rows nor the cursor.
+  On a 100,000-row table changed every run, a DuckDB 1.5.6 read took 9.1 s
+  after 30 runs without it, and at most 3.1 s with the default (about 0.01 s
+  right after each compaction); a million-row table compacts in about 1.5 s.
+  Each compaction still leaves two small manifests that later commits keep
+  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A
+  compaction that does not finish, or that another writer's commit overtakes,
+  is not applied and is retried by the next run; the table's verdict stays
+  what its delta made it. `--compact-after 0` turns it off. The
+  JSON report carries a `compaction` object per compacted table, and the audit
+  trail records the commit as `commit: compact`.
+- **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
+  snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
+  each duplicate and deletes the others, and the deletes are not written to
+  the binary log as row changes. The update carried the table forward from
+  its previous snapshot, so the copy kept every duplicate the source had
+  deleted, with nothing to say so. It now refuses the table like the
+  partition statements of #2632, naming the clause (`ALTER TABLE ... IGNORE
+  ... UNIQUE`), and the full read that follows takes the table as it is. It
+  counts when, under `IGNORE`, the statement adds a unique key (`UNIQUE`,
+  `PRIMARY KEY`, a column's bare `KEY`, `SERIAL`) or changes values a unique
+  key that already exists compares (`MODIFY`, `CHANGE`, `CONVERT TO`, a
+  character set or collation), and when its stored text was cut short.
+  `DROP PRIMARY KEY`, a plain index or a new column under `IGNORE` refuse
+  nothing. MySQL has had no `ALTER IGNORE` since 5.7. The same
+  refusal applies to `reconstruct --output-format mydumper` and the shim's
+  `_snapshot`.
+- **Engine Routing keeps `LEFT` and `RIGHT` with a negative length on MySQL** (#2652). `LEFT('abc', -1)` is `''` on MySQL and `'ab'` on the copy, and `RIGHT('abc', -1)` is `''` and `'bc'`, with no error on either side. `LEFT` and `RIGHT` now go to the copy only when the length is a whole number written in the statement; a length from a column, a placeholder or an expression goes to MySQL, since it may be negative on some row. A length of 0 or more, past the end of the text too, agrees on both and still goes to the copy.
+- **Engine Routing keeps a statement with a Unicode space outside its strings on MySQL** (#2652). MySQL reads a no-break space (U+00A0), an ideographic space (U+3000), a zero-width space (U+200B) and the other Unicode spaces the copy takes for white space as part of a name. Over a table with columns `a`, `b` and one named `a`, no-break space, `b`, writing that last name unquoted returned that column on MySQL and column `a` under the alias `b` on the copy: another value, with no error. Such a statement now runs on MySQL. Where the character made the statement an error on MySQL, for example a no-break space between `ROUND` and its parenthesis, the statement already went to MySQL, because MySQL could not explain it. Inside a string or a quoted name the character is the same text on both sides, with one exception that also goes to MySQL: the copy turns it into a plain space wherever it does not find a quote around it, and a quote inside a `/* */` comment or a `$` makes it find the quotes elsewhere, so `SELECT /* ' */ 'a b'` written with a no-break space was `'a b'` with a plain space on the copy. The plain port without Engine Routing is unchanged.
+- **The installer, `--help` and the first lines of the docs open with the
+  heavy queries** (#2637). The installer's banner now says "Heavy MySQL
+  queries, from minutes to seconds.", the headline of the README and of
+  dbtrail.com, instead of the undo sentence, and its next steps are the start
+  page's five: sign in, connect, take the first copy, the MySQL port, a heavy
+  query. The undo step is gone from that list; no step names a port number,
+  since 3309 can be taken, and when it is, step 4 says to publish another
+  free port and use that number after `-P`. `bintrail --help` and `bintrail-console --help`
+  open with what each binary is and link the start page; the console's no
+  longer calls itself a read-only web interface, which `watch` and `router`
+  are not. The `bintrail-console` package description, the header of
+  `docker-compose.yml` and the first lines of `docs/quickstart.md` and
+  `docs/guide.md` follow. `bintrail agent` is hidden from `--help` and from
+  the command table in `docs/install.md`: the endpoint in its examples does
+  not resolve. It still runs when called by name. The README's 30-second demo
+  moved from Install to the `AS OF` line, which is what it shows, and
+  `docs/bintrail-spec.md`, a historical design note, is removed.
+
+- **The installer installs one release and writes it down** (#2638).
+  `install.sh` took `docker-compose.yml` from `main` and left every image on
+  `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
+  over every release since the install, and nothing recorded which version
+  it had been. It now looks up the newest release (GitHub's
+  `releases/latest`, which skips drafts and prereleases; no token, no `jq`),
+  takes the compose file and the `dbtrail` command from that tag, and a fresh
+  install writes `BINTRAIL_TAG=<version>` to `.env` before it pulls. The value
+  is the image tag, the git tag **without the `v`** (`v0.130.0` →
+  `0.130.0`): the images are published under GoReleaser's `{{ .Version }}`,
+  and no `v`-prefixed image exists. A `BINTRAIL_TAG` already set, in `.env`
+  or in the installing shell, is never changed and chooses the compose file
+  (a version number) or is left as it is (empty, `latest`, a tag of one's
+  own); one with a `v` stops the install and says what to write instead.
+  `DBTRAIL_REF` still overrides: a release tag is that version, written to
+  `.env`; any other ref (`main`, a branch) writes nothing and says the images
+  follow `latest`. When GitHub does not answer (no network, its limit of 60
+  lookups an hour per address) or answers without a release tag, a fresh
+  install stops before creating anything and prints the command to name the
+  version with `DBTRAIL_REF`; it never falls back to `main`. A re-run over an
+  existing stack writes nothing to `.env` (as for `INDEX_BUFFER_POOL`), keeps
+  its `dbtrail` command when the lookup fails, and says how to pin a stack
+  installed before this. The end text names the version and the upgrade:
+  change `BINTRAIL_TAG`, then `docker compose pull && docker compose up -d`,
+  plus the release's compose file when it changed. `docs/upgrade.md`,
+  `docs/docker.md` and `docs/install.md` now take that file from the release
+  tag instead of `main`, and the `BINTRAIL_TAG=v0.26.0` example in
+  `docs/upgrade.md` (and `v0.9.0` in `.env.example`), which named images that
+  do not exist, is corrected.
+
+- **A full-table reconstruct into a folder used before no longer leaves an earlier run's rows in it** (#2684). A loader reads every file of a folder and looks at no marker. A table the run refused (no snapshot) or failed on kept the files an earlier run wrote for it, under an error that says nothing was written for it, and a table written again with fewer data files than before kept the earlier run's higher-numbered data files, under `_SUCCESS`. Now, after writing `_INCOMPLETE` and after the checks that can refuse the run before any table starts, `reconstruct --output-format mydumper` removes the schema file and the data files of each table it was asked for (`--output-format psql`: the table's one file), compared by exact name, and logs what it removed; files of other tables and files it never writes stay, and the schema files of tables it was not asked for are named in a warning. **A run that fails after those checks now leaves no files for the tables it names**, where the earlier run's used to stay. A run refused by those checks (a bad `--tables` entry, a snapshot location that cannot be read, an index it cannot reach) now leaves the folder as it was, markers included; before, it removed an earlier complete dump's `_SUCCESS` and wrote `_INCOMPLETE`, so `bintrail baseline` then refused that dump. A mistyped `--baseline-dir` or a bucket that does not exist is now refused up front, instead of failing every table.
+- **A snapshot folder that could not be read is named instead of "no snapshot"** (#2684). When a snapshot folder from at or before `--at` could not be read and a newer one that lacks the table was, `reconstruct` said the table had no snapshot and, with `--output-format mydumper`, offered `--allow-changes-only`, although the table may be in the folder it could not read. The error now names that snapshot and its error, says it may hold the table, and offers no flag. Single-row `reconstruct` names it too. A run given `--allow-changes-only` still writes the table.
+- **The schema file of a changes-only table holds a plain `CREATE TABLE`** (#2684). With `--allow-changes-only`, the schema file carried the newest recorded `CREATE TABLE` as written, and that can be the `CREATE TABLE IF NOT EXISTS` an application runs at every start. Loaded into a target that already had the table, it loaded the rows into that table instead of stopping. It is now written without the clause, as `CREATE OR REPLACE TABLE` already was, under a comment that says the statement may have created nothing at the source; a statement whose clause cannot be taken out gets a comment that names it instead of a definition.
+- `drill` and the console's `.sql` build no longer say a table with no snapshot "was rebuilt from" its recorded changes: since #2679 nothing is built for it. drill says `built from binlog deltas alone it would start from an EMPTY table, so it was not loaded`, and the console `built from its recorded changes alone, its dump would silently miss every row those changes never touched, so this build fails`.
+- **The compose router can read S3 with read-only keys of its own** (#2690). Since #2681 the `router` service, which serves the MySQL port and only reads S3, got the same AWS keys as the `bintrail` service, which can also write and delete. `ROUTER_AWS_ACCESS_KEY_ID` and `ROUTER_AWS_SECRET_ACCESS_KEY` in `.env` (and `ROUTER_AWS_SESSION_TOKEN` for temporary keys) now replace them for the router alone. Unset, nothing changes: the router reads with the shared keys, or with the instance role. The router's own pair never carries the shared `AWS_SESSION_TOKEN`, and half a pair, or a router token without a router pair, stops the router at startup naming the variable that is missing, never a value. The startup log says which keys it reads with. Region and endpoint stay shared, and a server whose S3 store has keys of its own (set in the web interface) is still read with those keys. docs/s3-iam-policy.md has the router's policy (`s3:ListBucket` on the bucket, `s3:GetObject` on its objects, change archives included) and what it calls; docs/docker.md has the setup, including one for the packaged systemd units.
+- **An acknowledged capture gap is no longer reported as `ok` while older changes are still served** (#2669). The report took the start of the changes still held from the delta floor alone, and missed two places that still serve changes from before the gap. Archived hours separated from the index by a stretch that was never archived: with archives from 1 to 22 June, archiving then turned off and rotation dropping the hours until 10 July, a gap acknowledged on 20 June read `ok` although the June archives can still be queried. And events older than the name of the partition that holds them: the oldest partition takes every event dated before it, so indexing an old binlog after rotation put changes from before the gap under a later hour, and the report said `ok`. `bintrail status` (text and JSON), `GET /api/status`, the Status page and `GET /api/coverage` now keep an acknowledged gap as `gap_acknowledged` while an hour in the index, an archived hour, or an event (in the index, or recorded for an archived file in `archive_state.min_event_ts`; a zero date there is not an event time, and an `archive_state` without that column is read by hour names) is from that moment or earlier. The extra reads run only when the verdict would otherwise be `ok`; if one fails, the gap stays reported. The floor snapshots are graded against, and `delta_from`, do not change. The status text under an acknowledged gap now ends "This is reported while the index or its archives still hold changes from it or earlier." in place of "... still hold the hour it happened in." While the start of the changes still held cannot be read, `bintrail status`, `/api/status`, the MCP `status` tool and `/api/coverage` warn once per index connection until a read works again (and say so at info level when it does), where they warned on every read; a request that was cancelled is not warned about, one that ran out of time is.
+- **Two runs of the same integration test at once no longer share a database** (#2684). The test helpers named each test database after the test and a counter, so two processes running the same test against one MySQL (two checkouts, two CI jobs on one server) used the same name, and one dropped or filled the other's database mid-test. The name now also carries eight random characters per process; its longest form is no longer than before. A database left behind by a killed run is no longer dropped by the next run of the same test; drop leftover `bt_*` databases by hand.
+- **The MySQL port serves a certificate of your own** (#2636). `bintrail-console router --tls-cert <file> --tls-key <file>` (or `BINTRAIL_ROUTER_TLS_CERT` and `BINTRAIL_ROUTER_TLS_KEY`) offers that certificate to every client that asks for TLS, so a client that trusts its CA can connect with `--ssl-mode=VERIFY_CA` or `VERIFY_IDENTITY`. Before, and still with nothing set, the port offered TLS only with a certificate it made up at start: a client could encrypt (`--ssl-mode=PREFERRED`, the `mysql` default, or `REQUIRED`) but could not verify it, so it could not tell the port from something impersonating it. The README said the port had no TLS, which was not accurate. One setting without the other, or a pair that cannot be used, stops the router at startup and names the setting and the file. The port still offers TLS without requiring it: a client that asks for no encryption is answered in clear text. The files are read at startup; restart the router after renewing the certificate. The startup lines say which certificate is offered and until when, and warn when it has expired. See [TLS on the port](time-travel-sql.md#tls-on-the-port).
+- **`/etc/dbtrail/dbtrail.cnf`** (#2671). Every DBTrail program but the standalone `bintrail-mcp` reads it when it starts (the compose file does not mount it yet; docs/option-file.md shows the line): options under `[dbtrail]`, written like MySQL's `my.cnf`, with the environment variable's name without `BINTRAIL_` (`commit-within = 2s`). The environment and `.bintrail.env` come first; an empty variable does not count. A line that is not used (an unknown option, with the nearest one named; no value; an internal name; one the environment already sets; an include) is a warning at start, never a refusal, and `loose-` silences an unknown option. A file every user can change is not used, as in MySQL. `dbtrail config check` lists what the file sets and every line that is not used, and exits 1 when it finds one. See docs/option-file.md.
+- **`restore-index`, `archive reconcile` and `export iceberg` work with a bucket in another region than the host's** (#2698). They signed for the configured region, so a bucket elsewhere answered `301 PermanentRedirect`. They now use the bucket's own region, found the same way as the other S3 commands since #2688: `restore-index` keeps one client per bucket it reads, `archive reconcile` lists (and, with `--deep`, reads footers) at the bucket's region, and `export iceberg` reads and writes the warehouse bucket (data and metadata files, including the metadata the Glue catalog reads back itself) at that bucket's region while the Glue or REST catalog API keeps the configured one. A `--region` flag is still used as given, and nothing is asked with a custom endpoint. Not covered: `export iceberg --catalog rest` without `--warehouse` or without `--catalog-sigv4`, where the bucket is not known in advance or the catalog supplies the S3 settings.
+- **Uploads no longer send the snapshot folder's own files** (#2691). An upload of a whole folder of snapshots (the PostgreSQL baseline's `--upload`, `bintrail baseline --upload`, `bintrail upload --source`) sent the upload interval's marks (`.upload-held.<snapshot>`), and could send the Parquet of an interrupted cleanup's leftover (`.<snapshot>.pruning`) under a name no reader knows. Every upload now leaves out anything directly under a folder of snapshots whose name starts with a dot, which covers every mark, record, lock and work directory the folder uses, and any added later. A schema whose name starts with a dot, inside a snapshot, is still sent.
+- **An empty snapshot folder left by a stopped run is removed** (#2691). A run that stopped between creating a snapshot's folder and writing its first file left an empty folder that every cleanup kept as a snapshot being written. The cleanup now removes a folder named as a snapshot that has held no file at all for an hour, in every mode, and logs it. It removes empty directories only, so a file written into the folder meanwhile is never removed.
+- **A restore's result is marked before it is written** (#2691). The mark that keeps a restore's result for 24 hours was written after the snapshot, so a daemon that stopped between the two left the result unmarked and the next cleanup removed it by the count. The mark is now written when the restore starts, and every mark is written whole (to a temporary file renamed over it), so a cleanup in another process never reads one half-written. Until the snapshot is complete it keeps nothing and the previous restore's result keeps its own mark; a restore that ends without writing its snapshot removes it.
+- **A restore starts from the local folder when S3 has nothing for it** (#2691). On a server with an S3 destination, a restore to a moment failed when the bucket held no snapshot at or before the moment, or could not be reached, even with usable snapshots in the server's folder. It now starts from the folder's newest snapshot at or before the moment (never a later one), the result is sent to S3 (when the bucket could not be read, not in that run: the cleanup sends it later, skipping anything S3 already has, so a complete copy there is never replaced), and the last restore's line on the Snapshots page says it started from the local folder and why. The Restore card stays on in that case instead of saying there is no snapshot. A bucket that answers is still read first.
+- **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
+
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in
   another, every request bintrail made for the bucket through the AWS SDK
@@ -36,6 +333,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interface, `... and its S3 store in the web interface signs for region
   eu-west-1: set that store's region to us-east-1`. The region flags' help
   now says their default is the bucket's own region.
+- **The bucket region found on its own stays right** (#2698). A bucket deleted and created again in another region while bintrail runs kept the old region until a restart, and the 301 message suggested `AWS_REGION`, which did not help: a redirect on the region bintrail had found now drops it, the message says to retry, and the next client for the bucket asks again (one question per redirect, and a failed question still waits a minute). And a request with a deadline shorter than the 5 s limit of the question cut the question short and remembered nothing, so every such request waited again: the question now runs on its own, the request stops waiting at its deadline, and the answer is kept for the next one. Concurrent requests still share one question.
 - **Adding the first server turns the MySQL port on, with Engine Routing on** (#2686). `dbtrail server add` and the web interface's Connect screen used to leave nothing answering on port 3309: turning the port on and turning Engine Routing on were two more steps.
   - **What happens now.** When a server is added and nothing was ever saved about the port, the port is turned on with Engine Routing on, and the answer shows the `mysql` line and the port's password. That is the only time the password is shown.
   - **What does not change.** Only the first server does it. A port that was turned off stays off. An installation that already has servers and never turned the port on keeps it off when it adds one more after the upgrade. The web interface's long form does not turn it on. The port is still reachable from the machine only (`127.0.0.1:3309`), still read-only, and a server still needs a forwarding user before anything is sent to MySQL.
@@ -44,6 +342,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Logging.** The router says once per server, not once per connection, that a server has no forwarding user.
   - **A statement that needed forwarding says why.** On a server with no forwarding user, an `INSERT`, an `UPDATE` or another statement the copy cannot run gets error 1290 naming the missing forwarding user and how to set it, instead of the copy's "only a single SELECT statement can run here". Reads are answered from the copy as before.
   - **Permissions.** The port is turned on only for a session that may change settings and has no data access policy, the two things the port's own page asks for. Otherwise the server is added, the port is left as it was, and the answer says why.
+
+- **A snapshot S3 refuses to answer for no longer stops the count for the whole folder** (#2689). With an S3 destination and **Keep by count**, a failed question about one snapshot stopped every removal of the cleanup. Credentials without `s3:ListBucket` make S3 answer 403 instead of 404 for a copy it does not have, so a snapshot whose upload failed was refused at every cleanup, was never re-sent, and the folder grew by one snapshot per schedule interval. Now a 403 on one snapshot keeps that snapshot, lists it to be sent again, and lets the others go. When S3 refuses every question, the newest snapshots included, no snapshot that needs S3's answer is removed (a snapshot the schedule kept on this machine only still goes by the count, as it needs no answer) and the page says so, as for a bucket that does not answer. Network errors, timeouts and other failures still stop the cleanup as before. The same rule applies to a server pruned by age: a snapshot S3 refuses to answer for is now listed to be sent again instead of only counted as not checked.
+  - Sending a snapshot again no longer fails on a 403 when it checks which files are already in S3: it sends them. With **Delete from S3 after** set, the send also asks whether the S3 cleanup is removing that snapshot's folder, which needs `s3:ListBucket`; without it that send still fails and is tried again every hour.
+  - A snapshot S3 could not be asked about is sent again at most once an hour, even when the send succeeds, and the page says when the next send is.
+  - Credentials that may upload but not read (`s3:PutObject` without `s3:GetObject`): a snapshot that was sent again and is then refused again is not sent again. When that is every refused snapshot and S3 confirms none, the page says that S3 accepts uploads to the prefix but refuses to read them back, names `s3:GetObject`, and keeps the snapshots on this machine. Before, such a bucket had every snapshot it held sent again at each cleanup.
+  - The Snapshots page now says "S3 could not be asked whether it has it" for such a snapshot instead of "S3 does not have it complete", and shows when the next send is tried after one failed. Both were in the cleanup's record and did not reach the page.
+- **Clearer logs and messages around capture gaps** (#2669). When a daemon cannot answer one of the questions it asks before skipping a quiet server's snapshot update, its warning now carries the cause (a refused connection, a missing grant, a timeout) as `error=...`, where the cause was only logged at debug level. This covers all of them: whether anything was indexed, how far the index still reaches, how far back it keeps events, the retention it was created under, where a published snapshot's readers start, whether capture lost events, and, new, whether a table was created since the last snapshot, which folded every cycle with only a debug line. The update-size probe of the snapshot schedule carries the cause too. The webhook message sent when a capture loss is acknowledged said updates spanning it are refused "until a full snapshot is taken after it"; they stay refused, and it now says "snapshot updates and reconstructions whose window spans the loss are still refused, and a full snapshot taken after it is not affected". `docs/streaming.md` is corrected the same way.
+- **Three follow-ups to the skipped slot of a quiet server** (#2674).
+  - The rule that takes a full read when even the cheapest recent update took clearly longer than the last full read (more than twice, and over 30 s more) now applies on a server with a per-event rate too when the number of changes since the previous snapshot is unknown. Before, that server updated anyway: the estimate needs the count, and the rule asked for no rate. The log line about an unknown count now says `the exception is a server whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen` (it named a server with no per-event rate).
+  - The update that runs where a slot would have been skipped, because the snapshot cannot wait or the index did not give capture's record, keeps its reason on its run record (`update_why`, and `last_run.update_why` on `GET /api/baselines`). The Snapshots page says `This update ran because <reason>.` under the last run and in the snapshot's detail. Before, the reason was shown before the run and once in the log, and the run was recorded as an ordinary update. A version before this ignores the field.
+  - **Read database now** refused while another job held the server says which job and since when, for example `The full read did not start: a snapshot kept on this machine is being sent to S3 since 2026-11-12 10:00:05 UTC; the full read can start once it finishes.` It said `Snapshot failed: a baseline is already running for this server`, including while the only job was the send to S3 of a snapshot kept on this machine. The answer is still 409.
+- **Checked on a real server: capture cannot read by GTID from a source whose `gtid_mode` is not ON** (#2674). The snapshot schedule treats a quiet source whose `gtid_mode` is `OFF`, `OFF_PERMISSIVE` or `ON_PERMISSIVE`, while capture follows it by GTID, as one capture cannot read from (a full read), on the MySQL manual's rule for auto-position. On MySQL 8.0.46 in each of the three modes, the source refuses capture's request, and `bintrail stream` resuming from a GTID checkpoint exits, with `ERROR 1236 (HY000): The replication sender thread cannot start in AUTO_POSITION mode: this server has GTID_MODE = <mode> instead of ON.`; under `ON` it is served. Nothing changes in behaviour. An integration test pins it against a throwaway server named by `BINTRAIL_TEST_GTIDMODE_DSN` (it changes that server's `gtid_mode`, so it never runs against a shared one).
+- **Two saves at once no longer slip a folder or a stopped capture past each other** (#2675).
+  - The snapshot settings save decides **this folder already holds snapshots** under the registry's lock, with the folder and the count the write leaves. Before, it was decided on the count read before the lock, so a second save that raised **Keep by count** at that instant got a folder holding snapshots past the refusal, and the next cleanup removed all but the newest. A count set on the folder the request did not see (another save moved it meanwhile) is asked about the same way. The refusal reads as before, for example `the folder /srv/b already holds 1 snapshot, and with Keep the newest at 3 all but the newest 3 would be removed. Empty Keep the newest to keep them all, or choose another folder`.
+  - The connection form writes only the fields it changed, on the entry as it is now. It wrote most of the entry as it had read it, so a save made in between was undone: a folder changed on the Snapshots page came back, a capture stopped meanwhile was marked to run again, the SQL mirror's switch was put back. The folder it moves to is checked under the lock too.
+  - Stopping capture writes only its own field, now with a test of its own.
+- **A count of local snapshots saved by an older version is no longer applied after an upgrade** (#2675). A version from before the single count (0.129.0 and older) saves a **Keep by count** of 3 it does not use on a server it adds with an S3 destination. After a downgrade and an upgrade, that count applied and the server's local folder was pruned to 3. Every count beside an S3 destination now carries the count and the destination it was saved with (`local_keep_saved_with` in the server registry), and a count without that mark is cleared at start, as the upgrade to 0.130.0 cleared the counts that did nothing: the server keeps every local snapshot until you set **Keep by count**, and the daemon log names it (`servers with an S3 destination had a number of local snapshots to keep that never applied to them; it was cleared, so they keep every local snapshot as before. Set Keep by count on the Snapshots page to keep only the newest on this machine`). The registry's version does not change: an older version still reads and writes the file, keeps the mark on the servers it edits and writes none on the servers it adds. The first start of this version marks every count it finds as it is, so a downgrade made before it, or one that went through 0.130.0 to an older version, is not covered.
+- **A snapshot made from a shell is no longer published again under a new date while capture is stopped** (#2674). A snapshot made by `bintrail baseline` from a shell, or by another process, has no run record in the daemon, so its first scheduled update ran with the number of changes since it unknown, and with capture stopped that update published the snapshot's rows again under a new date. When that snapshot is past the age at which a quiet index is doubted (two hours or six schedule intervals), the daemon now compares the binary log coordinates its table files recorded (the GTID set, or the file and position) with capture's checkpoint. A checkpoint at or before them means capture recorded nothing since the snapshot, and the slot is decided as for a server that indexed nothing: the source is asked, comparing it with the snapshot's own GTID set (capture may have stopped before the snapshot was taken), so a source that wrote nothing past the snapshot gets the update, a source that wrote past it takes a full read, and a slot whose source cannot be asked is skipped. The log says it once: `snapshot schedule: the previous snapshot has no run record here, but the binary log position it was read at shows capture recorded nothing since it, so nothing was indexed since it; the slot is decided as for a quiet server`. A checkpoint past the snapshot, or coordinates that cannot be compared (a PostgreSQL source, a MariaDB GTID set, a snapshot with none, two binary logs of different names), leave the count unknown and the update runs, as before.
+- **Two follow-ups to the defaults of a server with an S3 destination** (#2675).
+  - Removing a server's S3 destination and adding one again keeps a **Send to S3 every** of each update. The registry now records, when the destination is removed, that the empty interval was in force beside it (`upload_each_update` in the schedule), and a destination added later leaves it as it is. Before, the empty interval read as never chosen, and the new destination started the default of once a day. An interval set after that ends the record. A server that never had a destination still starts at once a day.
+  - With `--baseline-refresh-interval`, the snapshots that loop writes on a server with an S3 destination, a count and a schedule of its own are marked as kept on this machine on purpose, like the updates the upload interval keeps back: the count removes them, the cleanup no longer sends them to the bucket (up to three per cleanup, a cost the 0.130.0 notes declared), and the schedule's next due upload sends the newest local snapshot, the loop's included. On a server with no schedule of its own they are sent by the cleanup, as in 0.130.0: held, nothing would ever send them and the bucket would stop receiving copies. Without a count (pruned by age alone) they are sent by the cleanup, as before. A mark that cannot be written is logged: `snapshot refresh: could not mark the snapshot of the refresh interval as kept on this machine; the cleanup will send it to S3 instead`.
 
 ## [0.130.0] - 2026-11-12
 

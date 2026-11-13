@@ -124,6 +124,21 @@ func SetSnapshotViewsRespeller(f func(ctx context.Context, snapshotDir, root str
 // file is skipped, with only a per-upload warning to say so.
 func SnapshotViewsRespellerArmed() bool { return snapshotViewsRespeller != nil }
 
+// retryExists is the retry's "is this object there already" (#2689). A
+// refusal (403) is "cannot tell", and the object is sent: credentials without
+// s3:ListBucket refuse a HEAD of a key that does not exist instead of
+// answering 404, so failing on it would make a snapshot whose upload failed
+// impossible to send again, and sending a file that is there already
+// rewrites the same bytes. Any other failure stays a failure.
+func retryExists(ctx context.Context, ops s3UploadOps, key string) (bool, error) {
+	exists, err := ops.objectExists(ctx, key)
+	if err != nil && storage.IsAccessDenied(err) {
+		slog.Debug("S3 refused the question whether this object is there (access denied); sending it", "key", key, "error", err)
+		return false, nil
+	}
+	return exists, err
+}
+
 // uploadWithOps performs the crash-safe upload ordering against ops. See the
 // Upload doc for the four-step contract it guarantees.
 func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, ops s3UploadOps) (int, error) {
@@ -133,7 +148,7 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 			return err
 		}
 		if retry {
-			exists, err := ops.objectExists(ctx, key)
+			exists, err := retryExists(ctx, ops, key)
 			if err != nil {
 				return err
 			}
@@ -197,6 +212,14 @@ func uploadWithOps(ctx context.Context, outputDir, prefix string, retry bool, op
 	var successMarkers []string
 	var jobs, alone []func(context.Context) (uploaded bool, err error)
 	err = filepath.WalkDir(outputDir, func(path string, d fs.DirEntry, walkErr error) error {
+		// What the folder keeps for itself (#2691): marks, records, locks,
+		// an interrupted prune's leftovers, and any of them added later.
+		if walkErr == nil && IsLocalOnly(outputDir, path) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		// The daemon's own work beside the snapshots (isDaemonWorkDir) is
 		// not snapshot data: an upload of the whole root left it in the
 		// bucket, where nothing reads it and no retention removes it.
@@ -421,7 +444,7 @@ func uploadRespelledViews(ctx context.Context, localPath, outputDir, prefix stri
 		return false, err
 	}
 	if retry {
-		exists, err := ops.objectExists(ctx, key)
+		exists, err := retryExists(ctx, ops, key)
 		if err != nil {
 			return false, err
 		}
@@ -524,6 +547,50 @@ func snapshotDirsWithSuccess(outputDir string) ([]string, error) {
 		}
 	}
 	return dirs, nil
+}
+
+// IsLocalOnly reports whether path, met while walking the upload root root,
+// is an entry the local folder keeps for itself, which no upload sends
+// (#2691): any file or directory directly under a root of snapshots whose
+// name starts with a dot. That is every mark beside the snapshots
+// (.upload-held.*, .restored.*, .restored.*.local-only), every record
+// (.last-prune.json, .cleanup-waiting.json, .resent-unconfirmed.json and the
+// rest, with their .tmp- files), the locks (.prune.lock, .current.lock), the
+// staging names of a prune or a discard (.<snapshot>.pruning,
+// .<snapshot>.discarding), the daemon's work directories (.resolved,
+// .compact), and any added later: a rule by name instead of a list, so a new
+// mark cannot reach the bucket for want of an entry here. A snapshot's own
+// name never starts with a dot, and neither does anything an operator puts
+// beside the snapshots to be sent (a views.sql). When root is itself a
+// snapshot (the daemon sends one at a time), what is directly under it is a
+// schema, which may start with a dot, and is sent.
+func IsLocalOnly(root, path string) bool {
+	root, path = filepath.Clean(root), filepath.Clean(path)
+	if path == root || filepath.Dir(path) != root || !strings.HasPrefix(filepath.Base(path), ".") {
+		return false
+	}
+	return !rootIsSnapshot(root)
+}
+
+// IsSnapshotsRoot reports whether root is a folder of snapshots: not a
+// snapshot itself, and holding at least one directory named as a snapshot.
+// A generic uploader (`bintrail upload`) applies IsLocalOnly only to such a
+// folder: on any other tree a dot-named directory is the operator's data.
+func IsSnapshotsRoot(root string) bool {
+	root = filepath.Clean(root)
+	if rootIsSnapshot(root) {
+		return false
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if _, ok := parseBaselineDirTimestamp(e.Name()); ok && e.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // isPointerArtifact reports whether path is the baselines root's `current`

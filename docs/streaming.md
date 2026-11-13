@@ -48,7 +48,7 @@ changes made from now on (row history and undo): a row nobody has touched
 since is not in it.
 
 DBTrail reads the source in full again later too: when a column is added,
-dropped, renamed or retyped, on a `TRUNCATE`, `DROP` or `RENAME` of a table,
+dropped, renamed, retyped or given another character set, on a `TRUNCATE`, `DROP` or `RENAME` of a table,
 and when a new table appears. So the account needs these privileges for as
 long as it is in use, not just on the first day.
 
@@ -286,7 +286,7 @@ When binlogs have been purged and the gap cannot be filled:
    ```
 2. The checkpoint is **immediately updated** to the new (advanced) position. This prevents a crash loop if the stream fails during startup — the next restart will not hit the same purged-binlog error.
 3. The stream resumes from the earliest available position.
-4. **The loss is recorded durably** — it is not just a log line that scrolls away. The gap is stamped in `stream_state` (`gap_lost_at` / `gap_lost_detail`), so `bintrail status` reports `Continuity: ⚠ GAP LOST` and a loud `=== ⚠ EVENTS PERMANENTLY LOST ===` banner from then on (and `stream.continuity.status: "gap_lost"` under `--format json`), even after the capture process has exited. The index up to the gap stays valid for recovery; resuming capture cleanly requires a re-baseline. To alert on this in CI/cron, run `bintrail status --fail-on-gap` (exits non-zero, fails closed). See [Rotation & Status](rotation-and-status.md#stream-continuity-no-data-lost). Nothing erases the record. Stopping the server in the web interface acknowledges it (`gap_acked_at`), which silences the alarm; a snapshot update or a reconstruction whose window spans the gap is still refused until a full snapshot is taken after it.
+4. **The loss is recorded durably** — it is not just a log line that scrolls away. The gap is stamped in `stream_state` (`gap_lost_at` / `gap_lost_detail`), so `bintrail status` reports `Continuity: ⚠ GAP LOST` and a loud `=== ⚠ EVENTS PERMANENTLY LOST ===` banner from then on (and `stream.continuity.status: "gap_lost"` under `--format json`), even after the capture process has exited. The index up to the gap stays valid for recovery; resuming capture cleanly requires a re-baseline. To alert on this in CI/cron, run `bintrail status --fail-on-gap` (exits non-zero, fails closed). See [Rotation & Status](rotation-and-status.md#stream-continuity-no-data-lost). Nothing erases the record. Stopping the server in the web interface acknowledges it (`gap_acked_at`), which silences the alarm. A snapshot update or a reconstruction whose window spans the gap is still refused, before and after the acknowledgement; a full snapshot taken after the gap is not affected, so updates from it run. `bintrail status` reports the acknowledged gap as `gap_acknowledged`, not `ok`, while the changes the index still holds reach it (see [Rotation & Status](rotation-and-status.md#stream-continuity-no-data-lost)).
 
 #### Known and accepted: duplicate rows after a GTID-mode auto-advance
 

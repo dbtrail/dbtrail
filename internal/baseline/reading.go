@@ -17,10 +17,10 @@ import (
 // and a .sql build (consoleapp s3PruneBusyFn); this is the same rule for the
 // local folder, asked by the prune itself so that no caller of it can forget.
 //
-// In memory, on purpose: a reader that dies with the process holds nothing,
-// and one in ANOTHER process is not seen (the command-line tools reading a
-// folder the daemon prunes get an error when their snapshot goes, and run
-// again).
+// In memory, on purpose: a reader that dies with the process holds nothing.
+// A reader in ANOTHER process is not seen here; it holds the one snapshot it
+// reads with HoldSnapshot (readhold_unix.go, #2675), which the prune of any
+// process honours.
 
 // readHoldLimit is how long one registration stops the prune. Past it the
 // reader is taken for stuck and the prune goes on: a job that never ends
@@ -129,6 +129,9 @@ func Reading(root string) string {
 type snapshotPin struct {
 	what  string
 	until time.Time
+	// counted marks a pin taken under the cap (PinCounted): a reader whose
+	// snapshot a client chooses. Only these count toward it.
+	counted bool
 }
 
 var pins = map[string]map[string]map[*snapshotPin]struct{}{} // root -> snapshot name -> pins; under readsMu
@@ -143,17 +146,17 @@ func PinSnapshot(root, name, what string, limit time.Duration) (release func()) 
 	key := readKey(root)
 	readsMu.Lock()
 	defer readsMu.Unlock()
-	return insertPinLocked(key, name, what, limit)
+	return insertPinLocked(key, name, what, limit, false)
 }
 
 // insertPinLocked adds one pin and returns what releases it. The caller
-// holds readsMu, so a check made under the same lock (PinDownload)
+// holds readsMu, so a check made under the same lock (PinCounted)
 // and this insert are one step.
-func insertPinLocked(key, name, what string, limit time.Duration) (release func()) {
+func insertPinLocked(key, name, what string, limit time.Duration, counted bool) (release func()) {
 	if limit <= 0 {
 		limit = readHoldLimit
 	}
-	p := &snapshotPin{what: what, until: time.Now().Add(limit)}
+	p := &snapshotPin{what: what, until: time.Now().Add(limit), counted: counted}
 	if pins[key] == nil {
 		pins[key] = map[string]map[*snapshotPin]struct{}{}
 	}
@@ -209,36 +212,44 @@ func Pinned(root string) []string {
 	return out
 }
 
-// downloadReader names a snapshot download's pin: the kind of reader the cap
-// below counts.
+// downloadReader names a snapshot download's pin.
 const downloadReader = "a snapshot download"
 
-// PinDownload pins the snapshot a download streams, under a cap on what the
-// downloads of one folder hold back from the cleanup together (#2678).
-// Anyone allowed to download can start as many as they like, and a download
-// lasts as long as its client takes, so without a cap downloads repeated at
-// will keep any number of old snapshots on the disk.
+// PinDownload is PinCounted for a snapshot download.
+func PinDownload(root, name string, limit time.Duration, kept map[string]bool, max, ceiling int) (release func(), ok bool) {
+	return PinCounted(root, name, downloadReader, limit, kept, max, ceiling)
+}
+
+// PinCounted pins a snapshot whose reader a client chooses, under a cap on
+// what those readers of one folder hold back from the cleanup together
+// (#2678): a snapshot download, and a read of one table at a past moment
+// (/api/reconstruct, the MCP reconstruct tool, `_snapshot` through the
+// port, #2691). Anyone allowed to start one can start as many as they like,
+// on any snapshot still there, so without a cap reads repeated at will keep
+// any number of old snapshots on the disk. They share ONE cap: counted
+// apart, each kind would add its own.
 //
 // kept are the snapshots the cleanup keeps NOW whatever readers there are
 // (KeptNow), read just before this call. The cap is worked out on that
-// current state, not on what a snapshot was when its download started: a
+// current state, not on what a snapshot was when its reader started: a
 // download of the newest snapshot holds nothing back at first, and five
 // minutes later it is the only thing keeping a snapshot past the count.
 //
-//   - Another download of a snapshot a download already pins: let in. It
+//   - Another reader of a snapshot such a reader already pins: let in. It
 //     keeps nothing more on the disk.
-//   - Any other snapshot: refused once the downloads pin ceiling different
+//   - Any other snapshot: refused once these readers pin ceiling different
 //     snapshots in all. A snapshot the cleanup keeps today is past the
 //     count a few minutes on, so every pin counts toward this.
 //   - A snapshot past what the cleanup keeps: also refused once max such
-//     snapshots are pinned by downloads.
+//     snapshots are pinned by these readers.
 //
-// So the downloads of a folder never pin more than ceiling snapshots, and
-// that is the most they can hold back from the cleanup, however many
-// requests are made and for however long.
+// So the readers of a folder that count never pin more than ceiling
+// snapshots, and that is the most they can hold back from the cleanup,
+// however many requests are made and for however long. A pin taken with
+// PinSnapshot (a SQL statement, an Explain) does not count.
 // The count and the insert are ONE step under the lock: requests arriving
 // together must not all pass the check before any of them is counted.
-func PinDownload(root, name string, limit time.Duration, kept map[string]bool, max, ceiling int) (release func(), ok bool) {
+func PinCounted(root, name, what string, limit time.Duration, kept map[string]bool, max, ceiling int) (release func(), ok bool) {
 	if root == "" || name == "" || strings.HasPrefix(root, "s3://") {
 		return func() {}, true
 	}
@@ -249,7 +260,7 @@ func PinDownload(root, name string, limit time.Duration, kept map[string]bool, m
 	total, past, already := 0, 0, false
 	for n, set := range pins[key] {
 		for p := range set {
-			if p.what == downloadReader && now.Before(p.until) {
+			if p.counted && now.Before(p.until) {
 				total++
 				if !kept[n] {
 					past++
@@ -264,10 +275,22 @@ func PinDownload(root, name string, limit time.Duration, kept map[string]bool, m
 		// Holds nothing more.
 	case total >= ceiling:
 		// A rule of its own, asked first and of every snapshot not already
-		// pinned: downloads never pin more than ceiling snapshots.
+		// pinned: these readers never pin more than ceiling snapshots.
 		return func() {}, false
 	case !kept[name] && past >= max:
 		return func() {}, false
 	}
-	return insertPinLocked(key, name, downloadReader, limit), true
+	return insertPinLocked(key, name, what, limit, true), true
+}
+
+// HoldSnapshotOfTable is HoldSnapshot for the snapshot a table file of it
+// lives in: <root>/<snapshot>/<schema>/<table>.parquet, the path
+// reconstruct.FindBaseline returns.
+func HoldSnapshotOfTable(tablePath string) (release func(), gone bool) {
+	// Any URL (s3://, file://, http://) is read unheld: only a plain local
+	// path names a folder whose marker can be held.
+	if tablePath == "" || strings.Contains(tablePath, "://") {
+		return func() {}, false
+	}
+	return HoldSnapshot(filepath.Dir(filepath.Dir(tablePath)))
 }

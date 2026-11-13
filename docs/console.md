@@ -604,7 +604,9 @@ page.
   the `mysql` line to connect. Run again it does not print the
   password: `port new-password` makes another, and the old one stops working
   within a few seconds. `port status`, `port off`, and `port routing on|off`
-  for Engine Routing complete it. A port saved as on that is not answering
+  for Engine Routing complete it. `port mode <server>` says whether a
+  server's answers are fresh or fast, and what the router applies; `port mode
+  <server> fresh|fast` saves the choice (what the Snapshots page saves). A port saved as on that is not answering
   (the router is not running) exits 1 and says so.
 
 **The forwarding user.** With Engine Routing on, a statement the copy cannot
@@ -742,9 +744,10 @@ its login file somewhere a command would not look.
 
 These commands send a database password, so they are strict about where:
 
-- They read the environment of the shell they run in, and not `.bintrail.env`
-  or `~/.config/bintrail/config.env`, which every other command loads. A file
-  in the folder you happen to be in does not get to say where DBTrail is.
+- They read the environment of the shell they run in and
+  [`/etc/dbtrail/dbtrail.cnf`](./option-file.md), and not `.bintrail.env` or
+  `~/.config/bintrail/config.env`, which every other command loads. A file in
+  the folder you happen to be in does not get to say where DBTrail is.
 - Without `--url` they only talk to this machine.
 - `--url` reaches a DBTrail on another machine, with `BINTRAIL_CONSOLE_TOKEN`
   as its token. The token in `console-cli.json` belongs to the DBTrail of this
@@ -1121,16 +1124,31 @@ saved, shown with the reason `serve` is not running it.
   backup, no full backup is chosen on the estimate and the update runs,
   however old the previous snapshot is: its age says nothing about the
   size of the source, which is what a full backup costs. The rule of the
-  cheapest recent update, above, needs no count, so on a server with no
-  per-event rate that has measured an update since its last full backup it
-  still applies with an unknown count. The count is unknown when the
+  cheapest recent update, above, needs no count, so on a server that has
+  measured an update since its last full backup it still applies with an
+  unknown count, with or without a per-event rate (#2674). The count is unknown when the
   index does not answer the probe, when nothing on record says how far
   the index had been written at the previous snapshot (the run history
   does not hold it, or another process made the snapshot; an index that
   held no event then is on record as zero, and counts), when the
   server was pointed at another index, or when the index was rebuilt;
   the daemon log says which, once per cause, and that the update runs
-  with no estimate of its cost. After a long stop that update applies
+  with no estimate of its cost. A snapshot with no record (one made by
+  `bintrail baseline` from a shell, or by another process) still says
+  where in the source's binary log it was read: its table files carry the
+  GTID set or the file and position. Past that age, when capture's
+  checkpoint is at or before those coordinates, capture recorded nothing
+  since the snapshot, and the slot is decided as for a server that indexed
+  nothing (#2674, below): the source is asked, compared with the
+  snapshot's own GTID set (capture may have stopped before the snapshot
+  was taken, and the snapshot holds what capture missed), and a slot whose
+  source cannot be asked is skipped rather than updated. A source that
+  wrote nothing past the snapshot gets the update, one that wrote past it
+  a full read. Without that, the first update of such a snapshot published
+  its rows again under a new date while capture was stopped. Coordinates
+  that cannot be compared (a PostgreSQL source, a MariaDB GTID set, a
+  snapshot with none, two binary logs of different names) leave the count
+  unknown. After a long stop that update applies
   everything recorded since the previous snapshot. It reads those changes
   a page at a time and keeps the changed rows on disk past a limit, so
   its memory stays bounded, and nothing bounds how long it runs. It is
@@ -1210,7 +1228,10 @@ saved, shown with the reason `serve` is not running it.
   index that did not answer in time from a read that failed). Which one
   is said before the run, in `next_method_why`, and once in the daemon
   log, which words it as the end of the skipped stretch; the update's own
-  run record carries no reason (`last_run.why` is for full backups). The
+  run record keeps it too (#2674), in `last_run.update_why` (and the run
+  record's `update_why`), apart from `last_run.why`, which is for full
+  backups: the card says "This update ran because ..." under the last run,
+  and so does the snapshot's detail. The
   update also runs when the index itself did not give the capture's
   record (it did not answer, or not in time, or `stream_state` could not
   be read; the probe's time limit covers both servers, and it says which
@@ -1218,7 +1239,12 @@ saved, shown with the reason `serve` is not running it.
   an update with nothing to add publishes no snapshot, so the next slot
   asks again. While a kept snapshot is being sent to S3 the refresh slot
   is busy and the page says "Sending a snapshot kept on this machine to
-  S3" (`refresh.sending_held`). Stopping a source from the web interface
+  S3" (`refresh.sending_held`). **Read database now** is refused meanwhile,
+  as it is during any other job on the server (one job per server), and
+  the refusal names that job and since when (#2674): "The full read did
+  not start: a snapshot kept on this machine is being sent to S3 since
+  ... UTC; the full read can start once it finishes." Before, it said "a
+  baseline is already running for this server" whatever held it. Stopping a source from the web interface
   acknowledges its capture-gap record and does not erase it: the Stop
   stamps the time of the acknowledgement beside the record
   (`stream_state.gap_acked_at`), which silences the alarm (the
@@ -1377,7 +1403,10 @@ longer drawn on the page.
   did not send to S3 was never meant for the bucket, so it goes by the count
   alone, without waiting for S3; and when S3 cannot be asked the cleanup
   removes no snapshot that was sent to S3 and the list says so in red. The
-  list marks each snapshot that goes at the next cleanup. A server whose S3
+  list marks each snapshot that goes at the next cleanup, worked out by the
+  cleanup's own rule (#2675): past the count and, with **Delete by age**
+  set, older than that age too, never the newest copy of a table, the
+  `current` target or the last restore's result. A server whose S3
   location is also another server's is not pruned to a count, since S3 could
   answer for the other server's snapshot: its card says so and names the way
   out, a prefix of its own. Giving a server its first S3 destination while
@@ -2139,6 +2168,13 @@ server's statements instead of serving without it.
   address: `BINTRAIL_METRICS_ADDR` is the capture process's, and two processes
   cannot serve one address. The compose stack sets `:9091` and the packages
   `127.0.0.1:9091`.
+- `BINTRAIL_ROUTER_TLS_CERT` and `BINTRAIL_ROUTER_TLS_KEY` (`router` only):
+  same as `router --tls-cert` and `--tls-key`: a certificate and its key (PEM
+  files) the MySQL port offers to clients that ask for TLS, so they can
+  verify it. Both or neither; a pair that cannot be used stops the router
+  at startup. Unset, the port offers TLS with a certificate made up at start,
+  which no client can verify. See
+  [TLS on the port](time-travel-sql.md#tls-on-the-port).
 - `BINTRAIL_CONSOLE_ROUTER_URL` (`watch` only): same as `--router-url`: the
   address the router serves its metrics on (e.g. `http://127.0.0.1:9091`).
   Given it, the MySQL clients page shows the router's numbers for the server
@@ -2691,7 +2727,7 @@ All endpoints return JSON except `GET /api/views.sql`, which serves a SQL file. 
 | `POST /api/auth/password` | Set (first time; requires static-token auth) or rotate (`current_password` verified) the password. Revokes all sessions and returns a fresh one. |
 | `GET /api/status` | Index status (same payload as `bintrail status --format json`). For a session with restricted data access, the capture-health detail names only the tables that session may read; `tables_withheld` counts the rest and the counts stay whole. |
 | `GET /api/capacity` | The doctor's index disk-capacity check for the selected server: `{status, reason, retention: {known, retain, source, enabled}, measured, sample_hours, current_bytes, events_per_day, bytes_per_event, growth_bytes_per_day, projected_bytes, remaining_bytes, free_known, free_bytes, free_space_days_at_write_rate, days_until_full}`. `status` is `pass`/`warn`/`fail`/`skip` as `bintrail doctor` grades it; `reason` names the branch (`ok`, `headroom_low`, `free_under_floor`, `growth_exceeds_free`, `no_retention`, `rotation_paused`, `free_unknown`, `retention_unknown`, `not_enough_history`, `not_initialized`). `rotation_paused` is a warning: rotation is on, but the selected server's index holds history far older than the window it would keep and nobody chose a retention, so the loop deletes nothing until someone does (the [upgrade guard](./rotation-and-status.md)); `retention.drops_paused` is then `true`, `retention.oldest_history` says how far back that history goes, and `retention.retain` is the window the index would keep, not one in force. Rate and projection fields are absent while `measured` is false; `free_bytes` is meaningful only when `free_known`; `retention.known` is false on standalone `serve`. `status` and `reason` are the verdict; the two day figures are not. `free_space_days_at_write_rate` is the free space divided by the gross daily write rate: how long it lasts if rotation frees nothing, which is what the `free_under_floor` warning measures. It is not a date the disk fills, since under a retention window rotation frees space first and an index at its steady size does not grow. `days_until_full` is the same number and is present only when nothing bounds the index (no retention window, or `rotation_paused`), the cases where it is a forecast. `502` when the partition statistics cannot be read. |
-| `GET /api/coverage` | Live RPO summary from the index alone: restorable delta window `[delta_from, delta_to]`, `lag_seconds`, `continuity` (`ok`, `gap_lost`, `gap_acknowledged`, `unknown`, `unavailable` or `none`), `freshness` and `checkpoint_age_seconds`. `gap_acknowledged: {at, acknowledged_at}` is present with `continuity: "gap_acknowledged"`: when changes were lost and when that was acknowledged. That verdict lasts from `delta_from` on: while the loss is at or after `delta_from` it stays on record, including a loss after `delta_to`, and once `delta_from` is after it, `continuity` is `ok` again (an unknown `delta_from`, or one archives may extend further back, keeps it on record). `GET /api/status` and `bintrail status` apply the same rule to `stream.continuity.status`. `lag_growth: {grown_seconds, over_seconds, indexing}` is present when the gap between the source and the index widened by at least two minutes, and by at least a fifth of the time that passed, over coverage reads at least four minutes apart (kept per server for 15 minutes, fed by every read of this endpoint), and was still widening over the last minute or more ([#2201](https://github.com/dbtrail/dbtrail/issues/2201)). The growth is the time that passed on this machine minus how far the newest indexed change moved, so a constant offset between the two clocks cancels out. It is a trend over reads, not a verdict: a source nobody writes to widens the same gap, so the Overview shows it only when `GET /api/capture-status` calls capture `behind`, or when `indexing` is true (the newest indexed change kept moving forward, and the gap measured at the reads where it had just moved still grew by the same two-minute and one-fifth rule: capture is indexing, only slower than the source writes; a capture that keeps up with a source writing now and then has next to no gap at those reads) and `freshness` is `current` or `idle`. It reads no backup location ([#1850](https://github.com/dbtrail/dbtrail/issues/1850)): per-snapshot staleness is on the Snapshots page (`GET /api/baselines`, bounded to its window) and in `bintrail status`. |
+| `GET /api/coverage` | Live RPO summary from the index alone: restorable delta window `[delta_from, delta_to]`, `lag_seconds`, `continuity` (`ok`, `gap_lost`, `gap_acknowledged`, `unknown`, `unavailable` or `none`), `freshness` and `checkpoint_age_seconds`. `gap_acknowledged: {at, acknowledged_at}` is present with `continuity: "gap_acknowledged"`: when changes were lost and when that was acknowledged. That verdict lasts while the index or its archives still hold a change from the moment of the loss or earlier: a loss at or after `delta_from` stays on record, including a loss after `delta_to`, and so does an older one while archived hours separated from the index by a stretch never archived, or events older than the partition that holds them, still reach back to it. Once nothing held is that old, `continuity` is `ok` again (an unknown `delta_from`, or one archives may extend further back, keeps it on record). `GET /api/status` and `bintrail status` apply the same rule to `stream.continuity.status`. `lag_growth: {grown_seconds, over_seconds, indexing}` is present when the gap between the source and the index widened by at least two minutes, and by at least a fifth of the time that passed, over coverage reads at least four minutes apart (kept per server for 15 minutes, fed by every read of this endpoint), and was still widening over the last minute or more ([#2201](https://github.com/dbtrail/dbtrail/issues/2201)). The growth is the time that passed on this machine minus how far the newest indexed change moved, so a constant offset between the two clocks cancels out. It is a trend over reads, not a verdict: a source nobody writes to widens the same gap, so the Overview shows it only when `GET /api/capture-status` calls capture `behind`, or when `indexing` is true (the newest indexed change kept moving forward, and the gap measured at the reads where it had just moved still grew by the same two-minute and one-fifth rule: capture is indexing, only slower than the source writes; a capture that keeps up with a source writing now and then has next to no gap at those reads) and `freshness` is `current` or `idle`. It reads no backup location ([#1850](https://github.com/dbtrail/dbtrail/issues/1850)): per-snapshot staleness is on the Snapshots page (`GET /api/baselines`, bounded to its window) and in `bintrail status`. |
 | `GET /api/capture-status` | Whether capture has read everything the selected server's source wrote ([#1794](https://github.com/dbtrail/dbtrail/issues/1794)): `{server_id, state, detail, retry_in_seconds}`. `state` is `up_to_date`, `behind` or `unknown`. From the index alone a server nobody writes to and a capture that fell behind look the same, so under `watch` the daemon asks the source: it compares the GTID set capture has saved with the source's `@@GLOBAL.gtid_executed` (`@@GLOBAL.gtid_binlog_pos` on a MariaDB source). `up_to_date` means the two sets are equal. `behind` is said only on a second read, when the source holds more than one transaction capture has not recorded and a position saved since the first read still does not hold what the source had then. Everything else is `unknown`, with the reason in `detail`: the read-only `serve`, a server with no source, a capture in binlog-position mode, PostgreSQL sources, a MariaDB source whose position is not exactly the capture's (a MariaDB source is never called `behind`), an index on the source server, tagged GTIDs, a source ahead only by transactions in its `@@GLOBAL.gtid_purged` (for example after loading a `mysqldump` taken on another server, which sets it; no binlog carries those, so capture can never read them), a source one transaction ahead (a `GRANT` or another statement with no rows is recorded when the next transaction arrives), and a read that failed or took over three seconds. `unknown` is never shown as up to date or as behind. The Overview asks after the coverage card is drawn, and only while capture is idle. The daemon keeps each answer for 30 seconds and runs one read at a time per server, so the source is read at most twice a minute per server however many tabs are open (three times while a first read that found the source ahead is being confirmed), and in practice once per coverage read, which is every five minutes on an idle server. Each read opens one connection to the source and runs two `SELECT`s of global variables (one on a MariaDB source). Dropped rows and lost events do not change this answer: the continuity chip and the capture health list say those. |
 | `GET /api/schemas` | Schemas known to the index: those observed in `binlog_events` **plus** those in the latest schema snapshot, so a schema whose partitions have all been rotated out to Parquet/S3 is still listed (the archives still answer `/api/events` and `/api/recover`). `schemas` is that full union; `snapshot_only` (when present) is the subset with no live events observed — the UI labels these "snapshot only" since queries against them may return nothing; `snapshot_unavailable: true` means the snapshot half was skipped because the schema resolver failed to load (check the server log), so archive-only schemas may be missing from the list. The snapshot half is skipped under `--no-archive` or an active `--profile`, where archived data is unreachable anyway. Note this answers *which schemas this index knows of*, not *which have data in a given window* — for that, see `bintrail status`'s continuity verdict. `?schema=<name>` → that schema's tables. |
 | `GET /api/events` | Event browser. Query params: `schema, table, pk, event_type, gtid, since, until, changed_column, order, limit, limit_per_pk` plus the `after`/`before` keyset cursors. `limit_per_pk` keeps only the latest N events per row, requires `pk`, and is **refused alongside a cursor**: it is a whole-result-set cap, so paging would re-anchor it to each page's remainder. `scope=live` serves the **live index only** and answers immediately (the UI's phase 1: rows in `binlog_events` are milliseconds away, an archive scan can take tens of seconds); the response then carries `scope: "live"` and `archives_pending` (never omitted; `false` is a meaningful answer). `true` means registered archives were **not** read and a follow-up full read is required before the list is complete (the warning says so, loudly); `false` means no follow-up read would add anything: either nothing is registered, or the archives are excluded for this daemon/session (a session profile always announces itself; a --no-archive daemon announces only when the window has gaps to point at). Anything else in `scope` is a 400, never a silent full read. |

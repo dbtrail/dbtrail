@@ -53,6 +53,11 @@ type PGLiveConfig struct {
 	// DuckDBTuning is the resource budget for the baseline-merge DuckDB
 	// session the reconstruct step opens — see Config.DuckDBTuning.
 	DuckDBTuning duckdbutil.Tuning
+	// CoverageWait bounds how long a check whose snapshot is pinned waits,
+	// per table, for a running capture to reach the snapshot's consistent
+	// point (#2198; see waitIndexCoversPG). Zero means DefaultCoverageWait;
+	// negative means do not wait.
+	CoverageWait time.Duration
 }
 
 // PGTargetTables returns the tables a PostgreSQL live-source (or
@@ -116,16 +121,22 @@ func pgNormalizeRenderedBytes(raw []byte) []byte {
 //   - The delta window starts at the baseline's LSN floor and recorded bound
 //     (reconstruct.PGDeltaWindow, #1596; positions compare as numbers since
 //     #2446): from the snapshot's time alone, a commit that raced the
-//     snapshot's start was left out and read as a mismatch. It has no upper
-//     position bound (#2198). baselineFetchOptions still reads by time.
+//     snapshot's start was left out and read as a mismatch. It ends at the
+//     snapshot (pgLiveDeltaOptions). baselineFetchOptions still reads by time.
 //   - Coverage is checked against the stream's LSN checkpoint
 //     (indexCoversPG), which can PROVE coverage but not always disprove it —
 //     see pgCoverageVerdict for the honest degradation.
 //
-// Unlike VerifyTable since #2150, the reconstruction is NOT cut at the
-// snapshot's position: writes committed between the snapshot opening and the
-// reconstruct's Until surface as a (safe, conclusive) mismatch, so the table
-// must take no writes during the read. #2198 tracks the PG cut.
+// Writes during the check (#2198): the source is read at the snapshot a
+// temporary logical slot exported (consistency.AnchorPGSlot), which holds
+// exactly the transactions committed before the slot's consistent point, and
+// the reconstruction stops at the same point: every PostgreSQL row event
+// carries its commit LSN in end_pos, so the cut is `end_pos < consistent
+// point` by number, on the index and on the archives alike. A table with
+// steady writes then compares equal. When the slot cannot be had (the role
+// lacks REPLICATION, no free slot, ...) the read is cut at the time the scan
+// ended, as before #2198, and every verdict says so: a write to the table
+// during the read shows as a mismatch.
 func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) (TableResult, error) {
 	res := TableResult{Schema: schema, Table: table}
 
@@ -143,7 +154,13 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	if cfg.SourceChecksum == nil {
 		return res, fmt.Errorf("source checksum %s.%s: no PostgreSQL source checksum wired (see PGSourceChecksum; internal/pgverifysource.LiveSource provides it)", schema, table)
 	}
+	// openedBy is taken before the snapshot opens: the baseline the
+	// reconstruction starts from must be older than the read (step 2).
+	openedBy := time.Now().UTC()
 	src, err := cfg.SourceChecksum(ctx, schema, table, pgNormalizeRenderedBytes)
+	if errors.Is(err, consistency.ErrPGSnapshotWait) {
+		return inconclusive(res, err.Error()), nil
+	}
 	if err != nil {
 		return res, fmt.Errorf("source checksum %s.%s: %w", schema, table, err)
 	}
@@ -159,26 +176,62 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	res.SourceRows = src.RowCount
 	res.Anchor = fmt.Sprintf("LSN:%d", src.LSN) // same label form as anchorLabel's pg branch
 	asOf := time.Now().UTC()
+	// cutLSN is where the reconstruction stops (0 = not cut), and
+	// unpinnedNote is carried on every verdict when it is not.
+	var (
+		cutLSN       uint64
+		unpinnedNote string
+	)
+	if src.Anchor == consistency.AnchorPGSlot {
+		cutLSN = src.LSN
+	} else {
+		why := src.AnchorUnpinned
+		if why == "" {
+			why = "the source reader did not pin the snapshot"
+		}
+		unpinnedNote = unanchoredNote(why)
+	}
 
-	// 2. Find the baseline at-or-before asOf — identical to the MySQL path.
-	// Found BEFORE the coverage check (the MySQL path's opposite order)
-	// because the PG gap_lost verdict is scoped to the comparison window,
-	// whose start is this baseline's snapshot time.
-	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, cfg.BaselineSource, schema, table, asOf)
+	// 2. Find the baseline at-or-before the read opened: one taken while the
+	// table was being read is newer than the snapshot it is compared with
+	// (the MySQL path's rule since #2150). Found BEFORE the coverage check
+	// (the MySQL path's opposite order) because the PG gap_lost verdict is
+	// scoped to the comparison window, whose start is this baseline's
+	// snapshot time. Held until this table is checked (#2675), as on the
+	// MySQL path.
+	baselinePath, snapshotTime, _, releaseBaseline, err := reconstruct.FindBaselineHeld(ctx, cfg.BaselineSource, schema, table, openedBy)
 	if err != nil {
 		if isNoBaseline(err) {
-			return inconclusive(res, "no baseline at-or-before the snapshot; reconstruct would omit never-touched rows"), nil
+			return inconclusive(res, withNote("no baseline at-or-before the snapshot; reconstruct would omit never-touched rows", unpinnedNote)), nil
 		}
 		return res, fmt.Errorf("find baseline %s.%s: %w", schema, table, err)
 	}
+	defer releaseBaseline()
 
 	// 3. Coverage: has the index durably absorbed everything the snapshot
 	// reflects? Inconclusive when provably not (or when events were
 	// permanently lost inside the window); a note when it cannot be proven
-	// either way.
-	covered, coverageNote := indexCoversPG(ctx, cfg.IndexDB, src.LSN, snapshotTime)
+	// either way. With the read cut at the snapshot, a running capture is a
+	// few seconds behind it on a table with writes, so the check waits for it.
+	var (
+		covered      bool
+		coverageNote string
+		lastEventAt  time.Time
+	)
+	if cutLSN != 0 {
+		wait := cfg.CoverageWait
+		if wait == 0 {
+			wait = DefaultCoverageWait
+		}
+		covered, coverageNote, lastEventAt, err = waitIndexCoversPG(ctx, cfg.IndexDB, cutLSN, snapshotTime, wait)
+		if err != nil {
+			return res, fmt.Errorf("wait for the index to reach the snapshot of %s.%s: %w", schema, table, err)
+		}
+	} else {
+		covered, coverageNote = indexCoversPG(ctx, cfg.IndexDB, src.LSN, snapshotTime)
+	}
 	if !covered {
-		return inconclusive(res, coverageNote), nil
+		return inconclusive(res, withNote(coverageNote, unpinnedNote)), nil
 	}
 
 	// 4. Latest event per PK from the baseline's floor to asOf (see the
@@ -193,17 +246,16 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	if err != nil {
 		return res, fmt.Errorf("%s.%s: %w", schema, table, err)
 	}
-	deltaOpts := query.Options{
-		Schema:     schema,
-		Table:      table,
-		Since:      &deltaSince,
-		SincePos:   deltaFrom,
-		Until:      &asOf,
-		LimitPerPK: 1,
+	// With the cut, the time bound is only the coarse one, and it must not
+	// drop a change the snapshot holds that the source's clock stamped past
+	// this host's asOf: the capture's last indexed change, stamped by the
+	// source, is at or past every change below the cut (liveReadUntil, the
+	// MySQL path's rule).
+	until := asOf
+	if cutLSN != 0 {
+		until = liveReadUntil(asOf, lastEventAt)
 	}
-	if deltaProven {
-		deltaOpts = deltaOpts.SinceProven()
-	}
+	deltaOpts := pgLiveDeltaOptions(schema, table, deltaSince, deltaFrom, deltaProven, until, cutLSN)
 	engine := query.New(cfg.IndexDB)
 	rows, _, err := query.FetchMerged(ctx, cfg.IndexDB, engine, query.FetchMergedOptions{
 		Opts:           deltaOpts,
@@ -214,7 +266,7 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	if err != nil {
 		var gap *query.GapError
 		if errors.As(err, &gap) {
-			return inconclusive(res, "coverage gap in the reconstruction window: "+gap.Error()), nil
+			return inconclusive(res, withNote("coverage gap in the reconstruction window: "+gap.Error(), unpinnedNote)), nil
 		}
 		return res, fmt.Errorf("fetch changes %s.%s: %w", schema, table, err)
 	}
@@ -242,7 +294,7 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	for _, name := range src.Columns {
 		cm, ok := colByName[name]
 		if !ok {
-			return inconclusive(res, fmt.Sprintf("source column %q is absent from the index schema snapshot (DBTrail snapshots a relation when it first streams it); stream an event for this table so the relation is re-published", name)), nil
+			return inconclusive(res, withNote(fmt.Sprintf("source column %q is absent from the index schema snapshot (DBTrail snapshots a relation when it first streams it); stream an event for this table so the relation is re-published", name), unpinnedNote)), nil
 		}
 		orderedCols = append(orderedCols, cm)
 	}
@@ -302,7 +354,35 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	default:
 		res.Detail = detail
 	}
+	res.Detail = withNote(res.Detail, unpinnedNote)
 	return res, nil
+}
+
+// pgLiveDeltaOptions is the delta fetch of a PostgreSQL live-source check:
+// the window from the baseline (since, from, proven: reconstruct.PGDeltaWindow)
+// to asOf, the latest change per row. With cutLSN != 0 (the consistent point
+// of the slot whose snapshot was read) it also stops strictly before cutLSN:
+// UntilPos is at-or-before, so it is cutLSN-1, spelled as an LSN (a File with
+// a slash) so that both tiers compare end_pos by number (query.BinlogPos.IsLSN);
+// a File without one would take the binlog-file rule and match nothing.
+// A commit record can start exactly at the consistent point, and that
+// transaction is not in the snapshot, hence strict.
+func pgLiveDeltaOptions(schema, table string, since time.Time, from *query.BinlogPos, proven bool, asOf time.Time, cutLSN uint64) query.Options {
+	opts := query.Options{
+		Schema:     schema,
+		Table:      table,
+		Since:      &since,
+		SincePos:   from,
+		Until:      &asOf,
+		LimitPerPK: 1,
+	}
+	if cutLSN != 0 {
+		opts.UntilPos = &query.BinlogPos{File: formatLSN(cutLSN - 1), Pos: cutLSN - 1}
+	}
+	if proven {
+		opts = opts.SinceProven()
+	}
+	return opts
 }
 
 // indexCoversPG reads the stream checkpoint and applies pgCoverageVerdict —
@@ -318,26 +398,153 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 // follow. Same window-scoping convention as `verify --check recover` ("a
 // stamped gap_lost_at inside the window degrades to inconclusive").
 func indexCoversPG(ctx context.Context, indexDB *sql.DB, anchorLSN uint64, windowStart time.Time) (bool, string) {
+	st, err := readPGStreamPoint(ctx, indexDB)
+	if err != nil {
+		return false, err.Error()
+	}
+	return st.verdict(anchorLSN, windowStart)
+}
+
+// pgStreamPoint is the PostgreSQL capture's saved position as stream_state
+// holds it.
+type pgStreamPoint struct {
+	flavor     string
+	checkpoint uint64 // 0 = none saved
+	gapLostAt  sql.NullTime
+	gapDetail  string
+	// age is how long ago the checkpoint was saved, by the index server's
+	// clock (the one that stamped it); savedAt is the stamp itself, to tell
+	// two saves apart.
+	age     sql.NullInt64
+	savedAt string
+	// lastEvent is the source's stamp of the newest change the capture
+	// indexed (zero when none).
+	lastEvent time.Time
+}
+
+// readPGStreamPoint reads pgStreamPoint. Its errors are already worded as
+// the verdict's reason (inconclusive, never a false mismatch).
+func readPGStreamPoint(ctx context.Context, indexDB *sql.DB) (pgStreamPoint, error) {
 	var (
+		st        pgStreamPoint
 		flavor    sql.NullString
 		pos       sql.NullInt64
-		gapLostAt sql.NullTime
 		gapDetail sql.NullString
+		savedAt   sql.NullString
+		lastEvent sql.NullTime
 	)
 	err := indexDB.QueryRowContext(ctx,
-		"SELECT flavor, binlog_position, gap_lost_at, gap_lost_detail FROM stream_state WHERE id = 1").
-		Scan(&flavor, &pos, &gapLostAt, &gapDetail)
+		"SELECT flavor, binlog_position, gap_lost_at, gap_lost_detail, TIMESTAMPDIFF(SECOND, last_checkpoint, UTC_TIMESTAMP()), CAST(last_checkpoint AS CHAR), last_event_time FROM stream_state WHERE id = 1").
+		Scan(&flavor, &pos, &st.gapLostAt, &gapDetail, &st.age, &savedAt, &lastEvent)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, "index has no stream state yet (DBTrail not running or never checkpointed)"
+		return st, errors.New("index has no stream state yet (DBTrail not running or never checkpointed)")
 	}
 	if err != nil {
-		return false, "could not read index coverage: " + err.Error()
+		return st, errors.New("could not read index coverage: " + err.Error())
 	}
-	var checkpoint uint64
+	st.flavor, st.gapDetail, st.savedAt = flavor.String, gapDetail.String, savedAt.String
+	if lastEvent.Valid {
+		st.lastEvent = lastEvent.Time.UTC()
+	}
 	if pos.Valid && pos.Int64 > 0 {
-		checkpoint = uint64(pos.Int64)
+		st.checkpoint = uint64(pos.Int64)
 	}
-	return pgCoverageVerdict(flavor.String, checkpoint, anchorLSN, gapLostInWindow(gapLostAt, windowStart), gapDetail.String)
+	return st, nil
+}
+
+func (st pgStreamPoint) verdict(anchorLSN uint64, windowStart time.Time) (bool, string) {
+	return pgCoverageVerdict(st.flavor, st.checkpoint, anchorLSN, gapLostInWindow(st.gapLostAt, windowStart), st.gapDetail)
+}
+
+// waitIndexCoversPG is indexCoversPG for a read cut at the snapshot's
+// consistent point (#2198), waiting up to wait while the only thing the
+// verdict lacks is the capture reaching that point: checkpoint < anchor, the
+// "coverage unverified" branch of pgCoverageVerdict, which on a table with
+// writes is a capture a few seconds behind, and reconstructing then would
+// leave out the changes it has not indexed yet (a false mismatch). It also
+// returns the source's stamp of the newest change the capture indexed, for
+// the read's time bound.
+//
+// That same branch is also the steady state of a quiet database: the anchor
+// is past the last commit there (creating the slot writes WAL) and other
+// databases move it on, so no checkpoint ever reaches it. The wait therefore
+// ends, with the verdict as it is (covered, with the note), once the capture
+// has saved its position twice during the wait without it moving. That is
+// not a proof: a capture held up before delivering a commit below the anchor
+// (a large transaction still being decoded, heavy WAL elsewhere) saves the
+// same position too, and the note says so; it is the trade-off this verdict
+// already makes for an unpinned read (#2746 tracks the proof: the
+// walsender's sent position). A capture that is still moving its
+// position when the wait runs out is behind, provably, and the check is
+// inconclusive. A capture that is not running (no save within coverageStale)
+// is not waited for. A wait that ended on an unmoved position is remembered
+// (stuckCheckpoints), and later tables of the same run whose wait would start
+// from it do not wait again.
+func waitIndexCoversPG(ctx context.Context, indexDB *sql.DB, anchorLSN uint64, windowStart time.Time, wait time.Duration) (bool, string, time.Time, error) {
+	return waitPGCoverage(ctx, func() (pgStreamPoint, error) { return readPGStreamPoint(ctx, indexDB) },
+		indexDB, anchorLSN, windowStart, wait)
+}
+
+// waitPGCoverage is waitIndexCoversPG with the read as a seam, for tests.
+// stuck keys stuckCheckpoints.
+func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stuck *sql.DB, anchorLSN uint64, windowStart time.Time, wait time.Duration) (bool, string, time.Time, error) {
+	deadline := time.Now().Add(wait)
+	var (
+		started  bool
+		from     uint64 // the checkpoint the wait started from
+		lastSave string
+		lastLSN  uint64
+		unmoved  int // saves seen during the wait that left the position where it was
+	)
+	for {
+		st, err := read()
+		if cerr := ctx.Err(); cerr != nil {
+			return false, "", time.Time{}, cerr
+		}
+		if err != nil {
+			return false, err.Error(), time.Time{}, nil
+		}
+		covered, note := st.verdict(anchorLSN, windowStart)
+		if !covered || note == "" || wait < 0 {
+			return covered, note, st.lastEvent, nil
+		}
+		switch {
+		case !st.age.Valid:
+			return covered, note + ". The capture has no checkpoint time, so it was not waited for", st.lastEvent, nil
+		case time.Duration(st.age.Int64)*time.Second > coverageStale:
+			return covered, note + fmt.Sprintf(". The capture's last checkpoint is %ds old: is the capture running?", st.age.Int64), st.lastEvent, nil
+		}
+		if !started {
+			started, from, lastSave, lastLSN = true, st.checkpoint, st.savedAt, st.checkpoint
+			if stuckCheckpoints.is(stuck, formatLSN(from)) {
+				return covered, note + ". The capture's saved position did not move during an earlier wait of this run, so it was not waited for again", st.lastEvent, nil
+			}
+		} else if st.savedAt != lastSave {
+			if st.checkpoint == lastLSN {
+				unmoved++
+			} else {
+				unmoved = 0
+			}
+			lastSave, lastLSN = st.savedAt, st.checkpoint
+		}
+		if unmoved >= 2 {
+			stuckCheckpoints.set(stuck, formatLSN(st.checkpoint))
+			return covered, note + ". The capture saved its position twice during the wait without it moving: no change of this database was committed between it and the snapshot, or the capture is held up before delivering one", st.lastEvent, nil
+		}
+		if !time.Now().Before(deadline) {
+			if st.checkpoint != from {
+				return false, fmt.Sprintf("%s: the capture's saved position moved from %s to %s during a %s wait and is still before the snapshot's %s, so it has not indexed every change the snapshot holds; run the check again",
+					indexBehind, formatLSN(from), formatLSN(st.checkpoint), wait, formatLSN(anchorLSN)), st.lastEvent, nil
+			}
+			stuckCheckpoints.set(stuck, formatLSN(from))
+			return covered, note, st.lastEvent, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, "", time.Time{}, ctx.Err()
+		case <-time.After(coveragePoll):
+		}
+	}
 }
 
 // gapLostInWindow reports whether a stamped permanent loss falls inside the

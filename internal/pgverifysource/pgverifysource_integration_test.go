@@ -75,7 +75,7 @@ func TestConsistentTableChecksumPG_Integration(t *testing.T) {
 	}
 	t.Cleanup(func() { conn.Close(context.Background()) })
 
-	got, err := consistentTableChecksumPG(ctx, conn, "public", pgckTbl, nil)
+	got, err := consistentTableChecksumPG(ctx, conn, nil, "public", pgckTbl, nil)
 	if err != nil {
 		t.Fatalf("consistentTableChecksumPG: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestConsistentTableChecksumPG_Integration(t *testing.T) {
 	mustExec(fmt.Sprintf("CREATE TABLE %s %s", pgckTblRev, ddl))
 	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (2, false, NULL, NULL, NULL, '')", pgckTblRev))
 	mustExec(fmt.Sprintf("INSERT INTO %s VALUES (1, true, '\\xdeadbeef', '2024-01-02 03:04:05+00', 12.30, 'café 日本語')", pgckTblRev))
-	rev, err := consistentTableChecksumPG(ctx, conn, "public", pgckTblRev, nil)
+	rev, err := consistentTableChecksumPG(ctx, conn, nil, "public", pgckTblRev, nil)
 	if err != nil {
 		t.Fatalf("consistentTableChecksumPG (reversed): %v", err)
 	}
@@ -125,7 +125,7 @@ func TestConsistentTableChecksumPG_Integration(t *testing.T) {
 
 	// The normalize hook must rewrite values before hashing (and only non-NULL
 	// ones — it would have panicked on nil above if misapplied).
-	bang, err := consistentTableChecksumPG(ctx, conn, "public", pgckTbl, func(raw []byte) []byte {
+	bang, err := consistentTableChecksumPG(ctx, conn, nil, "public", pgckTbl, func(raw []byte) []byte {
 		return append(append([]byte{}, raw...), '!')
 	})
 	if err != nil {
@@ -139,7 +139,7 @@ func TestConsistentTableChecksumPG_Integration(t *testing.T) {
 	// loadColumns, so the live column set always matches the baseline's.
 	mustExec(fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY, n int, twice int GENERATED ALWAYS AS (n * 2) STORED)", pgckTblGen))
 	mustExec(fmt.Sprintf("INSERT INTO %s (id, n) VALUES (1, 21)", pgckTblGen))
-	gen, err := consistentTableChecksumPG(ctx, conn, "public", pgckTblGen, nil)
+	gen, err := consistentTableChecksumPG(ctx, conn, nil, "public", pgckTblGen, nil)
 	if err != nil {
 		t.Fatalf("consistentTableChecksumPG (generated): %v", err)
 	}
@@ -153,7 +153,7 @@ func TestConsistentTableChecksumPG_Integration(t *testing.T) {
 	}
 
 	// A missing table errors loudly, never a zero-row "match".
-	if _, err := consistentTableChecksumPG(ctx, conn, "public", "pgvs_ck_it_nope", nil); err == nil {
+	if _, err := consistentTableChecksumPG(ctx, conn, nil, "public", "pgvs_ck_it_nope", nil); err == nil {
 		t.Error("want an error for a nonexistent table")
 	}
 }
@@ -233,7 +233,21 @@ func TestVerifyTablePG_Integration(t *testing.T) {
 	// Changes after the baseline sit at or past its LSN floor: verify reads
 	// from there (#1596).
 	lsnText := func(lsn uint64) string { return fmt.Sprintf("%X/%X", lsn>>32, uint32(lsn)) }
-	after := stats.AnchorLSN + 0x100
+	// walNow is the server's WAL position now: an LSN for an indexed change
+	// that is past the baseline's floor and below the consistent point of
+	// any later check's slot, which cuts the reconstruction there (#2198).
+	walNow := func() uint64 {
+		t.Helper()
+		var text string
+		if err := setup.QueryRow(ctx, "SELECT pg_current_wal_lsn()::text").Scan(&text); err != nil {
+			t.Fatalf("pg_current_wal_lsn: %v", err)
+		}
+		var hi, lo uint64
+		if _, err := fmt.Sscanf(text, "%X/%X", &hi, &lo); err != nil {
+			t.Fatalf("parse LSN %q: %v", text, err)
+		}
+		return hi<<32 | lo
+	}
 
 	// Index side: the relation's schema snapshot (what the capture daemon
 	// writes on the first RelationMessage) ...
@@ -295,9 +309,34 @@ func TestVerifyTablePG_Integration(t *testing.T) {
 		t.Errorf("Detail = %q, want empty on a proven-coverage match", res.Detail)
 	}
 
+	// A role without REPLICATION cannot create the slot the snapshot is
+	// pinned with (#2198): the check still runs, cut at its time as before,
+	// and the verdict says so and why.
+	noReplDSN := roleWithoutReplication(t, setup, baseDSN, vpgTbl)
+	noReplChecksum, closeNoRepl, err := LiveSource(ctx, noReplDSN)
+	if err != nil {
+		t.Fatalf("LiveSource (no REPLICATION): %v", err)
+	}
+	t.Cleanup(func() { _ = closeNoRepl() })
+	noReplCfg := cfg
+	noReplCfg.SourceChecksum = noReplChecksum
+	res, err = verify.VerifyTablePG(ctx, noReplCfg, "public", vpgTbl)
+	if err != nil {
+		t.Fatalf("VerifyTablePG (no REPLICATION): %v", err)
+	}
+	t.Logf("no REPLICATION: %s, %q", res.Status, res.Detail)
+	if res.Status != verify.StatusMatch || !strings.Contains(res.Detail, "not cut at the snapshot") ||
+		!(strings.Contains(res.Detail, "REPLICATION") || strings.Contains(res.Detail, "pg_hba.conf")) {
+		t.Fatalf("status %q detail %q; want a match (no writes) that says the read was not cut, and why", res.Status, res.Detail)
+	}
+
 	// MISMATCH (content): an in-place UPDATE the index never captured must
 	// surface as a conclusive content divergence at equal row count.
 	mustExec(fmt.Sprintf("UPDATE %s SET v = 'tampered' WHERE id = 1", vpgTbl))
+	after := walNow()
+	if after < stats.DeltaStartLSN {
+		t.Fatalf("WAL position %s is before the baseline's floor %s", lsnText(after), lsnText(stats.DeltaStartLSN))
+	}
 	res, err = verify.VerifyTablePG(ctx, cfg, "public", vpgTbl)
 	if err != nil {
 		t.Fatalf("VerifyTablePG (tampered): %v", err)

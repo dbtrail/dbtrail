@@ -223,6 +223,11 @@ type backupSettingsServerDTO struct {
 	// count in force too (KeepInForce, #2658) a snapshot goes only when it
 	// is past the count AND older than this.
 	DeleteAfterMinutes int `json:"delete_after_minutes,omitempty"`
+	// DeleteAfterSharedS3 says an age is set and does not reach this server
+	// (DeleteAfterMinutes is then 0) because its S3 prefix is also the
+	// destination of a writer that keeps its snapshots in another folder, or
+	// in none (#2675, AgePruneSharedS3). The way out is a prefix of its own.
+	DeleteAfterSharedS3 bool `json:"delete_after_shared_s3,omitempty"`
 	// NotInS3 is the last prune's count of old snapshots the S3 destination
 	// answered it does not have (baseline.NotInDestinationFile): the only
 	// copy, so they stay on this machine. NotInS3Error says the record would
@@ -362,6 +367,11 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	inForce := s.localRetentionOf(e.ID)
 	if e.BaselineDir != "" && e.BaselineS3 != "" {
 		dto.DeleteAfterMinutes = s.pruneRetainMinutes()
+		// The age does not reach a folder whose S3 prefix another folder's
+		// writer sends to (#2675): the loop leaves it out (prunePlan).
+		if dto.DeleteAfterMinutes > 0 && AgePruneSharedS3(s.cm.reg.List(), e.BaselineDir, e.BaselineS3, s.cm.defaultBaselineDir, s.cm.defaultBaselineS3) {
+			dto.DeleteAfterMinutes, dto.DeleteAfterSharedS3 = 0, true
+		}
 		// With no age set and no count in force, no prune refreshes the
 		// record: what it says is frozen, so it is not read (the card would
 		// show a stale count).
@@ -370,7 +380,13 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
 				dto.NotInS3Error = err.Error()
 			} else if ok {
-				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending}
+				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending, NotAsked: rec.NotAsked, ReadRefused: rec.ReadRefused, WaitsForAnswer: rec.WaitsForAnswer, NotAskedCount: rec.NotAskedCount, ReadRefusedCount: rec.ReadRefusedCount, CleanupQuestionRefused: rec.CleanupQuestionRefused}
+				if rec.NextSend != nil {
+					dto.NotInS3.NextSend = rec.NextSend.UTC().Format(time.RFC3339)
+				}
+				for _, w := range rec.Waiting {
+					dto.NotInS3.Waiting = append(dto.NotInS3.Waiting, sendWaitDTO{Name: w.Name, Until: w.Until.UTC().Format(time.RFC3339), ForAnswer: w.ForAnswer})
+				}
 			}
 		}
 	}
@@ -578,37 +594,39 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 			return
 		}
 	}
+	keepSet := req.KeepNewest != nil
 	s3AgeMu.Lock()
-	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &entry)) {
+	// The S3 age is asked of the entry this save will write, built on the
+	// entry as it is now: every writer of the S3 fields holds s3AgeMu, so
+	// they cannot move between this and the write.
+	now, _ := s.cm.reg.Get(entry.ID)
+	probe := settingsOnto(now, before, entry, keepSet)
+	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &probe)) {
 		s3AgeMu.Unlock()
 		return
 	}
 	// Only what this save changed, on the entry as it is now (#2658): the
 	// schedule, the monitoring intent and every field this request left
 	// alone keep the value a save made since this request read the entry.
+	// Whether the folder may be adopted is decided here too, under the
+	// registry's lock, on the folder and the count this write leaves
+	// (#2675): checked before it, a count another save raised in between
+	// was not the one asked about.
+	var refused error
 	err := s.cm.reg.UpdateWith(entry.ID, func(cur ServerEntry) (ServerEntry, bool) {
-		if entry.BaselineDir != before.BaselineDir {
-			cur.BaselineDir = entry.BaselineDir
+		next := settingsOnto(cur, before, entry, keepSet)
+		if err := adoptionUnderLock(cur, before, next, keepSet); err != nil {
+			refused = err
+			return cur, false
 		}
-		if entry.BaselineS3 != before.BaselineS3 {
-			cur.BaselineS3 = entry.BaselineS3
-		}
-		if entry.NoArchive != before.NoArchive {
-			cur.NoArchive = entry.NoArchive
-		}
-		if req.KeepNewest != nil {
-			cur.LocalKeepNewest = entry.LocalKeepNewest
-		}
-		if entry.NoSQLMirror != before.NoSQLMirror {
-			cur.NoSQLMirror = entry.NoSQLMirror
-		}
-		if entry.BaselineS3Retain != before.BaselineS3Retain {
-			cur.BaselineS3Retain = entry.BaselineS3Retain
-		}
-		entry = cur
-		return cur, true
+		entry = next
+		return next, true
 	})
 	s3AgeMu.Unlock()
+	if refused != nil {
+		writeJSONError(w, http.StatusBadRequest, refused.Error())
+		return
+	}
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
@@ -628,6 +646,53 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		dto.ScheduleUploadSet = entry.BackupSchedule.UploadEvery
 	}
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// settingsOnto is the snapshot settings save applied to cur, the entry as it
+// is now: the fields this save changed from before (the entry as it read
+// it), and the count when the request named it. Everything else stays as
+// cur has it (#2658).
+func settingsOnto(cur, before, entry ServerEntry, keepSet bool) ServerEntry {
+	if entry.BaselineDir != before.BaselineDir {
+		cur.BaselineDir = entry.BaselineDir
+	}
+	if entry.BaselineS3 != before.BaselineS3 {
+		cur.BaselineS3 = entry.BaselineS3
+	}
+	if entry.NoArchive != before.NoArchive {
+		cur.NoArchive = entry.NoArchive
+	}
+	if keepSet {
+		cur.LocalKeepNewest = entry.LocalKeepNewest
+	}
+	if entry.NoSQLMirror != before.NoSQLMirror {
+		cur.NoSQLMirror = entry.NoSQLMirror
+	}
+	if entry.BaselineS3Retain != before.BaselineS3Retain {
+		cur.BaselineS3Retain = entry.BaselineS3Retain
+	}
+	return cur
+}
+
+// adoptionUnderLock is adoptsSnapshots asked under the registry's lock
+// (#2675), on next, the entry a save is about to write over cur: when the
+// save moves the folder to one that is not already the entry's, or sets the
+// count (keepSet) on a folder another save moved to after this one read the
+// entry (before). A count set on the folder the request saw is a choice
+// made looking at it, and is not asked about, as before; a folder another
+// save already moved the entry to is that save's, asked when it moved it.
+func adoptionUnderLock(cur, before, next ServerEntry, keepSet bool) error {
+	switch {
+	case next.BaselineDir == "":
+		return nil
+	case next.BaselineDir != cur.BaselineDir:
+		// This save moves the folder.
+	case keepSet && cur.BaselineDir != before.BaselineDir:
+		// The count, on a folder this request did not see.
+	default:
+		return nil
+	}
+	return adoptsSnapshots(next.BaselineDir, next.LocalKeepNewest)
 }
 
 // The two provenances a daemon-wide row can have.
@@ -738,4 +803,33 @@ type notInS3DTO struct {
 	Names []string `json:"names,omitempty"`
 	// Resending: this daemon sends them again after each cleanup (#2563).
 	Resending bool `json:"resending,omitempty"`
+	// NotAsked are those among them S3 could not be asked about (#2689), so
+	// the page does not say S3 lacks them.
+	NotAsked []string `json:"not_asked,omitempty"`
+	// NextSend, RFC3339 UTC, is when the next send is tried after one failed
+	// (#2678); absent: at the next cleanup.
+	NextSend string `json:"next_send,omitempty"`
+	// ReadRefused are those S3 accepted when sent again and then refused to
+	// read (#2696): not sent again. WaitsForAnswer: NextSend follows such
+	// sends, not a failure.
+	ReadRefused    []string `json:"read_refused,omitempty"`
+	WaitsForAnswer bool     `json:"waits_for_answer,omitempty"`
+	// NotAskedCount, ReadRefusedCount: how many those two lists name in all;
+	// the lists are cut like Names (#2701). Absent: the lists are whole.
+	NotAskedCount    int `json:"not_asked_count,omitempty"`
+	ReadRefusedCount int `json:"read_refused_count,omitempty"`
+	// CleanupQuestionRefused: the last send was refused because S3 would not say
+	// whether its cleanup is removing the folder, which needs s3:GetObject and
+	// s3:ListBucket while "Delete from S3 after" is set (#2701).
+	CleanupQuestionRefused bool `json:"cleanup_question_refused,omitempty"`
+	// Waiting are those whose send waits, each with when its wait ends
+	// (#2691); the others are sent at the next cleanup.
+	Waiting []sendWaitDTO `json:"waiting,omitempty"`
+}
+
+// sendWaitDTO is baseline.SendWait on the wire: Until RFC3339 UTC.
+type sendWaitDTO struct {
+	Name      string `json:"name"`
+	Until     string `json:"until"`
+	ForAnswer bool   `json:"for_answer,omitempty"`
 }

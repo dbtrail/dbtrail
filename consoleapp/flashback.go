@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -90,6 +91,10 @@ type flashbackConfig struct {
 	// the port's own numbers (console.Server.RouterStatus). The router sets
 	// it: it has no web page to show them on.
 	RouteStatus bool
+	// TLS is the certificate the port offers to a client that asks for
+	// encryption (#2636). nil: the one go-mysql makes up at start, which no
+	// client can verify (shim.NewMySQLServer).
+	TLS *shim.PortTLS
 	// ResultBudget bounds the SQL-on-the-copy results the port holds while
 	// it sends them (#2241). nil = withDefaults makes one of
 	// defaultFlashbackResultBudget; a test passes its own to read it.
@@ -165,7 +170,11 @@ func serveFlashback(ctx context.Context, srv *console.Server, ln net.Listener, c
 	// One *server.Server for the whole port: it owns the caching_sha2_password
 	// cache and the RSA keypair (see shim.NewMySQLServer). One shared *Gate so
 	// the full-table cap is process-wide, not per-connection.
-	mysrv, err := shim.NewMySQLServer(cfg.AuthMethod)
+	var cert *tls.Config
+	if cfg.TLS != nil {
+		cert = cfg.TLS.Config
+	}
+	mysrv, err := shim.NewMySQLServerWithTLS(cfg.AuthMethod, cert)
 	if err != nil {
 		// ln is already bound by the caller; close it so a construction failure
 		// (an unsupported auth method) doesn't leak the listener nor leave the
@@ -436,22 +445,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, fmt.Sprintf("flashback: cannot open server %q: %s", user, err))
 	}
 
-	shimCfg := shim.Config{
-		IndexDBName:   tgt.IndexDBName,
-		NoArchive:     tgt.NoArchive,
-		AllowGaps:     cfg.AllowGaps,
-		QueryTimeout:  cfg.QueryTimeout,
-		FullTableGate: gate,
-		ResultBudget:  cfg.ResultBudget,
-		AuthMethod:    cfg.AuthMethod,
-		// Already split by scheme and dir-preferred by ResolveFlashback so
-		// `_snapshot` matches the console's Time-travel tab.
-		BaselineDir: tgt.BaselineDir,
-		BaselineS3:  tgt.BaselineS3,
-		// The folder, then the server's S3 destination (#2678).
-		FindBaseline:   tgt.FindBaseline,
-		BaselineBucket: tgt.BaselineBucket,
-	}
+	shimCfg := flashbackShimConfig(tgt, cfg, gate)
 
 	h := shim.NewHandlerWithConfig(tgt.IndexDB, shimCfg, logger)
 	h.BindConnContext(ctx)
@@ -563,6 +557,29 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	}
 	proxy.inner = h
 	return untrack, nil
+}
+
+// flashbackShimConfig is the shim configuration of one port connection to
+// the server tgt is for.
+func flashbackShimConfig(tgt console.FlashbackTarget, cfg flashbackConfig, gate *shim.Gate) shim.Config {
+	return shim.Config{
+		IndexDBName:   tgt.IndexDBName,
+		NoArchive:     tgt.NoArchive,
+		AllowGaps:     cfg.AllowGaps,
+		QueryTimeout:  cfg.QueryTimeout,
+		FullTableGate: gate,
+		ResultBudget:  cfg.ResultBudget,
+		AuthMethod:    cfg.AuthMethod,
+		// Already split by scheme and dir-preferred by ResolveFlashback so
+		// `_snapshot` matches the console's Time-travel tab.
+		BaselineDir: tgt.BaselineDir,
+		BaselineS3:  tgt.BaselineS3,
+		// The folder, then the server's S3 destination (#2678).
+		FindBaseline:   tgt.FindBaseline,
+		BaselineBucket: tgt.BaselineBucket,
+		// The snapshot a `_snapshot` query reads stays until it ends (#2691).
+		PinBaseline: tgt.PinBaseline,
+	}
 }
 
 // bindReadRouter turns h into a routing handler when read routing is on and

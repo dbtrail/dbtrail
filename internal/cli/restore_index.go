@@ -79,7 +79,7 @@ func init() {
 	f.StringVar(&riIndexDSN, "index-dsn", "", "DSN of the FRESH index MySQL database to rebuild into (required; refused if it already holds events)")
 	f.StringVar(&riArchiveDir, "archive-dir", "", "Local root of the Hive archive layout")
 	f.StringVar(&riArchiveS3, "archive-s3", "", "S3 URL of the archive layout (s3://bucket/prefix)")
-	f.StringVar(&riRegion, "region", "", "AWS region for --archive-s3")
+	f.StringVar(&riRegion, "region", "", "AWS region for --archive-s3 (default: the bucket's own region, found on its own; else AWS_REGION or ~/.aws/config)")
 	f.IntVar(&riBatch, "batch-size", 5000, "Rows per INSERT batch while loading")
 	f.IntVar(&riPartitions, "partitions", 48, "Forward partition horizon to create beyond the archived hours (same default as init)")
 	f.BoolVar(&riEncrypt, "encrypt", false, "Create binlog_events with InnoDB tablespace encryption (pass it if the lost index was encrypted; parity is not inferred)")
@@ -220,16 +220,15 @@ func runRestoreIndex(cmd *cobra.Command, args []string) error {
 	report := &restoreIndexReport{PartitionsCreated: partCount}
 
 	// ── Load every archived partition, rebuilding archive_state as we go ──
-	var s3c *s3.Client
-	if riArchiveS3 != "" {
-		if s3c, err = storage.NewS3Client(ctx, riRegion); err != nil {
-			return fmt.Errorf("init S3 client: %w", err)
-		}
-	}
+	s3c := newBucketClients(riRegion)
 	for _, f := range files {
 		path := f.LocalPath
 		if f.Backend == archive.BackendS3 {
-			path, err = downloadS3ToTemp(ctx, s3c, f.S3Bucket, f.S3Key)
+			client, cerr := s3c.client(ctx, f.S3Bucket)
+			if cerr != nil {
+				return fmt.Errorf("init S3 client: %w", cerr)
+			}
+			path, err = downloadS3ToTemp(ctx, client, f.S3Bucket, f.S3Key)
 			if err != nil {
 				report.FailedFiles = append(report.FailedFiles, "s3://"+f.S3Bucket+"/"+f.S3Key+": "+err.Error())
 				continue
@@ -447,6 +446,32 @@ func recordRestoredArchive(ctx context.Context, db *sql.DB, f archive.ScannedFil
 	return err
 }
 
+// bucketClients builds one S3 client per bucket, each signing for that
+// bucket's own region unless --region was given (#2698): one client on the
+// configured region answers 301 for a bucket that lives elsewhere, and the
+// scanned files carry their own bucket, so nothing here assumes they share
+// one.
+type bucketClients struct {
+	region string // --region; "" lets each bucket's own region be used
+	byName map[string]*s3.Client
+}
+
+func newBucketClients(region string) *bucketClients {
+	return &bucketClients{region: region, byName: map[string]*s3.Client{}}
+}
+
+func (c *bucketClients) client(ctx context.Context, bucket string) (*s3.Client, error) {
+	if cl := c.byName[bucket]; cl != nil {
+		return cl, nil
+	}
+	cl, err := s3ClientForBucket(ctx, bucket, c.region)
+	if err != nil {
+		return nil, err
+	}
+	c.byName[bucket] = cl
+	return cl, nil
+}
+
 func downloadS3ToTemp(ctx context.Context, client *s3.Client, bucket, key string) (string, error) {
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
 	if err != nil {
@@ -476,7 +501,7 @@ func downloadS3ToTemp(ctx context.Context, client *s3.Client, bucket, key string
 // unreadable or undownloadable one is returned as a warning — swallowing it
 // would let the report assert a false cause, and a newer-but-broken sidecar
 // silently losing to an older one must at least be visible.
-func newestSidecar(ctx context.Context, s3c *s3.Client, ids map[string]bool) (*archive.MetaSidecar, []string) {
+func newestSidecar(ctx context.Context, s3c *bucketClients, ids map[string]bool) (*archive.MetaSidecar, []string) {
 	var newest *archive.MetaSidecar
 	var warnings []string
 	warn := func(format string, a ...any) {
@@ -511,7 +536,12 @@ func newestSidecar(ctx context.Context, s3c *s3.Client, ids map[string]bool) (*a
 				key += "/"
 			}
 			key += "bintrail_id=" + id + "/" + archive.MetaSidecarName
-			path, err := downloadS3ToTemp(ctx, s3c, bucket, key)
+			client, err := s3c.client(ctx, bucket)
+			if err != nil {
+				warn("could not download sidecar s3://%s/%s: %v", bucket, key, err)
+				continue
+			}
+			path, err := downloadS3ToTemp(ctx, client, bucket, key)
 			if err != nil {
 				// Only NoSuchKey/NotFound is the routine absent case; an
 				// AccessDenied/throttle/network error hides a sidecar that

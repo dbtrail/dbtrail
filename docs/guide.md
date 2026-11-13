@@ -1,5 +1,7 @@
 # DBTrail — Practical Guide for DBAs
 
+To install DBTrail and run heavy queries from your mysql client, start at the [start page](https://www.dbtrail.com/docs/quickstart/). This guide covers the command line's row history and recovery.
+
 DBTrail indexes every INSERT, UPDATE, and DELETE from MySQL ROW-format binary logs into a queryable MySQL database, and generates reversal SQL for recovery — without needing the original binlog files. This guide is for DBAs who need scenario-driven walkthroughs and troubleshooting help.
 
 ---
@@ -52,7 +54,7 @@ bintrail config init
 # Edit .bintrail.env and set BINTRAIL_INDEX_DSN and BINTRAIL_SOURCE_DSN
 ```
 
-All commands load it automatically; CLI flags take precedence. Use `--global` to write `~/.config/bintrail/config.env` instead.
+All commands load it automatically; CLI flags take precedence. Use `--global` to write `~/.config/bintrail/config.env` instead. For settings shared by every program on a host, use [`/etc/dbtrail/dbtrail.cnf`](option-file.md), written like MySQL's `my.cnf`.
 
 ---
 

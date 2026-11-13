@@ -41,6 +41,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -88,9 +89,38 @@ const composeIndexDatadirRO = "/var/lib/bintrail-index-ro"
 // BESIDE the operator's file, never over it: the same line tells them to merge
 // their own edits into the new file, and an in-place download has already
 // deleted those edits by the time they read that.
-const composeDownload = "download the current docker-compose.yml next to yours, merge your own edits into it, " +
-	"then move it into place: curl -fsSL -o docker-compose.yml.new " +
-	"https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml"
+//
+// The file it names is the one of the release this daemon is (#2638): the
+// installer pins the images with BINTRAIL_TAG, and main's file can be ahead
+// of a pinned image. A build that is not a release (dev, a commit, a dirty
+// tree) has no file of its own, so it names main's.
+func composeDownload() string { return composeDownloadFor(appVersion) }
+
+func composeDownloadFor(version string) string {
+	what, ref := "the current docker-compose.yml", "main"
+	if tag, ok := releaseTag(version); ok {
+		what, ref = "the docker-compose.yml of "+tag, tag
+	}
+	return "download " + what + " next to yours, merge your own edits into it, " +
+		"then move it into place: curl -fsSL -o docker-compose.yml.new " +
+		"https://raw.githubusercontent.com/dbtrail/dbtrail/" + ref + "/docker-compose.yml"
+}
+
+// releaseVersionRE is a published release's version: GoReleaser's
+// {{ .Version }} (0.130.0, or a 0.130.0-rc1 prerelease), or `git describe`
+// exactly on a tag (v0.130.0). describe off a tag (v0.130.0-3-gabc1234),
+// -dirty and snapshot builds name no tag and do not match.
+var releaseVersionRE = regexp.MustCompile(`^v?([0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?)$`)
+
+// releaseTag returns the git tag of the release version names (always with
+// the v), or false when version is not a release.
+func releaseTag(version string) (string, bool) {
+	m := releaseVersionRE.FindStringSubmatch(strings.TrimSpace(version))
+	if m == nil {
+		return "", false
+	}
+	return "v" + m[1], true
+}
 
 // mountEntry is one line of /proc/self/mountinfo, reduced to the two fields
 // this file reads.
@@ -293,7 +323,7 @@ func composeVersionFinding(in driftInputs) (driftFinding, bool) {
 	attrs := []any{
 		"compose_file_version", have,
 		"current_version", in.shippedVersion,
-		"fix", composeDownload,
+		"fix", composeDownload(),
 	}
 	var missing []string
 	for v := have + 1; v <= in.shippedVersion; v++ {
@@ -362,7 +392,7 @@ func indexDatadirFinding(in driftInputs) (driftFinding, bool) {
 	}
 
 	fix := "the current docker-compose.yml mounts the index volume read-only at " +
-		composeIndexDatadirRO + " and points BINTRAIL_INDEX_DATADIR_RO at it, so " + composeDownload
+		composeIndexDatadirRO + " and points BINTRAIL_INDEX_DATADIR_RO at it, so " + composeDownload()
 	if strings.TrimSpace(in.getenv("INDEX_DSN")) != "" {
 		// The entrypoint exports the variable only when it builds the address
 		// itself, so this operator has to. Naming the path is not enough: on a
@@ -373,7 +403,7 @@ func indexDatadirFinding(in driftInputs) (driftFinding, bool) {
 			"volume (" + composeIndexDatadirRO + " in the current stack), or drop INDEX_DSN and let the " +
 			"stack build the address."
 		if !mounted {
-			fix += " Your compose file does not mount that path, so it needs the current file first: " + composeDownload
+			fix += " Your compose file does not mount that path, so it needs the current file first: " + composeDownload()
 		}
 	}
 	attrs := []any{"read_only_index_mount", mountState, "fix", fix}
@@ -471,7 +501,7 @@ func consoleStateFinding(in driftInputs) (driftFinding, bool) {
 			"looks exactly like a fresh install",
 		attrs: []any{
 			"stored_in_the_container", strings.Join(lost, ", "),
-			"fix", "mount a volume that covers these paths, or " + composeDownload,
+			"fix", "mount a volume that covers these paths, or " + composeDownload(),
 		},
 	}, true
 }

@@ -3,6 +3,7 @@ package baseline
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -149,9 +150,44 @@ type PruneResult struct {
 	// sent again, and the page says "could not be asked", not "S3 does not
 	// have it".
 	RestoredUnasked string
-	// KeptPinned counts snapshots kept because a reader of this process is
-	// on that one snapshot now (PinSnapshot, #2678): a download, a SQL
-	// statement, an Explain. The rest of the folder is pruned as usual.
+	// NotAsked names the snapshots among NotAtDestination that the
+	// destination could not be ASKED about: the last restore's result whose
+	// question failed, and the snapshots S3 refused (Denied). Not known to
+	// be missing, so the page says "could not be asked" for them.
+	NotAsked []string
+	// Denied counts the snapshots S3 refused the question about (403,
+	// storage.IsAccessDenied) while it answered for others (#2689): each is
+	// kept, listed in NotAtDestination to be sent again, and not counted in
+	// ProbeErrors, so it stops no other removal. Credentials without
+	// s3:ListBucket refuse a HEAD of a key that does not exist instead of
+	// answering 404, which is exactly a snapshot whose upload failed.
+	Denied int
+	// DestinationDenied reports that S3 refused every question the attempt
+	// asked, the check of the newest snapshots included (#2689): nothing can
+	// be confirmed, so the refusals count in ProbeErrors as any failure, and
+	// none is listed as missing. A HEAD carries no error body, so expired,
+	// invalid and unauthorized credentials all look like this.
+	DestinationDenied bool
+	// ReadRefused names the snapshots among Denied that the cleanup had sent
+	// again, which S3 accepted, and that S3 refused again (#2696): it takes
+	// uploads to them and refuses to read them back (no s3:GetObject). Kept,
+	// listed, and not sent again: sending would succeed and change nothing,
+	// at every cleanup, for ever.
+	ReadRefused []string
+	// restoredReadRefused: the last restore's result is among ReadRefused
+	// (#2701). It was asked on its own rule, so it is not among Denied.
+	restoredReadRefused bool
+	// DestinationWriteOnly reports that every refused question was about such
+	// a snapshot and that S3 confirmed none, the check of the newest included
+	// (#2696): a destination that accepts uploads and refuses every read.
+	// Nothing that needed its answer is removed, nothing is sent again.
+	DestinationWriteOnly bool
+	// KeptPinned counts snapshots kept because a reader is on that one
+	// snapshot now: one of this process (PinSnapshot, #2678: a download, a
+	// SQL statement, an Explain), or of any process that holds it
+	// (HoldSnapshot, #2675: an Iceberg export, a verify run, a full-table
+	// reconstruct, a cascade lookup). The rest of the folder is pruned as
+	// usual.
 	KeptPinned int
 	// Reading names the job of this process that reads older snapshots of
 	// this directory now (BeginRead, #2678), so this prune did nothing: a
@@ -202,6 +238,11 @@ type PruneResult struct {
 	// marker (an in-progress write or a partial run resumable via --retry — never
 	// our business).
 	KeptIncomplete int
+	// RemovedEmpty names the empty snapshot folders this cleanup removed
+	// (#2691), or would remove in a dry run: folders named as a snapshot
+	// that held no file at all, in them or below, for emptySnapshotDirAge.
+	// Not counted in Pruned: no snapshot was in them.
+	RemovedEmpty []string
 	// KeptUnreadable counts complete snapshots kept because their directory could
 	// not be fully enumerated (a transient os.ReadDir failure: fd exhaustion, an
 	// NFS/permission blip). We cannot prove such a snapshot is redundant, so the
@@ -213,7 +254,8 @@ type PruneResult struct {
 	// kept because the probe errored rather than cleanly reported absence; the two
 	// are different axes (where it landed vs why we couldn't confirm) and nothing
 	// sums them. A nonzero value means retention is not reclaiming everything it
-	// could because S3 was unreachable.
+	// could because S3 was unreachable. A refusal about one snapshot while S3
+	// answered for others is not counted here: see Denied.
 	ProbeErrors int
 }
 
@@ -378,7 +420,7 @@ func recordNotInDestination(opts PruneOptions, res PruneResult, err error, now t
 	if len(names) > notInDestinationNamesKept {
 		names = names[:notInDestinationNamesKept]
 	}
-	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n, Names: names, Unasked: res.RestoredUnasked}); werr != nil {
+	if werr := writeNotInDestRecord(opts.LocalDir, NotInDestination{At: now, Count: n, Names: names, NotAsked: res.NotAsked, ReadRefused: res.ReadRefused}); werr != nil {
 		slog.Error("baseline prune: snapshots the destination does not have were kept, and the record of them could not be written; the page will not say it",
 			"dir", opts.LocalDir, "kept", n, "error", werr)
 	}
@@ -414,6 +456,35 @@ func pruneFailureReason(res PruneResult, err error) string {
 		why = append(why, "The S3 destination could not be asked, so no snapshot that was sent to S3 was removed from this folder in this cleanup. DBTrail asks again at the next one.")
 	case res.ProbeErrors > 0:
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination, so they were kept.", snapshotsWord(res.ProbeErrors)))
+	}
+	if res.DestinationDenied {
+		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they have s3:GetObject on this S3 prefix.")
+	}
+	deniedRead := len(res.ReadRefused)
+	if res.restoredReadRefused {
+		deniedRead-- // not among Denied
+	}
+	if n := res.Denied - deniedRead; n > 0 {
+		itIs, it := "it is", "it"
+		if n > 1 {
+			itIs, it = "they are", "them"
+		}
+		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination: S3 refused the question (access denied), so %s kept here until S3 confirms it has %s. "+
+			"S3 answers that way about a copy it does not have when the credentials lack s3:ListBucket, and about every copy when they lack s3:GetObject.",
+			snapshotsWord(n), itIs, it))
+	}
+	// Refused after a send S3 took (#2696): S3's 403 does not say whether
+	// s3:GetObject is missing or the credentials stopped working (#2701),
+	// so both are named.
+	const readCauses = "either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both."
+	switch n := len(res.ReadRefused); {
+	case res.DestinationWriteOnly:
+		why = append(why, "S3 refuses to read back what it accepted: "+readCauses+
+			" DBTrail cannot confirm any snapshot is there, so it keeps them here, and it does not send them again: S3 took each one and then refused to read it.")
+	case n == 1:
+		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back: "+readCauses+" It is kept here and not sent again.")
+	case n > 1:
+		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back: %s They are kept here and not sent again.", n, readCauses))
 	}
 	// One cause per line, and "\n" only: the page renders them line by line,
 	// and a path or an error can itself contain "; " or ", ".
@@ -495,6 +566,11 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
 	sweepFailures, firstSweepErr := sweepPruningLeftovers(opts.LocalDir)
+	if !opts.DryRun {
+		// Records of reads whose snapshot is gone (#2675).
+		sweepHoldRecords(opts.LocalDir)
+	}
+	removedEmpty := sweepEmptySnapshotDirs(opts.LocalDir, pinnedNow(opts.LocalDir, time.Now()), time.Now(), opts.DryRun)
 
 	snaps, err := enumerateLocalSnapshots(opts.LocalDir)
 	if err != nil {
@@ -539,6 +615,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// deleted is a failure even in a cycle that has nothing new to remove.
 	withSweep := func(res PruneResult) PruneResult {
 		res.SweepFailures, res.firstSweepErr = sweepFailures, firstSweepErr
+		res.RemovedEmpty = removedEmpty
 		res.KeptPinned += keptPinned
 		for _, s := range all {
 			if s.unreadable {
@@ -573,7 +650,30 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			return res
 		}
 		ok, perr := probe(ctx, restoredSnap.name)
+		_, resent := resentMarks(opts.LocalDir)[restoredSnap.name]
+		if perr == nil && resent && !opts.DryRun {
+			// S3 answered about it: the mark's evidence is spent (#2701).
+			forgetResent(opts.LocalDir, restoredSnap.name)
+		}
+		// Refused after a send S3 took: a read it refuses, whether for a
+		// missing s3:GetObject or for credentials that stopped working; S3's
+		// 403 does not say which (a HEAD needs s3:GetObject, so without it
+		// every key answers 403, one that does not exist included).
+		refusedRead := perr != nil && resent && storage.IsAccessDenied(perr)
 		switch {
+		case refusedRead:
+			// Sent again by the cleanup, taken by S3, and refused since
+			// (#2701, as #2696 for the others): S3 takes uploads here and
+			// refuses to read them, so sending it again changes nothing.
+			// Kept, listed as refused to read, and not sent again.
+			slog.Warn("baseline prune: S3 took the last restore's snapshot when it was sent again and refuses to read it back; it is kept, and not sent again",
+				"snapshot", restoredSnap.name, "error", perr)
+			res.KeptNotDurable++
+			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
+			res.NotAsked = append(res.NotAsked, restoredSnap.name)
+			res.ReadRefused = append(res.ReadRefused, restoredSnap.name)
+			res.restoredReadRefused = true
+			res.RestoredUnasked = restoredSnap.name
 		case perr != nil:
 			// NOT counted in probeErrors. This snapshot is never removed, so
 			// the answer about it decides no removal; counted, one failed
@@ -586,6 +686,7 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 				"snapshot", restoredSnap.name, "error", perr)
 			res.KeptNotDurable++
 			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
+			res.NotAsked = append(res.NotAsked, restoredSnap.name)
 			res.RestoredUnasked = restoredSnap.name
 		case !ok:
 			res.KeptNotDurable++
@@ -600,6 +701,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 
 	if localOnly {
 		newest := computeNewestN(countable, opts.KeepNewest, now)
+		// The pair a check compares, which only this folder holds (#2691).
+		keepCheckPair(opts.LocalDir, keepers)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, 0, now)
 		res = restoredKept(res, nil)
 		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)
@@ -630,6 +733,16 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// destination's answer (counted mode only).
 	byCount := map[string]bool{}
 	var probeErrors int
+	// denied are the snapshots S3 refused the question about (#2689); asked
+	// is every snapshot asked, for the check below; answered reports that
+	// at least one question got an answer.
+	var denied []string
+	asked := map[string]bool{}
+	answered, confirmed := false, false
+	// The snapshots sent again and not confirmed since (#2696), and those S3
+	// answered about in this cycle, whose marks go.
+	marks := resentMarks(opts.LocalDir)
+	answeredNames := map[string]bool{}
 	var heldCandidates []localSnapshot
 	for _, s := range snaps {
 		if !s.complete || s.unreadable || keepers[s.name] || newest[s.name] {
@@ -658,14 +771,71 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			heldCandidates = append(heldCandidates, s)
 			continue
 		}
+		asked[s.name] = true
 		ok, perr := probe(ctx, s.name)
+		if perr != nil && storage.IsAccessDenied(perr) {
+			// Decided once every question is in: about this one snapshot
+			// when S3 answers others, the general failure when it answers
+			// none.
+			slog.Warn("baseline prune: S3 refused the question whether it has this snapshot (access denied); keeping it",
+				"snapshot", s.name, "error", perr)
+			denied = append(denied, s.name)
+			continue
+		}
 		if perr != nil {
 			slog.Warn("baseline prune: could not confirm S3 durability; keeping snapshot",
 				"snapshot", s.name, "error", perr)
 			probeErrors++
 			continue // absent from `durable` → planPrune keeps it
 		}
+		answered = true
+		confirmed = confirmed || ok
+		answeredNames[s.name] = true
 		durable[s.name] = ok
+	}
+	// A refusal is about one snapshot only when S3 answers for others
+	// (#2689). In a cycle where it answered none, the newest snapshots, which
+	// were sent, are asked as the check. A failure that is not a refusal
+	// means the bucket cannot be asked at all, and then a refusal is one
+	// more question it did not answer.
+	//
+	// A refused snapshot the cleanup had sent again (#2696) is a write S3
+	// accepted and a read it refuses: listed, never sent again. When every
+	// refusal is one of those and S3 confirms nothing, the check included,
+	// the destination takes uploads and refuses reads, which is said as such.
+	var deniedAll, writeOnly bool
+	var readRefused []string
+	if len(denied) > 0 {
+		for _, name := range denied {
+			if _, sent := marks[name]; sent {
+				readRefused = append(readRefused, name)
+			}
+		}
+		perObject := false
+		switch {
+		case probeErrors > 0:
+		case len(readRefused) == len(denied) && !confirmed:
+			answers, ok, failed := bucketAnswers(ctx, snaps, held, asked, probe, now)
+			perObject = !failed
+			writeOnly = !failed && !(answers && ok)
+		case answered:
+			perObject = true
+		default:
+			answers, _, failed := bucketAnswers(ctx, snaps, held, asked, probe, now)
+			perObject = answers
+			deniedAll = !answers && !failed
+		}
+		if perObject {
+			for _, name := range denied {
+				durable[name] = false // kept, and listed
+			}
+		} else {
+			probeErrors += len(denied)
+			denied, readRefused = nil, nil
+		}
+	}
+	if !opts.DryRun {
+		forgetAnsweredResends(opts.LocalDir, marks, answeredNames, all)
 	}
 	// Without a count, a held snapshot waits for a newer one confirmed in
 	// S3 (#2596). With one there are no such candidates: byCount took them.
@@ -678,6 +848,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	}
 
 	pruneNames, res := planPruneHeld(snaps, keepers, newest, durable, held, opts.Retain, minAge, now)
+	res.NotAsked, res.Denied, res.DestinationDenied = denied, len(denied), deniedAll
+	res.ReadRefused, res.DestinationWriteOnly = readRefused, writeOnly
 	res = restoredKept(res, &probeErrors)
 	res.ProbeErrors = probeErrors
 	if counted && probeErrors > 0 {
@@ -718,6 +890,69 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		}
 		return "durable copy in S3"
 	})), nil
+}
+
+// bucketChecks bounds the snapshots bucketAnswers asks about.
+const bucketChecks = 3
+
+// bucketAnswers reports whether S3 answers questions at all, in a cycle where
+// every question it was asked was refused (#2689): it asks about the newest
+// complete, readable snapshots not held on this machine, dated at or before
+// now and not asked already, newest first, at most bucketChecks of them. Those
+// were sent, so S3 should have them. Any answer, "here" or "not here", means
+// it answers, and the refusals are about those snapshots alone; confirmed is
+// that the answer was "here" (S3 reads at least that one, #2696). A refusal
+// of each, or nothing to ask, means it does not; failed reports a failure
+// that is not a refusal, which ends the check.
+func bucketAnswers(ctx context.Context, snaps []localSnapshot, held, asked map[string]bool, probe durableProbe, now time.Time) (answers, confirmed, failed bool) {
+	var check []localSnapshot
+	for _, s := range snaps {
+		if s.complete && !s.unreadable && !held[s.name] && !asked[s.name] && !s.ts.After(now) {
+			check = append(check, s)
+		}
+	}
+	sort.Slice(check, func(i, j int) bool { return check[i].ts.After(check[j].ts) })
+	for i, s := range check {
+		if i == bucketChecks {
+			break
+		}
+		ok, err := probe(ctx, s.name)
+		switch {
+		case err == nil:
+			return true, ok, false
+		case !storage.IsAccessDenied(err):
+			slog.Warn("baseline prune: could not ask S3 about a newer snapshot to tell whether it answers at all",
+				"snapshot", s.name, "error", err)
+			return false, false, true
+		}
+	}
+	return false, false, false
+}
+
+// forgetAnsweredResends removes from the record of snapshots sent again
+// (ResentFile) the ones S3 answered about in this cycle and the ones no
+// longer on disk: the evidence is about a refusal that followed a send.
+func forgetAnsweredResends(dir string, marks map[string]time.Time, answered map[string]bool, all []localSnapshot) {
+	if len(marks) == 0 {
+		return
+	}
+	present := map[string]bool{}
+	for _, s := range all {
+		present[s.name] = true
+	}
+	changed := false
+	for name := range marks {
+		if answered[name] || !present[name] {
+			delete(marks, name)
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	if err := writeResent(dir, marks); err != nil {
+		slog.Warn("baseline prune: the record of snapshots sent again could not be updated", "dir", dir, "error", err)
+	}
 }
 
 // supersededHeldProbes bounds the extra probes supersededHeld makes looking
@@ -818,7 +1053,17 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 			res.KeptPinned++
 			continue
 		}
-		staged, err := removeSnapshot(opts.LocalDir, name)
+		// A reader of any process that holds this snapshot (HoldSnapshot,
+		// #2675) keeps it. The marker stays locked until the snapshot is out
+		// of its path, so a reader that comes after finds it gone.
+		unlock, held := lockForRemoval(filepath.Join(opts.LocalDir, name))
+		if held {
+			slog.Info("baseline prune: another reader, in this process or another one, is on this snapshot; it stays until that reader ends",
+				"dir", opts.LocalDir, "snapshot", name)
+			res.KeptPinned++
+			continue
+		}
+		staged, err := removeSnapshot(opts.LocalDir, name, unlock)
 		if !staged {
 			slog.Warn("baseline prune: could not remove snapshot; it will be retried next cycle",
 				"snapshot", name, "error", err)
@@ -1139,11 +1384,17 @@ var (
 // is harmless (invisible to readers) and swept next cycle.
 //
 // staged reports whether the rename happened, which is what decides whether
-// the snapshot left the listing; err may still be set when it did.
-func removeSnapshot(dir, name string) (staged bool, err error) {
+// the snapshot left the listing; err may still be set when it did. afterRename
+// runs once the rename has been tried, either way.
+func removeSnapshot(dir, name string, afterRename func()) (staged bool, err error) {
 	src := filepath.Join(dir, name)
 	stagedPath := filepath.Join(dir, "."+name+pruningSuffix)
-	if err := renameAside(src, stagedPath); err != nil {
+	err = renameAside(src, stagedPath)
+	// The marker lock (lockForRemoval) is let go as soon as the folder has
+	// moved or failed to: holding it through the delete below would keep a
+	// reader waiting only to learn the snapshot is gone.
+	afterRename()
+	if err != nil {
 		return false, fmt.Errorf("stage snapshot %q for removal: %w", name, err)
 	}
 	if err := removeAll(stagedPath); err != nil {
@@ -1178,6 +1429,103 @@ func sweepPruningLeftovers(dir string) (failures int, firstErr string) {
 		}
 	}
 	return failures, firstErr
+}
+
+// emptySnapshotDirAge is how long a folder named as a snapshot must have held
+// no file at all before the cleanup removes it (#2691). Every writer creates
+// the folder and writes _INCOMPLETE into it in the next statement
+// (internal/baseline, internal/pgbaseline, reconstruct's fold), so a folder
+// still empty after a few seconds is one whose writer stopped in between.
+// The hour is margin, not a measured run time: it is the age mode's floor
+// (baselinePruneMinAge), and an empty folder takes no disk while it waits.
+// The age is the folder's own modification time, and that of every
+// directory under it, never the time in its name: a restore's folder is
+// named for a past moment and created now.
+const emptySnapshotDirAge = time.Hour
+
+// emptyDirRemoveHook runs between finding a folder empty and removing it. A
+// no-op, replaced only by the test that writes into the folder in that gap.
+var emptyDirRemoveHook = func(string) {}
+
+// sweepEmptySnapshotDirs removes the folders under dir that are named as a
+// snapshot and hold no file, in them or below, and whose directories have
+// not changed for emptySnapshotDirAge, and returns their names. The
+// `current` target and a pinned snapshot are left alone. The removal is one
+// rmdir per directory, the deepest first, never a recursive delete: a
+// directory that is not empty refuses it, so a file a writer puts in the
+// folder meanwhile stays, with the folder. A dry run removes nothing and
+// returns what it would remove.
+func sweepEmptySnapshotDirs(dir string, pinned map[string]string, now time.Time, dryRun bool) (removed []string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil // the enumeration right after reports this
+	}
+	current, _ := ResolveCurrentPointer(dir)
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || name == current || pinned[name] != "" {
+			continue
+		}
+		if _, ok := parseBaselineDirTimestamp(name); !ok {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		dirs, newest, empty := emptyTree(p)
+		if !empty || now.Sub(newest) < emptySnapshotDirAge {
+			continue
+		}
+		if dryRun {
+			removed = append(removed, name)
+			continue
+		}
+		emptyDirRemoveHook(p)
+		gone := true
+		for i := len(dirs) - 1; i >= 0; i-- {
+			if err := os.Remove(dirs[i]); err != nil {
+				// Not empty any more (a writer came back), or not removable:
+				// it is kept, and asked about again at the next cleanup.
+				slog.Info("baseline prune: an empty snapshot folder was not removed; it is kept",
+					"dir", dir, "snapshot", name, "error", err)
+				gone = false
+				break
+			}
+		}
+		if gone {
+			slog.Info("baseline prune: removed an empty snapshot folder; the run that created it stopped before writing anything in it",
+				"dir", dir, "snapshot", name, "empty_since", newest.UTC().Format(time.RFC3339))
+			removed = append(removed, name)
+		}
+	}
+	return removed
+}
+
+// emptyTree walks root and reports its directories in walk order (parents
+// first), the newest modification time among them, and whether it holds no
+// entry other than directories. A walk that fails reports not empty.
+func emptyTree(root string) (dirs []string, newest time.Time, empty bool) {
+	empty = true
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			empty = false
+			return filepath.SkipAll
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+		dirs = append(dirs, p)
+		return nil
+	})
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	return dirs, newest, empty
 }
 
 // hasSuccessMarker reports whether snapDir carries _SUCCESS itself, which

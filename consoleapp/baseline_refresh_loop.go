@@ -43,6 +43,10 @@ type refreshRequest struct {
 	// when the per-server backup schedule started this fold, empty for the
 	// daemon-wide interval loop.
 	Trigger string
+	// UpdateWhy is stamped onto the history record (BaselineRunRecord.
+	// UpdateWhy, #2674): why the schedule updated where it would otherwise
+	// have skipped the slot. Empty for every other update.
+	UpdateWhy string
 	// BaselineS3, when set, is the destination the finished snapshot is
 	// uploaded to, and the source the fold reads its previous snapshot from.
 	//
@@ -61,6 +65,16 @@ type refreshRequest struct {
 	// loop gets: it leaves BaselineS3 empty and uploads nothing anyway.
 	UploadEvery time.Duration
 	UploadAt    time.Duration
+	// HoldFromS3 is set by the daemon-wide interval loop (baselineRefreshTargets)
+	// for a server whose folder is pruned to its count, that has an S3
+	// destination and a schedule of its own (#2675): the snapshot this loop
+	// publishes there is marked as kept on this machine on purpose
+	// (baseline.MarkUploadHeld). The loop names no destination and uploads
+	// nothing (BaselineS3 stays empty); unmarked, the cleanup took it for a
+	// failed upload and sent it, up to three per cleanup. Marked, the count
+	// removes it, and the schedule's next due upload sends the newest one.
+	// A server with no schedule is not held: nothing else would send it.
+	HoldFromS3 bool
 	// FoldSource, when set, is where THIS run reads its previous snapshot
 	// from, resolved by resolveFoldSource just before the fold. Empty means
 	// the standing rule (baselineFoldSource): the bucket when the server has
@@ -264,8 +278,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// refuses nothing, and the next cycle with something in it behaves exactly
 	// as before. It does SAY so: at Info here, and as the schedule's own skip
 	// reason.
-	mark, known := readIndexMark(s.ctx, req.IndexDSN)
-	s.reportGateBlind("mark", known, req,
+	mark, markErr := readIndexMark(s.ctx, req.IndexDSN)
+	known := markErr == nil
+	s.reportGateBlind("mark", markErr, req,
 		"cannot tell whether anything has been indexed, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
 	if known && s.refreshCanSkip(s.ctx, req, mark, time.Now().UTC(), interval) {
@@ -414,6 +429,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	if err == nil && req.BaselineS3 != "" {
 		uploadHeld = holdUpload(s.ctx, req, at)
 	}
+	if err == nil && req.BaselineS3 == "" && req.HoldFromS3 {
+		markLoopSnapshotHeld(req, at)
+	}
 	if err == nil && req.BaselineS3 != "" && !uploadHeld {
 		uploadStarted := time.Now()
 		// Marked in flight so a full backup's sweep (#1725) does not send
@@ -445,6 +463,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// evidence the snapshot got there is the absence of a failure line.
 		Uploaded:   uploaded,
 		UploadHeld: uploadHeld,
+		UpdateWhy:  req.UpdateWhy,
 	}
 	if err == nil {
 		// What the #1721 cut-over estimates from: the events this update
@@ -597,14 +616,16 @@ var refreshStatusWritten = func(refreshRequest) {}
 // early leaves the day cap, which is today's behaviour, and the gate, blind on
 // the same read, folds every cycle and says so too.
 func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, interval time.Duration) time.Time {
-	floor, known := readLiveFloor(s.ctx, req.IndexDSN)
+	floor, err := readLiveFloor(s.ctx, req.IndexDSN)
 	line, ok := s.coverageRuleFor(s.ctx, req, interval).reanchorBy(floor, at)
-	known = known && ok
-	s.reportGateBlind("chain-floor", known, req,
+	if err == nil && !ok {
+		err = errNoLiveFloor
+	}
+	s.reportGateBlind("chain-floor", err, req,
 		"cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas "+
 			"early: a table is written in full only when its chain is a day old, and a restore of a quiet "+
 			"table can come to need events the index has already dropped")
-	if !known {
+	if err != nil {
 		return time.Time{}
 	}
 	return line
@@ -624,15 +645,10 @@ func (s *baselineSupervisor) publishedReadsFrom(req refreshRequest, at time.Time
 		return at, true
 	}
 	from, err := snapshotReadsFrom(s.ctx, req.BaselineDir, at)
-	known := err == nil
-	why := ""
+	s.reportGateBlind("reads-from", err, req,
+		"cannot tell where the readers of the snapshot just published start, so the next cycle folds "+
+			"instead of skipping; this repeats until a snapshot whose table deltas can all be read is published")
 	if err != nil {
-		why = "cannot tell where the readers of the snapshot just published start (" + err.Error() +
-			"), so the next cycle folds instead of skipping; this repeats until a snapshot whose table " +
-			"deltas can all be read is published"
-	}
-	s.reportGateBlind("reads-from", known, req, why)
-	if !known {
 		return time.Time{}, false
 	}
 	return from, true
@@ -890,12 +906,12 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	// what the operator has told it to hold. A skip needs both. The rule is
 	// the one the fold ends chains with, so the fold this releases moves the
 	// instant graded here.
-	covered, known := snapshotStillCovered(ctx, req.IndexDSN, prev.readsFrom, now,
+	covered, err := snapshotStillCovered(ctx, req.IndexDSN, prev.readsFrom, now,
 		s.coverageRuleFor(ctx, req, interval))
-	s.reportGateBlind("coverage", known, req,
+	s.reportGateBlind("coverage", err, req,
 		"cannot tell how far the index still reaches, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
-	if !known {
+	if err != nil {
 		return false
 	}
 	if !covered {
@@ -922,10 +938,14 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	s.gateEdge.Resolve("reanchor:" + req.ServerID)
 	// A CREATE TABLE writes no row, so it does not move the mark: a table
 	// created on a quiet server would otherwise never be looked for (#1993).
-	if created, err := tablesCreatedSince(ctx, req.IndexDSN, prev.publishedAt); err != nil || created {
-		if err != nil {
-			slog.Debug("snapshot refresh: could not ask the index whether tables were created since the last snapshot; folding", "server", req.ServerName, "error", err)
-		} else {
+	created, err := tablesCreatedSince(ctx, req.IndexDSN, prev.publishedAt)
+	// Blind like the questions above, and said the same way (#2669): a
+	// failing read here folds every cycle too.
+	s.reportGateBlind("tables-created", err, req,
+		"cannot tell whether a table was created since the last snapshot, so every cycle folds; this server is not "+
+			"being skipped and will not be until the index answers")
+	if err != nil || created {
+		if err == nil {
 			slog.Info("snapshot refresh: nothing has been indexed, but a table was created since the last snapshot; folding to look for it",
 				"server", req.ServerName, "id", req.ServerID)
 		}
@@ -944,13 +964,11 @@ func (s *baselineSupervisor) refreshCanSkip(ctx context.Context, req refreshRequ
 	// Blind like the mark and coverage questions above, and said the same
 	// way (#2664): with stream_state unreadable every cycle folds, and at
 	// Debug nothing told the operator why a quiet server is never skipped.
-	s.reportGateBlind("loss", err == nil, req,
+	s.reportGateBlind("loss", err, req,
 		"cannot tell whether capture lost events since the last snapshot, so every cycle folds; this server is not "+
 			"being skipped and will not be until the index answers")
 	if err != nil || lost {
-		if err != nil {
-			slog.Debug("snapshot refresh: could not ask the index whether capture lost events since the last snapshot; folding", "server", req.ServerName, "error", err)
-		} else if s.gateEdge.Fire("loss:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
+		if err == nil && s.gateEdge.Fire("loss:"+req.ServerID, prev.publishedAt.UTC().Format(time.RFC3339)) {
 			// Behind an edge, like the re-anchor line above: the condition
 			// holds every cycle until a full read is taken after the loss,
 			// and each of those cycles records its own refused run.
@@ -1023,9 +1041,10 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 		return rule
 	}
 	asked, unreadable := false, false
+	var readErr error
 	rule.dropsAfter, _ = rotation.DropWindow(s.rotationInForce(), func() rotation.Effective {
 		e := readIndexRetention(ctx, req.IndexDSN)
-		asked, unreadable = true, e.Source == rotation.RetainUnreadable
+		asked, unreadable, readErr = true, e.Source == rotation.RetainUnreadable, e.Err
 		return e
 	})
 	if asked {
@@ -1034,7 +1053,14 @@ func (s *baselineSupervisor) coverageRuleFor(ctx context.Context, req refreshReq
 		if s.tableDeltas {
 			why += "; on an index that new, every update writes its tables in full"
 		}
-		s.reportGateBlind("retention", !unreadable, req, why)
+		var cause error
+		if unreadable {
+			cause = readErr
+			if cause == nil {
+				cause = errors.New("the index did not say")
+			}
+		}
+		s.reportGateBlind("retention", cause, req, why)
 	}
 	return rule
 }
@@ -1061,8 +1087,8 @@ func (s *baselineSupervisor) followRotation(settings func() rotation.Settings) {
 }
 
 // reportGateBlind says, at most once a day per server, that the gate cannot
-// answer one of its questions — and resolves the condition when it can
-// again.
+// answer one of its questions, with the cause (#2669), and resolves the
+// condition when it can again. A nil cause is an answered question.
 //
 // At Warn, and this is the whole point of it. Failing toward folding is safe,
 // so nothing is lost; what IS lost is the feature, permanently and with no
@@ -1072,9 +1098,13 @@ func (s *baselineSupervisor) followRotation(settings func() rotation.Settings) {
 // servers. Folding every cycle on an idle one then reads as the gate being
 // broken, and the one line that explains it would be at Debug, which the
 // default log level does not print.
-func (s *baselineSupervisor) reportGateBlind(question string, known bool, req refreshRequest, why string) {
+//
+// The cause rides as the line's error and never in the edge's detail: a
+// timeout's text differs from read to read, and as a detail it would make
+// every cycle a new condition.
+func (s *baselineSupervisor) reportGateBlind(question string, cause error, req refreshRequest, why string) {
 	key := "gate-blind:" + question + ":" + req.ServerID
-	if known {
+	if cause == nil {
 		s.gateEdge.Resolve(key)
 		return
 	}
@@ -1087,7 +1117,7 @@ func (s *baselineSupervisor) reportGateBlind(question string, known bool, req re
 	}
 	if s.gateEdge.Fire(key, "") {
 		slog.Warn("baseline refresh: "+why, "server", req.ServerName, "id", req.ServerID,
-			"question", question)
+			"question", question, "error", cause)
 	}
 }
 
@@ -1239,6 +1269,18 @@ func holdUpload(ctx context.Context, req refreshRequest, at time.Time) bool {
 	return true
 }
 
+// markLoopSnapshotHeld marks the snapshot the daemon-wide interval loop just
+// published at `at` as kept on this machine on purpose (refreshRequest.
+// HoldFromS3, #2675). A mark that cannot be written is said: the snapshot
+// then reads as a failed upload, and the cleanup sends it to S3, as before.
+func markLoopSnapshotHeld(req refreshRequest, at time.Time) {
+	name := reconstruct.SnapshotDirName(at)
+	if err := baseline.MarkUploadHeld(req.BaselineDir, name); err != nil {
+		slog.Warn("snapshot refresh: could not mark the snapshot of the refresh interval as kept on this machine; the cleanup will send it to S3 instead",
+			"server", req.ServerName, "snapshot", name, "error", err)
+	}
+}
+
 // bucketNewest is the newest complete snapshot in the server's destination,
 // and whether the destination could be listed at all. Through the same
 // process-wide inventory resolveFoldSource reads, which every upload from
@@ -1303,6 +1345,19 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 	if !grid.UploadDue(now, newest, listed) {
 		return
 	}
+	// After a send that failed, the next try waits an hour (#2675), as a
+	// failed re-send does: the cycles that call this follow the schedule
+	// (every 5 minutes by default), and each try sends the whole snapshot
+	// again and logs a warning. It is the newest snapshot, which the count
+	// never removes, so nothing is lost by waiting; only how soon S3 has it.
+	s.mu.Lock()
+	retryAt := s.owedRetryAt[req.ServerID]
+	s.mu.Unlock()
+	if now.Before(retryAt) {
+		slog.Debug("snapshot refresh: the last send of the snapshot the upload interval owes S3 failed; trying again after the wait",
+			"server", req.ServerName, "snapshot", name, "next_try", retryAt)
+		return
+	}
 	dest := strings.TrimSuffix(req.BaselineS3, "/") + "/" + name
 	// Said on the slot for as long as the upload takes: what holds the
 	// server is this send, not an update. The claim is replaced when the
@@ -1314,10 +1369,19 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 	s.mu.Unlock()
 	n, err := s.uploadMarked(req.ServerID, name, filepath.Join(req.BaselineDir, name), dest, false)
 	if err != nil {
-		slog.Warn("snapshot refresh: could not send the newest snapshot the upload interval kept on this machine; the next cycle tries again",
+		s.mu.Lock()
+		if s.owedRetryAt == nil {
+			s.owedRetryAt = map[string]time.Time{}
+		}
+		s.owedRetryAt[req.ServerID] = now.Add(owedRetryWait)
+		s.mu.Unlock()
+		slog.Warn("snapshot refresh: could not send the newest snapshot the upload interval kept on this machine; it stays here, and sending it is tried again in an hour",
 			"server", req.ServerName, "snapshot", name, "destination", dest, "error", err)
 		return
 	}
+	s.mu.Lock()
+	delete(s.owedRetryAt, req.ServerID)
+	s.mu.Unlock()
 	if err := baseline.ClearUploadHeld(req.BaselineDir, name); err != nil {
 		slog.Warn("snapshot refresh: sent a held snapshot but could not remove its mark; it is in S3 all the same",
 			"server", req.ServerName, "snapshot", name, "error", err)
@@ -1325,6 +1389,10 @@ func (s *baselineSupervisor) sendOwedHeldUpload(req refreshRequest, now time.Tim
 	slog.Info("snapshot refresh: nothing new to fold, so sent the newest snapshot the upload interval had kept on this machine",
 		"server", req.ServerName, "snapshot", name, "uploaded", n)
 }
+
+// owedRetryWait is how long the owed upload waits after a send that failed
+// (#2675): the hourly pace of the cleanup's failed re-sends (resendBackoff).
+const owedRetryWait = resendBackoff
 
 // sendOwedForSkippedSlot is sendOwedHeldUpload for a slot the snapshot
 // schedule skips before any cycle starts (#2659: nothing indexed since an old
@@ -2708,9 +2776,30 @@ func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBase
 		}
 		if add(e.ID, e.Name, e.DSN, e.BaselineDir) {
 			withSource(&out[len(out)-1], e)
+			// Pruned to its count beside a destination, with a schedule of
+			// its own (#2675): what this loop writes there is held, and the
+			// schedule's next due upload sends the newest local snapshot.
+			// Without a schedule nothing else would ever send a held one,
+			// so the bucket would stop receiving copies; there the snapshot
+			// stays unmarked and the cleanup sends it, as in 0.130.0. The
+			// daemon's own --baseline-s3 is not known here; a folder sharing
+			// that prefix is not pruned to its count, and its marked
+			// snapshots go once a newer copy in S3 supersedes them.
+			out[len(out)-1].HoldFromS3 = strings.TrimSpace(e.BaselineS3) != "" && e.LocalKeepNewest > 0 &&
+				ownSchedule(e) && !console.LocalKeepBlocked(entries, e, globalBaselineDir)
 		}
 	}
 	return out, skippedS3Only, shared
+}
+
+// ownSchedule reports whether e has a schedule of its own that parses: the
+// one that sends a snapshot the daemon-wide loop held (HoldFromS3, #2675).
+func ownSchedule(e console.ServerEntry) bool {
+	if e.BackupSchedule == nil {
+		return false
+	}
+	_, err := e.BackupSchedule.Parse()
+	return err == nil
 }
 
 // refreshSkip is a server the refresh leaves alone, and why.

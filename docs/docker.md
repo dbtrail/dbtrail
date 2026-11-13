@@ -218,7 +218,10 @@ Notes:
   wiped it: take the updated file (see
   [Upgrading the stack](#upgrading-the-stack)) and generate the token once
   more, and it survives from then on.
-- `BINTRAIL_TAG` in `.env` pins the image version (default `latest`);
+- `BINTRAIL_TAG` in `.env` pins the image version (default `latest`). The
+  install script writes the version it installed there (`BINTRAIL_TAG=0.130.0`:
+  the release's git tag without the `v`, which is how the images are tagged),
+  and takes the compose file from that same release, so the two match;
   building from a source checkout instead is a comment-toggle in the
   compose file (`build:` with `dockerfile: build/Dockerfile.bintrail-console`).
 
@@ -226,23 +229,34 @@ Notes:
 
 Your stack is two things: the images, and the compose file that wires them
 together. `docker compose pull && docker compose up -d` upgrades the first and
-never touches the second. All three steps:
+never touches the second. Which images it pulls is the `BINTRAIL_TAG` line of
+`.env` (the install script writes it; with none, `latest`). All the steps, for
+a move to release `v0.131.0`:
 
 ```bash
-# 1. the images. Name the profiles you use: without them, the images only a
+# 1. the version: BINTRAIL_TAG=0.131.0 in .env (the image tag has no v)
+
+# 2. the compose file of that release, which nothing else updates for you. It
+#    downloads NEXT to yours, never over it, so your own edits are still there
+#    to carry over
+curl -fsSL -o docker-compose.yml.new https://raw.githubusercontent.com/dbtrail/dbtrail/v0.131.0/docker-compose.yml
+diff docker-compose.yml docker-compose.yml.new     # carry your edits into the new file
+mv docker-compose.yml.new docker-compose.yml
+
+# 3. the images. Name the profiles you use: without them, the images only a
 #    profile runs (baseline, iceberg-export) are not refreshed
 docker compose pull
 docker compose --profile baseline pull     # if you run the baseline profile
 
-# 2. the compose file, which nothing else updates for you. It downloads NEXT
-#    to yours, never over it, so your own edits are still there to carry over
-curl -fsSL -o docker-compose.yml.new https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml
-diff docker-compose.yml docker-compose.yml.new     # carry your edits into the new file
-mv docker-compose.yml.new docker-compose.yml
-
-# 3. the containers, now running both
+# 4. the containers, now running both
 docker compose up -d
 ```
+
+The install script follows the same rule: with `BINTRAIL_TAG` already in
+`.env`, it takes the compose file of that version. So `docker compose down`
+(the volumes stay), editing the line, moving `docker-compose.yml` aside and
+re-running the installer also does all four steps; carry your own edits from
+the old file into the new one afterwards.
 
 Step 2 is the one people miss. `docker-compose.yml` is yours: you downloaded it
 once. Volumes, mounts, published ports and profiles can only come from that
@@ -887,7 +901,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `ROUTER_METRICS_ADDR` | compose `router` service (optional) | Container-side bind for the router's Prometheus `/metrics` and its `/status` document (default `:9091`, reachable as `router:9091` on the compose network and not published on the host; set empty to disable) |
 | `ROUTER_URL` | compose (optional) | Where the web interface reads the router's numbers to show them on its MySQL clients page (default `http://router:9091`, the `router` service; set empty to show nothing about a router) |
 | `INDEX_MYSQL_ROOT_PASSWORD` | compose (optional) | Pin the bundled index root password (set *before* first boot; default: randomly generated into the `bintrail-index-secret` volume) |
-| `BINTRAIL_TAG` | compose (optional) | Image tag to run (default `latest`) |
+| `BINTRAIL_TAG` | compose (optional) | Image tag to run (default `latest`): the release version without the `v` (`0.130.0`). The install script writes the version it installed |
 | `BASELINE_SOURCE_DSN` | compose `baseline` profile | Source MySQL to snapshot (default: `SOURCE_DSN`) |
 | `BASELINE_SCHEMAS` | compose `baseline` profile | Comma-separated schemas to snapshot (default: `SCHEMAS`; empty = all user schemas, system schemas excluded) |
 | `BASELINE_DIR` | compose (optional) | Baseline dir for the boot `SOURCE_DSN` entry — set `/var/lib/bintrail/baselines` after the first `baseline` profile run to enable Time-travel on it. Also enables full-table `_snapshot.*` on the `flashback` profile shim |
@@ -909,6 +923,8 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `AWS_SECRET_ACCESS_KEY` | compose (optional) | Paired with `AWS_ACCESS_KEY_ID` above |
 | `AWS_SESSION_TOKEN` | compose (optional) | Only needed for temporary/STS credentials |
 | `AWS_REGION` | compose (optional) | Region for the S3 bucket(s) used by Archive to S3 / baselines |
+| `ROUTER_AWS_ACCESS_KEY_ID`, `ROUTER_AWS_SECRET_ACCESS_KEY` | compose `router` service (optional) | S3 keys for the router alone, which only reads S3: give it read-only keys ([the policy](s3-iam-policy.md#read-only-access-for-the-router)) while `bintrail` keeps the keys that write. Unset = the shared `AWS_*` keys, as before. Both or neither: half a pair is refused at start |
+| `ROUTER_AWS_SESSION_TOKEN` | compose `router` service (optional) | The token of temporary router keys. Without it the router's own keys carry no token, never the shared `AWS_SESSION_TOKEN` |
 
 (`SERVER_ID` is no longer needed — `bintrail-console watch` derives a stable
 one from the source DSN.)
@@ -939,6 +955,57 @@ container — not an IAM permissions problem. Once credentials resolve, the IAM
 principal still needs S3 permissions on the bucket: see [S3 IAM
 Policy](s3-iam-policy.md) for a copy-paste policy covering Archive to S3,
 baselines, and reading either back.
+
+#### Read-only keys for the router
+
+The `router` service gets the same AWS variables as `bintrail`, because a
+`_snapshot` or `_flashback` query on the MySQL port that reaches back past the
+local snapshots reads S3 from the router process. The router only reads; the
+shared keys can also write and delete. To give it keys of its own, create
+read-only keys ([the policy](s3-iam-policy.md#read-only-access-for-the-router))
+and set in `.env`:
+
+```bash
+ROUTER_AWS_ACCESS_KEY_ID=AKIA...
+ROUTER_AWS_SECRET_ACCESS_KEY=...
+# only for temporary keys:
+# ROUTER_AWS_SESSION_TOKEN=...
+```
+
+then `docker compose up -d router`. The rules:
+
+- **Unset, nothing changes**: the router reads with `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, as before, and with none of
+  them set, with the instance role or mounted `~/.aws`.
+- **The router's own pair never carries the shared token.** Without
+  `ROUTER_AWS_SESSION_TOKEN` the router runs with no session token: a token
+  belongs to the keys it was issued with.
+- **Half a pair is refused at start**, and so is a router token without a
+  router pair: `docker compose logs router` names the variable that is
+  missing, never a value.
+- **The startup log says which keys it reads with**: `Router: S3 is read with
+  the router's own keys (...)`, or `Router: S3 is read with the keys in
+  AWS_ACCESS_KEY_ID. In the compose stack those are the capture service's
+  ...`.
+- **Region and endpoint stay shared** (`AWS_REGION`, `BINTRAIL_S3_ENDPOINT`):
+  it is the same bucket.
+- **A server whose S3 store has keys of its own** (an S3-compatible store set
+  up in the web interface with an access key) is read with those keys by both
+  services; `ROUTER_AWS_*` does not replace them.
+
+With the packaged systemd units, both services read
+`/etc/bintrail/bintrail-console.env`. Put the router's keys in a file of its
+own and add it with `systemctl edit bintrail-router`:
+
+```ini
+[Service]
+EnvironmentFile=/etc/bintrail/router-aws.env
+```
+
+A later `EnvironmentFile` wins, so that file's `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` replace the shared ones for the router alone. If the
+shared file sets `AWS_SESSION_TOKEN`, put `AWS_SESSION_TOKEN=` (empty) in the
+router's file for long-term keys: the router drops an empty token at start.
 
 ## Image details
 

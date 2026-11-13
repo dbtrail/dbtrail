@@ -211,6 +211,15 @@ type ServerEntry struct {
 	// its copy; a count saved before #2658 beside a destination did nothing
 	// and was cleared on upgrade (clearInertKeepCounts).
 	LocalKeepNewest int `yaml:"local_keep_newest,omitempty"`
+	// LocalKeepSavedWith is the count and the S3 destination this entry had
+	// when a build that applies the count beside a destination last saved
+	// it (keepMark, #2675); "" when the count reaches no destination.
+	// Registry-owned: every save recomputes it, and a load clears a count
+	// beside a destination whose mark is missing or names another count or
+	// destination (clearInertKeepCounts), since a version from before #2658
+	// saved it, and there it did nothing. Such a version keeps the key on
+	// the entries it edits and writes none on the entries it adds.
+	LocalKeepSavedWith string `yaml:"local_keep_saved_with,omitempty"`
 	// BaselineS3Retain is the age past which the daemon removes this
 	// server's snapshots from BaselineS3 (#2596), "7d" style; empty (every
 	// entry saved before it) never removes anything there. The newest
@@ -802,6 +811,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	e.SQLMode, e.SQLFresh = "", false   // SetSQLFresh is the only writer (#2546)
 	e.SQLLikeIgnoresCase = false        // SetSQLMode is the only writer
 	e.PortUser, e.PortPassword = "", "" // SetPortLogin is the only writer
+	e.LocalKeepSavedWith = keepMark(e)  // registry-owned (#2675)
 	r.file.Servers = append(r.file.Servers, e)
 	if err := r.save(); err != nil {
 		r.file.Servers = r.file.Servers[:len(r.file.Servers)-1] // roll back
@@ -882,6 +892,10 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 			e.Flavor = old.Flavor
 		}
 		startUploadIntervalWithFirstDestination(old, &e)
+		rememberEachUpdate(old, &e)
+		// Registry-owned (#2675): the count this build saves beside a
+		// destination is one it applies, and is marked so.
+		e.LocalKeepSavedWith = keepMark(e)
 		// The whole list is copied: marking a folder that stops being shared
 		// changes OTHER entries, and a failed save must undo all of it.
 		prev := slices.Clone(r.file.Servers)

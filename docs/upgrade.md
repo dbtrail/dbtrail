@@ -30,27 +30,43 @@ entries.
 
 ## 3. Docker Compose (the bundled default)
 
-```sh
-docker compose pull
-# Images only a profile runs are not pulled without naming it:
-docker compose --profile baseline pull     # if you run the baseline profile
+`docker-compose.yml` runs the images `${BINTRAIL_TAG:-latest}`. The install
+script writes the version it installed to `.env` (`BINTRAIL_TAG=0.130.0`), so
+the stack stays on that version until you change that line: a re-run of the
+installer or a `docker compose pull` does not move it. The value is the
+image tag, which is the release's git tag **without the `v`** (release
+`v0.130.0` → `BINTRAIL_TAG=0.130.0`; there is no image tagged `v0.130.0`).
+To upgrade, set it to the new version, take that release's compose file, and
+restart:
 
-# The compose file is yours and nothing updates it for you. Take the current
-# one BESIDE it, carry your own edits across, then move it into place.
-curl -fsSL -o docker-compose.yml.new https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml
+```sh
+# 1. the version: edit the BINTRAIL_TAG line of .env, e.g. BINTRAIL_TAG=0.131.0
+
+# 2. the compose file of that release (the git tag, WITH the v). The compose
+#    file is yours and nothing updates it for you: take the new one BESIDE it,
+#    carry your own edits across, then move it into place.
+curl -fsSL -o docker-compose.yml.new https://raw.githubusercontent.com/dbtrail/dbtrail/v0.131.0/docker-compose.yml
 diff docker-compose.yml docker-compose.yml.new
 mv docker-compose.yml.new docker-compose.yml
 
+# 3. the images, then the containers. Images only a profile runs are not
+#    pulled without naming it:
+docker compose pull
+docker compose --profile baseline pull     # if you run the baseline profile
 docker compose up -d
 docker compose logs -f bintrail-console   # or `bintrail` on an older split-console file
 ```
 
-`docker-compose.yml` pins images to `${BINTRAIL_TAG:-latest}` — with no
-`BINTRAIL_TAG` set in `.env`, `pull` always grabs the newest release. Pin a
-specific version instead (`BINTRAIL_TAG=v0.26.0` in `.env`) if you want
-upgrades to be a deliberate, one-line edit rather than whatever `latest`
-currently points to — useful once you're past initial eval and want
-predictable upgrades.
+When a release does not change `docker-compose.yml`, steps 1 and 3 are the
+whole upgrade (`docker compose pull && docker compose up -d` after the edit);
+the `diff` in step 2 tells you which case you are in. Going back is putting
+the previous value in the same line, within the limits of
+[section 8](#8-downgrading).
+
+With no `BINTRAIL_TAG` in `.env` (an install from before the script wrote it,
+or one that set `DBTRAIL_REF` to a branch), `pull` always takes the newest
+release, whatever `latest` points to at that moment. Add the line to stay on
+one version.
 
 **`docker compose pull` only updates images — it never touches
 `docker-compose.yml` itself.** A release that adds a new service, env var, or
@@ -58,8 +74,8 @@ default (e.g. the `VERIFY_TRIGGER` default-on wiring in 0.26.0) only takes
 effect if your copy of `docker-compose.yml` actually has that line — an
 older file on disk keeps running with whatever it already had, silently,
 with no error. If a newer feature seems missing or a documented default
-doesn't match what you see, take the current `docker-compose.yml` with the
-three lines above and diff it against your customized copy before `up -d`, or
+doesn't match what you see, take the release's `docker-compose.yml` with the
+three lines of step 2 and diff it against your customized copy before `up -d`, or
 add the specific new line by hand if you've heavily customized the file. The
 `watch` daemon also reports the two gaps it can prove at startup (see
 [Upgrading the stack](./docker.md#upgrading-the-stack) for the full list of
@@ -72,8 +88,8 @@ change. Two known transitions that need more than `pull`:
 
 - **A compose file from before the web interface moved to its own image** (pre-#374) ran
   `bintrail up --console` from the single `ghcr.io/dbtrail/bintrail` image;
-  that flag no longer exists. Take the current `docker-compose.yml` (the three
-  lines above) rather than just `pull`-ing — see
+  that flag no longer exists. Take the release's `docker-compose.yml` (step 2
+  above) rather than just `pull`-ing — see
   [docker.md](./docker.md#the-bundled-index-mysql-84) for the exact symptom
   (`unknown flag: --console`, crash-loop) and confirmation that volumes and
   `.env` survive the swap untouched.
@@ -178,7 +194,12 @@ Servers you already have keep what they have:
   bound one.
 - `--baseline-retain` (**Delete by age**) still works and is the old way. A
   server with no count is pruned by the age alone, once S3 has each
-  snapshot. The daemon says so once at startup.
+  snapshot. The daemon says so once at startup. A folder whose S3 prefix
+  another server also sends to, from another folder or from none, is not
+  pruned by age any more ([#2675](https://github.com/dbtrail/dbtrail/issues/2675)):
+  the bucket cannot say which server's copy of a snapshot name it holds.
+  Such a folder now keeps every snapshot, the hourly cleanup logs it, and
+  its settings card says why. Give each server its own S3 prefix.
 - A schedule you already saved keeps sending to S3 as often as it did, each
   update included, and no schedule starts by itself on a server you already
   have.
@@ -190,8 +211,20 @@ minutes after its first snapshot, and sends one snapshot to S3 every 24
 hours. Change either on the Snapshots page.
 
 If you downgrade and add a server with an S3 destination on the older
-version, set its **Keep by count** to empty before upgrading again: the
-older version saves a 3 it does not use, and this version would apply it.
+version, the older version saves a 3 it does not use. Coming back up, that
+count is not applied (#2675): every count beside an S3 destination carries
+the count and the destination it was saved with
+(`local_keep_saved_with` in the server registry), written only by a
+version that applies the count. A count without that mark, or with the
+mark of another count or destination, is cleared at start, the log names
+the server, and the server keeps every local snapshot until you set
+**Keep by count** on it. An older version keeps the mark on the servers it
+edits and writes none on the servers it adds; it does nothing else with
+it. Two downgrades are not covered, and in both the 3 applies as before:
+one made before the first start of the version that brought the mark (it
+marks every count it finds, once), and one that goes through 0.130.0 to an
+older version (0.130.0 drops the record that the counts are marked, so the
+next start marks them all again).
 
 ### The count is the whole rule: no extra hour of snapshots
 
@@ -212,8 +245,11 @@ its number.
   snapshot sent before the moment you ask for.
 - **Tools that read the local folder from another process**
   (`bintrail reconstruct --baseline-dir`, `bintrail export iceberg`, a
-  standalone shim) get the same reach, and are not waited for by the
-  cleanup.
+  standalone shim) get the same reach. Since
+  [#2675](https://github.com/dbtrail/dbtrail/issues/2675) the snapshot
+  `bintrail reconstruct`, `bintrail verify` and `bintrail export iceberg`
+  are reading is kept by the cleanup until they end; a standalone shim's
+  single-row lookups are not.
 - **"Delete by age"** (`--baseline-retain`) is unchanged, its one-hour
   minimum included.
 
@@ -317,6 +353,8 @@ is simply ignored on read, which is usually fine, but any code path that
 built column lists positionally rather than by name would not be). If you
 need a rollback option, keep the previous binary/image tag around and pin
 `BINTRAIL_TAG` (or your package version) rather than relying on `latest`.
+A stack from the install script already has it in `.env`: write down the
+value before you change it.
 
 ## Getting help
 

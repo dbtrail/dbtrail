@@ -1,6 +1,10 @@
 package readrouter
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+	"unicode/utf8"
+)
 
 // The reasons the rewrite of backtick-quoted names refuses a statement. Each
 // is a veto of its own: the statement stays on MySQL and the copy is not
@@ -38,6 +42,15 @@ type scanned struct {
 	// occurred. All three are read from the client's text, before any
 	// rewrite.
 	doubleQuoted, backslash, hash bool
+	// spaceOutsideASCII: a character the copy takes for white space and
+	// MySQL for part of a name (copySpace) occurred outside comments,
+	// string literals and quoted names, or anywhere in a statement with a
+	// quote inside a /* */ comment or a $, where the copy may take a string
+	// literal's for one outside it (see the end of scan). Veto keeps such a
+	// statement on
+	// MySQL; the rewrite for the copy does not refuse it, since the
+	// character changes nothing in how the names are quoted.
+	spaceOutsideASCII bool
 	// refusal names why the names cannot be rewritten with certainty, or "".
 	refusal string
 	// raw is the statement with its names in double quotes and nothing else
@@ -56,6 +69,12 @@ type CopyOptions struct {
 	// compares it with case). On, accents still differ: MySQL's default
 	// collation also ignores them, the copy does not.
 	LikeIgnoresCase bool
+	// LimitOffsetComma writes MySQL's LIMIT offset, count as LIMIT count
+	// OFFSET offset, the only spelling the copy reads (#2628), when both are
+	// whole numbers written in the statement that the copy takes as MySQL
+	// does (limitOffsetComma). Only the port without routing sets it: a
+	// routed statement with the comma stays on MySQL.
+	LimitOffsetComma bool
 }
 
 // ForCopy returns the statement the copy is sent: every backtick-quoted name
@@ -81,7 +100,8 @@ func ForCopy(stmt string) (text, refusal string) {
 }
 
 // ForCopyOpts is ForCopy under a server's CopyOptions: with LikeIgnoresCase,
-// every LIKE keyword is also written ILIKE.
+// every LIKE keyword is also written ILIKE, and with LimitOffsetComma every
+// LIMIT offset, count it can rewrite with certainty LIMIT count OFFSET offset.
 func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 	if hintComment.MatchString(stmt) {
 		return stmt, vetoHintComment
@@ -142,6 +162,8 @@ func scan(stmt string) scanned {
 	// whether a string literal is the amount of an INTERVAL ('1' '5', two
 	// literals, is one amount on MySQL).
 	word, lastWord := -1, ""
+	// quoteInComment: a /* */ comment holds a ' or a ".
+	quoteInComment := false
 	// cpWord and blWord are where the word being read starts in the two
 	// texts being written; every STRAIGHT_JOIN and LIKE read as a word is
 	// kept in sc.keywords, for copyText to rewrite once the statement is
@@ -168,6 +190,9 @@ func scan(stmt string) scanned {
 				cp.WriteString(stmt[i:])
 				i = n
 				break
+			}
+			if strings.ContainsAny(stmt[i+2:i+2+end], `'"`) {
+				quoteInComment = true
 			}
 			if strings.Contains(stmt[i+2:i+2+end], "/*") {
 				// MySQL ends the comment at the first */; the copy nests
@@ -311,6 +336,11 @@ func scan(stmt string) scanned {
 			i = next
 			afterName, prefixAfterName = true, false
 		default:
+			if c >= 0xc0 {
+				if r, _ := utf8.DecodeRuneInString(stmt[i:]); copySpace(r) {
+					sc.spaceOutsideASCII = true
+				}
+			}
 			switch {
 			case prefixAfterName:
 				prefixAfterName = wordByte(c)
@@ -347,6 +377,15 @@ func scan(stmt string) scanned {
 	}
 	if word >= 0 {
 		endWord(n)
+	}
+	if quoteInComment || strings.IndexByte(stmt, '$') >= 0 {
+		// Before it parses, the copy turns every copySpace character into a
+		// plain space outside what it reads as quotes, and it finds the
+		// quotes on its own: a quote inside a /* */ comment opens one there
+		// (it skips -- comments, not these), and so may a $. So the
+		// character inside a string literal can come out a space: SELECT
+		// /* ' */ 'a<U+00A0>b' is 'a b' on the copy (DuckDB 1.5.6).
+		sc.spaceOutsideASCII = sc.spaceOutsideASCII || strings.ContainsFunc(stmt, copySpace)
 	}
 	sc.blanked = bl.String()
 	sc.raw = cp.String()
@@ -393,6 +432,21 @@ func TwoDigitYear(s string) bool {
 	return i > 3 && i+1 < len(s) && sep(s[i]) && asciiDigit(s[i+1])
 }
 
+// copySpace reports whether r is a character outside ASCII the copy reads as
+// white space between two words. MySQL reads every character from U+0080 up
+// as part of a name, so SELECT a<U+00A0>b is one column there and column a
+// under the alias b on the copy. The list is what DuckDB 1.5.6 took for
+// white space in SELECT 1<c>+ 2, abs<c>(-1), 'a'<c>AS x and SELECT<c>1
+// (#2652). U+0085, U+1680, U+180E, U+2028, U+2029, U+200C and U+200D it
+// refused there, as MySQL did, so they are not in it.
+func copySpace(r rune) bool {
+	switch {
+	case r == 0x00a0, 0x2000 <= r && r <= 0x200b, r == 0x202f, r == 0x205f, r == 0x2060, r == 0x3000, r == 0xfeff:
+		return true
+	}
+	return false
+}
+
 // notASCII reports whether r is a character outside ASCII.
 func notASCII(r rune) bool { return r >= 0x80 }
 
@@ -403,7 +457,7 @@ func wordByte(c byte) bool {
 }
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
-var rewrittenKeywords = []string{"straight_join", "like"}
+var rewrittenKeywords = []string{"straight_join", "like", "limit"}
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
 // copy (cp) and in the blanked text (bl).
@@ -418,7 +472,8 @@ type keywordAt struct {
 // side, and a CROSS JOIN when none does (MySQL then filters in WHERE). As a
 // SELECT modifier (SELECT STRAIGHT_JOIN, SELECT DISTINCT STRAIGHT_JOIN) it
 // only orders MySQL's plan and is dropped. With o.LikeIgnoresCase each LIKE
-// is written ILIKE.
+// is written ILIKE, and with o.LimitOffsetComma each LIMIT offset, count
+// that limitOffsetComma reads is written LIMIT count OFFSET offset.
 //
 // Which of the two joins is read from the blanked text, where comments are
 // gone and string literals are ”, so an ON inside either is not seen. A
@@ -440,6 +495,16 @@ func (sc scanned) copyText(o CopyOptions) string {
 		}
 		var repl string
 		switch {
+		case j.word == "limit":
+			if !o.LimitOffsetComma {
+				continue
+			}
+			offset, count, n, ok := limitOffsetComma(cp[j.cp+kw:], bl[j.bl+kw:])
+			if !ok {
+				continue
+			}
+			cp = cp[:j.cp] + "LIMIT " + count + " OFFSET " + offset + cp[j.cp+kw+n:]
+			continue
 		case j.word == "like":
 			if !o.LikeIgnoresCase {
 				continue
@@ -455,6 +520,73 @@ func (sc scanned) copyText(o CopyOptions) string {
 		cp = cp[:j.cp] + repl + cp[j.cp+kw:]
 	}
 	return cp
+}
+
+// limitArgs is MySQL's "offset, count" after a LIMIT: two whole numbers and
+// a comma, with white space between them that both sides read as white space.
+var limitArgs = regexp.MustCompile(`^[ \t\n\r]+([0-9]+)[ \t\n\r]*,[ \t\n\r]*([0-9]+)`)
+
+// limitOffsetComma reads MySQL's LIMIT offset, count from right after the
+// keyword, in cp (the text sent to the copy) and in bl (the blanked text). It
+// returns the two numbers without their leading zeros (MySQL reads 007 as 7,
+// and so does the copy), and how many bytes of cp they take.
+//
+// ok is false, and nothing is rewritten, unless the numbers stand alone: no
+// comment between them (cp and bl then differ there), and after the count
+// only the end of the statement, a ";", a ")" or a word that starts the next
+// clause (limitEndsBefore). Anything else would be read by the copy as part of
+// the OFFSET it is moved next to: LIMIT 1, 2-1 is a syntax error on MySQL and
+// would be OFFSET 1-1 on the copy, and LIMIT 1, 2 ROWS would be OFFSET 1 ROWS;
+// LIMIT 1, 2.5 and LIMIT 1, 2e3 are errors on MySQL too. And neither number
+// may pass 9223372036854775807: MySQL takes up to 18446744073709551615 and
+// answers, the copy fails past its 64-bit integer (DuckDB 1.5.6).
+func limitOffsetComma(cp, bl string) (offset, count string, n int, ok bool) {
+	m := limitArgs.FindStringSubmatchIndex(cp)
+	if m == nil || !strings.HasPrefix(bl, cp[:m[1]]) {
+		return "", "", 0, false
+	}
+	if rest := cp[m[1]:]; rest != "" && (wordByte(rest[0]) || rest[0] == '.') {
+		return "", "", 0, false
+	}
+	if rest := strings.TrimLeft(bl[m[1]:], " \t\n\r\f\v"); rest != "" && rest[0] != ';' && rest[0] != ')' && !limitEndsBefore(rest) {
+		return "", "", 0, false
+	}
+	offset, count = noLeadingZeros(cp[m[2]:m[3]]), noLeadingZeros(cp[m[4]:m[5]])
+	if !fitsInt64(offset) || !fitsInt64(count) {
+		return "", "", 0, false
+	}
+	return offset, count, m[1], true
+}
+
+// limitEndsBefore reports whether rest starts with a word MySQL takes after a
+// LIMIT, as a word of its own: FOR UPDATE, LOCK IN SHARE MODE, INTO, a set
+// operator, PROCEDURE.
+func limitEndsBefore(rest string) bool {
+	i := 0
+	for i < len(rest) && wordByte(rest[i]) {
+		i++
+	}
+	switch strings.ToLower(rest[:i]) {
+	case "for", "lock", "into", "union", "intersect", "except", "procedure":
+		return true
+	}
+	return false
+}
+
+// noLeadingZeros is the digits s without the zeros before them, "0" for
+// zeros alone.
+func noLeadingZeros(s string) string {
+	if s = strings.TrimLeft(s, "0"); s == "" {
+		return "0"
+	}
+	return s
+}
+
+// fitsInt64 reports whether the digits s, with no leading zero, are at most
+// 9223372036854775807.
+func fitsInt64(s string) bool {
+	const largest = "9223372036854775807"
+	return len(s) < len(largest) || len(s) == len(largest) && s <= largest
 }
 
 // namedByDot reports whether the keyword of length kw at at in the blanked

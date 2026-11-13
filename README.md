@@ -44,7 +44,9 @@ GROUP BY c.tier ORDER BY revenue DESC;
   You review it and you run it.
   [Undo a wrong change](https://www.dbtrail.com/docs/guides/recovery/)
 - **See a table as it was yesterday at 14:30**, or every version of one row,
-  with `AS OF` from your mysql client.
+  with `AS OF` from your mysql client. To try it in 30 seconds with nothing of
+  yours connected: `docker run --rm -p 6033:6033 ghcr.io/dbtrail/bintrail-demo`
+  ([the demo image](docs/demo.md)).
   [Restore tables to a moment](https://www.dbtrail.com/docs/guides/pitr/)
 - **Ask Claude what changed.** Connect Claude, or any MCP client, and ask in
   plain words: "what was deleted from orders in the last hour?", "how did
@@ -77,10 +79,6 @@ calls you can keep in your automation:
 [In production](https://www.dbtrail.com/docs/production/). Linux packages and
 Amazon ECS too.
 
-To try the time-travel SQL in 30 seconds, with nothing of yours connected:
-`docker run --rm -p 6033:6033 ghcr.io/dbtrail/bintrail-demo`
-([the demo image](docs/demo.md)).
-
 ## Limits
 
 - **The copy is behind your MySQL.** By seconds in fresh mode, the default,
@@ -98,7 +96,12 @@ To try the time-travel SQL in 30 seconds, with nothing of yours connected:
   `TRUNCATE`, makes DBTrail read that table again, with a short lock.
 - **Row history needs a bucket to last.** Without S3 it keeps 48 hours. The
   copy itself stays.
-- **The MySQL port has no TLS yet.** Use it on a private network.
+- **The MySQL port's TLS is verifiable only with your certificate.** Without
+  one, a client that asks for TLS gets it, with a certificate made up at
+  start that it cannot verify. Give the router yours (`--tls-cert`,
+  `--tls-key`) and clients can connect with `--ssl-mode=VERIFY_IDENTITY`.
+  The port offers TLS and does not require it. See
+  [TLS on the port](docs/time-travel-sql.md#tls-on-the-port).
 - **Yours to operate.** DBTrail and its small index MySQL run on your
   machines. Disk, backups and upgrades are yours.
 

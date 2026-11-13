@@ -427,7 +427,7 @@ var drillFold = reconstruct.ReconstructTablesDetailed
 
 // drillNoSnapshotError is the verdict of a table with no snapshot to start
 // from, however drill learned it.
-const drillNoSnapshotError = "no usable baseline for this table; the dump was rebuilt from binlog deltas alone (an EMPTY starting table); a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)"
+const drillNoSnapshotError = "no usable baseline for this table; built from binlog deltas alone it would start from an EMPTY table, so it was not loaded; a real restore would lose every never-touched row. Take a baseline (bintrail dump + bintrail baseline)"
 
 // drillNoSnapshotResult is the FAIL of a table the engine refused because it
 // has no snapshot. Nothing was written or loaded for it. binlog_only stays

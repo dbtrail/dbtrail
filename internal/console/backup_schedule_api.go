@@ -95,8 +95,11 @@ type backupScheduleRunDTO struct {
 	Method string `json:"method"`
 	// Why / WhyCode: for a full backup, the reason an update was not
 	// possible when it ran (#1604), and its stable code for the remedy.
-	Why        string `json:"why,omitempty"`
-	WhyCode    string `json:"why_code,omitempty"`
+	Why     string `json:"why,omitempty"`
+	WhyCode string `json:"why_code,omitempty"`
+	// UpdateWhy: for an update, why it ran where the slot would otherwise
+	// have been skipped (#2674, BaselineRunRecord.UpdateWhy).
+	UpdateWhy  string `json:"update_why,omitempty"`
 	StartedAt  string `json:"started_at"`
 	FinishedAt string `json:"finished_at"`
 	OK         bool   `json:"ok"`
@@ -382,6 +385,7 @@ func scheduleRunFromRecord(run *BaselineRunRecord) *backupScheduleRunDTO {
 		Method:        runMethod(run.Kind),
 		Why:           run.Why,
 		WhyCode:       run.WhyCode,
+		UpdateWhy:     run.UpdateWhy,
 		StartedAt:     run.StartedAt,
 		FinishedAt:    run.FinishedAt,
 		OK:            run.Error == "",
@@ -426,6 +430,7 @@ func scheduleRunFromStatus(st BackupScheduleState) *backupScheduleRunDTO {
 		Method:        st.LastMethod,
 		Why:           st.LastWhy,
 		WhyCode:       BackupWhyCode(st.LastWhy),
+		UpdateWhy:     st.LastUpdateWhy,
 		StartedAt:     st.LastStartedAt,
 		FinishedAt:    cur.FinishedAt,
 		OK:            ok,
@@ -507,6 +512,10 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The record that each update was in force beside a destination this
+	// server no longer has (#2675) stays while the interval stays empty: a
+	// save of the schedule's time is not a new choice about sending.
+	sched.UploadEachUpdate = sched.UploadEvery == "" && e.BackupSchedule != nil && e.BackupSchedule.UploadEachUpdate
 	// Asked only of a value this save sets: one saved while the server had a
 	// destination stays inert when it loses it, and editing the time of the
 	// updates must not force the operator to delete it first.

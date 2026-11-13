@@ -55,7 +55,7 @@ func TestTriggerRefresh_aStatementTheMarksCountIsInsideTheFoldWindow(t *testing.
 	mark := indexMark{events: 100, schemaChanges: 8}
 	prevMark := readIndexMark
 	t.Cleanup(func() { readIndexMark = prevMark })
-	readIndexMark = func(context.Context, string) (indexMark, bool) {
+	readIndexMark = func(context.Context, string) (indexMark, error) {
 		// The pauses keep the three instants apart on a coarse clock: the
 		// claim, the statement, and the return of this read.
 		time.Sleep(3 * time.Millisecond)
@@ -63,7 +63,7 @@ func TestTriggerRefresh_aStatementTheMarksCountIsInsideTheFoldWindow(t *testing.
 		truncatedAt = time.Now().UTC()
 		mu.Unlock()
 		time.Sleep(3 * time.Millisecond)
-		return mark, true
+		return mark, nil
 	}
 	prevFold := foldTables
 	t.Cleanup(func() { foldTables = prevFold })
@@ -238,10 +238,10 @@ func TestRefreshCanSkip_aHungCoverageReadBlocksNoOtherJob(t *testing.T) {
 	var once, freed sync.Once
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
-	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) {
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, error) {
 		once.Do(func() { close(reading) })
 		<-release
-		return true, true
+		return true, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -316,7 +316,7 @@ func TestReportGateBlind(t *testing.T) {
 		sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 		sup.gateEdge = notify.NewEdge(time.Hour)
 
-		sup.reportGateBlind("mark", false, req, why)
+		sup.reportGateBlind("mark", errGateBlindStub, req, why)
 		if got := warns(log); got != 1 {
 			t.Fatalf("%d Warn line(s) on the first blind cycle, want 1: %q", got, log.String())
 		}
@@ -327,13 +327,13 @@ func TestReportGateBlind(t *testing.T) {
 			}
 		}
 		for range 5 {
-			sup.reportGateBlind("mark", false, req, why)
+			sup.reportGateBlind("mark", errGateBlindStub, req, why)
 		}
 		if got := warns(log); got != 1 {
 			t.Errorf("%d Warn line(s) after six blind cycles, want still 1: at a five-minute "+
 				"interval this would be 288 lines a day", got)
 		}
-		sup.reportGateBlind("mark", true, req, why)
+		sup.reportGateBlind("mark", nil, req, why)
 		if got := warns(log); got != 1 {
 			t.Errorf("%d Warn line(s) after the read worked again, want still 1: recovering "+
 				"is not a warning", got)
@@ -341,7 +341,7 @@ func TestReportGateBlind(t *testing.T) {
 		if sup.gateEdge.Active("gate-blind:mark:s") {
 			t.Error("the condition is still standing after the read worked again")
 		}
-		sup.reportGateBlind("mark", false, req, why)
+		sup.reportGateBlind("mark", errGateBlindStub, req, why)
 		if got := warns(log); got != 2 {
 			t.Errorf("%d Warn line(s) after the read failed AGAIN, want 2: a condition that "+
 				"ended and came back is a new one", got)
@@ -353,9 +353,9 @@ func TestReportGateBlind(t *testing.T) {
 		sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 		sup.gateEdge = notify.NewEdge(time.Millisecond)
 
-		sup.reportGateBlind("coverage", false, req, why)
+		sup.reportGateBlind("coverage", errGateBlindStub, req, why)
 		time.Sleep(20 * time.Millisecond)
-		sup.reportGateBlind("coverage", false, req, why)
+		sup.reportGateBlind("coverage", errGateBlindStub, req, why)
 		if got := warns(log); got != 2 {
 			t.Errorf("%d Warn line(s), want 2: a condition that lasts for months is said "+
 				"once per window, not once ever", got)
@@ -367,8 +367,8 @@ func TestReportGateBlind(t *testing.T) {
 		sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 		sup.gateEdge = notify.NewEdge(time.Hour)
 
-		sup.reportGateBlind("mark", false, req, why)
-		sup.reportGateBlind("coverage", false, req, why)
+		sup.reportGateBlind("mark", errGateBlindStub, req, why)
+		sup.reportGateBlind("coverage", errGateBlindStub, req, why)
 		if got := warns(log); got != 2 {
 			t.Fatalf("%d Warn line(s), want 2: the mark being unreadable hid the coverage read "+
 				"failing: %q", got, log.String())
@@ -377,11 +377,11 @@ func TestReportGateBlind(t *testing.T) {
 			t.Errorf("no line names the coverage question: %q", log.String())
 		}
 		// And the recovery of one leaves the other standing.
-		sup.reportGateBlind("mark", true, req, why)
+		sup.reportGateBlind("mark", nil, req, why)
 		if !sup.gateEdge.Active("gate-blind:coverage:s") {
 			t.Error("the mark read recovering resolved the coverage condition too")
 		}
-		sup.reportGateBlind("coverage", false, req, why)
+		sup.reportGateBlind("coverage", errGateBlindStub, req, why)
 		if got := warns(log); got != 2 {
 			t.Errorf("%d Warn line(s), want still 2: the coverage condition never ended", got)
 		}
@@ -392,8 +392,8 @@ func TestReportGateBlind(t *testing.T) {
 		sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 		sup.gateEdge = notify.NewEdge(time.Hour)
 
-		sup.reportGateBlind("mark", false, req, why)
-		sup.reportGateBlind("mark", false, refreshRequest{ServerID: "t", ServerName: "billing"}, why)
+		sup.reportGateBlind("mark", errGateBlindStub, req, why)
+		sup.reportGateBlind("mark", errGateBlindStub, refreshRequest{ServerID: "t", ServerName: "billing"}, why)
 		if got := warns(log); got != 2 || !strings.Contains(log.String(), "server=billing") {
 			t.Errorf("%d Warn line(s), want 2 with one naming the second server: %q", got, log.String())
 		}
@@ -410,7 +410,7 @@ func TestRefreshCanSkip_saysWhenItCannotReadCoverage(t *testing.T) {
 	req := refreshRequest{ServerID: "s", ServerName: "shop", IndexDSN: "d"}
 	seedQuietServer(sup, req, mark)
 	// The mark has been unreadable for a while, and that is already standing.
-	sup.reportGateBlind("mark", false, req, "cannot tell whether anything has been indexed")
+	sup.reportGateBlind("mark", errGateBlindStub, req, "cannot tell whether anything has been indexed")
 
 	for range 3 {
 		if sup.refreshCanSkip(context.Background(), req, mark, refreshAt, 0) {
@@ -440,8 +440,8 @@ func TestReportGateBlind_aShutdownIsNotBlindness(t *testing.T) {
 	req := refreshRequest{ServerID: "s", ServerName: "shop"}
 
 	cancel()
-	sup.reportGateBlind("mark", false, req, "cannot tell")
-	sup.reportGateBlind("coverage", false, req, "cannot tell")
+	sup.reportGateBlind("mark", errGateBlindStub, req, "cannot tell")
+	sup.reportGateBlind("coverage", errGateBlindStub, req, "cannot tell")
 	if out := log.String(); strings.Contains(out, "level=WARN") {
 		t.Errorf("a shutdown was reported as the gate being blind: %q", out)
 	}
@@ -458,9 +458,9 @@ func TestReportGateBlind_aShutdownLeavesAStandingConditionAlone(t *testing.T) {
 	sup.gateEdge = notify.NewEdge(time.Hour)
 	req := refreshRequest{ServerID: "s", ServerName: "shop"}
 
-	sup.reportGateBlind("mark", false, req, "cannot tell")
+	sup.reportGateBlind("mark", errGateBlindStub, req, "cannot tell")
 	cancel()
-	sup.reportGateBlind("mark", false, req, "cannot tell")
+	sup.reportGateBlind("mark", errGateBlindStub, req, "cannot tell")
 	if !sup.gateEdge.Active("gate-blind:mark:s") {
 		t.Error("the shutdown resolved a condition nothing had fixed")
 	}

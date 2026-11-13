@@ -550,11 +550,11 @@ func TestServerList(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	want := []string{
-		"NAME       ADDRESS             USER     RECORDING            FORWARDS AS",
-		"boot       -                   -        set at startup       -",
-		"shop       db1:3306            dbtrail  running              shop_fwd",
-		"Billing    [2001:db8::1]:3307  dbtrail  not by this DBTrail  -",
-		"old-index  -                   -        -                    -",
+		"NAME       ADDRESS             USER     RECORDING            FORWARDS AS  MODE",
+		"boot       -                   -        set at startup       -            fast",
+		"shop       db1:3306            dbtrail  running              shop_fwd     fast (default)",
+		"Billing    [2001:db8::1]:3307  dbtrail  not by this DBTrail  -            fast (default)",
+		"old-index  -                   -        -                    -            -",
 	}
 	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
 		t.Errorf("got:\n%s\nwant:\n%s", out.String(), strings.Join(want, "\n"))

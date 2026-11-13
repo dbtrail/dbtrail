@@ -48,19 +48,26 @@ const CompactDirName = ".compact"
 // being enough: a root has neither.
 func isDaemonWorkDir(root, path string) bool {
 	root = filepath.Clean(root)
-	if filepath.Dir(path) != root {
+	if filepath.Dir(path) != root || rootIsSnapshot(root) {
 		return false
-	}
-	if _, isSnapshot := snapshotdir.ParseTime(filepath.Base(root)); isSnapshot {
-		return false
-	}
-	for _, marker := range []string{SuccessMarker, IncompleteMarker} {
-		if _, err := os.Stat(filepath.Join(root, marker)); err == nil {
-			return false
-		}
 	}
 	name := filepath.Base(path)
 	return name == CompactDirName || name == ResolvedDirName
+}
+
+// rootIsSnapshot reports whether root is itself a snapshot directory, told
+// by its name or by a completeness marker directly in it, either being
+// enough: a root of snapshots has neither.
+func rootIsSnapshot(root string) bool {
+	if _, isSnapshot := snapshotdir.ParseTime(filepath.Base(root)); isSnapshot {
+		return true
+	}
+	for _, marker := range []string{SuccessMarker, IncompleteMarker} {
+		if _, err := os.Stat(filepath.Join(root, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvedTableDeltaDir is where the resolved pair of the table file at

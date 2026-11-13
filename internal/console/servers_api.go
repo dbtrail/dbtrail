@@ -560,6 +560,11 @@ func startUploadIntervalWithFirstDestination(old ServerEntry, e *ServerEntry) {
 	if e.BackupSchedule == nil || strings.TrimSpace(e.BackupSchedule.UploadEvery) != "" {
 		return
 	}
+	// Each update was in force beside the destination this server had
+	// before (#2675, rememberEachUpdate): a destination added again keeps it.
+	if e.BackupSchedule.UploadEachUpdate {
+		return
+	}
 	every := defaultUploadEvery(*e, e.BackupSchedule.Every)
 	if every == "" {
 		return
@@ -569,6 +574,26 @@ func startUploadIntervalWithFirstDestination(old ServerEntry, e *ServerEntry) {
 	sched.UploadEvery = every
 	e.BackupSchedule = &sched
 	slog.Info(uploadIntervalStartedMsg(every), "server", e.Name, "every", sched.Every, "destination", e.BaselineS3)
+}
+
+// rememberEachUpdate records, inside the registry's own write, that a server
+// losing its S3 destination was sending to it at each update (#2675): the
+// empty interval was in force beside a destination, which is what a choice
+// of each update looks like, and a schedule saved before #2658 too. Without
+// it, removing the destination and adding one again turned each update into
+// the default of once a day, since an empty interval on a server with no
+// destination is never a choice (startUploadIntervalWithFirstDestination).
+func rememberEachUpdate(old ServerEntry, e *ServerEntry) {
+	if strings.TrimSpace(old.BaselineS3) == "" || strings.TrimSpace(e.BaselineS3) != "" {
+		return
+	}
+	if e.BackupSchedule == nil || strings.TrimSpace(e.BackupSchedule.UploadEvery) != "" || e.BackupSchedule.UploadEachUpdate {
+		return
+	}
+	// A copy: the schedule the caller holds is not this entry's to change.
+	sched := *e.BackupSchedule
+	sched.UploadEachUpdate = true
+	e.BackupSchedule = &sched
 }
 
 // uploadIntervalStartedMsg is the daemon's line when a first S3 destination
@@ -901,21 +926,36 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 		SSLKey:  old.SSLKey,
 	}
 	s3AgeMu.Lock()
-	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &entry)) {
+	// The S3 age is asked of the entry this save will write, built on the
+	// entry as it is now (every writer of the S3 fields holds s3AgeMu).
+	now, _ := s.cm.reg.Get(id)
+	probe := formOnto(now, old, entry)
+	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &probe)) {
 		s3AgeMu.Unlock()
 		return
 	}
-	// The fields this form does not own are taken from the entry as it is
-	// now, not as this request read it (#2658): the count of snapshots to
-	// keep and the schedule have their own saves, and a whole-entry write
-	// would put a stale count back, which deletes.
+	// Only what this form changed, on the entry as it is now (#2658, #2675):
+	// the count of snapshots to keep, the schedule, the monitoring intent,
+	// the SQL mirror's switch and every field a save made since this
+	// request read the entry keep their value, a folder moved meanwhile
+	// included. A whole-entry write would put a stale count or folder back,
+	// and a stale count deletes. The folder this form moves to is asked
+	// about under the lock, with the count it will have.
+	var refused error
 	err = s.cm.reg.UpdateWith(id, func(cur ServerEntry) (ServerEntry, bool) {
-		entry.LocalKeepNewest = cur.LocalKeepNewest
-		entry.BackupSchedule = cur.BackupSchedule
-		entry.DefaultScheduleOnFirst = cur.DefaultScheduleOnFirst
-		return entry, true
+		next := formOnto(cur, old, entry)
+		if err := adoptionUnderLock(cur, old, next, false); err != nil {
+			refused = err
+			return cur, false
+		}
+		entry = next
+		return next, true
 	})
 	s3AgeMu.Unlock()
+	if refused != nil {
+		writeJSONError(w, http.StatusBadRequest, refused.Error())
+		return
+	}
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
@@ -934,6 +974,51 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 		s.cm.rebuildDerived(entry) // keep the db, recompute baseline/no-archive gates
 	}
 	writeJSON(w, http.StatusOK, s.entryDTO(entry))
+}
+
+// formOnto is the connection form's save applied to cur, the entry as it is
+// now: each field the form owns that it changed from old (the entry as the
+// request read it), and nothing else (#2675). The form builds its entry from
+// old for the fields it does not show, so copying it whole put back what a
+// save made in between: a folder, a stopped capture, the SQL mirror's
+// switch. The flavor is written as the form resolved it: it cannot change
+// (the request is refused before this), and the registry keeps the stored
+// one within MySQL and MariaDB. The S3 age goes with a destination this
+// form moves (keepS3Retain), so it is cleared when the destination it
+// writes is not the one cur has.
+func formOnto(cur, old, form ServerEntry) ServerEntry {
+	next := cur
+	str := func(dst *string, was, now string) {
+		if now != was {
+			*dst = now
+		}
+	}
+	str(&next.Name, old.Name, form.Name)
+	str(&next.DSN, old.DSN, form.DSN)
+	str(&next.BaselineDir, old.BaselineDir, form.BaselineDir)
+	str(&next.BaselineS3, old.BaselineS3, form.BaselineS3)
+	if form.NoArchive != old.NoArchive {
+		next.NoArchive = form.NoArchive
+	}
+	str(&next.ArchiveS3, old.ArchiveS3, form.ArchiveS3)
+	str(&next.S3Endpoint, old.S3Endpoint, form.S3Endpoint)
+	str(&next.S3PathStyle, old.S3PathStyle, form.S3PathStyle)
+	str(&next.S3Region, old.S3Region, form.S3Region)
+	str(&next.S3AccessKeyID, old.S3AccessKeyID, form.S3AccessKeyID)
+	str(&next.S3SecretAccessKey, old.S3SecretAccessKey, form.S3SecretAccessKey)
+	str(&next.SourceDSN, old.SourceDSN, form.SourceDSN)
+	str(&next.RouteDSN, old.RouteDSN, form.RouteDSN)
+	if form.SourceServerID != old.SourceServerID {
+		next.SourceServerID = form.SourceServerID
+	}
+	str(&next.Schemas, old.Schemas, form.Schemas)
+	str(&next.SourceSlot, old.SourceSlot, form.SourceSlot)
+	str(&next.SourcePublication, old.SourcePublication, form.SourcePublication)
+	next.Flavor = form.Flavor
+	if normS3(next.BaselineS3) != normS3(cur.BaselineS3) {
+		next.BaselineS3Retain = ""
+	}
+	return next
 }
 
 // handleServersDelete serves DELETE /api/servers/{id}.
@@ -1111,14 +1196,7 @@ func (s *Server) handleMonitorStop(w http.ResponseWriter, r *http.Request) {
 	// Clear intent first: if the process dies mid-stop, boot reconciliation
 	// must not resurrect a stream the operator asked to stop.
 	if e.MonitorDesired {
-		e.MonitorDesired = false
-		// Only this handler's field, on the entry as it is now (#2658): a
-		// whole-entry write would put back whatever a save made since this
-		// request read the entry, a count of snapshots to keep included.
-		if err := s.cm.reg.UpdateWith(e.ID, func(cur ServerEntry) (ServerEntry, bool) {
-			cur.MonitorDesired = false
-			return cur, true
-		}); err != nil {
+		if err := s.stopIntent(e); err != nil {
 			writeJSONError(w, registryErrStatus(err), err.Error())
 			return
 		}
@@ -1128,6 +1206,18 @@ func (s *Server) handleMonitorStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"monitor": s.monitorCtrl.Status(e.ID)})
+}
+
+// stopIntent records that e is no longer to be captured: only that field,
+// on the entry as it is now (#2658), so a whole-entry write cannot put back
+// what a save made since the request read e, a count of snapshots to keep
+// included. startEntry's counterpart; apart from the handler so it can be
+// driven with an entry read before another save (#2675).
+func (s *Server) stopIntent(e ServerEntry) error {
+	return s.cm.reg.UpdateWith(e.ID, func(cur ServerEntry) (ServerEntry, bool) {
+		cur.MonitorDesired = false
+		return cur, true
+	})
 }
 
 // handleMonitorStatus serves GET /api/servers/{id}/monitor.

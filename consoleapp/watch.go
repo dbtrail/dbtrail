@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -854,7 +856,7 @@ func sqlPortOldComposeNotice(composeVersion string) string {
 	if err != nil || v >= 4 {
 		return ""
 	}
-	return fmt.Sprintf("NOTHING ANSWERS ON IT (port 3309). This version serves it from the router service, which the docker-compose.yml running this stack (version %d) does not start on that port. MySQL clients that connected to 3309 are refused until the file is replaced: %s", v, composeDownload)
+	return fmt.Sprintf("NOTHING ANSWERS ON IT (port 3309). This version serves it from the router service, which the docker-compose.yml running this stack (version %d) does not start on that port. MySQL clients that connected to 3309 are refused until the file is replaced: %s", v, composeDownload())
 }
 
 // sqlPortMigratedWords says what became of the port of an installation that
@@ -1735,6 +1737,11 @@ func localKeepPruneTargets(entries []console.ServerEntry, globalDir string, glob
 // an age target: one prune of it applies both rules (a snapshot goes when it
 // is past the count AND older than the age), where two prunes in a row would
 // let the age alone take the folder under its count.
+//
+// A folder whose S3 prefix another folder's writer also sends to is not
+// pruned by age either (#2675, console.AgePruneSharedS3): the bucket would
+// confirm the other writer's snapshot of the same name, and a local snapshot
+// whose own upload failed would be removed with no copy of it anywhere.
 func prunePlan(entries []console.ServerEntry, globalDir, globalS3 string, retain time.Duration) []baselinePruneTarget {
 	byCount, covered := localKeepPruneTargets(entries, globalDir, globalS3)
 	var targets []baselinePruneTarget
@@ -1743,10 +1750,35 @@ func prunePlan(entries []console.ServerEntry, globalDir, globalS3 string, retain
 			if covered[console.CanonicalDir(t.dir)] {
 				continue
 			}
+			if console.AgePruneSharedS3(entries, t.dir, t.s3, globalDir, globalS3) {
+				continue
+			}
 			targets = append(targets, t)
 		}
 	}
 	return append(targets, byCount...)
+}
+
+// ageSharedS3Message is what the hourly cleanup logs for each folder
+// prunePlan leaves out of the age rule because its S3 prefix is shared.
+const ageSharedS3Message = "snapshot cleanup: another server sends its snapshots to this folder's S3 prefix too, so the bucket cannot tell which server's copy it holds, and nothing is removed from this folder by age; give each server its own S3 prefix"
+
+// warnAgeSharedS3 logs each folder an age would prune and prunePlan leaves
+// out because its S3 prefix is shared (#2675). Called by the hourly cleanup
+// only: prunePlan also runs after every new snapshot, and the same line
+// every few minutes would bury the rest of the log.
+func warnAgeSharedS3(entries []console.ServerEntry, globalDir, globalS3 string, retain time.Duration) {
+	if retain <= 0 {
+		return
+	}
+	// The folders a count covers, as localKeepPruneTargets names them,
+	// without its own warnings said a second time.
+	covered := console.LocalKeepTargets(entries, globalDir, globalS3)
+	for _, t := range baselinePruneTargets(entries, globalDir, globalS3) {
+		if _, counted := covered[console.CanonicalDir(t.dir)]; !counted && console.AgePruneSharedS3(entries, t.dir, t.s3, globalDir, globalS3) {
+			slog.Warn(ageSharedS3Message, "dir", t.dir, "destination", t.s3)
+		}
+	}
 }
 
 // runBaselinePruneCycle prunes each target via pruneFn, one (dir + S3) pair at a
@@ -1854,26 +1886,47 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 			"dir", t.dir, "destination", t.s3, "missing", len(res.NotAtDestination))
 		return
 	}
-	// One round per folder at a time, and none for an hour after a round
-	// that failed (#2678). The cleanup now follows every snapshot, so
-	// without this a bucket that answers "not here" and refuses the upload
-	// (no write permission) was tried three times every few minutes, two
-	// rounds could send different snapshots at once, and the log filled
-	// with the same warning. An hour is the hourly cleanup's own pace, which
-	// is how often these were tried before.
+	// One round per folder at a time, and an hour's wait after a failed
+	// send (#2678): the cleanup follows every snapshot, so without it a
+	// bucket that answers "not here" and refuses the upload (no write
+	// permission) was tried three times every few minutes, two rounds could
+	// send different snapshots at once, and the log filled with the same
+	// warning. An hour is the hourly cleanup's own pace, which is how often
+	// these were tried before.
+	//
+	// Whose wait it is depends on what failed (#2691). A send that failed on
+	// a file of the snapshot itself (unreadable, a broken link) makes that
+	// snapshot wait, and the others are still sent: before, one damaged
+	// snapshot made the whole folder wait. Any other failure (the bucket,
+	// the credentials, the network) makes the folder wait, as before, since
+	// every other send would meet it too. A snapshot sent while S3 could not
+	// be asked about it waits on its own (#2696).
 	round := resendRoundFor(t.dir)
 	if !round.begin() {
-		noteResending(t, res, nil, nil, round.waitsUntil())
+		w, fw := round.waitsNow()
+		noteResending(t, res, nil, nil, w, fw, round.lastCleanupRefused())
 		return
 	}
 	defer round.end()
+	round.forget(t.dir, res)
 	sent, skipped, tried, failed := map[string]bool{}, map[string]bool{}, 0, 0
+	cleanupRefused := false
 	wasFailing := round.isFailing()
 	for _, name := range res.NotAtDestination {
 		if ctx.Err() != nil || tried >= resendPerCycle {
 			break
 		}
 		if _, err := os.Stat(filepath.Join(t.dir, name, baseline.SuccessMarker)); err != nil {
+			continue
+		}
+		// Sent before, taken by S3, and refused again since (#2696): S3
+		// accepts the upload and refuses the read, so sending it again
+		// changes nothing. It stays listed, for the page.
+		if slices.Contains(res.ReadRefused, name) {
+			continue
+		}
+		// Its own wait is not over: the others are still sent.
+		if round.waiting(name) {
 			continue
 		}
 		err := resendSnapshotFn(ctx, t.dir, t.s3, name)
@@ -1890,53 +1943,92 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 			continue
 		}
 		tried++
+		if errors.Is(err, errResendCleanupRefused) {
+			cleanupRefused = true
+		}
 		if err != nil {
 			failed++
+			own := failedOnItsOwnFile(err, t.dir)
+			round.sendFailed(name, own)
 			// Said once when the sending starts to fail, not at every
 			// attempt of a failure that goes on.
-			if !wasFailing && failed == 1 {
-				slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the snapshots stay on this disk, and sending them is tried again in an hour, not after every snapshot",
-					"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
-			} else {
+			switch {
+			case wasFailing || failed > 1:
 				slog.Debug("snapshot cleanup: a local snapshot the destination lacks could not be sent again",
+					"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
+			case own:
+				slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the snapshots stay on this disk, and this one is tried again in an hour, while the others are still sent",
+					"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
+			default:
+				slog.Warn("snapshot cleanup: a local snapshot the destination lacks could not be sent again; the snapshots stay on this disk, and sending them is tried again in an hour, not after every snapshot",
 					"dir", t.dir, "snapshot", name, "destination", t.s3, "error", err)
 			}
 			continue
 		}
 		sent[name] = true
+		// Sending a snapshot S3 could not be asked about may succeed and
+		// change nothing (it refuses the read, #2696), so it waits like a
+		// failed send: at most one such send per snapshot an hour.
+		round.sendWorked(name, slices.Contains(res.NotAsked, name))
+		// The evidence a later refusal is about the read (#2696).
+		if err := baseline.MarkResent(t.dir, name, time.Now()); err != nil {
+			slog.Warn("snapshot cleanup: a snapshot was sent again, and the note saying so could not be written; the hour's wait still bounds the sends",
+				"dir", t.dir, "snapshot", name, "error", err)
+		}
 		slog.Info("snapshot cleanup: sent again a local snapshot the destination lacked", "dir", t.dir, "snapshot", name, "destination", t.s3)
 	}
 	if round.finished(failed > 0, tried > 0) {
 		slog.Info("snapshot cleanup: sending the snapshots the destination lacked works again", "dir", t.dir, "destination", t.s3)
 	}
-	noteResending(t, res, sent, skipped, round.waitsUntil())
-}
-
-// waitsUntil is when the next round may start, or the zero time when
-// nothing makes it wait.
-func (r *resendRound) waitsUntil() time.Time {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if resendNow().Before(r.nextTry) {
-		return r.nextTry
+	if tried > 0 {
+		round.setCleanupRefused(cleanupRefused)
 	}
-	return time.Time{}
+	w, fw := round.waitsNow()
+	noteResending(t, res, sent, skipped, w, fw, round.lastCleanupRefused())
 }
 
-// resendBackoff is how long a folder's re-sends wait after a round in which
-// one failed: the hourly cleanup's pace.
+// failedOnItsOwnFile reports whether a send failed on a file of the
+// snapshot itself, under dir (one that would not open or read), rather than
+// at the destination: then that snapshot alone waits (#2691).
+func failedOnItsOwnFile(err error, dir string) bool {
+	var pe *fs.PathError
+	if !errors.As(err, &pe) {
+		return false
+	}
+	rel, rerr := filepath.Rel(filepath.Clean(dir), filepath.Clean(pe.Path))
+	return rerr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// resendBackoff is how long a snapshot's re-send waits after its send
+// failed, or after it was sent while S3 could not be asked about it: the
+// hourly cleanup's pace.
 const resendBackoff = time.Hour
 
 // resendNow is the clock of the re-send rounds, replaced in tests.
 var resendNow = time.Now
 
 // resendRound is one folder's re-send state: whether a round runs now,
-// whether the last one failed, and when the next may start.
+// whether sending fails, the folder's wait after a failure at the
+// destination, and each snapshot's own wait.
 type resendRound struct {
 	mu      sync.Mutex
 	running bool
 	failing bool
-	nextTry time.Time
+	// folderUntil: after a send that failed at the destination, no round
+	// until then (#2678).
+	folderUntil time.Time
+	waits       map[string]resendWait
+	// cleanupRefused: the last round that sent anything had a send refused
+	// for the cleanup question (errResendCleanupRefused, #2701), for the page.
+	cleanupRefused bool
+}
+
+// resendWait is one snapshot's wait before it is sent again (#2691).
+type resendWait struct {
+	until time.Time
+	// forAnswer: it was sent while S3 could not be asked about it (#2696),
+	// not a send that failed on its own file.
+	forAnswer bool
 }
 
 var (
@@ -1954,12 +2046,12 @@ func resendRoundFor(dir string) *resendRound {
 	return resendRounds[key]
 }
 
-// begin claims the folder's round; false while another runs or the wait
-// after a failed one is not over.
+// begin claims the folder's round; false while another runs or the folder's
+// wait after a failure at the destination is not over.
 func (r *resendRound) begin() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.running || resendNow().Before(r.nextTry) {
+	if r.running || resendNow().Before(r.folderUntil) {
 		return false
 	}
 	r.running = true
@@ -1978,27 +2070,112 @@ func (r *resendRound) isFailing() bool {
 	return r.failing
 }
 
+// forget drops the waits that no longer apply: a snapshot no longer on this
+// disk; and, once its wait is over, one sent while S3 could not be asked
+// about it, or one the prune no longer lists. A wait is NOT dropped for a
+// snapshot that is only missing from this cycle's list (a reader pinned it,
+// or the destination did not answer for it, #2658): the next cleanup would
+// send it again before its hour. A failed send stays noted after its wait,
+// until the snapshot is sent or goes: the folder is still failing while one
+// is.
+func (r *resendRound) forget(dir string, res baseline.PruneResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := resendNow()
+	for name, w := range r.waits {
+		_, serr := os.Stat(filepath.Join(dir, name))
+		gone := errors.Is(serr, fs.ErrNotExist)
+		over := !now.Before(w.until)
+		if gone || over && (w.forAnswer || !slices.Contains(res.NotAtDestination, name)) {
+			delete(r.waits, name)
+		}
+	}
+}
+
+// waiting reports whether name's own wait is not over.
+func (r *resendRound) waiting(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.waits[name]
+	return ok && resendNow().Before(w.until)
+}
+
+// sendFailed starts the wait after a failed send: name's when it failed on
+// its own file, the folder's otherwise.
+func (r *resendRound) sendFailed(name string, own bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	until := resendNow().Add(resendBackoff)
+	if !own {
+		r.folderUntil = until
+		return
+	}
+	if r.waits == nil {
+		r.waits = map[string]resendWait{}
+	}
+	r.waits[name] = resendWait{until: until}
+}
+
+// sendWorked records a send that went through: a snapshot S3 could not be
+// asked about waits the hour all the same (#2696); any other has no wait.
+func (r *resendRound) sendWorked(name string, notAsked bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !notAsked {
+		delete(r.waits, name)
+		return
+	}
+	if r.waits == nil {
+		r.waits = map[string]resendWait{}
+	}
+	r.waits[name] = resendWait{until: resendNow().Add(resendBackoff), forAnswer: true}
+}
+
 // finished records how the round went, and reports whether sending just
-// started to work again after failing.
+// started to work again after failing: a round that sent without a failure
+// while no snapshot is left whose last send failed.
 func (r *resendRound) finished(failed, tried bool) (recovered bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	switch {
 	case failed:
 		r.failing = true
-		r.nextTry = resendNow().Add(resendBackoff)
 	case tried:
+		for _, w := range r.waits {
+			if !w.forAnswer {
+				return false
+			}
+		}
 		recovered = r.failing
 		r.failing = false
-		r.nextTry = time.Time{}
+		r.folderUntil = time.Time{}
 	}
 	return recovered
+}
+
+// waitsNow returns the snapshots' own waits that are not over, and the
+// folder's wait when it is not over (the zero time when none).
+func (r *resendRound) waitsNow() (map[string]resendWait, time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := resendNow()
+	out := map[string]resendWait{}
+	for name, w := range r.waits {
+		if now.Before(w.until) {
+			out[name] = w
+		}
+	}
+	folder := time.Time{}
+	if now.Before(r.folderUntil) {
+		folder = r.folderUntil
+	}
+	return out, folder
 }
 
 // noteResending rewrites the folder's record of snapshots the destination
 // lacks after a round (sent and skipped are what it did), or with nothing
 // done when the round did not start: they are still going to be sent.
-func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time) {
+func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, waits map[string]resendWait, folderUntil time.Time, cleanupRefused bool) {
 	if res.DestinationSilent {
 		// The destination failed to answer for some snapshots in this pass
 		// (#2658), so how many it lacks is not known: the prune left the
@@ -2013,16 +2190,46 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 			left = append(left, name)
 		}
 	}
-	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
+	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true, CleanupQuestionRefused: cleanupRefused}
 	for _, name := range left {
-		if name == res.RestoredUnasked {
-			rec.Unasked = name
+		if slices.Contains(res.NotAsked, name) {
+			rec.NotAsked = append(rec.NotAsked, name)
+		}
+		if slices.Contains(res.ReadRefused, name) {
+			rec.ReadRefused = append(rec.ReadRefused, name)
 		}
 	}
-	if !next.IsZero() {
+	// Each one that waits, and when its wait ends (#2691), so the page says
+	// which go at the next cleanup and which later. NextSend, the earliest,
+	// only when every one sent again waits: a page that reads NextSend alone
+	// (an older build) then says something true of all of them.
+	allWait, allForAnswer := true, true
+	var earliest time.Time
+	for _, name := range left {
+		if slices.Contains(res.ReadRefused, name) {
+			continue // not sent again: no wait to say
+		}
+		w, ok := waits[name]
+		if !folderUntil.IsZero() && (!ok || w.until.Before(folderUntil)) {
+			// The folder waits after a failure at the destination: so does
+			// every one of its snapshots.
+			w, ok = resendWait{until: folderUntil}, true
+		}
+		if !ok {
+			allWait = false
+			continue
+		}
+		rec.Waiting = append(rec.Waiting, baseline.SendWait{Name: name, Until: w.until.UTC(), ForAnswer: w.forAnswer})
+		if earliest.IsZero() || w.until.Before(earliest) {
+			earliest = w.until
+		}
+		allForAnswer = allForAnswer && w.forAnswer
+	}
+	if len(rec.Waiting) > 0 && allWait {
 		// The page says when, instead of "at the next cleanup".
-		at := next.UTC()
+		at := earliest.UTC()
 		rec.NextSend = &at
+		rec.WaitsForAnswer = allForAnswer
 	}
 	if err := baseline.RewriteNotInDestination(t.dir, rec); err != nil {
 		slog.Warn("snapshot cleanup: the record of snapshots not at the destination could not be updated; the page may say an old count until the next cleanup",
@@ -2634,6 +2841,7 @@ func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, g
 	// A folder with a count prunes to it whether or not an age retention is
 	// set (#1681, and with an S3 destination since #2658); a set one still
 	// protects younger snapshots.
+	warnAgeSharedS3(entries, globalDir, globalS3, retain)
 	runBaselinePruneCycle(ctx, prunePlan(entries, globalDir, globalS3, retain), retain, pruneFn)
 	// After the local prune, never before it: that one removes a local
 	// snapshot only while its copy is in S3 (#2596).
@@ -2848,4 +3056,19 @@ func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
 		sup.sqlChainLine.Store(&line)
 		sup.sqlChainLimit.Store(&limit)
 	}
+}
+
+// setCleanupRefused records whether the round that just ended had a send refused
+// because S3 refused the cleanup question (#2701).
+func (r *resendRound) setCleanupRefused(v bool) {
+	r.mu.Lock()
+	r.cleanupRefused = v
+	r.mu.Unlock()
+}
+
+// lastCleanupRefused is that, for the record the page reads.
+func (r *resendRound) lastCleanupRefused() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cleanupRefused
 }

@@ -9152,20 +9152,98 @@ function notInS3Words(n, rec) {
     : n + " older " + (n === 1 ? "copy" : "copies") + (names.length ? " (" + names.map(at).join(", ") + (n > names.length ? " and " + (n - names.length) + " more" : "") + ")"
       : " (checked " + utcLabel(rec && rec.at) + ")");
   const it = n === 1 ? "it" : "them";
-  // The last restore's result when S3 could not be ASKED about it: sent
-  // again in case it is missing, and never said to be missing.
-  const unasked = rec && typeof rec.unasked === "string" && rec.unasked ? rec.unasked : "";
-  if (unasked && n === 1) {
-    return "Kept here: " + what + ". S3 could not be asked whether it has it; " +
-      (rec.resending === true
-        ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends it again at the next cleanup.")
-        : "send it to S3 again, or remove it by hand if not needed.");
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : []);
+  // How many a list names in all: the record cuts the lists to a few names
+  // and keeps their counts (#2701); an older build's record has them whole.
+  const total = (l, c) => (typeof c === "number" && c > l.length ? c : l.length);
+  const copiesOf = (l, all = l.length) => (!l.length ? all + " older " + (all === 1 ? "copy" : "copies")
+    : (all === 1 ? "the copy of " : "the copies of ") + l.map(at).join(", ") + (all > l.length ? " and " + (all - l.length) + " more" : ""));
+  // Each copy can wait on its own (#2691): an hour after its send failed on
+  // a file of its own, or after it was sent while S3 could not be asked
+  // about it. When the copies are not all in one case, the waiting ones are
+  // named with their case, and the rest are "the others": they are sent from
+  // the next cleanup on, 3 at most per cleanup, and one older than the age S3
+  // keeps is not sent at all (the record does not say which), so none of
+  // them is named and the line says both limits.
+  const waits = Array.isArray(rec && rec.waiting)
+    ? rec.waiting.filter((w) => w && typeof w.name === "string" && w.name && typeof w.until === "string" && w.until) : [];
+  const earliest = (ws) => ws.map((w) => w.until).sort()[0];
+  const eachOwnWait = () => {
+    const left = names.filter((x) => !list(rec && rec.read_refused).includes(x));
+    const failedW = waits.filter((w) => w.for_answer !== true && left.includes(w.name));
+    const answerW = waits.filter((w) => w.for_answer === true && left.includes(w.name));
+    const others = left.filter((x) => !failedW.concat(answerW).some((w) => w.name === x)).length + Math.max(0, n - names.length);
+    const parts = [];
+    if (failedW.length) {
+      parts.push("sending " + copiesOf(failedW.map((w) => w.name)) + " failed, and DBTrail tries again after " + utcLabel(earliest(failedW)));
+    }
+    if (answerW.length) {
+      const one = answerW.length === 1;
+      parts.push(copiesOf(answerW.map((w) => w.name)) + (one ? " was" : " were") + " sent but could not be confirmed, and DBTrail sends " +
+        (one ? "it" : "them") + " again after " + utcLabel(earliest(answerW)));
+    }
+    if (others) {
+      parts.push(others === 1
+        ? "DBTrail sends the other again at the next cleanup, unless it is older than the age S3 keeps"
+        : "DBTrail sends the others again from the next cleanup on, 3 at most per cleanup, except any older than the age S3 keeps");
+    }
+    return parts.length > 1 ? parts.join("; ") + "." : "";
+  };
+  // What happens next: sent at the next cleanup, after a wait (a failed
+  // send, or a send S3 could not confirm, #2696), or by hand. A send refused
+  // because S3 refused the cleanup's question (#2701) names both permissions
+  // that question needs and the ways out.
+  const tail = (them) => rec && rec.resending === true
+    ? (rec.cleanup_question_refused === true
+      ? "DBTrail does not send " + them + ": S3 will not say whether its own cleanup is removing " + (them === "it" ? "its" : "their") +
+        " folder, which with Delete from S3 after set needs s3:GetObject and s3:ListBucket on this prefix. Add the one that is missing, or clear Delete from S3 after" +
+        (rec.next_send ? "; DBTrail asks again after " + utcLabel(rec.next_send) + "." : ".")
+      : eachOwnWait() || (rec.next_send
+        ? (rec.waits_for_answer === true
+          ? "the last ones sent could not be confirmed, and DBTrail sends again after " + utcLabel(rec.next_send) + "."
+          : "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + ".")
+        : "DBTrail sends " + them + " again at the next cleanup."))
+    : "send " + them + " to S3 again, or remove " + them + " by hand if not needed.";
+  // The ones S3 took when sent again and then refused to read (#2696): not
+  // sent again, and the permission named.
+  const readRefused = list(rec && rec.read_refused);
+  const k = total(readRefused, rec && rec.read_refused_count);
+  if (k) {
+    // S3's refusal does not say why (#2701): a missing s3:GetObject and
+    // credentials that stopped working answer alike, so both are named.
+    const causes = "either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both";
+    if (k >= n) {
+      return "Kept here: " + what + ". S3 took " + it + " when sent again and refuses to read " + it + " back: " + causes +
+        ". DBTrail cannot confirm " + (n === 1 ? "it is" : "they are") + " there, and does not send " + it + " again.";
+    }
+    // The refused ones are among the ones S3 could not be asked about, so
+    // the rest's count of those is the whole count less these.
+    const rest = Object.assign({}, rec, {
+      names: list(rec.names).filter((x) => !readRefused.includes(x)),
+      not_asked: list(rec.not_asked).filter((x) => !readRefused.includes(x)),
+      not_asked_count: Math.max(0, total(list(rec.not_asked), rec.not_asked_count) - k),
+      read_refused: [],
+      read_refused_count: 0,
+    });
+    return notInS3Words(n - k, rest) + " Not sent again: " + copiesOf(readRefused, k) + ", which S3 took and refuses to read back: " + causes + ".";
   }
-  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete" +
-    (unasked ? " (it could not be asked about the copy of " + at(unasked) + ")" : "") + "; " +
-    (rec && rec.resending === true
-      ? (rec.next_send ? "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + "." : "DBTrail sends " + it + " again at the next cleanup.")
-      : "send " + it + " to S3 again, or remove " + it + " by hand if not needed.");
+  // The ones S3 could not be ASKED about (the last restore's result whose
+  // question failed, a copy S3 refused, #2689): sent again in case they are
+  // missing, and never said to be missing.
+  const notAsked = list(rec && rec.not_asked);
+  const a = total(notAsked, rec && rec.not_asked_count);
+  if (a && a >= n) {
+    return "Kept here: " + what + ". S3 could not be asked whether it has " + it + "; " + tail(it);
+  }
+  if (a) {
+    // Some S3 lacks, some it could not be asked about: each said of its own.
+    const m = n - a;
+    const lacked = names.filter((x) => !notAsked.includes(x));
+    const lacks = m === 1 && lacked.length === 1 ? "the copy of " + at(lacked[0])
+      : m + " older " + (m === 1 ? "copy" : "copies") + (lacked.length ? " (" + lacked.map(at).join(", ") + (m > lacked.length ? " and " + (m - lacked.length) + " more" : "") + ")" : "");
+    return "Kept here: " + what + ". S3 does not have " + lacks + " complete, and could not be asked about " + copiesOf(notAsked, a) + "; " + tail(it);
+  }
+  return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete; " + tail(it);
 }
 
 function localCopyWords(s3, keep, loop, reuse, was, reach) {
@@ -9188,8 +9266,11 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
   if (reuse && !s3) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
   const stuck = was.held || was.blocked;
   const none = s3 ? "the count does not apply to it" : "nothing in it is removed, whatever the count says";
+  // With an age set the age does not apply either (#2675): S3 cannot tell
+  // which server's copy of a snapshot name it holds.
+  const sharedNone = age.sharedS3 ? "nothing here is removed" : none;
   if (was.sharedS3) {
-    say("Another server sends its snapshots to this S3 location too, so " + none + ". Give each server its own S3 prefix.");
+    say("Another server sends its snapshots to this S3 location too, so " + sharedNone + ". Give each server its own S3 prefix.");
   } else if (was.held) {
     say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {
@@ -9514,7 +9595,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // about this server", so the card is read at a glance.
     const said = localCopyWords(s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
       { source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held, sharedS3: asSaved && !!srv.keep_shared_s3,
-        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
+        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, sharedS3: !!srv.delete_after_shared_s3, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
         every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0,
@@ -10094,6 +10175,13 @@ function scheduleSkipTail(reason) {
   return touchedRowBudgetText(reason) && /a full (backup|read) cannot start here/.test(reason || "")
     ? " Until a newer full read exists, every scheduled update is refused the same way."
     : " It will try again at the next scheduled time.";
+}
+
+// updateWhyLine: the recorded reason of an update that ran where the slot
+// would otherwise have been skipped (#2674, the run's update_why), which the
+// daemon words as a clause.
+function updateWhyLine(why) {
+  return "This update ran because " + why + (/[.!?]$/.test(why) ? "" : ".");
 }
 
 // unconfirmedSkipText: the skip the schedule records when nothing was indexed
@@ -11019,17 +11107,26 @@ function baselinesPanel(b, servers, opts) {
     // so the rows the listing found in both places are marked, and so are
     // the ones the S3 interval kept here on purpose (held), which go by the
     // count alone. One that was meant for S3 and is not there is not marked.
+    // Which ones is the server's answer (sn.going, #2675), worked out by the
+    // cleanup's own rule: the count AND "Delete by age" when it is set (a
+    // snapshot past the count and younger than the age stays), the newest
+    // of each table, the `current` target, the last restore's result.
+    // Counting positions here could not see the age, and marked rows the
+    // cleanup keeps.
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
-    let localSeen = 0;
     const goingIdx = new Set();
+    const checkKeptIdx = new Set();
     if (keepInForce > 0) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
-        localSeen++;
-        // The last restore's result is kept whatever its date, and takes
-        // no place in the count (#2678).
-        if (sn.restored) { localSeen--; return; }
-        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
+        if (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held) {
+          // Both answers are the server's (#2675): going is what the next
+          // cleanup removes; past_count is what the count and the age would
+          // remove, of which the pair a check compares stays on top of the
+          // count (#2691) and is never marked as going.
+          if (sn.going === true) goingIdx.add(i);
+          else if (sn.kept_for_check && sn.past_count === true) checkKeptIdx.add(i);
+        }
       });
     }
     const total = b.snapshots.length;
@@ -11085,6 +11182,10 @@ function baselinesPanel(b, servers, opts) {
         what.append(el("span", { class: "chip chip-unknown", text: "last restore, kept" + (sn.restored_until ? " until " + utcLabel(sn.restored_until) : ""),
           title: "The result of the last restore to a moment. Kept for 24 hours after the restore, or until the next restore, on top of the newest kept; then it goes like any older snapshot." +
             (sn.restored_local_only ? " It is older than the age S3 keeps, so it is on this machine only and is not sent to S3." : "") }));
+      }
+      if (checkKeptIdx.has(idx)) {
+        what.append(el("span", { class: "chip chip-unknown", text: "kept for the check",
+          title: "The read of the database most tables of the newest snapshot come from (usually the last full read), or the snapshot before it: the two a check of the snapshots compares for those tables. Kept on top of the newest kept, since S3 does not hold them, until another read takes its place. A table read on its own since then has no pair kept." }));
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
@@ -11250,6 +11351,14 @@ function snapshotFailureCard(failure, raw, where, note, name) {
   return box;
 }
 
+// createBaselineRefusal is the toast for a full read the daemon did not
+// start or that failed to start.
+function createBaselineRefusal(err) {
+  const msg = (err && err.message) || String(err);
+  if (err && err.status === 409) return "The full read did not start: " + msg + (/[.!?]$/.test(msg) ? "" : ".");
+  return "Snapshot failed: " + msg;
+}
+
 async function createBaseline(id, btn, onStarted) {
   const label = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
@@ -11257,7 +11366,9 @@ async function createBaseline(id, btn, onStarted) {
   try {
     await api("/api/servers/" + encodeURIComponent(id) + "/baseline", { method: "POST", body: {} });
   } catch (err) {
-    toastError("Snapshot failed: " + ((err && err.message) || err));
+    // 409: refused before it started (another job holds the server, #2674,
+    // or the folder is another server's), which is not a failed snapshot.
+    toastError(createBaselineRefusal(err));
     restore();
     return;
   }
@@ -11679,6 +11790,7 @@ async function loadBackupDetail(at, box) {
   // Outside the duration branch: a run stamped within one second has no
   // duration to show and still has its reason (#1604).
   if (d.run && d.run.why) lines.push(el("span", { class: "bk-fact", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
+  if (d.run && d.run.update_why) lines.push(el("span", { class: "bk-fact", text: updateWhyLine(d.run.update_why) }));
   const readLine = sourceReadLine(d);
   if (readLine) lines.push(el("span", { class: "bk-fact", text: readLine }));
   const lockLine = snapshotLockLine(d);
@@ -12556,6 +12668,10 @@ function backupScheduleCard(cur, b) {
       if (run.disk_note && run.disk_check !== "ok") body.append(diskNoteLine(run.disk_check, run.disk_note));
       // A full read that reached the source without encryption (#1996).
       if (run.transport_note) body.append(el("p", { class: "form-hint", text: run.transport_note }));
+      // Why an update ran where the slot would otherwise have been skipped
+      // (#2674), as recorded when it ran: before the run it was the next
+      // run's reason, and after it nothing else on the page says it.
+      if (run.method === "refresh" && run.update_why) body.append(el("p", { class: "form-hint", text: updateWhyLine(run.update_why) }));
       // The reason a full backup was taken, as recorded when it ran, and
       // the setting that turns the next one into an update (#1604). After
       // BOTH branches: a full read that then failed is the run whose
@@ -12750,10 +12866,24 @@ function backupRestoreCard(cur, b, restoreSt) {
   // coverage card reports as restore_reads. Offering the local-only rows on an
   // S3-backed server would prefill a moment the fold then refuses.
   const reads = cur.baseline_s3 ? "s3" : "dir";
-  const usable = backupSnapshotsFor(b, reads);
+  let usable = backupSnapshotsFor(b, reads);
+  // An S3 location with no snapshot, or one that could not be read, while
+  // the folder holds some (#2691): the restore then starts from the folder,
+  // and the card says so instead of switching off.
+  let fromFolder = "";
+  if (!usable.length && reads === "s3") {
+    const local = backupSnapshotsFor(b, "dir");
+    if (local.length) {
+      const s3src = ((b && b.sources) || []).find((s) => s.kind === "s3");
+      fromFolder = (s3src && s3src.error)
+        ? "This server's S3 location could not be read, so a restore starts from a snapshot in this server's folder. A newer snapshot may be in S3."
+        : "This server's S3 location holds no snapshot yet, so a restore starts from a snapshot in this server's folder.";
+      usable = local;
+    }
+  }
   if (!usable.length) {
     return off("no-snapshot", "There is no snapshot to restore from yet" +
-      (reads === "s3" ? " in this server's S3 location" : " in this server's folder") + ". Take one on Snapshots.");
+      (reads === "s3" ? " in this server's S3 location or in its folder" : " in this server's folder") + ". Take one on Snapshots.");
   }
   const rst = restoreSt && restoreSt.restore;
   if (rst && rst.state === "running") return null; // the run region owns it
@@ -12773,8 +12903,20 @@ function backupRestoreCard(cur, b, restoreSt) {
   msg.hidden = true;
   go.onclick = () => startBackupRestore(cur.id, input.value.trim(), go, msg);
   body.append(el("div", { class: "bk-restore-row" }, moment.wrap, go), msg);
-  const elsewhere = backupElsewhereNote(b, usable, reads);
+  if (fromFolder) body.append(el("p", { class: "form-hint bk-restore-from-folder", text: fromFolder }));
+  // On an S3 server the folder's own snapshots are no longer out of reach
+  // (#2691): a moment S3 has nothing at or before starts from the folder,
+  // so the shared "cannot start from those" line would be false here.
+  const localOnly = reads === "s3" && !fromFolder
+    ? ((b && b.snapshots) || []).filter((x) => x.kinds && x.kinds.length && !x.kinds.includes("s3")).length : 0;
+  const elsewhere = reads === "s3" && !fromFolder
+    ? (localOnly ? el("p", { class: "form-hint", text: localOnly + " snapshot" + (localOnly === 1 ? " is" : "s are") +
+        " kept only on this host, not in S3. A restore starts from S3, and from this host's folder only for a moment S3 has no snapshot at or before." }) : null)
+    : backupElsewhereNote(b, usable, fromFolder ? "dir" : reads);
   if (elsewhere) body.append(elsewhere);
+  // Why the last restore read the folder instead of S3 (#2691), on every
+  // outcome: a result that could not be sent to S3 still came from there.
+  const sourceNote = rst && rst.source_note ? " " + rst.source_note : "";
   if (rst && rst.state === "failed") {
     // published means the fold finished and the snapshot is on disk, and only
     // sending it to S3 failed (#1541). "Published nothing" there is false: the
@@ -12782,8 +12924,8 @@ function backupRestoreCard(cur, b, restoreSt) {
     state.hidden = false;
     state.classList.add("alarm");
     state.textContent = rst.published
-      ? "Last restore wrote the snapshot on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The snapshot is in the list below. A full read sends it along with the rest."
-      : restoreRefusedLine(rst);
+      ? "Last restore wrote the snapshot on this machine but could not send it to S3: " + backupFoldError(rst.last_error || "unknown error") + " The snapshot is in the list below. A full read sends it along with the rest." + sourceNote
+      : restoreRefusedLine(rst) + sourceNote;
   } else if (rst && rst.state === "succeeded") {
     // The reused count belongs here for the same reason it belongs on the
     // refresh note: a restore consumes the same reuse setting, and without the
@@ -12791,7 +12933,8 @@ function backupRestoreCard(cur, b, restoreSt) {
     state.hidden = false;
     state.textContent =
       "Last restore finished" + (rst.at ? ": the snapshot at " + utcLabel(rst.at) : "") + " is in the list below." +
-      (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "");
+      (rst.carried ? " " + rst.carried + " table(s) reused an unchanged file" + reusedCopiedNote(rst.carried_copied || 0) + "." : "") +
+      sourceNote;
   }
   if (!mayCreate) {
     // Only the outcome line, and no card at all when there is none: an
