@@ -133,6 +133,9 @@ type SQLOnCopy struct {
 // browser, and a worker failure, whose text can carry host paths, is logged
 // here and replaced.
 func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqlsandbox.Session) (sqlsandbox.Result, error) {
+	// The server's lag limit (#2777), read per statement: a change saved
+	// while the connection is open governs its next statement.
+	ctx = withBehindLimit(ctx, q.id, q.s.maxBehindSourceOf(q.id))
 	var unchanged sqlUnchanged
 	if sess.UnchangedWithin > 0 {
 		// Before the slot (#2085): a capture that is not known to be up to
@@ -161,7 +164,10 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		var refusal *sqlRefusal
 		var star *sqlStarRefusal
 		var changed *sqlChangedRefusal
+		var behind *sqlBehindRefusal
 		switch {
+		case errors.As(err, &behind):
+			return sqlsandbox.Result{}, &sqlsandbox.BehindSourceError{Reason: behind.Error(), Unknown: behind.unknown != ""}
 		case errors.As(err, &changed):
 			return sqlsandbox.Result{}, &sqlsandbox.MayHaveChangedError{Reason: changed.Message}
 		case errors.As(err, &star):

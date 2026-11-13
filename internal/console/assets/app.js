@@ -16483,7 +16483,8 @@ const ROUTE_REASON_TEXT = {
   in_transaction: "inside a transaction",
   veto: "uses something the copy answers differently (LIKE, NOW(), @variables, …)",
   explain_failed: "MySQL could not explain it",
-  copy_age_unknown: "the copy's age is unknown",
+  copy_age_unknown: "the copy's age is unknown, and this server has a limit on how far behind the source the copy may answer",
+  copy_behind_source: "the copy was further behind the source than this server's limit: MySQL answered",
   copy_too_old: "the copy was older than the limit, and a table the statement reads changed since its snapshot (or nothing could confirm that none did)",
   result_over_row_cap: "an expensive plan whose result is over the copy's row cap: MySQL answered, and the copy was not tried",
   copy_refused: "the copy refused it (a construct it lacks, a table it does not have, the row cap)",
@@ -16564,7 +16565,12 @@ function routerLines(view, cur) {
       const stale = staleSec > routerStaleAfterSec ? " The router last looked " + fmtAge(staleSec) + " ago, though it looks every 30 seconds: this is the last snapshot it knew of, and a newer one may exist." : "";
       if (okDate(snap)) {
         const age = okDate(read) ? " (" + fmtAge(Math.max(0, (read - snap) / 1000)) + " old)" : "";
-        out.push({ text: "The copy the router reads for " + name + " is the snapshot of " + snap.toLocaleString() + age + ". An expensive SELECT is answered from it whatever its age." + stale });
+        // The server's lag limit (#2777), from its saved entry.
+        const limit = Number(cur.sql_max_behind_source_seconds) || 0;
+        const rule = limit > 0
+          ? " An expensive SELECT is answered from it while its data is at most " + fmtAge(limit) + " behind the source, this server's limit; past that, MySQL answers."
+          : " An expensive SELECT is answered from it whatever its age.";
+        out.push({ text: "The copy the router reads for " + name + " is the snapshot of " + snap.toLocaleString() + age + "." + rule + stale });
       } else {
         out.push({ text: "The router knows no copy for " + name + ": it has no snapshot, or its copy cannot be read from where the router runs." + stale });
       }

@@ -282,6 +282,7 @@ func (c *Capturer) warnCaptureCoverage(ctx context.Context, conn *pgx.Conn) {
 // safe, so everything — receiving, decoding, emitting, and sending standby updates —
 // happens here in sequence; a second goroutine touching the connection is barred.
 func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, decoder *Decoder, out chan<- event.Event, interval time.Duration, standbyTicker *time.Ticker) error {
+	var sent sentMarker
 	for {
 		// Deadline so a quiet server still triggers a periodic standby update.
 		recvCtx, cancel := context.WithDeadline(ctx, time.Now().Add(interval))
@@ -315,6 +316,11 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 					return err
 				}
 			}
+			if ev, ok := sent.mark(uint64(pkm.ServerWALEnd)); ok {
+				if err := c.emit(ctx, replConn, out, ev, standbyTicker); err != nil {
+					return err
+				}
+			}
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(cd.Data[1:])
 			if err != nil {
@@ -344,6 +350,36 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 			}
 		}
 	}
+}
+
+// sentMarker turns keepalives into EventSentThrough markers (#2746).
+//
+// A logical walsender's keepalive carries sentPtr: the end of the last WAL
+// record it decoded (XLogSendLogical sets it after LogicalDecodingProcessRecord;
+// PostgreSQL 15+ may send instead the end of the commit record of an empty
+// transaction it is skipping, which can be past sentPtr; that is safe too,
+// since the skipped transaction sends nothing and everything before it was
+// sent already). pgoutput writes a transaction's messages while
+// decoding its commit record, so the messages of every transaction that
+// committed below that position were put on the connection before the
+// keepalive, and this loop has emitted them before it reads the keepalive. A
+// keepalive can arrive between two messages of one transaction (the walsender
+// sends one while it waits on a full socket); sentPtr then still ends before
+// that transaction's commit record, so its commit LSN is at or past the
+// position and the marker does not claim it. That holds because the stream
+// runs pgoutput proto_version 1, which never streams a transaction before its
+// commit.
+//
+// Only a position past the last one marked is emitted: on a quiet database the
+// walsender sends a keepalive at every wakeup, mostly with the same position.
+type sentMarker struct{ last uint64 }
+
+func (s *sentMarker) mark(walEnd uint64) (event.Event, bool) {
+	if walEnd <= s.last {
+		return event.Event{}, false
+	}
+	s.last = walEnd
+	return event.Event{EventType: event.EventSentThrough, EndPos: walEnd}, true
 }
 
 // emit delivers one event on out. It must not let a slow consumer starve the

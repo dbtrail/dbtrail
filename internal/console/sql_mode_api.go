@@ -19,12 +19,19 @@ import (
 // its default collations, the copy with it); off, they stay on MySQL. The
 // port reads it when a connection opens. Each field is saved only when it
 // is sent, so one choice never resets the other.
+//
+// max_behind_source_seconds is the server's lag limit (#2777): how far
+// behind the source, in seconds, the data of a statement on the copy may be
+// for the copy to answer it. 0 (the default) is no limit. Past it a routed
+// statement goes to MySQL and one on a connection that does not route is
+// refused. Read per statement, so it applies to open connections too.
 type sqlModeDTO struct {
 	Fresh bool `json:"fresh"`
 	// FreshSaved: a choice is saved for the server, as opposed to fresh by
 	// the default. Only in the answer.
-	FreshSaved      bool `json:"fresh_saved"`
-	LikeIgnoresCase bool `json:"like_ignores_case"`
+	FreshSaved      bool  `json:"fresh_saved"`
+	LikeIgnoresCase bool  `json:"like_ignores_case"`
+	MaxBehindSource int64 `json:"max_behind_source_seconds"`
 }
 
 // likeSwitchChanged is why the port's open connections of a server are
@@ -48,8 +55,9 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 	// Strict on purpose: {} or a typo'd key would decode to false and turn
 	// fresh mode off. The choice must be said.
 	var body struct {
-		Fresh           *bool `json:"fresh"`
-		LikeIgnoresCase *bool `json:"like_ignores_case"`
+		Fresh           *bool  `json:"fresh"`
+		LikeIgnoresCase *bool  `json:"like_ignores_case"`
+		MaxBehindSource *int64 `json:"max_behind_source_seconds"`
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -61,13 +69,19 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "the body holds more than one JSON value")
 		return
 	}
-	if body.Fresh == nil && body.LikeIgnoresCase == nil {
+	if body.Fresh == nil && body.LikeIgnoresCase == nil && body.MaxBehindSource == nil {
 		writeJSONError(w, http.StatusBadRequest, `send "fresh": true for fresh mode or "fresh": false for fast mode, `+
-			`or "like_ignores_case": true or false`)
+			`or "like_ignores_case": true or false, or "max_behind_source_seconds": a number of seconds (0 for no limit)`)
 		return
 	}
+	if body.MaxBehindSource != nil {
+		if err := checkMaxBehindSource(*body.MaxBehindSource); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	old, _ := s.cm.reg.Get(id)
-	e, err := s.cm.reg.SetSQLMode(id, body.Fresh, body.LikeIgnoresCase)
+	e, err := s.cm.reg.SetSQLMode(id, body.Fresh, body.LikeIgnoresCase, body.MaxBehindSource)
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
@@ -82,6 +96,9 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 	if body.LikeIgnoresCase != nil {
 		slog.Info("console: SQL LIKE switch saved", "actor", consoleActor(r), "server", e.Name, "id", id, "like_ignores_case", e.SQLLikeIgnoresCase)
 	}
+	if body.MaxBehindSource != nil {
+		slog.Info("console: SQL lag limit saved", "actor", consoleActor(r), "server", e.Name, "id", id, "max_behind_source_seconds", e.SQLMaxBehindSource)
+	}
 	if e.SQLLikeIgnoresCase != old.SQLLikeIgnoresCase {
 		// A connection keeps the switch it read when it opened: close the
 		// open ones so the change is in force at once, turning it off above
@@ -92,5 +109,6 @@ func (s *Server) handleSQLModePut(w http.ResponseWriter, r *http.Request) {
 	// does, and reads the registry again within seconds), but one that does
 	// applies it now.
 	s.applySQLFresh()
-	writeJSON(w, http.StatusOK, sqlModeDTO{Fresh: e.SQLFreshOn(), FreshSaved: e.SQLFreshSaved(), LikeIgnoresCase: e.SQLLikeIgnoresCase})
+	writeJSON(w, http.StatusOK, sqlModeDTO{Fresh: e.SQLFreshOn(), FreshSaved: e.SQLFreshSaved(), LikeIgnoresCase: e.SQLLikeIgnoresCase,
+		MaxBehindSource: e.SQLMaxBehindSource})
 }

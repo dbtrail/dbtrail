@@ -983,12 +983,12 @@ func (h *Handler) runPointInTime(q TimeTravelQuery) (*mysql.Result, error) {
 	// at AsOf (never created, or a DELETE tail); a fetch/coverage failure is a
 	// *ResolveError; an ApplyAt data-fault is raw. mysqlRenderErr maps both to
 	// the same wire codes the pre-#1008 inline path produced.
-	image, note, err := h.resolveFlashbackRow(ctx, q)
+	image, notes, err := h.resolveFlashbackRow(ctx, q)
 	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 	if image == nil {
-		return h.finishWithOrderNote(q, note, emptyResult(), nil)
+		return h.finishWithNotes(q, notes, emptyResult(), nil)
 	}
 	// When q.Columns is set (#313 user-supplied projection), bypass
 	// imageToResult's orderColumns step — orderColumns is designed for
@@ -999,10 +999,10 @@ func (h *Handler) runPointInTime(q TimeTravelQuery) (*mysql.Result, error) {
 	// (imagesToResultVerbatim vs imagesToResult).
 	if q.Columns != nil {
 		res, err := imageToResultVerbatim(image, q.Columns)
-		return h.finishWithOrderNote(q, note, res, err)
+		return h.finishWithNotes(q, notes, res, err)
 	}
 	res, err := imageToResult(image, h.columnOrderFor(q.Schema, q.Table))
-	return h.finishWithOrderNote(q, note, res, err)
+	return h.finishWithNotes(q, notes, res, err)
 }
 
 // imageToResultVerbatim is the user-projection sibling of imageToResult.
@@ -1233,8 +1233,44 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// before the images are extracted.
 	h.mapEventImages(q.Schema, q.Table, rows)
+	notes, err := h.checkChangesNarrowing(ctx, q, rows)
+	if err != nil {
+		return nil, err
+	}
 	res, err := h.fullTableResult(q, extractFullTableImages(rows))
-	return h.finishWithOrderNote(q, order.ReadNote(), res, err)
+	return h.finishWithNotes(q, append(nonEmptyNotes(order.ReadNote()), notes...), res, err)
+}
+
+// checkChangesNarrowing refuses a full-table read from the recorded changes
+// alone (_flashback, and _snapshot with no snapshot location) when a row it
+// returns carries a value a narrowing ALTER replaced with '?' (#2750,
+// reconstruct.CharsetNarrowings.CheckChange). rows are each row's latest
+// change, as extractFullTableImages reads them. The window starts at the
+// oldest of the rows returned: an ALTER before it cannot have touched a
+// value any of them wrote. The notes are what could not be checked.
+func (h *Handler) checkChangesNarrowing(ctx context.Context, q TimeTravelQuery, rows []query.ResultRow) ([]string, error) {
+	returned := make([]*query.ResultRow, 0, len(rows))
+	for i := range rows {
+		// The rows extractFullTableImages keeps, and no other.
+		if rows[i].EventType == event.EventDelete || len(rows[i].RowAfter) == 0 {
+			continue
+		}
+		returned = append(returned, &rows[i])
+	}
+	win, ok := reconstruct.ChangesWindow(returned, q.AsOf)
+	if !ok {
+		return nil, nil
+	}
+	narrowings, err := reconstruct.FindCharsetNarrowings(ctx, h.indexDB, q.Schema, q.Table, win)
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range returned {
+		if err := narrowings.CheckChange(ev.RowAfter, ev); err != nil {
+			return nil, err
+		}
+	}
+	return narrowings.Notes(), nil
 }
 
 // fullTableCapError is the refusal of a full-table read past the row cap

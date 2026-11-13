@@ -871,6 +871,21 @@ func EnsureSchema(db *sql.DB) error {
 	); err != nil {
 		return err
 	}
+	// pg_sent_through_lsn (#2746): the PostgreSQL walsender position below
+	// which every commit is indexed, written by the PostgreSQL checkpoint
+	// only; verify reads it to prove coverage on a quiet database. NULL =
+	// MySQL, or an older PostgreSQL capture. pg_sent_through_at ties it to
+	// the save that wrote it: see its column comment.
+	if err := ensureColumn(db, "stream_state", "pg_sent_through_lsn",
+		`ALTER TABLE stream_state ADD COLUMN pg_sent_through_lsn BIGINT UNSIGNED DEFAULT NULL COMMENT 'walsender position below which every PostgreSQL commit is indexed (#2746): the newest keepalive position the capture received, saved after every change received before it was indexed; proves coverage on a quiet database; 0 = this run has received none yet; NULL = MySQL, or a capture built before #2746; trusted only while pg_sent_through_at equals last_checkpoint'`,
+	); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "stream_state", "pg_sent_through_at",
+		`ALTER TABLE stream_state ADD COLUMN pg_sent_through_at DATETIME DEFAULT NULL COMMENT 'last_checkpoint of the save that wrote pg_sent_through_lsn (#2746), set in the same statement; the position is trusted only while this equals last_checkpoint, so a save by any other writer (an older capture, bintrail-pg reset) makes it stale; NULL with pg_sent_through_lsn'`,
+	); err != nil {
+		return err
+	}
 
 	// source_identity names the server whose binlog coordinates the
 	// checkpoint carries (MySQL @@server_uuid, MariaDB "server_id:<n>"), so a

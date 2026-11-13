@@ -208,7 +208,7 @@ const (
 	RouteReasonExplainFailed  RouteReason = "explain_failed"   // EXPLAIN did not run (MySQL refused it)
 	RouteReasonCheapPlan      RouteReason = "cheap_plan"       // below both thresholds
 	RouteReasonBoundedLimit   RouteReason = "bounded_limit"    // a small LIMIT MySQL answers without reading past it
-	RouteReasonCopyAgeUnknown RouteReason = "copy_age_unknown" // no snapshot time
+	RouteReasonCopyAgeUnknown RouteReason = "copy_age_unknown" // no snapshot time, or (#2777) how far behind the source the copy is cannot be told under the server's limit
 	RouteReasonCopyTooOld     RouteReason = "copy_too_old"     // snapshot older than MaxCopyAge, and its tables not vouched for as unchanged (#2085)
 	RouteReasonCopyRefused    RouteReason = "copy_refused"     // the copy errored or cut the result (a busy copy has its own two reasons below)
 	RouteReasonShowWarnings   RouteReason = "show_warnings"    // SHOW WARNINGS after a MySQL statement
@@ -235,6 +235,13 @@ const RouteReasonCopyColumnsDiffer RouteReason = "copy_columns_differ"
 // to have been complete within MaxCopyAge (#2085). Apart from
 // expensive_plan, so the two can be told apart in the tally.
 const RouteReasonTablesUnchanged RouteReason = "tables_unchanged"
+
+// RouteReasonCopyBehindSource: the server has a limit on how far behind the
+// source the copy may answer (#2777), and the data the statement would read
+// on the copy was further behind than that: MySQL answered. Its own reason,
+// apart from copy_too_old, which was the maximum copy age of the snapshot and
+// the tables-unchanged rule that went with it.
+const RouteReasonCopyBehindSource RouteReason = "copy_behind_source"
 
 // RouteReasonResultOverCap: the plan is expensive, and says the statement
 // returns more rows than the copy's row cap. MySQL answered and the copy was
@@ -795,6 +802,17 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// asked, under the reason it always had.
 		return ops.forward(RouteReasonCopyTooOld, tooOld+"; "+changed.Reason)
 	}
+	var behind *sqlsandbox.BehindSourceError
+	if errors.As(err, &behind) {
+		// The server's limit on how far behind the source the copy may answer
+		// (#2777): not a fault and not a warning, the rule the operator set.
+		// An age that cannot be told under a limit is MySQL's too, under the
+		// reason that always meant it.
+		if behind.Unknown {
+			return ops.forward(RouteReasonCopyAgeUnknown, behind.Reason)
+		}
+		return ops.forward(RouteReasonCopyBehindSource, behind.Reason)
+	}
 	var differ *sqlsandbox.ColumnsDifferError
 	if errors.As(err, &differ) {
 		// The copy works; it declined this statement because its answer would
@@ -1293,6 +1311,13 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// Handed back as it is: the routing ladder tells it from a fault.
 		return nil, err
 	}
+	var behind *sqlsandbox.BehindSourceError
+	if h.router != nil && errors.As(err, &behind) {
+		// Under routing the server's limit on how far behind the copy may
+		// answer (#2777) is the ladder's: it sends the statement to MySQL. A
+		// connection that does not route gets the reason as its error below.
+		return nil, err
+	}
 	if h.router != nil && errors.Is(err, sqlsandbox.ErrBusy) {
 		// Under routing a busy copy is the ladder's to tell from a fault too
 		// (#2112). Asked of the connection, like StrictStar above. A
@@ -1527,9 +1552,16 @@ func (h *Handler) freeSQLError(err error) error {
 	var qerr *sqlsandbox.QueryError
 	var timeout *sqlsandbox.TimeoutError
 	var werr *sqlsandbox.WorkerError
+	var behind *sqlsandbox.BehindSourceError
 	switch {
 	case errors.As(err, &refused):
 		return mysql.NewError(mysql.ER_PARSE_ERROR, refused.Reason)
+	case errors.As(err, &behind):
+		// The server's limit (#2777), on a connection that does not route
+		// (<server>@copy, or Engine Routing off): the rule the operator set,
+		// said to the client, and not a warning in the log per statement.
+		h.logger.Debug("free sql: the copy is further behind the source than its server's limit", "reason", behind.Reason)
+		return mysql.NewError(mysql.ER_UNKNOWN_ERROR, behind.Reason)
 	case errors.As(err, &qerr):
 		return mysql.NewError(mysql.ER_UNKNOWN_ERROR, qerr.Message)
 	case errors.As(err, &timeout):
