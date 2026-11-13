@@ -667,9 +667,18 @@ services:
       # query for a moment older than the snapshots in the local folder is
       # answered from the server's S3 destination, read by THIS process.
       # Without access the query fails with an error that names the bucket.
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      # This process only reads S3. To give it read-only keys instead of the
+      # `bintrail` service's (which also write and delete), set
+      # ROUTER_AWS_ACCESS_KEY_ID and ROUTER_AWS_SECRET_ACCESS_KEY in .env, and
+      # ROUTER_AWS_SESSION_TOKEN when those keys are temporary; the policy is
+      # in docs/s3-iam-policy.md. Unset, it reads with the shared keys, as
+      # before. Its own pair never carries the shared token, and half a pair
+      # is refused at start: BINTRAIL_ROUTER_OWN_AWS_KEYS tells the router
+      # which ROUTER_AWS_* were set, never their values.
+      AWS_ACCESS_KEY_ID: ${ROUTER_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}
+      AWS_SECRET_ACCESS_KEY: ${ROUTER_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}
+      AWS_SESSION_TOKEN: ${ROUTER_AWS_SESSION_TOKEN:-${AWS_SESSION_TOKEN:-}}
+      BINTRAIL_ROUTER_OWN_AWS_KEYS: ${ROUTER_AWS_ACCESS_KEY_ID:+access_key_id,}${ROUTER_AWS_SECRET_ACCESS_KEY:+secret_access_key,}${ROUTER_AWS_SESSION_TOKEN:+session_token,}
       AWS_REGION: ${AWS_REGION:-}
       BINTRAIL_S3_ENDPOINT: ${BINTRAIL_S3_ENDPOINT:-}
       BINTRAIL_S3_PATH_STYLE: ${BINTRAIL_S3_PATH_STYLE:-}

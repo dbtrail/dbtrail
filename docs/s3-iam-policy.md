@@ -163,6 +163,63 @@ If the reader's credentials resolve to a different region than the bucket,
 the `views.sql` file the web interface writes names the bucket's region when DBTrail could find
 it. Otherwise, set `AWS_REGION` to the bucket's region on the reader's machine.
 
+## Read-only access for the router
+
+The compose `router` service (`bintrail-console router`, the process that
+serves the MySQL port) reads S3 when a `_snapshot` or `_flashback` query
+reaches back past the local snapshots: it finds snapshots and change archives
+by listing, and reads their Parquet files. It never writes or deletes. The
+snapshot jobs, the uploads and the S3 cleanup run in the `bintrail` service,
+not in the router, and the router's SQL workers get no AWS variables at all.
+So it can hold keys with this policy instead of the one at the top of this
+page:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RouterListTheBucket",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::my-bucket"
+    },
+    {
+      "Sid": "RouterReadObjects",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-bucket/*"
+    }
+  ]
+}
+```
+
+Give the keys to the router alone with `ROUTER_AWS_ACCESS_KEY_ID` and
+`ROUTER_AWS_SECRET_ACCESS_KEY` in `.env` (see [Read-only keys for the
+router](docker.md#read-only-keys-for-the-router)).
+
+| What the router calls | Permission |
+|---|---|
+| `ListObjectsV2` on the snapshot and archive prefixes, to find snapshots, their `_SUCCESS` markers and the hourly archive files | `s3:ListBucket` |
+| `GetObject` of snapshot and archive Parquet files, and the range reads and `HEAD` requests DuckDB makes on them | `s3:GetObject` (S3 authorizes `HEAD` under it) |
+| An unsigned `HEAD` on the bucket to find its region | none |
+| `GetBucketLocation`, only when that `HEAD` gets no answer | `s3:GetBucketLocation`, optional, as in the policy at the top |
+
+Unlike the reader policy above, this one has no `Deny` on `bintrail_id=*`:
+`_flashback` and the changes laid over a `_snapshot` come from the change
+archives, so the router needs them. Scoping `s3:GetObject` to prefixes works
+if it names both the snapshot prefix and the archive prefix. Scoping
+`s3:ListBucket` with an `s3:prefix` condition has to allow every key under
+those prefixes, since the listing walks them without a delimiter.
+
+Two limits, stated plainly:
+
+- A server whose S3 store has keys of its own (an S3-compatible store set up
+  in the web interface with an access key) is read with those keys by the
+  router as well. This policy does not apply to them.
+- The router's AWS variables are read when it starts: `docker compose up -d
+  router` after changing them.
+
 ## Tighter scope (optional)
 
 DBTrail's own policy at the top of this page grants access to the whole bucket. If you want to scope it
