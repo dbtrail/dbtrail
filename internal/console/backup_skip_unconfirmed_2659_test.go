@@ -112,14 +112,15 @@ func TestWindowChoice_everyState_2659(t *testing.T) {
 								desc := fmt.Sprintf("capture=%q rate=%v lastFull=%s fixed=%s events=%d age=%s canWait=%v", capture, rate, lastFull, fixed, events, age, canWait)
 								// The measured rules first, whatever the capture
 								// says: an estimate (a count, a rate, a full read)
-								// clearly over the last full read, or with no rate
-								// a fixed cost clearly over it and something, or
-								// an unknown amount, to apply.
+								// clearly over the last full read, or with no
+								// estimate (no rate, or a rate and no count,
+								// #2674) a fixed cost clearly over it and
+								// something, or an unknown amount, to apply.
 								cost := false
 								switch {
 								case events > 0 && rate > 0 && lastFull > 0:
 									cost = dearer(fixed+time.Duration(float64(events)/rate*float64(time.Second)), lastFull)
-								case events != 0 && rate == 0 && fixed > 0 && lastFull > 0:
+								case events != 0 && (rate == 0 || events < 0) && fixed > 0 && lastFull > 0:
 									cost = dearer(fixed, lastFull)
 								}
 								// With nothing to apply, a rate and a full read on
