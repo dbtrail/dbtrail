@@ -9154,10 +9154,36 @@ function notInS3Words(n, rec) {
   const it = n === 1 ? "it" : "them";
   const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : []);
   const copiesOf = (l) => (l.length === 1 ? "the copy of " : "the copies of ") + l.map(at).join(", ");
+  // Each copy waits on its own (#2691): an hour after its send failed, or
+  // after it was sent while S3 could not be asked about it. When the copies
+  // are not all in one case, each case is said with its copies.
+  const waits = Array.isArray(rec && rec.waiting)
+    ? rec.waiting.filter((w) => w && typeof w.name === "string" && w.name && typeof w.until === "string" && w.until) : [];
+  const earliest = (ws) => ws.map((w) => w.until).sort()[0];
+  const eachOwnWait = () => {
+    const left = names.filter((x) => !list(rec && rec.read_refused).includes(x));
+    const failedW = waits.filter((w) => w.for_answer !== true && left.includes(w.name));
+    const answerW = waits.filter((w) => w.for_answer === true && left.includes(w.name));
+    const now = left.filter((x) => !failedW.concat(answerW).some((w) => w.name === x));
+    const unnamed = Math.max(0, n - names.length);
+    const parts = [];
+    if (now.length || unnamed) {
+      parts.push("DBTrail sends " + (now.length ? copiesOf(now) + (unnamed ? " and " + unnamed + " more" : "") : unnamed + " more") + " again at the next cleanup");
+    }
+    if (failedW.length) {
+      parts.push("sending " + copiesOf(failedW.map((w) => w.name)) + " failed, and DBTrail tries again after " + utcLabel(earliest(failedW)));
+    }
+    if (answerW.length) {
+      const one = answerW.length === 1;
+      parts.push(copiesOf(answerW.map((w) => w.name)) + (one ? " was" : " were") + " sent but could not be confirmed, and DBTrail sends " +
+        (one ? "it" : "them") + " again after " + utcLabel(earliest(answerW)));
+    }
+    return parts.length > 1 ? parts.join("; ") + "." : "";
+  };
   // What happens next: sent at the next cleanup, after a wait (a failed
   // send, or a send S3 could not confirm, #2696), or by hand.
   const tail = (them) => rec && rec.resending === true
-    ? (rec.next_send
+    ? eachOwnWait() || (rec.next_send
       ? (rec.waits_for_answer === true
         ? "the last ones sent could not be confirmed, and DBTrail sends again after " + utcLabel(rec.next_send) + "."
         : "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + ".")
