@@ -339,7 +339,7 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	}
 	sha := joined(got["s3SharedS3Age"].Before)
 	t.Logf("s3SharedS3Age (at rest):\n  %s", strings.Join(got["s3SharedS3Age"].Before.Words, "\n  "))
-	if !strings.Contains(sha, "Another server sends its snapshots to this S3 location too, so nothing in this folder is removed, by the count or by age. Give each server its own S3 prefix.") ||
+	if !strings.Contains(sha, "Another server sends its snapshots to this S3 location too, so nothing here is removed. Give each server its own S3 prefix.") ||
 		strings.Contains(sha, "older than") || strings.Contains(sha, "after each new snapshot") || strings.Contains(sha, "Set a number") {
 		t.Errorf("a shared destination with an age: %q", sha)
 	}

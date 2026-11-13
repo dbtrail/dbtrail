@@ -9221,7 +9221,7 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
     // With an age set the age does not apply either (#2675): S3 cannot
     // tell which server's copy of a snapshot name it holds.
     say("Another server sends its snapshots to this S3 location too, so " +
-      (age.sharedS3 ? "nothing in this folder is removed, by the count or by age" : none) + ". Give each server its own S3 prefix.");
+      (age.sharedS3 ? "nothing here is removed" : none) + ". Give each server its own S3 prefix.");
   } else if (was.held) {
     say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {

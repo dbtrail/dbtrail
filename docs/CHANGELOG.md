@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now does too. A folder whose S3 prefix another server sends to, from
   another folder or from none, keeps every local snapshot; the hourly
   cleanup logs each one, and the settings card says "Another server sends
-  its snapshots to this S3 location too, so nothing in this folder is
-  removed, by the count or by age. Give each server its own S3 prefix."
+  its snapshots to this S3 location too, so nothing here is removed. Give
+  each server its own S3 prefix."
   Servers that share both the folder and the prefix, which is what the
   startup migration gives them, are one set of snapshots and are pruned by
   age as before. `bintrail baseline --upload --baseline-retain` names one folder and
