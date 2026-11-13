@@ -60,6 +60,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until when, and says the others are sent from the next cleanup on, 3 at
   most per cleanup, except any older than the age S3 keeps; when they are
   all in the same case it says what it said before.
+- **Without S3, the cleanup keeps the two snapshots a check compares**
+  (#2691). A check of the snapshots, and its Explain, compares each table's
+  last full read of the database with the snapshot before it. On a server
+  without an S3 destination the count removed both about 15 minutes after
+  the full read (a snapshot every 5 minutes, a count of 3), so a check run
+  later found nothing to compare. The cleanup of a folder with a count and no
+  S3 destination now keeps one pair on top of the count: the read of the
+  database most tables of the newest snapshot come from (on a tie, the
+  oldest), usually the last full read, and the snapshot before it, until
+  another read takes its place. The Snapshots page marks the two rows "kept
+  for the check". A table read again on its own since, or one with no
+  recorded read (built from the changes alone), has no pair kept. At
+  most two extra snapshots per folder: the one before the read costs a whole
+  snapshot of disk, the read itself only the tables changed since it (the
+  others are hard links shared with the newer snapshots). Servers with S3
+  keep nothing extra.
 
 - **A snapshot update refuses a table whose column changed character set** (#2723). The update compared each column's type and NULL-ness with the schema snapshot taken after a DDL, but not its character set, which `COLUMN_TYPE` does not show. Two cases went wrong. An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column, under a non-strict `sql_mode` or as `CONVERT TO CHARACTER SET latin1`, turns every character latin1 cannot hold into `?` and writes no row event, so the update kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. A `CONVERT TO CHARACTER SET utf8mb4` on a latin1 table keeps every value, but the updated snapshot kept declaring the column latin1, and a restore from it created a column that cannot hold what was written after the change. Both now refuse the table like a type change, naming the column and both character sets (`name (varchar(20) CHARACTER SET utf8mb4 -> varchar(20) CHARACTER SET latin1)`), and a full read follows. The character set of the snapshot's `CREATE TABLE` is read as the server wrote it: the column's own, else the one its collation belongs to, else the table's default; `utf8` and `utf8mb3` are the same set. Nothing is compared, and nothing refused, when either side does not say: a schema snapshot with no character set recorded (every non-text column, a PostgreSQL source, a snapshot older than the record of character sets), or a `CREATE TABLE` that names none for the column or its table. A collation change within the same character set is still not seen, since schema snapshots do not record collations (#2083).
 - **Tests: the boot server's download cap through its call site, and the

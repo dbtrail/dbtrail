@@ -79,6 +79,11 @@ type baselineSnapshotDTO struct {
 	// RestoredLocalOnly: that result is older than the age the server's S3
 	// destination keeps, so it is on this machine only and is not sent.
 	RestoredLocalOnly bool `json:"restored_local_only,omitempty"`
+	// KeptForCheck: this local snapshot is one of the two a check of the
+	// snapshots compares (the last read of the database and the snapshot
+	// before it), which the cleanup of a folder with a count and no S3
+	// destination keeps on top of the count (baseline.CheckPair, #2691).
+	KeptForCheck bool `json:"kept_for_check,omitempty"`
 	// ViewsSkipped counts the views the source held and this snapshot left
 	// out (#1879), omitted when nothing is recorded: a snapshot from before
 	// the record, or a source with no views. Never zero on the wire.
@@ -244,6 +249,18 @@ func (s *Server) localRetentionOf(id string) *localRetentionDTO {
 		return nil
 	}
 	return &localRetentionDTO{KeepNewest: n}
+}
+
+// keepsCheckPair reports whether the cleanup keeps the pair a check compares
+// in the folder of the server with id (#2691): this process prunes it to a
+// count, and it has no S3 destination (with one, the check reads the pair
+// there).
+func (s *Server) keepsCheckPair(id string) bool {
+	if s.localRetentionOf(id) == nil {
+		return false
+	}
+	e, ok := s.cm.reg.Get(id)
+	return ok && strings.TrimSpace(e.BaselineS3) == ""
 }
 
 // cleanupWaitingDTO is baseline.CleanupWaiting on the wire.
@@ -444,6 +461,11 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	localDir := bundleBaselineDir(b)
+	checkPair := map[string]bool{}
+	if s.keepsCheckPair(s.selectedServerID(r)) && localDir != "" {
+		read, before := baseline.CheckPair(localDir)
+		checkPair[read], checkPair[before] = read != "", before != ""
+	}
 	resp.S3 = s3CopyOf(merged, localDir, s.selectedServerID(r), now)
 	// Staleness floor (#1193): best-effort but never silent and never a
 	// fabricated verdict — an unopened bundle connection or an unreadable
@@ -491,6 +513,7 @@ func (s *Server) handleBaselines(w http.ResponseWriter, r *http.Request) {
 				if held, err := baseline.UploadHeld(localDir, reconstruct.SnapshotDirName(f.SnapshotTime)); err == nil {
 					dto.Held = held
 				}
+				dto.KeptForCheck = checkPair[reconstruct.SnapshotDirName(f.SnapshotTime)]
 				if name, until := baseline.Restored(localDir); name == reconstruct.SnapshotDirName(f.SnapshotTime) {
 					dto.Restored = true
 					dto.RestoredUntil = until.UTC().Format(consoleTSFormat)

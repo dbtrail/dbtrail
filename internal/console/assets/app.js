@@ -11089,6 +11089,7 @@ function baselinesPanel(b, servers, opts) {
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
     let localSeen = 0;
     const goingIdx = new Set();
+    const checkKeptIdx = new Set();
     if (keepInForce > 0) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
@@ -11096,7 +11097,11 @@ function baselinesPanel(b, servers, opts) {
         // The last restore's result is kept whatever its date, and takes
         // no place in the count (#2678).
         if (sn.restored) { localSeen--; return; }
-        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
+        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) {
+          // The pair a check compares stays on top of the count (#2691).
+          if (sn.kept_for_check) checkKeptIdx.add(i);
+          else goingIdx.add(i);
+        }
       });
     }
     const total = b.snapshots.length;
@@ -11152,6 +11157,10 @@ function baselinesPanel(b, servers, opts) {
         what.append(el("span", { class: "chip chip-unknown", text: "last restore, kept" + (sn.restored_until ? " until " + utcLabel(sn.restored_until) : ""),
           title: "The result of the last restore to a moment. Kept for 24 hours after the restore, or until the next restore, on top of the newest kept; then it goes like any older snapshot." +
             (sn.restored_local_only ? " It is older than the age S3 keeps, so it is on this machine only and is not sent to S3." : "") }));
+      }
+      if (checkKeptIdx.has(idx)) {
+        what.append(el("span", { class: "chip chip-unknown", text: "kept for the check",
+          title: "The read of the database most tables of the newest snapshot come from (usually the last full read), or the snapshot before it: the two a check of the snapshots compares for those tables. Kept on top of the newest kept, since S3 does not hold them, until another read takes its place. A table read on its own since then has no pair kept." }));
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
