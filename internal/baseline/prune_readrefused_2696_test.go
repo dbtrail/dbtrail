@@ -16,28 +16,29 @@ import (
 )
 
 // A destination that takes uploads and refuses to read them back (#2696):
-// credentials with s3:ListBucket and s3:PutObject and without s3:GetObject.
-// S3 answers 404 for a snapshot it lacks and 403 for every one it HAS. One
-// failed upload gave a 404, so the cycle "had answers" and every 403 was
-// taken as that one snapshot's: all of them were listed to send again, the
-// send succeeded, the next question was refused again, for ever.
+// credentials with s3:PutObject and without s3:GetObject. A HEAD needs
+// s3:GetObject (#2701: AWS documents it, and a fake that answered 404 there
+// hid that), so once it is gone EVERY question is refused, a key that does
+// not exist included, whatever s3:ListBucket says. A send S3 took and a
+// refusal after it is the one evidence the cleanup has.
 
-// writeOnlyBucket answers 404 for what it lacks and 403 for what it holds.
+// writeOnlyBucket answers as S3 does. Until getDenied is set it reads: 404
+// for what it lacks, "here" for what it holds, and 403 for the objects in
+// unreadable once they exist (an object whose read alone is denied). With
+// getDenied, every HEAD is 403.
 type writeOnlyBucket struct {
-	has      map[string]bool
-	unreadOK map[string]bool // read allowed for these (a bucket that reads others)
-	asked    []string
+	has        map[string]bool
+	unreadable map[string]bool
+	getDenied  bool
+	asked      []string
 }
 
 func (b *writeOnlyBucket) probe(_ context.Context, name string) (bool, error) {
 	b.asked = append(b.asked, name)
-	if !b.has[name] {
-		return false, nil
+	if b.getDenied || (b.has[name] && b.unreadable[name]) {
+		return false, deniedErr(name)
 	}
-	if b.unreadOK[name] {
-		return true, nil
-	}
-	return false, deniedErr(name)
+	return b.has[name], nil
 }
 
 // cycle runs one cleanup by count and then what the daemon's resend does
@@ -60,9 +61,12 @@ func cycle(t *testing.T, root string, n int, probe durableProbe, has map[string]
 	return res, sent
 }
 
-// The reviewer's case: sends stop after the first send and one refusal; the
-// destination is then said to take uploads and refuse reads, and nothing
-// that needed its answer is removed.
+// The reviewer's case, as S3 answers it: s[0] is missing and sent once; then
+// s3:GetObject is taken away, so every question is refused. The one refused
+// question that followed a send, with the newest refused too, is a
+// destination that takes uploads and refuses reads: nothing more is sent,
+// nothing that needed an answer is removed, and the record names both
+// causes S3's refusal can have.
 func TestReadRefused_aWriteOnlyDestinationStopsTheSends(t *testing.T) {
 	root := t.TempDir()
 	s := five(t, root)
@@ -70,44 +74,51 @@ func TestReadRefused_aWriteOnlyDestinationStopsTheSends(t *testing.T) {
 	var perCycle []int
 	var res PruneResult
 	for i := 0; i < 5; i++ {
+		if i == 1 {
+			b.getDenied = true
+		}
 		var sent int
 		res, sent = cycle(t, root, 1, b.probe, b.has)
 		perCycle = append(perCycle, sent)
-		if len(res.Pruned) != 0 {
+		if i > 0 && len(res.Pruned) != 0 {
 			t.Fatalf("cycle %d removed %v from a destination that confirms nothing", i+1, res.Pruned)
 		}
 	}
-	if !slices.Equal(perCycle, []int{4, 0, 0, 0, 0}) {
-		t.Fatalf("sends per cycle %v, want 4 then none", perCycle)
+	if !slices.Equal(perCycle, []int{1, 0, 0, 0, 0}) {
+		t.Fatalf("sends per cycle %v, want 1 then none", perCycle)
 	}
-	if !res.DestinationWriteOnly || !slices.Equal(res.ReadRefused, s[:4]) || res.DestinationSilent || res.ProbeErrors != 0 {
-		t.Fatalf("want a write-only destination with the four read-refused: %+v", res)
+	if !res.DestinationWriteOnly || !slices.Equal(res.ReadRefused, s[:1]) || res.DestinationSilent || res.ProbeErrors != 0 {
+		t.Fatalf("want a write-only destination with s[0] read-refused: %+v", res)
 	}
-	wantOnDisk(t, root, s...)
+	wantOnDisk(t, root, s[0], s[4])
 	reason := failureReason(t, root)
 	t.Logf("failure record, as the page shows it:\n%s", reason)
-	want := "S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm any snapshot is there and keeps them here. It does not send them again: S3 took each one and then refused to read it."
+	want := "S3 refuses to read back what it accepted: either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both. DBTrail cannot confirm any snapshot is there, so it keeps them here, and it does not send them again: S3 took each one and then refused to read it."
 	if reason != want {
 		t.Fatalf("failure record %q, want %q", reason, want)
 	}
 	rec, ok, err := ReadNotInDestination(root)
-	if err != nil || !ok || !slices.Equal(rec.ReadRefused, s[:4]) {
-		t.Fatalf("record %+v ok=%v err=%v: want the four as read-refused", rec, ok, err)
+	if err != nil || !ok || !slices.Equal(rec.ReadRefused, s[:1]) {
+		t.Fatalf("record %+v ok=%v err=%v: want s[0] as read-refused", rec, ok, err)
 	}
 }
 
-// The same bucket with nothing missing: every question refused and no send
-// ever made, so it is the general stop, with no send.
+// No s3:GetObject from the start: every question refused and no send ever
+// made, so it is the general stop, with no send, and the record names
+// s3:GetObject among what to check.
 func TestReadRefused_writeOnlyWithNothingMissingIsTheGeneralStop(t *testing.T) {
 	root := t.TempDir()
 	s := five(t, root)
-	b := &writeOnlyBucket{has: map[string]bool{}}
+	b := &writeOnlyBucket{has: map[string]bool{}, getDenied: true}
 	for _, n := range s {
 		b.has[n] = true
 	}
 	res, sent := cycle(t, root, 1, b.probe, b.has)
 	if sent != 0 || !res.DestinationSilent || !res.DestinationDenied || len(res.Pruned) != 0 {
 		t.Fatalf("sent %d: want the general stop and nothing sent: %+v", sent, res)
+	}
+	if reason := failureReason(t, root); !strings.Contains(reason, "Check that the credentials are valid and that they have s3:GetObject on this S3 prefix.") {
+		t.Fatalf("failure record %q does not name s3:GetObject", reason)
 	}
 }
 
@@ -117,7 +128,7 @@ func TestReadRefused_oneSnapshotReadDenied(t *testing.T) {
 	root := t.TempDir()
 	s := five(t, root)
 	b := &writeOnlyBucket{has: map[string]bool{s[1]: true, s[2]: true, s[3]: true, s[4]: true},
-		unreadOK: map[string]bool{s[1]: true, s[2]: true, s[3]: true, s[4]: true}}
+		unreadable: map[string]bool{s[0]: true}}
 	// s[0] is missing and, once sent, unreadable: 404 then 403.
 	res, sent := cycle(t, root, 1, b.probe, b.has)
 	if sent != 1 || !slices.Equal(res.NotAtDestination, []string{s[0]}) {
@@ -135,7 +146,7 @@ func TestReadRefused_oneSnapshotReadDenied(t *testing.T) {
 	wantOnDisk(t, root, s[0], s[4])
 	reason := failureReason(t, root)
 	t.Logf("failure record, as the page shows it:\n%s", reason)
-	if want := "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again."; reason != want {
+	if want := "1 snapshot was sent again, and S3 took it but refuses to read it back: either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both. It is kept here and not sent again."; reason != want {
 		t.Fatalf("failure record %q, want %q", reason, want)
 	}
 }

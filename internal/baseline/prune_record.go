@@ -122,12 +122,37 @@ type NotInDestination struct {
 	// accepted, and that S3 then refused to read back (#2696): a destination
 	// that takes uploads without s3:GetObject. They are not sent again.
 	ReadRefused []string `json:"read_refused,omitempty"`
+	// NotAskedCount and ReadRefusedCount are how many NotAsked and
+	// ReadRefused name in all (#2701): the lists are cut to
+	// notInDestinationNamesKept like Names, and the page counts with these.
+	// Zero in a record an older build wrote: the lists are whole there.
+	NotAskedCount    int `json:"not_asked_count,omitempty"`
+	ReadRefusedCount int `json:"read_refused_count,omitempty"`
+	// CleanupQuestionRefused says the last send was refused because S3 would not
+	// say whether its own cleanup is removing the snapshot's folder: with
+	// "Delete from S3 after" set, that question needs s3:GetObject and
+	// s3:ListBucket, and the 403 does not say which is missing (#2701).
+	CleanupQuestionRefused bool `json:"cleanup_question_refused,omitempty"`
 	// WaitsForAnswer says NextSend is the wait after sending again snapshots
 	// S3 could not be asked about (#2696), not after a send that failed.
 	WaitsForAnswer bool `json:"waits_for_answer,omitempty"`
 	// NextSend, when set, is when the next send is tried: an hour after a
-	// round in which one failed (#2678). Absent: at the next cleanup.
+	// round in which one failed (#2678). Absent: at the next cleanup. Since
+	// #2691 each snapshot waits on its own, and NextSend is the earliest wait,
+	// set only when every snapshot sent again waits.
 	NextSend *time.Time `json:"next_send,omitempty"`
+	// Waiting names the snapshots among them whose send waits, each with
+	// when its wait ends (#2691); the others are sent at the next cleanup.
+	Waiting []SendWait `json:"waiting,omitempty"`
+}
+
+// SendWait is one snapshot's wait before it is sent again (#2691): an hour
+// after its send failed, or (ForAnswer) after it was sent while S3 could not
+// be asked about it (#2696).
+type SendWait struct {
+	Name      string    `json:"name"`
+	Until     time.Time `json:"until"`
+	ForAnswer bool      `json:"for_answer,omitempty"`
 }
 
 // RewriteNotInDestination replaces dir's record after the cleanup's resends
@@ -173,6 +198,7 @@ func ReadNotInDestination(dir string) (rec NotInDestination, ok bool, err error)
 
 func writeNotInDestination(dir string, rec NotInDestination) error {
 	rec.At = rec.At.UTC()
+	trimNotInDestination(&rec)
 	rec.Unasked = ""
 	if len(rec.NotAsked) > 0 {
 		rec.Unasked = rec.NotAsked[0]
@@ -354,6 +380,19 @@ func MarkResent(dir, name string, at time.Time) error {
 	return writeResent(dir, marks)
 }
 
+// forgetResent removes name from that record: S3 answered about it. A
+// failure is logged; a mark left behind costs at most one send not made.
+func forgetResent(dir, name string) {
+	marks := resentMarks(dir)
+	if _, ok := marks[name]; !ok {
+		return
+	}
+	delete(marks, name)
+	if err := writeResent(dir, marks); err != nil {
+		slog.Warn("baseline prune: the record of snapshots sent again could not be updated", "dir", dir, "error", err)
+	}
+}
+
 // ResentUnconfirmed lists the snapshots on that record, sorted.
 func ResentUnconfirmed(dir string) []string {
 	var out []string
@@ -395,4 +434,40 @@ func writeResent(dir string, marks map[string]time.Time) error {
 		return err
 	}
 	return writeFileAtomic0600(dir, ResentFile, b)
+}
+
+// trimNotInDestination cuts Names, NotAsked and ReadRefused to
+// notInDestinationNamesKept each (#2701), with the counts of the two
+// subsets kept whole. The ones also in Names go first, so a name the page
+// shows is never said to be missing because its "could not be asked" entry
+// was the one cut. Every writer goes through it.
+func trimNotInDestination(rec *NotInDestination) {
+	if rec.NotAskedCount < len(rec.NotAsked) {
+		rec.NotAskedCount = len(rec.NotAsked)
+	}
+	if rec.ReadRefusedCount < len(rec.ReadRefused) {
+		rec.ReadRefusedCount = len(rec.ReadRefused)
+	}
+	if len(rec.Names) > notInDestinationNamesKept {
+		rec.Names = rec.Names[:notInDestinationNamesKept]
+	}
+	shown := map[string]bool{}
+	for _, n := range rec.Names {
+		shown[n] = true
+	}
+	cut := func(l []string) []string {
+		if len(l) <= notInDestinationNamesKept {
+			return l
+		}
+		out := make([]string, 0, notInDestinationNamesKept)
+		for _, pass := range []bool{true, false} {
+			for _, n := range l {
+				if shown[n] == pass && len(out) < notInDestinationNamesKept {
+					out = append(out, n)
+				}
+			}
+		}
+		return out
+	}
+	rec.NotAsked, rec.ReadRefused = cut(rec.NotAsked), cut(rec.ReadRefused)
 }

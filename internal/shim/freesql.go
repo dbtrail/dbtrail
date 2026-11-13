@@ -1146,7 +1146,8 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 // The copy runs the statement it is given: the routing ladder hands it the
 // client's text with backtick-quoted names and STRAIGHT_JOIN rewritten
 // (copyText); a client on the port without routing gets the same rewrite
-// here when it can be made with certainty, and its own text otherwise.
+// here when it can be made with certainty, and its own text otherwise, plus
+// LIMIT offset, count written LIMIT count OFFSET offset (#2628).
 // Nothing else is translated from MySQL's dialect, and a statement the copy
 // refuses is the caller's to forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
 //
@@ -1206,11 +1207,21 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// cannot see (copyReadsOtherwise): a backtick-quoted word inside
 		// what the copy takes for a string or a comment would be rewritten
 		// there.
+		// LIMIT offset, count is written LIMIT count OFFSET offset, the
+		// copy's only spelling, where the rewrite is certain (#2628).
 		if !copyReadsOtherwise(qstr) {
-			if text, why := readrouter.ForCopyOpts(qstr, readrouter.CopyOptions{}); why == "" && text != qstr {
+			if text, why := readrouter.ForCopyOpts(qstr, readrouter.CopyOptions{LimitOffsetComma: true}); why == "" && text != qstr {
 				stmt = text
 				keepJoinOrder = readrouter.KeepsJoinOrder(qstr)
 			}
+		}
+	}
+	if h.router == nil {
+		// What the copy is about to run still holds MySQL's LIMIT offset,
+		// count: not rewritten above, or sent as written. The copy only
+		// fails on it, in its own words; this says how to write it.
+		if r, refused := readrouter.UnroutedLimitVeto(stmt); refused {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, r.Message())
 		}
 	}
 	// What the connection set for itself (#2035). Under routing: the

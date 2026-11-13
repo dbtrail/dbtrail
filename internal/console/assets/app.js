@@ -9153,46 +9153,95 @@ function notInS3Words(n, rec) {
       : " (checked " + utcLabel(rec && rec.at) + ")");
   const it = n === 1 ? "it" : "them";
   const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : []);
-  const copiesOf = (l) => (l.length === 1 ? "the copy of " : "the copies of ") + l.map(at).join(", ");
+  // How many a list names in all: the record cuts the lists to a few names
+  // and keeps their counts (#2701); an older build's record has them whole.
+  const total = (l, c) => (typeof c === "number" && c > l.length ? c : l.length);
+  const copiesOf = (l, all = l.length) => (!l.length ? all + " older " + (all === 1 ? "copy" : "copies")
+    : (all === 1 ? "the copy of " : "the copies of ") + l.map(at).join(", ") + (all > l.length ? " and " + (all - l.length) + " more" : ""));
+  // Each copy can wait on its own (#2691): an hour after its send failed on
+  // a file of its own, or after it was sent while S3 could not be asked
+  // about it. When the copies are not all in one case, the waiting ones are
+  // named with their case, and the rest are "the others": they are sent from
+  // the next cleanup on, 3 at most per cleanup, and one older than the age S3
+  // keeps is not sent at all (the record does not say which), so none of
+  // them is named and the line says both limits.
+  const waits = Array.isArray(rec && rec.waiting)
+    ? rec.waiting.filter((w) => w && typeof w.name === "string" && w.name && typeof w.until === "string" && w.until) : [];
+  const earliest = (ws) => ws.map((w) => w.until).sort()[0];
+  const eachOwnWait = () => {
+    const left = names.filter((x) => !list(rec && rec.read_refused).includes(x));
+    const failedW = waits.filter((w) => w.for_answer !== true && left.includes(w.name));
+    const answerW = waits.filter((w) => w.for_answer === true && left.includes(w.name));
+    const others = left.filter((x) => !failedW.concat(answerW).some((w) => w.name === x)).length + Math.max(0, n - names.length);
+    const parts = [];
+    if (failedW.length) {
+      parts.push("sending " + copiesOf(failedW.map((w) => w.name)) + " failed, and DBTrail tries again after " + utcLabel(earliest(failedW)));
+    }
+    if (answerW.length) {
+      const one = answerW.length === 1;
+      parts.push(copiesOf(answerW.map((w) => w.name)) + (one ? " was" : " were") + " sent but could not be confirmed, and DBTrail sends " +
+        (one ? "it" : "them") + " again after " + utcLabel(earliest(answerW)));
+    }
+    if (others) {
+      parts.push(others === 1
+        ? "DBTrail sends the other again at the next cleanup, unless it is older than the age S3 keeps"
+        : "DBTrail sends the others again from the next cleanup on, 3 at most per cleanup, except any older than the age S3 keeps");
+    }
+    return parts.length > 1 ? parts.join("; ") + "." : "";
+  };
   // What happens next: sent at the next cleanup, after a wait (a failed
-  // send, or a send S3 could not confirm, #2696), or by hand.
+  // send, or a send S3 could not confirm, #2696), or by hand. A send refused
+  // because S3 refused the cleanup's question (#2701) names both permissions
+  // that question needs and the ways out.
   const tail = (them) => rec && rec.resending === true
-    ? (rec.next_send
-      ? (rec.waits_for_answer === true
-        ? "the last ones sent could not be confirmed, and DBTrail sends again after " + utcLabel(rec.next_send) + "."
-        : "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + ".")
-      : "DBTrail sends " + them + " again at the next cleanup.")
+    ? (rec.cleanup_question_refused === true
+      ? "DBTrail does not send " + them + ": S3 will not say whether its own cleanup is removing " + (them === "it" ? "its" : "their") +
+        " folder, which with Delete from S3 after set needs s3:GetObject and s3:ListBucket on this prefix. Add the one that is missing, or clear Delete from S3 after" +
+        (rec.next_send ? "; DBTrail asks again after " + utcLabel(rec.next_send) + "." : ".")
+      : eachOwnWait() || (rec.next_send
+        ? (rec.waits_for_answer === true
+          ? "the last ones sent could not be confirmed, and DBTrail sends again after " + utcLabel(rec.next_send) + "."
+          : "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + ".")
+        : "DBTrail sends " + them + " again at the next cleanup."))
     : "send " + them + " to S3 again, or remove " + them + " by hand if not needed.";
   // The ones S3 took when sent again and then refused to read (#2696): not
   // sent again, and the permission named.
   const readRefused = list(rec && rec.read_refused);
-  if (readRefused.length) {
-    const k = readRefused.length;
+  const k = total(readRefused, rec && rec.read_refused_count);
+  if (k) {
+    // S3's refusal does not say why (#2701): a missing s3:GetObject and
+    // credentials that stopped working answer alike, so both are named.
+    const causes = "either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both";
     if (k >= n) {
-      return "Kept here: " + what + ". S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm " +
-        (n === 1 ? "it is" : "they are") + " there, and does not send " + it + " again.";
+      return "Kept here: " + what + ". S3 took " + it + " when sent again and refuses to read " + it + " back: " + causes +
+        ". DBTrail cannot confirm " + (n === 1 ? "it is" : "they are") + " there, and does not send " + it + " again.";
     }
+    // The refused ones are among the ones S3 could not be asked about, so
+    // the rest's count of those is the whole count less these.
     const rest = Object.assign({}, rec, {
       names: list(rec.names).filter((x) => !readRefused.includes(x)),
       not_asked: list(rec.not_asked).filter((x) => !readRefused.includes(x)),
+      not_asked_count: Math.max(0, total(list(rec.not_asked), rec.not_asked_count) - k),
       read_refused: [],
+      read_refused_count: 0,
     });
-    return notInS3Words(n - k, rest) + " Not sent again: " + copiesOf(readRefused) + ", which S3 took but refuses to read back (s3:GetObject).";
+    return notInS3Words(n - k, rest) + " Not sent again: " + copiesOf(readRefused, k) + ", which S3 took and refuses to read back: " + causes + ".";
   }
   // The ones S3 could not be ASKED about (the last restore's result whose
   // question failed, a copy S3 refused, #2689): sent again in case they are
   // missing, and never said to be missing.
   const notAsked = list(rec && rec.not_asked);
-  if (notAsked.length && notAsked.length >= n) {
+  const a = total(notAsked, rec && rec.not_asked_count);
+  if (a && a >= n) {
     return "Kept here: " + what + ". S3 could not be asked whether it has " + it + "; " + tail(it);
   }
-  if (notAsked.length) {
+  if (a) {
     // Some S3 lacks, some it could not be asked about: each said of its own.
-    const m = n - notAsked.length;
+    const m = n - a;
     const lacked = names.filter((x) => !notAsked.includes(x));
     const lacks = m === 1 && lacked.length === 1 ? "the copy of " + at(lacked[0])
       : m + " older " + (m === 1 ? "copy" : "copies") + (lacked.length ? " (" + lacked.map(at).join(", ") + (m > lacked.length ? " and " + (m - lacked.length) + " more" : "") + ")" : "");
-    return "Kept here: " + what + ". S3 does not have " + lacks + " complete, and could not be asked about " + copiesOf(notAsked) + "; " + tail(it);
+    return "Kept here: " + what + ". S3 does not have " + lacks + " complete, and could not be asked about " + copiesOf(notAsked, a) + "; " + tail(it);
   }
   return "Not in S3 yet, so kept here: " + what + ". S3 does not have " + it + " complete; " + tail(it);
 }
@@ -9217,8 +9266,11 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
   if (reuse && !s3) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
   const stuck = was.held || was.blocked;
   const none = s3 ? "the count does not apply to it" : "nothing in it is removed, whatever the count says";
+  // With an age set the age does not apply either (#2675): S3 cannot tell
+  // which server's copy of a snapshot name it holds.
+  const sharedNone = age.sharedS3 ? "nothing here is removed" : none;
   if (was.sharedS3) {
-    say("Another server sends its snapshots to this S3 location too, so " + none + ". Give each server its own S3 prefix.");
+    say("Another server sends its snapshots to this S3 location too, so " + sharedNone + ". Give each server its own S3 prefix.");
   } else if (was.held) {
     say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {
@@ -9543,7 +9595,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // about this server", so the card is read at a glance.
     const said = localCopyWords(s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
       { source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held, sharedS3: asSaved && !!srv.keep_shared_s3,
-        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
+        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, sharedS3: !!srv.delete_after_shared_s3, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
         every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0,
@@ -11055,17 +11107,26 @@ function baselinesPanel(b, servers, opts) {
     // so the rows the listing found in both places are marked, and so are
     // the ones the S3 interval kept here on purpose (held), which go by the
     // count alone. One that was meant for S3 and is not there is not marked.
+    // Which ones is the server's answer (sn.going, #2675), worked out by the
+    // cleanup's own rule: the count AND "Delete by age" when it is set (a
+    // snapshot past the count and younger than the age stays), the newest
+    // of each table, the `current` target, the last restore's result.
+    // Counting positions here could not see the age, and marked rows the
+    // cleanup keeps.
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
-    let localSeen = 0;
     const goingIdx = new Set();
+    const checkKeptIdx = new Set();
     if (keepInForce > 0) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
-        localSeen++;
-        // The last restore's result is kept whatever its date, and takes
-        // no place in the count (#2678).
-        if (sn.restored) { localSeen--; return; }
-        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
+        if (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held) {
+          // Both answers are the server's (#2675): going is what the next
+          // cleanup removes; past_count is what the count and the age would
+          // remove, of which the pair a check compares stays on top of the
+          // count (#2691) and is never marked as going.
+          if (sn.going === true) goingIdx.add(i);
+          else if (sn.kept_for_check && sn.past_count === true) checkKeptIdx.add(i);
+        }
       });
     }
     const total = b.snapshots.length;
@@ -11121,6 +11182,10 @@ function baselinesPanel(b, servers, opts) {
         what.append(el("span", { class: "chip chip-unknown", text: "last restore, kept" + (sn.restored_until ? " until " + utcLabel(sn.restored_until) : ""),
           title: "The result of the last restore to a moment. Kept for 24 hours after the restore, or until the next restore, on top of the newest kept; then it goes like any older snapshot." +
             (sn.restored_local_only ? " It is older than the age S3 keeps, so it is on this machine only and is not sent to S3." : "") }));
+      }
+      if (checkKeptIdx.has(idx)) {
+        what.append(el("span", { class: "chip chip-unknown", text: "kept for the check",
+          title: "The read of the database most tables of the newest snapshot come from (usually the last full read), or the snapshot before it: the two a check of the snapshots compares for those tables. Kept on top of the newest kept, since S3 does not hold them, until another read takes its place. A table read on its own since then has no pair kept." }));
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");

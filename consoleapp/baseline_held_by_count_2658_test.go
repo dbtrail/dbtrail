@@ -107,8 +107,10 @@ func TestHeldByCount_theOwedUploadSurvivesTheCleanup(t *testing.T) {
 		t.Fatalf("the snapshot whose upload is owed is gone: %v", err)
 	}
 
-	// Then it works: sent once more, to its own key, and the mark goes.
+	// Then it works, at the first try after the hour a failed send waits
+	// (#2675): sent once more, to its own key, and the mark goes.
 	failing = false
+	now = now.Add(owedRetryWait)
 	s.sendOwedHeldUpload(req, now)
 	if want := "s3://bkt/p/" + newest; len(sent) != 2 || sent[1] != want {
 		t.Fatalf("uploads %v, want a second one to %s", sent, want)
