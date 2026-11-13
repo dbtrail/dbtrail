@@ -74,6 +74,18 @@ func TestCellText(t *testing.T) {
 		{"timestamp that does not parse is left", "TIMESTAMP", "infinity", str("infinity")},
 		{"date", "DATE", "2026-01-02", str("2026-01-02")},
 		{"list", "INTEGER[]", []any{json.Number("1"), nil}, str("[1,null]")},
+		{"double", "DOUBLE", json.Number("0.1"), str("0.1")},
+		{"double whole", "DOUBLE", json.Number("0"), str("0")},
+		{"double large takes an exponent", "DOUBLE", json.Number("100000000000000000000"), str("1e+20")},
+		{"double just under the exponent", "DOUBLE", json.Number("999999999999999"), str("999999999999999")},
+		{"double small takes an exponent", "DOUBLE", json.Number("0.00001"), str("1e-05")},
+		{"double negative", "DOUBLE", json.Number("-2.75"), str("-2.75")},
+		{"real keeps its own digits", "FLOAT", json.Number("0.1"), str("0.1")},
+		{"a whole number is not reformatted", "BIGINT", json.Number("100000000000000000000"), str("100000000000000000000")},
+		{"bytes that are text", "BLOB", "ab", str(`\x6162`)},
+		{"bytes that are not text", "BLOB", "0x00FF", str(`\x00ff`)},
+		{"no bytes", "BLOB", "", str(`\x`)},
+		{"text that looks like bytes is text", "VARCHAR", "0x00ff", str("0x00ff")},
 	} {
 		got := CellText(tc.typ, tc.in)
 		switch {
