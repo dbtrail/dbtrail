@@ -33,6 +33,9 @@ func TestColumnDefinitionChanged_doesNotSeeACollationChange(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if cs := baseline.ColumnCharsets(sql, cols)["code"]; cs != "utf8mb4" {
+			t.Fatalf("the carried definition should resolve code to utf8mb4, got %q", cs)
+		}
 		return cols[1], baseline.BinaryCollationColumns(sql, cols)
 	}
 	// What the schema snapshot holds for the column after EITHER alter: the
@@ -43,7 +46,7 @@ func TestColumnDefinitionChanged_doesNotSeeACollationChange(t *testing.T) {
 	if !slices.Equal(binary, []string{"code"}) {
 		t.Fatalf("the carried definition should name code as _bin: %v", binary)
 	}
-	if diff, changed := columnDefinitionChanged(wasBin, now); changed {
+	if diff, changed := columnDefinitionChanged(wasBin, "utf8mb4", now); changed {
 		t.Errorf("_bin to _ci is now seen by the refresh (%s): update this test and the documented limit", diff)
 	}
 
@@ -51,7 +54,7 @@ func TestColumnDefinitionChanged_doesNotSeeACollationChange(t *testing.T) {
 	if len(binary) != 0 {
 		t.Fatalf("the carried definition should not name code as _bin: %v", binary)
 	}
-	if diff, changed := columnDefinitionChanged(wasCI, now); changed {
+	if diff, changed := columnDefinitionChanged(wasCI, "utf8mb4", now); changed {
 		t.Errorf("_ci to _bin is now seen by the refresh (%s): update this test and the documented limit", diff)
 	}
 }
