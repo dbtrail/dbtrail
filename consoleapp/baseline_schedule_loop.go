@@ -326,13 +326,26 @@ func (b *backupScheduler) measureWindow(ctx context.Context, e console.ServerEnt
 			w.Events = int64(cur.events - base)
 		}
 	}
+	// No record names how far the index had been written for this snapshot
+	// (a `bintrail baseline` run from a shell, another process, a lost
+	// history): its own binary log coordinates can still say that capture
+	// recorded nothing since it (#2674). Asked only where the zero changes
+	// the decision, past the cut-over age.
+	// against is the snapshot's GTID set when the zero came from it: the
+	// source is then asked against what the snapshot holds (#2720 review).
+	var against string
+	if countUnknown == countUnknownNoBase && pastCutover(e, w, time.Now()) {
+		if nothing, held := b.nothingCapturedSinceAnchor(ctx, e, anchor); nothing {
+			w.Events, countUnknown, against = 0, "", held
+		}
+	}
 	b.reportCountUnknown(e, anchor, countUnknown)
 	if w.Events == 0 && pastCutover(e, w, time.Now()) {
 		var sourceRead time.Time
 		if b.sup.history != nil {
 			sourceRead = b.sup.history.LastSourceRead(e.ID, anchor)
 		}
-		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e, anchor, sourceRead)
+		w.Capture, w.CaptureDetail = b.captureVerdict(ctx, e, anchor, sourceRead, against)
 		if w.Capture == console.CaptureUnaskable {
 			// The source cannot be asked, so the slot may be skipped
 			// (#2659): only while the snapshot loses nothing by waiting.
@@ -466,13 +479,18 @@ func (s *baselineSupervisor) snapshotReadersStart(ctx context.Context, e console
 // sourceRead is when the newest full backup that read the source started,
 // which the capture's dropped rows are dated against. A caller that went
 // away mid-probe learned nothing about the source, so nothing is logged.
-func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry, anchor, sourceRead time.Time) (verdict, detail string) {
+//
+// against, when set, is the snapshot's GTID set, which the source is
+// compared with instead of capture's (probeCaptureAgainst).
+func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEntry, anchor, sourceRead time.Time, against string) (verdict, detail string) {
 	var r captureProbeResult
 	switch {
 	case e.SourceDSN == "":
 		r.detail = captureDetailNoSource
 	case e.IsPostgres():
 		r.detail = captureDetailPostgres
+	case against != "":
+		r = probeCaptureAgainst(ctx, e.DSN, e.SourceDSN, e.SourceSSL(), anchor, sourceRead, against)
 	default:
 		r = probeCapture(ctx, e.DSN, e.SourceDSN, e.SourceSSL(), anchor, sourceRead)
 	}
