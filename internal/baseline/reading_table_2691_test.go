@@ -114,12 +114,12 @@ func TestPinCounted_readsAndDownloadsShareTheCap(t *testing.T) {
 		r()
 		t.Fatal("a download was let in over the ceiling the reads filled")
 	}
-	if got, want := Pinned(root), []string{old[0], old[2], newest}; !slices.Equal(got, sorted(want)) {
-		t.Fatalf("pinned %v, want %v", got, sorted(want))
+	if got, want := Pinned(root), []string{old[0], old[2], newest}; !slices.Equal(got, sortedNames(want)) {
+		t.Fatalf("pinned %v, want %v", got, sortedNames(want))
 	}
 }
 
-func sorted(s []string) []string {
+func sortedNames(s []string) []string {
 	out := slices.Clone(s)
 	slices.Sort(out)
 	return out
