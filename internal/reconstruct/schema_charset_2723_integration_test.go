@@ -124,7 +124,7 @@ func TestRefresh_charsetChange(t *testing.T) {
 	}
 	testutil.MustExec(t, indexDB, "UPDATE `"+dbName+"`.schema_snapshots SET snapshot_time = ?", base.Add(5*time.Second))
 	var narrowedCharset string
-	if err := indexDB.QueryRow("SELECT character_set_name FROM `"+dbName+"`.schema_snapshots WHERE table_name = 'narrowed' AND column_name = 'name'").
+	if err := indexDB.QueryRow("SELECT character_set_name FROM `" + dbName + "`.schema_snapshots WHERE table_name = 'narrowed' AND column_name = 'name'").
 		Scan(&narrowedCharset); err != nil || narrowedCharset != "latin1" {
 		t.Fatalf("the snapshot's character set for narrowed.name: %q, %v; want latin1", narrowedCharset, err)
 	}
@@ -159,7 +159,9 @@ func TestRefresh_charsetChange(t *testing.T) {
 		t.Fatalf("WriteSuccessMarker: %v", err)
 	}
 
-	refresh := func(tbls ...string) ([]reconstruct.TableFailure, error) {
+	// Each run targets its own instant: a refused run leaves its directory
+	// behind, marked incomplete, and a directory is written once.
+	refresh := func(cut time.Time, tbls ...string) ([]reconstruct.TableFailure, error) {
 		qualified := make([]string, len(tbls))
 		for i, tbl := range tbls {
 			qualified[i] = src + "." + tbl
@@ -173,7 +175,7 @@ func TestRefresh_charsetChange(t *testing.T) {
 	}
 
 	t.Run("a changed character set refuses, naming the column and both sets", func(t *testing.T) {
-		failures, err := refresh(tables...)
+		failures, err := refresh(cut, tables...)
 		if err == nil {
 			t.Fatal("the refresh published across two character set changes")
 		}
@@ -206,7 +208,8 @@ func TestRefresh_charsetChange(t *testing.T) {
 			}
 			before[tbl] = p
 		}
-		failures, err := refresh("mixed", "mixed_latin1")
+		cut := cut.Add(5 * time.Second)
+		failures, err := refresh(cut, "mixed", "mixed_latin1")
 		if err != nil {
 			t.Fatalf("the refresh refused tables whose character sets did not change: %v\n%s", err, fmt.Sprint(failures))
 		}

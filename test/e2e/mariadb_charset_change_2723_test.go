@@ -19,7 +19,7 @@ import (
 // ALTER IGNORE, so the refusal must come from comparing the carried CREATE
 // TABLE with the schema snapshot, not from reading the statement (#2640).
 //
-//   - narrowed: utf8mb4 to latin1 under sql_mode=''. MariaDB turns the ✓ into
+//   - narrowed: utf8mb4 to latin1 with an empty sql_mode. MariaDB turns the ✓ into
 //     '?' and writes no row event for it.
 //   - widened: CONVERT TO CHARACTER SET utf8mb4 on a latin1 table. Values are
 //     kept; the carried CREATE TABLE would still say latin1.
