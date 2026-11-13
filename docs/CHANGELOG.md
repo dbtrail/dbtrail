@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The MySQL port without Engine Routing answers `LIMIT offset, count`** (part of #2628). It used to refuse `LIMIT 10, 5` and ask for `LIMIT 5 OFFSET 10`; it now writes it that way for the copy itself, so deep pagination from an ORM or a BI tool (`LIMIT ?, ?` from SQLAlchemy too) runs as written. The rows are the ones MySQL returns, checked against MySQL 8.0.46 for an offset of 0, an offset past the last row, a count of 0, leading zeros, and a `LIMIT` in a subquery, a CTE and either side of a `UNION`. A form it cannot write with certainty is still refused with how to write it: a number past 9223372036854775807, a comment between the two numbers, or a prepared argument that is not a whole number; a DOUBLE or DECIMAL argument to a prepared `LIMIT ?` gets MySQL's own error 1210, as on MySQL. And a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery is now refused on that port, as MySQL refuses it (error 1235); the copy used to answer it. Engine Routing is unchanged.
+- **A shared S3 prefix is not pruned by age either** (#2675). With
+  `--baseline-retain` (**Delete by age**) and no count, the cleanup removed a
+  local snapshot once the bucket had `<prefix>/<snapshot name>/_SUCCESS`. A
+  snapshot name has no server in it, and two servers on one prefix and one
+  schedule write the same names, so the bucket confirmed the other server's
+  upload, and a snapshot whose own upload had failed could be removed with no
+  copy anywhere. A count already left such a folder alone (#2658); the age
+  now does too. A folder whose S3 prefix another server sends to, from
+  another folder or from none, keeps every local snapshot; the hourly
+  cleanup logs each one, and the settings card says "Another server sends
+  its snapshots to this S3 location too, so nothing here is removed. Give
+  each server its own S3 prefix."
+  Servers that share both the folder and the prefix, which is what the
+  startup migration gives them, are one set of snapshots and are pruned by
+  age as before. `bintrail baseline --upload --baseline-retain` names one folder and
+  one prefix and cannot see other servers; it is unchanged.
 - **A reader in another process keeps the snapshot it reads** (#2675). The
   readers the cleanup waits for were known only inside the process that runs
   them, so `bintrail export iceberg`, `bintrail verify` and `bintrail
@@ -79,6 +96,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pg_hba.conf`, the check runs as before and the result says the read was
   not cut and why. The baseline it starts from is now the newest one taken
   before the read opened, as on MySQL since #2150.
+- **A snapshot that fails to send on a file of its own no longer holds back
+  the others** (#2691). When sending again a snapshot the bucket lacks
+  failed, the whole folder waited an hour, so one snapshot with a file that
+  would not read held back every other snapshot the bucket lacked. A send
+  that fails on a file of the snapshot itself now makes that snapshot alone
+  wait the hour; the others are still sent at each cleanup, at most 3 per
+  cleanup as before. A failure at the destination (the bucket, the
+  credentials, the network) still makes the folder wait, since every other
+  send would meet it. The bounds of #2696 hold per snapshot: one S3 could not
+  be asked about is sent at most once an hour, and one S3 refuses to read
+  back is not sent again. When the copies on the Backup settings card are
+  not all in the same case, the card names the ones that wait, with why and
+  until when, and says the others are sent from the next cleanup on, 3 at
+  most per cleanup, except any older than the age S3 keeps; when they are
+  all in the same case it says what it said before.
+- **Without S3, the cleanup keeps the two snapshots a check compares**
+  (#2691). A check of the snapshots, and its Explain, compares each table's
+  last full read of the database with the snapshot before it. On a server
+  without an S3 destination the count removed both about 15 minutes after
+  the full read (a snapshot every 5 minutes, a count of 3), so a check run
+  later found nothing to compare. The cleanup of a folder with a count and no
+  S3 destination now keeps one pair on top of the count: the read of the
+  database most tables of the newest snapshot come from (on a tie, the
+  oldest), usually the last full read, and the snapshot before it, until
+  another read takes its place. The Snapshots page marks the two rows "kept
+  for the check". A table read again on its own since, or one with no
+  recorded read (built from the changes alone), has no pair kept. At
+  most two extra snapshots per folder: the one before the read costs a whole
+  snapshot of disk, the read itself only the tables changed since it (the
+  others are hard links shared with the newer snapshots). Servers with S3
+  keep nothing extra.
+
 - **A snapshot update refuses a table whose column changed character set** (#2723). The update compared each column's type and NULL-ness with the schema snapshot taken after a DDL, but not its character set, which `COLUMN_TYPE` does not show. Two cases went wrong. An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column, under a non-strict `sql_mode` or as `CONVERT TO CHARACTER SET latin1`, turns every character latin1 cannot hold into `?` and writes no row event, so the update kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. A `CONVERT TO CHARACTER SET utf8mb4` on a latin1 table keeps every value, but the updated snapshot kept declaring the column latin1, and a restore from it created a column that cannot hold what was written after the change. Both now refuse the table like a type change, naming the column and both character sets (`name (varchar(20) CHARACTER SET utf8mb4 -> varchar(20) CHARACTER SET latin1)`), and a full read follows. The character set of the snapshot's `CREATE TABLE` is read as the server wrote it: the column's own, else the one its collation belongs to, else the table's default; `utf8` and `utf8mb3` are the same set. Nothing is compared, and nothing refused, when either side does not say: a schema snapshot with no character set recorded (every non-text column, a PostgreSQL source, a snapshot older than the record of character sets), or a `CREATE TABLE` that names none for the column or its table. A collation change within the same character set is still not seen, since schema snapshots do not record collations (#2083).
 - **Tests: the boot server's download cap through its call site, and the
   "Not in S3" line in every combination** (#2691). No behavior change. A test

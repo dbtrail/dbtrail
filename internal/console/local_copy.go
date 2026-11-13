@@ -395,6 +395,45 @@ func LocalKeepSharedS3(entries []ServerEntry, e ServerEntry, excluded ...string)
 	return false
 }
 
+// AgePruneSharedS3 reports whether the S3 prefix s3 is also the destination
+// of a writer whose snapshots are kept in a folder other than dir, or in no
+// folder at all: another server's entry, or the daemon's own --baseline-dir
+// and --baseline-s3 pair (globalDir, globalS3). Prefixes compare as sameS3
+// does (trailing slashes aside, surrounding spaces ignored), folders as
+// canonicalDir resolves them.
+//
+// Such a folder is never pruned by age either (#2675), for the reason a
+// shared destination is never pruned to a count (LocalKeepSharedS3): the
+// prune asks the bucket for <prefix>/<snapshot name>/_SUCCESS, a snapshot
+// name has no server in it, and two writers on one prefix and one schedule
+// write the same names, so the bucket confirms the other writer's upload.
+// The writer's identity cannot be asked instead: both uploads land at the
+// SAME keys, so the bucket holds one set of files for the name, not one per
+// writer.
+//
+// Writers that share both the prefix AND the folder are one set of
+// snapshots (the startup migration gives servers the daemon's own pair), so
+// a name exists once in the folder and nothing is confirmed for another
+// folder. That is not counted as shared here.
+func AgePruneSharedS3(entries []ServerEntry, dir, s3, globalDir, globalS3 string) bool {
+	mine := strings.TrimSpace(s3)
+	if mine == "" {
+		return false
+	}
+	other := func(d, p string) bool {
+		return sameS3(mine, strings.TrimSpace(p)) && !sameDir(dir, d)
+	}
+	if other(globalDir, globalS3) {
+		return true
+	}
+	for _, o := range entries {
+		if other(o.BaselineDir, o.BaselineS3) {
+			return true
+		}
+	}
+	return false
+}
+
 // LocalKeepServer is the ONE server that keeps its snapshots in dir, a folder
 // LocalKeepTargets named, in the spelling it returned. Its S3 destination,
 // when it has one, is what a snapshot past the count must be confirmed
