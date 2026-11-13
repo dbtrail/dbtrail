@@ -58,7 +58,7 @@ func TestScheduledRefresh_namesTablesCreatedAfterThePreviousSnapshot(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.startRebuild(e, p, "2026-10-01T09:00:00Z"); err != nil {
+	if err := b.startRebuild(e, p, "2026-10-01T09:00:00Z", ""); err != nil {
 		t.Fatalf("startRebuild: %v", err)
 	}
 	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
@@ -105,7 +105,7 @@ func TestScheduledRefresh_unreachableSourceSaysTheCheckDidNotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := e.BackupSchedule.Parse()
-	if err := b.startRebuild(e, p, "2026-10-01T09:00:00Z"); err != nil {
+	if err := b.startRebuild(e, p, "2026-10-01T09:00:00Z", ""); err != nil {
 		t.Fatalf("startRebuild: %v", err)
 	}
 	st := waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)
