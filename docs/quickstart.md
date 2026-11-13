@@ -1,12 +1,12 @@
 # Command-line quickstart
 
-DBTrail keeps every change on your MySQL server, before and after, and writes
-the SQL that undoes the ones you didn't want.
+To install DBTrail and run heavy queries from your mysql client, start at the
+[start page](https://www.dbtrail.com/docs/quickstart/). It sets up the web
+interface with the one-line installer.
 
-This page runs it from the command line: the `bintrail` binary, for scripts,
-cron and systemd. To start from the web interface, which is what the one-line
-installer sets up, follow the
-[start page](https://www.dbtrail.com/docs/quickstart/) instead.
+This page is the command line's own quickstart: the `bintrail` binary, for
+scripts, cron and systemd. It keeps every change on your MySQL server, before
+and after, and writes the SQL that undoes the ones you didn't want.
 
 The command line calls a snapshot a baseline. Commands and flags such as
 `bintrail baseline` and `--baseline-dir` use that word, where the web

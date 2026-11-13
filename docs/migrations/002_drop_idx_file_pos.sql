@@ -9,7 +9,8 @@
 -- Same convention as 001_create_tables.sql (see header on that file).
 --
 -- Removes the dead idx_file_pos index from binlog_events. The index was
--- declared at project inception (bintrail-spec.md:215, mid-Mar 2026) but
+-- declared at project inception (the original design spec, mid-Mar 2026,
+-- since removed from the repository in #2637) but
 -- the query/recover paths shipped using gtid, event_timestamp, and pk_hash
 -- — never binlog_file or start_pos. Confirmed by:
 --

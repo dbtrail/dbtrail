@@ -1007,6 +1007,12 @@ func countOfServers(n int) string {
 
 func runRouter(cmd *cobra.Command, _ []string) error {
 	cli.LoadEnvFile()
+	// Before anything reads the AWS variables: the router's own S3 keys
+	// (#2690) decide which token it may carry, or refuse a mixed pair.
+	awsKeysLine, err := applyRouterAWSKeys()
+	if err != nil {
+		return err
+	}
 	st, err := routerSettingsFrom(cmd)
 	if err != nil {
 		return err
@@ -1079,6 +1085,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprint(os.Stderr, routerFreshnessLine(console.SQLModeSetting()))
 	fmt.Fprint(os.Stderr, routerFreshServersLine(srv.FreshServerNames(), pool.Workers, pool.FreshWorkers))
+	fmt.Fprint(os.Stderr, awsKeysLine)
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
 	return port.serve(ctx)
 }
