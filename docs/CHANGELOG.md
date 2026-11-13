@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.131.0] - 2026-11-13
+
 - **"Goes at the next cleanup" follows the cleanup's own rule, and a failed
   owed upload waits an hour** (#2675). The Snapshots list marked every local
   snapshot past the count, counting positions, so with **Delete by age** set
