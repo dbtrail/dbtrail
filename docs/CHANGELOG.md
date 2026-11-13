@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.132.0] - 2026-11-13
+
+- **The compose `baseline` profile works on sources with
+  `explain_format=TREE`** (#2733). Its mydumper step runs from mydumper's own
+  image, with no MySQL client to ask the source first, so the #2211 fix did
+  not reach it and mydumper still crashed with a segmentation fault (exit
+  139) on MySQL 9.x with `TREE` or `JSON`. Step `baseline-quiet` (`bintrail
+  dump wait-quiet`) now reads the source's `explain_format` in every lock
+  mode and, when the variable exists, writes
+  `[mydumper_session_variables] explain_format = TRADITIONAL` to
+  `/dump/mydumper-session.cnf`; the dump step passes it with
+  `--defaults-extra-file` and removes it when it ends, so a MariaDB run after
+  a MySQL 9.x run does not inherit it. Sources without the variable (MariaDB,
+  MySQL before 8.0.32) get no file. A leftover file that cannot be removed,
+  or a file that cannot be written for a `TREE`/`JSON` source, stops the run
+  with the cause. `baseline-quiet` now runs as root and mounts the
+  `bintrail-dump` volume, whose root uid 999 cannot write. A 139 exit
+  without the file prints what to check. The mydumper image stays at
+  1.0.3-1, the build every other path ships.
+
+- **iceberg-go 0.7.0** (#2728), the library behind `bintrail export
+  iceberg`, with arrow-go 18.8.0. The upgrade moves shared dependencies too.
+  Every binary (`bintrail`, `bintrail-console`, `bintrail-mcp`,
+  `bintrail-pg`) gets newer versions of the AWS SDK, golang.org/x/sys, sync
+  and text, klauspost/compress and go-sql-driver/mysql 1.10.0, whose fix to
+  reading the server's `max_allowed_packet` applies to the index and source
+  connections whose DSN does not set `maxAllowedPacket`, since bintrail asks
+  the server for that limit there. gRPC,
+  OpenTelemetry, gocloud and the Azure and Google Cloud libraries change only
+  in `bintrail`, the one binary with the export. The minimum Go version is
+  unchanged (1.25.11).
+  The manifests an export compaction (`--compact-after`, #2719) leaves
+  behind are now dropped by the next one, so with `--compact-after 1` the
+  read stayed at about 0.007 s through 30 compactions instead of creeping to
+  0.044 s.
+
+- **A full-table reconstruct, the SQL port's `_snapshot` and the Iceberg export no longer carry text an ALTER replaced with `?`** (#2735). An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column under a non-strict `sql_mode` (or `CONVERT TO CHARACTER SET latin1`, or MariaDB's `ALTER IGNORE`) turns every character latin1 cannot hold into `?` and writes no row event, and these three readers kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. Under a strict `sql_mode` the same statement fails with error 1366 when a value has such a character (measured on MySQL 8.0.46 and MariaDB 11.4), so the value decides, not the statement: `reconstruct --output-format mydumper` and `parquet` and the full-table `_snapshot` check each value they take from before the ALTER against the new character set (from the schema snapshot capture took for it) and refuse, naming the column, the statement and both sets but never the value, only when one lost a character. A change to a set that holds everything (latin1 to utf8mb4) and a narrowing over values the new set holds refuse nothing, so neither forces a full read. The Iceberg export refuses a row it writes from before the ALTER that lost a character; the rows it leaves in the table are not read back, so the outcome says the ALTER happened and what it may have changed instead of refusing. Sets other than latin1, ascii, utf8mb3 and ucs2 (and those that hold everything), and a statement with no schema snapshot recorded, give a warning instead of a check. A snapshot update across such an ALTER refuses a table delta and does not carry the table forward unchanged. The single-row reads and the binlog-only paths are covered by #2750.
+
+- **The MySQL port without Engine Routing answers `DATE_FORMAT` and `DATEDIFF`** (#2628). The copy has neither function, so both used to fail there (or, for `DATEDIFF`, be refused). `DATE_FORMAT(d, '%Y-%m')` is now sent as `strftime(d, '%Y-%m')` with each MySQL specifier in the copy's spelling, and `DATEDIFF(a, b)` as `date_diff('day', CAST(b AS DATE), CAST(a AS DATE))`, as text and as a prepared statement. The answers are MySQL's, measured on MySQL 8.0.46 for `DATE`, `DATETIME`, `DATETIME(6)` and `TIMESTAMP` columns, strings and `NULL`, under a session time zone too. A `DATE_FORMAT` whose format is not one string in the statement, or holds `%D`, `%u`, `%V`, `%X` or a letter MySQL does not read as a specifier, is refused with error 1235 and the copy's spelling. The `DIV` refusal used to suggest `a // b` in every case, which divides a `DECIMAL` or a `DOUBLE` without truncating; it now gives `CAST(trunc(a / nullif(b, 0)) AS BIGINT)` for those. `IFNULL`, `IF` and `CONCAT_WS` are unchanged; the differences measured for them (a string read as a condition, a `DOUBLE` or a comparison turned into text) are listed in docs/time-travel-sql.md. Engine Routing is unchanged.
+
+- **Single-row reads and reads from recorded changes alone no longer carry text an ALTER replaced with `?`** (#2750). After #2735 the full-table readers refuse a value from before an `ALTER TABLE` that narrowed a column's character set (utf8mb4 to latin1 under a non-strict `sql_mode`) when it holds a character the new set cannot store. The same check now runs on `reconstruct --pk` (and `--history`), the MCP `reconstruct` tool, the web interface's Time-travel tab and the SQL port's single-row `_snapshot`, against the change the row last came from or the snapshot row, and on the reads with no snapshot: `reconstruct --output-format mydumper --allow-changes-only` for a table with no snapshot, `_flashback` (one row or the whole table) and `_snapshot` with no snapshot location. A row rewritten after the ALTER, or deleted by the requested time, refuses nothing. The refusal names the column, the statement and both character sets, never the value; for the reads with no snapshot it says the rows were rebuilt from their recorded changes alone and asks for a snapshot taken after the ALTER. A change that cannot be checked value by value is a warning (`charset_narrowing_unchecked:` in the MCP tool and the web interface, `SHOW WARNINGS` on the SQL port, a log line in the CLI).
+
+- **`bintrail-pg verify --source-dsn` proves coverage on a quiet PostgreSQL database** (#2746). With no commit after the snapshot, the capture's checkpoint never reaches the snapshot's consistent point, so the check used to end its wait once the capture had saved the same position twice and match with a `coverage unverified` note. That was not a proof: a capture not yet sent a commit below the snapshot (a large transaction still being decoded, heavy WAL in other databases, network lag) saves the same position, and the check then reported a mismatch that was only index lag. The capture now also saves how far PostgreSQL has sent it the WAL, the position in the walsender's keepalive messages, in a new `stream_state.pg_sent_through_lsn` column, and only once every change received before that keepalive is indexed; `pg_sent_through_at` ties it to the save that wrote it, so a save by an older capture or by `bintrail-pg reset` leaves it untrusted. When it reaches the snapshot's point, the table is compared with no note; when it does not within the wait, the table is `inconclusive`, never a mismatch. A restarted capture on a quiet database now saves its checkpoint every interval too, where it used to save nothing until the next commit. A capture built before this change saves no such position, and verify keeps the old behavior with it.
+
+- **A server can have a limit on how far behind the source the copy
+  answers** (#2777). Off by default, so nothing changes until it is saved:
+  `PUT /api/servers/{id}/sql-mode` with `{"max_behind_source_seconds": 300}`
+  (`0` removes it). With a limit, a statement that would read the copy's
+  tables is answered there only while its data is at most that far behind the
+  source, measured like `behind_source_seconds` before the statement runs: in
+  fresh mode from the tails, so an old snapshot with caught-up tails is
+  within it, and a quiet source whose capture is caught up is 0 behind. Past
+  it, a routed statement goes to MySQL under the new reason
+  `copy_behind_source`; on a `<server>@copy` connection the client gets error
+  1105 with the lag and the limit. A lag that cannot be told is not within the
+  limit (`copy_age_unknown`). The limit is read per statement, so a change
+  applies to open connections, and `SHOW ROUTER STATUS` shows it as
+  `max_behind_source_seconds`. Capture's state is read at most every 30
+  seconds, so a capture that stops can still read as caught up for about a
+  minute and a half, and a limit under that is not kept to the second. See [A lag limit per server](time-travel-sql.md#lag-limit).
+
+- **Engine Routing answers `CURRENT_TIMESTAMP`, `CURRENT_DATE`, `LOCALTIME` and `LOCALTIMESTAMP` on the copy** (#2611). They are `NOW()` and `CURDATE()` on MySQL and MariaDB, and are now sent to the copy as those calls, under the same rules (arithmetic that makes them numbers, where a date may stand, the source clock check, named time zones). A fraction of a second (`CURRENT_TIMESTAMP(3)`), `CURRENT_TIME`, `CURTIME`, `UTC_TIME` and `SYSDATE` stay on MySQL. The port without routing is unchanged.
+
+- **`dbtrail port max-behind <server> [<seconds>|off]` says or sets a
+  server's lag limit from the terminal** (#2783). It takes whole seconds
+  (`300`) or a duration (`5m`, `1h30m`); `off` (or `0`) removes it, and with
+  no value it says the limit saved. A negative value, a fraction of a second
+  or anything else is refused with the forms it takes. A limit under 90
+  seconds is saved and the command says why it is not kept to the second.
+  It sends the limit alone, so the server's fresh or fast mode and LIKE
+  switch stay as they were. `dbtrail port status` now lists each server's
+  limit (`off` when there is none). See
+  [A lag limit per server](time-travel-sql.md#lag-limit).
+
+- **A comparison harness for PostgreSQL sources: same statement on the source and on the copy** (#2772). The new `internal/pgcompare` package sends a statement to a PostgreSQL source and to the copy of that source and says whether the two answers are the same, with the verdicts the MySQL comparison already uses (`EQUAL`, `DIFFERENT`, `NOT_ON_COPY`, `SOURCE_ERROR`, `INCONCLUSIVE`, `SKIPPED`). The copy is queried through the SQL sandbox with the snapshot's views, since it has no PostgreSQL-protocol port yet. An integration test takes a real snapshot and pins the verdict of 55 statements over numbers, text, booleans, dates, JSON, arrays and bytes, on PostgreSQL 14 to 17 in CI. Today 26 answer the same; the other 29 are refused or answered differently because the copy holds every column as text (#2755), and each of those lines is pinned as it is so the fix shows up as a failing expectation to move. Nothing changes for a running install.
+
+- **Engine Routing answers `DATE_FORMAT` and `DATEDIFF` on the copy** (#2611). Over a `DATE`, `DATETIME` or `TIMESTAMP` column, or `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` and `UTC_DATE()`, they are sent to the copy as `strftime` and `date_diff`, the rewrite the port without routing already had, so a report such as `SELECT DATE_FORMAT(created_at, '%Y-%m') AS month, COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL 30 DAY GROUP BY month ORDER BY month` no longer goes to MySQL. Sorting by such a call whose format writes texts of one length (`%Y-%m`, `%Y-%m-%d %H:%i`) stays on the copy; comparing its text with another string does not. Text columns, strings, placeholders, a name the statement aliases, `TIMESTAMPDIFF` and `TIMEDIFF` stay on MySQL.
+
 ## [0.131.0] - 2026-11-13
 
 - **"Goes at the next cleanup" follows the cleanup's own rule, and a failed
