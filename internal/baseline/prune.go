@@ -182,9 +182,12 @@ type PruneResult struct {
 	// (#2696): a destination that accepts uploads and refuses every read.
 	// Nothing that needed its answer is removed, nothing is sent again.
 	DestinationWriteOnly bool
-	// KeptPinned counts snapshots kept because a reader of this process is
-	// on that one snapshot now (PinSnapshot, #2678): a download, a SQL
-	// statement, an Explain. The rest of the folder is pruned as usual.
+	// KeptPinned counts snapshots kept because a reader is on that one
+	// snapshot now: one of this process (PinSnapshot, #2678: a download, a
+	// SQL statement, an Explain), or of any process that holds it
+	// (HoldSnapshot, #2675: an Iceberg export, a verify run, a full-table
+	// reconstruct, a cascade lookup). The rest of the folder is pruned as
+	// usual.
 	KeptPinned int
 	// Reading names the job of this process that reads older snapshots of
 	// this directory now (BeginRead, #2678), so this prune did nothing: a
@@ -563,6 +566,10 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// Sweep any ".<ts>.pruning" leftovers from a previous crashed cycle first —
 	// they are already invisible to discovery, but they still occupy disk.
 	sweepFailures, firstSweepErr := sweepPruningLeftovers(opts.LocalDir)
+	if !opts.DryRun {
+		// Records of reads whose snapshot is gone (#2675).
+		sweepHoldRecords(opts.LocalDir)
+	}
 	removedEmpty := sweepEmptySnapshotDirs(opts.LocalDir, pinnedNow(opts.LocalDir, time.Now()), time.Now(), opts.DryRun)
 
 	snaps, err := enumerateLocalSnapshots(opts.LocalDir)
@@ -694,6 +701,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 
 	if localOnly {
 		newest := computeNewestN(countable, opts.KeepNewest, now)
+		// The pair a check compares, which only this folder holds (#2691).
+		keepCheckPair(opts.LocalDir, keepers)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, 0, now)
 		res = restoredKept(res, nil)
 		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)
@@ -1044,7 +1053,17 @@ func removePlanned(opts PruneOptions, now time.Time, pruneNames []string, res Pr
 			res.KeptPinned++
 			continue
 		}
-		staged, err := removeSnapshot(opts.LocalDir, name)
+		// A reader of any process that holds this snapshot (HoldSnapshot,
+		// #2675) keeps it. The marker stays locked until the snapshot is out
+		// of its path, so a reader that comes after finds it gone.
+		unlock, held := lockForRemoval(filepath.Join(opts.LocalDir, name))
+		if held {
+			slog.Info("baseline prune: another reader, in this process or another one, is on this snapshot; it stays until that reader ends",
+				"dir", opts.LocalDir, "snapshot", name)
+			res.KeptPinned++
+			continue
+		}
+		staged, err := removeSnapshot(opts.LocalDir, name, unlock)
 		if !staged {
 			slog.Warn("baseline prune: could not remove snapshot; it will be retried next cycle",
 				"snapshot", name, "error", err)
@@ -1365,11 +1384,17 @@ var (
 // is harmless (invisible to readers) and swept next cycle.
 //
 // staged reports whether the rename happened, which is what decides whether
-// the snapshot left the listing; err may still be set when it did.
-func removeSnapshot(dir, name string) (staged bool, err error) {
+// the snapshot left the listing; err may still be set when it did. afterRename
+// runs once the rename has been tried, either way.
+func removeSnapshot(dir, name string, afterRename func()) (staged bool, err error) {
 	src := filepath.Join(dir, name)
 	stagedPath := filepath.Join(dir, "."+name+pruningSuffix)
-	if err := renameAside(src, stagedPath); err != nil {
+	err = renameAside(src, stagedPath)
+	// The marker lock (lockForRemoval) is let go as soon as the folder has
+	// moved or failed to: holding it through the delete below would keep a
+	// reader waiting only to learn the snapshot is gone.
+	afterRename()
+	if err != nil {
 		return false, fmt.Errorf("stage snapshot %q for removal: %w", name, err)
 	}
 	if err := removeAll(stagedPath); err != nil {

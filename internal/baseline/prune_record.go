@@ -137,8 +137,22 @@ type NotInDestination struct {
 	// S3 could not be asked about (#2696), not after a send that failed.
 	WaitsForAnswer bool `json:"waits_for_answer,omitempty"`
 	// NextSend, when set, is when the next send is tried: an hour after a
-	// round in which one failed (#2678). Absent: at the next cleanup.
+	// round in which one failed (#2678). Absent: at the next cleanup. Since
+	// #2691 each snapshot waits on its own, and NextSend is the earliest wait,
+	// set only when every snapshot sent again waits.
 	NextSend *time.Time `json:"next_send,omitempty"`
+	// Waiting names the snapshots among them whose send waits, each with
+	// when its wait ends (#2691); the others are sent at the next cleanup.
+	Waiting []SendWait `json:"waiting,omitempty"`
+}
+
+// SendWait is one snapshot's wait before it is sent again (#2691): an hour
+// after its send failed, or (ForAnswer) after it was sent while S3 could not
+// be asked about it (#2696).
+type SendWait struct {
+	Name      string    `json:"name"`
+	Until     time.Time `json:"until"`
+	ForAnswer bool      `json:"for_answer,omitempty"`
 }
 
 // RewriteNotInDestination replaces dir's record after the cleanup's resends

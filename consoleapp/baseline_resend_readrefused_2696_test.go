@@ -44,20 +44,25 @@ func TestResendOfNotAskedWaitsAnHour(t *testing.T) {
 		total = append(total, sends)
 		clock = clock.Add(5 * time.Minute)
 	}
-	if !slices.Equal(total, []int{3, 3, 3, 3, 3}) {
-		t.Fatalf("sends after each cycle %v, want 3 and then none within the hour", total)
+	// Each snapshot waits on its own (#2691): d, never sent, goes at the
+	// next cycle; none of the four is sent twice within its hour.
+	if !slices.Equal(total, []int{3, 4, 4, 4, 4}) {
+		t.Fatalf("sends after each cycle %v, want 3, then d alone, then none within the hour", total)
 	}
 	rec, ok, err := baseline.ReadNotInDestination(d)
 	if err != nil || !ok || rec.NextSend == nil || !rec.WaitsForAnswer || !rec.NextSend.Equal(time.Date(2026, 11, 12, 11, 0, 0, 0, time.UTC)) {
 		t.Fatalf("record during the wait %+v ok=%v err=%v: want next_send at 11:00 for a send S3 could not confirm", rec, ok, err)
 	}
-	if got := baseline.ResentUnconfirmed(d); !slices.Equal(got, []string{"a", "b", "c"}) {
-		t.Fatalf("noted as sent %v, want a, b, c", got)
+	if len(rec.Waiting) != 4 || !rec.Waiting[3].Until.Equal(time.Date(2026, 11, 12, 11, 5, 0, 0, time.UTC)) || !rec.Waiting[3].ForAnswer {
+		t.Fatalf("record during the wait names the waits %+v, want the four, d's ending at 11:05", rec.Waiting)
+	}
+	if got := baseline.ResentUnconfirmed(d); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
+		t.Fatalf("noted as sent %v, want a, b, c, d", got)
 	}
 	clock = time.Date(2026, 11, 12, 11, 1, 0, 0, time.UTC)
 	run()
-	if sends != 6 {
-		t.Fatalf("after the hour %d sends, want 6", sends)
+	if sends != 7 {
+		t.Fatalf("after the hour %d sends, want 7: a, b and c again, d still inside its hour", sends)
 	}
 }
 

@@ -2569,7 +2569,20 @@ error 1235, which names the construct and how to write it for the copy:
 | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `INTO OUTFILE` | drop the clause; the copy takes no locks and writes no files |
 | `MATCH ... AGAINST`, `BINARY x` | `ILIKE` or `regexp_matches`; compare the copy's way |
 | `0x10`, `0b101`, `x'41'`, `b'1'` | the number in decimal, `'\x41'::BLOB` |
-| `LIMIT 10, 5`, `_binary'x'`, `/*! ... */` | `LIMIT 5 OFFSET 10`, the string alone, the statement without the comment |
+| `_binary'x'`, `/*! ... */` | the string alone, the statement without the comment |
+| a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery (MySQL itself refuses it with error 1235) | the `LIMIT` in a derived table: `IN (SELECT a FROM (SELECT a FROM t LIMIT 2) AS d)` |
+
+`LIMIT offset, count` is written for the copy before it runs: `LIMIT 10, 5`
+is sent as `LIMIT 5 OFFSET 10`, the only spelling the copy reads, in the
+statement, in a subquery, in a CTE and on either side of a `UNION`, and in a
+prepared `LIMIT ?, ?` once its arguments are written in. The rows are the
+ones MySQL returns, offset 0 and an offset past the last row included
+(measured on MySQL 8.0.46). It is rewritten only when both are whole numbers
+of at most 9223372036854775807 with nothing but white space around the comma.
+Otherwise it is refused with error 1235 and the copy's spelling: a number
+past that (MySQL takes up to 18446744073709551615, the copy fails), a
+comment between the two, or a prepared argument that is not a whole number
+(MySQL reads a NULL offset as 0; this port does not guess it).
 
 Or turn on Engine Routing, and MySQL answers them. The list is of
 constructs only MySQL's SQL holds; it does not make the copy MySQL. Every
