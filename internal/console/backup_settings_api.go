@@ -223,6 +223,11 @@ type backupSettingsServerDTO struct {
 	// count in force too (KeepInForce, #2658) a snapshot goes only when it
 	// is past the count AND older than this.
 	DeleteAfterMinutes int `json:"delete_after_minutes,omitempty"`
+	// DeleteAfterSharedS3 says an age is set and does not reach this server
+	// (DeleteAfterMinutes is then 0) because its S3 prefix is also the
+	// destination of a writer that keeps its snapshots in another folder, or
+	// in none (#2675, AgePruneSharedS3). The way out is a prefix of its own.
+	DeleteAfterSharedS3 bool `json:"delete_after_shared_s3,omitempty"`
 	// NotInS3 is the last prune's count of old snapshots the S3 destination
 	// answered it does not have (baseline.NotInDestinationFile): the only
 	// copy, so they stay on this machine. NotInS3Error says the record would
@@ -362,6 +367,11 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	inForce := s.localRetentionOf(e.ID)
 	if e.BaselineDir != "" && e.BaselineS3 != "" {
 		dto.DeleteAfterMinutes = s.pruneRetainMinutes()
+		// The age does not reach a folder whose S3 prefix another folder's
+		// writer sends to (#2675): the loop leaves it out (prunePlan).
+		if dto.DeleteAfterMinutes > 0 && AgePruneSharedS3(s.cm.reg.List(), e.BaselineDir, e.BaselineS3, s.cm.defaultBaselineDir, s.cm.defaultBaselineS3) {
+			dto.DeleteAfterMinutes, dto.DeleteAfterSharedS3 = 0, true
+		}
 		// With no age set and no count in force, no prune refreshes the
 		// record: what it says is frozen, so it is not read (the card would
 		// show a stale count).
@@ -370,9 +380,12 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 				slog.Warn("console: the record of snapshots not at the destination could not be read", "server", e.ID, "dir", e.BaselineDir, "error", err)
 				dto.NotInS3Error = err.Error()
 			} else if ok {
-				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending, NotAsked: rec.NotAsked, ReadRefused: rec.ReadRefused, WaitsForAnswer: rec.WaitsForAnswer}
+				dto.NotInS3 = &notInS3DTO{At: rec.At.UTC().Format(time.RFC3339), Count: rec.Count, Names: rec.Names, Resending: rec.Resending, NotAsked: rec.NotAsked, ReadRefused: rec.ReadRefused, WaitsForAnswer: rec.WaitsForAnswer, NotAskedCount: rec.NotAskedCount, ReadRefusedCount: rec.ReadRefusedCount, CleanupQuestionRefused: rec.CleanupQuestionRefused}
 				if rec.NextSend != nil {
 					dto.NotInS3.NextSend = rec.NextSend.UTC().Format(time.RFC3339)
+				}
+				for _, w := range rec.Waiting {
+					dto.NotInS3.Waiting = append(dto.NotInS3.Waiting, sendWaitDTO{Name: w.Name, Until: w.Until.UTC().Format(time.RFC3339), ForAnswer: w.ForAnswer})
 				}
 			}
 		}
@@ -801,4 +814,22 @@ type notInS3DTO struct {
 	// sends, not a failure.
 	ReadRefused    []string `json:"read_refused,omitempty"`
 	WaitsForAnswer bool     `json:"waits_for_answer,omitempty"`
+	// NotAskedCount, ReadRefusedCount: how many those two lists name in all;
+	// the lists are cut like Names (#2701). Absent: the lists are whole.
+	NotAskedCount    int `json:"not_asked_count,omitempty"`
+	ReadRefusedCount int `json:"read_refused_count,omitempty"`
+	// CleanupQuestionRefused: the last send was refused because S3 would not say
+	// whether its cleanup is removing the folder, which needs s3:GetObject and
+	// s3:ListBucket while "Delete from S3 after" is set (#2701).
+	CleanupQuestionRefused bool `json:"cleanup_question_refused,omitempty"`
+	// Waiting are those whose send waits, each with when its wait ends
+	// (#2691); the others are sent at the next cleanup.
+	Waiting []sendWaitDTO `json:"waiting,omitempty"`
+}
+
+// sendWaitDTO is baseline.SendWait on the wire: Until RFC3339 UTC.
+type sendWaitDTO struct {
+	Name      string `json:"name"`
+	Until     string `json:"until"`
+	ForAnswer bool   `json:"for_answer,omitempty"`
 }

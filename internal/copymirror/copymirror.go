@@ -67,6 +67,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1071,8 +1072,15 @@ func (m *mirror) retain() error {
 	if err != nil {
 		return err
 	}
+	pinned := baseline.Pinned(m.cfg.Dir)
 	for i, s := range held {
 		if i < m.cfg.Keep {
+			continue
+		}
+		// A SQL statement of this process on it keeps it (#2675): a statement
+		// can last minutes, and two snapshots can land in that time. It goes
+		// in a later round, once nothing reads it.
+		if slices.Contains(pinned, s.name) {
 			continue
 		}
 		dir := filepath.Join(m.cfg.Dir, s.name)

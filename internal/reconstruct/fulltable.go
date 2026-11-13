@@ -1367,7 +1367,10 @@ func ReconstructTable(
 
 	// ── 1. Find the baseline snapshot ──────────────────────────────────────
 	// FindBaseline already logs a stale-fallback warning (#466) server-side.
-	baselinePath, snapshotTime, _, err := FindBaseline(ctx, cfg.BaselineSrc, schema, table, cfg.At)
+	// Held against the cleanup of any process until this table is written
+	// (#2675): `bintrail reconstruct` is a process of its own.
+	baselinePath, snapshotTime, _, releaseBaseline, err := FindBaselineHeld(ctx, cfg.BaselineSrc, schema, table, cfg.At)
+	defer releaseBaseline()
 	if err == nil {
 		rep.SourceSnapshotDir = localSnapshotDir(baselinePath)
 		rep.SourceSnapshot = snapshotOfTable(baselinePath)

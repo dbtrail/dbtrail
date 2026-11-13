@@ -230,13 +230,16 @@ func VerifyTable(ctx context.Context, cfg Config, schema, table string) (TableRe
 
 	// 3. Find the baseline at-or-before the read opened: one taken while the
 	// table was being read is newer than the snapshot it is compared with.
-	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, cfg.BaselineSource, schema, table, openedBy)
+	// Held against the cleanup of any process until this table is checked
+	// (#2675): `bintrail verify` is a process of its own.
+	baselinePath, snapshotTime, _, releaseBaseline, err := reconstruct.FindBaselineHeld(ctx, cfg.BaselineSource, schema, table, openedBy)
 	if err != nil {
 		if isNoBaseline(err) {
 			return inconclusive(res, "no baseline at-or-before the snapshot; reconstruct would omit never-touched rows"), nil
 		}
 		return res, fmt.Errorf("find baseline %s.%s: %w", schema, table, err)
 	}
+	defer releaseBaseline()
 	// Read the baseline's exact recorded binlog position so the delta fetch
 	// below can anchor on it instead of the imprecise snapshotTime DATETIME
 	// (#797). Best-effort: a read failure just means SincePos stays unset and

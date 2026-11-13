@@ -54,6 +54,11 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// On disk too: which ones go is worked out from the folder itself
+	// (baseline.KeptNow, #2675).
+	for h := 1; h <= 5; h++ {
+		writeKeepSnapshot(t, dir, at(h))
+	}
 	for _, h := range []int{1, 4} {
 		if err := baseline.MarkUploadHeld(dir, reconstruct.SnapshotDirName(at(h))); err != nil {
 			t.Fatal(err)
@@ -100,6 +105,15 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 		local = append(local, map[string]any{"time": at(h).Format(consoleTSFormat), "age_hours": h, "tables": []string{"shop.orders"}, "kinds": []string{"dir"}})
 	}
 	local[len(local)-1]["restored"] = true
+	// What the server answers for each (going, #2675): past the newest two,
+	// the restore's result excepted.
+	for i := 2; i < len(local)-1; i++ {
+		local[i]["going"] = true
+	}
+	// The 4-hour one is past the count and kept all the same (#2675): older
+	// than the newest two, younger than Delete by age. The server says
+	// going: false, and the page must not mark it; counting positions did.
+	local[len(local)-2]["going"] = false
 	local[len(local)-1]["restored_until"] = "2026-11-13 09:30:00"
 	raw, _ := json.Marshal(local)
 	script := renderHarnessJS + `
@@ -144,11 +158,12 @@ console.log(JSON.stringify({
 	t.Logf("no S3:   line %q, %d rows going, hover %q", got.Local.Line, got.Local.Chips, got.Local.Titles)
 	t.Logf("with S3: line %q, %d rows going, hover %q", got.S3.Line, got.S3.Chips, got.S3.Titles)
 
-	// No S3: of the six local snapshots past the newest two, five go: the
-	// one made 30 minutes ago included (no hour keeps it), the last
-	// restore's result not.
-	if got.Local.Chips != 5 || got.Local.Going != 5 {
-		t.Errorf("no S3: %d chips on %d rows, want 5: the 30-minute one and the four after it, not the restore's result", got.Local.Chips, got.Local.Going)
+	// No S3: of the six local snapshots past the newest two, four go: the
+	// one made 30 minutes ago included (no hour keeps it); not the 4-hour
+	// one, which the age keeps (#2675: counting positions marked it), nor
+	// the last restore's result.
+	if got.Local.Chips != 4 || got.Local.Going != 4 {
+		t.Errorf("no S3: %d chips on %d rows, want 4: the 30-minute one and the 1, 2 and 3-hour ones, not the one the age keeps (going false) nor the restore's result", got.Local.Chips, got.Local.Going)
 	}
 	for _, title := range got.Local.Titles {
 		if title != "Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next cleanup, which follows each new snapshot, never a table's only copy." {

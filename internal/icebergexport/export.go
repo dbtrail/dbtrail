@@ -513,10 +513,14 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 	if existing != nil && existing.CurrentSnapshot() != nil {
 		return nil, nil, none, fmt.Errorf("Iceberg table at %s holds data but no export cursor, so it was not written by this export; remove the table directory to load it from a baseline", existing.Location())
 	}
-	path, snapTime, stale, err := reconstruct.FindBaseline(ctx, d.cfg.BaselineSrc, schema, tbl, d.cfg.At)
+	// Held until the load below has read it (#2675): this export runs in a
+	// process of its own, and the daemon's cleanup of the folder would
+	// otherwise remove the snapshot under a long first load.
+	path, snapTime, stale, release, err := reconstruct.FindBaselineHeld(ctx, d.cfg.BaselineSrc, schema, tbl, d.cfg.At)
 	if err != nil {
 		return nil, nil, none, fmt.Errorf("no usable baseline snapshot for %s.%s under %s: %w", schema, tbl, d.cfg.BaselineSrc, err)
 	}
+	defer release()
 	res := loadResult{}
 	if stale.Stale() {
 		slog.Warn("iceberg export: seeding from an older snapshot", "schema", schema, "table", tbl, "detail", stale.Message)
@@ -1243,11 +1247,11 @@ func writeDelta(ctx context.Context, mem memory.Allocator, icetbl *table.Table, 
 
 // releasing hands ownership of every yielded batch to its consumer, the way
 // table.WriteRecords documents for the data path ("releases each RecordBatch
-// it consumes") and does internally with the same adapter. iceberg-go v0.6.0
-// does NOT wrap the equality-delete input the same way: WriteEqualityDeletes
-// retains each batch in its bin packer and releases that reference in the file
-// writer, so the producer's own reference is never dropped and one key array
-// per batch leaks for the life of the run. writer_test.go's checked allocator
+// it consumes") and does internally with the same adapter. iceberg-go (v0.6.0,
+// and still v0.7.0) does NOT wrap the equality-delete input the same way:
+// WriteEqualityDeletes retains each batch in its bin packer and releases that
+// reference in the file writer, so the producer's own reference is never
+// dropped and one key array per batch leaks for the life of the run. writer_test.go's checked allocator
 // pins this: a leak fails AssertSize, and a double release after an upstream
 // fix fails on the refcount, so either change is loud.
 func releasing(itr iter.Seq2[arrow.RecordBatch, error]) iter.Seq2[arrow.RecordBatch, error] {

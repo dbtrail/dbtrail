@@ -613,6 +613,25 @@ Notes:
     a `latest` already on the machine: `docker compose pull` without the
     profile does not refresh the images only this profile uses. Run
     `docker compose --profile baseline pull`.
+- **Sources with `explain_format=TREE` or `JSON`** (MySQL 9.x; `TREE` is
+  Percona Server 9.7's default). mydumper crashes on them with a
+  segmentation fault while it sizes tables, unless its own sessions use
+  `TRADITIONAL`. Step `baseline-quiet` asks the source for the variable in
+  every lock mode and, when it exists, writes `/dump/mydumper-session.cnf`
+  (in the `bintrail-dump` volume) with
+  `[mydumper_session_variables] explain_format = TRADITIONAL`; the dump step
+  passes it to mydumper with `--defaults-extra-file` and removes it when it
+  ends. The server's own setting is not changed. MariaDB and MySQL before
+  8.0.32 have no such variable and get no file: mydumper exits 1 on a session
+  variable the server does not know. That step runs as root so it can write
+  in the volume. If it cannot ask the source, it says so in its log and the
+  dump goes ahead without the file. It needs a `bintrail` image newer than
+  0.130.0; an older one writes nothing, and mydumper then crashes on such a
+  source with exit 139, which the dump step's log explains. Check
+  `BINTRAIL_TAG` and run `docker compose --profile baseline pull`, or set
+  `explain_format=TRADITIONAL` on the source. The file is removed when the
+  dump step exits; if that container is killed, the next run's
+  `baseline-quiet` removes it.
 - If the run fails with `service "baseline-dump" didn't complete
   successfully`, the cause (a mydumper error, a FATAL from the DSN/schema
   guards) is in `docker compose --profile baseline logs baseline-dump`.

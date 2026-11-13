@@ -78,7 +78,11 @@ func New(find FindBaselineFunc, resolver *metadata.Resolver, db *sql.DB) *Provid
 
 // BaselineChildren implements cascade.BaselineProvider.
 func (p *Provider) BaselineChildren(ctx context.Context, schema, table, fkCol, parentPK string, at time.Time, limit int) (cascade.BaselineLookup, bool, error) {
-	path, snap, stale, err := p.find(ctx, schema, table, at)
+	// Held against the cleanup of any process for this lookup (#2675): a
+	// cascade over an earlier moment reads older snapshots, and a CLI
+	// recovery is a process of its own.
+	path, snap, stale, release, err := reconstruct.FindHeld(ctx, reconstruct.FindFunc(p.find), schema, table, at)
+	defer release()
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			return cascade.BaselineLookup{}, false, nil // table not covered → Phase-1 only
