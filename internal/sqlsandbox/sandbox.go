@@ -468,6 +468,20 @@ type MayHaveChangedError struct{ Reason string }
 
 func (e *MayHaveChangedError) Error() string { return e.Reason }
 
+// BehindSourceError: the statement was not run because its server has a
+// limit on how far behind the source the copy may answer (#2777), and the
+// data the statement would read is further behind than that, or how far
+// behind it is cannot be told (Unknown). A decision about the copy's
+// freshness, not a fault of the copy: read routing sends the statement to
+// MySQL; a connection that does not route gets Reason as its error. Reason
+// is written for a MySQL client.
+type BehindSourceError struct {
+	Reason  string
+	Unknown bool
+}
+
+func (e *BehindSourceError) Error() string { return e.Reason }
+
 // QueryError: DuckDB ran (or tried to run) the statement inside the sandbox
 // and failed. Message is DuckDB's own text: a Permission Error for a path
 // outside the copy, an Out of Memory Error past the cap, a Binder Error for

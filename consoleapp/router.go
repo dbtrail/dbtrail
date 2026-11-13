@@ -269,7 +269,8 @@ func routerPortTLS(certName, cert, keyName, key string) (*shim.PortTLS, error) {
 }
 
 // routerFlashbackConfig is how the router's port serves: routing always on,
-// with no maximum copy age, and a busy copy answers error 1040. A server
+// with no maximum copy age (a server's own lag limit, #2777, is the copy's
+// to apply), and a busy copy answers error 1040. A server
 // that cannot route is answered from the copy alone (#2341).
 func routerFlashbackConfig(st routerSettings) flashbackConfig {
 	return flashbackConfig{
@@ -647,7 +648,7 @@ func routerMetricsOffLine(addr string, err error) string {
 func routerIgnoredEnv() []string {
 	var out []string
 	if v := os.Getenv("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE"); v != "" {
-		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE=%s is not applied: the router has no maximum copy age, an expensive read goes to the copy whatever the age of its snapshot", v))
+		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE=%s is not applied: the router has no maximum copy age, an expensive read goes to the copy whatever the age of its snapshot unless the server has a lag limit of its own (max_behind_source_seconds, PUT /api/servers/{id}/sql-mode)", v))
 	}
 	if v := os.Getenv("BINTRAIL_CONSOLE_FLASHBACK_LISTEN"); v != "" {
 		out = append(out, fmt.Sprintf("BINTRAIL_CONSOLE_FLASHBACK_LISTEN=%s is not applied: the router listens where BINTRAIL_ROUTER_LISTEN or --listen says, 127.0.0.1:3309 unless set. To keep answering on the old address, set BINTRAIL_ROUTER_LISTEN=%s", v, v))
@@ -841,7 +842,7 @@ func routerStartupLines(u routerStartup) string {
 	if u.MemoryErr != nil {
 		fmt.Fprintf(&b, "Router: the SQL memory saved in the web interface could NOT be read, so the default is used: %v\n", u.MemoryErr)
 	}
-	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot. When every worker is busy such a statement waits its turn, in the order it arrived, %s",
+	rule := fmt.Sprintf("SELECTs with plan cost >= %.0f or a full scan over >= %d rows (on a MariaDB source, also joins that read that many rows in all) run on the copy, whatever the age of its snapshot unless the server has a lag limit of its own (max_behind_source_seconds). When every worker is busy such a statement waits its turn, in the order it arrived, %s",
 		u.Cfg.RoutePolicy.CostThreshold, u.Cfg.RoutePolicy.ScanRows, routerWaitText(u.MaxWait))
 	if u.Cfg.RouteReadOnly {
 		b.WriteString("Router: Engine Routing is read-only (--route-read-only): reads go to each server's source MySQL with that server's forwarding account; a server that has none is not forwarded for and is answered from the copy alone, since the account DBTrail captures with is never used; " + rule + ". A statement that is not a read is refused and never sent to the source. The check reads the statement's text: what a stored function does when a SELECT calls it is up to that account's grants.\n")

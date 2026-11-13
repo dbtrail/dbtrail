@@ -498,6 +498,58 @@ func (c *copyAges) captureRead(id string, sample captureSample, err error, why s
 	s.capture, s.captureHave, s.captureFailed = sample, true, false
 }
 
+// knownCut is the instant and least event id remembered for server id's set
+// of snapshots key, ok false when none is (#2777).
+func (c *copyAges) knownCut(id, key string) (time.Time, uint64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.by[id]
+	if s == nil {
+		return time.Time{}, 0, false
+	}
+	cut, ok := s.cut[key]
+	return cut, s.cutID[key], ok
+}
+
+// keepCut remembers what the index said of server id's set of snapshots key,
+// read for a statement held to its lag limit (#2777), bounded like the cuts
+// resolve keeps. Answers that wait on the same set are left for resolve.
+func (c *copyAges) keepCut(id, key string, cut time.Time, cutID uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.server(id)
+	if _, ok := s.cut[key]; !ok && len(s.cut) >= copyAgesCutKeep {
+		clear(s.cut)
+		clear(s.cutID)
+	}
+	s.cut[key], s.cutID[key] = cut, cutID
+}
+
+// sampleSince is server id's last good capture sample when it was read at or
+// after since (#2777).
+func (c *copyAges) sampleSince(id string, since time.Time) (captureSample, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.by[id]
+	if s == nil || !s.captureHave || s.capture.readAt.Before(since) {
+		return captureSample{}, false
+	}
+	return s.capture, true
+}
+
+// keepSample records a capture sample read for a statement held to its lag
+// limit (#2777): the status document reads the same one, so the two never
+// disagree on capture's state. A sample older than the one kept is dropped.
+func (c *copyAges) keepSample(id string, sample captureSample) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.server(id)
+	if s.captureHave && sample.readAt.Before(s.capture.readAt) {
+		return
+	}
+	s.capture, s.captureHave, s.captureFailed = sample, true, false
+}
+
 // captureReadEvery is how old a server's capture sample may be before
 // resolve reads it again: the status document, which anyone can ask for,
 // must not turn into one index read per request.

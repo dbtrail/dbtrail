@@ -852,9 +852,13 @@ The decision, in order, for every statement:
    (`copy_refused`). A connection that set `sql_select_limit` at or under
    the cap asked for the cut, and the copy answers it as before. On a
    **MariaDB** source this is seen for a table or an index read whole.
-6. The age of the copy is not checked. A plan the copy should take goes on
-   to the next step whatever the age of the copy's snapshot (see
-   [No maximum copy age](#no-maximum-copy-age) below).
+6. The age of the copy is not checked by default. A plan the copy should
+   take goes on to the next step whatever the age of the copy's snapshot,
+   unless the server has a lag limit of its own: then, once the copy knows
+   which tables the statement reads, a statement whose data would be further
+   behind the source than the limit goes to MySQL (see
+   [No maximum copy age](#no-maximum-copy-age) and
+   [A lag limit per server](#lag-limit) below).
 7. The session. MySQL answers a statement under the connection's session
    settings (its time zone, its SQL mode and so on); the copy answers the
    same only when it runs under the same ones. So before a statement goes
@@ -1013,10 +1017,12 @@ asked:
 <a id="past-the-limit-tables-that-have-not-changed"></a>
 #### No maximum copy age
 
-There is no limit on how old the copy may be. With Engine Routing on, an
-expensive read goes to the copy whatever the age of its snapshot. Earlier
-versions had a limit (`--route-max-copy-age`) and, past it, a check of which
-tables had changed since their snapshot. Both are gone.
+By default there is no limit on how old the copy may be. With Engine
+Routing on, an expensive read goes to the copy whatever the age of its
+snapshot. Earlier versions had a limit for every server (`--route-max-copy-age`)
+and, past it, a check of which tables had changed since their snapshot. Both
+are gone. A server can have a lag limit of its own, off unless it is saved
+([A lag limit per server](#lag-limit) below).
 
 **Fresh mode, the default: the copy answers with what capture has indexed.**
 A server answers in fresh mode unless Fast is saved for it.
@@ -1131,8 +1137,77 @@ asynchronous replica. Its age is a number to watch, not a rule:
   `_diff` schemas are not counted here, as they are not in the statement
   counts.
 
-If an application cannot read a result as far behind as capture, have it
-connect straight to MySQL and not through this port.
+If an application cannot read a result as far behind as capture, give its
+server a lag limit (below), or have it connect straight to MySQL and not
+through this port.
+
+<a id="lag-limit"></a>
+#### A lag limit per server
+
+A server can have a limit on how far behind the source the copy may answer,
+in seconds. It is off by default (0), and then nothing changes: the copy
+answers whatever its lag. With a limit, a statement that would read the
+copy's tables is answered there only if the data it would read is at most
+that far behind the source. Past it:
+
+- on a routed connection, MySQL answers the statement, counted under the
+  reason `copy_behind_source` in `SHOW ROUTER STATUS` and on the MySQL
+  clients page;
+- on a connection that does not route (`<server>@copy`, or Engine Routing
+  off), nobody else can answer it, so the client gets error 1105 with the
+  lag and the limit: `the copy is 7201 s behind the source, more than this
+  server's limit of 300 s (max_behind_source_seconds), so it does not answer
+  this statement`.
+
+Save it with the web interface's API, beside the server's other choices for
+the port (there is no control for it on the page yet):
+
+```sh
+curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: application/json' \
+  http://127.0.0.1:8090/api/servers/7f4d577430b48821/sql-mode \
+  -d '{"max_behind_source_seconds": 300}'
+```
+
+`0` removes it. A negative number, a fraction, or more than a year
+(31536000) is refused. The server given on the command line has no entry of
+its own and cannot have one. The limit is read for every statement, so a
+change applies to open connections within the few seconds the router takes
+to read the servers file again; no connection is closed. `SHOW ROUTER STATUS`
+shows it as `max_behind_source_seconds` (`off` when there is none), and the
+server list (`GET /api/servers`) as `sql_max_behind_source_seconds`.
+
+The lag is the number `behind_source_seconds` reports after an answer, read
+like MySQL's `Seconds_Behind_Source`, measured before the statement runs:
+
+- What the data reaches. In fresh mode, when every table the statement reads
+  has its tail, the tails' instant: a server whose snapshot is hours old and
+  whose tails are caught up is within the limit. Otherwise the instant the
+  snapshot was cut at, read once per snapshot from the index; the older of
+  the two when a statement reads both.
+- Capture. When capture is caught up with the source and the data holds
+  every event the index holds, the lag is 0: a quiet source whose data is
+  old but still current is answered from the copy. Otherwise it is how far
+  the data is from the newest indexed event, or from now when capture is not
+  caught up.
+- Capture's state is read from the index at most every 30 seconds, and is
+  counted as caught up for a minute after its last stamp. So for up to about
+  a minute and a half after capture stops, a statement can still be answered
+  from the copy, and with capture healthy the events of the last 30 seconds
+  can be missing from data that reads 0 behind. A source whose clock runs
+  ahead of the router's reads as that much less behind. Pick a limit of a few
+  minutes or more: under about a minute and a half it is not kept to the
+  second.
+- When the router cannot read the server's index, its log warns about it
+  now and then, so a copy that stops answering under the limit is not
+  silent.
+- When the lag cannot be told (the router cannot reach the server's index, a
+  snapshot whose cut was not recorded, a copy read through the moving
+  `current` link), it is not within any limit: MySQL answers, counted under
+  `copy_age_unknown`, and a connection that does not route gets the reason.
+  A PostgreSQL source has no caught-up stamp, so its lag is always the
+  data's age.
+- The change log (`events`) is history, not the tables' state: a statement
+  that reads none of the copy's tables is not held to the limit.
 
 What this is and is not:
 
@@ -2381,9 +2456,13 @@ The router does the counting, so the numbers are read from the router:
   lost or could not be opened, and the client got error 2006), and
   `read_only` (refused: not a read, on a read-only port, which is how the
   router starts unless told otherwise; the client got error 1290).
-  Four more names are part of the set and are not counted by the port any
-  more. `copy_age_unknown`, `copy_too_old` and `tables_unchanged` belonged
-  to the maximum copy age, which no longer exists. `routing_off` is listed
+  `copy_behind_source` (MySQL answered: the copy was further behind the
+  source than the server's [lag limit](#lag-limit)) and `copy_age_unknown`
+  (MySQL answered: the server has a lag limit and how far behind the copy
+  is could not be told) are counted only for a server with a lag limit.
+  Three more names are part of the set and are not counted by the port any
+  more. `copy_too_old` and `tables_unchanged` belonged to the maximum copy
+  age for every server, which no longer exists. `routing_off` is listed
   for completeness: a connection made while routing is off is not routed, so
   it counts no decision. A copy that never answers shows up as `copy_refused`
   or `session_differs` climbing while
@@ -2855,9 +2934,10 @@ What changes on an upgrade:
   Anywhere else, start `bintrail-console router` yourself.
 - **`--route-max-copy-age` / `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` no longer
   turns Engine Routing on.** It only prints a WARNING. Engine Routing is the
-  saved `routing` setting, and it is off until that is turned on. There is no
+  saved `routing` setting, and it is off until that is turned on. It sets no
   maximum copy age any more: with routing on, an expensive read goes to the
-  copy whatever the age of its snapshot.
+  copy whatever the age of its snapshot, unless the server has a
+  [lag limit](#lag-limit) of its own.
 - **`--route-read-only`, `--route-cost-threshold`, `--route-scan-rows` and
   `--sql-port-max-rows` given to `watch` no longer apply.** `watch` prints a
   WARNING that names them. Give them to the router, on its command line or

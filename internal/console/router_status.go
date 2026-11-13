@@ -35,6 +35,13 @@ func (s *Server) RouterStatus(ctx context.Context, serverID string, sql *SQLOnCo
 			[2]string{"copy_snapshot", at.UTC().Format(time.RFC3339)},
 			[2]string{"copy_age_seconds", strconv.FormatInt(int64(time.Since(at).Seconds()), 10)})
 	}
+	// The server's lag limit (#2777), so a client that sees MySQL answer
+	// with the copy available can tell why: "off" when there is none.
+	limit := "off"
+	if d := s.maxBehindSourceOf(serverID); d > 0 {
+		limit = strconv.FormatInt(int64(d.Seconds()), 10)
+	}
+	out = append(out, [2]string{"max_behind_source_seconds", limit})
 	// The connection's own last statement (#2369): the copy's age above is
 	// the newest snapshot's, this is what the statement actually read.
 	out = append(out, sql.lastAnswerStatus(ctx)...)

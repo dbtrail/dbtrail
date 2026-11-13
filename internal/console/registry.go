@@ -121,6 +121,15 @@ type ServerEntry struct {
 	// SetSQLMode writes it. The port reads it when a connection
 	// opens (FlashbackTarget).
 	SQLLikeIgnoresCase bool `yaml:"sql_like_ignores_case,omitempty"`
+	// SQLMaxBehindSource is, in seconds, how far behind the source the data
+	// of a statement on the copy may be for the copy to answer it on the SQL
+	// port (#2777), read like MySQL's Seconds_Behind_Source. Absent or 0 is
+	// no limit: the copy answers whatever its lag, as before. Past it a
+	// routed statement goes to MySQL and one on a connection that does not
+	// route is refused. Registry-owned like SQLLikeIgnoresCase: only
+	// SetSQLMode writes it. Read per statement, so a change applies to open
+	// connections.
+	SQLMaxBehindSource int64 `yaml:"sql_max_behind_source_seconds,omitempty"`
 	// PortUser and PortPassword are the server's application login on the
 	// MySQL-protocol port: a username and password that open the port for
 	// THIS server only, so a proxy in front of the application (ProxySQL)
@@ -810,6 +819,7 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	e.Hidden = nil                      // SetHidden is the only writer (#2529)
 	e.SQLMode, e.SQLFresh = "", false   // SetSQLFresh is the only writer (#2546)
 	e.SQLLikeIgnoresCase = false        // SetSQLMode is the only writer
+	e.SQLMaxBehindSource = 0            // SetSQLMode is the only writer (#2777)
 	e.PortUser, e.PortPassword = "", "" // SetPortLogin is the only writer
 	e.LocalKeepSavedWith = keepMark(e)  // registry-owned (#2675)
 	r.file.Servers = append(r.file.Servers, e)
@@ -882,6 +892,8 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 		e.SQLMode, e.SQLFresh = old.SQLMode, old.SQLFresh
 		// And the LIKE switch: SetSQLMode is its only writer.
 		e.SQLLikeIgnoresCase = old.SQLLikeIgnoresCase
+		// And the copy's lag limit (#2777): SetSQLMode is its only writer.
+		e.SQLMaxBehindSource = old.SQLMaxBehindSource
 		// And the application login: SetPortLogin is its only writer.
 		e.PortUser, e.PortPassword = old.PortUser, old.PortPassword
 		// Within MySQL and MariaDB the Source type is registry-owned too:
@@ -998,10 +1010,17 @@ func (r *Registry) SetSQLFresh(id string, on bool) (ServerEntry, error) {
 
 // SetSQLMode saves entry id's choices for its statements on the SQL port in
 // one write: the fresh mode when fresh is not nil (as SetSQLFresh), and
-// whether statements with LIKE go to the copy when like is not nil. It is the
-// only writer of ServerEntry.SQLLikeIgnoresCase. Either both are saved or
-// neither is.
-func (r *Registry) SetSQLMode(id string, fresh, like *bool) (ServerEntry, error) {
+// whether statements with LIKE go to the copy when like is not nil, and the
+// copy's lag limit in seconds when maxBehind is not nil (0 removes it). It is
+// the only writer of ServerEntry.SQLLikeIgnoresCase and
+// ServerEntry.SQLMaxBehindSource. Either all that is given is saved or none
+// of it is.
+func (r *Registry) SetSQLMode(id string, fresh, like *bool, maxBehind *int64) (ServerEntry, error) {
+	if maxBehind != nil {
+		if err := checkMaxBehindSource(*maxBehind); err != nil {
+			return ServerEntry{}, err
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.readOnly {
@@ -1016,6 +1035,9 @@ func (r *Registry) SetSQLMode(id string, fresh, like *bool) (ServerEntry, error)
 		}
 		if like != nil {
 			r.file.Servers[i].SQLLikeIgnoresCase = *like
+		}
+		if maxBehind != nil {
+			r.file.Servers[i].SQLMaxBehindSource = *maxBehind
 		}
 		if err := r.save(); err != nil {
 			r.file.Servers[i] = old // roll back

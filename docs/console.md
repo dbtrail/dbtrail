@@ -2195,7 +2195,8 @@ server's statements instead of serving without it.
 - `BINTRAIL_CONSOLE_ROUTE_MAX_COPY_AGE` (`watch` only): same as
   `--route-max-copy-age`. It no longer turns Engine Routing on and only prints
   a warning at startup. Engine Routing is a saved setting, on from the moment
-  the port is first turned on, and there is no maximum copy age any more. See
+  the port is first turned on, and it sets no maximum copy age any more (a
+  server can have a lag limit of its own, `max_behind_source_seconds`). See
   [time-travel-sql.md](time-travel-sql.md#engine-routing-mysql-answers-the-copy-takes-the-heavy-reads).
 - `BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD`, `BINTRAIL_CONSOLE_ROUTE_SCAN_ROWS`
   and `BINTRAIL_CONSOLE_ROUTE_READ_ONLY` (`router`): the router's
