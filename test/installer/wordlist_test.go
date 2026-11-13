@@ -8,10 +8,14 @@ import (
 	"testing"
 )
 
-// The promise the installer, the README and the site's start page all make
-// where DBTrail does not know the server yet (#1799, #1807). One sentence,
-// word for word the same on every surface.
-const promise = "DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want."
+// The promise the installer's banner makes, word for word the headline of the
+// README's header and of the dbtrail.com home page (#2637; before it, the undo
+// sentence of #1799 and #1807).
+const promise = "Heavy MySQL queries, from minutes to seconds."
+
+// The undo sentence the banner made before #2637. The README still says it
+// where it describes undo; the installer's banner must not lead with it again.
+const oldPromise = "DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want."
 
 // The start page every onboarding surface points at.
 const startPage = "https://www.dbtrail.com/docs/quickstart/"
@@ -255,6 +259,9 @@ func cleanRunSpeaksTheWordList(t *testing.T, env ...string) {
 		"Find it",
 		"I ran it",
 		"Read database now",
+		"MySQL clients",
+		"Turn on",
+		"5. Heavy query.",
 		"a MySQL login that can create users",
 		"Docker volumes",
 		"docker compose down",
@@ -263,20 +270,32 @@ func cleanRunSpeaksTheWordList(t *testing.T, env ...string) {
 			t.Errorf("the clean install does not say %q:\n%s", want, r.out)
 		}
 	}
+	// The five steps end on the heavy query, as the start page's do: no step
+	// after it, and none of the earlier story's undo step.
+	if i, j := strings.Index(r.out, "5. Heavy query."), strings.Index(r.out, "4. MySQL port."); j < 0 || i < j {
+		t.Errorf("the heavy query is not the step after the MySQL port:\n%s", r.out)
+	}
+	for _, gone := range []string{oldPromise, "  6. ", "First change", "with an Undo"} {
+		if strings.Contains(r.out, gone) {
+			t.Errorf("the clean install still says %q:\n%s", gone, r.out)
+		}
+	}
 	if strings.Contains(r.out, "github.com/dbtrail") {
 		t.Errorf("the clean install points at the GitHub repository instead of the start page:\n%s", r.out)
 	}
 }
 
-// The README makes the same promise, and not the older one.
+// The README makes the same promise, in its header. It is the header image's
+// headline and the first words of that image's alt text, which is where this
+// finds it.
 func TestPromise_theREADMEMakesTheSamePromise(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	readme := string(b)
-	if !strings.Contains(readme, promise) {
-		t.Errorf("README.md does not make the promise word for word: %q", promise)
+	if !strings.Contains(readme, `alt="`+promise) {
+		t.Errorf("README.md's header image does not open with the promise word for word: %q", promise)
 	}
 	if !strings.Contains(readme, startPage) {
 		t.Errorf("README.md does not link the start page %s", startPage)

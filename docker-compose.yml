@@ -1,9 +1,12 @@
-# Bintrail Docker Compose — the zero-friction quickstart.
+# DBTrail with Docker Compose: heavy MySQL queries, answered in seconds from a
+# copy of your tables that follows your binlog.
 #
 #   1. docker compose up -d
-#   2. Open http://127.0.0.1:8090 and create your console username + password
-#   3. In the console: "+ Add server" — paste the MySQL to watch; bintrail
-#      runs the preflight, provisions an index for it, and starts streaming.
+#   2. Open http://127.0.0.1:8090 and create a username and password.
+#   3. Press "+ Add server" and connect your MySQL.
+#   4. On Snapshots, press "Read database now" to take the first copy.
+#   5. Copy the mysql line from Settings, MySQL clients, and run a heavy query.
+#   Every step in detail: https://www.dbtrail.com/docs/quickstart/
 #
 # No .env needed. On first run the console asks you to create a username and
 # password (it persists in the bintrail-state volume); every later visit is a

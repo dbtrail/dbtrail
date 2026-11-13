@@ -33,9 +33,9 @@ RELEASE_API="https://api.github.com/repos/dbtrail/dbtrail/releases/latest"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/healthz"
 CONSOLE_URL="http://127.0.0.1:${PORT}"
 START_PAGE="https://www.dbtrail.com/docs/quickstart/"
-# The promise, word for word the same in this banner, the README and the start
-# page (#1807); test/installer pins it.
-PROMISE="DBTrail keeps every change on your MySQL server, before and after, and writes the SQL that undoes the ones you didn't want."
+# The promise, word for word the headline of the README's header and of the
+# dbtrail.com home page (#2637); test/installer pins it.
+PROMISE="Heavy MySQL queries, from minutes to seconds."
 
 # ── color capability detection ──────────────────────────────────────────
 # Four tiers so the sunset gradient degrades gracefully: 24-bit truecolor →
@@ -602,8 +602,11 @@ if [ -z "$ready" ]; then
 fi
 
 # ── 5. next steps — the whole point of this script ──────────────────────
-# The same four steps, in the same words, as the start page (#1807), and only
-# what the merged code does. The sentences a person reads here follow the
+# The same five steps as the start page, ending on the heavy query (#1807,
+# #2637), and only what the release this installs does: in it the MySQL port
+# starts off, and step 4 still reads right once it starts on, since the button
+# is pressed only when the port is off. No port number is said: 3309 can be
+# taken, and then it is not published. The sentences a person reads here follow the
 # first run's closed word list (test/installer reads it from the walk's
 # scoreboard); commands may say anything, since they are copied, not read.
 say ""
@@ -620,11 +623,16 @@ say "     shows the SQL that creates a user for DBTrail: run it on your MySQL wi
 say "     that login, then press I ran it. DBTrail checks the rest by itself."
 say "     Your MySQL runs on this same machine? Use host ${B}host.docker.internal${RST}"
 say "     (on Linux, that MySQL must listen on more than 127.0.0.1)."
-say "  ${B}3. First change.${RST} Change a row on your MySQL. It shows on the Overview"
-say "     within a minute, with an Undo that writes the SQL to reverse it."
-say "  ${B}4. First copy.${RST} On Snapshots, press Read database now. DBTrail reads your"
-say "     tables once, as Parquet files you open in DuckDB; the start page below"
-say "     shows how to query them."
+say "  ${B}3. First copy.${RST} On Snapshots, press Read database now. DBTrail reads every"
+say "     table once, with a short lock to read them at one moment, so pick a quiet time."
+say "  ${B}4. MySQL port.${RST} On Settings, MySQL clients, press Turn on if the port is off."
+say "     Copy the mysql line it shows, and keep the password: it is shown only once."
+if [ -n "${SQLPORT_SKIP:-}" ]; then
+  say "     The port is not published on this machine yet (see above): add its 'ports:' line first."
+fi
+say "  ${B}5. Heavy query.${RST} Run that mysql line in a terminal, then a total or a ranking"
+say "     over one of your big tables. DBTrail answers it from the copy, without"
+say "     slowing down your MySQL. The start page below has one to try."
 say ""
 if [ -n "$CLI" ]; then
   say "${B}Or from this terminal${RST}, with no browser. The same steps as commands:"

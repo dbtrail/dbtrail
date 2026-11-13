@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The installer, `--help` and the first lines of the docs open with the
+  heavy queries** (#2637). The installer's banner now says "Heavy MySQL
+  queries, from minutes to seconds.", the headline of the README and of
+  dbtrail.com, instead of the undo sentence, and its next steps are the start
+  page's five: sign in, connect, take the first copy, the MySQL port, a heavy
+  query. The undo step is gone from that list; no step names a port number,
+  since 3309 can be taken. `bintrail --help` and `bintrail-console --help`
+  open with what each binary is and link the start page; the console's no
+  longer calls itself a read-only web interface, which `watch` and `router`
+  are not. The `bintrail-console` package description, the header of
+  `docker-compose.yml` and the first lines of `docs/quickstart.md` and
+  `docs/guide.md` follow. `bintrail agent` is hidden from `--help` and from
+  the command table in `docs/install.md`: the endpoint in its examples does
+  not resolve. It still runs when called by name. The README's 30-second demo
+  moved from Install to the `AS OF` line, which is what it shows, and
+  `docs/bintrail-spec.md`, a historical design note, is removed.
+
 - **The installer installs one release and writes it down** (#2638).
   `install.sh` took `docker-compose.yml` from `main` and left every image on
   `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
