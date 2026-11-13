@@ -79,16 +79,16 @@ func TestVeto_nowKeywords_2611(t *testing.T) {
 // or a comment.
 func TestForCopy_nowKeywords_2611(t *testing.T) {
 	for stmt, want := range map[string]string{
-		"SELECT CURRENT_TIMESTAMP":   "SELECT now()",
-		"SELECT CURRENT_TIMESTAMP()": "SELECT now()",
-		"SELECT current_timestamp ( )": "SELECT now ( )",
-		"SELECT LOCALTIME, LOCALTIMESTAMP, LOCALTIME(), LOCALTIMESTAMP()": "SELECT now(), now(), now(), now()",
-		"SELECT CURRENT_DATE, CURRENT_DATE()":                             "SELECT curdate(), curdate()",
-		"SELECT * FROM `t` WHERE `d` >= CURRENT_DATE - INTERVAL 7 DAY":    `SELECT * FROM "t" WHERE "d" >= curdate() - INTERVAL 7 DAY`,
+		"SELECT CURRENT_TIMESTAMP":                                                "SELECT now()",
+		"SELECT CURRENT_TIMESTAMP()":                                              "SELECT now()",
+		"SELECT current_timestamp ( )":                                            "SELECT now ( )",
+		"SELECT LOCALTIME, LOCALTIMESTAMP, LOCALTIME(), LOCALTIMESTAMP()":         "SELECT now(), now(), now(), now()",
+		"SELECT CURRENT_DATE, CURRENT_DATE()":                                     "SELECT curdate(), curdate()",
+		"SELECT * FROM `t` WHERE `d` >= CURRENT_DATE - INTERVAL 7 DAY":            `SELECT * FROM "t" WHERE "d" >= curdate() - INTERVAL 7 DAY`,
 		"SELECT * FROM t WHERE ts >= CURRENT_TIMESTAMP/* x */() - INTERVAL 1 DAY": "SELECT * FROM t WHERE ts >= now/* x */() - INTERVAL 1 DAY",
 		"SELECT `current_date`, t.current_date, t . current_date FROM t":          `SELECT "current_date", t.current_date, t . current_date FROM t`,
-		"SELECT 'CURRENT_DATE', 1 /* LOCALTIME */": "SELECT 'CURRENT_DATE', 1 /* LOCALTIME */",
-		"SELECT current_dates, localtimes FROM t":  "SELECT current_dates, localtimes FROM t",
+		"SELECT 'CURRENT_DATE', 1 /* LOCALTIME */":                                "SELECT 'CURRENT_DATE', 1 /* LOCALTIME */",
+		"SELECT current_dates, localtimes FROM t":                                 "SELECT current_dates, localtimes FROM t",
 	} {
 		got, why := ForCopyOpts(stmt, clockOpts)
 		if why != "" {
@@ -120,13 +120,13 @@ func TestForCopy_nowKeywords_2611(t *testing.T) {
 // apply to them as to NOW() and CURDATE().
 func TestCallsNow_nowKeywords_2611(t *testing.T) {
 	for stmt, want := range map[string]bool{
-		"SELECT CURRENT_TIMESTAMP":                              true,
+		"SELECT CURRENT_TIMESTAMP":                                 true,
 		"SELECT * FROM t WHERE d >= CURRENT_DATE - INTERVAL 1 DAY": true,
-		"SELECT LOCALTIME()":                                    true,
-		"SELECT LOCALTIMESTAMP":                                 true,
-		"SELECT `current_date` FROM t":                          false,
-		"SELECT t.current_timestamp FROM t":                     false,
-		"SELECT 'CURRENT_DATE'":                                 false,
+		"SELECT LOCALTIME()":                                       true,
+		"SELECT LOCALTIMESTAMP":                                    true,
+		"SELECT `current_date` FROM t":                             false,
+		"SELECT t.current_timestamp FROM t":                        false,
+		"SELECT 'CURRENT_DATE'":                                    false,
 	} {
 		if got := CallsNow(stmt); got != want {
 			t.Errorf("CallsNow(%q) = %v, want %v", stmt, got, want)
