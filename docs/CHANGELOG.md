@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A reader in another process keeps the snapshot it reads** (#2675). The
+  readers the cleanup waits for were known only inside the process that runs
+  them, so `bintrail export iceberg`, `bintrail verify` and `bintrail
+  reconstruct` lost an older snapshot to the cleanup of `watch` while they
+  read it, and failed. Each now holds the snapshot it reads with a shared lock
+  on that snapshot's `_SUCCESS` file (the first load of each table for the
+  export; each table checked, and every pair's snapshots for the default
+  check, for verify; each table of a full-table run for reconstruct; each
+  lookup of a cascade recovery), and the cleanup of any process takes the
+  file exclusively right before it removes a snapshot: when it cannot, the
+  snapshot stays and the rest of the folder is cleaned. The lock needs only
+  read access and ends with the process, killed included. A reader that
+  reaches its snapshot just as it is removed looks it up once more, and
+  twice fails with "the snapshot of <schema>.<table> was removed by the
+  cleanup twice while this read started; run it again". Not covered: a
+  snapshot with no `_SUCCESS` file, one read from S3, and a DuckDB session of
+  your own over an older snapshot's `views.sql`.
+
 - **Engine Routing keeps `LEFT` and `RIGHT` with a negative length on MySQL** (#2652). `LEFT('abc', -1)` is `''` on MySQL and `'ab'` on the copy, and `RIGHT('abc', -1)` is `''` and `'bc'`, with no error on either side. `LEFT` and `RIGHT` now go to the copy only when the length is a whole number written in the statement; a length from a column, a placeholder or an expression goes to MySQL, since it may be negative on some row. A length of 0 or more, past the end of the text too, agrees on both and still goes to the copy.
 - **Engine Routing keeps a statement with a Unicode space outside its strings on MySQL** (#2652). MySQL reads a no-break space (U+00A0), an ideographic space (U+3000), a zero-width space (U+200B) and the other Unicode spaces the copy takes for white space as part of a name. Over a table with columns `a`, `b` and one named `a`, no-break space, `b`, writing that last name unquoted returned that column on MySQL and column `a` under the alias `b` on the copy: another value, with no error. Such a statement now runs on MySQL. Where the character made the statement an error on MySQL, for example a no-break space between `ROUND` and its parenthesis, the statement already went to MySQL, because MySQL could not explain it. Inside a string or a quoted name the character is the same text on both sides, with one exception that also goes to MySQL: the copy turns it into a plain space wherever it does not find a quote around it, and a quote inside a `/* */` comment or a `$` makes it find the quotes elsewhere, so `SELECT /* ' */ 'a b'` written with a no-break space was `'a b'` with a plain space on the copy. The plain port without Engine Routing is unchanged.
 - **The installer, `--help` and the first lines of the docs open with the

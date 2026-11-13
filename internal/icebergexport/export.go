@@ -491,10 +491,14 @@ func (d *deps) firstLoad(ctx context.Context, schema, tbl string, tm *metadata.T
 	if existing != nil && existing.CurrentSnapshot() != nil {
 		return nil, nil, none, fmt.Errorf("Iceberg table at %s holds data but no export cursor, so it was not written by this export; remove the table directory to load it from a baseline", existing.Location())
 	}
-	path, snapTime, stale, err := reconstruct.FindBaseline(ctx, d.cfg.BaselineSrc, schema, tbl, d.cfg.At)
+	// Held until the load below has read it (#2675): this export runs in a
+	// process of its own, and the daemon's cleanup of the folder would
+	// otherwise remove the snapshot under a long first load.
+	path, snapTime, stale, release, err := reconstruct.FindBaselineHeld(ctx, d.cfg.BaselineSrc, schema, tbl, d.cfg.At)
 	if err != nil {
 		return nil, nil, none, fmt.Errorf("no usable baseline snapshot for %s.%s under %s: %w", schema, tbl, d.cfg.BaselineSrc, err)
 	}
+	defer release()
 	res := loadResult{}
 	if stale.Stale() {
 		slog.Warn("iceberg export: seeding from an older snapshot", "schema", schema, "table", tbl, "detail", stale.Message)
