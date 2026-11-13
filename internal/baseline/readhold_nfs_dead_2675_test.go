@@ -131,29 +131,46 @@ func TestLockForRemoval_aLockErrorIsWarnedOnce(t *testing.T) {
 // and read-only when that is refused; the lock is taken either way here.
 // A _SUCCESS that is a FIFO is not opened for long: the prune does not hang
 // on it.
+// accessMode is how f is open, asked of the kernel: O_RDONLY or O_RDWR.
+func accessMode(t *testing.T, f *os.File) int {
+	t.Helper()
+	fl, _, errno := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), syscall.F_GETFL, 0)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	return int(fl) & syscall.O_ACCMODE
+}
+
 func TestOpenMarker_modeAndKind(t *testing.T) {
 	root := t.TempDir()
 	s := threeSnapshots(t, root)
 	f, writable, err := openMarker(filepath.Join(root, s[0]), true)
-	if err != nil || !writable {
-		t.Fatalf("the prune's open: writable %v, err %v", writable, err)
+	if err != nil || !writable || accessMode(t, f) != syscall.O_RDWR {
+		t.Fatalf("the prune's open: writable %v, err %v: want the marker open read-write", writable, err)
 	}
 	f.Close()
-	if f, writable, _ := openMarker(filepath.Join(root, s[0]), false); writable {
+	f, writable, _ = openMarker(filepath.Join(root, s[0]), false)
+	if writable || accessMode(t, f) != syscall.O_RDONLY {
 		t.Error("a reader opened the marker for writing")
-	} else {
-		f.Close()
 	}
+	f.Close()
 	if os.Geteuid() != 0 {
 		if err := os.Chmod(filepath.Join(root, s[1], SuccessMarker), 0o444); err != nil {
 			t.Fatal(err)
 		}
 		f, writable, err := openMarker(filepath.Join(root, s[1]), true)
-		if err != nil || writable {
+		if err != nil || writable || accessMode(t, f) != syscall.O_RDONLY {
 			t.Fatalf("a read-only marker: writable %v, err %v; want the read-only fallback", writable, err)
 		}
 		f.Close()
 	}
+}
+
+// A _SUCCESS that is a FIFO is never waited on: a reader reads unheld and
+// the prune goes on.
+func TestOpenMarker_aFIFOIsNotWaitedOn(t *testing.T) {
+	root := t.TempDir()
+	s := threeSnapshots(t, root)
 	m := filepath.Join(root, s[0], SuccessMarker)
 	if err := os.Remove(m); err != nil {
 		t.Fatal(err)
@@ -161,17 +178,20 @@ func TestOpenMarker_modeAndKind(t *testing.T) {
 	if err := syscall.Mkfifo(m, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
+	done := make(chan bool, 1)
 	go func() {
-		keepNewest(t, root, 1)
-		release, _ := HoldSnapshot(filepath.Join(root, s[0]))
+		release, gone := HoldSnapshot(filepath.Join(root, s[0]))
 		release()
-		close(done)
+		keepNewest(t, root, 1)
+		done <- gone
 	}()
 	select {
-	case <-done:
+	case gone := <-done:
+		if gone {
+			t.Error("a FIFO marker reads as gone")
+		}
 	case <-time.After(5 * time.Second):
-		t.Error("the prune or a reader hangs on a _SUCCESS that is a FIFO")
+		t.Error("a reader or the prune hangs on a _SUCCESS that is a FIFO")
 		if w, _ := os.OpenFile(m, os.O_WRONLY, 0); w != nil {
 			w.Close()
 		}
