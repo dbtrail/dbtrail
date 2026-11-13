@@ -1,7 +1,4 @@
-	if snapDir == "" || strings.Contains(snapDir, "://") {
-		return noop, false
-	}
-	f, err := openMarker//go:build unix
+//go:build unix
 
 package baseline
 
@@ -117,7 +114,7 @@ func openMarker(snapDir string) (*os.File, error) {
 // release is safe to call more than once.
 func HoldSnapshot(snapDir string) (release func(), gone bool) {
 	noop := func() {}
-	if snapDir == "" || strings.HasPrefix(snapDir, "s3://") {
+	if snapDir == "" || strings.Contains(snapDir, "://") {
 		return noop, false
 	}
 	f, err := openMarker(snapDir)

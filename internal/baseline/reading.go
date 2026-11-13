@@ -1,7 +1,4 @@
-func HoldSnapshotOfTable(tablePath string) (release func(), gone bool) {
-	// Any URL (s3://, file://, http://) is read unheld: only a plain local
-	// path names a folder whose marker can be held.
-	if tablePath == "" || strings.Contains(tablePath, "://") {package baseline
+package baseline
 
 import (
 	"path/filepath"
@@ -279,7 +276,9 @@ func PinDownload(root, name string, limit time.Duration, kept map[string]bool, m
 // lives in: <root>/<snapshot>/<schema>/<table>.parquet, the path
 // reconstruct.FindBaseline returns.
 func HoldSnapshotOfTable(tablePath string) (release func(), gone bool) {
-	if tablePath == "" || strings.HasPrefix(tablePath, "s3://") {
+	// Any URL (s3://, file://, http://) is read unheld: only a plain local
+	// path names a folder whose marker can be held.
+	if tablePath == "" || strings.Contains(tablePath, "://") {
 		return func() {}, false
 	}
 	return HoldSnapshot(filepath.Dir(filepath.Dir(tablePath)))
