@@ -54,6 +54,9 @@ func TestVeto_nowKeywords_2611(t *testing.T) {
 		// A name, not the keyword (quoted, or after a dot): kept on MySQL as
 		// before, since the copy may still read it as its own function.
 		"SELECT `current_date` FROM t", "SELECT t.current_date FROM t", "SELECT `localtime` FROM t",
+		// A long s folds to s for EqualFold: a name on MySQL, not the keyword,
+		// and never written as a call.
+		"SELECT current_time\u017ftamp FROM t",
 		// An INTERVAL amount that is a placeholder is not read as a step, as
 		// with CURDATE().
 		"SELECT * FROM t WHERE d >= CURRENT_DATE - INTERVAL ? DAY",
@@ -89,6 +92,7 @@ func TestForCopy_nowKeywords_2611(t *testing.T) {
 		"SELECT `current_date`, t.current_date, t . current_date FROM t":          `SELECT "current_date", t.current_date, t . current_date FROM t`,
 		"SELECT 'CURRENT_DATE', 1 /* LOCALTIME */":                                "SELECT 'CURRENT_DATE', 1 /* LOCALTIME */",
 		"SELECT current_dates, localtimes FROM t":                                 "SELECT current_dates, localtimes FROM t",
+		"SELECT current_time\u017ftamp FROM t":                                    "SELECT current_time\u017ftamp FROM t",
 	} {
 		got, why := ForCopyOpts(stmt, clockOpts)
 		if why != "" {

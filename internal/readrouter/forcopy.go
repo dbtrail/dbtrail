@@ -192,7 +192,11 @@ func scan(stmt string) scanned {
 	cpWord, blWord := 0, 0
 	endWord := func(i int) {
 		for _, kw := range rewrittenKeywords {
-			if strings.EqualFold(stmt[word:i], kw) {
+			// The same length in bytes too: EqualFold folds Unicode, so
+			// current_time\u017ftamp (a long s) would match, and the rewrites
+			// that replace len(kw) bytes would leave its last byte behind.
+			// MySQL reads such a word as a name, not as the keyword.
+			if i-word == len(kw) && strings.EqualFold(stmt[word:i], kw) {
 				sc.keywords = append(sc.keywords, keywordAt{word: kw, cp: cpWord, bl: blWord})
 			}
 		}
