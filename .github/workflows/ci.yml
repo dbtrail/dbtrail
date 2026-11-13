@@ -918,7 +918,7 @@ jobs:
         run: |
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v \
-            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ 2>&1 | tee /tmp/pg-it.out
+            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ ./internal/pgcompare/ 2>&1 | tee /tmp/pg-it.out
           grep -q -- '--- PASS: TestOne_EndToEnd_PostgresToIndexToRecovery' /tmp/pg-it.out \
             || { echo "FATAL: PG end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationPGVerifyLiveSourceUnderWrites2198' /tmp/pg-it.out \
@@ -927,6 +927,8 @@ jobs:
             || { echo "FATAL: pgbaseline integration suite did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestPGWire_PostgresSourceRoundTrip' /tmp/pg-it.out \
             || { echo "FATAL: pgwire PostgreSQL-source E2E did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationPGCompare' /tmp/pg-it.out \
+            || { echo "FATAL: the PostgreSQL source-against-copy comparison did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography

@@ -1214,8 +1214,23 @@ that far behind the source. Past it:
   server's limit of 300 s (max_behind_source_seconds), so it does not answer
   this statement`.
 
-Save it with the web interface's API, beside the server's other choices for
-the port (there is no control for it on the page yet):
+Save it from the terminal, on the machine DBTrail runs on:
+
+```sh
+dbtrail port max-behind shop 5m     # or 300, in seconds
+dbtrail port max-behind shop        # say the limit saved, or off
+dbtrail port max-behind shop off    # remove it (the same as 0)
+```
+
+It takes whole seconds (`300`) or a duration (`90s`, `5m`, `1h30m`), and
+refuses a negative value, a fraction of a second and anything else. A limit
+under 90 seconds is saved, and the command says why it is not kept to the
+second (below). It changes only the limit: the server's fresh or fast mode
+and its LIKE switch stay as they were. `dbtrail port status` lists the limit
+of each server, `off` when there is none.
+
+Or with the web interface's API, beside the server's other choices for the
+port (there is no control for it on the page yet):
 
 ```sh
 curl -X PUT -H "Authorization: Bearer $CONSOLE_TOKEN" -H 'Content-Type: application/json' \
