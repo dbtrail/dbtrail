@@ -406,8 +406,12 @@ func (h *Handler) BindRouter(r Router, cfg RouterConfig) {
 func (h *Handler) copyOpts() readrouter.CopyOptions {
 	// MySQLClockKeywords: the port's copy session always has MySQL's NOW()
 	// and CURDATE() (sessionvars, Session.MySQLClock), so the keywords that
-	// mean them can be written as those calls (#2611).
-	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true}
+	// mean them can be written as those calls (#2611). MySQLDateFunctions:
+	// DATE_FORMAT and DATEDIFF as the copy's strftime and date_diff, the
+	// rewrite the port without routing has (#2628); the console keeps on
+	// MySQL a call whose date is not a date column or a clock call
+	// (readrouter.DateFunctionVeto).
+	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true, MySQLDateFunctions: true}
 }
 
 // Close releases what a connection holds: the router's upstream connection,

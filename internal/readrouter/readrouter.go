@@ -191,7 +191,7 @@ var vetoes = []struct {
 	{"WEEK/YEARWEEK", regexp.MustCompile(`(?i)\b(week|yearweek)\s*\(`)},
 	{"EXTRACT(WEEK ...)", regexp.MustCompile(`(?i)\bextract\s*\(\s*week\b`)},
 	{"STR_TO_DATE", regexp.MustCompile(`(?i)\bstr_to_date\s*\(`)},                                  // NULL in MySQL, error in DuckDB on a bad date
-	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)\s*\(`)}, // day counting differs
+	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)\s*\(`)}, // day counting differs; vetoDateDiff, narrowed by MySQLDateFunctions (VetoOpts, #2611)
 	{"COLLATE", regexp.MustCompile(`(?i)\bcollate\b`)},                                             // collations do not exist on the copy
 	{"CAST AS UNSIGNED/SIGNED", regexp.MustCompile(`(?i)\bas\s+(un)?signed\b`)},                    // overflow and truncation differ
 	{"DIV", regexp.MustCompile(`(?i)\bdiv\b`)},                                                     // integer division differs
@@ -310,7 +310,11 @@ func HasLike(stmt string) bool {
 // SOUNDS LIKE, which the copy does not have, and REGEXP and RLIKE. With
 // MySQLClockKeywords, CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME and
 // LOCALTIMESTAMP are held to the rules of NOW() and CURDATE() (#2611); without
-// it they keep the statement on MySQL.
+// it they keep the statement on MySQL. With MySQLDateFunctions, DATEDIFF no
+// longer keeps a statement on MySQL when every call is one ForCopyOpts writes
+// as date_diff (dateDiffsRewritten); TIMESTAMPDIFF and TIMEDIFF still do, and
+// what each DATE_FORMAT and DATEDIFF is given is the caller's to check once
+// the columns' types are known (DateFunctionVeto).
 func VetoOpts(stmt string, o CopyOptions) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
@@ -335,6 +339,12 @@ func VetoOpts(stmt string, o CopyOptions) string {
 				return v.name
 			}
 			re = regexpOnly
+		}
+		if v.name == vetoDateDiff && o.MySQLDateFunctions {
+			if !dateDiffsRewritten(sc.blankedCopy) {
+				return v.name
+			}
+			re = timeDiffOnly
 		}
 		if re.MatchString(sc.blankedCopy) {
 			return v.name
