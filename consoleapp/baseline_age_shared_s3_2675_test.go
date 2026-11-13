@@ -198,3 +198,22 @@ func TestWarnAgeSharedS3_saysNothingWithoutAnAge(t *testing.T) {
 		t.Errorf("each folder left out is not named once: %s", out)
 	}
 }
+
+// The daemon's own --baseline-dir has no settings card, so the hourly
+// cleanup's log line is the only place it is said that a shared prefix
+// keeps that folder from being pruned by age.
+func TestBaselinePruneSweep_logsTheDaemonsSharedPrefix(t *testing.T) {
+	reg := liveRegistry(t)
+	if _, err := reg.Add(console.ServerEntry{Name: "prod", DSN: "u:p@tcp(127.0.0.1:3306)/idx",
+		BaselineDir: t.TempDir(), BaselineS3: "s3://bucket/shared/"}); err != nil {
+		t.Fatal(err)
+	}
+	own := t.TempDir()
+	logs := captureSlogFor(t)
+	pruned := 0
+	baselinePruneSweep(context.Background(), reg, own, "s3://bucket/shared", "30d",
+		func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error) { pruned++; return baseline.PruneResult{}, nil })
+	if out := logs.String(); !strings.Contains(out, ageSharedS3Message) || !strings.Contains(out, "dir="+own) || pruned != 0 {
+		t.Fatalf("pruned %d, log %s: want nothing pruned and the daemon's own folder named", pruned, out)
+	}
+}
