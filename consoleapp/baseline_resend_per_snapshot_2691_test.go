@@ -3,9 +3,14 @@ package consoleapp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,7 +35,9 @@ func TestResendLacking_eachSnapshotWaitsOnItsOwn(t *testing.T) {
 	resendSnapshotFn = func(_ context.Context, _, _, name string) error {
 		sends = append(sends, name)
 		if name == "a" {
-			return errors.New("a damaged file")
+			// What the uploader returns for a file of the snapshot that will
+			// not read: its own failure, not the bucket's.
+			return fmt.Errorf("upload: %w", &fs.PathError{Op: "read", Path: filepath.Join(d, "a", "shop", "orders.parquet"), Err: syscall.EIO})
 		}
 		return nil
 	}
@@ -91,11 +98,93 @@ func TestResendLacking_eachSnapshotWaitsOnItsOwn(t *testing.T) {
 	}
 	// One failing snapshot is one warning, and the sends that worked meanwhile
 	// do not say sending "works again" while a still fails.
-	if n := strings.Count(logs.String(), "could not be sent again; the snapshots stay on this disk"); n != 1 {
-		t.Fatalf("the failure was warned %d times, want once", n)
+	if n := strings.Count(logs.String(), "could not be sent again; the snapshots stay on this disk, and this one is tried again in an hour, while the others are still sent"); n != 1 {
+		t.Fatalf("the failure was warned %d times, want once:\n%s", n, logs.String())
 	}
 	if strings.Contains(logs.String(), "works again") {
 		t.Fatal("said sending works again while a snapshot still fails")
+	}
+	// c pinned by a reader for one cycle is missing from the list: its wait
+	// is not dropped, and it is not sent again the cycle after.
+	clock = clock.Add(2 * time.Minute) // 11:03; c's hour ends at 11:10
+	cycle(baseline.PruneResult{KeptNotDurable: 2, NotAtDestination: []string{"a", "r"}, NotAsked: []string{"r"}, ReadRefused: []string{"r"}})
+	clock = clock.Add(3 * time.Minute) // 11:06
+	cycle(baseline.PruneResult{KeptNotDurable: 3, NotAtDestination: []string{"a", "c", "r"}, NotAsked: []string{"c", "r"}, ReadRefused: []string{"r"}})
+	if slices.Contains(sends[4:], "c") {
+		t.Fatalf("sends %v: c, missing from one cycle's list, was sent again inside its hour", sends)
+	}
+	// a removed by hand: its failure is forgotten, and the next round that
+	// sends says sending works again.
+	if err := os.RemoveAll(filepath.Join(d, "a")); err != nil {
+		t.Fatal(err)
+	}
+	snapDir(t, d, "e", true)
+	clock = clock.Add(5 * time.Minute)
+	cycle(baseline.PruneResult{KeptNotDurable: 1, NotAtDestination: []string{"e"}})
+	if sends[len(sends)-1] != "e" || strings.Count(logs.String(), "works again") != 1 {
+		t.Fatalf("sends %v, log %q: want e sent and sending said to work again once a is gone", sends, logs.String())
+	}
+}
+
+// A failure that is not on a file of the snapshot (the bucket, the
+// credentials, the network) makes the whole folder wait, as before (#2678):
+// every other send would meet it too.
+func TestResendLacking_aFailureAtTheDestinationHoldsTheFolder(t *testing.T) {
+	d := t.TempDir()
+	for _, n := range []string{"a", "b", "c", "d", "e", "f"} {
+		snapDir(t, d, n, true)
+	}
+	clock := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	prevNow, prevSend := resendNow, resendSnapshotFn
+	t.Cleanup(func() { resendNow, resendSnapshotFn = prevNow, prevSend })
+	resendNow = func() time.Time { return clock }
+	sends := 0
+	resendSnapshotFn = func(context.Context, string, string, string) error {
+		sends++
+		return errors.New("api error AccessDenied: Access Denied")
+	}
+	logs := captureLog(t, slog.LevelInfo)
+	target := baselinePruneTarget{dir: d, s3: "s3://bkt/p/", keepNewest: 1}
+	res := baseline.PruneResult{KeptNotDurable: 6, NotAtDestination: []string{"a", "b", "c", "d", "e", "f"}}
+	var per []int
+	for i := 0; i < 12; i++ { // an hour of cleanups every 5 minutes
+		resendLacking(context.Background(), target, res, false)
+		per = append(per, sends)
+		clock = clock.Add(5 * time.Minute)
+	}
+	if sends != 3 {
+		t.Fatalf("an hour against a bucket that refuses every upload: %d sends (%v), want the first round's 3", sends, per)
+	}
+	if !strings.Contains(logs.String(), "and sending them is tried again in an hour, not after every snapshot") {
+		t.Fatalf("the warning does not say the folder waits: %q", logs.String())
+	}
+	rec, _, _ := baseline.ReadNotInDestination(d)
+	if rec.NextSend == nil || !rec.NextSend.Equal(time.Date(2026, 11, 12, 11, 0, 0, 0, time.UTC)) || len(rec.Waiting) != 6 {
+		t.Fatalf("record %+v, want all six waiting until 11:00", rec)
+	}
+}
+
+// Whose failure it is: a file under the snapshot's folder that would not
+// open or read is the snapshot's own; anything else is the destination's.
+func TestFailedOnItsOwnFile(t *testing.T) {
+	dir := "/state/snapshots/s1"
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{fmt.Errorf("open: %w", &fs.PathError{Op: "open", Path: dir + "/2026-11-10T03-00-00Z/shop/orders.parquet", Err: fs.ErrPermission}), true},
+		{&fs.PathError{Op: "read", Path: dir + "//2026-11-10T03-00-00Z/shop/orders.parquet", Err: syscall.EIO}, true},
+		// A path outside the folder, the folder itself, a sibling folder
+		// sharing its prefix: not the snapshot's file.
+		{&fs.PathError{Op: "open", Path: "/etc/ssl/cert.pem", Err: fs.ErrNotExist}, false},
+		{&fs.PathError{Op: "open", Path: dir, Err: fs.ErrPermission}, false},
+		{&fs.PathError{Op: "open", Path: dir + "-old/x/shop/t.parquet", Err: fs.ErrPermission}, false},
+		{errors.New("api error AccessDenied"), false},
+		{nil, false},
+	} {
+		if got := failedOnItsOwnFile(c.err, dir); got != c.want {
+			t.Errorf("failedOnItsOwnFile(%v) = %v, want %v", c.err, got, c.want)
+		}
 	}
 }
 
@@ -107,7 +196,7 @@ func TestNoteResending_nextSendOnlyWhenAllWait(t *testing.T) {
 	target := baselinePruneTarget{dir: d, s3: "s3://bkt/p/"}
 	until := time.Date(2026, 11, 12, 11, 0, 0, 0, time.UTC)
 	res := baseline.PruneResult{KeptNotDurable: 2, NotAtDestination: []string{"a", "b"}}
-	noteResending(target, res, nil, nil, map[string]resendWait{"a": {until: until}})
+	noteResending(target, res, nil, nil, map[string]resendWait{"a": {until: until}}, time.Time{})
 	rec, ok, err := baseline.ReadNotInDestination(d)
 	if err != nil || !ok || rec.NextSend != nil || len(rec.Waiting) != 1 || rec.Waiting[0].Name != "a" {
 		t.Fatalf("record %+v ok=%v err=%v, want a waiting and no next_send", rec, ok, err)
