@@ -20,7 +20,6 @@ func TestUnroutedVeto(t *testing.T) {
 		"SELECT YEARWEEK(d) FROM t":                      "weekofyear",
 		"SELECT EXTRACT(WEEK FROM d) FROM t":             "weekofyear",
 		"SELECT STR_TO_DATE(s, '%Y') FROM t":             "strptime",
-		"SELECT DATEDIFF(a, b) FROM t":                   "date_diff",
 		"SELECT TIMEDIFF(a, b) FROM t":                   "end - start",
 		"SELECT @@version":                               "variable",
 		"SELECT a FROM t WHERE b = @x":                   "variable",
@@ -31,6 +30,7 @@ func TestUnroutedVeto(t *testing.T) {
 		"SELECT CAST(x AS UNSIGNED) FROM t":              "BIGINT",
 		"SELECT CAST(x AS SIGNED) FROM t":                "BIGINT",
 		"SELECT a DIV b FROM t":                          "//",
+		"SELECT dc DIV 2 FROM t":                         "trunc(a / nullif(b, 0))",
 		"SELECT FOUND_ROWS()":                            "MySQL",
 		"SELECT DATABASE()":                              "current_database",
 		"SELECT VERSION()":                               "pragma_version",
@@ -106,6 +106,10 @@ func TestUnroutedVeto(t *testing.T) {
 		"SELECT s.row_count, found_rows, last_insert_id FROM s",
 		"SELECT * FROM t WHERE code = '10-20-30' OR d = '21-04-2026' OR d = '26-01-15'",
 		"SELECT datediff('day', a, b) FROM t",
+		// Written for the copy before it runs, or refused then
+		// (UnroutedFunctionVeto, #2628).
+		"SELECT DATEDIFF(a, b) FROM t",
+		"SELECT DATE_FORMAT(d, '%Y') FROM t",
 		"SELECT [1, 2] @> [1], [1] <@ [1, 2], 'abc' ^@ 'a'",
 		"SELECT 1_000_000",
 		"SELECT 'it''s /*! not a comment */' FROM t",

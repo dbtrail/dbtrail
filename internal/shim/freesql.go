@@ -1147,7 +1147,8 @@ func copyText(qstr string, o readrouter.CopyOptions) (string, error) {
 // client's text with backtick-quoted names and STRAIGHT_JOIN rewritten
 // (copyText); a client on the port without routing gets the same rewrite
 // here when it can be made with certainty, and its own text otherwise, plus
-// LIMIT offset, count written LIMIT count OFFSET offset (#2628).
+// LIMIT offset, count written LIMIT count OFFSET offset, DATE_FORMAT written
+// strftime and DATEDIFF written date_diff (#2628).
 // Nothing else is translated from MySQL's dialect, and a statement the copy
 // refuses is the caller's to forward. unchangedWithin is sqlsandbox.Session.UnchangedWithin (#2085).
 //
@@ -1208,9 +1209,10 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// what the copy takes for a string or a comment would be rewritten
 		// there.
 		// LIMIT offset, count is written LIMIT count OFFSET offset, the
-		// copy's only spelling, where the rewrite is certain (#2628).
+		// copy's only spelling, and DATE_FORMAT and DATEDIFF the copy's
+		// calls that answer the same, where the rewrite is certain (#2628).
 		if !copyReadsOtherwise(qstr) {
-			if text, why := readrouter.ForCopyOpts(qstr, readrouter.CopyOptions{LimitOffsetComma: true}); why == "" && text != qstr {
+			if text, why := readrouter.ForCopyOpts(qstr, readrouter.CopyOptions{LimitOffsetComma: true, MySQLDateFunctions: true}); why == "" && text != qstr {
 				stmt = text
 				keepJoinOrder = readrouter.KeepsJoinOrder(qstr)
 			}
@@ -1221,6 +1223,11 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// count: not rewritten above, or sent as written. The copy only
 		// fails on it, in its own words; this says how to write it.
 		if r, refused := readrouter.UnroutedLimitVeto(stmt); refused {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, r.Message())
+		}
+		// Likewise MySQL's DATE_FORMAT and two-argument DATEDIFF, which the
+		// copy does not have.
+		if r, refused := readrouter.UnroutedFunctionVeto(stmt); refused {
 			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, r.Message())
 		}
 	}
