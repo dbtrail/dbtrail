@@ -88,9 +88,20 @@ func TestReconstruct2684_reusedFolderAndIfNotExists(t *testing.T) {
 
 	t.Run("a refused table keeps no file of the earlier run", func(t *testing.T) {
 		seed(t)
+		// The earlier run was complete: a run that fails a table must not
+		// leave it reading as complete (#842).
+		if err := baseline.WriteSuccessMarker(out); err != nil {
+			t.Fatal(err)
+		}
 		_, err := run(false)
 		if !errors.Is(err, reconstruct.ErrChangesOnly) {
 			t.Fatalf("err = %v, want the refusal", err)
+		}
+		if _, err := os.Stat(filepath.Join(out, baseline.SuccessMarker)); err == nil {
+			t.Errorf("the earlier run's %s survived a run that failed a table", baseline.SuccessMarker)
+		}
+		if _, err := os.Stat(filepath.Join(out, baseline.IncompleteMarker)); err != nil || baseline.SnapshotComplete(out) {
+			t.Errorf("a run that failed a table does not leave the folder %s: %v", baseline.IncompleteMarker, err)
 		}
 		got := names(t)
 		for _, n := range earlier {
