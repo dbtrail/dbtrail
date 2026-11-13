@@ -26,7 +26,20 @@ const (
 	// a second connection held LOCK TABLES <table> READ, so no transaction
 	// writing the table was in flight. Exact for that table.
 	AnchorTableLock = "table-lock"
+	// AnchorPGSlot (PostgreSQL, #2198): the snapshot is the one a temporary
+	// logical replication slot exported when it was created, and
+	// TableChecksum.LSN is that slot's consistent point. The snapshot holds
+	// exactly the transactions whose commit is before that LSN: the pairing
+	// PostgreSQL's own logical replication copies a table with. Exact for
+	// every table, and takes no lock.
+	AnchorPGSlot = "pg-slot"
 )
+
+// ErrPGSnapshotWait (PostgreSQL, #2198): creating the temporary slot whose
+// snapshot the table is read at waits for the write transactions open at
+// that moment, on the whole server, to end, and one did not end within the
+// wait. The scan was not run; the caller reports the check inconclusive.
+var ErrPGSnapshotWait = errors.New("a write transaction open on the PostgreSQL server did not end within the wait, so the snapshot's position could not be pinned")
 
 // ErrAnchorBusy: the table was never free of open write transactions when
 // the read lock the anchor needs was asked for (every attempt hit
