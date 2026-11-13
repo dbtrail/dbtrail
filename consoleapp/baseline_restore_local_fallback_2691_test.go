@@ -2,8 +2,8 @@ package consoleapp
 
 import (
 	"context"
-	"os"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
