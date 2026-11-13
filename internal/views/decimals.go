@@ -155,14 +155,15 @@ func writePGCastNote(b *strings.Builder, in Input) {
 		b.WriteString("-- A PostgreSQL source's snapshot files hold every value as the text PostgreSQL\n")
 		b.WriteString("-- wrote. The views below read each column as the type the table declares:\n")
 		b.WriteString("-- whole numbers, numeric, real and double precision, boolean, date, timestamp\n")
-		b.WriteString("-- with and without time zone, uuid and bytea. Text columns are given byte\n")
-		b.WriteString("-- comparison (COLLATE C), so they compare with regard to case as PostgreSQL's\n")
-		b.WriteString("-- do. A numeric declared without precision is read as an exact\n")
+		b.WriteString("-- with and without time zone, time with and without time zone, interval, uuid\n")
+		b.WriteString("-- and bytea. Text columns are given byte comparison (COLLATE C), so they\n")
+		b.WriteString("-- compare with regard to case as PostgreSQL's do. A numeric declared without\n")
+		b.WriteString("-- precision is read as an exact\n")
 		fmt.Fprintf(b, "-- DECIMAL(%d,%d). A value its type here cannot hold (NaN in a numeric, more\n",
 			baseline.MaxDuckDBDecimalPrecision, baseline.PGNumericScale)
 		b.WriteString("-- digits than fit) fails the statement that reads it; it is never rounded or\n")
-		b.WriteString("-- read as NULL. An array of one dimension of these types is read as a list\n")
-		b.WriteString("-- (labels[1] is its first element); one of more dimensions fails the\n")
+		b.WriteString("-- read as NULL. An array of one dimension is read as a list (labels[1] is its\n")
+		b.WriteString("-- first element) unless it is named below; one of more dimensions fails the\n")
 		b.WriteString("-- statement that reads it. Columns of any other type stay text and are named\n")
 		b.WriteString("-- below.\n")
 		return
@@ -341,6 +342,9 @@ func replaceParts(t BaselineTable) []retyped {
 //     its text does in PostgreSQL.
 //   - an array of one dimension is read as a list of its elements' type
 //     (pgListExpr).
+//   - a time of 24:00:00 is refused, since every surface would show it as
+//     midnight; an interval loses the plus PostgreSQL writes on a positive
+//     part that follows a negative one, which the cast does not take.
 //   - a numeric declared without precision has no scale to cast to. It is
 //     read as DECIMAL(38, PGNumericScale), and since a cast to a scale ROUNDS
 //     a value with more decimals, such a value is refused first.
@@ -369,6 +373,20 @@ func pgParts(t BaselineTable) []retyped {
 			parts = append(parts, retyped{c.Name, fmt.Sprintf(
 				"CASE WHEN ends_with(%[1]s, ' BC') THEN %[2]s ELSE CAST(%[1]s AS %[3]s) END",
 				q, refuse("a date before the common era"), c.As)})
+		case "TIME":
+			// 24:00:00 is a time of day in PostgreSQL. The engine holds
+			// it, but its Go driver hands a TIME over as a clock reading,
+			// where it is 00:00:00: every surface would show midnight, with
+			// no error. A TIMETZ is handed over with its offset and shows
+			// 24:00:00, so it takes the plain cast.
+			parts = append(parts, retyped{c.Name, fmt.Sprintf(
+				"CASE WHEN starts_with(%[1]s, '24:') THEN %[2]s ELSE CAST(%[1]s AS TIME) END",
+				q, refuse("the time 24:00:00"))})
+		case "INTERVAL":
+			// Under IntervalStyle postgres a positive part after a negative
+			// one is written with a plus (-1 years +3 days), which the
+			// engine's cast refuses; a plus appears nowhere else in the text.
+			parts = append(parts, retyped{c.Name, "CAST(replace(" + q + ", '+', '') AS INTERVAL)"})
 		case baseline.PGAsNumeric:
 			msg := fmt.Sprintf("%s.%s: column %s holds a numeric with more than %d decimals, which the copy does not read exactly",
 				t.Schema, t.Table, c.Name, baseline.PGNumericScale)

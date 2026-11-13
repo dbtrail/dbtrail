@@ -57,13 +57,18 @@ func TestPGCasts(t *testing.T) {
 		{Name: "docs", TypeOID: 3807, TypeMod: -1, Ordinal: 46},
 		{Name: "spans", TypeOID: 1187, TypeMod: -1, Ordinal: 47},
 		{Name: "moods", TypeOID: 16391, TypeMod: -1, Ordinal: 48},
+		{Name: "atz", TypeOID: 1266, TypeMod: -1, Ordinal: 49},
+		{Name: "at3", TypeOID: 1083, TypeMod: 3, Ordinal: 50},
+		{Name: "span_day", TypeOID: 1186, TypeMod: 0x0008ffff, Ordinal: 51},
+		{Name: "ats", TypeOID: 1183, TypeMod: -1, Ordinal: 52},
+		{Name: "atzs", TypeOID: 1270, TypeMod: -1, Ordinal: 53},
 	}}
 	want := []PGCast{
 		{"id", "BIGINT"}, {"amount", "DECIMAL(12,2)"}, {"note", PGAsText}, {"free", PGAsNumeric},
 		{"wide", ""}, {"neg_scale", ""}, {"scale_over", ""}, {"max", "DECIMAL(38,38)"},
 		{"flag", "BOOLEAN"}, {"small", "SMALLINT"}, {"n", "INTEGER"}, {"r", "FLOAT"}, {"d", "DOUBLE"},
 		{"day", "DATE"}, {"ts", "TIMESTAMP"}, {"tstz", "TIMESTAMPTZ"}, {"tag", "UUID"}, {"payload", PGAsBytes},
-		{"code", PGAsText}, {"fixed", PGAsText}, {"attrs", ""}, {"labels", "VARCHAR[]"}, {"at", ""}, {"span", ""}, {"mood", ""},
+		{"code", PGAsText}, {"fixed", PGAsText}, {"attrs", ""}, {"labels", "VARCHAR[]"}, {"at", "TIME"}, {"span", "INTERVAL"}, {"mood", ""},
 		{"ident", PGAsText}, {"ref", "UINTEGER"},
 		{"ints", "INTEGER[]"}, {"bigs", "BIGINT[]"}, {"smalls", "SMALLINT[]"}, {"flags", "BOOLEAN[]"},
 		{"codes", "VARCHAR[]"}, {"fixeds", "VARCHAR[]"}, {"names", "VARCHAR[]"}, {"reals", "FLOAT[]"},
@@ -72,6 +77,10 @@ func TestPGCasts(t *testing.T) {
 		// Left as text: a numeric with no precision or too wide, bytea,
 		// jsonb, interval, and an array type made by a user.
 		{"frees", ""}, {"wides", ""}, {"blobs", ""}, {"docs", ""}, {"spans", ""}, {"moods", ""},
+		// A precision or a field restriction does not change how it reads.
+		{"atz", "TIMETZ"}, {"at3", "TIME"}, {"span_day", "INTERVAL"},
+		// Arrays of them stay text.
+		{"ats", ""}, {"atzs", ""},
 	}
 	if got := PGCasts(rel); !reflect.DeepEqual(got, want) {
 		t.Fatalf("PGCasts:\n got %v\nwant %v", got, want)

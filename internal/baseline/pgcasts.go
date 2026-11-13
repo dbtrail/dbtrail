@@ -51,8 +51,11 @@ const (
 	pgOIDBpchar      = 1042
 	pgOIDVarchar     = 1043
 	pgOIDDate        = 1082
+	pgOIDTime        = 1083
 	pgOIDTimestamp   = 1114
 	pgOIDTimestamptz = 1184
+	pgOIDInterval    = 1186
+	pgOIDTimetz      = 1266
 	pgOIDNumeric     = 1700
 	pgOIDUUID        = 2950
 )
@@ -94,10 +97,10 @@ func PGListElement(as string) (string, bool) {
 // included, so the list is also the table's column order.
 //
 // Left as text on purpose: json and jsonb (the operators that read them take
-// text, and PostgreSQL's spelling of a jsonb value is kept), time and timetz
-// (24:00:00 is a time in PostgreSQL and not in DuckDB), interval, arrays of
-// bytea, of a numeric DuckDB has no DECIMAL for and of any type in this
-// list, enums, domains, ranges and every type of an extension.
+// text, and PostgreSQL's spelling of a jsonb value is kept), arrays of bytea,
+// of time, timetz and interval, of a numeric DuckDB has no DECIMAL for and
+// of any type in this list, enums, domains, ranges and every type of an
+// extension.
 func PGCasts(rel PGRelation) []PGCast {
 	cols := make([]PGColumn, len(rel.Columns))
 	copy(cols, rel.Columns)
@@ -156,6 +159,12 @@ func pgCastOf(c PGColumn) string {
 		return "TIMESTAMP"
 	case pgOIDTimestamptz:
 		return "TIMESTAMPTZ"
+	case pgOIDTime:
+		return "TIME"
+	case pgOIDTimetz:
+		return "TIMETZ"
+	case pgOIDInterval:
+		return "INTERVAL"
 	case pgOIDUUID:
 		return "UUID"
 	case pgOIDBytea:

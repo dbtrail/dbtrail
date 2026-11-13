@@ -161,3 +161,20 @@ func TestPostgresRules_onTheWire(t *testing.T) {
 		}
 	}
 }
+
+// Why the views refuse a PostgreSQL time of 24:00:00 (#2787): the engine
+// holds it, and a TIME cell of it reaches every surface as midnight. A
+// TIMETZ of it reads as it is. If this changes, the refusal in
+// internal/views (pgParts) can go.
+func TestTimeOf24_isShownAsMidnight(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	res, err := r.Run(context.Background(), f.job(
+		"SELECT CAST('24:00:00' AS TIME), CAST(CAST('24:00:00' AS TIME) AS VARCHAR), CAST('24:00:00+00' AS TIMETZ)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rowsJSON(t, res), `[["00:00:00","24:00:00","24:00:00+00"]]`; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
