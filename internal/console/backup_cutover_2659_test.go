@@ -135,10 +135,9 @@ func TestCutoverToFull_everyCombination_2659(t *testing.T) {
 													t.Fatalf("%s: a measured full read (%q) with no full read on record, or on numbers older than it", desc, why)
 												}
 												est := fixed.Seconds()
-												if rate > 0 {
-													if ev < 0 {
-														t.Fatalf("%s: a measured full read (%q) on an estimate with no event count", desc, why)
-													}
+												// With a rate and no count, only the fixed
+												// cost can choose one (#2674): est stays it.
+												if rate > 0 && ev >= 0 {
 													est += float64(ev) / rate
 													if float64(ev) <= BackupProvenMargin*float64(proven) {
 														t.Fatalf("%s: a measured full read (%q) on an update proven cheaper", desc, why)
@@ -205,10 +204,11 @@ func TestCutoverToFull_measuredRulesStillCutOver_2659(t *testing.T) {
 	for _, age := range []time.Duration{5 * time.Minute, 5 * time.Hour, 30 * 24 * time.Hour} {
 		anchor := now.Add(-age)
 		for name, w := range map[string]BackupWindow{
-			"the estimate":             {Anchor: anchor, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute},
-			"the estimate, overflowed": {Anchor: anchor, Events: math.MaxInt64, FoldRate: 0.0000001, LastFull: 8 * time.Minute},
-			"the fixed cost":           {Anchor: anchor, Events: 40, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute},
-			"the fixed cost, no count": {Anchor: anchor, Events: -1, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute},
+			"the estimate":                          {Anchor: anchor, Events: 17_000_000, FoldRate: 4000, LastFull: 8 * time.Minute},
+			"the estimate, overflowed":              {Anchor: anchor, Events: math.MaxInt64, FoldRate: 0.0000001, LastFull: 8 * time.Minute},
+			"the fixed cost":                        {Anchor: anchor, Events: 40, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute},
+			"the fixed cost, no count":              {Anchor: anchor, Events: -1, FoldFixed: 6 * time.Minute, LastFull: 2 * time.Minute},
+			"the fixed cost, no count, with a rate": {Anchor: anchor, Events: -1, FoldFixed: 6 * time.Minute, FoldRate: 4000, LastFull: 2 * time.Minute},
 		} {
 			why := CutoverToFull(w, 5*time.Minute, now)
 			if BackupWhyCode(why) != "window_measured" {
