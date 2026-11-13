@@ -79,7 +79,7 @@ func TestDumpCmd_allFlagsRegistered(t *testing.T) {
 // ─── buildMydumperArgs ────────────────────────────────────────────────────────
 
 func TestBuildMydumperArgs_basic(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 	assertArgsContainPair(t, args, "--host", "127.0.0.1")
 	assertArgsContainPair(t, args, "--port", "3306")
 	assertArgsContainPair(t, args, "--user", "root")
@@ -88,7 +88,7 @@ func TestBuildMydumperArgs_basic(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_compressAndComplete(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 	if !argsContain(args, "--compress-protocol") {
 		t.Error("expected --compress-protocol in args")
 	}
@@ -103,7 +103,7 @@ func TestBuildMydumperArgs_lockAndTrx_supported(t *testing.T) {
 	// hand back a snapshot stitched from several instants with nothing saying
 	// so. A baseline is the seed state reconstruct merges deltas onto, so that
 	// is not a default anyone should land on by not choosing.
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 	assertArgsContainPair(t, args, "--sync-thread-lock-mode", "FTWRL")
 	if !argsContain(args, "--trx-tables") {
 		t.Error("expected --trx-tables in args when supportsLockMode=true")
@@ -111,7 +111,7 @@ func TestBuildMydumperArgs_lockAndTrx_supported(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_lockAndTrx_unsupported(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", false, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", false, baseline.DefaultLockMode)
 	if argsContain(args, "--sync-thread-lock-mode") {
 		t.Error("expected --sync-thread-lock-mode to be absent when supportsLockMode=false")
 	}
@@ -133,7 +133,7 @@ func TestBuildMydumperArgs_lockAndTrx_unsupported(t *testing.T) {
 // function no longer even accepts a password, so it cannot leak one.
 func TestBuildMydumperArgs_neverPassword(t *testing.T) {
 	for _, defaultsFile := range []string{"", "/tmp/bintrail-mydumper-xyz.cnf"} {
-		args := buildMydumperArgs("127.0.0.1", 3306, "root", defaultsFile, "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+		args := buildMydumperArgs("127.0.0.1", 3306, "root", defaultsFile, "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 		if argsContain(args, "--password") {
 			t.Errorf("defaultsFile=%q: --password must never appear on argv: %v", defaultsFile, args)
 		}
@@ -145,17 +145,17 @@ func TestBuildMydumperArgs_neverPassword(t *testing.T) {
 // and omitted when empty (local mode delivers it via MYSQL_PWD env).
 func TestBuildMydumperArgs_defaultsFile(t *testing.T) {
 	const path = "/tmp/bintrail-mydumper-abc.cnf"
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", path, "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", path, "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 	assertArgsContainPair(t, args, "--defaults-file", path)
 
-	none := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+	none := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 	if argsContain(none, "--defaults-file") {
 		t.Errorf("expected --defaults-file to be absent when no defaults file given: %v", none)
 	}
 }
 
 func TestBuildMydumperArgs_singleSchema(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, []string{"mydb"}, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, []string{"mydb"}, nil, "", true, baseline.DefaultLockMode)
 	assertArgsContainPair(t, args, "--database", "mydb")
 	if argsContain(args, "--regex") {
 		t.Error("expected --regex to be absent for single schema")
@@ -163,7 +163,7 @@ func TestBuildMydumperArgs_singleSchema(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_multipleSchemas(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, []string{"db1", "db2"}, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, []string{"db1", "db2"}, nil, "", true, baseline.DefaultLockMode)
 	if argsContain(args, "--database") {
 		t.Error("expected --database to be absent for multiple schemas")
 	}
@@ -184,7 +184,7 @@ func TestBuildMydumperArgs_multipleSchemas(t *testing.T) {
 // even a password-shaped value must never appear anywhere in the argv (the
 // function delivers credentials out of band, so it takes no password at all).
 func TestBuildMydumperArgs_passwordNeverLeaksToArgv(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, []string{"mydb"}, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, []string{"mydb"}, nil, "", true, baseline.DefaultLockMode)
 	for _, a := range args {
 		if a == "s3cr3t" || a == "--password" {
 			t.Errorf("password-related token leaked to argv: %q in %v", a, args)
@@ -193,7 +193,7 @@ func TestBuildMydumperArgs_passwordNeverLeaksToArgv(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_noSchemasOrTables(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 	for _, flag := range []string{"--database", "--regex", "--tables-list"} {
 		if argsContain(args, flag) {
 			t.Errorf("expected %s to be absent when no schemas or tables given", flag)
@@ -202,7 +202,7 @@ func TestBuildMydumperArgs_noSchemasOrTables(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_regexAnchoredFormat(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, []string{"db1", "db2"}, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, []string{"db1", "db2"}, nil, "", true, baseline.DefaultLockMode)
 	idx := argsIndex(args, "--regex")
 	if idx < 0 || idx+1 >= len(args) {
 		t.Fatal("expected --regex in args")
@@ -218,7 +218,7 @@ func TestBuildMydumperArgs_regexAnchoredFormat(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_schemaAndTables(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4,
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4,
 		[]string{"mydb"}, []string{"mydb.orders", "mydb.items"}, "", true, baseline.DefaultLockMode)
 	assertArgsContainPair(t, args, "--database", "mydb")
 	idx := argsIndex(args, "--tables-list")
@@ -231,7 +231,7 @@ func TestBuildMydumperArgs_schemaAndTables(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_tables(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, []string{"mydb.orders", "mydb.items"}, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, []string{"mydb.orders", "mydb.items"}, "", true, baseline.DefaultLockMode)
 	idx := argsIndex(args, "--tables-list")
 	if idx < 0 {
 		t.Fatal("expected --tables-list in args")
@@ -264,7 +264,7 @@ func TestBuildMydumperArgs_outputDirIsLast(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/data/backup", 4, tc.schemas, tc.tables, tc.encrypt, true, baseline.DefaultLockMode)
+			args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/data/backup", 4, tc.schemas, tc.tables, tc.encrypt, true, baseline.DefaultLockMode)
 			n := len(args)
 			if n < 2 {
 				t.Fatalf("args too short: %v", args)
@@ -352,7 +352,7 @@ func TestAcquireDumpLock_staleLock(t *testing.T) {
 // TestBuildMydumperArgs_threeSchemas verifies that 3+ schemas all appear in the
 // --regex value, not just the first two.
 func TestBuildMydumperArgs_threeSchemas(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, []string{"db1", "db2", "db3"}, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, []string{"db1", "db2", "db3"}, nil, "", true, baseline.DefaultLockMode)
 	idx := argsIndex(args, "--regex")
 	if idx < 0 || idx+1 >= len(args) {
 		t.Fatal("expected --regex in args for 3 schemas")
@@ -770,7 +770,7 @@ func TestDumpCmd_encryptFlagsRegistered(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_encrypt(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "/path/to/key", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "/path/to/key", true, baseline.DefaultLockMode)
 	idx := argsIndex(args, "--exec-per-thread")
 	if idx < 0 {
 		t.Fatal("expected --exec-per-thread in args when encryption enabled")
@@ -789,7 +789,7 @@ func TestBuildMydumperArgs_encrypt(t *testing.T) {
 }
 
 func TestBuildMydumperArgs_noEncrypt(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", true, baseline.DefaultLockMode)
 	if argsContain(args, "--exec-per-thread") {
 		t.Error("expected --exec-per-thread to be absent when encryption disabled")
 	}
@@ -906,7 +906,7 @@ func TestEscapeMyCnfValue(t *testing.T) {
 
 func TestWriteMydumperDefaultsFile(t *testing.T) {
 	const pw = `s3cr3t#p"w`
-	path, cleanup, err := writeMydumperDefaultsFile(pw)
+	path, cleanup, err := writeMydumperDefaultsFile(pw, "")
 	if err != nil {
 		t.Fatalf("writeMydumperDefaultsFile: %v", err)
 	}

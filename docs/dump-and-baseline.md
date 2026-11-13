@@ -183,6 +183,15 @@ DBTrail always passes these flags to mydumper:
 
 The source password never appears on mydumper's command line, so it is not visible in `ps aux` or (Docker mode) `docker inspect`. With a local mydumper binary it is delivered via `MYSQL_PWD` in the child process environment; in Docker mode it is written to a temporary `0600` MySQL option file bind-mounted read-only into the container, which mydumper reads via `--defaults-file`.
 
+**`explain_format` on MySQL 9.x.** mydumper sizes each table with a plain `EXPLAIN SELECT` and reads its `rows` column. With `explain_format=TREE` (the default on Percona Server 9.7) or `JSON`, that column is missing and mydumper crashes with a segmentation fault before it dumps anything ([mydumper#2307](https://github.com/mydumper/mydumper/issues/2307)). Before each dump, DBTrail reads the source's `explain_format`; when the variable exists, it gives mydumper an option file with
+
+```ini
+[mydumper_session_variables]
+explain_format = TRADITIONAL
+```
+
+so mydumper's own sessions use the format it can read. The server's global setting is not changed. A local mydumper gets the file as `--defaults-extra-file`, so an `/etc/mydumper.cnf` you keep is still read; in Docker mode the section goes in the same `--defaults-file` as the password. Sources without the variable (MariaDB, MySQL before 8.0.32) get nothing: mydumper exits 1 when it cannot set a session variable. The file is only given to mydumper 0.16.1 or newer, the oldest build measured to take it; with an older build, or one whose version cannot be read, DBTrail logs a warning naming the remedy, and you can set `explain_format = TRADITIONAL` on the source yourself.
+
 ### Cross-table consistency
 
 Under `no-lock` (`--sync-thread-lock-mode NO_LOCK --trx-tables`), every mydumper worker thread opens its own transactional snapshot **independently, with no synchronization barrier between threads**. Each table's snapshot is therefore anchored at *that thread's* instant, not at one shared instant for the whole dump. On a quiet source the skew between threads is negligible; on a write-heavy source it can be milliseconds to a few seconds. Two consequences follow:

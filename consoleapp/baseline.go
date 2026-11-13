@@ -1583,6 +1583,20 @@ var sourceServerVersion = func(ctx context.Context, dsn string, ssl config.SSL) 
 	return v, err
 }
 
+// sourceExplainFormat reads the source's explain_format (#2211), with the
+// connection settings of the other pre-dump reads. A seam, so the tests need
+// no server.
+var sourceExplainFormat = func(ctx context.Context, dsn string, ssl config.SSL) (string, bool, error) {
+	db, err := connectSource(dsn, ssl)
+	if err != nil {
+		return "", false, err
+	}
+	defer db.Close()
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return mydumperlock.SourceExplainFormat(qctx, db)
+}
+
 // planMydumper reads the version of the mydumper on PATH and decides, the way
 // `bintrail dump` does (#219, #460, #1686), what this run can ask of it.
 //
@@ -1805,6 +1819,11 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	}
 
 	tlsArgs := mydumperTLSArgs(tlsPlan, plan.lib)
+	// What goes in the one option file mydumper is given with
+	// --defaults-extra-file. One file, because mydumper keeps only the last
+	// --defaults-extra-file it is passed: a second flag would drop the TLS pin
+	// without a word.
+	var options strings.Builder
 	// A build linked against the MySQL client library enforces --ssl-mode
 	// REQUIRED itself. Any other does not reliably (Connector/C, measured:
 	// it dumps in cleartext from a server without TLS), so the dump is
@@ -1816,12 +1835,7 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			return fmt.Errorf("the full read must reach the source encrypted, and a connection with TLS required failed: %w", err)
 		}
 		if plan.lib == mydumperlock.LibMariaDB {
-			pin, remove, err := writeMydumperTLSPin(filepath.Dir(dumpDir), fp)
-			if err != nil {
-				return fmt.Errorf("could not write the TLS settings file for mydumper: %w", err)
-			}
-			defer remove()
-			tlsArgs = append(tlsArgs, "--defaults-extra-file", pin)
+			options.WriteString("[client]\nssl-fp=" + fp + "\n")
 		} else {
 			// Unknown library: the check proved the server encrypts, but
 			// mydumper is not pinned, so an attacker between the check
@@ -1831,6 +1845,28 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			reportTransportNote(ctx, "Encrypted, not pinned: mydumper's client library could not be identified, so the "+
 				"source was checked to encrypt but mydumper was not tied to its certificate.")
 		}
+	}
+	// explain_format other than TRADITIONAL (TREE is the default on Percona
+	// Server 9.7) makes mydumper segfault while it sizes tables (#2211). Its
+	// own sessions are told TRADITIONAL; the server's setting is not touched.
+	if value, present, err := sourceExplainFormat(ctx, sourceDSN, ssl); err != nil {
+		slog.Warn("console snapshot: could not read the source's explain_format, so mydumper is not told to use TRADITIONAL; "+
+			"if the source runs with TREE or JSON, mydumper crashes", "host", host, "error", err)
+	} else {
+		ef := mydumperlock.PlanExplainFormat(present, value, plan.versionKnown, plan.version)
+		if ef.Send {
+			options.WriteString(mydumperlock.ExplainFormatSection)
+		} else if ef.Warning != "" {
+			slog.Warn("console snapshot: "+ef.Warning, "host", host, "mydumper", plan.path)
+		}
+	}
+	if options.Len() > 0 {
+		path, remove, err := writeMydumperOptions(filepath.Dir(dumpDir), options.String())
+		if err != nil {
+			return fmt.Errorf("could not write the settings file for mydumper: %w", err)
+		}
+		defer remove()
+		tlsArgs = append(tlsArgs, "--defaults-extra-file", path)
 	}
 	// A list of schemas goes as --database a,b on a mydumper measured to write
 	// each schema's CREATE DATABASE that way (1.0.3-1): under --regex it

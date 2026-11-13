@@ -51,6 +51,19 @@ var waitForQuietSource = func(ctx context.Context, sourceDSN string, mode baseli
 	return err
 }
 
+// sourceExplainFormat is mydumperlock.SourceExplainFormat on the source
+// (#2211). Tests replace it.
+var sourceExplainFormat = func(ctx context.Context, sourceDSN string) (string, bool, error) {
+	db, err := config.Connect(sourceDSN)
+	if err != nil {
+		return "", false, err
+	}
+	defer db.Close()
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return mydumperlock.SourceExplainFormat(qctx, db)
+}
+
 var dumpCmd = &cobra.Command{
 	Use:   "dump",
 	Short: "Invoke mydumper to create a logical dump of the source MySQL instance",
@@ -277,8 +290,13 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// blaming an age nothing measured.
 	var versionErr error
 	var probed mydumperlock.Version // what --version printed, when knownOldMydumper
+	// What the explain_format decision (#2211) knows of the build. Docker mode
+	// is not probed and already sends the 0.18 flags unconditionally (the
+	// pinned image is >= 0.18), so it is treated as taking session variables.
+	buildKnown, build := true, mydumperlock.SessionVariablesFloor
 	if res.mode == dumpModeLocal {
 		v, verErr := mydumperlock.ProbeVersion(res.path)
+		buildKnown, build = verErr == nil, v
 		switch {
 		case errors.Is(verErr, mydumperlock.ErrNotRunnable):
 			// A binary that cannot run --version will not complete a dump
@@ -363,6 +381,21 @@ func runDump(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// explain_format other than TRADITIONAL (TREE is the default on Percona
+	// Server 9.7) makes mydumper segfault while it sizes tables (#2211). Its
+	// own sessions are told TRADITIONAL; the server's setting is not touched.
+	// Read here, with the other pre-dump reads, before the output directory
+	// is disturbed.
+	var explainPlan mydumperlock.ExplainFormatPlan
+	if value, present, err := sourceExplainFormat(cmd.Context(), dmpSourceDSN); err != nil {
+		slog.Warn("could not read the source's explain_format, so mydumper is not told to use TRADITIONAL; "+
+			"if the source runs with TREE or JSON, mydumper crashes", "error", err)
+	} else {
+		explainPlan = mydumperlock.PlanExplainFormat(present, value, buildKnown, build)
+		if explainPlan.Warning != "" {
+			slog.Warn(explainPlan.Warning)
+		}
+	}
 
 	// 4. Acquire dump lock — only one dump at a time.
 	lockFile, err := acquireDumpLock()
@@ -403,17 +436,33 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// `ps aux` / /proc/<pid>/cmdline and, under Docker, in `docker inspect`).
 	// Docker mode delivers it via a 0600 defaults-file bind-mounted read-only;
 	// local mode delivers it via MYSQL_PWD in the child env below (#811).
-	var defaultsFile string
-	if password != "" && res.mode == dumpModeDocker {
+	// The session variables (#2211) ride in the same file under Docker, which
+	// is already bind-mounted, and in a file of their own locally, given with
+	// --defaults-extra-file.
+	var sessionVars string
+	if explainPlan.Send {
+		sessionVars = mydumperlock.ExplainFormatSection
+	}
+	var defaultsFile, extraDefaultsFile string
+	switch {
+	case res.mode == dumpModeDocker && (password != "" || sessionVars != ""):
 		var cleanup func()
 		var derr error
-		defaultsFile, cleanup, derr = writeMydumperDefaultsFile(password)
+		defaultsFile, cleanup, derr = writeMydumperDefaultsFile(password, sessionVars)
+		if derr != nil {
+			return derr
+		}
+		defer cleanup()
+	case res.mode != dumpModeDocker && sessionVars != "":
+		var cleanup func()
+		var derr error
+		extraDefaultsFile, cleanup, derr = writeMydumperDefaultsFile("", sessionVars)
 		if derr != nil {
 			return derr
 		}
 		defer cleanup()
 	}
-	mydumperArgs := buildMydumperArgs(host, port, user, defaultsFile, dmpOutputDir, dmpThreads, schemas, tables, encryptKeyPath, supportsLockMode, lockMode)
+	mydumperArgs := buildMydumperArgs(host, port, user, defaultsFile, extraDefaultsFile, dmpOutputDir, dmpThreads, schemas, tables, encryptKeyPath, supportsLockMode, lockMode)
 
 	// 7. Build the final command depending on resolution mode.
 	var c *exec.Cmd
@@ -690,8 +739,11 @@ func (p *dumpDirPrep) rollback() {
 // delivered out of band: locally via MYSQL_PWD in the child env, and under
 // Docker via a 0600 defaults-file bind-mounted read-only. When defaultsFile is
 // non-empty its path is referenced with --defaults-file so mydumper reads the
-// password from it (#811).
-func buildMydumperArgs(host string, port uint16, user, defaultsFile, outputDir string,
+// password from it (#811). extraDefaultsFile, when non-empty, goes as
+// --defaults-extra-file: the local-mode option file with the session variables
+// (#2211), added to whatever /etc/mydumper.cnf the operator keeps rather than
+// replacing it as --defaults-file would.
+func buildMydumperArgs(host string, port uint16, user, defaultsFile, extraDefaultsFile, outputDir string,
 	threads int, schemas, tables []string, encryptKeyPath string, supportsLockMode bool,
 	lockMode baseline.LockMode) []string {
 
@@ -710,6 +762,9 @@ func buildMydumperArgs(host string, port uint16, user, defaultsFile, outputDir s
 
 	if defaultsFile != "" {
 		args = append(args, "--defaults-file", defaultsFile)
+	}
+	if extraDefaultsFile != "" {
+		args = append(args, "--defaults-extra-file", extraDefaultsFile)
 	}
 
 	switch len(schemas) {
@@ -746,11 +801,12 @@ func buildMydumperArgs(host string, port uint16, user, defaultsFile, outputDir s
 // writeMydumperDefaultsFile writes the source password to a fresh temp file in
 // MySQL option-file format (0600) so mydumper can read it via --defaults-file
 // instead of taking it on argv. Used by Docker mode, where a passed-through
-// MYSQL_PWD would still surface in `docker inspect` Config.Env. The returned
+// MYSQL_PWD would still surface in `docker inspect` Config.Env, and, with an
+// empty password, for the session variables alone (#2211). The returned
 // cleanup removes the file and must be deferred by the caller even on a later
 // error. os.CreateTemp opens O_EXCL with mode 0600, so creation is atomic and
 // the secret is never briefly world-readable (#811).
-func writeMydumperDefaultsFile(password string) (path string, cleanup func(), err error) {
+func writeMydumperDefaultsFile(password, extra string) (path string, cleanup func(), err error) {
 	f, err := os.CreateTemp("", "bintrail-mydumper-*.cnf")
 	if err != nil {
 		return "", nil, fmt.Errorf("create mydumper defaults file: %w", err)
@@ -765,9 +821,14 @@ func writeMydumperDefaultsFile(password string) (path string, cleanup func(), er
 		return "", nil, fmt.Errorf("chmod mydumper defaults file: %w", chmodErr)
 	}
 	// Password under both [client] and [mydumper] so any mydumper build picks
-	// it up regardless of which group it reads.
-	v := escapeMyCnfValue(password)
-	content := "[client]\npassword=" + v + "\n[mydumper]\npassword=" + v + "\n"
+	// it up regardless of which group it reads. extra (the session variables,
+	// #2211) follows as written; an empty password writes no password lines.
+	content := ""
+	if password != "" {
+		v := escapeMyCnfValue(password)
+		content = "[client]\npassword=" + v + "\n[mydumper]\npassword=" + v + "\n"
+	}
+	content += extra
 	if _, werr := f.WriteString(content); werr != nil {
 		_ = f.Close()
 		cleanup()
