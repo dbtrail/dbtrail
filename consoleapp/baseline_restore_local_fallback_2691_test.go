@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"os"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -151,7 +152,13 @@ func TestRestoreFallback_neverFromASnapshotNewerThanTheMoment(t *testing.T) {
 // A local folder that cannot be listed is no fallback either: both failures
 // are named.
 func TestRestoreFallback_bothLocationsFail(t *testing.T) {
-	local := filepath.Join(t.TempDir(), "gone")
+	// A path that is not a directory: it cannot be listed, and the mark the
+	// restore writes first cannot create it either. (A folder that does not
+	// exist yet is created by that mark, and then holds no snapshot.)
+	local := filepath.Join(t.TempDir(), "not-a-folder")
+	if err := os.WriteFile(local, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	folded, _, _ := stubBucket(t, nil, time.Time{}, errBucketDown)
 	_, st, _ := restoreS3Server(t, local)
 	if st.State != "failed" || len(*folded) != 0 {
