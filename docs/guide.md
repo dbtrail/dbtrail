@@ -1,5 +1,7 @@
 # DBTrail — Practical Guide for DBAs
 
+To install DBTrail and run heavy queries from your mysql client, start at the [start page](https://www.dbtrail.com/docs/quickstart/). This guide covers the command line's row history and recovery.
+
 DBTrail indexes every INSERT, UPDATE, and DELETE from MySQL ROW-format binary logs into a queryable MySQL database, and generates reversal SQL for recovery — without needing the original binlog files. This guide is for DBAs who need scenario-driven walkthroughs and troubleshooting help.
 
 ---

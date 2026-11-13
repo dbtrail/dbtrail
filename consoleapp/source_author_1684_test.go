@@ -123,7 +123,7 @@ func TestFoldSourceAuthor(t *testing.T) {
 
 			asked.Store(0)
 			folds.Store(0)
-			_, _, _, err = sup.executeRestore(console.BaselineRestoreRequest{ServerID: "s", ServerName: "s", BaselineDir: dir, IndexDSN: "idx", At: refreshAt})
+			_, _, _, _, err = sup.executeRestore(console.BaselineRestoreRequest{ServerID: "s", ServerName: "s", BaselineDir: dir, IndexDSN: "idx", At: refreshAt})
 			check("restore", err, folds, asked)
 		})
 	}

@@ -44,7 +44,9 @@ GROUP BY c.tier ORDER BY revenue DESC;
   You review it and you run it.
   [Undo a wrong change](https://www.dbtrail.com/docs/guides/recovery/)
 - **See a table as it was yesterday at 14:30**, or every version of one row,
-  with `AS OF` from your mysql client.
+  with `AS OF` from your mysql client. To try it in 30 seconds with nothing of
+  yours connected: `docker run --rm -p 6033:6033 ghcr.io/dbtrail/bintrail-demo`
+  ([the demo image](docs/demo.md)).
   [Restore tables to a moment](https://www.dbtrail.com/docs/guides/pitr/)
 - **Ask Claude what changed.** Connect Claude, or any MCP client, and ask in
   plain words: "what was deleted from orders in the last hour?", "how did
@@ -76,10 +78,6 @@ For a server you keep running, the same setup as a compose file and a few API
 calls you can keep in your automation:
 [In production](https://www.dbtrail.com/docs/production/). Linux packages and
 Amazon ECS too.
-
-To try the time-travel SQL in 30 seconds, with nothing of yours connected:
-`docker run --rm -p 6033:6033 ghcr.io/dbtrail/bintrail-demo`
-([the demo image](docs/demo.md)).
 
 ## Limits
 
