@@ -53,6 +53,10 @@ type Config struct {
 	// DuckDBTuning bounds the baseline scan; the zero value is DefaultTuning.
 	DuckDBTuning duckdbutil.Tuning
 
+	// CompactAfter compacts a table, after its delta, once it holds at least
+	// this many delete files (compact.go). 0 never compacts.
+	CompactAfter int
+
 	// OnCommit, when set, is called right after each commit becomes durable,
 	// before the run moves on. This is where the audit event belongs: a run
 	// killed between two tables has still written the first, and a callback
@@ -106,6 +110,11 @@ type Outcome struct {
 	SnapshotID *int64
 	Cursor     string
 	Location   string
+	// Compaction is nil when the run did not compact the table, and says
+	// what happened when it tried. A compaction that was not applied leaves
+	// the verdict alone: the delta before it committed, and the table is
+	// current.
+	Compaction *Compaction
 }
 
 // CommitKind says what a commit wrote.
@@ -114,13 +123,16 @@ type CommitKind string
 const (
 	CommitLoad  CommitKind = "load"  // the baseline rows
 	CommitDelta CommitKind = "delta" // one window of net changes
+	// CommitCompact rewrote the table's live rows and dropped its delete
+	// files; the rows and the cursor are unchanged.
+	CommitCompact CommitKind = "compact"
 )
 
 // Commit describes one durable commit, as handed to Config.OnCommit.
 type Commit struct {
 	Schema, Table string
 	Kind          CommitKind
-	Rows          int64 // rows loaded (load) or upserted (delta)
+	Rows          int64 // rows loaded (load), upserted (delta) or rewritten (compact)
 	Deletes       int64
 	Events        int64
 	SnapshotID    *int64 // nil for a load that wrote no data file (see Outcome.SnapshotID)
@@ -467,6 +479,16 @@ func (d *deps) runTable(ctx context.Context, schema, tbl string) Outcome {
 		out.Verdict = VerdictExported
 		out.Detail = fmt.Sprintf("%d events folded into %d upserts and %d deletes%s", res.events, res.upserts, res.deletes, res.note)
 	}
+	// Also on a run with nothing new: a compaction that was refused last
+	// time is retried here, and the threshold is read from the table, so a
+	// table another engine already compacted is left alone.
+	if c := d.compact(ctx, schema, tbl, res.table, res.cursor); c != nil {
+		out.Compaction = c
+		if c.Err == nil {
+			out.SnapshotID = c.SnapshotID
+		}
+		out.Detail += c.note()
+	}
 	return out
 }
 
@@ -774,7 +796,8 @@ type incrementResult struct {
 	snapshotID               *int64 // nil while the table has no snapshot
 	cursor                   cursor
 	location                 string
-	note                     string // "" or a hedge appended to the outcome's detail
+	note                     string       // "" or a hedge appended to the outcome's detail
+	table                    *table.Table // the table as the window left it: committed, or as read
 }
 
 // increment folds the events between cur and the run's cut into one commit.
@@ -794,7 +817,7 @@ type incrementResult struct {
 func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.TableMeta, pkCols []metadata.ColumnMeta,
 	icetbl *table.Table, cur *cursor) (*incrementResult, error) {
 
-	res := &incrementResult{cursor: *cur, location: icetbl.Location(), snapshotID: snapshotIDOf(icetbl)}
+	res := &incrementResult{cursor: *cur, location: icetbl.Location(), snapshotID: snapshotIDOf(icetbl), table: icetbl}
 	at := d.cfg.At
 
 	cols, err := columnsFromSchema(icetbl.Schema())
@@ -983,6 +1006,7 @@ func (d *deps) increment(ctx context.Context, schema, tbl string, tm *metadata.T
 		return nil, fmt.Errorf("commit deltas for %s.%s: %w", schema, tbl, err)
 	}
 	res.cursor = newCur
+	res.table = committed
 	res.location = committed.Location()
 	res.snapshotID = snapshotIDOf(committed)
 	slog.Info("iceberg export: deltas committed", "schema", schema, "table", tbl,

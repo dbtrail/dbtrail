@@ -156,7 +156,13 @@ const (
 	// MySQL source serves a reader by GTID only with gtid_mode=ON (the
 	// manual, CHANGE REPLICATION SOURCE TO, SOURCE_AUTO_POSITION:
 	// "GTID_MODE=ON on the source"), so under any other value the capture
-	// cannot read from it while the source keeps writing.
+	// cannot read from it while the source keeps writing. Verified on MySQL
+	// 8.0.46 in each of the three (#2674,
+	// TestIntegrationGTIDModeRefusesCaptureByGTID_2674): the source answers
+	// capture's GTID request, and `bintrail stream` resuming from a GTID
+	// checkpoint, with ERROR 1236 "The replication sender thread cannot
+	// start in AUTO_POSITION mode: this server has GTID_MODE = <mode>
+	// instead of ON.", and serves it under ON.
 	captureDetailNoGTIDMode        = "the source has no gtid_mode (a MariaDB source), which is not compared"
 	captureDetailGTIDModeOff       = "GTIDs are off on the source (gtid_mode=OFF) while capture follows it by GTID, so capture cannot read from it"
 	captureDetailGTIDOffPermissive = "the source's gtid_mode is OFF_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it"
@@ -344,9 +350,19 @@ var probeCapture = probeCaptureFromDBs
 // asked". Only once the index's part is done is it the source that did not
 // answer in time.
 func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time) captureProbeResult {
+	return probeCaptureAgainstFromDBs(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, "")
+}
+
+// probeCaptureAgainst is probeCapture with the source compared against
+// another GTID set than capture's: the snapshot's, when the snapshot's own
+// coordinates showed that capture recorded nothing since it (#2720 review,
+// asOfSnapshot). A package variable for the reason probeCapture is.
+var probeCaptureAgainst = probeCaptureAgainstFromDBs
+
+func probeCaptureAgainstFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time, against string) captureProbeResult {
 	var indexRead atomic.Bool
 	r := boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) captureProbeResult {
-		return captureFromDBs(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, &indexRead)
+		return captureFromDBsAgainst(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, &indexRead, against)
 	})
 	return timedOutSide(r, indexRead.Load())
 }
@@ -393,6 +409,12 @@ func boundedCaptureProbe(parent context.Context, within time.Duration, probe fun
 // is bounded like the window probe (windowProbeTimeout, dial and reads),
 // and its queries by ctx; a failure's cause is scrubbed of both DSNs.
 func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time, indexRead *atomic.Bool) captureProbeResult {
+	return captureFromDBsAgainst(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, indexRead, "")
+}
+
+// captureFromDBsAgainst is captureFromDBs with the checkpoint's GTID set
+// replaced by against when that is set (asOfSnapshot).
+func captureFromDBsAgainst(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time, indexRead *atomic.Bool, against string) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -406,6 +428,7 @@ func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.
 	if indexRead != nil {
 		indexRead.Store(true)
 	}
+	st = asOfSnapshot(st, against)
 	r, err := compareCapture(ctx, idx, st, anchor, sourceRead, func() (*sql.DB, error) {
 		return connectSource(sourceProbeDSN(sourceDSN), ssl)
 	})

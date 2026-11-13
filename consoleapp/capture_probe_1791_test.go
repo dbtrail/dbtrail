@@ -300,11 +300,11 @@ func TestCaptureVerdict_aCancelledCallerLogsNothing(t *testing.T) {
 	logs := captureSlogFor(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	b.captureVerdict(ctx, e, time.Now().Add(-3*time.Hour), time.Time{})
+	b.captureVerdict(ctx, e, time.Now().Add(-3*time.Hour), time.Time{}, "")
 	if out := logs.String(); out != "" {
 		t.Fatalf("a cancelled caller logged %q", out)
 	}
-	b.captureVerdict(context.Background(), e, time.Now().Add(-3*time.Hour), time.Time{})
+	b.captureVerdict(context.Background(), e, time.Now().Add(-3*time.Hour), time.Time{}, "")
 	if out := logs.String(); !strings.Contains(out, "does not confirm that capture recorded everything it wrote") {
 		t.Fatalf("a live caller logged %q, want the line", out)
 	}
