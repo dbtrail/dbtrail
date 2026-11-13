@@ -77,7 +77,8 @@ func TestPGFollowingViewHasNoCasts(t *testing.T) {
 	in.Follow = FollowPointer
 	in.BaselineSource = "/snap"
 	out := Generate(in)
-	for _, not := range []string{"CAST(", "COLLATE C", "unhex("} {
+	// The table's own columns: the file's preflight uses COLLATE C on paths.
+	for _, not := range []string{`CAST("id"`, `"note" COLLATE C`, `unhex(`, "A PostgreSQL source's snapshot files"} {
 		if strings.Contains(out, not) {
 			t.Errorf("a following file carries %q for a PostgreSQL table\n%s", not, out)
 		}
