@@ -3,10 +3,14 @@ package status
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // ContinuityStatus is the single rule for the machine-readable continuity
@@ -38,7 +42,8 @@ import (
 // CollectCoverageSummary, or LoadGapWindow after a bare LoadStreamState). A
 // stream without it grades an acknowledged loss "gap_acknowledged" however
 // old it is: the conservative answer, and the one this function gave before
-// the window existed.
+// the window existed. The window can start before the delta floor the
+// coverage summary reports as its start (see lookBelowFloor), never after it.
 func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 	switch {
 	case stream == nil && streamErr != nil:
@@ -130,9 +135,9 @@ type CoverageSummary struct {
 
 // acknowledgedLossInWindow is the continuity verdict of a stream that holds an
 // ACKNOWLEDGED loss stamped at lostAt: still on record while the loss is
-// inside the window of changes still held, which starts at the delta-coverage
-// floor (the oldest hour of changes still held), and ok once the window starts
-// after it. The record itself is never erased, so without this a loss from
+// inside the window of changes still held, which starts at floor (the delta
+// floor, moved back by lookBelowFloor to an older change still held), and ok
+// once the window starts after it. The record itself is never erased, so without this a loss from
 // years ago would keep every later verdict off "ok" although nothing still
 // held spans that moment. A loss AT the floor counts as inside. With no
 // floor, or a floor that archives may extend further back (BelowIsUnknown),
@@ -166,20 +171,195 @@ func (s *StreamStateInfo) GapOnRecord() bool {
 // held, so the continuity verdict of an ACKNOWLEDGED loss can tell a loss
 // that window still reaches from one it no longer does. It reads the floor
 // (OldestDeltaFromDB) only when the stream holds an acknowledged loss: no
-// other verdict depends on it, and CollectStatus runs on a timer.
+// other verdict depends on it, and CollectStatus runs on a timer. Then
+// lookBelowFloor checks what the floor cannot see.
 //
-// A floor that cannot be read is logged and left unknown, which keeps the
-// loss on record. Safe on a nil stream.
+// A floor that cannot be read is left unknown, which keeps the loss on record,
+// and is said once per condition (floorWarnings). Safe on a nil stream.
 func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *StreamStateInfo) {
 	if !stream.GapAcknowledged() {
 		return
 	}
 	floor, err := OldestDeltaFromDB(ctx, db, dbName)
 	if err != nil {
-		slog.Warn("could not determine the delta-coverage floor; the acknowledged capture loss stays on record", "db", dbName, "error", err)
+		floorWarnings.failed(ctx, db, "gap-window",
+			"could not determine the delta-coverage floor; the acknowledged capture loss stays on record", dbName, err)
 		return
 	}
+	floorWarnings.answered(db, "gap-window",
+		"the delta-coverage floor can be read again; the acknowledged capture loss is graded against it", dbName)
 	stream.Floor = floor
+	lookBelowFloor(ctx, db, dbName, stream)
+}
+
+// lookBelowFloor moves stream.Floor back to a change still held from at or
+// before an acknowledged loss, when the delta floor alone would put the loss
+// outside the window (#2669). The delta floor is the right start for grading
+// snapshots and misses two places that still serve older changes:
+//
+//   - archived hours that do not reach the live partitions without a break.
+//     The floor stops at the break, but those hours can still be queried, and
+//     a query over them and the live hours spans the loss;
+//   - events dated before the name of the partition that holds them. The
+//     oldest partition takes every event older than its bound, so an old
+//     binlog indexed after rotation puts changes from before the loss under a
+//     later hour's name. Archived the same way, they are seen through
+//     archive_state.min_event_ts.
+//
+// It runs only when the verdict would otherwise be "ok", so the common case
+// costs nothing. A check that fails, a cancelled request included, leaves the
+// window's start unknown, which keeps the loss on record: "ok" is never said
+// from a look that did not finish. Only stream.Floor changes; the floor a
+// caller grades snapshots against or reports as delta_from is its own copy.
+func lookBelowFloor(ctx context.Context, db *sql.DB, dbName string, stream *StreamStateInfo) {
+	if !stream.GapAcknowledged() || stream.GapOnRecord() {
+		return
+	}
+	held, err := heldAtOrBefore(ctx, db, stream.GapLostAt.Time)
+	if err != nil {
+		stream.Floor = DeltaFloor{}
+		floorWarnings.failed(ctx, db, "gap-below",
+			"could not check whether changes from before the acknowledged capture loss are still held; it stays on record", dbName, err)
+		return
+	}
+	floorWarnings.answered(db, "gap-below",
+		"changes from before the acknowledged capture loss can be checked again", dbName)
+	if !held.IsZero() {
+		stream.Floor.Hour = held.UTC().Truncate(time.Hour)
+	}
+}
+
+// floorWarnings says a failed read of the window's start at Warn once per
+// condition: on the first failure for an index, and again only after a read of
+// it has worked (#2669). The readers run on timers and on every page load, so
+// a Warn per read turned one outage into a line per request. A read whose own
+// request was cancelled (a browser that navigated away, a daemon stopping) is
+// not a condition of the index and is logged at Debug only, without touching
+// the state; one that ran out of time is.
+var floorWarnings = &onceWarner{failing: map[warnKey]bool{}}
+
+// warnKey is one condition: one question asked of one index connection. The
+// *sql.DB tells apart two index servers whose databases share a name; every
+// caller holds its handle for the life of the index (the console's bundle,
+// the MCP target, one `bintrail status` run). An entry lives only while its
+// condition stands, so a handle that is gone leaves at most one behind.
+type warnKey struct {
+	db       *sql.DB
+	question string
+}
+
+type onceWarner struct {
+	mu      sync.Mutex
+	failing map[warnKey]bool
+}
+
+func (w *onceWarner) failed(ctx context.Context, db *sql.DB, question, msg, dbName string, err error) {
+	// Only a cancellation is the caller going away. A deadline is a read that
+	// did not answer in time, which is exactly what this exists to report.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		slog.Debug(msg, "db", dbName, "error", err, "cancelled", ctx.Err())
+		return
+	}
+	key := warnKey{db, question}
+	w.mu.Lock()
+	first := !w.failing[key]
+	w.failing[key] = true
+	w.mu.Unlock()
+	if first {
+		slog.Warn(msg, "db", dbName, "error", err)
+		return
+	}
+	slog.Debug(msg, "db", dbName, "error", err)
+}
+
+func (w *onceWarner) answered(db *sql.DB, question, msg, dbName string) {
+	key := warnKey{db, question}
+	w.mu.Lock()
+	was := w.failing[key]
+	delete(w.failing, key)
+	w.mu.Unlock()
+	if was {
+		slog.Info(msg, "db", dbName)
+	}
+}
+
+// heldAtOrBefore returns a moment at or before at from which the index or its
+// archives still hold a change, or zero when they hold none. It is not the
+// oldest such moment, only one: the caller needs to know whether the window
+// reaches at, not how far it goes.
+//
+// The archives answer first, from archive_state: an archived hour that starts
+// at or before at, or an archived file whose recorded oldest event is. The
+// index answers next, through idx_row_lookup (one dive per table, not a scan
+// of the partition) and partition pruning, which leaves only the oldest
+// partition to look in. A missing archive_state is an index with no archive
+// tier.
+func heldAtOrBefore(ctx context.Context, db *sql.DB, at time.Time) (time.Time, error) {
+	at = at.UTC()
+	held, err := archivedAtOrBefore(ctx, db, at)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !held.IsZero() {
+		return held, nil
+	}
+	var ev sql.NullTime
+	err = db.QueryRowContext(ctx, `SELECT MIN(event_timestamp) FROM binlog_events WHERE event_timestamp <= ? GROUP BY schema_name, table_name LIMIT 1`, at).Scan(&ev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("look for indexed changes from before %s: %w", at.Format(TSFmt), err)
+	}
+	if !ev.Valid || ev.Time.IsZero() || ev.Time.After(at) {
+		return time.Time{}, nil
+	}
+	return ev.Time, nil
+}
+
+// archivedAtOrBefore is heldAtOrBefore's question to archive_state, zero when
+// no archived change at or before at is known. Only values at or before at
+// count: the MIN over the matching rows can be a later hour's name when a row
+// matched by its recorded oldest event.
+//
+// A min_event_ts stored as the zero date (a non-strict sql_mode, or old data)
+// is not an event time. It is left out in the query, so it can neither win the
+// MIN over a real recorded event nor match the row by itself, and ignored here
+// as a second belt; that row still counts by its hour's name. An archive_state
+// without the column (1054: created before it and not migrated, as the
+// planner allows for) is asked by hour names only.
+func archivedAtOrBefore(ctx context.Context, db *sql.DB, at time.Time) (time.Time, error) {
+	hour := at.Format("p_2006010215")
+	var minPartition sql.NullString
+	var minEvent sql.NullTime
+	err := db.QueryRowContext(ctx, `SELECT MIN(partition_name), MIN(CASE WHEN min_event_ts > '1000-01-01' THEN min_event_ts END) FROM archive_state WHERE partition_name <= ? OR (min_event_ts <= ? AND min_event_ts > '1000-01-01')`,
+		hour, at).Scan(&minPartition, &minEvent)
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) && myErr.Number == 1054 {
+		minEvent = sql.NullTime{}
+		err = db.QueryRowContext(ctx, `SELECT MIN(partition_name) FROM archive_state WHERE partition_name <= ?`, hour).Scan(&minPartition)
+	}
+	switch {
+	case err == nil:
+	case isMissingTableErr(err):
+		return time.Time{}, nil
+	default:
+		return time.Time{}, fmt.Errorf("look for archived changes from before %s: %w", at.Format(TSFmt), err)
+	}
+	var held time.Time
+	if minPartition.Valid {
+		t, ok := parsePartitionName(minPartition.String)
+		if !ok {
+			return time.Time{}, fmt.Errorf("archive_state partition_name %q is unparseable", minPartition.String)
+		}
+		if !t.After(at) {
+			held = t
+		}
+	}
+	if minEvent.Valid && !minEvent.Time.IsZero() && !minEvent.Time.After(at) && (held.IsZero() || minEvent.Time.Before(held)) {
+		held = minEvent.Time
+	}
+	return held, nil
 }
 
 // CollectCoverageSummary computes the summary against one index. The floor
@@ -190,8 +370,11 @@ func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *Strea
 func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now time.Time) (*CoverageSummary, error) {
 	sum := &CoverageSummary{}
 	if floor, err := OldestDeltaFromDB(ctx, db, dbName); err != nil {
-		slog.Warn("could not determine the delta-coverage floor; coverage window start is unknown", "db", dbName, "error", err)
+		floorWarnings.failed(ctx, db, "coverage",
+			"could not determine the delta-coverage floor; coverage window start is unknown", dbName, err)
 	} else {
+		floorWarnings.answered(db, "coverage",
+			"the delta-coverage floor can be read again; the coverage window has a start", dbName)
 		sum.Floor = floor
 	}
 	latest, err := NewestIndexedEvent(ctx, db, dbName)
@@ -204,10 +387,11 @@ func CollectCoverageSummary(ctx context.Context, db *sql.DB, dbName string, now 
 		slog.Warn("could not load stream state for the coverage summary", "db", dbName, "error", streamErr)
 	}
 	if stream != nil {
-		// The floor this summary already read is the window: one read, and
-		// the verdict cannot be graded against a different floor than the
-		// delta_from beside it.
+		// The floor this summary already read starts the window: one read,
+		// and the window can only start at or before the delta_from beside
+		// it, through the same look below it LoadGapWindow takes.
 		stream.Floor = sum.Floor
+		lookBelowFloor(ctx, db, dbName, stream)
 	}
 	sum.Continuity = ContinuityStatus(stream, streamErr)
 	if sum.Continuity == ContinuityGapAcknowledged {
