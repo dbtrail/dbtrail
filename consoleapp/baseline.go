@@ -400,8 +400,9 @@ func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
 	// while a refresh folds the newest one forward would leave the refresh
 	// anchored on a snapshot being written underneath it.
 	if s.busyLocked(req.ServerID) {
+		err := s.busyErrLocked(req.ServerID)
 		s.mu.Unlock()
-		return console.ErrBaselineRunning
+		return err
 	}
 	s.jobs[req.ServerID] = &console.BaselineStatus{State: "running", Since: nowStamp()}
 	s.mu.Unlock()
@@ -2025,6 +2026,51 @@ func countDumpableTables(ctx context.Context, db *sql.DB, schemas []string) (int
 
 // nowStamp is the RFC3339 timestamp used in job status fields.
 func nowStamp() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// busyError is console.ErrBaselineRunning with what holds the server (#2674):
+// the button that starts a full read answered "a baseline is already running"
+// while the only job was the send to S3 of a snapshot kept on this machine,
+// which the page names differently and which nobody calls a baseline. It is
+// still ErrBaselineRunning to errors.Is, so every caller keeps its 409.
+type busyError struct{ what string }
+
+func (e *busyError) Error() string        { return e.what }
+func (e *busyError) Is(target error) bool { return target == console.ErrBaselineRunning }
+
+// busyErrLocked says which job holds serverID, for a full read refused by the
+// one-job-per-server rule; s.mu held, and busyLocked true. The job kinds are
+// busyLocked's, in its order.
+func (s *baselineSupervisor) busyErrLocked(serverID string) error {
+	since := func(st *console.BaselineStatus) string {
+		t, err := time.Parse(time.RFC3339, st.Since)
+		if err != nil {
+			return ""
+		}
+		return " since " + t.UTC().Format("2006-01-02 15:04:05") + " UTC"
+	}
+	running := func(m map[string]*console.BaselineStatus) *console.BaselineStatus {
+		if st, ok := m[serverID]; ok && st.State == "running" {
+			return st
+		}
+		return nil
+	}
+	const after = "; the full read can start once it finishes"
+	switch {
+	case running(s.jobs) != nil:
+		return &busyError{"a full read of this server is already running" + since(running(s.jobs))}
+	case running(s.refreshes) != nil && running(s.refreshes).SendingHeld:
+		return &busyError{"a snapshot kept on this machine is being sent to S3" + since(running(s.refreshes)) + after}
+	case running(s.refreshes) != nil:
+		return &busyError{"an update of this server's snapshot from the recorded changes is running" + since(running(s.refreshes)) + after}
+	case running(s.restores) != nil:
+		return &busyError{"a snapshot restore for this server is running" + since(running(s.restores)) + after}
+	case running(s.exports) != nil:
+		return &busyError{"a SQL export of this server's snapshot is running" + since(running(s.exports)) + after}
+	case running(s.compacts) != nil:
+		return &busyError{"the table changes of this server's snapshots are being merged" + since(running(s.compacts)) + after}
+	}
+	return console.ErrBaselineRunning
+}
 
 // recordRun appends one finished run to the history (no-op without one).
 // finishedAt is stamped here so every producer records the same clock.
