@@ -32,7 +32,7 @@ func TestBuildMydumperArgsCarriesLockMode(t *testing.T) {
 		{baseline.LockModeSafeNoLock, "SAFE_NO_LOCK"},
 		{baseline.LockModeNoLock, "NO_LOCK"},
 	} {
-		args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", true, tc.mode)
+		args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", true, tc.mode)
 		if got := syncModeArg(t, args); got != tc.want {
 			t.Errorf("lock mode %s produced --sync-thread-lock-mode %q, want %q", tc.mode, got, tc.want)
 		}
@@ -65,7 +65,7 @@ func TestDumpLockModeFlagDefaultsToConsistent(t *testing.T) {
 // run path refuses when the operator asked for a specific mode — this only
 // pins that the builder itself stays silent.
 func TestBuildMydumperArgsOmitsLockModeOnOldMydumper(t *testing.T) {
-	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "/tmp/dump", 4, nil, nil, "", false, baseline.LockModeFTWRL)
+	args := buildMydumperArgs("127.0.0.1", 3306, "root", "", "", "/tmp/dump", 4, nil, nil, "", false, baseline.LockModeFTWRL)
 	if got := syncModeArg(t, args); got != "" {
 		t.Errorf("old mydumper got --sync-thread-lock-mode %q; the flag does not exist there and the dump would fail", got)
 	}
