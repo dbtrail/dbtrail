@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -78,7 +79,7 @@ func (s *baselineSupervisor) runRestore(req console.BaselineRestoreRequest) {
 		slog.Warn("restore to a moment: could not mark the snapshot it will write as a restore's result before writing it; it is marked again when the restore ends",
 			"server", req.ServerName, "id", req.ServerID, "error", merr)
 	}
-	tables, refused, reuse, err := s.executeRestore(req)
+	tables, refused, reuse, from, err := s.executeRestore(req)
 	if err == nil {
 		if merr := baseline.MarkRestored(req.BaselineDir, result); merr != nil {
 			slog.Warn("restore to a moment: the snapshot was published, but its mark could not be rewritten as finished; the mark written when the restore started keeps it for a day from then, and if that one is missing too the cleanup may remove it as an old snapshot",
@@ -94,7 +95,19 @@ func (s *baselineSupervisor) runRestore(req console.BaselineRestoreRequest) {
 	// before it deletes a local one). Gated on the fold's success so an
 	// incomplete snapshot never reaches the destination.
 	var uploaded int
-	if err == nil && req.BaselineS3 != "" {
+	switch {
+	case err == nil && req.BaselineS3 != "" && from.bucketUnread:
+		// Not sent (#2691): the bucket could not be listed, so whether it
+		// already holds a complete snapshot of this very second is unknown
+		// (the collision check below the listing could not run), and an
+		// upload would write _INCOMPLETE into it and then overwrite it. The
+		// cleanup sends it later (it lists the last restore's result as to
+		// send even while S3 cannot be asked about it, restoredKept), and
+		// that send skips every object S3 already has and never removes
+		// _SUCCESS, so a complete copy there is never replaced.
+		err = fmt.Errorf("%w: it was written to %s and not sent to %s, because %s could not be read, so it is not known whether it already holds a snapshot of that second; the cleanup sends it later, skipping anything S3 already has, so a complete copy there is never replaced",
+			errSnapshotNotUploaded, refreshSnapshotDir(restoreFoldRequest(req), req.At.UTC()), req.BaselineS3, req.BaselineS3)
+	case err == nil && req.BaselineS3 != "":
 		uploaded, err = uploadRefreshedSnapshot(s.ctx, restoreFoldRequest(req), req.At.UTC())
 	}
 	s.recordRun(req.ServerID, req.ServerName, foldRunCounts(console.BaselineRunRecord{
@@ -111,6 +124,9 @@ func (s *baselineSupervisor) runRestore(req console.BaselineRestoreRequest) {
 		s.restores[req.ServerID] = st
 	}
 	applyFoldStatus(st, tables, refused, reuse, err)
+	// Set on every outcome, never left from a previous run: the slot is
+	// reused. A result that could not be sent to S3 still came from here.
+	st.SourceNote = from.note
 	if err != nil {
 		if foldPublished(err) {
 			// The fold did its work; only the sending failed. Said as such,
@@ -157,19 +173,20 @@ var snapshotAt = reconstruct.SnapshotAt
 // the listing's source separately from the fold's would let the two name
 // different locations, and the fold would then refuse tables the list
 // promised.
-func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) (tables, refused int, reuse reuseTally, err error) {
+func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) (tables, refused int, reuse reuseTally, from restoreFrom, err error) {
 	fold := restoreFoldRequest(req)
-	source := baselineFoldSource(fold)
-	tableList, anchor, err := snapshotAt(s.ctx, source, req.At)
+	source, tableList, anchor, from, err := s.restoreSource(fold, req.At)
 	if err != nil {
-		return 0, 0, reuseTally{}, fmt.Errorf("list the snapshot to restore from: %w", err)
+		return 0, 0, reuseTally{}, restoreFrom{}, err
 	}
-	if len(tableList) == 0 {
-		return 0, 0, reuseTally{}, fmt.Errorf("no snapshot exists at or before %s; a restore folds an existing snapshot forward, so pick a moment after your oldest snapshot", req.At.UTC().Format("2006-01-02 15:04:05"))
+	if source != baselineFoldSource(fold) {
+		// The fold reads where the listing found the snapshot. The upload
+		// still goes to the S3 destination (runRestore).
+		fold.FoldSource = source
 	}
 	// Another writer's snapshot is never restored from (#1684).
 	if err := foldSourceRefusal(req.IndexDSN, source, anchor); err != nil {
-		return 0, 0, reuseTally{}, err
+		return 0, 0, reuseTally{}, restoreFrom{}, err
 	}
 	if reconstruct.SnapshotDirName(anchor) == reconstruct.SnapshotDirName(req.At) {
 		// Compared by the DIRECTORY NAME, which is what collides, not by the
@@ -183,9 +200,74 @@ func (s *baselineSupervisor) executeRestore(req console.BaselineRestoreRequest) 
 		// place, writing the _INCOMPLETE marker into a complete remote backup
 		// first, so a failure midway leaves the bucket copy hidden from every
 		// listing and nothing saying so.
-		return 0, 0, reuseTally{}, fmt.Errorf("a snapshot already exists at exactly %s in %s; pick another second, or use that snapshot", req.At.UTC().Format("2006-01-02 15:04:05"), source)
+		return 0, 0, reuseTally{}, restoreFrom{}, fmt.Errorf("a snapshot already exists at exactly %s in %s; pick another second, or use that snapshot", req.At.UTC().Format("2006-01-02 15:04:05"), source)
 	}
-	return s.foldSnapshot(fold, req.At.UTC(), tableList)
+	tables, refused, reuse, err = s.foldSnapshot(fold, req.At.UTC(), tableList)
+	return tables, refused, reuse, from, err
+}
+
+// restoreFrom says where a restore read when it was not the usual place:
+// note is the operator-facing reason (BaselineStatus.SourceNote), and
+// bucketUnread that the S3 location could not be listed, which also means
+// its result must not be uploaded in this run (runRestore).
+type restoreFrom struct {
+	note         string
+	bucketUnread bool
+}
+
+// restoreSource finds the snapshot a restore to at starts from: the newest at
+// or before at, in the location the scheduled update reads (the S3
+// destination on a server that has one, #1541). When that is the bucket and
+// it holds no such snapshot, or cannot be read, the server's local folder is
+// asked the same question (#2691), the folder-then-bucket pair the console's
+// time travel reads, in the restore's order: the bucket stays first because
+// the local folder holds only the newest few, and may be the one that is
+// behind. A snapshot after at is never an answer, in either location.
+//
+// note is empty when the restore reads where it normally reads, and says
+// why it reads the local folder otherwise. When neither location has a
+// snapshot, the error names both.
+func (s *baselineSupervisor) restoreSource(fold refreshRequest, at time.Time) (source string, tables []string, anchor time.Time, from restoreFrom, err error) {
+	source = baselineFoldSource(fold)
+	tables, anchor, err = snapshotAt(s.ctx, source, at)
+	moment := at.UTC().Format("2006-01-02 15:04:05")
+	fallback := fold.BaselineDir != "" && source != fold.BaselineDir && strings.HasPrefix(source, "s3://")
+	if (err == nil && len(tables) > 0) || !fallback {
+		if err != nil {
+			return "", nil, time.Time{}, restoreFrom{}, fmt.Errorf("list the snapshot to restore from: %w", err)
+		}
+		if len(tables) == 0 {
+			return "", nil, time.Time{}, restoreFrom{}, errNoSnapshotAtOrBefore(moment)
+		}
+		return source, tables, anchor, restoreFrom{}, nil
+	}
+	ltables, lanchor, lerr := snapshotAt(s.ctx, fold.BaselineDir, at)
+	if lerr == nil && len(ltables) > 0 {
+		when := lanchor.UTC().Format("2006-01-02 15:04:05")
+		if err != nil {
+			from.note, from.bucketUnread = fmt.Sprintf("The S3 location %s could not be read (%v), so this restore started from the snapshot at %s in this server's local folder. A newer snapshot may be in S3.", source, err, when), true
+			slog.Warn("restore to a moment: the S3 location could not be read; restoring from the local folder",
+				"server", fold.ServerName, "id", fold.ServerID, "destination", source, "folder", fold.BaselineDir, "snapshot", when, "error", err)
+		} else {
+			from.note = fmt.Sprintf("The S3 location %s holds no snapshot at or before %s, so this restore started from the snapshot at %s in this server's local folder.", source, moment, when)
+			slog.Warn("restore to a moment: the S3 location holds no snapshot at or before the moment; restoring from the local folder",
+				"server", fold.ServerName, "id", fold.ServerID, "destination", source, "folder", fold.BaselineDir, "snapshot", when)
+		}
+		return fold.BaselineDir, ltables, lanchor, from, nil
+	}
+	switch {
+	case err != nil && lerr != nil:
+		return "", nil, time.Time{}, restoreFrom{}, fmt.Errorf("list the snapshot to restore from: %w; the local folder %s could not be read either: %v", err, fold.BaselineDir, lerr)
+	case err != nil:
+		return "", nil, time.Time{}, restoreFrom{}, fmt.Errorf("list the snapshot to restore from: %w; the local folder %s holds no snapshot at or before %s either", err, fold.BaselineDir, moment)
+	case lerr != nil:
+		return "", nil, time.Time{}, restoreFrom{}, fmt.Errorf("%w; the local folder %s could not be read: %v", errNoSnapshotAtOrBefore(moment), fold.BaselineDir, lerr)
+	}
+	return "", nil, time.Time{}, restoreFrom{}, errNoSnapshotAtOrBefore(moment)
+}
+
+func errNoSnapshotAtOrBefore(moment string) error {
+	return fmt.Errorf("no snapshot exists at or before %s; a restore folds an existing snapshot forward, so pick a moment after your oldest snapshot", moment)
 }
 
 // restoreFoldRequest translates a restore request into the fold request the

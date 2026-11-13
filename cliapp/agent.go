@@ -34,6 +34,9 @@ import (
 var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Connect to DBTrail and listen for commands",
+	// Hidden (#2637): the endpoint its examples connect to does not resolve
+	// today, so a new user who found it in --help had nowhere to connect. The command still runs for anyone who calls it by name.
+	Hidden: true,
 	Long: `Start an outbound agent channel to the DBTrail service. The agent opens a
 WebSocket connection to DBTrail, authenticates with its API key, and listens
 for commands (resolve_pk, recover, forensics_query). No inbound ports are
