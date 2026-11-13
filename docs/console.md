@@ -606,12 +606,7 @@ page.
   within a few seconds. `port status`, `port off`, and `port routing on|off`
   for Engine Routing complete it. `port mode <server>` says whether a
   server's answers are fresh or fast, and what the router applies; `port mode
-  <server> fresh|fast` saves the choice (what the Snapshots page saves).
-  `port max-behind <server> 5m` gives a server a lag limit: past 5 minutes
-  behind its source, MySQL answers its statements instead of the copy (see
-  [A lag limit per server](time-travel-sql.md#lag-limit)); `off` removes it,
-  and with no value it says the limit saved. `port status` lists each
-  server's limit. A port saved as on that is not answering
+  <server> fresh|fast` saves the choice (what the Snapshots page saves). A port saved as on that is not answering
   (the router is not running) exits 1 and says so.
 
 **The forwarding user.** With Engine Routing on, a statement the copy cannot

@@ -96,14 +96,16 @@ func operandBefore(before string, col []int) bool {
 // INTERVAL is a date on MySQL and a date and time on the copy, which only a
 // comparison does not show; a date picked among strings (GREATEST, COALESCE,
 // CASE, UNION), compared with a string or a parameter, or stepped through
-// another function is MySQL's. So the copy takes a date in four places only:
+// another function is MySQL's. So the copy takes a date in these places only:
 // compared with a column (d >= CURDATE() - INTERVAL 7 DAY, BETWEEN
 // included), inside YEAR, MONTH, DAY or QUARTER, or a select item of its own
 // outside any parentheses, in a statement with no set operation and no
 // ORDER BY (which may read it back under its alias). A compared name must be
 // a column: in a statement with a derived table, a subquery, a WITH or a
 // HAVING, or one that gives the name to a select item itself, it may stand
-// for text, which the caller's types cannot see.
+// for text, which the caller's types cannot see. A fifth place came with
+// #2611: a whole argument of DATEDIFF, or DATE_FORMAT's date
+// (wholeDateFunctionArg), not stepped.
 func dateUses(b string) (cols []string, ok bool) {
 	seen := map[string]bool{}
 	add := func(c string) {
@@ -133,6 +135,10 @@ func dateUses(b string) (cols []string, ok bool) {
 		after := strings.TrimLeft(b[l[1]+len(stepped):], " \t\r\n")
 		switch {
 		case stepped == "" && datePart.MatchString(before) && strings.HasPrefix(after, ")"):
+		case stepped == "" && wholeDateFunctionArg(b, l[0], l[1]):
+			// A whole argument of DATEDIFF, or the date of DATE_FORMAT
+			// (#2611): cast to a date, or written as text, it is the same
+			// date on both sides.
 		case stepped == "" && !setOp && !orderBy.MatchString(b) && depth(before) == 0 && selectItem.MatchString(before) && ended.MatchString(after):
 		default:
 			m := columnThenCmp.FindStringSubmatchIndex(before)
