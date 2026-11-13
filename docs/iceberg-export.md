@@ -472,6 +472,21 @@ These checks run on every invocation, including one where nothing new was
 indexed: a TRUNCATE never lands in the event index, so a quiet window is not
 proof of an unchanged table.
 
+An `ALTER TABLE` in the window that narrowed a column's character set
+(utf8mb4 to latin1), which under a non-strict `sql_mode` turns each character
+the new set cannot hold into `?` with no row events
+([#2735](https://github.com/dbtrail/dbtrail/issues/2735)), is handled in two
+parts. A row the run writes from a change made before the ALTER, holding such
+a character, is `refused-ddl`, and the table reloads as for the other
+statements. The rows the run leaves in the Iceberg table were written by
+earlier runs and are not read back, so the export cannot tell whether one of
+them lost a character: the outcome's detail says so (`an ALTER TABLE narrowed
+shop.orders's column status to latin1 ... Rows this run did not change keep the
+text written before it`) and the run is not refused. If any of them may hold
+characters the new set cannot store, reload the table from a baseline taken
+after the ALTER. A change to a set that holds everything (latin1 to utf8mb4)
+says nothing.
+
 Two conditions refuse before anything is written:
 
 - **No primary key**, or a key of type FLOAT, DOUBLE, TIME, BIT, JSON or a

@@ -285,6 +285,7 @@ func mergeBaselineIntoParquet(ctx context.Context, in mergeInput, rep *TableRepo
 		Changes:           in.Changes,
 		Spill:             in.Spill,
 		PGTextPK:          in.PG,
+		Narrowings:        in.Narrowings,
 		CheckPass: func(m map[string]*query.ResultRow) error {
 			return checkPostBaselineColumns(in, m, colNames)
 		},

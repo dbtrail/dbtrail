@@ -384,8 +384,14 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	if err := h.deltaRefusal(delta); err != nil {
 		return nil, err
 	}
-	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
-		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
+	ddlWin := reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}
+	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table, ddlWin); err != nil {
+		return nil, err
+	}
+	// A narrowing ALTER (#2735): the merge refuses a row carrying a value it
+	// replaced with '?', and what cannot be checked becomes a warning.
+	narrowings, err := reconstruct.FindCharsetNarrowings(ctx, h.indexDB, q.Schema, q.Table, ddlWin)
+	if err != nil {
 		return nil, err
 	}
 	numberingNote, err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark)
@@ -427,7 +433,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// The note becomes this statement's warning only once the read has
 	// succeeded (finishWithOrderNote): a later step that fails must leave
 	// SHOW WARNINGS with nothing, not with a note about a result never sent.
-	notes := nonEmptyNotes(numberingNote, order.ReadNote())
+	notes := append(nonEmptyNotes(numberingNote, order.ReadNote()), narrowings.Notes()...)
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// BEFORE the merge: the merged rowMap reaching the callback below has
 	// no per-row timestamp, and fullTableTextCell would coerce a delta's
@@ -449,7 +455,8 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		// rows was fetched LimitPerPK=1, so it is already collapsed to the latest
 		// event per PK; hand it to the #782 guard anyway (authoritative over what
 		// was fetched), bounded by that fetch (see pkChangingUpdateInEvents).
-		Events: rows,
+		Events:     rows,
+		Narrowings: narrowings,
 	}
 
 	// #998: with a bound connection and no LIMIT, stream the merged rows straight

@@ -66,7 +66,7 @@ func TestWriteBaselineRows_aTableNamedLikeAGlob(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &deps{cfg: Config{}, mem: memory.DefaultAllocator}
-	files, rows, err := d.writeBaselineRows(ctx, tbl, arrowSchema, cols, pk, path)
+	files, rows, err := d.writeBaselineRows(ctx, tbl, arrowSchema, cols, pk, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
