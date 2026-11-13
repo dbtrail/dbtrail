@@ -62,17 +62,30 @@ func (s *baselineSupervisor) RestoreStatus(serverID string) console.BaselineStat
 func (s *baselineSupervisor) runRestore(req console.BaselineRestoreRequest) {
 	defer s.recoverBaselineJob(baselineJobRestore, req.ServerID, req.ServerName)
 	started := time.Now().UTC()
+	// The snapshot is named for the moment restored, which is in the past, so
+	// nothing in its name keeps it: without a mark the count removed it at the
+	// first cleanup after it was written (#2678). The cleanup keeps the last
+	// restore's result for 24 hours, or until the next restore.
+	//
+	// The mark goes in BEFORE the fold (#2691): written after it, a daemon
+	// that died between the publish and the mark left the result unmarked,
+	// and the next cleanup removed it by the count. Until the result is
+	// complete the mark is pending and protects nothing else away from the
+	// previous restore's result; at the end it is rewritten as finished, so
+	// the day is counted from then, or removed when nothing was published.
+	result := reconstruct.SnapshotDirName(req.At.UTC())
+	if merr := baseline.MarkRestoring(req.BaselineDir, result); merr != nil {
+		slog.Warn("restore to a moment: could not mark the snapshot it will write as a restore's result before writing it; it is marked again when the restore ends",
+			"server", req.ServerName, "id", req.ServerID, "error", merr)
+	}
 	tables, refused, reuse, err := s.executeRestore(req)
 	if err == nil {
-		// The snapshot is named for the moment restored, which is in the
-		// past, so nothing in its name keeps it: without this mark the count
-		// removed it at the first cleanup after it was written (#2678). The
-		// cleanup keeps the last restore's result for 24 hours, or until the
-		// next restore.
-		if merr := baseline.MarkRestored(req.BaselineDir, reconstruct.SnapshotDirName(req.At.UTC())); merr != nil {
-			slog.Warn("restore to a moment: the snapshot was published, but it could not be marked as a restore's result, so the cleanup may remove it as an old snapshot",
+		if merr := baseline.MarkRestored(req.BaselineDir, result); merr != nil {
+			slog.Warn("restore to a moment: the snapshot was published, but its mark could not be rewritten as finished; the mark written when the restore started keeps it for a day from then, and if that one is missing too the cleanup may remove it as an old snapshot",
 				"server", req.ServerName, "id", req.ServerID, "error", merr)
 		}
+	} else {
+		baseline.ForgetRestoring(req.BaselineDir, result)
 	}
 	// Same rule as runRefresh, for the same reason: on a server whose backups
 	// go to S3, a snapshot that exists on one box is not where the backups
