@@ -22,6 +22,12 @@ var ErrConcurrentCommit = errors.New("another writer committed to this table aft
 
 // errCommitUnknown marks a commit whose outcome the catalog could not report
 // (a REST 5xx or gateway timeout): it may or may not have landed.
+// errNotSent marks a refusal made before the commit reached the catalog: the
+// guard saw the table had moved and never called it. Only then is it certain
+// that the commit cannot land later, which is what a compaction needs to know
+// before it removes the files it wrote.
+var errNotSent = errors.New("the commit was not sent to the catalog")
+
 var errCommitUnknown = errors.New("the catalog could not say whether this run's commit was applied, so it may or may not have been applied; the next run reads whichever cursor the catalog holds and continues from it")
 
 // guardedCatalog sits between the export and every catalog, local or
@@ -89,6 +95,10 @@ type commitBase struct {
 	cursor   [len(baseKeys)]string
 	present  [len(baseKeys)]bool
 	intended iceberg.Properties
+	// compaction is the id a compaction commit stamps in its snapshot
+	// summary. A compaction sets no property, so the cursor cannot tell its
+	// own commit from another writer's; the id can.
+	compaction string
 }
 
 // baseKeys are the properties whose change means another export run
@@ -106,13 +116,37 @@ func withCommitBase(ctx context.Context, tbl *table.Table, intended iceberg.Prop
 	return context.WithValue(ctx, commitBaseKey{}, b)
 }
 
+// withCompactionBase is withCommitBase for a compaction: the commit sets no
+// property, and it is recognized after a catalog error by the id it stamps in
+// its snapshot summary.
+func withCompactionBase(ctx context.Context, tbl *table.Table, id string) context.Context {
+	b := baseOf(tbl.Metadata())
+	b.compaction = id
+	return context.WithValue(ctx, commitBaseKey{}, b)
+}
+
 // landed reports whether meta is this commit's own result: the cursor it
 // set is there and the table is no longer at the base. Two runs that cut at
 // the same binlog position from the same base compute the same window, so
 // mistaking the other one's identical commit for ours reports a commit that
 // exists with the content ours would have had.
 func (b commitBase) landed(meta table.Metadata) bool {
-	if len(b.intended) == 0 || baseOf(meta).equal(b) {
+	if baseOf(meta).equal(b) {
+		return false
+	}
+	if b.compaction != "" {
+		// The compaction landed when the table's history holds a snapshot
+		// stamped with its id, made on top of the base. Another writer may
+		// have committed after it before the reload; the compaction is
+		// applied all the same, and saying otherwise would hide it.
+		id := compactionSnapshot(meta, b.compaction)
+		if id == nil {
+			return false
+		}
+		s := meta.SnapshotByID(*id)
+		return s != nil && sameID(s.ParentSnapshotID, b.snapshot)
+	}
+	if len(b.intended) == 0 {
 		return false
 	}
 	props := meta.Properties()
@@ -137,6 +171,13 @@ func baseOf(meta table.Metadata) commitBase {
 	return b
 }
 
+func sameID(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 func (b commitBase) equal(o commitBase) bool {
 	if (b.snapshot == nil) != (o.snapshot == nil) || (b.snapshot != nil && *b.snapshot != *o.snapshot) {
 		return false
@@ -156,7 +197,7 @@ func (g guardedCatalog) CommitTable(ctx context.Context, ident table.Identifier,
 		return nil, "", err
 	}
 	if moved {
-		return nil, "", ErrConcurrentCommit
+		return nil, "", fmt.Errorf("%w (%w)", ErrConcurrentCommit, errNotSent)
 	}
 	// Make the catalog check it too, atomically where it can (a REST server
 	// validates requirements under its own lock). A RowDelta already carries

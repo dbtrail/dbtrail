@@ -22,6 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed re-sends, and the log says "it stays here, and sending it is tried
   again in an hour". It keeps its hold mark and stays on disk meanwhile.
 
+- **`bintrail export iceberg` compacts its own tables** (#2719). Every
+  run adds one delete file per table it changed, and DuckDB and ClickHouse
+  pay for each one on every read without being able to compact the table
+  themselves, so reads got slower run after run. Now, once a table holds
+  `--compact-after` delete files (default 10), the run rewrites the table's
+  live rows into new data files and drops every delete file, in one Iceberg
+  commit of type `replace` that changes neither the rows nor the cursor.
+  On a 100,000-row table changed every run, a DuckDB 1.5.6 read took 9.1 s
+  after 30 runs without it, and at most 3.1 s with the default (about 0.01 s
+  right after each compaction); a million-row table compacts in about 1.5 s.
+  Each compaction still leaves two small manifests that later commits keep
+  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A
+  compaction that does not finish, or that another writer's commit overtakes,
+  is not applied and is retried by the next run; the table's verdict stays
+  what its delta made it. `--compact-after 0` turns it off. The
+  JSON report carries a `compaction` object per compacted table, and the audit
+  trail records the commit as `commit: compact`.
 - **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
   snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
   each duplicate and deletes the others, and the deletes are not written to
