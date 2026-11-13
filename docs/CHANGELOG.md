@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **"Goes at the next cleanup" follows the cleanup's own rule, and a failed
+  owed upload waits an hour** (#2675). The Snapshots list marked every local
+  snapshot past the count, counting positions, so with **Delete by age** set
+  it marked snapshots the cleanup keeps (past the count and younger than the
+  age), and it could mark the newest copy of a table or the `current`
+  target. Each row now carries `going` from `GET /api/baselines`, worked out
+  by the cleanup's rule (`baseline.KeptNow`, with the count and the age in
+  force), and the list marks only those. Separately, the newest snapshot the
+  upload interval kept on this machine, sent by a cycle with nothing new to
+  fold, was tried again at every such cycle when its send failed (every 5
+  minutes by default), each time sending the whole snapshot and logging a
+  warning; after a failure it now waits an hour, the cleanup's pace for
+  failed re-sends, and the log says "it stays here, and sending it is tried
+  again in an hour". It keeps its hold mark and stays on disk meanwhile.
+
 - **The MySQL port without Engine Routing answers `LIMIT offset, count`** (part of #2628). It used to refuse `LIMIT 10, 5` and ask for `LIMIT 5 OFFSET 10`; it now writes it that way for the copy itself, so deep pagination from an ORM or a BI tool (`LIMIT ?, ?` from SQLAlchemy too) runs as written. The rows are the ones MySQL returns, checked against MySQL 8.0.46 for an offset of 0, an offset past the last row, a count of 0, leading zeros, and a `LIMIT` in a subquery, a CTE and either side of a `UNION`. A form it cannot write with certainty is still refused with how to write it: a number past 9223372036854775807, a comment between the two numbers, or a prepared argument that is not a whole number; a DOUBLE or DECIMAL argument to a prepared `LIMIT ?` gets MySQL's own error 1210, as on MySQL. And a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery is now refused on that port, as MySQL refuses it (error 1235); the copy used to answer it. Engine Routing is unchanged.
 - **A shared S3 prefix is not pruned by age either** (#2675). With
   `--baseline-retain` (**Delete by age**) and no count, the cleanup removed a

@@ -32,6 +32,12 @@ func TestSnapshotList_keptForTheCheck(t *testing.T) {
 	}
 	// Newest first: the 4th is the last full read, the 5th the one before it.
 	rows[3]["kept_for_check"], rows[4]["kept_for_check"] = true, true
+	// What the server answers past the newest two (#2675): all four are past
+	// the count; the pair is not going, the other two are.
+	for _, i := range []int{2, 3, 4, 5} {
+		rows[i]["past_count"] = true
+	}
+	rows[2]["going"], rows[5]["going"] = true, true
 	raw, _ := json.Marshal(rows)
 	script := renderHarnessJS + `
 vm.runInContext("capsCache = { backup_schedule: true };", ctx);

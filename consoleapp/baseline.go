@@ -261,6 +261,10 @@ type baselineSupervisor struct {
 	// taking the server. The skip is right and the reason is wrong, so what
 	// this carries is the reason.
 	refreshGateSkips map[string]string
+	// owedRetryAt is, per server, when the upload the interval still owes S3
+	// (sendOwedHeldUpload) may be tried again after one that failed: an hour
+	// later, the failed re-sends' pace (#2675). Under s.mu.
+	owedRetryAt map[string]time.Time
 	// refreshChecked is when a refresh cycle for each server last ENDED, whether
 	// it folded or the gate skipped it (#1705), as RefreshStatus reports it.
 	//
