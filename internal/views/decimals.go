@@ -89,7 +89,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 func writeDecimalNote(b *strings.Builder, in Input) {
 	var cast, uncastable, unknown bool
 	for _, t := range in.Baselines {
-		if len(t.PGCasts) > 0 {
+		if len(t.PGCasts) > 0 && !in.Follow.follows() {
 			continue
 		}
 		if !t.SchemaKnown {
@@ -143,6 +143,10 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 // tables: a reader who finds a CAST or a COLLATE in their own state view
 // should learn here where it came from.
 func writePGCastNote(b *strings.Builder, in Input) {
+	if in.Follow.follows() {
+		// A following file reads these tables as text (writeStateViews).
+		return
+	}
 	for _, t := range in.Baselines {
 		if len(t.PGCasts) == 0 {
 			continue
