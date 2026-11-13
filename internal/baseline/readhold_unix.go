@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -48,6 +49,20 @@ import (
 //   - the first time this process's prune found the marker held, which
 //     needs nothing from the reader, so a hold with no record, or one whose
 //     record keeps being rewritten, is bounded all the same.
+//
+// Only LIVE readers count: each reader holds its own record exclusively for
+// as long as it reads, so a record the prune can lock is a dead reader's. It
+// is removed, and the prune's clock for that marker starts over, so a reader
+// that comes after a killed one is never charged with the dead one's age.
+//
+// On NFS (EFS included) Linux turns flock into POSIX locks, which are seen
+// across clients: a reader on one host holds against the cleanup on
+// another. Two differences: an exclusive lock needs the file open for
+// writing, which is why the prune opens _SUCCESS read-write (it owns the
+// folder) and warns once when a lock fails for any other reason than "held";
+// and two holders in ONE process do not exclude each other, so there a
+// reader in the daemon's own process is protected only by the in-memory
+// holds (reading.go), not by this lock.
 //
 // Past the limit the prune removes the snapshot anyway and says so once
 // per snapshot; the reader then fails as it did before this existed.
@@ -98,9 +113,40 @@ var (
 	holdOverridden = map[string]bool{}
 )
 
-// openMarker opens a snapshot's marker to lock it, never through a symlink.
-func openMarker(snapDir string) (*os.File, error) {
-	return os.OpenFile(filepath.Join(snapDir, SuccessMarker), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+// flockFn is syscall.Flock: the seam a test injects a lock error through
+// that a local filesystem never gives (EBADF, which NFS returns for an
+// exclusive lock on a file opened read-only).
+var flockFn = syscall.Flock
+
+// errNotAMarker is a _SUCCESS that is not a regular file (a FIFO, a device):
+// nothing to hold, and never something to wait on.
+var errNotAMarker = errors.New("the snapshot's _SUCCESS is not a regular file")
+
+// openMarker opens a snapshot's marker to lock it: never through a symlink,
+// never blocking (O_NONBLOCK: a FIFO named _SUCCESS opens at once and is
+// refused, instead of wedging the caller), and only a regular file. forWrite
+// opens it read-write when it can: on NFS, Linux turns flock into a POSIX
+// lock, and an EXCLUSIVE one needs the file open for writing (flock(2)), so
+// the prune, which owns the folder, asks for that and falls back to
+// read-only when it is refused. writable reports which it got. A reader
+// opens read-only: a shared lock needs only read access.
+func openMarker(snapDir string, forWrite bool) (f *os.File, writable bool, err error) {
+	path := filepath.Join(snapDir, SuccessMarker)
+	if forWrite {
+		f, err = os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		writable = err == nil
+	}
+	if f == nil {
+		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if fi, serr := f.Stat(); serr != nil || !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, false, errNotAMarker
+	}
+	return f, writable, nil
 }
 
 // HoldSnapshot keeps the snapshot directory snapDir from the prune of any
@@ -108,8 +154,9 @@ func openMarker(snapDir string) (*os.File, error) {
 // that the snapshot was moved aside or removed before the hold could be
 // taken (the caller finds its snapshot again); release is then a no-op. A
 // snapshot that cannot be held (no marker, an unreadable one, a marker that
-// is a link, a non-local path, a lock not had within readHoldWait) is read
-// unheld, as before this existed: release is a no-op and gone is false.
+// is a link or not a regular file, a non-local path, a lock not had within
+// readHoldWait) is read unheld, as before this existed: release is a no-op
+// and gone is false.
 //
 // release is safe to call more than once.
 func HoldSnapshot(snapDir string) (release func(), gone bool) {
@@ -117,7 +164,7 @@ func HoldSnapshot(snapDir string) (release func(), gone bool) {
 	if snapDir == "" || strings.Contains(snapDir, "://") {
 		return noop, false
 	}
-	f, err := openMarker(snapDir)
+	f, _, err := openMarker(snapDir, false)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			if _, serr := os.Stat(snapDir); errors.Is(serr, fs.ErrNotExist) {
@@ -143,18 +190,20 @@ func HoldSnapshot(snapDir string) (release func(), gone bool) {
 	held, herr := f.Stat()
 	now, nerr := os.Lstat(marker)
 	if herr != nil || nerr != nil || !os.SameFile(held, now) {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = flockFn(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 		return noop, true
 	}
-	record := writeHoldRecord(snapDir)
+	record, recordFile := writeHoldRecord(snapDir)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			if record != "" {
 				_ = os.Remove(record)
+				_ = flockFn(int(recordFile.Fd()), syscall.LOCK_UN)
+				recordFile.Close()
 			}
-			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = flockFn(int(f.Fd()), syscall.LOCK_UN)
 			f.Close()
 		})
 	}, false
@@ -165,7 +214,7 @@ func HoldSnapshot(snapDir string) (release func(), gone bool) {
 func flockShared(f *os.File) error {
 	deadline := time.Now().Add(readHoldWait)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+		err := flockFn(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
 		if err == nil {
 			return nil
 		}
@@ -180,44 +229,73 @@ func flockShared(f *os.File) error {
 }
 
 // writeHoldRecord writes the reader's pid and start beside the snapshot and
-// returns its path, "" when it could not (a folder the reader may only read:
-// the hold is then bounded by the prune's own clock). 0600, created new,
-// never through a link.
-func writeHoldRecord(snapDir string) string {
+// holds the record EXCLUSIVELY for as long as the read lasts, which is how
+// the prune tells a live reader's record from a dead one's (liveHoldRecords).
+// It returns the record's path and the open file that holds the lock, "" and
+// nil when it could not (a folder the reader may only read: the hold is then
+// bounded by the prune's own clock). 0600, created new, never through a link.
+func writeHoldRecord(snapDir string) (string, *os.File) {
 	root, name := filepath.Dir(snapDir), filepath.Base(snapDir)
 	path := filepath.Join(root, fmt.Sprintf("%s%s.%d.%d", holdRecordPrefix, name, os.Getpid(), time.Now().UnixNano()))
 	b, _ := json.Marshal(holdRecord{PID: os.Getpid(), Since: holdNow().UTC()})
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		slog.Debug("baseline: the hold on this snapshot has no record of its start; the cleanup bounds it by its own clock", "snapshot", snapDir, "error", err)
-		return ""
+		return "", nil
 	}
-	_, werr := f.Write(b)
-	cerr := f.Close()
-	if werr != nil || cerr != nil {
+	if _, err := f.Write(b); err != nil {
+		f.Close()
 		_ = os.Remove(path)
-		return ""
+		return "", nil
 	}
-	return path
+	if err := flockFn(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		// A record nobody holds reads as a dead reader's, so it is not left.
+		slog.Debug("baseline: the record of this hold could not be locked; the cleanup bounds the hold by its own clock", "snapshot", snapDir, "error", err)
+		f.Close()
+		_ = os.Remove(path)
+		return "", nil
+	}
+	return path, f
 }
 
-// holdRecords reads the records beside root for the snapshot name: the
-// earliest start among them, and the pids. Unreadable or malformed records
-// are skipped.
-func holdRecords(root, name string) (since time.Time, pids []int, paths []string) {
-	matches, _ := filepath.Glob(filepath.Join(root, holdRecordPrefix+name+".*"))
-	for _, p := range matches {
-		paths = append(paths, p)
-		fi, err := os.Lstat(p)
-		if err != nil || !fi.Mode().IsRegular() {
-			continue
+// holdRecordPaths lists the records beside root for the snapshot name.
+func holdRecordPaths(root, name string) []string {
+	m, _ := filepath.Glob(filepath.Join(root, holdRecordPrefix+name+".*"))
+	return m
+}
+
+// liveHoldRecords reads the records beside root for the snapshot name and
+// removes those of readers that are gone: a record its reader no longer
+// holds (it can be taken exclusively without waiting) belongs to a process
+// that ended, killed included. since is the earliest start among the live
+// ones, pids their readers, dead how many were removed. A record that
+// cannot be tested (another user's, unreadable) is taken as live: the limit
+// still bounds it.
+func liveHoldRecords(root, name string) (since time.Time, pids []int, dead int) {
+	for _, p := range holdRecordPaths(root, name) {
+		f, err := os.OpenFile(p, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			f, err = os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		}
-		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
+		fi, serr := f.Stat()
+		if serr != nil || !fi.Mode().IsRegular() {
+			f.Close()
+			continue
+		}
+		if flockFn(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			_ = os.Remove(p)
+			_ = flockFn(int(f.Fd()), syscall.LOCK_UN)
+			f.Close()
+			dead++
+			continue
+		}
+		b, rerr := io.ReadAll(f)
+		f.Close()
 		var r holdRecord
-		if json.Unmarshal(b, &r) != nil || r.Since.IsZero() {
+		if rerr != nil || json.Unmarshal(b, &r) != nil || r.Since.IsZero() {
 			continue
 		}
 		pids = append(pids, r.PID)
@@ -225,38 +303,60 @@ func holdRecords(root, name string) (since time.Time, pids []int, paths []string
 			since = r.Since
 		}
 	}
-	return since, pids, paths
+	return since, pids, dead
 }
+
+var (
+	lockWarnedMu sync.Mutex
+	// lockWarned names each folder and lock error the prune already warned
+	// about, so a condition that lasts (a filesystem without flock) is said
+	// once, not at every snapshot of every cleanup.
+	lockWarned = map[string]bool{}
+)
 
 // lockForRemoval takes snapDir's marker exclusively without waiting, for the
 // prune, right before the snapshot is moved aside. held reports that a
 // reader holds it (HoldSnapshot) and its hold is inside readHoldLimit: the
 // snapshot stays. A hold past the limit is overridden, said once, and the
-// removal goes on without the lock. With no marker, a marker that is a link,
-// or one that cannot be opened or locked for another reason, nothing could
-// hold it and the removal goes on as before. unlock is called once the
-// snapshot is out of its path.
+// removal goes on without the lock. With no marker, or one that is a link or
+// not a regular file, nothing could hold it and the removal goes on as
+// before. A lock that fails for any reason but "held" goes on too, and is
+// warned about once per folder and error: a reader of another process may
+// then be on it unprotected. unlock is called once the snapshot is out of
+// its path.
 func lockForRemoval(snapDir string) (unlock func(), held bool) {
 	noop := func() {}
 	key := filepath.Join(snapDir, SuccessMarker)
 	root, name := filepath.Dir(snapDir), filepath.Base(snapDir)
-	f, err := openMarker(snapDir)
+	f, writable, err := openMarker(snapDir, true)
 	if err != nil {
 		return noop, false
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := flockFn(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			slog.Debug("baseline prune: could not lock a snapshot's marker; removing it as before", "snapshot", snapDir, "error", err)
+			warnKey := root + "\x00" + err.Error()
+			lockWarnedMu.Lock()
+			say := !lockWarned[warnKey]
+			lockWarned[warnKey] = true
+			lockWarnedMu.Unlock()
+			if say {
+				slog.Warn("baseline prune: could not lock a snapshot's _SUCCESS before removing it, so a reader in another process may be reading it unprotected; snapshots of this folder are removed as before (on NFS an exclusive lock needs the file open for writing)",
+					"dir", root, "snapshot", name, "opened_for_writing", writable, "error", err)
+			}
 			return noop, false
 		}
 		now := holdNow()
-		since, pids, _ := holdRecords(root, name)
+		since, pids, dead := liveHoldRecords(root, name)
 		holdSeenMu.Lock()
 		first, ok := holdSeen[key]
-		if !ok {
+		if !ok || dead > 0 {
+			// A reader that died leaves its age behind in this clock too:
+			// started over, so the readers still on it are not charged with
+			// it (#2675).
 			first = now
 			holdSeen[key] = now
+			delete(holdOverridden, key)
 		}
 		if since.IsZero() || first.Before(since) {
 			since = first
@@ -280,7 +380,7 @@ func lockForRemoval(snapDir string) (unlock func(), held bool) {
 		// Records first, while no reader can hold the marker: any left now
 		// are of readers that ended without removing theirs.
 		forgetHold(key, root, name)
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = flockFn(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 	}, false
 }
@@ -292,8 +392,7 @@ func forgetHold(key, root, name string) {
 	delete(holdSeen, key)
 	delete(holdOverridden, key)
 	holdSeenMu.Unlock()
-	_, _, paths := holdRecords(root, name)
-	for _, p := range paths {
+	for _, p := range holdRecordPaths(root, name) {
 		_ = os.Remove(p)
 	}
 }
@@ -342,16 +441,23 @@ func sweepHoldRecords(root string) {
 	for name := range names {
 		snap := filepath.Join(root, name)
 		key := filepath.Join(snap, SuccessMarker)
-		f, err := openMarker(snap)
+		f, _, err := openMarker(snap, true)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				forgetHold(key, root, name)
 			}
 			continue
 		}
-		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+		if flockFn(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
 			forgetHold(key, root, name)
-			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = flockFn(int(f.Fd()), syscall.LOCK_UN)
+		} else if _, _, dead := liveHoldRecords(root, name); dead > 0 {
+			// Still held, by someone else: the dead readers' records go,
+			// and so does the clock they started.
+			holdSeenMu.Lock()
+			delete(holdSeen, key)
+			delete(holdOverridden, key)
+			holdSeenMu.Unlock()
 		}
 		f.Close()
 	}

@@ -33,7 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   your own over an older snapshot's `views.sql`. The local mirror of an
   S3-only server's snapshots (SQL on the copy) no longer removes, past its
   two, a mirrored snapshot a SQL statement is reading; it goes in the first
-  round after the statement ends.
+  round after the statement ends. Only live readers count: each reader also
+  locks its own record, so a killed reader's age is never charged to the
+  reader after it. On NFS (EFS included) the cleanup opens `_SUCCESS`
+  read-write, since an exclusive lock there needs it, and a lock refused for
+  any other reason than a reader holding it is logged once per folder as a
+  warning instead of passing in silence; two holders in one process do not
+  exclude each other on NFS. A `_SUCCESS` that is not a regular file (a FIFO)
+  is not waited on.
 
 - **`bintrail export iceberg` compacts its own tables** (#2719). Every
   run adds one delete file per table it changed, and DuckDB and ClickHouse
