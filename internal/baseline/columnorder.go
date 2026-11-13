@@ -278,6 +278,9 @@ func (st *footerScan) settleColumnOrder(held map[string]map[string]bool, read ma
 				"so the table's column order is not known; its state view returns SELECT * in alphabetical order",
 				"path", p, "declared_columns", len(f.Columns), "file_columns", len(held[p]))
 			f.Columns = nil
+			// A cast names its column, and a view that names a column the
+			// file does not hold does not bind: the table reads as text.
+			f.PG = nil
 		}
 		st.footers[p] = f
 	}

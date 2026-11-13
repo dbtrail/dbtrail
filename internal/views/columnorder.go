@@ -35,7 +35,7 @@ import (
 // the order does not name means the two were not read from one CREATE TABLE,
 // and the list is refused rather than built without it.
 func selectList(t BaselineTable) string {
-	if !t.SchemaKnown || len(t.Columns) == 0 {
+	if (!t.SchemaKnown && len(t.PGCasts) == 0) || len(t.Columns) == 0 {
 		return ""
 	}
 	exprs := map[string]string{}

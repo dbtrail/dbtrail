@@ -55,6 +55,15 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		if !ok {
 			continue
 		}
+		if f.PG != nil {
+			// A PostgreSQL source's file: its own casts and column order, and
+			// none of what follows, which is read from a MySQL CREATE TABLE.
+			// SchemaKnown stays false on purpose: every reader of it asks
+			// about that CREATE TABLE.
+			in.Baselines[i].PGCasts = f.PG
+			in.Baselines[i].Columns = f.Columns
+			continue
+		}
 		in.Baselines[i].Decimals = f.Decimals
 		in.Baselines[i].Datetimes = f.Datetimes
 		in.Baselines[i].BinaryText = f.BinaryText
@@ -80,6 +89,9 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 func writeDecimalNote(b *strings.Builder, in Input) {
 	var cast, uncastable, unknown bool
 	for _, t := range in.Baselines {
+		if len(t.PGCasts) > 0 {
+			continue
+		}
 		if !t.SchemaKnown {
 			unknown = true
 			continue
@@ -127,6 +139,29 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 	}
 }
 
+// writePGCastNote says, once, how the views read a PostgreSQL source's
+// tables: a reader who finds a CAST or a COLLATE in their own state view
+// should learn here where it came from.
+func writePGCastNote(b *strings.Builder, in Input) {
+	for _, t := range in.Baselines {
+		if len(t.PGCasts) == 0 {
+			continue
+		}
+		b.WriteString("--\n")
+		b.WriteString("-- A PostgreSQL source's snapshot files hold every value as the text PostgreSQL\n")
+		b.WriteString("-- wrote. The views below read each column as the type the table declares:\n")
+		b.WriteString("-- whole numbers, numeric, real and double precision, boolean, date, timestamp\n")
+		b.WriteString("-- with and without time zone, uuid and bytea. Text columns are given byte\n")
+		b.WriteString("-- comparison (COLLATE C), so they compare with regard to case as PostgreSQL's\n")
+		b.WriteString("-- do. A numeric declared without precision is read as an exact\n")
+		fmt.Fprintf(b, "-- DECIMAL(%d,%d). A value its type here cannot hold (NaN in a numeric, more\n",
+			baseline.MaxDuckDBDecimalPrecision, baseline.PGNumericScale)
+		b.WriteString("-- digits than fit) fails the statement that reads it; it is never rounded or\n")
+		b.WriteString("-- read as NULL. Columns of any other type stay text and are named below.\n")
+		return
+	}
+}
+
 // writeBinaryCollationNote says, once, why some text columns carry COLLATE C:
 // a reader who finds it in their own state view should learn here that it is
 // the column's MySQL collation, not a choice made for them.
@@ -147,6 +182,18 @@ func writeBinaryCollationNote(b *strings.Builder, in Input) {
 // (a following file does not), so a table without column types loses that too. Silence would be the same bug in miniature, a column that
 // reads as text with nothing anywhere saying so.
 func decimalComments(t BaselineTable, pinned bool) []string {
+	if len(t.PGCasts) > 0 {
+		var text []string
+		for _, c := range t.PGCasts {
+			if c.As == "" {
+				text = append(text, commentSafe(c.Name))
+			}
+		}
+		if len(text) == 0 {
+			return nil
+		}
+		return []string{strings.Join(text, ", ") + " (left as text: a type the views do not read)"}
+	}
 	if !t.SchemaKnown && pinned {
 		return []string{"this file carries no column types, so nothing is cast; " +
 			"decimal columns read as text, _bin columns compare by the session's collation " +
@@ -244,6 +291,9 @@ type retyped struct{ name, expr string }
 // pinned views' explicit select list (selectList) places the same expressions
 // on the columns where they stand.
 func replaceParts(t BaselineTable) []retyped {
+	if len(t.PGCasts) > 0 {
+		return pgParts(t)
+	}
 	if !t.SchemaKnown {
 		return nil
 	}
@@ -269,6 +319,66 @@ func replaceParts(t BaselineTable) []retyped {
 		parts = append(parts, retyped{name, quoteIdent(name) + " COLLATE C"})
 	}
 	return parts
+}
+
+// pgParts are the columns of a PostgreSQL source's table that its view reads
+// through an expression (#2755). The file holds each value as PostgreSQL's
+// text, so a cast is all a type needs; the two that need more:
+//
+//   - bytea is \x and hex digits, so the digits are decoded.
+//   - a numeric declared without precision has no scale to cast to. It is
+//     read as DECIMAL(38, PGNumericScale), and since a cast to a scale ROUNDS
+//     a value with more decimals, such a value is refused first.
+//
+// CAST, never TRY_CAST, for the reason replaceClause gives: a value that does
+// not fit must fail the statement, not turn into a NULL nobody would notice.
+//
+// The names come from the file's own footer and are checked against its
+// column list before they reach here (baseline.ReadTableFooters), which is
+// the invariant replaceClause states.
+func pgParts(t BaselineTable) []retyped {
+	var parts []retyped
+	for _, c := range t.PGCasts {
+		q := quoteIdent(c.Name)
+		switch c.As {
+		case "", pgPlainText:
+		case baseline.PGAsText:
+			parts = append(parts, retyped{c.Name, q + " COLLATE C"})
+		case baseline.PGAsBytes:
+			parts = append(parts, retyped{c.Name, "unhex(substr(" + q + ", 3))"})
+		case baseline.PGAsNumeric:
+			msg := fmt.Sprintf("%s.%s: column %s holds a numeric with more than %d decimals, which the copy does not read exactly",
+				t.Schema, t.Table, c.Name, baseline.PGNumericScale)
+			parts = append(parts, retyped{c.Name, fmt.Sprintf(
+				"CASE WHEN strpos(%[1]s, '.') > 0 AND length(%[1]s) - strpos(%[1]s, '.') > %[2]d THEN error(%[3]s) ELSE CAST(%[1]s AS DECIMAL(%[4]d,%[2]d)) END",
+				q, baseline.PGNumericScale, sqlString(msg), baseline.MaxDuckDBDecimalPrecision)})
+		default:
+			parts = append(parts, retyped{c.Name, "CAST(" + q + " AS " + c.As + ")"})
+		}
+	}
+	return parts
+}
+
+// withoutPGCollation drops the byte comparison of a PostgreSQL table's text
+// columns and keeps its casts, for a file that follows later snapshots: the
+// same choice writeStateViews makes for a _bin column, and for its reason.
+// pgPlainText marks a PostgreSQL text column whose view carries no collation
+// of its own (withoutPGCollation): read bare, and not one of the columns a
+// view names as left as text for want of a type.
+const pgPlainText = "plain text"
+
+func withoutPGCollation(casts []baseline.PGCast) []baseline.PGCast {
+	if len(casts) == 0 {
+		return casts
+	}
+	out := make([]baseline.PGCast, len(casts))
+	for i, c := range casts {
+		if c.As == baseline.PGAsText {
+			c.As = pgPlainText
+		}
+		out[i] = c
+	}
+	return out
 }
 
 // castableDecimal reports whether DuckDB has a DECIMAL that can hold this

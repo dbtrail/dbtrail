@@ -85,6 +85,11 @@ type TableFooter struct {
 	// ZeroDate are the date columns whose NULL on the copy may be a zero
 	// date (ZeroDateColumns, #2633).
 	ZeroDate []string
+	// PG is set for a snapshot file of a PostgreSQL source and nothing else
+	// above is, but Columns: the file carries no CREATE TABLE, it records
+	// the table's shape (MetaKeyPGRelation), and PG says how each column's
+	// text is read (PGCasts, #2755). Nil for a MySQL or MariaDB file.
+	PG []PGCast
 }
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
@@ -447,10 +452,12 @@ func warnNoSchema(paths []string) {
 }
 
 // decimalFooterQuery reads the embedded CREATE TABLE out of each listed file's
-// footer. parquet_kv_metadata reads footers only, never row data.
+// footer, or, for a file of a PostgreSQL source, the shape it records in its
+// place (the third column says which). parquet_kv_metadata reads footers only, never row data.
 func decimalFooterQuery(paths []string) string {
-	return "SELECT file_name, value FROM parquet_kv_metadata(" + fileListLiteral(paths) + ") WHERE key = " +
-		sqlQuoteLiteral(MetaKeyCreateTableSQL)
+	return "SELECT file_name, value, key = " + sqlQuoteLiteral(MetaKeyPGRelation) + " FROM parquet_kv_metadata(" +
+		fileListLiteral(paths) + ") WHERE key IN (" + sqlQuoteLiteral(MetaKeyCreateTableSQL) + ", " +
+		sqlQuoteLiteral(MetaKeyPGRelation) + ")"
 }
 
 // decimalColumnsPerFile is the batched read's fallback: one query per file, so
@@ -484,9 +491,14 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		var file string
 		// parquet_kv_metadata types both key and value as BLOB.
 		var createSQL []byte
-		if err := rows.Scan(&file, &createSQL); err != nil {
+		var pgRelation bool
+		if err := rows.Scan(&file, &createSQL, &pgRelation); err != nil {
 			st.lostRows++
 			slog.Debug("baseline: could not scan Parquet footer metadata", "error", err)
+			continue
+		}
+		if pgRelation {
+			st.collectPGRelation(file, string(createSQL))
 			continue
 		}
 		cols, err := ParseSchemaText(string(createSQL))
@@ -542,6 +554,32 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		slog.Warn("baseline: reading Parquet footer metadata ended early; "+
 			"some tables' state views "+SchemaLossConsequence, "error", err)
 	}
+}
+
+// collectPGRelation records a PostgreSQL-source file's shape as its footer
+// entry. A file that also carries a CREATE TABLE keeps that entry: no writer
+// produces both, and the CREATE TABLE is the fuller answer.
+func (st *footerScan) collectPGRelation(file, value string) {
+	if f, ok := st.footers[file]; ok && f.PG == nil {
+		return
+	}
+	rel, ok, err := ParsePGRelation(value)
+	if err != nil || !ok {
+		// Same standing as a CREATE TABLE that does not parse: the key is
+		// there and its value is not usable, which is never the ordinary
+		// case. The table's view reads its columns as text.
+		st.unparsable[file] = true
+		slog.Warn("baseline: the table shape recorded in a PostgreSQL snapshot file's footer would not parse; "+
+			"this table's state view reads every column as text, in alphabetical order",
+			"path", file, "error", err)
+		return
+	}
+	casts := PGCasts(rel)
+	names := make([]string, len(casts))
+	for i, c := range casts {
+		names[i] = c.Name
+	}
+	st.footers[file] = TableFooter{PG: casts, Columns: names}
 }
 
 // DecimalColumns picks the decimal and numeric columns out of a parsed schema.

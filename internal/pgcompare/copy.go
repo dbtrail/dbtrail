@@ -2,10 +2,13 @@ package pgcompare
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,8 +133,14 @@ func CellText(typ string, v any) *string {
 		}
 	case json.Number:
 		s = x.String()
+		if typ == "DOUBLE" || typ == "FLOAT" {
+			s = pgFloat(typ, s)
+		}
 	case string:
 		s = x
+		if typ == "BLOB" {
+			s = pgBytea(x)
+		}
 		if strings.HasPrefix(typ, "TIMESTAMP") {
 			if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
 				s = pgTimestamp(t)
@@ -149,6 +158,38 @@ func CellText(typ string, v any) *string {
 		}
 	}
 	return &s
+}
+
+// pgFloat writes a floating point number the way PostgreSQL does: the
+// shortest digits that read back as the same value, with an exponent from
+// 1e15 up and below 1e-4.
+func pgFloat(typ, s string) string {
+	bits := 64
+	if typ == "FLOAT" {
+		bits = 32
+	}
+	f, err := strconv.ParseFloat(s, bits)
+	if err != nil {
+		return s
+	}
+	if abs := math.Abs(f); abs != 0 && (abs >= 1e15 || abs < 1e-4) {
+		return strconv.FormatFloat(f, 'e', -1, bits)
+	}
+	return strconv.FormatFloat(f, 'f', -1, bits)
+}
+
+// pgBytea writes a BLOB cell as PostgreSQL writes a bytea: \x and hex
+// digits. The sandbox hands a BLOB over as its text when the bytes are valid
+// UTF-8 and as 0x and hex digits otherwise, so bytes that happen to spell
+// "0x" and hex digits cannot be told from the bytes those digits name; they
+// are read as the second.
+func pgBytea(cell string) string {
+	if rest, ok := strings.CutPrefix(cell, "0x"); ok {
+		if _, err := hex.DecodeString(rest); err == nil {
+			return `\x` + strings.ToLower(rest)
+		}
+	}
+	return `\x` + hex.EncodeToString([]byte(cell))
 }
 
 // pgTimestamp is PostgreSQL's ISO text for an instant in UTC: seconds, then

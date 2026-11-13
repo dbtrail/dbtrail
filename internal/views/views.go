@@ -203,6 +203,12 @@ type BaselineTable struct {
 	// DeltaReserved says the table has a column under a name a table delta
 	// reserves (baseline.TableFooter says why). Set with SchemaKnown.
 	DeltaReserved bool
+	// PGCasts are the columns of a PostgreSQL source's table, each with how
+	// its text is read (baseline.PGCasts, #2755). Set INSTEAD of SchemaKnown
+	// and of everything set with it but Columns: a PostgreSQL file carries
+	// no CREATE TABLE, and what those fields answer is asked about MySQL.
+	PGCasts []baseline.PGCast
+
 	// SchemaKnown records whether the table's embedded CREATE TABLE was read at
 	// all. It separates "this table has no decimal columns" from "we could not
 	// find out", which are the same empty Decimals slice and very different
@@ -2304,6 +2310,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		for i := range tables {
 			tables[i].BinaryText = nil
 			tables[i].Columns = nil
+			tables[i].PGCasts = withoutPGCollation(tables[i].PGCasts)
 		}
 		in.Baselines = tables
 	}
@@ -2375,6 +2382,7 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 	}
 	writeDecimalNote(b, in)
 	writeBinaryCollationNote(b, in)
+	writePGCastNote(b, in)
 	writeColumnOrderNote(b, in)
 	if in.Follow == FollowNewest {
 		cached := in.listsOnce() && isS3(in.BaselineSource)
