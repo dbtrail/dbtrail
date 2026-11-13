@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Tests: the boot server's download cap through its call site, and the
+  "Not in S3" line in every combination** (#2691). No behavior change. A test
+  drives a download of the daemon's own server through the real handler and
+  fails if the cap is worked out from anything but the daemon's
+  `--baseline-s3`; a node test renders the Backup settings card's "Not in S3"
+  line for every record the cleanup can write (which copies S3 lacks, could
+  not be asked about, or refuses to read back, with and without a resend and
+  a wait), and a Go test follows the case of several copies and a restore's
+  result S3 could not be asked about from the real cleanup's record to the
+  line the page draws.
+
 - **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
   snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
   each duplicate and deletes the others, and the deletes are not written to
