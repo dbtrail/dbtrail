@@ -85,6 +85,11 @@ type TableFooter struct {
 	// ZeroDate are the date columns whose NULL on the copy may be a zero
 	// date (ZeroDateColumns, #2633).
 	ZeroDate []string
+	// PG is set for a snapshot file of a PostgreSQL source and nothing else
+	// above is, but Columns: the file carries no CREATE TABLE, it records
+	// the table's shape (MetaKeyPGRelation), and PG says how each column's
+	// text is read (PGCasts, #2755). Nil for a MySQL or MariaDB file.
+	PG []PGCast
 }
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
@@ -393,9 +398,8 @@ func (st *footerScan) result(paths []string, batchErr error) FooterRead {
 // name under another source's root does.
 var warnedNoSchema sync.Map
 
-// noSchemaWarnCap is how many tables one read names. A source where no table
-// carries a CREATE TABLE (every PostgreSQL source) has as many of these as it
-// has tables, and a one-shot command would print them all on every run.
+// noSchemaWarnCap is how many tables one read names. A source whose snapshot
+// predates the table definitions has as many of these as it has tables, and a one-shot command would print them all on every run.
 const noSchemaWarnCap = 10
 
 // noSchemaKey splits a snapshot file's path, <root>/<snapshot>/<schema>/
@@ -415,8 +419,8 @@ func noSchemaKey(path string) (key, table string) {
 }
 
 // warnNoSchema logs, once per table per process, that a snapshot file carries
-// no CREATE TABLE. It is not a fault (a PostgreSQL-source snapshot never
-// carries one, and neither does one older than the key), which is why nothing
+// no table definition: no CREATE TABLE and no PostgreSQL shape. It is not a
+// fault (a snapshot older than either key carries none), which is why nothing
 // was logged before; it is logged now because of what it costs. The first
 // noSchemaWarnCap tables of a read are named; the rest are counted in one
 // line and named at Debug.
@@ -434,10 +438,9 @@ func warnNoSchema(paths []string) {
 			continue
 		}
 		named++
-		slog.Warn("baseline: this table's snapshot file carries no CREATE TABLE, so its column types and collations are unknown; "+
+		slog.Warn("baseline: this table's snapshot file carries no table definition, so its column types and collations are unknown; "+
 			"its state view "+SchemaLossConsequence+", and under Engine Routing MySQL answers every statement over this table. "+
-			"Take a new full snapshot: one of a MySQL or MariaDB source records them "+
-			"(a PostgreSQL source has none to record)",
+			"Take a new full snapshot: it records them (a CREATE TABLE for a MySQL or MariaDB source, the table's shape for a PostgreSQL one)",
 			"table", table, "path", p)
 	}
 	if more > 0 {
@@ -447,10 +450,12 @@ func warnNoSchema(paths []string) {
 }
 
 // decimalFooterQuery reads the embedded CREATE TABLE out of each listed file's
-// footer. parquet_kv_metadata reads footers only, never row data.
+// footer, or, for a file of a PostgreSQL source, the shape it records in its
+// place (the third column says which). parquet_kv_metadata reads footers only, never row data.
 func decimalFooterQuery(paths []string) string {
-	return "SELECT file_name, value FROM parquet_kv_metadata(" + fileListLiteral(paths) + ") WHERE key = " +
-		sqlQuoteLiteral(MetaKeyCreateTableSQL)
+	return "SELECT file_name, value, key = " + sqlQuoteLiteral(MetaKeyPGRelation) + " FROM parquet_kv_metadata(" +
+		fileListLiteral(paths) + ") WHERE key IN (" + sqlQuoteLiteral(MetaKeyCreateTableSQL) + ", " +
+		sqlQuoteLiteral(MetaKeyPGRelation) + ")"
 }
 
 // decimalColumnsPerFile is the batched read's fallback: one query per file, so
@@ -484,9 +489,14 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		var file string
 		// parquet_kv_metadata types both key and value as BLOB.
 		var createSQL []byte
-		if err := rows.Scan(&file, &createSQL); err != nil {
+		var pgRelation bool
+		if err := rows.Scan(&file, &createSQL, &pgRelation); err != nil {
 			st.lostRows++
 			slog.Debug("baseline: could not scan Parquet footer metadata", "error", err)
+			continue
+		}
+		if pgRelation {
+			st.collectPGRelation(file, string(createSQL))
 			continue
 		}
 		cols, err := ParseSchemaText(string(createSQL))
@@ -542,6 +552,45 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		slog.Warn("baseline: reading Parquet footer metadata ended early; "+
 			"some tables' state views "+SchemaLossConsequence, "error", err)
 	}
+}
+
+// collectPGRelation records a PostgreSQL-source file's shape as its footer
+// entry. A file that also carries a CREATE TABLE keeps that entry: no writer
+// produces both, and the CREATE TABLE is the fuller answer.
+func (st *footerScan) collectPGRelation(file, value string) {
+	if f, ok := st.footers[file]; ok && f.PG == nil {
+		return
+	}
+	rel, ok, err := ParsePGRelation(value)
+	if err != nil || !ok {
+		// Same standing as a CREATE TABLE that does not parse: the key is
+		// there and its value is not usable, which is never the ordinary
+		// case. The table's view reads its columns as text.
+		st.unparsable[file] = true
+		slog.Warn("baseline: the table shape recorded in a PostgreSQL snapshot file's footer would not parse; "+
+			"this table's state view reads every column as text, in alphabetical order",
+			"path", file, "error", err)
+		return
+	}
+	casts := PGCasts(rel)
+	names := make([]string, len(casts))
+	folded := map[string]bool{}
+	for i, c := range casts {
+		names[i] = c.Name
+		// PostgreSQL keeps "Id" and "id" apart; the engine that reads the
+		// file does not, quoted or not, so a view that named both would read
+		// one of them twice. Such a table is read as the text it is.
+		if key := strings.ToLower(c.Name); folded[key] {
+			st.unparsable[file] = true
+			slog.Warn("baseline: a PostgreSQL table has two columns whose names differ only in case, which the copy cannot tell apart; "+
+				"this table's state view reads every column as text, in alphabetical order",
+				"path", file, "column", c.Name)
+			return
+		} else {
+			folded[key] = true
+		}
+	}
+	st.footers[file] = TableFooter{PG: casts, Columns: names}
 }
 
 // DecimalColumns picks the decimal and numeric columns out of a parsed schema.

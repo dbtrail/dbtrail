@@ -23,6 +23,7 @@ import (
 const (
 	itCustomers = "pgcmp_customers"
 	itOrders    = "pgcmp_orders"
+	itOdd       = "pgcmp_odd"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -58,7 +59,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd)
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -132,10 +133,10 @@ func TestIntegrationPGCompare(t *testing.T) {
 		t.Log(line)
 	}
 
-	// 26 statements answering the same is the measured starting point; the
-	// count only goes up from here.
-	if n := rep.Counts[sqlcompare.Equal]; n < 26 {
-		t.Errorf("%d statements were EQUAL, fewer than the 26 this list started with", n)
+	// 26 statements answered the same when every column of the copy was
+	// text; 50 do with the columns typed (#2755). The count only goes up.
+	if n := rep.Counts[sqlcompare.Equal]; n < 50 {
+		t.Errorf("%d statements were EQUAL, fewer than 50", n)
 	}
 
 	// The read-only transaction is the lock behind IsQuery and ReadOnlyVeto.
@@ -197,23 +198,32 @@ func seedSQL() []string {
 			(10, 9, 7.70,     7,    7.7,   'paid', 'w',      '2026-03-04 10:00:00',     '2026-03-04 10:00:00+00',    NULL,                                   NULL,                  NULL,     NULL),
 			(11, 1, 8.80,     8,    8.8,   'paid', 'v',      '2026-03-05 10:00:00',     '2026-03-05 10:00:00+00',    NULL,                                   NULL,                  NULL,     NULL),
 			(12, 1, 9.90,     20,   9.9,   'paid', 'u',      '2026-03-06 10:00:00',     '2026-03-06 10:00:00+00',    NULL,                                   NULL,                  NULL,     NULL)`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders,
+		`CREATE TABLE ` + itOdd + ` (id int PRIMARY KEY, free numeric, fixed numeric(10,2))`,
+		`INSERT INTO ` + itOdd + ` VALUES
+			(1, 'NaN', 1.10),
+			(2, 1.1234567890123456789012, 2.20),
+			(3, 12345.678, 3.30),
+			(4, 99999999999999999999, 4.40),
+			(5, NULL, NULL)`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd,
 	}
 }
 
 func expectations() []expectation {
-	o, c := itOrders, itCustomers
+	o, c, odd := itOrders, itCustomers, itOdd
 	eq := func(stmt string) expectation { return expectation{stmt: stmt, verdict: sqlcompare.Equal} }
-	// Both of these are #2755: the copy of a PostgreSQL source holds every
-	// column as text, compares text without regard to case, and returns the
-	// columns of a star in alphabetical order. diff is a statement the copy
-	// answers wrongly, refused one it cannot run.
-	const allText = "#2755: every column of the copy is text"
-	diff := func(kind, stmt string) expectation {
-		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: allText}
+	// What still differs, each with the issue it belongs to. still is a
+	// statement the copy answers differently, refused one it cannot run.
+	const (
+		nullsAndDivision = "#2786: the copy sorts NULL and divides integers by MySQL's rules"
+		otherTypes       = "#2787: arrays and json are still read as text"
+		dialect          = "#2770: the copy's dialect answers this differently; it belongs to the source"
+	)
+	still := func(kind, says, why, stmt string) expectation {
+		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: why, says: says}
 	}
-	refused := func(says, stmt string) expectation {
-		return expectation{stmt: stmt, verdict: sqlcompare.NotOnCopy, why: allText, says: says}
+	refused := func(says, why, stmt string) expectation {
+		return expectation{stmt: stmt, verdict: sqlcompare.NotOnCopy, why: why, says: says}
 	}
 	return []expectation{
 		// No tables.
@@ -228,30 +238,30 @@ func expectations() []expectation {
 		eq(`SELECT id, tag, attrs, payload, labels FROM ` + o),
 		eq(`SELECT id, name, city, active, signup FROM ` + c),
 		eq(`SELECT name FROM ` + c + ` WHERE id = 3`),
-		diff("rows", `SELECT name FROM `+c+` WHERE city = 'Lima'`),
+		eq(`SELECT name FROM ` + c + ` WHERE city = 'Lima'`),
 		eq(`SELECT name FROM ` + c + ` WHERE city IS NULL`),
 		eq(`SELECT o.id, c.name FROM ` + o + ` o JOIN ` + c + ` c ON c.id = o.customer_id`),
 		eq(`SELECT c.name, count(o.id) FROM ` + c + ` c LEFT JOIN ` + o + ` o ON o.customer_id = c.id GROUP BY c.name`),
 		// Order.
-		diff("order", `SELECT id FROM `+o+` ORDER BY id`),
-		diff("order", `SELECT id, qty FROM `+o+` ORDER BY qty, id`),
-		diff("text", `SELECT id FROM `+o+` ORDER BY amount DESC NULLS LAST, id LIMIT 3`),
+		eq(`SELECT id FROM ` + o + ` ORDER BY id`),
+		still("order", "", nullsAndDivision, `SELECT id, qty FROM `+o+` ORDER BY qty, id`),
+		eq(`SELECT id FROM ` + o + ` ORDER BY amount DESC NULLS LAST, id LIMIT 3`),
 		eq(`SELECT name FROM ` + c + ` ORDER BY signup NULLS LAST`),
-		diff("order", `(SELECT id FROM `+o+` ORDER BY id)`),
+		eq(`(SELECT id FROM ` + o + ` ORDER BY id)`),
 		// Numbers.
-		refused("sum(VARCHAR)", `SELECT sum(qty), min(qty), max(qty) FROM `+o),
-		refused("sum(VARCHAR)", `SELECT sum(amount), avg(amount) FROM `+o),
-		diff("rows", `SELECT max(amount) FROM `+o),
-		refused("VARCHAR and type INTEGER_LITERAL", `SELECT id FROM `+o+` WHERE qty > 9`),
-		refused("VARCHAR and INTEGER_LITERAL in BETWEEN", `SELECT id FROM `+o+` WHERE amount BETWEEN 5 AND 50`),
-		refused("*(VARCHAR, INTEGER_LITERAL)", `SELECT id, qty * 2 AS twice, amount * qty AS total FROM `+o),
-		refused("sum(VARCHAR)", `SELECT customer_id, sum(amount) FROM `+o+` GROUP BY customer_id`),
-		refused("/(VARCHAR, INTEGER_LITERAL)", `SELECT id, qty / 2 AS half FROM `+o),
-		refused("Could not convert string", `SELECT id, round(ratio::numeric, 1) FROM `+o),
+		eq(`SELECT sum(qty), min(qty), max(qty) FROM ` + o),
+		still("precision", "", dialect, `SELECT sum(amount), avg(amount) FROM `+o),
+		eq(`SELECT max(amount) FROM ` + o),
+		eq(`SELECT id FROM ` + o + ` WHERE qty > 9`),
+		eq(`SELECT id FROM ` + o + ` WHERE amount BETWEEN 5 AND 50`),
+		eq(`SELECT id, qty * 2 AS twice, amount * qty AS total FROM ` + o),
+		eq(`SELECT customer_id, sum(amount) FROM ` + o + ` GROUP BY customer_id`),
+		still("rows", "", nullsAndDivision, `SELECT id, qty / 2 AS half FROM `+o),
+		refused("to DECIMAL(18,3)", dialect, `SELECT id, round(ratio::numeric, 1) FROM `+o),
 		// Text.
-		diff("rows", `SELECT status, count(*) FROM `+o+` GROUP BY status`),
-		diff("rows", `SELECT DISTINCT status FROM `+o),
-		diff("rows", `SELECT id FROM `+o+` WHERE status = 'new'`),
+		eq(`SELECT status, count(*) FROM ` + o + ` GROUP BY status`),
+		eq(`SELECT DISTINCT status FROM ` + o),
+		eq(`SELECT id FROM ` + o + ` WHERE status = 'new'`),
 		eq(`SELECT id FROM ` + o + ` WHERE status LIKE 'p%'`),
 		eq(`SELECT id FROM ` + o + ` WHERE status ILIKE 'p%'`),
 		eq(`SELECT upper(name), length(name) FROM ` + c),
@@ -261,25 +271,39 @@ func expectations() []expectation {
 		eq(`SELECT name FROM ` + c + ` WHERE NOT active`),
 		eq(`SELECT active, count(*) FROM ` + c + ` GROUP BY active`),
 		// Dates and times.
-		refused("VARCHAR and type DATE", `SELECT name FROM `+c+` WHERE signup >= DATE '2026-01-01'`),
-		refused("+(VARCHAR, INTEGER_LITERAL)", `SELECT name, signup + 1 FROM `+c),
-		refused("VARCHAR and type TIMESTAMP", `SELECT id FROM `+o+` WHERE placed_at < TIMESTAMP '2026-02-01 00:00:00'`),
-		refused("date_trunc(STRING_LITERAL, VARCHAR)", `SELECT date_trunc('month', placed_at) AS m, count(*) FROM `+o+` GROUP BY 1`),
-		refused("date_part(STRING_LITERAL, VARCHAR)", `SELECT id, extract(year FROM placed_at) FROM `+o),
+		eq(`SELECT name FROM ` + c + ` WHERE signup >= DATE '2026-01-01'`),
+		eq(`SELECT name, signup + 1 FROM ` + c),
+		eq(`SELECT id FROM ` + o + ` WHERE placed_at < TIMESTAMP '2026-02-01 00:00:00'`),
+		eq(`SELECT date_trunc('month', placed_at) AS m, count(*) FROM ` + o + ` GROUP BY 1`),
+		eq(`SELECT id, extract(year FROM placed_at) FROM ` + o),
 		eq(`SELECT id, placed_at::date FROM ` + o),
 		eq(`SELECT min(seen_at), max(seen_at) FROM ` + o),
 		// JSON, arrays, bytes, uuid.
 		eq(`SELECT id, attrs->>'k' FROM ` + o),
-		refused("@>(VARCHAR, STRING_LITERAL)", `SELECT id FROM `+o+` WHERE attrs @> '{"k": "v"}'`),
-		diff("rows", `SELECT id, labels[1] FROM `+o),
-		refused("UNNEST not supported here", `SELECT id FROM `+o+` WHERE 'red' = ANY(labels)`),
-		diff("rows", `SELECT id, length(payload) FROM `+o),
+		refused("@>(VARCHAR, STRING_LITERAL)", otherTypes, `SELECT id FROM `+o+` WHERE attrs @> '{"k": "v"}'`),
+		still("rows", "", otherTypes, `SELECT id, labels[1] FROM `+o),
+		refused("UNNEST not supported here", otherTypes, `SELECT id FROM `+o+` WHERE 'red' = ANY(labels)`),
+		refused("length(BLOB)", dialect, `SELECT id, length(payload) FROM `+o),
 		eq(`SELECT id FROM ` + o + ` WHERE tag = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'`),
 		// Shapes.
-		refused("VARCHAR and type INTEGER_LITERAL", `WITH big AS (SELECT * FROM `+o+` WHERE qty >= 10) SELECT count(*) FROM big`),
-		diff("rows", `SELECT id, row_number() OVER (ORDER BY id) FROM `+o),
+		eq(`WITH big AS (SELECT * FROM ` + o + ` WHERE qty >= 10) SELECT count(*) FROM big`),
+		eq(`SELECT id, row_number() OVER (ORDER BY id) FROM ` + o),
 		eq(`SELECT id FROM ` + o + ` WHERE customer_id IN (SELECT id FROM ` + c + ` WHERE active)`),
-		diff("columns", `SELECT * FROM `+c),
+		eq(`SELECT * FROM ` + c),
+		// A numeric declared without precision is an exact DECIMAL(38,18) on
+		// the copy: it sorts, sums and compares as on the source.
+		eq(`SELECT id FROM ` + odd + ` WHERE fixed > 2 ORDER BY fixed`),
+		eq(`SELECT sum(fixed) FROM ` + odd),
+		eq(`SELECT id, fixed FROM ` + odd),
+		// It prints with 18 decimals, where the source prints the digits
+		// the value was written with.
+		still("precision", "", "#2768: a numeric without precision prints with the copy's 18 decimals", `SELECT free FROM `+odd+` WHERE id = 3`),
+		// A value the copy's type cannot hold fails the statement that reads
+		// it, and only that one.
+		refused("NaN", "by design: NaN is not a DECIMAL", `SELECT free FROM `+odd+` WHERE id = 1`),
+		refused("more than 18 decimals", "by design: never rounded", `SELECT free FROM `+odd+` WHERE id = 2`),
+		// Which of the two values stops it first is the engine's choice.
+		refused("", "by design: a statement that reads the whole column meets those values", `SELECT id FROM `+odd+` WHERE free > 12345`),
 		// Not compared.
 		{stmt: `SELECT * FROM pgcmp_missing`, verdict: sqlcompare.SourceError},
 		{stmt: `DELETE FROM ` + o, verdict: sqlcompare.Skipped, kind: "not_a_query"},

@@ -88,9 +88,9 @@ CREATE OR REPLACE SECRET bintrail_s3_chain (TYPE s3, PROVIDER credential_chain, 
 -- Some files carry no column types, so their views cast nothing and every
 -- decimal column in them reads as text. Those tables are named below. A
 -- baseline older than this feature gains the casts when it is next taken or
--- refreshed; a PostgreSQL-source baseline stores all its values as text and
--- will not gain them. If a footer could not be read at all, the bintrail log
--- has the error.
+-- refreshed, and so does a PostgreSQL-source baseline written before its
+-- table shape was recorded. If a footer could not be read at all, the
+-- bintrail log has the error.
 --
 -- SELECT * on these views returns each table's columns sorted by name, the
 -- order the snapshot files hold them in, not the order the table declares

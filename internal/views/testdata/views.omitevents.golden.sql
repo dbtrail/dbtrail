@@ -91,9 +91,9 @@ SET VARIABLE bintrail_footers_read = (SELECT count(*) FROM parquet_file_metadata
 -- collation; and no column order, so SELECT * returns their columns sorted
 -- by name. Those tables are named below. A
 -- baseline older than this feature gains the casts when it is next taken or
--- refreshed; a PostgreSQL-source baseline stores all its values as text and
--- will not gain them. If a footer could not be read at all, the bintrail log
--- has the error.
+-- refreshed, and so does a PostgreSQL-source baseline written before its
+-- table shape was recorded. If a footer could not be read at all, the
+-- bintrail log has the error.
 --
 -- Each view lists its table's columns in the order the table declares them,
 -- so SELECT * returns them as MySQL does. The snapshot files hold them sorted

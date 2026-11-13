@@ -279,6 +279,21 @@ func (st *footerScan) settleColumnOrder(held map[string]map[string]bool, read ma
 				"path", p, "declared_columns", len(f.Columns), "file_columns", len(held[p]))
 			f.Columns = nil
 		}
+		if f.PG != nil && f.Columns == nil {
+			// A PostgreSQL entry is its casts and its order, and both name
+			// columns: a view that names one the file does not hold does not
+			// bind. Without the check there is nothing to keep, and an entry
+			// left behind empty would read as a MySQL table with no decimal
+			// and no text column. Not read is asked again (orderUnread); not
+			// matching is a fact about the file.
+			delete(st.footers, p)
+			if read[p] {
+				st.unparsable[p] = true
+			} else {
+				st.failed[p] = true
+			}
+			continue
+		}
 		st.footers[p] = f
 	}
 }

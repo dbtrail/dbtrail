@@ -393,10 +393,12 @@ What to know before relying on it:
   a column added with `AFTER` or `FIRST` included. Three kinds of table still differ
   from MySQL, and each table's view says which applies to it (in the file
   `bintrail views --pin-snapshot` writes, as a comment above the view):
-  - **A table whose snapshot carries no `CREATE TABLE`** (every table of a
-    PostgreSQL source, a snapshot written by a version before 0.5, a file
-    whose footer cannot be read) has no order to go by: `SELECT *` returns
-    its columns sorted by name. Name the columns to read it by position.
+  - **A table whose snapshot carries no `CREATE TABLE`** (a snapshot written
+    by a version before 0.5, a file whose footer cannot be read) has no
+    order to go by: `SELECT *` returns its columns sorted by name. Name the
+    columns to read it by position. A table of a PostgreSQL source carries
+    its shape in another form and gets its order and its types from it
+    ([how each type reads](postgres.md#how-each-type-reads-in-sql-on-the-copy)).
   - **A generated column** (`GENERATED ALWAYS AS ... STORED` or `VIRTUAL`,
     and a MariaDB system-versioning period column) is not in a snapshot, so
     the copy's `SELECT *` has one column fewer than MySQL's and naming the
@@ -1790,10 +1792,11 @@ What this is and is not:
   - **A table with no definition to go by.** A table whose snapshot file
     carries no `CREATE TABLE`, or one that cannot be read, has no
     collations to go by, so all its text columns fold case, `_bin` ones
-    included, and its decimal columns read as text. That is every table of
-    a PostgreSQL source, a MySQL or MariaDB table whose snapshot was
-    written by a version before 0.5, and a file whose footer could not be
-    read at that moment. The router's log says so once per table (`this
+    included, and its decimal columns read as text. That is a MySQL or
+    MariaDB table whose snapshot was written by a version before 0.5, and
+    a file whose footer could not be read at that moment. (A table of a
+    PostgreSQL source is read from the shape its snapshot records: its
+    text compares with regard to case and its numbers are numbers.) The router's log says so once per table (`this
     table's snapshot file carries no CREATE TABLE`), naming the first ten
     at warning level and the rest in the debug log, and counts the files
     it could not read; a new full snapshot of a MySQL or MariaDB source

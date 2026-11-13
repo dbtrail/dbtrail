@@ -55,6 +55,15 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		if !ok {
 			continue
 		}
+		if f.PG != nil {
+			// A PostgreSQL source's file: its own casts and column order, and
+			// none of what follows, which is read from a MySQL CREATE TABLE.
+			// SchemaKnown stays false on purpose: every reader of it asks
+			// about that CREATE TABLE.
+			in.Baselines[i].PGCasts = f.PG
+			in.Baselines[i].Columns = f.Columns
+			continue
+		}
 		in.Baselines[i].Decimals = f.Decimals
 		in.Baselines[i].Datetimes = f.Datetimes
 		in.Baselines[i].BinaryText = f.BinaryText
@@ -80,6 +89,9 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 func writeDecimalNote(b *strings.Builder, in Input) {
 	var cast, uncastable, unknown bool
 	for _, t := range in.Baselines {
+		if len(t.PGCasts) > 0 && !in.Follow.follows() {
+			continue
+		}
 		if !t.SchemaKnown {
 			unknown = true
 			continue
@@ -121,9 +133,36 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 			b.WriteString("-- by name. Those tables are named below. A\n")
 		}
 		b.WriteString("-- baseline older than this feature gains the casts when it is next taken or\n")
-		b.WriteString("-- refreshed; a PostgreSQL-source baseline stores all its values as text and\n")
-		b.WriteString("-- will not gain them. If a footer could not be read at all, the bintrail log\n")
-		b.WriteString("-- has the error.\n")
+		b.WriteString("-- refreshed, and so does a PostgreSQL-source baseline written before its\n")
+		b.WriteString("-- table shape was recorded. If a footer could not be read at all, the\n")
+		b.WriteString("-- bintrail log has the error.\n")
+	}
+}
+
+// writePGCastNote says, once, how the views read a PostgreSQL source's
+// tables: a reader who finds a CAST or a COLLATE in their own state view
+// should learn here where it came from.
+func writePGCastNote(b *strings.Builder, in Input) {
+	if in.Follow.follows() {
+		// A following file reads these tables as text (writeStateViews).
+		return
+	}
+	for _, t := range in.Baselines {
+		if len(t.PGCasts) == 0 {
+			continue
+		}
+		b.WriteString("--\n")
+		b.WriteString("-- A PostgreSQL source's snapshot files hold every value as the text PostgreSQL\n")
+		b.WriteString("-- wrote. The views below read each column as the type the table declares:\n")
+		b.WriteString("-- whole numbers, numeric, real and double precision, boolean, date, timestamp\n")
+		b.WriteString("-- with and without time zone, uuid and bytea. Text columns are given byte\n")
+		b.WriteString("-- comparison (COLLATE C), so they compare with regard to case as PostgreSQL's\n")
+		b.WriteString("-- do. A numeric declared without precision is read as an exact\n")
+		fmt.Fprintf(b, "-- DECIMAL(%d,%d). A value its type here cannot hold (NaN in a numeric, more\n",
+			baseline.MaxDuckDBDecimalPrecision, baseline.PGNumericScale)
+		b.WriteString("-- digits than fit) fails the statement that reads it; it is never rounded or\n")
+		b.WriteString("-- read as NULL. Columns of any other type stay text and are named below.\n")
+		return
 	}
 }
 
@@ -147,6 +186,18 @@ func writeBinaryCollationNote(b *strings.Builder, in Input) {
 // (a following file does not), so a table without column types loses that too. Silence would be the same bug in miniature, a column that
 // reads as text with nothing anywhere saying so.
 func decimalComments(t BaselineTable, pinned bool) []string {
+	if len(t.PGCasts) > 0 {
+		var text []string
+		for _, c := range t.PGCasts {
+			if c.As == "" {
+				text = append(text, commentSafe(c.Name))
+			}
+		}
+		if len(text) == 0 {
+			return nil
+		}
+		return []string{strings.Join(text, ", ") + " (left as text: a type the views do not read)"}
+	}
 	if !t.SchemaKnown && pinned {
 		return []string{"this file carries no column types, so nothing is cast; " +
 			"decimal columns read as text, _bin columns compare by the session's collation " +
@@ -244,6 +295,9 @@ type retyped struct{ name, expr string }
 // pinned views' explicit select list (selectList) places the same expressions
 // on the columns where they stand.
 func replaceParts(t BaselineTable) []retyped {
+	if len(t.PGCasts) > 0 {
+		return pgParts(t)
+	}
 	if !t.SchemaKnown {
 		return nil
 	}
@@ -267,6 +321,58 @@ func replaceParts(t BaselineTable) []retyped {
 		// collation is, and it travels with the column: through a subquery,
 		// a CTE, a function over it, GROUP BY, ORDER BY and a join.
 		parts = append(parts, retyped{name, quoteIdent(name) + " COLLATE C"})
+	}
+	return parts
+}
+
+// pgParts are the columns of a PostgreSQL source's table that its view reads
+// through an expression (#2755). The file holds each value as PostgreSQL's
+// text, so a cast is all a type needs; the two that need more:
+//
+//   - bytea is \x and hex digits, so the digits are decoded, and a value
+//     that does not start with \x (another output format) is refused: its
+//     characters would decode to other bytes or to none.
+//   - a date or timestamp before the common era ends in " BC", which the
+//     cast is not trusted to read, so it is refused.
+//   - a column left as text (json, an array, an enum) still compares byte by
+//     byte, as its text does in PostgreSQL.
+//   - a numeric declared without precision has no scale to cast to. It is
+//     read as DECIMAL(38, PGNumericScale), and since a cast to a scale ROUNDS
+//     a value with more decimals, such a value is refused first.
+//
+// CAST, never TRY_CAST, for the reason replaceClause gives: a value that does
+// not fit must fail the statement, not turn into a NULL nobody would notice.
+//
+// The names come from the file's own footer and are checked against its
+// column list before they reach here (baseline.ReadTableFooters), which is
+// the invariant replaceClause states.
+func pgParts(t BaselineTable) []retyped {
+	var parts []retyped
+	for _, c := range t.PGCasts {
+		q := quoteIdent(c.Name)
+		refuse := func(what string) string {
+			return "error(" + sqlString(fmt.Sprintf("%s.%s: column %s holds %s, which the copy does not read", t.Schema, t.Table, c.Name, what)) + ")"
+		}
+		switch c.As {
+		case "", baseline.PGAsText:
+			parts = append(parts, retyped{c.Name, q + " COLLATE C"})
+		case baseline.PGAsBytes:
+			parts = append(parts, retyped{c.Name, fmt.Sprintf(
+				`CASE WHEN %[1]s IS NULL OR starts_with(%[1]s, '\x') THEN unhex(substr(%[1]s, 3)) ELSE %[2]s END`,
+				q, refuse(`bytes that are not written as \x and hex digits`))})
+		case "DATE", "TIMESTAMP", "TIMESTAMPTZ":
+			parts = append(parts, retyped{c.Name, fmt.Sprintf(
+				"CASE WHEN ends_with(%[1]s, ' BC') THEN %[2]s ELSE CAST(%[1]s AS %[3]s) END",
+				q, refuse("a date before the common era"), c.As)})
+		case baseline.PGAsNumeric:
+			msg := fmt.Sprintf("%s.%s: column %s holds a numeric with more than %d decimals, which the copy does not read exactly",
+				t.Schema, t.Table, c.Name, baseline.PGNumericScale)
+			parts = append(parts, retyped{c.Name, fmt.Sprintf(
+				"CASE WHEN strpos(%[1]s, '.') > 0 AND length(%[1]s) - strpos(%[1]s, '.') > %[2]d THEN error(%[3]s) ELSE CAST(%[1]s AS DECIMAL(%[4]d,%[2]d)) END",
+				q, baseline.PGNumericScale, sqlString(msg), baseline.MaxDuckDBDecimalPrecision)})
+		default:
+			parts = append(parts, retyped{c.Name, "CAST(" + q + " AS " + c.As + ")"})
+		}
 	}
 	return parts
 }
