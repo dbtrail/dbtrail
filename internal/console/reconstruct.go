@@ -425,7 +425,12 @@ func (s *Server) handleReconstruct(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// 1. Locate the baseline at-or-before `at` and read the row's initial state.
-	path, snapshotTime, stale, err := b.findBaseline(ctx, schema, table, atTime)
+	// The snapshot is pinned until the handler returns (#2691): the cleanup
+	// would otherwise remove an older one between the lookup and the reads
+	// of its files below.
+	path, snapshotTime, stale, release, err := reconstruct.FindPinned(ctx, b.findBaseline,
+		pinBaselineRead(s, s.selectedServerID(r)), schema, table, atTime, "a time-travel read")
+	defer release()
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			writeJSONError(w, http.StatusNotFound,

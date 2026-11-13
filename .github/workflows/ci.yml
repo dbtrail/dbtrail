@@ -902,7 +902,7 @@ jobs:
           docker logs bintrail-test-postgres >&2 || true
           exit 1
 
-      # Scoped to the two PostgreSQL packages by path (not -run) so the selection
+      # Scoped to the PostgreSQL packages by path (not -run) so the selection
       # is naming-independent — it won't accidentally catch a future TestOne_*-
       # style test added elsewhere. -p 1 serializes (the tests share one server,
       # creating/dropping their own slots/publications).
@@ -918,9 +918,11 @@ jobs:
         run: |
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v \
-            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ 2>&1 | tee /tmp/pg-it.out
+            ./internal/pgcapture/ ./internal/pgstreamrun/ ./internal/pgbaseline/ ./internal/pgshim/ ./internal/pgverifysource/ 2>&1 | tee /tmp/pg-it.out
           grep -q -- '--- PASS: TestOne_EndToEnd_PostgresToIndexToRecovery' /tmp/pg-it.out \
             || { echo "FATAL: PG end-to-end integration test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '--- PASS: TestIntegrationPGVerifyLiveSourceUnderWrites2198' /tmp/pg-it.out \
+            || { echo "FATAL: PG live-source verify under writes did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestPGBaseline_Integration' /tmp/pg-it.out \
             || { echo "FATAL: pgbaseline integration suite did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestPGWire_PostgresSourceRoundTrip' /tmp/pg-it.out \

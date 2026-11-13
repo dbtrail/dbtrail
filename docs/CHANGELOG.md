@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Full reads work on sources with `explain_format=TREE`** (#2211). On a
+  MySQL 9.x source whose `explain_format` is `TREE` (the default on Percona
+  Server 9.7) or `JSON`, mydumper crashed with a segmentation fault within
+  seconds while it sized tables, so no copy could be made. The console's full
+  read and `bintrail dump` now read the source's `explain_format` first and,
+  when the variable exists, give mydumper an option file whose
+  `[mydumper_session_variables]` section sets `explain_format = TRADITIONAL`
+  for mydumper's own sessions. The server's global setting is not touched.
+  Sources without the variable (MariaDB, MySQL before 8.0.32) get nothing,
+  since mydumper exits 1 on a session variable the server does not know.
+  The file goes only to mydumper 0.16.1 or newer (the oldest build measured
+  to take it). With an older build, or one whose version cannot be read, or
+  when the source cannot be asked, the cause and the remedy are logged and
+  added to the error if mydumper then crashes, instead of a bare segmentation
+  fault. On the console, the TLS pin and the session section share one
+  `--defaults-extra-file`, because mydumper keeps only the last one it is
+  given. The `baseline` profile of `docker-compose.yml` is not covered yet
+  (#2733).
+- **Live-source `verify` on a PostgreSQL table with writes compares equal**
+  (#2198). The table was read inside one snapshot, but the reconstruction
+  was cut at the time the scan ended, so every write committed while the
+  table was read was in the reconstruction and not in the snapshot: a
+  MISMATCH on a table that was fine. Now, when the source role has the
+  `REPLICATION` attribute (`rds_replication` on Amazon RDS), the table is
+  read at the snapshot of a temporary logical slot made for the read (the
+  built-in `pgoutput`, nothing installed in the source; the slot goes away
+  as soon as the read has started), and the reconstruction stops strictly
+  before that slot's consistent point, on the index and on the archives.
+  The check waits up to 60 seconds for a running capture to reach that
+  point (a capture still catching up when the wait runs out makes the table
+  `inconclusive`), and stops waiting early on a quiet database. Creating the slot
+  waits for the write transactions open on the server; one still open
+  after 10 seconds makes the table `inconclusive`, naming the oldest one.
+  Without `REPLICATION`, a free slot, or a replication entry in
+  `pg_hba.conf`, the check runs as before and the result says the read was
+  not cut and why. The baseline it starts from is now the newest one taken
+  before the read opened, as on MySQL since #2150.
 - **A snapshot that fails to send on a file of its own no longer holds back
   the others** (#2691). When sending again a snapshot the bucket lacks
   failed, the whole folder waited an hour, so one snapshot with a file that
@@ -34,6 +71,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a wait), and a Go test follows the case of several copies and a restore's
   result S3 could not be asked about from the real cleanup's record to the
   line the page draws.
+- **A read of one table at a past moment keeps its snapshot while it runs**
+  (#2691). `/api/reconstruct`, the MCP `reconstruct` tool of the console and
+  a `_snapshot` query through the MySQL port of `watch` (one row or the whole
+  table) read an older snapshot after looking it up, and the cleanup after a
+  publish could remove it in between, so the read failed. They now pin that
+  snapshot until they end, like a snapshot download, for no longer than a
+  download of the table's files would keep it (their bytes at 1 MiB/s plus
+  one minute), or than the query's own time limit when that is longer: a
+  whole table goes out at the pace of the MySQL client, and a client must not
+  decide how long a snapshot stays. They count toward the downloads' limit,
+  together with the downloads: past it a read is not refused, it runs without
+  a pin as before, and a warning says so at most once every 10 minutes per
+  server. A snapshot removed between the
+  lookup and the pin is looked up once more. The Explain of a check, which
+  already pinned its two snapshots, has a test of its own.
 
 - **`bintrail export iceberg` compacts its own tables** (#2719). Every
   run adds one delete file per table it changed, and DuckDB and ClickHouse
@@ -190,6 +242,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Stopping capture writes only its own field, now with a test of its own.
 - **A count of local snapshots saved by an older version is no longer applied after an upgrade** (#2675). A version from before the single count (0.129.0 and older) saves a **Keep by count** of 3 it does not use on a server it adds with an S3 destination. After a downgrade and an upgrade, that count applied and the server's local folder was pruned to 3. Every count beside an S3 destination now carries the count and the destination it was saved with (`local_keep_saved_with` in the server registry), and a count without that mark is cleared at start, as the upgrade to 0.130.0 cleared the counts that did nothing: the server keeps every local snapshot until you set **Keep by count**, and the daemon log names it (`servers with an S3 destination had a number of local snapshots to keep that never applied to them; it was cleared, so they keep every local snapshot as before. Set Keep by count on the Snapshots page to keep only the newest on this machine`). The registry's version does not change: an older version still reads and writes the file, keeps the mark on the servers it edits and writes none on the servers it adds. The first start of this version marks every count it finds as it is, so a downgrade made before it, or one that went through 0.130.0 to an older version, is not covered.
 - **A snapshot made from a shell is no longer published again under a new date while capture is stopped** (#2674). A snapshot made by `bintrail baseline` from a shell, or by another process, has no run record in the daemon, so its first scheduled update ran with the number of changes since it unknown, and with capture stopped that update published the snapshot's rows again under a new date. When that snapshot is past the age at which a quiet index is doubted (two hours or six schedule intervals), the daemon now compares the binary log coordinates its table files recorded (the GTID set, or the file and position) with capture's checkpoint. A checkpoint at or before them means capture recorded nothing since the snapshot, and the slot is decided as for a server that indexed nothing: the source is asked, comparing it with the snapshot's own GTID set (capture may have stopped before the snapshot was taken), so a source that wrote nothing past the snapshot gets the update, a source that wrote past it takes a full read, and a slot whose source cannot be asked is skipped. The log says it once: `snapshot schedule: the previous snapshot has no run record here, but the binary log position it was read at shows capture recorded nothing since it, so nothing was indexed since it; the slot is decided as for a quiet server`. A checkpoint past the snapshot, or coordinates that cannot be compared (a PostgreSQL source, a MariaDB GTID set, a snapshot with none, two binary logs of different names), leave the count unknown and the update runs, as before.
+- **Two follow-ups to the defaults of a server with an S3 destination** (#2675).
+  - Removing a server's S3 destination and adding one again keeps a **Send to S3 every** of each update. The registry now records, when the destination is removed, that the empty interval was in force beside it (`upload_each_update` in the schedule), and a destination added later leaves it as it is. Before, the empty interval read as never chosen, and the new destination started the default of once a day. An interval set after that ends the record. A server that never had a destination still starts at once a day.
+  - With `--baseline-refresh-interval`, the snapshots that loop writes on a server with an S3 destination, a count and a schedule of its own are marked as kept on this machine on purpose, like the updates the upload interval keeps back: the count removes them, the cleanup no longer sends them to the bucket (up to three per cleanup, a cost the 0.130.0 notes declared), and the schedule's next due upload sends the newest local snapshot, the loop's included. On a server with no schedule of its own they are sent by the cleanup, as in 0.130.0: held, nothing would ever send them and the bucket would stop receiving copies. Without a count (pruned by age alone) they are sent by the cleanup, as before. A mark that cannot be written is logged: `snapshot refresh: could not mark the snapshot of the refresh interval as kept on this machine; the cleanup will send it to S3 instead`.
 
 ## [0.130.0] - 2026-11-12
 
