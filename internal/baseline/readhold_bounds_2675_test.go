@@ -220,3 +220,62 @@ func TestHoldSnapshot_recordModeAndNoLinkFollowed(t *testing.T) {
 		t.Error("the cleanup followed a linked marker to another snapshot's hold")
 	}
 }
+
+// What the cleanup once knew of a hold is forgotten once nobody holds the
+// snapshot: a reader that comes after the limit has passed holds it afresh.
+func TestHoldSnapshot_anOldHoldIsNotInheritedByANewReader(t *testing.T) {
+	t.Run("the cleanup's own clock", func(t *testing.T) {
+		root := t.TempDir()
+		s := threeSnapshots(t, root)
+		start := time.Now()
+		holdNow = func() time.Time { return start }
+		t.Cleanup(func() { holdNow = time.Now })
+		first, _ := HoldSnapshot(filepath.Join(root, s[0]))
+		if res := keepNewest(t, root, 1); res.KeptPinned != 1 {
+			t.Fatalf("kept pinned %d", res.KeptPinned)
+		}
+		first()
+		keepNewest(t, root, 3) // nothing planned; the sweep sees the marker free
+		holdNow = func() time.Time { return start.Add(readHoldLimit + time.Hour) }
+		second, _ := HoldSnapshot(filepath.Join(root, s[0]))
+		defer second()
+		if res := keepNewest(t, root, 1); res.KeptPinned != 1 || slices.Contains(res.Pruned, s[0]) {
+			t.Fatalf("a new reader lost its snapshot to an earlier reader's start: pruned %v, kept pinned %d", res.Pruned, res.KeptPinned)
+		}
+	})
+	t.Run("a dead reader's record", func(t *testing.T) {
+		root := t.TempDir()
+		s := threeSnapshots(t, root)
+		b, _ := json.Marshal(holdRecord{PID: 7, Since: time.Now().Add(-readHoldLimit - time.Hour)})
+		stale := filepath.Join(root, holdRecordPrefix+s[0]+".7.1")
+		if err := os.WriteFile(stale, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		keepNewest(t, root, 3)
+		if _, err := os.Stat(stale); !os.IsNotExist(err) {
+			t.Fatalf("the record of a reader nobody is left of stays: %v", err)
+		}
+		release, _ := HoldSnapshot(filepath.Join(root, s[0]))
+		defer release()
+		if res := keepNewest(t, root, 1); res.KeptPinned != 1 {
+			t.Fatalf("a new reader lost its snapshot to a dead reader's record: pruned %v", res.Pruned)
+		}
+	})
+}
+
+// A record's snapshot is read from the right, so a name with a dot is whole.
+func TestRecordSnapshot(t *testing.T) {
+	for in, want := range map[string]string{
+		holdRecordPrefix + "2026-11-12T10-00-00Z.123.456": "2026-11-12T10-00-00Z",
+		holdRecordPrefix + "snap.with.dots.123.456":       "snap.with.dots",
+	} {
+		if got, ok := recordSnapshot(in); !ok || got != want {
+			t.Errorf("recordSnapshot(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+	for _, bad := range []string{holdRecordPrefix + "123", holdRecordPrefix + ".1.2", "other.1.2"} {
+		if got, ok := recordSnapshot(bad); ok {
+			t.Errorf("recordSnapshot(%q) = %q, want no name", bad, got)
+		}
+	}
+}

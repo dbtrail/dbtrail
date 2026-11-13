@@ -298,19 +298,61 @@ func forgetHold(key, root, name string) {
 	}
 }
 
-// sweepHoldRecords removes the records beside root whose snapshot is no
-// longer there: a reader that died, or one whose snapshot went past the
-// limit. Best-effort.
+// recordSnapshot is the snapshot a hold record names: the name between the
+// prefix and the last two fields (pid, nanos), read from the right so a
+// name with a dot in it is still read whole.
+func recordSnapshot(base string) (string, bool) {
+	rest, ok := strings.CutPrefix(base, holdRecordPrefix)
+	if !ok {
+		return "", false
+	}
+	for range 2 {
+		i := strings.LastIndex(rest, ".")
+		if i <= 0 {
+			return "", false
+		}
+		rest = rest[:i]
+	}
+	return rest, true
+}
+
+// sweepHoldRecords forgets every hold of root that nobody holds now: the
+// records of a reader that died or whose snapshot is gone, and the first
+// time this process found a marker held. Without it, a reader that comes
+// days later to a snapshot the cleanup once found held, or whose earlier
+// reader died, would inherit that old start and lose its snapshot at once.
+// A marker is free when it can be taken exclusively without waiting; it is
+// forgotten while taken, so no reader starts a hold in between. Best-effort.
 func sweepHoldRecords(root string) {
+	root = filepath.Clean(root)
+	names := map[string]bool{}
 	matches, _ := filepath.Glob(filepath.Join(root, holdRecordPrefix+"*"))
 	for _, p := range matches {
-		rest := strings.TrimPrefix(filepath.Base(p), holdRecordPrefix)
-		name, _, ok := strings.Cut(rest, ".")
-		if !ok || name == "" {
+		if name, ok := recordSnapshot(filepath.Base(p)); ok {
+			names[name] = true
+		}
+	}
+	holdSeenMu.Lock()
+	for key := range holdSeen {
+		if snap := filepath.Dir(key); filepath.Dir(snap) == root {
+			names[filepath.Base(snap)] = true
+		}
+	}
+	holdSeenMu.Unlock()
+	for name := range names {
+		snap := filepath.Join(root, name)
+		key := filepath.Join(snap, SuccessMarker)
+		f, err := openMarker(snap)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				forgetHold(key, root, name)
+			}
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(root, name)); errors.Is(err, fs.ErrNotExist) {
-			_ = os.Remove(p)
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			forgetHold(key, root, name)
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		}
+		f.Close()
 	}
 }
