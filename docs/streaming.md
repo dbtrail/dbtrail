@@ -48,7 +48,7 @@ changes made from now on (row history and undo): a row nobody has touched
 since is not in it.
 
 DBTrail reads the source in full again later too: when a column is added,
-dropped, renamed or retyped, on a `TRUNCATE`, `DROP` or `RENAME` of a table,
+dropped, renamed, retyped or given another character set, on a `TRUNCATE`, `DROP` or `RENAME` of a table,
 and when a new table appears. So the account needs these privileges for as
 long as it is in use, not just on the first day.
 

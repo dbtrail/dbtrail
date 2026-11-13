@@ -156,7 +156,13 @@ const (
 	// MySQL source serves a reader by GTID only with gtid_mode=ON (the
 	// manual, CHANGE REPLICATION SOURCE TO, SOURCE_AUTO_POSITION:
 	// "GTID_MODE=ON on the source"), so under any other value the capture
-	// cannot read from it while the source keeps writing.
+	// cannot read from it while the source keeps writing. Verified on MySQL
+	// 8.0.46 in each of the three (#2674,
+	// TestIntegrationGTIDModeRefusesCaptureByGTID_2674): the source answers
+	// capture's GTID request, and `bintrail stream` resuming from a GTID
+	// checkpoint, with ERROR 1236 "The replication sender thread cannot
+	// start in AUTO_POSITION mode: this server has GTID_MODE = <mode>
+	// instead of ON.", and serves it under ON.
 	captureDetailNoGTIDMode        = "the source has no gtid_mode (a MariaDB source), which is not compared"
 	captureDetailGTIDModeOff       = "GTIDs are off on the source (gtid_mode=OFF) while capture follows it by GTID, so capture cannot read from it"
 	captureDetailGTIDOffPermissive = "the source's gtid_mode is OFF_PERMISSIVE, not ON, while capture follows it by GTID, so capture cannot read from it"

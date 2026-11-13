@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +16,12 @@ import (
 
 func resetExportGlobals(t *testing.T) {
 	t.Helper()
-	sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat, sEvery := eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery
+	sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat, sEvery, sCompact := eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery, eiCompact
 	t.Cleanup(func() {
-		eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery = sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat, sEvery
+		eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery, eiCompact = sDSN, sDir, sS3, sWh, sTables, sAt, sBatch, sFormat, sEvery, sCompact
 		exportIcebergCmd.SetOut(nil)
 	})
-	eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery = "", "", "", "", "", "", 0, "text", ""
+	eiIndexDSN, eiBaselineDir, eiBaselineS3, eiWarehouse, eiTables, eiAt, eiFetchBatch, eiFormat, eiEvery, eiCompact = "", "", "", "", "", "", 0, "text", "", defaultCompactAfter
 }
 
 // TestRunExportIceberg_flagValidation: each refusal fires before anything
@@ -48,6 +49,7 @@ func TestRunExportIceberg_flagValidation(t *testing.T) {
 		{"no warehouse", func() { eiWarehouse = "" }, "--warehouse is required"},
 		{"bad format", func() { eiFormat = "yaml" }, "--format must be text or json"},
 		{"negative batch", func() { eiFetchBatch = -1 }, "--fetch-batch-size must be >= 0"},
+		{"negative compact-after", func() { eiCompact = -1 }, "--compact-after must be >= 0"},
 		{"bad at", func() { eiAt = "yesterday-ish" }, "--at"},
 		{"table without schema", func() { eiTables = "orders" }, "must be schema.table"},
 		{"tables all blank", func() { eiTables = " , " }, "no entries"},
@@ -118,6 +120,71 @@ func TestWriteExportJSON_shape(t *testing.T) {
 }
 
 func i64(n int64) *int64 { return &n }
+
+// TestWriteExportJSON_compaction: a table the run compacted carries a
+// "compaction" object; one it did not compact carries none; one whose
+// compaction was not applied says so, with no rows or files after.
+func TestWriteExportJSON_compaction(t *testing.T) {
+	var buf bytes.Buffer
+	err := writeExportJSON(&buf, []icebergexport.Outcome{
+		{Schema: "shop", Table: "a", Verdict: icebergexport.VerdictExported, SnapshotID: i64(7),
+			Compaction: &icebergexport.Compaction{DataFilesBefore: 11, DeleteFilesBefore: 10, DataFilesAfter: 1, Rows: 500, SnapshotID: i64(7)}},
+		{Schema: "shop", Table: "b", Verdict: icebergexport.VerdictUnchanged},
+		{Schema: "shop", Table: "c", Verdict: icebergexport.VerdictExported, SnapshotID: i64(3),
+			Compaction: &icebergexport.Compaction{DataFilesBefore: 11, DeleteFilesBefore: 10, Err: icebergexport.ErrConcurrentCommit}},
+	}, "hadoop", "/w", time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Tables []map[string]any `json:"tables"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	a := got.Tables[0]["compaction"].(map[string]any)
+	if a["status"] != "applied" || a["data_files_before"].(float64) != 11 || a["delete_files_before"].(float64) != 10 ||
+		a["data_files_after"].(float64) != 1 || a["rows"].(float64) != 500 || a["snapshot_id"].(float64) != 7 {
+		t.Fatalf("compacted table = %v", a)
+	}
+	if _, ok := a["error"]; ok {
+		t.Fatalf("a compaction that committed carries an error: %v", a)
+	}
+	if _, ok := got.Tables[1]["compaction"]; ok {
+		t.Fatalf("a table the run did not compact carries a compaction: %v", got.Tables[1])
+	}
+	c := got.Tables[2]["compaction"].(map[string]any)
+	if c["status"] != "not_applied" || c["error"] == nil || c["rows"].(float64) != 0 || c["data_files_after"].(float64) != 0 {
+		t.Fatalf("refused compaction = %v", c)
+	}
+	if _, ok := c["snapshot_id"]; ok {
+		t.Fatalf("a refused compaction names a snapshot: %v", c)
+	}
+}
+
+// TestExportIceberg_compactAfterDefault: the flag's default is the constant
+// the help and the docs name, and it reaches the run's config.
+func TestExportIceberg_compactAfterDefault(t *testing.T) {
+	f := exportIcebergCmd.Flags().Lookup("compact-after")
+	if f == nil || f.DefValue != strconv.Itoa(defaultCompactAfter) {
+		t.Fatalf("--compact-after = %+v, want default %d", f, defaultCompactAfter)
+	}
+	if !strings.Contains(exportIcebergCmd.Long, "--compact-after delete files (default "+strconv.Itoa(defaultCompactAfter)+")") {
+		t.Fatal("the help does not name the default")
+	}
+	for _, n := range []int{0, defaultCompactAfter, 3} {
+		resetExportGlobals(t)
+		eiIndexDSN, eiBaselineDir, eiWarehouse, eiTables, eiCompact = "u:p@tcp(127.0.0.1:1)/db", t.TempDir(), t.TempDir(), "shop.orders", n
+		exportIcebergCmd.SetContext(context.Background())
+		job, _, err := prepareExport(exportIcebergCmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.cfg.CompactAfter != n {
+			t.Fatalf("--compact-after %d reached the run as %d", n, job.cfg.CompactAfter)
+		}
+	}
+}
 
 // TestAuditIcebergCommit_snapshotIDOnlyWhenPresent: the audit detail names
 // the snapshot when the commit left one and carries no snapshot_id key at

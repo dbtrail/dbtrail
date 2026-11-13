@@ -63,7 +63,7 @@ The `snapshot_id` column is NULL for these DDLs, which the status command uses t
 
 ## Restoring to Before a Snapshot Was Recorded
 
-A snapshot is taken when capture reaches the DDL, which can be minutes or hours after the DDL ran on the source (capture behind, or catching up after a restart). When a backup is updated, or a Parquet snapshot is written for a moment (`reconstruct --output-format parquet`), DDLs on the table that ran at or after the second the backup's `CREATE TABLE` was read and at or before that moment (by the `detected_at` of their `schema_changes` rows) are checked: if the newest snapshot taken for such a DDL is newer than the one in effect at that moment, the column types are also compared with it, and a difference refuses.
+A snapshot is taken when capture reaches the DDL, which can be minutes or hours after the DDL ran on the source (capture behind, or catching up after a restart). When a backup is updated, or a Parquet snapshot is written for a moment (`reconstruct --output-format parquet`), DDLs on the table that ran at or after the second the backup's `CREATE TABLE` was read and at or before that moment (by the `detected_at` of their `schema_changes` rows) are checked: if the newest snapshot taken for such a DDL is newer than the one in effect at that moment, the column types, character sets and NULL-ness are also compared with it, and a difference refuses.
 
 That snapshot read the table after the DDL, and maybe after later DDLs too, so this extra comparison can only add refusals: it may refuse a restore that would have been right, but it never lets through one the existing check would have refused. Clock skew between the source and the DBTrail host moves this window by the skew.
 
