@@ -23,28 +23,31 @@ func TestMain(m *testing.M) {
 }
 
 func TestIsQuery(t *testing.T) {
-	for stmt, want := range map[string]bool{
-		"SELECT 1":                             true,
-		"  select 1":                           true,
-		"(SELECT 1) UNION (SELECT 2)":          true,
-		"WITH x AS (SELECT 1) SELECT * FROM x": true,
-		"VALUES (1), (2)":                      true,
-		"TABLE orders":                         true,
-		"-- note\nSELECT 1":                    true,
-		"/* a */ /* b */ select 1":             true,
-		"selectx 1":                            false,
-		"DELETE FROM orders":                   false,
-		"INSERT INTO t SELECT 1":               false,
-		"SET default_transaction_read_only = off": false,
-		"EXPLAIN SELECT 1":                     false,
-		"":                                     false,
-		"   ":                                  false,
-		"-- only a comment":                    false,
-		"/* never closed select 1":             false,
-		"((":                                   false,
+	for _, tc := range []struct {
+		stmt string
+		want bool
+	}{
+		{"SELECT 1", true},
+		{"  select 1", true},
+		{"(SELECT 1) UNION (SELECT 2)", true},
+		{"WITH x AS (SELECT 1) SELECT * FROM x", true},
+		{"VALUES (1), (2)", true},
+		{"TABLE orders", true},
+		{"-- note\nSELECT 1", true},
+		{"/* a */ /* b */ select 1", true},
+		{"selectx 1", false},
+		{"DELETE FROM orders", false},
+		{"INSERT INTO t SELECT 1", false},
+		{"SET default_transaction_read_only = off", false},
+		{"EXPLAIN SELECT 1", false},
+		{"", false},
+		{"   ", false},
+		{"-- only a comment", false},
+		{"/* never closed select 1", false},
+		{"((", false},
 	} {
-		if got := IsQuery(stmt); got != want {
-			t.Errorf("IsQuery(%q) = %v, want %v", stmt, got, want)
+		if got := IsQuery(tc.stmt); got != tc.want {
+			t.Errorf("IsQuery(%q) = %v, want %v", tc.stmt, got, tc.want)
 		}
 	}
 }
