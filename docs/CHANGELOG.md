@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Checked on a real server: capture cannot read by GTID from a source whose `gtid_mode` is not ON** (#2674). The snapshot schedule treats a quiet source whose `gtid_mode` is `OFF`, `OFF_PERMISSIVE` or `ON_PERMISSIVE`, while capture follows it by GTID, as one capture cannot read from (a full read), on the MySQL manual's rule for auto-position. On MySQL 8.0.46 in each of the three modes, the source refuses capture's request, and `bintrail stream` resuming from a GTID checkpoint exits, with `ERROR 1236 (HY000): The replication sender thread cannot start in AUTO_POSITION mode: this server has GTID_MODE = <mode> instead of ON.`; under `ON` it is served. Nothing changes in behaviour. An integration test pins it against a throwaway server named by `BINTRAIL_TEST_GTIDMODE_DSN` (it changes that server's `gtid_mode`, so it never runs against a shared one).
 - **The installer installs one release and writes it down** (#2638).
   `install.sh` took `docker-compose.yml` from `main` and left every image on
   `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
