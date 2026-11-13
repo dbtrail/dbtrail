@@ -42,6 +42,7 @@ var portCmd = &cobra.Command{
   bintrail-console port new-password  replace the password
   bintrail-console port routing on    send what the copy cannot answer to MySQL
   bintrail-console port mode shop fast  answer shop from its last snapshot alone
+  bintrail-console port max-behind shop 5m  past 5 minutes behind its source, MySQL answers shop
   bintrail-console port off
 
 Connect with the mysql client. The user is the server's name:
@@ -176,7 +177,7 @@ decides for every server: a choice saved here then applies once it is removed.`,
 		},
 	}
 	addCtlFlags(portCmd, &srvURL, &srvAccessFile)
-	portCmd.AddCommand(mode,
+	portCmd.AddCommand(mode, newPortMaxBehindCmd(),
 		portVerb("on", "Turn the MySQL port on. Prints its password when one is made", func(ctx context.Context, c *ctlClient, w io.Writer) error {
 			return runPortSet(ctx, c, true, w)
 		}),
@@ -397,6 +398,11 @@ func (p ctlPort) where() string {
 // hide whether the port is on.
 func portUser(ctx context.Context, c *ctlClient) string {
 	servers, err := listServers(ctx, c)
+	return portUserOf(servers, err)
+}
+
+// portUserOf is portUser for a list already read (err is why it was not).
+func portUserOf(servers []ctlServer, err error) string {
 	if err != nil {
 		return "<server name>"
 	}
@@ -492,11 +498,15 @@ func runPortStatus(ctx context.Context, c *ctlClient, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// One read of the list serves the mysql line and the lag limits
+	// (#2783). It not loading never hides whether the port is on.
+	servers, listErr := listServers(ctx, c)
 	user := ""
 	if *p.Enabled {
-		user = portUser(ctx, c)
+		user = portUserOf(servers, listErr)
 	}
 	printPort(out, p, user)
+	printMaxBehindList(out, servers, listErr)
 	return nil
 }
 
