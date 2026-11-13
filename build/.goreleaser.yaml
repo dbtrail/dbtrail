@@ -213,8 +213,9 @@ nfpms:
     homepage: https://github.com/dbtrail/dbtrail
     maintainer: Daniel <daniel@dbtrail.com>
     description: >-
-      Web console for the bintrail binlog index — read-only event browser,
-      recovery SQL generation, and the combined stream+console watch daemon.
+      The DBTrail service: heavy MySQL queries answered in seconds from a copy
+      of your tables that follows your binlog, on a MySQL port, with the web
+      interface, row history and recovery SQL.
     license: Apache-2.0
     formats:
       - deb
