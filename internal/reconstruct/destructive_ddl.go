@@ -184,9 +184,10 @@ func sameBinlogSequence(a, b string) bool {
 //
 // An ALTER TABLE is included when a clause of it changes rows with no row
 // events (#2632, ddltext.RowsChangedWithoutEvents): DROP, TRUNCATE, EXCHANGE
-// or CONVERT of a partition, DISCARD or IMPORT of a tablespace. The columns
-// stay the same, so the shape check lets it through. An EXCHANGE refuses the
-// table it names after WITH TABLE too.
+// or CONVERT of a partition, DISCARD or IMPORT of a tablespace, and MariaDB's
+// ALTER IGNORE TABLE with a UNIQUE or PRIMARY KEY, which deletes duplicates
+// (#2640). The columns stay the same, so the shape check lets it through. An
+// EXCHANGE refuses the table it names after WITH TABLE too.
 //
 // A missing schema_changes table (a pre-DDL-tracking index, or a caller that
 // hasn't run indexer.EnsureSchema) is treated as "nothing to check" rather
@@ -392,7 +393,10 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 	// PARTITION is recorded under the partitioned table only, and changes the
 	// table it names after WITH TABLE just as much. Those statements are few,
 	// and the LIKE keeps the rest of the ALTERs out of the result. LOWER
-	// makes it match whatever the column's collation.
+	// makes it match whatever the column's collation. '%ignore%' brings in
+	// MariaDB's ALTER IGNORE TABLE (#2640), whose UNIQUE or PRIMARY KEY
+	// deletes duplicates; a word inside a comment or a name brings in a row
+	// that the text check then leaves out, never the reverse.
 	q := `SELECT id, ddl_type, detected_at, binlog_file, binlog_pos,
 			detected_at ` + sinceOp + ` ?, detected_at <= ?, LEFT(ddl_query, 400),
 			schema_name, table_name, IF(ddl_type = 'ALTER TABLE', ddl_query, '')
@@ -400,7 +404,8 @@ func loadDestructiveDDLs(ctx context.Context, db *sql.DB, schema, table string, 
 		WHERE ((schema_name = ? OR schema_name = '') AND table_name = ?
 			AND ddl_type IN ('TRUNCATE TABLE', 'DROP TABLE', 'RENAME TABLE', 'CREATE OR REPLACE TABLE', 'ALTER PUBLICATION'))
 		OR (ddl_type = 'ALTER TABLE'
-			AND (LOWER(ddl_query) LIKE '%partition%' OR LOWER(ddl_query) LIKE '%tablespace%'))
+			AND (LOWER(ddl_query) LIKE '%partition%' OR LOWER(ddl_query) LIKE '%tablespace%'
+				OR LOWER(ddl_query) LIKE '%ignore%'))
 		ORDER BY detected_at ASC, id ASC`
 
 	rows, err := db.QueryContext(ctx, q, w.Since, w.Until, schema, table)

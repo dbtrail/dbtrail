@@ -43,6 +43,10 @@ type refreshRequest struct {
 	// when the per-server backup schedule started this fold, empty for the
 	// daemon-wide interval loop.
 	Trigger string
+	// UpdateWhy is stamped onto the history record (BaselineRunRecord.
+	// UpdateWhy, #2674): why the schedule updated where it would otherwise
+	// have skipped the slot. Empty for every other update.
+	UpdateWhy string
 	// BaselineS3, when set, is the destination the finished snapshot is
 	// uploaded to, and the source the fold reads its previous snapshot from.
 	//
@@ -446,6 +450,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 		// evidence the snapshot got there is the absence of a failure line.
 		Uploaded:   uploaded,
 		UploadHeld: uploadHeld,
+		UpdateWhy:  req.UpdateWhy,
 	}
 	if err == nil {
 		// What the #1721 cut-over estimates from: the events this update

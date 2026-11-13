@@ -82,7 +82,7 @@ func rebuildOnce(t *testing.T, b *backupScheduler, e console.ServerEntry, stamp 
 	b.mu.Lock()
 	b.seen[e.ID] = seenSlot{identity: e.BackupSchedule.Identity()}
 	b.mu.Unlock()
-	if err := b.startRebuild(e, p, stamp); err != nil {
+	if err := b.startRebuild(e, p, stamp, ""); err != nil {
 		t.Fatalf("startRebuild: %v", err)
 	}
 	waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)

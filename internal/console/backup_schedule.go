@@ -594,8 +594,9 @@ func updateClearlyDearer(updateSec, fullSec float64) bool {
 //     (updateClearlyDearer, #2181) and no update of about this size was done
 //     cheaper (BackupProvenMargin, #1736). The estimate is crude on purpose
 //     (events x rate): it decides between two producers, not a schedule;
-//   - the fixed cost (#1736): with no rate, when even the cheapest measured
-//     update took clearly longer than the last full backup;
+//   - the fixed cost (#1736): with no estimate (no rate, or a rate and an
+//     unknown count, #2674), when even the cheapest measured update took
+//     clearly longer than the last full backup;
 //   - an index that is missing writes as far as the evidence goes (#1791):
 //     nothing was indexed since an anchor older than
 //     BackupCutoverAge(interval), counted from when the full backup that
@@ -622,7 +623,7 @@ func updateClearlyDearer(updateSec, fullSec float64) bool {
 // cannot be made (no count, no rate, no full backup on record), one within
 // the margin, and one made on numbers older than the last full backup. An
 // unknown count (Events < 0) rules out the estimate and not the fixed-cost
-// rule, which needs no count. The age of the anchor says nothing about the
+// rule, which needs no count, with or without a rate (#2674). The age of the anchor says nothing about the
 // size of the source, which is what a full read costs. An update that
 // turns out wrong or too large refuses on its own terms (a capture gap, a
 // schema change, too many changed rows), and the schedule answers a
@@ -694,11 +695,14 @@ func WindowChoice(w BackupWindow, interval time.Duration, now time.Time) (method
 		// the source; or it rests on numbers older than the last full
 		// backup (#1737).
 	}
-	// No rate, but the fixed cost alone decides (#1736's review): when even
-	// the cheapest measured update took longer than the last full backup,
-	// no estimate is needed.
+	// No estimate, but the fixed cost alone decides (#1736's review): when
+	// even the cheapest measured update took longer than the last full
+	// backup, no estimate is needed. That is a server with no rate, and one
+	// with a rate whose count of changes is unknown (#2674): the estimate
+	// above needs the count, this rule does not, and whatever the count is,
+	// the update costs at least its fixed cost.
 	// Only ever a full backup, so not on a model older than the last one.
-	if !w.UnmeasuredSinceFull && w.Events != 0 && w.FoldRate <= 0 && w.FoldFixed > 0 && w.LastFull > 0 &&
+	if !w.UnmeasuredSinceFull && w.Events != 0 && (w.FoldRate <= 0 || w.Events < 0) && w.FoldFixed > 0 && w.LastFull > 0 &&
 		updateClearlyDearer(w.FoldFixed.Seconds(), w.LastFull.Seconds()) {
 		return BackupMethodFull, fmt.Sprintf("%s: the cheapest recent update took %s, %s the last full read, which took %s",
 			BackupWhyWindowPrefix, roundDuration(w.FoldFixed), backupFullCostMarginWords, roundDuration(w.LastFull))
@@ -1348,6 +1352,9 @@ type BackupScheduleState struct {
 	// LastWhy is why that job was a full backup (#1604), as decided when it
 	// started; empty for an update.
 	LastWhy string
+	// LastUpdateWhy is why that job, an update, ran where the slot would
+	// otherwise have been skipped (#2674, BaselineRunRecord.UpdateWhy).
+	LastUpdateWhy string
 	// Last is the supervisor's status for THAT job: live while it is in the
 	// slot, afterwards the copy ScheduleState took when it saw the job
 	// terminal (so a later manual job taking the slot does not erase it),

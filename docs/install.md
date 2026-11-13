@@ -501,7 +501,6 @@ For cron, systemd units, and Ansible recipes, see [deployment.md](./deployment.m
 | `snapshot` | Capture table and column metadata from the source server |
 | `index` | Parse binlog files from disk and write row events to the index |
 | `stream` | Connect as a replica and index row events in real-time |
-| `agent` | Connect to DBTrail and listen for commands |
 | `query` | Search the index with flexible filters (schema, table, PK, time range, GTID) |
 | `recover` | Generate reversal SQL for matching events |
 | `recover-cascade` | Generate reversal SQL for rows hit by a foreign-key ON DELETE / ON UPDATE CASCADE / SET NULL |

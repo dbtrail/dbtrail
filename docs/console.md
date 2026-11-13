@@ -1124,9 +1124,9 @@ saved, shown with the reason `serve` is not running it.
   backup, no full backup is chosen on the estimate and the update runs,
   however old the previous snapshot is: its age says nothing about the
   size of the source, which is what a full backup costs. The rule of the
-  cheapest recent update, above, needs no count, so on a server with no
-  per-event rate that has measured an update since its last full backup it
-  still applies with an unknown count. The count is unknown when the
+  cheapest recent update, above, needs no count, so on a server that has
+  measured an update since its last full backup it still applies with an
+  unknown count, with or without a per-event rate (#2674). The count is unknown when the
   index does not answer the probe, when nothing on record says how far
   the index had been written at the previous snapshot (the run history
   does not hold it, or another process made the snapshot; an index that
@@ -1228,7 +1228,10 @@ saved, shown with the reason `serve` is not running it.
   index that did not answer in time from a read that failed). Which one
   is said before the run, in `next_method_why`, and once in the daemon
   log, which words it as the end of the skipped stretch; the update's own
-  run record carries no reason (`last_run.why` is for full backups). The
+  run record keeps it too (#2674), in `last_run.update_why` (and the run
+  record's `update_why`), apart from `last_run.why`, which is for full
+  backups: the card says "This update ran because ..." under the last run,
+  and so does the snapshot's detail. The
   update also runs when the index itself did not give the capture's
   record (it did not answer, or not in time, or `stream_state` could not
   be read; the probe's time limit covers both servers, and it says which
@@ -1236,7 +1239,12 @@ saved, shown with the reason `serve` is not running it.
   an update with nothing to add publishes no snapshot, so the next slot
   asks again. While a kept snapshot is being sent to S3 the refresh slot
   is busy and the page says "Sending a snapshot kept on this machine to
-  S3" (`refresh.sending_held`). Stopping a source from the web interface
+  S3" (`refresh.sending_held`). **Read database now** is refused meanwhile,
+  as it is during any other job on the server (one job per server), and
+  the refusal names that job and since when (#2674): "The full read did
+  not start: a snapshot kept on this machine is being sent to S3 since
+  ... UTC; the full read can start once it finishes." Before, it said "a
+  baseline is already running for this server" whatever held it. Stopping a source from the web interface
   acknowledges its capture-gap record and does not erase it: the Stop
   stamps the time of the acknowledgement beside the record
   (`stream_state.gap_acked_at`), which silences the alarm (the

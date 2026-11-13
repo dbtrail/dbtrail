@@ -50,15 +50,14 @@ var tel cli.TelemetryHook
 
 var rootCmd = &cobra.Command{
 	Use:   "bintrail-console",
-	Short: "Read-only web interface over the DBTrail binlog index",
-	Long: `bintrail-console serves a local, read-only web UI over the binlog index:
-browse indexed row events with full before/after diffs, generate recovery
-(undo) SQL, and run point-in-time reconstruct when baselines are configured.
+	Short: "DBTrail: heavy MySQL queries answered in seconds from a copy of your tables",
+	Long: `bintrail-console is the DBTrail service. It follows your MySQL binlog, keeps
+a copy of your tables, and answers heavy queries from that copy in seconds,
+on a MySQL port your mysql client and your application connect to. It also
+keeps the history of every changed row and writes the SQL that undoes a
+change; you review that SQL and run it yourself.
 
-It is the web interface's own binary (formerly the core CLI's "console"
-command), shipped separately so the core bintrail CLI carries no web UI. It
-NEVER executes SQL; recover produces a script you review and apply
-yourself.`,
+Start here: https://www.dbtrail.com/docs/quickstart/`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		observe.Setup(os.Stderr, logFormat, logLevel)
 		tel.Start(cmd)

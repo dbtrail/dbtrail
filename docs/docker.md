@@ -923,6 +923,8 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `AWS_SECRET_ACCESS_KEY` | compose (optional) | Paired with `AWS_ACCESS_KEY_ID` above |
 | `AWS_SESSION_TOKEN` | compose (optional) | Only needed for temporary/STS credentials |
 | `AWS_REGION` | compose (optional) | Region for the S3 bucket(s) used by Archive to S3 / baselines |
+| `ROUTER_AWS_ACCESS_KEY_ID`, `ROUTER_AWS_SECRET_ACCESS_KEY` | compose `router` service (optional) | S3 keys for the router alone, which only reads S3: give it read-only keys ([the policy](s3-iam-policy.md#read-only-access-for-the-router)) while `bintrail` keeps the keys that write. Unset = the shared `AWS_*` keys, as before. Both or neither: half a pair is refused at start |
+| `ROUTER_AWS_SESSION_TOKEN` | compose `router` service (optional) | The token of temporary router keys. Without it the router's own keys carry no token, never the shared `AWS_SESSION_TOKEN` |
 
 (`SERVER_ID` is no longer needed — `bintrail-console watch` derives a stable
 one from the source DSN.)
@@ -953,6 +955,57 @@ container — not an IAM permissions problem. Once credentials resolve, the IAM
 principal still needs S3 permissions on the bucket: see [S3 IAM
 Policy](s3-iam-policy.md) for a copy-paste policy covering Archive to S3,
 baselines, and reading either back.
+
+#### Read-only keys for the router
+
+The `router` service gets the same AWS variables as `bintrail`, because a
+`_snapshot` or `_flashback` query on the MySQL port that reaches back past the
+local snapshots reads S3 from the router process. The router only reads; the
+shared keys can also write and delete. To give it keys of its own, create
+read-only keys ([the policy](s3-iam-policy.md#read-only-access-for-the-router))
+and set in `.env`:
+
+```bash
+ROUTER_AWS_ACCESS_KEY_ID=AKIA...
+ROUTER_AWS_SECRET_ACCESS_KEY=...
+# only for temporary keys:
+# ROUTER_AWS_SESSION_TOKEN=...
+```
+
+then `docker compose up -d router`. The rules:
+
+- **Unset, nothing changes**: the router reads with `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, as before, and with none of
+  them set, with the instance role or mounted `~/.aws`.
+- **The router's own pair never carries the shared token.** Without
+  `ROUTER_AWS_SESSION_TOKEN` the router runs with no session token: a token
+  belongs to the keys it was issued with.
+- **Half a pair is refused at start**, and so is a router token without a
+  router pair: `docker compose logs router` names the variable that is
+  missing, never a value.
+- **The startup log says which keys it reads with**: `Router: S3 is read with
+  the router's own keys (...)`, or `Router: S3 is read with the keys in
+  AWS_ACCESS_KEY_ID. In the compose stack those are the capture service's
+  ...`.
+- **Region and endpoint stay shared** (`AWS_REGION`, `BINTRAIL_S3_ENDPOINT`):
+  it is the same bucket.
+- **A server whose S3 store has keys of its own** (an S3-compatible store set
+  up in the web interface with an access key) is read with those keys by both
+  services; `ROUTER_AWS_*` does not replace them.
+
+With the packaged systemd units, both services read
+`/etc/bintrail/bintrail-console.env`. Put the router's keys in a file of its
+own and add it with `systemctl edit bintrail-router`:
+
+```ini
+[Service]
+EnvironmentFile=/etc/bintrail/router-aws.env
+```
+
+A later `EnvironmentFile` wins, so that file's `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` replace the shared ones for the router alone. If the
+shared file sets `AWS_SESSION_TOKEN`, put `AWS_SESSION_TOKEN=` (empty) in the
+router's file for long-term keys: the router drops an empty token at start.
 
 ## Image details
 

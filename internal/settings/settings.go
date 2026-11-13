@@ -289,6 +289,8 @@ var table = []Entry{
 	{Env: "BINTRAIL_ROUTER_STATEMENT_TABLE"},
 	{Env: "BINTRAIL_ROUTER_TLS_CERT"},
 	{Env: "BINTRAIL_ROUTER_TLS_KEY"},
+	// Which ROUTER_AWS_* the compose file was given (#2690), never values.
+	{Env: "BINTRAIL_ROUTER_OWN_AWS_KEYS", Kind: Internal},
 	{Env: "BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS"},
 	{Env: "BINTRAIL_CONSOLE_ROUTE_READ_ONLY"},
 	{Env: "BINTRAIL_CONSOLE_ROUTE_COST_THRESHOLD"},

@@ -35,11 +35,15 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "bintrail",
-	Short: "MySQL binlog indexer and recovery tool",
+	Short: "DBTrail's command line for row history and recovery SQL",
 	Long: `Bintrail parses MySQL ROW-format binary logs, indexes every row event into a
 MySQL table with full before/after images, and provides query and recovery
 capabilities. The index is self-contained; recovery does not depend on
-binlog files still existing on disk.`,
+binlog files still existing on disk.
+
+The web interface, the copy that answers heavy queries in seconds and its
+MySQL port run in the DBTrail service, not in this command line. To install
+it, start at https://www.dbtrail.com/docs/quickstart/`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		observe.Setup(os.Stderr, logFormat, logLevel)
 		tel.Start(cmd)

@@ -149,6 +149,9 @@ type scheduledStart struct {
 	since string
 	// why is the reason a full backup was chosen (#1604); "" for an update.
 	why string
+	// updateWhy is why an update ran where the slot would have been
+	// skipped (#2674, console.BackupScheduleState.LastUpdateWhy).
+	updateWhy string
 	// last is the job's status once it was observed in a terminal state,
 	// nil until then.
 	last *console.BaselineStatus
@@ -626,9 +629,9 @@ const (
 // the two lines that report one. The age of the previous snapshot no longer
 // chooses a full read (#2659), so the update is what runs, and nothing
 // estimated its cost. The exception is console.CutoverToFull's fixed-cost
-// rule, which needs no count.
+// rule, which needs no count, with or without a rate (#2674).
 const windowNoEstimateWords = "the schedule's choice is the update, with no estimate of what it will cost; " +
-	"the exception is a server with no per-event rate whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen"
+	"the exception is a server whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen"
 
 // reportCountUnknown says, once per cause and server, that the changes since
 // the previous snapshot could not be counted, and what the schedule does
@@ -784,7 +787,7 @@ func (b *backupScheduler) ScheduleState(serverID string) console.BackupScheduleS
 	if !started {
 		return out
 	}
-	out.LastStartedAt, out.LastMethod, out.LastWhy = st.at, st.method, st.why
+	out.LastStartedAt, out.LastMethod, out.LastWhy, out.LastUpdateWhy = st.at, st.method, st.why, st.updateWhy
 	var cur console.BaselineStatus
 	if st.method == console.BackupMethodRefresh {
 		cur = b.sup.RefreshStatus(serverID)
@@ -1143,7 +1146,14 @@ func (b *backupScheduler) fire(e console.ServerEntry, p console.ParsedBackupSche
 	}
 	stamp := now.Format(time.RFC3339)
 	if method == console.BackupMethodRefresh {
-		switch err := b.startRebuild(e, p, stamp); {
+		// The why of an update is recorded only where it says something the
+		// run history has to keep (#2674): the update that ran instead of a
+		// skip. The plain update's why is the page's own wording.
+		updateWhy := ""
+		if console.IsUnconfirmedUpdate(why) {
+			updateWhy = why
+		}
+		switch err := b.startRebuild(e, p, stamp, updateWhy); {
 		case err == nil:
 			b.watch(e, stamp, method)
 		case errors.Is(err, console.ErrBaselineRunning):
@@ -1226,8 +1236,10 @@ func (b *backupScheduler) rebuildRequest(e console.ServerEntry, p console.Parsed
 }
 
 // startRebuild triggers the fold and records the job as the schedule's.
-func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBackupSchedule, stamp string) error {
+// updateWhy is console.BackupScheduleState.LastUpdateWhy for this job.
+func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBackupSchedule, stamp, updateWhy string) error {
 	req := b.rebuildRequest(e, p)
+	req.UpdateWhy = updateWhy
 	// The interval is what the overrun warning measures against and names;
 	// for a scheduled rebuild that is the schedule's own `every`. Passing the
 	// wrong one here does not only mislabel a log attribute: it decides
@@ -1239,7 +1251,7 @@ func (b *backupScheduler) startRebuild(e console.ServerEntry, p console.ParsedBa
 	if err != nil {
 		return err
 	}
-	b.record(e, console.BackupMethodRefresh, stamp, since, false, "")
+	b.recordStart(e, scheduledStart{method: console.BackupMethodRefresh, at: stamp, since: since, updateWhy: updateWhy})
 	return nil
 }
 
@@ -1528,7 +1540,7 @@ func (b *backupScheduler) updateInstead(e console.ServerEntry, failed console.Ba
 	slog.Warn("snapshot schedule: the full read failed; updating from the recorded changes instead, although the update costs more",
 		"server", e.Name, "id", e.ID, "reason", reason)
 	stamp := now.Format(time.RFC3339)
-	switch err := b.startRebuild(e, p, stamp); {
+	switch err := b.startRebuild(e, p, stamp, ""); {
 	case err == nil:
 		b.mu.Lock()
 		if st, ok := b.started[e.ID]; ok && st.at == stamp {
