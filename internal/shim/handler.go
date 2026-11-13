@@ -419,6 +419,11 @@ type Config struct {
 	// BaselineBucket says the lookup above also covers an S3 destination,
 	// for the refusal's wording only.
 	BaselineBucket bool
+	// PinBaseline keeps the snapshot a `_snapshot` query reads from the
+	// cleanup of its folder until the query ends (#2691), single-row and
+	// full-table. Set by the console, whose process prunes the folder; nil
+	// (no pin) for a standalone shim, which another process prunes.
+	PinBaseline reconstruct.PinFunc
 	// QueryTimeout bounds each time-travel query end-to-end — planner,
 	// index fetch, archive/DuckDB fetch, and (for full-table queries)
 	// the wait for a FullTableGate slot (#823). Zero disables the

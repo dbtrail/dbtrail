@@ -295,7 +295,10 @@ func TestBaselineDownload_overTheCapIs429(t *testing.T) {
 	prev := downloadRule
 	t.Cleanup(func() { downloadRule = prev })
 	downloadRule = func(*Server, *http.Request) (int, time.Duration) { return 1, 0 }
-	defer baseline.PinSnapshot(dir, other, "a snapshot download", time.Hour)()
+	// Another download holds the one place past the count (a pin taken
+	// under the cap: only those count toward it, #2691).
+	held, _ := baseline.PinDownload(dir, other, time.Hour, nil, 1, 2)
+	defer held()
 	w := httptest.NewRecorder()
 	srv.handleBaselineDownload(w, httptest.NewRequest("GET", "/api/baselines/download"+detailQuery(detailSnapAt), nil))
 	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "60" {
