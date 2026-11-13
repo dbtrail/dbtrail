@@ -402,6 +402,7 @@ func (s *Server) newMCPServer(id string, pol *ext.AccessPolicy) *mcp.Server {
 				// this endpoint accepts only the static or UI-managed token, so
 				// no session policy ever reaches these handlers.
 				FindBaseline:       b.findBaseline,
+				PinBaseline:        pinBaselineRead(s, serverID),
 				BaselineConfigured: b.baselineConfigured,
 				// The connection is owned by the connManager; never closed
 				// per call, never schema-migrated (registry servers are
