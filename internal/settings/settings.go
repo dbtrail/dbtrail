@@ -316,10 +316,12 @@ var table = []Entry{
 	{Env: "BINTRAIL_TELEMETRY_DEBUG"},
 
 	// Set by DBTrail for another of its processes, never by an operator.
-	// The compose file passes these two: the file's own version, and where
-	// its index volume is mounted read-only.
+	// The compose file passes these three: the file's own version, where
+	// its index volume is mounted read-only, and where the baseline
+	// profile's wait-quiet step writes mydumper's session option file (#2733).
 	{Env: "BINTRAIL_COMPOSE_VERSION", Kind: Internal},
 	{Env: "BINTRAIL_INDEX_DATADIR_RO", Kind: Internal},
+	{Env: "BINTRAIL_MYDUMPER_SESSION_FILE", Kind: Internal},
 	// A process starting a SQL worker or a verify child marks it with these.
 	{Env: "BINTRAIL_SQL_SANDBOX_WORKER", Kind: Internal},
 	{Env: "BINTRAIL_VERIFY_CHILD_LOG_LEVEL", Kind: Internal},
