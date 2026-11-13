@@ -100,6 +100,22 @@ func TestWaitPGCoverage_sentThrough_2746(t *testing.T) {
 			t.Fatalf("covered %v note %q; want the moved position waited for and proven", covered, note)
 		}
 	})
+	t.Run("a sent position that moved during the wait is not remembered", func(t *testing.T) {
+		db := &sql.DB{}
+		pts := make([]pgStreamPoint, 0, 4000)
+		for i := range 4000 {
+			pts = append(pts, pgSentPoint(900, fmt.Sprintf("s%d", i), 950+uint64(min(i, 1))))
+		}
+		if covered, _, _ := run(t, db, 20*time.Millisecond, pts...); covered {
+			t.Fatal("the first wait was covered")
+		}
+		// The next table finds the position the first wait ended on, and
+		// must wait for it rather than be declared inconclusive at once.
+		covered, note, f := run(t, db, time.Minute, pgSentPoint(900, "t1", 951), pgSentPoint(900, "t2", 2000))
+		if !covered || note != "" || f.reads != 2 {
+			t.Fatalf("covered %v note %q reads %d; want the wait run and proven", covered, note, f.reads)
+		}
+	})
 	t.Run("a checkpoint still moving at the deadline is behind", func(t *testing.T) {
 		pts := make([]pgStreamPoint, 0, 4000)
 		for i := range 4000 {

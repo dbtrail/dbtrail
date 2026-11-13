@@ -356,8 +356,10 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 //
 // A logical walsender's keepalive carries sentPtr: the end of the last WAL
 // record it decoded (XLogSendLogical sets it after LogicalDecodingProcessRecord;
-// PostgreSQL 15+ may send instead the end of a transaction it is skipping,
-// which is no further). pgoutput writes a transaction's messages while
+// PostgreSQL 15+ may send instead the end of the commit record of an empty
+// transaction it is skipping, which can be past sentPtr; that is safe too,
+// since the skipped transaction sends nothing and everything before it was
+// sent already). pgoutput writes a transaction's messages while
 // decoding its commit record, so the messages of every transaction that
 // committed below that position were put on the connection before the
 // keepalive, and this loop has emitted them before it reads the keepalive. A

@@ -523,11 +523,13 @@ func waitIndexCoversPG(ctx context.Context, indexDB *sql.DB, anchorLSN uint64, w
 func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stuck *sql.DB, anchorLSN uint64, windowStart time.Time, wait time.Duration) (bool, string, time.Time, error) {
 	deadline := time.Now().Add(wait)
 	var (
-		started  bool
-		from     uint64 // the checkpoint the wait started from
-		lastSave string
-		lastLSN  uint64
-		unmoved  int // saves seen during the wait that left the position where it was
+		started   bool
+		from      uint64 // the checkpoint the wait started from
+		fromSent  uint64 // the sent position the wait started from (#2746)
+		sentMoved bool   // the sent position, or whether it is known, changed during the wait
+		lastSave  string
+		lastLSN   uint64
+		unmoved   int // saves seen during the wait that left the position where it was
 	)
 	for {
 		st, err := read()
@@ -553,6 +555,7 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 		}
 		if !started {
 			started, from, lastSave, lastLSN = true, st.checkpoint, st.savedAt, st.checkpoint
+			fromSent = st.sentThrough
 			if st.sentKnown && stuckCheckpoints.is(stuck, stuckSentKey(st.sentThrough)) {
 				return false, pgSentNotProven(st.sentThrough, anchorLSN, 0), st.lastEvent, nil
 			}
@@ -567,6 +570,9 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 			}
 			lastSave, lastLSN = st.savedAt, st.checkpoint
 		}
+		if !st.sentKnown || st.sentThrough != fromSent {
+			sentMoved = true
+		}
 		if unmoved >= 2 && !st.sentKnown {
 			stuckCheckpoints.set(stuck, formatLSN(st.checkpoint))
 			return covered, note + ". The capture saved its position twice during the wait without it moving: no change of this database was committed between it and the snapshot, or the capture is held up before delivering one", st.lastEvent, nil
@@ -577,7 +583,12 @@ func waitPGCoverage(ctx context.Context, read func() (pgStreamPoint, error), stu
 					indexBehind, formatLSN(from), formatLSN(st.checkpoint), wait, formatLSN(anchorLSN)), st.lastEvent, nil
 			}
 			if st.sentKnown {
-				stuckCheckpoints.set(stuck, stuckSentKey(st.sentThrough))
+				// Remembered only when the whole wait left it where it was: a
+				// position that moved is a capture making progress, and the
+				// next table may well find it past its snapshot.
+				if !sentMoved {
+					stuckCheckpoints.set(stuck, stuckSentKey(st.sentThrough))
+				}
 				return false, pgSentNotProven(st.sentThrough, anchorLSN, wait), st.lastEvent, nil
 			}
 			stuckCheckpoints.set(stuck, formatLSN(from))
