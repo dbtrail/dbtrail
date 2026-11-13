@@ -150,15 +150,68 @@ func CellText(typ string, v any) *string {
 				}
 			}
 		}
-	default:
-		b, err := json.Marshal(x)
-		if err != nil {
-			s = fmt.Sprint(x)
-		} else {
-			s = string(b)
+	case []any:
+		if elem, ok := strings.CutSuffix(typ, "[]"); ok {
+			s = pgArray(elem, x)
+			break
 		}
+		s = jsonText(x)
+	default:
+		s = jsonText(x)
 	}
 	return &s
+}
+
+func jsonText(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(b)
+}
+
+// pgArray writes a list cell as PostgreSQL writes an array (array_out): the
+// elements between braces with commas, each as CellText writes a value of
+// the element's type, NULL bare for a missing one, and between double
+// quotes, with a backslash before a quote or a backslash, when the element
+// is empty, spells NULL in any case, or holds a brace, a comma, a quote, a
+// backslash or a blank.
+func pgArray(elem string, list []any) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, v := range list {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		cell := CellText(elem, v)
+		if cell == nil {
+			b.WriteString("NULL")
+			continue
+		}
+		if !pgArrayNeedsQuotes(*cell) {
+			b.WriteString(*cell)
+			continue
+		}
+		b.WriteByte('"')
+		for _, r := range *cell {
+			if r == '"' || r == '\\' {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+		}
+		b.WriteByte('"')
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+func pgArrayNeedsQuotes(s string) bool {
+	if s == "" || strings.EqualFold(s, "NULL") {
+		return true
+	}
+	// array_out's own list: braces, the delimiter, a quote, a backslash,
+	// and what its scanner calls a blank.
+	return strings.ContainsAny(s, "{},\"\\ \t\n\r\v\f")
 }
 
 // pgFloat writes a floating point number the way PostgreSQL does: the

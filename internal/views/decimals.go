@@ -161,7 +161,10 @@ func writePGCastNote(b *strings.Builder, in Input) {
 		fmt.Fprintf(b, "-- DECIMAL(%d,%d). A value its type here cannot hold (NaN in a numeric, more\n",
 			baseline.MaxDuckDBDecimalPrecision, baseline.PGNumericScale)
 		b.WriteString("-- digits than fit) fails the statement that reads it; it is never rounded or\n")
-		b.WriteString("-- read as NULL. Columns of any other type stay text and are named below.\n")
+		b.WriteString("-- read as NULL. An array of one dimension of these types is read as a list\n")
+		b.WriteString("-- (labels[1] is its first element); one of more dimensions fails the\n")
+		b.WriteString("-- statement that reads it. Columns of any other type stay text and are named\n")
+		b.WriteString("-- below.\n")
 		return
 	}
 }
@@ -334,8 +337,10 @@ func replaceParts(t BaselineTable) []retyped {
 //     characters would decode to other bytes or to none.
 //   - a date or timestamp before the common era ends in " BC", which the
 //     cast is not trusted to read, so it is refused.
-//   - a column left as text (json, an array, an enum) still compares byte by
-//     byte, as its text does in PostgreSQL.
+//   - a column left as text (json, an enum) still compares byte by byte, as
+//     its text does in PostgreSQL.
+//   - an array of one dimension is read as a list of its elements' type
+//     (pgListExpr).
 //   - a numeric declared without precision has no scale to cast to. It is
 //     read as DECIMAL(38, PGNumericScale), and since a cast to a scale ROUNDS
 //     a value with more decimals, such a value is refused first.
@@ -371,10 +376,43 @@ func pgParts(t BaselineTable) []retyped {
 				"CASE WHEN strpos(%[1]s, '.') > 0 AND length(%[1]s) - strpos(%[1]s, '.') > %[2]d THEN error(%[3]s) ELSE CAST(%[1]s AS DECIMAL(%[4]d,%[2]d)) END",
 				q, baseline.PGNumericScale, sqlString(msg), baseline.MaxDuckDBDecimalPrecision)})
 		default:
+			if elem, ok := baseline.PGListElement(c.As); ok {
+				parts = append(parts, retyped{c.Name, pgListExpr(q, elem, refuse)})
+				continue
+			}
 			parts = append(parts, retyped{c.Name, "CAST(" + q + " AS " + c.As + ")"})
 		}
 	}
 	return parts
+}
+
+// pgListElements reads the text of a PostgreSQL array of one dimension,
+// with its outer braces taken off, as a list of its elements' text (#2787).
+// PostgreSQL writes an element bare, or between double quotes with \ before
+// a quote or a backslash; it quotes every element that holds a comma, a
+// brace, a quote, a backslash or a blank, is empty, or spells NULL. So a
+// bare NULL is the missing value and nothing else is: the test is on the
+// element's bytes (hex), which no collation of the session folds.
+const pgListElements = `list_transform(regexp_extract_all(%[1]s[2:-2], '(?s)"(?:[^"\\]|\\.)*"|[^,]+'), ` +
+	`lambda x: CASE WHEN hex(x) = '4E554C4C' THEN NULL WHEN x[1:1] = '"' THEN regexp_replace(x[2:-2], '(?s)\\(.)', '\1', 'g') ELSE x END)`
+
+// pgListExpr is the expression that reads column q, the text of a
+// PostgreSQL array, as a list of elem. What a list of one dimension cannot
+// hold fails the statement that reads it: an array of more dimensions
+// ({{1,2},{3,4}}), one written with bounds of its own ([0:1]={1,2}), text
+// that does not end where an array ends (a value cut short), and,
+// for dates, an element before the common era, whose " BC" the engine's
+// cast drops without a word.
+func pgListExpr(q, elem string, refuse func(string) string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "CASE WHEN %[1]s IS NULL THEN NULL WHEN NOT starts_with(%[1]s, '{') OR NOT ends_with(%[1]s, '}') OR starts_with(%[1]s, '{{') THEN %[2]s",
+		q, refuse("an array of more than one dimension, with bounds of its own, or text that is not an array's"))
+	switch elem {
+	case "DATE", "TIMESTAMP", "TIMESTAMPTZ":
+		fmt.Fprintf(&b, " WHEN contains(%s, ' BC') THEN %s", q, refuse("a date before the common era"))
+	}
+	fmt.Fprintf(&b, " ELSE CAST("+pgListElements+" AS %[2]s[]) END", q, elem)
+	return b.String()
 }
 
 // castableDecimal reports whether DuckDB has a DECIMAL that can hold this

@@ -769,15 +769,17 @@ tables once.
 | `uuid` | uuid |
 | `bytea` | bytes |
 | `text`, `varchar(n)`, `char(n)` | text compared byte by byte, so `'Lima'` is not `'lima'` |
+| an array of any type above but `bytea` and `numeric` with no precision (`text[]`, `integer[]`, `date[]`, ...) | a list of that type: `labels[1]` is the first element, `'red' = ANY(labels)` works |
 | everything else | the text PostgreSQL wrote |
 
 "Everything else" is `json` and `jsonb`, `time` and `timetz`, `interval`,
-arrays, enums, domains, ranges, a `numeric` wider than 38 digits, with a
-negative scale or with a scale above its precision, and every extension type.
-`->>` reads a `json` column as it is; an array is the text `{a,b}`, so
-`labels[1]` is its first character, not its first element. A column left as
-text still compares byte by byte. Each view names the columns it left as
-text.
+enums, domains, ranges, a `numeric` wider than 38 digits, with a
+negative scale or with a scale above its precision, every extension type,
+and an array of any of these, of `bytea` or of `numeric` with no precision.
+`->>` reads a `json` column as it is; an array left as text is the text
+`{a,b}`, so `labels[1]` is its first character, not its first element. A
+column left as text still compares byte by byte. Each view names the columns
+it left as text.
 
 Two kinds of table are read as text throughout: one with two columns whose
 names differ only in case (`"Id"` and `"id"`), which the copy cannot tell
@@ -794,6 +796,13 @@ error that says so. It is never rounded and never read as NULL:
 - A `date`, `timestamp` or `timestamptz` before the common era, or beyond the
   years the copy's types reach.
 - A `bytea` not written as `\x` and hex digits.
+- An array of more than one dimension (`'{{1,2},{3,4}}'`), or one whose
+  first element is not numbered 1 (`'[0:1]={1,2}'`).
+
+The elements of a text array compare as the session compares text. On the
+SQL card of a PostgreSQL server that is byte by byte. In a DuckDB of your
+own with `default_collation = 'nocase'`, `labels[1] = 'RED'` matches `red`,
+where a text column of the same views does not.
 
 A statement that does not read that column is not affected, and neither is
 recovery, which works from the text.
