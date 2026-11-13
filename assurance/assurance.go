@@ -214,12 +214,15 @@ func ContinuityStatus(stream *StreamStateInfo, streamErr error) string {
 	return status.ContinuityStatus(stream, streamErr)
 }
 
-// LoadGapWindow fills stream.Floor with the delta floor (OldestDeltaFromDB)
+// LoadGapWindow fills stream.Floor with the start of the changes still held
 // when the stream holds an acknowledged loss, so ContinuityStatus can tell a
-// loss the changes still held reach from one they no longer do. It runs no
-// query for any other stream, is safe on the nil value LoadStreamState returns
-// for a file-mode index, and on a failed floor read logs a warning and leaves
-// the loss on record.
+// loss the changes still held reach from one they no longer do. The start is
+// the delta floor (OldestDeltaFromDB), moved further back when archives past a
+// break or an event older than its partition's name still hold a change from
+// before the loss. It runs no query for any other stream, and is safe on the
+// nil value LoadStreamState returns for a file-mode index. A read that fails
+// leaves the loss on record and is warned about once per condition, not on
+// every call; a cancelled request is not warned about.
 func LoadGapWindow(ctx context.Context, db *sql.DB, dbName string, stream *StreamStateInfo) {
 	status.LoadGapWindow(ctx, db, dbName, stream)
 }
