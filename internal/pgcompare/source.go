@@ -2,22 +2,27 @@ package pgcompare
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/dbtrail/dbtrail/internal/sqlcompare"
 )
 
 // sourceSettings are set on the source connection so its text is the text a
 // snapshot is written with (pgbaseline's render settings), and so nothing
-// this tool sends can write.
+// this tool sends runs for ever. Read-only is not a setting here: a setting
+// is something a statement can change, so each statement gets a read-only
+// transaction of its own (Query).
 var sourceSettings = []string{
 	"SET TimeZone = 'UTC'",
 	"SET DateStyle = 'ISO, YMD'",
 	"SET IntervalStyle = 'postgres'",
 	"SET bytea_output = 'hex'",
-	"SET default_transaction_read_only = on",
+	"SET statement_timeout = '60s'",
 }
 
 // Source is a PostgreSQL connection that answers in text.
@@ -49,9 +54,23 @@ func OpenSource(ctx context.Context, dsn, schema string) (*Source, error) {
 func (s *Source) Close(ctx context.Context) error { return s.conn.Close(ctx) }
 
 // Query runs one statement and returns its rows as the text PostgreSQL sent.
-// It goes through the extended protocol with no parameters and no result
-// formats: that asks for text and refuses a second statement after a `;`.
+// The statement runs alone in a READ ONLY transaction that is rolled back:
+// PostgreSQL does not let a statement turn such a transaction read-write,
+// which a session setting would allow. It goes through the extended protocol
+// with no parameters and no result formats: that asks for text and refuses a
+// second statement after a `;`.
 func (s *Source) Query(ctx context.Context, stmt string, max int) (sqlcompare.Rows, bool, error) {
+	if _, err := s.conn.Exec(ctx, "BEGIN TRANSACTION READ ONLY"); err != nil {
+		return sqlcompare.Rows{}, false, &FatalError{Err: fmt.Errorf("the source would not open a read-only transaction: %w", err)}
+	}
+	out, over, err := s.read(ctx, stmt, max)
+	if _, rbErr := s.conn.Exec(ctx, "ROLLBACK"); rbErr != nil {
+		return sqlcompare.Rows{}, false, &FatalError{Err: fmt.Errorf("the source would not close the read-only transaction: %w", rbErr)}
+	}
+	return out, over, err
+}
+
+func (s *Source) read(ctx context.Context, stmt string, max int) (sqlcompare.Rows, bool, error) {
 	rr := s.conn.PgConn().ExecParams(ctx, stmt, nil, nil, nil, nil)
 	var out sqlcompare.Rows
 	for _, fd := range rr.FieldDescriptions() {
@@ -79,7 +98,23 @@ func (s *Source) Query(ctx context.Context, stmt string, max int) (sqlcompare.Ro
 		if s.conn.IsClosed() {
 			return sqlcompare.Rows{}, false, &FatalError{Err: fmt.Errorf("the connection to the source was lost: %w", err)}
 		}
+		var pg *pgconn.PgError
+		if errors.As(err, &pg) && notAboutTheStatement(pg.Code) {
+			return sqlcompare.Rows{}, false, &CutError{Kind: "source_fault", Err: err}
+		}
 		return sqlcompare.Rows{}, false, err
 	}
 	return out, over, nil
+}
+
+// notAboutTheStatement: the server stopped the statement for a reason of its
+// own. 57 is operator intervention (cancelled, timed out), 53 insufficient
+// resources, 40 a rollback forced by another transaction, 58 a system error.
+func notAboutTheStatement(code string) bool {
+	for _, class := range []string{"57", "53", "40", "58"} {
+		if strings.HasPrefix(code, class) {
+			return true
+		}
+	}
+	return false
 }

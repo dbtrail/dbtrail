@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -52,15 +51,7 @@ func (c *SnapshotCopy) Query(ctx context.Context, stmt string, max int) (sqlcomp
 		Limits:   sqlsandbox.Limits{MaxRows: max},
 	})
 	if err != nil {
-		// A refusal or an engine error is about the statement. Anything
-		// else (the worker died, no slot, no local copy) is about the
-		// harness and must not be filed as the statement's answer.
-		var refused *sqlsandbox.RefusedError
-		var query *sqlsandbox.QueryError
-		if errors.As(err, &refused) || errors.As(err, &query) {
-			return sqlcompare.Rows{}, false, err
-		}
-		return sqlcompare.Rows{}, false, &FatalError{Err: err}
+		return sqlcompare.Rows{}, false, classifyCopyError(err)
 	}
 	if res.Spool != nil {
 		res.Spool.Close()
@@ -84,6 +75,44 @@ func (c *SnapshotCopy) Query(ctx context.Context, stmt string, max int) (sqlcomp
 	return out, res.Truncated || res.TruncatedCells > 0, nil
 }
 
+// statementErrors are the engine's error kinds that are about the statement:
+// it does not parse, names something the copy does not have, or asks for
+// something the copy's types cannot do. Any other engine error (out of
+// memory, a file that does not read, an internal error) is about the copy
+// or the harness.
+var statementErrors = []string{
+	"Parser Error", "Binder Error", "Catalog Error", "Conversion Error",
+	"Invalid Input Error", "Not implemented Error", "Out of Range Error",
+	"Mismatch Type Error", "Invalid type Error",
+}
+
+// classifyCopyError says what a sandbox error means for the statement: its
+// own error when it is about the statement (NOT_ON_COPY), a CutError when
+// the answer could not be had whole, a FatalError otherwise.
+func classifyCopyError(err error) error {
+	var refused *sqlsandbox.RefusedError
+	if errors.As(err, &refused) {
+		return err
+	}
+	var query *sqlsandbox.QueryError
+	if errors.As(err, &query) {
+		for _, kind := range statementErrors {
+			if strings.HasPrefix(query.Message, kind) {
+				return err
+			}
+		}
+		return &FatalError{Err: fmt.Errorf("the copy failed in a way that is not about the statement: %w", err)}
+	}
+	var timeout *sqlsandbox.TimeoutError
+	if errors.As(err, &timeout) {
+		return &CutError{Kind: "copy_timeout", Err: err}
+	}
+	if errors.Is(err, sqlsandbox.ErrResultTooLarge) {
+		return &CutError{Kind: "copy_result_too_large", Err: err}
+	}
+	return &FatalError{Err: err}
+}
+
 // CellText writes one cell of the copy's answer the way PostgreSQL writes a
 // value of that kind as text, or nil for NULL. typ is the copy's type name
 // for the column (BOOLEAN, TIMESTAMP, TIMESTAMP WITH TIME ZONE, ...). This is
@@ -101,8 +130,6 @@ func CellText(typ string, v any) *string {
 		}
 	case json.Number:
 		s = x.String()
-	case float64:
-		s = strconv.FormatFloat(x, 'f', -1, 64)
 	case string:
 		s = x
 		if strings.HasPrefix(typ, "TIMESTAMP") {

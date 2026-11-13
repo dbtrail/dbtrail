@@ -35,6 +35,9 @@ type expectation struct {
 	verdict sqlcompare.Verdict
 	kind    string
 	why     string
+	// says is a piece of the copy's refusal, for NOT_ON_COPY: a statement
+	// refused for another reason is another finding.
+	says string
 }
 
 // TestIntegrationPGCompare takes a snapshot of a PostgreSQL source the way
@@ -107,17 +110,6 @@ func TestIntegrationPGCompare(t *testing.T) {
 	t.Cleanup(func() { src.Close(context.Background()) })
 
 	want := expectations()
-	equal := 0
-	for _, e := range want {
-		if e.verdict == sqlcompare.Equal {
-			equal++
-		}
-	}
-	// 26 of the 54 statements answering the same is the measured starting
-	// point; the count only goes up from here.
-	if equal < 26 {
-		t.Fatalf("%d statements are expected to be EQUAL, fewer than the 26 this list started with", equal)
-	}
 	stmts := make([]string, len(want))
 	for i, e := range want {
 		stmts[i] = e.stmt
@@ -130,15 +122,38 @@ func TestIntegrationPGCompare(t *testing.T) {
 	for i, r := range rep.Results {
 		e := want[i]
 		line := fmt.Sprintf("%-13s %-10s %s\n    detail: %s", r.Verdict, r.Kind, r.Statement, r.Detail)
-		if r.Verdict != e.verdict || r.Kind != e.kind {
+		if r.Verdict != e.verdict || r.Kind != e.kind || !strings.Contains(r.Detail, e.says) {
+			if e.says != "" {
+				e.why += "; the copy's refusal should say " + e.says
+			}
 			t.Errorf("want %s/%q (%s), got:\n  %s", e.verdict, e.kind, e.why, line)
 			continue
 		}
 		t.Log(line)
 	}
 
-	// The read-only session is the second lock behind IsQuery: a WITH that
-	// writes reaches the source and must be refused there.
+	// 26 statements answering the same is the measured starting point; the
+	// count only goes up from here.
+	if n := rep.Counts[sqlcompare.Equal]; n < 26 {
+		t.Errorf("%d statements were EQUAL, fewer than the 26 this list started with", n)
+	}
+
+	// The read-only transaction is the lock behind IsQuery and ReadOnlyVeto.
+	// Straight to the source, past both: a statement that turns the session
+	// read-write changes nothing for the next one, and a WITH that writes is
+	// refused.
+	for _, unlock := range []string{
+		"SELECT set_config('default_transaction_read_only', 'off', false)",
+		"SELECT set_config('transaction_read_only', 'off', false)",
+	} {
+		_, _, _ = src.Query(ctx, unlock, 10)
+		if _, _, err := src.Query(ctx, "WITH gone AS (DELETE FROM "+itOrders+" RETURNING id) SELECT count(*) FROM gone", 10); err == nil || !strings.Contains(err.Error(), "read-only") {
+			t.Fatalf("after %s the source ran a DELETE, or refused it for another reason: %v", unlock, err)
+		}
+	}
+
+	// Through Run: a WITH that writes reaches the source and is refused
+	// there, and a second statement after a `;` is refused by the protocol.
 	writes := "WITH gone AS (DELETE FROM " + itOrders + " RETURNING id) SELECT count(*) FROM gone"
 	rep, err = Run(ctx, src, cp, Options{NoRerun: true}, []string{writes, "SELECT 1; SELECT 2"})
 	if err != nil {
@@ -197,8 +212,8 @@ func expectations() []expectation {
 	diff := func(kind, stmt string) expectation {
 		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: allText}
 	}
-	refused := func(stmt string) expectation {
-		return expectation{stmt: stmt, verdict: sqlcompare.NotOnCopy, why: allText}
+	refused := func(says, stmt string) expectation {
+		return expectation{stmt: stmt, verdict: sqlcompare.NotOnCopy, why: allText, says: says}
 	}
 	return []expectation{
 		// No tables.
@@ -221,17 +236,18 @@ func expectations() []expectation {
 		diff("order", `SELECT id FROM `+o+` ORDER BY id`),
 		diff("order", `SELECT id, qty FROM `+o+` ORDER BY qty, id`),
 		diff("text", `SELECT id FROM `+o+` ORDER BY amount DESC NULLS LAST, id LIMIT 3`),
-		eq(`SELECT name FROM ` + c + ` ORDER BY name`),
+		eq(`SELECT name FROM ` + c + ` ORDER BY signup NULLS LAST`),
+		diff("order", `(SELECT id FROM `+o+` ORDER BY id)`),
 		// Numbers.
-		refused(`SELECT sum(qty), min(qty), max(qty) FROM ` + o),
-		refused(`SELECT sum(amount), avg(amount) FROM ` + o),
+		refused("sum(VARCHAR)", `SELECT sum(qty), min(qty), max(qty) FROM `+o),
+		refused("sum(VARCHAR)", `SELECT sum(amount), avg(amount) FROM `+o),
 		diff("rows", `SELECT max(amount) FROM `+o),
-		refused(`SELECT id FROM ` + o + ` WHERE qty > 9`),
-		refused(`SELECT id FROM ` + o + ` WHERE amount BETWEEN 5 AND 50`),
-		refused(`SELECT id, qty * 2 AS twice, amount * qty AS total FROM ` + o),
-		refused(`SELECT customer_id, sum(amount) FROM ` + o + ` GROUP BY customer_id`),
-		refused(`SELECT id, qty / 2 AS half FROM ` + o),
-		refused(`SELECT id, round(ratio::numeric, 1) FROM ` + o),
+		refused("VARCHAR and type INTEGER_LITERAL", `SELECT id FROM `+o+` WHERE qty > 9`),
+		refused("VARCHAR and INTEGER_LITERAL in BETWEEN", `SELECT id FROM `+o+` WHERE amount BETWEEN 5 AND 50`),
+		refused("*(VARCHAR, INTEGER_LITERAL)", `SELECT id, qty * 2 AS twice, amount * qty AS total FROM `+o),
+		refused("sum(VARCHAR)", `SELECT customer_id, sum(amount) FROM `+o+` GROUP BY customer_id`),
+		refused("/(VARCHAR, INTEGER_LITERAL)", `SELECT id, qty / 2 AS half FROM `+o),
+		refused("Could not convert string", `SELECT id, round(ratio::numeric, 1) FROM `+o),
 		// Text.
 		diff("rows", `SELECT status, count(*) FROM `+o+` GROUP BY status`),
 		diff("rows", `SELECT DISTINCT status FROM `+o),
@@ -245,27 +261,28 @@ func expectations() []expectation {
 		eq(`SELECT name FROM ` + c + ` WHERE NOT active`),
 		eq(`SELECT active, count(*) FROM ` + c + ` GROUP BY active`),
 		// Dates and times.
-		refused(`SELECT name FROM ` + c + ` WHERE signup >= DATE '2026-01-01'`),
-		refused(`SELECT name, signup + 1 FROM ` + c),
-		refused(`SELECT id FROM ` + o + ` WHERE placed_at < TIMESTAMP '2026-02-01 00:00:00'`),
-		refused(`SELECT date_trunc('month', placed_at) AS m, count(*) FROM ` + o + ` GROUP BY 1`),
-		refused(`SELECT id, extract(year FROM placed_at) FROM ` + o),
+		refused("VARCHAR and type DATE", `SELECT name FROM `+c+` WHERE signup >= DATE '2026-01-01'`),
+		refused("+(VARCHAR, INTEGER_LITERAL)", `SELECT name, signup + 1 FROM `+c),
+		refused("VARCHAR and type TIMESTAMP", `SELECT id FROM `+o+` WHERE placed_at < TIMESTAMP '2026-02-01 00:00:00'`),
+		refused("date_trunc(STRING_LITERAL, VARCHAR)", `SELECT date_trunc('month', placed_at) AS m, count(*) FROM `+o+` GROUP BY 1`),
+		refused("date_part(STRING_LITERAL, VARCHAR)", `SELECT id, extract(year FROM placed_at) FROM `+o),
 		eq(`SELECT id, placed_at::date FROM ` + o),
 		eq(`SELECT min(seen_at), max(seen_at) FROM ` + o),
 		// JSON, arrays, bytes, uuid.
 		eq(`SELECT id, attrs->>'k' FROM ` + o),
-		refused(`SELECT id FROM ` + o + ` WHERE attrs @> '{"k": "v"}'`),
+		refused("@>(VARCHAR, STRING_LITERAL)", `SELECT id FROM `+o+` WHERE attrs @> '{"k": "v"}'`),
 		diff("rows", `SELECT id, labels[1] FROM `+o),
-		refused(`SELECT id FROM ` + o + ` WHERE 'red' = ANY(labels)`),
+		refused("UNNEST not supported here", `SELECT id FROM `+o+` WHERE 'red' = ANY(labels)`),
 		diff("rows", `SELECT id, length(payload) FROM `+o),
 		eq(`SELECT id FROM ` + o + ` WHERE tag = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'`),
 		// Shapes.
-		refused(`WITH big AS (SELECT * FROM ` + o + ` WHERE qty >= 10) SELECT count(*) FROM big`),
+		refused("VARCHAR and type INTEGER_LITERAL", `WITH big AS (SELECT * FROM `+o+` WHERE qty >= 10) SELECT count(*) FROM big`),
 		diff("rows", `SELECT id, row_number() OVER (ORDER BY id) FROM `+o),
 		eq(`SELECT id FROM ` + o + ` WHERE customer_id IN (SELECT id FROM ` + c + ` WHERE active)`),
 		diff("columns", `SELECT * FROM `+c),
 		// Not compared.
 		{stmt: `SELECT * FROM pgcmp_missing`, verdict: sqlcompare.SourceError},
 		{stmt: `DELETE FROM ` + o, verdict: sqlcompare.Skipped, kind: "not_a_query"},
+		{stmt: `SELECT pg_advisory_lock(2772)`, verdict: sqlcompare.Skipped, kind: "not_read_only"},
 	}
 }

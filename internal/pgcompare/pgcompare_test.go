@@ -225,3 +225,140 @@ func TestRun(t *testing.T) {
 		}
 	})
 }
+
+func TestOrderedAtTop(t *testing.T) {
+	for _, tc := range []struct {
+		stmt string
+		want bool
+	}{
+		{"SELECT id FROM t ORDER BY id", true},
+		{"select id from t order   by id;", true},
+		{"SELECT id FROM t", false},
+		// PostgreSQL's # operators are not comments.
+		{"SELECT id, attrs #>> '{k}' FROM t ORDER BY id", true},
+		{"SELECT a # b FROM t ORDER BY 1", true},
+		// A backslash does not escape in a plain literal.
+		{`SELECT id FROM t WHERE note <> '\' ORDER BY id`, true},
+		{`SELECT id FROM t WHERE note <> E'\' ORDER BY id'`, false},
+		{"SELECT id FROM t WHERE note = 'it''s ORDER BY x'", false},
+		{`SELECT "order by" FROM t`, false},
+		{"SELECT $$ ORDER BY $$ FROM t", false},
+		{"SELECT $q$ ORDER BY $q$ FROM t ORDER BY 1", true},
+		{"SELECT id FROM t -- ORDER BY id", false},
+		{"SELECT id FROM t /* a /* nested */ ORDER BY id */", false},
+		// Parentheses around the whole statement keep the order.
+		{"(SELECT id FROM t ORDER BY id)", true},
+		{"((SELECT id FROM t ORDER BY id))", true},
+		{"(SELECT id FROM t ORDER BY id) UNION ALL (SELECT id FROM u ORDER BY id)", false},
+		{"(SELECT id FROM t) UNION (SELECT id FROM u) ORDER BY 1", true},
+		// Inside a subquery or a window it orders nothing outside.
+		{"SELECT id FROM (SELECT id FROM t ORDER BY id) s", false},
+		{"SELECT id, row_number() OVER (ORDER BY id) FROM t", false},
+		{"SELECT reorder_by FROM t", false},
+		{"", false},
+	} {
+		if got := OrderedAtTop(tc.stmt); got != tc.want {
+			t.Errorf("OrderedAtTop(%q) = %v, want %v", tc.stmt, got, tc.want)
+		}
+	}
+}
+
+func TestReadOnlyVeto(t *testing.T) {
+	for _, tc := range []struct {
+		stmt string
+		veto bool
+	}{
+		{"SELECT set_config('default_transaction_read_only', 'off', false)", true},
+		{"SELECT SET_CONFIG ('x', 'y', true)", true},
+		{"SELECT pg_sleep(3600)", true},
+		{"SELECT pg_sleep_for('1 hour')", true},
+		{"SELECT pg_advisory_lock(1)", true},
+		{"SELECT pg_try_advisory_xact_lock(1)", true},
+		{"SELECT pg_terminate_backend(pid) FROM pg_stat_activity", true},
+		{"SELECT * FROM pg_logical_slot_get_changes('s', NULL, NULL)", true},
+		{"SELECT pg_replication_slot_advance('s', '0/0')", true},
+		{"SELECT pg_drop_replication_slot('s')", true},
+		{"SELECT lo_unlink(1)", true},
+		{"SELECT nextval('s')", true},
+		{"SELECT * FROM dblink('x', 'delete from t') AS t(a int)", true},
+		{"SELECT id FROM t FOR UPDATE", true},
+		{"SELECT id FROM t FOR NO KEY UPDATE", true},
+		{"SELECT id FROM t FOR SHARE", true},
+		// Only the statement's own words count.
+		{"SELECT 'pg_sleep(1)' AS note", false},
+		{"SELECT id FROM t -- pg_sleep(1)", false},
+		{`SELECT "set_config" FROM t`, false},
+		{"SELECT set_configured FROM t", false},
+		{"SELECT id FROM t WHERE note = 'for update'", false},
+		{"SELECT count(*) FROM t", false},
+	} {
+		if got := ReadOnlyVeto(tc.stmt); (got != "") != tc.veto {
+			t.Errorf("ReadOnlyVeto(%q) = %q, want a veto: %v", tc.stmt, got, tc.veto)
+		}
+	}
+}
+
+func TestClassifyCopyError(t *testing.T) {
+	kindOf := func(err error) string {
+		var f *FatalError
+		var c *CutError
+		switch {
+		case errors.As(err, &f):
+			return "fatal"
+		case errors.As(err, &c):
+			return "cut:" + c.Kind
+		}
+		return "statement"
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"refused", &sqlsandbox.RefusedError{Reason: "reads a file"}, "statement"},
+		{"binder", &sqlsandbox.QueryError{Message: "Binder Error: no function sum(VARCHAR)"}, "statement"},
+		{"catalog", &sqlsandbox.QueryError{Message: "Catalog Error: Table with name x does not exist"}, "statement"},
+		{"conversion", &sqlsandbox.QueryError{Message: "Conversion Error: Could not convert"}, "statement"},
+		{"out of memory", &sqlsandbox.QueryError{Message: "Out of Memory Error: could not allocate"}, "fatal"},
+		{"io", &sqlsandbox.QueryError{Message: "IO Error: No files found"}, "fatal"},
+		{"unknown engine error", &sqlsandbox.QueryError{Message: "something new"}, "fatal"},
+		{"timeout", &sqlsandbox.TimeoutError{}, "cut:copy_timeout"},
+		{"too large", sqlsandbox.ErrResultTooLarge, "cut:copy_result_too_large"},
+		{"busy", sqlsandbox.ErrBusy, "fatal"},
+		{"not local", sqlsandbox.ErrCopyNotLocal, "fatal"},
+		{"worker", &sqlsandbox.WorkerError{Err: errors.New("exit status 2")}, "fatal"},
+	} {
+		if got := kindOf(classifyCopyError(tc.err)); got != tc.want {
+			t.Errorf("%s: classified %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRunRefusesAndCuts(t *testing.T) {
+	ctx := context.Background()
+	if rep, err := Run(ctx, &fakeSide{}, &fakeSide{}, Options{}, nil); err == nil || rep != nil {
+		t.Fatalf("no statements: rep %+v, err %v; want an error", rep, err)
+	}
+	src, cp := &fakeSide{}, &fakeSide{}
+	rep, err := Run(ctx, src, cp, Options{}, []string{"SELECT pg_sleep(10)"})
+	if err != nil || rep.Results[0].Verdict != sqlcompare.Skipped || rep.Results[0].Kind != "not_read_only" || len(src.calls)+len(cp.calls) != 0 {
+		t.Fatalf("side-effect function: %+v, err %v, calls %v %v", rep, err, src.calls, cp.calls)
+	}
+	for _, side := range []string{"source", "copy"} {
+		src := &fakeSide{answers: []fakeAnswer{{rows: oneCol("a")}}}
+		cp := &fakeSide{answers: []fakeAnswer{{rows: oneCol("a")}}}
+		cutErr := &CutError{Kind: "slow", Err: errors.New("ran out of time")}
+		if side == "source" {
+			src.answers = []fakeAnswer{{err: cutErr}}
+		} else {
+			cp.answers = []fakeAnswer{{err: cutErr}}
+		}
+		rep, err := Run(ctx, src, cp, Options{}, []string{"SELECT v FROM t"})
+		if err != nil {
+			t.Fatalf("%s cut: %v", side, err)
+		}
+		if r := rep.Results[0]; r.Verdict != sqlcompare.Inconclusive || r.Kind != "slow" || !strings.Contains(r.Detail, "the "+side) {
+			t.Fatalf("%s cut: got %+v", side, r)
+		}
+	}
+}

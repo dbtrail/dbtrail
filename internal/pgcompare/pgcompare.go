@@ -24,9 +24,10 @@
 //     difference, two texts that differ only in case as a "case" difference,
 //     so a report can tell them from a wrong answer. Both are still DIFFERENT.
 //
-// The source connection is read-only (default_transaction_read_only) and
-// takes one statement per call; a statement that does not start as a query
-// is SKIPPED without being sent.
+// Nothing here writes to the source. A statement that does not start as a
+// query, or that calls a function with side effects (ReadOnlyVeto), is
+// SKIPPED without being sent; every statement that is sent runs alone in a
+// read-only transaction that is rolled back, under a statement timeout.
 package pgcompare
 
 import (
@@ -44,6 +45,18 @@ import (
 type Side interface {
 	Query(ctx context.Context, stmt string, max int) (rows sqlcompare.Rows, over bool, err error)
 }
+
+// CutError is a side saying it could not give a whole answer for a reason
+// that is not about the statement's meaning: it ran out of time, the result
+// was too large to carry, the server cancelled it. The statement is
+// INCONCLUSIVE with Kind as its kind.
+type CutError struct {
+	Kind string
+	Err  error
+}
+
+func (e *CutError) Error() string { return e.Err.Error() }
+func (e *CutError) Unwrap() error { return e.Err }
 
 // FatalError wraps an error that says nothing about the statement: the
 // connection or the worker is gone. Run stops on it instead of filing it as
@@ -86,6 +99,9 @@ func Run(ctx context.Context, src, cp Side, opts Options, statements []string) (
 	if opts.MaxRows <= 0 {
 		opts.MaxRows = 1000
 	}
+	if len(statements) == 0 {
+		return nil, errors.New("no statements to compare")
+	}
 	rep := &Report{Counts: map[sqlcompare.Verdict]int{}}
 	for i, stmt := range statements {
 		res, err := compareOne(ctx, src, cp, opts, stmt)
@@ -104,10 +120,17 @@ func compareOne(ctx context.Context, src, cp Side, opts Options, stmt string) (R
 		res.Verdict, res.Kind, res.Detail = sqlcompare.Skipped, "not_a_query", "only SELECT, WITH, VALUES and TABLE statements are compared"
 		return res, nil
 	}
+	if why := ReadOnlyVeto(stmt); why != "" {
+		res.Verdict, res.Kind, res.Detail = sqlcompare.Skipped, "not_read_only", "not sent: "+why
+		return res, nil
+	}
 	srcRows, srcOver, err := src.Query(ctx, stmt, opts.MaxRows)
 	if err != nil {
 		if fatal(ctx, err) {
 			return res, fmt.Errorf("source: %w", err)
+		}
+		if cut(&res, "the source", err) {
+			return res, nil
 		}
 		res.Verdict, res.Detail = sqlcompare.SourceError, err.Error()
 		return res, nil
@@ -118,6 +141,9 @@ func compareOne(ctx context.Context, src, cp Side, opts Options, stmt string) (R
 		if fatal(ctx, err) {
 			return res, fmt.Errorf("copy: %w", err)
 		}
+		if cut(&res, "the copy", err) {
+			return res, nil
+		}
 		res.Verdict, res.Detail = sqlcompare.NotOnCopy, err.Error()
 		return res, nil
 	}
@@ -127,7 +153,7 @@ func compareOne(ctx context.Context, src, cp Side, opts Options, stmt string) (R
 		res.Detail = fmt.Sprintf("more than %d rows on a side, or a cell too long to carry; narrow the statement", opts.MaxRows)
 		return res, nil
 	}
-	ordered := sqlcompare.TopLevelOrderBy(stmt)
+	ordered := OrderedAtTop(stmt)
 	res.Verdict, res.Kind, res.Detail = sqlcompare.Compare(srcRows, cpRows, ordered)
 	if res.Verdict == sqlcompare.Different && !opts.NoRerun {
 		// A write between the two reads looks exactly like a difference. If
@@ -149,6 +175,16 @@ func compareOne(ctx context.Context, src, cp Side, opts Options, stmt string) (R
 		}
 	}
 	return res, nil
+}
+
+// cut files a CutError as INCONCLUSIVE and reports whether err was one.
+func cut(res *Result, side string, err error) bool {
+	var c *CutError
+	if !errors.As(err, &c) {
+		return false
+	}
+	res.Verdict, res.Kind, res.Detail = sqlcompare.Inconclusive, c.Kind, side+": "+c.Error()
+	return true
 }
 
 func fatal(ctx context.Context, err error) bool {
