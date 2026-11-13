@@ -213,6 +213,15 @@ func compactTable(ctx context.Context, tbl *table.Table, threshold int, beforeCo
 	}
 	c.DataFilesAfter = len(newFiles)
 
+	// A failure before the commit reached the catalog leaves the new files
+	// unreferenced for good; they are a whole copy of the table, so they are
+	// removed instead of piling up run after run. Once the request was sent,
+	// they stay whatever the answer: a commit the catalog applies late would
+	// otherwise point at files that no longer exist.
+	discard := func(err error) (*table.Table, *Compaction) {
+		removeFiles(ctx, tbl, newFiles)
+		return fail(err)
+	}
 	id, err := compactionID()
 	if err != nil {
 		return discard(err)
@@ -224,15 +233,6 @@ func compactTable(ctx context.Context, tbl *table.Table, threshold int, beforeCo
 		summaryCompactedDeleteFiles: strconv.Itoa(len(deletes)),
 		summaryCompactedRows:        strconv.FormatInt(c.Rows, 10),
 	})
-	// A failure before the commit reached the catalog leaves the new files
-	// unreferenced for good; they are a whole copy of the table, so they are
-	// removed instead of piling up run after run. Once the request was sent,
-	// they stay whatever the answer: a commit the catalog applies late would
-	// otherwise point at files that no longer exist.
-	discard := func(err error) (*table.Table, *Compaction) {
-		removeFiles(ctx, tbl, newFiles)
-		return fail(err)
-	}
 	// The delete files go in as they are listed in the manifests; the
 	// position deletes ExecuteCompactionGroup reports as safe are among
 	// them, and passing them twice would be refused as a duplicate.
