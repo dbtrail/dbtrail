@@ -44,7 +44,7 @@ func TestSnapshotPin_aCleanupDuringTheQueryKeepsItsSnapshot(t *testing.T) {
 		}
 		var readers []string
 		var results []baseline.PruneResult
-		pin := func(path, what string) func() {
+		pin := func(_ context.Context, path, what string) func() {
 			readers = append(readers, what)
 			root, name, ok := baseline.TableFileSnapshot(path)
 			if !ok {

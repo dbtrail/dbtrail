@@ -14,10 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish could remove it in between, so the read failed. They now pin that
   snapshot until they end, like a snapshot download, for no longer than a
   download of the table's files would keep it (their bytes at 1 MiB/s plus
-  one minute): a whole table goes out at the pace of the MySQL client, and a
-  client must not decide how long a snapshot stays. They count toward the
-  downloads' limit, together with the downloads: past it a read is not
-  refused, it runs without a pin as before. A snapshot removed between the
+  one minute), or than the query's own time limit when that is longer: a
+  whole table goes out at the pace of the MySQL client, and a client must not
+  decide how long a snapshot stays. They count toward the downloads' limit,
+  together with the downloads: past it a read is not refused, it runs without
+  a pin as before, and a warning says so at most once every 10 minutes per
+  server. A snapshot removed between the
   lookup and the pin is looked up once more. The Explain of a check, which
   already pinned its two snapshots, has a test of its own.
 

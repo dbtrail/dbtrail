@@ -73,7 +73,7 @@ func TestExplain_pinsTheComparedPairWhileItRuns(t *testing.T) {
 // reads unpinned whatever the console sets on the target.
 func TestFlashbackShimConfig_carriesThePin(t *testing.T) {
 	var pinned []string
-	tgt := console.FlashbackTarget{PinBaseline: func(path, what string) func() {
+	tgt := console.FlashbackTarget{PinBaseline: func(_ context.Context, path, what string) func() {
 		pinned = append(pinned, path+" "+what)
 		return func() {}
 	}}
@@ -81,7 +81,7 @@ func TestFlashbackShimConfig_carriesThePin(t *testing.T) {
 	if cfg.PinBaseline == nil {
 		t.Fatal("the shim configuration carries no pin")
 	}
-	cfg.PinBaseline("/b/s/shop/orders.parquet", "a _snapshot query")()
+	cfg.PinBaseline(context.Background(), "/b/s/shop/orders.parquet", "a _snapshot query")()
 	if !slices.Equal(pinned, []string{"/b/s/shop/orders.parquet a _snapshot query"}) {
 		t.Fatalf("the shim's pin reached %v, want the target's", pinned)
 	}

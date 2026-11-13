@@ -659,26 +659,56 @@ func pinForRead(root, name, what string, keep int, retain, limit time.Duration) 
 // lookup returned, never from the server's settings: the lookup may have
 // answered from another location. The pin lasts what a download of the
 // table's files would (downloadPinLimit), because a full-table `_snapshot`
-// streams at the pace of its MySQL client, and it is counted with the
+// streams at the pace of its MySQL client, or as long as the reader's own
+// deadline when that is later (readPinLimit). It is counted with the
 // downloads: past the cap the read goes on without a pin, as it did before,
 // and fails if the cleanup removes its snapshot meanwhile. A var for the
 // tests.
 var pinBaselineRead = func(s *Server, id string) reconstruct.PinFunc {
-	return func(path, what string) (release func()) {
+	return func(ctx context.Context, path, what string) (release func()) {
 		root, name, ok := baseline.TableFileSnapshot(path)
 		if !ok {
 			return func() {}
 		}
 		keep, retain := pruneRule(s, id)
-		release, ok = pinForRead(root, name, what, keep, retain, downloadPinLimit(baseline.TableReadBytes(path)))
+		release, ok = pinForRead(root, name, what, keep, retain, readPinLimit(ctx, baseline.TableReadBytes(path)))
 		if !ok {
-			// Debug: a client repeating reads past the cap would flood the
-			// log at any louder level, and the read itself goes on.
-			slog.Debug("console: a read of a past moment goes without a pin: downloads and reads of this server's snapshots hold their limit, so the cleanup may remove its snapshot while it runs",
-				"server", id, "snapshot", name, "reader", what)
+			warnUnpinnedRead(id, name, what)
 		}
 		return release
 	}
+}
+
+// readPinLimit is the deadline of a read's pin: a download's of its bytes,
+// or what is left of the reader's own deadline when that is later. A query
+// through the port first reads the change log, which can take minutes on a
+// small table, and its time limit (--flashback-query-timeout) is the server's,
+// not the client's.
+func readPinLimit(ctx context.Context, bytes int64) time.Duration {
+	limit := downloadPinLimit(bytes)
+	if d, ok := ctx.Deadline(); ok {
+		limit = max(limit, time.Until(d))
+	}
+	return limit
+}
+
+// unpinnedReadWarnEvery bounds the warning of a read past the cap to one
+// per server in this interval: a client repeating reads would otherwise
+// fill the log, and one line is enough to explain a read that then fails
+// on a removed snapshot.
+const unpinnedReadWarnEvery = 10 * time.Minute
+
+var unpinnedReadWarned sync.Map // server id -> time.Time of the last warning
+
+func warnUnpinnedRead(id, name, what string) {
+	now := time.Now()
+	if last, ok := unpinnedReadWarned.Load(id); ok && now.Sub(last.(time.Time)) < unpinnedReadWarnEvery {
+		slog.Debug("console: a read of a past moment goes without a pin", "server", id, "snapshot", name, "reader", what)
+		return
+	}
+	unpinnedReadWarned.Store(id, now)
+	slog.Warn("console: a read of a past moment goes without a pin: downloads and reads of this server's older snapshots hold their limit, so the cleanup may remove its snapshot while it runs and the read then fails; it can be run again (said once every 10 minutes per server)",
+		"server", id, "snapshot", name, "reader", what)
 }
 
 // downloadsBusyMessage is the refusal of a download past the cap. It

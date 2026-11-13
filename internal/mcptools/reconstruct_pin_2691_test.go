@@ -31,7 +31,7 @@ func TestReconstructPinsWithTheTargetsPinFunc(t *testing.T) {
 					}
 					return "", time.Time{}, reconstruct.StaleWarning{}, reconstruct.ErrNoBaseline
 				},
-				PinBaseline: func(path, what string) func() {
+				PinBaseline: func(_ context.Context, path, what string) func() {
 					pinned, readers = append(pinned, path), append(readers, what)
 					return func() { released = append(released, path) }
 				},

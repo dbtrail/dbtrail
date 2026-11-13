@@ -55,9 +55,9 @@ func cleanupInsidePin(t *testing.T, root string) (results *[]baseline.PruneResul
 	results, readers = &[]baseline.PruneResult{}, &[]string{}
 	pinBaselineRead = func(s *Server, id string) reconstruct.PinFunc {
 		real := prev(s, id)
-		return func(path, what string) func() {
+		return func(ctx context.Context, path, what string) func() {
 			*readers = append(*readers, what)
-			release := real(path, what)
+			release := real(ctx, path, what)
 			res, err := baseline.PruneLocal(context.Background(), baseline.PruneOptions{LocalDir: root, KeepNewest: 1})
 			if err != nil {
 				t.Errorf("cleanup during the read: %v", err)
@@ -125,14 +125,42 @@ func TestPinBaselineRead_countsWithTheDownloads(t *testing.T) {
 	if !ok {
 		t.Fatal("the first download past the count was refused")
 	}
-	r := pinBaselineRead(srv, "")(bFile, "a time-travel read")
+	r := pinBaselineRead(srv, "")(context.Background(), bFile, "a time-travel read")
 	defer r()
 	if got := baseline.Pinned(dir); !slices.Equal(got, []string{a}) {
 		t.Fatalf("pinned %v, want only the download's %s: the read went past the cap", got, a)
 	}
-	// A read of the snapshot the download holds is let in: it holds nothing more.
-	r2 := pinBaselineRead(srv, "")(filepath.Join(dir, a, "shop", "orders.parquet"), "a _snapshot query")
+	// A read of the snapshot the download holds is let in: it holds nothing
+	// more. Released, the download's pin is still there; the download's
+	// release then lets it go, so the read's pin was taken.
+	r2 := pinBaselineRead(srv, "")(context.Background(), filepath.Join(dir, a, "shop", "orders.parquet"), "a _snapshot query")
+	release()
+	if got := baseline.Pinned(dir); !slices.Equal(got, []string{a}) {
+		t.Fatalf("pinned %v once the download ended, want %s still held by the read: the read of a snapshot a download holds was refused", got, a)
+	}
 	r2()
+	if got := baseline.Pinned(dir); len(got) != 0 {
+		t.Fatalf("pinned %v after both ended", got)
+	}
+}
+
+// A read's pin lasts as long as the reader's own deadline when that is
+// later than a download's of its bytes (#2691): a `_snapshot` query reads
+// the change log first, which can take minutes on a small table.
+func TestReadPinLimit(t *testing.T) {
+	if got := readPinLimit(context.Background(), 10<<20); got != downloadPinLimit(10<<20) {
+		t.Fatalf("no deadline: %v, want a download's %v", got, downloadPinLimit(10<<20))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if got := readPinLimit(ctx, 0); got < 4*time.Minute || got > 5*time.Minute {
+		t.Fatalf("a 5-minute query on a small table: %v, want the query's deadline", got)
+	}
+	short, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if got := readPinLimit(short, 100<<20); got != downloadPinLimit(100<<20) {
+		t.Fatalf("a short deadline on a big table: %v, want a download's %v", got, downloadPinLimit(100<<20))
+	}
 }
 
 // The folder comes from the path the lookup answered with, and the rule from
@@ -164,7 +192,7 @@ func TestResolveFlashback_pinsWithItsServersRule(t *testing.T) {
 	}
 	other := t.TempDir()
 	p := pinFixtureSnapshot(t, other, "2026-06-01T00-00-00Z")
-	release := tgt.PinBaseline(p, "a _snapshot query")
+	release := tgt.PinBaseline(context.Background(), p, "a _snapshot query")
 	if got := baseline.Pinned(other); !slices.Equal(got, []string{"2026-06-01T00-00-00Z"}) {
 		t.Fatalf("pinned in the lookup's folder: %v, want the snapshot of the path", got)
 	}

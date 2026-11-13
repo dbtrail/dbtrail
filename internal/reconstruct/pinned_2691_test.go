@@ -15,7 +15,7 @@ type pinRecorder struct {
 	what             []string
 }
 
-func (p *pinRecorder) pin(path, what string) func() {
+func (p *pinRecorder) pin(_ context.Context, path, what string) func() {
 	p.pinned = append(p.pinned, path)
 	p.what = append(p.what, what)
 	return func() { p.released = append(p.released, path) }
@@ -86,6 +86,9 @@ func TestFindPinned(t *testing.T) {
 		defer release()
 		if err != nil || path != gone || *n != 2 {
 			t.Fatalf("path %q, err %v, lookups %d; want the path handed to the read after 2 lookups", path, err, *n)
+		}
+		if len(rec.pinned) != 2 || len(rec.released) != 1 {
+			t.Fatalf("pinned %v, released %v; want two pins, the first released and the second left to the reader", rec.pinned, rec.released)
 		}
 	})
 

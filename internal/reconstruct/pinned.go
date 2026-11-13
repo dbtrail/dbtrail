@@ -11,11 +11,12 @@ import (
 
 // PinFunc keeps the snapshot that holds the table file at path from the
 // local cleanup while one reader reads it, until release is called (#2691).
+// ctx is the reader's: a deadline on it is how long the reader may still run.
 // what names the reader in the cleanup's log. It is given by the process
 // that prunes the folder (the console), which knows the folder's count and
 // the cap on what readers may hold back; a nil PinFunc pins nothing, which is
 // right for a process that prunes nothing (a standalone shim or MCP server).
-type PinFunc func(path, what string) (release func())
+type PinFunc func(ctx context.Context, path, what string) (release func())
 
 // FindFunc is a snapshot lookup with its location bound: FindBaseline's
 // shape.
@@ -38,7 +39,7 @@ func FindPinned(ctx context.Context, find FindFunc, pin PinFunc, schema, table s
 		if err != nil || pin == nil {
 			return path, snapshotTime, stale, func() {}, err
 		}
-		release = pin(path, what)
+		release = pin(ctx, path, what)
 		if attempt > 0 || !tableFileGone(path) {
 			return path, snapshotTime, stale, release, nil
 		}
