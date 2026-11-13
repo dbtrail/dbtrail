@@ -527,7 +527,8 @@ var integerDisplayWidthTypes = map[string]bool{
 //
 // Attributes after the type (DEFAULT, COLLATE, COMMENT) never reach the
 // result, so a character set change is invisible here, as it is in
-// COLUMN_TYPE.
+// COLUMN_TYPE. ColumnCharsets reads the character sets for the comparison
+// that needs them (#2723).
 func ComparableColumnType(declared string) string {
 	token, args, unsigned, _ := splitDeclaredType(strings.TrimSpace(declared))
 	switch token {

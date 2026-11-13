@@ -584,37 +584,39 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 			return
 		}
 	}
+	keepSet := req.KeepNewest != nil
 	s3AgeMu.Lock()
-	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &entry)) {
+	// The S3 age is asked of the entry this save will write, built on the
+	// entry as it is now: every writer of the S3 fields holds s3AgeMu, so
+	// they cannot move between this and the write.
+	now, _ := s.cm.reg.Get(entry.ID)
+	probe := settingsOnto(now, before, entry, keepSet)
+	if all := s.cm.reg.List(); !mayLowerS3Age(w, r, all, withEntry(all, entry.ID, &probe)) {
 		s3AgeMu.Unlock()
 		return
 	}
 	// Only what this save changed, on the entry as it is now (#2658): the
 	// schedule, the monitoring intent and every field this request left
 	// alone keep the value a save made since this request read the entry.
+	// Whether the folder may be adopted is decided here too, under the
+	// registry's lock, on the folder and the count this write leaves
+	// (#2675): checked before it, a count another save raised in between
+	// was not the one asked about.
+	var refused error
 	err := s.cm.reg.UpdateWith(entry.ID, func(cur ServerEntry) (ServerEntry, bool) {
-		if entry.BaselineDir != before.BaselineDir {
-			cur.BaselineDir = entry.BaselineDir
+		next := settingsOnto(cur, before, entry, keepSet)
+		if err := adoptionUnderLock(cur, before, next, keepSet); err != nil {
+			refused = err
+			return cur, false
 		}
-		if entry.BaselineS3 != before.BaselineS3 {
-			cur.BaselineS3 = entry.BaselineS3
-		}
-		if entry.NoArchive != before.NoArchive {
-			cur.NoArchive = entry.NoArchive
-		}
-		if req.KeepNewest != nil {
-			cur.LocalKeepNewest = entry.LocalKeepNewest
-		}
-		if entry.NoSQLMirror != before.NoSQLMirror {
-			cur.NoSQLMirror = entry.NoSQLMirror
-		}
-		if entry.BaselineS3Retain != before.BaselineS3Retain {
-			cur.BaselineS3Retain = entry.BaselineS3Retain
-		}
-		entry = cur
-		return cur, true
+		entry = next
+		return next, true
 	})
 	s3AgeMu.Unlock()
+	if refused != nil {
+		writeJSONError(w, http.StatusBadRequest, refused.Error())
+		return
+	}
 	if err != nil {
 		writeJSONError(w, registryErrStatus(err), err.Error())
 		return
@@ -634,6 +636,53 @@ func (s *Server) handleBackupSettingsServerUpdate(w http.ResponseWriter, r *http
 		dto.ScheduleUploadSet = entry.BackupSchedule.UploadEvery
 	}
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// settingsOnto is the snapshot settings save applied to cur, the entry as it
+// is now: the fields this save changed from before (the entry as it read
+// it), and the count when the request named it. Everything else stays as
+// cur has it (#2658).
+func settingsOnto(cur, before, entry ServerEntry, keepSet bool) ServerEntry {
+	if entry.BaselineDir != before.BaselineDir {
+		cur.BaselineDir = entry.BaselineDir
+	}
+	if entry.BaselineS3 != before.BaselineS3 {
+		cur.BaselineS3 = entry.BaselineS3
+	}
+	if entry.NoArchive != before.NoArchive {
+		cur.NoArchive = entry.NoArchive
+	}
+	if keepSet {
+		cur.LocalKeepNewest = entry.LocalKeepNewest
+	}
+	if entry.NoSQLMirror != before.NoSQLMirror {
+		cur.NoSQLMirror = entry.NoSQLMirror
+	}
+	if entry.BaselineS3Retain != before.BaselineS3Retain {
+		cur.BaselineS3Retain = entry.BaselineS3Retain
+	}
+	return cur
+}
+
+// adoptionUnderLock is adoptsSnapshots asked under the registry's lock
+// (#2675), on next, the entry a save is about to write over cur: when the
+// save moves the folder to one that is not already the entry's, or sets the
+// count (keepSet) on a folder another save moved to after this one read the
+// entry (before). A count set on the folder the request saw is a choice
+// made looking at it, and is not asked about, as before; a folder another
+// save already moved the entry to is that save's, asked when it moved it.
+func adoptionUnderLock(cur, before, next ServerEntry, keepSet bool) error {
+	switch {
+	case next.BaselineDir == "":
+		return nil
+	case next.BaselineDir != cur.BaselineDir:
+		// This save moves the folder.
+	case keepSet && cur.BaselineDir != before.BaselineDir:
+		// The count, on a folder this request did not see.
+	default:
+		return nil
+	}
+	return adoptsSnapshots(next.BaselineDir, next.LocalKeepNewest)
 }
 
 // The two provenances a daemon-wide row can have.
