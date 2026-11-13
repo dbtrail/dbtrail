@@ -1,8 +1,3 @@
-	reason := failureReason(t, root)
-	t.Logf("failure record: %q", reason)
-	if reason != "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again." {
-		t.Errorf("the failure record says %q", reason)
-	}
 package baseline
 
 import (
@@ -43,6 +38,11 @@ func TestReadRefused_theRestoreResultIsSentOnce(t *testing.T) {
 	}
 	if !slices.Equal(res.ReadRefused, []string{restored}) || res.RestoredUnasked != restored || !slices.Contains(res.NotAtDestination, restored) {
 		t.Fatalf("the restore's result after the refusal: %+v", res)
+	}
+	reason := failureReason(t, root)
+	t.Logf("failure record: %q", reason)
+	if reason != "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again." {
+		t.Errorf("the failure record says %q", reason)
 	}
 	// A refusal that followed no send is a question S3 would not answer,
 	// not a refused read: it is sent (once per round, as before).
