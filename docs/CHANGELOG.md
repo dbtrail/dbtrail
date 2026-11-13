@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Two saves at once no longer slip a folder or a stopped capture past each other** (#2675).
+  - The snapshot settings save decides **this folder already holds snapshots** under the registry's lock, with the folder and the count the write leaves. Before, it was decided on the count read before the lock, so a second save that raised **Keep by count** at that instant got a folder holding snapshots past the refusal, and the next cleanup removed all but the newest. A count set on the folder the request did not see (another save moved it meanwhile) is asked about the same way. The refusal reads as before, for example `the folder /srv/b already holds 1 snapshot, and with Keep the newest at 3 all but the newest 3 would be removed. Empty Keep the newest to keep them all, or choose another folder`.
+  - The connection form writes only the fields it changed, on the entry as it is now. It wrote most of the entry as it had read it, so a save made in between was undone: a folder changed on the Snapshots page came back, a capture stopped meanwhile was marked to run again, the SQL mirror's switch was put back. The folder it moves to is checked under the lock too.
+  - Stopping capture writes only its own field, now with a test of its own.
 - **The installer installs one release and writes it down** (#2638).
   `install.sh` took `docker-compose.yml` from `main` and left every image on
   `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
