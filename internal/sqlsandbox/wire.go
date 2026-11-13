@@ -38,7 +38,9 @@ type wireJob struct {
 	MySQLClock    bool   `json:"mysql_clock,omitempty"`
 	SelectLimit   int    `json:"select_limit,omitempty"`
 	// KeepJoinOrder: see Session.KeepJoinOrder.
-	KeepJoinOrder bool   `json:"keep_join_order,omitempty"`
+	KeepJoinOrder bool `json:"keep_join_order,omitempty"`
+	// PostgresRules: see Session.PostgresRules.
+	PostgresRules bool   `json:"postgres_rules,omitempty"`
 	Threads       int    `json:"threads"`
 	MemoryLimit   string `json:"memory_limit"`
 	MaxRows       int    `json:"max_rows"`

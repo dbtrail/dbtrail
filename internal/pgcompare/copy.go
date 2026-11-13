@@ -51,6 +51,7 @@ func (c *SnapshotCopy) Query(ctx context.Context, stmt string, max int) (sqlcomp
 		ViewsSQL: c.viewsSQL,
 		SQL:      stmt,
 		Schema:   c.schema,
+		Session:  sqlsandbox.Session{PostgresRules: true},
 		Limits:   sqlsandbox.Limits{MaxRows: max},
 	})
 	if err != nil {

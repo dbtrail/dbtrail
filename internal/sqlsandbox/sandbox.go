@@ -263,6 +263,14 @@ type Session struct {
 	// not fit anywhere (a CH-benCHmark Q5 that filled 351 GB of spill and
 	// answered in 5 s in the written order).
 	KeepJoinOrder bool
+	// PostgresRules runs the statement by PostgreSQL's rules where the
+	// engine's session decides the answer (#2786), for the copy of a
+	// PostgreSQL source: NULL sorts as the largest value (last ascending,
+	// first descending), `/` between two integers gives an integer, and text
+	// with no collation of its own compares byte by byte. Unset, the session
+	// is the one written for MySQL. Division by zero is not covered: the
+	// copy answers NULL where PostgreSQL fails the statement.
+	PostgresRules bool
 	// ResultToFile is the caller's, not the connection's: it can send a
 	// result larger than the memory cap to its client from a file
 	// (Result.Spool), so the statement may run with no row cap and its
@@ -1572,7 +1580,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	}
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
-		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder,
+		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,
