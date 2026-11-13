@@ -7,24 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **The compose `baseline` profile works on sources with
-  `explain_format=TREE`** (#2733). Its mydumper step runs from mydumper's own
-  image, with no MySQL client to ask the source first, so the #2211 fix did
-  not reach it and mydumper still crashed with a segmentation fault (exit
-  139) on MySQL 9.x with `TREE` or `JSON`. Step `baseline-quiet` (`bintrail
-  dump wait-quiet`) now reads the source's `explain_format` in every lock
-  mode and, when the variable exists, writes
-  `[mydumper_session_variables] explain_format = TRADITIONAL` to
-  `/dump/mydumper-session.cnf`; the dump step passes it with
-  `--defaults-extra-file` and removes it when it ends, so a MariaDB run after
-  a MySQL 9.x run does not inherit it. Sources without the variable (MariaDB,
-  MySQL before 8.0.32) get no file. A leftover file that cannot be removed,
-  or a file that cannot be written for a `TREE`/`JSON` source, stops the run
-  with the cause. `baseline-quiet` now runs as root and mounts the
-  `bintrail-dump` volume, whose root uid 999 cannot write. A 139 exit
-  without the file prints what to check. The mydumper image stays at
-  1.0.3-1, the build every other path ships.
-
 - **Full reads work on sources with `explain_format=TREE`** (#2211). On a
   MySQL 9.x source whose `explain_format` is `TREE` (the default on Percona
   Server 9.7) or `JSON`, mydumper crashed with a segmentation fault within
@@ -62,7 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pg_hba.conf`, the check runs as before and the result says the read was
   not cut and why. The baseline it starts from is now the newest one taken
   before the read opened, as on MySQL since #2150.
-
 - **A snapshot update refuses a table whose column changed character set** (#2723). The update compared each column's type and NULL-ness with the schema snapshot taken after a DDL, but not its character set, which `COLUMN_TYPE` does not show. Two cases went wrong. An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column, under a non-strict `sql_mode` or as `CONVERT TO CHARACTER SET latin1`, turns every character latin1 cannot hold into `?` and writes no row event, so the update kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. A `CONVERT TO CHARACTER SET utf8mb4` on a latin1 table keeps every value, but the updated snapshot kept declaring the column latin1, and a restore from it created a column that cannot hold what was written after the change. Both now refuse the table like a type change, naming the column and both character sets (`name (varchar(20) CHARACTER SET utf8mb4 -> varchar(20) CHARACTER SET latin1)`), and a full read follows. The character set of the snapshot's `CREATE TABLE` is read as the server wrote it: the column's own, else the one its collation belongs to, else the table's default; `utf8` and `utf8mb3` are the same set. Nothing is compared, and nothing refused, when either side does not say: a schema snapshot with no character set recorded (every non-text column, a PostgreSQL source, a snapshot older than the record of character sets), or a `CREATE TABLE` that names none for the column or its table. A collation change within the same character set is still not seen, since schema snapshots do not record collations (#2083).
 - **Tests: the boot server's download cap through its call site, and the
   "Not in S3" line in every combination** (#2691). No behavior change. A test
