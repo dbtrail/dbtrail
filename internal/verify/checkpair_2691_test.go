@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -171,5 +172,27 @@ func TestCheckPair_aTieGoesToTheOldestRead(t *testing.T) {
 	lrWrite(t, root, at(2), "orders", lrFold(at(2), at(1), at(1), 1, 120))
 	if r, b := baseline.CheckPair(root); r != reconstruct.SnapshotDirName(at(1)) || b != reconstruct.SnapshotDirName(at(0)) {
 		t.Fatalf("CheckPair = %s, %s; want the older of the two reads, %s", r, b, reconstruct.SnapshotDirName(at(1)))
+	}
+}
+
+// When the snapshot of the read most tables share is gone (removed by
+// hand), the next most shared read whose snapshot is still here is kept.
+func TestCheckPair_theNextReadWhenTheMostSharedIsGone(t *testing.T) {
+	root := t.TempDir()
+	at := func(h int) time.Time { return lr0.Add(time.Duration(h) * time.Hour) }
+	for _, tb := range []string{"accounts", "orders", "payments"} {
+		lrWrite(t, root, at(1), tb, lrDump(at(1), 110))
+		lrWrite(t, root, at(2), tb, lrDump(at(2), 120))
+		lrWrite(t, root, at(3), tb, lrFold(at(3), at(2), at(2), 1, 130))
+	}
+	lrWrite(t, root, at(4), "payments", lrDump(at(4), 140))
+	for _, tb := range []string{"accounts", "orders"} {
+		lrWrite(t, root, at(4), tb, lrFold(at(4), at(3), at(2), 2, 140))
+	}
+	if err := os.RemoveAll(filepath.Join(root, reconstruct.SnapshotDirName(at(2)))); err != nil {
+		t.Fatal(err)
+	}
+	if r, b := baseline.CheckPair(root); r != reconstruct.SnapshotDirName(at(4)) || b != reconstruct.SnapshotDirName(at(3)) {
+		t.Fatalf("CheckPair = %q, %q; want payments' read %s, the one still here", r, b, reconstruct.SnapshotDirName(at(4)))
 	}
 }
