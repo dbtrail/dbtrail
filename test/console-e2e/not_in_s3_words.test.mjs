@@ -89,6 +89,7 @@ test("a copy S3 could not be asked about is never said to be missing, in every c
     }
     assert.ok(!/undefined|NaN|\bnull\b/.test(s) && !s.includes("—"), "drawn text: " + ctxt);
   }
+  console.log("records rendered: " + seen);
   assert.ok(seen > 100, "only " + seen + " records generated");
 });
 
