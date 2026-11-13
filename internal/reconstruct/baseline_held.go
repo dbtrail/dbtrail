@@ -8,9 +8,6 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
 
-// FindFunc is the shape of FindBaseline with its source bound.
-type FindFunc func(ctx context.Context, schema, table string, at time.Time) (string, time.Time, StaleWarning, error)
-
 // FindHeld runs find and holds the snapshot it names against the prune of
 // any process (baseline.HoldSnapshotOfTable, #2675) until release is called.
 // A snapshot moved aside between the lookup and the hold is looked up once
