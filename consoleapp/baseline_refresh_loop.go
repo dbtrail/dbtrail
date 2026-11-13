@@ -61,6 +61,15 @@ type refreshRequest struct {
 	// loop gets: it leaves BaselineS3 empty and uploads nothing anyway.
 	UploadEvery time.Duration
 	UploadAt    time.Duration
+	// HoldFromS3 is set by the daemon-wide interval loop (baselineRefreshTargets)
+	// for a server whose folder is pruned to its count and that has an S3
+	// destination (#2675): the snapshot this loop publishes there is marked
+	// as kept on this machine on purpose (baseline.MarkUploadHeld). The loop
+	// names no destination and uploads nothing (BaselineS3 stays empty), so
+	// the snapshot was never meant for the bucket; unmarked, the cleanup took
+	// it for a failed upload and sent it, up to three per cleanup, a cost
+	// nobody chose. Marked, the count removes it like any held snapshot.
+	HoldFromS3 bool
 	// FoldSource, when set, is where THIS run reads its previous snapshot
 	// from, resolved by resolveFoldSource just before the fold. Empty means
 	// the standing rule (baselineFoldSource): the bucket when the server has
@@ -414,6 +423,9 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	var uploadHeld bool
 	if err == nil && req.BaselineS3 != "" {
 		uploadHeld = holdUpload(s.ctx, req, at)
+	}
+	if err == nil && req.BaselineS3 == "" && req.HoldFromS3 {
+		markLoopSnapshotHeld(req, at)
 	}
 	if err == nil && req.BaselineS3 != "" && !uploadHeld {
 		uploadStarted := time.Now()
@@ -1249,6 +1261,18 @@ func holdUpload(ctx context.Context, req refreshRequest, at time.Time) bool {
 		"server", req.ServerName, "snapshot", name, "upload_every", req.UploadEvery,
 		"bucket_newest", newest.UTC().Format(time.RFC3339))
 	return true
+}
+
+// markLoopSnapshotHeld marks the snapshot the daemon-wide interval loop just
+// published at `at` as kept on this machine on purpose (refreshRequest.
+// HoldFromS3, #2675). A mark that cannot be written is said: the snapshot
+// then reads as a failed upload, and the cleanup sends it to S3, as before.
+func markLoopSnapshotHeld(req refreshRequest, at time.Time) {
+	name := reconstruct.SnapshotDirName(at)
+	if err := baseline.MarkUploadHeld(req.BaselineDir, name); err != nil {
+		slog.Warn("snapshot refresh: could not mark the snapshot of the refresh interval as kept on this machine; the cleanup will send it to S3 instead",
+			"server", req.ServerName, "snapshot", name, "error", err)
+	}
 }
 
 // bucketNewest is the newest complete snapshot in the server's destination,
@@ -2720,6 +2744,13 @@ func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBase
 		}
 		if add(e.ID, e.Name, e.DSN, e.BaselineDir) {
 			withSource(&out[len(out)-1], e)
+			// Pruned to its count beside a destination (#2675): what this
+			// loop writes there is not for the bucket. The daemon's own
+			// --baseline-s3 is not known here; a folder sharing that prefix
+			// is not pruned to its count, and its marked snapshots go once a
+			// newer copy in S3 supersedes them, as held snapshots do.
+			out[len(out)-1].HoldFromS3 = strings.TrimSpace(e.BaselineS3) != "" && e.LocalKeepNewest > 0 &&
+				!console.LocalKeepBlocked(entries, e, globalBaselineDir)
 		}
 	}
 	return out, skippedS3Only, shared

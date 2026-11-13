@@ -882,6 +882,7 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 			e.Flavor = old.Flavor
 		}
 		startUploadIntervalWithFirstDestination(old, &e)
+		rememberEachUpdate(old, &e)
 		// The whole list is copied: marking a folder that stops being shared
 		// changes OTHER entries, and a failed save must undo all of it.
 		prev := slices.Clone(r.file.Servers)

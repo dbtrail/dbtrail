@@ -560,6 +560,11 @@ func startUploadIntervalWithFirstDestination(old ServerEntry, e *ServerEntry) {
 	if e.BackupSchedule == nil || strings.TrimSpace(e.BackupSchedule.UploadEvery) != "" {
 		return
 	}
+	// Each update was in force beside the destination this server had
+	// before (#2675, rememberEachUpdate): a destination added again keeps it.
+	if e.BackupSchedule.UploadEachUpdate {
+		return
+	}
 	every := defaultUploadEvery(*e, e.BackupSchedule.Every)
 	if every == "" {
 		return
@@ -569,6 +574,26 @@ func startUploadIntervalWithFirstDestination(old ServerEntry, e *ServerEntry) {
 	sched.UploadEvery = every
 	e.BackupSchedule = &sched
 	slog.Info(uploadIntervalStartedMsg(every), "server", e.Name, "every", sched.Every, "destination", e.BaselineS3)
+}
+
+// rememberEachUpdate records, inside the registry's own write, that a server
+// losing its S3 destination was sending to it at each update (#2675): the
+// empty interval was in force beside a destination, which is what a choice
+// of each update looks like, and a schedule saved before #2658 too. Without
+// it, removing the destination and adding one again turned each update into
+// the default of once a day, since an empty interval on a server with no
+// destination is never a choice (startUploadIntervalWithFirstDestination).
+func rememberEachUpdate(old ServerEntry, e *ServerEntry) {
+	if strings.TrimSpace(old.BaselineS3) == "" || strings.TrimSpace(e.BaselineS3) != "" {
+		return
+	}
+	if e.BackupSchedule == nil || strings.TrimSpace(e.BackupSchedule.UploadEvery) != "" || e.BackupSchedule.UploadEachUpdate {
+		return
+	}
+	// A copy: the schedule the caller holds is not this entry's to change.
+	sched := *e.BackupSchedule
+	sched.UploadEachUpdate = true
+	e.BackupSchedule = &sched
 }
 
 // uploadIntervalStartedMsg is the daemon's line when a first S3 destination

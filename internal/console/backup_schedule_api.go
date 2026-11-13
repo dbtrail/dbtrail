@@ -507,6 +507,10 @@ func (s *Server) handleBackupScheduleUpdate(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The record that each update was in force beside a destination this
+	// server no longer has (#2675) stays while the interval stays empty: a
+	// save of the schedule's time is not a new choice about sending.
+	sched.UploadEachUpdate = sched.UploadEvery == "" && e.BackupSchedule != nil && e.BackupSchedule.UploadEachUpdate
 	// Asked only of a value this save sets: one saved while the server had a
 	// destination stays inert when it loses it, and editing the time of the
 	// updates must not force the operator to delete it first.

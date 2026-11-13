@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Two follow-ups to the defaults of a server with an S3 destination** (#2675).
+  - Removing a server's S3 destination and adding one again keeps a **Send to S3 every** of each update. The registry now records, when the destination is removed, that the empty interval was in force beside it (`upload_each_update` in the schedule), and a destination added later leaves it as it is. Before, the empty interval read as never chosen, and the new destination started the default of once a day. An interval set after that ends the record. A server that never had a destination still starts at once a day.
+  - With `--baseline-refresh-interval`, the snapshots that loop writes on a server with an S3 destination and a count are marked as kept on this machine on purpose, like the updates the upload interval keeps back: the count removes them, and the cleanup no longer sends them to the bucket, up to three per cleanup, a cost the 0.130.0 notes declared. When the server also has a schedule with an upload interval, its next due upload sends the newest local snapshot, the loop's included. Without a count (pruned by age alone) they are sent by the cleanup, as before. A mark that cannot be written is logged: `snapshot refresh: could not mark the snapshot of the refresh interval as kept on this machine; the cleanup will send it to S3 instead`.
 - **The installer installs one release and writes it down** (#2638).
   `install.sh` took `docker-compose.yml` from `main` and left every image on
   `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
