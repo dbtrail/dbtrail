@@ -18,7 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lookup of a cascade recovery), and the cleanup of any process takes the
   file exclusively right before it removes a snapshot: when it cannot, the
   snapshot stays and the rest of the folder is cleaned. The lock needs only
-  read access and ends with the process, killed included. A reader that
+  read access and ends with the process, killed included. A hold stops the
+  cleanup for at most 24 hours, like a job of `watch`, counted from the
+  earlier of the start the reader records beside the snapshot (0600, never
+  through a link) and the first time the cleanup found it held; past that the
+  cleanup removes the snapshot and logs once "a reader has held this snapshot
+  for longer than any read is allowed to, so the cleanup no longer waits for
+  it and removes it; that reader will fail". A reader that cannot get the
+  lock within 5 seconds reads without it and says so. A reader that
   reaches its snapshot just as it is removed looks it up once more, and
   twice fails with "the snapshot of <schema>.<table> was removed by the
   cleanup twice while this read started; run it again". Not covered: a
