@@ -83,7 +83,9 @@ func TestReconstructTables_theS3LocationIsReadFirst(t *testing.T) {
 	orig := listS3Location
 	t.Cleanup(func() { listS3Location = orig })
 
-	listS3Location = func(context.Context, string) error { return errors.New("NoSuchBucket: The specified bucket does not exist") }
+	listS3Location = func(context.Context, string) error {
+		return errors.New("NoSuchBucket: The specified bucket does not exist")
+	}
 	out := t.TempDir()
 	seedCompleteDump(t, out, "shop.t-schema.sql", "shop.t.00000.sql")
 	before := dirNames(t, out)
