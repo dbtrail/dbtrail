@@ -9218,7 +9218,10 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
   const stuck = was.held || was.blocked;
   const none = s3 ? "the count does not apply to it" : "nothing in it is removed, whatever the count says";
   if (was.sharedS3) {
-    say("Another server sends its snapshots to this S3 location too, so " + none + ". Give each server its own S3 prefix.");
+    // With an age set the age does not apply either (#2675): S3 cannot
+    // tell which server's copy of a snapshot name it holds.
+    say("Another server sends its snapshots to this S3 location too, so " +
+      (age.sharedS3 ? "nothing in this folder is removed, by the count or by age" : none) + ". Give each server its own S3 prefix.");
   } else if (was.held) {
     say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {
@@ -9543,7 +9546,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // about this server", so the card is read at a glance.
     const said = localCopyWords(s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
       { source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held, sharedS3: asSaved && !!srv.keep_shared_s3,
-        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
+        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, sharedS3: !!srv.delete_after_shared_s3, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
         every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0,

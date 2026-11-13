@@ -118,6 +118,9 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   await step("s3CountedKeepAll", s3c, (r) => type(r, "keep_newest", ""));
   // Two servers on one S3 prefix (#2658): the count does not apply.
   await step("s3SharedS3", Object.assign({}, s3c, { keep_blocked: true, keep_shared_s3: true, keep_in_force: 0 }), null);
+  // The same with an age set (#2675): the age does not apply either, and
+  // the API sends it as 0 with the reason.
+  await step("s3SharedS3Age", Object.assign({}, s3c, { keep_blocked: true, keep_shared_s3: true, keep_in_force: 0, delete_after_minutes: 0, delete_after_shared_s3: true, prune_retain_minutes: 7 * 1440 }), null);
   // The save that gives a server its first S3 destination: the daemon
   // answers with the S3 interval it started on the schedule.
   toasts.length = 0;
@@ -333,6 +336,12 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 	if !strings.Contains(sh, "Another server sends its snapshots to this S3 location too, so the count does not apply to it. Give each server its own S3 prefix.") ||
 		strings.Contains(sh, "after each new snapshot") || strings.Contains(sh, "Set a number") {
 		t.Errorf("a destination shared with another server: %q", sh)
+	}
+	sha := joined(got["s3SharedS3Age"].Before)
+	t.Logf("s3SharedS3Age (at rest):\n  %s", strings.Join(got["s3SharedS3Age"].Before.Words, "\n  "))
+	if !strings.Contains(sha, "Another server sends its snapshots to this S3 location too, so nothing in this folder is removed, by the count or by age. Give each server its own S3 prefix.") ||
+		strings.Contains(sha, "older than") || strings.Contains(sha, "after each new snapshot") || strings.Contains(sha, "Set a number") {
+		t.Errorf("a shared destination with an age: %q", sha)
 	}
 	// The first S3 destination: the save's own message says what the
 	// schedule now does. A save that started nothing says only that it saved.
