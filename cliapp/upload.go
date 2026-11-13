@@ -114,14 +114,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	}
 	var dbUpdates []uploadedFile
 
-	err = filepath.WalkDir(uplSource, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
-			return walkErr
-		}
-		if !uploadable(path) {
-			return nil
-		}
-
+	err = walkUploadable(uplSource, func(path string) error {
 		key, err := storage.BuildS3Key(uplSource, path, prefix)
 		if err != nil {
 			return err
@@ -230,6 +223,36 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// walkUploadable calls fn with every file under root that `bintrail upload`
+// sends: an uploadable file that is not one the snapshots folder keeps for
+// itself (#2691, baseline.IsLocalOnly). Without that rule an upload of a
+// snapshots root sent the Parquet of an interrupted prune's leftover
+// (.<snapshot>.pruning) and of the daemon's work directories under names no
+// reader knows.
+//
+// Only on a folder of snapshots (baseline.IsSnapshotsRoot): `bintrail upload`
+// also sends archives and any other Parquet tree, where a dot-named
+// directory is the operator's own data and is sent as before.
+func walkUploadable(root string, fn func(path string) error) error {
+	snapshots := baseline.IsSnapshotsRoot(root)
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr == nil && snapshots && baseline.IsLocalOnly(root, path) {
+			slog.Info("upload: not sent; it belongs to the snapshots folder itself, not to a snapshot", "path", path)
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		if !uploadable(path) {
+			return nil
+		}
+		return fn(path)
+	})
 }
 
 // uploadable reports whether `bintrail upload` sends a file: Parquet, and the
