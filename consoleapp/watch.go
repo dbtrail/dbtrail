@@ -1864,12 +1864,12 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	// is how often these were tried before.
 	round := resendRoundFor(t.dir)
 	if !round.begin() {
-		noteResending(t, res, nil, nil, round.waitsUntil(), round.waitIsForAnswer(), round.lastNeedsList())
+		noteResending(t, res, nil, nil, round.waitsUntil(), round.waitIsForAnswer(), round.lastCleanupRefused())
 		return
 	}
 	defer round.end()
 	sent, skipped, tried, failed, unasked := map[string]bool{}, map[string]bool{}, 0, 0, 0
-	needsList := false
+	cleanupRefused := false
 	wasFailing := round.isFailing()
 	for _, name := range res.NotAtDestination {
 		if ctx.Err() != nil || tried >= resendPerCycle {
@@ -1901,8 +1901,8 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 		if slices.Contains(res.NotAsked, name) {
 			unasked++
 		}
-		if errors.Is(err, errResendNeedsList) {
-			needsList = true
+		if errors.Is(err, errResendCleanupRefused) {
+			cleanupRefused = true
 		}
 		if err != nil {
 			failed++
@@ -1935,9 +1935,9 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 		round.holdForAnswer()
 	}
 	if tried > 0 {
-		round.setNeedsList(needsList)
+		round.setCleanupRefused(cleanupRefused)
 	}
-	noteResending(t, res, sent, skipped, round.waitsUntil(), round.waitIsForAnswer(), round.lastNeedsList())
+	noteResending(t, res, sent, skipped, round.waitsUntil(), round.waitIsForAnswer(), round.lastCleanupRefused())
 }
 
 // waitsUntil is when the next round may start, or the zero time when
@@ -1968,9 +1968,9 @@ type resendRound struct {
 	// forAnswer: the wait is after sending snapshots S3 could not be asked
 	// about (#2696), not after a failure.
 	forAnswer bool
-	// needsList: the last round that sent anything had a send refused for
-	// s3:ListBucket (errResendNeedsList, #2701), for the page.
-	needsList bool
+	// cleanupRefused: the last round that sent anything had a send refused for
+	// the cleanup question (errResendCleanupRefused, #2701), for the page.
+	cleanupRefused bool
 }
 
 var (
@@ -2055,7 +2055,7 @@ func (r *resendRound) waitIsForAnswer() bool {
 // noteResending rewrites the folder's record of snapshots the destination
 // lacks after a round (sent and skipped are what it did), or with nothing
 // done when the round did not start: they are still going to be sent.
-func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time, forAnswer, needsList bool) {
+func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, next time.Time, forAnswer, cleanupRefused bool) {
 	if res.DestinationSilent {
 		// The destination failed to answer for some snapshots in this pass
 		// (#2658), so how many it lacks is not known: the prune left the
@@ -2070,7 +2070,7 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 			left = append(left, name)
 		}
 	}
-	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true, NeedsListBucket: needsList}
+	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true, CleanupQuestionRefused: cleanupRefused}
 	for _, name := range left {
 		if slices.Contains(res.NotAsked, name) {
 			rec.NotAsked = append(rec.NotAsked, name)
@@ -2911,17 +2911,17 @@ func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
 	}
 }
 
-// setNeedsList records whether the round that just ended had a send refused
-// for s3:ListBucket (#2701).
-func (r *resendRound) setNeedsList(v bool) {
+// setCleanupRefused records whether the round that just ended had a send refused
+// because S3 refused the cleanup question (#2701).
+func (r *resendRound) setCleanupRefused(v bool) {
 	r.mu.Lock()
-	r.needsList = v
+	r.cleanupRefused = v
 	r.mu.Unlock()
 }
 
-// lastNeedsList is that, for the record the page reads.
-func (r *resendRound) lastNeedsList() bool {
+// lastCleanupRefused is that, for the record the page reads.
+func (r *resendRound) lastCleanupRefused() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.needsList
+	return r.cleanupRefused
 }

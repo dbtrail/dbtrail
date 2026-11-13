@@ -128,10 +128,11 @@ type NotInDestination struct {
 	// Zero in a record an older build wrote: the lists are whole there.
 	NotAskedCount    int `json:"not_asked_count,omitempty"`
 	ReadRefusedCount int `json:"read_refused_count,omitempty"`
-	// NeedsListBucket says the last send was refused because S3 would not
+	// CleanupQuestionRefused says the last send was refused because S3 would not
 	// say whether its own cleanup is removing the snapshot's folder: with
-	// "Delete from S3 after" set, that question needs s3:ListBucket (#2701).
-	NeedsListBucket bool `json:"needs_list_bucket,omitempty"`
+	// "Delete from S3 after" set, that question needs s3:GetObject and
+	// s3:ListBucket, and the 403 does not say which is missing (#2701).
+	CleanupQuestionRefused bool `json:"cleanup_question_refused,omitempty"`
 	// WaitsForAnswer says NextSend is the wait after sending again snapshots
 	// S3 could not be asked about (#2696), not after a send that failed.
 	WaitsForAnswer bool `json:"waits_for_answer,omitempty"`

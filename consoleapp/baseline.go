@@ -722,8 +722,8 @@ func (s *baselineSupervisor) resendLacking(_ context.Context, dir, s3URL, name s
 		// earlier S3 cleanup marked and did not finish is finished by a later
 		// one whatever its age, so a copy sent into it would be removed after
 		// the local copy went on the strength of it. The page says which
-		// permission, from errResendNeedsList.
-		return fmt.Errorf("%w: %w", errResendNeedsList, err)
+		// permission, from errResendCleanupRefused.
+		return fmt.Errorf("%w: %w", errResendCleanupRefused, err)
 	case err != nil:
 		// A real failure, counted and logged as one by the caller.
 		return fmt.Errorf("could not tell whether the S3 cleanup is removing this snapshot's folder, so it was not sent "+
@@ -757,12 +757,14 @@ var errNotResent = errors.New("snapshot not sent again for now")
 // on this disk without an S3 copy, so it is still listed as missing.
 var errPastS3Age = errors.New("snapshot past the S3 age, not sent again")
 
-// errResendNeedsList is the resend refused because S3 refused the question
+// errResendCleanupRefused is the resend refused because S3 refused the question
 // whether its own cleanup is removing the snapshot's folder (#2701): with
-// "Delete from S3 after" set and no s3:ListBucket, a HEAD on the missing
-// _PRUNING mark is answered 403. A failure, retried at the failed rounds'
+// "Delete from S3 after" set, a HEAD on the missing _PRUNING mark is
+// answered 403 when the credentials lack s3:GetObject (a HEAD needs it) or
+// s3:ListBucket (a missing key needs it to answer 404); the 403 does not say
+// which, so both are named. A failure, retried at the failed rounds'
 // hourly pace, and named on the page.
-var errResendNeedsList = errors.New("S3 refused to say whether its cleanup is removing this snapshot's folder (with \"Delete from S3 after\" set, that question needs s3:ListBucket on the prefix), so it was not sent")
+var errResendCleanupRefused = errors.New("S3 refused to say whether its cleanup is removing this snapshot's folder (with \"Delete from S3 after\" set, that question needs s3:GetObject and s3:ListBucket on the prefix), so it was not sent")
 
 // readsS3Now reports whether a restore or a SQL file build runs now for any
 // of the servers: both read a snapshot the S3 cleanup could remove (#2596).

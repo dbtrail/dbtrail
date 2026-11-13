@@ -9160,11 +9160,12 @@ function notInS3Words(n, rec) {
     : (all === 1 ? "the copy of " : "the copies of ") + l.map(at).join(", ") + (all > l.length ? " and " + (all - l.length) + " more" : ""));
   // What happens next: sent at the next cleanup, after a wait (a failed
   // send, or a send S3 could not confirm, #2696), or by hand. A send refused
-  // for s3:ListBucket (#2701) says so and the two ways out.
+  // because S3 refused the cleanup's question (#2701) names both permissions
+  // that question needs and the ways out.
   const tail = (them) => rec && rec.resending === true
-    ? (rec.needs_list_bucket === true
+    ? (rec.cleanup_question_refused === true
       ? "DBTrail does not send " + them + ": S3 will not say whether its own cleanup is removing " + (them === "it" ? "its" : "their") +
-        " folder, which with Delete from S3 after set needs s3:ListBucket on this prefix. Add that permission, or clear Delete from S3 after" +
+        " folder, which with Delete from S3 after set needs s3:GetObject and s3:ListBucket on this prefix. Add the one that is missing, or clear Delete from S3 after" +
         (rec.next_send ? "; DBTrail asks again after " + utcLabel(rec.next_send) + "." : ".")
       : (rec.next_send
         ? (rec.waits_for_answer === true
@@ -9177,9 +9178,12 @@ function notInS3Words(n, rec) {
   const readRefused = list(rec && rec.read_refused);
   const k = total(readRefused, rec && rec.read_refused_count);
   if (k) {
+    // S3's refusal does not say why (#2701): a missing s3:GetObject and
+    // credentials that stopped working answer alike, so both are named.
+    const causes = "either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both";
     if (k >= n) {
-      return "Kept here: " + what + ". S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm " +
-        (n === 1 ? "it is" : "they are") + " there, and does not send " + it + " again.";
+      return "Kept here: " + what + ". S3 took " + it + " when sent again and refuses to read " + it + " back: " + causes +
+        ". DBTrail cannot confirm " + (n === 1 ? "it is" : "they are") + " there, and does not send " + it + " again.";
     }
     // The refused ones are among the ones S3 could not be asked about, so
     // the rest's count of those is the whole count less these.
@@ -9190,7 +9194,7 @@ function notInS3Words(n, rec) {
       read_refused: [],
       read_refused_count: 0,
     });
-    return notInS3Words(n - k, rest) + " Not sent again: " + copiesOf(readRefused, k) + ", which S3 took but refuses to read back (s3:GetObject).";
+    return notInS3Words(n - k, rest) + " Not sent again: " + copiesOf(readRefused, k) + ", which S3 took and refuses to read back: " + causes + ".";
   }
   // The ones S3 could not be ASKED about (the last restore's result whose
   // question failed, a copy S3 refused, #2689): sent again in case they are

@@ -115,8 +115,9 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
   // 12 not asked about (3 of them refused to read), five names each.
   await step("s3CountedCutLists", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 15, names: ["2026-11-01T00-00-00Z", "2026-11-02T00-00-00Z", "2026-11-03T00-00-00Z", "2026-11-04T00-00-00Z", "2026-11-05T00-00-00Z"], resending: true, not_asked: ["2026-11-04T00-00-00Z", "2026-11-05T00-00-00Z", "2026-11-15T00-00-00Z", "2026-11-14T00-00-00Z", "2026-11-13T00-00-00Z"], not_asked_count: 12, read_refused: ["2026-11-15T00-00-00Z", "2026-11-14T00-00-00Z", "2026-11-04T00-00-00Z"], read_refused_count: 3 } }), null);
   // #2701: a send refused because S3 will not say whether its cleanup is
-  // removing the folder (no s3:ListBucket with Delete from S3 after set).
-  await step("s3CountedNeedsList", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z", needs_list_bucket: true } }), null);
+  // removing the folder (no s3:GetObject or s3:ListBucket with Delete from
+  // S3 after set).
+  await step("s3CountedCleanupRefused", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z", cleanup_question_refused: true } }), null);
   await step("s3CountedWaits", Object.assign({}, s3c, { not_in_s3: { at: "2026-11-11T03:00:00Z", count: 2, names: ["2026-11-10T03-00-00Z", "2026-11-10T03-05-00Z"], resending: true, next_send: "2026-11-11T04:00:00Z" } }), null);
   await step("s3CountedNoLoop", Object.assign({}, s3c, { prune_loop: false, keep_in_force: 0 }), null);
   await step("s3CountedBlocked", Object.assign({}, s3c, { keep_blocked: true, keep_in_force: 0 }), null);
@@ -282,8 +283,8 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 		"s3CountedAge":            "Older ones past that number and older than 7 days are removed from this folder after each new snapshot, once S3 has them.",
 		"s3CountedUnasked":        "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup.",
 		"s3CountedUnaskedTwo":     "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 could not be asked whether it has them; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
-		"s3CountedReadRefusedAll": "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm they are there, and does not send them again.",
-		"s3CountedReadRefusedOne": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup. Not sent again: the copy of 2026-11-10 03:05:00 UTC, which S3 took but refuses to read back (s3:GetObject).",
+		"s3CountedReadRefusedAll": "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 took them when sent again and refuses to read them back: either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both. DBTrail cannot confirm they are there, and does not send them again.",
+		"s3CountedReadRefusedOne": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; DBTrail sends it again at the next cleanup. Not sent again: the copy of 2026-11-10 03:05:00 UTC, which S3 took and refuses to read back: either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both.",
 		"s3CountedWaitsForAnswer": "Kept here: the copy of 2026-11-10 03:00:00 UTC. S3 could not be asked whether it has it; the last ones sent could not be confirmed, and DBTrail sends again after 2026-11-11 04:00:00 UTC.",
 		"s3CountedSomeUnasked":    "Kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have the copy of 2026-11-10 03:00:00 UTC complete, and could not be asked about the copy of 2026-11-10 03:05:00 UTC; DBTrail sends them again at the next cleanup.",
 		"s3CountedWaits":          "Not in S3 yet, so kept here: 2 older copies (2026-11-10 03:00:00 UTC, 2026-11-10 03:05:00 UTC). S3 does not have them complete; sending failed, and DBTrail tries again after 2026-11-11 04:00:00 UTC.",
@@ -295,14 +296,14 @@ const type = (r, name, v) => { const i = byName(r, name); i.value = v; fire(i, "
 			t.Errorf("%s: %q does not say %q", name, w, want)
 		}
 	}
-	for _, name := range []string{"s3CountedCutLists", "s3CountedNeedsList"} {
+	for _, name := range []string{"s3CountedCutLists", "s3CountedCleanupRefused"} {
 		t.Logf("%s (at rest):\n  %s", name, strings.Join(got[name].Before.Words, "\n  "))
 	}
 	if w := joined(got["s3CountedCutLists"].Before); !strings.Contains(w, "Kept here: 12 older copies") || !strings.Contains(w, "could not be asked about the copies of 2026-11-05 00:00:00 UTC, 2026-11-13 00:00:00 UTC and 7 more") ||
 		!strings.Contains(w, "Not sent again: the copies of 2026-11-15 00:00:00 UTC, 2026-11-14 00:00:00 UTC, 2026-11-04 00:00:00 UTC, which S3 took") || strings.Contains(w, "S3 does not have the copy of 2026-11-05") {
 		t.Errorf("a record with cut lists: %q", w)
 	}
-	if w := joined(got["s3CountedNeedsList"].Before); !strings.Contains(w, "s3:ListBucket") || !strings.Contains(w, "Add that permission, or clear Delete from S3 after; DBTrail asks again after 2026-11-11 04:00:00 UTC.") || strings.Contains(w, "sending failed") {
+	if w := joined(got["s3CountedCleanupRefused"].Before); !strings.Contains(w, "needs s3:GetObject and s3:ListBucket on this prefix") || !strings.Contains(w, "Add the one that is missing, or clear Delete from S3 after; DBTrail asks again after 2026-11-11 04:00:00 UTC.") || strings.Contains(w, "sending failed") {
 		t.Errorf("a send refused for s3:ListBucket: %q", w)
 	}
 	// A copy S3 could not be asked about is never said to be missing (#2689).

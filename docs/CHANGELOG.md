@@ -13,28 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     its own rule never read the record of snapshots sent again. It is now
     sent once; after S3 takes it and refuses to read it, it is listed as
     refused to read and not sent again, and the failure record says "1
-    snapshot was sent again, and S3 took it but refuses to read it back
-    (s3:GetObject), so it is kept here and not sent again." An answer from S3
-    about it clears its mark.
-  - With **Delete from S3 after** set and no `s3:ListBucket`, a re-send asks
-    whether the S3 cleanup is removing the snapshot's folder and is refused.
-    It still does not send: a folder an earlier S3 cleanup marked and did not
-    finish is finished by a later one whatever its age, so a copy sent there
-    could be removed after the local copy went on the strength of it. The
-    Snapshots page now says why instead of "sending failed": "DBTrail does
-    not send them: S3 will not say whether its own cleanup is removing their
-    folder, which with Delete from S3 after set needs s3:ListBucket on this
-    prefix. Add that permission, or clear Delete from S3 after; DBTrail asks
+    snapshot was sent again, and S3 took it but refuses to read it back:
+    either the credentials lack s3:GetObject on this prefix, or they are no
+    longer valid; check both. It is kept here and not sent again." An answer
+    from S3 about it clears its mark.
+  - A refusal after a send S3 took was said to be a missing s3:GetObject. S3
+    authorizes every HEAD under s3:GetObject, so without it every question
+    is refused, a key that does not exist included, and that looks the same
+    as credentials that stopped working. Every message about it now names
+    both causes; the one for a destination that refuses every read is "S3
+    refuses to read back what it accepted: either the credentials lack
+    s3:GetObject on this prefix, or they are no longer valid; check both.",
+    and the one for every question refused ends "Check that the credentials
+    are valid and that they have s3:GetObject on this S3 prefix."
+  - With **Delete from S3 after** set, a re-send asks whether the S3 cleanup
+    is removing the snapshot's folder, and S3 refuses that question without
+    s3:ListBucket or without s3:GetObject. It still does not send: a folder
+    an earlier S3 cleanup marked and did not finish is finished by a later
+    one whatever its age, so a copy sent there could be removed after the
+    local copy went on the strength of it. The Snapshots page now says why
+    instead of "sending failed": "DBTrail does not send them: S3 will not
+    say whether its own cleanup is removing their folder, which with Delete
+    from S3 after set needs s3:GetObject and s3:ListBucket on this prefix.
+    Add the one that is missing, or clear Delete from S3 after; DBTrail asks
     again after ...".
-  - Credentials S3 refuses altogether right after a re-send it took read as
-    "S3 accepts uploads to this prefix but refuses to read them back
-    (s3:GetObject)". The cleanup now asks about a key no snapshot has: a
-    destination that only refuses reads answers "not here" for it, refused
-    credentials refuse it too, and the cleanup then says "S3 refused every
-    question about these snapshots (access denied) ... Check that the
-    credentials are valid and that they may read this S3 prefix.", removes
-    nothing, sends nothing and keeps the marks until S3 answers. Without
-    `s3:ListBucket` the two cannot be told apart and read as credentials.
   - The record of what S3 lacks cut its list of names to five and kept the
     "could not be asked" and "refused to read" lists whole, so with many
     snapshots the page's mixed sentence counted wrong. All three are cut

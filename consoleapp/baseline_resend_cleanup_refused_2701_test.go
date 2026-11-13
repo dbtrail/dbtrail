@@ -16,14 +16,15 @@ import (
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 )
 
-// #2701 point 2: with "Delete from S3 after" set and no s3:ListBucket, S3
+// #2701 point 2: with "Delete from S3 after" set and no s3:ListBucket or no
+// s3:GetObject (a HEAD needs it; the 403 does not say which is missing), S3
 // refuses (403) the question whether its own cleanup is removing a
 // snapshot's folder. The re-send keeps refusing to send into such a folder
 // (a folder an earlier S3 cleanup marked is finished by a later one whatever
 // its age, so a copy sent there would go after the local copy went on its
-// strength), and the record the page reads names the permission, through
+// strength), and the record the page reads names both permissions, through
 // the wait that follows, until a round fails for something else.
-func TestResend_aRefusedS3CleanupQuestionNamesListBucket(t *testing.T) {
+func TestResend_aRefusedS3CleanupQuestionNamesBothPermissions(t *testing.T) {
 	prevCut, prevPresent, prevUp, prevSend, prevNow := s3PruneCutFn, s3ObjectPresent, uploadSnapshot, resendSnapshotFn, resendNow
 	t.Cleanup(func() {
 		s3PruneCutFn, s3ObjectPresent, uploadSnapshot, resendSnapshotFn, resendNow = prevCut, prevPresent, prevUp, prevSend, prevNow
@@ -46,8 +47,8 @@ func TestResend_aRefusedS3CleanupQuestionNamesListBucket(t *testing.T) {
 	s := newBaselineSupervisor(context.Background(), t.TempDir(), "")
 	resendSnapshotFn = s.resendLacking
 
-	if err := s.resendLacking(context.Background(), root, "s3://bkt/p/", name); !errors.Is(err, errResendNeedsList) {
-		t.Fatalf("err = %v, want errResendNeedsList", err)
+	if err := s.resendLacking(context.Background(), root, "s3://bkt/p/", name); !errors.Is(err, errResendCleanupRefused) {
+		t.Fatalf("err = %v, want errResendCleanupRefused", err)
 	} else {
 		t.Logf("error: %v", err)
 	}
@@ -66,23 +67,23 @@ func TestResend_aRefusedS3CleanupQuestionNamesListBucket(t *testing.T) {
 		return rec
 	}
 	run()
-	if rec := read(); !rec.NeedsListBucket || rec.NextSend == nil || sent != 0 {
+	if rec := read(); !rec.CleanupQuestionRefused || rec.NextSend == nil || sent != 0 {
 		t.Fatalf("after the refused round: %+v, sent %d: want the permission named, an hourly retry, nothing sent", rec, sent)
 	}
 	// During the wait the record keeps saying why.
 	clock = clock.Add(5 * time.Minute)
 	run()
-	if rec := read(); !rec.NeedsListBucket {
+	if rec := read(); !rec.CleanupQuestionRefused {
 		t.Fatalf("the reason is lost during the wait: %+v", rec)
 	}
 	// The next round fails for another reason: the record stops naming it.
 	present = func(context.Context, string) (bool, error) { return false, errors.New("dial tcp: i/o timeout") }
 	clock = clock.Add(2 * time.Hour)
 	run()
-	if rec := read(); rec.NeedsListBucket {
-		t.Fatalf("a round that failed for another reason still names s3:ListBucket: %+v", rec)
+	if rec := read(); rec.CleanupQuestionRefused {
+		t.Fatalf("a round that failed for another reason still names the permissions: %+v", rec)
 	}
-	if !strings.Contains(errResendNeedsList.Error(), "s3:ListBucket") {
-		t.Fatal("the error does not name the permission")
+	if !strings.Contains(errResendCleanupRefused.Error(), "needs s3:GetObject and s3:ListBucket on the prefix") {
+		t.Fatal("the error does not name both permissions")
 	}
 }

@@ -455,7 +455,7 @@ func pruneFailureReason(res PruneResult, err error) string {
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination, so they were kept.", snapshotsWord(res.ProbeErrors)))
 	}
 	if res.DestinationDenied {
-		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they may read this S3 prefix.")
+		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they have s3:GetObject on this S3 prefix.")
 	}
 	deniedRead := len(res.ReadRefused)
 	if res.restoredReadRefused {
@@ -467,17 +467,21 @@ func pruneFailureReason(res PruneResult, err error) string {
 			itIs, it = "they are", "them"
 		}
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination: S3 refused the question (access denied), so %s kept here until S3 confirms it has %s. "+
-			"Without permission to list the bucket (s3:ListBucket), S3 answers that way about a copy it does not have.",
+			"S3 answers that way about a copy it does not have when the credentials lack s3:ListBucket, and about every copy when they lack s3:GetObject.",
 			snapshotsWord(n), itIs, it))
 	}
+	// Refused after a send S3 took (#2696): S3's 403 does not say whether
+	// s3:GetObject is missing or the credentials stopped working (#2701),
+	// so both are named.
+	const readCauses = "either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both."
 	switch n := len(res.ReadRefused); {
 	case res.DestinationWriteOnly:
-		why = append(why, "S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm any snapshot is there and keeps them here. "+
-			"It does not send them again: S3 took each one and then refused to read it.")
+		why = append(why, "S3 refuses to read back what it accepted: "+readCauses+
+			" DBTrail cannot confirm any snapshot is there, so it keeps them here, and it does not send them again: S3 took each one and then refused to read it.")
 	case n == 1:
-		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again.")
+		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back: "+readCauses+" It is kept here and not sent again.")
 	case n > 1:
-		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back (s3:GetObject), so they are kept here and not sent again.", n))
+		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back: %s They are kept here and not sent again.", n, readCauses))
 	}
 	// One cause per line, and "\n" only: the page renders them line by line,
 	// and a path or an error can itself contain "; " or ", ".
@@ -620,26 +624,6 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 	// kept. With a destination it is asked about like a snapshot that could
 	// go, so one whose upload failed is listed as missing there and sent
 	// again (resendLacking) instead of staying on this disk alone for good.
-	// refusesAllNow asks S3, once per cleanup, about a key no snapshot has
-	// (absentSnapshot, #2701): all reports that S3 refused that too, which
-	// is credentials it refuses, not a destination that only refuses reads;
-	// failed reports a failure that is not a refusal.
-	var refusesAllAsked, refusesAllAnswer, refusesAllFailed bool
-	refusesAllNow := func() (all, failed bool) {
-		if !refusesAllAsked {
-			refusesAllAsked = true
-			_, err := probe(ctx, absentSnapshot)
-			switch {
-			case err == nil:
-			case storage.IsAccessDenied(err):
-				refusesAllAnswer = true
-			default:
-				slog.Warn("baseline prune: could not ask S3 about a key no snapshot has, to tell refused credentials from refused reads", "error", err)
-				refusesAllFailed = true
-			}
-		}
-		return refusesAllAnswer, refusesAllFailed
-	}
 	restoredKept := func(res PruneResult, probeErrors *int) PruneResult {
 		if restoredSnap == nil {
 			return res
@@ -664,13 +648,11 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			// S3 answered about it: the mark's evidence is spent (#2701).
 			forgetResent(opts.LocalDir, restoredSnap.name)
 		}
+		// Refused after a send S3 took: a read it refuses, whether for a
+		// missing s3:GetObject or for credentials that stopped working; S3's
+		// 403 does not say which (a HEAD needs s3:GetObject, so without it
+		// every key answers 403, one that does not exist included).
 		refusedRead := perr != nil && resent && storage.IsAccessDenied(perr)
-		if refusedRead {
-			// Not when S3 refuses everything, a key no snapshot has
-			// included: then it is the credentials, not the read (#2701).
-			all, failed := refusesAllNow()
-			refusedRead = !all && !failed
-		}
 		switch {
 		case refusedRead:
 			// Sent again by the cleanup, taken by S3, and refused since
@@ -825,21 +807,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 		case probeErrors > 0:
 		case len(readRefused) == len(denied) && !confirmed:
 			answers, ok, failed := bucketAnswers(ctx, snaps, held, asked, probe, now)
-			if !failed && !answers {
-				// The newest were refused too, which a destination with no
-				// s3:GetObject does to the snapshots it holds (#2701). Told
-				// apart by a key no snapshot has: S3 answers "not here" when
-				// only reads are refused, and refuses that too when the
-				// credentials are refused (expired, revoked).
-				switch all, f := refusesAllNow(); {
-				case f:
-					failed = true
-				case all:
-					deniedAll = true
-				}
-			}
-			perObject = !failed && !deniedAll
-			writeOnly = perObject && !(answers && ok)
+			perObject = !failed
+			writeOnly = !failed && !(answers && ok)
 		case answered:
 			perObject = true
 		default:
@@ -1540,10 +1509,3 @@ func hasSuccessMarker(snapDir string) bool {
 	_, err := os.Stat(filepath.Join(snapDir, SuccessMarker))
 	return err == nil
 }
-
-// absentSnapshot is a snapshot name no snapshot has: the epoch, which no run
-// is named for. The cleanup asks S3 about it to tell a destination that
-// refuses reads (it answers "not here" for a missing key, given
-// s3:ListBucket) from credentials S3 refuses (it refuses that question too,
-// #2701).
-const absentSnapshot = "1970-01-01T00-00-00Z"

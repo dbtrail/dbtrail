@@ -22,9 +22,9 @@ func TestReadRefused_theRestoreResultIsSentOnce(t *testing.T) {
 	}
 	// Everything ordinary is in S3 and readable; the restore's result is
 	// not there yet, and once sent S3 refuses to read it.
-	b := &writeOnlyBucket{has: map[string]bool{}, unreadOK: map[string]bool{}}
+	b := &writeOnlyBucket{has: map[string]bool{}, unreadable: map[string]bool{restored: true}}
 	for _, n := range s {
-		b.has[n], b.unreadOK[n] = true, true
+		b.has[n] = true
 	}
 	var sentPerCycle []int
 	var res PruneResult
@@ -41,7 +41,7 @@ func TestReadRefused_theRestoreResultIsSentOnce(t *testing.T) {
 	}
 	reason := failureReason(t, root)
 	t.Logf("failure record: %q", reason)
-	if reason != "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again." {
+	if reason != "1 snapshot was sent again, and S3 took it but refuses to read it back: either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both. It is kept here and not sent again." {
 		t.Errorf("the failure record says %q", reason)
 	}
 	// A refusal that followed no send is a question S3 would not answer,
@@ -79,5 +79,38 @@ func TestReadRefused_anAnswerAboutTheRestoreResultClearsItsMark(t *testing.T) {
 	s3Count(t, root, 1, b.probe)
 	if slices.Contains(ResentUnconfirmed(root), restored) {
 		t.Fatalf("S3 confirmed the restore's result and its mark stays: %v", ResentUnconfirmed(root))
+	}
+}
+
+// The same as S3 answers once s3:GetObject is taken away after the restore's
+// result was sent: every question is refused from then on, and the result
+// is still sent only once.
+func TestReadRefused_theRestoreResultIsSentOnceWhenGetObjectGoes(t *testing.T) {
+	root := t.TempDir()
+	s := five(t, root)
+	restored := snapName(7 * time.Minute)
+	makeSnapshot(t, root, restored, true, "shop/orders")
+	if err := MarkRestored(root, restored); err != nil {
+		t.Fatal(err)
+	}
+	b := &writeOnlyBucket{has: map[string]bool{}}
+	for _, n := range s {
+		b.has[n] = true
+	}
+	var per []int
+	var res PruneResult
+	for i := 0; i < 5; i++ {
+		if i == 1 {
+			b.getDenied = true
+		}
+		var sent int
+		res, sent = cycle(t, root, 1, b.probe, b.has)
+		per = append(per, sent)
+	}
+	if !slices.Equal(per, []int{1, 0, 0, 0, 0}) {
+		t.Fatalf("sends per cycle %v, want [1 0 0 0 0]", per)
+	}
+	if !slices.Equal(res.ReadRefused, []string{restored}) {
+		t.Fatalf("the restore's result: %+v", res)
 	}
 }
