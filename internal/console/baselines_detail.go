@@ -128,6 +128,9 @@ type baselineRunDTO struct {
 	// possible when it ran (#1604). Persisted with the run, never recomputed.
 	Why     string `json:"why,omitempty"`
 	WhyCode string `json:"why_code,omitempty"`
+	// UpdateWhy: for a scheduled update, why it ran where the slot would
+	// otherwise have been skipped (#2674).
+	UpdateWhy string `json:"update_why,omitempty"`
 	// DiskCheck / DiskNote: the full read's free-space check (#1938).
 	DiskCheck string `json:"disk_check,omitempty"`
 	DiskNote  string `json:"disk_note,omitempty"`
@@ -449,7 +452,7 @@ func (s *Server) handleBaselineFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.baselineHistory != nil {
 		if rec := s.baselineHistory.FindBySnapshot(s.selectedServerID(r), ts.Format(time.RFC3339)); rec != nil {
-			run := &baselineRunDTO{Kind: rec.Kind, Tables: rec.Tables, Rows: rec.Rows, Why: rec.Why, WhyCode: rec.WhyCode,
+			run := &baselineRunDTO{Kind: rec.Kind, Tables: rec.Tables, Rows: rec.Rows, Why: rec.Why, WhyCode: rec.WhyCode, UpdateWhy: rec.UpdateWhy,
 				DiskCheck: rec.DiskCheck, DiskNote: rec.DiskNote, TransportNote: rec.TransportNote,
 				LeftOutTables: rec.LeftOutTables, LeftOutTablesOmitted: rec.LeftOutTablesOmitted}
 			if st, err1 := time.Parse(time.RFC3339, rec.StartedAt); err1 == nil {

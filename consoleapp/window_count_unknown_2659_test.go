@@ -161,7 +161,7 @@ func TestMeasureWindow_aSilentIndexIsSaidAndTheUpdateRuns_2659(t *testing.T) {
 	line := logLine(logs.String(), "did not answer the update-size probe")
 	t.Log(line)
 	for _, want := range []string{"level=WARN", "so the number of changes since the previous snapshot is unknown", "the schedule's choice is the update, with no estimate of what it will cost",
-		"the exception is a server with no per-event rate whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen"} {
+		"the exception is a server whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("the line %q lacks %q", line, want)
 		}

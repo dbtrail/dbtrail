@@ -10151,6 +10151,13 @@ function scheduleSkipTail(reason) {
     : " It will try again at the next scheduled time.";
 }
 
+// updateWhyLine: the recorded reason of an update that ran where the slot
+// would otherwise have been skipped (#2674, the run's update_why), which the
+// daemon words as a clause.
+function updateWhyLine(why) {
+  return "This update ran because " + why + (/[.!?]$/.test(why) ? "" : ".");
+}
+
 // unconfirmedSkipText: the skip the schedule records when nothing was indexed
 // since the previous snapshot and the source cannot confirm that capture
 // recorded everything it wrote (#2659). Matched on the reason's fixed words
@@ -11305,6 +11312,14 @@ function snapshotFailureCard(failure, raw, where, note, name) {
   return box;
 }
 
+// createBaselineRefusal is the toast for a full read the daemon did not
+// start or that failed to start.
+function createBaselineRefusal(err) {
+  const msg = (err && err.message) || String(err);
+  if (err && err.status === 409) return "The full read did not start: " + msg + (/[.!?]$/.test(msg) ? "" : ".");
+  return "Snapshot failed: " + msg;
+}
+
 async function createBaseline(id, btn, onStarted) {
   const label = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "Creating…"; }
@@ -11312,7 +11327,9 @@ async function createBaseline(id, btn, onStarted) {
   try {
     await api("/api/servers/" + encodeURIComponent(id) + "/baseline", { method: "POST", body: {} });
   } catch (err) {
-    toastError("Snapshot failed: " + ((err && err.message) || err));
+    // 409: refused before it started (another job holds the server, #2674,
+    // or the folder is another server's), which is not a failed snapshot.
+    toastError(createBaselineRefusal(err));
     restore();
     return;
   }
@@ -11734,6 +11751,7 @@ async function loadBackupDetail(at, box) {
   // Outside the duration branch: a run stamped within one second has no
   // duration to show and still has its reason (#1604).
   if (d.run && d.run.why) lines.push(el("span", { class: "bk-fact", text: backupWhyLine(d.run.why, d.run.why_code, false) }));
+  if (d.run && d.run.update_why) lines.push(el("span", { class: "bk-fact", text: updateWhyLine(d.run.update_why) }));
   const readLine = sourceReadLine(d);
   if (readLine) lines.push(el("span", { class: "bk-fact", text: readLine }));
   const lockLine = snapshotLockLine(d);
@@ -12611,6 +12629,10 @@ function backupScheduleCard(cur, b) {
       if (run.disk_note && run.disk_check !== "ok") body.append(diskNoteLine(run.disk_check, run.disk_note));
       // A full read that reached the source without encryption (#1996).
       if (run.transport_note) body.append(el("p", { class: "form-hint", text: run.transport_note }));
+      // Why an update ran where the slot would otherwise have been skipped
+      // (#2674), as recorded when it ran: before the run it was the next
+      // run's reason, and after it nothing else on the page says it.
+      if (run.method === "refresh" && run.update_why) body.append(el("p", { class: "form-hint", text: updateWhyLine(run.update_why) }));
       // The reason a full backup was taken, as recorded when it ran, and
       // the setting that turns the next one into an update (#1604). After
       // BOTH branches: a full read that then failed is the run whose
