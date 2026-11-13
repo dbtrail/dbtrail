@@ -1318,6 +1318,20 @@ What this is and is not:
   position but `-1` goes to MySQL, since how long the text is depends on the
   row, and so does a position from a column or a placeholder; the copy has
   no `MID`, so MySQL answers that one anyway),
+  `LEFT` and `RIGHT` unless the length is a whole number written in the
+  statement (a negative length is `''` on MySQL and cuts from the other end
+  on the copy: `LEFT('abc', -1)` is `'ab'` there and `RIGHT('abc', -1)` is
+  `'bc'`; a length from a column or a placeholder goes to MySQL, since it may
+  be negative on some row),
+  a space character outside ASCII outside the statement's strings, quoted
+  names and comments (a no-break space, an ideographic space, a zero-width
+  space and the other Unicode spaces the copy reads as white space: MySQL
+  reads them as part of a name, so over a column whose name holds a no-break
+  space between `a` and `b`, writing that name unquoted reads the column on
+  MySQL and column `a` under the alias `b` on the copy; the same character
+  anywhere in a statement goes to MySQL too when a `/* */` comment holds a
+  quote or the statement holds a `$`, since the copy then may take a string's
+  character for one outside it and turn it into a plain space),
   a zero date (the copy holds `0000-00-00` as NULL: in a `DATE`, `DATETIME`
   or `TIMESTAMP` column declared `NOT NULL`, or whose default is the zero
   date, a NULL on the copy can only be one, and a statement that names such

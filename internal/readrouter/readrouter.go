@@ -311,6 +311,11 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	if why := sc.literalVeto(); why != "" {
 		return why
 	}
+	if sc.spaceOutsideASCII {
+		// Before the list: every check after this one reads the character
+		// as a space, as the copy does, where MySQL reads another statement.
+		return vetoSpaceOutsideASCII
+	}
 	for _, v := range vetoes {
 		re := v.re
 		if v.name == likeVeto && o.LikeIgnoresCase {
@@ -345,7 +350,64 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	if !substringsAgree(sc.blankedCopy) {
 		return vetoSubstring
 	}
+	if !leftRightAgree(sc.blankedCopy) {
+		return vetoLeftRight
+	}
 	return ""
+}
+
+// vetoSpaceOutsideASCII keeps on MySQL a statement with a character outside
+// ASCII that the copy reads as white space (copySpace) outside its string
+// literals, quoted names and comments (#2652). MySQL reads the character as
+// part of a name, the copy as a space between two words. Over a table with
+// columns a, b and a<U+00A0>b, SELECT a<U+00A0>b FROM t is the column
+// a<U+00A0>b on MySQL and column a under the alias b on the copy: another
+// value, with no error on either side and a plan MySQL explains (MySQL
+// 8.0.46, DuckDB 1.5.6). Where the character makes the statement an error
+// on MySQL (ROUND<U+00A0>(2.5e0) calls a function that does not exist), the
+// plan fails and the statement went to MySQL already. Under a latin1
+// connection MySQL may read 0xA0 as a space too; the statement then goes to
+// MySQL where the copy would have agreed, which costs only the offload.
+const vetoSpaceOutsideASCII = "a space character outside ASCII (part of a name on MySQL, white space on the copy)"
+
+// vetoLeftRight keeps LEFT and RIGHT on MySQL when the copy could cut the
+// text another way (#2652). Measured on MySQL 8.0.46 and DuckDB 1.5.6: a
+// negative length is empty on MySQL and the text without its last characters
+// on the copy (LEFT('abc', -1) is 'ab' there, RIGHT('abc', -1) 'bc'), the
+// same over a multi-byte text. A length of 0 or more agrees, past the end
+// too. A decimal, an exponent, TRUE and a LEFT length from 2^32 up are
+// errors on the copy, which then sends the statement to MySQL. The copy
+// answers only when the length is digits written in the statement: one from
+// a column, a placeholder or an expression may be negative on some row, a
+// NULL agrees but is not digits, and a quoted one is blanked before this is
+// read, so '2' and '-1' look the same. Checked after vetoSubstring,
+// which names a statement with both.
+const vetoLeftRight = "LEFT/RIGHT with a length other than a whole number written in the statement (a negative length is empty on MySQL and cuts from the other end on the copy)"
+
+// leftRightCall opens a LEFT or RIGHT call, the name bare or quoted, as
+// substringCall does. LEFT JOIN and RIGHT JOIN are not matched: a word
+// stands between the keyword and any parenthesis.
+var leftRightCall = regexp.MustCompile(`(?i)"?(?:left|right)"?[\s\v]*\(`)
+
+// leftRightAgree reports whether every LEFT and RIGHT call in blanked has
+// two arguments and a length both engines read the same way
+// (vetoLeftRight). A call it cannot read, or one MySQL does not take, does
+// not agree.
+func leftRightAgree(blanked string) bool {
+	for _, l := range callsOf(leftRightCall, blanked) {
+		body, ok := closingBody(blanked, l[1])
+		if !ok {
+			return false
+		}
+		args, ok := topLevelArgs(body)
+		if !ok || len(args) != 2 {
+			return false
+		}
+		if !substringLen.MatchString(unwrap(args[1])) {
+			return false
+		}
+	}
+	return true
 }
 
 // vetoSubstring keeps SUBSTRING, SUBSTR and MID on MySQL when the copy could

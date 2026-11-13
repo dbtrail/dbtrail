@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **`bintrail export iceberg` compacts its own tables** (#2719, #2372). Every
+- **`bintrail export iceberg` compacts its own tables** (#2719). Every
   run adds one delete file per table it changed, and DuckDB and ClickHouse
   pay for each one on every read without being able to compact the table
   themselves, so reads got slower run after run. Now, once a table holds
@@ -18,12 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after 30 runs without it, and at most 3.1 s with the default (about 0.01 s
   right after each compaction); a million-row table compacts in about 1.5 s.
   Each compaction still leaves two small manifests that later commits keep
-  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A compaction that does not finish, or that another writer's
-  commit overtakes, is not applied and is retried by the next run; the table's
-  verdict stays what its delta made it. `--compact-after 0` turns it off. The
+  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A
+  compaction that does not finish, or that another writer's commit overtakes,
+  is not applied and is retried by the next run; the table's verdict stays
+  what its delta made it. `--compact-after 0` turns it off. The
   JSON report carries a `compaction` object per compacted table, and the audit
   trail records the commit as `commit: compact`.
-
+- **Engine Routing keeps `LEFT` and `RIGHT` with a negative length on MySQL** (#2652). `LEFT('abc', -1)` is `''` on MySQL and `'ab'` on the copy, and `RIGHT('abc', -1)` is `''` and `'bc'`, with no error on either side. `LEFT` and `RIGHT` now go to the copy only when the length is a whole number written in the statement; a length from a column, a placeholder or an expression goes to MySQL, since it may be negative on some row. A length of 0 or more, past the end of the text too, agrees on both and still goes to the copy.
+- **Engine Routing keeps a statement with a Unicode space outside its strings on MySQL** (#2652). MySQL reads a no-break space (U+00A0), an ideographic space (U+3000), a zero-width space (U+200B) and the other Unicode spaces the copy takes for white space as part of a name. Over a table with columns `a`, `b` and one named `a`, no-break space, `b`, writing that last name unquoted returned that column on MySQL and column `a` under the alias `b` on the copy: another value, with no error. Such a statement now runs on MySQL. Where the character made the statement an error on MySQL, for example a no-break space between `ROUND` and its parenthesis, the statement already went to MySQL, because MySQL could not explain it. Inside a string or a quoted name the character is the same text on both sides, with one exception that also goes to MySQL: the copy turns it into a plain space wherever it does not find a quote around it, and a quote inside a `/* */` comment or a `$` makes it find the quotes elsewhere, so `SELECT /* ' */ 'a b'` written with a no-break space was `'a b'` with a plain space on the copy. The plain port without Engine Routing is unchanged.
 - **The installer, `--help` and the first lines of the docs open with the
   heavy queries** (#2637). The installer's banner now says "Heavy MySQL
   queries, from minutes to seconds.", the headline of the README and of
@@ -85,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Uploads no longer send the snapshot folder's own files** (#2691). An upload of a whole folder of snapshots (the PostgreSQL baseline's `--upload`, `bintrail baseline --upload`, `bintrail upload --source`) sent the upload interval's marks (`.upload-held.<snapshot>`), and could send the Parquet of an interrupted cleanup's leftover (`.<snapshot>.pruning`) under a name no reader knows. Every upload now leaves out anything directly under a folder of snapshots whose name starts with a dot, which covers every mark, record, lock and work directory the folder uses, and any added later. A schema whose name starts with a dot, inside a snapshot, is still sent.
 - **An empty snapshot folder left by a stopped run is removed** (#2691). A run that stopped between creating a snapshot's folder and writing its first file left an empty folder that every cleanup kept as a snapshot being written. The cleanup now removes a folder named as a snapshot that has held no file at all for an hour, in every mode, and logs it. It removes empty directories only, so a file written into the folder meanwhile is never removed.
 - **A restore's result is marked before it is written** (#2691). The mark that keeps a restore's result for 24 hours was written after the snapshot, so a daemon that stopped between the two left the result unmarked and the next cleanup removed it by the count. The mark is now written when the restore starts, and every mark is written whole (to a temporary file renamed over it), so a cleanup in another process never reads one half-written. Until the snapshot is complete it keeps nothing and the previous restore's result keeps its own mark; a restore that ends without writing its snapshot removes it.
+- **A restore starts from the local folder when S3 has nothing for it** (#2691). On a server with an S3 destination, a restore to a moment failed when the bucket held no snapshot at or before the moment, or could not be reached, even with usable snapshots in the server's folder. It now starts from the folder's newest snapshot at or before the moment (never a later one), the result is sent to S3 (when the bucket could not be read, not in that run: the cleanup sends it later, skipping anything S3 already has, so a complete copy there is never replaced), and the last restore's line on the Snapshots page says it started from the local folder and why. The Restore card stays on in that case instead of saying there is no snapshot. A bucket that answers is still read first.
 - **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
 
 - **A bucket in another region than the host's works** (#2688). With
