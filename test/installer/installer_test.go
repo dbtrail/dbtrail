@@ -14,7 +14,13 @@ import (
 // in BUSY_PORTS; curl serves the repository's docker-compose.yml; docker
 // records what it was asked to do, and plays a stopped Docker
 // (STUB_DOCKER_DOWN) or a missing Compose (STUB_NO_COMPOSE) when asked;
-// `docker info --format` prints STUB_MEM_TOTAL, the memory Docker reports.
+// `docker info --format` prints STUB_MEM_TOTAL, the memory Docker reports;
+// `docker compose pull` also writes down the BINTRAIL_TAG line .env holds at
+// that moment, so a test sees what the pull was run with.
+//
+// curl writes every URL it is asked for to CURL_LOG and answers GitHub's
+// newest-release lookup with STUB_RELEASE_BODY (by default releaseBody), or
+// fails the way `curl -f` does on a 403 when STUB_RELEASE_FAIL is set.
 var stubs = map[string]string{
 	"docker": `#!/bin/sh
 echo "docker $*" >> "$STUB_LOG"
@@ -24,7 +30,8 @@ case "$1" in
   compose) [ "$2" = version ] && [ -n "$STUB_NO_COMPOSE" ] && exit 1 ;;
 esac
 case "$1 $2" in
-  "compose pull") [ -n "$STUB_PULL_FAIL" ] && exit 1 ;;
+  "compose pull") [ -f .env ] && grep BINTRAIL_TAG .env | sed 's/^/pull sees /' >> "$STUB_LOG"
+                  [ -n "$STUB_PULL_FAIL" ] && exit 1 ;;
 esac
 exit 0
 `,
@@ -36,10 +43,14 @@ exit 1
 	"curl": `#!/bin/sh
 out=""; url=""
 while [ $# -gt 0 ]; do
-  case "$1" in -o) out=$2; shift 2;; -*) shift;; *) url=$1; shift;; esac
+  case "$1" in -o) out=$2; shift 2;; --max-time) shift 2;; -*) shift;; *) url=$1; shift;; esac
 done
+echo "$url" >> "$CURL_LOG"
 case "$url" in
-  *docker-compose.yml) cp "$COMPOSE_SRC" "$out";;
+  https://api.github.com/repos/dbtrail/dbtrail/releases/latest)
+    [ -n "$STUB_RELEASE_FAIL" ] && exit 22
+    if [ -n "$out" ]; then printf '%s' "$STUB_RELEASE_BODY" > "$out"; else printf '%s' "$STUB_RELEASE_BODY"; fi;;
+  *docker-compose.yml) [ -n "$STUB_COMPOSE_FAIL" ] && exit 22; cp "$COMPOSE_SRC" "$out";;
   *dbtrail.sh) [ -n "$STUB_NO_CLI" ] && exit 22; cp "$CLI_SRC" "$out";;
 esac
 exit 0
@@ -52,7 +63,22 @@ type run struct {
 	dir     string // the stack directory the installer was pointed at
 	upCalls int
 	calls   string // every docker call, in order
+	urls    string // every URL curl was asked for, one per line
 }
+
+// releaseBody is what GitHub's API answers for the newest release, cut to
+// the fields around tag_name and laid out the way the API lays it out.
+const releaseBody = `{
+  "url": "https://api.github.com/repos/dbtrail/dbtrail/releases/1",
+  "html_url": "https://github.com/dbtrail/dbtrail/releases/tag/v0.130.0",
+  "id": 1,
+  "tag_name": "v0.130.0",
+  "target_commitish": "main",
+  "name": "v0.130.0",
+  "draft": false,
+  "prerelease": false,
+  "body": "## Changelog, with a \"quote\", and commas"
+}`
 
 func install(t *testing.T, env ...string) run {
 	t.Helper()
@@ -86,6 +112,7 @@ func installWith(t *testing.T, prep func(dir string), env ...string) run {
 		prep(dir)
 	}
 	log := filepath.Join(tmp, "docker.log")
+	curlLog := filepath.Join(tmp, "curl.log")
 	cmd := exec.Command("sh", filepath.Join(root, "install.sh"))
 	cmd.Env = append([]string{
 		"PATH=" + bin + ":/usr/bin:/bin",
@@ -93,12 +120,15 @@ func installWith(t *testing.T, prep func(dir string), env ...string) run {
 		"DBTRAIL_DIR=" + dir,
 		"DBTRAIL_NO_OPEN=1",
 		"STUB_LOG=" + log,
+		"CURL_LOG=" + curlLog,
+		"STUB_RELEASE_BODY=" + releaseBody,
 		"COMPOSE_SRC=" + filepath.Join(root, "docker-compose.yml"),
 		"CLI_SRC=" + filepath.Join(root, "dbtrail.sh"),
 	}, env...)
 	out, err := cmd.CombinedOutput()
 	calls, _ := os.ReadFile(log)
-	return run{out: string(out), failed: err != nil, dir: dir, upCalls: strings.Count(string(calls), "compose up"), calls: string(calls)}
+	urls, _ := os.ReadFile(curlLog)
+	return run{out: string(out), failed: err != nil, dir: dir, upCalls: strings.Count(string(calls), "compose up"), calls: string(calls), urls: string(urls)}
 }
 
 func (r run) compose(t *testing.T) string {
@@ -292,7 +322,7 @@ func TestInstaller_aFailedPullStartsWithTheImagesHere(t *testing.T) {
 	if r.failed || r.upCalls != 1 {
 		t.Fatalf("a failed pull stopped the install (failed=%v up=%d):\n%s", r.failed, r.upCalls, r.out)
 	}
-	if !strings.Contains(r.out, "could not download the newest images") {
+	if !strings.Contains(r.out, "could not download the images") {
 		t.Errorf("a failed pull is not said:\n%s", r.out)
 	}
 }

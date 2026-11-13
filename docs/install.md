@@ -69,6 +69,18 @@ go next (and opens it in your browser when it can):
 curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | sh
 ```
 
+It installs the newest release, and stays on it: the compose file comes from
+that release's tag, and the version goes into `.env` as `BINTRAIL_TAG`
+(`BINTRAIL_TAG=0.130.0`), so neither a re-run nor `docker compose pull` moves
+it. Upgrading is changing that line ([Upgrading DBTrail](./upgrade.md#3-docker-compose-the-bundled-default)).
+A `BINTRAIL_TAG` already in `.env` is never changed, and the installer then
+takes the compose file of that version. To install a given release, run it
+with `DBTRAIL_REF=v0.130.0 sh`; `DBTRAIL_REF` set to a branch (`main`) takes
+that branch's files and writes no version, so the images follow `latest`. The
+newest release is looked up on GitHub's API, which answers 60 lookups an hour
+per address without a token; when it does not answer, the installer stops
+before creating anything and says how to name the version yourself.
+
 It drops the stack in `./dbtrail` (override with `DBTRAIL_DIR`). If port 8090
 is already taken, it stops before touching anything and prints the command to
 run instead, on a port it found free:
@@ -89,8 +101,14 @@ or turn it on in the web interface). When 3309 is
 taken, the installer leaves that port unpublished and says so; add a `ports:`
 line to the `router` service of `docker-compose.yml` to use it. Prefer to drive Compose yourself?
 
+Take the compose file of one release and write its version down, so a later
+`docker compose pull` stays on it. Set `V` to the newest version on the
+[releases page](https://github.com/dbtrail/dbtrail/releases), without the `v`:
+
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml
+V=0.130.0
+curl -fsSLO https://raw.githubusercontent.com/dbtrail/dbtrail/v$V/docker-compose.yml
+echo "BINTRAIL_TAG=$V" >> .env
 docker compose up -d
 docker compose logs -f bintrail
 ```
@@ -160,13 +178,15 @@ the full walkthrough is in [docker.md](./docker.md).
 `docker compose up -d` bring new images and run them against the compose file
 you already have, which nothing updates for you. Volumes, mounts, ports and
 profiles can only come from that file, so the binaries move forward and the
-stack around them does not. Re-download it as part of every upgrade:
+stack around them does not. Re-download it, from the release you move to, as
+part of every upgrade (here `v0.131.0`, after setting `BINTRAIL_TAG=0.131.0`
+in `.env`):
 
 ```sh
-docker compose pull
-curl -fsSL -o docker-compose.yml.new https://raw.githubusercontent.com/dbtrail/dbtrail/main/docker-compose.yml
+curl -fsSL -o docker-compose.yml.new https://raw.githubusercontent.com/dbtrail/dbtrail/v0.131.0/docker-compose.yml
 diff docker-compose.yml docker-compose.yml.new   # carry your edits into the new file
 mv docker-compose.yml.new docker-compose.yml
+docker compose pull
 docker compose up -d
 ```
 
@@ -330,6 +350,9 @@ journalctl -u bintrail-router -f
 - It reads **the same settings file** as the capture service, so it serves the
   servers that one manages. Its own settings are at the end of that file,
   commented out: `BINTRAIL_ROUTER_LISTEN` (`127.0.0.1:3309` unless set),
+  `BINTRAIL_ROUTER_TLS_CERT` and `BINTRAIL_ROUTER_TLS_KEY` (a certificate of
+  your own for the port's TLS, see
+  [TLS on the port](./time-travel-sql.md#tls-on-the-port)),
   `BINTRAIL_CONSOLE_ROUTE_READ_ONLY`, `BINTRAIL_ROUTER_METRICS_ADDR` and
   `BINTRAIL_CONSOLE_ROUTER_URL`.
 - **Its numbers are on by default.** The router's unit sets

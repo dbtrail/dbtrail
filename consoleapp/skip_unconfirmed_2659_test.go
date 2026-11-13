@@ -641,7 +641,7 @@ func TestBackupScheduler_theLogOfAStretchInterruptedByAnUpdate_2659(t *testing.T
 	covered := true
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
-	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) { return covered, true }
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, error) { return covered, nil }
 	memo := sup.foldedMarks[e.ID]
 	logs := captureSlogFor(t)
 	t0 := time.Date(2026, 8, 28, 9, 0, 5, 0, time.UTC)
@@ -1043,9 +1043,9 @@ func TestQuietSnapshotCanWait_saysWhenTheIndexWasSlow_2659(t *testing.T) {
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
 	// The coverage read outlives the budget.
-	snapshotStillCovered = func(ctx context.Context, _ string, _, _ time.Time, _ coverageRule) (bool, bool) {
+	snapshotStillCovered = func(ctx context.Context, _ string, _, _ time.Time, _ coverageRule) (bool, error) {
 		<-ctx.Done()
-		return false, false
+		return false, ctx.Err()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -1055,7 +1055,9 @@ func TestQuietSnapshotCanWait_saysWhenTheIndexWasSlow_2659(t *testing.T) {
 		t.Fatalf("ok=%v why=%q", ok, why)
 	}
 	// The same read failing at once is said as a failed read.
-	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) { return false, false }
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, error) {
+		return false, errGateBlindStub
+	}
 	ok, why = sup.quietSnapshotCanWait(context.Background(), e, snapshotAnchor, snapshotAnchor.Add(8*24*time.Hour), time.Hour)
 	if ok || why != "how far back the index still keeps changes could not be read" {
 		t.Fatalf("ok=%v why=%q", ok, why)

@@ -48,6 +48,9 @@ func TestIndexMark_unchangedSince(t *testing.T) {
 	}
 }
 
+// errGateBlindStub is the cause a stub gives for a read it pretends failed.
+var errGateBlindStub = errors.New("stub: the index did not answer")
+
 // stubCoverage answers the gate's second question — is the published snapshot
 // still inside the window the index can fold from — without an index.
 func stubCoverage(t *testing.T, covered, known bool) *gateProbe {
@@ -55,11 +58,14 @@ func stubCoverage(t *testing.T, covered, known bool) *gateProbe {
 	p := &gateProbe{}
 	prev := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prev })
-	snapshotStillCovered = func(_ context.Context, dsn string, publishedAt, now time.Time, rule coverageRule) (bool, bool) {
+	snapshotStillCovered = func(_ context.Context, dsn string, publishedAt, now time.Time, rule coverageRule) (bool, error) {
 		p.mu.Lock()
 		p.coverages = append(p.coverages, coverageCall{dsn: dsn, publishedAt: publishedAt, now: now, rule: rule})
 		p.mu.Unlock()
-		return covered, known
+		if !known {
+			return covered, errGateBlindStub
+		}
+		return covered, nil
 	}
 	return p
 }
@@ -181,11 +187,14 @@ func stubIndexMark(t *testing.T, mark *indexMark, known bool) *gateProbe {
 	p := &gateProbe{}
 	prev := readIndexMark
 	t.Cleanup(func() { readIndexMark = prev })
-	readIndexMark = func(_ context.Context, dsn string) (indexMark, bool) {
+	readIndexMark = func(_ context.Context, dsn string) (indexMark, error) {
 		p.mu.Lock()
 		p.markDSNs = append(p.markDSNs, dsn)
 		p.mu.Unlock()
-		return *mark, known
+		if !known {
+			return *mark, errGateBlindStub
+		}
+		return *mark, nil
 	}
 	return p
 }
@@ -205,7 +214,12 @@ func stubIndexMarkSwitchable(t *testing.T, mark *indexMark, known *bool) {
 	t.Helper()
 	prev := readIndexMark
 	t.Cleanup(func() { readIndexMark = prev })
-	readIndexMark = func(context.Context, string) (indexMark, bool) { return *mark, *known }
+	readIndexMark = func(context.Context, string) (indexMark, error) {
+		if !*known {
+			return *mark, errGateBlindStub
+		}
+		return *mark, nil
+	}
 }
 
 // countFolds replaces the fold with one that records how often it ran and
@@ -585,8 +599,8 @@ func TestReadIndexMarkFrom(t *testing.T) {
 			}
 			defer db.Close()
 			c.setup(mock)
-			mark, known := readIndexMarkFrom(context.Background(), db)
-			if mark != c.wantMark || known != c.wantKnown {
+			mark, err := readIndexMarkFrom(context.Background(), db)
+			if known := err == nil; mark != c.wantMark || known != c.wantKnown {
 				t.Errorf("readIndexMarkFrom = %+v, %v; want %+v, %v — %s",
 					mark, known, c.wantMark, c.wantKnown, c.why)
 			}
@@ -623,8 +637,8 @@ func TestRunRefresh_foldsToReanchorAnAgingBackup(t *testing.T) {
 	covered := true
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
-	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, bool) {
-		return covered, true
+	snapshotStillCovered = func(context.Context, string, time.Time, time.Time, coverageRule) (bool, error) {
+		return covered, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -873,10 +887,10 @@ func TestSnapshotCoveredIn_readsOnlyTheLivePartitions(t *testing.T) {
 
 	mock.ExpectQuery(".*").WillReturnError(errors.New("a second query was issued"))
 
-	covered, known := snapshotCoveredIn(context.Background(), db, "idx", now.Add(-time.Hour), now, coverageRule{})
-	if !known || !covered {
-		t.Errorf("covered=%v known=%v, want true/true: the snapshot is an hour old inside a "+
-			"30-day window", covered, known)
+	covered, err := snapshotCoveredIn(context.Background(), db, "idx", now.Add(-time.Hour), now, coverageRule{})
+	if err != nil || !covered {
+		t.Errorf("covered=%v err=%v, want true/nil: the snapshot is an hour old inside a "+
+			"30-day window", covered, err)
 	}
 	if err := mock.ExpectationsWereMet(); err == nil {
 		t.Error("a second query ran: the coverage question must read the live partitions and " +
@@ -892,8 +906,8 @@ func TestSnapshotCoveredIn_anUnreadablePartitionListFolds(t *testing.T) {
 	}
 	defer db.Close()
 	mock.ExpectQuery("information_schema.PARTITIONS").WillReturnError(errors.New("gone away"))
-	if covered, known := snapshotCoveredIn(context.Background(), db, "idx",
-		time.Now().Add(-time.Hour), time.Now(), coverageRule{}); known || covered {
-		t.Errorf("covered=%v known=%v, want false/false", covered, known)
+	if covered, err := snapshotCoveredIn(context.Background(), db, "idx",
+		time.Now().Add(-time.Hour), time.Now(), coverageRule{}); err == nil || covered {
+		t.Errorf("covered=%v err=%v, want false and the cause", covered, err)
 	}
 }

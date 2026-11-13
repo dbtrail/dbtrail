@@ -199,9 +199,9 @@ func TestSQLPortServedElsewhereLine(t *testing.T) {
 	}{
 		{"off", false, "2", nil, nil},
 		{"off, current file", false, "4", nil, nil},
-		{"on, file from before the router", true, "2", []string{"WARNING", "NOTHING ANSWERS", "3309", "(version 2)", composeDownload}, nil},
-		{"on, file with the router on its old port", true, " 3 ", []string{"WARNING", "(version 3)", composeDownload}, nil},
-		{"on, current file", true, "4", []string{"The router answers it"}, []string{"WARNING", composeDownload}},
+		{"on, file from before the router", true, "2", []string{"WARNING", "NOTHING ANSWERS", "3309", "(version 2)", composeDownload()}, nil},
+		{"on, file with the router on its old port", true, " 3 ", []string{"WARNING", "(version 3)", composeDownload()}, nil},
+		{"on, current file", true, "4", []string{"The router answers it"}, []string{"WARNING", composeDownload()}},
 		{"on, a newer file", true, "5", []string{"The router answers it"}, []string{"WARNING"}},
 		{"on, no number (a package, or a file of their own)", true, "", []string{"The router answers it"}, []string{"WARNING"}},
 		{"on, a number that is not one", true, "latest", []string{"The router answers it"}, []string{"WARNING"}},
@@ -292,7 +292,7 @@ func TestSQLPortMigratedWords(t *testing.T) {
 func TestUpConsoleConfig_theOldComposeNoticeReachesTheConsole(t *testing.T) {
 	t.Setenv("BINTRAIL_COMPOSE_VERSION", "3")
 	opts := upConsoleOpts()
-	if !strings.Contains(opts.SQLPortNotice, "NOTHING ANSWERS ON IT") || !strings.Contains(opts.SQLPortNotice, composeDownload) {
+	if !strings.Contains(opts.SQLPortNotice, "NOTHING ANSWERS ON IT") || !strings.Contains(opts.SQLPortNotice, composeDownload()) {
 		t.Fatalf("upConsoleOpts().SQLPortNotice = %q, want the notice with the way out", opts.SQLPortNotice)
 	}
 	cfg, err := upConsoleConfig(nil, "user:pass@tcp(127.0.0.1:3306)/idx",

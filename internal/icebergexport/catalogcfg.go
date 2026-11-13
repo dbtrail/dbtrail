@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsglue "github.com/aws/aws-sdk-go-v2/service/glue"
 
 	"github.com/dbtrail/dbtrail/internal/storage"
 
@@ -363,12 +365,12 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 	noop := func() {}
 	switch c.kind() {
 	case CatalogGlue:
-		files, cfg, err := awsConfigs(ctx, "", "set AWS_REGION, or a region in the AWS profile, to the region of the Glue catalog")
+		files, cfg, err := awsConfigs(ctx, "", location, "set AWS_REGION, or a region in the AWS profile, to the region of the Glue catalog")
 		if err != nil {
 			return nil, nil, ctx, err
 		}
 		ctx = utils.WithAwsConfig(ctx, &files)
-		return guard(glue.NewCatalog(glue.WithAwsConfig(cfg))), noop, ctx, nil
+		return guard(newGlueCatalog(glueCatalogConfig(files, cfg))), noop, ctx, nil
 
 	case CatalogREST:
 		var opts []rest.Option
@@ -378,7 +380,7 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 		switch {
 		case c.SigV4:
 			region, service := sigV4Defaults(c.URI, c.SigV4Region, c.SigV4Service)
-			files, cfg, err := awsConfigs(ctx, region, "pass --catalog-sigv4-region, or set AWS_REGION, to the catalog's region")
+			files, cfg, err := awsConfigs(ctx, region, location, "pass --catalog-sigv4-region, or set AWS_REGION, to the catalog's region")
 			if err != nil {
 				return nil, nil, ctx, err
 			}
@@ -404,6 +406,43 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 	}
 }
 
+// newGlueCatalog opens the Glue catalog on cfg. A variable so a test sees
+// the config the catalog was given.
+var newGlueCatalog = func(cfg aws.Config) catalog.Catalog {
+	return glue.NewCatalog(glue.WithAwsConfig(cfg))
+}
+
+// glueCatalogConfig is the one config the Glue catalog gets, for two jobs:
+// its Glue API client, and the S3 reads it makes on its own (#2698). The
+// library reads a table's metadata file with this config, not with the one
+// in the context: it wraps the context again when it loads a table, right
+// after creating it and on every commit. So it is the FILES config (the
+// warehouse bucket's region, the S3 endpoint), with the Glue client pinned
+// to the catalog's region and to the endpoint the catalog-only config gives
+// it, through a per-service option the SDK applies only when it builds the
+// Glue client. That endpoint is computed from the catalog config as the SDK
+// resolves it (an AWS_ENDPOINT_URL_GLUE, a glue endpoint_url in a services
+// section of ~/.aws/config, else AWS's own): the option runs AFTER the SDK
+// resolved the endpoint from the files config, so clearing it would drop an
+// operator's Glue endpoint (a VPC endpoint without private DNS, a test Glue)
+// and send the catalog calls to AWS's public Glue.
+func glueCatalogConfig(files, catalogCfg aws.Config) aws.Config {
+	c := files.Copy()
+	region := catalogCfg.Region
+	endpoint := awsglue.NewFromConfig(catalogCfg).Options().BaseEndpoint
+	c.ServiceOptions = append(slices.Clone(c.ServiceOptions), func(service string, o any) {
+		if g, ok := o.(*awsglue.Options); ok && service == awsglue.ServiceID {
+			g.Region = region
+			g.BaseEndpoint = endpoint
+		}
+	})
+	return c
+}
+
+// envIcebergS3Endpoint is the endpoint variable the library's S3 file IO
+// reads on its own (io/gocloud), beside the AWS SDK's.
+const envIcebergS3Endpoint = "AWS_S3_ENDPOINT"
+
 // awsConfigs loads the AWS chain through storage.LoadAWSConfig, the one
 // place bintrail builds S3 configs, so BINTRAIL_S3_ENDPOINT and the IMDS
 // region fallback apply here as everywhere else. It returns two configs:
@@ -413,7 +452,19 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 // services that an S3-compatible store does not serve. A config with no
 // region is refused here: the SDK would only report it from deep inside the
 // first request.
-func awsConfigs(ctx context.Context, region, fix string) (files, catalog aws.Config, err error) {
+//
+// The files config signs for the bucket of location (an s3:// warehouse) in
+// that bucket's own region when it differs (#2698): the library's S3 file IO
+// uses this one config for every request, and a bucket answers only in its
+// own region, so a warehouse bucket outside the catalog's region answered
+// 301 on the first write. The catalog config keeps the configured region:
+// that is where Glue or the REST endpoint is, and region (the SigV4 region)
+// names the catalog, not the bucket. With no location (a REST catalog that
+// places the tables itself) the bucket is not known here and the files keep
+// the configured region. Nor is it asked with AWS_S3_ENDPOINT set: the
+// library sends the files there (an S3-compatible store bintrail's own
+// endpoint check does not see), and AWS would answer for another bucket.
+func awsConfigs(ctx context.Context, region, location, fix string) (files, catalog aws.Config, err error) {
 	files, err = storage.LoadAWSConfig(ctx, region)
 	if err != nil {
 		return aws.Config{}, aws.Config{}, fmt.Errorf("load the AWS configuration: %w", err)
@@ -423,6 +474,11 @@ func awsConfigs(ctx context.Context, region, fix string) (files, catalog aws.Con
 	}
 	catalog = files.Copy()
 	catalog.BaseEndpoint = nil
+	if bucket, _, perr := storage.ParseS3URL(location); perr == nil && os.Getenv(envIcebergS3Endpoint) == "" {
+		if r, ok := storage.DiscoverBucketRegion(ctx, files, bucket); ok {
+			files.Region = r
+		}
+	}
 	return files, catalog, nil
 }
 

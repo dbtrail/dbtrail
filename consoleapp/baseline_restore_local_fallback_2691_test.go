@@ -100,7 +100,7 @@ func TestRestoreFallback_anUnreachableBucketRestoresFromTheLocalCopyAndSaysSo(t 
 		t.Fatalf("uploaded %+v to a bucket that could not be listed: a complete snapshot of that second there would be overwritten", *uploads)
 	}
 	stamp := reconstruct.SnapshotDirName(restoreAt)
-	wantErr := "the snapshot was not sent to the snapshot destination: it was written to " + filepath.Join(local, stamp) + " and not sent to " + fallbackBucket + ", because " + fallbackBucket + " could not be read, so it is not known whether it already holds a snapshot of that second; the cleanup sends it once S3 answers and does not have it"
+	wantErr := "the snapshot was not sent to the snapshot destination: it was written to " + filepath.Join(local, stamp) + " and not sent to " + fallbackBucket + ", because " + fallbackBucket + " could not be read, so it is not known whether it already holds a snapshot of that second; the cleanup sends it later, skipping anything S3 already has, so a complete copy there is never replaced"
 	if st.LastError != wantErr {
 		t.Fatalf("last error = %q, want %q", st.LastError, wantErr)
 	}

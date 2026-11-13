@@ -12,7 +12,7 @@ bintrail upload \
   --destination s3://my-bucket/archives/
 ```
 
-This recursively walks the source directory and uploads every `*.parquet` file to S3, preserving the directory structure as key prefixes.
+This recursively walks the source directory and uploads every `*.parquet` file to S3, preserving the directory structure as key prefixes. On a folder of snapshots (one that holds at least one snapshot directory), nothing directly under the folder whose name starts with a dot is sent: those are the folder's own marks, records, locks and work directories (`.upload-held.*`, `.restored.*`, `.last-prune.json`, `.resolved`, the `.<snapshot>.pruning` leftover of an interrupted cleanup, and so on), and the same rule applies to every upload DBTrail makes (#2691). Each entry left out is logged. Any other folder, an archive tree for example, is sent as before, directories whose names start with a dot included.
 
 ---
 
@@ -98,9 +98,10 @@ No environment variables or config files needed — the SDK discovers credential
 The AWS region is resolved in this order:
 
 1. `--region` flag (if provided)
-2. `AWS_REGION` environment variable
-3. `AWS_DEFAULT_REGION` environment variable
-4. `~/.aws/config` region setting for the active profile
+2. the bucket's own region, found as described in the next section
+3. `AWS_REGION` environment variable
+4. `AWS_DEFAULT_REGION` environment variable
+5. `~/.aws/config` region setting for the active profile
 
 ### A bucket in another region
 
@@ -116,18 +117,33 @@ to the bucket's region by itself.)
   archive and snapshot reads of `query`, `recover`, `reconstruct` and the
   web interface (time travel through the MySQL port included), the check of a
   snapshot before it is read, and `doctor`'s lifecycle and Object Lock checks
-  and `init --s3-arn`'s bucket check.
-- **Where it does not, yet**: `init --s3-bucket` (it creates the bucket in
-  `--s3-region`), `restore-index`, `archive reconcile` and `export iceberg`
-  use the configured region; for a bucket elsewhere, pass its region with
-  their region flag.
+  and `init --s3-arn`'s bucket check, `restore-index` (one client per bucket
+  it reads), `archive reconcile`, and the data files `export iceberg` writes
+  under an `s3://` `--warehouse` (with `--catalog glue`, or `--catalog rest`
+  with `--catalog-sigv4`; the catalog itself keeps the configured region).
+- **Where it does not**: `init --s3-bucket` uses `--s3-region` on purpose, as
+  it creates the bucket there. `export iceberg` with `--catalog rest` and no
+  `--warehouse` (the server places the tables, so the bucket is not known
+  in advance), or with an OAuth credential or a token instead of
+  `--catalog-sigv4` (the files then sign with what the catalog hands out, or
+  the configured region), and with `AWS_S3_ENDPOINT` set. A 301 from the
+  Iceberg file writes is not reworded: it is S3's own message.
 
 - **How**: one HEAD request on the bucket, without credentials. S3 names the
   bucket's region in that answer even when it refuses or redirects the
   request, so no IAM permission is needed for it (not even
   `s3:GetBucketLocation`). It is asked once per bucket per process and
   remembered; a question that gets no answer is asked again after a minute,
-  never on every query.
+  never on every query. A command with a short time limit does not cut the
+  question short: it goes on with the configured region, and the answer is
+  kept for the next one.
+- **A bucket that moves while bintrail runs** (deleted and created again in
+  another region): the first request S3 redirects drops the region bintrail
+  had found, and the error says to retry; the bucket's region is looked up
+  again the next time bintrail opens the bucket, once. The agent's payload
+  uploads keep the client they started with: until the agent restarts, each
+  payload batch fails its retries and is dropped (counted as lost in the
+  agent's heartbeat), so restart the agent.
 - **A region you pass yourself wins**: a `--region`/`--*-s3-region` flag is
   used as given.
 - **Not with a custom endpoint**: with `BINTRAIL_S3_ENDPOINT`,
