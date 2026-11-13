@@ -9154,10 +9154,41 @@ function notInS3Words(n, rec) {
   const it = n === 1 ? "it" : "them";
   const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : []);
   const copiesOf = (l) => (l.length === 1 ? "the copy of " : "the copies of ") + l.map(at).join(", ");
+  // Each copy can wait on its own (#2691): an hour after its send failed on
+  // a file of its own, or after it was sent while S3 could not be asked
+  // about it. When the copies are not all in one case, the waiting ones are
+  // named with their case, and the rest are "the others": they are sent from
+  // the next cleanup on, 3 at most per cleanup, and one older than the age S3
+  // keeps is not sent at all (the record does not say which), so none of
+  // them is named and the line says both limits.
+  const waits = Array.isArray(rec && rec.waiting)
+    ? rec.waiting.filter((w) => w && typeof w.name === "string" && w.name && typeof w.until === "string" && w.until) : [];
+  const earliest = (ws) => ws.map((w) => w.until).sort()[0];
+  const eachOwnWait = () => {
+    const left = names.filter((x) => !list(rec && rec.read_refused).includes(x));
+    const failedW = waits.filter((w) => w.for_answer !== true && left.includes(w.name));
+    const answerW = waits.filter((w) => w.for_answer === true && left.includes(w.name));
+    const others = left.filter((x) => !failedW.concat(answerW).some((w) => w.name === x)).length + Math.max(0, n - names.length);
+    const parts = [];
+    if (failedW.length) {
+      parts.push("sending " + copiesOf(failedW.map((w) => w.name)) + " failed, and DBTrail tries again after " + utcLabel(earliest(failedW)));
+    }
+    if (answerW.length) {
+      const one = answerW.length === 1;
+      parts.push(copiesOf(answerW.map((w) => w.name)) + (one ? " was" : " were") + " sent but could not be confirmed, and DBTrail sends " +
+        (one ? "it" : "them") + " again after " + utcLabel(earliest(answerW)));
+    }
+    if (others) {
+      parts.push(others === 1
+        ? "DBTrail sends the other again at the next cleanup, unless it is older than the age S3 keeps"
+        : "DBTrail sends the others again from the next cleanup on, 3 at most per cleanup, except any older than the age S3 keeps");
+    }
+    return parts.length > 1 ? parts.join("; ") + "." : "";
+  };
   // What happens next: sent at the next cleanup, after a wait (a failed
   // send, or a send S3 could not confirm, #2696), or by hand.
   const tail = (them) => rec && rec.resending === true
-    ? (rec.next_send
+    ? eachOwnWait() || (rec.next_send
       ? (rec.waits_for_answer === true
         ? "the last ones sent could not be confirmed, and DBTrail sends again after " + utcLabel(rec.next_send) + "."
         : "sending failed, and DBTrail tries again after " + utcLabel(rec.next_send) + ".")
@@ -9217,8 +9248,11 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
   if (reuse && !s3) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
   const stuck = was.held || was.blocked;
   const none = s3 ? "the count does not apply to it" : "nothing in it is removed, whatever the count says";
+  // With an age set the age does not apply either (#2675): S3 cannot tell
+  // which server's copy of a snapshot name it holds.
+  const sharedNone = age.sharedS3 ? "nothing here is removed" : none;
   if (was.sharedS3) {
-    say("Another server sends its snapshots to this S3 location too, so " + none + ". Give each server its own S3 prefix.");
+    say("Another server sends its snapshots to this S3 location too, so " + sharedNone + ". Give each server its own S3 prefix.");
   } else if (was.held) {
     say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {
@@ -9543,7 +9577,7 @@ function backupServerRow(srv, readOnly, servers, daemonS3, reuse) {
     // about this server", so the card is read at a glance.
     const said = localCopyWords(s3v, keepNow() || 0, !!srv.prune_loop, !!reuse && !!capsCache.monitor,
       { source: srv.source, blocked: !!srv.keep_blocked, held: !!srv.keep_held, sharedS3: asSaved && !!srv.keep_shared_s3,
-        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
+        age: { asSaved: asSaved && !!was.s3 && !!was.rawDir, s3Only: s3OnlyAtRest, minutes: srv.delete_after_minutes || 0, sharedS3: !!srv.delete_after_shared_s3, notIn: srv.not_in_s3 || null, notInError: srv.not_in_s3_error || "" },
         shared: asSaved ? snapSharedWith : [] },
       { inForce: asSaved ? (srv.keep_in_force || 0) : -1,
         every: srv.snapshot_every_minutes || 0, retain: srv.prune_retain_minutes || 0,
@@ -11063,10 +11097,18 @@ function baselinesPanel(b, servers, opts) {
     // cleanup keeps.
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
     const goingIdx = new Set();
+    const checkKeptIdx = new Set();
     if (keepInForce > 0) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
-        if (sn.going === true && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) goingIdx.add(i);
+        if (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held) {
+          // Both answers are the server's (#2675): going is what the next
+          // cleanup removes; past_count is what the count and the age would
+          // remove, of which the pair a check compares stays on top of the
+          // count (#2691) and is never marked as going.
+          if (sn.going === true) goingIdx.add(i);
+          else if (sn.kept_for_check && sn.past_count === true) checkKeptIdx.add(i);
+        }
       });
     }
     const total = b.snapshots.length;
@@ -11122,6 +11164,10 @@ function baselinesPanel(b, servers, opts) {
         what.append(el("span", { class: "chip chip-unknown", text: "last restore, kept" + (sn.restored_until ? " until " + utcLabel(sn.restored_until) : ""),
           title: "The result of the last restore to a moment. Kept for 24 hours after the restore, or until the next restore, on top of the newest kept; then it goes like any older snapshot." +
             (sn.restored_local_only ? " It is older than the age S3 keeps, so it is on this machine only and is not sent to S3." : "") }));
+      }
+      if (checkKeptIdx.has(idx)) {
+        what.append(el("span", { class: "chip chip-unknown", text: "kept for the check",
+          title: "The read of the database most tables of the newest snapshot come from (usually the last full read), or the snapshot before it: the two a check of the snapshots compares for those tables. Kept on top of the newest kept, since S3 does not hold them, until another read takes its place. A table read on its own since then has no pair kept." }));
       }
       if (goingIdx.has(idx)) {
         row.classList.add("stg-row-going");
