@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Without S3, the cleanup keeps the two snapshots a check compares**
+  (#2691). A check of the snapshots, and its Explain, compares each table's
+  last full read of the database with the snapshot before it. On a server
+  without an S3 destination the count removed both about 15 minutes after
+  the full read (a snapshot every 5 minutes, a count of 3), so a check run
+  later found nothing to compare. The cleanup of a folder with a count and no
+  S3 destination now keeps that pair on top of the count until the next full
+  read, and the Snapshots page marks the two rows "kept for the check". At
+  most two extra snapshots per folder: the one before the read costs a whole
+  snapshot of disk, the read itself only the tables changed since it (the
+  others are hard links shared with the newer snapshots). Servers with S3
+  keep nothing extra.
+
 - **Engine Routing keeps `LEFT` and `RIGHT` with a negative length on MySQL** (#2652). `LEFT('abc', -1)` is `''` on MySQL and `'ab'` on the copy, and `RIGHT('abc', -1)` is `''` and `'bc'`, with no error on either side. `LEFT` and `RIGHT` now go to the copy only when the length is a whole number written in the statement; a length from a column, a placeholder or an expression goes to MySQL, since it may be negative on some row. A length of 0 or more, past the end of the text too, agrees on both and still goes to the copy.
 - **Engine Routing keeps a statement with a Unicode space outside its strings on MySQL** (#2652). MySQL reads a no-break space (U+00A0), an ideographic space (U+3000), a zero-width space (U+200B) and the other Unicode spaces the copy takes for white space as part of a name. Over a table with columns `a`, `b` and one named `a`, no-break space, `b`, writing that last name unquoted returned that column on MySQL and column `a` under the alias `b` on the copy: another value, with no error. Such a statement now runs on MySQL. Where the character made the statement an error on MySQL, for example a no-break space between `ROUND` and its parenthesis, the statement already went to MySQL, because MySQL could not explain it. Inside a string or a quoted name the character is the same text on both sides, with one exception that also goes to MySQL: the copy turns it into a plain space wherever it does not find a quote around it, and a quote inside a `/* */` comment or a `$` makes it find the quotes elsewhere, so `SELECT /* ' */ 'a b'` written with a no-break space was `'a b'` with a plain space on the copy. The plain port without Engine Routing is unchanged.
 - **The installer, `--help` and the first lines of the docs open with the
