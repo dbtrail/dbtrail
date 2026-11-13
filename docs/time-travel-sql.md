@@ -1328,7 +1328,10 @@ What this is and is not:
   space and the other Unicode spaces the copy reads as white space: MySQL
   reads them as part of a name, so over a column whose name holds a no-break
   space between `a` and `b`, writing that name unquoted reads the column on
-  MySQL and column `a` under the alias `b` on the copy),
+  MySQL and column `a` under the alias `b` on the copy; the same character
+  anywhere in a statement goes to MySQL too when a `/* */` comment holds a
+  quote or the statement holds a `$`, since the copy then may take a string's
+  character for one outside it and turn it into a plain space),
   a zero date (the copy holds `0000-00-00` as NULL: in a `DATE`, `DATETIME`
   or `TIMESTAMP` column declared `NOT NULL`, or whose default is the zero
   date, a NULL on the copy can only be one, and a statement that names such
