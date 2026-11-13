@@ -37,6 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a wait), and a Go test follows the case of several copies and a restore's
   result S3 could not be asked about from the real cleanup's record to the
   line the page draws.
+- **A read of one table at a past moment keeps its snapshot while it runs**
+  (#2691). `/api/reconstruct`, the MCP `reconstruct` tool of the console and
+  a `_snapshot` query through the MySQL port of `watch` (one row or the whole
+  table) read an older snapshot after looking it up, and the cleanup after a
+  publish could remove it in between, so the read failed. They now pin that
+  snapshot until they end, like a snapshot download, for no longer than a
+  download of the table's files would keep it (their bytes at 1 MiB/s plus
+  one minute), or than the query's own time limit when that is longer: a
+  whole table goes out at the pace of the MySQL client, and a client must not
+  decide how long a snapshot stays. They count toward the downloads' limit,
+  together with the downloads: past it a read is not refused, it runs without
+  a pin as before, and a warning says so at most once every 10 minutes per
+  server. A snapshot removed between the
+  lookup and the pin is looked up once more. The Explain of a check, which
+  already pinned its two snapshots, has a test of its own.
 
 - **`bintrail export iceberg` compacts its own tables** (#2719). Every
   run adds one delete file per table it changed, and DuckDB and ClickHouse

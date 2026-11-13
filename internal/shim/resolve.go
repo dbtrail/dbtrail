@@ -323,7 +323,10 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	}
 
 	// Stale-fallback warning (#466) discarded here — see the full-table path.
-	baselinePath, snapshotTime, _, err := h.findBaseline(ctx, q.Schema, q.Table, q.AsOf)
+	// Pinned until the row has been read and folded (#2691).
+	baselinePath, snapshotTime, _, release, err := reconstruct.FindPinned(ctx, h.findBaseline, h.cfg.PinBaseline,
+		q.Schema, q.Table, q.AsOf, "a _snapshot query")
+	defer release()
 	if err != nil {
 		if errors.Is(err, reconstruct.ErrNoBaseline) {
 			// A location is configured and holds no snapshot of this table
