@@ -1,9 +1,13 @@
-# Bintrail Docker Compose — the zero-friction quickstart.
+# DBTrail with Docker Compose: heavy MySQL queries, answered in seconds from a
+# copy of your tables that follows your binlog.
 #
 #   1. docker compose up -d
-#   2. Open http://127.0.0.1:8090 and create your console username + password
-#   3. In the console: "+ Add server" — paste the MySQL to watch; bintrail
-#      runs the preflight, provisions an index for it, and starts streaming.
+#   2. Open http://127.0.0.1:8090 and create a username and password.
+#   3. Press "+ Add server" and connect your MySQL.
+#   4. On Snapshots, press "Read database now" to take the first copy.
+#   5. On Settings, MySQL clients, press "Turn on" if the port is off, copy
+#      the mysql line it shows, and run a heavy query.
+#   Every step in detail: https://www.dbtrail.com/docs/quickstart/
 #
 # No .env needed. On first run the console asks you to create a username and
 # password (it persists in the bintrail-state volume); every later visit is a
@@ -667,9 +671,18 @@ services:
       # query for a moment older than the snapshots in the local folder is
       # answered from the server's S3 destination, read by THIS process.
       # Without access the query fails with an error that names the bucket.
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      # This process only reads S3. To give it read-only keys instead of the
+      # `bintrail` service's (which also write and delete), set
+      # ROUTER_AWS_ACCESS_KEY_ID and ROUTER_AWS_SECRET_ACCESS_KEY in .env, and
+      # ROUTER_AWS_SESSION_TOKEN when those keys are temporary; the policy is
+      # in docs/s3-iam-policy.md. Unset, it reads with the shared keys, as
+      # before. Its own pair never carries the shared token, and half a pair
+      # is refused at start: BINTRAIL_ROUTER_OWN_AWS_KEYS tells the router
+      # which ROUTER_AWS_* were set, never their values.
+      AWS_ACCESS_KEY_ID: ${ROUTER_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}
+      AWS_SECRET_ACCESS_KEY: ${ROUTER_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}
+      AWS_SESSION_TOKEN: ${ROUTER_AWS_SESSION_TOKEN:-${AWS_SESSION_TOKEN:-}}
+      BINTRAIL_ROUTER_OWN_AWS_KEYS: ${ROUTER_AWS_ACCESS_KEY_ID:+access_key_id,}${ROUTER_AWS_SECRET_ACCESS_KEY:+secret_access_key,}${ROUTER_AWS_SESSION_TOKEN:+session_token,}
       AWS_REGION: ${AWS_REGION:-}
       BINTRAIL_S3_ENDPOINT: ${BINTRAIL_S3_ENDPOINT:-}
       BINTRAIL_S3_PATH_STYLE: ${BINTRAIL_S3_PATH_STYLE:-}
