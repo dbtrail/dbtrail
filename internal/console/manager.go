@@ -78,6 +78,11 @@ type bundle struct {
 	// is present AND archives are enabled AND no RBAC profile is active. See
 	// the rationale on newBundleDerived.
 	baselineConfigured bool
+	// pgSource says the source of the server given on the command line is
+	// PostgreSQL: what its index's stream stamped, read once when the
+	// console starts (New). A registry server leaves it unset and answers
+	// from its entry (sourceIsPostgres).
+	pgSource bool
 }
 
 // connManager owns the per-server connection lifecycle: lazy open on first

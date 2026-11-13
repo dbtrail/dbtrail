@@ -531,7 +531,7 @@ func (s *Server) handleSQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := s.runSQL(r.Context(), b, consoleActor(r), req.SQL, "", req.MaxRows, sqlsandbox.Session{})
+	out, err := s.runSQL(r.Context(), b, consoleActor(r), req.SQL, "", req.MaxRows, s.sqlCopySession(b))
 	if err != nil {
 		var refusal *sqlRefusal
 		if errors.As(err, &refusal) {

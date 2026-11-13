@@ -215,9 +215,8 @@ func expectations() []expectation {
 	// What still differs, each with the issue it belongs to. still is a
 	// statement the copy answers differently, refused one it cannot run.
 	const (
-		nullsAndDivision = "#2786: the copy sorts NULL and divides integers by MySQL's rules"
-		otherTypes       = "#2787: arrays and json are still read as text"
-		dialect          = "#2770: the copy's dialect answers this differently; it belongs to the source"
+		otherTypes = "#2787: arrays and json are still read as text"
+		dialect    = "#2770: the copy's dialect answers this differently; it belongs to the source"
 	)
 	still := func(kind, says, why, stmt string) expectation {
 		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: why, says: says}
@@ -230,6 +229,9 @@ func expectations() []expectation {
 		eq(`SELECT 1`),
 		eq(`SELECT 1 + 1 AS two, 'a' || 'b' AS ab`),
 		eq(`SELECT true AS yes, false AS no, NULL AS nothing`),
+		// Text with no column behind it compares byte by byte (#2786).
+		eq(`SELECT 'a' = 'A' AS same, 'abc' LIKE 'ABC' AS alike, 'a' IN ('A', 'b') AS listed`),
+		eq(`SELECT 7 / 2 AS cut, -7 / 2 AS cut_negative`),
 		// Plain reads.
 		eq(`SELECT count(*) FROM ` + o),
 		eq(`SELECT id, note FROM ` + o),
@@ -244,7 +246,9 @@ func expectations() []expectation {
 		eq(`SELECT c.name, count(o.id) FROM ` + c + ` c LEFT JOIN ` + o + ` o ON o.customer_id = c.id GROUP BY c.name`),
 		// Order.
 		eq(`SELECT id FROM ` + o + ` ORDER BY id`),
-		still("order", "", nullsAndDivision, `SELECT id, qty FROM `+o+` ORDER BY qty, id`),
+		// NULL is the largest value, as on the source (#2786).
+		eq(`SELECT id, qty FROM ` + o + ` ORDER BY qty, id`),
+		eq(`SELECT id, qty FROM ` + o + ` ORDER BY qty DESC, id`),
 		eq(`SELECT id FROM ` + o + ` ORDER BY amount DESC NULLS LAST, id LIMIT 3`),
 		eq(`SELECT name FROM ` + c + ` ORDER BY signup NULLS LAST`),
 		eq(`(SELECT id FROM ` + o + ` ORDER BY id)`),
@@ -256,7 +260,15 @@ func expectations() []expectation {
 		eq(`SELECT id FROM ` + o + ` WHERE amount BETWEEN 5 AND 50`),
 		eq(`SELECT id, qty * 2 AS twice, amount * qty AS total FROM ` + o),
 		eq(`SELECT customer_id, sum(amount) FROM ` + o + ` GROUP BY customer_id`),
-		still("rows", "", nullsAndDivision, `SELECT id, qty / 2 AS half FROM `+o),
+		// Two integers divide to an integer, cut toward zero (#2786); with
+		// a float on a side the fraction stays.
+		eq(`SELECT id, qty / 2 AS half FROM ` + o),
+		eq(`SELECT id, (0 - qty) / 2 AS half FROM ` + o),
+		eq(`SELECT customer_id, sum(qty) / count(*) FROM ` + o + ` GROUP BY customer_id`),
+		eq(`SELECT id, ratio / 2 FROM ` + o),
+		// The source fails a division by zero. The copy would answer NULL
+		// (sqlsandbox pins that); here the statement stops at the source.
+		{stmt: `SELECT id, qty / 0 FROM ` + o, verdict: sqlcompare.SourceError},
 		refused("to DECIMAL(18,3)", dialect, `SELECT id, round(ratio::numeric, 1) FROM `+o),
 		// Text.
 		eq(`SELECT status, count(*) FROM ` + o + ` GROUP BY status`),

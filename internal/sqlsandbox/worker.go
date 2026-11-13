@@ -274,6 +274,16 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 			return sessionErr("%s: %v", stmt, err)
 		}
 	}
+	// PostgreSQL's rules for the copy of a PostgreSQL source, over the fixed
+	// ones: before the views, whose text is read under them too, and before
+	// the lock like every other SET.
+	if job.PostgresRules {
+		for _, stmt := range postgresSettings {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				return sessionErr("%s: %v", stmt, err)
+			}
+		}
+	}
 	mark(&res.LockdownNS)
 	viewsSQL := job.ViewsSQL
 	if job.AskViews {
@@ -663,6 +673,26 @@ var fixedSettings = []string{
 	"SET default_collation = 'nocase'",
 	"SET default_null_order = 'nulls_first_on_asc_last_on_desc'",
 	"SET ieee_floating_point_ops = false",
+}
+
+// postgresSettings replace three of the session's rules for a job with
+// Session.PostgresRules (#2786). Each was measured on the pinned engine
+// against PostgreSQL 16 (internal/pgcompare):
+//
+//   - default_null_order: NULL is the largest value, so it is last in
+//     ORDER BY x and first in ORDER BY x DESC.
+//   - integer_division: `/` between two integers truncates toward zero (9/2
+//     is 4, -9/2 is -4); with a float or a decimal on either side it keeps
+//     the fraction, as before.
+//   - default_collation empty is the engine's own byte comparison: 'a' = 'A'
+//     is false, and so is 'a' LIKE 'A'.
+//
+// Not changed, because the engine has no setting for it: a division by zero
+// is NULL here and an error on PostgreSQL.
+var postgresSettings = []string{
+	"SET default_null_order = 'nulls_last_on_asc_first_on_desc'",
+	"SET integer_division = true",
+	"SET default_collation = ''",
 }
 
 func lockdownStatements(copyDirs []string, spill spillSpec) []string {

@@ -24,7 +24,7 @@ func (s *Server) mcpSQLRunner(b *bundle) mcptools.SQLRunFunc {
 		if b.noArchive {
 			return mcptools.SQLAnswer{}, errors.New("archive access is disabled for this server, so its copy cannot be read")
 		}
-		out, err := s.runSQL(ctx, b, mcpSQLUser(ctx), statement, schema, maxRows, sqlsandbox.Session{})
+		out, err := s.runSQL(ctx, b, mcpSQLUser(ctx), statement, schema, maxRows, s.sqlCopySession(b))
 		if err != nil {
 			return mcptools.SQLAnswer{}, mcpSQLError(err)
 		}

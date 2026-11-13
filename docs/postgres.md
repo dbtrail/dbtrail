@@ -798,10 +798,23 @@ error that says so. It is never rounded and never read as NULL:
 A statement that does not read that column is not affected, and neither is
 recovery, which works from the text.
 
+In the console's SQL card and the `sql` tool, a statement on a PostgreSQL
+server runs by PostgreSQL's rules where the two engines differ in silence:
+NULL is the largest value (last in `ORDER BY x`, first in `ORDER BY x DESC`),
+`/` between two integers gives an integer cut toward zero (`9 / 2` is `4`,
+`-9 / 2` is `-4`), and text compares byte by byte (`'a' = 'A'` is false). A
+views file you run in a DuckDB of your own runs under that DuckDB's settings;
+these three lines give it the same rules:
+
+```sql
+SET default_null_order = 'nulls_last_on_asc_first_on_desc';
+SET integer_division = true;
+SET default_collation = '';
+```
+
 Three things still answer differently from PostgreSQL, with no error:
 
-- `ORDER BY` puts NULL first where PostgreSQL puts it last, and `/` between
-  two integers keeps the fraction (`9 / 2` is `4.5`).
+- A division by zero is NULL, where PostgreSQL fails the statement.
 - Text sorts by bytes. PostgreSQL sorts by the collation the database was
   created with, which for anything but `C` orders letters differently.
 - `char(n)` compares with its padding, where PostgreSQL ignores trailing
