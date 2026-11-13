@@ -49,6 +49,7 @@ var (
 	discoverMu       sync.Mutex
 	discoverCache    = map[string]discoveredRegion{}
 	discoverInflight = map[string]chan struct{}{} // closed when that question is answered
+	discoverGen      uint64                       // bumped by a reset; a question from before it records nothing
 )
 
 func resetDiscoveredRegions() {
@@ -56,6 +57,7 @@ func resetDiscoveredRegions() {
 	defer discoverMu.Unlock()
 	discoverCache = map[string]discoveredRegion{}
 	discoverInflight = map[string]chan struct{}{}
+	discoverGen++
 }
 
 // headBucketRegion asks S3 for bucket's region with an unsigned HEAD from
@@ -112,10 +114,18 @@ func customEndpointConfigured(cfg aws.Config) bool {
 
 // DiscoverBucketRegion returns the region bucket lives in, asking S3 with an
 // unsigned HEAD at most once per bucket for the life of the process (a
-// failure is asked again after bucketRegionMissTTL). ok is false when the
-// region is not known: no bucket, a bucket with its own store, a custom
-// endpoint, or S3 did not say. cfg supplies the partition (its Region) and
-// the HTTP settings; its credentials are not used.
+// failure is asked again after bucketRegionMissTTL, and a success is dropped
+// when S3 redirects a request signed for it: forgetDiscoveredRegion). ok is
+// false when the region is not known: no bucket, a bucket with its own store,
+// a custom endpoint, or S3 did not say. cfg supplies the partition (its
+// Region) and the HTTP settings; its credentials are not used.
+//
+// The question runs on a context of its own, bounded by
+// bucketRegionProbeTimeout and not by the caller's (#2698): a caller whose
+// deadline ends first stops waiting and goes on with the configured region,
+// while the question finishes and its answer is remembered for the next
+// caller. Cut short with the caller, it was remembered as nothing, so every
+// short-deadline request paid the wait again.
 func DiscoverBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (string, bool) {
 	if bucket == "" {
 		return "", false
@@ -127,8 +137,8 @@ func DiscoverBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (s
 		return "", false
 	}
 	key := partitionOf(cfg.Region) + "\x00" + bucket
+	discoverMu.Lock()
 	for {
-		discoverMu.Lock()
 		e, cached := discoverCache[key]
 		if cached && (e.ok || bucketRegionClock().Sub(e.at) < bucketRegionMissTTL) {
 			discoverMu.Unlock()
@@ -137,46 +147,87 @@ func DiscoverBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (s
 		// One question per bucket at a time: twenty connections arriving at
 		// once on a cold process wait for the first one's answer instead of
 		// asking twenty times, each up to bucketRegionProbeTimeout.
-		if wait, asking := discoverInflight[key]; asking {
-			discoverMu.Unlock()
-			select {
-			case <-wait:
-				continue // answered (or the asker gave up): look again
-			case <-ctx.Done():
-				return "", false
-			}
+		wait, asking := discoverInflight[key]
+		if !asking {
+			wait = make(chan struct{})
+			discoverInflight[key] = wait
+			go answerBucketRegion(context.WithoutCancel(ctx), cfg, bucket, key, wait,
+				headBucketRegion, bucketRegionClock, discoverGen)
 		}
-		done := make(chan struct{})
-		discoverInflight[key] = done
 		discoverMu.Unlock()
-
-		region, ok := askBucketRegion(ctx, cfg, bucket)
-
-		discoverMu.Lock()
-		// A cancelled caller learned nothing about the bucket: not remembered,
-		// so the next caller (a waiter included) asks.
-		if ok || ctx.Err() == nil {
-			discoverCache[key] = discoveredRegion{region: region, ok: ok, at: bucketRegionClock()}
+		select {
+		case <-wait:
+			discoverMu.Lock() // answered: look again
+		case <-ctx.Done():
+			return "", false
 		}
-		delete(discoverInflight, key)
-		close(done)
-		discoverMu.Unlock()
-		return region, ok
 	}
+}
+
+// answerBucketRegion asks one question and records its answer, a failure
+// (the time limit included) as well as a success, then wakes the waiters.
+// ask and clock are read by the caller under the lock, so a test that swaps
+// them does not race this goroutine; gen keeps a question that outlived a
+// reset (a test's cleanup) from writing into the next test's cache.
+func answerBucketRegion(ctx context.Context, cfg aws.Config, bucket, key string, done chan struct{},
+	ask func(context.Context, aws.Config, string) (string, error), clock func() time.Time, gen uint64) {
+	ctx, cancel := context.WithTimeout(ctx, bucketRegionProbeTimeout)
+	defer cancel()
+	region, ok := askBucketRegion(ctx, cfg, bucket, ask)
+	discoverMu.Lock()
+	if gen == discoverGen {
+		discoverCache[key] = discoveredRegion{region: region, ok: ok, at: clock()}
+		delete(discoverInflight, key)
+	}
+	close(done)
+	discoverMu.Unlock()
 }
 
 // askBucketRegion is one question, its answer normalized: "" and false
 // unless S3 named a region.
-func askBucketRegion(ctx context.Context, cfg aws.Config, bucket string) (string, bool) {
-	region, err := headBucketRegion(ctx, cfg, bucket)
+func askBucketRegion(ctx context.Context, cfg aws.Config, bucket string,
+	ask func(context.Context, aws.Config, string) (string, error)) (string, bool) {
+	region, err := ask(ctx, cfg, bucket)
 	if err == nil && region != "" {
 		return region, true
 	}
-	if ctx.Err() == nil {
-		slog.Debug("S3 bucket region not discovered; requests use the configured region",
-			"bucket", bucket, "configured_region", cfg.Region, "error", err)
-	}
+	slog.Debug("S3 bucket region not discovered; requests use the configured region",
+		"bucket", bucket, "configured_region", cfg.Region, "error", err)
 	return "", false
+}
+
+// forgetDiscoveredRegion drops what this process learned about bucket's
+// region when S3 redirected a request signed for exactly that region (#2698):
+// the bucket was deleted and created again elsewhere while the process ran,
+// and the remembered region would otherwise be used until a restart. The
+// next client built for the bucket asks again, once (the question is
+// single-flight, and a failed one is kept for bucketRegionMissTTL), so a
+// redirect costs at most one question and nothing loops. Only a remembered
+// SUCCESS for that region is dropped: a 301 on a region the operator passed
+// says nothing about what was discovered, and a remembered failure keeps its
+// window. Reports whether anything was dropped.
+func forgetDiscoveredRegion(bucket, signedRegion string) bool {
+	if bucket == "" || signedRegion == "" {
+		return false
+	}
+	dropped := false
+	key := partitionOf(signedRegion) + "\x00" + bucket
+	discoverMu.Lock()
+	if e, ok := discoverCache[key]; ok && e.ok && e.region == signedRegion {
+		delete(discoverCache, key)
+		dropped = true
+	}
+	discoverMu.Unlock()
+	// DetectBucketRegionCached keeps its own answers (keyed by bucket first).
+	bucketRegionMu.Lock()
+	for k, e := range bucketRegionCache {
+		if strings.HasPrefix(k, bucket+"\x00") && e.detected && e.region == signedRegion {
+			delete(bucketRegionCache, k)
+			dropped = true
+		}
+	}
+	bucketRegionMu.Unlock()
+	return dropped
 }
 
 // SetBucketRegionDiscoveryForTest replaces the unsigned HEAD that discovery

@@ -187,7 +187,7 @@ func TestReadGapLostFrom(t *testing.T) {
 		}
 		got := sent.events[1].Summary
 		t.Logf("webhook, loss acknowledged (record still there): %q", got)
-		if got != "capture loss acknowledged: this alarm is cleared; snapshot updates and reconstructions whose window spans the loss are still refused until a full snapshot is taken after it" {
+		if got != "capture loss acknowledged: this alarm is cleared; snapshot updates and reconstructions whose window spans the loss are still refused, and a full snapshot taken after it is not affected" {
 			t.Errorf("resolution summary = %q", got)
 		}
 	})

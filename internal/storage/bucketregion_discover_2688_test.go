@@ -211,13 +211,15 @@ func TestBucketRegion_cache_2688(t *testing.T) {
 		t.Errorf("a failed discovery was not asked again after its TTL (%d)", f.count("down"))
 	}
 
-	// A cancelled caller's failure is not remembered.
+	// A caller that arrives already cancelled does not wait, but the question
+	// is still asked and its answer kept (#2698): the next caller does not
+	// ask again.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	DiscoverBucketRegion(ctx, aws.Config{Region: "us-west-2"}, "cancelled")
 	DiscoverBucketRegion(context.Background(), aws.Config{Region: "us-west-2"}, "cancelled")
-	if f.count("cancelled") != 2 {
-		t.Errorf("a cancelled question was cached (%d asks, want 2)", f.count("cancelled"))
+	if f.count("cancelled") != 1 {
+		t.Errorf("a cancelled caller's question was asked %d times, want 1", f.count("cancelled"))
 	}
 
 	// Partitions are separate namespaces.
