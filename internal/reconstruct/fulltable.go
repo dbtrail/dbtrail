@@ -3275,6 +3275,30 @@ func reconstructBinlogOnly(
 		case found:
 			return nil, binlogOnlyDestructiveDDLErr(schema, table, ddlType, detectedAt, fold.First.EventTimestamp)
 		}
+		// An ALTER in the same window that narrowed a column's character set
+		// wrote '?' for what the new set cannot hold, with no row event
+		// (#2750): refuse when a row this writes carries a value its last
+		// change wrote before that ALTER and the new set cannot hold. Checked
+		// before anything is written, so a refusal leaves no output behind.
+		// An index with no schema_changes table finds nothing here, and was
+		// warned about just above. Its window is the changes written, placed
+		// by position as well as time (ChangesWindow): an ALTER that waited
+		// on a lock carries a time from before the changes it follows.
+		held := make([]*query.ResultRow, 0, len(changes))
+		for _, ev := range changes {
+			held = append(held, ev)
+		}
+		nw, _ := ChangesWindow(held, cfg.At)
+		narrowings, err := FindCharsetNarrowings(ctx, db, schema, table, nw)
+		if err != nil {
+			return nil, err
+		}
+		for _, note := range narrowings.Notes() {
+			slog.Warn("reconstruct: "+note, "schema", schema, "table", table)
+		}
+		if err := checkChangesNarrowing(narrowings, changes); err != nil {
+			return nil, err
+		}
 	}
 
 	// A table that only ever existed after the last baseline was very likely

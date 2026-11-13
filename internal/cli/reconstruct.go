@@ -403,9 +403,9 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	// would silently resolve a truncated-away row as if it still existed at
 	// --at (#764; same guard as the full-table path and the shim's
 	// _snapshot).
-	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable,
-		reconstruct.DDLWindow{Since: snapshotTime, Until: at, Anchor: reconstruct.AnchorOf(bmeta),
-			Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
+	ddlWin := reconstruct.DDLWindow{Since: snapshotTime, Until: at, Anchor: reconstruct.AnchorOf(bmeta),
+		Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}
+	if err := reconstruct.CheckDestructiveDDL(cmd.Context(), db, recSchema, recTable, ddlWin); err != nil {
 		return err
 	}
 
@@ -657,6 +657,20 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 	}
 	if warn := reconstruct.PastCutWarning(order, recAt != ""); warn != "" {
 		slog.Warn("reconstruct: " + warn)
+	}
+	// An ALTER in the window that narrowed a column's character set wrote '?'
+	// for what the new set cannot hold, with no row event (#2750): refuse the
+	// row when a value it carries from before that ALTER lost a character,
+	// in --history too (its last entry is the row at --at).
+	narrowings, err := reconstruct.FindCharsetNarrowings(cmd.Context(), db, recSchema, recTable, ddlWin)
+	if err != nil {
+		return err
+	}
+	for _, note := range narrowings.Notes() {
+		slog.Warn("reconstruct: "+note, "schema", recSchema, "table", recTable)
+	}
+	if err := narrowings.CheckFold(baselineRow, ordered, at); err != nil {
+		return err
 	}
 	if err := writeReconstructOutput(baselineRow, ordered, snapshotTime, at, recHistory, recFormat, os.Stdout); err != nil {
 		return err

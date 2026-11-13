@@ -406,6 +406,14 @@ func writtenBefore(ev *query.ResultRow, d destructiveDDL) bool {
 // value or the row's key: it reaches clients (the shim, MCP) whose session may
 // not be allowed to read the table's rows.
 func (n *CharsetNarrowings) CheckRow(row map[string]any, ev *query.ResultRow) error {
+	if c := n.lost(row, ev); c != nil {
+		return n.lostErr(c)
+	}
+	return nil
+}
+
+// lost is the narrowing CheckRow refuses row on, nil when there is none.
+func (n *CharsetNarrowings) lost(row map[string]any, ev *query.ResultRow) *charsetNarrowing {
 	if !n.Checked() {
 		return nil
 	}
@@ -429,12 +437,12 @@ func (n *CharsetNarrowings) CheckRow(row map[string]any, ev *query.ResultRow) er
 			// its characters cannot be read off it, except that ascii holds
 			// no byte past 0x7F in any character set.
 			if c.To == "ascii" && !isASCII(s) {
-				return n.lostErr(c)
+				return c
 			}
 			continue
 		}
 		if holds, known := charsetHolds(c.To, s); known && !holds {
-			return n.lostErr(c)
+			return c
 		}
 	}
 	return nil
