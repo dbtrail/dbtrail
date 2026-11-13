@@ -9217,11 +9217,11 @@ function localCopyWords(s3, keep, loop, reuse, was, reach) {
   if (reuse && !s3) say("A table that did not change keeps its last file, so a new snapshot only costs the tables that changed.");
   const stuck = was.held || was.blocked;
   const none = s3 ? "the count does not apply to it" : "nothing in it is removed, whatever the count says";
+  // With an age set the age does not apply either (#2675): S3 cannot tell
+  // which server's copy of a snapshot name it holds.
+  const sharedNone = age.sharedS3 ? "nothing here is removed" : none;
   if (was.sharedS3) {
-    // With an age set the age does not apply either (#2675): S3 cannot
-    // tell which server's copy of a snapshot name it holds.
-    say("Another server sends its snapshots to this S3 location too, so " +
-      (age.sharedS3 ? "nothing here is removed" : none) + ". Give each server its own S3 prefix.");
+    say("Another server sends its snapshots to this S3 location too, so " + sharedNone + ". Give each server its own S3 prefix.");
   } else if (was.held) {
     say("Another server's snapshots are still in this folder, so " + (s3 ? none : "nothing here is removed") + ". To keep only the newest, use a new empty folder.");
   } else if (was.blocked) {
