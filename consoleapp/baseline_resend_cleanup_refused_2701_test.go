@@ -38,7 +38,11 @@ func TestResend_aRefusedS3CleanupQuestionNamesBothPermissions(t *testing.T) {
 	}
 	var present func(context.Context, string) (bool, error)
 	present = func(context.Context, string) (bool, error) { return false, denied }
-	s3ObjectPresent = func(ctx context.Context, u string) (bool, error) { return present(ctx, u) }
+	asks := 0
+	s3ObjectPresent = func(ctx context.Context, u string) (bool, error) {
+		asks++
+		return present(ctx, u)
+	}
 	sent := 0
 	uploadSnapshot = func(context.Context, string, string, string, bool) (int, error) { sent++; return 1, nil }
 	root := t.TempDir()
@@ -70,9 +74,15 @@ func TestResend_aRefusedS3CleanupQuestionNamesBothPermissions(t *testing.T) {
 	if rec := read(); !rec.CleanupQuestionRefused || rec.NextSend == nil || sent != 0 {
 		t.Fatalf("after the refused round: %+v, sent %d: want the permission named, an hourly retry, nothing sent", rec, sent)
 	}
+	// A refusal at the destination, not on a file of the snapshot (#2691):
+	// the whole folder waits the hour, so nothing is asked during it.
+	asksBefore := asks
 	// During the wait the record keeps saying why.
 	clock = clock.Add(5 * time.Minute)
 	run()
+	if asks != asksBefore {
+		t.Fatalf("asked S3 %d more times during the folder's wait", asks-asksBefore)
+	}
 	if rec := read(); !rec.CleanupQuestionRefused {
 		t.Fatalf("the reason is lost during the wait: %+v", rec)
 	}
