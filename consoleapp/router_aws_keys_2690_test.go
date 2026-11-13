@@ -1,7 +1,10 @@
 package consoleapp
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -196,5 +199,125 @@ func TestComposeRouter_ownAWSKeysFallBackToTheShared(t *testing.T) {
 		if got, _ := capture[k].(string); got != "${"+k+":-}" {
 			t.Errorf("%s %s = %q, want ${%s:-}", composeService, k, got, k)
 		}
+	}
+}
+
+// The same rules through the real interpolation: `docker compose config`
+// renders the router's environment from a .env, and that environment is
+// what applyRouterAWSKeys then settles. Skipped where Docker Compose is not
+// installed (it is on the CI runners).
+func TestComposeRouter_renderedAWSKeys(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker is not installed")
+	}
+	if out, err := exec.Command("docker", "compose", "version").CombinedOutput(); err != nil {
+		t.Skipf("docker compose is not available: %v %s", err, out)
+	}
+	abs, err := filepath.Abs(composePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(t *testing.T, dotenv string) map[string]*string {
+		t.Helper()
+		dir := t.TempDir()
+		envFile := filepath.Join(dir, "router.env")
+		if err := os.WriteFile(envFile, []byte(dotenv), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("docker", "compose", "--project-name", "rt2690", "--project-directory", dir,
+			"--env-file", envFile, "-f", abs, "config", "--format", "json")
+		// Only what the CLI needs: an AWS_* of the machine running the test
+		// would otherwise be interpolated too.
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+		out, err := cmd.Output()
+		if err != nil {
+			var stderr []byte
+			if ee, ok := err.(*exec.ExitError); ok {
+				stderr = ee.Stderr
+			}
+			t.Fatalf("docker compose config: %v\n%s", err, stderr)
+		}
+		var doc struct {
+			Services map[string]struct {
+				Environment map[string]*string `json:"environment"`
+			} `json:"services"`
+		}
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := doc.Services["router"]; !ok {
+			t.Fatal("no router service in the rendered file")
+		}
+		for name, svc := range doc.Services {
+			if name == "router" {
+				continue
+			}
+			for k, v := range svc.Environment {
+				if v != nil && strings.Contains(*v, "ROUTER-") {
+					t.Errorf("service %s is given the router's %s", name, k)
+				}
+			}
+		}
+		return doc.Services["router"].Environment
+	}
+	str := func(v *string) string {
+		if v == nil {
+			return "<unset>"
+		}
+		return *v
+	}
+	shared := "AWS_ACCESS_KEY_ID=SHARED-ID\nAWS_SECRET_ACCESS_KEY=SHARED-SECRET\nAWS_SESSION_TOKEN=SHARED-TOKEN\n"
+	cases := []struct {
+		name, dotenv string
+		// What the container is given, and what the router runs with after
+		// applyRouterAWSKeys ("<unset>" for none); refuse: it stops at start.
+		key, secret, token, runToken string
+		refuse                       bool
+	}{
+		{name: "nothing set", dotenv: "", key: "", secret: "", token: "", runToken: "<unset>"},
+		{name: "shared keys only, as before", dotenv: shared, key: "SHARED-ID", secret: "SHARED-SECRET", token: "SHARED-TOKEN", runToken: "SHARED-TOKEN"},
+		{name: "router pair beside a shared token", dotenv: shared + "ROUTER_AWS_ACCESS_KEY_ID=ROUTER-ID\nROUTER_AWS_SECRET_ACCESS_KEY=ROUTER-SECRET\n",
+			key: "ROUTER-ID", secret: "ROUTER-SECRET", token: "SHARED-TOKEN", runToken: "<unset>"},
+		{name: "router pair and token", dotenv: shared + "ROUTER_AWS_ACCESS_KEY_ID=ROUTER-ID\nROUTER_AWS_SECRET_ACCESS_KEY=ROUTER-SECRET\nROUTER_AWS_SESSION_TOKEN=ROUTER-TOKEN\n",
+			key: "ROUTER-ID", secret: "ROUTER-SECRET", token: "ROUTER-TOKEN", runToken: "ROUTER-TOKEN"},
+		{name: "router pair, no shared keys", dotenv: "ROUTER_AWS_ACCESS_KEY_ID=ROUTER-ID\nROUTER_AWS_SECRET_ACCESS_KEY=ROUTER-SECRET\n",
+			key: "ROUTER-ID", secret: "ROUTER-SECRET", token: "", runToken: "<unset>"},
+		{name: "router variables present but empty", dotenv: shared + "ROUTER_AWS_ACCESS_KEY_ID=\nROUTER_AWS_SECRET_ACCESS_KEY=\nROUTER_AWS_SESSION_TOKEN=\n",
+			key: "SHARED-ID", secret: "SHARED-SECRET", token: "SHARED-TOKEN", runToken: "SHARED-TOKEN"},
+		{name: "router key id only", dotenv: shared + "ROUTER_AWS_ACCESS_KEY_ID=ROUTER-ID\n",
+			key: "ROUTER-ID", secret: "SHARED-SECRET", token: "SHARED-TOKEN", refuse: true},
+		{name: "router token only", dotenv: shared + "ROUTER_AWS_SESSION_TOKEN=ROUTER-TOKEN\n",
+			key: "SHARED-ID", secret: "SHARED-SECRET", token: "ROUTER-TOKEN", refuse: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := render(t, c.dotenv)
+			for k, want := range map[string]string{"AWS_ACCESS_KEY_ID": c.key, "AWS_SECRET_ACCESS_KEY": c.secret, "AWS_SESSION_TOKEN": c.token} {
+				if got := str(env[k]); got != want {
+					t.Errorf("rendered %s = %q, want %q", k, got, want)
+				}
+			}
+			setRouterAWSEnv(t, str(env[routerOwnAWSKeysEnv]), str(env["AWS_ACCESS_KEY_ID"]), str(env["AWS_SECRET_ACCESS_KEY"]), str(env["AWS_SESSION_TOKEN"]))
+			_, err := applyRouterAWSKeys()
+			if c.refuse {
+				if err == nil {
+					t.Fatal("the router started with a mixed pair")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := "<unset>"
+			if v, set := os.LookupEnv("AWS_SESSION_TOKEN"); set {
+				got = v
+			}
+			if got != c.runToken {
+				t.Errorf("the router runs with AWS_SESSION_TOKEN %q, want %q", got, c.runToken)
+			}
+			if os.Getenv("AWS_ACCESS_KEY_ID") != c.key {
+				t.Errorf("the router runs with AWS_ACCESS_KEY_ID %q, want %q", os.Getenv("AWS_ACCESS_KEY_ID"), c.key)
+			}
+		})
 	}
 }
