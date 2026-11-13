@@ -1,6 +1,9 @@
 package readrouter
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // The reasons the rewrite of backtick-quoted names refuses a statement. Each
 // is a veto of its own: the statement stays on MySQL and the copy is not
@@ -38,6 +41,15 @@ type scanned struct {
 	// occurred. All three are read from the client's text, before any
 	// rewrite.
 	doubleQuoted, backslash, hash bool
+	// spaceOutsideASCII: a character the copy takes for white space and
+	// MySQL for part of a name (copySpace) occurred outside comments,
+	// string literals and quoted names, or anywhere in a statement with a
+	// quote inside a /* */ comment or a $, where the copy may take a string
+	// literal's for one outside it (see the end of scan). Veto keeps such a
+	// statement on
+	// MySQL; the rewrite for the copy does not refuse it, since the
+	// character changes nothing in how the names are quoted.
+	spaceOutsideASCII bool
 	// refusal names why the names cannot be rewritten with certainty, or "".
 	refusal string
 	// raw is the statement with its names in double quotes and nothing else
@@ -142,6 +154,8 @@ func scan(stmt string) scanned {
 	// whether a string literal is the amount of an INTERVAL ('1' '5', two
 	// literals, is one amount on MySQL).
 	word, lastWord := -1, ""
+	// quoteInComment: a /* */ comment holds a ' or a ".
+	quoteInComment := false
 	// cpWord and blWord are where the word being read starts in the two
 	// texts being written; every STRAIGHT_JOIN and LIKE read as a word is
 	// kept in sc.keywords, for copyText to rewrite once the statement is
@@ -168,6 +182,9 @@ func scan(stmt string) scanned {
 				cp.WriteString(stmt[i:])
 				i = n
 				break
+			}
+			if strings.ContainsAny(stmt[i+2:i+2+end], `'"`) {
+				quoteInComment = true
 			}
 			if strings.Contains(stmt[i+2:i+2+end], "/*") {
 				// MySQL ends the comment at the first */; the copy nests
@@ -311,6 +328,11 @@ func scan(stmt string) scanned {
 			i = next
 			afterName, prefixAfterName = true, false
 		default:
+			if c >= 0xc0 {
+				if r, _ := utf8.DecodeRuneInString(stmt[i:]); copySpace(r) {
+					sc.spaceOutsideASCII = true
+				}
+			}
 			switch {
 			case prefixAfterName:
 				prefixAfterName = wordByte(c)
@@ -347,6 +369,15 @@ func scan(stmt string) scanned {
 	}
 	if word >= 0 {
 		endWord(n)
+	}
+	if quoteInComment || strings.IndexByte(stmt, '$') >= 0 {
+		// Before it parses, the copy turns every copySpace character into a
+		// plain space outside what it reads as quotes, and it finds the
+		// quotes on its own: a quote inside a /* */ comment opens one there
+		// (it skips -- comments, not these), and so may a $. So the
+		// character inside a string literal can come out a space: SELECT
+		// /* ' */ 'a<U+00A0>b' is 'a b' on the copy (DuckDB 1.5.6).
+		sc.spaceOutsideASCII = sc.spaceOutsideASCII || strings.ContainsFunc(stmt, copySpace)
 	}
 	sc.blanked = bl.String()
 	sc.raw = cp.String()
@@ -391,6 +422,21 @@ func TwoDigitYear(s string) bool {
 		i++
 	}
 	return i > 3 && i+1 < len(s) && sep(s[i]) && asciiDigit(s[i+1])
+}
+
+// copySpace reports whether r is a character outside ASCII the copy reads as
+// white space between two words. MySQL reads every character from U+0080 up
+// as part of a name, so SELECT a<U+00A0>b is one column there and column a
+// under the alias b on the copy. The list is what DuckDB 1.5.6 took for
+// white space in SELECT 1<c>+ 2, abs<c>(-1), 'a'<c>AS x and SELECT<c>1
+// (#2652). U+0085, U+1680, U+180E, U+2028, U+2029, U+200C and U+200D it
+// refused there, as MySQL did, so they are not in it.
+func copySpace(r rune) bool {
+	switch {
+	case r == 0x00a0, 0x2000 <= r && r <= 0x200b, r == 0x202f, r == 0x205f, r == 0x2060, r == 0x3000, r == 0xfeff:
+		return true
+	}
+	return false
 }
 
 // notASCII reports whether r is a character outside ASCII.
