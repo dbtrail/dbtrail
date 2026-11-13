@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   given. The `baseline` profile of `docker-compose.yml` is not covered yet
   (#2733).
 
+- **`bintrail export iceberg` compacts its own tables** (#2719). Every
+  run adds one delete file per table it changed, and DuckDB and ClickHouse
+  pay for each one on every read without being able to compact the table
+  themselves, so reads got slower run after run. Now, once a table holds
+  `--compact-after` delete files (default 10), the run rewrites the table's
+  live rows into new data files and drops every delete file, in one Iceberg
+  commit of type `replace` that changes neither the rows nor the cursor.
+  On a 100,000-row table changed every run, a DuckDB 1.5.6 read took 9.1 s
+  after 30 runs without it, and at most 3.1 s with the default (about 0.01 s
+  right after each compaction); a million-row table compacts in about 1.5 s.
+  Each compaction still leaves two small manifests that later commits keep
+  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A
+  compaction that does not finish, or that another writer's commit overtakes,
+  is not applied and is retried by the next run; the table's verdict stays
+  what its delta made it. `--compact-after 0` turns it off. The
+  JSON report carries a `compaction` object per compacted table, and the audit
+  trail records the commit as `commit: compact`.
 - **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
   snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
   each duplicate and deletes the others, and the deletes are not written to
@@ -157,6 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The rule that takes a full read when even the cheapest recent update took clearly longer than the last full read (more than twice, and over 30 s more) now applies on a server with a per-event rate too when the number of changes since the previous snapshot is unknown. Before, that server updated anyway: the estimate needs the count, and the rule asked for no rate. The log line about an unknown count now says `the exception is a server whose cheapest update measured since its last full read took clearly longer than that read, where a full read is still chosen` (it named a server with no per-event rate).
   - The update that runs where a slot would have been skipped, because the snapshot cannot wait or the index did not give capture's record, keeps its reason on its run record (`update_why`, and `last_run.update_why` on `GET /api/baselines`). The Snapshots page says `This update ran because <reason>.` under the last run and in the snapshot's detail. Before, the reason was shown before the run and once in the log, and the run was recorded as an ordinary update. A version before this ignores the field.
   - **Read database now** refused while another job held the server says which job and since when, for example `The full read did not start: a snapshot kept on this machine is being sent to S3 since 2026-11-12 10:00:05 UTC; the full read can start once it finishes.` It said `Snapshot failed: a baseline is already running for this server`, including while the only job was the send to S3 of a snapshot kept on this machine. The answer is still 409.
+- **Checked on a real server: capture cannot read by GTID from a source whose `gtid_mode` is not ON** (#2674). The snapshot schedule treats a quiet source whose `gtid_mode` is `OFF`, `OFF_PERMISSIVE` or `ON_PERMISSIVE`, while capture follows it by GTID, as one capture cannot read from (a full read), on the MySQL manual's rule for auto-position. On MySQL 8.0.46 in each of the three modes, the source refuses capture's request, and `bintrail stream` resuming from a GTID checkpoint exits, with `ERROR 1236 (HY000): The replication sender thread cannot start in AUTO_POSITION mode: this server has GTID_MODE = <mode> instead of ON.`; under `ON` it is served. Nothing changes in behaviour. An integration test pins it against a throwaway server named by `BINTRAIL_TEST_GTIDMODE_DSN` (it changes that server's `gtid_mode`, so it never runs against a shared one).
 
 ## [0.130.0] - 2026-11-12
 
