@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
+  snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
+  each duplicate and deletes the others, and the deletes are not written to
+  the binary log as row changes. The update carried the table forward from
+  its previous snapshot, so the copy kept every duplicate the source had
+  deleted, with nothing to say so. It now refuses the table like the
+  partition statements of #2632, naming the clause (`ALTER TABLE ... IGNORE
+  ... UNIQUE`), and the full read that follows takes the table as it is. It
+  counts when, under `IGNORE`, the statement adds a unique key (`UNIQUE`,
+  `PRIMARY KEY`, a column's bare `KEY`, `SERIAL`) or changes values a unique
+  key that already exists compares (`MODIFY`, `CHANGE`, `CONVERT TO`, a
+  character set or collation), and when its stored text was cut short.
+  `DROP PRIMARY KEY`, a plain index or a new column under `IGNORE` refuse
+  nothing. MySQL has had no `ALTER IGNORE` since 5.7. The same
+  refusal applies to `reconstruct --output-format mydumper` and the shim's
+  `_snapshot`.
 - **Engine Routing keeps `LEFT` and `RIGHT` with a negative length on MySQL** (#2652). `LEFT('abc', -1)` is `''` on MySQL and `'ab'` on the copy, and `RIGHT('abc', -1)` is `''` and `'bc'`, with no error on either side. `LEFT` and `RIGHT` now go to the copy only when the length is a whole number written in the statement; a length from a column, a placeholder or an expression goes to MySQL, since it may be negative on some row. A length of 0 or more, past the end of the text too, agrees on both and still goes to the copy.
 - **Engine Routing keeps a statement with a Unicode space outside its strings on MySQL** (#2652). MySQL reads a no-break space (U+00A0), an ideographic space (U+3000), a zero-width space (U+200B) and the other Unicode spaces the copy takes for white space as part of a name. Over a table with columns `a`, `b` and one named `a`, no-break space, `b`, writing that last name unquoted returned that column on MySQL and column `a` under the alias `b` on the copy: another value, with no error. Such a statement now runs on MySQL. Where the character made the statement an error on MySQL, for example a no-break space between `ROUND` and its parenthesis, the statement already went to MySQL, because MySQL could not explain it. Inside a string or a quoted name the character is the same text on both sides, with one exception that also goes to MySQL: the copy turns it into a plain space wherever it does not find a quote around it, and a quote inside a `/* */` comment or a `$` makes it find the quotes elsewhere, so `SELECT /* ' */ 'a b'` written with a no-break space was `'a b'` with a plain space on the copy. The plain port without Engine Routing is unchanged.
 - **The installer, `--help` and the first lines of the docs open with the
