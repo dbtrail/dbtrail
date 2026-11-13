@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A read of one table at a past moment keeps its snapshot while it runs**
+  (#2691). `/api/reconstruct`, the MCP `reconstruct` tool of the console and
+  a `_snapshot` query through the MySQL port of `watch` (one row or the whole
+  table) read an older snapshot after looking it up, and the cleanup after a
+  publish could remove it in between, so the read failed. They now pin that
+  snapshot until they end, like a snapshot download, for no longer than a
+  download of the table's files would keep it (their bytes at 1 MiB/s plus
+  one minute): a whole table goes out at the pace of the MySQL client, and a
+  client must not decide how long a snapshot stays. They count toward the
+  downloads' limit, together with the downloads: past it a read is not
+  refused, it runs without a pin as before. A snapshot removed between the
+  lookup and the pin is looked up once more. The Explain of a check, which
+  already pinned its two snapshots, has a test of its own.
+
 - **The installer, `--help` and the first lines of the docs open with the
   heavy queries** (#2637). The installer's banner now says "Heavy MySQL
   queries, from minutes to seconds.", the headline of the README and of

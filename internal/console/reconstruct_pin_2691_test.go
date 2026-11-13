@@ -1,0 +1,175 @@
+package console
+
+import (
+	"context"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+)
+
+// pinFixtureSnapshot writes <root>/<name>/shop/orders.parquet and _SUCCESS:
+// a complete snapshot as far as the cleanup and the lookup are concerned.
+func pinFixtureSnapshot(t *testing.T, root, name string) string {
+	t.Helper()
+	p := filepath.Join(root, name, "shop", "orders.parquet")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("not parquet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := baseline.WriteSuccessMarker(filepath.Join(root, name)); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// withPruneRule makes every server's folder pruned to keep, for the test.
+func withPruneRule(t *testing.T, keep int, seen *[]string) {
+	t.Helper()
+	prev := pruneRule
+	t.Cleanup(func() { pruneRule = prev })
+	pruneRule = func(_ *Server, id string) (int, time.Duration) {
+		if seen != nil {
+			*seen = append(*seen, id)
+		}
+		return keep, 0
+	}
+}
+
+// cleanupInsidePin wraps pinBaselineRead so that a real cleanup to a count of
+// 1 runs right after the console's own pin is taken: what happens when a
+// snapshot is published while the read is on its files. It records the
+// cleanup's result and the readers that pinned.
+func cleanupInsidePin(t *testing.T, root string) (results *[]baseline.PruneResult, readers *[]string) {
+	t.Helper()
+	prev := pinBaselineRead
+	t.Cleanup(func() { pinBaselineRead = prev })
+	results, readers = &[]baseline.PruneResult{}, &[]string{}
+	pinBaselineRead = func(s *Server, id string) reconstruct.PinFunc {
+		real := prev(s, id)
+		return func(path, what string) func() {
+			*readers = append(*readers, what)
+			release := real(path, what)
+			res, err := baseline.PruneLocal(context.Background(), baseline.PruneOptions{LocalDir: root, KeepNewest: 1})
+			if err != nil {
+				t.Errorf("cleanup during the read: %v", err)
+			}
+			*results = append(*results, res)
+			return release
+		}
+	}
+	return results, readers
+}
+
+// /api/reconstruct keeps the snapshot it reads from a cleanup that runs while
+// it reads (#2691), and lets it go when it ends.
+func TestReconstruct_aCleanupDuringTheReadKeepsItsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	old, newer := "2026-06-01T00-00-00Z", "2026-06-02T00-00-00Z"
+	oldFile := pinFixtureSnapshot(t, dir, old)
+	pinFixtureSnapshot(t, dir, newer)
+	srv := newBaselineServer(t, dir, true)
+	srv.cm.boot.resolver = metadata.NewResolverFromTables(1, map[string]*metadata.TableMeta{
+		"shop.orders": {Schema: "shop", Table: "orders", PKColumns: []string{"id"},
+			Columns: []metadata.ColumnMeta{{Name: "id", OrdinalPosition: 1, IsPK: true, DataType: "int"}}},
+	})
+	withPruneRule(t, 1, nil)
+	results, readers := cleanupInsidePin(t, dir)
+
+	rec := httptest.NewRecorder()
+	srv.handleReconstruct(rec, httptest.NewRequest("GET", "/api/reconstruct?schema=shop&table=orders&pk=1&at=2026-06-01T12:00:00Z", nil))
+	// The file is not Parquet: the read after the pin answers 500. What is
+	// tested is the snapshot under it.
+	t.Logf("the read answered %d: %s", rec.Code, rec.Body.String())
+	if !slices.Equal(*readers, []string{"a time-travel read"}) {
+		t.Fatalf("readers that pinned: %v, want one time-travel read: /api/reconstruct reads without a pin", *readers)
+	}
+	if len(*results) != 1 || (*results)[0].KeptPinned != 1 || len((*results)[0].Pruned) != 0 {
+		t.Fatalf("the cleanup during the read: %+v, want the read's snapshot kept as pinned and nothing removed", *results)
+	}
+	if _, err := os.Stat(oldFile); err != nil {
+		t.Fatalf("the snapshot the read was on is gone: %v", err)
+	}
+	if got := baseline.Pinned(dir); len(got) != 0 {
+		t.Fatalf("the read is over and %v is still pinned", got)
+	}
+	// Released: the next cleanup removes it.
+	res, err := baseline.PruneLocal(context.Background(), baseline.PruneOptions{LocalDir: dir, KeepNewest: 1})
+	if err != nil || !slices.Equal(res.Pruned, []string{old}) {
+		t.Fatalf("the cleanup after the read: pruned %v (err %v), want [%s]", res.Pruned, err, old)
+	}
+}
+
+// The reads of a past moment count with the downloads (#2691): with the
+// downloads at their limit, a read of another old snapshot pins nothing, and
+// goes on unpinned as before rather than being refused.
+func TestPinBaselineRead_countsWithTheDownloads(t *testing.T) {
+	dir := t.TempDir()
+	a, b, newest := "2026-06-01T00-00-00Z", "2026-06-02T00-00-00Z", "2026-06-03T00-00-00Z"
+	pinFixtureSnapshot(t, dir, a)
+	bFile := pinFixtureSnapshot(t, dir, b)
+	pinFixtureSnapshot(t, dir, newest)
+	srv := newBaselineServer(t, dir, true)
+	withPruneRule(t, 1, nil)
+	// Count 1: one snapshot past the count may be held. A download takes it.
+	release, ok := pinForDownload(dir, a, 1, 0, time.Hour)
+	defer release()
+	if !ok {
+		t.Fatal("the first download past the count was refused")
+	}
+	r := pinBaselineRead(srv, "")(bFile, "a time-travel read")
+	defer r()
+	if got := baseline.Pinned(dir); !slices.Equal(got, []string{a}) {
+		t.Fatalf("pinned %v, want only the download's %s: the read went past the cap", got, a)
+	}
+	// A read of the snapshot the download holds is let in: it holds nothing more.
+	r2 := pinBaselineRead(srv, "")(filepath.Join(dir, a, "shop", "orders.parquet"), "a _snapshot query")
+	r2()
+}
+
+// The folder comes from the path the lookup answered with, and the rule from
+// the server the port target is for (#2691): a lookup that answered from
+// another folder pins there, and the count read is that server's.
+func TestResolveFlashback_pinsWithItsServersRule(t *testing.T) {
+	clearStores(t)
+	reg, err := LoadRegistry(filepath.Join(t.TempDir(), "console-servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ent, err := reg.Add(ServerEntry{Name: "srv", DSN: "u:p@tcp(127.0.0.1:1)/idx?timeout=2s", BaselineDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg, LazyIndex: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.cm.CloseAll)
+	var ids []string
+	withPruneRule(t, 3, &ids)
+	tgt, err := srv.ResolveFlashback(context.Background(), "srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.PinBaseline == nil {
+		t.Fatal("the port target carries no pin: `_snapshot` reads unpinned")
+	}
+	other := t.TempDir()
+	p := pinFixtureSnapshot(t, other, "2026-06-01T00-00-00Z")
+	release := tgt.PinBaseline(p, "a _snapshot query")
+	if got := baseline.Pinned(other); !slices.Equal(got, []string{"2026-06-01T00-00-00Z"}) {
+		t.Fatalf("pinned in the lookup's folder: %v, want the snapshot of the path", got)
+	}
+	release()
+	if !slices.Equal(ids, []string{ent.ID}) {
+		t.Fatalf("the rule was read for %v, want the target's server %q", ids, ent.ID)
+	}
+}
