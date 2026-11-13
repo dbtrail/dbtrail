@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **"Goes at the next cleanup" follows the cleanup's own rule, and a failed
+  owed upload waits an hour** (#2675). The Snapshots list marked every local
+  snapshot past the count, counting positions, so with **Delete by age** set
+  it marked snapshots the cleanup keeps (past the count and younger than the
+  age), and it could mark the newest copy of a table or the `current`
+  target. Each row now carries `going` from `GET /api/baselines`, worked out
+  by the cleanup's rule (`baseline.KeptNow`, with the count and the age in
+  force), and the list marks only those. Separately, the newest snapshot the
+  upload interval kept on this machine, sent by a cycle with nothing new to
+  fold, was tried again at every such cycle when its send failed (every 5
+  minutes by default), each time sending the whole snapshot and logging a
+  warning; after a failure it now waits an hour, the cleanup's pace for
+  failed re-sends, and the log says "it stays here, and sending it is tried
+  again in an hour". It keeps its hold mark and stays on disk meanwhile.
 - **The cleanup's re-sends under partial S3 permissions** (#2701).
   - The last restore's result, in a bucket that takes uploads and refuses to
     read them back, was sent again at every round (an hour apart), because

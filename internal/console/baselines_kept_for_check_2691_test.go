@@ -76,6 +76,8 @@ func TestBaselinesList_marksThePairKeptForTheCheck(t *testing.T) {
 			Snapshots []struct {
 				Time         string
 				KeptForCheck bool `json:"kept_for_check"`
+				Going        bool
+				PastCount    bool `json:"past_count"`
 			}
 		}
 		if err := json.Unmarshal(body, &listed); err != nil {
@@ -93,6 +95,14 @@ func TestBaselinesList_marksThePairKeptForTheCheck(t *testing.T) {
 		}
 		if !slices.Equal(kept, want) {
 			t.Fatalf("with S3 %v: rows kept for the check %v, want %v", withS3, kept, want)
+		}
+		// Past the count, the pair is not going; with S3 there is no pair, and
+		// both go once S3 has them (#2675).
+		for _, sn := range listed.Snapshots {
+			past := sn.Time == at(3).Format(consoleTSFormat) || sn.Time == at(4).Format(consoleTSFormat)
+			if sn.PastCount != past || sn.Going != (past && withS3) {
+				t.Errorf("with S3 %v: %s past_count %v going %v, want %v and %v", withS3, sn.Time, sn.PastCount, sn.Going, past, past && withS3)
+			}
 		}
 	}
 }

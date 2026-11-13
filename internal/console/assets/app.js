@@ -11107,21 +11107,25 @@ function baselinesPanel(b, servers, opts) {
     // so the rows the listing found in both places are marked, and so are
     // the ones the S3 interval kept here on purpose (held), which go by the
     // count alone. One that was meant for S3 and is not there is not marked.
+    // Which ones is the server's answer (sn.going, #2675), worked out by the
+    // cleanup's own rule: the count AND "Delete by age" when it is set (a
+    // snapshot past the count and younger than the age stays), the newest
+    // of each table, the `current` target, the last restore's result.
+    // Counting positions here could not see the age, and marked rows the
+    // cleanup keeps.
     const keepInForce = (b.local_retention && b.local_retention.keep_newest) || 0;
-    let localSeen = 0;
     const goingIdx = new Set();
     const checkKeptIdx = new Set();
     if (keepInForce > 0) {
       b.snapshots.forEach((sn, i) => {
         if (sn.kinds && sn.kinds.length && !sn.kinds.includes("dir")) return;
-        localSeen++;
-        // The last restore's result is kept whatever its date, and takes
-        // no place in the count (#2678).
-        if (sn.restored) { localSeen--; return; }
-        if (localSeen > keepInForce && (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held)) {
-          // The pair a check compares stays on top of the count (#2691).
-          if (sn.kept_for_check) checkKeptIdx.add(i);
-          else goingIdx.add(i);
+        if (!b.s3_destination || (sn.kinds || []).includes("s3") || sn.held) {
+          // Both answers are the server's (#2675): going is what the next
+          // cleanup removes; past_count is what the count and the age would
+          // remove, of which the pair a check compares stays on top of the
+          // count (#2691) and is never marked as going.
+          if (sn.going === true) goingIdx.add(i);
+          else if (sn.kept_for_check && sn.past_count === true) checkKeptIdx.add(i);
         }
       });
     }
