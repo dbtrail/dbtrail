@@ -638,9 +638,9 @@ say "     slowing down your MySQL. The start page below has one to try."
 say ""
 if [ -n "$CLI" ]; then
   say "${B}Or from this terminal${RST}, with no browser. The same steps as commands:"
-  say "  ${DIR}/dbtrail server add -h <host> -u dbtrail -p   ${DIM}# connect your MySQL${RST}"
+  say "  ${DIR}/dbtrail server add -h <host> -u dbtrail -p   ${DIM}# connect your MySQL; turns the MySQL port on${RST}"
   say "  ${DIR}/dbtrail snapshot run <name>                  ${DIM}# first copy${RST}"
-  say "  ${DIR}/dbtrail port on                              ${DIM}# the MySQL port${RST}"
+  say "  ${DIR}/dbtrail port status                          ${DIM}# the mysql line to query it${RST}"
   say "  ${DIR}/dbtrail --help"
   say ""
 fi
