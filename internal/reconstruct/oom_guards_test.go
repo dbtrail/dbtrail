@@ -72,50 +72,49 @@ func TestMergeBaselineIntoWriter_customDuckDBTuningStillWorks(t *testing.T) {
 }
 
 // TestReconstructTables_incompleteMarkerOnDBConnectFailure covers the #842
-// completeness marker's "written at start, survives a mid-run failure" half:
-// ReconstructTables writes _INCOMPLETE into OutputDir right after creating it
-// and BEFORE connecting to the index DB, so a DB-connect failure (standing in
-// for any later, potentially uncatchable, mid-run failure — OOM-kill included)
-// must leave _INCOMPLETE on disk and never write _SUCCESS. Port 1 on loopback
-// refuses instantly (nothing can ever listen there), so this needs no Docker
-// MySQL and runs fast.
+// completeness marker against an early refusal. These two tests used a
+// DB-connect failure as the stand-in for a mid-run failure, because the
+// marker was written before the connection. Since #2684 a dump folder's
+// marker is written after every check that can refuse the run before a
+// table starts (the index connection among them), so that a run refused up
+// front leaves an earlier complete dump complete; the mid-run half (marker
+// written before the first table, stale _SUCCESS removed on a reused folder)
+// is pinned by TestReconstruct2684_reusedFolderAndIfNotExists, which fails a
+// table in a real run, and by TestMarkRunIncomplete_removesStaleSuccess.
+// Port 1 on loopback refuses instantly, so this needs no MySQL.
 func TestReconstructTables_incompleteMarkerOnDBConnectFailure(t *testing.T) {
 	outDir := t.TempDir()
 	cfg := FullTableConfig{
 		IndexDSN:    "root@tcp(127.0.0.1:1)/idx",
-		BaselineSrc: "/tmp/baselines",
+		BaselineSrc: t.TempDir(),
 		Tables:      []string{"db.t"},
 		OutputDir:   outDir,
 	}
 	if _, err := ReconstructTables(context.Background(), cfg); err == nil {
 		t.Fatal("expected a DB-connect error, got nil")
-	}
-	if _, statErr := os.Stat(filepath.Join(outDir, baseline.IncompleteMarker)); statErr != nil {
-		t.Errorf("%s marker missing after a failed run: %v", baseline.IncompleteMarker, statErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(outDir, baseline.SuccessMarker)); statErr == nil {
 		t.Errorf("%s marker must not exist after a failed run", baseline.SuccessMarker)
 	}
+	if _, statErr := os.Stat(filepath.Join(outDir, baseline.IncompleteMarker)); statErr == nil {
+		t.Errorf("%s written by a run refused before any table started", baseline.IncompleteMarker)
+	}
 }
 
-// TestReconstructTables_staleSuccessMarkerClearedOnReuse is the regression
-// guard for the reused-OutputDir hole: reconstruct's OutputDir (unlike a
-// `bintrail baseline` snapshot dir, which is always a fresh
-// <output>/<timestamp>/) is an operator-chosen path routinely reused across
-// runs — e.g. re-running with a later --at. baseline.SnapshotComplete checks
-// _SUCCESS FIRST and returns true regardless of _INCOMPLETE, so a stale
-// _SUCCESS left by a prior successful run must be removed before a NEW run
-// starts; otherwise this run failing mid-way (OOM-kill included) would still
-// read as complete.
+// TestReconstructTables_staleSuccessMarkerClearedOnReuse: an earlier,
+// complete dump in a reused OutputDir stays complete when the next run is
+// refused before any table starts, because nothing in it was changed. Before
+// #2684 the refusal removed its _SUCCESS and wrote _INCOMPLETE, and
+// `bintrail baseline` then refused a dump that was whole.
 func TestReconstructTables_staleSuccessMarkerClearedOnReuse(t *testing.T) {
 	outDir := t.TempDir()
 	if err := baseline.WriteSuccessMarker(outDir); err != nil {
-		t.Fatalf("seed stale _SUCCESS from a prior run: %v", err)
+		t.Fatalf("seed _SUCCESS from a prior run: %v", err)
 	}
 
 	cfg := FullTableConfig{
 		IndexDSN:    "root@tcp(127.0.0.1:1)/idx",
-		BaselineSrc: "/tmp/baselines",
+		BaselineSrc: t.TempDir(),
 		Tables:      []string{"db.t"},
 		OutputDir:   outDir,
 	}
@@ -123,14 +122,11 @@ func TestReconstructTables_staleSuccessMarkerClearedOnReuse(t *testing.T) {
 		t.Fatal("expected a DB-connect error, got nil")
 	}
 
-	if _, statErr := os.Stat(filepath.Join(outDir, baseline.SuccessMarker)); statErr == nil {
-		t.Errorf("stale %s marker from the prior run must be removed, not left masking this failed run as complete", baseline.SuccessMarker)
+	if _, statErr := os.Stat(filepath.Join(outDir, baseline.IncompleteMarker)); statErr == nil {
+		t.Errorf("%s written by a run refused before any table started", baseline.IncompleteMarker)
 	}
-	if _, statErr := os.Stat(filepath.Join(outDir, baseline.IncompleteMarker)); statErr != nil {
-		t.Errorf("%s marker missing after a failed run: %v", baseline.IncompleteMarker, statErr)
-	}
-	if baseline.SnapshotComplete(outDir) {
-		t.Error("SnapshotComplete must report this failed, reused-dir run as incomplete")
+	if !baseline.SnapshotComplete(outDir) {
+		t.Error("the earlier complete dump no longer reads as complete after a run that changed nothing")
 	}
 }
 
