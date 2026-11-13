@@ -77,8 +77,14 @@ The first run loads the newest baseline snapshot. Every run after that appends
 only what changed: the events between the table's own cursor and the run's
 binlog cut are folded to the net change per primary key and committed as ONE
 Iceberg snapshot (equality deletes for every touched key, plus the rows that
-still exist). The table is never rewritten; compaction is the reader's
-concern and any engine can do it.
+still exist).
+
+Each run adds delete files that readers pay for on every read, and DuckDB and
+ClickHouse cannot compact the table themselves. So once a table holds
+--compact-after delete files (default ` + strconv.Itoa(defaultCompactAfter) + `), the run compacts it after its delta:
+the live rows are rewritten into new data files and every delete file is
+dropped, in one commit of type "replace" that changes neither the rows nor the
+cursor. --compact-after 0 turns it off (for a table another engine compacts).
 
 The cursor lives in the table's own properties, in the same commit as the
 data, so nothing is written to the index and a run that dies before committing
@@ -170,6 +176,7 @@ var (
 	eiFetchBatch  int
 	eiFormat      string
 	eiEvery       string
+	eiCompact     int
 
 	eiCatalog          string
 	eiCatalogURI       string
@@ -205,6 +212,7 @@ func init() {
 	f.IntVar(&eiFetchBatch, "fetch-batch-size", 0, "Event page size for the delta fold (0 = default)")
 	f.StringVar(&eiFormat, "format", "text", "Output format: text or json")
 	f.StringVar(&eiEvery, "every", "", "Run again this long after each run ends, until stopped (e.g. 15m, 1h; at least 1m). Empty = run once. Command line only, never read from the environment")
+	f.IntVar(&eiCompact, "compact-after", defaultCompactAfter, "Compact a table once it holds this many delete files: rewrite its live rows and drop the delete files, in one commit (0 = never)")
 	f.StringVar(&eiCatalog, "catalog", "hadoop", "Catalog to register the tables in: hadoop (a local directory), glue (AWS Glue, data on S3) or rest (an Iceberg REST catalog)")
 	f.StringVar(&eiCatalogURI, "catalog-uri", "", "REST catalog base URL (--catalog rest)")
 	f.StringVar(&eiCatalogWarehouse, "catalog-warehouse", "", "REST catalog warehouse identifier: a catalog name, an AWS account id, an S3 Tables bucket ARN (--catalog rest)")
@@ -219,6 +227,11 @@ func init() {
 	exportCmd.AddCommand(exportIcebergCmd)
 	rootCmd.AddCommand(exportCmd)
 }
+
+// defaultCompactAfter is --compact-after's default: how many delete files a
+// table may gather before the run compacts it. One delta run adds one, so
+// with a run a minute this compacts every ten minutes.
+const defaultCompactAfter = 10
 
 // exportEveryFloor is the shortest --every accepted. Below it the loop would
 // spend most of its time starting runs (listing the baseline, opening the
@@ -336,6 +349,9 @@ func prepareExport(cmd *cobra.Command) (*exportJob, time.Duration, error) {
 	if eiFetchBatch < 0 {
 		return nil, 0, fmt.Errorf("--fetch-batch-size must be >= 0 (0 = default)")
 	}
+	if eiCompact < 0 {
+		return nil, 0, fmt.Errorf("--compact-after must be >= 0 (0 = never compact)")
+	}
 	source := eiBaselineDir
 	if source == "" {
 		source = eiBaselineS3
@@ -373,6 +389,7 @@ func prepareExport(cmd *cobra.Command) (*exportJob, time.Duration, error) {
 		Warehouse:      eiWarehouse,
 		Catalog:        catCfg,
 		FetchBatchSize: eiFetchBatch,
+		CompactAfter:   eiCompact,
 		ArchiveFetcher: cli.TunedArchiveFetcher(tuning),
 		DuckDBTuning:   tuning,
 	}
@@ -645,6 +662,36 @@ type exportTableJSON struct {
 	SnapshotID *int64 `json:"snapshot_id,omitempty"` // absent when the table has no snapshot (a zero-row load)
 	Cursor     string `json:"cursor,omitempty"`
 	Location   string `json:"location,omitempty"`
+	// Compaction is absent when the run did not compact the table.
+	Compaction *exportCompactionJSON `json:"compaction,omitempty"`
+}
+
+// exportCompactionJSON is one table's compaction. Status is "applied",
+// "not_applied" (the table is as the run's delta left it) or "unknown" (the
+// catalog could not say; the rows are the same either way), and Error is set
+// unless it is "applied".
+type exportCompactionJSON struct {
+	Status            string `json:"status"`
+	DataFilesBefore   int    `json:"data_files_before"`
+	DeleteFilesBefore int    `json:"delete_files_before"`
+	DataFilesAfter    int    `json:"data_files_after"`
+	Rows              int64  `json:"rows"`
+	SnapshotID        *int64 `json:"snapshot_id,omitempty"`
+	Error             string `json:"error,omitempty"`
+}
+
+func compactionJSON(c *icebergexport.Compaction) *exportCompactionJSON {
+	if c == nil {
+		return nil
+	}
+	out := &exportCompactionJSON{Status: c.Status(), DataFilesBefore: c.DataFilesBefore,
+		DeleteFilesBefore: c.DeleteFilesBefore, SnapshotID: c.SnapshotID}
+	if c.Err != nil {
+		out.Error = c.Err.Error()
+		return out
+	}
+	out.DataFilesAfter, out.Rows = c.DataFilesAfter, c.Rows
+	return out
 }
 
 // writeExportJSON writes one run's report: indented for a one-shot, on a
@@ -657,6 +704,7 @@ func writeExportJSON(w io.Writer, outcomes []icebergexport.Outcome, catalogKind,
 			Schema: o.Schema, Table: o.Table, Verdict: string(o.Verdict), Detail: o.Detail,
 			RowsLoaded: o.RowsLoaded, Events: o.Events, Upserts: o.Upserts, Deletes: o.Deletes,
 			SnapshotID: o.SnapshotID, Cursor: o.Cursor, Location: o.Location,
+			Compaction: compactionJSON(o.Compaction),
 		})
 	}
 	enc := json.NewEncoder(w)
