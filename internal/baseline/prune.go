@@ -660,6 +660,8 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 
 	if localOnly {
 		newest := computeNewestN(countable, opts.KeepNewest, now)
+		// The pair a check compares, which only this folder holds (#2691).
+		keepCheckPair(opts.LocalDir, keepers)
 		pruneNames, res := planPruneKeepNewest(snaps, keepers, newest, opts.Retain, 0, now)
 		res = restoredKept(res, nil)
 		why := "no external destination; keeping the newest " + fmt.Sprint(opts.KeepNewest)

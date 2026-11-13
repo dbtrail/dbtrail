@@ -384,6 +384,9 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 				if rec.NextSend != nil {
 					dto.NotInS3.NextSend = rec.NextSend.UTC().Format(time.RFC3339)
 				}
+				for _, w := range rec.Waiting {
+					dto.NotInS3.Waiting = append(dto.NotInS3.Waiting, sendWaitDTO{Name: w.Name, Until: w.Until.UTC().Format(time.RFC3339), ForAnswer: w.ForAnswer})
+				}
 			}
 		}
 	}
@@ -811,4 +814,14 @@ type notInS3DTO struct {
 	// sends, not a failure.
 	ReadRefused    []string `json:"read_refused,omitempty"`
 	WaitsForAnswer bool     `json:"waits_for_answer,omitempty"`
+	// Waiting are those whose send waits, each with when its wait ends
+	// (#2691); the others are sent at the next cleanup.
+	Waiting []sendWaitDTO `json:"waiting,omitempty"`
+}
+
+// sendWaitDTO is baseline.SendWait on the wire: Until RFC3339 UTC.
+type sendWaitDTO struct {
+	Name      string `json:"name"`
+	Until     string `json:"until"`
+	ForAnswer bool   `json:"for_answer,omitempty"`
 }

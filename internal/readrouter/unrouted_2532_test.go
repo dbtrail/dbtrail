@@ -46,7 +46,6 @@ func TestUnroutedVeto(t *testing.T) {
 		"SELECT 0x10":                                    "hexadecimal",
 		"SELECT x'41'":                                   "hexadecimal",
 		"SELECT b'101'":                                  "hexadecimal",
-		"SELECT a FROM t LIMIT 10, 5":                    "OFFSET",
 		"SELECT _binary'x'":                              "_binary",
 		"SELECT DAYOFWEEK(d) FROM t":                     "isodow",
 		"SELECT WEEKDAY(d) FROM t":                       "isodow",
@@ -62,6 +61,9 @@ func TestUnroutedVeto(t *testing.T) {
 		}
 	}
 	answered := []string{
+		// Written for the copy before it runs, or refused then
+		// (UnroutedLimitVeto, #2628).
+		"SELECT a FROM t LIMIT 10, 5",
 		// The copy's own way of writing things.
 		`SELECT "order", "group" FROM "my table"`,
 		"SELECT a || b FROM t",
