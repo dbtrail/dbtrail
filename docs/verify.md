@@ -57,13 +57,15 @@ It is read-only and never writes to your source or your index.
 - **Live-source mode needs an exact snapshot position to run on a table
   with writes.** The reconstruction is cut at the position the live read was
   taken at, so writes committed during the check are left out of both sides.
-  That position is exact on Percona Server and MariaDB, and on MySQL with
-  GTIDs on only with `--pause-writes`, which briefly pauses writes to each
-  checked table on the source; see [Live-source](#live-source). Everywhere
-  else (MySQL by default, MySQL with `gtid_mode=OFF`, a source account
-  without the grants, a PostgreSQL source) the rule is unchanged: **no writes
-  to the table while it is read**, or a write shows as a MISMATCH even though
-  the reconstruction is correct. The result says when that rule applies.
+  That position is exact on Percona Server, MariaDB and PostgreSQL (when the
+  source role has the `REPLICATION` attribute), and on MySQL with GTIDs on
+  only with `--pause-writes`, which briefly pauses writes to each checked
+  table on the source; see [Live-source](#live-source). Everywhere else
+  (MySQL by default, MySQL with `gtid_mode=OFF`, a source account without the
+  grants, a PostgreSQL role without `REPLICATION`) the rule is unchanged: **no
+  writes to the table while it is read**, or a write shows as a MISMATCH even
+  though the reconstruction is correct. The result says when that rule
+  applies.
 
 ## The modes
 
@@ -197,7 +199,8 @@ depends on the server:
 | Percona Server (`gtid_mode=ON`) | the server's own snapshot position (`Binlog_snapshot_gtid_executed`), no lock | fine |
 | MariaDB | the server's own snapshot coordinate (`binlog_snapshot_file`/`_position`, through `BINLOG_GTID_POS`), no lock | fine |
 | MySQL (`gtid_mode=ON`) with `--pause-writes` | `LOCK TABLES <table> READ` on a second connection while the snapshot opens: **writes to that one table on the source wait while it is held**, the time it takes to open a snapshot and read one variable; reads never wait | fine, unless steady writes keep the lock from being granted (then `inconclusive`) |
-| MySQL by default (no `--pause-writes`), MySQL without the grants, MySQL with `gtid_mode` other than `ON` (`ON_PERMISSIVE` still commits transactions without a GTID), PostgreSQL | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
+| PostgreSQL, role with `REPLICATION` (on Amazon RDS, `rds_replication`) | a temporary logical slot (built-in `pgoutput`) created for the read: the table is read at the snapshot the slot exports, and the reconstruction stops at the slot's consistent point. The slot goes away when the read has started; nothing is installed in the source | fine. Creating the slot waits for the write transactions open on the server at that moment; one still open after 10 seconds makes the table `inconclusive`, naming the oldest open transaction. Needs one free slot in `max_replication_slots` |
+| MySQL by default (no `--pause-writes`), MySQL without the grants, MySQL with `gtid_mode` other than `ON` (`ON_PERMISSIVE` still commits transactions without a GTID), PostgreSQL role without `REPLICATION` (or no free slot, or no replication entry in `pg_hba.conf`) | not pinned | **none allowed**: a write while the table is read shows as a MISMATCH |
 
 **`--pause-writes` (stock MySQL only, off by default).** Exactly who waits,
 on the production source:
@@ -689,7 +692,7 @@ sources exist:
   read in PostgreSQL's own text rendering under the same pinned session GUCs
   the capture and baseline run under (`TimeZone=UTC`, `DateStyle=ISO`,
   `extra_float_digits=3`, `bytea_output=hex`, `IntervalStyle=postgres`), and
-  anchored on `pg_current_wal_lsn()`. Its coverage check differs from MySQL
+  anchored on a WAL position (which one is below). Its coverage check differs from MySQL
   by necessity: an index checkpoint at-or-past the anchor **proves** the
   index absorbed everything the snapshot reflects; a checkpoint behind it
   proves nothing (WAL from other databases and non-transactional activity —
@@ -701,7 +704,21 @@ sources exist:
   stamped **inside the comparison window** reports `inconclusive`, never a
   false mismatch; a loss older than the baseline snapshot is outside the
   window — the baseline is a fresh dump of the source, so it re-covers
-  whatever the gap lost — and does not degrade the verdict. The
-  live-source reconstruction is not cut at the snapshot's position yet
-  ([#2198](https://github.com/dbtrail/dbtrail/issues/2198)), so there must be
-  no writes to the table while it is read.
+  whatever the gap lost — and does not degrade the verdict. With a role that
+  has `REPLICATION`, the table is read at the snapshot of a temporary logical
+  slot created for the read, and the anchor is that slot's consistent point:
+  the snapshot holds exactly the transactions committed before it, and every
+  change the PostgreSQL capture indexes carries its commit LSN, so the
+  reconstruction stops strictly before that point, on the index and on the
+  archives alike, and a table with writes compares equal. The check then
+  waits (up to 60 seconds per table) for a running capture to save a position
+  at or past that point; on a quiet database, where no later commit moves the
+  capture past it, the wait ends once the capture has saved its position
+  twice without it moving, and the result carries the `coverage unverified`
+  note (that is not proof: a capture held up before delivering a commit
+  saves the same position too). A capture still moving its position, but not
+  yet at that point, when the wait runs out is behind: the table is
+  `inconclusive`. Without `REPLICATION` (or with no free slot, or no replication entry
+  in `pg_hba.conf`), the read is anchored on `pg_current_wal_lsn()` and not
+  cut, the result says why, and there must be no writes to the table while
+  it is read.
