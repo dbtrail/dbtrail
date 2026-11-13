@@ -65,10 +65,11 @@ func TestReadRefused_expiredCredentialsAreNotReadRefusals(t *testing.T) {
 		t.Errorf("the mark of the re-send is lost while S3 refuses everything: %v", ResentUnconfirmed(root))
 	}
 
-	// 3. They work again: it heals, the mark goes, the record clears.
+	// 3. They work again: it heals, the mark goes, the record clears, and
+	// s[0], now confirmed, goes past the count (the others went in 1).
 	b.refuse = false
 	res, _ = cycle(t, root, 1, b.probe, b.has)
-	if res.DestinationDenied || res.DestinationWriteOnly || len(res.Pruned) != 4 {
+	if res.DestinationDenied || res.DestinationWriteOnly || !slices.Equal(res.Pruned, []string{s[0]}) {
 		t.Fatalf("after the credentials work again: %+v", res)
 	}
 	if m := ResentUnconfirmed(root); len(m) != 0 {

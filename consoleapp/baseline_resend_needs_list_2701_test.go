@@ -54,7 +54,9 @@ func TestResend_aRefusedS3CleanupQuestionNamesListBucket(t *testing.T) {
 	prune := func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error) {
 		return baseline.PruneResult{KeptNotDurable: 1, NotAtDestination: []string{name}}, nil
 	}
-	run := func() { runBaselinePruneCycle(context.Background(), []baselinePruneTarget{{dir: root, s3: "s3://bkt/p/"}}, 0, prune) }
+	run := func() {
+		runBaselinePruneCycle(context.Background(), []baselinePruneTarget{{dir: root, s3: "s3://bkt/p/"}}, 0, prune)
+	}
 	read := func() baseline.NotInDestination {
 		t.Helper()
 		rec, ok, err := baseline.ReadNotInDestination(root)
