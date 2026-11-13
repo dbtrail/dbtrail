@@ -24,6 +24,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup migration gives them, are one set of snapshots and are pruned by
   age as before. `bintrail baseline --upload --baseline-retain` names one folder and
   one prefix and cannot see other servers; it is unchanged.
+- **A reader in another process keeps the snapshot it reads** (#2675). The
+  readers the cleanup waits for were known only inside the process that runs
+  them, so `bintrail export iceberg`, `bintrail verify` and `bintrail
+  reconstruct` lost an older snapshot to the cleanup of `watch` while they
+  read it, and failed. Each now holds the snapshot it reads with a shared lock
+  on that snapshot's `_SUCCESS` file (the first load of each table for the
+  export; each table checked, and every pair's snapshots for the default
+  check, for verify; each table of a full-table run for reconstruct; each
+  lookup of a cascade recovery), and the cleanup of any process takes the
+  file exclusively right before it removes a snapshot: when it cannot, the
+  snapshot stays and the rest of the folder is cleaned. The lock needs only
+  read access and ends with the process, killed included. A hold stops the
+  cleanup for at most 24 hours, like a job of `watch`, counted from the
+  earlier of the start the reader records beside the snapshot (0600, never
+  through a link) and the first time the cleanup found it held; past that the
+  cleanup removes the snapshot and logs once "a reader has held this snapshot
+  for longer than any read is allowed to, so the cleanup no longer waits for
+  it and removes it; that reader will fail". A reader that cannot get the
+  lock within 5 seconds reads without it and says so. A reader that
+  reaches its snapshot just as it is removed looks it up once more, and
+  twice fails with "the snapshot of <schema>.<table> was removed by the
+  cleanup twice while this read started; run it again". Not covered: a
+  snapshot with no `_SUCCESS` file, one read from S3, and a DuckDB session of
+  your own over an older snapshot's `views.sql`. The local mirror of an
+  S3-only server's snapshots (SQL on the copy) no longer removes, past its
+  two, a mirrored snapshot a SQL statement is reading; it goes in the first
+  round after the statement ends. Only live readers count: each reader also
+  locks its own record, so a killed reader's age is never charged to the
+  reader after it. On NFS (EFS included) the cleanup opens `_SUCCESS`
+  read-write, since an exclusive lock there needs it, and a lock refused for
+  any other reason than a reader holding it is logged once per folder as a
+  warning instead of passing in silence; two holders in one process do not
+  exclude each other on NFS. A `_SUCCESS` that is not a regular file (a FIFO)
+  is not waited on.
 
 - **Full reads work on sources with `explain_format=TREE`** (#2211). On a
   MySQL 9.x source whose `explain_format` is `TREE` (the default on Percona

@@ -245,8 +245,11 @@ its number.
   snapshot sent before the moment you ask for.
 - **Tools that read the local folder from another process**
   (`bintrail reconstruct --baseline-dir`, `bintrail export iceberg`, a
-  standalone shim) get the same reach, and are not waited for by the
-  cleanup.
+  standalone shim) get the same reach. Since
+  [#2675](https://github.com/dbtrail/dbtrail/issues/2675) the snapshot
+  `bintrail reconstruct`, `bintrail verify` and `bintrail export iceberg`
+  are reading is kept by the cleanup until they end; a standalone shim's
+  single-row lookups are not.
 - **"Delete by age"** (`--baseline-retain`) is unchanged, its one-hour
   minimum included.
 
