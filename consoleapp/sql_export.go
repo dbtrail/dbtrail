@@ -996,5 +996,5 @@ func sqlExportRunError(reports []*reconstruct.TableReport, runErr error) error {
 
 func sqlExportNoSnapshotError(schema, table string) error {
 	return fmt.Errorf(
-		"table %s.%s lost its snapshot mid-build and was rebuilt from recorded changes only; that dump would silently miss every row those changes never touched", schema, table)
+		"table %s.%s lost its snapshot mid-build; built from its recorded changes alone, its dump would silently miss every row those changes never touched, so this build fails", schema, table)
 }

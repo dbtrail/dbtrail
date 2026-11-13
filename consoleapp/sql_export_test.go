@@ -272,7 +272,7 @@ func TestSQLExportRunError(t *testing.T) {
 	}
 	err := sqlExportRunError(degraded, nil)
 	if err == nil || !strings.Contains(err.Error(), "shop.users") ||
-		!strings.Contains(err.Error(), "recorded changes only") {
+		!strings.Contains(err.Error(), "recorded changes alone") {
 		t.Fatalf("binlog-only report: err = %v, want a refusal naming shop.users", err)
 	}
 	if kept := sqlExportRunError(clean, errors.New("fold died")); kept == nil || kept.Error() != "fold died" {
@@ -308,7 +308,7 @@ func TestSQLExport_aTableThatLostItsSnapshotFailsTheBuildUnwritten(t *testing.T)
 	if cfg.AllowChangesOnly {
 		t.Error("the build asks for a table with no snapshot to be written from its changes alone")
 	}
-	const want = "table shop.users lost its snapshot mid-build and was rebuilt from recorded changes only; that dump would silently miss every row those changes never touched"
+	const want = "table shop.users lost its snapshot mid-build; built from its recorded changes alone, its dump would silently miss every row those changes never touched, so this build fails"
 	engine := errors.Join(
 		fmt.Errorf("shop.users: %w", &reconstruct.ChangesOnlyError{Schema: "shop", Table: "users", At: time.Now()}),
 		errors.New("shop.items: no primary key"),

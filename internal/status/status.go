@@ -111,14 +111,17 @@ type StreamStateInfo struct {
 	// acknowledgements were recorded. Read it through GapAcknowledged /
 	// GapUnacknowledged, never directly.
 	GapAckedAt sql.NullTime
-	// Floor is the start of the window of changes this index still holds (the
-	// delta-coverage floor, OldestDeltaFromDB). It is not a stream_state
-	// column: LoadStreamState leaves it zero, and the collectors fill it
-	// (CollectStatus, CollectCoverageSummary, or LoadGapWindow). Its one use
-	// is GapOnRecord: an ACKNOWLEDGED loss older than this floor is no longer
-	// reported, because nothing still held spans it. Zero means the window's
-	// start is unknown, and the loss then stays on record. It never changes
-	// GapUnacknowledged, GapAcknowledged or GapLostAt.
+	// Floor is the start of the window of changes this index still holds: the
+	// delta-coverage floor (OldestDeltaFromDB), moved back to an older change
+	// when archives past a break or an event older than its partition's name
+	// still hold one from before an acknowledged loss (lookBelowFloor). So it
+	// can be earlier than the floor snapshots are graded against, never later.
+	// It is not a stream_state column: LoadStreamState leaves it zero, and the
+	// collectors fill it (CollectStatus, CollectCoverageSummary, or
+	// LoadGapWindow). Its one use is GapOnRecord: an ACKNOWLEDGED loss older
+	// than this start is no longer reported, because nothing still held spans
+	// it. Zero means the window's start is unknown, and the loss then stays on
+	// record. It never changes GapUnacknowledged, GapAcknowledged or GapLostAt.
 	Floor DeltaFloor
 	// GapColumnsPresent is true when the gap_lost_* columns existed and were read
 	// (the normal, migrated index). It is false only on a legacy index whose
@@ -1141,7 +1144,7 @@ func WriteStatus(w io.Writer, files []IndexStateRow, parts []PartitionStat, arch
 				stream.GapLostAt.Time.Format(TSFmt), stream.GapAckedAt.Time.Format(TSFmt))
 			fmt.Fprintln(w, "  Snapshot updates and reconstructions whose window spans that moment are")
 			fmt.Fprintln(w, "  refused. A full snapshot taken after it is not affected. This is reported")
-			fmt.Fprintln(w, "  while the index or its archives still hold the hour it happened in.")
+			fmt.Fprintln(w, "  while the index or its archives still hold changes from it or earlier.")
 		default:
 			fmt.Fprintln(w, "  Continuity:      no gaps in the captured range (not a liveness check)")
 		}
