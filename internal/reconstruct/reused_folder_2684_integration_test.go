@@ -108,11 +108,12 @@ func TestReconstruct2684_reusedFolderAndIfNotExists(t *testing.T) {
 	// A complete dump of an earlier run, markers included, stays complete
 	// after a run refused before any table starts: its files AND its markers.
 	for _, refused := range []struct {
-		name, baselineSrc, wantErr string
-		tables                     []string
+		name, indexDB, baselineSrc, wantErr string
+		tables                              []string
 	}{
-		{"a bad --tables entry", t.TempDir(), "invalid --tables entry", []string{"shop.t", "shop."}},
-		{"a snapshot folder that does not exist", filepath.Join(t.TempDir(), "typo"), "cannot be read", []string{"shop.t"}},
+		{"a bad --tables entry", dbName, t.TempDir(), "invalid --tables entry", []string{"shop.t", "shop."}},
+		{"a snapshot folder that does not exist", dbName, filepath.Join(t.TempDir(), "typo"), "cannot be read", []string{"shop.t"}},
+		{"an index database that does not exist", dbName + "_gone", t.TempDir(), "connect to index DB", []string{"shop.t"}},
 	} {
 		t.Run("a run refused up front by "+refused.name+" leaves the folder as it was", func(t *testing.T) {
 			seed(t)
@@ -124,7 +125,7 @@ func TestReconstruct2684_reusedFolderAndIfNotExists(t *testing.T) {
 			}
 			before := names(t)
 			_, _, err := reconstruct.ReconstructTablesDetailed(ctx, reconstruct.FullTableConfig{
-				IndexDSN:     testutil.BaseDSN() + "/" + dbName,
+				IndexDSN:     testutil.BaseDSN() + "/" + refused.indexDB,
 				BaselineSrc:  refused.baselineSrc,
 				Tables:       refused.tables,
 				At:           at,
