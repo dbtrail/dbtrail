@@ -1,6 +1,9 @@
 package console
 
-import "github.com/dbtrail/dbtrail/internal/sqlsandbox"
+import (
+	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+)
 
 // sqlCopySession is the session of a statement written in the copy's own
 // dialect (the SQL card, the MCP sql tool) for b's server: PostgreSQL's rules
@@ -14,19 +17,25 @@ func (s *Server) sqlCopySession(b *bundle) sqlsandbox.Session {
 	if s.cm != nil && s.cm.reg != nil {
 		get = s.cm.reg.Get
 	}
-	return sqlsandbox.Session{PostgresRules: sourceIsPostgres(b.serverID, s.bootSourceFlavor, get)}
+	indexFlavor := func() string { return query.SourceFlavor(b.db) }
+	return sqlsandbox.Session{PostgresRules: sourceIsPostgres(b.serverID, indexFlavor, get)}
 }
 
-// sourceIsPostgres answers from what is held in memory, with no read of the
-// index: the registry entry's flavor, or for the server given on the command
-// line the flavor its capture runs as. Anything not known to be PostgreSQL
-// (an entry no longer in the registry, no flavor reported) is not.
-func sourceIsPostgres(serverID string, bootFlavor func() string, get func(string) (ServerEntry, bool)) bool {
+// sourceIsPostgres says whether a server's source is PostgreSQL.
+//
+// A registry server answers from its entry, held in memory: the flavor is
+// required when the entry is made and cannot be changed afterwards. The
+// server given on the command line has no entry, and the flavor its capture
+// reports is only ever MySQL or MariaDB, so it answers from its index
+// (indexFlavor: what the stream stamped there), one read per statement.
+// Anything not known to be PostgreSQL (an entry no longer in the registry, an
+// index no stream has written to, a read that failed) is not.
+func sourceIsPostgres(serverID string, indexFlavor func() string, get func(string) (ServerEntry, bool)) bool {
 	if serverID == "" || serverID == bootServerID {
-		if bootFlavor == nil {
+		if indexFlavor == nil {
 			return false
 		}
-		f, err := NormalizeFlavor(bootFlavor())
+		f, err := NormalizeFlavor(indexFlavor())
 		return err == nil && f == FlavorPostgres
 	}
 	if get == nil {
