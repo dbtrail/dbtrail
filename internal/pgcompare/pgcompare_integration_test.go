@@ -24,6 +24,7 @@ const (
 	itCustomers = "pgcmp_customers"
 	itOrders    = "pgcmp_orders"
 	itOdd       = "pgcmp_odd"
+	itArrays    = "pgcmp_arrays"
 	itPub       = "pgcmp_pub"
 	itSlot      = "pgcmp_slot"
 )
@@ -59,7 +60,7 @@ func TestIntegrationPGCompare(t *testing.T) {
 	dropAll := func() {
 		bg := context.Background()
 		_, _ = setup.Exec(bg, "DROP PUBLICATION IF EXISTS "+itPub)
-		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd)
+		_, _ = setup.Exec(bg, "DROP TABLE IF EXISTS "+itOrders+", "+itCustomers+", "+itOdd+", "+itArrays)
 		_, _ = setup.Exec(bg, "SELECT pg_drop_replication_slot($1) WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", itSlot)
 	}
 	dropAll()
@@ -205,17 +206,23 @@ func seedSQL() []string {
 			(3, 12345.678, 3.30),
 			(4, 99999999999999999999, 4.40),
 			(5, NULL, NULL)`,
-		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd,
+		`CREATE TABLE ` + itArrays + ` (id int PRIMARY KEY, tags text[], nums integer[], days date[], flags boolean[], grid integer[])`,
+		`INSERT INTO ` + itArrays + ` VALUES
+			(1, ARRAY['red', 'two words', 'a,b', 'q"x', 'back\\slash', '', 'NULL', 'null', NULL, 'it''s', '{x}'],
+			    ARRAY[1, NULL, 7], ARRAY[DATE '2026-01-31', NULL], ARRAY[true, false, NULL], NULL),
+			(2, '{}', '{}', '{}', '{}', NULL),
+			(3, NULL, NULL, NULL, NULL, '{{1,2},{3,4}}')`,
+		`CREATE PUBLICATION ` + itPub + ` FOR TABLE ` + itCustomers + `, ` + itOrders + `, ` + itOdd + `, ` + itArrays,
 	}
 }
 
 func expectations() []expectation {
-	o, c, odd := itOrders, itCustomers, itOdd
+	o, c, odd, arr := itOrders, itCustomers, itOdd, itArrays
 	eq := func(stmt string) expectation { return expectation{stmt: stmt, verdict: sqlcompare.Equal} }
 	// What still differs, each with the issue it belongs to. still is a
 	// statement the copy answers differently, refused one it cannot run.
 	const (
-		otherTypes = "#2787: arrays and json are still read as text"
+		otherTypes = "#2770: json's operators belong to the source's dialect"
 		dialect    = "#2770: the copy's dialect answers this differently; it belongs to the source"
 	)
 	still := func(kind, says, why, stmt string) expectation {
@@ -293,8 +300,21 @@ func expectations() []expectation {
 		// JSON, arrays, bytes, uuid.
 		eq(`SELECT id, attrs->>'k' FROM ` + o),
 		refused("@>(VARCHAR, STRING_LITERAL)", otherTypes, `SELECT id FROM `+o+` WHERE attrs @> '{"k": "v"}'`),
-		still("rows", "", otherTypes, `SELECT id, labels[1] FROM `+o),
-		refused("UNNEST not supported here", otherTypes, `SELECT id FROM `+o+` WHERE 'red' = ANY(labels)`),
+		// An array is a list on the copy (#2787): an element by its
+		// position, ANY, and the array itself, written as the source does.
+		eq(`SELECT id, labels[1] FROM ` + o),
+		eq(`SELECT id, labels[2] FROM ` + o),
+		eq(`SELECT id FROM ` + o + ` WHERE 'red' = ANY(labels)`),
+		eq(`SELECT id, labels FROM ` + o + ` WHERE labels IS NOT NULL`),
+		eq(`SELECT id FROM ` + o + ` WHERE labels IS NULL`),
+		eq(`SELECT id, tags, nums, days, flags FROM ` + arr),
+		eq(`SELECT id, nums[1], tags[3], flags[2] FROM ` + arr),
+		eq(`SELECT id FROM ` + arr + ` WHERE 7 = ANY(nums)`),
+		eq(`SELECT id FROM ` + arr + ` WHERE 'two words' = ANY(tags)`),
+		// More than one dimension does not fit a list: the statement that
+		// reads the column fails, and one that does not is answered.
+		refused("more than one dimension", "by design: never read as something else", `SELECT grid FROM `+arr),
+		eq(`SELECT id FROM ` + arr + ` ORDER BY id`),
 		refused("length(BLOB)", dialect, `SELECT id, length(payload) FROM `+o),
 		eq(`SELECT id FROM ` + o + ` WHERE tag = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'`),
 		// Shapes.
