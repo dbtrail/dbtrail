@@ -1273,7 +1273,7 @@ func TestStartRebuild_carriesTheDestinationIntoTheFold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.startRebuild(e, p, "2026-08-28T09:00:00Z"); err != nil {
+	if err := b.startRebuild(e, p, "2026-08-28T09:00:00Z", ""); err != nil {
 		t.Fatalf("startRebuild: %v", err)
 	}
 	waitTerminalMethod(t, b, e.ID, console.BackupMethodRefresh)

@@ -116,6 +116,14 @@ type BaselineRunRecord struct {
 	// it, fixed at write time. Empty on updates and manual backups.
 	Why     string `json:"why,omitempty"`
 	WhyCode string `json:"why_code,omitempty"`
+	// UpdateWhy is why a scheduled UPDATE ran where the slot would otherwise
+	// have been skipped (#2674): the snapshot could not wait, or the index
+	// did not give capture's record (console.IsUnconfirmedUpdate). Shown
+	// before the run as the next run's reason and once in the log; kept here
+	// so the run says it after the live view is gone. Empty on every other
+	// run. Apart from Why, which every reader takes for the reason of a FULL
+	// read. A build before it ignores the key.
+	UpdateWhy string `json:"update_why,omitempty"`
 	// DiskCheck / DiskNote: see BaselineStatus. Kept with the run so a read
 	// that ran on a low disk says so after the live status is gone.
 	DiskCheck string `json:"disk_check,omitempty"`
