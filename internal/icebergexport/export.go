@@ -1247,11 +1247,11 @@ func writeDelta(ctx context.Context, mem memory.Allocator, icetbl *table.Table, 
 
 // releasing hands ownership of every yielded batch to its consumer, the way
 // table.WriteRecords documents for the data path ("releases each RecordBatch
-// it consumes") and does internally with the same adapter. iceberg-go v0.6.0
-// does NOT wrap the equality-delete input the same way: WriteEqualityDeletes
-// retains each batch in its bin packer and releases that reference in the file
-// writer, so the producer's own reference is never dropped and one key array
-// per batch leaks for the life of the run. writer_test.go's checked allocator
+// it consumes") and does internally with the same adapter. iceberg-go (v0.6.0,
+// and still v0.7.0) does NOT wrap the equality-delete input the same way:
+// WriteEqualityDeletes retains each batch in its bin packer and releases that
+// reference in the file writer, so the producer's own reference is never
+// dropped and one key array per batch leaks for the life of the run. writer_test.go's checked allocator
 // pins this: a leak fails AssertSize, and a double release after an upstream
 // fix fails on the refcount, so either change is loud.
 func releasing(itr iter.Seq2[arrow.RecordBatch, error]) iter.Seq2[arrow.RecordBatch, error] {
