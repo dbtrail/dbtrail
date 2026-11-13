@@ -29,8 +29,6 @@ func TestVeto_nowKeywords_2611(t *testing.T) {
 		"SELECT YEAR(CURRENT_DATE), MONTH(CURRENT_TIMESTAMP) FROM t",
 		"SELECT * FROM t WHERE ts >= CURRENT_TIMESTAMP /* now */ - INTERVAL 1 DAY",
 		"SELECT * FROM t WHERE d >= CURRENT_DATE - INTERVAL 7 DAY AND k > ?",
-		// A name, not the keyword: quoted, or after a dot.
-		"SELECT `current_date` FROM t", "SELECT t.current_date FROM t",
 		// Inside a string or a comment.
 		"SELECT * FROM t WHERE note = 'CURRENT_DATE - 1'", "SELECT 1 /* CURRENT_DATE - 1 */",
 	} {
@@ -53,6 +51,9 @@ func TestVeto_nowKeywords_2611(t *testing.T) {
 		"SELECT * FROM t WHERE CURRENT_DATE = '2026-11-02 10:00:00'", "SELECT * FROM t WHERE CURRENT_DATE = ?",
 		"SELECT COALESCE(s, CURRENT_DATE) FROM t", "SELECT * FROM (SELECT note AS d FROM ev) x WHERE d = CURRENT_DATE",
 		"SELECT DATE(CURRENT_TIMESTAMP) - INTERVAL 1 DAY",
+		// A name, not the keyword (quoted, or after a dot): kept on MySQL as
+		// before, since the copy may still read it as its own function.
+		"SELECT `current_date` FROM t", "SELECT t.current_date FROM t", "SELECT `localtime` FROM t",
 		// An INTERVAL amount that is a placeholder is not read as a step, as
 		// with CURDATE().
 		"SELECT * FROM t WHERE d >= CURRENT_DATE - INTERVAL ? DAY",

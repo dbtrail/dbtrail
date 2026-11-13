@@ -432,7 +432,11 @@ What to know before relying on it:
     that calls them goes to MySQL when the session's zone is a name
     (`America/New_York`), because near a clock change a wall clock there can
     stand for two instants or for none; under UTC and a whole-hour offset
-    the copy answers. Without Engine Routing the copy answers them under a
+    the copy answers. Under Engine Routing `CURRENT_TIMESTAMP`, `LOCALTIME`
+    and `LOCALTIMESTAMP` (with or without `()`) are sent to the copy as
+    `NOW()`, and `CURRENT_DATE` as `CURDATE()`, under the same rules; without
+    Engine Routing they are the copy's own keywords (a date and time with its
+    zone and microseconds). Without Engine Routing the copy answers them under a
     name too, and within an hour of a clock change a comparison with a
     `TIMESTAMP` column can come out an hour away from MySQL's. `NOW()` and the columns that are instants (a MySQL `TIMESTAMP`, the
     `events` view's `event_timestamp` and `commit_time`) are printed in it,
@@ -656,8 +660,11 @@ The decision, in order, for every statement:
    the next transaction (#2607).
 3. A construct the copy would answer *differently* without an error
    (`GROUP_CONCAT`, `NOW(3)` and the clock forms the copy does not have:
-   `CURRENT_TIMESTAMP`, `CURRENT_DATE`, `LOCALTIME`, `CURTIME`, `SYSDATE`,
-   `UTC_TIME`; `NOW()` or `CURDATE()` next to arithmetic other than
+   a fraction of a second (`CURRENT_TIMESTAMP(3)`, `LOCALTIME(6)`),
+   `CURRENT_TIME`, `CURTIME`, `SYSDATE`, `UTC_TIME`, and `CURRENT_DATE` or
+   `LOCALTIME` written as a quoted name or after a dot; `NOW()` or
+   `CURDATE()` (and `CURRENT_TIMESTAMP`, `LOCALTIME`, `LOCALTIMESTAMP` and
+   `CURRENT_DATE`, which the copy is sent as those two) next to arithmetic other than
    `INTERVAL`, which MySQL turns into a number, or after the `INTERVAL`
    (`NOW() - INTERVAL 1 DAY * 2`); `CURDATE()` or `UTC_DATE()` anywhere but
    compared with a `DATE`, `DATETIME` or `TIMESTAMP` column (`BETWEEN`

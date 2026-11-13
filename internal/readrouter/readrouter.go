@@ -173,10 +173,15 @@ var vetoes = []struct {
 	{"GROUP_CONCAT", regexp.MustCompile(`(?i)\bgroup_concat\s*\(`)}, // MySQL cuts at group_concat_max_len
 	// NOW(), CURDATE(), UTC_TIMESTAMP() and UTC_DATE() the copy has with
 	// MySQL's values (sqlsandbox's macros, #2611), next to no arithmetic but
-	// INTERVAL (nowVeto). Not these: a fraction of a second, the keywords
-	// DuckDB reads as its own (CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME,
-	// LOCALTIMESTAMP, which it types or computes another way), a time of day
-	// (held as text on the copy), and SYSDATE, the time each call runs at.
+	// INTERVAL (nowVeto), and so CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME
+	// and LOCALTIMESTAMP, which the text this list reads holds as those calls
+	// (clockKeywordsAsCalls; VetoOpts keeps them on MySQL without
+	// CopyOptions.MySQLClockKeywords). Not these: a fraction of a second
+	// (CURRENT_TIMESTAMP(3) is read as now(3) here), a time of day (held as
+	// text on the copy), and SYSDATE, the time each call runs at. A
+	// CURRENT_DATE or a LOCALTIME still in the text is a name (quoted, or
+	// next to a dot), which the copy may still resolve to its own function:
+	// kept on MySQL, as it was before the keywords reached the copy.
 	{vetoNowKeyword, regexp.MustCompile(`(?i)\b(now|utc_timestamp)\s*\(\s*[^)\s]|\b(curtime|current_timestamp|current_date|current_time|sysdate|utc_time|localtime|localtimestamp)\b`)},
 	// UNIX_TIMESTAMP() with no argument is now; with one, the column types
 	// decide (UnixTimeVeto, #2493). Quoted too: MySQL calls the function.
@@ -302,7 +307,10 @@ func HasLike(stmt string) bool {
 // when every LIKE in it is followed by a string literal or a placeholder.
 // A pattern read from a column or an expression can hold a backslash, an
 // escape on MySQL and a character on the copy, so it stays on MySQL; so does
-// SOUNDS LIKE, which the copy does not have, and REGEXP and RLIKE.
+// SOUNDS LIKE, which the copy does not have, and REGEXP and RLIKE. With
+// MySQLClockKeywords, CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME and
+// LOCALTIMESTAMP are held to the rules of NOW() and CURDATE() (#2611); without
+// it they keep the statement on MySQL.
 func VetoOpts(stmt string, o CopyOptions) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
@@ -318,6 +326,10 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	}
 	for _, v := range vetoes {
 		re := v.re
+		if v.name == vetoNowKeyword && sc.clockKeyword && !o.MySQLClockKeywords {
+			// The copy would be sent the keyword, and read it as its own.
+			return v.name
+		}
 		if v.name == likeVeto && o.LikeIgnoresCase {
 			if !likePatternsWritten(sc.blankedCopy) {
 				return v.name

@@ -397,7 +397,10 @@ func (h *Handler) BindRouter(r Router, cfg RouterConfig) {
 // copyOpts is what this connection's server lets the copy answer that MySQL
 // would answer otherwise.
 func (h *Handler) copyOpts() readrouter.CopyOptions {
-	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase}
+	// MySQLClockKeywords: the port's copy session always has MySQL's NOW()
+	// and CURDATE() (sessionvars, Session.MySQLClock), so the keywords that
+	// mean them can be written as those calls (#2611).
+	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true}
 }
 
 // Close releases what a connection holds: the router's upstream connection,

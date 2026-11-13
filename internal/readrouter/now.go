@@ -7,7 +7,7 @@ import (
 
 // The vetoes of #2611.
 const (
-	vetoNowKeyword    = "NOW(fsp), CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME, CURTIME, SYSDATE or UTC_TIME (not given to the copy: a fraction of a second, a keyword the copy reads as its own, a time of day, the time each call runs at)"
+	vetoNowKeyword    = "NOW(fsp), CURRENT_TIMESTAMP(fsp), CURRENT_TIME, CURTIME, SYSDATE or UTC_TIME (not given to the copy: a fraction of a second, a time of day, the time each call runs at), or CURRENT_TIMESTAMP, CURRENT_DATE or LOCALTIME where the copy would read them as its own"
 	vetoNowArithmetic = "NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE() next to arithmetic other than INTERVAL (a number built from the digits on MySQL; a date or a date and time on the copy)"
 	vetoDatePlace     = "CURDATE() or UTC_DATE() other than compared with a column, inside YEAR, MONTH, DAY or QUARTER, or a column of its own (a date on MySQL that the copy may turn into a date and time, or compare as one)"
 	vetoDateWrapped   = "NOW() or UTC_TIMESTAMP() made a date and then stepped (a date on MySQL, a date and time on the copy)"
@@ -203,6 +203,53 @@ func dateVeto(blanked string) string {
 		return vetoDatePlace
 	}
 	return ""
+}
+
+// clockKeywords are the keywords that mean NOW() and CURDATE() on MySQL and
+// MariaDB, with or without (), and the call each is written as (#2611).
+// LOCALTIME is NOW() too, a date and time, not a time of day.
+var clockKeywords = map[string]string{
+	"current_timestamp": "now",
+	"localtime":         "now",
+	"localtimestamp":    "now",
+	"current_date":      "curdate",
+}
+
+// clockCall is the call that replaces a clock keyword, given the text after
+// it: the name alone when the client wrote parentheses (kept as written, so
+// CURRENT_TIMESTAMP(3) is now(3), which the veto keeps on MySQL), the name
+// and () when it did not.
+func clockCall(word, after string) string {
+	if strings.HasPrefix(strings.TrimLeft(after, " \t\n\r\f\v"), "(") {
+		return clockKeywords[word]
+	}
+	return clockKeywords[word] + "()"
+}
+
+// clockKeywordsAsCalls writes each clock keyword of a blanked text (one that
+// scan read as a word, so not inside a string, a comment or a quoted name,
+// and not next to a dot, where it is a name) as the call it means, padded
+// with spaces to the keyword's length so that every position scan kept
+// still points at the same text. The checks that follow (the veto list,
+// nowVeto, CallsNow, DateComparedColumns, the console's column checks over
+// Shape) then read CURRENT_DATE - 1 as they read CURDATE() - 1. It reports
+// whether there was one.
+func clockKeywordsAsCalls(blanked string, kws []keywordAt) (string, bool) {
+	var b []byte
+	for _, k := range kws {
+		if clockKeywords[k.word] == "" || namedByDot(blanked, k.bl, len(k.word)) {
+			continue
+		}
+		if b == nil {
+			b = []byte(blanked)
+		}
+		call := clockCall(k.word, blanked[k.bl+len(k.word):])
+		copy(b[k.bl:k.bl+len(k.word)], call+strings.Repeat(" ", len(k.word)-len(call)))
+	}
+	if b == nil {
+		return blanked, false
+	}
+	return string(b), true
 }
 
 // nowCall is a call the copy answers with MySQL's value: NOW(),

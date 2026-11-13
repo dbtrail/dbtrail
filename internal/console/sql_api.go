@@ -1805,10 +1805,12 @@ func sqlNowRefusalFor(narrowed views.Input, statement string, types sqlsandbox.C
 	return ""
 }
 
-// mayCallNow is a word of NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE()
-// anywhere in a statement, comments and literals included: with no reading
-// of the statement, a literal can only cost a refusal.
-var mayCallNow = regexp.MustCompile(`(?i)\b(now|curdate|utc_timestamp|utc_date)\b`)
+// mayCallNow is a word of NOW(), CURDATE(), UTC_TIMESTAMP() or UTC_DATE(),
+// or of a keyword the router writes as one of them (CURRENT_TIMESTAMP,
+// CURRENT_DATE, LOCALTIME, LOCALTIMESTAMP), anywhere in a statement, comments
+// and literals included: with no reading of the statement, a literal can only
+// cost a refusal.
+var mayCallNow = regexp.MustCompile(`(?i)\b(now|curdate|utc_timestamp|utc_date|current_timestamp|current_date|localtime|localtimestamp)\b`)
 
 // sqlWordsRefusalFor says why the copy would refuse a statement because of
 // how it writes the name of a column of a table it reads, or "" (#2131):

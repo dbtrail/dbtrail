@@ -55,6 +55,13 @@ func TestSQLNowRefusalFor(t *testing.T) {
 		{"SELECT * FROM ev WHERE missing = CURDATE()", "", []string{"ev"}, true},
 		{"SELECT * FROM ev JOIN log USING (id) WHERE d = CURDATE()", "", []string{"ev", "log"}, true},
 		{"SELECT * FROM raw WHERE d = CURDATE()", "", []string{"raw"}, true},
+		// The keywords the router writes as NOW() and CURDATE() are held to
+		// the same refusals.
+		{"SELECT * FROM ev WHERE ts >= CURRENT_TIMESTAMP - INTERVAL 1 DAY", "America/New_York", []string{"ev"}, true},
+		{"SELECT * FROM ev WHERE ts >= LOCALTIMESTAMP - INTERVAL 1 DAY", "Etc/GMT+5", []string{"ev"}, false},
+		{"SELECT * FROM ev WHERE d >= CURRENT_DATE - INTERVAL 7 DAY", "", []string{"ev"}, false},
+		{"SELECT * FROM ev WHERE note = CURRENT_DATE", "", []string{"ev"}, true},
+		{"SELECT * FROM log WHERE d >= CURRENT_DATE() - INTERVAL 7 DAY", "", []string{"log"}, true},
 	} {
 		if got := sqlNowRefusalFor(only(c.tables...), c.stmt, readrouter.ShapeOf(c.stmt), c.zone); (got != "") != c.refused {
 			t.Errorf("sqlNowRefusalFor(%q, %q) = %q, want refused=%v", c.stmt, c.zone, got, c.refused)
@@ -69,6 +76,9 @@ func TestSQLNowRefusalFor(t *testing.T) {
 func TestSQLNowRefusalFor_noShape(t *testing.T) {
 	if sqlNowRefusalFor(views.Input{}, "SELECT now()", nil, "") == "" {
 		t.Error("no reading, NOW(): not refused")
+	}
+	if sqlNowRefusalFor(views.Input{}, "SELECT CURRENT_DATE", nil, "") == "" {
+		t.Error("no reading, CURRENT_DATE: not refused")
 	}
 	if got := sqlNowRefusalFor(views.Input{}, "SELECT 1", nil, ""); got != "" {
 		t.Errorf("no reading, no call: %q", got)

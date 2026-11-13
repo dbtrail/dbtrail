@@ -36,8 +36,11 @@ package sqlsandbox
 // has it. _bintrail_wall is now() over a given instant, for tests. TEMP, as
 // the UNIX_TIMESTAMP macros: the worker reuses its connection. The router
 // lets through only the calls with no argument and no arithmetic but INTERVAL
-// next to them (readrouter.nowVeto); NOW(3), CURRENT_TIMESTAMP, CURRENT_DATE
-// and LOCALTIME, which DuckDB reads as its own, stay MySQL's.
+// next to them (readrouter.nowVeto); NOW(3) stays MySQL's. CURRENT_TIMESTAMP,
+// LOCALTIME, LOCALTIMESTAMP and CURRENT_DATE, which DuckDB reads as its own
+// keywords (a macro cannot replace those), reach these macros only because
+// the routing port writes them as now() and curdate()
+// (readrouter.CopyOptions.MySQLClockKeywords).
 const nowMacros = `CREATE OR REPLACE TEMP MACRO _bintrail_wall(t) AS (CAST(date_trunc('second', t) AS TIMESTAMP));
 CREATE OR REPLACE TEMP MACRO now() AS (_bintrail_wall(current_timestamp));
 CREATE OR REPLACE TEMP MACRO curdate() AS (CAST(_bintrail_wall(current_timestamp) AS DATE));

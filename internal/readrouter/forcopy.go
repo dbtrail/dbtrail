@@ -58,6 +58,10 @@ type scanned struct {
 	// and in blanked.
 	raw      string
 	keywords []keywordAt
+	// clockKeyword: CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME or
+	// LOCALTIMESTAMP occurred as a keyword (not a name). blankedCopy then
+	// holds the call each means instead (clockKeywordsAsCalls).
+	clockKeyword bool
 }
 
 // CopyOptions are a server's choices about what the copy may answer that
@@ -82,6 +86,14 @@ type CopyOptions struct {
 	// without routing sets it: under routing the copy refuses both, and MySQL
 	// answers.
 	MySQLDateFunctions bool
+	// MySQLClockKeywords writes CURRENT_TIMESTAMP, LOCALTIME and
+	// LOCALTIMESTAMP as now(), and CURRENT_DATE as curdate(), the calls they
+	// mean on MySQL (#2611), which the copy's session has with MySQL's values
+	// (sqlsandbox's macros, under Session.MySQLClock). The copy reads the
+	// keywords as its own: a date and time with its zone and microseconds.
+	// Without it the veto keeps them on MySQL. Only the routing port sets it;
+	// the port without routing answers them with the copy's meaning.
+	MySQLClockKeywords bool
 }
 
 // ForCopy returns the statement the copy is sent: every backtick-quoted name
@@ -400,7 +412,7 @@ func scan(stmt string) scanned {
 	sc.raw = cp.String()
 	// Comments and string literals are gone from blanked, so every backtick
 	// left in it quotes a name.
-	sc.blankedCopy = strings.ReplaceAll(sc.blanked, "`", `"`)
+	sc.blankedCopy, sc.clockKeyword = clockKeywordsAsCalls(strings.ReplaceAll(sc.blanked, "`", `"`), sc.keywords)
 	return sc
 }
 
@@ -466,7 +478,8 @@ func wordByte(c byte) bool {
 }
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
-var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff"}
+var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff",
+	"current_timestamp", "current_date", "localtime", "localtimestamp"}
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
 // copy (cp) and in the blanked text (bl).
@@ -484,7 +497,9 @@ type keywordAt struct {
 // is written ILIKE, with o.LimitOffsetComma each LIMIT offset, count
 // that limitOffsetComma reads is written LIMIT count OFFSET offset, and with
 // o.MySQLDateFunctions each DATE_FORMAT and DATEDIFF call mysqlDateCall reads
-// is written as the copy's call. The keywords are taken from the last one
+// is written as the copy's call, and with o.MySQLClockKeywords each
+// CURRENT_TIMESTAMP, LOCALTIME, LOCALTIMESTAMP and CURRENT_DATE the call it
+// means (clockCall). The keywords are taken from the last one
 // back, so a call inside another one's arguments is rewritten first, and the
 // outer one reads its arguments from the text already rewritten.
 //
@@ -508,6 +523,11 @@ func (sc scanned) copyText(o CopyOptions) string {
 		}
 		var repl string
 		switch {
+		case clockKeywords[j.word] != "":
+			if !o.MySQLClockKeywords {
+				continue
+			}
+			repl = clockCall(j.word, bl[j.bl+kw:])
 		case j.word == "date_format" || j.word == "datediff":
 			if !o.MySQLDateFunctions {
 				continue
