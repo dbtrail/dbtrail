@@ -686,6 +686,10 @@ type ctlServer struct {
 	// default. What the router applies is `port mode`'s to say.
 	SQLFresh      bool `json:"sql_fresh"`
 	SQLFreshSaved bool `json:"sql_fresh_saved"`
+	// SQLMaxBehindSource is the copy's lag limit saved for this server on
+	// the MySQL port, in seconds, 0 for none (#2777). Nil when the daemon is
+	// older than the limit and does not say: that is not "off".
+	SQLMaxBehindSource *int64 `json:"sql_max_behind_source_seconds,omitempty"`
 	// MonitorState is whether its changes are being recorded: running,
 	// pending, stopped, failed... Empty for a server with no source, and on
 	// a DBTrail that records nothing itself (`serve`).
