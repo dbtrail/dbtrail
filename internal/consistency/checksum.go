@@ -66,18 +66,24 @@ type TableChecksum struct {
 	GTIDFlavor string
 	RowCount   int64
 	Digest     string
-	// LSN is the PostgreSQL WAL anchor (pg_current_wal_lsn) captured when the
-	// snapshot opens — the PG sibling of GTIDSet, set only by
-	// ConsistentTableChecksumPG (zero on the MySQL paths, which leave the
-	// anchor in GTIDSet). It carries the same lock-free-window caveat as
-	// GTIDSet: pg_current_wal_lsn is global state, not MVCC-filtered.
+	// LSN is the PostgreSQL WAL anchor, the PG sibling of GTIDSet, set only by
+	// the PostgreSQL live scan (internal/pgverifysource; zero on the MySQL
+	// paths, which leave the anchor in GTIDSet). With Anchor ==
+	// AnchorPGSlot it is the consistent point of the slot whose snapshot was
+	// read: exact. Otherwise it is pg_current_wal_lsn() read as the snapshot
+	// opened, with the same lock-free-window caveat as GTIDSet: global state,
+	// not MVCC-filtered.
 	LSN uint64
-	// Anchor says how GTIDSet is tied to the snapshot (#2150): AnchorNative
-	// or AnchorTableLock when it is the snapshot's exact position; "" when it
-	// is the set read just after the snapshot opened, which can differ from
-	// the snapshot by the transactions committing at that moment. Set only by
-	// ConsistentTableChecksumAnchored.
+	// Anchor says how GTIDSet (or, on PostgreSQL, LSN) is tied to the
+	// snapshot (#2150, #2198): AnchorNative, AnchorTableLock or AnchorPGSlot
+	// when it is the snapshot's exact position; "" when it is the position
+	// read just after the snapshot opened, which can differ from the snapshot
+	// by the transactions committing at that moment.
 	Anchor string
+	// AnchorUnpinned (PostgreSQL, #2198) says, when Anchor is "", why the
+	// exact anchor could not be had (the role lacks REPLICATION, no free
+	// replication slot, ...), for the verdict's note.
+	AnchorUnpinned string
 	// AnchorLockRefused: an exact anchor needed LOCK TABLES on the table and
 	// the account may not take it, so Anchor is "".
 	AnchorLockRefused bool

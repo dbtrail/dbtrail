@@ -24,7 +24,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   age as before. `bintrail baseline --upload --baseline-retain` names one folder and
   one prefix and cannot see other servers; it is unchanged.
 
+- **Live-source `verify` on a PostgreSQL table with writes compares equal**
+  (#2198). The table was read inside one snapshot, but the reconstruction
+  was cut at the time the scan ended, so every write committed while the
+  table was read was in the reconstruction and not in the snapshot: a
+  MISMATCH on a table that was fine. Now, when the source role has the
+  `REPLICATION` attribute (`rds_replication` on Amazon RDS), the table is
+  read at the snapshot of a temporary logical slot made for the read (the
+  built-in `pgoutput`, nothing installed in the source; the slot goes away
+  as soon as the read has started), and the reconstruction stops strictly
+  before that slot's consistent point, on the index and on the archives.
+  The check waits up to 60 seconds for a running capture to reach that
+  point (a capture still catching up when the wait runs out makes the table
+  `inconclusive`), and stops waiting early on a quiet database. Creating the slot
+  waits for the write transactions open on the server; one still open
+  after 10 seconds makes the table `inconclusive`, naming the oldest one.
+  Without `REPLICATION`, a free slot, or a replication entry in
+  `pg_hba.conf`, the check runs as before and the result says the read was
+  not cut and why. The baseline it starts from is now the newest one taken
+  before the read opened, as on MySQL since #2150.
 - **A snapshot update refuses a table whose column changed character set** (#2723). The update compared each column's type and NULL-ness with the schema snapshot taken after a DDL, but not its character set, which `COLUMN_TYPE` does not show. Two cases went wrong. An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column, under a non-strict `sql_mode` or as `CONVERT TO CHARACTER SET latin1`, turns every character latin1 cannot hold into `?` and writes no row event, so the update kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. A `CONVERT TO CHARACTER SET utf8mb4` on a latin1 table keeps every value, but the updated snapshot kept declaring the column latin1, and a restore from it created a column that cannot hold what was written after the change. Both now refuse the table like a type change, naming the column and both character sets (`name (varchar(20) CHARACTER SET utf8mb4 -> varchar(20) CHARACTER SET latin1)`), and a full read follows. The character set of the snapshot's `CREATE TABLE` is read as the server wrote it: the column's own, else the one its collation belongs to, else the table's default; `utf8` and `utf8mb3` are the same set. Nothing is compared, and nothing refused, when either side does not say: a schema snapshot with no character set recorded (every non-text column, a PostgreSQL source, a snapshot older than the record of character sets), or a `CREATE TABLE` that names none for the column or its table. A collation change within the same character set is still not seen, since schema snapshots do not record collations (#2083).
+- **Tests: the boot server's download cap through its call site, and the
+  "Not in S3" line in every combination** (#2691). No behavior change. A test
+  drives a download of the daemon's own server through the real handler and
+  fails if the cap is worked out from anything but the daemon's
+  `--baseline-s3`; a node test renders the Backup settings card's "Not in S3"
+  line for every record the cleanup can write (which copies S3 lacks, could
+  not be asked about, or refuses to read back, with and without a resend and
+  a wait), and a Go test follows the case of several copies and a restore's
+  result S3 could not be asked about from the real cleanup's record to the
+  line the page draws.
 
 - **`bintrail export iceberg` compacts its own tables** (#2719). Every
   run adds one delete file per table it changed, and DuckDB and ClickHouse
