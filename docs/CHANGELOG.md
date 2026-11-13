@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Live-source `verify` on a PostgreSQL table with writes compares equal**
+  (#2198). The table was read inside one snapshot, but the reconstruction
+  was cut at the time the scan ended, so every write committed while the
+  table was read was in the reconstruction and not in the snapshot: a
+  MISMATCH on a table that was fine. Now, when the source role has the
+  `REPLICATION` attribute (`rds_replication` on Amazon RDS), the table is
+  read at the snapshot of a temporary logical slot made for the read (the
+  built-in `pgoutput`, nothing installed in the source; the slot goes away
+  as soon as the read has started), and the reconstruction stops strictly
+  before that slot's consistent point, on the index and on the archives.
+  The check waits up to 60 seconds for a running capture to reach that
+  point (a capture still catching up when the wait runs out makes the table
+  `inconclusive`), and stops waiting early on a quiet database. Creating the slot
+  waits for the write transactions open on the server; one still open
+  after 10 seconds makes the table `inconclusive`, naming the oldest one.
+  Without `REPLICATION`, a free slot, or a replication entry in
+  `pg_hba.conf`, the check runs as before and the result says the read was
+  not cut and why. The baseline it starts from is now the newest one taken
+  before the read opened, as on MySQL since #2150.
+
 - **A MariaDB `ALTER IGNORE TABLE` that adds a unique key refuses the
   snapshot update** (#2640). With `IGNORE`, MariaDB keeps the first row of
   each duplicate and deletes the others, and the deletes are not written to
