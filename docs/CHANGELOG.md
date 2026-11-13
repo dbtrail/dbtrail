@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dbtrail.com, instead of the undo sentence, and its next steps are the start
   page's five: sign in, connect, take the first copy, the MySQL port, a heavy
   query. The undo step is gone from that list; no step names a port number,
-  since 3309 can be taken. `bintrail --help` and `bintrail-console --help`
+  since 3309 can be taken, and when it is, step 4 says to publish another
+  free port and use that number after `-P`. `bintrail --help` and `bintrail-console --help`
   open with what each binary is and link the start page; the console's no
   longer calls itself a read-only web interface, which `watch` and `router`
   are not. The `bintrail-console` package description, the header of

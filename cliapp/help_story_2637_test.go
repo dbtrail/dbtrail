@@ -47,7 +47,9 @@ func TestRootHelp_pointsAtTheStartPage(t *testing.T) {
 	if !strings.Contains(rootCmd.Long, startPage2637) {
 		t.Errorf("root Long does not link the start page %s:\n%s", startPage2637, rootCmd.Long)
 	}
-	if !strings.Contains(rootCmd.Long, "bintrail-console") {
-		t.Errorf("root Long does not name the binary that answers heavy queries:\n%s", rootCmd.Long)
+	// Builds that embed this command line name their service binary
+	// differently, so the help says "the DBTrail service", not a file name.
+	if !strings.Contains(rootCmd.Long, "the DBTrail service") || strings.Contains(rootCmd.Long, "bintrail-console") {
+		t.Errorf("root Long must point at the DBTrail service without naming a binary:\n%s", rootCmd.Long)
 	}
 }

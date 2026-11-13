@@ -5,7 +5,8 @@
 #   2. Open http://127.0.0.1:8090 and create a username and password.
 #   3. Press "+ Add server" and connect your MySQL.
 #   4. On Snapshots, press "Read database now" to take the first copy.
-#   5. Copy the mysql line from Settings, MySQL clients, and run a heavy query.
+#   5. On Settings, MySQL clients, press "Turn on" if the port is off, copy
+#      the mysql line it shows, and run a heavy query.
 #   Every step in detail: https://www.dbtrail.com/docs/quickstart/
 #
 # No .env needed. On first run the console asks you to create a username and
