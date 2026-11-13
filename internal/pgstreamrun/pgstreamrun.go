@@ -107,6 +107,14 @@ type pgStreamState struct {
 	eventsIndexed int64
 	lastEventTime sql.NullTime
 	serverID      uint32
+	// resumed is set when lsn is a checkpoint this index saved, so it is
+	// durable and may be saved again before this run commits anything (a
+	// flag LSN on a first run is not).
+	resumed bool
+	// sentThrough is the newest walsender position (EventSentThrough, #2746)
+	// below which every commit is in the index; saved with each checkpoint
+	// in pg_sent_through_lsn. 0 until this run has received one.
+	sentThrough uint64
 }
 
 // One runs a complete PostgreSQL replication stream until ctx is cancelled. It
@@ -164,6 +172,10 @@ func One(ctx context.Context, cfg Config) error {
 	state := &pgStreamState{lsn: startLSN, serverID: cfg.ServerID}
 	if saved != nil {
 		state.eventsIndexed = saved.eventsIndexed
+		// Kept so a checkpoint saved before this run's first commit (#2746:
+		// a quiet database) does not clear the newest change's time.
+		state.lastEventTime = saved.lastEventTime
+		state.resumed = true
 	}
 
 	cap := pgcapture.New(pgcapture.Config{
@@ -440,7 +452,18 @@ func streamLoopPG(
 		saveSourceHealth(indexDB, state.serverID, healthJSON, logger)
 	}
 
+	// The last complete transaction's commit LSN. A resumed run starts from
+	// the checkpoint it resumed at, which is durable already, so a quiet
+	// database still gets its checkpoint (and its sent-through position,
+	// #2746) saved every interval instead of never.
 	var lastCommitLSN uint64
+	if state.resumed {
+		lastCommitLSN = state.lsn
+	}
+	// pendingSent is the newest EventSentThrough received. It becomes
+	// state.sentThrough only in checkpoint(), after the commit of everything
+	// received before it.
+	var pendingSent uint64
 
 	// snapshotByTable maps "schema.table" → the snapshot_id of that table's most
 	// recent EventRelation (#533). Per-TABLE, not a single scalar: pgoutput sends a
@@ -488,6 +511,10 @@ func streamLoopPG(
 		if err := w.CommitComplete(); err != nil {
 			return err
 		}
+		// Every event received before the newest marker is in the index now,
+		// except the rows of a transaction still being read, whose commit is
+		// at or past the marker's position (see pgcapture.sentMarker).
+		state.sentThrough = pendingSent
 		if lastCommitLSN == 0 {
 			return nil // nothing committed yet — nothing durable to checkpoint
 		}
@@ -620,6 +647,13 @@ func streamLoopPG(
 					return fmt.Errorf("pgstreamrun: persist schema snapshot for %s.%s: %w", ev.Schema, ev.Table, werr)
 				}
 				snapshotByTable[ev.Schema+"."+ev.Table] = uint32(id)
+			case event.EventSentThrough:
+				// The walsender's sent position (#2746). Recorded only: it is
+				// saved by the next checkpoint, after everything received
+				// before it is committed.
+				if ev.EndPos > pendingSent {
+					pendingSent = ev.EndPos
+				}
 			case event.EventGTID:
 				// PostgreSQL does not emit a leading GTID marker; ignore defensively.
 			default:
@@ -682,11 +716,16 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	// error within WriteTimeout instead of freezing the stream on TCP retransmit.
 	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
 	defer cancel()
+	// pg_sent_through_at gets the same UTC_TIMESTAMP() as last_checkpoint
+	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
+	// the two are equal, so a save by any writer that does not set it (an
+	// older capture, bintrail-pg reset) leaves the position untrusted.
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO stream_state
 			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
-			 events_indexed, last_event_time, last_checkpoint, server_id)
-		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?)
+			 events_indexed, last_event_time, last_checkpoint, server_id,
+			 pg_sent_through_lsn, pg_sent_through_at)
+		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP())
 		ON DUPLICATE KEY UPDATE
 			binlog_file     = VALUES(binlog_file),
 			binlog_position = VALUES(binlog_position),
@@ -695,8 +734,11 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			events_indexed  = VALUES(events_indexed),
 			last_event_time = VALUES(last_event_time),
 			last_checkpoint = UTC_TIMESTAMP(),
-			server_id       = VALUES(server_id)`,
-		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID)
+			server_id       = VALUES(server_id),
+			pg_sent_through_lsn = VALUES(pg_sent_through_lsn),
+			pg_sent_through_at = UTC_TIMESTAMP()`,
+		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
+		state.sentThrough)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}

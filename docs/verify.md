@@ -712,13 +712,22 @@ sources exist:
   reconstruction stops strictly before that point, on the index and on the
   archives alike, and a table with writes compares equal. The check then
   waits (up to 60 seconds per table) for a running capture to save a position
-  at or past that point; on a quiet database, where no later commit moves the
-  capture past it, the wait ends once the capture has saved its position
-  twice without it moving, and the result carries the `coverage unverified`
-  note (that is not proof: a capture held up before delivering a commit
-  saves the same position too). A capture still moving its position, but not
-  yet at that point, when the wait runs out is behind: the table is
-  `inconclusive`. Without `REPLICATION` (or with no free slot, or no replication entry
+  at or past that point. On a quiet database no later commit moves the
+  capture's position past that point, so the capture also saves how far
+  PostgreSQL has sent it the WAL (the position in the walsender's keepalive
+  messages, saved only once every change received before it is indexed).
+  When that position reaches the point, every commit before it is in the
+  index, and the table is compared with no note. If it does not reach the
+  point within the wait, the table is `inconclusive`: a capture held up
+  before receiving a commit (a large transaction still being decoded, heavy
+  WAL in other databases, network lag) cannot be told apart from a quiet one
+  otherwise. A capture older than this check saves no such position; there
+  the wait ends once the capture has saved its position twice without it
+  moving, and the result carries the `coverage unverified` note (that is not
+  proof: a capture held up before delivering a commit saves the same
+  position too). A capture still moving its position, but not yet at that
+  point, when the wait runs out is behind: the table is `inconclusive`.
+  Without `REPLICATION` (or with no free slot, or no replication entry
   in `pg_hba.conf`), the read is anchored on `pg_current_wal_lsn()` and not
   cut, the result says why, and there must be no writes to the table while
   it is read.
