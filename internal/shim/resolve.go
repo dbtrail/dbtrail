@@ -161,14 +161,17 @@ func mysqlRenderErr(err error) error {
 // is logged. The MySQL renderer also hands it to the client (SHOW WARNINGS)
 // through resolveFlashbackRow.
 func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
-	image, note, err := h.resolveFlashbackRow(ctx, q)
-	h.logOrderNote(q, note)
+	image, notes, err := h.resolveFlashbackRow(ctx, q)
+	for _, n := range notes {
+		h.logOrderNote(q, n)
+	}
 	return image, err
 }
 
-// resolveFlashbackRow is ResolveFlashbackRow, with the order note (#2156)
-// returned for the caller to deliver: "" when there is none.
-func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, string, error) {
+// resolveFlashbackRow is ResolveFlashbackRow, with its notes returned for the
+// caller to deliver: the order note (#2156) and what a narrowing ALTER check
+// could not check (#2750). Empty when there is none.
+func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, []string, error) {
 	opts := query.Options{
 		Schema: q.Schema,
 		Table:  q.Table,
@@ -196,7 +199,7 @@ func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (m
 		ArchiveFetcher: h.archiveFetcher,
 	}, q.AsOf)
 	if err != nil {
-		return nil, "", classifyFetchError(ctx, q.Type, err, h.logger)
+		return nil, nil, classifyFetchError(ctx, q.Type, err, h.logger)
 	}
 
 	// ENUM/SET ordinals → labels (#472/#475) BEFORE the fold: ApplyAt replaces
@@ -208,16 +211,35 @@ func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (m
 		// Residual unchanged-TOAST marker (#592) — a capture-invariant
 		// violation, i.e. a server-side data fault. Raw error → the caller's
 		// "internal fault" branch. Refusing beats serving the marker's JSON.
-		return nil, "", err
+		return nil, nil, err
 	}
+	notes := nonEmptyNotes(note)
 	if len(image) == 0 {
 		// Row never existed at AsOf (no event in the window), or its latest
 		// surviving event was a DELETE. A non-DELETE tail that folds to empty is
 		// a corrupt/partial row image — surfaced as a Warn, not silently.
 		h.warnCorruptImageDrop(q.Schema, q.Table, ordered)
-		return nil, note, nil
+		return nil, notes, nil
 	}
-	return image, note, nil
+	// An ALTER that narrowed a column's character set after the row's last
+	// change wrote '?' for what the new set cannot hold, with no row event
+	// (#2750). The window starts at the row's oldest change read: an ALTER
+	// before it cannot have touched a value any of them wrote.
+	changes := make([]*query.ResultRow, len(ordered))
+	for i := range ordered {
+		changes[i] = &ordered[i]
+	}
+	if win, ok := reconstruct.ChangesWindow(changes, q.AsOf); ok {
+		narrowings, err := reconstruct.FindCharsetNarrowings(ctx, h.indexDB, q.Schema, q.Table, win)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := narrowings.CheckChangesFold(ordered, q.AsOf); err != nil {
+			return nil, nil, err
+		}
+		notes = append(notes, narrowings.Notes()...)
+	}
+	return image, notes, nil
 }
 
 // foldRowInBinlogOrder folds ONE row's changes onto initial as of asOf, in
@@ -356,8 +378,8 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	if err := h.deltaRefusal(delta); err != nil {
 		return nil, nil, err
 	}
-	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table,
-		reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}); err != nil {
+	ddlWin := reconstruct.DDLWindow{Since: snapshotTime, Until: q.AsOf, Anchor: sincePos, Mark: ddlMark}
+	if err := reconstruct.CheckDestructiveDDL(ctx, h.indexDB, q.Schema, q.Table, ddlWin); err != nil {
 		return nil, nil, err
 	}
 	numberingNote, err := h.checkSnapshotNumbering(ctx, q, snapshotTime, sincePos, eventMark)
@@ -416,13 +438,23 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 		h.warnCorruptImageDrop(q.Schema, q.Table, ordered)
 		return nil, notes, nil
 	}
-	return state, notes, nil
+	// An ALTER in the window that narrowed a column's character set wrote '?'
+	// for what the new set cannot hold, with no row event (#2750). Read only
+	// for a row there is to return: a lookup that finds nothing pays nothing.
+	narrowings, err := reconstruct.FindCharsetNarrowings(ctx, h.indexDB, q.Schema, q.Table, ddlWin)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := narrowings.CheckFold(baselineRow, ordered, q.AsOf); err != nil {
+		return nil, nil, err
+	}
+	return state, append(notes, narrowings.Notes()...), nil
 }
 
 // withNotes is a binlog-only answer (resolveFlashbackRow) as
 // resolveSnapshotRow returns it.
-func withNotes(image map[string]any, note string, err error) (map[string]any, []string, error) {
-	return image, nonEmptyNotes(note), err
+func withNotes(image map[string]any, notes []string, err error) (map[string]any, []string, error) {
+	return image, notes, err
 }
 
 // ColumnsFor returns the wire column list for a single-row time-travel result,

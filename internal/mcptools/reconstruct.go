@@ -338,9 +338,9 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		if err != nil {
 			return ErrorResult(err), nil, nil
 		}
-		if err := reconstruct.CheckDestructiveDDL(ctx, t.DB, args.Schema, args.Table,
-			reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
-				Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}); err != nil {
+		ddlWin := reconstruct.DDLWindow{Since: snapshotTime, Until: atTime, Anchor: reconstruct.AnchorOf(bmeta),
+			Mark: reconstruct.ParseDDLMark(bmeta.DDLMark)}
+		if err := reconstruct.CheckDestructiveDDL(ctx, t.DB, args.Schema, args.Table, ddlWin); err != nil {
 			return ErrorResult(err), nil, nil
 		}
 		//      CaptureGapStatus rather than CheckCaptureGap: the shared helper
@@ -490,6 +490,21 @@ func MakeReconstructTool(cfg Config) func(context.Context, *mcp.CallToolRequest,
 		}
 		if warn := reconstruct.PastCutWarning(order, at != nil); warn != "" {
 			res.Warnings = append(res.Warnings, "cut_by_statement_time: "+warn)
+		}
+		// An ALTER in the window that narrowed a column's character set wrote
+		// '?' for what the new set cannot hold, with no row event (#2750): the
+		// row is refused when a value it carries from before that ALTER lost a
+		// character, in history mode too (its last entry is the row at `at`).
+		// The refusal names the column and the statement, never the value.
+		narrowings, err := reconstruct.FindCharsetNarrowings(ctx, t.DB, args.Schema, args.Table, ddlWin)
+		if err != nil {
+			return ErrorResult(err), nil, nil
+		}
+		for _, note := range narrowings.Notes() {
+			res.Warnings = append(res.Warnings, "charset_narrowing_unchecked: "+note)
+		}
+		if err := narrowings.CheckFold(baselineRow, ordered, atTime); err != nil {
+			return ErrorResult(err), nil, nil
 		}
 		if args.History {
 			entries, err := reconstruct.BuildHistory(baselineRow, snapshotTime, ordered, atTime)

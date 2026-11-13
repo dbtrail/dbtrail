@@ -1643,6 +1643,12 @@ func TestRunFullTable_Limit(t *testing.T) {
 			mock.ExpectQuery("pk_values IN").WillReturnRows(events(nRows))
 		}
 		mock.ExpectQuery("FROM binlog_events").WillReturnRows(events(nRows))
+		// The narrowing-ALTER check (#2750) reads schema_changes once for the
+		// rows returned: none here.
+		if nRows <= cap {
+			mock.ExpectQuery("FROM schema_changes").WillReturnRows(sqlmock.NewRows([]string{
+				"id", "ddl_type", "detected_at", "binlog_file", "binlog_pos", "after_since", "before_until", "snapshot_id", "ddl_query"}))
+		}
 		h := &Handler{
 			indexDB: db,
 			cfg: Config{AllowGaps: true, IndexDBName: "bintrail_index",

@@ -444,7 +444,13 @@ captured history makes a reconstruction *silently wrong* (a state that never
 existed), not merely incomplete, so the tool aborts with an actionable error and
 you opt in explicitly. It also refuses outright — no override — when a
 `TRUNCATE`/`DROP`/`RENAME` (or MariaDB's `CREATE OR REPLACE TABLE`) hit the table inside the window: no archive can refill
-that, and the fold would resurrect rows that are gone.
+that, and the fold would resurrect rows that are gone. It refuses the same way
+when an `ALTER TABLE` in the window narrowed a column's character set (utf8mb4
+to latin1) and the row carries a value from before it that the new set cannot
+hold: the source replaced those characters with `?` without row events
+([#2750](https://github.com/dbtrail/dbtrail/issues/2750)). A change it cannot
+check value by value comes back as a `charset_narrowing_unchecked:` entry in
+`warnings`.
 
 The same `allow_gaps: false` default covers two further refusals, both of which
 `allow_gaps: true` overrides — and when you override one, the reason comes back
