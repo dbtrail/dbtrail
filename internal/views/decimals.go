@@ -325,7 +325,13 @@ func replaceParts(t BaselineTable) []retyped {
 // through an expression (#2755). The file holds each value as PostgreSQL's
 // text, so a cast is all a type needs; the two that need more:
 //
-//   - bytea is \x and hex digits, so the digits are decoded.
+//   - bytea is \x and hex digits, so the digits are decoded, and a value
+//     that does not start with \x (another output format) is refused: its
+//     characters would decode to other bytes or to none.
+//   - a date or timestamp before the common era ends in " BC", which the
+//     cast is not trusted to read, so it is refused.
+//   - a column left as text (json, an array, an enum) still compares byte by
+//     byte, as its text does in PostgreSQL.
 //   - a numeric declared without precision has no scale to cast to. It is
 //     read as DECIMAL(38, PGNumericScale), and since a cast to a scale ROUNDS
 //     a value with more decimals, such a value is refused first.
@@ -340,12 +346,20 @@ func pgParts(t BaselineTable) []retyped {
 	var parts []retyped
 	for _, c := range t.PGCasts {
 		q := quoteIdent(c.Name)
+		refuse := func(what string) string {
+			return "error(" + sqlString(fmt.Sprintf("%s.%s: column %s holds %s, which the copy does not read", t.Schema, t.Table, c.Name, what)) + ")"
+		}
 		switch c.As {
-		case "", pgPlainText:
-		case baseline.PGAsText:
+		case "", baseline.PGAsText:
 			parts = append(parts, retyped{c.Name, q + " COLLATE C"})
 		case baseline.PGAsBytes:
-			parts = append(parts, retyped{c.Name, "unhex(substr(" + q + ", 3))"})
+			parts = append(parts, retyped{c.Name, fmt.Sprintf(
+				`CASE WHEN %[1]s IS NULL OR starts_with(%[1]s, '\x') THEN unhex(substr(%[1]s, 3)) ELSE %[2]s END`,
+				q, refuse(`bytes that are not written as \x and hex digits`))})
+		case "DATE", "TIMESTAMP", "TIMESTAMPTZ":
+			parts = append(parts, retyped{c.Name, fmt.Sprintf(
+				"CASE WHEN ends_with(%[1]s, ' BC') THEN %[2]s ELSE CAST(%[1]s AS %[3]s) END",
+				q, refuse("a date before the common era"), c.As)})
 		case baseline.PGAsNumeric:
 			msg := fmt.Sprintf("%s.%s: column %s holds a numeric with more than %d decimals, which the copy does not read exactly",
 				t.Schema, t.Table, c.Name, baseline.PGNumericScale)
@@ -357,28 +371,6 @@ func pgParts(t BaselineTable) []retyped {
 		}
 	}
 	return parts
-}
-
-// withoutPGCollation drops the byte comparison of a PostgreSQL table's text
-// columns and keeps its casts, for a file that follows later snapshots: the
-// same choice writeStateViews makes for a _bin column, and for its reason.
-// pgPlainText marks a PostgreSQL text column whose view carries no collation
-// of its own (withoutPGCollation): read bare, and not one of the columns a
-// view names as left as text for want of a type.
-const pgPlainText = "plain text"
-
-func withoutPGCollation(casts []baseline.PGCast) []baseline.PGCast {
-	if len(casts) == 0 {
-		return casts
-	}
-	out := make([]baseline.PGCast, len(casts))
-	for i, c := range casts {
-		if c.As == baseline.PGAsText {
-			c.As = pgPlainText
-		}
-		out[i] = c
-	}
-	return out
 }
 
 // castableDecimal reports whether DuckDB has a DECIMAL that can hold this

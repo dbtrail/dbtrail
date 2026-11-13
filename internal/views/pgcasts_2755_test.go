@@ -12,11 +12,11 @@ func pgTable() BaselineTable {
 	t := BaselineTable{Schema: "public", Table: "orders", Path: "/snap/public/orders.parquet", Rel: "public/orders.parquet"}
 	in := Input{Baselines: []BaselineTable{t}}
 	in.ApplyFooters(map[string]baseline.TableFooter{t.Path: {
-		Columns: []string{"id", "note", "amount", "free", "payload", "labels", "it's"},
+		Columns: []string{"id", "note", "amount", "free", "payload", "labels", "it's", "day"},
 		PG: []baseline.PGCast{
 			{Name: "id", As: "BIGINT"}, {Name: "note", As: baseline.PGAsText}, {Name: "amount", As: "DECIMAL(12,2)"},
 			{Name: "free", As: baseline.PGAsNumeric}, {Name: "payload", As: baseline.PGAsBytes}, {Name: "labels"},
-			{Name: "it's", As: baseline.PGAsNumeric},
+			{Name: "it's", As: baseline.PGAsNumeric}, {Name: "day", As: "DATE"},
 		},
 	}})
 	return in.Baselines[0]
@@ -32,7 +32,8 @@ func TestPGSelectList(t *testing.T) {
 	got := selectList(tbl)
 	for _, want := range []string{
 		`CAST("id" AS BIGINT) AS "id", "note" COLLATE C AS "note", CAST("amount" AS DECIMAL(12,2)) AS "amount", CASE WHEN strpos("free", '.') > 0 AND length("free") - strpos("free", '.') > 18 THEN error('public.orders: column free holds a numeric with more than 18 decimals, which the copy does not read exactly') ELSE CAST("free" AS DECIMAL(38,18)) END AS "free"`,
-		`unhex(substr("payload", 3)) AS "payload", "labels", CASE`,
+		`CASE WHEN "payload" IS NULL OR starts_with("payload", '\x') THEN unhex(substr("payload", 3)) ELSE error('public.orders: column payload holds bytes that are not written as \x and hex digits, which the copy does not read') END AS "payload", "labels" COLLATE C AS "labels", CASE`,
+		`CASE WHEN ends_with("day", ' BC') THEN error('public.orders: column day holds a date before the common era, which the copy does not read') ELSE CAST("day" AS DATE) END AS "day"`,
 		// A quote in a column name is doubled in the message's literal.
 		`error('public.orders: column it''s holds`,
 	} {
@@ -67,23 +68,24 @@ func TestPGViewsScript(t *testing.T) {
 	}
 }
 
-// A file that follows later snapshots keeps the casts and drops the column
-// list and the text collation, as it does for a MySQL table.
-func TestPGFollowingViewKeepsCasts(t *testing.T) {
-	casts := withoutPGCollation(pgTable().PGCasts)
-	tbl := pgTable()
-	tbl.PGCasts, tbl.Columns = casts, nil
-	if got := selectList(tbl); got != "" {
-		t.Errorf("select list = %q, want none without a column order", got)
+// A file that follows later snapshots reads a PostgreSQL table as text: a
+// cast written today would read a column whose type changes tomorrow through
+// the old type, with no error.
+func TestPGFollowingViewHasNoCasts(t *testing.T) {
+	in := SnapshotScopedInput(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), []BaselineTable{pgTable()})
+	in.Baselines[0] = pgTable()
+	in.Follow = FollowPointer
+	in.BaselineSource = "/snap"
+	out := Generate(in)
+	for _, not := range []string{"CAST(", "COLLATE C", "unhex("} {
+		if strings.Contains(out, not) {
+			t.Errorf("a following file carries %q for a PostgreSQL table\n%s", not, out)
+		}
 	}
-	got := replaceClause(tbl)
-	if !strings.Contains(got, `CAST("id" AS BIGINT) AS "id"`) || strings.Contains(got, "COLLATE") {
-		t.Errorf("replace list = %q, want the casts without the collation", got)
+	if !strings.Contains(out, "carries no column types") {
+		t.Errorf("a following file does not say the PostgreSQL table is read as text\n%s", out)
 	}
-	if notes := decimalComments(tbl, false); len(notes) != 1 || !strings.HasPrefix(notes[0], "labels (left as text") {
-		t.Errorf("notes = %q: a text column without its collation is not a column left for want of a type", notes)
-	}
-	if pgTable().PGCasts[1].As != baseline.PGAsText {
-		t.Error("withoutPGCollation changed the table it was given")
+	if len(in.Baselines[0].PGCasts) == 0 {
+		t.Error("generating a following file cleared the caller's table")
 	}
 }

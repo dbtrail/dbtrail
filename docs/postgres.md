@@ -753,7 +753,10 @@ wrote, which is what keeps recovery exact. SQL on the copy (the web
 interface's SQL page, `bintrail views`, the views file inside each snapshot)
 reads each column as the type the table declares, in the table's own column
 order, from the shape the snapshot records beside the data. Nothing is
-rewritten: a snapshot taken by an earlier version reads the same way.
+rewritten: a snapshot that records the shape reads this way whichever
+version took it. One taken before the shape was recorded reads as text, in
+alphabetical column order, until the next full snapshot; the log names such
+tables once.
 
 | PostgreSQL type | Reads as |
 |---|---|
@@ -769,10 +772,18 @@ rewritten: a snapshot taken by an earlier version reads the same way.
 | everything else | the text PostgreSQL wrote |
 
 "Everything else" is `json` and `jsonb`, `time` and `timetz`, `interval`,
-arrays, enums, domains, ranges, a `numeric` wider than 38 digits or with a
-negative scale, and every extension type. `->>` reads a `json` column as it
-is; an array is the text `{a,b}`, so `labels[1]` is its first character, not
-its first element. Each view names the columns it left as text.
+arrays, enums, domains, ranges, a `numeric` wider than 38 digits, with a
+negative scale or with a scale above its precision, and every extension type.
+`->>` reads a `json` column as it is; an array is the text `{a,b}`, so
+`labels[1]` is its first character, not its first element. A column left as
+text still compares byte by byte. Each view names the columns it left as
+text.
+
+Two kinds of table are read as text throughout: one with two columns whose
+names differ only in case (`"Id"` and `"id"`), which the copy cannot tell
+apart, and any table in a views file that follows later snapshots
+(`bintrail views` without `--pin-snapshot`), because a type written into
+such a file would outlive a change of the column's type at the source.
 
 A value its type here cannot hold fails the statement that reads it, with an
 error that says so. It is never rounded and never read as NULL:
@@ -780,7 +791,9 @@ error that says so. It is never rounded and never read as NULL:
 - `NaN` or `Infinity` in a `numeric` column.
 - A `numeric` with no precision holding more than 18 decimals or more than
   20 digits before the point.
-- A `timestamp` before the common era.
+- A `date`, `timestamp` or `timestamptz` before the common era, or beyond the
+  years the copy's types reach.
+- A `bytea` not written as `\x` and hex digits.
 
 A statement that does not read that column is not affected, and neither is
 recovery, which works from the text.

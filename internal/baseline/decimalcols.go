@@ -398,9 +398,8 @@ func (st *footerScan) result(paths []string, batchErr error) FooterRead {
 // name under another source's root does.
 var warnedNoSchema sync.Map
 
-// noSchemaWarnCap is how many tables one read names. A source where no table
-// carries a CREATE TABLE (every PostgreSQL source) has as many of these as it
-// has tables, and a one-shot command would print them all on every run.
+// noSchemaWarnCap is how many tables one read names. A source whose snapshot
+// predates the table definitions has as many of these as it has tables, and a one-shot command would print them all on every run.
 const noSchemaWarnCap = 10
 
 // noSchemaKey splits a snapshot file's path, <root>/<snapshot>/<schema>/
@@ -420,8 +419,8 @@ func noSchemaKey(path string) (key, table string) {
 }
 
 // warnNoSchema logs, once per table per process, that a snapshot file carries
-// no CREATE TABLE. It is not a fault (a PostgreSQL-source snapshot never
-// carries one, and neither does one older than the key), which is why nothing
+// no table definition: no CREATE TABLE and no PostgreSQL shape. It is not a
+// fault (a snapshot older than either key carries none), which is why nothing
 // was logged before; it is logged now because of what it costs. The first
 // noSchemaWarnCap tables of a read are named; the rest are counted in one
 // line and named at Debug.
@@ -439,10 +438,9 @@ func warnNoSchema(paths []string) {
 			continue
 		}
 		named++
-		slog.Warn("baseline: this table's snapshot file carries no CREATE TABLE, so its column types and collations are unknown; "+
+		slog.Warn("baseline: this table's snapshot file carries no table definition, so its column types and collations are unknown; "+
 			"its state view "+SchemaLossConsequence+", and under Engine Routing MySQL answers every statement over this table. "+
-			"Take a new full snapshot: one of a MySQL or MariaDB source records them "+
-			"(a PostgreSQL source has none to record)",
+			"Take a new full snapshot: it records them (a CREATE TABLE for a MySQL or MariaDB source, the table's shape for a PostgreSQL one)",
 			"table", table, "path", p)
 	}
 	if more > 0 {
@@ -576,8 +574,21 @@ func (st *footerScan) collectPGRelation(file, value string) {
 	}
 	casts := PGCasts(rel)
 	names := make([]string, len(casts))
+	folded := map[string]bool{}
 	for i, c := range casts {
 		names[i] = c.Name
+		// PostgreSQL keeps "Id" and "id" apart; the engine that reads the
+		// file does not, quoted or not, so a view that named both would read
+		// one of them twice. Such a table is read as the text it is.
+		if key := strings.ToLower(c.Name); folded[key] {
+			st.unparsable[file] = true
+			slog.Warn("baseline: a PostgreSQL table has two columns whose names differ only in case, which the copy cannot tell apart; "+
+				"this table's state view reads every column as text, in alphabetical order",
+				"path", file, "column", c.Name)
+			return
+		} else {
+			folded[key] = true
+		}
 	}
 	st.footers[file] = TableFooter{PG: casts, Columns: names}
 }

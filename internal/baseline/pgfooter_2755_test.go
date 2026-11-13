@@ -36,7 +36,8 @@ func writePGFixture(t *testing.T, path string, names []string, relation string, 
 // A PostgreSQL snapshot file's recorded shape is read as its footer entry:
 // the table's own column order and how each column's text is read (#2755).
 // What cannot be trusted reads as text: a shape that does not parse, one that
-// names a column the file does not hold, and a file that records none.
+// names a column the file does not hold, one with two columns that differ only
+// in case, and a file that records none.
 func TestReadTableFooters_postgresShape(t *testing.T) {
 	dir := t.TempDir()
 	encode := func(cols ...PGColumn) string {
@@ -60,8 +61,14 @@ func TestReadTableFooters_postgresShape(t *testing.T) {
 	old := filepath.Join(dir, "snap", "public", "old.parquet")
 	writePGFixture(t, old, []string{"id"}, "", []string{"1"})
 
+	twins := filepath.Join(dir, "snap", "public", "twins.parquet")
+	writePGFixture(t, twins, []string{"Id", "id"}, encode(
+		PGColumn{Name: "Id", TypeOID: 20, TypeMod: -1, Ordinal: 1},
+		PGColumn{Name: "id", TypeOID: 25, TypeMod: -1, Ordinal: 2},
+	), []string{"1", "x"})
+
 	logs := captureLogs(t)
-	read, err := ReadTableFooters(context.Background(), []string{good, other, broken, old})
+	read, err := ReadTableFooters(context.Background(), []string{good, other, twins, broken, old})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,12 +85,11 @@ func TestReadTableFooters_postgresShape(t *testing.T) {
 	if f.Decimals != nil || f.Text != nil || f.Temporal != nil {
 		t.Errorf("a PostgreSQL entry carries MySQL fields: %+v", f)
 	}
-	// The shape names a column the file does not hold: a view that named it
-	// would not bind, so neither the order nor the casts are kept.
-	if f := read.Footers[other]; f.PG != nil || f.Columns != nil {
-		t.Errorf("file that does not hold its recorded columns kept its casts or order: %+v", f)
-	}
-	for _, p := range []string{broken, old} {
+	// other: the shape names a column the file does not hold, so a view that
+	// named it would not bind. twins: two columns that differ only in case,
+	// which the engine reading the file cannot tell apart. Neither keeps an
+	// entry: an empty one would read as a MySQL table with nothing to cast.
+	for _, p := range []string{other, twins, broken, old} {
 		if _, ok := read.Footers[p]; ok {
 			t.Errorf("%s has a footer entry; want none", filepath.Base(p))
 		}

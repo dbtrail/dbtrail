@@ -2310,7 +2310,12 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 		for i := range tables {
 			tables[i].BinaryText = nil
 			tables[i].Columns = nil
-			tables[i].PGCasts = withoutPGCollation(tables[i].PGCasts)
+			// Nor a PostgreSQL table's casts (#2755): they are written from
+			// the types the columns had when the file was generated, and a
+			// column whose type changes at the source would then be read
+			// through the old one (1.5 through INTEGER is 2, with no error).
+			// A following file reads such a table as the text it is.
+			tables[i].PGCasts = nil
 		}
 		in.Baselines = tables
 	}
