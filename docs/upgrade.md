@@ -206,8 +206,20 @@ minutes after its first snapshot, and sends one snapshot to S3 every 24
 hours. Change either on the Snapshots page.
 
 If you downgrade and add a server with an S3 destination on the older
-version, set its **Keep by count** to empty before upgrading again: the
-older version saves a 3 it does not use, and this version would apply it.
+version, the older version saves a 3 it does not use. Coming back up, that
+count is not applied (#2675): every count beside an S3 destination carries
+the count and the destination it was saved with
+(`local_keep_saved_with` in the server registry), written only by a
+version that applies the count. A count without that mark, or with the
+mark of another count or destination, is cleared at start, the log names
+the server, and the server keeps every local snapshot until you set
+**Keep by count** on it. An older version keeps the mark on the servers it
+edits and writes none on the servers it adds; it does nothing else with
+it. Two downgrades are not covered, and in both the 3 applies as before:
+one made before the first start of the version that brought the mark (it
+marks every count it finds, once), and one that goes through 0.130.0 to an
+older version (0.130.0 drops the record that the counts are marked, so the
+next start marks them all again).
 
 ### The count is the whole rule: no extra hour of snapshots
 
