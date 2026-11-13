@@ -336,7 +336,7 @@ The verdict is one of five states:
 | Text | JSON `stream.continuity.status` | Meaning |
 |---|---|---|
 | `no gaps in the captured range` | `ok` | The changes the index still holds are contiguous: nothing in them was dropped. Also the verdict for an acknowledged loss older than those changes (see below) |
-| `no gaps since the loss acknowledged below` | `gap_acknowledged` | A recorded loss has been acknowledged and the index still holds changes from the hour it happened in (see below): an `Acknowledged loss:` line follows with when it happened, and nothing was dropped since. Not `ok`: the events of that loss are still missing |
+| `no gaps since the loss acknowledged below` | `gap_acknowledged` | A recorded loss has been acknowledged and the index or its archives still hold changes from that moment or earlier (see below): an `Acknowledged loss:` line follows with when it happened, and nothing was dropped since. Not `ok`: the events of that loss are still missing |
 | `⚠ GAP LOST at <ts>` | `gap_lost` | An unfillable gap was stamped and nobody has acknowledged it; the index is valid only up to the gap. It stays `gap_lost` however old the loss is, until it is acknowledged |
 | `not evaluated (legacy index …)` | `unknown` | A legacy index without the gap-detection columns — the state can't be confirmed (never a false "ok") |
 | `⚠ unavailable (could not read stream state: <err>)` | `unavailable`, under top-level `stream_error` (not `stream`) | `stream_state` could not be **read** (e.g. transient timeout) — distinct from an empty table, which shows no Stream block. The verdict, and any permanent-loss banner, could not be evaluated; re-run `status` to retry |
@@ -377,25 +377,41 @@ of the banner:
   Acknowledged loss: capture permanently lost events at 2026-02-19 11:30:00 (acknowledged 2026-02-19 14:02:11).
   Snapshot updates and reconstructions whose window spans that moment are
   refused. A full snapshot taken after it is not affected. This is reported
-  while the index or its archives still hold the hour it happened in.
+  while the index or its archives still hold changes from it or earlier.
 ```
 
 **When an acknowledged loss stops being reported.** The record in
 `stream_state` is never erased, and the report follows the changes the index
-still holds. Once rotation has dropped the hour of the loss, and the archived
-hours do not reach back to it without a break from the hours still in the
-index, the report takes that moment as outside what is held: `status` prints
-`no gaps in the captured range`, the JSON verdict is `ok` with no
-`gap_acknowledged` object, and the web interface shows the green `no gaps`
+and its archives still hold. The loss stays reported while any of them is from
+that moment or earlier, because a query can then read changes from both sides
+of it:
+
+- an hour still in the index, from the hour of the loss on;
+- an archived hour from the hour of the loss or before, even when a stretch
+  that was never archived separates it from the hours still in the index;
+- an event dated at or before the loss, in the index, or in an archived file
+  that recorded its oldest event (`archive_state.min_event_ts`). The oldest
+  partition of the index takes every event older than its name, so indexing an
+  old binlog after rotation puts such events under a later hour. An archived
+  file with no recorded oldest event (archived before that column existed, or
+  registered by `upload` or `archive reconcile --repair` without reading the
+  file) counts by its hour's name only, so such events in it are not seen.
+
+Once none of them is, the report takes that moment as outside what is held:
+`status` prints `no gaps in the captured range`, the JSON verdict is `ok` with
+no `gap_acknowledged` object, and the web interface shows the green `no gaps`
 and `continuity ok` again. `bintrail status`, `GET /api/status`, the Status
 page and the Restore coverage card (`GET /api/coverage`) all apply this one
-rule, against the same start of held changes that `/api/coverage` reports as
-`delta_from`. The loss stays reported when that start cannot be read, and on an
-index with archives that is shared by more than one source, where it cannot
-be told whose archived hours reach further back. With archiving on, that can
-be for as long as the archives are kept: nothing removes an archived hour
-from the record. A loss nobody acknowledged is never dropped from the
-report this way: it stays `gap_lost` until it is acknowledged.
+rule. The start of held changes it uses can be earlier than the `delta_from`
+that `/api/coverage` reports, which is where snapshots can still be updated
+from without a break, never later. The loss stays reported when that start
+cannot be read, and on an index with archives that is shared by more than one
+source, where it cannot be told whose archived hours reach further back. With
+archiving on, that can be for as long as the archives are kept: an archived
+hour that the index no longer holds stays on record until `archive reconcile
+--prune` removes it, which it does only for a row whose files are gone. A loss nobody acknowledged is never
+dropped from the report this way: it stays `gap_lost` until it is
+acknowledged.
 
 An acknowledgement does not bring the events back. `reconstruct`, a snapshot
 update (`baseline refresh`, or a scheduled update on the Snapshots page),
