@@ -892,6 +892,7 @@ func (r *Registry) updateLocked(e ServerEntry) error {
 			e.Flavor = old.Flavor
 		}
 		startUploadIntervalWithFirstDestination(old, &e)
+		rememberEachUpdate(old, &e)
 		// Registry-owned (#2675): the count this build saves beside a
 		// destination is one it applies, and is marked so.
 		e.LocalKeepSavedWith = keepMark(e)
