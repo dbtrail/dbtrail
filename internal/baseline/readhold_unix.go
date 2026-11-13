@@ -186,7 +186,7 @@ func flockShared(f *os.File) error {
 func writeHoldRecord(snapDir string) string {
 	root, name := filepath.Dir(snapDir), filepath.Base(snapDir)
 	path := filepath.Join(root, fmt.Sprintf("%s%s.%d.%d", holdRecordPrefix, name, os.Getpid(), time.Now().UnixNano()))
-	b, _ := json.Marshal(holdRecord{PID: os.Getpid(), Since: time.Now().UTC()})
+	b, _ := json.Marshal(holdRecord{PID: os.Getpid(), Since: holdNow().UTC()})
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		slog.Debug("baseline: the hold on this snapshot has no record of its start; the cleanup bounds it by its own clock", "snapshot", snapDir, "error", err)
