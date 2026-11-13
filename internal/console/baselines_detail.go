@@ -700,8 +700,11 @@ const unpinnedReadWarnEvery = 10 * time.Minute
 
 var unpinnedReadWarned sync.Map // server id -> time.Time of the last warning
 
+// unpinnedReadNow is warnUnpinnedRead's clock, replaced in tests.
+var unpinnedReadNow = time.Now
+
 func warnUnpinnedRead(id, name, what string) {
-	now := time.Now()
+	now := unpinnedReadNow()
 	if last, ok := unpinnedReadWarned.Load(id); ok && now.Sub(last.(time.Time)) < unpinnedReadWarnEvery {
 		slog.Debug("console: a read of a past moment goes without a pin", "server", id, "snapshot", name, "reader", what)
 		return

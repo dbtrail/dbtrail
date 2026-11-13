@@ -1,11 +1,14 @@
 package console
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,5 +202,33 @@ func TestResolveFlashback_pinsWithItsServersRule(t *testing.T) {
 	release()
 	if !slices.Equal(ids, []string{ent.ID}) {
 		t.Fatalf("the rule was read for %v, want the target's server %q", ids, ent.ID)
+	}
+}
+
+// A read past the cap is said in a warning, once every 10 minutes per
+// server (#2691): a read that then fails on a removed snapshot has a line
+// that explains it, and a client repeating reads does not fill the log.
+func TestWarnUnpinnedRead_oncePerServerEveryTenMinutes(t *testing.T) {
+	var buf bytes.Buffer
+	prevLog, prevNow := slog.Default(), unpinnedReadNow
+	t.Cleanup(func() { slog.SetDefault(prevLog); unpinnedReadNow = prevNow })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	clock := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	unpinnedReadNow = func() time.Time { return clock }
+	a, b := "warn-a-"+t.Name(), "warn-b-"+t.Name()
+	warnUnpinnedRead(a, "2026-06-01T00-00-00Z", "a time-travel read")
+	clock = clock.Add(9 * time.Minute)
+	warnUnpinnedRead(a, "2026-06-01T00-00-00Z", "a _snapshot query")
+	warnUnpinnedRead(b, "2026-06-01T00-00-00Z", "the MCP reconstruct tool")
+	clock = clock.Add(2 * time.Minute)
+	warnUnpinnedRead(a, "2026-06-01T00-00-00Z", "a time-travel read")
+	out := buf.String()
+	t.Logf("the log:\n%s", out)
+	warns := strings.Count(out, "level=WARN")
+	if warns != 3 || strings.Count(out, "level=DEBUG") != 1 {
+		t.Fatalf("%d warnings and %d debug lines, want 3 (a, b, a after 10 minutes) and 1 (a within them)", warns, strings.Count(out, "level=DEBUG"))
+	}
+	if !strings.Contains(out, "console: a read of a past moment goes without a pin: downloads and reads of this server's older snapshots hold their limit, so the cleanup may remove its snapshot while it runs and the read then fails; it can be run again (said once every 10 minutes per server)") {
+		t.Fatal("the warning's words changed")
 	}
 }
