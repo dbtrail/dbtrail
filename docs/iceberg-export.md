@@ -272,7 +272,9 @@ from. If another run (or another engine) committed to the table in between,
 this run's commit is not applied and the table reports `refused-conflict`. The
 next run continues from the cursor the other run committed, so nothing is
 folded twice and nothing is skipped. The same happens if an engine rewrites the
-table (compaction) during the run. A commit whose outcome the catalog cannot
+table (compaction) during the run. The export's own compaction goes through the
+same check: if anything commits to the table while it is being compacted, the
+compaction is not applied and the next run tries again (see "Compaction"). A commit whose outcome the catalog cannot
 report (a server error or timeout) is refused with that said; the next run
 reads whichever cursor the catalog holds.
 
@@ -324,11 +326,69 @@ one Iceberg snapshot:
 
 An update is therefore a delete of the old row plus an insert of the new one,
 in the same commit. A key changed fifty times in the window costs one delete
-row and one data row, not fifty. The table is never rewritten, so it gets
-slower to read with every run until something compacts it. Athena
-(`OPTIMIZE ... REWRITE DATA USING BIN_PACK`) and Spark can; ClickHouse and
-DuckDB cannot (ClickHouse refuses `overwrite` snapshots). Compaction by the
-export itself is #2719.
+row and one data row, not fifty.
+
+### Compaction
+
+Every run adds one delete file per table it changed, and readers pay for each
+delete file on every read. Athena (`OPTIMIZE ... REWRITE DATA USING BIN_PACK`)
+and Spark can compact a table; DuckDB cannot, ClickHouse refuses to compact a
+table that holds `overwrite` snapshots (which every delta is), and S3 Tables'
+automatic compaction did not run on a small table in two hours. So the export
+compacts its own tables.
+
+Once a table holds `--compact-after` delete files (default 10), the run
+compacts it right after the table's delta: the live rows are read back,
+deletes applied, and written into new data files, and every delete file is
+dropped. With a run a minute, that is a compaction every ten minutes.
+
+- **One commit, of type `replace`.** Iceberg's word for "the files changed,
+  the data did not", so other engines can tell it from a data change. It
+  changes no `bintrail.export.*` property: the cursor stays where the delta
+  put it. iceberg-go also records the column name mapping
+  (`schema.name-mapping.default`), a standard property, on the first rewrite.
+- **Every data file is rewritten, never a part of them.** That is what makes
+  dropping every delete file safe: a delete applies only to data files written
+  before it, and once all of those are gone no delete file has anything left to
+  apply to.
+- **Nothing changes if it does not finish.** A run killed during a compaction
+  leaves files nothing refers to; the table reads as the delta left it. If
+  another run or another engine commits to the table while it is being
+  compacted, the compaction is not applied (same check as every other commit,
+  see "Two runs at once"), and the next run tries again.
+- **The table's verdict does not depend on it.** The delta committed before
+  the compaction started, so a compaction that was not applied leaves the
+  table `exported` (or `unchanged`), with a note in the detail line and
+  `"status": "not_applied"` in the JSON (or `"unknown"` when the catalog
+  answered with an error that could not be read back, so the compaction may or
+  may not be in the table; the rows are the same either way). The files of a
+  compaction whose commit never reached the catalog are removed. The next run tries again even if nothing
+  new arrived, because the threshold is read from the table itself. For the
+  same reason a table that another engine just compacted is left alone.
+- **It costs the whole table, not the window.** The live rows are read and
+  written once per compaction. On a 16-vCPU test machine a one-million-row
+  table compacted in 1.5 seconds with about 290 MB of memory, and a
+  100,000-row table in 0.1 to 0.4 seconds. A larger table costs more in
+  proportion: raise `--compact-after` for it, or set it to 0 and compact the
+  table with another engine.
+- **Old snapshots keep their files.** A compaction adds a snapshot; the
+  earlier ones, and the files only they use, stay for time travel. Expiring
+  snapshots is still yours to schedule (Spark's `expire_snapshots`, Athena's
+  `VACUUM`).
+
+`--compact-after 0` turns it off, for a table another engine compacts on its
+own schedule. `--compact-after 1` compacts after every run that changed the
+table.
+
+In the JSON report a compacted table carries:
+
+```json
+"compaction": {"status": "applied", "data_files_before": 11, "delete_files_before": 10,
+               "data_files_after": 1, "rows": 100000, "snapshot_id": 4417...}
+```
+
+and the audit trail records the commit as `cli/export.iceberg` with
+`commit: compact`.
 
 An UPDATE that changes a row's primary key (`SET id = id + 1000`, or one column
 of a composite key) is a delete of the old key and an insert of the new one.
@@ -470,13 +530,17 @@ Three things to know:
   key columns too (as the quick start does), or materialize first:
   `CREATE TABLE orders AS SELECT * FROM iceberg_scan('...')`. DuckDB 1.5 lifts
   this (checked with 1.5.5).
-- **DuckDB gets slower on a table that is exported often.** Every run adds
-  one equality-delete file per table, and DuckDB's cost of applying them grows
-  with each one: with DuckDB 1.5.5 a 300,000-row table exported every five
-  minutes went from 3 seconds to read to 200 seconds after twelve runs, about
-  16 seconds more per run, while Spark read the same table in under a second
-  ([#2372](https://github.com/dbtrail/dbtrail/issues/2372)). Read a frequently-exported table with Spark or another engine, or
-  keep DuckDB for a table exported a few times a day.
+- **DuckDB pays for every delete file on every read.** Every run adds one
+  equality-delete file per table, and before the export compacted its own
+  tables a 300,000-row table exported every five minutes went from 3 seconds
+  to read to 200 seconds after twelve runs with DuckDB 1.5.5
+  ([#2372](https://github.com/dbtrail/dbtrail/issues/2372)). The export now
+  compacts a table once it holds `--compact-after` delete files (see
+  "Compaction"), so the read time stays bounded. Measured with DuckDB 1.5.6 on a 100,000-row
+  table with 1,700 keys changed per run: without compaction a read took 0.3
+  seconds after the first run and 9.1 seconds after 30; with the default it
+  never went past 3.1 seconds and was back to about 0.01 seconds after each
+  compaction; with `--compact-after 1` it stayed under 0.05 seconds.
 - **The table is not relocatable by default.** Iceberg metadata stores
   absolute paths. If you copy or sync the warehouse elsewhere (for example
   `bintrail upload` to S3), read it with
@@ -553,6 +617,13 @@ proves nothing about them.
   the table) to reload it from a fresh baseline. Iceberg tracks columns by id, which is what will make an ADD
   COLUMN a metadata change in a later release.
 - Tables are unpartitioned.
+- Each compaction leaves two small manifest files (Iceberg's lists of files)
+  that every later commit keeps listing: iceberg-go 0.6.0, the library the
+  export uses, does not drop a manifest whose files were all removed. Readers
+  pay a little for each one; in the measurement under "Reading the tables", a
+  read right after a compaction went from 0.008 to 0.05 seconds over 30
+  compactions. Moving to a release that drops them is
+  [#2728](https://github.com/dbtrail/dbtrail/issues/2728).
 - Two source schemas or tables whose names differ only in case
   (`Shop.orders` and `shop.orders`) are refused, both of them, on every
   catalog.
@@ -590,9 +661,11 @@ The audit trail records `cli/export.iceberg` after a commit is durable, by
 this rule: every first load is recorded, including one of a baseline with
 zero rows (it creates the table and its cursor and has no snapshot to name,
 so its event carries `rows: 0` and no `snapshot_id`); a delta is recorded
-only when it changed rows. A window with no changes moves the cursor in a
-properties-only commit and records nothing; a table with nothing past its
-cursor commits nothing and records nothing. Both report `unchanged`.
+only when it changed rows, and a compaction only when it committed (`commit:
+compact`, with the rows it rewrote and the cursor it left unchanged). A window
+with no changes moves the cursor in a properties-only commit and records
+nothing; a table with nothing past its cursor commits nothing and records
+nothing. Both report `unchanged`.
 
 ## Flags
 
@@ -612,4 +685,5 @@ cursor commits nothing and records nothing. Both report `unchanged`.
 | `--fetch-batch-size` | event page size for the fold (0 = default) |
 | `--format` | `text` or `json` (with `--every`, one JSON document per run, one per line) |
 | `--every` | stay running and export again this long after each run ends (at least `1m`; empty = run once); command line only, no environment variable |
+| `--compact-after` | compact a table once it holds this many delete files: rewrite its live rows and drop the delete files, in one `replace` commit (default 10; 0 = never) |
 | `--ultrafast`, `--duckdb-threads`, `--duckdb-memory-limit` | the DuckDB budget for the baseline scan and the archive reads |
