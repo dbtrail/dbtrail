@@ -103,7 +103,7 @@ func TestDenied_oneRefusedAmongConfirmations(t *testing.T) {
 	}
 	reason := failureReason(t, root)
 	t.Logf("failure record, as the page shows it:\n%s", reason)
-	want := "1 snapshot could not be checked at the S3 destination: S3 refused the question (access denied), so it is kept here until S3 confirms it has it. Without permission to list the bucket (s3:ListBucket), S3 answers that way about a copy it does not have."
+	want := "1 snapshot could not be checked at the S3 destination: S3 refused the question (access denied), so it is kept here until S3 confirms it has it. S3 answers that way about a copy it does not have when the credentials lack s3:ListBucket, and about every copy when they lack s3:GetObject."
 	if reason != want {
 		t.Fatalf("failure record %q, want %q", reason, want)
 	}
@@ -138,7 +138,7 @@ func TestDenied_everyQuestionRefusedIsTheGeneralStop(t *testing.T) {
 	t.Logf("failure record, as the page shows it:\n%s", reason)
 	for _, want := range []string{
 		"The S3 destination could not be asked, so no snapshot that was sent to S3 was removed from this folder in this cleanup. DBTrail asks again at the next one.",
-		"S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they may read this S3 prefix.",
+		"S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they have s3:GetObject on this S3 prefix.",
 	} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("failure record %q does not say %q", reason, want)

@@ -21,6 +21,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning; after a failure it now waits an hour, the cleanup's pace for
   failed re-sends, and the log says "it stays here, and sending it is tried
   again in an hour". It keeps its hold mark and stays on disk meanwhile.
+- **The cleanup's re-sends under partial S3 permissions** (#2701).
+  - The last restore's result, in a bucket that takes uploads and refuses to
+    read them back, was sent again at every round (an hour apart), because
+    its own rule never read the record of snapshots sent again. It is now
+    sent once; after S3 takes it and refuses to read it, it is listed as
+    refused to read and not sent again, and the failure record says "1
+    snapshot was sent again, and S3 took it but refuses to read it back:
+    either the credentials lack s3:GetObject on this prefix, or they are no
+    longer valid; check both. It is kept here and not sent again." An answer
+    from S3 about it clears its mark.
+  - A refusal after a send S3 took was said to be a missing s3:GetObject. S3
+    authorizes every HEAD under s3:GetObject, so without it every question
+    is refused, a key that does not exist included, and that looks the same
+    as credentials that stopped working. Every message about it now names
+    both causes; the one for a destination that refuses every read is "S3
+    refuses to read back what it accepted: either the credentials lack
+    s3:GetObject on this prefix, or they are no longer valid; check both.",
+    and the one for every question refused ends "Check that the credentials
+    are valid and that they have s3:GetObject on this S3 prefix."
+  - With **Delete from S3 after** set, a re-send asks whether the S3 cleanup
+    is removing the snapshot's folder, and S3 refuses that question without
+    s3:ListBucket or without s3:GetObject. It still does not send: a folder
+    an earlier S3 cleanup marked and did not finish is finished by a later
+    one whatever its age, so a copy sent there could be removed after the
+    local copy went on the strength of it. The Snapshots page now says why
+    instead of "sending failed": "DBTrail does not send them: S3 will not
+    say whether its own cleanup is removing their folder, which with Delete
+    from S3 after set needs s3:GetObject and s3:ListBucket on this prefix.
+    Add the one that is missing, or clear Delete from S3 after; DBTrail asks
+    again after ...".
+  - The record of what S3 lacks cut its list of names to five and kept the
+    "could not be asked" and "refused to read" lists whole, so with many
+    snapshots the page's mixed sentence counted wrong. All three are cut
+    to five now, with their counts kept, and the page counts with those
+    ("... could not be asked about the copies of A, B and 7 more").
 
 - **The MySQL port without Engine Routing answers `LIMIT offset, count`** (part of #2628). It used to refuse `LIMIT 10, 5` and ask for `LIMIT 5 OFFSET 10`; it now writes it that way for the copy itself, so deep pagination from an ORM or a BI tool (`LIMIT ?, ?` from SQLAlchemy too) runs as written. The rows are the ones MySQL returns, checked against MySQL 8.0.46 for an offset of 0, an offset past the last row, a count of 0, leading zeros, and a `LIMIT` in a subquery, a CTE and either side of a `UNION`. A form it cannot write with certainty is still refused with how to write it: a number past 9223372036854775807, a comment between the two numbers, or a prepared argument that is not a whole number; a DOUBLE or DECIMAL argument to a prepared `LIMIT ?` gets MySQL's own error 1210, as on MySQL. And a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery is now refused on that port, as MySQL refuses it (error 1235); the copy used to answer it. Engine Routing is unchanged.
 - **A shared S3 prefix is not pruned by age either** (#2675). With

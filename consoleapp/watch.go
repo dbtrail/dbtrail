@@ -1904,12 +1904,13 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	round := resendRoundFor(t.dir)
 	if !round.begin() {
 		w, fw := round.waitsNow()
-		noteResending(t, res, nil, nil, w, fw)
+		noteResending(t, res, nil, nil, w, fw, round.lastCleanupRefused())
 		return
 	}
 	defer round.end()
 	round.forget(t.dir, res)
 	sent, skipped, tried, failed := map[string]bool{}, map[string]bool{}, 0, 0
+	cleanupRefused := false
 	wasFailing := round.isFailing()
 	for _, name := range res.NotAtDestination {
 		if ctx.Err() != nil || tried >= resendPerCycle {
@@ -1942,6 +1943,9 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 			continue
 		}
 		tried++
+		if errors.Is(err, errResendCleanupRefused) {
+			cleanupRefused = true
+		}
 		if err != nil {
 			failed++
 			own := failedOnItsOwnFile(err, t.dir)
@@ -1976,8 +1980,11 @@ func resendLacking(ctx context.Context, t baselinePruneTarget, res baseline.Prun
 	if round.finished(failed > 0, tried > 0) {
 		slog.Info("snapshot cleanup: sending the snapshots the destination lacked works again", "dir", t.dir, "destination", t.s3)
 	}
+	if tried > 0 {
+		round.setCleanupRefused(cleanupRefused)
+	}
 	w, fw := round.waitsNow()
-	noteResending(t, res, sent, skipped, w, fw)
+	noteResending(t, res, sent, skipped, w, fw, round.lastCleanupRefused())
 }
 
 // failedOnItsOwnFile reports whether a send failed on a file of the
@@ -2011,6 +2018,9 @@ type resendRound struct {
 	// until then (#2678).
 	folderUntil time.Time
 	waits       map[string]resendWait
+	// cleanupRefused: the last round that sent anything had a send refused
+	// for the cleanup question (errResendCleanupRefused, #2701), for the page.
+	cleanupRefused bool
 }
 
 // resendWait is one snapshot's wait before it is sent again (#2691).
@@ -2165,7 +2175,7 @@ func (r *resendRound) waitsNow() (map[string]resendWait, time.Time) {
 // noteResending rewrites the folder's record of snapshots the destination
 // lacks after a round (sent and skipped are what it did), or with nothing
 // done when the round did not start: they are still going to be sent.
-func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, waits map[string]resendWait, folderUntil time.Time) {
+func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skipped map[string]bool, waits map[string]resendWait, folderUntil time.Time, cleanupRefused bool) {
 	if res.DestinationSilent {
 		// The destination failed to answer for some snapshots in this pass
 		// (#2658), so how many it lacks is not known: the prune left the
@@ -2180,7 +2190,7 @@ func noteResending(t baselinePruneTarget, res baseline.PruneResult, sent, skippe
 			left = append(left, name)
 		}
 	}
-	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true}
+	rec := baseline.NotInDestination{At: time.Now().UTC(), Count: res.KeptNotDurable - res.ProbeErrors - len(sent) - len(skipped), Names: left, Resending: true, CleanupQuestionRefused: cleanupRefused}
 	for _, name := range left {
 		if slices.Contains(res.NotAsked, name) {
 			rec.NotAsked = append(rec.NotAsked, name)
@@ -3046,4 +3056,19 @@ func wireSQLChainLine(sup *baselineSupervisor, srv *console.Server) {
 		sup.sqlChainLine.Store(&line)
 		sup.sqlChainLimit.Store(&limit)
 	}
+}
+
+// setCleanupRefused records whether the round that just ended had a send refused
+// because S3 refused the cleanup question (#2701).
+func (r *resendRound) setCleanupRefused(v bool) {
+	r.mu.Lock()
+	r.cleanupRefused = v
+	r.mu.Unlock()
+}
+
+// lastCleanupRefused is that, for the record the page reads.
+func (r *resendRound) lastCleanupRefused() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cleanupRefused
 }

@@ -174,6 +174,9 @@ type PruneResult struct {
 	// listed, and not sent again: sending would succeed and change nothing,
 	// at every cleanup, for ever.
 	ReadRefused []string
+	// restoredReadRefused: the last restore's result is among ReadRefused
+	// (#2701). It was asked on its own rule, so it is not among Denied.
+	restoredReadRefused bool
 	// DestinationWriteOnly reports that every refused question was about such
 	// a snapshot and that S3 confirmed none, the check of the newest included
 	// (#2696): a destination that accepts uploads and refuses every read.
@@ -455,25 +458,33 @@ func pruneFailureReason(res PruneResult, err error) string {
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination, so they were kept.", snapshotsWord(res.ProbeErrors)))
 	}
 	if res.DestinationDenied {
-		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they may read this S3 prefix.")
+		why = append(why, "S3 refused every question about these snapshots (access denied), so DBTrail cannot tell which ones it has. Check that the credentials are valid and that they have s3:GetObject on this S3 prefix.")
 	}
-	if n := res.Denied - len(res.ReadRefused); n > 0 {
+	deniedRead := len(res.ReadRefused)
+	if res.restoredReadRefused {
+		deniedRead-- // not among Denied
+	}
+	if n := res.Denied - deniedRead; n > 0 {
 		itIs, it := "it is", "it"
 		if n > 1 {
 			itIs, it = "they are", "them"
 		}
 		why = append(why, fmt.Sprintf("%s could not be checked at the S3 destination: S3 refused the question (access denied), so %s kept here until S3 confirms it has %s. "+
-			"Without permission to list the bucket (s3:ListBucket), S3 answers that way about a copy it does not have.",
+			"S3 answers that way about a copy it does not have when the credentials lack s3:ListBucket, and about every copy when they lack s3:GetObject.",
 			snapshotsWord(n), itIs, it))
 	}
+	// Refused after a send S3 took (#2696): S3's 403 does not say whether
+	// s3:GetObject is missing or the credentials stopped working (#2701),
+	// so both are named.
+	const readCauses = "either the credentials lack s3:GetObject on this prefix, or they are no longer valid; check both."
 	switch n := len(res.ReadRefused); {
 	case res.DestinationWriteOnly:
-		why = append(why, "S3 accepts uploads to this prefix but refuses to read them back (s3:GetObject), so DBTrail cannot confirm any snapshot is there and keeps them here. "+
-			"It does not send them again: S3 took each one and then refused to read it.")
+		why = append(why, "S3 refuses to read back what it accepted: "+readCauses+
+			" DBTrail cannot confirm any snapshot is there, so it keeps them here, and it does not send them again: S3 took each one and then refused to read it.")
 	case n == 1:
-		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back (s3:GetObject), so it is kept here and not sent again.")
+		why = append(why, "1 snapshot was sent again, and S3 took it but refuses to read it back: "+readCauses+" It is kept here and not sent again.")
 	case n > 1:
-		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back (s3:GetObject), so they are kept here and not sent again.", n))
+		why = append(why, fmt.Sprintf("%d snapshots were sent again, and S3 took them but refuses to read them back: %s They are kept here and not sent again.", n, readCauses))
 	}
 	// One cause per line, and "\n" only: the page renders them line by line,
 	// and a path or an error can itself contain "; " or ", ".
@@ -639,7 +650,30 @@ func pruneAttempt(ctx context.Context, opts PruneOptions, probe durableProbe) (P
 			return res
 		}
 		ok, perr := probe(ctx, restoredSnap.name)
+		_, resent := resentMarks(opts.LocalDir)[restoredSnap.name]
+		if perr == nil && resent && !opts.DryRun {
+			// S3 answered about it: the mark's evidence is spent (#2701).
+			forgetResent(opts.LocalDir, restoredSnap.name)
+		}
+		// Refused after a send S3 took: a read it refuses, whether for a
+		// missing s3:GetObject or for credentials that stopped working; S3's
+		// 403 does not say which (a HEAD needs s3:GetObject, so without it
+		// every key answers 403, one that does not exist included).
+		refusedRead := perr != nil && resent && storage.IsAccessDenied(perr)
 		switch {
+		case refusedRead:
+			// Sent again by the cleanup, taken by S3, and refused since
+			// (#2701, as #2696 for the others): S3 takes uploads here and
+			// refuses to read them, so sending it again changes nothing.
+			// Kept, listed as refused to read, and not sent again.
+			slog.Warn("baseline prune: S3 took the last restore's snapshot when it was sent again and refuses to read it back; it is kept, and not sent again",
+				"snapshot", restoredSnap.name, "error", perr)
+			res.KeptNotDurable++
+			res.NotAtDestination = append(res.NotAtDestination, restoredSnap.name)
+			res.NotAsked = append(res.NotAsked, restoredSnap.name)
+			res.ReadRefused = append(res.ReadRefused, restoredSnap.name)
+			res.restoredReadRefused = true
+			res.RestoredUnasked = restoredSnap.name
 		case perr != nil:
 			// NOT counted in probeErrors. This snapshot is never removed, so
 			// the answer about it decides no removal; counted, one failed
