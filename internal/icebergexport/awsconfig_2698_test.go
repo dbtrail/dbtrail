@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -169,7 +170,7 @@ func TestOpenCatalog_glueGetsTheBucketConfig_2698(t *testing.T) {
 	orig := newGlueCatalog
 	t.Cleanup(func() { newGlueCatalog = orig })
 	var got aws.Config
-	newGlueCatalog = func(cfg aws.Config) catalog.Catalog {
+	newGlueCatalog = func(cfg aws.Config) (catalog.Catalog, error) {
 		got = cfg
 		return orig(cfg)
 	}
@@ -181,6 +182,24 @@ func TestOpenCatalog_glueGetsTheBucketConfig_2698(t *testing.T) {
 	if s3.NewFromConfig(got).Options().Region != "us-east-1" || awsglue.NewFromConfig(got).Options().Region != "us-west-2" {
 		t.Errorf("Glue catalog config: S3 %q, Glue %q; want us-east-1 and us-west-2",
 			s3.NewFromConfig(got).Options().Region, awsglue.NewFromConfig(got).Options().Region)
+	}
+}
+
+// A Glue catalog that does not open is the run's error, with what failed;
+// a nil catalog wrapped in the guard would fail later, on the first table.
+func TestOpenCatalog_glueOpenErrorIsReturned(t *testing.T) {
+	regionEnv2698(t)
+	fakeRegions2698(t, map[string]string{"wh": "us-east-1"})
+	orig := newGlueCatalog
+	t.Cleanup(func() { newGlueCatalog = orig })
+	boom := errors.New("failed to initialize metrics reporter: boom")
+	newGlueCatalog = func(aws.Config) (catalog.Catalog, error) { return nil, boom }
+	cat, release, _, err := openCatalog(context.Background(), CatalogConfig{Kind: CatalogGlue}, "s3://wh/iceberg")
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "open the Glue catalog") {
+		t.Fatalf("err = %v, want the Glue open error with its context", err)
+	}
+	if cat != nil || release != nil {
+		t.Fatalf("catalog %v, release set %v; want neither on error", cat, release != nil)
 	}
 }
 

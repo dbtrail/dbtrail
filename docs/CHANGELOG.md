@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **iceberg-go 0.7.0** (#2728), the library behind `bintrail export
+  iceberg`, with arrow-go 18.8.0. The upgrade moves shared dependencies too.
+  Every binary (`bintrail`, `bintrail-console`, `bintrail-mcp`,
+  `bintrail-pg`) gets newer versions of the AWS SDK, golang.org/x/sys, sync
+  and text, klauspost/compress and go-sql-driver/mysql 1.10.0, whose fix to
+  reading the server's `max_allowed_packet` applies to the index and source
+  connections whose DSN does not set `maxAllowedPacket`, since bintrail asks
+  the server for that limit there. gRPC,
+  OpenTelemetry, gocloud and the Azure and Google Cloud libraries change only
+  in `bintrail`, the one binary with the export. The minimum Go version is
+  unchanged (1.25.11).
 - **A snapshot update refuses a table whose column changed character set** (#2723). The update compared each column's type and NULL-ness with the schema snapshot taken after a DDL, but not its character set, which `COLUMN_TYPE` does not show. Two cases went wrong. An `ALTER TABLE ... MODIFY name VARCHAR(20) CHARACTER SET latin1` on a utf8mb4 column, under a non-strict `sql_mode` or as `CONVERT TO CHARACTER SET latin1`, turns every character latin1 cannot hold into `?` and writes no row event, so the update kept `'Ñandú ✓'` where the source holds `'Ñandú ?'`. A `CONVERT TO CHARACTER SET utf8mb4` on a latin1 table keeps every value, but the updated snapshot kept declaring the column latin1, and a restore from it created a column that cannot hold what was written after the change. Both now refuse the table like a type change, naming the column and both character sets (`name (varchar(20) CHARACTER SET utf8mb4 -> varchar(20) CHARACTER SET latin1)`), and a full read follows. The character set of the snapshot's `CREATE TABLE` is read as the server wrote it: the column's own, else the one its collation belongs to, else the table's default; `utf8` and `utf8mb3` are the same set. Nothing is compared, and nothing refused, when either side does not say: a schema snapshot with no character set recorded (every non-text column, a PostgreSQL source, a snapshot older than the record of character sets), or a `CREATE TABLE` that names none for the column or its table. A collation change within the same character set is still not seen, since schema snapshots do not record collations (#2083).
 
 - **`bintrail export iceberg` compacts its own tables** (#2719). Every
@@ -19,8 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On a 100,000-row table changed every run, a DuckDB 1.5.6 read took 9.1 s
   after 30 runs without it, and at most 3.1 s with the default (about 0.01 s
   right after each compaction); a million-row table compacts in about 1.5 s.
-  Each compaction still leaves two small manifests that later commits keep
-  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A
+  The manifests a compaction leaves behind are dropped by the next one
+  (#2728, iceberg-go 0.7.0), so with `--compact-after 1` the read stayed at
+  about 0.007 s through 30 compactions instead of creeping to 0.044 s. A
   compaction that does not finish, or that another writer's commit overtakes,
   is not applied and is retried by the next run; the table's verdict stays
   what its delta made it. `--compact-after 0` turns it off. The

@@ -370,7 +370,11 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 			return nil, nil, ctx, err
 		}
 		ctx = utils.WithAwsConfig(ctx, &files)
-		return guard(newGlueCatalog(glueCatalogConfig(files, cfg))), noop, ctx, nil
+		cat, err := newGlueCatalog(glueCatalogConfig(files, cfg))
+		if err != nil {
+			return nil, nil, ctx, fmt.Errorf("open the Glue catalog: %w", err)
+		}
+		return guard(cat), noop, ctx, nil
 
 	case CatalogREST:
 		var opts []rest.Option
@@ -408,7 +412,7 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 
 // newGlueCatalog opens the Glue catalog on cfg. A variable so a test sees
 // the config the catalog was given.
-var newGlueCatalog = func(cfg aws.Config) catalog.Catalog {
+var newGlueCatalog = func(cfg aws.Config) (catalog.Catalog, error) {
 	return glue.NewCatalog(glue.WithAwsConfig(cfg))
 }
 
