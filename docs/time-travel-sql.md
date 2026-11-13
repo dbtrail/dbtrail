@@ -283,8 +283,11 @@ What to know before relying on it:
   double-quoted string, a backslash in a string, a dollar-quoted string, a
   `--` comment with no space after it; the
   full list is under "Two things are translated") runs as written. `STRAIGHT_JOIN` is read as MySQL's
-  keyword, so a column named `straight_join` must be quoted. `DATE_FORMAT` is
-  not understood; DuckDB's `strftime` is. `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
+  keyword, so a column named `straight_join` must be quoted. `DATE_FORMAT`
+  and MySQL's two-argument `DATEDIFF`, which DuckDB does not have, are
+  written as DuckDB's `strftime` and `date_diff` where the answer is the
+  same, and refused with how to write them otherwise (under "What a
+  connection the copy answers alone refuses"). `GROUP_CONCAT` runs (DuckDB has it), and the order of its list
   can differ from MySQL's; `string_agg` is DuckDB's own spelling. `USE <schema>` works and sets
   where unqualified names resolve; the connection starts in the server's
   source database when the registry knows it. Schema and table names match
@@ -2709,9 +2712,9 @@ error 1235, which names the construct and how to write it for the copy:
 | `WEEK`, `YEARWEEK`, `EXTRACT(WEEK ...)` | `weekofyear(d)` (ISO weeks), `strftime(d, '%U')` (weeks from Sunday) |
 | `DAYOFWEEK`, `WEEKDAY`, `MICROSECOND` | `isodow(d) % 7 + 1` (MySQL's `DAYOFWEEK`), `isodow(d) - 1` (`WEEKDAY`), `microsecond(ts) % 1000000` |
 | `STR_TO_DATE` | `strptime(text, format)`, `try_strptime` for NULL on a bad date |
-| `DATEDIFF`, `TIMESTAMPDIFF`, `TIMEDIFF` | `date_diff('day', start, end)` for a count, `end - start` for a time (the copy's own `datediff('day', a, b)` is answered) |
+| `TIMESTAMPDIFF`, `TIMEDIFF` | `date_diff('day', start, end)` for a count, `end - start` for a time |
 | `CAST(x AS SIGNED)`, `AS UNSIGNED` | `CAST(x AS BIGINT)`, `CAST(x AS UBIGINT)` |
-| `a DIV b` | `a // b` |
+| `a DIV b` | `a // b` for two whole numbers; `CAST(trunc(a / nullif(b, 0)) AS BIGINT)` when either is a `DECIMAL` or a `DOUBLE`, since the copy's `//` truncates only whole numbers (`7.5 // 2` is `3.75` there, `7.5 DIV 2` is `3` on MySQL) |
 | `REGEXP`, `RLIKE` | `regexp_matches(x, 'pattern', 'i')` |
 | `DATABASE()`, `USER()`, `VERSION()`, `CURRENT_USER` and the like | `current_database()`, `current_schema()`, `library_version FROM pragma_version()` |
 | `FOUND_ROWS()`, `LAST_INSERT_ID()`, `ROW_COUNT()`, `@x` and `@@x` variables | nothing on the copy: run it on MySQL (`abs(x)` for the copy's `@x`) |
@@ -2733,12 +2736,51 @@ past that (MySQL takes up to 18446744073709551615, the copy fails), a
 comment between the two, or a prepared argument that is not a whole number
 (MySQL reads a NULL offset as 0; this port does not guess it).
 
+`DATE_FORMAT(d, format)` and `DATEDIFF(a, b)`, two functions the copy does
+not have, are written for it the same way (#2628), in the statement and in a
+prepared statement once its arguments are written in:
+
+- `DATE_FORMAT(d, '%Y-%m')` is sent as `strftime(d, '%Y-%m')`, each of
+  MySQL's specifiers in the copy's spelling (`%i` is `%M`, `%M` is `%B`,
+  `%e` is `%-d`, `%r` is `%I:%M:%S %p`). The text is MySQL's, measured on
+  MySQL 8.0.46 for a `DATE`, a `DATETIME`, a `DATETIME(6)` and a `TIMESTAMP`,
+  under a session time zone too, at midnight and noon, on February 29 and at
+  the turn of a year: `%a %b %c %d %e %f %H %h %I %i %j %k %l %M %m %p %r %S
+  %s %T %U %v %W %w %x %Y %y %%`. Names of days and months are English, as
+  `MONTHNAME` and `DAYNAME` are on this port, whatever `lc_time_names` the
+  connection set. It is rewritten only when the format is one string written
+  in the statement, not empty. Otherwise it is refused with error 1235 and
+  the copy's spelling: a format from a column or a `NULL`, `%D` (`29th`, which
+  the copy cannot write), `%u`, `%V` and `%X` (weeks the copy does not count
+  that way), a letter that is not one of MySQL's specifiers (MySQL prints
+  the letter), and a statement this port sends as written (see the start of
+  this page). A zero date is a NULL on the copy, so its `DATE_FORMAT` is NULL
+  where MySQL writes `0000-00-00`.
+- `DATEDIFF(a, b)` is sent as `date_diff('day', CAST(b AS DATE), CAST(a AS
+  DATE))`: the days between the two dates, their times left out, in the
+  connection's time zone, as on MySQL, for a column, a string with or
+  without a time, and `NULL`. The copy's own `datediff('day', a, b)`, with a
+  unit first, is answered as it is. A `DATEDIFF` this port sends as written
+  is refused with that spelling.
+
 Or turn on Engine Routing, and MySQL answers them. The list is of
 constructs only MySQL's SQL holds; it does not make the copy MySQL. Every
 other difference this page lists still holds on such a connection (text
 compared by case only, `CONCAT` skipping a NULL where MySQL returns NULL,
 `ROUND` of a `DOUBLE` half away from zero, `SUBSTRING` from position 0,
-and the rest). Answered with the copy's own meaning, because it is also how
+and the rest). Three more, measured on MySQL 8.0.46 for `IFNULL`, `IF` and
+`CONCAT_WS`, which answer as MySQL does otherwise (a NULL argument of
+`CONCAT_WS` skipped on both, a NULL separator NULL on both): a string read
+as a condition (`IF('true', 1, 2)` is `1` on the copy and `2` on MySQL,
+which reads the string as the number 0; a string the copy cannot read as
+true or false, `IF('abc', 1, 2)`, fails there); an `IF` whose two values are
+a whole number and a `DECIMAL` (the same values, written `7` on MySQL and
+`7.00` on the copy); and a value turned into text, in `CONCAT_WS` too: a
+`DOUBLE` (`0` and `1e20` on MySQL, `0.0` and `1e+20` on the copy), a
+comparison (`1` and `true`) and a `DATETIME` or a `TIMESTAMP` (with its
+zone, `+00`, on the copy).
+`IFNULL` and `IF` over a number and a string (`IFNULL(n, 'none')`) fail on
+the copy, where MySQL answers with text. Answered with the copy's own meaning, because it is also how
 DuckDB SQL is written or because it is a difference listed above: a string
 that reads as a date with a two-digit year (`'26-01-15'` is year 26 here,
 2026 on MySQL; any text of that shape would otherwise be refused), a
