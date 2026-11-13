@@ -62,13 +62,14 @@ type refreshRequest struct {
 	UploadEvery time.Duration
 	UploadAt    time.Duration
 	// HoldFromS3 is set by the daemon-wide interval loop (baselineRefreshTargets)
-	// for a server whose folder is pruned to its count and that has an S3
-	// destination (#2675): the snapshot this loop publishes there is marked
-	// as kept on this machine on purpose (baseline.MarkUploadHeld). The loop
-	// names no destination and uploads nothing (BaselineS3 stays empty), so
-	// the snapshot was never meant for the bucket; unmarked, the cleanup took
-	// it for a failed upload and sent it, up to three per cleanup, a cost
-	// nobody chose. Marked, the count removes it like any held snapshot.
+	// for a server whose folder is pruned to its count, that has an S3
+	// destination and a schedule of its own (#2675): the snapshot this loop
+	// publishes there is marked as kept on this machine on purpose
+	// (baseline.MarkUploadHeld). The loop names no destination and uploads
+	// nothing (BaselineS3 stays empty); unmarked, the cleanup took it for a
+	// failed upload and sent it, up to three per cleanup. Marked, the count
+	// removes it, and the schedule's next due upload sends the newest one.
+	// A server with no schedule is not held: nothing else would send it.
 	HoldFromS3 bool
 	// FoldSource, when set, is where THIS run reads its previous snapshot
 	// from, resolved by resolveFoldSource just before the fold. Empty means
@@ -2744,16 +2745,30 @@ func baselineRefreshTargets(entries []console.ServerEntry, globalDSN, globalBase
 		}
 		if add(e.ID, e.Name, e.DSN, e.BaselineDir) {
 			withSource(&out[len(out)-1], e)
-			// Pruned to its count beside a destination (#2675): what this
-			// loop writes there is not for the bucket. The daemon's own
-			// --baseline-s3 is not known here; a folder sharing that prefix
-			// is not pruned to its count, and its marked snapshots go once a
-			// newer copy in S3 supersedes them, as held snapshots do.
+			// Pruned to its count beside a destination, with a schedule of
+			// its own (#2675): what this loop writes there is held, and the
+			// schedule's next due upload sends the newest local snapshot.
+			// Without a schedule nothing else would ever send a held one,
+			// so the bucket would stop receiving copies; there the snapshot
+			// stays unmarked and the cleanup sends it, as in 0.130.0. The
+			// daemon's own --baseline-s3 is not known here; a folder sharing
+			// that prefix is not pruned to its count, and its marked
+			// snapshots go once a newer copy in S3 supersedes them.
 			out[len(out)-1].HoldFromS3 = strings.TrimSpace(e.BaselineS3) != "" && e.LocalKeepNewest > 0 &&
-				!console.LocalKeepBlocked(entries, e, globalBaselineDir)
+				ownSchedule(e) && !console.LocalKeepBlocked(entries, e, globalBaselineDir)
 		}
 	}
 	return out, skippedS3Only, shared
+}
+
+// ownSchedule reports whether e has a schedule of its own that parses: the
+// one that sends a snapshot the daemon-wide loop held (HoldFromS3, #2675).
+func ownSchedule(e console.ServerEntry) bool {
+	if e.BackupSchedule == nil {
+		return false
+	}
+	_, err := e.BackupSchedule.Parse()
+	return err == nil
 }
 
 // refreshSkip is a server the refresh leaves alone, and why.
