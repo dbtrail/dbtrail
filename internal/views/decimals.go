@@ -133,9 +133,9 @@ func writeDecimalNote(b *strings.Builder, in Input) {
 			b.WriteString("-- by name. Those tables are named below. A\n")
 		}
 		b.WriteString("-- baseline older than this feature gains the casts when it is next taken or\n")
-		b.WriteString("-- refreshed; a PostgreSQL-source baseline stores all its values as text and\n")
-		b.WriteString("-- will not gain them. If a footer could not be read at all, the bintrail log\n")
-		b.WriteString("-- has the error.\n")
+		b.WriteString("-- refreshed, and so does a PostgreSQL-source baseline written before its\n")
+		b.WriteString("-- table shape was recorded. If a footer could not be read at all, the\n")
+		b.WriteString("-- bintrail log has the error.\n")
 	}
 }
 

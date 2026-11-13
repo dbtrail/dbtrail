@@ -34,6 +34,8 @@ func TestPGCasts(t *testing.T) {
 		{Name: "at", TypeOID: 1083, Ordinal: 23},
 		{Name: "span", TypeOID: 1186, Ordinal: 24},
 		{Name: "mood", TypeOID: 16390, Ordinal: 25},
+		{Name: "ident", TypeOID: 19, Ordinal: 26},
+		{Name: "ref", TypeOID: 26, Ordinal: 27},
 	}}
 	want := []PGCast{
 		{"id", "BIGINT"}, {"amount", "DECIMAL(12,2)"}, {"note", PGAsText}, {"free", PGAsNumeric},
@@ -41,6 +43,7 @@ func TestPGCasts(t *testing.T) {
 		{"flag", "BOOLEAN"}, {"small", "SMALLINT"}, {"n", "INTEGER"}, {"r", "FLOAT"}, {"d", "DOUBLE"},
 		{"day", "DATE"}, {"ts", "TIMESTAMP"}, {"tstz", "TIMESTAMPTZ"}, {"tag", "UUID"}, {"payload", PGAsBytes},
 		{"code", PGAsText}, {"fixed", PGAsText}, {"attrs", ""}, {"labels", ""}, {"at", ""}, {"span", ""}, {"mood", ""},
+		{"ident", PGAsText}, {"ref", "UINTEGER"},
 	}
 	if got := PGCasts(rel); !reflect.DeepEqual(got, want) {
 		t.Fatalf("PGCasts:\n got %v\nwant %v", got, want)

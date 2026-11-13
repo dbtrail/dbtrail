@@ -19,6 +19,7 @@ type PGCast struct {
 	As   string
 }
 
+// The values of PGCast.As that are not a DuckDB type name.
 const (
 	PGAsText    = "text"
 	PGAsBytes   = "bytes"

@@ -161,8 +161,8 @@ func CellText(typ string, v any) *string {
 }
 
 // pgFloat writes a floating point number the way PostgreSQL does: the
-// shortest digits that read back as the same value, with an exponent from
-// 1e15 up and below 1e-4.
+// shortest digits that read back as the same value, with an exponent below
+// 1e-4 and from 1e15 up for a double precision, from 1e6 up for a real.
 func pgFloat(typ, s string) string {
 	bits := 64
 	if typ == "FLOAT" {
@@ -172,7 +172,11 @@ func pgFloat(typ, s string) string {
 	if err != nil {
 		return s
 	}
-	if abs := math.Abs(f); abs != 0 && (abs >= 1e15 || abs < 1e-4) {
+	top := 1e15
+	if bits == 32 {
+		top = 1e6
+	}
+	if abs := math.Abs(f); abs != 0 && (abs >= top || abs < 1e-4) {
 		return strconv.FormatFloat(f, 'e', -1, bits)
 	}
 	return strconv.FormatFloat(f, 'f', -1, bits)
