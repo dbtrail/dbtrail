@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The installer installs one release and writes it down** (#2638).
+  `install.sh` took `docker-compose.yml` from `main` and left every image on
+  `${BINTRAIL_TAG:-latest}`, so a re-run or a `docker compose pull` jumped
+  over every release since the install, and nothing recorded which version
+  it had been. It now looks up the newest release (GitHub's
+  `releases/latest`, which skips drafts and prereleases; no token, no `jq`),
+  takes the compose file and the `dbtrail` command from that tag, and a fresh
+  install writes `BINTRAIL_TAG=<version>` to `.env` before it pulls. The value
+  is the image tag, the git tag **without the `v`** (`v0.130.0` →
+  `0.130.0`): the images are published under GoReleaser's `{{ .Version }}`,
+  and no `v`-prefixed image exists. A `BINTRAIL_TAG` already set, in `.env`
+  or in the installing shell, is never changed and chooses the compose file
+  (a version number) or is left as it is (empty, `latest`, a tag of one's
+  own); one with a `v` stops the install and says what to write instead.
+  `DBTRAIL_REF` still overrides: a release tag is that version, written to
+  `.env`; any other ref (`main`, a branch) writes nothing and says the images
+  follow `latest`. When GitHub does not answer (no network, its limit of 60
+  lookups an hour per address) or answers without a release tag, a fresh
+  install stops before creating anything and prints the command to name the
+  version with `DBTRAIL_REF`; it never falls back to `main`. A re-run over an
+  existing stack writes nothing to `.env` (as for `INDEX_BUFFER_POOL`), keeps
+  its `dbtrail` command when the lookup fails, and says how to pin a stack
+  installed before this. The end text names the version and the upgrade:
+  change `BINTRAIL_TAG`, then `docker compose pull && docker compose up -d`,
+  plus the release's compose file when it changed. `docs/upgrade.md`,
+  `docs/docker.md` and `docs/install.md` now take that file from the release
+  tag instead of `main`, and the `BINTRAIL_TAG=v0.26.0` example in
+  `docs/upgrade.md` (and `v0.9.0` in `.env.example`), which named images that
+  do not exist, is corrected.
+
 - **An acknowledged capture gap is no longer reported as `ok` while older changes are still served** (#2669). The report took the start of the changes still held from the delta floor alone, and missed two places that still serve changes from before the gap. Archived hours separated from the index by a stretch that was never archived: with archives from 1 to 22 June, archiving then turned off and rotation dropping the hours until 10 July, a gap acknowledged on 20 June read `ok` although the June archives can still be queried. And events older than the name of the partition that holds them: the oldest partition takes every event dated before it, so indexing an old binlog after rotation put changes from before the gap under a later hour, and the report said `ok`. `bintrail status` (text and JSON), `GET /api/status`, the Status page and `GET /api/coverage` now keep an acknowledged gap as `gap_acknowledged` while an hour in the index, an archived hour, or an event (in the index, or recorded for an archived file in `archive_state.min_event_ts`; a zero date there is not an event time, and an `archive_state` without that column is read by hour names) is from that moment or earlier. The extra reads run only when the verdict would otherwise be `ok`; if one fails, the gap stays reported. The floor snapshots are graded against, and `delta_from`, do not change. The status text under an acknowledged gap now ends "This is reported while the index or its archives still hold changes from it or earlier." in place of "... still hold the hour it happened in." While the start of the changes still held cannot be read, `bintrail status`, `/api/status`, the MCP `status` tool and `/api/coverage` warn once per index connection until a read works again (and say so at info level when it does), where they warned on every read; a request that was cancelled is not warned about, one that ran out of time is.
 - **Two runs of the same integration test at once no longer share a database** (#2684). The test helpers named each test database after the test and a counter, so two processes running the same test against one MySQL (two checkouts, two CI jobs on one server) used the same name, and one dropped or filled the other's database mid-test. The name now also carries eight random characters per process; its longest form is no longer than before. A database left behind by a killed run is no longer dropped by the next run of the same test; drop leftover `bt_*` databases by hand.
 - **The MySQL port serves a certificate of your own** (#2636). `bintrail-console router --tls-cert <file> --tls-key <file>` (or `BINTRAIL_ROUTER_TLS_CERT` and `BINTRAIL_ROUTER_TLS_KEY`) offers that certificate to every client that asks for TLS, so a client that trusts its CA can connect with `--ssl-mode=VERIFY_CA` or `VERIFY_IDENTITY`. Before, and still with nothing set, the port offered TLS only with a certificate it made up at start: a client could encrypt (`--ssl-mode=PREFERRED`, the `mysql` default, or `REQUIRED`) but could not verify it, so it could not tell the port from something impersonating it. The README said the port had no TLS, which was not accurate. One setting without the other, or a pair that cannot be used, stops the router at startup and names the setting and the file. The port still offers TLS without requiring it: a client that asks for no encryption is answered in clear text. The files are read at startup; restart the router after renewing the certificate. The startup lines say which certificate is offered and until when, and warn when it has expired. See [TLS on the port](time-travel-sql.md#tls-on-the-port).
@@ -15,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Uploads no longer send the snapshot folder's own files** (#2691). An upload of a whole folder of snapshots (the PostgreSQL baseline's `--upload`, `bintrail baseline --upload`, `bintrail upload --source`) sent the upload interval's marks (`.upload-held.<snapshot>`), and could send the Parquet of an interrupted cleanup's leftover (`.<snapshot>.pruning`) under a name no reader knows. Every upload now leaves out anything directly under a folder of snapshots whose name starts with a dot, which covers every mark, record, lock and work directory the folder uses, and any added later. A schema whose name starts with a dot, inside a snapshot, is still sent.
 - **An empty snapshot folder left by a stopped run is removed** (#2691). A run that stopped between creating a snapshot's folder and writing its first file left an empty folder that every cleanup kept as a snapshot being written. The cleanup now removes a folder named as a snapshot that has held no file at all for an hour, in every mode, and logs it. It removes empty directories only, so a file written into the folder meanwhile is never removed.
 - **`dbtrail port mode <server> [fresh|fast]`** (#2683). It says what is saved for a server's answers on the MySQL port and what the router applies, and saves a choice, waiting a few seconds for the router to take it. `dbtrail server list` has a MODE column. Before, only the web interface could choose.
+
 - **A bucket in another region than the host's works** (#2688). With
   `AWS_REGION` (or the instance's region) set to one region and the bucket in
   another, every request bintrail made for the bucket through the AWS SDK

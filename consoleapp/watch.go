@@ -855,7 +855,7 @@ func sqlPortOldComposeNotice(composeVersion string) string {
 	if err != nil || v >= 4 {
 		return ""
 	}
-	return fmt.Sprintf("NOTHING ANSWERS ON IT (port 3309). This version serves it from the router service, which the docker-compose.yml running this stack (version %d) does not start on that port. MySQL clients that connected to 3309 are refused until the file is replaced: %s", v, composeDownload)
+	return fmt.Sprintf("NOTHING ANSWERS ON IT (port 3309). This version serves it from the router service, which the docker-compose.yml running this stack (version %d) does not start on that port. MySQL clients that connected to 3309 are refused until the file is replaced: %s", v, composeDownload())
 }
 
 // sqlPortMigratedWords says what became of the port of an installation that
