@@ -1849,14 +1849,19 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 	// explain_format other than TRADITIONAL (TREE is the default on Percona
 	// Server 9.7) makes mydumper segfault while it sizes tables (#2211). Its
 	// own sessions are told TRADITIONAL; the server's setting is not touched.
+	// explainNote, when set, is added to the run's error if mydumper fails:
+	// a crash prints almost nothing, and the card is where the operator looks.
+	var explainNote string
 	if value, present, err := sourceExplainFormat(ctx, sourceDSN, ssl); err != nil {
-		slog.Warn("console snapshot: could not read the source's explain_format, so mydumper is not told to use TRADITIONAL; "+
-			"if the source runs with TREE or JSON, mydumper crashes", "host", host, "error", err)
+		explainNote = "the source's explain_format could not be read (" + err.Error() + "), so mydumper was not told to use " +
+			"TRADITIONAL; if the source runs with TREE or JSON, mydumper crashes. Setting explain_format=TRADITIONAL on the source avoids it"
+		slog.Warn("console snapshot: "+explainNote, "host", host)
 	} else {
 		ef := mydumperlock.PlanExplainFormat(present, value, plan.versionKnown, plan.version)
 		if ef.Send {
 			options.WriteString(mydumperlock.ExplainFormatSection)
 		} else if ef.Warning != "" {
+			explainNote = ef.Warning
 			slog.Warn("console snapshot: "+ef.Warning, "host", host, "mydumper", plan.path)
 		}
 	}
@@ -1911,7 +1916,13 @@ func runMydumper(ctx context.Context, sourceDSN string, ssl config.SSL, schemas 
 			if strings.Contains(msg, mydumperNoSpaceText) {
 				return &mydumperNoSpaceError{err: fmt.Errorf("mydumper failed: %w; output: %s", err, msg)}
 			}
+			if explainNote != "" {
+				return fmt.Errorf("mydumper failed: %w: %s; output: %s", err, explainNote, msg)
+			}
 			return fmt.Errorf("mydumper failed: %w; output: %s", err, msg)
+		}
+		if explainNote != "" {
+			return fmt.Errorf("mydumper failed: %w: %s", err, explainNote)
 		}
 		return fmt.Errorf("mydumper failed: %w", err)
 	}

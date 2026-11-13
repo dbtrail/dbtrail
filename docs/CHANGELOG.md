@@ -18,10 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sources without the variable (MariaDB, MySQL before 8.0.32) get nothing,
   since mydumper exits 1 on a session variable the server does not know.
   The file goes only to mydumper 0.16.1 or newer (the oldest build measured
-  to take it); an older build, or one whose version cannot be read, is
-  logged with the remedy instead. On the console, the TLS pin and the session
-  section share one `--defaults-extra-file`, because mydumper keeps only the
-  last one it is given.
+  to take it). With an older build, or one whose version cannot be read, or
+  when the source cannot be asked, the cause and the remedy are logged and
+  added to the error if mydumper then crashes, instead of a bare segmentation
+  fault. On the console, the TLS pin and the session section share one
+  `--defaults-extra-file`, because mydumper keeps only the last one it is
+  given. The `baseline` profile of `docker-compose.yml` is not covered yet
+  (#2733).
 
 - **The installer, `--help` and the first lines of the docs open with the
   heavy queries** (#2637). The installer's banner now says "Heavy MySQL

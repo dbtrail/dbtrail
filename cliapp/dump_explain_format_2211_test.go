@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -144,5 +145,121 @@ func TestWriteMydumperDefaultsFile_SessionVariables(t *testing.T) {
 				t.Errorf("file %q: password lines present = %v, want %v", s, !tc.wantPassword, tc.wantPassword)
 			}
 		})
+	}
+}
+
+// fakeDockerRecording puts a `docker` on an otherwise empty PATH (no mydumper,
+// so runDump picks Docker mode). It records its argv, copies the file given
+// with --defaults-file, and writes a dump with a binlog position so runDump
+// completes.
+func fakeDockerRecording(t *testing.T) (argv, copied string) {
+	t.Helper()
+	dir := t.TempDir()
+	argv = filepath.Join(dir, "argv")
+	copied = filepath.Join(dir, "defaults.cnf")
+	for _, tool := range []string{"mkdir", "cp"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("%s not found: %v", tool, err)
+		}
+		if err := os.Symlink(p, filepath.Join(dir, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := "#!/bin/bash\n" +
+		"printf '%s\\n' \"$@\" > '" + argv + "'\n" +
+		"out=\"\"; prev=\"\"; for a in \"$@\"; do\n" +
+		"  [ \"$prev\" = --outputdir ] && out=\"$a\"\n" +
+		"  [ \"$prev\" = --defaults-file ] && cp \"$a\" '" + copied + "'\n" +
+		"  prev=\"$a\"\n" +
+		"done\n" +
+		"mkdir -p \"$out\"\n" +
+		"printf 'Started dump at: 2026-09-18 03:00:00\\nSHOW MASTER STATUS:\\n\\tLog: binlog.000001\\n\\tPos: 4\\n\\nFinished dump at: 2026-09-18 03:00:01\\n' > \"$out/metadata\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	return argv, copied
+}
+
+// #2211, `bintrail dump` in Docker mode: the section rides in the
+// bind-mounted --defaults-file, including when there is no password (the
+// file used to exist only for one).
+func TestRunDump_DockerModeExplainFormat(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		dsn          string
+		present      bool
+		wantFile     bool
+		wantPassword bool
+	}{
+		{name: "TREE, no password", dsn: "admin@tcp(127.0.0.1:1)/", present: true, wantFile: true},
+		{name: "TREE, with a password", dsn: "admin:p@tcp(127.0.0.1:1)/", present: true, wantFile: true, wantPassword: true},
+		{name: "no such variable, no password: no file", dsn: "admin@tcp(127.0.0.1:1)/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupQuietDump(t, func(baseline.LockMode) error { return nil })
+			argvPath, copied := fakeDockerRecording(t)
+			dmpSourceDSN = tc.dsn
+			stubExplainFormat(t, "TREE", tc.present, nil)
+			if err := runDump(newDumpCmdForTest(t), nil); err != nil {
+				t.Fatalf("runDump: %v", err)
+			}
+			data, err := os.ReadFile(argvPath)
+			if err != nil {
+				t.Fatalf("docker never ran: %v", err)
+			}
+			args := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+			if slices.Contains(args, "--defaults-extra-file") {
+				t.Fatalf("args %q: Docker mode must not add a second option file", args)
+			}
+			i := slices.Index(args, "--defaults-file")
+			if (i >= 0) != tc.wantFile {
+				t.Fatalf("args %q: --defaults-file present = %v, want %v", args, i >= 0, tc.wantFile)
+			}
+			if !tc.wantFile {
+				return
+			}
+			file := args[i+1]
+			if !slices.Contains(args, file+":"+file+":ro") {
+				t.Fatalf("args %q do not bind-mount %s read-only into the container", args, file)
+			}
+			text, err := os.ReadFile(copied)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := string(text)
+			if !strings.HasSuffix(s, mydumperlock.ExplainFormatSection) {
+				t.Errorf("defaults file %q, want it to end with the session section", s)
+			}
+			if strings.Contains(s, "password=") != tc.wantPassword {
+				t.Errorf("defaults file %q: password lines present = %v, want %v", s, !tc.wantPassword, tc.wantPassword)
+			}
+		})
+	}
+}
+
+// When the section could not be sent, a failing mydumper's error carries why:
+// a segfault prints almost nothing of its own.
+func TestRunDump_FailureCarriesTheExplainFormatNote(t *testing.T) {
+	setupQuietDump(t, func(baseline.LockMode) error { return nil })
+	bin, _, _ := fakeMydumperRecording(t, "mydumper v1.0.3-1, built against MySQL 8.4.9 with SSL support")
+	script, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, []byte(strings.Replace(string(script), "touch ", "kill -SEGV $$\ntouch ", 1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubExplainFormat(t, "", false, errors.New("access denied"))
+	cmd := newDumpCmdForTest(t)
+	if err := cmd.Flags().Set("mydumper-path", bin); err != nil {
+		t.Fatal(err)
+	}
+	err = runDump(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "explain_format could not be read (access denied)") ||
+		!strings.Contains(err.Error(), "explain_format=TRADITIONAL on the source") {
+		t.Fatalf("err = %v, want the explain_format note and its remedy", err)
 	}
 }

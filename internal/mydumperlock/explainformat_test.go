@@ -63,6 +63,7 @@ func TestPlanExplainFormat(t *testing.T) {
 		build      Version
 		wantSend   bool
 		wantWarnIn string // "" = no warning
+		wantRemedy string
 	}{
 		{name: "tree, modern build", present: true, value: "TREE", known: true, build: modern, wantSend: true},
 		{name: "json, modern build", present: true, value: "JSON", known: true, build: modern, wantSend: true},
@@ -72,10 +73,12 @@ func TestPlanExplainFormat(t *testing.T) {
 		{name: "at the floor", present: true, value: "TREE", known: true, build: Version{0, 16, 1}, wantSend: true},
 		{name: "variable absent", present: false, known: true, build: modern},
 		{name: "variable absent, old build", present: false, known: true, build: Version{0, 10, 0}},
-		{name: "below the floor, tree", present: true, value: "TREE", known: true, build: Version{0, 16, 0}, wantWarnIn: "(0.16.0) is older than 0.16.1"},
-		{name: "below the floor, lower-case tree with spaces", present: true, value: " tree ", known: true, build: Version{0, 10, 0}, wantWarnIn: "explain_format=tree,"},
+		{name: "below the floor, tree", present: true, value: "TREE", known: true, build: Version{0, 16, 0}, wantWarnIn: "(0.16.0) is older than 0.16.1", wantRemedy: "install mydumper 0.16.1 or newer"},
+		{name: "below the floor, lower-case tree with spaces", present: true, value: " tree ", known: true, build: Version{0, 10, 0}, wantWarnIn: "explain_format=tree,", wantRemedy: "install mydumper 0.16.1 or newer"},
 		{name: "below the floor, traditional any case", present: true, value: "traditional", known: true, build: Version{0, 10, 0}},
-		{name: "unknown build, tree", present: true, value: "TREE", known: false, wantWarnIn: "version could not be read"},
+		// An unreadable version may be a modern build: telling it to install
+		// a newer one would be false.
+		{name: "unknown build, tree", present: true, value: "TREE", known: false, wantWarnIn: "version could not be read", wantRemedy: "use a mydumper whose --version this release can read"},
 		{name: "unknown build, traditional", present: true, value: "TRADITIONAL", known: false},
 	}
 	for _, c := range cases {
@@ -90,8 +93,13 @@ func TestPlanExplainFormat(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(p.Warning, c.wantWarnIn) || !strings.Contains(p.Warning, "Install mydumper 0.16.1 or newer") {
-				t.Fatalf("warning %q, want it to hold %q and the remedy", p.Warning, c.wantWarnIn)
+			for _, w := range []string{c.wantWarnIn, c.wantRemedy, "or set explain_format=TRADITIONAL on the source"} {
+				if !strings.Contains(p.Warning, w) {
+					t.Fatalf("warning %q, want it to hold %q", p.Warning, w)
+				}
+			}
+			if !c.known && strings.Contains(p.Warning, "install mydumper") {
+				t.Fatalf("warning %q tells a build of unknown version to install a newer one", p.Warning)
 			}
 		})
 	}

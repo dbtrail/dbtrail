@@ -76,10 +76,12 @@ func PlanExplainFormat(present bool, value string, buildKnown bool, build Versio
 		return ExplainFormatPlan{}
 	}
 	which := "this mydumper's version could not be read"
+	remedy := "use a mydumper whose --version this release can read"
 	if buildKnown {
 		which = "this mydumper (" + build.String() + ") is older than " + SessionVariablesFloor.String()
+		remedy = "install mydumper " + SessionVariablesFloor.String() + " or newer"
 	}
 	return ExplainFormatPlan{Warning: fmt.Sprintf("the source runs with explain_format=%s, which makes mydumper crash "+
 		"(segmentation fault) while it sizes tables, and %s, so it cannot be told to use TRADITIONAL for its own "+
-		"sessions. Install mydumper %s or newer", strings.TrimSpace(value), which, SessionVariablesFloor)}
+		"sessions. To fix it, %s, or set explain_format=TRADITIONAL on the source", strings.TrimSpace(value), which, remedy)}
 }

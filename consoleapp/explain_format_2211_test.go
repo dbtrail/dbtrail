@@ -142,3 +142,38 @@ func TestRunMydumper_ExplainFormatSkippedBelowTheFloor(t *testing.T) {
 		t.Fatalf("args %q carry --defaults-extra-file on a build below the floor", args)
 	}
 }
+
+// When the section could not be sent, a crashing mydumper's error (the run
+// card's text) carries why and the remedy, not a bare segmentation fault.
+func TestRunMydumper_FailureCarriesTheExplainFormatNote(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		build   string
+		readErr error
+		want    string
+	}{
+		{name: "the read failed", build: versionModern, readErr: errors.New("access denied"), want: "explain_format could not be read (access denied)"},
+		{name: "build below the floor", build: "mydumper v0.16.0, built against MySQL 8.0.40", want: "(0.16.0) is older than 0.16.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := fakeConsoleMydumper(t, printsVersion(tc.build))
+			scriptPath := filepath.Join(filepath.Dir(record), "mydumper")
+			script, err := os.ReadFile(scriptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			crash := strings.TrimSuffix(string(script), "exit 0\n") + "kill -SEGV $$\n"
+			if err := os.WriteFile(scriptPath, []byte(crash), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			stubPreflight(t, nil)
+			stubSourceVersion(t, "8.0.40", nil)
+			stubSourceExplainFormat(t, "TREE", tc.readErr == nil, tc.readErr)
+			err = runMydumper(context.Background(), "u:p@tcp(127.0.0.1:1)/", config.SSL{Mode: "disabled"}, []string{"appdb"},
+				filepath.Join(t.TempDir(), "out"), baseline.LockModeFTWRL, lockModeFromEnv)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "explain_format=TRADITIONAL on the source") {
+				t.Fatalf("err = %v, want it to hold %q and the remedy", err, tc.want)
+			}
+		})
+	}
+}

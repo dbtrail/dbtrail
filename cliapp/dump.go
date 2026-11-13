@@ -386,13 +386,18 @@ func runDump(cmd *cobra.Command, args []string) error {
 	// own sessions are told TRADITIONAL; the server's setting is not touched.
 	// Read here, with the other pre-dump reads, before the output directory
 	// is disturbed.
+	// explainNote, when set, is added to the error if mydumper fails: a crash
+	// prints almost nothing of its own.
 	var explainPlan mydumperlock.ExplainFormatPlan
+	var explainNote string
 	if value, present, err := sourceExplainFormat(cmd.Context(), dmpSourceDSN); err != nil {
-		slog.Warn("could not read the source's explain_format, so mydumper is not told to use TRADITIONAL; "+
-			"if the source runs with TREE or JSON, mydumper crashes", "error", err)
+		explainNote = "the source's explain_format could not be read (" + err.Error() + "), so mydumper was not told to use " +
+			"TRADITIONAL; if the source runs with TREE or JSON, mydumper crashes. Setting explain_format=TRADITIONAL on the source avoids it"
+		slog.Warn(explainNote)
 	} else {
 		explainPlan = mydumperlock.PlanExplainFormat(present, value, buildKnown, build)
 		if explainPlan.Warning != "" {
+			explainNote = explainPlan.Warning
 			slog.Warn(explainPlan.Warning)
 		}
 	}
@@ -515,7 +520,13 @@ func runDump(cmd *cobra.Command, args []string) error {
 			if hint := mydumperlock.FTWRLDeniedHint(lockMode, stderr, mydumperlock.RemedyCLI); hint != "" {
 				return fmt.Errorf("mydumper failed: %w: %s; stderr: %s", runErr, hint, stderr)
 			}
+			if explainNote != "" {
+				return fmt.Errorf("mydumper failed: %w: %s; stderr: %s", runErr, explainNote, stderr)
+			}
 			return fmt.Errorf("mydumper failed: %w; stderr: %s", runErr, stderr)
+		}
+		if explainNote != "" {
+			return fmt.Errorf("mydumper failed: %w: %s", runErr, explainNote)
 		}
 		return fmt.Errorf("mydumper failed: %w", runErr)
 	}
