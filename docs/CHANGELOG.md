@@ -7,17 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **iceberg-go 0.7.0** (#2728), the library behind `bintrail export
-  iceberg`, with arrow-go 18.8.0. The upgrade moves shared dependencies too.
-  Every binary (`bintrail`, `bintrail-console`, `bintrail-mcp`,
-  `bintrail-pg`) gets newer versions of the AWS SDK, golang.org/x/sys, sync
-  and text, klauspost/compress and go-sql-driver/mysql 1.10.0, whose fix to
-  reading the server's `max_allowed_packet` applies to the index and source
-  connections whose DSN does not set `maxAllowedPacket`, since bintrail asks
-  the server for that limit there. gRPC,
-  OpenTelemetry, gocloud and the Azure and Google Cloud libraries change only
-  in `bintrail`, the one binary with the export. The minimum Go version is
-  unchanged (1.25.11).
 - **Live-source `verify` on a PostgreSQL table with writes compares equal**
   (#2198). The table was read inside one snapshot, but the reconstruction
   was cut at the time the scan ended, so every write committed while the
@@ -59,9 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On a 100,000-row table changed every run, a DuckDB 1.5.6 read took 9.1 s
   after 30 runs without it, and at most 3.1 s with the default (about 0.01 s
   right after each compaction); a million-row table compacts in about 1.5 s.
-  The manifests a compaction leaves behind are dropped by the next one
-  (#2728, iceberg-go 0.7.0), so with `--compact-after 1` the read stayed at
-  about 0.007 s through 30 compactions instead of creeping to 0.044 s. A
+  Each compaction still leaves two small manifests that later commits keep
+  listing, an iceberg-go 0.6.0 behavior; moving to 0.7.0 is #2728. A
   compaction that does not finish, or that another writer's commit overtakes,
   is not applied and is retried by the next run; the table's verdict stays
   what its delta made it. `--compact-after 0` turns it off. The
