@@ -110,6 +110,12 @@ func TestSnapshotList_goingRowsWithS3(t *testing.T) {
 	for i := 2; i < len(local)-1; i++ {
 		local[i]["going"] = true
 	}
+	// Past the count and kept all the same (#2675): older than the newest
+	// two, younger than Delete by age. The server says going: false, and the
+	// page must not mark it; counting positions marked it.
+	agedKept := map[string]any{"time": now.Add(-270 * time.Minute).Format(consoleTSFormat), "age_hours": 4.5,
+		"tables": []string{"shop.orders"}, "kinds": []string{"dir"}, "going": false}
+	local = append(local[:len(local)-1], agedKept, local[len(local)-1])
 	local[len(local)-1]["restored_until"] = "2026-11-13 09:30:00"
 	raw, _ := json.Marshal(local)
 	script := renderHarnessJS + `
@@ -158,7 +164,7 @@ console.log(JSON.stringify({
 	// one made 30 minutes ago included (no hour keeps it), the last
 	// restore's result not.
 	if got.Local.Chips != 5 || got.Local.Going != 5 {
-		t.Errorf("no S3: %d chips on %d rows, want 5: the 30-minute one and the four after it, not the restore's result", got.Local.Chips, got.Local.Going)
+		t.Errorf("no S3: %d chips on %d rows, want 5: the 30-minute one and the four after it, not the one the age keeps (going false) nor the restore's result", got.Local.Chips, got.Local.Going)
 	}
 	for _, title := range got.Local.Titles {
 		if title != "Past the newest 2 kept (Settings, Keep by count). Removed from this machine at the next cleanup, which follows each new snapshot, never a table's only copy." {
