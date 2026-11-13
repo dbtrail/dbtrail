@@ -935,9 +935,25 @@ services:
   # profile does not refresh it), fails here with
   # `required flag(s) "output" not set`; the fix is
   # `docker compose --profile baseline pull`.
+  #
+  # This step also asks the source for explain_format (#2733), in every lock
+  # mode. On MySQL 9.x with TREE (Percona Server 9.7's default) or JSON,
+  # mydumper crashes with a segmentation fault while it sizes tables unless
+  # its own sessions use TRADITIONAL; on MariaDB or MySQL before 8.0.32,
+  # which have no such variable, telling it so makes it exit 1. So the step
+  # writes the option file /dump/mydumper-session.cnf only when the variable
+  # exists, and baseline-dump passes it to mydumper when it is there. The
+  # server's own setting is not changed. A bintrail image newer than 0.130.0
+  # is needed for this part; an older one ignores the variable, and then a
+  # TREE source crashes mydumper as before.
   baseline-quiet:
     profiles: ["baseline"]
     image: ghcr.io/dbtrail/bintrail:${BINTRAIL_TAG:-latest}
+    # Root, unlike every other service of this image: the bintrail-dump
+    # volume's root is created by root (by this mount or by baseline-dump,
+    # which runs as root), and the image's uid 999 cannot create the option
+    # file there. The step only reads the source and writes that one file.
+    user: "0:0"
     # Same mapping as the bintrail service: host.docker.internal on Linux too.
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
@@ -945,7 +961,12 @@ services:
       # The same source as baseline-dump below, in the variable the command
       # reads.
       BINTRAIL_SOURCE_DSN: ${BASELINE_SOURCE_DSN:-${SOURCE_DSN:-}}
+      # Where to write mydumper's session option file. Outside
+      # /dump/snapshot, which baseline-dump empties every run.
+      BINTRAIL_MYDUMPER_SESSION_FILE: /dump/mydumper-session.cnf
     command: ["dump", "wait-quiet", "--lock-mode", "${BASELINE_LOCK_MODE:-ftwrl}"]
+    volumes:
+      - bintrail-dump:/dump
 
   baseline-dump:
     profiles: ["baseline"]
@@ -973,6 +994,13 @@ services:
     command:
       - |
         set -e
+        # Written by baseline-quiet just before, only when the source has
+        # explain_format (see there). Used once: removed when this step
+        # exits, so a run started without baseline-quiet (`--no-deps`) does
+        # not find an earlier source's file. A killed container skips that;
+        # baseline-quiet removes it again on the next run.
+        session_file=/dump/mydumper-session.cnf
+        trap 'rm -f "$$session_file"' EXIT
         dsn="$$BASELINE_SOURCE_DSN"
         if [ -z "$$dsn" ]; then
           echo "FATAL: set BASELINE_SOURCE_DSN (or SOURCE_DSN) to the source MySQL to snapshot, e.g." >&2
@@ -1021,6 +1049,9 @@ services:
           --threads 4 --compress-protocol --complete-insert \
           --sync-thread-lock-mode "$$sync_mode" --trx-tables
         [ -n "$$pass" ] && set -- "$$@" --password "$$pass"
+        # [mydumper_session_variables] explain_format = TRADITIONAL, read by
+        # mydumper 0.16.1 and newer (the pin is above that).
+        [ -f "$$session_file" ] && set -- "$$@" --defaults-extra-file "$$session_file"
         schemas="$$(printf '%s' "$$BASELINE_SCHEMAS" | tr -d ' ')"
         if [ -n "$$schemas" ]; then
           case "$$schemas" in
@@ -1038,7 +1069,25 @@ services:
           set -- "$$@" --regex "^(?!(mysql|sys|performance_schema|information_schema)($$|\\.))"
         fi
         set -- "$$@" --outputdir /dump/snapshot
-        mydumper "$$@"
+        rc=0
+        mydumper "$$@" || rc=$$?
+        if [ "$$rc" -ne 0 ]; then
+          # 139 is a segmentation fault. Without the option file, one known
+          # cause is a source with explain_format=TREE or JSON; another is
+          # ftwrl with BACKUP_ADMIN but no RELOAD (see the note below).
+          if [ "$$rc" -eq 139 ] && [ ! -f "$$session_file" ]; then
+            echo "mydumper crashed (exit 139) and was not told to use explain_format=TRADITIONAL." >&2
+            echo "If the source runs explain_format=TREE or JSON (MySQL 9.x), that is the cause:" >&2
+            echo "  docker compose --profile baseline logs baseline-quiet   says whether the source was asked and what it answered;" >&2
+            echo "  nothing there about explain_format means a bintrail image of 0.130.0 or older (check BINTRAIL_TAG," >&2
+            echo "  then docker compose --profile baseline pull); or set explain_format=TRADITIONAL on the source." >&2
+            echo "The same crash happens with BASELINE_LOCK_MODE=ftwrl and an account with BACKUP_ADMIN but no RELOAD." >&2
+          elif [ -f "$$session_file" ]; then
+            echo "mydumper was given explain_format = TRADITIONAL for its sessions from $$session_file (written by baseline-quiet)." >&2
+            echo "If its error names explain_format, that file came from another source: delete it and run the profile again." >&2
+          fi
+          exit "$$rc"
+        fi
         # Record the lock mode the dump was taken with, the way `bintrail
         # dump` does, so the snapshot made from it says how it was locked.
         # The value passed the case above, so it is one of the four names.
