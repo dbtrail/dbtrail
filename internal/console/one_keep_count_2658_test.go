@@ -303,12 +303,12 @@ func TestOneKeepCount_aFirstDestinationStartsTheUploadInterval(t *testing.T) {
 	})
 }
 
-// The documented downgrade case, pinned as it behaves: a registry that
-// already records the migration and holds a server with an S3 destination
-// and a count (an older version saved the 3 it does not use, after a
-// downgrade) is read with that count in force. docs/upgrade.md says to empty
-// Keep by count on such a server before upgrading again.
-func TestOneKeepCount_aCountSavedAfterADowngradeApplies(t *testing.T) {
+// A registry that records the migration without marks (saved by the first
+// version with the record) holds a server with an S3 destination and a
+// count: that version applied it, so it is read with the count in force
+// (#2675 marks it as it is). A count an older version saved after the marks
+// exist is cleared instead (keep_count_mark_2675_test.go).
+func TestOneKeepCount_aCountFromTheFirstVersionWithTheRecordApplies(t *testing.T) {
 	clearStores(t)
 	path := writeRegistryFile(t, `version: 1
 local_keep_with_s3:
@@ -323,7 +323,7 @@ servers:
 `)
 	r := loadReg(t, path)
 	if e := mustGet(t, r, "aaaaaaaaaaaaaaa1"); e.LocalKeepNewest != 3 {
-		t.Fatalf("count %d, want the stored 3 (the migration ran before this server existed)", e.LocalKeepNewest)
+		t.Fatalf("count %d, want the stored 3 (that version applied it)", e.LocalKeepNewest)
 	}
 	if got := LocalKeepTargets(r.List()); got["/srv/one"] != 3 {
 		t.Fatalf("folders pruned to a count = %v, want /srv/one at 3", got)
