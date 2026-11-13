@@ -1737,6 +1737,11 @@ func localKeepPruneTargets(entries []console.ServerEntry, globalDir string, glob
 // an age target: one prune of it applies both rules (a snapshot goes when it
 // is past the count AND older than the age), where two prunes in a row would
 // let the age alone take the folder under its count.
+//
+// A folder whose S3 prefix another folder's writer also sends to is not
+// pruned by age either (#2675, console.AgePruneSharedS3): the bucket would
+// confirm the other writer's snapshot of the same name, and a local snapshot
+// whose own upload failed would be removed with no copy of it anywhere.
 func prunePlan(entries []console.ServerEntry, globalDir, globalS3 string, retain time.Duration) []baselinePruneTarget {
 	byCount, covered := localKeepPruneTargets(entries, globalDir, globalS3)
 	var targets []baselinePruneTarget
@@ -1745,10 +1750,35 @@ func prunePlan(entries []console.ServerEntry, globalDir, globalS3 string, retain
 			if covered[console.CanonicalDir(t.dir)] {
 				continue
 			}
+			if console.AgePruneSharedS3(entries, t.dir, t.s3, globalDir, globalS3) {
+				continue
+			}
 			targets = append(targets, t)
 		}
 	}
 	return append(targets, byCount...)
+}
+
+// ageSharedS3Message is what the hourly cleanup logs for each folder
+// prunePlan leaves out of the age rule because its S3 prefix is shared.
+const ageSharedS3Message = "snapshot cleanup: another server sends its snapshots to this folder's S3 prefix too, so the bucket cannot tell which server's copy it holds, and nothing is removed from this folder by age; give each server its own S3 prefix"
+
+// warnAgeSharedS3 logs each folder an age would prune and prunePlan leaves
+// out because its S3 prefix is shared (#2675). Called by the hourly cleanup
+// only: prunePlan also runs after every new snapshot, and the same line
+// every few minutes would bury the rest of the log.
+func warnAgeSharedS3(entries []console.ServerEntry, globalDir, globalS3 string, retain time.Duration) {
+	if retain <= 0 {
+		return
+	}
+	// The folders a count covers, as localKeepPruneTargets names them,
+	// without its own warnings said a second time.
+	covered := console.LocalKeepTargets(entries, globalDir, globalS3)
+	for _, t := range baselinePruneTargets(entries, globalDir, globalS3) {
+		if _, counted := covered[console.CanonicalDir(t.dir)]; !counted && console.AgePruneSharedS3(entries, t.dir, t.s3, globalDir, globalS3) {
+			slog.Warn(ageSharedS3Message, "dir", t.dir, "destination", t.s3)
+		}
+	}
 }
 
 // runBaselinePruneCycle prunes each target via pruneFn, one (dir + S3) pair at a
@@ -2801,6 +2831,7 @@ func baselinePruneSweep(ctx context.Context, reg *console.Registry, globalDir, g
 	// A folder with a count prunes to it whether or not an age retention is
 	// set (#1681, and with an S3 destination since #2658); a set one still
 	// protects younger snapshots.
+	warnAgeSharedS3(entries, globalDir, globalS3, retain)
 	runBaselinePruneCycle(ctx, prunePlan(entries, globalDir, globalS3, retain), retain, pruneFn)
 	// After the local prune, never before it: that one removes a local
 	// snapshot only while its copy is in S3 (#2596).

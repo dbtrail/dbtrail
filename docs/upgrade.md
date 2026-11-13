@@ -194,7 +194,12 @@ Servers you already have keep what they have:
   bound one.
 - `--baseline-retain` (**Delete by age**) still works and is the old way. A
   server with no count is pruned by the age alone, once S3 has each
-  snapshot. The daemon says so once at startup.
+  snapshot. The daemon says so once at startup. A folder whose S3 prefix
+  another server also sends to, from another folder or from none, is not
+  pruned by age any more ([#2675](https://github.com/dbtrail/dbtrail/issues/2675)):
+  the bucket cannot say which server's copy of a snapshot name it holds.
+  Such a folder now keeps every snapshot, the hourly cleanup logs it, and
+  its settings card says why. Give each server its own S3 prefix.
 - A schedule you already saved keeps sending to S3 as often as it did, each
   update included, and no schedule starts by itself on a server you already
   have.

@@ -223,6 +223,11 @@ type backupSettingsServerDTO struct {
 	// count in force too (KeepInForce, #2658) a snapshot goes only when it
 	// is past the count AND older than this.
 	DeleteAfterMinutes int `json:"delete_after_minutes,omitempty"`
+	// DeleteAfterSharedS3 says an age is set and does not reach this server
+	// (DeleteAfterMinutes is then 0) because its S3 prefix is also the
+	// destination of a writer that keeps its snapshots in another folder, or
+	// in none (#2675, AgePruneSharedS3). The way out is a prefix of its own.
+	DeleteAfterSharedS3 bool `json:"delete_after_shared_s3,omitempty"`
 	// NotInS3 is the last prune's count of old snapshots the S3 destination
 	// answered it does not have (baseline.NotInDestinationFile): the only
 	// copy, so they stay on this machine. NotInS3Error says the record would
@@ -362,6 +367,11 @@ func (s *Server) backupSettingsServerDTO(e ServerEntry) backupSettingsServerDTO 
 	inForce := s.localRetentionOf(e.ID)
 	if e.BaselineDir != "" && e.BaselineS3 != "" {
 		dto.DeleteAfterMinutes = s.pruneRetainMinutes()
+		// The age does not reach a folder whose S3 prefix another folder's
+		// writer sends to (#2675): the loop leaves it out (prunePlan).
+		if dto.DeleteAfterMinutes > 0 && AgePruneSharedS3(s.cm.reg.List(), e.BaselineDir, e.BaselineS3, s.cm.defaultBaselineDir, s.cm.defaultBaselineS3) {
+			dto.DeleteAfterMinutes, dto.DeleteAfterSharedS3 = 0, true
+		}
 		// With no age set and no count in force, no prune refreshes the
 		// record: what it says is frozen, so it is not read (the card would
 		// show a stale count).

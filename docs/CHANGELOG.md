@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **The MySQL port without Engine Routing answers `LIMIT offset, count`** (part of #2628). It used to refuse `LIMIT 10, 5` and ask for `LIMIT 5 OFFSET 10`; it now writes it that way for the copy itself, so deep pagination from an ORM or a BI tool (`LIMIT ?, ?` from SQLAlchemy too) runs as written. The rows are the ones MySQL returns, checked against MySQL 8.0.46 for an offset of 0, an offset past the last row, a count of 0, leading zeros, and a `LIMIT` in a subquery, a CTE and either side of a `UNION`. A form it cannot write with certainty is still refused with how to write it: a number past 9223372036854775807, a comment between the two numbers, or a prepared argument that is not a whole number; a DOUBLE or DECIMAL argument to a prepared `LIMIT ?` gets MySQL's own error 1210, as on MySQL. And a `LIMIT` inside an `IN`, `ALL`, `ANY` or `SOME` subquery is now refused on that port, as MySQL refuses it (error 1235); the copy used to answer it. Engine Routing is unchanged.
+- **A shared S3 prefix is not pruned by age either** (#2675). With
+  `--baseline-retain` (**Delete by age**) and no count, the cleanup removed a
+  local snapshot once the bucket had `<prefix>/<snapshot name>/_SUCCESS`. A
+  snapshot name has no server in it, and two servers on one prefix and one
+  schedule write the same names, so the bucket confirmed the other server's
+  upload, and a snapshot whose own upload had failed could be removed with no
+  copy anywhere. A count already left such a folder alone (#2658); the age
+  now does too. A folder whose S3 prefix another server sends to, from
+  another folder or from none, keeps every local snapshot; the hourly
+  cleanup logs each one, and the settings card says "Another server sends
+  its snapshots to this S3 location too, so nothing here is removed. Give
+  each server its own S3 prefix."
+  Servers that share both the folder and the prefix, which is what the
+  startup migration gives them, are one set of snapshots and are pruned by
+  age as before. `bintrail baseline --upload --baseline-retain` names one folder and
+  one prefix and cannot see other servers; it is unchanged.
+
 - **Full reads work on sources with `explain_format=TREE`** (#2211). On a
   MySQL 9.x source whose `explain_format` is `TREE` (the default on Percona
   Server 9.7) or `JSON`, mydumper crashed with a segmentation fault within
