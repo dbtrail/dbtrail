@@ -211,8 +211,11 @@ func TestBaselinePruneSweep_logsTheDaemonsSharedPrefix(t *testing.T) {
 	own := t.TempDir()
 	logs := captureSlogFor(t)
 	pruned := 0
-	baselinePruneSweep(context.Background(), reg, own, "s3://bucket/shared", "30d",
-		func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error) { pruned++; return baseline.PruneResult{}, nil })
+	prune := func(context.Context, baseline.PruneOptions) (baseline.PruneResult, error) {
+		pruned++
+		return baseline.PruneResult{}, nil
+	}
+	baselinePruneSweep(context.Background(), reg, own, "s3://bucket/shared", "30d", prune)
 	if out := logs.String(); !strings.Contains(out, ageSharedS3Message) || !strings.Contains(out, "dir="+own) || pruned != 0 {
 		t.Fatalf("pruned %d, log %s: want nothing pruned and the daemon's own folder named", pruned, out)
 	}
