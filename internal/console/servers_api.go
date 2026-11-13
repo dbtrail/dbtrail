@@ -94,6 +94,10 @@ type serverDTO struct {
 	// statements on the SQL port. Edited through /api/servers/{id}/sql-mode
 	// only; applied to connections opened after the change.
 	SQLLikeIgnoresCase bool `json:"sql_like_ignores_case"`
+	// SQLMaxBehindSource is the copy's lag limit SAVED for this server, in
+	// seconds, 0 for none (#2777). Edited through /api/servers/{id}/sql-mode
+	// only; read per statement.
+	SQLMaxBehindSource int64 `json:"sql_max_behind_source_seconds"`
 	// PortUser is the server's application login on the MySQL port, and
 	// HasPortPassword says it has its password; the password itself is
 	// never sent. Edited through /api/servers/{id}/port-login only.
@@ -1916,6 +1920,7 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 		SQLFresh:             e.SQLFreshOn(),
 		SQLFreshSaved:        e.SQLFreshSaved(),
 		SQLLikeIgnoresCase:   e.SQLLikeIgnoresCase,
+		SQLMaxBehindSource:   e.SQLMaxBehindSource,
 		PortUser:             e.PortUser,
 		HasPortPassword:      e.PortPassword != "",
 		Flavor:               e.SourceFlavor(),
