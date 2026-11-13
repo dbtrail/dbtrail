@@ -197,14 +197,16 @@ func VerifyTablePG(ctx context.Context, cfg PGLiveConfig, schema, table string) 
 	// (the MySQL path's rule since #2150). Found BEFORE the coverage check
 	// (the MySQL path's opposite order) because the PG gap_lost verdict is
 	// scoped to the comparison window, whose start is this baseline's
-	// snapshot time.
-	baselinePath, snapshotTime, _, err := reconstruct.FindBaseline(ctx, cfg.BaselineSource, schema, table, openedBy)
+	// snapshot time. Held until this table is checked (#2675), as on the
+	// MySQL path.
+	baselinePath, snapshotTime, _, releaseBaseline, err := reconstruct.FindBaselineHeld(ctx, cfg.BaselineSource, schema, table, openedBy)
 	if err != nil {
 		if isNoBaseline(err) {
 			return inconclusive(res, withNote("no baseline at-or-before the snapshot; reconstruct would omit never-touched rows", unpinnedNote)), nil
 		}
 		return res, fmt.Errorf("find baseline %s.%s: %w", schema, table, err)
 	}
+	defer releaseBaseline()
 
 	// 3. Coverage: has the index durably absorbed everything the snapshot
 	// reflects? Inconclusive when provably not (or when events were

@@ -445,22 +445,7 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 		return untrack, gomysql.NewError(gomysql.ER_UNKNOWN_ERROR, fmt.Sprintf("flashback: cannot open server %q: %s", user, err))
 	}
 
-	shimCfg := shim.Config{
-		IndexDBName:   tgt.IndexDBName,
-		NoArchive:     tgt.NoArchive,
-		AllowGaps:     cfg.AllowGaps,
-		QueryTimeout:  cfg.QueryTimeout,
-		FullTableGate: gate,
-		ResultBudget:  cfg.ResultBudget,
-		AuthMethod:    cfg.AuthMethod,
-		// Already split by scheme and dir-preferred by ResolveFlashback so
-		// `_snapshot` matches the console's Time-travel tab.
-		BaselineDir: tgt.BaselineDir,
-		BaselineS3:  tgt.BaselineS3,
-		// The folder, then the server's S3 destination (#2678).
-		FindBaseline:   tgt.FindBaseline,
-		BaselineBucket: tgt.BaselineBucket,
-	}
+	shimCfg := flashbackShimConfig(tgt, cfg, gate)
 
 	h := shim.NewHandlerWithConfig(tgt.IndexDB, shimCfg, logger)
 	h.BindConnContext(ctx)
@@ -572,6 +557,29 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	}
 	proxy.inner = h
 	return untrack, nil
+}
+
+// flashbackShimConfig is the shim configuration of one port connection to
+// the server tgt is for.
+func flashbackShimConfig(tgt console.FlashbackTarget, cfg flashbackConfig, gate *shim.Gate) shim.Config {
+	return shim.Config{
+		IndexDBName:   tgt.IndexDBName,
+		NoArchive:     tgt.NoArchive,
+		AllowGaps:     cfg.AllowGaps,
+		QueryTimeout:  cfg.QueryTimeout,
+		FullTableGate: gate,
+		ResultBudget:  cfg.ResultBudget,
+		AuthMethod:    cfg.AuthMethod,
+		// Already split by scheme and dir-preferred by ResolveFlashback so
+		// `_snapshot` matches the console's Time-travel tab.
+		BaselineDir: tgt.BaselineDir,
+		BaselineS3:  tgt.BaselineS3,
+		// The folder, then the server's S3 destination (#2678).
+		FindBaseline:   tgt.FindBaseline,
+		BaselineBucket: tgt.BaselineBucket,
+		// The snapshot a `_snapshot` query reads stays until it ends (#2691).
+		PinBaseline: tgt.PinBaseline,
+	}
 }
 
 // bindReadRouter turns h into a routing handler when read routing is on and

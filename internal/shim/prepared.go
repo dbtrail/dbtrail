@@ -194,6 +194,11 @@ func (h *Handler) HandleStmtExecute(context any, _ string, args []any) (*mysql.R
 	if st.up != nil {
 		return h.executeRouted(st, args)
 	}
+	if !st.mysqlEscapes {
+		if err := limitArgsRefusal(st.parts, args); err != nil {
+			return nil, err
+		}
+	}
 	text, err := st.interpolate(args)
 	if err != nil {
 		return nil, mysql.NewError(mysql.ER_WRONG_ARGUMENTS, err.Error())
@@ -445,6 +450,41 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db string, toF
 	out := *res
 	out.Resultset = bin
 	return &out, nil
+}
+
+// limitPlaceholder is a template piece that ends right where a LIMIT or an
+// OFFSET takes its number; limitCommaPiece is the comma between LIMIT ?, ?.
+var (
+	limitPlaceholder = regexp.MustCompile(`(?i)\b(limit|offset)\s*$`)
+	limitCommaPiece  = regexp.MustCompile(`^\s*,\s*$`)
+)
+
+// limitArgsRefusal is MySQL's refusal of a LIMIT or OFFSET argument that is
+// not an integer: a DOUBLE (2.0) or a DECIMAL. MySQL answers error 1210
+// (MySQL 8.0.46, LIMIT ?, ? with 2.0 and 1); written into the text it would
+// be the number 2, and the copy would answer it (#2628). parts is the template
+// split at its placeholders. A LIMIT with a comment before its placeholder is
+// not seen here.
+func limitArgsRefusal(parts []string, args []any) error {
+	prevLimit := false
+	for i := 0; i < len(args) && i < len(parts)-1; i++ {
+		atLimit := limitPlaceholder.MatchString(parts[i]) || prevLimit && limitCommaPiece.MatchString(parts[i])
+		prevLimit = atLimit
+		if !atLimit {
+			continue
+		}
+		notInteger := false
+		switch v := args[i].(type) {
+		case float32, float64:
+			notInteger = true
+		case mysql.TypedBytes:
+			notInteger = v.Type == mysql.MYSQL_TYPE_DECIMAL || v.Type == mysql.MYSQL_TYPE_NEWDECIMAL
+		}
+		if notInteger {
+			return mysql.NewError(mysql.ER_WRONG_ARGUMENTS, fmt.Sprintf("Incorrect arguments to mysqld_stmt_execute (argument %d is a LIMIT or OFFSET that is not an integer, which MySQL refuses)", i+1))
+		}
+	}
+	return nil
 }
 
 // interpolate writes the arguments into the template.

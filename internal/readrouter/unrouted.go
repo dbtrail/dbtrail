@@ -7,15 +7,26 @@ import (
 
 // UnroutedRefusal is a construct refused on a connection the copy answers
 // alone (#2532): What names it, Instead says how to write it for the copy.
+// Why, when set, says what happens to it in place of "answered differently
+// there than on MySQL, without an error". MySQLRefuses: MySQL refuses it too,
+// so the message does not offer Engine Routing as a way to have it answered.
 type UnroutedRefusal struct {
-	What, Instead string
+	What, Instead, Why string
+	MySQLRefuses       bool
 }
 
 // Message is the refusal as the client is shown it.
 func (r UnroutedRefusal) Message() string {
-	return "this connection is answered by the copy, which runs DuckDB SQL: " + r.What +
-		" is answered differently there than on MySQL, without an error. Write it for the copy instead (" + r.Instead +
-		"), or turn on Engine Routing so that MySQL answers it"
+	why := "is answered differently there than on MySQL, without an error"
+	if r.Why != "" {
+		why = r.Why
+	}
+	msg := "this connection is answered by the copy, which runs DuckDB SQL: " + r.What + " " + why +
+		". Write it for the copy instead (" + r.Instead + ")"
+	if r.MySQLRefuses {
+		return msg
+	}
+	return msg + ", or turn on Engine Routing so that MySQL answers it"
 }
 
 // unroutedVetoes are the constructs of the veto list that only a statement
@@ -65,7 +76,6 @@ var unroutedVetoes = []struct {
 	{regexp.MustCompile(`(?i)\bbinary\s+[\w"'(]`), "BINARY before a value (a byte comparison on MySQL)", "compare the values the copy's way, or run it on MySQL"},
 	{regexp.MustCompile(`(?i)\b(regexp|rlike)\b`), "REGEXP and RLIKE (case-insensitive on MySQL)", "regexp_matches(x, 'pattern', 'i')"},
 	{regexp.MustCompile(`(?i)\b[xb]''`), "x'..' and b'..' (a hexadecimal or bit string on MySQL)", "a decimal number, or a hexadecimal string the copy's way: '\\x41'::BLOB"},
-	{regexp.MustCompile(`(?i)\blimit\s+[\d?]+\s*,`), "LIMIT offset, count", "LIMIT count OFFSET offset"},
 	{regexp.MustCompile(`(?i)\b_binary\s*''`), "_binary before a string", "drop _binary"},
 	{dayNumbering, "DAYOFWEEK, WEEKDAY and MICROSECOND (days numbered another way, microseconds that count the seconds too)", "isodow(d) % 7 + 1 for MySQL's DAYOFWEEK, isodow(d) - 1 for WEEKDAY, microsecond(ts) % 1000000 for MICROSECOND"},
 }
@@ -94,7 +104,7 @@ var lineCommentTail = regexp.MustCompile(`--[^\n]*`)
 // nothing.
 func UnroutedVeto(stmt string) (UnroutedRefusal, bool) {
 	if executableComment.MatchString(lineCommentTail.ReplaceAllString(singleQuoted.ReplaceAllString(stmt, "''"), "")) {
-		return UnroutedRefusal{"a MySQL executable comment (/*! ... */, which MySQL runs and the copy skips)", "write what is inside it without the comment"}, true
+		return UnroutedRefusal{What: "a MySQL executable comment (/*! ... */, which MySQL runs and the copy skips)", Instead: "write what is inside it without the comment"}, true
 	}
 	// The copy reads a backslash in a string as a plain character, where
 	// scan reads MySQL's escape: 'C:\' ends there on the copy. Outside a
@@ -103,11 +113,133 @@ func UnroutedVeto(stmt string) (UnroutedRefusal, bool) {
 	text := lineCommentTail.ReplaceAllString(sc.blankedCopy, "")
 	for _, v := range unroutedVetoes {
 		if v.re.MatchString(text) {
-			return UnroutedRefusal{v.what, v.instead}, true
+			return UnroutedRefusal{What: v.what, Instead: v.instead}, true
 		}
 	}
+	// Names emptied first: a -- inside one (`x-- y`) must not cut the rest
+	// of the line, a LIMIT after it with it.
+	if limitInSetSubquery(lineCommentTail.ReplaceAllString(quotedName.ReplaceAllString(sc.blankedCopy, `""`), "")) {
+		return limitInSetRefusal, true
+	}
 	if hexNumber.MatchString(quotedName.ReplaceAllString(text, `""`)) {
-		return UnroutedRefusal{"0x.. and 0b.. (a hexadecimal or bit number on MySQL; a number and an alias on the copy)", "the number in decimal, or a hexadecimal string the copy's way: '\\x41'::BLOB"}, true
+		return UnroutedRefusal{What: "0x.. and 0b.. (a hexadecimal or bit number on MySQL; a number and an alias on the copy)", Instead: "the number in decimal, or a hexadecimal string the copy's way: '\\x41'::BLOB"}, true
+	}
+	return UnroutedRefusal{}, false
+}
+
+// limitInSetRefusal is MySQL's own refusal of a LIMIT in an IN, ALL, ANY or
+// SOME subquery, which the copy answers.
+var limitInSetRefusal = UnroutedRefusal{
+	What:         "a LIMIT inside an IN, ALL, ANY or SOME subquery",
+	Why:          "is refused by MySQL with error 1235 (\"This version of MySQL doesn't yet support 'LIMIT & IN/ALL/ANY/SOME subquery'\"), and answered by the copy",
+	Instead:      "the LIMIT in a derived table, which MySQL takes too: IN (SELECT a FROM (SELECT a FROM t LIMIT 2) AS d)",
+	MySQLRefuses: true,
+}
+
+// limitInSetSubquery reports whether text, a statement blanked as UnroutedVeto
+// reads it (names in double quotes, strings ”), holds a LIMIT of the query
+// of an IN, ALL, ANY or SOME subquery: MySQL refuses it with error 1235, the
+// copy answers it (#2628). Measured on MySQL 8.0.46: refused is the LIMIT of
+// the subquery's own query, after a UNION in it, after a WITH, and inside a
+// second pair of parentheses; answered is a LIMIT in a derived table or a CTE
+// inside the subquery, in a scalar subquery and in EXISTS. Read with the depth
+// of parentheses, each one marked by whether it opens such a subquery.
+func limitInSetSubquery(text string) bool {
+	set := []bool{false}
+	for i := 0; i < len(text); {
+		c := text[i]
+		switch {
+		case c == '"':
+			// A quoted name: skipped whole, whatever it holds.
+			end := strings.IndexByte(text[i+1:], '"')
+			if end < 0 {
+				return false
+			}
+			i += end + 2
+		case c == '(':
+			set = append(set, opensSetSubquery(text[:i], set[len(set)-1]))
+			i++
+		case c == ')':
+			if len(set) > 1 {
+				set = set[:len(set)-1]
+			}
+			i++
+		case wordByte(c):
+			j := i
+			for j < len(text) && wordByte(text[j]) {
+				j++
+			}
+			if set[len(set)-1] && strings.EqualFold(text[i:j], "limit") && !namedByDot(text, i, j-i) {
+				return true
+			}
+			i = j
+		default:
+			i++
+		}
+	}
+	return false
+}
+
+// opensSetSubquery reports whether the parenthesis after before opens the
+// query of an IN, ALL, ANY or SOME subquery: IN right before it, or ALL, ANY
+// or SOME after a comparison (= ANY, > ALL; UNION ALL is not one). Right
+// after another parenthesis, or after a UNION, INTERSECT or EXCEPT, it is
+// still the query the enclosing one opened, so it takes enclosing.
+func opensSetSubquery(before string, enclosing bool) bool {
+	b := strings.TrimRight(before, " \t\n\r\f\v")
+	if strings.HasSuffix(b, "(") {
+		return enclosing
+	}
+	i := len(b)
+	for i > 0 && wordByte(b[i-1]) {
+		i--
+	}
+	w := strings.ToLower(b[i:])
+	rest := strings.TrimRight(b[:i], " \t\n\r\f\v")
+	if strings.HasSuffix(rest, ".") {
+		return false // a name: t.in(...)
+	}
+	switch w {
+	case "in":
+		return true
+	case "union", "intersect", "except":
+		return enclosing
+	case "any", "some", "all", "distinct":
+		if w != "distinct" && rest != "" && strings.IndexByte("=<>", rest[len(rest)-1]) >= 0 {
+			return true
+		}
+		k := len(rest)
+		for k > 0 && wordByte(rest[k-1]) {
+			k--
+		}
+		switch strings.ToLower(rest[k:]) {
+		case "union", "intersect", "except":
+			return enclosing
+		}
+	}
+	return false
+}
+
+// limitCommaAny is MySQL's LIMIT offset, count with any one token first
+// (limitComma, the routed veto's, takes a number or a placeholder only): -1,
+// NULL, '1' and 1.5 are what a prepared statement's arguments can write.
+var limitCommaAny = regexp.MustCompile(`(?i)\blimit\s+[-+]?[\w.?']+\s*,`)
+
+// UnroutedLimitVeto says whether text, the statement about to be sent to the
+// copy on a connection without routing, still holds MySQL's LIMIT offset,
+// count: one ForCopyOpts did not rewrite (a number past 9223372036854775807,
+// a comment between the two, an argument that is not a whole number) or a
+// statement sent as the client wrote it. The copy only fails on it, with its
+// own parser error; the refusal says how to write it. Read as UnroutedVeto
+// reads a statement, so a LIMIT inside a string or a comment refuses nothing.
+func UnroutedLimitVeto(text string) (UnroutedRefusal, bool) {
+	sc := scan(strings.ReplaceAll(text, `\`, " "))
+	if limitCommaAny.MatchString(lineCommentTail.ReplaceAllString(sc.blankedCopy, "")) {
+		return UnroutedRefusal{
+			What:    "LIMIT offset, count",
+			Why:     "is not read there. This port writes it for the copy only with two whole numbers of at most 9223372036854775807, nothing but white space around the comma, and in a statement whose names and strings it rewrites with certainty (no # comment, no $, no backslash or double-quoted string)",
+			Instead: "LIMIT count OFFSET offset",
+		}, true
 	}
 	return UnroutedRefusal{}, false
 }
