@@ -351,6 +351,10 @@ dropped. With a run a minute, that is a compaction every ten minutes.
   dropping every delete file safe: a delete applies only to data files written
   before it, and once all of those are gone no delete file has anything left to
   apply to.
+- **The list of files a reader opens does not grow.** A compaction writes
+  two small manifests (Iceberg's lists of files) that only record the files
+  it replaced; the next compaction drops them. Over 30 compactions of a
+  100,000-row table the current snapshot listed 3 manifests after every one.
 - **Nothing changes if it does not finish.** A run killed during a compaction
   leaves files nothing refers to; the table reads as the delta left it. If
   another run or another engine commits to the table while it is being
@@ -368,7 +372,7 @@ dropped. With a run a minute, that is a compaction every ten minutes.
 - **It costs the whole table, not the window.** The live rows are read and
   written once per compaction. On a 16-vCPU test machine a one-million-row
   table compacted in 1.5 seconds with about 290 MB of memory, and a
-  100,000-row table in 0.1 to 0.4 seconds. A larger table costs more in
+  100,000-row table in under 0.1 seconds. A larger table costs more in
   proportion: raise `--compact-after` for it, or set it to 0 and compact the
   table with another engine.
 - **Old snapshots keep their files.** A compaction adds a snapshot; the
@@ -540,7 +544,8 @@ Three things to know:
   table with 1,700 keys changed per run: without compaction a read took 0.3
   seconds after the first run and 9.1 seconds after 30; with the default it
   never went past 3.1 seconds and was back to about 0.01 seconds after each
-  compaction; with `--compact-after 1` it stayed under 0.05 seconds.
+  compaction; with `--compact-after 1` it stayed at about 0.007 seconds
+  through 30 compactions.
 - **The table is not relocatable by default.** Iceberg metadata stores
   absolute paths. If you copy or sync the warehouse elsewhere (for example
   `bintrail upload` to S3), read it with
@@ -617,13 +622,6 @@ proves nothing about them.
   the table) to reload it from a fresh baseline. Iceberg tracks columns by id, which is what will make an ADD
   COLUMN a metadata change in a later release.
 - Tables are unpartitioned.
-- Each compaction leaves two small manifest files (Iceberg's lists of files)
-  that every later commit keeps listing: iceberg-go 0.6.0, the library the
-  export uses, does not drop a manifest whose files were all removed. Readers
-  pay a little for each one; in the measurement under "Reading the tables", a
-  read right after a compaction went from 0.008 to 0.05 seconds over 30
-  compactions. Moving to a release that drops them is
-  [#2728](https://github.com/dbtrail/dbtrail/issues/2728).
 - Two source schemas or tables whose names differ only in case
   (`Shop.orders` and `shop.orders`) are refused, both of them, on every
   catalog.
