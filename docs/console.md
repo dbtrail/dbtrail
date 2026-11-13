@@ -1139,12 +1139,16 @@ saved, shown with the reason `serve` is not running it.
   GTID set or the file and position. Past that age, when capture's
   checkpoint is at or before those coordinates, capture recorded nothing
   since the snapshot, and the slot is decided as for a server that indexed
-  nothing (#2674, below): the source is asked, and a slot whose source
-  cannot be asked is skipped rather than updated. Without that, the first
-  update of such a snapshot published its rows again under a new date
-  while capture was stopped. Coordinates that cannot be compared (a
-  PostgreSQL or MariaDB source, a snapshot with none, two binary logs of
-  different names) leave the count unknown. After a long stop that update applies
+  nothing (#2674, below): the source is asked, compared with the
+  snapshot's own GTID set (capture may have stopped before the snapshot
+  was taken, and the snapshot holds what capture missed), and a slot whose
+  source cannot be asked is skipped rather than updated. A source that
+  wrote nothing past the snapshot gets the update, one that wrote past it
+  a full read. Without that, the first update of such a snapshot published
+  its rows again under a new date while capture was stopped. Coordinates
+  that cannot be compared (a PostgreSQL source, a MariaDB GTID set, a
+  snapshot with none, two binary logs of different names) leave the count
+  unknown. After a long stop that update applies
   everything recorded since the previous snapshot. It reads those changes
   a page at a time and keeps the changed rows on disk past a limit, so
   its memory stays bounded, and nothing bounds how long it runs. It is

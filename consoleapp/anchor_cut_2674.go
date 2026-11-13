@@ -2,6 +2,7 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -34,10 +35,17 @@ import (
 // under a new date.
 //
 // Only that one direction is ever concluded. A checkpoint past the snapshot,
-// coordinates that cannot be compared (a PostgreSQL or MariaDB source, a
-// snapshot with no coordinates, a GTID set that does not parse, two binary
-// logs of different names) or anything that could not be read leave the count
-// unknown, and the update runs as it did before.
+// coordinates that cannot be compared (a PostgreSQL source, a MariaDB GTID
+// set, a snapshot with no coordinates, a GTID set that does not parse, two
+// binary logs of different names) or anything that could not be read leave
+// the count unknown, and the update runs as it did before.
+//
+// When capture stopped BEFORE the snapshot (its checkpoint is strictly
+// inside the snapshot's set), the source is asked against the snapshot's set,
+// not capture's (review of #2720): the snapshot already holds what capture
+// missed, so a source that wrote nothing since the snapshot is one the
+// update brings forward truthfully, and comparing it with capture's set
+// would call it ahead and read it in full on no evidence.
 
 // anchorCutsFor reads the coordinates every table file of the snapshot at
 // anchor recorded; a package variable so the schedule's use of it can be
@@ -92,18 +100,22 @@ func captureCheckpointFromDB(ctx context.Context, dsn string) (*status.StreamSta
 // order the fold's lower bound uses (query.BinlogPos.AtOrBefore), and only
 // within one binary log name: positions in two differently named sequences
 // say nothing about each other.
-func capturedNothingSince(st *status.StreamStateInfo, cuts []baseline.DumpMetadata) bool {
+//
+// held is the snapshot's GTID set (the union), what the source is compared
+// with when nothing was captured since; "" by position and whenever the
+// answer is false.
+func capturedNothingSince(st *status.StreamStateInfo, cuts []baseline.DumpMetadata) (nothing bool, held string) {
 	if st == nil || len(cuts) == 0 {
-		return false
+		return false, ""
 	}
 	switch st.Mode {
 	case "gtid":
 		if !st.GTIDSet.Valid {
-			return false
+			return false, ""
 		}
 		have, err := gomysql.ParseMysqlGTIDSet(compactGTIDSet(st.GTIDSet.String))
 		if err != nil || have.IsEmpty() {
-			return false
+			return false, ""
 		}
 		held := gomysql.NewMysqlGTIDSet()
 		found := false
@@ -119,10 +131,13 @@ func capturedNothingSince(st *status.StreamStateInfo, cuts []baseline.DumpMetada
 			}
 			found = true
 		}
-		return found && held.Contain(have)
+		if !found || !held.Contain(have) {
+			return false, ""
+		}
+		return true, held.String()
 	case "position":
 		if st.BinlogFile == "" {
-			return false
+			return false, ""
 		}
 		ckpt := query.BinlogPos{File: st.BinlogFile, Pos: st.BinlogPosition}
 		var newest *query.BinlogPos
@@ -135,9 +150,9 @@ func capturedNothingSince(st *status.StreamStateInfo, cuts []baseline.DumpMetada
 				newest = &p
 			}
 		}
-		return newest != nil && ckpt.AtOrBefore(*newest)
+		return newest != nil && ckpt.AtOrBefore(*newest), ""
 	}
-	return false
+	return false, ""
 }
 
 // compactGTIDSet drops the whitespace a GTID set may carry: MySQL prints a
@@ -159,16 +174,18 @@ func sameBinlogName(a, b string) bool {
 	return base(a) == base(b)
 }
 
-// nothingCapturedSinceAnchor is the schedule's use of capturedNothingSince
+// nothingCapturedSinceAnchor is the schedule's use of capturedNothingSince,
+// and the GTID set the source is to be compared with (the snapshot's; ""
+// by position)
 // for e's snapshot at anchor, within one bounded read (windowProbeTimeout:
 // the window probe runs on page loads too). The snapshot's files are read
 // first, so a snapshot with no coordinates never opens the index. Said once
 // per snapshot, at Info, when it does establish the zero: the decision that
 // follows (asking the source, a skip, a full read) otherwise reads as if the
 // daemon had a record it does not have.
-func (b *backupScheduler) nothingCapturedSinceAnchor(ctx context.Context, e console.ServerEntry, anchor time.Time) bool {
+func (b *backupScheduler) nothingCapturedSinceAnchor(ctx context.Context, e console.ServerEntry, anchor time.Time) (bool, string) {
 	if e.IsPostgres() || strings.TrimSpace(e.BaselineDir) == "" || anchor.IsZero() {
-		return false
+		return false, ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, windowProbeTimeout)
 	defer cancel()
@@ -176,16 +193,35 @@ func (b *backupScheduler) nothingCapturedSinceAnchor(ctx context.Context, e cons
 	if err != nil || len(cuts) == 0 {
 		slog.Debug("snapshot schedule: the previous snapshot's binary log coordinates could not be read; the number of changes since it stays unknown",
 			"server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339), "error", err)
-		return false
+		return false, ""
 	}
 	st, err := captureCheckpointFor(ctx, probeDSN(e.DSN))
-	if err != nil || !capturedNothingSince(st, cuts) {
-		return false
+	if err != nil {
+		return false, ""
+	}
+	nothing, held := capturedNothingSince(st, cuts)
+	if !nothing {
+		return false, ""
 	}
 	if b.sup.gateEdge.Fire("anchor-cut:"+e.ID, anchor.UTC().Format(time.RFC3339)) {
 		slog.Info(anchorCutZeroMsg, "server", e.Name, "id", e.ID, "previous_backup", anchor.UTC().Format(time.RFC3339))
 	}
-	return true
+	return true, held
+}
+
+// asOfSnapshot is st with its GTID set replaced by the snapshot's (held),
+// for the source to be compared with what the snapshot holds rather than
+// with what capture recorded; st itself when there is no snapshot set or
+// capture does not follow the source by GTID. Everything else (the loss
+// record, the dropped rows, the mode) is still capture's own, and is still
+// asked.
+func asOfSnapshot(st *status.StreamStateInfo, held string) *status.StreamStateInfo {
+	if st == nil || held == "" || st.Mode != "gtid" {
+		return st
+	}
+	c := *st
+	c.GTIDSet = sql.NullString{String: held, Valid: true}
+	return &c
 }
 
 // anchorCutZeroMsg is that line.

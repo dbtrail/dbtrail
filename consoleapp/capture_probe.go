@@ -344,9 +344,19 @@ var probeCapture = probeCaptureFromDBs
 // asked". Only once the index's part is done is it the source that did not
 // answer in time.
 func probeCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time) captureProbeResult {
+	return probeCaptureAgainstFromDBs(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, "")
+}
+
+// probeCaptureAgainst is probeCapture with the source compared against
+// another GTID set than capture's: the snapshot's, when the snapshot's own
+// coordinates showed that capture recorded nothing since it (#2720 review,
+// asOfSnapshot). A package variable for the reason probeCapture is.
+var probeCaptureAgainst = probeCaptureAgainstFromDBs
+
+func probeCaptureAgainstFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time, against string) captureProbeResult {
 	var indexRead atomic.Bool
 	r := boundedCaptureProbe(ctx, windowProbeTimeout, func(ctx context.Context) captureProbeResult {
-		return captureFromDBs(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, &indexRead)
+		return captureFromDBsAgainst(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, &indexRead, against)
 	})
 	return timedOutSide(r, indexRead.Load())
 }
@@ -393,6 +403,12 @@ func boundedCaptureProbe(parent context.Context, within time.Duration, probe fun
 // is bounded like the window probe (windowProbeTimeout, dial and reads),
 // and its queries by ctx; a failure's cause is scrubbed of both DSNs.
 func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time, indexRead *atomic.Bool) captureProbeResult {
+	return captureFromDBsAgainst(ctx, indexDSN, sourceDSN, ssl, anchor, sourceRead, indexRead, "")
+}
+
+// captureFromDBsAgainst is captureFromDBs with the checkpoint's GTID set
+// replaced by against when that is set (asOfSnapshot).
+func captureFromDBsAgainst(ctx context.Context, indexDSN, sourceDSN string, ssl config.SSL, anchor, sourceRead time.Time, indexRead *atomic.Bool, against string) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -406,6 +422,7 @@ func captureFromDBs(ctx context.Context, indexDSN, sourceDSN string, ssl config.
 	if indexRead != nil {
 		indexRead.Store(true)
 	}
+	st = asOfSnapshot(st, against)
 	r, err := compareCapture(ctx, idx, st, anchor, sourceRead, func() (*sql.DB, error) {
 		return connectSource(sourceProbeDSN(sourceDSN), ssl)
 	})

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/status"
 )
@@ -82,8 +83,14 @@ func TestCapturedNothingSince_2674(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := capturedNothingSince(c.st, c.cuts); got != c.want {
+			got, held := capturedNothingSince(c.st, c.cuts)
+			if got != c.want {
 				t.Fatalf("capturedNothingSince = %v, want %v", got, c.want)
+			}
+			// The snapshot's set comes back exactly where the source is to
+			// be compared with it: nothing captured since, by GTID.
+			if (got && c.st.Mode == "gtid") != (held != "") {
+				t.Fatalf("held = %q for got=%v mode=%q", held, got, c.st.Mode)
 			}
 		})
 	}
@@ -104,6 +111,23 @@ func stubAnchorCut(t *testing.T, cuts []baseline.DumpMetadata, st *status.Stream
 	return &reads
 }
 
+// stubProbeAgainst answers the probe that compares the source with the
+// snapshot's set: the real verdict (compareGTIDSets) of the set it is
+// handed against a source whose executed set is source. It records the set,
+// so a test fails if capture's set is handed instead of the snapshot's.
+func stubProbeAgainst(t *testing.T, source string) *[]string {
+	t.Helper()
+	var asked []string
+	prev := probeCaptureAgainst
+	t.Cleanup(func() { probeCaptureAgainst = prev })
+	probeCaptureAgainst = func(_ context.Context, _, _ string, _ config.SSL, _, _ time.Time, against string) captureProbeResult {
+		asked = append(asked, against)
+		v, d := compareGTIDSets(against, source)
+		return captureProbeResult{verdict: v, detail: d}
+	}
+	return &asked
+}
+
 // The slot, end to end through the schedule's own decision: a shell snapshot
 // with no record, eight days old on an hourly schedule.
 func TestShellSnapshot_capturedNothingSinceIsDecidedAsAQuietServer_2674(t *testing.T) {
@@ -117,31 +141,51 @@ func TestShellSnapshot_capturedNothingSinceIsDecidedAsAQuietServer_2674(t *testi
 		stubCoverage(t, true, true)
 		return b, e
 	}
-
-	t.Run("capture stopped at the snapshot, the source wrote more: a full read, not a new date", func(t *testing.T) {
-		b, e := setup(t, captureProbeResult{verdict: console.CaptureBehind, detail: captureDetailBehind})
-		stubAnchorCut(t, snap, gtidCheckpoint(cutUUID+":1-100"))
-		logs := captureSlogFor(t)
-		method, why := freshDecision(t, b, e, now)
-		t.Logf("%s: %s", method, why)
-		if method != console.BackupMethodFull || console.BackupWhyCode(why) != "window_age" {
-			t.Fatalf("method=%q why=%q, want the full read the index doubt takes", method, why)
-		}
-		line := logLine(logs.String(), "has no run record here")
-		t.Logf("log: %s", line)
-		if !strings.Contains(line, anchorCutZeroMsg) || !strings.Contains(line, "level=INFO") {
-			t.Fatalf("the log does not say where the zero came from: %q", logs.String())
-		}
-		if strings.Contains(logs.String(), countUnknownLine) {
-			t.Fatalf("the count is said to be unknown although it was established: %q", logs.String())
-		}
-	})
+	cases := []struct {
+		name, capture, source string
+		method                string
+	}{
+		// Capture stopped at the snapshot, the source wrote more: a full
+		// read, on evidence, not a new date.
+		{"capture at the snapshot, the source wrote past it", cutUUID + ":1-100", cutUUID + ":1-120", console.BackupMethodFull},
+		// The review's case: capture stopped BEFORE the snapshot was taken by
+		// hand, and the source wrote nothing since. The snapshot is current,
+		// so the update runs (its new date is true), never a full read.
+		{"capture behind the snapshot, the source idle since it", cutUUID + ":1-90", cutUUID + ":1-100", console.BackupMethodRefresh},
+		// The same, but the source wrote past the snapshot: now a full read
+		// has its evidence.
+		{"capture behind the snapshot, the source wrote past it", cutUUID + ":1-90", cutUUID + ":1-105", console.BackupMethodFull},
+		{"capture at the snapshot, the source idle (caught up)", cutUUID + ":1-100", cutUUID + ":1-100", console.BackupMethodRefresh},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, e := setup(t, captureProbeResult{detail: "probeCapture must not be asked here"})
+			stubAnchorCut(t, snap, gtidCheckpoint(c.capture))
+			asked := stubProbeAgainst(t, c.source)
+			logs := captureSlogFor(t)
+			method, why := freshDecision(t, b, e, now)
+			t.Logf("%s: %s", method, why)
+			if method != c.method {
+				t.Fatalf("method=%q why=%q, want %q", method, why, c.method)
+			}
+			if len(*asked) == 0 || (*asked)[0] != cutUUID+":1-100" {
+				t.Fatalf("the source was compared with %v, want the snapshot's set", *asked)
+			}
+			if method == console.BackupMethodFull && console.BackupWhyCode(why) != "window_age" {
+				t.Fatalf("the full read's why %q", why)
+			}
+			if !strings.Contains(logs.String(), anchorCutZeroMsg) || strings.Contains(logs.String(), countUnknownLine) {
+				t.Fatalf("the log does not say where the zero came from, or says the count is unknown: %q", logs.String())
+			}
+		})
+	}
 	t.Run("capture stopped, the source cannot be asked: the slot is skipped", func(t *testing.T) {
 		b, e := setup(t, captureProbeResult{detail: positionMode})
 		stubAnchorCut(t, []baseline.DumpMetadata{posCut("binlog.000003", 900)}, posCheckpoint("binlog.000003", 870))
+		asked := stubProbeAgainst(t, cutUUID+":1-100")
 		method, why := freshDecision(t, b, e, now)
-		if method != console.BackupMethodSkip || why != console.SkipUnconfirmedReason(positionMode) {
-			t.Fatalf("method=%q why=%q, want the skip", method, why)
+		if method != console.BackupMethodSkip || why != console.SkipUnconfirmedReason(positionMode) || len(*asked) != 0 {
+			t.Fatalf("method=%q why=%q asked against %v, want the skip and no GTID comparison", method, why, *asked)
 		}
 	})
 	t.Run("capture healthy, a burst right after the snapshot: the update runs", func(t *testing.T) {
@@ -150,13 +194,6 @@ func TestShellSnapshot_capturedNothingSinceIsDecidedAsAQuietServer_2674(t *testi
 		method, why := freshDecision(t, b, e, now)
 		if method != console.BackupMethodRefresh || console.IsUnconfirmedUpdate(why) {
 			t.Fatalf("method=%q why=%q, want the plain update", method, why)
-		}
-	})
-	t.Run("capture caught up and nothing since: the update runs", func(t *testing.T) {
-		b, e := setup(t, captureProbeResult{verdict: console.CaptureCaughtUp})
-		stubAnchorCut(t, snap, gtidCheckpoint(cutUUID+":1-100"))
-		if method, why := freshDecision(t, b, e, now); method != console.BackupMethodRefresh {
-			t.Fatalf("method=%q why=%q, want the update", method, why)
 		}
 	})
 	t.Run("coordinates that cannot be compared: the update runs, as before", func(t *testing.T) {
@@ -180,6 +217,20 @@ func TestShellSnapshot_capturedNothingSinceIsDecidedAsAQuietServer_2674(t *testi
 			t.Fatalf("the snapshot's coordinates were read %d times for a PostgreSQL source", reads.Load())
 		}
 	})
+}
+
+// asOfSnapshot puts the snapshot's set in place of capture's, and nothing
+// else: the loss record and the mode stay capture's.
+func TestAsOfSnapshot_2720(t *testing.T) {
+	st := gtidCheckpoint(cutUUID + ":1-90")
+	st.GapColumnsPresent = true
+	got := asOfSnapshot(st, cutUUID+":1-100")
+	if got.GTIDSet.String != cutUUID+":1-100" || !got.GapColumnsPresent || got.Mode != "gtid" || st.GTIDSet.String != cutUUID+":1-90" {
+		t.Fatalf("asOfSnapshot = %+v (and the original %+v)", got, st)
+	}
+	if asOfSnapshot(st, "") != st || asOfSnapshot(posCheckpoint("binlog.000001", 4), cutUUID+":1-100").Mode != "position" || asOfSnapshot(nil, "x") != nil {
+		t.Fatal("asOfSnapshot changed a checkpoint it has no set for")
+	}
 }
 
 // The coordinates are read only where the zero decides something: past the
