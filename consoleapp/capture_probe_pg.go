@@ -20,9 +20,9 @@ import (
 // timer, so one read finds a healthy capture behind; and a capture that
 // stopped is fixed by starting it, not by reading the source in full. So:
 //
-//   - a loss stamped at or after the snapshot, or a dropped row no full
-//     read has read back: the full read, as for MySQL. Read from the index
-//     alone, without a connection to the source;
+//   - a loss stamped at or after the snapshot (a lost replication slot):
+//     the full read, as for MySQL. Read from the index alone, without a
+//     connection to the source;
 //   - the two positions equal: confirmed caught up;
 //   - the source ahead, the capture past it, a capture that stopped saving,
 //     a position that cannot be compared, a source that did not answer: the
@@ -46,7 +46,9 @@ func probeCapturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anch
 
 // capturePGFromDBs reads the capture's record and its position from the
 // index, then the source's position, and compares them.
-func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, sourceRead time.Time, indexRead *atomic.Bool) captureProbeResult {
+// sourceRead is not used: it dates dropped rows, which a PostgreSQL capture
+// does not record.
+func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, _ time.Time, indexRead *atomic.Bool) captureProbeResult {
 	idx, err := config.Connect(probeDSN(indexDSN))
 	if err != nil {
 		return captureProbeResult{detail: captureDetailIndexSilent, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
@@ -57,7 +59,7 @@ func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, s
 		return captureProbeResult{detail: captureDetailCheckpointUnread, cause: config.ScrubDSNError(err, indexDSN, sourceDSN)}
 	}
 	// No connection to production for a verdict the index already settles.
-	if ok, detail := pgCaptureComparable(st, anchor, sourceRead); !ok {
+	if ok, detail := pgCaptureComparable(st, anchor); !ok {
 		indexRead.Store(true)
 		return captureProbeResult{detail: detail}
 	}
@@ -78,16 +80,28 @@ func capturePGFromDBs(ctx context.Context, indexDSN, sourceDSN string, anchor, s
 	return captureProbeResult{verdict: verdict, detail: detail}
 }
 
-// pgCaptureComparable is captureComparable for a PostgreSQL capture: the
-// same record of losses and dropped rows, with the loss said in words that
-// fit a source with no binary log. Pure.
-func pgCaptureComparable(st *status.StreamStateInfo, anchor, sourceRead time.Time) (ok bool, detail string) {
-	if st != nil && st.GapColumnsPresent && st.GapLostAt.Valid && !st.GapLostAt.Time.Before(anchor) {
+// pgCaptureComparable is captureComparable for a PostgreSQL capture: what
+// the index's own record of the capture says before the source is asked.
+// Pure.
+//
+// Not captureComparable itself, for one reason that a real PostgreSQL index
+// showed: a PostgreSQL capture keeps no ledger of dropped rows
+// (stream_state.capture_skips stays NULL), and captureComparable reads a
+// ledger that is not there as one that cannot be read, which takes a full
+// read. Here the loss record is the whole of it: gap_lost_at, which a lost
+// replication slot stamps.
+func pgCaptureComparable(st *status.StreamStateInfo, anchor time.Time) (ok bool, detail string) {
+	switch {
+	case st == nil:
+		return false, captureDetailNoCapture
+	case !st.GapColumnsPresent:
+		return false, captureDetailPGNoLossRecord
+	case st.GapLostAt.Valid && !st.GapLostAt.Time.Before(anchor):
 		return false, captureDetailPGLost
 	}
-	// A PostgreSQL capture saves mode 'gtid' with its LSN as the set, so the
-	// checkpoint half of this passes once it has saved one.
-	return captureComparable(st, anchor, sourceRead)
+	// A PostgreSQL capture saves mode 'gtid' with its LSN as the set, so
+	// this passes once it has saved a checkpoint.
+	return checkpointComparable(st)
 }
 
 // comparePGPositions is the schedule's verdict on the capture's saved

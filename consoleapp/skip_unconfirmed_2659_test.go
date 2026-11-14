@@ -728,6 +728,7 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 		"captureDetailPGNoPosition":  {"the capture has not saved how far the source has sent it yet", captureCannotAsk},
 		"captureDetailPGOldCapture":  {"the index holds no position to compare: it was last written by a capture that does not record how far the source has sent it", captureCannotAsk},
 		"captureDetailPGNotPostgres": {"the index was not written by a PostgreSQL capture", captureCannotAsk},
+		"captureDetailPGNoLossRecord": {"the index has no record of capture losses to read", captureCannotAsk},
 		// The capture status read's own for PostgreSQL, never returned to
 		// the schedule: decided as the rest of PostgreSQL's, never a full read.
 		"captureDetailPGFirstRead": {"the source looked ahead on a first read, and is asked again", captureCannotAsk},

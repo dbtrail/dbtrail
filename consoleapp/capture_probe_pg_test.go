@@ -79,11 +79,16 @@ func TestPGCaptureComparable(t *testing.T) {
 		{name: "a loss at the snapshot's own instant", st: state(lost(anchor)), detail: captureDetailPGLost},
 		{name: "a loss before the snapshot, which the snapshot's full read covers", st: state(lost(anchor.Add(-time.Minute))), ok: true},
 		{name: "no capture on record", st: nil, detail: captureDetailNoCapture},
+		{name: "no ledger of dropped rows, which a PostgreSQL capture never writes", st: state(func(st *status.StreamStateInfo) { st.CaptureSkips = sql.NullString{} }), ok: true},
+		{name: "a ledger that does not parse is not read at all", st: state(func(st *status.StreamStateInfo) { st.CaptureSkips = sql.NullString{String: "{", Valid: true} }), ok: true},
+		{name: "an index with no loss record", st: state(func(st *status.StreamStateInfo) { st.GapColumnsPresent = false }), detail: captureDetailPGNoLossRecord},
+		{name: "position mode, which a PostgreSQL capture never saves",
+			st: state(func(st *status.StreamStateInfo) { st.Mode = "position" }), detail: captureDetailPositionMode},
 		{name: "the row a health poll wrote, before the first checkpoint",
 			st: state(func(st *status.StreamStateInfo) { st.GTIDSet = sql.NullString{} }), detail: captureDetailNoCheckpoint},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, detail := pgCaptureComparable(tc.st, anchor, time.Time{})
+			ok, detail := pgCaptureComparable(tc.st, anchor)
 			if ok != tc.ok || detail != tc.detail {
 				t.Fatalf("got %v, %q; want %v, %q", ok, detail, tc.ok, tc.detail)
 			}

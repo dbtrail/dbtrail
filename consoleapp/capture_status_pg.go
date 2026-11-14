@@ -83,6 +83,7 @@ const (
 	// The snapshot schedule's own (capture_probe_pg.go).
 	captureDetailPGAhead = "the source's WAL is ahead of the capture's saved position while capture keeps saving, as it is whenever anything on that PostgreSQL server writes"
 	captureDetailPGLost  = "the capture recorded a loss of changes after the previous snapshot"
+	captureDetailPGNoLossRecord = "the index has no record of capture losses to read"
 )
 
 // pgCaptureRead is one read of the two positions. detail is set, with the

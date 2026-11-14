@@ -248,6 +248,7 @@ var captureClasses = map[string]captureClass{
 	captureDetailPGNoPosition:  captureCannotAsk,
 	captureDetailPGOldCapture:  captureCannotAsk,
 	captureDetailPGNotPostgres: captureCannotAsk,
+	captureDetailPGNoLossRecord: captureCannotAsk,
 	captureDetailPGFirstRead:   captureCannotAsk,
 	captureDetailPGNotSaved:    captureCannotAsk,
 	captureDetailPGReading:     captureCannotAsk,
