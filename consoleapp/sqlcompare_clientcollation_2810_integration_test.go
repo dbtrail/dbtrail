@@ -130,7 +130,6 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	// Not s: a letter with an accent there keeps any statement reading it on
 	// MySQL.
 	const copyRead = "SELECT side, dt FROM ev ORDER BY k"
-<<<<<<< HEAD
 	// copyReadText is copyRead with a string literal, which the copy answers
 	// only under a collation that compares as it does.
 	const copyReadText = "SELECT side, dt FROM ev WHERE side > '0' ORDER BY k"
@@ -140,15 +139,6 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	// read-back's rule), read from the direct connection. Its collation does
 	// not decide it: copyRead has no string literal and no function that
 	// returns text, which the copy answers under any collation (#2836).
-=======
-	// The copy answers copyRead when the session the SOURCE gives this client
-	// compares as the copy does and sends utf8mb4 (the session read-back's
-	// rule), read from the direct connection: on MySQL that is
-	// utf8mb4_0900_ai_ci and utf8mb4_unicode_ci, on MariaDB 11.4 and later
-	// also the driver's default, which the source itself turns into
-	// utf8mb4_uca1400_ai_ci.
-	copyCollations := map[string]bool{"utf8mb4_0900_ai_ci": true, "utf8mb4_unicode_ci": true, "utf8mb4_uca1400_ai_ci": true}
->>>>>>> origin/main
 	cases := []struct{ collation string }{
 		{""}, // go-sql-driver's default: utf8mb4_general_ci
 		{"utf8mb4_general_ci"},
@@ -183,18 +173,9 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		}
 		liveSession := strings.Split(answerText(live, session), "|")
 		wantWho := "live"
-<<<<<<< HEAD
 		if len(liveSession) == 4 && liveSession[2] == "utf8mb4" && liveSession[3] == "utf8mb4" {
 			wantWho = "copy"
 		}
-=======
-		if len(liveSession) == 4 && copyCollations[liveSession[0]] && liveSession[3] == "utf8mb4" {
-			wantWho = "copy"
-		}
-		if !mariadb && (c.collation == "utf8mb4_0900_ai_ci" || c.collation == "utf8mb4_unicode_ci") != (wantWho == "copy") {
-			t.Errorf("%s: MySQL gave the session %v, which the test did not expect", label, liveSession)
-		}
->>>>>>> origin/main
 		got, want := answerText(port, copyRead), answerText(live, copyRead)
 		t.Logf("%-20s port %-70.200s %s (session %v)", label, got, copyRead, liveSession)
 		who := "live"
@@ -207,7 +188,6 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", label, copyRead, got, want)
 		}
-<<<<<<< HEAD
 		if wantWho == "copy" && !copyCollations[liveSession[0]] {
 			wantWho = "live"
 		}
@@ -219,8 +199,6 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", label, copyReadText, got, want)
 		}
-=======
->>>>>>> origin/main
 	}
 
 	// A SET NAMES of the client's own, later: the copy answers once the
@@ -242,21 +220,13 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 			t.Fatal(err)
 		}
 	}
-<<<<<<< HEAD
 	for _, stmt := range []string{session, copyReadText} {
-=======
-	for _, stmt := range []string{session, copyRead} {
->>>>>>> origin/main
 		got, want := connAnswer(t, pconn, stmt), connAnswer(t, lconn, stmt)
 		t.Logf("after SET NAMES: port %-70.200s %s", got, stmt)
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("after %s, %q through the port:\n  got  %s\n  want %s", setNames, stmt, got, want)
 		}
-<<<<<<< HEAD
 		if stmt == copyReadText && !strings.Contains(got, "copy|") {
-=======
-		if stmt == copyRead && !strings.Contains(got, "copy|") {
->>>>>>> origin/main
 			t.Errorf("after %s, %q was not answered by the copy: %s", setNames, stmt, got)
 		}
 	}
