@@ -49,6 +49,18 @@ var dateAddCall = regexp.MustCompile(`(?i)(date_add|adddate)[\s\v]*\(`)
 // date and time on the copy (a known difference, in the docs), and other
 // checks keep on MySQL arithmetic on a date (ColumnVeto, nowVeto).
 func dateAddVeto(stmt, shape string) string {
+	if why := dateAddCallsVeto(shape); why != "" {
+		return why
+	}
+	if _, ok := wrapIntervalSteps(stmt); !ok {
+		return VetoDateAdd
+	}
+	return ""
+}
+
+// dateAddCallsVeto is dateAddVeto's half about DATE_ADD and ADDDATE calls,
+// which ForCopyOpts refuses too.
+func dateAddCallsVeto(shape string) string {
 	for _, l := range callsOf(dateAddCall, shape) {
 		name := dateAddCall.FindStringSubmatch(shape[l[0]:l[1]])[1]
 		if namedByDot(shape, l[0], len(name)) {
@@ -60,9 +72,6 @@ func dateAddVeto(stmt, shape string) string {
 		if !ok || strings.IndexByte(rest[:n], '?') >= 0 {
 			return VetoDateAdd
 		}
-	}
-	if _, ok := wrapIntervalSteps(stmt); !ok {
-		return VetoDateAdd
 	}
 	return ""
 }

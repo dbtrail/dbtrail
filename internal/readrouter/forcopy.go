@@ -163,6 +163,9 @@ func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 		return stmt, vetoHash
 	}
 	if o.MySQLDateAdd {
+		if why := dateAddCallsVeto(sc.blankedCopy); why != "" {
+			return stmt, why
+		}
 		wrapped, ok := wrapIntervalSteps(stmt)
 		if !ok {
 			return stmt, VetoDateAdd
