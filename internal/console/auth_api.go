@@ -295,7 +295,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // design, so logout with one only clears the cookie. Idempotent.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Revoke(bearerToken(r))
-	s.sessions.Revoke(s.sessionCookieToken(r))
+	// Both cookies' sessions, not only the one a request is judged by
+	// (sessionCookieTokens): signing out leaves none of them alive.
+	for _, token := range sessionCookieTokens(r) {
+		s.sessions.Revoke(token)
+	}
 	clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }

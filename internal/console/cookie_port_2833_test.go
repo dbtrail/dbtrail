@@ -163,3 +163,46 @@ func TestSessionCookie_aProviderLoginSetsThePlainName(t *testing.T) {
 		t.Errorf("the provider's session on port 8090: %d", code)
 	}
 }
+
+// Signing out ends every session the browser holds for this address: the one
+// under the port's name (a password login) and the one under the plain name
+// (a provider login). Neither token works afterwards, as a cookie or as a
+// Bearer.
+func TestSessionCookie_logoutEndsBothSessions(t *testing.T) {
+	srv, _ := newPasswordServer(t, "", "admin", "correct-horse-battery")
+	byPassword := loginOn(t, srv, "127.0.0.1:8090")
+	rec := httptest.NewRecorder()
+	providerToken, _, err := srv.extSessionIssuer()(rec, "someone@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byProvider := &http.Cookie{Name: sessionCookieName, Value: providerToken}
+	if !srv.sessions.Validate(byPassword.Value) || !srv.sessions.Validate(providerToken) {
+		t.Fatal("the two sessions are not both alive before the logout")
+	}
+
+	out := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "http://127.0.0.1:8090/api/auth/logout", strings.NewReader("{}"))
+	req.Host = "127.0.0.1:8090"
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: byPassword.Name, Value: byPassword.Value})
+	req.AddCookie(byProvider)
+	srv.Handler().ServeHTTP(out, req)
+
+	if srv.sessions.Validate(byPassword.Value) {
+		t.Error("the session under the port's name is still alive after signing out")
+	}
+	if srv.sessions.Validate(providerToken) {
+		t.Error("the session under the plain name is still alive after signing out")
+	}
+	for _, tok := range []string{byPassword.Value, providerToken} {
+		r := httptest.NewRequest("GET", "http://127.0.0.1:8090/api/servers", nil)
+		r.Host = "127.0.0.1:8090"
+		r.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		if w.Code == 200 {
+			t.Error("a token of a signed-out session still opens the console as a Bearer")
+		}
+	}
+}

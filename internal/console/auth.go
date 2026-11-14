@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -112,6 +113,20 @@ func (s *Server) sessionCookieToken(r *http.Request) string {
 		return plain
 	}
 	return port
+}
+
+// sessionCookieTokens returns every session token the browser sent as a
+// cookie for this address: the port's name and the plain one. Signing out
+// ends all of them: ending only the one sessionCookieToken picks would leave
+// the other session alive on the server, for whoever still holds its token.
+func sessionCookieTokens(r *http.Request) []string {
+	var out []string
+	for _, name := range []string{sessionCookieNameFor(r), sessionCookieName} {
+		if c, err := r.Cookie(name); err == nil && c.Value != "" && !slices.Contains(out, c.Value) {
+			out = append(out, c.Value)
+		}
+	}
+	return out
 }
 
 // setSessionCookie attaches the issued session token to a login response,
