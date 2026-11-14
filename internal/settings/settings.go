@@ -283,6 +283,7 @@ var table = []Entry{
 
 	// The router: the MySQL port.
 	{Env: "BINTRAIL_ROUTER_LISTEN"},
+	{Env: "BINTRAIL_ROUTER_PG_LISTEN"},
 	{Env: "BINTRAIL_ROUTER_METRICS_ADDR"},
 	{Env: "BINTRAIL_ROUTER_CONCURRENCY"},
 	{Env: "BINTRAIL_ROUTER_MAX_WAIT"},
