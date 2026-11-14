@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -24,11 +25,12 @@ import (
 // A servers file that already holds both families (it was edited by hand, or
 // written before this rule) does not stop anything: every server is still
 // served and captured, the mix is logged as an error where the file is read,
-// and no server can be added or edited by a person until one family is left
-// (removing one is how it is fixed). Nothing that the
-// program writes about a server on its own (a kept-snapshot mark, a schedule,
-// MySQL corrected to MariaDB) is refused: that would stop the capture this
-// rule leaves running. There is no setting that allows the mix.
+// and no server can be ADDED until one family is left (removing one is how it
+// is fixed). Editing a server stays allowed, and so does everything the
+// program writes about one on its own: an edit cannot change a server's
+// family, and refusing it would leave a server whose password was rotated
+// with no way to be captured again short of removing a whole family. There
+// is no setting that allows the mix.
 
 // The two families. MariaDB is MySQL's: one capture engine, one client port.
 const (
@@ -87,9 +89,14 @@ func (e *OtherFamilyError) mixed() bool { return len(e.MixedPostgres) > 0 && len
 func (e *OtherFamilyError) Error() string {
 	const why = "Each DBTrail installation serves one database family, MySQL and MariaDB or PostgreSQL, because the two are tested and released apart."
 	if e.mixed() {
-		return fmt.Sprintf("This installation holds servers of both database families (%s: %s; %s: %s), which is not supported. Nothing was changed. "+
-			"Remove the servers of one family, or move them to an installation of their own: until then no server can be added or edited. %s",
-			familyWords(FamilyPostgres), someNames(e.MixedPostgres), familyWords(FamilyMySQL), someNames(e.MixedMySQL), why)
+		fix := "Remove the servers of one family, or move them to an installation of their own: until then no server can be added."
+		if slices.Contains(e.MixedPostgres, bootServerWords) || slices.Contains(e.MixedMySQL, bootServerWords) {
+			// It is not in the list of servers: nothing in the web
+			// interface removes it.
+			fix = "One of them is the server this was started with (--index-dsn or --source-dsn), which only starting DBTrail without it removes; or remove the servers of the other family. Until then no server can be added."
+		}
+		return fmt.Sprintf("This installation holds servers of both database families (%s: %s; %s: %s), which is not supported. Nothing was changed. %s %s",
+			familyWords(FamilyPostgres), someNames(e.MixedPostgres), familyWords(FamilyMySQL), someNames(e.MixedMySQL), fix, why)
 	}
 	return fmt.Sprintf("This installation serves %s servers, so %s cannot be added to it. Nothing was changed. "+
 		"To use DBTrail with %s, run a second installation for it. %s",
@@ -126,18 +133,20 @@ func familiesOf(servers []ServerEntry) (postgres, mysql []string) {
 	return postgres, mysql
 }
 
+// bootServerWords names, in a refusal, the server given on the command line.
+const bootServerWords = "the server this was started with"
+
 // familyRefusal says why a server of flavor cannot join servers, nil when it
 // can: there are none, or they are all of its family. boot, when not "", is
 // the family of the server given on the command line, which counts as one
 // more server of that family (named "the server this was started with").
 func familyRefusal(servers []ServerEntry, boot, flavor string) error {
 	postgres, mysql := familiesOf(servers)
-	const bootName = "the server this was started with"
 	switch boot {
 	case FamilyPostgres:
-		postgres = append(postgres, bootName)
+		postgres = append(postgres, bootServerWords)
 	case FamilyMySQL:
-		mysql = append(mysql, bootName)
+		mysql = append(mysql, bootServerWords)
 	}
 	if len(postgres) > 0 && len(mysql) > 0 {
 		return &OtherFamilyError{MixedPostgres: postgres, MixedMySQL: mysql}
@@ -159,16 +168,6 @@ func (r *Registry) MixedFamilies() (postgres, mysql []string, mixed bool) {
 	defer r.mu.Unlock()
 	postgres, mysql = familiesOf(r.file.Servers)
 	return postgres, mysql, len(postgres) > 0 && len(mysql) > 0
-}
-
-// MixedFamiliesRefusal is the refusal for a change a person asks for while
-// the registry holds both families, nil when it does not.
-func (r *Registry) MixedFamiliesRefusal() error {
-	postgres, mysql, mixed := r.MixedFamilies()
-	if !mixed {
-		return nil
-	}
-	return &OtherFamilyError{MixedPostgres: postgres, MixedMySQL: mysql}
 }
 
 // warnFamilies says, where a servers file is read, the two things about its
@@ -206,23 +205,52 @@ func warnFamilies(path string, servers []ServerEntry, said string) string {
 	}
 	if mixed {
 		slog.Error("the servers file holds servers of both database families, which is not supported: each installation serves MySQL and MariaDB, or PostgreSQL. "+
-			"Every server is still served and captured; no server can be added or edited until one family is left",
+			"Every server is still served and captured; no server can be added until one family is left",
 			"file", path, "postgresql", strings.Join(postgres, ", "), "mysql_and_mariadb", strings.Join(mysql, ", "),
 			"fix", "remove the servers of one family, or move them to an installation of their own")
 	}
 	return now
 }
 
+// bootFamily is the family of the server given on the command line, "" when
+// there is none to count (a daemon started with no source keeps a hidden one
+// that captures nothing).
+func (s *Server) bootFamily() string {
+	if !s.cm.bootSelectable() {
+		return ""
+	}
+	if b, _ := s.cm.bootInfo(); b != nil && b.pgSource {
+		return FamilyPostgres
+	}
+	return FamilyMySQL
+}
+
 // newServerFamilyRefusal is the rule for a server about to be added through
 // the console, with the server given on the command line counted: the
 // registry alone (addLocked) cannot see that one.
 func (s *Server) newServerFamilyRefusal(flavor string) error {
-	boot := ""
-	if s.cm.bootSelectable() {
-		boot = FamilyMySQL
-		if b, _ := s.cm.bootInfo(); b != nil && b.pgSource {
-			boot = FamilyPostgres
-		}
+	return familyRefusal(s.cm.reg.List(), s.bootFamily(), flavor)
+}
+
+// warnBootFamily says at start, in the log, that the server given on the
+// command line and the servers in the file are of different families: the
+// file alone holds one family then, so reading it says nothing
+// (warnFamilies), and the first sign would be a refused add.
+func (s *Server) warnBootFamily() {
+	boot := s.bootFamily()
+	if boot == "" || s.cm.reg == nil {
+		return
 	}
-	return familyRefusal(s.cm.reg.List(), boot, flavor)
+	postgres, mysql := familiesOf(s.cm.reg.List())
+	other := mysql
+	if boot == FamilyMySQL {
+		other = postgres
+	}
+	if len(other) == 0 {
+		return
+	}
+	slog.Error("the server this was started with and the servers in the servers file are of different database families, which is not supported: each installation serves MySQL and MariaDB, or PostgreSQL. "+
+		"Every server is still served and captured; no server can be added until one family is left",
+		"started_with", familyWords(boot), "servers_of_the_other_family", strings.Join(other, ", "),
+		"fix", "start DBTrail without --index-dsn or --source-dsn, or remove those servers")
 }

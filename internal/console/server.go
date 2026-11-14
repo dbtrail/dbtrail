@@ -987,6 +987,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Registry != nil {
 		cfg.Registry.setReservedUser(s.monitorUser)
 	}
+	s.warnBootFamily()
 	s.mux = s.buildHandler()
 	// What each server's switch saved before this process started (#2546).
 	// The router reads it again on every registry reading; a switch flipped

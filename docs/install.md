@@ -213,22 +213,23 @@ offered. This is about the databases DBTrail captures from. Where DBTrail keeps
 its own data (the index) is MySQL for every family.
 
 To use DBTrail with both, run a second installation beside the first, in a
-folder of its own and on a port of its own:
+folder with another name and on a port of its own:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | DBTRAIL_DIR=./dbtrail-postgres DBTRAIL_PORT=8091 sh
+curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | DBTRAIL_DIR=./dbtrail-2 DBTRAIL_PORT=8091 sh
 ```
 
 The second installation has its own containers, its own index and its own web
-interface on that port. The ports the first one holds are handled as on any
-install: metrics move to a free port, and the MySQL port (3309) is left
-unpublished when it is taken, which a PostgreSQL installation does not use.
+interface on that port, with its own login. The folder's name is what keeps
+the two apart, not its place: two folders that end in the same name
+(`/opt/dbtrail` and `/srv/dbtrail`) would share their data.
 
 If the servers file already holds both families (it was edited by hand, or
 comes from a version before this rule), nothing stops: every server is still
-captured and served, an error in the log names the servers, and no server can
-be added or edited until one family is left. Remove the servers of one family
-to get there.
+captured and served, an error in the log names the servers, and a server can
+still be edited, which is how a changed password is put right. No server can
+be added until one family is left. Remove the servers of one family to get
+there.
 
 ## Try it without installing anything (30 seconds)
 

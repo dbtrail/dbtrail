@@ -784,12 +784,6 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
 		return
 	}
-	// A registry that holds both source families takes no edit from a person
-	// until one is left (family.go); removing a server is how it gets there.
-	if err := s.cm.reg.MixedFamiliesRefusal(); err != nil {
-		writeJSONError(w, http.StatusConflict, err.Error())
-		return
-	}
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeBodyDecodeError(w, err)

@@ -181,7 +181,7 @@ func TestRegistry_aMixedFileIsReadAndTakesNoNewServer(t *testing.T) {
 			t.Fatalf("a %q server was added to a mixed registry: %v", flavor, err)
 		}
 		msg := err.Error()
-		for _, want := range []string{"both database families", "PostgreSQL: ledger", "MySQL and MariaDB: shop, wiki", "Nothing was changed", "Remove the servers of one family"} {
+		for _, want := range []string{"both database families", "PostgreSQL: ledger", "MySQL and MariaDB: shop, wiki", "Nothing was changed", "Remove the servers of one family", "no server can be added"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("the refusal does not say %q:\n%s", want, msg)
 			}
@@ -207,9 +207,6 @@ func TestRegistry_aMixedFileIsReadAndTakesNoNewServer(t *testing.T) {
 	}
 	if _, _, mixed := reg.MixedFamilies(); mixed {
 		t.Fatal("still mixed with its only PostgreSQL server removed")
-	}
-	if err := reg.MixedFamiliesRefusal(); err != nil {
-		t.Fatalf("still refusing: %v", err)
 	}
 	if _, err := reg.Add(familyTestEntry("new", "mysql")); err != nil {
 		t.Fatalf("a MySQL server after the PostgreSQL one was removed: %v", err)
@@ -256,7 +253,7 @@ func TestRegistry_aMixedFileIsLoggedWhereItIsRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"level=ERROR", "both database families", "ledger", "shop, wiki", "added or edited"} {
+	for _, want := range []string{"level=ERROR", "both database families", "ledger", "shop, wiki", "no server can be added"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the log does not say %q:\n%s", want, out)
 		}
@@ -423,9 +420,11 @@ func TestServersAPI_refusesTheOtherFamily(t *testing.T) {
 	}
 }
 
-// A registry that holds both families takes no edit from a person, and says
-// which servers are in the way; removing one is still allowed, and ends it.
-func TestServersAPI_aMixedRegistryTakesNoEditButARemoval(t *testing.T) {
+// A registry that holds both families takes no new server, and says which
+// servers are in the way. Editing one stays allowed: an edit cannot change a
+// server's family, and it is how a rotated password is put right without
+// removing a whole family first. Removing one family ends it.
+func TestServersAPI_aMixedRegistryTakesEditsAndRemovalsButNoNewServer(t *testing.T) {
 	clearStores(t)
 	reg, err := LoadRegistry(mixedRegistryFile(t))
 	if err != nil {
@@ -440,33 +439,49 @@ func TestServersAPI_aMixedRegistryTakesNoEditButARemoval(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(string(body), "shop") || !strings.Contains(string(body), "ledger") || !strings.Contains(string(body), "wiki") {
 		t.Fatalf("list: %d %s", rec.Code, body)
 	}
-	for _, method := range []string{"PUT", "PATCH"} {
-		rec, body = doServersReq(t, srv, method, "/api/servers/aaaa000000000001", `{"name":"shop2","host":"h","user":"u","dbname":"db"}`)
+	// An add of either family is refused.
+	for _, add := range []string{
+		`{"name":"more","host":"h","user":"u","password":"p","dbname":"db"}`,
+		`{"name":"more","flavor":"postgres","host":"h","user":"u","password":"p","dbname":"db"}`,
+	} {
+		rec, body = doServersReq(t, srv, "POST", "/api/servers", add)
 		if rec.Code != http.StatusConflict {
-			t.Fatalf("%s on a mixed registry: %d %s", method, rec.Code, body)
+			t.Fatalf("an add on a mixed registry: %d %s", rec.Code, body)
 		}
 		msg := familyRefusalText(t, body)
-		if !strings.Contains(msg, "both database families") || !strings.Contains(msg, "ledger") || !strings.Contains(msg, "Nothing was changed") {
-			t.Errorf("%s refusal: %s", method, msg)
+		if !strings.Contains(msg, "both database families") || !strings.Contains(msg, "ledger") || !strings.Contains(msg, "no server can be added") {
+			t.Errorf("the refusal: %s", msg)
+		}
+		if strings.Contains(msg, "edited") {
+			t.Errorf("the refusal says a server cannot be edited, and it can: %s", msg)
 		}
 	}
-	if e, _ := reg.Get("aaaa000000000001"); e.Name != "shop" {
-		t.Fatalf("a refused edit renamed the server to %q", e.Name)
+	// An edit goes in, on a server of each family: this is how a password
+	// that was rotated is put right while the file is mixed.
+	for _, id := range []string{"aaaa000000000001", "aaaa000000000002"} {
+		for _, method := range []string{"PUT", "PATCH"} {
+			rec, body = doServersReq(t, srv, method, "/api/servers/"+id, `{"name":"renamed-`+id[len(id)-1:]+`","host":"h","user":"u","password":"new-password","dbname":"db"}`)
+			if rec.Code == http.StatusConflict || strings.Contains(string(body), "database famil") {
+				t.Fatalf("%s %s on a mixed registry was refused for the families: %d %s", method, id, rec.Code, body)
+			}
+		}
 	}
-	rec, body = doServersReq(t, srv, "POST", "/api/servers", `{"name":"more","host":"h","user":"u","password":"p","dbname":"db"}`)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("an add on a mixed registry: %d %s", rec.Code, body)
+	if e, _ := reg.Get("aaaa000000000002"); e.Family() != FamilyPostgres {
+		t.Fatalf("an edit changed a PostgreSQL server's family to %q", e.Family())
 	}
-	// Removing the PostgreSQL server is allowed, and the edit then goes in.
+	// An edit cannot move a server to the other family.
+	rec, body = doServersReq(t, srv, "PATCH", "/api/servers/aaaa000000000001", `{"flavor":"postgres"}`)
+	if e, _ := reg.Get("aaaa000000000001"); e.Family() != FamilyMySQL {
+		t.Fatalf("an edit moved a MySQL server to PostgreSQL (%d %s)", rec.Code, body)
+	}
+	// Removing the PostgreSQL server is allowed, and an add then goes in.
 	rec, body = doServersReq(t, srv, "DELETE", "/api/servers/aaaa000000000002", "")
 	if rec.Code >= 300 {
 		t.Fatalf("removing a server from a mixed registry: %d %s", rec.Code, body)
 	}
-	// The same edit is no longer refused for the families (whatever else the
-	// form says about a hand-written entry is not this rule's).
-	rec, body = doServersReq(t, srv, "PATCH", "/api/servers/aaaa000000000001", `{"name":"shop2","host":"h","user":"u","dbname":"db"}`)
-	if rec.Code == http.StatusConflict || strings.Contains(string(body), "database famil") {
-		t.Fatalf("an edit once one family is left is still refused for the families: %d %s", rec.Code, body)
+	rec, body = doServersReq(t, srv, "POST", "/api/servers", `{"name":"more","host":"h","user":"u","password":"p","dbname":"db"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("an add once one family is left: %d %s", rec.Code, body)
 	}
 }
 
@@ -600,5 +615,57 @@ func TestCheck_refusesTheOtherFamilyBeforeTheChecks(t *testing.T) {
 	}
 	if _, kept, err := srv.drafts.Load(); err != nil || kept {
 		t.Errorf("the refused form was kept as a draft (kept=%v err=%v)", kept, err)
+	}
+}
+
+// A command-line server of one family beside servers of the other in the
+// file: the file alone holds one family, so reading it says nothing, and the
+// console says it at start. The refusal then says what removes a server that
+// is in no list.
+func TestServer_theCommandLineServerOfAnotherFamilyIsSaidAtStart(t *testing.T) {
+	srv := newRegistryServer(t)
+	if _, err := srv.cm.reg.Add(familyTestEntry("ledger", "postgres")); err != nil {
+		t.Fatal(err)
+	}
+	buf := captureLog(t)
+	srv.warnBootFamily()
+	if buf.Len() != 0 {
+		t.Fatalf("said with no command-line server:\n%s", buf.String())
+	}
+	srv.cm.mu.Lock()
+	srv.cm.boot = &bundle{pgSource: true}
+	srv.cm.mu.Unlock()
+	srv.warnBootFamily()
+	if buf.Len() != 0 {
+		t.Fatalf("said of a command-line server of the same family:\n%s", buf.String())
+	}
+	srv.cm.mu.Lock()
+	srv.cm.boot = &bundle{}
+	srv.cm.mu.Unlock()
+	srv.warnBootFamily()
+	out := buf.String()
+	for _, want := range []string{"level=ERROR", "different database families", "ledger", "--index-dsn", "no server can be added"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not say %q:\n%s", want, out)
+		}
+	}
+	rec, body := doServersReq(t, srv, "POST", "/api/servers", `{"name":"more","flavor":"postgres","host":"h","user":"u","password":"p","dbname":"db"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("%d %s", rec.Code, body)
+	}
+	msg := familyRefusalText(t, body)
+	for _, want := range []string{"the server this was started with", "--index-dsn or --source-dsn", "starting DBTrail without it"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, msg)
+		}
+	}
+	// A hidden command-line server (a daemon started with no source) counts
+	// for nothing: it captures nothing.
+	srv.cm.mu.Lock()
+	srv.cm.hideBoot = true
+	srv.cm.mu.Unlock()
+	rec, body = doServersReq(t, srv, "POST", "/api/servers", `{"name":"more","flavor":"postgres","host":"h","user":"u","password":"p","dbname":"db"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("a PostgreSQL server beside PostgreSQL ones and a hidden command-line server: %d %s", rec.Code, body)
 	}
 }
