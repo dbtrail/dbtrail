@@ -106,8 +106,8 @@ func TestIntegrationForwarder_floatTextIsMySQLs_2828(t *testing.T) {
 			t.Errorf("column %s: type %d, want %d", buf.Fields[i].Name, buf.Fields[i].Type, want)
 		}
 	}
-	if buf.Fields[1].Decimals != 2 || buf.Fields[3].Flag&mysql.ZEROFILL_FLAG == 0 {
-		t.Errorf("FLOAT(7,2) decimals %d, ZEROFILL flag %v: the definitions were not MySQL's", buf.Fields[1].Decimals, buf.Fields[3].Flag&mysql.ZEROFILL_FLAG != 0)
+	if buf.Fields[1].Decimal != 2 || buf.Fields[3].Flag&mysql.ZEROFILL_FLAG == 0 {
+		t.Errorf("FLOAT(7,2) decimals %d, ZEROFILL flag %v: the definitions were not MySQL's", buf.Fields[1].Decimal, buf.Fields[3].Flag&mysql.ZEROFILL_FLAG != 0)
 	}
 
 	// The prepared form: binary rows, MySQL's own bits.

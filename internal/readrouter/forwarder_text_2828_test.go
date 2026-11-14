@@ -65,10 +65,10 @@ func TestForwarderStream_textCellsAreTheSourceBytes_2828(t *testing.T) {
 	}
 	defer f.Close()
 	fields := []*mysql.Field{
-		{Name: []byte("f"), Type: mysql.MYSQL_TYPE_FLOAT, Decimals: 31},
-		{Name: []byte("f72"), Type: mysql.MYSQL_TYPE_FLOAT, Decimals: 2},
-		{Name: []byte("fu"), Type: mysql.MYSQL_TYPE_FLOAT, Flag: mysql.UNSIGNED_FLAG, Decimals: 31},
-		{Name: []byte("d"), Type: mysql.MYSQL_TYPE_DOUBLE, Decimals: 31},
+		{Name: []byte("f"), Type: mysql.MYSQL_TYPE_FLOAT, Decimal: 31},
+		{Name: []byte("f72"), Type: mysql.MYSQL_TYPE_FLOAT, Decimal: 2},
+		{Name: []byte("fu"), Type: mysql.MYSQL_TYPE_FLOAT, Flag: mysql.UNSIGNED_FLAG, Decimal: 31},
+		{Name: []byte("d"), Type: mysql.MYSQL_TYPE_DOUBLE, Decimal: 31},
 		{Name: []byte("z"), Type: mysql.MYSQL_TYPE_LONG, Flag: mysql.UNSIGNED_FLAG | mysql.ZEROFILL_FLAG},
 		{Name: []byte("big"), Type: mysql.MYSQL_TYPE_LONGLONG, Flag: mysql.UNSIGNED_FLAG},
 		{Name: []byte("s"), Type: mysql.MYSQL_TYPE_VAR_STRING},
