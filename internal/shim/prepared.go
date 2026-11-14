@@ -393,6 +393,12 @@ var plainInteger = regexp.MustCompile(`^[+-]?\d+$`)
 // type (and finds 13).
 func copyUnsafeArgument(args []any) string {
 	for i, a := range args {
+		if u, ok := a.(uint64); ok && u > math.MaxInt64 {
+			// Written into the statement, a number from 2^63 up is a
+			// 128-bit integer on the copy, sent as a DECIMAL, and a BIGINT
+			// UNSIGNED on MySQL (#2806, as readrouter keeps it written).
+			return fmt.Sprintf("argument %d is a whole number from 9223372036854775808 up (a BIGINT UNSIGNED on MySQL, another type on the copy)", i+1)
+		}
 		tb, ok := a.(mysql.TypedBytes)
 		if !ok {
 			continue

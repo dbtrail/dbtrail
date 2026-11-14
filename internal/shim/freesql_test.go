@@ -655,3 +655,17 @@ func appendFile(path, text string) error {
 	}
 	return err
 }
+
+// #2806: a bound whole number from 2^63 up is a BIGINT UNSIGNED on MySQL and
+// would be written into the copy's statement as a 128-bit integer, now sent
+// as a DECIMAL: kept on MySQL, as the same number written in the statement is.
+func TestCopyUnsafeArgument_bigUnsigned(t *testing.T) {
+	if got := copyUnsafeArgument([]any{int64(-1), uint64(1<<63 - 1)}); got != "" {
+		t.Errorf("up to 2^63-1: %q, want none", got)
+	}
+	for _, u := range []uint64{1 << 63, 1<<64 - 1} {
+		if got := copyUnsafeArgument([]any{int64(1), u}); !strings.Contains(got, "argument 2") {
+			t.Errorf("%d: %q, want argument 2 refused", u, got)
+		}
+	}
+}
