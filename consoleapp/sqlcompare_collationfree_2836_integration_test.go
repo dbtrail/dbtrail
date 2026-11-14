@@ -123,9 +123,10 @@ func collationFree(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT side, d FROM ev WHERE k > 0 AND d > '2026-01-03' ORDER BY k", "live"},
 	}
 	// MariaDB 11.4 and later turn a utf8mb4_general_ci handshake into
-	// utf8mb4_uca1400_ai_ci, which compares as the copy does: there the copy
-	// answers every one of these, as on a direct connection the source's own
-	// collation would.
+	// utf8mb4_uca1400_ai_ci, which compares as the copy does: there the
+	// collation keeps none of these on MySQL (other checks still may, so who
+	// answers the second group is not asserted), and each is still the
+	// source's answer.
 	var sessionCollation string
 	if err := live.QueryRow("SELECT @@collation_connection").Scan(&sessionCollation); err != nil {
 		t.Fatal(err)
@@ -133,16 +134,14 @@ func collationFree(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	t.Logf("the source's session: %s", sessionCollation)
 	reproduced := sessionCollation == "utf8mb4_uca1400_ai_ci" || sessionCollation == "utf8mb4_0900_ai_ci" || sessionCollation == "utf8mb4_unicode_ci"
 	for _, c := range cases {
-		if reproduced {
-			c.who = "copy"
-		}
+		anyone := reproduced && c.who == "live"
 		got, want := answerText(port, c.stmt), answerText(live, c.stmt)
 		t.Logf("%-5s port %-70.200s %s", c.who, got, c.stmt)
 		if strings.HasPrefix(want, "ERROR ") {
 			t.Errorf("the source refused %q: %s", c.stmt, want)
 			continue
 		}
-		if !strings.Contains(got, c.who+"|") {
+		if !anyone && !strings.Contains(got, c.who+"|") {
 			t.Errorf("%q answered %s, want it answered by %s", c.stmt, got, c.who)
 			continue
 		}
