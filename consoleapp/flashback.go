@@ -501,6 +501,13 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	if !copyOnly {
 		fw, _ = bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
 	}
+	if fw != nil && mysqlConn != nil {
+		// The session MySQL opens for this client is under the collation
+		// and character set the client's handshake asked for, as on a
+		// connection to MySQL itself (#2810). A reset or a change of user
+		// binds a new forwarder here, from the same handshake.
+		fw.ClientCollation = mysqlConn.Charset()
+	}
 	if fw == nil && cfg.RouteStatus {
 		// SHOW ROUTER STATUS on a connection the copy answers alone: the
 		// same numbers, under a first line that says nothing is routed
@@ -717,10 +724,13 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			// backslash escapes, before it knew the server. A source that
 			// opens its sessions otherwise is said in the log (#2110).
 			fw.OnSession = func(status uint16) { warnSessionDefaults(logger, id, user, status) }
-			// A MariaDB that did not know the collation the port's login
-			// asked for, and would not take the one the port names instead.
+			// The source would not give the session the collation the
+			// client's handshake asked for (#2810), or, on a connection of
+			// no client collation, a MariaDB did not know the one the
+			// port's login asked for and would not take the one the port
+			// names instead.
 			fw.OnCollation = func(collation string, err error) {
-				logger.Warn("Engine Routing: the source would not give this connection a collation the copy reproduces; MySQL answers every statement on it",
+				logger.Warn("Engine Routing: the source would not give this connection the collation it was to have; it runs under the one the source gave it",
 					"server", user, "collation", collation, "error", err.Error())
 			}
 			// The source is asked to say when a statement changed one of

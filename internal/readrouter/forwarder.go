@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,10 +80,18 @@ type Forwarder struct {
 	// (AccountRefused).
 	OnConnect func(error)
 	// OnCollation, when set, is told that a new connection's collation
-	// could not be settled (settleCollation): the collation the source gave
-	// the session, and the source's refusal to change it. The connection
-	// works; the copy does not answer on it.
+	// could not be settled (settleCollation) or given the client's
+	// (clientCollation): the collation the source gave the session or the
+	// one the client asked for, and why it is not the session's. The
+	// connection works, under the collation the source gave it.
 	OnCollation func(collation string, err error)
+	// ClientCollation is the collation number the client's own handshake
+	// asked the port for (go-mysql's server.Conn.Charset()), set before the
+	// first statement: the session is opened under it and its character
+	// set, as a connection to the source itself would be (#2810). 0, a
+	// connection of the port's own, keeps the port's choice
+	// (settleCollation).
+	ClientCollation uint8
 	// OnSession, when set, is told the state the source opened the session
 	// in (SessionStatusFlags), at most once: with the source's first answer
 	// to a statement, because that is the first packet that shows what an
@@ -329,7 +338,11 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 	}
 	if err == nil {
 		// Part of opening the connection: one that breaks here did not open.
-		if serr := f.settleCollation(ctx, c); serr != nil {
+		settle := f.settleCollation
+		if f.ClientCollation != 0 {
+			settle = f.clientCollation
+		}
+		if serr := settle(ctx, c); serr != nil {
 			_ = c.Close()
 			err = fmt.Errorf("settle the session's collation: %w", serr)
 		}
@@ -427,6 +440,80 @@ func (f *Forwarder) settleCollation(ctx context.Context, c *client.Conn) error {
 	}
 	if _, err := c.Execute("SET NAMES utf8mb4 COLLATE " + settledCollation); err != nil {
 		return refused(got, err)
+	}
+	return nil
+}
+
+// collationName is what the source may name a character set or a collation:
+// lowercase letters, digits and underscores, which is every name MySQL and
+// MariaDB have. Anything else is not sent back in a SET NAMES.
+var collationName = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// clientCollation gives a client's connection the collation and character
+// set the client's handshake asked the port for (ClientCollation), before
+// anything of the client's: the session MySQL would have given the client
+// had it connected there itself (#2810). The port's own handshake asks for
+// utf8mb4_0900_ai_ci (mysql.DEFAULT_COLLATION_ID): a client that asked for
+// that is sent nothing more, MariaDB included, since the source reads the
+// number as it would read it from the client (a MariaDB 10.11, which does
+// not have it, falls back to its utf8mb4 default for both). Any other
+// number is a question and a statement: the source says what its number
+// means (information_schema.COLLATIONS), and SET NAMES sets the three
+// character sets and the collation as the handshake would have. A number is
+// asked of the source, not read from a table of the port's: the two servers
+// do not number every collation alike.
+//
+// Whether the copy then answers is the session read-back's decision, as for
+// a client's own SET NAMES: only under a collation that compares as the copy
+// does (collationReproducible) and results in a character set the client
+// decodes the copy's bytes in. Under utf8mb4_general_ci, go-sql-driver's
+// default, MySQL answers every statement.
+//
+// What cannot be done leaves the session as the source gave it, under
+// utf8mb4_0900_ai_ci, and OnCollation is told: a number the source has no
+// collation for, a name that is not one, and a SET NAMES the source refuses
+// (a character set no client may use, ucs2). As in settleCollation, an error
+// that ends the session is a connection that did not open.
+func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn) error {
+	if f.ClientCollation == mysql.DEFAULT_COLLATION_ID {
+		return nil
+	}
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	asked := "number " + strconv.Itoa(int(f.ClientCollation))
+	refused := func(collation string, err error) error {
+		if !stillInSession(err) {
+			if cause := ctx.Err(); cause != nil {
+				return cause
+			}
+			return err
+		}
+		if f.OnCollation != nil {
+			f.OnCollation(collation, err)
+		}
+		return nil
+	}
+	res, err := c.Execute("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE ID = " + strconv.Itoa(int(f.ClientCollation)))
+	if err != nil {
+		return refused(asked, err)
+	}
+	if res.RowNumber() == 0 {
+		return refused(asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
+			Message: "the source has no collation numbered " + strconv.Itoa(int(f.ClientCollation)) + ", which the client's handshake asked for"})
+	}
+	cs, err1 := res.GetString(0, 0)
+	coll, err2 := res.GetString(0, 1)
+	// Cells are views of the packet's bytes.
+	cs, coll = strings.Clone(cs), strings.Clone(coll)
+	if err := errors.Join(err1, err2); err != nil || !collationName.MatchString(cs) || !collationName.MatchString(coll) {
+		return refused(asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
+			Message: fmt.Sprintf("the source named collation %s %q of character set %q, which is not a collation name", asked, coll, cs)})
+	}
+	set := "SET NAMES " + cs + " COLLATE " + coll
+	if cs == "binary" {
+		set = "SET NAMES binary"
+	}
+	if _, err := c.Execute(set); err != nil {
+		return refused(coll, err)
 	}
 	return nil
 }
