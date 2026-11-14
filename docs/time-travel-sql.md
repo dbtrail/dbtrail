@@ -1051,20 +1051,43 @@ The decision, in order, for every statement:
    inside one week, and a past rule that held for less than five years and
    missed both months. An offset (`+02:00`) needs none of this.
 
-   **MariaDB 10.11.** The port asks the source for MySQL's default
-   collation, `utf8mb4_0900_ai_ci`. MariaDB 11.4 knows it; 10.11 does not
-   and would leave the connection in `utf8mb4_general_ci`, under which the
-   copy does not answer. So on a new connection to a MariaDB source the
-   port asks which collation the session got, and when it is not the one
-   it asked for it sends `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`
-   before anything of the client's: one extra statement per connection on
-   MariaDB 11.4 and later, two on 10.11, none on MySQL (the statement that
-   asks for session tracking, below, is one more on all of them). The copy then
-   answers a connection that names no collation on every supported
-   version. A client that sets a collation itself keeps it: `SET NAMES
-   utf8mb4` with no `COLLATE` means `utf8mb4_general_ci` on 10.11, and
-   MySQL answers that connection (the log says so, once, with the
-   setting). Send `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci` instead.
+   **The collation and character set the client asked for.** A client
+   names a collation when it connects (the handshake carries its number),
+   and since #2810 the port opens the client's session on the source under
+   it, as MySQL would have: on MySQL `@@collation_connection` and the three
+   `character_set_*` variables read the same through the port as on a
+   direct connection, and so does every comparison they decide (`'10:47' <
+   '1045'` is false under `utf8mb4_general_ci` and true under
+   `utf8mb4_0900_ai_ci`). Before, every forwarded session ran under
+   `utf8mb4_0900_ai_ci` whatever was asked, and a `latin1` client read
+   UTF-8 bytes (a stored `é` as `C3 A9` instead of `E9`).
+
+   The port's own login to the source asks for `utf8mb4_0900_ai_ci`, so a
+   client that asked for that costs nothing more. Any other collation costs
+   two statements when the connection opens, before anything of the
+   client's: the port asks the source what its collation number means
+   (`information_schema.COLLATIONS`) and sends `SET NAMES`. A number the
+   source has no collation for, or a `SET NAMES` it refuses, leaves the
+   session under `utf8mb4_0900_ai_ci`, and the log says so once per
+   connection. A `COM_CHANGE_USER` gives the session the collation it
+   carries. After a `COM_RESET_CONNECTION` the session is what the source's
+   own reset leaves: on MySQL the server's global character sets and
+   collation (measured on 8.0.46: a session opened under `latin1` is under
+   `utf8mb4_0900_ai_ci` after a reset), on MariaDB the handshake's
+   character set under its default collation (`latin1` stays `latin1`; a
+   `utf8mb4_general_ci` session is under `utf8mb4_uca1400_ai_ci` after a
+   reset on 11.4 and later).
+
+   Whether the copy answers is the table above: only under a collation that
+   compares like `utf8mb4_0900_ai_ci` and with results in `utf8mb4`. That
+   matters for drivers whose default is another collation:
+   go-sql-driver/mysql asks for `utf8mb4_general_ci`, so a Go client that
+   names no collation is now answered by MySQL on every statement. Ask for
+   one the copy reproduces in the DSN: `collation=utf8mb4_0900_ai_ci` on
+   MySQL and MariaDB 11.4 and later, `collation=utf8mb4_unicode_ci` on
+   MariaDB 10.11 (which has no `utf8mb4_0900_ai_ci` and gives a client that
+   asks for it `utf8mb4_general_ci`, on a direct connection as through the
+   port). A client's own `SET NAMES` later in the session works as before.
 
    **A setting changed inside a stored function.** A `SELECT` that calls a
    stored function is a read by its text, and the function can run `SET`
@@ -2234,7 +2257,10 @@ What this is and is not:
     refused as well: the server reads that as the start of a comment under
     `latin1` and not under `utf8mb4`, and the port cannot know which. A `SET NAMES` to a character set other than `utf8mb4`,
     `utf8`, `latin1`, `ascii` or `binary` is refused too: under `gbk` or
-    `sjis` the port could not tell where a string ends.
+    `sjis` the port could not tell where a string ends. For the same
+    reason a client that asks for such a character set when it connects
+    does not get it on a read-only port: its session stays under
+    `utf8mb4_0900_ai_ci`, and the log says so.
   - **What it cannot see.** The check reads the statement's text. A
     `SELECT` that calls a stored function, or reads a view built on one,
     looks like a read and is forwarded; if the function writes, MySQL runs

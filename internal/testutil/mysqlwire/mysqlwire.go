@@ -137,7 +137,10 @@ func Dial(addr, user, password, db string) (*Conn, error) {
 	}
 	pkt := binary.LittleEndian.AppendUint32(nil, caps)
 	pkt = binary.LittleEndian.AppendUint32(pkt, 1<<24)
-	pkt = append(pkt, 45) // utf8mb4_general_ci
+	// utf8mb4_unicode_ci: the routing port forwards under the collation the
+	// client asks for (#2810), and the copy answers under this one on every
+	// supported MySQL and MariaDB, as it did under the port's own choice.
+	pkt = append(pkt, 224)
 	pkt = append(pkt, make([]byte, 23)...)
 	pkt = append(pkt, user...)
 	pkt = append(pkt, 0)
