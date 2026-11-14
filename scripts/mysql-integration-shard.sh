@@ -152,6 +152,9 @@ split_config_guard() {
     pattern="${entry#*:}"
     case "$shard" in
       '' | *[!0-9]*) die "SPLIT_PARTS entry '$entry': the shard must be a number" ;;
+      # Shards are matched as text ("01" is not shard 1), so only one
+      # spelling of each number is accepted.
+      0?*) die "SPLIT_PARTS entry '$entry': write the shard without a leading zero" ;;
     esac
     [ "$shard" -ge 1 ] && [ "$shard" -le "$SHARD_COUNT" ] \
       || die "SPLIT_PARTS entry '$entry': shard $shard is not from 1 to $SHARD_COUNT"
@@ -403,7 +406,10 @@ run_shard() {
     if [ "$pkg" = "$module/$SPLIT_PKG" ]; then
       split_guard "$dir" "$bin"
       if pattern="$(split_pattern "$shard")"; then
-        part=("-test.run=$pattern")
+        # Wrapped as in split_skip: -test.run splits a pattern on a top-level
+        # "|", which would change what a flag such as (?i) covers, while
+        # -test.list (split_guard) reads the pattern whole.
+        part=("-test.run=(?:$pattern)")
       elif [ "$shard" = "$SPLIT_REST_SHARD" ]; then
         part=("-test.skip=$(split_skip)")
       else

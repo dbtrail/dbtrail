@@ -224,6 +224,10 @@ variant 3 '^TestA'
 expect_refused "an entry without a shard" "is not <shard>:<pattern>"
 variant 3 'x:^TestA'
 expect_refused "a shard that is not a number" "the shard must be a number"
+variant 3 '01:^TestA'
+expect_refused "a shard with a leading zero" "write the shard without a leading zero"
+variant 03 '1:^TestA'
+expect_refused "a rest shard with a leading zero" "write the shard without a leading zero"
 variant 3 '4:^TestA'
 expect_refused "a part past SHARD_COUNT" "shard 4 is not from 1 to 3"
 variant 0 '1:^TestA'
