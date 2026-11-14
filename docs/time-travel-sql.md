@@ -626,7 +626,10 @@ With Engine Routing on, a
 connection on this port to a server that has a source DSN and a
 [forwarding account](#the-forwarding-account) forwards every statement to
 that MySQL over one upstream connection per client connection, with that
-forwarding account, and MySQL's own answer comes back, errors included. A
+forwarding account, and MySQL's own answer comes back, errors included.
+Every cell of a forwarded result is the text MySQL sent, unchanged: a
+`FLOAT` holding `1e38` reads `1e38`, a `FLOAT(7,2)` `0.10` reads `0.10`
+and an `INT ZEROFILL` `00042` reads `00042`. A
 server with no forwarding account is not forwarded for: the account
 DBTrail captures with is never used by this port, so the copy answers that
 server alone. Resultsets are streamed to the client as they arrive, never held
