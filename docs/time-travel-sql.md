@@ -803,6 +803,31 @@ The decision, in order, for every statement:
    - `SUBDATE(d, n)`, the form with a number of days, is not rewritten: the
      copy has no such function, and MySQL answers. On the port without
      routing nothing changes: `DATE_SUB` there is still the copy's own.
+
+   A date stepped forward or back by an `INTERVAL` in any other spelling
+   (`DATE_ADD(d, INTERVAL n unit)`, its synonym `ADDDATE(d, INTERVAL n
+   unit)`, `d + INTERVAL n unit`, `d - INTERVAL n unit`) is checked for a
+   result outside the years 1 to 9999 since #2800. There MySQL answers `NULL`
+   and the copy would compute a year of five digits or the year 0: a value
+   MySQL never sends, or a row a `WHERE` or a `COUNT` would keep where
+   MySQL's `NULL` leaves it out. The port sends each step as a function of
+   the copy's session that steps the date and declines the statement out of
+   that range, which then goes to MySQL under `copy_columns_differ`; inside
+   it the copy's answer is what it was, to `9999-12-31 23:59:59`. The range
+   is read on the session's wall clock, so a `TIMESTAMP` that lands on the
+   last second of 9999 in UTC is past it five hours east. Unlike `DATE_SUB`,
+   what is stepped is not narrowed: a `DATE` plus an `INTERVAL` of days is
+   still the copy's, shown as a date and time (see the known differences).
+   A step the port cannot send that way with certainty stays on MySQL: the
+   `INTERVAL` written first (`INTERVAL 1 DAY + d`), an amount that is not a
+   number or a quoted one written in the statement (`INTERVAL -1 DAY`, which
+   the copy refuses, a placeholder, an expression), a placeholder in what is
+   stepped, `ADDDATE(d, n)` with a number of days, and arithmetic that binds
+   tighter than `+` right before what is stepped (`a - d + INTERVAL 1 DAY`,
+   `2 * d + ...`) or right after the unit (`d + INTERVAL 1 DAY * 2`).
+   `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()`, `UTC_DATE()` and the clock
+   keywords stepped by a number of at most a thousand years cannot leave the
+   range, and are sent as written.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
