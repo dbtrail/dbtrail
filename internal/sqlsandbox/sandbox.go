@@ -394,6 +394,20 @@ type Column struct {
 	Type string `json:"type"`
 }
 
+// DateScale is how MySQL declares one column of an answer, when that column
+// is a date and time (#2849). Known says the parent could tell; then Digits
+// is its fractional seconds (0 to 6) and Timestamp says MySQL types it
+// TIMESTAMP rather than DATETIME. Name, when set, is the name the column
+// must have for the scale to be its own: a star's columns are lined up with
+// the table's declared order, and a copy whose view returns them in another
+// order would get another column's scale.
+type DateScale struct {
+	Known     bool
+	Digits    int
+	Timestamp bool
+	Name      string
+}
+
 // Result is what came back. Cells are JSON-shaped values a browser can show
 // as they are: nil, bool, string, json.Number (every digit kept), []any for
 // a LIST and map[string]any for a STRUCT or JSON. Dates are "2006-01-02",
@@ -417,6 +431,12 @@ type Result struct {
 	// routing prints without the decimals or zero padding MySQL gives it
 	// (#2829). Set by the parent, never by the worker.
 	PrintNote string `json:"-"`
+	// DateScales say how MySQL declares each column of the answer that is a
+	// date and time (#2849), one per column, read by the parent from the
+	// statement's select list and the tables' CREATE TABLE; nil when the
+	// list could not be read that way. Set by the parent, never by the
+	// worker.
+	DateScales []DateScale `json:"-"`
 	// Spool holds the rows instead of Rows (which is then nil) when the
 	// result passed MaxResultBytes and Limits.SpoolMaxBytes let it go to a
 	// file. The caller reads it and must Close it, which removes the file.
