@@ -163,6 +163,25 @@ func fcvtText(x float64, d int) string {
 	return short + strings.Repeat("0", d-decimals)
 }
 
+// nativeFloatText prints a float32 (a FLOAT) or float64 (a DOUBLE) as MySQL
+// prints such a column declared without digits, or as the exact value when
+// binary is set; false for anything else and for NaN or an infinity.
+func nativeFloatText(v any, binary bool) ([]byte, bool) {
+	var single bool
+	switch v.(type) {
+	case float32:
+		single = true
+	case float64:
+	default:
+		return nil, false
+	}
+	x, ok := floatValue(v, single)
+	if !ok {
+		return nil, false
+	}
+	return []byte(floatPrint{single: single, decimals: -1}.text(x, binary)), true
+}
+
 // floatValue reads a FLOAT or DOUBLE cell of a time-travel row as the
 // number it holds: a float32 or float64 from a baseline snapshot (DuckDB
 // reads a FLOAT column as float32), a float32 or float64 typeEventFloats
@@ -247,6 +266,32 @@ func (h *Handler) timeTravelFloats(q TimeTravelQuery) *timeTravelFloats {
 		return nil
 	}
 	return f
+}
+
+// printTimeTravelFloats prints the FLOAT and DOUBLE cells of a time-travel
+// answer's row images in place, as MySQL prints them (#2851), and returns
+// notes with the warning owed for such a column whose declaration the
+// snapshot did not record (timeTravelFloats.notes). An answer with no row
+// owes none.
+func (h *Handler) printTimeTravelFloats(q TimeTravelQuery, notes []string, images ...map[string]any) []string {
+	if len(images) == 0 {
+		return notes
+	}
+	f := h.timeTravelFloats(q)
+	for _, img := range images {
+		f.image(img)
+		// A float32 or float64 left is a value typeEventFloats typed or a
+		// baseline holds, of a column the snapshot at AS OF does not
+		// describe: its Go type still says FLOAT or DOUBLE. Printed here, or
+		// a column mixing the two would fail the resultset builder.
+		for k, v := range img {
+			if b, ok := nativeFloatText(v, h.buffered); ok {
+				img[k] = b
+			}
+		}
+	}
+	f.logOdd(h)
+	return append(notes, f.notes(q.Columns)...)
 }
 
 // tableMetaAt is schema.table as the schema snapshot in effect at t

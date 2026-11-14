@@ -445,6 +445,11 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// refuses to touch. Baseline rows already carry labels and pass
 	// through unchanged.
 	h.mapEventImages(q.Schema, q.Table, rows)
+	// Before the merge too, for the same reason: a delta's FLOAT or DOUBLE
+	// value is read at the precision it was captured with (#2851), which
+	// only the event's own epoch tells.
+	h.typeEventFloats(q.Schema, q.Table, rows)
+	floats := h.timeTravelFloats(q)
 	changes := make(map[string]*query.ResultRow, len(rows))
 	for i := range rows {
 		changes[rows[i].PKValues] = &rows[i]
@@ -483,7 +488,7 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		streamCols = h.columnOrderFor(q.Schema, q.Table)
 	}
 	if h.conn != nil && !h.buffered && q.Limit == 0 && len(streamCols) > 0 {
-		return h.streamSnapshotFullTable(ctx, q, input, streamCols, notes)
+		return h.streamSnapshotFullTable(ctx, q, input, streamCols, notes, floats)
 	}
 
 	rowCap := h.cfg.FullTableRowCap
@@ -497,16 +502,17 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	// post-baseline event image is JSON-decoded (the same column arrives as
 	// json.Number), and BuildSimpleTextResultset rejects a column whose non-NULL
 	// rows disagree on type ("row types aren't consistent"). Rendering every cell
-	// to its text bytes makes each column uniformly VAR_STRING. For INT and DOUBLE
-	// columns the two origins render byte-identically: fullTableTextCell routes
+	// to its text bytes makes each column uniformly VAR_STRING. For INT columns
+	// the two origins render byte-identically: fullTableTextCell routes
 	// json.Number through numberToText, the same FormatTextValue path the default
 	// branch uses for baseline values; and the #496 read-path fix keeps event-side
-	// integers exact (json.Number, no float64 rounding). Known pre-existing
-	// exceptions, both baseline-side and out of this path's control: FLOAT(32-bit)
-	// columns diverge (DuckDB scans baseline FLOAT as float32, which FormatTextValue
-	// widens — "0.10000000149011612" vs the event side's "0.1"), and a baseline
-	// BIGINT UNSIGNED > 2^63 can't round-trip (baseline stores bigint as signed
-	// Int64). Stop at cap+1 so overflow is detectable.
+	// integers exact (json.Number, no float64 rounding). FLOAT and DOUBLE cells
+	// are printed by floats instead, as MySQL prints them under the column's
+	// declaration at AS OF (#2851): a baseline FLOAT (DuckDB's float32) and the
+	// event side's "0.1" both come out "0.1". Known pre-existing exception,
+	// baseline-side and out of this path's control: a baseline BIGINT UNSIGNED
+	// > 2^63 can't round-trip (baseline stores bigint as signed Int64). Stop at
+	// cap+1 so overflow is detectable.
 	// Residual unchanged-TOAST markers (#592) are caught upstream by
 	// SnapshotFullTableImages' checkChangesToast on the delta events (baseline
 	// rows can't carry a marker), NOT by buildImagesResult below: fullTableTextCell
@@ -518,6 +524,10 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 	err = reconstruct.SnapshotFullTableImages(ctx, input, func(rowMap map[string]any) error {
 		img := make(map[string]any, len(rowMap))
 		for k, v := range rowMap {
+			if out, ok := floats.cell(k, v); ok {
+				img[k] = out
+				continue
+			}
 			img[k] = h.fullTableTextCell(q.Schema, q.Table, k, v)
 		}
 		images = append(images, img)
@@ -547,6 +557,10 @@ func (h *Handler) runSnapshotFullTable(q TimeTravelQuery) (*mysql.Result, error)
 		return nil, err
 	}
 
+	floats.logOdd(h)
+	if len(images) > 0 {
+		notes = append(notes, floats.notes(q.Columns)...)
+	}
 	res, err := h.fullTableResult(q, images)
 	return h.finishWithNotes(q, notes, res, err)
 }
@@ -602,7 +616,7 @@ func nonEmptyNotes(notes ...string) []string {
 // first-packet ERR). A failure once rows are already on the wire returns an
 // error that go-mysql renders as an ERR packet mid-resultset — the client sees
 // no terminating EOF and reads it as an unambiguous failure (see streamWriter).
-func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string, notes []string) (*mysql.Result, error) {
+func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery, input reconstruct.SnapshotFullTableInput, cols []string, notes []string, floats *timeTravelFloats) (*mysql.Result, error) {
 	sw := newStreamWriter(h.out(), cols)
 	sw.status = h.SessionStatus()
 	cells := make([]any, len(cols)) // reused per row; writeRow encodes synchronously
@@ -638,7 +652,7 @@ func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery
 			}
 		}
 		for i, c := range cols {
-			v, cerr := h.projectCell(q.Schema, q.Table, c, rowMap[c])
+			v, cerr := h.projectCell(floats, q.Schema, q.Table, c, rowMap[c])
 			if cerr != nil {
 				return cerr
 			}
@@ -651,6 +665,10 @@ func (h *Handler) streamSnapshotFullTable(ctx context.Context, q TimeTravelQuery
 	}
 	// Every row was written; the closing packet carries the warning count,
 	// so the note is set before it.
+	floats.logOdd(h)
+	if sw.rows > 0 {
+		notes = append(notes, floats.notes(q.Columns)...)
+	}
 	h.finishWithNotes(q, notes, nil, nil)
 	return sw.finish()
 }
@@ -752,10 +770,22 @@ func (h *Handler) fullTableTextCell(schema, table, column string, v any) any {
 	case json.Number:
 		// Post-baseline event images are JSON-decoded as json.Number (#496).
 		// Render through numberToText (FormatTextValue) so event-origin cells emit
-		// the same wire bytes as baseline-origin INT/DOUBLE cells (the default
-		// branch below renders DuckDB-native int64/float64 the same way). Baseline
-		// FLOAT (float32) is the known exception — see runSnapshotFullTable.
+		// the same wire bytes as baseline-origin INT cells (the default branch
+		// below renders DuckDB-native int64 the same way). A FLOAT or DOUBLE
+		// cell does not get here when the snapshot knows its column
+		// (timeTravelFloats prints it first, #2851).
 		return numberToText(x)
+	case float32, float64:
+		// A baseline FLOAT or DOUBLE of a column the snapshot at AS OF does not
+		// describe: DuckDB's Go type still says which of the two it is, so it
+		// is printed as MySQL prints one declared without digits (#2851), and
+		// as the exact value in a prepared statement's answer.
+		if b, ok := nativeFloatText(x, h.buffered); ok {
+			return b
+		}
+		h.logger.Warn("shim: a FLOAT or DOUBLE cell of a time-travel answer holds no finite number; sent as stored",
+			"schema", schema, "table", table, "column", column)
+		return []byte(fmt.Sprint(x))
 	case time.Time:
 		return []byte(x.UTC().Format("2006-01-02 15:04:05"))
 	default:
@@ -853,13 +883,14 @@ func (h *Handler) runSnapshotPointInTime(q TimeTravelQuery) (*mysql.Result, erro
 	// A nil state means the row did not exist at AsOf; a fetch/coverage failure
 	// is a *ResolveError; a baseline/ApplyAt data-fault is raw. mysqlRenderErr
 	// keeps this byte-identical to the pre-#1008 inline path.
-	state, notes, err := h.resolveSnapshotRow(ctx, q)
+	state, notes, err := h.resolveSnapshotRow(ctx, q, true)
 	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 	if state == nil {
 		return h.finishWithNotes(q, notes, emptyResult(), nil)
 	}
+	notes = h.printTimeTravelFloats(q, notes, state)
 
 	// Same projection handling as runPointInTime: an explicit column list
 	// is emitted verbatim; SELECT * uses the DDL column order.

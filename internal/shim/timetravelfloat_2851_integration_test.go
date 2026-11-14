@@ -4,16 +4,21 @@ package shim
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	drivermysql "github.com/go-sql-driver/mysql"
 
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -308,5 +313,144 @@ func TestIntegrationTimeTravelFloatTextAcrossAlter(t *testing.T) {
 				t.Errorf("row %d %s after the ALTER: time travel prints %q, MySQL sends %q", r, w.col, got, mysqlText)
 			}
 		}
+	}
+}
+
+// #2851 end to end on a real index: every time-travel path of the MySQL
+// port (`_flashback` and `_snapshot`, one row and the whole table, from a
+// baseline row and from an event) prints FLOAT and DOUBLE cells as MySQL
+// prints them under the column's declaration at AS OF, and the value of an
+// event captured under an earlier epoch at the type it had then. The texts
+// expected are the ones MySQL 8.0 sends for the same values (the two tests
+// above).
+func TestIntegrationTimeTravelFloatCellsEndToEnd(t *testing.T) {
+	db, dbName := testutil.CreateTestDB(t)
+	testutil.InitIndexTables(t, db)
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	// The hour before this one, so every AS OF below is in the past.
+	hourTop := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	addHourlyPartition(t, db, hourTop)
+	snap1, snap2 := hourTop.Add(1*time.Minute), hourTop.Add(20*time.Minute)
+	asOfA, asOfB := hourTop.Add(10*time.Minute), hourTop.Add(30*time.Minute)
+	eventTS := hourTop.Add(5 * time.Minute).Format("2006-01-02 15:04:05")
+
+	// Epoch 1: w is a FLOAT. Epoch 2 (after ALTER TABLE m MODIFY w DOUBLE):
+	// w is a DOUBLE. u has no recorded declaration (a snapshot from before
+	// column types were recorded).
+	insertTyped := func(id int, at time.Time, column string, ordinal int, key, dataType string, columnType any) {
+		testutil.MustExec(t, db, `INSERT INTO schema_snapshots
+			(snapshot_id, snapshot_time, schema_name, table_name, column_name,
+			 ordinal_position, column_key, data_type, column_type, is_nullable)
+			VALUES (?, ?, 'myapp', 'm', ?, ?, ?, ?, ?, 'YES')`,
+			id, at.Format("2006-01-02 15:04:05"), column, ordinal, key, dataType, columnType)
+	}
+	for id, at := range map[int]time.Time{1: snap1, 2: snap2} {
+		wType := "float"
+		if id == 2 {
+			wType = "double"
+		}
+		insertTyped(id, at, "id", 1, "PRI", "int", "int")
+		insertTyped(id, at, "f", 2, "", "float", "float")
+		insertTyped(id, at, "d", 3, "", "double", "double")
+		insertTyped(id, at, "d2", 4, "", "double", "double(10,2)")
+		insertTyped(id, at, "z", 5, "", "float", "float unsigned zerofill")
+		insertTyped(id, at, "w", 6, "", wType, wType)
+		insertTyped(id, at, "u", 7, "", "double", nil)
+		insertTyped(id, at, "n", 8, "", "bigint", "bigint unsigned")
+	}
+
+	cols := []baseline.Column{
+		{Name: "id", MySQLType: "int", ParquetType: baseline.MysqlToParquetNode("int")},
+		{Name: "f", MySQLType: "float", ParquetType: baseline.MysqlToParquetNode("float")},
+		{Name: "d", MySQLType: "double", ParquetType: baseline.MysqlToParquetNode("double")},
+		{Name: "d2", MySQLType: "double", ParquetType: baseline.MysqlToParquetNode("double")},
+		{Name: "z", MySQLType: "float", ParquetType: baseline.MysqlToParquetNode("float")},
+		{Name: "w", MySQLType: "float", ParquetType: baseline.MysqlToParquetNode("float")},
+		{Name: "u", MySQLType: "double", ParquetType: baseline.MysqlToParquetNode("double")},
+		{Name: "n", MySQLType: "bigint", ParquetType: baseline.MysqlToParquetNode("bigint")},
+	}
+	baselineDir := writeBaselineSnapshot(t, snap1, "myapp", "m", cols, [][]string{
+		{"1", "0.1", "1e15", "0.1", "1.5", "0.1", "0.25", "100"},
+		{"2", "9", "9", "9", "9", "9", "9", "9"},
+	})
+	testutil.InsertEvent(t, db, "mysql-bin.000001", 100, 200, eventTS, nil,
+		"myapp", "m", 2 /*update*/, "2", nil,
+		[]byte(`{"id":2,"f":9,"d":9,"d2":9,"z":9,"w":9,"u":9,"n":9}`),
+		[]byte(`{"id":2,"f":0.3333333,"d":1e21,"d2":0.1,"z":1.5,"w":0.1,"u":0.5,"n":18446744073709551615}`))
+	testutil.InsertEvent(t, db, "mysql-bin.000001", 200, 300, eventTS, nil,
+		"myapp", "m", 1 /*insert*/, "3", nil, nil,
+		[]byte(`{"id":3,"f":-0.0,"d":-0.0,"d2":null,"z":0,"w":1e-7,"u":null,"n":1}`))
+
+	h := NewHandlerWithConfig(db, Config{
+		AllowGaps: true, NoArchive: true, IndexDBName: dbName, BaselineDir: baselineDir,
+	}, slog.Default())
+	if err := h.UseDB("myapp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// rowsByID runs a statement and returns its cells by id and column, with
+	// the warnings it left.
+	rowsByID := func(stmt string) (map[string]map[string]string, []string) {
+		t.Helper()
+		res, err := h.HandleQuery(stmt)
+		if err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+		names := fieldNames(res.Resultset.Fields)
+		out := map[string]map[string]string{}
+		for _, cells := range rowCells(t, res.Resultset) {
+			row := map[string]string{}
+			for i, c := range cells {
+				row[names[i]] = c
+			}
+			out[row["id"]] = row
+		}
+		return out, slices.Clone(h.lastWarnings)
+	}
+	at := func(ts time.Time) string { return ts.Format("2006-01-02 15:04:05") }
+	eventRow := map[string]string{"f": "0.333333", "d": "1e21", "d2": "0.10", "z": "0000000001.5", "w": "0.1", "u": "0.5", "n": "18446744073709551615"}
+	insertedRow := map[string]string{"f": "-0", "d": "-0", "d2": "NULL", "z": "000000000000", "w": "0.0000001", "u": "NULL", "n": "1"}
+	baselineRow := map[string]string{"f": "0.1", "d": "1e15", "d2": "0.10", "z": "0000000001.5", "w": "0.1", "u": "0.25", "n": "100"}
+	check := func(stmt string, want map[string]map[string]string) {
+		t.Helper()
+		got, warnings := rowsByID(stmt)
+		for id, wantRow := range want {
+			for col, w := range wantRow {
+				if got[id][col] != w {
+					t.Errorf("%s\n  id=%s %s = %q, want %q", stmt, id, col, got[id][col], w)
+				}
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("%s: %d rows %v, want %d", stmt, len(got), got, len(want))
+		}
+		found := false
+		for _, w := range warnings {
+			found = found || strings.HasPrefix(w, "myapp.m.u: the schema snapshot does not record how the column was declared")
+		}
+		if !found {
+			t.Errorf("%s: warnings %q, want the one for u", stmt, warnings)
+		}
+	}
+
+	check("SELECT * FROM _flashback.m AS OF '"+at(asOfA)+"' WHERE id = 2", map[string]map[string]string{"2": eventRow})
+	check("SELECT * FROM _flashback.m AS OF '"+at(asOfA)+"'", map[string]map[string]string{"2": eventRow, "3": insertedRow})
+	check("SELECT * FROM _snapshot.m AS OF '"+at(asOfA)+"' WHERE id = 1", map[string]map[string]string{"1": baselineRow})
+	check("SELECT * FROM _snapshot.m AS OF '"+at(asOfA)+"' WHERE id = 2", map[string]map[string]string{"2": eventRow})
+	check("SELECT * FROM _snapshot.m AS OF '"+at(asOfA)+"'", map[string]map[string]string{"1": baselineRow, "2": eventRow, "3": insertedRow})
+
+	// After the ALTER, w is a DOUBLE holding the FLOAT widened: from the
+	// baseline's float32 and from the event captured while it was a FLOAT.
+	widened := "0.10000000149011612"
+	check("SELECT id, w, u FROM _snapshot.m AS OF '"+at(asOfB)+"'", map[string]map[string]string{
+		"1": {"w": widened}, "2": {"w": widened}, "3": {"w": "0.00000010000000116860974"},
+	})
+	check("SELECT id, w, u FROM _flashback.m AS OF '"+at(asOfB)+"' WHERE id = 2", map[string]map[string]string{"2": {"w": widened}})
+
+	// A projection that leaves u out owes no warning.
+	if _, warnings := rowsByID("SELECT id, f FROM _flashback.m AS OF '" + at(asOfA) + "'"); len(warnings) != 0 {
+		t.Errorf("projection without u: warnings %q", warnings)
 	}
 }

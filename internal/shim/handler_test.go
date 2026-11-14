@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"slices"
 	"strings"
@@ -135,25 +136,27 @@ func TestImagesToResult_jsonNumberMixedAndExact(t *testing.T) {
 
 // TestFullTableTextCell_jsonNumberMatchesNative locks the baseline/event
 // consistency the silent-failure review flagged: a json.Number event cell renders
-// byte-identically to FormatTextValue of the equivalent native Go value (the path
-// baseline-origin INT/DOUBLE cells take), including extreme doubles where the raw
-// literal (1e+21) differs from FormatTextValue's decimal form. FLOAT (float32) is
-// the documented exception (separate sub-test below).
+// byte-identically to the equivalent native Go value a baseline row carries.
+//
+// For an integer column both go through FormatTextValue. A FLOAT or DOUBLE
+// column no longer does (#2851): FormatTextValue printed a double in Go's text
+// and widened a baseline float32, so this test used to pin 1e21 as
+// "1000000000000000000000" on both sides and a baseline FLOAT 0.1 as
+// "0.10000000149011612" against the event side's "0.1". Both sides are now
+// printed as MySQL 8.0 prints the column (timeTravelFloats, measured in
+// TestIntegrationTimeTravelFloatTextIsMySQLs): "1e21", and "0.1" from either
+// origin, so the FLOAT exception this test documented is gone.
 func TestFullTableTextCell_jsonNumberMatchesNative(t *testing.T) {
 	h := NewHandler(nil, nil)
-	cases := []struct {
+	ints := []struct {
 		num    json.Number
 		native any
 	}{
 		{"18446744073709551615", uint64(18446744073709551615)}, // BIGINT UNSIGNED max
 		{"100", int64(100)},
 		{"-9223372036854775808", int64(-9223372036854775808)}, // BIGINT signed min
-		{"1e+21", float64(1e21)},                              // extreme double: "1e+21" vs decimal
-		{"-1e+21", float64(-1e21)},                            // negative extreme double
-		{"0.0000001", float64(1e-7)},
-		{"100.5", float64(100.5)},
 	}
-	for _, c := range cases {
+	for _, c := range ints {
 		event, _ := h.fullTableTextCell("s", "t", "c", c.num).([]byte)
 		baseline, _ := h.fullTableTextCell("s", "t", "c", c.native).([]byte)
 		if string(event) != string(baseline) {
@@ -161,19 +164,38 @@ func TestFullTableTextCell_jsonNumberMatchesNative(t *testing.T) {
 		}
 	}
 
-	// Documented KNOWN exception (pre-existing, baseline-side, tracked as a
-	// follow-up): a baseline FLOAT column is scanned by DuckDB as float32, which
-	// FormatTextValue widens — so it does NOT match the event side's shortest
-	// float32 literal. This locks the current behavior so a future baseline
-	// float32 fix has to update it deliberately.
-	eventFloat := string(h.fullTableTextCell("s", "t", "c", json.Number("0.1")).([]byte))
-	baselineFloat := string(h.fullTableTextCell("s", "t", "c", float32(0.1)).([]byte))
-	if eventFloat != "0.1" {
-		t.Errorf("event FLOAT 0.1 = %q, want \"0.1\"", eventFloat)
+	fh := floatsHandler()
+	floats := fh.timeTravelFloats(TimeTravelQuery{Schema: "myapp", Table: "m", AsOf: time.Now()})
+	for _, c := range []struct {
+		col    string
+		num    json.Number
+		native any
+		want   string
+	}{
+		{"d", "1e+21", float64(1e21), "1e21"}, // Go's literal is 1e+21, MySQL's 1e21
+		{"d", "-1e+21", float64(-1e21), "-1e21"},
+		{"d", "0.0000001", float64(1e-7), "0.0000001"},
+		{"d", "100.5", float64(100.5), "100.5"},
+		{"d", "1e15", float64(1e15), "1e15"}, // an integer double: never the integer text
+		{"d", "-0.0", math.Copysign(0, -1), "-0"},
+		{"f", "0.1", float32(0.1), "0.1"}, // DuckDB reads a baseline FLOAT as float32
+		{"f", "0.3333333", float32(0.3333333), "0.333333"},
+		{"d2", "0.1", float64(0.1), "0.10"},
+	} {
+		event, _ := fh.projectCell(floats, "myapp", "m", c.col, c.num)
+		baseline, _ := fh.projectCell(floats, "myapp", "m", c.col, c.native)
+		if string(event.([]byte)) != c.want || string(baseline.([]byte)) != c.want {
+			t.Errorf("%s: json.Number(%q) → %q, native %T → %q, want both %q", c.col, c.num, event, c.native, baseline, c.want)
+		}
 	}
-	if eventFloat == baselineFloat {
-		t.Errorf("FLOAT baseline (float32) is expected to DIVERGE from the event side today; "+
-			"event=%q baseline=%q — if a baseline float32 fix made them match, update this test and the comments", eventFloat, baselineFloat)
+
+	// A baseline FLOAT or DOUBLE of a column the snapshot does not describe
+	// is printed by its Go type, as a column declared without digits.
+	if got := string(h.fullTableTextCell("s", "t", "c", float32(0.1)).([]byte)); got != "0.1" {
+		t.Errorf("baseline float32 0.1 with no snapshot = %q, want \"0.1\"", got)
+	}
+	if got := string(h.fullTableTextCell("s", "t", "c", float64(1e21)).([]byte)); got != "1e21" {
+		t.Errorf("baseline float64 1e21 with no snapshot = %q, want \"1e21\"", got)
 	}
 }
 
