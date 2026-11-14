@@ -179,9 +179,31 @@ func TestIntegrationFlashbackRoutesByServer(t *testing.T) {
 	}
 }
 
+// testCollation is the collation the integration tests' connections ask for
+// when their DSN names none. The port forwards under the collation a client
+// asks for (#2810), and go-sql-driver's default, utf8mb4_general_ci, is one
+// the copy does not answer under; this one it answers under on every
+// supported MySQL and MariaDB (MariaDB 10.11 has no utf8mb4_0900_ai_ci). The
+// direct connections a test compares with ask for it too, so both sides
+// compare text alike. A test of the driver's own default opens its
+// connection with sql.Open.
+const testCollation = "utf8mb4_unicode_ci"
+
+// withTestCollation is dsn asking for testCollation, unless it names a
+// collation itself.
+func withTestCollation(dsn string) string {
+	if strings.Contains(dsn, "collation=") {
+		return dsn
+	}
+	if strings.Contains(dsn, "?") {
+		return dsn + "&collation=" + testCollation
+	}
+	return dsn + "?collation=" + testCollation
+}
+
 func openFlashback(t *testing.T, addr, user, pass, db string) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=5s", user, pass, addr, db))
+	conn, err := sql.Open("mysql", withTestCollation(fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=5s", user, pass, addr, db)))
 	if err != nil {
 		t.Fatal(err)
 	}

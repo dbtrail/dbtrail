@@ -147,8 +147,13 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		if label == "" {
 			label = "(driver default)"
 		}
-		port := openRaw(t, withCollation(portDSN, c.collation))
-		live := openRaw(t, withCollation(liveDSN, c.collation))
+		open := openRaw
+		if c.collation == "" {
+			// openRaw would name testCollation.
+			open = openDriverDefault
+		}
+		port := open(t, withCollation(portDSN, c.collation))
+		live := open(t, withCollation(liveDSN, c.collation))
 		for _, stmt := range sameEverywhere {
 			got, want := answerText(port, stmt), answerText(live, stmt)
 			t.Logf("%-20s port %-70.200s %s", label, got, stmt)
@@ -177,12 +182,12 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	// A SET NAMES of the client's own, later: the copy answers once the
 	// session compares as it does, on the one connection.
 	ctxT := context.Background()
-	pconn, err := openRaw(t, portDSN).Conn(ctxT)
+	pconn, err := openRaw(t, withCollation(portDSN, "utf8mb4_general_ci")).Conn(ctxT)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pconn.Close()
-	lconn, err := openRaw(t, liveDSN).Conn(ctxT)
+	lconn, err := openRaw(t, withCollation(liveDSN, "utf8mb4_general_ci")).Conn(ctxT)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,6 +272,18 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	if strings.Contains(got, "gbk") || strings.Count(got, "|") > 0 {
 		t.Errorf("a gbk client on a read-only port: %q was read as two columns by the source: %q", hidden, got)
 	}
+}
+
+// openDriverDefault is openRaw without testCollation: the collation
+// go-sql-driver asks for itself.
+func openDriverDefault(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
 }
 
 // connAnswer is answerText on one connection.
