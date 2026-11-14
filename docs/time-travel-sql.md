@@ -196,7 +196,9 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   `utf8mb4_0900_ai_ci` or `utf8mb4_unicode_ci`: in Go,
   `collation=utf8mb4_0900_ai_ci` in the DSN; in Python with PyMySQL, the
   same collation in `connect()`. An application on its driver's default
-  `utf8mb4_general_ci` (both of those) gets every answer from MySQL. The
+  `utf8mb4_general_ci` (both of those) gets from MySQL the answer to every
+  statement with a string literal or a function that returns text, and
+  from the copy only the others (#2836). The
   `mysql` client asks for `utf8mb4_0900_ai_ci` already.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
@@ -1069,7 +1071,7 @@ The decision, in order, for every statement:
    | `timestamp`, asked before each statement that calls `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` or `UTC_DATE()` (#2611) | not set, and the source's clock within a second of DBTrail's host's | set (`SET timestamp = ...`, as replay tools do: MySQL's `NOW()` is that moment), or a source clock more than a second from DBTrail's host's (the copy reads the host's) |
    | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
    | `character_set_results` | `utf8mb4`; `NULL` or `binary` (no conversion: each column comes in its own character set and says so, as from the copy) | `latin1`, `utf8mb3` and the rest: MySQL converts, the copy answers in utf8mb4 |
-   | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. The copy itself folds case only: accents, `ß` and full-width letters stay a documented difference under every one of these (see "The copy itself compares text"). Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs` |
+   | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. The copy itself folds case only: accents, `ß` and full-width letters stay a documented difference under every one of these (see "The copy itself compares text"). Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs`: since #2836, only for a statement with a string literal (or a double-quoted string, a hex or bit number, a placeholder) or a call other than `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, the number and date functions (`ROUND`, `YEAR`, `NOW()`, `DATEDIFF` and a few more) and the keywords that open a list. A statement with neither has no text that takes the connection's collation (a column carries its own, and wins against a literal), and the copy answers it under any collation |
 
    These are session settings whose value MySQL reads when it answers a
    `SELECT` the vetoes of step 3 let through. `group_concat_max_len` and
@@ -1127,7 +1129,9 @@ The decision, in order, for every statement:
    matters for drivers whose default is another collation:
    go-sql-driver/mysql asks for `utf8mb4_general_ci`, so on MySQL and on
    MariaDB 10.11 a Go client that names no collation is now answered by
-   MySQL on every statement (MariaDB 11.4 and later give that handshake
+   MySQL on every statement with a string literal or a function that
+   returns text (#2836; the others the copy still answers; MariaDB 11.4 and
+   later give that handshake
    `utf8mb4_uca1400_ai_ci` themselves, which the copy answers under). Ask for
    one the copy reproduces in the DSN: `collation=utf8mb4_0900_ai_ci` on
    MySQL and MariaDB 11.4 and later (PyMySQL, whose default is the same

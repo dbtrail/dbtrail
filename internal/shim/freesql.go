@@ -773,7 +773,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		}
 		return ops.forward(reason, d.Reason)
 	}
-	if why := h.resultOverRowCap(ctx, d); why != "" && !(ops.toFile && h.resultFileRoom()) {
+	if why := h.resultOverRowCap(ctx, d, qstr); why != "" && !(ops.toFile && h.resultFileRoom()) {
 		return ops.forward(RouteReasonResultOverCap, why+"; "+d.Reason)
 	}
 	var unchangedWithin time.Duration
@@ -789,7 +789,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	// Last, the source's session: the copy answers only under one it
 	// reproduces. Asked here and not earlier, so only a statement that
 	// would otherwise go to the copy pays the read-back.
-	if why := h.sessionKeepsCopyFromAnswering(ctx); why != "" {
+	if why := h.sessionKeepsCopyFromAnswering(ctx, qstr); why != "" {
 		return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
 	}
 	// A statement that reads the copy's clock (#2611) also needs the source's
@@ -939,13 +939,13 @@ func (h *Handler) resultFileRoom() bool {
 // without an error, as the client asked, so the statement is the copy's as
 // before. A session that cannot be read, or one the copy does not
 // reproduce, is left to the rungs that own those cases.
-func (h *Handler) resultOverRowCap(ctx context.Context, d readrouter.Decision) string {
+func (h *Handler) resultOverRowCap(ctx context.Context, d readrouter.Decision, stmt string) string {
 	rowCap := h.freeSQL.RowCap()
 	if rowCap <= 0 || d.ResultRows <= int64(rowCap) {
 		return ""
 	}
 	rs, err := h.ensureSession(ctx)
-	if err != nil || rs.differs != "" {
+	if err != nil || rs.differs != "" || (rs.collationDiffers != "" && !readrouter.CollationFree(stmt)) {
 		return ""
 	}
 	if limit := rs.vars.selectLimit; limit > 0 && limit <= uint64(rowCap) {
