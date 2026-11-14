@@ -499,6 +499,11 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// that apply those rules (console.FlashbackTarget.TimeTravelRefusal).
 		engine := shim.NewHandlerWithConfig(tgt.IndexDB, flashbackShimConfig(tgt, flashbackConfig{QueryTimeout: timeout}.withDefaults(), gate), logger)
 		engine.BindActor("server:" + tgt.ID)
+		// On the engine too: this wire does not go through the engine's own
+		// command loop, which is where it asks, so the one below is the gate
+		// that acts here. Bound all the same, so the engine carries its
+		// server's gate whichever way it is ever reached.
+		engine.BindTimeTravelGate(tgt.TimeTravelRefusal)
 		bound.TimeTravel, bound.TimeTravelRefusal = engine, tgt.TimeTravelRefusal
 		closers := []func(){engine.Close}
 		bound.Close = func() {

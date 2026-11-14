@@ -19,6 +19,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -325,4 +326,56 @@ func TestIntegrationPGRouter(t *testing.T) {
 			t.Errorf("psql with a wrong password: err %v, output %q", err, b)
 		}
 	})
+
+	// Last, since it changes what the views answer: the server comes to hide
+	// a column while the connection above is still open. Time travel reads
+	// the history past the views that hide it, so from the next statement on
+	// it is refused, with the server's reason, on that same connection. This
+	// is the only test that the port is wired to the server's own gate
+	// (pgPortLogin): without that wiring every statement below answers the
+	// hidden column from the index.
+	rules, err := hiderules.Parse(hiderules.Rules{Columns: []string{"public.users.name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetHidden(ent.ID, rules); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	recordsBefore := 0
+	for _, ev := range rec.Events() {
+		if ev.Surface == "shim" && ev.Action == "timetravel.query" {
+			recordsBefore++
+		}
+	}
+	for _, stmt := range []string{
+		fmt.Sprintf("SELECT * FROM _flashback.users AS OF '%s' WHERE id = 1", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")),
+		fmt.Sprintf("SELECT * FROM _snapshot.users AS OF '%s' WHERE id = 1", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")),
+		fmt.Sprintf("SELECT * FROM public.users WHERE id = 1 AS OF '%s'", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")),
+	} {
+		_, rows, err := pgText(t, port, stmt)
+		var pe *pgconn.PgError
+		if !errors.As(err, &pe) {
+			t.Fatalf("%s: answered %v (err %v) on a server that hides a column: time travel read past the rule", stmt, rows, err)
+		}
+		if pe.Code != "42501" || !strings.Contains(pe.Message, "hides some tables and columns") {
+			t.Errorf("%s: %s %q, want 42501 with the server's reason", stmt, pe.Code, pe.Message)
+		}
+		if strings.Contains(pe.Message, "alice") {
+			t.Errorf("the refusal carries the hidden value: %q", pe.Message)
+		}
+	}
+	recordsAfter := 0
+	for _, ev := range rec.Events() {
+		if ev.Surface == "shim" && ev.Action == "timetravel.query" {
+			recordsAfter++
+		}
+	}
+	if recordsAfter != recordsBefore {
+		t.Errorf("%d time-travel audit records after the refusals, %d before: a refused statement was recorded as served", recordsAfter, recordsBefore)
+	}
+	// The connection goes on, and ordinary SQL on the copy still answers.
+	if _, rows, err := pgText(t, port, "SELECT count(*) AS n FROM "+tbl); err != nil || len(rows) != 1 {
+		t.Errorf("ordinary SQL after the rule was saved: %v %v", rows, err)
+	}
 }
