@@ -1368,6 +1368,15 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				}
 				textDecline = sqlTextDeclineSQL(guards)
 			}
+			if sess.StrictStar || sess.MySQLText {
+				// Routed or not, what the MySQL port sends is read as
+				// MySQL's text (#2829). After the routed refusals, so a
+				// FLOAT column keeps its own reason there.
+				if msg := sqlFixedPrintRefusalFor(narrowed, statement, !sess.StrictStar); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
+			}
 			if sess.TimeZone != "" {
 				// A session zone other than UTC: every DATETIME the statement
 				// can read must be the wall clock MySQL holds, or it would be
@@ -1777,6 +1786,87 @@ func sqlFloatRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsan
 		return ""
 	}
 	return fmt.Sprintf("the copy does not answer this statement: it reads a FLOAT column of %s (%s)", strings.Join(tables, ", "), why)
+}
+
+// sqlFixedPrintRefusalFor says why the copy must not answer a statement on
+// the MySQL port because it may print a FLOAT or DOUBLE column MySQL prints
+// with fixed decimals or zero padding (baseline.FixedPrintColumns, #2829),
+// or "" when it may answer. 0.1 in a DOUBLE(10,2) is 0.10 on MySQL, and the
+// copy's answer, a plain DOUBLE, would print 0.1.
+//
+// unrouted is the port without routing. It takes the copy's own dialect,
+// which reaches a column in more ways than a search of the text can tell
+// (FROM t first, COLUMNS('re'), a list of column aliases after the table, the
+// row as a STRUCT), so there any statement that reads such a table is
+// refused.
+//
+// Under routing the statement is MySQL's, and the search is its raw text,
+// erring toward refusing: a name counts wherever it stands, inside a string
+// or a quoted name too, up to letter case; a name that is not made of word
+// characters counts as a piece of text anywhere. A star counts unless it is
+// COUNT(*), and so do the word TABLE (MySQL's TABLE t) and a statement with
+// no SELECT in it: each can print every column without its name. A refusal
+// there is never a wrong answer: the statement goes to MySQL.
+func sqlFixedPrintRefusalFor(narrowed views.Input, statement string, unrouted bool) string {
+	low := strings.ToLower(statement)
+	for _, t := range narrowed.SelectedBaselines() {
+		if unrouted && len(t.FixedPrint) > 0 {
+			return fmt.Sprintf("the copy does not answer a statement over %s.%s on this port: %s is a column MySQL prints with fixed decimals "+
+				"or zero padding as it is declared, which the copy cannot print as MySQL does", t.Schema, t.Table, t.FixedPrint[0])
+		}
+		for _, name := range t.FixedPrint {
+			if containsName(low, strings.ToLower(name)) {
+				return fmt.Sprintf("the copy does not answer this statement: it names %s of %s.%s, which MySQL prints with fixed decimals "+
+					"or zero padding as the column is declared, and the copy cannot print as MySQL does", name, t.Schema, t.Table)
+			}
+		}
+		if len(t.FixedPrint) > 0 && mayPrintEveryColumn(low) {
+			return fmt.Sprintf("the copy does not answer this statement: it may print every column of %s.%s, and %s is a column MySQL prints "+
+				"with fixed decimals or zero padding as it is declared, which the copy cannot print as MySQL does", t.Schema, t.Table, t.FixedPrint[0])
+		}
+	}
+	return ""
+}
+
+// countStar is COUNT(*), the one star that prints no column.
+var countStar = regexp.MustCompile(`count\s*\(\s*\*\s*\)`)
+
+// mayPrintEveryColumn says whether a lowercased statement may print every
+// column of a table without naming one (sqlFixedPrintRefusalFor).
+func mayPrintEveryColumn(low string) bool {
+	return strings.Contains(countStar.ReplaceAllString(low, ""), "*") || containsName(low, "table") || !containsName(low, "select")
+}
+
+// containsName says whether name stands in text as a whole word, both
+// lowercased; a name with a byte that is not a word byte is looked for as a
+// piece of text anywhere.
+func containsName(text, name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if !nameByte(name[i]) {
+			return strings.Contains(text, name)
+		}
+	}
+	for from := 0; ; {
+		i := strings.Index(text[from:], name)
+		if i < 0 {
+			return false
+		}
+		i += from
+		end := i + len(name)
+		if (i == 0 || !nameByte(text[i-1])) && (end == len(text) || !nameByte(text[end])) {
+			return true
+		}
+		from = i + 1
+	}
+}
+
+// nameByte is a byte an unquoted name is made of: an ASCII letter, a digit,
+// _, $, or any byte of a character outside ASCII.
+func nameByte(b byte) bool {
+	return b == '_' || b == '$' || b >= 0x80 || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 // sqlUnixTimeRefusalFor says why the copy must not answer a statement because

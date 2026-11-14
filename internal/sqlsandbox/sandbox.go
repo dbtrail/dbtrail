@@ -246,6 +246,12 @@ type Session struct {
 	// client writes MySQL: the MySQL port, routed or not. The SQL card's
 	// reader writes the copy's dialect and keeps DuckDB's.
 	MySQLClock bool
+	// MySQLText says the answer leaves as MySQL's text, on the MySQL port,
+	// routed or not (#2829): the copy then declines a statement that reads
+	// a FLOAT or DOUBLE column MySQL prints with fixed decimals or zero
+	// padding, which the copy's answer cannot print as MySQL does. The SQL
+	// card shows the copy's own values and leaves it off.
+	MySQLText bool
 	// SelectLimit is MySQL's sql_select_limit: the most rows a SELECT with no
 	// LIMIT of its own returns. Zero is no limit. It never raises the cap:
 	// at or under Limits.MaxRows the result is cut at it and NOT reported as

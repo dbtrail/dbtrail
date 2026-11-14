@@ -1607,6 +1607,23 @@ What this is and is not:
   MySQL and `-Infinity` on the copy; a statement over the same table that
   does not name the column still goes to the copy, and a `DOUBLE` column
   is the same type on both),
+  any statement that names a `FLOAT` or `DOUBLE` column declared with its
+  digits (`DOUBLE(10,2)`, `FLOAT(7,2)`) or with `ZEROFILL`, or that may
+  print every column of its table without naming one (a star other than
+  `COUNT(*)`, `TABLE t`), because MySQL prints such a column with that many
+  decimals (`0.10` in a `DOUBLE(10,2)`, and an `AVG` over it with four
+  more) or padded with zeros, and the copy's answer carries neither. The
+  port without routing refuses every statement over a table with such a
+  column, since the copy's dialect reaches a column in more ways than a
+  name or a star. A `FLOAT` or `DOUBLE`
+  declared without digits prints on the copy as MySQL prints it, on both
+  ports: six significant digits for a `FLOAT` (`3.14`, `0.333333`,
+  `123457000`), the shortest exact text for a `DOUBLE`, the fixed form
+  down to `0.000000000000001` and up to 15 digits, and an exponent with no
+  `+` past that (`1e38`, `1.23457e-38`). A prepared statement gets the
+  exact value, as MySQL sends it. NaN and an infinity, which MySQL never
+  returns, are not sent: under routing MySQL answers the statement, and
+  the port without routing returns error 1690,
   `SUBSTRING`, `SUBSTR` and `MID` unless the position is a positive whole
   number or `-1` and the length a whole number, both written in the
   statement (`SUBSTRING('abc', 0, 2)` is `''` on MySQL and `'a'` on the

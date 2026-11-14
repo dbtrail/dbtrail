@@ -824,6 +824,7 @@ func atoiAll(in []string) []int {
 func settings(s sqlsandbox.Session) sqlsandbox.Session {
 	s.StrictStar = false
 	s.MySQLClock = false // set on every port session (sessionVars.session)
+	s.MySQLText = false  // so is this
 	s.Types = nil
 	return s
 }

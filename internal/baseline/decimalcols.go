@@ -88,6 +88,12 @@ type TableFooter struct {
 	// Float are the table's FLOAT columns (FloatColumns, #2827). Read
 	// routing keeps a statement that names one on the source.
 	Float []string
+	// FixedPrint are the table's FLOAT and DOUBLE columns whose declaration
+	// fixes how MySQL prints them (FixedPrintColumns, #2829). The copy does
+	// not know it, so a statement that names one is kept from the copy's
+	// answer: sent to the source under read routing, refused on the port
+	// without it.
+	FixedPrint []string
 	// PG is set for a snapshot file of a PostgreSQL source and nothing else
 	// above is, but Columns: the file carries no CREATE TABLE, it records
 	// the table's shape (MetaKeyPGRelation), and PG says how each column's
@@ -135,6 +141,31 @@ func FloatColumns(cols []Column) []string {
 	var out []string
 	for _, c := range cols {
 		if c.MySQLType == "float" {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+// FixedPrintColumns picks the FLOAT and DOUBLE columns whose declaration
+// fixes how MySQL prints them out of a parsed schema (#2829): declared with
+// their digits, FLOAT(M,D) or DOUBLE(M,D) (REAL(M,D) is a DOUBLE(M,D)), which
+// MySQL prints with D decimals (0.1 in a DOUBLE(10,2) is 0.10, and an AVG over
+// it has D+4), or ZEROFILL, which it pads with zeros to M digits. The copy
+// holds a plain FLOAT or DOUBLE and its answer's types carry neither, so it
+// would print 0.1. A FLOAT or DOUBLE whose declaration was not recorded is
+// listed: not known is never "prints as the value needs".
+func FixedPrintColumns(cols []Column) []string {
+	var out []string
+	for _, c := range cols {
+		switch c.MySQLType {
+		case "float", "double", "real":
+		default:
+			continue
+		}
+		decl := strings.ToLower(c.DeclaredType)
+		_, args, _, _ := splitDeclaredType(decl)
+		if decl == "" || strings.Contains(args, ",") || strings.Contains(decl, "zerofill") {
 			out = append(out, c.Name)
 		}
 	}
@@ -555,6 +586,7 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		f.Text = TextColumns(string(createSQL), cols)
 		f.ZeroDate = ZeroDateColumns(cols)
 		f.Float = FloatColumns(cols)
+		f.FixedPrint = FixedPrintColumns(cols)
 		st.footers[file] = f
 	}
 	if err := rows.Err(); err != nil {
