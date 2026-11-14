@@ -617,8 +617,10 @@ func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context, stmt string
 		return "the source's session could not be read: " + shortErr(err)
 	}
 	why, variable := rs.differs, rs.variable
+	headline := "Engine Routing: the copy does not answer on this connection while the source's session holds a setting it does not reproduce"
 	if why == "" && rs.collationDiffers != "" && !readrouter.CollationFree(stmt) {
 		why, variable = rs.collationDiffers, "collation_connection"
+		headline = "Engine Routing: the copy does not answer this connection's statements with a string literal or a function that returns text while its collation_connection compares otherwise; it answers the others"
 	}
 	if why == "" {
 		return ""
@@ -632,8 +634,7 @@ func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context, stmt string
 	h.routeWarned[key] = true
 	h.mu.Unlock()
 	if !seen {
-		h.logger.Warn("Engine Routing: the copy does not answer on this connection while the source's session holds a setting it does not reproduce",
-			"setting", why, "note", "logged once per setting per connection")
+		h.logger.Warn(headline, "setting", why, "note", "logged once per setting per connection")
 	}
 	return why
 }

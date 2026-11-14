@@ -63,6 +63,8 @@ func TestCollationFree_2836(t *testing.T) {
 		"SELECT N'x' FROM t",      // a national string
 		"SELECT _utf8mb4'x' FROM t",
 		"SELECT x'41' FROM t",
+		"SELECT n FROM a UNION ALL SELECT tm FROM b ORDER BY 1", // a time beside a number, as text
+		"(SELECT s FROM a) UNION (SELECT n FROM b)",
 	}
 	for _, stmt := range notFree {
 		if CollationFree(stmt) {
