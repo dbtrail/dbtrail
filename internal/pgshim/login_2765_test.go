@@ -660,8 +660,11 @@ func TestPort_aGiantMessageBeforeLoginEndsTheConnection(t *testing.T) {
 func TestPort_aFullPortRefusesWithAnError(t *testing.T) {
 	p := &portLogin{run: answer([]sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, []any{json.Number("1")})}
 	addr := serveAddrCfg(t, Config{Login: p.login, MaxConns: 1})
+	// sslmode=disable: a client that asks for TLS first is told there is
+	// none and connects again, and for a moment its first connection still
+	// holds the port's only place.
 	connect := func() (*pgx.Conn, error) {
-		cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders", portPassword, addr))
+		cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders?sslmode=disable", portPassword, addr))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -724,7 +727,7 @@ func TestPort_aClientThatNeverLogsInIsPutOut(t *testing.T) {
 	// And a real client gets the place.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders", portPassword, addr))
+		cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders?sslmode=disable", portPassword, addr))
 		if err != nil {
 			t.Fatal(err)
 		}
