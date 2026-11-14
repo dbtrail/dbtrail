@@ -227,6 +227,9 @@ func TestClearCheckpoint_RealCheckpointStampsLoss(t *testing.T) {
 	mock.ExpectExec(`UPDATE stream_state SET\s+gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = \?,\s+gap_acked_at\s+= NULL,\s+binlog_file`).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// The stamp of when capture was last caught up goes with the cursor (#2845).
+	mock.ExpectExec(`UPDATE stream_state SET caught_up_at = NULL WHERE id = 1`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	res, err := clearCheckpoint(context.Background(), db)
@@ -263,6 +266,10 @@ func TestClearCheckpoint_IndexWithoutGapAckedAt(t *testing.T) {
 	mock.ExpectExec(`UPDATE stream_state SET\s+gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = \?,\s+binlog_file`).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// An index this old has no caught_up_at either (#2845): no stamp to
+	// remove, and the reset still commits.
+	mock.ExpectExec(`UPDATE stream_state SET caught_up_at = NULL WHERE id = 1`).
+		WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'caught_up_at' in 'field list'"})
 	mock.ExpectCommit()
 
 	res, err := clearCheckpoint(context.Background(), db)
@@ -313,6 +320,9 @@ func TestClearCheckpoint_NoCheckpointPreservesPriorLoss(t *testing.T) {
 	mock.ExpectQuery("SELECT flavor, binlog_position FROM stream_state.*FOR UPDATE").
 		WillReturnRows(sqlmock.NewRows([]string{"flavor", "binlog_position"}).AddRow("postgres", 0))
 	mock.ExpectExec(`UPDATE stream_state SET\s+binlog_file`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// The stamp of when capture was last caught up goes with the cursor (#2845).
+	mock.ExpectExec(`UPDATE stream_state SET caught_up_at = NULL WHERE id = 1`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
