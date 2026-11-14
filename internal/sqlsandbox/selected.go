@@ -89,6 +89,9 @@ func selectedOfNode(n any) []SelectedItem {
 				// they cannot be lined up with the other side's here.
 				Unread: l.Unread || r.Unread || l.Star != nil || r.Star != nil,
 			}
+			if out[i].Unread {
+				out[i] = SelectedItem{Unread: true}
+			}
 		}
 		return out
 	}
@@ -125,9 +128,12 @@ func selectedOfSelect(sel map[string]any) []SelectedItem {
 		} else {
 			w.value(item, &it)
 			it.Itself = it.Itself || isColumnItself(item)
-			if it.Unread || len(it.Columns) != 1 {
+			if len(it.Columns) != 1 {
 				it.Itself = false
 			}
+		}
+		if it.Unread {
+			it = SelectedItem{Unread: true} // what was read of it says nothing
 		}
 		out[i] = it
 	}

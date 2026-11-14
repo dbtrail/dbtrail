@@ -1222,6 +1222,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// printNote is the warning the MySQL port without routing sends with
 	// the answer (sqlFixedPrintNote, #2829); "" when none.
 	var printNote string
+	// dateScales are how MySQL declares the answer's date and time columns
+	// (sqlDateScales, #2849), set once the views are decided.
+	var dateScales []sqlsandbox.DateScale
 	var copyUpdatedAt *time.Time
 	if !in.BaselineSnapshot.IsZero() {
 		at := in.BaselineSnapshot.UTC()
@@ -1411,6 +1414,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// where the input is built, which also serves checks that
 			// render no view.
 			markReadTableDeadRows(narrowed.Baselines, readTables)
+			dateScales = sqlDateScales(narrowed, refs, sess.StrictStar, sess.MySQLClock)
 			viewsSQL = views.Generate(narrowed) + sqlUsedSchema(in, narrowed.OnlyViews, schema) + textDecline
 			return viewsSQL, nil
 		},
@@ -1463,6 +1467,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 		observe.ObserveSQLStatementPhase(phase, d)
 	}
 	readFrom, readFromOK := copyReadFrom(in, readTables)
+	res.DateScales = dateScales
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,
 		PrintNote: printNote}, nil
