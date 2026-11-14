@@ -18113,7 +18113,9 @@ function missingSourceHost(form) {
   return grantDefaultsApply(form) && !f.source_host.value.trim() && !f.host.value.trim();
 }
 
-function buildServerForm() {
+// offered are the server types the form offers (familyChoices), every one
+// when not given; familyLine, when given, is the line that says why (#2815).
+function buildServerForm(offered, familyLine) {
   const form = el("form", { class: "filters", id: "server-form", style: "display:block;margin-top:18px" });
   form.append(el("input", { type: "hidden", name: "id" }));
 
@@ -18126,12 +18128,14 @@ function buildServerForm() {
   const mon = el("fieldset", { class: "form-section", "data-capability": "monitor" });
   mon.append(el("legend", { class: "form-legend", text: "Monitor a source database" }));
   mon.append(el("p", { class: "form-hint", text: "Name, source host, user and password are required. DBTrail checks that the server is ready, then starts capturing changes." }));
+  if (familyLine) mon.append(el("p", { class: "form-hint", id: "server-family-hint", text: familyLine }));
   const monGrid = el("div", { class: "form-grid" });
   // Source family selector — reveals the PostgreSQL-only fields below.
   monGrid.append(el("label", { class: "field" },
     el("span", { class: "field-label", text: "Source type" }),
     el("select", { class: "select", name: "flavor" },
-      opt("mysql", "MySQL"), opt("postgres", "PostgreSQL"), opt("mariadb", "MariaDB"))));
+      ...[["mysql", "MySQL"], ["postgres", "PostgreSQL"], ["mariadb", "MariaDB"]]
+        .filter(([v]) => !offered || offered.includes(v)).map(([v, label]) => opt(v, label)))));
   monGrid.append(srvField("Source host", "source_host", { placeholder: "db.example.com" }));
   monGrid.append(srvField("Source port", "source_port", { placeholder: "3306" }));
   monGrid.append(srvField("Source user", "source_user", { placeholder: "repl" }));
@@ -18248,7 +18252,12 @@ function showServerForm(prefill, opts) {
   const mountEl = document.getElementById("server-form-mount");
   if (!addWrap || !mountEl) return false;
   addWrap.hidden = true;
-  const form = buildServerForm();
+  // A new server is offered the installed family's types alone, with the
+  // line that says why (#2815); the server answers the same way if asked.
+  // An edit shows the type the server has, whatever it is.
+  const adding = !(prefill && prefill.id);
+  const offered = adding ? familyChoices(installFamily.family) : null;
+  const form = buildServerForm(offered, adding ? familyHint(installFamily.family) : "");
   mountEl.replaceChildren(form);
   $all("[data-capability]", form).forEach((n) => n.classList.toggle("cap-on", !!capsCache[n.dataset.capability]));
   $("#server-cancel", form).addEventListener("click", hideServerForm);
@@ -18302,16 +18311,8 @@ function showServerForm(prefill, opts) {
   }
   // Flavor init runs for both add and edit; it's immutable after create (the
   // backend rejects a change on PUT), so disable the selector when editing.
-  // A new server is offered the installed family's types alone, with the
-  // line that says why (#2815); the server answers the same way if asked.
-  if (!(prefill && prefill.id)) {
-    const offered = familyChoices(installFamily.family);
-    Array.from(form.elements.flavor.options).forEach((o) => { if (!offered.includes(o.value)) o.remove(); });
-    const hint = el("p", { class: "form-hint", id: "server-family-hint", text: familyHint(installFamily.family) });
-    form.elements.flavor.closest(".field").after(hint);
-  }
   const wanted = (prefill && prefill.flavor) || "mysql";
-  form.elements.flavor.value = Array.from(form.elements.flavor.options).some((o) => o.value === wanted) ? wanted : form.elements.flavor.options[0].value;
+  form.elements.flavor.value = !offered || offered.includes(wanted) ? wanted : offered[0];
   if (prefill && prefill.id) form.elements.flavor.disabled = true;
   applyFlavor(form);
   // After the id and flavor are set: they decide whether the grant block gets

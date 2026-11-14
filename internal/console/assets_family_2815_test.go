@@ -147,8 +147,10 @@ func TestFamilyPage_isWired(t *testing.T) {
 	for _, want := range []string{
 		`installFamily = { family: data.family || "", mixed: data.mixed || null };`,
 		`mixedFamiliesNote(installFamily.mixed)`,
-		`familyChoices(installFamily.family)`,
-		`familyHint(installFamily.family)`,
+		`const offered = adding ? familyChoices(installFamily.family) : null;`,
+		`buildServerForm(offered, adding ? familyHint(installFamily.family) : "")`,
+		`.filter(([v]) => !offered || offered.includes(v))`,
+		`form.elements.flavor.value = !offered || offered.includes(wanted) ? wanted : offered[0];`,
 		`connectFullFormLabel(installFamily.family)`,
 		`connectRefusalSaid(said, refused)`,
 		`installFamily.family !== "postgres") return showConnectForm(`,
