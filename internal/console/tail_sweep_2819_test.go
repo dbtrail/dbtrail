@@ -3,6 +3,7 @@ package console
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -180,6 +181,80 @@ func TestTailKeeper_aRemovedDirectoryIsMadeAgain_2819(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), gone) {
 		t.Errorf("no warning names the removed directory:\n%s", logs.String())
+	}
+	if _, err := lockTailDir(k.dir); !errors.Is(err, errTailDirHeld) {
+		t.Errorf("the directory made again is not held: %v", err)
+	}
+}
+
+// A directory replaced under its name (removed, then another made there) is
+// not the keeper's: its tails are built again in one of its own, and the
+// files under the old name are not removed later.
+func TestTailKeeper_aReplacedDirectoryIsNotItsOwn_2819(t *testing.T) {
+	ctx := context.Background()
+	orders, ko := keeperTable("orders"), tailKey("shop", "orders")
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	k.keepOld = 0
+	v := settled(t, ctx, k, orders)[ko]
+	if len(v.Paths) == 0 {
+		t.Fatal("no tail written")
+	}
+	old := k.dir
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Another's file, under the name the keeper's had.
+	if err := os.WriteFile(v.Paths[0], []byte("other"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := settled(t, ctx, k, orders)[ko]
+	if !ok || k.dir == old || filepath.Dir(got.Paths[0]) != k.dir {
+		t.Fatalf("tail %v in %q, the replaced one %q", got.Paths, k.dir, old)
+	}
+	if b, err := os.ReadFile(v.Paths[0]); err != nil || string(b) != "other" {
+		t.Errorf("a file under the replaced directory's name was touched: %q, %v", b, err)
+	}
+}
+
+// A replaced keeper's directory stays held until it is removed: a sweep in
+// between keeps it, then it is removed and its lock let go.
+func TestTailKeeper_removeDirAfter_2819(t *testing.T) {
+	ctx := context.Background()
+	parent := t.TempDir()
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, parent, tailBudget{Keys: 3}, time.Minute, time.Hour)
+	settled(t, ctx, k, keeperTable("orders"))
+	dir := k.dir
+	k.close()
+	k.removeDirAfter(200 * time.Millisecond)
+	idleSince(t, time.Now().Add(-2*time.Hour), dir)
+	sweepTailDirs(parent, time.Now().Add(-tailKeepOld))
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("a closed keeper's directory was swept while a statement may read it: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the directory was not removed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	k.mu.Lock()
+	lock := k.dirLock
+	k.mu.Unlock()
+	if lock != nil {
+		if _, err := lock.Stat(); err == nil {
+			t.Error("the lock is still open after its directory was removed")
+		}
 	}
 }
 
