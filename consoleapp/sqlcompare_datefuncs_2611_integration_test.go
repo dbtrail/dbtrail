@@ -141,7 +141,7 @@ func dateFunctionsRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 		{stmt: "SELECT side, DATE_FORMAT(d, '%D') FROM ev ORDER BY k", who: "live", why: "a specifier the copy does not write"},
 		{stmt: "SELECT side, s AS d2, DATEDIFF(d, d2) FROM ev ORDER BY k", who: "live", why: "a name the statement gives itself"},
 		{stmt: "SELECT side, DATEDIFF(CURDATE() - INTERVAL 1 DAY, d) FROM ev ORDER BY k", who: "live", why: "CURDATE() stepped"},
-		{stmt: "SELECT side, TIMESTAMPDIFF(DAY, d2, d) FROM ev ORDER BY k", who: "live", why: "TIMESTAMPDIFF"},
+		{stmt: "SELECT side, TIMESTAMPDIFF(DAY, d2, d) FROM ev ORDER BY k", who: "copy", why: "TIMESTAMPDIFF over two DATE columns (the copy's since its own slice of #2611)"},
 		{stmt: "SELECT MIN(side), DATE_FORMAT(d, '%M') AS m FROM ev GROUP BY m ORDER BY m", who: "live", why: "sorted by a name of another length each"},
 		{stmt: "SELECT MIN(side), COUNT(*) FROM ev WHERE DATE_FORMAT(dt, '%H:%i') < '1045'", who: "live", why: "a format compared with another text: ':' sorts before a digit on MySQL, after one on the copy"},
 		{stmt: "SELECT side, s AS `d` FROM ev ORDER BY DATE_FORMAT(d, '%Y'), k", who: "live", why: "a quoted name the statement gives itself"},

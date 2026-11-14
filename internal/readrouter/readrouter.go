@@ -312,9 +312,11 @@ func HasLike(stmt string) bool {
 // LOCALTIMESTAMP are held to the rules of NOW() and CURDATE() (#2611); without
 // it they keep the statement on MySQL. With MySQLDateFunctions, DATEDIFF no
 // longer keeps a statement on MySQL when every call is one ForCopyOpts writes
-// as date_diff (dateDiffsRewritten); TIMESTAMPDIFF and TIMEDIFF still do, and
-// what each DATE_FORMAT and DATEDIFF is given is the caller's to check once
-// the columns' types are known (DateFunctionVeto).
+// as date_diff (dateDiffsRewritten); TIMEDIFF still does, and so does
+// TIMESTAMPDIFF unless MySQLTimestampDiff is on and the text the copy is sent
+// holds none (dateDiffVeto, #2611). What each DATE_FORMAT, DATEDIFF and
+// TIMESTAMPDIFF is given is the caller's to check once the columns' types are
+// known (DateFunctionVeto, TimestampDiffVeto).
 func VetoOpts(stmt string, o CopyOptions) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
@@ -340,15 +342,18 @@ func VetoOpts(stmt string, o CopyOptions) string {
 			}
 			re = regexpOnly
 		}
-		if v.name == vetoDateDiff && o.MySQLDateFunctions {
-			if !dateDiffsRewritten(sc.blankedCopy) {
+		if v.name == vetoDateDiff {
+			var keep bool
+			if re, keep = dateDiffVeto(sc, o, re); keep {
 				return v.name
 			}
-			re = timeDiffOnly
 		}
 		if re.MatchString(sc.blankedCopy) {
 			return v.name
 		}
+	}
+	if why := copyMacroVeto(sc.blankedCopy); why != "" {
+		return why
 	}
 	if why := nowVeto(sc.blankedCopy); why != "" {
 		return why
