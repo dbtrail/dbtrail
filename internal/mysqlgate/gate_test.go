@@ -150,7 +150,9 @@ func answers(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}})
+	// Workers kept between statements, as the port runs them: the same path,
+	// and the list does not pay a process start per statement.
+	runner := sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Standby: true, WorkerStatements: sqlsandbox.DefaultWorkerStatements})
 	t.Cleanup(runner.Close)
 
 	var b strings.Builder
