@@ -1764,7 +1764,10 @@ func sqlFloatRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsan
 	}
 	why := "the statement could not be searched for its FLOAT columns"
 	if types != nil {
-		why = types.FloatVeto(floats, refs.Star || refs.StarNamedJoin || len(refs.StarTables) > 0)
+		// A NATURAL JOIN compares the columns two tables share without
+		// naming them: a FLOAT against a DECIMAL of the same name is
+		// compared as a double on MySQL and as a float on the copy.
+		why = types.FloatVeto(floats, refs.Star || refs.StarNamedJoin || len(refs.StarTables) > 0 || refs.Natural)
 	}
 	if why == "" {
 		return ""

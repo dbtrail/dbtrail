@@ -101,6 +101,12 @@ func TestSQLFloatRefusalFor_2827(t *testing.T) {
 	if asked.calls != 1 || strings.Join(asked.floats, ",") != "f,g,h" || !asked.star {
 		t.Errorf("asked %d times about %q (star %v), want once about f,g,h with the star", asked.calls, asked.floats, asked.star)
 	}
+	// A NATURAL JOIN reaches the column without naming it: asked as a star.
+	asked = &floatAsked{}
+	sqlFloatRefusalFor(in, sqlsandbox.Refs{Natural: true}, asked)
+	if !asked.star {
+		t.Error("a NATURAL JOIN was not asked as a star")
+	}
 	asked.why = "x"
 	if got := sqlFloatRefusalFor(in, sqlsandbox.Refs{}, asked); !strings.Contains(got, "shop.a, shop.c") || !strings.Contains(got, "(x)") {
 		t.Errorf("refusal %q, want the tables and the reason", got)
