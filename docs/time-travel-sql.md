@@ -1633,7 +1633,11 @@ What this is and is not:
   answers `-3`, and `ROW_NUMBER() OVER (...) - 10` is `-9` where MySQL
   refuses it. Comparisons stay on the copy (`u > -1`, `u BETWEEN -5 AND
   5`), and so do `SUM(ui) - 1`, `COUNT(ui) - 1` and arithmetic on an
-  `UNSIGNED` `DECIMAL` or `DOUBLE`, which were measured equal. Read without
+  `UNSIGNED` `DECIMAL` or `DOUBLE`, which were measured equal. A prepared
+  statement with an argument bound as an unsigned integer (go-sql-driver
+  binds every `uint64` so) goes to MySQL when a placeholder stands in such
+  arithmetic: MySQL types that argument as a `BIGINT UNSIGNED`, so `k - ?`
+  with 10 bound over a `k` of 3 is refused there. Read without
   arithmetic, an `INT UNSIGNED` column or a `ROW_NUMBER` has MySQL's value
   and is declared a signed `BIGINT` ([#2856](https://github.com/dbtrail/dbtrail/issues/2856)),
   any statement that names a `FLOAT` or `DOUBLE` column declared with its

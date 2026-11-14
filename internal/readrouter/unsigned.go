@@ -366,3 +366,23 @@ func starAt(t *shapeText, i int) bool {
 	}
 	return false
 }
+
+// UnsignedArgumentVeto says why the copy must not answer a prepared
+// statement whose arguments include one bound as an unsigned integer, or ""
+// when no placeholder of stmt (the template) stands in arithmetic (#2848).
+// MySQL types such an argument as a BIGINT UNSIGNED: k - ? with 10 bound
+// unsigned, over a k of 3, is refused there with error 1690, and the copy,
+// sent the number 10, answers -7. The placeholders are looked for as
+// UnsignedVeto looks for a column, with the same rules for groups, aliases
+// and subqueries.
+func UnsignedArgumentVeto(stmt string) string {
+	// A placeholder is written as a word of its own, $, which no name the
+	// statement holds is: a quoted name is emptied, and an unquoted $ alone
+	// is not a name MySQL takes.
+	shape := strings.ReplaceAll(Shape(stmt), "?", " $ ")
+	if why, _ := unsignedVetoWork(shape, []string{"$"}, false); why != "" {
+		return "an argument is bound as an unsigned integer and a placeholder may stand in arithmetic " +
+			"(MySQL computes it as a BIGINT UNSIGNED and refuses a negative result with error 1690; the copy is sent a plain number)"
+	}
+	return ""
+}
