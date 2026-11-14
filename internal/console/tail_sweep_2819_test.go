@@ -183,6 +183,84 @@ func TestTailKeeper_aRemovedDirectoryIsMadeAgain_2819(t *testing.T) {
 	}
 }
 
+// What the sweep removes and keeps, every directory idle past the cutoff
+// unless it says otherwise.
+func TestSweepTailDirs_2819(t *testing.T) {
+	parent := t.TempDir()
+	long := time.Now().Add(-2 * time.Hour)
+	mk := func(name string) string {
+		t.Helper()
+		d := filepath.Join(parent, name)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "1-shop.orders.parquet"), []byte("1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+
+	held := mk("bintrail-tails-held")
+	lock, err := lockTailDir(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lock.Close() })
+	// A lock let go (its process ended): the directory is any earlier
+	// process's.
+	released := mk("bintrail-tails-released")
+	l2, err := lockTailDir(released)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2.Close()
+	// A recent directory no one holds: a keeper that has just made it and not
+	// locked it yet, or one of an older version that is writing.
+	recent := mk("bintrail-tails-recent")
+	// A link by the name, to an earlier process's directory elsewhere: the
+	// link is not a directory, and what it points to is not the sweep's.
+	target := filepath.Join(t.TempDir(), "bintrail-tails-target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "bintrail-tails-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	var others string
+	if os.Getuid() == 0 {
+		others = mk("bintrail-tails-another-user")
+		if err := os.Chown(others, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{held, released, target, others} {
+		if d != "" {
+			idleSince(t, long, d)
+		}
+	}
+
+	sweepTailDirs(parent, time.Now().Add(-tailKeepOld))
+
+	if _, err := os.Stat(released); !os.IsNotExist(err) {
+		t.Errorf("a directory no process holds stayed: %v", err)
+	}
+	for _, d := range []string{held, recent, link, target, others} {
+		if d == "" {
+			continue
+		}
+		if _, err := os.Lstat(d); err != nil {
+			t.Errorf("%s removed: %v", filepath.Base(d), err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(held, "1-shop.orders.parquet")); err != nil {
+		t.Errorf("a held directory lost its file: %v", err)
+	}
+	if others == "" {
+		t.Log("not root: another user's directory is not checked")
+	}
+}
+
 // idleSince sets paths' times to at, as a directory and files no write
 // touched since.
 func idleSince(t *testing.T, at time.Time, paths ...string) {
