@@ -123,7 +123,7 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 	same := func(port *client.Conn, name, stmt, who string, defsOnly bool, args ...any) {
 		t.Helper()
 		for _, binary := range []bool{false, true} {
-			got, want := typedAnswer(t, port, stmt, binary, args...), typedAnswer(t, live, stmt, binary, args...)
+			got, want := dateTypedAnswer(t, port, stmt, binary, args...), dateTypedAnswer(t, live, stmt, binary, args...)
 			t.Logf("%s binary=%v %s\n  port  %.400s\n  MySQL %.400s", name, binary, stmt, got, want)
 			if got.err != "" || want.err != "" {
 				t.Errorf("%s binary=%v %q: port %q, MySQL %q", name, binary, stmt, got.err, want.err)
@@ -159,7 +159,7 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 	same(plain, "without routing", "SELECT side, dt3, ts6 FROM ev WHERE k > ? ORDER BY k", "copy", false, 0)
 	// What the copy cannot tell the digits of, without routing: as before,
 	// declared with 6, the value as it is.
-	if got := typedAnswer(t, plain, "SELECT side, FROM_UNIXTIME(k) FROM ev WHERE k > 0 ORDER BY k", false); got.defs != "[t12/6]" ||
+	if got := dateTypedAnswer(t, plain, "SELECT side, FROM_UNIXTIME(k) FROM ev WHERE k > 0 ORDER BY k", false); got.defs != "[t12/6]" ||
 		got.rows != "copy|2023-11-14 22:13:20 / copy|2026-03-31 23:15:00" {
 		t.Errorf("without routing, FROM_UNIXTIME of a column: %+v, want it declared with 6", got)
 	}
@@ -203,7 +203,7 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 // a prepared statement, the value as go-mysql reads it by those digits.
 type dateAnswer struct{ defs, rows, err string }
 
-func typedAnswer(t *testing.T, c *client.Conn, stmt string, binary bool, args ...any) dateAnswer {
+func dateTypedAnswer(t *testing.T, c *client.Conn, stmt string, binary bool, args ...any) dateAnswer {
 	t.Helper()
 	var res *mysql.Result
 	var err error
