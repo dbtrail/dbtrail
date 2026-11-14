@@ -789,7 +789,7 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	// Last, the source's session: the copy answers only under one it
 	// reproduces. Asked here and not earlier, so only a statement that
 	// would otherwise go to the copy pays the read-back.
-	if why := h.sessionKeepsCopyFromAnswering(ctx); why != "" {
+	if why := h.sessionKeepsCopyFromAnswering(ctx, qstr); why != "" {
 		return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
 	}
 	// A statement that reads the copy's clock (#2611) also needs the source's

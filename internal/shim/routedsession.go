@@ -69,6 +69,11 @@ type routeSession struct {
 	// variable is its name (the key of the once-per-connection warning).
 	differs  string
 	variable string
+	// collationDiffers is set, with differs "", when the one setting the
+	// copy does not reproduce is the connection's collation (#2836): the
+	// copy still answers a statement that collation cannot change
+	// (readrouter.CollationFree), and no other.
+	collationDiffers string
 	// zone is @@time_zone as MySQL reports it; zoneUTC says every probe
 	// instant came back with no offset, whatever the zone is called. Both
 	// are set whenever the session was read, reproducible or not: time
@@ -376,10 +381,13 @@ func sessionFromReadBack(cells []any, instants []time.Time, copyZone func(duckZo
 		// and stays itself on the copy.
 		return differ("character_set_connection", csConnection, "the copy reads the statement's literals as utf8mb4")
 	case !collationReproducible(collation):
-		return differ("collation_connection", "(not one that compares like utf8mb4_0900_ai_ci)",
-			"the copy's text comparisons are documented against MySQL's default collation (utf8mb4_0900_ai_ci), and this connection compares otherwise. "+
-				"utf8mb4_unicode_ci and utf8mb4_0900_ai_ci do; utf8mb4_general_ci (MariaDB 10.11's default for utf8mb4, which SET NAMES utf8mb4 with no COLLATE asks for) does not: "+
-				"SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci on the connection")
+		// Last of the checks, so every other setting is reproduced: the
+		// copy may still answer what this collation cannot change.
+		rs.collationDiffers = "collation_connection = (not one that compares like utf8mb4_0900_ai_ci): " +
+			"the copy's text comparisons are documented against MySQL's default collation (utf8mb4_0900_ai_ci), and this connection compares otherwise, " +
+			"so a statement with a string literal, or a function that returns text, is MySQL's. " +
+			"utf8mb4_unicode_ci and utf8mb4_0900_ai_ci compare as the copy does; utf8mb4_general_ci (go-sql-driver's and PyMySQL's default, and MariaDB 10.11's for utf8mb4) does not: " +
+			"ask for utf8mb4_0900_ai_ci or utf8mb4_unicode_ci when connecting, or SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
 	}
 	return rs, nil
 }
@@ -599,7 +607,7 @@ func (h *Handler) sessionReadBack(tracker sessionTracker, rs routeSession, vars 
 // never the statement: an operator whose driver sets '+05:30', or whose
 // source runs in a zone other than UTC, has to be able to see why the copy
 // never answers and what to change.
-func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context) string {
+func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context, stmt string) string {
 	rs, err := h.ensureSession(ctx)
 	if err != nil {
 		// Not read: nothing is assumed. (When the cause is the connection
@@ -608,22 +616,26 @@ func (h *Handler) sessionKeepsCopyFromAnswering(ctx context.Context) string {
 		h.routeWarn("session-read", "Engine Routing: the source's session settings could not be read, expensive statement forwarded", err)
 		return "the source's session could not be read: " + shortErr(err)
 	}
-	if rs.differs == "" {
+	why, variable := rs.differs, rs.variable
+	if why == "" && rs.collationDiffers != "" && !readrouter.CollationFree(stmt) {
+		why, variable = rs.collationDiffers, "collation_connection"
+	}
+	if why == "" {
 		return ""
 	}
 	h.mu.Lock()
 	if h.routeWarned == nil {
 		h.routeWarned = map[string]bool{}
 	}
-	key := "session:" + rs.variable
+	key := "session:" + variable
 	seen := h.routeWarned[key]
 	h.routeWarned[key] = true
 	h.mu.Unlock()
 	if !seen {
 		h.logger.Warn("Engine Routing: the copy does not answer on this connection while the source's session holds a setting it does not reproduce",
-			"setting", rs.differs, "note", "logged once per setting per connection")
+			"setting", why, "note", "logged once per setting per connection")
 	}
-	return rs.differs
+	return why
 }
 
 // timeTravelZoneRefusal is the check a time-travel statement goes through on

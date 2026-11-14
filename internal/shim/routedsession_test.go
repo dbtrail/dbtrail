@@ -234,12 +234,8 @@ func TestRoutedSession_settingsTheCopyDoesNotReproduce(t *testing.T) {
 		{"character_set_results latin1", func(s *fakeSource) { s.cs = "latin1" }, "character_set_results = latin1"},
 		{"character_set_results utf8mb3", func(s *fakeSource) { s.cs = "utf8mb3" }, "character_set_results = utf8mb3"},
 		{"a latin1 connection character set, whose default collation also ignores case and accents", func(s *fakeSource) { s.csConn = "latin1" }, "character_set_connection = latin1"},
-		{"a case-sensitive connection collation", func(s *fakeSource) { s.coll = "01110" }, "collation_connection"},
-		{"an accent-sensitive connection collation", func(s *fakeSource) { s.coll = "10110" }, "collation_connection"},
-		{"utf8mb4_general_ci: ß is not ss, a full-width a is not a", func(s *fakeSource) { s.coll = "11001" }, "collation_connection"},
-		{"utf8mb4_general_nopad_ci", func(s *fakeSource) { s.coll = "11000" }, "collation_connection"},
-		{"utf8mb4_bin", func(s *fakeSource) { s.coll = "00000" }, "collation_connection"},
-		{"a probe answer of another length", func(s *fakeSource) { s.coll = "11" }, "collation_connection"},
+		// The connection's collation keeps only some statements on MySQL
+		// (#2836): TestRoutedSession_collationKeepsOnlyTextOnMySQL_2836.
 		{"time_zone with minutes", func(s *fakeSource) { s.zone = "+05:30" }, "time_zone = +05:30: the copy applies whole-hour offsets"},
 		{"time_zone the source cannot convert", func(s *fakeSource) { s.zone = "Mars/Olympus" }, "time_zone = Mars/Olympus: the source could not convert"},
 		{"a select limit that is not a number", func(s *fakeSource) { s.limit = "many" }, "sql_select_limit = many"},
@@ -1029,4 +1025,48 @@ func sourceRows(sink readrouter.RowSink, names []string, rows [][]any) (*mysql.R
 	rs.Fields = fields
 	rs.Streaming, rs.StreamingDone = mysql.StreamingSelect, true
 	return &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}, nil
+}
+
+// #2836: under a connection collation the copy does not reproduce, the copy
+// still answers a statement that collation cannot change (no string
+// literal, no function that returns text), and MySQL answers the others,
+// under session_differs, the log naming the collation once.
+func TestRoutedSession_collationKeepsOnlyTextOnMySQL_2836(t *testing.T) {
+	const withLiteral = "SELECT status, count(*) FROM t WHERE status = 'x' GROUP BY status"
+	const withText = "SELECT LOWER(status), count(*) FROM t GROUP BY 1"
+	for _, tc := range []struct{ name, probe string }{
+		{"a case-sensitive connection collation", "01110"},
+		{"an accent-sensitive connection collation", "10110"},
+		{"utf8mb4_general_ci: ß is not ss, a full-width a is not a", "11001"},
+		{"utf8mb4_general_nopad_ci", "11000"},
+		{"utf8mb4_bin", "00000"},
+		{"a probe answer of another length", "11"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newSessRig(t)
+			rig.r.src.coll = tc.probe
+			if got := rig.side(t); got != "copy" {
+				t.Errorf("%q answered by %s, want copy: nothing in it takes the connection's collation", expensive, got)
+			}
+			for _, stmt := range []string{withLiteral, withText} {
+				calls := rig.f.calls
+				if got := firstCell(t, rig.run(t, stmt)); got != "mysql" {
+					t.Errorf("%q answered by %s, want mysql", stmt, got)
+				}
+				if rig.f.calls != calls {
+					t.Errorf("%q: the copy was asked", stmt)
+				}
+				if rig.last() != "mysql/session_differs" {
+					t.Errorf("%q observed %q, want mysql/session_differs", stmt, rig.last())
+				}
+			}
+			if n := strings.Count(rig.logs.String(), "collation_connection"); n != 1 {
+				t.Errorf("the log names collation_connection %d time(s), want once:\n%s", n, rig.logs.String())
+			}
+			// And the copy again, on the same known session.
+			if got := rig.side(t); got != "copy" {
+				t.Errorf("after them, %q answered by %s, want copy", expensive, got)
+			}
+		})
+	}
 }
