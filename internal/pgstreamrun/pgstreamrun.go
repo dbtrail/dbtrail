@@ -46,10 +46,12 @@ const defaultEventBuffer = 1000
 // staleness indicator degrades a snapshot older than a few intervals (a dead daemon
 // must not read as healthy). healthPollTimeout bounds one probe so a hung source can
 // only briefly pause event draining (the poll runs inline in the loop's select).
-const (
-	healthPollInterval = 30 * time.Second
-	healthPollTimeout  = 5 * time.Second
-)
+const healthPollTimeout = 5 * time.Second
+
+// A variable so a test against a real source need not wait half a minute for
+// a reading. It is also how often capture can find itself caught up
+// (caughtup.go), and the readers of that stamp are sized for 30 s.
+var healthPollInterval = 30 * time.Second
 
 // Config binds everything One needs.
 type Config struct {
@@ -115,6 +117,11 @@ type pgStreamState struct {
 	// below which every commit is in the index; saved with each checkpoint
 	// in pg_sent_through_lsn. 0 until this run has received one.
 	sentThrough uint64
+	// caughtUpAt is the newest moment at which the capture is known to have
+	// held everything the source had (caughtup.go), not yet saved; zero when
+	// there is none. The next successful checkpoint stamps it into
+	// caught_up_at and clears it.
+	caughtUpAt time.Time
 }
 
 // One runs a complete PostgreSQL replication stream until ctx is cancelled. It
@@ -279,7 +286,8 @@ func persistSlotLostPG(db *sql.DB, serverID uint32, detail string, logger *slog.
 		ON DUPLICATE KEY UPDATE
 			gap_lost_at     = UTC_TIMESTAMP(),
 			gap_lost_detail = VALUES(gap_lost_detail),
-			gap_acked_at    = NULL`,
+			gap_acked_at    = NULL,
+			caught_up_at    = NULL`,
 		pgFlavor, serverID, detail)
 	if err != nil {
 		logger.Error("pgstreamrun: could not persist lost-slot record; `status` will not show the permanent-loss banner",
@@ -423,9 +431,15 @@ func streamLoopPG(
 		defer healthTicker.Stop()
 		healthC = healthTicker.C
 	}
+	// The source readings the capture has not reached yet (caughtup.go).
+	var samples caughtUpSamples
+	flushedUnread := false
 	pollHealth := func() {
 		pctx, cancel := context.WithTimeout(ctx, healthPollTimeout)
 		defer cancel()
+		// Before the source is asked: what it answers is its position at or
+		// after this moment, so reaching it proves this moment.
+		asked := time.Now()
 		snap, err := probe(pctx)
 		if err != nil {
 			// A cancellation is a graceful shutdown (the loop's ctx is done), not a
@@ -443,6 +457,18 @@ func streamLoopPG(
 				saveSourceHealth(indexDB, state.serverID, errJSON, logger)
 			}
 			return
+		}
+		samples.add(snap.FlushedLSN, asked)
+		// Said when it starts failing and when it stops, not every 30 seconds:
+		// without this reading no caught-up stamp is written, and the web
+		// interface shows the capture as behind.
+		if failing := snap.FlushedLSNErr != nil; failing != flushedUnread {
+			flushedUnread = failing
+			if failing {
+				logger.Warn("pgstreamrun: could not read how far the source's WAL is flushed; until it can be read, nothing records when capture was last caught up, and it will show as behind", "error", snap.FlushedLSNErr)
+			} else {
+				logger.Info("pgstreamrun: the source's flushed WAL position is read again")
+			}
 		}
 		healthJSON, err := buildSourceHealthJSON(snap, time.Now())
 		if err != nil {
@@ -515,6 +541,11 @@ func streamLoopPG(
 		// except the rows of a transaction still being read, whose commit is
 		// at or past the marker's position (see pgcapture.sentMarker).
 		state.sentThrough = pendingSent
+		// And so is every commit the source had flushed at each reading that
+		// position has reached (caughtup.go).
+		if at, ok := samples.reached(state.sentThrough); ok {
+			state.caughtUpAt = at
+		}
 		if lastCommitLSN == 0 {
 			return nil // nothing committed yet — nothing durable to checkpoint
 		}
@@ -716,6 +747,15 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	// error within WriteTimeout instead of freezing the stream on TCP retransmit.
 	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
 	defer cancel()
+	// caught_up_at (#2845): the moment in state.caughtUpAt on the index's
+	// clock, as UTC_TIMESTAMP(6) minus how long ago it was, the way the MySQL
+	// capture writes it (#2556). With none to write the interval is NULL, the
+	// value is NULL, and the update arm keeps the stamp there is: the column
+	// says when capture was LAST caught up.
+	var caughtUpAgo any
+	if !state.caughtUpAt.IsZero() {
+		caughtUpAgo = max(time.Since(state.caughtUpAt).Microseconds(), 0)
+	}
 	// pg_sent_through_at gets the same UTC_TIMESTAMP() as last_checkpoint
 	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
 	// the two are equal, so a save by any writer that does not set it (an
@@ -724,8 +764,9 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 		INSERT INTO stream_state
 			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
 			 events_indexed, last_event_time, last_checkpoint, server_id,
-			 pg_sent_through_lsn, pg_sent_through_at)
-		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP())
+			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at)
+		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
+			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND)
 		ON DUPLICATE KEY UPDATE
 			binlog_file     = VALUES(binlog_file),
 			binlog_position = VALUES(binlog_position),
@@ -736,12 +777,14 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			last_checkpoint = UTC_TIMESTAMP(),
 			server_id       = VALUES(server_id),
 			pg_sent_through_lsn = VALUES(pg_sent_through_lsn),
-			pg_sent_through_at = UTC_TIMESTAMP()`,
+			pg_sent_through_at = UTC_TIMESTAMP(),
+			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at)`,
 		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough)
+		state.sentThrough, caughtUpAgo)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}
+	state.caughtUpAt = time.Time{}
 	return nil
 }
 

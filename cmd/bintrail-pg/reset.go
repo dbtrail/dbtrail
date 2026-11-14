@@ -271,6 +271,9 @@ func clearCheckpoint(ctx context.Context, db *sql.DB) (clearOutcome, error) {
 			WHERE id = 1`); err != nil {
 			return clearOutcome{}, err
 		}
+		if err := clearCaughtUp(ctx, tx); err != nil {
+			return clearOutcome{}, err
+		}
 		if err := tx.Commit(); err != nil {
 			return clearOutcome{}, err
 		}
@@ -295,10 +298,27 @@ func clearCheckpoint(ctx context.Context, db *sql.DB) (clearOutcome, error) {
 	if err != nil {
 		return clearOutcome{}, err
 	}
+	if err := clearCaughtUp(ctx, tx); err != nil {
+		return clearOutcome{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return clearOutcome{}, err
 	}
 	return clearOutcome{rows: 1, lossDetail: detail}, nil
+}
+
+// clearCaughtUp removes the stamp of when capture was last caught up
+// (caught_up_at, #2845): it was about the slot this reset drops, and the next
+// stream starts from a new one. In the transaction that clears the cursor. An
+// index without the column (the stream adds it when it starts; reset does not
+// migrate) has no stamp to remove; a failed statement does not end the
+// transaction.
+func clearCaughtUp(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, "UPDATE stream_state SET caught_up_at = NULL WHERE id = 1")
+	if isUnknownColumnErr(err) {
+		return nil
+	}
+	return err
 }
 
 // stampDiscardSQL is the one statement that both records a discarded checkpoint

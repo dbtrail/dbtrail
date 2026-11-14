@@ -22,10 +22,15 @@ func SourceFlushedLSN(ctx context.Context, queryDSN string) (uint64, error) {
 		return 0, fmt.Errorf("pgcapture: flushed position connect: %w", err)
 	}
 	defer conn.Close(context.Background())
+	return QueryFlushedLSN(ctx, conn)
+}
+
+// QueryFlushedLSN is SourceFlushedLSN on a connection the caller holds.
+func QueryFlushedLSN(ctx context.Context, conn *pgx.Conn) (uint64, error) {
 	var text *string
 	// CASE evaluates one branch: pg_current_wal_flush_lsn() raises on a
 	// standby, pg_last_wal_replay_lsn() is NULL on a primary.
-	err = conn.QueryRow(ctx, `SELECT CASE WHEN pg_is_in_recovery()
+	err := conn.QueryRow(ctx, `SELECT CASE WHEN pg_is_in_recovery()
 		THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_flush_lsn() END::text`).Scan(&text)
 	if err != nil {
 		return 0, fmt.Errorf("pgcapture: read the flushed WAL position: %w", err)

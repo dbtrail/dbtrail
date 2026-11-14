@@ -13,7 +13,7 @@ import (
 // caughtUpAgo reads how long ago capture was last caught up with its source
 // (#2556, stream_state.caught_up_at), on the index's own clock, so no two
 // machines' clocks are compared. ok false when there is no stamp: none
-// written yet, a PostgreSQL source, or an index an older capture last wrote,
+// written yet (a PostgreSQL capture writes one since #2845), or an index an older capture last wrote,
 // whose missing column (error 1054) is no stamp and not an error: the
 // console never migrates a registry server's index.
 func caughtUpAgo(ctx context.Context, db *sql.DB) (time.Duration, bool, error) {
