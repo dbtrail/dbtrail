@@ -162,7 +162,7 @@ func intervalWords(bl string) []int {
 }
 
 // intervalStep reads INTERVAL amount unit at w in bl: the amount a number
-// (digits, a decimal point) or a string literal ('' once blanked), and the
+// (digits, a decimal point) or a string literal (two quotes once blanked), and the
 // unit one word. It returns where each is in bl and where the step ends.
 func intervalStep(bl string, w int) (amount, unit [2]int, end int, ok bool) {
 	i := w + len("interval")
@@ -251,8 +251,8 @@ var looserWords = wordSet("select", "where", "and", "or", "xor", "not", "on", "h
 	"between", "case", "distinct", "all", "by")
 
 // operandStart is where the operand that ends at q (its last byte) starts:
-// a word (a name, a number, NULL), a quoted name, a string literal ('' once
-// blanked, with the type word of a typed literal or a prefix before it), or
+// a word (a name, a number, NULL), a quoted name, a string literal (two quotes
+// once blanked, with the type word of a typed literal or a prefix before it), or
 // a group in parentheses with the name of a call right before it; each with
 // any qualifier before a dot.
 func operandStart(bl string, q int) (int, bool) {
