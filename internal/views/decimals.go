@@ -78,6 +78,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		in.Baselines[i].WholeSafe, in.Baselines[i].WholeOther = f.WholeSafe, f.WholeOther
 		in.Baselines[i].Text = f.Text
 		in.Baselines[i].ZeroDate = f.ZeroDate
+		in.Baselines[i].Float = f.Float
 		in.Baselines[i].SchemaKnown = true
 	}
 }

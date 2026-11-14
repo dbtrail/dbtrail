@@ -1613,6 +1613,7 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //     answers differently (sqlTypesRefusalFor, #2133);
 //   - an aggregate over DISTINCT text (sqlDistinctRefusalFor, #2532), or a
 //     ROUND of something not known to be exact (sqlRoundRefusalFor, #2641);
+//   - a FLOAT column is read at all (sqlFloatRefusalFor, #2827);
 //   - a column's name stands right before a string, which the copy reads
 //     as a constant of a type called that (sqlWordsRefusalFor, #2131).
 //
@@ -1635,6 +1636,9 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 		return msg
 	}
 	if msg := sqlRoundRefusalFor(narrowed, statement, types); msg != "" {
+		return msg
+	}
+	if msg := sqlFloatRefusalFor(narrowed, refs, types); msg != "" {
 		return msg
 	}
 	if msg := sqlBinaryILikeRefusalFor(narrowed, statement, types); msg != "" {
@@ -1732,6 +1736,40 @@ func sqlRoundRefusalFor(narrowed views.Input, statement string, types sqlsandbox
 		return ""
 	}
 	return "the copy does not answer this statement: " + why
+}
+
+// sqlFloatRefusalFor says why the copy must not answer a statement because it
+// reads a FLOAT column, or "" when it can (#2827). MySQL compares and
+// computes a FLOAT as a double, the copy as a float: WHERE f = 3.14 finds no
+// row on MySQL and the row on the copy, f * 2 is a double on one and a float
+// on the other. The rule is the routing layer's (readrouter.FloatVeto, asked
+// through types), over every table's FLOAT columns from its snapshot's
+// table definition; a table without one never gets here (sqlNamesRefusalFor
+// refuses it first). With no reading of the statement (types is nil), a
+// statement over a table with a FLOAT column is refused: not known is never
+// "nothing to find".
+func sqlFloatRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsandbox.ColumnTypes) string {
+	var floats, tables []string
+	for _, t := range narrowed.SelectedBaselines() {
+		if len(t.Float) == 0 {
+			continue
+		}
+		floats = append(floats, t.Float...)
+		if len(tables) < 3 {
+			tables = append(tables, t.Schema+"."+t.Table)
+		}
+	}
+	if len(floats) == 0 {
+		return ""
+	}
+	why := "the statement could not be searched for its FLOAT columns"
+	if types != nil {
+		why = types.FloatVeto(floats, refs.Star || refs.StarNamedJoin || len(refs.StarTables) > 0)
+	}
+	if why == "" {
+		return ""
+	}
+	return fmt.Sprintf("the copy does not answer this statement: it reads a FLOAT column of %s (%s)", strings.Join(tables, ", "), why)
 }
 
 // sqlUnixTimeRefusalFor says why the copy must not answer a statement because

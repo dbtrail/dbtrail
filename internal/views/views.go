@@ -192,6 +192,9 @@ type BaselineTable struct {
 	// date the source has (baseline.TableFooter.ZeroDate, #2633). Set with
 	// SchemaKnown.
 	ZeroDate []string
+	// Float are the table's FLOAT columns (baseline.TableFooter.Float,
+	// #2827). Set with SchemaKnown.
+	Float []string
 	// UnixTimeSafe and UnixTimeOther split the table's columns into those
 	// UNIX_TIMESTAMP(col) gives the same number of on the copy as on MySQL and
 	// the rest (baseline.TableFooter.UnixTimeSafe, #2493). Set with SchemaKnown.
