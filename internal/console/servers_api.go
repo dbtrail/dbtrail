@@ -429,6 +429,12 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			created = ""
 		}
 	}()
+	// One source family per installation (family.go), with the server given
+	// on the command line counted, and before a folder is made for a server
+	// that will not be added.
+	if err := s.newServerFamilyRefusal(entry.Flavor); err != nil {
+		return ServerEntry{}, "", err
+	}
 	entry.LocalKeepNewest = DefaultLocalKeepNewest
 	if entry.BaselineDir != "" {
 		fresh := !dirExists(entry.BaselineDir)
@@ -776,6 +782,12 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request, patch bool
 	old, ok := s.cm.reg.Get(id)
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, ErrUnknownServer.Error())
+		return
+	}
+	// A registry that holds both source families takes no edit from a person
+	// until one is left (family.go); removing a server is how it gets there.
+	if err := s.cm.reg.MixedFamiliesRefusal(); err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
 		return
 	}
 	raw, err := io.ReadAll(r.Body)
@@ -2039,7 +2051,7 @@ func scrubDSNError(err error, dsn string) string {
 // registryErrStatus maps registry errors onto HTTP statuses.
 func registryErrStatus(err error) int {
 	switch {
-	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict):
+	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict), errors.Is(err, ErrOtherFamily):
 		return http.StatusConflict
 	case errors.Is(err, ErrUnknownServer):
 		return http.StatusNotFound

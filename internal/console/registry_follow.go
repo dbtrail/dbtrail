@@ -107,6 +107,7 @@ func (r *Registry) Reload() ([]RegistryChange, error) {
 	}
 	r.file, r.followed = next, data
 	warnUnusableSSLModes(r.path, r.file.Servers)
+	warnMixedFamilies(r.path, r.file.Servers)
 	r.syncBucketStores()
 	return changes, nil
 }

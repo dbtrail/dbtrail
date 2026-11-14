@@ -437,6 +437,7 @@ func LoadRegistry(path string) (*Registry, error) {
 			"note", "the block is left in the file untouched")
 	}
 	warnUnusableSSLModes(path, r.file.Servers)
+	warnMixedFamilies(path, r.file.Servers)
 	r.syncBucketStores()
 	return r, nil
 }
@@ -803,6 +804,11 @@ func (r *Registry) AddAutoNamed(e ServerEntry, base string) (ServerEntry, error)
 func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	if r.readOnly {
 		return ServerEntry{}, ErrRegistryReadOnly
+	}
+	// One source family per installation (family.go), before anything else
+	// is checked or made: the refusal says nothing was changed.
+	if err := familyRefusal(r.file.Servers, "", e.Flavor); err != nil {
+		return ServerEntry{}, err
 	}
 	if err := r.checkName(e.Name, ""); err != nil {
 		return ServerEntry{}, err

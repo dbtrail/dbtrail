@@ -1,0 +1,349 @@
+package console
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// One source family per installation (#2815).
+
+func TestFamilyOfFlavor(t *testing.T) {
+	for _, tc := range []struct{ flavor, want string }{
+		{"", FamilyMySQL}, // a blank entry is MySQL, as SourceFlavor has it
+		{"mysql", FamilyMySQL},
+		{"MySQL", FamilyMySQL},
+		{"mariadb", FamilyMySQL},
+		{" MariaDB ", FamilyMySQL},
+		{"postgres", FamilyPostgres},
+		{"postgresql", FamilyPostgres},
+		{" POSTGRES\n", FamilyPostgres},
+		{"postgres ", FamilyPostgres},
+		{"oracle", FamilyMySQL},   // not a flavor this build knows: a hand edit, read as SourceFlavor reads it
+		{"postgre", FamilyMySQL},  // a prefix is not the name
+		{"pg", FamilyMySQL},       // nor is a short form
+		{"postgres/", FamilyMySQL},
+	} {
+		if got := FamilyOfFlavor(tc.flavor); got != tc.want {
+			t.Errorf("FamilyOfFlavor(%q) = %q, want %q", tc.flavor, got, tc.want)
+		}
+		if got := (ServerEntry{Flavor: tc.flavor}).Family(); got != tc.want {
+			t.Errorf("ServerEntry{Flavor: %q}.Family() = %q, want %q", tc.flavor, got, tc.want)
+		}
+	}
+}
+
+func familyTestEntry(name, flavor string) ServerEntry {
+	return ServerEntry{Name: name, Flavor: flavor, DSN: "u:p@tcp(127.0.0.1:1)/idx_" + name}
+}
+
+// The first server fixes the family; one of the other is refused and leaves
+// the registry and its file as they were.
+func TestRegistryAdd_refusesTheOtherFamily(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second string
+		refused       bool
+		installed     string
+	}{
+		{"mysql then mysql", "mysql", "mysql", false, ""},
+		{"mysql then mariadb", "mysql", "mariadb", false, ""},
+		{"mariadb then mysql", "mariadb", "", false, ""},
+		{"blank then mariadb", "", "mariadb", false, ""},
+		{"postgres then postgres", "postgres", "postgresql", false, ""},
+		{"mysql then postgres", "mysql", "postgres", true, "MySQL and MariaDB"},
+		{"blank then postgres", "", "postgres", true, "MySQL and MariaDB"},
+		{"mariadb then postgres", "mariadb", "postgres", true, "MySQL and MariaDB"},
+		{"postgres then mysql", "postgres", "mysql", true, "PostgreSQL"},
+		{"postgres then blank", "postgres", "", true, "PostgreSQL"},
+		{"postgres then mariadb", "postgres", "mariadb", true, "PostgreSQL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "servers.yaml")
+			reg, err := LoadRegistry(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reg.Add(familyTestEntry("one", tc.first)); err != nil {
+				t.Fatalf("the first server: %v", err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = reg.Add(familyTestEntry("two", tc.second))
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			var of *OtherFamilyError
+			if !errors.As(err, &of) || !errors.Is(err, ErrOtherFamily) {
+				t.Fatalf("err = %v, want the other-family refusal", err)
+			}
+			msg := err.Error()
+			for _, want := range []string{"This installation serves " + tc.installed + " servers", "Nothing was changed", "a second installation", "one database family"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the refusal does not say %q:\n%s", want, msg)
+				}
+			}
+			if reg.Len() != 1 {
+				t.Errorf("%d servers after a refused add, want 1", reg.Len())
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Error("the servers file changed on a refused add")
+			}
+		})
+	}
+}
+
+// The family is that of the servers there are, not a setting: with the last
+// one removed, the other family can be added.
+func TestRegistryAdd_theFamilyIsTheServersThereAre(t *testing.T) {
+	reg, err := LoadRegistry(filepath.Join(t.TempDir(), "servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pg, err := reg.Add(familyTestEntry("pg", "postgres"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Add(familyTestEntry("my", "mysql")); !errors.Is(err, ErrOtherFamily) {
+		t.Fatalf("a MySQL server beside a PostgreSQL one: %v", err)
+	}
+	if err := reg.Remove(pg.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Add(familyTestEntry("my", "mysql")); err != nil {
+		t.Fatalf("a MySQL server in a registry with no server left: %v", err)
+	}
+	if _, err := reg.Add(familyTestEntry("pg2", "postgres")); !errors.Is(err, ErrOtherFamily) {
+		t.Fatalf("a PostgreSQL server beside a MySQL one: %v", err)
+	}
+}
+
+// mixedRegistryFile writes a servers file that holds both families, the way
+// only a hand edit (or a file from before this rule) can.
+func mixedRegistryFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "console-servers.yaml")
+	body := `version: 1
+servers:
+  - id: aaaa000000000001
+    name: shop
+    dsn: u:p@tcp(127.0.0.1:1)/idx_shop
+  - id: aaaa000000000002
+    name: ledger
+    flavor: postgres
+    dsn: u:p@tcp(127.0.0.1:1)/idx_ledger
+  - id: aaaa000000000003
+    name: wiki
+    flavor: mariadb
+    dsn: u:p@tcp(127.0.0.1:1)/idx_wiki
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A file that already holds both families is read whole: nothing refuses to
+// start. Adding is refused for either family, naming the servers; removing
+// one family ends it.
+func TestRegistry_aMixedFileIsReadAndTakesNoNewServer(t *testing.T) {
+	path := mixedRegistryFile(t)
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatalf("a mixed file stopped the registry from loading: %v", err)
+	}
+	if reg.Len() != 3 {
+		t.Fatalf("%d servers read, want all 3", reg.Len())
+	}
+	postgres, mysql, mixed := reg.MixedFamilies()
+	if !mixed || strings.Join(postgres, ",") != "ledger" || strings.Join(mysql, ",") != "shop,wiki" {
+		t.Fatalf("MixedFamilies = %v %v %v", postgres, mysql, mixed)
+	}
+	for _, flavor := range []string{"mysql", "postgres", "mariadb", ""} {
+		_, err := reg.Add(familyTestEntry("new", flavor))
+		if !errors.Is(err, ErrOtherFamily) {
+			t.Fatalf("a %q server was added to a mixed registry: %v", flavor, err)
+		}
+		msg := err.Error()
+		for _, want := range []string{"both database families", "PostgreSQL: ledger", "MySQL and MariaDB: shop, wiki", "Nothing was changed", "Remove the servers of one family"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the refusal does not say %q:\n%s", want, msg)
+			}
+		}
+	}
+	if reg.Len() != 3 {
+		t.Fatalf("%d servers after refused adds, want 3", reg.Len())
+	}
+	// What the program writes about a server on its own still goes through:
+	// capture goes on for every server of a mixed file.
+	if err := reg.UpdateWith("aaaa000000000002", func(cur ServerEntry) (ServerEntry, bool) {
+		cur.NoArchive = !cur.NoArchive
+		return cur, true
+	}); err != nil {
+		t.Fatalf("a write of the program's own was refused on a mixed registry: %v", err)
+	}
+	if changed, err := reg.CorrectSourceFlavor("aaaa000000000001", FlavorMariaDB); err != nil || !changed {
+		t.Fatalf("MySQL corrected to MariaDB on a mixed registry: changed=%v err=%v", changed, err)
+	}
+	// One family removed: the registry takes a server of the one left.
+	if err := reg.Remove("aaaa000000000002"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, mixed := reg.MixedFamilies(); mixed {
+		t.Fatal("still mixed with its only PostgreSQL server removed")
+	}
+	if err := reg.MixedFamiliesRefusal(); err != nil {
+		t.Fatalf("still refusing: %v", err)
+	}
+	if _, err := reg.Add(familyTestEntry("new", "mysql")); err != nil {
+		t.Fatalf("a MySQL server after the PostgreSQL one was removed: %v", err)
+	}
+	if _, err := reg.Add(familyTestEntry("pg", "postgres")); !errors.Is(err, ErrOtherFamily) {
+		t.Fatalf("a PostgreSQL server now: %v", err)
+	}
+}
+
+// MySQL corrected to MariaDB (capture found the server to be one) stays in
+// the family, in a registry of one family too.
+func TestRegistry_mysqlToMariaDBIsTheSameFamily(t *testing.T) {
+	reg, err := LoadRegistry(filepath.Join(t.TempDir(), "servers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := reg.Add(familyTestEntry("one", "mysql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := reg.CorrectSourceFlavor(e.ID, FlavorMariaDB); err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	if _, err := reg.Add(familyTestEntry("two", "mysql")); err != nil {
+		t.Fatalf("a MySQL server beside one corrected to MariaDB: %v", err)
+	}
+}
+
+// The follower (the router's view of the file) reads a mixed file too.
+func TestRegistryFollower_readsAMixedFile(t *testing.T) {
+	path := mixedRegistryFile(t)
+	reg, err := LoadRegistryFollower(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reg.Len() != 3 {
+		t.Fatalf("%d servers, want 3", reg.Len())
+	}
+}
+
+func familyRefusalText(t *testing.T, body []byte) string {
+	t.Helper()
+	var out struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("not a JSON error: %s", body)
+	}
+	return out.Error
+}
+
+// Through the API, which is what the web interface and `dbtrail server add`
+// call: the refusal is a 409 whose text stands on its own, in one paragraph
+// with no markup, and no folder was made for the server that was not added.
+func TestServersAPI_refusesTheOtherFamily(t *testing.T) {
+	srv := newRegistryServer(t)
+	rec, body := doServersReq(t, srv, "POST", "/api/servers", `{"name":"shop","host":"h","user":"u","password":"p","dbname":"db"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("the first server: %d %s", rec.Code, body)
+	}
+	dir := filepath.Join(t.TempDir(), "snapshots-of-a-server-never-added")
+	req, _ := json.Marshal(map[string]any{
+		"name": "ledger", "flavor": "postgres", "host": "h", "user": "u", "password": "p", "dbname": "db", "baseline_dir": dir,
+	})
+	rec, body = doServersReq(t, srv, "POST", "/api/servers", string(req))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a PostgreSQL server beside a MySQL one: %d %s", rec.Code, body)
+	}
+	msg := familyRefusalText(t, body)
+	for _, want := range []string{"This installation serves MySQL and MariaDB servers", "a PostgreSQL server cannot be added", "Nothing was changed", "a second installation"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, msg)
+		}
+	}
+	if strings.ContainsAny(msg, "\n\t`*<>") {
+		t.Errorf("the refusal carries markup or line breaks a terminal would print as they are: %q", msg)
+	}
+	if len(msg) > 400 {
+		t.Errorf("the refusal is %d characters: too long to read in a terminal", len(msg))
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("a folder was made for a server that was refused: %v", err)
+	}
+	if srv.cm.reg.Len() != 1 {
+		t.Errorf("%d servers, want 1", srv.cm.reg.Len())
+	}
+	// The same family still goes in.
+	rec, body = doServersReq(t, srv, "POST", "/api/servers", `{"name":"wiki","flavor":"mariadb","host":"h","user":"u","password":"p","dbname":"db"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("a MariaDB server beside a MySQL one: %d %s", rec.Code, body)
+	}
+}
+
+// A registry that holds both families takes no edit from a person, and says
+// which servers are in the way; removing one is still allowed, and ends it.
+func TestServersAPI_aMixedRegistryTakesNoEditButARemoval(t *testing.T) {
+	clearStores(t)
+	reg, err := LoadRegistry(mixedRegistryFile(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Listen: "127.0.0.1:8090", Token: "t", Registry: reg})
+	if err != nil {
+		t.Fatalf("a mixed servers file stopped the console from starting: %v", err)
+	}
+	// Every server is listed: nothing is hidden or dropped.
+	rec, body := doServersReq(t, srv, "GET", "/api/servers", "")
+	if rec.Code != http.StatusOK || !strings.Contains(string(body), "shop") || !strings.Contains(string(body), "ledger") || !strings.Contains(string(body), "wiki") {
+		t.Fatalf("list: %d %s", rec.Code, body)
+	}
+	for _, method := range []string{"PUT", "PATCH"} {
+		rec, body = doServersReq(t, srv, method, "/api/servers/aaaa000000000001", `{"name":"shop2","host":"h","user":"u","dbname":"db"}`)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s on a mixed registry: %d %s", method, rec.Code, body)
+		}
+		msg := familyRefusalText(t, body)
+		if !strings.Contains(msg, "both database families") || !strings.Contains(msg, "ledger") || !strings.Contains(msg, "Nothing was changed") {
+			t.Errorf("%s refusal: %s", method, msg)
+		}
+	}
+	if e, _ := reg.Get("aaaa000000000001"); e.Name != "shop" {
+		t.Fatalf("a refused edit renamed the server to %q", e.Name)
+	}
+	rec, body = doServersReq(t, srv, "POST", "/api/servers", `{"name":"more","host":"h","user":"u","password":"p","dbname":"db"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("an add on a mixed registry: %d %s", rec.Code, body)
+	}
+	// Removing the PostgreSQL server is allowed, and the edit then goes in.
+	rec, body = doServersReq(t, srv, "DELETE", "/api/servers/aaaa000000000002", "")
+	if rec.Code >= 300 {
+		t.Fatalf("removing a server from a mixed registry: %d %s", rec.Code, body)
+	}
+	rec, body = doServersReq(t, srv, "PATCH", "/api/servers/aaaa000000000001", `{"name":"shop2"}`)
+	if rec.Code >= 300 {
+		t.Fatalf("an edit once one family is left: %d %s", rec.Code, body)
+	}
+}
