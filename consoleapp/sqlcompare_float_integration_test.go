@@ -95,6 +95,8 @@ func wireBinary(c *client.Conn, stmt string, args ...any) string {
 				b.WriteString("NULL")
 			case mysql.FieldValueTypeFloat:
 				b.WriteString(strconv.FormatFloat(v.AsFloat64(), 'g', -1, 64))
+			case mysql.FieldValueTypeString:
+				b.Write(v.AsString())
 			default:
 				fmt.Fprintf(&b, "%v", v.Value())
 			}
@@ -238,7 +240,8 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 
 	stmts := []string{
 		"SELECT side, f, f72, fu FROM fl ORDER BY f",
-		"SELECT side, f, f72, fu FROM fl ORDER BY id",
+		"SELECT side, f, f72, fu, d FROM fl ORDER BY id",
+		"SELECT side, d, d * 1, f FROM fl WHERE id = 3",
 		"SELECT side, id FROM fl WHERE f = 3.14",
 		"SELECT side, id FROM fl WHERE fu = 3.14",
 		"SELECT side, id FROM fl WHERE f72 = 3.14",
@@ -312,6 +315,19 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 				t.Logf("MEASURE %s %s %-6s by=%s :: %s\n    mysql: %s\n    port:  %s", verdict, mode, side.name, who, s, want, got)
 			}
 		}
+	}
+	// CAST AS DOUBLE prepared on the copy, read by database/sql.
+	for _, dsn := range []string{fmt.Sprintf("%s:tok@tcp(%s)/%s", copyUser, copyAddr, srcName), sourceDSN} {
+		db := openRaw(t, dsn)
+		st, err := db.Prepare("SELECT CAST(f AS DOUBLE) FROM fl WHERE id = 1")
+		if err != nil {
+			t.Logf("MEASURE castdouble prepare %v", err)
+			continue
+		}
+		var v any
+		err = st.QueryRow().Scan(&v)
+		t.Logf("MEASURE castdouble %s: %T %v %v", dsn, v, v, err)
+		st.Close()
 	}
 	// A placeholder bound to 3.14 as a DOUBLE and as text.
 	for _, arg := range []any{float64(3.14), "3.14", float32(3.14)} {
