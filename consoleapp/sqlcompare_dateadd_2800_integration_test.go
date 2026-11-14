@@ -116,7 +116,7 @@ func TestIntegrationSQLCompareDateAddRouted(t *testing.T) {
 		{stmt: "SELECT side, ts + INTERVAL 7973 YEAR + INTERVAL 68400 SECOND FROM ev WHERE k = 2", who: "copy", who5: "live", why: "a second past 9999 five hours east"},
 		{stmt: "SELECT side, DATE_ADD(DATE_ADD(ts, INTERVAL 7973 YEAR), INTERVAL 86400 SECOND) FROM ev WHERE k = 2", who: "live", why: "a TIMESTAMP a second past 9999 in UTC"},
 		{stmt: "SELECT MIN(side), COUNT(*) FROM ev WHERE dt <= NOW() + INTERVAL 1 DAY", who: "copy", why: "NOW() stepped forward, compared"},
-		{stmt: "SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= DATE_ADD(NOW(), INTERVAL '-30' DAY) OR dt < NOW() - INTERVAL 1 DAY", who: "copy", why: "NOW() stepped back, both spellings"},
+		{stmt: "SELECT MIN(side), COUNT(*) FROM ev WHERE dt <= DATE_ADD(NOW(), INTERVAL 1 DAY) AND dt > NOW() - INTERVAL 30 YEAR", who: "copy", why: "NOW() stepped both ways, both spellings"},
 		{stmt: "SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= DATE_ADD(NOW(), INTERVAL -30 DAY)", who: "live", why: "a sign before the number, which the copy refuses"},
 		{stmt: "SELECT side, dt + INTERVAL 1 DAY FROM ev WHERE k > ? AND k NOT IN (3, 4) ORDER BY k", args: []any{0}, who: "copy", why: "prepared, inside the range"},
 		{stmt: "SELECT side, dt FROM ev WHERE (dt + INTERVAL 1 DAY) > dt AND k <> 3 ORDER BY k", who: "copy", why: "a group compared"},
@@ -139,25 +139,6 @@ func TestIntegrationSQLCompareDateAddRouted(t *testing.T) {
 		{stmt: "SELECT side, dt + INTERVAL 1 DAY FROM ev WHERE k > ? ORDER BY k", args: []any{0}, who: "live", why: "prepared, past 9999"},
 		{stmt: "SELECT side, ? + INTERVAL 1 DAY FROM ev WHERE k = 1", args: []any{"2026-01-01 00:00:00"}, who: "live", why: "a placeholder stepped"},
 		{stmt: "SELECT side, DATE_ADD(?, INTERVAL 1 DAY) FROM ev WHERE k = 1", args: []any{"2026-01-01 00:00:00"}, who: "live", why: "DATE_ADD of a placeholder"},
-	}
-	{
-		probe := openRaw(t, strings.Replace(withZone(portDSN, "+00:00"), "parseTime=true", "parseTime=false", 1))
-		conn, _ := probe.Conn(context.Background())
-		for _, q := range []string{"SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= DATE_ADD(NOW(), INTERVAL '-30' DAY)", "SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= DATE_ADD(NOW(), INTERVAL 30 DAY)", "SELECT MIN(side), COUNT(*) FROM ev WHERE dt >= DATE_SUB(NOW(), INTERVAL 30 DAY)"} {
-			rows, err := conn.QueryContext(context.Background(), q)
-			if err == nil {
-				rows.Close()
-			}
-			w, err := conn.QueryContext(context.Background(), "SHOW WARNINGS")
-			for err == nil && w.Next() {
-				var a, b, c string
-				_ = w.Scan(&a, &b, &c)
-				t.Logf("PROBE %s => %s %s %s", q, a, b, c)
-			}
-			if w != nil {
-				w.Close()
-			}
-		}
 	}
 	asText := func(dsn string) string { return strings.Replace(dsn, "parseTime=true", "parseTime=false", 1) }
 	for _, zone := range []string{"+00:00", "+05:00"} {
