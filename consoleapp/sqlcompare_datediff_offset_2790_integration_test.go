@@ -117,7 +117,12 @@ func TestIntegrationProbe2790(t *testing.T) {
 		port, live := openRaw(t, pdsn), openRaw(t, ldsn)
 		for _, e := range exprs {
 			stmt := "SELECT id, " + e + " FROM px ORDER BY id"
-			t.Logf("tz=%-6s %-75s\n    port   %.300s\n    source %.300s", zone, e, answerText(port, stmt), answerText(live, stmt))
+			pa, sa := answerText(port, stmt), answerText(live, stmt)
+			mark := "same"
+			if pa != sa {
+				mark = "DIFF"
+			}
+			t.Logf("P %s tz=%s %s || port %.60s || src %.60s", mark, zone, e, pa, sa)
 		}
 		stmt := "SELECT id, DATEDIFF(d, ?) FROM px ORDER BY id"
 		t.Logf("tz=%-6s prepared +05:00\n    port   %.300s\n    source %.300s", zone, answerText(port, stmt, "2026-01-15 02:00:00+05:00"), answerText(live, stmt, "2026-01-15 02:00:00+05:00"))
