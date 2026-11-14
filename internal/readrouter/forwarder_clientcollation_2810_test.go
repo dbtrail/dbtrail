@@ -72,9 +72,42 @@ func newWrappedCollationForwarder(t *testing.T, version, collation string, wrap 
 type clientCollationSource struct {
 	*collationSource
 	names map[uint16][2]string
+	// clientCS is the session's character_set_client: start, then what a
+	// SET NAMES set ("" is utf8mb4). setNamesErr refuses SET NAMES utf8mb4.
+	clientCS    string
+	setNamesErr error
+}
+
+// answerClientCS answers the read-only port's question about the session's
+// client character set, and records it.
+func answerClientCS(h *collationSource, cs string) (*mysql.Result, error) {
+	h.mu.Lock()
+	h.seen = append(h.seen, "SELECT @@character_set_client")
+	h.mu.Unlock()
+	if cs == "" {
+		cs = "utf8mb4"
+	}
+	rs, err := mysql.BuildSimpleTextResultset([]string{"@@character_set_client"}, [][]any{{cs}})
+	if err != nil {
+		return nil, err
+	}
+	return &mysql.Result{Resultset: rs}, nil
 }
 
 func (h *clientCollationSource) HandleQuery(q string) (*mysql.Result, error) {
+	if q == "SELECT @@character_set_client" {
+		return answerClientCS(h.collationSource, h.clientCS)
+	}
+	if q == "SET NAMES utf8mb4" && h.setNamesErr != nil {
+		h.mu.Lock()
+		h.seen = append(h.seen, q)
+		h.mu.Unlock()
+		return nil, h.setNamesErr
+	}
+	if cs, ok := strings.CutPrefix(q, "SET NAMES "); ok && (h.setErr == nil || cs == "utf8mb4") {
+		cs, _, _ = strings.Cut(cs, " ")
+		h.clientCS = cs
+	}
 	for id, n := range h.names {
 		if q == clientCollationAsk(id) {
 			h.mu.Lock()
@@ -267,9 +300,13 @@ func TestForwarder_clientCollationReadOnly_2810(t *testing.T) {
 				t.Fatal(err)
 			}
 			set := "SET NAMES " + n[0] + " COLLATE " + n[1]
-			want := []string{clientCollationAsk(id), set, "DO 1"}
+			check := []string{}
+			if readOnly {
+				check = []string{"SELECT @@character_set_client"}
+			}
+			want := append([]string{clientCollationAsk(id), set}, append(check, "DO 1")...)
 			if readOnly && !safe {
-				want = []string{clientCollationAsk(id), "DO 1"}
+				want = []string{clientCollationAsk(id), "SELECT @@character_set_client", "DO 1"}
 				if len(said) != 1 || !strings.Contains(said[0], "read-only") || !strings.Contains(said[0], n[0]) {
 					t.Errorf("%s, read-only: OnCollation was told %q, want once, naming the character set", n[0], said)
 				}
@@ -290,6 +327,9 @@ type globalSource struct {
 }
 
 func (h *globalSource) HandleQuery(q string) (*mysql.Result, error) {
+	if q == "SELECT @@character_set_client" {
+		return answerClientCS(h.collationSource, "")
+	}
 	if q == "SELECT @@GLOBAL.character_set_client, @@GLOBAL.character_set_results, @@GLOBAL.collation_connection" {
 		h.mu.Lock()
 		h.seen = append(h.seen, q)
@@ -338,7 +378,11 @@ func TestForwarder_globalSessionAfterReset_2810(t *testing.T) {
 			if _, err := f.Forward(ctx, "DO 1", &BufferSink{}); err != nil {
 				t.Fatal(err)
 			}
-			want := append(append([]string(nil), tc.want...), "DO 1")
+			want := append([]string(nil), tc.want...)
+			if tc.readOnly {
+				want = append(want, "SELECT @@character_set_client")
+			}
+			want = append(want, "DO 1")
 			if got := src.statements(); !reflect.DeepEqual(got, want) {
 				t.Errorf("the source saw %q, want %q", got, want)
 			}
@@ -347,6 +391,56 @@ func TestForwarder_globalSessionAfterReset_2810(t *testing.T) {
 				t.Errorf("OnCollation was told %q", said)
 			case tc.said != "" && (len(said) != 1 || !strings.Contains(said[0], tc.said)):
 				t.Errorf("OnCollation was told %q, want once, with %q", said, tc.said)
+			}
+		})
+	}
+}
+
+// #2810: on a read-only port the source is asked, last, which character set
+// it reads the client's bytes in, however the session was settled: a server
+// that ignores the login's (skip-character-set-client-handshake) or a
+// MariaDB that falls back to its global one can leave gbk there unasked.
+// It is replaced with utf8mb4 and OnCollation is told; a source that will
+// not take utf8mb4 opens no connection. A port that is not read-only does
+// not ask.
+func TestForwarder_readOnlyChecksTheClientCharset_2810(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name          string
+		client        uint16
+		readOnly      bool
+		sessionCS     string
+		setNamesErr   error
+		want          []string
+		said, opens   bool
+	}{
+		{"read-only, the source left gbk", 255, true, "gbk", nil, []string{"SELECT @@character_set_client", "SET NAMES utf8mb4", "DO 1"}, true, true},
+		{"read-only, a port's own connection, the source left sjis", 0, true, "sjis", nil, []string{"SELECT @@character_set_client", "SET NAMES utf8mb4", "DO 1"}, true, true},
+		{"read-only, utf8mb4", 255, true, "utf8mb4", nil, []string{"SELECT @@character_set_client", "DO 1"}, false, true},
+		{"read-only, the source refuses utf8mb4", 255, true, "gbk", mysql.NewError(mysql.ER_UNKNOWN_CHARACTER_SET, "no"), nil, false, false},
+		{"not read-only, gbk left", 255, false, "gbk", nil, []string{"DO 1"}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var src *clientCollationSource
+			f, _ := newWrappedCollationForwarder(t, "8.0.46", "utf8mb4_0900_ai_ci", func(inner *collationSource) server.Handler {
+				src = &clientCollationSource{collationSource: inner, names: map[uint16][2]string{}, clientCS: tc.sessionCS, setNamesErr: tc.setNamesErr}
+				return src
+			})
+			f.ClientCollation, f.SafeCharsetsOnly = tc.client, tc.readOnly
+			var said []string
+			f.OnCollation = func(collation string, err error) { said = append(said, collation+": "+err.Error()) }
+			_, err := f.Forward(ctx, "DO 1", &BufferSink{})
+			if tc.opens != (err == nil) {
+				t.Fatalf("Forward: %v, want it answered: %v", err, tc.opens)
+			}
+			if !tc.opens {
+				return
+			}
+			if got := src.statements(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("the source saw %q, want %q", got, tc.want)
+			}
+			if tc.said != (len(said) == 1 && strings.Contains(said[0], "read-only")) || len(said) > 1 {
+				t.Errorf("OnCollation was told %q, want told: %v", said, tc.said)
 			}
 		})
 	}

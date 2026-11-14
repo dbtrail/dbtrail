@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/client"
@@ -15,6 +16,9 @@ import (
 type fakeChanger struct {
 	server.EmptyHandler
 	changed string
+	// collation is what ChangeUserCollation was told (#2810).
+	mu        sync.Mutex
+	collation uint16
 }
 
 func (f *fakeChanger) ChangeUserCredential(user string) (server.Credential, bool, any) {

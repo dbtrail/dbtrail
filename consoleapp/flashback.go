@@ -733,7 +733,7 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 			// port's login asked for and would not take the one the port
 			// names instead.
 			fw.OnCollation = func(collation string, err error) {
-				logger.Warn("Engine Routing: the source would not give this connection the collation it was to have; it runs under the one the source gave it",
+				logger.Warn("Engine Routing: this connection's session did not get the collation or character set it was to have; it stays as the port's login left it (the error says why, and whether the port or the source decided)",
 					"server", user, "collation", collation, "error", err.Error())
 			}
 			// The source is asked to say when a statement changed one of

@@ -356,7 +356,11 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 		case f.ClientCollation != 0:
 			settle = f.clientCollation
 		}
-		if serr := settle(ctx, c); serr != nil {
+		serr := settle(ctx, c)
+		if serr == nil && f.SafeCharsetsOnly {
+			serr = f.safeClientCharset(ctx, c)
+		}
+		if serr != nil {
 			_ = c.Close()
 			err = fmt.Errorf("settle the session's collation: %w", serr)
 		}
@@ -484,8 +488,9 @@ var collationName = regexp.MustCompile(`^[a-z0-9_]+$`)
 // decodes the copy's bytes in. Under utf8mb4_general_ci, go-sql-driver's
 // default, MySQL answers every statement.
 //
-// What is not done leaves the session as the source gave it, under
-// utf8mb4_0900_ai_ci, and OnCollation is told: a number the source has no
+// What is not done leaves the session as the port's login left it
+// (utf8mb4_0900_ai_ci on MySQL, utf8mb4_general_ci on a MariaDB 10.11), and
+// OnCollation is told: a number the source has no
 // collation for, a name that is not one, a SET NAMES the source refuses (a
 // character set no client may use, ucs2), and on a read-only port a
 // character set outside safeCharsets (gbk, sjis, big5: a second byte 0x5C
@@ -503,7 +508,7 @@ func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn) error {
 	if err != nil {
 		return f.collationRefused(ctx, asked, err)
 	}
-	if res.RowNumber() == 0 {
+	if res == nil || res.Resultset == nil || res.RowNumber() == 0 {
 		return f.collationRefused(ctx, asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
 			Message: "the source has no collation numbered " + id + ", which the client asked for"})
 	}
@@ -532,7 +537,7 @@ func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn) error {
 // character set cs.
 func unsafeCharset(cs string) error {
 	return &mysql.MyError{Code: mysql.ER_UNKNOWN_CHARACTER_SET,
-		Message: "this port is read-only and reads statements as bytes; it does not give a session the character set " + cs + " (the session keeps utf8mb4)"}
+		Message: "this port is read-only and reads statements as bytes; it does not give a session the character set " + cs + " (the session keeps the port's own, utf8mb4)"}
 }
 
 // globalCollation gives a connection that replaces one the client reset
@@ -548,6 +553,9 @@ func (f *Forwarder) globalCollation(ctx context.Context, c *client.Conn) error {
 	res, err := c.Execute("SELECT @@GLOBAL.character_set_client, @@GLOBAL.character_set_results, @@GLOBAL.collation_connection")
 	if err != nil {
 		return f.collationRefused(ctx, what, err)
+	}
+	if res == nil || res.Resultset == nil || res.RowNumber() == 0 {
+		return f.collationRefused(ctx, what, &mysql.MyError{Code: mysql.ER_UNKNOWN_ERROR, Message: "the source answered no row for its global character sets"})
 	}
 	var v [3]string
 	for i := range v {
@@ -575,6 +583,47 @@ func (f *Forwarder) globalCollation(ctx context.Context, c *client.Conn) error {
 	}
 	if _, err := c.Execute("SET SESSION character_set_client = " + clientCS + ", character_set_results = " + results + ", collation_connection = " + coll); err != nil {
 		return f.collationRefused(ctx, coll, err)
+	}
+	return nil
+}
+
+// safeClientCharset is the read-only port's last check on a new connection
+// (SafeCharsetsOnly): whatever settled the session, the source is asked
+// which character set it reads the client's bytes in, and one outside
+// safeCharsets is replaced with utf8mb4 (OnCollation is told). A source can
+// leave one there without the port asking for it: a server started with
+// skip-character-set-client-handshake, or a MariaDB that does not know the
+// number the login asked for, takes its global character set. A
+// connection where this cannot be read or done does not open: the screen
+// would read the client's statements as other bytes than the source runs.
+func (f *Forwarder) safeClientCharset(ctx context.Context, c *client.Conn) error {
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	res, err := c.Execute("SELECT @@character_set_client")
+	if err != nil {
+		if cause := ctx.Err(); cause != nil {
+			return cause
+		}
+		return fmt.Errorf("read the session's client character set: %w", err)
+	}
+	if res == nil || res.Resultset == nil || res.RowNumber() == 0 {
+		return errors.New("the source answered no row for the session's client character set")
+	}
+	cell, err := res.GetString(0, 0)
+	if err != nil {
+		return fmt.Errorf("read the session's client character set: %w", err)
+	}
+	cs := strings.Clone(cell)
+	if safeCharsets[cs] {
+		return nil
+	}
+	if _, err := c.Execute("SET NAMES utf8mb4"); err != nil {
+		if cause := ctx.Err(); cause != nil {
+			return cause
+		}
+		return fmt.Errorf("the session's client character set is %s, which this read-only port does not read safely, and SET NAMES utf8mb4 failed: %w", cs, err)
+	}
+	if f.OnCollation != nil {
+		f.OnCollation(cs, unsafeCharset(cs))
 	}
 	return nil
 }

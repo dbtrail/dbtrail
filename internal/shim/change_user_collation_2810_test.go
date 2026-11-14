@@ -30,3 +30,37 @@ func TestParseChangeUser_collation_2810(t *testing.T) {
 		}
 	}
 }
+
+func (f *fakeChanger) ChangeUserCollation(id uint16) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.collation = id
+}
+
+// #2810: a change of user that the session accepts tells the handler the
+// collation the packet carried, before it binds the new user.
+func TestChangeUser_tellsTheCollation_2810(t *testing.T) {
+	c, h, _ := sessionPair(t)
+	c.ResetSequence()
+	if err := c.WritePacket(changeUserPkt("app2")); err != nil { // carries 0x21
+		t.Fatal(err)
+	}
+	sw, err := c.ReadPacket()
+	if err != nil || sw[0] != mysql.EOF_HEADER {
+		t.Fatalf("no auth switch: %x %v", sw, err)
+	}
+	salt := sw[1+len(mysql.AUTH_NATIVE_PASSWORD)+1 : len(sw)-1]
+	if err := c.WritePacket(append([]byte{0, 0, 0, 0}, mysql.CalcNativePassword(salt, []byte("pw2"))...)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.ReadPacket()
+	if err != nil || resp[0] != mysql.OK_HEADER {
+		t.Fatalf("client read %q %v, want OK", resp, err)
+	}
+	h.mu.Lock()
+	got := h.collation
+	h.mu.Unlock()
+	if got != 0x21 {
+		t.Errorf("ChangeUserCollation was told %d, want 33", got)
+	}
+}
