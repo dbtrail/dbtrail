@@ -44,6 +44,7 @@ var recordCallSites = map[string]int{
 	"internal/mcptools/sql.go":             1, // console-mcp sql.run (#2456)
 	"internal/shim/handler.go":             1, // shim/timetravel.query (recordTimeTravel — all three serving layers)
 	"internal/shim/freesql.go":             1, // shim/sql.run (recordFreeSQL — the console's embedded port)
+	"internal/pgshim/login.go":             1, // shim/sql.run (recordFree — the PostgreSQL-protocol port)
 }
 
 // TestAuditRecordCallSitesAccounted walks the module source tree and asserts
