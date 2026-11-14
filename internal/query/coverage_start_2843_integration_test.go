@@ -20,8 +20,8 @@ func TestCoverageStart_2843(t *testing.T) {
 	setState := func(t *testing.T, db *sql.DB, flavor string, from any) {
 		t.Helper()
 		testutil.MustExec(t, db, "DELETE FROM stream_state")
-		if _, err := db.Exec(`INSERT INTO stream_state (id, mode, flavor, binlog_file, binlog_position, last_checkpoint, pg_capture_from_lsn)
-			VALUES (1, 'gtid', ?, '0/2000', 8192, UTC_TIMESTAMP(), ?)`, flavor, from); err != nil {
+		if _, err := db.Exec(`INSERT INTO stream_state (id, mode, flavor, binlog_file, binlog_position, server_id, last_checkpoint, pg_capture_from_lsn)
+			VALUES (1, 'gtid', ?, '0/2000', 8192, 1, UTC_TIMESTAMP(), ?)`, flavor, from); err != nil {
 			t.Fatalf("seed stream_state: %v", err)
 		}
 	}
