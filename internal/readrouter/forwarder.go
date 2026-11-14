@@ -538,12 +538,16 @@ func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn, charset
 		return f.collationRefused(ctx, coll, unsafeCharset(cs))
 	}
 	set := "SET NAMES " + cs + " COLLATE " + coll
-	if cs == "binary" || charsetOnly || strings.EqualFold(isDefault, "yes") {
-		// A character set's default collation is named by the set alone,
-		// as a handshake names it to the source: MariaDB 11.4 and later
-		// then give the set the collation character_set_collations maps it
-		// to (utf8mb4_uca1400_ai_ci for a utf8mb4_general_ci handshake,
-		// measured), where an explicit COLLATE would not.
+	mariadb := strings.Contains(strings.ToLower(c.GetServerVersion()), "mariadb")
+	if cs == "binary" || charsetOnly || strings.EqualFold(isDefault, "yes") || (mariadb && coll == cs+"_general_ci") {
+		// A character set's default collation is named by the set alone.
+		// On MariaDB a handshake that names the set's built-in default
+		// (its _general_ci) is read as the set alone: 11.4 and later then
+		// give it the collation character_set_collations maps it to
+		// (utf8mb4_uca1400_ai_ci for a utf8mb4_general_ci handshake,
+		// measured in CI on 11.4, 11.8 and 12.3), which SET NAMES with the
+		// set alone does too and an explicit COLLATE would not; 10.11 keeps
+		// utf8mb4_general_ci either way.
 		set = "SET NAMES " + cs
 	}
 	if _, err := c.Execute(set); err != nil {

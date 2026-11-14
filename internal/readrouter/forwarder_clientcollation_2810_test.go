@@ -181,7 +181,7 @@ func TestForwarder_clientCollation_2810(t *testing.T) {
 		{"unicode_ci on MySQL", "8.0.46", "utf8mb4_0900_ai_ci", 224, []string{clientCollationAsk(224), "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"}},
 		{"what the port asks for itself, on MySQL", "8.0.46", "utf8mb4_0900_ai_ci", 255, nil},
 		{"what the port asks for itself, on a MariaDB that falls back", "10.11.9-MariaDB", "utf8mb4_general_ci", 255, nil},
-		{"the driver's default on MariaDB 10.11: no settling", "10.11.9-MariaDB", "utf8mb4_general_ci", 45, []string{clientCollationAsk(45), "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci"}},
+		{"the driver's default on MariaDB 10.11: no settling, the set alone", "10.11.9-MariaDB", "utf8mb4_general_ci", 45, []string{clientCollationAsk(45), "SET NAMES utf8mb4"}},
 		{"the port's own connection on MariaDB 10.11: settled as before", "10.11.9-MariaDB", "utf8mb4_general_ci", 0, []string{ask, settle}},
 		{"the port's own connection on MySQL: nothing", "8.0.46", "utf8mb4_0900_ai_ci", 0, nil},
 	}
@@ -487,7 +487,7 @@ func TestForwarder_clientCollationDefault_2810(t *testing.T) {
 	}{
 		{45, true, "SET NAMES utf8mb4"},
 		{8, true, "SET NAMES latin1"},
-		{45, false, "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci"},
+		{45, false, "SET NAMES utf8mb4"}, // MariaDB: the set's built-in default
 		{46, false, "SET NAMES utf8mb4 COLLATE utf8mb4_bin"},
 	} {
 		var src *clientCollationSource
