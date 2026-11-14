@@ -146,3 +146,78 @@ func TestCallOpen_sharedByTheOtherControls_2802(t *testing.T) {
 		}
 	}
 }
+
+// #2611: TIMESTAMPDIFF with any white space MySQL takes before the
+// parenthesis is the same call to the rewrite and to every check: kept on
+// MySQL without the option, sent as the copy's macro with it, and checked for
+// what its dates are.
+func TestTimestampDiff_whiteSpaceBeforeParenthesis_2611(t *testing.T) {
+	dates := []string{"d", "dt"}
+	other := []string{"s", "k"}
+	for _, sp := range mysqlCallSpaces {
+		stmt := "SELECT TIMESTAMPDIFF" + sp.sep + "(DAY, dt, d) FROM t"
+		if got := VetoOpts(stmt, CopyOptions{MySQLDateFunctions: true}); got != vetoDateDiff {
+			t.Errorf("%s: VetoOpts(%q) without MySQLTimestampDiff = %q, want %q", sp.name, stmt, got, vetoDateDiff)
+		}
+		if got := VetoOpts(stmt, routedDiffOpts); got != "" {
+			t.Errorf("%s: VetoOpts(%q) = %q, want it past the veto list", sp.name, stmt, got)
+		}
+		if got, _ := ForCopyOpts(stmt, routedDiffOpts); got != "SELECT _bintrail_timestampdiff(dt, d, 86400000000) FROM t" {
+			t.Errorf("%s: ForCopyOpts(%q) = %q, want the macro", sp.name, stmt, got)
+		}
+		if got := TimestampDiffVeto(Shape(stmt), dates, other); got != "" {
+			t.Errorf("%s: TimestampDiffVeto(%q) = %q, want the copy to answer it", sp.name, stmt, got)
+		}
+		for _, bad := range []string{"SELECT TIMESTAMPDIFF" + sp.sep + "(DAY, s, d) FROM t", "SELECT TIMESTAMPDIFF" + sp.sep + "(DAY, '2026-01-15', d) FROM t"} {
+			if got := TimestampDiffVeto(Shape(bad), dates, other); got != VetoTimestampDiff {
+				t.Errorf("%s: TimestampDiffVeto(%q) = %q, want it kept on MySQL", sp.name, bad, got)
+			}
+		}
+		if got := VetoOpts("SELECT TIMESTAMPDIFF(DAY, dt, d), TIMEDIFF"+sp.sep+"(dt, d) FROM t", routedDiffOpts); got != vetoDateDiff {
+			t.Errorf("%s: TIMEDIFF beside it: %q, want %q", sp.name, got, vetoDateDiff)
+		}
+		if got := VetoOpts("SELECT _bintrail_timestampdiff"+sp.sep+"(dt, d, 1) FROM t", routedDiffOpts); got != vetoCopyMacro {
+			t.Errorf("%s: the copy's macro written by the client: %q, want %q", sp.name, got, vetoCopyMacro)
+		}
+	}
+}
+
+// #2802: the veto list's calls are calls with any white space MySQL takes
+// before the parenthesis.
+func TestVetoList_whiteSpaceBeforeParenthesis_2802(t *testing.T) {
+	for _, sp := range mysqlCallSpaces {
+		for _, tmpl := range []string{
+			"SELECT GROUP_CONCAT{}(a) FROM t",
+			"SELECT WEEK{}(d) FROM t",
+			"SELECT YEARWEEK{}(d) FROM t",
+			"SELECT EXTRACT{}(WEEK FROM d) FROM t",
+			"SELECT STR_TO_DATE{}(s, '%Y') FROM t",
+			"SELECT TIMESTAMPDIFF{}(DAY, d, d) FROM t",
+			"SELECT TIMEDIFF{}(d, d) FROM t",
+			"SELECT RAND{}() FROM t",
+			"SELECT VERSION{}() FROM t",
+			"SELECT INSTR{}(s, 'a') FROM t",
+			"SELECT JSON_EXTRACT{}(j, '$.a') FROM t",
+			"SELECT UNIX_TIMESTAMP{}() FROM t",
+			"SELECT 1 FROM t WHERE MATCH{}(s) AGAINST ('a')",
+			"SELECT NOW{}(3) FROM t",
+		} {
+			stmt := strings.ReplaceAll(tmpl, "{}", sp.sep)
+			if got := Veto(stmt); got == "" {
+				t.Errorf("%s: Veto(%q) = \"\", want it kept on MySQL", sp.name, stmt)
+			}
+		}
+	}
+	// A clock call with a vertical tab before its parenthesis: MySQL's
+	// call, which the checks next to it read only with \s.
+	for _, stmt := range []string{"SELECT NOW\v() + 1 FROM t", "SELECT CURDATE\v() FROM t", "SELECT UTC_TIMESTAMP \v () FROM t"} {
+		if got := VetoOpts(stmt, routedDiffOpts); got != vetoNowKeyword {
+			t.Errorf("VetoOpts(%q) = %q, want %q", stmt, got, vetoNowKeyword)
+		}
+	}
+	for _, stmt := range []string{"SELECT NOW() FROM t"} {
+		if got := VetoOpts(stmt, routedDiffOpts); got != "" {
+			t.Errorf("VetoOpts(%q) = %q, want the copy to answer it", stmt, got)
+		}
+	}
+}

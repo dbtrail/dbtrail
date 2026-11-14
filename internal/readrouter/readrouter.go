@@ -170,7 +170,7 @@ var vetoes = []struct {
 	name string
 	re   *regexp.Regexp
 }{
-	{"GROUP_CONCAT", regexp.MustCompile(`(?i)\bgroup_concat\s*\(`)}, // MySQL cuts at group_concat_max_len
+	{"GROUP_CONCAT", regexp.MustCompile(`(?i)\bgroup_concat` + callOpen)}, // MySQL cuts at group_concat_max_len
 	// NOW(), CURDATE(), UTC_TIMESTAMP() and UTC_DATE() the copy has with
 	// MySQL's values (sqlsandbox's macros, #2611), next to no arithmetic but
 	// INTERVAL (nowVeto), and so CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME
@@ -181,23 +181,26 @@ var vetoes = []struct {
 	// text on the copy), and SYSDATE, the time each call runs at. A
 	// CURRENT_DATE or a LOCALTIME still in the text is a name (quoted, or
 	// next to a dot), which the copy may still resolve to its own function:
-	// kept on MySQL, as it was before the keywords reached the copy.
-	{vetoNowKeyword, regexp.MustCompile(`(?i)\b(now|utc_timestamp)\s*\(\s*[^)\s]|\b(curtime|current_timestamp|current_date|current_time|sysdate|utc_time|localtime|localtimestamp)\b`)},
+	// kept on MySQL, as it was before the keywords reached the copy. A
+	// clock call with a vertical tab before its parenthesis is kept on MySQL
+	// too: MySQL takes it as white space, and the checks that read what
+	// stands next to NOW() (nowVeto) look for \s, which leaves it out.
+	{vetoNowKeyword, regexp.MustCompile(`(?i)\b(now|utc_timestamp)\s*\(\s*[^)\s]|\b(now|curdate|utc_timestamp|utc_date)[\s\v]*\v[\s\v]*\(|\b(curtime|current_timestamp|current_date|current_time|sysdate|utc_time|localtime|localtimestamp)\b`)},
 	// UNIX_TIMESTAMP() with no argument is now; with one, the column types
 	// decide (UnixTimeVeto, #2493). Quoted too: MySQL calls the function.
-	{"UNIX_TIMESTAMP() (now, in the MySQL session time zone)", regexp.MustCompile(`(?i)\bunix_timestamp"?\s*\(\s*\)`)},
+	{"UNIX_TIMESTAMP() (now, in the MySQL session time zone)", regexp.MustCompile(`(?i)\bunix_timestamp"?` + callOpen + `[\s\v]*\)`)},
 	// MySQL numbers weeks by default_week_format (from Sunday by default),
 	// the copy by ISO weeks.
-	{"WEEK/YEARWEEK", regexp.MustCompile(`(?i)\b(week|yearweek)\s*\(`)},
-	{"EXTRACT(WEEK ...)", regexp.MustCompile(`(?i)\bextract\s*\(\s*week\b`)},
-	{"STR_TO_DATE", regexp.MustCompile(`(?i)\bstr_to_date\s*\(`)},                                  // NULL in MySQL, error in DuckDB on a bad date
-	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)\s*\(`)}, // day counting differs; vetoDateDiff, narrowed by MySQLDateFunctions (VetoOpts, #2611)
-	{"COLLATE", regexp.MustCompile(`(?i)\bcollate\b`)},                                             // collations do not exist on the copy
-	{"CAST AS UNSIGNED/SIGNED", regexp.MustCompile(`(?i)\bas\s+(un)?signed\b`)},                    // overflow and truncation differ
-	{"DIV", regexp.MustCompile(`(?i)\bdiv\b`)},                                                     // integer division differs
-	{"RAND/UUID", regexp.MustCompile(`(?i)\b(rand|uuid|uuid_short)\s*\(`)},                         // nondeterministic
+	{"WEEK/YEARWEEK", regexp.MustCompile(`(?i)\b(week|yearweek)` + callOpen)},
+	{"EXTRACT(WEEK ...)", regexp.MustCompile(`(?i)\bextract` + callOpen + `[\s\v]*week\b`)},
+	{"STR_TO_DATE", regexp.MustCompile(`(?i)\bstr_to_date` + callOpen)},                                  // NULL in MySQL, error in DuckDB on a bad date
+	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)` + callOpen)}, // day counting differs; narrowed by MySQLDateFunctions and MySQLTimestampDiff (dateDiffVeto, #2611)
+	{"COLLATE", regexp.MustCompile(`(?i)\bcollate\b`)},                                                   // collations do not exist on the copy
+	{"CAST AS UNSIGNED/SIGNED", regexp.MustCompile(`(?i)\bas\s+(un)?signed\b`)},                          // overflow and truncation differ
+	{"DIV", regexp.MustCompile(`(?i)\bdiv\b`)},                                                           // integer division differs
+	{"RAND/UUID", regexp.MustCompile(`(?i)\b(rand|uuid|uuid_short)` + callOpen)},                         // nondeterministic
 	{"FOUND_ROWS/LAST_INSERT_ID/ROW_COUNT", regexp.MustCompile(`(?i)\b(found_rows|last_insert_id|row_count|sql_calc_found_rows)\b`)},
-	{"CONNECTION_ID/USER/DATABASE/VERSION", regexp.MustCompile(`(?i)\b(connection_id|current_user|session_user|system_user|user|database|schema|version)\s*\(`)},
+	{"CONNECTION_ID/USER/DATABASE/VERSION", regexp.MustCompile(`(?i)\b(connection_id|current_user|session_user|system_user|user|database|schema|version)` + callOpen)},
 	// Without parentheses CURRENT_USER is still the function on MySQL and
 	// MariaDB (root@localhost), and the copy has its own (duckdb); so is
 	// CURRENT_ROLE, with or without them (NONE on MySQL, NULL on MariaDB,
@@ -209,14 +212,14 @@ var vetoes = []struct {
 	{"locking read", regexp.MustCompile(`(?i)\b(for\s+update|lock\s+in\s+share\s+mode|for\s+share)\b`)},
 	{"INTO (OUTFILE/DUMPFILE/variables)", regexp.MustCompile(`(?i)\binto\s+(outfile|dumpfile|@)`)},
 	{"system schema", regexp.MustCompile(`(?i)\b(information_schema|performance_schema|mysql|sys)[\x60"]?\s*\.`)}, // quoted or not: the copy has an information_schema of its own, and would answer
-	{"MATCH AGAINST", regexp.MustCompile(`(?i)\bmatch\s*\(.*\)\s*against\b`)},
+	{"MATCH AGAINST", regexp.MustCompile(`(?i)\bmatch` + callOpen + `.*\)[\s\v]*against\b`)},
 	{"binary string comparison", regexp.MustCompile(`(?i)\bbinary\s+[\w\x60'"(]`)},
 	{likeVeto, regexp.MustCompile(`(?i)\b(like|regexp|rlike)\b`)}, // the copy's default collation (nocase) does not reach LIKE (DuckDB #10416)
 	// DISTINCT inside an aggregate is decided by the types of its columns
 	// where they are known (DistinctVeto, #2532), not here.
-	{"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)", regexp.MustCompile(`(?i)\b(instr|locate|position|strcmp|field|find_in_set)\s*\(`)},
+	{"INSTR/LOCATE/POSITION/STRCMP (case-sensitive on the copy)", regexp.MustCompile(`(?i)\b(instr|locate|position|strcmp|field|find_in_set)` + callOpen)},
 	{"|| (string concatenation on the copy, logical OR on MySQL)", regexp.MustCompile(`\|\|`)},
-	{"JSON function or -> operator (missing or different on the copy)", regexp.MustCompile(`(?i)\bjson_[a-z_]+\s*\(|->>?`)}, // JSON_UNQUOTE does not exist on the copy; JSON_EXTRACT paths and quoting differ
+	{"JSON function or -> operator (missing or different on the copy)", regexp.MustCompile(`(?i)\bjson_[a-z_]+` + callOpen + `|->>?`)}, // JSON_UNQUOTE does not exist on the copy; JSON_EXTRACT paths and quoting differ
 	{"^ (power on the copy, bitwise XOR on MySQL)", regexp.MustCompile(`\^`)},
 	{"-- without a space after it (two minus signs on MySQL, a comment on the copy)", regexp.MustCompile(`--`)}, // scrub already removed what MySQL reads as a comment, so any `--` left is arithmetic there (5--3 is 8) and the copy would drop the rest of the line
 	// UNION, INTERSECT and EXCEPT that remove duplicates do not compare the
