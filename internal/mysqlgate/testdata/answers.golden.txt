@@ -1,0 +1,710 @@
+== sql card == SELECT * FROM items ORDER BY id
+columns: id INTEGER | name VARCHAR | code VARCHAR | price DECIMAL(10,2) | qty BIGINT | big UBIGINT | flag INTEGER | small INTEGER | ratio DOUBLE | born DATE | seen TIMESTAMPTZ | stamp TIMESTAMPTZ | tod VARCHAR | yr INTEGER | kind VARCHAR | tags VARCHAR | doc VARCHAR | raw BLOB | note VARCHAR
+[1,"Alice","Ab","10.50",7,18446744073709551615,1,-3,0.5,"2026-01-31","2026-01-31T10:00:00.123456Z","2026-01-31T10:00:00Z","10:30:00",2026,"a","x,y","{\"k\": 1, \"s\": \"one\"}","AB","Hello there"]
+[2,"alice","AB","0.00",0,0,0,0,-1.25,"2024-02-29","2024-02-29T23:59:59Z","2024-02-29T23:59:59Z","00:00:00",1999,"b","","[1, 2, 3]","ab","hello"]
+[3,"BOB","ab","99999999.99",4294967295,9223372036854775808,1,32767,10000000000,"1999-12-31","1999-12-31T00:00:00.000001Z","2001-01-01T00:00:01Z","838:59:59",2155,"c","x,y,z","null","",""]
+[4,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]
+[5,"Émile","é","-7.25",12,42,0,-32768,3.14159,"2026-12-01","2026-12-01T12:00:00.5Z","2026-12-01T12:00:00Z","-01:00:00",2000,"a","z","{\"k\": 2}","Zz","año"]
+
+== sql card == SELECT * FROM orders ORDER BY id
+columns: id BIGINT | item_id INTEGER | amount DECIMAL(12,4) | status VARCHAR
+[1,1,"10.5000","new"]
+[2,1,"0.2500","PAID"]
+[3,2,"100.0000","paid"]
+[4,null,"1.0000",null]
+[5,3,"0.0001","New"]
+
+== sql card == SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'items' ORDER BY ordinal_position
+columns: column_name VARCHAR | data_type VARCHAR | is_nullable VARCHAR
+["id","INTEGER","YES"]
+["name","VARCHAR","YES"]
+["code","VARCHAR","YES"]
+["price","DECIMAL(10,2)","YES"]
+["qty","BIGINT","YES"]
+["big","UBIGINT","YES"]
+["flag","INTEGER","YES"]
+["small","INTEGER","YES"]
+["ratio","DOUBLE","YES"]
+["born","DATE","YES"]
+["seen","TIMESTAMP WITH TIME ZONE","YES"]
+["stamp","TIMESTAMP WITH TIME ZONE","YES"]
+["tod","VARCHAR","YES"]
+["yr","INTEGER","YES"]
+["kind","VARCHAR","YES"]
+["tags","VARCHAR","YES"]
+["doc","VARCHAR","YES"]
+["raw","BLOB","YES"]
+["note","VARCHAR","YES"]
+
+== sql card == SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'orders' ORDER BY ordinal_position
+columns: column_name VARCHAR | data_type VARCHAR
+["id","BIGINT"]
+["item_id","INTEGER"]
+["amount","DECIMAL(12,4)"]
+["status","VARCHAR"]
+
+== sql card == SELECT typeof(id), typeof(name), typeof(code), typeof(price), typeof(qty), typeof(big), typeof(flag), typeof(small), typeof(ratio) FROM items WHERE id = 1
+columns: typeof(id) VARCHAR | typeof("name") VARCHAR | typeof(code) VARCHAR | typeof(price) VARCHAR | typeof(qty) VARCHAR | typeof(big) VARCHAR | typeof(flag) VARCHAR | typeof(small) VARCHAR | typeof(ratio) VARCHAR
+["INTEGER","VARCHAR","VARCHAR","DECIMAL(10,2)","BIGINT","UBIGINT","INTEGER","INTEGER","DOUBLE"]
+
+== sql card == SELECT typeof(born), typeof(seen), typeof(stamp), typeof(tod), typeof(yr), typeof(kind), typeof(tags), typeof(doc), typeof(raw), typeof(note) FROM items WHERE id = 1
+columns: typeof(born) VARCHAR | typeof(seen) VARCHAR | typeof(stamp) VARCHAR | typeof(tod) VARCHAR | typeof(yr) VARCHAR | typeof(kind) VARCHAR | typeof(tags) VARCHAR | typeof(doc) VARCHAR | typeof(raw) VARCHAR | typeof(note) VARCHAR
+["DATE","TIMESTAMP WITH TIME ZONE","TIMESTAMP WITH TIME ZONE","VARCHAR","INTEGER","VARCHAR","VARCHAR","VARCHAR","BLOB","VARCHAR"]
+
+== sql card == SELECT id FROM items WHERE name = 'ALICE' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== sql card == SELECT id FROM items WHERE name = 'alice' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== sql card == SELECT id FROM items WHERE code = 'AB' ORDER BY id
+columns: id INTEGER
+[2]
+
+== sql card == SELECT id FROM items WHERE code = 'ab' ORDER BY id
+columns: id INTEGER
+[3]
+
+== sql card == SELECT id FROM items WHERE name < 'b' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== sql card == SELECT id FROM items WHERE name IN ('bob', 'ÉMILE') ORDER BY id
+columns: id INTEGER
+[3]
+[5]
+
+== sql card == SELECT id, name FROM items ORDER BY name, id
+columns: id INTEGER | name VARCHAR
+[4,null]
+[1,"Alice"]
+[2,"alice"]
+[3,"BOB"]
+[5,"Émile"]
+
+== sql card == SELECT id, name FROM items ORDER BY name DESC, id
+columns: id INTEGER | name VARCHAR
+[5,"Émile"]
+[3,"BOB"]
+[1,"Alice"]
+[2,"alice"]
+[4,null]
+
+== sql card == SELECT id, code FROM items ORDER BY code, id
+columns: id INTEGER | code VARCHAR
+[4,null]
+[2,"AB"]
+[1,"Ab"]
+[3,"ab"]
+[5,"é"]
+
+== sql card == SELECT count(DISTINCT name), count(DISTINCT code) FROM items
+columns: count(DISTINCT "name") BIGINT | count(DISTINCT code) BIGINT
+[4,4]
+
+== sql card == SELECT lower(name) AS n, count(*) AS c FROM items GROUP BY ALL ORDER BY n
+columns: n VARCHAR | c BIGINT
+[null,1]
+["alice",2]
+["bob",1]
+["émile",1]
+
+== sql card == SELECT min(name), max(name), min(code), max(code) FROM items
+columns: min("name") VARCHAR | max("name") VARCHAR | min(code) VARCHAR | max(code) VARCHAR
+["Alice","Émile","AB","é"]
+
+== sql card == SELECT id, note LIKE 'HEL%', note ILIKE 'HEL%', note = 'HELLO' FROM items ORDER BY id
+columns: id INTEGER | (note ~~ 'HEL%') BOOLEAN | (note ~~* 'HEL%') BOOLEAN | (note = 'HELLO') BOOLEAN
+[1,false,true,false]
+[2,false,true,true]
+[3,false,false,false]
+[4,null,null,null]
+[5,false,false,false]
+
+== sql card == SELECT id FROM orders WHERE status = 'paid' ORDER BY id
+columns: id BIGINT
+[2]
+[3]
+
+== sql card == SELECT lower(status) AS s, count(*) AS c FROM orders GROUP BY ALL ORDER BY s
+columns: s VARCHAR | c BIGINT
+[null,1]
+["new",2]
+["paid",2]
+
+== sql card == SELECT 'a' = 'A', 'a' < 'B', 'a' LIKE 'A'
+columns: ('a' = 'A') BOOLEAN | ('a' < 'B') BOOLEAN | ('a' ~~ 'A') BOOLEAN
+[true,true,false]
+
+== sql card == SELECT id, price FROM items ORDER BY price, id
+columns: id INTEGER | price DECIMAL(10,2)
+[4,null]
+[5,"-7.25"]
+[2,"0.00"]
+[1,"10.50"]
+[3,"99999999.99"]
+
+== sql card == SELECT id, price FROM items ORDER BY price DESC, id
+columns: id INTEGER | price DECIMAL(10,2)
+[3,"99999999.99"]
+[1,"10.50"]
+[2,"0.00"]
+[5,"-7.25"]
+[4,null]
+
+== sql card == SELECT id FROM items WHERE name IS NULL
+columns: id INTEGER
+[4]
+
+== sql card == SELECT count(*), count(name), count(price) FROM items
+columns: count_star() BIGINT | count("name") BIGINT | count(price) BIGINT
+[5,4,4]
+
+== sql card == SELECT sum(price), avg(price), min(price), max(price) FROM items
+columns: sum(price) DECIMAL(38,2) | avg(price) DOUBLE | min(price) DECIMAL(10,2) | max(price) DECIMAL(10,2)
+["100000003.24",25000000.81,"-7.25","99999999.99"]
+
+== sql card == SELECT id, price * 2, price / 3, price + qty FROM items ORDER BY id
+columns: id INTEGER | (price * 2) DECIMAL(18,2) | (price / 3) DOUBLE | (price + qty) DECIMAL(22,2)
+[1,"21.00",3.5,"17.50"]
+[2,"0.00",0,"0.00"]
+[3,"199999999.98",33333333.33,"4394967294.99"]
+[4,null,null,null]
+[5,"-14.50",-2.4166666666666665,"4.75"]
+
+== sql card == SELECT id, qty, big, small FROM items ORDER BY id
+columns: id INTEGER | qty BIGINT | big UBIGINT | small INTEGER
+[1,7,18446744073709551615,-3]
+[2,0,0,0]
+[3,4294967295,9223372036854775808,32767]
+[4,null,null,null]
+[5,12,42,-32768]
+
+== sql card == SELECT id, big + 0, qty + 1 FROM items ORDER BY id
+columns: id INTEGER | (big + 0) UBIGINT | (qty + 1) BIGINT
+[1,18446744073709551615,8]
+[2,0,1]
+[3,9223372036854775808,4294967296]
+[4,null,null]
+[5,42,13]
+
+== sql card == SELECT max(big), max(qty), min(small) FROM items
+columns: max(big) UBIGINT | max(qty) BIGINT | min(small) INTEGER
+[18446744073709551615,4294967295,-32768]
+
+== sql card == SELECT 9 / 2, 7 / 2, -7 / 2, 7 // 2, 7 % 2
+columns: (9 / 2) DOUBLE | (7 / 2) DOUBLE | (-7 / 2) DOUBLE | (7 // 2) INTEGER | (7 % 2) INTEGER
+[4.5,3.5,-3.5,3,1]
+
+== sql card == SELECT id, qty / 2 FROM items ORDER BY id
+columns: id INTEGER | (qty / 2) DOUBLE
+[1,3.5]
+[2,0]
+[3,2147483647.5]
+[4,null]
+[5,6]
+
+== sql card == SELECT id, flag, flag = 1, flag + 1 FROM items ORDER BY id
+columns: id INTEGER | flag INTEGER | (flag = 1) BOOLEAN | (flag + 1) INTEGER
+[1,1,true,2]
+[2,0,false,1]
+[3,1,true,2]
+[4,null,null,null]
+[5,0,false,1]
+
+== sql card == SELECT id, ratio, ratio * 2 FROM items ORDER BY id
+columns: id INTEGER | ratio DOUBLE | (ratio * 2) DOUBLE
+[1,0.5,1]
+[2,-1.25,-2.5]
+[3,10000000000,20000000000]
+[4,null,null]
+[5,3.14159,6.28318]
+
+== sql card == SELECT sum(amount), avg(amount) FROM orders
+columns: sum(amount) DECIMAL(38,4) | avg(amount) DOUBLE
+["111.7501",22.35002]
+
+== sql card == SELECT id, amount, amount * 3 FROM orders ORDER BY id
+columns: id BIGINT | amount DECIMAL(12,4) | (amount * 3) DECIMAL(18,4)
+[1,"10.5000","31.5000"]
+[2,"0.2500","0.7500"]
+[3,"100.0000","300.0000"]
+[4,"1.0000","3.0000"]
+[5,"0.0001","0.0003"]
+
+== sql card == SELECT id, born, seen, stamp, tod, yr FROM items ORDER BY id
+columns: id INTEGER | born DATE | seen TIMESTAMPTZ | stamp TIMESTAMPTZ | tod VARCHAR | yr INTEGER
+[1,"2026-01-31","2026-01-31T10:00:00.123456Z","2026-01-31T10:00:00Z","10:30:00",2026]
+[2,"2024-02-29","2024-02-29T23:59:59Z","2024-02-29T23:59:59Z","00:00:00",1999]
+[3,"1999-12-31","1999-12-31T00:00:00.000001Z","2001-01-01T00:00:01Z","838:59:59",2155]
+[4,null,null,null,null,null]
+[5,"2026-12-01","2026-12-01T12:00:00.5Z","2026-12-01T12:00:00Z","-01:00:00",2000]
+
+== sql card == SELECT id, born + INTERVAL 1 MONTH, date_diff('day', born, DATE '2026-03-01') FROM items ORDER BY id
+columns: id INTEGER | (born + to_months(CAST(trunc(CAST(1 AS DOUBLE)) AS INTEGER))) TIMESTAMP | date_diff('day', born, CAST('2026-03-01' AS "DATE")) BIGINT
+[1,"2026-02-28T00:00:00Z",29]
+[2,"2024-03-29T00:00:00Z",731]
+[3,"2000-01-31T00:00:00Z",9557]
+[4,null,null]
+[5,"2027-01-01T00:00:00Z",-275]
+
+== sql card == SELECT id, year(seen), month(stamp), CAST(seen AS DATE) FROM items ORDER BY id
+columns: id INTEGER | "year"(seen) BIGINT | "month"(stamp) BIGINT | CAST(seen AS "DATE") DATE
+[1,2026,1,"2026-01-31"]
+[2,2024,2,"2024-02-29"]
+[3,1999,1,"1999-12-31"]
+[4,null,null,null]
+[5,2026,12,"2026-12-01"]
+
+== sql card == SELECT id FROM items WHERE seen >= '2026-01-01' ORDER BY id
+columns: id INTEGER
+[1]
+[5]
+
+== sql card == SELECT id FROM items WHERE born BETWEEN '2024-01-01' AND '2026-06-30' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== sql card == SELECT min(seen), max(stamp), min(born) FROM items
+columns: min(seen) TIMESTAMPTZ | max(stamp) TIMESTAMPTZ | min(born) DATE
+["1999-12-31T00:00:00.000001Z","2026-12-01T12:00:00Z","1999-12-31"]
+
+== sql card == SELECT id, kind, tags FROM items ORDER BY id
+columns: id INTEGER | kind VARCHAR | tags VARCHAR
+[1,"a","x,y"]
+[2,"b",""]
+[3,"c","x,y,z"]
+[4,null,null]
+[5,"a","z"]
+
+== sql card == SELECT id FROM items WHERE kind = 'A' ORDER BY id
+columns: id INTEGER
+[1]
+[5]
+
+== sql card == SELECT kind, count(*) FROM items GROUP BY kind ORDER BY kind
+columns: kind VARCHAR | count_star() BIGINT
+[null,1]
+["a",2]
+["b",1]
+["c",1]
+
+== sql card == SELECT id, doc FROM items ORDER BY id
+columns: id INTEGER | doc VARCHAR
+[1,"{\"k\": 1, \"s\": \"one\"}"]
+[2,"[1, 2, 3]"]
+[3,"null"]
+[4,null]
+[5,"{\"k\": 2}"]
+
+== sql card == SELECT id, raw, hex(raw) FROM items ORDER BY id
+columns: id INTEGER | raw BLOB | hex(raw) VARCHAR
+[1,"AB","4142"]
+[2,"ab","6162"]
+[3,"",""]
+[4,null,null]
+[5,"Zz","5A7A"]
+
+== sql card == SELECT id FROM items WHERE raw = 'AB' ORDER BY id
+columns: id INTEGER
+[1]
+
+== sql card == SELECT i.id, i.name, sum(o.amount) AS total, count(o.id) AS n FROM items i LEFT JOIN orders o ON o.item_id = i.id GROUP BY i.id, i.name ORDER BY i.id
+columns: id INTEGER | name VARCHAR | total DECIMAL(38,4) | n BIGINT
+[1,"Alice","10.7500",2]
+[2,"alice","100.0000",1]
+[3,"BOB","0.0001",1]
+[4,null,null,0]
+[5,"Émile",null,0]
+
+== sql card == SELECT o.id FROM orders o JOIN items i ON i.id = o.item_id WHERE i.name = 'ALICE' ORDER BY o.id
+columns: id BIGINT
+[1]
+[2]
+[3]
+
+== sql card == SELECT status FROM orders UNION SELECT name FROM items ORDER BY 1
+columns: status VARCHAR
+[null]
+["Alice"]
+["BOB"]
+["new"]
+["PAID"]
+["Émile"]
+
+== sql card == SELECT typeof(NOW()), typeof(CURDATE())
+error: Catalog Error: Scalar Function with name curdate does not exist! Did you mean "current_date"? LINE 1: SELECT typeof(NOW()), typeof(CURDATE()) ^
+
+== sql card == SELECT NOW() >= TIMESTAMP '2026-01-01 00:00:00', CURDATE() >= DATE '2026-01-01'
+error: Catalog Error: Scalar Function with name curdate does not exist! Did you mean "current_date"? LINE 1: SELECT NOW() >= TIMESTAMP '2026-01-01 00:00:00', CURDATE() >= DATE '2026-01-01' ^
+
+== sql card == SELECT ID, Name FROM Items WHERE id = 1
+columns: id INTEGER | name VARCHAR
+[1,"Alice"]
+
+== sql card == SELECT id FROM shop.items WHERE id = 1
+columns: id INTEGER
+[1]
+
+== mysql port == SELECT * FROM items ORDER BY id
+columns: id INTEGER | name VARCHAR | code VARCHAR | price DECIMAL(10,2) | qty BIGINT | big UBIGINT | flag INTEGER | small INTEGER | ratio DOUBLE | born DATE | seen TIMESTAMPTZ | stamp TIMESTAMPTZ | tod VARCHAR | yr INTEGER | kind VARCHAR | tags VARCHAR | doc VARCHAR | raw BLOB | note VARCHAR
+[1,"Alice","Ab","10.50",7,18446744073709551615,1,-3,0.5,"2026-01-31","2026-01-31T10:00:00.123456Z","2026-01-31T10:00:00Z","10:30:00",2026,"a","x,y","{\"k\": 1, \"s\": \"one\"}","AB","Hello there"]
+[2,"alice","AB","0.00",0,0,0,0,-1.25,"2024-02-29","2024-02-29T23:59:59Z","2024-02-29T23:59:59Z","00:00:00",1999,"b","","[1, 2, 3]","ab","hello"]
+[3,"BOB","ab","99999999.99",4294967295,9223372036854775808,1,32767,10000000000,"1999-12-31","1999-12-31T00:00:00.000001Z","2001-01-01T00:00:01Z","838:59:59",2155,"c","x,y,z","null","",""]
+[4,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null]
+[5,"Émile","é","-7.25",12,42,0,-32768,3.14159,"2026-12-01","2026-12-01T12:00:00.5Z","2026-12-01T12:00:00Z","-01:00:00",2000,"a","z","{\"k\": 2}","Zz","año"]
+
+== mysql port == SELECT * FROM orders ORDER BY id
+columns: id BIGINT | item_id INTEGER | amount DECIMAL(12,4) | status VARCHAR
+[1,1,"10.5000","new"]
+[2,1,"0.2500","PAID"]
+[3,2,"100.0000","paid"]
+[4,null,"1.0000",null]
+[5,3,"0.0001","New"]
+
+== mysql port == SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'items' ORDER BY ordinal_position
+columns: column_name VARCHAR | data_type VARCHAR | is_nullable VARCHAR
+["id","INTEGER","YES"]
+["name","VARCHAR","YES"]
+["code","VARCHAR","YES"]
+["price","DECIMAL(10,2)","YES"]
+["qty","BIGINT","YES"]
+["big","UBIGINT","YES"]
+["flag","INTEGER","YES"]
+["small","INTEGER","YES"]
+["ratio","DOUBLE","YES"]
+["born","DATE","YES"]
+["seen","TIMESTAMP WITH TIME ZONE","YES"]
+["stamp","TIMESTAMP WITH TIME ZONE","YES"]
+["tod","VARCHAR","YES"]
+["yr","INTEGER","YES"]
+["kind","VARCHAR","YES"]
+["tags","VARCHAR","YES"]
+["doc","VARCHAR","YES"]
+["raw","BLOB","YES"]
+["note","VARCHAR","YES"]
+
+== mysql port == SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'orders' ORDER BY ordinal_position
+columns: column_name VARCHAR | data_type VARCHAR
+["id","BIGINT"]
+["item_id","INTEGER"]
+["amount","DECIMAL(12,4)"]
+["status","VARCHAR"]
+
+== mysql port == SELECT typeof(id), typeof(name), typeof(code), typeof(price), typeof(qty), typeof(big), typeof(flag), typeof(small), typeof(ratio) FROM items WHERE id = 1
+columns: typeof(id) VARCHAR | typeof("name") VARCHAR | typeof(code) VARCHAR | typeof(price) VARCHAR | typeof(qty) VARCHAR | typeof(big) VARCHAR | typeof(flag) VARCHAR | typeof(small) VARCHAR | typeof(ratio) VARCHAR
+["INTEGER","VARCHAR","VARCHAR","DECIMAL(10,2)","BIGINT","UBIGINT","INTEGER","INTEGER","DOUBLE"]
+
+== mysql port == SELECT typeof(born), typeof(seen), typeof(stamp), typeof(tod), typeof(yr), typeof(kind), typeof(tags), typeof(doc), typeof(raw), typeof(note) FROM items WHERE id = 1
+columns: typeof(born) VARCHAR | typeof(seen) VARCHAR | typeof(stamp) VARCHAR | typeof(tod) VARCHAR | typeof(yr) VARCHAR | typeof(kind) VARCHAR | typeof(tags) VARCHAR | typeof(doc) VARCHAR | typeof(raw) VARCHAR | typeof(note) VARCHAR
+["DATE","TIMESTAMP WITH TIME ZONE","TIMESTAMP WITH TIME ZONE","VARCHAR","INTEGER","VARCHAR","VARCHAR","VARCHAR","BLOB","VARCHAR"]
+
+== mysql port == SELECT id FROM items WHERE name = 'ALICE' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== mysql port == SELECT id FROM items WHERE name = 'alice' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== mysql port == SELECT id FROM items WHERE code = 'AB' ORDER BY id
+columns: id INTEGER
+[2]
+
+== mysql port == SELECT id FROM items WHERE code = 'ab' ORDER BY id
+columns: id INTEGER
+[3]
+
+== mysql port == SELECT id FROM items WHERE name < 'b' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== mysql port == SELECT id FROM items WHERE name IN ('bob', 'ÉMILE') ORDER BY id
+columns: id INTEGER
+[3]
+[5]
+
+== mysql port == SELECT id, name FROM items ORDER BY name, id
+columns: id INTEGER | name VARCHAR
+[4,null]
+[1,"Alice"]
+[2,"alice"]
+[3,"BOB"]
+[5,"Émile"]
+
+== mysql port == SELECT id, name FROM items ORDER BY name DESC, id
+columns: id INTEGER | name VARCHAR
+[5,"Émile"]
+[3,"BOB"]
+[1,"Alice"]
+[2,"alice"]
+[4,null]
+
+== mysql port == SELECT id, code FROM items ORDER BY code, id
+columns: id INTEGER | code VARCHAR
+[4,null]
+[2,"AB"]
+[1,"Ab"]
+[3,"ab"]
+[5,"é"]
+
+== mysql port == SELECT count(DISTINCT name), count(DISTINCT code) FROM items
+columns: count(DISTINCT "name") BIGINT | count(DISTINCT code) BIGINT
+[4,4]
+
+== mysql port == SELECT lower(name) AS n, count(*) AS c FROM items GROUP BY ALL ORDER BY n
+columns: n VARCHAR | c BIGINT
+[null,1]
+["alice",2]
+["bob",1]
+["émile",1]
+
+== mysql port == SELECT min(name), max(name), min(code), max(code) FROM items
+columns: min("name") VARCHAR | max("name") VARCHAR | min(code) VARCHAR | max(code) VARCHAR
+["Alice","Émile","AB","é"]
+
+== mysql port == SELECT id, note LIKE 'HEL%', note ILIKE 'HEL%', note = 'HELLO' FROM items ORDER BY id
+columns: id INTEGER | (note ~~ 'HEL%') BOOLEAN | (note ~~* 'HEL%') BOOLEAN | (note = 'HELLO') BOOLEAN
+[1,false,true,false]
+[2,false,true,true]
+[3,false,false,false]
+[4,null,null,null]
+[5,false,false,false]
+
+== mysql port == SELECT id FROM orders WHERE status = 'paid' ORDER BY id
+columns: id BIGINT
+[2]
+[3]
+
+== mysql port == SELECT lower(status) AS s, count(*) AS c FROM orders GROUP BY ALL ORDER BY s
+columns: s VARCHAR | c BIGINT
+[null,1]
+["new",2]
+["paid",2]
+
+== mysql port == SELECT 'a' = 'A', 'a' < 'B', 'a' LIKE 'A'
+columns: ('a' = 'A') BOOLEAN | ('a' < 'B') BOOLEAN | ('a' ~~ 'A') BOOLEAN
+[true,true,false]
+
+== mysql port == SELECT id, price FROM items ORDER BY price, id
+columns: id INTEGER | price DECIMAL(10,2)
+[4,null]
+[5,"-7.25"]
+[2,"0.00"]
+[1,"10.50"]
+[3,"99999999.99"]
+
+== mysql port == SELECT id, price FROM items ORDER BY price DESC, id
+columns: id INTEGER | price DECIMAL(10,2)
+[3,"99999999.99"]
+[1,"10.50"]
+[2,"0.00"]
+[5,"-7.25"]
+[4,null]
+
+== mysql port == SELECT id FROM items WHERE name IS NULL
+columns: id INTEGER
+[4]
+
+== mysql port == SELECT count(*), count(name), count(price) FROM items
+columns: count_star() BIGINT | count("name") BIGINT | count(price) BIGINT
+[5,4,4]
+
+== mysql port == SELECT sum(price), avg(price), min(price), max(price) FROM items
+columns: sum(price) DECIMAL(38,2) | avg(price) DOUBLE | min(price) DECIMAL(10,2) | max(price) DECIMAL(10,2)
+["100000003.24",25000000.81,"-7.25","99999999.99"]
+
+== mysql port == SELECT id, price * 2, price / 3, price + qty FROM items ORDER BY id
+columns: id INTEGER | (price * 2) DECIMAL(18,2) | (price / 3) DOUBLE | (price + qty) DECIMAL(22,2)
+[1,"21.00",3.5,"17.50"]
+[2,"0.00",0,"0.00"]
+[3,"199999999.98",33333333.33,"4394967294.99"]
+[4,null,null,null]
+[5,"-14.50",-2.4166666666666665,"4.75"]
+
+== mysql port == SELECT id, qty, big, small FROM items ORDER BY id
+columns: id INTEGER | qty BIGINT | big UBIGINT | small INTEGER
+[1,7,18446744073709551615,-3]
+[2,0,0,0]
+[3,4294967295,9223372036854775808,32767]
+[4,null,null,null]
+[5,12,42,-32768]
+
+== mysql port == SELECT id, big + 0, qty + 1 FROM items ORDER BY id
+columns: id INTEGER | (big + 0) UBIGINT | (qty + 1) BIGINT
+[1,18446744073709551615,8]
+[2,0,1]
+[3,9223372036854775808,4294967296]
+[4,null,null]
+[5,42,13]
+
+== mysql port == SELECT max(big), max(qty), min(small) FROM items
+columns: max(big) UBIGINT | max(qty) BIGINT | min(small) INTEGER
+[18446744073709551615,4294967295,-32768]
+
+== mysql port == SELECT 9 / 2, 7 / 2, -7 / 2, 7 // 2, 7 % 2
+columns: (9 / 2) DOUBLE | (7 / 2) DOUBLE | (-7 / 2) DOUBLE | (7 // 2) INTEGER | (7 % 2) INTEGER
+[4.5,3.5,-3.5,3,1]
+
+== mysql port == SELECT id, qty / 2 FROM items ORDER BY id
+columns: id INTEGER | (qty / 2) DOUBLE
+[1,3.5]
+[2,0]
+[3,2147483647.5]
+[4,null]
+[5,6]
+
+== mysql port == SELECT id, flag, flag = 1, flag + 1 FROM items ORDER BY id
+columns: id INTEGER | flag INTEGER | (flag = 1) BOOLEAN | (flag + 1) INTEGER
+[1,1,true,2]
+[2,0,false,1]
+[3,1,true,2]
+[4,null,null,null]
+[5,0,false,1]
+
+== mysql port == SELECT id, ratio, ratio * 2 FROM items ORDER BY id
+columns: id INTEGER | ratio DOUBLE | (ratio * 2) DOUBLE
+[1,0.5,1]
+[2,-1.25,-2.5]
+[3,10000000000,20000000000]
+[4,null,null]
+[5,3.14159,6.28318]
+
+== mysql port == SELECT sum(amount), avg(amount) FROM orders
+columns: sum(amount) DECIMAL(38,4) | avg(amount) DOUBLE
+["111.7501",22.35002]
+
+== mysql port == SELECT id, amount, amount * 3 FROM orders ORDER BY id
+columns: id BIGINT | amount DECIMAL(12,4) | (amount * 3) DECIMAL(18,4)
+[1,"10.5000","31.5000"]
+[2,"0.2500","0.7500"]
+[3,"100.0000","300.0000"]
+[4,"1.0000","3.0000"]
+[5,"0.0001","0.0003"]
+
+== mysql port == SELECT id, born, seen, stamp, tod, yr FROM items ORDER BY id
+columns: id INTEGER | born DATE | seen TIMESTAMPTZ | stamp TIMESTAMPTZ | tod VARCHAR | yr INTEGER
+[1,"2026-01-31","2026-01-31T10:00:00.123456Z","2026-01-31T10:00:00Z","10:30:00",2026]
+[2,"2024-02-29","2024-02-29T23:59:59Z","2024-02-29T23:59:59Z","00:00:00",1999]
+[3,"1999-12-31","1999-12-31T00:00:00.000001Z","2001-01-01T00:00:01Z","838:59:59",2155]
+[4,null,null,null,null,null]
+[5,"2026-12-01","2026-12-01T12:00:00.5Z","2026-12-01T12:00:00Z","-01:00:00",2000]
+
+== mysql port == SELECT id, born + INTERVAL 1 MONTH, date_diff('day', born, DATE '2026-03-01') FROM items ORDER BY id
+columns: id INTEGER | (born + to_months(CAST(trunc(CAST(1 AS DOUBLE)) AS INTEGER))) TIMESTAMP | date_diff('day', born, CAST('2026-03-01' AS "DATE")) BIGINT
+[1,"2026-02-28T00:00:00Z",29]
+[2,"2024-03-29T00:00:00Z",731]
+[3,"2000-01-31T00:00:00Z",9557]
+[4,null,null]
+[5,"2027-01-01T00:00:00Z",-275]
+
+== mysql port == SELECT id, year(seen), month(stamp), CAST(seen AS DATE) FROM items ORDER BY id
+columns: id INTEGER | "year"(seen) BIGINT | "month"(stamp) BIGINT | CAST(seen AS "DATE") DATE
+[1,2026,1,"2026-01-31"]
+[2,2024,2,"2024-02-29"]
+[3,1999,1,"1999-12-31"]
+[4,null,null,null]
+[5,2026,12,"2026-12-01"]
+
+== mysql port == SELECT id FROM items WHERE seen >= '2026-01-01' ORDER BY id
+columns: id INTEGER
+[1]
+[5]
+
+== mysql port == SELECT id FROM items WHERE born BETWEEN '2024-01-01' AND '2026-06-30' ORDER BY id
+columns: id INTEGER
+[1]
+[2]
+
+== mysql port == SELECT min(seen), max(stamp), min(born) FROM items
+columns: min(seen) TIMESTAMPTZ | max(stamp) TIMESTAMPTZ | min(born) DATE
+["1999-12-31T00:00:00.000001Z","2026-12-01T12:00:00Z","1999-12-31"]
+
+== mysql port == SELECT id, kind, tags FROM items ORDER BY id
+columns: id INTEGER | kind VARCHAR | tags VARCHAR
+[1,"a","x,y"]
+[2,"b",""]
+[3,"c","x,y,z"]
+[4,null,null]
+[5,"a","z"]
+
+== mysql port == SELECT id FROM items WHERE kind = 'A' ORDER BY id
+columns: id INTEGER
+[1]
+[5]
+
+== mysql port == SELECT kind, count(*) FROM items GROUP BY kind ORDER BY kind
+columns: kind VARCHAR | count_star() BIGINT
+[null,1]
+["a",2]
+["b",1]
+["c",1]
+
+== mysql port == SELECT id, doc FROM items ORDER BY id
+columns: id INTEGER | doc VARCHAR
+[1,"{\"k\": 1, \"s\": \"one\"}"]
+[2,"[1, 2, 3]"]
+[3,"null"]
+[4,null]
+[5,"{\"k\": 2}"]
+
+== mysql port == SELECT id, raw, hex(raw) FROM items ORDER BY id
+columns: id INTEGER | raw BLOB | hex(raw) VARCHAR
+[1,"AB","4142"]
+[2,"ab","6162"]
+[3,"",""]
+[4,null,null]
+[5,"Zz","5A7A"]
+
+== mysql port == SELECT id FROM items WHERE raw = 'AB' ORDER BY id
+columns: id INTEGER
+[1]
+
+== mysql port == SELECT i.id, i.name, sum(o.amount) AS total, count(o.id) AS n FROM items i LEFT JOIN orders o ON o.item_id = i.id GROUP BY i.id, i.name ORDER BY i.id
+columns: id INTEGER | name VARCHAR | total DECIMAL(38,4) | n BIGINT
+[1,"Alice","10.7500",2]
+[2,"alice","100.0000",1]
+[3,"BOB","0.0001",1]
+[4,null,null,0]
+[5,"Émile",null,0]
+
+== mysql port == SELECT o.id FROM orders o JOIN items i ON i.id = o.item_id WHERE i.name = 'ALICE' ORDER BY o.id
+columns: id BIGINT
+[1]
+[2]
+[3]
+
+== mysql port == SELECT status FROM orders UNION SELECT name FROM items ORDER BY 1
+columns: status VARCHAR
+[null]
+["Alice"]
+["BOB"]
+["new"]
+["PAID"]
+["Émile"]
+
+== mysql port == SELECT typeof(NOW()), typeof(CURDATE())
+columns: typeof(now()) VARCHAR | typeof(curdate()) VARCHAR
+["TIMESTAMP","DATE"]
+
+== mysql port == SELECT NOW() >= TIMESTAMP '2026-01-01 00:00:00', CURDATE() >= DATE '2026-01-01'
+columns: (now() >= CAST('2026-01-01 00:00:00' AS TIMESTAMP)) BOOLEAN | (curdate() >= CAST('2026-01-01' AS "DATE")) BOOLEAN
+[true,true]
+
+== mysql port == SELECT ID, Name FROM Items WHERE id = 1
+columns: id INTEGER | name VARCHAR
+[1,"Alice"]
+
+== mysql port == SELECT id FROM shop.items WHERE id = 1
+columns: id INTEGER
+[1]
+
