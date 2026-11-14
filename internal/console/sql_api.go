@@ -1354,6 +1354,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
+				if msg := sqlTimestampDiffRefusalFor(narrowed, statement, sess.Types, sess.TimeZone); msg != "" {
+					viewsRefusal = &sqlStarRefusal{msg}
+					return "", viewsRefusal
+				}
 				// The text the statement compares (#2533): refused here
 				// when no value could make the copy's answer MySQL's,
 				// guarded at the end of the script when the values decide.

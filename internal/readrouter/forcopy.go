@@ -103,6 +103,14 @@ type CopyOptions struct {
 	// sent as written and the copy refuses it: its own date_sub takes three
 	// arguments.
 	MySQLDateSub bool
+	// MySQLTimestampDiff writes MySQL's TIMESTAMPDIFF(unit, a, b) as one of
+	// the copy's _bintrail_timestampdiff macros (mysqlTimestampDiffCall,
+	// #2611), which sqlsandbox defines under Session.MySQLClock, and lets a
+	// statement whose every call was written so past the veto list
+	// (dateDiffVeto). Only the routing port sets it, and the caller keeps on
+	// MySQL a call whose dates are not date columns or clock calls
+	// (TimestampDiffVeto).
+	MySQLTimestampDiff bool
 	// MySQLDateAdd writes MySQL's DATE_ADD(d, INTERVAL n unit) and
 	// ADDDATE(d, INTERVAL n unit) as the copy's _bintrail_date_add macro
 	// (mysqlDateAddCall), and every d + INTERVAL n unit and d - INTERVAL n
@@ -553,7 +561,7 @@ func wordByte(c byte) bool {
 }
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
-var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff", "date_sub", "subdate", "date_add", "adddate",
+var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff", "date_sub", "subdate", "date_add", "adddate", "timestampdiff",
 	"current_timestamp", "current_date", "localtime", "localtimestamp"}
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
@@ -620,6 +628,16 @@ func (sc scanned) copyText(o CopyOptions) string {
 				continue
 			}
 			call, n, ok := mysqlDateSubCall(cp[j.cp+kw:], bl[j.bl+kw:])
+			if !ok {
+				continue
+			}
+			cp = cp[:j.cp] + call + cp[j.cp+kw+n:]
+			continue
+		case j.word == "timestampdiff":
+			if !o.MySQLTimestampDiff {
+				continue
+			}
+			call, n, ok := mysqlTimestampDiffCall(cp[j.cp+kw:], bl[j.bl+kw:])
 			if !ok {
 				continue
 			}
