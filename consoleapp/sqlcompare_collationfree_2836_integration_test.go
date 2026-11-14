@@ -117,7 +117,7 @@ func collationFree(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT side, YEAR(d), MONTH(d) FROM ev WHERE k > 0 ORDER BY k", "copy"},
 
 		{"SELECT side, '10:47' < '1045' FROM ev WHERE k > 0 ORDER BY k", "live"},
-		{"SELECT side, s FROM ev WHERE k > 0 AND s < '1045' ORDER BY k", "live"},
+		{"SELECT side, s FROM ev WHERE k > 0 AND s > '1045' ORDER BY k", "live"},
 		{"SELECT side, CONCAT(n) FROM ev WHERE k > 0 ORDER BY k", "live"},
 		{"SELECT side, LOWER(s) AS x FROM ev WHERE k > 0 ORDER BY x, k", "live"},
 		{"SELECT side, d FROM ev WHERE k > 0 AND d > '2026-01-03' ORDER BY k", "live"},
