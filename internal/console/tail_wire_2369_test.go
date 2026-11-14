@@ -177,8 +177,10 @@ func TestTailKeeperNote(t *testing.T) {
 	}
 }
 
-// An earlier process's tails directories are removed; a running one's, and
-// anything else, stay.
+// An earlier process's tails directories are removed; a recent one's, and
+// anything else, stay. Neither holds a lock: a directory of a version from
+// before #2819, by its age alone (a held one stays at any age:
+// TestSweepTailDirs_2819).
 func TestSweepTailDirs(t *testing.T) {
 	parent := t.TempDir()
 	old, recent, other := filepath.Join(parent, "bintrail-tails-1"), filepath.Join(parent, "bintrail-tails-2"), filepath.Join(parent, "keep-me")

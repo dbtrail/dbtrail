@@ -1,0 +1,350 @@
+package console
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// #2819: the sweep a process runs at its first keeper removed every
+// bintrail-tails-* directory of the user idle for 30 minutes, and a keeper
+// writes only when a tail changed, so a live process whose server had no
+// change for that long lost its files to another process's start.
+
+// tailSweepHelperEnv makes TestTailSweepHelperProcess a keeper in a process
+// of its own, under the parent it names.
+const tailSweepHelperEnv = "BINTRAIL_TAIL_SWEEP_HELPER_PARENT"
+
+// TestTailSweepHelperProcess is not a test: run by
+// TestTailSweep_anotherLiveProcessKeepsItsTails_2819 as a second process, it
+// writes a tail, prints its directory and files, and lives until its stdin
+// closes.
+func TestTailSweepHelperProcess(t *testing.T) {
+	parent := os.Getenv(tailSweepHelperEnv)
+	if parent == "" {
+		t.Skip("run as a second process by TestTailSweep_anotherLiveProcessKeepsItsTails_2819")
+	}
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, parent, tailBudget{Keys: 3}, time.Minute, time.Hour)
+	got := settled(t, context.Background(), k, keeperTable("orders"))
+	v, ok := got[tailKey("shop", "orders")]
+	if !ok || len(v.Paths) == 0 {
+		t.Fatalf("no tail written: %+v", got)
+	}
+	fmt.Printf("DIR=%s\n", k.dir)
+	for _, p := range v.Paths {
+		fmt.Printf("FILE=%s\n", p)
+	}
+	fmt.Println("READY")
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+// Two processes under one temporary directory: the first's keeper idle past
+// the cutoff, the second's sweep keeps its files; once the first is gone, its
+// directory is removed.
+func TestTailSweep_anotherLiveProcessKeepsItsTails_2819(t *testing.T) {
+	parent := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTailSweepHelperProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(), tailSweepHelperEnv+"="+parent)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	var dir string
+	var files []string
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		line := sc.Text()
+		if d, ok := strings.CutPrefix(line, "DIR="); ok {
+			dir = d
+		}
+		if f, ok := strings.CutPrefix(line, "FILE="); ok {
+			files = append(files, f)
+		}
+		if line == "READY" {
+			break
+		}
+	}
+	if dir == "" || len(files) == 0 {
+		t.Fatalf("the second process wrote no tail (dir %q, files %v)", dir, files)
+	}
+	go func() { _, _ = io.Copy(io.Discard, stdout) }()
+	idleSince(t, time.Now().Add(-2*time.Hour), append([]string{dir}, files...)...)
+
+	sweepTailDirs(parent, time.Now().Add(-tailKeepOld))
+	for _, f := range files {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("a live process's tail was removed by another's sweep: %v", err)
+		}
+	}
+
+	stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("the second process: %v", err)
+	}
+	sweepTailDirs(parent, time.Now().Add(-tailKeepOld))
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the directory of a process that ended stayed: %v", err)
+	}
+}
+
+// The issue's own shape, in one process: two keepers under one parent, the
+// first idle past the cutoff, the second started; the first's files are still
+// there and its next statement reads them.
+func TestTailSweep_anIdleKeeperKeepsItsTails_2819(t *testing.T) {
+	ctx := context.Background()
+	parent := t.TempDir()
+	orders, ko := keeperTable("orders"), tailKey("shop", "orders")
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	first := newTailKeeper(f, parent, tailBudget{Keys: 3}, time.Minute, time.Hour)
+	v := settled(t, ctx, first, orders)[ko]
+	if len(v.Paths) == 0 {
+		t.Fatal("no tail written")
+	}
+	idleSince(t, time.Now().Add(-2*time.Hour), append([]string{first.dir}, v.Paths...)...)
+
+	// The second keeper's start, as tailKeeperFor runs it.
+	sweepTailDirs(parent, time.Now().Add(-tailKeepOld))
+	g := &fakeIndex{}
+	g.add("orders", "1")
+	second := newTailKeeper(g, parent, tailBudget{Keys: 3}, time.Minute, time.Hour)
+	settled(t, ctx, second, orders)
+
+	if err := statChain(t, v, false); err != nil {
+		t.Fatalf("the idle keeper's tail was removed: %v", err)
+	}
+	again := settled(t, ctx, first, orders)[ko]
+	if chain(again) != chain(v) || fileKeys(t, again.Paths) != 1 {
+		t.Fatalf("the idle keeper's next statement reads %v, want %v", again.Paths, v.Paths)
+	}
+}
+
+// A keeper whose directory is removed under it (by hand, or by an older
+// version's sweep) makes it again and builds its tails again: the next
+// statement reads files that exist, never paths that are gone.
+func TestTailKeeper_aRemovedDirectoryIsMadeAgain_2819(t *testing.T) {
+	ctx := context.Background()
+	logs := captureLogs(t)
+	orders, ko := keeperTable("orders"), tailKey("shop", "orders")
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	v := settled(t, ctx, k, orders)[ko]
+	if len(v.Paths) == 0 {
+		t.Fatal("no tail written")
+	}
+	gone := k.dir
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing changed since: the tail is not dirty, and the old code handed
+	// its gone paths out again.
+	got, ok := settled(t, ctx, k, orders)[ko]
+	if ok {
+		if err := statChain(t, got, false); err != nil {
+			t.Fatalf("a statement is handed a tail whose file is gone: %v", err)
+		}
+	}
+	f.add("orders", "2")
+	got, ok = settled(t, ctx, k, orders)[ko]
+	if !ok {
+		t.Fatal("no tail after its directory was made again")
+	}
+	if err := statChain(t, got, false); err != nil {
+		t.Fatalf("a statement is handed a tail whose file is gone: %v", err)
+	}
+	if fileKeys(t, got.Paths) != 2 {
+		t.Errorf("the tail built again holds %d keys, want 2", fileKeys(t, got.Paths))
+	}
+	if k.dir == gone || filepath.Dir(k.dir) != filepath.Dir(gone) {
+		t.Errorf("directory %q, removed one %q", k.dir, gone)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), gone) {
+		t.Errorf("no warning names the removed directory:\n%s", logs.String())
+	}
+	if _, err := lockTailDir(k.dir); !errors.Is(err, errTailDirHeld) {
+		t.Errorf("the directory made again is not held: %v", err)
+	}
+}
+
+// A directory replaced under its name (removed, then another made there) is
+// not the keeper's: its tails are built again in one of its own, and the
+// files under the old name are not removed later.
+func TestTailKeeper_aReplacedDirectoryIsNotItsOwn_2819(t *testing.T) {
+	ctx := context.Background()
+	orders, ko := keeperTable("orders"), tailKey("shop", "orders")
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	k.keepOld = 0
+	v := settled(t, ctx, k, orders)[ko]
+	if len(v.Paths) == 0 {
+		t.Fatal("no tail written")
+	}
+	old := k.dir
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Another's file, under the name the keeper's had.
+	if err := os.WriteFile(v.Paths[0], []byte("other"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := settled(t, ctx, k, orders)[ko]
+	if !ok || k.dir == old || filepath.Dir(got.Paths[0]) != k.dir {
+		t.Fatalf("tail %v in %q, the replaced one %q", got.Paths, k.dir, old)
+	}
+	if b, err := os.ReadFile(v.Paths[0]); err != nil || string(b) != "other" {
+		t.Errorf("a file under the replaced directory's name was touched: %q, %v", b, err)
+	}
+}
+
+// A replaced keeper's directory stays held until it is removed: a sweep in
+// between keeps it, then it is removed and its lock let go.
+func TestTailKeeper_removeDirAfter_2819(t *testing.T) {
+	ctx := context.Background()
+	parent := t.TempDir()
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, parent, tailBudget{Keys: 3}, time.Minute, time.Hour)
+	settled(t, ctx, k, keeperTable("orders"))
+	dir := k.dir
+	k.close()
+	k.removeDirAfter(200 * time.Millisecond)
+	idleSince(t, time.Now().Add(-2*time.Hour), dir)
+	sweepTailDirs(parent, time.Now().Add(-tailKeepOld))
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("a closed keeper's directory was swept while a statement may read it: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the directory was not removed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	k.mu.Lock()
+	lock := k.dirLock
+	k.mu.Unlock()
+	if lock != nil {
+		if _, err := lock.Stat(); err == nil {
+			t.Error("the lock is still open after its directory was removed")
+		}
+	}
+}
+
+// What the sweep removes and keeps, every directory idle past the cutoff
+// unless it says otherwise.
+func TestSweepTailDirs_2819(t *testing.T) {
+	parent := t.TempDir()
+	long := time.Now().Add(-2 * time.Hour)
+	mk := func(name string) string {
+		t.Helper()
+		d := filepath.Join(parent, name)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "1-shop.orders.parquet"), []byte("1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+
+	held := mk("bintrail-tails-held")
+	lock, err := lockTailDir(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lock.Close() })
+	// A lock let go (its process ended): the directory is any earlier
+	// process's.
+	released := mk("bintrail-tails-released")
+	l2, err := lockTailDir(released)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2.Close()
+	// A recent directory no one holds: a keeper that has just made it and not
+	// locked it yet, or one of an older version that is writing.
+	recent := mk("bintrail-tails-recent")
+	// A link by the name, to an earlier process's directory elsewhere: the
+	// link is not a directory, and what it points to is not the sweep's.
+	target := filepath.Join(t.TempDir(), "bintrail-tails-target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "bintrail-tails-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	var others string
+	if os.Getuid() == 0 {
+		others = mk("bintrail-tails-another-user")
+		if err := os.Chown(others, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{held, released, target, others} {
+		if d != "" {
+			idleSince(t, long, d)
+		}
+	}
+
+	sweepTailDirs(parent, time.Now().Add(-tailKeepOld))
+
+	if _, err := os.Stat(released); !os.IsNotExist(err) {
+		t.Errorf("a directory no process holds stayed: %v", err)
+	}
+	for _, d := range []string{held, recent, link, target, others} {
+		if d == "" {
+			continue
+		}
+		if _, err := os.Lstat(d); err != nil {
+			t.Errorf("%s removed: %v", filepath.Base(d), err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(held, "1-shop.orders.parquet")); err != nil {
+		t.Errorf("a held directory lost its file: %v", err)
+	}
+	if others == "" {
+		t.Log("not root: another user's directory is not checked")
+	}
+}
+
+// idleSince sets paths' times to at, as a directory and files no write
+// touched since.
+func idleSince(t *testing.T, at time.Time, paths ...string) {
+	t.Helper()
+	// Files first: setting a file's times does not touch its directory's,
+	// but the order keeps it obvious.
+	for i := len(paths) - 1; i >= 0; i-- {
+		if err := os.Chtimes(paths[i], at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

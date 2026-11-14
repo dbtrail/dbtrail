@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -160,14 +161,7 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 		// Outside the keepers' lock: the old one may be mid-refresh. Its
 		// builds end now, and none installs into it after.
 		old.close()
-		time.AfterFunc(tailKeepOld, func() {
-			old.mu.Lock()
-			dir := old.dir
-			old.mu.Unlock()
-			if dir != "" {
-				_ = os.RemoveAll(dir)
-			}
-		})
+		old.removeDirAfter(tailKeepOld)
 	}
 	return k
 }
@@ -246,12 +240,22 @@ func tailsSayTheInstant(statement string, tailed bool) bool {
 
 var tailSweep sync.Once
 
+// errTailDirHeld is lockTailDir's answer for a directory a live process holds.
+var errTailDirHeld = errors.New("another process holds the tails' directory")
+
 // sweepTailDirs removes the tails' directories an earlier process left under
-// parent (it stopped before removing them; nothing reads them again), those
-// last written before cutoff: another process's are written while it runs.
+// parent (it stopped before removing them; nothing reads them again): this
+// user's, last written before cutoff, and held by no process. Not written
+// for a while is no proof it is unused (#2819): a keeper writes only when a
+// tail changed, so a live process whose server had no change for longer
+// still reads its files, and the lock it holds on its directory (makeDir)
+// is what keeps it. The age stays a rule for the instant between a keeper
+// making its directory and locking it, and for a directory of a version from
+// before the lock, whose process may still run.
 func sweepTailDirs(parent string, cutoff time.Time) {
 	dirs, _ := filepath.Glob(filepath.Join(parent, "bintrail-tails-*"))
 	for _, dir := range dirs {
+		// Lstat: a link by that name is not a directory, and is left alone.
 		fi, err := os.Lstat(dir)
 		if err != nil || !fi.IsDir() || !fi.ModTime().Before(cutoff) {
 			continue
@@ -259,9 +263,20 @@ func sweepTailDirs(parent string, cutoff time.Time) {
 		if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
 			continue // another user's
 		}
+		lock, err := lockTailDir(dir)
+		if err != nil {
+			// Held: a live process reads it. Any other failure cannot tell
+			// it is unused, so it stays too.
+			if !errors.Is(err, errTailDirHeld) {
+				slog.Debug("Engine Routing: an earlier process's tails were kept: whether a process still uses them is not known", "dir", dir, "error", err)
+			}
+			continue
+		}
+		// Removed while held, so no keeper takes it in between.
 		if err := os.RemoveAll(dir); err != nil {
 			slog.Debug("Engine Routing: an earlier process's tails could not be removed", "dir", dir, "error", err)
 		}
+		lock.Close()
 	}
 }
 

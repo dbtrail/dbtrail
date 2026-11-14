@@ -2,7 +2,6 @@ package console
 
 import (
 	"log/slog"
-	"os"
 	"slices"
 	"sync"
 	"time"
@@ -292,10 +291,5 @@ func settleWithin(ks []*tailKeeper, d time.Duration) {
 // retireTailKeeper closes k and removes its directory after tailKeepOld.
 func retireTailKeeper(k *tailKeeper) {
 	k.close()
-	k.mu.Lock()
-	dir := k.dir
-	k.mu.Unlock()
-	if dir != "" {
-		time.AfterFunc(tailKeepOld, func() { _ = os.RemoveAll(dir) })
-	}
+	k.removeDirAfter(tailKeepOld)
 }
