@@ -406,13 +406,13 @@ func TestForwarder_globalSessionAfterReset_2810(t *testing.T) {
 func TestForwarder_readOnlyChecksTheClientCharset_2810(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
-		name          string
-		client        uint16
-		readOnly      bool
-		sessionCS     string
-		setNamesErr   error
-		want          []string
-		said, opens   bool
+		name        string
+		client      uint16
+		readOnly    bool
+		sessionCS   string
+		setNamesErr error
+		want        []string
+		said, opens bool
 	}{
 		{"read-only, the source left gbk", 255, true, "gbk", nil, []string{"SELECT @@character_set_client", "SET NAMES utf8mb4", "DO 1"}, true, true},
 		{"read-only, a port's own connection, the source left sjis", 0, true, "sjis", nil, []string{"SELECT @@character_set_client", "SET NAMES utf8mb4", "DO 1"}, true, true},
