@@ -493,6 +493,15 @@ records where the next fold starts (an LSN) and how far back in time the
 changes after it can reach, so a chain of folds applies every transaction
 exactly once.
 
+A snapshot schedule set on a PostgreSQL server in the web interface does the
+same on its own. The first snapshot is a full read of the source; each slot
+after it builds the next snapshot from the previous one and the changes
+captured since, without reading the source again. An update holds the changes
+up to capture's last saved position, which capture saves every 10 seconds. It
+does not look for tables created after the previous snapshot, and says so in
+the log: such a table enters the copy when a full snapshot is next taken,
+if the publication includes it.
+
 What to know:
 
 - **The output is a snapshot, or SQL psql loads.** A snapshot's values are
