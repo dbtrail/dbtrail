@@ -16,14 +16,14 @@ func TestSessionCookieNameFor(t *testing.T) {
 		{"127.0.0.1:8091", "bintrail_session_8091"},
 		{"localhost:8090", "bintrail_session_8090"},
 		{"[::1]:8090", "bintrail_session_8090"},
-		{"dbtrail.example.com", "bintrail_session"},     // behind a proxy: no port in the address
+		{"dbtrail.example.com", "bintrail_session"}, // behind a proxy: no port in the address
 		{"dbtrail.example.com:443", "bintrail_session_443"},
 		{"", "bintrail_session"},
 		{"127.0.0.1:", "bintrail_session"},
-		{"127.0.0.1:http", "bintrail_session"},          // not a number: never part of a cookie's name
-		{"127.0.0.1:80;x=y", "bintrail_session"},        // nor anything a client could smuggle in
-		{"127.0.0.1:123456", "bintrail_session"},        // longer than a port
-		{"127.0.0.1:８０９０", "bintrail_session"},        // digits that are not ASCII
+		{"127.0.0.1:http", "bintrail_session"},   // not a number: never part of a cookie's name
+		{"127.0.0.1:80;x=y", "bintrail_session"}, // nor anything a client could smuggle in
+		{"127.0.0.1:123456", "bintrail_session"}, // longer than a port
+		{"127.0.0.1:８０９０", "bintrail_session"},   // digits that are not ASCII
 	} {
 		r := httptest.NewRequest("GET", "http://x/", nil)
 		r.Host = tc.host
@@ -134,9 +134,32 @@ func TestSessionCookie_aLoginFromBeforeStillWorks(t *testing.T) {
 	if code := authInfoWith(t, srv, "127.0.0.1:8090", stale, c); code != 200 {
 		t.Errorf("a good port cookie beside a stale plain one: %d", code)
 	}
-	// And a stale port cookie does not hide... nothing: it is the one read.
-	bad := &http.Cookie{Name: "bintrail_session_8090", Value: "not-a-session"}
-	if code := authInfoWith(t, srv, "127.0.0.1:8090", bad, old); code == 200 {
-		t.Error("a bad port cookie fell back to the plain one: the port's name, when present, is the one that counts")
+	// A session that ended under the port's name does not shut out a good
+	// one under the plain name (what a login through a provider sets).
+	ended := &http.Cookie{Name: "bintrail_session_8090", Value: "not-a-session"}
+	if code := authInfoWith(t, srv, "127.0.0.1:8090", ended, old); code != 200 {
+		t.Errorf("a good plain cookie beside an ended port cookie: %d", code)
+	}
+	// Neither is a session: refused, as one bad cookie is.
+	if code := authInfoWith(t, srv, "127.0.0.1:8090", ended, stale); code == 200 {
+		t.Error("two cookies that are no session were let in")
+	}
+}
+
+// A login through an installed provider has no request to read a port from:
+// it sets the plain name, which every port reads.
+func TestSessionCookie_aProviderLoginSetsThePlainName(t *testing.T) {
+	srv, _ := newPasswordServer(t, "", "admin", "correct-horse-battery")
+	rec := httptest.NewRecorder()
+	token, _, err := srv.extSessionIssuer()(rec, "someone@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := rec.Result().Cookies()
+	if len(cs) != 1 || cs[0].Name != sessionCookieName || cs[0].Value != token {
+		t.Fatalf("cookies set: %v", rec.Header().Values("Set-Cookie"))
+	}
+	if code := authInfoWith(t, srv, "127.0.0.1:8090", cs[0]); code != 200 {
+		t.Errorf("the provider's session on port 8090: %d", code)
 	}
 }

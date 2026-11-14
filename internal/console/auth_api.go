@@ -85,7 +85,9 @@ func (s *Server) extSessionIssuer() ext.ConsoleSessionIssuer {
 		if err != nil {
 			return "", time.Time{}, err
 		}
-		setSessionCookie(w, r, token, expires)
+		// Under the plain name: this seam hands over no request, so the
+		// port the browser opened is not known here (setSessionCookie).
+		setSessionCookie(w, nil, token, expires)
 		slog.Info("console external-auth login", "identity", identity)
 		return token, expires, nil
 	}
@@ -293,7 +295,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // design, so logout with one only clears the cookie. Idempotent.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Revoke(bearerToken(r))
-	s.sessions.Revoke(sessionCookieToken(r))
+	s.sessions.Revoke(s.sessionCookieToken(r))
 	clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }

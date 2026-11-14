@@ -83,18 +83,35 @@ func sessionCookieNameFor(r *http.Request) string {
 	return sessionCookieName + "_" + port
 }
 
-// sessionCookieToken returns the session cookie's value, or "" when absent:
-// the cookie named for the port the browser opened, or, when there is none,
-// the plain name, which is what a login made before #2833 holds.
-func sessionCookieToken(r *http.Request) string {
-	if c, err := r.Cookie(sessionCookieNameFor(r)); err == nil && c.Value != "" {
-		return c.Value
+// sessionCookieToken returns the session token a browser sent as a cookie,
+// "" when it sent none. There can be two: the one named for the port it
+// opened, and the plain name, which a login made before #2833 holds and which
+// a login through an installed provider still sets (extSessionIssuer has no
+// request to read a port from).
+//
+// The port's cookie is the one that counts, except when it is no session of
+// this server and the plain one is: a session that ended under the port's
+// name must not shut out a good one the provider has just set under the
+// plain name. With one cookie there is nothing to choose.
+func (s *Server) sessionCookieToken(r *http.Request) string {
+	port, plain := "", ""
+	if name := sessionCookieNameFor(r); name != sessionCookieName {
+		if c, err := r.Cookie(name); err == nil {
+			port = c.Value
+		}
 	}
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
-		return ""
+	if c, err := r.Cookie(sessionCookieName); err == nil {
+		plain = c.Value
 	}
-	return c.Value
+	switch {
+	case port == "":
+		return plain
+	case plain == "":
+		return port
+	case s.sessions != nil && !s.sessions.Validate(port) && s.sessions.Validate(plain):
+		return plain
+	}
+	return port
 }
 
 // setSessionCookie attaches the issued session token to a login response,
@@ -107,8 +124,14 @@ func sessionCookieToken(r *http.Request) string {
 // idle TTL may end the session earlier, which the middleware enforces — a
 // cookie outliving its session is just a refused credential.
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	// No request: the caller cannot say which address the browser opened
+	// (extSessionIssuer), and the plain name is the one every address reads.
+	name := sessionCookieName
+	if r != nil {
+		name = sessionCookieNameFor(r)
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieNameFor(r),
+		Name:     name,
 		Value:    token,
 		Path:     "/",
 		MaxAge:   int(time.Until(expires) / time.Second),
@@ -217,7 +240,7 @@ func (s *Server) tokenMiddleware(next http.Handler) http.Handler {
 		got := bearerToken(r)
 		viaCookie := false
 		if got == "" {
-			got = sessionCookieToken(r)
+			got = s.sessionCookieToken(r)
 			viaCookie = got != ""
 		}
 		if got == "" {
