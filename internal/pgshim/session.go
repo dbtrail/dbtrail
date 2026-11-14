@@ -1,6 +1,7 @@
 package pgshim
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,11 @@ type session struct {
 	h         *shim.Handler
 	currentDB string
 	logger    *slog.Logger
+	// bound is set on a port with a login of its own (login.go): ordinary
+	// statements run on the copy through it, and h is nil. ctx is that
+	// connection's context, which ends when the client leaves.
+	bound *Binding
+	ctx   context.Context
 }
 
 // pgErr is a query-level failure carrying a 5-char SQLSTATE and a message.
@@ -36,7 +42,8 @@ type pgErr struct {
 // failure is sent as an ErrorResponse and returns nil. Every path ends with
 // ReadyForQuery so the client is never left hanging (advisor invariant).
 func (s *session) handleSimpleQuery(qstr string) error {
-	if strings.TrimSpace(qstr) == "" {
+	// Nothing but blanks and semicolons is an empty query, as on PostgreSQL.
+	if strings.Trim(qstr, " \t\r\n;") == "" {
 		s.be.Send(&pgproto3.EmptyQueryResponse{})
 		return s.readyFlush()
 	}
@@ -65,6 +72,16 @@ func (s *session) handleSimpleQuery(qstr string) error {
 // query-level error. Single-row AS OF only; full-table and _diff are refused.
 func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
 	q, err := shim.Parse(qstr, s.currentDB)
+	if s.h == nil && !errors.Is(err, shim.ErrNotTimeTravel) {
+		// A port that runs SQL on the copy and has no time-travel engine
+		// bound, and a statement written for time travel, well formed or
+		// not. Refused by name: run as ordinary SQL it would answer from the
+		// copy as it is now, not as of the moment asked for, and a parse
+		// error here would send the reader to fix a statement this port
+		// does not serve.
+		return nil, nil, "", &pgErr{"0A000",
+			"time travel (_flashback, _snapshot, AS OF) is not served on this port; it runs SQL on the copy as it is now"}
+	}
 	if err != nil {
 		if !errors.Is(err, shim.ErrNotTimeTravel) {
 			// Recognised as a time-travel query but malformed (bad AS OF literal,
@@ -74,6 +91,15 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 		// Not a time-travel query. Tolerate the handful of setup statements a
 		// client fires on connect; reject anything else (we are not a general
 		// PostgreSQL engine).
+		if s.bound != nil {
+			if t, refusal, ok := boundProbe(qstr); ok {
+				if refusal != nil {
+					return nil, nil, "", refusal
+				}
+				return nil, nil, t, nil
+			}
+			return s.runFree(qstr)
+		}
 		if t, ok := probeReply(qstr); ok {
 			return nil, nil, t, nil
 		}
