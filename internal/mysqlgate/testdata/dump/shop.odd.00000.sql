@@ -1,0 +1,5 @@
+/*!40101 SET NAMES utf8mb4*/;
+INSERT INTO `odd` (`Key`,`my col`,`select`,`f`,`zd`,`tu`,`mi`,`bi`,`bits`,`wide`,`bin`,`cs`) VALUES(1,"a",1,3.14,"0000-00-00",255,8388607,9223372036854775807,"A",1234567890123456789012345678901234567.89,_binary "\0ÿ","Ab")
+,(2,"A",NULL,-0.1,"2026-01-01",0,-8388608,-9223372036854775808,"",0.00,_binary "abc","ab")
+,(3,NULL,3,NULL,"1999-12-31",NULL,NULL,NULL,NULL,NULL,NULL,NULL)
+;
