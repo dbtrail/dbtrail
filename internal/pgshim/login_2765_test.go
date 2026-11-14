@@ -1,13 +1,13 @@
 package pgshim
 
 import (
-	"encoding/binary"
-	"io"
-	"net"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
