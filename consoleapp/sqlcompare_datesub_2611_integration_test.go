@@ -35,6 +35,55 @@ func TestIntegrationSQLCompareDateSubRoutedMariaDB(t *testing.T) {
 	dateSubRouted(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true")
 }
 
+// typedAnswer is rawAnswer with arguments: each column's type and every
+// row's text, as the wire carried them.
+func typedAnswer(db *sql.DB, stmt string, args ...any) string {
+	rows, err := db.Query(stmt, args...)
+	if err != nil {
+		return "ERROR " + err.Error()
+	}
+	defer rows.Close()
+	types, err := rows.ColumnTypes()
+	if err != nil {
+		return "ERROR " + err.Error()
+	}
+	var b strings.Builder
+	b.WriteString("[")
+	for i, ct := range types {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(ct.DatabaseTypeName())
+	}
+	b.WriteString("]")
+	for rows.Next() {
+		cells := make([]sql.RawBytes, len(types))
+		ptrs := make([]any, len(types))
+		for i := range cells {
+			ptrs[i] = &cells[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return "ERROR " + err.Error()
+		}
+		b.WriteString(" (")
+		for i, c := range cells {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if c == nil {
+				b.WriteString("NULL")
+			} else {
+				b.Write(c)
+			}
+		}
+		b.WriteString(")")
+	}
+	if err := rows.Err(); err != nil {
+		return b.String() + " ERROR " + err.Error()
+	}
+	return b.String()
+}
+
 func dateSubRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	now := time.Now().UTC().Truncate(time.Second)
 	indexDSN := seedFlashbackIndex(t, "alice", now.Truncate(time.Hour))
@@ -155,18 +204,22 @@ func dateSubRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), AVG(DATE_SUB(dt, INTERVAL 1 DAY)) FROM ev WHERE k <> 4", who: "live", why: "AVG of the result"},
 		{stmt: "SELECT side, DATE_SUB(NOW(), INTERVAL 1 DAY) - DATE_SUB(NOW(), INTERVAL 2 DAY) FROM ev ORDER BY k", who: "live", why: "one result minus another"},
 	}
+	// Without parseTime, and with each column's type: the text and the type
+	// each side sends are compared, so a date sent as a date and time, or a
+	// fraction of zeros, would show.
+	asText := func(dsn string) string { return strings.Replace(dsn, "parseTime=true", "parseTime=false", 1) }
 	for _, zone := range []string{"+00:00", "+05:00"} {
-		routed := openRaw(t, withZone(portDSN, zone))
-		live := openRaw(t, withZone(sourceDSN, zone))
+		routed := openRaw(t, asText(withZone(portDSN, zone)))
+		live := openRaw(t, asText(withZone(sourceDSN, zone)))
 		for _, c := range cases {
-			got := answerText(routed, c.stmt, c.args...)
+			got := typedAnswer(routed, c.stmt, c.args...)
 			t.Logf("[%s] routed %-60.300s %s", zone, got, c.stmt)
-			if strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, c.who+"|") {
+			if strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, "("+c.who+",") {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want it answered by %s", zone, c.stmt, c.why, got, c.who)
 				continue
 			}
-			want := answerText(live, c.stmt, c.args...)
-			if strings.ReplaceAll(got, "copy|", "live|") != want {
+			want := typedAnswer(live, c.stmt, c.args...)
+			if strings.ReplaceAll(got, "(copy,", "(live,") != want {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want %s, the source's own answer", zone, c.stmt, c.why, got, want)
 			}
 		}
