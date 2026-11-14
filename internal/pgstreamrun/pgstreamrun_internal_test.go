@@ -285,7 +285,8 @@ func TestLoadKnownReleases_2441(t *testing.T) {
 // the same statement, so a loss recorded after an operator acknowledged an
 // earlier one is never read as acknowledged (not even in the same second).
 // End-anchored: the arm must touch nothing else (the checkpoint is not its to
-// write).
+// write), but for the stamp of when capture was last caught up, which a lost
+// slot makes false (#2845).
 func TestPersistSlotLostPG_stampWithdrawsAcknowledgement(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -295,7 +296,7 @@ func TestPersistSlotLostPG_stampWithdrawsAcknowledgement(t *testing.T) {
 
 	mock.ExpectExec(`(?s)INSERT INTO stream_state \(id, mode, flavor, server_id, last_checkpoint, gap_lost_at, gap_lost_detail\)`+
 		`.*ON DUPLICATE KEY UPDATE\s+`+
-		`gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = VALUES\(gap_lost_detail\),\s+gap_acked_at\s+= NULL\s*$`).
+		`gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = VALUES\(gap_lost_detail\),\s+gap_acked_at\s+= NULL,\s+caught_up_at\s+= NULL\s*$`).
 		WithArgs("postgres", uint32(7), "slot lost").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
