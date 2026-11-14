@@ -425,6 +425,7 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		dedup_floor_event_id BIGINT UNSIGNED DEFAULT NULL,
 		pg_sent_through_lsn BIGINT UNSIGNED DEFAULT NULL,
 		pg_sent_through_at DATETIME DEFAULT NULL,
+		pg_capture_from_lsn BIGINT UNSIGNED DEFAULT NULL,
 		CONSTRAINT single_row CHECK (id = 1)
 	) ENGINE=InnoDB`)
 

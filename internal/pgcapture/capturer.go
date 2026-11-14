@@ -77,7 +77,21 @@ type Capturer struct {
 	// standby status update reports it and never anything ahead, so PostgreSQL can
 	// never release WAL for rows the index has not durably recorded.
 	lastAcked atomic.Uint64
+	// startedFrom is the slot position this run started reading from; 0
+	// until replication has started, and when it could not be read.
+	startedFrom atomic.Uint64
 }
+
+// StartedFrom is where this run started reading the source from: the
+// consistent point of the slot it created, or, for a slot that was already
+// there, the slot's own position (SlotFloorLSN) read before replication
+// started. Every transaction that commits at or after it is delivered. 0
+// before replication starts, and when that position could not be read: no
+// position, never a guess.
+//
+// It is what a first run records as the start of the capture (#2843). On a
+// resume it is the saved checkpoint, which is not a start.
+func (c *Capturer) StartedFrom() uint64 { return c.startedFrom.Load() }
 
 // New constructs a Capturer. It does not open connections (Run does), mirroring
 // NewStreamParser's no-I/O constructor. logger may be nil (slog.Default()).
@@ -162,6 +176,19 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		return err
 	}
 
+	// A slot that was already there (a snapshot taken before the first
+	// capture creates it) is resumed from its own position, which ensureSlot
+	// does not return. Read before replication starts, while it is still
+	// where the slot was left. A failed read is no position.
+	from := startLSN
+	if from == 0 {
+		if floor, fErr := SlotFloorLSN(startupCtx, queryConn, c.cfg.SlotName); fErr == nil {
+			from = floor
+		} else {
+			c.logger.Debug("pgcapture: the slot's position at start could not be read; where capture started will not be on record", "slot", c.cfg.SlotName, "error", fErr)
+		}
+	}
+
 	if err := pglogrepl.StartReplication(ctx, replConn, c.cfg.SlotName, startLSN, pglogrepl.StartReplicationOptions{
 		Mode:       pglogrepl.LogicalReplication,
 		PluginArgs: []string{"proto_version '1'", fmt.Sprintf("publication_names '%s'", c.cfg.Publication)},
@@ -171,6 +198,7 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// Seed the durable cursor to the resume point: everything up to startLSN is
 	// already durably indexed (first run = ConsistentPoint, nothing precedes it).
 	c.lastAcked.Store(uint64(startLSN))
+	c.startedFrom.Store(uint64(from))
 	c.logger.Info("pgcapture: started", "slot", c.cfg.SlotName, "publication", c.cfg.Publication, "start_lsn", startLSN)
 	if c.cfg.OnStarted != nil {
 		c.cfg.OnStarted()

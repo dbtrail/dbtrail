@@ -117,6 +117,12 @@ type pgStreamState struct {
 	// below which every commit is in the index; saved with each checkpoint
 	// in pg_sent_through_lsn. 0 until this run has received one.
 	sentThrough uint64
+	// captureFrom is where this capture started reading its source from
+	// (pgcapture.Capturer.StartedFrom), on a first run only; 0 on a resume,
+	// where the index already holds it, and when it is not known. Saved by
+	// every checkpoint into pg_capture_from_lsn, which keeps the first
+	// value it was given (#2843).
+	captureFrom uint64
 	// caughtUpAt is the newest moment at which the capture is known to have
 	// held everything the source had (caughtup.go), not yet saved; zero when
 	// there is none. The next successful checkpoint stamps it into
@@ -558,6 +564,11 @@ func streamLoopPG(
 		if lastCommitLSN == 0 {
 			return nil // nothing committed yet — nothing durable to checkpoint
 		}
+		// A first run's start, once the capturer knows it (replication has
+		// started by the time anything was committed).
+		if !state.resumed && state.captureFrom == 0 && cap != nil {
+			state.captureFrom = cap.StartedFrom()
+		}
 		if err := saveCheckpointPG(indexDB, state, lastCommitLSN); err != nil {
 			return err
 		}
@@ -768,6 +779,13 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	if !state.caughtUpAt.IsZero() {
 		caughtUpAgo = max(time.Since(state.caughtUpAt).Microseconds(), 0)
 	}
+	// pg_capture_from_lsn (#2843): written by the first save that has it and
+	// kept afterwards. A resume and an unknown start give NULL, which keeps
+	// what is there.
+	var captureFrom any
+	if state.captureFrom != 0 {
+		captureFrom = state.captureFrom
+	}
 	// pg_sent_through_at gets the same UTC_TIMESTAMP() as last_checkpoint
 	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
 	// the two are equal, so a save by any writer that does not set it (an
@@ -776,9 +794,9 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 		INSERT INTO stream_state
 			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
 			 events_indexed, last_event_time, last_checkpoint, server_id,
-			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at)
+			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn)
 		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
-			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND)
+			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?)
 		ON DUPLICATE KEY UPDATE
 			binlog_file     = VALUES(binlog_file),
 			binlog_position = VALUES(binlog_position),
@@ -790,9 +808,10 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			server_id       = VALUES(server_id),
 			pg_sent_through_lsn = VALUES(pg_sent_through_lsn),
 			pg_sent_through_at = UTC_TIMESTAMP(),
-			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at)`,
+			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at),
+			pg_capture_from_lsn = COALESCE(pg_capture_from_lsn, VALUES(pg_capture_from_lsn))`,
 		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo)
+		state.sentThrough, caughtUpAgo, captureFrom)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}

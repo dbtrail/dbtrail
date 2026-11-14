@@ -154,7 +154,7 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 	rep.EventsApplied = fold.Total
 	rep.FetchDuration, rep.FoldDuration = fold.FetchDuration, fold.FoldDuration
 	if fold.First != nil {
-		start, startOK := query.OldestIndexedEvent(db)
+		start, startOK := query.CoverageStart(db, "postgres")
 		WarnBaselineFirstEventGap("postgres", bmeta, *fold.First, start, startOK, schema, table)
 	}
 
