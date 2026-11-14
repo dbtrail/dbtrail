@@ -59,6 +59,11 @@ func TestCollectSelected(t *testing.T) {
 		{"SELECT x FROM (SELECT dt AS x FROM ev) s", []SelectedItem{unread}},
 		{"SELECT s.x, ev.dt FROM (SELECT dt AS x FROM ev) s, ev", []SelectedItem{unread, {Columns: cols(col("dt", ev)), Itself: true}}},
 		{"WITH w AS (SELECT dt FROM ev) SELECT dt FROM w", []SelectedItem{unread}},
+		// A WITH before a set operation is seen by both sides, also under the
+		// name of a real table.
+		{"WITH ev AS (SELECT dt3 AS dt FROM shop.ev) SELECT dt FROM ev UNION ALL SELECT dt FROM ev", []SelectedItem{unread}},
+		// A step by a fraction: a DECIMAL constant, not a whole number.
+		{"SELECT dt + INTERVAL '1.5' SECOND FROM ev", []SelectedItem{unread}},
 		// Stars: one base table's columns, or not read.
 		{"SELECT * FROM ev", []SelectedItem{{Star: &ev}}},
 		{"SELECT e.*, dt FROM ev e", []SelectedItem{{Star: &ev}, {Columns: cols(col("dt", ev)), Itself: true}}},

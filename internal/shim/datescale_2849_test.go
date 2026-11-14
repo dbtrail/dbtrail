@@ -123,7 +123,7 @@ func TestFreeSQLResultset_dateScales(t *testing.T) {
 // removed); a column that is not a date and time never is. The port without
 // routing answers it, declared with 6.
 func TestDateScaleUnknown_routedToMySQL(t *testing.T) {
-	cols := []sqlsandbox.Column{{Name: "side", Type: "VARCHAR"}, {Name: "at", Type: "TIMESTAMP"}}
+	cols := []sqlsandbox.Column{{Name: "s", Type: "VARCHAR"}, {Name: "t", Type: "TIMESTAMP"}}
 	rows := [][]any{{"copy", "2026-03-31T23:15:00.5Z"}}
 	for _, fromFile := range []bool{false, true} {
 		f := &fakeFreeSQL{res: sqlsandbox.Result{Columns: cols, Rows: rows}, noDateScales: true}
@@ -132,7 +132,7 @@ func TestDateScaleUnknown_routedToMySQL(t *testing.T) {
 		}
 		r := &fakeRouter{toCopy: true, reason: "expensive"}
 		h := spoolRouting(t, f, r, &capturePW{})
-		if _, err := h.HandleQuery("SELECT side, at FROM ev"); err != nil {
+		if _, err := h.HandleQuery("SELECT s, t FROM fl"); err != nil {
 			t.Fatalf("file %v: %v", fromFile, err)
 		}
 		if f.calls != 1 || len(r.forwarded) != 1 {
@@ -143,14 +143,14 @@ func TestDateScaleUnknown_routedToMySQL(t *testing.T) {
 	// No date and time column: nothing to tell, the copy answers.
 	f := &fakeFreeSQL{res: sqlsandbox.Result{Columns: cols[:1], Rows: [][]any{{"copy"}}}, noDateScales: true}
 	r := &fakeRouter{toCopy: true, reason: "expensive"}
-	if _, err := spoolRouting(t, f, r, nil).HandleQuery("SELECT side FROM ev"); err != nil || len(r.forwarded) != 0 {
+	if _, err := spoolRouting(t, f, r, nil).HandleQuery("SELECT s FROM fl"); err != nil || len(r.forwarded) != 0 {
 		t.Errorf("no date and time column: (%v, forwarded %v), want the copy's answer", err, r.forwarded)
 	}
 
 	plain := &fakeFreeSQL{res: sqlsandbox.Result{Columns: cols, Rows: rows}, noDateScales: true}
 	h := NewHandler(nil, nil)
 	h.BindFreeSQL(plain)
-	res, err := h.HandleQuery("SELECT side, at FROM ev")
+	res, err := h.HandleQuery("SELECT s, t FROM fl")
 	if err != nil {
 		t.Fatal(err)
 	}

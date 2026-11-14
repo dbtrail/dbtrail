@@ -61,18 +61,44 @@ type SelectedColumn struct {
 // up.
 func collectSelected(stmt any) []SelectedItem {
 	root, _ := stmt.(map[string]any)
-	return selectedOfNode(root["node"])
+	return selectedOfNode(root["node"], nil)
+}
+
+// withNames is withs and the names a node's own WITH binds: a WITH is
+// attached to the node it stands before, a SELECT or a set operation, and is
+// seen by every select under it.
+func withNames(node map[string]any, withs map[string]bool) map[string]bool {
+	cm, ok := node["cte_map"].(map[string]any)
+	if !ok {
+		return withs
+	}
+	entries, _ := cm["map"].([]any)
+	if len(entries) == 0 {
+		return withs
+	}
+	out := make(map[string]bool, len(withs)+len(entries))
+	for k := range withs {
+		out[k] = true
+	}
+	for _, e := range entries {
+		entry, _ := e.(map[string]any)
+		if key, ok := entry["key"].(string); ok {
+			out[foldName(key)] = true
+		}
+	}
+	return out
 }
 
 // selectedOfNode is collectSelected for one query node: a SELECT, or a set
 // operation, whose column I is the largest of its sides' column I on MySQL.
-func selectedOfNode(n any) []SelectedItem {
+func selectedOfNode(n any, withs map[string]bool) []SelectedItem {
 	node, _ := n.(map[string]any)
+	withs = withNames(node, withs)
 	switch node["type"] {
 	case "SELECT_NODE":
-		return selectedOfSelect(node)
+		return selectedOfSelect(node, withs)
 	case "SET_OPERATION_NODE":
-		left, right := selectedOfNode(node["left"]), selectedOfNode(node["right"])
+		left, right := selectedOfNode(node["left"], withs), selectedOfNode(node["right"], withs)
 		if left == nil || len(left) != len(right) {
 			return nil
 		}
@@ -99,7 +125,7 @@ func selectedOfNode(n any) []SelectedItem {
 }
 
 // selectedOfSelect reads one SELECT's list.
-func selectedOfSelect(sel map[string]any) []SelectedItem {
+func selectedOfSelect(sel map[string]any, withs map[string]bool) []SelectedItem {
 	list, ok := sel["select_list"].([]any)
 	if !ok || len(list) == 0 {
 		return nil
@@ -107,16 +133,6 @@ func selectedOfSelect(sel map[string]any) []SelectedItem {
 	items, _, fromOK := fromItems(sel["from_table"])
 	if sel["from_table"] == nil || isEmptyFrom(sel["from_table"]) {
 		items, fromOK = nil, true // SELECT NOW(): no table, nothing to resolve
-	}
-	withs := map[string]bool{}
-	if cm, ok := sel["cte_map"].(map[string]any); ok {
-		entries, _ := cm["map"].([]any)
-		for _, e := range entries {
-			entry, _ := e.(map[string]any)
-			if key, ok := entry["key"].(string); ok {
-				withs[foldName(key)] = true
-			}
-		}
 	}
 	w := selectedWalk{from: items, fromOK: fromOK, withs: withs}
 	out := make([]SelectedItem, len(list))
@@ -423,6 +439,14 @@ func wholeAmount(n any) bool {
 	case "CONSTANT":
 		val, _ := v["value"].(map[string]any)
 		if val["is_null"] == true {
+			return false
+		}
+		// By the constant's type, not its value: a DECIMAL such as 1.5 is
+		// serialized as its scaled integer, 15.
+		typ, _ := val["type"].(map[string]any)
+		switch typ["id"] {
+		case "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "VARCHAR":
+		default:
 			return false
 		}
 		switch x := val["value"].(type) {
