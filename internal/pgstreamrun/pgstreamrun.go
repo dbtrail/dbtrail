@@ -119,9 +119,9 @@ type pgStreamState struct {
 	sentThrough uint64
 	// captureFrom is where this capture started reading its source from
 	// (pgcapture.Capturer.StartedFrom), on a first run only; 0 on a resume,
-	// where the index already holds it, and when it is not known. Saved by
-	// every checkpoint into pg_capture_from_lsn, which keeps the first
-	// value it was given (#2843).
+	// where the index already holds it, and when it is not known. A first
+	// run's checkpoints write it into pg_capture_from_lsn; a resume's leave
+	// that column as it is (#2843).
 	captureFrom uint64
 	// caughtUpAt is the newest moment at which the capture is known to have
 	// held everything the source had (caughtup.go), not yet saved; zero when
@@ -779,9 +779,12 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	if !state.caughtUpAt.IsZero() {
 		caughtUpAgo = max(time.Since(state.caughtUpAt).Microseconds(), 0)
 	}
-	// pg_capture_from_lsn (#2843): written by the first save that has it and
-	// kept afterwards. A resume and an unknown start give NULL, which keeps
-	// what is there.
+	// pg_capture_from_lsn (#2843): a first run writes where it started, an
+	// unknown start as NULL, over whatever is there: a first run is one with
+	// no checkpoint to resume, so a value already there is of a capture that
+	// ended (cleared by a writer that left the column, such as an older
+	// bintrail-pg reset), and keeping it would vouch for this one. A resume
+	// keeps what the first run wrote.
 	var captureFrom any
 	if state.captureFrom != 0 {
 		captureFrom = state.captureFrom
@@ -809,9 +812,9 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			pg_sent_through_lsn = VALUES(pg_sent_through_lsn),
 			pg_sent_through_at = UTC_TIMESTAMP(),
 			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at),
-			pg_capture_from_lsn = COALESCE(pg_capture_from_lsn, VALUES(pg_capture_from_lsn))`,
+			pg_capture_from_lsn = IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn))`,
 		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo, captureFrom)
+		state.sentThrough, caughtUpAgo, captureFrom, state.resumed)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // IndexStart is the earliest surviving LIVE indexed event's coordinates — the
@@ -97,11 +99,21 @@ func CoverageStart(db *sql.DB, flavor string) (IndexStart, bool) {
 // which is the proof the gap check looks for and that a quiet table's first
 // event, necessarily after the snapshot, can never give.
 func pgCaptureStart(db *sql.DB) (IndexStart, bool) {
-	var from sql.NullInt64
+	var from sql.Null[uint64]
 	err := db.QueryRow("SELECT pg_capture_from_lsn FROM stream_state WHERE id = 1 AND flavor = 'postgres'").Scan(&from)
-	if err != nil || !from.Valid || from.Int64 == 0 {
+	if err != nil {
+		// No row is an index of another flavor, or none; 1054 one that
+		// predates the column. Anything else is a read that failed, said,
+		// since without it the gap check keeps a warning it could rule out.
+		var me *mysql.MySQLError
+		if !errors.Is(err, sql.ErrNoRows) && !(errors.As(err, &me) && me.Number == 1054) {
+			slog.Debug("where the PostgreSQL capture started could not be read; the gap check uses the oldest surviving event alone", "error", err)
+		}
 		return IndexStart{}, false
 	}
-	lsn := uint64(from.Int64)
+	if !from.Valid || from.V == 0 {
+		return IndexStart{}, false
+	}
+	lsn := from.V
 	return IndexStart{BinlogFile: fmt.Sprintf("%X/%X", uint32(lsn>>32), uint32(lsn)), StartPos: lsn}, true
 }

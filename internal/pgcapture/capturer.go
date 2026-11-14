@@ -176,17 +176,21 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		return err
 	}
 
-	// A slot that was already there (a snapshot taken before the first
-	// capture creates it) is resumed from its own position, which ensureSlot
-	// does not return. Read before replication starts, while it is still
-	// where the slot was left. A failed read is no position.
-	from := startLSN
-	if from == 0 {
-		if floor, fErr := SlotFloorLSN(startupCtx, queryConn, c.cfg.SlotName); fErr == nil {
-			from = floor
-		} else {
-			c.logger.Debug("pgcapture: the slot's position at start could not be read; where capture started will not be on record", "slot", c.cfg.SlotName, "error", fErr)
-		}
+	// Where the slot stands is where replication starts, whatever LSN is
+	// asked for: PostgreSQL moves a lower one forward to it and never
+	// rewinds a slot. So it is read from the slot itself, for the slot this
+	// run just created (its consistent point) and for one that was already
+	// there (a snapshot taken before the first capture creates it, or a slot
+	// an earlier capture left further on), before replication starts, while
+	// it is still where the slot was left. The later of that and the LSN
+	// asked for is where this run reads from. A failed read is no position:
+	// the LSN asked for alone could be before the slot.
+	var from pglogrepl.LSN
+	if floor, fErr := SlotFloorLSN(startupCtx, queryConn, c.cfg.SlotName); fErr == nil {
+		from = max(floor, startLSN)
+	} else if !c.cfg.ExpectExistingSlot {
+		// A first run records this, once; a resume does not use it.
+		c.logger.Warn("pgcapture: the slot's position at start could not be read, so where this capture started is not recorded; snapshot updates will warn of a possible gap they cannot rule out", "slot", c.cfg.SlotName, "error", fErr)
 	}
 
 	if err := pglogrepl.StartReplication(ctx, replConn, c.cfg.SlotName, startLSN, pglogrepl.StartReplicationOptions{

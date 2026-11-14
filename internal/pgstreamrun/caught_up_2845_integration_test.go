@@ -318,9 +318,10 @@ func TestIntegrationPGCaughtUpStampRealSource_2845(t *testing.T) {
 	}
 }
 
-// Where a capture started reading from (#2843): written by a first run's
-// first checkpoint, and kept by every checkpoint after it, a resumed run's
-// included.
+// Where a capture started reading from (#2843): a first run writes it, a
+// resumed run leaves it, and a later first run (one with no checkpoint to
+// resume: the capture before it ended) writes its own over it, an unknown
+// start included.
 func TestIntegrationPGCaptureFromIsWrittenOnce_2843(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	db, _ := testutil.CreateTestDB(t)
@@ -369,10 +370,21 @@ func TestIntegrationPGCaptureFromIsWrittenOnce_2843(t *testing.T) {
 	if v, ok := captureFrom(); !ok || v != 1200 {
 		t.Fatalf("after a resumed run the start on record is %d (%v), want 1200", v, ok)
 	}
-	// So does a run that claims another start: the first one is the capture's.
-	run(&pgStreamState{serverID: 92843, captureFrom: 9000}, 4, 9500)
+	// And a resumed run that somehow carries a start does not write it.
+	run(&pgStreamState{serverID: 92843, lsn: 3500, resumed: true, captureFrom: 7000}, 4, 4500)
 	if v, ok := captureFrom(); !ok || v != 1200 {
-		t.Fatalf("a later start replaced the first: %d (%v), want 1200", v, ok)
+		t.Fatalf("a resumed run wrote a start: %d (%v), want 1200", v, ok)
+	}
+	// Another first run is another capture: its start replaces the old one.
+	run(&pgStreamState{serverID: 92843, captureFrom: 9000}, 5, 9500)
+	if v, ok := captureFrom(); !ok || v != 9000 {
+		t.Fatalf("a new capture's start on record is %d (%v), want its own, 9000", v, ok)
+	}
+	// And one that does not know where it started removes the old one: the
+	// start of a capture that ended must not vouch for this one.
+	run(&pgStreamState{serverID: 92843}, 6, 9900)
+	if v, ok := captureFrom(); ok {
+		t.Fatalf("the start of the capture before, %d, survived a first run with none known", v)
 	}
 }
 
@@ -389,11 +401,15 @@ func TestIntegrationPGCaptureFromRealSource_2843(t *testing.T) {
 		repl = pgDSN + "&replication=database"
 	}
 	for _, tc := range []struct {
-		name      string
-		slotFirst bool
+		name       string
+		slotFirst  bool
+		askEarlier bool
 	}{
 		{name: "capture creates the slot"},
 		{name: "the slot is already there", slotFirst: true},
+		// An LSN asked for that is before the slot: PostgreSQL starts at the
+		// slot, and that is what must be on record.
+		{name: "the slot is already there and an earlier LSN is asked for", slotFirst: true, askEarlier: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			indexDB, dbName := testutil.CreateTestDB(t)
@@ -441,6 +457,10 @@ func TestIntegrationPGCaptureFromRealSource_2843(t *testing.T) {
 				mustExec(fmt.Sprintf("INSERT INTO %s VALUES (100, 'before capture')", tbl))
 			}
 
+			var startLSN uint64
+			if tc.askEarlier {
+				startLSN = floor - 64
+			}
 			life := func() (stop func()) {
 				runCtx, cancel := context.WithCancel(ctx)
 				runErr := make(chan error, 1)
@@ -448,7 +468,7 @@ func TestIntegrationPGCaptureFromRealSource_2843(t *testing.T) {
 					runErr <- One(runCtx, Config{
 						IndexDSN: testutil.BaseDSN() + "/" + dbName, ReplDSN: repl, QueryDSN: pgDSN,
 						SlotName: slot, Publication: pub, ServerID: 2843, Tables: "public." + tbl,
-						BatchSize: 100, Checkpoint: 200 * time.Millisecond,
+						BatchSize: 100, Checkpoint: 200 * time.Millisecond, StartLSN: startLSN,
 					})
 				}()
 				waitCaughtUp(t, "the slot active", 30*time.Second, func() bool {
