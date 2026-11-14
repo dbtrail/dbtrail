@@ -363,6 +363,9 @@ type Registry struct {
 	// none. Guarded by mu.
 	follows  bool
 	followed []byte
+	// familiesSaid is what was last logged about the file's families
+	// (warnFamilies), so a file read again says it once. Guarded by mu.
+	familiesSaid string
 	// processBuckets are buckets the daemon itself reads with the
 	// process-wide endpoint (bucket → the setting's name), which no per-server
 	// store may claim; see SetProcessS3Location. Guarded by mu.
@@ -437,6 +440,7 @@ func LoadRegistry(path string) (*Registry, error) {
 			"note", "the block is left in the file untouched")
 	}
 	warnUnusableSSLModes(path, r.file.Servers)
+	r.familiesSaid = warnFamilies(path, r.file.Servers, "")
 	r.syncBucketStores()
 	return r, nil
 }
@@ -804,6 +808,19 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	if r.readOnly {
 		return ServerEntry{}, ErrRegistryReadOnly
 	}
+	// One source family per installation (family.go), before anything else
+	// is checked or made: the refusal says nothing was changed.
+	if err := familyRefusal(r.file.Servers, "", e.Flavor); err != nil {
+		return ServerEntry{}, err
+	}
+	return r.insertLocked(e)
+}
+
+// insertLocked is addLocked past the family rule: everything else an added
+// server goes through. Only addLocked calls it; it is apart so that a test
+// can put a server of the other family in a registry the way a hand edit of
+// the file does, which is the only way one can be there.
+func (r *Registry) insertLocked(e ServerEntry) (ServerEntry, error) {
 	if err := r.checkName(e.Name, ""); err != nil {
 		return ServerEntry{}, err
 	}

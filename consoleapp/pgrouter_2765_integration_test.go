@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/console"
+	"github.com/dbtrail/dbtrail/internal/hiderules"
 	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -123,7 +125,21 @@ func TestIntegrationPGRouter(t *testing.T) {
 	t.Setenv("BINTRAIL_SQL_TAILS", "")
 	pgRouterNoTails()
 	f := newRouterFiles(t)
-	dsn := seedFlashbackIndex(t, "alice", time.Now().UTC().Truncate(time.Hour))
+	hour := time.Now().UTC().Truncate(time.Hour)
+	dsn := seedFlashbackIndex(t, "alice", hour)
+	// The same row under the schema a PostgreSQL client's names resolve in:
+	// the helper seeds it under a MySQL database name.
+	eventAt := hour.Add(5 * time.Minute)
+	idx, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { idx.Close() })
+	snapTS := hour.Add(-time.Hour).Format("2006-01-02 15:04:05")
+	testutil.InsertSnapshot(t, idx, 2, snapTS, "public", "users", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, idx, 2, snapTS, "public", "users", "name", 2, "", "varchar", "YES")
+	testutil.InsertEvent(t, idx, "mysql-bin.000001", 300, 400, eventAt.Format("2006-01-02 15:04:05"), nil,
+		"public", "users", 1, "1", nil, nil, []byte(`{"id":1,"name":"alice"}`))
 	ent, err := f.owner.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir})
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +221,6 @@ func TestIntegrationPGRouter(t *testing.T) {
 		{"SELECT 1; DELETE FROM " + tbl, "0A000"},
 		{"SELECT * FROM no_such_table", "42P01"},
 		{"SELEC 1", "42601"},
-		{"SELECT * FROM _snapshot." + tbl + " AS OF '5 minutes ago' WHERE id = 1", "0A000"},
 	} {
 		_, _, err := pgText(t, port, tc.stmt)
 		var pe *pgconn.PgError
@@ -222,6 +237,42 @@ func TestIntegrationPGRouter(t *testing.T) {
 	}
 	if _, rows, err := pgText(t, port, "SELECT count(*) FROM "+tbl); err != nil || rows[0][0] != "4" {
 		t.Fatalf("the port after the refused statements: %v %v, want it to go on answering", rows, err)
+	}
+
+	// Time travel on the same connection, from the server's index: the row
+	// as it was after the event the index holds. Its audit record is the
+	// time-travel one, under the same server.
+	names, tt, err := pgText(t, port, fmt.Sprintf("SELECT * FROM _flashback.users AS OF '%s' WHERE id = 1", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")))
+	if err != nil {
+		t.Fatalf("time travel on the port: %v", err)
+	}
+	if fmt.Sprint(names) != "[id name]" || len(tt) != 1 || fmt.Sprint(tt[0]) != "[1 alice]" {
+		t.Errorf("time travel answered %v %v, want one row [1 alice] under [id name]", names, tt)
+	}
+	// Before the event: the row did not exist yet, an answer with its
+	// columns and no row.
+	_, tt, err = pgText(t, port, fmt.Sprintf("SELECT * FROM _flashback.users AS OF '%s' WHERE id = 1", eventAt.Add(-time.Minute).Format("2006-01-02 15:04:05")))
+	if err != nil || len(tt) != 0 {
+		t.Errorf("time travel before the row existed: %v %v, want no row", tt, err)
+	}
+	// A whole table as of a moment is refused on this wire, with what to
+	// use for it.
+	_, _, err = pgText(t, port, "SELECT * FROM _flashback.users AS OF '5 minutes ago'")
+	var ttErr *pgconn.PgError
+	if !errors.As(err, &ttErr) || ttErr.Code != "0A000" {
+		t.Errorf("full-table time travel: %v, want 0A000", err)
+	}
+	var timeTravels int
+	for _, ev := range rec.Events() {
+		if ev.Surface == "shim" && ev.Action == "timetravel.query" {
+			timeTravels++
+			if ev.Actor != "server:"+ent.ID {
+				t.Errorf("time-travel audit actor %q, want server:%s", ev.Actor, ent.ID)
+			}
+		}
+	}
+	if timeTravels != 2 {
+		t.Errorf("%d time-travel audit records, want 2: the row found and the row not there yet", timeTravels)
 	}
 
 	// Every answered statement left its audit record, under the server.
@@ -275,4 +326,56 @@ func TestIntegrationPGRouter(t *testing.T) {
 			t.Errorf("psql with a wrong password: err %v, output %q", err, b)
 		}
 	})
+
+	// Last, since it changes what the views answer: the server comes to hide
+	// a column while the connection above is still open. Time travel reads
+	// the history past the views that hide it, so from the next statement on
+	// it is refused, with the server's reason, on that same connection. This
+	// is the only test that the port is wired to the server's own gate
+	// (pgPortLogin): without that wiring every statement below answers the
+	// hidden column from the index.
+	rules, err := hiderules.Parse(hiderules.Rules{Columns: []string{"public.users.name"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetHidden(ent.ID, rules); err != nil {
+		t.Fatal(err)
+	}
+	srv.RefreshFollowedFiles()
+	recordsBefore := 0
+	for _, ev := range rec.Events() {
+		if ev.Surface == "shim" && ev.Action == "timetravel.query" {
+			recordsBefore++
+		}
+	}
+	for _, stmt := range []string{
+		fmt.Sprintf("SELECT * FROM _flashback.users AS OF '%s' WHERE id = 1", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")),
+		fmt.Sprintf("SELECT * FROM _snapshot.users AS OF '%s' WHERE id = 1", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")),
+		fmt.Sprintf("SELECT * FROM public.users WHERE id = 1 AS OF '%s'", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")),
+	} {
+		_, rows, err := pgText(t, port, stmt)
+		var pe *pgconn.PgError
+		if !errors.As(err, &pe) {
+			t.Fatalf("%s: answered %v (err %v) on a server that hides a column: time travel read past the rule", stmt, rows, err)
+		}
+		if pe.Code != "42501" || !strings.Contains(pe.Message, "hides some tables and columns") {
+			t.Errorf("%s: %s %q, want 42501 with the server's reason", stmt, pe.Code, pe.Message)
+		}
+		if strings.Contains(pe.Message, "alice") {
+			t.Errorf("the refusal carries the hidden value: %q", pe.Message)
+		}
+	}
+	recordsAfter := 0
+	for _, ev := range rec.Events() {
+		if ev.Surface == "shim" && ev.Action == "timetravel.query" {
+			recordsAfter++
+		}
+	}
+	if recordsAfter != recordsBefore {
+		t.Errorf("%d time-travel audit records after the refusals, %d before: a refused statement was recorded as served", recordsAfter, recordsBefore)
+	}
+	// The connection goes on, and ordinary SQL on the copy still answers.
+	if _, rows, err := pgText(t, port, "SELECT count(*) AS n FROM "+tbl); err != nil || len(rows) != 1 {
+		t.Errorf("ordinary SQL after the rule was saved: %v %v", rows, err)
+	}
 }

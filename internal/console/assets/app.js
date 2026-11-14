@@ -14838,6 +14838,63 @@ function wireSchemaCascade(root) {
 function updateSrvNote() {
   const n = document.getElementById("srv-note");
   if (n) n.hidden = !(serversEmpty && capsCache.monitor);
+  // Both database families in one installation (#2815): said here, under the
+  // server list, for as long as it lasts. Until this it was only in the log
+  // and in the refusal of an add.
+  const m = document.getElementById("srv-mixed-note");
+  if (m) {
+    const said = mixedFamiliesNote(installFamily.mixed);
+    m.textContent = said;
+    m.hidden = !said;
+  }
+}
+
+// One database family per installation (#2815). What GET /api/servers says
+// about it: family is "mysql" (MySQL and MariaDB) or "postgres", "" while
+// there is no server or the installation holds both; mixed then names the
+// servers of each.
+let installFamily = { family: "", mixed: null };
+
+// mixedFamiliesNote is the sentence shown while an installation holds
+// servers of both families, "" when it does not.
+function mixedFamiliesNote(mixed) {
+  if (!mixed || !(mixed.postgres || []).length || !(mixed.mysql || []).length) return "";
+  const few = (names) => names.length > 3 ? names.slice(0, 3).join(", ") + " and " + (names.length - 3) + " more" : names.join(", ");
+  return "This installation holds servers of both database families, which is not supported: PostgreSQL (" + few(mixed.postgres) +
+    ") and MySQL or MariaDB (" + few(mixed.mysql) + "). Every server keeps working and can be edited. No server can be added until one family is left.";
+}
+
+// familyChoices are the server types "+ Add server" offers: the installed
+// family's own, or all three while the installation has no server.
+function familyChoices(family) {
+  if (family === "postgres") return ["postgres"];
+  if (family === "mysql") return ["mysql", "mariadb"];
+  return ["mysql", "postgres", "mariadb"];
+}
+
+// familyHint is the line under the server type: what the first choice
+// fixes, or why the other family is not offered.
+function familyHint(family) {
+  if (family === "postgres") return "This installation serves PostgreSQL servers. MySQL and MariaDB go in an installation of their own.";
+  if (family === "mysql") return "This installation serves MySQL and MariaDB servers. PostgreSQL goes in an installation of its own.";
+  return "The first server decides what this installation serves: MySQL and MariaDB, or PostgreSQL. The other family goes in an installation of its own.";
+}
+
+// connectFullFormLabel is the button at the foot of the Connect screen. On
+// an installation that serves MySQL and MariaDB it does not offer
+// PostgreSQL, which the full form would refuse.
+function connectFullFormLabel(family) {
+  return family === "mysql" ? "S3 or your own store? Open the full form" : "PostgreSQL, S3 or your own store? Open the full form";
+}
+
+// connectRefusalSaid is what the Connect screen says for an answer that
+// asking again unchanged cannot fix. Most of them the person can fix in the
+// form (a name already taken, a value refused), so they are told to press
+// Check again. The other-family refusal is not one of those: nothing in this
+// form changes what the installation serves.
+function connectRefusalSaid(said, err) {
+  if (err && err.body && err.body.code === "other_family") return said;
+  return said + " Press Check again once it is fixed.";
 }
 
 // ── Connect AI client (#1041, managed token #1052) ───────────────────────────
@@ -17461,6 +17518,7 @@ let serverNames = new Map();
 async function loadServers() {
   const data = await api("/api/servers");
   defaultServerId = data.default_id || "";
+  installFamily = { family: data.family || "", mixed: data.mixed || null };
   const servers = data.servers || [];
   serverNames = new Map(servers.map((s) => [s.id, s.name]));
   rememberHiddenRules(servers);
@@ -18055,7 +18113,9 @@ function missingSourceHost(form) {
   return grantDefaultsApply(form) && !f.source_host.value.trim() && !f.host.value.trim();
 }
 
-function buildServerForm() {
+// offered are the server types the form offers (familyChoices), every one
+// when not given; familyLine, when given, is the line that says why (#2815).
+function buildServerForm(offered, familyLine) {
   const form = el("form", { class: "filters", id: "server-form", style: "display:block;margin-top:18px" });
   form.append(el("input", { type: "hidden", name: "id" }));
 
@@ -18068,12 +18128,14 @@ function buildServerForm() {
   const mon = el("fieldset", { class: "form-section", "data-capability": "monitor" });
   mon.append(el("legend", { class: "form-legend", text: "Monitor a source database" }));
   mon.append(el("p", { class: "form-hint", text: "Name, source host, user and password are required. DBTrail checks that the server is ready, then starts capturing changes." }));
+  if (familyLine) mon.append(el("p", { class: "form-hint", id: "server-family-hint", text: familyLine }));
   const monGrid = el("div", { class: "form-grid" });
   // Source family selector — reveals the PostgreSQL-only fields below.
   monGrid.append(el("label", { class: "field" },
     el("span", { class: "field-label", text: "Source type" }),
     el("select", { class: "select", name: "flavor" },
-      opt("mysql", "MySQL"), opt("postgres", "PostgreSQL"), opt("mariadb", "MariaDB"))));
+      ...[["mysql", "MySQL"], ["postgres", "PostgreSQL"], ["mariadb", "MariaDB"]]
+        .filter(([v]) => !offered || offered.includes(v)).map(([v, label]) => opt(v, label)))));
   monGrid.append(srvField("Source host", "source_host", { placeholder: "db.example.com" }));
   monGrid.append(srvField("Source port", "source_port", { placeholder: "3306" }));
   monGrid.append(srvField("Source user", "source_user", { placeholder: "repl" }));
@@ -18183,12 +18245,19 @@ function showServerForm(prefill, opts) {
   // (#1804). The long form stays for Edit, for a console that only reads an
   // index, and for what Connect leaves out (PostgreSQL, MariaDB, S3, an own
   // index), reached by the link at its foot.
-  if (!prefill && capsCache.monitor && !(opts && opts.full)) return showConnectForm(opts && opts.draft);
+  // On an installation that serves PostgreSQL the Connect screen, which adds
+  // MySQL and MariaDB servers, has nothing it could add: the full form opens.
+  if (!prefill && capsCache.monitor && !(opts && opts.full) && installFamily.family !== "postgres") return showConnectForm(opts && opts.draft);
   const addWrap = document.getElementById("server-add-wrap");
   const mountEl = document.getElementById("server-form-mount");
   if (!addWrap || !mountEl) return false;
   addWrap.hidden = true;
-  const form = buildServerForm();
+  // A new server is offered the installed family's types alone, with the
+  // line that says why (#2815); the server answers the same way if asked.
+  // An edit shows the type the server has, whatever it is.
+  const adding = !(prefill && prefill.id);
+  const offered = adding ? familyChoices(installFamily.family) : null;
+  const form = buildServerForm(offered, adding ? familyHint(installFamily.family) : "");
   mountEl.replaceChildren(form);
   $all("[data-capability]", form).forEach((n) => n.classList.toggle("cap-on", !!capsCache[n.dataset.capability]));
   $("#server-cancel", form).addEventListener("click", hideServerForm);
@@ -18242,7 +18311,8 @@ function showServerForm(prefill, opts) {
   }
   // Flavor init runs for both add and edit; it's immutable after create (the
   // backend rejects a change on PUT), so disable the selector when editing.
-  form.elements.flavor.value = (prefill && prefill.flavor) || "mysql";
+  const wanted = (prefill && prefill.flavor) || "mysql";
+  form.elements.flavor.value = !offered || offered.includes(wanted) ? wanted : offered[0];
   if (prefill && prefill.id) form.elements.flavor.disabled = true;
   applyFlavor(form);
   // After the id and flavor are set: they decide whether the grant block gets
@@ -18545,7 +18615,7 @@ function buildConnectForm() {
   foot.append(el("button", { class: "btn btn-ghost", type: "button", id: "server-cancel", text: "Cancel" }));
   // In the foot, on every step, taking no row of its own: a row above the
   // button would push it below the fold on steps 2 and 3.
-  foot.append(el("button", { class: "btn btn-sm btn-ghost cx-full", type: "button", id: "connect-full-form", text: "PostgreSQL, S3 or your own store? Open the full form",
+  foot.append(el("button", { class: "btn btn-sm btn-ghost cx-full", type: "button", id: "connect-full-form", text: connectFullFormLabel(installFamily.family),
     onclick: () => openFullForm(form) }));
   form.append(foot);
   return form;
@@ -18857,11 +18927,12 @@ async function runConnectCheck(form, pressed) {
   if (cancel) cancel.disabled = true;
   if (auto) auto.textContent = "Checking…";
   formMsg("", false);
-  let res, failure = "", lasting = false;
+  let res, failure = "", lasting = false, refused = null;
   try {
     await flushConnectDraft();
     res = await api("/api/servers/check", { method: "POST", body });
   } catch (err) {
+    refused = err;
     failure = (err && err.message) || String(err);
     // No answer from the server at all (the network): say what did not run.
     // An answer carries its own words ("the startup checks could not run").
@@ -18898,7 +18969,7 @@ async function runConnectCheck(form, pressed) {
     setConnectStep(form, 3);
     const said = failure.charAt(0).toUpperCase() + failure.slice(1) + (/[.!?]$/.test(failure) ? "" : ".");
     if (lasting) {
-      if (auto) auto.textContent = said + " Press Check again once it is fixed.";
+      if (auto) auto.textContent = connectRefusalSaid(said, refused);
       return;
     }
     return scheduleConnectRecheck(form, round, said);

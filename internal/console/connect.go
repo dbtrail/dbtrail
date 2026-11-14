@@ -173,6 +173,14 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 			"fill in the address, user and password of the database you want DBTrail to read")
 		return
 	}
+	// One source family per installation (family.go), said BEFORE the checks
+	// and before the form is kept: the checks of a server that can never be
+	// added would have a person fix their database for nothing, and a form
+	// that was refused is not one to bring back after a reload.
+	if err := s.newServerFamilyRefusal(entry.Flavor); err != nil {
+		writeNewServerError(w, registryErrStatus(err), err)
+		return
+	}
 	base := DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor())
 	name := s.cm.reg.NameFor(entry.Name, base)
 
@@ -206,7 +214,7 @@ func (s *Server) handleServersCheck(w http.ResponseWriter, r *http.Request) {
 	first := s.cm.reg.Len() == 0 && !s.cm.bootSelectable()
 	added, created, err := s.persistNewEntry(entry, deriveIndex, base, localCopyOf(req))
 	if err != nil {
-		writeJSONError(w, newEntryErrStatus(err), err.Error())
+		writeNewServerError(w, newEntryErrStatus(err), err)
 		return
 	}
 	res := s.startNewEntry(r.Context(), added, created)

@@ -313,10 +313,9 @@ func TestFlashbackForwardDSN(t *testing.T) {
 	}
 	// A PostgreSQL source: nothing to forward to in the port's protocol, and
 	// no MySQL account is asked for.
-	pg, err := reg.Add(ServerEntry{Name: "pg", DSN: "u:p@tcp(i:3306)/idx8", Flavor: FlavorPostgres, SourceDSN: "postgres://repl:pw@s:5432/shop"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// (By hand: a registry takes one family, and this one already holds
+	// MySQL servers.)
+	pg := addByHand(t, reg, ServerEntry{Name: "pg", DSN: "u:p@tcp(i:3306)/idx8", Flavor: FlavorPostgres, SourceDSN: "postgres://repl:pw@s:5432/shop"})
 	type fwd struct{ dsn, refused string }
 	for name, tc := range map[string]struct {
 		id   string

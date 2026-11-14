@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -233,14 +234,6 @@ func TestPGRouter_login(t *testing.T) {
 	if _, err := f.owner.Add(console.ServerEntry{Name: "staging", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_staging"}); err != nil {
 		t.Fatal(err)
 	}
-	// A MySQL server in the same registry: this port does not serve it.
-	mysqlSrv, err := f.owner.Add(console.ServerEntry{Name: "shop", DSN: "u:p@tcp(127.0.0.1:1)/idx_shop"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.owner.SetPortLogin(mysqlSrv.ID, "shopapp", "pw-shop"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := f.owner.SetPortLogin(prod.ID, "app1", "pw-one"); err != nil {
 		t.Fatal(err)
 	}
@@ -288,10 +281,6 @@ func TestPGRouter_login(t *testing.T) {
 		{"app1", "pw-one", "nowhere", found, "even a database that does not exist"},
 		{"app1", "port-pw", "prod", found, "the application login with the port's password"},
 		{"App1", "pw-one", "prod", "28P01", "the login in another case"},
-		{"anyone", "port-pw", "shop", "0A000", "a MySQL server, with the right password"},
-		{"anyone", "port-pw", mysqlSrv.ID, "0A000", "a MySQL server by its id"},
-		{"shopapp", "pw-shop", "prod", "0A000", "a MySQL server's application login"},
-		{"anyone", "wrong", "shop", "28P01", "a wrong password says nothing about the family either"},
 		{"app1", "wrong", "prod", "28P01", "the login with a wrong password"},
 	} {
 		if got := pgLoginCode(t, addr, tc.user, tc.pw, tc.db); got != tc.want {
@@ -413,4 +402,64 @@ func TestPGRouterPort_routingSwitchKeepsClientsAReplacedPasswordDoesNot(t *testi
 	f.savePortFile(t, false, "port-pw-2")
 	srv.RefreshFollowedFiles()
 	waitUntil(t, "the port to close", func() bool { return port.listening() == "" })
+}
+
+// A servers file that holds both families (a hand edit: the registry takes
+// one, #2815) still has its PostgreSQL servers served here, and its MySQL ones
+// refused by name, after the password and never before it.
+func TestPGRouter_refusesTheMySQLServersOfAMixedFile(t *testing.T) {
+	f := newRouterFiles(t)
+	body := `version: 1
+servers:
+  - id: aaaa000000000001
+    name: shop
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_shop
+  - id: aaaa000000000002
+    name: ledger
+    flavor: postgres
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_ledger
+  - id: aaaa000000000003
+    name: wiki
+    flavor: mariadb
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_wiki
+`
+	if err := os.WriteFile(f.servers, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.savePortFile(t, true, "port-pw")
+	srv, runner, err := newRouterConsole(f.settings(""), console.SQLPool{Workers: 1, Threads: 2})
+	if err != nil {
+		t.Fatalf("a mixed servers file stopped the router's console: %v", err)
+	}
+	t.Cleanup(runner.Close)
+	srv.RefreshFollowedFiles()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- servePGPort(ctx, srv, ln, 0) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("the PostgreSQL port did not stop with its context")
+		}
+	})
+	addr := ln.Addr().String()
+	for _, tc := range []struct{ pw, db, want, why string }{
+		{"port-pw", "ledger", "", "the PostgreSQL server of a mixed file is served"},
+		{"port-pw", "aaaa000000000002", "", "by its id too"},
+		{"port-pw", "shop", "0A000", "a MySQL server, with the right password"},
+		{"port-pw", "aaaa000000000001", "0A000", "a MySQL server by its id"},
+		{"port-pw", "wiki", "0A000", "a MariaDB server"},
+		{"wrong", "shop", "28P01", "a wrong password says nothing about the family"},
+		{"wrong", "ledger", "28P01", "nor about a PostgreSQL server"},
+	} {
+		if got := pgLoginCode(t, addr, "anyone", tc.pw, tc.db); got != tc.want {
+			t.Errorf("%s (%s / %s): SQLSTATE %q, want %q", tc.why, tc.pw, tc.db, got, tc.want)
+		}
+	}
 }

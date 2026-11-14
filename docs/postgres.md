@@ -43,8 +43,10 @@ The index MySQL has the same requirements as for any source — see
 
 ## Install
 
-DBTrail captures PostgreSQL as a **first-class source**, in the same
-`bintrail-console watch` stack the [Compose quickstart](install.md) stands up.
+DBTrail captures PostgreSQL in the same `bintrail-console watch` stack the
+[Compose quickstart](install.md) stands up, in an installation of its own: an
+installation serves PostgreSQL servers, or MySQL and MariaDB servers, not both
+([one database family per installation](install.md#one-database-family-per-installation)).
 There are two ways in: the **web interface** (recommended: zero binaries to place)
 or the standalone **`bintrail-pg`** binary (for an existing index or a headless
 CLI deployment).
@@ -594,8 +596,18 @@ listener, its own workers, its own memory.
 - A result with more rows than the port's row cap, or with a cell longer than
   the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
   the long column.
-- Time travel (`_flashback`, `_snapshot`, `AS OF`) is not served on this port;
-  use `bintrail-pg flashback`, below.
+- **Time travel on the same connection**: one row as it was at a past moment,
+  from the server's change history and snapshots.
+
+  ```sql
+  SELECT * FROM _flashback.orders AS OF '5 minutes ago' WHERE id = 42;
+  SELECT * FROM _snapshot.orders  AS OF '2026-07-01 09:00:00' WHERE id = 42;
+  ```
+
+  A whole table as of a moment is refused here (use `bintrail-pg reconstruct`
+  or the web interface). A server that hides rows or columns refuses time
+  travel on this port, with the reason: time travel reads the history
+  directly, past the views that hide them.
 
 What the process may use is said where it is started, with small defaults so
 it fits beside capture:

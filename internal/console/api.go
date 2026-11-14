@@ -1376,6 +1376,16 @@ func writeBodyDecodeError(w http.ResponseWriter, err error) {
 	writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 }
 
+// writeJSONErrorCode is writeJSONError with a word a page can decide by
+// ("code") beside the sentence a person reads ("error"). The sentence is
+// written for people and changes; a page that has to treat one refusal
+// otherwise than the rest reads the code, never the sentence.
+func writeJSONErrorCode(w http.ResponseWriter, status int, msg, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": code})
+}
+
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

@@ -146,6 +146,14 @@ type serverDTO struct {
 }
 
 type serversResponse struct {
+	// Family is the database family this installation serves, "mysql"
+	// (MySQL and MariaDB) or "postgres", "" while it has no server or holds
+	// both; Mixed is set in that last case, with the servers of each
+	// (#2815, Server.installationFamily). The page offers the family's own
+	// server types and says the mix while it lasts.
+	Family string       `json:"family,omitempty"`
+	Mixed  *familiesDTO `json:"mixed,omitempty"`
+
 	Servers []serverDTO `json:"servers"`
 	// DefaultID is the entry the switcher renders as selected: the boot
 	// entry when present and not hidden; under HideBoot the first sourced
@@ -285,7 +293,8 @@ func (s *Server) handleServersList(w http.ResponseWriter, r *http.Request) {
 	for _, e := range s.cm.reg.List() {
 		out = append(out, s.entryDTO(e))
 	}
-	writeJSON(w, http.StatusOK, serversResponse{Servers: out, DefaultID: s.cm.defaultID()})
+	family, mixed := s.installationFamily()
+	writeJSON(w, http.StatusOK, serversResponse{Family: family, Mixed: mixed, Servers: out, DefaultID: s.cm.defaultID()})
 }
 
 // handleServersGet serves GET /api/servers/{id} — the masked single-entry view
@@ -331,7 +340,7 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 	added, _, err := s.persistNewEntry(entry, deriveIndex,
 		DeriveServerName(req.SourceHost, req.SourcePort, entry.SourceFlavor()), localCopyOf(req))
 	if err != nil {
-		writeJSONError(w, newEntryErrStatus(err), err.Error())
+		writeNewServerError(w, newEntryErrStatus(err), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.entryDTO(added))
@@ -429,6 +438,12 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			created = ""
 		}
 	}()
+	// One source family per installation (family.go), with the server given
+	// on the command line counted, and before a folder is made for a server
+	// that will not be added.
+	if err := s.newServerFamilyRefusal(entry.Flavor); err != nil {
+		return ServerEntry{}, "", err
+	}
 	entry.LocalKeepNewest = DefaultLocalKeepNewest
 	if entry.BaselineDir != "" {
 		fresh := !dirExists(entry.BaselineDir)
@@ -2039,7 +2054,7 @@ func scrubDSNError(err error, dsn string) string {
 // registryErrStatus maps registry errors onto HTTP statuses.
 func registryErrStatus(err error) int {
 	switch {
-	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict):
+	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict), errors.Is(err, ErrOtherFamily):
 		return http.StatusConflict
 	case errors.Is(err, ErrUnknownServer):
 		return http.StatusNotFound
