@@ -130,17 +130,21 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	// Not s: a letter with an accent there keeps any statement reading it on
 	// MySQL.
 	const copyRead = "SELECT side, dt FROM ev ORDER BY k"
-	cases := []struct {
-		collation string
-		copy      bool // the copy answers copyRead
-	}{
-		{"", false}, // go-sql-driver's default: utf8mb4_general_ci
-		{"utf8mb4_general_ci", false},
-		{"utf8mb4_bin", false},
-		{"latin1_swedish_ci", false},
-		{"binary", false},
-		{"utf8mb4_unicode_ci", true},
-		{"utf8mb4_0900_ai_ci", !mariadb}, // MariaDB 10.11 has no such collation
+	// The copy answers copyRead when the session the SOURCE gives this client
+	// compares as the copy does and sends utf8mb4 (the session read-back's
+	// rule), read from the direct connection: on MySQL that is
+	// utf8mb4_0900_ai_ci and utf8mb4_unicode_ci, on MariaDB 11.4 and later
+	// also the driver's default, which the source itself turns into
+	// utf8mb4_uca1400_ai_ci.
+	copyCollations := map[string]bool{"utf8mb4_0900_ai_ci": true, "utf8mb4_unicode_ci": true, "utf8mb4_uca1400_ai_ci": true}
+	cases := []struct{ collation string }{
+		{""}, // go-sql-driver's default: utf8mb4_general_ci
+		{"utf8mb4_general_ci"},
+		{"utf8mb4_bin"},
+		{"latin1_swedish_ci"},
+		{"binary"},
+		{"utf8mb4_unicode_ci"},
+		{"utf8mb4_0900_ai_ci"},
 	}
 	for _, c := range cases {
 		label := c.collation
@@ -165,14 +169,22 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 				t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", label, stmt, got, want)
 			}
 		}
+		liveSession := strings.Split(answerText(live, session), "|")
+		wantWho := "live"
+		if len(liveSession) == 4 && copyCollations[liveSession[0]] && liveSession[3] == "utf8mb4" {
+			wantWho = "copy"
+		}
+		if !mariadb && (c.collation == "utf8mb4_0900_ai_ci" || c.collation == "utf8mb4_unicode_ci") != (wantWho == "copy") {
+			t.Errorf("%s: MySQL gave the session %v, which the test did not expect", label, liveSession)
+		}
 		got, want := answerText(port, copyRead), answerText(live, copyRead)
-		t.Logf("%-20s port %-70.200s %s", label, got, copyRead)
+		t.Logf("%-20s port %-70.200s %s (session %v)", label, got, copyRead, liveSession)
 		who := "live"
 		if strings.Contains(got, "copy|") {
 			who = "copy"
 		}
-		if wantWho := map[bool]string{true: "copy", false: "live"}[c.copy]; who != wantWho && !(mariadb && c.collation == "utf8mb4_0900_ai_ci") {
-			t.Errorf("%s: %q answered by %s, want %s", label, copyRead, who, wantWho)
+		if who != wantWho {
+			t.Errorf("%s: %q answered by %s, want %s (the source's session is %v)", label, copyRead, who, wantWho, liveSession)
 		}
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", label, copyRead, got, want)
