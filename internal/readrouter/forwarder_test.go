@@ -136,7 +136,7 @@ func TestForwarder_emptyStringIsNotNull(t *testing.T) {
 	}
 	f := &Forwarder{}
 	sink := &kindSink{}
-	if _, err := f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+	if _, err := f.stream(sink, true, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
 		res.Resultset = &mysql.Resultset{Fields: fields}
 		if err := perRes(res); err != nil {
 			return err

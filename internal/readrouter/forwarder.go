@@ -32,6 +32,11 @@ const CodeUpstreamLost uint16 = 2006
 // large result is never held whole in this process. Header is called once,
 // before the first row; Row once per row with the cell values (nil for NULL;
 // []byte cells alias the packet buffer and are valid only during the call).
+// In the text protocol (Forward) every non-NULL cell is a []byte holding the
+// bytes the source sent, whatever the column's type: a number is never
+// parsed and printed again, which would lose MySQL's own form of it (see
+// stream). In the binary protocol (a prepared statement) cells are the typed
+// values go-mysql decodes, each re-encoded under its column's type.
 // An error from either aborts the statement: the rest of the resultset is
 // discarded and the connection to the source is dropped (it cannot be
 // resynchronised mid-resultset).
@@ -1512,7 +1517,7 @@ func (f *Forwarder) Forward(ctx context.Context, stmt string, sink RowSink) (*my
 	}
 	w := f.watchStatement(ctx, stmt, false)
 	defer w.stop()
-	res, err := f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+	res, err := f.stream(sink, true, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
 		return c.ExecuteSelectStreaming(stmt, res, perRow, perRes)
 	})
 	if err == nil {
@@ -1523,10 +1528,20 @@ func (f *Forwarder) Forward(ctx context.Context, stmt string, sink RowSink) (*my
 
 // stream runs one statement through run (the text or the prepared form of
 // go-mysql's streaming read) and hands its rows to sink; see Forward for
-// what comes back.
-func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPerRowCallback, client.SelectPerResultCallback) error) (*mysql.Result, error) {
+// what comes back. text says the rows come in the text protocol.
+//
+// A text row is parsed by go-mysql under the result's Fields as it stands
+// when the row arrives: a FLOAT or DOUBLE cell becomes a float64 and an
+// integer an int64, which the port then prints again in Go's form, not
+// MySQL's (1e38 came out as 1 and 38 zeros, a FLOAT(7,2) 0.10 as 0.1, an
+// INT ZEROFILL 00042 as 42; #2828). So once the sink has the source's column
+// definitions, the rows are parsed under copies of them typed as strings:
+// every cell stays the bytes MySQL sent. The source's own definitions are
+// put back on the result before it is returned.
+func (f *Forwarder) stream(sink RowSink, text bool, run func(*mysql.Result, client.SelectPerRowCallback, client.SelectPerResultCallback) error) (*mysql.Result, error) {
 	var res mysql.Result
 	var cells []any
+	var sourceFields []*mysql.Field
 	err := run(&res,
 		func(row []mysql.FieldValue) error {
 			if cap(cells) < len(row) {
@@ -1551,8 +1566,15 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 			if err := sink.Header(r.Fields); err != nil {
 				return sinkError{err}
 			}
+			if text {
+				sourceFields = r.Fields
+				r.Fields = asTextFields(r.Fields)
+			}
 			return nil
 		})
+	if sourceFields != nil {
+		res.Fields = sourceFields
+	}
 	if err != nil {
 		var se sinkError
 		switch {
@@ -1583,6 +1605,20 @@ func (f *Forwarder) stream(sink RowSink, run func(*mysql.Result, client.SelectPe
 		res.Resultset = nil
 	}
 	return &res, nil
+}
+
+// asTextFields returns copies of fields that go-mysql's text-row parser
+// reads as strings, so it hands back each cell's bytes as the source sent
+// them (see stream). The fields themselves are not changed: the sink holds
+// them.
+func asTextFields(fields []*mysql.Field) []*mysql.Field {
+	out := make([]*mysql.Field, len(fields))
+	for i, f := range fields {
+		c := *f
+		c.Type = mysql.MYSQL_TYPE_VAR_STRING
+		out[i] = &c
+	}
+	return out
 }
 
 // UseDB selects the database on the upstream connection, so unqualified
@@ -1970,7 +2006,7 @@ func (p *prepared) Execute(ctx context.Context, args []any, sink RowSink) (*mysq
 	}
 	w := p.f.watchStatement(ctx, p.query, true)
 	defer w.stop()
-	res, err := p.f.stream(sink, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
+	res, err := p.f.stream(sink, false, func(res *mysql.Result, perRow client.SelectPerRowCallback, perRes client.SelectPerResultCallback) error {
 		return p.st.ExecuteSelectStreaming(res, perRow, perRes, args...)
 	})
 	if err == nil {
