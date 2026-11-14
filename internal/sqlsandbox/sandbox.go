@@ -358,6 +358,11 @@ type Session struct {
 // other the rest, and the answer is why a call must not be answered by the
 // copy, or "".
 //
+// TimestampDiffVeto is about TIMESTAMPDIFF under routing (#2611): dates are
+// the DATE columns and the DATETIME and TIMESTAMP columns without fractional
+// seconds (a TIMESTAMP left out under a zone with clock changes), other the
+// rest, and the answer is why a call must not be answered by the copy, or "".
+//
 // FloatVeto is about FLOAT columns under routing (#2827): floats are the
 // FLOAT columns, star says the statement holds a star (Refs), and the answer
 // is why the copy must not answer a statement that reads one, or "".
@@ -371,6 +376,7 @@ type ColumnTypes interface {
 	RoundVeto(safe, other []string) string
 	DateFunctionVeto(dates, notDates []string) string
 	DateSubVeto(dates, times, other []string) string
+	TimestampDiffVeto(dates, other []string) string
 	FloatVeto(floats []string, star bool) string
 }
 
