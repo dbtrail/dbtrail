@@ -72,7 +72,7 @@ func jsonText(v any) string {
 }
 
 // pgArray writes a list cell as PostgreSQL writes an array (array_out): the
-// elements between braces with commas, each as CellText writes a value of
+// elements between braces with commas, each as Cell writes a value of
 // the element's type, NULL bare for a missing one, and between double
 // quotes, with a backslash before a quote or a backslash, when the element
 // is empty, spells NULL in any case, or holds a brace, a comma, a quote, a
@@ -84,7 +84,7 @@ func pgArray(elem string, list []any) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		cell := CellText(elem, v)
+		cell := Cell(elem, v)
 		if cell == nil {
 			b.WriteString("NULL")
 			continue
