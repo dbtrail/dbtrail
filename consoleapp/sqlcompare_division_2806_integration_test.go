@@ -169,42 +169,42 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		who  string
 		why  string
 	}{
-		{stmt: "SELECT side, k / 7 FROM ev ORDER BY id", who: "live", why: "the issue's case"},
-		{stmt: "SELECT side, k/7, -k / 7, k / -7 FROM ev ORDER BY id", who: "live", why: "signs, no spaces"},
-		{stmt: "SELECT side, k / 0, k / z FROM ev ORDER BY id", who: "live", why: "by zero"},
-		{stmt: "SELECT side, b / 3, u / 3, ui / 7 FROM ev ORDER BY id", who: "live", why: "BIGINT, UNSIGNED"},
-		{stmt: "SELECT side, dc / 3, dc / dc FROM ev ORDER BY id", who: "live", why: "a DECIMAL"},
-		{stmt: "SELECT side, dbl / 2 FROM ev ORDER BY id", who: "live", why: "a DOUBLE"},
-		{stmt: "SELECT side, k / 7.0, k / 2e0 FROM ev ORDER BY id", who: "live", why: "a decimal and a double literal"},
-		{stmt: "SELECT side, YEAR(dt) / 7, DATEDIFF(dt2, dt) / 7 FROM ev ORDER BY id", who: "live", why: "a function's whole number"},
-		{stmt: "SELECT side, FLOOR(k / 7), CEIL(k / 3) FROM ev ORDER BY id", who: "live", why: "FLOOR of a quotient, selected"},
-		{stmt: "SELECT side, id FROM ev WHERE k / 3 > 1 ORDER BY id", who: "live", why: "in WHERE"},
-		{stmt: "SELECT side, id FROM ev ORDER BY k / 3, id", who: "live", why: "in ORDER BY"},
-		{stmt: "SELECT side, k / ? FROM ev ORDER BY id", args: []any{7}, who: "live", why: "prepared"},
+		{stmt: "SELECT side, k / 7 FROM ev ORDER BY k", who: "live", why: "the issue's case"},
+		{stmt: "SELECT side, k/7, -k / 7, k / -7 FROM ev ORDER BY k", who: "live", why: "signs, no spaces"},
+		{stmt: "SELECT side, k / 0, k / z FROM ev ORDER BY k", who: "live", why: "by zero"},
+		{stmt: "SELECT side, b / 3, u / 3, ui / 7 FROM ev ORDER BY k", who: "live", why: "BIGINT, UNSIGNED"},
+		{stmt: "SELECT side, dc / 3, dc / dc FROM ev ORDER BY k", who: "live", why: "a DECIMAL"},
+		{stmt: "SELECT side, dbl / 2 FROM ev ORDER BY k", who: "live", why: "a DOUBLE"},
+		{stmt: "SELECT side, k / 7.0, k / 2e0 FROM ev ORDER BY k", who: "live", why: "a decimal and a double literal"},
+		{stmt: "SELECT side, YEAR(dt) / 7, DATEDIFF(dt2, dt) / 7 FROM ev ORDER BY k", who: "live", why: "a function's whole number"},
+		{stmt: "SELECT side, FLOOR(k / 7), CEIL(k / 3) FROM ev ORDER BY k", who: "live", why: "FLOOR of a quotient, selected"},
+		{stmt: "SELECT side, b FROM ev WHERE k / 3 > 1 ORDER BY k", who: "live", why: "in WHERE"},
+		{stmt: "SELECT side, b FROM ev ORDER BY k / 3, b", who: "live", why: "in ORDER BY"},
+		{stmt: "SELECT side, k / ? FROM ev ORDER BY k", args: []any{7}, who: "live", why: "prepared"},
 		{stmt: "SELECT MIN(side), SUM(k) / COUNT(*) FROM ev", who: "live", why: "SUM over COUNT"},
 		{stmt: "SELECT MIN(side), AVG(k), AVG(b), AVG(u), AVG(dc), AVG(dbl) FROM ev", who: "live", why: "AVG"},
-		{stmt: "SELECT MIN(side), AVG(z) FROM ev WHERE id = 8", who: "live", why: "AVG of NULLs"},
+		{stmt: "SELECT MIN(side), AVG(z) FROM ev WHERE k IS NULL", who: "live", why: "AVG of NULLs"},
 		{stmt: "SELECT MIN(side), avg (k) FROM ev", who: "live", why: "AVG with a space"},
 
 		{stmt: "SELECT MIN(side), SUM(k) FROM ev", who: "copy", why: "the issue's SUM"},
 		{stmt: "SELECT MIN(side), SUM(b), SUM(u), SUM(ui) FROM ev", who: "copy", why: "BIGINT, UNSIGNED, past 2^64"},
 		{stmt: "SELECT MIN(side), SUM(dc) FROM ev", who: "copy", why: "a DECIMAL"},
 		{stmt: "SELECT MIN(side), SUM(dbl) FROM ev", who: "?", why: "a DOUBLE"},
-		{stmt: "SELECT MIN(side), SUM(z) FROM ev WHERE id = 8", who: "copy", why: "NULLs only"},
+		{stmt: "SELECT MIN(side), SUM(z) FROM ev WHERE k IS NULL", who: "copy", why: "NULLs only"},
 		{stmt: "SELECT MIN(side), SUM(k) FROM ev WHERE k > 100", who: "copy", why: "no row"},
-		{stmt: "SELECT side, SUM(k) OVER (ORDER BY id) FROM ev ORDER BY id", who: "copy", why: "a window"},
+		{stmt: "SELECT side, SUM(k) OVER (ORDER BY k) FROM ev ORDER BY k", who: "copy", why: "a window"},
 		{stmt: "SELECT MIN(side), SUM(k) + 1, SUM(k) * 2, -SUM(k), ABS(SUM(k)) FROM ev", who: "copy", why: "arithmetic on a SUM"},
 		{stmt: "SELECT MIN(side), SUM(k) * 1.5, SUM(k) + 0.25 FROM ev", who: "?", why: "a SUM and a decimal"},
 		{stmt: "SELECT MIN(side), SUM(YEAR(dt)), SUM(DATEDIFF(dt2, dt)) FROM ev", who: "copy", why: "SUM of a function's whole number"},
 		{stmt: "SELECT side, SUM(k) FROM ev GROUP BY side", who: "copy", why: "grouped"},
 		{stmt: "SELECT MIN(side), SUM(k) FROM ev WHERE k > ?", args: []any{0}, who: "copy", why: "prepared"},
 
-		{stmt: "SELECT side, k, k % 3, MOD(k, 3) FROM ev ORDER BY id", who: "?", why: "modulo"},
+		{stmt: "SELECT side, k, k % 3, MOD(k, 3) FROM ev ORDER BY k", who: "?", why: "modulo"},
 		{stmt: "SELECT MIN(side), MIN(k), MAX(b), MAX(u), COUNT(k) FROM ev", who: "?", why: "MIN, MAX, COUNT"},
 		{stmt: "SELECT MIN(side), STD(k), VARIANCE(k) FROM ev", who: "?", why: "STD and VARIANCE"},
-		{stmt: "SELECT side, 9223372036854775808, 99999999999999999999 FROM ev ORDER BY id", who: "?", why: "literals past BIGINT"},
-		{stmt: "SELECT side, k DIV 2 FROM ev ORDER BY id", who: "live", why: "DIV"},
-		{stmt: "SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev ORDER BY id", who: "copy", why: "the #2493 bucket"},
+		{stmt: "SELECT side, 9223372036854775808, 99999999999999999999 FROM ev ORDER BY k", who: "?", why: "literals past BIGINT"},
+		{stmt: "SELECT side, k DIV 2 FROM ev ORDER BY k", who: "live", why: "DIV"},
+		{stmt: "SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev ORDER BY k", who: "copy", why: "the #2493 bucket"},
 	}
 	asText := func(dsn string) string { return strings.Replace(dsn, "parseTime=true", "parseTime=false", 1) }
 	routedText := openRaw(t, asText(withZone(portDSN, "+00:00")))
@@ -230,7 +230,7 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// whatever it runs (routedsession), a SUM included.
 	routedPrec := openRaw(t, asText(withZone(portDSN, "+00:00"))+"&div_precision_increment=2")
 	livePrec := openRaw(t, asText(withZone(sourceDSN, "+00:00"))+"&div_precision_increment=2")
-	for _, stmt := range []string{"SELECT side, k / 7 FROM ev ORDER BY id", "SELECT MIN(side), SUM(k), AVG(k) FROM ev"} {
+	for _, stmt := range []string{"SELECT side, k / 7 FROM ev ORDER BY k", "SELECT MIN(side), SUM(k), AVG(k) FROM ev"} {
 		got, want := scaledAnswer(routedPrec, stmt), scaledAnswer(livePrec, stmt)
 		t.Logf("prec=2 routed %-80.300s %s", got, stmt)
 		if !strings.Contains(got, "(live,") || got != want {
