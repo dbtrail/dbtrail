@@ -149,7 +149,7 @@ func unixTimeCompare(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{"SELECT side, UNIX_TIMESTAMP(dt) FROM ev ORDER BY secs", "copy", "a DATETIME without fractional seconds"},
 		{"SELECT side, UNIX_TIMESTAMP(ts) FROM ev ORDER BY secs", "copy", "a TIMESTAMP without fractional seconds"},
 		{"SELECT side, UNIX_TIMESTAMP(d) FROM ev ORDER BY secs", "copy", "a DATE"},
-		{"SELECT side, FLOOR(UNIX_TIMESTAMP(ts) / 86400) AS day, COUNT(*) FROM ev GROUP BY side, day ORDER BY day", "copy", "orders per day, over a TIMESTAMP"},
+		{"SELECT side, FLOOR(UNIX_TIMESTAMP(ts) / 86400) AS day, COUNT(*) FROM ev GROUP BY side, day ORDER BY day", "live", "orders per day, a / outside FROM_UNIXTIME: FLOOR of it is a DECIMAL on MySQL and a DOUBLE on the copy (#2806)"},
 		{"SELECT side, FROM_UNIXTIME(secs) FROM ev WHERE secs > 0 ORDER BY secs", "copy", "a whole number of seconds"},
 		{"SELECT side, FROM_UNIXTIME(secs) FROM ev ORDER BY secs", "live", "second 0: NULL on MariaDB 11.8 and 12.3, so the copy declines it"},
 		{"SELECT side, FROM_UNIXTIME(UNIX_TIMESTAMP(dt)) = dt FROM ev ORDER BY secs", "copy", "the round trip"},

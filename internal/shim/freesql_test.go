@@ -296,7 +296,7 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 	wantTypes := []uint8{
 		mysql.MYSQL_TYPE_LONGLONG, mysql.MYSQL_TYPE_NEWDECIMAL, mysql.MYSQL_TYPE_TINY, mysql.MYSQL_TYPE_DATETIME,
 		mysql.MYSQL_TYPE_JSON, mysql.MYSQL_TYPE_JSON, mysql.MYSQL_TYPE_VAR_STRING, mysql.MYSQL_TYPE_LONGLONG,
-		mysql.MYSQL_TYPE_VAR_STRING, mysql.MYSQL_TYPE_DATE,
+		mysql.MYSQL_TYPE_NEWDECIMAL, mysql.MYSQL_TYPE_DATE,
 	}
 	for i, want := range wantTypes {
 		if got := rs.Fields[i].Type; got != want {
@@ -311,6 +311,11 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 	}
 	if rs.Fields[7].Flag&mysql.UNSIGNED_FLAG == 0 {
 		t.Error("UBIGINT lost its UNSIGNED flag")
+	}
+	// A HUGEINT is the copy's SUM of whole numbers, which MySQL types as a
+	// DECIMAL with no fraction (#2806).
+	if f := rs.Fields[8]; f.Decimal != 0 || f.Charset != 63 || f.Flag&mysql.BINARY_FLAG == 0 || f.Flag&mysql.UNSIGNED_FLAG != 0 {
+		t.Errorf("HUGEINT scale/charset/flag = %d/%d/%d, want a signed DECIMAL with no fraction", f.Decimal, f.Charset, f.Flag)
 	}
 	rows := textRows(t, rs)
 	if len(rows) != 2 {
@@ -649,4 +654,18 @@ func appendFile(path, text string) error {
 		err = cerr
 	}
 	return err
+}
+
+// #2806: a bound whole number from 2^63 up is a BIGINT UNSIGNED on MySQL and
+// would be written into the copy's statement as a 128-bit integer, now sent
+// as a DECIMAL: kept on MySQL, as the same number written in the statement is.
+func TestCopyUnsafeArgument_bigUnsigned(t *testing.T) {
+	if got := copyUnsafeArgument([]any{int64(-1), uint64(1<<63 - 1)}); got != "" {
+		t.Errorf("up to 2^63-1: %q, want none", got)
+	}
+	for _, u := range []uint64{1 << 63, 1<<64 - 1} {
+		if got := copyUnsafeArgument([]any{int64(1), u}); !strings.Contains(got, "argument 2") {
+			t.Errorf("%d: %q, want argument 2 refused", u, got)
+		}
+	}
 }

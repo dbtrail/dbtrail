@@ -597,8 +597,10 @@ What to know before relying on it:
 - Every statement is written to the audit trail when one is installed
   (`shim` / `sql.run`: the statement, the schema, the row count).
 - Column types are mapped to MySQL's (DuckDB `INTEGER` arrives as `BIGINT`,
-  `DECIMAL(p,s)` as `DECIMAL`, `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0,
-  a `LIST`/`STRUCT` as JSON text, `MAP`/`HUGEINT`/`UUID`/`INTERVAL` as text).
+  `DECIMAL(p,s)` as `DECIMAL`, `HUGEINT` (what `SUM` of whole numbers
+  returns) as a `DECIMAL` with no fraction, as MySQL types that `SUM`,
+  `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0, a `LIST`/`STRUCT` as JSON
+  text, `MAP`/`UUID`/`INTERVAL` as text).
 
 <a id="read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental"></a>
 ### Engine Routing: MySQL answers, the copy takes the heavy reads
@@ -698,7 +700,9 @@ The decision, in order, for every statement:
    a `TIMESTAMPDIFF` outside the rules below, `TIMEDIFF`, a `DATEDIFF` that
    is not two arguments (see below), a call of a function whose name starts
    with `_bintrail_` (the copy's own functions, which MySQL does not have), `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
-   CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
+   CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, a `/` outside the argument of
+   `FROM_UNIXTIME`, `AVG` and MariaDB's `MEDIAN`, a whole number written from
+   9223372036854775808 up, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
    JSON functions and the `->`/`->>` operators, a backslash inside a string
    literal, optimizer hints), and a backtick-quoted name the port will not
@@ -718,7 +722,11 @@ The decision, in order, for every statement:
      integer columns, integer literals and `UNIX_TIMESTAMP(column)`, joined
      by `+`, `-` and `*`, and `FLOOR` or `CEIL` of `UNIX_TIMESTAMP(column)`
      divided by numbers of up to seven digits
-     (`FLOOR(UNIX_TIMESTAMP(created_at) / 3600) * 3600`). A column inside
+     (`FLOOR(UNIX_TIMESTAMP(created_at) / 3600) * 3600`). The same `FLOOR`
+     outside `FROM_UNIXTIME` (`GROUP BY FLOOR(UNIX_TIMESTAMP(ts) / 86400)`)
+     stays on MySQL: there MySQL's is a `DECIMAL` with no fraction and the
+     copy's a `DOUBLE` (#2806).
+     A column inside
      that division stays on MySQL: MySQL divides exactly, the copy as a
      floating-point number, which rounds past 2^53 (a column of
      nanoseconds). MySQL
@@ -875,8 +883,9 @@ The decision, in order, for every statement:
      keeps as text), a column whose name the statement also gives a select
      item, and a statement with a subquery or a `WITH`.
    - Arithmetic on the result (`+ 1`, one count minus another, `AVG`) is
-     MySQL's, as it is on a date column. A division and a `SUM` are not
-     held back yet, the same as over an integer column (#2806).
+     MySQL's, as it is on a date column. So is a division: a `/` stays on
+     MySQL wherever it is (#2806). A `SUM` of the result is the copy's, typed
+     `DECIMAL` as MySQL types it.
    - On the port without routing nothing changes: `TIMESTAMPDIFF` there is
      refused, with `date_diff` as the copy's way to count.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
@@ -1069,7 +1078,7 @@ The decision, in order, for every statement:
    | `sql_select_limit` | any limit of 1 or more, applied to the copy's answer | `0` |
    | `sql_mode` | any combination of `ONLY_FULL_GROUP_BY`, `STRICT_TRANS_TABLES`, `STRICT_ALL_TABLES`, `NO_ZERO_DATE`, `NO_ZERO_IN_DATE`, `ERROR_FOR_DIVISION_BY_ZERO`, `NO_ENGINE_SUBSTITUTION`, `NO_UNSIGNED_SUBTRACTION`, `NO_AUTO_VALUE_ON_ZERO`, `NO_DIR_IN_CREATE`, `TRADITIONAL` (and MariaDB's `NO_AUTO_CREATE_USER`, `NO_FIELD_OPTIONS`, `NO_KEY_OPTIONS`, `NO_TABLE_OPTIONS`, `SIMULTANEOUS_ASSIGNMENT`), the empty mode included | any other flag: `PAD_CHAR_TO_FULL_LENGTH`, `HIGH_NOT_PRECEDENCE`, `REAL_AS_FLOAT`, `TIME_TRUNCATE_FRACTIONAL`, `ALLOW_INVALID_DATES`, `IGNORE_SPACE`, `ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `ANSI`, MariaDB's `EMPTY_STRING_IS_NULL`, `TIME_ROUND_FRACTIONAL`, `ORACLE` |
    | `lc_time_names` | `en_US` | any other locale (`MONTHNAME`, `DAYNAME`) |
-   | `div_precision_increment` | `4` (the default). The copy's `/` and `AVG` still return more decimals than MySQL's there: that is the documented precision difference, not something this setting removes | any other value: it moves MySQL's answer further from the copy's |
+   | `div_precision_increment` | `4` (the default). A `/` and an `AVG` stay on MySQL under routing whatever the value (#2806), so this setting only decides the session's other statements | any other value: it moves MySQL's answer further from the copy's |
    | `sql_auto_is_null` | `0` | `1` |
    | `timestamp`, asked before each statement that calls `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` or `UTC_DATE()` (#2611) | not set, and the source's clock within a second of DBTrail's host's | set (`SET timestamp = ...`, as replay tools do: MySQL's `NOW()` is that moment), or a source clock more than a second from DBTrail's host's (the copy reads the host's) |
    | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
@@ -1974,7 +1983,9 @@ What this is and is not:
     it could not read; a new full snapshot of a MySQL or MariaDB source
     records the definition, and an unreadable file is tried again within
     minutes.
-  - **`AVG` and `/` return a double** on the copy, where MySQL returns a
+  - **`AVG` and `/` return a double** on the copy (on the port without
+    routing and in the console; under Engine Routing both stay on MySQL
+    since #2806), where MySQL returns a
     `DECIMAL` with four decimals more than the operand has (for `DECIMAL`
     and integer operands; a `DOUBLE` operand gives a double on both):
     `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and

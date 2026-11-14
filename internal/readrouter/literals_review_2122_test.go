@@ -169,8 +169,8 @@ func TestVeto_avgOfATime(t *testing.T) {
 		"SELECT CAST(ts AS TIME) - 1 FROM t":                   vetoDateArithmetic,
 		"SELECT TIME '10:00:00' + INTERVAL 1 HOUR":             "",
 		"SELECT MAX(TIME '10:00:00'), CAST(ts AS CHAR) FROM t": "",
-		"SELECT AVG(amount), runtime '10' FROM t":              "",
-		"SELECT AVG(TIME(ts)) FROM t":                          "", // the copy refuses TIME(...)
+		"SELECT AVG(amount), runtime '10' FROM t":              vetoAvg, // not the date veto; AVG is #2806's, checked last
+		"SELECT AVG(TIME(ts)) FROM t":                          vetoAvg, // not the date veto (the copy refuses TIME(...)); AVG is #2806's, checked last
 	} {
 		if got := Veto(stmt); got != want {
 			t.Errorf("Veto(%q) = %q, want %q", stmt, got, want)
@@ -225,8 +225,8 @@ func TestVeto_dateInsideAGroup(t *testing.T) {
 		"SELECT SUM(a) - SUM(b) FROM t WHERE d >= DATE '2026-01-01'":                                           "",
 		"SELECT (a + b) - 1 FROM t WHERE (d >= DATE '2026-01-01') AND x - 1 > 0":                               "",
 		"SELECT x - 1 FROM t WHERE x - 1 > 0 AND (d >= DATE '2026-01-01')":                                     "",
-		"SELECT AVG(amount), MIN(DATE(ts)), MAX(DATE(ts)) FROM t":                                              "",
-		"SELECT AVG(amount) + 1 FROM t WHERE d = DATE '2026-01-01'":                                            "",
+		"SELECT AVG(amount), MIN(DATE(ts)), MAX(DATE(ts)) FROM t":                                              vetoAvg, // not the date veto; AVG is #2806's, checked last
+		"SELECT AVG(amount) + 1 FROM t WHERE d = DATE '2026-01-01'":                                            vetoAvg, // not the date veto; AVG is #2806's, checked last
 		"SELECT CASE WHEN d > DATE '2026-01-03' THEN 1 ELSE 0 END, a + 1 FROM t":                               "",
 		"SELECT CASE WHEN a THEN 1 END + 1, DATE(ts) FROM t":                                                   "",
 		"SELECT GREATEST(DATE '2026-02-01', DATE '2026-01-01') + INTERVAL 1 DAY":                               vetoNullArg, // not the date veto; the call is #2633's, checked last
