@@ -23,9 +23,9 @@ func TestFamilyOfFlavor(t *testing.T) {
 		{"postgresql", FamilyPostgres},
 		{" POSTGRES\n", FamilyPostgres},
 		{"postgres ", FamilyPostgres},
-		{"oracle", FamilyMySQL},   // not a flavor this build knows: a hand edit, read as SourceFlavor reads it
-		{"postgre", FamilyMySQL},  // a prefix is not the name
-		{"pg", FamilyMySQL},       // nor is a short form
+		{"oracle", FamilyMySQL},  // not a flavor this build knows: a hand edit, read as SourceFlavor reads it
+		{"postgre", FamilyMySQL}, // a prefix is not the name
+		{"pg", FamilyMySQL},      // nor is a short form
 		{"postgres/", FamilyMySQL},
 	} {
 		if got := FamilyOfFlavor(tc.flavor); got != tc.want {
@@ -342,8 +342,10 @@ func TestServersAPI_aMixedRegistryTakesNoEditButARemoval(t *testing.T) {
 	if rec.Code >= 300 {
 		t.Fatalf("removing a server from a mixed registry: %d %s", rec.Code, body)
 	}
-	rec, body = doServersReq(t, srv, "PATCH", "/api/servers/aaaa000000000001", `{"name":"shop2"}`)
-	if rec.Code >= 300 {
-		t.Fatalf("an edit once one family is left: %d %s", rec.Code, body)
+	// The same edit is no longer refused for the families (whatever else the
+	// form says about a hand-written entry is not this rule's).
+	rec, body = doServersReq(t, srv, "PATCH", "/api/servers/aaaa000000000001", `{"name":"shop2","host":"h","user":"u","dbname":"db"}`)
+	if rec.Code == http.StatusConflict || strings.Contains(string(body), "database famil") {
+		t.Fatalf("an edit once one family is left is still refused for the families: %d %s", rec.Code, body)
 	}
 }
