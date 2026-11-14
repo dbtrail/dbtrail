@@ -282,10 +282,11 @@ func pgCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string) pgCapture
 func pgCapturePosition(ctx context.Context, idx *sql.DB) (pgCaptureRead, error) {
 	var (
 		flavor   sql.NullString
+		position sql.NullInt64
 		savedAgo sql.NullInt64
 		sent     sql.NullInt64
 	)
-	err := idx.QueryRowContext(ctx, pgCapturePositionQuery).Scan(&flavor, &savedAgo, &sent)
+	err := idx.QueryRowContext(ctx, pgCapturePositionQuery).Scan(&flavor, &position, &savedAgo, &sent)
 	var me *mysql.MySQLError
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -298,6 +299,11 @@ func pgCapturePosition(ctx context.Context, idx *sql.DB) (pgCaptureRead, error) 
 		return pgCaptureRead{detail: captureDetailCheckpointUnread}, err
 	case flavor.String != console.FlavorPostgres:
 		return pgCaptureRead{detail: pgCaptureDetailNotPostgres}, nil
+	case position.Int64 == 0:
+		// The row is there before the first checkpoint: the capture's health
+		// poll and a lost slot both write it, with no position of any kind.
+		// A new capture on a quiet source, not an old one.
+		return pgCaptureRead{detail: pgCaptureDetailNoPosition}, nil
 	case !sent.Valid:
 		return pgCaptureRead{detail: pgCaptureDetailOldCapture}, nil
 	case sent.Int64 == 0 || !savedAgo.Valid:
@@ -308,7 +314,8 @@ func pgCapturePosition(ctx context.Context, idx *sql.DB) (pgCaptureRead, error) 
 	return pgCaptureRead{sent: uint64(sent.Int64), savedAgo: time.Duration(max(savedAgo.Int64, 0)) * time.Second}, nil
 }
 
-// pgCapturePositionQuery reads, in one statement, the position, the stamp it
-// is trusted by and how long ago it was saved, so all three are of one save.
-const pgCapturePositionQuery = "SELECT flavor, TIMESTAMPDIFF(SECOND, last_checkpoint, UTC_TIMESTAMP()), " +
+// pgCapturePositionQuery reads, in one statement, the checkpoint (0 or NULL
+// until the first one), the sent-through position with the stamp it is
+// trusted by, and how long ago it was saved, so all are of one save.
+const pgCapturePositionQuery = "SELECT flavor, binlog_position, TIMESTAMPDIFF(SECOND, last_checkpoint, UTC_TIMESTAMP()), " +
 	"IF(pg_sent_through_at <=> last_checkpoint, pg_sent_through_lsn, NULL) FROM stream_state WHERE id = 1"

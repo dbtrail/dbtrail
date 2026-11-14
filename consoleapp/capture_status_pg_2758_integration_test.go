@@ -90,10 +90,23 @@ func TestIntegrationPGCaptureStatus(t *testing.T) {
 	// The same through the reporter the page asks: a real answer, no longer
 	// "not compared yet".
 	c := newCaptureStatusReporter("")
-	got := c.CaptureStatus(ctx, e)
-	if got.ServerID != e.ID || (got.State != console.CaptureStateUpToDate && got.RetryInSeconds == 0) {
-		t.Fatalf("the reporter answered %+v, want up to date or a first read that asks again", got)
-	}
+	// The reporter bounds its two connections at three seconds, which a
+	// loaded machine under the race detector can miss; that answer expires
+	// like any other, so it is asked until it is one of the two.
+	pgTestWait(t, "an answer from the reporter", 2*time.Minute, func() (bool, string) {
+		got := c.CaptureStatus(ctx, e)
+		if got.ServerID != e.ID {
+			t.Fatalf("the reporter answered for %q: %+v", got.ServerID, got)
+		}
+		if got.Detail == captureDetailTimedOut {
+			time.Sleep(time.Second)
+			return false, got.Detail
+		}
+		if got.State != console.CaptureStateUpToDate && got.RetryInSeconds == 0 {
+			t.Fatalf("the reporter answered %+v, want up to date or a read that asks again", got)
+		}
+		return true, ""
+	})
 
 	// Capture stops and the source keeps changing: never up to date again.
 	if err := mon.Stop(ctx, e.ID); err != nil {

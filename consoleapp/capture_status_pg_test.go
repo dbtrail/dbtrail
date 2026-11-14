@@ -87,6 +87,12 @@ func TestPGCaptureStatusFrom(t *testing.T) {
 		{name: "behind with the save exactly the confirming gap after the earlier read",
 			r: saved(550, 800, time.Hour-captureConfirmGap), prev: held(600, 0), now: time.Hour,
 			state: behind, detail: pgCaptureDetailBehind, next: held(600, 0)},
+		{name: "behind on a source that has not moved since the earlier read",
+			r: saved(550, 600, time.Second), prev: held(600, 0), now: pgReachWithin,
+			state: behind, detail: pgCaptureDetailBehind, next: held(600, 0)},
+		{name: "a save exactly the confirming gap after the earlier read counts as since",
+			r: saved(550, 800, 25*time.Second-captureConfirmGap), prev: held(600, 0), now: 25 * time.Second,
+			state: unknown, detail: pgCaptureDetailReading, retry: true, next: held(600, 0)},
 		{name: "one position short is still behind",
 			r: saved(599, 800, 0), prev: held(600, 0), now: time.Hour,
 			state: behind, detail: pgCaptureDetailBehind, next: held(600, 0)},
@@ -202,7 +208,7 @@ func TestCaptureStatus_postgresReadPanics(t *testing.T) {
 
 func TestPGCapturePosition(t *testing.T) {
 	const stamp = int64(7) // seconds since the save, by the index's clock
-	cols := []string{"flavor", "saved_ago", "sent"}
+	cols := []string{"flavor", "binlog_position", "saved_ago", "sent"}
 	cases := []struct {
 		name    string
 		rows    *sqlmock.Rows
@@ -212,15 +218,17 @@ func TestPGCapturePosition(t *testing.T) {
 		ago     time.Duration
 		wantErr bool
 	}{
-		{name: "a trusted position", rows: sqlmock.NewRows(cols).AddRow("postgres", stamp, int64(4096)), sent: 4096, ago: 7 * time.Second},
+		{name: "a trusted position", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(4000), stamp, int64(4096)), sent: 4096, ago: 7 * time.Second},
 		{name: "no capture on record", rows: sqlmock.NewRows(cols), detail: captureDetailNoCapture},
 		{name: "an index without the columns", err: &mysql.MySQLError{Number: 1054, Message: "Unknown column 'pg_sent_through_at'"}, detail: pgCaptureDetailOldCapture},
-		{name: "a position another writer's save untied", rows: sqlmock.NewRows(cols).AddRow("postgres", stamp, nil), detail: pgCaptureDetailOldCapture},
-		{name: "a capture that has received no position yet", rows: sqlmock.NewRows(cols).AddRow("postgres", stamp, int64(0)), detail: pgCaptureDetailNoPosition},
-		{name: "a save with no stamp", rows: sqlmock.NewRows(cols).AddRow("postgres", nil, int64(4096)), detail: pgCaptureDetailNoPosition},
-		{name: "a save stamped after the index's now", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(-3), int64(4096)), sent: 4096, ago: 0},
-		{name: "a MySQL capture's index", rows: sqlmock.NewRows(cols).AddRow("mysql", stamp, nil), detail: pgCaptureDetailNotPostgres},
-		{name: "an index with no flavor", rows: sqlmock.NewRows(cols).AddRow(nil, stamp, int64(4096)), detail: pgCaptureDetailNotPostgres},
+		{name: "a position another writer's save untied", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(4000), stamp, nil), detail: pgCaptureDetailOldCapture},
+		{name: "a capture that has received no position yet", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(4000), stamp, int64(0)), detail: pgCaptureDetailNoPosition},
+		{name: "a new capture before its first checkpoint: the row its health poll wrote", rows: sqlmock.NewRows(cols).AddRow("postgres", nil, stamp, nil), detail: pgCaptureDetailNoPosition},
+		{name: "a checkpoint of zero", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(0), stamp, nil), detail: pgCaptureDetailNoPosition},
+		{name: "a save with no stamp", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(4000), nil, int64(4096)), detail: pgCaptureDetailNoPosition},
+		{name: "a save stamped after the index's now", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(4000), int64(-3), int64(4096)), sent: 4096, ago: 0},
+		{name: "a MySQL capture's index", rows: sqlmock.NewRows(cols).AddRow("mysql", int64(4000), stamp, nil), detail: pgCaptureDetailNotPostgres},
+		{name: "an index with no flavor", rows: sqlmock.NewRows(cols).AddRow(nil, int64(4000), stamp, int64(4096)), detail: pgCaptureDetailNotPostgres},
 		{name: "a read that failed", err: errors.New("connection reset"), detail: captureDetailCheckpointUnread, wantErr: true},
 	}
 	for _, tc := range cases {
