@@ -1222,7 +1222,10 @@ func (s *Server) buildHandler() http.Handler {
 	// catch-all; with no provider installed the path falls into that
 	// catch-all and 401s — the desired behavior for the stock binary.
 	if p := ext.ConsoleAuth(); p != nil {
-		root.Handle(extAuthPrefix, p.Handler(extAuthPrefix, s.extSessionIssuer()))
+		// withRequestWriter: the session issuer is handed the response
+		// writer alone, and names the login cookie for the address the
+		// browser opened (#2833), which only the request says.
+		root.Handle(extAuthPrefix, withRequestWriter(p.Handler(extAuthPrefix, s.extSessionIssuer())))
 	}
 	// Extension views (ext seam): an embedding distribution can contribute
 	// additional console views. Each one's static assets mount UNAUTHENTICATED on

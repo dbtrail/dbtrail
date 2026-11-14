@@ -2261,7 +2261,9 @@ A running server accepts it on the next login; no restart needed.
   of them), and on process restart — nothing session-shaped touches disk.
 - The login response also sets the session token as an **HttpOnly
   `bintrail_session` cookie** (`Secure; SameSite=Lax; Path=/`, `Max-Age`
-  matching the session's absolute expiry), so opening a link to the web interface in a new
+  matching the session's absolute expiry; its name carries the port the
+  browser opened, `bintrail_session_8090`, so two web interfaces on one
+  machine each keep their own login), so opening a link to the web interface in a new
   tab or window is already signed in — same store, same expiry, same
   revocation as the Bearer path; the cookie holds nothing new. Logout revokes
   the session server-side *and* expires the cookie, killing every tab at once.

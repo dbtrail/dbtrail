@@ -85,7 +85,11 @@ func (s *Server) extSessionIssuer() ext.ConsoleSessionIssuer {
 		if err != nil {
 			return "", time.Time{}, err
 		}
-		setSessionCookie(w, token, expires)
+		// Named for the address the browser opened, read from the request
+		// the provider's routes are served with (requestOf). A provider
+		// that hands over a writer of its own that hides it gets the plain
+		// name, which every address reads.
+		setSessionCookie(w, requestOf(w), token, expires)
 		slog.Info("console external-auth login", "identity", identity)
 		return token, expires, nil
 	}
@@ -179,7 +183,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("console password created via first-run setup", "remote", ip)
-	setSessionCookie(w, token, expires)
+	setSessionCookie(w, r, token, expires)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token":      token,
 		"expires_at": expires.UTC().Format(time.RFC3339),
@@ -242,7 +246,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// The verified identity is the operator's audit trail (like the external
 		// auth issuer); logged only on SUCCESS, where it is a real identity.
 		slog.Info("console login", "remote", ip, "identity", cred.Identity)
-		setSessionCookie(w, token, expires)
+		setSessionCookie(w, r, token, expires)
 		writeJSON(w, http.StatusOK, map[string]string{
 			"token":      token,
 			"expires_at": expires.UTC().Format(time.RFC3339),
@@ -278,7 +282,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("console login", "remote", ip)
-	setSessionCookie(w, token, expires)
+	setSessionCookie(w, r, token, expires)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token":      token,
 		"expires_at": expires.UTC().Format(time.RFC3339),
@@ -293,8 +297,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // design, so logout with one only clears the cookie. Idempotent.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Revoke(bearerToken(r))
-	s.sessions.Revoke(sessionCookieToken(r))
-	clearSessionCookie(w)
+	// Asked before anything is revoked: is the plain cookie a session of
+	// this server (clearSessionCookie)?
+	plainIsOurs := false
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		plainIsOurs = s.sessions.Validate(c.Value)
+	}
+	// Both cookies' sessions, not only the one a request is judged by
+	// (sessionCookieTokens): signing out leaves none of them alive.
+	for _, token := range sessionCookieTokens(r) {
+		s.sessions.Revoke(token)
+	}
+	clearSessionCookie(w, r, plainIsOurs)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -385,7 +399,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	slog.Info("console password changed", "remote", ip)
 	// The RevokeAll above also killed the session the cookie names; hand this
 	// tab's cookie the fresh session so its new tabs stay signed in.
-	setSessionCookie(w, token, expires)
+	setSessionCookie(w, r, token, expires)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token":      token,
 		"expires_at": expires.UTC().Format(time.RFC3339),
