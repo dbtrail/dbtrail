@@ -820,8 +820,10 @@ The decision, in order, for every statement:
    still the copy's, shown as a date and time (see the known differences).
    A step the port cannot send that way with certainty stays on MySQL: the
    `INTERVAL` written first (`INTERVAL 1 DAY + d`), an amount that is not a
-   number or a quoted one written in the statement (`INTERVAL -1 DAY`, which
-   the copy refuses, a placeholder, an expression), a placeholder in what is
+   whole number of at most nine digits written in the statement, quoted or
+   not (`INTERVAL -1 DAY`, which the copy refuses; `1.5`, which MySQL rounds
+   and the copy does not; a placeholder; an expression), an amount past every
+   date of the years 1 to 9999, a `TIME` stepped, a placeholder in what is
    stepped, `ADDDATE(d, n)` with a number of days, and arithmetic that binds
    tighter than `+` right before what is stepped (`a - d + INTERVAL 1 DAY`,
    `2 * d + ...`) or right after the unit (`d + INTERVAL 1 DAY * 2`).
