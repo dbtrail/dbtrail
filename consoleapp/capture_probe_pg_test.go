@@ -3,6 +3,7 @@ package consoleapp
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,5 +163,41 @@ func TestBackupScheduler_quietPostgresServer_2844(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// What the log says about a PostgreSQL probe. "The source is ahead" is how a
+// healthy capture reads on a server that is not idle, in turns with "caught
+// up": neither it nor the turns are written. A capture that stopped saving
+// and a capture past its source are warnings.
+func TestReportCaptureProbe_postgres(t *testing.T) {
+	b, _, _ := newScheduleFixture(t, true)
+	e := console.ServerEntry{ID: "p", Name: "p", Flavor: console.FlavorPostgres}
+	anchor := time.Date(2026, 11, 14, 6, 0, 0, 0, time.UTC)
+	logs := captureSlogFor(t)
+	caughtUp := captureProbeResult{verdict: console.CaptureCaughtUp}
+	ahead := captureProbeResult{detail: captureDetailPGAhead}
+	for range 3 {
+		b.reportCaptureProbe(e, anchor, caughtUp)
+		b.reportCaptureProbe(e, anchor, ahead)
+	}
+	if out := logs.String(); strings.Count(out, "the source confirms it wrote nothing the capture has not recorded") != 1 ||
+		strings.Contains(out, "does not confirm") || strings.Contains(out, "level=WARN") {
+		t.Fatalf("caught up and ahead in turns: %q, want the one line that says caught up", out)
+	}
+	for _, loud := range []string{captureDetailPGNotSaving, captureDetailPGPast} {
+		before := strings.Count(logs.String(), "level=WARN")
+		b.reportCaptureProbe(e, anchor, captureProbeResult{detail: loud})
+		b.reportCaptureProbe(e, anchor, captureProbeResult{detail: loud})
+		if out := logs.String(); strings.Count(out, "level=WARN") != before+1 || !strings.Contains(out, loud) {
+			t.Fatalf("%q twice: %q, want one more Warn line that says it", loud, out)
+		}
+	}
+	// A loss on record is the update's news (it is refused for the gap, and
+	// says so): here it is a reason like the structural ones, at Info.
+	before := strings.Count(logs.String(), "level=WARN")
+	b.reportCaptureProbe(e, anchor, captureProbeResult{detail: captureDetailPGLost})
+	if out := logs.String(); strings.Count(out, "level=WARN") != before || !strings.Contains(out, captureDetailPGLost) {
+		t.Fatalf("a loss on record: %q, want an Info line that says it", out)
 	}
 }
