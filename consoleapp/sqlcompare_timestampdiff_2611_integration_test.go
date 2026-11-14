@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,35 @@ func TestIntegrationSQLCompareTimestampDiffRoutedMariaDB(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	srcDB, srcName := testutil.CreateTestMariaDB(t)
 	timestampDiffRouted(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true")
+}
+
+// readsClock is a statement that reads the clock: its answer can change
+// between two runs a moment apart.
+var readsClock = regexp.MustCompile(`(?i)\b(now|curdate|utc_timestamp|utc_date|current_timestamp|current_date|localtime|localtimestamp|sysdate)\b`)
+
+// clockAnswers says why got, the port's answer with the copy's mark taken
+// off, is not the source's, or "". after is the source's answer right after
+// the port's; before, for a statement that reads the clock, the one right
+// before it ("" otherwise), and start the moment before was asked. Two runs
+// of a statement that reads the clock can fall on two sides of a minute or of
+// midnight, so the port may give either; and the three are asked within a
+// minute of each other, or "either side" could hide a real difference.
+func clockAnswers(got, before, after string, start time.Time) string {
+	if before != "" {
+		if d := time.Since(start); d > time.Minute {
+			return fmt.Sprintf("the source was asked %s apart, too far to compare a statement that reads the clock", d)
+		}
+		if got == before {
+			return ""
+		}
+	}
+	if got != after {
+		if before != "" {
+			return fmt.Sprintf("want %s or %s, the source's own answer right before and right after", before, after)
+		}
+		return fmt.Sprintf("want %s, the source's own answer", after)
+	}
+	return ""
 }
 
 func timestampDiffRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
@@ -165,15 +195,20 @@ func timestampDiffRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 			if len(c.args) > 0 {
 				routed, live = routedBin, liveBin
 			}
+			ask := func() string { return typedAnswer(live, c.stmt, c.args...) }
+			before, start := "", time.Now()
+			if readsClock.MatchString(c.stmt) {
+				before = ask()
+			}
 			got := typedAnswer(routed, c.stmt, c.args...)
 			t.Logf("[%s] routed %-60.300s %s", zone, got, c.stmt)
 			if strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, "("+c.who+",") {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want it answered by %s", zone, c.stmt, c.why, got, c.who)
 				continue
 			}
-			want := typedAnswer(live, c.stmt, c.args...)
-			if strings.ReplaceAll(got, "(copy,", "(live,") != want {
-				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want %s, the source's own answer", zone, c.stmt, c.why, got, want)
+			want := ask()
+			if why := clockAnswers(strings.ReplaceAll(got, "(copy,", "(live,"), before, want, start); why != "" {
+				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  %s", zone, c.stmt, c.why, got, why)
 			}
 		}
 	}

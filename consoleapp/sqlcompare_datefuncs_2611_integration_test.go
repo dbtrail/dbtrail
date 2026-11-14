@@ -162,15 +162,23 @@ func dateFunctionsRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 		routed := openRaw(t, withZone(sameCollation(portDSN), zone))
 		live := openRaw(t, withZone(sameCollation(sourceDSN), zone))
 		for _, c := range cases {
+			// A statement that reads the clock is asked of the source before
+			// and after the port: the port's answer may fall on either side
+			// of a minute or of midnight (clockAnswers).
+			ask := func() string { return answerText(live, c.stmt, c.args...) }
+			before, start := "", time.Now()
+			if readsClock.MatchString(c.stmt) {
+				before = ask()
+			}
 			got := answerText(routed, c.stmt, c.args...)
 			t.Logf("[%s] routed %-60.300s %s", zone, got, c.stmt)
 			if strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, c.who+"|") {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want it answered by %s", zone, c.stmt, c.why, got, c.who)
 				continue
 			}
-			want := answerText(live, c.stmt, c.args...)
-			if strings.ReplaceAll(got, "copy|", "live|") != want {
-				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want %s, the source's own answer", zone, c.stmt, c.why, got, want)
+			want := ask()
+			if why := clockAnswers(strings.ReplaceAll(got, "copy|", "live|"), before, want, start); why != "" {
+				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  %s", zone, c.stmt, c.why, got, why)
 			}
 		}
 	}
