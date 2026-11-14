@@ -236,7 +236,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		// What the copy goes on answering over the same table.
 		{stmt: "SELECT side, n + 1, created_on FROM ev WHERE created_on >= '2026-01-15' ORDER BY n", who: "copy", why: "a + that is not next to the date"},
 		{stmt: "SELECT side, n FROM ev WHERE created_on = ? ORDER BY n", args: []any{"2026-01-15"}, who: "copy", why: "a date with its whole year bound to a prepared statement"},
-		{stmt: "SELECT side, created_on + INTERVAL 1 DAY FROM ev ORDER BY n", who: "copy", why: "a date plus INTERVAL: the same day, a known difference in how it is shown"},
+		{stmt: "SELECT side, created_on + INTERVAL 1 DAY FROM ev ORDER BY n", who: "live", why: "a date plus a day is a DATE on MySQL and a date and time on the copy (#2849)"},
 		// #2532: DISTINCT inside an aggregate, decided by the column's type.
 		{stmt: "SELECT MIN(side), COUNT(DISTINCT n), COUNT(DISTINCT ev.id) FROM ev", who: "copy", why: "DISTINCT over whole numbers: counted alike"},
 		{stmt: "SELECT MIN(side), COUNT(DISTINCT created_on) FROM ev", who: "live", why: "DISTINCT over a date: the copy holds a zero date as NULL"},

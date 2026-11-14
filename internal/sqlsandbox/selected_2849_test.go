@@ -13,7 +13,9 @@ func TestCollectSelected(t *testing.T) {
 	ev := TableRef{Name: "ev"}
 	ev2 := TableRef{Name: "ev2"}
 	shopEv := TableRef{Schema: "shop", Name: "ev"}
-	col := func(name string, tables ...TableRef) SelectedColumn { return SelectedColumn{Name: name, Tables: tables} }
+	col := func(name string, tables ...TableRef) SelectedColumn {
+		return SelectedColumn{Name: name, Tables: tables}
+	}
 	cols := func(c ...SelectedColumn) []SelectedColumn { return c }
 	unread := SelectedItem{Unread: true}
 	cases := []struct {

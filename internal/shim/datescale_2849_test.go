@@ -42,7 +42,9 @@ func TestMySQLDateTimeText(t *testing.T) {
 // never "unknown".
 func TestAnswerDateDigits(t *testing.T) {
 	cols := []sqlsandbox.Column{{Name: "side", Type: "VARCHAR"}, {Name: "dt", Type: "TIMESTAMP WITH TIME ZONE"}, {Name: "dt3", Type: "TIMESTAMP"}, {Name: "d", Type: "DATE"}}
-	k := func(d int, name string) sqlsandbox.DateScale { return sqlsandbox.DateScale{Known: true, Digits: d, Name: name} }
+	k := func(d int, name string) sqlsandbox.DateScale {
+		return sqlsandbox.DateScale{Known: true, Digits: d, Name: name}
+	}
 	for _, c := range []struct {
 		why         string
 		scales      []sqlsandbox.DateScale
