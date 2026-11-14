@@ -251,11 +251,11 @@ var captureClasses = map[string]captureClass{
 	captureDetailPGNoLossRecord: captureCannotAsk,
 	// Not evidence, although it is a loss: see capture_probe_pg.go. The
 	// full read it leads to is the refused update's, which has a brake.
-	captureDetailPGLost: captureCannotAsk,
-	captureDetailPGFirstRead:    captureCannotAsk,
-	captureDetailPGNotSaved:     captureCannotAsk,
-	captureDetailPGReading:      captureCannotAsk,
-	captureDetailPGBehind:       captureCannotAsk,
+	captureDetailPGLost:      captureCannotAsk,
+	captureDetailPGFirstRead: captureCannotAsk,
+	captureDetailPGNotSaved:  captureCannotAsk,
+	captureDetailPGReading:   captureCannotAsk,
+	captureDetailPGBehind:    captureCannotAsk,
 
 	captureDetailLost:     captureEvidence,
 	captureDetailDropped:  captureEvidence,
