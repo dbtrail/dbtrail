@@ -1054,8 +1054,10 @@ The decision, in order, for every statement:
    Whether the copy answers is the table above: only under a collation that
    compares like `utf8mb4_0900_ai_ci` and with results in `utf8mb4`. That
    matters for drivers whose default is another collation:
-   go-sql-driver/mysql asks for `utf8mb4_general_ci`, so a Go client that
-   names no collation is now answered by MySQL on every statement. Ask for
+   go-sql-driver/mysql asks for `utf8mb4_general_ci`, so on MySQL and on
+   MariaDB 10.11 a Go client that names no collation is now answered by
+   MySQL on every statement (MariaDB 11.4 and later give that handshake
+   `utf8mb4_uca1400_ai_ci` themselves, which the copy answers under). Ask for
    one the copy reproduces in the DSN: `collation=utf8mb4_0900_ai_ci` on
    MySQL and MariaDB 11.4 and later, `collation=utf8mb4_unicode_ci` on
    MariaDB 10.11 (which has no `utf8mb4_0900_ai_ci` and gives a client that
