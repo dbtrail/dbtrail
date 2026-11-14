@@ -120,7 +120,7 @@ func TestRegistryAdd_theFamilyIsTheServersThereAre(t *testing.T) {
 	if _, err := reg.Add(familyTestEntry("my", "mysql")); !errors.Is(err, ErrOtherFamily) {
 		t.Fatalf("a MySQL server beside a PostgreSQL one: %v", err)
 	}
-	if err := reg.Remove(pg.ID); err != nil {
+	if err := reg.Delete(pg.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reg.Add(familyTestEntry("my", "mysql")); err != nil {
@@ -199,7 +199,7 @@ func TestRegistry_aMixedFileIsReadAndTakesNoNewServer(t *testing.T) {
 		t.Fatalf("MySQL corrected to MariaDB on a mixed registry: changed=%v err=%v", changed, err)
 	}
 	// One family removed: the registry takes a server of the one left.
-	if err := reg.Remove("aaaa000000000002"); err != nil {
+	if err := reg.Delete("aaaa000000000002"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, mixed := reg.MixedFamilies(); mixed {
