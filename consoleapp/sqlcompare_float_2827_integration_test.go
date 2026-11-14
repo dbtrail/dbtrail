@@ -58,7 +58,7 @@ func TestIntegrationSQLCompareFloatRouted(t *testing.T) {
 			t.Fatal(err)
 		}
 		var name, ddl string
-		if err := src.QueryRow("SHOW CREATE TABLE " + tb.name).Scan(&name, &ddl); err != nil {
+		if err := src.QueryRow("SHOW CREATE TABLE "+tb.name).Scan(&name, &ddl); err != nil {
 			t.Fatal(err)
 		}
 		cols := "id, side, f, f72, fu, d"
