@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -121,8 +122,12 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 	}
 	t.Logf("ddl: %s", ddl)
 	// The copy holds what a dump holds: the text MySQL prints for each cell.
-	dumpRows := func(side string) [][]string {
-		rs, err := src.Query("SELECT id, side, f, f72, fu, d FROM fl ORDER BY id")
+	dumpRows := func(side string, exact bool) [][]string {
+		q := "SELECT id, side, f, f72, fu, d FROM fl ORDER BY id"
+		if exact {
+			q = "SELECT id, side, CAST(f AS DOUBLE), CAST(f72 AS DOUBLE), CAST(fu AS DOUBLE), d FROM fl ORDER BY id"
+		}
+		rs, err := src.Query(q)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,8 +155,9 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 		}
 		return out
 	}
-	live, cp := dumpRows("live"), dumpRows("copy")
-	t.Logf("dump rows: %v", live)
+	exact := os.Getenv("FLOAT_EXACT") == "1"
+	live, cp := dumpRows("live", false), dumpRows("copy", exact)
+	t.Logf("dump rows: %v\ncopy rows: %v", live, cp)
 	baseDir := t.TempDir()
 	writeOrderSnapshot(t, baseDir, srcName, []orderTable{{name: "fl", ddl: ddl + ";\n", rows: live, copyRows: cp, footer: true}})
 
@@ -222,14 +228,28 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 				got := wireAnswer(side.db, s, prep)
 				norm := strings.ReplaceAll(got, "copy", "live")
 				verdict := "SAME"
-				if norm != want {
+				rowsOf := func(a string) string {
+					if i := strings.Index(a, "]"); i >= 0 && !strings.HasPrefix(a, "ERROR") {
+						return a[i+1:]
+					}
+					return a
+				}
+				switch {
+				case norm == want:
+				case rowsOf(norm) == rowsOf(want):
+					verdict = "TYPES"
+				default:
 					verdict = "DIFF"
 				}
 				who := "mysql"
 				if strings.Contains(got, "copy") {
 					who = "copy"
 				}
-				t.Logf("MEASURE %s %s %-6s answered-by=%s %s\n    mysql: %s\n    port:  %s", verdict, mode, side.name, who, s, want, got)
+				if verdict == "DIFF" {
+					t.Logf("MEASURE %s %s %-6s answered-by=%s %s\n    mysql: %s\n    port:  %s", verdict, mode, side.name, who, s, want, got)
+				} else {
+					t.Logf("MEASURE %s %s %-6s answered-by=%s %s", verdict, mode, side.name, who, s)
+				}
 			}
 		}
 	}
