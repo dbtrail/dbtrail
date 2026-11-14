@@ -27,6 +27,10 @@ func TestPGCaptureStatusFrom(t *testing.T) {
 		behind   = console.CaptureStateBehind
 		unknown  = console.CaptureStateUnknown
 	)
+	// saved is a read whose position was saved d before it was read.
+	saved := func(sent, source uint64, d time.Duration) pgCaptureRead {
+		return pgCaptureRead{sent: sent, source: source, savedAgo: d}
+	}
 	cases := []struct {
 		name  string
 		r     pgCaptureRead
@@ -40,46 +44,58 @@ func TestPGCaptureStatusFrom(t *testing.T) {
 		next   *pgCaptureSample
 	}{
 		{name: "equal on a first read",
-			r: pgCaptureRead{sent: 500, source: 500}, now: 0,
+			r: saved(500, 500, 0), now: 0,
 			state: upToDate, next: held(500, 0)},
-		{name: "equal, whatever was held",
-			r: pgCaptureRead{sent: 900, source: 900}, prev: held(700, 0), now: time.Hour,
+		{name: "equal, whatever was held and however long ago it was saved",
+			r: saved(900, 900, 6*time.Hour), prev: held(700, 0), now: time.Hour,
 			state: upToDate, next: held(900, time.Hour)},
 		{name: "the source ahead on a first read is asked again",
-			r: pgCaptureRead{sent: 500, source: 600}, now: 0,
+			r: saved(500, 600, 0), now: 0,
 			state: unknown, detail: pgCaptureDetailFirstRead, retry: true, next: held(600, 0)},
+
 		{name: "the capture reached where the source was at the earlier read",
-			r: pgCaptureRead{sent: 650, source: 800, checkpoint: at(20 * time.Second)}, prev: held(600, 0), now: 25 * time.Second,
+			r: saved(650, 800, 5*time.Second), prev: held(600, 0), now: 25 * time.Second,
 			state: upToDate, next: held(800, 25*time.Second)},
 		{name: "exactly where the source was",
-			r: pgCaptureRead{sent: 600, source: 800, checkpoint: at(20 * time.Second)}, prev: held(600, 0), now: 25 * time.Second,
+			r: saved(600, 800, 5*time.Second), prev: held(600, 0), now: 25 * time.Second,
 			state: upToDate, next: held(800, 25*time.Second)},
-		{name: "reached at the edge of a fresh earlier read",
-			r: pgCaptureRead{sent: 650, source: 800}, prev: held(600, 0), now: pgSampleFresh,
-			state: upToDate, next: held(800, pgSampleFresh)},
+		{name: "reached at the edge of the time it is given",
+			r: saved(650, 800, 0), prev: held(600, 0), now: pgReachWithin,
+			state: upToDate, next: held(800, pgReachWithin)},
 		{name: "reached, but the earlier read is too old to speak for now",
-			r: pgCaptureRead{sent: 650, source: 800}, prev: held(600, 0), now: pgSampleFresh + time.Second,
-			state: unknown, detail: pgCaptureDetailFirstRead, retry: true, next: held(800, pgSampleFresh+time.Second)},
+			r: saved(650, 800, 0), prev: held(600, 0), now: pgReachWithin + time.Second,
+			state: unknown, detail: pgCaptureDetailFirstRead, retry: true, next: held(800, pgReachWithin+time.Second)},
+		{name: "reached with a save at the edge of recent",
+			r: saved(650, 800, pgSaveFresh), prev: held(600, 0), now: 40 * time.Second,
+			state: upToDate, next: held(800, 40*time.Second)},
+		{name: "reached, and then the capture stopped saving",
+			r: saved(650, 800, pgSaveFresh+time.Second), prev: held(600, 0), now: 40 * time.Second,
+			state: unknown, detail: pgCaptureDetailNotSaving, retry: true, next: held(800, 40*time.Second)},
+
 		{name: "not reached, and no position saved since the earlier read",
-			r: pgCaptureRead{sent: 550, source: 800, checkpoint: at(-5 * time.Second)}, prev: held(600, 0), now: 25 * time.Second,
+			r: saved(550, 800, 30*time.Second), prev: held(600, 0), now: 25 * time.Second,
 			state: unknown, detail: pgCaptureDetailNotSaved, retry: true, next: held(600, 0)},
 		{name: "not reached, a position saved too soon after the earlier read",
-			r: pgCaptureRead{sent: 550, source: 800, checkpoint: at(captureConfirmGap - time.Second)}, prev: held(600, 0), now: 5 * time.Minute,
+			r: saved(550, 800, 5*time.Minute-captureConfirmGap+time.Second), prev: held(600, 0), now: 5 * time.Minute,
 			state: unknown, detail: pgCaptureDetailNotSaved, retry: true, next: held(600, 0)},
 		{name: "not reached with a position saved since, still inside the time it is given",
-			r: pgCaptureRead{sent: 550, source: 800, checkpoint: at(20 * time.Second)}, prev: held(600, 0), now: pgBehindAfter - time.Second,
+			r: saved(550, 800, time.Second), prev: held(600, 0), now: pgReachWithin - time.Second,
 			state: unknown, detail: pgCaptureDetailReading, retry: true, next: held(600, 0)},
 		{name: "not reached after the time it is given: behind",
-			r: pgCaptureRead{sent: 550, source: 800, checkpoint: at(20 * time.Second)}, prev: held(600, 0), now: pgBehindAfter,
+			r: saved(550, 800, time.Second), prev: held(600, 0), now: pgReachWithin,
+			state: behind, detail: pgCaptureDetailBehind, next: held(600, 0)},
+		{name: "behind with the save exactly the confirming gap after the earlier read",
+			r: saved(550, 800, time.Hour-captureConfirmGap), prev: held(600, 0), now: time.Hour,
 			state: behind, detail: pgCaptureDetailBehind, next: held(600, 0)},
 		{name: "one position short is still behind",
-			r: pgCaptureRead{sent: 599, source: 800, checkpoint: at(time.Hour)}, prev: held(600, 0), now: time.Hour,
+			r: saved(599, 800, 0), prev: held(600, 0), now: time.Hour,
 			state: behind, detail: pgCaptureDetailBehind, next: held(600, 0)},
+
 		{name: "the capture past the source: nothing held survives",
-			r: pgCaptureRead{sent: 900, source: 800}, prev: held(600, 0), now: 25 * time.Second,
+			r: saved(900, 800, 0), prev: held(600, 0), now: 25 * time.Second,
 			state: unknown, detail: pgCaptureDetailPast, next: nil},
 		{name: "the source before where it was: read as a first read",
-			r: pgCaptureRead{sent: 100, source: 300}, prev: held(600, 0), now: 25 * time.Second,
+			r: saved(100, 300, 0), prev: held(600, 0), now: 25 * time.Second,
 			state: unknown, detail: pgCaptureDetailFirstRead, retry: true, next: held(300, 25*time.Second)},
 		{name: "a read that failed keeps what was held",
 			r: pgCaptureRead{detail: captureDetailSourceSilent, cause: "dial"}, prev: held(600, 0), now: 25 * time.Second,
@@ -124,7 +140,7 @@ func TestCaptureStatus_postgres(t *testing.T) {
 	}
 	ask := func() console.CaptureStatus { return c.CaptureStatus(context.Background(), e) }
 
-	next = pgCaptureRead{sent: 500, source: 600, checkpoint: *clock}
+	next = pgCaptureRead{sent: 500, source: 600}
 	first := ask()
 	if first.State != console.CaptureStateUnknown || first.RetryInSeconds == 0 || first.ServerID != "p" {
 		t.Fatalf("first read: %+v", first)
@@ -135,29 +151,28 @@ func TestCaptureStatus_postgres(t *testing.T) {
 	}
 	// The page asks again when told to: the answer has expired by then.
 	*clock = clock.Add(captureStatusRetry)
-	next = pgCaptureRead{sent: 700, source: 900, checkpoint: *clock}
+	next = pgCaptureRead{sent: 700, source: 900, savedAgo: 2 * time.Second}
 	if got := ask(); got.State != console.CaptureStateUpToDate || reads != 2 {
 		t.Fatalf("after the capture passed where the source was: %+v (%d reads)", got, reads)
 	}
 
-	// The capture stops saving; the source keeps writing.
-	stopped := *clock
+	// The capture stops saving right there; the source keeps writing. 700 is
+	// short of 900, where the source was at the read now held, and nothing
+	// was saved since that read.
 	*clock = clock.Add(captureStatusTTL)
-	next = pgCaptureRead{sent: 700, source: 1000, checkpoint: stopped}
-	// 700 is short of 900, where the source was at the read now held, and
-	// nothing was saved since that read.
+	next = pgCaptureRead{sent: 700, source: 1000, savedAgo: captureStatusTTL + 2*time.Second}
 	if got := ask(); got.State != console.CaptureStateUnknown || got.Detail != pgCaptureDetailNotSaved {
 		t.Fatalf("a capture that stopped saving: %+v", got)
 	}
 	// It saves again without having read further, and the time it is given runs out.
-	*clock = clock.Add(pgBehindAfter)
-	next = pgCaptureRead{sent: 700, source: 1100, checkpoint: *clock}
+	*clock = clock.Add(pgReachWithin)
+	next = pgCaptureRead{sent: 700, source: 1100, savedAgo: time.Second}
 	if got := ask(); got.State != console.CaptureStateBehind || got.Detail != pgCaptureDetailBehind {
 		t.Fatalf("a capture that saves without advancing: %+v", got)
 	}
 	// And catches up.
 	*clock = clock.Add(captureStatusTTL)
-	next = pgCaptureRead{sent: 1100, source: 1100, checkpoint: *clock}
+	next = pgCaptureRead{sent: 1100, source: 1100}
 	if got := ask(); got.State != console.CaptureStateUpToDate {
 		t.Fatalf("a capture that caught up: %+v", got)
 	}
@@ -186,22 +201,24 @@ func TestCaptureStatus_postgresReadPanics(t *testing.T) {
 }
 
 func TestPGCapturePosition(t *testing.T) {
-	stamp := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
-	const q = "SELECT flavor, last_checkpoint, IF(pg_sent_through_at <=> last_checkpoint, pg_sent_through_lsn, NULL) FROM stream_state WHERE id = 1"
-	cols := []string{"flavor", "last_checkpoint", "sent"}
+	const stamp = int64(7) // seconds since the save, by the index's clock
+	cols := []string{"flavor", "saved_ago", "sent"}
 	cases := []struct {
 		name    string
 		rows    *sqlmock.Rows
 		err     error
 		detail  string
 		sent    uint64
+		ago     time.Duration
 		wantErr bool
 	}{
-		{name: "a trusted position", rows: sqlmock.NewRows(cols).AddRow("postgres", stamp, int64(4096)), sent: 4096},
+		{name: "a trusted position", rows: sqlmock.NewRows(cols).AddRow("postgres", stamp, int64(4096)), sent: 4096, ago: 7 * time.Second},
 		{name: "no capture on record", rows: sqlmock.NewRows(cols), detail: captureDetailNoCapture},
 		{name: "an index without the columns", err: &mysql.MySQLError{Number: 1054, Message: "Unknown column 'pg_sent_through_at'"}, detail: pgCaptureDetailOldCapture},
 		{name: "a position another writer's save untied", rows: sqlmock.NewRows(cols).AddRow("postgres", stamp, nil), detail: pgCaptureDetailOldCapture},
 		{name: "a capture that has received no position yet", rows: sqlmock.NewRows(cols).AddRow("postgres", stamp, int64(0)), detail: pgCaptureDetailNoPosition},
+		{name: "a save with no stamp", rows: sqlmock.NewRows(cols).AddRow("postgres", nil, int64(4096)), detail: pgCaptureDetailNoPosition},
+		{name: "a save stamped after the index's now", rows: sqlmock.NewRows(cols).AddRow("postgres", int64(-3), int64(4096)), sent: 4096, ago: 0},
 		{name: "a MySQL capture's index", rows: sqlmock.NewRows(cols).AddRow("mysql", stamp, nil), detail: pgCaptureDetailNotPostgres},
 		{name: "an index with no flavor", rows: sqlmock.NewRows(cols).AddRow(nil, stamp, int64(4096)), detail: pgCaptureDetailNotPostgres},
 		{name: "a read that failed", err: errors.New("connection reset"), detail: captureDetailCheckpointUnread, wantErr: true},
@@ -213,7 +230,7 @@ func TestPGCapturePosition(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			exp := mock.ExpectQuery(regexp.QuoteMeta(q))
+			exp := mock.ExpectQuery(regexp.QuoteMeta(pgCapturePositionQuery))
 			if tc.err != nil {
 				exp.WillReturnError(tc.err)
 			} else {
@@ -226,8 +243,8 @@ func TestPGCapturePosition(t *testing.T) {
 			if got.detail != tc.detail || got.sent != tc.sent {
 				t.Fatalf("got %+v, want detail %q sent %d", got, tc.detail, tc.sent)
 			}
-			if tc.sent != 0 && !got.checkpoint.Equal(stamp) {
-				t.Fatalf("checkpoint = %s, want %s", got.checkpoint, stamp)
+			if got.savedAgo != tc.ago {
+				t.Fatalf("saved %s ago, want %s", got.savedAgo, tc.ago)
 			}
 		})
 	}

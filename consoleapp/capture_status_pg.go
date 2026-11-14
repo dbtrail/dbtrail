@@ -36,23 +36,40 @@ import (
 //
 //   - up to date is the two positions equal, OR the capture's position at
 //     or past where the source was at an earlier read no older than
-//     pgSampleFresh: the capture holds everything the source had then;
-//   - behind is said only against a read at least pgBehindAfter old that the
+//     pgReachWithin, by a capture that saved its position within
+//     pgSaveFresh: the capture holds everything the source had then, and is
+//     still saving;
+//   - behind is said only against a read at least pgReachWithin old that the
 //     capture, having saved its position since, still has not reached;
 //   - everything else is unknown with a reason, and a first read that finds
 //     the source ahead asks to be asked again.
 //
+// One window for both, on purpose: were "reached" accepted for longer than
+// "not reached" is waited for, a capture steadily behind by an amount between
+// the two would be called behind and up to date in turns.
+//
+// When the capture saved is taken as an AGE by the index's own clock, in the
+// statement that reads the position, so neither the two machines' clocks nor
+// the index connection's time zone enter into it.
+//
+// What this does not look at: a loss on record (the continuity chip and the
+// capture health list say those, as for MySQL), and the source's timeline. A
+// source replaced by another whose WAL is past the capture's position reads
+// as any source that is ahead.
+//
 // No same-server check: the index is a MySQL server.
 
 const (
-	// pgSampleFresh bounds how old an earlier read of the source may be for
-	// "the capture reached it" to mean up to date. Reaching where the source
-	// was an hour ago says nothing about now.
-	pgSampleFresh = 2 * time.Minute
-	// pgBehindAfter is how long the capture is given to reach a read of the
-	// source before it is called behind. Longer than a checkpoint period
-	// (10 s) plus the wait for the walsender's next position report.
-	pgBehindAfter = 60 * time.Second
+	// pgReachWithin is how long the capture is given to reach a read of the
+	// source. Reached within it is up to date; not reached after it is
+	// behind; reached later says nothing about now, and the source is
+	// sampled again. Longer than a checkpoint period (10 s) plus the wait
+	// for the walsender's next position report.
+	pgReachWithin = 60 * time.Second
+	// pgSaveFresh is how recent the capture's last save must be for "it
+	// reached the earlier read" to mean up to date: three checkpoint
+	// periods. A capture that reached it and then stopped is not up to date.
+	pgSaveFresh = 30 * time.Second
 
 	pgCaptureDetailNotPostgres = "the index was not written by a PostgreSQL capture"
 	pgCaptureDetailOldCapture  = "the index holds no position to compare: it was last written by a capture that does not record how far the source has sent it"
@@ -60,6 +77,7 @@ const (
 	pgCaptureDetailPast        = "the capture's position is past the source's: the source may have been restored or replaced"
 	pgCaptureDetailFirstRead   = "the source looked ahead on a first read, and is asked again"
 	pgCaptureDetailNotSaved    = "capture has not saved its position since the source was first asked"
+	pgCaptureDetailNotSaving   = "the source is ahead and capture has not saved its position lately: check that capture is running"
 	pgCaptureDetailReading     = "the source is ahead and capture is given time to reach it"
 	pgCaptureDetailBehind      = "capture has not reached the position the source had at an earlier read"
 )
@@ -72,8 +90,9 @@ type pgCaptureRead struct {
 	// sent is the capture's trusted sent-through position; source is how
 	// far the source's WAL is flushed, read after sent.
 	sent, source uint64
-	// checkpoint is when the capture saved sent, by the index's clock.
-	checkpoint time.Time
+	// savedAgo is how long before the read the capture saved sent, by the
+	// index's clock.
+	savedAgo time.Duration
 }
 
 // pgCaptureSample is where the source was at one read.
@@ -156,7 +175,14 @@ func (c *captureStatusReporter) captureStatusPG(ctx context.Context, e console.S
 	// Once per change of answer, not once per read.
 	if said := answer.State + "|" + answer.Detail + "|" + r.cause; slot.logged != said {
 		slot.logged = said
-		reportCaptureStatus(e, answer, r.cause)
+		if answer.Detail == pgCaptureDetailPast {
+			// The one sign of a source restored or replaced under a running
+			// capture: said aloud, where the other unknowns are Debug.
+			slog.Warn("capture status: the capture's saved position is past the source's flushed WAL position; if the source was restored or replaced, read it in full again",
+				"server", e.Name, "id", e.ID)
+		} else {
+			reportCaptureStatus(e, answer, r.cause)
+		}
 	}
 	return answer
 }
@@ -206,17 +232,21 @@ func pgCaptureStatusFrom(r pgCaptureRead, prev *pgCaptureSample, now time.Time) 
 	}
 	age := now.Sub(prev.at)
 	if r.sent >= prev.lsn {
-		if age <= pgSampleFresh {
-			return console.CaptureStatus{State: console.CaptureStateUpToDate}, here
+		switch {
+		case age > pgReachWithin:
+			// Reached, but too long ago to speak for now.
+			return again(pgCaptureDetailFirstRead), here
+		case r.savedAgo > pgSaveFresh:
+			// Reached, and then it stopped saving while the source went on.
+			return again(pgCaptureDetailNotSaving), here
 		}
-		// Reached, but too long ago to speak for now.
-		return again(pgCaptureDetailFirstRead), here
+		return console.CaptureStatus{State: console.CaptureStateUpToDate}, here
 	}
 	// Not reached. The earlier read stays: it is what the capture is held to.
 	switch {
-	case r.checkpoint.Sub(prev.at) < captureConfirmGap:
+	case now.Add(-r.savedAgo).Sub(prev.at) < captureConfirmGap:
 		return again(pgCaptureDetailNotSaved), prev
-	case age < pgBehindAfter:
+	case age < pgReachWithin:
 		return again(pgCaptureDetailReading), prev
 	}
 	return console.CaptureStatus{State: console.CaptureStateBehind, Detail: pgCaptureDetailBehind}, prev
@@ -251,15 +281,11 @@ func pgCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string) pgCapture
 // error; an error is a read that failed, with its detail.
 func pgCapturePosition(ctx context.Context, idx *sql.DB) (pgCaptureRead, error) {
 	var (
-		flavor     sql.NullString
-		checkpoint sql.NullTime
-		sent       sql.NullInt64
+		flavor   sql.NullString
+		savedAgo sql.NullInt64
+		sent     sql.NullInt64
 	)
-	// One statement, so the position and the stamp it is trusted by are of
-	// the same save.
-	err := idx.QueryRowContext(ctx,
-		"SELECT flavor, last_checkpoint, IF(pg_sent_through_at <=> last_checkpoint, pg_sent_through_lsn, NULL) FROM stream_state WHERE id = 1").
-		Scan(&flavor, &checkpoint, &sent)
+	err := idx.QueryRowContext(ctx, pgCapturePositionQuery).Scan(&flavor, &savedAgo, &sent)
 	var me *mysql.MySQLError
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -274,8 +300,15 @@ func pgCapturePosition(ctx context.Context, idx *sql.DB) (pgCaptureRead, error) 
 		return pgCaptureRead{detail: pgCaptureDetailNotPostgres}, nil
 	case !sent.Valid:
 		return pgCaptureRead{detail: pgCaptureDetailOldCapture}, nil
-	case sent.Int64 == 0 || !checkpoint.Valid:
+	case sent.Int64 == 0 || !savedAgo.Valid:
 		return pgCaptureRead{detail: pgCaptureDetailNoPosition}, nil
 	}
-	return pgCaptureRead{sent: uint64(sent.Int64), checkpoint: checkpoint.Time}, nil
+	// A save stamped after the index's "now" (its clock stepped back) is a
+	// save made just now.
+	return pgCaptureRead{sent: uint64(sent.Int64), savedAgo: time.Duration(max(savedAgo.Int64, 0)) * time.Second}, nil
 }
+
+// pgCapturePositionQuery reads, in one statement, the position, the stamp it
+// is trusted by and how long ago it was saved, so all three are of one save.
+const pgCapturePositionQuery = "SELECT flavor, TIMESTAMPDIFF(SECOND, last_checkpoint, UTC_TIMESTAMP()), " +
+	"IF(pg_sent_through_at <=> last_checkpoint, pg_sent_through_lsn, NULL) FROM stream_state WHERE id = 1"
