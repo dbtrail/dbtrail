@@ -1524,6 +1524,14 @@ What this is and is not:
   any other expression go to MySQL, even where the two would agree, and so
   does `ROUND` of any column beside a table whose snapshot has no table
   definition),
+  any statement that names a `FLOAT` column, or has a star over a table
+  with one (MySQL compares and computes a `FLOAT` as a double, the copy as
+  a single-precision float: a `FLOAT` holding `3.14` is
+  `3.140000104904175` on MySQL, so `WHERE f = 3.14` finds no row there and
+  the row on the copy, and `f * 2` near the type's limit is a number on
+  MySQL and `-Infinity` on the copy; a statement over the same table that
+  does not name the column still goes to the copy, and a `DOUBLE` column
+  is the same type on both),
   `SUBSTRING`, `SUBSTR` and `MID` unless the position is a positive whole
   number or `-1` and the length a whole number, both written in the
   statement (`SUBSTRING('abc', 0, 2)` is `''` on MySQL and `'a'` on the
