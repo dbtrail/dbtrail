@@ -25,11 +25,11 @@ func TestCollationFree_2836(t *testing.T) {
 		"SELECT ROUND(AVG(n), 2), SUM(n) FROM t",
 		"SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id)",
 		"SELECT x FROM (SELECT id AS x FROM t) q ORDER BY x",
-		"SELECT `count(x)` FROM t",                 // a name in backticks
-		"SELECT COUNT (*) FROM t",                  // a space before the parenthesis
-		"SELECT COUNT\v(*) FROM t",                 // a vertical tab
-		"SELECT id FROM t /* 'a' CONCAT(x) */",     // inside a comment
-		"SELECT id, ROW_NUMBER FROM t",             // a column named like a function
+		"SELECT `count(x)` FROM t",             // a name in backticks
+		"SELECT COUNT (*) FROM t",              // a space before the parenthesis
+		"SELECT COUNT\v(*) FROM t",             // a vertical tab
+		"SELECT id FROM t /* 'a' CONCAT(x) */", // inside a comment
+		"SELECT id, ROW_NUMBER FROM t",         // a column named like a function
 		"SELECT SUM(n) OVER (PARTITION BY k) FROM t",
 	}
 	for _, stmt := range free {
@@ -44,10 +44,10 @@ func TestCollationFree_2836(t *testing.T) {
 		"SELECT id FROM t WHERE s LIKE 'a%'",
 		"SELECT id FROM t WHERE s IN ('a', 'b')",
 		"SELECT CASE WHEN n > 1 THEN 'x' ELSE s END FROM t",
-		"SELECT \"x\" FROM t",                    // a double-quoted string
-		"SELECT id FROM t WHERE s = ?",           // a placeholder, perhaps text
-		"SELECT id FROM t WHERE b = 0x41",        // a hex number: a binary string
-		"SELECT id FROM t WHERE b = 0b1",         // a bit number
+		"SELECT \"x\" FROM t",             // a double-quoted string
+		"SELECT id FROM t WHERE s = ?",    // a placeholder, perhaps text
+		"SELECT id FROM t WHERE b = 0x41", // a hex number: a binary string
+		"SELECT id FROM t WHERE b = 0b1",  // a bit number
 		"SELECT CONCAT(s, g) AS x FROM t ORDER BY x",
 		"SELECT CONCAT(n) < CONCAT(id) FROM t",
 		"SELECT LOWER(s) FROM t ORDER BY 1",
@@ -58,9 +58,9 @@ func TestCollationFree_2836(t *testing.T) {
 		"SELECT IFNULL(s, g) FROM t",
 		"SELECT COALESCE(s, b) FROM t",
 		"SELECT GREATEST(s, g) FROM t",
-		"SELECT db.min(s) FROM t",  // a stored function
-		"SELECT xmin(s) FROM t",    // another function
-		"SELECT N'x' FROM t",       // a national string
+		"SELECT db.min(s) FROM t", // a stored function
+		"SELECT xmin(s) FROM t",   // another function
+		"SELECT N'x' FROM t",      // a national string
 		"SELECT _utf8mb4'x' FROM t",
 		"SELECT x'41' FROM t",
 	}
