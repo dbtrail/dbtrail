@@ -71,6 +71,16 @@ func (s *session) handleSimpleQuery(qstr string) error {
 // query-level error. Single-row AS OF only; full-table and _diff are refused.
 func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
 	q, err := shim.Parse(qstr, s.currentDB)
+	if s.h == nil && !errors.Is(err, shim.ErrNotTimeTravel) {
+		// A port that runs SQL on the copy and has no time-travel engine
+		// bound, and a statement written for time travel, well formed or
+		// not. Refused by name: run as ordinary SQL it would answer from the
+		// copy as it is now, not as of the moment asked for, and a parse
+		// error here would send the reader to fix a statement this port
+		// does not serve.
+		return nil, nil, "", &pgErr{"0A000",
+			"time travel (_flashback, _snapshot, AS OF) is not served on this port; it runs SQL on the copy as it is now"}
+	}
 	if err != nil {
 		if !errors.Is(err, shim.ErrNotTimeTravel) {
 			// Recognised as a time-travel query but malformed (bad AS OF literal,
@@ -89,14 +99,6 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 		return nil, nil, "", &pgErr{"0A000", fmt.Sprintf(
 			"this endpoint serves only _flashback / _snapshot AS OF time-travel queries; got: %s",
 			strings.TrimSpace(qstr))}
-	}
-
-	if s.h == nil {
-		// A port that runs SQL on the copy and has no time-travel engine
-		// bound. Refused by name: run as ordinary SQL, the statement would
-		// answer from the copy as it is now, not as of the moment asked for.
-		return nil, nil, "", &pgErr{"0A000",
-			"time travel (_flashback, _snapshot, AS OF) is not served on this port; it runs SQL on the copy as it is now"}
 	}
 
 	// Per-tenant schema authorization (#824/#1261), on the RESOLVED target

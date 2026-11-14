@@ -94,25 +94,36 @@ func textRows(t *testing.T, conn *pgx.Conn, stmt string) (names []string, out []
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	res, err := conn.PgConn().Exec(ctx, stmt).ReadAll()
-	if err != nil {
+	// Read by hand: the client library's ReadAll keeps the column names
+	// only when the result has a row.
+	mrr := conn.PgConn().Exec(ctx, stmt)
+	results := 0
+	for mrr.NextResult() {
+		results++
+		rr := mrr.ResultReader()
+		for _, f := range rr.FieldDescriptions() {
+			names = append(names, f.Name)
+		}
+		for rr.NextRow() {
+			vals := rr.Values()
+			row := make([]*string, len(vals))
+			for i, c := range vals {
+				if c != nil {
+					s := string(c)
+					row[i] = &s
+				}
+			}
+			out = append(out, row)
+		}
+		if _, err := rr.Close(); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := mrr.Close(); err != nil {
 		t.Fatalf("%s: %v", stmt, err)
 	}
-	if len(res) != 1 {
-		t.Fatalf("%s: %d results, want 1", stmt, len(res))
-	}
-	for _, f := range res[0].FieldDescriptions {
-		names = append(names, f.Name)
-	}
-	for _, r := range res[0].Rows {
-		row := make([]*string, len(r))
-		for i, c := range r {
-			if c != nil {
-				s := string(c)
-				row[i] = &s
-			}
-		}
-		out = append(out, row)
+	if results != 1 {
+		t.Fatalf("%s: %d results, want 1", stmt, results)
 	}
 	return names, out
 }
@@ -385,10 +396,16 @@ func TestPort_timeTravelIsRefusedNotRunOnTheCopy(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = conn.PgConn().Exec(ctx, "SELECT * FROM _flashback.orders AS OF '5 minutes ago' WHERE id = 1").ReadAll()
-	pe := requirePgError(t, err)
-	if pe.Code != "0A000" || !strings.Contains(pe.Message, "time travel") {
-		t.Fatalf("got %s %q", pe.Code, pe.Message)
+	for _, stmt := range []string{
+		"SELECT * FROM _flashback.orders AS OF '5 minutes ago' WHERE id = 1",
+		"SELECT * FROM public.orders AS OF '5 minutes ago' WHERE id = 1",
+		"SELECT * FROM _snapshot.orders AS OF 'not a time' WHERE id = 1", // malformed: still not this port's
+	} {
+		_, err = conn.PgConn().Exec(ctx, stmt).ReadAll()
+		pe := requirePgError(t, err)
+		if pe.Code != "0A000" || !strings.Contains(pe.Message, "time travel") {
+			t.Errorf("%s: got %s %q", stmt, pe.Code, pe.Message)
+		}
 	}
 	if ran {
 		t.Fatal("a time-travel statement reached the copy's executor")
