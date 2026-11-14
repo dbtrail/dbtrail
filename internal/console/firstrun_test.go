@@ -439,13 +439,11 @@ func TestHandleFirstRun(t *testing.T) {
 		listed = append(listed, source)
 		return false, nil
 	}
+	// By hand: the servers below are of both families, each for what the
+	// report says about it, and a registry takes one family (addByHand).
 	add := func(e ServerEntry) string {
 		t.Helper()
-		got, err := srv.cm.reg.Add(e)
-		if err != nil {
-			t.Fatalf("add %s: %v", e.Name, err)
-		}
-		return got.ID
+		return addByHand(t, srv.cm.reg, e).ID
 	}
 	get := func(id string) (int, string, FirstRunReport) {
 		t.Helper()
@@ -841,10 +839,8 @@ func TestHandleFirstRunWithBackupsOff(t *testing.T) {
 	// Off or on, a PostgreSQL server with no slot gets no backup step: capture
 	// cannot run for it, and turning backups on would not help.
 	t.Run("PostgreSQL with no slot", func(t *testing.T) {
-		e, err := srv.cm.reg.Add(ServerEntry{Name: "pgnoslot", Flavor: FlavorPostgres, SourceDSN: "postgres://<redacted>/db"})
-		if err != nil {
-			t.Fatal(err)
-		}
+		// By hand: this registry already holds MySQL servers.
+		e := addByHand(t, srv.cm.reg, ServerEntry{Name: "pgnoslot", Flavor: FlavorPostgres, SourceDSN: "postgres://<redacted>/db"})
 		rec, body := doServersReq(t, srv, "GET", "/api/servers/"+e.ID+"/first-run", "")
 		var rep FirstRunReport
 		if rec.Code != 200 || json.Unmarshal(body, &rep) != nil || len(rep.Steps) == 0 {

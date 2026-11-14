@@ -429,6 +429,12 @@ func (s *Server) persistNewEntry(entry ServerEntry, deriveIndex bool, nameBase s
 			created = ""
 		}
 	}()
+	// One source family per installation (family.go), with the server given
+	// on the command line counted, and before a folder is made for a server
+	// that will not be added.
+	if err := s.newServerFamilyRefusal(entry.Flavor); err != nil {
+		return ServerEntry{}, "", err
+	}
 	entry.LocalKeepNewest = DefaultLocalKeepNewest
 	if entry.BaselineDir != "" {
 		fresh := !dirExists(entry.BaselineDir)
@@ -2039,7 +2045,7 @@ func scrubDSNError(err error, dsn string) string {
 // registryErrStatus maps registry errors onto HTTP statuses.
 func registryErrStatus(err error) int {
 	switch {
-	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict):
+	case errors.Is(err, ErrDuplicateName), errors.Is(err, ErrRegistryReadOnly), errors.Is(err, ErrPortLoginConflict), errors.Is(err, ErrOtherFamily):
 		return http.StatusConflict
 	case errors.Is(err, ErrUnknownServer):
 		return http.StatusNotFound
