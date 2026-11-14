@@ -224,6 +224,13 @@ interface on that port, with its own login. The folder's name is what keeps
 the two apart, not its place: two folders that end in the same name
 (`/opt/dbtrail` and `/srv/dbtrail`) would share their data.
 
+The ports the first installation holds are found taken: metrics move to a free
+port by themselves, and the MySQL port (3309) is left unpublished, with the
+installer saying so. A PostgreSQL installation has no use for it. A second
+MySQL or MariaDB installation does: the installer prints the `ports:` line to
+add to its `docker-compose.yml` (such as `127.0.0.1:3310:3309`), and that
+number is the one to use after `-P`, whatever the web interface prints.
+
 If the servers file already holds both families (it was edited by hand, or
 comes from a version before this rule), nothing stops: every server is still
 captured and served, an error in the log names the servers, and a server can

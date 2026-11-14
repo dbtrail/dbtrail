@@ -40,6 +40,21 @@ for a in "$@"; do case "$a" in -iTCP:*) p=${a#-iTCP:};; esac; done
 for b in $BUSY_PORTS; do [ "$b" = "$p" ] && exit 0; done
 exit 1
 `,
+	// ss is the kernel's list of listening sockets, which shows the ports
+	// Docker holds even to a user who is not root (#2831): one line per port
+	// in SS_PORTS, in the shape `ss -ltn` prints. nc connects to the ports
+	// in NC_PORTS and to no other. Both are here so the tests never ask the
+	// machine they run on what it listens to.
+	"ss": `#!/bin/sh
+echo "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port"
+for b in $SS_PORTS; do echo "LISTEN 0      4096       127.0.0.1:$b      0.0.0.0:*"; done
+exit 0
+`,
+	"nc": `#!/bin/sh
+for a in "$@"; do p=$a; done
+for b in $NC_PORTS; do [ "$b" = "$p" ] && exit 0; done
+exit 1
+`,
 	"curl": `#!/bin/sh
 out=""; url=""
 while [ $# -gt 0 ]; do
@@ -389,6 +404,7 @@ func TestInstaller_aTakenMySQLPortIsLeftUnpublished(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 // A second installation beside a first (#2815: an installation serves one
 // database family, and the other family goes in an installation of its own):
 // the folder and the console's port are named, and the ports the first one
@@ -407,5 +423,59 @@ func TestInstaller_aSecondInstallationBesideAFirst(t *testing.T) {
 		if strings.Contains(c, taken) {
 			t.Errorf("a port the first installation holds is published again (%s):\n%s", taken, portLines(c))
 		}
+=======
+// On Linux, lsof run by a user who is not root does not list the sockets of
+// root's docker-proxy, so it calls every port Docker publishes free (#2831).
+// The kernel's list (ss) shows them: a port only ss sees is taken all the
+// same, and the three ports get what a taken port gets.
+func TestInstaller_aPortOnlyTheKernelsListShowsIsTaken(t *testing.T) {
+	// The console's port: stopped before anything is touched, with the
+	// command on the first port NO probe sees taken.
+	r := install(t, "SS_PORTS=8090 8091")
+	if !r.failed || r.upCalls != 0 {
+		t.Fatalf("the installer went on with 8090 held by Docker (failed=%v up=%d):\n%s", r.failed, r.upCalls, r.out)
+	}
+	if _, err := os.Stat(r.dir); err == nil {
+		t.Error("the installer created the stack directory before refusing")
+	}
+	if want := "DBTRAIL_PORT=8092 sh"; !strings.Contains(r.out, want) {
+		t.Errorf("the suggestion is not on the first free port (%s):\n%s", want, r.out)
+	}
+
+	// The metrics port and the MySQL port: moved and left unpublished.
+	r = install(t, "SS_PORTS=9090 3309")
+	if r.failed || r.upCalls != 1 {
+		t.Fatalf("install failed with 9090 and 3309 held by Docker (up=%d):\n%s", r.upCalls, r.out)
+	}
+	c := r.compose(t)
+	if !strings.Contains(c, `"127.0.0.1:9091:9090"`) || strings.Contains(c, `"127.0.0.1:9090:9090"`) {
+		t.Errorf("the metrics were not moved off 9090:\n%s", portLines(c))
+	}
+	if strings.Contains(c, `"127.0.0.1:3309:3309"`) {
+		t.Errorf("3309 is published though Docker holds it:\n%s", portLines(c))
+	}
+}
+
+// Each probe is asked, and one that says "taken" is enough: lsof for the
+// user's own listeners, ss for everyone's, a connection attempt where the
+// first two are silent. A port none of them sees is free.
+func TestInstaller_anyProbeThatSeesAPortMakesItTaken(t *testing.T) {
+	for _, env := range []string{"BUSY_PORTS=9090", "SS_PORTS=9090", "NC_PORTS=9090"} {
+		r := install(t, env)
+		if r.failed {
+			t.Fatalf("%s: install failed:\n%s", env, r.out)
+		}
+		if c := r.compose(t); !strings.Contains(c, `"127.0.0.1:9091:9090"`) {
+			t.Errorf("%s: 9090 was not read as taken:\n%s", env, portLines(c))
+		}
+	}
+	// A longer port that ends in the same digits is another port.
+	r := install(t, "SS_PORTS=19090 90900 909")
+	if r.failed {
+		t.Fatalf("install failed:\n%s", r.out)
+	}
+	if c := r.compose(t); !strings.Contains(c, `"127.0.0.1:9090:9090"`) {
+		t.Errorf("9090 was read as taken because 19090 is:\n%s", portLines(c))
+>>>>>>> origin/main
 	}
 }
