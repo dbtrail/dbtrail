@@ -686,8 +686,10 @@ type routerPort struct {
 	run      func(ctx context.Context, ln net.Listener) error
 	// alongside are the router's other ports. They open and close on the
 	// same switch, and the console keeps ONE callback for a password that
-	// was withdrawn, so the port that registers it (the MySQL one) closes
-	// these too. A port with a run of its own registers nothing.
+	// was withdrawn (or routing that was switched, which closes these as
+	// well though it changes nothing for them), so the port that registers
+	// it (the MySQL one) closes these too. A port with a run of its own
+	// registers nothing.
 	alongside []*routerPort
 
 	mu    sync.Mutex
@@ -732,17 +734,26 @@ func (p *routerPort) closeNow() {
 	p.mu.Unlock()
 }
 
+// watchWithdrawn has the console close this port, and the ports alongside
+// it, when the password from the web interface stops being accepted or the
+// port's routing is switched (console.Server.OnFlashbackPasswordWithdrawn).
+// Called before any of them starts serving, so none is open with nobody to
+// close it; calling it again changes nothing.
+func (p *routerPort) watchWithdrawn() {
+	p.srv.OnFlashbackPasswordWithdrawn(func() {
+		// Every connection: the port cannot tell which of them came in
+		// with the password that is gone. One made with the token
+		// reconnects at once.
+		p.closeNow()
+		for _, other := range p.alongside {
+			other.closeNow()
+		}
+	})
+}
+
 func (p *routerPort) serve(ctx context.Context) error {
 	if p.run == nil {
-		p.srv.OnFlashbackPasswordWithdrawn(func() {
-			// Every connection: the port cannot tell which of them came in
-			// with the password that is gone. One made with the token
-			// reconnects at once.
-			p.closeNow()
-			for _, other := range p.alongside {
-				other.closeNow()
-			}
-		})
+		p.watchWithdrawn()
 	}
 	opened, waiting, saidRebind := false, false, false
 	if p.run != nil {
@@ -1172,6 +1183,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		}
 		_ = probe.Close()
 		port.alongside = append(port.alongside, pg)
+		port.watchWithdrawn()
 		go func() {
 			if err := pg.serve(ctx); err != nil {
 				slog.Error("router: the PostgreSQL-protocol port is NOT listening", "listen", st.PGListen, "error", err)

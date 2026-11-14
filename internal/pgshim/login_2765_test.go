@@ -1,6 +1,9 @@
 package pgshim
 
 import (
+	"encoding/binary"
+	"io"
+	"net"
 	"context"
 	"encoding/json"
 	"errors"
@@ -604,5 +607,50 @@ func TestAuditContract_Port(t *testing.T) {
 		if ev.Detail[k] != want {
 			t.Errorf("detail[%s] = %q, want %q", k, ev.Detail[k], want)
 		}
+	}
+}
+
+// A client that holds no password cannot have this process set aside
+// memory for it: a "password" that announces a gigabyte ends the connection
+// at once. Without a ceiling the server would wait for the gigabyte, and
+// this read would time out.
+func TestPort_aGiantMessageBeforeLoginEndsTheConnection(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"the port", Config{Login: (&portLogin{run: answer(nil)}).login}},
+		{"flashback", Config{Auth: testAuth(t)}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			addr := serveAddrCfg(t, mode.cfg)
+			c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+			// StartupMessage: length, protocol 3.0, user\0app\0\0.
+			body := append([]byte{0, 3, 0, 0}, []byte("user\x00app\x00\x00")...)
+			msg := binary.BigEndian.AppendUint32(nil, uint32(len(body)+4))
+			if _, err := c.Write(append(msg, body...)); err != nil {
+				t.Fatal(err)
+			}
+			// The password request: 'R', length 8, code 3.
+			req := make([]byte, 9)
+			if _, err := io.ReadFull(c, req); err != nil || req[0] != 'R' {
+				t.Fatalf("no password request: %v %q", err, req)
+			}
+			// A password message that announces 1 GiB and sends four bytes.
+			giant := append([]byte{'p'}, binary.BigEndian.AppendUint32(nil, 1<<30)...)
+			if _, err := c.Write(append(giant, 'a', 'b', 'c', 'd')); err != nil {
+				t.Fatal(err)
+			}
+			_, err = io.ReadAll(c)
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.Fatal("the server waited for the announced gigabyte instead of ending the connection")
+			}
+		})
 	}
 }

@@ -352,6 +352,12 @@ func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string) error
 // what it sent. A client that answers with anything else is told so (08P01)
 // and the error says the connection is over.
 func readPassword(be *pgproto3.Backend) (string, error) {
+	// Before anyone is authenticated a message is a password and nothing
+	// else. The protocol library sizes its buffer from the length a message
+	// announces and has no ceiling of its own, so without one a client that
+	// holds no credential could announce two gigabytes and have them set
+	// aside in this process.
+	be.SetMaxBodyLen(maxPasswordMessage)
 	be.Send(&pgproto3.AuthenticationCleartextPassword{})
 	if err := be.Flush(); err != nil {
 		return "", err
@@ -376,12 +382,21 @@ func readPassword(be *pgproto3.Backend) (string, error) {
 // intentionally omitted — it only backs query cancellation, which we do not
 // implement.
 func sendAuthOK(be *pgproto3.Backend) {
+	// From here on a message is a statement: a larger ceiling, still one.
+	be.SetMaxBodyLen(maxStatementMessage)
 	be.Send(&pgproto3.AuthenticationOk{})
 	for _, ps := range startupParameters {
 		be.Send(&pgproto3.ParameterStatus{Name: ps[0], Value: ps[1]})
 	}
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 }
+
+// The most bytes one client message may announce: a password before the
+// login, a statement after it. A longer one ends the connection.
+const (
+	maxPasswordMessage  = 64 << 10
+	maxStatementMessage = 16 << 20
+)
 
 // startupParameters are the ParameterStatus values psql/libpq expect after
 // AuthenticationOk. server_version carries a leading numeric psql parses.
