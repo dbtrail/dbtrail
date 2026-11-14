@@ -538,6 +538,13 @@ const captureNoCaptureAdvice = ": no streaming capture has run against this inde
 // server's lifetime and a daily warning about them would teach an operator
 // to ignore the line.
 func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.Time, r captureProbeResult) {
+	if r.detail == captureDetailPGAhead {
+		// How a healthy PostgreSQL capture reads on a server that is not
+		// idle, in turns with "caught up" from one probe to the next: said
+		// on the page as the slot's reason, and not in the log, where the
+		// two would alternate for as long as the server lives.
+		return
+	}
 	quiet := "capture-caught-up:" + e.ID
 	loud := "capture-probe:" + e.ID
 	if r.verdict == console.CaptureCaughtUp {

@@ -14,20 +14,27 @@ import (
 // The snapshot schedule's capture probe (#1791) for a PostgreSQL source
 // (#2844): what it asks when nothing was indexed since an old snapshot.
 //
-// One rule sets this apart from the MySQL probe: only a loss on record takes
-// a full read. The source being ahead is not evidence here. Its WAL moves
-// for the whole PostgreSQL cluster, and the capture saves its position on a
-// timer, so one read finds a healthy capture behind; and a capture that
+// One rule sets this apart from the MySQL probe: nothing this probe answers
+// takes a full read. The source being ahead is not evidence here. Its WAL
+// moves for the whole PostgreSQL cluster, and the capture saves its position
+// on a timer, so one read finds a healthy capture behind; and a capture that
 // stopped is fixed by starting it, not by reading the source in full. So:
 //
-//   - a loss stamped at or after the snapshot (a lost replication slot):
-//     the full read, as for MySQL. Read from the index alone, without a
-//     connection to the source;
 //   - the two positions equal: confirmed caught up;
 //   - the source ahead, the capture past it, a capture that stopped saving,
 //     a position that cannot be compared, a source that did not answer: the
 //     source cannot be asked. The slot is skipped while the snapshot can
-//     wait, and the reason is on the page.
+//     wait, and the reason is on the page;
+//   - a loss stamped at or after the snapshot (a lost replication slot):
+//     said as the reason, from the index alone, and still "cannot be asked".
+//     A loss does lead to a full read, by the path that was there before
+//     this probe and that has a brake: the snapshot cannot wait
+//     (quietSnapshotCanWait), so the update runs, is refused for the gap,
+//     and the schedule takes one full read in its place, and no second one
+//     while the same refusal repeats (fullReadCannotCure). The brake is why
+//     it is not evidence here: a slot that stays lost stamps the same loss
+//     again at every retry of the capture, after each new snapshot, and
+//     evidence would read the source in full once per stamp.
 //
 // It never answers console.CaptureBehind.
 

@@ -721,7 +721,7 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 	}
 	want := map[string]decided{
 		// The source cannot be asked: the slot is skipped.
-		// A PostgreSQL source: only a loss on record takes a full read (#2844).
+		// A PostgreSQL source: nothing its probe answers takes a full read (#2844).
 		"captureDetailPGAhead":       {"the source's WAL is ahead of the capture's saved position while capture keeps saving, as it is whenever anything on that PostgreSQL server writes", captureCannotAsk},
 		"captureDetailPGNotSaving":   {"the source is ahead and capture has not saved its position lately: check that capture is running", captureCannotAsk},
 		"captureDetailPGPast":        {"the capture's position is past the source's: the source may have been restored or replaced", captureCannotAsk},
@@ -729,6 +729,9 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 		"captureDetailPGOldCapture":  {"the index holds no position to compare: it was last written by a capture that does not record how far the source has sent it", captureCannotAsk},
 		"captureDetailPGNotPostgres": {"the index was not written by a PostgreSQL capture", captureCannotAsk},
 		"captureDetailPGNoLossRecord": {"the index has no record of capture losses to read", captureCannotAsk},
+		// A loss, and still not evidence: the full read it leads to is the
+		// refused update's, which stops after one (capture_probe_pg.go).
+		"captureDetailPGLost": {"the capture recorded a loss of changes after the previous snapshot", captureCannotAsk},
 		// The capture status read's own for PostgreSQL, never returned to
 		// the schedule: decided as the rest of PostgreSQL's, never a full read.
 		"captureDetailPGFirstRead": {"the source looked ahead on a first read, and is asked again", captureCannotAsk},
@@ -747,7 +750,6 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 		"captureDetailNoCapture":        {"the index has no live capture on record", captureCannotAsk},
 		// Evidence that changes are missing, or are about to be: the full read.
 		"captureDetailLost":              {"the capture lost events to a binlog gap after the previous snapshot", captureEvidence},
-		"captureDetailPGLost":            {"the capture recorded a loss of changes after the previous snapshot", captureEvidence},
 		"captureDetailDropped":           {"the capture dropped events that no full read has read from the source since", captureEvidence},
 		"captureDetailDiverged":          {"the capture holds transactions the source does not have: the source may have been reset, restored or replaced", captureEvidence},
 		"captureDetailBehind":            {"the source reports transactions the capture's checkpoint does not include", captureEvidence},

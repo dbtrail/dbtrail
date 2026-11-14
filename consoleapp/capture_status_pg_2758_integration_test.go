@@ -153,7 +153,8 @@ func TestIntegrationPGCaptureStatus(t *testing.T) {
 		captureClassOf(r.detail) != captureCannotAsk && captureClassOf(r.detail) != captureIndexUnread {
 		t.Fatalf("the schedule's probe with capture stopped answered %+v", r)
 	}
-	// A loss on record since the snapshot is the one thing that does.
+	// A loss on record since the snapshot is said as the reason, from the
+	// index alone, and is not a full read of this probe's choosing either.
 	idx, err := sql.Open("mysql", e.DSN)
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +165,7 @@ func TestIntegrationPGCaptureStatus(t *testing.T) {
 	}
 	pgTestWait(t, "the schedule's probe reads the loss", 30*time.Second, func() (bool, string) {
 		r := probeCapturePGFromDBs(ctx, e.DSN, e.SourceDSN, anchor, time.Time{})
-		return r.detail == captureDetailPGLost && captureClassOf(r.detail) == captureEvidence, r.detail
+		return r.verdict == "" && r.detail == captureDetailPGLost && captureClassOf(r.detail) == captureCannotAsk, r.detail
 	})
 	// The same loss, from before the snapshot, is covered by the snapshot.
 	if r := probeCapturePGFromDBs(ctx, e.DSN, e.SourceDSN, time.Now().Add(time.Hour), time.Time{}); r.detail == captureDetailPGLost {

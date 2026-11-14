@@ -11,7 +11,7 @@ import (
 )
 
 // The snapshot schedule's capture probe for a PostgreSQL source (#2844).
-// The one rule: only a loss on record takes a full read.
+// The one rule: nothing this probe answers takes a full read.
 
 // stubCaptureProbePG replaces the PostgreSQL probe and records what it was
 // asked with.
@@ -97,13 +97,16 @@ func TestPGCaptureComparable(t *testing.T) {
 }
 
 // Through the schedule: a quiet PostgreSQL server with an old snapshot is
-// asked with its own probe, and only a loss on record reads the source in
-// full.
+// asked with its own probe, and no answer of it reads the source in full. A
+// loss on record makes the snapshot one that cannot wait, so the update
+// runs: that update is refused for the gap, and the full read taken in its
+// place is the one with a brake.
 func TestBackupScheduler_quietPostgresServer_2844(t *testing.T) {
 	now := snapshotAnchor.Add(8 * 24 * time.Hour)
 	for _, tc := range []struct {
 		name   string
 		probe  captureProbeResult
+		lost   bool // a loss on record since the snapshot
 		method string
 		why    func(string) bool
 	}{
@@ -122,15 +125,20 @@ func TestBackupScheduler_quietPostgresServer_2844(t *testing.T) {
 		{name: "the source did not answer: skipped",
 			probe: captureProbeResult{detail: captureDetailSourceSilent, cause: "dial"}, method: console.BackupMethodSkip,
 			why: func(w string) bool { return w == console.SkipUnconfirmedReason(captureDetailSourceSilent) }},
-		{name: "a loss on record since the snapshot: the full read",
-			probe: captureProbeResult{detail: captureDetailPGLost}, method: console.BackupMethodFull,
-			why: func(w string) bool { return console.BackupWhyCode(w) == "window_age" }},
+		{name: "a loss on record since the snapshot: the update, which the gap refuses, and never a full read chosen here",
+			probe: captureProbeResult{detail: captureDetailPGLost}, lost: true, method: console.BackupMethodRefresh,
+			why: func(w string) bool {
+				return w == console.UnconfirmedUpdateWhy(captureDetailPGLost, "capture lost changes since the previous snapshot")
+			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The MySQL probe answers "behind", which would be a full read:
 			// it must not be what a PostgreSQL server is asked with.
 			b, _, e, _, _ := quietUnconfirmed(t, captureProbeResult{verdict: console.CaptureBehind, detail: captureDetailBehind})
 			stubCoverage(t, true, true)
+			prevLoss := lossOnRecordSince
+			t.Cleanup(func() { lossOnRecordSince = prevLoss })
+			lossOnRecordSince = func(context.Context, string, time.Time) (bool, error) { return tc.lost, nil }
 			asked := stubCaptureProbePG(t, tc.probe)
 			e.Flavor = console.FlavorPostgres
 			e.SourceDSN = "postgres://u:pw@src/db"
@@ -141,6 +149,9 @@ func TestBackupScheduler_quietPostgresServer_2844(t *testing.T) {
 			t.Logf("%s: %s", method, why)
 			if method != tc.method || !tc.why(why) {
 				t.Fatalf("method=%q why=%q, want %q", method, why, tc.method)
+			}
+			if method == console.BackupMethodFull {
+				t.Fatal("the probe of a PostgreSQL server chose a full read")
 			}
 			if len(*asked) == 0 {
 				t.Fatal("the PostgreSQL probe was not asked")

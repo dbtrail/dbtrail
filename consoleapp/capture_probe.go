@@ -238,8 +238,8 @@ var captureClasses = map[string]captureClass{
 	captureDetailNotToldApart:     captureCannotAsk,
 	captureDetailSameServer:       captureCannotAsk,
 	captureDetailNoSource:         captureCannotAsk,
-	// A PostgreSQL source (capture_probe_pg.go, capture_status_pg.go): only
-	// a loss on record takes a full read. Everything else that is not
+	// A PostgreSQL source (capture_probe_pg.go, capture_status_pg.go):
+	// nothing its probe answers takes a full read. Everything that is not
 	// "caught up", the reasons only the capture status read returns
 	// included, is a source that cannot be asked.
 	captureDetailPGAhead:        captureCannotAsk,
@@ -249,13 +249,15 @@ var captureClasses = map[string]captureClass{
 	captureDetailPGOldCapture:   captureCannotAsk,
 	captureDetailPGNotPostgres:  captureCannotAsk,
 	captureDetailPGNoLossRecord: captureCannotAsk,
+	// Not evidence, although it is a loss: see capture_probe_pg.go. The
+	// full read it leads to is the refused update's, which has a brake.
+	captureDetailPGLost: captureCannotAsk,
 	captureDetailPGFirstRead:    captureCannotAsk,
 	captureDetailPGNotSaved:     captureCannotAsk,
 	captureDetailPGReading:      captureCannotAsk,
 	captureDetailPGBehind:       captureCannotAsk,
 
 	captureDetailLost:     captureEvidence,
-	captureDetailPGLost:   captureEvidence,
 	captureDetailDropped:  captureEvidence,
 	captureDetailDiverged: captureEvidence,
 	// The verdict console.CaptureBehind decides this one before any class
