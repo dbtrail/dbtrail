@@ -231,7 +231,7 @@ var (
 	// sent MySQL's DATEDIFF as date_diff.
 	timeDiffOnly = regexp.MustCompile(`(?i)\b(timestampdiff|timediff)\s*\(`)
 	// dateDiffCall opens a DATEDIFF call; callsOf keeps out a longer name.
-	dateDiffCall = regexp.MustCompile(`(?i)datediff\s*\(`)
+	dateDiffCall = regexp.MustCompile(`(?i)datediff` + callOpen)
 )
 
 // dateDiffsRewritten reports whether every DATEDIFF call of blanked (a
@@ -264,7 +264,7 @@ const VetoDateFunction = "DATE_FORMAT or DATEDIFF of something other than a DATE
 
 var (
 	// dateFunctionCall opens a DATE_FORMAT or a DATEDIFF call.
-	dateFunctionCall = regexp.MustCompile(`(?i)(date_format|datediff)\s*\(`)
+	dateFunctionCall = regexp.MustCompile(`(?i)(date_format|datediff)` + callOpen)
 	// wholeClockCall is an argument that is one of the four clock calls and
 	// nothing else.
 	wholeClockCall = regexp.MustCompile(`(?i)^(?:now|curdate|utc_timestamp|utc_date)\s*\(\s*\)$`)
