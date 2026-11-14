@@ -146,9 +146,21 @@ func dateFunctionsRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string)
 		{stmt: "SELECT MIN(side), COUNT(*) FROM ev WHERE DATE_FORMAT(dt, '%H:%i') < '1045'", who: "live", why: "a format compared with another text: ':' sorts before a digit on MySQL, after one on the copy"},
 		{stmt: "SELECT side, s AS `d` FROM ev ORDER BY DATE_FORMAT(d, '%Y'), k", who: "live", why: "a quoted name the statement gives itself"},
 	}
+	// Both sides under a collation that compares like utf8mb4_0900_ai_ci,
+	// the one the port forwards under whatever the client's handshake asks
+	// for (#2810): under the driver's default, utf8mb4_general_ci, the
+	// direct connection compared '10:47' < '1045' the other way, and a row
+	// of "now minus an hour" in hour 10 UTC failed the format case below.
+	// utf8mb4_unicode_ci, which every supported MySQL and MariaDB has.
+	sameCollation := func(dsn string) string {
+		if strings.Contains(dsn, "?") {
+			return dsn + "&collation=utf8mb4_unicode_ci"
+		}
+		return dsn + "?collation=utf8mb4_unicode_ci"
+	}
 	for _, zone := range []string{"+00:00", "+05:00"} {
-		routed := openRaw(t, withZone(portDSN, zone))
-		live := openRaw(t, withZone(sourceDSN, zone))
+		routed := openRaw(t, withZone(sameCollation(portDSN), zone))
+		live := openRaw(t, withZone(sameCollation(sourceDSN), zone))
 		for _, c := range cases {
 			got := answerText(routed, c.stmt, c.args...)
 			t.Logf("[%s] routed %-60.300s %s", zone, got, c.stmt)
