@@ -109,13 +109,13 @@ func TestIntegrationSQLCompareFloatRouted(t *testing.T) {
 		who  string
 		why  string
 	}{
-		{"SELECT side, id FROM %s WHERE f = 3.14", nil, "live", "no row on MySQL, the row on the copy"},
-		{"SELECT side, id FROM %s WHERE fu = 3.14", nil, "live", "the UNSIGNED one"},
-		{"SELECT side, id FROM %s WHERE `f` = -0.1", nil, "live", "quoted"},
-		{"SELECT side, id FROM %s WHERE f IN (3.14, 0.1) ORDER BY id", nil, "live", "IN"},
+		{"SELECT side, id FROM %s WHERE f = 3.14 OR id = 2", nil, "live", "only the NULL row on MySQL, also row 1 on the copy"},
+		{"SELECT side, id FROM %s WHERE fu = 3.14 OR id = 2 ORDER BY id", nil, "live", "the UNSIGNED one"},
+		{"SELECT side, id FROM %s WHERE `f` = -0.1 OR id = 2 ORDER BY id", nil, "live", "quoted"},
+		{"SELECT side, id FROM %s WHERE f IN (3.14, 0.1) OR id = 2 ORDER BY id", nil, "live", "IN"},
 		{"SELECT side, id FROM %s WHERE f <> 3.14 ORDER BY id", nil, "live", "eight rows on MySQL, seven on the copy"},
 		{"SELECT side, id FROM %s WHERE f > 3.14 ORDER BY id", nil, "live", "3.140000104904175 is more than 3.14 on MySQL"},
-		{"SELECT side, id FROM %s WHERE f = ?", []any{3.14}, "live", "a placeholder bound to a double"},
+		{"SELECT side, id FROM %s WHERE f = ? OR id = 2 ORDER BY id", []any{3.14}, "live", "a placeholder bound to a double"},
 		{"SELECT side, id FROM %s WHERE f72 = 3.14", nil, "live", "a FLOAT(7,2)"},
 		{"SELECT MIN(side), MIN(f * 2), MAX(f * 2) FROM %s", nil, "live", "-Infinity on the copy"},
 		{"SELECT side, f * 2, -f FROM %s ORDER BY f", nil, "live", "a double on MySQL, a float on the copy"},
@@ -123,8 +123,8 @@ func TestIntegrationSQLCompareFloatRouted(t *testing.T) {
 		{"SELECT side, f, COUNT(*) FROM %s GROUP BY side, f ORDER BY f", nil, "live", "two values a dump prints alike"},
 		{"SELECT DISTINCT side, f FROM %s ORDER BY f", nil, "live", "the same"},
 		{"SELECT side, CAST(f AS CHAR) FROM %s ORDER BY f", nil, "live", "MySQL's text of a FLOAT"},
-		{"SELECT a.side, a.id, b.id FROM %[1]s a JOIN %[1]s b ON a.f = b.d ORDER BY a.id", nil, "live", "a join on it"},
-		{"SELECT * FROM %s ORDER BY d", nil, "live", "a star"},
+		{"SELECT a.side, a.id, b.id FROM %[1]s a LEFT JOIN %[1]s b ON a.f = b.d ORDER BY a.id, b.id", nil, "live", "a join on it"},
+		{"SELECT side, x.* FROM %s x ORDER BY d", nil, "live", "a star"},
 		{"SELECT side, id, d FROM %s WHERE d > 0 ORDER BY d", nil, "copy", "the table's DOUBLE, a full scan: the copy"},
 		{"SELECT MIN(side), COUNT(*) FROM %s WHERE id + 0 > 0", nil, "copy", "no FLOAT named"},
 	}
