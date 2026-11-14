@@ -345,6 +345,10 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		if _, err := conn.ExecContext(ctx, dateSubMacro); err != nil {
 			return sessionErr("define DATE_SUB: %v", err)
 		}
+		// And DATE_ADD, and d + INTERVAL n unit (#2800).
+		if _, err := conn.ExecContext(ctx, dateAddMacro); err != nil {
+			return sessionErr("define DATE_ADD: %v", err)
+		}
 	}
 	// The client's time zone (the port's SET time_zone), after the views
 	// script, which pins UTC, and before the lock, after which no SET runs. A

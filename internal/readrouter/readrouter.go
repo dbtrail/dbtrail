@@ -314,7 +314,9 @@ func HasLike(stmt string) bool {
 // longer keeps a statement on MySQL when every call is one ForCopyOpts writes
 // as date_diff (dateDiffsRewritten); TIMESTAMPDIFF and TIMEDIFF still do, and
 // what each DATE_FORMAT and DATEDIFF is given is the caller's to check once
-// the columns' types are known (DateFunctionVeto).
+// the columns' types are known (DateFunctionVeto). With MySQLDateAdd, a date
+// stepped by an INTERVAL that ForCopyOpts cannot send inside the copy's
+// macros keeps the statement on MySQL (dateAddVeto, #2800).
 func VetoOpts(stmt string, o CopyOptions) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
@@ -352,6 +354,11 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	}
 	if why := nowVeto(sc.blankedCopy); why != "" {
 		return why
+	}
+	if o.MySQLDateAdd {
+		if why := dateAddVeto(stmt, o); why != "" {
+			return why
+		}
 	}
 	if why := shapeVeto(sc.blankedCopy); why != "" {
 		return why
