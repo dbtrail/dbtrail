@@ -71,15 +71,18 @@ const (
 	// periods. A capture that reached it and then stopped is not up to date.
 	pgSaveFresh = 30 * time.Second
 
-	pgCaptureDetailNotPostgres = "the index was not written by a PostgreSQL capture"
-	pgCaptureDetailOldCapture  = "the index holds no position to compare: it was last written by a capture that does not record how far the source has sent it"
-	pgCaptureDetailNoPosition  = "the capture has not saved how far the source has sent it yet"
-	pgCaptureDetailPast        = "the capture's position is past the source's: the source may have been restored or replaced"
-	pgCaptureDetailFirstRead   = "the source looked ahead on a first read, and is asked again"
-	pgCaptureDetailNotSaved    = "capture has not saved its position since the source was first asked"
-	pgCaptureDetailNotSaving   = "the source is ahead and capture has not saved its position lately: check that capture is running"
-	pgCaptureDetailReading     = "the source is ahead and capture is given time to reach it"
-	pgCaptureDetailBehind      = "capture has not reached the position the source had at an earlier read"
+	captureDetailPGNotPostgres = "the index was not written by a PostgreSQL capture"
+	captureDetailPGOldCapture  = "the index holds no position to compare: it was last written by a capture that does not record how far the source has sent it"
+	captureDetailPGNoPosition  = "the capture has not saved how far the source has sent it yet"
+	captureDetailPGPast        = "the capture's position is past the source's: the source may have been restored or replaced"
+	captureDetailPGFirstRead   = "the source looked ahead on a first read, and is asked again"
+	captureDetailPGNotSaved    = "capture has not saved its position since the source was first asked"
+	captureDetailPGNotSaving   = "the source is ahead and capture has not saved its position lately: check that capture is running"
+	captureDetailPGReading     = "the source is ahead and capture is given time to reach it"
+	captureDetailPGBehind      = "capture has not reached the position the source had at an earlier read"
+	// The snapshot schedule's own (capture_probe_pg.go).
+	captureDetailPGAhead = "the source's WAL is ahead of the capture's saved position while capture keeps saving, as it is whenever anything on that PostgreSQL server writes"
+	captureDetailPGLost  = "the capture recorded a loss of changes after the previous snapshot"
 )
 
 // pgCaptureRead is one read of the two positions. detail is set, with the
@@ -175,7 +178,7 @@ func (c *captureStatusReporter) captureStatusPG(ctx context.Context, e console.S
 	// Once per change of answer, not once per read.
 	if said := answer.State + "|" + answer.Detail + "|" + r.cause; slot.logged != said {
 		slot.logged = said
-		if answer.Detail == pgCaptureDetailPast {
+		if answer.Detail == captureDetailPGPast {
 			// The one sign of a source restored or replaced under a running
 			// capture: said aloud, where the other unknowns are Debug.
 			slog.Warn("capture status: the capture's saved position is past the source's flushed WAL position; if the source was restored or replaced, read it in full again",
@@ -222,34 +225,34 @@ func pgCaptureStatusFrom(r pgCaptureRead, prev *pgCaptureSample, now time.Time) 
 	case r.sent > r.source:
 		// The source was read AFTER the capture's position, so on one
 		// cluster it cannot be before it. What was held is void.
-		return unknown(pgCaptureDetailPast), nil
+		return unknown(captureDetailPGPast), nil
 	case r.sent == r.source:
 		return console.CaptureStatus{State: console.CaptureStateUpToDate}, here
 	case prev == nil || prev.lsn > r.source:
 		// A first read, or a source now before where it was: another
 		// cluster's positions are not held against this one.
-		return again(pgCaptureDetailFirstRead), here
+		return again(captureDetailPGFirstRead), here
 	}
 	age := now.Sub(prev.at)
 	if r.sent >= prev.lsn {
 		switch {
 		case age > pgReachWithin:
 			// Reached, but too long ago to speak for now.
-			return again(pgCaptureDetailFirstRead), here
+			return again(captureDetailPGFirstRead), here
 		case r.savedAgo > pgSaveFresh:
 			// Reached, and then it stopped saving while the source went on.
-			return again(pgCaptureDetailNotSaving), here
+			return again(captureDetailPGNotSaving), here
 		}
 		return console.CaptureStatus{State: console.CaptureStateUpToDate}, here
 	}
 	// Not reached. The earlier read stays: it is what the capture is held to.
 	switch {
 	case now.Add(-r.savedAgo).Sub(prev.at) < captureConfirmGap:
-		return again(pgCaptureDetailNotSaved), prev
+		return again(captureDetailPGNotSaved), prev
 	case age < pgReachWithin:
-		return again(pgCaptureDetailReading), prev
+		return again(captureDetailPGReading), prev
 	}
-	return console.CaptureStatus{State: console.CaptureStateBehind, Detail: pgCaptureDetailBehind}, prev
+	return console.CaptureStatus{State: console.CaptureStateBehind, Detail: captureDetailPGBehind}, prev
 }
 
 // pgCaptureFromDBs reads the capture's position from the index, then the
@@ -280,38 +283,73 @@ func pgCaptureFromDBs(ctx context.Context, indexDSN, sourceDSN string) pgCapture
 // when it was saved. A position that cannot be compared is a detail, not an
 // error; an error is a read that failed, with its detail.
 func pgCapturePosition(ctx context.Context, idx *sql.DB) (pgCaptureRead, error) {
-	var (
-		flavor   sql.NullString
-		position sql.NullInt64
-		savedAgo sql.NullInt64
-		sent     sql.NullInt64
-	)
-	err := idx.QueryRowContext(ctx, pgCapturePositionQuery).Scan(&flavor, &position, &savedAgo, &sent)
+	row, err := readPGPositionRow(ctx, idx)
+	if err != nil {
+		return pgCaptureRead{detail: captureDetailCheckpointUnread}, err
+	}
+	if ok, detail := pgPositionRefusal(row); !ok {
+		return pgCaptureRead{detail: detail}, nil
+	}
+	return pgCaptureRead{sent: row.sentLSN(), savedAgo: row.savedFor()}, nil
+}
+
+// pgPositionRow is stream_state's row as pgCapturePositionQuery reads it.
+type pgPositionRow struct {
+	// none: no row. oldIndex: an index without the columns (the console
+	// reads indexes it never migrates, and only a capture that has them
+	// adds them).
+	none, oldIndex bool
+	flavor         sql.NullString
+	position       sql.NullInt64
+	savedAgo       sql.NullInt64
+	sent           sql.NullInt64
+}
+
+func (r pgPositionRow) sentLSN() uint64 { return uint64(r.sent.Int64) }
+
+// savedFor is how long ago the position was saved. A save stamped after the
+// index's "now" (its clock stepped back) is a save made just now.
+func (r pgPositionRow) savedFor() time.Duration {
+	return time.Duration(max(r.savedAgo.Int64, 0)) * time.Second
+}
+
+// readPGPositionRow reads pgPositionRow; its error is a read that failed.
+func readPGPositionRow(ctx context.Context, idx *sql.DB) (pgPositionRow, error) {
+	var r pgPositionRow
+	err := idx.QueryRowContext(ctx, pgCapturePositionQuery).Scan(&r.flavor, &r.position, &r.savedAgo, &r.sent)
 	var me *mysql.MySQLError
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return pgCaptureRead{detail: captureDetailNoCapture}, nil
+		return pgPositionRow{none: true}, nil
 	case errors.As(err, &me) && me.Number == 1054:
-		// An index without the columns: the console reads indexes it never
-		// migrates, and only a capture that has them adds them.
-		return pgCaptureRead{detail: pgCaptureDetailOldCapture}, nil
+		return pgPositionRow{oldIndex: true}, nil
 	case err != nil:
-		return pgCaptureRead{detail: captureDetailCheckpointUnread}, err
-	case flavor.String != console.FlavorPostgres:
-		return pgCaptureRead{detail: pgCaptureDetailNotPostgres}, nil
-	case position.Int64 == 0:
+		return pgPositionRow{}, err
+	}
+	return r, nil
+}
+
+// pgPositionRefusal says whether r holds a position that can be compared
+// with a source, and why not. Pure.
+func pgPositionRefusal(r pgPositionRow) (ok bool, detail string) {
+	switch {
+	case r.none:
+		return false, captureDetailNoCapture
+	case r.oldIndex:
+		return false, captureDetailPGOldCapture
+	case r.flavor.String != console.FlavorPostgres:
+		return false, captureDetailPGNotPostgres
+	case r.position.Int64 == 0:
 		// The row is there before the first checkpoint: the capture's health
 		// poll and a lost slot both write it, with no position of any kind.
 		// A new capture on a quiet source, not an old one.
-		return pgCaptureRead{detail: pgCaptureDetailNoPosition}, nil
-	case !sent.Valid:
-		return pgCaptureRead{detail: pgCaptureDetailOldCapture}, nil
-	case sent.Int64 == 0 || !savedAgo.Valid:
-		return pgCaptureRead{detail: pgCaptureDetailNoPosition}, nil
+		return false, captureDetailPGNoPosition
+	case !r.sent.Valid:
+		return false, captureDetailPGOldCapture
+	case r.sent.Int64 == 0 || !r.savedAgo.Valid:
+		return false, captureDetailPGNoPosition
 	}
-	// A save stamped after the index's "now" (its clock stepped back) is a
-	// save made just now.
-	return pgCaptureRead{sent: uint64(sent.Int64), savedAgo: time.Duration(max(savedAgo.Int64, 0)) * time.Second}, nil
+	return true, ""
 }
 
 // pgCapturePositionQuery reads, in one statement, the checkpoint (0 or NULL

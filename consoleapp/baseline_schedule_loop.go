@@ -488,7 +488,8 @@ func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEn
 	case e.SourceDSN == "":
 		r.detail = captureDetailNoSource
 	case e.IsPostgres():
-		r.detail = captureDetailPostgres
+		// Its own probe and its own rule (capture_probe_pg.go).
+		r = probeCapturePG(ctx, e.DSN, e.SourceDSN, anchor, sourceRead)
 	case against != "":
 		r = probeCaptureAgainst(ctx, e.DSN, e.SourceDSN, e.SourceSSL(), anchor, sourceRead, against)
 	default:
@@ -560,7 +561,8 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	// server whose measured rate makes the slot an update whatever the
 	// source says. The line that takes a full read on it (fire) says so.
 	msg := "snapshot schedule: nothing was indexed since the previous snapshot, and the source does not confirm that capture recorded everything it wrote, so the index may be missing changes"
-	if r.cause != "" || captureClassOf(r.detail) != captureCannotAsk || r.detail == captureDetailNoCapture {
+	if r.cause != "" || captureClassOf(r.detail) != captureCannotAsk || r.detail == captureDetailNoCapture ||
+		r.detail == captureDetailPGNotSaving || r.detail == captureDetailPGPast {
 		slog.Warn(msg, args...)
 		return
 	}

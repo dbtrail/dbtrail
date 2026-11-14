@@ -189,7 +189,6 @@ const (
 	captureDetailSourceGTIDUnread = "the source did not report its GTID set"
 	// The schedule's own, before the probe is tried (captureVerdict).
 	captureDetailNoSource = "this server has no source to ask"
-	captureDetailPostgres = "PostgreSQL sources are not compared yet"
 	// The capture status read's own (#1794: its MariaDB comparison and its
 	// panic guard). The snapshot schedule's probe never returns them; they
 	// are constants here so that every reason is, and are decided like any
@@ -239,9 +238,23 @@ var captureClasses = map[string]captureClass{
 	captureDetailNotToldApart:     captureCannotAsk,
 	captureDetailSameServer:       captureCannotAsk,
 	captureDetailNoSource:         captureCannotAsk,
-	captureDetailPostgres:         captureCannotAsk,
+	// A PostgreSQL source (capture_probe_pg.go, capture_status_pg.go): only
+	// a loss on record takes a full read. Everything else that is not
+	// "caught up", the reasons only the capture status read returns
+	// included, is a source that cannot be asked.
+	captureDetailPGAhead:       captureCannotAsk,
+	captureDetailPGNotSaving:   captureCannotAsk,
+	captureDetailPGPast:        captureCannotAsk,
+	captureDetailPGNoPosition:  captureCannotAsk,
+	captureDetailPGOldCapture:  captureCannotAsk,
+	captureDetailPGNotPostgres: captureCannotAsk,
+	captureDetailPGFirstRead:   captureCannotAsk,
+	captureDetailPGNotSaved:    captureCannotAsk,
+	captureDetailPGReading:     captureCannotAsk,
+	captureDetailPGBehind:      captureCannotAsk,
 
 	captureDetailLost:     captureEvidence,
+	captureDetailPGLost:   captureEvidence,
 	captureDetailDropped:  captureEvidence,
 	captureDetailDiverged: captureEvidence,
 	// The verdict console.CaptureBehind decides this one before any class

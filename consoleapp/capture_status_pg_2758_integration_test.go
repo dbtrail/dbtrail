@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -71,7 +72,7 @@ func TestIntegrationPGCaptureStatus(t *testing.T) {
 	}
 
 	// Before any change is captured nothing is saved, so nothing is compared.
-	if r := pgCaptureFromDBs(ctx, e.DSN, e.SourceDSN); r.detail != captureDetailNoCapture && r.detail != pgCaptureDetailNoPosition {
+	if r := pgCaptureFromDBs(ctx, e.DSN, e.SourceDSN); r.detail != captureDetailNoCapture && r.detail != captureDetailPGNoPosition {
 		t.Fatalf("before the first captured change: %+v, want no capture on record or no position yet", r)
 	}
 
@@ -108,6 +109,22 @@ func TestIntegrationPGCaptureStatus(t *testing.T) {
 		return true, ""
 	})
 
+	// The snapshot schedule's probe (#2844), on the same server: with no
+	// loss on record it confirms caught up once the two positions meet, and
+	// until then it says the source is ahead. Never behind, which would
+	// read the source in full.
+	anchor := time.Now().Add(-time.Hour)
+	pgTestWait(t, "the schedule's probe confirms caught up", 60*time.Second, func() (bool, string) {
+		r := probeCapturePGFromDBs(ctx, e.DSN, e.SourceDSN, anchor, time.Time{})
+		switch {
+		case r.verdict == console.CaptureCaughtUp:
+			return true, ""
+		case r.verdict != "" || (r.detail != captureDetailPGAhead && r.detail != captureDetailSourceSlow && r.detail != captureDetailIndexSlow):
+			t.Fatalf("the schedule's probe answered %+v", r)
+		}
+		return false, r.detail
+	})
+
 	// Capture stops and the source keeps changing: never up to date again.
 	if err := mon.Stop(ctx, e.ID); err != nil {
 		t.Fatalf("stop capture: %v", err)
@@ -129,5 +146,28 @@ func TestIntegrationPGCaptureStatus(t *testing.T) {
 			t.Fatalf("read %d with capture stopped and a change it never read: %+v (sent %d, source %d)", i, a, r.sent, r.source)
 		}
 		time.Sleep(300 * time.Millisecond)
+	}
+	// And the schedule's probe: the source is ahead, which is no reason to
+	// read it in full.
+	if r := probeCapturePGFromDBs(ctx, e.DSN, e.SourceDSN, anchor, time.Time{}); r.verdict != "" ||
+		captureClassOf(r.detail) != captureCannotAsk && captureClassOf(r.detail) != captureIndexUnread {
+		t.Fatalf("the schedule's probe with capture stopped answered %+v", r)
+	}
+	// A loss on record since the snapshot is the one thing that does.
+	idx, err := sql.Open("mysql", e.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	if _, err := idx.ExecContext(ctx, "UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP(), gap_lost_detail = 'test: slot lost' WHERE id = 1"); err != nil {
+		t.Fatalf("record a loss: %v", err)
+	}
+	pgTestWait(t, "the schedule's probe reads the loss", 30*time.Second, func() (bool, string) {
+		r := probeCapturePGFromDBs(ctx, e.DSN, e.SourceDSN, anchor, time.Time{})
+		return r.detail == captureDetailPGLost && captureClassOf(r.detail) == captureEvidence, r.detail
+	})
+	// The same loss, from before the snapshot, is covered by the snapshot.
+	if r := probeCapturePGFromDBs(ctx, e.DSN, e.SourceDSN, time.Now().Add(time.Hour), time.Time{}); r.detail == captureDetailPGLost {
+		t.Fatalf("a loss before the snapshot was held against it: %+v", r)
 	}
 }

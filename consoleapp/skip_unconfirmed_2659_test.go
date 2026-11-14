@@ -255,7 +255,7 @@ func TestBackupScheduler_updatesWhenTheSnapshotCannotWait_2659(t *testing.T) {
 		}, "whether capture lost changes since the previous snapshot could not be read"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			b, _, e, _, _ := quietUnconfirmed(t, captureProbeResult{detail: "PostgreSQL sources are not compared yet"})
+			b, _, e, _, _ := quietUnconfirmed(t, captureProbeResult{detail: captureDetailPositionMode})
 			c.setup(t)
 			now := time.Date(2026, 8, 28, 10, 0, 5, 0, time.UTC)
 			w := b.measureWindow(context.Background(), e, snapshotAnchor)
@@ -264,7 +264,7 @@ func TestBackupScheduler_updatesWhenTheSnapshotCannotWait_2659(t *testing.T) {
 			}
 			method, why := freshDecision(t, b, e, now)
 			t.Log(why)
-			if method != console.BackupMethodRefresh || why != console.UnconfirmedUpdateWhy("PostgreSQL sources are not compared yet", c.whyNot) {
+			if method != console.BackupMethodRefresh || why != console.UnconfirmedUpdateWhy(captureDetailPositionMode, c.whyNot) {
 				t.Fatalf("method=%q why=%q, want the update that says what stopped the skip", method, why)
 			}
 		})
@@ -637,7 +637,7 @@ func TestSendOwedForSkippedSlot_whenThereIsNothingToSend_2659(t *testing.T) {
 // cannot wait, and a new start when the skipping resumes. Never two starts
 // with no end between them.
 func TestBackupScheduler_theLogOfAStretchInterruptedByAnUpdate_2659(t *testing.T) {
-	b, sup, e, _, folds := quietUnconfirmed(t, captureProbeResult{detail: "PostgreSQL sources are not compared yet"})
+	b, sup, e, _, folds := quietUnconfirmed(t, captureProbeResult{detail: captureDetailPositionMode})
 	covered := true
 	prevCov := snapshotStillCovered
 	t.Cleanup(func() { snapshotStillCovered = prevCov })
@@ -705,6 +705,7 @@ func TestBackupScheduler_theLogOfAStretchInterruptedByAnUpdate_2659(t *testing.T
 var captureReasonFuncs = map[string]bool{
 	"captureComparable": true, "checkpointComparable": true, "compareGTIDSets": true,
 	"gtidModeRefusal": true, "compareMariaDBPositions": true,
+	"pgCaptureComparable": true, "pgPositionRefusal": true, "comparePGPositions": true,
 }
 
 // Every reason the probe can return is a constant with a decision
@@ -720,7 +721,19 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 	}
 	want := map[string]decided{
 		// The source cannot be asked: the slot is skipped.
-		"captureDetailPostgres":         {"PostgreSQL sources are not compared yet", captureCannotAsk},
+		// A PostgreSQL source: only a loss on record takes a full read (#2844).
+		"captureDetailPGAhead":       {"the source's WAL is ahead of the capture's saved position while capture keeps saving, as it is whenever anything on that PostgreSQL server writes", captureCannotAsk},
+		"captureDetailPGNotSaving":   {"the source is ahead and capture has not saved its position lately: check that capture is running", captureCannotAsk},
+		"captureDetailPGPast":        {"the capture's position is past the source's: the source may have been restored or replaced", captureCannotAsk},
+		"captureDetailPGNoPosition":  {"the capture has not saved how far the source has sent it yet", captureCannotAsk},
+		"captureDetailPGOldCapture":  {"the index holds no position to compare: it was last written by a capture that does not record how far the source has sent it", captureCannotAsk},
+		"captureDetailPGNotPostgres": {"the index was not written by a PostgreSQL capture", captureCannotAsk},
+		// The capture status read's own for PostgreSQL, never returned to
+		// the schedule: decided as the rest of PostgreSQL's, never a full read.
+		"captureDetailPGFirstRead": {"the source looked ahead on a first read, and is asked again", captureCannotAsk},
+		"captureDetailPGNotSaved":  {"capture has not saved its position since the source was first asked", captureCannotAsk},
+		"captureDetailPGReading":   {"the source is ahead and capture is given time to reach it", captureCannotAsk},
+		"captureDetailPGBehind":    {"capture has not reached the position the source had at an earlier read", captureCannotAsk},
 		"captureDetailNoSource":         {"this server has no source to ask", captureCannotAsk},
 		"captureDetailPositionMode":     {"the capture runs in binlog-position mode, which is not compared", captureCannotAsk},
 		"captureDetailNoCheckpoint":     {"the capture has no GTID checkpoint", captureCannotAsk},
@@ -733,6 +746,7 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 		"captureDetailNoCapture":        {"the index has no live capture on record", captureCannotAsk},
 		// Evidence that changes are missing, or are about to be: the full read.
 		"captureDetailLost":              {"the capture lost events to a binlog gap after the previous snapshot", captureEvidence},
+		"captureDetailPGLost":            {"the capture recorded a loss of changes after the previous snapshot", captureEvidence},
 		"captureDetailDropped":           {"the capture dropped events that no full read has read from the source since", captureEvidence},
 		"captureDetailDiverged":          {"the capture holds transactions the source does not have: the source may have been reset, restored or replaced", captureEvidence},
 		"captureDetailBehind":            {"the source reports transactions the capture's checkpoint does not include", captureEvidence},
@@ -1025,7 +1039,10 @@ func TestCaptureClasses_whatTheSlotDoes_2659(t *testing.T) {
 	if !pg.IsPostgres() {
 		t.Fatal("the fixture's PostgreSQL entry is not one")
 	}
-	if method, why := freshDecision(t, b, pg, now); method != console.BackupMethodSkip || why != console.SkipUnconfirmedReason(captureDetailPostgres) {
+	// A PostgreSQL source has a probe of its own (capture_probe_pg_test.go);
+	// the MySQL one stubbed above must not be what answers for it.
+	stubCaptureProbePG(t, captureProbeResult{detail: captureDetailPGAhead})
+	if method, why := freshDecision(t, b, pg, now); method != console.BackupMethodSkip || why != console.SkipUnconfirmedReason(captureDetailPGAhead) {
 		t.Fatalf("a PostgreSQL source: method=%q why=%q", method, why)
 	}
 	none := e
