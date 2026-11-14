@@ -19,7 +19,7 @@ import (
 // clientCollationAsk is what the forwarder asks the source for the names of
 // the collation the client's handshake gave by number (#2810).
 func clientCollationAsk(id uint16) string {
-	return "SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE ID = " + strconv.Itoa(int(id))
+	return "SELECT CHARACTER_SET_NAME, COLLATION_NAME, IS_DEFAULT FROM information_schema.COLLATIONS WHERE ID = " + strconv.Itoa(int(id))
 }
 
 // newWrappedCollationForwarder is newCollationForwarder with the source's
@@ -72,6 +72,9 @@ func newWrappedCollationForwarder(t *testing.T, version, collation string, wrap 
 type clientCollationSource struct {
 	*collationSource
 	names map[uint16][2]string
+	// defaults are the numbers the source says are their character set's
+	// default collation (IS_DEFAULT).
+	defaults map[uint16]bool
 	// clientCS is the session's character_set_client: start, then what a
 	// SET NAMES set ("" is utf8mb4). setNamesErr refuses SET NAMES utf8mb4.
 	clientCS    string
@@ -113,11 +116,15 @@ func (h *clientCollationSource) HandleQuery(q string) (*mysql.Result, error) {
 			h.mu.Lock()
 			h.seen = append(h.seen, q)
 			h.mu.Unlock()
-			rows := [][]any{{n[0], n[1]}}
+			isDefault := ""
+			if h.defaults[id] {
+				isDefault = "Yes"
+			}
+			rows := [][]any{{n[0], n[1], isDefault}}
 			if n[0] == "" {
 				rows = nil
 			}
-			rs, err := mysql.BuildSimpleTextResultset([]string{"CHARACTER_SET_NAME", "COLLATION_NAME"}, rows)
+			rs, err := mysql.BuildSimpleTextResultset([]string{"CHARACTER_SET_NAME", "COLLATION_NAME", "IS_DEFAULT"}, rows)
 			if err != nil {
 				return nil, err
 			}
@@ -135,7 +142,7 @@ func (h *clientCollationSource) HandleQuery(q string) (*mysql.Result, error) {
 		h.mu.Lock()
 		h.seen = append(h.seen, q)
 		h.mu.Unlock()
-		rs, err := mysql.BuildSimpleTextResultset([]string{"CHARACTER_SET_NAME", "COLLATION_NAME"}, nil)
+		rs, err := mysql.BuildSimpleTextResultset([]string{"CHARACTER_SET_NAME", "COLLATION_NAME", "IS_DEFAULT"}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -464,5 +471,38 @@ func TestForwarder_resetOnMariaDBKeepsTheClientCollation_2810(t *testing.T) {
 	want := []string{clientCollationAsk(8), "SET NAMES latin1", "DO 1"}
 	if got := src.statements(); !reflect.DeepEqual(got, want) {
 		t.Errorf("the source saw %q, want %q", got, want)
+	}
+}
+
+// #2810: a character set's default collation is set by naming the character
+// set alone, as the client's handshake named it to the source: MariaDB 11.4
+// and later then apply character_set_collations (a utf8mb4_general_ci
+// handshake is under utf8mb4_uca1400_ai_ci there, measured in CI), where SET
+// NAMES ... COLLATE would give utf8mb4_general_ci.
+func TestForwarder_clientCollationDefault_2810(t *testing.T) {
+	for _, tc := range []struct {
+		id        uint16
+		isDefault bool
+		want      string
+	}{
+		{45, true, "SET NAMES utf8mb4"},
+		{8, true, "SET NAMES latin1"},
+		{45, false, "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci"},
+		{46, false, "SET NAMES utf8mb4 COLLATE utf8mb4_bin"},
+	} {
+		var src *clientCollationSource
+		f, _ := newWrappedCollationForwarder(t, "11.4.13-MariaDB", "utf8mb4_uca1400_ai_ci", func(inner *collationSource) server.Handler {
+			src = &clientCollationSource{collationSource: inner,
+				names:    map[uint16][2]string{45: {"utf8mb4", "utf8mb4_general_ci"}, 8: {"latin1", "latin1_swedish_ci"}, 46: {"utf8mb4", "utf8mb4_bin"}},
+				defaults: map[uint16]bool{tc.id: tc.isDefault}}
+			return src
+		})
+		f.ClientCollation = tc.id
+		if _, err := f.Forward(context.Background(), "DO 1", &BufferSink{}); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := src.statements(), []string{clientCollationAsk(tc.id), tc.want, "DO 1"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("collation %d, default %v: the source saw %q, want %q", tc.id, tc.isDefault, got, want)
+		}
 	}
 }

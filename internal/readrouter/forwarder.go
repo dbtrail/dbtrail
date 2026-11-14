@@ -486,7 +486,8 @@ var collationName = regexp.MustCompile(`^[a-z0-9_]+$`)
 // not have it, falls back to its utf8mb4 default for both). Any other
 // number is a question and a statement: the source says what its number
 // means (information_schema.COLLATIONS), and SET NAMES sets the three
-// character sets and the collation as the handshake would have. The number
+// character sets and the collation as the handshake would have, naming the
+// character set alone when the collation is its default. The number
 // is asked of the source, not read from a table of the port's: the two
 // servers do not number every collation alike.
 //
@@ -516,7 +517,7 @@ func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn, charset
 	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
 	id := strconv.Itoa(int(f.ClientCollation))
 	asked := "number " + id
-	res, err := c.Execute("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE ID = " + id)
+	res, err := c.Execute("SELECT CHARACTER_SET_NAME, COLLATION_NAME, IS_DEFAULT FROM information_schema.COLLATIONS WHERE ID = " + id)
 	if err != nil {
 		return f.collationRefused(ctx, asked, err)
 	}
@@ -526,9 +527,10 @@ func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn, charset
 	}
 	cs, err1 := res.GetString(0, 0)
 	coll, err2 := res.GetString(0, 1)
+	isDefault, err3 := res.GetString(0, 2)
 	// Cells are views of the packet's bytes.
 	cs, coll = strings.Clone(cs), strings.Clone(coll)
-	if err := errors.Join(err1, err2); err != nil || !collationName.MatchString(cs) || !collationName.MatchString(coll) {
+	if err := errors.Join(err1, err2, err3); err != nil || !collationName.MatchString(cs) || !collationName.MatchString(coll) {
 		return f.collationRefused(ctx, asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
 			Message: fmt.Sprintf("the source named collation %s %q of character set %q, which is not a collation name", asked, coll, cs)})
 	}
@@ -536,7 +538,12 @@ func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn, charset
 		return f.collationRefused(ctx, coll, unsafeCharset(cs))
 	}
 	set := "SET NAMES " + cs + " COLLATE " + coll
-	if cs == "binary" || charsetOnly {
+	if cs == "binary" || charsetOnly || strings.EqualFold(isDefault, "yes") {
+		// A character set's default collation is named by the set alone,
+		// as a handshake names it to the source: MariaDB 11.4 and later
+		// then give the set the collation character_set_collations maps it
+		// to (utf8mb4_uca1400_ai_ci for a utf8mb4_general_ci handshake,
+		// measured), where an explicit COLLATE would not.
 		set = "SET NAMES " + cs
 	}
 	if _, err := c.Execute(set); err != nil {
