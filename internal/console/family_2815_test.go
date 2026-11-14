@@ -582,7 +582,7 @@ func TestCheck_refusesTheOtherFamilyBeforeTheChecks(t *testing.T) {
 	}
 
 	rec, body = doServersReq(t, srv, "POST", "/api/servers/check",
-		`{"flavor":"postgres","source_host":"pg.example.com","source_user":"dbtrail","source_password":"Ab3-xyz","source_dbname":"app","pg_slot":"s","pg_publication":"p"}`)
+		`{"flavor":"postgres","source_host":"pg.example.com","source_user":"dbtrail","source_password":"Ab3-xyz","source_database":"app","source_slot":"s","source_publication":"p"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("a PostgreSQL server on a MySQL installation: %d %s", rec.Code, body)
 	}
