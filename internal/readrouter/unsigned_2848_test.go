@@ -27,6 +27,9 @@ func TestUnsignedVeto_2848(t *testing.T) {
 		{"SELECT 7 mod ui FROM ev", cols, false, true, "MOD before the column"},
 		{"SELECT MOD(ui, 2) FROM ev", cols, false, true, "MOD called"},
 		{"SELECT ui DIV 2, ui / 2 FROM ev", cols, false, true, "DIV and /"},
+		{"SELECT ui << 1 FROM ev", cols, false, true, "a shift after the column"},
+		{"SELECT 1<<ti FROM ev", cols, false, true, "a shift before the column"},
+		{"SELECT u FROM ev WHERE u < 5 AND ui <= 3 AND ti <> 2", cols, false, false, "comparisons that start with <"},
 		{"SELECT -u FROM ev", cols, false, true, "unary minus: wraps around on the copy"},
 		{"SELECT - ui FROM ev", cols, false, true, "unary minus, a space"},
 		{"SELECT (-ti) FROM ev", cols, false, true, "unary minus in parentheses"},
@@ -52,6 +55,8 @@ func TestUnsignedVeto_2848(t *testing.T) {
 		{"SELECT x - 1 FROM (SELECT u AS x FROM ev) q", cols, false, true, "an alias in a derived table"},
 		{"WITH q AS (SELECT u AS x FROM ev) SELECT x * 2 FROM q", cols, false, true, "an alias in a WITH"},
 		{"SELECT a - 1 FROM (SELECT * FROM ev) q (a)", cols, false, true, "a star in a derived table"},
+		{"SELECT x - 1 FROM (\vSELECT ui AS x FROM ev) q", cols, false, true, "a vertical tab before the subquery's SELECT"},
+		{"SELECT ui AS x FROM ev ORDER\vBY x - 4", cols, false, true, "a vertical tab in ORDER BY"},
 		{"SELECT a - 1 FROM (SELECT id FROM ev) q", cols, true, true, "a star the parse saw, in a derived table"},
 
 		{"SELECT u, ui, ti FROM ev", cols, false, false, "the columns alone"},
@@ -113,6 +118,8 @@ func TestWindowNumberVeto_2848(t *testing.T) {
 		{"SELECT CASE WHEN k > 0 THEN RANK() OVER () END - 1 FROM ev", true, "under CASE"},
 		{"SELECT ROW_NUMBER() OVER () AS rn FROM ev ORDER BY rn - 1", true, "an alias in ORDER BY"},
 		{"SELECT rn - 1 FROM (SELECT ROW_NUMBER() OVER () AS rn FROM ev) q", true, "an alias in a derived table"},
+		{"SELECT rn - 1 FROM (\vSELECT ROW_NUMBER() OVER () AS rn FROM ev) q", true, "a vertical tab before the subquery's SELECT"},
+		{"SELECT ROW_NUMBER() OVER () AS rn FROM ev GROUP\vBY rn - 1", true, "a vertical tab in GROUP BY"},
 
 		{"SELECT ROW_NUMBER() OVER (ORDER BY k) FROM ev", false, "alone"},
 		{"SELECT ROW_NUMBER() OVER (PARTITION BY k - 1) FROM ev", false, "arithmetic inside the window, on a signed column"},

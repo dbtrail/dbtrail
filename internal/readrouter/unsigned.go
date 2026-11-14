@@ -46,7 +46,7 @@ var notUnsignedCalls = map[string]bool{"sum": true, "count": true}
 // answers -1, and -u wraps around to 18446744073709551613 where MySQL answers
 // -3. So the statement is kept on MySQL when one of these columns, or a group
 // that holds it (a pair of parentheses, a call with its window, a CASE ...
-// END), stands next to +, -, *, /, %, MOD or DIV, on either side. A group
+// END), stands next to +, -, *, /, %, <<, MOD or DIV, on either side. A group
 // that is a call of SUM or COUNT ends the walk (notUnsignedCalls).
 // Comparisons are not arithmetic: u > -1, u BETWEEN -5 AND 5 and u > b were
 // measured equal on both sides.
@@ -265,8 +265,10 @@ func mathOperator(c byte) bool { return strings.IndexByte("+-*/%", c) >= 0 }
 // mathWord reports MOD or DIV.
 func mathWord(w string) bool { return strings.EqualFold(w, "mod") || strings.EqualFold(w, "div") }
 
-// mathBefore reports an arithmetic operator, MOD or DIV as the last thing
-// before pos, white space aside.
+// mathBefore reports an arithmetic operator, a <<, MOD or DIV as the last
+// thing before pos, white space aside. << is here because MySQL shifts an
+// UNSIGNED value as a BIGINT UNSIGNED and the copy as a signed number; the
+// other bit operators are kept on MySQL from the text (bitOperator).
 func mathBefore(t *shapeText, pos int) bool {
 	l := pos - 1
 	for l >= 0 && sqlSpace(t.at(l)) {
@@ -276,7 +278,7 @@ func mathBefore(t *shapeText, pos int) bool {
 		return false
 	}
 	if c := t.at(l); !wordByte(c) {
-		return mathOperator(c)
+		return mathOperator(c) || c == '<' && l > 0 && t.at(l-1) == '<'
 	}
 	w := l
 	for w >= 0 && wordByte(t.at(w)) {
@@ -285,8 +287,8 @@ func mathBefore(t *shapeText, pos int) bool {
 	return l-w == 3 && mathWord(t.sub(w+1, l+1)) && (w < 0 || t.at(w) != '.')
 }
 
-// mathAfter reports an arithmetic operator, MOD or DIV as the first thing
-// from pos on, white space aside. An INTERVAL after a + or a - counts: an
+// mathAfter reports an arithmetic operator, a <<, MOD or DIV as the first
+// thing from pos on, white space aside. An INTERVAL after a + or a - counts: an
 // UNSIGNED number stepped by one is not a date on the copy either.
 func mathAfter(t *shapeText, pos int) bool {
 	n := t.len()
@@ -298,7 +300,7 @@ func mathAfter(t *shapeText, pos int) bool {
 		return false
 	}
 	if c := t.at(r); !wordByte(c) {
-		return mathOperator(c)
+		return mathOperator(c) || c == '<' && r+1 < n && t.at(r+1) == '<'
 	}
 	e := r
 	for e < n && wordByte(t.at(e)) {
@@ -309,7 +311,7 @@ func mathAfter(t *shapeText, pos int) bool {
 
 // mathFrom reports arithmetic at or after from that could be on a value the
 // text does not name: a + or a - that is not a number's sign (dateSign), a
-// * that is not a star (starAt), a /, a %, or the word MOD or DIV.
+// * that is not a star (starAt), a /, a %, a <<, or the word MOD or DIV.
 func mathFrom(t *shapeText, closes map[int]int, from int) bool {
 	n := t.len()
 	for i := from; i < n; i++ {
@@ -323,7 +325,7 @@ func mathFrom(t *shapeText, closes map[int]int, from int) bool {
 			if !starAt(t, i) {
 				return true
 			}
-		case c == '/' || c == '%':
+		case c == '/' || c == '%' || c == '<' && i+1 < n && t.at(i+1) == '<':
 			return true
 		case wordByte(c):
 			j := i
