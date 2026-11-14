@@ -188,6 +188,16 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   reset asks for no password. Both work under `mysql_native_password`;
   under `caching_sha2_password` a change of user takes the port's own
   password only, as logins are not offered there.
+- **The application's collation reaches the port through ProxySQL.**
+  ProxySQL passes on the collation the application asked for (measured
+  with ProxySQL 2.6.6: `mysql-default_collation_connection` does not
+  replace it), and the port opens the session on MySQL under it (#2810).
+  For the copy to answer, the application must ask for
+  `utf8mb4_0900_ai_ci` or `utf8mb4_unicode_ci`: in Go,
+  `collation=utf8mb4_0900_ai_ci` in the DSN; in Python with PyMySQL, the
+  same collation in `connect()`. An application on its driver's default
+  `utf8mb4_general_ci` (both of those) gets every answer from MySQL. The
+  `mysql` client and Node's mysql2 ask for one the copy reproduces already.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
   The MySQL clients page saves it too, under *A proxy in front*, for the
@@ -1120,7 +1130,9 @@ The decision, in order, for every statement:
    MySQL on every statement (MariaDB 11.4 and later give that handshake
    `utf8mb4_uca1400_ai_ci` themselves, which the copy answers under). Ask for
    one the copy reproduces in the DSN: `collation=utf8mb4_0900_ai_ci` on
-   MySQL and MariaDB 11.4 and later, `collation=utf8mb4_unicode_ci` on
+   MySQL and MariaDB 11.4 and later (PyMySQL, whose default is the same
+   `utf8mb4_general_ci`: `collation='utf8mb4_0900_ai_ci'` in `connect()`),
+   `collation=utf8mb4_unicode_ci` on
    MariaDB 10.11 (which has no `utf8mb4_0900_ai_ci` and gives a client that
    asks for it `utf8mb4_general_ci`, on a direct connection as through the
    port). A client's own `SET NAMES` later in the session works as before.
