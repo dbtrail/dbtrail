@@ -431,8 +431,15 @@ func streamLoopPG(
 		defer healthTicker.Stop()
 		healthC = healthTicker.C
 	}
-	// The source readings the capture has not reached yet (caughtup.go).
-	var samples caughtUpSamples
+	// pendingSent is the newest EventSentThrough received. It becomes
+	// state.sentThrough only in checkpoint(), after the commit of everything
+	// received before it.
+	var pendingSent uint64
+	// The reading of the source waiting to be reached, and the moment the
+	// last one reached in time was taken, which the next checkpoint hands to
+	// state.caughtUpAt (caughtup.go).
+	var proof caughtUpProof
+	var caughtUpMoment time.Time
 	flushedUnread := false
 	pollHealth := func() {
 		pctx, cancel := context.WithTimeout(ctx, healthPollTimeout)
@@ -458,11 +465,18 @@ func streamLoopPG(
 			}
 			return
 		}
-		samples.add(snap.FlushedLSN, asked)
+		proof.asked(snap.FlushedLSN, asked)
+		// A quiet source: the position received before the asking is
+		// already the one it answered.
+		if at, ok := proof.received(pendingSent, time.Now()); ok {
+			caughtUpMoment = at
+		}
 		// Said when it starts failing and when it stops, not every 30 seconds:
 		// without this reading no caught-up stamp is written, and the web
-		// interface shows the capture as behind.
-		if failing := snap.FlushedLSNErr != nil; failing != flushedUnread {
+		// interface shows the capture as behind. Not when the loop is
+		// stopping or the probe ran out of time, which cut the read short:
+		// neither is the source refusing it.
+		if failing := snap.FlushedLSNErr != nil; failing != flushedUnread && ctx.Err() == nil && pctx.Err() == nil {
 			flushedUnread = failing
 			if failing {
 				logger.Warn("pgstreamrun: could not read how far the source's WAL is flushed; until it can be read, nothing records when capture was last caught up, and it will show as behind", "error", snap.FlushedLSNErr)
@@ -486,11 +500,6 @@ func streamLoopPG(
 	if state.resumed {
 		lastCommitLSN = state.lsn
 	}
-	// pendingSent is the newest EventSentThrough received. It becomes
-	// state.sentThrough only in checkpoint(), after the commit of everything
-	// received before it.
-	var pendingSent uint64
-
 	// snapshotByTable maps "schema.table" → the snapshot_id of that table's most
 	// recent EventRelation (#533). Per-TABLE, not a single scalar: pgoutput sends a
 	// RelationMessage once per relation per session, so a second table's snapshot
@@ -541,10 +550,10 @@ func streamLoopPG(
 		// except the rows of a transaction still being read, whose commit is
 		// at or past the marker's position (see pgcapture.sentMarker).
 		state.sentThrough = pendingSent
-		// And so is every commit the source had flushed at each reading that
-		// position has reached (caughtup.go).
-		if at, ok := samples.reached(state.sentThrough); ok {
-			state.caughtUpAt = at
+		// And so is everything the source had at the last moment it was
+		// reached in time (caughtup.go).
+		if !caughtUpMoment.IsZero() {
+			state.caughtUpAt, caughtUpMoment = caughtUpMoment, time.Time{}
 		}
 		if lastCommitLSN == 0 {
 			return nil // nothing committed yet — nothing durable to checkpoint
@@ -684,6 +693,9 @@ func streamLoopPG(
 				// before it is committed.
 				if ev.EndPos > pendingSent {
 					pendingSent = ev.EndPos
+				}
+				if at, ok := proof.received(pendingSent, time.Now()); ok {
+					caughtUpMoment = at
 				}
 			case event.EventGTID:
 				// PostgreSQL does not emit a leading GTID marker; ignore defensively.

@@ -257,13 +257,13 @@ needs the slot; only *resuming capture* requires a re-baseline.
 #### When capture was last caught up
 
 With each of those health polls the capture also asks the source how far its
-WAL is flushed. Once the position the capture has saved reaches that reading,
-it holds everything the source had when it was asked, and it records that
-moment in the index at its next checkpoint. The web interface and the router
-read it to say how far behind the source an answer is. A capture that keeps up
-records one about every 30 seconds; one that is behind records an older moment
-or none, and shows as behind. It is one `SELECT` on the health poll's
-connection.
+WAL is flushed. If the capture has received the source's changes up to that
+point within a second of asking, it held everything the source had at that
+moment, and it records the moment in the index at its next checkpoint. The web
+interface and the router read it to say how far behind the source an answer
+is. A capture that keeps up records one about every 30 seconds; one that is
+more than a second behind records none, and shows as behind. It is one
+`SELECT` on the health poll's connection.
 
 ---
 

@@ -14,63 +14,56 @@ import "time"
 //
 //   - the health poll, every healthPollInterval, asks the source how far its
 //     WAL is flushed, and the loop notes when it asked;
-//   - once the capture's sent-through position (every commit below it is in
-//     the index, #2746) reaches that reading, the capture holds everything
-//     the source had when it was asked. That moment is the stamp.
+//   - if the walsender's sent position, as this loop has received it, is at
+//     or past that reading within caughtUpWithin of the asking, the loop had
+//     by then consumed everything the source had when it was asked. The
+//     moment it asked is the stamp, written by the next checkpoint, which
+//     first commits every complete transaction received before it.
 //
-// Stamped about once a poll on a capture that keeps up, written at the next
-// checkpoint: the cadence of the MySQL stamp on a quiet source, which is what
-// the readers' window (two heartbeat periods) is sized for. A capture that is
-// behind stamps the older reading it did reach, or nothing, and reads as
-// behind.
+// "Within caughtUpWithin" is what makes it a statement about that moment. A
+// capture that reaches the reading twenty seconds later holds what the source
+// had then, twenty seconds late: it is twenty seconds behind, and a stamp for
+// it would tell the router "zero" for as long as that lag lasted. It gets no
+// stamp, and reads as behind.
+//
+// Stamped about once a poll on a capture that keeps up: the cadence of the
+// MySQL stamp on a quiet source, which is what the readers' window (two
+// heartbeat periods) is sized for.
 
-// maxCaughtUpSamples bounds the readings kept while the capture has not
-// reached them: two minutes of polls. An older one would stamp a moment the
-// readers' window no longer counts.
-const maxCaughtUpSamples = 4
+// caughtUpWithin is how soon after the source was asked the capture must
+// have received its position for that moment to count. The walsender reports
+// its position as soon as it runs out of WAL to decode, so a capture that
+// keeps up has it in milliseconds; this is also the most the stamp can
+// overstate: a capture up to this far behind at that moment is stamped.
+const caughtUpWithin = time.Second
 
-// sourceReading is how far the source's WAL was flushed (lsn) at a moment no
-// later than the read (at: taken before the source was asked).
-type sourceReading struct {
+// caughtUpProof holds the one reading of the source that is still waiting
+// to be reached: how far its WAL was flushed (lsn; 0 = none waiting) at a
+// moment no later than the read (at: taken before the source was asked).
+type caughtUpProof struct {
 	lsn uint64
 	at  time.Time
 }
 
-// caughtUpSamples holds the readings the capture has not reached yet, oldest
-// first.
-type caughtUpSamples struct {
-	pending []sourceReading
+// asked notes a reading, in place of the one that was waiting: that one was
+// not reached in time, or it would be gone. A zero lsn (the source could not
+// be read) leaves none waiting.
+func (p *caughtUpProof) asked(lsn uint64, at time.Time) {
+	p.lsn, p.at = lsn, at
 }
 
-// add notes a reading. A zero lsn (the source was not read) is not one. A
-// reading before the newest kept one means the source's WAL went backward (a
-// source restored or replaced): what was kept is about another history, and
-// is dropped.
-func (s *caughtUpSamples) add(lsn uint64, at time.Time) {
-	if lsn == 0 {
-		return
-	}
-	if n := len(s.pending); n > 0 && lsn < s.pending[n-1].lsn {
-		s.pending = s.pending[:0]
-	}
-	if len(s.pending) == maxCaughtUpSamples {
-		s.pending = append(s.pending[:0], s.pending[1:]...)
-	}
-	s.pending = append(s.pending, sourceReading{lsn: lsn, at: at})
-}
-
-// reached answers with the moment of the newest reading the capture's
-// sent-through position has reached, and forgets it and the older ones. ok
-// is false when it has reached none (a zero position reaches none).
-func (s *caughtUpSamples) reached(sentThrough uint64) (at time.Time, ok bool) {
-	n := 0
-	for n < len(s.pending) && s.pending[n].lsn <= sentThrough {
-		n++
-	}
-	if n == 0 {
+// received is told the newest sent position this loop has received (sent)
+// and the time (now). When that position reaches the waiting reading it
+// answers with the reading's moment, and ok says whether it was reached in
+// time; either way the reading is spent. A zero position reaches nothing.
+func (p *caughtUpProof) received(sent uint64, now time.Time) (at time.Time, ok bool) {
+	if p.lsn == 0 || sent < p.lsn {
 		return time.Time{}, false
 	}
-	at = s.pending[n-1].at
-	s.pending = append(s.pending[:0], s.pending[n:]...)
+	at, ok = p.at, now.Sub(p.at) <= caughtUpWithin
+	p.lsn, p.at = 0, time.Time{}
+	if !ok {
+		return time.Time{}, false
+	}
 	return at, true
 }

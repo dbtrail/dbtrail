@@ -61,8 +61,10 @@ func waitCaughtUp(t *testing.T, what string, limit time.Duration, done func() bo
 }
 
 // The loop, with the source's readings fed by the test: the stamp is written
-// only for a reading the saved sent-through position has reached, at the
-// moment the source was asked, and is kept when there is nothing newer.
+// only for a reading the received sent position has reached, at the moment
+// the source was asked, and is kept when there is nothing newer. (That it
+// must be reached within caughtUpWithin is TestCaughtUpProof's: here a
+// reading is taken every 10 ms, so the one waiting is always recent.)
 func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	db, _ := testutil.CreateTestDB(t)
@@ -130,18 +132,19 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 		t.Fatalf("the stamp moved from %s to %s with the capture at 5000 and the source at 9000", held, now)
 	}
 
-	// A reading that fails is not one: reaching 9000 after the source could
-	// no longer be read stamps the readings taken before, and then nothing.
+	// A reading that fails is not one: reaching 9000 while the source cannot
+	// be read stamps nothing.
 	failing.Store(true)
 	time.Sleep(50 * time.Millisecond)
 	send(sentMarkerAt(9000))
-	waitCaughtUp(t, "a stamp for the readings taken before the failure", 5*time.Second, func() bool { return caughtUpStamp(t, db) != held })
-	held = caughtUpStamp(t, db)
-	send(sentMarkerAt(20000))
 	time.Sleep(200 * time.Millisecond)
 	if now := caughtUpStamp(t, db); now != held {
 		t.Fatalf("the stamp moved from %s to %s while the source's position could not be read", held, now)
 	}
+	// It can be read again, and it is where the capture already is: a quiet
+	// source, stamped at the next reading with no new position to receive.
+	failing.Store(false)
+	waitCaughtUp(t, "a stamp once the source could be read again", 5*time.Second, func() bool { return caughtUpStamp(t, db) != held })
 
 	// A lost slot removes the stamp: capture is not caught up with anything.
 	persistSlotLostPG(db, 92845, "test: slot lost", slog.New(slog.DiscardHandler))

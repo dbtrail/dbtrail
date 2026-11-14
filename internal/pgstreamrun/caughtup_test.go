@@ -5,64 +5,67 @@ import (
 	"time"
 )
 
-func TestCaughtUpSamples(t *testing.T) {
+func TestCaughtUpProof(t *testing.T) {
 	t0 := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
-	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	at := func(d time.Duration) time.Time { return t0.Add(d) }
 	type step struct {
-		// add a reading (lsn, at second), or ask with a sent-through position.
-		add     uint64
-		addAt   int
-		sent    uint64
+		// ask: a reading (lsn at askAt). Otherwise the loop received a sent
+		// position (sent at now), and want is the moment answered.
 		ask     bool
-		want    int // the second of the moment answered
+		lsn     uint64
+		askAt   time.Duration
+		sent    uint64
+		now     time.Duration
+		want    time.Duration
 		wantNot bool
 	}
+	asked := func(lsn uint64, d time.Duration) step { return step{ask: true, lsn: lsn, askAt: d} }
+	got := func(sent uint64, now, want time.Duration) step { return step{sent: sent, now: now, want: want} }
+	none := func(sent uint64, now time.Duration) step { return step{sent: sent, now: now, wantNot: true} }
 	for _, tc := range []struct {
 		name  string
 		steps []step
 	}{
-		{name: "nothing read, nothing reached", steps: []step{{ask: true, sent: 9000, wantNot: true}}},
-		{name: "a reading the capture has reached", steps: []step{
-			{add: 500, addAt: 0}, {ask: true, sent: 500, want: 0}}},
-		{name: "a reading the capture is one short of", steps: []step{
-			{add: 500, addAt: 0}, {ask: true, sent: 499, wantNot: true}, {ask: true, sent: 500, want: 0}}},
-		{name: "a zero position reaches nothing", steps: []step{
-			{add: 500, addAt: 0}, {ask: true, sent: 0, wantNot: true}}},
-		{name: "a reading that failed is not one", steps: []step{
-			{add: 0, addAt: 0}, {ask: true, sent: 9000, wantNot: true}}},
-		{name: "the newest reached is the moment, and it is answered once", steps: []step{
-			{add: 500, addAt: 0}, {add: 600, addAt: 30}, {add: 900, addAt: 60},
-			{ask: true, sent: 700, want: 30},
-			{ask: true, sent: 700, wantNot: true},
-			{ask: true, sent: 900, want: 60}}},
-		{name: "a capture behind stamps the older reading it reached, not the newest", steps: []step{
-			{add: 500, addAt: 0}, {add: 800, addAt: 30}, {ask: true, sent: 500, want: 0}}},
-		{name: "a quiet source: the same position read again is reached at once", steps: []step{
-			{add: 500, addAt: 0}, {ask: true, sent: 500, want: 0}, {add: 500, addAt: 30}, {ask: true, sent: 500, want: 30}}},
-		{name: "only the newest readings are kept", steps: []step{
-			{add: 100, addAt: 0}, {add: 200, addAt: 30}, {add: 300, addAt: 60}, {add: 400, addAt: 90}, {add: 500, addAt: 120},
-			// The reading at second 0 is gone: a capture that only reached
-			// it has no moment recent enough to stamp.
-			{ask: true, sent: 100, wantNot: true},
-			{ask: true, sent: 200, want: 30}}},
-		{name: "a source whose WAL went backward: what was read before is another history", steps: []step{
-			{add: 900, addAt: 0}, {add: 300, addAt: 30},
-			{ask: true, sent: 900, want: 30},
-			{ask: true, sent: 900, wantNot: true}}},
+		{name: "nothing asked, nothing reached", steps: []step{none(9000, 0)}},
+		{name: "reached at once", steps: []step{asked(500, 0), got(500, 5*time.Millisecond, 0)}},
+		{name: "past the reading", steps: []step{asked(500, 0), got(900, 5*time.Millisecond, 0)}},
+		{name: "one short of the reading, then reached", steps: []step{
+			asked(500, 0), none(499, 5*time.Millisecond), got(500, 20*time.Millisecond, 0)}},
+		{name: "a zero position reaches nothing", steps: []step{asked(500, 0), none(0, 0)}},
+		{name: "reached at the edge of in time", steps: []step{asked(500, 0), got(500, caughtUpWithin, 0)}},
+		{name: "reached too late: behind by that much, and no stamp", steps: []step{
+			asked(500, 0), none(500, caughtUpWithin+time.Millisecond)}},
+		{name: "a reading reached too late is spent, not answered at the next position", steps: []step{
+			asked(500, 0), none(500, 20*time.Second), none(900, 21*time.Second)}},
+		{name: "a reading is answered once", steps: []step{
+			asked(500, 0), got(500, time.Millisecond, 0), none(900, 2*time.Millisecond)}},
+		{name: "a capture twenty seconds behind is never stamped, poll after poll", steps: []step{
+			asked(500, 0), none(400, time.Second),
+			asked(800, 30*time.Second), none(500, 30*time.Second+time.Millisecond), none(700, 40*time.Second),
+			asked(1100, 60*time.Second), none(800, 60*time.Second+time.Millisecond)}},
+		{name: "a new reading replaces one that was not reached", steps: []step{
+			asked(500, 0), asked(800, 30*time.Second),
+			// 500 was reached long ago by now; it is not what is waiting.
+			none(600, 30*time.Second+time.Millisecond),
+			got(800, 30*time.Second+10*time.Millisecond, 30*time.Second)}},
+		{name: "a reading that failed leaves none waiting", steps: []step{
+			asked(500, 0), asked(0, 30*time.Second), none(9000, 30*time.Second+time.Millisecond)}},
+		{name: "a quiet source: the position received before the asking answers it", steps: []step{
+			asked(500, 0), got(500, time.Millisecond, 0),
+			asked(500, 30*time.Second), got(500, 30*time.Second+time.Millisecond, 30*time.Second)}},
+		{name: "a source whose WAL went backward is read as any other", steps: []step{
+			asked(900, 0), asked(300, 30*time.Second), got(900, 30*time.Second+time.Millisecond, 30*time.Second)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var s caughtUpSamples
+			var p caughtUpProof
 			for i, st := range tc.steps {
-				if !st.ask {
-					s.add(st.add, at(st.addAt))
-					if len(s.pending) > maxCaughtUpSamples {
-						t.Fatalf("step %d: %d readings kept, at most %d", i, len(s.pending), maxCaughtUpSamples)
-					}
+				if st.ask {
+					p.asked(st.lsn, at(st.askAt))
 					continue
 				}
-				got, ok := s.reached(st.sent)
-				if ok == st.wantNot || (ok && !got.Equal(at(st.want))) {
-					t.Fatalf("step %d: reached(%d) = %v, %v; want second %d, none: %v", i, st.sent, got.Sub(t0), ok, st.want, st.wantNot)
+				moment, ok := p.received(st.sent, at(st.now))
+				if ok == st.wantNot || (ok && !moment.Equal(at(st.want))) {
+					t.Fatalf("step %d: received(%d at %s) = %v, %v; want %s, none: %v", i, st.sent, st.now, moment.Sub(t0), ok, st.want, st.wantNot)
 				}
 			}
 		})
