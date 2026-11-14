@@ -1073,3 +1073,18 @@ func TestRoutedSession_collationKeepsOnlyTextOnMySQL_2836(t *testing.T) {
 		})
 	}
 }
+
+// #2836: a statement over the copy's row cap that the session's collation
+// keeps on MySQL is counted under session_differs, as before, not under the
+// row cap: the operator is told the collation is why.
+func TestRoutedSession_collationBeforeTheRowCap_2836(t *testing.T) {
+	rig := newSessRig(t)
+	rig.r.src.coll = "11001"
+	rig.f.rowCap, rig.r.resultRows = 10, 1000
+	if got := firstCell(t, rig.run(t, "SELECT LOWER(status) FROM t")); got != "mysql" {
+		t.Fatalf("answered by %s, want mysql", got)
+	}
+	if rig.last() != "mysql/session_differs" {
+		t.Errorf("observed %q, want mysql/session_differs", rig.last())
+	}
+}
