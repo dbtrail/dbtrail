@@ -2170,6 +2170,10 @@ server's statements instead of serving without it.
 - `BINTRAIL_ROUTER_LISTEN` (`router` only): same as `router --listen`
   (default `127.0.0.1:3309`): the address of the MySQL port. The router is
   the only process that serves it. See [The router](time-travel-sql.md#the-router-the-process-that-serves-the-port).
+- `BINTRAIL_ROUTER_PG_LISTEN` (`router` only): same as `router --pg-listen`
+  (no default: no such port): the address of a PostgreSQL-protocol port that
+  runs read-only SQL on the copy, on this machine only. See
+  [SQL on the copy from `psql`](postgres.md#sql-on-the-copy-from-psql).
 - `BINTRAIL_ROUTER_METRICS_ADDR` (`router` only): same as `router
   --metrics-addr`: where the router serves its Prometheus metrics and its
   `/status` document. Its own

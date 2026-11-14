@@ -2972,6 +2972,7 @@ one environment file serves both processes.
 | Flag | Environment variable | Default | What it does |
 |---|---|---|---|
 | `--listen` | `BINTRAIL_ROUTER_LISTEN` | `127.0.0.1:3309` | Where the MySQL port listens |
+| `--pg-listen` | `BINTRAIL_ROUTER_PG_LISTEN` | none | Where a PostgreSQL-protocol port listens, for read-only SQL on the copy from a PostgreSQL client. An address of this machine only. See [SQL on the copy from `psql`](postgres.md#sql-on-the-copy-from-psql) |
 | `--metrics-addr` | `BINTRAIL_ROUTER_METRICS_ADDR` | none | Where `/metrics` and `/status` are served |
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password for the port. It does not open the port |
 | `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |

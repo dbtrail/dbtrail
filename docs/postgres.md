@@ -536,6 +536,52 @@ What to know:
 - One index database follows one PostgreSQL source: the fold reads where it
   stops from the whole index.
 
+### SQL on the copy from `psql`
+
+The router can open a PostgreSQL-protocol port next to its MySQL one, so a
+PostgreSQL client runs read-only SQL on a server's copy:
+
+```bash
+bintrail-console router --pg-listen 127.0.0.1:5433
+# or BINTRAIL_ROUTER_PG_LISTEN=127.0.0.1:5433 in the router's environment
+```
+
+```
+psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app"
+
+SELECT status, count(*) AS n FROM orders GROUP BY status ORDER BY n DESC;
+```
+
+- **The database name picks the server**: its id or its name, as the web
+  interface shows them. The username is free, except that a server's
+  application login, used as the username, opens that server whatever database
+  is named.
+- **The password** is the MySQL port's: the one created in the web interface
+  (`dbtrail port on`), the access token, or the application login's own. The
+  port is open while the MySQL port is turned on, and closes with it.
+- **The copy answers every statement.** Nothing is sent to the source, and a
+  statement that is not a read is refused with an error. Unqualified names
+  resolve in `public`. NULL order, integer division and text comparison follow
+  PostgreSQL, and each type reads as [the table below](#how-each-type-reads-in-sql-on-the-copy)
+  says; the differences listed there apply here too.
+- **Every column is sent as text**, written the way PostgreSQL writes a value
+  of that kind (`t`/`f`, `{a,b}`, `2026-03-04 05:06:07+00`). `psql` shows them
+  as it would; a driver that asks for a column's type is told `text`.
+- **A column with no name of its own gets the copy's name for it**: `count(*)`
+  is headed `count_star()`, not `count`. Give it a name (`count(*) AS n`) when
+  the heading matters.
+- **Simple query protocol only**: `psql` uses it; a `pgx` client sets
+  `QueryExecModeSimpleProtocol`. Prepared statements are refused with an error.
+- **This machine only.** The port asks for the password in clear text and has
+  no TLS, so `--pg-listen` takes an address of this machine alone (`127.0.0.1`,
+  `::1`, `localhost`) and the router refuses to start with any other.
+- A result with more rows than the port's row cap is refused, not cut: add a
+  `LIMIT`. Time travel (`_flashback`, `_snapshot`, `AS OF`) is not served on
+  this port; use `bintrail-pg flashback`, below.
+
+A MySQL or MariaDB server can be named too: its copy answers in the copy's own
+SQL, with its source database as the default schema.
+
 ### Interactive `AS OF` from `psql`
 
 The `_flashback` / `_snapshot` / `AS OF` time-travel grammar is also available
