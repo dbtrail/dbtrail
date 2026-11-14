@@ -2779,8 +2779,10 @@ prepared statement once its arguments are written in:
   space before the offset, and an offset after a date with no time or a time
   with no seconds are not offsets to MySQL: those strings are answered, alike
   on both. What this port cannot see is still answered the copy's way: a
-  text column that holds an offset (`DATEDIFF(note, d)`) or one built while
-  the statement runs (`CONCAT(t, '+05:00')`) gives the date as written. Turn
+  text column that holds an offset (`DATEDIFF(note, d)`), a string built
+  while the statement runs (`CONCAT(t, '+05:00')`), and a string given a
+  name in a derived table or a `WITH` and read by that name in the
+  `DATEDIFF` give the date as written. Turn
   on Engine Routing for those: MySQL answers every `DATEDIFF` of a string.
 
 Or turn on Engine Routing, and MySQL answers them. The list is of

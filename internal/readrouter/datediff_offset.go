@@ -43,7 +43,7 @@ var dateDiffOffsetRefusal = UnroutedRefusal{
 func UnroutedDateDiffOffsetVeto(stmt string) (UnroutedRefusal, bool) {
 	// A backslash escapes the next character in MySQL's string, a quote
 	// among them; it is no SQL outside one. As UnroutedVeto reads it.
-	s := strings.ReplaceAll(stmt, `\`, " ")
+	s := blankBacktickNames(strings.ReplaceAll(stmt, `\`, " "))
 	for i := 0; i < len(s); {
 		if end, _, skipped := skipQuoted(s, i); skipped {
 			i = end
@@ -121,18 +121,53 @@ func skipQuoted(s string, i int) (end int, lit string, skipped bool) {
 	return i, "", false
 }
 
-// literalsIn is the text of each string in single quotes in s, read as
-// skipQuoted reads them.
-func literalsIn(s string) []string {
-	var lits []string
+// blankBacktickNames is s with each name in backticks written "": callArgs
+// does not read backticks, and a name such as `a,b`, `a)b` or `a'b` would
+// split, close or open the arguments where MySQL and the rewrite for the
+// copy read one name.
+func blankBacktickNames(s string) string {
+	var b strings.Builder
 	for i := 0; i < len(s); {
-		end, lit, skipped := skipQuoted(s, i)
+		end, _, skipped := skipQuoted(s, i)
 		if !skipped {
+			b.WriteByte(s[i])
 			i++
 			continue
 		}
-		if s[i] == '\'' {
-			lits = append(lits, lit)
+		if s[i] == '`' {
+			b.WriteString(`""`)
+		} else {
+			b.WriteString(s[i:end])
+		}
+		i = end
+	}
+	return b.String()
+}
+
+// literalsIn is the text of each string in single quotes in s, read as
+// skipQuoted reads them. Strings with nothing but white space or comments
+// between them are one, as MySQL reads them: '2026-01-15 02:00:00' '+05:00'.
+func literalsIn(s string) []string {
+	var lits []string
+	joins := false
+	for i := 0; i < len(s); {
+		end, lit, skipped := skipQuoted(s, i)
+		switch {
+		case !skipped:
+			if strings.IndexByte(" \t\n\r\f\v", s[i]) < 0 {
+				joins = false
+			}
+			i++
+			continue
+		case s[i] == '\'':
+			if joins {
+				lits[len(lits)-1] += lit
+			} else {
+				lits = append(lits, lit)
+			}
+			joins = true
+		case s[i] == '"' || s[i] == '`':
+			joins = false
 		}
 		i = end
 	}

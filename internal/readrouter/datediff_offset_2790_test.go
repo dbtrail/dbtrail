@@ -48,8 +48,18 @@ func TestUnroutedDateDiffOffsetVeto(t *testing.T) {
 		"SELECT DATEDIFF(d, -- y\n'2026-01-15 02:00:00+05:00') FROM t",
 		// A prepared statement's argument, as the port writes it in.
 		"SELECT DATEDIFF(d,  '2026-01-15 02:00:00+05:00' ) FROM t",
-		// A backtick-quoted column beside it.
+		// A backtick-quoted column beside it, one whose name holds a comma,
+		// a parenthesis or a quote among them.
 		"SELECT DATEDIFF(`d`, '2026-01-15 02:00:00+05:00') FROM `t`",
+		"SELECT DATEDIFF(`a,b`, '2026-01-15 02:00:00+05:00') FROM t",
+		"SELECT DATEDIFF(`a)b`, '2026-01-15 02:00:00+05:00') FROM t",
+		"SELECT DATEDIFF(`a'b`, '2026-01-15 02:00:00+05:00') FROM t",
+		"SELECT DATEDIFF(`a\"b`, '2026-01-15 02:00:00+05:00') FROM t",
+		"SELECT DATEDIFF(`a``b`, '2026-01-15 02:00:00+05:00') FROM t",
+		// Strings side by side, which MySQL reads as one.
+		"SELECT DATEDIFF('2026-01-15 02:00:00' '+05:00', d) FROM t",
+		"SELECT DATEDIFF('2026-01-15 02:00:00'\n'+05:00', d) FROM t",
+		"SELECT DATEDIFF('2026-01-15 02:00:00' /* x */ '+05:00', d) FROM t",
 	}
 	for _, stmt := range refused {
 		r, ok := UnroutedDateDiffOffsetVeto(stmt)
@@ -98,6 +108,8 @@ func TestUnroutedDateDiffOffsetVeto(t *testing.T) {
 		// One argument, which MySQL refuses by itself, and a call left open.
 		"SELECT DATEDIFF('2026-01-15 02:00:00+05:00') FROM t",
 		"SELECT DATEDIFF('2026-01-15 02:00:00+05:00', d FROM t",
+		// Two strings that are not side by side.
+		"SELECT DATEDIFF(CONCAT('2026-01-15 02:00:00', '+05:00'), d) FROM t",
 		// No offset after a date that ends in a number.
 		"SELECT DATEDIFF('2026-01-01', '2025-12-31') FROM t",
 		"",
