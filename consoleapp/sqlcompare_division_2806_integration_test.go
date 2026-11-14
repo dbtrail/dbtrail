@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,9 @@ func scaledAnswer(db *sql.DB, stmt string, args ...any) string {
 	return b.String()
 }
 
+// scaleless is the scale scaledAnswer writes after a type.
+var scaleless = regexp.MustCompile(`/\d+`)
+
 func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	now := time.Now().UTC().Truncate(time.Second)
 	indexDSN := seedFlashbackIndex(t, "alice", now.Truncate(time.Hour))
@@ -162,12 +166,16 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	t.Cleanup(func() { cancel(); <-served })
 	portDSN := fmt.Sprintf("%s:tok@tcp(%s)/%s?parseTime=true&timeout=5s", ent.ID, ln.Addr().String(), srcName)
 
-	// who "?" is measured and logged, not asserted.
+	// who "?" is measured and logged, not asserted; "" asserts the answer
+	// and not who gave it. noScale leaves the declared scale out: the copy
+	// declares every DATETIME with six fraction digits (applyDuckType), a
+	// difference of its own that is not #2806's.
 	cases := []struct {
-		stmt string
-		args []any
-		who  string
-		why  string
+		stmt    string
+		args    []any
+		who     string
+		noScale bool
+		why     string
 	}{
 		{stmt: "SELECT side, k / 7 FROM ev ORDER BY k", who: "live", why: "the issue's case"},
 		{stmt: "SELECT side, k/7, -k / 7, k / -7 FROM ev ORDER BY k", who: "live", why: "signs, no spaces"},
@@ -191,7 +199,7 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), SUM(dc) FROM ev", who: "copy", why: "a DECIMAL"},
 		{stmt: "SELECT MIN(side), SUM(dbl) FROM ev", who: "?", why: "a DOUBLE: the same text, and the scale a DOUBLE is declared with differs (#2829)"},
 		{stmt: "SELECT MIN(side), SUM(z) FROM ev WHERE k IS NULL", who: "copy", why: "NULLs only"},
-		{stmt: "SELECT MIN(side), SUM(k) FROM ev WHERE k > 100", who: "copy", why: "no row"},
+		{stmt: "SELECT MIN(side), SUM(k) FROM ev WHERE k > 100", who: "", why: "no row: nothing says who answered"},
 		{stmt: "SELECT side, SUM(k) OVER (ORDER BY k) FROM ev ORDER BY k", who: "copy", why: "a window"},
 		{stmt: "SELECT MIN(side), SUM(k) + 1, SUM(k) * 2, -SUM(k), ABS(SUM(k)) FROM ev", who: "copy", why: "arithmetic on a SUM"},
 		{stmt: "SELECT MIN(side), SUM(k) * 1.5, SUM(k) + 0.25 FROM ev", who: "copy", why: "a SUM and a decimal"},
@@ -208,8 +216,8 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT side, k DIV 2 FROM ev ORDER BY k", who: "live", why: "DIV"},
 		{stmt: "SELECT side, ui + k, -ui, u - 1 FROM ev WHERE k > 0 ORDER BY k", who: "?", why: "unsigned arithmetic, not this issue's"},
 		{stmt: "SELECT side, b - u FROM ev WHERE k > 2 ORDER BY k", who: "?", why: "signed minus unsigned, not this issue's"},
-		{stmt: "SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "copy", why: "the #2493 bucket"},
-		{stmt: "SELECT side, FLOOR(UNIX_TIMESTAMP(dt) / 86400) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "live", why: "FLOOR of a quotient outside FROM_UNIXTIME: a BIGINT on MySQL, a DOUBLE on the copy"},
+		{stmt: "SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "copy", noScale: true, why: "the #2493 bucket"},
+		{stmt: "SELECT side, FLOOR(UNIX_TIMESTAMP(dt) / 86400) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "live", why: "FLOOR of a quotient outside FROM_UNIXTIME: a DECIMAL on MySQL, a DOUBLE on the copy"},
 	}
 	asText := func(dsn string) string { return strings.Replace(dsn, "parseTime=true", "parseTime=false", 1) }
 	routedText := openRaw(t, asText(withZone(portDSN, "+00:00")))
@@ -222,7 +230,10 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		if c.who == "?" {
 			continue
 		}
-		if strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, "("+c.who+",") {
+		if c.noScale {
+			got, want = scaleless.ReplaceAllString(got, ""), scaleless.ReplaceAllString(want, "")
+		}
+		if strings.HasPrefix(got, "ERROR ") || (c.who != "" && !strings.Contains(got, "("+c.who+",")) {
 			t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", c.stmt, c.why, got, c.who)
 			continue
 		}

@@ -185,7 +185,8 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// ask (part 2 does).
 	for stmt, veto := range map[string]string{
 		bitOr: "bit operator", yearTwo: "two-digit year", castFrac: "CAST to DATETIME or TIME",
-		plus: "", minus: "", avg: "", alias: "", renamed: "", timeStar: "", timeText: "", interval: "",
+		avg: "AVG or MEDIAN", // #2806, before the columns are asked
+		plus: "", minus: "", alias: "", renamed: "", timeStar: "", timeText: "", interval: "",
 		// Kept on MySQL for its NULLs since #2633.
 		concat: "CONCAT/LEAST/GREATEST",
 	} {
@@ -289,7 +290,8 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	if reasons["copy_columns_differ"] != 16 || reasons["veto"] != 2 || reasons["expensive_plan"] != 5 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 16, veto 2, expensive_plan 5, copy_refused 0, explain_failed 0", reasons)
+	// The two AVG statements are vetoed from the text since #2806.
+	if reasons["copy_columns_differ"] != 14 || reasons["veto"] != 4 || reasons["expensive_plan"] != 5 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 14, veto 4, expensive_plan 5, copy_refused 0, explain_failed 0", reasons)
 	}
 }

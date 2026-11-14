@@ -335,7 +335,7 @@ func backtickFixtures(db string, dollarNames bool) []backtickFixture {
 		named("SELECT MAX(`orders`.`amount`) AS `amount__max`, MIN(`orders`.`amount`) AS `amount__min`, SUM(`order_items`.`quantity`) AS `q` FROM `orders` LEFT OUTER JOIN `order_items` ON (`orders`.`id` = `order_items`.`order_id`)", "aggregate()"),
 		same("SELECT DISTINCT `orders`.`status` FROM `orders` ORDER BY `orders`.`status` ASC", "distinct()"),
 		same("SELECT `orders`.`id` FROM `orders` WHERE (`orders`.`created_on` >= '2026-01-02' AND `orders`.`created_on` < '2026-01-05' AND NOT (`orders`.`status` = 'void')) ORDER BY `orders`.`created_on` ASC, `orders`.`id` ASC", "a date range with exclude()"),
-		{stmt: "SELECT AVG(`orders`.`amount`) AS `amount__avg` FROM `orders`", verdict: diff, kind: "precision", names: true, why: "AVG is a DECIMAL with four more decimals on MySQL and a DOUBLE on the copy (#2083), backticks or not"},
+		{stmt: "SELECT AVG(`orders`.`amount`) AS `amount__avg` FROM `orders`", verdict: diff, kind: "precision", names: true, veto: "AVG or MEDIAN", why: "AVG is a DECIMAL with four more decimals on MySQL and a DOUBLE on the copy (#2083), backticks or not; kept on MySQL under routing since #2806"},
 		// What the copy refuses with the names out of the way (#2114): kept on
 		// MySQL from the text, so the failed attempt on the copy is not paid.
 		kept("SELECT `orders`.`status`, COUNT(`orders`.`id`) AS `n` FROM `orders` GROUP BY `orders`.`status` ORDER BY NULL", noc, "ORDER BY NULL", "what Django sends after GROUP BY: a binder error on the copy"),

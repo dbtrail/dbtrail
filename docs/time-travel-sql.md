@@ -721,7 +721,8 @@ The decision, in order, for every statement:
      divided by numbers of up to seven digits
      (`FLOOR(UNIX_TIMESTAMP(created_at) / 3600) * 3600`). The same `FLOOR`
      outside `FROM_UNIXTIME` (`GROUP BY FLOOR(UNIX_TIMESTAMP(ts) / 86400)`)
-     stays on MySQL: there it is a `BIGINT` and the copy's a `DOUBLE` (#2806).
+     stays on MySQL: there MySQL's is a `DECIMAL` with no fraction and the
+     copy's a `DOUBLE` (#2806).
      A column inside
      that division stays on MySQL: MySQL divides exactly, the copy as a
      floating-point number, which rounds past 2^53 (a column of

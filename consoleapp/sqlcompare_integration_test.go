@@ -81,7 +81,7 @@ SELECT status FROM orders ORDER BY status, id;
 SELECT id FROM orders WHERE status LIKE 'L%';
 -- utf8mb4_0900_ai_ci equates ß and ss; the copy's collation (nocase, #2532) does not: DIFFERENT
 SELECT id FROM orders WHERE status = 'strasse';
--- AVG is a DECIMAL with four more decimals on MySQL and a DOUBLE on the copy: a copy-routed DIFFERENT
+-- AVG is a DECIMAL with four more decimals on MySQL and a DOUBLE on the copy: a DIFFERENT the router keeps on MySQL (#2806)
 SELECT AVG(id) FROM orders WHERE status <> 'x';
 -- MySQL syntax the copy lacks
 SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s;
@@ -126,7 +126,7 @@ SELECT * FROM nope;
 		"SELECT `status`, count(*) FROM `orders` GROUP BY `status`":                           {sqlcompare.Equal, "", "copy"},
 		"SELECT id FROM orders WHERE status LIKE 'L%'":                                        {sqlcompare.Different, "rows", "mysql"},
 		"SELECT id FROM orders WHERE status = 'strasse'":                                      {sqlcompare.Different, "rows", "copy"},
-		"SELECT AVG(id) FROM orders WHERE status <> 'x'":                                      {sqlcompare.Different, "precision", "copy"},
+		"SELECT AVG(id) FROM orders WHERE status <> 'x'":                                      {sqlcompare.Different, "precision", "mysql"},
 		"SELECT CONVERT(status USING utf8mb4) s, count(*) FROM orders GROUP BY s":             {sqlcompare.NotOnCopy, "", "copy"},
 		"WITH c AS (SELECT id FROM orders) DELETE FROM orders WHERE id IN (SELECT id FROM c)": {sqlcompare.Skipped, "not_read_only", "mysql"},
 		"UPDATE orders SET status = 'x'":                                                      {sqlcompare.Skipped, "not_a_select", "mysql"},
@@ -148,8 +148,8 @@ SELECT * FROM nope;
 	if r := by["SELECT id, CURRENT_TIMESTAMP FROM orders ORDER BY id"]; r.Route != "mysql" || !strings.Contains(r.RouteReason, "veto: NOW") || (r.Verdict != sqlcompare.Different && r.Verdict != sqlcompare.Inconclusive) {
 		t.Errorf("CURRENT_TIMESTAMP: got %s route=%s (%s), want DIFFERENT or INCONCLUSIVE, vetoed", r.Verdict, r.Route, r.RouteReason)
 	}
-	if rep.CopyDiffers != 2 || rep.CopyOrderDiffers != 0 || !rep.Failed() {
-		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 2 and 0: the case difference is gone (the copy folds case), ß/ss is the documented accent difference of the nocase collation (#2532), LIKE and CURRENT_TIMESTAMP are vetoed, and the AVG one is the documented remainder the harness must still catch", rep.CopyDiffers, rep.CopyOrderDiffers)
+	if rep.CopyDiffers != 1 || rep.CopyOrderDiffers != 0 || !rep.Failed() {
+		t.Errorf("CopyDiffers = %d, CopyOrderDiffers = %d, want 1 and 0: the case difference is gone (the copy folds case), ß/ss is the documented accent difference of the nocase collation (#2532) and the remainder the harness must still catch, LIKE and CURRENT_TIMESTAMP are vetoed, and so is AVG since #2806 (still DIFFERENT, on a statement the router keeps on MySQL)", rep.CopyDiffers, rep.CopyOrderDiffers)
 	}
 	// The rule travels beside the reason, so a JSON consumer never parses
 	// prose: a veto, a failed EXPLAIN and the plan's own rule each name
