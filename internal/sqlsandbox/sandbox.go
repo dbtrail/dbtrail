@@ -351,6 +351,12 @@ type Session struct {
 // DateFunctionVeto is about DATE_FORMAT and DATEDIFF under routing (#2611):
 // dates are the DATE, DATETIME and TIMESTAMP columns, notDates the rest, and
 // the answer is why a call's date must not be read by the copy, or "".
+//
+// DateSubVeto is about DATE_SUB and SUBDATE under routing (#2611): dates are
+// the DATE columns, times the DATETIME and TIMESTAMP columns without
+// fractional seconds (a TIMESTAMP left out under a zone with clock changes),
+// other the rest, and the answer is why a call must not be answered by the
+// copy, or "".
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
 	NameVeto(names []string) string
@@ -360,6 +366,7 @@ type ColumnTypes interface {
 	DateComparedColumns() []string
 	RoundVeto(safe, other []string) string
 	DateFunctionVeto(dates, notDates []string) string
+	DateSubVeto(dates, times, other []string) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,
