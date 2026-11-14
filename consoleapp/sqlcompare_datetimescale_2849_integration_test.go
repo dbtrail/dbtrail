@@ -149,12 +149,13 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 		"SELECT side, ts6, ts FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, e.dt3 AS x, E.DT, ev2.ts6 FROM ev e JOIN ew ev2 ON ev2.id = e.id WHERE e.k > 0 ORDER BY e.k",
 		"SELECT MIN(side), MIN(dt), MAX(dt3), MAX(ts6), MIN(ts), MAX(d) FROM ev",
-		"SELECT * FROM ew WHERE k > 0 ORDER BY k",
 		"SELECT side, COALESCE(dt, dt3), CASE WHEN k > 1700000000 THEN dt ELSE dt3 END FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, dt3 FROM ev WHERE k IS NULL",
 	} {
 		same(plain, "without routing", stmt, "copy", false)
 	}
+	// A star: the id comes first, the side second.
+	same(plain, "without routing", "SELECT side, ew.* FROM ew WHERE k > 0 ORDER BY k", "copy", false)
 	same(plain, "without routing", "SELECT side, NOW() FROM ev WHERE k > 0 ORDER BY k", "copy", true)
 	same(plain, "without routing", "SELECT side, dt3, ts6 FROM ev WHERE k > ? ORDER BY k", "copy", false, 0)
 	// What the copy cannot tell the digits of, without routing: as before,
@@ -175,7 +176,8 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 		// The issue's statement.
 		"SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, DATE_ADD(dt, INTERVAL 1 HOUR), dt3 + INTERVAL 1 DAY, d + INTERVAL 1 HOUR FROM ev WHERE k > 0 ORDER BY k",
-		"SELECT side, dt + INTERVAL 1 MICROSECOND, DATE_SUB(dt3, INTERVAL '2' WEEK) FROM ev WHERE k > 0 ORDER BY k",
+		"SELECT side, dt + INTERVAL 1 MICROSECOND FROM ev WHERE k > 0 ORDER BY k",
+		"SELECT side, DATE_SUB(dt, INTERVAL '2' WEEK), DATE_SUB(ts, INTERVAL 1 QUARTER) FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, COALESCE(dt, dt3), CASE WHEN k > 1700000000 THEN dt ELSE dt3 END FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, MAX(dt3) OVER (ORDER BY k) FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, dt FROM ev WHERE k > 0 UNION ALL SELECT side, dt3 FROM ev WHERE k > 0 ORDER BY 2",

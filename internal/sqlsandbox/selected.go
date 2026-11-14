@@ -324,7 +324,7 @@ func (w selectedWalk) function(v map[string]any, it *SelectedItem) {
 			it.Digits = max(it.Digits, 6)
 		case "to_milliseconds":
 			it.Digits = max(it.Digits, 3)
-		case "to_days", "to_weeks", "to_months", "to_years":
+		case "to_days", "to_weeks", "to_months", "to_quarters", "to_years":
 			it.DayStep = true
 		}
 		w.value(date, it)
@@ -396,7 +396,7 @@ func intervalUnit(n any) string {
 	}
 	name, _ := v["function_name"].(string)
 	switch name {
-	case "to_microseconds", "to_milliseconds", "to_seconds", "to_minutes", "to_hours", "to_days", "to_weeks", "to_months", "to_years":
+	case "to_microseconds", "to_milliseconds", "to_seconds", "to_minutes", "to_hours", "to_days", "to_weeks", "to_months", "to_quarters", "to_years":
 	default:
 		return ""
 	}

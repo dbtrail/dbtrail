@@ -36,10 +36,12 @@ func TestCollectSelected(t *testing.T) {
 		// Date steps: the date's own digits, 6 for microseconds, and a day
 		// or more said apart (a DATE stays a DATE on MySQL).
 		{"SELECT _bintrail_date_add(dt3, INTERVAL 1 DAY), dt + INTERVAL 1 MICROSECOND, INTERVAL 2 HOUR + d, " +
-			"_bintrail_date_sub(ts, INTERVAL '2' WEEK), dt - INTERVAL 90 MINUTE, date_add(dt, INTERVAL 1 SECOND) FROM ev", []SelectedItem{
+			"_bintrail_date_sub(ts, INTERVAL '2' WEEK), dt - INTERVAL 90 MINUTE, date_add(dt, INTERVAL 1 SECOND), " +
+			"_bintrail_date_sub(ts, INTERVAL 1 QUARTER), _bintrail_date_sub(dt, INTERVAL '-1' MONTH) FROM ev", []SelectedItem{
 			{Columns: cols(col("dt3", ev)), DayStep: true}, {Columns: cols(col("dt", ev)), Digits: 6},
 			{Columns: cols(col("d", ev))}, {Columns: cols(col("ts", ev)), DayStep: true},
-			{Columns: cols(col("dt", ev))}, {Columns: cols(col("dt", ev))}}},
+			{Columns: cols(col("dt", ev))}, {Columns: cols(col("dt", ev))},
+			{Columns: cols(col("ts", ev)), DayStep: true}, {Columns: cols(col("dt", ev)), DayStep: true}}},
 		// A step by a column, a number added to a date, DuckDB's date_sub
 		// (a count of units): not read.
 		{"SELECT dt + INTERVAL (k) DAY, dt + k, date_sub('day', dt, dt3), k + 1 FROM ev", []SelectedItem{unread, unread, unread, unread}},
