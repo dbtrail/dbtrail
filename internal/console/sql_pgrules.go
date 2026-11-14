@@ -46,3 +46,23 @@ func flavorIsPostgres(flavor string) bool {
 	f, err := NormalizeFlavor(flavor)
 	return err == nil && f == FlavorPostgres
 }
+
+// SourceIsPostgres says whether the source of the server with this id is
+// PostgreSQL, the way sqlCopySession decides it (sourceIsPostgres): from the
+// registry entry, or for the server given on the command line from what its
+// index said when the console started. A port that serves one family asks it
+// before it binds a connection to the server.
+func (s *Server) SourceIsPostgres(id string) bool {
+	if s == nil || s.cm == nil {
+		return false
+	}
+	boot := false
+	if b, _ := s.cm.bootInfo(); b != nil {
+		boot = b.pgSource
+	}
+	var get func(string) (ServerEntry, bool)
+	if s.cm.reg != nil {
+		get = s.cm.reg.Get
+	}
+	return sourceIsPostgres(id, boot, get)
+}

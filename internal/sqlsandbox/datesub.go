@@ -24,9 +24,29 @@ package sqlsandbox
 // DATE stepped by a day or more is a DATE on MySQL and a date and time here,
 // and is kept on MySQL. Installed with nowMacros, for a client that writes
 // MySQL (Session.MySQLClock); TEMP, as they are.
-const dateSubMacro = `CREATE OR REPLACE TEMP MACRO _bintrail_date_sub(x, i) AS (
+var dateSubMacro = dateStepMacro("_bintrail_date_sub", "x - i", "DATE_SUB")
+
+// dateAddMacro is the other direction (#2800): x plus the interval, the
+// routing port's spelling of DATE_ADD and ADDDATE with an INTERVAL, and of
+// x + INTERVAL n unit (readrouter.CopyOptions.MySQLDateAdd, which writes
+// x - INTERVAL n unit as dateSubMacro). Past the year 9999 MySQL answers
+// NULL and the copy a year of five digits, which reaches a client as a value
+// MySQL never sends, or keeps a row MySQL's NULL leaves out of a WHERE or a
+// COUNT. x + i is what the copy computed for each spelling before: its own
+// date_add(x, i) is the same value of the same type, over a DATE, a TIMESTAMP
+// and a TIMESTAMP WITH TIME ZONE, under UTC and a fixed offset (measured on
+// DuckDB 1.5.6). Installed with dateSubMacro.
+var dateAddMacro = dateStepMacro("_bintrail_date_add", "x + i", "DATE_ADD")
+
+// dateStepMacro is the macro name(x, i) that is step, x stepped by the
+// interval i, and errors with the declined-value mark where that is outside
+// the years 1 to 9999 on the session's wall clock (see dateSubMacro for why
+// the cast and not year()). what names the step in the error.
+func dateStepMacro(name, step, what string) string {
+	return `CREATE OR REPLACE TEMP MACRO ` + name + `(x, i) AS (
   CASE
-    WHEN CAST(x - i AS TIMESTAMP) NOT BETWEEN TIMESTAMP '0001-01-01 00:00:00' AND TIMESTAMP '9999-12-31 23:59:59.999999' THEN error('DATE_SUB to a time before the year 1 or after the year 9999 (NULL or a zero date on MySQL) is not answered by the copy')
-    ELSE x - i
+    WHEN CAST(` + step + ` AS TIMESTAMP) NOT BETWEEN TIMESTAMP '0001-01-01 00:00:00' AND TIMESTAMP '9999-12-31 23:59:59.999999' THEN error('` + what + ` to a time before the year 1 or after the year 9999 (NULL or a zero date on MySQL) ` + valueDeclinedMark + `')
+    ELSE ` + step + `
   END
 );`
+}

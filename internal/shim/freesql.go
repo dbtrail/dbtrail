@@ -413,8 +413,10 @@ func (h *Handler) copyOpts() readrouter.CopyOptions {
 	// (readrouter.DateFunctionVeto). MySQLDateSub: DATE_SUB and SUBDATE with
 	// an INTERVAL as the copy's macro, defined under the same
 	// Session.MySQLClock; the console keeps on MySQL a call the copy would
-	// answer another way (readrouter.DateSubVeto).
-	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true}
+	// answer another way (readrouter.DateSubVeto). MySQLDateAdd: DATE_ADD,
+	// ADDDATE and d + or - INTERVAL inside the copy's macros, which refuse a
+	// result outside the years 1 to 9999, where MySQL answers NULL (#2800).
+	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true}
 }
 
 // Close releases what a connection holds: the router's upstream connection,
