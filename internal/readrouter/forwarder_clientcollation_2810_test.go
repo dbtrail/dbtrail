@@ -445,3 +445,22 @@ func TestForwarder_readOnlyChecksTheClientCharset_2810(t *testing.T) {
 		})
 	}
 }
+
+// #2810: MariaDB's own reset keeps the handshake's character sets (measured
+// on 10.11 and 11.4), so on a source that greets as MariaDB the connection
+// after a reset takes the client's collation again, not the global ones.
+func TestForwarder_resetOnMariaDBKeepsTheClientCollation_2810(t *testing.T) {
+	var src *clientCollationSource
+	f, _ := newWrappedCollationForwarder(t, "11.4.13-MariaDB", "utf8mb4_uca1400_ai_ci", func(inner *collationSource) server.Handler {
+		src = &clientCollationSource{collationSource: inner, names: map[uint16][2]string{8: {"latin1", "latin1_swedish_ci"}}}
+		return src
+	})
+	f.GlobalSession, f.ClientCollation = true, 8
+	if _, err := f.Forward(context.Background(), "DO 1", &BufferSink{}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{clientCollationAsk(8), "SET NAMES latin1 COLLATE latin1_swedish_ci", "DO 1"}
+	if got := src.statements(); !reflect.DeepEqual(got, want) {
+		t.Errorf("the source saw %q, want %q", got, want)
+	}
+}

@@ -1043,9 +1043,11 @@ The decision, in order, for every statement:
    source has no collation for, or a `SET NAMES` it refuses, leaves the
    session under `utf8mb4_0900_ai_ci`, and the log says so once per
    connection. A `COM_CHANGE_USER` gives the session the collation it
-   carries, and a `COM_RESET_CONNECTION` the server's global character sets
-   and collation, as MySQL does (measured on MySQL 8.0.46: a session opened
-   under `latin1` is under `utf8mb4_0900_ai_ci` after a reset).
+   carries. After a `COM_RESET_CONNECTION` the session is what the source's
+   own reset leaves: on MySQL the server's global character sets and
+   collation (measured on 8.0.46: a session opened under `latin1` is under
+   `utf8mb4_0900_ai_ci` after a reset), on MariaDB the handshake's (10.11
+   and 11.4 keep `latin1`).
 
    Whether the copy answers is the table above: only under a collation that
    compares like `utf8mb4_0900_ai_ci` and with results in `utf8mb4`. That

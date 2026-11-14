@@ -263,8 +263,10 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	}()
 	t.Cleanup(func() { roCancel(); <-roServed })
 	ro := openRaw(t, withCollation(fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, roLn.Addr().String(), srcName), "gbk_chinese_ci"))
-	if got := answerText(ro, session); !strings.HasPrefix(got, "utf8mb4_0900_ai_ci|utf8mb4|") {
-		t.Errorf("a gbk client on a read-only port: the session is %s, want utf8mb4_0900_ai_ci and utf8mb4", got)
+	// The port's login's own: utf8mb4_0900_ai_ci on MySQL, MariaDB's
+	// fallback for utf8mb4 there.
+	if got := answerText(ro, session); strings.Contains(got, "gbk") || !strings.Contains(got, "|utf8mb4|utf8mb4|utf8mb4") {
+		t.Errorf("a gbk client on a read-only port: the session is %s, want utf8mb4", got)
 	}
 	hidden := "SELECT '\xbf\\' , @@character_set_client -- '"
 	got := answerText(ro, hidden)

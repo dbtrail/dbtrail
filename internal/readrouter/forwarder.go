@@ -93,9 +93,10 @@ type Forwarder struct {
 	// keeps the port's choice (settleCollation).
 	ClientCollation uint16
 	// GlobalSession: the connection replaces one the client reset
-	// (COM_RESET_CONNECTION), which on the source sets the session's
-	// character sets and collation to the server's global values. It wins
-	// over ClientCollation.
+	// (COM_RESET_CONNECTION), which on MySQL sets the session's character
+	// sets and collation to the server's global values; it wins over
+	// ClientCollation there. MariaDB's reset keeps the handshake's, so on a
+	// source that greets as MariaDB ClientCollation stands.
 	GlobalSession bool
 	// SafeCharsetsOnly: the port is read-only, and its screen
 	// (ReadOnlyRefusal) reads a statement's bytes as the source does only
@@ -351,7 +352,10 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 		// Part of opening the connection: one that breaks here did not open.
 		settle := f.settleCollation
 		switch {
-		case f.GlobalSession:
+		case f.GlobalSession && !strings.Contains(strings.ToLower(c.GetServerVersion()), "mariadb"):
+			// MariaDB's reset keeps the handshake's character sets
+			// (measured on 10.11 and 11.4): there the client's collation
+			// stands, below.
 			settle = f.globalCollation
 		case f.ClientCollation != 0:
 			settle = f.clientCollation
@@ -542,9 +546,10 @@ func unsafeCharset(cs string) error {
 
 // globalCollation gives a connection that replaces one the client reset
 // (GlobalSession) the character sets and the collation of the source's
-// global values, which is where COM_RESET_CONNECTION leaves them on the
-// source (measured on MySQL 8.0.46: a session opened under latin1 is under
-// utf8mb4_0900_ai_ci after the reset). The values are read, checked as
+// global values, which is where COM_RESET_CONNECTION leaves them on MySQL
+// (measured on MySQL 8.0.46: a session opened under latin1 is under
+// utf8mb4_0900_ai_ci after the reset; MariaDB 10.11 and 11.4 keep latin1,
+// and open never calls this for them). The values are read, checked as
 // clientCollation checks its names, and set; what cannot be set leaves the
 // session as the source gave it, and OnCollation is told.
 func (f *Forwarder) globalCollation(ctx context.Context, c *client.Conn) error {
