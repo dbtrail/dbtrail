@@ -373,6 +373,11 @@ type Session struct {
 // FloatVeto is about FLOAT columns under routing (#2827): floats are the
 // FLOAT columns, star says the statement holds a star (Refs), and the answer
 // is why the copy must not answer a statement that reads one, or "".
+//
+// UnsignedVeto is about arithmetic on UNSIGNED whole numbers under routing
+// (#2848): unsigned are the UNSIGNED TINYINT to BIGINT columns, star says the
+// statement holds a star (Refs), and the answer is why the copy must not
+// answer a statement that does arithmetic on one, or "".
 type ColumnTypes interface {
 	ColumnVeto(dates, whole []string, star bool) string
 	NameVeto(names []string) string
@@ -385,6 +390,7 @@ type ColumnTypes interface {
 	DateSubVeto(dates, times, other []string) string
 	TimestampDiffVeto(dates, other []string) string
 	FloatVeto(floats []string, star bool) string
+	UnsignedVeto(unsigned []string, star bool) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,

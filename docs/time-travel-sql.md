@@ -1619,6 +1619,23 @@ What this is and is not:
   MySQL and `-Infinity` on the copy; a statement over the same table that
   does not name the column still goes to the copy, and a `DOUBLE` column
   is the same type on both),
+  arithmetic on an `UNSIGNED` whole-number column (`TINYINT` to `BIGINT
+  UNSIGNED`) or on `ROW_NUMBER`, `RANK`, `DENSE_RANK` or `NTILE`: one of
+  them, or a group or call that holds it, next to `+`, `-`, `*`, `/`, `%`,
+  `MOD` or `DIV`, or anywhere in a statement with a subquery or a `WITH`,
+  or in its `GROUP BY`, `HAVING` or `ORDER BY`, where an alias can stand
+  for it (#2848). MySQL computes such arithmetic as a `BIGINT UNSIGNED` and
+  refuses a negative result with error 1690, unless `sql_mode` has
+  `NO_UNSIGNED_SUBTRACTION`; the copy holds `TINYINT` to `INT UNSIGNED` as
+  signed numbers, so `b - u` over a `BIGINT` and a `BIGINT UNSIGNED` is a
+  `DECIMAL` there, `ui - 4` over an `INT UNSIGNED` holding 3 is `-1` where
+  MySQL refuses it, `-u` comes back as `18446744073709551613` where MySQL
+  answers `-3`, and `ROW_NUMBER() OVER (...) - 10` is `-9` where MySQL
+  refuses it. Comparisons stay on the copy (`u > -1`, `u BETWEEN -5 AND
+  5`), and so do `SUM(ui) - 1`, `COUNT(ui) - 1` and arithmetic on an
+  `UNSIGNED` `DECIMAL` or `DOUBLE`, which were measured equal. Read without
+  arithmetic, an `INT UNSIGNED` column or a `ROW_NUMBER` has MySQL's value
+  and is declared a signed `BIGINT` ([#2856](https://github.com/dbtrail/dbtrail/issues/2856)),
   any statement that names a `FLOAT` or `DOUBLE` column declared with its
   digits (`DOUBLE(10,2)`, `FLOAT(7,2)`) or with `ZEROFILL`, or that may
   print every column of its table without naming one (a star other than

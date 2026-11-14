@@ -80,6 +80,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 		in.Baselines[i].ZeroDate = f.ZeroDate
 		in.Baselines[i].Float = f.Float
 		in.Baselines[i].FixedPrint = f.FixedPrint
+		in.Baselines[i].Unsigned = f.Unsigned
 		in.Baselines[i].SchemaKnown = true
 	}
 }

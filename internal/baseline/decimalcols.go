@@ -94,6 +94,11 @@ type TableFooter struct {
 	// answer: sent to the source under read routing, refused on the port
 	// without it.
 	FixedPrint []string
+	// Unsigned are the table's UNSIGNED whole-number columns (TINYINT,
+	// SMALLINT, MEDIUMINT, INT and BIGINT; UnsignedWholeColumns, #2848).
+	// Read routing keeps a statement that does arithmetic on one on the
+	// source.
+	Unsigned []string
 	// PG is set for a snapshot file of a PostgreSQL source and nothing else
 	// above is, but Columns: the file carries no CREATE TABLE, it records
 	// the table's shape (MetaKeyPGRelation), and PG says how each column's
@@ -141,6 +146,33 @@ func FloatColumns(cols []Column) []string {
 	var out []string
 	for _, c := range cols {
 		if c.MySQLType == "float" {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+// UnsignedWholeColumns picks the UNSIGNED whole-number columns out of a
+// parsed schema (#2848): TINYINT, SMALLINT, MEDIUMINT, INT and BIGINT with
+// the UNSIGNED attribute (or ZEROFILL, which implies it), a value kept
+// verbatim as text included. MySQL
+// computes +, -, * and % with one of them as a BIGINT UNSIGNED and refuses a
+// negative result (error 1690, unless NO_UNSIGNED_SUBTRACTION); the copy
+// holds TINYINT to INT UNSIGNED as signed integers and BIGINT UNSIGNED as a
+// UBIGINT, so it answers another type and, for a negative result, a number.
+// An UNSIGNED DECIMAL or DOUBLE is not listed: measured on MySQL 8.0.46, its
+// arithmetic has the same type and value on both sides, a negative result
+// included. A FLOAT is kept back on its own (FloatColumns).
+func UnsignedWholeColumns(cols []Column) []string {
+	var out []string
+	for _, c := range cols {
+		// ZEROFILL implies UNSIGNED on MySQL, which prints both; a schema
+		// written by hand may carry the one word alone.
+		if !c.Unsigned && !strings.Contains(strings.ToLower(c.DeclaredType), "zerofill") {
+			continue
+		}
+		switch c.MySQLType {
+		case "tinyint", "smallint", "mediumint", "int", "integer", "bigint":
 			out = append(out, c.Name)
 		}
 	}
@@ -587,6 +619,7 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		f.ZeroDate = ZeroDateColumns(cols)
 		f.Float = FloatColumns(cols)
 		f.FixedPrint = FixedPrintColumns(cols)
+		f.Unsigned = UnsignedWholeColumns(cols)
 		st.footers[file] = f
 	}
 	if err := rows.Err(); err != nil {

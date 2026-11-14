@@ -216,8 +216,8 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT side, -9223372036854775808 FROM ev ORDER BY k", who: "live", why: "the smallest BIGINT, written"},
 		{stmt: "SELECT side, 9223372036854775807 FROM ev ORDER BY k", who: "copy", why: "the largest BIGINT, written"},
 		{stmt: "SELECT side, k DIV 2 FROM ev ORDER BY k", who: "live", why: "DIV"},
-		{stmt: "SELECT side, ui + k, -ui, u - 1 FROM ev WHERE k > 0 ORDER BY k", who: "?", why: "unsigned arithmetic: #2848"},
-		{stmt: "SELECT side, b - u FROM ev WHERE k > 2 ORDER BY k", who: "?", why: "signed minus unsigned: #2848"},
+		{stmt: "SELECT side, ui + k, -ui, u - 1 FROM ev WHERE k > 0 ORDER BY k", who: "", why: "unsigned arithmetic, kept on MySQL since #2848: u - 1 over a 0 is MySQL's error 1690, sent as it is"},
+		{stmt: "SELECT side, b - u FROM ev WHERE k > 2 ORDER BY k", who: "live", why: "signed minus unsigned, kept on MySQL since #2848"},
 		{stmt: "SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "copy", textOnly: true, why: "the #2493 bucket"},
 		{stmt: "SELECT side, FLOOR(UNIX_TIMESTAMP(dt) / 86400) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "live", why: "FLOOR of a quotient outside FROM_UNIXTIME: a DECIMAL on MySQL, a DOUBLE on the copy"},
 	}

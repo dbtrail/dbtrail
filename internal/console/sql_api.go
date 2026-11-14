@@ -1640,6 +1640,8 @@ func sqlStarRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs) string {
 //   - an aggregate over DISTINCT text (sqlDistinctRefusalFor, #2532), or a
 //     ROUND of something not known to be exact (sqlRoundRefusalFor, #2641);
 //   - a FLOAT column is read at all (sqlFloatRefusalFor, #2827);
+//   - an UNSIGNED whole-number column is in arithmetic
+//     (sqlUnsignedRefusalFor, #2848);
 //   - a column's name stands right before a string, which the copy reads
 //     as a constant of a type called that (sqlWordsRefusalFor, #2131).
 //
@@ -1665,6 +1667,9 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 		return msg
 	}
 	if msg := sqlFloatRefusalFor(narrowed, refs, types); msg != "" {
+		return msg
+	}
+	if msg := sqlUnsignedRefusalFor(narrowed, refs, types); msg != "" {
 		return msg
 	}
 	if msg := sqlBinaryILikeRefusalFor(narrowed, statement, types); msg != "" {
@@ -1799,6 +1804,41 @@ func sqlFloatRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsan
 		return ""
 	}
 	return fmt.Sprintf("the copy does not answer this statement: it reads a FLOAT column of %s (%s)", strings.Join(tables, ", "), why)
+}
+
+// sqlUnsignedRefusalFor says why the copy must not answer a statement because
+// it does arithmetic on an UNSIGNED whole-number column, or "" when it can
+// (#2848). MySQL computes b - u over a BIGINT and a BIGINT UNSIGNED as a
+// BIGINT UNSIGNED and refuses a negative result with error 1690; the copy
+// answers a 128-bit integer, and ui - 4 over an INT UNSIGNED holding 3 is -1
+// there. The rule is the routing layer's (readrouter.UnsignedVeto, asked
+// through types), over every table's UNSIGNED TINYINT to BIGINT columns from
+// its snapshot's table definition; a table without one never gets here
+// (sqlNamesRefusalFor refuses it first). With no reading of the statement
+// (types is nil), a statement over a table with such a column is refused:
+// not known is never "nothing to find".
+func sqlUnsignedRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsandbox.ColumnTypes) string {
+	var unsigned, tables []string
+	for _, t := range narrowed.SelectedBaselines() {
+		if len(t.Unsigned) == 0 {
+			continue
+		}
+		unsigned = append(unsigned, t.Unsigned...)
+		if len(tables) < 3 {
+			tables = append(tables, t.Schema+"."+t.Table)
+		}
+	}
+	if len(unsigned) == 0 {
+		return ""
+	}
+	why := "the statement could not be searched for arithmetic on its UNSIGNED columns"
+	if types != nil {
+		why = types.UnsignedVeto(unsigned, refs.Star || refs.StarNamedJoin || len(refs.StarTables) > 0)
+	}
+	if why == "" {
+		return ""
+	}
+	return fmt.Sprintf("the copy does not answer this statement: it may do arithmetic on an UNSIGNED whole-number column of %s (%s)", strings.Join(tables, ", "), why)
 }
 
 // sqlFixedPrintRefusalFor says why the copy must not answer a routed
