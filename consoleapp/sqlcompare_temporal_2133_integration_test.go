@@ -185,7 +185,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	// ask (part 2 does).
 	for stmt, veto := range map[string]string{
 		bitOr: "bit operator", yearTwo: "two-digit year", castFrac: "CAST to DATETIME or TIME",
-		avg: "AVG or MEDIAN", // #2806, before the columns are asked
+		avg:  "AVG or MEDIAN", // #2806, before the columns are asked
 		plus: "", minus: "", alias: "", renamed: "", timeStar: "", timeText: "", interval: "",
 		// Kept on MySQL for its NULLs since #2633.
 		concat: "CONCAT/LEAST/GREATEST",

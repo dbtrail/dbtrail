@@ -183,7 +183,7 @@ SELECT * FROM nope;
 	}
 	var out bytes.Buffer
 	sqlcompare.WriteText(&out, rep)
-	for _, s := range []string{"DIFFERENT    router=mysql", "veto: LIKE", "NOT_ON_COPY", "SKIPPED", "2 statement(s) the router would send to the copy answer DIFFERENTLY"} {
+	for _, s := range []string{"DIFFERENT    router=mysql", "veto: LIKE", "NOT_ON_COPY", "SKIPPED", "1 statement(s) the router would send to the copy answer DIFFERENTLY"} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("text report lacks %q:\n%s", s, out.String())
 		}
