@@ -147,7 +147,7 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 		"SELECT side, dt FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, dt3 FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, ts6, ts FROM ev WHERE k > 0 ORDER BY k",
-		"SELECT e.side, e.dt3 AS x, E.DT, ev2.ts6 FROM ev e JOIN ew ev2 ON ev2.id = e.id WHERE e.k > 0 ORDER BY e.k",
+		"SELECT e.side, e.dt3 AS x, e.DT, ev2.ts6 FROM ev e JOIN ew ev2 ON ev2.id = e.id WHERE e.k > 0 ORDER BY e.k",
 		"SELECT MIN(side), MIN(dt), MAX(dt3), MAX(ts6), MIN(ts), MAX(d) FROM ev",
 		"SELECT side, COALESCE(dt, dt3), CASE WHEN k > 1700000000 THEN dt ELSE dt3 END FROM ev WHERE k > 0 ORDER BY k",
 		"SELECT side, dt3 FROM ev WHERE k IS NULL",
