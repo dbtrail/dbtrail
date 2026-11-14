@@ -828,9 +828,11 @@ jobs:
       # (not silently skip) if the DSN is missing — guards against green-via-skip.
       # The 8.0/8.4 matrix and console-e2e leave it unset, so PG tests skip there.
       BINTRAIL_REQUIRE_POSTGRES: "1"
-      # Data-path PRs only (plus push/nightly/dispatch); step-level because
-      # of the matrix — see the note on the `changes` job.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
+      # Data-path PRs (plus push/nightly/dispatch), and console PRs too
+      # (#2813): this is the only job with a MySQL index AND a PostgreSQL
+      # source, and the console's tests that need both run here or nowhere.
+      # Step-level because of the matrix — see the note on the `changes` job.
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || needs.changes.outputs.console == 'true' }}
 
     steps:
       # Step-level (not job-level) `if:` — see the note on the `integration`
@@ -929,6 +931,25 @@ jobs:
             || { echo "FATAL: pgwire PostgreSQL-source E2E did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '--- PASS: TestIntegrationPGCompare' /tmp/pg-it.out \
             || { echo "FATAL: the PostgreSQL source-against-copy comparison did not run — false-green tripwire" >&2; exit 1; }
+
+      # The console's tests that need a MySQL index and a PostgreSQL source at
+      # once (#2813). In the MySQL shards they skip for want of a PostgreSQL,
+      # so this is where they run; selected by name, since the rest of
+      # consoleapp's integration tests have their own shards. On one
+      # PostgreSQL version: what they exercise is the console and the wire,
+      # and the snapshot under them is tested on every version above. The
+      # tripwire is the point: a renamed test, or a pattern that stops
+      # matching, would otherwise leave this step green with nothing run.
+      - name: Console tests that need MySQL and PostgreSQL together
+        if: env.RUN == 'true' && matrix.postgres == '16'
+        run: |
+          set -o pipefail
+          sudo apt-get install -y --no-install-recommends postgresql-client >/dev/null 2>&1 \
+            || echo "psql could not be installed; the test reads the wire with its own client and skips the psql part"
+          go test -tags=integration -race -p 1 -count=1 -v \
+            -run '^TestIntegrationPGRouter$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
+          grep -q -- '--- PASS: TestIntegrationPGRouter' /tmp/pg-console-it.out \
+            || { echo "FATAL: the PostgreSQL router end-to-end test did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography
