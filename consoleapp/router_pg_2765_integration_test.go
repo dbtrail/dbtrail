@@ -158,12 +158,15 @@ func TestIntegrationRouterPGPort(t *testing.T) {
 		"SELECT * FROM public." + tbl + " ORDER BY id",
 		// PostgreSQL's rules, not the engine's own: NULL sorts last, text
 		// compares by its bytes, two integers divide to an integer.
-		"SELECT status FROM " + tbl + " ORDER BY status",
-		"SELECT status FROM " + tbl + " ORDER BY status DESC",
-		"SELECT count(*) FROM " + tbl + " WHERE status = 'paid'",
+		// (Two texts that differ in case only are left out of the sorted
+		// ones: the source sorts them by its database's locale, the copy by
+		// their bytes, a difference docs/postgres.md states.)
+		"SELECT status FROM " + tbl + " WHERE status IS DISTINCT FROM 'Paid' ORDER BY status",
+		"SELECT status FROM " + tbl + " WHERE status IS DISTINCT FROM 'Paid' ORDER BY status DESC",
+		"SELECT count(*) AS n FROM " + tbl + " WHERE status = 'paid'",
 		"SELECT id, id / 2 AS half FROM " + tbl + " ORDER BY id",
 		"SELECT sum(amount) AS total, count(*) AS n FROM " + tbl,
-		"SELECT status, count(*) FROM " + tbl + " GROUP BY status ORDER BY status",
+		"SELECT status, count(*) AS n FROM " + tbl + " WHERE status IS DISTINCT FROM 'Paid' GROUP BY status ORDER BY status",
 		"SELECT id FROM " + tbl + " WHERE placed >= '2026-01-01' ORDER BY id",
 		"SELECT id FROM " + tbl + " WHERE 'z' = ANY(tags)",
 		"SELECT id FROM " + tbl + " WHERE note = ''",

@@ -282,6 +282,7 @@ func TestPort_executorErrorsBecomeClientErrors(t *testing.T) {
 	}{
 		{"the port's own", &Error{Code: "55000", Message: "not available here"}, "55000", "not available here", ""},
 		{"not a read", &sqlsandbox.RefusedError{Reason: "only a read can run here"}, "0A000", "only a read", ""},
+		{"syntax, said by the sandbox", &sqlsandbox.RefusedError{Reason: "syntax error: syntax error at or near \"SELEC\""}, "42601", "SELEC", ""},
 		{"syntax", &sqlsandbox.QueryError{Message: "Parser Error: syntax error at or near \"FORM\""}, "42601", "FORM", ""},
 		{"no such table", &sqlsandbox.QueryError{Message: "Catalog Error: Table with name nope does not exist!"}, "42P01", "nope", ""},
 		{"no such function", &sqlsandbox.QueryError{Message: "Catalog Error: Scalar Function with name nope does not exist!"}, "42704", "nope", ""},
@@ -378,6 +379,31 @@ func TestPort_aRowOfTheWrongWidthIsAnErrorNotAShiftedRow(t *testing.T) {
 	_, err = conn.PgConn().Exec(ctx, "SELECT a, b FROM t").ReadAll()
 	if pe := requirePgError(t, err); pe.Code != "XX000" {
 		t.Fatalf("code = %s, want XX000", pe.Code)
+	}
+}
+
+// Blanks and semicolons alone are an empty query: no error, and the executor
+// is not asked.
+func TestPort_anEmptyQueryIsNotSentToTheCopy(t *testing.T) {
+	ran := 0
+	p := &portLogin{}
+	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+		ran++
+		return sqlsandbox.Result{}, nil
+	}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, stmt := range []string{"", " ", ";", " ;\n; "} {
+		if _, err := conn.PgConn().Exec(ctx, stmt).ReadAll(); err != nil {
+			t.Errorf("%q: %v", stmt, err)
+		}
+	}
+	if ran != 0 {
+		t.Fatalf("the executor was asked %d times for empty queries", ran)
 	}
 }
 

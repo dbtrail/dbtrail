@@ -237,6 +237,11 @@ func freeError(err error, logger *slog.Logger) *pgErr {
 	case errors.As(err, &own):
 		return &pgErr{own.Code, own.Message}
 	case errors.As(err, &refused):
+		if strings.HasPrefix(refused.Reason, "syntax error") {
+			// The sandbox parses the statement before it runs anything, and
+			// says so in these words (sqlsandbox worker).
+			return &pgErr{"42601", refused.Reason}
+		}
 		// The statement's shape: not a read, more than one statement, or
 		// something the sandbox does not run.
 		return &pgErr{"0A000", refused.Reason}

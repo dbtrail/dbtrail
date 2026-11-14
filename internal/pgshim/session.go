@@ -42,7 +42,8 @@ type pgErr struct {
 // failure is sent as an ErrorResponse and returns nil. Every path ends with
 // ReadyForQuery so the client is never left hanging (advisor invariant).
 func (s *session) handleSimpleQuery(qstr string) error {
-	if strings.TrimSpace(qstr) == "" {
+	// Nothing but blanks and semicolons is an empty query, as on PostgreSQL.
+	if strings.Trim(qstr, " \t\r\n;") == "" {
 		s.be.Send(&pgproto3.EmptyQueryResponse{})
 		return s.readyFlush()
 	}
