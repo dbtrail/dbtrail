@@ -127,6 +127,9 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 	flushed.Store(9000)
 	time.Sleep(100 * time.Millisecond)
 	held := caughtUpStamp(t, db)
+	if held == "" {
+		t.Fatal("the checkpoints with nothing new to stamp erased the stamp")
+	}
 	time.Sleep(200 * time.Millisecond)
 	if now := caughtUpStamp(t, db); now != held {
 		t.Fatalf("the stamp moved from %s to %s with the capture at 5000 and the source at 9000", held, now)
@@ -150,6 +153,70 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 	persistSlotLostPG(db, 92845, "test: slot lost", slog.New(slog.DiscardHandler))
 	if ago, ok := caughtUpAgo(t, db); ok {
 		t.Fatalf("a stamp %s old survived a lost slot", ago)
+	}
+}
+
+// A source that keeps writing: each reading is past every position the loop
+// has received, so nothing a reading finds already there can answer it. Only
+// the position that arrives after the asking can, and it does when it
+// arrives in time.
+func TestIntegrationPGCaughtUpStampOnABusySource_2845(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	db, _ := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(context.Background(), db, 4, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	// Reading n answers n*1000: always ahead of what was received before it.
+	var readings atomic.Uint64
+	probe := func(context.Context) (pgcapture.HealthSnapshot, error) {
+		return pgcapture.HealthSnapshot{FlushedLSN: readings.Add(1) * 1000}, nil
+	}
+	idx := indexer.New(db, 1000)
+	events := make(chan event.Event)
+	done := make(chan error, 1)
+	const poll = 400 * time.Millisecond
+	go func() {
+		done <- streamLoopPG(context.Background(), events, idx, db, nil, 10*time.Millisecond, probe, poll,
+			&pgStreamState{serverID: 92846}, slog.New(slog.DiscardHandler), nil)
+	}()
+	send := func(ev event.Event) {
+		t.Helper()
+		select {
+		case events <- ev:
+		case err := <-done:
+			t.Fatalf("streamLoopPG ended early: %v", err)
+		}
+	}
+	defer func() {
+		close(events)
+		if err := <-done; err != nil {
+			t.Fatalf("streamLoopPG: %v", err)
+		}
+	}()
+	send(pgRow(1))
+	send(event.Event{EventType: event.EventCommit, EndPos: 500})
+
+	// The capture stays one reading behind: it receives each position only
+	// after the next reading was taken. Never in time for the one waiting.
+	for range 3 {
+		n := readings.Load()
+		waitCaughtUp(t, "the next reading", 5*time.Second, func() bool { return readings.Load() > n })
+		send(sentMarkerAt(n * 1000))
+	}
+	time.Sleep(100 * time.Millisecond)
+	if ago, ok := caughtUpAgo(t, db); ok {
+		t.Fatalf("stamped %s ago with the capture always one reading behind", ago)
+	}
+
+	// It receives the position of the reading that is waiting, right after
+	// that reading: caught up at the moment the source was asked.
+	n := readings.Load()
+	waitCaughtUp(t, "the next reading", 5*time.Second, func() bool { return readings.Load() > n })
+	asked := time.Now()
+	send(sentMarkerAt(readings.Load() * 1000))
+	waitCaughtUp(t, "a stamp for the reading reached in time", 5*time.Second, func() bool { _, ok := caughtUpAgo(t, db); return ok })
+	if ago, _ := caughtUpAgo(t, db); ago < 0 || ago > time.Since(asked)+poll {
+		t.Fatalf("the stamp is %s old, %s after the reading it answers", ago, time.Since(asked))
 	}
 }
 
