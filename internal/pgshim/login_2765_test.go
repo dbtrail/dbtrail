@@ -398,7 +398,7 @@ func TestPort_timeTravelIsRefusedNotRunOnTheCopy(t *testing.T) {
 	defer cancel()
 	for _, stmt := range []string{
 		"SELECT * FROM _flashback.orders AS OF '5 minutes ago' WHERE id = 1",
-		"SELECT * FROM public.orders AS OF '5 minutes ago' WHERE id = 1",
+		"SELECT * FROM public.orders WHERE id = 1 AS OF '5 minutes ago'", // the bare form: AS OF closes the statement
 		"SELECT * FROM _snapshot.orders AS OF 'not a time' WHERE id = 1", // malformed: still not this port's
 	} {
 		_, err = conn.PgConn().Exec(ctx, stmt).ReadAll()

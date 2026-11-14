@@ -15,10 +15,10 @@ import (
 )
 
 // The router's PostgreSQL-protocol port (#2765): which address it takes, and
-// who its login lets in. None of the servers here has an index that answers
-// (their DSN points at a closed port), so a login that passes the password
-// and finds its server ends in "cannot open server" (08006): that code is
-// this file's proof that the password was accepted and the server found.
+// who its login lets in. A server's index is opened by its first statement,
+// not by the login, so a client that is let in here ("") passed the password
+// and named a server the registry holds; none of these servers has an index
+// that answers.
 
 func TestValidPGListen(t *testing.T) {
 	for _, tc := range []struct {
@@ -176,7 +176,7 @@ func TestRouterPGPort_login(t *testing.T) {
 	})
 	addr := ln.Addr().String()
 
-	const found = "08006" // the password passed and the server was found (see the top of the file)
+	const found = "" // let in: the password passed and the server was found
 	for _, tc := range []struct {
 		user, pw, db, want, why string
 	}{
