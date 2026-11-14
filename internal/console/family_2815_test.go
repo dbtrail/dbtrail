@@ -140,15 +140,15 @@ func mixedRegistryFile(t *testing.T) string {
 servers:
   - id: aaaa000000000001
     name: shop
-    dsn: u:p@tcp(127.0.0.1:1)/idx_shop
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_shop
   - id: aaaa000000000002
     name: ledger
     flavor: postgres
-    dsn: u:p@tcp(127.0.0.1:1)/idx_ledger
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_ledger
   - id: aaaa000000000003
     name: wiki
     flavor: mariadb
-    dsn: u:p@tcp(127.0.0.1:1)/idx_wiki
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_wiki
 `
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
