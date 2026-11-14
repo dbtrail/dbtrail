@@ -37,7 +37,6 @@ func TestForCopy_dateSub_2611(t *testing.T) {
 		{"SELECT DATE_SUB(d, intervals) FROM t", "SELECT DATE_SUB(d, intervals) FROM t"},
 		{"SELECT db.date_sub(d, INTERVAL 1 DAY) FROM t", "SELECT db.date_sub(d, INTERVAL 1 DAY) FROM t"},
 		{"SELECT t.date_sub FROM t", "SELECT t.date_sub FROM t"},
-		{"SELECT `date_sub`(d, INTERVAL 1 DAY) FROM t", `SELECT "date_sub"(d, INTERVAL 1 DAY) FROM t`},
 		{"SELECT date_subs(d, INTERVAL 1 DAY) FROM t", "SELECT date_subs(d, INTERVAL 1 DAY) FROM t"},
 		{"SELECT 'DATE_SUB(d, INTERVAL 1 DAY)' FROM t", "SELECT 'DATE_SUB(d, INTERVAL 1 DAY)' FROM t"},
 		{"SELECT 1 /* DATE_SUB(d, INTERVAL 1 DAY) */ FROM t", "SELECT 1 /* DATE_SUB(d, INTERVAL 1 DAY) */ FROM t"},
@@ -69,6 +68,9 @@ func TestDateSubVeto_2611(t *testing.T) {
 		"SELECT DATE_SUB(dt, INTERVAL 90 MINUTE), DATE_SUB(dt, INTERVAL 3601 SECOND), DATE_SUB(ts, INTERVAL 25 HOUR) FROM t",
 		"SELECT DATE_SUB(`dt`, INTERVAL 1 DAY), DATE_SUB(t.dt, INTERVAL 1 DAY), DATE_SUB((dt), INTERVAL 1 DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL '7' DAY) FROM t",
+		// A quoted amount with a sign is the same number on both (scan
+		// refuses one that is not a whole number).
+		"SELECT DATE_SUB(dt, INTERVAL '-1' DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL 0 DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL 999999999 SECOND) FROM t",
 		"SELECT id FROM t WHERE dt >= DATE_SUB(NOW(), INTERVAL 30 DAY)",
@@ -205,7 +207,9 @@ func TestVeto_dateSub_2611(t *testing.T) {
 		"SELECT DATE_SUB(dt, INTERVAL ? DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL (1.5) DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL '1.5' DAY) FROM t",
-		"SELECT DATE_SUB(dt, INTERVAL '-1' DAY) FROM t",
+		"SELECT DATE_SUB(dt, INTERVAL '1 2' DAY) FROM t",
+		// A quoted name before a parenthesis: refused by the scan, as any.
+		"SELECT `date_sub`(dt, INTERVAL 1 DAY) FROM t",
 	} {
 		if got := VetoOpts(stmt, routedSubOpts); got == "" {
 			t.Errorf("VetoOpts(%q) = \"\", want it kept on MySQL", stmt)

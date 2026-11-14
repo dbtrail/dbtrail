@@ -132,6 +132,9 @@ func dateSubRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), COUNT(*) FROM ev WHERE d >= DATE_SUB(NOW(), INTERVAL 7 DAY)", who: "copy", why: "a DATE compared with it"},
 		{stmt: "SELECT MIN(side), DATE_SUB(dt, INTERVAL 1 MONTH) AS since, COUNT(*) FROM ev WHERE k <> 4 GROUP BY since ORDER BY since", who: "copy", why: "grouped and sorted, a NULL first"},
 		{stmt: "SELECT side, DATE_SUB(dt, INTERVAL 1 MONTH) FROM ev WHERE k > ? AND k <> 4 ORDER BY k", args: []any{0}, who: "copy", why: "prepared"},
+		{stmt: "SELECT side, DATE_SUB(dt, INTERVAL '-1' MONTH), DATE_SUB(ts, INTERVAL '-1' DAY) FROM ev WHERE k <> 5 ORDER BY k", who: "copy", why: "a quoted amount with a sign: a step forward"},
+
+		{stmt: "SELECT side, DATE_SUB(dt, INTERVAL '-1' DAY) FROM ev WHERE k = 5", who: "live", why: "past 9999: NULL on MySQL"},
 
 		{stmt: "SELECT side, DATE_SUB(dt, INTERVAL 1 DAY) FROM ev ORDER BY k", who: "live", why: "the year 1 minus a day: a zero date on MySQL, the year 0 on the copy"},
 		{stmt: "SELECT side, DATE_SUB(dt, INTERVAL 1 MONTH) FROM ev WHERE k = 4", who: "live", why: "the year 1 minus a month"},
