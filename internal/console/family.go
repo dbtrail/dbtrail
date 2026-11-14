@@ -89,7 +89,7 @@ func (e *OtherFamilyError) Error() string {
 	if e.mixed() {
 		return fmt.Sprintf("This installation holds servers of both database families (%s: %s; %s: %s), which is not supported. Nothing was changed. "+
 			"Remove the servers of one family, or move them to an installation of their own: until then no server can be added or edited. %s",
-			familyWords(FamilyPostgres), strings.Join(e.MixedPostgres, ", "), familyWords(FamilyMySQL), strings.Join(e.MixedMySQL, ", "), why)
+			familyWords(FamilyPostgres), someNames(e.MixedPostgres), familyWords(FamilyMySQL), someNames(e.MixedMySQL), why)
 	}
 	return fmt.Sprintf("This installation serves %s servers, so %s cannot be added to it. Nothing was changed. "+
 		"To use DBTrail with %s, run a second installation for it. %s",
@@ -97,6 +97,16 @@ func (e *OtherFamilyError) Error() string {
 }
 
 func (e *OtherFamilyError) Is(target error) bool { return target == ErrOtherFamily }
+
+// someNames lists names for a message a person reads in one line: the first
+// few, and how many more there are.
+func someNames(names []string) string {
+	const show = 4
+	if len(names) <= show {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:show], ", "), len(names)-show)
+}
 
 // familiesOf sorts servers' names by family.
 func familiesOf(servers []ServerEntry) (postgres, mysql []string) {
@@ -143,8 +153,7 @@ func familyRefusal(servers []ServerEntry, boot, flavor string) error {
 }
 
 // MixedFamilies reports whether the registry holds servers of both families,
-// with their names: the state a hand-edited file can be in. The web interface
-// says so while it lasts.
+// with their names: the state a hand-edited file can be in.
 func (r *Registry) MixedFamilies() (postgres, mysql []string, mixed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -162,17 +171,46 @@ func (r *Registry) MixedFamiliesRefusal() error {
 	return &OtherFamilyError{MixedPostgres: postgres, MixedMySQL: mysql}
 }
 
-// warnMixedFamilies logs, where a servers file is read, that it holds both
-// families. An error, not a refusal: every server in it is still served.
-func warnMixedFamilies(path string, servers []ServerEntry) {
-	postgres, mysql := familiesOf(servers)
-	if len(postgres) == 0 || len(mysql) == 0 {
-		return
+// warnFamilies says, where a servers file is read, the two things about its
+// families that the file's owner has to know and nothing else would tell
+// them: that it holds both, and that an entry's flavor is not one this build
+// knows (it is then read as MySQL, which is what puts a PostgreSQL server
+// written "pgsql" among the MySQL ones). Errors in the log, not refusals:
+// every server in the file is still served.
+//
+// It returns what it said, and says nothing when that is what it said last
+// time (said): a process that follows the file reads it again on every change
+// the daemon makes to it, and the same sentence on each would bury the rest.
+func warnFamilies(path string, servers []ServerEntry, said string) string {
+	var unknown []string
+	for _, e := range servers {
+		if _, err := NormalizeFlavor(e.Flavor); err != nil {
+			unknown = append(unknown, fmt.Sprintf("%s (flavor %q)", e.Name, e.Flavor))
+		}
 	}
-	slog.Error("the servers file holds servers of both database families, which is not supported: each installation serves MySQL and MariaDB, or PostgreSQL. "+
-		"Every server is still served and captured; no server can be added until one family is left",
-		"file", path, "postgresql", strings.Join(postgres, ", "), "mysql_and_mariadb", strings.Join(mysql, ", "),
-		"fix", "remove the servers of one family, or move them to an installation of their own")
+	postgres, mysql := familiesOf(servers)
+	mixed := len(postgres) > 0 && len(mysql) > 0
+	now := ""
+	if mixed || len(unknown) > 0 {
+		now = strings.Join(unknown, ",") + "|" + strings.Join(postgres, ",") + "|" + strings.Join(mysql, ",")
+		if !mixed {
+			now = strings.Join(unknown, ",") + "||"
+		}
+	}
+	if now == said {
+		return now
+	}
+	if len(unknown) > 0 {
+		slog.Error("the servers file names a source flavor this version does not know, and reads those servers as MySQL: write mysql, mariadb or postgres",
+			"file", path, "servers", strings.Join(unknown, ", "))
+	}
+	if mixed {
+		slog.Error("the servers file holds servers of both database families, which is not supported: each installation serves MySQL and MariaDB, or PostgreSQL. "+
+			"Every server is still served and captured; no server can be added or edited until one family is left",
+			"file", path, "postgresql", strings.Join(postgres, ", "), "mysql_and_mariadb", strings.Join(mysql, ", "),
+			"fix", "remove the servers of one family, or move them to an installation of their own")
+	}
+	return now
 }
 
 // newServerFamilyRefusal is the rule for a server about to be added through

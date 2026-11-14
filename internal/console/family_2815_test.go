@@ -1,8 +1,11 @@
 package console
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -235,18 +238,136 @@ func TestRegistry_mysqlToMariaDBIsTheSameFamily(t *testing.T) {
 	}
 }
 
-// The follower (the router's view of the file) reads a mixed file too.
-func TestRegistryFollower_readsAMixedFile(t *testing.T) {
-	path := mixedRegistryFile(t)
+// captureLog routes the default logger to a buffer for the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &buf
+}
+
+// A mixed file is said in the log where it is read, with the servers' names:
+// that line is the only way its owner learns of it short of a refusal.
+func TestRegistry_aMixedFileIsLoggedWhereItIsRead(t *testing.T) {
+	buf := captureLog(t)
+	if _, err := LoadRegistry(mixedRegistryFile(t)); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"level=ERROR", "both database families", "ledger", "shop, wiki", "added or edited"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not say %q:\n%s", want, out)
+		}
+	}
+	// A file of one family says nothing.
+	buf.Reset()
+	path := filepath.Join(t.TempDir(), "servers.yaml")
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Add(familyTestEntry("one", "mariadb")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRegistry(path); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "famil") {
+		t.Errorf("a file of one family was logged about:\n%s", buf.String())
+	}
+}
+
+// A flavor this build does not know is read as MySQL, and the log says which
+// server and what was written: without it a PostgreSQL server spelled "pgsql"
+// shows up as a MySQL one nobody can find.
+func TestRegistry_anUnknownFlavorIsNamedInTheLog(t *testing.T) {
+	buf := captureLog(t)
+	path := filepath.Join(t.TempDir(), "servers.yaml")
+	body := `version: 1
+servers:
+  - id: aaaa000000000001
+    name: ledger
+    flavor: postgres
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_ledger
+  - id: aaaa000000000002
+    name: books
+    flavor: pgsql
+    index_dsn: u:p@tcp(127.0.0.1:1)/idx_books
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"does not know", `books (flavor \"pgsql\")`, "both database families"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not say %q:\n%s", want, out)
+		}
+	}
+	if _, mysql, mixed := reg.MixedFamilies(); !mixed || strings.Join(mysql, ",") != "books" {
+		t.Fatalf("mixed=%v mysql=%v, want books read as MySQL", mixed, mysql)
+	}
+}
+
+// The follower (the router's view of the file) reads a mixed file, says so
+// when the file comes to hold both families, and does not say it again on
+// every later change of the file: the daemon rewrites it for its own marks.
+func TestRegistryFollower_saysAMixedFileOnce(t *testing.T) {
+	buf := captureLog(t)
+	path := filepath.Join(t.TempDir(), "console-servers.yaml")
+	one := "version: 1\nservers:\n  - id: aaaa000000000001\n    name: shop\n    index_dsn: u:p@tcp(127.0.0.1:1)/idx_shop\n"
+	if err := os.WriteFile(path, []byte(one), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	reg, err := LoadRegistryFollower(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reg.Reload(); err != nil {
-		t.Fatalf("reload: %v", err)
+		t.Fatal(err)
 	}
-	if reg.Len() != 3 {
-		t.Fatalf("%d servers, want 3", reg.Len())
+	if strings.Contains(buf.String(), "both database families") {
+		t.Fatalf("said of a file of one family:\n%s", buf.String())
+	}
+	write := func(extra string) {
+		t.Helper()
+		body := one + "  - id: aaaa000000000002\n    name: ledger\n    flavor: postgres\n    index_dsn: u:p@tcp(127.0.0.1:1)/idx_ledger\n" + extra
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reg.Reload(); err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+	}
+	write("")
+	if n := strings.Count(buf.String(), "both database families"); n != 1 {
+		t.Fatalf("said %d times when the file came to hold both families, want once:\n%s", n, buf.String())
+	}
+	if reg.Len() != 2 {
+		t.Fatalf("%d servers, want both", reg.Len())
+	}
+	// The file changes again, the families do not: nothing more is said.
+	for i := range 3 {
+		write(fmt.Sprintf("    no_archive: %v\n", i%2 == 0))
+	}
+	if n := strings.Count(buf.String(), "both database families"); n != 1 {
+		t.Fatalf("said %d times over changes that left the families as they were, want once", n)
+	}
+	// One family is left, then the mix comes back: said again.
+	if err := os.WriteFile(path, []byte(one), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	write("")
+	if n := strings.Count(buf.String(), "both database families"); n != 2 {
+		t.Fatalf("said %d times after the mix came back, want twice", n)
 	}
 }
 
@@ -270,9 +391,11 @@ func TestServersAPI_refusesTheOtherFamily(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("the first server: %d %s", rec.Code, body)
 	}
-	dir := filepath.Join(t.TempDir(), "snapshots-of-a-server-never-added")
 	req, _ := json.Marshal(map[string]any{
-		"name": "ledger", "flavor": "postgres", "host": "h", "user": "u", "password": "p", "dbname": "db", "baseline_dir": dir,
+		"name": "ledger", "flavor": "postgres", "host": "h", "user": "u", "password": "p", "dbname": "db",
+		// A folder that does not exist: refused for the family first, never
+		// for the folder (which would be a 400).
+		"baseline_dir": filepath.Join(t.TempDir(), "snapshots-of-a-server-never-added"),
 	})
 	rec, body = doServersReq(t, srv, "POST", "/api/servers", string(req))
 	if rec.Code != http.StatusConflict {
@@ -289,9 +412,6 @@ func TestServersAPI_refusesTheOtherFamily(t *testing.T) {
 	}
 	if len(msg) > 400 {
 		t.Errorf("the refusal is %d characters: too long to read in a terminal", len(msg))
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("a folder was made for a server that was refused: %v", err)
 	}
 	if srv.cm.reg.Len() != 1 {
 		t.Errorf("%d servers, want 1", srv.cm.reg.Len())
@@ -424,5 +544,61 @@ func TestServersAPI_theCommandLineServerFixesTheFamily(t *testing.T) {
 				t.Fatalf("%d %s", rec.Code, body)
 			}
 		})
+	}
+}
+
+// A registry with many servers of each family names a few and counts the
+// rest: the refusal is still one line a terminal shows whole.
+func TestOtherFamilyError_namesAFewAndCountsTheRest(t *testing.T) {
+	var servers []ServerEntry
+	for i := range 30 {
+		servers = append(servers, familyTestEntry(fmt.Sprintf("my%02d", i), "mysql"), familyTestEntry(fmt.Sprintf("pg%02d", i), "postgres"))
+	}
+	msg := familyRefusal(servers, "", "mysql").Error()
+	for _, want := range []string{"pg00, pg01, pg02, pg03 and 26 more", "my00, my01, my02, my03 and 26 more", "Nothing was changed"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, msg)
+		}
+	}
+	if len(msg) > 600 {
+		t.Errorf("the refusal is %d characters for 60 servers", len(msg))
+	}
+}
+
+// On the Connect step and from `dbtrail server add` (both POST
+// /api/servers/check), the family is refused BEFORE the checks run against
+// the source and before the form is kept: nobody fixes their database for a
+// server that can never be added, and a refused form does not come back
+// after a reload.
+func TestCheck_refusesTheOtherFamilyBeforeTheChecks(t *testing.T) {
+	srv, ctrl := newSupervisorServer(t)
+	rec, body := doServersReq(t, srv, "POST", "/api/servers/check", checkBody)
+	if rec.Code != 200 || !decodeCheck(t, body).Started {
+		t.Fatalf("the first server (MySQL): %d %s", rec.Code, body)
+	}
+	checksBefore, startsBefore := len(ctrl.unsaved), len(ctrl.started)
+	if err := srv.drafts.Discard(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, body = doServersReq(t, srv, "POST", "/api/servers/check",
+		`{"flavor":"postgres","source_host":"pg.example.com","source_user":"dbtrail","source_password":"Ab3-xyz","source_dbname":"app","pg_slot":"s","pg_publication":"p"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a PostgreSQL server on a MySQL installation: %d %s", rec.Code, body)
+	}
+	if msg := familyRefusalText(t, body); !strings.Contains(msg, "This installation serves MySQL and MariaDB servers") || !strings.Contains(msg, "Nothing was changed") {
+		t.Errorf("the refusal: %s", msg)
+	}
+	if len(ctrl.unsaved) != checksBefore {
+		t.Errorf("the checks ran against the source of a server that was refused (%d runs, %d before)", len(ctrl.unsaved), checksBefore)
+	}
+	if len(ctrl.started) != startsBefore {
+		t.Errorf("capture was started for a refused server")
+	}
+	if srv.cm.reg.Len() != 1 {
+		t.Errorf("%d servers, want 1", srv.cm.reg.Len())
+	}
+	if _, kept, err := srv.drafts.Load(); err != nil || kept {
+		t.Errorf("the refused form was kept as a draft (kept=%v err=%v)", kept, err)
 	}
 }
