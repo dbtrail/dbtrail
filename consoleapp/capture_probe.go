@@ -242,17 +242,17 @@ var captureClasses = map[string]captureClass{
 	// a loss on record takes a full read. Everything else that is not
 	// "caught up", the reasons only the capture status read returns
 	// included, is a source that cannot be asked.
-	captureDetailPGAhead:       captureCannotAsk,
-	captureDetailPGNotSaving:   captureCannotAsk,
-	captureDetailPGPast:        captureCannotAsk,
-	captureDetailPGNoPosition:  captureCannotAsk,
-	captureDetailPGOldCapture:  captureCannotAsk,
-	captureDetailPGNotPostgres: captureCannotAsk,
+	captureDetailPGAhead:        captureCannotAsk,
+	captureDetailPGNotSaving:    captureCannotAsk,
+	captureDetailPGPast:         captureCannotAsk,
+	captureDetailPGNoPosition:   captureCannotAsk,
+	captureDetailPGOldCapture:   captureCannotAsk,
+	captureDetailPGNotPostgres:  captureCannotAsk,
 	captureDetailPGNoLossRecord: captureCannotAsk,
-	captureDetailPGFirstRead:   captureCannotAsk,
-	captureDetailPGNotSaved:    captureCannotAsk,
-	captureDetailPGReading:     captureCannotAsk,
-	captureDetailPGBehind:      captureCannotAsk,
+	captureDetailPGFirstRead:    captureCannotAsk,
+	captureDetailPGNotSaved:     captureCannotAsk,
+	captureDetailPGReading:      captureCannotAsk,
+	captureDetailPGBehind:       captureCannotAsk,
 
 	captureDetailLost:     captureEvidence,
 	captureDetailPGLost:   captureEvidence,

@@ -109,7 +109,7 @@ func TestBackupScheduler_quietPostgresServer_2844(t *testing.T) {
 	}{
 		{name: "the two positions equal: confirmed, nothing read",
 			probe: captureProbeResult{verdict: console.CaptureCaughtUp}, method: console.BackupMethodRefresh,
-			why: func(w string) bool { return w == "" }},
+			why: func(w string) bool { return w == "no load on your database" }},
 		{name: "the source ahead while capture saves: the slot is skipped",
 			probe: captureProbeResult{detail: captureDetailPGAhead}, method: console.BackupMethodSkip,
 			why: func(w string) bool { return w == console.SkipUnconfirmedReason(captureDetailPGAhead) }},
@@ -134,6 +134,9 @@ func TestBackupScheduler_quietPostgresServer_2844(t *testing.T) {
 			asked := stubCaptureProbePG(t, tc.probe)
 			e.Flavor = console.FlavorPostgres
 			e.SourceDSN = "postgres://u:pw@src/db"
+			// Without these a full read is not possible at all, and the
+			// case that expects one would pass for the wrong reason.
+			e.SourceSlot, e.SourcePublication = "slot", "pub"
 			method, why := freshDecision(t, b, e, now)
 			t.Logf("%s: %s", method, why)
 			if method != tc.method || !tc.why(why) {
