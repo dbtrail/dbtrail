@@ -170,8 +170,5 @@ func dateSubRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 				t.Errorf("[%s] routed %q (%s):\n  got  %s\n  want %s, the source's own answer", zone, c.stmt, c.why, got, want)
 			}
 		}
-		// Not this change's: DATE_ADD past 9999, logged only.
-		probe := "SELECT side, DATE_ADD(dt, INTERVAL 1 DAY), dt + INTERVAL 1 DAY FROM ev WHERE k = 5"
-		t.Logf("[%s] PROBE routed %s / live %s", zone, answerText(routed, probe), answerText(live, probe))
 	}
 }

@@ -14,9 +14,11 @@ package sqlsandbox
 // date for a day step into the year 0 (0001-01-01 minus a day is 0000-00-00
 // there), and the copy a year 0 or a negative year. There the macro errors
 // with the declined-value mark, so read routing sends the statement to
-// MySQL without counting a fault of the copy (DeclinedValue). year() reads a
-// TIMESTAMP WITH TIME ZONE in the session's zone, the wall clock MySQL's
-// range is about.
+// MySQL without counting a fault of the copy (DeclinedValue). The range is
+// read on the wall clock, as MySQL's is: the cast to TIMESTAMP takes a
+// TIMESTAMP WITH TIME ZONE (a DATETIME under a UTC session, a TIMESTAMP) to
+// the session's wall clock. Not year(): over a TIMESTAMP WITH TIME ZONE it
+// counts years by era, so the year before 1 is 1 again (1 BC) and passes.
 //
 // What it is given is the router's to decide (readrouter.DateSubVeto): a
 // DATE stepped by a day or more is a DATE on MySQL and a date and time here,
@@ -24,7 +26,7 @@ package sqlsandbox
 // MySQL (Session.MySQLClock); TEMP, as they are.
 const dateSubMacro = `CREATE OR REPLACE TEMP MACRO _bintrail_date_sub(x, i) AS (
   CASE
-    WHEN year(x - i) NOT BETWEEN 1 AND 9999 THEN error('DATE_SUB to a time before the year 1 or after the year 9999 (NULL or a zero date on MySQL) is not answered by the copy')
+    WHEN CAST(x - i AS TIMESTAMP) NOT BETWEEN TIMESTAMP '0001-01-01 00:00:00' AND TIMESTAMP '9999-12-31 23:59:59.999999' THEN error('DATE_SUB to a time before the year 1 or after the year 9999 (NULL or a zero date on MySQL) is not answered by the copy')
     ELSE x - i
   END
 );`

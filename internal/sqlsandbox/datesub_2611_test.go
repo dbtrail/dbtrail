@@ -57,11 +57,25 @@ func TestDateSubMacro_2611(t *testing.T) {
 		"SELECT _bintrail_date_sub(DATE '0001-01-01', INTERVAL 1 MONTH)",
 		"SELECT _bintrail_date_sub(TIMESTAMP '2026-03-31 00:00:00', INTERVAL 1000000 DAY)",
 		"SELECT _bintrail_date_sub(TIMESTAMP '9999-12-31 00:00:00', INTERVAL (-1) DAY)",
+		// A DATETIME under a UTC session and a TIMESTAMP are TIMESTAMP WITH
+		// TIME ZONE on the copy, where year() counts by era: the year 0 is
+		// 1 BC, year 1 again.
+		"SELECT _bintrail_date_sub(TIMESTAMPTZ '0001-01-01 00:00:00+00', INTERVAL 1 DAY)",
+		"SELECT _bintrail_date_sub(TIMESTAMPTZ '0001-01-01 00:00:00+00', INTERVAL 13 MONTH)",
 	} {
 		_, err := run("", sql, true)
 		if !DeclinedValue(err) {
 			t.Errorf("%s: %v, want a declined value", sql, err)
 		}
+	}
+	// Five hours east, the year 1 starts five hours before it does in UTC:
+	// 0001-01-01 03:00 UTC is 08:00 there, and minus six hours still the
+	// year 1 on the wall clock.
+	if _, err := run("Etc/GMT-5", "SELECT _bintrail_date_sub(TIMESTAMPTZ '0001-01-01 03:00:00+00', INTERVAL 6 HOUR)", true); err != nil {
+		t.Errorf("the year 1 on the session's wall clock: %v", err)
+	}
+	if _, err := run("Etc/GMT-5", "SELECT _bintrail_date_sub(TIMESTAMPTZ '0001-01-01 03:00:00+00', INTERVAL 9 HOUR)", true); !DeclinedValue(err) {
+		t.Errorf("before the year 1 on the session's wall clock: %v, want a declined value", err)
 	}
 	// The SQL card's reader writes DuckDB: no such macro there.
 	if _, err := run("", "SELECT _bintrail_date_sub(TIMESTAMP '2026-03-31 10:00:00', INTERVAL 1 DAY)", false); err == nil {
