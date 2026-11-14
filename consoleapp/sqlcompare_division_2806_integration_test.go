@@ -87,8 +87,8 @@ func scaledAnswer(db *sql.DB, stmt string, args ...any) string {
 	return b.String()
 }
 
-// scaleless is the scale scaledAnswer writes after a type.
-var scaleless = regexp.MustCompile(`/\d+`)
+// typesLeftOut is the list of column types scaledAnswer starts with.
+var typesLeftOut = regexp.MustCompile(`^\[[^\]]*\]`)
 
 func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	now := time.Now().UTC().Truncate(time.Second)
@@ -167,15 +167,17 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	portDSN := fmt.Sprintf("%s:tok@tcp(%s)/%s?parseTime=true&timeout=5s", ent.ID, ln.Addr().String(), srcName)
 
 	// who "?" is measured and logged, not asserted; "" asserts the answer
-	// and not who gave it. noScale leaves the declared scale out: the copy
-	// declares every DATETIME with six fraction digits (applyDuckType), a
-	// difference of its own (#2849).
+	// and not who gave it. textOnly compares the rows and not the column
+	// types: the copy declares every DATETIME with six fraction digits
+	// (applyDuckType), and MariaDB 11.8 and later type FROM_UNIXTIME as a
+	// TIMESTAMP, differences of their own (#2849) that #2493's test leaves
+	// out the same way.
 	cases := []struct {
-		stmt    string
-		args    []any
-		who     string
-		noScale bool
-		why     string
+		stmt     string
+		args     []any
+		who      string
+		textOnly bool
+		why      string
 	}{
 		{stmt: "SELECT side, k / 7 FROM ev ORDER BY k", who: "live", why: "the issue's case"},
 		{stmt: "SELECT side, k/7, -k / 7, k / -7 FROM ev ORDER BY k", who: "live", why: "signs, no spaces"},
@@ -216,7 +218,7 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT side, k DIV 2 FROM ev ORDER BY k", who: "live", why: "DIV"},
 		{stmt: "SELECT side, ui + k, -ui, u - 1 FROM ev WHERE k > 0 ORDER BY k", who: "?", why: "unsigned arithmetic: #2848"},
 		{stmt: "SELECT side, b - u FROM ev WHERE k > 2 ORDER BY k", who: "?", why: "signed minus unsigned: #2848"},
-		{stmt: "SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "copy", noScale: true, why: "the #2493 bucket"},
+		{stmt: "SELECT side, FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(dt) / 3600) * 3600) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "copy", textOnly: true, why: "the #2493 bucket"},
 		{stmt: "SELECT side, FLOOR(UNIX_TIMESTAMP(dt) / 86400) FROM ev WHERE k IS NOT NULL ORDER BY k", who: "live", why: "FLOOR of a quotient outside FROM_UNIXTIME: a DECIMAL on MySQL, a DOUBLE on the copy"},
 	}
 	asText := func(dsn string) string { return strings.Replace(dsn, "parseTime=true", "parseTime=false", 1) }
@@ -230,8 +232,8 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		if c.who == "?" {
 			continue
 		}
-		if c.noScale {
-			got, want = scaleless.ReplaceAllString(got, ""), scaleless.ReplaceAllString(want, "")
+		if c.textOnly {
+			got, want = typesLeftOut.ReplaceAllString(got, ""), typesLeftOut.ReplaceAllString(want, "")
 		}
 		if strings.HasPrefix(got, "ERROR ") || (c.who != "" && !strings.Contains(got, "("+c.who+",")) {
 			t.Errorf("routed %q (%s):\n  got  %s\n  want it answered by %s", c.stmt, c.why, got, c.who)
