@@ -351,14 +351,18 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 	if err == nil {
 		// Part of opening the connection: one that breaks here did not open.
 		settle := f.settleCollation
+		mariadb := strings.Contains(strings.ToLower(c.GetServerVersion()), "mariadb")
 		switch {
-		case f.GlobalSession && !strings.Contains(strings.ToLower(c.GetServerVersion()), "mariadb"):
-			// MariaDB's reset keeps the handshake's character sets
-			// (measured on 10.11 and 11.4): there the client's collation
-			// stands, below.
+		case f.GlobalSession && !mariadb:
 			settle = f.globalCollation
+		case f.GlobalSession && f.ClientCollation != 0:
+			// MariaDB's reset keeps the handshake's character set and
+			// gives it that set's default collation (measured: latin1
+			// stays latin1; a utf8mb4_general_ci session is under
+			// utf8mb4_uca1400_ai_ci after a reset on 11.4 and later).
+			settle = func(ctx context.Context, c *client.Conn) error { return f.clientCollation(ctx, c, true) }
 		case f.ClientCollation != 0:
-			settle = f.clientCollation
+			settle = func(ctx context.Context, c *client.Conn) error { return f.clientCollation(ctx, c, false) }
 		}
 		serr := settle(ctx, c)
 		if serr == nil && f.SafeCharsetsOnly {
@@ -501,8 +505,12 @@ var collationName = regexp.MustCompile(`^[a-z0-9_]+$`)
 // would be a backslash to the screen and part of a letter to the source).
 // As in settleCollation, an error that ends the session is a connection
 // that did not open.
-func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn) error {
-	if f.ClientCollation == uint16(mysql.DEFAULT_COLLATION_ID) {
+//
+// charsetOnly sends SET NAMES with the character set alone, so the source
+// gives it its default collation: what MariaDB's COM_RESET_CONNECTION
+// leaves.
+func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn, charsetOnly bool) error {
+	if f.ClientCollation == uint16(mysql.DEFAULT_COLLATION_ID) && !charsetOnly {
 		return nil
 	}
 	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
@@ -528,8 +536,8 @@ func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn) error {
 		return f.collationRefused(ctx, coll, unsafeCharset(cs))
 	}
 	set := "SET NAMES " + cs + " COLLATE " + coll
-	if cs == "binary" {
-		set = "SET NAMES binary"
+	if cs == "binary" || charsetOnly {
+		set = "SET NAMES " + cs
 	}
 	if _, err := c.Execute(set); err != nil {
 		return f.collationRefused(ctx, coll, err)

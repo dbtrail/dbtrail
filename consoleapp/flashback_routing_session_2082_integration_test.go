@@ -64,7 +64,7 @@ func writeVisitsBaseline(t *testing.T, dir, schema, side string) {
 // connection. No parseTime: the tests compare the text the protocol carried.
 func routedConn(t *testing.T, addr, user, db, params string) *sql.Conn {
 	t.Helper()
-	pool, err := sql.Open("mysql", withTestCollation(fmt.Sprintf("%s:tok@tcp(%s)/%s?timeout=5s%s", user, addr, db, params)))
+	pool, err := sql.Open("mysql", withTestCollation(t, fmt.Sprintf("%s:tok@tcp(%s)/%s?timeout=5s%s", user, addr, db, params)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func routedConn(t *testing.T, addr, user, db, params string) *sql.Conn {
 // answers, with no port between.
 func directConn(t *testing.T, dsn string) *sql.Conn {
 	t.Helper()
-	pool, err := sql.Open("mysql", withTestCollation(dsn))
+	pool, err := sql.Open("mysql", withTestCollation(t, dsn))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -149,7 +149,7 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		}
 		open := openRaw
 		if c.collation == "" {
-			// openRaw would name testCollation.
+			// openRaw would ask for testCollation.
 			open = openDriverDefault
 		}
 		port := open(t, withCollation(portDSN, c.collation))

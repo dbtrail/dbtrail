@@ -1046,8 +1046,10 @@ The decision, in order, for every statement:
    carries. After a `COM_RESET_CONNECTION` the session is what the source's
    own reset leaves: on MySQL the server's global character sets and
    collation (measured on 8.0.46: a session opened under `latin1` is under
-   `utf8mb4_0900_ai_ci` after a reset), on MariaDB the handshake's (10.11
-   and 11.4 keep `latin1`).
+   `utf8mb4_0900_ai_ci` after a reset), on MariaDB the handshake's
+   character set under its default collation (`latin1` stays `latin1`; a
+   `utf8mb4_general_ci` session is under `utf8mb4_uca1400_ai_ci` after a
+   reset on 11.4 and later).
 
    Whether the copy answers is the table above: only under a collation that
    compares like `utf8mb4_0900_ai_ci` and with results in `utf8mb4`. That
