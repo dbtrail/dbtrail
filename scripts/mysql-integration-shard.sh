@@ -23,7 +23,7 @@
 # package that has no integration tests any more (renamed, moved, tests
 # deleted) stops the run instead of quietly running nothing.
 #
-# One package runs in TWO shards, split by test name: see SPLIT_PKG below.
+# One package runs in THREE shards, split by test name: see SPLIT_PKG below.
 #
 # How: every test binary of the shard is compiled first, in parallel
 # (`go test -c`), then the binaries run ONE AT A TIME from their package
@@ -38,36 +38,48 @@ shopt -s inherit_errexit 2>/dev/null || true
 
 SHARD_COUNT=3
 
-# Balanced on the integration (8.0) run of 2026-10-02 (seconds of tests plus
-# build, serial): about 360 / 370 / 400. Keep the catch-all shard the one
-# with many small packages. consoleapp is named in one shard and runs in two
-# (SPLIT_PKG below).
+# Seconds of tests per shard in the integration (8.0) run of main on
+# 2026-11-14, with consoleapp's parts placed as in SPLIT_PARTS below: about
+# 1100 / 640 / 990 (shard 1: 700 plus SQLCompare's 394; shard 2: 1037 less
+# SQLCompare's 394). Keep the catch-all shard the one with many small
+# packages. consoleapp is named in no shard here: SPLIT_PARTS and
+# SPLIT_REST_SHARD below decide where it runs.
 shard_list() {
   case "$1" in
     1) echo "internal/console internal/cli internal/cascade internal/doctor internal/metadata test/e2e" ;;
-    2) echo "consoleapp internal/streamrun cmd/bintrail-mcp internal/icebergexport internal/verify internal/shim" ;;
+    2) echo "internal/streamrun cmd/bintrail-mcp internal/icebergexport internal/verify internal/shim" ;;
     *) echo "" ;;
   esac
 }
 
 # consoleapp alone reached 550 s of the 600 s a package gets (#2132), most of
-# it tests that start one worker process per SQL statement. It runs in two
-# parts: the shard that names it in shard_list runs the tests whose name
-# matches SPLIT_RUN (-test.run), and shard SPLIT_REST_SHARD runs every other
-# test of the package (-test.skip with the same pattern). Each part is its own
-# run of the binary, with its own 10 minutes. Keep each part under about 300 s.
+# it tests that start one worker process per SQL statement. In two parts, the
+# SQLCompare and Flashback tests together reached 588 s on their own (#2820),
+# so it now runs in three. Each entry of SPLIT_PARTS is "<shard>:<pattern>":
+# that shard runs the tests whose name matches the pattern (-test.run), and
+# shard SPLIT_REST_SHARD runs every other test of the package (-test.skip with
+# all the patterns joined). Each part is its own run of the binary, with its
+# own 10 minutes. Measured on 2026-11-14 (8.0): SQLCompare 394 s, Flashback
+# 192 s, the rest 368 s. Keep each part under about 300 s; SQLCompare is past
+# that already and is the next one to split.
 #
-# One pattern, used both ways, cannot leave a test out or run it twice as long
-# as it has no "/" (with one, -test.run and -test.skip stop being opposites).
-# Two checks do not take that on trust:
-#   - before running, each part must hold at least one test (split_guard), so
-#     a pattern that stopped matching anything does not put the whole package
-#     back in one run;
+# Flashback stays in shard 2: two of its tests need the GTID source, which
+# ci.yml and release.yaml start only in shard 2 (with internal/streamrun).
+#
+# Patterns that do not overlap, used both ways, cannot leave a test out or
+# run it twice as long as none has a "/" (with one, -test.run and -test.skip
+# stop being opposites). Two checks do not take that on trust:
+#   - before running, each part must hold at least one test, the rest too,
+#     and no test may match two patterns (split_guard), so a pattern that
+#     stopped matching anything does not quietly move its tests elsewhere;
 #   - after every shard ran, the `integration` job reads their logs together
 #     and fails unless each test the binary lists ran exactly once
 #     (check-split).
 SPLIT_PKG="consoleapp"
-SPLIT_RUN='^TestIntegration(SQLCompare|Flashback)'
+SPLIT_PARTS=(
+  '1:^TestIntegrationSQLCompare'
+  '2:^TestIntegrationFlashback'
+)
 SPLIT_REST_SHARD=3
 
 # What check-split reads in the logs.
@@ -97,13 +109,80 @@ integration_packages() {
   comm -13 <(printf '%s\n' "$plain") <(printf '%s\n' "$tagged") | awk '{print $1}'
 }
 
+# split_pattern <shard>: the pattern of the part that shard runs with
+# -test.run. Returns 1 when the shard runs no such part.
+split_pattern() {
+  local entry
+  for entry in "${SPLIT_PARTS[@]}"; do
+    if [ "${entry%%:*}" = "$1" ]; then
+      printf '%s\n' "${entry#*:}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# split_skip: every part's pattern in one, for the rest's -test.skip. Each is
+# wrapped in (?:...) so a flag such as (?i) at the start of one cannot reach
+# the next.
+split_skip() {
+  local entry out=""
+  for entry in "${SPLIT_PARTS[@]}"; do
+    out="$out${out:+|}(?:${entry#*:})"
+  done
+  printf '%s\n' "$out"
+}
+
+# split_runs_in <shard>: whether that shard runs a part of the split package.
+split_runs_in() {
+  [ "$1" = "$SPLIT_REST_SHARD" ] || split_pattern "$1" >/dev/null
+}
+
+# Refuses a split configuration that cannot add up to the package, before
+# any Go runs: what can be told without the test binary.
+split_config_guard() {
+  local entry shard pattern i seen=" "
+  [ "${#SPLIT_PARTS[@]}" -gt 0 ] || die "SPLIT_PARTS is empty: name at least one part, or stop splitting $SPLIT_PKG"
+  for entry in "${SPLIT_PARTS[@]}" "$SPLIT_REST_SHARD:rest"; do
+    case "$entry" in
+      *:*) ;;
+      *) die "SPLIT_PARTS entry '$entry' is not <shard>:<pattern>" ;;
+    esac
+    shard="${entry%%:*}"
+    pattern="${entry#*:}"
+    case "$shard" in
+      '' | *[!0-9]*) die "SPLIT_PARTS entry '$entry': the shard must be a number" ;;
+    esac
+    [ "$shard" -ge 1 ] && [ "$shard" -le "$SHARD_COUNT" ] \
+      || die "SPLIT_PARTS entry '$entry': shard $shard is not from 1 to $SHARD_COUNT"
+    case "$seen" in
+      *" $shard "*) die "shard $shard runs two parts of $SPLIT_PKG (SPLIT_PARTS, SPLIT_REST_SHARD); a shard runs a package once" ;;
+    esac
+    seen="$seen$shard "
+    [ -n "$pattern" ] || die "SPLIT_PARTS entry '$entry' has an empty pattern, which matches every test"
+    case "$pattern" in
+      */*) die "SPLIT_PARTS pattern '$pattern' must not contain '/': with one, -test.run and -test.skip are not opposites" ;;
+    esac
+  done
+  for ((i = 1; i < SHARD_COUNT; i++)); do
+    case " $(shard_list "$i") " in
+      *" $SPLIT_PKG "*) die "shard $i names the split package $SPLIT_PKG in shard_list; SPLIT_PARTS and SPLIT_REST_SHARD decide where it runs" ;;
+    esac
+  done
+}
+
 shard_packages() {
   local shard="$1" module all named pkg i seen=" "
+  split_config_guard
   module="$(go list -m)"
   all="$(integration_packages)"
   [ -n "$all" ] || die "go list found no package with integration tests"
+  grep -qxF "$module/$SPLIT_PKG" <<<"$all" \
+    || die "the split package $SPLIT_PKG has no integration tests; update SPLIT_PKG"
 
-  named=""
+  # The split package counts as named, so the catch-all shard does not take
+  # it whole.
+  named="$module/$SPLIT_PKG"$'\n'
   for ((i = 1; i < SHARD_COUNT; i++)); do
     for pkg in $(shard_list "$i"); do
       grep -qxF "$module/$pkg" <<<"$all" \
@@ -114,21 +193,13 @@ shard_packages() {
     done
   done
 
-  case "$seen" in
-    *" $SPLIT_PKG "*) ;;
-    *) die "the split package $SPLIT_PKG must be named in one shard of shard_list" ;;
-  esac
-  case " $(shard_list "$SPLIT_REST_SHARD") " in
-    *" $SPLIT_PKG "*) die "shard $SPLIT_REST_SHARD both names $SPLIT_PKG and runs the rest of it; move one" ;;
-  esac
-
   if [ "$shard" -lt "$SHARD_COUNT" ]; then
     for pkg in $(shard_list "$shard"); do echo "$module/$pkg"; done
   else
     comm -23 <(printf '%s\n' "$all" | sort) <(printf '%s' "$named" | sort)
   fi
-  # The second part of the split package.
-  if [ "$shard" = "$SPLIT_REST_SHARD" ]; then
+  # This shard's part of the split package, if it runs one.
+  if split_runs_in "$shard"; then
     echo "$module/$SPLIT_PKG"
   fi
 }
@@ -142,25 +213,33 @@ list_tests() {
   grep -E '^(Test|Example|Fuzz)' <<<"$out" || true
 }
 
-# Refuses a split that is not one: a pattern with a "/", or a part with no
-# test in it.
+# Refuses a split that is not one, over the test binary: a part with no test
+# in it, a test two patterns match, or no test left for the rest. Every shard
+# that runs a part checks every part, so each refuses the same way.
 split_guard() {
-  local dir="$1" bin="$2" all part
-  case "$SPLIT_RUN" in
-    */*) die "SPLIT_RUN must not contain '/': with one, -test.run and -test.skip are not opposites" ;;
-  esac
+  local dir="$1" bin="$2" all entry pattern names matched="" n twice rest
   all="$(list_tests "$dir" "$bin" '.*' | wc -l | tr -d ' ')"
-  part="$(list_tests "$dir" "$bin" "$SPLIT_RUN" | wc -l | tr -d ' ')"
-  [ "$part" -gt 0 ] \
-    || die "SPLIT_RUN matches none of the $all tests of $SPLIT_PKG: the package would run whole in one shard"
-  [ "$part" -lt "$all" ] \
-    || die "SPLIT_RUN matches all $all tests of $SPLIT_PKG: the package would run whole in one shard"
-  echo "$SPLIT_PKG: $part of $all tests match $SPLIT_RUN"
+  for entry in "${SPLIT_PARTS[@]}"; do
+    pattern="${entry#*:}"
+    names="$(list_tests "$dir" "$bin" "$pattern")"
+    n="$(printf '%s' "$names" | grep -c . || true)"
+    [ "$n" -gt 0 ] \
+      || die "SPLIT_PARTS pattern '$pattern' (shard ${entry%%:*}) matches none of the $all tests of $SPLIT_PKG: its shard would run nothing"
+    echo "$SPLIT_PKG: shard ${entry%%:*} runs $n of $all tests ($pattern)"
+    matched="$matched$names"$'\n'
+  done
+  twice="$(printf '%s' "$matched" | grep . | sort | uniq -d | head -n 5 | paste -sd' ' -)"
+  [ -z "$twice" ] \
+    || die "two SPLIT_PARTS patterns match the same tests of $SPLIT_PKG ($twice): each would run twice"
+  rest="$(list_tests "$dir" "$bin" '.*' | grep -cvxF -f <(printf '%s' "$matched" | grep .) || true)"
+  [ "$rest" -gt 0 ] \
+    || die "the SPLIT_PARTS patterns match all $all tests of $SPLIT_PKG: shard $SPLIT_REST_SHARD would run nothing"
+  echo "$SPLIT_PKG: shard $SPLIT_REST_SHARD runs the other $rest"
 }
 
 # check-split: over the logs of every shard, concatenated. Each test the
 # binary of the split package lists must have started exactly once, inside one
-# of that package's two runs.
+# of that package's runs.
 check_split() {
   local log="$1" listed ran name n bad=0 total=0
   [ -f "$log" ] || die "check-split: no log at $log"
@@ -182,7 +261,7 @@ check_split() {
       bad=1
     fi
   done <<<"$listed"
-  [ "$bad" = 0 ] || die "check-split: the two parts of $SPLIT_PKG do not add up to the package (SPLIT_RUN, SPLIT_REST_SHARD)"
+  [ "$bad" = 0 ] || die "check-split: the parts of $SPLIT_PKG do not add up to the package (SPLIT_PARTS, SPLIT_REST_SHARD)"
   echo "check-split: each of the $total tests of $SPLIT_PKG ran exactly once"
 }
 
@@ -288,7 +367,7 @@ collect() {
 
 run_shard() {
   local shard="$1" log="$2" bindir t0 status=0 pkg dir bin rc start elapsed ran=0 dirs
-  local list module label name
+  local list module label name pattern
   local -a pkgs=() part=()
   # Not a process substitution: a refusal inside shard_packages must stop the
   # run, not leave it with a partial list.
@@ -317,16 +396,18 @@ run_shard() {
       status=1
       continue
     fi
-    # The split package: which half of its tests this shard runs, and what
+    # The split package: which part of its tests this shard runs, and what
     # check-split needs in the log (the full list goes to the log file only).
     part=()
     label=""
     if [ "$pkg" = "$module/$SPLIT_PKG" ]; then
       split_guard "$dir" "$bin"
-      if [ "$shard" = "$SPLIT_REST_SHARD" ]; then
-        part=("-test.skip=$SPLIT_RUN")
+      if pattern="$(split_pattern "$shard")"; then
+        part=("-test.run=$pattern")
+      elif [ "$shard" = "$SPLIT_REST_SHARD" ]; then
+        part=("-test.skip=$(split_skip)")
       else
-        part=("-test.run=$SPLIT_RUN")
+        die "shard $shard runs $SPLIT_PKG but no part of it (SPLIT_PARTS, SPLIT_REST_SHARD)"
       fi
       label=$'\t'"[${part[0]}]"
       list_tests "$dir" "$bin" '.*' | while IFS= read -r name; do
