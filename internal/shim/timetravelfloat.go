@@ -124,8 +124,7 @@ func (fp floatPrint) text(x float64, binary bool) string {
 	var s string
 	switch {
 	case fp.decimals >= 0:
-		// my_fcvt: correctly rounded to D decimals, never an exponent.
-		s = strconv.FormatFloat(x, 'f', fp.decimals, 64)
+		s = fcvtText(x, fp.decimals)
 	case fp.single:
 		s = mysqlFloatText(float32(x))
 	default:
@@ -135,6 +134,33 @@ func (fp floatPrint) text(x float64, binary bool) string {
 		s = strings.Repeat("0", n) + s
 	}
 	return s
+}
+
+// fcvtText is my_fcvt (strings/dtoa.cc, MySQL 8.0), what MySQL prints a
+// FLOAT(M,D) or DOUBLE(M,D) cell with: D decimals and never an exponent,
+// from a dtoa mode that stops early where a shorter text reads back as the
+// same double. So the shortest text of x when it has at most D decimals, padded
+// with zeros to D (70.9175631630185 in a DOUBLE(30,20) is
+// 70.91756316301850000000, not the exact 70.91756316301849949468), and x
+// correctly rounded to D decimals when it has more. A FLOAT is printed from
+// its value widened to a double. Measured against MySQL 8.0
+// (TestIntegrationTimeTravelFloatTextIsMySQLs).
+func fcvtText(x float64, d int) string {
+	short := strconv.FormatFloat(x, 'f', -1, 64)
+	decimals := 0
+	if i := strings.IndexByte(short, '.'); i >= 0 {
+		decimals = len(short) - i - 1
+	}
+	if decimals > d {
+		return strconv.FormatFloat(x, 'f', d, 64)
+	}
+	if d == 0 {
+		return short
+	}
+	if decimals == 0 {
+		short += "."
+	}
+	return short + strings.Repeat("0", d-decimals)
 }
 
 // floatValue reads a FLOAT or DOUBLE cell of a time-travel row as the

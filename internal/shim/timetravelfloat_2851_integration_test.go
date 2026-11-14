@@ -133,6 +133,7 @@ func TestIntegrationTimeTravelFloatTextIsMySQLs(t *testing.T) {
 		{"f72", "FLOAT(7,2)", 7, 2, false},
 		{"f2010", "FLOAT(20,10)", 20, 10, false},
 		{"f50", "FLOAT(5,0)", 5, 0, false},
+		{"f128", "FLOAT(12,8)", 12, 8, false},
 		{"d102", "DOUBLE(10,2)", 10, 2, false},
 		{"d3020", "DOUBLE(30,20)", 30, 20, false},
 		{"d255", "DOUBLE(255,30)", 255, 30, false},
