@@ -196,9 +196,13 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   `utf8mb4_0900_ai_ci` or `utf8mb4_unicode_ci`: in Go,
   `collation=utf8mb4_0900_ai_ci` in the DSN; in Python with PyMySQL, the
   same collation in `connect()`. An application on its driver's default
+<<<<<<< HEAD
   `utf8mb4_general_ci` (both of those) gets from MySQL the answer to every
   statement with a string literal or a function that returns text, and
   from the copy only the others (#2836). The
+=======
+  `utf8mb4_general_ci` (both of those) gets every answer from MySQL. The
+>>>>>>> origin/main
   `mysql` client asks for `utf8mb4_0900_ai_ci` already.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
@@ -1129,9 +1133,13 @@ The decision, in order, for every statement:
    matters for drivers whose default is another collation:
    go-sql-driver/mysql asks for `utf8mb4_general_ci`, so on MySQL and on
    MariaDB 10.11 a Go client that names no collation is now answered by
+<<<<<<< HEAD
    MySQL on every statement with a string literal or a function that
    returns text (#2836; the others the copy still answers; MariaDB 11.4 and
    later give that handshake
+=======
+   MySQL on every statement (MariaDB 11.4 and later give that handshake
+>>>>>>> origin/main
    `utf8mb4_uca1400_ai_ci` themselves, which the copy answers under). Ask for
    one the copy reproduces in the DSN: `collation=utf8mb4_0900_ai_ci` on
    MySQL and MariaDB 11.4 and later (PyMySQL, whose default is the same

@@ -1063,8 +1063,8 @@ func TestRoutedSession_collationKeepsOnlyTextOnMySQL_2836(t *testing.T) {
 			if !strings.Contains(rig.logs.String(), "with a string literal or a function that returns text") {
 				t.Errorf("the log does not say which statements the copy leaves to MySQL:\n%s", rig.logs.String())
 			}
-			if n := strings.Count(rig.logs.String(), "level=WARN"); n != 1 {
-				t.Errorf("warned %d time(s), want once:\n%s", n, rig.logs.String())
+			if n := strings.Count(rig.logs.String(), "collation_connection compares otherwise"); n != 1 {
+				t.Errorf("warned about the collation %d time(s), want once:\n%s", n, rig.logs.String())
 			}
 			// And the copy again, on the same known session.
 			if got := rig.side(t); got != "copy" {
