@@ -108,6 +108,15 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 			strings.TrimSpace(qstr))}
 	}
 
+	// A port's own gate on time travel (Binding.TimeTravelRefusal): asked for
+	// every statement, so a rule saved while the connection is open governs
+	// its next one, and before anything is read or said about the table.
+	if s.bound != nil && s.bound.TimeTravelRefusal != nil {
+		if why := s.bound.TimeTravelRefusal(); why != "" {
+			return nil, nil, "", &pgErr{"42501", why}
+		}
+	}
+
 	// Per-tenant schema authorization (#824/#1261), on the RESOLVED target
 	// schema — the same rule and the same call the MySQL front-end applies in
 	// HandleQuery. Parse fills q.Schema from the connect database for the

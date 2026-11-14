@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/pgshim"
+	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -41,8 +42,10 @@ import (
 // name>); the password is the one the MySQL port takes. A username that is a
 // server's application login opens that server alone, with that login's
 // password or the port's, whatever database it names. The copy answers every
-// statement: nothing is forwarded to the source, and time travel is not
-// served here yet.
+// statement and nothing is forwarded to the source. Time travel (_flashback,
+// _snapshot, AS OF for one row) is answered on the same connection from the
+// server's index and snapshots, unless the server hides rows or columns:
+// time travel reads past the views that hide them.
 var pgRouterCmd = &cobra.Command{
 	Use:   "pg-router",
 	Short: "Serve a PostgreSQL-protocol port that runs read-only SQL on the copy of a PostgreSQL server, as a service of its own",
@@ -430,7 +433,11 @@ func servePGPort(ctx context.Context, srv *console.Server, ln net.Listener, maxC
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
-	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout), Logger: logger, MaxConns: maxConns})
+	// One gate for the port, as the MySQL port has one: full-table time
+	// travel is refused on this wire, so nothing waits on it; the engine
+	// asks for it all the same.
+	gate := shim.NewGate(defaultFlashbackMaxFullTable)
+	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger), Logger: logger, MaxConns: maxConns})
 }
 
 // pgPortLogin is the port's login: the port's passwords, then the server.
@@ -438,7 +445,7 @@ func servePGPort(ctx context.Context, srv *console.Server, ln net.Listener, maxC
 // The password is checked before anything is said about the server, and a
 // wrong password reads the same for every username and database, so a client
 // that holds no password learns nothing about which servers exist.
-func pgPortLogin(srv *console.Server, timeout time.Duration) pgshim.LoginFunc {
+func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger) pgshim.LoginFunc {
 	return func(ctx context.Context, user, database, password string, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
@@ -484,15 +491,30 @@ func pgPortLogin(srv *console.Server, timeout time.Duration) pgshim.LoginFunc {
 			return nil, &pgshim.Error{Code: "0A000", Message: fmt.Sprintf(
 				"server %q is not a PostgreSQL server, and this port serves PostgreSQL servers only; the copy of a MySQL or MariaDB server is read with a MySQL client on the MySQL port", tgt.ID)}
 		}
-		bound := &pgshim.Binding{Actor: "server:" + tgt.ID}
+		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema}
+		// Time travel, by the engine the MySQL port binds per connection
+		// (flashbackShimConfig, called as it is): the server's index and its
+		// snapshots. The server's own gate goes with it: a server that hides
+		// rows or columns refuses time travel, which reads past the views
+		// that apply those rules (console.FlashbackTarget.TimeTravelRefusal).
+		engine := shim.NewHandlerWithConfig(tgt.IndexDB, flashbackShimConfig(tgt, flashbackConfig{QueryTimeout: timeout}.withDefaults(), gate), logger)
+		engine.BindActor("server:" + tgt.ID)
+		bound.TimeTravel, bound.TimeTravelRefusal = engine, tgt.TimeTravelRefusal
+		closers := []func(){engine.Close}
+		bound.Close = func() {
+			for _, c := range closers {
+				c()
+			}
+		}
 		if tgt.ViaLogin {
 			// Tracked, so that changing or removing the login closes the
 			// connection it opened (console.Server.TrackLoginConn).
 			untrack, ok := srv.TrackLoginConn(tgt.ID, epoch, drop)
 			if !ok {
+				engine.Close()
 				return nil, &pgshim.Error{Code: "57P03", Message: "an application login changed while connecting; reconnect"}
 			}
-			bound.Close = untrack
+			closers = append(closers, untrack)
 		}
 		if tgt.SQL == nil {
 			// The connection is made and every statement says why it cannot
@@ -508,7 +530,6 @@ func pgPortLogin(srv *console.Server, timeout time.Duration) pgshim.LoginFunc {
 		// A PostgreSQL source's copy answers by PostgreSQL's rules, with its
 		// names resolved where PostgreSQL resolves them.
 		sess, schema := sqlsandbox.Session{PostgresRules: true}, pgPortSchema
-		bound.Schema = schema
 		bound.Answered = copySQL.NoteAnswered
 		bound.Run = func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
 			if timeout > 0 {

@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -123,7 +124,21 @@ func TestIntegrationPGRouter(t *testing.T) {
 	t.Setenv("BINTRAIL_SQL_TAILS", "")
 	pgRouterNoTails()
 	f := newRouterFiles(t)
-	dsn := seedFlashbackIndex(t, "alice", time.Now().UTC().Truncate(time.Hour))
+	hour := time.Now().UTC().Truncate(time.Hour)
+	dsn := seedFlashbackIndex(t, "alice", hour)
+	// The same row under the schema a PostgreSQL client's names resolve in:
+	// the helper seeds it under a MySQL database name.
+	eventAt := hour.Add(5 * time.Minute)
+	idx, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { idx.Close() })
+	snapTS := hour.Add(-time.Hour).Format("2006-01-02 15:04:05")
+	testutil.InsertSnapshot(t, idx, 2, snapTS, "public", "users", "id", 1, "PRI", "int", "NO")
+	testutil.InsertSnapshot(t, idx, 2, snapTS, "public", "users", "name", 2, "", "varchar", "YES")
+	testutil.InsertEvent(t, idx, "mysql-bin.000001", 300, 400, eventAt.Format("2006-01-02 15:04:05"), nil,
+		"public", "users", 1, "1", nil, nil, []byte(`{"id":1,"name":"alice"}`))
 	ent, err := f.owner.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir})
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +220,6 @@ func TestIntegrationPGRouter(t *testing.T) {
 		{"SELECT 1; DELETE FROM " + tbl, "0A000"},
 		{"SELECT * FROM no_such_table", "42P01"},
 		{"SELEC 1", "42601"},
-		{"SELECT * FROM _snapshot." + tbl + " AS OF '5 minutes ago' WHERE id = 1", "0A000"},
 	} {
 		_, _, err := pgText(t, port, tc.stmt)
 		var pe *pgconn.PgError
@@ -222,6 +236,42 @@ func TestIntegrationPGRouter(t *testing.T) {
 	}
 	if _, rows, err := pgText(t, port, "SELECT count(*) FROM "+tbl); err != nil || rows[0][0] != "4" {
 		t.Fatalf("the port after the refused statements: %v %v, want it to go on answering", rows, err)
+	}
+
+	// Time travel on the same connection, from the server's index: the row
+	// as it was after the event the index holds. Its audit record is the
+	// time-travel one, under the same server.
+	names, tt, err := pgText(t, port, fmt.Sprintf("SELECT * FROM _flashback.users AS OF '%s' WHERE id = 1", eventAt.Add(time.Minute).Format("2006-01-02 15:04:05")))
+	if err != nil {
+		t.Fatalf("time travel on the port: %v", err)
+	}
+	if fmt.Sprint(names) != "[id name]" || len(tt) != 1 || fmt.Sprint(tt[0]) != "[1 alice]" {
+		t.Errorf("time travel answered %v %v, want one row [1 alice] under [id name]", names, tt)
+	}
+	// Before the event: the row did not exist yet, an answer with its
+	// columns and no row.
+	_, tt, err = pgText(t, port, fmt.Sprintf("SELECT * FROM _flashback.users AS OF '%s' WHERE id = 1", eventAt.Add(-time.Minute).Format("2006-01-02 15:04:05")))
+	if err != nil || len(tt) != 0 {
+		t.Errorf("time travel before the row existed: %v %v, want no row", tt, err)
+	}
+	// A whole table as of a moment is refused on this wire, with what to
+	// use for it.
+	_, _, err = pgText(t, port, "SELECT * FROM _flashback.users AS OF '5 minutes ago'")
+	var ttErr *pgconn.PgError
+	if !errors.As(err, &ttErr) || ttErr.Code != "0A000" {
+		t.Errorf("full-table time travel: %v, want 0A000", err)
+	}
+	var timeTravels int
+	for _, ev := range rec.Events() {
+		if ev.Surface == "shim" && ev.Action == "timetravel.query" {
+			timeTravels++
+			if ev.Actor != "server:"+ent.ID {
+				t.Errorf("time-travel audit actor %q, want server:%s", ev.Actor, ent.ID)
+			}
+		}
+	}
+	if timeTravels != 2 {
+		t.Errorf("%d time-travel audit records, want 2: the row found and the row not there yet", timeTravels)
 	}
 
 	// Every answered statement left its audit record, under the server.
