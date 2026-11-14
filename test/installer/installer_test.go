@@ -422,6 +422,8 @@ func TestInstaller_aSecondInstallationBesideAFirst(t *testing.T) {
 		if strings.Contains(c, taken) {
 			t.Errorf("a port the first installation holds is published again (%s):\n%s", taken, portLines(c))
 		}
+	}
+}
 
 // On Linux, lsof run by a user who is not root does not list the sockets of
 // root's docker-proxy, so it calls every port Docker publishes free (#2831).
