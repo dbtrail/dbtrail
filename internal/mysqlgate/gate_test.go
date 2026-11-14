@@ -105,9 +105,11 @@ var statements = []string{
 	"SELECT o.id FROM orders o JOIN items i ON i.id = o.item_id WHERE i.name = 'ALICE' ORDER BY o.id",
 	"SELECT status FROM orders UNION SELECT name FROM items ORDER BY 1",
 	// The clock calls: MySQL's on the MySQL port, the copy's own on the SQL
-	// card. Their types and what they compare with, never their value.
+	// card. Their types and what they compare with, never their value, and
+	// never against the fixture's rows: an answer here must be the same on
+	// any day the test runs.
 	"SELECT typeof(NOW()), typeof(CURDATE())",
-	"SELECT NOW() >= TIMESTAMP '2026-01-01 00:00:00', CURDATE() >= DATE '2026-01-01', count(*) FROM items WHERE seen < NOW()",
+	"SELECT NOW() >= TIMESTAMP '2026-01-01 00:00:00', CURDATE() >= DATE '2026-01-01'",
 	// Names as a statement may write them.
 	"SELECT ID, Name FROM Items WHERE id = 1",
 	"SELECT id FROM shop.items WHERE id = 1",
