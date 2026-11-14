@@ -175,7 +175,7 @@ func unsignedMathRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) 
 		{stmt: "SELECT side, u + ? FROM ev WHERE k = 3", args: []any{-5}, who: "live", why: "prepared, negative"},
 		{stmt: "SELECT side, k - ? FROM ev WHERE k = 3", args: []any{uint64(10)}, who: "live", why: "an argument bound as unsigned: a BIGINT UNSIGNED on MySQL"},
 		{stmt: "SELECT side, k FROM ev WHERE k > ? - 10 ORDER BY k", args: []any{uint64(5)}, who: "live", why: "an argument bound as unsigned, in WHERE"},
-		{stmt: "SELECT side, k FROM ev WHERE k = ? ORDER BY k", args: []any{uint64(3)}, who: "copy", why: "an argument bound as unsigned, compared"},
+		{stmt: "SELECT side, b FROM ev WHERE k = ? ORDER BY k", args: []any{uint64(3)}, who: "copy", why: "an argument bound as unsigned, compared"},
 		{stmt: "SELECT side, `u` - 4, ev.ui - 4 FROM ev WHERE k = 3", who: "live", why: "quoted and qualified"},
 		{stmt: "SELECT side, ui AS x FROM ev WHERE k > 2 ORDER BY x - 4, k", who: "live", why: "alias in ORDER BY"},
 		{stmt: "SELECT side, MAX(ui) AS x FROM ev GROUP BY side HAVING x - 100 > 0", who: "live", why: "alias in HAVING"},

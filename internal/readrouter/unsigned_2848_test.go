@@ -185,20 +185,23 @@ func TestUnsignedVetoLinear_2848(t *testing.T) {
 // A placeholder bound as an unsigned integer is a BIGINT UNSIGNED on MySQL:
 // in arithmetic it keeps the statement there.
 func TestUnsignedArgumentVeto_2848(t *testing.T) {
-	for stmt, veto := range map[string]bool{
-		"SELECT k - ? FROM ev":                   true,
-		"SELECT k FROM ev WHERE k > ? - 10":       true,
-		"SELECT ?*2 FROM ev":                      true,
-		"SELECT -? FROM ev":                       true,
-		"SELECT ABS(?) - 1 FROM ev":               true,
-		"SELECT k FROM ev WHERE id = ?":           false,
-		"SELECT k FROM ev WHERE id IN (?, ?)":     false,
-		"SELECT k FROM ev WHERE k BETWEEN ? AND ?": false,
-		"SELECT k FROM ev WHERE name = '? - 1' AND id = ?": false,
-		"SELECT `$` FROM ev WHERE id = ?":         false,
+	for _, c := range []struct {
+		stmt string
+		veto bool
+	}{
+		{"SELECT k - ? FROM ev", true},
+		{"SELECT k FROM ev WHERE k > ? - 10", true},
+		{"SELECT ?*2 FROM ev", true},
+		{"SELECT -? FROM ev", true},
+		{"SELECT ABS(?) - 1 FROM ev", true},
+		{"SELECT k FROM ev WHERE id = ?", false},
+		{"SELECT k FROM ev WHERE id IN (?, ?)", false},
+		{"SELECT k FROM ev WHERE k BETWEEN ? AND ?", false},
+		{"SELECT k FROM ev WHERE name = '? - 1' AND id = ?", false},
+		{"SELECT `$` FROM ev WHERE id = ?", false},
 	} {
-		if got := UnsignedArgumentVeto(stmt); (got != "") != veto {
-			t.Errorf("%q: %q, want veto=%v", stmt, got, veto)
+		if got := UnsignedArgumentVeto(c.stmt); (got != "") != c.veto {
+			t.Errorf("%q: %q, want veto=%v", c.stmt, got, c.veto)
 		}
 	}
 }
