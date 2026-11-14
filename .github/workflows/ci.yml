@@ -95,6 +95,27 @@ jobs:
   # package under -tags integration, the unit job now does on its own
   # (`go vet -tags integration ./...`), so a test helper that redeclares
   # one from an integration test file still fails the PR (#1843).
+  mysql-path:
+    # Informational (#2816), never a required check: says in the run's summary
+    # which files a pull request touched on the MySQL path (the port, the
+    # copy, the index, the regression gate's reviewed answers) and the lines
+    # it removed there. Shared files are edited on purpose; this is so that
+    # nobody has to remember to look, and so that a squash that drops another
+    # change's lines is seen. The script exits 0 whatever it finds.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history: the summary is a diff against the base branch.
+          fetch-depth: 0
+      - name: What this pull request touched on the MySQL path
+        run: sh scripts/mysql-path-touched.sh "origin/${BASE_REF}" | tee -a "$GITHUB_STEP_SUMMARY"
+
   changes:
     runs-on: ubuntu-22.04
     permissions:
