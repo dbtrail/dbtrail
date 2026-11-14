@@ -1,0 +1,6 @@
+Started dump at: 2026-02-01 00:00:00
+Finished dump at: 2026-02-01 00:00:05
+SHOW MASTER STATUS:
+	Log: binlog.000007
+	Pos: 4242
+	GTID: 3e11fa47-bee9-11e4-9716-8f2e7c74b0e5:1-100
