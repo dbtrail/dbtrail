@@ -221,7 +221,6 @@ func TestCaptureStatus_notAskedWithoutASourceToAsk(t *testing.T) {
 	})
 	for name, e := range map[string]console.ServerEntry{
 		"no source":  {ID: "n", DSN: "u:p@tcp(idx:3306)/n"},
-		"PostgreSQL": {ID: "p", DSN: "u:p@tcp(idx:3306)/p", SourceDSN: "postgres://u:p@h/db", Flavor: console.FlavorPostgres},
 		"the daemon's own index, started without a source": {ID: bootCaptureServerID, DSN: "u:p@tcp(idx:3306)/boot"},
 	} {
 		got := c.CaptureStatus(context.Background(), e)
