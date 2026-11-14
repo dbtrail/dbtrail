@@ -56,6 +56,11 @@ type fakeFreeSQL struct {
 	noFileRoom bool
 	// damageSpool appends a line that does not read to each file made.
 	damageSpool bool
+	// The console reads how MySQL declares each date and time column
+	// (sqlsandbox.Result.DateScales, #2849). A canned result with none gets
+	// what it gives a bare DATETIME column, no fractional digits, unless
+	// noDateScales: a column whose digits the console could not tell.
+	noDateScales bool
 }
 
 func (f *fakeFreeSQL) ResultFileRoom() bool { return !f.noFileRoom }
@@ -91,6 +96,12 @@ func (f *fakeFreeSQL) Run(_ context.Context, statement, schema string, sess sqls
 	// of a result's rows as it renders them.
 	res := f.res
 	res.Rows = slices.Clone(f.res.Rows)
+	if res.DateScales == nil && !f.noDateScales {
+		res.DateScales = make([]sqlsandbox.DateScale, len(res.Columns))
+		for i := range res.DateScales {
+			res.DateScales[i].Known = true
+		}
+	}
 	if f.spoolRows != nil && sess.ResultToFile && f.err == nil {
 		dir, err := os.MkdirTemp(f.spoolDir, "spool-")
 		if err != nil {

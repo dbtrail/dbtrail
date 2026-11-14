@@ -157,7 +157,9 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 	// A star: the id comes first, the side second.
 	same(plain, "without routing", "SELECT side, ew.* FROM ew WHERE k > 0 ORDER BY k", "copy", false)
 	same(plain, "without routing", "SELECT side, NOW() FROM ev WHERE k > 0 ORDER BY k", "copy", true)
-	same(plain, "without routing", "SELECT side, dt3, ts6 FROM ev WHERE k > ? ORDER BY k", "copy", false, 0)
+	// #2801: a prepared statement sends each value with its column's
+	// digits, a NULL and a zero fraction included.
+	same(plain, "without routing", "SELECT side, dt, dt3, ts6, ts FROM ev WHERE id > ? ORDER BY id", "copy", false, 0)
 	// What the copy cannot tell the digits of, without routing: as before,
 	// declared with 6, the value as it is.
 	if got := dateTypedAnswer(t, plain, "SELECT side, FROM_UNIXTIME(k) FROM ev WHERE k > 0 ORDER BY k", false); got.defs != "[t12/6]" ||
@@ -185,7 +187,7 @@ func TestIntegrationSQLCompareDatetimeScale(t *testing.T) {
 		same(routed, "routed", stmt, "copy", false)
 	}
 	same(routed, "routed", "SELECT side, NOW(), UTC_TIMESTAMP(), CURRENT_TIMESTAMP FROM ev WHERE k > 0 ORDER BY k", "copy", true)
-	same(routed, "routed", "SELECT side, dt3, ts6 FROM ev WHERE k > ? ORDER BY k", "copy", false, 0)
+	same(routed, "routed", "SELECT side, dt, dt3, ts6, ts FROM ev WHERE k > ? ORDER BY k", "copy", false, 0)
 	// A star: whoever answers, MySQL's definitions.
 	same(routed, "routed", "SELECT * FROM ew WHERE k > 0 ORDER BY k", "", false)
 	// And MySQL answers what the copy cannot declare as it does.

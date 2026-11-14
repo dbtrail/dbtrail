@@ -3,7 +3,6 @@ package console
 import (
 	"strings"
 
-	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
 )
@@ -58,11 +57,11 @@ func sqlItemDateScale(in views.Input, item sqlsandbox.SelectedItem, routed, mysq
 	}
 	digits, timestamp := item.Digits, false
 	for _, c := range item.Columns {
-		tc, ok := sqlTemporalColumn(in, c)
-		if !ok || tc.Digits < 0 {
+		typ, colDigits, ok := sqlTemporalColumn(in, c)
+		if !ok || colDigits < 0 {
 			return unknown
 		}
-		switch tc.Type {
+		switch typ {
 		case "date":
 			if item.DayStep {
 				// A DATE stepped by a day or more is a DATE on MySQL, and a
@@ -74,37 +73,36 @@ func sqlItemDateScale(in views.Input, item sqlsandbox.SelectedItem, routed, mysq
 			// A TIME or a YEAR: the copy holds neither as a date and time.
 			return unknown
 		}
-		digits = max(digits, tc.Digits)
-		timestamp = item.Itself && tc.Type == "timestamp"
+		digits = max(digits, colDigits)
+		timestamp = item.Itself && typ == "timestamp"
 	}
 	return sqlsandbox.DateScale{Known: true, Digits: digits, Timestamp: timestamp}
 }
 
-// sqlTemporalColumn is the date, time or year column a select item's column
-// is, found in the tables it can belong to. ok is false when it is none
+// sqlTemporalColumn is the type and the declared digits of the date, time or
+// year column a select item's column is, found in the tables it can belong
+// to. ok is false when it is none
 // (not a date column, or a table the copy does not have), when a table it
 // may be in has no CREATE TABLE to read, and when two such tables declare it
 // differently: the parse cannot say which one the name binds to.
-func sqlTemporalColumn(in views.Input, c sqlsandbox.SelectedColumn) (baseline.TemporalColumn, bool) {
-	var found baseline.TemporalColumn
-	seen := false
+func sqlTemporalColumn(in views.Input, c sqlsandbox.SelectedColumn) (typ string, digits int, ok bool) {
 	for _, ref := range c.Tables {
 		for _, t := range sqlTablesOf(in, ref) {
 			if !t.SchemaKnown {
-				return baseline.TemporalColumn{}, false
+				return "", 0, false
 			}
 			for _, tc := range t.Temporal {
 				if !strings.EqualFold(tc.Name, c.Name) {
 					continue
 				}
-				if seen && (tc.Type != found.Type || tc.Digits != found.Digits) {
-					return baseline.TemporalColumn{}, false
+				if ok && (tc.Type != typ || tc.Digits != digits) {
+					return "", 0, false
 				}
-				found, seen = tc, true
+				typ, digits, ok = tc.Type, tc.Digits, true
 			}
 		}
 	}
-	return found, seen
+	return typ, digits, ok
 }
 
 // sqlStarDateScales is a star's entries: its table's columns in the order

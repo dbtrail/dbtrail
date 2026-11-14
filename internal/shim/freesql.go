@@ -1,7 +1,6 @@
 package shim
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1683,8 +1682,6 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*
 			rs.Fields[i].Type = mysql.MYSQL_TYPE_VAR_STRING
 			applyDuckType(rs.Fields[i], c.Type)
 		}
-		// The header goes out before the rows are read: a value with more
-		// digits than this declares keeps them in its text (mysqlDateTimeText).
 		digits, _ := answerDateDigits(res)
 		applyDateScales(rs.Fields, res, digits)
 		return rs, nil
@@ -1701,17 +1698,6 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*
 			c, err := freeSQLCellDigits(cell, typ, loc, binary, digitsAt(digits, j))
 			if err != nil {
 				return nil, cellError(err, res.Columns, j, i)
-			}
-			if d := digitsAt(digits, j); d >= 0 {
-				// A value with more digits than the declaration read: the
-				// column is declared with the value's, never fewer, so a
-				// client that reads a value by its column's digits keeps
-				// them all (mysqlDateTimeText).
-				if text, ok := c.([]byte); ok {
-					if dot := bytes.LastIndexByte(text, '.'); dot >= 0 && len(text)-dot-1 > d {
-						digits[j] = len(text) - dot - 1
-					}
-				}
 			}
 			out[j] = c
 		}
@@ -1974,8 +1960,11 @@ func floatType(duckType string) (single, ok bool) {
 // mysqlDateTimeText is a date and time in MySQL's spelling, with digits
 // fractional seconds, or as many as the value needs for -1. A digit past
 // digits that is not zero is printed anyway: the declaration says fewer
-// than the value holds, which only a declaration read wrong does, and
-// dropping the digit would change the value.
+// than the value holds, which only a declaration read wrong does (a column
+// altered on the source since the snapshot whose CREATE TABLE was read),
+// and dropping the digit would change the value. The declaration is left as
+// read, in memory as in a file, whose header goes out before its rows are
+// read: the two answers stay the same.
 func mysqlDateTimeText(t time.Time, digits int) string {
 	if digits < 0 {
 		return t.Format("2006-01-02 15:04:05.999999")

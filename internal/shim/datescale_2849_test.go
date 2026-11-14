@@ -71,7 +71,7 @@ func TestAnswerDateDigits(t *testing.T) {
 
 // The answer is declared and printed with the known digits, a TIMESTAMP
 // typed one, and a column whose digits are not known keeps 6; a value with
-// more digits than the declaration widens it, in memory and in binary.
+// more digits than the declaration keeps them in its text.
 func TestFreeSQLResultset_dateScales(t *testing.T) {
 	res := func() sqlsandbox.Result {
 		return sqlsandbox.Result{
@@ -90,7 +90,7 @@ func TestFreeSQLResultset_dateScales(t *testing.T) {
 			t.Fatal(err)
 		}
 		wantTypes := []uint8{mysql.MYSQL_TYPE_DATETIME, mysql.MYSQL_TYPE_DATETIME, mysql.MYSQL_TYPE_TIMESTAMP, mysql.MYSQL_TYPE_DATETIME, mysql.MYSQL_TYPE_LONGLONG, mysql.MYSQL_TYPE_DATETIME}
-		wantDigits := []uint8{0, 3, 6, 6, 0, 2}
+		wantDigits := []uint8{0, 3, 6, 6, 0, 0}
 		for i := range wantTypes {
 			if f := rs.Fields[i]; f.Type != wantTypes[i] || f.Decimal != wantDigits[i] {
 				t.Errorf("binary=%v %s: type %d with %d digits, want %d with %d", binary, f.Name, f.Type, f.Decimal, wantTypes[i], wantDigits[i])
@@ -115,5 +115,49 @@ func TestFreeSQLResultset_dateScales(t *testing.T) {
 	}
 	if rs.Fields[1].Decimal != 3 || rs.Fields[2].Type != mysql.MYSQL_TYPE_TIMESTAMP || rs.Fields[3].Decimal != 6 {
 		t.Errorf("file header: %+v %+v %+v", rs.Fields[1], rs.Fields[2], rs.Fields[3])
+	}
+}
+
+// Under routing, a date and time column whose digits the console could not
+// tell is MySQL's to answer, from memory and from a file (the file is
+// removed); a column that is not a date and time never is. The port without
+// routing answers it, declared with 6.
+func TestDateScaleUnknown_routedToMySQL(t *testing.T) {
+	cols := []sqlsandbox.Column{{Name: "side", Type: "VARCHAR"}, {Name: "at", Type: "TIMESTAMP"}}
+	rows := [][]any{{"copy", "2026-03-31T23:15:00.5Z"}}
+	for _, fromFile := range []bool{false, true} {
+		f := &fakeFreeSQL{res: sqlsandbox.Result{Columns: cols, Rows: rows}, noDateScales: true}
+		if fromFile {
+			f = &fakeFreeSQL{res: sqlsandbox.Result{Columns: cols}, spoolRows: rows, noDateScales: true}
+		}
+		r := &fakeRouter{toCopy: true, reason: "expensive"}
+		h := spoolRouting(t, f, r, &capturePW{})
+		if _, err := h.HandleQuery("SELECT side, at FROM ev"); err != nil {
+			t.Fatalf("file %v: %v", fromFile, err)
+		}
+		if f.calls != 1 || len(r.forwarded) != 1 {
+			t.Errorf("file %v: copy ran %d time(s), forwarded %v; want it sent to MySQL", fromFile, f.calls, r.forwarded)
+		}
+		gone(t, f.spools)
+	}
+	// No date and time column: nothing to tell, the copy answers.
+	f := &fakeFreeSQL{res: sqlsandbox.Result{Columns: cols[:1], Rows: [][]any{{"copy"}}}, noDateScales: true}
+	r := &fakeRouter{toCopy: true, reason: "expensive"}
+	if _, err := spoolRouting(t, f, r, nil).HandleQuery("SELECT side FROM ev"); err != nil || len(r.forwarded) != 0 {
+		t.Errorf("no date and time column: (%v, forwarded %v), want the copy's answer", err, r.forwarded)
+	}
+
+	plain := &fakeFreeSQL{res: sqlsandbox.Result{Columns: cols, Rows: rows}, noDateScales: true}
+	h := NewHandler(nil, nil)
+	h.BindFreeSQL(plain)
+	res, err := h.HandleQuery("SELECT side, at FROM ev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := res.Resultset.Fields[1]; f.Type != mysql.MYSQL_TYPE_DATETIME || f.Decimal != 6 {
+		t.Errorf("without routing: type %d with %d digits, want DATETIME with 6", f.Type, f.Decimal)
+	}
+	if got := textRows(t, res.Resultset); got[0][1] != "2026-03-31 23:15:00.5" {
+		t.Errorf("without routing: %v, want the value as before", got)
 	}
 }

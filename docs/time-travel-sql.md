@@ -600,7 +600,13 @@ What to know before relying on it:
   `DECIMAL(p,s)` as `DECIMAL`, `HUGEINT` (what `SUM` of whole numbers
   returns) as a `DECIMAL` with no fraction, as MySQL types that `SUM`,
   `TIMESTAMP` as `DATETIME`, `BOOLEAN` as 1/0, a `LIST`/`STRUCT` as JSON
-  text, `MAP`/`UUID`/`INTERVAL` as text).
+  text, `MAP`/`UUID`/`INTERVAL` as text). A date and time is declared with
+  the fractional seconds MySQL declares and printed with exactly that many
+  (a `DATETIME` with none, `12:00:00.120` in a `DATETIME(3)`), and a
+  `TIMESTAMP` column as a `TIMESTAMP`, wherever the copy can tell them from
+  the statement and the table's definition (#2849; the list is under Engine
+  Routing, below). Where it cannot, the port without routing declares six
+  and prints the digits the value needs, as before.
 
 <a id="read-routing-mysql-answers-the-copy-takes-the-heavy-reads-experimental"></a>
 ### Engine Routing: MySQL answers, the copy takes the heavy reads
@@ -1641,6 +1647,26 @@ What this is and is not:
   exact value, as MySQL sends it. NaN and an infinity, which MySQL never
   returns, are not sent: under routing MySQL answers the statement, and
   the port without routing returns error 1690,
+  a date and time column of the answer whose fractional seconds the copy
+  cannot tell as MySQL declares them (#2849). MySQL declares a `DATETIME`
+  column with no fraction, a `DATETIME(3)` with three and so on, prints
+  every value with exactly that many (`12:00:00.120`), and a client that
+  formats a value by the declaration (some JDBC drivers, a tool that pads
+  to the declared digits) shows what it says. The copy reads them from the
+  table's definition for a column, `MIN`, `MAX` or `ANY_VALUE` of one (a
+  `TIMESTAMP` column stays a `TIMESTAMP` there), a star, and `COALESCE`,
+  `IFNULL`, `CASE`, `IF`, `GREATEST`, `LEAST` and a step by an `INTERVAL`
+  of a whole number written in the statement over such columns (the most
+  digits among them, six for a step in `MICROSECOND`s), and it knows
+  `NOW()`, `UTC_TIMESTAMP()` and `FROM_UNIXTIME` of a whole number (no
+  fraction). Anything else that returns a date and time (a `CAST`, a
+  `TIMESTAMP '...'` literal, a column of a derived table or of a `WITH`, a
+  subquery) is answered by MySQL, and so is a `DATE` stepped by a day or
+  more, which MySQL returns as a `DATE`. This one is decided once the copy
+  has answered, since only then is it known which columns are dates and
+  times: such a statement costs the copy's run as well. On a MariaDB 11.8
+  or 12.3 source `FROM_UNIXTIME` is a `TIMESTAMP`, and the copy declares it
+  a `DATETIME`, as MySQL and MariaDB 10.11 and 11.4 do (#2858),
   `SUBSTRING`, `SUBSTR` and `MID` unless the position is a positive whole
   number or `-1` and the length a whole number, both written in the
   statement (`SUBSTRING('abc', 0, 2)` is `''` on MySQL and `'a'` on the
