@@ -21,7 +21,7 @@ import (
 func sessionCookieFrom(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == sessionCookieName || strings.HasPrefix(c.Name, sessionCookieName+"_") {
 			return c
 		}
 	}

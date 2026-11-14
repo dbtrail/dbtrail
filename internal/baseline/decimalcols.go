@@ -85,6 +85,9 @@ type TableFooter struct {
 	// ZeroDate are the date columns whose NULL on the copy may be a zero
 	// date (ZeroDateColumns, #2633).
 	ZeroDate []string
+	// Float are the table's FLOAT columns (FloatColumns, #2827). Read
+	// routing keeps a statement that names one on the source.
+	Float []string
 	// PG is set for a snapshot file of a PostgreSQL source and nothing else
 	// above is, but Columns: the file carries no CREATE TABLE, it records
 	// the table's shape (MetaKeyPGRelation), and PG says how each column's
@@ -120,6 +123,22 @@ func DistinctColumns(cols []Column) (safe, other []string) {
 		}
 	}
 	return safe, other
+}
+
+// FloatColumns picks the FLOAT columns out of a parsed schema (#2827),
+// whatever their declaration: FLOAT, FLOAT(M,D), FLOAT UNSIGNED. MySQL
+// compares and computes one as a double, so 3.14 stored in a FLOAT is
+// 3.140000104904175 there and is not equal to 3.14; the copy holds it as a
+// single-precision float, casts the literal to one, and finds it equal. A
+// DOUBLE is the same type on both sides and is not listed.
+func FloatColumns(cols []Column) []string {
+	var out []string
+	for _, c := range cols {
+		if c.MySQLType == "float" {
+			out = append(out, c.Name)
+		}
+	}
+	return out
 }
 
 // UnixTimeColumns splits a parsed schema into the columns UNIX_TIMESTAMP(col)
@@ -535,6 +554,7 @@ func collectDecimalRows(rows *sql.Rows, st *footerScan) {
 		f.WholeSafe, f.WholeOther = WholeNumberColumns(cols)
 		f.Text = TextColumns(string(createSQL), cols)
 		f.ZeroDate = ZeroDateColumns(cols)
+		f.Float = FloatColumns(cols)
 		st.footers[file] = f
 	}
 	if err := rows.Err(); err != nil {

@@ -140,14 +140,24 @@ docker info >/dev/null 2>&1 || die \
 # have no probe tool, stay quiet and let Docker decide. Skipped when this dir
 # already has a stack (a re-run, where dbtrail's OWN container legitimately holds
 # the port) — there `up -d` is a harmless no-op and the console is already up.
+#
+# A port is taken when ANY probe that can see it says so (#2831). lsof alone is
+# not enough: run by a user who is not root it lists that user's sockets only,
+# and the ports Docker publishes are held by root's docker-proxy, so on Linux
+# it called every one of them free and `up -d` then died on Docker's bind
+# error. The kernel's own list of listening sockets (ss) needs no privilege;
+# a connection attempt (nc) is the last word where neither is there.
 port_in_use() {
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
-  elif command -v nc >/dev/null 2>&1; then
-    nc -z 127.0.0.1 "$1" >/dev/null 2>&1
-  else
-    return 1
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; then
+    return 0
   fi
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -Eq "[:.]$1[[:space:]]"; then
+    return 0
+  fi
+  if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 # first_free_port FROM TO [SKIP] prints the first port in FROM..TO that nothing
 # listens on and is not SKIP. With no probe tool every port reads as free.
