@@ -128,7 +128,8 @@ func UnroutedVeto(stmt string) (UnroutedRefusal, bool) {
 	if hexNumber.MatchString(quotedName.ReplaceAllString(text, `""`)) {
 		return UnroutedRefusal{What: "0x.. and 0b.. (a hexadecimal or bit number on MySQL; a number and an alias on the copy)", Instead: "the number in decimal, or a hexadecimal string the copy's way: '\\x41'::BLOB"}, true
 	}
-	return UnroutedRefusal{}, false
+	// Read in the strings themselves, which the text above has blanked.
+	return UnroutedDateDiffOffsetVeto(stmt)
 }
 
 // limitInSetRefusal is MySQL's own refusal of a LIMIT in an IN, ALL, ANY or

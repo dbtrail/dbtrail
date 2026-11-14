@@ -2761,10 +2761,29 @@ prepared statement once its arguments are written in:
   where MySQL writes `0000-00-00`.
 - `DATEDIFF(a, b)` is sent as `date_diff('day', CAST(b AS DATE), CAST(a AS
   DATE))`: the days between the two dates, their times left out, in the
-  connection's time zone, as on MySQL, for a column, a string with or
-  without a time, and `NULL`. The copy's own `datediff('day', a, b)`, with a
-  unit first, is answered as it is. A `DATEDIFF` this port sends as written
-  is refused with that spelling.
+  connection's time zone, as on MySQL, for a `DATE`, `DATETIME` or
+  `TIMESTAMP` column, a string with or without a time, and `NULL`. The
+  copy's own `datediff('day', a, b)`, with a unit first, is answered as it
+  is. A `DATEDIFF` this port sends as written is refused with that spelling.
+- A `DATEDIFF` given a string with a UTC offset right after its time
+  (`'2026-01-15 02:00:00+05:00'`, on its own or inside an argument such as
+  `COALESCE` or `TIMESTAMP '...'`) is refused with error 1235 (#2790). MySQL
+  8.0.19 and later move that time into the connection's time zone before
+  they take the date, so `DATEDIFF('2026-01-15 02:00:00+05:00', DATE
+  '2026-02-01')` is `-18` under UTC, and read `NULL` for an offset they do
+  not take (`+0500`, `+05`, `-00:00`, past `+14:00`); the copy takes the date
+  as written and answered `-17`. The refusal gives the copy's spelling,
+  `date_diff('day', CAST(b AS DATE), CAST(CAST(a AS TIMESTAMPTZ) AS DATE))`,
+  which answers MySQL's number under any session zone (measured on MySQL
+  8.0.46 under UTC, `+05:00` and `-08:00`). A `Z` or ` UTC` at the end, a
+  space before the offset, and an offset after a date with no time or a time
+  with no seconds are not offsets to MySQL: those strings are answered, alike
+  on both. What this port cannot see is still answered the copy's way: a
+  text column that holds an offset (`DATEDIFF(note, d)`), a string built
+  while the statement runs (`CONCAT(t, '+05:00')`), and a string given a
+  name in a derived table or a `WITH` and read by that name in the
+  `DATEDIFF` give the date as written. Turn
+  on Engine Routing for those: MySQL answers every `DATEDIFF` of a string.
 
 Or turn on Engine Routing, and MySQL answers them. The list is of
 constructs only MySQL's SQL holds; it does not make the copy MySQL. Every
