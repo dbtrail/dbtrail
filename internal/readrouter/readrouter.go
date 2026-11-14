@@ -191,7 +191,7 @@ var vetoes = []struct {
 	{"WEEK/YEARWEEK", regexp.MustCompile(`(?i)\b(week|yearweek)\s*\(`)},
 	{"EXTRACT(WEEK ...)", regexp.MustCompile(`(?i)\bextract\s*\(\s*week\b`)},
 	{"STR_TO_DATE", regexp.MustCompile(`(?i)\bstr_to_date\s*\(`)},                                  // NULL in MySQL, error in DuckDB on a bad date
-	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)` + callOpen)}, // day counting differs; vetoDateDiff, narrowed by MySQLDateFunctions and MySQLTimestampDiff (dateDiffVeto, #2611)
+	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)\s*\(`)}, // day counting differs; vetoDateDiff, narrowed by MySQLDateFunctions (VetoOpts, #2611)
 	{"COLLATE", regexp.MustCompile(`(?i)\bcollate\b`)},                                             // collations do not exist on the copy
 	{"CAST AS UNSIGNED/SIGNED", regexp.MustCompile(`(?i)\bas\s+(un)?signed\b`)},                    // overflow and truncation differ
 	{"DIV", regexp.MustCompile(`(?i)\bdiv\b`)},                                                     // integer division differs
