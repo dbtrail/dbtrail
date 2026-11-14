@@ -289,7 +289,7 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 				map[string]any{"a": json.Number("1")}, "x", json.Number("18446744073709551615"), "170141183460469231731687303715884105727", "2026-01-02"},
 		},
 	}
-	rs, err := freeSQLResultset(res, nil)
+	rs, err := freeSQLResultset(res, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 		}
 	}
 
-	empty, err := freeSQLResultset(sqlsandbox.Result{Columns: res.Columns[:2]}, nil)
+	empty, err := freeSQLResultset(sqlsandbox.Result{Columns: res.Columns[:2]}, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestFreeSQLResultset_decimalKeepsItsScale(t *testing.T) {
 			{"-0.05", "-42", "12345678901234567890.1234567890"},
 		},
 	}
-	rs, err := freeSQLResultset(res, nil)
+	rs, err := freeSQLResultset(res, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
