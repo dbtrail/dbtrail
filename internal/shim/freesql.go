@@ -1413,6 +1413,16 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 			code = mysql.ER_UNKNOWN_ERROR
 		}
 	}
+	if res.PrintNote != "" {
+		// A column printed without the decimals or zero padding MySQL
+		// gives it (#2829): a note of the port's own too, 1105 for the same
+		// reason (MySQL has no code for it, and 1265, data truncated, would
+		// say the value was cut, which it is not).
+		warnings = append(warnings, res.PrintNote)
+		if res.TruncatedCells == 0 {
+			code = mysql.ER_UNKNOWN_ERROR
+		}
+	}
 	h.setWarningsCoded(code, warnings)
 	h.recordFreeSQL(qstr, schema, res, routeReason)
 	return out, nil

@@ -356,3 +356,43 @@ func TestFloatType_onlyTheTypeItself(t *testing.T) {
 		}
 	}
 }
+
+// A column the copy prints without the decimals MySQL gives it (#2829): on
+// the port without routing the answer goes out with a warning, 1105 (the
+// port's own code), that SHOW WARNINGS reads back; beside the older-copy
+// note both are there.
+func TestFreeSQL_printNoteIsAWarning(t *testing.T) {
+	const note = "shop.m.d102: declared with fixed decimals or ZEROFILL, which the copy does not print"
+	for _, c := range []struct {
+		name  string
+		older string
+		count uint16
+	}{{"alone", "", 1}, {"beside the older-copy note", "Answered from the copy of ...", 2}} {
+		res := oneCell("d102", "DOUBLE", json.Number("0.1"))
+		res.PrintNote = note
+		res.Note = c.older
+		h := NewHandler(nil, nil)
+		h.BindFreeSQL(&fakeFreeSQL{res: res})
+		conn := &warningsConn{}
+		h.BindConn(conn)
+		got, err := h.HandleQuery("SELECT d102 FROM m")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cells := joinRows(rawTextRows(t, got.Resultset)); cells != "0.1" {
+			t.Errorf("%s: answer %q, want the copy's 0.1", c.name, cells)
+		}
+		if conn.warnings != c.count {
+			t.Errorf("%s: connection warnings = %d, want %d", c.name, conn.warnings, c.count)
+		}
+		w, err := h.HandleQuery("SHOW WARNINGS")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := rawTextRows(t, w.Resultset)
+		last := rows[len(rows)-1]
+		if len(rows) != int(c.count) || last[0] != "Warning" || last[1] != "1105" || last[2] != note {
+			t.Errorf("%s: SHOW WARNINGS rows = %v", c.name, rows)
+		}
+	}
+}

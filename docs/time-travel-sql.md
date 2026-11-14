@@ -1613,8 +1613,13 @@ What this is and is not:
   `COUNT(*)`, `TABLE t`), because MySQL prints such a column with that many
   decimals (`0.10` in a `DOUBLE(10,2)`, and an `AVG` over it with four
   more) or padded with zeros, and the copy's answer carries neither. The
-  port without routing refuses every statement over a table with such a
-  column, since the copy's dialect reaches a column in more ways than a
+  port without routing answers from the copy and warns: the answer's
+  warning count is 1 or more, and `SHOW WARNINGS` reads a `Warning` with
+  code 1105 (the port's own, as for an answer from an earlier copy) that
+  names each such column of the tables read and says a value there is
+  written without its decimals (`0.1` where MySQL writes `0.10`). It is
+  sent for every statement over such a table, whether or not the column is
+  printed, since the copy's dialect reaches a column in more ways than a
   name or a star. A `FLOAT` or `DOUBLE`
   declared without digits prints on the copy as MySQL prints it, on both
   ports: six significant digits for a `FLOAT` (`3.14`, `0.333333`,

@@ -54,22 +54,23 @@ func TestSQLFixedPrintRefusalFor_2829(t *testing.T) {
 			}
 		}
 		narrowed := views.Input{Baselines: []views.BaselineTable{table}}
-		got := sqlFixedPrintRefusalFor(narrowed, c.stmt, false)
+		got := sqlFixedPrintRefusalFor(narrowed, c.stmt)
 		if (got != "") != c.refuse {
 			t.Errorf("routed %q: refusal %q, want refused %v", c.stmt, got, c.refuse)
 		}
-		// Without routing, any statement over such a table: the copy's
-		// dialect reaches a column in ways no search tells.
-		unrouted := sqlFixedPrintRefusalFor(narrowed, c.stmt, true)
-		if want := len(table.FixedPrint) > 0; (unrouted != "") != want {
-			t.Errorf("without routing %q: refusal %q, want refused %v", c.stmt, unrouted, want)
+		// Without routing the copy answers with a warning, for any
+		// statement over such a table.
+		note := sqlFixedPrintNote(narrowed)
+		if want := len(table.FixedPrint) > 0; (note != "") != want {
+			t.Errorf("without routing %q: note %q, want one %v", c.stmt, note, want)
 		}
 	}
 }
 
-// Through the real worker: the MySQL port's session (MySQLText), routed or
-// not, is refused a DOUBLE(10,2) column, as a decision the routing ladder
-// forwards; the SQL card's session gets the copy's answer.
+// Through the real worker: a routed MySQL port session is refused a
+// DOUBLE(10,2) column, as a decision the routing ladder forwards; the port
+// without routing gets the copy's answer with a note; the SQL card's session
+// gets the copy's answer and no note.
 func TestSQL_realWorkerFixedPrintColumn_2829(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -82,19 +83,19 @@ func TestSQL_realWorkerFixedPrintColumn_2829(t *testing.T) {
 	ctx := context.Background()
 	const stmt = "SELECT d102 FROM shop.m"
 
-	if _, err := f.s.runSQL(ctx, f.s.cm.boot, "u", stmt, "", 0, sqlsandbox.Session{}); err != nil {
-		t.Errorf("the SQL card: %v, want the copy's answer", err)
+	out, err := f.s.runSQL(ctx, f.s.cm.boot, "u", stmt, "", 0, sqlsandbox.Session{})
+	if err != nil || out.PrintNote != "" {
+		t.Errorf("the SQL card: (note %q, %v), want the copy's answer and no note", out.PrintNote, err)
 	}
-	for name, sess := range map[string]sqlsandbox.Session{
-		"port":   {MySQLText: true},
-		"routed": {MySQLText: true, StrictStar: true, Types: readrouter.ShapeOf(stmt)},
-	} {
-		_, err := (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(ctx, stmt, "", sess)
-		var differ *sqlsandbox.ColumnsDifferError
-		if !errors.As(err, &differ) || !strings.Contains(differ.Reason, "shop.m") || !strings.Contains(differ.Reason, "d102") ||
-			!strings.Contains(differ.Reason, "fixed decimals") {
-			t.Errorf("%s: err = %v (%T), want a ColumnsDifferError naming d102 and shop.m", name, err, err)
-		}
+	res, err := (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(ctx, stmt, "", sqlsandbox.Session{MySQLText: true})
+	if err != nil || !strings.Contains(res.PrintNote, "shop.m.d102") || !strings.Contains(res.PrintNote, "0.10") {
+		t.Errorf("the port without routing: (note %q, %v), want the copy's answer with a note naming shop.m.d102", res.PrintNote, err)
+	}
+	routed := sqlsandbox.Session{MySQLText: true, StrictStar: true, Types: readrouter.ShapeOf(stmt)}
+	_, err = (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(ctx, stmt, "", routed)
+	var differ *sqlsandbox.ColumnsDifferError
+	if !errors.As(err, &differ) || !strings.Contains(differ.Reason, "d102 of shop.m") {
+		t.Errorf("routed: err = %v (%T), want a ColumnsDifferError naming d102 of shop.m", err, err)
 	}
 	routedPlain := "SELECT id, d FROM shop.m"
 	if _, err := (&SQLOnCopy{s: f.s, b: f.s.cm.boot, user: "server:x"}).Run(ctx, routedPlain, "",

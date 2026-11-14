@@ -143,20 +143,32 @@ func TestIntegrationSQLCompareFloatText(t *testing.T) {
 			t.Errorf("without routing, prepared %q:\n  copy  %s\n  MySQL %s", stmt, gotB, wantB)
 		}
 	}
+	// A column MySQL prints with fixed decimals: without routing the copy
+	// answers and warns, for any statement over its table, since the copy's
+	// dialect reaches a column in ways a search of the text cannot tell.
 	for _, stmt := range []string{
 		"SELECT d102 FROM fm ORDER BY id",
 		"SELECT AVG(d102) FROM fm",
 		"SELECT f72 FROM fm ORDER BY id",
 		"SELECT * FROM fm ORDER BY id",
+		"SELECT id, d FROM fm WHERE id = 5",
 	} {
-		if got := rawText(t, plain, stmt); !strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, "fixed decimals") {
-			t.Errorf("without routing %q: %s, want the copy's refusal (MySQL prints the column with fixed decimals)", stmt, got)
+		res, err := plain.Execute(stmt)
+		if err != nil {
+			t.Errorf("without routing %q: %v, want the copy's answer with a warning", stmt, err)
+			continue
+		}
+		if res.Warnings == 0 {
+			t.Errorf("without routing %q: no warning", stmt)
+		}
+		w := rawText(t, plain, "SHOW WARNINGS")
+		if !strings.Contains(w, "Warning|1105|") || !strings.Contains(w, ".fm.d102") || !strings.Contains(w, ".fm.f72") || !strings.Contains(w, "0.10") {
+			t.Errorf("without routing %q: SHOW WARNINGS %s, want the note naming d102 and f72", stmt, w)
 		}
 	}
-	// Any statement over such a table, without routing: the copy's dialect
-	// reaches a column in ways a search of the text cannot tell.
-	if got := rawText(t, plain, "SELECT id, d FROM fm WHERE id = 5"); !strings.Contains(got, "fixed decimals") {
-		t.Errorf("without routing, a plain DOUBLE beside a DOUBLE(10,2): %s, want the copy's refusal", got)
+	// A table with none: no warning.
+	if res, err := plain.Execute("SELECT d FROM ft WHERE id = 5"); err != nil || res.Warnings != 0 {
+		t.Errorf("without routing, a table with no such column: (%v, %v), want no warning", res, err)
 	}
 	for _, stmt := range []string{"SELECT CAST('inf' AS DOUBLE)", "SELECT d, CAST('-inf' AS DOUBLE) FROM ft ORDER BY id"} {
 		if got := rawText(t, plain, stmt); !strings.HasPrefix(got, "ERROR ") || !strings.Contains(got, "does not send this result") {

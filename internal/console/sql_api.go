@@ -886,6 +886,10 @@ type sqlOutcome struct {
 	// TailThroughID is the least id of the index's event the tails it read
 	// hold every event through (#2556), 0 when unknown or none.
 	TailThroughID uint64
+	// PrintNote is the warning the MySQL port without routing sends with
+	// the answer: a column the copy prints without the decimals or the zero
+	// padding MySQL gives it (sqlFixedPrintNote, #2829); "" when none.
+	PrintNote string
 }
 
 // runSQL is POST /api/sql without the HTTP: the gates that need the copy
@@ -1215,6 +1219,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	var tailThrough time.Time
 	var tailThroughID uint64
 	var allTailed bool
+	// printNote is the warning the MySQL port without routing sends with
+	// the answer (sqlFixedPrintNote, #2829); "" when none.
+	var printNote string
 	var copyUpdatedAt *time.Time
 	if !in.BaselineSnapshot.IsZero() {
 		at := in.BaselineSnapshot.UTC()
@@ -1368,14 +1375,19 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				}
 				textDecline = sqlTextDeclineSQL(guards)
 			}
-			if sess.StrictStar || sess.MySQLText {
-				// Routed or not, what the MySQL port sends is read as
-				// MySQL's text (#2829). After the routed refusals, so a
-				// FLOAT column keeps its own reason there.
-				if msg := sqlFixedPrintRefusalFor(narrowed, statement, !sess.StrictStar); msg != "" {
+			// What the MySQL port sends is read as MySQL's text (#2829).
+			// Under routing a statement the copy cannot print as MySQL is
+			// MySQL's (after the routed refusals, so a FLOAT column keeps its
+			// own reason there); without routing the copy answers and says so.
+			printNote = ""
+			switch {
+			case sess.StrictStar:
+				if msg := sqlFixedPrintRefusalFor(narrowed, statement); msg != "" {
 					viewsRefusal = &sqlStarRefusal{msg}
 					return "", viewsRefusal
 				}
+			case sess.MySQLText:
+				printNote = sqlFixedPrintNote(narrowed)
 			}
 			if sess.TimeZone != "" {
 				// A session zone other than UTC: every DATETIME the statement
@@ -1452,7 +1464,8 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	}
 	readFrom, readFromOK := copyReadFrom(in, readTables)
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
-		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed}, nil
+		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,
+		PrintNote: printNote}, nil
 }
 
 // sqlWantedViews decides which of the copy's views a statement needs, from
@@ -1788,32 +1801,22 @@ func sqlFloatRefusalFor(narrowed views.Input, refs sqlsandbox.Refs, types sqlsan
 	return fmt.Sprintf("the copy does not answer this statement: it reads a FLOAT column of %s (%s)", strings.Join(tables, ", "), why)
 }
 
-// sqlFixedPrintRefusalFor says why the copy must not answer a statement on
-// the MySQL port because it may print a FLOAT or DOUBLE column MySQL prints
-// with fixed decimals or zero padding (baseline.FixedPrintColumns, #2829),
-// or "" when it may answer. 0.1 in a DOUBLE(10,2) is 0.10 on MySQL, and the
-// copy's answer, a plain DOUBLE, would print 0.1.
+// sqlFixedPrintRefusalFor says why the copy must not answer a routed
+// statement because it may print a FLOAT or DOUBLE column MySQL prints with
+// fixed decimals or zero padding (baseline.FixedPrintColumns, #2829), or ""
+// when it may answer. 0.1 in a DOUBLE(10,2) is 0.10 on MySQL, and the copy's
+// answer, a plain DOUBLE, would print 0.1. The statement then goes to MySQL.
 //
-// unrouted is the port without routing. It takes the copy's own dialect,
-// which reaches a column in more ways than a search of the text can tell
-// (FROM t first, COLUMNS('re'), a list of column aliases after the table, the
-// row as a STRUCT), so there any statement that reads such a table is
-// refused.
-//
-// Under routing the statement is MySQL's, and the search is its raw text,
-// erring toward refusing: a name counts wherever it stands, inside a string
-// or a quoted name too, up to letter case; a name that is not made of word
-// characters counts as a piece of text anywhere. A star counts unless it is
-// COUNT(*), and so do the word TABLE (MySQL's TABLE t) and a statement with
-// no SELECT in it: each can print every column without its name. A refusal
-// there is never a wrong answer: the statement goes to MySQL.
-func sqlFixedPrintRefusalFor(narrowed views.Input, statement string, unrouted bool) string {
+// The search is the statement's raw text, and it errs toward refusing: a
+// name counts wherever it stands, inside a string or a quoted name too, up
+// to letter case; a name that is not made of word characters counts as a
+// piece of text anywhere. A star counts unless it is COUNT(*), and so do the
+// word TABLE (MySQL's TABLE t) and a statement with no SELECT in it: each
+// can print every column without its name. A refusal is never a wrong
+// answer: MySQL answers.
+func sqlFixedPrintRefusalFor(narrowed views.Input, statement string) string {
 	low := strings.ToLower(statement)
 	for _, t := range narrowed.SelectedBaselines() {
-		if unrouted && len(t.FixedPrint) > 0 {
-			return fmt.Sprintf("the copy does not answer a statement over %s.%s on this port: %s is a column MySQL prints with fixed decimals "+
-				"or zero padding as it is declared, which the copy cannot print as MySQL does", t.Schema, t.Table, t.FixedPrint[0])
-		}
 		for _, name := range t.FixedPrint {
 			if containsName(low, strings.ToLower(name)) {
 				return fmt.Sprintf("the copy does not answer this statement: it names %s of %s.%s, which MySQL prints with fixed decimals "+
@@ -1826,6 +1829,32 @@ func sqlFixedPrintRefusalFor(narrowed views.Input, statement string, unrouted bo
 		}
 	}
 	return ""
+}
+
+// sqlFixedPrintNote is the warning the MySQL port without routing sends with
+// an answer over a table that has a FLOAT or DOUBLE column MySQL prints with
+// fixed decimals or zero padding (#2829), or "" when no table read has one.
+// It is said for every statement over such a table, whether or not the
+// statement prints the column: the copy's dialect reaches a column in more
+// ways than a search of the text can tell (FROM t first, COLUMNS('re'), a
+// list of column aliases, the row as a STRUCT), so the table is the only
+// sure test.
+func sqlFixedPrintNote(narrowed views.Input) string {
+	var cols []string
+	for _, t := range narrowed.SelectedBaselines() {
+		for _, name := range t.FixedPrint {
+			cols = append(cols, t.Schema+"."+t.Table+"."+name)
+		}
+	}
+	if len(cols) == 0 {
+		return ""
+	}
+	more := ""
+	if len(cols) > 3 {
+		cols, more = cols[:3], fmt.Sprintf(" and %d more", len(cols)-3)
+	}
+	return fmt.Sprintf("%s%s: declared with fixed decimals or ZEROFILL, which the copy does not print: a value there is written "+
+		"without them (0.1 where MySQL writes 0.10)", strings.Join(cols, ", "), more)
 }
 
 // countStar is COUNT(*), the one star that prints no column.

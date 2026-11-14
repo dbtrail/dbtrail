@@ -197,6 +197,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 	}
 	q.noteCopyAnswerMark(out.ReadFrom, out.ReadFromOK, time.Now(), out.TailThrough, out.TailThroughID, out.AllTailed)
 	out.Result.Note = out.OlderCopyNote
+	out.Result.PrintNote = out.PrintNote
 	return out.Result, nil
 }
 
