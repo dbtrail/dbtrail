@@ -315,7 +315,7 @@ func writeValuesBaseline(t *testing.T, dir, schema, table, ddl string, rows [][]
 
 func openRaw(t *testing.T, dsn string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open("mysql", withTestCollation(t, dsn))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -179,9 +179,38 @@ func TestIntegrationFlashbackRoutesByServer(t *testing.T) {
 	}
 }
 
+// testCollation is the collation an integration test's connections ask for
+// when their DSN names none. The port forwards under the collation a client
+// asks for (#2810), and go-sql-driver's default, utf8mb4_general_ci, is one
+// the copy does not answer under. utf8mb4_0900_ai_ci is the one the port
+// itself logs in with, so asking for it costs a connection nothing; a
+// MariaDB test (MariaDB in its name, as the MariaDB job picks them) asks for
+// utf8mb4_unicode_ci, which MariaDB 10.11 has and utf8mb4_0900_ai_ci it does
+// not. The direct connections a test compares with ask for it too, so both
+// sides compare text alike. A test of the driver's own default opens its
+// connection with sql.Open.
+func testCollation(t *testing.T) string {
+	if strings.Contains(t.Name(), "MariaDB") {
+		return "utf8mb4_unicode_ci"
+	}
+	return "utf8mb4_0900_ai_ci"
+}
+
+// withTestCollation is dsn asking for testCollation, unless it names a
+// collation itself.
+func withTestCollation(t *testing.T, dsn string) string {
+	if strings.Contains(dsn, "collation=") {
+		return dsn
+	}
+	if strings.Contains(dsn, "?") {
+		return dsn + "&collation=" + testCollation(t)
+	}
+	return dsn + "?collation=" + testCollation(t)
+}
+
 func openFlashback(t *testing.T, addr, user, pass, db string) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=5s", user, pass, addr, db))
+	conn, err := sql.Open("mysql", withTestCollation(t, fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=5s", user, pass, addr, db)))
 	if err != nil {
 		t.Fatal(err)
 	}

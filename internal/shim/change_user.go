@@ -39,6 +39,13 @@ type UserChanger interface {
 	ResetConnection() error
 }
 
+// CollationChanger is a UserChanger told the collation a COM_CHANGE_USER
+// asks for, before ChangeUser: on MySQL the session takes it, as it took the
+// handshake's (#2810). A packet that carries none says nothing.
+type CollationChanger interface {
+	ChangeUserCollation(id uint16)
+}
+
 // ErrChangeUserRefused is what Session.HandleCommand returns when it closed
 // the connection after refusing a COM_CHANGE_USER or COM_RESET_CONNECTION.
 var ErrChangeUserRefused = errors.New("connection closed after a refused change of user")
@@ -68,6 +75,9 @@ var errChangeUserMalformed = mysql.NewError(mysql.ER_MALFORMED_PACKET, "malforme
 // changeUser) answers, and checks only that answer.
 type changeUserPacket struct {
 	user, schema string
+	// collation is the character set number after the schema, 0 when the
+	// packet ends before it.
+	collation uint16
 }
 
 func parseChangeUser(data []byte, capability uint32) (changeUserPacket, error) {
@@ -92,11 +102,15 @@ func parseChangeUser(data []byte, capability uint32) (changeUserPacket, error) {
 	// The schema is NUL-terminated; a client may end the packet right after
 	// the auth data when it names none.
 	if len(rest) > 0 {
-		schema, _, ok := bytes.Cut(rest, []byte{0})
+		schema, after, ok := bytes.Cut(rest, []byte{0})
 		if !ok {
 			return p, errChangeUserMalformed
 		}
 		p.schema = string(schema)
+		// Then the character set, two bytes, when the client sends more.
+		if capability&mysql.CLIENT_PROTOCOL_41 != 0 && len(after) >= 2 {
+			p.collation = uint16(after[0]) | uint16(after[1])<<8
+		}
 	}
 	return p, nil
 }
@@ -172,6 +186,9 @@ func (s *Session) changeUser(uc UserChanger, data []byte) any {
 	}
 	// What the old user prepared is not the new user's (MySQL drops it too).
 	s.dropStatements()
+	if cc, ok := uc.(CollationChanger); ok && p.collation != 0 {
+		cc.ChangeUserCollation(p.collation)
+	}
 	if err := uc.ChangeUser(p.user, p.schema, ticket); err != nil {
 		return closeAfter{err: err, why: "binding the new user failed"}
 	}

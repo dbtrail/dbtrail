@@ -188,6 +188,16 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   reset asks for no password. Both work under `mysql_native_password`;
   under `caching_sha2_password` a change of user takes the port's own
   password only, as logins are not offered there.
+- **The application's collation reaches the port through ProxySQL.**
+  ProxySQL passes on the collation the application asked for (measured
+  with ProxySQL 2.6.6: `mysql-default_collation_connection` does not
+  replace it), and the port opens the session on MySQL under it (#2810).
+  For the copy to answer, the application must ask for
+  `utf8mb4_0900_ai_ci` or `utf8mb4_unicode_ci`: in Go,
+  `collation=utf8mb4_0900_ai_ci` in the DSN; in Python with PyMySQL, the
+  same collation in `connect()`. An application on its driver's default
+  `utf8mb4_general_ci` (both of those) gets every answer from MySQL. The
+  `mysql` client asks for `utf8mb4_0900_ai_ci` already.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
   The MySQL clients page saves it too, under *A proxy in front*, for the
@@ -1085,20 +1095,47 @@ The decision, in order, for every statement:
    inside one week, and a past rule that held for less than five years and
    missed both months. An offset (`+02:00`) needs none of this.
 
-   **MariaDB 10.11.** The port asks the source for MySQL's default
-   collation, `utf8mb4_0900_ai_ci`. MariaDB 11.4 knows it; 10.11 does not
-   and would leave the connection in `utf8mb4_general_ci`, under which the
-   copy does not answer. So on a new connection to a MariaDB source the
-   port asks which collation the session got, and when it is not the one
-   it asked for it sends `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci`
-   before anything of the client's: one extra statement per connection on
-   MariaDB 11.4 and later, two on 10.11, none on MySQL (the statement that
-   asks for session tracking, below, is one more on all of them). The copy then
-   answers a connection that names no collation on every supported
-   version. A client that sets a collation itself keeps it: `SET NAMES
-   utf8mb4` with no `COLLATE` means `utf8mb4_general_ci` on 10.11, and
-   MySQL answers that connection (the log says so, once, with the
-   setting). Send `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci` instead.
+   **The collation and character set the client asked for.** A client
+   names a collation when it connects (the handshake carries its number),
+   and since #2810 the port opens the client's session on the source under
+   it, as MySQL would have: on MySQL `@@collation_connection` and the three
+   `character_set_*` variables read the same through the port as on a
+   direct connection, and so does every comparison they decide (`'10:47' <
+   '1045'` is false under `utf8mb4_general_ci` and true under
+   `utf8mb4_0900_ai_ci`). Before, every forwarded session ran under
+   `utf8mb4_0900_ai_ci` whatever was asked, and a `latin1` client read
+   UTF-8 bytes (a stored `é` as `C3 A9` instead of `E9`).
+
+   The port's own login to the source asks for `utf8mb4_0900_ai_ci`, so a
+   client that asked for that costs nothing more. Any other collation costs
+   two statements when the connection opens, before anything of the
+   client's: the port asks the source what its collation number means
+   (`information_schema.COLLATIONS`) and sends `SET NAMES`. A number the
+   source has no collation for, or a `SET NAMES` it refuses, leaves the
+   session under `utf8mb4_0900_ai_ci`, and the log says so once per
+   connection. A `COM_CHANGE_USER` gives the session the collation it
+   carries. After a `COM_RESET_CONNECTION` the session is what the source's
+   own reset leaves: on MySQL the server's global character sets and
+   collation (measured on 8.0.46: a session opened under `latin1` is under
+   `utf8mb4_0900_ai_ci` after a reset), on MariaDB the handshake's
+   character set under its default collation (`latin1` stays `latin1`; a
+   `utf8mb4_general_ci` session is under `utf8mb4_uca1400_ai_ci` after a
+   reset on 11.4 and later).
+
+   Whether the copy answers is the table above: only under a collation that
+   compares like `utf8mb4_0900_ai_ci` and with results in `utf8mb4`. That
+   matters for drivers whose default is another collation:
+   go-sql-driver/mysql asks for `utf8mb4_general_ci`, so on MySQL and on
+   MariaDB 10.11 a Go client that names no collation is now answered by
+   MySQL on every statement (MariaDB 11.4 and later give that handshake
+   `utf8mb4_uca1400_ai_ci` themselves, which the copy answers under). Ask for
+   one the copy reproduces in the DSN: `collation=utf8mb4_0900_ai_ci` on
+   MySQL and MariaDB 11.4 and later (PyMySQL, whose default is the same
+   `utf8mb4_general_ci`: `collation='utf8mb4_0900_ai_ci'` in `connect()`),
+   `collation=utf8mb4_unicode_ci` on
+   MariaDB 10.11 (which has no `utf8mb4_0900_ai_ci` and gives a client that
+   asks for it `utf8mb4_general_ci`, on a direct connection as through the
+   port). A client's own `SET NAMES` later in the session works as before.
 
    **A setting changed inside a stored function.** A `SELECT` that calls a
    stored function is a read by its text, and the function can run `SET`
@@ -2276,7 +2313,10 @@ What this is and is not:
     refused as well: the server reads that as the start of a comment under
     `latin1` and not under `utf8mb4`, and the port cannot know which. A `SET NAMES` to a character set other than `utf8mb4`,
     `utf8`, `latin1`, `ascii` or `binary` is refused too: under `gbk` or
-    `sjis` the port could not tell where a string ends.
+    `sjis` the port could not tell where a string ends. For the same
+    reason a client that asks for such a character set when it connects
+    does not get it on a read-only port: its session stays under
+    `utf8mb4_0900_ai_ci`, and the log says so.
   - **What it cannot see.** The check reads the statement's text. A
     `SELECT` that calls a stored function, or reads a view built on one,
     looks like a read and is forwarded; if the function writes, MySQL runs
