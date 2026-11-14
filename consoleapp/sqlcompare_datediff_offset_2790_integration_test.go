@@ -103,7 +103,7 @@ func TestIntegrationPlainPortDateDiffOffset(t *testing.T) {
 		{expr: "datediff ( ' 2026-01-15 02:00:00.5+05:00 ' , d )", want: refused},
 		{expr: "DATEDIFF('2026-01-15T02:00:00+05:00', dt)", want: refused},
 		{expr: "DATEDIFF('2026-01-15 02:00:00+00:00', d)", want: refused},
-		{expr: "DATEDIFF('2026-01-15 02:00:00+0500', d)", want: refused}, // NULL on MySQL
+		{expr: "DATEDIFF('2026-01-15 02:00:00+0500', d)", want: refused},  // NULL on MySQL
 		{expr: "DATEDIFF('2026-01-15 02:00:00-00:00', d)", want: refused}, // NULL on MySQL
 		{expr: "DATEDIFF('2026-01-15 02:00:00+14:01', d)", want: refused}, // NULL on MySQL
 		{expr: "DATEDIFF('2026-01-15 02:00:00+05:00', NULL)", want: refused},

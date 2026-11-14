@@ -34,7 +34,7 @@ func TestUnrouted_dateDiffOffsetRefused(t *testing.T) {
 		"SELECT DATEDIFF(COALESCE('2026-01-15 02:00:00+0500', d), d) FROM t": offsetRefusal,
 		"SELECT DATEDIFF(d, '2026-01-15 02:00:00+05:00') FROM t LIMIT 1, 2":  offsetRefusal,
 		// Sent as written (a backslash): refused either way, never run.
-		`SELECT DATEDIFF(d, '2026-01-15 02:00:00+05:00') FROM t WHERE s = 'a\'b'`: "DATEDIFF",
+		`SELECT DATEDIFF(d, '2026-01-15 02:00:00+05:00') FROM t WHERE s = 'C:\temp'`: "DATEDIFF",
 	} {
 		_, err := h.HandleQuery(stmt)
 		refused(stmt, want, err)
@@ -58,8 +58,8 @@ func TestUnrouted_dateDiffOffsetRefused(t *testing.T) {
 	}
 
 	for stmt, want := range map[string]string{
-		"SELECT DATEDIFF('2026-01-15 02:00:00Z', d) FROM t":       "SELECT date_diff('day', CAST(d AS DATE), CAST('2026-01-15 02:00:00Z' AS DATE)) FROM t",
-		"SELECT DATEDIFF('2026-01-15 02:00:00 +05:00', d) FROM t": "SELECT date_diff('day', CAST(d AS DATE), CAST('2026-01-15 02:00:00 +05:00' AS DATE)) FROM t",
+		"SELECT DATEDIFF('2026-01-15 02:00:00Z', d) FROM t":          "SELECT date_diff('day', CAST(d AS DATE), CAST('2026-01-15 02:00:00Z' AS DATE)) FROM t",
+		"SELECT DATEDIFF('2026-01-15 02:00:00 +05:00', d) FROM t":    "SELECT date_diff('day', CAST(d AS DATE), CAST('2026-01-15 02:00:00 +05:00' AS DATE)) FROM t",
 		"SELECT DATEDIFF(d, dt), '2026-01-15 02:00:00+05:00' FROM t": "SELECT date_diff('day', CAST(dt AS DATE), CAST(d AS DATE)), '2026-01-15 02:00:00+05:00' FROM t",
 	} {
 		if _, err := h.HandleQuery(stmt); err != nil {
