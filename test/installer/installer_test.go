@@ -388,3 +388,24 @@ func TestInstaller_aTakenMySQLPortIsLeftUnpublished(t *testing.T) {
 		t.Errorf("the router service lost more than its port mapping")
 	}
 }
+
+// A second installation beside a first (#2815: an installation serves one
+// database family, and the other family goes in an installation of its own):
+// the folder and the console's port are named, and the ports the first one
+// holds are handled as on any install. This is the command docs/install.md
+// gives, with the first installation's three ports taken.
+func TestInstaller_aSecondInstallationBesideAFirst(t *testing.T) {
+	r := install(t, "DBTRAIL_PORT=8091", "BUSY_PORTS=8090 9090 3309")
+	if r.failed || r.upCalls != 1 {
+		t.Fatalf("the second installation did not start (failed=%v, up=%d):\n%s", r.failed, r.upCalls, r.out)
+	}
+	c := r.compose(t)
+	if !strings.Contains(c, `"127.0.0.1:8091:8090"`) {
+		t.Errorf("the web interface is not on the port asked for:\n%s", portLines(c))
+	}
+	for _, taken := range []string{`"127.0.0.1:8090:8090"`, `"127.0.0.1:9090:9090"`, `"127.0.0.1:3309:3309"`} {
+		if strings.Contains(c, taken) {
+			t.Errorf("a port the first installation holds is published again (%s):\n%s", taken, portLines(c))
+		}
+	}
+}

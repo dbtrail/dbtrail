@@ -43,8 +43,10 @@ The index MySQL has the same requirements as for any source — see
 
 ## Install
 
-DBTrail captures PostgreSQL as a **first-class source**, in the same
-`bintrail-console watch` stack the [Compose quickstart](install.md) stands up.
+DBTrail captures PostgreSQL in the same `bintrail-console watch` stack the
+[Compose quickstart](install.md) stands up, in an installation of its own: an
+installation serves PostgreSQL servers, or MySQL and MariaDB servers, not both
+([one database family per installation](install.md#one-database-family-per-installation)).
 There are two ways in: the **web interface** (recommended: zero binaries to place)
 or the standalone **`bintrail-pg`** binary (for an existing index or a headless
 CLI deployment).

@@ -49,10 +49,12 @@ With a bare `docker run`, that restart is yours to set up.
   bundles one).
 - **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**
   ([10.11+](./mariadb.md), with 10.11, 11.4, 11.8 and 12.3 tested in CI) and
-  **PostgreSQL** ([beta](./postgres.md), 14+). Both are first-class sources in
-  the web interface (**+ Add server** → pick the source type); PostgreSQL also
-  ships a standalone `bintrail-pg` binary for headless/CLI deployments. Each has
-  its own prerequisites; see the linked guide.
+  **PostgreSQL** ([beta](./postgres.md), 14+). Each is added in the web
+  interface (**+ Add server** → pick the source type); PostgreSQL also ships a
+  standalone `bintrail-pg` binary for headless/CLI deployments. Each has its
+  own prerequisites; see the linked guide. An installation serves one family:
+  MySQL and MariaDB together, or PostgreSQL. See
+  [One database family per installation](#one-database-family-per-installation).
 - Go 1.25+ (the module targets `go 1.25.11`) — only when building from source. The default `GOTOOLCHAIN=auto` fetches the right toolchain for you.
 
 ## Docker Compose (the bundled default)
@@ -198,6 +200,35 @@ and password, the servers you added, and the AI connection token live inside
 the container and are deleted the next time it is recreated, with nothing
 saying so. [Upgrading the stack](./docker.md#upgrading-the-stack) lists what
 else a stale file costs.
+
+## One database family per installation
+
+An installation serves MySQL and MariaDB servers, or PostgreSQL servers, not
+both. The first server you add decides which, and a server of the other family
+is refused with a message that says so. Nothing is changed by the refusal.
+
+MySQL and MariaDB support and PostgreSQL support are tested and released apart,
+and the two are never run together in one process, so the combination is not
+offered. This is about the databases DBTrail captures from. Where DBTrail keeps
+its own data (the index) is MySQL for every family.
+
+To use DBTrail with both, run a second installation beside the first, in a
+folder of its own and on a port of its own:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dbtrail/dbtrail/main/install.sh | DBTRAIL_DIR=./dbtrail-postgres DBTRAIL_PORT=8091 sh
+```
+
+The second installation has its own containers, its own index and its own web
+interface on that port. The ports the first one holds are handled as on any
+install: metrics move to a free port, and the MySQL port (3309) is left
+unpublished when it is taken, which a PostgreSQL installation does not use.
+
+If the servers file already holds both families (it was edited by hand, or
+comes from a version before this rule), nothing stops: every server is still
+captured and served, an error in the log names the servers, and no server can
+be added or edited until one family is left. Remove the servers of one family
+to get there.
 
 ## Try it without installing anything (30 seconds)
 

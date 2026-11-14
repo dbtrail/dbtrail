@@ -122,6 +122,10 @@ All of them: [Limitations](https://www.dbtrail.com/docs/limitations/).
 DBTrail never needs the binlog files on disk, which is why managed cloud
 databases work.
 
+Each DBTrail installation serves one database family: MySQL and MariaDB, or
+PostgreSQL (beta). See
+[one database family per installation](docs/install.md#one-database-family-per-installation).
+
 ## Who builds it
 
 DBTrail is built by Daniel Guzman-Burgos, former MySQL Technical Lead at
