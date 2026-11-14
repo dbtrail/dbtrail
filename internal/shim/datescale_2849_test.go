@@ -13,7 +13,7 @@ import (
 
 // #2849: a date and time is printed with the digits MySQL declares it with,
 // never fewer than the value holds; -1 is as before.
-func TestDateTimeText(t *testing.T) {
+func TestMySQLDateTimeText(t *testing.T) {
 	at := func(us int) time.Time { return time.Date(2026, 3, 31, 23, 15, 0, us*1000, time.UTC) }
 	for _, c := range []struct {
 		us, digits int
@@ -31,7 +31,7 @@ func TestDateTimeText(t *testing.T) {
 		{123456, 3, "2026-03-31 23:15:00.123456"},
 		{120000, 1, "2026-03-31 23:15:00.12"},
 	} {
-		if got := dateTimeText(at(c.us), c.digits); got != c.want {
+		if got := mysqlDateTimeText(at(c.us), c.digits); got != c.want {
 			t.Errorf("%dus with %d digits = %q, want %q", c.us, c.digits, got, c.want)
 		}
 	}

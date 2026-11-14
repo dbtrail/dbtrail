@@ -1684,7 +1684,7 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*
 			applyDuckType(rs.Fields[i], c.Type)
 		}
 		// The header goes out before the rows are read: a value with more
-		// digits than this declares keeps them in its text (dateTimeText).
+		// digits than this declares keeps them in its text (mysqlDateTimeText).
 		digits, _ := answerDateDigits(res)
 		applyDateScales(rs.Fields, res, digits)
 		return rs, nil
@@ -1706,7 +1706,7 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*
 				// A value with more digits than the declaration read: the
 				// column is declared with the value's, never fewer, so a
 				// client that reads a value by its column's digits keeps
-				// them all (dateTimeText).
+				// them all (mysqlDateTimeText).
 				if text, ok := c.([]byte); ok {
 					if dot := bytes.LastIndexByte(text, '.'); dot >= 0 && len(text)-dot-1 > d {
 						digits[j] = len(text) - dot - 1
@@ -1888,7 +1888,7 @@ func freeSQLCellDigits(v any, duckType string, loc *time.Location, binary bool, 
 				if loc != nil && isInstantType(duckType) {
 					t = t.In(loc)
 				}
-				return []byte(dateTimeText(t, digits)), nil
+				return []byte(mysqlDateTimeText(t, digits)), nil
 			}
 		}
 		return []byte(x), nil
@@ -1971,12 +1971,12 @@ func floatType(duckType string) (single, ok bool) {
 	return false, false
 }
 
-// dateTimeText is a date and time in MySQL's spelling, with digits
+// mysqlDateTimeText is a date and time in MySQL's spelling, with digits
 // fractional seconds, or as many as the value needs for -1. A digit past
 // digits that is not zero is printed anyway: the declaration says fewer
 // than the value holds, which only a declaration read wrong does, and
 // dropping the digit would change the value.
-func dateTimeText(t time.Time, digits int) string {
+func mysqlDateTimeText(t time.Time, digits int) string {
 	if digits < 0 {
 		return t.Format("2006-01-02 15:04:05.999999")
 	}
