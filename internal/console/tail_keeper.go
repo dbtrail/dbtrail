@@ -243,6 +243,11 @@ type tailKeeper struct {
 	// name repeats.
 	parent string
 	dir    string
+	// dirLock holds an flock on dir for as long as the directory may be
+	// read (#2819), so another process's sweep keeps it however long no tail
+	// changes; nil when it could not be taken. Let go only after dir is
+	// removed (removeDirAfter), or once dir is found gone (refreshLocked).
+	dirLock *os.File
 	// budget bounds the tails (tailBudget); keepOld how long a replaced
 	// version stays for a statement that may still read it; idle how long
 	// a tail no statement asked for is kept.
@@ -345,6 +350,11 @@ func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables 
 }
 
 func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineTable) (map[string]tailView, error) {
+	// A tail no change touched since its last write is handed out as it was
+	// written (view), with no write to find its file gone: so asked here, at
+	// every update. Not of a closed keeper, whose directory is removed on
+	// purpose (removeDirAfter) and which nothing reads again.
+	k.dirCheckLocked()
 	start, from, written, rows := k.now(), k.mark.ID, k.written, k.rowsWritten
 	var read, folded time.Duration
 	// The newest event FIRST: every read below is bounded by it, so the
@@ -1069,7 +1079,30 @@ func (k *tailKeeper) write(t views.BaselineTable, e *tailEntry) error {
 func (k *tailKeeper) ensureDir() (string, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	// The directory a statement's sandbox allows must be the one its tails
+	// are in: one found gone is made again here, not after.
+	k.dirCheckLocked()
 	return k.makeDir()
+}
+
+// dirCheckLocked makes k forget a directory found gone (dirGoneLocked): it
+// warns, lets the lock go, and drops every tail, so the next write makes a new
+// directory and every tail is built again from the index. The files of the
+// old one are forgotten, not removed later: they are gone, or under a name
+// another now holds. Not for a closed keeper, whose directory is removed on
+// purpose (removeDirAfter) and which nothing reads again.
+func (k *tailKeeper) dirCheckLocked() {
+	if k.life.Err() != nil || !k.dirGoneLocked() {
+		return
+	}
+	slog.Warn("Engine Routing: the directory of the copy's tails was removed while this process used it; "+
+		"it is made again and every tail is built again from the index", "dir", k.dir)
+	if k.dirLock != nil {
+		k.dirLock.Close()
+	}
+	k.dir, k.dirLock = "", nil
+	k.dropAll()
+	k.orphans = nil
 }
 
 func (k *tailKeeper) makeDir() (string, error) {
@@ -1081,9 +1114,69 @@ func (k *tailKeeper) makeDir() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		k.dir = dir
+		// Locked before any file is written into it: until then only its
+		// age keeps it from another process's sweep (sweepTailDirs).
+		lock, err := lockTailDir(dir)
+		if err != nil {
+			tailDirLockWarn.Do(func() {
+				slog.Warn("Engine Routing: the directory of the copy's tails could not be locked; another process's start "+
+					"keeps it only while a tail changed in the last 30 minutes, and this one makes it again if it is removed",
+					"dir", dir, "error", err)
+			})
+		}
+		k.dir, k.dirLock = dir, lock
 	}
 	return k.dir, nil
+}
+
+// tailDirLockWarn says once per process that a directory could not be
+// locked: every keeper of the process would fail the same way.
+var tailDirLockWarn sync.Once
+
+// dirGoneLocked says the directory k made is no longer there: removed under
+// it (by hand, by a cleaner of the temporary directory, by the sweep of a
+// version from before the lock), or replaced by another under its name. Its
+// tails' files went with it. A Stat that fails otherwise cannot tell, and the
+// next write says so.
+func (k *tailKeeper) dirGoneLocked() bool {
+	if k.dir == "" {
+		return false
+	}
+	now, err := os.Stat(k.dir)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	if !now.IsDir() {
+		return true
+	}
+	if k.dirLock == nil {
+		return false
+	}
+	held, err := k.dirLock.Stat()
+	return err == nil && !os.SameFile(held, now)
+}
+
+// removeDirAfter removes k's directory once d has passed, the time a statement
+// may still read its last version, and only then lets its lock go: let go
+// before, an idle directory is another process's to sweep while a statement
+// reads it. The directory is the one k has when d has passed, as a build
+// still running when k was closed may have made it.
+func (k *tailKeeper) removeDirAfter(d time.Duration) {
+	time.AfterFunc(d, func() {
+		k.mu.Lock()
+		dir, lock := k.dir, k.dirLock
+		k.mu.Unlock()
+		if dir != "" {
+			if err := os.RemoveAll(dir); err != nil {
+				// What stays, no process holds: the sweep of a later start
+				// removes it once it is 30 minutes old.
+				slog.Debug("Engine Routing: a replaced keeper's tails could not be removed", "dir", dir, "error", err)
+			}
+		}
+		if lock != nil {
+			lock.Close()
+		}
+	})
 }
 
 // retire moves every file of e's chain among the old ones.

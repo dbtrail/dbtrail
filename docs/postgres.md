@@ -536,6 +536,82 @@ What to know:
 - One index database follows one PostgreSQL source: the fold reads where it
   stops from the whole index.
 
+### SQL on the copy from `psql`
+
+`bintrail-console pg-router` opens a PostgreSQL-protocol port, so a PostgreSQL
+client runs read-only SQL on the copy of a PostgreSQL server:
+
+```bash
+bintrail-console pg-router --listen 127.0.0.1:5433
+```
+
+```
+psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app"
+
+SELECT status, count(*) AS n FROM orders GROUP BY status ORDER BY n DESC;
+```
+
+It is a process of its own. It runs beside `bintrail-console watch`, reads the
+servers the web interface manages and never writes them, and shares nothing
+at run time with the MySQL port (`bintrail-console router`): its own
+listener, its own workers, its own memory.
+
+- **The database name picks the server**: its id or its name, as the web
+  interface shows them. The username is free, except that a server's
+  application login, used as the username, opens that server whatever database
+  is named.
+- **The password** is the one created for SQL clients in the web interface
+  (`dbtrail port on`), the access token, or the application login's own. The
+  port is open while the port for SQL clients is turned on in the web
+  interface, and closes with every connection when it is turned off or its
+  password is replaced. Switching Engine Routing, which is the MySQL port's,
+  does not disconnect anyone here.
+- **PostgreSQL servers only.** A MySQL or MariaDB server is refused with an
+  error that names it; its copy is read through the MySQL port.
+- **As of the last snapshot update.** Fresh mode does not apply to a
+  PostgreSQL server, so an answer is as old as the copy's last update, and
+  this process keeps no files of recent changes.
+- **The copy answers every statement.** Nothing is sent to the source, and a
+  statement that is not a read is refused with an error. Unqualified names
+  resolve in `public`. NULL order, integer division and text comparison follow
+  PostgreSQL, and each type reads as [the table below](#how-each-type-reads-in-sql-on-the-copy)
+  says; the differences listed there apply here too.
+- **Every column is sent as text**, written the way PostgreSQL writes a value
+  of that kind (`t`/`f`, `{a,b}`, `2026-03-04 05:06:07+00`). `psql` shows them
+  as it would; a driver that asks for a column's type is told `text`.
+- **A column with no name of its own gets the copy's name for it**: `count(*)`
+  is headed `count_star()`, not `count`. Give it a name (`count(*) AS n`) when
+  the heading matters.
+- **Simple query protocol only**: `psql` uses it; a `pgx` client sets
+  `QueryExecModeSimpleProtocol`. Prepared statements are refused with an error.
+- **This machine only.** The port asks for the password in clear text and has
+  no TLS, so `--listen` takes an address of this machine alone (`127.0.0.1`,
+  `::1`, `localhost`) and the process refuses to start with any other.
+- `SET search_path`, `SET ROLE` and a `SET TimeZone` other than UTC are
+  refused: the port resolves names in `public` and answers in UTC, so write the
+  schema in the name and convert zones in the statement. Other `SET`s, `BEGIN`,
+  `COMMIT` and `ROLLBACK` are accepted and change nothing.
+- A result with more rows than the port's row cap, or with a cell longer than
+  the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
+  the long column.
+- Time travel (`_flashback`, `_snapshot`, `AS OF`) is not served on this port;
+  use `bintrail-pg flashback`, below.
+
+What the process may use is said where it is started, with small defaults so
+it fits beside capture:
+
+| Flag | Environment variable | Default | What it does |
+|---|---|---|---|
+| `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens. An address of this machine only |
+| `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 2 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
+| `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
+| `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
+| `--max-connections` | `BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` | 16 | Clients connected at once (1 to 1024). One more is refused with an error |
+| `--max-wait` | `BINTRAIL_PG_ROUTER_MAX_WAIT` | none | How long a statement waits for its turn before it is refused |
+| `--sql-port-max-rows` | `BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS` | the port's row cap | Most rows one statement returns |
+| `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
+| `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |
+
 ### Interactive `AS OF` from `psql`
 
 The `_flashback` / `_snapshot` / `AS OF` time-travel grammar is also available

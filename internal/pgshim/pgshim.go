@@ -87,6 +87,10 @@ type Config struct {
 	// is what an empty/omitted allowed_schemas means; nil disables the gate
 	// for every tenant.
 	AllowedSchemas map[string][]string
+	// Login, when set, makes this a port that runs SQL on the copy (login.go):
+	// it decides who may connect and what the connection is bound to, and
+	// IndexDB, ShimConfig, Auth and AllowedSchemas above are not read.
+	Login LoginFunc
 	// Logger; nil → slog.Default().
 	Logger *slog.Logger
 	// MaxConns caps concurrent connections; 0 = unlimited.
@@ -111,6 +115,10 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 		sem = make(chan struct{}, cfg.MaxConns)
 	}
 
+	// How many refusals for a full port may be in the middle of being said at
+	// once; past it a connection is closed without a word.
+	refusals := make(chan struct{}, 16)
+
 	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
@@ -132,11 +140,9 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 			select {
 			case sem <- struct{}{}:
 			default:
-				// Cap breached pre-handshake: no clean way to send a PG
-				// ErrorResponse before the client's startup, so close. Rare.
-				logger.Warn("pgshim connection refused: --max-connections reached",
+				logger.Warn("pgshim connection refused: the connection limit is reached",
 					"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
-				conn.Close()
+				refuseFull(conn, cfg.MaxConns, refusals)
 				continue
 			}
 		}
@@ -149,6 +155,34 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 			handleConn(ctx, c, cfg, logger)
 		}(conn)
 	}
+}
+
+// refuseFull tells a client that the port has all the connections it takes,
+// in an error it can read (53300, too_many_connections), and closes. The
+// error can only be sent as the answer to the client's start-up message, so
+// that is read first, for at most a few seconds, on a goroutine of its own:
+// the accept loop does not wait on a client that sends nothing. When too many
+// refusals are already being said the connection is closed without one.
+func refuseFull(c net.Conn, max int, refusals chan struct{}) {
+	select {
+	case refusals <- struct{}{}:
+	default:
+		_ = c.Close()
+		return
+	}
+	go func() {
+		defer func() { <-refusals }()
+		defer c.Close()
+		// What is read here comes from a client nobody identified: a fault
+		// reading it ends this refusal, not the process.
+		defer func() { _ = recover() }()
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		be := pgproto3.NewBackend(c, c)
+		if startup, err := negotiateStartup(c, be); err != nil || startup == nil {
+			return
+		}
+		sendFatal(be, "53300", fmt.Sprintf("the port's limit of %d connections at once is reached; try again in a moment", max))
+	}()
 }
 
 // nextBackoff mirrors the MySQL serveLoop's accept backoff: 100ms → 5s cap.
@@ -167,6 +201,10 @@ func nextBackoff(cur time.Duration) time.Duration {
 // decline), cleartext auth, then a simple-query command loop over its own
 // shim.Handler.
 func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger) {
+	if cfg.Login != nil {
+		handleLoginConn(ctx, c, cfg, logger)
+		return
+	}
 	defer c.Close()
 
 	// Per-connection context: cancelling it aborts an in-flight resolve
@@ -235,6 +273,12 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 
 	sess := &session{be: be, h: h, currentDB: database, logger: logger}
 
+	commandLoop(be, sess)
+}
+
+// commandLoop answers the connection's commands until the client leaves or a
+// write fails.
+func commandLoop(be *pgproto3.Backend, sess *session) {
 	// skipUntilSync implements the PostgreSQL extended-query error rule: once we
 	// reject an extended-protocol message we must discard everything until the
 	// client's Sync, then release it with ReadyForQuery.
@@ -320,25 +364,13 @@ func negotiateStartup(c net.Conn, be *pgproto3.Backend) (*pgproto3.StartupMessag
 // ER_ACCESS_DENIED posture; it does not attempt to equalise the cost of the
 // tenant-map lookup itself (the endpoint is loopback-default / TLS-fronted).
 func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string) error {
-	be.Send(&pgproto3.AuthenticationCleartextPassword{})
-	if err := be.Flush(); err != nil {
-		return err
-	}
-	if err := be.SetAuthType(pgproto3.AuthTypeCleartextPassword); err != nil {
-		return err
-	}
-	msg, err := be.Receive()
+	password, err := readPassword(be)
 	if err != nil {
 		return err
 	}
-	pw, ok := msg.(*pgproto3.PasswordMessage)
-	if !ok {
-		sendFatal(be, "08P01", fmt.Sprintf("expected a password message, got %T", msg))
-		return fmt.Errorf("expected PasswordMessage, got %T", msg)
-	}
 	expected, found, cerr := auth.LookupPassword(user)
 	match := found && cerr == nil &&
-		subtle.ConstantTimeCompare([]byte(pw.Password), []byte(expected)) == 1
+		subtle.ConstantTimeCompare([]byte(password), []byte(expected)) == 1
 	if !match {
 		sendFatal(be, "28P01", fmt.Sprintf("password authentication failed for user %q", user))
 		return fmt.Errorf("auth failed for user %q", user)
@@ -346,17 +378,55 @@ func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string) error
 	return nil
 }
 
+// readPassword asks the client for its password in clear text and returns
+// what it sent. A client that answers with anything else is told so (08P01)
+// and the error says the connection is over.
+func readPassword(be *pgproto3.Backend) (string, error) {
+	// Before anyone is authenticated a message is a password and nothing
+	// else. The protocol library sizes its buffer from the length a message
+	// announces and has no ceiling of its own, so without one a client that
+	// holds no credential could announce two gigabytes and have them set
+	// aside in this process.
+	be.SetMaxBodyLen(maxPasswordMessage)
+	be.Send(&pgproto3.AuthenticationCleartextPassword{})
+	if err := be.Flush(); err != nil {
+		return "", err
+	}
+	if err := be.SetAuthType(pgproto3.AuthTypeCleartextPassword); err != nil {
+		return "", err
+	}
+	msg, err := be.Receive()
+	if err != nil {
+		return "", err
+	}
+	pw, ok := msg.(*pgproto3.PasswordMessage)
+	if !ok {
+		sendFatal(be, "08P01", fmt.Sprintf("expected a password message, got %T", msg))
+		return "", fmt.Errorf("expected PasswordMessage, got %T", msg)
+	}
+	return pw.Password, nil
+}
+
 // sendAuthOK finishes the handshake: AuthenticationOk, the ParameterStatus set a
 // PostgreSQL client reads at startup, then ReadyForQuery(idle). BackendKeyData is
 // intentionally omitted — it only backs query cancellation, which we do not
 // implement.
 func sendAuthOK(be *pgproto3.Backend) {
+	// From here on a message is a statement: a larger ceiling, still one.
+	be.SetMaxBodyLen(maxStatementMessage)
 	be.Send(&pgproto3.AuthenticationOk{})
 	for _, ps := range startupParameters {
 		be.Send(&pgproto3.ParameterStatus{Name: ps[0], Value: ps[1]})
 	}
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 }
+
+// The most bytes one client message may announce: a password before the
+// login, a statement after it. A longer one ends the connection.
+const (
+	maxPasswordMessage  = 64 << 10
+	maxStatementMessage = 16 << 20
+)
 
 // startupParameters are the ParameterStatus values psql/libpq expect after
 // AuthenticationOk. server_version carries a leading numeric psql parses.

@@ -680,8 +680,9 @@ The decision, in order, for every statement:
    gives itself (`AS d`), which may stand for text; `NOW()` made a date and then
    stepped (`DATE(NOW()) - INTERVAL 1 DAY`); `UTC_DATE` and `UTC_TIMESTAMP`
    without parentheses; `STR_TO_DATE`,
-   `TIMESTAMPDIFF`, `TIMEDIFF`, a `DATEDIFF` that is not two arguments
-   (see below), `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
+   a `TIMESTAMPDIFF` outside the rules below, `TIMEDIFF`, a `DATEDIFF` that
+   is not two arguments (see below), a call of a function whose name starts
+   with `_bintrail_` (the copy's own functions, which MySQL does not have), `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
    CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
    JSON functions and the `->`/`->>` operators, a backslash inside a string
@@ -764,8 +765,8 @@ The decision, in order, for every statement:
      sorted, a `UNION`), the format stays MySQL's, because there the `:`
      can stand against a digit, which MySQL sorts after it and the copy
      before it.
-   - `TIMESTAMPDIFF` and `TIMEDIFF` stay on MySQL, and so does a `DATEDIFF`
-     with another number of arguments.
+   - `TIMEDIFF` stays on MySQL, and so does a `DATEDIFF` with another number
+     of arguments. `TIMESTAMPDIFF` has rules of its own, below.
 
    `DATE_SUB(d, INTERVAL n unit)` and its synonym `SUBDATE(d, INTERVAL n
    unit)`, the way a report writes "since", go to the copy since #2611 when
@@ -803,6 +804,66 @@ The decision, in order, for every statement:
    - `SUBDATE(d, n)`, the form with a number of days, is not rewritten: the
      copy has no such function, and MySQL answers. On the port without
      routing nothing changes: `DATE_SUB` there is still the copy's own.
+
+   A date stepped forward or back by an `INTERVAL` in any other spelling
+   (`DATE_ADD(d, INTERVAL n unit)`, its synonym `ADDDATE(d, INTERVAL n
+   unit)`, `d + INTERVAL n unit`, `d - INTERVAL n unit`) is checked for a
+   result outside the years 1 to 9999 since #2800. There MySQL answers `NULL`
+   and the copy would compute a year of five digits or the year 0: a value
+   MySQL never sends, or a row a `WHERE` or a `COUNT` would keep where
+   MySQL's `NULL` leaves it out. The port sends each step as a function of
+   the copy's session that steps the date and declines the statement out of
+   that range, which then goes to MySQL under `copy_columns_differ`; inside
+   it the copy's answer is what it was, to `9999-12-31 23:59:59`. The range
+   is read on the session's wall clock, so a `TIMESTAMP` that lands on the
+   last second of 9999 in UTC is past it five hours east. Unlike `DATE_SUB`,
+   what is stepped is not narrowed: a `DATE` plus an `INTERVAL` of days is
+   still the copy's, shown as a date and time (see the known differences).
+   A step the port cannot send that way with certainty stays on MySQL: the
+   `INTERVAL` written first (`INTERVAL 1 DAY + d`), an amount that is not a
+   whole number of at most nine digits written in the statement, quoted or
+   not (`INTERVAL -1 DAY`, which the copy refuses; `1.5`, which MySQL rounds
+   and the copy does not; a placeholder; an expression), an amount past every
+   date of the years 1 to 9999, a `TIME` stepped, a placeholder in what is
+   stepped, `ADDDATE(d, n)` with a number of days, and arithmetic that binds
+   tighter than `+` right before what is stepped (`a - d + INTERVAL 1 DAY`,
+   `2 * d + ...`) or right after the unit (`d + INTERVAL 1 DAY * 2`).
+   `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()`, `UTC_DATE()` and the clock
+   keywords stepped by a number of at most a thousand years cannot leave the
+   range, and are sent as written.
+
+   `TIMESTAMPDIFF(unit, a, b)`, the way a report writes an age or a delay,
+   goes to the copy since #2611 when its answer is MySQL's. MySQL counts
+   whole units from `a` to `b` and drops the rest: from January 31 to
+   February 28 is no month, from 10:00 to 09:59:59 the next month is no
+   month either, and a negative count drops its rest toward zero. The copy
+   has no `TIMESTAMPDIFF`, and its `date_diff` counts the boundaries a unit
+   crosses (one month from January 31 to February 1), so the port sends
+   MySQL's call as a function of the copy's session that counts as MySQL
+   does. So `WHERE TIMESTAMPDIFF(DAY, created_at, NOW()) > 30` is the
+   copy's. The rules:
+   - The unit is one of `MICROSECOND`, `SECOND`, `MINUTE`, `HOUR`, `DAY`,
+     `WEEK`, `MONTH`, `QUARTER` and `YEAR`, in any case. `SQL_TSI_DAY` and
+     MySQL's other `SQL_TSI_` spellings stay on MySQL.
+   - Each of `a` and `b` is a `DATE` column, a `DATETIME` or `TIMESTAMP`
+     column declared without fractional seconds, named as a bare column, or
+     `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()`, `UTC_DATE()` or
+     `CURRENT_TIMESTAMP`. A `DATE` counts from its midnight on both sides. A
+     `TIMESTAMP` is read on the session's wall clock, as MySQL reads it, so
+     from January 31 20:00 UTC to February 28 20:00 UTC is no month under
+     UTC and one month under `+05:00` on both. It needs a session zone of UTC
+     or a fixed offset: under a zone name, a wall clock at a clock change
+     can put no minute between two instants an hour apart. Everything else
+     stays on MySQL, counted as `copy_columns_differ`: text (MySQL reads
+     `'20260115'` as a date), a string, a placeholder, an expression, a
+     `DATETIME(6)` (the port cannot tell such a column from one the copy
+     keeps as text), a column whose name the statement also gives a select
+     item, and a statement with a subquery or a `WITH`.
+   - Arithmetic on the result (`+ 1`, one count minus another, `AVG`) is
+     MySQL's, as it is on a date column. A division and a `SUM` are not
+     held back yet, the same as over an integer column (#2806).
+   - On the port without routing nothing changes: `TIMESTAMPDIFF` there is
+     refused, with `date_diff` as the copy's way to count.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):
