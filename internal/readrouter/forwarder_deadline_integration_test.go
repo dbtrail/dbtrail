@@ -84,7 +84,7 @@ func TestIntegrationForwarder_deadlineKeepsTheSession(t *testing.T) {
 		t.Errorf("thread %d then %d, in a transaction %v: the session was not kept", id, fw.ThreadID(), fw.InTransaction())
 	}
 	buf, err := run(context.Background(), "SELECT @kept")
-	if err != nil || len(buf.Rows) != 1 || fmt.Sprint(buf.Rows[0][0]) != "7" {
+	if err != nil || len(buf.Rows) != 1 || cellText(buf.Rows[0][0]) != "7" {
 		t.Errorf("SELECT @kept after the stop: rows %v, err %v, want 7", buf.Rows, err)
 	}
 

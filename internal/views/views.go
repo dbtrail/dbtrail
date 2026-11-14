@@ -195,6 +195,10 @@ type BaselineTable struct {
 	// Float are the table's FLOAT columns (baseline.TableFooter.Float,
 	// #2827). Set with SchemaKnown.
 	Float []string
+	// FixedPrint are the table's FLOAT and DOUBLE columns MySQL prints with
+	// fixed decimals or zero padding (baseline.TableFooter.FixedPrint,
+	// #2829). Set with SchemaKnown.
+	FixedPrint []string
 	// UnixTimeSafe and UnixTimeOther split the table's columns into those
 	// UNIX_TIMESTAMP(col) gives the same number of on the copy as on MySQL and
 	// the rest (baseline.TableFooter.UnixTimeSafe, #2493). Set with SchemaKnown.

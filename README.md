@@ -117,7 +117,7 @@ All of them: [Limitations](https://www.dbtrail.com/docs/limitations/).
 | Amazon Aurora MySQL | Yes (verified) | Yes (verified) |
 | Google Cloud SQL for MySQL | Should work, please report issues | Should work |
 | MariaDB 10.11+, including Amazon RDS for MariaDB | Yes | Yes. See [MariaDB source](docs/mariadb.md) |
-| PostgreSQL 14+ | One-time copy only, no scheduled update yet | Beta. See [PostgreSQL source](docs/postgres.md) |
+| PostgreSQL 14+ | Beta. Scheduled updates run; a table created later enters with the next full snapshot | Beta. See [PostgreSQL source](docs/postgres.md) |
 
 DBTrail never needs the binlog files on disk, which is why managed cloud
 databases work.

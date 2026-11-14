@@ -246,6 +246,13 @@ type Session struct {
 	// client writes MySQL: the MySQL port, routed or not. The SQL card's
 	// reader writes the copy's dialect and keeps DuckDB's.
 	MySQLClock bool
+	// MySQLText says the answer leaves as MySQL's text, on the MySQL port,
+	// routed or not (#2829). Over a FLOAT or DOUBLE column MySQL prints with
+	// fixed decimals or zero padding, which the copy cannot print as MySQL
+	// does, a routed statement is declined (StrictStar) and one on the port
+	// without routing is answered with a warning that says so. The SQL card
+	// shows the copy's own values and leaves it off.
+	MySQLText bool
 	// SelectLimit is MySQL's sql_select_limit: the most rows a SELECT with no
 	// LIMIT of its own returns. Zero is no limit. It never raises the cap:
 	// at or under Limits.MaxRows the result is cut at it and NOT reported as
@@ -406,6 +413,10 @@ type Result struct {
 	// Note is a sentence the caller adds for the reader, set by the parent
 	// and never by the worker (#2210: the answer came from an earlier copy).
 	Note string `json:"-"`
+	// PrintNote is another such sentence: a column the MySQL port without
+	// routing prints without the decimals or zero padding MySQL gives it
+	// (#2829). Set by the parent, never by the worker.
+	PrintNote string `json:"-"`
 	// Spool holds the rows instead of Rows (which is then nil) when the
 	// result passed MaxResultBytes and Limits.SpoolMaxBytes let it go to a
 	// file. The caller reads it and must Close it, which removes the file.

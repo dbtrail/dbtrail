@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -572,7 +573,11 @@ func (h *Handler) sendSpooled(res *mysql.Result, err error) (*mysql.Result, erro
 			return fmt.Errorf("row %d of the result file has %d cells for %d columns", sent+1, len(cells), len(sp.columns))
 		}
 		for j, c := range cells {
-			row[j] = freeSQLCell(c, sp.columns[j].Type, sp.loc)
+			cell, err := freeSQLCell(c, sp.columns[j].Type, sp.loc, sp.binary)
+			if err != nil {
+				return cellError(err, sp.columns, j, sent)
+			}
+			row[j] = cell
 		}
 		if wireErr = w.writeRow(row); wireErr != nil {
 			return wireErr
@@ -1357,9 +1362,30 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// Truncated (sqlsandbox.Session.SelectLimit).
 		return nil, rowCapError(qstr, len(res.Rows), vars.selectLimit)
 	}
-	rs, err := freeSQLResultset(res, vars.loc)
+	if res.Spool != nil {
+		// A result in a file is sent after the routing ladder is done, when
+		// nothing can be forwarded any more: what freeSQLResultset refuses
+		// for rows in memory is looked for in the file now.
+		if err := spoolNotFinite(res.Spool, res.Columns); err != nil {
+			if errors.Is(err, errNotFinite) {
+				return nil, notFiniteRefusal(err)
+			}
+			if errors.Is(err, errFloatCell) {
+				h.logger.Error("free sql: a FLOAT or DOUBLE cell of a large result is not a number", "err", err)
+				return nil, fmt.Errorf("free sql: build resultset: %w", err)
+			}
+			// Under routing the ladder forwards the statement to MySQL.
+			h.logger.Warn("free sql: a large result's file could not be read; not sent", "err", err)
+			return nil, mysql.NewError(mysql.ER_UNKNOWN_ERROR, fmt.Sprintf("the result could not be read: %v", err))
+		}
+	}
+	rs, err := freeSQLResultset(res, vars.loc, binary || h.buffered)
+	if errors.Is(err, errNotFinite) {
+		return nil, notFiniteRefusal(err)
+	}
 	if err != nil {
-		// Only a worker bug (a row with the wrong column count) gets here.
+		// Only a worker bug (a row with the wrong column count, a FLOAT or
+		// DOUBLE cell that is no number) gets here.
 		h.logger.Error("free sql: build resultset", "err", err)
 		return nil, fmt.Errorf("free sql: build resultset: %w", err)
 	}
@@ -1383,6 +1409,16 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// own: MySQL has no code for it, so 1105, unless a cut cell's 1262
 		// is the other warning of this statement.
 		warnings = append(warnings, res.Note)
+		if res.TruncatedCells == 0 {
+			code = mysql.ER_UNKNOWN_ERROR
+		}
+	}
+	if res.PrintNote != "" {
+		// A column printed without the decimals or zero padding MySQL
+		// gives it (#2829): a note of the port's own too, 1105 for the same
+		// reason (MySQL has no code for it, and 1265, data truncated, would
+		// say the value was cut, which it is not).
+		warnings = append(warnings, res.PrintNote)
 		if res.TruncatedCells == 0 {
 			code = mysql.ER_UNKNOWN_ERROR
 		}
@@ -1613,7 +1649,11 @@ func (h *Handler) freeSQLError(err error) error {
 // bytes: BuildSimpleTextResultset fixes a column's wire type from its first
 // non-null row, and a column mixing Go types across rows is an error there.
 // loc is the session's time zone, nil for UTC: an instant is printed in it.
-func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Resultset, error) {
+// binary says the answer is re-encoded for a prepared statement
+// (binaryResultset), so a FLOAT or DOUBLE cell keeps its exact value
+// (freeSQLCell). A cell MySQL could not send fails the whole result with
+// errNotFinite, before anything is written.
+func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*mysql.Resultset, error) {
 	names := make([]string, len(res.Columns))
 	for i, c := range res.Columns {
 		names[i] = c.Name
@@ -1640,7 +1680,11 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Results
 			if j < len(res.Columns) {
 				typ = res.Columns[j].Type
 			}
-			out[j] = freeSQLCell(cell, typ, loc)
+			c, err := freeSQLCell(cell, typ, loc, binary)
+			if err != nil {
+				return nil, cellError(err, res.Columns, j, i)
+			}
+			out[j] = c
 		}
 		values[i] = out
 		// The decoded row is not read again, and every cell above is a copy:
@@ -1662,6 +1706,53 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Results
 	return rs, nil
 }
 
+// notFiniteRefusal is the client's error for a result holding a cell MySQL
+// could not send (errNotFinite). Under read routing the ladder forwards the
+// statement to MySQL instead, which answers it its own way.
+func notFiniteRefusal(err error) error {
+	return mysql.NewError(mysql.ER_DATA_OUT_OF_RANGE, "the copy does not send this result: "+err.Error()+
+		" (NaN or an infinity, which MySQL does not hold: it raises an error or returns another value there)")
+}
+
+// spoolNotFinite reads a result file for a FLOAT or DOUBLE cell MySQL could
+// not send, as freeSQLResultset refuses one in memory. A result with no such
+// column is not read.
+func spoolNotFinite(sp *sqlsandbox.Spool, columns []sqlsandbox.Column) error {
+	var floats []int
+	for c, col := range columns {
+		if _, ok := floatType(col.Type); ok {
+			floats = append(floats, c)
+		}
+	}
+	if len(floats) == 0 {
+		return nil
+	}
+	row := 0
+	return sp.Each(func(cells []any) error {
+		for _, c := range floats {
+			if c >= len(cells) || cells[c] == nil {
+				continue
+			}
+			single, _ := floatType(columns[c].Type)
+			if _, err := floatCellText(cells[c], single, false); err != nil {
+				return cellError(err, columns, c, row)
+			}
+		}
+		row++
+		return nil
+	})
+}
+
+// cellError names where a cell freeSQLCell refused is: column col (of
+// columns) of row row, counted from 0.
+func cellError(err error, columns []sqlsandbox.Column, col, row int) error {
+	name := ""
+	if col < len(columns) {
+		name = columns[col].Name
+	}
+	return fmt.Errorf("column %d (%s) of row %d: %w", col+1, name, row+1, err)
+}
+
 // freeSQLCell renders one JSON-shaped cell to the text the wire carries,
 // nil staying NULL. A timestamp arrives RFC 3339 in UTC and leaves in
 // MySQL's DATETIME spelling, because that is what the column is declared
@@ -1670,19 +1761,30 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location) (*mysql.Results
 // TIMESTAMP is a wall clock and is printed as it is, whatever the zone. A
 // nested value (LIST, STRUCT, MAP, JSON) is its JSON text; a boolean
 // is 1 or 0, as MySQL's own BOOLEAN reads back.
-func freeSQLCell(v any, duckType string, loc *time.Location) any {
+//
+// A FLOAT or a DOUBLE is printed as MySQL prints one (mysqlFloatText,
+// mysqlDoubleText, #2829), or, when binary is set (a prepared statement's
+// answer, re-encoded by encodeBinaryCell), as the exact value: MySQL sends a
+// FLOAT's bytes there, and the six digits it prints would lose some. NaN and
+// an infinity, which MySQL never sends, are errNotFinite.
+func freeSQLCell(v any, duckType string, loc *time.Location, binary bool) (any, error) {
+	if v != nil {
+		if single, ok := floatType(duckType); ok {
+			return floatCellText(v, single, binary)
+		}
+	}
 	switch x := v.(type) {
 	case nil:
-		return nil
+		return nil, nil
 	case json.Number:
 		// The worker's own rendering, every digit kept. (A DECIMAL is not
 		// here: it arrives as text, already carrying its scale's zeros.)
-		return []byte(x.String())
+		return []byte(x.String()), nil
 	case bool:
 		if x {
-			return []byte("1")
+			return []byte("1"), nil
 		}
-		return []byte("0")
+		return []byte("0"), nil
 	case string:
 		if isTimestampType(duckType) {
 			if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
@@ -1690,19 +1792,87 @@ func freeSQLCell(v any, duckType string, loc *time.Location) any {
 				if loc != nil && isInstantType(duckType) {
 					t = t.In(loc)
 				}
-				return []byte(t.Format("2006-01-02 15:04:05.999999"))
+				return []byte(t.Format("2006-01-02 15:04:05.999999")), nil
 			}
 		}
-		return []byte(x)
+		return []byte(x), nil
 	case []any, map[string]any:
 		b, err := json.Marshal(x)
 		if err != nil {
-			return []byte(fmt.Sprint(x))
+			return []byte(fmt.Sprint(x)), nil
 		}
-		return b
+		return b, nil
 	default:
-		return []byte(fmt.Sprint(x))
+		return []byte(fmt.Sprint(x)), nil
 	}
+}
+
+// errNotFinite: the copy computed NaN or an infinity for a FLOAT or DOUBLE
+// cell. MySQL holds neither and never sends one (it raises an error, or
+// returns NULL or a finite value, for what overflows on the copy), so the
+// copy's answer is not sent (#2829).
+var errNotFinite = errors.New("the copy computed a value MySQL never returns")
+
+// errFloatCell: a FLOAT or DOUBLE cell the worker sent as something that is
+// not a number, which only a bug does.
+var errFloatCell = errors.New("the copy sent a FLOAT or DOUBLE cell that is not a number")
+
+// floatCellText is freeSQLCell for a non-NULL FLOAT (single) or DOUBLE cell.
+// The worker sends a finite one as a JSON number, the widened double for a
+// FLOAT, and NaN and the infinities as text.
+func floatCellText(v any, single, binary bool) ([]byte, error) {
+	var x float64
+	switch n := v.(type) {
+	case json.Number:
+		f, err := strconv.ParseFloat(n.String(), 64)
+		if err != nil {
+			return nil, fmt.Errorf("%w: a %s cell reads as no number: %q", errFloatCell, floatName(single), n)
+		}
+		x = f
+	case float64:
+		x = n
+	case float32:
+		x = float64(n)
+	case string:
+		// floatCell's spelling of what JSON cannot carry.
+		return nil, fmt.Errorf("%w (%s)", errNotFinite, n)
+	default:
+		return nil, fmt.Errorf("%w: a %s cell arrived as %T", errFloatCell, floatName(single), v)
+	}
+	if math.IsInf(x, 0) || math.IsNaN(x) || (single && math.IsInf(float64(float32(x)), 0)) {
+		return nil, fmt.Errorf("%w (%v)", errNotFinite, x)
+	}
+	switch {
+	case binary:
+		return []byte(exactFloatText(x, single)), nil
+	case single:
+		return []byte(mysqlFloatText(float32(x))), nil
+	default:
+		return []byte(mysqlDoubleText(x)), nil
+	}
+}
+
+func floatName(single bool) string {
+	if single {
+		return "FLOAT"
+	}
+	return "DOUBLE"
+}
+
+// floatType says whether a DuckDB column type is one applyDuckType declares
+// a FLOAT (single) or a DOUBLE, and which.
+func floatType(duckType string) (single, ok bool) {
+	base, nested := duckBaseType(duckType)
+	if nested {
+		return false, false
+	}
+	switch base {
+	case "FLOAT", "REAL":
+		return true, true
+	case "DOUBLE":
+		return false, true
+	}
+	return false, false
 }
 
 func isTimestampType(duckType string) bool {
@@ -1729,13 +1899,7 @@ func isInstantType(duckType string) bool {
 // MySQL shape (UHUGEINT, INTERVAL, UUID, ENUM) is text; nested types are
 // JSON.
 func applyDuckType(f *mysql.Field, duckType string) {
-	upper := strings.ToUpper(strings.TrimSpace(duckType))
-	// A LIST or ARRAY (INTEGER[], VARCHAR[3]) is nested whatever its element.
-	nested := strings.HasSuffix(upper, "]") || strings.HasPrefix(upper, "STRUCT") || strings.HasPrefix(upper, "MAP") || upper == "JSON"
-	base := upper
-	if i := strings.IndexAny(base, "(["); i >= 0 {
-		base = strings.TrimSpace(base[:i])
-	}
+	base, nested := duckBaseType(duckType)
 	numeric := func(t uint8, unsigned bool) {
 		f.Type = t
 		f.Charset = 63
@@ -1764,8 +1928,13 @@ func applyDuckType(f *mysql.Field, duckType string) {
 		f.Decimal = 0
 	case base == "FLOAT", base == "REAL":
 		numeric(mysql.MYSQL_TYPE_FLOAT, false)
+		// MySQL's decimals for a FLOAT or DOUBLE declared without digits
+		// (NOT_FIXED_DEC): a client reads it as "printed as the value
+		// needs", not as a fixed number of decimals (#2829).
+		f.Decimal = notFixedDecimals
 	case base == "DOUBLE":
 		numeric(mysql.MYSQL_TYPE_DOUBLE, false)
+		f.Decimal = notFixedDecimals
 	case base == "BOOLEAN":
 		numeric(mysql.MYSQL_TYPE_TINY, false)
 	case base == "DATE":
@@ -1778,6 +1947,23 @@ func applyDuckType(f *mysql.Field, duckType string) {
 	default:
 		text(mysql.MYSQL_TYPE_VAR_STRING)
 	}
+}
+
+// notFixedDecimals is MySQL's NOT_FIXED_DEC (31), the decimals it sends for
+// a FLOAT or DOUBLE column whose digits are not declared.
+const notFixedDecimals = 31
+
+// duckBaseType is a DuckDB type name upper-cased without its arguments
+// (DECIMAL(10,2) is DECIMAL), and whether it is nested: a LIST or ARRAY
+// (INTEGER[], VARCHAR[3]) whatever its element, a STRUCT, a MAP or JSON.
+func duckBaseType(duckType string) (base string, nested bool) {
+	upper := strings.ToUpper(strings.TrimSpace(duckType))
+	nested = strings.HasSuffix(upper, "]") || strings.HasPrefix(upper, "STRUCT") || strings.HasPrefix(upper, "MAP") || upper == "JSON"
+	base = upper
+	if i := strings.IndexAny(base, "(["); i >= 0 {
+		base = strings.TrimSpace(base[:i])
+	}
+	return base, nested
 }
 
 // decimalScale reads the scale of DECIMAL(p,s); 0 when absent.
@@ -1863,7 +2049,9 @@ func (sp *spooledAnswer) binaryTypes(fields []*mysql.Field) error {
 	if len(fields) != len(sp.columns) {
 		return fmt.Errorf("%d columns in the header for %d in the result", len(fields), len(sp.columns))
 	}
+	row := 0
 	return sp.spool.Each(func(cells []any) error {
+		defer func() { row++ }()
 		if len(cells) != len(fields) {
 			return fmt.Errorf("a row of the result file has %d cells for %d columns", len(cells), len(fields))
 		}
@@ -1871,7 +2059,11 @@ func (sp *spooledAnswer) binaryTypes(fields []*mysql.Field) error {
 			if !check[c] || cell == nil {
 				continue
 			}
-			text, _ := freeSQLCell(cell, sp.columns[c].Type, sp.loc).([]byte)
+			v, err := freeSQLCell(cell, sp.columns[c].Type, sp.loc, true)
+			if err != nil {
+				return cellError(err, sp.columns, c, row)
+			}
+			text, _ := v.([]byte)
 			if _, ok := encodeBinaryCell(fields[c], text); !ok {
 				asBinaryText(fields[c])
 				check[c] = false
