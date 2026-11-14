@@ -197,7 +197,7 @@ mysql -h 127.0.0.1 -P 3309 -u shop_app -p   # answered for that server
   `collation=utf8mb4_0900_ai_ci` in the DSN; in Python with PyMySQL, the
   same collation in `connect()`. An application on its driver's default
   `utf8mb4_general_ci` (both of those) gets every answer from MySQL. The
-  `mysql` client and Node's mysql2 ask for one the copy reproduces already.
+  `mysql` client asks for `utf8mb4_0900_ai_ci` already.
 - **Who can save it:** the same permission as the port's password
   (`settings:write`), and never from a session with a data access policy.
   The MySQL clients page saves it too, under *A proxy in front*, for the
