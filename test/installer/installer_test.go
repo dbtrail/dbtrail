@@ -404,7 +404,6 @@ func TestInstaller_aTakenMySQLPortIsLeftUnpublished(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 // A second installation beside a first (#2815: an installation serves one
 // database family, and the other family goes in an installation of its own):
 // the folder and the console's port are named, and the ports the first one
@@ -423,7 +422,7 @@ func TestInstaller_aSecondInstallationBesideAFirst(t *testing.T) {
 		if strings.Contains(c, taken) {
 			t.Errorf("a port the first installation holds is published again (%s):\n%s", taken, portLines(c))
 		}
-=======
+
 // On Linux, lsof run by a user who is not root does not list the sockets of
 // root's docker-proxy, so it calls every port Docker publishes free (#2831).
 // The kernel's list (ss) shows them: a port only ss sees is taken all the
@@ -476,6 +475,5 @@ func TestInstaller_anyProbeThatSeesAPortMakesItTaken(t *testing.T) {
 	}
 	if c := r.compose(t); !strings.Contains(c, `"127.0.0.1:9090:9090"`) {
 		t.Errorf("9090 was read as taken because 19090 is:\n%s", portLines(c))
->>>>>>> origin/main
 	}
 }
