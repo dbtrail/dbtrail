@@ -38,28 +38,27 @@ func mysqlDateAddCall(rest, blRest string) (call string, n int, ok bool) {
 var dateAddCall = regexp.MustCompile(`(?i)(date_add|adddate)[\s\v]*\(`)
 
 // dateAddVeto says why the routing port keeps stmt on MySQL because of a
-// date stepped by an INTERVAL, or "" (#2800). shape is Shape(stmt). Each
-// DATE_ADD and ADDDATE must be one copyText writes as the macro, with no
-// placeholder in it: a prepared statement is rewritten a piece at a time
-// between its placeholders (shim copyParts), and a call cut there would
-// reach the copy as its own date_add, unchecked. Each + or - before an
-// INTERVAL must be one wrapIntervalSteps wraps.
+// date stepped by an INTERVAL, or "" (#2800): when ForCopyOpts, under o,
+// would refuse it for that reason. The veto is the rewrite's own answer, so
+// the two cannot disagree. Refused are a DATE_ADD or ADDDATE that copyText
+// does not write as the macro (dateAddCallsVeto, dateAddLeft) and a + or -
+// before an INTERVAL that wrapIntervalSteps does not wrap.
 //
 // What the copy is given is not checked here: a DATE stepped by a day is a
 // date and time on the copy (a known difference, in the docs), and other
 // checks keep on MySQL arithmetic on a date (ColumnVeto, nowVeto).
-func dateAddVeto(stmt, shape string) string {
-	if why := dateAddCallsVeto(shape); why != "" {
-		return why
-	}
-	if _, ok := wrapIntervalSteps(stmt); !ok {
+func dateAddVeto(stmt string, o CopyOptions) string {
+	if _, why := ForCopyOpts(stmt, o); why == VetoDateAdd {
 		return VetoDateAdd
 	}
 	return ""
 }
 
-// dateAddCallsVeto is dateAddVeto's half about DATE_ADD and ADDDATE calls,
-// which ForCopyOpts refuses too.
+// dateAddCallsVeto says why ForCopyOpts refuses a DATE_ADD or ADDDATE call
+// of shape, Shape of the statement, or "": each must be one copyText writes
+// as the macro, with no placeholder in it. A prepared statement is rewritten
+// a piece at a time between its placeholders (shim copyParts), and a call cut
+// there would reach the copy as its own date_add, unchecked.
 func dateAddCallsVeto(shape string) string {
 	for _, l := range callsOf(dateAddCall, shape) {
 		name := dateAddCall.FindStringSubmatch(shape[l[0]:l[1]])[1]
@@ -74,6 +73,20 @@ func dateAddCallsVeto(shape string) string {
 		}
 	}
 	return ""
+}
+
+// dateAddLeft reports whether text, written for the copy, still calls
+// DATE_ADD or ADDDATE (not a name after a dot): the copy's own date_add would
+// answer it without the check of the range.
+func dateAddLeft(text string) bool {
+	bl := scan(text).blanked
+	for _, l := range callsOf(dateAddCall, bl) {
+		name := dateAddCall.FindStringSubmatch(bl[l[0]:l[1]])[1]
+		if !namedByDot(bl, l[0], len(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // wrapIntervalSteps writes each date stepped by an INTERVAL with + or - in
@@ -104,17 +117,18 @@ func dateAddCallsVeto(shape string) string {
 // by an amount written in the statement that cannot leave the years 1 to
 // 9999 (clockStepSafe) is left as written.
 func wrapIntervalSteps(stmt string) (string, bool) {
-	for {
+	for round := 0; ; round++ {
 		sc := scan(stmt)
 		if sc.refusal != "" || sc.hash {
-			// The statement is refused for its text before this matters.
-			return stmt, true
+			// The statement is refused for its text before this matters; a
+			// refusal that only the rewrite brought would be lost.
+			return stmt, round == 0
 		}
 		bl, at := sc.blanked, sc.blankedAt
 		wrapped := false
 		for _, w := range intervalWords(bl) {
 			amount, unit, end, ok := intervalStep(bl, w)
-			if !ok {
+			if !ok || !amountAgrees(stmt[at[amount[0]]:at[amount[1]]], bl[unit[0]:unit[1]]) {
 				return stmt, false
 			}
 			sign := lastNonSpace(bl, w)
@@ -140,6 +154,10 @@ func wrapIntervalSteps(stmt string) (string, bool) {
 				macro = dateSubMacro
 			}
 			S, E, I, U := at[s], at[e], at[w], at[end]
+			if S > 0 && wordByte(stmt[S-1]) {
+				// DISTINCT`dt`: the macro's name would join the word.
+				macro = " " + macro
+			}
 			stmt = stmt[:S] + macro + "(" + stmt[S:E] + ", " + stmt[I:U] + ")" + stmt[U:]
 			wrapped = true
 			break
@@ -151,12 +169,17 @@ func wrapIntervalSteps(stmt string) (string, bool) {
 }
 
 // intervalWords are where the word INTERVAL starts in bl, a blanked text:
-// read as a word, not inside a quoted name, and not next to a dot (a name).
+// read as a word, not inside a quoted name (blanked keeps those between their
+// backticks), and not next to a dot (a name).
 func intervalWords(bl string) []int {
 	const kw = "interval"
 	var out []int
+	quoted := false
 	for i := 0; i+len(kw) <= len(bl); i++ {
-		if !strings.EqualFold(bl[i:i+len(kw)], kw) {
+		if bl[i] == '`' {
+			quoted = !quoted
+		}
+		if quoted || !strings.EqualFold(bl[i:i+len(kw)], kw) {
 			continue
 		}
 		if i > 0 && (wordByte(bl[i-1]) || bl[i-1] == '`') || i+len(kw) < len(bl) && (wordByte(bl[i+len(kw)]) || bl[i+len(kw)] == '`') {
@@ -170,9 +193,10 @@ func intervalWords(bl string) []int {
 	return out
 }
 
-// intervalStep reads INTERVAL amount unit at w in bl: the amount a number
-// (digits, a decimal point) or a string literal (two quotes once blanked), and the
-// unit one word. It returns where each is in bl and where the step ends.
+// intervalStep reads INTERVAL amount unit at w in bl: the amount digits or a
+// string literal (two quotes once blanked), and the unit one word. A decimal
+// amount is not read: MySQL rounds 1.5 and the copy does not, so the range
+// would be checked on another value than MySQL's. It returns where each is in bl and where the step ends.
 func intervalStep(bl string, w int) (amount, unit [2]int, end int, ok bool) {
 	i := w + len("interval")
 	j := firstNonSpace(bl, i)
@@ -182,12 +206,12 @@ func intervalStep(bl string, w int) (amount, unit [2]int, end int, ok bool) {
 			return amount, unit, 0, false
 		}
 		amount = [2]int{j, j + 2}
-	case j > i && j < len(bl) && (asciiDigit(bl[j]) || bl[j] == '.'):
+	case j > i && j < len(bl) && asciiDigit(bl[j]):
 		k := j
-		for k < len(bl) && (asciiDigit(bl[k]) || bl[k] == '.') {
+		for k < len(bl) && asciiDigit(bl[k]) {
 			k++
 		}
-		if k < len(bl) && wordByte(bl[k]) {
+		if k < len(bl) && (wordByte(bl[k]) || bl[k] == '.') {
 			return amount, unit, 0, false
 		}
 		amount = [2]int{j, k}
@@ -203,6 +227,30 @@ func intervalStep(bl string, w int) (amount, unit [2]int, end int, ok bool) {
 		return amount, unit, 0, false
 	}
 	return amount, [2]int{u, k}, k, true
+}
+
+// amountAgrees reports whether a step's amount, as the statement writes it
+// (digits, or a quoted whole number scan has checked), is one the copy reads
+// as MySQL does and steps without an overflow: nine digits at most, and at
+// most maxStep of its unit, past which every date of the years 1 to 9999 is
+// left behind (NULL on MySQL, an overflow on the copy, which would count as
+// its fault).
+func amountAgrees(amount, unit string) bool {
+	a := strings.TrimSpace(amount)
+	if len(a) >= 2 && a[0] == '\'' && a[len(a)-1] == '\'' {
+		a = strings.TrimSpace(a[1 : len(a)-1])
+		if a != "" && (a[0] == '-' || a[0] == '+') {
+			a = a[1:]
+		}
+	}
+	if a == "" || len(a) > 9 || strings.TrimLeft(a, "0123456789") != "" {
+		return false
+	}
+	n, _ := strconv.Atoi(a)
+	if limit, ok := maxStep[strings.ToLower(unit)]; ok && n > limit {
+		return false
+	}
+	return true
 }
 
 // looserAfter reports whether what follows a step's unit at end binds
@@ -278,6 +326,10 @@ func operandStart(bl string, q int) (int, bool) {
 			for k > 0 && wordByte(bl[k-1]) {
 				k--
 			}
+			if !stringPrefix(bl[k:s]) {
+				// SELECT'..': a keyword glued to it.
+				return 0, false
+			}
 			s = k
 		} else if p := lastNonSpace(bl, s); p >= 0 && wordByte(bl[p]) {
 			k := p + 1
@@ -285,7 +337,9 @@ func operandStart(bl string, q int) (int, bool) {
 				k--
 			}
 			switch strings.ToLower(bl[k : p+1]) {
-			case "date", "time", "timestamp":
+			case "date", "timestamp":
+				// Not TIME: a TIME plus an INTERVAL is a TIME on the copy,
+				// which the macro's check cannot cast.
 				s = k
 			}
 		} else if p >= 0 && bl[p] == '\'' {
@@ -308,6 +362,16 @@ func operandStart(bl string, q int) (int, bool) {
 	return s, true
 }
 
+// stringPrefix reports whether p, glued before a string literal, is one
+// MySQL reads as part of it: a character set (_utf8mb4), N, X or B.
+func stringPrefix(p string) bool {
+	switch strings.ToLower(p) {
+	case "n", "x", "b":
+		return true
+	}
+	return len(p) > 1 && p[0] == '_'
+}
+
 // atomStart is where the word, quoted name, blanked string or parenthesized
 // group whose last byte is at q starts. A group takes the name of a call
 // glued to it.
@@ -323,10 +387,15 @@ func atomStart(bl string, q int) (int, bool) {
 				depth--
 			}
 			if depth == 0 {
-				for p > 0 && wordByte(bl[p-1]) {
-					p--
+				k := p
+				for k > 0 && wordByte(bl[k-1]) {
+					k--
 				}
-				return p, true
+				if notOperands[strings.ToLower(bl[k:p])] {
+					// DISTINCT(dt), NOT(dt): a keyword, not a call.
+					return 0, false
+				}
+				return k, true
 			}
 		}
 		return 0, false

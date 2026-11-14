@@ -356,7 +356,7 @@ func VetoOpts(stmt string, o CopyOptions) string {
 		return why
 	}
 	if o.MySQLDateAdd {
-		if why := dateAddVeto(stmt, sc.blankedCopy); why != "" {
+		if why := dateAddVeto(stmt, o); why != "" {
 			return why
 		}
 	}

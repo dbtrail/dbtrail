@@ -172,7 +172,17 @@ func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 		}
 		if wrapped != stmt {
 			sc = scan(wrapped)
+			if why := sc.literalVeto(); why != "" {
+				return stmt, why
+			}
 		}
+		text := sc.copyText(o)
+		if dateAddLeft(text) {
+			// A DATE_ADD copyText could not rewrite (a comment before its
+			// parenthesis): the copy's own date_add would answer, unchecked.
+			return stmt, VetoDateAdd
+		}
+		return text, ""
 	}
 	return sc.copyText(o), ""
 }
@@ -218,6 +228,10 @@ func scan(stmt string) scanned {
 			sc.refusal = why
 		}
 	}
+	// blankEnd is where the text blanked stands for ends: the statement's end, or
+	// the start of a -- or # comment that runs to it, which blanked does not
+	// hold (blankedAt's last entry).
+	blankEnd := -1
 	// afterName is true from the closing backtick of a name until the next
 	// byte that is neither white space nor a comment.
 	afterName := false
@@ -292,6 +306,7 @@ func scan(stmt string) scanned {
 				refuse(vetoCommentCR)
 			}
 			if nl < 0 {
+				blankEnd = cp.Len()
 				cp.WriteString(stmt[i:])
 				i = n
 				break
@@ -464,7 +479,10 @@ func scan(stmt string) scanned {
 		// /* ' */ 'a<U+00A0>b' is 'a b' on the copy (DuckDB 1.5.6).
 		sc.spaceOutsideASCII = sc.spaceOutsideASCII || strings.ContainsFunc(stmt, copySpace)
 	}
-	sc.blankedAt = append(sc.blankedAt, cp.Len())
+	if blankEnd < 0 {
+		blankEnd = cp.Len()
+	}
+	sc.blankedAt = append(sc.blankedAt, blankEnd)
 	sc.blanked = bl.String()
 	sc.raw = cp.String()
 	// Comments and string literals are gone from blanked, so every backtick

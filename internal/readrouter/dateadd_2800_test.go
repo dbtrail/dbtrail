@@ -2,6 +2,7 @@ package readrouter
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -40,7 +41,12 @@ func TestForCopyDateAdd_2800(t *testing.T) {
 		{"SELECT a FROM t WHERE created_on > seen_at - INTERVAL 7 DAY ORDER BY dt + INTERVAL 1 DAY", "SELECT a FROM t WHERE created_on > _bintrail_date_sub(seen_at, INTERVAL 7 DAY) ORDER BY _bintrail_date_add(dt, INTERVAL 1 DAY)"},
 		{"SELECT TIMESTAMP '9999-12-31 00:00:00' + INTERVAL 1 DAY", "SELECT _bintrail_date_add(TIMESTAMP '9999-12-31 00:00:00', INTERVAL 1 DAY)"},
 		{"SELECT DATE '9999-12-31' - INTERVAL 1 DAY", "SELECT _bintrail_date_sub(DATE '9999-12-31', INTERVAL 1 DAY)"},
-		{"SELECT dt + INTERVAL 1.5 DAY FROM t", "SELECT _bintrail_date_add(dt, INTERVAL 1.5 DAY) FROM t"},
+		{"SELECT DISTINCT`dt` + INTERVAL 1 DAY FROM t", `SELECT DISTINCT _bintrail_date_add("dt", INTERVAL 1 DAY) FROM t`},
+		{"SELECT a FROM t WHERE`dt` + INTERVAL 1 DAY > x", `SELECT a FROM t WHERE _bintrail_date_add("dt", INTERVAL 1 DAY) > x`},
+		{"SELECT dt + INTERVAL 1 DAY-- note", "SELECT _bintrail_date_add(dt, INTERVAL 1 DAY)-- note"},
+		{"SELECT `a,b + interval 1 day` FROM t", `SELECT "a,b + interval 1 day" FROM t`},
+		{"SELECT _utf8mb4'2026-01-01 00:00:00' + INTERVAL 1 DAY", "SELECT _bintrail_date_add(_utf8mb4'2026-01-01 00:00:00', INTERVAL 1 DAY)"},
+		{"SELECT dt + INTERVAL 999999999 SECOND FROM t", "SELECT _bintrail_date_add(dt, INTERVAL 999999999 SECOND) FROM t"},
 		// NOW() and the other clocks stepped by less than a thousand
 		// years are inside the range whatever the clock says: sent as
 		// written, as before.
@@ -115,6 +121,22 @@ func TestDateAddKeptOnMySQL_2800(t *testing.T) {
 		"SELECT '2026-01-01' '10:00:00' + INTERVAL 1 DAY",
 		"SELECT @v + INTERVAL 1 DAY",
 		"SELECT DATE_ADD(?, INTERVAL 1 DAY)",
+		// a comment before the parenthesis: the copy's own date_add otherwise
+		"SELECT DATE_ADD/*x*/(dt, INTERVAL 1 DAY) FROM t",
+		"SELECT ADDDATE-- c\n(dt, INTERVAL 1 DAY) FROM t",
+		// MySQL rounds 1.5, the copy does not: the range would be checked on another value
+		"SELECT dt + INTERVAL 1.5 DAY FROM t",
+		"SELECT DATE_ADD(dt, INTERVAL 1.5 DAY) FROM t",
+		// past every date of the years 1 to 9999: an overflow on the copy
+		"SELECT dt + INTERVAL 3652501 DAY FROM t",
+		"SELECT dt + INTERVAL '3652501' DAY FROM t",
+		"SELECT dt + INTERVAL 1000000000 SECOND FROM t",
+		// a keyword glued to the operand
+		"SELECT DISTINCT(dt) + INTERVAL 1 DAY FROM t",
+		"SELECT a FROM t WHERE NOT(dt) + INTERVAL 1 DAY > x",
+		"SELECT'9999-12-31' + INTERVAL 1 DAY",
+		// TIME plus an INTERVAL is a TIME on the copy, which the check cannot cast
+		"SELECT TIME '10:00:00' + INTERVAL 1 HOUR",
 		"SELECT DATE_ADD(dt, INTERVAL ? DAY) FROM t",
 		"SELECT ADDDATE(dt, 1) FROM t",
 		"SELECT DATE_ADD(dt) FROM t",
@@ -166,4 +188,29 @@ func unwrappedStep(text string) bool { return stepOutside.MatchString(scan(text)
 // clockStepOnly reports whether every unwrapped step is of a clock call.
 func clockStepOnly(text string) bool {
 	return !stepOutside.MatchString(clockStepText.ReplaceAllString(scan(text).blanked, "x"))
+}
+
+// A prepared statement is sent a piece at a time between its placeholders
+// (shim copyParts): when VetoOpts lets the template through, no piece is
+// sent with a step outside the macros.
+func TestDateAddPiecesAgree_2800(t *testing.T) {
+	for _, tmpl := range []string{
+		"SELECT dt + INTERVAL 1 DAY FROM t WHERE k > ?",
+		"SELECT ?, dt + INTERVAL 1 DAY FROM t",
+		"SELECT DATE_ADD(dt, INTERVAL 1 DAY), ? FROM t WHERE dt - INTERVAL 1 DAY > ?",
+		"SELECT ? + INTERVAL 1 DAY",
+		"SELECT DATE_ADD(?, INTERVAL 1 DAY)",
+		"SELECT DATE(?) + INTERVAL 1 DAY",
+		"SELECT a FROM t WHERE k = ? AND dt + INTERVAL 1 DAY > ?",
+	} {
+		if VetoOpts(tmpl, dateAddOpts) != "" {
+			continue
+		}
+		for _, piece := range strings.Split(tmpl, "?") {
+			got, refusal := ForCopyOpts(piece, dateAddOpts)
+			if refusal == "" && unwrappedStep(got) {
+				t.Errorf("template %q passed VetoOpts, piece %q is sent %q", tmpl, piece, got)
+			}
+		}
+	}
 }
