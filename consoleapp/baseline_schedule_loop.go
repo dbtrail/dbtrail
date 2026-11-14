@@ -488,7 +488,8 @@ func (b *backupScheduler) captureVerdict(ctx context.Context, e console.ServerEn
 	case e.SourceDSN == "":
 		r.detail = captureDetailNoSource
 	case e.IsPostgres():
-		r.detail = captureDetailPostgres
+		// Its own probe and its own rule (capture_probe_pg.go).
+		r = probeCapturePG(ctx, e.DSN, e.SourceDSN, anchor, sourceRead)
 	case against != "":
 		r = probeCaptureAgainst(ctx, e.DSN, e.SourceDSN, e.SourceSSL(), anchor, sourceRead, against)
 	default:
@@ -537,6 +538,13 @@ const captureNoCaptureAdvice = ": no streaming capture has run against this inde
 // server's lifetime and a daily warning about them would teach an operator
 // to ignore the line.
 func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.Time, r captureProbeResult) {
+	if r.detail == captureDetailPGAhead {
+		// How a healthy PostgreSQL capture reads on a server that is not
+		// idle, in turns with "caught up" from one probe to the next: said
+		// on the page as the slot's reason, and not in the log, where the
+		// two would alternate for as long as the server lives.
+		return
+	}
 	quiet := "capture-caught-up:" + e.ID
 	loud := "capture-probe:" + e.ID
 	if r.verdict == console.CaptureCaughtUp {
@@ -560,7 +568,8 @@ func (b *backupScheduler) reportCaptureProbe(e console.ServerEntry, anchor time.
 	// server whose measured rate makes the slot an update whatever the
 	// source says. The line that takes a full read on it (fire) says so.
 	msg := "snapshot schedule: nothing was indexed since the previous snapshot, and the source does not confirm that capture recorded everything it wrote, so the index may be missing changes"
-	if r.cause != "" || captureClassOf(r.detail) != captureCannotAsk || r.detail == captureDetailNoCapture {
+	if r.cause != "" || captureClassOf(r.detail) != captureCannotAsk || r.detail == captureDetailNoCapture ||
+		r.detail == captureDetailPGNotSaving || r.detail == captureDetailPGPast {
 		slog.Warn(msg, args...)
 		return
 	}

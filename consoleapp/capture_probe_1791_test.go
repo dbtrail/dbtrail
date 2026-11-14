@@ -253,12 +253,13 @@ func TestMeasureWindow_asksTheSourceOnlyWhenNothingWasIndexedOnAnOldAnchor(t *te
 			t.Fatalf("asked=%v, want the source left alone inside six days", asked)
 		}
 	})
-	t.Run("a PostgreSQL source: not asked, and said why", func(t *testing.T) {
+	t.Run("a PostgreSQL source: asked with its own probe, never the MySQL one", func(t *testing.T) {
 		pg := e
 		pg.Flavor = console.FlavorPostgres
+		askedPG := stubCaptureProbePG(t, captureProbeResult{detail: captureDetailPGAhead})
 		w, asked := run(t, pg, old, 1000, 1000, caughtUp)
-		if len(asked) != 0 || w.Capture != console.CaptureUnaskable || w.CaptureDetail == "" {
-			t.Fatalf("window=%+v asked=%v, want no probe, a source that cannot be asked and a reason", w, asked)
+		if len(asked) != 0 || len(*askedPG) != 1 || w.Capture != console.CaptureUnaskable || w.CaptureDetail != captureDetailPGAhead {
+			t.Fatalf("window=%+v asked=%v askedPG=%v, want the PostgreSQL probe alone, a source that cannot be asked and its reason", w, asked, *askedPG)
 		}
 	})
 	t.Run("no source configured: not asked", func(t *testing.T) {
