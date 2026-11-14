@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -253,4 +254,53 @@ func (s *Server) warnBootFamily() {
 		"Every server is still served and captured; no server can be added until one family is left",
 		"started_with", familyWords(boot), "servers_of_the_other_family", strings.Join(other, ", "),
 		"fix", "start DBTrail without --index-dsn or --source-dsn, or remove those servers")
+}
+
+// OtherFamilyCode is the "code" of the refusal's JSON (writeJSONErrorCode): a
+// page tells this refusal from one a person can fix and try again.
+const OtherFamilyCode = "other_family"
+
+// writeNewServerError answers a refused add: the other-family refusal with
+// its code, anything else as it always was.
+func writeNewServerError(w http.ResponseWriter, status int, err error) {
+	if errors.Is(err, ErrOtherFamily) {
+		writeJSONErrorCode(w, status, err.Error(), OtherFamilyCode)
+		return
+	}
+	writeJSONError(w, status, err.Error())
+}
+
+// familiesDTO is the two families' servers, by name, in the servers list of
+// an installation that holds both.
+type familiesDTO struct {
+	Postgres []string `json:"postgres"`
+	MySQL    []string `json:"mysql"`
+}
+
+// installationFamily is what the page is told about the families: the one
+// this installation serves ("" while it has no server), and, when it holds
+// both, the servers of each. The server given on the command line counts, as
+// it does for an add (newServerFamilyRefusal): the two must never disagree
+// about what an add will be answered.
+func (s *Server) installationFamily() (family string, mixed *familiesDTO) {
+	var servers []ServerEntry
+	if s.cm.reg != nil {
+		servers = s.cm.reg.List()
+	}
+	postgres, mysql := familiesOf(servers)
+	switch s.bootFamily() {
+	case FamilyPostgres:
+		postgres = append(postgres, bootServerWords)
+	case FamilyMySQL:
+		mysql = append(mysql, bootServerWords)
+	}
+	switch {
+	case len(postgres) > 0 && len(mysql) > 0:
+		return "", &familiesDTO{Postgres: postgres, MySQL: mysql}
+	case len(postgres) > 0:
+		return FamilyPostgres, nil
+	case len(mysql) > 0:
+		return FamilyMySQL, nil
+	}
+	return "", nil
 }
