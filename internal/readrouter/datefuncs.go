@@ -229,7 +229,7 @@ const vetoDateDiff = "TIMESTAMPDIFF/DATEDIFF"
 var (
 	// timeDiffOnly is what the DATEDIFF veto still matches when the copy is
 	// sent MySQL's DATEDIFF as date_diff.
-	timeDiffOnly = regexp.MustCompile(`(?i)\b(timestampdiff|timediff)\s*\(`)
+	timeDiffOnly = regexp.MustCompile(`(?i)\b(timestampdiff|timediff)` + callOpen)
 	// dateDiffCall opens a DATEDIFF call; callsOf keeps out a longer name.
 	dateDiffCall = regexp.MustCompile(`(?i)datediff` + callOpen)
 )
@@ -381,10 +381,10 @@ func (s StatementShape) DateFunctionVeto(dates, notDates []string) string {
 }
 
 // wholeDateFunctionArg reports whether the text from start to end of the
-// blanked, lowercased statement b is one whole argument of a DATEDIFF, or
-// the first argument of a DATE_FORMAT: a ( or a , right before it, a , or a
-// ) right after it, white space aside, and the call it sits in one of those
-// two, its name not next to a dot. dateUses lets CURDATE() and UTC_DATE()
+// blanked, lowercased statement b is one whole argument of a DATEDIFF, the
+// first argument of a DATE_FORMAT, or the second or third of a TIMESTAMPDIFF:
+// a ( or a , right before it, a , or a ) right after it, white space aside,
+// and the call it sits in one of those three, its name not next to a dot. dateUses lets CURDATE() and UTC_DATE()
 // stand there (#2611): DATEDIFF casts each argument to a date and
 // DATE_FORMAT writes it, so a date is the same date on both sides.
 func wholeDateFunctionArg(b string, start, end int) bool {
@@ -430,6 +430,9 @@ func wholeDateFunctionArg(b string, start, end int) bool {
 		return arg <= 1
 	case "date_format":
 		return arg == 0
+	case "timestampdiff":
+		// Either date (#2611): read at its midnight on both sides.
+		return arg == 1 || arg == 2
 	}
 	return false
 }
