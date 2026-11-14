@@ -783,8 +783,8 @@ func (h *Handler) fullTableTextCell(schema, table, column string, v any) any {
 		if b, ok := nativeFloatText(x, h.buffered); ok {
 			return b
 		}
-		h.logger.Warn("shim: a FLOAT or DOUBLE cell of a time-travel answer holds no finite number; sent as stored",
-			"schema", schema, "table", table, "column", column)
+		// NaN or an infinity, which MySQL never holds: sent as stored, and
+		// logged once per answer by timeTravelFloats.logOdd, which counted it.
 		return []byte(fmt.Sprint(x))
 	case time.Time:
 		return []byte(x.UTC().Format("2006-01-02 15:04:05"))

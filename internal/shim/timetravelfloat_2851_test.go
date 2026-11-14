@@ -237,9 +237,28 @@ func TestPrintTimeTravelFloats_preparedKeepsTheExactValue(t *testing.T) {
 	h := floatsHandler()
 	h.buffered = true
 	row := floatsRow()
-	h.printTimeTravelFloats(TimeTravelQuery{Schema: "myapp", Table: "m"}, nil, row)
+	notes := h.printTimeTravelFloats(TimeTravelQuery{Schema: "myapp", Table: "m"}, nil, row)
 	if string(row["f"].([]byte)) != "0.3333333" || string(row["d2"].([]byte)) != "0.1" {
 		t.Errorf("prepared: f %q d2 %q, want the exact 0.3333333 and 0.1", row["f"], row["d2"])
+	}
+	// The exact value is the same whatever u was declared with: no warning.
+	if len(notes) != 0 {
+		t.Errorf("prepared: notes %q, want none", notes)
+	}
+}
+
+// A NaN in a baseline FLOAT column the snapshot does not describe is sent as
+// stored and counted, so it is logged once per answer, not once per cell.
+func TestTimeTravelFloats_countsNotFiniteOfUnknownColumn(t *testing.T) {
+	h := floatsHandler()
+	floats := h.timeTravelFloats(TimeTravelQuery{Schema: "myapp", Table: "m", AsOf: time.Now()})
+	for range 3 {
+		if _, ok := floats.cell("gone", float32(math.NaN())); ok {
+			t.Fatal("NaN printed")
+		}
+	}
+	if _, ok := floats.cell("gone", 1.5); ok || floats.odd != 3 || floats.oddCol != "gone" {
+		t.Errorf("odd %d col %q, want 3 NaN counted and 1.5 left to the caller", floats.odd, floats.oddCol)
 	}
 }
 

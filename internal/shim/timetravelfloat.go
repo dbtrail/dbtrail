@@ -182,6 +182,11 @@ func nativeFloatText(v any, binary bool) ([]byte, bool) {
 	return []byte(floatPrint{single: single, decimals: -1}.text(x, binary)), true
 }
 
+func isFloat64(v any) bool {
+	_, ok := v.(float64)
+	return ok
+}
+
 // floatValue reads a FLOAT or DOUBLE cell of a time-travel row as the
 // number it holds: a float32 or float64 from a baseline snapshot (DuckDB
 // reads a FLOAT column as float32), a float32 or float64 typeEventFloats
@@ -300,10 +305,18 @@ func (h *Handler) printTimeTravelFloats(q TimeTravelQuery, notes []string, image
 func (h *Handler) tableMetaAt(schema, table string, t time.Time) *metadata.TableMeta {
 	if epochs := h.loadEpochs(); len(epochs) > 0 {
 		if id, ok := metadata.EpochAt(epochs, t); ok {
-			if r, err := h.epochResolver(id); err == nil && r != nil {
+			r, err := h.epochResolver(id)
+			if err == nil && r != nil {
 				if tm, err := r.Resolve(schema, table); err == nil {
 					return tm
 				}
+				// A table created after that snapshot: its newest one is
+				// the closest description.
+			} else {
+				// The snapshot in effect could not be loaded: a column whose
+				// type changed since may print by its newer declaration.
+				h.logger.Warn("shim: the schema snapshot in effect at AS OF could not be read; FLOAT and DOUBLE cells are printed by the table's newest snapshot",
+					"schema", schema, "table", table, "snapshot_id", id, "err", err)
 			}
 		}
 	}
@@ -320,6 +333,15 @@ func (f *timeTravelFloats) cell(col string, v any) (any, bool) {
 	fp, ok := f.cols[col]
 	if !ok {
 		if fp, ok = f.lower[strings.ToLower(col)]; !ok {
+			// A baseline FLOAT or DOUBLE of a column the snapshot does not
+			// describe that is NaN or an infinity is counted here, so it is
+			// logged once per answer and not once per cell.
+			if _, isFloat := v.(float32); isFloat || isFloat64(v) {
+				if _, finite := nativeFloatText(v, false); !finite {
+					f.odd++
+					f.oddCol = col
+				}
+			}
 			return nil, false
 		}
 	}
@@ -354,7 +376,9 @@ func (f *timeTravelFloats) image(img map[string]any) {
 // digits or ZEROFILL. It is the warning the port without routing sends for
 // such a column on the copy (#2829).
 func (f *timeTravelFloats) notes(cols []string) []string {
-	if f == nil || len(f.undeclared) == 0 {
+	// A prepared statement's answer carries the exact value whatever the
+	// declaration, so it owes no such warning.
+	if f == nil || len(f.undeclared) == 0 || f.binary {
 		return nil
 	}
 	var names []string
@@ -372,7 +396,8 @@ func (f *timeTravelFloats) notes(cols []string) []string {
 	}
 	return []string{fmt.Sprintf("%s%s: the schema snapshot does not record how the column was declared, so a value there is written "+
 		"as MySQL writes a FLOAT or DOUBLE declared without digits, and not with the fixed decimals or ZEROFILL it may have "+
-		"(0.1 where MySQL writes 0.10); a schema snapshot taken now records the declaration", strings.Join(names, ", "), more)}
+		"(0.1 where MySQL writes 0.10); a schema snapshot taken now records the declaration for AS OF instants after it, "+
+		"not for this one", strings.Join(names, ", "), more)}
 }
 
 // logOdd logs, once per answer, the cells of a FLOAT or DOUBLE column that
