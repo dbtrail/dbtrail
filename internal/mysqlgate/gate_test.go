@@ -121,7 +121,8 @@ var statements = []q{
 	one("SELECT typeof(CURDATE()) AS t"),
 	one("SELECT typeof(UTC_TIMESTAMP()) AS ts, typeof(UTC_DATE()) AS d"),
 	one("SELECT NOW() >= TIMESTAMP '2026-01-01 00:00:00' AS later"),
-	s("SELECT id, UNIX_TIMESTAMP(stamp) AS u FROM items ORDER BY id"),
+	s("SELECT id, UNIX_TIMESTAMP(stamp) AS u FROM items WHERE id IN (1, 2, 3) ORDER BY id"),
+	s("SELECT id, UNIX_TIMESTAMP(stamp) AS u FROM items WHERE id = 4 ORDER BY id"),
 	one("SELECT FROM_UNIXTIME(86400) AS t"),
 	// Names as a statement may write them.
 	one("SELECT ID, Name FROM Items WHERE id = 1"),
@@ -411,8 +412,8 @@ func TestTheGateTellsPostgresRulesApart(t *testing.T) {
 	}
 	reviewed := blocks(string(want))
 	for _, stmt := range []string{
-		"SELECT id FROM items WHERE name = 'ALICE' ORDER BY id",          // text compared without regard to case
-		"SELECT id, price FROM items ORDER BY price, id",                 // NULL first
+		"SELECT id FROM items WHERE name = 'ALICE' ORDER BY id",               // text compared without regard to case
+		"SELECT id, price FROM items ORDER BY price, id",                      // NULL first
 		"SELECT 9 / 2 AS a, 7 / 2 AS b, -7 / 2 AS c, 7 // 2 AS d, 7 % 2 AS e", // integers divide to a fraction
 	} {
 		key := "== sql card == " + stmt
