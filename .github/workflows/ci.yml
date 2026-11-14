@@ -134,6 +134,11 @@ jobs:
               - '.github/workflows/ci.yml'
               # Every job that starts a container pulls its images with it.
               - 'scripts/pull-test-images.sh'
+              # The MySQL regression gate's reviewed answers and its fixed
+              # dump (#2814): a pull request that changes only those must run
+              # the gate, or the answers could be rewritten with nothing
+              # holding them against the code.
+              - 'internal/mysqlgate/testdata/**'
             dbgo:
               - '**/*.go'
               - 'go.mod'
