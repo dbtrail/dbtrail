@@ -2,6 +2,7 @@ package readrouter
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -18,12 +19,18 @@ const dateSubMacro = "_bintrail_date_sub"
 // and nothing is rewritten, unless the call has two arguments, neither empty,
 // and the second opens with the word INTERVAL. SUBDATE(d, n), the days form,
 // is not rewritten: the copy has no subdate and refuses it.
-func mysqlDateSubCall(rest string) (call string, n int, ok bool) {
+//
+// Whether the second argument opens with INTERVAL is read in blRest, the
+// same call in the blanked text, as DateSubVeto reads it: a comment there
+// is a space (DATE_SUB(dt, /* c */ INTERVAL 1 DAY)), and so is a vertical
+// tab, so the two never disagree about which calls are MySQL's.
+func mysqlDateSubCall(rest, blRest string) (call string, n int, ok bool) {
 	args, n, ok := callArgs(rest)
 	if !ok || len(args) != 2 || strings.TrimSpace(args[0]) == "" {
 		return "", 0, false
 	}
-	if !intervalFirst.MatchString(argText(args[1])) {
+	blArgs, _, ok := callArgs(blRest)
+	if !ok || len(blArgs) != 2 || !intervalFirst.MatchString(strings.Join(strings.Fields(blArgs[1]), " ")+" ") {
 		return "", 0, false
 	}
 	return dateSubMacro + "(" + argText(args[0]) + ", " + argText(args[1]) + ")", n, true
@@ -40,14 +47,15 @@ const VetoDateSub = "DATE_SUB or SUBDATE other than of a DATETIME or TIMESTAMP c
 var (
 	// dateSubCall opens a DATE_SUB or a SUBDATE call; callsOf keeps out a
 	// longer name.
-	dateSubCall = regexp.MustCompile(`(?i)(date_sub|subdate)\s*\(`)
+	// \v too: Go's \s leaves it out, and callArgs (the rewrite) skips it.
+	dateSubCall = regexp.MustCompile(`(?i)(date_sub|subdate)[\s\v]*\(`)
 	// dateSubStep is the second argument the copy may be given: INTERVAL, a
 	// whole number written in the statement (a quoted one is blanked to ''
 	// here, and scan has refused one that is not digits), and a unit of one
 	// word whose arithmetic was measured to agree.
 	// Nine digits at most: the copy reads a longer amount as a number too
 	// large for an interval and refuses the statement.
-	dateSubStep = regexp.MustCompile(`(?i)^interval\s+(?:\d{1,9}|'')\s+(second|minute|hour|day|week|month|quarter|year)$`)
+	dateSubStep = regexp.MustCompile(`(?i)^interval\s+(\d{1,9}|'')\s+(second|minute|hour|day|week|month|quarter|year)$`)
 	// clockTimeCall is an argument that is NOW() or UTC_TIMESTAMP() and
 	// nothing else: a date and time with no fraction on both sides.
 	clockTimeCall = regexp.MustCompile(`(?i)^(?:now|utc_timestamp)\s*\(\s*\)$`)
@@ -108,6 +116,12 @@ func DateSubVeto(shape string, dates, times, other []string) string {
 		if step == nil {
 			return VetoDateSub
 		}
+		unit := strings.ToLower(step[2])
+		if n, err := strconv.Atoi(step[1]); err == nil && n > maxStep[unit] {
+			// Past every date of the years 1 to 9999: NULL on MySQL, and on
+			// the copy an overflow, which would count as its fault.
+			return VetoDateSub
+		}
 		a := unwrap(strings.TrimSpace(args[0]))
 		if clockTimeCall.MatchString(a) {
 			continue
@@ -122,13 +136,18 @@ func DateSubVeto(shape string, dates, times, other []string) string {
 		}
 		switch f := sameName(col); {
 		case timeCol[f] && !dateCol[f]:
-		case dateCol[f] && !timeCol[f] && subDay[strings.ToLower(step[1])]:
+		case dateCol[f] && !timeCol[f] && subDay[unit]:
 		default:
 			return VetoDateSub
 		}
 	}
 	return ""
 }
+
+// maxStep is, per unit, the largest amount that can still land inside the
+// years 1 to 9999 (10,000 years of each unit, rounded up).
+var maxStep = map[string]int{"year": 10000, "quarter": 40000, "month": 120000, "week": 521800,
+	"day": 3652500, "hour": 87660000, "minute": 999999999, "second": 999999999}
 
 // subDay are the units that step a DATE into a date and time on MySQL.
 var subDay = map[string]bool{"second": true, "minute": true, "hour": true}

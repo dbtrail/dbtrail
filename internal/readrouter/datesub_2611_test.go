@@ -22,6 +22,9 @@ func TestForCopy_dateSub_2611(t *testing.T) {
 		{"SELECT DATE_SUB(dt /* the time */, INTERVAL 1 MONTH) FROM t", "SELECT _bintrail_date_sub(dt /* the time */, INTERVAL 1 MONTH) FROM t"},
 		{"SELECT DATE_SUB(dt -- the time\n, INTERVAL 1 MONTH) FROM t", "SELECT _bintrail_date_sub(dt -- the time\n, INTERVAL 1 MONTH) FROM t"},
 		{"SELECT DATE_SUB(NOW(), INTERVAL 30 DAY) FROM t", "SELECT _bintrail_date_sub(NOW(), INTERVAL 30 DAY) FROM t"},
+		// A comment before or after INTERVAL: read as the veto reads it.
+		{"SELECT DATE_SUB(dt, /* c */ INTERVAL 1 DAY) FROM t", "SELECT _bintrail_date_sub(dt, /* c */ INTERVAL 1 DAY) FROM t"},
+		{"SELECT DATE_SUB(dt, INTERVAL/**/1 DAY) FROM t", "SELECT _bintrail_date_sub(dt, INTERVAL/**/1 DAY) FROM t"},
 		{"SELECT DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 30 DAY) FROM t", "SELECT _bintrail_date_sub(now(), INTERVAL 30 DAY) FROM t"},
 		// Inside another call, and inside itself: each written once.
 		{"SELECT DATE_FORMAT(DATE_SUB(dt, INTERVAL 1 DAY), '%Y') FROM t", "SELECT strftime(_bintrail_date_sub(dt, INTERVAL 1 DAY), '%Y') FROM t"},
@@ -73,6 +76,8 @@ func TestDateSubVeto_2611(t *testing.T) {
 		"SELECT DATE_SUB(dt, INTERVAL '-1' DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL 0 DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL 999999999 SECOND) FROM t",
+		"SELECT DATE_SUB(dt, INTERVAL 10000 YEAR), DATE_SUB(dt, INTERVAL 3652500 DAY) FROM t",
+		"SELECT DATE_SUB(dt, /* c */ INTERVAL 1 DAY) FROM t",
 		"SELECT id FROM t WHERE dt >= DATE_SUB(NOW(), INTERVAL 30 DAY)",
 		"SELECT id FROM t WHERE ts BETWEEN DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR) AND NOW()",
 		"SELECT id FROM t WHERE d >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND k > ?",
@@ -117,6 +122,13 @@ func TestDateSubVeto_2611(t *testing.T) {
 		"SELECT DATE_SUB(dt, INTERVAL k DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL NULL DAY) FROM t",
 		"SELECT DATE_SUB(dt, INTERVAL 1000000000 SECOND) FROM t",
+		// Past every date of the years 1 to 9999 (an overflow on the copy).
+		"SELECT DATE_SUB(dt, INTERVAL 10001 YEAR) FROM t",
+		"SELECT DATE_SUB(dt, INTERVAL 999999999 YEAR) FROM t",
+		"SELECT DATE_SUB(dt, INTERVAL 120001 MONTH) FROM t",
+		"SELECT DATE_SUB(dt, INTERVAL 3652501 DAY) FROM t",
+		// A vertical tab before the parenthesis: still the call.
+		"SELECT DATE_SUB\v(note, INTERVAL 1 DAY) FROM t",
 		// What is stepped: text, a literal, a placeholder, an expression, a
 		// column not known, NULL.
 		"SELECT DATE_SUB(note, INTERVAL 1 DAY) FROM t",

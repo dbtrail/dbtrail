@@ -557,7 +557,7 @@ func (sc scanned) copyText(o CopyOptions) string {
 			if !o.MySQLDateSub {
 				continue
 			}
-			call, n, ok := mysqlDateSubCall(cp[j.cp+kw:])
+			call, n, ok := mysqlDateSubCall(cp[j.cp+kw:], bl[j.bl+kw:])
 			if !ok {
 				continue
 			}
