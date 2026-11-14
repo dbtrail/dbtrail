@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// routedOpts are the routing port's options (shim's copyOpts).
-var routedOpts = CopyOptions{MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true}
+// dateAddOpts are the routing port's options (shim's copyOpts).
+var dateAddOpts = CopyOptions{MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true}
 
 // #2800: under routing, a date stepped by an INTERVAL with DATE_ADD,
 // ADDDATE, + or - is sent to the copy inside its macros, which decline a
@@ -55,11 +55,11 @@ func TestForCopyDateAdd_2800(t *testing.T) {
 		"SELECT 'dt + INTERVAL 1 DAY' FROM t":                "SELECT 'dt + INTERVAL 1 DAY' FROM t",
 		"SELECT dt FROM t -- + INTERVAL 1 DAY\n":              "SELECT dt FROM t -- + INTERVAL 1 DAY\n",
 	} {
-		got, refusal := ForCopyOpts(stmt, routedOpts)
+		got, refusal := ForCopyOpts(stmt, dateAddOpts)
 		if refusal != "" || got != want {
 			t.Errorf("ForCopyOpts(%q)\n  = %q, %q\n  want %q", stmt, got, refusal, want)
 		}
-		if v := VetoOpts(stmt, routedOpts); v == VetoDateAdd {
+		if v := VetoOpts(stmt, dateAddOpts); v == VetoDateAdd {
 			t.Errorf("VetoOpts(%q) = %q, but the rewrite wraps it", stmt, v)
 		}
 	}
@@ -103,15 +103,15 @@ func TestDateAddKeptOnMySQL_2800(t *testing.T) {
 		"SELECT DATE_ADD(dt) FROM t",
 		"SELECT db.date_add(dt, INTERVAL 1 DAY) FROM t",
 	} {
-		if v := VetoOpts(stmt, routedOpts); v == "" {
+		if v := VetoOpts(stmt, dateAddOpts); v == "" {
 			t.Errorf("VetoOpts(%q) = \"\", want it kept on MySQL", stmt)
 		}
-		if got, refusal := ForCopyOpts(stmt, routedOpts); refusal == "" && unwrappedStep(got) {
+		if got, refusal := ForCopyOpts(stmt, dateAddOpts); refusal == "" && unwrappedStep(got) {
 			t.Errorf("ForCopyOpts(%q) = %q with an unguarded step and no refusal", stmt, got)
 		}
 	}
 	// A prepared statement's piece after a placeholder: no operand in it.
-	if _, refusal := ForCopyOpts(" + INTERVAL 1 DAY FROM t", routedOpts); refusal == "" {
+	if _, refusal := ForCopyOpts(" + INTERVAL 1 DAY FROM t", dateAddOpts); refusal == "" {
 		t.Error("a piece that starts with the step was not refused")
 	}
 }
@@ -127,10 +127,10 @@ func TestDateAddVetoAndRewriteAgree_2800(t *testing.T) {
 		"SELECT a FROM t WHERE k > ? AND dt + INTERVAL 1 DAY > ?",
 		"SELECT a FROM t WHERE dt >= CURRENT_TIMESTAMP - INTERVAL 1 DAY",
 	} {
-		if v := VetoOpts(stmt, routedOpts); v != "" {
+		if v := VetoOpts(stmt, dateAddOpts); v != "" {
 			continue
 		}
-		got, refusal := ForCopyOpts(stmt, routedOpts)
+		got, refusal := ForCopyOpts(stmt, dateAddOpts)
 		if refusal != "" || unwrappedStep(got) && !clockStepOnly(got) {
 			t.Errorf("VetoOpts(%q) passed, ForCopyOpts = %q, %q", stmt, got, refusal)
 		}
