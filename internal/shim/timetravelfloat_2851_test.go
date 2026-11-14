@@ -91,7 +91,10 @@ func TestFloatPrintText_asMeasured(t *testing.T) {
 		{floatPrint{single: true, decimals: -1, zerofill: 12, declared: true}, 1.5, "0000000001.5"},
 		{floatPrint{decimals: -1, zerofill: 22, declared: true}, 1.5, "00000000000000000001.5"},
 		{floatPrint{decimals: 2, zerofill: 10, declared: true}, 1.5, "0000001.50"},
-		{floatPrint{decimals: -1, zerofill: 22, declared: true}, 1e300, "1e300"},
+		// MySQL pads the exponent form too: 1e21 in a DOUBLE ZEROFILL is
+		// 000000000000000001e21 (in the values the integration test sends).
+		{floatPrint{decimals: -1, zerofill: 22, declared: true}, 1e300, "00000000000000000" + "1e300"},
+		{floatPrint{decimals: -1, zerofill: 22, declared: true}, 1.2345678901234567e300, "1.2345678901234567e300"},
 	} {
 		if got := c.fp.text(c.x, false); got != c.want {
 			t.Errorf("%+v.text(%v) = %q, want %q", c.fp, c.x, got, c.want)
