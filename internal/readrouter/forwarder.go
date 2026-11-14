@@ -493,7 +493,7 @@ var collationName = regexp.MustCompile(`^[a-z0-9_]+$`)
 // As in settleCollation, an error that ends the session is a connection
 // that did not open.
 func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn) error {
-	if f.ClientCollation == mysql.DEFAULT_COLLATION_ID {
+	if f.ClientCollation == uint16(mysql.DEFAULT_COLLATION_ID) {
 		return nil
 	}
 	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
