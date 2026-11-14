@@ -3746,3 +3746,5 @@ button.st-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .sqlp-hidden { margin: 0 0 10px; color: var(--ink-2); font-size: var(--fs-xs); }
 .hidden-dl-note { color: var(--ink-2); }
 .hidden-unmatched { color: var(--warn, var(--ink)); }
+/* both database families in one installation (#2815): said under the server list while it lasts */
+.srv-note-warn { font-size: var(--fs-sm); line-height: 1.4; padding: 8px 10px; border-radius: var(--r-md); border: 1px solid var(--line); border-top: 3px solid var(--ochre); }
