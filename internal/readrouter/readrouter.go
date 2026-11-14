@@ -191,7 +191,7 @@ var vetoes = []struct {
 	{"WEEK/YEARWEEK", regexp.MustCompile(`(?i)\b(week|yearweek)\s*\(`)},
 	{"EXTRACT(WEEK ...)", regexp.MustCompile(`(?i)\bextract\s*\(\s*week\b`)},
 	{"STR_TO_DATE", regexp.MustCompile(`(?i)\bstr_to_date\s*\(`)},                                  // NULL in MySQL, error in DuckDB on a bad date
-	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)\s*\(`)}, // day counting differs; vetoDateDiff, narrowed by MySQLDateFunctions (VetoOpts, #2611)
+	{"TIMESTAMPDIFF/DATEDIFF", regexp.MustCompile(`(?i)\b(timestampdiff|datediff|timediff)` + callOpen)}, // day counting differs; vetoDateDiff, narrowed by MySQLDateFunctions and MySQLTimestampDiff (dateDiffVeto, #2611)
 	{"COLLATE", regexp.MustCompile(`(?i)\bcollate\b`)},                                             // collations do not exist on the copy
 	{"CAST AS UNSIGNED/SIGNED", regexp.MustCompile(`(?i)\bas\s+(un)?signed\b`)},                    // overflow and truncation differ
 	{"DIV", regexp.MustCompile(`(?i)\bdiv\b`)},                                                     // integer division differs
@@ -317,6 +317,9 @@ func HasLike(stmt string) bool {
 // holds none (dateDiffVeto, #2611). What each DATE_FORMAT, DATEDIFF and
 // TIMESTAMPDIFF is given is the caller's to check once the columns' types are
 // known (DateFunctionVeto, TimestampDiffVeto).
+// With MySQLDateAdd, a date stepped by an INTERVAL that ForCopyOpts cannot
+// send inside the copy's macros keeps the statement on MySQL (dateAddVeto,
+// #2800).
 func VetoOpts(stmt string, o CopyOptions) string {
 	if hintComment.MatchString(stmt) {
 		return vetoHintComment
@@ -357,6 +360,11 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	}
 	if why := nowVeto(sc.blankedCopy); why != "" {
 		return why
+	}
+	if o.MySQLDateAdd {
+		if why := dateAddVeto(stmt, o); why != "" {
+			return why
+		}
 	}
 	if why := shapeVeto(sc.blankedCopy); why != "" {
 		return why
@@ -414,7 +422,7 @@ const vetoLeftRight = "LEFT/RIGHT with a length other than a whole number writte
 // leftRightCall opens a LEFT or RIGHT call, the name bare or quoted, as
 // substringCall does. LEFT JOIN and RIGHT JOIN are not matched: a word
 // stands between the keyword and any parenthesis.
-var leftRightCall = regexp.MustCompile(`(?i)"?(?:left|right)"?[\s\v]*\(`)
+var leftRightCall = regexp.MustCompile(`(?i)"?(?:left|right)"?` + callOpen)
 
 // leftRightAgree reports whether every LEFT and RIGHT call in blanked has
 // two arguments and a length both engines read the same way
@@ -454,10 +462,10 @@ const vetoSubstring = "SUBSTRING/SUBSTR/MID with a position other than a positiv
 
 var (
 	// substringCall opens a call, the name bare or quoted: a quoted name is
-	// an error on MySQL and an answer on the copy. \v too: Go's \s leaves it
-	// out, and MySQL reads it as a space. A dot before it is matched: a
+	// an error on MySQL and an answer on the copy, with the white space MySQL
+	// takes before the parenthesis (callOpen). A dot before it is matched: a
 	// qualified name is a stored function on MySQL.
-	substringCall = regexp.MustCompile(`(?i)"?(?:substring|substr|mid)"?[\s\v]*\(`)
+	substringCall = regexp.MustCompile(`(?i)"?(?:substring|substr|mid)"?` + callOpen)
 	// substringFrom is the FROM ... FOR form: SUBSTRING(s FROM p FOR n).
 	substringFrom = regexp.MustCompile(`(?i)^(.*?)\bfrom\b(.*?)(?:\bfor\b(.*))?$`)
 	// substringPos and substringLen are what the copy may be given: a
@@ -532,8 +540,8 @@ func depthZero(s string, i int) bool {
 // veto already keeps on MySQL is still named by that one.
 const vetoNullArg = "CONCAT/LEAST/GREATEST (NULL on MySQL when an argument is NULL; the copy skips it)"
 
-// \v too: Go's \s leaves it out, and MySQL reads it as a space.
-var nullArgCall = regexp.MustCompile(`(?i)\b(concat|least|greatest)[\s\v]*\(`)
+// The white space before the parenthesis is what MySQL takes (callOpen).
+var nullArgCall = regexp.MustCompile(`(?i)\b(concat|least|greatest)` + callOpen)
 
 // Scrub is scrub for other packages: the statement with comments removed
 // and string literals blanked, for structural checks such as "is there an

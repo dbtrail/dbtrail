@@ -15,11 +15,11 @@ var (
 	// a backtick as a double quote, and MySQL still calls the built-in
 	// function). A dot before it is matched too: a qualified name is a
 	// stored function on MySQL, which the copy does not have.
-	roundCall = regexp.MustCompile(`(?i)"?round"?[\s\v]*\(`)
+	roundCall = regexp.MustCompile(`(?i)"?round"?` + callOpen)
 	// exactAggregate is SUM, MIN or MAX of what follows, up to the closing
 	// parenthesis: over an exact column each is exact on both sides. AVG is
 	// not: the copy returns a DOUBLE.
-	exactAggregate = regexp.MustCompile(`(?i)^(?:sum|min|max)[\s\v]*\(`)
+	exactAggregate = regexp.MustCompile(`(?i)^(?:sum|min|max)` + callOpen)
 	// exactNumber is a number written without an exponent: a DECIMAL (or a
 	// whole number) on both sides. With an exponent it is a DOUBLE.
 	exactNumber = regexp.MustCompile(`^[+-]?\s*(?:\d+(?:\.\d*)?|\.\d+)$`)

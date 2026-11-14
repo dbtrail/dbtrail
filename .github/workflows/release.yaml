@@ -184,7 +184,7 @@ jobs:
       # GTID source captured into an index on ANOTHER server (#2085): the
       # index of a source is never compared with it when both are one server,
       # and the main server above runs without GTIDs. Only in the shard that
-      # runs the consoleapp TestIntegrationFlashback tests (SPLIT_RUN in
+      # runs the consoleapp TestIntegrationFlashback tests (SPLIT_PARTS in
       # scripts/mysql-integration-shard.sh); if that split moves to another
       # shard, this step and the two variables below move with it, and the
       # `integration` job's "Key tests ran" step is what notices if they did
@@ -317,9 +317,9 @@ jobs:
         id: s3store
         run: bash scripts/mysql-integration-shard.sh collect /tmp/mysql-it-shards "${{ matrix.mysql }}" /tmp/mysql-it.out
 
-      # One package (consoleapp) runs in two shards, split by test name: one
-      # shard runs the tests a pattern matches, another the rest. Over both
-      # logs together, every test its binary lists must have run exactly
+      # One package (consoleapp) runs in three shards, split by test name: two
+      # shards each run the tests one pattern matches, the third the rest. Over
+      # all the logs together, every test its binary lists must have run exactly
       # once, so a change to the split can neither drop a test nor run it
       # twice (scripts/mysql-integration-shard.sh, SPLIT_PKG).
       - name: The split package ran whole

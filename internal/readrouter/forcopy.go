@@ -58,6 +58,13 @@ type scanned struct {
 	// and in blanked.
 	raw      string
 	keywords []keywordAt
+	// blankedAt is, for each byte of blanked, where the text it stands for
+	// starts in raw (and in the statement, which raw matches byte for byte:
+	// a backtick and the double quote written for it are one byte each),
+	// and once more at the end, len(raw). A blanked string or comment
+	// stands for all of it, so blankedAt[i+1] is where the text of byte i
+	// ends (wrapIntervalSteps, #2800).
+	blankedAt []int
 	// clockKeyword: CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIME or
 	// LOCALTIMESTAMP occurred as a keyword (not a name). blankedCopy then
 	// holds the call each means instead (clockKeywordsAsCalls).
@@ -104,6 +111,17 @@ type CopyOptions struct {
 	// MySQL a call whose dates are not date columns or clock calls
 	// (TimestampDiffVeto).
 	MySQLTimestampDiff bool
+	// MySQLDateAdd writes MySQL's DATE_ADD(d, INTERVAL n unit) and
+	// ADDDATE(d, INTERVAL n unit) as the copy's _bintrail_date_add macro
+	// (mysqlDateAddCall), and every d + INTERVAL n unit and d - INTERVAL n
+	// unit as _bintrail_date_add and _bintrail_date_sub over the same two
+	// operands (wrapIntervalSteps, #2800), which sqlsandbox defines under
+	// Session.MySQLClock: d plus or minus the interval, refused outside the
+	// years 1 to 9999, where MySQL answers NULL and the copy a year of five
+	// digits or the year 0. A step it cannot wrap with certainty is refused,
+	// and VetoOpts keeps it on MySQL. Only the routing port sets it, with
+	// MySQLDateSub; off, the copy computes the step as its own.
+	MySQLDateAdd bool
 	// MySQLClockKeywords writes CURRENT_TIMESTAMP, LOCALTIME and
 	// LOCALTIMESTAMP as now(), and CURRENT_DATE as curdate(), the calls they
 	// mean on MySQL (#2611), which the copy's session has with MySQL's values
@@ -152,6 +170,28 @@ func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 	if sc.hash {
 		return stmt, vetoHash
 	}
+	if o.MySQLDateAdd {
+		if why := dateAddCallsVeto(sc.blankedCopy); why != "" {
+			return stmt, why
+		}
+		wrapped, ok := wrapIntervalSteps(stmt)
+		if !ok {
+			return stmt, VetoDateAdd
+		}
+		if wrapped != stmt {
+			sc = scan(wrapped)
+			if why := sc.literalVeto(); why != "" {
+				return stmt, why
+			}
+		}
+		text := sc.copyText(o)
+		if dateAddLeft(text) {
+			// A DATE_ADD copyText could not rewrite (a comment before its
+			// parenthesis): the copy's own date_add would answer, unchecked.
+			return stmt, VetoDateAdd
+		}
+		return text, ""
+	}
 	return sc.copyText(o), ""
 }
 
@@ -184,11 +224,22 @@ func scan(stmt string) scanned {
 	var sc scanned
 	var cp, bl strings.Builder
 	n := len(stmt)
+	// blank writes s to bl, each byte standing for the text from at in cp.
+	blank := func(s string, at int) {
+		for range len(s) {
+			sc.blankedAt = append(sc.blankedAt, at)
+		}
+		bl.WriteString(s)
+	}
 	refuse := func(why string) {
 		if sc.refusal == "" {
 			sc.refusal = why
 		}
 	}
+	// blankEnd is where the text blanked stands for ends: the statement's end, or
+	// the start of a -- or # comment that runs to it, which blanked does not
+	// hold (blankedAt's last entry).
+	blankEnd := -1
 	// afterName is true from the closing backtick of a name until the next
 	// byte that is neither white space nor a comment.
 	afterName := false
@@ -243,8 +294,8 @@ func scan(stmt string) scanned {
 				// different statements.
 				refuse(vetoNestedComment)
 			}
+			blank(" ", cp.Len())
 			cp.WriteString(stmt[i : i+end+4])
-			bl.WriteByte(' ')
 			i += end + 4
 		case c == '#', c == '-' && i+1 < n && stmt[i+1] == '-' && (i+2 >= n || stmt[i+2] == ' ' || stmt[i+2] == '\t' || stmt[i+2] == '\n'):
 			if c == '#' {
@@ -263,12 +314,13 @@ func scan(stmt string) scanned {
 				refuse(vetoCommentCR)
 			}
 			if nl < 0 {
+				blankEnd = cp.Len()
 				cp.WriteString(stmt[i:])
 				i = n
 				break
 			}
+			blank("\n", cp.Len())
 			cp.WriteString(stmt[i : i+nl+1])
-			bl.WriteByte('\n')
 			i += nl + 1
 		case c == '\'' || c == '"':
 			if afterName || prefixAfterName {
@@ -334,15 +386,17 @@ func scan(stmt string) scanned {
 				// (#2122); a whole number is the same on both.
 				refuse(vetoIntervalAmount)
 			}
+			blank("''", cp.Len())
 			cp.WriteString(stmt[i : j+1])
-			bl.WriteString("''")
 			i = j + 1
 		case c == '`':
 			j := strings.IndexByte(stmt[i+1:], '`')
 			if j < 0 {
 				refuse(vetoUnterminated)
+				for k := i; k < n; k++ {
+					blank(stmt[k:k+1], cp.Len()+k-i)
+				}
 				cp.WriteString(stmt[i:])
-				bl.WriteString(stmt[i:])
 				i = n
 				break
 			}
@@ -362,6 +416,7 @@ func scan(stmt string) scanned {
 				// U&`data` is two columns and an operator to MySQL.
 				refuse(vetoNamePrefix)
 			}
+			at := cp.Len()
 			cp.WriteByte('"')
 			cp.WriteString(name)
 			cp.WriteByte('"')
@@ -370,11 +425,13 @@ func scan(stmt string) scanned {
 			// a pattern that takes a quote next to a word for "this word is
 			// a quoted name" must not take the operator for one.
 			if i > 0 && wordByte(stmt[i-1]) {
-				bl.WriteByte(' ')
+				blank(" ", at)
 			}
-			bl.WriteString(stmt[i:next])
+			for k := i; k < next; k++ {
+				blank(stmt[k:k+1], at+k-i)
+			}
 			if next < n && wordByte(stmt[next]) {
-				bl.WriteByte(' ')
+				blank(" ", at+next-i)
 			}
 			i = next
 			afterName, prefixAfterName = true, false
@@ -413,8 +470,8 @@ func scan(stmt string) scanned {
 			case c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v':
 				lastWord = ""
 			}
+			blank(stmt[i:i+1], cp.Len())
 			cp.WriteByte(c)
-			bl.WriteByte(c)
 			i++
 		}
 	}
@@ -430,6 +487,10 @@ func scan(stmt string) scanned {
 		// /* ' */ 'a<U+00A0>b' is 'a b' on the copy (DuckDB 1.5.6).
 		sc.spaceOutsideASCII = sc.spaceOutsideASCII || strings.ContainsFunc(stmt, copySpace)
 	}
+	if blankEnd < 0 {
+		blankEnd = cp.Len()
+	}
+	sc.blankedAt = append(sc.blankedAt, blankEnd)
 	sc.blanked = bl.String()
 	sc.raw = cp.String()
 	// Comments and string literals are gone from blanked, so every backtick
@@ -500,7 +561,7 @@ func wordByte(c byte) bool {
 }
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
-var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff", "date_sub", "subdate", "timestampdiff",
+var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff", "date_sub", "subdate", "date_add", "adddate", "timestampdiff",
 	"current_timestamp", "current_date", "localtime", "localtimestamp"}
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
@@ -520,7 +581,8 @@ type keywordAt struct {
 // that limitOffsetComma reads is written LIMIT count OFFSET offset, and with
 // o.MySQLDateFunctions each DATE_FORMAT and DATEDIFF call mysqlDateCall reads
 // is written as the copy's call, with o.MySQLDateSub each DATE_SUB and
-// SUBDATE mysqlDateSubCall reads as the copy's macro, and with o.MySQLClockKeywords each
+// SUBDATE mysqlDateSubCall reads as the copy's macro, with o.MySQLDateAdd each
+// DATE_ADD and ADDDATE mysqlDateAddCall reads as the other macro, and with o.MySQLClockKeywords each
 // CURRENT_TIMESTAMP, LOCALTIME, LOCALTIMESTAMP and CURRENT_DATE the call it
 // means (clockCall). The keywords are taken from the last one
 // back, so a call inside another one's arguments is rewritten first, and the
@@ -576,6 +638,16 @@ func (sc scanned) copyText(o CopyOptions) string {
 				continue
 			}
 			call, n, ok := mysqlTimestampDiffCall(cp[j.cp+kw:], bl[j.bl+kw:])
+			if !ok {
+				continue
+			}
+			cp = cp[:j.cp] + call + cp[j.cp+kw+n:]
+			continue
+		case j.word == "date_add" || j.word == "adddate":
+			if !o.MySQLDateAdd {
+				continue
+			}
+			call, n, ok := mysqlDateAddCall(cp[j.cp+kw:], bl[j.bl+kw:])
 			if !ok {
 				continue
 			}

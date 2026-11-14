@@ -63,14 +63,14 @@ func mysqlTimestampDiffCall(rest, blRest string) (call string, n int, ok bool) {
 }
 
 var (
-	// timestampDiffCall opens a TIMESTAMPDIFF call; callsOf keeps out a
-	// longer name. \v too: Go's \s leaves it out, and callArgs (the rewrite)
-	// skips it.
-	timestampDiffCall = regexp.MustCompile(`(?i)timestampdiff[\s\v]*\(`)
+	// timestampDiffCall opens a TIMESTAMPDIFF call, with the white space
+	// MySQL takes before the parenthesis (callOpen); callsOf keeps out a
+	// longer name.
+	timestampDiffCall = regexp.MustCompile(`(?i)timestampdiff` + callOpen)
 	// The DATEDIFF veto's text when only one of the two options lets its
 	// function through, and when both do.
-	timeDiffOrDateDiff = regexp.MustCompile(`(?i)\b(datediff|timediff)[\s\v]*\(`)
-	timeDiffAlone      = regexp.MustCompile(`(?i)\btimediff[\s\v]*\(`)
+	timeDiffOrDateDiff = regexp.MustCompile(`(?i)\b(datediff|timediff)` + callOpen)
+	timeDiffAlone      = regexp.MustCompile(`(?i)\btimediff` + callOpen)
 )
 
 // dateDiffVeto is how VetoOpts reads its TIMESTAMPDIFF/DATEDIFF entry under
@@ -109,7 +109,7 @@ func dateDiffVeto(sc scanned, o CopyOptions, re *regexp.Regexp) (_ *regexp.Regex
 // the macro called on a column.
 const vetoCopyMacro = "a function named _bintrail_... (one of the copy's own, which MySQL does not have)"
 
-var copyMacroCall = regexp.MustCompile(`(?i)(^|[^\w$"\x60])_bintrail_\w*[\s\v]*\(`)
+var copyMacroCall = regexp.MustCompile(`(?i)(^|[^\w$"\x60])_bintrail_\w*` + callOpen)
 
 // copyMacroVeto is vetoCopyMacro over a blanked statement, or "".
 func copyMacroVeto(blanked string) string {
