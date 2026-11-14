@@ -220,7 +220,7 @@ func TestCaptureStatus_notAskedWithoutASourceToAsk(t *testing.T) {
 		return captureProbeResult{verdict: console.CaptureCaughtUp}
 	})
 	for name, e := range map[string]console.ServerEntry{
-		"no source":  {ID: "n", DSN: "u:p@tcp(idx:3306)/n"},
+		"no source": {ID: "n", DSN: "u:p@tcp(idx:3306)/n"},
 		"the daemon's own index, started without a source": {ID: bootCaptureServerID, DSN: "u:p@tcp(idx:3306)/boot"},
 	} {
 		got := c.CaptureStatus(context.Background(), e)
