@@ -296,7 +296,7 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 	wantTypes := []uint8{
 		mysql.MYSQL_TYPE_LONGLONG, mysql.MYSQL_TYPE_NEWDECIMAL, mysql.MYSQL_TYPE_TINY, mysql.MYSQL_TYPE_DATETIME,
 		mysql.MYSQL_TYPE_JSON, mysql.MYSQL_TYPE_JSON, mysql.MYSQL_TYPE_VAR_STRING, mysql.MYSQL_TYPE_LONGLONG,
-		mysql.MYSQL_TYPE_VAR_STRING, mysql.MYSQL_TYPE_DATE,
+		mysql.MYSQL_TYPE_NEWDECIMAL, mysql.MYSQL_TYPE_DATE,
 	}
 	for i, want := range wantTypes {
 		if got := rs.Fields[i].Type; got != want {
@@ -311,6 +311,11 @@ func TestFreeSQLResultset_typesAndCells(t *testing.T) {
 	}
 	if rs.Fields[7].Flag&mysql.UNSIGNED_FLAG == 0 {
 		t.Error("UBIGINT lost its UNSIGNED flag")
+	}
+	// A HUGEINT is the copy's SUM of whole numbers, which MySQL types as a
+	// DECIMAL with no fraction (#2806).
+	if f := rs.Fields[8]; f.Decimal != 0 || f.Charset != 63 || f.Flag&mysql.BINARY_FLAG == 0 || f.Flag&mysql.UNSIGNED_FLAG != 0 {
+		t.Errorf("HUGEINT scale/charset/flag = %d/%d/%d, want a signed DECIMAL with no fraction", f.Decimal, f.Charset, f.Flag)
 	}
 	rows := textRows(t, rs)
 	if len(rows) != 2 {

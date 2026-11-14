@@ -1723,8 +1723,11 @@ func isInstantType(duckType string) bool {
 // columns are declared utf8mb4, never binary: a MySQL 8 client shows a
 // binary-charset string column as hex, which would make every VARCHAR
 // unreadable. Numbers, dates and times keep MySQL's own convention
-// (charset 63, binary flag). What has no MySQL shape (HUGEINT, INTERVAL,
-// UUID, ENUM) is text; nested types are JSON.
+// (charset 63, binary flag). A HUGEINT is a DECIMAL with no fraction: it is
+// what the copy's SUM of whole numbers returns, and MySQL types that SUM as
+// a DECIMAL (#2806; the cell is already the number's digits). What has no
+// MySQL shape (UHUGEINT, INTERVAL, UUID, ENUM) is text; nested types are
+// JSON.
 func applyDuckType(f *mysql.Field, duckType string) {
 	upper := strings.ToUpper(strings.TrimSpace(duckType))
 	// A LIST or ARRAY (INTEGER[], VARCHAR[3]) is nested whatever its element.
@@ -1756,6 +1759,9 @@ func applyDuckType(f *mysql.Field, duckType string) {
 	case strings.HasPrefix(base, "DECIMAL"):
 		numeric(mysql.MYSQL_TYPE_NEWDECIMAL, false)
 		f.Decimal = decimalScale(duckType)
+	case base == "HUGEINT":
+		numeric(mysql.MYSQL_TYPE_NEWDECIMAL, false)
+		f.Decimal = 0
 	case base == "FLOAT", base == "REAL":
 		numeric(mysql.MYSQL_TYPE_FLOAT, false)
 	case base == "DOUBLE":

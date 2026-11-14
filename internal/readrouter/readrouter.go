@@ -391,7 +391,7 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	if !leftRightAgree(sc.blankedCopy) {
 		return vetoLeftRight
 	}
-	return ""
+	return divisionVeto(sc.blankedCopy)
 }
 
 // vetoSpaceOutsideASCII keeps on MySQL a statement with a character outside
