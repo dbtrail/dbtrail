@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func TestValidPGListen(t *testing.T) {
 		{"127.0.0.1:pg", false, "not a port number"},
 		{" 127.0.0.1:5433", false, "this machine only"},
 	} {
-		err := validPGListen(tc.addr)
+		err := validPGListen(tc.addr, "--listen")
 		if tc.ok != (err == nil) {
 			t.Errorf("validPGListen(%q) = %v, want ok=%v", tc.addr, err, tc.ok)
 			continue
@@ -112,7 +113,7 @@ func TestPGRouterSettings(t *testing.T) {
 		{[]string{"--sql-port-max-rows", "0"}, [2]string{}, "--sql-port-max-rows must be between"},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_WORKERS", "many"}, `BINTRAIL_PG_ROUTER_WORKERS="many" is not a whole number`},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_WORKERS", "99"}, "BINTRAIL_PG_ROUTER_WORKERS must be between 1 and 16"},
-		{nil, [2]string{"BINTRAIL_PG_ROUTER_LISTEN", "10.0.0.1:5433"}, "this machine only"},
+		{nil, [2]string{"BINTRAIL_PG_ROUTER_LISTEN", "10.0.0.1:5433"}, `BINTRAIL_PG_ROUTER_LISTEN "10.0.0.1:5433": the PostgreSQL port listens on this machine only`},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_MAX_WAIT", "soon"}, "max-wait"},
 	} {
 		clearPGRouterEnv(t)
@@ -307,4 +308,109 @@ func TestPGRouter_login(t *testing.T) {
 	if got := pgLoginCode(t, addr, "app1", "pw-one", "prod"); got != "28P01" {
 		t.Errorf("with the port turned off the application login still answers %q, want 28P01", got)
 	}
+}
+
+// The port as the command runs it (the follower console, the port's own
+// loop), with no database: a login is let in without its server's index, and
+// SET is answered by the port itself.
+//
+// What closes it and what does not: the MySQL port's Engine Routing switched
+// on or off leaves every PostgreSQL client connected (this port routes
+// nothing); a replaced password puts them out.
+func TestPGRouterPort_routingSwitchKeepsClientsAReplacedPasswordDoesNot(t *testing.T) {
+	t.Setenv("BINTRAIL_SQL_TAILS", "")
+	pgRouterNoTails()
+	f := newRouterFiles(t)
+	prod, err := f.owner.Add(console.ServerEntry{Name: "prod", Flavor: console.FlavorPostgres, DSN: "u:p@tcp(127.0.0.1:1)/idx_prod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.saveRouting(t, "port-pw", false)
+	srv, runner, err := newRouterConsole(f.settings(""), console.SQLPool{Workers: 1, Threads: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runner.Close)
+	srv.RefreshFollowedFiles()
+	// No tails in this process: a PostgreSQL server, fresh by its entry's
+	// default, is in fast mode here, so no tail directory is made or swept.
+	if mode, from := srv.SQLModeOf(prod.ID); mode != "fast" || from != console.SQLModeFromEnvironment {
+		t.Fatalf("server mode %q from %q, want fast from the environment", mode, from)
+	}
+	if names := srv.FreshServerNames(); len(names) != 0 {
+		t.Fatalf("servers in fresh mode in this process: %v", names)
+	}
+
+	port := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 4, poll: 20 * time.Millisecond, out: io.Discard}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- port.serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("the port did not stop with its context")
+		}
+	})
+	waitUntil(t, "the port to open", func() bool { return port.listening() != "" })
+
+	connect := func(password string) (*pgconn.PgConn, error) {
+		host, portNum, _ := net.SplitHostPort(port.listening())
+		cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s sslmode=disable", host, portNum))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.User, cfg.Password, cfg.Database = "anyone", password, "prod"
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return pgconn.ConnectConfig(c, cfg)
+	}
+	alive := func(conn *pgconn.PgConn) bool {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := conn.Exec(c, "SET application_name = 'x'").ReadAll()
+		return err == nil
+	}
+	conn, err := connect("port-pw")
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(context.Background())
+	if !alive(conn) {
+		t.Fatal("the connection does not answer")
+	}
+
+	// Engine Routing switched on, then off: the MySQL port's business.
+	for _, routing := range []bool{true, false} {
+		f.saveRouting(t, "port-pw", routing)
+		srv.RefreshFollowedFiles()
+		time.Sleep(100 * time.Millisecond)
+		if !alive(conn) {
+			t.Fatalf("switching Engine Routing to %v put a PostgreSQL client out", routing)
+		}
+	}
+
+	// The password replaced: everyone on the port is put out, and the port
+	// opens again for the new one.
+	f.saveRouting(t, "port-pw-2", false)
+	srv.RefreshFollowedFiles()
+	waitUntil(t, "the connection made with the old password to be closed", func() bool { return !alive(conn) })
+	waitUntil(t, "the port to take the new password", func() bool {
+		c, err := connect("port-pw-2")
+		if err != nil {
+			return false
+		}
+		_ = c.Close(context.Background())
+		return true
+	})
+	if c, err := connect("port-pw"); err == nil {
+		_ = c.Close(context.Background())
+		t.Fatal("the old password still opens the port")
+	}
+
+	// The port turned off: closed, and no password opens it.
+	f.savePortFile(t, false, "port-pw-2")
+	srv.RefreshFollowedFiles()
+	waitUntil(t, "the port to close", func() bool { return port.listening() == "" })
 }

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,7 +99,7 @@ func addPGRouterFlags(cmd *cobra.Command) {
 	f.Int("workers", defaultPGRouterWorkers, fmt.Sprintf("How many statements run on the copy at once, 1 to %d. The rest wait their turn. Env BINTRAIL_PG_ROUTER_WORKERS.", maxPGRouterWorkers))
 	f.Int("threads", defaultPGRouterThreads, fmt.Sprintf("How many threads each statement may use, 1 to %d. Env BINTRAIL_PG_ROUTER_THREADS.", maxPGRouterThreads))
 	f.Int("max-connections", defaultPGRouterMaxConns, fmt.Sprintf("How many clients may be connected at once, 1 to %d; one more is refused with an error. Env BINTRAIL_PG_ROUTER_MAX_CONNECTIONS.", maxPGRouterMaxConns))
-	f.String("max-wait", "", "How long a statement waits for its turn when every worker is busy, e.g. 30s or 2m; past it the client gets an error. Empty or 0: it waits for as long as its client stays connected. Env BINTRAIL_PG_ROUTER_MAX_WAIT.")
+	f.String("max-wait", "", "How long a statement waits for its turn when every worker is busy, e.g. 30s or 2m; past it the client gets an error. Empty or 0: no limit of its own, and the five minutes one statement may take, its wait included, is what ends it. Env BINTRAIL_PG_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 }
 
@@ -161,7 +162,11 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	if st.ServersFile == "" {
 		st.ServersFile = console.DefaultRegistryPath()
 	}
-	if err := validPGListen(st.Listen); err != nil {
+	listenName := "--listen"
+	if !f.Changed("listen") && os.Getenv("BINTRAIL_PG_ROUTER_LISTEN") != "" {
+		listenName = "BINTRAIL_PG_ROUTER_LISTEN"
+	}
+	if err := validPGListen(st.Listen, listenName); err != nil {
 		return st, err
 	}
 	var err error
@@ -195,12 +200,12 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 		b.WriteString(" (the access token is accepted too)")
 	}
 	b.WriteString(".\n")
-	b.WriteString("PostgreSQL router: it serves PostgreSQL servers only. The copy answers every statement, read-only, and nothing is sent to the source.\n")
+	b.WriteString("PostgreSQL router: it serves PostgreSQL servers only. The copy answers every statement, read-only, as of its last snapshot update, and nothing is sent to the source.\n")
 	b.WriteString("PostgreSQL router: the password is asked for in clear text and there is no TLS, which is why the port listens on this machine only.\n")
 	if !serversExist {
 		fmt.Fprintf(&b, "PostgreSQL router: the servers file %s does not exist yet, so no server can be reached. It is read again when it appears; if DBTrail keeps it somewhere else, give that path with --servers-file.\n", st.ServersFile)
 	} else {
-		fmt.Fprintf(&b, "PostgreSQL router: %s from %s, read again when it changes.\n", countOfServers(servers), st.ServersFile)
+		fmt.Fprintf(&b, "PostgreSQL router: %s listed in %s, read again when it changes; the PostgreSQL ones are served here.\n", countOfServers(servers), st.ServersFile)
 	}
 	fmt.Fprintf(&b, "PostgreSQL router: %s on the copy at once, %s and up to %s of memory each (%s), and at most %d clients connected. These are set where this is started (--workers, --threads, --sql-memory, --max-connections); nothing is worked out from the machine.\n",
 		countOfStatements(st.Workers), countOfThreads(st.Threads), memory, memoryFrom, st.MaxConns)
@@ -216,6 +221,7 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	pgRouterNoTails()
 	// The MySQL router's own start-up pieces, called as they are (router.go
 	// is not edited for this command): the saved SQL memory, and the console
 	// that follows the daemon's files with a pool of the size given.
@@ -251,6 +257,22 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	return port.serve(ctx)
 }
 
+// pgRouterNoTails turns fresh mode off for this process, whatever each
+// server's entry or the environment says.
+//
+// Fresh mode keeps files of recent changes ("tails") in the temporary
+// directory, and the first one a process makes sweeps that directory for
+// tails an earlier process left behind, by age. Two processes that share a
+// machine share that directory, so a tail this one made could be swept by the
+// MySQL router's start, and the MySQL router's by this one's: a statement
+// failing for a reason neither process can see. A PostgreSQL table has no
+// tail to read in any case (the copy of a PostgreSQL server is as old as its
+// last snapshot update), so this process makes none, sweeps nothing, and
+// leaves the directory to the MySQL router.
+func pgRouterNoTails() {
+	_ = os.Setenv("BINTRAIL_SQL_TAILS", "off")
+}
+
 // pgRouterPort is the listener over time: open while a password that could
 // open it exists, closed with every connection on it when the password from
 // the web interface is withdrawn. The same rule as the MySQL router's port,
@@ -266,6 +288,29 @@ type pgRouterPort struct {
 	mu    sync.Mutex
 	bound string
 	stop  context.CancelFunc
+	// passwords are the ones that opened the port as it is bound now.
+	passwords []string
+}
+
+// withdrawn closes the port, with every connection on it, when the passwords
+// that open it are no longer the ones it was opened with: the port cannot
+// tell which connection came in with the one that is gone.
+//
+// The console calls this for two things (console.Server.
+// OnFlashbackPasswordWithdrawn): a password that stopped being accepted, and
+// Engine Routing switched on or off, which the MySQL port closes its
+// connections for so they reconnect under the new routing. This port routes
+// nothing, so that second one must not put its clients out: it is told from
+// the first by the passwords, which a withdrawal always changes (one is
+// replaced, or the port is turned off and there are none) and a switch of
+// routing leaves as they were.
+func (p *pgRouterPort) withdrawn() {
+	now := p.srv.FlashbackPasswords()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stop != nil && !slices.Equal(now, p.passwords) {
+		p.stop()
+	}
 }
 
 // listening is the address the port is bound on now, "" while it is closed.
@@ -283,15 +328,7 @@ func (p *pgRouterPort) open() bool { return len(p.srv.FlashbackPasswords()) > 0 
 // not stay up looking like one that does. After that a failure to bind again
 // is logged once and tried again every second.
 func (p *pgRouterPort) serve(ctx context.Context) error {
-	p.srv.OnFlashbackPasswordWithdrawn(func() {
-		// Every connection: the port cannot tell which of them came in with
-		// the password that is gone.
-		p.mu.Lock()
-		if p.stop != nil {
-			p.stop()
-		}
-		p.mu.Unlock()
-	})
+	p.srv.OnFlashbackPasswordWithdrawn(p.withdrawn)
 	// Before waiting for a password: an address that cannot be bound is said
 	// now, not on the day a password is created.
 	probe, err := net.Listen("tcp", p.addr)
@@ -304,7 +341,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		if !p.open() {
 			if !waiting {
 				waiting = true
-				fmt.Fprintf(p.out, "The PostgreSQL router is not listening yet: no password for SQL clients exists. Create it with `dbtrail port on`, or in the web interface (Settings, Connect a SQL client): %s opens here within a few seconds, without a restart. An access token (--token, BINTRAIL_CONSOLE_TOKEN) is one more password while the port is on; it does not open it.\n", p.addr)
+				fmt.Fprintf(p.out, "The PostgreSQL router is not listening yet: the port for SQL clients is not turned on. Turn it on with `dbtrail port on`, or in the web interface (Settings, Connect a SQL client): either creates its password, and %s opens here within a few seconds, without a restart. An access token (--token, BINTRAIL_CONSOLE_TOKEN) is one more password while the port is on; it does not open it.\n", p.addr)
 			}
 			select {
 			case <-ctx.Done():
@@ -313,6 +350,9 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 			continue
 		}
 		waiting = false
+		// Read before the port is bound: a password replaced between here
+		// and there then differs from these, and closes the port.
+		passwords := p.srv.FlashbackPasswords()
 		ln, err := net.Listen("tcp", p.addr)
 		if err != nil {
 			if !opened {
@@ -331,13 +371,13 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		opened, saidRebind = true, false
 		child, cancel := context.WithCancel(ctx)
 		p.mu.Lock()
-		p.bound, p.stop = ln.Addr().String(), cancel
+		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
 		err = servePGPort(child, p.srv, ln, p.maxConns)
 		cancel()
 		p.mu.Lock()
-		p.bound, p.stop = "", nil
+		p.bound, p.stop, p.passwords = "", nil, nil
 		p.mu.Unlock()
 		if err != nil && ctx.Err() == nil && p.open() {
 			slog.Warn("PostgreSQL router: the port stopped; opening it again", "error", err)
@@ -362,13 +402,13 @@ const pgPortSchema = "public"
 // port asks for its password in clear text and has no TLS, so it listens on
 // this machine alone: an address other machines reach would put the port's
 // password on the network for anyone between them to read.
-func validPGListen(addr string) error {
+func validPGListen(addr, name string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("--listen %q is not an address: want host:port, e.g. 127.0.0.1:5433", addr)
+		return fmt.Errorf("%s %q is not an address: want host:port, e.g. 127.0.0.1:5433", name, addr)
 	}
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("--listen %q: %q is not a port number (1 to 65535)", addr, port)
+		return fmt.Errorf("%s %q: %q is not a port number (1 to 65535)", name, addr, port)
 	}
 	if host == "localhost" {
 		return nil
@@ -376,8 +416,8 @@ func validPGListen(addr string) error {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("--listen %q: the PostgreSQL port listens on this machine only (127.0.0.1, ::1 or localhost); "+
-		"it asks for its password in clear text and has no TLS, so an address other machines reach would show that password to the network", addr)
+	return fmt.Errorf("%s %q: the PostgreSQL port listens on this machine only (127.0.0.1, ::1 or localhost); "+
+		"it asks for its password in clear text and has no TLS, so an address other machines reach would show that password to the network", name, addr)
 }
 
 // servePGPort serves the PostgreSQL-protocol port on ln until ctx ends, with
@@ -442,7 +482,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration) pgshim.LoginFunc {
 			// here would be a path nothing tests. Said after the password
 			// passed, like every other fact about a server.
 			return nil, &pgshim.Error{Code: "0A000", Message: fmt.Sprintf(
-				"server %q is a MySQL or MariaDB server, and this port serves PostgreSQL servers; connect a MySQL client to the MySQL port for it", tgt.ID)}
+				"server %q is not a PostgreSQL server, and this port serves PostgreSQL servers only; the copy of a MySQL or MariaDB server is read with a MySQL client on the MySQL port", tgt.ID)}
 		}
 		bound := &pgshim.Binding{Actor: "server:" + tgt.ID}
 		if tgt.ViaLogin {

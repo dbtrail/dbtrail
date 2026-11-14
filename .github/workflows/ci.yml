@@ -832,7 +832,10 @@ jobs:
       # (#2813): this is the only job with a MySQL index AND a PostgreSQL
       # source, and the console's tests that need both run here or nowhere.
       # Step-level because of the matrix — see the note on the `changes` job.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || needs.changes.outputs.console == 'true' }}
+      # A console PR starts the two servers on one cell only, the one its
+      # tests run on; DATA is what the data-path suite below still waits for.
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || (needs.changes.outputs.console == 'true' && matrix.postgres == '16') }}
+      DATA: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
       # Step-level (not job-level) `if:` — see the note on the `integration`
@@ -916,7 +919,7 @@ jobs:
       # asserting the headline end-to-end test genuinely ran — not merely that
       # `go test` exited 0. pipefail keeps the go-test exit code through the tee.
       - name: PostgreSQL-source integration tests
-        if: env.RUN == 'true'
+        if: env.RUN == 'true' && env.DATA == 'true'
         run: |
           set -o pipefail
           go test -tags=integration -race -p 1 -count=1 -v \
@@ -944,11 +947,14 @@ jobs:
         if: env.RUN == 'true' && matrix.postgres == '16'
         run: |
           set -o pipefail
-          sudo apt-get install -y --no-install-recommends postgresql-client >/dev/null 2>&1 \
-            || echo "psql could not be installed; the test reads the wire with its own client and skips the psql part"
-          go test -tags=integration -race -p 1 -count=1 -v \
+          # psql is the client the port is for: the test runs it, and with
+          # BINTRAIL_REQUIRE_PSQL its absence is a failure, not a skip.
+          command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
+          BINTRAIL_REQUIRE_PSQL=1 go test -tags=integration -race -p 1 -count=1 -v \
             -run '^TestIntegrationPGRouter$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
-          grep -q -- '--- PASS: TestIntegrationPGRouter' /tmp/pg-console-it.out \
+          grep -q -- '--- PASS: TestIntegrationPGRouter/psql ' /tmp/pg-console-it.out \
+            || { echo "FATAL: psql did not run against the PostgreSQL router — false-green tripwire" >&2; exit 1; }
+          grep -q -- '^--- PASS: TestIntegrationPGRouter ' /tmp/pg-console-it.out \
             || { echo "FATAL: the PostgreSQL router end-to-end test did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:

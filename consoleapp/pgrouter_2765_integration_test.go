@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -116,28 +117,31 @@ func TestIntegrationPGRouter(t *testing.T) {
 		t.Fatalf("pgbaseline.Run: %v", err)
 	}
 
-	reg, err := console.LoadRegistry(t.TempDir() + "/servers.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The port as the command runs it: the servers and the port's password
+	// read from the daemon's files by a console that cannot write them
+	// (newRouterConsole), with no tails, behind the port's own loop.
+	t.Setenv("BINTRAIL_SQL_TAILS", "")
+	pgRouterNoTails()
+	f := newRouterFiles(t)
 	dsn := seedFlashbackIndex(t, "alice", time.Now().UTC().Truncate(time.Hour))
-	ent, err := reg.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir})
+	ent, err := f.owner.Add(console.ServerEntry{Name: "pgsrv", DSN: dsn, Flavor: console.FlavorPostgres, BaselineDir: outDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := console.New(console.Config{Listen: "127.0.0.1:0", Token: "tok", Registry: reg})
+	f.savePortFile(t, true, "tok")
+	srv, runner, err := newRouterConsole(f.settings(""), console.SQLPool{Workers: 2, Threads: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(runner.Close)
+	srv.RefreshFollowedFiles()
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 8, poll: 20 * time.Millisecond, out: io.Discard}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})
-	go func() { _ = servePGPort(portCtx, srv, ln, 0); close(served) }()
+	go func() { _ = router.serve(portCtx); close(served) }()
 	defer func() { stopPort(); <-served }()
-	host, portNum, _ := net.SplitHostPort(ln.Addr().String())
+	waitUntil(t, "the port to open", func() bool { return router.listening() != "" })
+	host, portNum, _ := net.SplitHostPort(router.listening())
 
 	rec := audittest.Install(t)
 	cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s sslmode=disable", host, portNum))
@@ -237,32 +241,38 @@ func TestIntegrationPGRouter(t *testing.T) {
 		t.Errorf("%d sql.run audit records, want 16: the 15 compared statements and the last count", sqlRuns)
 	}
 
-	// The client the port is for. Not every machine that runs this has it.
-	psql, err := exec.LookPath("psql")
-	if err != nil {
-		t.Log("psql is not installed here; the wire was read with pgconn alone")
-		return
-	}
-	run := func(args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, psql, append([]string{"-h", host, "-p", portNum, "-U", "anyone", "-d", "pgsrv", "-X", "-At"}, args...)...)
-		cmd.Env = append(os.Environ(), "PGPASSWORD=tok", "PGSSLMODE=prefer", "PGCONNECT_TIMEOUT=10")
-		out, err := cmd.CombinedOutput()
-		return strings.TrimSpace(string(out)), err
-	}
-	out, err := run("-c", "SELECT id, status, amount FROM "+tbl+" ORDER BY id")
-	if err != nil {
-		t.Fatalf("psql: %v\n%s", err, out)
-	}
-	if want := "1|new|10.50\n2|paid|0.00\n3||\n4|Paid|7.25"; out != want {
-		t.Errorf("psql printed:\n%s\nwant:\n%s", out, want)
-	}
-	out, err = run("-c", "DELETE FROM "+tbl)
-	if err == nil || !strings.Contains(out, "ERROR") {
-		t.Errorf("psql ran a DELETE: err %v, output %q", err, out)
-	}
-	cmd := exec.CommandContext(ctx, psql, "-h", host, "-p", portNum, "-U", "anyone", "-d", "pgsrv", "-X", "-At", "-c", "SELECT 1")
-	cmd.Env = append(os.Environ(), "PGPASSWORD=wrong", "PGCONNECT_TIMEOUT=10")
-	if b, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(b), "password authentication failed") {
-		t.Errorf("psql with a wrong password: err %v, output %q", err, b)
-	}
+	// The client the port is for. Not every machine that runs this has it;
+	// where it must be there (CI sets BINTRAIL_REQUIRE_PSQL), its absence
+	// fails the test, so the check cannot be green without psql having run.
+	t.Run("psql", func(t *testing.T) {
+		psql, err := exec.LookPath("psql")
+		if err != nil {
+			if os.Getenv("BINTRAIL_REQUIRE_PSQL") != "" {
+				t.Fatal("psql is not installed, and BINTRAIL_REQUIRE_PSQL says it must be")
+			}
+			t.Skip("psql is not installed here; the wire was read with pgconn alone")
+		}
+		run := func(args ...string) (string, error) {
+			cmd := exec.CommandContext(ctx, psql, append([]string{"-h", host, "-p", portNum, "-U", "anyone", "-d", "pgsrv", "-X", "-At"}, args...)...)
+			cmd.Env = append(os.Environ(), "PGPASSWORD=tok", "PGSSLMODE=prefer", "PGCONNECT_TIMEOUT=10")
+			out, err := cmd.CombinedOutput()
+			return strings.TrimSpace(string(out)), err
+		}
+		out, err := run("-c", "SELECT id, status, amount FROM "+tbl+" ORDER BY id")
+		if err != nil {
+			t.Fatalf("psql: %v\n%s", err, out)
+		}
+		if want := "1|new|10.50\n2|paid|0.00\n3||\n4|Paid|7.25"; out != want {
+			t.Errorf("psql printed:\n%s\nwant:\n%s", out, want)
+		}
+		out, err = run("-c", "DELETE FROM "+tbl)
+		if err == nil || !strings.Contains(out, "ERROR") {
+			t.Errorf("psql ran a DELETE: err %v, output %q", err, out)
+		}
+		cmd := exec.CommandContext(ctx, psql, "-h", host, "-p", portNum, "-U", "anyone", "-d", "pgsrv", "-X", "-At", "-c", "SELECT 1")
+		cmd.Env = append(os.Environ(), "PGPASSWORD=wrong", "PGCONNECT_TIMEOUT=10")
+		if b, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(b), "password authentication failed") {
+			t.Errorf("psql with a wrong password: err %v, output %q", err, b)
+		}
+	})
 }

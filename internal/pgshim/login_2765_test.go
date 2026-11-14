@@ -699,3 +699,51 @@ func TestPort_aFullPortRefusesWithAnError(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A socket that connects and never logs in gives its place back: the port's
+// connections are for clients, not for whatever opened a socket.
+func TestPort_aClientThatNeverLogsInIsPutOut(t *testing.T) {
+	old := loginTimeout
+	loginTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { loginTimeout = old })
+	p := &portLogin{run: answer([]sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, []any{json.Number("1")})}
+	addr := serveAddrCfg(t, Config{Login: p.login, MaxConns: 1})
+	silent, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	// It holds the only place, says nothing, and is closed by the port.
+	_ = silent.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(silent); err != nil {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatal("a socket that never logged in was left connected")
+		}
+	}
+	// And a real client gets the place.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders", portPassword, addr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := pgx.ConnectConfig(ctx, cfg)
+		cancel()
+		if err == nil {
+			// A client that logged in is not put out by the timer.
+			time.Sleep(2 * loginTimeout)
+			if _, rows := textRows(t, conn, "SELECT 1"); len(rows) != 1 {
+				t.Fatalf("a logged-in client was put out by the login timer: %v", rows)
+			}
+			_ = conn.Close(context.Background())
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the place was never given back: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

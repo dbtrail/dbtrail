@@ -84,6 +84,13 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	stopClose := context.AfterFunc(connCtx, func() { _ = c.Close() })
 	defer stopClose()
 
+	// A client has this long to log in. A socket that connects and says
+	// nothing, or stops at the password, would otherwise hold one of the
+	// port's connections for as long as it liked, and a handful of them
+	// would keep every real client out.
+	loginTimer := time.AfterFunc(loginTimeout, func() { _ = c.Close() })
+	defer loginTimer.Stop()
+
 	be := pgproto3.NewBackend(wc, wc)
 	startup, err := negotiateStartup(c, be)
 	if err != nil {
@@ -119,12 +126,21 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	if bound.Close != nil {
 		defer bound.Close()
 	}
+	if !loginTimer.Stop() {
+		// It fired: the socket is closed, or about to be.
+		logger.Info("pgshim login took too long", "user", user, "database", database, "remote", c.RemoteAddr())
+		return
+	}
 	sendAuthOK(be)
 	if err := be.Flush(); err != nil {
 		return
 	}
 	commandLoop(be, &session{be: be, bound: bound, ctx: connCtx, logger: logger})
 }
+
+// loginTimeout is how long a client has, from connecting, to send its
+// start-up message and its password. A variable so a test can shorten it.
+var loginTimeout = 30 * time.Second
 
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {

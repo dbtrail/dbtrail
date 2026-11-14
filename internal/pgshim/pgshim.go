@@ -173,6 +173,9 @@ func refuseFull(c net.Conn, max int, refusals chan struct{}) {
 	go func() {
 		defer func() { <-refusals }()
 		defer c.Close()
+		// What is read here comes from a client nobody identified: a fault
+		// reading it ends this refusal, not the process.
+		defer func() { _ = recover() }()
 		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 		be := pgproto3.NewBackend(c, c)
 		if startup, err := negotiateStartup(c, be); err != nil || startup == nil {

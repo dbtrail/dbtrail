@@ -562,10 +562,15 @@ listener, its own workers, its own memory.
   is named.
 - **The password** is the one created for SQL clients in the web interface
   (`dbtrail port on`), the access token, or the application login's own. The
-  port is open while that password exists, and closes with every connection
-  when it is withdrawn.
-- **PostgreSQL servers only.** A MySQL or MariaDB server is refused by name;
-  its copy is read through the MySQL port.
+  port is open while the port for SQL clients is turned on in the web
+  interface, and closes with every connection when it is turned off or its
+  password is replaced. Switching Engine Routing, which is the MySQL port's,
+  does not disconnect anyone here.
+- **PostgreSQL servers only.** A MySQL or MariaDB server is refused with an
+  error that names it; its copy is read through the MySQL port.
+- **As of the last snapshot update.** Fresh mode does not apply to a
+  PostgreSQL server, so an answer is as old as the copy's last update, and
+  this process keeps no files of recent changes.
 - **The copy answers every statement.** Nothing is sent to the source, and a
   statement that is not a read is refused with an error. Unqualified names
   resolve in `public`. NULL order, integer division and text comparison follow
