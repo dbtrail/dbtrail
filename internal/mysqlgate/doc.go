@@ -11,8 +11,21 @@
 // statements is run, and each answer (column names, types and every cell) is
 // held against testdata/answers.golden.txt.
 //
-// It needs no database, so it runs in the unit tier on every pull request and
-// no path filter or missing service can skip it.
+// It needs no database, so it runs in the unit tier of every pull request
+// that changes Go code or this package's testdata (the CI path filter names
+// it), and nothing in it skips.
+//
+// The golden file holds the COPY's answers, not MySQL's. Where the copy is
+// known to answer otherwise than MySQL (docs/time-travel-sql.md lists them:
+// LIKE is case-sensitive, count(DISTINCT) over folded text, the type a
+// division or an aggregate comes back as), the file pins the copy's answer:
+// the gate is about that answer not moving, not about it being MySQL's.
+//
+// What it does not reach: a table with changes over its snapshot (delta
+// files, fresh mode's tails), the change-log views, more than one schema, a
+// latin1 column, a MariaDB dump, and the session fields a caller decides
+// with its own views (StrictStar, Types, UnchangedWithin, a session time
+// zone, which needs the console's wall-clock DATETIME input).
 //
 // A change that alters an answer on purpose changes the golden file in the
 // same pull request, where a reviewer sees which answer moved. Run with
