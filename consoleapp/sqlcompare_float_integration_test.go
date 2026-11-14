@@ -279,7 +279,12 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 	for _, r := range rep.Results {
 		route[r.Statement] = r
 	}
-	norm := func(a string) string { return strings.ReplaceAll(a, "copy", "live") }
+	norm := func(a string) string {
+		if i := strings.Index(a, "]"); i >= 0 && strings.HasPrefix(a, "[") {
+			a = a[i+1:]
+		}
+		return strings.ReplaceAll(a, "copy", "live")
+	}
 	for _, s := range stmts {
 		r := route[s]
 		t.Logf("ROUTE %s rule=%s (%s) sqlcompare=%s/%s :: %s", r.Route, r.RouteRule, r.RouteReason, r.Verdict, r.Kind, s)
@@ -301,7 +306,7 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 					who = "copy"
 				}
 				verdict := "SAME"
-				if norm(got) != want {
+				if norm(got) != norm(want) {
 					verdict = "DIFF"
 				}
 				t.Logf("MEASURE %s %s %-6s by=%s :: %s\n    mysql: %s\n    port:  %s", verdict, mode, side.name, who, s, want, got)
@@ -318,7 +323,7 @@ func TestIntegrationSQLCompareFloatMeasure(t *testing.T) {
 		}{{"copy", copyOnly}, {"routed", routed}} {
 			got := wireBinary(side.c, q, arg)
 			verdict := "SAME"
-			if norm(got) != want {
+			if norm(got) != norm(want) {
 				verdict = "DIFF"
 			}
 			t.Logf("MEASURE %s bound %T %-6s :: %s\n    mysql: %s\n    port:  %s", verdict, arg, side.name, q, want, got)
