@@ -87,6 +87,15 @@ type CopyOptions struct {
 	// past the veto list (VetoOpts), and the caller keeps on MySQL a call
 	// whose date is not a date column or a clock call (DateFunctionVeto).
 	MySQLDateFunctions bool
+	// MySQLDateSub writes MySQL's DATE_SUB(d, INTERVAL n unit) and
+	// SUBDATE(d, INTERVAL n unit) as the copy's _bintrail_date_sub macro
+	// (mysqlDateSubCall, #2611), which sqlsandbox defines under
+	// Session.MySQLClock: d minus the interval, refused outside the years 1
+	// to 9999. Only the routing port sets it, and the caller keeps on MySQL a
+	// call the copy would answer another way (DateSubVeto). Off, DATE_SUB is
+	// sent as written and the copy refuses it: its own date_sub takes three
+	// arguments.
+	MySQLDateSub bool
 	// MySQLClockKeywords writes CURRENT_TIMESTAMP, LOCALTIME and
 	// LOCALTIMESTAMP as now(), and CURRENT_DATE as curdate(), the calls they
 	// mean on MySQL (#2611), which the copy's session has with MySQL's values
@@ -483,7 +492,7 @@ func wordByte(c byte) bool {
 }
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
-var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff",
+var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff", "date_sub", "subdate",
 	"current_timestamp", "current_date", "localtime", "localtimestamp"}
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
@@ -502,7 +511,8 @@ type keywordAt struct {
 // is written ILIKE, with o.LimitOffsetComma each LIMIT offset, count
 // that limitOffsetComma reads is written LIMIT count OFFSET offset, and with
 // o.MySQLDateFunctions each DATE_FORMAT and DATEDIFF call mysqlDateCall reads
-// is written as the copy's call, and with o.MySQLClockKeywords each
+// is written as the copy's call, with o.MySQLDateSub each DATE_SUB and
+// SUBDATE mysqlDateSubCall reads as the copy's macro, and with o.MySQLClockKeywords each
 // CURRENT_TIMESTAMP, LOCALTIME, LOCALTIMESTAMP and CURRENT_DATE the call it
 // means (clockCall). The keywords are taken from the last one
 // back, so a call inside another one's arguments is rewritten first, and the
@@ -538,6 +548,16 @@ func (sc scanned) copyText(o CopyOptions) string {
 				continue
 			}
 			call, n, ok := mysqlDateCall(j.word, cp[j.cp+kw:])
+			if !ok {
+				continue
+			}
+			cp = cp[:j.cp] + call + cp[j.cp+kw+n:]
+			continue
+		case j.word == "date_sub" || j.word == "subdate":
+			if !o.MySQLDateSub {
+				continue
+			}
+			call, n, ok := mysqlDateSubCall(cp[j.cp+kw:], bl[j.bl+kw:])
 			if !ok {
 				continue
 			}

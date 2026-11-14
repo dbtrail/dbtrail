@@ -766,6 +766,43 @@ The decision, in order, for every statement:
      before it.
    - `TIMESTAMPDIFF` and `TIMEDIFF` stay on MySQL, and so does a `DATEDIFF`
      with another number of arguments.
+
+   `DATE_SUB(d, INTERVAL n unit)` and its synonym `SUBDATE(d, INTERVAL n
+   unit)`, the way a report writes "since", go to the copy since #2611 when
+   its answer is MySQL's. The copy's own `date_sub` counts the units between
+   two dates, so the port sends MySQL's call as a function of the copy's
+   session that subtracts the interval. So `WHERE created_at >=
+   DATE_SUB(NOW(), INTERVAL 30 DAY)` is the copy's. The rules:
+   - What is stepped is a `DATETIME` or `TIMESTAMP` column declared without
+     fractional seconds, named as a bare column, or `NOW()`,
+     `UTC_TIMESTAMP()` or `CURRENT_TIMESTAMP`; or a `DATE` column stepped by
+     `SECOND`, `MINUTE` or `HOUR`, which is a date and time on both sides. A
+     `DATE` stepped by a day or more stays on MySQL, counted as
+     `copy_columns_differ`: MySQL answers a `DATE` (`2026-03-30`) and the copy
+     a date and time (`2026-03-30 00:00:00`). So do `CURDATE()` and
+     `UTC_DATE()`, a `DATETIME(6)` (MySQL prints `.250000`, the copy `.25`),
+     text, a string, a placeholder, an expression, a column whose name the
+     statement also gives a select item, and a statement with a subquery or a
+     `WITH`. A `TIMESTAMP` column needs a session zone of UTC or a fixed
+     offset: under a zone name, MySQL steps the wall clock and the copy the
+     instant, which part at a clock change.
+   - The amount is a whole number written in the statement, quoted or not
+     (`INTERVAL 30 DAY`, `INTERVAL '-1' MONTH`), and the unit one of
+     `SECOND`, `MINUTE`, `HOUR`, `DAY`, `WEEK`, `MONTH`, `QUARTER` and
+     `YEAR`. `MICROSECOND`, the units of two parts (`DAY_HOUR`), a decimal
+     amount (MySQL rounds `1.5`) and a placeholder (`INTERVAL ? DAY`) stay on
+     MySQL. Month and year steps clip to the month's last day on both sides:
+     March 31 minus a month is February 28, February 29 minus a year February
+     28.
+   - A result before the year 1 or after 9999 is MySQL's: there MySQL answers
+     `NULL`, or `0000-00-00` for a day step into the year 0, and the copy
+     declines the statement, which then goes to MySQL under
+     `copy_columns_differ`, as `UNIX_TIMESTAMP` out of its range does.
+   - Arithmetic on the result (`DATE_SUB(dt, INTERVAL 1 DAY) + 0`, one minus
+     another, `AVG`, `SUM`) is MySQL's, as it is on a date column.
+   - `SUBDATE(d, n)`, the form with a number of days, is not rewritten: the
+     copy has no such function, and MySQL answers. On the port without
+     routing nothing changes: `DATE_SUB` there is still the copy's own.
 4. The one shape that needs no plan: `SELECT <columns> FROM <one table>
    LIMIT <at most 1,000 rows, offset included>` with nothing else (no
    `WHERE`, join, `ORDER BY`, `GROUP BY`, subquery or function call):

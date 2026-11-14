@@ -341,6 +341,10 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		if _, err := conn.ExecContext(ctx, nowMacros); err != nil {
 			return sessionErr("define NOW, CURDATE, UTC_TIMESTAMP and UTC_DATE: %v", err)
 		}
+		// MySQL's DATE_SUB, which the routing port writes as this macro.
+		if _, err := conn.ExecContext(ctx, dateSubMacro); err != nil {
+			return sessionErr("define DATE_SUB: %v", err)
+		}
 	}
 	// The client's time zone (the port's SET time_zone), after the views
 	// script, which pins UTC, and before the lock, after which no SET runs. A
