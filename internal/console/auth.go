@@ -57,8 +57,39 @@ const sessionCookieName = "bintrail_session"
 // audit trail can say a command on the machine made it (localCLIActor).
 type localCLICtxKey struct{}
 
-// sessionCookieToken returns the session cookie's value, or "" when absent.
+// sessionCookieNameFor is the cookie's name for the address the browser
+// opened: the plain name with the port after it ("bintrail_session_8091"),
+// the plain name when the address has no port (behind a proxy on 443).
+//
+// A browser keeps cookies per host and does not tell ports apart, so two web
+// interfaces on one host (two installations on one machine, on 8090 and
+// 8091) would share one cookie of a single name: signing in to one would
+// overwrite the other's, and signing out of either would clear both (#2833).
+// The port in the name gives each its own.
+//
+// The port is read from the request's Host, which the client writes. It
+// chooses a NAME to look under, never a credential: a token found under any
+// name is still looked up in this server's own session store.
+func sessionCookieNameFor(r *http.Request) string {
+	_, port, err := net.SplitHostPort(r.Host)
+	if err != nil || port == "" || len(port) > 5 {
+		return sessionCookieName
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return sessionCookieName
+		}
+	}
+	return sessionCookieName + "_" + port
+}
+
+// sessionCookieToken returns the session cookie's value, or "" when absent:
+// the cookie named for the port the browser opened, or, when there is none,
+// the plain name, which is what a login made before #2833 holds.
 func sessionCookieToken(r *http.Request) string {
+	if c, err := r.Cookie(sessionCookieNameFor(r)); err == nil && c.Value != "" {
+		return c.Value
+	}
 	c, err := r.Cookie(sessionCookieName)
 	if err != nil {
 		return ""
@@ -66,7 +97,8 @@ func sessionCookieToken(r *http.Request) string {
 	return c.Value
 }
 
-// setSessionCookie attaches the issued session token to a login response.
+// setSessionCookie attaches the issued session token to a login response,
+// under the name for the address the browser opened (sessionCookieNameFor).
 // HttpOnly keeps it out of script reach; SameSite=Lax withholds it on
 // cross-site POSTs (the first CSRF layer — see tokenMiddleware for the belt);
 // Secure is safe for the local first-run flow because browsers treat loopback
@@ -74,9 +106,9 @@ func sessionCookieToken(r *http.Request) string {
 // in docs/console.md). Max-Age mirrors the session's absolute expiry; the
 // idle TTL may end the session earlier, which the middleware enforces — a
 // cookie outliving its session is just a refused credential.
-func setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     sessionCookieNameFor(r),
 		Value:    token,
 		Path:     "/",
 		MaxAge:   int(time.Until(expires) / time.Second),
@@ -89,17 +121,25 @@ func setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
 // clearSessionCookie expires the session cookie (Max-Age=0 on the wire), so a
 // logout kills every tab, not just the one that clicked it. Attributes match
 // setSessionCookie — a clear that differs in Path would leave the original
-// cookie standing.
-func clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
+// cookie standing. Both names are cleared: the one for this address, and the
+// plain one a login made before #2833 left, which sessionCookieToken would
+// otherwise go on reading.
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	names := []string{sessionCookieNameFor(r)}
+	if names[0] != sessionCookieName {
+		names = append(names, sessionCookieName)
+	}
+	for _, name := range names {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
 }
 
 // authKind records, in the request context, which credential authenticated
