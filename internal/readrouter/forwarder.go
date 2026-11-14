@@ -85,13 +85,24 @@ type Forwarder struct {
 	// one the client asked for, and why it is not the session's. The
 	// connection works, under the collation the source gave it.
 	OnCollation func(collation string, err error)
-	// ClientCollation is the collation number the client's own handshake
-	// asked the port for (go-mysql's server.Conn.Charset()), set before the
-	// first statement: the session is opened under it and its character
-	// set, as a connection to the source itself would be (#2810). 0, a
-	// connection of the port's own, keeps the port's choice
-	// (settleCollation).
-	ClientCollation uint8
+	// ClientCollation is the collation number the client asked the port
+	// for (its handshake's, go-mysql's server.Conn.Charset(), or the one a
+	// COM_CHANGE_USER carried), set before the first statement: the session
+	// is opened under it and its character set, as a connection to the
+	// source itself would be (#2810). 0, a connection of the port's own,
+	// keeps the port's choice (settleCollation).
+	ClientCollation uint16
+	// GlobalSession: the connection replaces one the client reset
+	// (COM_RESET_CONNECTION), which on the source sets the session's
+	// character sets and collation to the server's global values. It wins
+	// over ClientCollation.
+	GlobalSession bool
+	// SafeCharsetsOnly: the port is read-only, and its screen
+	// (ReadOnlyRefusal) reads a statement's bytes as the source does only
+	// under a client character set of safeCharsets. A character set outside
+	// them is not given to the session (OnCollation is told), as the screen
+	// refuses a client's own SET NAMES of one.
+	SafeCharsetsOnly bool
 	// OnSession, when set, is told the state the source opened the session
 	// in (SessionStatusFlags), at most once: with the source's first answer
 	// to a statement, because that is the first packet that shows what an
@@ -339,7 +350,10 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 	if err == nil {
 		// Part of opening the connection: one that breaks here did not open.
 		settle := f.settleCollation
-		if f.ClientCollation != 0 {
+		switch {
+		case f.GlobalSession:
+			settle = f.globalCollation
+		case f.ClientCollation != 0:
 			settle = f.clientCollation
 		}
 		if serr := settle(ctx, c); serr != nil {
@@ -446,22 +460,23 @@ func (f *Forwarder) settleCollation(ctx context.Context, c *client.Conn) error {
 
 // collationName is what the source may name a character set or a collation:
 // lowercase letters, digits and underscores, which is every name MySQL and
-// MariaDB have. Anything else is not sent back in a SET NAMES.
+// MariaDB have. Nothing else is written back into a SET: the names come from
+// the source's own tables, never from the client, which only gives a number.
 var collationName = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 // clientCollation gives a client's connection the collation and character
-// set the client's handshake asked the port for (ClientCollation), before
-// anything of the client's: the session MySQL would have given the client
-// had it connected there itself (#2810). The port's own handshake asks for
+// set the client asked the port for (ClientCollation), before anything of
+// the client's: the session MySQL would have given the client had it
+// connected there itself (#2810). The port's own handshake asks for
 // utf8mb4_0900_ai_ci (mysql.DEFAULT_COLLATION_ID): a client that asked for
 // that is sent nothing more, MariaDB included, since the source reads the
 // number as it would read it from the client (a MariaDB 10.11, which does
 // not have it, falls back to its utf8mb4 default for both). Any other
 // number is a question and a statement: the source says what its number
 // means (information_schema.COLLATIONS), and SET NAMES sets the three
-// character sets and the collation as the handshake would have. A number is
-// asked of the source, not read from a table of the port's: the two servers
-// do not number every collation alike.
+// character sets and the collation as the handshake would have. The number
+// is asked of the source, not read from a table of the port's: the two
+// servers do not number every collation alike.
 //
 // Whether the copy then answers is the session read-back's decision, as for
 // a client's own SET NAMES: only under a collation that compares as the copy
@@ -469,51 +484,114 @@ var collationName = regexp.MustCompile(`^[a-z0-9_]+$`)
 // decodes the copy's bytes in. Under utf8mb4_general_ci, go-sql-driver's
 // default, MySQL answers every statement.
 //
-// What cannot be done leaves the session as the source gave it, under
+// What is not done leaves the session as the source gave it, under
 // utf8mb4_0900_ai_ci, and OnCollation is told: a number the source has no
-// collation for, a name that is not one, and a SET NAMES the source refuses
-// (a character set no client may use, ucs2). As in settleCollation, an error
-// that ends the session is a connection that did not open.
+// collation for, a name that is not one, a SET NAMES the source refuses (a
+// character set no client may use, ucs2), and on a read-only port a
+// character set outside safeCharsets (gbk, sjis, big5: a second byte 0x5C
+// would be a backslash to the screen and part of a letter to the source).
+// As in settleCollation, an error that ends the session is a connection
+// that did not open.
 func (f *Forwarder) clientCollation(ctx context.Context, c *client.Conn) error {
 	if f.ClientCollation == mysql.DEFAULT_COLLATION_ID {
 		return nil
 	}
 	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
-	asked := "number " + strconv.Itoa(int(f.ClientCollation))
-	refused := func(collation string, err error) error {
-		if !stillInSession(err) {
-			if cause := ctx.Err(); cause != nil {
-				return cause
-			}
-			return err
-		}
-		if f.OnCollation != nil {
-			f.OnCollation(collation, err)
-		}
-		return nil
-	}
-	res, err := c.Execute("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE ID = " + strconv.Itoa(int(f.ClientCollation)))
+	id := strconv.Itoa(int(f.ClientCollation))
+	asked := "number " + id
+	res, err := c.Execute("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE ID = " + id)
 	if err != nil {
-		return refused(asked, err)
+		return f.collationRefused(ctx, asked, err)
 	}
 	if res.RowNumber() == 0 {
-		return refused(asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
-			Message: "the source has no collation numbered " + strconv.Itoa(int(f.ClientCollation)) + ", which the client's handshake asked for"})
+		return f.collationRefused(ctx, asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
+			Message: "the source has no collation numbered " + id + ", which the client asked for"})
 	}
 	cs, err1 := res.GetString(0, 0)
 	coll, err2 := res.GetString(0, 1)
 	// Cells are views of the packet's bytes.
 	cs, coll = strings.Clone(cs), strings.Clone(coll)
 	if err := errors.Join(err1, err2); err != nil || !collationName.MatchString(cs) || !collationName.MatchString(coll) {
-		return refused(asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
+		return f.collationRefused(ctx, asked, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION,
 			Message: fmt.Sprintf("the source named collation %s %q of character set %q, which is not a collation name", asked, coll, cs)})
+	}
+	if f.SafeCharsetsOnly && !safeCharsets[cs] {
+		return f.collationRefused(ctx, coll, unsafeCharset(cs))
 	}
 	set := "SET NAMES " + cs + " COLLATE " + coll
 	if cs == "binary" {
 		set = "SET NAMES binary"
 	}
 	if _, err := c.Execute(set); err != nil {
-		return refused(coll, err)
+		return f.collationRefused(ctx, coll, err)
+	}
+	return nil
+}
+
+// unsafeCharset is why a read-only port does not give a session the
+// character set cs.
+func unsafeCharset(cs string) error {
+	return &mysql.MyError{Code: mysql.ER_UNKNOWN_CHARACTER_SET,
+		Message: "this port is read-only and reads statements as bytes; it does not give a session the character set " + cs + " (the session keeps utf8mb4)"}
+}
+
+// globalCollation gives a connection that replaces one the client reset
+// (GlobalSession) the character sets and the collation of the source's
+// global values, which is where COM_RESET_CONNECTION leaves them on the
+// source (measured on MySQL 8.0.46: a session opened under latin1 is under
+// utf8mb4_0900_ai_ci after the reset). The values are read, checked as
+// clientCollation checks its names, and set; what cannot be set leaves the
+// session as the source gave it, and OnCollation is told.
+func (f *Forwarder) globalCollation(ctx context.Context, c *client.Conn) error {
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	const what = "the source's global values"
+	res, err := c.Execute("SELECT @@GLOBAL.character_set_client, @@GLOBAL.character_set_results, @@GLOBAL.collation_connection")
+	if err != nil {
+		return f.collationRefused(ctx, what, err)
+	}
+	var v [3]string
+	for i := range v {
+		cell, err := res.GetString(0, i)
+		if err != nil {
+			return f.collationRefused(ctx, what, &mysql.MyError{Code: mysql.ER_UNKNOWN_ERROR, Message: "the source did not say its global character sets: " + err.Error()})
+		}
+		v[i] = strings.Clone(cell)
+	}
+	clientCS, results, coll := v[0], v[1], v[2]
+	if results == "" {
+		// NULL: no conversion of the results.
+		results = "NULL"
+	}
+	for _, n := range []string{clientCS, coll} {
+		if !collationName.MatchString(n) {
+			return f.collationRefused(ctx, what, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION, Message: fmt.Sprintf("the source named %q, which is not a character set or collation name", n)})
+		}
+	}
+	if results != "NULL" && !collationName.MatchString(results) {
+		return f.collationRefused(ctx, what, &mysql.MyError{Code: mysql.ER_UNKNOWN_COLLATION, Message: fmt.Sprintf("the source named %q, which is not a character set name", results)})
+	}
+	if f.SafeCharsetsOnly && !safeCharsets[clientCS] {
+		return f.collationRefused(ctx, coll, unsafeCharset(clientCS))
+	}
+	if _, err := c.Execute("SET SESSION character_set_client = " + clientCS + ", character_set_results = " + results + ", collation_connection = " + coll); err != nil {
+		return f.collationRefused(ctx, coll, err)
+	}
+	return nil
+}
+
+// collationRefused is how clientCollation and globalCollation end on an
+// error: one the session survives is told to OnCollation and the connection
+// opens as the source gave it; any other (a broken connection, a session the
+// source ended, a client that left) is a connection that did not open.
+func (f *Forwarder) collationRefused(ctx context.Context, collation string, err error) error {
+	if !stillInSession(err) {
+		if cause := ctx.Err(); cause != nil {
+			return cause
+		}
+		return err
+	}
+	if f.OnCollation != nil {
+		f.OnCollation(collation, err)
 	}
 	return nil
 }

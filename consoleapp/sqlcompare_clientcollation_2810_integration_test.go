@@ -127,7 +127,9 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	}
 	// What the copy answers on a session that compares as it does: ORDER BY
 	// k, a column with no index, so the plan reads the whole table.
-	const copyRead = "SELECT side, s FROM ev ORDER BY k"
+	// Not s: a letter with an accent there keeps any statement reading it on
+	// MySQL.
+	const copyRead = "SELECT side, dt FROM ev ORDER BY k"
 	cases := []struct {
 		collation string
 		copy      bool // the copy answers copyRead
@@ -222,17 +224,48 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 			if r := resetConnection(t, c); r.closed || r.code != 0 {
 				t.Fatalf("COM_RESET_CONNECTION (%s): %+v", coll, r)
 			}
-			res, err := c.Execute("SELECT @@collation_connection")
+			res, err := c.Execute(session)
 			if err != nil {
 				t.Fatal(err)
 			}
-			after[i], _ = res.GetString(0, 0)
+			for j := 0; j < 4; j++ {
+				v, _ := res.GetString(0, j)
+				after[i] += v + "|"
+			}
 			c.Close()
 		}
 		t.Logf("after a reset, asked %s: port %s, source %s", coll, after[0], after[1])
 		if after[0] != after[1] {
 			t.Errorf("after COM_RESET_CONNECTION on a connection that asked for %s: the port's session is %s, the source's %s", coll, after[0], after[1])
 		}
+	}
+
+	// A read-only port: a client that asks for gbk does not get it (its
+	// screen reads a statement's bytes as utf8mb4 or latin1 would), so the
+	// bytes BF 5C, a letter in gbk and a letter and a backslash to the
+	// screen, cannot end a string the screen reads as going on. The
+	// statement below is one string literal to the screen; under gbk it
+	// would be a string and then a second column naming the character set.
+	roLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roCtx, roCancel := context.WithCancel(context.Background())
+	roServed := make(chan struct{})
+	go func() {
+		_ = serveFlashback(roCtx, srv, roLn, flashbackConfig{RouteMaxCopyAge: time.Hour, RoutePolicy: readrouter.Policy{ScanRows: 2}, RouteReadOnly: true})
+		close(roServed)
+	}()
+	t.Cleanup(func() { roCancel(); <-roServed })
+	ro := openRaw(t, withCollation(fmt.Sprintf("%s:tok@tcp(%s)/%s", ent.ID, roLn.Addr().String(), srcName), "gbk_chinese_ci"))
+	if got := answerText(ro, session); !strings.HasPrefix(got, "utf8mb4_0900_ai_ci|utf8mb4|") {
+		t.Errorf("a gbk client on a read-only port: the session is %s, want utf8mb4_0900_ai_ci and utf8mb4", got)
+	}
+	hidden := "SELECT '\xbf\\' , @@character_set_client -- '"
+	got := answerText(ro, hidden)
+	t.Logf("read-only, gbk: %q answered %q", hidden, got)
+	if strings.Contains(got, "gbk") || strings.Count(got, "|") > 0 {
+		t.Errorf("a gbk client on a read-only port: %q was read as two columns by the source: %q", hidden, got)
 	}
 }
 

@@ -280,6 +280,7 @@ func handleFlashbackConn(ctx context.Context, srv *console.Server, c net.Conn, m
 	}
 
 	closeConn := func() { _ = c.Close() }
+	proxy.collation = uint16(mysqlConn.Charset())
 	untrack, err := bindFlashbackHandler(connCtx, srv, proxy, mysqlConn, mysqlConn.GetUser(), cc.loginServer, loginEpoch, gate, cfg, logger, closeConn)
 	proxy.untrack = untrack
 	// The connection's tracking as it is when it ends: a change of user
@@ -501,12 +502,14 @@ func bindFlashbackHandler(ctx context.Context, srv *console.Server, proxy *routi
 	if !copyOnly {
 		fw, _ = bindReadRouterWhy(h, srv, tgt, user, cfg, logger)
 	}
-	if fw != nil && mysqlConn != nil {
+	if fw != nil {
 		// The session MySQL opens for this client is under the collation
-		// and character set the client's handshake asked for, as on a
-		// connection to MySQL itself (#2810). A reset or a change of user
-		// binds a new forwarder here, from the same handshake.
-		fw.ClientCollation = mysqlConn.Charset()
+		// and character set the client asked for, as on a connection to
+		// MySQL itself (#2810): its handshake's, a change of user's, or
+		// after a reset the source's global values. A read-only port gives
+		// none outside the character sets its screen reads safely.
+		fw.ClientCollation, fw.GlobalSession = proxy.collation, proxy.globalSession
+		fw.SafeCharsetsOnly = cfg.RouteReadOnly
 	}
 	if fw == nil && cfg.RouteStatus {
 		// SHOW ROUTER STATUS on a connection the copy answers alone: the
@@ -1138,6 +1141,13 @@ type routingHandler struct {
 	// with a default schema (mysql -D, a DSN /db path, JDBC) is rejected before
 	// auth even runs.
 	pendingDB string
+	// collation is the collation number the client asked for, which a
+	// bound forwarder opens its session under (#2810): the handshake's,
+	// then a COM_CHANGE_USER's. globalSession: the last thing that set it
+	// was a COM_RESET_CONNECTION, which leaves the source's session under
+	// the server's global character sets.
+	collation     uint16
+	globalSession bool
 }
 
 // changeTicket is what a change of user's credential opens: the server whose
@@ -1164,6 +1174,12 @@ func (r *routingHandler) ChangeUser(user, schema string, ticket any) error {
 		return gomysql.NewError(gomysql.ER_UNKNOWN_COM_ERROR, "changing the user of this connection is not supported")
 	}
 	return r.rebind(user, schema, t)
+}
+
+// ChangeUserCollation implements shim.CollationChanger: the next binding
+// opens its session under the collation the change of user carried.
+func (r *routingHandler) ChangeUserCollation(id uint16) {
+	r.collation, r.globalSession = id, false
 }
 
 // ResetConnection implements shim.UserChanger: the connection is bound
@@ -1200,6 +1216,9 @@ func (r *routingHandler) ResetConnection() error {
 	if r.inner != nil {
 		db = r.inner.CurrentDB()
 	}
+	// The source's own reset leaves the session's character sets at the
+	// server's global values, not the handshake's (#2810).
+	r.globalSession = true
 	return r.rebind(r.user, db, t)
 }
 
