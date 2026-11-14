@@ -41,6 +41,17 @@ func TestMySQLPathDoesNotLinkPostgreSQL(t *testing.T) {
 		module + "internal/query",
 		module + "internal/reconstruct",
 	}
+	// The guard can see what it looks for: a package that is PostgreSQL's
+	// own does link the banned ones. Without this, a list that matched
+	// nothing (a module path that changed, a library that moved) would pass
+	// for ever.
+	control, err := exec.Command("go", "list", "-deps", module+"internal/pgshim").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list -deps internal/pgshim: %v\n%s", err, control)
+	}
+	if !strings.Contains(string(control), "github.com/jackc/pgx") {
+		t.Fatal("internal/pgshim does not appear to link github.com/jackc/pgx: this guard can no longer see what it bans")
+	}
 	for _, pkg := range mysqlPath {
 		out, err := exec.Command("go", "list", "-deps", pkg).CombinedOutput()
 		if err != nil {
