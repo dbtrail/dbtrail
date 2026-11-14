@@ -115,6 +115,9 @@ type captureStatusReporter struct {
 	// readMariaDB is read for a MariaDB source; nil means the real one.
 	readMariaDB func(ctx context.Context, indexDSN, sourceDSN string) captureProbeResult
 	now         func() time.Time
+
+	// pg is the read for PostgreSQL sources (capture_status_pg.go).
+	pg pgCaptureStatus
 }
 
 func newCaptureStatusReporter(bootSourceDSN string) *captureStatusReporter {
@@ -159,7 +162,8 @@ func (c *captureStatusReporter) CaptureStatus(ctx context.Context, e console.Ser
 	case source == "":
 		return unknown("this server has no source to ask")
 	case e.IsPostgres():
-		return unknown("PostgreSQL sources are not compared yet")
+		// Its own read and its own rules (capture_status_pg.go).
+		return c.captureStatusPG(ctx, e, source)
 	}
 	// The real reads take the source's TLS; a test's read does not need it.
 	now := time.Now

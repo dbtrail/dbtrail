@@ -13,11 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/console"
-	"github.com/dbtrail/dbtrail/internal/pgstreamrun"
 	"github.com/dbtrail/dbtrail/internal/snapshotdir"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -102,49 +99,12 @@ func TestIntegrationPGSnapshotUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
-	source, err := pgconn.Connect(ctx, baseDSN)
-	if err != nil {
-		t.Fatalf("connect to the source: %v", err)
-	}
-	t.Cleanup(func() { source.Close(context.Background()) })
-	exec1 := func(stmt string) {
-		t.Helper()
-		if _, _, err := pgText(t, source, stmt); err != nil {
-			t.Fatalf("source: %s: %v", stmt, err)
-		}
-	}
-	dropAll := func() {
-		bg := context.Background()
-		_, _ = source.Exec(bg, "DROP PUBLICATION IF EXISTS "+pgUpdPub).ReadAll()
-		_, _ = source.Exec(bg, "DROP TABLE IF EXISTS "+pgUpdTable).ReadAll()
-		// The slot stays active for a moment after capture is told to stop,
-		// and an active slot cannot be dropped.
-		for range 50 {
-			_, _ = source.Exec(bg, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '"+pgUpdSlot+"' AND NOT active").ReadAll()
-			left, err := source.Exec(bg, "SELECT 1 FROM pg_replication_slots WHERE slot_name = '"+pgUpdSlot+"'").ReadAll()
-			if err != nil || len(left) == 0 || len(left[0].Rows) == 0 {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	dropAll()
-	t.Cleanup(dropAll)
-	exec1("CREATE TABLE " + pgUpdTable + " (id int PRIMARY KEY, status text, amount numeric(10,2))")
-	exec1("ALTER TABLE " + pgUpdTable + " REPLICA IDENTITY FULL")
+	_, source, exec1 := pgTestSource(t, ctx, pgUpdTable, pgUpdSlot, pgUpdPub, "id int PRIMARY KEY, status text, amount numeric(10,2)")
 	exec1("INSERT INTO " + pgUpdTable + " VALUES (1, 'new', 10.50), (2, 'new', 20.00), (3, 'new', 30.00)")
-	exec1("CREATE PUBLICATION " + pgUpdPub + " FOR TABLE " + pgUpdTable)
 
-	// Capture, as the daemon supervises it. The one change is the checkpoint
-	// period: 10 s in the daemon, and the update below reads only as far as
-	// the last checkpoint.
-	_, bootName := testutil.CreateTestDB(t)
-	bootDSN := testutil.IntegrationDSN(bootName)
-	mon := newMonitorSupervisor(ctx, bootDSN, nil, nil)
-	mon.pgStreamFn = func(c context.Context, cfg pgstreamrun.Config) error {
-		cfg.Checkpoint = 200 * time.Millisecond
-		return pgstreamrun.One(c, cfg)
-	}
+	// Capture, as the daemon supervises it, with a short checkpoint period:
+	// the update below reads only as far as the last checkpoint.
+	mon, bootDSN := pgTestMonitor(t, ctx, 200*time.Millisecond)
 
 	// The schedule as the daemon builds it: full reads allowed, the window
 	// measured (the fixture turns that off for its dated fake snapshots), and
@@ -170,44 +130,13 @@ func TestIntegrationPGSnapshotUpdate(t *testing.T) {
 	if err := reg.Update(e); err != nil {
 		t.Fatalf("save the index connection: %v", err)
 	}
-	t.Cleanup(func() {
-		if db, err := sql.Open("mysql", bootDSN); err == nil {
-			_, _ = db.Exec("DROP DATABASE IF EXISTS bintrail_idx_" + e.ID)
-			_ = db.Close()
-		}
-	})
-	if err := mon.Start(ctx, e); err != nil {
-		t.Fatalf("start capture: %v", err)
-	}
-	t.Cleanup(func() { _ = mon.Stop(context.Background(), e.ID) })
-
-	waitFor := func(what string, limit time.Duration, done func() (bool, string)) {
-		t.Helper()
-		deadline := time.Now().Add(limit)
-		for {
-			ok, seen := done()
-			if ok {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("%s: not within %s; last seen: %s", what, limit, seen)
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-	waitFor("capture attached to its slot", 60*time.Second, func() (bool, string) {
-		_, rows, err := pgText(t, source, "SELECT active::text FROM pg_replication_slots WHERE slot_name = '"+pgUpdSlot+"'")
-		if err != nil || len(rows) != 1 {
-			return false, "no slot yet"
-		}
-		return rows[0][0] == "true", "active=" + rows[0][0]
-	})
+	pgTestStart(t, ctx, mon, bootDSN, source, e)
 
 	// The first snapshot: a full read, started as the Create button does.
 	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
 		t.Fatalf("start the full read: %v", err)
 	}
-	waitFor("the full read", 2*time.Minute, func() (bool, string) {
+	pgTestWait(t, "the full read", 2*time.Minute, func() (bool, string) {
 		st := sup.Status(e.ID)
 		if st.State == "failed" {
 			t.Fatalf("the full read failed: %s", st.LastError)
@@ -244,7 +173,7 @@ func TestIntegrationPGSnapshotUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = idx.Close() })
-	waitFor("the three changes indexed and checkpointed", 90*time.Second, func() (bool, string) {
+	pgTestWait(t, "the three changes indexed and checkpointed", 90*time.Second, func() (bool, string) {
 		var events, covered int
 		err := idx.QueryRowContext(ctx, `SELECT
 			(SELECT COUNT(*) FROM binlog_events WHERE table_name = ?),
@@ -267,7 +196,7 @@ func TestIntegrationPGSnapshotUpdate(t *testing.T) {
 	}
 	b.fire(e, p, time.Now().UTC())
 	var st console.BackupScheduleState
-	waitFor("the scheduled job", 3*time.Minute, func() (bool, string) {
+	pgTestWait(t, "the scheduled job", 3*time.Minute, func() (bool, string) {
 		st = b.ScheduleState(e.ID)
 		if st.LastSkipReason != "" {
 			t.Fatalf("the schedule skipped its slot: %s", st.LastSkipReason)
