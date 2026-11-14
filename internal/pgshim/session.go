@@ -91,11 +91,17 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 		// Not a time-travel query. Tolerate the handful of setup statements a
 		// client fires on connect; reject anything else (we are not a general
 		// PostgreSQL engine).
+		if s.bound != nil {
+			if t, refusal, ok := boundProbe(qstr); ok {
+				if refusal != nil {
+					return nil, nil, "", refusal
+				}
+				return nil, nil, t, nil
+			}
+			return s.runFree(qstr)
+		}
 		if t, ok := probeReply(qstr); ok {
 			return nil, nil, t, nil
-		}
-		if s.bound != nil {
-			return s.runFree(qstr)
 		}
 		return nil, nil, "", &pgErr{"0A000", fmt.Sprintf(
 			"this endpoint serves only _flashback / _snapshot AS OF time-travel queries; got: %s",

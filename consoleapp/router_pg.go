@@ -101,7 +101,13 @@ func pgPortLogin(srv *console.Server, cfg flashbackConfig) pgshim.LoginFunc {
 		default:
 			// The connection manager already took the secrets out of an
 			// open error's text.
-			return nil, &pgshim.Error{Code: "08006", Message: fmt.Sprintf("cannot open server %q: %s", database, err)}
+			named := database
+			if loginServer != "" {
+				// The server the login opens, not whatever database the
+				// client typed beside it.
+				named = loginServer
+			}
+			return nil, &pgshim.Error{Code: "08006", Message: fmt.Sprintf("cannot open server %q: %s", named, err)}
 		}
 		bound := &pgshim.Binding{Actor: "server:" + tgt.ID}
 		if tgt.ViaLogin {

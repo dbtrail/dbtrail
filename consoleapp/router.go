@@ -744,14 +744,25 @@ func (p *routerPort) serve(ctx context.Context) error {
 			}
 		})
 	}
-	// Before anything else, and before waiting for a credential: an address
-	// that cannot be bound is said now, not on the day a password is created.
-	probe, err := net.Listen("tcp", p.addr)
-	if err != nil {
-		return fmt.Errorf("the router cannot listen on %s: %w", p.addr, err)
-	}
-	_ = probe.Close()
 	opened, waiting, saidRebind := false, false, false
+	if p.run != nil {
+		// A port beside the MySQL one runs on a goroutine nobody waits for,
+		// so an error returned from here would leave the router up, saying
+		// in its start-up lines that this port exists, with nothing
+		// listening and nothing trying again. Its address was tried before
+		// the router started (runRouter); from then on a failure to bind is
+		// logged and tried again, like a port that had been open.
+		opened = true
+	} else {
+		// Before anything else, and before waiting for a credential: an
+		// address that cannot be bound is said now, not on the day a
+		// password is created.
+		probe, err := net.Listen("tcp", p.addr)
+		if err != nil {
+			return fmt.Errorf("the router cannot listen on %s: %w", p.addr, err)
+		}
+		_ = probe.Close()
+	}
 	for ctx.Err() == nil {
 		if !p.open() {
 			if !waiting && p.run != nil {

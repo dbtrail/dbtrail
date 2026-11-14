@@ -442,7 +442,7 @@ func TestPort_notesReachTheClientAsNotices(t *testing.T) {
 	p := &portLogin{}
 	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
 		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}},
-			TruncatedCells: 2, Note: "answered from an earlier copy"}, nil
+			Note: "answered from an earlier copy"}, nil
 	}
 	addr := serveAddrCfg(t, Config{Login: p.login})
 	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders", portPassword, addr))
@@ -470,8 +470,113 @@ func TestPort_notesReachTheClientAsNotices(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	all := strings.Join(notices, " | ")
-	if !strings.Contains(all, "2 cell(s)") || !strings.Contains(all, "earlier copy") {
-		t.Fatalf("notices = %q, want the cut cells and the note", all)
+	if !strings.Contains(all, "earlier copy") {
+		t.Fatalf("notices = %q, want the note", all)
+	}
+}
+
+// A cell the copy cut is not sent on: written again as PostgreSQL writes its
+// kind, a cut value would lose the marker that says it was cut.
+func TestPort_aCutCellIsRefused(t *testing.T) {
+	p := &portLogin{}
+	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "b", Type: "BLOB"}}, Rows: [][]any{{"0x4142 [cell cut at 1 MiB]"}}, TruncatedCells: 1}, nil
+	}
+	rec := audittest.Install(t)
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = conn.PgConn().Exec(ctx, "SELECT b FROM t").ReadAll()
+	pe := requirePgError(t, err)
+	if pe.Code != "54000" || !strings.Contains(pe.Message, "1 cell(s)") {
+		t.Fatalf("got %s %q, want 54000 naming the cut cell", pe.Code, pe.Message)
+	}
+	if evs := rec.Events(); len(evs) != 0 {
+		t.Errorf("a refused result left %d audit records", len(evs))
+	}
+}
+
+func TestBoundProbe(t *testing.T) {
+	for _, tc := range []struct {
+		stmt    string
+		tag     string // "" when not answered here or refused
+		refused string // in the refusal's message
+		ok      bool
+	}{
+		{"SET client_encoding TO 'UTF8'", "SET", "", true},
+		{"set application_name = 'psql';", "SET", "", true},
+		{"SET extra_float_digits = 3", "SET", "", true},
+		{"BEGIN", "BEGIN", "", true},
+		{"begin read only;", "BEGIN", "", true},
+		{"COMMIT", "COMMIT", "", true},
+		{"ROLLBACK ; ", "ROLLBACK", "", true},
+		{"SET TimeZone = 'UTC'", "SET", "", true},
+		{"SET TIME ZONE 'UTC'", "SET", "", true},
+		{"SET SESSION timezone TO utc", "SET", "", true},
+		// Not a probe: the rest of the message would be dropped.
+		{"SET x = 1; SELECT * FROM orders", "", "", false},
+		{"BEGIN; SELECT 1", "", "", false},
+		{"begin read only; select 1; commit", "", "", false},
+		{"SELECT 1", "", "", false},
+		{"settle", "", "", false},
+		{"", "", "", false},
+		// Would change what the next statement reads: refused, by name.
+		{"SET search_path TO sales", "", "SET search_path", true},
+		{"set search_path = sales, public;", "", "SET search_path", true},
+		{"SET SESSION search_path = 'sales'", "", "SET search_path", true},
+		{"SET LOCAL search_path TO sales", "", "SET search_path", true},
+		{"SET SCHEMA 'sales'", "", "SET schema", true},
+		{"SET ROLE admin", "", "SET role", true},
+		{"SET SESSION AUTHORIZATION admin", "", "SET session_authorization", true},
+		{"SET TimeZone = 'America/Bogota'", "", "SET TimeZone", true},
+		{"SET TIME ZONE 'Europe/Madrid'", "", "SET TimeZone", true},
+		{"set timezone to -5", "", "SET TimeZone", true},
+	} {
+		tag, refusal, ok := boundProbe(tc.stmt)
+		if ok != tc.ok || tag != tc.tag {
+			t.Errorf("boundProbe(%q) = tag %q ok %v, want tag %q ok %v", tc.stmt, tag, ok, tc.tag, tc.ok)
+		}
+		switch {
+		case tc.refused == "" && refusal != nil:
+			t.Errorf("boundProbe(%q) refused: %s", tc.stmt, refusal.msg)
+		case tc.refused != "" && (refusal == nil || refusal.code != "0A000" || !strings.Contains(refusal.msg, tc.refused)):
+			t.Errorf("boundProbe(%q) refusal = %+v, want 0A000 saying %q", tc.stmt, refusal, tc.refused)
+		}
+	}
+}
+
+// Over the wire: a setup statement and a query in one message reach the
+// executor whole (which refuses more than one statement); neither is
+// answered "SET" with the query dropped.
+func TestPort_aSetAndAQueryInOneMessageAreNotAnsweredSET(t *testing.T) {
+	var got []string
+	p := &portLogin{}
+	p.run = func(_ context.Context, statement string) (sqlsandbox.Result, error) {
+		got = append(got, statement)
+		return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: "one statement at a time"}
+	}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = conn.PgConn().Exec(ctx, "SET x = 1; SELECT * FROM orders").ReadAll()
+	if pe := requirePgError(t, err); pe.Code != "0A000" {
+		t.Fatalf("code %s", pe.Code)
+	}
+	if len(got) != 1 || got[0] != "SET x = 1; SELECT * FROM orders" {
+		t.Fatalf("the executor was given %q, want the whole message", got)
+	}
+	_, err = conn.PgConn().Exec(ctx, "SET search_path TO sales").ReadAll()
+	if pe := requirePgError(t, err); pe.Code != "0A000" || !strings.Contains(pe.Message, "search_path") {
+		t.Fatalf("SET search_path: %s %q", pe.Code, pe.Message)
+	}
+	if len(got) != 1 {
+		t.Fatalf("SET search_path reached the executor: %q", got)
 	}
 }
 

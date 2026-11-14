@@ -575,8 +575,13 @@ SELECT status, count(*) AS n FROM orders GROUP BY status ORDER BY n DESC;
 - **This machine only.** The port asks for the password in clear text and has
   no TLS, so `--pg-listen` takes an address of this machine alone (`127.0.0.1`,
   `::1`, `localhost`) and the router refuses to start with any other.
-- A result with more rows than the port's row cap is refused, not cut: add a
-  `LIMIT`. Time travel (`_flashback`, `_snapshot`, `AS OF`) is not served on
+- `SET search_path`, `SET ROLE` and a `SET TimeZone` other than UTC are
+  refused: the port resolves names in `public` and answers in UTC, so write the
+  schema in the name and convert zones in the statement. Other `SET`s, `BEGIN`,
+  `COMMIT` and `ROLLBACK` are accepted and change nothing.
+- A result with more rows than the port's row cap, or with a cell longer than
+  the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
+  the long column. Time travel (`_flashback`, `_snapshot`, `AS OF`) is not served on
   this port; use `bintrail-pg flashback`, below.
 
 A MySQL or MariaDB server can be named too: its copy answers in the copy's own

@@ -100,6 +100,9 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	}
 	password, err := readPassword(be)
 	if err != nil {
+		// Debug: psql itself closes here once, to ask for the password and
+		// connect again.
+		logger.Debug("pgshim: no password was read", "err", err, "user", user, "remote", c.RemoteAddr())
 		return
 	}
 	bound, refused := cfg.Login(connCtx, user, database, password, func() { _ = c.Close() })
@@ -107,7 +110,9 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 		if refused == nil {
 			refused = &Error{Code: "XX000", Message: "the login returned nothing to connect to"}
 		}
-		logger.Info("pgshim login refused", "user", user, "database", database, "code", refused.Code, "remote", c.RemoteAddr())
+		// With the reason: it is the text the client is shown, and "cannot
+		// open server" is the operator's to fix.
+		logger.Info("pgshim login refused", "user", user, "database", database, "code", refused.Code, "reason", refused.Message, "remote", c.RemoteAddr())
 		sendFatal(be, refused.Code, refused.Message)
 		return
 	}
@@ -125,7 +130,9 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
 	defer func() {
-		if s.bound.Answered != nil {
+		// A client that left, or a port that is closing, is not the copy
+		// refusing a statement: it is not counted at all.
+		if s.bound.Answered != nil && s.ctx.Err() == nil {
 			s.bound.Answered(time.Since(started), perr != nil)
 		}
 	}()
@@ -147,6 +154,16 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 			"the result has more than %d rows, the most one statement returns on this port, and is not returned cut; add a LIMIT or narrow the statement",
 			len(res.Rows))}
 	}
+	if res.TruncatedCells > 0 {
+		// Refused too. The copy cuts a cell past its cap and ends it with a
+		// marker, which a reader of text can see; here a cell is written
+		// again the way PostgreSQL writes its kind, and a cut bytea would
+		// come out as other bytes with no marker in sight. A notice is not
+		// enough: most drivers drop it.
+		return nil, nil, "", &pgErr{"54000", fmt.Sprintf(
+			"%d cell(s) of the result are longer than the most one cell may be on this port, and are not returned cut; select fewer columns, or a part of the long one (substring, left)",
+			res.TruncatedCells)}
+	}
 	cols = make([]string, len(res.Columns))
 	for i, c := range res.Columns {
 		cols[i] = c.Name
@@ -165,9 +182,6 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 			}
 		}
 		rows[i] = cells
-	}
-	if res.TruncatedCells > 0 {
-		s.notice(fmt.Sprintf("%d cell(s) longer than this server's cap were cut; each ends with a marker", res.TruncatedCells))
 	}
 	if res.Note != "" {
 		s.notice(res.Note)
@@ -297,4 +311,54 @@ func engineErrorCode(msg string) string {
 	default:
 		return "XX000"
 	}
+}
+
+// boundProbe answers the session statements a client sends beside its
+// queries on a port that runs SQL on the copy, where what is not answered
+// here reaches the copy's executor. ok is false for anything else.
+//
+// Narrower than probeReply on purpose. More than one statement in a message
+// is not a probe: "SET x = 1; SELECT ..." answered "SET" would drop the
+// SELECT and say nothing. And a SET that would change which table a name
+// reads, or who reads it, is refused, not acknowledged and ignored: the next
+// statement would answer from somewhere the client did not ask for.
+func boundProbe(qstr string) (tag string, refusal *pgErr, ok bool) {
+	q := strings.ToLower(strings.TrimSpace(strings.TrimRight(strings.TrimSpace(qstr), ";")))
+	if strings.Contains(q, ";") {
+		return "", nil, false
+	}
+	tag, ok = probeReply(q)
+	if !ok {
+		return "", nil, false
+	}
+	if tag != "SET" {
+		return tag, nil, true
+	}
+	words := strings.Fields(strings.NewReplacer("=", " ", "'", " ", `"`, " ").Replace(q))
+	// set [session|local] <name> ...
+	if len(words) > 1 && (words[1] == "session" || words[1] == "local") {
+		if len(words) > 2 && words[2] == "authorization" {
+			words = []string{"set", "session_authorization"}
+		} else {
+			words = append(words[:1], words[2:]...)
+		}
+	}
+	name := ""
+	if len(words) > 1 {
+		name = words[1]
+	}
+	switch name {
+	case "search_path", "schema", "role", "session_authorization":
+		return "", &pgErr{"0A000", fmt.Sprintf(
+			"SET %s is not supported on this port: unqualified names resolve in the connection's default schema, so write the schema in the name (schema.table)", name)}, true
+	case "timezone", "time":
+		// SET TimeZone / SET TIME ZONE: this port answers in UTC, and says
+		// so at start-up. Setting UTC changes nothing; another zone would
+		// change what a timestamp reads as.
+		zone := words[len(words)-1]
+		if zone != "utc" && zone != "etc/utc" && zone != "gmt" && zone != "0" && zone != "z" {
+			return "", &pgErr{"0A000", "SET TimeZone is not supported on this port: it answers in UTC; convert in the statement (AT TIME ZONE)"}, true
+		}
+	}
+	return "SET", nil, true
 }
