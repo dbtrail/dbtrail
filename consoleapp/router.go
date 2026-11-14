@@ -84,6 +84,7 @@ func addRouterFlags(cmd *cobra.Command) {
 	def := readrouter.DefaultPolicy()
 	f := cmd.Flags()
 	f.String("listen", defaultRouterListen, "Address the MySQL-protocol port listens on (host:port). Env BINTRAIL_ROUTER_LISTEN.")
+	f.String("pg-listen", "", "Address a PostgreSQL-protocol port listens on (host:port, e.g. 127.0.0.1:5433); empty = none. A PostgreSQL client connects with dbname=<server id or name> and the MySQL port's password, and runs read-only SQL on that server's copy; nothing is sent to the source. Open while the MySQL port is turned on in the web interface. It asks for the password in clear text and has no TLS, so only an address of this machine is taken (127.0.0.1, ::1, localhost). Env BINTRAIL_ROUTER_PG_LISTEN.")
 	f.String("metrics-addr", "", "Address to expose Prometheus metrics on (e.g. 127.0.0.1:9091); empty = none. The same address answers /status, the router's numbers as JSON, which the web interface reads when it is given this address (BINTRAIL_CONSOLE_ROUTER_URL). Neither asks for a password. Not the capture process's address: each process serves its own. Env BINTRAIL_ROUTER_METRICS_ADDR.")
 	f.String("token", "", "Access token: one more password for the port, beside the one created in the web interface. It does not open the port: the port is open while the MySQL port is turned on in the web interface, and closed when it is turned off there. Env BINTRAIL_CONSOLE_TOKEN.")
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
@@ -104,7 +105,10 @@ func addRouterFlags(cmd *cobra.Command) {
 // routerSettings is what the router starts with, flags and environment
 // resolved.
 type routerSettings struct {
-	Listen         string
+	Listen string
+	// PGListen is the PostgreSQL-protocol port's address (#2765), "" for
+	// none.
+	PGListen       string
 	MetricsAddr    string
 	Token          string
 	ServersFile    string
@@ -144,6 +148,7 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 	}
 	st := routerSettings{
 		Listen:       str("listen", "BINTRAIL_ROUTER_LISTEN"),
+		PGListen:     str("pg-listen", "BINTRAIL_ROUTER_PG_LISTEN"),
 		MetricsAddr:  str("metrics-addr", "BINTRAIL_ROUTER_METRICS_ADDR"),
 		Token:        str("token", "BINTRAIL_CONSOLE_TOKEN"),
 		ServersFile:  str("servers-file", "BINTRAIL_CONSOLE_SERVERS"),
@@ -152,6 +157,11 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 	}
 	if st.ServersFile == "" {
 		st.ServersFile = console.DefaultRegistryPath()
+	}
+	if st.PGListen != "" {
+		if err := validPGListen(st.PGListen); err != nil {
+			return st, err
+		}
 	}
 	if _, port, err := net.SplitHostPort(st.Listen); err != nil {
 		return st, fmt.Errorf("--listen %q is not an address: want host:port, e.g. %s", st.Listen, defaultRouterListen)
@@ -669,6 +679,16 @@ type routerPort struct {
 	// poll is how often it looks for a credential while it has none.
 	poll time.Duration
 	out  io.Writer
+	// protocol names the port in what it says, and run serves one bound
+	// listener until its context ends. Both empty is the MySQL port
+	// (serveFlashback); the PostgreSQL port (#2765) sets both.
+	protocol string
+	run      func(ctx context.Context, ln net.Listener) error
+	// alongside are the router's other ports. They open and close on the
+	// same switch, and the console keeps ONE callback for a password that
+	// was withdrawn, so the port that registers it (the MySQL one) closes
+	// these too. A port with a run of its own registers nothing.
+	alongside []*routerPort
 
 	mu    sync.Mutex
 	bound string
@@ -694,17 +714,36 @@ func (p *routerPort) open() bool {
 	return len(p.srv.FlashbackPasswords()) > 0
 }
 
+// name is the protocol the port speaks, for what it prints and logs.
+func (p *routerPort) name() string {
+	if p.protocol == "" {
+		return "MySQL"
+	}
+	return p.protocol
+}
+
+// closeNow closes the port's listener with every connection on it; the port
+// opens again when a credential can open it.
+func (p *routerPort) closeNow() {
+	p.mu.Lock()
+	if p.stop != nil {
+		p.stop()
+	}
+	p.mu.Unlock()
+}
+
 func (p *routerPort) serve(ctx context.Context) error {
-	p.srv.OnFlashbackPasswordWithdrawn(func() {
-		// Every connection: the port cannot tell which of them came in
-		// with the password that is gone. One made with the token
-		// reconnects at once.
-		p.mu.Lock()
-		if p.stop != nil {
-			p.stop()
-		}
-		p.mu.Unlock()
-	})
+	if p.run == nil {
+		p.srv.OnFlashbackPasswordWithdrawn(func() {
+			// Every connection: the port cannot tell which of them came in
+			// with the password that is gone. One made with the token
+			// reconnects at once.
+			p.closeNow()
+			for _, other := range p.alongside {
+				other.closeNow()
+			}
+		})
+	}
 	// Before anything else, and before waiting for a credential: an address
 	// that cannot be bound is said now, not on the day a password is created.
 	probe, err := net.Listen("tcp", p.addr)
@@ -715,6 +754,11 @@ func (p *routerPort) serve(ctx context.Context) error {
 	opened, waiting, saidRebind := false, false, false
 	for ctx.Err() == nil {
 		if !p.open() {
+			if !waiting && p.run != nil {
+				// The MySQL port says how to turn the switch on, for both.
+				waiting = true
+				fmt.Fprintf(p.out, "The router's %s port is not listening yet either: it opens %s with the MySQL port, on the same switch.\n", p.name(), p.addr)
+			}
 			if !waiting {
 				waiting = true
 				fmt.Fprintf(p.out, "The router is not listening yet: the MySQL port is not turned on. Turn it on with `dbtrail port on`, or in the web interface (Settings, MySQL clients, Connect a SQL client): either creates its password and opens %s here within a few seconds, without a restart. An access token (--token, BINTRAIL_CONSOLE_TOKEN) is one more password while the port is on; it does not open it.\n", p.addr)
@@ -734,7 +778,7 @@ func (p *routerPort) serve(ctx context.Context) error {
 			if !saidRebind {
 				// Once: it is tried again every second until it works.
 				saidRebind = true
-				slog.Error("router: the port could not be opened again and the router is NOT listening; it keeps trying", "listen", p.addr, "error", err)
+				slog.Error("router: the port could not be opened again and the router is NOT listening; it keeps trying", "protocol", p.name(), "listen", p.addr, "error", err)
 			}
 			select {
 			case <-ctx.Done():
@@ -747,14 +791,18 @@ func (p *routerPort) serve(ctx context.Context) error {
 		p.mu.Lock()
 		p.bound, p.stop = ln.Addr().String(), cancel
 		p.mu.Unlock()
-		slog.Info("router: the MySQL-protocol port is open", "listen", ln.Addr().String())
-		err = serveFlashback(child, p.srv, ln, p.cfg)
+		slog.Info("router: the "+p.name()+"-protocol port is open", "listen", ln.Addr().String())
+		if p.run != nil {
+			err = p.run(child, ln)
+		} else {
+			err = serveFlashback(child, p.srv, ln, p.cfg)
+		}
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop = "", nil
 		p.mu.Unlock()
 		if err != nil && ctx.Err() == nil && p.open() {
-			slog.Warn("router: the MySQL-protocol port stopped; opening it again", "error", err)
+			slog.Warn("router: the "+p.name()+"-protocol port stopped; opening it again", "error", err)
 			select {
 			case <-ctx.Done():
 			case <-time.After(time.Second):
@@ -766,7 +814,9 @@ func (p *routerPort) serve(ctx context.Context) error {
 
 // routerStartup is what the router says when it starts.
 type routerStartup struct {
-	Listen      string
+	Listen string
+	// PGListen is the PostgreSQL-protocol port's address, "" for none.
+	PGListen    string
 	Pool        console.SQLPool
 	MemoryLimit string
 	// Token: the router was started with an access token.
@@ -857,10 +907,21 @@ func routerStartupLines(u routerStartup) string {
 		}
 	}
 	b.WriteString(routerTLSLine(u.TLS, u.Now))
+	b.WriteString(routerPGLine(u.PGListen))
 	for _, line := range u.Ignored {
 		b.WriteString("Router: " + line + ".\n")
 	}
 	return b.String()
+}
+
+// routerPGLine says where the PostgreSQL-protocol port is and how a client
+// reaches a server on it (#2765); nothing when there is none.
+func routerPGLine(listen string) string {
+	if listen == "" {
+		return ""
+	}
+	return fmt.Sprintf("Router: the PostgreSQL-protocol port is %s, open while the MySQL port is; connect a PostgreSQL client with dbname=<server id or name> and the same password. "+
+		"The copy answers every statement there, read-only, and nothing is sent to the source. The password is asked for in clear text and there is no TLS, which is why the port listens on this machine only.\n", listen)
 }
 
 // routerTLSLine says what a client that asks the port for encryption gets
@@ -1078,7 +1139,7 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 		Listen: st.Listen, Pool: pool, MemoryLimit: memoryLimit, MemoryFrom: memoryFrom, MemoryErr: savedErr, Cfg: cfg,
 		ServersFile: st.ServersFile, ServersExists: statErr == nil, Servers: srv.ServerCount(),
 		PortFile: routerPortFile(st), Token: st.Token != "", MaxWait: st.MaxWait, Ignored: routerIgnoredEnv(), InContainer: inContainer(),
-		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr, TLS: st.TLS,
+		StatementTable: st.StatementTable, MetricsAddr: st.MetricsAddr, TLS: st.TLS, PGListen: st.PGListen,
 	}))
 	if p := st.TLS.ValidityProblem(time.Now()); p != "" {
 		// In the log as well: the startup lines are plain text on stderr.
@@ -1088,5 +1149,23 @@ func runRouter(cmd *cobra.Command, _ []string) error {
 	fmt.Fprint(os.Stderr, routerFreshServersLine(srv.FreshServerNames(), pool.Workers, pool.FreshWorkers))
 	fmt.Fprint(os.Stderr, awsKeysLine)
 	port := &routerPort{srv: srv, addr: st.Listen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr}
+	if st.PGListen != "" {
+		pg := &routerPort{srv: srv, addr: st.PGListen, cfg: cfg, poll: console.DefaultFollowInterval, out: os.Stderr,
+			protocol: "PostgreSQL", run: func(ctx context.Context, ln net.Listener) error { return servePGPort(ctx, srv, ln, cfg) }}
+		// Said now and not on the day the port is turned on, like the MySQL
+		// port's own address: a router asked for a port it cannot open does
+		// not start.
+		probe, err := net.Listen("tcp", st.PGListen)
+		if err != nil {
+			return fmt.Errorf("the router cannot listen on %s (--pg-listen): %w", st.PGListen, err)
+		}
+		_ = probe.Close()
+		port.alongside = append(port.alongside, pg)
+		go func() {
+			if err := pg.serve(ctx); err != nil {
+				slog.Error("router: the PostgreSQL-protocol port is NOT listening", "listen", st.PGListen, "error", err)
+			}
+		}()
+	}
 	return port.serve(ctx)
 }

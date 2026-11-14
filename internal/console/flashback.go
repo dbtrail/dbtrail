@@ -225,6 +225,12 @@ func (q *SQLOnCopy) CopyUpdatedAt(ctx context.Context) time.Time {
 	return in.BaselineSnapshot
 }
 
+// PostgresSource says whether this server's source is PostgreSQL, the way
+// the SQL card decides it (sqlCopySession): a port then runs its statements
+// by PostgreSQL's rules (sqlsandbox.Session.PostgresRules) and resolves
+// unqualified names in PostgreSQL's default schema.
+func (q *SQLOnCopy) PostgresSource() bool { return q.s.sqlCopySession(q.b).PostgresRules }
+
 // RowCap is the port's row cap for one statement on the copy: the same
 // number Run hands the worker.
 func (q *SQLOnCopy) RowCap() int { return q.s.sqlPortRowCap() }

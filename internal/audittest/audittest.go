@@ -69,6 +69,10 @@ const (
 	// PostgreSQL wire front-end drives a real pgx client against a seeded
 	// index, the same real-code-path posture as the other owners.
 	OwnerPGShim Owner = "internal/pgshim (integration)"
+	// OwnerPGShimUnit: internal/pgshim/login_2765_test.go — the front-end's
+	// port mode (free SQL on the copy, with the host's own login), driven by
+	// a real pgx client over the wire against an executor the test supplies.
+	OwnerPGShimUnit Owner = "internal/pgshim (unit)"
 	// OwnerExportCLI: cliapp/export_iceberg_integration_test.go — the Iceberg
 	// export runs the real command against the integration MySQL plus a
 	// baseline Parquet and records after each table's commit is durable. It
@@ -167,6 +171,14 @@ var Required = []Requirement{
 		Pair:  Pair{Surface: "shim", Action: "sql.run"},
 		Owner: OwnerShim,
 		Why:   "free read-only SQL over the Parquet copy by an authenticated tenant of the MySQL-protocol port: raw row data, and the statement is the reader's own",
+	},
+	{
+		// The same pair as the MySQL-protocol port's, from a call site of
+		// its own: the PostgreSQL-protocol port answers free SQL in
+		// internal/pgshim, outside shim.Handler.
+		Pair:  Pair{Surface: "shim", Action: "sql.run"},
+		Owner: OwnerPGShimUnit,
+		Why:   "free read-only SQL over the Parquet copy through the PostgreSQL-protocol port: raw row data, and the statement is the reader's own",
 	},
 	{
 		// The SAME pair again, under a second owner: bintrail-pg flashback

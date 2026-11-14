@@ -87,6 +87,10 @@ type Config struct {
 	// is what an empty/omitted allowed_schemas means; nil disables the gate
 	// for every tenant.
 	AllowedSchemas map[string][]string
+	// Login, when set, makes this a port that runs SQL on the copy (login.go):
+	// it decides who may connect and what the connection is bound to, and
+	// IndexDB, ShimConfig, Auth and AllowedSchemas above are not read.
+	Login LoginFunc
 	// Logger; nil → slog.Default().
 	Logger *slog.Logger
 	// MaxConns caps concurrent connections; 0 = unlimited.
@@ -167,6 +171,10 @@ func nextBackoff(cur time.Duration) time.Duration {
 // decline), cleartext auth, then a simple-query command loop over its own
 // shim.Handler.
 func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger) {
+	if cfg.Login != nil {
+		handleLoginConn(ctx, c, cfg, logger)
+		return
+	}
 	defer c.Close()
 
 	// Per-connection context: cancelling it aborts an in-flight resolve
@@ -235,6 +243,12 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 
 	sess := &session{be: be, h: h, currentDB: database, logger: logger}
 
+	commandLoop(be, sess)
+}
+
+// commandLoop answers the connection's commands until the client leaves or a
+// write fails.
+func commandLoop(be *pgproto3.Backend, sess *session) {
 	// skipUntilSync implements the PostgreSQL extended-query error rule: once we
 	// reject an extended-protocol message we must discard everything until the
 	// client's Sync, then release it with ReadyForQuery.
@@ -320,30 +334,41 @@ func negotiateStartup(c net.Conn, be *pgproto3.Backend) (*pgproto3.StartupMessag
 // ER_ACCESS_DENIED posture; it does not attempt to equalise the cost of the
 // tenant-map lookup itself (the endpoint is loopback-default / TLS-fronted).
 func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string) error {
-	be.Send(&pgproto3.AuthenticationCleartextPassword{})
-	if err := be.Flush(); err != nil {
-		return err
-	}
-	if err := be.SetAuthType(pgproto3.AuthTypeCleartextPassword); err != nil {
-		return err
-	}
-	msg, err := be.Receive()
+	password, err := readPassword(be)
 	if err != nil {
 		return err
 	}
-	pw, ok := msg.(*pgproto3.PasswordMessage)
-	if !ok {
-		sendFatal(be, "08P01", fmt.Sprintf("expected a password message, got %T", msg))
-		return fmt.Errorf("expected PasswordMessage, got %T", msg)
-	}
 	expected, found, cerr := auth.LookupPassword(user)
 	match := found && cerr == nil &&
-		subtle.ConstantTimeCompare([]byte(pw.Password), []byte(expected)) == 1
+		subtle.ConstantTimeCompare([]byte(password), []byte(expected)) == 1
 	if !match {
 		sendFatal(be, "28P01", fmt.Sprintf("password authentication failed for user %q", user))
 		return fmt.Errorf("auth failed for user %q", user)
 	}
 	return nil
+}
+
+// readPassword asks the client for its password in clear text and returns
+// what it sent. A client that answers with anything else is told so (08P01)
+// and the error says the connection is over.
+func readPassword(be *pgproto3.Backend) (string, error) {
+	be.Send(&pgproto3.AuthenticationCleartextPassword{})
+	if err := be.Flush(); err != nil {
+		return "", err
+	}
+	if err := be.SetAuthType(pgproto3.AuthTypeCleartextPassword); err != nil {
+		return "", err
+	}
+	msg, err := be.Receive()
+	if err != nil {
+		return "", err
+	}
+	pw, ok := msg.(*pgproto3.PasswordMessage)
+	if !ok {
+		sendFatal(be, "08P01", fmt.Sprintf("expected a password message, got %T", msg))
+		return "", fmt.Errorf("expected PasswordMessage, got %T", msg)
+	}
+	return pw.Password, nil
 }
 
 // sendAuthOK finishes the handshake: AuthenticationOk, the ParameterStatus set a

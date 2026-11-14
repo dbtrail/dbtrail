@@ -1,6 +1,7 @@
 package pgshim
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,11 @@ type session struct {
 	h         *shim.Handler
 	currentDB string
 	logger    *slog.Logger
+	// bound is set on a port with a login of its own (login.go): ordinary
+	// statements run on the copy through it, and h is nil. ctx is that
+	// connection's context, which ends when the client leaves.
+	bound *Binding
+	ctx   context.Context
 }
 
 // pgErr is a query-level failure carrying a 5-char SQLSTATE and a message.
@@ -77,9 +83,20 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 		if t, ok := probeReply(qstr); ok {
 			return nil, nil, t, nil
 		}
+		if s.bound != nil {
+			return s.runFree(qstr)
+		}
 		return nil, nil, "", &pgErr{"0A000", fmt.Sprintf(
 			"this endpoint serves only _flashback / _snapshot AS OF time-travel queries; got: %s",
 			strings.TrimSpace(qstr))}
+	}
+
+	if s.h == nil {
+		// A port that runs SQL on the copy and has no time-travel engine
+		// bound. Refused by name: run as ordinary SQL, the statement would
+		// answer from the copy as it is now, not as of the moment asked for.
+		return nil, nil, "", &pgErr{"0A000",
+			"time travel (_flashback, _snapshot, AS OF) is not served on this port; it runs SQL on the copy as it is now"}
 	}
 
 	// Per-tenant schema authorization (#824/#1261), on the RESOLVED target

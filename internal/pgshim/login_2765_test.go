@@ -1,0 +1,460 @@
+package pgshim
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/dbtrail/dbtrail/internal/audittest"
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+)
+
+// The port mode (#2765): a host's own login, and ordinary SQL answered by
+// the executor the login bound. A real pgx client over the wire; the
+// executor is the test's.
+
+const portPassword = "port-secret"
+
+// portLogin accepts portPassword for any user and binds the connection to
+// run, recording what it was called with.
+type portLogin struct {
+	mu       sync.Mutex
+	users    []string
+	dbs      []string
+	closed   int
+	answered []bool
+	run      func(ctx context.Context, statement string) (sqlsandbox.Result, error)
+}
+
+func (p *portLogin) login(_ context.Context, user, database, password string, _ func()) (*Binding, *Error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.users, p.dbs = append(p.users, user), append(p.dbs, database)
+	if password != portPassword {
+		return nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
+	}
+	if database == "nowhere" {
+		return nil, &Error{Code: "3D000", Message: `database "nowhere" does not exist`}
+	}
+	return &Binding{
+		Run:    p.run,
+		Actor:  "server:" + database,
+		Schema: "public",
+		Answered: func(_ time.Duration, refused bool) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.answered = append(p.answered, refused)
+		},
+		Close: func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.closed++
+		},
+	}, nil
+}
+
+func dialPort(t *testing.T, p *portLogin, user, pass, database string) (*pgx.Conn, error) {
+	t.Helper()
+	addr := serveAddrCfg(t, Config{Login: p.login})
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://%s:%s@%s/%s", user, pass, addr, database))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() {
+		cc, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = conn.Close(cc)
+	})
+	return conn, nil
+}
+
+func answer(cols []sqlsandbox.Column, rows ...[]any) func(context.Context, string) (sqlsandbox.Result, error) {
+	return func(context.Context, string) (sqlsandbox.Result, error) {
+		return sqlsandbox.Result{Columns: cols, Rows: rows}, nil
+	}
+}
+
+// textRows reads a result as text, nil for NULL.
+func textRows(t *testing.T, conn *pgx.Conn, stmt string) (names []string, out [][]*string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := conn.PgConn().Exec(ctx, stmt).ReadAll()
+	if err != nil {
+		t.Fatalf("%s: %v", stmt, err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("%s: %d results, want 1", stmt, len(res))
+	}
+	for _, f := range res[0].FieldDescriptions {
+		names = append(names, f.Name)
+	}
+	for _, r := range res[0].Rows {
+		row := make([]*string, len(r))
+		for i, c := range r {
+			if c != nil {
+				s := string(c)
+				row[i] = &s
+			}
+		}
+		out = append(out, row)
+	}
+	return names, out
+}
+
+func TestPort_answersAStatementFromTheBoundExecutor(t *testing.T) {
+	var got []string
+	p := &portLogin{}
+	p.run = func(_ context.Context, statement string) (sqlsandbox.Result, error) {
+		got = append(got, statement)
+		return sqlsandbox.Result{
+			Columns: []sqlsandbox.Column{{Name: "id", Type: "BIGINT"}, {Name: "ok", Type: "BOOLEAN"}, {Name: "at", Type: "TIMESTAMP"}, {Name: "note", Type: "VARCHAR"}, {Name: "tags", Type: "VARCHAR[]"}},
+			Rows: [][]any{
+				{json.Number("7"), true, "2026-03-04T05:06:07Z", "", []any{"a", "b c"}},
+				{json.Number("8"), false, nil, nil, nil},
+			},
+		}, nil
+	}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	names, rows := textRows(t, conn, "SELECT id, ok, at, note, tags FROM t")
+	if strings.Join(names, ",") != "id,ok,at,note,tags" {
+		t.Fatalf("columns = %v", names)
+	}
+	if len(got) != 1 || got[0] != "SELECT id, ok, at, note, tags FROM t" {
+		t.Fatalf("the executor was given %q", got)
+	}
+	want := [][]string{
+		{"7", "t", "2026-03-04 05:06:07", "", `{a,"b c"}`},
+		{"8", "f", "NULL", "NULL", "NULL"},
+	}
+	for i, r := range rows {
+		for j, c := range r {
+			cell := "NULL"
+			if c != nil {
+				cell = *c
+			}
+			if cell != want[i][j] {
+				t.Errorf("row %d column %s = %q, want %q", i, names[j], cell, want[i][j])
+			}
+		}
+	}
+	// An empty string is a value, not NULL: the one cell a text rendering
+	// loses first.
+	if rows[0][3] == nil {
+		t.Error("an empty string was sent as NULL")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.users) != 1 || p.users[0] != "app" || p.dbs[0] != "orders" {
+		t.Errorf("the login was given user %v database %v", p.users, p.dbs)
+	}
+	if len(p.answered) != 1 || p.answered[0] {
+		t.Errorf("answered = %v, want one statement that was not refused", p.answered)
+	}
+}
+
+func TestPort_aResultWithNoRowsKeepsItsColumns(t *testing.T) {
+	p := &portLogin{run: answer([]sqlsandbox.Column{{Name: "id", Type: "BIGINT"}})}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, rows := textRows(t, conn, "SELECT id FROM t WHERE false")
+	if len(names) != 1 || names[0] != "id" || len(rows) != 0 {
+		t.Fatalf("names %v rows %v, want the column and no row", names, rows)
+	}
+}
+
+func TestPort_loginRefusalsReachTheClient(t *testing.T) {
+	for _, tc := range []struct {
+		name, pass, db, code string
+	}{
+		{"wrong password", "nope", "orders", "28P01"},
+		{"unknown server", portPassword, "nowhere", "3D000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &portLogin{run: answer(nil)}
+			_, err := dialPort(t, p, "app", tc.pass, tc.db)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) {
+				t.Fatalf("connect error = %v, want a PostgreSQL error", err)
+			}
+			if pgErr.Code != tc.code || pgErr.Severity != "FATAL" {
+				t.Fatalf("got %s %s %q, want FATAL %s", pgErr.Severity, pgErr.Code, pgErr.Message, tc.code)
+			}
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.closed != 0 {
+				t.Errorf("Close ran %d times for a connection that was never bound", p.closed)
+			}
+		})
+	}
+}
+
+// A client that names no database gets its username as one, as on
+// PostgreSQL: the login is never handed an empty database to resolve.
+func TestPort_noDatabaseIsTheUser(t *testing.T) {
+	p := &portLogin{run: answer(nil)}
+	addr := serveAddrCfg(t, Config{Login: p.login})
+	cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=orders password=%s sslmode=disable", hostOf(addr), portOf(addr), portPassword))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Database = ""
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgconn.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.dbs) != 1 || p.dbs[0] != "orders" {
+		t.Fatalf("the login was given database %q, want the user's name", p.dbs)
+	}
+}
+
+func hostOf(addr string) string { return addr[:strings.LastIndex(addr, ":")] }
+func portOf(addr string) string { return addr[strings.LastIndex(addr, ":")+1:] }
+
+func TestPort_bindingIsClosedOnceWhenTheClientLeaves(t *testing.T) {
+	p := &portLogin{run: answer([]sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, []any{json.Number("1")})}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	textRows(t, conn, "SELECT 1")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = conn.Close(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.mu.Lock()
+		n := p.closed
+		p.mu.Unlock()
+		if n == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Close ran %d times, want 1", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPort_executorErrorsBecomeClientErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+		want string // in the message
+		not  string // never in the message
+	}{
+		{"the port's own", &Error{Code: "55000", Message: "not available here"}, "55000", "not available here", ""},
+		{"not a read", &sqlsandbox.RefusedError{Reason: "only a read can run here"}, "0A000", "only a read", ""},
+		{"syntax", &sqlsandbox.QueryError{Message: "Parser Error: syntax error at or near \"FORM\""}, "42601", "FORM", ""},
+		{"no such table", &sqlsandbox.QueryError{Message: "Catalog Error: Table with name nope does not exist!"}, "42P01", "nope", ""},
+		{"no such function", &sqlsandbox.QueryError{Message: "Catalog Error: Scalar Function with name nope does not exist!"}, "42704", "nope", ""},
+		{"no such column", &sqlsandbox.QueryError{Message: "Binder Error: Referenced column \"x\" not found"}, "42000", "not found", ""},
+		{"bad value", &sqlsandbox.QueryError{Message: "Conversion Error: Could not convert string 'a' to INT32"}, "22000", "convert", ""},
+		{"engine fault", &sqlsandbox.QueryError{Message: "IO Error: cannot open file"}, "XX000", "IO Error", ""},
+		{"behind the source", &sqlsandbox.BehindSourceError{Reason: "the copy is 90 s behind"}, "55000", "90 s behind", ""},
+		{"copy not usable", &sqlsandbox.UnavailableError{Reason: "the copy is only on S3"}, "55000", "only on S3", ""},
+		{"too slow", &sqlsandbox.TimeoutError{Limit: 30 * time.Second}, "57014", "30 s", ""},
+		{"busy", sqlsandbox.ErrBusy, "53000", "busy", ""},
+		{"too large", sqlsandbox.ErrResultTooLarge, "54000", "MB", ""},
+		{"connection cap", context.DeadlineExceeded, "57014", "cap", ""},
+		{"cancelled", context.Canceled, "57014", "cancelled", ""},
+		{"worker failed", &sqlsandbox.WorkerError{Err: errors.New("open /var/lib/secret/path: denied")}, "XX000", "worker failed", "/var/lib"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := freeError(tc.err, discardLogger())
+			if got.code != tc.code {
+				t.Errorf("code = %s, want %s (%s)", got.code, tc.code, got.msg)
+			}
+			if !strings.Contains(got.msg, tc.want) {
+				t.Errorf("message %q does not hold %q", got.msg, tc.want)
+			}
+			if tc.not != "" && strings.Contains(got.msg, tc.not) {
+				t.Errorf("message %q holds %q, which the client must not be shown", got.msg, tc.not)
+			}
+		})
+	}
+}
+
+// After an error the connection answers the next statement: the client is
+// told it may go on (ReadyForQuery) on every way out.
+func TestPort_anErrorLeavesTheConnectionUsable(t *testing.T) {
+	calls := 0
+	p := &portLogin{}
+	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+		calls++
+		if calls == 1 {
+			return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: "only a read can run here"}
+		}
+		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}}}, nil
+	}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = conn.PgConn().Exec(ctx, "DELETE FROM t").ReadAll()
+	if pe := requirePgError(t, err); pe.Code != "0A000" {
+		t.Fatalf("code = %s, want 0A000", pe.Code)
+	}
+	_, rows := textRows(t, conn, "SELECT 1")
+	if len(rows) != 1 || *rows[0][0] != "1" {
+		t.Fatalf("the statement after the error answered %v", rows)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.answered) != 2 || !p.answered[0] || p.answered[1] {
+		t.Errorf("answered = %v, want the first refused and the second not", p.answered)
+	}
+}
+
+func TestPort_aCutResultIsRefusedNotReturnedShort(t *testing.T) {
+	p := &portLogin{}
+	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}, {json.Number("2")}}, Truncated: true}, nil
+	}
+	rec := audittest.Install(t)
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = conn.PgConn().Exec(ctx, "SELECT n FROM big").ReadAll()
+	pe := requirePgError(t, err)
+	if pe.Code != "54000" || !strings.Contains(pe.Message, "more than 2 rows") {
+		t.Fatalf("got %s %q, want 54000 naming the cap", pe.Code, pe.Message)
+	}
+	if evs := rec.Events(); len(evs) != 0 {
+		t.Errorf("a refused result left %d audit records", len(evs))
+	}
+}
+
+func TestPort_aRowOfTheWrongWidthIsAnErrorNotAShiftedRow(t *testing.T) {
+	p := &portLogin{run: answer([]sqlsandbox.Column{{Name: "a", Type: "INTEGER"}, {Name: "b", Type: "INTEGER"}}, []any{json.Number("1")})}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = conn.PgConn().Exec(ctx, "SELECT a, b FROM t").ReadAll()
+	if pe := requirePgError(t, err); pe.Code != "XX000" {
+		t.Fatalf("code = %s, want XX000", pe.Code)
+	}
+}
+
+// Time travel has no engine on this port: a statement written for it is
+// refused by name, never run as ordinary SQL on the copy as it is now.
+func TestPort_timeTravelIsRefusedNotRunOnTheCopy(t *testing.T) {
+	ran := false
+	p := &portLogin{}
+	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+		ran = true
+		return sqlsandbox.Result{}, nil
+	}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = conn.PgConn().Exec(ctx, "SELECT * FROM _flashback.orders AS OF '5 minutes ago' WHERE id = 1").ReadAll()
+	pe := requirePgError(t, err)
+	if pe.Code != "0A000" || !strings.Contains(pe.Message, "time travel") {
+		t.Fatalf("got %s %q", pe.Code, pe.Message)
+	}
+	if ran {
+		t.Fatal("a time-travel statement reached the copy's executor")
+	}
+}
+
+func TestPort_notesReachTheClientAsNotices(t *testing.T) {
+	p := &portLogin{}
+	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}},
+			TruncatedCells: 2, Note: "answered from an earlier copy"}, nil
+	}
+	addr := serveAddrCfg(t, Config{Login: p.login})
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders", portPassword, addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	var mu sync.Mutex
+	var notices []string
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		mu.Lock()
+		defer mu.Unlock()
+		notices = append(notices, n.Message)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, rows := textRows(t, conn, "SELECT 1"); len(rows) != 1 {
+		t.Fatalf("rows = %v", rows)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	all := strings.Join(notices, " | ")
+	if !strings.Contains(all, "2 cell(s)") || !strings.Contains(all, "earlier copy") {
+		t.Fatalf("notices = %q, want the cut cells and the note", all)
+	}
+}
+
+// The audit contract of the port mode (audittest.OwnerPGShimUnit): a served
+// statement leaves one shim/sql.run record under the actor the login bound.
+// No t.Parallel(): the sink is process-wide.
+func TestAuditContract_Port(t *testing.T) {
+	rec := audittest.Install(t)
+	p := &portLogin{run: answer([]sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, []any{json.Number("1")}, []any{json.Number("2")})}
+	conn, err := dialPort(t, p, "app", portPassword, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	textRows(t, conn, "SELECT n FROM t")
+	audittest.CheckCoverage(t, audittest.OwnerPGShimUnit, rec.Pairs())
+	evs := rec.Events()
+	if len(evs) != 1 {
+		t.Fatalf("%d audit records, want 1", len(evs))
+	}
+	ev := evs[0]
+	if ev.Actor != "server:orders" {
+		t.Errorf("actor = %q, want the one the login bound", ev.Actor)
+	}
+	for k, want := range map[string]string{"sql": "SELECT n FROM t", "rows": "2", "truncated": "false", "schema": "public", "protocol": "postgresql"} {
+		if ev.Detail[k] != want {
+			t.Errorf("detail[%s] = %q, want %q", k, ev.Detail[k], want)
+		}
+	}
+}
