@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/dbtrail/dbtrail/internal/audittest"
+	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
 
@@ -748,5 +749,92 @@ func TestPort_aClientThatNeverLogsInIsPutOut(t *testing.T) {
 			t.Fatalf("the place was never given back: %v", err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// With an engine bound, a time-travel statement goes to it and never to the
+// copy's executor; and the port's gate, asked for every statement, refuses it
+// with the port's reason before the engine reads anything.
+func TestPort_timeTravelGoesToTheEngineBehindThePortsGate(t *testing.T) {
+	ranOnCopy := false
+	hidden := "" // what the gate answers; "" lets time travel through
+	asked := 0
+	login := func(_ context.Context, _, _, password string, _ func()) (*Binding, *Error) {
+		if password != portPassword {
+			return nil, &Error{Code: "28P01", Message: "no"}
+		}
+		return &Binding{
+			Run: func(context.Context, string) (sqlsandbox.Result, error) {
+				ranOnCopy = true
+				return sqlsandbox.Result{}, nil
+			},
+			Actor:  "server:orders",
+			Schema: "public",
+			// An index nobody answers on: a statement that reaches the
+			// engine fails there, which is how this test tells "reached the
+			// engine" from "refused before it".
+			TimeTravel:        shim.NewHandlerWithConfig(deadDB(t), shim.Config{NoArchive: true, IndexDBName: "idx"}, discardLogger()),
+			TimeTravelRefusal: func() string { asked++; return hidden },
+		}, nil
+	}
+	addr := serveAddrCfg(t, Config{Login: login})
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://app:%s@%s/orders?sslmode=disable", portPassword, addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	const stmt = "SELECT * FROM _flashback.orders AS OF '5 minutes ago' WHERE id = 1"
+
+	// The gate lets it through: it reaches the engine (and fails on the
+	// index that is not there), not the "not served on this port" refusal
+	// and not the copy.
+	_, err = conn.PgConn().Exec(ctx, stmt).ReadAll()
+	pe := requirePgError(t, err)
+	if strings.Contains(pe.Message, "not served on this port") {
+		t.Fatalf("with an engine bound, time travel was refused as not served: %s", pe.Message)
+	}
+	if asked != 1 {
+		t.Fatalf("the gate was asked %d times for one statement", asked)
+	}
+
+	// A rule saved while the connection is open: the next statement is
+	// refused with the port's reason, as a permission error.
+	hidden = "this server hides rows, so time travel is not available for it"
+	_, err = conn.PgConn().Exec(ctx, stmt).ReadAll()
+	pe = requirePgError(t, err)
+	if pe.Code != "42501" || pe.Message != hidden {
+		t.Fatalf("got %s %q, want 42501 with the port's reason", pe.Code, pe.Message)
+	}
+	if asked != 2 {
+		t.Fatalf("the gate was asked %d times for two statements", asked)
+	}
+	// The bare form and _snapshot are time travel too.
+	for _, s := range []string{
+		"SELECT * FROM _snapshot.orders AS OF '5 minutes ago' WHERE id = 1",
+		"SELECT * FROM public.orders WHERE id = 1 AS OF '5 minutes ago'",
+	} {
+		_, err = conn.PgConn().Exec(ctx, s).ReadAll()
+		if pe := requirePgError(t, err); pe.Code != "42501" {
+			t.Errorf("%s: %s %q, want the gate's refusal", s, pe.Code, pe.Message)
+		}
+	}
+	// Ordinary SQL is not the gate's: it still goes to the copy.
+	if _, err = conn.PgConn().Exec(ctx, "SELECT 1").ReadAll(); err != nil {
+		t.Fatalf("ordinary SQL behind a closed time-travel gate: %v", err)
+	}
+	if !ranOnCopy {
+		t.Fatal("ordinary SQL did not reach the copy's executor")
+	}
+	ranOnCopy = false
+	_, _ = conn.PgConn().Exec(ctx, stmt).ReadAll()
+	if ranOnCopy {
+		t.Fatal("a time-travel statement reached the copy's executor")
 	}
 }

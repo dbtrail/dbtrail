@@ -29,6 +29,10 @@ import (
 // query protocol, every column sent as text (a value written the way
 // PostgreSQL writes one of its kind, pgtext.Cell), and nothing that writes.
 // The password crosses the wire in clear text, so the host binds loopback.
+//
+// Time travel (_flashback, _snapshot, AS OF) is served on the same
+// connection when the host binds an engine for it (Binding.TimeTravel), by
+// the code the first mode runs; without one it is refused by name.
 
 // Error is a failure the client is shown: a five-character SQLSTATE and a
 // message written for the person reading it.
@@ -57,6 +61,17 @@ type Binding struct {
 	Actor string
 	// Schema is where unqualified names resolve, for the audit record.
 	Schema string
+	// TimeTravel, when set, answers the time-travel statements of this
+	// connection (single-row _flashback and _snapshot AS OF, as the first
+	// mode serves them). It reads the index and the snapshot directly. Nil:
+	// a time-travel statement is refused by name.
+	TimeTravel *shim.Handler
+	// TimeTravelRefusal, when set, is asked before every time-travel
+	// statement; a reason it returns refuses the statement with that reason.
+	// It is how a host keeps time travel away from what its views hide:
+	// time travel reads past the views, so rules applied in them (rows or
+	// columns a server hides) would not hold here.
+	TimeTravelRefusal func() string
 	// Answered, when set, is told how long each statement took and whether
 	// the client got an error.
 	Answered func(took time.Duration, refused bool)
@@ -135,7 +150,16 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	if err := be.Flush(); err != nil {
 		return
 	}
-	commandLoop(be, &session{be: be, bound: bound, ctx: connCtx, logger: logger})
+	sess := &session{be: be, bound: bound, ctx: connCtx, logger: logger}
+	if bound.TimeTravel != nil {
+		// The engine's statements end with the connection, as free SQL's do.
+		bound.TimeTravel.BindConnContext(connCtx)
+		sess.h = bound.TimeTravel
+		// Where a time-travel statement's unqualified table resolves: the
+		// schema free SQL resolves names in.
+		sess.currentDB = bound.Schema
+	}
+	commandLoop(be, sess)
 }
 
 // loginTimeout is how long a client has, from connecting, to send its
