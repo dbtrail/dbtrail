@@ -349,3 +349,80 @@ func TestServersAPI_aMixedRegistryTakesNoEditButARemoval(t *testing.T) {
 		t.Fatalf("an edit once one family is left is still refused for the families: %d %s", rec.Code, body)
 	}
 }
+
+// addByHand puts e in reg past the family rule, as a hand edit of the servers
+// file does. For tests whose subject is one server's behaviour and that keep
+// servers of both families in one registry for it: such a registry still
+// serves every server (TestRegistry_aMixedFileIsReadAndTakesNoNewServer).
+func addByHand(t *testing.T, reg *Registry, e ServerEntry) ServerEntry {
+	t.Helper()
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	added, err := reg.insertLocked(e)
+	if err != nil {
+		t.Fatalf("add %s by hand: %v", e.Name, err)
+	}
+	return added
+}
+
+// The server given on the command line counts as the first one: the registry
+// cannot see it, so the console's own check does.
+func TestFamilyRefusal_theCommandLineServerCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		servers []ServerEntry
+		boot    string
+		flavor  string
+		want    string // in the refusal, "" for none
+	}{
+		{"nothing at all", nil, "", "postgres", ""},
+		{"a MySQL boot server, a MySQL server", nil, FamilyMySQL, "mysql", ""},
+		{"a MySQL boot server, a MariaDB server", nil, FamilyMySQL, "mariadb", ""},
+		{"a MySQL boot server, a PostgreSQL server", nil, FamilyMySQL, "postgres", "This installation serves MySQL and MariaDB servers"},
+		{"a PostgreSQL boot server, a MySQL server", nil, FamilyPostgres, "", "This installation serves PostgreSQL servers"},
+		{"a PostgreSQL boot server, a PostgreSQL server", nil, FamilyPostgres, "postgresql", ""},
+		{"a MySQL boot server beside PostgreSQL servers already", []ServerEntry{familyTestEntry("ledger", "postgres")}, FamilyMySQL, "postgres", "the server this was started with"},
+		{"a MySQL boot server beside PostgreSQL servers, a MySQL one asked", []ServerEntry{familyTestEntry("ledger", "postgres")}, FamilyMySQL, "mysql", "both database families"},
+	} {
+		err := familyRefusal(tc.servers, tc.boot, tc.flavor)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		case tc.want != "" && (err == nil || !errors.Is(err, ErrOtherFamily) || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: err = %v, want a refusal saying %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestServersAPI_theCommandLineServerFixesTheFamily(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		bootIsPG bool
+		body     string
+		refused  bool
+	}{
+		{"a MySQL boot server refuses PostgreSQL", false, `{"name":"ledger","flavor":"postgres","host":"h","user":"u","password":"p","dbname":"db"}`, true},
+		{"a MySQL boot server takes MariaDB", false, `{"name":"wiki","flavor":"mariadb","host":"h","user":"u","password":"p","dbname":"db"}`, false},
+		{"a PostgreSQL boot server refuses MySQL", true, `{"name":"shop","host":"h","user":"u","password":"p","dbname":"db"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newRegistryServer(t)
+			srv.cm.mu.Lock()
+			srv.cm.boot = &bundle{pgSource: tc.bootIsPG}
+			srv.cm.mu.Unlock()
+			rec, body := doServersReq(t, srv, "POST", "/api/servers", tc.body)
+			if tc.refused {
+				if rec.Code != http.StatusConflict || !strings.Contains(familyRefusalText(t, body), "This installation serves") {
+					t.Fatalf("%d %s", rec.Code, body)
+				}
+				if srv.cm.reg.Len() != 0 {
+					t.Fatalf("%d servers after a refused add", srv.cm.reg.Len())
+				}
+				return
+			}
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("%d %s", rec.Code, body)
+			}
+		})
+	}
+}

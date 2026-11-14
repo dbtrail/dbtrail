@@ -810,6 +810,14 @@ func (r *Registry) addLocked(e ServerEntry) (ServerEntry, error) {
 	if err := familyRefusal(r.file.Servers, "", e.Flavor); err != nil {
 		return ServerEntry{}, err
 	}
+	return r.insertLocked(e)
+}
+
+// insertLocked is addLocked past the family rule: everything else an added
+// server goes through. Only addLocked calls it; it is apart so that a test
+// can put a server of the other family in a registry the way a hand edit of
+// the file does, which is the only way one can be there.
+func (r *Registry) insertLocked(e ServerEntry) (ServerEntry, error) {
 	if err := r.checkName(e.Name, ""); err != nil {
 		return ServerEntry{}, err
 	}
