@@ -85,9 +85,11 @@ func (s *Server) extSessionIssuer() ext.ConsoleSessionIssuer {
 		if err != nil {
 			return "", time.Time{}, err
 		}
-		// Under the plain name: this seam hands over no request, so the
-		// port the browser opened is not known here (setSessionCookie).
-		setSessionCookie(w, nil, token, expires)
+		// Named for the address the browser opened, read from the request
+		// the provider's routes are served with (requestOf). A provider
+		// that hands over a writer of its own that hides it gets the plain
+		// name, which every address reads.
+		setSessionCookie(w, requestOf(w), token, expires)
 		slog.Info("console external-auth login", "identity", identity)
 		return token, expires, nil
 	}
@@ -295,12 +297,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // design, so logout with one only clears the cookie. Idempotent.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Revoke(bearerToken(r))
+	// Asked before anything is revoked: is the plain cookie a session of
+	// this server (clearSessionCookie)?
+	plainIsOurs := false
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		plainIsOurs = s.sessions.Validate(c.Value)
+	}
 	// Both cookies' sessions, not only the one a request is judged by
 	// (sessionCookieTokens): signing out leaves none of them alive.
 	for _, token := range sessionCookieTokens(r) {
 		s.sessions.Revoke(token)
 	}
-	clearSessionCookie(w, r)
+	clearSessionCookie(w, r, plainIsOurs)
 	w.WriteHeader(http.StatusNoContent)
 }
 

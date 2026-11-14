@@ -24,6 +24,10 @@ func TestSessionCookieNameFor(t *testing.T) {
 		{"127.0.0.1:80;x=y", "bintrail_session"}, // nor anything a client could smuggle in
 		{"127.0.0.1:123456", "bintrail_session"}, // longer than a port
 		{"127.0.0.1:８０９０", "bintrail_session"},   // digits that are not ASCII
+		{"::1", "bintrail_session"},              // an IPv6 address with no brackets: no port to read
+		{"[::1]", "bintrail_session"},
+		{"a:b:c", "bintrail_session"},
+		{"host:80:90", "bintrail_session"},
 	} {
 		r := httptest.NewRequest("GET", "http://x/", nil)
 		r.Host = tc.host
@@ -106,8 +110,11 @@ func TestSessionCookie_twoConsolesOnOneHostKeepTheirOwnLogin(t *testing.T) {
 			cleared[c.Name] = true
 		}
 	}
-	if !cleared["bintrail_session_8091"] || !cleared["bintrail_session"] {
-		t.Errorf("logout cleared %v, want this port's name and the plain one", cleared)
+	if !cleared["bintrail_session_8091"] {
+		t.Errorf("logout cleared %v, want this port's name", cleared)
+	}
+	if cleared["bintrail_session"] {
+		t.Error("logout cleared the plain name, which held no session of this console: another console on the host may be signed in under it")
 	}
 	if cleared["bintrail_session_8090"] {
 		t.Error("logout on the second console cleared the first console's cookie")
@@ -146,21 +153,143 @@ func TestSessionCookie_aLoginFromBeforeStillWorks(t *testing.T) {
 	}
 }
 
-// A login through an installed provider has no request to read a port from:
-// it sets the plain name, which every port reads.
-func TestSessionCookie_aProviderLoginSetsThePlainName(t *testing.T) {
+// A login through an installed provider is named for the port too: the
+// provider's routes are served through a writer that remembers the request.
+// A provider that hands the issuer a writer of its own that hides it gets
+// the plain name, which every port reads.
+func TestSessionCookie_aProviderLoginIsNamedForThePort(t *testing.T) {
 	srv, _ := newPasswordServer(t, "", "admin", "correct-horse-battery")
+	issue := srv.extSessionIssuer()
+	var token string
+	provider := withRequestWriter(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		var err error
+		if token, _, err = issue(w, "someone@example.com", nil); err != nil {
+			t.Fatal(err)
+		}
+	}))
 	rec := httptest.NewRecorder()
-	token, _, err := srv.extSessionIssuer()(rec, "someone@example.com", nil)
+	req := httptest.NewRequest("GET", "http://127.0.0.1:8091/auth/ext/callback", nil)
+	req.Host = "127.0.0.1:8091"
+	provider.ServeHTTP(rec, req)
+	cs := rec.Result().Cookies()
+	if len(cs) != 1 || cs[0].Name != "bintrail_session_8091" || cs[0].Value != token {
+		t.Fatalf("cookies set through the provider's routes: %v", rec.Header().Values("Set-Cookie"))
+	}
+	if code := authInfoWith(t, srv, "127.0.0.1:8091", cs[0]); code != 200 {
+		t.Errorf("the provider's session: %d", code)
+	}
+
+	// Under one more wrapper that can be unwrapped: still found.
+	rec = httptest.NewRecorder()
+	withRequestWriter(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, _, err := issue(unwrappable{w}, "someone@example.com", nil); err != nil {
+			t.Fatal(err)
+		}
+	})).ServeHTTP(rec, req)
+	if cs := rec.Result().Cookies(); len(cs) != 1 || cs[0].Name != "bintrail_session_8091" {
+		t.Fatalf("through a wrapper: %v", rec.Header().Values("Set-Cookie"))
+	}
+
+	// A bare writer, as a provider's own might be: the plain name.
+	rec = httptest.NewRecorder()
+	if _, _, err := issue(rec, "someone@example.com", nil); err != nil {
+		t.Fatal(err)
+	}
+	if cs := rec.Result().Cookies(); len(cs) != 1 || cs[0].Name != sessionCookieName {
+		t.Fatalf("with no request to read: %v", rec.Header().Values("Set-Cookie"))
+	}
+}
+
+type unwrappable struct{ http.ResponseWriter }
+
+func (u unwrappable) Unwrap() http.ResponseWriter { return u.ResponseWriter }
+
+// Two people in one browser: one signs in with a password, then another
+// through the provider. A new tab is the second person, the one who signed
+// in last, never the first with the second's cookie ignored.
+func TestSessionCookie_theLastLoginIsTheOneANewTabGets(t *testing.T) {
+	srv, _ := newPasswordServer(t, "", "admin", "correct-horse-battery")
+	first := loginOn(t, srv, "127.0.0.1:8090")
+	var second string
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://127.0.0.1:8090/auth/ext/callback", nil)
+	req.Host = "127.0.0.1:8090"
+	issue := srv.extSessionIssuer()
+	withRequestWriter(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		var err error
+		if second, _, err = issue(w, "second@example.com", nil); err != nil {
+			t.Fatal(err)
+		}
+	})).ServeHTTP(rec, req)
+	cs := rec.Result().Cookies()
+	if len(cs) != 1 || cs[0].Name != first.Name {
+		t.Fatalf("the second login did not replace the first one's cookie (%s): %v", first.Name, rec.Header().Values("Set-Cookie"))
+	}
+	// The browser now holds ONE cookie of that name, the second login's.
+	r := httptest.NewRequest("GET", "http://127.0.0.1:8090/api/servers", nil)
+	r.Host = "127.0.0.1:8090"
+	r.AddCookie(&http.Cookie{Name: cs[0].Name, Value: cs[0].Value})
+	if got := srv.sessionCookieToken(r); got != second {
+		t.Fatalf("a new tab is judged by another session than the last login's")
+	}
+	if identity, _, ok := srv.sessions.Lookup(second); !ok || identity != "second@example.com" {
+		t.Fatalf("the session a new tab gets is %q (ok=%v), want the second person's", identity, ok)
+	}
+}
+
+// Signing out of one console leaves alone a plain-named cookie that is not
+// its own session: it may be another console's on the same host.
+func TestSessionCookie_logoutLeavesAnotherConsolesPlainCookie(t *testing.T) {
+	a, _ := newPasswordServer(t, "", "admin", "correct-horse-battery")
+	b, _ := newPasswordServer(t, "", "admin", "correct-horse-battery")
+	// A login on A from before the change: under the plain name.
+	recA := httptest.NewRecorder()
+	tokA, _, err := a.extSessionIssuer()(recA, "someone@example.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := rec.Result().Cookies()
-	if len(cs) != 1 || cs[0].Name != sessionCookieName || cs[0].Value != token {
-		t.Fatalf("cookies set: %v", rec.Header().Values("Set-Cookie"))
+	plainA := &http.Cookie{Name: sessionCookieName, Value: tokA}
+	mine := loginOn(t, b, "127.0.0.1:8091")
+
+	out := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "http://127.0.0.1:8091/api/auth/logout", strings.NewReader("{}"))
+	req.Host = "127.0.0.1:8091"
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: mine.Name, Value: mine.Value})
+	req.AddCookie(plainA)
+	b.Handler().ServeHTTP(out, req)
+	for _, c := range out.Result().Cookies() {
+		if c.Name == sessionCookieName && c.MaxAge < 0 {
+			t.Fatal("signing out of the second console cleared the plain cookie, which is the first console's login")
+		}
 	}
-	if code := authInfoWith(t, srv, "127.0.0.1:8090", cs[0]); code != 200 {
-		t.Errorf("the provider's session on port 8090: %d", code)
+	if !a.sessions.Validate(tokA) {
+		t.Fatal("the first console's session ended when the second signed out")
+	}
+	if code := authInfoWith(t, a, "127.0.0.1:8090", plainA); code != 200 {
+		t.Errorf("the first console after the second signed out: %d", code)
+	}
+
+	// The same console's own plain-named session IS cleared by its logout.
+	recOwn := httptest.NewRecorder()
+	own, _, err := b.extSessionIssuer()(recOwn, "someone@example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "http://127.0.0.1:8091/api/auth/logout", strings.NewReader("{}"))
+	req.Host = "127.0.0.1:8091"
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: own})
+	b.Handler().ServeHTTP(out, req)
+	clearedPlain := false
+	for _, c := range out.Result().Cookies() {
+		if c.Name == sessionCookieName && c.MaxAge < 0 {
+			clearedPlain = true
+		}
+	}
+	if !clearedPlain || b.sessions.Validate(own) {
+		t.Errorf("a console's own plain-named session: cleared=%v alive=%v, want cleared and ended", clearedPlain, b.sessions.Validate(own))
 	}
 }
 

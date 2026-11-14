@@ -86,9 +86,8 @@ func sessionCookieNameFor(r *http.Request) string {
 
 // sessionCookieToken returns the session token a browser sent as a cookie,
 // "" when it sent none. There can be two: the one named for the port it
-// opened, and the plain name, which a login made before #2833 holds and which
-// a login through an installed provider still sets (extSessionIssuer has no
-// request to read a port from).
+// opened, and the plain name, which a login made before #2833 holds (and a
+// login through an installed provider whose writer hides the request).
 //
 // The port's cookie is the one that counts, except when it is no session of
 // this server and the plain one is: a session that ended under the port's
@@ -113,6 +112,52 @@ func (s *Server) sessionCookieToken(r *http.Request) string {
 		return plain
 	}
 	return port
+}
+
+// requestWriter is a response writer that remembers the request it answers.
+// The external auth seam (ext.ConsoleSessionIssuer) hands the session issuer
+// the writer and nothing else, and its signature is one other code is built
+// against; the issuer needs the request to name the login cookie for the
+// address the browser opened. The provider's routes are served through this
+// wrapper (withRequestWriter) and the issuer finds the request in it
+// (requestOf).
+type requestWriter struct {
+	http.ResponseWriter
+	r *http.Request
+}
+
+// Unwrap lets http.ResponseController, and requestOf through another
+// wrapper, reach the writer underneath.
+func (w *requestWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Flush keeps a provider that streams its answer working through the wrapper.
+func (w *requestWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func withRequestWriter(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&requestWriter{ResponseWriter: w, r: r}, r)
+	})
+}
+
+// requestOf is the request a response writer answers, when it was served
+// through withRequestWriter (directly, or under wrappers that can be
+// unwrapped); nil otherwise.
+func requestOf(w http.ResponseWriter) *http.Request {
+	for range 8 { // a chain of wrappers is short; this cannot spin
+		switch x := w.(type) {
+		case *requestWriter:
+			return x.r
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = x.Unwrap()
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 // sessionCookieTokens returns every session token the browser sent as a
@@ -159,12 +204,14 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expi
 // clearSessionCookie expires the session cookie (Max-Age=0 on the wire), so a
 // logout kills every tab, not just the one that clicked it. Attributes match
 // setSessionCookie — a clear that differs in Path would leave the original
-// cookie standing. Both names are cleared: the one for this address, and the
-// plain one a login made before #2833 left, which sessionCookieToken would
-// otherwise go on reading.
-func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+// cookie standing. The cookie named for this address is always cleared. The
+// plain name is cleared too only when plainToo says it held a session of
+// THIS server (a login from before #2833): the plain name is shared by every
+// console on the host, and clearing one that belongs to another console
+// would sign the browser out of it.
+func clearSessionCookie(w http.ResponseWriter, r *http.Request, plainToo bool) {
 	names := []string{sessionCookieNameFor(r)}
-	if names[0] != sessionCookieName {
+	if plainToo && names[0] != sessionCookieName {
 		names = append(names, sessionCookieName)
 	}
 	for _, name := range names {
