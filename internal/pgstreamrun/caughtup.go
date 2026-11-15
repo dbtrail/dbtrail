@@ -39,31 +39,34 @@ const caughtUpWithin = time.Second
 
 // caughtUpProof holds the one reading of the source that is still waiting
 // to be reached: how far its WAL was flushed (lsn; 0 = none waiting) at a
-// moment no later than the read (at: taken before the source was asked).
+// moment no later than the read (at: taken before the source was asked), and
+// the source's own clock for that reading (sourceAt; zero = it gave none).
 type caughtUpProof struct {
-	lsn uint64
-	at  time.Time
+	lsn      uint64
+	at       time.Time
+	sourceAt time.Time
 }
 
 // asked notes a reading, in place of the one that was waiting: that one was
 // not reached in time, or it would be gone. A zero lsn (the source could not
 // be read) leaves none waiting.
-func (p *caughtUpProof) asked(lsn uint64, at time.Time) {
-	p.lsn, p.at = lsn, at
+func (p *caughtUpProof) asked(lsn uint64, at, sourceAt time.Time) {
+	p.lsn, p.at, p.sourceAt = lsn, at, sourceAt
 }
 
 // received is told the newest sent position this loop has received (sent)
 // and the time (now). When that position reaches the waiting reading it
-// answers with the reading's moment, and ok says whether it was reached in
-// time; either way the reading is spent. A zero position reaches nothing.
-func (p *caughtUpProof) received(sent uint64, now time.Time) (at time.Time, ok bool) {
+// answers with the reading's moment and the source's clock for it, and ok
+// says whether it was reached in time; either way the reading is spent. A
+// zero position reaches nothing.
+func (p *caughtUpProof) received(sent uint64, now time.Time) (at, sourceAt time.Time, ok bool) {
 	if p.lsn == 0 || sent < p.lsn {
-		return time.Time{}, false
+		return time.Time{}, time.Time{}, false
 	}
-	at, ok = p.at, now.Sub(p.at) <= caughtUpWithin
-	p.lsn, p.at = 0, time.Time{}
+	at, sourceAt, ok = p.at, p.sourceAt, now.Sub(p.at) <= caughtUpWithin
+	*p = caughtUpProof{}
 	if !ok {
-		return time.Time{}, false
+		return time.Time{}, time.Time{}, false
 	}
-	return at, true
+	return at, sourceAt, true
 }

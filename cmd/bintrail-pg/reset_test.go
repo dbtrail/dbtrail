@@ -230,6 +230,8 @@ func TestClearCheckpoint_RealCheckpointStampsLoss(t *testing.T) {
 	// The stamp of when capture was last caught up goes with the cursor (#2845).
 	mock.ExpectExec(`UPDATE stream_state SET caught_up_at = NULL WHERE id = 1`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE stream_state SET pg_caught_up_source_at = NULL WHERE id = 1`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	// And where that capture started reading from (#2843).
 	mock.ExpectExec(`UPDATE stream_state SET pg_capture_from_lsn = NULL WHERE id = 1`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -273,6 +275,8 @@ func TestClearCheckpoint_IndexWithoutGapAckedAt(t *testing.T) {
 	// remove, and the reset still commits.
 	mock.ExpectExec(`UPDATE stream_state SET caught_up_at = NULL WHERE id = 1`).
 		WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'caught_up_at' in 'field list'"})
+	mock.ExpectExec(`UPDATE stream_state SET pg_caught_up_source_at = NULL WHERE id = 1`).
+		WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'pg_caught_up_source_at' in 'field list'"})
 	mock.ExpectExec(`UPDATE stream_state SET pg_capture_from_lsn = NULL WHERE id = 1`).
 		WillReturnError(&mysql.MySQLError{Number: 1054, Message: "Unknown column 'pg_capture_from_lsn' in 'field list'"})
 	mock.ExpectCommit()
@@ -328,6 +332,8 @@ func TestClearCheckpoint_NoCheckpointPreservesPriorLoss(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// The stamp of when capture was last caught up goes with the cursor (#2845).
 	mock.ExpectExec(`UPDATE stream_state SET caught_up_at = NULL WHERE id = 1`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE stream_state SET pg_caught_up_source_at = NULL WHERE id = 1`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	// And where that capture started reading from (#2843).
 	mock.ExpectExec(`UPDATE stream_state SET pg_capture_from_lsn = NULL WHERE id = 1`).
