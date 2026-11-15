@@ -43,7 +43,7 @@ func TestReconstructTables_PGTableEnteredCaptureLate_2862(t *testing.T) {
 	const late = "entered capture after the snapshot"
 	for _, tc := range []struct {
 		name      string
-		from      any // stream_state.pg_capture_from_lsn
+		from      any           // stream_state.pg_capture_from_lsn
 		kind      event.DDLKind // of the recorded entry; "" = none recorded
 		schema    string
 		table     string
