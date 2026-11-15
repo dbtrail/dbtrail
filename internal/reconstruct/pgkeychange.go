@@ -306,15 +306,49 @@ func pgKeyChangeErr(schema, table, before, after, why string) error {
 // again. Capture saves its position after it commits rows to the index, so a
 // crash between the two makes PostgreSQL send whole transactions a second
 // time (pgstreamrun, "indexed twice after a crash"), and one cut at the
-// batch size can leave its beginning behind. The second delivery starts with
-// the very change the first one started with, so a change that does not link
-// but equals the key's first change of the transaction (same start, same
-// result) starts the sequence again instead of refusing it.
+// batch size can leave its beginning behind. What the index then holds for
+// the key is its changes up to some point, and then all of them again from
+// the first.
 //
-// What this cannot see: two rows that are equal in EVERY column, key
-// included. Inserting an exact copy of a row and deleting the original reads,
-// change for change, like inserting a row and deleting it again. Only the
-// catalog knows the key is deferrable, and the index does not record that.
+// A second delivery is accepted only as that, change by change. A change
+// that does not link but equals the key's first change of the transaction
+// (same start, same result) OPENS a repeat: the changes so far are the run
+// to repeat (RefLen of them, with their digest Ref), and a new run starts.
+// The new run must itself link, and when it reaches the length of the run
+// before it, the two digests must be equal: every change of the second run
+// equals the change at the same place in the first. Only then does the
+// sequence go on, from the state both runs reached. Anything else refuses:
+// a second run that differs anywhere (INSERT a, UPDATE to b, INSERT a,
+// DELETE a is not a transaction delivered twice: the second run's second
+// change is a DELETE where the first run's was an UPDATE, and the source
+// keeps the row b), a first change that comes back while a repeat is still
+// open, and a repeat still open when the key's changes end (a delivery
+// whose last run is shorter than the one before it; the last delivery of a
+// transaction the fold reads is always whole, since the fold stops at
+// capture's saved position).
+//
+// The repeat is checked while the changes of one key are folded one by one,
+// in event id order. Records put together another way (changes of one
+// transaction held on both sides of a move to disk, or reaching the fold
+// against event id order) are linked end to start, and a first change coming
+// back across that seam is refused, not checked: the run's digest is not
+// carried over the seam (DigestLost). That refuses a legitimate second
+// delivery split by a move to disk, which is the safe direction.
+//
+// What this cannot see is rows that are equal in EVERY column, key included:
+//
+//   - an exact copy of a row that already existed is inserted and the
+//     original deleted: change for change, a row inserted and deleted again;
+//   - the same row is inserted twice and one of the two deleted (INSERT a,
+//     INSERT a, DELETE a): change for change, a transaction cut after its
+//     first change and then delivered whole. The source keeps one row, the
+//     copy none. The same holds for any series of changes made identically
+//     to two identical rows.
+//
+// Only the catalog knows the key is deferrable, and the index does not
+// record that. And on a database whose encoding is SQL_ASCII, text that is
+// not valid UTF-8 is stored with replacement characters, so two rows that
+// differ only in such bytes compare equal.
 //
 // This rule runs for every change of a PostgreSQL fold, halves included. The
 // rule above stays beside it for sequences with a key change: there two rows
@@ -350,7 +384,50 @@ type pgKeyTxn struct {
 	// Why is set when the changes do not describe one row: the reason, in
 	// words for the refusal.
 	Why string
+
+	// The current run: the changes since the key's first change of the
+	// transaction, or since that first change last came back. RunLen counts
+	// them and Run is their digest, one change after the other.
+	RunLen uint32
+	Run    pgRunDigest
+	// The run to repeat while a repeat is open (RefLen > 0): the run before
+	// the current one. See pgKeyTxn's comment.
+	RefLen uint32
+	Ref    pgRunDigest
+	// Restarted reports that the first change came back at least once.
+	Restarted bool
+	// DigestLost reports that Run does not cover the current run (records
+	// were put together across a seam), so a repeat cannot be checked.
+	DigestLost bool
 }
+
+// pgRunDigest is the digest of a run of changes, in order: each change's
+// start and result folded into the digest of the changes before it.
+type pgRunDigest struct{ Hi, Lo uint64 }
+
+// then is d after one more change, which started from needs and left leaves.
+func (d pgRunDigest) then(needs, leaves pgRowState) pgRunDigest {
+	var b [16 + 2*17]byte
+	binary.BigEndian.PutUint64(b[0:], d.Hi)
+	binary.BigEndian.PutUint64(b[8:], d.Lo)
+	for i, s := range []pgRowState{needs, leaves} {
+		o := 16 + i*17
+		b[o] = s.Kind
+		binary.BigEndian.PutUint64(b[o+1:], s.Hi)
+		binary.BigEndian.PutUint64(b[o+9:], s.Lo)
+	}
+	sum := sha256.Sum256(b[:])
+	return pgRunDigest{Hi: binary.BigEndian.Uint64(sum[:8]), Lo: binary.BigEndian.Uint64(sum[8:16])}
+}
+
+const (
+	pgWhyNotARepeat = "its first change appears a second time, as when capture delivers a transaction twice, " +
+		"but the changes after it do not repeat the changes before it"
+	pgWhyRepeatOpen = "its first change appears a second time, as when capture delivers a transaction twice, " +
+		"and the changes after it stop before they repeat the changes before it"
+	pgWhyRepeatSeam = "its first change appears a second time, as when capture delivers a transaction twice, " +
+		"and that cannot be checked here: the changes of the transaction were put together from more than one place (a move to disk)"
+)
 
 // pgRowState is what a key holds before or after one change, as far as the
 // change's images say: no row, a row (by a hash of its whole image), or
@@ -442,6 +519,7 @@ func pgKeyTxnOf(ev *query.ResultRow, half bool, from, to string) (pgKeyTxn, bool
 		needs, leaves = pgImageState(ev.RowBefore), pgRowState{Kind: pgStateNone}
 	}
 	t.FirstNeeds, t.FirstLeaves, t.Leaves = needs, leaves, leaves
+	t.RunLen, t.Run = 1, pgRunDigest{}.then(needs, leaves)
 	if half {
 		t.From, t.To = from, to
 	}
@@ -466,21 +544,24 @@ func (t pgKeyTxn) with(n pgKeyTxn) pgKeyTxn {
 	if n.MaxID < t.FirstID {
 		a, b = n, t
 	}
+	// What is not about the chain is kept from t, as before.
+	arrival, half, from, to := t.MinArrival, t.Half, t.From, t.To
+	maxID := max(t.MaxID, n.MaxID)
 	switch {
 	case t.Why != "":
+		a.Why = t.Why
 	case n.Why != "":
-		t.Why = n.Why
+		a.Why = n.Why
 	case a.MaxID >= b.FirstID:
-		t.Why = "its changes cannot be put in the order they were made in (two of them carry event ids that overlap)"
+		a.Why = "its changes cannot be put in the order they were made in (two of them carry event ids that overlap)"
+	case b.FirstID == b.MaxID && b.RunLen == 1 && !b.Restarted && !a.DigestLost:
+		a = a.step(b)
 	default:
-		why := pgRowLink(a.Leaves, b.FirstNeeds)
-		if why != "" && b.FirstNeeds == a.FirstNeeds && b.FirstLeaves == a.FirstLeaves {
-			why = "" // the transaction delivered again, from its first change
-		}
-		t.Why = why
+		a = a.join(b)
 	}
-	t.FirstID, t.FirstNeeds, t.FirstLeaves, t.Leaves = a.FirstID, a.FirstNeeds, a.FirstLeaves, b.Leaves
-	t.MaxID = max(t.MaxID, n.MaxID)
+	t = a
+	t.MinArrival, t.Half, t.From, t.To = arrival, half, from, to
+	t.MaxID = maxID
 	if n.MinArrival != 0 && (t.MinArrival == 0 || n.MinArrival < t.MinArrival) {
 		t.MinArrival = n.MinArrival
 	}
@@ -488,6 +569,65 @@ func (t pgKeyTxn) with(n pgKeyTxn) pgKeyTxn {
 		t.Half, t.From, t.To = true, n.From, n.To
 	}
 	return t
+}
+
+// step is a after the single change e, the next one by event id: the exact
+// rule of pgKeyTxn's comment, the repeat of a transaction delivered twice
+// included.
+func (a pgKeyTxn) step(e pgKeyTxn) pgKeyTxn {
+	why := pgRowLink(a.Leaves, e.FirstNeeds)
+	switch {
+	case why == "":
+		a.RunLen++
+		a.Run = a.Run.then(e.FirstNeeds, e.FirstLeaves)
+		if a.RefLen > 0 && a.RunLen == a.RefLen {
+			// The second run is as long as the first: it must be the first.
+			if a.Run != a.Ref {
+				a.Why = pgWhyNotARepeat
+			}
+			a.RefLen, a.Ref = 0, pgRunDigest{}
+		}
+	case e.FirstNeeds != a.FirstNeeds || e.FirstLeaves != a.FirstLeaves:
+		a.Why = why
+	case a.RefLen > 0:
+		// The first change again, while the run before it is not repeated yet.
+		a.Why = pgWhyRepeatOpen
+	default:
+		// The first change again: the run so far is the one to repeat.
+		a.Restarted = true
+		a.RefLen, a.Ref = a.RunLen, a.Run
+		a.RunLen, a.Run = 1, e.Run
+		if a.RefLen == 1 {
+			if a.Run != a.Ref {
+				a.Why = pgWhyNotARepeat
+			}
+			a.RefLen, a.Ref = 0, pgRunDigest{}
+		}
+	}
+	a.Leaves, a.MaxID = e.Leaves, e.MaxID
+	return a
+}
+
+// join is a followed by the record b of later changes, when b is more than
+// one change or a's digest is lost: the two are linked end to start, and
+// nothing about a repeat can be checked across the seam, so a repeat open on
+// either side, a first change that comes back at the seam, and one that came
+// back inside b (judged there against b's own first change, which is not the
+// transaction's) are refused.
+func (a pgKeyTxn) join(b pgKeyTxn) pgKeyTxn {
+	why := pgRowLink(a.Leaves, b.FirstNeeds)
+	switch {
+	case a.RefLen > 0 || b.RefLen > 0 || b.Restarted:
+		a.Why = pgWhyRepeatSeam
+	case why != "" && b.FirstNeeds == a.FirstNeeds && b.FirstLeaves == a.FirstLeaves:
+		a.Why = pgWhyRepeatSeam
+	case why != "":
+		a.Why = why
+	}
+	a.RunLen += b.RunLen
+	a.DigestLost = true
+	a.Leaves, a.MaxID = b.Leaves, b.MaxID
+	return a
 }
 
 // ambiguous reports a sequence pgKeyTxn's comment refuses: a key change
@@ -520,6 +660,32 @@ func pgSameTxnErr(schema, table, key string, t pgKeyTxn) error {
 			"When a primary key is DEFERRABLE two rows can hold the same key value inside a transaction, "+
 			"and the captured changes do not say whether the second change is about the row that arrived or about another row that had that key",
 		lsnText(t.LSN), key))
+}
+
+// pgTxnEnd refuses a key whose transaction ends with a repeat still open: its
+// first change came back and the changes after it stop before repeating the
+// run before it (pgKeyTxn). Called once the window is folded, for the
+// records still in memory; the ones that went to disk are checked when their
+// group is read back.
+func (r *foldResult) pgTxnEnd(schema, table string) error {
+	return pgTxnOpenRepeat(r.pgTxn, schema, table)
+}
+
+// pgTxnOpenRepeat is the refusal for the first key of txn, in key order,
+// whose record has a repeat open, or nil.
+func pgTxnOpenRepeat(txn map[string]pgKeyTxn, schema, table string) error {
+	first, found := "", false
+	for k, t := range txn {
+		if t.RefLen > 0 && (!found || k < first) {
+			first, found = k, true
+		}
+	}
+	if !found {
+		return nil
+	}
+	t := txn[first]
+	t.Why = pgWhyRepeatOpen
+	return pgSameTxnErr(schema, table, first, t)
 }
 
 // notePGTxn records one filed row of a PostgreSQL fold under its key and

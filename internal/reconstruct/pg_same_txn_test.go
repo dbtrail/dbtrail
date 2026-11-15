@@ -102,6 +102,10 @@ func stFold(t *testing.T, pages [][]query.ResultRow, spill bool) (map[string]*qu
 		}
 	}
 	if !spill {
+		// What the fold checks once the window is read.
+		if err := res.pgTxnEnd("mydb", "orders"); err != nil {
+			return nil, err
+		}
 		return res.Changes, nil
 	}
 	if err := res.Spill.finish(); err != nil {
@@ -253,10 +257,11 @@ func TestFoldPage_pgSameTransaction_ambiguous(t *testing.T) {
 
 // A transaction delivered twice. Capture saves its position after the rows,
 // so a crash between the two has PostgreSQL send the transaction again, and
-// one cut at the batch size can leave its beginning behind. The second
-// delivery starts with the transaction's first change of the key again:
-// that starts the sequence over and is not a refusal. In event id order,
-// which is how they reach the fold.
+// one cut at the batch size can leave its beginning behind. What the index
+// holds for the key is then its changes up to some point and all of them
+// again from the first. Accepted when the second run repeats the first
+// change by change for as long as the first ran, and only then. In event id
+// order, which is how they reach the fold.
 func TestFoldPage_pgSameTransaction_deliveredTwice(t *testing.T) {
 	cases := []struct {
 		name string
@@ -267,13 +272,22 @@ func TestFoldPage_pgSameTransaction_deliveredTwice(t *testing.T) {
 		{"one update, twice", []query.ResultRow{stUpd(1, "old", "new"), stUpd(11, "old", "new")}, "new"},
 		{"one delete, three times", []query.ResultRow{stDel(1, "old"), stDel(11, "old"), stDel(21, "old")}, ""},
 		{"insert and update, twice", []query.ResultRow{stIns(1, "new"), stUpd(2, "new", "changed"), stIns(11, "new"), stUpd(12, "new", "changed")}, "changed"},
+		{"insert and update, three times", []query.ResultRow{stIns(1, "new"), stUpd(2, "new", "changed"), stIns(11, "new"), stUpd(12, "new", "changed"),
+			stIns(21, "new"), stUpd(22, "new", "changed")}, "changed"},
 		{"the beginning left behind, then the whole", []query.ResultRow{stIns(1, "new"), stIns(11, "new"), stUpd(12, "new", "changed"), stDel(13, "changed")}, ""},
+		{"two changes left behind, then the whole", []query.ResultRow{stIns(1, "new"), stUpd(2, "new", "changed"),
+			stIns(11, "new"), stUpd(12, "new", "changed"), stUpd(13, "changed", "again")}, "again"},
+		{"the beginning left behind, then the whole twice", []query.ResultRow{stIns(1, "new"),
+			stIns(11, "new"), stUpd(12, "new", "changed"), stIns(21, "new"), stUpd(22, "new", "changed")}, "changed"},
 	}
 	for _, c := range cases {
 		for how, pages := range stOrders(c.evs, false) {
 			for _, spill := range []bool{false, true} {
 				name := c.name + "/" + how + "/in memory"
 				if spill {
+					// One page is one record on disk; a page each is one
+					// record per change, put together one by one: both are
+					// the exact rule.
 					name = c.name + "/" + how + "/through disk"
 				}
 				t.Run(name, func(t *testing.T) {
@@ -296,6 +310,104 @@ func TestFoldPage_pgSameTransaction_deliveredTwice(t *testing.T) {
 	// does not link and is not the first one is still refused.
 	_, err := stFold(t, [][]query.ResultRow{{stIns(1, "new"), stUpd(2, "new", "changed"), stUpd(3, "new", "changed")}}, false)
 	stRefused(t, err, stWhyNotTheRow)
+}
+
+const (
+	stWhyNotARepeat = "but the changes after it do not repeat the changes before it"
+	stWhyRepeatOpen = "stop before they repeat the changes before it"
+	stWhyRepeatSeam = "that cannot be checked here"
+)
+
+// The first change coming back is not enough to be a second delivery: what
+// follows must repeat what came before, change by change.
+//
+// A deferrable key, row 1 not there before: INSERT a, UPDATE it to b, INSERT
+// a again (allowed until commit), DELETE the row that holds a. The source
+// keeps (1, b). The third change equals the first, and a rule that started
+// the sequence over on that alone ended on the DELETE: no row 1, no error.
+// It is not a second delivery: that would repeat INSERT, UPDATE, and here
+// the second run goes INSERT, DELETE.
+func TestFoldPage_pgSameTransaction_firstChangeAgainIsNotARepeat(t *testing.T) {
+	cases := []struct {
+		name string
+		evs  []query.ResultRow
+		why  string
+	}{
+		{"insert a, update to b, insert a, delete a", []query.ResultRow{
+			stIns(1, "a"), stUpd(2, "a", "b"), stIns(3, "a"), stDel(4, "a")}, stWhyNotARepeat},
+		{"insert a, update to b, insert a, update a to c, delete c", []query.ResultRow{
+			stIns(1, "a"), stUpd(2, "a", "b"), stIns(3, "a"), stUpd(4, "a", "c"), stDel(5, "c")}, stWhyNotARepeat},
+		{"the second run differs at its third change", []query.ResultRow{
+			stIns(1, "a"), stUpd(2, "a", "b"), stUpd(3, "b", "c"), stIns(4, "a"), stUpd(5, "a", "b"), stDel(6, "b")}, stWhyNotARepeat},
+		{"the second run stops before the first one's length", []query.ResultRow{
+			stIns(1, "a"), stUpd(2, "a", "b"), stIns(3, "a")}, stWhyRepeatOpen},
+		{"the second run stops one change short", []query.ResultRow{
+			stIns(1, "a"), stUpd(2, "a", "b"), stDel(3, "b"), stIns(4, "a"), stUpd(5, "a", "b")}, stWhyRepeatOpen},
+		{"the first change comes back while the second run is not complete", []query.ResultRow{
+			stIns(1, "a"), stUpd(2, "a", "b"), stIns(3, "a"), stIns(4, "a"), stUpd(5, "a", "b")}, stWhyRepeatOpen},
+	}
+	for _, c := range cases {
+		for how, pages := range stOrders(c.evs, false) {
+			for _, spill := range []bool{false, true} {
+				name := c.name + "/" + how + "/in memory"
+				if spill {
+					name = c.name + "/" + how + "/through disk"
+				}
+				t.Run(name, func(t *testing.T) {
+					got, err := stFold(t, pages, spill)
+					if err == nil {
+						t.Fatalf("folded to %+v", got["1"])
+					}
+					stRefused(t, err, c.why)
+				})
+			}
+		}
+	}
+}
+
+// What the rule cannot tell apart, and what it does there: the same row
+// inserted twice and one of the two deleted reads, change for change, like a
+// transaction cut after its first change and then delivered whole (INSERT;
+// INSERT, DELETE). It is applied as that: no row. On a deferrable key the
+// source keeps one row. Documented in docs/postgres.md.
+func TestFoldPage_pgSameTransaction_twoEqualRowsAreNotSeen(t *testing.T) {
+	for _, spill := range []bool{false, true} {
+		got, err := stFold(t, [][]query.ResultRow{{stIns(1, "a"), stIns(2, "a"), stDel(3, "a")}}, spill)
+		if err != nil {
+			t.Fatalf("spill %v: refused: %v", spill, err)
+		}
+		if ev := got["1"]; ev == nil || ev.EventType != event.EventDelete {
+			t.Errorf("spill %v: key 1 = %+v, want the DELETE", spill, ev)
+		}
+	}
+}
+
+// A second delivery whose changes were put together from more than one
+// record of several changes (a move to disk in the middle) cannot be
+// checked, and is refused: in memory the same pages are applied.
+func TestFoldPage_pgSameTransaction_deliveredTwiceAcrossAMoveToDisk(t *testing.T) {
+	pages := [][]query.ResultRow{
+		{stIns(1, "new"), stUpd(2, "new", "changed")},
+		{stIns(11, "new"), stUpd(12, "new", "changed")},
+	}
+	if got, err := stFold(t, pages, false); err != nil || got["1"].RowAfter["status"] != "changed" {
+		t.Fatalf("in memory: %v, %v", got, err)
+	}
+	_, err := stFold(t, pages, true)
+	stRefused(t, err, stWhyRepeatSeam)
+
+	// The first delivery on both sides of the move, then the second: the
+	// record in memory after the move starts at the third change, which the
+	// first change coming back neither follows nor equals.
+	pages = [][]query.ResultRow{
+		{stIns(1, "new"), stUpd(2, "new", "a")},
+		{stUpd(3, "a", "b"), stIns(11, "new"), stUpd(12, "new", "a"), stUpd(13, "a", "b")},
+	}
+	if got, err := stFold(t, pages, false); err != nil || got["1"].RowAfter["status"] != "b" {
+		t.Fatalf("in memory: %v, %v", got, err)
+	}
+	_, err = stFold(t, pages, true)
+	stRefused(t, err, stWhyInsert)
 }
 
 // A change whose event id falls inside a run already linked cannot be put in
