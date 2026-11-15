@@ -349,24 +349,24 @@ func TestPGImageState(t *testing.T) {
 		t.Fatalf("the same row in another map order: %+v", a)
 	}
 	for name, other := range map[string]map[string]any{
-		"another value":                   {"id": "1", "v": "y", "n": nil},
-		"NULL against empty text":         {"id": "1", "v": "x", "n": ""},
-		"NULL against the text NULL":      {"id": "1", "v": "x", "n": "NULL"},
-		"a column less":                   {"id": "1", "v": "x"},
-		"a column more":                   {"id": "1", "v": "x", "n": nil, "z": nil},
-		"values that join the same":       {"id": "1v", "v": "x", "n": nil},
+		"another value":                    {"id": "1", "v": "y", "n": nil},
+		"NULL against empty text":          {"id": "1", "v": "x", "n": ""},
+		"NULL against the text NULL":       {"id": "1", "v": "x", "n": "NULL"},
+		"a column less":                    {"id": "1", "v": "x"},
+		"a column more":                    {"id": "1", "v": "x", "n": nil, "z": nil},
+		"values that join the same":        {"id": "1v", "v": "x", "n": nil},
 		"a value moved to the next column": {"id": "1", "v": "", "n": "x"},
-		"another column name":             {"id": "1", "w": "x", "n": nil},
+		"another column name":              {"id": "1", "w": "x", "n": nil},
 	} {
 		if got := pgImageState(other); got == a || got.Kind != pgStateRow {
 			t.Errorf("%s: %+v, want a row state that differs", name, got)
 		}
 	}
 	for name, img := range map[string]map[string]any{
-		"no image":                 nil,
-		"a number":                 {"id": json.Number("1")},
+		"no image":                  nil,
+		"a number":                  {"id": json.Number("1")},
 		"an unchanged-TOAST marker": {"id": "1", "v": map[string]any{event.UnchangedToastKey: true}},
-		"a boolean":                {"id": "1", "v": true},
+		"a boolean":                 {"id": "1", "v": true},
 	} {
 		if got := pgImageState(img); got.Kind != pgStateUnknown {
 			t.Errorf("%s: %+v, want a state that cannot be compared", name, got)
