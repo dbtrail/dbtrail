@@ -125,6 +125,7 @@ jobs:
       dbgo: ${{ steps.filter.outputs.dbgo }}
       console: ${{ steps.filter.outputs.console }}
       data: ${{ steps.filter.outputs.data }}
+      consoleit: ${{ steps.filter.outputs.consoleit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -180,6 +181,15 @@ jobs:
               - 'internal/console/**'
               - 'cmd/bintrail-console/**'
               - 'consoleapp/**'
+            # consoleapp's integration tests (#2813). `data` leaves all of
+            # consoleapp out, so a pull request that changes only that package
+            # skipped the MySQL 8.0 cells and every MariaDB cell, though
+            # integration tests for both live in it: a change to one of those
+            # tests reached main without having run on the servers it is
+            # about. A change to one of them counts toward those cells; a
+            # change to the rest of consoleapp still does not.
+            consoleit:
+              - 'consoleapp/**/*_integration_test.go'
             data:
               - '**/*.go'
               - 'go.mod'
@@ -330,7 +340,7 @@ jobs:
       # outside the console's browser-driven tests (`dbgo`), 8.4 always
       # runs; 8.0 joins only when the PR touches the data path, and
       # otherwise reports as a success with nothing executed.
-      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.dbgo == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true')) }}
+      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.dbgo == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true' || needs.changes.outputs.consoleit == 'true')) }}
 
     steps:
       # Step-level (not job-level) `if:`, as everywhere a matrix job reports
@@ -528,7 +538,7 @@ jobs:
     env:
       # The same gate as integration-shard: when a cell's shards were told to
       # skip, so is this.
-      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.dbgo == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true')) }}
+      RUN: ${{ github.event_name != 'pull_request' || (needs.changes.outputs.dbgo == 'true' && (matrix.mysql == '8.4' || needs.changes.outputs.data == 'true' || needs.changes.outputs.consoleit == 'true')) }}
     steps:
       # A failed `changes` job leaves every output empty, which reads as
       # "skip" on a PR: refuse instead of passing on nothing.
@@ -635,7 +645,7 @@ jobs:
       # Data-path PRs only (plus push/nightly/dispatch). Step-level, not
       # job-level: this job has a matrix, and its cells are required
       # checks. See the note on the `changes` job.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || needs.changes.outputs.consoleit == 'true' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
