@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -240,6 +241,13 @@ func wholeSecondsDeclared(declared, typ string) bool {
 // could be, because not known is never read as "not a date".
 type TemporalColumn struct {
 	Name, Type string
+	// Digits is the fractional seconds the column is declared with: the n
+	// of DATETIME(n), TIMESTAMP(n) or TIME(n), 0 for the bare type and for
+	// a DATE or a YEAR. -1 when the declaration was not recorded or does not
+	// read as one, and for a column whose type is not known. MySQL declares
+	// a result column with these digits and prints every value with exactly
+	// that many (#2849).
+	Digits int
 }
 
 // knownOtherTypes are the column types this package knows and that are not
@@ -265,14 +273,38 @@ func TemporalColumns(cols []Column) []TemporalColumn {
 	for _, c := range cols {
 		switch c.MySQLType {
 		case "date", "datetime", "timestamp", "time", "year":
-			out = append(out, TemporalColumn{Name: c.Name, Type: c.MySQLType})
+			out = append(out, TemporalColumn{Name: c.Name, Type: c.MySQLType, Digits: declaredDigits(c)})
 		default:
 			if !knownOtherTypes[c.MySQLType] {
-				out = append(out, TemporalColumn{Name: c.Name})
+				out = append(out, TemporalColumn{Name: c.Name, Digits: -1})
 			}
 		}
 	}
 	return out
+}
+
+// declaredDigits is TemporalColumn.Digits for a date, time or year column.
+func declaredDigits(c Column) int {
+	if c.RawText {
+		return -1
+	}
+	switch c.MySQLType {
+	case "date", "year":
+		return 0
+	}
+	token, args, _, _ := splitDeclaredType(strings.TrimSpace(c.DeclaredType))
+	if token != c.MySQLType {
+		return -1 // not recorded, or not the type the column was read as
+	}
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(args)
+	if err != nil || n < 0 || n > 6 {
+		return -1
+	}
+	return n
 }
 
 // TableFootersFor reports, for each baseline Parquet file, the decimal and

@@ -60,8 +60,12 @@ shard_list() {
 # shard SPLIT_REST_SHARD runs every other test of the package (-test.skip with
 # all the patterns joined). Each part is its own run of the binary, with its
 # own 10 minutes. Measured on 2026-11-14 (8.0): SQLCompare 394 s, Flashback
-# 192 s, the rest 368 s. Keep each part under about 300 s; SQLCompare is past
-# that already and is the next one to split.
+# 192 s, the rest 368 s. Keep each part under about 300 s. SQLCompare reached
+# 543 s in main's run of the same day, and one more test of its own took it
+# past the 600 s (#2849), so it runs in two parts: the tests whose name goes
+# on with A to D (about 300 s in that run), and the others with the bare
+# TestIntegrationSQLCompare (about 250 s), which run in the Flashback part
+# (about 440 s together): a shard runs one part of the package.
 #
 # Flashback stays in shard 2: two of its tests need the GTID source, which
 # ci.yml and release.yaml start only in shard 2 (with internal/streamrun).
@@ -77,8 +81,8 @@ shard_list() {
 #     (check-split).
 SPLIT_PKG="consoleapp"
 SPLIT_PARTS=(
-  '1:^TestIntegrationSQLCompare'
-  '2:^TestIntegrationFlashback'
+  '1:^TestIntegrationSQLCompare[A-D]'
+  '2:^TestIntegration(Flashback|SQLCompare($|[E-Z]))'
 )
 SPLIT_REST_SHARD=3
 

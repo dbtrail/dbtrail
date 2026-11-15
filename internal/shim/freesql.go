@@ -522,6 +522,9 @@ type spooledAnswer struct {
 	spool   *sqlsandbox.Spool
 	columns []sqlsandbox.Column
 	loc     *time.Location
+	// digits are the fractional seconds each date and time column is
+	// printed with (answerDateDigits, #2849).
+	digits []int
 	// binary is a prepared statement's answer: its rows go out in the
 	// binary encoding, under the header's types.
 	binary bool
@@ -573,7 +576,7 @@ func (h *Handler) sendSpooled(res *mysql.Result, err error) (*mysql.Result, erro
 			return fmt.Errorf("row %d of the result file has %d cells for %d columns", sent+1, len(cells), len(sp.columns))
 		}
 		for j, c := range cells {
-			cell, err := freeSQLCell(c, sp.columns[j].Type, sp.loc, sp.binary)
+			cell, err := freeSQLCellDigits(c, sp.columns[j].Type, sp.loc, sp.binary, digitsAt(sp.digits, j))
 			if err != nil {
 				return cellError(err, sp.columns, j, sent)
 			}
@@ -1317,7 +1320,8 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		}
 		defer func() {
 			if refused == nil {
-				h.spooled = &spooledAnswer{spool: res.Spool, columns: res.Columns, loc: vars.loc}
+				digits, _ := answerDateDigits(res)
+				h.spooled = &spooledAnswer{spool: res.Spool, columns: res.Columns, loc: vars.loc, digits: digits}
 				kept = true
 			}
 		}()
@@ -1361,6 +1365,14 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// the cap asked for it, and the executor does not report that cut as
 		// Truncated (sqlsandbox.Session.SelectLimit).
 		return nil, rowCapError(qstr, len(res.Rows), vars.selectLimit)
+	}
+	if _, unknown := answerDateDigits(res); unknown >= 0 && h.router != nil {
+		// Under routing the client expects MySQL's column definitions: a
+		// date and time whose digits the copy cannot tell is MySQL's to
+		// answer (#2849). A decision about the statement, not a fault of the
+		// copy, as a star's columns are (#2111).
+		return nil, &sqlsandbox.ColumnsDifferError{Reason: fmt.Sprintf("the copy does not answer this statement: it cannot tell how many "+
+			"fractional seconds MySQL declares its column %d (%s) with", unknown+1, res.Columns[unknown].Name)}
 	}
 	if res.Spool != nil {
 		// A result in a file is sent after the routing ladder is done, when
@@ -1670,8 +1682,11 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*
 			rs.Fields[i].Type = mysql.MYSQL_TYPE_VAR_STRING
 			applyDuckType(rs.Fields[i], c.Type)
 		}
+		digits, _ := answerDateDigits(res)
+		applyDateScales(rs.Fields, res, digits)
 		return rs, nil
 	}
+	digits, _ := answerDateDigits(res)
 	values := make([][]any, len(res.Rows))
 	for i, row := range res.Rows {
 		out := make([]any, len(row))
@@ -1680,7 +1695,7 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*
 			if j < len(res.Columns) {
 				typ = res.Columns[j].Type
 			}
-			c, err := freeSQLCell(cell, typ, loc, binary)
+			c, err := freeSQLCellDigits(cell, typ, loc, binary, digitsAt(digits, j))
 			if err != nil {
 				return nil, cellError(err, res.Columns, j, i)
 			}
@@ -1703,7 +1718,66 @@ func freeSQLResultset(res sqlsandbox.Result, loc *time.Location, binary bool) (*
 		}
 		applyDuckType(rs.Fields[i], c.Type)
 	}
+	applyDateScales(rs.Fields, res, digits)
 	return rs, nil
+}
+
+// answerDateDigits is, for each column of the copy's answer, the fractional
+// seconds its date and time cells are printed with (#2849): the digits MySQL
+// declares the column with, where the console could tell them
+// (sqlsandbox.Result.DateScales), and -1 for every other column, a date and
+// time among them, which is printed as before (as many digits as the value
+// needs) and declared with 6. unknown is the first date and time column
+// whose digits are not known, -1 when there is none.
+//
+// The scales are trusted only when they line up with the answer: one per
+// column, and a column the console named (a star's) carrying that name.
+func answerDateDigits(res sqlsandbox.Result) (digits []int, unknown int) {
+	digits = make([]int, len(res.Columns))
+	unknown = -1
+	aligned := len(res.DateScales) == len(res.Columns)
+	for i, c := range res.Columns {
+		digits[i] = -1
+		if !isTimestampType(c.Type) {
+			continue
+		}
+		if aligned {
+			sc := res.DateScales[i]
+			if sc.Known && (sc.Name == "" || strings.EqualFold(sc.Name, c.Name)) && sc.Digits >= 0 && sc.Digits <= 6 {
+				digits[i] = sc.Digits
+				continue
+			}
+		}
+		if unknown < 0 {
+			unknown = i
+		}
+	}
+	return digits, unknown
+}
+
+// applyDateScales declares each date and time column whose digits are known
+// as MySQL does (#2849): with those fractional seconds (digits, from
+// answerDateDigits), and as a TIMESTAMP where MySQL types it one (a
+// TIMESTAMP column, or MIN or MAX of one). applyDuckType has declared it a
+// DATETIME with 6.
+func applyDateScales(fields []*mysql.Field, res sqlsandbox.Result, digits []int) {
+	for i, d := range digits {
+		if d < 0 || i >= len(fields) {
+			continue
+		}
+		fields[i].Decimal = uint8(d)
+		if res.DateScales[i].Timestamp {
+			fields[i].Type = mysql.MYSQL_TYPE_TIMESTAMP
+		}
+	}
+}
+
+// digitsAt is digits[i], or -1 past its end.
+func digitsAt(digits []int, i int) int {
+	if i < len(digits) {
+		return digits[i]
+	}
+	return -1
 }
 
 // notFiniteRefusal is the client's error for a result holding a cell MySQL
@@ -1768,6 +1842,14 @@ func cellError(err error, columns []sqlsandbox.Column, col, row int) error {
 // FLOAT's bytes there, and the six digits it prints would lose some. NaN and
 // an infinity, which MySQL never sends, are errNotFinite.
 func freeSQLCell(v any, duckType string, loc *time.Location, binary bool) (any, error) {
+	return freeSQLCellDigits(v, duckType, loc, binary, -1)
+}
+
+// freeSQLCellDigits is freeSQLCell with a date and time printed with digits
+// fractional seconds, as MySQL prints a column declared with them
+// (DATETIME(3) holds 12:00:00.120 and prints it so, #2849); -1 prints as
+// many as the value needs.
+func freeSQLCellDigits(v any, duckType string, loc *time.Location, binary bool, digits int) (any, error) {
 	if v != nil {
 		if single, ok := floatType(duckType); ok {
 			return floatCellText(v, single, binary)
@@ -1792,7 +1874,7 @@ func freeSQLCell(v any, duckType string, loc *time.Location, binary bool) (any, 
 				if loc != nil && isInstantType(duckType) {
 					t = t.In(loc)
 				}
-				return []byte(t.Format("2006-01-02 15:04:05.999999")), nil
+				return []byte(mysqlDateTimeText(t, digits)), nil
 			}
 		}
 		return []byte(x), nil
@@ -1873,6 +1955,30 @@ func floatType(duckType string) (single, ok bool) {
 		return false, true
 	}
 	return false, false
+}
+
+// mysqlDateTimeText is a date and time in MySQL's spelling, with digits
+// fractional seconds, or as many as the value needs for -1. A digit past
+// digits that is not zero is printed anyway: the declaration says fewer
+// than the value holds, which only a declaration read wrong does (a column
+// altered on the source since the snapshot whose CREATE TABLE was read),
+// and dropping the digit would change the value. The declaration is left as
+// read, in memory as in a file, whose header goes out before its rows are
+// read: the two answers stay the same.
+func mysqlDateTimeText(t time.Time, digits int) string {
+	if digits < 0 {
+		return t.Format("2006-01-02 15:04:05.999999")
+	}
+	frac := fmt.Sprintf("%06d", t.Nanosecond()/1000)
+	if kept := strings.TrimRight(frac, "0"); len(kept) > digits {
+		frac = kept
+	} else {
+		frac = frac[:digits]
+	}
+	if frac == "" {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return t.Format("2006-01-02 15:04:05") + "." + frac
 }
 
 func isTimestampType(duckType string) bool {

@@ -91,6 +91,7 @@ func TestCollectRefs(t *testing.T) {
 		got.Star, got.NamedJoin, got.Natural, got.StarTables, got.StarNamedJoin = false, false, false, nil, false // TestCollectRefs_star has them
 		got.Columns = nil                                                                                         // TestCollectRefs_names has them
 		got.Text = TextUse{}                                                                                      // TestCollectRefs_textUse has it
+		got.Selected = nil                                                                                        // TestCollectSelected has them
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.sql, got, c.want)
 		}
@@ -224,7 +225,11 @@ func TestRun_asksForTheViewsItNeeds(t *testing.T) {
 	want := []Refs{{Tables: []TableRef{{Schema: "shop", Name: "orders"}},
 		Columns: []ColumnRef{{Name: "id"}, {Name: "id"}, {Name: "status"}},
 		// How the statement uses text crosses to the parent too (#2533).
-		Text: TextUse{Ordered: []ColumnRef{{Name: "id"}}, Sorted: []ColumnRef{{Name: "id"}}}}}
+		Text: TextUse{Ordered: []ColumnRef{{Name: "id"}}, Sorted: []ColumnRef{{Name: "id"}}},
+		// And the select list, item by item (#2849).
+		Selected: []SelectedItem{
+			{Columns: []SelectedColumn{{Name: "id", Tables: []TableRef{{Schema: "shop", Name: "orders"}}}}, Itself: true},
+			{Columns: []SelectedColumn{{Name: "status", Tables: []TableRef{{Schema: "shop", Name: "orders"}}}}, Itself: true}}}}
 	if !reflect.DeepEqual(seen, want) {
 		t.Errorf("asked with %+v, want %+v", seen, want)
 	}
