@@ -11,17 +11,21 @@ import (
 const unsignedDiffers = "MySQL computes it as a BIGINT UNSIGNED and refuses a negative result with error 1690; " +
 	"the copy answers another type and, for a negative result, a number"
 
-// vetoWindowNumber keeps on MySQL a statement that does arithmetic on
-// ROW_NUMBER, RANK, DENSE_RANK or NTILE (#2848). MySQL types each as a BIGINT
-// UNSIGNED, so ROW_NUMBER() OVER (ORDER BY k) - 10 is refused there with
-// error 1690 from the first row; the copy types it as a signed BIGINT and
-// answers -9.
-const vetoWindowNumber = "ROW_NUMBER, RANK, DENSE_RANK or NTILE in arithmetic (a BIGINT UNSIGNED on MySQL, " +
-	"which refuses a negative result with error 1690; a signed BIGINT on the copy)"
+// vetoUnsignedCall keeps on MySQL a statement that does arithmetic on a call
+// MySQL types as an unsigned whole number (#2848): ROW_NUMBER, RANK,
+// DENSE_RANK and NTILE are a BIGINT UNSIGNED, so ROW_NUMBER() OVER (ORDER BY
+// k) - 10 is refused there with error 1690 from the first row, where the
+// copy types it as a signed BIGINT and answers -9. MySQL 8.4 types YEAR as
+// unsigned as well: YEAR(dt) - 3000 is refused there and is -974 on the copy
+// (MySQL 8.0 and MariaDB answer -974). MONTH, DAY, DAYOFMONTH, DAYOFYEAR,
+// QUARTER, HOUR, MINUTE and SECOND are kept with it; EXTRACT was measured
+// signed on both.
+const vetoUnsignedCall = "arithmetic on ROW_NUMBER, RANK, DENSE_RANK, NTILE or a date part such as YEAR " +
+	"(an unsigned whole number on MySQL, which refuses a negative result with error 1690; a signed BIGINT on the copy)"
 
-// windowNumberCall is a call of a window function MySQL types as a BIGINT
-// UNSIGNED, with the white space MySQL takes before the parenthesis.
-var windowNumberCall = regexp.MustCompile(`(?i)\b(?:row_number|rank|dense_rank|ntile)` + callOpen)
+// unsignedCall is a call of a function MySQL types as an unsigned whole
+// number, with the white space MySQL takes before the parenthesis.
+var unsignedCall = regexp.MustCompile(`(?i)\b(?:row_number|rank|dense_rank|ntile|year|month|day|dayofmonth|dayofyear|quarter|hour|minute|second)` + callOpen)
 
 // notUnsignedCalls are the calls whose result is not an unsigned whole number
 // whatever they are given, so arithmetic next to one is not arithmetic on
@@ -143,29 +147,29 @@ func unsignedVetoWork(shape string, unsigned []string, star bool) (why string, s
 	return "", t.steps
 }
 
-// windowNumberVeto is vetoWindowNumber when blanked (the statement as the
-// vetoes read it) does arithmetic on a call of ROW_NUMBER, RANK, DENSE_RANK
-// or NTILE, or "". The rule is UnsignedVeto's with the call for the column:
-// next to the arithmetic, in a group next to it, or anywhere in a statement
-// with a subquery, a derived table or a WITH, or after its first GROUP BY,
-// HAVING or ORDER BY, where an alias can stand for it. A call alone is
-// answered by the copy: the value is the same, typed BIGINT where MySQL types
-// it BIGINT UNSIGNED.
-func windowNumberVeto(blanked string) string {
-	why, _ := windowNumberVetoWork(blanked)
+// unsignedCallVeto is vetoUnsignedCall when blanked (the statement as the
+// vetoes read it) does arithmetic on a call that unsignedCall matches, or "".
+// The rule is UnsignedVeto's with the call for the column: next to the
+// arithmetic, in a group next to it, or anywhere in a statement with a
+// subquery, a derived table or a WITH, or after its first GROUP BY, HAVING
+// or ORDER BY, where an alias can stand for it. A call alone, or compared
+// (YEAR(dt) = 2026), is answered by the copy: the value is the same, typed
+// signed where MySQL types it unsigned (#2856).
+func unsignedCallVeto(blanked string) string {
+	why, _ := unsignedCallVetoWork(blanked)
 	return why
 }
 
-// windowNumberVetoWork is windowNumberVeto with the work it took.
-func windowNumberVetoWork(blanked string) (why string, steps int) {
-	if !windowNumberCall.MatchString(blanked) {
+// unsignedCallVetoWork is unsignedCallVeto with the work it took.
+func unsignedCallVetoWork(blanked string) (why string, steps int) {
+	if !unsignedCall.MatchString(blanked) {
 		return "", len(blanked)
 	}
 	// Every quoted name emptied: what is inside a name is not syntax.
 	t := &shapeText{s: namesKept(blanked, nil)}
 	text := t.all()
 	var shapes []temporal
-	for _, m := range windowNumberCall.FindAllStringIndex(text, -1) {
+	for _, m := range unsignedCall.FindAllStringIndex(text, -1) {
 		shapes = append(shapes, temporal{start: m[0], left: m[0], paren: m[1] - 1, in: -1})
 	}
 	if len(shapes) == 0 {
@@ -174,13 +178,13 @@ func windowNumberVetoWork(blanked string) (why string, steps int) {
 	readGroups(t, shapes)
 	closes := groupCloses(t)
 	if subquery.MatchString(text) && mathFrom(t, closes, 0) {
-		return vetoWindowNumber, t.steps
+		return vetoUnsignedCall, t.steps
 	}
 	if loc := aliasClause.FindStringIndex(text); loc != nil && mathFrom(t, closes, loc[1]) {
-		return vetoWindowNumber, t.steps
+		return vetoUnsignedCall, t.steps
 	}
 	if shapesInMath(t, shapes) {
-		return vetoWindowNumber, t.steps
+		return vetoUnsignedCall, t.steps
 	}
 	return "", t.steps
 }

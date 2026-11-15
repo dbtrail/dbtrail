@@ -1620,7 +1620,10 @@ What this is and is not:
   does not name the column still goes to the copy, and a `DOUBLE` column
   is the same type on both),
   arithmetic on an `UNSIGNED` whole-number column (`TINYINT` to `BIGINT
-  UNSIGNED`) or on `ROW_NUMBER`, `RANK`, `DENSE_RANK` or `NTILE`: one of
+  UNSIGNED`), on `ROW_NUMBER`, `RANK`, `DENSE_RANK` or `NTILE`, or on
+  `YEAR`, `MONTH`, `DAY`, `DAYOFMONTH`, `DAYOFYEAR`, `QUARTER`, `HOUR`,
+  `MINUTE` or `SECOND` (MySQL 8.4 types `YEAR` as unsigned: `YEAR(dt) -
+  3000` is refused there and is `-974` on the copy): one of
   them, or a group or call that holds it, next to `+`, `-`, `*`, `/`, `%`,
   `MOD` or `DIV`, or anywhere in a statement with a subquery or a `WITH`,
   or in its `GROUP BY`, `HAVING` or `ORDER BY`, where an alias can stand

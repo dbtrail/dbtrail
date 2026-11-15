@@ -227,7 +227,7 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT side, d + 1 FROM (SELECT created_on AS d, n, side FROM ev) x ORDER BY n", who: "live", why: "an alias of the date, used outside its subquery"},
 		{stmt: "SELECT MIN(side), AVG(x) FROM (SELECT created_on AS x, side FROM ev) q", who: "live", why: "AVG of an alias of the date, from outside its subquery"},
 		{stmt: "WITH q(i, a, b, c, e, f, side) AS (SELECT*FROM ev) SELECT side, a - 1 FROM q ORDER BY f", who: "live", why: "the date renamed by a column list over a star"},
-		{stmt: "SELECT side, YEAR(created_on) + 1, n - -1 FROM ev WHERE n > -9 ORDER BY n", who: "copy", why: "a number out of the date, and the sign of a number: not arithmetic on a date"},
+		{stmt: "SELECT side, YEAR(created_on) + 1, n - -1 FROM ev WHERE n > -9 ORDER BY n", who: "live", why: "a number out of the date, and the sign of a number: not arithmetic on a date; YEAR is unsigned on MySQL 8.4, so arithmetic on it is MySQL's since #2848"},
 		{stmt: "SELECT side, n FROM ev WHERE tm >= '9:00:00' ORDER BY n", who: "live", why: "a TIME column named"},
 		{stmt: "SELECT side, n FROM ev WHERE yr = 26 ORDER BY n", who: "live", why: "a YEAR column named"},
 		{stmt: "SELECT side, n | 0 FROM ev ORDER BY n", who: "live", why: "a bit operator: kept on the source from the text"},

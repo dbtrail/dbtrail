@@ -121,6 +121,12 @@ func TestWindowNumberVeto_2848(t *testing.T) {
 		{"SELECT rn - 1 FROM (\vSELECT ROW_NUMBER() OVER () AS rn FROM ev) q", true, "a vertical tab before the subquery's SELECT"},
 		{"SELECT ROW_NUMBER() OVER () AS rn FROM ev GROUP\vBY rn - 1", true, "a vertical tab in GROUP BY"},
 
+		{"SELECT YEAR(dt) - 3000 FROM ev", true, "YEAR: unsigned on MySQL 8.4"},
+		{"SELECT 1 + month (dt), hour(dt) * 2 FROM ev", true, "MONTH and HOUR"},
+		{"SELECT DAYOFYEAR(dt) % 7 FROM ev", true, "DAYOFYEAR"},
+		{"SELECT YEAR(dt), MONTH(dt) FROM ev WHERE YEAR(dt) = 2026", false, "date parts selected and compared"},
+		{"SELECT dt + INTERVAL 1 DAY, EXTRACT(YEAR FROM dt) - 1 FROM ev", false, "DAY as a unit, EXTRACT"},
+		{"SELECT year - 1, `day` * 2 FROM ev", false, "columns called year and day"},
 		{"SELECT ROW_NUMBER() OVER (ORDER BY k) FROM ev", false, "alone"},
 		{"SELECT ROW_NUMBER() OVER (PARTITION BY k - 1) FROM ev", false, "arithmetic inside the window, on a signed column"},
 		{"SELECT ROW_NUMBER() OVER (ORDER BY k - 1) FROM ev", true, "the same after ORDER BY, where an alias could stand: costs a statement, never a wrong answer"},
@@ -131,14 +137,14 @@ func TestWindowNumberVeto_2848(t *testing.T) {
 		{"SELECT 'rank() - 1' FROM ev", false, "inside a string"},
 	}
 	for _, c := range cases {
-		got := windowNumberVeto(Shape(c.stmt))
+		got := unsignedCallVeto(Shape(c.stmt))
 		if (got != "") != c.veto {
 			t.Errorf("%q (%s): %q, want veto=%v", c.stmt, c.why, got, c.veto)
 		}
 	}
 	// VetoOpts asks it, last.
-	if got := VetoOpts("SELECT ROW_NUMBER() OVER (ORDER BY k) - 10 FROM ev", CopyOptions{}); got != vetoWindowNumber {
-		t.Errorf("VetoOpts: %q, want %q", got, vetoWindowNumber)
+	if got := VetoOpts("SELECT ROW_NUMBER() OVER (ORDER BY k) - 10 FROM ev", CopyOptions{}); got != vetoUnsignedCall {
+		t.Errorf("VetoOpts: %q, want %q", got, vetoUnsignedCall)
 	}
 	if got := VetoOpts("SELECT ROW_NUMBER() OVER (ORDER BY k) FROM ev", CopyOptions{}); got != "" {
 		t.Errorf("VetoOpts, the call alone: %q, want none", got)
@@ -156,8 +162,8 @@ func TestUnsignedVetoLinear_2848(t *testing.T) {
 	for name, build := range shapes {
 		_, small := unsignedVetoWork(Shape(build(2000)), cols, false)
 		_, large := unsignedVetoWork(Shape(build(8000)), cols, false)
-		_, wsmall := windowNumberVetoWork(Shape(build(2000)))
-		_, wlarge := windowNumberVetoWork(Shape(build(8000)))
+		_, wsmall := unsignedCallVetoWork(Shape(build(2000)))
+		_, wlarge := unsignedCallVetoWork(Shape(build(8000)))
 		for _, w := range [][2]int{{small, large}, {wsmall, wlarge}} {
 			ratio := float64(w[1]) / float64(w[0])
 			t.Logf("%-12s %9d steps at 2,000, %9d at 8,000: x%.2f", name, w[0], w[1], ratio)
