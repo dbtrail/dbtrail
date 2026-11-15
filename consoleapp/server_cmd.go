@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -66,6 +67,12 @@ type addFlags struct {
 	Name          string
 	Schemas       string
 	Flavor        string
+	// Database, Slot and Publication are a PostgreSQL's (#2773): the
+	// database to record, the replication slot DBTrail creates, and the
+	// publication its operator created.
+	Database    string
+	Slot        string
+	Publication string
 	// ForwardUser is the forwarding account (#2686): the user the MySQL port
 	// runs statements as on this database when the copy cannot answer.
 	// NoForward: do not ask for one.
@@ -106,6 +113,15 @@ Enter skips it. Without a terminal, put it in the option file:
 
 --forward-user names it on the command line (its password is then asked
 for, or read from that group); --no-forward does not ask.
+
+A PostgreSQL is named with --flavor postgres, and takes its database (-d)
+and the publication that names its tables, which you create first:
+
+  bintrail-console server add --flavor postgres -h pg1 -u dbtrail -p -d shop --publication bintrail_pub
+
+DBTrail creates the replication slot (--slot, bintrail_<database> unless
+named). There is no forwarding user: the PostgreSQL port answers from the
+copy alone. docs/postgres.md has the setup of the source.
 
 DBTrail's user on your database, if it does not exist yet:
 
@@ -195,14 +211,17 @@ func init() {
 	// what frees it: cobra only adds its own "-h, --help" when none exists.
 	f.Bool("help", false, "Help for add")
 	f.StringVarP(&srvAdd.Host, "host", "h", "", "Host of the database")
-	f.StringVarP(&srvAdd.Port, "port", "P", "", "Port of the database (default 3306)")
+	f.StringVarP(&srvAdd.Port, "port", "P", "", "Port of the database (default 3306; 5432 for a PostgreSQL)")
 	f.StringVarP(&srvAdd.User, "user", "u", "", "User DBTrail logs in as")
 	f.BoolVarP(&srvAdd.AskPassword, "password", "p", false, "Ask for the password (it is never taken on the command line)")
 	f.BoolVar(&srvAdd.PasswordStdin, "password-stdin", false, "Read the password from the first line of stdin (for scripts)")
 	f.StringVar(&srvAdd.DefaultsFile, "defaults-file", "", "Read host, port, user and password from this MySQL option file: [client], then [dbtrail]. - reads it from stdin")
 	f.StringVar(&srvAdd.Name, "name", "", "What to call the server (default: made from its address). It is the user name on DBTrail's MySQL port")
 	f.StringVar(&srvAdd.Schemas, "schemas", "", "Comma-separated schemas to record (default: every user schema)")
-	f.StringVar(&srvAdd.Flavor, "flavor", "", "mysql or mariadb (default: asked of the server)")
+	f.StringVar(&srvAdd.Flavor, "flavor", "", "mysql, mariadb or postgres (default: asked of the server; a PostgreSQL has to be named)")
+	f.StringVarP(&srvAdd.Database, "database", "d", "", "PostgreSQL: the database to record")
+	f.StringVar(&srvAdd.Publication, "publication", "", "PostgreSQL: the publication that names the tables to record. You create it; DBTrail checks it")
+	f.StringVar(&srvAdd.Slot, "slot", "", "PostgreSQL: the replication slot, which DBTrail creates (default: bintrail_<database>)")
 	f.StringVar(&srvAdd.ForwardUser, "forward-user", "", "The user the MySQL port runs statements as on this database when the copy cannot answer (default: asked, or [dbtrail-forward] in --defaults-file)")
 	f.BoolVar(&srvAdd.NoForward, "no-forward", false, "Do not ask for a forwarding user")
 	f.BoolVarP(&srvVerbose, "verbose", "v", false, "Also print how to turn on each optional improvement")
@@ -444,6 +463,8 @@ func newTerminalAsker() asker {
 type addInput struct {
 	Host, Port, User, Password string
 	Name, Schemas, Flavor      string
+	// Database, Slot and Publication: a PostgreSQL's (see addFlags).
+	Database, Slot, Publication string
 	// FwdUser and FwdPassword are the forwarding account, when it is known
 	// before the server is added (a flag, the option file, or both).
 	// FwdAsk: none is known, and there is someone to ask once the server is
@@ -466,8 +487,22 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	}
 	switch in.Flavor {
 	case "", doctor.FlavorMySQL, doctor.FlavorMariaDB:
+	case console.FlavorPostgres, "postgresql":
+		in.Flavor = console.FlavorPostgres
 	default:
-		return addInput{}, fmt.Errorf("--flavor is mysql or mariadb, not %q (a PostgreSQL is added in the web interface)", f.Flavor)
+		return addInput{}, fmt.Errorf("--flavor is mysql, mariadb or postgres, not %q", f.Flavor)
+	}
+	pg := in.Flavor == console.FlavorPostgres
+	in.Database, in.Slot, in.Publication = strings.TrimSpace(f.Database), strings.TrimSpace(f.Slot), strings.TrimSpace(f.Publication)
+	switch {
+	case !pg && (in.Database != "" || in.Slot != "" || in.Publication != ""):
+		return addInput{}, errors.New("--database, --slot and --publication are a PostgreSQL's: add --flavor postgres")
+	case pg && (strings.TrimSpace(f.ForwardUser) != "" || f.NoForward):
+		return addInput{}, errors.New("a PostgreSQL has no forwarding user: its port answers from the copy alone. Leave --forward-user and --no-forward out")
+	}
+	defaultPort := "3306"
+	if pg {
+		defaultPort = "5432"
 	}
 	if f.AskPassword && f.PasswordStdin {
 		return addInput{}, errors.New("-p and --password-stdin both say where the password comes from: use one")
@@ -534,7 +569,7 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 			return addInput{}, errors.New("no host given")
 		}
 		if in.Port == "" {
-			if in.Port, err = ask.Line("Port", "3306"); err != nil {
+			if in.Port, err = ask.Line("Port", defaultPort); err != nil {
 				return addInput{}, err
 			}
 		}
@@ -548,10 +583,15 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 		return addInput{}, fmt.Errorf("%q is not a host name or address. The port goes in -P", in.Host)
 	}
 	if in.Port == "" {
-		in.Port = "3306"
+		in.Port = defaultPort
 	}
 	if n, perr := strconv.Atoi(in.Port); perr != nil || n < 1 || n > 65535 {
 		return addInput{}, fmt.Errorf("the port is a number from 1 to 65535, not %q", in.Port)
+	}
+	// What answers there is asked in MySQL's protocol, which a PostgreSQL
+	// does not speak: said here, before a password is asked for.
+	if in.Flavor == "" && in.Port == "5432" {
+		return addInput{}, errors.New("5432 is PostgreSQL's port. For a PostgreSQL add --flavor postgres, with -d <database> and --publication <name>; for a MySQL that listens there, add --flavor mysql")
 	}
 	if in.User == "" {
 		if !interactive {
@@ -583,10 +623,81 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	if in.Password == "" {
 		return addInput{}, errors.New("the password is empty. DBTrail needs a user with a password")
 	}
+	if pg {
+		if err := resolvePostgres(&in, ask, interactive); err != nil {
+			return addInput{}, err
+		}
+		return in, nil
+	}
 	if err := resolveForward(&in, f, fwdFile, ask, ask.Interactive() && !f.PasswordStdin && !fileOnStdin); err != nil {
 		return addInput{}, err
 	}
 	return in, nil
+}
+
+// pgSlotNameRE is what PostgreSQL takes as a replication slot's name.
+var pgSlotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+// resolvePostgres settles what a PostgreSQL needs beyond its address and
+// login (#2773): the database, the publication its operator created, and the
+// slot DBTrail creates. The database and the publication have no default
+// worth guessing; the slot's is made from the database.
+func resolvePostgres(in *addInput, ask asker, interactive bool) error {
+	var err error
+	if in.Database == "" {
+		if !interactive {
+			return errors.New("which database of that PostgreSQL? Give it with -d")
+		}
+		if in.Database, err = ask.Line("Database", ""); err != nil {
+			return err
+		}
+		if in.Database = strings.TrimSpace(in.Database); in.Database == "" {
+			return errors.New("no database given")
+		}
+	}
+	if in.Publication == "" {
+		if !interactive {
+			return errors.New("which publication names the tables to record? Give it with --publication (you create it: CREATE PUBLICATION bintrail_pub FOR ALL TABLES;)")
+		}
+		if in.Publication, err = ask.Line("Publication (you create it; see docs/postgres.md)", "bintrail_pub"); err != nil {
+			return err
+		}
+		if in.Publication = strings.TrimSpace(in.Publication); in.Publication == "" {
+			return errors.New("no publication given")
+		}
+	}
+	if in.Slot == "" {
+		in.Slot = pgDefaultSlot(in.Database)
+		if interactive {
+			if in.Slot, err = ask.Line("Replication slot (DBTrail creates it)", in.Slot); err != nil {
+				return err
+			}
+			in.Slot = strings.TrimSpace(in.Slot)
+		}
+	}
+	if !pgSlotNameRE.MatchString(in.Slot) {
+		return fmt.Errorf("%q cannot name a replication slot: lowercase letters, digits and _ only, at most 63. Name one with --slot", in.Slot)
+	}
+	return nil
+}
+
+// pgDefaultSlot is the slot's name when none is given: bintrail_ and the
+// database's name, with what a slot's name cannot hold turned into _ and
+// cut to PostgreSQL's 63.
+func pgDefaultSlot(database string) string {
+	var b strings.Builder
+	b.WriteString("bintrail_")
+	for _, c := range strings.ToLower(database) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			b.WriteRune(c)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	if s := b.String(); len(s) > 63 {
+		return s[:63]
+	}
+	return b.String()
 }
 
 // resolveForward settles the forwarding account before anything is checked
@@ -753,8 +864,10 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 	// What answers there, before any login: its flavor, and the one mistake
 	// worth fixing without asking, a 127.0.0.1 typed for a DBTrail that runs
 	// in a container, where that address is the container itself. --flavor
-	// overrides the flavor it finds, not the question.
-	{
+	// overrides the flavor it finds, not the question. Not a PostgreSQL:
+	// the question is asked in MySQL's protocol.
+	pg := in.Flavor == console.FlavorPostgres
+	if !pg {
 		var id doctor.Identification
 		err := c.do(ctx, http.MethodPost, "/api/servers/identify",
 			map[string]string{"source_host": in.Host, "source_port": in.Port}, &id)
@@ -783,7 +896,7 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 
 	fmt.Fprintf(out, "Checking %s as %s ...\n", net.JoinHostPort(in.Host, in.Port), in.User)
 	var res ctlCheckResponse
-	err := c.do(ctx, http.MethodPost, "/api/servers/check", map[string]any{
+	body := map[string]any{
 		"flavor": in.Flavor, "name": in.Name,
 		"source_host": in.Host, "source_port": in.Port,
 		"source_user": in.User, "source_password": in.Password,
@@ -791,7 +904,11 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 		// Not the Connect screen: leave the form someone may be filling in
 		// a browser as it is.
 		"no_draft": true,
-	}, &res)
+	}
+	if pg {
+		body["source_database"], body["source_slot"], body["source_publication"] = in.Database, in.Slot, in.Publication
+	}
+	err := c.do(ctx, http.MethodPost, "/api/servers/check", body, &res)
 	if err != nil {
 		return err
 	}
@@ -802,6 +919,11 @@ func runServerAdd(ctx context.Context, c *ctlClient, in addInput, verbose bool, 
 		// The port's password exists in this answer only: printed before the
 		// forwarding user is asked for or set, so neither a Ctrl-C at the
 		// question nor a refused account loses it.
+		if pg {
+			printNewServerPortPG(out, res.Port, res.Name)
+			fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
+			return nil
+		}
 		printNewServerPort(out, res.Port, res.Name, in.FwdUser == "")
 		if err := addForwardUser(ctx, c, in, res, out); err != nil {
 			fmt.Fprintf(out, "Next, the first copy of its tables:  bintrail-console snapshot run %s\n", res.Name)
@@ -866,6 +988,41 @@ func printNewServerPort(out io.Writer, p *ctlNewServerPort, name string, noForwa
 	// file with no router): said, never left out after "it is on now".
 	if p.Notice != "" && *p.Enabled {
 		fmt.Fprintf(out, "%s\n", p.Notice)
+	}
+	fmt.Fprintln(out)
+}
+
+// printNewServerPortPG is printNewServerPort for a PostgreSQL (#2773). The
+// port for SQL clients is one setting with one password; what a PostgreSQL
+// client connects to is the PostgreSQL router, which listens on 5433 unless
+// its own setting says otherwise, and this command cannot see that setting:
+// the line says so. The database a client names is the server's name. No
+// Engine Routing and no forwarding user: the copy answers alone.
+func printNewServerPortPG(out io.Writer, p *ctlNewServerPort, name string) {
+	if p == nil || p.Enabled == nil {
+		return
+	}
+	host := p.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	line := fmt.Sprintf("  psql \"host=%s port=5433 dbname=%s user=app sslmode=require\"", host, mysqlLineUser(name))
+	const where = "PostgreSQL clients connect to the PostgreSQL port (5433, unless the PostgreSQL router was given another), with the server's name as the database and any user:"
+	switch {
+	case p.TurnedOn:
+		fmt.Fprintf(out, "\nThe port for SQL clients is on now. %s\n\n%s\n\n", where, line)
+		if p.Password != "" {
+			fmt.Fprintf(out, "Password (shown only now, keep it): %s\n", p.Password)
+		} else {
+			fmt.Fprintln(out, "No password came with the answer. Make one:  bintrail-console port new-password")
+		}
+		fmt.Fprintf(out, "Statements for %q are answered once its first copy is ready.\n", name)
+	case *p.Enabled:
+		fmt.Fprintf(out, "\nThe port for SQL clients is on, and takes the password it already has. %s\n\n%s\n", where, line)
+	case p.NotTurnedOn != "":
+		fmt.Fprintf(out, "\nThe port for SQL clients was not turned on: %s.\n", strings.TrimRight(p.NotTurnedOn, "."))
+	default:
+		fmt.Fprintln(out, "\nThe port for SQL clients is off, as it was saved. Turn it on:  bintrail-console port on")
 	}
 	fmt.Fprintln(out)
 }

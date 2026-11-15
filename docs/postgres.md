@@ -71,6 +71,20 @@ setup](#postgresql-side-setup) below first, then:
    `REPLICA IDENTITY FULL`, slot health — and surfaces any failure as a
    remediation card). Capture resumes automatically on restart.
 
+From a terminal, the same thing is one command (the publication is the one
+you created above; the slot is created for you and named `bintrail_<database>`
+unless you give `--slot`):
+
+```bash
+dbtrail server add --flavor postgres -h pg1.example.com -u dbtrail -p -d shop --publication bintrail_pub
+```
+
+It runs the same checks, prints each one that fails with its fix, and saves
+nothing until they all pass. `--flavor postgres` has to be said: the question
+DBTrail asks an address to learn what answers there is in MySQL's protocol.
+What it prints at the end is the `psql` line for the PostgreSQL port, with the
+port's password when this was the first server.
+
 The **index stays MySQL**; only the *source* is PostgreSQL. The source type is
 fixed once saved — to change a server's capture engine, delete and re-create it.
 The form lives in `bintrail-console watch` (the Compose default); the read-only
@@ -305,6 +319,24 @@ interface and the router read it to say how far behind the source an answer
 is. A capture that keeps up records one about every 30 seconds; one that is
 more than a second behind records none, and shows as behind. It is one
 `SELECT` on the health poll's connection.
+
+#### A large transaction arrives whole, after it commits
+
+PostgreSQL sends a transaction to capture only once it has committed (capture
+asks for version 1 of the `pgoutput` protocol, which does not stream a
+transaction that is still open). Nothing is missing from the copy while it is
+open: its changes are not visible on the source either. The cost comes at the
+commit. The whole transaction is then sent in one piece and indexed, and every
+change committed after it waits behind it. A transaction that changed a few
+million rows can leave the copy minutes behind, where the same rows in small
+transactions would have gone through as they were made.
+
+So what sets the delay is how MUCH one transaction changed, not how long it
+stayed open: a transaction open for an hour that changed ten rows costs
+nothing. While the large one goes through, the web interface shows the capture
+as behind and the copy stays where it was; both recover by themselves once it
+is in. If a job on the source changes rows in
+bulk, committing in batches keeps the copy close.
 
 ---
 

@@ -169,16 +169,62 @@ type pgRunEnd struct {
 	until     uint64
 	newestEnd uint64
 	newestAt  time.Time
+	// caughtUpAt is the source's own clock when capture last had everything
+	// the source had (stream_state.pg_caught_up_source_at): on a primary its
+	// time then, on a standby the commit time of the last transaction it had
+	// replayed. A change capture had not received by then committed after
+	// it, on the clock commit times are on. Read BEFORE the newest event: a
+	// change the index did not hold at that read is one capture had not
+	// received at the stamp. Read after, a change delivered between the two
+	// reads would be past the run's end with a commit before the stamp.
+	// Zero: not known.
+	caughtUpAt time.Time
+	// allIn: the run ends at the newest change the index holds, with its
+	// transaction complete, so what it leaves for the next fold is only what
+	// capture had not delivered. False when a change past at was found, or
+	// when the newest one is left whole to the next fold: those are in the
+	// index, and may have committed before the stamp. On an index with no
+	// change at all it also needs no archive to exist (see resolvePGRunEnd).
+	allIn bool
+}
+
+// readPGCaughtUpAt reads stream_state.pg_caught_up_source_at. Zero when
+// there is none, on an index that predates the column, and on a read that
+// failed: the bound is then the one a fold recorded before the stamp existed.
+//
+// Not caught_up_at: that one is this host's clock, and a standby that
+// replays hours late is "caught up" at a moment long after the commit time of
+// changes it has yet to replay.
+func readPGCaughtUpAt(ctx context.Context, db *sql.DB) time.Time {
+	var at sql.NullTime
+	err := db.QueryRowContext(ctx, `SELECT pg_caught_up_source_at FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&at)
+	if err != nil || !at.Valid {
+		return time.Time{}
+	}
+	return at.Time.UTC()
+}
+
+// noArchives reports whether the index records no archived partition. False
+// when that cannot be read.
+func noArchives(ctx context.Context, db *sql.DB) bool {
+	var n int
+	return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM archive_state LIMIT 1) one`).Scan(&n) == nil && n == 0
 }
 
 // resolvePGRunEnd reads a run's pgRunEnd at the point at.
 func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, error) {
-	run := pgRunEnd{at: at}
+	// First: see pgRunEnd.caughtUpAt.
+	run := pgRunEnd{at: at, caughtUpAt: readPGCaughtUpAt(ctx, db)}
 	err := db.QueryRowContext(ctx, `SELECT end_pos, event_timestamp FROM binlog_events
 		WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
 		ORDER BY event_id DESC LIMIT 1`).Scan(&run.newestEnd, &run.newestAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		run.none = true
+		// No change in the live index. A fold of such a run reads nothing
+		// (pgFoldBounds.empty), archives included, so the bound may move
+		// only when there is no archive that could hold a change past the
+		// floor: an index rotated empty with its changes archived keeps the
+		// bound it had, and the next fold that finds a change reads them.
+		run.none, run.allIn = true, noArchives(ctx, db)
 		return run, nil
 	}
 	if err != nil {
@@ -211,7 +257,7 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 	}
 	run.until = run.newestEnd - 1
 	if checkpoint.Valid && uint64(checkpoint.Int64) >= run.newestEnd {
-		run.until = run.newestEnd
+		run.until, run.allIn = run.newestEnd, true
 	}
 	return run, nil
 }
@@ -277,16 +323,37 @@ func (r pgRunEnd) boundsFor(floor uint64, baselineAt, prevSince time.Time) (pgFo
 // next floor and a time before at, and a reader that started at at would
 // drop it.
 //
+// A source with no change gives none of that: the newest change the index
+// holds stays where it was, the bound with it, and the index in time drops
+// the hours the bound points at, after which the next update is refused and
+// the source is read in full. When capture was caught up is what moves it
+// (pgRunEnd.caughtUpAt): with every change the index held folded or below
+// the floor (allIn), a change left for the next fold had not reached the
+// index, so it committed after that moment too. Not when the newest change
+// is left whole to the next fold, or one past at was found: those are in the
+// index, and say nothing about the stamp.
+//
 // Truncated down to the second, as RFC3339 writes it.
 func (r pgRunEnd) foldedDeltaSince(b pgFoldBounds, floor uint64, prevSince time.Time) time.Time {
-	if b.Next == floor {
-		return prevSince.UTC().Truncate(time.Second)
+	var caught time.Time
+	if r.allIn && !r.caughtUpAt.IsZero() {
+		caught = r.caughtUpAt
+		if r.at.Before(caught) {
+			caught = r.at
+		}
 	}
-	since := r.at
-	if r.newestAt.Before(since) {
-		since = r.newestAt
+	since := prevSince
+	if b.Next != floor {
+		since = r.at
+		if r.newestAt.Before(since) {
+			since = r.newestAt
+		}
+		since = since.Add(-PGDeltaMargin)
 	}
-	return since.Add(-PGDeltaMargin).UTC().Truncate(time.Second)
+	if c := caught.Add(-PGDeltaMargin); !caught.IsZero() && c.After(since) {
+		since = c
+	}
+	return since.UTC().Truncate(time.Second)
 }
 
 // foldFrom is the bounds of a fold from floor through until: nothing to fold
