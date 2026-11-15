@@ -153,10 +153,11 @@ type pgRun struct {
 	format    string
 	carry     bool
 	deltas    bool
-	// chainFloor is FullTableConfig.ChainStartFloor.
-	chainFloor time.Time
 	tables    []string
 	allowGaps bool
+
+	// chainFloor is FullTableConfig.ChainStartFloor.
+	chainFloor time.Time
 }
 
 // run folds root's snapshots to r.at into root, and returns the table's
