@@ -28,7 +28,7 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 		// drop is the partition dropped by hand, unrecorded: 1 the first
 		// hour's, 2 the one after it.
 		drop int
-		want     map[string]string
+		want map[string]string
 	}{
 		{name: "capture started before the floor", from: 0x400, snap: -30 * time.Second, at: 10 * time.Minute,
 			want: map[string]string{"1": "after-the-snapshot", "3": "newbie", "5": "keep"}},
