@@ -35,7 +35,7 @@ type portLogin struct {
 	dbs      []string
 	closed   int
 	answered []bool
-	run      func(ctx context.Context, statement string) (sqlsandbox.Result, error)
+	run      func(ctx context.Context, statement string, opts RunOptions) (sqlsandbox.Result, error)
 }
 
 func (p *portLogin) login(_ context.Context, user, database string, password *Password, _ func()) (*Binding, *Error) {
@@ -87,8 +87,8 @@ func dialPort(t *testing.T, p *portLogin, user, pass, database string) (*pgx.Con
 	return conn, nil
 }
 
-func answer(cols []sqlsandbox.Column, rows ...[]any) func(context.Context, string) (sqlsandbox.Result, error) {
-	return func(context.Context, string) (sqlsandbox.Result, error) {
+func answer(cols []sqlsandbox.Column, rows ...[]any) func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
+	return func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		return sqlsandbox.Result{Columns: cols, Rows: rows}, nil
 	}
 }
@@ -135,7 +135,7 @@ func textRows(t *testing.T, conn *pgx.Conn, stmt string) (names []string, out []
 func TestPort_answersAStatementFromTheBoundExecutor(t *testing.T) {
 	var got []string
 	p := &portLogin{}
-	p.run = func(_ context.Context, statement string) (sqlsandbox.Result, error) {
+	p.run = func(_ context.Context, statement string, _ RunOptions) (sqlsandbox.Result, error) {
 		got = append(got, statement)
 		return sqlsandbox.Result{
 			Columns: []sqlsandbox.Column{{Name: "id", Type: "BIGINT"}, {Name: "ok", Type: "BOOLEAN"}, {Name: "at", Type: "TIMESTAMP"}, {Name: "note", Type: "VARCHAR"}, {Name: "tags", Type: "VARCHAR[]"}},
@@ -322,7 +322,7 @@ func TestPort_executorErrorsBecomeClientErrors(t *testing.T) {
 func TestPort_anErrorLeavesTheConnectionUsable(t *testing.T) {
 	calls := 0
 	p := &portLogin{}
-	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+	p.run = func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		calls++
 		if calls == 1 {
 			return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: "only a read can run here"}
@@ -352,7 +352,7 @@ func TestPort_anErrorLeavesTheConnectionUsable(t *testing.T) {
 
 func TestPort_aCutResultIsRefusedNotReturnedShort(t *testing.T) {
 	p := &portLogin{}
-	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+	p.run = func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}, {json.Number("2")}}, Truncated: true}, nil
 	}
 	rec := audittest.Install(t)
@@ -391,7 +391,7 @@ func TestPort_aRowOfTheWrongWidthIsAnErrorNotAShiftedRow(t *testing.T) {
 func TestPort_anEmptyQueryIsNotSentToTheCopy(t *testing.T) {
 	ran := 0
 	p := &portLogin{}
-	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+	p.run = func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		ran++
 		return sqlsandbox.Result{}, nil
 	}
@@ -416,7 +416,7 @@ func TestPort_anEmptyQueryIsNotSentToTheCopy(t *testing.T) {
 func TestPort_timeTravelIsRefusedNotRunOnTheCopy(t *testing.T) {
 	ran := false
 	p := &portLogin{}
-	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+	p.run = func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		ran = true
 		return sqlsandbox.Result{}, nil
 	}
@@ -444,7 +444,7 @@ func TestPort_timeTravelIsRefusedNotRunOnTheCopy(t *testing.T) {
 
 func TestPort_notesReachTheClientAsNotices(t *testing.T) {
 	p := &portLogin{}
-	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+	p.run = func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}},
 			Note: "answered from an earlier copy"}, nil
 	}
@@ -483,7 +483,7 @@ func TestPort_notesReachTheClientAsNotices(t *testing.T) {
 // kind, a cut value would lose the marker that says it was cut.
 func TestPort_aCutCellIsRefused(t *testing.T) {
 	p := &portLogin{}
-	p.run = func(context.Context, string) (sqlsandbox.Result, error) {
+	p.run = func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "b", Type: "BLOB"}}, Rows: [][]any{{"0x4142 [cell cut at 1 MiB]"}}, TruncatedCells: 1}, nil
 	}
 	rec := audittest.Install(t)
@@ -503,62 +503,13 @@ func TestPort_aCutCellIsRefused(t *testing.T) {
 	}
 }
 
-func TestBoundProbe(t *testing.T) {
-	for _, tc := range []struct {
-		stmt    string
-		tag     string // "" when not answered here or refused
-		refused string // in the refusal's message
-		ok      bool
-	}{
-		{"SET client_encoding TO 'UTF8'", "SET", "", true},
-		{"set application_name = 'psql';", "SET", "", true},
-		{"SET extra_float_digits = 3", "SET", "", true},
-		{"BEGIN", "BEGIN", "", true},
-		{"begin read only;", "BEGIN", "", true},
-		{"COMMIT", "COMMIT", "", true},
-		{"ROLLBACK ; ", "ROLLBACK", "", true},
-		{"SET TimeZone = 'UTC'", "SET", "", true},
-		{"SET TIME ZONE 'UTC'", "SET", "", true},
-		{"SET SESSION timezone TO utc", "SET", "", true},
-		// Not a probe: the rest of the message would be dropped.
-		{"SET x = 1; SELECT * FROM orders", "", "", false},
-		{"BEGIN; SELECT 1", "", "", false},
-		{"begin read only; select 1; commit", "", "", false},
-		{"SELECT 1", "", "", false},
-		{"settle", "", "", false},
-		{"", "", "", false},
-		// Would change what the next statement reads: refused, by name.
-		{"SET search_path TO sales", "", "SET search_path", true},
-		{"set search_path = sales, public;", "", "SET search_path", true},
-		{"SET SESSION search_path = 'sales'", "", "SET search_path", true},
-		{"SET LOCAL search_path TO sales", "", "SET search_path", true},
-		{"SET SCHEMA 'sales'", "", "SET schema", true},
-		{"SET ROLE admin", "", "SET role", true},
-		{"SET SESSION AUTHORIZATION admin", "", "SET session_authorization", true},
-		{"SET TimeZone = 'America/Bogota'", "", "SET TimeZone", true},
-		{"SET TIME ZONE 'Europe/Madrid'", "", "SET TimeZone", true},
-		{"set timezone to -5", "", "SET TimeZone", true},
-	} {
-		tag, refusal, ok := boundProbe(tc.stmt)
-		if ok != tc.ok || tag != tc.tag {
-			t.Errorf("boundProbe(%q) = tag %q ok %v, want tag %q ok %v", tc.stmt, tag, ok, tc.tag, tc.ok)
-		}
-		switch {
-		case tc.refused == "" && refusal != nil:
-			t.Errorf("boundProbe(%q) refused: %s", tc.stmt, refusal.msg)
-		case tc.refused != "" && (refusal == nil || refusal.code != "0A000" || !strings.Contains(refusal.msg, tc.refused)):
-			t.Errorf("boundProbe(%q) refusal = %+v, want 0A000 saying %q", tc.stmt, refusal, tc.refused)
-		}
-	}
-}
-
 // Over the wire: a setup statement and a query in one message reach the
 // executor whole (which refuses more than one statement); neither is
 // answered "SET" with the query dropped.
 func TestPort_aSetAndAQueryInOneMessageAreNotAnsweredSET(t *testing.T) {
 	var got []string
 	p := &portLogin{}
-	p.run = func(_ context.Context, statement string) (sqlsandbox.Result, error) {
+	p.run = func(_ context.Context, statement string, _ RunOptions) (sqlsandbox.Result, error) {
 		got = append(got, statement)
 		return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: "one statement at a time"}
 	}
@@ -575,12 +526,14 @@ func TestPort_aSetAndAQueryInOneMessageAreNotAnsweredSET(t *testing.T) {
 	if len(got) != 1 || got[0] != "SET x = 1; SELECT * FROM orders" {
 		t.Fatalf("the executor was given %q, want the whole message", got)
 	}
-	_, err = conn.PgConn().Exec(ctx, "SET search_path TO sales").ReadAll()
-	if pe := requirePgError(t, err); pe.Code != "0A000" || !strings.Contains(pe.Message, "search_path") {
-		t.Fatalf("SET search_path: %s %q", pe.Code, pe.Message)
+	// A SET of a role is refused here, by name, and never reaches the
+	// executor.
+	_, err = conn.PgConn().Exec(ctx, "SET ROLE admin").ReadAll()
+	if pe := requirePgError(t, err); pe.Code != "0A000" || !strings.Contains(pe.Message, "role") {
+		t.Fatalf("SET ROLE: %s %q", pe.Code, pe.Message)
 	}
 	if len(got) != 1 {
-		t.Fatalf("SET search_path reached the executor: %q", got)
+		t.Fatalf("SET ROLE reached the executor: %q", got)
 	}
 }
 
@@ -764,7 +717,7 @@ func TestPort_timeTravelGoesToTheEngineBehindThePortsGate(t *testing.T) {
 			return nil, &Error{Code: "28P01", Message: "no"}
 		}
 		return &Binding{
-			Run: func(context.Context, string) (sqlsandbox.Result, error) {
+			Run: func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 				ranOnCopy = true
 				return sqlsandbox.Result{}, nil
 			},

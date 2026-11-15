@@ -154,11 +154,19 @@ format, nothing that needs DBTrail running to be read.
 Text in the files is UTF-8, whatever the column's character set on the source.
 A `latin1` column is converted as MySQL converts it (MySQL's `latin1` is
 Windows-1252), so `café` reads as `café` in any engine, and a restore with
-`reconstruct --output-format mydumper` writes the `latin1` bytes back. Other
-character sets that are not UTF-8 (`cp1250`, `sjis`, `gbk`, ...) are not
-converted: a table that holds non-ASCII text in such a column cannot be read
-from the copy (DuckDB refuses the file), and with Engine Routing MySQL answers
-its statements.
+`reconstruct --output-format mydumper` writes the `latin1` bytes back.
+mydumper 1.0.3 with its stock `/etc/mydumper.cnf` heads every file with
+`SET NAMES utf8mb4` on MySQL 8 and MariaDB 11 and 12, yet some of its threads
+write a `latin1` table's rows as the stored bytes and others as UTF-8, so each
+dump file is read by its rows, not by its header: a value that is not UTF-8,
+or that holds a character `latin1` does not have, marks the file as stored
+bytes. One case cannot be told from the bytes: a `latin1` column that already
+holds UTF-8 bytes of `latin1` characters (`Ã©` stored as `C3 A9`), in a file
+with no other value that settles it, is read as `é`. Other character sets that are not UTF-8 (`cp1250`, `sjis`,
+`gbk`, ...) are not converted: a table that holds non-ASCII text in such a
+column cannot be read from the copy (DuckDB refuses the file), and with Engine
+Routing MySQL answers its statements. The full read says so when it writes such
+a file, with a warning naming the table and the column.
 
 **Snapshots**, one folder per moment, because a snapshot is read whole:
 

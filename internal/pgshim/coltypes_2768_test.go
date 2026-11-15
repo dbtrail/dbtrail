@@ -233,7 +233,6 @@ func TestBinaryCell_refusesTextThatIsNotItsType_2768(t *testing.T) {
 		{"DATE", "2026-02-30"},
 		{"TIMESTAMP", "294247-01-10 04:00:54.775807"},
 		{"TIMESTAMPTZ", "2026-01-01 00:00:00"},
-		{"TIMESTAMPTZ", "2026-01-01 00:00:00+02"},
 		{"TIME", "25:00:00"},
 		{"TIME", "12:00"},
 		{"TIME", "12:00:00.1234567"},

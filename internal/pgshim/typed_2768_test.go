@@ -34,7 +34,7 @@ func (l *typedLogin) login(_ context.Context, _, _ string, password *Password, _
 	if !password.Matches([]string{portPassword}) {
 		return nil, &Error{Code: "28P01", Message: "no"}
 	}
-	return &Binding{Actor: "server:t", Schema: "public", Run: func(_ context.Context, st string) (sqlsandbox.Result, error) {
+	return &Binding{Actor: "server:t", Schema: "public", Run: func(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
 		l.mu.Lock()
 		l.ran = append(l.ran, st)
 		l.mu.Unlock()

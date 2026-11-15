@@ -229,7 +229,7 @@ func pgxTry(t *testing.T, addr, password, params string) (*tls.ConnectionState, 
 	return nil, nil
 }
 
-func one(context.Context, string) (sqlsandbox.Result, error) {
+func one(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 	return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{int32(1)}}}, nil
 }
 
@@ -520,12 +520,12 @@ func TestTLS_aFullPortRefusesOverTLS(t *testing.T) {
 	_, cfg := testCertConfig(t, testutil.TestCertOptions{})
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
-	p := &portLogin{run: func(ctx context.Context, _ string) (sqlsandbox.Result, error) {
+	p := &portLogin{run: func(ctx context.Context, _ string, _ RunOptions) (sqlsandbox.Result, error) {
 		select {
 		case <-block:
 		case <-ctx.Done():
 		}
-		return one(ctx, "")
+		return one(ctx, "", RunOptions{})
 	}}
 	addr := serveAddrCfg(t, Config{Login: p.login, TLS: cfg, MaxConns: 1})
 	host, port, _ := net.SplitHostPort(addr)
