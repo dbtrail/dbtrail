@@ -290,8 +290,9 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	// The two AVG statements are vetoed from the text since #2806.
-	if reasons["copy_columns_differ"] != 14 || reasons["veto"] != 4 || reasons["expensive_plan"] != 5 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 14, veto 4, expensive_plan 5, copy_refused 0, explain_failed 0", reasons)
+	// The two AVG statements are vetoed from the text since #2806, and
+	// YEAR(created_on) + 1 since #2848.
+	if reasons["copy_columns_differ"] != 14 || reasons["veto"] != 5 || reasons["expensive_plan"] != 4 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 14, veto 5, expensive_plan 4, copy_refused 0, explain_failed 0", reasons)
 	}
 }
