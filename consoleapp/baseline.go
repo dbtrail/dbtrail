@@ -412,8 +412,8 @@ func (s *baselineSupervisor) Trigger(req console.BaselineRequest) error {
 	s.mu.Unlock()
 
 	slog.Info("baseline: starting in-process snapshot", "server", req.ServerName, "id", req.ServerID)
-	// A full read's upload and its sweep read snapshots of this folder (the
-	// PostgreSQL one walks all of them), so the cleanup stands still until
+	// A full read's upload and its sweep read snapshots of this folder, so
+	// the cleanup stands still until
 	// they are done, then applies the count (#2678). Registered here, before
 	// the goroutine exists: a cleanup between the two would not see the job.
 	end := baseline.BeginRead(req.LocalDir, "a full read and its upload")
@@ -452,20 +452,17 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	if job != nil {
 		req.Journal = job
 	}
-	if req.Flavor == console.FlavorPostgres {
-		// The PG producer uploads inside executePG and stamps the snapshot
-		// server-side; it keeps the one-phase shape. No index mark either:
-		// with the snapshot's instant out of this process's sight, no
-		// record could name the snapshot the next update folds from, so
-		// that update goes unmeasured and the one after it is measured
-		// from the memo (#1737).
-		out, uploaded, err := s.executePG(req)
-		s.finishDump(req, started, out, nil, uploaded, 0, err)
-		return
-	}
 	produce := s.produce
 	if produce == nil {
 		produce = s.execute
+		if req.Flavor == console.FlavorPostgres {
+			// The PostgreSQL read only produces its snapshot, like execute;
+			// the index mark, the publish, the upload of that one snapshot
+			// and the record are shared with MySQL (#2761). It used to
+			// upload by itself, handing the uploader the whole folder, and
+			// recorded no index mark.
+			produce = s.executePG
+		}
 	}
 	// Read BEFORE the dump: its anchor is stamped inside produce, and an
 	// event indexed between a later read and that anchor would be applied
@@ -589,6 +586,18 @@ func (s *baselineSupervisor) completeDump(req console.BaselineRequest, started t
 	}
 	if req.S3 == "" {
 		s.finishDump(req, started, out, nil, 0, 0, nil)
+		return
+	}
+	if out.snapDir == "" || out.at.IsZero() {
+		// A read that did not say when its snapshot was taken (only the
+		// PostgreSQL one can; pgbaseline always says it today). The folder
+		// it wrote cannot be named, so nothing is sent: the only other
+		// choice is the whole folder, every snapshot in it again (#2761).
+		// Recorded as a read that did not finish, since no record can name
+		// its snapshot either.
+		s.finishDump(req, started, out, nil, 0, 0, fmt.Errorf(
+			"upload: the read finished without the time of its snapshot, so the folder it wrote under %s cannot be named and nothing was sent to %s",
+			req.LocalDir, req.S3))
 		return
 	}
 	own.st = s.publishDump(req, out)
@@ -911,7 +920,7 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 	// snapshot was written they fit, whatever the upload did afterwards, and
 	// the note says so in place of "this read may fail"; a read that wrote
 	// none keeps the warning as it was given. wroteSnapshot is the condition
-	// above without the timestamp, which a Postgres read does not have here.
+	// above without the timestamp.
 	wroteSnapshot := err == nil || out.snapDir != ""
 	if wroteSnapshot {
 		rec.DiskCheck, rec.DiskNote = dumpDiskOnceItFit(rec.DiskCheck, rec.DiskNote)
@@ -949,8 +958,8 @@ func (s *baselineSupervisor) finishDump(req console.BaselineRequest, started tim
 		st.LastError = err.Error()
 		st.Failure = rec.Failure
 		// A snapshot written to the server's own folder before the failure
-		// exists (a Postgres upload that failed after the snapshot; a MySQL
-		// one was already marked by publishDump).
+		// exists (publishDump already marked it, for MySQL and PostgreSQL
+		// alike; this is the belt).
 		if rec.SnapshotTime != "" {
 			st.Published = true
 		}
@@ -1499,31 +1508,31 @@ var dumpEventMarkFunc = func(req console.BaselineRequest) string {
 // COPY straight to Parquet, anchored at the slot's consistent-point LSN. No
 // mydumper subprocess and no #768 timestamp skew: pgbaseline self-stamps the
 // snapshot time from the database's own now(). Like execute(), it writes into
-// the server's local directory (#2431), then uploads through the same
-// source-agnostic baseline.Upload.
+// the server's local directory (#2431) and uploads nothing: completeDump
+// sends the snapshot it returns, and only that one, as it does for MySQL
+// (#2761).
 // pgBaselineRun is pgbaseline.Run; a test replaces it.
 var pgBaselineRun = pgbaseline.Run
 
-// executePG returns the snapshot it wrote even when the upload after it
-// failed: that snapshot exists in the local directory (out.snapDir set), and
-// finishDump then marks the run published and names its
-// time, so no page calls it unfinished (#1991 review).
-func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome, int, error) {
+// executePG returns the snapshot it wrote (out.snapDir and out.at), which is
+// what completeDump publishes and uploads. Both stay unset when pgbaseline
+// reports no snapshot time, since the folder cannot then be named.
+func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome, error) {
 	outputDir := req.LocalDir
 	if strings.TrimSpace(outputDir) == "" {
-		return dumpOutcome{}, 0, console.NoLocalFolderError()
+		return dumpOutcome{}, console.NoLocalFolderError()
 	}
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
-		return dumpOutcome{}, 0, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
+		return dumpOutcome{}, fmt.Errorf("create the working folder %s: %w", s.stagingDir, err)
 	}
 
 	cfg, err := pgBaselineConfig(req, outputDir)
 	if err != nil {
-		return dumpOutcome{}, 0, err
+		return dumpOutcome{}, err
 	}
 	pgStats, err := pgBaselineRun(s.ctx, cfg)
 	if err != nil {
-		return dumpOutcome{}, 0, fmt.Errorf("pg baseline: %w", err)
+		return dumpOutcome{}, fmt.Errorf("pg baseline: %w", err)
 	}
 	out := dumpOutcome{stats: baseline.Stats{
 		TablesProcessed: pgStats.TablesProcessed,
@@ -1533,15 +1542,7 @@ func (s *baselineSupervisor) executePG(req console.BaselineRequest) (dumpOutcome
 	if !pgStats.SnapshotTime.IsZero() {
 		out.snapDir = filepath.Join(outputDir, reconstruct.SnapshotDirName(pgStats.SnapshotTime))
 	}
-
-	var uploaded int
-	if req.S3 != "" {
-		uploaded, err = uploadSnapshot(s.ctx, outputDir, req.S3, "", false)
-		if err != nil {
-			return out, 0, fmt.Errorf("upload: %w", err)
-		}
-	}
-	return out, uploaded, nil
+	return out, nil
 }
 
 // pgBaselineConfig builds the pgbaseline.Config for a PG source, mirroring
