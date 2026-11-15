@@ -108,7 +108,7 @@ func TestPGDefaultSlot(t *testing.T) {
 		"shop":                  "bintrail_shop",
 		"Shop":                  "bintrail_shop",
 		"my-db.v2":              "bintrail_my_db_v2",
-		"ünï":                   "bintrail____",
+		"ünï":                   "bintrail__n_",
 		strings.Repeat("d", 80): "bintrail_" + strings.Repeat("d", 54),
 		"":                      "bintrail_",
 	} {
