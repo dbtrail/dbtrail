@@ -48,6 +48,10 @@ func TestCheckDeferrableKeys_realServer(t *testing.T) {
 	exec("CREATE TABLE defkey_unique_only (id int PRIMARY KEY, v text, UNIQUE (v) DEFERRABLE)")
 	exec("CREATE TABLE defkey_unpublished (id int, v text, PRIMARY KEY (id) DEFERRABLE)")
 	for _, tb := range tables {
+		// A deferrable key cannot be a table's replica identity, so without
+		// this a published table with one refuses every UPDATE for that
+		// reason; whole rows are what capture asks for anyway.
+		exec("ALTER TABLE " + tb + " REPLICA IDENTITY FULL")
 		exec("INSERT INTO " + tb + " VALUES (1, 'a'), (2, 'b'), (3, 'c')")
 	}
 	exec("CREATE PUBLICATION " + pub + " FOR TABLE defkey_plain, defkey_immediate, defkey_deferred, defkey_unique_only")
@@ -77,8 +81,8 @@ func TestCheckDeferrableKeys_realServer(t *testing.T) {
 			got[k.Table] = k.Constraint
 		}
 		for _, tb := range tables[:4] {
-			if (got[tb] != "") != shifts(tb) {
-				t.Errorf("%s: %s: the check names it: %v, the server lets rows share a key: %v", when, tb, got[tb] != "", !(got[tb] != ""))
+			if named, shares := got[tb] != "", shifts(tb); named != shares {
+				t.Errorf("%s: %s: the check names it: %v, the server lets rows share a key: %v", when, tb, named, shares)
 			}
 		}
 		if len(got) != len(want) {
