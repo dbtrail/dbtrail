@@ -1,0 +1,493 @@
+package pgshim
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+)
+
+// The extended query protocol (#2767): Parse, Bind, Describe, Execute, Close,
+// Sync and Flush, which JDBC, pgx in its default mode, psycopg 3 and
+// node-postgres with parameters speak. Every statement still runs the way a
+// simple query does (session.run, the same refusals with the same codes):
+// what this adds is statements and portals with names, arguments written into
+// the statement (params.go), a statement's columns said before it runs, an
+// Execute that hands its rows over a few at a time, and PostgreSQL's error
+// rule: after an error everything up to the next Sync is discarded, and Sync
+// says the transaction status.
+
+// Caps on what one connection keeps open. PostgreSQL has none, but there each
+// is a plan; here an open portal holds its whole answer in memory.
+const (
+	maxStatements = 1000
+	maxPortals    = 64
+)
+
+// preparedStatement is a statement Parse made.
+type preparedStatement struct {
+	name  string
+	query string
+	tmpl  template
+	// paramOIDs is one type per parameter: the one the client declared, or
+	// 0 when it declared none.
+	paramOIDs []uint32
+	// rd is who reads the statement once its arguments are written in.
+	rd reader
+	// described is the column count a Describe of the statement told the
+	// client (-1 for none, and for no rows: noRows), which every portal
+	// bound from it must keep: the client decodes the rows by that answer.
+	described int
+}
+
+// portal is a statement with its arguments, ready to run.
+type portal struct {
+	name          string
+	stmt          *preparedStatement
+	text          string
+	resultFormats []int16
+	// ran is set once the statement ran; what it answered is below.
+	ran   bool
+	empty bool
+	cols  []string // nil: the statement returns no rows
+	rows  [][][]byte
+	tag   string
+	// sent is how many of rows earlier Executes handed over.
+	sent int
+}
+
+// extState is the extended protocol's state on one connection.
+type extState struct {
+	stmts   map[string]*preparedStatement
+	portals map[string]*portal
+	// skip is set by an error: messages are discarded up to the next Sync.
+	skip bool
+}
+
+// noRows is preparedStatement.described for a statement said to return no
+// rows (NoData).
+const noRows = -2
+
+func (e *extState) dropUnnamed() {
+	delete(e.stmts, "")
+	delete(e.portals, "")
+}
+
+// dropPortals ends every portal: the end of a transaction, explicit or the
+// implicit one a Sync closes.
+func (e *extState) dropPortals() {
+	clear(e.portals)
+}
+
+// extFail sends an extended-protocol error and discards the rest of the
+// client's messages up to its Sync.
+func (s *session) extFail(perr *pgErr) {
+	s.fail(perr)
+	s.ext.skip = true
+}
+
+// handleParse answers Parse.
+func (s *session) handleParse(m *pgproto3.Parse) {
+	if perr := s.abortedRefusal(m.Query); perr != nil {
+		s.extFail(perr)
+		return
+	}
+	if m.Name != "" {
+		if _, ok := s.ext.stmts[m.Name]; ok {
+			s.extFail(&pgErr{"42P05", fmt.Sprintf("prepared statement %q already exists", m.Name)})
+			return
+		}
+		if len(s.ext.stmts) >= maxStatements {
+			s.extFail(&pgErr{"54000", fmt.Sprintf("this connection already has %d prepared statements, the most it keeps; close some", maxStatements)})
+			return
+		}
+	}
+	tmpl, perr := splitParams(m.Query)
+	if perr != nil {
+		s.extFail(perr)
+		return
+	}
+	n := max(tmpl.highest, len(m.ParameterOIDs))
+	if n > maxParams {
+		s.extFail(&pgErr{"54000", fmt.Sprintf("a statement takes at most %d parameters", maxParams)})
+		return
+	}
+	oids := make([]uint32, n)
+	copy(oids, m.ParameterOIDs)
+	st := &preparedStatement{name: m.Name, query: m.Query, tmpl: tmpl, paramOIDs: oids, described: -1}
+	// Which parser reads the statement decides how an argument is written
+	// into it, and the arguments do not exist yet: ask with a stand-in.
+	if s.classify(st.probeText()).timeTravel {
+		st.rd = readTimeTravel
+	}
+	if s.ext.stmts == nil {
+		s.ext.stmts = map[string]*preparedStatement{}
+	}
+	s.ext.stmts[m.Name] = st
+	s.be.Send(&pgproto3.ParseComplete{})
+}
+
+// probeArgument stands in for every placeholder when Parse asks which parser
+// reads a statement: a quoted string the time-travel parser takes both as a
+// key and as the moment of an AS OF.
+const probeArgument = "'1 second ago'"
+
+func (st *preparedStatement) probeText() string {
+	var b strings.Builder
+	for i, part := range st.tmpl.parts {
+		b.WriteString(part)
+		if i < len(st.tmpl.refs) {
+			b.WriteString(" " + probeArgument + " ")
+		}
+	}
+	return b.String()
+}
+
+// handleBind answers Bind.
+func (s *session) handleBind(m *pgproto3.Bind) {
+	st, ok := s.ext.stmts[m.PreparedStatement]
+	if !ok {
+		s.extFail(&pgErr{"26000", fmt.Sprintf("prepared statement %q does not exist", m.PreparedStatement)})
+		return
+	}
+	if perr := s.abortedRefusal(st.query); perr != nil {
+		s.extFail(perr)
+		return
+	}
+	if len(m.Parameters) != len(st.paramOIDs) {
+		s.extFail(&pgErr{"08P01", fmt.Sprintf("bind message supplies %d parameters, but prepared statement %q requires %d",
+			len(m.Parameters), st.name, len(st.paramOIDs))})
+		return
+	}
+	nf := len(m.ParameterFormatCodes)
+	if nf != 0 && nf != 1 && nf != len(m.Parameters) {
+		s.extFail(&pgErr{"08P01", fmt.Sprintf("bind message has %d parameter formats but %d parameters", nf, len(m.Parameters))})
+		return
+	}
+	for _, f := range m.ResultFormatCodes {
+		if f != 0 && f != 1 {
+			s.extFail(&pgErr{"22023", fmt.Sprintf("unsupported format code: %d", f)})
+			return
+		}
+	}
+	if m.DestinationPortal != "" {
+		if _, ok := s.ext.portals[m.DestinationPortal]; ok {
+			s.extFail(&pgErr{"42P03", fmt.Sprintf("portal %q already exists", m.DestinationPortal)})
+			return
+		}
+		if len(s.ext.portals) >= maxPortals {
+			s.extFail(&pgErr{"54000", fmt.Sprintf("this connection already has %d open portals, the most it keeps; close some", maxPortals)})
+			return
+		}
+	}
+	args := make([]arg, len(m.Parameters))
+	for i, raw := range m.Parameters {
+		var format int16
+		switch nf {
+		case 1:
+			format = m.ParameterFormatCodes[0]
+		case len(m.Parameters):
+			format = m.ParameterFormatCodes[i]
+		}
+		a, perr := decodeArg(i, st.paramOIDs[i], format, raw)
+		if perr != nil {
+			s.extFail(perr)
+			return
+		}
+		args[i] = a
+	}
+	text, perr := st.tmpl.fill(args, st.rd)
+	if perr != nil {
+		s.extFail(perr)
+		return
+	}
+	if s.classify(text).timeTravel != (st.rd == readTimeTravel) {
+		// The arguments were written for one parser and the finished text
+		// would be read by the other. Never run text under the parser it
+		// was not written for.
+		s.extFail(&pgErr{"22023", "an argument changes how this prepared statement is read; write the value in the statement's text"})
+		return
+	}
+	if s.ext.portals == nil {
+		s.ext.portals = map[string]*portal{}
+	}
+	s.ext.portals[m.DestinationPortal] = &portal{
+		name: m.DestinationPortal, stmt: st, text: text,
+		// The message's buffer is reused for the next one.
+		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
+	}
+	s.be.Send(&pgproto3.BindComplete{})
+}
+
+// handleDescribe answers Describe of a statement ('S') or a portal ('P').
+func (s *session) handleDescribe(m *pgproto3.Describe) {
+	switch m.ObjectType {
+	case 'S':
+		st, ok := s.ext.stmts[m.Name]
+		if !ok {
+			s.extFail(&pgErr{"26000", fmt.Sprintf("prepared statement %q does not exist", m.Name)})
+			return
+		}
+		cols, perr := s.describeStatement(st)
+		if perr != nil {
+			// What fails here PostgreSQL reports at Parse, where the
+			// statement then never exists. It goes, so that a client that
+			// prepares it again under the same name (pgx's statement cache
+			// does, after an error) is not told it already exists.
+			s.closeStatement(m.Name)
+			s.extFail(perr)
+			return
+		}
+		s.be.Send(&pgproto3.ParameterDescription{ParameterOIDs: st.paramOIDs})
+		if cols == nil {
+			st.described = noRows
+			s.be.Send(&pgproto3.NoData{})
+			return
+		}
+		st.described = len(cols)
+		s.rowDescription(cols, nil)
+	case 'P':
+		p, ok := s.ext.portals[m.Name]
+		if !ok {
+			s.extFail(&pgErr{"34000", fmt.Sprintf("portal %q does not exist", m.Name)})
+			return
+		}
+		if !p.ran {
+			// A statement that returns no rows says so without running: a
+			// BEGIN described must not open its block before it executes.
+			if c := s.classify(p.text); isEmptyQuery(p.text) || c.kind == kindProbe {
+				s.be.Send(&pgproto3.NoData{})
+				return
+			}
+		}
+		if perr := s.runPortal(p); perr != nil {
+			s.extFail(perr)
+			return
+		}
+		if p.cols == nil {
+			s.be.Send(&pgproto3.NoData{})
+			return
+		}
+		if perr := checkResultFormats(p); perr != nil {
+			s.extFail(perr)
+			return
+		}
+		s.rowDescription(p.cols, p.resultFormats)
+	default:
+		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid DESCRIBE message subtype %d", m.ObjectType)})
+	}
+}
+
+// describeStatement says, before any argument exists, what a statement
+// returns: its columns, or nil for none. It runs nothing a client would be
+// answered from, and it meets every gate the statement would.
+func (s *session) describeStatement(st *preparedStatement) ([]string, *pgErr) {
+	if perr := s.abortedRefusal(st.query); perr != nil {
+		return nil, perr
+	}
+	if isEmptyQuery(st.query) {
+		return nil, nil
+	}
+	c := s.classify(st.probeText())
+	switch c.kind {
+	case kindRefused:
+		return nil, c.perr
+	case kindProbe:
+		// A session statement returns no rows; one that is refused is
+		// refused when it executes, with its own arguments.
+		return nil, nil
+	case kindTimeTravel:
+		// The gates first: the table's columns are something said about it.
+		if perr := s.timeTravelGates(c.q); perr != nil {
+			return nil, perr
+		}
+		cols := s.h.ColumnsFor(nil, c.q)
+		if cols == nil {
+			// Rows of no known column: still rows, not NoData.
+			cols = []string{}
+		}
+		return cols, nil
+	}
+	return s.describeFree(st)
+}
+
+// describeFree finds the columns of a statement for the copy with NULL for
+// every argument, through the executor the connection is bound to, so the
+// copy's own rules (its views, what a server hides) hold for it as they do
+// for the statement. First as a subquery that returns no row, which costs
+// the copy nothing; a statement that cannot stand in a subquery (SHOW,
+// DESCRIBE) runs as it is, its rows dropped. Neither run is answered to the
+// client or recorded as one: the statement's own Execute is.
+func (s *session) describeFree(st *preparedStatement) ([]string, *pgErr) {
+	nulls := make([]arg, len(st.paramOIDs))
+	for i, oid := range st.paramOIDs {
+		nulls[i] = arg{null: true, cast: typedCast[oid]}
+	}
+	text, perr := st.tmpl.fill(nulls, readCopy)
+	if perr != nil {
+		return nil, perr
+	}
+	body := strings.TrimRight(text, " \t\r\n;")
+	// On lines of their own: a statement that ends in a -- comment must not
+	// comment out the closing parenthesis.
+	wrapped := "SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0"
+	if cols, err := s.columnsOf(wrapped); err == nil {
+		return cols, nil
+	}
+	cols, err := s.columnsOf(text)
+	if err != nil {
+		return nil, freeError(err, s.logger)
+	}
+	return cols, nil
+}
+
+// columnsOf runs text on the copy and returns its column names.
+func (s *session) columnsOf(text string) ([]string, error) {
+	res, err := s.bound.Run(s.ctx, text)
+	if res.Spool != nil {
+		_ = res.Spool.Close()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return columnNames(res.Columns), nil
+}
+
+func columnNames(cols []sqlsandbox.Column) []string {
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.Name
+	}
+	return names
+}
+
+// runPortal runs a portal's statement once, the way a simple query runs it,
+// and keeps its answer for the Executes that hand it over.
+func (s *session) runPortal(p *portal) *pgErr {
+	if p.ran {
+		return nil
+	}
+	p.ran = true
+	if isEmptyQuery(p.text) {
+		p.empty = true
+		return nil
+	}
+	cols, rows, tag, perr := s.run(p.text)
+	if perr != nil {
+		return perr
+	}
+	if d := p.stmt.described; cols != nil && d != -1 {
+		if d == noRows || len(cols) != d {
+			// The client decodes the rows by what Describe told it; rows of
+			// another shape would be read into the wrong columns. The words
+			// are PostgreSQL's, which drivers recognize and prepare again on.
+			return &pgErr{"0A000", "cached plan must not change result type"}
+		}
+	}
+	p.cols, p.rows, p.tag = cols, rows, tag
+	return nil
+}
+
+// checkResultFormats refuses a Bind whose result formats cannot apply to the
+// statement's columns: none, one for all, or one per column.
+func checkResultFormats(p *portal) *pgErr {
+	if n := len(p.resultFormats); n > 1 && n != len(p.cols) {
+		return &pgErr{"08P01", fmt.Sprintf("bind message has %d result formats but query has %d columns", n, len(p.cols))}
+	}
+	return nil
+}
+
+// handleExecute answers Execute: the portal's rows, at most maxRows of them
+// when maxRows is not 0, then PortalSuspended if some are left, or the
+// CommandComplete that ends it.
+func (s *session) handleExecute(m *pgproto3.Execute) {
+	p, ok := s.ext.portals[m.Portal]
+	if !ok {
+		s.extFail(&pgErr{"34000", fmt.Sprintf("portal %q does not exist", m.Portal)})
+		return
+	}
+	// Asked here too, not only when the statement runs: a portal that ran
+	// before its block failed hands over nothing more.
+	if perr := s.abortedRefusal(p.stmt.query); perr != nil {
+		s.extFail(perr)
+		return
+	}
+	if perr := s.runPortal(p); perr != nil {
+		s.extFail(perr)
+		return
+	}
+	switch {
+	case p.empty:
+		s.be.Send(&pgproto3.EmptyQueryResponse{})
+		return
+	case p.cols == nil:
+		s.commandComplete(p.tag)
+		return
+	}
+	if perr := checkResultFormats(p); perr != nil {
+		s.extFail(perr)
+		return
+	}
+	// Every column is sent as text (OID 25), whose binary form is the same
+	// bytes, so a cell goes out as it is whichever format was asked for.
+	left := len(p.rows) - p.sent
+	n := left
+	if m.MaxRows > 0 && uint64(m.MaxRows) < uint64(left) {
+		n = int(m.MaxRows)
+	}
+	for _, r := range p.rows[p.sent : p.sent+n] {
+		s.dataRow(r)
+	}
+	p.sent += n
+	if n < left {
+		s.be.Send(&pgproto3.PortalSuspended{})
+		return
+	}
+	// The count is this Execute's rows, as PostgreSQL counts them.
+	word, _, _ := strings.Cut(p.tag, " ")
+	s.commandComplete(word + " " + strconv.Itoa(n))
+}
+
+// handleClose answers Close of a statement ('S') or a portal ('P'). Closing
+// one that does not exist is not an error. Closing a statement closes the
+// portals made from it.
+func (s *session) handleClose(m *pgproto3.Close) {
+	switch m.ObjectType {
+	case 'S':
+		s.closeStatement(m.Name)
+	case 'P':
+		delete(s.ext.portals, m.Name)
+	default:
+		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid CLOSE message subtype %d", m.ObjectType)})
+		return
+	}
+	s.be.Send(&pgproto3.CloseComplete{})
+}
+
+// closeStatement ends a statement and the portals made from it.
+func (s *session) closeStatement(name string) {
+	st, ok := s.ext.stmts[name]
+	if !ok {
+		return
+	}
+	delete(s.ext.stmts, name)
+	for pname, p := range s.ext.portals {
+		if p.stmt == st {
+			delete(s.ext.portals, pname)
+		}
+	}
+}
+
+// handleSync answers Sync: the end of the client's batch. Outside a
+// transaction block it ends the implicit transaction, and with it every
+// portal; then ReadyForQuery says the status.
+func (s *session) handleSync() error {
+	s.ext.skip = false
+	if s.txStatus() == 'I' {
+		s.ext.dropPortals()
+	}
+	return s.readyFlush()
+}

@@ -256,13 +256,12 @@ func TestPGWire_AuthFailureIsRejected(t *testing.T) {
 	}
 }
 
-// TestPGWire_ExtendedProtocolDeclinedThenResyncs pins the documented invariant
-// on the DEFAULT pgx client path (pgshim.go: "a default-mode client is not left
-// hanging"): a first cut speaks only the simple query protocol, so an
-// extended-protocol query is declined with 0A000 — NOT a hang — and the
-// connection resyncs on the client's trailing Sync so a following simple-protocol
-// query on the SAME connection succeeds.
-func TestPGWire_ExtendedProtocolDeclinedThenResyncs(t *testing.T) {
+// TestPGWire_ExtendedProtocolRefusesWhatSimpleRefusesThenResyncs: on the
+// DEFAULT pgx client path (the extended protocol, #2767) a statement this
+// time-travel-only endpoint does not serve is refused with the code the simple
+// protocol gives it (0A000), and the connection resyncs on the client's
+// trailing Sync so a following query on the SAME connection succeeds.
+func TestPGWire_ExtendedProtocolRefusesWhatSimpleRefusesThenResyncs(t *testing.T) {
 	addr := serveAddr(t, testAuth(t))
 	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://%s:%s@%s/public", testUser, testPass, addr))
 	if err != nil {
@@ -284,17 +283,18 @@ func TestPGWire_ExtendedProtocolDeclinedThenResyncs(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// Prepare unambiguously sends a Parse (a zero-arg Exec would be optimised to
-	// the simple protocol by pgx). The Parse is declined (not hung).
+	// Prepare unambiguously sends a Parse and a Describe (a zero-arg Exec would
+	// be optimised to the simple protocol by pgx). Not a time-travel statement:
+	// refused, not hung.
 	_, err = conn.Prepare(ctx, "probe_stmt", "SELECT 1")
 	pgErr := requirePgError(t, err)
 	if pgErr.Code != "0A000" {
-		t.Fatalf("extended-protocol decline: code = %s, want 0A000; msg=%s", pgErr.Code, pgErr.Message)
+		t.Fatalf("extended-protocol refusal: code = %s, want 0A000; msg=%s", pgErr.Code, pgErr.Message)
 	}
 	// The connection resynced (ReadyForQuery on the trailing Sync): a
 	// simple-protocol query on the SAME conn works.
 	if _, err := conn.Exec(ctx, "SET x=1", pgx.QueryExecModeSimpleProtocol); err != nil {
-		t.Fatalf("connection did not resync after the extended-protocol decline: %v", err)
+		t.Fatalf("connection did not resync after the extended-protocol refusal: %v", err)
 	}
 }
 
