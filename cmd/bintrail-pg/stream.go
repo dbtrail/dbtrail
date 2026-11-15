@@ -74,6 +74,7 @@ var (
 	pgBatchSize   int
 	pgCheckpoint  int
 	pgPartitions  int
+	pgMetricsAddr string
 
 	pgRotateRetain    string
 	pgRotateInterval  string
@@ -94,6 +95,9 @@ func init() {
 	streamCmd.Flags().DurationVar(&indexer.WriteTimeout, "write-timeout", indexer.DefaultWriteTimeout, "Deadline for each index write (batch INSERT, checkpoint, schema snapshot). A mid-statement network stall surfaces as an error within this window instead of freezing the stream on kernel TCP retransmission (~13-16 min). Raise for very large batches over a slow link")
 	streamCmd.Flags().IntVar(&pgCheckpoint, "checkpoint", 5, "Checkpoint interval in seconds")
 	streamCmd.Flags().IntVar(&pgPartitions, "partitions", 48, "binlog_events partitions for the one-time index bootstrap")
+	// In cli.EnvBindings, so BINTRAIL_METRICS_ADDR sets it too: the same flag
+	// and variable as the MySQL stream's.
+	streamCmd.Flags().StringVar(&pgMetricsAddr, "metrics-addr", "", "Address to expose Prometheus metrics (e.g. :9090); empty = disabled")
 	// Built-in index rotation (mirrors the core `up`/`watch` daemons). Because
 	// bintrail-pg has no `up` command, `stream` is a PostgreSQL install's only
 	// long-running daemon and must keep the index bounded itself (#951). Names,
@@ -173,6 +177,7 @@ func pgStreamConfigFromFlags() (pgstreamrun.Config, error) {
 		BatchSize:   pgBatchSize,
 		Partitions:  pgPartitions,
 		Checkpoint:  time.Duration(pgCheckpoint) * time.Second,
+		MetricsAddr: pgMetricsAddr,
 	}, nil
 }
 

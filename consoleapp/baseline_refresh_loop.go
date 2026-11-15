@@ -103,6 +103,9 @@ type refreshRequest struct {
 	SourceSSL      config.SSL // the entry's SourceSSL, as the full read uses (#1996)
 	Schemas        []string
 	SourcePostgres bool
+	// SourcePublication is a PostgreSQL server's publication, whose tables
+	// are what its source "has" for that check (#2759).
+	SourcePublication string
 	// laneWait, when set, adds up the time the fold waited for the snapshot
 	// lane (#2385). runRefresh takes it off the run's measured time: a wait
 	// behind another server is not what an update costs, and UpdateSeconds
