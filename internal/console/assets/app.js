@@ -16690,20 +16690,27 @@ function routerSecs(sec) {
 // when capture was caught up and the query read every change DBTrail had.
 // One number and nothing under it. Null when the router does not say (an
 // older router, or the copy answered nothing for this server yet).
+// yourSource names the database the installation reads, as the user calls
+// it (#2855): an installation holds one family (#2815), so the sentences
+// about "your MySQL" that a PostgreSQL server can show say PostgreSQL there.
+function yourSource() {
+  return installFamily.family === "postgres" ? "your PostgreSQL" : "your MySQL";
+}
+
 function behindSourceLine(t) {
   if (!t) return null;
   const sec = Number(t.behind_source_seconds);
   if (t.behind_source_seconds != null && isFinite(sec) && sec >= 0) {
     const ran = t.behind_source_ran ? new Date(t.behind_source_ran) : null;
     return { state: "known", seconds: sec, words: routerBehindWords(sec),
-      text: "The last query read data " + routerBehindWords(sec) + " behind your MySQL.",
+      text: "The last query read data " + routerBehindWords(sec) + " behind " + yourSource() + ".",
       ran: ran && !isNaN(ran) ? ran : null };
   }
   if (t.behind_source_pending === true) {
-    return { state: "pending", text: "How far behind your MySQL the last query read is being worked out. Refresh in a few seconds." };
+    return { state: "pending", text: "How far behind " + yourSource() + " the last query read is being worked out. Refresh in a few seconds." };
   }
   if (t.behind_source_unknown_reason) {
-    return { state: "unknown", text: "How far behind your MySQL the last query read cannot be told: " + t.behind_source_unknown_reason + "." };
+    return { state: "unknown", text: "How far behind " + yourSource() + " the last query read cannot be told: " + t.behind_source_unknown_reason + "." };
   }
   return null;
 }
@@ -17057,7 +17064,7 @@ function routerSides(m) {
       const b = m.behind;
       const word = b.state === "known" ? b.words : b.state === "pending" ? "being worked out" : "unknown";
       facts.append(el("span", { class: "rs-fact", title: b.text + (b.ran ? " That query ran " + b.ran.toLocaleString() + "." : "") },
-        "Behind your MySQL: ", el("b", { text: word }), " (last query)"));
+        "Behind " + yourSource() + ": ", el("b", { text: word }), " (last query)"));
     } else if (s.key === "copy" && m.data) {
       const d = m.data;
       if (d.state === "known") facts.append(el("span", { class: "rs-fact", title: "Its data reached " + d.at.toLocaleString() }, "Lag: ", el("b", { text: d.age }), " (last answer)"));
