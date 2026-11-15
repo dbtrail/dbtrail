@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -125,9 +126,13 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		return nil, err
 	}
 
+	// The destructive-DDL and capture-gap checks above, and the bound the
+	// footer records, keep since; only the fetch's coverage check starts
+	// later.
+	fetchSince := pgFetchSince(ctx, db, p.dbName, since, floor)
 	fetchOpts := query.Options{
 		Schema: schema, Table: table,
-		Since: &since, SincePos: from,
+		Since: &fetchSince, SincePos: from,
 		Until: &cfg.At, UntilPos: b.Until,
 	}.SinceProven()
 	fetcher := cfg.ArchiveFetcher
@@ -218,4 +223,40 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		"deletes_skipped", rep.DeletesSkipped,
 		"duration_ms", rep.Duration.Milliseconds())
 	return rep, nil
+}
+
+// pgFetchSince is the time a PostgreSQL fold's fetch starts its coverage
+// check from: since, or the hour the index was created in when since is
+// before it and the index's capture started at or before the snapshot's
+// floor.
+//
+// The planner calls an hour a gap when no partition is named after it and no
+// archive covers it. An index's first partition is its creation hour, so a
+// snapshot whose window starts in the hour before (taken before the index's
+// tables were created, or in the first PGDeltaMargin of that hour) was
+// refused as "rotated and not archived" for an hour that never had a
+// partition to rotate, and the refusal ended in a full read of the source.
+// That partition has no lower bound and holds every older event, and the
+// fetch reads it: its time bound is query.CoarseSinceFloor, an hour below
+// the hour of the start given here, and the floor does the exact cut.
+//
+// The capture's recorded start is what says those events are in this index:
+// one created after the snapshot with a capture that started later (emptied
+// and created again) does not hold them, and keeps since. So does an index
+// with no history (an older build's, a restored one) and one whose history
+// cannot be read. An hour from the creation hour on is judged as before.
+func pgFetchSince(ctx context.Context, db *sql.DB, dbName string, since time.Time, floor uint64) time.Time {
+	hist, err := indexer.ReadPartitionHistory(ctx, db, dbName)
+	if err != nil || !hist.Known || hist.CreatedAt.IsZero() {
+		return since
+	}
+	first := hist.CreatedAt.UTC().Truncate(time.Hour)
+	if !since.Before(first) {
+		return since
+	}
+	start, ok := query.CoverageStart(db, "postgres")
+	if !ok || start.StartPos == 0 || start.StartPos > floor {
+		return since
+	}
+	return first
 }
