@@ -195,7 +195,7 @@ func binaryCell(t colType, text []byte) ([]byte, error) {
 // A date or timestamp is read with a four-digit year: the copy refuses one
 // before the common era (views.pgParts), and a year past 9999 does not parse,
 // so it is an error here rather than a count PostgreSQL would read as another
-// day.
+// day. infinity and -infinity are the ends of the count, as on PostgreSQL.
 
 func binaryScalar(oid uint32, s string) ([]byte, error) {
 	switch oid {
@@ -238,7 +238,16 @@ func binaryScalar(oid uint32, s string) ([]byte, error) {
 		return binary.BigEndian.AppendUint64(nil, math.Float64bits(f)), nil
 	case oidNumeric:
 		return binaryNumeric(s)
+	case oidName:
+		return []byte(s), nil
 	case oidDate:
+		// PostgreSQL's infinite dates are the ends of the day count (#2769).
+		switch s {
+		case "infinity":
+			return binary.BigEndian.AppendUint32(nil, math.MaxInt32), nil
+		case "-infinity":
+			return binary.BigEndian.AppendUint32(nil, 0x80000000), nil
+		}
 		d, err := time.Parse("2006-01-02", s)
 		if err != nil {
 			break
@@ -264,22 +273,37 @@ func binaryScalar(oid uint32, s string) ([]byte, error) {
 		// PostgreSQL keeps the zone as seconds WEST of UTC: +02 is -7200.
 		return binary.BigEndian.AppendUint32(b, uint32(int32(-off))), nil
 	case oidTimestamp, oidTimestamptz:
-		text := s
+		// PostgreSQL's infinite timestamps are the ends of the microsecond
+		// count (#2769).
+		switch s {
+		case "infinity":
+			return binary.BigEndian.AppendUint64(nil, math.MaxInt64), nil
+		case "-infinity":
+			return binary.BigEndian.AppendUint64(nil, 1<<63), nil
+		}
+		text, offset := s, 0
 		if oid == oidTimestamptz {
-			var found bool
-			// This port answers in UTC (startupParameters), and pgtext.Cell
-			// writes every instant there.
-			if text, found = strings.CutSuffix(s, "+00"); !found {
+			// The offset of the session's time zone at that instant
+			// (pgtext.CellIn): +00, -05, +05:30, +00:19:32. It starts after
+			// the date, whose dashes are not one.
+			i := strings.LastIndexAny(s, "+-")
+			if i <= len("2006-01-02") {
 				break
 			}
+			off, ok := parseOffset(s[i:])
+			if !ok {
+				break
+			}
+			text, offset = s[:i], off
 		}
 		at, err := time.Parse("2006-01-02 15:04:05.999999", text)
 		if err != nil {
 			break
 		}
 		// Counted from Unix seconds, not as a time.Duration, which holds
-		// only some 292 years.
-		us := (at.Unix()-pgEpoch.Unix())*1e6 + int64(at.Nanosecond()/1000)
+		// only some 292 years. The wall clock is the instant plus its
+		// offset, so the offset comes off.
+		us := (at.Unix()-int64(offset)-pgEpoch.Unix())*1e6 + int64(at.Nanosecond()/1000)
 		return binary.BigEndian.AppendUint64(nil, uint64(us)), nil
 	case oidUUID:
 		h := strings.ReplaceAll(s, "-", "")
@@ -324,6 +348,8 @@ func typeName(oid uint32) string {
 		return "uuid"
 	case oidText:
 		return "text"
+	case oidName:
+		return "name"
 	}
 	return fmt.Sprintf("type %d", oid)
 }

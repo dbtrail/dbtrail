@@ -359,9 +359,8 @@ func TestIntegrationPGRouterExtended(t *testing.T) {
 		same("empty", &pgproto3.Parse{Query: ""}, &pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
 		same("bad integer", &pgproto3.Parse{Query: "SELECT id FROM " + tbl + " WHERE id = $1", ParameterOIDs: []uint32{23}},
 			&pgproto3.Bind{Parameters: [][]byte{[]byte("4x")}}, &pgproto3.Execute{}, &pgproto3.Sync{})
-		// (A SET of a setting PostgreSQL reports, application_name, is followed
-		// there by its ParameterStatus, which this port does not send.)
-		same("set", &pgproto3.Parse{Query: "SET work_mem = '4MB'"}, &pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
+		// (A SET's ParameterStatus is compared in the #2769 test.)
+		same("set", &pgproto3.Parse{Query: "SET application_name = 'x'"}, &pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
 		// A transaction block: a portal outlives Sync and hands its rows
 		// over a few at a time; an error fails the block until ROLLBACK.
 		same("begin", &pgproto3.Query{String: "BEGIN"})
