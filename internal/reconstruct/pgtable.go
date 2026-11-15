@@ -126,13 +126,9 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		return nil, err
 	}
 
-	// The destructive-DDL and capture-gap checks above, and the bound the
-	// footer records, keep since; only the fetch's coverage check starts
-	// later.
-	fetchSince := pgFetchSince(ctx, db, p.dbName, since, floor)
 	fetchOpts := query.Options{
 		Schema: schema, Table: table,
-		Since: &fetchSince, SincePos: from,
+		Since: &since, SincePos: from,
 		Until: &cfg.At, UntilPos: b.Until,
 	}.SinceProven()
 	fetcher := cfg.ArchiveFetcher
@@ -145,6 +141,7 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		Opts: fetchOpts, AllowGaps: cfg.AllowGaps, ArchiveFetcher: fetcher,
 		SpillOverBudget: true,
 		PG:              true,
+		NeverPartitionedBefore: pgNeverPartitionedBefore(ctx, db, p.dbName, schema, table, floor),
 	})
 	fold := &foldResult{Changes: map[string]*query.ResultRow{}}
 	if b.empty(floor) {
@@ -225,42 +222,39 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 	return rep, nil
 }
 
-// pgFetchSince is the time a PostgreSQL fold's fetch starts its coverage
-// check from: since, or the hour the index was created in when since is
-// before it and the index's capture started at or before the snapshot's
-// floor.
+// pgNeverPartitionedBefore is the index's first hour when a PostgreSQL fold
+// may read through the hours before it, and the zero time when it may not
+// (query.FetchMergedOptions.NeverPartitionedBefore).
 //
 // The planner calls an hour a gap when no partition is named after it and no
 // archive covers it. An index's first partition is its creation hour, so a
-// snapshot whose window starts in the hour before (taken before the index's
-// tables were created, or in the first PGDeltaMargin of that hour) was
-// refused as "rotated and not archived" for an hour that never had a
+// snapshot whose window starts in an hour before it (taken before the
+// index's tables were created, or in the first PGDeltaMargin of that hour)
+// was refused as "rotated and not archived" for an hour that never had a
 // partition to rotate, and the refusal ended in a full read of the source.
-// That partition has no lower bound and holds every older event, and the
-// fetch reads it: its time bound is query.CoarseSinceFloor, an hour below
-// the hour of the start given here, and the floor does the exact cut.
+// The first partition has no lower bound and holds every older event; the
+// fetch's start and its time bound stay where they were, so it reads them.
 //
-// The capture's recorded start is what says those events are in this index:
-// one created after the snapshot with a capture that started later (emptied
-// and created again) does not hold them, and keeps since. So does an index
-// with no history (an older build's, a restored one) and one whose history
-// cannot be read, and a window that starts more than an hour before the
-// creation hour. An hour from the creation hour on is judged as before.
-func pgFetchSince(ctx context.Context, db *sql.DB, dbName string, since time.Time, floor uint64) time.Time {
+// Two records say the events are there. Nothing was ever dropped, so the
+// first partition is still the one that holds them (the fetch checks that it
+// is live). And the capture's recorded start is at or before the snapshot's
+// floor: an index created after the snapshot whose capture started later
+// (emptied and created again) does not hold the changes between. An index
+// with no history (an older build's, a restored one), or one whose history
+// cannot be read, is judged as before.
+func pgNeverPartitionedBefore(ctx context.Context, db *sql.DB, dbName, schema, table string, floor uint64) time.Time {
 	hist, err := indexer.ReadPartitionHistory(ctx, db, dbName)
-	if err != nil || !hist.Known || hist.CreatedAt.IsZero() {
-		return since
+	if err != nil {
+		slog.Warn("the index's partition history could not be read; an hour before its first partition is judged as one that was rotated out",
+			"schema", schema, "table", table, "error", err)
+		return time.Time{}
 	}
-	first := hist.CreatedAt.UTC().Truncate(time.Hour)
-	// Only the hour right before the first: the fetch's time bound goes one
-	// hour below the start given here and no further, so a window that
-	// starts earlier keeps its own start, and its refusal.
-	if !since.Before(first) || since.Before(query.CoarseSinceFloor(first)) {
-		return since
+	if !hist.Known || !hist.DroppedBelow.IsZero() {
+		return time.Time{}
 	}
 	start, ok := query.CoverageStart(db, "postgres")
 	if !ok || start.StartPos == 0 || start.StartPos > floor {
-		return since
+		return time.Time{}
 	}
-	return first
+	return hist.CreatedAt.UTC().Truncate(time.Hour)
 }
