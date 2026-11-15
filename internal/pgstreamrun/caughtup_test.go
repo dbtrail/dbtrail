@@ -60,10 +60,18 @@ func TestCaughtUpProof(t *testing.T) {
 			var p caughtUpProof
 			for i, st := range tc.steps {
 				if st.ask {
-					p.asked(st.lsn, at(st.askAt))
+					// The source's clock, seven hours off this host's: it
+					// travels with the reading it was read with.
+					p.asked(st.lsn, at(st.askAt), at(st.askAt).Add(-7*time.Hour))
 					continue
 				}
-				moment, ok := p.received(st.sent, at(st.now))
+				moment, sourceAt, ok := p.received(st.sent, at(st.now))
+				if ok && !sourceAt.Equal(at(st.want).Add(-7*time.Hour)) {
+					t.Fatalf("step %d: the source's clock for the reading = %v, want the one read with it", i, sourceAt)
+				}
+				if !ok && !sourceAt.IsZero() {
+					t.Fatalf("step %d: a reading not reached answered a source clock %v", i, sourceAt)
+				}
 				if ok == st.wantNot || (ok && !moment.Equal(at(st.want))) {
 					t.Fatalf("step %d: received(%d at %s) = %v, %v; want %s, none: %v", i, st.sent, st.now, moment.Sub(t0), ok, st.want, st.wantNot)
 				}

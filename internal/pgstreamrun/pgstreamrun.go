@@ -136,6 +136,10 @@ type pgStreamState struct {
 	// there is none. The next successful checkpoint stamps it into
 	// caught_up_at and clears it.
 	caughtUpAt time.Time
+	// caughtUpSourceAt is the source's own clock for caughtUpAt's moment
+	// (pgcapture.QueryFlushed), stamped with it into
+	// pg_caught_up_source_at; zero when the source gave none.
+	caughtUpSourceAt time.Time
 	// metrics is where the loop publishes its Prometheus metrics (#2762);
 	// nil publishes none (metrics.go).
 	metrics *pgMetrics
@@ -318,7 +322,8 @@ func persistSlotLostPG(db *sql.DB, serverID uint32, detail string, logger *slog.
 			gap_lost_at     = UTC_TIMESTAMP(),
 			gap_lost_detail = VALUES(gap_lost_detail),
 			gap_acked_at    = NULL,
-			caught_up_at    = NULL`,
+			caught_up_at    = NULL,
+			pg_caught_up_source_at = NULL`,
 		pgFlavor, serverID, detail)
 	if err != nil {
 		logger.Error("pgstreamrun: could not persist lost-slot record; `status` will not show the permanent-loss banner",
@@ -470,7 +475,7 @@ func streamLoopPG(
 	// last one reached in time was taken, which the next checkpoint hands to
 	// state.caughtUpAt (caughtup.go).
 	var proof caughtUpProof
-	var caughtUpMoment time.Time
+	var caughtUpMoment, caughtUpSourceAt time.Time
 	flushedUnread := false
 	pollHealth := func() {
 		pctx, cancel := context.WithTimeout(ctx, healthPollTimeout)
@@ -498,11 +503,11 @@ func streamLoopPG(
 			return
 		}
 		state.metrics.slotRead(snap, time.Now())
-		proof.asked(snap.FlushedLSN, asked)
+		proof.asked(snap.FlushedLSN, asked, snap.FlushedSourceAt)
 		// A quiet source: the position received before the asking is
 		// already the one it answered.
-		if at, ok := proof.received(pendingSent, time.Now()); ok {
-			caughtUpMoment = at
+		if at, sourceAt, ok := proof.received(pendingSent, time.Now()); ok {
+			caughtUpMoment, caughtUpSourceAt = at, sourceAt
 		}
 		// Said when it starts failing and when it stops, not every 30 seconds:
 		// without this reading no caught-up stamp is written, and the web
@@ -590,7 +595,8 @@ func streamLoopPG(
 		// And so is everything the source had at the last moment it was
 		// reached in time (caughtup.go).
 		if !caughtUpMoment.IsZero() {
-			state.caughtUpAt, caughtUpMoment = caughtUpMoment, time.Time{}
+			state.caughtUpAt, state.caughtUpSourceAt = caughtUpMoment, caughtUpSourceAt
+			caughtUpMoment, caughtUpSourceAt = time.Time{}, time.Time{}
 		}
 		if lastCommitLSN == 0 {
 			return nil // nothing committed yet — nothing durable to checkpoint
@@ -740,8 +746,8 @@ func streamLoopPG(
 				if ev.EndPos > pendingSent {
 					pendingSent = ev.EndPos
 				}
-				if at, ok := proof.received(pendingSent, time.Now()); ok {
-					caughtUpMoment = at
+				if at, sourceAt, ok := proof.received(pendingSent, time.Now()); ok {
+					caughtUpMoment, caughtUpSourceAt = at, sourceAt
 				}
 			case event.EventGTID:
 				// PostgreSQL does not emit a leading GTID marker; ignore defensively.
@@ -825,6 +831,14 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	if state.captureFrom != 0 {
 		captureFrom = state.captureFrom
 	}
+	// pg_caught_up_source_at: the source's own clock for the moment
+	// caught_up_at stamps, written with it and kept the same way. A stamp
+	// the source gave no clock for (a standby that has replayed no
+	// transaction) keeps the one there is, which stays true of its moment.
+	var caughtUpSourceAt any
+	if !state.caughtUpAt.IsZero() && !state.caughtUpSourceAt.IsZero() {
+		caughtUpSourceAt = state.caughtUpSourceAt.UTC().Format("2006-01-02 15:04:05.000000")
+	}
 	// pg_sent_through_at gets the same UTC_TIMESTAMP() as last_checkpoint
 	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
 	// the two are equal, so a save by any writer that does not set it (an
@@ -833,9 +847,10 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 		INSERT INTO stream_state
 			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
 			 events_indexed, last_event_time, last_checkpoint, server_id,
-			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn)
+			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn,
+			 pg_caught_up_source_at)
 		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
-			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?)
+			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			binlog_file     = VALUES(binlog_file),
 			binlog_position = VALUES(binlog_position),
@@ -848,13 +863,14 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			pg_sent_through_lsn = VALUES(pg_sent_through_lsn),
 			pg_sent_through_at = UTC_TIMESTAMP(),
 			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at),
+			pg_caught_up_source_at = COALESCE(VALUES(pg_caught_up_source_at), pg_caught_up_source_at),
 			pg_capture_from_lsn = IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn))`,
 		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo, captureFrom, state.resumed)
+		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, state.resumed)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}
-	state.caughtUpAt = time.Time{}
+	state.caughtUpAt, state.caughtUpSourceAt = time.Time{}, time.Time{}
 	return nil
 }
 
