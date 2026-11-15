@@ -169,16 +169,43 @@ type pgRunEnd struct {
 	until     uint64
 	newestEnd uint64
 	newestAt  time.Time
+	// caughtUpAt is when capture last had everything its source had
+	// (stream_state.caught_up_at, #2845), read BEFORE the newest event: a
+	// change the index did not hold at that read was not flushed on the
+	// source at caughtUpAt, so it committed after it. Read after, a change
+	// delivered between the two reads would be past the run's end with a
+	// commit before the stamp. Zero: not known.
+	caughtUpAt time.Time
+	// allIn: every change the index held when it was read is at or below
+	// until, so what this run leaves for the next is only what had not
+	// reached the index. False when a change past at was found, or when the
+	// newest one is left whole to the next fold.
+	allIn bool
+}
+
+// readPGCaughtUpAt reads stream_state.caught_up_at as a moment on this
+// host's clock: now, less how long ago the index says it was. Zero when
+// there is none, on an index that predates the column, and on a read that
+// failed: the bound is then the one a fold recorded before the stamp existed.
+func readPGCaughtUpAt(ctx context.Context, db *sql.DB) time.Time {
+	var ago sql.NullInt64
+	err := db.QueryRowContext(ctx, `SELECT TIMESTAMPDIFF(MICROSECOND, caught_up_at, UTC_TIMESTAMP(6))
+		FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&ago)
+	if err != nil || !ago.Valid {
+		return time.Time{}
+	}
+	return time.Now().UTC().Add(-time.Duration(ago.Int64) * time.Microsecond)
 }
 
 // resolvePGRunEnd reads a run's pgRunEnd at the point at.
 func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, error) {
-	run := pgRunEnd{at: at}
+	// First: see pgRunEnd.caughtUpAt.
+	run := pgRunEnd{at: at, caughtUpAt: readPGCaughtUpAt(ctx, db)}
 	err := db.QueryRowContext(ctx, `SELECT end_pos, event_timestamp FROM binlog_events
 		WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
 		ORDER BY event_id DESC LIMIT 1`).Scan(&run.newestEnd, &run.newestAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		run.none = true
+		run.none, run.allIn = true, true
 		return run, nil
 	}
 	if err != nil {
@@ -211,7 +238,7 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 	}
 	run.until = run.newestEnd - 1
 	if checkpoint.Valid && uint64(checkpoint.Int64) >= run.newestEnd {
-		run.until = run.newestEnd
+		run.until, run.allIn = run.newestEnd, true
 	}
 	return run, nil
 }
@@ -277,16 +304,37 @@ func (r pgRunEnd) boundsFor(floor uint64, baselineAt, prevSince time.Time) (pgFo
 // next floor and a time before at, and a reader that started at at would
 // drop it.
 //
+// A source with no change gives none of that: the newest change the index
+// holds stays where it was, the bound with it, and the index in time drops
+// the hours the bound points at, after which the next update is refused and
+// the source is read in full. When capture was caught up is what moves it
+// (pgRunEnd.caughtUpAt): with every change the index held folded or below
+// the floor (allIn), a change left for the next fold had not reached the
+// index, so it committed after that moment too. Not when the newest change
+// is left whole to the next fold, or one past at was found: those are in the
+// index, and say nothing about the stamp.
+//
 // Truncated down to the second, as RFC3339 writes it.
 func (r pgRunEnd) foldedDeltaSince(b pgFoldBounds, floor uint64, prevSince time.Time) time.Time {
-	if b.Next == floor {
-		return prevSince.UTC().Truncate(time.Second)
+	var caught time.Time
+	if r.allIn && !r.caughtUpAt.IsZero() {
+		caught = r.caughtUpAt
+		if r.at.Before(caught) {
+			caught = r.at
+		}
 	}
-	since := r.at
-	if r.newestAt.Before(since) {
-		since = r.newestAt
+	since := prevSince
+	if b.Next != floor {
+		since = r.at
+		if r.newestAt.Before(since) {
+			since = r.newestAt
+		}
+		since = since.Add(-PGDeltaMargin)
 	}
-	return since.Add(-PGDeltaMargin).UTC().Truncate(time.Second)
+	if c := caught.Add(-PGDeltaMargin); !caught.IsZero() && c.After(since) {
+		since = c
+	}
+	return since.UTC().Truncate(time.Second)
 }
 
 // foldFrom is the bounds of a fold from floor through until: nothing to fold
