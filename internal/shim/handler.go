@@ -983,13 +983,14 @@ func (h *Handler) runPointInTime(q TimeTravelQuery) (*mysql.Result, error) {
 	// at AsOf (never created, or a DELETE tail); a fetch/coverage failure is a
 	// *ResolveError; an ApplyAt data-fault is raw. mysqlRenderErr maps both to
 	// the same wire codes the pre-#1008 inline path produced.
-	image, notes, err := h.resolveFlashbackRow(ctx, q)
+	image, notes, err := h.resolveFlashbackRow(ctx, q, true)
 	if err != nil {
 		return nil, mysqlRenderErr(err)
 	}
 	if image == nil {
 		return h.finishWithNotes(q, notes, emptyResult(), nil)
 	}
+	notes = h.printTimeTravelFloats(q, notes, image)
 	// When q.Columns is set (#313 user-supplied projection), bypass
 	// imageToResult's orderColumns step — orderColumns is designed for
 	// SELECT * and DROPS missing-from-image columns + APPENDS image
@@ -1233,11 +1234,14 @@ func (h *Handler) runFullTable(q TimeTravelQuery) (*mysql.Result, error) {
 	// ENUM/SET ordinals → labels per event's snapshot epoch (#472/#475),
 	// before the images are extracted.
 	h.mapEventImages(q.Schema, q.Table, rows)
+	h.typeEventFloats(q.Schema, q.Table, rows)
 	notes, err := h.checkChangesNarrowing(ctx, q, rows)
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.fullTableResult(q, extractFullTableImages(rows))
+	images := extractFullTableImages(rows)
+	notes = h.printTimeTravelFloats(q, notes, images...)
+	res, err := h.fullTableResult(q, images)
 	return h.finishWithNotes(q, append(nonEmptyNotes(order.ReadNote()), notes...), res, err)
 }
 
@@ -2136,11 +2140,11 @@ func marshalImageOrdered(image map[string]any, ddlOrder []string) string {
 //     Returning int64 for an integral DOUBLE and float64 for a fractional one in
 //     the same column would crash the whole _flashback full-table query. A
 //     uniform []byte makes every such column VAR_STRING.
-//   - In the full-table _snapshot merge, baseline-origin INT/DOUBLE cells
+//   - In the full-table _snapshot merge, baseline-origin INT cells
 //     (DuckDB-native, rendered via FormatTextValue) and event-origin cells emit
-//     identical bytes because both route through FormatTextValue (a raw
-//     json.Number literal would diverge, e.g. "1e+21" vs "1000…0"). FLOAT(32-bit)
-//     is the known exception — see runSnapshotFullTable.
+//     identical bytes because both route through FormatTextValue. FLOAT and
+//     DOUBLE cells of a column the snapshot describes never get here: they are
+//     printed as MySQL prints them first (timeTravelFloats, #2851).
 //
 // The exact numeric type is recovered first so a BIGINT UNSIGNED > 2^63 stays
 // exact (int64 → uint64 → float64), falling back to the literal text.

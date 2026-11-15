@@ -39,7 +39,7 @@ const caughtUpWindow = 2 * captureHeartbeatPeriod
 // captureSample is what the router last read of one server's capture state,
 // all of it in one read so a newer part never meets an older one:
 //   - caughtUp: when capture was last caught up, on the ROUTER's clock (zero
-//     when never: no stamp, an older capture build, a PostgreSQL source);
+//     when never: no stamp, an older capture build);
 //   - maxID: the id of the newest event in the index (0 when none, or when
 //     ids are not the index's order: an index `bintrail index` also wrote);
 //   - newest: the source event time of the newest indexed event (the latest
