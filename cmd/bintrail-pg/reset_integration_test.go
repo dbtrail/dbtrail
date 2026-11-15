@@ -32,15 +32,22 @@ func TestClearCheckpoint_Integration(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO stream_state
 			(id, mode, flavor, binlog_file, binlog_position, gtid_set,
-			 events_indexed, server_id, last_checkpoint, gap_lost_at, gap_lost_detail, gap_acked_at)
+			 events_indexed, server_id, last_checkpoint, gap_lost_at, gap_lost_detail, gap_acked_at, caught_up_at, pg_capture_from_lsn)
 		VALUES (1, 'gtid', 'postgres', '0/1A2B3C4', 27440068, '0/1A2B3C4',
-			 42, 9, UTC_TIMESTAMP(), UTC_TIMESTAMP(), 'prior slot loss', UTC_TIMESTAMP())`); err != nil {
+			 42, 9, UTC_TIMESTAMP(), UTC_TIMESTAMP(), 'prior slot loss', UTC_TIMESTAMP(), UTC_TIMESTAMP(6), 4096)`); err != nil {
 		t.Fatalf("seed checkpoint: %v", err)
 	}
 
 	res, err := clearCheckpoint(ctx, db)
 	if err != nil || res.tableMissing || res.rows != 1 {
 		t.Fatalf("clear real checkpoint = (%+v, %v), want rows=1", res, err)
+	}
+	// The stamp of when capture was last caught up was about the slot the
+	// reset drops (#2845).
+	var caughtUp sql.NullTime
+	var captureFrom sql.NullInt64
+	if err := db.QueryRowContext(ctx, "SELECT caught_up_at, pg_capture_from_lsn FROM stream_state WHERE id = 1").Scan(&caughtUp, &captureFrom); err != nil || caughtUp.Valid || captureFrom.Valid {
+		t.Fatalf("after a reset: caught_up_at %v, pg_capture_from_lsn %v (err %v), want neither", caughtUp, captureFrom, err)
 	}
 	if !strings.Contains(res.lossDetail, "0/1A2B3C4") {
 		t.Errorf("loss detail should name the discarded LSN, got %q", res.lossDetail)

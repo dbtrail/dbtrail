@@ -49,6 +49,10 @@ type Refs struct {
 	// Text is how the statement uses the values it compares (collectTextUse,
 	// #2533).
 	Text TextUse `json:"text"`
+	// Selected is the statement's select list read item by item, for the
+	// fractional seconds MySQL declares a date and time result with
+	// (collectSelected, #2849); nil when it is not read that way.
+	Selected []SelectedItem `json:"selected,omitempty"`
 }
 
 // collectRefs walks a json_serialize_sql statement tree. A shape this walk
@@ -75,6 +79,7 @@ func collectRefs(stmt any) Refs {
 	walkRefs(stmt, nil, &r)
 	collectNames(stmt, &r)
 	collectTextUse(stmt, &r)
+	r.Selected = collectSelected(stmt)
 	return r
 }
 

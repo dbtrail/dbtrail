@@ -254,6 +254,17 @@ dropped out from under a running capture, `bintrail status` shows a loud
 case the index up to the gap is still fully usable for recovery — recovery never
 needs the slot; only *resuming capture* requires a re-baseline.
 
+#### When capture was last caught up
+
+With each of those health polls the capture also asks the source how far its
+WAL is flushed. If the capture has received the source's changes up to that
+point within a second of asking, it held everything the source had at that
+moment, and it records the moment in the index at its next checkpoint. The web
+interface and the router read it to say how far behind the source an answer
+is. A capture that keeps up records one about every 30 seconds; one that is
+more than a second behind records none, and shows as behind. It is one
+`SELECT` on the health poll's connection.
+
 ---
 
 ## Running it

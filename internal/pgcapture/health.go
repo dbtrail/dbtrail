@@ -151,6 +151,13 @@ func QuerySlotHealth(ctx context.Context, conn *pgx.Conn, slotName string) (Slot
 type HealthSnapshot struct {
 	Slot                   SlotHealth
 	ReplicaIdentityNotFull []string
+	// FlushedLSN is how far the source's WAL was flushed when the probe ran
+	// (QueryFlushedLSN): where a capture has to have read to for it to hold
+	// everything the source had at that moment (#2845). 0 when it could not
+	// be read, with FlushedLSNErr saying why; that read failing does not fail
+	// the probe, since the health panel does not use it.
+	FlushedLSN    uint64
+	FlushedLSNErr error
 }
 
 // ProbeHealth opens a short-lived plain connection to queryDSN and reads current source
@@ -173,7 +180,9 @@ func ProbeHealth(ctx context.Context, queryDSN, slotName, publication string) (H
 	if err != nil {
 		return HealthSnapshot{}, err
 	}
-	return HealthSnapshot{Slot: slot, ReplicaIdentityNotFull: notFull}, nil
+	snap := HealthSnapshot{Slot: slot, ReplicaIdentityNotFull: notFull}
+	snap.FlushedLSN, snap.FlushedLSNErr = QueryFlushedLSN(ctx, conn)
+	return snap, nil
 }
 
 // DropSlot idempotently drops the replication slot on a plain query connection, for

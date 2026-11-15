@@ -18,7 +18,7 @@ func TestTemporalColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []TemporalColumn{{"created_on", "date"}, {"dt", "datetime"}, {"ts", "timestamp"}, {"tm", "time"}, {"yr", "year"}, {"odd", ""}}
+	want := []TemporalColumn{{"created_on", "date", 0}, {"dt", "datetime", 6}, {"ts", "timestamp", 0}, {"tm", "time", 0}, {"yr", "year", 0}, {"odd", "", -1}}
 	if got := TemporalColumns(cols); !reflect.DeepEqual(got, want) {
 		t.Errorf("TemporalColumns = %v, want %v", got, want)
 	}
@@ -44,7 +44,7 @@ func TestReadTableFooters_temporal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := footers[path].Temporal, []TemporalColumn{{"created_on", "date"}, {"tm", "time"}}; !reflect.DeepEqual(got, want) {
+	if got, want := footers[path].Temporal, []TemporalColumn{{"created_on", "date", 0}, {"tm", "time", 0}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Temporal = %v, want %v", got, want)
 	}
 }

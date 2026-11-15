@@ -77,7 +77,21 @@ type Capturer struct {
 	// standby status update reports it and never anything ahead, so PostgreSQL can
 	// never release WAL for rows the index has not durably recorded.
 	lastAcked atomic.Uint64
+	// startedFrom is the slot position this run started reading from; 0
+	// until replication has started, and when it could not be read.
+	startedFrom atomic.Uint64
 }
+
+// StartedFrom is where this run started reading the source from: the
+// consistent point of the slot it created, or, for a slot that was already
+// there, the slot's own position (SlotFloorLSN) read before replication
+// started. Every transaction that commits at or after it is delivered. 0
+// before replication starts, and when that position could not be read: no
+// position, never a guess.
+//
+// It is what a first run records as the start of the capture (#2843). On a
+// resume it is the saved checkpoint, which is not a start.
+func (c *Capturer) StartedFrom() uint64 { return c.startedFrom.Load() }
 
 // New constructs a Capturer. It does not open connections (Run does), mirroring
 // NewStreamParser's no-I/O constructor. logger may be nil (slog.Default()).
@@ -162,6 +176,23 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 		return err
 	}
 
+	// Where the slot stands is where replication starts, whatever LSN is
+	// asked for: PostgreSQL moves a lower one forward to it and never
+	// rewinds a slot. So it is read from the slot itself, for the slot this
+	// run just created (its consistent point) and for one that was already
+	// there (a snapshot taken before the first capture creates it, or a slot
+	// an earlier capture left further on), before replication starts, while
+	// it is still where the slot was left. The later of that and the LSN
+	// asked for is where this run reads from. A failed read is no position:
+	// the LSN asked for alone could be before the slot.
+	var from pglogrepl.LSN
+	if floor, fErr := SlotFloorLSN(startupCtx, queryConn, c.cfg.SlotName); fErr == nil {
+		from = max(floor, startLSN)
+	} else if !c.cfg.ExpectExistingSlot {
+		// A first run records this, once; a resume does not use it.
+		c.logger.Warn("pgcapture: the slot's position at start could not be read, so where this capture started is not recorded; snapshot updates will warn of a possible gap they cannot rule out", "slot", c.cfg.SlotName, "error", fErr)
+	}
+
 	if err := pglogrepl.StartReplication(ctx, replConn, c.cfg.SlotName, startLSN, pglogrepl.StartReplicationOptions{
 		Mode:       pglogrepl.LogicalReplication,
 		PluginArgs: []string{"proto_version '1'", fmt.Sprintf("publication_names '%s'", c.cfg.Publication)},
@@ -171,6 +202,7 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	// Seed the durable cursor to the resume point: everything up to startLSN is
 	// already durably indexed (first run = ConsistentPoint, nothing precedes it).
 	c.lastAcked.Store(uint64(startLSN))
+	c.startedFrom.Store(uint64(from))
 	c.logger.Info("pgcapture: started", "slot", c.cfg.SlotName, "publication", c.cfg.Publication, "start_lsn", startLSN)
 	if c.cfg.OnStarted != nil {
 		c.cfg.OnStarted()

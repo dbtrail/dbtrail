@@ -168,10 +168,9 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 
 	// who "?" is measured and logged, not asserted; "" asserts the answer
 	// and not who gave it. textOnly compares the rows and not the column
-	// types: the copy declares every DATETIME with six fraction digits
-	// (applyDuckType), and MariaDB 11.8 and later type FROM_UNIXTIME as a
-	// TIMESTAMP, differences of their own (#2849) that #2493's test leaves
-	// out the same way.
+	// types: MariaDB 11.8 and later type FROM_UNIXTIME as a TIMESTAMP, and
+	// the copy declares it a DATETIME as MySQL and older MariaDB do (#2849;
+	// on MySQL TestIntegrationSQLCompareDatetimeScale compares the types).
 	cases := []struct {
 		stmt     string
 		args     []any

@@ -161,7 +161,7 @@ func mysqlRenderErr(err error) error {
 // is logged. The MySQL renderer also hands it to the client (SHOW WARNINGS)
 // through resolveFlashbackRow.
 func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
-	image, notes, err := h.resolveFlashbackRow(ctx, q)
+	image, notes, err := h.resolveFlashbackRow(ctx, q, false)
 	for _, n := range notes {
 		h.logOrderNote(q, n)
 	}
@@ -170,8 +170,11 @@ func (h *Handler) ResolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (m
 
 // resolveFlashbackRow is ResolveFlashbackRow, with its notes returned for the
 // caller to deliver: the order note (#2156) and what a narrowing ALTER check
-// could not check (#2750). Empty when there is none.
-func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (map[string]any, []string, error) {
+// could not check (#2750). Empty when there is none. mysqlText is set by the
+// MySQL port: its FLOAT and DOUBLE values are then read at the precision
+// they were captured with (typeEventFloats), which the PostgreSQL port does
+// not want, since it prints the stored JSON text as it is.
+func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery, mysqlText bool) (map[string]any, []string, error) {
 	opts := query.Options{
 		Schema: q.Schema,
 		Table:  q.Table,
@@ -206,6 +209,11 @@ func (h *Handler) resolveFlashbackRow(ctx context.Context, q TimeTravelQuery) (m
 	// the image wholesale per event, so pre-mapped events make the final state
 	// carry labels the way the live table did when the event happened.
 	h.mapEventImages(q.Schema, q.Table, rows)
+	if mysqlText {
+		// The MySQL port prints a FLOAT or DOUBLE cell by its type (#2851):
+		// read each value at the precision it was captured with.
+		h.typeEventFloats(q.Schema, q.Table, rows)
+	}
 	image, ordered, note, err := foldRowInBinlogOrder(nil, rows, q.AsOf, query.BinlogOrderProof(ctx, h.indexDB))
 	if err != nil {
 		// Residual unchanged-TOAST marker (#592) — a capture-invariant
@@ -294,7 +302,7 @@ func (h *Handler) logOrderNote(q TimeTravelQuery, note string) {
 // lives here, the pgwire front-end inherits it for free — a second renderer must
 // NOT re-derive it.
 func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, error) {
-	state, notes, err := h.resolveSnapshotRow(ctx, q)
+	state, notes, err := h.resolveSnapshotRow(ctx, q, false)
 	for _, n := range notes {
 		h.logOrderNote(q, n)
 	}
@@ -303,13 +311,14 @@ func (h *Handler) ResolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 
 // resolveSnapshotRow is ResolveSnapshotRow, with its notes returned for the
 // caller to deliver, as resolveFlashbackRow: the binlog numbering check's
-// when it could not tell (#2186), then the order note (#2156).
-func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (map[string]any, []string, error) {
+// when it could not tell (#2186), then the order note (#2156). mysqlText is
+// set by the MySQL port, as for resolveFlashbackRow.
+func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery, mysqlText bool) (map[string]any, []string, error) {
 	src := h.baselineSource()
 	if src == "" {
 		h.logger.Debug("shim: _snapshot has no baseline source configured; using binlog-only path",
 			"schema", q.Schema, "table", q.Table)
-		return withNotes(h.resolveFlashbackRow(ctx, q))
+		return withNotes(h.resolveFlashbackRow(ctx, q, mysqlText))
 	}
 
 	// Guard the PK type before attempting a baseline match. ReadBaselineRow
@@ -321,7 +330,7 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	if !ok {
 		h.logger.Debug("shim: _snapshot cannot resolve PK type; using binlog-only path",
 			"schema", q.Schema, "table", q.Table, "pk_column", q.PKColumn)
-		return withNotes(h.resolveFlashbackRow(ctx, q))
+		return withNotes(h.resolveFlashbackRow(ctx, q, mysqlText))
 	}
 	// PostgreSQL baselines store every column as raw pgoutput text (#593), so
 	// ReadBaselineRow's string-bound match is a string-identity join that can
@@ -340,7 +349,7 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 				h.logger.Warn("shim: _snapshot PK type not safe for baseline lookup; using binlog-only path",
 					"schema", q.Schema, "table", q.Table, "pk_column", q.PKColumn, "pk_type", dataType)
 			}
-			return withNotes(h.resolveFlashbackRow(ctx, q))
+			return withNotes(h.resolveFlashbackRow(ctx, q, mysqlText))
 		}
 	}
 
@@ -429,6 +438,9 @@ func (h *Handler) resolveSnapshotRow(ctx context.Context, q TimeTravelQuery) (ma
 	}
 
 	h.mapEventImages(q.Schema, q.Table, rows)
+	if mysqlText {
+		h.typeEventFloats(q.Schema, q.Table, rows)
+	}
 	state, ordered, note, err := foldRowInBinlogOrder(baselineRow, rows, q.AsOf, query.BinlogOrderProof(ctx, h.indexDB))
 	if err != nil {
 		return nil, nil, err
