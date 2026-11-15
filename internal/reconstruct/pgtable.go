@@ -49,9 +49,12 @@ type pgTableInput struct {
 //   - The window is read from the snapshot's LSN floor and its recorded time
 //     bound (PGDeltaWindow), up to the run's end (pgRunEnd). Events from
 //     before the snapshot's time come with it: a change the snapshot already
-//     holds is applied again, which leaves the same row. The per-event guards
-//     of the fold see them too, so a PK-changing UPDATE or an unchanged-TOAST
-//     marker in one refuses even when a later change overwrote it.
+//     holds is applied again, which leaves the same row: a key change among
+//     them is a delete of the old key and an insert of the new one (#2760,
+//     splitPGKeyChange), applied again the same way. The per-event guards of
+//     the fold see them too, so an unchanged-TOAST marker, or a key change
+//     that cannot be proven whole, refuses even when a later change
+//     overwrote it.
 //   - The destructive-DDL check starts at the same time bound: a TRUNCATE
 //     that raced the snapshot writes no row events and may be missing from
 //     it, and the fold would bring its rows back. By time only: the anchor is

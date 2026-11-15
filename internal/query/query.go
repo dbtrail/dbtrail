@@ -260,6 +260,8 @@ func (p BinlogPos) AtOrBefore(q BinlogPos) bool {
 // BinlogFile ("0/16B3748", hasBinlogCoordinate), which this rule does not
 // order: such a row has no coordinate here and arrival order stands, which
 // for PostgreSQL is commit order (its event_timestamp is the commit time).
+// The full-table reconstruct does not rest on that: it orders PostgreSQL rows
+// by commit LSN itself (reconstruct.laterInWAL, #2760).
 func LaterInBinlog(a, b *ResultRow) bool {
 	if !hasBinlogCoordinate(a) || !hasBinlogCoordinate(b) {
 		return false

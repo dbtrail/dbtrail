@@ -413,9 +413,10 @@ func TestFoldPage_pkChange_spellingProofPerType(t *testing.T) {
 	}
 }
 
-// K: a PostgreSQL window keeps refusing. Its rows carry no binary log
-// coordinate (an LSN), so the ordering rule the split relies on does not
-// apply, and its before-image may hold only the key.
+// K: a PostgreSQL window refuses a key change it cannot order. Since #2760
+// such a window splits the UPDATE too, ordered by commit LSN
+// (pg_key_change_2760_test.go); this event's start position is zero, so it
+// has no LSN to be ordered by and keeps the #782 refusal.
 func TestFoldPage_pkChange_postgresRefuses(t *testing.T) {
 	u := pkUpd(1, 100, 1, 2, "moved")
 	u.BinlogFile, u.StartPos, u.EndPos = "0/16B3748", 0, 0
@@ -609,8 +610,8 @@ func readTailRows(t *testing.T, path string) string {
 	return strings.Join(got, ",")
 }
 
-// The refusal the PostgreSQL gate and the three untouched paths keep is the
-// #782 error, text unchanged; the spelling refusal is its own text, naming
+// The refusal the three untouched paths keep is the #782 error, text
+// unchanged (a PostgreSQL window's refusal starts with it, #2760); the spelling refusal is its own text, naming
 // the stored and the decoded spelling and what to do.
 func TestPKChangingUpdateErr_isUnchanged(t *testing.T) {
 	err := pkChangingUpdateErr("mydb", "orders", "1", "2")
