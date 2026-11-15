@@ -61,6 +61,7 @@ func (in *Input) ApplyFooters(footers map[string]baseline.TableFooter) {
 			// SchemaKnown stays false on purpose: every reader of it asks
 			// about that CREATE TABLE.
 			in.Baselines[i].PGCasts = f.PG
+			in.Baselines[i].PGRelation = f.PGRelation
 			in.Baselines[i].Columns = f.Columns
 			continue
 		}

@@ -58,6 +58,12 @@ type session struct {
 	// cancelTarget is what a cancel request for this connection stops
 	// (cancel.go); nil cancels nothing.
 	cancelTarget *cancelTarget
+	// database is the database the client connected to (the catalog's one
+	// database), and catalogTables the copy's tables as the catalog last
+	// read them, at catalogAt (catalog.go).
+	database      string
+	catalogTables []CatalogTable
+	catalogAt     time.Time
 }
 
 // initSettings sets a connection's settings before its start-up message is
@@ -251,6 +257,9 @@ const (
 	// kindLocal is a session statement answered here with rows (SHOW,
 	// version()).
 	kindLocal
+	// kindCatalog is a catalog statement a client sends to list what the
+	// server holds, answered here from the copy's tables (catalog.go).
+	kindCatalog
 	// kindRefused is refused before anything runs.
 	kindRefused
 )
@@ -264,6 +273,10 @@ type classified struct {
 	// refuses a kindRefused.
 	cmd  *sessionCmd
 	perr *pgErr
+	// cat is the recognized catalog statement of a kindCatalog, and catArgs
+	// what was read out of it.
+	cat     *catalogStmt
+	catArgs []string
 	// timeTravel says the time-travel parser reads the text (well formed or
 	// not), which decides how an argument is written into it.
 	timeTravel bool
@@ -306,7 +319,23 @@ func (s *session) classify(qstr string) classified {
 			return classified{kind: kindLocal, cmd: cmd}
 		case ok:
 			return classified{kind: kindProbe, cmd: cmd}
-		case s.bound != nil:
+		}
+		// The system catalog: the statements tools send to list schemas,
+		// tables and columns are answered here, any other is refused by
+		// name, and none reaches the copy's engine (catalog.go).
+		canon := catalogCanon(qstr)
+		if catalogish := readsCatalog(qstr); catalogish || strings.HasPrefix(canon, "select current_setting(") {
+			if st, m := matchCatalog(canon); st != nil && s.bound != nil && s.bound.Catalog != nil {
+				return classified{kind: kindCatalog, cat: st, catArgs: m}
+			}
+			if catalogish {
+				if s.bound == nil || s.bound.Catalog == nil {
+					return classified{kind: kindRefused, perr: &pgErr{"0A000", "the system catalog (pg_catalog, information_schema) is not served on this port"}}
+				}
+				return classified{kind: kindRefused, perr: catalogRefusal}
+			}
+		}
+		if s.bound != nil {
 			return classified{kind: kindFree}
 		}
 		return classified{kind: kindRefused, perr: &pgErr{"0A000", fmt.Sprintf(
@@ -335,6 +364,8 @@ func (s *session) resolveClassified(qstr string, c classified) (cols []string, t
 		return nil, nil, nil, tag, perr
 	case kindLocal:
 		return s.answerLocal(c.cmd)
+	case kindCatalog:
+		return s.answerCatalog(c.cat, c.catArgs)
 	case kindFree:
 		return s.runFree(qstr)
 	}
