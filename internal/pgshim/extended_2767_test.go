@@ -57,6 +57,9 @@ func (e *echoLogin) run(_ context.Context, st string) (sqlsandbox.Result, error)
 	if strings.Contains(st, "dbtrail_describe") && strings.Contains(st, "SHOW") {
 		return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: "syntax error at or near \"SHOW\""}
 	}
+	if strings.Contains(st, "dbtrail_describe") && strings.Contains(st, "BUSY") {
+		return sqlsandbox.Result{}, sqlsandbox.ErrBusy
+	}
 	if strings.Contains(st, "no_such_table") {
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: "Catalog Error: Table with name no_such_table does not exist!"}
 	}
@@ -693,4 +696,61 @@ func TestExtended_describeNeverRunsTheStatementItself(t *testing.T) {
 	// nothing was held against it.
 	want(t, "execute the undescribed", r.send(&pgproto3.Bind{PreparedStatement: "show"}, &pgproto3.Execute{}, &pgproto3.Sync{}),
 		"BindComplete", "DataRow SHOW TABLES", "CommandComplete SELECT 1", "ReadyForQuery I")
+}
+
+// A Describe the copy could not answer for a reason of the moment (busy,
+// behind, a timeout) fails, so the client does not keep "no rows" for a
+// statement that has them; one it could not answer for the statement's own
+// shape or text is described as no rows.
+func TestExtended_aDescribeThatFailsForTheMomentIsAnError(t *testing.T) {
+	e := &echoLogin{}
+	r := dialRaw(t, e.login)
+	want(t, "busy", r.send(&pgproto3.Parse{Name: "b", Query: "SELECT BUSY"}, &pgproto3.Describe{ObjectType: 'S', Name: "b"}, &pgproto3.Sync{}),
+		"ParseComplete", "Error 53000", "ReadyForQuery I")
+	// Gone with its error: prepared again under its name.
+	want(t, "again", r.send(&pgproto3.Parse{Name: "b", Query: "SELECT 1"}, &pgproto3.Sync{}), "ParseComplete", "ReadyForQuery I")
+	want(t, "a missing table", r.send(&pgproto3.Parse{Name: "m", Query: "SELECT * FROM no_such_table"}, &pgproto3.Describe{ObjectType: 'S', Name: "m"}, &pgproto3.Sync{}),
+		"ParseComplete", "ParameterDescription []", "NoData", "ReadyForQuery I")
+}
+
+// A time-travel row goes out in the columns the statement was described
+// with, by name: a column the row lacks is NULL, one the table no longer has
+// is left out with a notice. Never a value under another column's name.
+func TestExtended_aTimeTravelRowGoesIntoTheDescribedColumns(t *testing.T) {
+	var out strings.Builder
+	s := &session{be: pgproto3.NewBackend(strings.NewReader(""), &out), logger: discardLogger()}
+	cols, rows := s.intoDescribed([]string{"id", "email", "name"}, []string{"id", "name", "mail"},
+		[][][]byte{{[]byte("1"), []byte("ada"), []byte("a@x")}})
+	if fmt.Sprint(cols) != "[id email name]" {
+		t.Fatalf("columns %v", cols)
+	}
+	if got := fmt.Sprintf("%q", rows[0]); got != `["1" "" "ada"]` || rows[0][1] != nil {
+		t.Fatalf("row %s (email nil: %v), want id, NULL, ada", got, rows[0][1] == nil)
+	}
+	if err := s.be.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "mail") {
+		t.Fatal("no notice named the column left out")
+	}
+}
+
+// What one connection keeps open is bounded in bytes, not only in count.
+func TestExtended_whatAConnectionHoldsIsBounded(t *testing.T) {
+	oldS, oldP := maxStatementBytes, maxPortalBytes
+	maxStatementBytes, maxPortalBytes = 64, 400
+	t.Cleanup(func() { maxStatementBytes, maxPortalBytes = oldS, oldP })
+	e := &echoLogin{rows: 4}
+	r := dialRaw(t, e.login)
+	long := "SELECT stmt FROM t WHERE a = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+	want(t, "statements", r.send(&pgproto3.Parse{Name: "s1", Query: long}, &pgproto3.Parse{Name: "s2", Query: long}, &pgproto3.Sync{}),
+		"ParseComplete", "Error 54000", "ReadyForQuery I")
+	want(t, "begin", r.send(&pgproto3.Query{String: "BEGIN"}), "CommandComplete BEGIN", "ReadyForQuery T")
+	// Each answer is 4 rows of the statement's text: one fits, a second does not.
+	got := r.send(&pgproto3.Bind{DestinationPortal: "p1", PreparedStatement: "s1"}, &pgproto3.Execute{Portal: "p1", MaxRows: 1},
+		&pgproto3.Bind{DestinationPortal: "p2", PreparedStatement: "s1"}, &pgproto3.Execute{Portal: "p2", MaxRows: 1},
+		&pgproto3.Sync{})
+	if got[len(got)-2] != "Error 54000" || got[len(got)-1] != "ReadyForQuery E" {
+		t.Fatalf("portals past the budget: %q", got)
+	}
 }

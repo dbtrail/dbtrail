@@ -2,6 +2,7 @@ package pgshim
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,19 @@ import (
 const (
 	maxStatements = 1000
 	maxPortals    = 64
+	// flushAfterBytes: an Execute that sends more than this flushes at its
+	// end instead of keeping the rows in the buffer until the client's Sync.
+	flushAfterBytes = 1 << 20
+)
+
+// maxStatementBytes is the most text the prepared statements of one
+// connection may hold together, and maxPortalBytes the most answer its open
+// portals may: the port runs in the process that may also capture, so one
+// client must not be able to fill its memory. Variables so a test can lower
+// them.
+var (
+	maxStatementBytes = 64 << 20
+	maxPortalBytes    = 256 << 20
 )
 
 // preparedStatement is a statement Parse made.
@@ -38,6 +52,9 @@ type preparedStatement struct {
 	paramOIDs []uint32
 	// rd is who reads the statement once its arguments are written in.
 	rd reader
+	// describedNames are the columns a Describe of the statement named,
+	// which a time-travel execution is put into (runPortal).
+	describedNames []string
 	// described is the column count a Describe of the statement told the
 	// client (-1 for none, and for no rows: noRows), which every portal
 	// bound from it must keep: the client decodes the rows by that answer.
@@ -58,6 +75,8 @@ type portal struct {
 	tag   string
 	// sent is how many of rows earlier Executes handed over.
 	sent int
+	// bytes is about how much memory rows hold.
+	bytes int
 }
 
 // extState is the extended protocol's state on one connection.
@@ -71,6 +90,28 @@ type extState struct {
 // noRows is preparedStatement.described for a statement said to return no
 // rows (NoData).
 const noRows = -2
+
+// statementBytes is the text the named statements hold.
+func (e *extState) statementBytes() int {
+	n := 0
+	for name, st := range e.stmts {
+		if name != "" {
+			n += len(st.query)
+		}
+	}
+	return n
+}
+
+// portalBytes is the answer the open portals hold, but skip's.
+func (e *extState) portalBytes(skip *portal) int {
+	n := 0
+	for _, p := range e.portals {
+		if p != skip {
+			n += p.bytes
+		}
+	}
+	return n
+}
 
 func (e *extState) dropUnnamed() {
 	delete(e.stmts, "")
@@ -99,6 +140,10 @@ func (s *session) handleParse(m *pgproto3.Parse) {
 	if m.Name != "" {
 		if _, ok := s.ext.stmts[m.Name]; ok {
 			s.extFail(&pgErr{"42P05", fmt.Sprintf("prepared statement %q already exists", m.Name)})
+			return
+		}
+		if s.ext.statementBytes()+len(m.Query) > maxStatementBytes {
+			s.extFail(&pgErr{"54000", fmt.Sprintf("this connection's prepared statements already hold close to %d MB of text, the most it keeps; close some", maxStatementBytes>>20)})
 			return
 		}
 		if len(s.ext.stmts) >= maxStatements {
@@ -251,7 +296,7 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.be.Send(&pgproto3.NoData{})
 			return
 		}
-		st.described = len(cols)
+		st.described, st.describedNames = len(cols), cols
 		s.rowDescription(cols, nil)
 	case 'P':
 		p, ok := s.ext.portals[m.Name]
@@ -311,9 +356,13 @@ func (s *session) describeStatement(st *preparedStatement) (cols []string, held 
 			return nil, false, perr
 		}
 		cols := s.h.ColumnsFor(nil, c.q)
-		if cols == nil {
-			// Rows of no known column: still rows, not NoData.
-			cols = []string{}
+		if len(cols) == 0 {
+			// No schema snapshot names the table's columns: there is
+			// nothing true to describe, and an answer of no columns would
+			// hold every execution to it.
+			return nil, false, &pgErr{"55000", fmt.Sprintf(
+				"the columns of %s.%s cannot be described: no schema snapshot of the table is recorded; run the statement with the simple query protocol",
+				c.q.Schema, c.q.Table)}
 		}
 		return cols, true, nil
 	}
@@ -346,14 +395,27 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, described 
 	// On lines of their own: a statement that ends in a -- comment must not
 	// comment out the closing parenthesis.
 	wrapped := "SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0"
-	cols, ok := s.columnsOf(wrapped)
-	return cols, ok, nil
+	cols, err := s.columnsOf(wrapped)
+	if err == nil {
+		return cols, true, nil
+	}
+	perr = freeError(err, s.logger)
+	if strings.HasPrefix(perr.code, "42") || perr.code == "0A000" {
+		// The statement's own shape or text: it cannot stand in the
+		// subquery, and its Execute answers the error a simple query gets.
+		return nil, false, nil
+	}
+	// Anything else (the copy busy, behind, timed out, a worker that
+	// failed) is the moment's, not the statement's: the Describe fails with
+	// it, so the client does not keep "no rows" for a statement that has
+	// them, and tries again.
+	s.logger.Warn("pgshim: a statement could not be described", "code", perr.code, "err", err)
+	return nil, false, perr
 }
 
 // columnsOf runs text on the copy, counted and recorded as every statement
-// the port runs is (runFree), and returns its column names; ok is false when
-// it failed.
-func (s *session) columnsOf(text string) (cols []string, ok bool) {
+// the port runs is (runFree), and returns its column names.
+func (s *session) columnsOf(text string) ([]string, error) {
 	started := time.Now()
 	res, err := s.bound.Run(s.ctx, text)
 	if s.bound.Answered != nil && s.ctx.Err() == nil {
@@ -363,11 +425,10 @@ func (s *session) columnsOf(text string) (cols []string, ok bool) {
 		_ = res.Spool.Close()
 	}
 	if err != nil {
-		s.logger.Debug("pgshim: a statement could not be described", "err", err)
-		return nil, false
+		return nil, err
 	}
 	s.recordFree(text, res)
-	return columnNames(res.Columns), true
+	return columnNames(res.Columns), nil
 }
 
 func columnNames(cols []sqlsandbox.Column) []string {
@@ -393,6 +454,9 @@ func (s *session) runPortal(p *portal) *pgErr {
 	if perr != nil {
 		return perr
 	}
+	if p.stmt.rd == readTimeTravel && cols != nil && p.stmt.described >= 0 {
+		cols, rows = s.intoDescribed(p.stmt.describedNames, cols, rows)
+	}
 	if d := p.stmt.described; cols != nil && d != -1 {
 		if d == noRows || len(cols) != d {
 			// The client decodes the rows by what Describe told it; rows of
@@ -401,8 +465,51 @@ func (s *session) runPortal(p *portal) *pgErr {
 			return &pgErr{"0A000", "cached plan must not change result type"}
 		}
 	}
-	p.cols, p.rows, p.tag = cols, rows, tag
+	bytes := 0
+	for _, r := range rows {
+		for _, c := range r {
+			bytes += len(c) + 24
+		}
+	}
+	if s.ext.portalBytes(p)+bytes > maxPortalBytes {
+		return &pgErr{"54000", fmt.Sprintf("this connection's open portals would hold more than %d MB of answers, the most it keeps; fetch or close the open ones", maxPortalBytes>>20)}
+	}
+	p.cols, p.rows, p.tag, p.bytes = cols, rows, tag, bytes
 	return nil
+}
+
+// intoDescribed puts a time-travel row into the columns its statement's
+// Describe named, by name, which is how the client reads it. A row as it was
+// can carry other columns than the table has now (renamed, dropped, added
+// since): one the Describe named and the row lacks is NULL, as on the simple
+// protocol, and one the row has that the Describe did not name cannot be
+// sent, which a notice says.
+func (s *session) intoDescribed(names, cols []string, rows [][][]byte) ([]string, [][][]byte) {
+	at := make(map[string]int, len(cols))
+	for i, c := range cols {
+		at[c] = i
+	}
+	var left []string
+	for _, c := range cols {
+		if !slices.Contains(names, c) {
+			left = append(left, c)
+		}
+	}
+	if len(left) > 0 {
+		s.notice(fmt.Sprintf("the row as it was has column(s) %s, which the table no longer has and this prepared statement was described without; run it with the simple query protocol to see them",
+			strings.Join(left, ", ")))
+	}
+	out := make([][][]byte, len(rows))
+	for r, row := range rows {
+		cells := make([][]byte, len(names))
+		for i, n := range names {
+			if j, ok := at[n]; ok {
+				cells[i] = row[j]
+			}
+		}
+		out[r] = cells
+	}
+	return names, out
 }
 
 // checkResultFormats refuses a Bind whose result formats cannot apply to the
@@ -452,10 +559,19 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 	if m.MaxRows > 0 && uint64(m.MaxRows) < uint64(left) {
 		n = int(m.MaxRows)
 	}
+	sentBytes := 0
 	for _, r := range p.rows[p.sent : p.sent+n] {
 		s.dataRow(r)
+		for _, c := range r {
+			sentBytes += len(c)
+		}
 	}
 	p.sent += n
+	if sentBytes > flushAfterBytes {
+		// A write failure here is seen by the next read, which ends the
+		// connection.
+		defer func() { _ = s.be.Flush() }()
+	}
 	if m.MaxRows > 0 && uint64(n) == uint64(m.MaxRows) {
 		// PostgreSQL stops at the limit without looking past it: a portal
 		// whose last row the limit reached exactly is suspended too, and

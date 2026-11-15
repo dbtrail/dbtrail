@@ -55,6 +55,14 @@ func TestSplitParams(t *testing.T) {
 		{"SELECT $$ unclosed $1", nil, 0},
 		// A lone $ is a character.
 		{"SELECT $ + $1", []int{0}, 1},
+		// A -- comment ends at a carriage return too.
+		{"SELECT 1 -- x\r'\n $1 ', $2", []int{1}, 2},
+		// What follows a number starts a token of its own: 1e'..' is 1 and
+		// an escape string, 1$$..$$ is 1 and a dollar quote.
+		{`SELECT 1e'\' $1', $2`, []int{1}, 2},
+		{"SELECT 1$$ $1 $$, $2", []int{1}, 2},
+		{`SELECT x1e'\', $1`, []int{0}, 1},
+		{"SELECT col1$1, $2", []int{1}, 2},
 		// Unclosed strings run to the end.
 		{"SELECT 'open $1", nil, 0},
 		{`SELECT "open $1`, nil, 0},

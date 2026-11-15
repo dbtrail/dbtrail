@@ -55,6 +55,25 @@ func isIdentByte(c byte) bool {
 	return c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
 }
 
+// continuesName says whether q[i] would continue a name begun before it, as
+// PostgreSQL's scanner reads it: after a letter, or after digits that follow
+// one (col1$). Digits standing alone are a number, and what follows a number
+// starts a token of its own: 1e'..' is 1 then an escape string, 1$$..$$ is 1
+// then a dollar quote.
+func continuesName(q string, i int) bool {
+	if i == 0 || !isIdentByte(q[i-1]) {
+		return false
+	}
+	k := i - 1
+	for k >= 0 && q[k] >= '0' && q[k] <= '9' {
+		k--
+	}
+	if k == i-1 {
+		return true // a letter, _, $ or a byte of a multi-byte letter
+	}
+	return k >= 0 && isIdentByte(q[k])
+}
+
 func isIdentStart(c byte) bool {
 	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
 }
@@ -66,7 +85,9 @@ func splitParams(q string) (template, *pgErr) {
 	n := len(q)
 	start := 0
 	lineEnd := func(i int) int {
-		if j := strings.IndexByte(q[i:], '\n'); j >= 0 {
+		// A -- comment ends at a line feed or a carriage return, as in
+		// PostgreSQL's scanner.
+		if j := strings.IndexAny(q[i:], "\n\r"); j >= 0 {
 			return i + j + 1
 		}
 		return n
@@ -77,7 +98,7 @@ func splitParams(q string) (template, *pgErr) {
 		case c == '\'':
 			// An escape string is E'...' with the E starting its own token;
 			// in it a backslash escapes the next character, a quote too.
-			escapes := i > 0 && (q[i-1] == 'e' || q[i-1] == 'E') && (i < 2 || !isIdentByte(q[i-2]))
+			escapes := i > 0 && (q[i-1] == 'e' || q[i-1] == 'E') && !continuesName(q, i-1)
 			i = stringEnd(q, i+1, escapes)
 		case c == '"':
 			i = stringEnd(q, i+1, false) // a quoted name: "" is a quote in it
@@ -86,7 +107,7 @@ func splitParams(q string) (template, *pgErr) {
 		case c == '/' && i+1 < n && q[i+1] == '*':
 			i = commentEnd(q, i+2)
 		case c == '$':
-			if i > 0 && isIdentByte(q[i-1]) {
+			if continuesName(q, i) {
 				// Part of a name: col$1 is one identifier.
 				i++
 				continue

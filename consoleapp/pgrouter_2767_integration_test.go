@@ -252,6 +252,7 @@ func TestIntegrationPGRouterExtended(t *testing.T) {
 			`SELECT $q$ ' $x$ $q$ AS a, 'z' AS b`,
 			`SELECT 1 AS a /* ' */, 'z' AS b`,
 			`SELECT 1 AS a -- '` + "\n" + `, 'z' AS b`,
+			`SELECT 1 AS a -- '` + "\r" + `, 'z' AS b`,
 			`SELECT "a""b" FROM (SELECT 1 AS "a""b") s`,
 		} {
 			want, got := pgxAnswer(ctx, src, stmt), pgxAnswer(ctx, port, stmt)
