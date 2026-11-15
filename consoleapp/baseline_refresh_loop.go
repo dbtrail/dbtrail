@@ -318,8 +318,13 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// BELOW the mark read, and the order is the point (#1705). See
 	// anchorRefresh.
 	at = s.anchorRefresh(req.ServerID, at)
-	if s.tableDeltas {
+	// A PostgreSQL table carried forward unchanged keeps its file's start as
+	// a chain of deltas keeps its own (#2757), so its fold needs the same
+	// line, deltas or not.
+	if s.tableDeltas || (req.SourcePostgres && req.CarryForwardUnchanged) {
 		req.ChainStartFloor = s.chainStartFloor(req, at, interval)
+	}
+	if s.tableDeltas {
 		if line := s.sqlChainLine.Load(); line != nil {
 			req.MaxChainUpserts = (*line)() / 2
 		}
@@ -494,7 +499,7 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	var readsFrom time.Time
 	var readsFromKnown bool
 	if err == nil && known {
-		readsFrom, readsFromKnown = s.publishedReadsFrom(req, at)
+		readsFrom, readsFromKnown = s.publishedReadsFrom(req, at, reuse.pg || req.SourcePostgres)
 	}
 	if err != nil {
 		// Reported and reclaimed OUTSIDE s.mu. Deleting a directory is
@@ -624,10 +629,14 @@ func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, i
 	if err == nil && !ok {
 		err = errNoLiveFloor
 	}
-	s.reportGateBlind("chain-floor", err, req,
-		"cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas "+
-			"early: a table is written in full only when its chain is a day old, and a restore of a quiet "+
-			"table can come to need events the index has already dropped")
+	consequence := "cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas " +
+		"early: a table is written in full only when its chain is a day old, and a restore of a quiet " +
+		"table can come to need events the index has already dropped"
+	if req.SourcePostgres {
+		consequence = "cannot tell how far back the index keeps events, so this cycle carries no unchanged " +
+			"table forward: every table is written in full, as before, until the index can be read"
+	}
+	s.reportGateBlind("chain-floor", err, req, consequence)
 	if err != nil {
 		return time.Time{}
 	}
@@ -640,14 +649,21 @@ func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, i
 // With table deltas off no chain can be in it (the fold writes none and
 // carries none), so its readers start at its own instant and nothing is read.
 // With them on, the snapshot's files are read, once, since a published
-// snapshot never changes. A failed read is known=false and the gate folds,
+// snapshot never changes. A PostgreSQL source's snapshot (pg) is read either
+// way: each file's footer says where its reader starts, and a table carried
+// forward unchanged keeps an older one (#2757).
+// A failed read is known=false and the gate folds,
 // rather than vouching for the directory's instant, which is exactly the
 // instant #1904 is about.
-func (s *baselineSupervisor) publishedReadsFrom(req refreshRequest, at time.Time) (time.Time, bool) {
-	if !s.tableDeltas {
+func (s *baselineSupervisor) publishedReadsFrom(req refreshRequest, at time.Time, pg bool) (time.Time, bool) {
+	if !s.tableDeltas && !pg {
 		return at, true
 	}
-	from, err := snapshotReadsFrom(s.ctx, req.BaselineDir, at)
+	read := snapshotReadsFrom
+	if pg {
+		read = snapshotReadsFromPG
+	}
+	from, err := read(s.ctx, req.BaselineDir, at)
 	s.reportGateBlind("reads-from", err, req,
 		"cannot tell where the readers of the snapshot just published start, so the next cycle folds "+
 			"instead of skipping; this repeats until a snapshot whose table deltas can all be read is published")
@@ -2006,6 +2022,8 @@ type reuseTally struct {
 	// table was not REBUILT, which is the part the advice about a table's
 	// cost gets wrong if nobody says so.
 	slowestCarried bool
+	// pg: a table of a PostgreSQL source was published (TableReport.PG).
+	pg bool
 }
 
 // countReuse tallies the tables a fold published by reusing the previous
@@ -2025,6 +2043,7 @@ func countReuse(reports []*reconstruct.TableReport) (tally reuseTally) {
 		if rep == nil {
 			continue
 		}
+		tally.pg = tally.pg || rep.PG
 		if rep.CarriedForward {
 			tally.reused++
 			if !rep.CarriedByLink {

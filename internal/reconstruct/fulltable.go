@@ -439,6 +439,10 @@ type TableReport struct {
 	// as well — a binlog-only report has no baseline GTID/binlog coordinates
 	// to embed in the metadata file.
 	BinlogOnly bool
+	// PG is true for a table of a PostgreSQL source: a reader of its
+	// published file starts where the file's footer says (PGDeltaWindow),
+	// which can be before the snapshot's time.
+	PG bool
 	// CarriedForward is true when the delta window held no events for this
 	// table, so its previous Parquet file was published into the new snapshot
 	// unchanged instead of being folded and re-emitted. The row counters above
