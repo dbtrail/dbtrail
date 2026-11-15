@@ -79,7 +79,7 @@ const (
 	captureDetailPGNotSaved    = "capture has not saved its position since the source was first asked"
 	captureDetailPGNotSaving   = "the source is ahead and capture has not saved its position lately: check that capture is running"
 	captureDetailPGReading     = "the source is ahead and capture is given time to reach it"
-	captureDetailPGBehind      = "capture has not reached the position the source had at an earlier read"
+	captureDetailPGBehind      = "capture has not reached the position the source had at an earlier read; a large transaction is sent whole once it commits, and the changes after it wait until it is in"
 	// The snapshot schedule's own (capture_probe_pg.go).
 	captureDetailPGAhead        = "the source's WAL is ahead of the capture's saved position while capture keeps saving, as it is whenever anything on that PostgreSQL server writes"
 	captureDetailPGLost         = "the capture recorded a loss of changes after the previous snapshot"
