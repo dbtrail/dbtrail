@@ -314,6 +314,7 @@ a final checkpoint).
 | `--batch-size` | no | Events per batch insert (default 1000). |
 | `--checkpoint` | no | Checkpoint interval in seconds (default 5). |
 | `--partitions` | no | Index partitions for the one-time bootstrap (default 48). |
+| `--metrics-addr` | no | Address to expose Prometheus metrics on, e.g. `:9090`; empty (the default) exposes none (env `BINTRAIL_METRICS_ADDR`). See [observability.md](observability.md#postgresql-capture-bintrail_pg_). |
 | `--rotate-retain` | no | Built-in rotation: drop index partitions older than this (`Nd`/`Nh`; `off` disables). Default `48h` for a new index; an index created before that default changed keeps the window it was created under (env `BINTRAIL_ROTATE_RETAIN`). |
 | `--rotate-interval` | no | Built-in rotation: how often a rotation cycle runs (default `1h`, env `BINTRAIL_ROTATE_INTERVAL`). |
 | `--rotate-add-future` | no | Built-in rotation: keep at least N future hourly partitions ready (default `3`, env `BINTRAIL_ROTATE_ADD_FUTURE`). |
