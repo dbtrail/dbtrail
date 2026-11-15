@@ -326,6 +326,7 @@ func TestSplitPGKeyChange_refusals_2760(t *testing.T) {
 		{"a before-image without one column", func(u *query.ResultRow) {
 			u.RowBefore = map[string]any{"id": "1", "other": "x"}
 		}, "the old row has no column status"},
+		{"a before-image with a column the after-image lacks", func(u *query.ResultRow) { u.RowBefore["extra"] = "x" }, "the old row holds 3 columns and the new row 2"},
 		{"a before-image whose key is NULL", func(u *query.ResultRow) { u.RowBefore["id"] = nil }, "the old row's key column id is missing"},
 		{"a before-image without the key column", func(u *query.ResultRow) { delete(u.RowBefore, "id") }, "the old row's key column id is missing"},
 		{"an after-image whose key is NULL", func(u *query.ResultRow) { u.RowAfter["id"] = nil }, "the new row's key column id is missing"},
