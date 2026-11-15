@@ -614,7 +614,7 @@ Notes:
     profile does not refresh the images only this profile uses. Run
     `docker compose --profile baseline pull`.
 - **Sources with `explain_format=TREE` or `JSON`** (MySQL 9.x; `TREE` is
-  Percona Server 9.7's default). mydumper crashes on them with a
+  the default of MySQL 9.7 and Percona Server 9.7). mydumper crashes on them with a
   segmentation fault while it sizes tables, unless its own sessions use
   `TRADITIONAL`. Step `baseline-quiet` asks the source for the variable in
   every lock mode and, when it exists, writes `/dump/mydumper-session.cnf`

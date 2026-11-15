@@ -92,6 +92,10 @@ grep -q -- '--- PASS: TestIntegrationCopyUnchanged_numberingStartedOver_2160 ' "
   || { echo "FATAL: read routing after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
 grep -q -- '--- PASS: TestIntegrationCopyUnchanged_lateChangeArchivedAndDropped_2187 ' "$log" \
   || { echo "FATAL: read routing after a late change was archived and dropped did not run (false-green tripwire)" >&2; exit 1; }
+grep -q -- '--- PASS: TestIntegrationFirstCopyWithTheRealMydumper ' "$log" \
+  || { echo "FATAL: the first copy with the real mydumper did not run: is mydumper installed in the shard that runs the rest of consoleapp? (false-green tripwire)" >&2; exit 1; }
+grep -q -- '--- PASS: TestIntegrationRecoverCascadeRestoresTheSource ' "$log" \
+  || { echo "FATAL: the applied recover-cascade end-to-end test did not run (false-green tripwire)" >&2; exit 1; }
 grep -q -- '--- PASS: TestCascade_afterTheBinlogNumberingStartsOver_2177 ' "$log" \
   || { echo "FATAL: cascade recovery after a binlog numbering that started over did not run (false-green tripwire)" >&2; exit 1; }
 grep -q -- '--- PASS: TestCheckNumbering_archivedWindow_2186 ' "$log" \

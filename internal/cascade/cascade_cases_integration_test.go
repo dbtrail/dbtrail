@@ -396,6 +396,7 @@ func TestSynthesizeVictims_selfRefAndCompositePK(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	ctx := context.Background()
 	sourceDB, sourceName := testutil.CreateTestDB(t)
+	skipIfSourceLogsCascades(t, sourceDB)
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 
@@ -585,6 +586,27 @@ func applyFKOff(t *testing.T, dbName, sqlText string) {
 // captureAndIndex flushes to a clean binlog, runs dml (which performs the
 // inserts/updates/deletes to capture), seals + copies the file, and parses it
 // into the index. One captured window per call.
+// skipIfSourceLogsCascades skips a test that pins the synthesis of cascades
+// the source does not log, on a source that logs them (MySQL 9.6 and later
+// with innodb_native_foreign_keys = OFF): there the cascade's child rows are
+// in the index and recover-cascade reverses them instead (Options.Logging),
+// which TestIntegrationRecoverCascadeRestoresTheSource covers end to end.
+// The test's premise ("the cascade is invisible in the binary log") does not
+// hold on such a server, and the server's setting cannot change without a
+// restart, so the synthesis is pinned on the cells whose server does not log
+// them (8.0, 8.4).
+func skipIfSourceLogsCascades(t *testing.T, sourceDB *sql.DB) {
+	t.Helper()
+	src, err := metadata.ReadSourceFKLogging(context.Background(), sourceDB)
+	if err != nil {
+		t.Fatalf("ReadSourceFKLogging: %v", err)
+	}
+	if src.LogsCascades() {
+		t.Skip("the source writes its foreign-key cascades to the binary log (innodb_native_foreign_keys = OFF); " +
+			"this test pins the synthesis of cascades a source does not log")
+	}
+}
+
 func captureAndIndex(t *testing.T, sourceDB, indexDB *sql.DB, resolver *metadata.Resolver, sourceName string, dml func()) {
 	t.Helper()
 	testutil.MustExec(t, sourceDB, "FLUSH BINARY LOGS")
@@ -622,6 +644,7 @@ func TestSynthesizeVictims_multiPathDedup(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	ctx := context.Background()
 	sourceDB, sourceName := testutil.CreateTestDB(t)
+	skipIfSourceLogsCascades(t, sourceDB)
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 
@@ -676,6 +699,7 @@ func TestSynthesizeVictims_multiRootIndependentT(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	ctx := context.Background()
 	sourceDB, sourceName := testutil.CreateTestDB(t)
+	skipIfSourceLogsCascades(t, sourceDB)
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 
@@ -802,6 +826,7 @@ func TestSynthesizeVictims_setNullGuardProtectsRepointedRow(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	ctx := context.Background()
 	sourceDB, sourceName := testutil.CreateTestDB(t)
+	skipIfSourceLogsCascades(t, sourceDB)
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 

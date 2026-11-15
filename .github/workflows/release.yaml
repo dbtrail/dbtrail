@@ -233,6 +233,20 @@ jobs:
           docker logs bintrail-test-mysql-gtid >&2 || true
           exit 1
 
+      # The real mydumper, in the shard that runs the rest of consoleapp:
+      # TestIntegrationFirstCopyWithTheRealMydumper makes a first copy of this
+      # cell's MySQL with it (on 9.7 that copy needs the console's
+      # explain_format session setting, #2211). The version and checksum are
+      # the ones the console image and the MariaDB job pin.
+      - name: Install mydumper (1.0.3-1)
+        if: matrix.shard == 3
+        run: |
+          wget -q https://github.com/mydumper/mydumper/releases/download/v1.0.3-1/mydumper_1.0.3-1.jammy_amd64.deb -O /tmp/mydumper.deb
+          echo "9f7fb46c03e1a721e86d71c42a3fe3bd88f1a7b0ec80fa91c7736826f7f1e6f4  /tmp/mydumper.deb" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq /tmp/mydumper.deb
+          mydumper --version
+
       # An S3-compatible store for the #1453/#1454 leg: the SDK half uploads
       # through BINTRAIL_S3_ENDPOINT and the DuckDB half reads the object back
       # through the session's endpoint settings. The image, its pin and its
@@ -264,6 +278,8 @@ jobs:
           # test that needs it FAILS when it is missing instead of skipping.
           BINTRAIL_TEST_GTID_SOURCE_DSN: ${{ matrix.shard == 2 && 'root:testroot@tcp(127.0.0.1:13316)' || '' }}
           BINTRAIL_REQUIRE_GTID_SOURCE: ${{ matrix.shard == 2 && '1' || '' }}
+          # The shard that installs mydumper: the first-copy test must run there.
+          BINTRAIL_REQUIRE_MYDUMPER: ${{ matrix.shard == 3 && '1' || '' }}
         run: |
           mkdir -p /tmp/mysql-it-shard
           bash scripts/mysql-integration-shard.sh run ${{ matrix.shard }} /tmp/mysql-it-shard/mysql-it.out

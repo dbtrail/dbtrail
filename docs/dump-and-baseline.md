@@ -183,7 +183,7 @@ DBTrail always passes these flags to mydumper:
 
 The source password never appears on mydumper's command line, so it is not visible in `ps aux` or (Docker mode) `docker inspect`. With a local mydumper binary it is delivered via `MYSQL_PWD` in the child process environment; in Docker mode it is written to a temporary `0600` MySQL option file bind-mounted read-only into the container, which mydumper reads via `--defaults-file`.
 
-**`explain_format` on MySQL 9.x.** mydumper sizes each table with a plain `EXPLAIN SELECT` and reads its `rows` column. With `explain_format=TREE` (the default on Percona Server 9.7) or `JSON`, that column is missing and mydumper crashes with a segmentation fault before it dumps anything ([mydumper#2307](https://github.com/mydumper/mydumper/issues/2307)). Before each dump, DBTrail reads the source's `explain_format`; when the variable exists, it gives mydumper an option file with
+**`explain_format` on MySQL 9.x.** mydumper sizes each table with a plain `EXPLAIN SELECT` and reads its `rows` column. With `explain_format=TREE` (the default on MySQL 9.7 and Percona Server 9.7; measured on MySQL 9.7.4) or `JSON`, that column is missing and mydumper crashes with a segmentation fault before it dumps anything ([mydumper#2307](https://github.com/mydumper/mydumper/issues/2307)). Before each dump, DBTrail reads the source's `explain_format`; when the variable exists, it gives mydumper an option file with
 
 ```ini
 [mydumper_session_variables]

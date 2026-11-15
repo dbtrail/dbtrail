@@ -943,7 +943,11 @@ type fkRow struct {
 // merge their rows under one id (#844) — and, unlike an earlier
 // MAX(snapshot_id)+1 FOR UPDATE design, can't deadlock each other either.
 func TakeSnapshot(sourceDB, indexDB *sql.DB, schemas []string) (SnapshotStats, error) {
-	return takeSnapshot(sourceDB, indexDB, schemas, false)
+	stats, err := takeSnapshot(sourceDB, indexDB, schemas, false)
+	if err == nil {
+		recordSourceFKLoggingBestEffort(sourceDB, indexDB)
+	}
+	return stats, err
 }
 
 // addImplicitPeriodColumns appends synthetic columnRow entries for the HIDDEN
@@ -1240,7 +1244,11 @@ func explicitPeriodTables(sourceDB *sql.DB, schemas []string) (map[string]bool, 
 // initial setup keep the strict TakeSnapshot: refusing to START capture
 // against an unsupported schema is a good preflight.
 func TakeSnapshotExcludingInvalid(sourceDB, indexDB *sql.DB, schemas []string) (SnapshotStats, error) {
-	return takeSnapshot(sourceDB, indexDB, schemas, true)
+	stats, err := takeSnapshot(sourceDB, indexDB, schemas, true)
+	if err == nil {
+		recordSourceFKLoggingBestEffort(sourceDB, indexDB)
+	}
+	return stats, err
 }
 
 // TablesWithoutPrimaryKey reports the tables the snapshot would refuse (strict)

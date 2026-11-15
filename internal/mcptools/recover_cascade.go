@@ -393,6 +393,15 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 				return ErrorResult(fmt.Errorf("load FK graph: %w", lerr)), nil, nil
 			}
 			caveats = append(caveats, fkCaveats...)
+			// Whether the source logged its cascades, per server start: a change
+			// written by one that did has its child rows reversed from the index
+			// (cascade.Logging). An unreadable record is judged unknown, never
+			// guessed.
+			logging, logErr := cascade.LoadLogging(ctx, t.DB)
+			if logErr != nil {
+				caveats = append(caveats, "could not read whether the source logs its foreign-key cascades ("+logErr.Error()+"); every parent change is treated as unknown")
+				logging = cascade.NewLogging(nil)
+			}
 			results := make([]cascade.Result, 0, len(groups))
 			for _, g := range groups {
 				r, serr := cascade.SynthesizeVictims(ctx, fetcher, g.FKs, g.Roots, cascade.Options{
@@ -402,6 +411,7 @@ func MakeRecoverCascadeTool(cfg Config) func(context.Context, *mcp.CallToolReque
 					ArchivesPresent: archivesExist,
 					WindowCovered:   cascade.WindowProbe(t.DB, t.DBName, fetcher),
 					PKMetas:         cascade.PKMetasFromResolver(resolver),
+					Logging:         logging,
 				})
 				results = append(results, r)
 				if serr != nil {
