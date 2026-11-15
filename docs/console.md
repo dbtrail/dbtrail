@@ -1273,9 +1273,9 @@ saved, shown with the reason `serve` is not running it.
   same measurement, cached for a minute); neither applies when a full
   backup cannot start (the creation opt-in off), where the update runs
   however long it takes, being the producer that can. Every update's run
-  records `events`, `update_seconds` and `index_mark`, and every MySQL
+  records `events`, `update_seconds` and `index_mark`, and every
   full backup that published a snapshot `index_mark` (a PostgreSQL one
-  cannot: its snapshot is stamped by the database), which is what the model
+  too, since #2761), which is what the model
   and the count after a restart or a full backup are read from. The reason is persisted with the run,
   never recomputed later, so a cleared bucket error cannot show the cheap
   producer for a run that read production in full (#1604); the snapshot

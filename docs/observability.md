@@ -1,6 +1,6 @@
 # Observability
 
-`bintrail stream` (and the `bintrail-console watch` control plane) expose
+`bintrail stream`, `bintrail-pg stream` (and the `bintrail-console watch` control plane) expose
 Prometheus metrics describing both the **live replication pipeline** and the
 **state of the index** a DBA cares about for recovery readiness.
 
@@ -62,6 +62,66 @@ A zero read time — a file-mode `bintrail index` backfill, or any event a
 non-replication producer built — is **skipped**, never recorded as a
 0-second latency. Re-indexing month-old binlogs must not publish
 "everything is perfectly fresh".
+
+## PostgreSQL capture (`bintrail_pg_*`)
+
+A PostgreSQL capture publishes the stream metrics above under the same names
+and with the same meaning, so a dashboard or an alert written for a MySQL
+source works for a PostgreSQL one. Enable the endpoint on the standalone
+command with the same flag:
+
+```bash
+bintrail-pg stream --metrics-addr :9090 --index-dsn ... --repl-dsn ... --query-dsn ... --slot bintrail_slot --publication bintrail_pub --server-id 100
+# scrape http://localhost:9090/metrics
+```
+
+Under `bintrail-console watch` there is nothing to enable per source: the
+daemon's `--metrics-addr` serves the PostgreSQL captures it runs along with
+the MySQL ones.
+
+The `source` label is the supervisor's entry ID under `watch`, and the
+replication slot's name on a standalone `bintrail-pg stream`.
+
+What the stream metrics mean on PostgreSQL where it is worth saying:
+
+- `bintrail_stream_last_event_timestamp_seconds` and the two lag gauges start
+  from the source transaction's commit time. PostgreSQL sends a transaction
+  when it commits, so the receive-time lag of a long transaction is measured
+  from its commit, not from its first statement.
+- `bintrail_stream_errors_total` uses the types `batch_flush` and
+  `checkpoint`, and one of its own, `health_probe`: a reading of the slot's
+  health that failed (the reading runs every 30 seconds).
+- A capture that is starting answers the scrape before it has connected to
+  the index or the source, with every series at zero.
+
+On top of those, four gauges that only a PostgreSQL source has:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `bintrail_pg_last_commit_lsn` | gauge | Commit LSN of the last source transaction saved in the checkpoint, as a number of bytes. Capture resumes from here after a restart. `0` until the first checkpoint |
+| `bintrail_pg_slot_retained_wal_bytes` | gauge | WAL the source is keeping for the replication slot, as of the last reading of the slot. The same number as the web interface's slot health |
+| `bintrail_pg_slot_health_timestamp_seconds` | gauge | When the slot was last read and found. The reading above is kept when a reading fails or the slot is gone, so check its age with this |
+| `bintrail_pg_caught_up_timestamp_seconds` | gauge | The last moment the capture is known to have held everything the source had. Set on a quiet source too, which the lag gauges are not |
+
+To compare `bintrail_pg_last_commit_lsn` with the source, write the source's
+position the same way: `SELECT pg_current_wal_lsn() - '0/0'::pg_lsn`.
+
+```promql
+# the slot is holding more than 10 GiB of WAL on the source
+bintrail_pg_slot_retained_wal_bytes > 10 * 1024 * 1024 * 1024
+
+# the slot has not been read for 5 minutes: the number above is old
+time() - bintrail_pg_slot_health_timestamp_seconds > 300
+
+# the capture has not been caught up with its source for 5 minutes
+time() - bintrail_pg_caught_up_timestamp_seconds > 300
+```
+
+The first one is the alert that protects the source: a slot whose consumer is
+stopped or slow makes PostgreSQL keep WAL until the disk fills, or until
+`max_slot_wal_keep_size` invalidates the slot and the changes are lost.
+
+A PostgreSQL capture does not publish the `bintrail_index_*` gauges below.
 
 ## Capture loss (`bintrail_statement_dml_dropped_total`)
 

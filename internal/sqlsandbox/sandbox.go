@@ -278,6 +278,15 @@ type Session struct {
 	// is the one written for MySQL. Division by zero is not covered: the
 	// copy answers NULL where PostgreSQL fails the statement.
 	PostgresRules bool
+	// PostgresNames heads a result column the statement gives no name of
+	// its own the way PostgreSQL does (#2803): `count` for count(*), the
+	// function's name for a call, the type's for a cast of an expression,
+	// `?column?` for an operator or a constant, read from the statement's
+	// parse (postgresColumnNames). A column with an alias, a bare column, and
+	// every column of a statement the rule cannot read keep the engine's
+	// name. Only the PostgreSQL-protocol port sets it: the SQL card and the
+	// MySQL port show the engine's names.
+	PostgresNames bool
 	// ResultToFile is the caller's, not the connection's: it can send a
 	// result larger than the memory cap to its client from a file
 	// (Result.Spool), so the statement may run with no row cap and its
@@ -1629,7 +1638,7 @@ func marshalJob(job Job, limits Limits, spill spillSpec, spool string, more bool
 	}
 	return json.Marshal(wireJob{
 		CopyDirs: allowedDirs(job.CopyDirs), ViewsSQL: viewsSQL, AskViews: asking, SQL: job.SQL, NoFileReaders: job.NoFileReaders, Schema: job.Schema,
-		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules,
+		TimeZone: job.Session.TimeZone, MySQLClock: job.Session.MySQLClock, SelectLimit: job.Session.SelectLimit, KeepJoinOrder: job.Session.KeepJoinOrder, PostgresRules: job.Session.PostgresRules, PostgresNames: job.Session.PostgresNames,
 		Threads: limits.Threads, MemoryLimit: limits.MemoryLimit, MaxRows: limits.MaxRows,
 		MaxResultBytes: limits.MaxResultBytes, TimeoutNS: int64(limits.Timeout),
 		SpillDir: spill.Dir, SpillMaxBytes: spill.MaxBytes, More: more,

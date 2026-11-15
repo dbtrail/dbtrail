@@ -399,9 +399,19 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 	}
 	res.Columns = make([]Column, len(types))
 	typeNames := make([]string, len(types))
+	// PostgreSQL's names for the columns the statement did not name
+	// (Session.PostgresNames), from the parse above: no second parse.
+	var pgNames []string
+	if job.PostgresNames {
+		pgNames = postgresColumnNames(stmt, len(types))
+	}
 	for i, ct := range types {
 		typeNames[i] = ct.DatabaseTypeName()
-		res.Columns[i] = Column{Name: ct.Name(), Type: typeNames[i]}
+		name := ct.Name()
+		if pgNames != nil && pgNames[i] != "" {
+			name = pgNames[i]
+		}
+		res.Columns[i] = Column{Name: name, Type: typeNames[i]}
 	}
 	res.Rows = [][]any{}
 	var rd renderer
