@@ -73,3 +73,71 @@ test("the panel draws psql for PostgreSQL servers and keeps the mysql line", () 
   // No write of its own: the buttons are the MySQL panel's.
   assert.equal((panel.match(/api\("\/api\/flashback/g) || []).length, 4, "the panel's writes changed: see save_controls.mjs");
 });
+
+// The panel itself, drawn by the real sqlClientPanel over a small stand-in
+// for the DOM, and read as the text a person sees.
+function draw({ servers, fb, reveal = "", split = false, picked = "shop" }) {
+  class Node {
+    constructor(tag) { this.tag = tag; this.kids = []; this.attrs = {}; this.className = ""; this.own = ""; this.nodeType = 1; }
+    append(...k) { for (const x of k) if (x != null) this.kids.push(x); }
+    setAttribute(k, v) { this.attrs[k] = v; }
+    addEventListener() {}
+    replaceChildren(...k) { this.kids = [...k]; this.own = ""; }
+    get children() { return this.kids.filter((k) => k.nodeType === 1); }
+    set textContent(v) { this.kids = []; this.own = String(v); }
+    get textContent() { return this.own + this.kids.map((k) => k.textContent).join(" "); }
+  }
+  const c = vm.createContext({
+    document: { createElement: (t) => new Node(t), createTextNode: (s) => ({ nodeType: 3, textContent: s }) },
+    location: { hostname: "dbtrail.example" },
+    window: {},
+    sessionMay: () => true,
+    api: () => { throw new Error("the panel wrote something while being drawn"); },
+    copyText: () => {},
+    toastError: () => {},
+  });
+  vm.runInContext("var currentServer = " + JSON.stringify(picked) + ", defaultServerId = '', capsCache = { monitor: true };", c);
+  for (const name of ["el", "mcpSelector", "shellWord", "flashbackHost", "sqlPortAddress", "cnSection", "cnFact", "cnFine", "utcLabel",
+    "postgresInstall", "pgPortLine", "sqlClientPanel"]) {
+    vm.runInContext(fn(name), c);
+  }
+  c.args = { servers, fb, reveal, split };
+  return vm.runInContext("sqlClientPanel(args.servers, args.fb, args.reveal, null, undefined, args.split).textContent", c);
+}
+
+test("drawn for a PostgreSQL server: on", () => {
+  const on = { enabled: true, can_manage: true, password_created_at: "2026-11-15T10:00:00Z" };
+  const text = draw({ servers: [pg("shop")], fb: on, reveal: "bfp_secret" });
+  for (const want of ['psql "host=dbtrail.example port=5433 dbname=shop user=app sslmode=require"', "Database", "5433",
+    "the PostgreSQL router's usual number", "bfp_secret", "Nothing is sent to your PostgreSQL", "The user can be anything"]) {
+    assert.ok(text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + text);
+  }
+  for (const not of ["mysql -h", "3309", "Engine Routing", "forwarding account", "_flashback", "MySQL"]) {
+    assert.ok(!text.includes(not), "says " + JSON.stringify(not) + ":\n" + text);
+  }
+});
+
+test("drawn for a PostgreSQL server: the page with two sections", () => {
+  const text = draw({ servers: [pg("shop")], fb: { enabled: true, can_manage: true }, split: true });
+  for (const want of ["PostgreSQL client", "Read your copy from a PostgreSQL client", "port=5433 dbname=shop",
+    "A PostgreSQL server's port answers from the copy alone."]) {
+    assert.ok(text.includes(want), "lacks " + JSON.stringify(want) + ":\n" + text);
+  }
+  for (const not of ["mysql -h", "3309", "Run MySQL and DuckDB", "Put ProxySQL in front", "Read your copy from a MySQL client"]) {
+    assert.ok(!text.includes(not), "says " + JSON.stringify(not) + ":\n" + text);
+  }
+});
+
+test("drawn for a PostgreSQL server: off, and no server picked", () => {
+  const off = draw({ servers: [pg("shop")], fb: { enabled: false, can_manage: true } });
+  assert.ok(off.includes("your usual PostgreSQL client can read the copy of your tables"), off);
+  assert.ok(!off.includes("MySQL client"), off);
+  const none = draw({ servers: [pg("shop"), pg("crm")], fb: { enabled: true, can_manage: true }, picked: "" });
+  assert.ok(none.includes("dbname=<server-name>"), none);
+});
+
+test("drawn for a MySQL server: off, as it always was", () => {
+  const off = draw({ servers: [my("shop")], fb: { enabled: false, can_manage: true } });
+  assert.ok(off.includes("your usual MySQL client can read any table as it was at a chosen moment"), off);
+  assert.ok(!off.includes("PostgreSQL"), off);
+});
