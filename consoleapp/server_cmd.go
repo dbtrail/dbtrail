@@ -781,6 +781,9 @@ type ctlServer struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Kind       string `json:"kind"`
+	// Flavor is the source's family: mysql, mariadb or postgres. Empty from
+	// a DBTrail older than the field, which is read as not PostgreSQL.
+	Flavor     string `json:"flavor,omitempty"`
 	HasSource  bool   `json:"has_source"`
 	SourceHost string `json:"source_host"`
 	SourcePort string `json:"source_port"`

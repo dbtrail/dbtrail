@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/dbtrail/dbtrail/internal/console"
 )
 
 // `port max-behind <server> [<seconds>|off]` (#2783): the terminal's way to
@@ -166,6 +168,8 @@ func runPortMaxBehind(ctx context.Context, c *ctlClient, name string, want *int6
 		return fmt.Errorf("%q was given where DBTrail starts and has no choices of its own, so it cannot have a lag limit. Add it as a server (dbtrail server add) to set one", s.Name)
 	case !s.HasSource:
 		return fmt.Errorf("%q has no source database, so the MySQL port does not answer for it", s.Name)
+	case s.Flavor == console.FlavorPostgres:
+		return fmt.Errorf("%q is a PostgreSQL: %s", s.Name, postgresOnlyRefusal)
 	}
 	if want == nil {
 		if s.SQLMaxBehindSource == nil {
