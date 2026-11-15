@@ -208,6 +208,27 @@ func TestFoldPage_pgSameTransaction_ordinary(t *testing.T) {
 	}
 }
 
+// Records of several changes each, put together when they are read back
+// from disk: each is linked to what the one before it left.
+func TestFoldPage_pgSameTransaction_ordinaryAcrossSeveralMovesToDisk(t *testing.T) {
+	pages := [][]query.ResultRow{
+		{stIns(1, "a"), stUpd(2, "a", "b")},
+		{stUpd(3, "b", "c"), stUpd(4, "c", "d")},
+		{stUpd(5, "d", "e"), stDel(6, "e")},
+		{stIns(7, "f"), stUpd(8, "f", "g")},
+	}
+	for _, spill := range []bool{false, true} {
+		got, err := stFold(t, pages, spill)
+		if err != nil || got["1"] == nil || got["1"].RowAfter["status"] != "g" {
+			t.Fatalf("spill %v: %v, %v", spill, got, err)
+		}
+	}
+	// And a link that does not hold between two such records is still seen.
+	pages[2] = []query.ResultRow{stUpd(5, "other", "e"), stDel(6, "e")}
+	_, err := stFold(t, pages, true)
+	stRefused(t, err, stWhyNotTheRow)
+}
+
 // The sequences that do not describe one row: refused, in memory and
 // through disk, in every order, with the reason.
 func TestFoldPage_pgSameTransaction_ambiguous(t *testing.T) {
@@ -408,6 +429,26 @@ func TestFoldPage_pgSameTransaction_deliveredTwiceAcrossAMoveToDisk(t *testing.T
 	}
 	_, err := stFold(t, pages, true)
 	stRefused(t, err, stWhyRepeatSeam)
+
+	// A repeat left open on one side of the move and continued on the other,
+	// and one opened inside the later record (judged there against that
+	// record's own first change): neither can be checked, both are refused.
+	for name, pages := range map[string][][]query.ResultRow{
+		"a repeat open at the move": {
+			{stIns(1, "a"), stUpd(2, "a", "b"), stUpd(3, "b", "c"), stIns(11, "a")},
+			{stUpd(12, "a", "b"), stUpd(13, "b", "c")},
+		},
+		"a first change back inside the later record": {
+			{stUpd(1, "x", "a"), stUpd(2, "a", "a")},
+			{stUpd(3, "a", "b"), stUpd(4, "a", "b"), stUpd(5, "b", "c")},
+		},
+	} {
+		_, err := stFold(t, pages, true)
+		if err == nil {
+			t.Fatalf("%s: folded", name)
+		}
+		stRefused(t, err, stWhyRepeatSeam)
+	}
 
 	// The first delivery on both sides of the move, then the second: the
 	// record in memory after the move starts at the third change, which the
