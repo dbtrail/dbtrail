@@ -108,10 +108,30 @@ func (b *ResultBudget) admit(logger *slog.Logger) *pgErr {
 	return b.refuse(logger)
 }
 
-// resultBytes is what a result built for the wire holds: its cells.
+// What a held result costs beside the bytes of its cells. A row is a slice of
+// cells (its header, 24 bytes) and goes on the wire as a DataRow message (a
+// type byte, a length, a count of cells: 7 bytes); a cell is a slice of bytes
+// (its header, 24 bytes) and goes on the wire behind its length (4 bytes). A
+// NULL or an empty cell holds no bytes of its own and costs these all the
+// same, so a result of many of them is not counted as nothing.
+//
+// The MySQL port counts each row as it is written for the wire
+// (shim.resultBytes): the cell's bytes and its length prefix, one byte for a
+// NULL. This counts the same things as they are on this wire, and the
+// headers this port keeps for each row and cell while it sends them.
+const (
+	sliceHeaderBytes  = 24
+	rowOverheadBytes  = sliceHeaderBytes + 7
+	cellOverheadBytes = sliceHeaderBytes + 4
+)
+
+// resultBytes is what a result built for the wire holds: its cells' bytes,
+// and the fixed cost of every row and every cell (rowOverheadBytes,
+// cellOverheadBytes).
 func resultBytes(rows [][][]byte) int64 {
 	var n int64
 	for _, row := range rows {
+		n += rowOverheadBytes + int64(len(row))*cellOverheadBytes
 		for _, cell := range row {
 			n += int64(len(cell))
 		}

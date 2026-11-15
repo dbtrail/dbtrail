@@ -52,9 +52,10 @@ func TestPGShim_timeTravelAnswerIsCountedInTheResultBudget(t *testing.T) {
 		t.Fatalf("name = %q, want alice", name)
 	}
 	waitBudget(t, "the answer to be given back once it was written", func() bool { return b.Held() == 0 })
-	// "1" and "alice".
-	if b.Charged() != 6 {
-		t.Fatalf("charged %d bytes for the row, want the 6 of its cells: a time-travel answer is counted", b.Charged())
+	// "1" and "alice", and the fixed cost of one row of two cells.
+	const row = 6 + rowOverheadBytes + 2*cellOverheadBytes
+	if b.Charged() != row {
+		t.Fatalf("charged %d bytes for the row, want %d: a time-travel answer is counted", b.Charged(), row)
 	}
 
 	// The row did not exist yet: an answer with no row counts nothing.
@@ -70,8 +71,8 @@ func TestPGShim_timeTravelAnswerIsCountedInTheResultBudget(t *testing.T) {
 	if rows.Err() != nil || n != 0 {
 		t.Fatalf("before the row existed: %d rows, %v", n, rows.Err())
 	}
-	if b.Charged() != 6 {
-		t.Fatalf("charged %d after an answer with no row, want 6 still", b.Charged())
+	if b.Charged() != row {
+		t.Fatalf("charged %d after an answer with no row, want %d still", b.Charged(), row)
 	}
 
 	// The port full: refused, not answered, and nothing counted.
@@ -80,7 +81,7 @@ func TestPGShim_timeTravelAnswerIsCountedInTheResultBudget(t *testing.T) {
 	if pe := requirePgError(t, err); pe.Code != "53000" || !contains(pe.Message, "still sending") {
 		t.Fatalf("on a full port: %s %q, want 53000", pe.Code, pe.Message)
 	}
-	if b.Charged() != 6 || b.Held() != b.Max() {
+	if b.Charged() != row || b.Held() != b.Max() {
 		t.Fatalf("a refused answer changed the count: charged %d, held %d", b.Charged(), b.Held())
 	}
 	b.held.Store(0)
@@ -88,7 +89,7 @@ func TestPGShim_timeTravelAnswerIsCountedInTheResultBudget(t *testing.T) {
 		t.Fatalf("with room again, name = %q, want alice", name)
 	}
 	waitBudget(t, "the answer to be given back", func() bool { return b.Held() == 0 })
-	if b.Charged() != 12 {
-		t.Fatalf("charged %d, want 12: the two rows that were sent", b.Charged())
+	if b.Charged() != 2*row {
+		t.Fatalf("charged %d, want %d: the two rows that were sent", b.Charged(), 2*row)
 	}
 }

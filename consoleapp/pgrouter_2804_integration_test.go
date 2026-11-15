@@ -70,8 +70,9 @@ func TestIntegrationPGRouter_answersAreCountedInThePortsResultBudget(t *testing.
 		t.Fatalf("time travel answered %v %v, want one row [1 alice] under [id name]", names, rows)
 	}
 	waitUntil(t, "the answer to be given back", func() bool { return budget.Held() == 0 })
-	// "1" and "alice".
-	if budget.Charged() != 6 {
-		t.Fatalf("the port's budget was charged %d bytes, want the 6 of the row's cells", budget.Charged())
+	// "1" and "alice" (6 bytes), and what the port counts for one row (31)
+	// of two cells (28 each): internal/pgshim's resultBytes.
+	if budget.Charged() != 6+31+2*28 {
+		t.Fatalf("the port's budget was charged %d bytes, want the %d of one row of two cells holding 6 bytes", budget.Charged(), 6+31+2*28)
 	}
 }

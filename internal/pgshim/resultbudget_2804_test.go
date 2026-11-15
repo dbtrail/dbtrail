@@ -23,9 +23,71 @@ import (
 // is no room for is refused, and what a connection counted is given back when
 // its answer is written or the connection ends.
 
-// cellsOf is a result of one row holding n bytes.
+// oneCell is what a result of one row of one cell costs before its bytes.
+const oneCell = rowOverheadBytes + cellOverheadBytes
+
+// cellsOf is a result of one row of one cell that costs n bytes in the
+// budget, its fixed cost included; 0 is a result of no rows.
 func cellsOf(n int) [][][]byte {
-	return [][][]byte{{make([]byte, n)}}
+	if n == 0 {
+		return nil
+	}
+	if n < oneCell {
+		panic("a result of one cell costs at least its fixed cost")
+	}
+	return [][][]byte{{make([]byte, n-oneCell)}}
+}
+
+// What a result costs: its cells' bytes, and a fixed cost for every row and
+// every cell, so a result of NULLs or of empty strings is not free. Each case
+// is held on a port whose budget the cells' bytes alone would stay under, and
+// the next statement must be refused.
+func TestResultBudget_aResultCostsItsRowsAndCellsNotOnlyTheirBytes(t *testing.T) {
+	grid := func(rows, cells int, cell func() []byte) [][][]byte {
+		out := make([][][]byte, rows)
+		for i := range out {
+			out[i] = make([][]byte, cells)
+			for j := range out[i] {
+				out[i][j] = cell()
+			}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name    string
+		rows    [][][]byte
+		payload int64
+		want    int64
+		budget  int64
+	}{
+		{"1000 rows of 10 NULL cells", grid(1000, 10, func() []byte { return nil }), 0, 1000*31 + 10000*28, 1000},
+		{"1000 rows of 10 empty strings", grid(1000, 10, func() []byte { return []byte{} }), 0, 1000*31 + 10000*28, 1000},
+		{"one large cell", grid(1, 1, func() []byte { return make([]byte, 1000) }), 1000, 1000 + 31 + 28, 1050},
+		{"one row of no cells", [][][]byte{{}}, 0, 31, 31},
+		{"no rows", nil, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resultBytes(tc.rows); got != tc.want {
+				t.Fatalf("the result costs %d bytes, want %d", got, tc.want)
+			}
+			if tc.budget == 0 {
+				return
+			}
+			if tc.payload >= tc.budget {
+				t.Fatalf("the cells' bytes alone (%d) reach the budget of %d: this would prove nothing", tc.payload, tc.budget)
+			}
+			b := NewResultBudget(tc.budget)
+			if err := budgetSession(b).holdResult(tc.rows); err != nil {
+				t.Fatalf("refused with nothing held: %s", err.msg)
+			}
+			if b.Held() != tc.want {
+				t.Fatalf("held %d, want %d", b.Held(), tc.want)
+			}
+			if err := budgetSession(b).admitResult(); err == nil {
+				t.Fatalf("with a result of %d bytes held on a port of %d, the next statement was let in", b.Held(), tc.budget)
+			}
+		})
+	}
 }
 
 func budgetSession(b *ResultBudget) *session {
@@ -61,12 +123,12 @@ func TestResultBudget_refusesAtTheBudgetNotBelowIt(t *testing.T) {
 		refused bool
 	}{
 		{"nothing held", 0, false},
-		{"one byte under the budget", 9, false},
-		{"exactly the budget", 10, true},
-		{"one byte over the budget", 11, true},
+		{"one byte under the budget", 999, false},
+		{"exactly the budget", 1000, true},
+		{"one byte over the budget", 1001, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b := NewResultBudget(10)
+			b := NewResultBudget(1000)
 			first := budgetSession(b)
 			// With nothing held the first result is always taken, whatever
 			// its size: the port holds under its budget plus one result.
@@ -77,13 +139,13 @@ func TestResultBudget_refusesAtTheBudgetNotBelowIt(t *testing.T) {
 				t.Fatalf("held %d, want %d", b.Held(), tc.first)
 			}
 			next := budgetSession(b)
-			before, after := next.admitResult(), next.holdResult(cellsOf(3))
+			before, after := next.admitResult(), next.holdResult(cellsOf(300))
 			if (before != nil) != tc.refused || (after != nil) != tc.refused {
-				t.Fatalf("with %d of 10 bytes held: before the statement %v, with its result %v; want refused=%v at both", tc.first, before, after, tc.refused)
+				t.Fatalf("with %d of 1000 bytes held: before the statement %v, with its result %v; want refused=%v at both", tc.first, before, after, tc.refused)
 			}
 			if !tc.refused {
-				if b.Held() != int64(tc.first+3) {
-					t.Fatalf("held %d, want %d", b.Held(), tc.first+3)
+				if b.Held() != int64(tc.first+300) {
+					t.Fatalf("held %d, want %d", b.Held(), tc.first+300)
 				}
 				return
 			}
@@ -106,30 +168,30 @@ func TestResultBudget_refusesAtTheBudgetNotBelowIt(t *testing.T) {
 }
 
 func TestResultBudget_aResultIsGivenBackOnce(t *testing.T) {
-	b := NewResultBudget(100)
+	b := NewResultBudget(10000)
 	one, two := budgetSession(b), budgetSession(b)
-	if err := one.holdResult(cellsOf(40)); err != nil {
+	if err := one.holdResult(cellsOf(4000)); err != nil {
 		t.Fatal(err.msg)
 	}
-	if err := two.holdResult(cellsOf(30)); err != nil {
+	if err := two.holdResult(cellsOf(3000)); err != nil {
 		t.Fatal(err.msg)
 	}
 	one.releaseResult()
-	if b.Held() != 30 {
-		t.Fatalf("held %d after one of two results was given back, want 30", b.Held())
+	if b.Held() != 3000 {
+		t.Fatalf("held %d after one of two results was given back, want 3000", b.Held())
 	}
 	// Twice: when the answer is written and again when the connection ends.
 	one.releaseResult()
 	one.releaseResult()
-	if b.Held() != 30 {
-		t.Fatalf("held %d after the same result was given back again, want 30: it was taken from another connection's count", b.Held())
+	if b.Held() != 3000 {
+		t.Fatalf("held %d after the same result was given back again, want 3000: it was taken from another connection's count", b.Held())
 	}
 	// A connection holds one result: its next one replaces the last.
-	if err := two.holdResult(cellsOf(5)); err != nil {
+	if err := two.holdResult(cellsOf(500)); err != nil {
 		t.Fatal(err.msg)
 	}
-	if b.Held() != 5 {
-		t.Fatalf("held %d, want the 5 bytes of the connection's present result", b.Held())
+	if b.Held() != 500 {
+		t.Fatalf("held %d, want the 500 bytes of the connection's present result", b.Held())
 	}
 	// No rows: nothing counted, nothing to give back.
 	if err := one.holdResult(nil); err != nil {
@@ -140,8 +202,8 @@ func TestResultBudget_aResultIsGivenBackOnce(t *testing.T) {
 	if b.Held() != 0 {
 		t.Fatalf("held %d with every result given back, want 0", b.Held())
 	}
-	if b.Charged() != 75 {
-		t.Fatalf("charged %d, want the 75 bytes ever counted", b.Charged())
+	if b.Charged() != 7500 {
+		t.Fatalf("charged %d, want the 7500 bytes ever counted", b.Charged())
 	}
 }
 
@@ -149,10 +211,10 @@ func TestResultBudget_aResultIsGivenBackOnce(t *testing.T) {
 // together they pass it, and the port never holds more than its budget plus
 // one result however the connections interleave.
 func TestResultBudget_manySmallResultsTogetherAreBounded(t *testing.T) {
-	const max, size, conns, rounds = 64, 8, 32, 2000
+	const max, size, conns, rounds = 640, 80, 32, 2000
 	b := NewResultBudget(max)
 
-	// In order first: eight results of 8 bytes fill 64, the ninth is refused,
+	// In order first: eight results of 80 bytes fill 640, the ninth is refused,
 	// and one given back makes room for it.
 	var sessions []*session
 	for i := 0; i < max/size; i++ {
@@ -320,6 +382,9 @@ const (
 	bigRows  = 24
 	bigCell  = 1 << 20
 	bigBytes = bigRows * bigCell
+	// bigHeld is what the port counts for it: the bytes, and the fixed cost
+	// of its 24 rows of one cell.
+	bigHeld = bigBytes + bigRows*oneCell
 )
 
 // bigOrSmall answers a statement that names "big" with 24 MiB in 24 rows,
@@ -370,11 +435,11 @@ func TestPort_aResultHeldForASlowClientRefusesTheNextStatement(t *testing.T) {
 
 	slow := rawLogin(t, addr)
 	slow.send("SELECT v FROM big")
-	waitBudget(t, "the port to hold the first result", func() bool { return b.Held() == bigBytes })
+	waitBudget(t, "the port to hold the first result", func() bool { return b.Held() == bigHeld })
 	// Held while it is being sent, not counted and given back at once.
 	time.Sleep(200 * time.Millisecond)
-	if b.Held() != bigBytes {
-		t.Fatalf("held %d a moment later, want the %d bytes of the result nobody read", b.Held(), bigBytes)
+	if b.Held() != bigHeld {
+		t.Fatalf("held %d a moment later, want the %d bytes of the result nobody read", b.Held(), bigHeld)
 	}
 
 	other := rawLogin(t, addr)
@@ -411,8 +476,8 @@ func TestPort_aResultHeldForASlowClientRefusesTheNextStatement(t *testing.T) {
 		t.Fatalf("with nothing held the statement got %d rows, error %q %q; want its row", a.rows, a.code, a.message)
 	}
 	waitBudget(t, "the small result to be given back", func() bool { return b.Held() == 0 })
-	if b.Charged() != bigBytes+1 {
-		t.Fatalf("charged %d, want %d: the two results that were sent", b.Charged(), bigBytes+1)
+	if want := int64(bigHeld + oneCell + 1); b.Charged() != want {
+		t.Fatalf("charged %d, want %d: the two results that were sent", b.Charged(), want)
 	}
 }
 
@@ -425,7 +490,7 @@ func TestPort_aClientThatLeavesMidResultGivesItBack(t *testing.T) {
 	addr := serveAddrCfg(t, Config{Login: p.login, ResultBudget: b})
 	gone := rawLogin(t, addr)
 	gone.send("SELECT v FROM big")
-	waitBudget(t, "the port to hold the result", func() bool { return b.Held() == bigBytes })
+	waitBudget(t, "the port to hold the result", func() bool { return b.Held() == bigHeld })
 	_ = gone.c.Close()
 	waitBudget(t, "the result of a client that left to be given back", func() bool { return b.Held() == 0 })
 	waitBudget(t, "the connection to end", func() bool {
@@ -452,7 +517,7 @@ func TestPort_aClientThatStopsReadingIsCut(t *testing.T) {
 	stuck := rawLogin(t, addr)
 	started := time.Now()
 	stuck.send("SELECT v FROM big")
-	waitBudget(t, "the port to hold the result", func() bool { return b.Held() == bigBytes })
+	waitBudget(t, "the port to hold the result", func() bool { return b.Held() == bigHeld })
 	waitBudget(t, "the result of a client that reads nothing to be given back", func() bool { return b.Held() == 0 })
 	if took := time.Since(started); took < 250*time.Millisecond {
 		t.Fatalf("given back after %v, before the write timeout: the client was not waited for", took)
@@ -535,15 +600,16 @@ func TestPort_aFailedStatementHoldsNothing(t *testing.T) {
 	if b.Charged() != 0 {
 		t.Fatalf("a result of no rows was charged %d bytes", b.Charged())
 	}
-	// And one with rows is counted by its cells: "12" + "abc", NULL nothing.
+	// And one with rows is counted by its cells: "12" + "abc", and the fixed
+	// cost of two rows of two cells, the NULL ones included.
 	set(sqlsandbox.Result{Columns: col, Rows: [][]any{{json.Number("12"), "abc"}, {nil, nil}}}, nil)
 	c.send("SELECT a, b FROM t")
 	if a := c.read(0); a.code != "" || a.rows != 2 {
 		t.Fatalf("%d rows, error %q %q; want 2 rows", a.rows, a.code, a.message)
 	}
 	waitBudget(t, "the result to be given back", func() bool { return b.Held() == 0 })
-	if b.Charged() != 5 {
-		t.Fatalf("charged %d, want the 5 bytes of the cells", b.Charged())
+	if want := int64(5 + 2*rowOverheadBytes + 4*cellOverheadBytes); b.Charged() != want {
+		t.Fatalf("charged %d, want %d: the 5 bytes of the cells and the cost of 2 rows and 4 cells", b.Charged(), want)
 	}
 }
 
