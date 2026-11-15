@@ -856,8 +856,6 @@ services:
     # 0 = no ceiling. See PG_ROUTER_MEMORY / PG_ROUTER_CPUS above.
     mem_limit: ${PG_ROUTER_MEMORY:-0}
     cpus: ${PG_ROUTER_CPUS:-0}
-    # A lower CPU priority than capture, as the router has.
-    cpu_shares: ${PG_ROUTER_CPU_SHARES:-256}
     volumes:
       - bintrail-state:/var/lib/bintrail:ro
     restart: unless-stopped
