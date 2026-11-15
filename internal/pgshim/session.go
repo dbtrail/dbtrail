@@ -76,7 +76,7 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// back when this returns: its answer is written by then, or never will
 	// be (the write failed, the client left, the statement was refused).
 	defer s.releaseResult()
-	cols, rows, tag, perr := s.run(qstr)
+	cols, types, rows, tag, perr := s.run(qstr)
 	if perr != nil {
 		s.fail(perr)
 		return s.readyFlush()
@@ -86,7 +86,7 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// resolves to zero rows (row absent at AsOf) — has a non-nil cols and emits
 	// the RowDescription so the client sees the real column header.
 	if cols != nil {
-		s.rowDescription(cols, nil)
+		s.rowDescription(cols, types, nil)
 		for _, r := range rows {
 			s.dataRow(r)
 		}
@@ -102,13 +102,16 @@ func isEmptyQuery(qstr string) bool { return strings.Trim(qstr, " \t\r\n;") == "
 // run answers one statement, either protocol's, and moves the transaction
 // status: BEGIN opens a block, COMMIT and ROLLBACK end it, and in a failed
 // block nothing but those runs (25P02), as on PostgreSQL.
-func (s *session) run(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
+//
+// types are the columns' types (coltypes.go); nil, or a column past its
+// end, is text.
+func (s *session) run(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	if perr := s.abortedRefusal(qstr); perr != nil {
-		return nil, nil, "", perr
+		return nil, nil, nil, "", perr
 	}
-	cols, rows, tag, perr = s.resolve(qstr)
+	cols, types, rows, tag, perr = s.resolve(qstr)
 	if perr != nil {
-		return nil, nil, "", perr
+		return nil, nil, nil, "", perr
 	}
 	switch tag {
 	case "BEGIN":
@@ -128,7 +131,7 @@ func (s *session) run(qstr string) (cols []string, rows [][][]byte, tag string, 
 		s.tx = 'I'
 		s.dropPortals()
 	}
-	return cols, rows, tag, nil
+	return cols, types, rows, tag, nil
 }
 
 // abortedRefusal refuses a statement in a failed transaction block other
@@ -228,22 +231,25 @@ func (s *session) classify(qstr string) classified {
 }
 
 // resolve parses and runs a query through the shared engine, returning the
-// column list, the (zero or one) rendered rows, the CommandComplete tag, and a
-// query-level error. Single-row AS OF only; full-table and _diff are refused.
-func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
+// column list and types, the rendered rows, the CommandComplete tag, and a
+// query-level error. Time travel is single-row AS OF only (full-table and
+// _diff are refused), and its columns are text: a row as it was can carry
+// other columns, and other types, than the table has now.
+func (s *session) resolve(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	c := s.classify(qstr)
 	switch c.kind {
 	case kindRefused:
-		return nil, nil, "", c.perr
+		return nil, nil, nil, "", c.perr
 	case kindProbe:
 		if c.perr != nil {
-			return nil, nil, "", c.perr
+			return nil, nil, nil, "", c.perr
 		}
-		return nil, nil, c.tag, nil
+		return nil, nil, nil, c.tag, nil
 	case kindFree:
 		return s.runFree(qstr)
 	}
-	return s.resolveTimeTravel(c.q)
+	cols, rows, tag, perr = s.resolveTimeTravel(c.q)
+	return cols, nil, rows, tag, perr
 }
 
 // timeTravelGates are the refusals a time-travel statement meets before
@@ -481,24 +487,19 @@ func probeReply(qstr string) (tag string, ok bool) {
 
 // --- wire writers ---------------------------------------------------------
 
-// rowDescription describes the columns. formats are a portal's result
-// formats from its Bind: none (text), one for every column, or one each.
-func (s *session) rowDescription(cols []string, formats []int16) {
+// rowDescription describes the columns, each with its type (types; text
+// where it has none). formats are a portal's result formats from its Bind:
+// none (text), one for every column, or one each.
+func (s *session) rowDescription(cols []string, types []colType, formats []int16) {
 	fields := make([]pgproto3.FieldDescription, len(cols))
 	for i, c := range cols {
-		format := int16(pgproto3.TextFormat)
-		switch len(formats) {
-		case 1:
-			format = formats[0]
-		case len(cols):
-			format = formats[i]
-		}
+		t := typeAt(types, i)
 		fields[i] = pgproto3.FieldDescription{
 			Name:         []byte(c),
-			DataTypeOID:  pgtypeText,
-			DataTypeSize: -1, // variable-length
-			TypeModifier: -1,
-			Format:       format,
+			DataTypeOID:  t.oid,
+			DataTypeSize: t.size,
+			TypeModifier: t.typmod,
+			Format:       formatAt(formats, len(cols), i),
 		}
 	}
 	s.be.Send(&pgproto3.RowDescription{Fields: fields})

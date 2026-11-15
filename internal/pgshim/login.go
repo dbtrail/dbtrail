@@ -26,8 +26,10 @@ import (
 // shim.yaml tenant and time travel alone.
 //
 // What a client gets is the copy's SQL over a PostgreSQL wire: the simple
-// and the extended query protocol (extended.go), every column sent as text (a value written the way
-// PostgreSQL writes one of its kind, pgtext.Cell), and nothing that writes.
+// and the extended query protocol (extended.go), every column announced with
+// its PostgreSQL type and written the way PostgreSQL writes a value of that
+// type (pgtext.Cell; in binary when the client asks, coltypes.go), and nothing
+// that writes.
 // The login is SCRAM-SHA-256 (scram.go), so the password never crosses the
 // wire, and the port serves TLS when the host gives it a certificate.
 //
@@ -193,7 +195,7 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, l
 var loginTimeout = 30 * time.Second
 
 // runFree answers a statement that is not time travel on the copy.
-func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
+func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
 	defer func() {
 		// A client that left, or a port that is closing, is not the copy
@@ -205,7 +207,7 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 	// Before anything is run (#2804): a statement whose result the port has
 	// no room to hold is refused here, not after the copy answered it.
 	if refusal := s.admitResult(); refusal != nil {
-		return nil, nil, "", refusal
+		return nil, nil, nil, "", refusal
 	}
 	res, err := s.bound.Run(s.ctx, qstr)
 	if res.Spool != nil {
@@ -216,12 +218,12 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 		}
 	}
 	if err != nil {
-		return nil, nil, "", freeError(err, s.logger)
+		return nil, nil, nil, "", freeError(err, s.logger)
 	}
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows
 		// for the whole answer.
-		return nil, nil, "", &pgErr{"54000", fmt.Sprintf(
+		return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
 			"the result has more than %d rows, the most one statement returns on this port, and is not returned cut; add a LIMIT or narrow the statement",
 			len(res.Rows))}
 	}
@@ -231,19 +233,21 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 		// again the way PostgreSQL writes its kind, and a cut bytea would
 		// come out as other bytes with no marker in sight. A notice is not
 		// enough: most drivers drop it.
-		return nil, nil, "", &pgErr{"54000", fmt.Sprintf(
+		return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
 			"%d cell(s) of the result are longer than the most one cell may be on this port, and are not returned cut; select fewer columns, or a part of the long one (substring, left)",
 			res.TruncatedCells)}
 	}
 	cols = make([]string, len(res.Columns))
+	types = make([]colType, len(res.Columns))
 	for i, c := range res.Columns {
 		cols[i] = c.Name
+		types[i] = columnType(c.Type)
 	}
 	rows = make([][][]byte, len(res.Rows))
 	for i, r := range res.Rows {
 		if len(r) != len(cols) {
 			s.logger.Error("pgshim: a row of the copy's answer has the wrong number of cells", "row", i, "cells", len(r), "columns", len(cols))
-			return nil, nil, "", &pgErr{"XX000", "the copy's answer could not be read; DBTrail's log has the details"}
+			return nil, nil, nil, "", &pgErr{"XX000", "the copy's answer could not be read; DBTrail's log has the details"}
 		}
 		cells := make([][]byte, len(r))
 		for j, v := range r {
@@ -258,13 +262,13 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 	// taken while the statement ran. Before the notice and the audit
 	// record: a refused answer served nobody.
 	if refusal := s.holdResult(rows); refusal != nil {
-		return nil, nil, "", refusal
+		return nil, nil, nil, "", refusal
 	}
 	if res.Note != "" {
 		s.notice(res.Note)
 	}
 	s.recordFree(qstr, res)
-	return cols, rows, "SELECT " + strconv.Itoa(len(rows)), nil
+	return cols, types, rows, "SELECT " + strconv.Itoa(len(rows)), nil
 }
 
 // notice sends the client a sentence beside the statement's answer.

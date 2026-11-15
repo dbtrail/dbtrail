@@ -22,6 +22,13 @@ func postgresColumnNames(stmt any, n int) (names []string) {
 		}
 	}()
 	root, _ := stmt.(map[string]any)
+	if inner, ok := describeWrapped(root); ok {
+		// The PostgreSQL port's Describe asks for a statement's columns as
+		// SELECT * FROM (<statement>) AS dbtrail_describe LIMIT 0. A star
+		// over a subquery takes the subquery's column names, on PostgreSQL
+		// as on the engine: the names are the statement's own.
+		return postgresColumnNames(inner, n)
+	}
 	list := pgSelectList(root["node"])
 	if len(list) == 0 || len(list) != n {
 		return nil
@@ -47,6 +54,107 @@ func postgresColumnNames(stmt any, n int) (names []string) {
 		}
 	}
 	return out
+}
+
+// describeWrapped reads exactly the PostgreSQL port's Describe wrapper,
+// SELECT * FROM (<statement>) AS dbtrail_describe LIMIT 0, and returns the
+// statement inside it. Anything else, or anything more (a WHERE, another
+// limit, an offset, a star that excludes, renames or replaces, a column
+// alias list), is not it: ok is false and the names are worked out as they
+// always were.
+func describeWrapped(root map[string]any) (inner any, ok bool) {
+	node, _ := root["node"].(map[string]any)
+	if node["type"] != "SELECT_NODE" || !emptyField(root, "named_param_map") {
+		return nil, false
+	}
+	for _, k := range []string{"where_clause", "having", "qualify", "sample"} {
+		if node[k] != nil {
+			return nil, false
+		}
+	}
+	for _, k := range []string{"group_expressions", "group_sets"} {
+		if !emptyField(node, k) {
+			return nil, false
+		}
+	}
+	if cte, _ := node["cte_map"].(map[string]any); !emptyField(cte, "map") {
+		return nil, false
+	}
+	if h, found := node["aggregate_handling"]; found && h != "STANDARD_HANDLING" {
+		return nil, false
+	}
+	list, _ := node["select_list"].([]any)
+	if len(list) != 1 {
+		return nil, false
+	}
+	star, _ := list[0].(map[string]any)
+	if star["class"] != "STAR" || star["type"] != "STAR" || star["expr"] != nil {
+		return nil, false
+	}
+	if alias, _ := star["alias"].(string); alias != "" {
+		return nil, false
+	}
+	if rel, _ := star["relation_name"].(string); rel != "" {
+		return nil, false
+	}
+	if cols, _ := star["columns"].(bool); cols {
+		return nil, false
+	}
+	for _, k := range []string{"exclude_list", "replace_list", "rename_list", "qualified_exclude_list"} {
+		if !emptyField(star, k) {
+			return nil, false
+		}
+	}
+	from, _ := node["from_table"].(map[string]any)
+	if from["type"] != "SUBQUERY" || from["alias"] != "dbtrail_describe" || from["sample"] != nil || !emptyField(from, "column_name_alias") {
+		return nil, false
+	}
+	mods, _ := node["modifiers"].([]any)
+	if len(mods) != 1 {
+		return nil, false
+	}
+	mod, _ := mods[0].(map[string]any)
+	if mod["type"] != "LIMIT_MODIFIER" || mod["offset"] != nil {
+		return nil, false
+	}
+	limit, _ := mod["limit"].(map[string]any)
+	val, _ := limit["value"].(map[string]any)
+	if limit["class"] != "CONSTANT" || val["is_null"] != false || !isZero(val["value"]) {
+		return nil, false
+	}
+	sub, _ := from["subquery"].(map[string]any)
+	if sub == nil {
+		return nil, false
+	}
+	return sub, true
+}
+
+// emptyField says m[k] is absent, null, or an empty list or object.
+func emptyField(m map[string]any, k string) bool {
+	switch v := m[k].(type) {
+	case nil:
+		return true
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	}
+	return false
+}
+
+func isZero(v any) bool {
+	switch x := v.(type) {
+	case float64:
+		return x == 0
+	case int64:
+		return x == 0
+	case int:
+		return x == 0
+	}
+	if n, ok := v.(interface{ String() string }); ok {
+		return n.String() == "0"
+	}
+	return false
 }
 
 // pgSelectList is the select list that names a query node's columns: a
