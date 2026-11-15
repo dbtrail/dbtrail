@@ -84,7 +84,7 @@ func TestLatin1Columns(t *testing.T) {
 	}
 }
 
-func TestDumpIsBinary(t *testing.T) {
+func TestHeaderSaysBinary(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
 		p := filepath.Join(dir, name)
@@ -100,23 +100,23 @@ func TestDumpIsBinary(t *testing.T) {
 		"mydumper default":       {"/*!40101 SET NAMES binary*/;\n/*!40014 SET FOREIGN_KEY_CHECKS=0*/;\nINSERT INTO `t` VALUES(1,\"caf\xe9\");\n", true},
 		"set names utf8mb4":      {"/*!40101 SET NAMES utf8mb4*/;\nINSERT INTO `t` VALUES(1,\"café\");\n", false},
 		"lower case, spaces":     {"/*!40101   set names   'BINARY' */;\n", true},
+		"set names latin1":       {"/*!40101 SET NAMES latin1*/;\n", true},
 		"no SET NAMES: mydumper": {"INSERT INTO `t` VALUES(1,\"caf\xe9\");\n", true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			p := write(name+".sql", c.body)
-			if got := dumpIsBinary(TableFiles{Format: "sql", DataFiles: []string{p}}); got != c.want {
+			if got := headerSaysBinary(write(name+".sql", c.body)); got != c.want {
 				t.Fatalf("got %v, want %v", got, c.want)
 			}
 		})
 	}
-	if !dumpIsBinary(TableFiles{Format: "sql"}) {
-		t.Fatal("a table with no data file has nothing to decide; binary")
+	if !headerSaysBinary(filepath.Join(dir, "missing.sql")) {
+		t.Fatal("a file that will not open is left to the read that follows; binary")
 	}
 	// A tab dump's first lines are rows: a cell reading SET NAMES utf8 is
-	// data, not the dump's character set.
+	// data, not the dump's character set, and the file is not scanned.
 	tab := write("rows.dat", "1\tset names utf8\n2\tcaf\xe9\n")
-	if !dumpIsBinary(TableFiles{Format: "tab", DataFiles: []string{tab}}) {
-		t.Fatal("a tab dump is stored bytes; its rows are not a header")
+	if stored, err := fileHoldsStoredLatin1(context.Background(), tab, "tab", []bool{false, true}); err != nil || !stored {
+		t.Fatalf("a tab dump is stored bytes; its rows are not a header: %v, %v", stored, err)
 	}
 }
 
