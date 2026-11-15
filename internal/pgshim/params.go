@@ -35,6 +35,10 @@ import (
 // parameters in 16 bits.
 const maxParams = 65535
 
+// maxPlaceholders is how many placeholders one statement may have, a
+// parameter named twice counted twice: past it the template is refused.
+const maxPlaceholders = maxParams
+
 // template is a statement cut at its placeholders.
 type template struct {
 	// parts is the text around the placeholders: len(parts) == len(refs)+1.
@@ -95,6 +99,9 @@ func splitParams(q string) (template, *pgErr) {
 				num, err := strconv.Atoi(q[i+1 : j])
 				if err != nil || num < 1 || num > maxParams {
 					return template{}, &pgErr{"42P02", fmt.Sprintf("there is no parameter %s", q[i:j])}
+				}
+				if len(t.refs) >= maxPlaceholders {
+					return template{}, &pgErr{"54000", fmt.Sprintf("a statement may name its parameters at most %d times", maxPlaceholders)}
 				}
 				t.parts = append(t.parts, q[start:i])
 				t.refs = append(t.refs, num-1)
@@ -746,18 +753,34 @@ func (t template) fill(args []arg, rd reader) (string, *pgErr) {
 		}
 		lits[i] = lit
 	}
+	// The length is counted before anything is written: a placeholder named
+	// many times repeats its argument each time, and the finished text must
+	// not grow past the longest statement a client may send.
+	total := 0
+	for i, part := range t.parts {
+		total += len(part)
+		if i < len(t.refs) {
+			ref := t.refs[i]
+			if ref >= len(lits) {
+				return "", &pgErr{"08P01", fmt.Sprintf("there is no parameter $%d", ref+1)}
+			}
+			total += len(lits[ref]) + 2
+		}
+		if total > maxStatementMessage {
+			return "", &pgErr{"54000", fmt.Sprintf(
+				"the statement with its arguments written in is longer than %d MB, the most this port takes; send shorter arguments, or name each one fewer times",
+				maxStatementMessage>>20)}
+		}
+	}
 	var b strings.Builder
+	b.Grow(total)
 	for i, part := range t.parts {
 		b.WriteString(part)
 		if i == len(t.refs) {
 			break
 		}
-		ref := t.refs[i]
-		if ref >= len(lits) {
-			return "", &pgErr{"08P01", fmt.Sprintf("there is no parameter $%d", ref+1)}
-		}
 		b.WriteByte(' ')
-		b.WriteString(lits[ref])
+		b.WriteString(lits[t.refs[i]])
 		b.WriteByte(' ')
 	}
 	return b.String(), nil

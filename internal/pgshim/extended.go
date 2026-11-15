@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -231,7 +232,7 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.extFail(&pgErr{"26000", fmt.Sprintf("prepared statement %q does not exist", m.Name)})
 			return
 		}
-		cols, perr := s.describeStatement(st)
+		cols, held, perr := s.describeStatement(st)
 		if perr != nil {
 			// What fails here PostgreSQL reports at Parse, where the
 			// statement then never exists. It goes, so that a client that
@@ -242,8 +243,11 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			return
 		}
 		s.be.Send(&pgproto3.ParameterDescription{ParameterOIDs: st.paramOIDs})
+		st.described = -1
 		if cols == nil {
-			st.described = noRows
+			if held {
+				st.described = noRows
+			}
 			s.be.Send(&pgproto3.NoData{})
 			return
 		}
@@ -282,34 +286,36 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 }
 
 // describeStatement says, before any argument exists, what a statement
-// returns: its columns, or nil for none. It runs nothing a client would be
-// answered from, and it meets every gate the statement would.
-func (s *session) describeStatement(st *preparedStatement) ([]string, *pgErr) {
+// returns: its columns, or nil for none. It reads no row, and it meets every
+// gate the statement would. held is false when the answer is not one the
+// statement's executions are held to (a statement the copy could not
+// describe, see describeFree).
+func (s *session) describeStatement(st *preparedStatement) (cols []string, held bool, perr *pgErr) {
 	if perr := s.abortedRefusal(st.query); perr != nil {
-		return nil, perr
+		return nil, false, perr
 	}
 	if isEmptyQuery(st.query) {
-		return nil, nil
+		return nil, true, nil
 	}
 	c := s.classify(st.probeText())
 	switch c.kind {
 	case kindRefused:
-		return nil, c.perr
+		return nil, false, c.perr
 	case kindProbe:
 		// A session statement returns no rows; one that is refused is
 		// refused when it executes, with its own arguments.
-		return nil, nil
+		return nil, true, nil
 	case kindTimeTravel:
 		// The gates first: the table's columns are something said about it.
 		if perr := s.timeTravelGates(c.q); perr != nil {
-			return nil, perr
+			return nil, false, perr
 		}
 		cols := s.h.ColumnsFor(nil, c.q)
 		if cols == nil {
 			// Rows of no known column: still rows, not NoData.
 			cols = []string{}
 		}
-		return cols, nil
+		return cols, true, nil
 	}
 	return s.describeFree(st)
 }
@@ -317,43 +323,51 @@ func (s *session) describeStatement(st *preparedStatement) ([]string, *pgErr) {
 // describeFree finds the columns of a statement for the copy with NULL for
 // every argument, through the executor the connection is bound to, so the
 // copy's own rules (its views, what a server hides) hold for it as they do
-// for the statement. First as a subquery that returns no row, which costs
-// the copy nothing; a statement that cannot stand in a subquery (SHOW,
-// DESCRIBE) runs as it is, its rows dropped. Neither run is answered to the
-// client or recorded as one: the statement's own Execute is.
-func (s *session) describeFree(st *preparedStatement) ([]string, *pgErr) {
+// for the statement. It asks with the statement inside a subquery that
+// returns no row, which costs the copy nothing, and never runs the statement
+// itself: a Describe reads no row.
+//
+// A statement that cannot stand in a subquery (a write, a syntax error, SHOW)
+// is described as returning no rows (NoData), and nothing is held against
+// its Execute: that runs the statement as a simple query runs it, and
+// answers the error a simple query gets, with its code, where the subquery's
+// error would name another statement than the client's. described returns
+// false then.
+func (s *session) describeFree(st *preparedStatement) (cols []string, described bool, perr *pgErr) {
 	nulls := make([]arg, len(st.paramOIDs))
 	for i, oid := range st.paramOIDs {
 		nulls[i] = arg{null: true, cast: typedCast[oid]}
 	}
 	text, perr := st.tmpl.fill(nulls, readCopy)
 	if perr != nil {
-		return nil, perr
+		return nil, false, perr
 	}
 	body := strings.TrimRight(text, " \t\r\n;")
 	// On lines of their own: a statement that ends in a -- comment must not
 	// comment out the closing parenthesis.
 	wrapped := "SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0"
-	if cols, err := s.columnsOf(wrapped); err == nil {
-		return cols, nil
-	}
-	cols, err := s.columnsOf(text)
-	if err != nil {
-		return nil, freeError(err, s.logger)
-	}
-	return cols, nil
+	cols, ok := s.columnsOf(wrapped)
+	return cols, ok, nil
 }
 
-// columnsOf runs text on the copy and returns its column names.
-func (s *session) columnsOf(text string) ([]string, error) {
+// columnsOf runs text on the copy, counted and recorded as every statement
+// the port runs is (runFree), and returns its column names; ok is false when
+// it failed.
+func (s *session) columnsOf(text string) (cols []string, ok bool) {
+	started := time.Now()
 	res, err := s.bound.Run(s.ctx, text)
+	if s.bound.Answered != nil && s.ctx.Err() == nil {
+		s.bound.Answered(time.Since(started), err != nil)
+	}
 	if res.Spool != nil {
 		_ = res.Spool.Close()
 	}
 	if err != nil {
-		return nil, err
+		s.logger.Debug("pgshim: a statement could not be described", "err", err)
+		return nil, false
 	}
-	return columnNames(res.Columns), nil
+	s.recordFree(text, res)
+	return columnNames(res.Columns), true
 }
 
 func columnNames(cols []sqlsandbox.Column) []string {

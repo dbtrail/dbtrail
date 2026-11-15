@@ -283,3 +283,27 @@ func numericBinary(ndigits, weight int16, sign, dscale uint16, digits ...uint16)
 	}
 	return b
 }
+
+// A placeholder named many times repeats its argument each time: the finished
+// text is refused past the longest statement the port takes, before it is
+// written, and a template with too many placeholders is refused at Parse.
+func TestTemplateFillIsCapped(t *testing.T) {
+	tm, perr := splitParams("SELECT " + strings.Repeat("$1,", 20) + "1")
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	big := arg{kind: argText, text: strings.Repeat("x", 1<<20)}
+	if _, perr := tm.fill([]arg{big}, readCopy); perr == nil || perr.code != "54000" {
+		t.Fatalf("20 copies of a 1 MB argument: %v, want 54000", perr)
+	}
+	small := arg{kind: argText, text: strings.Repeat("x", 1<<10)}
+	if _, perr := tm.fill([]arg{small}, readCopy); perr != nil {
+		t.Fatalf("20 copies of a 1 KB argument: %v", perr)
+	}
+	if _, perr := splitParams("SELECT " + strings.Repeat("$1,", maxPlaceholders) + "1"); perr != nil {
+		t.Fatalf("%d placeholders: %v", maxPlaceholders, perr)
+	}
+	if _, perr := splitParams("SELECT " + strings.Repeat("$1,", maxPlaceholders+1) + "1"); perr == nil || perr.code != "54000" {
+		t.Fatalf("%d placeholders: %v, want 54000", maxPlaceholders+1, perr)
+	}
+}

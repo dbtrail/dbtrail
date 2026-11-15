@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/dbtrail/dbtrail/internal/audittest"
 	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 )
@@ -29,6 +30,8 @@ type echoLogin struct {
 	ran  []string
 	rows int
 	tt   func() *Binding // when set, the binding to hand out
+	// answered counts what the binding's Answered was told.
+	answered int
 }
 
 func (e *echoLogin) setRows(n int) {
@@ -50,6 +53,9 @@ func (e *echoLogin) run(_ context.Context, st string) (sqlsandbox.Result, error)
 	e.mu.Unlock()
 	if strings.Contains(st, "DELETE") {
 		return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: "only a single SELECT statement can run here"}
+	}
+	if strings.Contains(st, "dbtrail_describe") && strings.Contains(st, "SHOW") {
+		return sqlsandbox.Result{}, &sqlsandbox.RefusedError{Reason: "syntax error at or near \"SHOW\""}
 	}
 	if strings.Contains(st, "no_such_table") {
 		return sqlsandbox.Result{}, &sqlsandbox.QueryError{Message: "Catalog Error: Table with name no_such_table does not exist!"}
@@ -77,7 +83,17 @@ func (e *echoLogin) login(_ context.Context, _, _, password string, _ func()) (*
 	if e.tt != nil {
 		return e.tt(), nil
 	}
-	return &Binding{Run: e.run, Actor: "server:orders", Schema: "public"}, nil
+	return &Binding{Run: e.run, Actor: "server:orders", Schema: "public", Answered: func(time.Duration, bool) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.answered++
+	}}, nil
+}
+
+func (e *echoLogin) timesAnswered() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.answered
 }
 
 func dialEcho(t *testing.T, e *echoLogin, mode pgx.QueryExecMode) *pgx.Conn {
@@ -630,4 +646,45 @@ func TestExtended_flashbackFrontEnd(t *testing.T) {
 	if _, err := conn.Exec(ctx, "SET x = 1"); err != nil {
 		t.Fatalf("the connection after the refusals: %v", err)
 	}
+}
+
+// A Describe never runs the client's statement itself: only the subquery that
+// returns no row, counted and recorded like every statement the port runs.
+// A statement that cannot stand in one is described as returning no rows, and
+// its Execute is what runs it.
+func TestExtended_describeNeverRunsTheStatementItself(t *testing.T) {
+	rec := audittest.Install(t)
+	e := &echoLogin{}
+	r := dialRaw(t, e.login)
+	want(t, "describe what cannot stand in a subquery", r.send(
+		&pgproto3.Parse{Name: "show", Query: "SHOW TABLES"}, &pgproto3.Describe{ObjectType: 'S', Name: "show"}, &pgproto3.Sync{}),
+		"ParseComplete", "ParameterDescription []", "NoData", "ReadyForQuery I")
+	want(t, "describe a read", r.send(
+		&pgproto3.Parse{Name: "read", Query: "SELECT stmt FROM t WHERE a = $1"}, &pgproto3.Describe{ObjectType: 'S', Name: "read"}, &pgproto3.Sync{}),
+		"ParseComplete", "ParameterDescription [0]", "RowDescription stmt/0", "ReadyForQuery I")
+	ran := e.statements()
+	if len(ran) != 2 {
+		t.Fatalf("the describes ran %q, want two subqueries", ran)
+	}
+	for _, st := range ran {
+		if !strings.HasPrefix(st, "SELECT * FROM (\n") || !strings.HasSuffix(st, "\n) AS dbtrail_describe LIMIT 0") {
+			t.Fatalf("a describe ran the statement itself: %q", st)
+		}
+	}
+	if n := e.timesAnswered(); n != 2 {
+		t.Fatalf("the binding was told of %d statements, want the 2 the describes ran", n)
+	}
+	var recorded []string
+	for _, ev := range rec.Events() {
+		if ev.Surface == "shim" && ev.Action == "sql.run" {
+			recorded = append(recorded, ev.Detail["sql"])
+		}
+	}
+	if len(recorded) != 1 || recorded[0] != ran[1] {
+		t.Fatalf("audit records %q, want the one describe that answered (%q)", recorded, ran[1])
+	}
+	// Described as no rows, the statement's Execute still answers its rows:
+	// nothing was held against it.
+	want(t, "execute the undescribed", r.send(&pgproto3.Bind{PreparedStatement: "show"}, &pgproto3.Execute{}, &pgproto3.Sync{}),
+		"BindComplete", "DataRow SHOW TABLES", "CommandComplete SELECT 1", "ReadyForQuery I")
 }
