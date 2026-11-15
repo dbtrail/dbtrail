@@ -101,7 +101,8 @@ metrics to the next free port and says so. Choose one yourself with
 answers nothing until the port is on: adding the first server turns it on,
 or turn it on in the web interface). When 3309 is
 taken, the installer leaves that port unpublished and says so; add a `ports:`
-line to the `router` service of `docker-compose.yml` to use it. Prefer to drive Compose yourself?
+line to the `router` service of `docker-compose.yml` to use it. The PostgreSQL
+port, 5433 (the `pg-router` service), is handled the same way. Prefer to drive Compose yourself?
 
 Take the compose file of one release and write its version down, so a later
 `docker compose pull` stays on it. Set `V` to the newest version on the
@@ -226,8 +227,11 @@ the two apart, not its place: two folders that end in the same name
 
 The ports the first installation holds are found taken: metrics move to a free
 port by themselves, and the MySQL port (3309) is left unpublished, with the
-installer saying so. A PostgreSQL installation has no use for it. A second
-MySQL or MariaDB installation does: the installer prints the `ports:` line to
+installer saying so, and so is the PostgreSQL port (5433). An installation
+uses the port of its own family and has no use for the other. A second
+PostgreSQL installation adds a `ports:` line to its `pg-router` service (such
+as `127.0.0.1:5434:5433`) and connects to that number. A second
+MySQL or MariaDB installation does the same with the `router` service: the installer prints the `ports:` line to
 add to its `docker-compose.yml` (such as `127.0.0.1:3310:3309`), and that
 number is the one to use after `-P`, whatever the web interface prints.
 

@@ -272,6 +272,7 @@ What a stale compose file costs:
 | What your file is missing | What it costs | How it looks |
 |---|---|---|
 | `BINTRAIL_TELEMETRY_DIR` on the `bintrail`, `router` and `shim` services (file version 5) | the usage telemetry choice lives inside the container, so the next `up -d` that recreates it deletes the choice | **Silent.** Telemetry you turned off in the web interface, or with `telemetry off`, is on again after the upgrade. `BINTRAIL_TELEMETRY=off` and `DO_NOT_TRACK=1` in the file are not affected |
+| the `pg-router` service on port 5433 (file version 9) | nothing answers on the PostgreSQL port, where PostgreSQL clients read the copy of a PostgreSQL server | PostgreSQL clients that connect to 5433 are refused, with the port turned on or off. Nothing says so. An installation with MySQL or MariaDB servers only loses nothing |
 | the `router` service on port 3309 (file version 4) | nothing answers on the MySQL port. This version serves it from the `router` service only; the `bintrail` service no longer opens it | MySQL clients that connected to 3309 are refused. With the port turned on, `bintrail` prints a `WARNING` at startup that says so (below) |
 | the state paths on the `bintrail-state` volume | your username and password, the servers you added, and the AI connection token live inside the container, so the next `up -d` that recreates it deletes them | **Silent.** The web interface comes back asking you to create a password, exactly like a fresh install, and reports no loss. Fix this one first |
 | the read-only index mount plus `BINTRAIL_INDEX_DATADIR_RO` | free disk space for the index cannot be measured | The preflight and the Retention page report it as not measurable |
@@ -836,6 +837,73 @@ be read back.
 Without this service nothing serves the MySQL port: the web interface can
 turn it on and nothing listens. The router itself is described in
 [The router](time-travel-sql.md#the-router-the-process-that-serves-the-port).
+### The PostgreSQL router: the service that answers the PostgreSQL port
+
+The stack starts a `pg-router` service too. PostgreSQL clients and
+applications connect to it, on port **5433**, to read the copy of a
+PostgreSQL server. An installation serves one database family, so with MySQL
+or MariaDB servers this service has nothing to answer for: it waits and uses
+next to nothing.
+
+The stack publishes it as `127.0.0.1:5433`. Like the MySQL port, it listens
+only while the port for SQL clients is turned on in the web interface
+(**Settings**, **Connect a SQL client**), with the password created there,
+and closes with every connection when the port is turned off. With
+`CONSOLE_TOKEN` set in `.env`, the token is accepted as a password too while
+the port is on; it does not open it.
+
+```bash
+psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app sslmode=require"
+```
+
+The database name is the server's id or name; the username can be anything.
+The copy answers every statement, by PostgreSQL's rules. Nothing is sent to
+your PostgreSQL, and a statement that is not a read is refused.
+
+For another machine, open a tunnel, or widen the mapping to `"5433:5433"`
+behind a firewall: the port's password reads every server. If 5433 is taken
+on this machine, delete the whole `ports:` line of the `pg-router` service
+(`install.sh` does that for you and says so).
+
+**Encryption.** The login is SCRAM-SHA-256, so the password never crosses the
+network. A client that asks for TLS gets it. Out of the box the certificate is
+made up when the service starts: `sslmode=require` works, and `verify-ca` and
+`verify-full` refuse it. The port cannot turn away a client that asks for no
+TLS, so set `sslmode=require` or stricter in every client that connects from
+another machine.
+
+To serve a certificate clients can verify, mount it into the service and name
+the two paths in `.env`:
+
+```yaml
+  pg-router:
+    volumes:
+      - bintrail-state:/var/lib/bintrail:ro
+      - /etc/dbtrail/tls:/tls:ro
+```
+
+```bash
+# .env
+PG_ROUTER_TLS_CERT=/tls/server.crt
+PG_ROUTER_TLS_KEY=/tls/server.key
+```
+
+The key must be readable by the container's user and not encrypted. The
+certificate is read when the service starts: restart `pg-router` to serve a
+renewed one.
+
+**Size.** The service is small on purpose, so it fits beside capture without
+asking: two statements at once, two threads each, sixteen clients.
+
+| `.env` | What it sets | Unset |
+|---|---|---|
+| `PG_ROUTER_WORKERS` | statements that run on the copy at once (1 to 16) | 2 |
+| `PG_ROUTER_THREADS` | threads each statement may use (1 to 16) | 2 |
+| `PG_ROUTER_MAX_CONNECTIONS` | clients connected at once; one more is refused | 16 |
+| `PG_ROUTER_MAX_WAIT` | how long a statement waits for its turn, e.g. `30s` | no limit of its own |
+| `PG_ROUTER_MEMORY`, `PG_ROUTER_CPUS` | ceilings for the whole service, e.g. `8g` and `4` | none |
+| `SQL_MEMORY` | memory each statement may use (shared with the other services) | 2GB |
+
 ### Time-travel SQL (`AS OF`) and the compose stack
 
 The web interface's Time-travel tab and time-travel **SQL** (`SELECT … AS OF`) are
