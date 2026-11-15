@@ -306,6 +306,24 @@ is. A capture that keeps up records one about every 30 seconds; one that is
 more than a second behind records none, and shows as behind. It is one
 `SELECT` on the health poll's connection.
 
+#### A large transaction arrives whole, after it commits
+
+PostgreSQL sends a transaction to capture only once it has committed (capture
+asks for version 1 of the `pgoutput` protocol, which does not stream a
+transaction that is still open). Nothing is missing from the copy while it is
+open: its changes are not visible on the source either. The cost comes at the
+commit. The whole transaction is then sent in one piece and indexed, and every
+change committed after it waits behind it. A transaction that changed a few
+million rows can leave the copy minutes behind, where the same rows in small
+transactions would have gone through as they were made.
+
+So what sets the delay is how MUCH one transaction changed, not how long it
+stayed open: a transaction open for an hour that changed ten rows costs
+nothing. While the large one goes through, the web interface shows the capture
+as behind and the copy stays where it was; both recover by themselves once it
+is in. If a job on the source changes rows in
+bulk, committing in batches keeps the copy close.
+
 ---
 
 ## Running it

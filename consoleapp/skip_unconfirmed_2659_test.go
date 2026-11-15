@@ -737,7 +737,7 @@ func TestCaptureClasses_everyReasonIsDecided_2659(t *testing.T) {
 		"captureDetailPGFirstRead": {"the source looked ahead on a first read, and is asked again", captureCannotAsk},
 		"captureDetailPGNotSaved":  {"capture has not saved its position since the source was first asked", captureCannotAsk},
 		"captureDetailPGReading":   {"the source is ahead and capture is given time to reach it", captureCannotAsk},
-		"captureDetailPGBehind":    {"capture has not reached the position the source had at an earlier read", captureCannotAsk},
+		"captureDetailPGBehind":    {"capture has not reached the position the source had at an earlier read; a large transaction is sent whole once it commits, and the changes after it wait until it is in", captureCannotAsk},
 		"captureDetailNoSource":         {"this server has no source to ask", captureCannotAsk},
 		"captureDetailPositionMode":     {"the capture runs in binlog-position mode, which is not compared", captureCannotAsk},
 		"captureDetailNoCheckpoint":     {"the capture has no GTID checkpoint", captureCannotAsk},
