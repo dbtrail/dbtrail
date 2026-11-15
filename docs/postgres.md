@@ -71,6 +71,20 @@ setup](#postgresql-side-setup) below first, then:
    `REPLICA IDENTITY FULL`, slot health — and surfaces any failure as a
    remediation card). Capture resumes automatically on restart.
 
+From a terminal, the same thing is one command (the publication is the one
+you created above; the slot is created for you and named `bintrail_<database>`
+unless you give `--slot`):
+
+```bash
+dbtrail server add --flavor postgres -h pg1.example.com -u dbtrail -p -d shop --publication bintrail_pub
+```
+
+It runs the same checks, prints each one that fails with its fix, and saves
+nothing until they all pass. `--flavor postgres` has to be said: the question
+DBTrail asks an address to learn what answers there is in MySQL's protocol.
+What it prints at the end is the `psql` line for the PostgreSQL port, with the
+port's password when this was the first server.
+
 The **index stays MySQL**; only the *source* is PostgreSQL. The source type is
 fixed once saved — to change a server's capture engine, delete and re-create it.
 The form lives in `bintrail-console watch` (the Compose default); the read-only
