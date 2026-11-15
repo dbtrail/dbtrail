@@ -113,9 +113,9 @@ func arrivals(evs []query.ResultRow) map[string][][]query.ResultRow {
 		return out
 	}
 	return map[string][][]query.ResultRow{
-		"in LSN order, one page":        {slices.Clone(evs)},
-		"in LSN order, a page each":     perEvent(evs),
-		"against LSN order, one page":   {rev},
+		"in LSN order, one page":         {slices.Clone(evs)},
+		"in LSN order, a page each":      perEvent(evs),
+		"against LSN order, one page":    {rev},
 		"against LSN order, a page each": perEvent(rev),
 	}
 }
@@ -386,8 +386,8 @@ func TestLaterInWAL_2760(t *testing.T) {
 		return &query.ResultRow{EventID: id, BinlogFile: lsnText(lsn), StartPos: lsn}
 	}
 	cases := []struct {
-		name       string
-		a, b       *query.ResultRow
+		name           string
+		a, b           *query.ResultRow
 		aLater, bLater bool
 	}{
 		{"a higher LSN is later", row(1, 0x200), row(9, 0x100), true, false},
