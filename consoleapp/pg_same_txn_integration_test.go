@@ -21,6 +21,11 @@ import (
 type pgSameTxnCase struct {
 	table, slot, pub string
 	columns          string   // between the parentheses of CREATE TABLE
+	// deferAfter makes the primary key (id) DEFERRABLE INITIALLY DEFERRED once
+	// capture has started: the capture refuses to start on a table whose key
+	// is deferrable (pgcapture.CheckDeferrableKeys), so what is left for the
+	// fold's own refusal is a key changed while capture runs.
+	deferAfter bool
 	setup            []string // after CREATE TABLE, before capture
 	changes          []string // after the full read; each is one statement or one BEGIN ... COMMIT
 	lastPK           string   // pk_values of the last change, which the wait looks for
@@ -82,6 +87,9 @@ func pgSameTxnRun(t *testing.T, c pgSameTxnCase) pgSameTxnOutcome {
 		t.Fatalf("save the index connection: %v", err)
 	}
 	pgTestStart(t, ctx, mon, bootDSN, source, e)
+	if c.deferAfter {
+		exec1("ALTER TABLE " + c.table + " DROP CONSTRAINT " + c.table + "_pkey, ADD PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED")
+	}
 
 	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
 		t.Fatalf("start the full read: %v", err)
@@ -244,7 +252,8 @@ func TestIntegrationPGSnapshotUpdateDeferredKeySameTransaction(t *testing.T) {
 	const tbl = "pgst_deferred"
 	out := pgSameTxnRun(t, pgSameTxnCase{
 		table: tbl, slot: "bintrail_pgstd_slot", pub: "bintrail_pgstd_pub",
-		columns: "id int, v text, PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED",
+		columns:    "id int PRIMARY KEY, v text",
+		deferAfter: true,
 		setup:   []string{"INSERT INTO " + tbl + " VALUES (1, 'old one'), (2, 'old two'), (3, 'keep')"},
 		changes: []string{
 			"BEGIN; INSERT INTO " + tbl + " VALUES (1, 'new one'); DELETE FROM " + tbl + " WHERE id = 1 AND v = 'old one'; COMMIT",
@@ -357,7 +366,8 @@ func TestIntegrationPGSnapshotUpdateDeferredKeyFirstChangeAgain(t *testing.T) {
 	const tbl = "pgst_again"
 	out := pgSameTxnRun(t, pgSameTxnCase{
 		table: tbl, slot: "bintrail_pgsta_slot", pub: "bintrail_pgsta_pub",
-		columns: "id int, v text, PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED",
+		columns:    "id int PRIMARY KEY, v text",
+		deferAfter: true,
 		setup:   []string{"INSERT INTO " + tbl + " VALUES (3, 'keep')"},
 		changes: []string{
 			"BEGIN; INSERT INTO " + tbl + " VALUES (1, 'a'); UPDATE " + tbl + " SET v = 'b' WHERE id = 1; " +

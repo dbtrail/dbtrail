@@ -22,7 +22,7 @@ const doctorTimeout = 30 * time.Second
 
 // dependentCheckNames are the checks BuildPGReport skips when wal_level is genuinely
 // not 'logical' — logical decoding is impossible, so they cannot meaningfully run.
-var dependentCheckNames = []string{"Publication coverage", "REPLICA IDENTITY FULL", "No UNLOGGED tables", "FK cascade-child coverage", "max_slot_wal_keep_size", "Replication slot health", commitTimestampCheckName, generatedColumnsCheck}
+var dependentCheckNames = []string{"Publication coverage", "REPLICA IDENTITY FULL", "No UNLOGGED tables", "FK cascade-child coverage", "max_slot_wal_keep_size", "Replication slot health", commitTimestampCheckName, generatedColumnsCheck, deferrableKeysCheck}
 
 // PGDoctorConfig is the subset of stream settings a health check needs: a normal
 // (non-replication) connection to the source, the slot to inspect, and the
@@ -107,6 +107,7 @@ func BuildPGReport(ctx context.Context, cfg PGDoctorConfig) *doctor.Report {
 	}
 
 	addGeneratedColumnsCheck(ctx, r, conn, cfg.Publication)
+	addDeferrableKeysCheck(ctx, r, conn, cfg.Publication)
 	addUnloggedCheck(ctx, r, conn, cfg.Publication, filters)
 	addCascadeCoverageCheck(ctx, r, conn, cfg.Publication)
 	addKeepSizeCheck(ctx, r, conn)
@@ -372,5 +373,29 @@ func addGeneratedColumnsCheck(ctx context.Context, r *doctor.Report, conn *pgx.C
 		})
 	default:
 		r.Add(doctor.CheckResult{Name: generatedColumnsCheck, Status: doctor.StatusPass})
+	}
+}
+
+// deferrableKeysCheck is the name of the check below.
+const deferrableKeysCheck = "Primary keys are not deferrable"
+
+// addDeferrableKeysCheck reports a table of the publication whose primary key
+// is declared DEFERRABLE (pgcapture.CheckDeferrableKeys): the copy is kept by
+// key, and such a key lets two rows share one inside a transaction. A
+// failure: the capture refuses to start on it.
+func addDeferrableKeysCheck(ctx context.Context, r *doctor.Report, conn *pgx.Conn, publication string) {
+	found, err := pgcapture.QueryDeferrableKeys(ctx, conn, publication)
+	switch {
+	case err != nil:
+		r.Add(doctor.CheckResult{Name: deferrableKeysCheck, Status: doctor.StatusWarn, Detail: "could not check: " + err.Error()})
+	case len(found) > 0:
+		r.Add(doctor.CheckResult{
+			Name:        deferrableKeysCheck,
+			Status:      doctor.StatusFail,
+			Detail:      pgcapture.DeferrableKeysProblem(found),
+			Remediation: "Make the key not deferrable, or take the table out of the publication.",
+		})
+	default:
+		r.Add(doctor.CheckResult{Name: deferrableKeysCheck, Status: doctor.StatusPass})
 	}
 }
