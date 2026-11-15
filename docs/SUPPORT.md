@@ -8,7 +8,7 @@ are closed with a pointer to this file.
 
 DBTrail's contract with your infrastructure is one line:
 
-> **A reachable MySQL 8.0+ via `--index-dsn`.**
+> **A reachable MySQL 8.0, 8.4 or 9.7 via `--index-dsn`.**
 
 DBTrail installs and versions **its own schema** on that server — databases
 (`CREATE DATABASE IF NOT EXISTS`), tables, and idempotent migrations, via
@@ -55,8 +55,9 @@ yours:
   8.4 datadir is non-downgradable), and distribution/managed-flavor quirks
   (RDS, Aurora, Cloud SQL, MariaDB) of the **index** server.
 
-The **supported surface is two cells, both tested in CI** (the 8.0/8.4
-integration matrix): (1) any **MySQL 8.0+ reached via `--index-dsn`** (BYO),
+The **supported surface is two cells, both tested in CI** (the 8.0/8.4/9.7
+integration matrix): (1) a **MySQL 8.0, 8.4 or 9.7 reached via `--index-dsn`**
+(BYO; the 9.x Innovation releases between LTS lines are not supported),
 and (2) the **pinned MySQL 8.4 image we bundle**. We own those two images'
 builds and the schema/migrations on them; the *operation* of whatever server
 you actually run — BYO or bundled — is not part of our defect matrix.
@@ -82,7 +83,7 @@ The boundary triage cites:
   upgrades we document. **Volume loss = re-index** (back up the
   `bintrail-index-data` + `bintrail-index-secret` volumes together). The
   managed tier at [dbtrail.com](https://dbtrail.com) operates it for you.
-- **BYO stays co-equal.** Set `INDEX_DSN` in `.env` to a MySQL 8.0+ you run
+- **BYO stays co-equal.** Set `INDEX_DSN` in `.env` to a MySQL 8.0, 8.4 or 9.7 you run
   and remove the bundled `index-init` + `index-mysql` services (see
   [docker.md](./docker.md)) — same ship-vs-operate split, your server.
 
@@ -121,7 +122,7 @@ at a non-MySQL server is **not** supported.
 
 | Source | Status | Capture mechanism | Guide |
 |---|---|---|---|
-| **MySQL** 8.0+ (incl. Percona, RDS, Aurora, Cloud SQL) | Supported | ROW-format binlog over the replication protocol | [streaming.md](./streaming.md) |
+| **MySQL** 8.0, 8.4 and 9.7 LTS (incl. Percona, RDS, Aurora, Cloud SQL) | Supported | ROW-format binlog over the replication protocol | [streaming.md](./streaming.md) |
 | **MariaDB** 10.11+ (10.11, 11.4, 11.8 and 12.3 tested) | Supported | ROW-format binlog (MariaDB GTID) | [mariadb.md](./mariadb.md) |
 | **PostgreSQL** 14+ | Beta — via the separate `bintrail-pg` binary | Logical replication (`pgoutput`) | [postgres.md](./postgres.md) |
 

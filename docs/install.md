@@ -36,7 +36,7 @@ With a bare `docker run`, that restart is yours to set up.
 
 ## Requirements
 
-- A **source MySQL 8.0+** with `binlog_format = ROW` and
+- A **source MySQL 8.0, 8.4 or 9.7** with `binlog_format = ROW` and
   `binlog_row_image = FULL`. Don't guess: `bintrail doctor` checks everything
   and prints copy-pasteable remediation for whatever is missing.
 - A MySQL user on the source with `REPLICATION SLAVE`, `REPLICATION CLIENT`,
@@ -45,7 +45,7 @@ With a bare `docker run`, that restart is yours to set up.
   baseline) and every later full read. On managed MySQL (RDS, Aurora, Cloud
   SQL) grant `LOCK TABLES` instead of `RELOAD` and `BACKUP_ADMIN`. See
   [streaming.md](./streaming.md#the-baseline-needs-a-lock-privilege-and-show-view).
-- An **index MySQL 8.0+** database for DBTrail's data (the Compose stack
+- An **index MySQL 8.0, 8.4 or 9.7** database for DBTrail's data (the Compose stack
   bundles one).
 - **Other sources:** besides MySQL, DBTrail can also capture from **MariaDB**
   ([10.11+](./mariadb.md), with 10.11, 11.4, 11.8 and 12.3 tested in CI) and
@@ -165,7 +165,7 @@ cites is [SUPPORT.md](./SUPPORT.md). See [docker.md](./docker.md) for the
 credential mechanism and the `8.0→8.4` upgrade note.
 
 **Bring your own index MySQL** (co-equal path, not an afterthought): set
-`INDEX_DSN` in `.env` to a MySQL 8.0+ you operate, and remove the bundled
+`INDEX_DSN` in `.env` to a MySQL 8.0, 8.4 or 9.7 you operate, and remove the bundled
 `index-init` + `index-mysql` services. Same split — DBTrail installs and
 migrates only its schema on whatever server you point it at; the contract
 floor stays MySQL 8.0+ (only the *bundled* index is 8.4). Want it operated for

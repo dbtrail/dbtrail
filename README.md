@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/img/dbtrailheader.png" alt="Heavy MySQL queries, from minutes to seconds. For your MySQL 8.0+, RDS, Aurora, Percona or MariaDB, and anything else that writes a MySQL binlog: DBTrail follows your binlog and answers from a copy in Parquet with DuckDB. Works with your mysql client and drivers, and installs nothing on your MySQL." width="100%">
+<img src="docs/img/dbtrailheader.png" alt="Heavy MySQL queries, from minutes to seconds. For your MySQL 8.0, 8.4 or 9.7, RDS, Aurora, Percona or MariaDB, and anything else that writes a MySQL binlog: DBTrail follows your binlog and answers from a copy in Parquet with DuckDB. Works with your mysql client and drivers, and installs nothing on your MySQL." width="100%">
 
 **HTAP for MySQL and MariaDB. Transactions stay on your server; heavy queries come back in seconds from a columnar copy that follows your binlog, routed automatically on the same connection, with no ETL and nothing installed on your MySQL.**
 
@@ -111,8 +111,8 @@ All of them: [Limitations](https://www.dbtrail.com/docs/limitations/).
 
 | Source | Analytical copy | Row history and undo |
 |---|---|---|
-| MySQL 8.0, 8.4 | Yes | Yes |
-| Percona Server for MySQL 8.0, 8.4 | Yes | Yes |
+| MySQL 8.0, 8.4, 9.7 | Yes | Yes |
+| Percona Server for MySQL 8.0, 8.4, 9.7 | Yes | Yes |
 | Amazon RDS for MySQL | Yes (verified) | Yes (verified) |
 | Amazon Aurora MySQL | Yes (verified) | Yes (verified) |
 | Google Cloud SQL for MySQL | Should work, please report issues | Should work |

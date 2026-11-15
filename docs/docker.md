@@ -494,7 +494,7 @@ A healthy index lists its servers, a recent stream position, and its partitions.
 
 ### Connecting to an external index MySQL (bring your own)
 
-To run your own index instead of the bundled 8.4, set `INDEX_DSN` in `.env` to a MySQL 8.0+ you operate and
+To run your own index instead of the bundled 8.4, set `INDEX_DSN` in `.env` to a MySQL 8.0, 8.4 or 9.7 you operate and
 remove the bundled index from the compose file: delete the `index-init` and
 `index-mysql` services, the `bintrail-index-data` / `bintrail-index-secret`
 volumes, the `bintrail-index-secret` mount, the `bintrail-index-data`

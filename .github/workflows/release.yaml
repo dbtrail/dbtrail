@@ -79,18 +79,23 @@ jobs:
     # shard took about 12 minutes when this was written.
     timeout-minutes: 40
 
-    # Two supported cells: the BYO contract floor (8.0) and the bundled index
+    # Three supported cells: the BYO contract floor (8.0), the bundled index
     # engine (8.4, where mysql_native_password is disabled by default so every
     # connection authenticates with caching_sha2_password over the plaintext
-    # network). Running the whole suite on 8.4 is what proves the native_password-
-    # OFF default doesn't break the up→stream→query→shim pipeline; the focused
-    # TestCachingSha2ColdAuthSeam additionally guards the cold full-auth path on
-    # both cells. fail-fast: false so a regression on one version still reports
-    # the other.
+    # network) and the 9.7 LTS. Running the whole suite on 8.4 is what proves
+    # the native_password-OFF default doesn't break the up→stream→query→shim
+    # pipeline; the focused TestCachingSha2ColdAuthSeam additionally guards the
+    # cold full-auth path on every cell. On 9.7 mysql_native_password no
+    # longer exists (removed in 9.0), and gtid_mode / enforce_gtid_consistency
+    # default to ON, which the main server below turns off so that every cell
+    # runs the same tests. Innovation releases (9.x between LTS lines) are not
+    # supported and get no cell.
+    # fail-fast: false so a regression on one version still reports the
+    # others.
     strategy:
       fail-fast: false
       matrix:
-        mysql: ["8.0", "8.4"]
+        mysql: ["8.0", "8.4", "9.7"]
         # Must list 1..SHARD_COUNT of scripts/mysql-integration-shard.sh: the
         # script refuses a shard past its count, and the `integration` job
         # fails when a shard's result is missing.
@@ -136,6 +141,9 @@ jobs:
       # command-line args). This mirrors the local setup in CONTRIBUTING.md so
       # CI and developer machines run against an identical container.
       - name: Start MySQL (bintrail-test-mysql, ${{ matrix.mysql }})
+        # GTIDs off on every cell, as 8.0 and 8.4 start by default. 9.7 starts
+        # with them on; the suite's position-mode tests need a
+        # server without them, and GTID capture has its own server below.
         run: |
           docker run -d --name bintrail-test-mysql \
             -e MYSQL_ROOT_PASSWORD=testroot \
@@ -144,7 +152,9 @@ jobs:
             --binlog-format=ROW \
             --binlog-row-image=FULL \
             --log-bin=binlog \
-            --server-id=1
+            --server-id=1 \
+            --gtid-mode=OFF \
+            --enforce-gtid-consistency=OFF
           echo "Waiting for MySQL to accept connections..."
           # Probe over the SAME path the tests use — host TCP 127.0.0.1:13306
           # with full auth and a real query — NOT `docker exec ... mysqladmin
@@ -183,7 +193,8 @@ jobs:
       # A second MySQL, with GTIDs on, for the read-routing tests that need a
       # GTID source captured into an index on ANOTHER server (#2085): the
       # index of a source is never compared with it when both are one server,
-      # and the main server above runs without GTIDs. Only in the shard that
+      # and the main server above runs without GTIDs (on 9.7, whose default is
+      # on, because its start turns them off). Only in the shard that
       # runs the consoleapp TestIntegrationFlashback tests (SPLIT_PARTS in
       # scripts/mysql-integration-shard.sh); if that split moves to another
       # shard, this step and the two variables below move with it, and the
@@ -283,7 +294,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # `integration-mysql (8.0)` and `integration-mysql (8.4)`: what the `release`
+  # `integration-mysql (8.0)`, `(8.4)` and `(9.7)`: what the `release`
   # job waits for. It runs no tests; it collects the shards of its MySQL
   # version and is green only when every shard ran and passed, then checks
   # the key tests and the S3 leg over all their logs together. `!cancelled()`
@@ -296,7 +307,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mysql: ["8.0", "8.4"]
+        mysql: ["8.0", "8.4", "9.7"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
