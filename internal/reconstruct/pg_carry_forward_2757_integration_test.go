@@ -66,7 +66,7 @@ func TestReconstructTables_PGCarryForwardUnchanged(t *testing.T) {
 	// Nothing of orders changed: the same file, by link, with its footer.
 	f.other(0x700, 22*time.Minute)
 	at2 := f.at(30 * time.Minute)
-	got, md2, reps, err := f.run(root, pgRun{at: at2, carry: true})
+	got, md2, reps, err := f.run(root, pgRun{at: at2, carry: true, chainFloor: f.base})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestReconstructTables_PGCarryForwardUnchanged(t *testing.T) {
 	f.event(0x800, 32*time.Minute, 2, "1", s("late"))
 	f.checkpoint(0x800)
 	at3 := f.at(40 * time.Minute)
-	got, md3, reps, err := f.run(root, pgRun{at: at3, carry: true})
+	got, md3, reps, err := f.run(root, pgRun{at: at3, carry: true, chainFloor: f.base})
 	if err != nil {
 		t.Fatal(err)
 	}

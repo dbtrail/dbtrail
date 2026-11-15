@@ -469,6 +469,10 @@ func (s *baselineSupervisor) snapshotReadersStart(ctx context.Context, e console
 	if e.IsPostgres() {
 		// Each file's footer says where its reader starts, deltas or not.
 		from, err := snapshotReadsFromPG(ctx, e.BaselineDir, anchor)
+		if err != nil && ctx.Err() == nil && s.gateEdge.Fire("pg-reads-from:"+e.ID, err.Error()) {
+			slog.Warn("backup schedule: cannot tell where the readers of the newest snapshot start, so it is updated instead of waiting",
+				"server", e.Name, "id", e.ID, "error", err)
+		}
 		return from, err == nil
 	}
 	if !s.tableDeltas {

@@ -318,8 +318,13 @@ func (s *baselineSupervisor) runRefresh(req refreshRequest, at time.Time, interv
 	// BELOW the mark read, and the order is the point (#1705). See
 	// anchorRefresh.
 	at = s.anchorRefresh(req.ServerID, at)
-	if s.tableDeltas {
+	// A PostgreSQL table carried forward unchanged keeps its file's start as
+	// a chain of deltas keeps its own (#2757), so its fold needs the same
+	// line, deltas or not.
+	if s.tableDeltas || (req.SourcePostgres && req.CarryForwardUnchanged) {
 		req.ChainStartFloor = s.chainStartFloor(req, at, interval)
+	}
+	if s.tableDeltas {
 		if line := s.sqlChainLine.Load(); line != nil {
 			req.MaxChainUpserts = (*line)() / 2
 		}
@@ -624,10 +629,14 @@ func (s *baselineSupervisor) chainStartFloor(req refreshRequest, at time.Time, i
 	if err == nil && !ok {
 		err = errNoLiveFloor
 	}
-	s.reportGateBlind("chain-floor", err, req,
-		"cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas "+
-			"early: a table is written in full only when its chain is a day old, and a restore of a quiet "+
-			"table can come to need events the index has already dropped")
+	consequence := "cannot tell how far back the index keeps events, so this cycle ends no chain of table deltas " +
+		"early: a table is written in full only when its chain is a day old, and a restore of a quiet " +
+		"table can come to need events the index has already dropped"
+	if req.SourcePostgres {
+		consequence = "cannot tell how far back the index keeps events, so this cycle carries no unchanged " +
+			"table forward: every table is written in full, as before, until the index can be read"
+	}
+	s.reportGateBlind("chain-floor", err, req, consequence)
 	if err != nil {
 		return time.Time{}
 	}

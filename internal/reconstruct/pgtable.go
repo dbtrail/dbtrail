@@ -298,10 +298,12 @@ func pgNeverPartitionedBefore(ctx context.Context, db *sql.DB, dbName, schema, t
 //     into a later snapshot, that would be measured from the later time, past
 //     changes the fold never looked at. Such a file is rewritten once, and
 //     the file the rewrite leaves is the one carried.
-//   - The bound must still be young: after cfg.ChainStartFloor (the line the
-//     daemon draws from how far back the index keeps events, #1904), or,
-//     with no line, less than tableDeltaMaxAge before the run. Past that the
-//     table is rewritten, which records the run's bound.
+//   - The bound must still be young: after cfg.ChainStartFloor, the line
+//     the daemon draws from how far back the index keeps events (#1904).
+//     Past it the table is rewritten, which records the run's bound. With no
+//     line (a command-line run, or an index the daemon could not read)
+//     nothing says how long the index keeps the events the file starts from,
+//     so nothing is carried on this ground.
 //   - Unless the rewrite would record no newer bound (newSince, what the run
 //     would write: on a source with no change at all it is the old one). The
 //     rewrite would then cost the whole table and move nothing.
@@ -309,9 +311,6 @@ func pgCarryForwardEligible(cfg FullTableConfig, srcPath string, bmeta baseline.
 	if !carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, srcPath, changes, capGap) || bmeta.PGDeltaSince == "" {
 		return false
 	}
-	line := cfg.ChainStartFloor
-	if line.IsZero() {
-		line = cfg.At.Add(-tableDeltaMaxAge)
-	}
-	return since.After(line) || !newSince.After(since)
+	young := !cfg.ChainStartFloor.IsZero() && since.After(cfg.ChainStartFloor)
+	return young || !newSince.After(since)
 }

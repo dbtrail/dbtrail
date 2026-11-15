@@ -41,3 +41,40 @@ func TestPublishedReadsFromPostgres(t *testing.T) {
 		t.Fatalf("scheduler, MySQL: from %v ok %v (pg reads %d, reads %d)", from, ok, pgReads, reads)
 	}
 }
+
+// A PostgreSQL update that carries unchanged tables forward is handed the
+// line that ends a carried file's life (#2757), with table deltas off too:
+// without it nothing rewrites a quiet table before the index drops the
+// changes its file starts from.
+func TestRunRefresh_postgresCarryDrawsTheLineWithDeltasOff(t *testing.T) {
+	cases := []struct {
+		name      string
+		pg, carry bool
+		line      bool
+	}{
+		{name: "PostgreSQL carrying forward", pg: true, carry: true, line: true},
+		{name: "PostgreSQL rewriting", pg: true},
+		{name: "MySQL carrying forward", carry: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			folds := probeFolds(t)
+			stubCoverage(t, true, true)
+			stubLiveFloor(t, refreshAt.Add(-12*time.Hour), true)
+			prev := snapshotReadsFromPG
+			t.Cleanup(func() { snapshotReadsFromPG = prev })
+			snapshotReadsFromPG = func(context.Context, string, time.Time) (time.Time, error) { return refreshAt, nil }
+			sup, req, _ := deltasRig(t, false)
+			req.SourcePostgres, req.CarryForwardUnchanged = tc.pg, tc.carry
+			sup.refreshes["s"] = &console.BaselineStatus{State: "running"}
+			sup.runRefresh(req, refreshAt, 5*time.Minute)
+			cfgs := folds.all()
+			if len(cfgs) != 1 {
+				t.Fatalf("folded %d time(s), want 1", len(cfgs))
+			}
+			if got := !cfgs[0].ChainStartFloor.IsZero(); got != tc.line {
+				t.Fatalf("ChainStartFloor = %s, want a line: %v", cfgs[0].ChainStartFloor, tc.line)
+			}
+		})
+	}
+}

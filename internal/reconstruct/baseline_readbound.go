@@ -251,6 +251,10 @@ func snapshotReadsFrom(ctx context.Context, root string, at time.Time, pg bool) 
 		}
 		from := b.From(mine[i].SnapshotTime)
 		if pg && !mine[i].HasDelta() {
+			// One file read per table, on a caller's deadline.
+			if err := ctx.Err(); err != nil {
+				return time.Time{}, err
+			}
 			meta, err := baseline.ReadParquetMetadata(mine[i].Path)
 			if err != nil {
 				return time.Time{}, fmt.Errorf("where a reader of %s starts could not be read: %w", mine[i].Path, err)

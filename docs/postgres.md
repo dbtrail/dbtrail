@@ -664,7 +664,9 @@ What to know:
   read rewrites every table once, because a full read's files do not record
   how far back their missing changes reach. And a table that has gone
   unchanged for long is rewritten before the index drops the changes its file
-  starts from (a day, when that cannot be told). A changed table is rewritten
+  starts from. Only the scheduled updates of the web console carry tables
+  forward: `bintrail baseline refresh` on the command line does not know how
+  long the index keeps its changes, and rewrites. A changed table is rewritten
   in full: `--table-deltas` applies to MySQL only.
 - **Capture that is behind is safe for the chain, not for one file.** A
   snapshot folded while capture is behind holds the table as of the newest
