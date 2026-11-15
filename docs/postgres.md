@@ -657,9 +657,15 @@ What to know:
   ordinary UPDATE and for one that changes the key. A marker is only in
   changes captured without the whole old row, where the value was never
   captured.
-- **A table with no change is rewritten**, never carried forward or written as
-  a delta (`--carry-forward-unchanged` and `--table-deltas` apply to MySQL only):
-  the new file must hold the new starting point.
+- **A table with no change is carried forward** under
+  `--carry-forward-unchanged`, as for MySQL: the new snapshot gets the previous
+  file (a hard link where the filesystem allows one) and the table is not read
+  or written again. Two cases still rewrite it. The first update after a full
+  read rewrites every table once, because a full read's files do not record
+  how far back their missing changes reach. And a table that has gone
+  unchanged for long is rewritten before the index drops the changes its file
+  starts from (a day, when that cannot be told). A changed table is rewritten
+  in full: `--table-deltas` applies to MySQL only.
 - **Capture that is behind is safe for the chain, not for one file.** A
   snapshot folded while capture is behind holds the table as of the newest
   change the index has, under the requested point's name, and the run warns.

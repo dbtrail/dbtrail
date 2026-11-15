@@ -208,6 +208,20 @@ func NewestPerTable(files []BaselineFile) []int {
 // snapshot, or a chain whose start could not be read. Never a guess, since
 // the caller acts on a later answer as "still covered".
 func SnapshotReadsFrom(ctx context.Context, root string, at time.Time) (time.Time, error) {
+	return snapshotReadsFrom(ctx, root, at, false)
+}
+
+// SnapshotReadsFromPG is SnapshotReadsFrom for a snapshot of a PostgreSQL
+// source. A reader of a PostgreSQL table file starts where its footer says
+// (PGDeltaWindow): a minute before the snapshot for a file a full read
+// wrote, the recorded bound for one an update wrote, and for a file carried
+// forward unchanged (#2757) the bound of the snapshot it was written in,
+// which can be many updates back. One footer is read per table file.
+func SnapshotReadsFromPG(ctx context.Context, root string, at time.Time) (time.Time, error) {
+	return snapshotReadsFrom(ctx, root, at, true)
+}
+
+func snapshotReadsFrom(ctx context.Context, root string, at time.Time, pg bool) (time.Time, error) {
 	files, unreadable, err := ListBaselinesUnreadable(ctx, root)
 	if err != nil {
 		return time.Time{}, err
@@ -235,7 +249,21 @@ func SnapshotReadsFrom(ctx context.Context, root string, at time.Time) (time.Tim
 		if b.Unread {
 			return time.Time{}, fmt.Errorf("where the chain of deltas beside %s starts could not be read", mine[i].Path)
 		}
-		if from := b.From(mine[i].SnapshotTime); oldest.IsZero() || from.Before(oldest) {
+		from := b.From(mine[i].SnapshotTime)
+		if pg && !mine[i].HasDelta() {
+			meta, err := baseline.ReadParquetMetadata(mine[i].Path)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("where a reader of %s starts could not be read: %w", mine[i].Path, err)
+			}
+			since, _, _, err := PGDeltaWindow(meta, mine[i].SnapshotTime)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("%s: %w", mine[i].Path, err)
+			}
+			if since.Before(from) {
+				from = since
+			}
+		}
+		if oldest.IsZero() || from.Before(oldest) {
 			oldest = from
 		}
 	}

@@ -153,6 +153,8 @@ type pgRun struct {
 	format    string
 	carry     bool
 	deltas    bool
+	// chainFloor is FullTableConfig.ChainStartFloor.
+	chainFloor time.Time
 	tables    []string
 	allowGaps bool
 }
@@ -176,6 +178,7 @@ func (f *pgFixture) run(root string, r pgRun) (map[string]string, baseline.DumpM
 	reps, err := reconstruct.ReconstructTables(context.Background(), reconstruct.FullTableConfig{
 		IndexDSN: f.dsn, BaselineSrc: root, Tables: tables, At: r.at, OutputDir: out,
 		OutputFormat: format, CarryForwardUnchanged: r.carry, TableDeltas: r.deltas, Parallelism: 1, AllowGaps: r.allowGaps,
+		ChainStartFloor: r.chainFloor,
 	})
 	if err != nil {
 		return nil, baseline.DumpMetadata{}, reps, err
@@ -324,8 +327,8 @@ func TestReconstructTables_PGCaptureBehind(t *testing.T) {
 // A window holding one transaction at exactly the floor folds it: on
 // PostgreSQL every row of a transaction carries its LSN in both positions,
 // so a window whose end equals its start is not empty. A table with no
-// change is rewritten, never carried forward or written as a delta: the
-// previous file's footer holds the previous bound.
+// change is then carried forward (#2757), never written as a delta: the
+// file keeps the floor and the bound it was written with.
 func TestReconstructTables_PGWindowAtTheFloor(t *testing.T) {
 	f := newPGFixture(t)
 	snap := f.at(10 * time.Minute)
@@ -341,14 +344,14 @@ func TestReconstructTables_PGWindowAtTheFloor(t *testing.T) {
 	if got["1"] != "at-the-floor" || md.LSN != 0x701 {
 		t.Fatalf("rows %v LSN %X", got, md.LSN)
 	}
-	// Nothing new: rewritten, with the bound it was read with.
+	// Nothing new: the same file, with the bound it was written with.
 	firstSince := md.PGDeltaSince
 	at2 := f.at(25 * time.Minute)
 	got, md, reps, err := f.run(root, pgRun{at: at2, carry: true, deltas: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reps) != 1 || reps[0].CarriedForward || got["1"] != "at-the-floor" || md.LSN != 0x701 || md.PGDeltaSince != firstSince {
+	if len(reps) != 1 || !reps[0].CarriedForward || !reps[0].PG || got["1"] != "at-the-floor" || md.LSN != 0x701 || md.PGDeltaSince != firstSince {
 		t.Fatalf("unchanged table: reps %+v rows %v LSN %X since %q, want since %q", reps, got, md.LSN, md.PGDeltaSince, firstSince)
 	}
 }

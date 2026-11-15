@@ -201,7 +201,7 @@ func TestOtherBlindLinesCarryTheCause_2669(t *testing.T) {
 		stubReadsFrom(t, time.Time{}, errors.New("read orders.parquet footer: unexpected EOF"))
 		sup := newSup(t)
 		sup.tableDeltas = true
-		if _, ok := sup.publishedReadsFrom(req, refreshAt); ok {
+		if _, ok := sup.publishedReadsFrom(req, refreshAt, false); ok {
 			t.Fatal("the start is known although its read failed")
 		}
 		check(t, log, "cannot tell where the readers of the snapshot just published start, so the next cycle folds instead of skipping",

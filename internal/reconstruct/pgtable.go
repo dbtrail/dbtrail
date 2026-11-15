@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -60,9 +61,11 @@ type pgTableInput struct {
 //     that raced the snapshot writes no row events and may be missing from
 //     it, and the fold would bring its rows back. By time only: the anchor is
 //     an LSN.
-//   - No table delta, no carry-forward: the published file's footer must hold
-//     this fold's LSN and bound, and a carried file holds the previous ones,
-//     whose margin a reader would measure from this snapshot's later time.
+//   - No table delta. A table with no change is carried forward only when
+//     its footer records its own time bound (pgCarryForwardEligible, #2757):
+//     a carried file keeps the previous floor and bound, and a bound the
+//     footer does not record is a margin a reader would measure from this
+//     snapshot's later time.
 //   - The window-empty skip is pgFoldBounds.empty, never
 //     windowEmptyByPosition: a window whose end equals its start holds the
 //     whole transaction at that LSN.
@@ -166,6 +169,25 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		WarnBaselineFirstEventGapForTable("postgres", bmeta, *fold.First, start, startOK, entry, schema, table)
 	}
 
+	rep.PG = true
+	// Nothing changed: publish the previous file instead of rewriting it
+	// (#2757). After the fold, so the change map is known, and after every
+	// refusal above (see ReconstructTable's step 5b for why each matters).
+	if pgCarryForwardEligible(cfg, p.baselinePath, bmeta, since, b.Since, fold.changeCount(), capGap) {
+		linked, cerr := carryForward(ctx, p.baselinePath, cfg.snapshotDir, schema, table)
+		if cerr != nil {
+			return nil, fmt.Errorf("carry %s.%s forward unchanged: %w", schema, table, cerr)
+		}
+		rep.CarriedForward, rep.CarriedByLink = true, linked
+		rep.Files = []string{filepath.Join(schema, table+".parquet")}
+		rep.Duration = time.Since(start)
+		slog.Info("table carried forward unchanged", "schema", schema, "table", table,
+			"reason", "no events in the window", "linked", linked,
+			"lsn", lsnText(floor), "reads_from", since.UTC().Format(time.RFC3339),
+			"fetch_ms", rep.FetchDuration.Milliseconds(), "fold_ms", rep.FoldDuration.Milliseconds())
+		return rep, nil
+	}
+
 	localPath, cleanup, err := materializeBaselineLocalIn(ctx, p.baselinePath, cfg.DuckDBTuning, cfg.DownloadDir, cfg.SpaceCheck)
 	if err != nil {
 		return nil, fmt.Errorf("materialize baseline: %w", err)
@@ -257,4 +279,39 @@ func pgNeverPartitionedBefore(ctx context.Context, db *sql.DB, dbName, schema, t
 		return time.Time{}
 	}
 	return hist.CreatedAt.UTC().Truncate(time.Hour)
+}
+
+// pgCarryForwardEligible reports whether a PostgreSQL table with no change
+// in the window is published by carrying its previous file forward (#2757),
+// on top of carryForwardEligible's rule.
+//
+// A carried file keeps its footer: the LSN floor and the time bound
+// (MetaKeyPGDeltaSince) the previous snapshot's readers used, both older
+// than the ones a rewrite would record. Reading from them stays right: the
+// fold just showed the table has no change from that floor to the run's end,
+// and the bound was already true of every change past the floor. What it
+// costs is that the readers of the new snapshot start further back, in
+// events the index has to still hold. So:
+//
+//   - The footer must record the bound. A file a full read wrote has none,
+//     and its reader takes PGDeltaMargin before the snapshot's time: carried
+//     into a later snapshot, that would be measured from the later time, past
+//     changes the fold never looked at. Such a file is rewritten once, and
+//     the file the rewrite leaves is the one carried.
+//   - The bound must still be young: after cfg.ChainStartFloor (the line the
+//     daemon draws from how far back the index keeps events, #1904), or,
+//     with no line, less than tableDeltaMaxAge before the run. Past that the
+//     table is rewritten, which records the run's bound.
+//   - Unless the rewrite would record no newer bound (newSince, what the run
+//     would write: on a source with no change at all it is the old one). The
+//     rewrite would then cost the whole table and move nothing.
+func pgCarryForwardEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMetadata, since, newSince time.Time, changes int, capGap *CaptureGap) bool {
+	if !carryForwardEligible(cfg.CarryForwardUnchanged, cfg.OutputFormat, srcPath, changes, capGap) || bmeta.PGDeltaSince == "" {
+		return false
+	}
+	line := cfg.ChainStartFloor
+	if line.IsZero() {
+		line = cfg.At.Add(-tableDeltaMaxAge)
+	}
+	return since.After(line) || !newSince.After(since)
 }

@@ -466,6 +466,11 @@ func (s *baselineSupervisor) snapshotReadersStart(ctx context.Context, e console
 	if seen && memo.indexDSN == e.DSN && reconstruct.SnapshotDirName(memo.publishedAt) == reconstruct.SnapshotDirName(anchor) {
 		return memo.readsFrom, memo.readsFromKnown
 	}
+	if e.IsPostgres() {
+		// Each file's footer says where its reader starts, deltas or not.
+		from, err := snapshotReadsFromPG(ctx, e.BaselineDir, anchor)
+		return from, err == nil
+	}
 	if !s.tableDeltas {
 		return anchor, true
 	}
