@@ -338,3 +338,52 @@ func TestIntegrationPGSnapshotUpdateSameTransactionOrdinary(t *testing.T) {
 			out.refused, out.fallback, out.snapshots, out.said)
 	}
 }
+
+// A deferred key and a change that comes back, on a real PostgreSQL. Row 1
+// is not there before. One transaction inserts (1, 'a'), updates it to 'b',
+// inserts (1, 'a') again (allowed until commit) and deletes the row that
+// holds 'a'. The source keeps (1, 'b'). The captured changes are INSERT a,
+// UPDATE a to b, INSERT a, DELETE a: the third equals the first, as when
+// capture delivers a transaction twice, but a second delivery would repeat
+// INSERT, UPDATE, and this goes INSERT, DELETE. Taking it for a second
+// delivery ends on the DELETE and the copy has no row 1.
+//
+// Key 2 is the variant: the second 'a' row is updated to 'c' and then
+// deleted.
+//
+// Required: every copy made after the changes holds the source's rows, or
+// the update refused the table for this reason. Never other rows.
+func TestIntegrationPGSnapshotUpdateDeferredKeyFirstChangeAgain(t *testing.T) {
+	const tbl = "pgst_again"
+	out := pgSameTxnRun(t, pgSameTxnCase{
+		table: tbl, slot: "bintrail_pgsta_slot", pub: "bintrail_pgsta_pub",
+		columns: "id int, v text, PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED",
+		setup:   []string{"INSERT INTO " + tbl + " VALUES (3, 'keep')"},
+		changes: []string{
+			"BEGIN; INSERT INTO " + tbl + " VALUES (1, 'a'); UPDATE " + tbl + " SET v = 'b' WHERE id = 1; " +
+				"INSERT INTO " + tbl + " VALUES (1, 'a'); DELETE FROM " + tbl + " WHERE id = 1 AND v = 'a'; COMMIT",
+			"BEGIN; INSERT INTO " + tbl + " VALUES (2, 'a'); UPDATE " + tbl + " SET v = 'b' WHERE id = 2; " +
+				"INSERT INTO " + tbl + " VALUES (2, 'a'); UPDATE " + tbl + " SET v = 'c' WHERE id = 2 AND v = 'a'; " +
+				"DELETE FROM " + tbl + " WHERE id = 2 AND v = 'c'; COMMIT",
+			"INSERT INTO " + tbl + " VALUES (100, 'last')",
+		},
+		lastPK:      "100",
+		sourceExprs: "id::text, v", fileExprs: "CAST(id AS VARCHAR), CAST(v AS VARCHAR)", width: 2,
+	})
+	if want := pgKcSort([][]string{{"1", "b"}, {"2", "b"}, {"3", "keep"}, {"100", "last"}}); !reflect.DeepEqual(out.src, want) {
+		t.Fatalf("the source holds %v, want %v", out.src, want)
+	}
+	pgSameTxnJudge(t, out)
+	if out.updated {
+		t.Logf("the update followed the transactions of a deferred key and holds the source's rows")
+		return
+	}
+	if !out.refused {
+		t.Fatalf("the update neither published the source's rows nor failed (%d snapshots): %s", out.snapshots, out.said)
+	}
+	for _, want := range []string{"inside one transaction", "do not describe one row", "do not repeat the changes before it", "DEFERRABLE"} {
+		if !strings.Contains(out.said, want) {
+			t.Errorf("the update was refused, but not for this reason (missing %q): %s", want, out.said)
+		}
+	}
+}
