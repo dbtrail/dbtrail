@@ -12,6 +12,7 @@ import (
 
 func TestSourcePGStreamConfig(t *testing.T) {
 	e := console.ServerEntry{
+		ID:                "e1",
 		DSN:               "root:pw@tcp(idx:3306)/bintrail_idx_e1",
 		SourceDSN:         "postgres://repl:secret@pg:5432/appdb",
 		SourceSlot:        "bintrail_slot",
@@ -37,6 +38,11 @@ func TestSourcePGStreamConfig(t *testing.T) {
 	}
 	if cfg.Checkpoint != 10*time.Second {
 		t.Errorf("checkpoint = %v, want 10s", cfg.Checkpoint)
+	}
+	// #2762: the capture's metrics are labelled by the entry, and it opens no
+	// address of its own (the daemon serves one for all its captures).
+	if cfg.MetricsSource != e.ID || cfg.MetricsAddr != "" {
+		t.Errorf("MetricsSource %q MetricsAddr %q, want the entry's ID %q and no address", cfg.MetricsSource, cfg.MetricsAddr, e.ID)
 	}
 }
 

@@ -74,6 +74,14 @@ type Config struct {
 	// lost PG slot is fatal (One returns it; the supervisor reconnects), not a
 	// continue-after-loss.
 	Hooks *Hooks
+	// MetricsAddr, when set, serves this process's Prometheus metrics at
+	// that address under /metrics, for as long as One runs (#2762). Empty
+	// under `bintrail-console watch`, which serves one address for all its
+	// captures.
+	MetricsAddr string
+	// MetricsSource is the "source" label of this capture's metrics: the
+	// registry entry's ID under a supervisor. Empty = the slot's name.
+	MetricsSource string
 }
 
 // Hooks are liveness callbacks a supervisor attaches to one PG stream. All are
@@ -128,6 +136,9 @@ type pgStreamState struct {
 	// there is none. The next successful checkpoint stamps it into
 	// caught_up_at and clears it.
 	caughtUpAt time.Time
+	// metrics is where the loop publishes its Prometheus metrics (#2762);
+	// nil publishes none (metrics.go).
+	metrics *pgMetrics
 }
 
 // One runs a complete PostgreSQL replication stream until ctx is cancelled. It
@@ -154,6 +165,20 @@ func One(ctx context.Context, cfg Config) error {
 	if checkpointInterval <= 0 {
 		checkpointInterval = 5 * time.Second
 	}
+
+	// Before any connection: an address that cannot be opened fails the
+	// command at once, and a capture still starting (or waiting for its
+	// index) already answers a scrape.
+	if cfg.MetricsAddr != "" {
+		_, stopMetrics, err := startMetricsServer(cfg.MetricsAddr, logger)
+		if err != nil {
+			return fmt.Errorf("pgstreamrun: %w", err)
+		}
+		defer stopMetrics()
+	}
+	// Here and not where the loop starts, so the series exist (at zero) for
+	// a scrape during everything below.
+	metrics := newPGMetrics(metricsSource(cfg))
 
 	indexDB, err := config.Connect(cfg.IndexDSN)
 	if err != nil {
@@ -182,7 +207,7 @@ func One(ctx context.Context, cfg Config) error {
 	}
 	startLSN := resolveStartLSN(saved, cfg.StartLSN, logger)
 
-	state := &pgStreamState{lsn: startLSN, serverID: cfg.ServerID}
+	state := &pgStreamState{lsn: startLSN, serverID: cfg.ServerID, metrics: metrics}
 	if saved != nil {
 		state.eventsIndexed = saved.eventsIndexed
 		// Kept so a checkpoint saved before this run's first commit (#2746:
@@ -463,6 +488,7 @@ func streamLoopPG(
 				return
 			}
 			logger.Warn("pgstreamrun: source-health probe failed; recording it so the console shows the failure, not a blank panel", "error", err)
+			state.metrics.failed(errTypeHealthProbe)
 			// Persist the failure (not just log it): a never-written snapshot leaves the
 			// panel absent and the staleness net has nothing to age — the silent-failure
 			// the visibility feature must not have. buildProbeErrorJSON cannot fail.
@@ -471,6 +497,7 @@ func streamLoopPG(
 			}
 			return
 		}
+		state.metrics.slotRead(snap, time.Now())
 		proof.asked(snap.FlushedLSN, asked)
 		// A quiet source: the position received before the asking is
 		// already the one it answered.
@@ -526,14 +553,18 @@ func streamLoopPG(
 	// own until its commit, so a reader never sees part of it (past the
 	// indexer's row/time caps it is made visible in parts, and logged).
 	w := indexer.NewTxnBatcher(idx, maxTxnRows, maxTxnOpen, indexer.TxnBatcherHooks{
-		Published: func(n int64, _ []indexer.CommitStamp) {
+		Statement:  state.metrics.statement,
+		WriteError: func() { state.metrics.failed(errTypeBatchFlush) },
+		Published: func(n int64, stamps []indexer.CommitStamp) {
 			state.eventsIndexed += n
+			state.metrics.published(n, stamps, time.Now())
 			// Liveness: any rows indexed flip a supervised job pending→running.
 			if n > 0 && hooks != nil && hooks.OnIndexed != nil {
 				hooks.OnIndexed(n)
 			}
 		},
 		Split: func(why string, rows int64, open time.Duration, first bool) {
+			state.metrics.split()
 			if first {
 				logger.Warn("pgstreamrun: a source transaction is too large to make visible all at once; readers can see part of it until its commit is captured",
 					"reason", why, "rows_so_far", rows, "open_for", open.Round(time.Millisecond))
@@ -569,9 +600,13 @@ func streamLoopPG(
 		if !state.resumed && state.captureFrom == 0 && cap != nil {
 			state.captureFrom = cap.StartedFrom()
 		}
+		// Read before the save, which clears it once it is stamped.
+		stamping := state.caughtUpAt
 		if err := saveCheckpointPG(indexDB, state, lastCommitLSN); err != nil {
+			state.metrics.failed(errTypeCheckpoint)
 			return err
 		}
+		state.metrics.checkpointSaved(lastCommitLSN, stamping)
 		// Only now is it safe to let PostgreSQL release WAL up to lastCommitLSN.
 		if cap != nil {
 			cap.AckCommitted(lastCommitLSN)
@@ -711,6 +746,7 @@ func streamLoopPG(
 			case event.EventGTID:
 				// PostgreSQL does not emit a leading GTID marker; ignore defensively.
 			default:
+				state.metrics.received(ev.Timestamp, time.Now())
 				ev.SchemaVersion = snapshotByTable[ev.Schema+"."+ev.Table]
 				if err := w.Add(ev); err != nil {
 					return err

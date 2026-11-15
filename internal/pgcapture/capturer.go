@@ -332,6 +332,10 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 			}
 			return fmt.Errorf("pgcapture: receive message: %w", err)
 		}
+		// When this message was read off the connection: event.Event.ReadAt
+		// of the changes it carries, from which the consumer measures how
+		// long a change waited to be in the index (#2762).
+		readAt := time.Now()
 
 		cd, ok := msg.(*pgproto3.CopyData)
 		if !ok {
@@ -368,6 +372,7 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 				return err
 			}
 			if emit {
+				ev.ReadAt = readAt
 				if err := c.emit(ctx, replConn, out, ev, standbyTicker); err != nil {
 					return err
 				}
@@ -376,6 +381,7 @@ func (c *Capturer) receiveLoop(ctx context.Context, replConn *pgconn.PgConn, dec
 			// Only a multi-relation TRUNCATE (`TRUNCATE a, b`) fills this — one marker
 			// per in-scope relation past the first — so none is silently dropped (#827).
 			for _, pev := range decoder.TakePending() {
+				pev.ReadAt = readAt
 				if err := c.emit(ctx, replConn, out, pev, standbyTicker); err != nil {
 					return err
 				}
