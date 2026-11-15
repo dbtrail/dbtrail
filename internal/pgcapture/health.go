@@ -67,7 +67,7 @@ type SlotHealth struct {
 // retention). retained_bytes is derived in SQL via pg_wal_lsn_diff. pg_current_wal_lsn()
 // assumes a primary (the source we capture from); on a standby it would error, which a
 // health surface reports rather than hides. The columns exist on every supported
-// version (PG14+).
+// version (PG15+).
 const slotHealthQuery = `SELECT
 	s.active,
 	s.wal_status,
