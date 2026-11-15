@@ -643,15 +643,40 @@ listener, its own workers, its own memory.
   a statement whose select list holds a `*` next to an unnamed expression, a
   cast of an expression to `text`, `varchar`, `char`, `real` or `float`, a
   column written with upper-case letters inside a cast, and `VALUES` lists.
-- **Simple query protocol only**: `psql` uses it; a `pgx` client sets
-  `QueryExecModeSimpleProtocol`. Prepared statements are refused with an error.
+- **Prepared statements and parameters work**: the port speaks the simple and
+  the extended query protocol, so `psql`, JDBC, `pgx` in its default mode
+  and psycopg 3 connect as they are. Each argument is written
+  into the statement as a value before the copy runs it, and the statement then
+  runs exactly as if it had been typed with that value; whatever the simple
+  protocol refuses (a write, `SET search_path`) is refused here with the same
+  error. Three things to know:
+  - The port does not work out a parameter's type from the statement, as
+    PostgreSQL does: it tells the driver the type is unknown. An argument the
+    driver sends without a type is read as the type its place needs
+    (`id = $1` compares as a number), but where its place does not decide, as
+    in `$1 + 1`, give it one: `$1::int + 1`.
+  - When a driver asks for a statement's columns before running it (pgx does,
+    JDBC sometimes), the port asks the copy for them without reading a row.
+    A statement the copy cannot ask that way (`SHOW`, `DESCRIBE`) is
+    described as returning no rows; with `pgx` run those with
+    `QueryExecModeSimpleProtocol`.
+    The columns said this way keep the copy's own heading where the statement
+    gives one no name (`count(*)` is `count_star()`), so name such a column
+    (`AS n`) when the heading matters to a driver that describes first.
+  - `BEGIN`, `COMMIT` and `ROLLBACK` move the transaction status the driver
+    sees, and after an error inside a block every statement is refused until
+    `ROLLBACK`, as on PostgreSQL. They do not make a snapshot: each statement
+    reads the copy as it is when it runs. A driver that fetches a few rows at a
+    time (JDBC with `setFetchSize` and autocommit off) works; the port still
+    computes the whole answer first, under the same row cap.
 - **This machine only.** The port asks for the password in clear text and has
   no TLS, so `--listen` takes an address of this machine alone (`127.0.0.1`,
   `::1`, `localhost`) and the process refuses to start with any other.
 - `SET search_path`, `SET ROLE` and a `SET TimeZone` other than UTC are
   refused: the port resolves names in `public` and answers in UTC, so write the
-  schema in the name and convert zones in the statement. Other `SET`s, `BEGIN`,
-  `COMMIT` and `ROLLBACK` are accepted and change nothing.
+  schema in the name and convert zones in the statement. Other `SET`s are accepted and
+  change nothing; `BEGIN`, `COMMIT` and `ROLLBACK` move the transaction status
+  only (see above).
 - A result with more rows than the port's row cap, or with a cell longer than
   the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
   the long column.
@@ -735,9 +760,10 @@ Scope and behaviour track PostgreSQL's current time-travel maturity:
   `psql`/libpq (their text protocol uses NUL-terminated C strings); a driver that
   reads the raw value (e.g. `pgx` scanning into `[]byte`) round-trips it intact.
   Per-column type OIDs (so `bytea` arrives as `bytea`) are a follow-up.
-- Use the **simple query protocol** — `psql` does this by default; a `pgx`
-  client sets `QueryExecModeSimpleProtocol`. The extended (prepared-statement)
-  protocol is not yet implemented.
+- Both the **simple and the extended query protocol** are served, so a driver
+  in its default mode can prepare `SELECT * FROM _flashback.orders AS OF $1
+  WHERE id = $2` and run it with arguments. An argument cannot hold a single
+  quote (`'`) here: write such a value in the statement's text.
 - **Auth** mirrors the shim: a cleartext password per tenant from
   `--shim-config` (`shim.yaml`). The default listen address is loopback; for a
   non-loopback bind, front a TLS terminator — the same posture as the MySQL

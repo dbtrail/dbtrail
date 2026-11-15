@@ -29,11 +29,28 @@ type session struct {
 	// connection's context, which ends when the client leaves.
 	bound *Binding
 	ctx   context.Context
+	// tx is the transaction status ReadyForQuery reports: 'I' idle, 'T' in
+	// a transaction block, 'E' in a failed one. The port keeps no
+	// transaction of its own (every statement reads the copy as it is); the
+	// status is what a client is told so that it moves through BEGIN,
+	// COMMIT and ROLLBACK as on PostgreSQL.
+	tx byte
+	// ext is the extended query protocol's state (extended.go).
+	ext extState
 	// budget is the port's bound on the results it holds while it sends
 	// them (resultbudget.go), nil for none; heldResult is what this
-	// connection's result counts in it now.
+	// connection's last result counts in it now, before a portal takes it
+	// over (portal.held).
 	budget     *ResultBudget
 	heldResult int64
+}
+
+// txStatus is the status ReadyForQuery reports.
+func (s *session) txStatus() byte {
+	if s.tx == 0 {
+		return 'I'
+	}
+	return s.tx
 }
 
 // pgErr is a query-level failure carrying a 5-char SQLSTATE and a message.
@@ -47,8 +64,10 @@ type pgErr struct {
 // failure is sent as an ErrorResponse and returns nil. Every path ends with
 // ReadyForQuery so the client is never left hanging (advisor invariant).
 func (s *session) handleSimpleQuery(qstr string) error {
-	// Nothing but blanks and semicolons is an empty query, as on PostgreSQL.
-	if strings.Trim(qstr, " \t\r\n;") == "" {
+	// A simple query ends the unnamed statement and portal, as on
+	// PostgreSQL.
+	s.dropUnnamed()
+	if isEmptyQuery(qstr) {
 		s.be.Send(&pgproto3.EmptyQueryResponse{})
 		return s.readyFlush()
 	}
@@ -57,9 +76,9 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// back when this returns: its answer is written by then, or never will
 	// be (the write failed, the client left, the statement was refused).
 	defer s.releaseResult()
-	cols, rows, tag, perr := s.resolve(qstr)
+	cols, rows, tag, perr := s.run(qstr)
 	if perr != nil {
-		s.errorResponse(perr.code, perr.msg)
+		s.fail(perr)
 		return s.readyFlush()
 	}
 	// cols == nil marks a non-row reply (a handshake/setup probe like SET): no
@@ -67,7 +86,7 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// resolves to zero rows (row absent at AsOf) — has a non-nil cols and emits
 	// the RowDescription so the client sees the real column header.
 	if cols != nil {
-		s.rowDescription(cols)
+		s.rowDescription(cols, nil)
 		for _, r := range rows {
 			s.dataRow(r)
 		}
@@ -76,53 +95,170 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	return s.readyFlush()
 }
 
-// resolve parses and runs a query through the shared engine, returning the
-// column list, the (zero or one) rendered rows, the CommandComplete tag, and a
-// query-level error. Single-row AS OF only; full-table and _diff are refused.
-func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
+// isEmptyQuery: nothing but blanks and semicolons is an empty query, as on
+// PostgreSQL.
+func isEmptyQuery(qstr string) bool { return strings.Trim(qstr, " \t\r\n;") == "" }
+
+// run answers one statement, either protocol's, and moves the transaction
+// status: BEGIN opens a block, COMMIT and ROLLBACK end it, and in a failed
+// block nothing but those runs (25P02), as on PostgreSQL.
+func (s *session) run(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
+	if perr := s.abortedRefusal(qstr); perr != nil {
+		return nil, nil, "", perr
+	}
+	cols, rows, tag, perr = s.resolve(qstr)
+	if perr != nil {
+		return nil, nil, "", perr
+	}
+	switch tag {
+	case "BEGIN":
+		if s.txStatus() != 'I' {
+			s.warning("25001", "there is already a transaction in progress")
+		} else {
+			s.tx = 'T'
+		}
+	case "COMMIT", "ROLLBACK":
+		switch s.txStatus() {
+		case 'I':
+			s.warning("25P01", "there is no transaction in progress")
+		case 'E':
+			// A failed block is rolled back, whatever ended it.
+			tag = "ROLLBACK"
+		}
+		s.tx = 'I'
+		s.dropPortals()
+	}
+	return cols, rows, tag, nil
+}
+
+// abortedRefusal refuses a statement in a failed transaction block other
+// than the COMMIT or ROLLBACK that ends it.
+func (s *session) abortedRefusal(qstr string) *pgErr {
+	if s.txStatus() != 'E' {
+		return nil
+	}
+	if tag, ok := probeReply(qstr); ok && (tag == "COMMIT" || tag == "ROLLBACK") {
+		return nil
+	}
+	return &pgErr{"25P02", "current transaction is aborted, commands ignored until end of transaction block"}
+}
+
+// fail sends a statement's error. In a transaction block the block fails
+// with it.
+func (s *session) fail(perr *pgErr) {
+	s.errorResponse(perr.code, perr.msg)
+	if s.txStatus() == 'T' {
+		s.tx = 'E'
+	}
+}
+
+// warning sends a WARNING notice.
+func (s *session) warning(code, msg string) {
+	s.be.Send(&pgproto3.NoticeResponse{Severity: "WARNING", SeverityUnlocalized: "WARNING", Code: code, Message: msg})
+}
+
+// stmtKind is which way resolve answers a statement.
+type stmtKind int
+
+const (
+	// kindFree is ordinary SQL, answered on the copy.
+	kindFree stmtKind = iota
+	// kindTimeTravel is a well-formed time-travel statement.
+	kindTimeTravel
+	// kindProbe is a session statement answered here with a tag (SET,
+	// BEGIN...), or refused with one.
+	kindProbe
+	// kindRefused is refused before anything runs.
+	kindRefused
+)
+
+// classified is what classify says about a statement.
+type classified struct {
+	kind stmtKind
+	// q is the time-travel statement, for kindTimeTravel.
+	q shim.TimeTravelQuery
+	// tag answers a kindProbe; perr refuses a kindProbe or a kindRefused.
+	tag  string
+	perr *pgErr
+	// timeTravel says the time-travel parser reads the text (well formed or
+	// not), which decides how an argument is written into it.
+	timeTravel bool
+}
+
+// classify decides which way resolve answers qstr, without running it. It is
+// the one place that decides: resolve acts on it, and the extended protocol
+// asks it before a statement runs (to say whether it returns rows, and how
+// its arguments are written).
+func (s *session) classify(qstr string) classified {
 	q, err := shim.Parse(qstr, s.currentDB)
-	if s.h == nil && !errors.Is(err, shim.ErrNotTimeTravel) {
+	tt := !errors.Is(err, shim.ErrNotTimeTravel)
+	if s.h == nil && tt {
 		// A port that runs SQL on the copy and has no time-travel engine
 		// bound, and a statement written for time travel, well formed or
 		// not. Refused by name: run as ordinary SQL it would answer from the
 		// copy as it is now, not as of the moment asked for, and a parse
 		// error here would send the reader to fix a statement this port
 		// does not serve.
-		return nil, nil, "", &pgErr{"0A000",
-			"time travel (_flashback, _snapshot, AS OF) is not served on this port; it runs SQL on the copy as it is now"}
+		return classified{kind: kindRefused, timeTravel: true, perr: &pgErr{"0A000",
+			"time travel (_flashback, _snapshot, AS OF) is not served on this port; it runs SQL on the copy as it is now"}}
 	}
 	if err != nil {
-		if !errors.Is(err, shim.ErrNotTimeTravel) {
+		if tt {
 			// Recognised as a time-travel query but malformed (bad AS OF literal,
 			// missing schema, bad grammar) → syntax_error.
-			return nil, nil, "", &pgErr{"42601", err.Error()}
+			return classified{kind: kindRefused, timeTravel: true, perr: &pgErr{"42601", err.Error()}}
 		}
 		// Not a time-travel query. Tolerate the handful of setup statements a
 		// client fires on connect; reject anything else (we are not a general
 		// PostgreSQL engine).
 		if s.bound != nil {
 			if t, refusal, ok := boundProbe(qstr); ok {
-				if refusal != nil {
-					return nil, nil, "", refusal
-				}
-				return nil, nil, t, nil
+				return classified{kind: kindProbe, tag: t, perr: refusal}
 			}
-			return s.runFree(qstr)
+			return classified{kind: kindFree}
 		}
 		if t, ok := probeReply(qstr); ok {
-			return nil, nil, t, nil
+			return classified{kind: kindProbe, tag: t}
 		}
-		return nil, nil, "", &pgErr{"0A000", fmt.Sprintf(
+		return classified{kind: kindRefused, perr: &pgErr{"0A000", fmt.Sprintf(
 			"this endpoint serves only _flashback / _snapshot AS OF time-travel queries; got: %s",
-			strings.TrimSpace(qstr))}
+			strings.TrimSpace(qstr))}}
 	}
+	return classified{kind: kindTimeTravel, q: q, timeTravel: true}
+}
 
+// resolve parses and runs a query through the shared engine, returning the
+// column list, the (zero or one) rendered rows, the CommandComplete tag, and a
+// query-level error. Single-row AS OF only; full-table and _diff are refused.
+func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
+	c := s.classify(qstr)
+	switch c.kind {
+	case kindRefused:
+		return nil, nil, "", c.perr
+	case kindProbe:
+		if c.perr != nil {
+			return nil, nil, "", c.perr
+		}
+		return nil, nil, c.tag, nil
+	case kindFree:
+		return s.runFree(qstr)
+	}
+	return s.resolveTimeTravel(c.q)
+}
+
+// timeTravelGates are the refusals a time-travel statement meets before
+// anything is read or said about its table, in this order. A Describe asks
+// them too, before it names the table's columns.
+//
+// run is set when the statement is about to run, not only be described: the
+// port's result budget is then asked too, at its place in the order.
+func (s *session) timeTravelGates(q shim.TimeTravelQuery, run bool) *pgErr {
 	// A port's own gate on time travel (Binding.TimeTravelRefusal): asked for
 	// every statement, so a rule saved while the connection is open governs
 	// its next one, and before anything is read or said about the table.
 	if s.bound != nil && s.bound.TimeTravelRefusal != nil {
 		if why := s.bound.TimeTravelRefusal(); why != "" {
-			return nil, nil, "", &pgErr{"42501", why}
+			return &pgErr{"42501", why}
 		}
 	}
 
@@ -136,7 +272,7 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 	// It runs BEFORE the PK check, matching the MySQL order: an unauthorized
 	// schema must not first be told whether its WHERE column is a PK.
 	if msg, deny := s.h.SchemaAuthzCheck(q.Schema); deny {
-		return nil, nil, "", &pgErr{"42501", msg}
+		return &pgErr{"42501", msg}
 	}
 
 	// A time-travel answer is held like any other while it is sent, so the
@@ -144,10 +280,11 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 	// was found to be one this connection may send, before the index is read
 	// for it. Only for a statement that would be answered with a row: a
 	// whole table as of a moment and _diff are refused below for what they
-	// are, which sending them again would not change.
-	if (q.Type == shim.TypeFlashback || q.Type == shim.TypeSnapshot) && q.PKColumn != "" {
+	// are, which sending them again would not change. A Describe reads no
+	// row and holds none, so it does not ask.
+	if run && (q.Type == shim.TypeFlashback || q.Type == shim.TypeSnapshot) && q.PKColumn != "" {
 		if refusal := s.admitResult(); refusal != nil {
-			return nil, nil, "", refusal
+			return refusal
 		}
 	}
 
@@ -155,57 +292,65 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 	// WHERE whose column is not the table's single-column PK is refused so a
 	// non-PK filter cannot silently return the wrong row.
 	if msg, reject := s.h.PKColumnCheck(q); reject {
-		return nil, nil, "", &pgErr{"42601", msg}
+		return &pgErr{"42601", msg}
 	}
 
 	switch q.Type {
 	case shim.TypeDiff:
-		return nil, nil, "", &pgErr{"0A000",
+		return &pgErr{"0A000",
 			"_diff is not supported over the PostgreSQL wire front-end; use `bintrail-pg reconstruct --history` for a row's per-event history"}
 	case shim.TypeFlashback, shim.TypeSnapshot:
 		if q.PKColumn == "" {
-			return nil, nil, "", &pgErr{"0A000", fullTableRefusalMsg}
+			return &pgErr{"0A000", fullTableRefusalMsg}
 		}
-		ctx, cancel := s.h.QueryContext()
-		defer cancel()
-		var image map[string]any
-		var rerr error
-		if q.Type == shim.TypeSnapshot {
-			image, rerr = s.h.ResolveSnapshotRow(ctx, q)
-		} else {
-			image, rerr = s.h.ResolveFlashbackRow(ctx, q)
-		}
-		if rerr != nil {
-			return nil, nil, "", pgResolveError(rerr)
-		}
-		cols = s.h.ColumnsFor(image, q)
-		if image == nil {
-			// Row did not exist at AsOf (never created, or a DELETE tail): a real
-			// resultset with the table's columns and zero rows. Still a served
-			// time-travel read, so it is audited like the MySQL front-end's
-			// empty resultsets (side channel on the success path, see
-			// ext/audit.go; a refusal above emits nothing).
-			s.h.AuditResolve(q, 0)
-			return cols, nil, "SELECT 0", nil
-		}
-		cells, cerr := imageCells(image, cols)
-		if cerr != nil {
-			// Residual unchanged-TOAST marker (#592) — refuse rather than serve
-			// the marker's JSON as a value.
-			return nil, nil, "", &pgErr{"XX000", cerr.Error()}
-		}
-		rows = [][][]byte{cells}
-		// Counted from here until it is written; refused when the budget
-		// was taken while the row was read. Before the audit record: a
-		// refused answer served nobody.
-		if refusal := s.holdResult(rows); refusal != nil {
-			return nil, nil, "", refusal
-		}
-		s.h.AuditResolve(q, 1)
-		return cols, rows, "SELECT 1", nil
-	default:
-		return nil, nil, "", &pgErr{"XX000", fmt.Sprintf("unsupported query type: %s", q.Type)}
+		return nil
 	}
+	return &pgErr{"XX000", fmt.Sprintf("unsupported query type: %s", q.Type)}
+}
+
+// resolveTimeTravel answers a well-formed time-travel statement: its gates,
+// then the row as of the moment asked for.
+func (s *session) resolveTimeTravel(q shim.TimeTravelQuery) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
+	if perr := s.timeTravelGates(q, true); perr != nil {
+		return nil, nil, "", perr
+	}
+	ctx, cancel := s.h.QueryContext()
+	defer cancel()
+	var image map[string]any
+	var rerr error
+	if q.Type == shim.TypeSnapshot {
+		image, rerr = s.h.ResolveSnapshotRow(ctx, q)
+	} else {
+		image, rerr = s.h.ResolveFlashbackRow(ctx, q)
+	}
+	if rerr != nil {
+		return nil, nil, "", pgResolveError(rerr)
+	}
+	cols = s.h.ColumnsFor(image, q)
+	if image == nil {
+		// Row did not exist at AsOf (never created, or a DELETE tail): a real
+		// resultset with the table's columns and zero rows. Still a served
+		// time-travel read, so it is audited like the MySQL front-end's
+		// empty resultsets (side channel on the success path, see
+		// ext/audit.go; a refusal above emits nothing).
+		s.h.AuditResolve(q, 0)
+		return cols, nil, "SELECT 0", nil
+	}
+	cells, cerr := imageCells(image, cols)
+	if cerr != nil {
+		// Residual unchanged-TOAST marker (#592) — refuse rather than serve
+		// the marker's JSON as a value.
+		return nil, nil, "", &pgErr{"XX000", cerr.Error()}
+	}
+	rows = [][][]byte{cells}
+	// Counted from here until it is written; refused when the budget was
+	// taken while the row was read. Before the audit record: a refused
+	// answer served nobody.
+	if refusal := s.holdResult(rows); refusal != nil {
+		return nil, nil, "", refusal
+	}
+	s.h.AuditResolve(q, 1)
+	return cols, rows, "SELECT 1", nil
 }
 
 // pgResolveError maps the wire-neutral *shim.ResolveError (or a raw data-fault)
@@ -336,15 +481,24 @@ func probeReply(qstr string) (tag string, ok bool) {
 
 // --- wire writers ---------------------------------------------------------
 
-func (s *session) rowDescription(cols []string) {
+// rowDescription describes the columns. formats are a portal's result
+// formats from its Bind: none (text), one for every column, or one each.
+func (s *session) rowDescription(cols []string, formats []int16) {
 	fields := make([]pgproto3.FieldDescription, len(cols))
 	for i, c := range cols {
+		format := int16(pgproto3.TextFormat)
+		switch len(formats) {
+		case 1:
+			format = formats[0]
+		case len(cols):
+			format = formats[i]
+		}
 		fields[i] = pgproto3.FieldDescription{
 			Name:         []byte(c),
 			DataTypeOID:  pgtypeText,
 			DataTypeSize: -1, // variable-length
 			TypeModifier: -1,
-			Format:       pgproto3.TextFormat,
+			Format:       format,
 		}
 	}
 	s.be.Send(&pgproto3.RowDescription{Fields: fields})
@@ -362,9 +516,10 @@ func (s *session) errorResponse(code, msg string) {
 	s.be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: code, Message: msg})
 }
 
-// readyFlush sends ReadyForQuery(idle) and flushes — the required end of every
-// simple-query cycle, success or failure.
+// readyFlush sends ReadyForQuery with the transaction status and flushes —
+// the required end of every simple-query cycle and of every Sync, success or
+// failure.
 func (s *session) readyFlush() error {
-	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: s.txStatus()})
 	return s.be.Flush()
 }

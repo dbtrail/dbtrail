@@ -39,9 +39,10 @@ exactly like the MySQL shim; _snapshot additionally consults --baseline-dir /
 --baseline-s3 so a row untouched in the retained window still resolves.
 
 Scope: single-row AS OF (WHERE <primary-key> = <value>) only. Full-table AS OF is
-refused with remediation (PostgreSQL full-table time-travel is deferred). Use the
-simple query protocol — psql does this natively; a pgx client sets
-QueryExecModeSimpleProtocol.
+refused with remediation (PostgreSQL full-table time-travel is deferred). Both
+the simple and the extended query protocol are served, so psql and a driver in
+its default mode (pgx, JDBC, psycopg 3) connect as they are; an argument ($1)
+cannot hold a single quote here.
 
 Auth mirrors the shim: a cleartext credential validated per tenant from
 --shim-config (shim.yaml). This is loopback-default; front a TLS terminator for a

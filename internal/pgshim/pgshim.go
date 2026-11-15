@@ -19,9 +19,10 @@
 //   - full-table AS OF is REFUSED with actionable remediation (the PostgreSQL
 //     baseline still omits CREATE TABLE, slice E) — never a silent partial.
 //   - _diff is refused (use `bintrail-pg reconstruct --history`).
-//   - simple query protocol only (psql uses it natively; a pgx client sets
-//     QueryExecModeSimpleProtocol). The extended query protocol is declined with
-//     a clear error and a resync, so a default-mode client is not left hanging.
+//   - the simple and the extended query protocol (#2767, extended.go): named
+//     and unnamed statements and portals, $n parameters written into the
+//     statement as literals (params.go), Describe before Execute, Execute
+//     with a row limit, and PostgreSQL's discard-until-Sync error rule.
 //
 // Addressing: the connect `database` parameter is the bintrail SCHEMA (the
 // PostgreSQL schema name, e.g. `public`); flashback-vs-snapshot semantics are
@@ -284,23 +285,22 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 // commandLoop answers the connection's commands until the client leaves or a
 // write fails.
 func commandLoop(be *pgproto3.Backend, sess *session) {
-	// skipUntilSync implements the PostgreSQL extended-query error rule: once we
-	// reject an extended-protocol message we must discard everything until the
-	// client's Sync, then release it with ReadyForQuery.
-	skipUntilSync := false
 	// The connection is over when this returns: nothing it counted in the
-	// port's result budget outlives it.
+	// port's result budget outlives it, a portal's kept rows included.
 	defer sess.releaseResult()
+	defer sess.dropPortals()
 	for {
 		msg, rerr := be.Receive()
 		if rerr != nil {
 			return // client disconnect / read error
 		}
-		if skipUntilSync {
+		if sess.ext.skip {
+			// PostgreSQL's extended-query error rule: after an error every
+			// message up to the client's Sync is discarded, a simple query
+			// too, and the Sync releases the client with ReadyForQuery.
 			switch msg.(type) {
 			case *pgproto3.Sync:
-				skipUntilSync = false
-				if err := sess.readyFlush(); err != nil {
+				if err := sess.handleSync(); err != nil {
 					return
 				}
 			case *pgproto3.Terminate:
@@ -308,28 +308,48 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 			}
 			continue
 		}
+		// Replies to Parse, Bind, Describe, Execute and Close are buffered,
+		// as PostgreSQL buffers them: they leave at the client's Sync or
+		// Flush.
 		switch m := msg.(type) {
 		case *pgproto3.Query:
 			if err := sess.handleSimpleQuery(m.String); err != nil {
 				return
 			}
+		case *pgproto3.Parse:
+			sess.handleParse(m)
+		case *pgproto3.Bind:
+			sess.handleBind(m)
+		case *pgproto3.Describe:
+			sess.handleDescribe(m)
+		case *pgproto3.Execute:
+			sess.handleExecute(m)
+		case *pgproto3.Close:
+			sess.handleClose(m)
+		case *pgproto3.Sync:
+			if err := sess.handleSync(); err != nil {
+				return
+			}
+		case *pgproto3.Flush:
+			if err := be.Flush(); err != nil {
+				return
+			}
 		case *pgproto3.Terminate:
 			return
-		case *pgproto3.Sync:
-			// A stray Sync (some clients send one after startup): acknowledge.
+		case *pgproto3.FunctionCall:
+			// The fast-path function call: a client waits for its
+			// ReadyForQuery, as for a simple query.
+			sess.fail(&pgErr{"0A000", "function calls are not supported on this port; call the function in a statement"})
 			if err := sess.readyFlush(); err != nil {
 				return
 			}
 		default:
-			// Extended query protocol (Parse/Bind/Describe/Execute/Close/Flush)
-			// or an unrecognised message. Not supported in the first cut; emit one
-			// error and skip to the client's Sync so it is not left hanging.
-			sess.errorResponse("0A000", "this endpoint supports only the simple query protocol; "+
-				"psql uses it natively — with pgx set QueryExecModeSimpleProtocol")
+			// A message this port does not take (COPY data outside a COPY,
+			// for one): one error, then the client's Sync resynchronizes.
+			sess.extFail(&pgErr{"08P01", fmt.Sprintf("unexpected message %T", m)})
 			if err := be.Flush(); err != nil {
 				return
 			}
-			skipUntilSync = true
 		}
 	}
 }
