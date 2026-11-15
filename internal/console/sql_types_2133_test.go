@@ -150,6 +150,7 @@ func (a *askedTypes) DateFunctionVeto(dates, notDates []string) string          
 func (a *askedTypes) DateSubVeto(dates, times, other []string) string               { return "" }
 func (a *askedTypes) TimestampDiffVeto(dates, other []string) string                { return "" }
 func (a *askedTypes) FloatVeto(floats []string, star bool) string                   { return "" }
+func (a *askedTypes) UnsignedVeto(unsigned []string, star bool) string              { return "" }
 
 func (a *askedTypes) NameVeto(names []string) string {
 	a.nameCalls++

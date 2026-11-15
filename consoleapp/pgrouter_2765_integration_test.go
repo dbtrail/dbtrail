@@ -193,6 +193,33 @@ func TestIntegrationPGRouter(t *testing.T) {
 		"SELECT id FROM " + tbl + " WHERE false",
 		"SELECT 1 AS one;",
 		"select 'it''s' as q, NULL as nothing, true as yes",
+		// A column the statement gives no name is headed as PostgreSQL heads
+		// it (#2803): the source itself says what each one is called.
+		"SELECT count(*) FROM " + tbl,
+		"SELECT COUNT(*), Sum(id), max(amount), LOWER(status) FROM " + tbl + " WHERE id = 1 GROUP BY status",
+		"SELECT count(DISTINCT status), count(status) FILTER (WHERE id > 1) FROM " + tbl,
+		"SELECT id + 1, -id, id = 1, status IS NULL, NOT ok, id BETWEEN 1 AND 2, id IN (1, 2), status || 'x', status LIKE 'n%', id = 1 AND ok, 1, 'x', NULL, 1.5 FROM " + tbl + " WHERE id = 1",
+		"SELECT sum(id) + 1, upper(lower(status)), coalesce(status, 'none'), nullif(id, 1), greatest(id, 2), least(id, 2) FROM " + tbl + " WHERE id = 2 GROUP BY status, id",
+		"SELECT (id + 1)::int, CAST(id + 1 AS bigint), 1::smallint, (id + 1)::numeric(10,2), 1::decimal, (id + 1)::double precision, (id = 1)::boolean, " +
+			"DATE '2020-01-01', '2020-01-01'::date, '2020-01-01'::timestamp, '2020-01-01'::timestamptz, INTERVAL '1 day', 'yes'::bool, '{}'::json, '{1}'::int[], " +
+			"'00:00'::time, 'x'::bytea, '00000000-0000-0000-0000-000000000000'::uuid FROM " + tbl + " WHERE false",
+		"SELECT id::bigint, count(*)::int, lower(status)::text, id::bigint::int, (id + 1)::bigint::int, " + tbl + ".id::bigint FROM " + tbl + " WHERE id = 1 GROUP BY id, status",
+		"SELECT TRUE, false, NOT ok, true::int, 'true'::boolean FROM " + tbl + " WHERE id = 1",
+		"SELECT CASE WHEN id = 1 THEN 2 END, CASE WHEN id = 1 THEN 2 ELSE id END, CASE WHEN id = 1 THEN 2 ELSE length(status)::int END, CASE WHEN id = 1 THEN 2 ELSE id + 1 END FROM " + tbl + " WHERE id = 1",
+		"SELECT EXISTS (SELECT 1), (SELECT 1), (SELECT id FROM " + tbl + " WHERE id = 2), (SELECT count(*) FROM " + tbl + "), (SELECT 1 AS x), id IN (SELECT 1), NOT EXISTS (SELECT 1) FROM " + tbl + " WHERE id = 1",
+		"SELECT row_number() OVER (ORDER BY id), count(*) OVER (), sum(id) OVER (PARTITION BY ok) FROM " + tbl + " WHERE false",
+		"SELECT extract(year FROM day), substring(status FROM 1 FOR 2), position('e' IN status), trim(status), trim(LEADING 'x' FROM status), " +
+			"placed AT TIME ZONE 'UTC', ARRAY[1, 2], status COLLATE \"C\", date_part('year', day), tags[1] FROM " + tbl + " WHERE false",
+		"SELECT count(*) FROM " + tbl + " UNION ALL SELECT id FROM " + tbl + " WHERE false",
+		"SELECT id FROM " + tbl + " WHERE id = 1 UNION ALL SELECT count(*) FROM " + tbl + " WHERE false",
+		"WITH c AS (SELECT id FROM " + tbl + ") SELECT count(*), max(id) FROM c",
+		"SELECT count(*) FROM (SELECT id FROM " + tbl + ") s ORDER BY 1 LIMIT 1",
+		"SELECT DISTINCT lower(status) FROM " + tbl + " WHERE id = 1",
+		"(SELECT count(*) FROM " + tbl + ")",
+		// A name the statement gave stays, whatever it looks like, and two
+		// columns may carry one name.
+		"SELECT count(*) AS \"count_star()\", count(*) AS n, count(*), count(*), id AS \"Id\" FROM " + tbl + " WHERE id = 1 GROUP BY id",
+		"SELECT ID, Status, " + tbl + ".id FROM " + tbl + " WHERE id = 1",
 	} {
 		wantNames, want, err := pgText(t, source, stmt)
 		if err != nil {
@@ -288,8 +315,8 @@ func TestIntegrationPGRouter(t *testing.T) {
 			}
 		}
 	}
-	if sqlRuns != 16 {
-		t.Errorf("%d sql.run audit records, want 16: the 15 compared statements and the last count", sqlRuns)
+	if sqlRuns != 36 {
+		t.Errorf("%d sql.run audit records, want 36: the 35 compared statements and the last count", sqlRuns)
 	}
 
 	// The client the port is for. Not every machine that runs this has it;

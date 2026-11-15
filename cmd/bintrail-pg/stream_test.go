@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pglogrepl"
 
+	"github.com/dbtrail/dbtrail/internal/cli"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/rotation"
@@ -30,6 +31,7 @@ func resetPGFlags() {
 	pgBatchSize = 1000
 	pgCheckpoint = 5
 	pgPartitions = 48
+	pgMetricsAddr = ""
 }
 
 // clearPGEnv blanks the BINTRAIL_PG_* vars for the test. t.Setenv to "" reads as
@@ -98,6 +100,47 @@ func TestPGStreamConfigFromFlags_HappyPathFromFlags(t *testing.T) {
 	}
 	if cfg.StartLSN != 0 {
 		t.Errorf("StartLSN = %d, want 0 when --start-lsn is unset", cfg.StartLSN)
+	}
+	if cfg.MetricsAddr != "" || cfg.MetricsSource != "" {
+		t.Errorf("MetricsAddr %q MetricsSource %q, want both empty when --metrics-addr is unset", cfg.MetricsAddr, cfg.MetricsSource)
+	}
+}
+
+// --metrics-addr reaches the capture (#2762), and is the flag the shared
+// BINTRAIL_METRICS_ADDR binding sets: the MySQL stream's flag and variable.
+func TestPGStreamConfigFromFlags_MetricsAddr_2762(t *testing.T) {
+	clearPGEnv(t)
+	resetPGFlags()
+	t.Cleanup(resetPGFlags)
+	pgReplDSN, pgQueryDSN, pgSlot, pgPublication = "postgres://h/db?replication=database", "postgres://h/db", "s", "p"
+	pgMetricsAddr = "127.0.0.1:9187"
+	cfg, err := pgStreamConfigFromFlags()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MetricsAddr != "127.0.0.1:9187" {
+		t.Errorf("MetricsAddr = %q, want the flag's value", cfg.MetricsAddr)
+	}
+	// The label is left to the capture, which uses the slot's name.
+	if cfg.MetricsSource != "" {
+		t.Errorf("MetricsSource = %q, want empty", cfg.MetricsSource)
+	}
+
+	f := streamCmd.Flag("metrics-addr")
+	if f == nil {
+		t.Fatal("flag --metrics-addr not registered")
+	}
+	if f.DefValue != "" {
+		t.Errorf("--metrics-addr defaults to %q, want empty (no metrics unless asked)", f.DefValue)
+	}
+	bound := false
+	for _, b := range cli.EnvBindings {
+		if b.Flag == "metrics-addr" && b.EnvVar == "BINTRAIL_METRICS_ADDR" {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Error("BINTRAIL_METRICS_ADDR is not bound to --metrics-addr")
 	}
 }
 

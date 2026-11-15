@@ -352,7 +352,13 @@ func (h *Handler) executeRouted(st *preparedStmt, args []any) (*mysql.Result, er
 					return why
 				}
 			}
-			return copyUnsafeArgument(args)
+			if why := copyUnsafeArgument(args); why != "" {
+				return why
+			}
+			if unsignedArgument(args) {
+				return readrouter.UnsignedArgumentVeto(st.query)
+			}
+			return ""
 		},
 	})
 	return h.sendSpooled(res, err)
@@ -381,6 +387,20 @@ func likeUnsafeArgument(args []any) string {
 		}
 	}
 	return ""
+}
+
+// unsignedArgument reports an argument the client bound as an unsigned
+// integer (decodeStmtArgs decodes one as a uint8 to a uint64). MySQL types it
+// as a BIGINT UNSIGNED in arithmetic (readrouter.UnsignedArgumentVeto,
+// #2848); go-sql-driver binds every uint64 so.
+func unsignedArgument(args []any) bool {
+	for _, a := range args {
+		switch a.(type) {
+		case uint8, uint16, uint32, uint64:
+			return true
+		}
+	}
+	return false
 }
 
 // plainInteger is a number MySQL and the copy both read as that integer.

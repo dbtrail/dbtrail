@@ -314,6 +314,7 @@ a final checkpoint).
 | `--batch-size` | no | Events per batch insert (default 1000). |
 | `--checkpoint` | no | Checkpoint interval in seconds (default 5). |
 | `--partitions` | no | Index partitions for the one-time bootstrap (default 48). |
+| `--metrics-addr` | no | Address to expose Prometheus metrics on, e.g. `:9090`; empty (the default) exposes none (env `BINTRAIL_METRICS_ADDR`). See [observability.md](observability.md#postgresql-capture-bintrail_pg_). |
 | `--rotate-retain` | no | Built-in rotation: drop index partitions older than this (`Nd`/`Nh`; `off` disables). Default `48h` for a new index; an index created before that default changed keeps the window it was created under (env `BINTRAIL_ROTATE_RETAIN`). |
 | `--rotate-interval` | no | Built-in rotation: how often a rotation cycle runs (default `1h`, env `BINTRAIL_ROTATE_INTERVAL`). |
 | `--rotate-add-future` | no | Built-in rotation: keep at least N future hourly partitions ready (default `3`, env `BINTRAIL_ROTATE_ADD_FUTURE`). |
@@ -508,10 +509,12 @@ A snapshot schedule set on a PostgreSQL server in the web interface does the
 same on its own. The first snapshot is a full read of the source; each slot
 after it builds the next snapshot from the previous one and the changes
 captured since, without reading the source again. An update holds the changes
-up to capture's last saved position, which capture saves every 10 seconds. It
-does not look for tables created after the previous snapshot, and says so in
-the log: such a table enters the copy when a full snapshot is next taken,
-if the publication includes it.
+up to capture's last saved position, which capture saves every 10 seconds. A
+table added to the publication after the previous snapshot has no file to
+update, so the update publishes without it and names it, and the schedule then
+takes one full read of the source to bring it into the copy, as it does for a
+new table on a MySQL source: where the schedule may take full reads, and no
+more than a few times for the same table.
 
 What to know:
 
@@ -601,9 +604,14 @@ listener, its own workers, its own memory.
 - **Every column is sent as text**, written the way PostgreSQL writes a value
   of that kind (`t`/`f`, `{a,b}`, `2026-03-04 05:06:07+00`). `psql` shows them
   as it would; a driver that asks for a column's type is told `text`.
-- **A column with no name of its own gets the copy's name for it**: `count(*)`
-  is headed `count_star()`, not `count`. Give it a name (`count(*) AS n`) when
-  the heading matters.
+- **A column with no name of its own is headed as PostgreSQL heads it**:
+  `count(*)` is `count`, a function call takes the function's name, a cast of
+  an expression takes the type's name (`int4`, `numeric`, `timestamptz`), and
+  an operator or a constant is `?column?`. A few cases keep the copy's own
+  heading, so give the column a name (`AS n`) when the heading matters there:
+  a statement whose select list holds a `*` next to an unnamed expression, a
+  cast of an expression to `text`, `varchar`, `char`, `real` or `float`, a
+  column written with upper-case letters inside a cast, and `VALUES` lists.
 - **Prepared statements and parameters work**: the port speaks the simple and
   the extended query protocol, so `psql`, JDBC, `pgx` in its default mode
   and psycopg 3 connect as they are. Each argument is written
@@ -621,6 +629,9 @@ listener, its own workers, its own memory.
     A statement the copy cannot ask that way (`SHOW`, `DESCRIBE`) is
     described as returning no rows; with `pgx` run those with
     `QueryExecModeSimpleProtocol`.
+    The columns said this way keep the copy's own heading where the statement
+    gives one no name (`count(*)` is `count_star()`), so name such a column
+    (`AS n`) when the heading matters to a driver that describes first.
   - `BEGIN`, `COMMIT` and `ROLLBACK` move the transaction status the driver
     sees, and after an error inside a block every statement is refused until
     `ROLLBACK`, as on PostgreSQL. They do not make a snapshot: each statement

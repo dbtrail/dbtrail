@@ -11,9 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/config"
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/pgbaseline"
 )
 
 // Tables created after the previous snapshot (#1993).
@@ -27,6 +29,10 @@ import (
 // the scheduler's (newTablesPlanner decides and the run records it,
 // includeNewTables starts the full read): a full read when one may start here,
 // otherwise the gap stays reported on the run with the reason.
+
+// listSourceTablesPG is listSourceTables for a PostgreSQL source; a package
+// variable for the reason listSourceTables is.
+var listSourceTablesPG = pgbaseline.TablesOfNextRun
 
 // newTablesCheck is what one update learned about tables it left out.
 // unchecked non-empty means the source was not asked or did not answer, and
@@ -122,12 +128,25 @@ func (s *baselineSupervisor) checkNewTables(req refreshRequest, snapshot []strin
 		// not skipped: an empty list here would read as "nothing missing".
 		return newTablesCheck{unchecked: "no source connection is set for this server, so tables created on it after the previous snapshot were not looked for"}
 	}
-	if req.SourcePostgres {
-		return newTablesCheck{unchecked: "tables created after the previous snapshot are not looked for on PostgreSQL sources yet"}
-	}
 	ctx, cancel := context.WithTimeout(s.ctx, sourceTablesTimeout)
 	defer cancel()
-	source, foldCase, err := listSourceTables(ctx, req.SourceDSN, req.SourceSSL, req.Schemas)
+	var (
+		source   []string
+		foldCase bool
+		err      error
+	)
+	if req.SourcePostgres {
+		// A PostgreSQL source's tables are its publication's (#2759): what a
+		// full read would copy, listed by the full read's own discovery.
+		// Names are compared as they are: PostgreSQL's are case-sensitive.
+		if req.SourcePublication == "" {
+			return newTablesCheck{unchecked: "this PostgreSQL server has no publication set, so tables added after the previous snapshot were not looked for"}
+		}
+		source, err = listSourceTablesPG(ctx, req.SourceDSN, req.SourcePublication,
+			cliutil.BuildIndexFilters(strings.Join(req.Schemas, ","), ""))
+	} else {
+		source, foldCase, err = listSourceTables(ctx, req.SourceDSN, req.SourceSSL, req.Schemas)
+	}
 	if err != nil {
 		return newTablesCheck{unchecked: console.ScrubReason(
 			fmt.Sprintf("could not ask the source which tables it has: %v", err), req.SourceDSN)}
@@ -210,6 +229,7 @@ var tablesCreatedSince = func(ctx context.Context, indexDSN string, since time.T
 func withSource(req *refreshRequest, e console.ServerEntry) {
 	br := console.BaselineRequestFor(e)
 	req.SourceDSN, req.SourceSSL, req.Schemas, req.SourcePostgres = br.SourceDSN, br.SourceSSL, br.Schemas, e.IsPostgres()
+	req.SourcePublication = br.Publication
 }
 
 // reportNewTables puts the check in the daemon log, where the published line

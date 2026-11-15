@@ -12,6 +12,8 @@ func TestBehindSourceScreens_2556(t *testing.T) {
 	var got struct {
 		Lines                                   map[string]*struct{ State, Text string }
 		RouterNew, RouterOld, SnapshotsCard     string
+		PGLines                                 map[string]*struct{ State, Text string }
+		PGRouter, MySQLAgain                    string
 		CurrentCaught, CurrentOld, CurrentNoTag struct{ Arrow, Source, Screen string }
 		IdleCaught, IdleCaughtSourceBehind      struct{ Arrow, Source, Screen string }
 		FallingCaught, FallingOld               bool
@@ -46,9 +48,22 @@ const current = { freshness: "current", continuity: "ok", lag_seconds: 150, delt
 const idle = { freshness: "idle", continuity: "ok", lag_seconds: 3600, delta_to: "2026-10-25 13:00:00" };
 const growing = { grown_seconds: 150, over_seconds: 300, indexing: true };
 const falling = vm.runInContext("captureFallingBehind", ctx);
+// #2855: an installation of PostgreSQL servers names its source as that.
+const routerNew = sides({ ...base, behind_source_seconds: 0, behind_source_ran: "2026-10-25T14:00:00Z" });
+vm.runInContext('installFamily = { family: "postgres", mixed: null };', ctx);
+const pgLines = {
+  zero: line({ behind_source_seconds: 0, behind_source_ran: "2026-10-25T14:00:00Z" }),
+  pending: line({ behind_source_pending: true }),
+  unknown: line({ behind_source_unknown_reason: "the server's index could not be reached" }),
+};
+const pgRouter = sides({ ...base, behind_source_seconds: 0, behind_source_ran: "2026-10-25T14:00:00Z" });
+vm.runInContext('installFamily = { family: "mysql", mixed: null };', ctx);
+const mysqlAgain = line({ behind_source_seconds: 0 }).text;
+vm.runInContext('installFamily = { family: "", mixed: null };', ctx);
 console.log(JSON.stringify({
+  pgLines, pgRouter, mysqlAgain,
   lines,
-  routerNew: sides({ ...base, behind_source_seconds: 0, behind_source_ran: "2026-10-25T14:00:00Z" }),
+  routerNew,
   routerOld: sides(base),
   snapshotsCard: card.textContent,
   currentCaught: draw({ ...current, caught_up_ago_seconds: 20 }),
@@ -61,6 +76,22 @@ console.log(JSON.stringify({
   statusIdleCaught: vm.runInContext("covCard", ctx)({ ...idle, caught_up_ago_seconds: 20 }).textContent,
 }));
 `, &got)
+	// #2855: the same sentences on an installation of PostgreSQL servers.
+	for k, want := range map[string]string{
+		"zero":    "The last query read data 0 seconds behind your PostgreSQL.",
+		"pending": "How far behind your PostgreSQL the last query read is being worked out. Refresh in a few seconds.",
+		"unknown": "How far behind your PostgreSQL the last query read cannot be told: the server's index could not be reached.",
+	} {
+		if l := got.PGLines[k]; l == nil || l.Text != want {
+			t.Errorf("PostgreSQL installation, %s: %+v, want %q", k, l, want)
+		}
+	}
+	if !strings.Contains(got.PGRouter, "Behind your PostgreSQL: 0 seconds (last query)") || strings.Contains(got.PGRouter, "your MySQL: 0") {
+		t.Errorf("PostgreSQL installation, the router card: %s", got.PGRouter)
+	}
+	if got.MySQLAgain != "The last query read data 0 seconds behind your MySQL." {
+		t.Errorf("a MySQL installation: %q", got.MySQLAgain)
+	}
 	for k, l := range got.Lines {
 		if l != nil {
 			t.Logf("line %s: %s", k, l.Text)

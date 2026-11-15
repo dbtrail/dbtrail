@@ -199,6 +199,9 @@ type BaselineTable struct {
 	// fixed decimals or zero padding (baseline.TableFooter.FixedPrint,
 	// #2829). Set with SchemaKnown.
 	FixedPrint []string
+	// Unsigned are the table's UNSIGNED whole-number columns
+	// (baseline.TableFooter.Unsigned, #2848). Set with SchemaKnown.
+	Unsigned []string
 	// UnixTimeSafe and UnixTimeOther split the table's columns into those
 	// UNIX_TIMESTAMP(col) gives the same number of on the copy as on MySQL and
 	// the rest (baseline.TableFooter.UnixTimeSafe, #2493). Set with SchemaKnown.

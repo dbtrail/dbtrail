@@ -887,6 +887,10 @@ func sourcePGStreamConfig(e console.ServerEntry, serverID uint32, batchSize int)
 		BatchSize:   streamBatchSize(batchSize),
 		Schemas:     e.Schemas,
 		Checkpoint:  10 * time.Second,
+		// The label of this capture's Prometheus metrics (#2762), as the
+		// MySQL captures have it. MetricsAddr stays empty: the daemon serves
+		// one /metrics for all the captures it runs.
+		MetricsSource: e.ID,
 	}, nil
 }
 

@@ -218,8 +218,12 @@ func copyZoneProbeSQL(instants []time.Time) string {
 //   - ONLY_FULL_GROUP_BY, NO_ZERO_DATE, NO_ZERO_IN_DATE: what they change
 //     (a column outside the GROUP BY, a zero or partial date literal) the
 //     copy refuses either way, so MySQL answers.
-//   - NO_UNSIGNED_SUBTRACTION: with it MySQL answers a negative unsigned
-//     difference as the copy does; without it MySQL refuses it.
+//   - NO_UNSIGNED_SUBTRACTION: what it changes, a difference with an
+//     UNSIGNED operand (a signed BIGINT with it, a BIGINT UNSIGNED that
+//     refuses a negative result without it), the copy answers under neither:
+//     arithmetic on an UNSIGNED column or on ROW_NUMBER, RANK, DENSE_RANK or
+//     NTILE is kept on MySQL (readrouter.UnsignedVeto, #2848), and so are a
+//     CAST AS UNSIGNED and a whole number written from 2^63 up.
 //
 // Every other flag keeps the statement on MySQL, a flag this build does not
 // know included: PAD_CHAR_TO_FULL_LENGTH (CHAR columns come back padded),

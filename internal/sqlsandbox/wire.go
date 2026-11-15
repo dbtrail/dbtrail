@@ -40,7 +40,9 @@ type wireJob struct {
 	// KeepJoinOrder: see Session.KeepJoinOrder.
 	KeepJoinOrder bool `json:"keep_join_order,omitempty"`
 	// PostgresRules: see Session.PostgresRules.
-	PostgresRules bool   `json:"postgres_rules,omitempty"`
+	PostgresRules bool `json:"postgres_rules,omitempty"`
+	// PostgresNames: see Session.PostgresNames.
+	PostgresNames bool   `json:"postgres_names,omitempty"`
 	Threads       int    `json:"threads"`
 	MemoryLimit   string `json:"memory_limit"`
 	MaxRows       int    `json:"max_rows"`
