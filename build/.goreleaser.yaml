@@ -254,6 +254,10 @@ nfpms:
       # by an install either.
       - src: build/packaging/bintrail-console/bintrail-router.service
         dst: /usr/lib/systemd/system/bintrail-router.service
+      # The PostgreSQL router (#2774): `bintrail-console pg-router` as a third
+      # unit of the same package, reading the same settings file.
+      - src: build/packaging/bintrail-console/bintrail-pg-router.service
+        dst: /usr/lib/systemd/system/bintrail-pg-router.service
       - src: build/packaging/bintrail-console/bintrail-console.env
         dst: /usr/share/bintrail-console/bintrail-console.env
       - dst: /var/lib/bintrail
