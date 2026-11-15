@@ -316,7 +316,7 @@ func clearCheckpoint(ctx context.Context, db *sql.DB) (clearOutcome, error) {
 // not migrate) has nothing of it to remove, so each is its own statement; a
 // failed statement does not end the transaction.
 func clearCaughtUp(ctx context.Context, tx *sql.Tx) error {
-	for _, column := range []string{"caught_up_at", "pg_capture_from_lsn"} {
+	for _, column := range []string{"caught_up_at", "pg_caught_up_source_at", "pg_capture_from_lsn"} {
 		_, err := tx.ExecContext(ctx, "UPDATE stream_state SET "+column+" = NULL WHERE id = 1")
 		if err != nil && !isUnknownColumnErr(err) {
 			return err

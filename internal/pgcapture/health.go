@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
@@ -158,6 +159,9 @@ type HealthSnapshot struct {
 	// the probe, since the health panel does not use it.
 	FlushedLSN    uint64
 	FlushedLSNErr error
+	// FlushedSourceAt is the source's own clock for that reading
+	// (QueryFlushed); zero when the source had none to give.
+	FlushedSourceAt time.Time
 }
 
 // ProbeHealth opens a short-lived plain connection to queryDSN and reads current source
@@ -181,7 +185,7 @@ func ProbeHealth(ctx context.Context, queryDSN, slotName, publication string) (H
 		return HealthSnapshot{}, err
 	}
 	snap := HealthSnapshot{Slot: slot, ReplicaIdentityNotFull: notFull}
-	snap.FlushedLSN, snap.FlushedLSNErr = QueryFlushedLSN(ctx, conn)
+	snap.FlushedLSN, snap.FlushedSourceAt, snap.FlushedLSNErr = QueryFlushed(ctx, conn)
 	return snap, nil
 }
 
