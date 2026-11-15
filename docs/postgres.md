@@ -544,10 +544,41 @@ What to know:
   [Schema changes on PostgreSQL](#schema-changes-on-postgresql)); otherwise
   the fold cannot tell, and the chain's "every transaction exactly once" holds
   only for what capture received.
-- **A primary-key-changing UPDATE refuses**, including one in the minute
-  before the snapshot, which the fold reads again (see above).
+- **An UPDATE that changes the primary key is applied as a delete of the old
+  key and an insert of the new one**, the way MySQL and MariaDB do it, each
+  ordered against every other change of that key by the commit LSN (and,
+  inside one transaction, by the order the changes were made in). This covers
+  a key changed twice, changed and changed back, moved onto a key that was
+  deleted, and two rows swapping keys through a third value, each change in
+  its own transaction, and several rows moved by one statement when no row
+  lands on a key that changes again in that statement's transaction. One such change still refuses the
+  table, with the reason in the message, when it cannot be proven whole: the
+  change has no commit LSN in the index, its old row was not captured with
+  every column (the table was not at `REPLICA IDENTITY FULL`), a key column
+  is missing from either row, or the key the index stores for it is not the
+  one its old row spells. One more case refuses out of caution: the old row
+  has NULL in every column outside the key and the new row has a NULL outside
+  the key too. Such an old row looks the same as one captured with the key
+  only, where a large value the UPDATE did not touch would have been stored
+  as NULL. And one case refuses because the changes alone cannot say what
+  happened: inside one transaction, a key receives a row (an INSERT, or a
+  row whose key changed to it) and is changed again later in that
+  transaction, with a key change among those changes. When a primary key is
+  `DEFERRABLE`, two rows can hold the same key value inside a transaction, so
+  `UPDATE t SET id = id + 1` over rows 1, 2 and 3 is captured as "1 to 2, 2
+  to 3, 3 to 4", the same as one row moved three times, and the two leave
+  different rows. This also refuses a row whose key is changed twice in one
+  transaction, and a row inserted and re-keyed in the same transaction. The
+  same statements in separate transactions are applied. A refused change refuses even when a later change
+  overwrote it, and one in the minute before the snapshot, which the fold
+  reads again (see above), counts too.
 - **An unchanged-TOAST marker refuses** on any change the fold reads, even
-  one a later change overwrote.
+  one a later change overwrote. Under `REPLICA IDENTITY FULL`, which capture
+  requires, there is no marker to meet: capture replaces an unchanged large
+  value with the real one from the old row of the same change, for an
+  ordinary UPDATE and for one that changes the key. A marker is only in
+  changes captured without the whole old row, where the value was never
+  captured.
 - **A table with no change is rewritten**, never carried forward or written as
   a delta (`--carry-forward-unchanged` and `--table-deltas` apply to MySQL only):
   the new file must hold the new starting point.
