@@ -301,17 +301,15 @@ func rawLogin(t *testing.T, addr string) *rawClient {
 	if err := r.fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
+	if err := scramClientLogin(r.fe, portPassword, nil); err != nil {
+		t.Fatalf("login: %v", err)
+	}
 	for {
 		msg, err := r.fe.Receive()
 		if err != nil {
 			t.Fatalf("login: %v", err)
 		}
 		switch m := msg.(type) {
-		case *pgproto3.AuthenticationCleartextPassword:
-			r.fe.Send(&pgproto3.PasswordMessage{Password: portPassword})
-			if err := r.fe.Flush(); err != nil {
-				t.Fatal(err)
-			}
 		case *pgproto3.ErrorResponse:
 			t.Fatalf("login refused: %s %s", m.Code, m.Message)
 		case *pgproto3.ReadyForQuery:
@@ -654,8 +652,8 @@ func TestPort_aResultReadyOnAFullPortIsRefusedWhole(t *testing.T) {
 // anything, and with room it goes to the engine.
 func TestPort_timeTravelAsksTheBudget(t *testing.T) {
 	b := NewResultBudget(100)
-	login := func(_ context.Context, _, _, password string, _ func()) (*Binding, *Error) {
-		if password != portPassword {
+	login := func(_ context.Context, _, _ string, password *Password, _ func()) (*Binding, *Error) {
+		if !password.Matches([]string{portPassword}) {
 			return nil, &Error{Code: "28P01", Message: "no"}
 		}
 		return &Binding{

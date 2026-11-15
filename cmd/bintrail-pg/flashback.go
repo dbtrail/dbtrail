@@ -44,9 +44,11 @@ the simple and the extended query protocol are served, so psql and a driver in
 its default mode (pgx, JDBC, psycopg 3) connect as they are; an argument ($1)
 cannot hold a single quote here.
 
-Auth mirrors the shim: a cleartext credential validated per tenant from
---shim-config (shim.yaml). This is loopback-default; front a TLS terminator for a
-non-loopback bind (same posture as the MySQL shim behind ProxySQL).`,
+Login is SCRAM-SHA-256 against each tenant's password in --shim-config
+(shim.yaml): the password never crosses the network. A client that asks for TLS
+gets it, with --tls-cert and --tls-key (verifiable: sslmode=verify-ca or
+verify-full), or with a certificate made up at start that it cannot verify. A
+client that asks for no TLS is answered in clear text.`,
 	RunE: runFlashback,
 }
 
@@ -60,6 +62,8 @@ var (
 	fbBaselineS3   string
 	fbQueryTimeout time.Duration
 	fbMaxConns     int
+	fbTLSCert      string
+	fbTLSKey       string
 )
 
 func init() {
@@ -72,6 +76,8 @@ func init() {
 	flashbackCmd.Flags().StringVar(&fbBaselineS3, "baseline-s3", "", "S3 baseline snapshot prefix enabling _snapshot; takes precedence over --baseline-dir (env BINTRAIL_PG_BASELINE_S3)")
 	flashbackCmd.Flags().DurationVar(&fbQueryTimeout, "query-timeout", 30*time.Second, "Per-query deadline; 0 disables")
 	flashbackCmd.Flags().IntVar(&fbMaxConns, "max-connections", 0, "Cap concurrent connections; 0 = unlimited")
+	flashbackCmd.Flags().StringVar(&fbTLSCert, "tls-cert", "", "Certificate file (PEM, its chain after it) offered to clients that ask for TLS, so they can verify it (sslmode=verify-ca or verify-full). Requires --tls-key. Unset, a client that asks for TLS gets a certificate made up at start. Read at start (env BINTRAIL_PG_FLASHBACK_TLS_CERT)")
+	flashbackCmd.Flags().StringVar(&fbTLSKey, "tls-key", "", "Private key file (PEM, not encrypted) of --tls-cert (env BINTRAIL_PG_FLASHBACK_TLS_KEY)")
 
 	// index-dsn lives in cli.EnvBindings, so BindCommandEnv both loads the env
 	// file and sets it from BINTRAIL_INDEX_DSN (marking it Changed so the env-only
@@ -93,6 +99,12 @@ func runFlashback(cmd *cobra.Command, args []string) error {
 	applyEnvFallback(&fbShimConfig, "BINTRAIL_PG_SHIM_CONFIG")
 	applyEnvFallback(&fbBaselineDir, "BINTRAIL_PG_BASELINE_DIR")
 	applyEnvFallback(&fbBaselineS3, "BINTRAIL_PG_BASELINE_S3")
+	applyEnvFallback(&fbTLSCert, "BINTRAIL_PG_FLASHBACK_TLS_CERT")
+	applyEnvFallback(&fbTLSKey, "BINTRAIL_PG_FLASHBACK_TLS_KEY")
+	portTLS, err := flashbackTLS(fbTLSCert, fbTLSKey)
+	if err != nil {
+		return err
+	}
 
 	tenantCfgs, err := shim.LoadTenantConfigs(fbShimConfig)
 	if err != nil {
@@ -153,13 +165,24 @@ func runFlashback(cmd *cobra.Command, args []string) error {
 	defer listener.Close()
 
 	if !isLoopbackListenAddr(listener.Addr()) {
-		slog.Warn("bintrail-pg flashback is bound to a non-loopback address and authenticates with a CLEARTEXT password; "+
-			"front a TLS terminator or restrict network access to this port",
+		slog.Warn("bintrail-pg flashback is bound to an address other machines reach: a client that asks for no TLS reads its rows in clear text, "+
+			"so set sslmode=require or stricter on the clients, or restrict network access to this port",
 			"addr", listener.Addr().String())
 	}
+	if p := portTLS.ValidityProblemFor(time.Now(), "sslmode=verify-ca or verify-full"); p != "" {
+		slog.Warn("bintrail-pg flashback: " + p)
+	}
 
+	served := "a certificate made up at start (clients cannot verify it)"
+	if portTLS.CertFile != "" {
+		served = portTLS.CertFile
+	}
+	if !pgshim.ChannelBindingOffered(portTLS.Config) {
+		slog.Warn("bintrail-pg flashback: channel binding (SCRAM-SHA-256-PLUS) is not offered with this certificate, whose signature names no hash for it; clients with channel_binding=require cannot connect")
+	}
 	slog.Info("bintrail-pg flashback listening",
 		"addr", listener.Addr().String(),
+		"tls", served,
 		"tenants", len(tenantCfgs),
 		"snapshot_baseline", fbBaselineDir != "" || fbBaselineS3 != "")
 
@@ -191,12 +214,39 @@ func runFlashback(cmd *cobra.Command, args []string) error {
 		AllowedSchemas: allowedSchemas,
 		Logger:         slog.Default(),
 		MaxConns:       fbMaxConns,
+		TLS:            portTLS.Config,
 	}
 	return pgshim.Serve(ctx, listener, cfg)
 }
 
+// flashbackTLS is the certificate the port serves (#2766): the operator's
+// when both files are given, one made up at start when neither is, and a
+// refusal when only one is or they cannot be used, before anything listens.
+func flashbackTLS(cert, key string) (*shim.PortTLS, error) {
+	for _, v := range []struct{ name, val string }{{"--tls-cert", cert}, {"--tls-key", key}} {
+		if v.val != "" && strings.TrimSpace(v.val) == "" {
+			// Not taken for "none": a port that served a made-up
+			// certificate instead of the one meant would look encrypted and
+			// fail every client that verifies.
+			return nil, fmt.Errorf("%s is only spaces: give the path of a PEM file, or leave it unset", v.name)
+		}
+	}
+	cert, key = strings.TrimSpace(cert), strings.TrimSpace(key)
+	switch {
+	case cert == "" && key == "":
+		return shim.MadeUpPortTLS()
+	case cert == "" || key == "":
+		return nil, fmt.Errorf("--tls-cert and --tls-key go together: give both, the certificate and its private key, or neither")
+	}
+	t, err := shim.LoadPortTLS(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("the certificate (--tls-cert %s, --tls-key %s) cannot be used: %w", cert, key, err)
+	}
+	return t, nil
+}
+
 // isLoopbackListenAddr reports whether the bound address is loopback, so a
-// non-loopback bind (where cleartext auth is exposed) can be warned about.
+// bind other machines reach can be warned about.
 func isLoopbackListenAddr(addr net.Addr) bool {
 	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {

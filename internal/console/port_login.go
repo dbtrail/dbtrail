@@ -223,6 +223,24 @@ func (s *Server) FlashbackPasswordsFor(user string) (passwords []string, loginSe
 	return out, ""
 }
 
+// AllFlashbackPasswords is every password FlashbackPasswordsFor can return,
+// for any username: the port's own and every application login's, under the
+// same conditions. A front end that derives each password ahead of a login
+// (SCRAM) reads them all here, so that the work a login does never depends on
+// which username it names.
+func (s *Server) AllFlashbackPasswords() []string {
+	out := s.FlashbackPasswords()
+	if len(out) == 0 || s.loginsUnreadable.Load() {
+		return out
+	}
+	for _, e := range s.cm.reg.List() {
+		if e.PortPassword != "" {
+			out = append(out, e.PortPassword)
+		}
+	}
+	return out
+}
+
 // setLoginsUnreadable records whether the registry file this process follows
 // could be read the last time it looked (RefreshFollowedFiles). While it
 // cannot, no application login opens the port: what this process still holds

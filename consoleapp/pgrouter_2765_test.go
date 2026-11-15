@@ -36,6 +36,7 @@ func pgRouterTestCmd(t *testing.T, args ...string) *cobra.Command {
 func clearPGRouterEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{"BINTRAIL_PG_ROUTER_LISTEN", "BINTRAIL_PG_ROUTER_WORKERS", "BINTRAIL_PG_ROUTER_THREADS", "BINTRAIL_PG_ROUTER_MAX_CONNECTIONS", "BINTRAIL_PG_ROUTER_MAX_WAIT",
+		"BINTRAIL_PG_ROUTER_TLS_CERT", "BINTRAIL_PG_ROUTER_TLS_KEY",
 		"BINTRAIL_CONSOLE_TOKEN", "BINTRAIL_CONSOLE_SERVERS", "BINTRAIL_CONSOLE_AUTH", "BINTRAIL_CONSOLE_MCP_TOKEN_FILE", "BINTRAIL_CONSOLE_SQL_MEMORY", "BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS"} {
 		t.Setenv(k, "")
 	}
@@ -51,17 +52,16 @@ func TestValidPGListen(t *testing.T) {
 		{"localhost:5433", true, ""},
 		{"[::1]:5433", true, ""},
 		{"127.0.0.2:5433", true, ""},
-		{"0.0.0.0:5433", false, "this machine only"},
-		{":5433", false, "this machine only"},
-		{"[::]:5433", false, "this machine only"},
-		{"10.0.0.5:5433", false, "this machine only"},
-		{"db.example.com:5433", false, "this machine only"},
-		{"LOCALHOST:5433", false, "this machine only"},
+		// Any host since #2766: the password never crosses the network.
+		{"0.0.0.0:5433", true, ""},
+		{":5433", true, ""},
+		{"[::]:5433", true, ""},
+		{"10.0.0.5:5433", true, ""},
+		{"db.example.com:5433", true, ""},
 		{"127.0.0.1", false, "not an address"},
 		{"127.0.0.1:0", false, "not a port number"},
 		{"127.0.0.1:70000", false, "not a port number"},
 		{"127.0.0.1:pg", false, "not a port number"},
-		{" 127.0.0.1:5433", false, "this machine only"},
 	} {
 		err := validPGListen(tc.addr, "--listen")
 		if tc.ok != (err == nil) {
@@ -105,7 +105,6 @@ func TestPGRouterSettings(t *testing.T) {
 		env  [2]string
 		want string
 	}{
-		{[]string{"--listen", "0.0.0.0:5433"}, [2]string{}, "this machine only"},
 		{[]string{"--listen", "5433"}, [2]string{}, "not an address"},
 		{[]string{"--workers", "0"}, [2]string{}, "--workers must be between 1 and 16"},
 		{[]string{"--workers", "17"}, [2]string{}, "--workers must be between 1 and 16"},
@@ -114,7 +113,7 @@ func TestPGRouterSettings(t *testing.T) {
 		{[]string{"--sql-port-max-rows", "0"}, [2]string{}, "--sql-port-max-rows must be between"},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_WORKERS", "many"}, `BINTRAIL_PG_ROUTER_WORKERS="many" is not a whole number`},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_WORKERS", "99"}, "BINTRAIL_PG_ROUTER_WORKERS must be between 1 and 16"},
-		{nil, [2]string{"BINTRAIL_PG_ROUTER_LISTEN", "10.0.0.1:5433"}, `BINTRAIL_PG_ROUTER_LISTEN "10.0.0.1:5433": the PostgreSQL port listens on this machine only`},
+		{nil, [2]string{"BINTRAIL_PG_ROUTER_LISTEN", "10.0.0.1"}, `BINTRAIL_PG_ROUTER_LISTEN "10.0.0.1" is not an address`},
 		{nil, [2]string{"BINTRAIL_PG_ROUTER_MAX_WAIT", "soon"}, "max-wait"},
 	} {
 		clearPGRouterEnv(t)
@@ -131,12 +130,12 @@ func TestPGRouterSettings(t *testing.T) {
 func TestPGRouterStartupLines(t *testing.T) {
 	st := pgRouterSettings{Listen: "127.0.0.1:5433", ServersFile: "/etc/x/servers.yaml", Workers: 2, Threads: 2, MaxConns: 16, Token: "tok"}
 	out := pgRouterStartupLines(st, "2GB", "the default", nil, 3, true)
-	for _, want := range []string{"127.0.0.1:5433", "dbname=<server id or name>", "PostgreSQL servers only", "clear text", "the access token is accepted too", "/etc/x/servers.yaml", "at most 16 clients", "2GB", "--workers"} {
+	for _, want := range []string{"127.0.0.1:5433", "dbname=<server id or name>", "PostgreSQL servers only", "SCRAM-SHA-256", "made up at start", "answered in clear text", "the access token is accepted too", "/etc/x/servers.yaml", "at most 16 clients", "2GB", "--workers"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the start-up lines do not say %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "does not exist") || strings.Contains(out, "could NOT be read") {
+	if strings.Contains(out, "does not exist") || strings.Contains(out, "could NOT be read") || strings.Contains(out, "other machines") {
 		t.Errorf("a warning with nothing to warn about:\n%s", out)
 	}
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -162,7 +161,7 @@ func TestPGRouterIsACommandOfItsOwn(t *testing.T) {
 	if routerCmd.Flags().Lookup("pg-listen") != nil {
 		t.Error("the MySQL router has a --pg-listen flag: the PostgreSQL port is a process of its own")
 	}
-	for _, name := range []string{"route-read-only", "route-cost-threshold", "route-scan-rows", "concurrency", "tls-cert", "statement-table"} {
+	for _, name := range []string{"route-read-only", "route-cost-threshold", "route-scan-rows", "concurrency", "statement-table"} {
 		if pgRouterCmd.Flags().Lookup(name) != nil {
 			t.Errorf("pg-router takes the MySQL router's --%s", name)
 		}
@@ -175,29 +174,6 @@ func TestPGRouterIsACommandOfItsOwn(t *testing.T) {
 	}
 	if !found {
 		t.Error("pg-router is not registered")
-	}
-}
-
-func TestPasswordAccepted(t *testing.T) {
-	for _, tc := range []struct {
-		list  []string
-		given string
-		want  bool
-	}{
-		{[]string{"a", "b"}, "a", true},
-		{[]string{"a", "b"}, "b", true},
-		{[]string{"a", "b"}, "c", false},
-		{[]string{"a", "b"}, "", false},
-		{[]string{""}, "", false},
-		{[]string{"", "a"}, "", false},
-		{nil, "a", false},
-		{[]string{"a"}, "A", false},
-		{[]string{"a"}, "a ", false},
-		{[]string{"a", "a"}, "a", true},
-	} {
-		if got := passwordAccepted(tc.list, tc.given); got != tc.want {
-			t.Errorf("passwordAccepted(%q, %q) = %v, want %v", tc.list, tc.given, got, tc.want)
-		}
 	}
 }
 

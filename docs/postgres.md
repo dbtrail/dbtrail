@@ -747,9 +747,38 @@ listener, its own workers, its own memory.
     reads the copy as it is when it runs. A driver that fetches a few rows at a
     time (JDBC with `setFetchSize` and autocommit off) works; the port still
     computes the whole answer first, under the same row cap.
-- **This machine only.** The port asks for the password in clear text and has
-  no TLS, so `--listen` takes an address of this machine alone (`127.0.0.1`,
-  `::1`, `localhost`) and the process refuses to start with any other.
+- **The login is SCRAM-SHA-256.** The client proves it knows the password and
+  the password itself never crosses the network, with TLS or without. The port
+  never asks for the password in clear text, so a client needs SCRAM support:
+  libpq 10 or later (`psql`, psycopg), JDBC 42.2 or later, or any `pgx`. Over
+  TLS the port also offers SCRAM-SHA-256-PLUS, which binds the login to the
+  certificate the client saw, so a client with `channel_binding=require`
+  refuses anything that relays between it and the port.
+- **TLS with the MySQL port's certificate.** Give the same files the MySQL port
+  takes (`router --tls-cert`) with `--tls-cert` and `--tls-key`, and a client
+  that trusts their CA connects with `sslmode=verify-ca`, or
+  `sslmode=verify-full` with the name the certificate holds:
+
+  ```
+  psql "host=db.example.com port=5433 dbname=<server> user=app sslmode=verify-full sslrootcert=ca.pem"
+  ```
+
+  With no certificate set, a client that asks for TLS still gets it, with a
+  certificate made up at start: `sslmode=require` works, and `verify-ca` and
+  `verify-full` refuse it. The files are read when the process starts, so a
+  renewed certificate is served after a restart; one that expired is served
+  all the same, with a warning at start, and a file that cannot be read stops
+  the process before it listens, with the reason. Clients that start TLS
+  directly (`sslnegotiation=direct`, PostgreSQL 17) are taken too.
+- **TLS is offered, never required**, as on the MySQL port: a client that asks
+  for no TLS (`sslmode=disable` or `allow`) is answered in clear text. Its password still does not cross the
+  network, but its rows do. A client that must not read rows in clear text
+  sets `sslmode=require` or stricter; that is also what keeps something in
+  the middle from turning TLS off.
+- **Any address.** `--listen` takes any host:port, `0.0.0.0:5433` included. An
+  address other machines reach is named at start, since whoever reaches it can
+  try the port's password; keep it behind a firewall as you would the MySQL
+  port.
 - `SET search_path`, `SET ROLE` and a `SET TimeZone` other than UTC are
   refused: the port resolves names in `public` and answers in UTC, so write the
   schema in the name and convert zones in the statement. Other `SET`s are accepted and
@@ -784,7 +813,9 @@ it fits beside capture:
 
 | Flag | Environment variable | Default | What it does |
 |---|---|---|---|
-| `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens. An address of this machine only |
+| `--listen` | `BINTRAIL_PG_ROUTER_LISTEN` | `127.0.0.1:5433` | Where the port listens |
+| `--tls-cert` | `BINTRAIL_PG_ROUTER_TLS_CERT` | none: a certificate made up at start | The certificate (PEM, its chain after it) a client that asks for TLS gets. Requires `--tls-key` |
+| `--tls-key` | `BINTRAIL_PG_ROUTER_TLS_KEY` | none | Its private key (PEM, not encrypted with a passphrase) |
 | `--workers` | `BINTRAIL_PG_ROUTER_WORKERS` | 2 | How many statements run on the copy at once (1 to 16). The rest wait their turn |
 | `--threads` | `BINTRAIL_PG_ROUTER_THREADS` | 2 | Threads each statement may use (1 to 16) |
 | `--sql-memory` | `BINTRAIL_CONSOLE_SQL_MEMORY` | 2GB, or the value saved in the web interface | Memory each statement may use |
@@ -842,10 +873,13 @@ Scope and behaviour track PostgreSQL's current time-travel maturity:
   in its default mode can prepare `SELECT * FROM _flashback.orders AS OF $1
   WHERE id = $2` and run it with arguments. An argument cannot hold a single
   quote (`'`) here: write such a value in the statement's text.
-- **Auth** mirrors the shim: a cleartext password per tenant from
-  `--shim-config` (`shim.yaml`). The default listen address is loopback; for a
-  non-loopback bind, front a TLS terminator — the same posture as the MySQL
-  shim behind ProxySQL.
+- **Login** is SCRAM-SHA-256 against each tenant's password in
+  `--shim-config` (`shim.yaml`), as on `pg-router`: the password never crosses
+  the network. A client that asks for TLS gets it, with `--tls-cert` and
+  `--tls-key` (`BINTRAIL_PG_FLASHBACK_TLS_CERT`, `_KEY`) or with a certificate
+  made up at start; one that asks for none is answered in clear text. The
+  default listen address is loopback, and a bind other machines reach is
+  warned about at start.
 
 `bintrail-pg` still ships the MySQL-wire `shim` command as well, if you prefer
 to reach the index from MySQL tooling. See

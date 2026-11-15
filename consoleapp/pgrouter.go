@@ -2,7 +2,7 @@ package consoleapp
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -60,8 +60,12 @@ the database (dbname), any username, and the password created for SQL clients
 in the web interface (or the access token). The port is open while that
 password exists, and closes with every connection when it is withdrawn.
 
-It serves PostgreSQL servers only. It asks for the password in clear text and
-has no TLS, so it listens on this machine alone (127.0.0.1, ::1, localhost).
+It serves PostgreSQL servers only. The login is SCRAM-SHA-256, so the password
+never crosses the network, and a client that asks for TLS gets it: with the
+certificate of --tls-cert and --tls-key, which a client can verify
+(sslmode=verify-ca or verify-full), or with one made up at start, which it
+cannot. A client that asks for no TLS is answered in clear text: sslmode=require
+or stricter on the client is what makes it encrypted or nothing.
 
 How many statements run at once (--workers), with how many threads each
 (--threads) and how much memory each (--sql-memory), is what is said here: the
@@ -93,7 +97,9 @@ func init() {
 
 func addPGRouterFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.String("listen", defaultPGRouterListen, "Address the PostgreSQL-protocol port listens on (host:port). An address of this machine only (127.0.0.1, ::1, localhost): the password is asked for in clear text and there is no TLS. Env BINTRAIL_PG_ROUTER_LISTEN.")
+	f.String("listen", defaultPGRouterListen, "Address the PostgreSQL-protocol port listens on (host:port). Env BINTRAIL_PG_ROUTER_LISTEN.")
+	f.String("tls-cert", "", "Certificate file (PEM, its chain after it if it has one) the PostgreSQL port offers to clients that ask for TLS, so they can verify it (sslmode=verify-ca or verify-full); the MySQL port's (router --tls-cert) serves here as it is. Requires --tls-key. Unset, the port still encrypts for a client that asks, with a certificate made up at start that no client can verify. Read when this starts: restart it to serve a renewed certificate. Env BINTRAIL_PG_ROUTER_TLS_CERT.")
+	f.String("tls-key", "", "Private key file (PEM, not encrypted) of --tls-cert. Requires --tls-cert. Env BINTRAIL_PG_ROUTER_TLS_KEY.")
 	f.String("token", "", "Access token: one more password for the port, beside the one created in the web interface. It does not open the port. Env BINTRAIL_CONSOLE_TOKEN.")
 	f.String("servers-file", "", "Path to the server registry the web interface manages (default ~/.config/bintrail/console-servers.yaml). Read, never written. Env BINTRAIL_CONSOLE_SERVERS.")
 	f.String("auth-file", "", "Path to the web interface auth file, when it is not the default: only so a statement cannot read it through a copy directory that contains it. Env BINTRAIL_CONSOLE_AUTH.")
@@ -120,6 +126,9 @@ type pgRouterSettings struct {
 	MaxConns       int
 	MaxWait        time.Duration
 	SQLPortMaxRows int
+	// TLS is the operator's certificate (--tls-cert, --tls-key), nil when
+	// none is set: the port then serves one made up at start.
+	TLS *shim.PortTLS
 }
 
 // pgRouterSettingsFrom resolves the flags with the environment, a flag
@@ -191,7 +200,71 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	if st.SQLPortMaxRows, err = num("sql-port-max-rows", "BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS", 1, 1<<31-1, "the most rows one statement returns"); err != nil {
 		return st, err
 	}
+	// named is str with the name the value came from, for a refusal: the
+	// flag when it was given, else the variable when it is set.
+	named := func(flag, env string) (name, v string) {
+		v = str(flag, env)
+		switch {
+		case f.Changed(flag):
+			return "--" + flag, v
+		case os.Getenv(env) != "":
+			return env, v
+		}
+		return "--" + flag + " (" + env + ")", v
+	}
+	certName, cert := named("tls-cert", "BINTRAIL_PG_ROUTER_TLS_CERT")
+	keyName, key := named("tls-key", "BINTRAIL_PG_ROUTER_TLS_KEY")
+	// Loaded the way the MySQL port loads its own, and refused for the same
+	// things: a port that silently served a made-up certificate instead of
+	// the one set would look encrypted and fail every client that verifies.
+	if st.TLS, err = portTLSFiles("the PostgreSQL port", certName, cert, keyName, key); err != nil {
+		return st, err
+	}
 	return st, nil
+}
+
+// pgVerifying is how a PostgreSQL client verifies the port's certificate.
+const pgVerifying = "sslmode=verify-ca or verify-full"
+
+// pgRouterTLSLines says at start-up what a client that asks the port for TLS
+// gets, and that one that asks for none is answered in clear text: the port
+// offers TLS and never requires it, as the MySQL port does. t nil is the
+// certificate made up at start.
+func pgRouterTLSLines(t *shim.PortTLS, now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var b strings.Builder
+	b.WriteString("PostgreSQL router: the login is SCRAM-SHA-256: the password never crosses the network, with TLS or without.\n")
+	if t == nil {
+		b.WriteString("PostgreSQL router: TLS: no certificate is set (--tls-cert and --tls-key, or BINTRAIL_PG_ROUTER_TLS_CERT and BINTRAIL_PG_ROUTER_TLS_KEY). A client that asks for TLS gets it, with a certificate made up at start that it cannot verify: the rows are encrypted, and a client that sets channel_binding=require refuses something that relays between it and the port, but verify-ca and verify-full refuse that certificate. A client that asks for none is answered in clear text.\n")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "PostgreSQL router: TLS: a client that asks for it gets the certificate %s (valid until %s); to verify it, the client needs the CA that signed it (%s, with sslrootcert). A client that asks for no TLS is still answered, in clear text: sslmode=require or stricter on the client is what makes it encrypted or nothing. A renewed certificate is served after this restarts.\n",
+		t.CertFile, t.NotAfter.UTC().Format("2006-01-02"), pgVerifying)
+	if p := t.ValidityProblemFor(now, pgVerifying); p != "" {
+		b.WriteString("PostgreSQL router: WARNING: " + p + ".\n")
+	}
+	if !pgshim.ChannelBindingOffered(t.Config) {
+		b.WriteString("PostgreSQL router: WARNING: channel binding (SCRAM-SHA-256-PLUS) is not offered with this certificate: its signature names no hash for it (an Ed25519 certificate, for one). A client with channel_binding=require cannot connect; one with the default (prefer) logs in with SCRAM-SHA-256.\n")
+	}
+	return b.String()
+}
+
+// pgRouterAddressLine says, for an address other machines reach, what they
+// reach; "" for an address of this machine.
+func pgRouterAddressLine(listen string, container bool) string {
+	host, _, _ := net.SplitHostPort(listen)
+	if host == "localhost" {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return ""
+	}
+	if container {
+		return "PostgreSQL router: that address is reached from outside this container as the container publishes it. Whoever reaches it can try the port's password, and reads the copy of every PostgreSQL server with it.\n"
+	}
+	return "PostgreSQL router: that address is reached from other machines. Whoever reaches it can try the port's password, and reads the copy of every PostgreSQL server with it; keep it behind a firewall.\n"
 }
 
 // pgRouterStartupLines says, at start-up, where the port will be, how a
@@ -204,7 +277,8 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 	}
 	b.WriteString(".\n")
 	b.WriteString("PostgreSQL router: it serves PostgreSQL servers only. The copy answers every statement, read-only, as of its last snapshot update, and nothing is sent to the source.\n")
-	b.WriteString("PostgreSQL router: the password is asked for in clear text and there is no TLS, which is why the port listens on this machine only.\n")
+	b.WriteString(pgRouterAddressLine(st.Listen, inContainer()))
+	b.WriteString(pgRouterTLSLines(st.TLS, time.Time{}))
 	if !serversExist {
 		fmt.Fprintf(&b, "PostgreSQL router: the servers file %s does not exist yet, so no server can be reached. It is read again when it appears; if DBTrail keeps it somewhere else, give that path with --servers-file.\n", st.ServersFile)
 	} else {
@@ -255,9 +329,19 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 	// never by a statement, so what waits on it does not pile up.
 	go resolveCopyAgesEvery(ctx, srv.ResolveCopyAges, routerCopySnapshotEvery)
 
+	served := st.TLS
+	if served == nil {
+		if served, err = shim.MadeUpPortTLS(); err != nil {
+			return fmt.Errorf("the PostgreSQL router cannot serve TLS: %w", err)
+		}
+	}
 	_, statErr := os.Stat(st.ServersFile)
 	fmt.Fprint(os.Stderr, pgRouterStartupLines(st, memory, memoryFrom, memoryErr, srv.ServerCount(), statErr == nil))
-	port := &pgRouterPort{srv: srv, addr: st.Listen, maxConns: st.MaxConns, poll: console.DefaultFollowInterval, out: os.Stderr}
+	if p := st.TLS.ValidityProblemFor(time.Now(), pgVerifying); p != "" {
+		// In the log as well: the startup lines are plain text on stderr.
+		slog.Warn("PostgreSQL router: " + p)
+	}
+	port := &pgRouterPort{srv: srv, addr: st.Listen, maxConns: st.MaxConns, poll: console.DefaultFollowInterval, out: os.Stderr, tls: served.Config}
 	return port.serve(ctx)
 }
 
@@ -292,6 +376,8 @@ type pgRouterPort struct {
 	// nil: serve makes one of the default size; a test passes its own to
 	// read it.
 	budget *pgshim.ResultBudget
+	// tls is what a client that asks for TLS gets (#2766); nil answers 'N'.
+	tls *tls.Config
 
 	mu    sync.Mutex
 	bound string
@@ -389,7 +475,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
-		err = servePGPortWithin(child, p.srv, ln, p.maxConns, budget)
+		err = servePGPortWithin(child, p.srv, ln, p.maxConns, budget, p.tls)
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop, p.passwords = "", nil, nil
@@ -413,32 +499,25 @@ const pgRouterQueryTimeout = defaultFlashbackQueryTimeout
 // the copy of a PostgreSQL source: PostgreSQL's own default.
 const pgPortSchema = "public"
 
-// validPGListen refuses an address the PostgreSQL port must not take. The
-// port asks for its password in clear text and has no TLS, so it listens on
-// this machine alone: an address other machines reach would put the port's
-// password on the network for anyone between them to read.
+// validPGListen refuses what is not an address the port can listen on. Any
+// host is taken (#2766): the login never puts the password on the network,
+// and a client that asks for TLS gets it; what an address other machines
+// reach exposes is said at start-up (pgRouterAddressLine).
 func validPGListen(addr, name string) error {
-	host, port, err := net.SplitHostPort(addr)
+	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("%s %q is not an address: want host:port, e.g. 127.0.0.1:5433", name, addr)
 	}
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 		return fmt.Errorf("%s %q: %q is not a port number (1 to 65535)", name, addr, port)
 	}
-	if host == "localhost" {
-		return nil
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return nil
-	}
-	return fmt.Errorf("%s %q: the PostgreSQL port listens on this machine only (127.0.0.1, ::1 or localhost); "+
-		"it asks for its password in clear text and has no TLS, so an address other machines reach would show that password to the network", name, addr)
+	return nil
 }
 
 // servePGPort serves the PostgreSQL-protocol port on ln until ctx ends, with
 // at most maxConns clients connected (0 for no limit).
 func servePGPort(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int) error {
-	return servePGPortWithin(ctx, srv, ln, maxConns, newPGPortResultBudget())
+	return servePGPortWithin(ctx, srv, ln, maxConns, newPGPortResultBudget(), nil)
 }
 
 // newPGPortResultBudget is the port's bound on the results it holds while it
@@ -451,8 +530,9 @@ func newPGPortResultBudget() *pgshim.ResultBudget {
 
 // servePGPortWithin is servePGPort with the budget its results are counted
 // in (#2804): time travel's answers and the copy's alike, from the moment
-// one is built until it is written or its connection ends.
-func servePGPortWithin(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget) error {
+// one is built until it is written or its connection ends. tlsConfig is what a
+// client that asks for TLS gets; nil answers it 'N'.
+func servePGPortWithin(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config) error {
 	logger := slog.Default()
 	// Accept returns when the listener is closed; the connections end with
 	// ctx (pgshim closes each one's socket), and Serve waits for them.
@@ -464,16 +544,18 @@ func servePGPortWithin(ctx context.Context, srv *console.Server, ln net.Listener
 	// travel is refused on this wire, so nothing waits on it; the engine
 	// asks for it all the same.
 	gate := shim.NewGate(defaultFlashbackMaxFullTable)
-	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger), Logger: logger, MaxConns: maxConns, ResultBudget: budget})
+	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
 }
 
 // pgPortLogin is the port's login: the port's passwords, then the server.
 //
 // The password is checked before anything is said about the server, and a
 // wrong password reads the same for every username and database, so a client
-// that holds no password learns nothing about which servers exist.
+// that holds no password learns nothing about which servers exist. It takes
+// the same time too: the client's proof is checked against as many passwords
+// whether or not the username is an application login (Password.Matches).
 func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger) pgshim.LoginFunc {
-	return func(ctx context.Context, user, database, password string, drop func()) (*pgshim.Binding, *pgshim.Error) {
+	return func(ctx context.Context, user, database string, password *pgshim.Password, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
 		// (console.Server.LoginEpoch).
@@ -482,7 +564,11 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// (console.Server.FlashbackPasswordsFor): the connection is bound to
 		// that server, never to what the username resolves to later.
 		passwords, loginServer := srv.FlashbackPasswordsFor(user)
-		if !passwordAccepted(passwords, password) {
+		// Every password that opens the port, for any username, derived
+		// before this username's are checked: the work a login does then
+		// says nothing about which usernames are application logins.
+		pgshim.WarmPasswords(srv.AllFlashbackPasswords())
+		if !password.Matches(passwords) {
 			return nil, &pgshim.Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
 		}
 		var tgt console.FlashbackTarget
@@ -574,22 +660,4 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		return bound, nil
 	}
-}
-
-// passwordAccepted says whether given is one of the passwords that open the
-// port. An empty password opens nothing, whatever the list holds, and every
-// entry is compared, in constant time, so the answer's timing does not say
-// which one matched or how much of it.
-func passwordAccepted(passwords []string, given string) bool {
-	if given == "" {
-		return false
-	}
-	ok := 0
-	for _, p := range passwords {
-		if p == "" {
-			continue
-		}
-		ok |= subtle.ConstantTimeCompare([]byte(p), []byte(given))
-	}
-	return ok == 1
 }
