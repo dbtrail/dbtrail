@@ -31,11 +31,13 @@ import (
 //
 // The port knows each password it takes as text, so nothing is stored for
 // SCRAM on disk. One salt is made up when the process starts and sent to
-// every client, and each password is derived with it once and kept in memory
-// (scramSalted): a client that holds no password then costs the port a few
-// HMACs per attempt, not a PBKDF2 per password, which is what PostgreSQL's
-// stored verifier gives it too. The salt is the same for every username, so
-// it says nothing about which exist.
+// every client, and every password that opens the port is derived with it
+// ahead of the check, all of them at once (WarmPasswords): a client that
+// holds no password then costs the port a few HMACs per attempt, not a PBKDF2
+// per password, which is what PostgreSQL's stored verifier gives it too.
+// Nothing about one username decides what is derived or checked: the salt is
+// the same for all, the set derived is the whole set, and every attempt
+// checks the same number of passwords in the same number of forms.
 
 const (
 	scramMechanism     = "SCRAM-SHA-256"
@@ -52,9 +54,12 @@ const (
 	// no login taking the same time. Three: the token, the port's password
 	// and one login's.
 	scramMinCandidates = 3
-	// scramCacheMax bounds the derived passwords kept: past it the cache is
-	// emptied and filled again from the passwords in use.
-	scramCacheMax = 64
+	// scramForms is how many forms of each password are checked
+	// (saslPrepForms), the made-up password's filling the rest, so that what
+	// is checked does not say which characters a password holds.
+	scramForms = 3
+	// scramDummy is the made-up password the checks are filled with.
+	scramDummy = "\x00 not a password"
 )
 
 // scramSalt is the salt every exchange of this process sends.
@@ -64,30 +69,73 @@ var scramSalt = func() []byte {
 	return b
 }()
 
-// scramCache holds each password derived with scramSalt, by the form the
-// client hashed (saslPrepForms).
+// scramCache holds every password that opens the port derived with
+// scramSalt, by the form a client hashes it in (saslPrepForms): the whole set
+// WarmPasswords was last given, nothing more and nothing less.
 var scramCache struct {
 	mu     sync.Mutex
 	salted map[string][]byte
 }
 
-// scramSalted is pw derived with scramSalt, from the cache when it was
-// derived before.
-func scramSalted(pw string) []byte {
+// WarmPasswords derives every form of every password in passwords, and the
+// made-up one, and makes that the set a proof is checked with. A host calls
+// it with ALL the passwords that open the port, for any username, before it
+// checks a proof (Password.Matches): what is derived then depends on the
+// port's passwords alone, never on the username a client names, and a
+// change of passwords is paid once, by whichever attempt comes first. A set
+// that did not change derives nothing.
+func WarmPasswords(passwords []string) {
+	forms := map[string]bool{}
+	for _, pw := range append([]string{scramDummy}, passwords...) {
+		if pw == "" {
+			continue
+		}
+		for _, f := range saslPrepForms(pw) {
+			forms[f] = true
+		}
+	}
 	scramCache.mu.Lock()
 	defer scramCache.mu.Unlock()
-	if k, ok := scramCache.salted[pw]; ok {
+	same := len(forms) == len(scramCache.salted)
+	for f := range forms {
+		if _, ok := scramCache.salted[f]; !ok {
+			same = false
+			break
+		}
+	}
+	if same {
+		return
+	}
+	next := make(map[string][]byte, len(forms))
+	for f := range forms {
+		if k, ok := scramCache.salted[f]; ok {
+			next[f] = k
+		} else {
+			next[f] = scramDerive(f, scramSalt, scramIterations)
+		}
+	}
+	scramCache.salted = next
+}
+
+// scramSalted is form derived with scramSalt, from the set WarmPasswords
+// derived. A form outside it (a host that checks a password it did not warm)
+// is derived here, and kept until the next set.
+func scramSalted(form string) []byte {
+	scramCache.mu.Lock()
+	defer scramCache.mu.Unlock()
+	if k, ok := scramCache.salted[form]; ok {
 		return k
 	}
-	if scramCache.salted == nil || len(scramCache.salted) >= scramCacheMax {
+	if scramCache.salted == nil {
 		scramCache.salted = map[string][]byte{}
 	}
-	k := scramDerive(pw, scramSalt, scramIterations)
-	scramCache.salted[pw] = k
+	k := scramDerive(form, scramSalt, scramIterations)
+	scramCache.salted[form] = k
 	return k
 }
 
-// scramChecks counts the candidates proofs were checked against, for a test.
+// scramChecks counts the password forms proofs were checked against, for a
+// test.
 var scramChecks atomic.Int64
 
 // Password is what a client proved in its SCRAM exchange. Matches checks it
@@ -110,15 +158,20 @@ func (p *Password) Matches(candidates []string) bool {
 	}
 	var hit []byte
 	for i := range max(len(candidates), scramMinCandidates) {
-		scramChecks.Add(1)
 		real := i < len(candidates) && candidates[i] != ""
-		pw := "\x00 not a password"
+		pw := scramDummy
 		if real {
 			pw = candidates[i]
 		}
-		for _, form := range saslPrepForms(pw) {
+		forms := saslPrepForms(pw)
+		for j := range scramForms {
+			scramChecks.Add(1)
+			form := scramDummy
+			if j < len(forms) {
+				form = forms[j]
+			}
 			salted := scramSalted(form)
-			if p.proves(salted) && real && hit == nil {
+			if p.proves(salted) && real && j < len(forms) && hit == nil {
 				hit = salted
 			}
 		}

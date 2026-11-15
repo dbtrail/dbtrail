@@ -399,6 +399,9 @@ func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string, encry
 	if err != nil {
 		return nil, err
 	}
+	// Every tenant's password, before the one of this username: what is
+	// derived must not depend on the username.
+	WarmPasswords(auth.Passwords())
 	var candidates []string
 	if expected, found, cerr := auth.LookupPassword(user); found && cerr == nil {
 		candidates = []string{expected}

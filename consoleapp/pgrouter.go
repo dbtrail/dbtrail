@@ -564,6 +564,10 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// (console.Server.FlashbackPasswordsFor): the connection is bound to
 		// that server, never to what the username resolves to later.
 		passwords, loginServer := srv.FlashbackPasswordsFor(user)
+		// Every password that opens the port, for any username, derived
+		// before this username's are checked: the work a login does then
+		// says nothing about which usernames are application logins.
+		pgshim.WarmPasswords(srv.AllFlashbackPasswords())
 		if !password.Matches(passwords) {
 			return nil, &pgshim.Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
 		}

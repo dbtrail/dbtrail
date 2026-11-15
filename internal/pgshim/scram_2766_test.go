@@ -632,25 +632,41 @@ func TestSCRAM_malformedExchanges(t *testing.T) {
 	})
 }
 
-// A wrong password reads the same, and checks as many passwords, whatever
-// the username: a login with one password more for a username (an
-// application login's) cannot be told from one without by the time it takes.
+// A wrong password reads the same, and costs the same work, whatever the
+// username: a username with one password more (an application login's,
+// here with characters off ASCII, which have more forms) cannot be told from
+// one without by what the port derives or checks, right after the passwords
+// changed (cold) or not (warm).
 func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
-	// "app1" has a login password of its own beside the port's two.
+	var derived atomic.Int64
+	old := scramDerive
+	scramDerive = func(pw string, salt []byte, n int) []byte { derived.Add(1); return old(pw, salt, n) }
+	t.Cleanup(func() { scramDerive = old })
+	var mu sync.Mutex
+	loginPassword := "app1-\uff50\u00e9\u00b2"
 	login := func(_ context.Context, user, _ string, password *Password, _ func()) (*Binding, *Error) {
+		mu.Lock()
+		lp := loginPassword
+		mu.Unlock()
+		// The host's rule: every password, for any username, warmed
+		// before this username's are checked.
+		WarmPasswords([]string{"token", portPassword, lp})
 		candidates := []string{"token", portPassword}
 		if user == "app1" {
-			candidates = append(candidates, "app1-password")
+			candidates = append(candidates, lp)
 		}
 		if !password.Matches(candidates) {
 			return nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
 		}
 		return &Binding{Run: one}, nil
 	}
+	// Start from this set, whatever an earlier test left warmed.
+	WarmPasswords([]string{"token", portPassword, loginPassword})
 	addr := serveAddrCfg(t, Config{Login: login})
 	host, port, _ := net.SplitHostPort(addr)
-	try := func(user string) (string, int64) {
-		before := scramChecks.Load()
+	type work struct{ derived, checked int64 }
+	try := func(user string) (string, work) {
+		d, c := derived.Load(), scramChecks.Load()
 		cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=%s password=wrong dbname=orders sslmode=disable", host, port, user))
 		if err != nil {
 			t.Fatal(err)
@@ -660,15 +676,35 @@ func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
 		if !errors.As(err, &pe) {
 			t.Fatalf("%s: %v", user, err)
 		}
-		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), scramChecks.Load() - before
+		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), work{derived.Load() - d, scramChecks.Load() - c}
 	}
-	loginMsg, loginWork := try("app1")
-	otherMsg, otherWork := try("nobody")
-	if loginMsg != otherMsg {
-		t.Errorf("a login user is refused with %q, any other with %q", loginMsg, otherMsg)
+	change := func(pw string) {
+		mu.Lock()
+		loginPassword = pw
+		mu.Unlock()
 	}
-	if loginWork != otherWork || loginWork != scramMinCandidates {
-		t.Errorf("passwords checked: %d for a login user, %d for another, want %d both", loginWork, otherWork, scramMinCandidates)
+	// Cold: the login's password just changed, each time to one of the same
+	// shape, before the attempt of each username.
+	change("app1-\uff51\u00e9\u00b2")
+	coldOtherMsg, coldOther := try("nobody")
+	change("app1-\uff52\u00e9\u00b2")
+	coldLoginMsg, coldLogin := try("app1")
+	// Warm: nothing changed since.
+	warmLoginMsg, warmLogin := try("app1")
+	warmOtherMsg, warmOther := try("nobody")
+	for _, m := range []string{coldLoginMsg, warmLoginMsg, warmOtherMsg} {
+		if m != coldOtherMsg {
+			t.Errorf("refusals differ: %q and %q", m, coldOtherMsg)
+		}
+	}
+	if coldLogin != coldOther {
+		t.Errorf("cold: %+v for a login user, %+v for another", coldLogin, coldOther)
+	}
+	if warmLogin != warmOther || warmLogin.derived != 0 {
+		t.Errorf("warm: %+v for a login user, %+v for another, want the same and nothing derived", warmLogin, warmOther)
+	}
+	if want := int64(scramMinCandidates * scramForms); warmLogin.checked != want || coldLogin.checked != want {
+		t.Errorf("forms checked: %d warm, %d cold, want %d", warmLogin.checked, coldLogin.checked, want)
 	}
 }
 
@@ -703,8 +739,12 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 	}
 	addr := serveAddrCfg(t, Config{Auth: auth})
 	host, port, _ := net.SplitHostPort(addr)
+	var derived atomic.Int64
+	old := scramDerive
+	scramDerive = func(pw string, salt []byte, n int) []byte { derived.Add(1); return old(pw, salt, n) }
+	t.Cleanup(func() { scramDerive = old })
 	try := func(user, password string) (string, int64) {
-		before := scramChecks.Load()
+		before := scramChecks.Load() + 1000*derived.Load()
 		cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=public sslmode=disable", host, port, user, password))
 		if err != nil {
 			t.Fatal(err)
@@ -712,13 +752,13 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 		conn, err := pgconn.ConnectConfig(context.Background(), cfg)
 		if err == nil {
 			conn.Close(context.Background())
-			return "", scramChecks.Load() - before
+			return "", scramChecks.Load() + 1000*derived.Load() - before
 		}
 		var pe *pgconn.PgError
 		if !errors.As(err, &pe) {
 			t.Fatalf("%s: %v", user, err)
 		}
-		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), scramChecks.Load() - before
+		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), scramChecks.Load() + 1000*derived.Load() - before
 	}
 	if msg, _ := try("alice", "alice-pw"); msg != "" {
 		t.Fatalf("the right password: %s", msg)
@@ -729,7 +769,7 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 		t.Errorf("a wrong password: %q, an unknown tenant: %q", known, unknown)
 	}
 	if kw != uw {
-		t.Errorf("passwords checked: %d for a wrong password, %d for an unknown tenant", kw, uw)
+		t.Errorf("work (checks + 1000 x derivations): %d for a wrong password, %d for an unknown tenant", kw, uw)
 	}
 }
 

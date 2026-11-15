@@ -81,6 +81,17 @@ func NewTenantAuth(users map[string]string) (TenantAuth, error) {
 // WithAuthMethod returns a copy whose credentials advertise the given
 // MySQL auth plugin ("" keeps mysql_native_password). Pass the same
 // value NewMySQLServer is built with — see the authPlugin field doc.
+// Passwords is every tenant's password, in no order: what a SCRAM front end
+// derives ahead of a login, so that no login derives one for its username
+// alone (pgshim.WarmPasswords).
+func (a TenantAuth) Passwords() []string {
+	out := make([]string, 0, len(a.users))
+	for _, p := range a.users {
+		out = append(out, p)
+	}
+	return out
+}
+
 func (a TenantAuth) WithAuthMethod(method string) TenantAuth {
 	a.authPlugin = method
 	return a
