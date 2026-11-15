@@ -100,6 +100,7 @@ func TestHeaderSaysBinary(t *testing.T) {
 		"mydumper default":       {"/*!40101 SET NAMES binary*/;\n/*!40014 SET FOREIGN_KEY_CHECKS=0*/;\nINSERT INTO `t` VALUES(1,\"caf\xe9\");\n", true},
 		"set names utf8mb4":      {"/*!40101 SET NAMES utf8mb4*/;\nINSERT INTO `t` VALUES(1,\"café\");\n", false},
 		"lower case, spaces":     {"/*!40101   set names   'BINARY' */;\n", true},
+		"set names latin1":       {"/*!40101 SET NAMES latin1*/;\n", true},
 		"no SET NAMES: mydumper": {"INSERT INTO `t` VALUES(1,\"caf\xe9\");\n", true},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -114,7 +115,7 @@ func TestHeaderSaysBinary(t *testing.T) {
 	// A tab dump's first lines are rows: a cell reading SET NAMES utf8 is
 	// data, not the dump's character set, and the file is not scanned.
 	tab := write("rows.dat", "1\tset names utf8\n2\tcaf\xe9\n")
-	if stored, err := fileHoldsStoredLatin1(tab, "tab", []bool{false, true}); err != nil || !stored {
+	if stored, err := fileHoldsStoredLatin1(context.Background(), tab, "tab", []bool{false, true}); err != nil || !stored {
 		t.Fatalf("a tab dump is stored bytes; its rows are not a header: %v, %v", stored, err)
 	}
 }

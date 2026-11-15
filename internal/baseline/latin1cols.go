@@ -2,6 +2,7 @@ package baseline
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -72,7 +73,9 @@ func headerSaysBinary(path string) bool {
 			break
 		}
 		if m := setNamesRe.FindStringSubmatch(line); m != nil {
-			return strings.EqualFold(m[1], "binary")
+			// Under SET NAMES latin1 the server sends a latin1 column's stored
+			// bytes as they are, the same as binary.
+			return strings.EqualFold(m[1], "binary") || latin1.IsLatin1(m[1])
 		}
 	}
 	return true
@@ -93,23 +96,28 @@ var errStoredLatin1Found = errors.New("stored latin1 bytes found")
 // utf8mb4 header; the others write UTF-8. Which thread takes which table is a
 // race, so the same table comes out one way or the other from run to run.
 //
-// So a header other than binary is checked against the rows: a latin1 value
-// that is not valid UTF-8 cannot come from a server converting to utf8mb4, so
-// it proves the whole file holds stored bytes. A file whose latin1 values are
-// all valid UTF-8 is taken as converted, as its header says. Stored latin1
-// text whose every byte above 0x7f happens to form UTF-8 (such as 'Ã©', which
-// is stored as the bytes of 'é') cannot be told apart from converted text; a
-// single other value in the file that is not valid UTF-8 settles it.
+// So a header other than binary is checked against the rows. A server
+// converting latin1 to utf8mb4 writes valid UTF-8 and only characters latin1
+// has, so a latin1 value that is not valid UTF-8, or that holds a character
+// latin1 has no byte for (stored UTF-8 bytes such as 'Å‘', which read as
+// 'ő'), proves the whole file holds stored bytes. A file whose latin1 values
+// pass both is taken as converted, as its header says. What cannot be told
+// apart is stored text whose every byte above 0x7f forms UTF-8 of characters
+// latin1 has (such as 'Ã©', stored as the bytes of 'é'): unless another value
+// of the same file settles it, such a file is read as converted.
 //
 // A tab-separated dump (.dat) has no header and is taken as stored bytes, as
-// is a file whose header says binary: neither is scanned.
-func fileHoldsStoredLatin1(path, format string, isLatin1 []bool) (bool, error) {
+// is a file whose header says binary or latin1: neither is scanned.
+func fileHoldsStoredLatin1(ctx context.Context, path, format string, isLatin1 []bool) (bool, error) {
 	if format != "sql" || headerSaysBinary(path) {
 		return true, nil
 	}
 	err := ReadSQLFile(path, func(values []string, nulls []bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for i, v := range values {
-			if i < len(isLatin1) && isLatin1[i] && (i >= len(nulls) || !nulls[i]) && !utf8.ValidString(v) {
+			if i < len(isLatin1) && isLatin1[i] && (i >= len(nulls) || !nulls[i]) && !convertedLatin1(v) {
 				return errStoredLatin1Found
 			}
 		}
@@ -119,9 +127,23 @@ func fileHoldsStoredLatin1(path, format string, isLatin1 []bool) (bool, error) {
 	case errors.Is(err, errStoredLatin1Found):
 		return true, nil
 	case err != nil:
-		return false, fmt.Errorf("read sql file %s: %w", path, err)
+		return false, fmt.Errorf("scan for its latin1 encoding: %w", err)
 	}
 	return false, nil
+}
+
+// convertedLatin1 reports whether v can be a latin1 value a server converted
+// to UTF-8: valid UTF-8 made only of characters latin1 has.
+func convertedLatin1(v string) bool {
+	if !utf8.ValidString(v) {
+		return false
+	}
+	for _, r := range v {
+		if !latin1.Holds(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // decodeLatin1Row returns values with every latin1 column decoded to UTF-8, or

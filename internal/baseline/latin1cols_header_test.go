@@ -125,6 +125,22 @@ func TestProcessTable_latin1StoredBytesUnderUTF8Header(t *testing.T) {
 	}
 }
 
+// TestProcessTable_latin1StoredUTF8BytesUnderUTF8Header: a latin1 column an
+// application filled with UTF-8 bytes, dumped as stored. "\xc5\x91" is valid
+// UTF-8 ('ő'), but latin1 has no 'ő', so no server converting latin1 wrote
+// it: the file holds stored bytes, which MySQL reads as 'Å‘'.
+func TestProcessTable_latin1StoredUTF8BytesUnderUTF8Header(t *testing.T) {
+	got, digest := convertLatin1Table(t, latin1Schema,
+		utf8Header+"INSERT INTO `t` (`id`,`v`,`u`) VALUES(1,\"\xc5\x91\",NULL);\n")
+	want := []latin1Row{{1, sql.NullString{String: "Å‘", Valid: true}, sql.NullString{}}}
+	if !equalLatin1Rows(got, want) {
+		t.Fatalf("rows = %+v, want %+v", got, want)
+	}
+	if w := digestOf([]string{"1", "\xc5\x91", null}); digest != w {
+		t.Fatalf("the content digest must be over the stored bytes: got %s, want %s", digest, w)
+	}
+}
+
 // TestProcessTable_latin1ConvertedUnderUTF8Header is the other way the same
 // dump comes out: the rows already converted to UTF-8. They must not be
 // decoded a second time ('Ñ' would become 'Ã\u0091'), and the digest is still

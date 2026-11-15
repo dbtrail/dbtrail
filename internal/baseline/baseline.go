@@ -566,7 +566,7 @@ func processTable(ctx context.Context, tf TableFiles, outPath string, cfg Writer
 			return rowCount, ctx.Err()
 		}
 		if isLatin1 != nil {
-			storedLatin1, err = fileHoldsStoredLatin1(dataFile, tf.Format, isLatin1)
+			storedLatin1, err = fileHoldsStoredLatin1(ctx, dataFile, tf.Format, isLatin1)
 			if err != nil {
 				return rowCount, err
 			}
