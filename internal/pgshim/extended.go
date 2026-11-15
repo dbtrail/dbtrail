@@ -385,6 +385,11 @@ func (s *session) describeStatement(st *preparedStatement) (cols []string, types
 		// A session statement returns no rows; one that is refused is
 		// refused when it executes, with its own arguments.
 		return nil, nil, true, nil
+	case kindLocal:
+		// SHOW and the connect-time functions: their columns are known
+		// without running them.
+		cols, types, perr := s.localColumns(c.cmd)
+		return cols, types, perr == nil, perr
 	case kindTimeTravel:
 		// The gates first: the table's columns are something said about it.
 		if perr := s.timeTravelGates(c.q, false); perr != nil {
@@ -526,14 +531,23 @@ func (s *session) untypedArgumentsAsText(st *preparedStatement, types []colType)
 
 // columnsOf runs text on the copy, counted and recorded as every statement
 // the port runs is (runFree), and returns its columns.
+//
+// It runs as a statement does: in the session's schema and time zone, and
+// stopped by a cancel request or statement_timeout, which it then answers
+// with (a *pgErr in the error).
 func (s *session) columnsOf(text string) ([]sqlsandbox.Column, error) {
 	started := time.Now()
-	res, err := s.bound.Run(s.ctx, text)
-	if s.bound.Answered != nil && s.ctx.Err() == nil {
+	ctx, done := s.statementContext()
+	defer done()
+	res, err := s.bound.Run(ctx, text, s.runOptions())
+	if s.bound.Answered != nil && ctx.Err() == nil {
 		s.bound.Answered(time.Since(started), err != nil)
 	}
 	if res.Spool != nil {
 		_ = res.Spool.Close()
+	}
+	if perr := stoppedError(ctx); perr != nil && err != nil {
+		return nil, &stoppedErr{perr}
 	}
 	if err != nil {
 		return nil, err

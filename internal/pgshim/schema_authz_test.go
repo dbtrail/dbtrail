@@ -115,7 +115,7 @@ func TestPGWire_AllowedSchemasDeniesConnectDatabase(t *testing.T) {
 	}
 	// A denied query is a QUERY error, not a connection drop (#1261): the
 	// session must still be usable.
-	if _, err := conn.Exec(ctx, "SET x=1"); err != nil {
+	if _, err := conn.Exec(ctx, "SET application_name = 'x'"); err != nil {
 		t.Fatalf("connection did not survive the denial: %v", err)
 	}
 }

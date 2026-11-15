@@ -1395,16 +1395,21 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			if sess.TimeZone != "" {
 				// A session zone other than UTC: every DATETIME the statement
 				// can read must be the wall clock MySQL holds, or it would be
-				// shifted by the zone (views.BaselineTable.Datetimes).
-				tables, unknown := sqlWallClockDatetimes(narrowed)
-				if unknown != "" {
-					viewsRefusal = &sqlRefusal{http.StatusConflict, fmt.Sprintf(
-						"the session time zone (SET time_zone) cannot be applied to %s: that table's column types are not available "+
-							"(its snapshot does not record them, or they could not be read just now: DBTrail's log says), "+
-							"so a DATETIME cannot be told from a TIMESTAMP; SET time_zone = 'UTC' to read it", unknown)}
-					return "", viewsRefusal
+				// shifted by the zone (views.BaselineTable.Datetimes). The
+				// copy of a PostgreSQL source has no DATETIME: it reads each
+				// column as the type the table declares, a timestamp
+				// without time zone as a wall clock already (#2769).
+				if !sess.PostgresRules {
+					tables, unknown := sqlWallClockDatetimes(narrowed)
+					if unknown != "" {
+						viewsRefusal = &sqlRefusal{http.StatusConflict, fmt.Sprintf(
+							"the session time zone (SET time_zone) cannot be applied to %s: that table's column types are not available "+
+								"(its snapshot does not record them, or they could not be read just now: DBTrail's log says), "+
+								"so a DATETIME cannot be told from a TIMESTAMP; SET time_zone = 'UTC' to read it", unknown)}
+						return "", viewsRefusal
+					}
+					narrowed.Baselines = tables
 				}
-				narrowed.Baselines = tables
 				narrowed.NonUTCSession = true
 			}
 			// For each table the statement reads, find where the dead rows

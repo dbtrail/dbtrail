@@ -46,7 +46,7 @@ func newDeadEngine(t *testing.T) *shim.Handler {
 	return shim.NewHandlerWithConfig(deadDB(t), shim.Config{NoArchive: true, IndexDBName: "idx"}, discardLogger())
 }
 
-func (e *echoLogin) run(_ context.Context, st string) (sqlsandbox.Result, error) {
+func (e *echoLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
 	e.mu.Lock()
 	e.ran = append(e.ran, st)
 	rows := e.rows
@@ -197,7 +197,7 @@ func TestExtended_refusesWhatTheSimpleProtocolRefuses(t *testing.T) {
 				{"DELETE FROM t WHERE id = $1", "0A000"},
 				{"SELECT * FROM no_such_table WHERE id = $1", "42P01"},
 				{"SELECT * FROM _flashback.t AS OF $1 WHERE id = 1", "0A000"},
-				{"SET search_path = $1", "0A000"},
+				{"SET role = $1", "0A000"},
 			} {
 				rows, err := conn.Query(ctx, c.stmt, "x")
 				if err == nil {
@@ -466,7 +466,7 @@ func TestExtended_messageByMessage(t *testing.T) {
 	want(t, "describe SET", r.send(
 		&pgproto3.Parse{Query: "SET application_name = $1"}, &pgproto3.Describe{ObjectType: 'S'},
 		&pgproto3.Bind{Parameters: [][]byte{[]byte("x")}}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{}),
-		"ParseComplete", "ParameterDescription [0]", "NoData", "BindComplete", "NoData", "CommandComplete SET", "ReadyForQuery I")
+		"ParseComplete", "ParameterDescription [0]", "NoData", "BindComplete", "NoData", "CommandComplete SET", "Status", "ReadyForQuery I")
 	want(t, "empty query", r.send(
 		&pgproto3.Parse{Query: " ; "}, &pgproto3.Describe{ObjectType: 'S'}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{}),
 		"ParseComplete", "ParameterDescription []", "NoData", "BindComplete", "EmptyQueryResponse", "ReadyForQuery I")
@@ -528,7 +528,7 @@ func TestExtended_messageByMessage(t *testing.T) {
 
 	// A simple query ends the unnamed statement.
 	r.send(&pgproto3.Parse{Query: stmt}, &pgproto3.Sync{})
-	r.send(&pgproto3.Query{String: "SET x = 1"})
+	r.send(&pgproto3.Query{String: "SET extra_float_digits = 3"})
 	want(t, "unnamed statement after a simple query", r.send(&pgproto3.Bind{}, &pgproto3.Sync{}), "Error 26000", "ReadyForQuery I")
 }
 
@@ -542,7 +542,7 @@ func TestExtended_aStatementThatChangesShapeIsRefused(t *testing.T) {
 		if !password.Matches([]string{portPassword}) {
 			return nil, &Error{Code: "28P01", Message: "no"}
 		}
-		return &Binding{Schema: "public", Run: func(context.Context, string) (sqlsandbox.Result, error) {
+		return &Binding{Schema: "public", Run: func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 			cols := int(width.Load())
 			res := sqlsandbox.Result{Rows: [][]any{make([]any, cols)}}
 			for i := range cols {
@@ -651,7 +651,7 @@ func TestExtended_flashbackFrontEnd(t *testing.T) {
 			t.Errorf("%s: %s %q, want %s with %q", c.stmt, pe.Code, pe.Message, c.code, c.msg)
 		}
 	}
-	if _, err := conn.Exec(ctx, "SET x = 1"); err != nil {
+	if _, err := conn.Exec(ctx, "SET extra_float_digits = 3"); err != nil {
 		t.Fatalf("the connection after the refusals: %v", err)
 	}
 }

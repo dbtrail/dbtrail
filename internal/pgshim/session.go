@@ -43,6 +43,61 @@ type session struct {
 	// over (portal.held).
 	budget     *ResultBudget
 	heldResult int64
+
+	// set is the connection's settings now (settings.go); sessionLevel is
+	// what a COMMIT keeps of them (set without its SET LOCALs), txSaved what
+	// they were at BEGIN, which a ROLLBACK or a failed block goes back to,
+	// and defaults what RESET goes back to: the start-up message's values.
+	set, sessionLevel, txSaved, defaults settings
+	// reported is each reported parameter's value as the client was last
+	// told it (ParameterStatus); nil before the welcome.
+	reported map[string]string
+	// defaultSchema is where unqualified names resolve before a SET
+	// search_path, user the login's username (session_authorization).
+	defaultSchema, user string
+	// cancelTarget is what a cancel request for this connection stops
+	// (cancel.go); nil cancels nothing.
+	cancelTarget *cancelTarget
+}
+
+// initSettings sets a connection's settings before its start-up message is
+// read: names resolve in schema, and user is who logged in.
+func (s *session) initSettings(schema, user string) {
+	s.defaultSchema, s.user = schema, user
+	s.defaults = defaultSettings(schema)
+	s.set, s.sessionLevel, s.txSaved = s.defaults, s.defaults, s.defaults
+}
+
+// schema is where an unqualified name resolves now: the search_path's
+// schema, or the connect database on a session whose settings were never
+// set up (initSettings).
+func (s *session) schema() string {
+	if s.defaults.searchPath == nil {
+		return s.currentDB
+	}
+	return s.set.schema
+}
+
+// connContext is the connection's context.
+func (s *session) connContext() context.Context {
+	if s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
+}
+
+// welcome finishes the login: AuthenticationOk, each reported parameter
+// (ParameterStatus), the connection's process number and secret key
+// (BackendKeyData), then ReadyForQuery, in PostgreSQL's order.
+func (s *session) welcome() {
+	// From here on a message is a statement: a larger ceiling, still one.
+	s.be.SetMaxBodyLen(maxStatementMessage)
+	s.reported = map[string]string{}
+	s.reportChanges()
+	if t := s.cancelTarget; t != nil {
+		s.be.Send(&pgproto3.BackendKeyData{ProcessID: t.pid, SecretKey: append([]byte(nil), t.key[:]...)})
+	}
+	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 }
 
 // txStatus is the status ReadyForQuery reports.
@@ -109,24 +164,42 @@ func (s *session) run(qstr string) (cols []string, types []colType, rows [][][]b
 	if perr := s.abortedRefusal(qstr); perr != nil {
 		return nil, nil, nil, "", perr
 	}
-	cols, types, rows, tag, perr = s.resolve(qstr)
+	c := s.classify(qstr)
+	cols, types, rows, tag, perr = s.resolveClassified(qstr, c)
 	if perr != nil {
 		return nil, nil, nil, "", perr
 	}
-	switch tag {
-	case "BEGIN":
+	if c.kind != kindProbe || c.cmd == nil {
+		return cols, types, rows, tag, nil
+	}
+	switch c.cmd.kind {
+	case cmdBegin:
 		if s.txStatus() != 'I' {
 			s.warning("25001", "there is already a transaction in progress")
-		} else {
-			s.tx = 'T'
+			break
 		}
-	case "COMMIT", "ROLLBACK":
+		s.tx = 'T'
+		// What a ROLLBACK goes back to, and the block's isolation level.
+		s.txSaved = s.set
+		s.set.txIso = s.set.defaultIso
+		if c.cmd.modes.iso != "" {
+			s.set.txIso = c.cmd.modes.iso
+		}
+	case cmdCommit, cmdRollback:
 		switch s.txStatus() {
 		case 'I':
 			s.warning("25P01", "there is no transaction in progress")
 		case 'E':
-			// A failed block is rolled back, whatever ended it.
+			// A failed block is rolled back, whatever ended it; what it set
+			// was undone when it failed.
 			tag = "ROLLBACK"
+		case 'T':
+			if c.cmd.kind == cmdCommit {
+				// A SET LOCAL ends with its block; a SET stays.
+				s.set = s.sessionLevel
+			} else {
+				s.set, s.sessionLevel = s.txSaved, s.txSaved
+			}
 		}
 		s.tx = 'I'
 		s.dropPortals()
@@ -140,23 +213,27 @@ func (s *session) abortedRefusal(qstr string) *pgErr {
 	if s.txStatus() != 'E' {
 		return nil
 	}
-	if tag, ok := probeReply(qstr); ok && (tag == "COMMIT" || tag == "ROLLBACK") {
+	if c, ok, _ := parseSessionCmd(qstr); ok && (c.kind == cmdCommit || c.kind == cmdRollback) {
 		return nil
 	}
 	return &pgErr{"25P02", "current transaction is aborted, commands ignored until end of transaction block"}
 }
 
 // fail sends a statement's error. In a transaction block the block fails
-// with it.
+// with it, and what the block set is undone, as on PostgreSQL.
 func (s *session) fail(perr *pgErr) {
 	s.errorResponse(perr.code, perr.msg)
 	if s.txStatus() == 'T' {
 		s.tx = 'E'
+		s.set, s.sessionLevel = s.txSaved, s.txSaved
 	}
 }
 
-// warning sends a WARNING notice.
+// warning sends a WARNING notice, unless client_min_messages is above it.
 func (s *session) warning(code, msg string) {
+	if messageRank["warning"] < messageRank[s.set.minMessages] {
+		return
+	}
 	s.be.Send(&pgproto3.NoticeResponse{Severity: "WARNING", SeverityUnlocalized: "WARNING", Code: code, Message: msg})
 }
 
@@ -171,6 +248,9 @@ const (
 	// kindProbe is a session statement answered here with a tag (SET,
 	// BEGIN...), or refused with one.
 	kindProbe
+	// kindLocal is a session statement answered here with rows (SHOW,
+	// version()).
+	kindLocal
 	// kindRefused is refused before anything runs.
 	kindRefused
 )
@@ -180,8 +260,9 @@ type classified struct {
 	kind stmtKind
 	// q is the time-travel statement, for kindTimeTravel.
 	q shim.TimeTravelQuery
-	// tag answers a kindProbe; perr refuses a kindProbe or a kindRefused.
-	tag  string
+	// cmd is the session statement of a kindProbe or a kindLocal; perr
+	// refuses a kindRefused.
+	cmd  *sessionCmd
 	perr *pgErr
 	// timeTravel says the time-travel parser reads the text (well formed or
 	// not), which decides how an argument is written into it.
@@ -193,7 +274,7 @@ type classified struct {
 // asks it before a statement runs (to say whether it returns rows, and how
 // its arguments are written).
 func (s *session) classify(qstr string) classified {
-	q, err := shim.Parse(qstr, s.currentDB)
+	q, err := shim.Parse(qstr, s.schema())
 	tt := !errors.Is(err, shim.ErrNotTimeTravel)
 	if s.h == nil && tt {
 		// A port that runs SQL on the copy and has no time-travel engine
@@ -211,17 +292,22 @@ func (s *session) classify(qstr string) classified {
 			// missing schema, bad grammar) → syntax_error.
 			return classified{kind: kindRefused, timeTravel: true, perr: &pgErr{"42601", err.Error()}}
 		}
-		// Not a time-travel query. Tolerate the handful of setup statements a
-		// client fires on connect; reject anything else (we are not a general
-		// PostgreSQL engine).
-		if s.bound != nil {
-			if t, refusal, ok := boundProbe(qstr); ok {
-				return classified{kind: kindProbe, tag: t, perr: refusal}
-			}
+		// Not a time-travel query. The session statements a client sends
+		// (SET, SHOW, BEGIN, version()...) are answered here, on either
+		// port; on the time-travel port nothing else is.
+		cmd, ok, syntaxErr := parseSessionCmd(qstr)
+		switch {
+		case syntaxErr != nil:
+			return classified{kind: kindRefused, perr: syntaxErr}
+		case ok && cmd.kind == cmdShow && !cmd.all && gucs[cmd.param] == nil && s.bound != nil:
+			// Not a parameter: the copy's own SHOW (SHOW TABLES), as before.
 			return classified{kind: kindFree}
-		}
-		if t, ok := probeReply(qstr); ok {
-			return classified{kind: kindProbe, tag: t}
+		case ok && cmd.returnsRows():
+			return classified{kind: kindLocal, cmd: cmd}
+		case ok:
+			return classified{kind: kindProbe, cmd: cmd}
+		case s.bound != nil:
+			return classified{kind: kindFree}
 		}
 		return classified{kind: kindRefused, perr: &pgErr{"0A000", fmt.Sprintf(
 			"this endpoint serves only _flashback / _snapshot AS OF time-travel queries; got: %s",
@@ -236,15 +322,19 @@ func (s *session) classify(qstr string) classified {
 // _diff are refused), and its columns are text: a row as it was can carry
 // other columns, and other types, than the table has now.
 func (s *session) resolve(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
-	c := s.classify(qstr)
+	return s.resolveClassified(qstr, s.classify(qstr))
+}
+
+// resolveClassified is resolve of a statement classify already read.
+func (s *session) resolveClassified(qstr string, c classified) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	switch c.kind {
 	case kindRefused:
 		return nil, nil, nil, "", c.perr
 	case kindProbe:
-		if c.perr != nil {
-			return nil, nil, nil, "", c.perr
-		}
-		return nil, nil, nil, c.tag, nil
+		tag, perr := s.sessionReply(c.cmd)
+		return nil, nil, nil, tag, perr
+	case kindLocal:
+		return s.answerLocal(c.cmd)
 	case kindFree:
 		return s.runFree(qstr)
 	}
@@ -259,6 +349,13 @@ func (s *session) resolve(qstr string) (cols []string, types []colType, rows [][
 // run is set when the statement is about to run, not only be described: the
 // port's result budget is then asked too, at its place in the order.
 func (s *session) timeTravelGates(q shim.TimeTravelQuery, run bool) *pgErr {
+	// Time travel reads its AS OF moment in UTC and writes its cells as the
+	// change history holds them: under another session zone the moment
+	// would be read hours off, with nothing to say so (#2769).
+	if s.set.zone.duck != "" {
+		return &pgErr{"0A000", fmt.Sprintf(
+			"time travel (_flashback, _snapshot) reads AS OF in UTC, and this session's TimeZone is %s; SET TimeZone = 'UTC' for it, and write the moment in UTC", s.set.zone.name)}
+	}
 	// A port's own gate on time travel (Binding.TimeTravelRefusal): asked for
 	// every statement, so a rule saved while the connection is open governs
 	// its next one, and before anything is read or said about the table.
@@ -320,6 +417,14 @@ func (s *session) resolveTimeTravel(q shim.TimeTravelQuery) (cols []string, rows
 	if perr := s.timeTravelGates(q, true); perr != nil {
 		return nil, nil, "", perr
 	}
+	// The statement's own context, which a cancel request and
+	// statement_timeout end; the engine derives its query context from it.
+	stmtCtx, done := s.statementContext()
+	s.h.BindConnContext(stmtCtx)
+	defer func() {
+		s.h.BindConnContext(s.connContext())
+		done()
+	}()
 	ctx, cancel := s.h.QueryContext()
 	defer cancel()
 	var image map[string]any
@@ -330,6 +435,9 @@ func (s *session) resolveTimeTravel(q shim.TimeTravelQuery) (cols []string, rows
 		image, rerr = s.h.ResolveFlashbackRow(ctx, q)
 	}
 	if rerr != nil {
+		if perr := stoppedError(stmtCtx); perr != nil {
+			return nil, nil, "", perr
+		}
 		return nil, nil, "", pgResolveError(rerr)
 	}
 	cols = s.h.ColumnsFor(image, q)
@@ -466,25 +574,6 @@ func textCell(col string, v any) ([]byte, error) {
 	}
 }
 
-// probeReply tolerates the setup statements a client may fire on connect that
-// are not time-travel queries, so the connection is not torn down by an error
-// the operator did not type. Deliberately narrow: an unrecognised statement
-// falls through to the "only time-travel queries" rejection.
-func probeReply(qstr string) (tag string, ok bool) {
-	q := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(qstr), ";")))
-	switch {
-	case strings.HasPrefix(q, "set "):
-		return "SET", true
-	case q == "begin", strings.HasPrefix(q, "begin "):
-		return "BEGIN", true
-	case q == "commit":
-		return "COMMIT", true
-	case q == "rollback":
-		return "ROLLBACK", true
-	}
-	return "", false
-}
-
 // --- wire writers ---------------------------------------------------------
 
 // rowDescription describes the columns, each with its type (types; text
@@ -519,8 +608,10 @@ func (s *session) errorResponse(code, msg string) {
 
 // readyFlush sends ReadyForQuery with the transaction status and flushes —
 // the required end of every simple-query cycle and of every Sync, success or
-// failure.
+// failure — after a ParameterStatus for each reported parameter the
+// statements before it changed.
 func (s *session) readyFlush() error {
+	s.reportChanges()
 	s.be.Send(&pgproto3.ReadyForQuery{TxStatus: s.txStatus()})
 	return s.be.Flush()
 }

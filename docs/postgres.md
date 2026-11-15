@@ -715,7 +715,8 @@ listener, its own workers, its own memory.
   this process keeps no files of recent changes.
 - **The copy answers every statement.** Nothing is sent to the source, and a
   statement that is not a read is refused with an error. Unqualified names
-  resolve in `public`. NULL order, integer division and text comparison follow
+  resolve in `public` until the client sets `search_path` (see
+  [Session settings](#session-settings-and-query-cancel-on-the-postgresql-port)). NULL order, integer division and text comparison follow
   PostgreSQL, and each type reads as [the table below](#how-each-type-reads-in-sql-on-the-copy)
   says; the differences listed there apply here too.
 - **Each column carries its PostgreSQL type**, and each value is written the
@@ -741,6 +742,11 @@ listener, its own workers, its own memory.
     an array of arrays);
   - time travel (`_flashback`, `_snapshot`) and `SHOW`.
 
+  `infinity` and `-infinity` in a `date`, `timestamp` or `timestamptz` column
+  read as the source writes them: the words in text, and in binary the ends of
+  the count PostgreSQL sends (the largest and smallest 32-bit day for a `date`,
+  64-bit microsecond for a timestamp), in arrays too.
+
   An expression's type is the one the copy computes it with, which is not
   always PostgreSQL's: `avg()` of whole numbers is a `double precision` here
   and a `numeric` there, and an aggregate or a literal of a `numeric` keeps its
@@ -763,7 +769,7 @@ listener, its own workers, its own memory.
   and psycopg 3 connect as they are. Each argument is written
   into the statement as a value before the copy runs it, and the statement then
   runs exactly as if it had been typed with that value; whatever the simple
-  protocol refuses (a write, `SET search_path`) is refused here with the same
+  protocol refuses (a write, `SET ROLE`) is refused here with the same
   error. Three things to know:
   - The port does not work out a parameter's type from the statement, as
     PostgreSQL does: it tells the driver the type is unknown. An argument the
@@ -772,9 +778,10 @@ listener, its own workers, its own memory.
     in `$1 + 1`, give it one: `$1::int + 1`.
   - When a driver asks for a statement's columns before running it (pgx does,
     JDBC sometimes), the port asks the copy for them without reading a row.
-    A statement the copy cannot ask that way (`SHOW`, `DESCRIBE`) is
-    described as returning no rows; with `pgx` run those with
-    `QueryExecModeSimpleProtocol`.
+    A statement the copy cannot ask that way (`DESCRIBE`, the copy's own
+    `SHOW TABLES`) is described as returning no rows; with `pgx` run those
+    with `QueryExecModeSimpleProtocol`. `SHOW` of a setting is answered by
+    the port, and described.
     The columns said this way keep the copy's own heading where the statement
     gives one no name (`count(*)` is `count_star()`), so name such a column
     (`AS n`) when the heading matters to a driver that describes first.
@@ -816,11 +823,8 @@ listener, its own workers, its own memory.
   address other machines reach is named at start, since whoever reaches it can
   try the port's password; keep it behind a firewall as you would the MySQL
   port.
-- `SET search_path`, `SET ROLE` and a `SET TimeZone` other than UTC are
-  refused: the port resolves names in `public` and answers in UTC, so write the
-  schema in the name and convert zones in the statement. Other `SET`s are accepted and
-  change nothing; `BEGIN`, `COMMIT` and `ROLLBACK` move the transaction status
-  only (see above).
+- **Session settings and query cancel** are taken as PostgreSQL takes them;
+  [below](#session-settings-and-query-cancel-on-the-postgresql-port).
 - A result with more rows than the port's row cap, or with a cell longer than
   the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
   the long column.
@@ -862,6 +866,46 @@ it fits beside capture:
 | `--token` | `BINTRAIL_CONSOLE_TOKEN` | none | The access token, one more password. It does not open the port |
 | `--servers-file` | `BINTRAIL_CONSOLE_SERVERS` | `~/.config/bintrail/console-servers.yaml` | The servers file the web interface manages. Read, never written |
 
+
+### Session settings and query cancel on the PostgreSQL port
+
+What a driver sets for its session, with `SET` or in its connection
+parameters, is answered here as PostgreSQL answers it: the same `SET` and
+`SHOW`, the same values, and a `ParameterStatus` to the client when a reported
+setting changes. Nothing that would change an answer is taken and ignored:
+
+| Setting | On this port |
+|---|---|
+| `TimeZone` (`SET TIME ZONE`) | **Applied.** The statement runs in the zone (a cast to `date`, `date_trunc`, a literal without an offset), and a `timestamptz` is written in it (`2026-01-01 05:00:00-05`). A name of the time zone database (`America/Bogota`; `america/bogota` is taken too), a name of UTC, or `GMT` with a whole-hour offset as JDBC writes one (`GMT-05:00`). An offset as a number (`SET TIME ZONE -5`) or an interval is refused: name the zone (`Etc/GMT+5` is five hours behind UTC). A zone the copy's engine does not know, or knows with other offsets than this host, is refused. One difference is known: the engine reads `Europe/Amsterdam` before 1937 without its local mean time (+00:19:32), so a cast or `date_trunc` of such an instant there is off by those minutes; the `timestamptz` itself is written right. |
+| `search_path` (`SET SCHEMA`) | **Applied**, to one schema of the copy: unqualified names resolve there, `current_schema()` says it, time travel reads it. `"$user"` and `pg_catalog` may be in the path; a second schema, or one the copy does not have, is refused. |
+| `statement_timeout` | **Applied.** A statement that runs past it stops with `57014 canceling statement due to statement timeout`. The port's own cap (five minutes) still applies. |
+| `application_name`, `client_min_messages` | **Applied.** |
+| `extra_float_digits` 1 to 3, `DateStyle` `ISO, MDY`, `client_encoding` `UTF8` (or `SQL_ASCII`), `lock_timeout`, `IntervalStyle` `postgres`, `bytea_output` `hex`, `standard_conforming_strings` `on`, read committed, read only | **Taken; they change nothing this port answers.** PostgreSQL 12 and later write the same digits for an `extra_float_digits` of 1, 2 or 3; the copy takes no lock. |
+| `extra_float_digits` 0 or less, another `DateStyle`, `IntervalStyle`, `bytea_output` or client encoding, `standard_conforming_strings` off, `REPEATABLE READ`, `SERIALIZABLE`, `READ WRITE`, `SET ROLE`, `SET SESSION AUTHORIZATION` | **Refused, with the reason** (`0A000`): the port would answer otherwise than the setting says. Each statement reads the copy as it is when it runs, so no snapshot is kept across statements. |
+| A name the port does not take | **Refused** (`42704`); `SHOW ALL` lists the ones it takes. |
+
+A setting in the connection parameters (JDBC sends `TimeZone`, `DateStyle`
+and `extra_float_digits` there; libpq sends `PGOPTIONS` as `-c name=value`) is
+taken the same way, and is what `RESET` goes back to; a value refused there
+ends the connection with the reason. In a transaction block a `SET` is undone
+by `ROLLBACK` and by an error in the block, and a `SET LOCAL` ends with the
+block, as on PostgreSQL. `SELECT version()` answers `PostgreSQL 14.0 ...`,
+which is what SQLAlchemy (and Superset) read on connect.
+
+**Query cancel works**: each connection is given a process number and a secret
+key (`BackendKeyData`), and a cancel request with both, from `psql`'s Ctrl-C,
+JDBC's `setQueryTimeout` or `cancel()`, psycopg's `cancel()` or `pgx`, stops
+the statement the copy is running for that connection. It answers
+`57014 canceling statement due to user request` and the connection stays
+open. The request is taken in clear text and over TLS (`psql` 16 and psycopg
+send it in clear text even on a TLS connection; it carries no password), and
+also when the port has all the connections it takes.
+
+Time travel reads its `AS OF` moment in UTC, so under another `TimeZone` it
+is refused with the reason: `SET TimeZone = 'UTC'` first. Its columns are text,
+written as the change history holds them. On `bintrail-pg flashback`, which
+answers time travel only, `TimeZone` is UTC only, at connect too: start a JDBC
+client with `-Duser.timezone=UTC`.
 ### Interactive `AS OF` from `psql`
 
 The `_flashback` / `_snapshot` / `AS OF` time-travel grammar is also available

@@ -100,27 +100,6 @@ func TestPGResolveErrorClasses(t *testing.T) {
 	}
 }
 
-func TestProbeReply(t *testing.T) {
-	yes := map[string]string{
-		"SET client_encoding='UTF8'": "SET",
-		"set  application_name = x":  "SET",
-		"BEGIN":                      "BEGIN",
-		"begin transaction":          "BEGIN",
-		"COMMIT;":                    "COMMIT",
-		"rollback":                   "ROLLBACK",
-	}
-	for in, want := range yes {
-		if tag, ok := probeReply(in); !ok || tag != want {
-			t.Errorf("probeReply(%q) = (%q,%v), want (%q,true)", in, tag, ok, want)
-		}
-	}
-	for _, in := range []string{"SELECT 1", "SELECT * FROM orders", "DELETE FROM x"} {
-		if _, ok := probeReply(in); ok {
-			t.Errorf("probeReply(%q) must not be treated as a benign probe", in)
-		}
-	}
-}
-
 func TestNextBackoff(t *testing.T) {
 	if got := nextBackoff(0); got != 100*time.Millisecond {
 		t.Errorf("first backoff = %v", got)
@@ -293,7 +272,7 @@ func TestPGWire_ExtendedProtocolRefusesWhatSimpleRefusesThenResyncs(t *testing.T
 	}
 	// The connection resynced (ReadyForQuery on the trailing Sync): a
 	// simple-protocol query on the SAME conn works.
-	if _, err := conn.Exec(ctx, "SET x=1", pgx.QueryExecModeSimpleProtocol); err != nil {
+	if _, err := conn.Exec(ctx, "SET application_name = 'x'", pgx.QueryExecModeSimpleProtocol); err != nil {
 		t.Fatalf("connection did not resync after the extended-protocol refusal: %v", err)
 	}
 }
@@ -345,7 +324,7 @@ func TestPGWire_FullTableAsOfRefused(t *testing.T) {
 	}
 	// The connection survives the error (ReadyForQuery was sent): a follow-up
 	// probe still works.
-	if _, err := conn.Exec(ctx, "SET x=1"); err != nil {
+	if _, err := conn.Exec(ctx, "SET application_name = 'x'"); err != nil {
 		t.Fatalf("connection did not recover after an error (missing ReadyForQuery?): %v", err)
 	}
 }

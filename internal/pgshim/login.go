@@ -59,10 +59,11 @@ type LoginFunc func(ctx context.Context, user, database string, password *Passwo
 
 // Binding is what one logged-in connection runs its statements with.
 type Binding struct {
-	// Run answers one statement on the copy. An *Error is sent to the client
-	// as it is; the SQL sandbox's typed errors are sent by kind (freeError);
-	// anything else must already be text the client can be shown.
-	Run func(ctx context.Context, statement string) (sqlsandbox.Result, error)
+	// Run answers one statement on the copy, in what the connection set for
+	// itself (opts). An *Error is sent to the client as it is; the SQL
+	// sandbox's typed errors are sent by kind (freeError); anything else must
+	// already be text the client can be shown.
+	Run func(ctx context.Context, statement string, opts RunOptions) (sqlsandbox.Result, error)
 	// Actor is who the audit trail says read the rows.
 	Actor string
 	// Schema is where unqualified names resolve, for the audit record.
@@ -85,8 +86,24 @@ type Binding struct {
 	Close func()
 }
 
+// RunOptions are what a connection set for itself that a statement on the
+// copy runs in (#2769).
+type RunOptions struct {
+	// Schema is where unqualified names resolve: the session's search_path
+	// (Binding.Schema until the client sets one).
+	Schema string
+	// TimeZone is the session time zone as the copy's engine names it
+	// (sqlsandbox.Session.TimeZone), "" for UTC.
+	TimeZone string
+}
+
+// runOptions are the options the connection's next statement runs in.
+func (s *session) runOptions() RunOptions {
+	return RunOptions{Schema: s.schema(), TimeZone: s.set.zone.duck}
+}
+
 // handleLoginConn runs one connection of a port with a login of its own.
-func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger *slog.Logger) {
+func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
 	// The first defer, so the last to run: one connection's panic is logged
 	// with its stack and ends that connection, not the process the port
 	// shares with every other one.
@@ -125,7 +142,7 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, l
 	// back (resultbudget.go). On TLS through it, so the answers are
 	// encrypted.
 	be := pgproto3.NewBackend(conn, &deadlineWriter{c: conn, logger: logger})
-	startup, err := receiveStartup(be)
+	startup, err := receiveStartup(be, cancels, logger)
 	if err != nil {
 		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
 		return
@@ -173,19 +190,32 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, l
 		logger.Info("pgshim login took too long", "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
-	sendSASLFinal(be, password)
-	sendAuthOK(be)
-	if err := be.Flush(); err != nil {
-		return
-	}
 	sess := &session{be: be, bound: bound, ctx: connCtx, logger: logger, budget: cfg.ResultBudget}
 	if bound.TimeTravel != nil {
 		// The engine's statements end with the connection, as free SQL's do.
 		bound.TimeTravel.BindConnContext(connCtx)
 		sess.h = bound.TimeTravel
-		// Where a time-travel statement's unqualified table resolves: the
-		// schema free SQL resolves names in.
-		sess.currentDB = bound.Schema
+	}
+	// Where unqualified names resolve, a time-travel statement's table
+	// included: the schema free SQL resolves names in, until a SET
+	// search_path.
+	sess.currentDB = bound.Schema
+	sess.initSettings(bound.Schema, user)
+	target, release := cancels.register()
+	defer release()
+	sess.cancelTarget = target
+	sendSASLFinal(be, password)
+	be.Send(&pgproto3.AuthenticationOk{})
+	// The start-up message's settings, as PostgreSQL applies them: after the
+	// login, and a value refused ends the connection with the reason.
+	if perr := sess.applyStartup(startup.Parameters); perr != nil {
+		logger.Info("pgshim: a start-up parameter was refused", "user", user, "code", perr.code, "reason", perr.msg, "remote", c.RemoteAddr())
+		sendFatal(be, perr.code, perr.msg)
+		return
+	}
+	sess.welcome()
+	if err := be.Flush(); err != nil {
+		return
 	}
 	commandLoop(be, sess)
 }
@@ -197,10 +227,20 @@ var loginTimeout = 30 * time.Second
 // runFree answers a statement that is not time travel on the copy.
 func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][][]byte, tag string, perr *pgErr) {
 	started := time.Now()
+	// A session time zone the copy could not be asked about when it was set
+	// is asked about now (settings.go), before the statement's own context:
+	// the question has its own, and the statement's must stay the one a
+	// cancel request stops.
+	if perr := s.zoneOnCopy(s.set.zone, true); perr != nil {
+		return nil, nil, nil, "", perr
+	}
+	ctx, done := s.statementContext()
+	defer done()
 	defer func() {
-		// A client that left, or a port that is closing, is not the copy
-		// refusing a statement: it is not counted at all.
-		if s.bound.Answered != nil && s.ctx.Err() == nil {
+		// A client that left, a port that is closing, a cancel request and
+		// the client's own statement_timeout are not the copy refusing a
+		// statement: they are not counted at all.
+		if s.bound.Answered != nil && ctx.Err() == nil {
 			s.bound.Answered(time.Since(started), perr != nil)
 		}
 	}()
@@ -209,7 +249,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if refusal := s.admitResult(); refusal != nil {
 		return nil, nil, nil, "", refusal
 	}
-	res, err := s.bound.Run(s.ctx, qstr)
+	res, err := s.bound.Run(ctx, qstr, s.runOptions())
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
 		_ = res.Spool.Close()
@@ -218,7 +258,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		}
 	}
 	if err != nil {
-		return nil, nil, nil, "", freeError(err, s.logger)
+		return nil, nil, nil, "", s.statementError(ctx, err)
 	}
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows
@@ -251,7 +291,9 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		}
 		cells := make([][]byte, len(r))
 		for j, v := range r {
-			if text := pgtext.Cell(res.Columns[j].Type, v); text != nil {
+			// A timestamp with time zone in the session's zone (SET
+			// TimeZone), as PostgreSQL writes one.
+			if text := pgtext.CellIn(res.Columns[j].Type, v, s.set.zone.loc); text != nil {
 				// Never nil for a value: an empty string is not NULL.
 				cells[j] = append([]byte{}, *text...)
 			}
@@ -271,8 +313,12 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	return cols, types, rows, "SELECT " + strconv.Itoa(len(rows)), nil
 }
 
-// notice sends the client a sentence beside the statement's answer.
+// notice sends the client a sentence beside the statement's answer, unless
+// client_min_messages is above a notice.
 func (s *session) notice(msg string) {
+	if messageRank["notice"] < messageRank[s.set.minMessages] {
+		return
+	}
 	s.be.Send(&pgproto3.NoticeResponse{Severity: "NOTICE", SeverityUnlocalized: "NOTICE", Code: "00000", Message: msg})
 }
 
@@ -296,8 +342,8 @@ func (s *session) recordFree(statement string, res sqlsandbox.Result) {
 	if res.TruncatedCells > 0 {
 		detail["truncated_cells"] = strconv.Itoa(res.TruncatedCells)
 	}
-	if s.bound.Schema != "" {
-		detail["schema"] = s.bound.Schema
+	if schema := s.schema(); schema != "" {
+		detail["schema"] = schema
 	}
 	if res.Note != "" {
 		detail["note"] = res.Note
@@ -328,7 +374,10 @@ func freeError(err error, logger *slog.Logger) *pgErr {
 	var unavailable *sqlsandbox.UnavailableError
 	var differ *sqlsandbox.ColumnsDifferError
 	var changed *sqlsandbox.MayHaveChangedError
+	var stopped *stoppedErr
 	switch {
+	case errors.As(err, &stopped):
+		return stopped.perr
 	case errors.As(err, &own):
 		return &pgErr{own.Code, own.Message}
 	case errors.As(err, &refused):
@@ -392,54 +441,4 @@ func engineErrorCode(msg string) string {
 	default:
 		return "XX000"
 	}
-}
-
-// boundProbe answers the session statements a client sends beside its
-// queries on a port that runs SQL on the copy, where what is not answered
-// here reaches the copy's executor. ok is false for anything else.
-//
-// Narrower than probeReply on purpose. More than one statement in a message
-// is not a probe: "SET x = 1; SELECT ..." answered "SET" would drop the
-// SELECT and say nothing. And a SET that would change which table a name
-// reads, or who reads it, is refused, not acknowledged and ignored: the next
-// statement would answer from somewhere the client did not ask for.
-func boundProbe(qstr string) (tag string, refusal *pgErr, ok bool) {
-	q := strings.ToLower(strings.TrimSpace(strings.TrimRight(strings.TrimSpace(qstr), ";")))
-	if strings.Contains(q, ";") {
-		return "", nil, false
-	}
-	tag, ok = probeReply(q)
-	if !ok {
-		return "", nil, false
-	}
-	if tag != "SET" {
-		return tag, nil, true
-	}
-	words := strings.Fields(strings.NewReplacer("=", " ", "'", " ", `"`, " ").Replace(q))
-	// set [session|local] <name> ...
-	if len(words) > 1 && (words[1] == "session" || words[1] == "local") {
-		if len(words) > 2 && words[2] == "authorization" {
-			words = []string{"set", "session_authorization"}
-		} else {
-			words = append(words[:1], words[2:]...)
-		}
-	}
-	name := ""
-	if len(words) > 1 {
-		name = words[1]
-	}
-	switch name {
-	case "search_path", "schema", "role", "session_authorization":
-		return "", &pgErr{"0A000", fmt.Sprintf(
-			"SET %s is not supported on this port: unqualified names resolve in the connection's default schema, so write the schema in the name (schema.table)", name)}, true
-	case "timezone", "time":
-		// SET TimeZone / SET TIME ZONE: this port answers in UTC, and says
-		// so at start-up. Setting UTC changes nothing; another zone would
-		// change what a timestamp reads as.
-		zone := words[len(words)-1]
-		if zone != "utc" && zone != "etc/utc" && zone != "gmt" && zone != "0" && zone != "z" {
-			return "", &pgErr{"0A000", "SET TimeZone is not supported on this port: it answers in UTC; convert in the statement (AT TIME ZONE)"}, true
-		}
-	}
-	return "SET", nil, true
 }

@@ -238,9 +238,9 @@ func logNegotiateFailure(logger *slog.Logger, err error, remote net.Addr) {
 }
 
 // receiveStartup reads the client's start-up message, after negotiate. A
-// cancel request returns (nil, nil): the port keeps no list of running
-// statements, so there is nothing to cancel, and the caller closes.
-func receiveStartup(be *pgproto3.Backend) (*pgproto3.StartupMessage, error) {
+// cancel request is answered here (handleCancel: the statement it names
+// stops, and nothing is said) and returns (nil, nil): the caller closes.
+func receiveStartup(be *pgproto3.Backend, cancels *cancelRegistry, logger *slog.Logger) (*pgproto3.StartupMessage, error) {
 	msg, err := be.ReceiveStartupMessage()
 	if err != nil {
 		return nil, err
@@ -249,6 +249,7 @@ func receiveStartup(be *pgproto3.Backend) (*pgproto3.StartupMessage, error) {
 	case *pgproto3.StartupMessage:
 		return m, nil
 	case *pgproto3.CancelRequest:
+		handleCancel(cancels, m.ProcessID, m.SecretKey, logger)
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("unexpected startup message %T", m)

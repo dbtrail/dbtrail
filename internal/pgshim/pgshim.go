@@ -119,6 +119,8 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 		logger = slog.Default()
 	}
 	pt := newPortTLS(cfg.TLS)
+	// The connections a cancel request can name, this port's only.
+	cancels := newCancelRegistry()
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -155,7 +157,7 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 			default:
 				logger.Warn("pgshim connection refused: the connection limit is reached",
 					"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
-				refuseFull(conn, cfg.MaxConns, refusals, pt)
+				refuseFull(conn, cfg.MaxConns, refusals, pt, cancels, logger)
 				continue
 			}
 		}
@@ -165,7 +167,7 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 			if sem != nil {
 				defer func() { <-sem }()
 			}
-			handleConn(ctx, c, cfg, pt, logger)
+			handleConn(ctx, c, cfg, pt, cancels, logger)
 		}(conn)
 	}
 }
@@ -177,8 +179,9 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 // the accept loop does not wait on a client that sends nothing. When too many
 // refusals are already being said the connection is closed without one. A
 // client that asks for TLS gets it first, so one that requires it reads the
-// refusal instead of a failed negotiation.
-func refuseFull(c net.Conn, max int, refusals chan struct{}, pt *portTLS) {
+// refusal instead of a failed negotiation. A cancel request is answered
+// even then: a full port is when a client most needs to stop a statement.
+func refuseFull(c net.Conn, max int, refusals chan struct{}, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
 	select {
 	case refusals <- struct{}{}:
 	default:
@@ -200,7 +203,7 @@ func refuseFull(c net.Conn, max int, refusals chan struct{}, pt *portTLS) {
 		}
 		defer conn.Close()
 		be := pgproto3.NewBackend(conn, conn)
-		if startup, err := receiveStartup(be); err != nil || startup == nil {
+		if startup, err := receiveStartup(be, cancels, logger); err != nil || startup == nil {
 			return
 		}
 		sendFatal(be, "53300", fmt.Sprintf("the port's limit of %d connections at once is reached; try again in a moment", max))
@@ -221,9 +224,9 @@ func nextBackoff(cur time.Duration) time.Duration {
 
 // handleConn runs one connection: startup negotiation (TLS when the port has
 // it), the SCRAM login, then the command loop over its own shim.Handler.
-func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger *slog.Logger) {
+func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, cancels *cancelRegistry, logger *slog.Logger) {
 	if cfg.Login != nil {
-		handleLoginConn(ctx, c, cfg, pt, logger)
+		handleLoginConn(ctx, c, cfg, pt, cancels, logger)
 		return
 	}
 	defer c.Close()
@@ -258,7 +261,7 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger
 	defer conn.Close()
 	be := pgproto3.NewBackend(conn, conn)
 
-	startup, err := receiveStartup(be)
+	startup, err := receiveStartup(be, cancels, logger)
 	if err != nil {
 		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
 		return
@@ -280,12 +283,6 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger
 		logger.Info("pgshim login took too long", "user", user, "remote", c.RemoteAddr())
 		return
 	}
-	sendSASLFinal(be, password)
-	sendAuthOK(be)
-	if err := be.Flush(); err != nil {
-		return
-	}
-
 	h := shim.NewHandlerWithConfig(cfg.IndexDB, cfg.ShimConfig, logger)
 	h.BindConnContext(connCtx)
 	// This front-end authenticates a real per-tenant credential (shim.yaml),
@@ -310,8 +307,22 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger
 	// now returns one whenever the allowlist excludes the connect database.
 	_ = h.UseDB(database)
 
-	sess := &session{be: be, h: h, currentDB: database, logger: logger, budget: cfg.ResultBudget}
-
+	sess := &session{be: be, h: h, ctx: connCtx, currentDB: database, logger: logger, budget: cfg.ResultBudget}
+	sess.initSettings(database, user)
+	target, release := cancels.register()
+	defer release()
+	sess.cancelTarget = target
+	sendSASLFinal(be, password)
+	be.Send(&pgproto3.AuthenticationOk{})
+	if perr := sess.applyStartup(startup.Parameters); perr != nil {
+		logger.Info("pgshim: a start-up parameter was refused", "user", user, "code", perr.code, "reason", perr.msg, "remote", c.RemoteAddr())
+		sendFatal(be, perr.code, perr.msg)
+		return
+	}
+	sess.welcome()
+	if err := be.Flush(); err != nil {
+		return
+	}
 	commandLoop(be, sess)
 }
 
@@ -418,38 +429,12 @@ func sendSASLFinal(be *pgproto3.Backend, password *Password) {
 	be.Send(&pgproto3.AuthenticationSASLFinal{Data: password.serverFinal()})
 }
 
-// sendAuthOK finishes the handshake: AuthenticationOk, the ParameterStatus set a
-// PostgreSQL client reads at startup, then ReadyForQuery(idle). BackendKeyData is
-// intentionally omitted — it only backs query cancellation, which we do not
-// implement.
-func sendAuthOK(be *pgproto3.Backend) {
-	// From here on a message is a statement: a larger ceiling, still one.
-	be.SetMaxBodyLen(maxStatementMessage)
-	be.Send(&pgproto3.AuthenticationOk{})
-	for _, ps := range startupParameters {
-		be.Send(&pgproto3.ParameterStatus{Name: ps[0], Value: ps[1]})
-	}
-	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-}
-
 // The most bytes one client message may announce: a password before the
 // login, a statement after it. A longer one ends the connection.
 const (
 	maxPasswordMessage  = 64 << 10
 	maxStatementMessage = 16 << 20
 )
-
-// startupParameters are the ParameterStatus values psql/libpq expect after
-// AuthenticationOk. server_version carries a leading numeric psql parses.
-var startupParameters = [][2]string{
-	{"server_version", "14.0 (bintrail time-travel)"},
-	{"server_encoding", "UTF8"},
-	{"client_encoding", "UTF8"},
-	{"DateStyle", "ISO, MDY"},
-	{"standard_conforming_strings", "on"},
-	{"integer_datetimes", "on"},
-	{"TimeZone", "UTC"},
-}
 
 func sendFatal(be *pgproto3.Backend, code, msg string) {
 	be.Send(&pgproto3.ErrorResponse{Severity: "FATAL", SeverityUnlocalized: "FATAL", Code: code, Message: msg})
