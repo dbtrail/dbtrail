@@ -639,7 +639,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			// be answered: the reason is about the server, and a client that
 			// could not connect at all would not be shown it.
 			why := tgt.SQLUnavailable
-			bound.Run = func(context.Context, string) (sqlsandbox.Result, error) {
+			bound.Run = func(context.Context, string, pgshim.RunOptions) (sqlsandbox.Result, error) {
 				return sqlsandbox.Result{}, &pgshim.Error{Code: "55000", Message: "SQL on the copy is not available for this server: " + why}
 			}
 			return bound, nil
@@ -648,14 +648,20 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		// A PostgreSQL source's copy answers by PostgreSQL's rules, with its
 		// names resolved where PostgreSQL resolves them, and a column the
 		// statement did not name headed as PostgreSQL heads it (#2803).
-		sess, schema := sqlsandbox.Session{PostgresRules: true, PostgresNames: true}, pgPortSchema
 		bound.Answered = copySQL.NoteAnswered
-		bound.Run = func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
+		bound.Run = func(ctx context.Context, statement string, opts pgshim.RunOptions) (sqlsandbox.Result, error) {
 			if timeout > 0 {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, timeout)
 				defer cancel()
 			}
+			// The schema and time zone the client set (SET search_path, SET
+			// TimeZone), the port's own schema until it sets one (#2769).
+			schema := opts.Schema
+			if schema == "" {
+				schema = pgPortSchema
+			}
+			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
 			return copySQL.Run(ctx, statement, schema, sess)
 		}
 		return bound, nil

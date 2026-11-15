@@ -21,6 +21,15 @@ import (
 // the whole list of renderings the comparison allows for; a kind not listed
 // here is compared as the copy wrote it.
 func Cell(typ string, v any) *string {
+	return CellIn(typ, v, nil)
+}
+
+// CellIn is Cell for a client whose session time zone is loc (nil for UTC):
+// a timestamp with time zone is written as the wall clock of that zone with
+// the zone's offset at that instant, as PostgreSQL writes one under SET
+// TimeZone (2026-01-01 15:30:00+05:30). Every other kind is written as Cell
+// writes it: a timestamp without time zone is a wall clock already.
+func CellIn(typ string, v any, loc *time.Location) *string {
 	var s string
 	switch x := v.(type) {
 	case nil:
@@ -44,16 +53,19 @@ func Cell(typ string, v any) *string {
 			s = pgInterval(x)
 		}
 		if strings.HasPrefix(typ, "TIMESTAMP") {
+			// Text that is not an instant (infinity, -infinity) is written as
+			// it came.
 			if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
-				s = pgTimestamp(t)
 				if strings.Contains(typ, "TIME ZONE") || typ == "TIMESTAMPTZ" {
-					s += "+00"
+					s = pgTimestampIn(t, loc)
+				} else {
+					s = pgTimestamp(t)
 				}
 			}
 		}
 	case []any:
 		if elem, ok := strings.CutSuffix(typ, "[]"); ok {
-			s = pgArray(elem, x)
+			s = pgArray(elem, x, loc)
 			break
 		}
 		s = jsonText(x)
@@ -77,14 +89,14 @@ func jsonText(v any) string {
 // quotes, with a backslash before a quote or a backslash, when the element
 // is empty, spells NULL in any case, or holds a brace, a comma, a quote, a
 // backslash or a blank.
-func pgArray(elem string, list []any) string {
+func pgArray(elem string, list []any, loc *time.Location) string {
 	var b strings.Builder
 	b.WriteByte('{')
 	for i, v := range list {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		cell := Cell(elem, v)
+		cell := CellIn(elem, v, loc)
 		if cell == nil {
 			b.WriteString("NULL")
 			continue
@@ -158,6 +170,35 @@ func pgTimestamp(t time.Time) string {
 	s := t.Format("2006-01-02 15:04:05")
 	if us := t.Nanosecond() / 1000; us != 0 {
 		s += strings.TrimRight(fmt.Sprintf(".%06d", us), "0")
+	}
+	return s
+}
+
+// pgTimestampIn is PostgreSQL's ISO text for an instant with time zone, as
+// the wall clock of loc (nil for UTC) followed by loc's offset at that
+// instant: the hours always, the minutes when they are not zero, the seconds
+// when they are not (+00, -05, +05:30, +00:19:32 for Amsterdam's mean time
+// before 1937).
+func pgTimestampIn(t time.Time, loc *time.Location) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	t = t.In(loc)
+	_, off := t.Zone()
+	s := t.Format("2006-01-02 15:04:05")
+	if us := t.Nanosecond() / 1000; us != 0 {
+		s += strings.TrimRight(fmt.Sprintf(".%06d", us), "0")
+	}
+	sign := byte('+')
+	if off < 0 {
+		sign, off = '-', -off
+	}
+	s += fmt.Sprintf("%c%02d", sign, off/3600)
+	if mins, secs := off%3600/60, off%60; mins != 0 || secs != 0 {
+		s += fmt.Sprintf(":%02d", mins)
+		if secs != 0 {
+			s += fmt.Sprintf(":%02d", secs)
+		}
 	}
 	return s
 }

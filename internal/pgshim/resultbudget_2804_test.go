@@ -388,9 +388,9 @@ const (
 // bigOrSmall answers a statement that names "big" with 24 MiB in 24 rows,
 // far more than the sockets between a client and the port take in, and any
 // other with one row of one byte. ran counts the statements it was given.
-func bigOrSmall(ran *atomic.Int64) func(context.Context, string) (sqlsandbox.Result, error) {
+func bigOrSmall(ran *atomic.Int64) func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 	cell := strings.Repeat("x", bigCell)
-	return func(_ context.Context, statement string) (sqlsandbox.Result, error) {
+	return func(_ context.Context, statement string, _ RunOptions) (sqlsandbox.Result, error) {
 		ran.Add(1)
 		if !strings.Contains(statement, "big") {
 			return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}}}, nil
@@ -560,7 +560,7 @@ func TestPort_aFailedStatementHoldsNothing(t *testing.T) {
 		defer mu.Unlock()
 		next, nextErr = res, err
 	}
-	p := &portLogin{run: func(context.Context, string) (sqlsandbox.Result, error) {
+	p := &portLogin{run: func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		return next, nextErr
@@ -616,7 +616,7 @@ func TestPort_aFailedStatementHoldsNothing(t *testing.T) {
 // no notice and no audit record, and the count is left as it was.
 func TestPort_aResultReadyOnAFullPortIsRefusedWhole(t *testing.T) {
 	b := NewResultBudget(100)
-	p := &portLogin{run: func(context.Context, string) (sqlsandbox.Result, error) {
+	p := &portLogin{run: func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 		// Another connection's results fill the port meanwhile.
 		b.held.Store(100)
 		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "INTEGER"}}, Rows: [][]any{{json.Number("1")}, {json.Number("2")}},
@@ -657,7 +657,7 @@ func TestPort_timeTravelAsksTheBudget(t *testing.T) {
 			return nil, &Error{Code: "28P01", Message: "no"}
 		}
 		return &Binding{
-			Run: func(context.Context, string) (sqlsandbox.Result, error) {
+			Run: func(context.Context, string, RunOptions) (sqlsandbox.Result, error) {
 				return sqlsandbox.Result{}, errors.New("time travel reached the copy")
 			},
 			Actor:  "server:orders",
