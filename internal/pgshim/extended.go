@@ -55,6 +55,10 @@ type preparedStatement struct {
 	// describedNames are the columns a Describe of the statement named,
 	// which a time-travel execution is put into (runPortal).
 	describedNames []string
+	// describedTypes are the types a Describe of a statement for the copy
+	// announced its columns with (nil for time travel, whose columns are
+	// text): the client decodes every execution's cells by them.
+	describedTypes []colType
 	// described is the column count a Describe of the statement told the
 	// client (-1 for none, and for no rows: noRows), which every portal
 	// bound from it must keep: the client decodes the rows by that answer.
@@ -71,7 +75,10 @@ type portal struct {
 	ran   bool
 	empty bool
 	cols  []string // nil: the statement returns no rows
+	types []colType
 	rows  [][][]byte
+	// encoded is set once rows are in the formats the Bind asked for.
+	encoded bool
 	tag   string
 	// sent is how many of rows earlier Executes handed over.
 	sent int
@@ -307,7 +314,7 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.extFail(&pgErr{"26000", fmt.Sprintf("prepared statement %q does not exist", m.Name)})
 			return
 		}
-		cols, held, perr := s.describeStatement(st)
+		cols, types, held, perr := s.describeStatement(st)
 		if perr != nil {
 			// What fails here PostgreSQL reports at Parse, where the
 			// statement then never exists. It goes, so that a client that
@@ -318,7 +325,7 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			return
 		}
 		s.be.Send(&pgproto3.ParameterDescription{ParameterOIDs: st.paramOIDs})
-		st.described = -1
+		st.described, st.describedTypes = -1, nil
 		if cols == nil {
 			if held {
 				st.described = noRows
@@ -326,8 +333,8 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.be.Send(&pgproto3.NoData{})
 			return
 		}
-		st.described, st.describedNames = len(cols), cols
-		s.rowDescription(cols, nil)
+		st.described, st.describedNames, st.describedTypes = len(cols), cols, types
+		s.rowDescription(cols, types, nil)
 	case 'P':
 		p, ok := s.ext.portals[m.Name]
 		if !ok {
@@ -354,7 +361,11 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.extFail(perr)
 			return
 		}
-		s.rowDescription(p.cols, p.resultFormats)
+		if perr := encodePortal(p); perr != nil {
+			s.extFail(perr)
+			return
+		}
+		s.rowDescription(p.cols, p.types, p.resultFormats)
 	default:
 		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid DESCRIBE message subtype %d", m.ObjectType)})
 	}
@@ -365,36 +376,37 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 // gate the statement would. held is false when the answer is not one the
 // statement's executions are held to (a statement the copy could not
 // describe, see describeFree).
-func (s *session) describeStatement(st *preparedStatement) (cols []string, held bool, perr *pgErr) {
+func (s *session) describeStatement(st *preparedStatement) (cols []string, types []colType, held bool, perr *pgErr) {
 	if perr := s.abortedRefusal(st.query); perr != nil {
-		return nil, false, perr
+		return nil, nil, false, perr
 	}
 	if isEmptyQuery(st.query) {
-		return nil, true, nil
+		return nil, nil, true, nil
 	}
 	c := s.classify(st.probeText())
 	switch c.kind {
 	case kindRefused:
-		return nil, false, c.perr
+		return nil, nil, false, c.perr
 	case kindProbe:
 		// A session statement returns no rows; one that is refused is
 		// refused when it executes, with its own arguments.
-		return nil, true, nil
+		return nil, nil, true, nil
 	case kindTimeTravel:
 		// The gates first: the table's columns are something said about it.
 		if perr := s.timeTravelGates(c.q, false); perr != nil {
-			return nil, false, perr
+			return nil, nil, false, perr
 		}
 		cols := s.h.ColumnsFor(nil, c.q)
 		if len(cols) == 0 {
 			// No schema snapshot names the table's columns: there is
 			// nothing true to describe, and an answer of no columns would
 			// hold every execution to it.
-			return nil, false, &pgErr{"55000", fmt.Sprintf(
+			return nil, nil, false, &pgErr{"55000", fmt.Sprintf(
 				"the columns of %s.%s cannot be described: no schema snapshot of the table is recorded; run the statement with the simple query protocol",
 				c.q.Schema, c.q.Table)}
 		}
-		return cols, true, nil
+		// Text, as the simple protocol announces them.
+		return cols, nil, true, nil
 	}
 	return s.describeFree(st)
 }
@@ -412,40 +424,97 @@ func (s *session) describeStatement(st *preparedStatement) (cols []string, held 
 // answers the error a simple query gets, with its code, where the subquery's
 // error would name another statement than the client's. described returns
 // false then.
-func (s *session) describeFree(st *preparedStatement) (cols []string, described bool, perr *pgErr) {
-	nulls := make([]arg, len(st.paramOIDs))
-	for i, oid := range st.paramOIDs {
-		nulls[i] = arg{null: true, cast: typedCast[oid]}
-	}
-	text, perr := st.tmpl.fill(nulls, readCopy)
+func (s *session) describeFree(st *preparedStatement) (cols []string, types []colType, described bool, perr *pgErr) {
+	got, perr, err := s.describeWith(st, "")
 	if perr != nil {
-		return nil, false, perr
+		return nil, nil, false, perr
 	}
-	body := strings.TrimRight(text, " \t\r\n;")
-	// On lines of their own: a statement that ends in a -- comment must not
-	// comment out the closing parenthesis.
-	wrapped := "SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0"
-	cols, err := s.columnsOf(wrapped)
 	if err == nil {
-		return cols, true, nil
+		types = columnTypes(sandboxTypes(got))
+		s.untypedArgumentsAsText(st, types)
+		return columnNames(got), types, true, nil
 	}
 	perr = freeError(err, s.logger)
 	if strings.HasPrefix(perr.code, "42") || perr.code == "0A000" {
 		// The statement's own shape or text: it cannot stand in the
 		// subquery, and its Execute answers the error a simple query gets.
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	// Anything else (the copy busy, behind, timed out, a worker that
 	// failed) is the moment's, not the statement's: the Describe fails with
 	// it, so the client does not keep "no rows" for a statement that has
 	// them, and tries again.
 	s.logger.Warn("pgshim: a statement could not be described", "code", perr.code, "err", err)
-	return nil, false, perr
+	return nil, nil, false, perr
+}
+
+// describeWith asks the copy for the columns of st with NULL for every
+// argument, in a subquery that returns no row. untyped is the type a NULL
+// stands as for an argument whose type the client did not declare: "" for
+// none (the engine's own, an INTEGER in the answer). perr is a statement
+// whose arguments cannot be written in, err what the copy answered.
+func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sqlsandbox.Column, perr *pgErr, err error) {
+	nulls := make([]arg, len(st.paramOIDs))
+	for i, oid := range st.paramOIDs {
+		cast := typedCast[oid]
+		if cast == "" {
+			cast = untyped
+		}
+		nulls[i] = arg{null: true, cast: cast}
+	}
+	text, perr := st.tmpl.fill(nulls, readCopy)
+	if perr != nil {
+		return nil, perr, nil
+	}
+	body := strings.TrimRight(text, " \t\r\n;")
+	// On lines of their own: a statement that ends in a -- comment must not
+	// comment out the closing parenthesis.
+	cols, err = s.columnsOf("SELECT * FROM (\n" + body + "\n) AS dbtrail_describe LIMIT 0")
+	return cols, nil, err
+}
+
+// untypedArgumentsAsText announces as text each column whose type comes from
+// an argument the client gave no type. Such an argument is described as a
+// bare NULL, which the engine answers as an INTEGER, and runs as the string
+// literal the client sent, which it answers as text: SELECT $1 would be
+// announced as an integer and answer "hello". PostgreSQL reads an argument
+// of unknown type there as text, and so does this port: the statement is
+// described a second time with each such argument a NULL of text, and a
+// column whose type changes with it is text. Only asked when it can matter:
+// an argument without a type, and a column the first answer typed INTEGER.
+// When the second description fails (the text NULL meets a comparison with a
+// number) the first answer stands; an execution whose cells do not read as
+// it is refused then (conformToDescribed).
+func (s *session) untypedArgumentsAsText(st *preparedStatement, types []colType) {
+	untyped := false
+	for _, oid := range st.paramOIDs {
+		if typedCast[oid] == "" {
+			untyped = true
+		}
+	}
+	integer := false
+	for _, t := range types {
+		if t.oid == oidInt4 {
+			integer = true
+		}
+	}
+	if !untyped || !integer {
+		return
+	}
+	again, perr, err := s.describeWith(st, "VARCHAR")
+	if perr != nil || err != nil || len(again) != len(types) {
+		return
+	}
+	for i, c := range again {
+		if columnType(c.Type) != types[i] {
+			types[i] = textColumn
+		}
+	}
 }
 
 // columnsOf runs text on the copy, counted and recorded as every statement
-// the port runs is (runFree), and returns its column names.
-func (s *session) columnsOf(text string) ([]string, error) {
+// the port runs is (runFree), and returns its columns.
+func (s *session) columnsOf(text string) ([]sqlsandbox.Column, error) {
 	started := time.Now()
 	res, err := s.bound.Run(s.ctx, text)
 	if s.bound.Answered != nil && s.ctx.Err() == nil {
@@ -458,7 +527,15 @@ func (s *session) columnsOf(text string) ([]string, error) {
 		return nil, err
 	}
 	s.recordFree(text, res)
-	return columnNames(res.Columns), nil
+	return res.Columns, nil
+}
+
+func sandboxTypes(cols []sqlsandbox.Column) []string {
+	types := make([]string, len(cols))
+	for i, c := range cols {
+		types[i] = c.Type
+	}
+	return types
 }
 
 func columnNames(cols []sqlsandbox.Column) []string {
@@ -480,7 +557,7 @@ func (s *session) runPortal(p *portal) *pgErr {
 		p.empty = true
 		return nil
 	}
-	cols, rows, tag, perr := s.run(p.text)
+	cols, types, rows, tag, perr := s.run(p.text)
 	// What the statement counted in the port's budget is the portal's from
 	// here: the connection's next statement must not give it back while the
 	// portal still keeps these rows (an Execute with a row limit).
@@ -507,6 +584,12 @@ func (s *session) runPortal(p *portal) *pgErr {
 			return &pgErr{"0A000", "cached plan must not change result type"}
 		}
 	}
+	if cols != nil && p.stmt.describedTypes != nil {
+		if types, perr = conformToDescribed(p.stmt.describedTypes, types, rows); perr != nil {
+			giveBack()
+			return perr
+		}
+	}
 	bytes := 0
 	for _, r := range rows {
 		for _, c := range r {
@@ -517,7 +600,73 @@ func (s *session) runPortal(p *portal) *pgErr {
 		giveBack()
 		return &pgErr{"54000", fmt.Sprintf("this connection's open portals would hold more than %d MB of answers, the most it keeps; fetch or close the open ones", maxPortalBytes>>20)}
 	}
-	p.cols, p.rows, p.tag, p.bytes, p.held = cols, rows, tag, bytes, held
+	p.cols, p.types, p.rows, p.tag, p.bytes, p.held = cols, types, rows, tag, bytes, held
+	return nil
+}
+
+// conformToDescribed holds an execution's columns to the types its
+// statement's Describe announced, which is how the client decodes them (pgx
+// decodes by the statement's description and never asks for the portal's).
+// The copy can answer an execution with another type than its description:
+// an argument the description stood in for with a NULL can change an
+// expression's type (SELECT $1 + 1 with $1 a bigint). A cell of another type
+// is kept when its text reads as the announced type, the way PostgreSQL
+// reads a value as the type of its column; when one does not, the execution
+// is refused with PostgreSQL's words, and no cell is sent that the client
+// would read as another value.
+func conformToDescribed(described, types []colType, rows [][][]byte) ([]colType, *pgErr) {
+	out := make([]colType, len(described))
+	for i, want := range described {
+		out[i] = want
+		if typeAt(types, i) == want || want.oid == oidText {
+			continue
+		}
+		for _, r := range rows {
+			if i >= len(r) || r[i] == nil {
+				continue
+			}
+			if _, err := binaryCell(want, r[i]); err != nil {
+				return nil, &pgErr{"0A000", "cached plan must not change result type"}
+			}
+		}
+	}
+	return out, nil
+}
+
+// encodePortal puts p's rows in the result formats its Bind asked for, once:
+// a column asked for in binary gets each cell's binary form (binaryCell). A
+// cell that has none is refused, before any row is sent, rather than sent in
+// a format the client did not ask for: a client decodes by the format it
+// asked, not by the one it is told.
+func encodePortal(p *portal) *pgErr {
+	if p.encoded || p.cols == nil {
+		return nil
+	}
+	p.encoded = true
+	n := len(p.cols)
+	binaryAt := make([]bool, n)
+	some := false
+	for i := range n {
+		if formatAt(p.resultFormats, n, i) == pgproto3.BinaryFormat && typeAt(p.types, i).oid != oidText {
+			binaryAt[i], some = true, true
+		}
+	}
+	if !some {
+		return nil
+	}
+	for _, r := range p.rows {
+		for i, c := range r {
+			if i >= n || !binaryAt[i] || c == nil {
+				continue
+			}
+			b, err := binaryCell(typeAt(p.types, i), c)
+			if err != nil {
+				return &pgErr{"0A000", fmt.Sprintf(
+					"column %q cannot be sent in binary format: %v; ask for it in text format", p.cols[i], err)}
+			}
+			r[i] = b
+		}
+	}
 	return nil
 }
 
@@ -601,8 +750,10 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		s.extFail(perr)
 		return
 	}
-	// Every column is sent as text (OID 25), whose binary form is the same
-	// bytes, so a cell goes out as it is whichever format was asked for.
+	if perr := encodePortal(p); perr != nil {
+		s.extFail(perr)
+		return
+	}
 	left := len(p.rows) - p.sent
 	n := left
 	if m.MaxRows > 0 && uint64(m.MaxRows) < uint64(left) {

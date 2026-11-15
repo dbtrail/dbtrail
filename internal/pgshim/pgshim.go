@@ -56,11 +56,10 @@ import (
 	"github.com/dbtrail/dbtrail/internal/shim"
 )
 
-// pgtypeText is the PostgreSQL type OID for `text`. The first cut renders every
-// column as text (the issue's conservative choice): a numeric value goes on the
-// wire as its literal string, bytea/blob bytes verbatim, timestamps formatted.
-// A client reads each column as a string (or text-parses it into a typed target,
-// which pgx does). Refining per-column OIDs is a follow-up.
+// pgtypeText is the PostgreSQL type OID for `text`, what a time-travel
+// column is announced as: a numeric value goes on the wire as its literal
+// string, bytea/blob bytes verbatim, timestamps formatted. The columns of SQL
+// on the copy carry their own types (coltypes.go).
 const pgtypeText = uint32(25)
 
 // fullTableRefusalMsg is returned for a full-table AS OF (no PK-qualified
