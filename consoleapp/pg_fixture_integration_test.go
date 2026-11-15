@@ -106,11 +106,15 @@ func pgTestStart(t *testing.T, ctx context.Context, mon *monitorSupervisor, boot
 		t.Fatalf("start capture: %v", err)
 	}
 	t.Cleanup(func() { _ = mon.Stop(context.Background(), e.ID) })
+	// Streaming, not being created: a slot is active while PostgreSQL is
+	// still finding its consistent point, and has no position until it has.
+	// A snapshot taken in that window has its floor before the slot's start,
+	// which is a gap, and the update after it says so.
 	pgTestWait(t, "capture attached to its slot", 60*time.Second, func() (bool, string) {
-		_, rows, err := pgText(t, source, "SELECT active::text FROM pg_replication_slots WHERE slot_name = '"+e.SourceSlot+"'")
+		_, rows, err := pgText(t, source, "SELECT active::text, (confirmed_flush_lsn IS NOT NULL)::text FROM pg_replication_slots WHERE slot_name = '"+e.SourceSlot+"'")
 		if err != nil || len(rows) != 1 {
 			return false, "no slot yet"
 		}
-		return rows[0][0] == "true", "active=" + rows[0][0]
+		return rows[0][0] == "true" && rows[0][1] == "true", "active=" + rows[0][0] + " has_position=" + rows[0][1]
 	})
 }
