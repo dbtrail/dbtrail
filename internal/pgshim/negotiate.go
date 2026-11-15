@@ -2,8 +2,6 @@ package pgshim
 
 import (
 	"context"
-	"log/slog"
-	"sync/atomic"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/tls"
@@ -13,7 +11,9 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
