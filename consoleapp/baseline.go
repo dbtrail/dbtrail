@@ -455,14 +455,15 @@ func (s *baselineSupervisor) run(req console.BaselineRequest) {
 	produce := s.produce
 	if produce == nil {
 		produce = s.execute
-		if req.Flavor == console.FlavorPostgres {
-			// The PostgreSQL read only produces its snapshot, like execute;
-			// the index mark, the publish, the upload of that one snapshot
-			// and the record are shared with MySQL (#2761). It used to
-			// upload by itself, handing the uploader the whole folder, and
-			// recorded no index mark.
-			produce = s.executePG
-		}
+	}
+	if req.Flavor == console.FlavorPostgres {
+		// The PostgreSQL read only produces its snapshot, like execute; the
+		// index mark, the publish, the upload of that one snapshot and the
+		// record are shared with MySQL (#2761). It used to upload by itself,
+		// handing the uploader the whole folder, and recorded no index mark.
+		// Chosen over s.produce, which is the MySQL producer (or a test's
+		// stand-in for it) and has never run for a PostgreSQL server.
+		produce = s.executePG
 	}
 	// Read BEFORE the dump: its anchor is stamped inside produce, and an
 	// event indexed between a later read and that anchor would be applied
