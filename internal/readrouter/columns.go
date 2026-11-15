@@ -93,7 +93,7 @@ func ColumnVeto(shape string, dates, whole []string, star bool) string {
 var (
 	// subquery is the opening of a subquery, of a derived table written
 	// TABLE t or VALUES, or of a WITH.
-	subquery = regexp.MustCompile(`(?i)\(\s*(?:select|table|values)\b|\bwith\b`)
+	subquery = regexp.MustCompile(`(?i)\([\s\v]*(?:select|table|values)\b|\bwith\b`)
 	// starItem is a star that stands for columns (SELECT *, SELECT*, t.*, a
 	// list's next item) and not count(*) or a product, or the TABLE t that
 	// stands for one. A column called table can only be written quoted, and
@@ -104,7 +104,7 @@ var (
 	avgCall = regexp.MustCompile(`(?i)\b(?:avg|median)\s*\(`)
 	// aliasClause opens a clause where MySQL lets a select-list alias stand
 	// for its expression.
-	aliasClause = regexp.MustCompile(`(?i)\b(?:having|group\s+by|order\s+by)\b`)
+	aliasClause = regexp.MustCompile(`(?i)\b(?:having|group[\s\v]+by|order[\s\v]+by)\b`)
 )
 
 // numericOfDate are the functions whose call is a number on both sides
