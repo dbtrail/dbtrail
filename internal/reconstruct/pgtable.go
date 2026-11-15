@@ -139,8 +139,8 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		DB: db, Engine: p.engine, DBName: p.dbName, Resolver: p.resolver,
 		Schema: schema, Table: table, PKCols: pkCols,
 		Opts: fetchOpts, AllowGaps: cfg.AllowGaps, ArchiveFetcher: fetcher,
-		SpillOverBudget: true,
-		PG:              true,
+		SpillOverBudget:        true,
+		PG:                     true,
 		NeverPartitionedBefore: pgNeverPartitionedBefore(ctx, db, p.dbName, schema, table, floor),
 	})
 	fold := &foldResult{Changes: map[string]*query.ResultRow{}}

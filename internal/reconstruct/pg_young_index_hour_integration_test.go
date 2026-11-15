@@ -25,7 +25,9 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 		// index's first hour.
 		snap, at time.Duration
 		spoil    string // a statement run on the index before the fold
-		dropHour bool   // the first partition is dropped by hand, unrecorded
+		// drop is the partition dropped by hand, unrecorded: 1 the first
+		// hour's, 2 the one after it.
+		drop int
 		want     map[string]string
 	}{
 		{name: "capture started before the floor", from: 0x400, snap: -30 * time.Second, at: 10 * time.Minute,
@@ -38,9 +40,8 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 			want: map[string]string{"1": "after-the-snapshot", "3": "newbie", "5": "keep"}},
 		{name: "the point is before the first hour too", from: 0x400, snap: -30 * time.Second, at: -10 * time.Second,
 			want: map[string]string{"1": "after-the-snapshot", "5": "keep"}},
-		// An hour from the first one on is judged as it always was: the two
-		// hours after the first hold no change of this window.
-		{name: "an hour after the first is still judged", from: 0x400, snap: -30 * time.Second, at: 2*time.Hour + 10*time.Minute},
+		// An hour from the first one on is judged as it always was.
+		{name: "an hour after the first is still judged", from: 0x400, snap: -30 * time.Second, at: 2*time.Hour + 10*time.Minute, drop: 2},
 		{name: "capture started after the floor", from: 0x501, snap: -30 * time.Second, at: 10 * time.Minute},
 		{name: "no recorded start", snap: -30 * time.Second, at: 10 * time.Minute},
 		{name: "history unknown", from: 0x400, snap: -30 * time.Second, at: 10 * time.Minute,
@@ -49,7 +50,7 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 			spoil: fmt.Sprintf("UPDATE partition_history SET dropped_below_unix = %d WHERE id = 1", time.Now().Add(-day).Unix())},
 		// The changes went with the partition; the point's own hour has
 		// none, so only the first hour's absence can say so.
-		{name: "the first partition is gone", from: 0x400, snap: -30 * time.Second, at: -10 * time.Second, dropHour: true},
+		{name: "the first partition is gone", from: 0x400, snap: -30 * time.Second, at: -10 * time.Second, drop: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,8 +66,8 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 			if tc.spoil != "" {
 				testutil.MustExec(t, f.db, tc.spoil)
 			}
-			if tc.dropHour {
-				testutil.MustExec(t, f.db, "ALTER TABLE binlog_events DROP PARTITION p_"+f.base.Format("2006010215"))
+			if tc.drop > 0 {
+				testutil.MustExec(t, f.db, "ALTER TABLE binlog_events DROP PARTITION p_"+f.at(time.Duration(tc.drop-1)*time.Hour).Format("2006010215"))
 			}
 			root := t.TempDir()
 			f.baseline(root, f.at(tc.snap), 0x500, "", [2]string{"1", "paid"}, [2]string{"5", "keep"})
