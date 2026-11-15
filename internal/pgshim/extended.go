@@ -77,8 +77,6 @@ type portal struct {
 	cols  []string // nil: the statement returns no rows
 	types []colType
 	rows  [][][]byte
-	// encoded is set once rows are in the formats the Bind asked for.
-	encoded bool
 	tag   string
 	// sent is how many of rows earlier Executes handed over.
 	sent int
@@ -361,10 +359,6 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.extFail(perr)
 			return
 		}
-		if perr := encodePortal(p); perr != nil {
-			s.extFail(perr)
-			return
-		}
 		s.rowDescription(p.cols, p.types, p.resultFormats)
 	default:
 		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid DESCRIBE message subtype %d", m.ObjectType)})
@@ -590,6 +584,33 @@ func (s *session) runPortal(p *portal) *pgErr {
 			return perr
 		}
 	}
+	// In the formats the Bind asked for before anything is counted below: a
+	// cell's binary form can take more bytes than its text (a numeric 1 is
+	// one byte of text and ten of binary), and what the portal keeps is what
+	// it will send.
+	if perr := encodeResult(cols, types, p.resultFormats, rows); perr != nil {
+		giveBack()
+		return perr
+	}
+	// The statement was counted in the port's budget by its text; what the
+	// binary form adds is counted now, by the same rule: refused when the
+	// port already holds its budget.
+	if b := s.budget; b != nil && held != 0 {
+		if grown := resultBytes(rows) - held; grown > 0 {
+			for {
+				cur := b.held.Load()
+				if cur >= b.max {
+					giveBack()
+					return b.refuse(s.logger)
+				}
+				if b.held.CompareAndSwap(cur, cur+grown) {
+					break
+				}
+			}
+			b.charged.Add(grown)
+			held += grown
+		}
+	}
 	bytes := 0
 	for _, r := range rows {
 		for _, c := range r {
@@ -633,36 +654,36 @@ func conformToDescribed(described, types []colType, rows [][][]byte) ([]colType,
 	return out, nil
 }
 
-// encodePortal puts p's rows in the result formats its Bind asked for, once:
-// a column asked for in binary gets each cell's binary form (binaryCell). A
-// cell that has none is refused, before any row is sent, rather than sent in
-// a format the client did not ask for: a client decodes by the format it
-// asked, not by the one it is told.
-func encodePortal(p *portal) *pgErr {
-	if p.encoded || p.cols == nil {
+// encodeResult puts rows in the result formats a Bind asked for: a column
+// asked for in binary gets each cell's binary form (binaryCell). A cell that
+// has none is refused, before any row is sent, rather than sent in a format
+// the client did not ask for: a client decodes by the format it asked, not
+// by the one it is told. Formats that do not fit the columns are left for
+// checkResultFormats to refuse.
+func encodeResult(cols []string, types []colType, formats []int16, rows [][][]byte) *pgErr {
+	n := len(cols)
+	if cols == nil || (len(formats) > 1 && len(formats) != n) {
 		return nil
 	}
-	p.encoded = true
-	n := len(p.cols)
 	binaryAt := make([]bool, n)
 	some := false
 	for i := range n {
-		if formatAt(p.resultFormats, n, i) == pgproto3.BinaryFormat && typeAt(p.types, i).oid != oidText {
+		if formatAt(formats, n, i) == pgproto3.BinaryFormat && typeAt(types, i).oid != oidText {
 			binaryAt[i], some = true, true
 		}
 	}
 	if !some {
 		return nil
 	}
-	for _, r := range p.rows {
+	for _, r := range rows {
 		for i, c := range r {
 			if i >= n || !binaryAt[i] || c == nil {
 				continue
 			}
-			b, err := binaryCell(typeAt(p.types, i), c)
+			b, err := binaryCell(typeAt(types, i), c)
 			if err != nil {
 				return &pgErr{"0A000", fmt.Sprintf(
-					"column %q cannot be sent in binary format: %v; ask for it in text format", p.cols[i], err)}
+					"column %q cannot be sent in binary format: %v; ask for it in text format", cols[i], err)}
 			}
 			r[i] = b
 		}
@@ -747,10 +768,6 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		return
 	}
 	if perr := checkResultFormats(p); perr != nil {
-		s.extFail(perr)
-		return
-	}
-	if perr := encodePortal(p); perr != nil {
 		s.extFail(perr)
 		return
 	}

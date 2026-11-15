@@ -189,9 +189,6 @@ func binaryCell(t colType, text []byte) ([]byte, error) {
 	return binaryScalar(t.oid, string(text))
 }
 
-// pgEpoch is where PostgreSQL's binary dates and timestamps count from.
-var pgEpoch = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-
 // A date or timestamp is read with a four-digit year: the copy refuses one
 // before the common era (views.pgParts), and a year past 9999 does not parse,
 // so it is an error here rather than a count PostgreSQL would read as another
@@ -530,10 +527,11 @@ func parseInterval(s string) (months, days int32, us int64, ok bool) {
 				return 0, 0, 0, false
 			}
 			hours, _ := strconv.ParseInt(h, 10, 64)
-			if hours > math.MaxInt64/3600e6-1 {
+			const usPerHour = int64(3600_000_000)
+			if hours > math.MaxInt64/usPerHour-1 {
 				return 0, 0, 0, false
 			}
-			us = hours*3600e6 + clock
+			us = hours*usPerHour + clock
 			if neg {
 				us = -us
 			}

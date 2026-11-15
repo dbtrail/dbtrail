@@ -89,7 +89,9 @@ func TestBinaryCell_readsAsItsText_2768(t *testing.T) {
 		{"BIGINT", []string{"-9223372036854775808", "9223372036854775807", "9007199254740993"}},
 		{"FLOAT", []string{"1.1", "-0", "NaN", "Infinity", "-Infinity", "3.4028235e+38", "1e-05"}},
 		{"DOUBLE", []string{"0.1", "-0", "NaN", "Infinity", "-Infinity", "1e+20", "2.5", "0.3333333333333333", "5e-324"}},
-		{"DECIMAL(10,2)", []string{"10.50", "0.00", "-0.50", "12345678.90", "7.25"}},
+		// (Zero is pinned by its bytes below: pgx reads a numeric with no
+		// digits as 0 whatever its scale.)
+		{"DECIMAL(10,2)", []string{"10.50", "-0.50", "12345678.90", "7.25"}},
 		{"DECIMAL(38,18)", []string{"12345.678000000000000000", "-0.000000000000000001", "99999999999999999999.999999999999999999"}},
 		{"DECIMAL(10,0)", []string{"0", "10000", "-12345", "100000000"}},
 		{"HUGEINT", []string{"170141183460469231731687303715884105727", "-1", "0"}},

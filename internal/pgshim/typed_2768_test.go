@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
@@ -336,4 +338,98 @@ func TestTyped_textIsItsBytesInBinary_2768(t *testing.T) {
 	if b, err := binaryCell(textColumn, []byte("42")); err != nil || string(b) != "42" {
 		t.Fatalf("%q %v", b, err)
 	}
+}
+
+// tenOnes answers ten rows of a numeric 1: one byte of text a cell, ten of
+// binary.
+func tenOnes(string) (sqlsandbox.Result, error) {
+	res := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "n", Type: "DECIMAL(1,0)"}}}
+	for range 10 {
+		res.Rows = append(res.Rows, []any{"1"})
+	}
+	return res, nil
+}
+
+// What a portal sends in binary is what it is counted at: a binary form
+// larger than its text is charged in the port's result budget, refused by
+// the budget's own rule (the port already holds it all), and given back.
+func TestTyped_binaryIsCountedInTheResultBudgetAtItsSize_2768(t *testing.T) {
+	text := resultBytes(cellsOfText(10, "1"))
+	b := NewResultBudget(text) // exactly the text: the binary form passes it
+	l := &typedLogin{answer: tenOnes}
+	r := dialRawCfg(t, Config{Login: l.login, ResultBudget: b})
+	got := r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{ResultFormatCodes: []int16{1}},
+		&pgproto3.Execute{}, &pgproto3.Sync{})
+	want(t, "binary past the budget", got, "ParseComplete", "BindComplete", "Error 53000", "ReadyForQuery I")
+	if b.Held() != 0 {
+		t.Fatalf("the refused result still holds %d bytes", b.Held())
+	}
+	got = r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})
+	if len(got) != 14 || got[12] != "CommandComplete SELECT 10" {
+		t.Fatalf("the same in text: %q", got)
+	}
+	if b.Held() != 0 {
+		t.Fatalf("after the answer the budget holds %d bytes", b.Held())
+	}
+	// With room for it, the binary answer is charged at its binary size.
+	b2 := NewResultBudget(1 << 20)
+	r2 := dialRawCfg(t, Config{Login: l.login, ResultBudget: b2})
+	got = r2.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{ResultFormatCodes: []int16{1}},
+		&pgproto3.Execute{}, &pgproto3.Sync{})
+	if len(got) != 14 {
+		t.Fatalf("binary with room: %q", got)
+	}
+	if bin := resultBytes(cellsOfText(10, string([]byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 1}))); b2.Charged() != bin {
+		t.Fatalf("charged %d, want the binary size %d (the text is %d)", b2.Charged(), bin, text)
+	}
+	if b2.Held() != 0 {
+		t.Fatalf("after the answer the budget holds %d bytes", b2.Held())
+	}
+}
+
+// The bound on what a connection's portals keep counts the binary form too.
+func TestTyped_binaryIsCountedInThePortalBoundAtItsSize_2768(t *testing.T) {
+	old := maxPortalBytes
+	maxPortalBytes = 10*(1+24) + 50 // the text fits, the binary does not
+	t.Cleanup(func() { maxPortalBytes = old })
+	l := &typedLogin{answer: tenOnes}
+	r := dialRawCfg(t, Config{Login: l.login})
+	got := r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})
+	if len(got) != 14 {
+		t.Fatalf("text: %q", got)
+	}
+	got = r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{ResultFormatCodes: []int16{1}},
+		&pgproto3.Execute{}, &pgproto3.Sync{})
+	want(t, "binary past the portal bound", got, "ParseComplete", "BindComplete", "Error 54000", "ReadyForQuery I")
+}
+
+func cellsOfText(n int, cell string) [][][]byte {
+	rows := make([][][]byte, n)
+	for i := range rows {
+		rows[i] = [][]byte{[]byte(cell)}
+	}
+	return rows
+}
+
+// dialRawCfg is dialRaw on a port of cfg.
+func dialRawCfg(t *testing.T, cfg Config) *rawConn {
+	t.Helper()
+	addr := serveAddrCfg(t, cfg)
+	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+	r := &rawConn{t: t, c: c, fe: pgproto3.NewFrontend(c, c)}
+	r.fe.Send(&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters: map[string]string{"user": "app", "database": "orders"}})
+	if err := r.fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := scramClientLogin(r.fe, portPassword, nil); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	r.until()
+	return r
 }
