@@ -268,8 +268,8 @@ func TestParseBool(t *testing.T) {
 }
 
 func be32(v uint32) []byte { return binary.BigEndian.AppendUint32(nil, v) }
-func be32i(v int32) []byte  { return be32(uint32(v)) }
-func be64i(v int64) []byte  { return be64(uint64(v)) }
+func be32i(v int32) []byte { return be32(uint32(v)) }
+func be64i(v int64) []byte { return be64(uint64(v)) }
 func be64(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
 
 // numericBinary builds numeric's binary form.

@@ -121,15 +121,11 @@ func TestExtended_pgxModesWriteTheArgumentsIntoTheStatement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// With the server's description (the cache and describe modes) an
-			// argument has no declared type and pgx sends it as text: a string
-			// literal the copy reads as the type its place needs. In Exec mode
-			// pgx declares the Go type's: an int is an int8.
-			id := "'42'"
-			if mode == pgx.QueryExecModeExec {
-				id = "42"
-			}
-			want := "SELECT stmt FROM t WHERE id =  " + id + "  AND name =  'x'' OR ''1''=''1'  AND note =  NULL "
+			// The port declares no type for an argument (ParameterDescription
+			// 0), and Exec mode declares none either, so pgx sends each one as
+			// text: a string literal the copy reads as the type its place
+			// needs, as PostgreSQL reads an argument of unknown type.
+			want := "SELECT stmt FROM t WHERE id =  '42'  AND name =  'x'' OR ''1''=''1'  AND note =  NULL "
 			if got != want {
 				t.Fatalf("the copy ran\n %q\nwant\n %q", got, want)
 			}
@@ -541,66 +537,54 @@ func TestExtended_aStatementThatChangesShapeIsRefused(t *testing.T) {
 }
 
 // Time travel through the extended protocol: the port's gate is asked at
-// every execution of a prepared statement, not once when it was prepared,
-// and a Describe meets it before it names a column.
+// every execution of a prepared statement, not once when it was prepared, and
+// a Describe meets it before it says anything about the table.
 func TestExtended_timeTravelMeetsTheGateAtEveryExecution(t *testing.T) {
 	var gateMu sync.Mutex
-	hidden, asked := "", 0
+	hidden := ""
 	setHidden := func(h string) { gateMu.Lock(); hidden = h; gateMu.Unlock() }
-	timesAsked := func() int { gateMu.Lock(); defer gateMu.Unlock(); return asked }
 	e := &echoLogin{}
 	e.tt = func() *Binding {
 		return &Binding{Run: e.run, Actor: "server:orders", Schema: "public",
+			// An index nobody answers on: a statement past the gate fails
+			// there, which is how this test tells "passed the gate" from
+			// "refused by it".
 			TimeTravel: newDeadEngine(t),
 			TimeTravelRefusal: func() string {
 				gateMu.Lock()
 				defer gateMu.Unlock()
-				asked++
 				return hidden
 			}}
 	}
-	conn := dialEcho(t, e, pgx.QueryExecModeCacheStatement)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+	r := dialRaw(t, e.login)
 	const stmt = "SELECT * FROM _flashback.orders AS OF $1 WHERE id = $2"
 	const why = "this server hides rows"
-	query := func(args ...any) error {
-		rows, err := conn.Query(ctx, "tt", args...)
-		if err == nil {
-			rows.Close()
-			err = rows.Err()
-		}
-		return err
-	}
+	ts := []byte("5 minutes ago")
 
+	// Describe behind a closed gate: refused, and the statement is gone, so
+	// it can be prepared again under its name.
 	setHidden(why)
-	_, err := conn.Prepare(ctx, "tt", stmt)
-	if pe := requirePgError(t, err); pe.Code != "42501" {
-		t.Fatalf("describe behind a closed gate: %s %q, want 42501", pe.Code, pe.Message)
-	}
-	// The refused statement is gone, so preparing it again under its name
-	// works.
+	want(t, "describe behind a closed gate", r.send(
+		&pgproto3.Parse{Name: "tt", Query: stmt}, &pgproto3.Describe{ObjectType: 'S', Name: "tt"}, &pgproto3.Sync{}),
+		"ParseComplete", "Error 42501", "ReadyForQuery I")
+	// Behind an open gate the Describe reaches the engine's own checks (the
+	// primary key, read from the index that is not there).
 	setHidden("")
-	if _, err := conn.Prepare(ctx, "tt", stmt); err != nil {
-		t.Fatalf("describe behind an open gate: %v", err)
-	}
-	// It reaches the engine, which fails on an index nobody answers on.
-	if pe := requirePgError(t, query("5 minutes ago", 1)); strings.Contains(pe.Message, "not served") || pe.Code == "42501" {
-		t.Fatalf("an open gate: %s %q", pe.Code, pe.Message)
-	}
-	n := timesAsked()
+	want(t, "describe behind an open gate", r.send(
+		&pgproto3.Parse{Name: "tt", Query: stmt}, &pgproto3.Describe{ObjectType: 'S', Name: "tt"}, &pgproto3.Sync{}),
+		"ParseComplete", "Error 42601", "ReadyForQuery I")
+
+	// Prepared once, executed twice: the gate is asked at each execution.
+	want(t, "prepare", r.send(&pgproto3.Parse{Name: "tt", Query: stmt}, &pgproto3.Sync{}), "ParseComplete", "ReadyForQuery I")
+	exec := &pgproto3.Bind{PreparedStatement: "tt", Parameters: [][]byte{ts, []byte("1")}}
+	want(t, "an open gate", r.send(exec, &pgproto3.Execute{}, &pgproto3.Sync{}), "BindComplete", "Error 42601", "ReadyForQuery I")
 	setHidden(why)
-	if pe := requirePgError(t, query("5 minutes ago", 1)); pe.Code != "42501" || pe.Message != why {
-		t.Fatalf("an execution after the rule was saved: %s %q, want 42501", pe.Code, pe.Message)
-	}
-	if timesAsked() <= n {
-		t.Fatal("the gate was not asked at the execution")
-	}
+	want(t, "after the rule was saved", r.send(exec, &pgproto3.Execute{}, &pgproto3.Sync{}), "BindComplete", "Error 42501", "ReadyForQuery I")
 	// An argument with a quote cannot be written for the time-travel parser.
 	setHidden("")
-	if pe := requirePgError(t, query("5 minutes ago", "it's")); pe.Code != "22023" {
-		t.Fatalf("a quote in a time-travel argument: %s %q, want 22023", pe.Code, pe.Message)
-	}
+	want(t, "a quote in a time-travel argument", r.send(
+		&pgproto3.Bind{PreparedStatement: "tt", Parameters: [][]byte{ts, []byte("it's")}}, &pgproto3.Sync{}),
+		"Error 22023", "ReadyForQuery I")
 	for _, st := range e.statements() {
 		if strings.Contains(st, "_flashback") {
 			t.Fatalf("a time-travel statement reached the copy: %q", st)

@@ -444,7 +444,7 @@ func parseByteaText(s string) ([]byte, bool) {
 			i += 2
 			continue
 		}
-		if i+3 < len(s) &&s[i+1] >= '0' && s[i+1] <= '3' && isOctal(s[i+2]) && isOctal(s[i+3]) {
+		if i+3 < len(s) && s[i+1] >= '0' && s[i+1] <= '3' && isOctal(s[i+2]) && isOctal(s[i+3]) {
 			out = append(out, (s[i+1]-'0')<<6|(s[i+2]-'0')<<3|(s[i+3]-'0'))
 			i += 4
 			continue
