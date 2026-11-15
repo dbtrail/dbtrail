@@ -36,7 +36,7 @@ func TestExecute_anUncreatableWorkingFolderIsNamedAsOne(t *testing.T) {
 		t.Fatalf("mydumper ran %d time(s) with no folder to write to", calls.Load())
 	}
 
-	_, _, err = s.executePG(req)
+	_, err = s.executePG(req)
 	if err == nil || !strings.HasPrefix(err.Error(), "create the working folder "+stage+": ") {
 		t.Fatalf("executePG: err = %v, want it to name the working folder %s", err, stage)
 	}

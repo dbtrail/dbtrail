@@ -314,6 +314,7 @@ a final checkpoint).
 | `--batch-size` | no | Events per batch insert (default 1000). |
 | `--checkpoint` | no | Checkpoint interval in seconds (default 5). |
 | `--partitions` | no | Index partitions for the one-time bootstrap (default 48). |
+| `--metrics-addr` | no | Address to expose Prometheus metrics on, e.g. `:9090`; empty (the default) exposes none (env `BINTRAIL_METRICS_ADDR`). See [observability.md](observability.md#postgresql-capture-bintrail_pg_). |
 | `--rotate-retain` | no | Built-in rotation: drop index partitions older than this (`Nd`/`Nh`; `off` disables). Default `48h` for a new index; an index created before that default changed keeps the window it was created under (env `BINTRAIL_ROTATE_RETAIN`). |
 | `--rotate-interval` | no | Built-in rotation: how often a rotation cycle runs (default `1h`, env `BINTRAIL_ROTATE_INTERVAL`). |
 | `--rotate-add-future` | no | Built-in rotation: keep at least N future hourly partitions ready (default `3`, env `BINTRAIL_ROTATE_ADD_FUTURE`). |
@@ -508,10 +509,12 @@ A snapshot schedule set on a PostgreSQL server in the web interface does the
 same on its own. The first snapshot is a full read of the source; each slot
 after it builds the next snapshot from the previous one and the changes
 captured since, without reading the source again. An update holds the changes
-up to capture's last saved position, which capture saves every 10 seconds. It
-does not look for tables created after the previous snapshot, and says so in
-the log: such a table enters the copy when a full snapshot is next taken,
-if the publication includes it.
+up to capture's last saved position, which capture saves every 10 seconds. A
+table added to the publication after the previous snapshot has no file to
+update, so the update publishes without it and names it, and the schedule then
+takes one full read of the source to bring it into the copy, as it does for a
+new table on a MySQL source: where the schedule may take full reads, and no
+more than a few times for the same table.
 
 What to know:
 

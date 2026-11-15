@@ -60,7 +60,7 @@ func TestNoLocalFolder_fullReadsReadNothing(t *testing.T) {
 	sup := newBaselineSupervisor(context.Background(), t.TempDir(), baseline.DefaultLockMode)
 	_, err := sup.execute(console.BaselineRequest{ServerID: "s1", SourceDSN: "src", S3: "s3://b/p"})
 	wantNoLocalFolder(t, "execute", err)
-	_, _, err = sup.executePG(console.BaselineRequest{ServerID: "pg1", Flavor: console.FlavorPostgres, S3: "s3://b/p"})
+	_, err = sup.executePG(console.BaselineRequest{ServerID: "pg1", Flavor: console.FlavorPostgres, S3: "s3://b/p"})
 	wantNoLocalFolder(t, "executePG", err)
 	if calls.Load() != 0 || pgCalls.Load() != 0 {
 		t.Fatalf("mydumper ran %d times, the PostgreSQL read %d times, want neither", calls.Load(), pgCalls.Load())
