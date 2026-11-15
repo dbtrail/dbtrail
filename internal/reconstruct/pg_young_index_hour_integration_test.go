@@ -21,18 +21,27 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 		name    string
 		from    any  // stream_state.pg_capture_from_lsn
 		unknown bool // the index's partition history is not known
-		folds   bool
+		// snap is the snapshot's time from the index's first hour; 0 is
+		// thirty seconds before it.
+		snap  time.Duration
+		folds bool
 	}{
 		{name: "capture started before the floor", from: 0x400, folds: true},
 		{name: "capture started at the floor", from: 0x500, folds: true},
 		{name: "capture started after the floor", from: 0x501},
 		{name: "no recorded start"},
 		{name: "history unknown", from: 0x400, unknown: true},
+		{name: "the hour before, from its start", from: 0x400, snap: -59 * time.Minute, folds: true},
+		// The fetch reads one hour below the first and no further.
+		{name: "more than an hour before", from: 0x400, snap: -61 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPGFixture(t)
-			snap := f.at(-30 * time.Second)
+			if tc.snap == 0 {
+				tc.snap = -30 * time.Second
+			}
+			snap := f.at(tc.snap)
 			// After the snapshot and before the index's first hour: filed in
 			// the first partition, which has no lower bound.
 			f.event(0x600, -20*time.Second, 2, "1", s("before-the-hour"))

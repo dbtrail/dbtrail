@@ -244,14 +244,18 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 // one created after the snapshot with a capture that started later (emptied
 // and created again) does not hold them, and keeps since. So does an index
 // with no history (an older build's, a restored one) and one whose history
-// cannot be read. An hour from the creation hour on is judged as before.
+// cannot be read, and a window that starts more than an hour before the
+// creation hour. An hour from the creation hour on is judged as before.
 func pgFetchSince(ctx context.Context, db *sql.DB, dbName string, since time.Time, floor uint64) time.Time {
 	hist, err := indexer.ReadPartitionHistory(ctx, db, dbName)
 	if err != nil || !hist.Known || hist.CreatedAt.IsZero() {
 		return since
 	}
 	first := hist.CreatedAt.UTC().Truncate(time.Hour)
-	if !since.Before(first) {
+	// Only the hour right before the first: the fetch's time bound goes one
+	// hour below the start given here and no further, so a window that
+	// starts earlier keeps its own start, and its refusal.
+	if !since.Before(first) || since.Before(query.CoarseSinceFloor(first)) {
 		return since
 	}
 	start, ok := query.CoverageStart(db, "postgres")
