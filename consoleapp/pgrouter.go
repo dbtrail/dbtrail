@@ -533,8 +533,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		copySQL := tgt.SQL
 		// A PostgreSQL source's copy answers by PostgreSQL's rules, with its
-		// names resolved where PostgreSQL resolves them.
-		sess, schema := sqlsandbox.Session{PostgresRules: true}, pgPortSchema
+		// names resolved where PostgreSQL resolves them, and a column the
+		// statement did not name headed as PostgreSQL heads it (#2803).
+		sess, schema := sqlsandbox.Session{PostgresRules: true, PostgresNames: true}, pgPortSchema
 		bound.Answered = copySQL.NoteAnswered
 		bound.Run = func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
 			if timeout > 0 {
