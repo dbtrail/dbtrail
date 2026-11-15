@@ -169,32 +169,46 @@ type pgRunEnd struct {
 	until     uint64
 	newestEnd uint64
 	newestAt  time.Time
-	// caughtUpAt is when capture last had everything its source had
-	// (stream_state.caught_up_at, #2845), read BEFORE the newest event: a
-	// change the index did not hold at that read was not flushed on the
-	// source at caughtUpAt, so it committed after it. Read after, a change
-	// delivered between the two reads would be past the run's end with a
-	// commit before the stamp. Zero: not known.
+	// caughtUpAt is the source's own clock when capture last had everything
+	// the source had (stream_state.pg_caught_up_source_at): on a primary its
+	// time then, on a standby the commit time of the last transaction it had
+	// replayed. A change capture had not received by then committed after
+	// it, on the clock commit times are on. Read BEFORE the newest event: a
+	// change the index did not hold at that read is one capture had not
+	// received at the stamp. Read after, a change delivered between the two
+	// reads would be past the run's end with a commit before the stamp.
+	// Zero: not known.
 	caughtUpAt time.Time
-	// allIn: every change the index held when it was read is at or below
-	// until, so what this run leaves for the next is only what had not
-	// reached the index. False when a change past at was found, or when the
-	// newest one is left whole to the next fold.
+	// allIn: the run ends at the newest change the index holds, with its
+	// transaction complete, so what it leaves for the next fold is only what
+	// capture had not delivered. False when a change past at was found, or
+	// when the newest one is left whole to the next fold: those are in the
+	// index, and may have committed before the stamp. On an index with no
+	// change at all it also needs no archive to exist (see resolvePGRunEnd).
 	allIn bool
 }
 
-// readPGCaughtUpAt reads stream_state.caught_up_at as a moment on this
-// host's clock: now, less how long ago the index says it was. Zero when
+// readPGCaughtUpAt reads stream_state.pg_caught_up_source_at. Zero when
 // there is none, on an index that predates the column, and on a read that
 // failed: the bound is then the one a fold recorded before the stamp existed.
+//
+// Not caught_up_at: that one is this host's clock, and a standby that
+// replays hours late is "caught up" at a moment long after the commit time of
+// changes it has yet to replay.
 func readPGCaughtUpAt(ctx context.Context, db *sql.DB) time.Time {
-	var ago sql.NullInt64
-	err := db.QueryRowContext(ctx, `SELECT TIMESTAMPDIFF(MICROSECOND, caught_up_at, UTC_TIMESTAMP(6))
-		FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&ago)
-	if err != nil || !ago.Valid {
+	var at sql.NullTime
+	err := db.QueryRowContext(ctx, `SELECT pg_caught_up_source_at FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&at)
+	if err != nil || !at.Valid {
 		return time.Time{}
 	}
-	return time.Now().UTC().Add(-time.Duration(ago.Int64) * time.Microsecond)
+	return at.Time.UTC()
+}
+
+// noArchives reports whether the index records no archived partition. False
+// when that cannot be read.
+func noArchives(ctx context.Context, db *sql.DB) bool {
+	var n int
+	return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM archive_state LIMIT 1) one`).Scan(&n) == nil && n == 0
 }
 
 // resolvePGRunEnd reads a run's pgRunEnd at the point at.
@@ -205,7 +219,12 @@ func resolvePGRunEnd(ctx context.Context, db *sql.DB, at time.Time) (pgRunEnd, e
 		WHERE binlog_file IS NOT NULL AND end_pos IS NOT NULL
 		ORDER BY event_id DESC LIMIT 1`).Scan(&run.newestEnd, &run.newestAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		run.none, run.allIn = true, true
+		// No change in the live index. A fold of such a run reads nothing
+		// (pgFoldBounds.empty), archives included, so the bound may move
+		// only when there is no archive that could hold a change past the
+		// floor: an index rotated empty with its changes archived keeps the
+		// bound it had, and the next fold that finds a change reads them.
+		run.none, run.allIn = true, noArchives(ctx, db)
 		return run, nil
 	}
 	if err != nil {
