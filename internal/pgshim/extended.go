@@ -456,7 +456,10 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		s.dataRow(r)
 	}
 	p.sent += n
-	if n < left {
+	if m.MaxRows > 0 && uint64(n) == uint64(m.MaxRows) {
+		// PostgreSQL stops at the limit without looking past it: a portal
+		// whose last row the limit reached exactly is suspended too, and
+		// the next Execute ends it with no row.
 		s.be.Send(&pgproto3.PortalSuspended{})
 		return
 	}

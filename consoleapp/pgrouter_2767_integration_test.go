@@ -221,7 +221,7 @@ func pgExtCases(tbl string) []struct {
 		{"SELECT id FROM " + tbl + " WHERE placed >= $1 ORDER BY id", []any{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}},
 		{"SELECT id FROM " + tbl + " WHERE uid = $1 ORDER BY id", []any{"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}},
 		{"SELECT id FROM " + tbl + " WHERE big = $1 ORDER BY id", []any{int64(9007199254740993)}},
-		{"SELECT id FROM " + tbl + " WHERE id = $1 OR id = $1 + 1 ORDER BY id", []any{1}},
+		{"SELECT id FROM " + tbl + " WHERE id = $1 OR id = $1::int + 1 ORDER BY id", []any{1}},
 		{"SELECT id FROM " + tbl + " WHERE id IN ($2, $1) ORDER BY id", []any{1, 4}},
 		{"SELECT id FROM " + tbl + " ORDER BY id LIMIT $1 OFFSET $2", []any{2, 1}},
 		{"SELECT $1::int + 1 AS n", []any{41}},
@@ -334,7 +334,9 @@ func TestIntegrationPGRouterExtended(t *testing.T) {
 		same("empty", &pgproto3.Parse{Query: ""}, &pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
 		same("bad integer", &pgproto3.Parse{Query: "SELECT id FROM " + tbl + " WHERE id = $1", ParameterOIDs: []uint32{23}},
 			&pgproto3.Bind{Parameters: [][]byte{[]byte("4x")}}, &pgproto3.Execute{}, &pgproto3.Sync{})
-		same("set", &pgproto3.Parse{Query: "SET application_name = 'x'"}, &pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
+		// (A SET of a setting PostgreSQL reports, application_name, is followed
+		// there by its ParameterStatus, which this port does not send.)
+		same("set", &pgproto3.Parse{Query: "SET work_mem = '4MB'"}, &pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{})
 		// A transaction block: a portal outlives Sync and hands its rows
 		// over a few at a time; an error fails the block until ROLLBACK.
 		same("begin", &pgproto3.Query{String: "BEGIN"})

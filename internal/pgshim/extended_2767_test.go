@@ -417,6 +417,12 @@ func TestExtended_messageByMessage(t *testing.T) {
 		"ParseComplete", "BindComplete", row, row, "PortalSuspended", row, row, "PortalSuspended", row,
 		"CommandComplete SELECT 1", "ReadyForQuery I")
 
+	// A limit that reaches the last row exactly suspends, as on PostgreSQL:
+	// the next Execute ends the portal with no row.
+	want(t, "a limit that reaches the end", r.send(
+		&pgproto3.Parse{Query: stmt}, &pgproto3.Bind{}, &pgproto3.Execute{MaxRows: 5}, &pgproto3.Execute{}, &pgproto3.Sync{}),
+		"ParseComplete", "BindComplete", row, row, row, row, row, "PortalSuspended", "CommandComplete SELECT 0", "ReadyForQuery I")
+
 	// The portal ended with the implicit transaction its Sync closed.
 	want(t, "Execute after Sync", r.send(&pgproto3.Execute{}, &pgproto3.Sync{}), "Error 34000", "ReadyForQuery I")
 
