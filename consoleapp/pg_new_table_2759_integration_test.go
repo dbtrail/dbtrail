@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,10 @@ func TestIntegrationPGNewTableIsIncluded_2759(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The schedule's own tick sees the server first, as it does in the
+	// daemon a minute after the schedule is saved: a full read promised for a
+	// server the loop has not seen is taken as one whose schedule was removed.
+	b.tick(ctx, time.Now().UTC())
 	b.fire(e, p, time.Now().UTC())
 
 	// The update publishes without the new table and names it; the schedule
@@ -130,7 +135,9 @@ func TestIntegrationPGNewTableIsIncluded_2759(t *testing.T) {
 		if st := sup.Status(e.ID); st.State == "failed" {
 			t.Fatalf("the full read for the new table failed: %s", st.LastError)
 		}
-		return addedFile() != "", "method=" + st.LastMethod
+		rs := sup.RefreshStatus(e.ID)
+		return addedFile() != "", "method=" + st.LastMethod + " update=" + rs.State + " new=" + strings.Join(rs.NewTables, ",") +
+			" action=" + rs.NewTablesAction + " why=" + rs.NewTablesActionReason + " unchecked=" + rs.NewTablesUnchecked
 	})
 	b.watchers.Wait()
 	sup.postRefresh.Wait()
