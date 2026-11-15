@@ -222,6 +222,10 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 		var rec spillRecord
 		if err := dec.Decode(&rec); err != nil {
 			if errors.Is(err, io.EOF) {
+				// A repeat still open at the end of a key's changes.
+				if err := pgTxnOpenRepeat(txn, s.schema, s.table); err != nil {
+					return nil, err
+				}
 				return m, nil
 			}
 			return nil, fmt.Errorf("read changed rows back from disk: %w", err)

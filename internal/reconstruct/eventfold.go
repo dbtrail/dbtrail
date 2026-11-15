@@ -610,6 +610,11 @@ func (r *foldResult) admit(limit, maxBytes int64, tables int, spill bool) error 
 		return err
 	}
 	r.Changes = make(map[string]*query.ResultRow)
+	// The records go to disk with the changes and start again empty, which
+	// gives the memory back. A change that follows is linked to the record
+	// on disk when the group is read back; a transaction delivered twice
+	// whose changes are on both sides of this is refused there, not checked
+	// (pgKeyTxn.join).
 	r.pgTxn = nil
 	return nil
 }
@@ -855,6 +860,9 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 		return nil, annotateFoldFetchError(err, fc)
 	}
 
+	if err := res.pgTxnEnd(fc.Schema, fc.Table); err != nil {
+		return nil, err
+	}
 	if res.Spill != nil {
 		if err := res.Spill.finish(); err != nil {
 			return nil, err

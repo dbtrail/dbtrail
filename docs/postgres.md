@@ -612,6 +612,43 @@ What to know:
   same statements in separate transactions are applied. A refused change refuses even when a later change
   overwrote it, and one in the minute before the snapshot, which the fold
   reads again (see above), counts too.
+- **A transaction whose changes of one key do not describe one row
+  refuses.** A `DEFERRABLE` primary key is checked at the end of the
+  statement or of the transaction, so until then two rows can hold the same
+  key value, with no key change involved: a transaction inserts a new row 1
+  while the old row 1 is still there and then deletes the old one. The
+  captured changes are an INSERT and a DELETE of key 1, the last one is the
+  DELETE, and a copy that kept the last change would have no row 1 where the
+  source has the new one. The fold therefore checks, for the changes one
+  transaction makes to one key, that each starts from the row the one before
+  it left: an INSERT from no row, an UPDATE or a DELETE from exactly the row
+  the previous change wrote. When that does not hold, or the rows cannot be
+  compared, the table is refused with a message that names the key and the
+  transaction's commit LSN. The ordinary transactions are applied as before:
+  a row inserted and deleted again, inserted and updated, updated twice,
+  deleted and replaced under the same key.
+  A transaction that capture delivered twice after a restart is recognized
+  and applied once, when it looks exactly like one: the key's first change
+  of the transaction comes back, and the changes after it repeat the changes
+  before it, one by one, for as long as those ran (the first delivery may
+  have been cut short; the last one is whole). A first change that comes back
+  followed by anything else refuses. Two limits: when a snapshot update holds
+  so many changed rows that it moves them to disk and a transaction delivered
+  twice has its changes on both sides of that move, it is refused, not
+  checked; and a transaction delivered twice that holds a key-changing
+  UPDATE is refused by the rule of the previous point (the new key receives
+  the row twice).
+  What is not seen, in every case because the rows are equal in every column,
+  the key included: (1) a row inserted as an exact copy of one that already
+  existed, followed by a delete of the original, which reads like inserting
+  a row and deleting it again; (2) the same row inserted twice and one of the
+  two deleted, or any series of changes made identically to two identical
+  rows, which reads like a transaction cut short and then delivered whole:
+  the source keeps one row and the copy none. Both need a `DEFERRABLE` key;
+  the index does not record whether a key is deferrable. (3) On a database
+  whose encoding is `SQL_ASCII`, text that is not valid UTF-8 is stored with
+  replacement characters, so two rows that differ only in such bytes compare
+  equal.
 - **An unchanged-TOAST marker refuses** on any change the fold reads, even
   one a later change overwrote. Under `REPLICA IDENTITY FULL`, which capture
   requires, there is no marker to meet: capture replaces an unchanged large
