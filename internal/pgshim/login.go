@@ -106,7 +106,10 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	loginTimer := time.AfterFunc(loginTimeout, func() { _ = c.Close() })
 	defer loginTimer.Stop()
 
-	be := pgproto3.NewBackend(wc, wc)
+	// Written in pieces, each with its own deadline: a client that stops
+	// reading its answer is cut, and what the port held for it is given
+	// back (resultbudget.go).
+	be := pgproto3.NewBackend(wc, &deadlineWriter{c: c, logger: logger})
 	startup, err := negotiateStartup(c, be)
 	if err != nil {
 		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
@@ -150,7 +153,7 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	if err := be.Flush(); err != nil {
 		return
 	}
-	sess := &session{be: be, bound: bound, ctx: connCtx, logger: logger}
+	sess := &session{be: be, bound: bound, ctx: connCtx, logger: logger, budget: cfg.ResultBudget}
 	if bound.TimeTravel != nil {
 		// The engine's statements end with the connection, as free SQL's do.
 		bound.TimeTravel.BindConnContext(connCtx)
@@ -176,6 +179,11 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 			s.bound.Answered(time.Since(started), perr != nil)
 		}
 	}()
+	// Before anything is run (#2804): a statement whose result the port has
+	// no room to hold is refused here, not after the copy answered it.
+	if refusal := s.admitResult(); refusal != nil {
+		return nil, nil, "", refusal
+	}
 	res, err := s.bound.Run(s.ctx, qstr)
 	if res.Spool != nil {
 		// Only a bug gets here: this port asks for no result in a file.
@@ -222,6 +230,12 @@ func (s *session) runFree(qstr string) (cols []string, rows [][][]byte, tag stri
 			}
 		}
 		rows[i] = cells
+	}
+	// Counted from here until it is written, or refused when the budget was
+	// taken while the statement ran. Before the notice and the audit
+	// record: a refused answer served nobody.
+	if refusal := s.holdResult(rows); refusal != nil {
+		return nil, nil, "", refusal
 	}
 	if res.Note != "" {
 		s.notice(res.Note)
