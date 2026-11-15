@@ -61,7 +61,7 @@
 # instead of leaving you to diff two files (#1529). It is passed to the
 # console service below through the YAML anchor, so there is one number to
 # bump: raise it whenever this file gains wiring a running stack would need.
-x-bintrail-compose-version: &compose_version 8
+x-bintrail-compose-version: &compose_version 9
 
 volumes:
   bintrail-index-data:    # MySQL 8.4 datadir — the forensic record (NEW volume:
@@ -771,6 +771,91 @@ services:
     # its memory is stopped by this service's ceiling, or by the host.
     # security_opt:
     #   - writable-cgroups=true
+    volumes:
+      - bintrail-state:/var/lib/bintrail:ro
+    restart: unless-stopped
+
+  # ── PostgreSQL router: the PostgreSQL port, served apart from capture ──
+  # PostgreSQL clients and applications connect here, on port 5433, to read
+  # the copy of a PostgreSQL server. An installation serves one database
+  # family: with MySQL or MariaDB servers this service has nothing to answer
+  # for, waits, and uses next to nothing.
+  #
+  # Like the MySQL port above, it starts with the stack and LISTENS ONLY WHILE
+  # THE PORT FOR SQL CLIENTS IS TURNED ON in the web interface (Settings,
+  # Connect a SQL client), with the password created there; it closes again,
+  # with every connection, when the port is turned off. With CONSOLE_TOKEN set
+  # in .env the token is accepted as a password too while the port is on; it
+  # does not open it.
+  #
+  #   psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app sslmode=require"
+  #
+  # WHO ANSWERS. The copy answers every statement, by PostgreSQL's rules, and
+  # nothing is sent to your PostgreSQL. It is read-only: a statement that is
+  # not a read is refused. Time travel (_flashback, _snapshot, AS OF for one
+  # row) is answered on the same connection.
+  #
+  # ENCRYPTION. The login is SCRAM-SHA-256, so the password never crosses the
+  # network. A client that asks for TLS gets it, with a certificate made up
+  # at start: sslmode=require works, verify-ca and verify-full do not. The
+  # port cannot refuse a client that asks for no TLS, so put sslmode=require
+  # (or stricter) in the client. To serve a certificate clients can verify,
+  # mount it into this service and set BINTRAIL_PG_ROUTER_TLS_CERT and
+  # BINTRAIL_PG_ROUTER_TLS_KEY to its two paths (docs/docker.md).
+  #
+  # It reads the servers the web interface manages and the copies on the state
+  # volume, mounted READ-ONLY here: it writes nothing there.
+  #
+  # It is sized small on purpose, to fit beside capture without asking: two
+  # statements at once with two threads each, sixteen clients. PG_ROUTER_WORKERS,
+  # PG_ROUTER_THREADS and PG_ROUTER_MAX_CONNECTIONS in .env change that, and
+  # PG_ROUTER_MEMORY (e.g. 8g) and PG_ROUTER_CPUS (e.g. 4) give this service
+  # ceilings of its own. Each statement may take the memory saved in the web
+  # interface (SQL_MEMORY in .env wins; 2GB unless set).
+  #
+  # Without this service nothing serves the PostgreSQL port: the web interface
+  # can turn it on and nothing listens.
+  pg-router:
+    image: ghcr.io/dbtrail/bintrail-console:${BINTRAIL_TAG:-latest}
+    extra_hosts:
+      - "host.docker.internal:${HOST_GATEWAY:-host-gateway}"
+    command: ["pg-router"]
+    # On the host loopback. Nothing listens behind it until the port is turned
+    # on in the web interface. For another machine, open a tunnel, or widen to
+    # "5433:5433" behind a firewall: the port's password reads every server.
+    # If 5433 is taken on this machine, delete the whole `ports:` line below
+    # (install.sh does it for you). It is one line on purpose: a `ports:` key
+    # with nothing under it is a file Docker Compose refuses.
+    ports: ["127.0.0.1:5433:5433"]
+    environment:
+      # All interfaces INSIDE the container; the `ports` mapping above is what
+      # controls exposure on the host.
+      BINTRAIL_PG_ROUTER_LISTEN: 0.0.0.0:5433
+      BINTRAIL_CONSOLE_TOKEN: ${CONSOLE_TOKEN:-}
+      # The same three paths the `bintrail` service is given: the servers it
+      # answers for, and the two files a statement must never read through a
+      # copy directory that contains them.
+      BINTRAIL_CONSOLE_SERVERS: /var/lib/bintrail/console-servers.yaml
+      BINTRAIL_CONSOLE_AUTH: /var/lib/bintrail/console-auth.yaml
+      BINTRAIL_CONSOLE_MCP_TOKEN_FILE: /var/lib/bintrail/console-mcp-token.yaml
+      # Memory each statement on the copy may use: the same setting as
+      # `bintrail`, from the same .env.
+      BINTRAIL_CONSOLE_SQL_MEMORY: ${SQL_MEMORY:-}
+      # How many statements run at once, with how many threads each, and how
+      # many clients may be connected. Unset, the small defaults above.
+      BINTRAIL_PG_ROUTER_WORKERS: ${PG_ROUTER_WORKERS:-}
+      BINTRAIL_PG_ROUTER_THREADS: ${PG_ROUTER_THREADS:-}
+      BINTRAIL_PG_ROUTER_MAX_CONNECTIONS: ${PG_ROUTER_MAX_CONNECTIONS:-}
+      # How long a statement waits for its turn when every worker is busy,
+      # e.g. PG_ROUTER_MAX_WAIT=30s in .env; past it the client gets an error.
+      BINTRAIL_PG_ROUTER_MAX_WAIT: ${PG_ROUTER_MAX_WAIT:-}
+      # A certificate clients can verify: the two paths INSIDE this container
+      # of a certificate and its key that you mount into it.
+      BINTRAIL_PG_ROUTER_TLS_CERT: ${PG_ROUTER_TLS_CERT:-}
+      BINTRAIL_PG_ROUTER_TLS_KEY: ${PG_ROUTER_TLS_KEY:-}
+    # 0 = no ceiling. See PG_ROUTER_MEMORY / PG_ROUTER_CPUS above.
+    mem_limit: ${PG_ROUTER_MEMORY:-0}
+    cpus: ${PG_ROUTER_CPUS:-0}
     volumes:
       - bintrail-state:/var/lib/bintrail:ro
     restart: unless-stopped

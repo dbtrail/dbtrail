@@ -58,7 +58,7 @@ import (
 // two together (TestComposeVersionMatchesTheBinary asserts they agree) and add
 // a composeVersionAdded entry saying what the new number buys, or the daemon
 // can only tell an operator that their file is old and not what it is missing.
-const bundledComposeVersion = 8
+const bundledComposeVersion = 9
 
 // composeVersionAdded names, per version, the wiring that version added. Only
 // versions ABOVE the operator's are read, so version 1 (the first numbered
@@ -71,6 +71,7 @@ var composeVersionAdded = map[int]string{
 	6: "the bundled index MySQL sizes its buffer pool to the machine when INDEX_BUFFER_POOL is unset: with an older file it keeps InnoDB's 128 MB default, which caps capture at about 1,400 row changes per second on a busy server",
 	7: "the router runs at a lower CPU priority than capture (cpu_shares), so statements on the copy use every core instead of half of them: with an older file they run with half the machine's cores unless ROUTER_CPUS is set",
 	8: "SQL_FRESH in .env reaches the router: with an older file the mode cannot be set for every server from .env (off: answers as old as each table's last snapshot; on: about as far behind as capture), and each server answers in its own, fresh unless Fast was saved for it",
+	9: "the pg-router service: the PostgreSQL port (5433), where PostgreSQL clients read the copy of a PostgreSQL server: with an older file nothing listens on 5433, and the port for SQL clients can be turned on in the web interface with nothing answering it",
 }
 
 // composeIndexHost is the bundled index MySQL's service name in

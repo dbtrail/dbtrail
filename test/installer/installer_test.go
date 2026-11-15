@@ -404,13 +404,123 @@ func TestInstaller_aTakenMySQLPortIsLeftUnpublished(t *testing.T) {
 	}
 }
 
+// The PostgreSQL-protocol port is off until someone turns it on too, so a
+// taken 5433 is handled as a taken 3309 is: the stack comes up without
+// publishing it and the installer says so. With 5433 free the mapping is
+// there and nothing is said.
+func TestInstaller_aTakenPostgreSQLPortIsLeftUnpublished(t *testing.T) {
+	r := install(t)
+	if r.failed || !strings.Contains(r.compose(t), `"127.0.0.1:5433:5433"`) {
+		t.Fatalf("with 5433 free the PostgreSQL port must be published on loopback (failed=%v):\n%s", r.failed, portLines(r.compose(t)))
+	}
+	if strings.Contains(r.out, "5433") {
+		t.Errorf("nothing about 5433 should be said when it is free:\n%s", r.out)
+	}
+
+	for _, env := range []string{"BUSY_PORTS=5433", "SS_PORTS=5433"} {
+		r = install(t, env)
+		if r.failed || r.upCalls != 1 {
+			t.Fatalf("%s: install failed with only 5433 taken (up=%d):\n%s", env, r.upCalls, r.out)
+		}
+		c := r.compose(t)
+		if strings.Contains(c, `"127.0.0.1:5433:5433"`) {
+			t.Errorf("%s: a taken 5433 is still published:\n%s", env, portLines(c))
+		}
+		for _, kept := range []string{`"127.0.0.1:8090:8090"`, `"127.0.0.1:9090:9090"`, `"127.0.0.1:3309:3309"`} {
+			if !strings.Contains(c, kept) {
+				t.Errorf("%s: another port was disturbed (%s):\n%s", env, kept, portLines(c))
+			}
+		}
+		if !strings.Contains(r.out, "port 5433 is taken, so the PostgreSQL port is not published") {
+			t.Errorf("%s: the skip is not said:\n%s", env, r.out)
+		}
+		// The MySQL port's own notice is about 3309 only.
+		if strings.Contains(r.out, "3309") {
+			t.Errorf("%s: 3309 is free and is named:\n%s", env, r.out)
+		}
+		for _, h := range sentenceHits(t, r.out, r.dir) {
+			t.Errorf("%s: banned in a sentence the installer prints: %s", env, h)
+		}
+		var doc struct {
+			Services map[string]map[string]any `yaml:"services"`
+		}
+		if err := yaml.Unmarshal([]byte(c), &doc); err != nil {
+			t.Fatalf("%s: the rewritten compose file is not YAML: %v", env, err)
+		}
+		svc, ok := doc.Services["pg-router"]
+		if !ok {
+			t.Fatalf("%s: the pg-router service is gone, not only its mapping", env)
+		}
+		if _, has := svc["ports"]; has {
+			t.Errorf("%s: pg-router keeps a ports: key (%v); empty, Docker Compose refuses the file", env, svc["ports"])
+		}
+		if !strings.Contains(c, "BINTRAIL_PG_ROUTER_LISTEN: 0.0.0.0:5433") {
+			t.Errorf("%s: the pg-router service lost more than its port mapping", env)
+		}
+	}
+
+	// Both ports taken: each is left out, each is said.
+	r = install(t, "BUSY_PORTS=3309 5433")
+	c := r.compose(t)
+	if r.failed || strings.Contains(c, `"127.0.0.1:3309:3309"`) || strings.Contains(c, `"127.0.0.1:5433:5433"`) {
+		t.Fatalf("with both ports taken (failed=%v):\n%s", r.failed, portLines(c))
+	}
+	if !strings.Contains(r.out, "port 3309 is taken") || !strings.Contains(r.out, "port 5433 is taken") {
+		t.Errorf("both skips must be said:\n%s", r.out)
+	}
+}
+
+// The pg-router service as the stack ships it: the PostgreSQL port on the
+// host loopback, listening on every interface inside its container, reading
+// the state volume and never writing it.
+func TestCompose_pgRouterService(t *testing.T) {
+	var doc struct {
+		Services map[string]struct {
+			Command     []string          `yaml:"command"`
+			Ports       []string          `yaml:"ports"`
+			Environment map[string]string `yaml:"environment"`
+			Volumes     []string          `yaml:"volumes"`
+			Profiles    []string          `yaml:"profiles"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(install(t).compose(t)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	svc, ok := doc.Services["pg-router"]
+	if !ok {
+		t.Fatal("docker-compose.yml has no pg-router service")
+	}
+	if len(svc.Command) != 1 || svc.Command[0] != "pg-router" {
+		t.Errorf("command = %v", svc.Command)
+	}
+	if len(svc.Ports) != 1 || svc.Ports[0] != "127.0.0.1:5433:5433" {
+		t.Errorf("ports = %v, want the one loopback mapping", svc.Ports)
+	}
+	// It starts with the stack, as the router does: behind a profile the web
+	// interface turns the port on and nothing listens.
+	if len(svc.Profiles) != 0 {
+		t.Errorf("profiles = %v, want none", svc.Profiles)
+	}
+	if got := svc.Environment["BINTRAIL_PG_ROUTER_LISTEN"]; got != "0.0.0.0:5433" {
+		t.Errorf("BINTRAIL_PG_ROUTER_LISTEN = %q", got)
+	}
+	for _, k := range []string{"BINTRAIL_CONSOLE_SERVERS", "BINTRAIL_CONSOLE_AUTH", "BINTRAIL_CONSOLE_MCP_TOKEN_FILE"} {
+		if svc.Environment[k] != doc.Services["router"].Environment[k] || svc.Environment[k] == "" {
+			t.Errorf("%s = %q, want the router's %q", k, svc.Environment[k], doc.Services["router"].Environment[k])
+		}
+	}
+	if len(svc.Volumes) != 1 || svc.Volumes[0] != "bintrail-state:/var/lib/bintrail:ro" {
+		t.Errorf("volumes = %v, want the state volume read-only", svc.Volumes)
+	}
+}
+
 // A second installation beside a first (#2815: an installation serves one
 // database family, and the other family goes in an installation of its own):
 // the folder and the console's port are named, and the ports the first one
 // holds are handled as on any install. This is the command docs/install.md
-// gives, with the first installation's three ports taken.
+// gives, with the first installation's four ports taken.
 func TestInstaller_aSecondInstallationBesideAFirst(t *testing.T) {
-	r := install(t, "DBTRAIL_PORT=8091", "BUSY_PORTS=8090 9090 3309")
+	r := install(t, "DBTRAIL_PORT=8091", "BUSY_PORTS=8090 9090 3309 5433")
 	if r.failed || r.upCalls != 1 {
 		t.Fatalf("the second installation did not start (failed=%v, up=%d):\n%s", r.failed, r.upCalls, r.out)
 	}
@@ -418,7 +528,7 @@ func TestInstaller_aSecondInstallationBesideAFirst(t *testing.T) {
 	if !strings.Contains(c, `"127.0.0.1:8091:8090"`) {
 		t.Errorf("the web interface is not on the port asked for:\n%s", portLines(c))
 	}
-	for _, taken := range []string{`"127.0.0.1:8090:8090"`, `"127.0.0.1:9090:9090"`, `"127.0.0.1:3309:3309"`} {
+	for _, taken := range []string{`"127.0.0.1:8090:8090"`, `"127.0.0.1:9090:9090"`, `"127.0.0.1:3309:3309"`, `"127.0.0.1:5433:5433"`} {
 		if strings.Contains(c, taken) {
 			t.Errorf("a port the first installation holds is published again (%s):\n%s", taken, portLines(c))
 		}
