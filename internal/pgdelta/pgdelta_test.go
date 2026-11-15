@@ -224,7 +224,7 @@ func TestKeysAreBytes(t *testing.T) {
 	}
 	base := filepath.Join(t.TempDir(), "it's a folder", "t.parquet")
 	cols := []string{"k", "val"}
-	keys := []string{"a", "A", "e", "é", "x", "x ", "a|b", `a\b`, "it's", `q"q`, ""}
+	keys := []string{"a", "A", "e", "é", "x", "x ", "a|b", `a\b`, "it's", `q"q`, "", "b", "B", "o", "ö"}
 	var rows [][]cell
 	for _, k := range keys {
 		rows = append(rows, []cell{v(k), v("base")})
@@ -239,6 +239,12 @@ func TestKeysAreBytes(t *testing.T) {
 		change{key: KeyOf([]string{"a|b"}), row: []cell{v("a|b"), v("new")}},
 		change{key: KeyOf([]string{`a\b`}), del: true},
 		change{key: KeyOf([]string{""}), row: []cell{v(""), v("new")}},
+		// Two look-alikes changed by the SAME pair, to different rows: a
+		// comparison that folded them would give each row to both keys.
+		change{key: KeyOf([]string{"b"}), row: []cell{v("b"), v("lower")}},
+		change{key: KeyOf([]string{"B"}), row: []cell{v("B"), v("upper")}},
+		change{key: KeyOf([]string{"o"}), row: []cell{v("o"), v("plain")}},
+		change{key: KeyOf([]string{"ö"}), del: true},
 	)
 	// A later pair changes the lower-case one: it must not replace "A".
 	d1, r1 := pair(t, db, base, 1, cols, []string{"k"},
@@ -246,7 +252,8 @@ func TestKeysAreBytes(t *testing.T) {
 		change{key: KeyOf([]string{"e"}), del: true},
 	)
 	want(t, "look-alike keys", state(t, db, base, []string{d0, d1}, []string{r0, r1}, cols...),
-		"[] [new]", "[A] [new]", "[a] [newer]", "[a|b] [new]", "[it's] [base]", `[q"q] [base]`, "[x] [base]", "[é] [new]")
+		"[] [new]", "[A] [new]", "[a] [newer]", "[a|b] [new]", "[it's] [base]", `[q"q] [base]`, "[x] [base]", "[é] [new]",
+		"[B] [upper]", "[b] [lower]", "[o] [plain]")
 }
 
 // KeyOf is the key the capture writes: the same text event.BuildPKValues
