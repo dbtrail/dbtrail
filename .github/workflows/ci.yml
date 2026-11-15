@@ -987,7 +987,7 @@ jobs:
           # BINTRAIL_REQUIRE_PSQL its absence is a failure, not a skip.
           command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
           BINTRAIL_REQUIRE_PSQL=1 go test -tags=integration -race -p 1 -count=1 -v \
-            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
+            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
           grep -q -- '--- PASS: TestIntegrationPGRouter/psql ' /tmp/pg-console-it.out \
             || { echo "FATAL: psql did not run against the PostgreSQL router — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGRouter ' /tmp/pg-console-it.out \
@@ -996,6 +996,8 @@ jobs:
             || { echo "FATAL: the PostgreSQL scheduled snapshot update test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGCaptureStatus ' /tmp/pg-console-it.out \
             || { echo "FATAL: the PostgreSQL capture status test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '^--- PASS: TestIntegrationPGNewTableIsIncluded_2759 ' /tmp/pg-console-it.out \
+            || { echo "FATAL: the PostgreSQL new-table test did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography
