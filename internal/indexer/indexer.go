@@ -887,6 +887,15 @@ func EnsureSchema(db *sql.DB) error {
 		return err
 	}
 
+	// pg_capture_from_lsn (#2843): where a PostgreSQL capture started
+	// reading from, written once by its first checkpoint. The baseline gap
+	// check reads it (query.OldestIndexedEvent).
+	if err := ensureColumn(db, "stream_state", "pg_capture_from_lsn",
+		`ALTER TABLE stream_state ADD COLUMN pg_capture_from_lsn BIGINT UNSIGNED DEFAULT NULL COMMENT 'where this PostgreSQL capture started reading its source from (#2843): the replication slot position at its first run, so every commit at or after it was delivered to the index unless a loss is on record; written once, kept by every later checkpoint, removed by bintrail-pg reset; lets a fold prove that capture was attached before a snapshot was taken; NULL = MySQL, a capture built before #2843, or a start that could not be read'`,
+	); err != nil {
+		return err
+	}
+
 	// source_identity names the server whose binlog coordinates the
 	// checkpoint carries (MySQL @@server_uuid, MariaDB "server_id:<n>"), so a
 	// resume compares binlog file numbers only against a checkpoint of the

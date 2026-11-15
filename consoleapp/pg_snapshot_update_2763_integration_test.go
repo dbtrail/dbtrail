@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +99,7 @@ func TestIntegrationPGSnapshotUpdate(t *testing.T) {
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
+	logs := captureSlogFor(t)
 
 	_, source, exec1 := pgTestSource(t, ctx, pgUpdTable, pgUpdSlot, pgUpdPub, "id int PRIMARY KEY, status text, amount numeric(10,2)")
 	exec1("INSERT INTO " + pgUpdTable + " VALUES (1, 'new', 10.50), (2, 'new', 20.00), (3, 'new', 30.00)")
@@ -246,6 +248,14 @@ func TestIntegrationPGSnapshotUpdate(t *testing.T) {
 	// The full read is untouched: it is what a restore to that moment reads.
 	if got := pgUpdRows(t, firstFile); !reflect.DeepEqual(got, before) {
 		t.Fatalf("the update changed the previous snapshot: %v, want %v", got, before)
+	}
+
+	// Capture was attached before the snapshot was taken, and it recorded
+	// where it started: the update must not warn of a gap between the
+	// snapshot and the table's first change, which is after it only because
+	// nothing changed in between (#2843).
+	if out := logs.String(); strings.Contains(out, "possible gap between baseline") {
+		t.Fatalf("the update warned of a gap that capture's recorded start rules out:\n%s", out)
 	}
 
 	updates := 0

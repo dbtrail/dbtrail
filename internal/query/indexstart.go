@@ -3,7 +3,10 @@ package query
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // IndexStart is the earliest surviving LIVE indexed event's coordinates — the
@@ -66,4 +69,51 @@ func OldestIndexedEvent(db *sql.DB) (IndexStart, bool) {
 	}
 	s.BinlogFile = file.String
 	return s, true
+}
+
+// CoverageStart is where an index's coverage of its source is known to
+// begin, for the baseline gap check: OldestIndexedEvent, and for a
+// PostgreSQL source (flavor "postgres") the start its capture recorded
+// (#2843) when that is earlier, or when no event survives. Any other flavor
+// is OldestIndexedEvent unchanged, and reads nothing else.
+func CoverageStart(db *sql.DB, flavor string) (IndexStart, bool) {
+	oldest, ok := OldestIndexedEvent(db)
+	if db == nil || flavor != "postgres" {
+		return oldest, ok
+	}
+	if from, has := pgCaptureStart(db); has && (!ok || oldest.StartPos == 0 || from.StartPos < oldest.StartPos) {
+		return from, true
+	}
+	return oldest, ok
+}
+
+// pgCaptureStart is where a PostgreSQL capture started reading its source
+// from (stream_state.pg_capture_from_lsn, #2843), as an IndexStart; ok false
+// when the index holds none: a MySQL or MariaDB index, a capture that
+// predates the column (error 1054 included: readers never migrate), a start
+// that could not be read, or a read that failed.
+//
+// Unlike the oldest surviving event it does not move with rotation, and it
+// is there before the table at hand has changed at all: a capture attached
+// before a snapshot was taken starts at or before the snapshot's floor,
+// which is the proof the gap check looks for and that a quiet table's first
+// event, necessarily after the snapshot, can never give.
+func pgCaptureStart(db *sql.DB) (IndexStart, bool) {
+	var from sql.Null[uint64]
+	err := db.QueryRow("SELECT pg_capture_from_lsn FROM stream_state WHERE id = 1 AND flavor = 'postgres'").Scan(&from)
+	if err != nil {
+		// No row is an index of another flavor, or none; 1054 one that
+		// predates the column. Anything else is a read that failed, said,
+		// since without it the gap check keeps a warning it could rule out.
+		var me *mysql.MySQLError
+		if !errors.Is(err, sql.ErrNoRows) && !(errors.As(err, &me) && me.Number == 1054) {
+			slog.Debug("where the PostgreSQL capture started could not be read; the gap check uses the oldest surviving event alone", "error", err)
+		}
+		return IndexStart{}, false
+	}
+	if !from.Valid || from.V == 0 {
+		return IndexStart{}, false
+	}
+	lsn := from.V
+	return IndexStart{BinlogFile: fmt.Sprintf("%X/%X", uint32(lsn>>32), uint32(lsn)), StartPos: lsn}, true
 }

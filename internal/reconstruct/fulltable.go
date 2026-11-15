@@ -1871,7 +1871,7 @@ func ReconstructTable(
 	// first event is carried out of the fold because its page is gone by now.
 	if fold.First != nil {
 		flavor := query.SourceFlavor(db)
-		start, startOK := query.OldestIndexedEvent(db)
+		start, startOK := query.CoverageStart(db, flavor)
 		WarnBaselineFirstEventGap(flavor, anchorMeta, *fold.First, start, startOK, schema, table)
 	}
 

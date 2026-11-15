@@ -629,7 +629,7 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 			// earliest surviving event is the evidence that can: at-or-before
 			// the anchor proves capture was already running when the baseline
 			// was taken. See reconstruct.DecideBaselineGap.
-			start, startOK := query.OldestIndexedEvent(db)
+			start, startOK := query.CoverageStart(db, flavor)
 			if reconstruct.DecideBaselineGap(flavor, bmeta, first, start, startOK) == reconstruct.GapVerdictUnproven {
 				slog.Warn("possible gap between baseline and first indexed event — the index's earliest surviving event also starts past the baseline anchor, so coverage of the window between them cannot be proven (capture may have started after the baseline, or older events may have been rotated out)",
 					"baseline_file", bmeta.BinlogFile,
