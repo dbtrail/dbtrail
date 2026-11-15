@@ -166,6 +166,9 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	if err := CheckGeneratedColumns(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}
+	if err := CheckDeferrableKeys(startupCtx, queryConn, c.cfg.Publication); err != nil {
+		return err
+	}
 	if err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}

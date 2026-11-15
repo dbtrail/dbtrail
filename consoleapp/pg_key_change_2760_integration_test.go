@@ -398,8 +398,11 @@ func TestIntegrationPGSnapshotUpdateDeferrableKey(t *testing.T) {
 	defer cancel()
 	logs := captureSlogFor(t)
 
-	_, source, exec1 := pgTestSource(t, ctx, pgKdTable, pgKdSlot, pgKdPub,
-		"id int, v text, PRIMARY KEY (id) DEFERRABLE INITIALLY IMMEDIATE")
+	// The key is made deferrable AFTER capture starts (below): the capture
+	// refuses to start on a table whose key is deferrable
+	// (pgcapture.CheckDeferrableKeys), so what the fold's own refusal is
+	// left to catch is a key changed while capture runs.
+	_, source, exec1 := pgTestSource(t, ctx, pgKdTable, pgKdSlot, pgKdPub, "id int PRIMARY KEY, v text")
 	exec1("INSERT INTO " + pgKdTable + " VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')")
 	const sourceQuery = "SELECT id::text, v FROM " + pgKdTable + " ORDER BY id"
 
@@ -426,6 +429,7 @@ func TestIntegrationPGSnapshotUpdateDeferrableKey(t *testing.T) {
 		t.Fatalf("save the index connection: %v", err)
 	}
 	pgTestStart(t, ctx, mon, bootDSN, source, e)
+	exec1("ALTER TABLE " + pgKdTable + " DROP CONSTRAINT " + pgKdTable + "_pkey, ADD PRIMARY KEY (id) DEFERRABLE INITIALLY IMMEDIATE")
 
 	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
 		t.Fatalf("start the full read: %v", err)
