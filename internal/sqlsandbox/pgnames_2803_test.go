@@ -50,9 +50,12 @@ func TestPostgresColumnNames_2803(t *testing.T) {
 			"?column? upper coalesce nullif greatest least"},
 		// A cast of something with no name takes the type's.
 		{"SELECT (a + 1)::int, CAST(a + 1 AS bigint), 1::smallint, 1::numeric(10,2), 1::decimal, 1::double precision, '1'::boolean, '2020-01-01'::date, " +
-			"DATE '2020-01-01', '2020-01-01'::timestamp, '2020-01-01'::timestamptz, INTERVAL '1 day', TRUE, '{}'::json, '{1}'::int[], '00:00'::time, " +
+			"DATE '2020-01-01', '2020-01-01'::timestamp, '2020-01-01'::timestamptz, INTERVAL '1 day', 'yes'::bool, '{}'::json, '{1}'::int[], '00:00'::time, " +
 			"'x'::bytea, '00000000-0000-0000-0000-000000000000'::uuid",
 			"int4 int8 int2 numeric numeric float8 bool date date timestamp timestamptz interval bool json int4 time bytea uuid"},
+		// The words TRUE and FALSE have no name, though the engine's parser
+		// writes each as a cast.
+		{"SELECT TRUE, false, NOT true, true::int, 'true'::boolean", "?column? ?column? ?column? int4 bool"},
 		// A cast of something with a name keeps that name.
 		{"SELECT a::int, count(*)::int, lower(b)::int, a::bigint::int, (a + 1)::bigint::int, t.a::bigint" + from + " GROUP BY a, b", "a count lower a int4 a"},
 		// Not sure, so the engine's name stays: a type the engine holds as
@@ -125,12 +128,12 @@ func TestPostgresColumnNames_unreadableTree(t *testing.T) {
 		return map[string]any{"node": map[string]any{"type": "SELECT_NODE", "select_list": list}}
 	}
 	for name, stmt := range map[string]any{
-		"nil":            nil,
-		"a string":       "SELECT 1",
-		"no node":        map[string]any{},
-		"no select list": sel(nil),
-		"an empty list":  sel([]any{}),
-		"not a list":     sel("count"),
+		"nil":                          nil,
+		"a string":                     "SELECT 1",
+		"no node":                      map[string]any{},
+		"no select list":               sel(nil),
+		"an empty list":                sel([]any{}),
+		"not a list":                   sel("count"),
 		"an item that is not an object": sel([]any{"count"}),
 	} {
 		if got := postgresColumnNames(stmt, 1); got != nil {

@@ -101,6 +101,9 @@ func pgFigureName(n any) (name string, strength int, sure bool) {
 		if try, _ := v["try_cast"].(bool); try {
 			return "", 0, false
 		}
+		if pgBooleanWord(v) {
+			return "", 0, true
+		}
 		name, strength, sure = pgFigureName(v["child"])
 		if !sure || strength > 1 {
 			return name, strength, sure
@@ -149,6 +152,26 @@ func pgFigureName(n any) (name string, strength int, sure bool) {
 		}
 	}
 	return "", 0, false
+}
+
+// pgBooleanWord says whether a cast is how the engine's parser writes the
+// words TRUE and FALSE: the text 't' or 'f' cast to BOOLEAN. PostgreSQL
+// gives the word no name (?column?). A statement that writes that very cast
+// itself ('t'::boolean, which PostgreSQL heads bool) parses to the same tree
+// and is read as the word.
+func pgBooleanWord(cast map[string]any) bool {
+	if typ, _ := cast["cast_type"].(map[string]any); typ["id"] != "BOOLEAN" {
+		return false
+	}
+	child, _ := cast["child"].(map[string]any)
+	if child["class"] != "CONSTANT" {
+		return false
+	}
+	val, _ := child["value"].(map[string]any)
+	if typ, _ := val["type"].(map[string]any); typ["id"] != "VARCHAR" {
+		return false
+	}
+	return val["value"] == "t" || val["value"] == "f"
 }
 
 // pgFunctionName is the name of a function or window call. count(*) is

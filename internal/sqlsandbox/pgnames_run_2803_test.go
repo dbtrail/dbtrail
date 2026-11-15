@@ -42,8 +42,8 @@ func TestPostgresNames_onlyForTheSessionThatAsks(t *testing.T) {
 			[]string{"a", "CAST((a + 1) AS INTEGER)", "CAST(a AS BIGINT)", "lower(b)"}},
 		// A star: the engine's names, whole.
 		{"SELECT *, count(*) OVER ()" + from + " ORDER BY a",
-			[]string{"a", "b", "count_star() OVER ()"},
-			[]string{"a", "b", "count_star() OVER ()"}},
+			[]string{"a", "b", "count() OVER ()"},
+			[]string{"a", "b", "count() OVER ()"}},
 	} {
 		pg, pgRows := names(c.sql, Session{PostgresRules: true, PostgresNames: true})
 		if !reflect.DeepEqual(pg, c.pg) {
