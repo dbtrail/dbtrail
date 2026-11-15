@@ -38,6 +38,9 @@ func TestReconstructTables_PGSnapshotBeforeTheIndexsFirstHour(t *testing.T) {
 			want: map[string]string{"1": "after-the-snapshot", "3": "newbie", "5": "keep"}},
 		{name: "the point is before the first hour too", from: 0x400, snap: -30 * time.Second, at: -10 * time.Second,
 			want: map[string]string{"1": "after-the-snapshot", "5": "keep"}},
+		// An hour from the first one on is judged as it always was: the two
+		// hours after the first hold no change of this window.
+		{name: "an hour after the first is still judged", from: 0x400, snap: -30 * time.Second, at: 2*time.Hour + 10*time.Minute},
 		{name: "capture started after the floor", from: 0x501, snap: -30 * time.Second, at: 10 * time.Minute},
 		{name: "no recorded start", snap: -30 * time.Second, at: 10 * time.Minute},
 		{name: "history unknown", from: 0x400, snap: -30 * time.Second, at: 10 * time.Minute,
