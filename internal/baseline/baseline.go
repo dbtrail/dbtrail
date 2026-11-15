@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -482,15 +483,18 @@ func processTable(ctx context.Context, tf TableFiles, outPath string, cfg Writer
 	}
 
 	// latin1 text columns are decoded to UTF-8 on the way into the Parquet
-	// file (#2634), when the dump holds them as stored bytes.
-	var isLatin1 []bool
-	if dumpIsBinary(tf) {
-		createSQL, err := os.ReadFile(tf.SchemaFile)
-		if err != nil {
-			return 0, fmt.Errorf("read schema for its character sets: %w", err)
-		}
-		isLatin1 = Latin1Columns(string(createSQL), cols)
+	// file (#2634) when a data file holds them as stored bytes, which is
+	// decided per file (fileHoldsStoredLatin1).
+	createSQL, err := os.ReadFile(tf.SchemaFile)
+	if err != nil {
+		return 0, fmt.Errorf("read schema for its character sets: %w", err)
 	}
+	isLatin1 := Latin1Columns(string(createSQL), cols)
+	if !slices.Contains(isLatin1, true) {
+		isLatin1 = nil
+	}
+	storedLatin1 := true // the current data file's, set before each is read
+	textCheck := newTextCheck(tf, string(createSQL), cols)
 
 	// Create writer.
 	w, err := NewWriter(outPath, cols, cfg)
@@ -540,10 +544,19 @@ func processTable(ctx context.Context, tf TableFiles, outPath string, cfg Writer
 				"(generated columns are excluded from both) — dump/schema mismatch for %s.%s",
 				len(values), tf.SchemaFile, len(cols), tf.Database, tf.Table)
 		}
-		if err := w.WriteRow(decodeLatin1Row(values, nulls, isLatin1), nulls); err != nil {
+		written, stored := values, values
+		if isLatin1 != nil {
+			if storedLatin1 {
+				written = decodeLatin1Row(values, nulls, isLatin1)
+			} else {
+				stored = storedLatin1Row(values, nulls, isLatin1)
+			}
+		}
+		textCheck.row(written, nulls)
+		if err := w.WriteRow(written, nulls); err != nil {
 			return err
 		}
-		hasher.AddStrings(values, nulls)
+		hasher.AddStrings(stored, nulls)
 		rowCount++
 		return nil
 	}
@@ -552,6 +565,13 @@ func processTable(ctx context.Context, tf TableFiles, outPath string, cfg Writer
 		if ctx.Err() != nil {
 			return rowCount, ctx.Err()
 		}
+		if isLatin1 != nil {
+			storedLatin1, err = fileHoldsStoredLatin1(ctx, dataFile, tf.Format, isLatin1)
+			if err != nil {
+				return rowCount, err
+			}
+		}
+		textCheck.setFile(dataFile)
 		switch tf.Format {
 		case "tab":
 			if err := ReadTabFile(dataFile, len(cols), rowFn); err != nil {
