@@ -27,7 +27,7 @@ and set REPLICA IDENTITY; bintrail reads — it never writes to your source.
 
 | On the PostgreSQL source | Required? | Notes |
 |---|---|---|
-| **PostgreSQL 14+** | Yes (declared) | 14/15/16/17 tested in CI. 13 may work but is EOL — best-effort only. |
+| **PostgreSQL 15+** | Yes (declared) | 15/16/17/18 tested in CI. 13 and 14 may work but are past end of life, best-effort only. |
 | **`wal_level = logical`** | **Yes** | Server-wide; needs a **restart**. Validated at startup — bintrail-pg refuses to start otherwise. |
 | **A role with `REPLICATION`** | **Yes** | Used for the replication stream and to create the slot. |
 | **`REPLICA IDENTITY FULL`** on each captured table | **Yes** | The PostgreSQL analog of MySQL's `binlog_row_image = FULL`. Validated per table; refuses to start otherwise. |
@@ -860,7 +860,7 @@ The following types are **round-trip tested** two ways — insert → capture �
 canonical `::text` is byte-for-byte identical (`TestOne_PGTypeRoundTripMatrix`), and
 through the **baseline+delta reconstruct fold** under deliberately skewed session
 GUCs (`TestOne_PGTypeMatrixThroughReconstructFold`) — in `internal/pgstreamrun`,
-run across the PG 14/15/16/17 CI matrix:
+run across the PG 15/16/17/18 CI matrix:
 
 | Category | Types | Notes |
 |---|---|---|

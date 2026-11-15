@@ -334,8 +334,10 @@ func TestBuildPGReport_CoverageWarnings_Integration(t *testing.T) {
 		// UNLOGGED members outright — the check must PASS, not WARN "could not check".
 		// On a pre-15 server this same path exercises the pg_publication_namespace
 		// degrade: the catalog does not exist there (SQLSTATE 42P01) and the guard
-		// must treat that as "no schema members", never as a probe failure — the
-		// PG 14 CI cell runs this against a server that genuinely lacks the catalog.
+		// must treat that as "no schema members", never as a probe failure. CI has
+		// no pre-15 server since 14 left the matrix, so only a best-effort 13/14
+		// server reaches that branch live; pgcapture's isUndefinedTable unit test
+		// pins how the error is recognized.
 		const pub = "bintrail_cov_plain_pub"
 		const tbl = "doctor_cov_plain"
 		dropAll := func() {

@@ -25,7 +25,7 @@ import (
 //
 // Needs BOTH a live MySQL index (BINTRAIL_TEST_DSN) and a live PostgreSQL source
 // (BINTRAIL_TEST_PG_DSN); it skips on the MySQL-only jobs and runs in the
-// PostgreSQL 14–17 matrix — this is the "PG CI matrix" the acceptance asks for.
+// PostgreSQL 15–18 matrix — this is the "PG CI matrix" the acceptance asks for.
 func TestPGWire_PostgresSourceRoundTrip(t *testing.T) {
 	pgDSN := testutil.SkipIfNoPostgres(t)
 	testutil.SkipIfNoMySQL(t)

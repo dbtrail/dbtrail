@@ -62,7 +62,7 @@ jobs:
   # integration-postgres-source, integration-postgres-extensions) do NOT: a
   # job-level `if:` is evaluated BEFORE matrix expansion, so a false condition
   # means the matrix never expands and the specifically-suffixed required contexts
-  # (`integration (8.0)`, `integration-postgres-source (14)`, etc.) never get
+  # (`integration (8.0)`, `integration-postgres-source (15)`, etc.) never get
   # created at all — verified live via a throwaway PR, whose mergeStateStatus
   # stayed BLOCKED with those 6 contexts permanently missing even though every
   # other job showed "skipped". Those jobs instead push the same `if:`
@@ -844,14 +844,14 @@ jobs:
     needs: changes
     runs-on: ubuntu-22.04
 
-    # Spans the supported PostgreSQL range: 14 (declared minimum — PG13 is EOL)
-    # through 17. fail-fast: false so a regression on one version still reports
-    # the others, matching the MySQL matrix. (PG18-specific stream changes — e.g.
-    # STORED generated columns now in the WAL — are tracked with the beta work.)
+    # Spans the supported PostgreSQL range: 15 (declared minimum; 14 reached
+    # end of life in November 2026 and, like 13, is best-effort only) through
+    # 18. fail-fast: false so a regression on one version still reports the
+    # others, matching the MySQL matrix.
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["14", "15", "16", "17"]
+        postgres: ["15", "16", "17", "18"]
 
     env:
       BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
