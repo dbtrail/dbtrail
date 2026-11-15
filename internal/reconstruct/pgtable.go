@@ -155,7 +155,10 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 	rep.FetchDuration, rep.FoldDuration = fold.FetchDuration, fold.FoldDuration
 	if fold.First != nil {
 		start, startOK := query.CoverageStart(db, "postgres")
-		WarnBaselineFirstEventGap("postgres", bmeta, *fold.First, start, startOK, schema, table)
+		// The start is about the index; whether capture held THIS table when
+		// the snapshot was taken is what the index records of it (#2862).
+		entry := TableCaptureEntry(db, "postgres", bmeta, schema, table)
+		WarnBaselineFirstEventGapForTable("postgres", bmeta, *fold.First, start, startOK, entry, schema, table)
 	}
 
 	localPath, cleanup, err := materializeBaselineLocalIn(ctx, p.baselinePath, cfg.DuckDBTuning, cfg.DownloadDir, cfg.SpaceCheck)
