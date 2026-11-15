@@ -149,7 +149,7 @@ func TestFoldPage_pgKeyChange_shapes_2760(t *testing.T) {
 			pgUpd(1, 0x100, "3", "4", "was three"), pgUpd(2, 0x100, "2", "3", "was two"), pgUpd(3, 0x100, "1", "2", "was one")},
 			map[string]string{"1": "", "2": "was one", "3": "was two", "4": "was three"}},
 		{"one transaction: a row is changed and then moved away", []query.ResultRow{
-			pgUpd(1, 0x100, "1", "1", "touched"), pgUpd(2, 0x100, "1", "2", "moved")},
+			pgEv(1, 0x100, event.EventUpdate, pgImg("1", "before"), pgImg("1", "touched")), pgEv(2, 0x100, event.EventUpdate, pgImg("1", "touched"), pgImg("2", "moved"))},
 			map[string]string{"1": "", "2": "moved"}},
 		{"one transaction: a row moves away and a new row is inserted under its key", []query.ResultRow{
 			pgUpd(1, 0x100, "1", "2", "moved"), pgIns(2, 0x100, "1", "new")},
@@ -201,7 +201,8 @@ func TestFoldPage_pgKeyChange_sameTransactionAmbiguity_2760(t *testing.T) {
 		{"a row is inserted and its key then leaves", []query.ResultRow{
 			pgIns(1, lsn, "5", "new"), pgUpd(2, lsn, "5", "6", "moved")}, "5"},
 		{"a row is inserted, updated, and its key then leaves", []query.ResultRow{
-			pgIns(1, lsn, "5", "new"), pgUpd(2, lsn, "5", "5", "touched"), pgUpd(3, lsn, "5", "6", "moved")}, "5"},
+			pgIns(1, lsn, "5", "new"), pgEv(2, lsn, event.EventUpdate, pgImg("5", "new"), pgImg("5", "touched")),
+			pgEv(3, lsn, event.EventUpdate, pgImg("5", "touched"), pgImg("6", "moved"))}, "5"},
 	}
 	for _, c := range cases {
 		for how, pages := range arrivals(c.evs) {
@@ -226,7 +227,8 @@ func TestFoldPage_pgKeyChange_sameTransactionAmbiguity_2760(t *testing.T) {
 // The same sequences with no key change among them are left as they always
 // were: an INSERT, an UPDATE and a DELETE of one key in one transaction.
 func TestFoldPage_pgSameTransactionWithoutKeyChange_2760(t *testing.T) {
-	evs := []query.ResultRow{pgIns(1, 0x700, "5", "new"), pgUpd(2, 0x700, "5", "5", "touched"), pgDel(3, 0x700, "5"), pgIns(4, 0x700, "5", "again")}
+	evs := []query.ResultRow{pgIns(1, 0x700, "5", "new"), pgEv(2, 0x700, event.EventUpdate, pgImg("5", "new"), pgImg("5", "touched")),
+		pgEv(3, 0x700, event.EventDelete, pgImg("5", "touched"), nil), pgIns(4, 0x700, "5", "again")}
 	for how, pages := range arrivals(evs) {
 		t.Run(how, func(t *testing.T) {
 			wantPGState(t, pkColsIntID(), foldPGPages(t, pkColsIntID(), pages...), map[string]string{"5": "again"})

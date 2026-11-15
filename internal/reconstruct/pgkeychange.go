@@ -1,7 +1,10 @@
 package reconstruct
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -269,16 +272,63 @@ func pgKeyChangeErr(schema, table, before, after, why string) error {
 // was there, its departure, and then a row arriving. There the key never
 // holds two rows, deferrable or not. That includes the order a non-deferrable
 // key needs for `SET id = id + 1` to succeed at all (3→4, 2→3, 1→2: each key
-// loses its row, then receives one). A sequence with no key change in it is
-// left as it always was.
+// loses its row, then receives one).
 //
 // The price: one row whose key changes twice in one transaction, or a row
 // inserted and then re-keyed in the same transaction, is refused too.
 //
+// # The same, with no key change among the events
+//
+// A deferrable key lets two rows share a key value inside a transaction
+// without any key change: `INSERT INTO t VALUES (1, 'new')` while the old
+// row 1 is still there, then a DELETE of the OLD row. The events are
+// INSERT(1) then DELETE(1) at one commit LSN; the fold keeps the last one,
+// and the copy has no row 1 where the source has the new one.
+//
+// Here the events do carry what tells the cases apart, because every image
+// is a whole row (REPLICA IDENTITY FULL): the changes of one key in one
+// transaction describe ONE row exactly when each change starts from what the
+// change before it left. An INSERT starts from no row; an UPDATE and a DELETE
+// start from their before-image; an INSERT and an UPDATE leave their
+// after-image, a DELETE leaves no row. The record keeps what the key's first
+// change started from and left, and what its last change left (pgRowState: a
+// hash of the image), and every further change is linked to it (pgRowLink).
+// A link that does not hold refuses: a row inserted where one was left, a row
+// changed or deleted where none was left, a before-image that is not the row
+// the change before it left, and an image that cannot be compared (no
+// before-image, a value that is not text).
+//
+// What is ordinary stays applied, because there every link holds: insert a
+// row and delete it, insert and update it, delete a row and insert another
+// under its key, update twice.
+//
+// One exception to a link that does not hold: the transaction delivered
+// again. Capture saves its position after it commits rows to the index, so a
+// crash between the two makes PostgreSQL send whole transactions a second
+// time (pgstreamrun, "indexed twice after a crash"), and one cut at the
+// batch size can leave its beginning behind. The second delivery starts with
+// the very change the first one started with, so a change that does not link
+// but equals the key's first change of the transaction (same start, same
+// result) starts the sequence again instead of refusing it.
+//
+// What this cannot see: two rows that are equal in EVERY column, key
+// included. Inserting an exact copy of a row and deleting the original reads,
+// change for change, like inserting a row and deleting it again. Only the
+// catalog knows the key is deferrable, and the index does not record that.
+//
+// This rule runs for every change of a PostgreSQL fold, halves included. The
+// rule above stays beside it for sequences with a key change: there two rows
+// that differ only in the key (1,'a') and (2,'a') make "1 to 2, then 2 to 3"
+// link perfectly while being two rows.
+//
 // "Later" is by event id, the order inside one LSN (laterInWAL). The record
 // is kept beside the change map and travels with a change to disk
 // (spillRecord.Txn), so events of one transaction that land on different
-// pages, or on both sides of a drain, are still seen together.
+// pages, or on both sides of a drain, are still seen together. Changes of
+// one transaction reach the fold in event id order (one commit time, and the
+// fetch is ordered by time and id); records are put together by their id
+// ranges, so any other order ends in the same answer or, when a change falls
+// inside a range already linked, in a refusal, never in a link skipped.
 type pgKeyTxn struct {
 	// LSN is the transaction's commit LSN; 0 is no record.
 	LSN uint64
@@ -291,6 +341,85 @@ type pgKeyTxn struct {
 	Half bool
 	// From and To are the keys of one such key change, for the refusal.
 	From, To string
+
+	// FirstID is the lowest event id of the transaction seen at this key.
+	FirstID uint64
+	// FirstNeeds and FirstLeaves are what the change with FirstID started
+	// from and left; Leaves is what the change with MaxID left.
+	FirstNeeds, FirstLeaves, Leaves pgRowState
+	// Why is set when the changes do not describe one row: the reason, in
+	// words for the refusal.
+	Why string
+}
+
+// pgRowState is what a key holds before or after one change, as far as the
+// change's images say: no row, a row (by a hash of its whole image), or
+// something that cannot be compared.
+type pgRowState struct {
+	Kind   uint8
+	Hi, Lo uint64
+}
+
+const (
+	pgStateNone    uint8 = iota + 1 // no row
+	pgStateRow                      // a row; Hi and Lo are its hash
+	pgStateUnknown                  // an image that cannot be compared
+)
+
+// pgImageState is the state a whole row image stands for. Every value of a
+// PostgreSQL image is PostgreSQL's own text, or nil for NULL; an image with
+// any other value (the unchanged-TOAST marker, a number) and a missing image
+// cannot be compared exactly and are pgStateUnknown. The hash is over the
+// column names in order with each value's kind and length, so no two images
+// share an encoding: 128 bits of SHA-256.
+func pgImageState(img map[string]any) pgRowState {
+	if img == nil {
+		return pgRowState{Kind: pgStateUnknown}
+	}
+	cols := make([]string, 0, len(img))
+	for c := range img {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	h := sha256.New()
+	var n [binary.MaxVarintLen64 + 1]byte
+	put := func(tag byte, s string) {
+		n[0] = tag
+		h.Write(n[:1+binary.PutUvarint(n[1:], uint64(len(s)))])
+		h.Write([]byte(s))
+	}
+	for _, c := range cols {
+		put('c', c)
+		switch v := img[c].(type) {
+		case nil:
+			put('n', "")
+		case string:
+			put('s', v)
+		default:
+			return pgRowState{Kind: pgStateUnknown}
+		}
+	}
+	sum := h.Sum(nil)
+	return pgRowState{Kind: pgStateRow, Hi: binary.BigEndian.Uint64(sum[:8]), Lo: binary.BigEndian.Uint64(sum[8:16])}
+}
+
+// pgRowLink says why a change that starts from needs cannot follow one that
+// left leaves, or "" when it can: both are no row, or both are the same row.
+func pgRowLink(leaves, needs pgRowState) string {
+	switch {
+	case leaves.Kind == pgStateUnknown || needs.Kind == pgStateUnknown ||
+		leaves.Kind == 0 || needs.Kind == 0:
+		return "two changes of it follow each other and their row images cannot be compared (an image is missing or holds a value that is not text)"
+	case leaves.Kind == pgStateNone && needs.Kind == pgStateNone:
+		return ""
+	case leaves.Kind == pgStateRow && needs.Kind == pgStateNone:
+		return "a row is inserted where the change before it had left a row"
+	case leaves.Kind == pgStateNone && needs.Kind == pgStateRow:
+		return "a row is changed or deleted where the change before it had left no row"
+	case leaves == needs:
+		return ""
+	}
+	return "a change or a delete starts from a row that is not the row the change before it left"
 }
 
 // pgKeyTxnOf is the record of one filed row: ev itself, or one half of it
@@ -301,10 +430,18 @@ func pgKeyTxnOf(ev *query.ResultRow, half bool, from, to string) (pgKeyTxn, bool
 	if !ok {
 		return pgKeyTxn{}, false
 	}
-	t := pgKeyTxn{LSN: lsn, MaxID: ev.EventID, Half: half}
-	if ev.EventType == event.EventInsert {
+	t := pgKeyTxn{LSN: lsn, MaxID: ev.EventID, FirstID: ev.EventID, Half: half}
+	needs, leaves := pgRowState{Kind: pgStateUnknown}, pgRowState{Kind: pgStateUnknown}
+	switch ev.EventType {
+	case event.EventInsert:
 		t.MinArrival = ev.EventID
+		needs, leaves = pgRowState{Kind: pgStateNone}, pgImageState(ev.RowAfter)
+	case event.EventUpdate:
+		needs, leaves = pgImageState(ev.RowBefore), pgImageState(ev.RowAfter)
+	case event.EventDelete:
+		needs, leaves = pgImageState(ev.RowBefore), pgRowState{Kind: pgStateNone}
 	}
+	t.FirstNeeds, t.FirstLeaves, t.Leaves = needs, leaves, leaves
 	if half {
 		t.From, t.To = from, to
 	}
@@ -313,8 +450,11 @@ func pgKeyTxnOf(ev *query.ResultRow, half bool, from, to string) (pgKeyTxn, bool
 
 // with is t after one more record of the same key: a later transaction
 // replaces it, an earlier one is dropped (its result is overwritten whole by
-// the later transaction's), the same transaction is added up. The order the
-// records come in does not matter.
+// the later transaction's), the same transaction is added up: the two
+// records are two runs of event ids, linked where the earlier run ends and
+// the later one starts (pgKeyTxn says how, and what a run that starts like
+// the transaction's first change means). Runs that overlap cannot be linked
+// and set Why.
 func (t pgKeyTxn) with(n pgKeyTxn) pgKeyTxn {
 	switch {
 	case n.LSN > t.LSN:
@@ -322,6 +462,24 @@ func (t pgKeyTxn) with(n pgKeyTxn) pgKeyTxn {
 	case n.LSN < t.LSN:
 		return t
 	}
+	a, b := t, n // a is the earlier run
+	if n.MaxID < t.FirstID {
+		a, b = n, t
+	}
+	switch {
+	case t.Why != "":
+	case n.Why != "":
+		t.Why = n.Why
+	case a.MaxID >= b.FirstID:
+		t.Why = "its changes cannot be put in the order they were made in (two of them carry event ids that overlap)"
+	default:
+		why := pgRowLink(a.Leaves, b.FirstNeeds)
+		if why != "" && b.FirstNeeds == a.FirstNeeds && b.FirstLeaves == a.FirstLeaves {
+			why = "" // the transaction delivered again, from its first change
+		}
+		t.Why = why
+	}
+	t.FirstID, t.FirstNeeds, t.FirstLeaves, t.Leaves = a.FirstID, a.FirstNeeds, a.FirstLeaves, b.Leaves
 	t.MaxID = max(t.MaxID, n.MaxID)
 	if n.MinArrival != 0 && (t.MinArrival == 0 || n.MinArrival < t.MinArrival) {
 		t.MinArrival = n.MinArrival
@@ -332,16 +490,31 @@ func (t pgKeyTxn) with(n pgKeyTxn) pgKeyTxn {
 	return t
 }
 
-// ambiguous reports the sequence pgKeyTxn's comment refuses: a key change
-// among the key's events of the transaction, and a row arriving at the key
-// before the key's last event.
+// ambiguous reports a sequence pgKeyTxn's comment refuses: a key change
+// among the key's events of the transaction and a row arriving at the key
+// before the key's last event (movedTwice), or changes that do not describe
+// one row (Why).
 func (t pgKeyTxn) ambiguous() bool {
+	return t.movedTwice() || t.Why != ""
+}
+
+func (t pgKeyTxn) movedTwice() bool {
 	return t.Half && t.MinArrival != 0 && t.MinArrival < t.MaxID
 }
 
 // pgSameTxnErr is the refusal of an ambiguous sequence: the #782 text for
 // the key change involved, then why.
 func pgSameTxnErr(schema, table, key string, t pgKeyTxn) error {
+	if !t.movedTwice() {
+		// No key change to name: the changes of one key do not describe one
+		// row. The reason comes first, for a page that shows the start of a
+		// message.
+		return fmt.Errorf("full-table reconstruct: %s.%s: inside one transaction (commit LSN %s) the changes of primary key %q do not describe one row: %s. "+
+			"When a primary key is DEFERRABLE two rows can hold the same key value inside a transaction, "+
+			"and the captured changes do not say which of them is left at the end. "+
+			"A new snapshot of the table (`bintrail-pg baseline`, or a full backup from the web interface) starts after that transaction",
+			schema, table, lsnText(t.LSN), key, t.Why)
+	}
 	return pgKeyChangeErr(schema, table, t.From, t.To, fmt.Sprintf(
 		"inside one transaction (commit LSN %s) the key %q received a row and was changed again afterwards. "+
 			"When a primary key is DEFERRABLE two rows can hold the same key value inside a transaction, "+
