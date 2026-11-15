@@ -781,9 +781,6 @@ type ctlServer struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Kind       string `json:"kind"`
-	// Flavor is the source's family: mysql, mariadb or postgres. Empty from
-	// a DBTrail older than the field, which is read as not PostgreSQL.
-	Flavor     string `json:"flavor,omitempty"`
 	HasSource  bool   `json:"has_source"`
 	SourceHost string `json:"source_host"`
 	SourcePort string `json:"source_port"`
@@ -808,6 +805,9 @@ type ctlServer struct {
 	// pending, stopped, failed... Empty for a server with no source, and on
 	// a DBTrail that records nothing itself (`serve`).
 	MonitorState string `json:"monitor_state,omitempty"`
+	// Flavor is the source's family: mysql, mariadb or postgres. Empty from
+	// a DBTrail older than the field, which is read as not PostgreSQL.
+	Flavor string `json:"flavor,omitempty"`
 }
 
 // mode is how `server list` shows the mode saved for the server's statements
