@@ -16062,6 +16062,32 @@ function changeSQLPort(panel, servers, send, btn, rt, keep) {
   });
 }
 
+// postgresInstall reports whether the servers this DBTrail answers for are
+// PostgreSQL (#2773): at least one with a source, and every one of those
+// PostgreSQL. An installation serves one family; an empty list, one that was
+// not read, and a mixed one from before that rule are read as MySQL, whose
+// panel is the one this page always drew.
+function postgresInstall(servers) {
+  let found = false;
+  for (const s of servers || []) {
+    if (!s || !s.has_source) continue;
+    if (s.flavor !== "postgres") return false;
+    found = true;
+  }
+  return found;
+}
+
+// pgPortLine is the psql line for the PostgreSQL port: the server's name is
+// the database, any user will do, and sslmode=require is what makes the
+// connection encrypted or nothing (the port does not turn away a client that
+// asks for no TLS). 5433 is the PostgreSQL router's usual port; nothing tells
+// this page another one. A name that is not safe inside the quotes is left to
+// the person.
+function pgPortLine(host, name) {
+  const db = /^[A-Za-z0-9._@:-]+$/.test(name || "") ? name : "<server-name>";
+  return 'psql "host=' + (host || "127.0.0.1") + " port=5433 dbname=" + db + ' user=app sslmode=require"';
+}
+
 // sqlClientPanel renders the MySQL port: could not check, not here (a
 // read-only console), off, a setting this console cannot change, or on (the
 // ready-to-copy mysql line for the server picked in the sidebar, the user
@@ -16086,11 +16112,22 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
   // live: the element already on the page that this render will be moved
   // into (redrawSQLPanel); the buttons act on that one.
   live = live || wrap || panel;
+  // PostgreSQL servers (#2773): the same setting and password, answered by
+  // the PostgreSQL router. The panel says psql and its port, and draws no
+  // Engine Routing and no proxy logins, which forward to a MySQL source.
+  const pg = postgresInstall(servers);
   // route: "card" when read routing is drawn, "idle" when the port is off
   // and turning it on is what comes first, "" when this page cannot say
   // whether the port is on or can never have it (nothing is promised then).
   const done = (route) => {
     if (!split) return panel;
+    if (pg) {
+      wrap.append(cnSection("PostgreSQL client", "Read your copy from a PostgreSQL client",
+        "Your tables as DBTrail keeps them, answered by DBTrail's copy. Nothing here touches your database.", "pink"), panel);
+      wrap.append(el("section", { class: "ov-panel cn-routep sqlc is-idle" },
+        el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins send statements on to a MySQL or MariaDB server. A PostgreSQL server's port answers from the copy alone." })));
+      return wrap;
+    }
     wrap.append(cnSection("MySQL client", "Read your copy from a MySQL client",
       "Your tables as DBTrail keeps them, answered by DBTrail's copy. Nothing here touches your database.", "pink"), panel);
     wrap.append(cnSection("Engine Routing · optional", "Run MySQL and DuckDB on one port",
@@ -16133,7 +16170,9 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
       body.append(el("p", { class: "cn-sql-row", text: "Off. Someone who can change settings can turn it on here." }));
       return done("idle");
     }
-    body.append(el("p", { class: "cn-sql-row", text: "Off. Turn it on and your usual MySQL client can read any table as it was at a chosen moment." }));
+    body.append(el("p", { class: "cn-sql-row", text: pg
+      ? "Off. Turn it on and your usual PostgreSQL client can read the copy of your tables."
+      : "Off. Turn it on and your usual MySQL client can read any table as it was at a chosen moment." }));
     if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error }));
     const on = el("button", { class: "btn cn-cta", type: "button", text: "Turn on" });
     on.onclick = () => changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: true } }), on, rt);
@@ -16149,9 +16188,9 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
   head.append(el("b", { class: "cn-state is-on", text: "On" }));
   if (mayChange) {
     const fresh = el("button", { class: "btn btn-sm", type: "button", text: "New password" });
-    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working, and MySQL clients connected to the port are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
+    fresh.onclick = () => { if (ask("Create a new password?\n\nThe current one stops working, and " + (pg ? "" : "MySQL ") + "clients connected to the port are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback/password", { method: "POST", body: {} }), fresh, rt); };
     const off = el("button", { class: "btn btn-sm btn-danger", type: "button", text: "Turn off" });
-    off.onclick = () => { if (ask("Turn the port off?\n\nMySQL clients connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off, rt); };
+    off.onclick = () => { if (ask("Turn the port off?\n\n" + (pg ? "Clients" : "MySQL clients") + " connected to it are disconnected.")) changeSQLPort(live, servers, () => api("/api/flashback", { method: "PUT", body: { enabled: false } }), off, rt); };
     head.append(el("div", { class: "cn-head-acts" }, fresh, off));
   }
   // Nothing answers, and why: said first, above a command that would fail.
@@ -16159,14 +16198,15 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
   if (fb.error) body.append(el("p", { class: "cn-sql-row cn-sql-err", text: fb.error }));
   // The command, drawn as the terminal line it is: the one thing on this
   // panel a reader came for.
-  const line = "mysql -h " + shellWord(flashbackHost(at)) + " -P " + at.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
+  const line = pg ? pgPortLine(flashbackHost(at), user)
+    : "mysql -h " + shellWord(flashbackHost(at)) + " -P " + at.port + " -u " + (user ? shellWord(user) : "<server-name>") + " -p";
   // The row inside is the command and its Copy, nothing else: the prompt
   // sign is decoration and sits beside it.
   body.append(el("div", { class: "cn-term" },
     el("span", { class: "cn-term-p", "aria-hidden": "true", text: "$" }),
     el("div", { class: "cn-urlrow" },
       el("code", { class: "stg-code cn-url cn-term-line", text: line }),
-      el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(line, "mysql command") }))));
+      el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(line, pg ? "psql command" : "mysql command") }))));
   // The address is the router's to say. Without its answer the command
   // above carries the usual port, and says so.
   // Four ways to have no address, each said as what it is: the asking
@@ -16176,10 +16216,18 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     : rt && rt.status ? "The router that serves the port did not say an address this page can read, so "
     : rt && rt.configured ? "The router that serves the port did not answer, so "
     : "This DBTrail was not told where the router that serves the port is, so ") + "3309 above is the port's usual number, not a confirmed one.";
-  const portBad = !at.confirmed && (rt === null || !!(rt && rt.configured));
+  // The router asked above is the MySQL port's: what it says, or does not,
+  // is nothing about the PostgreSQL router.
+  const portBad = !pg && !at.confirmed && (rt === null || !!(rt && rt.configured));
   // What the line is made of, as facts: a label, the value large, a few
   // words. The sentences these replaced are in the fold below.
-  const facts = el("div", { class: "cn-facts" },
+  const facts = pg ? el("div", { class: "cn-facts" },
+    cnFact("Database", el("code", { text: user || "<server name>" }),
+      user ? "the server picked in the sidebar" : "the name of a server in the sidebar (none yet)"),
+    cnFact("Password", reveal ? "Shown below" : "Shown once",
+      reveal ? "copy it now" : fb.password_created_at ? "created " + utcLabel(fb.password_created_at) : "when it was created"),
+    cnFact("Reads", "Every schema", "read-only, the copy of every server in the sidebar"),
+    cnFact("Port", "5433", "the PostgreSQL router's usual number")) : el("div", { class: "cn-facts" },
     cnFact("User", el("code", { text: user || "<server name>" }),
       user ? "the server picked in the sidebar" : "the name of a server in the sidebar (none yet)"),
     cnFact("Password", reveal ? "Shown below" : "Shown once",
@@ -16202,6 +16250,18 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
       el("div", { class: "cn-urlrow" },
         el("code", { class: "stg-code cn-url cn-term-line", text: reveal }),
         el("button", { class: "btn btn-sm cn-term-copy", type: "button", text: "Copy", onclick: () => copyText(reveal, "Port password") }))));
+  }
+  if (pg) {
+    body.append(cnFine("What to run, and other machines",
+      el("p", { class: "form-hint" }, "Database ",
+        user ? el("code", { text: user }) : el("code", { text: "<server name>" }),
+        user ? ", the server picked in the left sidebar. " : ", the name of a server in the left sidebar (none yet). ",
+        "The user can be anything: the password is what opens the port."),
+      reveal ? null : el("p", { class: "form-hint", text: "Password: the one shown when it was created" +
+        (fb.password_created_at ? ", " + utcLabel(fb.password_created_at) : "") + ". It cannot be shown again." }),
+      el("p", { class: "form-hint", text: "This password reads the copy of every server in the sidebar. It is not an account on your PostgreSQL: DBTrail made it, and it opens only this port. Nothing is sent to your PostgreSQL, and a statement that is not a read is refused." }),
+      el("p", { class: "form-hint", text: "5433 is the port the PostgreSQL router listens on unless it was started with another (BINTRAIL_PG_ROUTER_LISTEN). It answers on this machine only unless that setting says otherwise; for another machine, open a tunnel to it. Keep sslmode=require in the line: the login never sends the password, and the port does not refuse a client that asks for no encryption." })));
+    return done("card");
   }
   const rbody = routeCard ? el("div", { class: "cn-sql-body" }) : body;
   if (routeCard) routeCard.append(rbody);
