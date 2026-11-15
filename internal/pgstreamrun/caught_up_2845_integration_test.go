@@ -50,6 +50,22 @@ func caughtUpStamp(t *testing.T, db *sql.DB) string {
 	return s.String
 }
 
+// settledStamp returns the stamp once two readings of it 300 ms apart agree.
+func settledStamp(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s := caughtUpStamp(t, db)
+		time.Sleep(300 * time.Millisecond)
+		if caughtUpStamp(t, db) == s {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stamp never held still")
+		}
+	}
+}
+
 func waitCaughtUp(t *testing.T, what string, limit time.Duration, done func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(limit)
@@ -125,9 +141,11 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 
 	// The source moves on and the capture does not: the stamp stays where it
 	// was, and grows old.
+	// A reading taken before the source moved can still be saved after it
+	// (the checkpoint that writes it may be slow), so the stamp is taken once
+	// it holds still.
 	flushed.Store(9000)
-	time.Sleep(100 * time.Millisecond)
-	held := caughtUpStamp(t, db)
+	held := settledStamp(t, db)
 	if held == "" {
 		t.Fatal("the checkpoints with nothing new to stamp erased the stamp")
 	}
@@ -138,8 +156,10 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 
 	// A reading that fails is not one: reaching 9000 while the source cannot
 	// be read stamps nothing.
+	// Long enough for a failed reading to replace the last good one, on a
+	// slow machine too.
 	failing.Store(true)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	send(sentMarkerAt(9000))
 	time.Sleep(200 * time.Millisecond)
 	if now := caughtUpStamp(t, db); now != held {
