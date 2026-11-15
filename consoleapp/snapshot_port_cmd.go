@@ -47,7 +47,14 @@ var portCmd = &cobra.Command{
 
 Connect with the mysql client. The user is the server's name:
 
-  mysql -h 127.0.0.1 -P 3309 -u shop -p`,
+  mysql -h 127.0.0.1 -P 3309 -u shop -p
+
+With PostgreSQL servers the same setting and password open the PostgreSQL
+port (5433), and the server's name is the database:
+
+  psql "host=127.0.0.1 port=5433 dbname=shop user=app sslmode=require"
+
+There, routing, mode and max-behind do not apply: the copy answers alone.`,
 }
 
 var (
@@ -438,6 +445,56 @@ func mysqlLineUser(name string) string {
 	return name
 }
 
+// postgresInstall reports whether the servers DBTrail answers for are
+// PostgreSQL: at least one with a source, and every one of those PostgreSQL
+// (an installation serves one family, #2815). A list that did not load, an
+// empty one and a mixed one from before that rule are read as MySQL, whose
+// lines are the ones these commands always printed.
+func postgresInstall(servers []ctlServer, err error) bool {
+	if err != nil {
+		return false
+	}
+	found := false
+	for _, s := range servers {
+		if !s.HasSource {
+			continue
+		}
+		if s.Flavor != console.FlavorPostgres {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
+// postgresOnlyRefusal is why a setting of the MySQL port has nothing to act
+// on for a PostgreSQL server.
+const postgresOnlyRefusal = "its port answers from the copy alone, as of the copy's last update: nothing is forwarded to the source, and there is no fresh mode or lag limit for it yet"
+
+// printPortPG is printPort for an installation of PostgreSQL servers
+// (#2773): the setting and its password are the same, what answers is the
+// PostgreSQL router on 5433 (unless it was given another port, which this
+// command cannot see), and there is no Engine Routing to report.
+func printPortPG(out io.Writer, p ctlPort, db string) {
+	if !*p.Enabled {
+		fmt.Fprintln(out, "The port for SQL clients is off. Turn it on:  bintrail-console port on")
+		return
+	}
+	who := "The database is a server's name (bintrail-console server list)"
+	if db != "<server name>" {
+		who = "The database is the server's name"
+	}
+	host := p.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	fmt.Fprintf(out, "The port for SQL clients is on. PostgreSQL clients connect to the PostgreSQL port (5433, unless the PostgreSQL router was given another). %s, and the user can be anything:\n\n  psql \"host=%s port=5433 dbname=%s user=app sslmode=require\"\n\n", who, host, db)
+	fmt.Fprintln(out, "The copy answers every statement; nothing is sent to your PostgreSQL.")
+	if p.Notice != "" {
+		fmt.Fprintf(out, "\n%s\n", p.Notice)
+	}
+}
+
 func printPort(out io.Writer, p ctlPort, user string) {
 	if !*p.Enabled {
 		fmt.Fprintln(out, "The MySQL port is off. Turn it on:  bintrail-console port on")
@@ -471,11 +528,17 @@ func runPortSet(ctx context.Context, c *ctlClient, on bool, out io.Writer) error
 	if *p.Enabled != on {
 		return fmt.Errorf("DBTrail took the request and the MySQL port is still %s", map[bool]string{true: "on", false: "off"}[*p.Enabled])
 	}
+	servers, listErr := listServers(ctx, c)
+	pg := postgresInstall(servers, listErr)
 	user := ""
 	if on {
-		user = portUser(ctx, c)
+		user = portUserOf(servers, listErr)
 	}
-	printPort(out, p, user)
+	if pg {
+		printPortPG(out, p, user)
+	} else {
+		printPort(out, p, user)
+	}
 	if !on {
 		return nil
 	}
@@ -487,7 +550,9 @@ func runPortSet(ctx context.Context, c *ctlClient, on bool, out io.Writer) error
 	default:
 		return errors.New("the port is on and DBTrail reports no password for it. Make one:  bintrail-console port new-password")
 	}
-	if p.Error != "" {
+	// The error is the MySQL router's: it says nothing about the PostgreSQL
+	// one, which is another service.
+	if p.Error != "" && !pg {
 		return errors.New("the MySQL port is saved as on and is not answering: " + p.Error)
 	}
 	return nil
@@ -504,6 +569,10 @@ func runPortStatus(ctx context.Context, c *ctlClient, out io.Writer) error {
 	user := ""
 	if *p.Enabled {
 		user = portUserOf(servers, listErr)
+	}
+	if postgresInstall(servers, listErr) {
+		printPortPG(out, p, user)
+		return nil
 	}
 	printPort(out, p, user)
 	printMaxBehindList(out, servers, listErr)
@@ -523,6 +592,13 @@ func runPortNewPassword(ctx context.Context, c *ctlClient, out io.Writer) error 
 }
 
 func runPortRouting(ctx context.Context, c *ctlClient, on bool, out io.Writer) error {
+	// Before anything is changed: Engine Routing forwards to a MySQL or
+	// MariaDB source, and a PostgreSQL has none to forward to.
+	if on {
+		if servers, lerr := listServers(ctx, c); postgresInstall(servers, lerr) {
+			return errors.New("Engine Routing sends what the copy cannot answer to a MySQL or MariaDB source. The servers here are PostgreSQL: " + postgresOnlyRefusal)
+		}
+	}
 	p, err := portAnswer(ctx, c, http.MethodPut, "/api/flashback", map[string]bool{"routing": on})
 	if err != nil {
 		return err
@@ -616,6 +692,8 @@ func runPortMode(ctx context.Context, c *ctlClient, name, want string, wait time
 		return fmt.Errorf("%q was given where DBTrail starts and has no choice of its own: it answers in fast mode unless SQL_FRESH=on (BINTRAIL_SQL_TAILS=on) says fresh for every server. Add it as a server (dbtrail server add) to choose", s.Name)
 	case !s.HasSource:
 		return fmt.Errorf("%q has no source database, so the MySQL port does not answer for it", s.Name)
+	case s.Flavor == console.FlavorPostgres:
+		return fmt.Errorf("%q is a PostgreSQL: %s", s.Name, postgresOnlyRefusal)
 	}
 	if want != "" {
 		var saved struct {

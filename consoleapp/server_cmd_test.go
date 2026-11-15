@@ -180,7 +180,7 @@ func TestResolveAddInput(t *testing.T) {
 		{name: "port is zero", flags: addFlags{Host: "db1", Port: "0", User: "u"}, wantErr: "1 to 65535"},
 		{name: "port is too big", flags: addFlags{Host: "db1", Port: "70000", User: "u"}, wantErr: "1 to 65535"},
 		{name: "bad port in the option file", flags: addFlags{}, cnf: "[client]\nhost=h\nport=abc\nuser=u\npassword=p\n", wantErr: "1 to 65535"},
-		{name: "postgres", flags: addFlags{Host: "db1", User: "u", Flavor: "postgres"}, wantErr: "mysql or mariadb"},
+		{name: "a flavor DBTrail does not record", flags: addFlags{Host: "db1", User: "u", Flavor: "oracle"}, wantErr: "mysql, mariadb or postgres"},
 		{name: "option file with a socket and no host", flags: addFlags{}, cnf: "[client]\nsocket=/tmp/mysql.sock\nuser=u\npassword=p\n", wantErr: "socket"},
 		{name: "host typed as nothing", flags: addFlags{}, ask: fakeAsker{tty: true, lines: map[string]string{"Host": ""}}, wantErr: "no host"},
 	}
