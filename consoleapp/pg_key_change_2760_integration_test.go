@@ -486,48 +486,53 @@ func TestIntegrationPGSnapshotUpdateDeferrableKey(t *testing.T) {
 		}
 		return st.Last != nil && !st.Running, "running"
 	})
-	// A refused update starts a full read in its place: wait for whichever
-	// job publishes the second snapshot.
+	// A refused update may start a full read in its place: let whatever the
+	// schedule started come to rest.
 	b.watchers.Wait()
 	sup.postRefresh.Wait()
-	pgTestWait(t, "a second snapshot", 3*time.Minute, func() (bool, string) {
+	pgTestWait(t, "the schedule at rest", 3*time.Minute, func() (bool, string) {
 		st := b.ScheduleState(e.ID)
-		n := len(pgUpdSnapshots(t, snapshots))
-		full := sup.Status(e.ID).State
-		return n >= 2 && !st.Running && full != "running", "snapshots=" + strconv.Itoa(n) + " full_read=" + full
+		full, upd := sup.Status(e.ID).State, sup.RefreshStatus(e.ID).State
+		return !st.Running && full != "running" && upd != "running", "full_read=" + full + " update=" + upd
 	})
 	b.watchers.Wait()
 	sup.postRefresh.Wait()
 
-	all := pgUpdSnapshots(t, snapshots)
-	newest := filepath.Join(snapshots, all[len(all)-1])
 	st := b.ScheduleState(e.ID)
-	reasons := st.LastFallbackReason
-	for _, rt := range st.LastFallbackRefusedTables {
-		reasons += " | " + rt.Name + ": " + rt.Reason
+	upd := sup.RefreshStatus(e.ID)
+	said := upd.LastError + "\n" + st.LastFallbackReason + "\n" + st.LastSkipReason
+	for _, rt := range append(upd.RefusedTables, st.LastFallbackRefusedTables...) {
+		said += "\n" + rt.Name + ": " + rt.Reason
+	}
+	if st.Last != nil {
+		said += "\n" + st.Last.LastError
 	}
 
-	// The source is the judge, whichever way the copy was made.
-	got := pgKdRows(t, newest)
-	if !reflect.DeepEqual(got, src) {
-		t.Fatalf("the newest copy and the source differ (the update fell back to a full read: %v; reasons: %s).\nthe copy holds %d rows:\n%s\nthe source holds %d rows:\n%s",
-			st.LastFallbackAt != "", reasons, len(got), pgKcDump(got), len(src), pgKcDump(src))
+	// The source is the judge of every copy made after the changes,
+	// whichever way it was made.
+	all := pgUpdSnapshots(t, snapshots)
+	for _, name := range all[1:] {
+		got := pgKdRows(t, filepath.Join(snapshots, name))
+		if !reflect.DeepEqual(got, src) {
+			t.Fatalf("the copy %s and the source differ.\nthe copy holds %d rows:\n%s\nthe source holds %d rows:\n%s\nwhat the schedule said: %s",
+				name, len(got), pgKcDump(got), len(src), pgKcDump(src), said)
+		}
 	}
-	if st.LastFallbackAt == "" {
+	if upd.State == "succeeded" && len(all) == 2 && st.LastFallbackAt == "" {
 		t.Logf("the update followed the changes of a deferrable key and holds the source's rows")
 		return
 	}
-	// Refused: for this reason. The page's copy of a reason is cut to a
-	// few hundred characters, so the whole text is looked for in the log
-	// too.
-	said := reasons + "\n" + logs.String()
-	for _, want := range []string{"inside one transaction", "DEFERRABLE"} {
-		if !strings.Contains(said, want) {
-			t.Errorf("the update was refused, but not for the deferrable-key reason (missing %q): %s", want, reasons)
-		}
+	// No copy from the update: then it was refused, and for this reason. The
+	// page's copy of a reason is cut to a few hundred characters, so the
+	// whole text is looked for in the log too.
+	if upd.State != "failed" {
+		t.Fatalf("the update neither published the source's rows nor failed: state %q, snapshots %v, said: %s", upd.State, all, said)
 	}
-	if len(all) != 2 {
-		t.Errorf("want the first full read and the full read taken in the update's place, got %v", all)
+	whole := said + "\n" + logs.String()
+	for _, want := range []string{"PK-changing UPDATE", "inside one transaction", "DEFERRABLE"} {
+		if !strings.Contains(whole, want) {
+			t.Errorf("the update was refused, but not for the deferrable-key reason (missing %q): %s", want, said)
+		}
 	}
 }
 
