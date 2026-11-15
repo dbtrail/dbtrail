@@ -26,7 +26,7 @@ import (
 // shim.yaml tenant and time travel alone.
 //
 // What a client gets is the copy's SQL over a PostgreSQL wire: the simple
-// query protocol, every column sent as text (a value written the way
+// and the extended query protocol (extended.go), every column sent as text (a value written the way
 // PostgreSQL writes one of its kind, pgtext.Cell), and nothing that writes.
 // The password crosses the wire in clear text, so the host binds loopback.
 //
