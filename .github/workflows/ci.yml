@@ -868,9 +868,9 @@ jobs:
       # (#2813): this is the only job with a MySQL index AND a PostgreSQL
       # source, and the console's tests that need both run here or nowhere.
       # Step-level because of the matrix — see the note on the `changes` job.
-      # A console PR starts the two servers on one cell only, the one its
-      # tests run on; DATA is what the data-path suite below still waits for.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || (needs.changes.outputs.console == 'true' && matrix.postgres == '16') }}
+      # A console PR starts the two servers only on the cells its tests run
+      # on (16 and 18); DATA is what the data-path suite below still waits for.
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || (needs.changes.outputs.console == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')) }}
       DATA: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
@@ -974,13 +974,14 @@ jobs:
       # The console's tests that need a MySQL index and a PostgreSQL source at
       # once (#2813). In the MySQL shards they skip for want of a PostgreSQL,
       # so this is where they run; selected by name, since the rest of
-      # consoleapp's integration tests have their own shards. On one
-      # PostgreSQL version: what they exercise is the console and the wire,
-      # and the snapshot under them is tested on every version above. The
+      # consoleapp's integration tests have their own shards. On two
+      # PostgreSQL versions, 16 and the newest: what they exercise is the
+      # console and the wire, and the snapshot under them is tested on every
+      # version above, but 18 changed how generated columns travel. The
       # tripwire is the point: a renamed test, or a pattern that stops
       # matching, would otherwise leave this step green with nothing run.
       - name: Console tests that need MySQL and PostgreSQL together
-        if: env.RUN == 'true' && matrix.postgres == '16'
+        if: env.RUN == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')
         run: |
           set -o pipefail
           # psql is the client the port is for: the test runs it, and with
