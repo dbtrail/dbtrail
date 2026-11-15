@@ -86,6 +86,10 @@ node --test "$HERE/route_grants.test.mjs"
 echo "==> access profiles hidden in the stock build (access_profiles_hidden.test.mjs)"
 node --test "$HERE/access_profiles_hidden.test.mjs"
 
+# The port panel for PostgreSQL servers (#2773): drawn by the real function.
+echo "==> the port panel for PostgreSQL servers (pg_port_panel_2773.test.mjs)"
+node --test "$HERE/pg_port_panel_2773.test.mjs"
+
 echo "==> build bintrail-console"
 CONSOLE_BIN="${CONSOLE_BIN:-}"
 if [ -z "$CONSOLE_BIN" ]; then
