@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/dbtrail/dbtrail/internal/event"
@@ -404,12 +405,17 @@ func TestIntegrationPGCaptureFromRealSource_2843(t *testing.T) {
 		name       string
 		slotFirst  bool
 		askEarlier bool
+		askLater   bool
 	}{
 		{name: "capture creates the slot"},
 		{name: "the slot is already there", slotFirst: true},
 		// An LSN asked for that is before the slot: PostgreSQL starts at the
 		// slot, and that is what must be on record.
 		{name: "the slot is already there and an earlier LSN is asked for", slotFirst: true, askEarlier: true},
+		// An LSN asked for that is past the slot: PostgreSQL skips to it, so
+		// what lies between the slot and it is not delivered, and the slot's
+		// own position on record would vouch for changes the index never got.
+		{name: "the slot is already there and a later LSN is asked for", slotFirst: true, askLater: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			indexDB, dbName := testutil.CreateTestDB(t)
@@ -461,6 +467,19 @@ func TestIntegrationPGCaptureFromRealSource_2843(t *testing.T) {
 			if tc.askEarlier {
 				startLSN = floor - 64
 			}
+			if tc.askLater {
+				var text string
+				if err := pg.QueryRow(ctx, "SELECT pg_current_wal_flush_lsn()::text").Scan(&text); err != nil {
+					t.Fatalf("the source's position: %v", err)
+				}
+				later, err := pglogrepl.ParseLSN(text)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if startLSN = uint64(later); startLSN <= floor {
+					t.Fatalf("the source at %#x has not moved past the slot at %#x", startLSN, floor)
+				}
+			}
 			life := func() (stop func()) {
 				runCtx, cancel := context.WithCancel(ctx)
 				runErr := make(chan error, 1)
@@ -501,7 +520,12 @@ func TestIntegrationPGCaptureFromRealSource_2843(t *testing.T) {
 			if from == 0 || from > oldest {
 				t.Fatalf("capture started at %#x on record, past its own oldest event at %#x", from, oldest)
 			}
-			if tc.slotFirst && from != floor {
+			switch {
+			case tc.askLater:
+				if from != startLSN {
+					t.Fatalf("capture started at %#x on record, want the LSN it was told to skip to, %#x (the slot was at %#x)", from, startLSN, floor)
+				}
+			case tc.slotFirst && from != floor:
 				t.Fatalf("capture started at %#x on record, want the floor the slot had before it, %#x", from, floor)
 			}
 			stop()
