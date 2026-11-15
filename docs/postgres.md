@@ -541,10 +541,26 @@ What to know:
   [Schema changes on PostgreSQL](#schema-changes-on-postgresql)); otherwise
   the fold cannot tell, and the chain's "every transaction exactly once" holds
   only for what capture received.
-- **A primary-key-changing UPDATE refuses**, including one in the minute
-  before the snapshot, which the fold reads again (see above).
+- **An UPDATE that changes the primary key is applied as a delete of the old
+  key and an insert of the new one**, the way MySQL and MariaDB do it, each
+  ordered against every other change of that key by the commit LSN (and,
+  inside one transaction, by the order the changes were made in). This covers
+  a key changed twice, changed and changed back, moved onto a key that was
+  deleted, and two rows swapping keys. One such change still refuses the
+  table, with the reason in the message, when it cannot be proven whole: the
+  change has no commit LSN in the index, its old row was not captured with
+  every column (the table was not at `REPLICA IDENTITY FULL`), a key column
+  is missing from either row, or the key the index stores for it is not the
+  one its old row spells. A refused change refuses even when a later change
+  overwrote it, and one in the minute before the snapshot, which the fold
+  reads again (see above), counts too.
 - **An unchanged-TOAST marker refuses** on any change the fold reads, even
-  one a later change overwrote.
+  one a later change overwrote. Under `REPLICA IDENTITY FULL`, which capture
+  requires, there is no marker to meet: capture replaces an unchanged large
+  value with the real one from the old row of the same change, for an
+  ordinary UPDATE and for one that changes the key. A marker is only in
+  changes captured without the whole old row, where the value was never
+  captured.
 - **A table with no change is rewritten**, never carried forward or written as
   a delta (`--carry-forward-unchanged` and `--table-deltas` apply to MySQL only):
   the new file must hold the new starting point.

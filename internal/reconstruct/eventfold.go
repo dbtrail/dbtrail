@@ -104,13 +104,14 @@ func retainEvent(ev *query.ResultRow) *query.ResultRow {
 //     of the new one (splitPKChange), both at the UPDATE's own place in the
 //     binary log, so the per-key "last in the binary log wins" rule below
 //     orders each half against every other change of that key, on whichever
-//     page it landed. Two shapes still refuse with the #782 error: a
-//     PostgreSQL window (opts.pg: its rows have no binary log coordinate for
-//     the ordering rule, and its before-image may hold only the key), and an
-//     event whose decoded before-image does not spell the key exactly as the
-//     parser stored it (splitPKChange says why that proof is the gate).
+//     page it landed. What still refuses with the #782 error: an event
+//     whose decoded before-image does not spell the key exactly as the
+//     parser stored it (splitPKChange says why that proof is the gate), and,
+//     in a PostgreSQL window (opts.pg), an event that cannot be proven whole
+//     or has no LSN to be ordered by (#2760, splitPGKeyChange: there the
+//     halves are ordered by commit LSN, laterInWAL).
 //
-// The #592 guard and the two remaining #782 refusals refuse the whole run.
+// The #592 guard and the remaining #782 refusals refuse the whole run.
 // That is deliberate and matches the pre-existing stance for these
 // conditions: the alternative is a dump that loads cleanly and is wrong.
 //
@@ -140,7 +141,13 @@ func foldPage(
 		if err := checkEventToast(*ev); err != nil {
 			return err
 		}
-		halves, err := splitPKChange(ev, schema, table, pkCols, opts.pg)
+		var halves []query.ResultRow
+		var err error
+		if opts.pg {
+			halves, err = splitPGKeyChange(ev, schema, table, pkCols)
+		} else {
+			halves, err = splitPKChange(ev, schema, table, pkCols, false)
+		}
 		if err != nil {
 			return err
 		}
@@ -185,12 +192,14 @@ func foldPage(
 }
 
 // fold files ev under its key unless the map already holds a later change of
-// that key, and reports the key to touched either way.
+// that key, and reports the key to touched either way. Later is laterChange:
+// by binary log position for MySQL and MariaDB rows, by commit LSN for
+// PostgreSQL rows.
 func (r *foldResult) fold(ev *query.ResultRow, touched func(string)) {
 	if touched != nil {
 		touched(ev.PKValues)
 	}
-	if cur, ok := r.Changes[ev.PKValues]; ok && query.LaterInBinlog(cur, ev) {
+	if cur, ok := r.Changes[ev.PKValues]; ok && laterChange(cur, ev) {
 		return
 	}
 	r.Changes[ev.PKValues] = retainEvent(ev)
@@ -198,8 +207,8 @@ func (r *foldResult) fold(ev *query.ResultRow, touched func(string)) {
 
 // foldOptions is what a fold's caller decides for a whole table, not per page.
 type foldOptions struct {
-	// pg folds a PostgreSQL window (foldConfig.PG): a PK-changing UPDATE
-	// keeps refusing there, see splitPKChange.
+	// pg folds a PostgreSQL window (foldConfig.PG): a PK-changing UPDATE is
+	// split by splitPGKeyChange there (#2760), not by splitPKChange.
 	pg bool
 	// touched, when set, is called with every key a page files or declines
 	// to file (the fold kept a later change): what a tail marks changed
@@ -215,10 +224,14 @@ type foldOptions struct {
 // other change of that key in the window. It returns nil for any other event,
 // and the #782 refusal where the split is not safe (#2501):
 //
-//   - pg: a PostgreSQL window. Its rows carry an LSN, not a binary log
+//   - pg: a PostgreSQL event. Its rows carry an LSN, not a binary log
 //     coordinate, so LaterInBinlog cannot order the halves against other
 //     changes of the same key, and under REPLICA IDENTITY DEFAULT the
-//     before-image may hold only the key.
+//     before-image may hold only the key. The full-table fold does not come
+//     here for a PostgreSQL window any more: it calls splitPGKeyChange
+//     (#2760), which checks both. The Iceberg export still passes pg
+//     (exportseam.go) and keeps this refusal: its own fold orders by
+//     LaterInBinlog alone.
 //   - the spelling proof fails (pkSpellingErr, its own text): the decoded
 //     before-image, spelled by event.BuildPKValues, must equal the key the
 //     parser STORED for this event (pk_values is built from the same values
@@ -392,7 +405,8 @@ type foldConfig struct {
 type foldResult struct {
 	// Changes maps pk_values → the LAST event for that PK in the window,
 	// trimmed by retainEvent. Last is by binary log position
-	// (query.LaterInBinlog), not by arrival: pages arrive in ascending
+	// (query.LaterInBinlog; for a PostgreSQL row by commit LSN, laterInWAL:
+	// laterChange is both), not by arrival: pages arrive in ascending
 	// (event_timestamp, event_id) order, and for one row that order can
 	// disagree with the binary log (#2151, see foldPage). A PK touched in
 	// page 1 and again in page 3 holds whichever of the two the binary log
@@ -719,8 +733,8 @@ func verifyFoldCoverage(ctx context.Context, fc foldConfig) error {
 //  2. The #592 unresolved-TOAST guard and the #782 PK-changing-UPDATE
 //     handling, per event, on the untrimmed event: the former refuses, the
 //     latter splits the UPDATE into a DELETE of the old key and an INSERT of
-//     the new one (#2501, splitPKChange), refusing only on a PostgreSQL
-//     window or an unproven key spelling.
+//     the new one (#2501, splitPKChange; #2760, splitPGKeyChange for a
+//     PostgreSQL window), refusing only what those two cannot prove.
 //  3. The fold, via retainEvent.
 //
 // Running these per event over the raw stream is strictly stronger than the

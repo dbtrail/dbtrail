@@ -187,8 +187,8 @@ func (s *changeSpill) finish() error {
 }
 
 // load reads group b back into a change map. For a key written more than
-// once it keeps the change the binary log holds last (query.LaterInBinlog,
-// the fold's own rule: #2151), and the later write between two at the same
+// once it keeps the change the source's log holds last (laterChange, the
+// fold's own rule: #2151, and #2760 for PostgreSQL rows), and the later write between two at the same
 // position. It stops with the changed-rows refusal as soon as the group alone
 // holds more distinct rows than the limit, before reading the rest of it.
 func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
@@ -214,7 +214,7 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 			rec.After[k] = restoreEmpty(v)
 		}
 		row := &query.ResultRow{EventType: rec.Type, EventID: rec.ID, PKValues: rec.PK, RowAfter: rec.After, BinlogFile: rec.File, StartPos: rec.Pos}
-		if cur, ok := m[rec.PK]; ok && query.LaterInBinlog(cur, row) {
+		if cur, ok := m[rec.PK]; ok && laterChange(cur, row) {
 			continue
 		}
 		m[rec.PK] = row
