@@ -342,7 +342,7 @@ func TestFoldPage_pgSameTransaction_firstChangeAgainIsNotARepeat(t *testing.T) {
 		{"the second run stops before the first one's length", []query.ResultRow{
 			stIns(1, "a"), stUpd(2, "a", "b"), stIns(3, "a")}, stWhyRepeatOpen},
 		{"the second run stops one change short", []query.ResultRow{
-			stIns(1, "a"), stUpd(2, "a", "b"), stDel(3, "b"), stIns(4, "a"), stUpd(5, "a", "b")}, stWhyRepeatOpen},
+			stIns(1, "a"), stUpd(2, "a", "b"), stUpd(3, "b", "c"), stIns(4, "a"), stUpd(5, "a", "b")}, stWhyRepeatOpen},
 		{"the first change comes back while the second run is not complete", []query.ResultRow{
 			stIns(1, "a"), stUpd(2, "a", "b"), stIns(3, "a"), stIns(4, "a"), stUpd(5, "a", "b")}, stWhyRepeatOpen},
 	}
@@ -361,6 +361,19 @@ func TestFoldPage_pgSameTransaction_firstChangeAgainIsNotARepeat(t *testing.T) {
 					stRefused(t, err, c.why)
 				})
 			}
+		}
+	}
+}
+
+// Not a first change coming back at all: after a DELETE the key holds no row,
+// so an INSERT of the same row links, and the sequence is one row inserted,
+// changed, deleted and inserted again.
+func TestFoldPage_pgSameTransaction_sameInsertAfterADeleteIsOrdinary(t *testing.T) {
+	evs := []query.ResultRow{stIns(1, "a"), stUpd(2, "a", "b"), stDel(3, "b"), stIns(4, "a"), stUpd(5, "a", "b")}
+	for _, spill := range []bool{false, true} {
+		got, err := stFold(t, [][]query.ResultRow{evs}, spill)
+		if err != nil || got["1"] == nil || got["1"].RowAfter["status"] != "b" {
+			t.Fatalf("spill %v: %v, %v", spill, got, err)
 		}
 	}
 }
