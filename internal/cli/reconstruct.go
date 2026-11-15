@@ -630,7 +630,14 @@ func runReconstruct(cmd *cobra.Command, args []string) error {
 			// the anchor proves capture was already running when the baseline
 			// was taken. See reconstruct.DecideBaselineGap.
 			start, startOK := query.CoverageStart(db, flavor)
-			if reconstruct.DecideBaselineGap(flavor, bmeta, first, start, startOK) == reconstruct.GapVerdictUnproven {
+			// What the index records of this table entering capture (#2862):
+			// read for a PostgreSQL source only.
+			entry := reconstruct.TableCaptureEntry(db, flavor, bmeta, recSchema, recTable)
+			switch reconstruct.DecideBaselineGapForTable(flavor, bmeta, first, start, startOK, entry) {
+			case reconstruct.GapVerdictLateEntry:
+				msg, args := reconstruct.LateEntryWarning(entry, bmeta, first)
+				slog.Warn(msg, args...)
+			case reconstruct.GapVerdictUnproven:
 				slog.Warn("possible gap between baseline and first indexed event — the index's earliest surviving event also starts past the baseline anchor, so coverage of the window between them cannot be proven (capture may have started after the baseline, or older events may have been rotated out)",
 					"baseline_file", bmeta.BinlogFile,
 					"baseline_pos", bmeta.BinlogPos,

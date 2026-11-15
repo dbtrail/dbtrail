@@ -37,6 +37,12 @@ type session struct {
 	tx byte
 	// ext is the extended query protocol's state (extended.go).
 	ext extState
+	// budget is the port's bound on the results it holds while it sends
+	// them (resultbudget.go), nil for none; heldResult is what this
+	// connection's last result counts in it now, before a portal takes it
+	// over (portal.held).
+	budget     *ResultBudget
+	heldResult int64
 }
 
 // txStatus is the status ReadyForQuery reports.
@@ -60,12 +66,16 @@ type pgErr struct {
 func (s *session) handleSimpleQuery(qstr string) error {
 	// A simple query ends the unnamed statement and portal, as on
 	// PostgreSQL.
-	s.ext.dropUnnamed()
+	s.dropUnnamed()
 	if isEmptyQuery(qstr) {
 		s.be.Send(&pgproto3.EmptyQueryResponse{})
 		return s.readyFlush()
 	}
 
+	// Whatever result this statement counts in the port's budget is given
+	// back when this returns: its answer is written by then, or never will
+	// be (the write failed, the client left, the statement was refused).
+	defer s.releaseResult()
 	cols, rows, tag, perr := s.run(qstr)
 	if perr != nil {
 		s.fail(perr)
@@ -116,7 +126,7 @@ func (s *session) run(qstr string) (cols []string, rows [][][]byte, tag string, 
 			tag = "ROLLBACK"
 		}
 		s.tx = 'I'
-		s.ext.dropPortals()
+		s.dropPortals()
 	}
 	return cols, rows, tag, nil
 }
@@ -262,6 +272,18 @@ func (s *session) timeTravelGates(q shim.TimeTravelQuery) *pgErr {
 		return &pgErr{"42501", msg}
 	}
 
+	// A time-travel answer is held like any other while it is sent, so the
+	// port's result budget is asked for it too (#2804): after the statement
+	// was found to be one this connection may send, before the index is read
+	// for it. Only for a statement that would be answered with a row: a
+	// whole table as of a moment and _diff are refused below for what they
+	// are, which sending them again would not change.
+	if (q.Type == shim.TypeFlashback || q.Type == shim.TypeSnapshot) && q.PKColumn != "" {
+		if refusal := s.admitResult(); refusal != nil {
+			return nil, nil, "", refusal
+		}
+	}
+
 	// PK-column validation is shared with the MySQL front-end (#296/#821): a
 	// WHERE whose column is not the table's single-column PK is refused so a
 	// non-PK filter cannot silently return the wrong row.
@@ -287,6 +309,12 @@ func (s *session) timeTravelGates(q shim.TimeTravelQuery) *pgErr {
 func (s *session) resolveTimeTravel(q shim.TimeTravelQuery) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
 	if perr := s.timeTravelGates(q); perr != nil {
 		return nil, nil, "", perr
+	}
+	// A time-travel answer is held like any other while it is sent, so the
+	// port's result budget is asked for it too (#2804): once the statement
+	// passed every refusal of what it is, before the index is read for it.
+	if refusal := s.admitResult(); refusal != nil {
+		return nil, nil, "", refusal
 	}
 	ctx, cancel := s.h.QueryContext()
 	defer cancel()
@@ -316,8 +344,15 @@ func (s *session) resolveTimeTravel(q shim.TimeTravelQuery) (cols []string, rows
 		// the marker's JSON as a value.
 		return nil, nil, "", &pgErr{"XX000", cerr.Error()}
 	}
+	rows = [][][]byte{cells}
+	// Counted from here until it is written; refused when the budget was
+	// taken while the row was read. Before the audit record: a refused
+	// answer served nobody.
+	if refusal := s.holdResult(rows); refusal != nil {
+		return nil, nil, "", refusal
+	}
 	s.h.AuditResolve(q, 1)
-	return cols, [][][]byte{cells}, "SELECT 1", nil
+	return cols, rows, "SELECT 1", nil
 }
 
 // pgResolveError maps the wire-neutral *shim.ResolveError (or a raw data-fault)

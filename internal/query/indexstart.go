@@ -7,6 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/dbtrail/dbtrail/internal/event"
 )
 
 // IndexStart is the earliest surviving LIVE indexed event's coordinates — the
@@ -116,4 +118,63 @@ func pgCaptureStart(db *sql.DB) (IndexStart, bool) {
 	}
 	lsn := from.V
 	return IndexStart{BinlogFile: fmt.Sprintf("%X/%X", uint32(lsn>>32), uint32(lsn)), StartPos: lsn}, true
+}
+
+// CaptureEntry is what an index records about a PostgreSQL table entering
+// capture after a position (#2862). The zero value is "nothing recorded".
+type CaptureEntry struct {
+	// Late: a recorded row says the table was first seen in the stream, or
+	// added to the publication, past the position asked about.
+	Late bool
+	// LSN and Kind are the earliest such row's position and ddl_type.
+	LSN  uint64
+	Kind string
+	// Err is a read that failed: nothing can be said about the table.
+	Err error
+}
+
+// PGTableEnteredCaptureAfter reports whether the index records that
+// schema.table entered a PostgreSQL capture after lsn: a schema change
+// inferred from the stream (#2441) that is a table first seen in it or added
+// to the publication (CREATE TABLE, ALTER PUBLICATION), placed past lsn. The
+// row's position is the commit of the first transaction that showed the
+// table, so a row past a snapshot's floor says capture did not hold the table
+// when the snapshot was taken, as far as the stream could tell.
+//
+// Only a row says so. A table the publication held when capture started has
+// none, and neither has one that entered while capture was stopped, one let
+// in by a wider --schemas/--tables filter at a restart, or any table of an
+// index written before these rows were: for those the answer is the zero
+// value, and the gap check's proof stands as it did.
+//
+// Names are compared with the index's own collation, as the fold reads the
+// table's events: a row for "Orders" answers for "orders" too, which can only
+// add a warning.
+func PGTableEnteredCaptureAfter(db *sql.DB, schema, table string, lsn uint64) CaptureEntry {
+	if db == nil {
+		return CaptureEntry{}
+	}
+	var e CaptureEntry
+	err := db.QueryRow(`
+		SELECT binlog_pos, ddl_type FROM schema_changes
+		WHERE schema_name = ? AND table_name = ?
+		  AND ddl_type IN (?, ?) AND ddl_query LIKE ?
+		  AND binlog_pos > ?
+		ORDER BY binlog_pos ASC, id ASC
+		LIMIT 1`,
+		schema, table, string(event.DDLCreateTable), string(event.DDLAlterPublication),
+		event.InferredDDLPrefix+"%", lsn).Scan(&e.LSN, &e.Kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CaptureEntry{}
+	}
+	if err != nil {
+		// 1146: an index with no schema_changes table holds no such row.
+		var me *mysql.MySQLError
+		if errors.As(err, &me) && me.Number == 1146 {
+			return CaptureEntry{}
+		}
+		return CaptureEntry{Err: err}
+	}
+	e.Late = true
+	return e
 }

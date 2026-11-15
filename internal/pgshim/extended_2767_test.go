@@ -754,3 +754,84 @@ func TestExtended_whatAConnectionHoldsIsBounded(t *testing.T) {
 		t.Fatalf("portals past the budget: %q", got)
 	}
 }
+
+// The rows a portal keeps between one Execute and the next count in the
+// port's result budget while it keeps them, and are given back at every way
+// the portal ends: its last row sent, Close, the end of the block, a failed
+// block's Sync, the connection's end.
+func TestExtended_aSuspendedPortalCountsInTheResultBudget(t *testing.T) {
+	b := NewResultBudget(100) // less than one answer: a held one blocks the next
+	e := &echoLogin{rows: 4}
+	addr := serveAddrCfg(t, Config{Login: e.login, ResultBudget: b})
+	dial := func() *rawConn {
+		t.Helper()
+		c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+		r := &rawConn{t: t, c: c, fe: pgproto3.NewFrontend(c, c)}
+		r.fe.Send(&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber,
+			Parameters: map[string]string{"user": "app", "database": "orders"}})
+		_ = r.fe.Flush()
+		r.until()
+		r.fe.Send(&pgproto3.PasswordMessage{Password: portPassword})
+		_ = r.fe.Flush()
+		r.until()
+		return r
+	}
+	const stmt = "SELECT stmt FROM t"
+	row := "DataRow " + stmt
+	held := func(what string, wantHeld bool) {
+		t.Helper()
+		if got := b.Held() > 0; got != wantHeld {
+			t.Fatalf("%s: the budget holds %d bytes, want held=%v", what, b.Held(), wantHeld)
+		}
+	}
+	suspend := func(r *rawConn, portal string) {
+		t.Helper()
+		want(t, "suspend "+portal, r.send(&pgproto3.Parse{Query: stmt}, &pgproto3.Bind{DestinationPortal: portal},
+			&pgproto3.Execute{Portal: portal, MaxRows: 1}, &pgproto3.Sync{}),
+			"ParseComplete", "BindComplete", row, "PortalSuspended", "ReadyForQuery T")
+	}
+	r := dial()
+	want(t, "begin", r.send(&pgproto3.Query{String: "BEGIN"}), "CommandComplete BEGIN", "ReadyForQuery T")
+
+	// Kept between Executes: counted, and the port refuses the next statement.
+	suspend(r, "c1")
+	held("a suspended portal", true)
+	other := dial()
+	want(t, "another connection while the rows are kept", other.send(&pgproto3.Query{String: stmt}), "Error 53000", "ReadyForQuery I")
+	// The rest sent: given back.
+	want(t, "the rest", r.send(&pgproto3.Execute{Portal: "c1"}, &pgproto3.Sync{}), row, row, row, "CommandComplete SELECT 3", "ReadyForQuery T")
+	held("after the last row", false)
+
+	suspend(r, "c2")
+	want(t, "close", r.send(&pgproto3.Close{ObjectType: 'P', Name: "c2"}, &pgproto3.Sync{}), "CloseComplete", "ReadyForQuery T")
+	held("after Close", false)
+
+	suspend(r, "c3")
+	want(t, "commit", r.send(&pgproto3.Query{String: "COMMIT"}), "CommandComplete COMMIT", "ReadyForQuery I")
+	held("after COMMIT", false)
+
+	want(t, "begin again", r.send(&pgproto3.Query{String: "BEGIN"}), "CommandComplete BEGIN", "ReadyForQuery T")
+	suspend(r, "c4")
+	want(t, "an error in the block", r.send(&pgproto3.Parse{Query: "DELETE FROM t"}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{}),
+		"ParseComplete", "BindComplete", "Error 53000", "ReadyForQuery E")
+	held("after the failed block's Sync", false)
+	want(t, "the block's portal", r.send(&pgproto3.Execute{Portal: "c4"}, &pgproto3.Sync{}), "Error 25P02", "ReadyForQuery E")
+	want(t, "rollback", r.send(&pgproto3.Query{String: "ROLLBACK"}), "CommandComplete ROLLBACK", "ReadyForQuery I")
+
+	// The connection ends with a portal kept: given back.
+	last := dial()
+	want(t, "begin on the last", last.send(&pgproto3.Query{String: "BEGIN"}), "CommandComplete BEGIN", "ReadyForQuery T")
+	suspend(last, "c5")
+	held("a portal on a connection about to end", true)
+	last.c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for b.Held() != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	held("after the connection ended", false)
+}

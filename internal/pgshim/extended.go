@@ -77,6 +77,10 @@ type portal struct {
 	sent int
 	// bytes is about how much memory rows hold.
 	bytes int
+	// held is what rows count in the port's result budget while the portal
+	// keeps them (resultbudget.go): from the run until the last of them is
+	// sent, or the portal ends.
+	held int64
 }
 
 // extState is the extended protocol's state on one connection.
@@ -113,15 +117,39 @@ func (e *extState) portalBytes(skip *portal) int {
 	return n
 }
 
-func (e *extState) dropUnnamed() {
-	delete(e.stmts, "")
-	delete(e.portals, "")
+// dropUnnamed ends the unnamed statement and portal.
+func (s *session) dropUnnamed() {
+	delete(s.ext.stmts, "")
+	s.dropPortal("")
 }
 
 // dropPortals ends every portal: the end of a transaction, explicit or the
-// implicit one a Sync closes.
-func (e *extState) dropPortals() {
-	clear(e.portals)
+// implicit one a Sync closes, and of the connection.
+func (s *session) dropPortals() {
+	for name := range s.ext.portals {
+		s.dropPortal(name)
+	}
+}
+
+// dropPortal ends one portal, and gives back what its kept rows count in the
+// port's result budget. Every way a portal ends goes through here.
+func (s *session) dropPortal(name string) {
+	p, ok := s.ext.portals[name]
+	if !ok {
+		return
+	}
+	delete(s.ext.portals, name)
+	s.releasePortal(p)
+}
+
+// releasePortal gives back what p's rows count in the budget and lets them
+// go.
+func (s *session) releasePortal(p *portal) {
+	if p.held != 0 && s.budget != nil {
+		s.budget.held.Add(-p.held)
+	}
+	// An Execute after this one finds the portal at its end and sends no row.
+	p.held, p.rows, p.sent = 0, nil, 0
 }
 
 // extFail sends an extended-protocol error and discards the rest of the
@@ -260,6 +288,8 @@ func (s *session) handleBind(m *pgproto3.Bind) {
 	if s.ext.portals == nil {
 		s.ext.portals = map[string]*portal{}
 	}
+	// The unnamed portal a new Bind replaces gives back what it kept.
+	s.dropPortal(m.DestinationPortal)
 	s.ext.portals[m.DestinationPortal] = &portal{
 		name: m.DestinationPortal, stmt: st, text: text,
 		// The message's buffer is reused for the next one.
@@ -451,7 +481,18 @@ func (s *session) runPortal(p *portal) *pgErr {
 		return nil
 	}
 	cols, rows, tag, perr := s.run(p.text)
+	// What the statement counted in the port's budget is the portal's from
+	// here: the connection's next statement must not give it back while the
+	// portal still keeps these rows (an Execute with a row limit).
+	held := s.heldResult
+	s.heldResult = 0
+	giveBack := func() {
+		if held != 0 && s.budget != nil {
+			s.budget.held.Add(-held)
+		}
+	}
 	if perr != nil {
+		giveBack()
 		return perr
 	}
 	if p.stmt.rd == readTimeTravel && cols != nil && p.stmt.described >= 0 {
@@ -462,6 +503,7 @@ func (s *session) runPortal(p *portal) *pgErr {
 			// The client decodes the rows by what Describe told it; rows of
 			// another shape would be read into the wrong columns. The words
 			// are PostgreSQL's, which drivers recognize and prepare again on.
+			giveBack()
 			return &pgErr{"0A000", "cached plan must not change result type"}
 		}
 	}
@@ -472,9 +514,10 @@ func (s *session) runPortal(p *portal) *pgErr {
 		}
 	}
 	if s.ext.portalBytes(p)+bytes > maxPortalBytes {
+		giveBack()
 		return &pgErr{"54000", fmt.Sprintf("this connection's open portals would hold more than %d MB of answers, the most it keeps; fetch or close the open ones", maxPortalBytes>>20)}
 	}
-	p.cols, p.rows, p.tag, p.bytes = cols, rows, tag, bytes
+	p.cols, p.rows, p.tag, p.bytes, p.held = cols, rows, tag, bytes, held
 	return nil
 }
 
@@ -527,6 +570,12 @@ func checkResultFormats(p *portal) *pgErr {
 func (s *session) handleExecute(m *pgproto3.Execute) {
 	p, ok := s.ext.portals[m.Portal]
 	if !ok {
+		if s.txStatus() == 'E' {
+			// The failed block's portals were let go at its Sync; to the
+			// client they are refused as on PostgreSQL, for the block.
+			s.extFail(s.abortedRefusal(""))
+			return
+		}
 		s.extFail(&pgErr{"34000", fmt.Sprintf("portal %q does not exist", m.Portal)})
 		return
 	}
@@ -579,6 +628,9 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		s.be.Send(&pgproto3.PortalSuspended{})
 		return
 	}
+	// Every row is sent: what they counted in the budget is given back once
+	// they are written (at the flush that follows), as on the simple path.
+	defer s.releasePortal(p)
 	// The count is this Execute's rows, as PostgreSQL counts them.
 	word, _, _ := strings.Cut(p.tag, " ")
 	s.commandComplete(word + " " + strconv.Itoa(n))
@@ -592,7 +644,7 @@ func (s *session) handleClose(m *pgproto3.Close) {
 	case 'S':
 		s.closeStatement(m.Name)
 	case 'P':
-		delete(s.ext.portals, m.Name)
+		s.dropPortal(m.Name)
 	default:
 		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid CLOSE message subtype %d", m.ObjectType)})
 		return
@@ -609,7 +661,7 @@ func (s *session) closeStatement(name string) {
 	delete(s.ext.stmts, name)
 	for pname, p := range s.ext.portals {
 		if p.stmt == st {
-			delete(s.ext.portals, pname)
+			s.dropPortal(pname)
 		}
 	}
 }
@@ -619,8 +671,11 @@ func (s *session) closeStatement(name string) {
 // portal; then ReadyForQuery says the status.
 func (s *session) handleSync() error {
 	s.ext.skip = false
-	if s.txStatus() == 'I' {
-		s.ext.dropPortals()
+	// Outside a block the Sync ends the implicit transaction, and every
+	// portal with it. In a failed block no portal can run again (25P02):
+	// what they keep is given back now, not at the ROLLBACK.
+	if s.txStatus() != 'T' {
+		s.dropPortals()
 	}
 	return s.readyFlush()
 }

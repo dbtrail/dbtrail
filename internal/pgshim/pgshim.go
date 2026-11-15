@@ -96,6 +96,11 @@ type Config struct {
 	Logger *slog.Logger
 	// MaxConns caps concurrent connections; 0 = unlimited.
 	MaxConns int
+	// ResultBudget bounds the results every connection of the port holds
+	// while it sends them (resultbudget.go); nil = no bound. One for the
+	// port: the config is copied to every connection, the budget it points
+	// at is shared.
+	ResultBudget *ResultBudget
 }
 
 // Serve accepts PostgreSQL wire-protocol connections until ctx is canceled or
@@ -272,7 +277,7 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 	// now returns one whenever the allowlist excludes the connect database.
 	_ = h.UseDB(database)
 
-	sess := &session{be: be, h: h, currentDB: database, logger: logger}
+	sess := &session{be: be, h: h, currentDB: database, logger: logger, budget: cfg.ResultBudget}
 
 	commandLoop(be, sess)
 }
@@ -280,6 +285,10 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 // commandLoop answers the connection's commands until the client leaves or a
 // write fails.
 func commandLoop(be *pgproto3.Backend, sess *session) {
+	// The connection is over when this returns: nothing it counted in the
+	// port's result budget outlives it, a portal's kept rows included.
+	defer sess.releaseResult()
+	defer sess.dropPortals()
 	for {
 		msg, rerr := be.Receive()
 		if rerr != nil {
