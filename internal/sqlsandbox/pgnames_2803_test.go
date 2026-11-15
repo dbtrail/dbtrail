@@ -128,12 +128,12 @@ func TestPostgresColumnNames_unreadableTree(t *testing.T) {
 		return map[string]any{"node": map[string]any{"type": "SELECT_NODE", "select_list": list}}
 	}
 	for name, stmt := range map[string]any{
-		"nil":                          nil,
-		"a string":                     "SELECT 1",
-		"no node":                      map[string]any{},
-		"no select list":               sel(nil),
-		"an empty list":                sel([]any{}),
-		"not a list":                   sel("count"),
+		"nil":                           nil,
+		"a string":                      "SELECT 1",
+		"no node":                       map[string]any{},
+		"no select list":                sel(nil),
+		"an empty list":                 sel([]any{}),
+		"not a list":                    sel("count"),
 		"an item that is not an object": sel([]any{"count"}),
 	} {
 		if got := postgresColumnNames(stmt, 1); got != nil {
