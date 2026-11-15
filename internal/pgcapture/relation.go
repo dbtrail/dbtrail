@@ -72,7 +72,7 @@ type PKResolver func(relationID uint32, schema, table string) ([]metadata.Column
 // i.indkey is an int2vector; it is cast to int2[] before array_position because
 // array_position is declared over anyarray/anyelement and int2vector is a distinct
 // internal type whose implicit coercion to int2[] is not guaranteed across the
-// supported version range (PG14+). The explicit cast removes that version-dependence
+// supported version range (PG15+). The explicit cast removes that version-dependence
 // — without it the ordering query could error on a floor-version server.
 const pkColumnsQuery = `SELECT a.attname
 FROM pg_index i
@@ -123,13 +123,13 @@ type AttrResolver func(relationID uint32, schema, table string) (map[string]Colu
 // columnAttrsQuery reports, per live column of a relation, whether it is a
 // GENERATED ALWAYS identity column and/or a STORED generated column. attnum>0 skips
 // system columns; NOT attisdropped skips dropped ones. attidentity/attgenerated are
-// available on every supported version (PG14+).
+// available on every supported version (PG15+).
 //
 // Intentional scope: attgenerated='s' flags STORED only. PG18 adds VIRTUAL generated
-// columns (attgenerated='v') and publish_generated_columns; those are out of scope for
-// a PG14–16 beta. A VIRTUAL column is computed on read and never materialized, so it is
-// not in the row image and a reverse INSERT/UPDATE would never reference it — but if
-// VIRTUAL support lands, extend this predicate to attgenerated IN ('s','v').
+// columns (attgenerated='v') and publish_generated_columns, which accepts only none or
+// stored: pgoutput never publishes a VIRTUAL column. It is computed on read and never
+// materialized, so it is not in the row image and a reverse INSERT/UPDATE would never
+// reference it — but if VIRTUAL support lands, extend this predicate to attgenerated IN ('s','v').
 const columnAttrsQuery = `SELECT attname, attidentity = 'a', attgenerated = 's'
 FROM pg_attribute
 WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped`

@@ -526,12 +526,12 @@ jobs:
     permissions:
       contents: read
 
-    # Spans the supported PostgreSQL range: 14 (declared minimum) through 17.
+    # Spans the supported PostgreSQL range: 15 (declared minimum) through 18.
     # fail-fast: false so a regression on one version still reports the others.
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["14", "15", "16", "17"]
+        postgres: ["15", "16", "17", "18"]
 
     env:
       BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"

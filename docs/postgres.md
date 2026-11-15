@@ -27,10 +27,11 @@ and set REPLICA IDENTITY; bintrail reads — it never writes to your source.
 
 | On the PostgreSQL source | Required? | Notes |
 |---|---|---|
-| **PostgreSQL 14+** | Yes (declared) | 14/15/16/17 tested in CI. 13 may work but is EOL — best-effort only. |
+| **PostgreSQL 15+** | Yes (declared) | 15/16/17/18 tested in CI. 13 and 14 may work but are past end of life, best-effort only. On 18, a table with a `VIRTUAL` generated column cannot be captured, and a table with a `STORED` one needs `publish_generated_columns = stored` on the publication ([why](#3-set-replica-identity-full-on-every-captured-table)). |
 | **`wal_level = logical`** | **Yes** | Server-wide; needs a **restart**. Validated at startup — bintrail-pg refuses to start otherwise. |
 | **A role with `REPLICATION`** | **Yes** | Used for the replication stream and to create the slot. |
 | **`REPLICA IDENTITY FULL`** on each captured table | **Yes** | The PostgreSQL analog of MySQL's `binlog_row_image = FULL`. Validated per table; refuses to start otherwise. |
+| **Primary keys that are not `DEFERRABLE`** | **Yes** | The copy is kept by key, and a deferrable key lets two rows share one inside a transaction. Validated at startup and in `doctor`: a captured table with one is refused, with what to do. |
 | **A `PUBLICATION`** covering those tables | **Yes — you create it** | bintrail-pg validates it exists and covers your tables; it does **not** create it. |
 | **A replication slot** | No — created for you | bintrail-pg creates the logical slot on first run and reuses it on restart. |
 | `max_replication_slots` ≥ 1, `max_wal_senders` ≥ 1 | Yes | Defaults (10) are usually fine. A slot consumes one of each. |
@@ -164,6 +165,41 @@ password copied from this page.
 
 ### 3. Set `REPLICA IDENTITY FULL` on every captured table
 
+> **PostgreSQL 18 and generated columns: read this before you run step 3 or 4.**
+> On PostgreSQL 18, a table that is at `REPLICA IDENTITY FULL`, belongs to a
+> publication, and has a generated column that the publication does not
+> publish **refuses every `UPDATE` and `DELETE`**, from your own application
+> too, with `Replica identity must not contain unpublished generated columns`.
+> `INSERT` still works. It takes effect the moment both settings are in place,
+> whether or not DBTrail is running.
+>
+> Find your generated columns first:
+>
+> ```sql
+> SELECT c.relnamespace::regnamespace AS schema, c.relname AS "table", a.attname AS "column",
+>        CASE a.attgenerated WHEN 's' THEN 'STORED' ELSE 'VIRTUAL' END AS kind
+> FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+> WHERE a.attgenerated <> '' AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p');
+> ```
+>
+> - **`STORED`**: create the publication with
+>   `WITH (publish_generated_columns = stored)` (step 4), and the table works.
+>   For a publication that exists:
+>   `ALTER PUBLICATION bintrail_pub SET (publish_generated_columns = stored);`
+> - **`VIRTUAL`** (new in 18, and what `GENERATED ALWAYS AS (...)` creates there
+>   when neither word is given): PostgreSQL cannot publish it, so that table
+>   cannot be captured. Leave it out of the publication and do not set
+>   `REPLICA IDENTITY FULL` on it. A `FOR ALL TABLES` publication cannot leave
+>   a table out: list the tables instead.
+> - A table that belongs to **another** publication as well is refused if that
+>   one does not publish the column, whatever DBTrail's publication does.
+> - **If your application is already refused**, this lets it write again at
+>   once: `ALTER TABLE shop.orders REPLICA IDENTITY DEFAULT;`
+>
+> `bintrail-pg doctor`, the web interface's checks when a server is added, and
+> the capture when it starts all look for this and stop with the statements to
+> run. PostgreSQL 17 and older have no such rule.
+
 This is the single most important step. By default PostgreSQL only puts the
 **primary-key** columns in the WAL for UPDATE/DELETE (`REPLICA IDENTITY
 DEFAULT`). bintrail needs the **full before-image** to generate correct reversal
@@ -199,6 +235,11 @@ changes.
 ```sql
 -- Specific tables (recommended — you control exactly what is captured):
 CREATE PUBLICATION bintrail_pub FOR TABLE shop.orders, shop.customers;
+
+-- On PostgreSQL 18, when a captured table has a STORED generated column
+-- (see the note in step 3):
+CREATE PUBLICATION bintrail_pub FOR TABLE shop.orders, shop.customers
+  WITH (publish_generated_columns = stored);
 
 -- …or everything (requires superuser):
 CREATE PUBLICATION bintrail_pub FOR ALL TABLES;
@@ -572,6 +613,43 @@ What to know:
   same statements in separate transactions are applied. A refused change refuses even when a later change
   overwrote it, and one in the minute before the snapshot, which the fold
   reads again (see above), counts too.
+- **A transaction whose changes of one key do not describe one row
+  refuses.** A `DEFERRABLE` primary key is checked at the end of the
+  statement or of the transaction, so until then two rows can hold the same
+  key value, with no key change involved: a transaction inserts a new row 1
+  while the old row 1 is still there and then deletes the old one. The
+  captured changes are an INSERT and a DELETE of key 1, the last one is the
+  DELETE, and a copy that kept the last change would have no row 1 where the
+  source has the new one. The fold therefore checks, for the changes one
+  transaction makes to one key, that each starts from the row the one before
+  it left: an INSERT from no row, an UPDATE or a DELETE from exactly the row
+  the previous change wrote. When that does not hold, or the rows cannot be
+  compared, the table is refused with a message that names the key and the
+  transaction's commit LSN. The ordinary transactions are applied as before:
+  a row inserted and deleted again, inserted and updated, updated twice,
+  deleted and replaced under the same key.
+  A transaction that capture delivered twice after a restart is recognized
+  and applied once, when it looks exactly like one: the key's first change
+  of the transaction comes back, and the changes after it repeat the changes
+  before it, one by one, for as long as those ran (the first delivery may
+  have been cut short; the last one is whole). A first change that comes back
+  followed by anything else refuses. Two limits: when a snapshot update holds
+  so many changed rows that it moves them to disk and a transaction delivered
+  twice has its changes on both sides of that move, it is refused, not
+  checked; and a transaction delivered twice that holds a key-changing
+  UPDATE is refused by the rule of the previous point (the new key receives
+  the row twice).
+  What is not seen, in every case because the rows are equal in every column,
+  the key included: (1) a row inserted as an exact copy of one that already
+  existed, followed by a delete of the original, which reads like inserting
+  a row and deleting it again; (2) the same row inserted twice and one of the
+  two deleted, or any series of changes made identically to two identical
+  rows, which reads like a transaction cut short and then delivered whole:
+  the source keeps one row and the copy none. Both need a `DEFERRABLE` key;
+  the index does not record whether a key is deferrable. (3) On a database
+  whose encoding is `SQL_ASCII`, text that is not valid UTF-8 is stored with
+  replacement characters, so two rows that differ only in such bytes compare
+  equal.
 - **An unchanged-TOAST marker refuses** on any change the fold reads, even
   one a later change overwrote. Under `REPLICA IDENTITY FULL`, which capture
   requires, there is no marker to meet: capture replaces an unchanged large
@@ -886,7 +964,7 @@ The following types are **round-trip tested** two ways — insert → capture �
 canonical `::text` is byte-for-byte identical (`TestOne_PGTypeRoundTripMatrix`), and
 through the **baseline+delta reconstruct fold** under deliberately skewed session
 GUCs (`TestOne_PGTypeMatrixThroughReconstructFold`) — in `internal/pgstreamrun`,
-run across the PG 14/15/16/17 CI matrix:
+run across the PG 15/16/17/18 CI matrix:
 
 | Category | Types | Notes |
 |---|---|---|
@@ -1083,6 +1161,10 @@ A numeric with no precision prints with all 18 decimals (`12345.678` as
 - **`GENERATED ... AS IDENTITY` / generated columns** can need care on recovery
   (`GENERATED ALWAYS AS IDENTITY` rejects an explicit insert; `STORED` generated
   columns are absent from the stream before PostgreSQL 18). Treat as best-effort.
+  The copy never holds a generated column: the database computes it. On
+  PostgreSQL 18 a table with a `VIRTUAL` generated column cannot be captured,
+  and one with a `STORED` one needs `publish_generated_columns = stored` on the
+  publication (see step 3 of the setup).
 - **Full-table `reconstruct` writes snapshots** (`--output-format
   parquet`, and `baseline refresh`) **or SQL psql loads** (`--output-format
   psql`); a mydumper dump stays MySQL's (see

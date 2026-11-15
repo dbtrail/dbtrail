@@ -62,7 +62,7 @@ jobs:
   # integration-postgres-source, integration-postgres-extensions) do NOT: a
   # job-level `if:` is evaluated BEFORE matrix expansion, so a false condition
   # means the matrix never expands and the specifically-suffixed required contexts
-  # (`integration (8.0)`, `integration-postgres-source (14)`, etc.) never get
+  # (`integration (8.0)`, `integration-postgres-source (15)`, etc.) never get
   # created at all — verified live via a throwaway PR, whose mergeStateStatus
   # stayed BLOCKED with those 6 contexts permanently missing even though every
   # other job showed "skipped". Those jobs instead push the same `if:`
@@ -858,14 +858,14 @@ jobs:
     needs: changes
     runs-on: ubuntu-22.04
 
-    # Spans the supported PostgreSQL range: 14 (declared minimum — PG13 is EOL)
-    # through 17. fail-fast: false so a regression on one version still reports
-    # the others, matching the MySQL matrix. (PG18-specific stream changes — e.g.
-    # STORED generated columns now in the WAL — are tracked with the beta work.)
+    # Spans the supported PostgreSQL range: 15 (declared minimum; 14 reached
+    # end of life in November 2026 and, like 13, is best-effort only) through
+    # 18. fail-fast: false so a regression on one version still reports the
+    # others, matching the MySQL matrix.
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["14", "15", "16", "17"]
+        postgres: ["15", "16", "17", "18"]
 
     env:
       BINTRAIL_TEST_DSN: "root:testroot@tcp(127.0.0.1:13306)"
@@ -882,9 +882,9 @@ jobs:
       # (#2813): this is the only job with a MySQL index AND a PostgreSQL
       # source, and the console's tests that need both run here or nowhere.
       # Step-level because of the matrix — see the note on the `changes` job.
-      # A console PR starts the two servers on one cell only, the one its
-      # tests run on; DATA is what the data-path suite below still waits for.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || (needs.changes.outputs.console == 'true' && matrix.postgres == '16') }}
+      # A console PR starts the two servers only on the cells its tests run
+      # on (16 and 18); DATA is what the data-path suite below still waits for.
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || (needs.changes.outputs.console == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')) }}
       DATA: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' }}
 
     steps:
@@ -988,20 +988,21 @@ jobs:
       # The console's tests that need a MySQL index and a PostgreSQL source at
       # once (#2813). In the MySQL shards they skip for want of a PostgreSQL,
       # so this is where they run; selected by name, since the rest of
-      # consoleapp's integration tests have their own shards. On one
-      # PostgreSQL version: what they exercise is the console and the wire,
-      # and the snapshot under them is tested on every version above. The
+      # consoleapp's integration tests have their own shards. On two
+      # PostgreSQL versions, 16 and the newest: what they exercise is the
+      # console and the wire, and the snapshot under them is tested on every
+      # version above, but 18 changed how generated columns travel. The
       # tripwire is the point: a renamed test, or a pattern that stops
       # matching, would otherwise leave this step green with nothing run.
       - name: Console tests that need MySQL and PostgreSQL together
-        if: env.RUN == 'true' && matrix.postgres == '16'
+        if: env.RUN == 'true' && (matrix.postgres == '16' || matrix.postgres == '18')
         run: |
           set -o pipefail
           # psql is the client the port is for: the test runs it, and with
           # BINTRAIL_REQUIRE_PSQL its absence is a failure, not a skip.
           command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
           BINTRAIL_REQUIRE_PSQL=1 go test -tags=integration -race -p 1 -count=1 -v \
-            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
+            -run '^(TestIntegrationPGRouter|TestIntegrationPGSnapshotUpdate|TestIntegrationPGCaptureStatus|TestIntegrationPGNewTableIsIncluded_2759|TestIntegrationPGSnapshotUpdateGeneratedColumn)$' ./consoleapp/ 2>&1 | tee /tmp/pg-console-it.out
           grep -q -- '--- PASS: TestIntegrationPGRouter/psql ' /tmp/pg-console-it.out \
             || { echo "FATAL: psql did not run against the PostgreSQL router — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGRouter ' /tmp/pg-console-it.out \
@@ -1012,6 +1013,8 @@ jobs:
             || { echo "FATAL: the PostgreSQL capture status test did not run — false-green tripwire" >&2; exit 1; }
           grep -q -- '^--- PASS: TestIntegrationPGNewTableIsIncluded_2759 ' /tmp/pg-console-it.out \
             || { echo "FATAL: the PostgreSQL new-table test did not run — false-green tripwire" >&2; exit 1; }
+          grep -q -- '^--- PASS: TestIntegrationPGSnapshotUpdateGeneratedColumn ' /tmp/pg-console-it.out \
+            || { echo "FATAL: the PostgreSQL generated-column test did not run — false-green tripwire" >&2; exit 1; }
 
   integration-postgres-extensions:
     # Extension-type round-trip coverage (#1210): PostGIS geometry/geography
