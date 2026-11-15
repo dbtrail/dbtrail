@@ -247,6 +247,13 @@ func routerSettingsFrom(cmd *cobra.Command) (routerSettings, error) {
 // port that silently served the made-up certificate instead of the one set
 // would look encrypted to an operator and fail every client that verifies.
 func routerPortTLS(certName, cert, keyName, key string) (*shim.PortTLS, error) {
+	return portTLSFiles("the MySQL port", certName, cert, keyName, key)
+}
+
+// portTLSFiles is routerPortTLS for the port named port ("the MySQL port",
+// "the PostgreSQL port"): both ports load the operator's certificate the same
+// way and refuse the same things (#2766).
+func portTLSFiles(port, certName, cert, keyName, key string) (*shim.PortTLS, error) {
 	for _, v := range []struct{ name, val string }{{certName, cert}, {keyName, key}} {
 		if v.val != "" && strings.TrimSpace(v.val) == "" {
 			return nil, fmt.Errorf("%s is only spaces: give the path of a PEM file, or leave it unset", v.name)
@@ -257,13 +264,13 @@ func routerPortTLS(certName, cert, keyName, key string) (*shim.PortTLS, error) {
 	case cert == "" && key == "":
 		return nil, nil
 	case key == "":
-		return nil, fmt.Errorf("%s is set and %s is not: the MySQL port needs both, the certificate and its private key", certName, keyName)
+		return nil, fmt.Errorf("%s is set and %s is not: %s needs both, the certificate and its private key", certName, keyName, port)
 	case cert == "":
-		return nil, fmt.Errorf("%s is set and %s is not: the MySQL port needs both, the certificate and its private key", keyName, certName)
+		return nil, fmt.Errorf("%s is set and %s is not: %s needs both, the certificate and its private key", keyName, certName, port)
 	}
 	t, err := shim.LoadPortTLS(cert, key)
 	if err != nil {
-		return nil, fmt.Errorf("the MySQL port's certificate (%s, %s) cannot be used: %w", certName, keyName, err)
+		return nil, fmt.Errorf("%s's certificate (%s, %s) cannot be used: %w", port, certName, keyName, err)
 	}
 	return t, nil
 }

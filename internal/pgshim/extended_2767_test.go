@@ -79,8 +79,8 @@ func (e *echoLogin) statements() []string {
 	return append([]string(nil), e.ran...)
 }
 
-func (e *echoLogin) login(_ context.Context, _, _, password string, _ func()) (*Binding, *Error) {
-	if password != portPassword {
+func (e *echoLogin) login(_ context.Context, _, _ string, password *Password, _ func()) (*Binding, *Error) {
+	if !password.Matches([]string{portPassword}) {
 		return nil, &Error{Code: "28P01", Message: "no"}
 	}
 	if e.tt != nil {
@@ -308,12 +308,8 @@ func dialRaw(t *testing.T, login LoginFunc) *rawConn {
 	if err := r.fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.until(); !strings.HasPrefix(got[0], "AuthenticationCleartextPassword") {
-		t.Fatalf("startup: %v", got)
-	}
-	r.fe.Send(&pgproto3.PasswordMessage{Password: portPassword})
-	if err := r.fe.Flush(); err != nil {
-		t.Fatal(err)
+	if err := scramClientLogin(r.fe, portPassword, nil); err != nil {
+		t.Fatalf("login: %v", err)
 	}
 	if got := r.until(); got[len(got)-1] != "ReadyForQuery I" {
 		t.Fatalf("login: %v", got)
@@ -542,7 +538,10 @@ func TestExtended_messageByMessage(t *testing.T) {
 func TestExtended_aStatementThatChangesShapeIsRefused(t *testing.T) {
 	var width atomic.Int32
 	width.Store(1)
-	login := func(_ context.Context, _, _, _ string, _ func()) (*Binding, *Error) {
+	login := func(_ context.Context, _, _ string, password *Password, _ func()) (*Binding, *Error) {
+		if !password.Matches([]string{portPassword}) {
+			return nil, &Error{Code: "28P01", Message: "no"}
+		}
 		return &Binding{Schema: "public", Run: func(context.Context, string) (sqlsandbox.Result, error) {
 			cols := int(width.Load())
 			res := sqlsandbox.Result{Rows: [][]any{make([]any, cols)}}
@@ -775,9 +774,9 @@ func TestExtended_aSuspendedPortalCountsInTheResultBudget(t *testing.T) {
 		r.fe.Send(&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber,
 			Parameters: map[string]string{"user": "app", "database": "orders"}})
 		_ = r.fe.Flush()
-		r.until()
-		r.fe.Send(&pgproto3.PasswordMessage{Password: portPassword})
-		_ = r.fe.Flush()
+		if err := scramClientLogin(r.fe, portPassword, nil); err != nil {
+			t.Fatalf("login: %v", err)
+		}
 		r.until()
 		return r
 	}

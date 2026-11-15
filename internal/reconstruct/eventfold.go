@@ -404,6 +404,9 @@ type foldConfig struct {
 	// text as captured (bytea as hex), with no ENUM ordinals and no base64
 	// to decode, so neither decoding pass runs.
 	PG bool
+	// NeverPartitionedBefore is query.FetchMergedOptions' field of that
+	// name; zero for every fold but a PostgreSQL one that proved it.
+	NeverPartitionedBefore time.Time
 
 	// Heads is the run's query.PartitionHeads, passed to the fetch so every
 	// table reads the same picture of the index; nil has the fetch load one.
@@ -714,6 +717,8 @@ func foldFetchOptions(fc foldConfig) query.FetchMergedOptions {
 		AllowGaps:      fc.AllowGaps,
 		ArchiveFetcher: fc.ArchiveFetcher,
 		PartitionHeads: fc.Heads,
+
+		NeverPartitionedBefore: fc.NeverPartitionedBefore,
 	}
 }
 

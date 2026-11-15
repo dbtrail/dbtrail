@@ -38,11 +38,11 @@ type portLogin struct {
 	run      func(ctx context.Context, statement string) (sqlsandbox.Result, error)
 }
 
-func (p *portLogin) login(_ context.Context, user, database, password string, _ func()) (*Binding, *Error) {
+func (p *portLogin) login(_ context.Context, user, database string, password *Password, _ func()) (*Binding, *Error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.users, p.dbs = append(p.users, user), append(p.dbs, database)
-	if password != portPassword {
+	if !password.Matches([]string{portPassword}) {
 		return nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
 	}
 	if database == "nowhere" {
@@ -759,8 +759,8 @@ func TestPort_timeTravelGoesToTheEngineBehindThePortsGate(t *testing.T) {
 	ranOnCopy := false
 	hidden := "" // what the gate answers; "" lets time travel through
 	asked := 0
-	login := func(_ context.Context, _, _, password string, _ func()) (*Binding, *Error) {
-		if password != portPassword {
+	login := func(_ context.Context, _, _ string, password *Password, _ func()) (*Binding, *Error) {
+		if !password.Matches([]string{portPassword}) {
 			return nil, &Error{Code: "28P01", Message: "no"}
 		}
 		return &Binding{
