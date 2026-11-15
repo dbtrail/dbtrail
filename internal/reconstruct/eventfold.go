@@ -181,10 +181,23 @@ func foldPage(
 			res.Deletes++
 		}
 		if halves == nil {
+			if opts.pg {
+				if err := res.notePGTxn(ev, false, "", "", schema, table); err != nil {
+					return err
+				}
+			}
 			res.fold(ev, opts.touched)
 			continue
 		}
 		for h := range halves {
+			if opts.pg {
+				// The one thing the split cannot see in the event: what
+				// else the same transaction did to each half's key
+				// (pgKeyTxn).
+				if err := res.notePGTxn(&halves[h], true, halves[0].PKValues, halves[1].PKValues, schema, table); err != nil {
+					return err
+				}
+			}
 			res.fold(&halves[h], opts.touched)
 		}
 	}
@@ -463,6 +476,11 @@ type foldResult struct {
 	ImageColumns map[string]struct{}
 	SawImage     bool
 
+	// pgTxn is, per key of a PostgreSQL fold, the record of the transaction
+	// that holds the key's last change (pgKeyTxn, #2760). nil for MySQL and
+	// MariaDB. It goes to disk with the changes and starts again empty.
+	pgTxn map[string]pgKeyTxn
+
 	// Spill holds the changes on disk once they passed the fold's in-memory
 	// limit (#1107), and Changes is then empty. Set only under
 	// foldConfig.SpillOverBudget; the caller removes it with close.
@@ -588,10 +606,11 @@ func (r *foldResult) admit(limit, maxBytes int64, tables int, spill bool) error 
 		s.maxBytes = maxBytes
 		r.Spill = s
 	}
-	if err := r.Spill.drain(r.Changes); err != nil {
+	if err := r.Spill.drainTxn(r.Changes, r.pgTxn); err != nil {
 		return err
 	}
 	r.Changes = make(map[string]*query.ResultRow)
+	r.pgTxn = nil
 	return nil
 }
 
@@ -803,6 +822,9 @@ func foldEventWindow(ctx context.Context, fc foldConfig) (*foldResult, error) {
 			// their own.
 			foldErr = err
 			return foldErr
+		}
+		if res.Spill != nil {
+			res.Spill.schema, res.Spill.table = fc.Schema, fc.Table
 		}
 		if !spilling && res.Spill != nil {
 			slog.Info("reconstruct: more changes than this fold holds in memory; writing them to disk and merging in passes",

@@ -206,11 +206,12 @@ func TestIntegrationPGSnapshotUpdateKeyChange(t *testing.T) {
 		set("code = 'tmp'", "code = 'k'"),
 		set("code = 'k'", "code = 'l'"),
 		set("code = 'l'", "code = 'tmp'"),
-		// One transaction: a key change, a change of the moved row, the key
-		// changed again, and another row moved onto a key deleted in it.
-		"BEGIN; " + set("code = 'm2'", "code = 'm'") + "; " + set("status = 'touched'", "code = 'm2'") + "; " +
-			set("code = 'm', tenant = 2", "code = 'm2'") + "; DELETE FROM " + pgKcTable + " WHERE code = 'n'; " +
-			set("code = 'n'", "code = 'o'") + "; COMMIT",
+		// One transaction: a row is changed and then moved, and another row
+		// is moved onto a key deleted in it. (A key that receives a row and
+		// is changed again in the same transaction is refused: see the
+		// deferrable-key test below.)
+		"BEGIN; " + set("status = 'touched'", "code = 'm'") + "; " + set("code = 'm2', tenant = 2", "code = 'm'") +
+			"; DELETE FROM " + pgKcTable + " WHERE code = 'n'; " + set("code = 'n'", "code = 'o'") + "; COMMIT",
 		// A change that keeps the key and leaves the large column alone.
 		set("status = 'shipped'", "code = 'p'"),
 		// Several rows moved by one statement.
@@ -324,7 +325,7 @@ func TestIntegrationPGSnapshotUpdateKeyChange(t *testing.T) {
 	}
 	for key, status := range map[string]string{
 		"1/u": "twice", "1/b": "back", "1/c": "was d", "1/f": "reborn", "1/f2": "was f", `1/año|ñ\雪`: "after the move",
-		"1/k": "was l", "1/l": "was k", "2/m": "touched", "1/n": "was o", "1/p": "shipped", "11/q": "was q", "11/r": "was r",
+		"1/k": "was l", "1/l": "was k", "2/m2": "touched", "1/n": "was o", "1/p": "shipped", "11/q": "was q", "11/r": "was r",
 		"1/s2": "was s", "1/t2": "NULL", "1/zz-last": "last", "1/keep": "was keep",
 	} {
 		if got, ok := codes[key]; !ok || got != status {
@@ -339,6 +340,194 @@ func TestIntegrationPGSnapshotUpdateKeyChange(t *testing.T) {
 	// The full read is untouched.
 	if got := pgKcRows(t, firstFile); !reflect.DeepEqual(got, srcBefore) {
 		t.Fatalf("the update changed the previous snapshot")
+	}
+}
+
+const (
+	pgKdTable = "pgkc_deferred"
+	pgKdSlot  = "bintrail_pgkd_slot"
+	pgKdPub   = "bintrail_pgkd_pub"
+)
+
+// pgKdRows reads the deferrable-key table out of one snapshot file.
+func pgKdRows(t *testing.T, snapshotDir string) [][]string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(snapshotDir, "*", pgKdTable+".parquet"))
+	if err != nil || len(found) != 1 {
+		t.Fatalf("snapshot %s: want one %s.parquet, found %v (err %v)", snapshotDir, pgKdTable, found, err)
+	}
+	duck, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer duck.Close()
+	rows, err := duck.Query(`SELECT CAST(id AS VARCHAR), CAST(v AS VARCHAR) FROM parquet_scan('` + found[0] + `')`)
+	if err != nil {
+		t.Fatalf("read %s: %v", found[0], err)
+	}
+	defer rows.Close()
+	var out [][]string
+	for rows.Next() {
+		var id, v string
+		if err := rows.Scan(&id, &v); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, []string{id, v})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return pgKcSort(out)
+}
+
+// A DEFERRABLE primary key on a real PostgreSQL (#2760). Its uniqueness is
+// checked at the end of the statement, so `UPDATE t SET id = id + 1` moves
+// every row onto the key of the next one, in one transaction, and a CASE
+// swaps two rows directly. The captured changes read "1 to 2, 2 to 3, ...",
+// the same as ONE row moved again and again, and applying them that way
+// leaves one row where the source holds five.
+//
+// What is required: the newest copy holds exactly the source's rows. Either
+// the update followed the changes correctly, or it refused the table for
+// this reason and the schedule read the source in full instead. Never other
+// rows.
+func TestIntegrationPGSnapshotUpdateDeferrableKey(t *testing.T) {
+	testutil.SkipIfNoMySQL(t)
+	baseDSN := testutil.SkipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	logs := captureSlogFor(t)
+
+	_, source, exec1 := pgTestSource(t, ctx, pgKdTable, pgKdSlot, pgKdPub,
+		"id int, v text, PRIMARY KEY (id) DEFERRABLE INITIALLY IMMEDIATE")
+	exec1("INSERT INTO " + pgKdTable + " VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')")
+	const sourceQuery = "SELECT id::text, v FROM " + pgKdTable + " ORDER BY id"
+
+	mon, bootDSN := pgTestMonitor(t, ctx, 200*time.Millisecond)
+	b, reg, sup := newScheduleFixture(t, true)
+	b.window = b.measureWindow
+	sup.tableDeltas = true
+	t.Cleanup(sup.postRefresh.Wait)
+
+	snapshots := t.TempDir()
+	e, err := reg.Add(console.ServerEntry{
+		Name: "pg-deferrable-key", Flavor: console.FlavorPostgres,
+		SourceDSN: baseDSN, SourceSlot: pgKdSlot, SourcePublication: pgKdPub,
+		Schemas: "public", BaselineDir: snapshots,
+		BackupSchedule: &console.BackupSchedule{Every: "1h", At: "00:00"},
+	})
+	if err != nil {
+		t.Fatalf("add the server: %v", err)
+	}
+	if e.DSN, err = mon.DeriveIndexDSN(e.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Update(e); err != nil {
+		t.Fatalf("save the index connection: %v", err)
+	}
+	pgTestStart(t, ctx, mon, bootDSN, source, e)
+
+	if err := sup.Trigger(console.BaselineRequestFor(e)); err != nil {
+		t.Fatalf("start the full read: %v", err)
+	}
+	pgTestWait(t, "the full read", 2*time.Minute, func() (bool, string) {
+		st := sup.Status(e.ID)
+		if st.State == "failed" {
+			t.Fatalf("the full read failed: %s", st.LastError)
+		}
+		return st.State == "succeeded", st.State
+	})
+	first := pgUpdSnapshots(t, snapshots)
+	if len(first) != 1 {
+		t.Fatalf("after the full read: want one snapshot, got %v", first)
+	}
+
+	// Every row onto the next one's key, by one statement; then two rows
+	// swapped directly; then the change the wait below looks for.
+	exec1("UPDATE " + pgKdTable + " SET id = id + 1")
+	exec1("UPDATE " + pgKdTable + " SET id = CASE id WHEN 2 THEN 3 WHEN 3 THEN 2 END WHERE id IN (2, 3)")
+	exec1("INSERT INTO " + pgKdTable + " VALUES (100, 'last')")
+	_, src, err := pgText(t, source, sourceQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src = pgKcSort(src)
+	if want := pgKcSort([][]string{{"2", "two"}, {"3", "one"}, {"4", "three"}, {"5", "four"}, {"6", "five"}, {"100", "last"}}); !reflect.DeepEqual(src, want) {
+		t.Fatalf("the source holds %v, want %v", src, want)
+	}
+
+	idx, err := sql.Open("mysql", e.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	pgTestWait(t, "the changes indexed and checkpointed", 90*time.Second, func() (bool, string) {
+		var last, covered int
+		err := idx.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM binlog_events WHERE table_name = ? AND pk_values = '100'),
+			COALESCE((SELECT binlog_position FROM stream_state WHERE id = 1) >= (SELECT MAX(end_pos) FROM binlog_events), 0)`,
+			pgKdTable).Scan(&last, &covered)
+		if err != nil {
+			return false, err.Error()
+		}
+		return last == 1 && covered == 1, "last_change_indexed=" + strconv.Itoa(last) + " checkpoint_covers=" + strconv.Itoa(covered)
+	})
+
+	time.Sleep(1100 * time.Millisecond)
+	p, err := e.BackupSchedule.Parse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.fire(e, p, time.Now().UTC())
+	pgTestWait(t, "the scheduled job", 3*time.Minute, func() (bool, string) {
+		st := b.ScheduleState(e.ID)
+		if st.LastSkipReason != "" {
+			t.Fatalf("the schedule skipped its slot: %s", st.LastSkipReason)
+		}
+		return st.Last != nil && !st.Running, "running"
+	})
+	// A refused update starts a full read in its place: wait for whichever
+	// job publishes the second snapshot.
+	b.watchers.Wait()
+	sup.postRefresh.Wait()
+	pgTestWait(t, "a second snapshot", 3*time.Minute, func() (bool, string) {
+		st := b.ScheduleState(e.ID)
+		n := len(pgUpdSnapshots(t, snapshots))
+		full := sup.Status(e.ID).State
+		return n >= 2 && !st.Running && full != "running", "snapshots=" + strconv.Itoa(n) + " full_read=" + full
+	})
+	b.watchers.Wait()
+	sup.postRefresh.Wait()
+
+	all := pgUpdSnapshots(t, snapshots)
+	newest := filepath.Join(snapshots, all[len(all)-1])
+	st := b.ScheduleState(e.ID)
+	reasons := st.LastFallbackReason
+	for _, rt := range st.LastFallbackRefusedTables {
+		reasons += " | " + rt.Name + ": " + rt.Reason
+	}
+
+	// The source is the judge, whichever way the copy was made.
+	got := pgKdRows(t, newest)
+	if !reflect.DeepEqual(got, src) {
+		t.Fatalf("the newest copy and the source differ (the update fell back to a full read: %v; reasons: %s).\nthe copy holds %d rows:\n%s\nthe source holds %d rows:\n%s",
+			st.LastFallbackAt != "", reasons, len(got), pgKcDump(got), len(src), pgKcDump(src))
+	}
+	if st.LastFallbackAt == "" {
+		t.Logf("the update followed the changes of a deferrable key and holds the source's rows")
+		return
+	}
+	// Refused: for this reason. The page's copy of a reason is cut to a
+	// few hundred characters, so the whole text is looked for in the log
+	// too.
+	said := reasons + "\n" + logs.String()
+	for _, want := range []string{"inside one transaction", "DEFERRABLE"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the update was refused, but not for the deferrable-key reason (missing %q): %s", want, reasons)
+		}
+	}
+	if len(all) != 2 {
+		t.Errorf("want the first full read and the full read taken in the update's place, got %v", all)
 	}
 }
 

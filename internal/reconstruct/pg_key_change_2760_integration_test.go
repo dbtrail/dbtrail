@@ -99,3 +99,49 @@ func TestReconstructTables_PGKeyChange_refusedWhenNotWhole_2760(t *testing.T) {
 		}
 	}
 }
+
+// Inside one transaction, a key that received a moved row and is changed
+// again is refused: with a DEFERRABLE primary key that is two rows shifting
+// (`UPDATE orders SET id = id + 1`), and applying it as one row moved twice
+// would lose rows. Through the real fold and index.
+func TestReconstructTables_PGKeyChange_sameTransactionRefused_2760(t *testing.T) {
+	f := newPGFixture(t)
+	snap := f.at(10 * time.Minute)
+	f.move(0x700, 15*time.Minute, "1", "2", "was one")
+	f.move(0x700, 15*time.Minute, "2", "3", "was two")
+	f.move(0x700, 15*time.Minute, "3", "4", "was three")
+	f.checkpoint(0x700)
+
+	root := t.TempDir()
+	f.baseline(root, snap, 0x500, "", [2]string{"1", "was one"}, [2]string{"2", "was two"}, [2]string{"3", "was three"})
+	got, _, _, err := f.run(root, pgRun{at: f.at(30 * time.Minute)})
+	if err == nil {
+		t.Fatalf("folded to %v; the source holds rows 2, 3 and 4", got)
+	}
+	for _, want := range []string{"PK-changing UPDATE", "public.orders", "inside one transaction (commit LSN 0/700)", "DEFERRABLE", "bintrail-pg baseline"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%s", want, err)
+		}
+	}
+}
+
+// The order a key that is not deferrable needs for the same statement
+// (highest row first) folds: each key loses its row, then receives one.
+func TestReconstructTables_PGKeyChange_sameTransactionShiftHighestFirst_2760(t *testing.T) {
+	f := newPGFixture(t)
+	snap := f.at(10 * time.Minute)
+	f.move(0x700, 15*time.Minute, "3", "4", "was three")
+	f.move(0x700, 15*time.Minute, "2", "3", "was two")
+	f.move(0x700, 15*time.Minute, "1", "2", "was one")
+	f.checkpoint(0x700)
+
+	root := t.TempDir()
+	f.baseline(root, snap, 0x500, "", [2]string{"1", "was one"}, [2]string{"2", "was two"}, [2]string{"3", "was three"})
+	got, _, _, err := f.run(root, pgRun{at: f.at(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"2": "was one", "3": "was two", "4": "was three"}; !sameRows(got, want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+}

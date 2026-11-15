@@ -145,9 +145,18 @@ func TestFoldPage_pgKeyChange_shapes_2760(t *testing.T) {
 		{"two rows swap keys through a third", []query.ResultRow{
 			pgUpd(1, 0x100, "1", "99", "was one"), pgUpd(2, 0x200, "2", "1", "was two"), pgUpd(3, 0x300, "99", "2", "was one")},
 			map[string]string{"1": "was two", "2": "was one", "99": ""}},
-		{"one transaction: key change, a change of the moved row, the key changed back", []query.ResultRow{
-			pgUpd(1, 0x100, "1", "2", "away"), pgUpd(2, 0x100, "2", "2", "touched"), pgUpd(3, 0x100, "2", "1", "back")},
-			map[string]string{"1": "back", "2": ""}},
+		{"one transaction: rows 3, 2, 1 each moved up by one, highest first (the only order a key that is not deferrable allows)", []query.ResultRow{
+			pgUpd(1, 0x100, "3", "4", "was three"), pgUpd(2, 0x100, "2", "3", "was two"), pgUpd(3, 0x100, "1", "2", "was one")},
+			map[string]string{"1": "", "2": "was one", "3": "was two", "4": "was three"}},
+		{"one transaction: a row is changed and then moved away", []query.ResultRow{
+			pgUpd(1, 0x100, "1", "1", "touched"), pgUpd(2, 0x100, "1", "2", "moved")},
+			map[string]string{"1": "", "2": "moved"}},
+		{"one transaction: a row moves away and a new row is inserted under its key", []query.ResultRow{
+			pgUpd(1, 0x100, "1", "2", "moved"), pgIns(2, 0x100, "1", "new")},
+			map[string]string{"1": "new", "2": "moved"}},
+		{"the shift 1 to 2, 2 to 3 in two transactions is one row moved twice", []query.ResultRow{
+			pgUpd(1, 0x100, "1", "2", "once"), pgUpd(2, 0x101, "2", "3", "twice")},
+			map[string]string{"1": "", "2": "", "3": "twice"}},
 		{"one transaction: delete a row, move another onto its key", []query.ResultRow{
 			pgDel(1, 0x100, "2"), pgUpd(2, 0x100, "1", "2", "took its place")},
 			map[string]string{"1": "", "2": "took its place"}},
@@ -161,6 +170,122 @@ func TestFoldPage_pgKeyChange_shapes_2760(t *testing.T) {
 				wantPGState(t, pkColsIntID(), foldPGPages(t, pkColsIntID(), pages...), c.want)
 			})
 		}
+	}
+}
+
+// Inside ONE transaction a key that receives a row and is changed again
+// afterwards is refused when a key change is involved: with a DEFERRABLE
+// primary key two rows can hold one key value inside a transaction, so
+// "1 to 2, then 2 to 3" is either one row moved twice (a row at 3) or two
+// rows shifted (rows at 2 and 3), and the events are the same. Refused in
+// every order the events can arrive in, over one page or several.
+func TestFoldPage_pgKeyChange_sameTransactionAmbiguity_2760(t *testing.T) {
+	const lsn = 0x700
+	cases := []struct {
+		name string
+		evs  []query.ResultRow
+		key  string // the key the refusal names
+	}{
+		{"every row moved up by one, lowest first (a deferrable key)", []query.ResultRow{
+			pgUpd(1, lsn, "1", "2", "was one"), pgUpd(2, lsn, "2", "3", "was two"), pgUpd(3, lsn, "3", "4", "was three")}, ""},
+		{"two rows swapped by one statement (a deferrable key)", []query.ResultRow{
+			pgUpd(1, lsn, "1", "2", "was one"), pgUpd(2, lsn, "2", "1", "was two")}, "2"},
+		{"one row moved twice", []query.ResultRow{
+			pgUpd(1, lsn, "1", "2", "once"), pgUpd(2, lsn, "2", "3", "twice")}, "2"},
+		{"a row arrives at a key and the key is updated", []query.ResultRow{
+			pgUpd(1, lsn, "1", "2", "moved"), pgUpd(2, lsn, "2", "2", "touched")}, "2"},
+		{"a row arrives at a key and the key is deleted", []query.ResultRow{
+			pgUpd(1, lsn, "1", "2", "moved"), pgDel(2, lsn, "2")}, "2"},
+		{"a row arrives at a key and a row is inserted there", []query.ResultRow{
+			pgUpd(1, lsn, "1", "2", "moved"), pgIns(2, lsn, "2", "second")}, "2"},
+		{"a row is inserted and its key then leaves", []query.ResultRow{
+			pgIns(1, lsn, "5", "new"), pgUpd(2, lsn, "5", "6", "moved")}, "5"},
+		{"a row is inserted, updated, and its key then leaves", []query.ResultRow{
+			pgIns(1, lsn, "5", "new"), pgUpd(2, lsn, "5", "5", "touched"), pgUpd(3, lsn, "5", "6", "moved")}, "5"},
+	}
+	for _, c := range cases {
+		for how, pages := range arrivals(c.evs) {
+			t.Run(c.name+"/"+how, func(t *testing.T) {
+				res := &foldResult{Changes: map[string]*query.ResultRow{}}
+				var err error
+				for _, p := range pages {
+					if err = foldPage(p, "mydb", "orders", pkColsIntID(), nil, foldOptions{pg: true}, res); err != nil {
+						break
+					}
+				}
+				pgKeyRefusal(t, err, "inside one transaction (commit LSN 0/700)")
+				pgKeyRefusal(t, err, "DEFERRABLE")
+				if c.key != "" {
+					pgKeyRefusal(t, err, `the key "`+c.key+`" received a row`)
+				}
+			})
+		}
+	}
+}
+
+// The same sequences with no key change among them are left as they always
+// were: an INSERT, an UPDATE and a DELETE of one key in one transaction.
+func TestFoldPage_pgSameTransactionWithoutKeyChange_2760(t *testing.T) {
+	evs := []query.ResultRow{pgIns(1, 0x700, "5", "new"), pgUpd(2, 0x700, "5", "5", "touched"), pgDel(3, 0x700, "5"), pgIns(4, 0x700, "5", "again")}
+	for how, pages := range arrivals(evs) {
+		t.Run(how, func(t *testing.T) {
+			wantPGState(t, pkColsIntID(), foldPGPages(t, pkColsIntID(), pages...), map[string]string{"5": "again"})
+		})
+	}
+}
+
+// The refusal holds when the transaction's events for the key land on both
+// sides of a move to disk: the record travels with the change and the two
+// are put together when the group is read back.
+func TestChangeSpill_pgSameTransactionAmbiguity_2760(t *testing.T) {
+	for _, order := range [][]query.ResultRow{
+		{pgUpd(1, 0x700, "1", "2", "was one"), pgUpd(2, 0x700, "2", "3", "was two")},
+		{pgUpd(2, 0x700, "2", "3", "was two"), pgUpd(1, 0x700, "1", "2", "was one")},
+	} {
+		res := &foldResult{Changes: map[string]*query.ResultRow{}}
+		t.Cleanup(res.close)
+		for _, ev := range order {
+			if err := foldPage([]query.ResultRow{ev}, "mydb", "orders", pkColsIntID(), nil, foldOptions{pg: true}, res); err != nil {
+				t.Fatalf("each page alone holds nothing to refuse: %v", err)
+			}
+			// A limit of one row: every page goes to disk.
+			if err := res.admit(1, 0, 1, true); err != nil {
+				t.Fatal(err)
+			}
+			if res.Spill == nil || len(res.Changes) != 0 || res.pgTxn != nil {
+				t.Fatalf("the page did not go to disk: spill %v, %d changes, records %v", res.Spill != nil, len(res.Changes), res.pgTxn)
+			}
+		}
+		res.Spill.schema, res.Spill.table = "mydb", "orders"
+		if err := res.Spill.finish(); err != nil {
+			t.Fatal(err)
+		}
+		var refusal error
+		for b := range spillBuckets {
+			if _, err := res.Spill.load(b); err != nil {
+				refusal = err
+			}
+		}
+		pgKeyRefusal(t, refusal, `inside one transaction (commit LSN 0/700) the key "2" received a row`)
+	}
+	// The allowed order survives the same trip: each key loses its row, then
+	// receives one.
+	res := &foldResult{Changes: map[string]*query.ResultRow{}}
+	t.Cleanup(res.close)
+	for _, ev := range []query.ResultRow{pgUpd(1, 0x700, "2", "3", "was two"), pgUpd(2, 0x700, "1", "2", "was one")} {
+		if err := foldPage([]query.ResultRow{ev}, "mydb", "orders", pkColsIntID(), nil, foldOptions{pg: true}, res); err != nil {
+			t.Fatal(err)
+		}
+		if err := res.admit(1, 0, 1, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := res.Spill.finish(); err != nil {
+		t.Fatal(err)
+	}
+	got := loadAll(t, res.Spill)
+	if len(got) != 3 || got["1"].EventType != event.EventDelete || got["2"].RowAfter["status"] != "was one" || got["3"].RowAfter["status"] != "was two" {
+		t.Errorf("read back %v", keysOf(got))
 	}
 }
 

@@ -78,6 +78,11 @@ func init() {
 // the merge: reading a group back keeps, per key, the change the binary log
 // holds last, and a row changed on both sides of a drain has one record from
 // each (#2151).
+//
+// Txn is a PostgreSQL fold's record of the key's transaction (pgKeyTxn,
+// #2760), zero for MySQL and MariaDB: a transaction whose events for one key
+// were drained on both sides of a drain is put together again on the way
+// back, and refused there if it is one the fold refuses.
 type spillRecord struct {
 	PK    string
 	Type  event.EventType
@@ -85,6 +90,7 @@ type spillRecord struct {
 	After map[string]any
 	File  string
 	Pos   uint64
+	Txn   pgKeyTxn
 }
 
 // changeSpill is one table's changes on disk, one gob stream per group.
@@ -94,6 +100,8 @@ type changeSpill struct {
 	// with it, and tables names the tables folding at once for the refusal.
 	limit  int64
 	tables int
+	// schema and table name the table in the PostgreSQL refusal load raises.
+	schema, table string
 	// maxBytes is the fold's size budget (#2207), what a merge pass should
 	// hold; heldBytes is the estimate of every record drained. The passes are
 	// sized from the two (passRows), over every drained row rather than the
@@ -138,6 +146,12 @@ func (s *changeSpill) path(b int) string {
 // binary log positions. Between two records at the same position the later
 // write wins, so calls still come in fold order.
 func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
+	return s.drainTxn(changes, nil)
+}
+
+// drainTxn is drain with a PostgreSQL fold's per-key transaction records
+// (foldResult.pgTxn; nil for none), written beside each change.
+func (s *changeSpill) drainTxn(changes map[string]*query.ResultRow, txn map[string]pgKeyTxn) error {
 	for pk, ev := range changes {
 		b := spillBucket(pk)
 		if s.encs[b] == nil {
@@ -150,7 +164,7 @@ func (s *changeSpill) drain(changes map[string]*query.ResultRow) error {
 			s.encs[b] = gob.NewEncoder(s.bufs[b])
 			s.written[b] = true
 		}
-		if err := s.encs[b].Encode(spillRecord{PK: pk, Type: ev.EventType, ID: ev.EventID, After: ev.RowAfter, File: ev.BinlogFile, Pos: ev.StartPos}); err != nil {
+		if err := s.encs[b].Encode(spillRecord{PK: pk, Type: ev.EventType, ID: ev.EventID, After: ev.RowAfter, File: ev.BinlogFile, Pos: ev.StartPos, Txn: txn[pk]}); err != nil {
 			return fmt.Errorf("write changed row %q to the temporary directory %s: %w", pk, s.dir, err)
 		}
 		s.records++
@@ -196,6 +210,8 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 	if !s.written[b] {
 		return m, nil
 	}
+	// A PostgreSQL fold's transaction records, put together again per key.
+	var txn map[string]pgKeyTxn
 	f, err := os.Open(s.path(b))
 	if err != nil {
 		return nil, fmt.Errorf("read changed rows back from disk: %w", err)
@@ -212,6 +228,16 @@ func (s *changeSpill) load(b int) (map[string]*query.ResultRow, error) {
 		}
 		for k, v := range rec.After {
 			rec.After[k] = restoreEmpty(v)
+		}
+		if rec.Txn.LSN != 0 {
+			if txn == nil {
+				txn = map[string]pgKeyTxn{}
+			}
+			t := txn[rec.PK].with(rec.Txn)
+			txn[rec.PK] = t
+			if t.ambiguous() {
+				return nil, pgSameTxnErr(s.schema, s.table, rec.PK, t)
+			}
 		}
 		row := &query.ResultRow{EventType: rec.Type, EventID: rec.ID, PKValues: rec.PK, RowAfter: rec.After, BinlogFile: rec.File, StartPos: rec.Pos}
 		if cur, ok := m[rec.PK]; ok && laterChange(cur, row) {
