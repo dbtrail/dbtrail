@@ -551,7 +551,11 @@ What to know:
   change has no commit LSN in the index, its old row was not captured with
   every column (the table was not at `REPLICA IDENTITY FULL`), a key column
   is missing from either row, or the key the index stores for it is not the
-  one its old row spells. A refused change refuses even when a later change
+  one its old row spells. One more case refuses out of caution: the old row
+  has NULL in every column outside the key and the new row has a NULL outside
+  the key too. Such an old row looks the same as one captured with the key
+  only, where a large value the UPDATE did not touch would have been stored
+  as NULL. A refused change refuses even when a later change
   overwrote it, and one in the minute before the snapshot, which the fold
   reads again (see above), counts too.
 - **An unchanged-TOAST marker refuses** on any change the fold reads, even

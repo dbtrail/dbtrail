@@ -97,6 +97,11 @@ func laterChange(a, b *query.ResultRow) bool {
 //     proves about the after-image (3). Capture refuses a table that is not
 //     at REPLICA IDENTITY FULL (pgcapture: at startup and on every relation
 //     message), which is the only way PostgreSQL sends the whole old row.
+//     Under a weaker identity PostgreSQL sends a key-only old row for a key
+//     change, with every other column NULL, and that has the same columns as
+//     a whole row whose other columns really are NULL. The two cannot be told
+//     apart from the event, so an old row with no value outside the key is
+//     taken as whole only when it cannot matter (pgOldRowMayBeKeyOnly).
 //  3. The after-image is the whole new row: every key column is text and no
 //     value is the unchanged-TOAST marker. The INSERT half writes this image
 //     as the row, so a marker would be written as data. Under REPLICA
@@ -150,6 +155,10 @@ func splitPGKeyChange(ev *query.ResultRow, schema, table string, pkCols []metada
 			return nil, refuse("the old row has no column " + col + ", so it was not captured whole")
 		}
 	}
+	if col := pgOldRowMayBeKeyOnly(ev, pkCols); col != "" {
+		return nil, refuse("the old row holds no value outside the key, so it cannot be told from one captured with the key only, " +
+			"and the new row's column " + col + " is NULL: with a key-only old row, an unchanged large value is stored as NULL")
+	}
 	if before != ev.PKValues {
 		return nil, refuse(fmt.Sprintf("the index stores the old key as %q but its row image spells it %q", ev.PKValues, before))
 	}
@@ -158,6 +167,40 @@ func splitPGKeyChange(ev *query.ResultRow, schema, table string, pkCols []metada
 	del.EventType, del.PKValues, del.RowAfter, del.ChangedColumns = event.EventDelete, ev.PKValues, nil, nil
 	ins.EventType, ins.PKValues, ins.RowBefore, ins.ChangedColumns = event.EventInsert, after, nil, nil
 	return []query.ResultRow{del, ins}, nil
+}
+
+// pgOldRowMayBeKeyOnly names a column of ev's after-image that cannot be
+// trusted because the before-image may be a key-only old row, or "" when
+// there is none.
+//
+// Capture fills an unchanged large value in the new row from the old row of
+// the same change (pgcapture decodeUpdate). From a key-only old row that
+// value is NULL, stored as if it were the column's value. Capture refuses
+// the tables that send key-only old rows, so no such event is expected in an
+// index; this is the per-event check that does not rest on that.
+//
+// An old row with any value outside the key is a whole row: a key-only one
+// has none. An old row with no value outside the key is either. Then a NULL
+// outside the key in the new row may be a large value that was lost, and the
+// first such column (by name) is returned; a new row with no NULL outside the
+// key holds only values PostgreSQL sent, whatever the old row was.
+func pgOldRowMayBeKeyOnly(ev *query.ResultRow, pkCols []metadata.ColumnMeta) string {
+	isKey := make(map[string]bool, len(pkCols))
+	for _, c := range pkCols {
+		isKey[c.Name] = true
+	}
+	for col, v := range ev.RowBefore {
+		if !isKey[col] && v != nil {
+			return ""
+		}
+	}
+	suspect := ""
+	for col, v := range ev.RowAfter {
+		if !isKey[col] && v == nil && (suspect == "" || col < suspect) {
+			suspect = col
+		}
+	}
+	return suspect
 }
 
 // pgKeyValueUnusable says why row's value for the key column col cannot

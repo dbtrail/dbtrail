@@ -365,6 +365,41 @@ func TestSplitPGKeyChange_refusals_2760(t *testing.T) {
 	}
 }
 
+// An old row with no value outside the key has the same shape as a key-only
+// old row, which PostgreSQL sends under a weaker replica identity and from
+// which capture would have filled an unchanged large value with NULL. Such
+// an event is split only when the new row holds no NULL outside the key.
+func TestSplitPGKeyChange_oldRowThatMayBeKeyOnly_2760(t *testing.T) {
+	ev := func(before, after map[string]any) query.ResultRow {
+		return pgEv(1, 0x100, event.EventUpdate, before, after)
+	}
+	cases := []struct {
+		name          string
+		before, after map[string]any
+		refusedOn     string // "" = split
+	}{
+		{"every other column NULL in both rows", map[string]any{"id": "1", "body": nil, "status": nil}, map[string]any{"id": "2", "body": nil, "status": nil}, "column body is NULL"},
+		{"every other column NULL in the old row, one NULL in the new", map[string]any{"id": "1", "body": nil, "status": nil}, map[string]any{"id": "2", "body": nil, "status": "set"}, "column body is NULL"},
+		{"every other column NULL in the old row, none in the new", map[string]any{"id": "1", "body": nil, "status": nil}, map[string]any{"id": "2", "body": "b", "status": "set"}, ""},
+		{"one value outside the key in the old row", map[string]any{"id": "1", "body": nil, "status": "s"}, map[string]any{"id": "2", "body": nil, "status": nil}, ""},
+		{"a table of key columns only", map[string]any{"id": "1"}, map[string]any{"id": "2"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			u := ev(c.before, c.after)
+			halves, err := splitPGKeyChange(&u, "mydb", "orders", pkColsIntID())
+			if c.refusedOn == "" {
+				if err != nil || len(halves) != 2 {
+					t.Fatalf("want the split, got %v, %v", halves, err)
+				}
+				return
+			}
+			pgKeyRefusal(t, err, "cannot be told from one captured with the key only")
+			pgKeyRefusal(t, err, c.refusedOn)
+		})
+	}
+}
+
 // What is not a key change is not touched: an INSERT, a DELETE, an UPDATE
 // that keeps its key, and an UPDATE with no before-image (stored under its
 // after-image's key by capture).
