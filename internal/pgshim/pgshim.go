@@ -245,9 +245,15 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger
 	stopClose := context.AfterFunc(connCtx, func() { _ = c.Close() })
 	defer stopClose()
 
+	// A client has loginTimeout to log in, as on the port with a login of
+	// its own: one that connects and stops would otherwise hold a
+	// connection for as long as it liked.
+	loginTimer := time.AfterFunc(loginTimeout, func() { _ = c.Close() })
+	defer loginTimer.Stop()
+
 	conn, encrypted, err := negotiate(connCtx, c, pt)
 	if err != nil {
-		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
+		logNegotiateFailure(logger, err, c.RemoteAddr())
 		return
 	}
 	defer conn.Close()
@@ -271,6 +277,10 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger
 		return
 	}
 
+	if !loginTimer.Stop() {
+		logger.Info("pgshim login took too long", "user", user, "remote", c.RemoteAddr())
+		return
+	}
 	sendSASLFinal(be, password)
 	sendAuthOK(be)
 	if err := be.Flush(); err != nil {

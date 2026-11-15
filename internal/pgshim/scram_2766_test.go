@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"golang.org/x/text/secure/precis"
 
 	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
@@ -52,6 +54,17 @@ type scramTweak struct {
 	// stopAfterFirst: the client leaves once the server's first message
 	// came, as psql does when it has no password yet.
 	stopAfterFirst bool
+	// prep prepares the password before it is hashed, as a driver does;
+	// nil is pgx's way (PRECIS OpaqueString).
+	prep func(string) string
+}
+
+// pgxPrep is how pgx prepares a password before hashing it.
+func pgxPrep(pw string) string {
+	if out, err := precis.OpaqueString.String(pw); err == nil {
+		return out
+	}
+	return pw
 }
 
 // scramClientLogin answers the port's SCRAM exchange on fe as a client does:
@@ -124,7 +137,11 @@ func scramClientTweaked(fe *pgproto3.Frontend, password string, binding []byte, 
 		return fmt.Errorf("bad server-first-message %q", serverFirst)
 	}
 	without := "c=" + base64.StdEncoding.EncodeToString(append([]byte(gs2), binding...)) + ",r=" + combined
-	salted, err := pbkdf2.Key(sha256.New, saslPrep(password), salt, iterations, 32)
+	prep := tw.prep
+	if prep == nil {
+		prep = pgxPrep
+	}
+	salted, err := pbkdf2.Key(sha256.New, prep(password), salt, iterations, 32)
 	if err != nil {
 		return err
 	}
@@ -328,7 +345,7 @@ func TestTLS_noChannelBindingForAnEd25519Certificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: priv}}}
-	if serverEndPoint(cfg) != nil {
+	if serverEndPoint(cfg) != nil || ChannelBindingOffered(cfg) {
 		t.Fatal("binding data worked out for an Ed25519 certificate")
 	}
 	addr := tlsPort(t, &portLogin{run: one}, cfg)
@@ -615,20 +632,10 @@ func TestSCRAM_malformedExchanges(t *testing.T) {
 	})
 }
 
-// A wrong password reads the same, and derives as many passwords, whatever
+// A wrong password reads the same, and checks as many passwords, whatever
 // the username: a login with one password more for a username (an
 // application login's) cannot be told from one without by the time it takes.
 func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
-	var mu sync.Mutex
-	derived := 0
-	old := scramDerive
-	scramDerive = func(pw string, salt []byte, n int) []byte {
-		mu.Lock()
-		derived++
-		mu.Unlock()
-		return old(pw, salt, n)
-	}
-	t.Cleanup(func() { scramDerive = old })
 	// "app1" has a login password of its own beside the port's two.
 	login := func(_ context.Context, user, _ string, password *Password, _ func()) (*Binding, *Error) {
 		candidates := []string{"token", portPassword}
@@ -642,10 +649,8 @@ func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
 	}
 	addr := serveAddrCfg(t, Config{Login: login})
 	host, port, _ := net.SplitHostPort(addr)
-	try := func(user string) (string, int) {
-		mu.Lock()
-		derived = 0
-		mu.Unlock()
+	try := func(user string) (string, int64) {
+		before := scramChecks.Load()
 		cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=%s password=wrong dbname=orders sslmode=disable", host, port, user))
 		if err != nil {
 			t.Fatal(err)
@@ -655,35 +660,51 @@ func TestSCRAM_aWrongPasswordTakesTheSameWork(t *testing.T) {
 		if !errors.As(err, &pe) {
 			t.Fatalf("%s: %v", user, err)
 		}
-		mu.Lock()
-		defer mu.Unlock()
-		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), derived
+		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), scramChecks.Load() - before
 	}
 	loginMsg, loginWork := try("app1")
 	otherMsg, otherWork := try("nobody")
 	if loginMsg != otherMsg {
 		t.Errorf("a login user is refused with %q, any other with %q", loginMsg, otherMsg)
 	}
-	if loginWork != otherWork || loginWork != scramMinDerivations {
-		t.Errorf("derivations: %d for a login user, %d for another, want %d both", loginWork, otherWork, scramMinDerivations)
+	if loginWork != otherWork || loginWork != scramMinCandidates {
+		t.Errorf("passwords checked: %d for a login user, %d for another, want %d both", loginWork, otherWork, scramMinCandidates)
+	}
+}
+
+// A client that holds no password costs the port no PBKDF2 per attempt:
+// each password is derived once, with the process's salt, and kept.
+func TestSCRAM_attemptsDeriveNothingNew(t *testing.T) {
+	var derived atomic.Int32
+	old := scramDerive
+	scramDerive = func(pw string, salt []byte, n int) []byte { derived.Add(1); return old(pw, salt, n) }
+	t.Cleanup(func() { scramDerive = old })
+	addr := tlsPort(t, &portLogin{run: one}, nil)
+	if _, err := pgxTry(t, addr, "wrong", "sslmode=disable"); err == nil {
+		t.Fatal("a wrong password logged in")
+	}
+	derived.Store(0)
+	for range 5 {
+		if _, err := pgxTry(t, addr, "wrong", "sslmode=disable"); err == nil {
+			t.Fatal("a wrong password logged in")
+		}
+	}
+	if n := derived.Load(); n != 0 {
+		t.Fatalf("five more attempts derived %d passwords, want 0", n)
 	}
 }
 
 // The first mode (bintrail-pg flashback): an unknown tenant and a known one
 // with a wrong password, the same answer and the same work.
 func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
-	var derived atomic.Int32
-	old := scramDerive
-	scramDerive = func(pw string, salt []byte, n int) []byte { derived.Add(1); return old(pw, salt, n) }
-	t.Cleanup(func() { scramDerive = old })
 	auth, err := shim.NewTenantAuth(map[string]string{"alice": "alice-pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := serveAddrCfg(t, Config{Auth: auth})
 	host, port, _ := net.SplitHostPort(addr)
-	try := func(user, password string) (string, int32) {
-		derived.Store(0)
+	try := func(user, password string) (string, int64) {
+		before := scramChecks.Load()
 		cfg, err := pgconn.ParseConfig(fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=public sslmode=disable", host, port, user, password))
 		if err != nil {
 			t.Fatal(err)
@@ -691,13 +712,13 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 		conn, err := pgconn.ConnectConfig(context.Background(), cfg)
 		if err == nil {
 			conn.Close(context.Background())
-			return "", derived.Load()
+			return "", scramChecks.Load() - before
 		}
 		var pe *pgconn.PgError
 		if !errors.As(err, &pe) {
 			t.Fatalf("%s: %v", user, err)
 		}
-		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), derived.Load()
+		return pe.Code + " " + strings.ReplaceAll(pe.Message, user, "<user>"), scramChecks.Load() - before
 	}
 	if msg, _ := try("alice", "alice-pw"); msg != "" {
 		t.Fatalf("the right password: %s", msg)
@@ -708,16 +729,16 @@ func TestSCRAM_firstModeUnknownTenantAndWrongPassword(t *testing.T) {
 		t.Errorf("a wrong password: %q, an unknown tenant: %q", known, unknown)
 	}
 	if kw != uw {
-		t.Errorf("derivations: %d for a wrong password, %d for an unknown tenant", kw, uw)
+		t.Errorf("passwords checked: %d for a wrong password, %d for an unknown tenant", kw, uw)
 	}
 }
 
-// proofFor is what a client that typed given proves, for Matches.
-func proofFor(t *testing.T, given string) *Password {
+// proofFor is what a client that typed given proves, for Matches, with the
+// password prepared by prep as its driver would.
+func proofFor(t *testing.T, given string, prep func(string) string) *Password {
 	t.Helper()
-	salt := []byte("0123456789abcdef")
-	auth := []byte("n=,r=x,r=xy,s=MDEyMzQ1Njc4OWFiY2RlZg==,i=4096,c=biws,r=xy")
-	salted := scramDerive(saslPrep(given), salt, scramIterations)
+	auth := []byte("n=,r=x,r=xy,s=c2FsdA==,i=4096,c=biws,r=xy")
+	salted := scramDerive(prep(given), scramSalt, scramIterations)
 	clientKey := testHMAC(salted, "Client Key")
 	stored := sha256.Sum256(clientKey)
 	sig := testHMAC(stored[:], string(auth))
@@ -725,33 +746,46 @@ func proofFor(t *testing.T, given string) *Password {
 	for i := range proof {
 		proof[i] = clientKey[i] ^ sig[i]
 	}
-	return &Password{salt: salt, authMessage: auth, proof: proof}
+	return &Password{authMessage: auth, proof: proof}
 }
 
 // What the cleartext comparison accepted, SCRAM accepts: one of the
-// passwords, exactly, and never an empty one.
+// passwords, exactly, and never an empty one; prepared the way pgx prepares
+// it and the way libpq and JDBC do (SASLprep), which differ off ASCII.
 func TestPassword_matches(t *testing.T) {
+	libpqPrep := saslPrepRFC4013
 	for _, tc := range []struct {
 		list  []string
 		given string
+		prep  func(string) string
 		want  bool
 	}{
-		{[]string{"a", "b"}, "a", true},
-		{[]string{"a", "b"}, "b", true},
-		{[]string{"a", "b"}, "c", false},
-		{[]string{"a", "b"}, "", false},
-		{[]string{""}, "", false},
-		{[]string{"", "a"}, "", false},
-		{nil, "a", false},
-		{[]string{"a"}, "A", false},
-		{[]string{"a"}, "a ", false},
-		{[]string{"a", "a"}, "a", true},
-		{[]string{"x", "y", "z", "w"}, "w", true},
-		// The same password typed composed or decomposed: SASLprep makes
-		// them one (a driver prepares what it was given the same way).
-		{[]string{"päss"}, "päss", true},
+		{[]string{"a", "b"}, "a", pgxPrep, true},
+		{[]string{"a", "b"}, "b", pgxPrep, true},
+		{[]string{"a", "b"}, "c", pgxPrep, false},
+		{[]string{"a", "b"}, "", pgxPrep, false},
+		{[]string{""}, "", pgxPrep, false},
+		{[]string{"", "a"}, "", pgxPrep, false},
+		{nil, "a", pgxPrep, false},
+		{[]string{"a"}, "A", pgxPrep, false},
+		{[]string{"a"}, "a ", pgxPrep, false},
+		{[]string{"a", "a"}, "a", pgxPrep, true},
+		{[]string{"x", "y", "z", "w"}, "w", pgxPrep, true},
+		// The same password typed composed or decomposed.
+		{[]string{"pa\u0308ss"}, "p\u00e4ss", pgxPrep, true},
+		{[]string{"pa\u0308ss"}, "p\u00e4ss", libpqPrep, true},
+		// Full-width letters and a superscript: NFKC (libpq) folds them,
+		// NFC (pgx) does not; both clients get in.
+		{[]string{"\uff50\uff41\uff53\uff53\u00b2"}, "\uff50\uff41\uff53\uff53\u00b2", libpqPrep, true},
+		{[]string{"\uff50\uff41\uff53\uff53\u00b2"}, "\uff50\uff41\uff53\uff53\u00b2", pgxPrep, true},
+		// A soft hyphen: libpq drops it, pgx refuses it and hashes the
+		// password as it is.
+		{[]string{"pa\u00adss"}, "pa\u00adss", libpqPrep, true},
+		{[]string{"pa\u00adss"}, "pa\u00adss", pgxPrep, true},
+		// What libpq folds is still not another password.
+		{[]string{"\uff50\uff41\uff53\uff53\u00b2"}, "pass3", libpqPrep, false},
 	} {
-		if got := proofFor(t, tc.given).Matches(tc.list); got != tc.want {
+		if got := proofFor(t, tc.given, tc.prep).Matches(tc.list); got != tc.want {
 			t.Errorf("Matches(%q) for %q = %v, want %v", tc.list, tc.given, got, tc.want)
 		}
 	}
@@ -778,5 +812,52 @@ func TestLogin_acceptedWithoutCheckingIsRefused(t *testing.T) {
 	case <-closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the binding the login returned was not closed")
+	}
+}
+
+// A TLS negotiation that fails for a reason the operator must see is a
+// warning, at most one per tlsWarnEvery; a client that just left is not.
+func TestLogNegotiateFailure(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&lockedWriter{w: &buf}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	tlsWarnedAt.Store(0)
+	bad := &tlsError{fmt.Errorf("TLS handshake: %w", errors.New("remote error: tls: unknown certificate authority"))}
+	logNegotiateFailure(logger, bad, nil)
+	logNegotiateFailure(logger, bad, nil)
+	logNegotiateFailure(logger, &tlsError{fmt.Errorf("TLS handshake: %w", io.EOF)}, nil)
+	tlsWarnedAt.Store(0)
+	logNegotiateFailure(logger, &tlsError{fmt.Errorf("TLS handshake: %w", io.EOF)}, nil)
+	logNegotiateFailure(logger, io.EOF, nil)
+	out := buf.String()
+	if n := strings.Count(out, "level=WARN"); n != 1 || !strings.Contains(out, "unknown certificate authority") {
+		t.Fatalf("want one warning for the refused certificate, the rest at debug level:\n%s", out)
+	}
+	if n := strings.Count(out, "level=DEBUG"); n != 4 {
+		t.Fatalf("want four debug lines:\n%s", out)
+	}
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// A SASL message the protocol library cannot read is answered 08P01; a
+// connection that ended has nobody to answer.
+func TestUnreadSASL(t *testing.T) {
+	var se *scramError
+	if err := unreadSASL(errors.New("invalid SASLInitialResponse")); !errors.As(err, &se) || se.code != "08P01" {
+		t.Errorf("a message that cannot be read: %v, want 08P01", err)
+	}
+	for _, err := range []error{io.EOF, io.ErrUnexpectedEOF, net.ErrClosed, fmt.Errorf("read: %w", io.EOF)} {
+		if errors.As(unreadSASL(err), &se) {
+			t.Errorf("%v was answered as a malformed message", err)
+		}
 	}
 }

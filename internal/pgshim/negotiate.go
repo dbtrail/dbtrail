@@ -2,6 +2,8 @@ package pgshim
 
 import (
 	"context"
+	"log/slog"
+	"sync/atomic"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/tls"
@@ -132,7 +134,7 @@ func negotiate(ctx context.Context, c net.Conn, pt *portTLS) (conn net.Conn, enc
 		if hdr[0] == tlsRecordHandshake && !encrypted {
 			// A TLS handshake with no request before it.
 			if pt == nil {
-				return nil, false, errors.New("the client started a TLS handshake, and this port has no TLS")
+				return nil, false, &tlsError{errors.New("the client started a TLS handshake (sslnegotiation=direct), and this port has no TLS")}
 			}
 			tc, err := tlsHandshake(ctx, &prefixConn{Conn: conn, pending: hdr[:]}, pt)
 			if err != nil {
@@ -143,7 +145,7 @@ func negotiate(ctx context.Context, c net.Conn, pt *portTLS) (conn net.Conn, enc
 				// speaks PostgreSQL in it, so a TLS connection meant for some
 				// other service is not taken for one.
 				_ = tc.Close()
-				return nil, false, errors.New("the client started a TLS handshake without naming the PostgreSQL protocol (ALPN postgresql)")
+				return nil, false, &tlsError{errors.New("the client started a TLS handshake without naming the PostgreSQL protocol (ALPN postgresql)")}
 			}
 			conn, encrypted = tc, true
 			continue
@@ -188,9 +190,51 @@ func tlsHandshake(ctx context.Context, conn net.Conn, pt *portTLS) (*tls.Conn, e
 	defer cancel()
 	if err := tc.HandshakeContext(hctx); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("TLS handshake: %w", err)
+		return nil, &tlsError{fmt.Errorf("TLS handshake: %w", err)}
 	}
 	return tc, nil
+}
+
+// tlsError is a TLS negotiation that failed: the operator's to look at when
+// it is not a client that simply left (a certificate a client refused, a
+// client that speaks TLS some other way).
+type tlsError struct{ err error }
+
+func (e *tlsError) Error() string { return e.err.Error() }
+func (e *tlsError) Unwrap() error { return e.err }
+
+// ChannelBindingOffered says whether the port offers SCRAM-SHA-256-PLUS with
+// cfg: not when the certificate's signature names no hash (Ed25519), or cfg
+// may serve another certificate than its first. A host says so at start, so
+// that clients with channel_binding=require failing are not a surprise.
+func ChannelBindingOffered(cfg *tls.Config) bool {
+	return cfg != nil && serverEndPoint(cfg) != nil
+}
+
+// tlsWarnedAt is when a failed TLS negotiation was last logged as a warning.
+var tlsWarnedAt atomic.Int64
+
+// tlsWarnEvery is how often at most a failed TLS negotiation is a warning;
+// the others in between are logged at debug level.
+const tlsWarnEvery = 10 * time.Second
+
+// logNegotiateFailure logs what negotiate returned. A TLS failure that is
+// not a client leaving is a warning, at most one per tlsWarnEvery: a
+// certificate every client refuses would otherwise fail every connection
+// with nothing said at the default level. The rest (a client that connected
+// and left, a port scan) stays at debug level.
+func logNegotiateFailure(logger *slog.Logger, err error, remote net.Addr) {
+	var te *tlsError
+	left := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed)
+	if errors.As(err, &te) && !left {
+		now := time.Now().UnixNano()
+		last := tlsWarnedAt.Load()
+		if now-last >= int64(tlsWarnEvery) && tlsWarnedAt.CompareAndSwap(last, now) {
+			logger.Warn("pgshim: a client's TLS negotiation failed (others in the next 10 s are logged at debug level)", "err", err, "remote", remote)
+			return
+		}
+	}
+	logger.Debug("pgshim startup failed", "err", err, "remote", remote)
 }
 
 // receiveStartup reads the client's start-up message, after negotiate. A

@@ -10,10 +10,15 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"golang.org/x/text/secure/precis"
+	"golang.org/x/text/unicode/norm"
 )
 
 // The port's login is SCRAM-SHA-256 (RFC 5802, RFC 7677), on a connection
@@ -25,8 +30,12 @@ import (
 // something in the middle that holds another certificate.
 //
 // The port knows each password it takes as text, so nothing is stored for
-// SCRAM: the salt is made up for each connection, and each password is
-// derived with it when the client's proof arrives.
+// SCRAM on disk. One salt is made up when the process starts and sent to
+// every client, and each password is derived with it once and kept in memory
+// (scramSalted): a client that holds no password then costs the port a few
+// HMACs per attempt, not a PBKDF2 per password, which is what PostgreSQL's
+// stored verifier gives it too. The salt is the same for every username, so
+// it says nothing about which exist.
 
 const (
 	scramMechanism     = "SCRAM-SHA-256"
@@ -35,20 +44,55 @@ const (
 	scramIterations = 4096
 	scramSaltLen    = 16
 	scramNonceLen   = 18
-	// scramMinDerivations is how many passwords a proof is always checked
+	// scramMinCandidates is how many passwords a proof is always checked
 	// against, made-up ones filling the rest. A login checks a username's
 	// own password beside the port's (an application login's), so the
 	// number of real ones says something about the username; checking the
 	// same number every time keeps a wrong password and a username that is
 	// no login taking the same time. Three: the token, the port's password
 	// and one login's.
-	scramMinDerivations = 3
+	scramMinCandidates = 3
+	// scramCacheMax bounds the derived passwords kept: past it the cache is
+	// emptied and filled again from the passwords in use.
+	scramCacheMax = 64
 )
+
+// scramSalt is the salt every exchange of this process sends.
+var scramSalt = func() []byte {
+	b := make([]byte, scramSaltLen)
+	_, _ = rand.Read(b)
+	return b
+}()
+
+// scramCache holds each password derived with scramSalt, by the form the
+// client hashed (saslPrepForms).
+var scramCache struct {
+	mu     sync.Mutex
+	salted map[string][]byte
+}
+
+// scramSalted is pw derived with scramSalt, from the cache when it was
+// derived before.
+func scramSalted(pw string) []byte {
+	scramCache.mu.Lock()
+	defer scramCache.mu.Unlock()
+	if k, ok := scramCache.salted[pw]; ok {
+		return k
+	}
+	if scramCache.salted == nil || len(scramCache.salted) >= scramCacheMax {
+		scramCache.salted = map[string][]byte{}
+	}
+	k := scramDerive(pw, scramSalt, scramIterations)
+	scramCache.salted[pw] = k
+	return k
+}
+
+// scramChecks counts the candidates proofs were checked against, for a test.
+var scramChecks atomic.Int64
 
 // Password is what a client proved in its SCRAM exchange. Matches checks it
 // against the passwords that open the port.
 type Password struct {
-	salt        []byte
 	authMessage []byte
 	proof       []byte
 	// salted is the derived password that matched, kept to sign the
@@ -58,34 +102,42 @@ type Password struct {
 
 // Matches says whether the client's proof was made with one of candidates.
 // An empty candidate opens nothing. Every candidate is checked, and at least
-// scramMinDerivations of them are derived, so the time it takes does not say
-// which one matched, or how many there were.
+// scramMinCandidates of them, so the time it takes does not say which one
+// matched, or how many there were.
 func (p *Password) Matches(candidates []string) bool {
 	if p == nil {
 		return false
 	}
 	var hit []byte
-	for i := range max(len(candidates), scramMinDerivations) {
+	for i := range max(len(candidates), scramMinCandidates) {
+		scramChecks.Add(1)
 		real := i < len(candidates) && candidates[i] != ""
 		pw := "\x00 not a password"
 		if real {
 			pw = candidates[i]
 		}
-		salted := scramDerive(saslPrep(pw), p.salt, scramIterations)
-		clientKey := hmacSHA256(salted, []byte("Client Key"))
-		stored := sha256.Sum256(clientKey)
-		signature := hmacSHA256(stored[:], p.authMessage)
-		// The proof is the client key XOR the signature: undone, it is the
-		// client key again when the password was this one.
-		recovered := make([]byte, len(signature))
-		subtle.XORBytes(recovered, p.proof, signature)
-		got := sha256.Sum256(recovered)
-		if subtle.ConstantTimeCompare(got[:], stored[:]) == 1 && real && hit == nil {
-			hit = salted
+		for _, form := range saslPrepForms(pw) {
+			salted := scramSalted(form)
+			if p.proves(salted) && real && hit == nil {
+				hit = salted
+			}
 		}
 	}
 	p.salted = hit
 	return hit != nil
+}
+
+// proves says whether the client's proof was made with salted.
+func (p *Password) proves(salted []byte) bool {
+	clientKey := hmacSHA256(salted, []byte("Client Key"))
+	stored := sha256.Sum256(clientKey)
+	signature := hmacSHA256(stored[:], p.authMessage)
+	// The proof is the client key XOR the signature: undone, it is the
+	// client key again when the password was this one.
+	recovered := make([]byte, len(signature))
+	subtle.XORBytes(recovered, p.proof, signature)
+	got := sha256.Sum256(recovered)
+	return subtle.ConstantTimeCompare(got[:], stored[:]) == 1
 }
 
 // matched says whether Matches found the password.
@@ -109,14 +161,51 @@ var scramDerive = func(password string, salt []byte, iterations int) []byte {
 	return k
 }
 
-// saslPrep is the password as a client hashes it: SASLprep, by the PRECIS
-// profile pgx uses for it, or the password as it is when that refuses it, as
-// PostgreSQL and pgx both fall back to.
-func saslPrep(pw string) string {
-	if out, err := precis.OpaqueString.String(pw); err == nil {
-		return out
+// saslPrepForms is the password in each form a client may hash it: drivers
+// prepare a password before hashing it, and not all the same way. pgx uses
+// the PRECIS profile OpaqueString (NFC); libpq, and so psql and psycopg, and
+// JDBC use SASLprep (RFC 4013: spaces mapped, invisible characters dropped,
+// NFKC). Each falls back to the password as it is when its preparation
+// refuses it. An ASCII password reads the same in every form, and is one.
+func saslPrepForms(pw string) []string {
+	ascii := true
+	for i := range len(pw) {
+		if pw[i] >= 0x80 {
+			ascii = false
+			break
+		}
 	}
-	return pw
+	if ascii {
+		return []string{pw}
+	}
+	forms := []string{pw}
+	if out, err := precis.OpaqueString.String(pw); err == nil && out != pw {
+		forms = append(forms, out)
+	}
+	if out := saslPrepRFC4013(pw); out != forms[0] && (len(forms) == 1 || out != forms[1]) {
+		forms = append(forms, out)
+	}
+	return forms
+}
+
+// saslPrepRFC4013 maps pw as SASLprep does before its checks: a non-ASCII
+// space becomes a space (RFC 3454 C.1.2), a character "commonly mapped to
+// nothing" goes (B.1), and the result is NFKC. The checks for prohibited
+// characters are not made: libpq hashes the password as it is when they
+// fail, and that form is already among saslPrepForms.
+func saslPrepRFC4013(pw string) string {
+	var b strings.Builder
+	for _, r := range pw {
+		switch {
+		case r == 0x00A0, r == 0x1680, r >= 0x2000 && r <= 0x200B, r == 0x202F, r == 0x205F, r == 0x3000:
+			b.WriteByte(' ')
+		case r == 0x00AD, r == 0x034F, r == 0x1806, r >= 0x180B && r <= 0x180D, r == 0x200C, r == 0x200D,
+			r == 0x2060, r >= 0xFE00 && r <= 0xFE0F, r == 0xFEFF:
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return norm.NFKC.String(b.String())
 }
 
 func hmacSHA256(key, msg []byte) []byte {
@@ -171,7 +260,7 @@ func scramSteps(be *pgproto3.Backend, encrypted bool, endPoint []byte) (*Passwor
 	}
 	msg, err := be.Receive()
 	if err != nil {
-		return nil, err
+		return nil, unreadSASL(err)
 	}
 	initial, ok := msg.(*pgproto3.SASLInitialResponse)
 	if !ok {
@@ -196,9 +285,8 @@ func scramSteps(be *pgproto3.Backend, encrypted bool, endPoint []byte) (*Passwor
 		return nil, &scramError{"28000", "SCRAM channel binding negotiation error: the client did not see this port's offer of SCRAM-SHA-256-PLUS"}
 	}
 
-	salt := make([]byte, scramSaltLen)
+	salt := scramSalt
 	nonce := make([]byte, scramNonceLen)
-	_, _ = rand.Read(salt)
 	_, _ = rand.Read(nonce)
 	combined := first.nonce + base64.RawStdEncoding.EncodeToString(nonce)
 	serverFirst := fmt.Sprintf("r=%s,s=%s,i=%d", combined, base64.StdEncoding.EncodeToString(salt), scramIterations)
@@ -210,7 +298,7 @@ func scramSteps(be *pgproto3.Backend, encrypted bool, endPoint []byte) (*Passwor
 		return nil, err
 	}
 	if msg, err = be.Receive(); err != nil {
-		return nil, err
+		return nil, unreadSASL(err)
 	}
 	resp, ok := msg.(*pgproto3.SASLResponse)
 	if !ok {
@@ -225,10 +313,20 @@ func scramSteps(be *pgproto3.Backend, encrypted bool, endPoint []byte) (*Passwor
 		return nil, err
 	}
 	return &Password{
-		salt:        salt,
 		authMessage: []byte(first.bare + "," + serverFirst + "," + withoutProof),
 		proof:       proof,
 	}, nil
+}
+
+// unreadSASL is a SASL message that could not be read: the client is told
+// why (08P01) unless the connection itself ended, and then there is nobody
+// to tell.
+func unreadSASL(err error) error {
+	var ne net.Error
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.As(err, &ne) {
+		return err
+	}
+	return malformedSCRAM(fmt.Sprintf("the SASL message could not be read: %v", err))
 }
 
 // clientFirst is the client's first SCRAM message, read.

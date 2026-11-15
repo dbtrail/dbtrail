@@ -245,6 +245,9 @@ func pgRouterTLSLines(t *shim.PortTLS, now time.Time) string {
 	if p := t.ValidityProblemFor(now, pgVerifying); p != "" {
 		b.WriteString("PostgreSQL router: WARNING: " + p + ".\n")
 	}
+	if !pgshim.ChannelBindingOffered(t.Config) {
+		b.WriteString("PostgreSQL router: WARNING: channel binding (SCRAM-SHA-256-PLUS) is not offered with this certificate: its signature names no hash for it (an Ed25519 certificate, for one). A client with channel_binding=require cannot connect; one with the default (prefer) logs in with SCRAM-SHA-256.\n")
+	}
 	return b.String()
 }
 

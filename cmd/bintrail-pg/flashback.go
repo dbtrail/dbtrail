@@ -173,8 +173,16 @@ func runFlashback(cmd *cobra.Command, args []string) error {
 		slog.Warn("bintrail-pg flashback: " + p)
 	}
 
+	served := "a certificate made up at start (clients cannot verify it)"
+	if portTLS.CertFile != "" {
+		served = portTLS.CertFile
+	}
+	if !pgshim.ChannelBindingOffered(portTLS.Config) {
+		slog.Warn("bintrail-pg flashback: channel binding (SCRAM-SHA-256-PLUS) is not offered with this certificate, whose signature names no hash for it; clients with channel_binding=require cannot connect")
+	}
 	slog.Info("bintrail-pg flashback listening",
 		"addr", listener.Addr().String(),
+		"tls", served,
 		"tenants", len(tenantCfgs),
 		"snapshot_baseline", fbBaselineDir != "" || fbBaselineS3 != "")
 
@@ -215,6 +223,14 @@ func runFlashback(cmd *cobra.Command, args []string) error {
 // when both files are given, one made up at start when neither is, and a
 // refusal when only one is or they cannot be used, before anything listens.
 func flashbackTLS(cert, key string) (*shim.PortTLS, error) {
+	for _, v := range []struct{ name, val string }{{"--tls-cert", cert}, {"--tls-key", key}} {
+		if v.val != "" && strings.TrimSpace(v.val) == "" {
+			// Not taken for "none": a port that served a made-up
+			// certificate instead of the one meant would look encrypted and
+			// fail every client that verifies.
+			return nil, fmt.Errorf("%s is only spaces: give the path of a PEM file, or leave it unset", v.name)
+		}
+	}
 	cert, key = strings.TrimSpace(cert), strings.TrimSpace(key)
 	switch {
 	case cert == "" && key == "":

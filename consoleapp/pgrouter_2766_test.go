@@ -2,9 +2,13 @@ package consoleapp
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -268,5 +272,32 @@ func TestPGRouter_loginOverTLS(t *testing.T) {
 		if got != tc.want || encrypted != tc.encrypted {
 			t.Errorf("%s (%s): SQLSTATE %q encrypted %v, want %q %v", tc.why, tc.params, got, encrypted, tc.want, tc.encrypted)
 		}
+	}
+}
+
+// A certificate the port cannot bind SCRAM to says so at start, and one it
+// can does not.
+func TestPGRouterTLSLines_channelBinding(t *testing.T) {
+	c := testutil.WriteTestCert(t, testutil.TestCertOptions{ECDSA: true})
+	pt, err := shim.LoadPortTLS(c.CertFile, c.KeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := pgRouterTLSLines(pt, time.Now()); strings.Contains(out, "channel binding") {
+		t.Errorf("an ECDSA certificate is said to lose channel binding:\n%s", out)
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed := &shim.PortTLS{CertFile: "ed.pem", NotBefore: tmpl.NotBefore, NotAfter: tmpl.NotAfter,
+		Config: &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: priv}}}}
+	if out := pgRouterTLSLines(ed, time.Now()); !strings.Contains(out, "WARNING: channel binding (SCRAM-SHA-256-PLUS) is not offered") {
+		t.Errorf("an Ed25519 certificate does not say it loses channel binding:\n%s", out)
 	}
 }

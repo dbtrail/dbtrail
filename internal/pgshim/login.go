@@ -114,7 +114,7 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, l
 	// the socket has one reader, the watcher, and TLS reads what it relays.
 	conn, encrypted, err := negotiate(connCtx, wc, pt)
 	if err != nil {
-		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
+		logNegotiateFailure(logger, err, c.RemoteAddr())
 		return
 	}
 	defer conn.Close()
