@@ -20,8 +20,8 @@ import (
 // PostgreSQL source the copy reads each column as the type the table
 // declares (baseline.PGCasts, #2755), so a bare column of a type the copy
 // reads comes back as that type: integer, bigint, numeric(p,s), double
-// precision, boolean, date, timestamp, timestamptz, time, timetz, interval,
-// uuid, bytea and one-dimensional arrays of those. A column the copy keeps as
+// precision, boolean, date, timestamp, timestamptz, time, timetz, uuid,
+// bytea and one-dimensional arrays of those. A column the copy keeps as
 // text (json, jsonb, varchar(n), char(n), an enum) is announced as text: the
 // answer does not say which table column a value came from, and an
 // expression over one is text anyway. A type of the engine that has no
@@ -29,6 +29,12 @@ import (
 // lists, a fixed-size array, a timestamp in nanoseconds, a bit string, json)
 // is announced as text too, and its cells are the text this port always sent
 // for it.
+//
+// interval is announced as text as well, though the copy reads it: JDBC
+// reads a column of a type outside its own short list (interval is outside
+// it) by asking the server's catalog what the type is, and this port has no
+// catalog to answer with, so getObject on an interval column failed the whole
+// read. As text it is the text PostgreSQL writes, which every client reads.
 //
 // The text of every cell stays the one pgtext.Cell writes, which is the text
 // PostgreSQL writes for a value of the type. The binary form is read from
@@ -66,7 +72,6 @@ var arrayOIDs = map[uint32]uint32{
 	oidDate:        1182,
 	oidTime:        1183,
 	oidTimestamptz: 1185,
-	oidInterval:    1187,
 	oidNumeric:     1231,
 	oidTimetz:      1270,
 	oidUUID:        2951,
@@ -130,8 +135,6 @@ func scalarType(duck string) (colType, bool) {
 		return colType{oidTimestamp, 8, -1}, true
 	case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE":
 		return colType{oidTimestamptz, 8, -1}, true
-	case "INTERVAL":
-		return colType{oidInterval, 16, -1}, true
 	case "UUID":
 		return colType{oidUUID, 16, -1}, true
 	case "BLOB":
@@ -278,14 +281,6 @@ func binaryScalar(oid uint32, s string) ([]byte, error) {
 		// only some 292 years.
 		us := (at.Unix()-pgEpoch.Unix())*1e6 + int64(at.Nanosecond()/1000)
 		return binary.BigEndian.AppendUint64(nil, uint64(us)), nil
-	case oidInterval:
-		months, days, us, ok := parseInterval(s)
-		if !ok {
-			break
-		}
-		b := binary.BigEndian.AppendUint64(nil, uint64(us))
-		b = binary.BigEndian.AppendUint32(b, uint32(days))
-		return binary.BigEndian.AppendUint32(b, uint32(months)), nil
 	case oidUUID:
 		h := strings.ReplaceAll(s, "-", "")
 		b, err := hex.DecodeString(h)
@@ -325,8 +320,6 @@ func typeName(oid uint32) string {
 		return "timestamp"
 	case oidTimestamptz:
 		return "timestamp with time zone"
-	case oidInterval:
-		return "interval"
 	case oidUUID:
 		return "uuid"
 	case oidText:
@@ -492,75 +485,6 @@ func parseOffset(s string) (int, bool) {
 		secs = -secs
 	}
 	return secs, true
-}
-
-// parseInterval reads an interval as PostgreSQL writes one under
-// IntervalStyle postgres (pgtext.Cell's pgInterval): counts of years, mons
-// and days, each signed and at most once, in that order, then a clock
-// [+-]HH:MM:SS[.ffffff] with as many hours as it needs.
-func parseInterval(s string) (months, days int32, us int64, ok bool) {
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return 0, 0, 0, false
-	}
-	seen := 0
-	var m int64
-	for i := 0; i < len(fields); {
-		f := fields[i]
-		if strings.Contains(f, ":") {
-			if i != len(fields)-1 {
-				return 0, 0, 0, false
-			}
-			neg := false
-			switch {
-			case strings.HasPrefix(f, "-"):
-				neg, f = true, f[1:]
-			case strings.HasPrefix(f, "+"):
-				f = f[1:]
-			}
-			h, rest, found := strings.Cut(f, ":")
-			if !found || h == "" || len(h) > 10 || !allDigits(h) {
-				return 0, 0, 0, false
-			}
-			clock, tail, good := parseClock("00:" + rest)
-			if !good || tail != "" {
-				return 0, 0, 0, false
-			}
-			hours, _ := strconv.ParseInt(h, 10, 64)
-			const usPerHour = int64(3600_000_000)
-			if hours > math.MaxInt64/usPerHour-1 {
-				return 0, 0, 0, false
-			}
-			us = hours*usPerHour + clock
-			if neg {
-				us = -us
-			}
-			i++
-			continue
-		}
-		if i+1 >= len(fields) {
-			return 0, 0, 0, false
-		}
-		n, err := strconv.ParseInt(f, 10, 32)
-		if err != nil {
-			return 0, 0, 0, false
-		}
-		switch unit := fields[i+1]; {
-		case (unit == "year" || unit == "years") && seen < 1:
-			m, seen = n*12, 1
-		case (unit == "mon" || unit == "mons") && seen < 2:
-			m, seen = m+n, 2
-		case (unit == "day" || unit == "days") && seen < 3:
-			days, seen = int32(n), 3
-		default:
-			return 0, 0, 0, false
-		}
-		i += 2
-	}
-	if m > math.MaxInt32 || m < math.MinInt32 {
-		return 0, 0, 0, false
-	}
-	return int32(m), days, us, true
 }
 
 // binaryArray writes a one-dimensional array's binary form from its text:

@@ -710,9 +710,38 @@ listener, its own workers, its own memory.
   resolve in `public`. NULL order, integer division and text comparison follow
   PostgreSQL, and each type reads as [the table below](#how-each-type-reads-in-sql-on-the-copy)
   says; the differences listed there apply here too.
-- **Every column is sent as text**, written the way PostgreSQL writes a value
-  of that kind (`t`/`f`, `{a,b}`, `2026-03-04 05:06:07+00`). `psql` shows them
-  as it would; a driver that asks for a column's type is told `text`.
+- **Each column carries its PostgreSQL type**, and each value is written the
+  way PostgreSQL writes a value of that type (`t`/`f`, `{a,b}`,
+  `2026-03-04 05:06:07+00`, `\xdead`, `-0`, `NaN`). A column of the table
+  keeps the type, type modifier and size the source announces for it:
+  `integer`, `bigint`, `smallint`, `numeric(p,s)`, `real`, `double precision`,
+  `boolean`, `date`, `timestamp`, `timestamptz`, `time`, `timetz`, `uuid`,
+  `bytea`, `text`, and arrays of one dimension of those. So `pgx` returns an
+  `int64` or a `time.Time`, psycopg an `int`, a `Decimal` or a `datetime`, and
+  JDBC's `getObject` a `Long`, a `BigDecimal` or a `Timestamp`, as they do from
+  the source. When a driver asks for results in binary (`pgx` and JDBC do for
+  common types, psycopg on a binary cursor), they are sent in binary, the
+  same bytes the source sends. Some columns are announced as `text`, with the
+  text PostgreSQL writes:
+  - `json`, `jsonb`, `varchar(n)`, `char(n)`, enums and the other types the
+    copy keeps as text (the [table below](#how-each-type-reads-in-sql-on-the-copy)
+    lists them);
+  - `interval`: JDBC reads a column of that type by asking the server's
+    catalog about it, which this port does not answer, so `getObject` would
+    fail; as text every driver reads it;
+  - a value of a type the copy has and PostgreSQL does not (a struct, a map,
+    an array of arrays);
+  - time travel (`_flashback`, `_snapshot`) and `SHOW`.
+
+  An expression's type is the one the copy computes it with, which is not
+  always PostgreSQL's: `avg()` of whole numbers is a `double precision` here
+  and a `numeric` there, and an aggregate or a literal of a `numeric` keeps its
+  precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
+  `numeric` declared without precision is a `numeric(38,18)` here and is
+  written with its 18 decimals (`12345.678000000000000000` where the source
+  writes `12345.678`). A value with no binary form for its type (a date past
+  year 9999) is refused with error `0A000` when a client asks for binary, and
+  sent as text when it asks for text.
 - **A column with no name of its own is headed as PostgreSQL heads it**:
   `count(*)` is `count`, a function call takes the function's name, a cast of
   an expression takes the type's name (`int4`, `numeric`, `timestamptz`), and
@@ -863,12 +892,12 @@ Scope and behaviour track PostgreSQL's current time-travel maturity:
   needs the `CREATE TABLE` metadata a PG baseline does not carry. A whole
   table at a point in time is `reconstruct --output-format parquet` (see
   [Full-table snapshots](#full-table-snapshots)).
-- Columns render as **text** (the conservative first cut): read each one as a
-  string, or let your driver text-parse it into a typed target. One caveat: a
+- Columns render as **text**, on purpose: a row as it was can carry other
+  columns, and other types, than the table has now. Read each one as a string,
+  or let your driver text-parse it into a typed target. One caveat: a
   binary/`bytea` value containing a `0x00` byte truncates at the first NUL in
   `psql`/libpq (their text protocol uses NUL-terminated C strings); a driver that
   reads the raw value (e.g. `pgx` scanning into `[]byte`) round-trips it intact.
-  Per-column type OIDs (so `bytea` arrives as `bytea`) are a follow-up.
 - Both the **simple and the extended query protocol** are served, so a driver
   in its default mode can prepare `SELECT * FROM _flashback.orders AS OF $1
   WHERE id = $2` and run it with arguments. An argument cannot hold a single

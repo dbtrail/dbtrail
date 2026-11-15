@@ -43,7 +43,9 @@ func TestColumnType_2768(t *testing.T) {
 		{"TIMESTAMP", colType{1114, 8, -1}},
 		{"TIMESTAMPTZ", colType{1184, 8, -1}},
 		{"TIMESTAMP WITH TIME ZONE", colType{1184, 8, -1}},
-		{"INTERVAL", colType{1186, 16, -1}},
+		// Text: JDBC asks the catalog for it (see coltypes.go).
+		{"INTERVAL", textColumn},
+		{"INTERVAL[]", textColumn},
 		{"UUID", colType{2950, 16, -1}},
 		{"BLOB", colType{17, -1, -1}},
 		{"VARCHAR", colType{25, -1, -1}},
@@ -99,7 +101,6 @@ func TestBinaryCell_readsAsItsText_2768(t *testing.T) {
 		{"TIME", []string{"00:00:00", "12:00:00.5", "23:59:59.999999"}},
 		{"TIMESTAMP", []string{"2026-03-04 05:06:07", "2026-03-04 05:06:07.123456", "1999-12-31 23:59:59.5", "0001-01-01 00:00:00", "9999-12-31 23:59:59.999999"}},
 		{"TIMESTAMPTZ", []string{"2026-03-04 05:06:07+00", "2026-03-04 05:06:07.123456+00", "1970-01-01 00:00:00+00"}},
-		{"INTERVAL", []string{"00:00:00", "1 year 2 mons -3 days +04:05:06.5", "-1 years", "1 day", "-00:00:01.5", "25:00:00", "1 mon", "-2 days +01:00:00", "100000:00:00"}},
 		{"UUID", []string{"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "00000000-0000-0000-0000-000000000000"}},
 		{"BLOB", []string{`\x`, `\xdead`, `\x00ff`}},
 		{"VARCHAR", []string{"", "año", "a\\b"}},
@@ -111,7 +112,6 @@ func TestBinaryCell_readsAsItsText_2768(t *testing.T) {
 		{"BOOLEAN[]", []string{"{t,f,NULL}"}},
 		{"DOUBLE[]", []string{"{1.5,NaN,-Infinity}"}},
 		{"BLOB[]", []string{`{"\\x01","\\x"}`}},
-		{"INTERVAL[]", []string{`{"1 day","-1 years +00:00:01"}`}},
 		{"UUID[]", []string{"{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}"}},
 	} {
 		ct := columnType(c.duck)
@@ -193,8 +193,6 @@ func TestBinaryCell_exactBytes_2768(t *testing.T) {
 		{"TIMETZ", "00:00:00+00", "000000000000000000000000"},
 		// date: days from 2000-01-01.
 		{"DATE", "1999-12-31", "ffffffff"},
-		// interval: microseconds, days, months.
-		{"INTERVAL", "1 year 2 mons -3 days +04:05:06.5", "000000036c9361a0fffffffd0000000e"},
 		{"INTEGER[]", "{}", "000000000000000000000017"},
 		{"INTEGER[]", "{1,NULL}", "00000001000000010000001700000002000000010000000400000001ffffffff"},
 	} {
@@ -241,10 +239,6 @@ func TestBinaryCell_refusesTextThatIsNotItsType_2768(t *testing.T) {
 		{"TIME", "12:00:00.1234567"},
 		{"TIMETZ", "12:00:00"},
 		{"TIMETZ", "12:00:00+2"},
-		{"INTERVAL", "1 week"},
-		{"INTERVAL", "1 day 1 year"},
-		{"INTERVAL", ""},
-		{"INTERVAL", "00:00:00 1 day"},
 		{"UUID", "a0eebc999c0b4ef8bb6d6bb9bd380a11"},
 		{"BLOB", "dead"},
 		{"BLOB", `\xdea`},
@@ -283,7 +277,6 @@ func TestBinaryCell_everyCellOfTheCopy_2768(t *testing.T) {
 		{"TIMESTAMP", "2026-01-02T03:04:05Z"},
 		{"TIMETZ", "12:00:00+02"},
 		{"TIME", "12:00:00.5"},
-		{"INTERVAL", "1 year 2 months -3 days 04:05:06.5"},
 		{"UUID", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"},
 		{"BLOB", "0x00FF"},
 		{"BLOB", "ab"},
@@ -294,7 +287,6 @@ func TestBinaryCell_everyCellOfTheCopy_2768(t *testing.T) {
 		{"TIMESTAMPTZ[]", []any{"2026-01-01T00:00:00Z"}},
 		{"DECIMAL(4,1)[]", []any{"1.5"}},
 		{"BLOB[]", []any{"\x01"}},
-		{"INTERVAL[]", []any{"1 day"}},
 		{"BOOLEAN[]", []any{true, false}},
 	} {
 		text := pgtext.Cell(c.duck, c.cell)

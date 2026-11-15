@@ -425,7 +425,9 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 	}
 	if err == nil {
 		types = columnTypes(sandboxTypes(got))
-		s.untypedArgumentsAsText(st, types)
+		if perr := s.untypedArgumentsAsText(st, types); perr != nil {
+			return nil, nil, false, perr
+		}
 		return columnNames(got), types, true, nil
 	}
 	perr = freeError(err, s.logger)
@@ -475,11 +477,15 @@ func (s *session) describeWith(st *preparedStatement, untyped string) (cols []sq
 // of unknown type there as text, and so does this port: the statement is
 // described a second time with each such argument a NULL of text, and a
 // column whose type changes with it is text. Only asked when it can matter:
-// an argument without a type, and a column the first answer typed INTEGER.
-// When the second description fails (the text NULL meets a comparison with a
-// number) the first answer stands; an execution whose cells do not read as
-// it is refused then (conformToDescribed).
-func (s *session) untypedArgumentsAsText(st *preparedStatement, types []colType) {
+// an argument without a type, and a column the first answer typed INTEGER or
+// a list of INTEGER (SELECT [$1]). When the second description is refused
+// for the statement's own shape or text (the text NULL meets a comparison
+// with a number) the first answer stands, and an execution whose cells do
+// not read as it is refused then (conformToDescribed). Any other failure is
+// the moment's, as in describeFree: the Describe fails with it, rather than
+// keep an INTEGER that an execution with text would be refused against for
+// a reason that is not its own.
+func (s *session) untypedArgumentsAsText(st *preparedStatement, types []colType) *pgErr {
 	untyped := false
 	for _, oid := range st.paramOIDs {
 		if typedCast[oid] == "" {
@@ -488,22 +494,34 @@ func (s *session) untypedArgumentsAsText(st *preparedStatement, types []colType)
 	}
 	integer := false
 	for _, t := range types {
-		if t.oid == oidInt4 {
+		if t.oid == oidInt4 || t.oid == arrayOIDs[oidInt4] {
 			integer = true
 		}
 	}
 	if !untyped || !integer {
-		return
+		return nil
 	}
 	again, perr, err := s.describeWith(st, "VARCHAR")
-	if perr != nil || err != nil || len(again) != len(types) {
-		return
+	if perr != nil {
+		return nil
+	}
+	if err != nil {
+		perr = freeError(err, s.logger)
+		if strings.HasPrefix(perr.code, "42") || perr.code == "0A000" {
+			return nil
+		}
+		s.logger.Warn("pgshim: a statement could not be described a second time", "code", perr.code, "err", err)
+		return perr
+	}
+	if len(again) != len(types) {
+		return nil
 	}
 	for i, c := range again {
 		if columnType(c.Type) != types[i] {
 			types[i] = textColumn
 		}
 	}
+	return nil
 }
 
 // columnsOf runs text on the copy, counted and recorded as every statement
@@ -588,18 +606,21 @@ func (s *session) runPortal(p *portal) *pgErr {
 	// cell's binary form can take more bytes than its text (a numeric 1 is
 	// one byte of text and ten of binary), and what the portal keeps is what
 	// it will send.
-	if perr := encodeResult(cols, types, p.resultFormats, rows); perr != nil {
+	if perr := s.encodeResult(cols, types, p.resultFormats, rows); perr != nil {
 		giveBack()
 		return perr
 	}
 	// The statement was counted in the port's budget by its text; what the
-	// binary form adds is counted now, by the same rule: refused when the
-	// port already holds its budget.
+	// binary form adds is counted now, so the budget holds what is really
+	// kept. By the budget's own rule: the port holds at most its budget plus
+	// one result, and the binary form is part of this one, so it is refused
+	// only when the OTHER results already hold the budget (what this one
+	// counted is taken out of the comparison), as holdResult refuses one.
 	if b := s.budget; b != nil && held != 0 {
 		if grown := resultBytes(rows) - held; grown > 0 {
 			for {
 				cur := b.held.Load()
-				if cur >= b.max {
+				if cur-held >= b.max {
 					giveBack()
 					return b.refuse(s.logger)
 				}
@@ -660,7 +681,7 @@ func conformToDescribed(described, types []colType, rows [][][]byte) ([]colType,
 // the client did not ask for: a client decodes by the format it asked, not
 // by the one it is told. Formats that do not fit the columns are left for
 // checkResultFormats to refuse.
-func encodeResult(cols []string, types []colType, formats []int16, rows [][][]byte) *pgErr {
+func (s *session) encodeResult(cols []string, types []colType, formats []int16, rows [][][]byte) *pgErr {
 	n := len(cols)
 	if cols == nil || (len(formats) > 1 && len(formats) != n) {
 		return nil
@@ -682,6 +703,10 @@ func encodeResult(cols []string, types []colType, formats []int16, rows [][][]by
 			}
 			b, err := binaryCell(typeAt(types, i), c)
 			if err != nil {
+				// A cell that does not read as its own column's type: the
+				// copy's text and the type announced for it disagree. Logged
+				// without the value, which is the client's data.
+				s.logger.Warn("pgshim: a cell has no binary form for its column's type", "column", cols[i], "oid", typeAt(types, i).oid)
 				return &pgErr{"0A000", fmt.Sprintf(
 					"column %q cannot be sent in binary format: %v; ask for it in text format", cols[i], err)}
 			}

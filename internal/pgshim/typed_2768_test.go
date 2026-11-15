@@ -95,7 +95,7 @@ func everyType(st string) (sqlsandbox.Result, error) {
 // Every type the copy answers with is announced as PostgreSQL's, on the
 // simple protocol and on each extended mode; a type with none is text.
 func TestTyped_rowDescriptionCarriesTheTypes_2768(t *testing.T) {
-	want := []uint32{23, 20, 21, 1700, 1700, 701, 700, 16, 1082, 1114, 1184, 1083, 1186, 2950, 17, 25, 1007, 25}
+	want := []uint32{23, 20, 21, 1700, 1700, 701, 700, 16, 1082, 1114, 1184, 1083, 25, 2950, 17, 25, 1007, 25}
 	modes := map[string]pgx.QueryExecMode{"SimpleProtocol": pgx.QueryExecModeSimpleProtocol}
 	for k, v := range extendedModes {
 		modes[k] = v
@@ -163,7 +163,7 @@ func TestTyped_pgxReadsTypedValues_2768(t *testing.T) {
 				d, ts time.Time
 				tz    time.Time
 				tm    pgtype.Time
-				iv    pgtype.Interval
+				iv    string
 				u     [16]byte
 				by    []byte
 				txt   string
@@ -175,11 +175,11 @@ func TestTyped_pgxReadsTypedValues_2768(t *testing.T) {
 			}
 			nv, _ := n.Value()
 			hv, _ := h.Value()
-			got := fmt.Sprintf("%d %d %d %v %v %v %v %v %s %s %s %d %d/%d/%d %x %x %s %d,%v %s",
+			got := fmt.Sprintf("%d %d %d %v %v %v %v %v %s %s %s %d %s %x %x %s %d,%v %s",
 				i, b, s, nv, hv, f, r, ok, d.Format("2006-01-02"), ts.Format(time.RFC3339Nano), tz.UTC().Format(time.RFC3339Nano),
-				tm.Microseconds, iv.Months, iv.Days, iv.Microseconds, u, by, txt, *a[0], a[1], st)
+				tm.Microseconds, iv, u, by, txt, *a[0], a[1], st)
 			want := "42 9007199254740993 -7 10.50 170141183460469231731687303715884105727 -0 1.1 true 2026-03-04 " +
-				"2026-03-04T05:06:07.123456Z 2026-03-04T05:06:07Z 43200500000 14/-3/14706500000 a0eebc999c0b4ef8bb6d6bb9bd380a11 dead año 1,<nil> {\"a\":1}"
+				"2026-03-04T05:06:07.123456Z 2026-03-04T05:06:07Z 43200500000 1 year 2 mons -3 days +04:05:06.5 a0eebc999c0b4ef8bb6d6bb9bd380a11 dead año 1,<nil> {\"a\":1}"
 			if got != want {
 				t.Errorf("got  %s\nwant %s", got, want)
 			}
@@ -351,39 +351,50 @@ func tenOnes(string) (sqlsandbox.Result, error) {
 }
 
 // What a portal sends in binary is what it is counted at: a binary form
-// larger than its text is charged in the port's result budget, refused by
-// the budget's own rule (the port already holds it all), and given back.
+// larger than its text is charged in the port's result budget at its binary
+// size, while it is kept, and given back when it is sent.
+//
+// By the budget's rule (at most the budget plus one result) a result is
+// refused only when the other results already hold the budget: with the
+// budget exactly this result's text, the binary form, larger, is part of
+// that one result and is served, not refused for the bytes it counted
+// itself. While a portal keeps it the budget holds the binary size, so the
+// next statement of another connection is refused.
 func TestTyped_binaryIsCountedInTheResultBudgetAtItsSize_2768(t *testing.T) {
 	text := resultBytes(cellsOfText(10, "1"))
-	b := NewResultBudget(text) // exactly the text: the binary form passes it
-	l := &typedLogin{answer: tenOnes}
-	r := dialRawCfg(t, Config{Login: l.login, ResultBudget: b})
-	got := r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{ResultFormatCodes: []int16{1}},
-		&pgproto3.Execute{}, &pgproto3.Sync{})
-	want(t, "binary past the budget", got, "ParseComplete", "BindComplete", "Error 53000", "ReadyForQuery I")
-	if b.Held() != 0 {
-		t.Fatalf("the refused result still holds %d bytes", b.Held())
+	bin := resultBytes(cellsOfText(10, string([]byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 1})))
+	if bin <= text {
+		t.Fatalf("the binary form (%d) must be larger than the text (%d) for this test", bin, text)
 	}
-	got = r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})
+	b := NewResultBudget(text)
+	l := &typedLogin{answer: tenOnes}
+	cfg := Config{Login: l.login, ResultBudget: b}
+	r := dialRawCfg(t, cfg)
+	want(t, "begin", r.send(&pgproto3.Query{String: "BEGIN"}), "CommandComplete BEGIN", "ReadyForQuery T")
+	got := r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{DestinationPortal: "c", ResultFormatCodes: []int16{1}},
+		&pgproto3.Execute{Portal: "c", MaxRows: 1}, &pgproto3.Sync{})
+	if got[len(got)-2] != "PortalSuspended" {
+		t.Fatalf("binary at the budget, kept in a portal: %q", got)
+	}
+	if b.Held() != bin || b.Charged() != bin {
+		t.Fatalf("held %d, charged %d: want the binary size %d (the text is %d)", b.Held(), b.Charged(), bin, text)
+	}
+	// The budget is held: another connection's statement is refused.
+	other := dialRawCfg(t, cfg)
+	got = other.send(&pgproto3.Query{String: "SELECT n FROM t"})
+	want(t, "another connection while the portal keeps the binary rows", got, "Error 53000", "ReadyForQuery I")
+	want(t, "commit", r.send(&pgproto3.Query{String: "COMMIT"}), "CommandComplete COMMIT", "ReadyForQuery I")
+	if b.Held() != 0 {
+		t.Fatalf("after the portal ended the budget holds %d bytes", b.Held())
+	}
+	// Sent at once, and given back once written.
+	got = r.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{ResultFormatCodes: []int16{1}},
+		&pgproto3.Execute{}, &pgproto3.Sync{})
 	if len(got) != 14 || got[12] != "CommandComplete SELECT 10" {
-		t.Fatalf("the same in text: %q", got)
+		t.Fatalf("binary at once: %q", got)
 	}
 	if b.Held() != 0 {
 		t.Fatalf("after the answer the budget holds %d bytes", b.Held())
-	}
-	// With room for it, the binary answer is charged at its binary size.
-	b2 := NewResultBudget(1 << 20)
-	r2 := dialRawCfg(t, Config{Login: l.login, ResultBudget: b2})
-	got = r2.send(&pgproto3.Parse{Query: "SELECT n FROM t"}, &pgproto3.Bind{ResultFormatCodes: []int16{1}},
-		&pgproto3.Execute{}, &pgproto3.Sync{})
-	if len(got) != 14 {
-		t.Fatalf("binary with room: %q", got)
-	}
-	if bin := resultBytes(cellsOfText(10, string([]byte{0, 1, 0, 0, 0, 0, 0, 0, 0, 1}))); b2.Charged() != bin {
-		t.Fatalf("charged %d, want the binary size %d (the text is %d)", b2.Charged(), bin, text)
-	}
-	if b2.Held() != 0 {
-		t.Fatalf("after the answer the budget holds %d bytes", b2.Held())
 	}
 }
 
@@ -432,4 +443,52 @@ func dialRawCfg(t *testing.T, cfg Config) *rawConn {
 	}
 	r.until()
 	return r
+}
+
+// A list built from an untyped argument (SELECT [$1]) is a list of INTEGER
+// when described with a NULL, and is asked about a second time too.
+func TestTyped_anUntypedArgumentInAListIsText_2768(t *testing.T) {
+	l := &typedLogin{}
+	l.answer = func(st string) (sqlsandbox.Result, error) {
+		typ := "INTEGER[]"
+		if strings.Contains(st, "CAST(NULL AS VARCHAR)") || !strings.Contains(st, "dbtrail_describe") {
+			typ = "VARCHAR[]"
+		}
+		res := sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "l", Type: typ}}}
+		if !strings.Contains(st, "dbtrail_describe") {
+			res.Rows = [][]any{{[]any{"a"}}}
+		}
+		return res, nil
+	}
+	conn := dialTyped(t, l, pgx.QueryExecModeCacheStatement)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var got string
+	if err := conn.QueryRow(ctx, "SELECT [$1] AS l", "a").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "{a}" {
+		t.Fatalf("%q", got)
+	}
+}
+
+// The second description failing for the moment (the copy busy) fails the
+// Describe with that error, as the first one would: the column is not kept
+// as an INTEGER that an execution with text would then be refused against.
+func TestTyped_aSecondDescribeThatFailsForTheMomentIsAnError_2768(t *testing.T) {
+	l := &typedLogin{}
+	l.answer = func(st string) (sqlsandbox.Result, error) {
+		if strings.Contains(st, "CAST(NULL AS VARCHAR)") {
+			return sqlsandbox.Result{}, sqlsandbox.ErrBusy
+		}
+		return sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "x", Type: "INTEGER"}}}, nil
+	}
+	conn := dialTyped(t, l, pgx.QueryExecModeCacheStatement)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := conn.Prepare(ctx, "s", "SELECT $1 AS x")
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "53000" {
+		t.Fatalf("%v, want 53000", err)
+	}
 }
