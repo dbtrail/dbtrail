@@ -135,23 +135,31 @@ func TestPackaging_theUnitMatchesWhatThePackageInstalls(t *testing.T) {
 // bintrail-router.service answers is-active from ROUTER_ACTIVE instead, so a
 // case can have one service running and the other not; its "starts" is a
 // service that is not running until it is enabled and started.
+// bintrail-pg-router.service answers the same way from PG_ROUTER_ACTIVE.
 func stub(t *testing.T) (path, log string) {
 	t.Helper()
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls.log")
 	rec := "#!/bin/sh\necho \"$(basename \"$0\") $*\" >> \"$STUB_LOG\"\n"
 	for name, body := range map[string]string{
-		"systemctl": rec + `case "$*" in "enable --now bintrail-router.service")
+		"systemctl": rec + `started=$STUB_LOG.router-started
+case "$*" in "enable --now bintrail-router.service")
   [ "$ENABLE_FAILS" = yes ] && exit 1
-  : > "$STUB_LOG.router-started" ;; esac
+  : > "$STUB_LOG.router-started" ;;
+"enable --now bintrail-pg-router.service")
+  [ "$PG_ENABLE_FAILS" = yes ] && exit 1
+  : > "$STUB_LOG.pg-router-started" ;; esac
 case "$1" in
   is-enabled) [ "$ENABLED" = yes ] ;;
   is-active) state=$ACTIVE; mark=$STUB_LOG.asked
-    case "$*" in *bintrail-router.service*) state=$ROUTER_ACTIVE; mark=$STUB_LOG.router-asked ;; esac
+    case "$*" in
+      *bintrail-router.service*) state=$ROUTER_ACTIVE; mark=$STUB_LOG.router-asked ;;
+      *bintrail-pg-router.service*) state=$PG_ROUTER_ACTIVE; mark=$STUB_LOG.pg-router-asked; started=$STUB_LOG.pg-router-started ;;
+    esac
     case "$state" in
       yes) exit 0 ;;
       once) [ ! -e "$mark" ] && : > "$mark" ;;
-      starts) [ -e "$STUB_LOG.router-started" ] ;;
+      starts) [ -e "$started" ] ;;
       *) exit 1 ;;
     esac ;;
 esac
@@ -184,7 +192,8 @@ func runScriptEnv(t *testing.T, script string, env []string, args ...string) (ca
 	// test cannot write: every run gets one of its own, absent unless the case
 	// names another.
 	cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "STUB_LOG=" + log,
-		"BINTRAIL_ROUTER_MARKER=" + filepath.Join(filepath.Dir(log), "router-started-once")}, env...)
+		"BINTRAIL_ROUTER_MARKER=" + filepath.Join(filepath.Dir(log), "router-started-once"),
+		"BINTRAIL_PG_ROUTER_MARKER=" + filepath.Join(filepath.Dir(log), "pg-router-started-once")}, env...)
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %v: %v\n%s", script, args, err, b)
@@ -311,7 +320,7 @@ func TestPackaging_preremoveStopsTheServiceOnARemovalAndNeverOnAnUpgrade(t *test
 func TestPackaging_postremoveDeletesOnlyTheSettingsFileAndOnlyOnAPurge(t *testing.T) {
 	// purge runs before the systemd check, so it is tested on any host.
 	calls, _ := runScript(t, "postremove.sh", "", "purge")
-	if !strings.Contains(calls, "rm -f /etc/bintrail/bintrail-console.env /etc/bintrail/.router-started\n") {
+	if !strings.Contains(calls, "rm -f /etc/bintrail/bintrail-console.env /etc/bintrail/.router-started /etc/bintrail/.pg-router-started\n") {
 		t.Errorf("a purge must delete the settings file, got:\n%s", calls)
 	}
 	for _, arg := range []string{"remove", "upgrade", "0", "1", "purge"} {
@@ -503,6 +512,134 @@ func TestPackaging_dbtrailIsInstalledBesideTheProgram(t *testing.T) {
 		}
 		if !strings.Contains(df, "/usr/local/bin/bintrail-console") {
 			t.Errorf("%s no longer installs /usr/local/bin/bintrail-console, which the dbtrail link points at", f)
+		}
+	}
+}
+
+// The PostgreSQL router is a third unit of the package: the packaged binary
+// running pg-router, with the capture unit's settings file, account and
+// folder, installed where systemd reads units.
+func TestPackaging_thePGRouterUnit(t *testing.T) {
+	cfg := read(t, "../../build/.goreleaser.yaml")
+	capture := read(t, filepath.Join(pkgDir, "bintrail-console.service"))
+	unit := read(t, filepath.Join(pkgDir, "bintrail-pg-router.service"))
+	line := func(u, key string) string {
+		t.Helper()
+		m := regexp.MustCompile(`(?m)^`+key+`=(.*)$`).FindAllStringSubmatch(u, -1)
+		if len(m) != 1 {
+			t.Fatalf("want one %s= line in the unit, found %d", key, len(m))
+		}
+		return m[0][1]
+	}
+	if !strings.Contains(cfg, "src: build/packaging/bintrail-console/bintrail-pg-router.service\n        dst: /usr/lib/systemd/system/bintrail-pg-router.service\n") {
+		t.Error("the package does not install bintrail-pg-router.service where systemd reads units")
+	}
+	if got := line(unit, "ExecStart"); got != "/usr/bin/bintrail-console pg-router" {
+		t.Errorf("ExecStart=%s, want the packaged binary running pg-router", got)
+	}
+	if cmd := read(t, "../../consoleapp/pgrouter.go"); !strings.Contains(cmd, "Use:   \"pg-router\",") {
+		t.Error("consoleapp/pgrouter.go no longer declares the pg-router command the unit starts")
+	}
+	for _, key := range []string{"EnvironmentFile", "User", "Group", "WorkingDirectory"} {
+		if got, want := line(unit, key), line(capture, key); got != want {
+			t.Errorf("%s=%s, want the capture unit's %s", key, got, want)
+		}
+	}
+	// Not under the capture unit: restarting capture must not drop its
+	// connections.
+	for _, key := range []string{"PartOf", "BindsTo", "Requires"} {
+		if regexp.MustCompile(`(?m)^` + key + `=`).MatchString(unit) {
+			t.Errorf("the unit has a %s= line: it must not hang off another service", key)
+		}
+	}
+	// The settings it reads are named in the settings file the package ships.
+	env := read(t, filepath.Join(pkgDir, "bintrail-console.env"))
+	for _, name := range []string{"BINTRAIL_PG_ROUTER_LISTEN=127.0.0.1:5433", "BINTRAIL_PG_ROUTER_TLS_CERT=", "BINTRAIL_PG_ROUTER_TLS_KEY=", "BINTRAIL_PG_ROUTER_WORKERS=", "BINTRAIL_PG_ROUTER_THREADS=", "BINTRAIL_PG_ROUTER_MAX_CONNECTIONS="} {
+		if !strings.Contains(env, "\n#"+name) {
+			t.Errorf("the settings file does not name %s, commented out", name)
+		}
+	}
+	for _, name := range regexp.MustCompile(`BINTRAIL_PG_ROUTER_[A-Z_]+`).FindAllString(env, -1) {
+		if !strings.Contains(read(t, "../../consoleapp/pgrouter.go"), `"`+name+`"`) {
+			t.Errorf("the settings file names %s, which pg-router does not read", name)
+		}
+	}
+}
+
+// The package starts the PostgreSQL router once, as it does the router, with
+// a marker of its own: one stopped by its operator stays stopped, one that
+// runs is restarted on an upgrade, and one that is not running after either
+// is said.
+func TestPackaging_postinstallStartsThePGRouterOnceAndRestartsARunningOne(t *testing.T) {
+	needSystemd(t)
+	for _, tc := range []struct {
+		name           string
+		args           []string
+		pg             string
+		marked         bool
+		restart, start bool
+		warn           bool
+		enableFails    bool
+	}{
+		{"first install", []string{"configure"}, "starts", false, false, true, false, false},
+		{"rpm first install", []string{"1"}, "starts", false, false, true, false, false},
+		{"the first upgrade that brings it", []string{"2"}, "starts", false, false, true, false, false},
+		{"first install, and it does not start", []string{"1"}, "no", false, false, true, true, false},
+		{"upgrade, running", []string{"2"}, "yes", true, true, false, false, false},
+		{"upgrade, running, marker lost", []string{"configure", "0.132.0"}, "yes", false, true, false, false, false},
+		{"upgrade, stopped by the operator", []string{"2"}, "no", true, false, false, false, false},
+		{"upgrade, and it does not come back", []string{"2"}, "once", true, true, false, true, false},
+		{"first install, and it cannot be enabled", []string{"1"}, "no", false, false, true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "pg-router-started-once")
+			if tc.marked {
+				if err := os.WriteFile(marker, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls, out := runScriptEnv(t, "postinstall.sh", []string{"ACTIVE=yes", "ROUTER_ACTIVE=yes", "PG_ROUTER_ACTIVE=" + tc.pg, "ENABLED=yes",
+				"BINTRAIL_PG_ROUTER_MARKER=" + marker, "PG_ENABLE_FAILS=" + map[bool]string{true: "yes"}[tc.enableFails]}, tc.args...)
+			if got := strings.Contains(calls, "try-restart bintrail-pg-router.service"); got != tc.restart {
+				t.Errorf("restart = %v, want %v; calls:\n%s", got, tc.restart, calls)
+			}
+			if got := strings.Contains(calls, "systemctl enable --now bintrail-pg-router.service\n"); got != tc.start {
+				t.Errorf("enabled and started = %v, want %v; calls:\n%s", got, tc.start, calls)
+			}
+			if got := strings.Contains(out, "bintrail-pg-router service did not enable"); got != tc.enableFails {
+				t.Errorf("said enabling failed = %v, want %v; output:\n%s", got, tc.enableFails, out)
+			}
+			if got := strings.Contains(out, "bintrail-pg-router\nservice, which runs from now on"); got != (tc.start && !tc.enableFails) {
+				t.Errorf("said it was started = %v, want %v; output:\n%s", got, tc.start && !tc.enableFails, out)
+			}
+			if got := strings.Contains(out, "bintrail-pg-router is not running"); got != tc.warn {
+				t.Errorf("warning printed = %v, want %v; output:\n%s", got, tc.warn, out)
+			}
+			// Nothing here is about the MySQL port's router, which runs.
+			if strings.Contains(out, "bintrail-router is not running") || strings.Contains(out, "could not be enabled") {
+				t.Errorf("the router was fine in every case here, got:\n%s", out)
+			}
+			if _, err := os.Stat(marker); (err == nil) == tc.enableFails {
+				t.Errorf("marker there = %v after the script: it must be there unless enabling failed", err == nil)
+			}
+		})
+	}
+}
+
+func TestPackaging_preremoveStopsThePGRouterOnARemoval(t *testing.T) {
+	needSystemd(t)
+	for _, arg := range []string{"remove", "0"} {
+		calls, _ := runScript(t, "preremove.sh", "", arg)
+		if !regexp.MustCompile(`(?m)^systemctl disable --now .*bintrail-pg-router\.service`).MatchString(calls) {
+			t.Errorf("preremove %s must stop and disable the PostgreSQL router, got:\n%s", arg, calls)
+		}
+		if !regexp.MustCompile(`(?m)^rm -f .*pg-router-started`).MatchString(calls) {
+			t.Errorf("preremove %s must remove its started-once marker, got:\n%s", arg, calls)
+		}
+	}
+	for _, arg := range []string{"upgrade", "1"} {
+		if calls, _ := runScript(t, "preremove.sh", "", arg); strings.Contains(calls, "bintrail-pg-router") {
+			t.Errorf("preremove %s is an upgrade and must not touch the PostgreSQL router, got:\n%s", arg, calls)
 		}
 	}
 }

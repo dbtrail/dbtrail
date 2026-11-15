@@ -6,7 +6,7 @@
 set -e
 
 if [ "$1" = purge ]; then
-    rm -f /etc/bintrail/bintrail-console.env /etc/bintrail/.router-started
+    rm -f /etc/bintrail/bintrail-console.env /etc/bintrail/.router-started /etc/bintrail/.pg-router-started
     rmdir /etc/bintrail 2>/dev/null || true
 fi
 
