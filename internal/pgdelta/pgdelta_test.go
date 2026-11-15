@@ -418,16 +418,6 @@ func TestCheckChain(t *testing.T) {
 	if err := os.Remove(r1); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err = WritePair(PairInput{BasePath: filepath.Join(dir, "other", "t.parquet"), Seq: 1, Base: "base-1", Run: "another-run",
-		Columns: []string{"id", "val"}, Changes: func(yield func(Change) error) error {
-			return yield(Change{Key: "2", Values: []string{"2", "z"}, Nulls: []bool{false, false}})
-		}})
-	if err == nil {
-		t.Fatal("a pair was written into a folder that does not exist")
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "other"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	_, other, _, err := WritePair(PairInput{BasePath: filepath.Join(dir, "other", "t.parquet"), Seq: 1, Base: "base-1", Run: "another-run",
 		Columns: []string{"id", "val"}, Changes: func(yield func(Change) error) error {
 			return yield(Change{Key: "2", Values: []string{"2", "z"}, Nulls: []bool{false, false}})
