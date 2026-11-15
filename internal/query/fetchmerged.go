@@ -117,6 +117,17 @@ type FetchMergedOptions struct {
 	// worse than a clear error for point-in-time recovery.
 	AllowGaps bool
 
+	// NeverPartitionedBefore, when set, is the index's first hour, given by
+	// a caller that has proved two things: the index never dropped a
+	// partition, and it holds every event the window asks for from before
+	// that hour. Those events are in the first partition, which has no lower
+	// bound, and the hours before it are gaps only on paper: no partition
+	// was ever named after them, so none was rotated out. They are taken out
+	// of the plan's gap hours, as long as the plan's oldest hour is still
+	// this one (the first partition is live, and nothing sits below it).
+	// Zero, the default, judges every hour as the planner does.
+	NeverPartitionedBefore time.Time
+
 	// ArchiveFetcher is the function used to fetch events from one archive
 	// source. In production callers this is parquetquery.Fetch. Leaving it
 	// nil together with NoArchive=false is a programming error and is
@@ -1010,6 +1021,9 @@ func resolveMergeSources(ctx context.Context, db *sql.DB, o *FetchMergedOptions)
 				if len(unchecked) > 0 {
 					slog.Warn(uncheckedHoursWarning(o.Opts.Schema, o.Opts.Table, unchecked))
 				}
+			}
+			if p != nil && !o.NeverPartitionedBefore.IsZero() && p.OldestKnownHour.Equal(o.NeverPartitionedBefore) {
+				p.GapHours = slices.DeleteFunc(p.GapHours, func(h time.Time) bool { return h.Before(o.NeverPartitionedBefore) })
 			}
 			if p != nil {
 				// Archives whose content escapes their hour label but overlaps

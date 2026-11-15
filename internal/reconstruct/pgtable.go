@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/indexer"
 	"github.com/dbtrail/dbtrail/internal/metadata"
 	"github.com/dbtrail/dbtrail/internal/parquetquery"
 	"github.com/dbtrail/dbtrail/internal/query"
@@ -138,8 +139,9 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		DB: db, Engine: p.engine, DBName: p.dbName, Resolver: p.resolver,
 		Schema: schema, Table: table, PKCols: pkCols,
 		Opts: fetchOpts, AllowGaps: cfg.AllowGaps, ArchiveFetcher: fetcher,
-		SpillOverBudget: true,
-		PG:              true,
+		SpillOverBudget:        true,
+		PG:                     true,
+		NeverPartitionedBefore: pgNeverPartitionedBefore(ctx, db, p.dbName, schema, table, floor),
 	})
 	fold := &foldResult{Changes: map[string]*query.ResultRow{}}
 	if b.empty(floor) {
@@ -218,4 +220,41 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		"deletes_skipped", rep.DeletesSkipped,
 		"duration_ms", rep.Duration.Milliseconds())
 	return rep, nil
+}
+
+// pgNeverPartitionedBefore is the index's first hour when a PostgreSQL fold
+// may read through the hours before it, and the zero time when it may not
+// (query.FetchMergedOptions.NeverPartitionedBefore).
+//
+// The planner calls an hour a gap when no partition is named after it and no
+// archive covers it. An index's first partition is its creation hour, so a
+// snapshot whose window starts in an hour before it (taken before the
+// index's tables were created, or in the first PGDeltaMargin of that hour)
+// was refused as "rotated and not archived" for an hour that never had a
+// partition to rotate, and the refusal ended in a full read of the source.
+// The first partition has no lower bound and holds every older event; the
+// fetch's start and its time bound stay where they were, so it reads them.
+//
+// Two records say the events are there. Nothing was ever dropped, so the
+// first partition is still the one that holds them (the fetch checks that it
+// is live). And the capture's recorded start is at or before the snapshot's
+// floor: an index created after the snapshot whose capture started later
+// (emptied and created again) does not hold the changes between. An index
+// with no history (an older build's, a restored one), or one whose history
+// cannot be read, is judged as before.
+func pgNeverPartitionedBefore(ctx context.Context, db *sql.DB, dbName, schema, table string, floor uint64) time.Time {
+	hist, err := indexer.ReadPartitionHistory(ctx, db, dbName)
+	if err != nil {
+		slog.Warn("the index's partition history could not be read; an hour before its first partition is judged as one that was rotated out",
+			"schema", schema, "table", table, "error", err)
+		return time.Time{}
+	}
+	if !hist.Known || !hist.DroppedBelow.IsZero() {
+		return time.Time{}
+	}
+	start, ok := query.CoverageStart(db, "postgres")
+	if !ok || start.StartPos == 0 || start.StartPos > floor {
+		return time.Time{}
+	}
+	return hist.CreatedAt.UTC().Truncate(time.Hour)
 }
