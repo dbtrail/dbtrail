@@ -272,18 +272,6 @@ func (s *session) timeTravelGates(q shim.TimeTravelQuery) *pgErr {
 		return &pgErr{"42501", msg}
 	}
 
-	// A time-travel answer is held like any other while it is sent, so the
-	// port's result budget is asked for it too (#2804): after the statement
-	// was found to be one this connection may send, before the index is read
-	// for it. Only for a statement that would be answered with a row: a
-	// whole table as of a moment and _diff are refused below for what they
-	// are, which sending them again would not change.
-	if (q.Type == shim.TypeFlashback || q.Type == shim.TypeSnapshot) && q.PKColumn != "" {
-		if refusal := s.admitResult(); refusal != nil {
-			return nil, nil, "", refusal
-		}
-	}
-
 	// PK-column validation is shared with the MySQL front-end (#296/#821): a
 	// WHERE whose column is not the table's single-column PK is refused so a
 	// non-PK filter cannot silently return the wrong row.
