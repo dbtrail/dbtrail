@@ -146,3 +146,111 @@ func TestGeneratedColumnsStopDoctorAndCapture(t *testing.T) {
 		t.Fatalf("the capture after the publication publishes the column: %v", err)
 	}
 }
+
+// A deferrable primary key: the doctor fails with what to do, and the capture
+// refuses to start and leaves no slot. Once the key is not deferrable both
+// pass. On every PostgreSQL version.
+func TestDeferrableKeyStopsDoctorAndCapture(t *testing.T) {
+	pgDSN := testutil.SkipIfNoPostgres(t)
+	testutil.SkipIfNoMySQL(t)
+	ctx := context.Background()
+	pg, err := pgx.Connect(ctx, pgDSN)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { pg.Close(context.Background()) })
+	const slot, pub, tbl = "bintrail_defkeysr_it", "bintrail_defkeysr_it_pub", "defkeysr_it_t"
+	drop := func() {
+		bg := context.Background()
+		_, _ = pg.Exec(bg, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = pg.Exec(bg, "DROP TABLE IF EXISTS "+tbl)
+		for range 50 {
+			_, _ = pg.Exec(bg, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active", slot)
+			var n int
+			if err := pg.QueryRow(bg, "SELECT COUNT(*) FROM pg_replication_slots WHERE slot_name = $1", slot).Scan(&n); err != nil || n == 0 {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	drop()
+	t.Cleanup(drop)
+	for _, q := range []string{
+		fmt.Sprintf("CREATE TABLE %s (id int, v text, PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED)", tbl),
+		fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", tbl),
+		fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pub, tbl),
+	} {
+		if _, err := pg.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_, dbName := testutil.CreateTestDB(t)
+	indexDSN := testutil.BaseDSN() + "/" + dbName
+	repl := pgDSN + "?replication=database"
+	if strings.Contains(pgDSN, "?") {
+		repl = pgDSN + "&replication=database"
+	}
+	const check = "Primary keys are not deferrable"
+	report := func() doctor.CheckResult {
+		t.Helper()
+		r := pgstreamrun.BuildPGReport(ctx, pgstreamrun.PGDoctorConfig{QueryDSN: pgDSN, SlotName: slot, Publication: pub})
+		for _, c := range r.Checks {
+			if c.Name == check {
+				return c
+			}
+		}
+		t.Fatalf("the report has no check named %q: %+v", check, r.Checks)
+		return doctor.CheckResult{}
+	}
+	start := func() error {
+		t.Helper()
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- pgstreamrun.One(runCtx, pgstreamrun.Config{
+				IndexDSN: indexDSN, ReplDSN: repl, QueryDSN: pgDSN, SlotName: slot, Publication: pub,
+				ServerID: 2875, Tables: "public." + tbl, BatchSize: 100, Checkpoint: 200 * time.Millisecond,
+			})
+		}()
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case err := <-done:
+				return err
+			default:
+			}
+			var active bool
+			if pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active {
+				cancel()
+				<-done
+				return nil
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatal("the capture neither started nor ended")
+		return nil
+	}
+
+	c := report()
+	if c.Status != doctor.StatusFail || !strings.Contains(c.Detail, "DEFERRABLE") ||
+		!strings.Contains(c.Detail, fmt.Sprintf(`ALTER TABLE "public".%q DROP CONSTRAINT %q, ADD PRIMARY KEY`, tbl, tbl+"_pkey")) {
+		t.Fatalf("the doctor on a deferrable key: %+v", c)
+	}
+	if err := start(); !errors.Is(err, pgcapture.ErrDeferrableKey) {
+		t.Fatalf("the capture on a deferrable key: %v, want a refusal", err)
+	}
+	var slots int
+	if err := pg.QueryRow(ctx, "SELECT COUNT(*) FROM pg_replication_slots WHERE slot_name = $1", slot).Scan(&slots); err != nil || slots != 0 {
+		t.Fatalf("the refused capture left %d slot(s) (err %v)", slots, err)
+	}
+	if _, err := pg.Exec(ctx, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s_pkey, ADD PRIMARY KEY (id)", tbl, tbl)); err != nil {
+		t.Fatal(err)
+	}
+	if c := report(); c.Status != doctor.StatusPass {
+		t.Fatalf("the doctor once the key is not deferrable: %+v", c)
+	}
+	if err := start(); err != nil {
+		t.Fatalf("the capture once the key is not deferrable: %v", err)
+	}
+}
