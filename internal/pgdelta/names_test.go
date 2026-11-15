@@ -97,11 +97,11 @@ func TestChainOf(t *testing.T) {
 	}
 
 	for name, names := range map[string][]string{
-		"half a pair, the rows":          {"orders.000000.pgnew"},
-		"half a pair, the dead rows":     {"orders.000000.pgdead"},
-		"half of a later pair":           join(pair("000000"), []string{"orders.000001.pgnew"}),
-		"does not start at 0":            pair("000001"),
-		"skips a number":                 join(pair("000000"), pair("000002")),
+		"half a pair, the rows":           {"orders.000000.pgnew"},
+		"half a pair, the dead rows":      {"orders.000000.pgdead"},
+		"half of a later pair":            join(pair("000000"), []string{"orders.000001.pgnew"}),
+		"does not start at 0":             pair("000001"),
+		"skips a number":                  join(pair("000000"), pair("000002")),
 		"the same file of one pair twice": {"orders.000000.pgnew", "orders.000000.pgdead", "orders.000000.pgnew"},
 	} {
 		if c, err := ChainOf("orders", names); !errors.Is(err, ErrBrokenChain) {

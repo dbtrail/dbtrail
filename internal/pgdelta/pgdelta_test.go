@@ -457,8 +457,12 @@ func TestBaseID(t *testing.T) {
 	for name, other := range map[string]func() (string, error){
 		"another LSN":   func() (string, error) { m := good; m.LSN++; return BaseID(m, 1234) },
 		"another bound": func() (string, error) { m := good; m.PGDeltaSince = "2026-11-15T09:58:00Z"; return BaseID(m, 1234) },
-		"another time":  func() (string, error) { m := good; m.SnapshotTimestamp = taken.Add(time.Microsecond); return BaseID(m, 1234) },
-		"another size":  func() (string, error) { return BaseID(good, 1235) },
+		"another time": func() (string, error) {
+			m := good
+			m.SnapshotTimestamp = taken.Add(time.Microsecond)
+			return BaseID(m, 1234)
+		},
+		"another size": func() (string, error) { return BaseID(good, 1235) },
 	} {
 		if got, err := other(); err != nil || got == id {
 			t.Errorf("%s: %q, %v; want another id than %q", name, got, err, id)
