@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -171,7 +172,9 @@ func TestIntegrationPGSnapshotUpdateGeneratedColumn(t *testing.T) {
 			cols = append(cols, c)
 		}
 		rows.Close()
-		if want := []string{"id", "qty", "price"}; !reflect.DeepEqual(cols, want) {
+		// A snapshot file's own column order is not the table's.
+		sort.Strings(cols)
+		if want := []string{"id", "price", "qty"}; !reflect.DeepEqual(cols, want) {
 			t.Fatalf("%s holds columns %v, want %v (a generated column is computed by the database, not copied)", filepath.Base(filepath.Dir(filepath.Dir(f))), cols, want)
 		}
 	}
