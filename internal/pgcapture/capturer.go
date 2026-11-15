@@ -160,6 +160,12 @@ func (c *Capturer) Run(ctx context.Context, out chan<- event.Event) error {
 	if err := validatePublication(startupCtx, queryConn, c.cfg.Publication, c.cfg.Filters); err != nil {
 		return err
 	}
+	// Before the replica identity gate, whose message tells an operator to
+	// set REPLICA IDENTITY FULL: on PostgreSQL 18 that is what stops the
+	// source's application from writing to a table with a generated column.
+	if err := CheckGeneratedColumns(startupCtx, queryConn, c.cfg.Publication); err != nil {
+		return err
+	}
 	if err := validateReplicaIdentity(startupCtx, queryConn, c.cfg.Publication); err != nil {
 		return err
 	}

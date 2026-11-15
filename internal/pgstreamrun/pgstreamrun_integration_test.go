@@ -1230,7 +1230,19 @@ func TestOne_PGIdentityGenerated_Recovery(t *testing.T) {
 	mustExec(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", tIda))
 	mustExec(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", tBd))
 	mustExec(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL", tGen))
-	mustExec(fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s, %s, %s", pub, tIda, tBd, tGen))
+	// PostgreSQL 18 refuses the UPDATE and the DELETE below on a table at
+	// REPLICA IDENTITY FULL whose generated column the publication does not
+	// publish; from 18 on the publication publishes STORED ones, which is
+	// what the capture then asks of an operator (pgcapture.CheckGeneratedColumns).
+	var serverVersion int
+	if err := pg.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&serverVersion); err != nil {
+		t.Fatalf("server version: %v", err)
+	}
+	publishGenerated := ""
+	if serverVersion >= 180000 {
+		publishGenerated = " WITH (publish_generated_columns = stored)"
+	}
+	mustExec(fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s, %s, %s%s", pub, tIda, tBd, tGen, publishGenerated))
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

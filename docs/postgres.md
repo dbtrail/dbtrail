@@ -164,6 +164,41 @@ password copied from this page.
 
 ### 3. Set `REPLICA IDENTITY FULL` on every captured table
 
+> **PostgreSQL 18 and generated columns: read this before you run step 3 or 4.**
+> On PostgreSQL 18, a table that is at `REPLICA IDENTITY FULL`, belongs to a
+> publication, and has a generated column that the publication does not
+> publish **refuses every `UPDATE` and `DELETE`**, from your own application
+> too, with `Replica identity must not contain unpublished generated columns`.
+> `INSERT` still works. It takes effect the moment both settings are in place,
+> whether or not DBTrail is running.
+>
+> Find your generated columns first:
+>
+> ```sql
+> SELECT c.relnamespace::regnamespace AS schema, c.relname AS "table", a.attname AS "column",
+>        CASE a.attgenerated WHEN 's' THEN 'STORED' ELSE 'VIRTUAL' END AS kind
+> FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+> WHERE a.attgenerated <> '' AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p');
+> ```
+>
+> - **`STORED`**: create the publication with
+>   `WITH (publish_generated_columns = stored)` (step 4), and the table works.
+>   For a publication that exists:
+>   `ALTER PUBLICATION bintrail_pub SET (publish_generated_columns = stored);`
+> - **`VIRTUAL`** (new in 18, and what `GENERATED ALWAYS AS (...)` creates there
+>   when neither word is given): PostgreSQL cannot publish it, so that table
+>   cannot be captured. Leave it out of the publication and do not set
+>   `REPLICA IDENTITY FULL` on it. A `FOR ALL TABLES` publication cannot leave
+>   a table out: list the tables instead.
+> - A table that belongs to **another** publication as well is refused if that
+>   one does not publish the column, whatever DBTrail's publication does.
+> - **If your application is already refused**, this lets it write again at
+>   once: `ALTER TABLE shop.orders REPLICA IDENTITY DEFAULT;`
+>
+> `bintrail-pg doctor`, the web interface's checks when a server is added, and
+> the capture when it starts all look for this and stop with the statements to
+> run. PostgreSQL 17 and older have no such rule.
+
 This is the single most important step. By default PostgreSQL only puts the
 **primary-key** columns in the WAL for UPDATE/DELETE (`REPLICA IDENTITY
 DEFAULT`). bintrail needs the **full before-image** to generate correct reversal
@@ -199,6 +234,11 @@ changes.
 ```sql
 -- Specific tables (recommended — you control exactly what is captured):
 CREATE PUBLICATION bintrail_pub FOR TABLE shop.orders, shop.customers;
+
+-- On PostgreSQL 18, when a captured table has a STORED generated column
+-- (see the note in step 3):
+CREATE PUBLICATION bintrail_pub FOR TABLE shop.orders, shop.customers
+  WITH (publish_generated_columns = stored);
 
 -- …or everything (requires superuser):
 CREATE PUBLICATION bintrail_pub FOR ALL TABLES;
@@ -643,15 +683,40 @@ listener, its own workers, its own memory.
   a statement whose select list holds a `*` next to an unnamed expression, a
   cast of an expression to `text`, `varchar`, `char`, `real` or `float`, a
   column written with upper-case letters inside a cast, and `VALUES` lists.
-- **Simple query protocol only**: `psql` uses it; a `pgx` client sets
-  `QueryExecModeSimpleProtocol`. Prepared statements are refused with an error.
+- **Prepared statements and parameters work**: the port speaks the simple and
+  the extended query protocol, so `psql`, JDBC, `pgx` in its default mode
+  and psycopg 3 connect as they are. Each argument is written
+  into the statement as a value before the copy runs it, and the statement then
+  runs exactly as if it had been typed with that value; whatever the simple
+  protocol refuses (a write, `SET search_path`) is refused here with the same
+  error. Three things to know:
+  - The port does not work out a parameter's type from the statement, as
+    PostgreSQL does: it tells the driver the type is unknown. An argument the
+    driver sends without a type is read as the type its place needs
+    (`id = $1` compares as a number), but where its place does not decide, as
+    in `$1 + 1`, give it one: `$1::int + 1`.
+  - When a driver asks for a statement's columns before running it (pgx does,
+    JDBC sometimes), the port asks the copy for them without reading a row.
+    A statement the copy cannot ask that way (`SHOW`, `DESCRIBE`) is
+    described as returning no rows; with `pgx` run those with
+    `QueryExecModeSimpleProtocol`.
+    The columns said this way keep the copy's own heading where the statement
+    gives one no name (`count(*)` is `count_star()`), so name such a column
+    (`AS n`) when the heading matters to a driver that describes first.
+  - `BEGIN`, `COMMIT` and `ROLLBACK` move the transaction status the driver
+    sees, and after an error inside a block every statement is refused until
+    `ROLLBACK`, as on PostgreSQL. They do not make a snapshot: each statement
+    reads the copy as it is when it runs. A driver that fetches a few rows at a
+    time (JDBC with `setFetchSize` and autocommit off) works; the port still
+    computes the whole answer first, under the same row cap.
 - **This machine only.** The port asks for the password in clear text and has
   no TLS, so `--listen` takes an address of this machine alone (`127.0.0.1`,
   `::1`, `localhost`) and the process refuses to start with any other.
 - `SET search_path`, `SET ROLE` and a `SET TimeZone` other than UTC are
   refused: the port resolves names in `public` and answers in UTC, so write the
-  schema in the name and convert zones in the statement. Other `SET`s, `BEGIN`,
-  `COMMIT` and `ROLLBACK` are accepted and change nothing.
+  schema in the name and convert zones in the statement. Other `SET`s are accepted and
+  change nothing; `BEGIN`, `COMMIT` and `ROLLBACK` move the transaction status
+  only (see above).
 - A result with more rows than the port's row cap, or with a cell longer than
   the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
   the long column.
@@ -735,9 +800,10 @@ Scope and behaviour track PostgreSQL's current time-travel maturity:
   `psql`/libpq (their text protocol uses NUL-terminated C strings); a driver that
   reads the raw value (e.g. `pgx` scanning into `[]byte`) round-trips it intact.
   Per-column type OIDs (so `bytea` arrives as `bytea`) are a follow-up.
-- Use the **simple query protocol** — `psql` does this by default; a `pgx`
-  client sets `QueryExecModeSimpleProtocol`. The extended (prepared-statement)
-  protocol is not yet implemented.
+- Both the **simple and the extended query protocol** are served, so a driver
+  in its default mode can prepare `SELECT * FROM _flashback.orders AS OF $1
+  WHERE id = $2` and run it with arguments. An argument cannot hold a single
+  quote (`'`) here: write such a value in the statement's text.
 - **Auth** mirrors the shim: a cleartext password per tenant from
   `--shim-config` (`shim.yaml`). The default listen address is loopback; for a
   non-loopback bind, front a TLS terminator — the same posture as the MySQL
@@ -1057,6 +1123,10 @@ A numeric with no precision prints with all 18 decimals (`12345.678` as
 - **`GENERATED ... AS IDENTITY` / generated columns** can need care on recovery
   (`GENERATED ALWAYS AS IDENTITY` rejects an explicit insert; `STORED` generated
   columns are absent from the stream before PostgreSQL 18). Treat as best-effort.
+  The copy never holds a generated column: the database computes it. On
+  PostgreSQL 18 a table with a `VIRTUAL` generated column cannot be captured,
+  and one with a `STORED` one needs `publish_generated_columns = stored` on the
+  publication (see step 3 of the setup).
 - **Full-table `reconstruct` writes snapshots** (`--output-format
   parquet`, and `baseline refresh`) **or SQL psql loads** (`--output-format
   psql`); a mydumper dump stays MySQL's (see
