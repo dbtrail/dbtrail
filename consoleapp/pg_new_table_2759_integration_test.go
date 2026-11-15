@@ -174,10 +174,36 @@ func TestIntegrationPGNewTableIsIncluded_2759(t *testing.T) {
 	if want := [][]string{{"1", "first"}, {"2", "second"}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the added table in the copy holds %v, want %v", got, want)
 	}
-	// Three snapshots, no more: the full read, the update, and one full read
-	// for the new table. Not one per slot.
-	if all := pgUpdSnapshots(t, snapshots); len(all) != 3 {
-		entries, _ := os.ReadDir(snapshots)
-		t.Fatalf("snapshots = %v (folder holds %d entries), want the first full read, the update and one full read for the new table", all, len(entries))
+	// One full read for the new table, not one per slot: the snapshots that
+	// a full read produced are the first one and that one. (The update's own
+	// snapshot may be gone by now: the full read that follows it supersedes
+	// it, and what the folder keeps of it is retention's business.)
+	dumps := 0
+	for _, name := range pgUpdSnapshots(t, snapshots) {
+		md, err := baseline.ReadParquetMetadata(pgTableFileOf(t, filepath.Join(snapshots, name), pgNewTable))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if md.Producer == baseline.ProducerDump {
+			dumps++
+		}
 	}
+	if dumps != 2 {
+		entries, _ := os.ReadDir(snapshots)
+		var names []string
+		for _, en := range entries {
+			names = append(names, en.Name())
+		}
+		t.Fatalf("%d snapshots were produced by a full read, want 2 (the first, and one for the new table); the folder holds %v", dumps, names)
+	}
+}
+
+// pgTableFileOf is the one Parquet file a snapshot holds for table.
+func pgTableFileOf(t *testing.T, snapshotDir, table string) string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(snapshotDir, "*", table+".parquet"))
+	if err != nil || len(found) != 1 {
+		t.Fatalf("snapshot %s: want one %s.parquet, found %v (err %v)", snapshotDir, table, found, err)
+	}
+	return found[0]
 }
