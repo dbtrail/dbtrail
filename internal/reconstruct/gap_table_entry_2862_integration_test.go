@@ -44,23 +44,20 @@ func TestReconstructTables_PGTableEnteredCaptureLate_2862(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		from      any // stream_state.pg_capture_from_lsn
-		seed      func(f *pgFixture)
+		kind      event.DDLKind // of the recorded entry; "" = none recorded
+		schema    string
+		table     string
+		lsn       uint64
 		wantLate  bool
 		wantOther bool // the index-wide warning
 	}{
 		{name: "a table captured all along: quiet", from: 0x400},
-		{name: "added to the publication after the snapshot: warns", from: 0x400, wantLate: true,
-			seed: func(f *pgFixture) { f.inferredEntry2862(event.DDLAlterPublication, "public", "orders", 0x700, 15*time.Minute) }},
-		{name: "first seen in the stream after the snapshot: warns", from: 0x400, wantLate: true,
-			seed: func(f *pgFixture) { f.inferredEntry2862(event.DDLCreateTable, "public", "orders", 0x700, 15*time.Minute) }},
-		{name: "added before the snapshot's floor: quiet", from: 0x400,
-			seed: func(f *pgFixture) { f.inferredEntry2862(event.DDLAlterPublication, "public", "orders", 0x480, 9*time.Minute) }},
-		{name: "added at the snapshot's floor: quiet", from: 0x400,
-			seed: func(f *pgFixture) { f.inferredEntry2862(event.DDLAlterPublication, "public", "orders", 0x500, 9*time.Minute) }},
-		{name: "the same name in another schema entered late: quiet", from: 0x400,
-			seed: func(f *pgFixture) { f.inferredEntry2862(event.DDLAlterPublication, "sales", "orders", 0x700, 15*time.Minute) }},
-		{name: "another table entered late: quiet", from: 0x400,
-			seed: func(f *pgFixture) { f.inferredEntry2862(event.DDLAlterPublication, "public", "items", 0x700, 15*time.Minute) }},
+		{name: "added to the publication after the snapshot: warns", from: 0x400, wantLate: true, kind: event.DDLAlterPublication, schema: "public", table: "orders", lsn: 0x700},
+		{name: "first seen in the stream after the snapshot: warns", from: 0x400, wantLate: true, kind: event.DDLCreateTable, schema: "public", table: "orders", lsn: 0x700},
+		{name: "added before the snapshot's floor: quiet", from: 0x400, kind: event.DDLAlterPublication, schema: "public", table: "orders", lsn: 0x480},
+		{name: "added at the snapshot's floor: quiet", from: 0x400, kind: event.DDLAlterPublication, schema: "public", table: "orders", lsn: 0x500},
+		{name: "the same name in another schema entered late: quiet", from: 0x400, kind: event.DDLAlterPublication, schema: "sales", table: "orders", lsn: 0x700},
+		{name: "another table entered late: quiet", from: 0x400, kind: event.DDLAlterPublication, schema: "public", table: "items", lsn: 0x700},
 		{name: "no recorded start and no entry: the index-wide warning, as before", from: nil, wantOther: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,8 +67,9 @@ func TestReconstructTables_PGTableEnteredCaptureLate_2862(t *testing.T) {
 			if _, err := f.db.Exec("UPDATE stream_state SET pg_capture_from_lsn = ? WHERE id = 1", tc.from); err != nil {
 				t.Fatal(err)
 			}
-			if tc.seed != nil {
-				tc.seed(f)
+			if tc.kind != "" {
+				// Dated inside the fold's window, whatever its position.
+				f.inferredEntry2862(tc.kind, tc.schema, tc.table, tc.lsn, 15*time.Minute)
 			}
 			root := t.TempDir()
 			f.baseline(root, f.at(10*time.Minute), 0x500, "", [2]string{"1", "paid"})
