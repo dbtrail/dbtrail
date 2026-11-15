@@ -13,6 +13,7 @@ func TestPGCarryForwardEligible(t *testing.T) {
 	on := FullTableConfig{CarryForwardUnchanged: true, OutputFormat: OutputFormatParquet, At: at}
 	with := func(f func(*FullTableConfig)) FullTableConfig { c := on; f(&c); return c }
 	lined := with(func(c *FullTableConfig) { c.ChainStartFloor = at.Add(-2 * time.Hour) })
+	onLine := func(f func(*FullTableConfig)) FullTableConfig { c := lined; f(&c); return c }
 	local := "/data/2026-11-15T11-00-00Z/public/orders.parquet"
 	cases := []struct {
 		name     string
@@ -26,8 +27,8 @@ func TestPGCarryForwardEligible(t *testing.T) {
 		want     bool
 	}{
 		{name: "unchanged, bound recorded", cfg: lined, src: local, meta: recorded, since: time.Hour, newSince: time.Minute, want: true},
-		{name: "off", cfg: with(func(c *FullTableConfig) { c.CarryForwardUnchanged = false; c.ChainStartFloor = at.Add(-2 * time.Hour) }), src: local, meta: recorded, since: time.Hour, newSince: time.Minute},
-		{name: "psql output", cfg: with(func(c *FullTableConfig) { c.OutputFormat = OutputFormatPsql; c.ChainStartFloor = at.Add(-2 * time.Hour) }), src: local, meta: recorded, since: time.Hour, newSince: time.Minute},
+		{name: "off", cfg: onLine(func(c *FullTableConfig) { c.CarryForwardUnchanged = false }), src: local, meta: recorded, since: time.Hour, newSince: time.Minute},
+		{name: "psql output", cfg: onLine(func(c *FullTableConfig) { c.OutputFormat = OutputFormatPsql }), src: local, meta: recorded, since: time.Hour, newSince: time.Minute},
 		{name: "read from a bucket", cfg: lined, src: "s3://b/2026-11-15T11-00-00Z/public/orders.parquet", meta: recorded, since: time.Hour, newSince: time.Minute},
 		{name: "a change", cfg: lined, src: local, meta: recorded, since: time.Hour, newSince: time.Minute, changes: 1},
 		{name: "a known capture gap", cfg: lined, src: local, meta: recorded, since: time.Hour, newSince: time.Minute, gap: &CaptureGap{}},
