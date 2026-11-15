@@ -20,7 +20,6 @@ func TestVeto_now_2611(t *testing.T) {
 		"SELECT * FROM t WHERE d = CURDATE()",
 		"SELECT * FROM t WHERE ts BETWEEN CURDATE() - INTERVAL 7 DAY AND NOW()",
 		"SELECT YEAR(NOW()), DATE(NOW()), MONTH(CURDATE()) FROM t",
-		"SELECT YEAR(NOW()) - 1 FROM t",
 		"SELECT * FROM t WHERE note = 'NOW() + 1'",
 		"SELECT `now` FROM t",
 		"SELECT * FROM t WHERE d >= CURDATE() - INTERVAL 30 DAY AND d < CURDATE() + INTERVAL 1 DAY",
@@ -41,6 +40,11 @@ func TestVeto_now_2611(t *testing.T) {
 		if got := Veto(stmt); got != "" {
 			t.Errorf("Veto(%q) = %q, want the copy to answer it", stmt, got)
 		}
+	}
+	// Arithmetic on YEAR is MySQL's since #2848 (unsigned on MySQL 8.4),
+	// whatever YEAR is given.
+	if got := Veto("SELECT YEAR(NOW()) - 1 FROM t"); got != vetoUnsignedCall {
+		t.Errorf("Veto(YEAR(NOW()) - 1) = %q, want %q", got, vetoUnsignedCall)
 	}
 	for _, stmt := range []string{
 		// Not given to the copy: a fraction, the keywords DuckDB reads as its
