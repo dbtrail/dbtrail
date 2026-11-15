@@ -447,3 +447,7 @@ func (m indexMark) unchangedSince(prev indexMark) bool {
 // snapshot it just published (foldMemo.readsFrom), and a unit test has no
 // published chain to read.
 var snapshotReadsFrom = reconstruct.SnapshotReadsFrom
+
+// snapshotReadsFromPG is the same seam for a PostgreSQL source's snapshot
+// (reconstruct.SnapshotReadsFromPG).
+var snapshotReadsFromPG = reconstruct.SnapshotReadsFromPG
