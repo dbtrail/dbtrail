@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/dbtrail/dbtrail/internal/testutil"
 )
@@ -67,7 +68,9 @@ func TestCheckGeneratedColumns_realServer(t *testing.T) {
 		for _, tb := range tables {
 			_, err := conn.Exec(ctx, "UPDATE "+tb+" SET v = v || 'x' WHERE id = 1")
 			if err != nil {
-				if !strings.Contains(err.Error(), "generated column") {
+				// The reason is in the error's detail, not its message.
+				var pgErr *pgconn.PgError
+				if !errors.As(err, &pgErr) || pgErr.Code != "42P10" || !strings.Contains(pgErr.Detail, "generated column") {
 					t.Fatalf("UPDATE %s failed for another reason: %v", tb, err)
 				}
 				out[tb] = true
