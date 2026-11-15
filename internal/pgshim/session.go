@@ -249,7 +249,10 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 // timeTravelGates are the refusals a time-travel statement meets before
 // anything is read or said about its table, in this order. A Describe asks
 // them too, before it names the table's columns.
-func (s *session) timeTravelGates(q shim.TimeTravelQuery) *pgErr {
+//
+// run is set when the statement is about to run, not only be described: the
+// port's result budget is then asked too, at its place in the order.
+func (s *session) timeTravelGates(q shim.TimeTravelQuery, run bool) *pgErr {
 	// A port's own gate on time travel (Binding.TimeTravelRefusal): asked for
 	// every statement, so a rule saved while the connection is open governs
 	// its next one, and before anything is read or said about the table.
@@ -270,6 +273,19 @@ func (s *session) timeTravelGates(q shim.TimeTravelQuery) *pgErr {
 	// schema must not first be told whether its WHERE column is a PK.
 	if msg, deny := s.h.SchemaAuthzCheck(q.Schema); deny {
 		return &pgErr{"42501", msg}
+	}
+
+	// A time-travel answer is held like any other while it is sent, so the
+	// port's result budget is asked for it too (#2804): after the statement
+	// was found to be one this connection may send, before the index is read
+	// for it. Only for a statement that would be answered with a row: a
+	// whole table as of a moment and _diff are refused below for what they
+	// are, which sending them again would not change. A Describe reads no
+	// row and holds none, so it does not ask.
+	if run && (q.Type == shim.TypeFlashback || q.Type == shim.TypeSnapshot) && q.PKColumn != "" {
+		if refusal := s.admitResult(); refusal != nil {
+			return refusal
+		}
 	}
 
 	// PK-column validation is shared with the MySQL front-end (#296/#821): a
@@ -295,14 +311,8 @@ func (s *session) timeTravelGates(q shim.TimeTravelQuery) *pgErr {
 // resolveTimeTravel answers a well-formed time-travel statement: its gates,
 // then the row as of the moment asked for.
 func (s *session) resolveTimeTravel(q shim.TimeTravelQuery) (cols []string, rows [][][]byte, tag string, perr *pgErr) {
-	if perr := s.timeTravelGates(q); perr != nil {
+	if perr := s.timeTravelGates(q, true); perr != nil {
 		return nil, nil, "", perr
-	}
-	// A time-travel answer is held like any other while it is sent, so the
-	// port's result budget is asked for it too (#2804): once the statement
-	// passed every refusal of what it is, before the index is read for it.
-	if refusal := s.admitResult(); refusal != nil {
-		return nil, nil, "", refusal
 	}
 	ctx, cancel := s.h.QueryContext()
 	defer cancel()

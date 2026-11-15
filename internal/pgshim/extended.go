@@ -382,7 +382,7 @@ func (s *session) describeStatement(st *preparedStatement) (cols []string, held 
 		return nil, true, nil
 	case kindTimeTravel:
 		// The gates first: the table's columns are something said about it.
-		if perr := s.timeTravelGates(c.q); perr != nil {
+		if perr := s.timeTravelGates(c.q, false); perr != nil {
 			return nil, false, perr
 		}
 		cols := s.h.ColumnsFor(nil, c.q)
