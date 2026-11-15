@@ -99,13 +99,39 @@ func keyIsEncrypted(keyFile string) bool {
 // that do not verify included; a client that verifies refuses it, and this
 // sentence is what tells the operator why.
 func (p *PortTLS) ValidityProblem(now time.Time) string {
+	return p.ValidityProblemFor(now, "--ssl-mode=VERIFY_CA or VERIFY_IDENTITY")
+}
+
+// ValidityProblemFor is ValidityProblem for a port whose clients verify a
+// certificate with other words than a MySQL client's: verifying names them
+// (for a PostgreSQL client, "sslmode=verify-ca or verify-full").
+func (p *PortTLS) ValidityProblemFor(now time.Time, verifying string) string {
 	switch {
 	case p == nil:
 		return ""
 	case now.After(p.NotAfter):
-		return fmt.Sprintf("the certificate %s expired on %s: a client that verifies it (--ssl-mode=VERIFY_CA or VERIFY_IDENTITY) refuses to connect until it is renewed and the process restarted", p.CertFile, p.NotAfter.UTC().Format(time.RFC3339))
+		return fmt.Sprintf("the certificate %s expired on %s: a client that verifies it (%s) refuses to connect until it is renewed and the process restarted", p.CertFile, p.NotAfter.UTC().Format(time.RFC3339), verifying)
 	case now.Before(p.NotBefore):
-		return fmt.Sprintf("the certificate %s is not valid before %s: a client that verifies it (--ssl-mode=VERIFY_CA or VERIFY_IDENTITY) refuses to connect until then (check this machine's clock)", p.CertFile, p.NotBefore.UTC().Format(time.RFC3339))
+		return fmt.Sprintf("the certificate %s is not valid before %s: a client that verifies it (%s) refuses to connect until then (check this machine's clock)", p.CertFile, p.NotBefore.UTC().Format(time.RFC3339), verifying)
 	}
 	return ""
+}
+
+// MadeUpPortTLS is a certificate made up at start, for a port that offers TLS
+// when the operator set none (the PostgreSQL port, #2766): the one the MySQL
+// port's SHA2 methods make up (generateSelfSignedTLS). A client that asks for
+// encryption gets it, and cannot verify the certificate. CertFile and KeyFile
+// are empty: there are no files.
+func MadeUpPortTLS() (*PortTLS, error) {
+	_, cfg, err := generateSelfSignedTLS()
+	if err != nil {
+		return nil, fmt.Errorf("make up a certificate: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(cfg.Certificates[0].Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("read the certificate made up: %w", err)
+	}
+	cfg.Certificates[0].Leaf = leaf
+	cfg.MinVersion = tls.VersionTLS12
+	return &PortTLS{Config: cfg, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter}, nil
 }

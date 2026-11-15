@@ -32,17 +32,17 @@
 // not support without a parser change; the query-prefix model needs none and is
 // strictly more capable — one connection reaches every virtual schema.)
 //
-// Auth mirrors the MySQL shim: a cleartext credential validated per tenant
-// against shim.yaml. This is loopback-default; front a TLS terminator (or run on
-// loopback behind a local proxy) for a non-loopback bind — the same posture as
-// the MySQL shim behind ProxySQL. Package placement is deliberate: pgproto3 is
+// Login is SCRAM-SHA-256 (scram.go): the client proves it knows the password,
+// which never crosses the wire. With Config.TLS the port also serves TLS
+// (negotiate.go) and offers SCRAM-SHA-256-PLUS on it (#2766); without, a
+// request for TLS is answered 'N'. Package placement is deliberate: pgproto3 is
 // github.com/jackc/pgx/v5/pgproto3, which the cliapp pgfree guard bans from the
 // core bintrail binary, so this front-end is linked ONLY by cmd/bintrail-pg.
 package pgshim
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -80,7 +80,8 @@ type Config struct {
 	// AllowGaps, QueryTimeout). FullTableGate is unused here — full-table is
 	// refused — and AuthMethod is a MySQL concept, also unused.
 	ShimConfig shim.Config
-	// Auth validates the per-tenant cleartext password (loaded from shim.yaml).
+	// Auth holds each tenant's password (loaded from shim.yaml), which a
+	// client's SCRAM proof is checked against.
 	Auth shim.TenantAuth
 	// AllowedSchemas maps tenant username → allowed_schemas (#824/#1261),
 	// built with shim.UserAllowedSchemas from the same shim.yaml the MySQL
@@ -101,6 +102,12 @@ type Config struct {
 	// port: the config is copied to every connection, the budget it points
 	// at is shared.
 	ResultBudget *ResultBudget
+	// TLS, when set, is the certificate a client that asks for encryption
+	// gets (sslmode=prefer or stricter), with SCRAM-SHA-256-PLUS offered on
+	// it. Nil: a request for TLS is answered 'N'. The port offers TLS and
+	// never requires it: a client that must not talk in clear text says so
+	// (sslmode=require or stricter). Not changed by the port.
+	TLS *tls.Config
 }
 
 // Serve accepts PostgreSQL wire-protocol connections until ctx is canceled or
@@ -112,6 +119,7 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	pt := newPortTLS(cfg.TLS)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -148,7 +156,7 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 			default:
 				logger.Warn("pgshim connection refused: the connection limit is reached",
 					"remote", conn.RemoteAddr(), "max_connections", cfg.MaxConns)
-				refuseFull(conn, cfg.MaxConns, refusals)
+				refuseFull(conn, cfg.MaxConns, refusals, pt)
 				continue
 			}
 		}
@@ -158,7 +166,7 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 			if sem != nil {
 				defer func() { <-sem }()
 			}
-			handleConn(ctx, c, cfg, logger)
+			handleConn(ctx, c, cfg, pt, logger)
 		}(conn)
 	}
 }
@@ -168,8 +176,10 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 // error can only be sent as the answer to the client's start-up message, so
 // that is read first, for at most a few seconds, on a goroutine of its own:
 // the accept loop does not wait on a client that sends nothing. When too many
-// refusals are already being said the connection is closed without one.
-func refuseFull(c net.Conn, max int, refusals chan struct{}) {
+// refusals are already being said the connection is closed without one. A
+// client that asks for TLS gets it first, so one that requires it reads the
+// refusal instead of a failed negotiation.
+func refuseFull(c net.Conn, max int, refusals chan struct{}, pt *portTLS) {
 	select {
 	case refusals <- struct{}{}:
 	default:
@@ -183,8 +193,15 @@ func refuseFull(c net.Conn, max int, refusals chan struct{}) {
 		// reading it ends this refusal, not the process.
 		defer func() { _ = recover() }()
 		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-		be := pgproto3.NewBackend(c, c)
-		if startup, err := negotiateStartup(c, be); err != nil || startup == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, _, err := negotiate(ctx, c, pt)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		be := pgproto3.NewBackend(conn, conn)
+		if startup, err := receiveStartup(be); err != nil || startup == nil {
 			return
 		}
 		sendFatal(be, "53300", fmt.Sprintf("the port's limit of %d connections at once is reached; try again in a moment", max))
@@ -203,12 +220,11 @@ func nextBackoff(cur time.Duration) time.Duration {
 	return cap
 }
 
-// handleConn runs one connection: startup negotiation (incl. the SSLRequest
-// decline), cleartext auth, then a simple-query command loop over its own
-// shim.Handler.
-func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger) {
+// handleConn runs one connection: startup negotiation (TLS when the port has
+// it), the SCRAM login, then the command loop over its own shim.Handler.
+func handleConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger *slog.Logger) {
 	if cfg.Login != nil {
-		handleLoginConn(ctx, c, cfg, logger)
+		handleLoginConn(ctx, c, cfg, pt, logger)
 		return
 	}
 	defer c.Close()
@@ -229,9 +245,15 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 	stopClose := context.AfterFunc(connCtx, func() { _ = c.Close() })
 	defer stopClose()
 
-	be := pgproto3.NewBackend(c, c)
+	conn, encrypted, err := negotiate(connCtx, c, pt)
+	if err != nil {
+		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
+		return
+	}
+	defer conn.Close()
+	be := pgproto3.NewBackend(conn, conn)
 
-	startup, err := negotiateStartup(c, be)
+	startup, err := receiveStartup(be)
 	if err != nil {
 		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
 		return
@@ -243,11 +265,13 @@ func handleConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger
 	user := startup.Parameters["user"]
 	database := startup.Parameters["database"]
 
-	if err := authenticate(be, cfg.Auth, user); err != nil {
-		logger.Info("pgshim auth denied", "user", user, "remote", c.RemoteAddr())
+	password, err := authenticate(be, cfg.Auth, user, encrypted, pt.bindingData())
+	if err != nil {
+		logger.Info("pgshim auth denied", "user", user, "remote", c.RemoteAddr(), "err", err)
 		return
 	}
 
+	sendSASLFinal(be, password)
 	sendAuthOK(be)
 	if err := be.Flush(); err != nil {
 		return
@@ -354,85 +378,32 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 	}
 }
 
-// negotiateStartup returns the client's StartupMessage, declining an SSLRequest
-// or GSSEncRequest with a single 'N' byte (we terminate no TLS here) and then
-// re-reading. A CancelRequest returns (nil, nil): we run no query registry, so
-// there is nothing to cancel — the caller closes.
-func negotiateStartup(c net.Conn, be *pgproto3.Backend) (*pgproto3.StartupMessage, error) {
-	for {
-		msg, err := be.ReceiveStartupMessage()
-		if err != nil {
-			return nil, err
-		}
-		switch m := msg.(type) {
-		case *pgproto3.StartupMessage:
-			return m, nil
-		case *pgproto3.SSLRequest:
-			if _, err := c.Write([]byte{'N'}); err != nil {
-				return nil, err
-			}
-		case *pgproto3.GSSEncRequest:
-			if _, err := c.Write([]byte{'N'}); err != nil {
-				return nil, err
-			}
-		case *pgproto3.CancelRequest:
-			return nil, nil
-		default:
-			return nil, fmt.Errorf("unexpected startup message %T", m)
-		}
-	}
-}
-
-// authenticate performs the cleartext-password exchange and validates it against
-// the tenant store. On failure it sends a FATAL 28P01 and returns an error; the
-// caller closes the connection. An unknown user and a wrong password are rejected
-// with a byte-identical 28P01 message, so the error content never reveals which
-// usernames exist. The password check uses subtle.ConstantTimeCompare to avoid a
-// per-byte timing oracle on a known user's password — the MySQL shim's
-// ER_ACCESS_DENIED posture; it does not attempt to equalise the cost of the
-// tenant-map lookup itself (the endpoint is loopback-default / TLS-fronted).
-func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string) error {
-	password, err := readPassword(be)
+// authenticate runs the SCRAM exchange and checks the proof against the
+// tenant's password. On failure it sends a FATAL error and returns an error;
+// the caller closes the connection. An unknown user and a wrong password are
+// refused with a byte-identical 28P01 message, and in the same time: the proof
+// is checked against as many passwords either way (Password.Matches), so
+// neither the answer nor its timing says which usernames exist.
+func authenticate(be *pgproto3.Backend, auth shim.TenantAuth, user string, encrypted bool, endPoint []byte) (*Password, error) {
+	password, err := scramExchange(be, encrypted, endPoint)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	expected, found, cerr := auth.LookupPassword(user)
-	match := found && cerr == nil &&
-		subtle.ConstantTimeCompare([]byte(password), []byte(expected)) == 1
-	if !match {
+	var candidates []string
+	if expected, found, cerr := auth.LookupPassword(user); found && cerr == nil {
+		candidates = []string{expected}
+	}
+	if !password.Matches(candidates) {
 		sendFatal(be, "28P01", fmt.Sprintf("password authentication failed for user %q", user))
-		return fmt.Errorf("auth failed for user %q", user)
+		return nil, fmt.Errorf("auth failed for user %q", user)
 	}
-	return nil
+	return password, nil
 }
 
-// readPassword asks the client for its password in clear text and returns
-// what it sent. A client that answers with anything else is told so (08P01)
-// and the error says the connection is over.
-func readPassword(be *pgproto3.Backend) (string, error) {
-	// Before anyone is authenticated a message is a password and nothing
-	// else. The protocol library sizes its buffer from the length a message
-	// announces and has no ceiling of its own, so without one a client that
-	// holds no credential could announce two gigabytes and have them set
-	// aside in this process.
-	be.SetMaxBodyLen(maxPasswordMessage)
-	be.Send(&pgproto3.AuthenticationCleartextPassword{})
-	if err := be.Flush(); err != nil {
-		return "", err
-	}
-	if err := be.SetAuthType(pgproto3.AuthTypeCleartextPassword); err != nil {
-		return "", err
-	}
-	msg, err := be.Receive()
-	if err != nil {
-		return "", err
-	}
-	pw, ok := msg.(*pgproto3.PasswordMessage)
-	if !ok {
-		sendFatal(be, "08P01", fmt.Sprintf("expected a password message, got %T", msg))
-		return "", fmt.Errorf("expected PasswordMessage, got %T", msg)
-	}
-	return pw.Password, nil
+// sendSASLFinal sends the server's last SCRAM message, once the password
+// matched: what shows the client the port knows it too.
+func sendSASLFinal(be *pgproto3.Backend, password *Password) {
+	be.Send(&pgproto3.AuthenticationSASLFinal{Data: password.serverFinal()})
 }
 
 // sendAuthOK finishes the handshake: AuthenticationOk, the ParameterStatus set a

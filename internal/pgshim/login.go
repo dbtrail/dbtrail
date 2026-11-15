@@ -28,7 +28,8 @@ import (
 // What a client gets is the copy's SQL over a PostgreSQL wire: the simple
 // and the extended query protocol (extended.go), every column sent as text (a value written the way
 // PostgreSQL writes one of its kind, pgtext.Cell), and nothing that writes.
-// The password crosses the wire in clear text, so the host binds loopback.
+// The login is SCRAM-SHA-256 (scram.go), so the password never crosses the
+// wire, and the port serves TLS when the host gives it a certificate.
 //
 // Time travel (_flashback, _snapshot, AS OF) is served on the same
 // connection when the host binds an engine for it (Binding.TimeTravel), by
@@ -46,10 +47,13 @@ func (e *Error) Error() string { return e.Message }
 // LoginFunc decides whether a client may connect and what its connection is
 // bound to. user and database are the client's start-up parameters (database
 // is user when the client named none, as PostgreSQL has it) and password is
-// what it answered. drop closes the connection, for a host that must put a
-// client out later (a credential withdrawn). A refusal is sent to the client
-// as a FATAL error and the connection is closed.
-type LoginFunc func(ctx context.Context, user, database, password string, drop func()) (*Binding, *Error)
+// what the client proved in its SCRAM exchange: the login checks it against
+// the passwords that open the port (Password.Matches), and a login that lets
+// a client in without one matching is refused all the same. drop closes the
+// connection, for a host that must put a client out later (a credential
+// withdrawn). A refusal is sent to the client as a FATAL error and the
+// connection is closed.
+type LoginFunc func(ctx context.Context, user, database string, password *Password, drop func()) (*Binding, *Error)
 
 // Binding is what one logged-in connection runs its statements with.
 type Binding struct {
@@ -80,7 +84,7 @@ type Binding struct {
 }
 
 // handleLoginConn runs one connection of a port with a login of its own.
-func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.Logger) {
+func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, logger *slog.Logger) {
 	// The first defer, so the last to run: one connection's panic is logged
 	// with its stack and ends that connection, not the process the port
 	// shares with every other one.
@@ -106,11 +110,20 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	loginTimer := time.AfterFunc(loginTimeout, func() { _ = c.Close() })
 	defer loginTimer.Stop()
 
+	// TLS, when the client asks for it, runs over the watched connection:
+	// the socket has one reader, the watcher, and TLS reads what it relays.
+	conn, encrypted, err := negotiate(connCtx, wc, pt)
+	if err != nil {
+		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
+		return
+	}
+	defer conn.Close()
 	// Written in pieces, each with its own deadline: a client that stops
 	// reading its answer is cut, and what the port held for it is given
-	// back (resultbudget.go).
-	be := pgproto3.NewBackend(wc, &deadlineWriter{c: c, logger: logger})
-	startup, err := negotiateStartup(c, be)
+	// back (resultbudget.go). On TLS through it, so the answers are
+	// encrypted.
+	be := pgproto3.NewBackend(conn, &deadlineWriter{c: conn, logger: logger})
+	startup, err := receiveStartup(be)
 	if err != nil {
 		logger.Debug("pgshim startup failed", "err", err, "remote", c.RemoteAddr())
 		return
@@ -123,14 +136,23 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 	if database == "" {
 		database = user
 	}
-	password, err := readPassword(be)
+	password, err := scramExchange(be, encrypted, pt.bindingData())
 	if err != nil {
 		// Debug: psql itself closes here once, to ask for the password and
-		// connect again.
-		logger.Debug("pgshim: no password was read", "err", err, "user", user, "remote", c.RemoteAddr())
+		// connect again. A malformed exchange was told why.
+		logger.Debug("pgshim: no password was proved", "err", err, "user", user, "remote", c.RemoteAddr())
 		return
 	}
 	bound, refused := cfg.Login(connCtx, user, database, password, func() { _ = c.Close() })
+	if refused == nil && bound != nil && !password.matched() {
+		// The host let the client in without checking its password against
+		// any: a bug of the host's, and the client is not let in on it.
+		logger.Error("pgshim: the login let a client in without checking its password; refused", "user", user, "remote", c.RemoteAddr())
+		if bound.Close != nil {
+			bound.Close()
+		}
+		bound, refused = nil, &Error{Code: "28P01", Message: fmt.Sprintf("password authentication failed for user %q", user)}
+	}
 	if refused != nil || bound == nil {
 		if refused == nil {
 			refused = &Error{Code: "XX000", Message: "the login returned nothing to connect to"}
@@ -149,6 +171,7 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, logger *slog.L
 		logger.Info("pgshim login took too long", "user", user, "database", database, "remote", c.RemoteAddr())
 		return
 	}
+	sendSASLFinal(be, password)
 	sendAuthOK(be)
 	if err := be.Flush(); err != nil {
 		return

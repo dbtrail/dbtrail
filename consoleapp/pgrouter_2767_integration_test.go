@@ -4,6 +4,7 @@ package consoleapp
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -51,6 +52,13 @@ type pgExtEnv struct {
 }
 
 func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
+	t.Helper()
+	return startPGExtPortTLS(t, ctx, nil)
+}
+
+// startPGExtPortTLS is startPGExtPort with the TLS the port serves (#2766);
+// nil answers a request for TLS 'N'.
+func startPGExtPortTLS(t *testing.T, ctx context.Context, tlsConfig *tls.Config) pgExtEnv {
 	t.Helper()
 	testutil.SkipIfNoMySQL(t)
 	baseDSN := testutil.SkipIfNoPostgres(t)
@@ -124,7 +132,7 @@ func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
 	}
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
-	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard}
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard, tls: tlsConfig}
 	portCtx, stopPort := context.WithCancel(context.Background())
 	served := make(chan struct{})
 	go func() { _ = router.serve(portCtx); close(served) }()
