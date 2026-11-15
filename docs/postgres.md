@@ -635,9 +635,14 @@ listener, its own workers, its own memory.
 - **Every column is sent as text**, written the way PostgreSQL writes a value
   of that kind (`t`/`f`, `{a,b}`, `2026-03-04 05:06:07+00`). `psql` shows them
   as it would; a driver that asks for a column's type is told `text`.
-- **A column with no name of its own gets the copy's name for it**: `count(*)`
-  is headed `count_star()`, not `count`. Give it a name (`count(*) AS n`) when
-  the heading matters.
+- **A column with no name of its own is headed as PostgreSQL heads it**:
+  `count(*)` is `count`, a function call takes the function's name, a cast of
+  an expression takes the type's name (`int4`, `numeric`, `timestamptz`), and
+  an operator or a constant is `?column?`. A few cases keep the copy's own
+  heading, so give the column a name (`AS n`) when the heading matters there:
+  a statement whose select list holds a `*` next to an unnamed expression, a
+  cast of an expression to `text`, `varchar`, `char`, `real` or `float`, a
+  column written with upper-case letters inside a cast, and `VALUES` lists.
 - **Simple query protocol only**: `psql` uses it; a `pgx` client sets
   `QueryExecModeSimpleProtocol`. Prepared statements are refused with an error.
 - **This machine only.** The port asks for the password in clear text and has
@@ -650,6 +655,14 @@ listener, its own workers, its own memory.
 - A result with more rows than the port's row cap, or with a cell longer than
   the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
   the long column.
+- **Results being sent are held in memory up to 256 MB in all.** The port
+  builds a result whole and keeps it until the client has read it. While it
+  holds 256 MB of results for clients that have not read theirs yet, the next
+  statement is refused with error `53000` before it runs; run it again once
+  the other clients have read their answers. Time travel answers are counted
+  too. A client that asks for a result and reads nothing of it for 60 seconds
+  is disconnected, and what the port held for it is freed. There is no flag
+  for this size; the MySQL port holds the same amount.
 - **Time travel on the same connection**: one row as it was at a past moment,
   from the server's change history and snapshots.
 

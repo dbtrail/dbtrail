@@ -200,7 +200,7 @@ func TestVeto_dateArithmetic(t *testing.T) {
 		"SELECT amount - 1, DATE '2026-01-01' FROM orders":                                       "",
 		"SELECT amount + 1 AS date, created_on AS date2 FROM orders":                             "",
 		"SELECT created_on AS date FROM orders WHERE amount + 1 > 2":                             "",
-		"SELECT YEAR(created_on) + 1, MONTH(created_on) - 1 FROM orders":                         "",
+		"SELECT YEAR(created_on) + 1, MONTH(created_on) - 1 FROM orders":                         vetoUnsignedCall, // #2848: unsigned on MySQL 8.4
 		"SELECT CAST(a AS DECIMAL(10,2)) + 1, CAST(b AS CHAR) FROM t":                            "",
 		"SELECT CAST(DATE(a) AS CHAR) FROM t":                                                    "",
 		"SELECT DATE '2026-01-01' = x + 1 FROM t":                                                "",

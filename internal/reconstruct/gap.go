@@ -1,6 +1,8 @@
 package reconstruct
 
 import (
+	"database/sql"
+	"fmt"
 	"log/slog"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -79,6 +81,13 @@ const (
 	// be established from what survives. The warning says what could not be
 	// proven instead of asserting incompleteness.
 	GapVerdictUnproven
+	// GapVerdictLateEntry means the proof is not taken for THIS table
+	// (#2862): the index's coverage start is about the index as a whole, and
+	// the index records that this PostgreSQL table entered capture past the
+	// snapshot's floor (or that could not be read). Changes made to it
+	// between the snapshot and that point are in neither. Only
+	// DecideBaselineGapForTable returns it.
+	GapVerdictLateEntry
 )
 
 // indexStartComparable reports whether the oldest-event coordinates carry a
@@ -123,6 +132,50 @@ func DecideBaselineGap(flavor string, bmeta baseline.DumpMetadata, first query.R
 	return GapVerdictUnproven
 }
 
+// TableCaptureEntry reads what the index records about schema.table entering
+// capture after the snapshot's floor (#2862), for DecideBaselineGapForTable.
+//
+// PostgreSQL only: flavor "postgres", or an unknown flavor with a snapshot
+// that carries an LSN floor (the lineage guard of WarnBaselineFirstEventGap).
+// For MySQL and MariaDB the index records nothing about a table entering
+// capture (a filter change leaves no row), so nothing is read and the answer
+// is the zero value: their verdict is what it was.
+func TableCaptureEntry(db *sql.DB, flavor string, bmeta baseline.DumpMetadata, schema, table string) query.CaptureEntry {
+	if db == nil || bmeta.LSN == 0 || (flavor != "postgres" && flavor != "") {
+		return query.CaptureEntry{}
+	}
+	return query.PGTableEnteredCaptureAfter(db, schema, table, bmeta.LSN)
+}
+
+// DecideBaselineGapForTable is DecideBaselineGap with what the index records
+// about the table itself (entry, from TableCaptureEntry). The coverage start
+// proves that capture was attached when the snapshot was taken, not that it
+// held this table: a PostgreSQL table the index records as entering capture
+// past the snapshot's floor is not proven by it. A read of that record that
+// failed leaves the question open, and an open question keeps the warning.
+//
+// Without such a record the verdict is DecideBaselineGap's. That is the
+// direction the records allow: a table the publication held when capture
+// started has no record of entering, so "no record" must stay proven, or
+// every table would warn again (#2843).
+func DecideBaselineGapForTable(flavor string, bmeta baseline.DumpMetadata, first query.ResultRow, start query.IndexStart, startOK bool, entry query.CaptureEntry) GapVerdict {
+	if flavor == "postgres" && (entry.Late || entry.Err != nil) {
+		return GapVerdictLateEntry
+	}
+	return DecideBaselineGap(flavor, bmeta, first, start, startOK)
+}
+
+// LateEntryWarning is the message and fields of GapVerdictLateEntry.
+func LateEntryWarning(entry query.CaptureEntry, bmeta baseline.DumpMetadata, first query.ResultRow) (string, []any) {
+	args := []any{"baseline_lsn", bmeta.LSN, "first_event_pos", first.StartPos, "flavor", "postgres"}
+	if entry.Err != nil {
+		return "possible gap between baseline and this table's first indexed event: whether the table entered capture after the snapshot could not be read from the index, so coverage of the window between them cannot be proven",
+			append(args, "error", entry.Err)
+	}
+	return "possible gap between baseline and this table's first indexed event: the index records that the table entered capture after the snapshot (it was first seen in the stream, or added to the publication, past the snapshot's LSN floor), so changes made to it between the snapshot and that point may be in neither",
+		append(args, "entered_capture_lsn", fmt.Sprintf("%X/%X", uint32(entry.LSN>>32), uint32(entry.LSN)), "recorded_as", entry.Kind)
+}
+
 // WarnBaselineFirstEventGap emits the baseline↔first-event gap warning for
 // callers that live in this package — the full-table reconstruct path (#781),
 // which previously produced a dump silently missing that gap while single-row
@@ -143,6 +196,13 @@ func DecideBaselineGap(flavor string, bmeta baseline.DumpMetadata, first query.R
 // record so the warning is attributable when several tables reconstruct
 // concurrently.
 func WarnBaselineFirstEventGap(flavor string, bmeta baseline.DumpMetadata, first query.ResultRow, start query.IndexStart, startOK bool, schema, table string) {
+	WarnBaselineFirstEventGapForTable(flavor, bmeta, first, start, startOK, query.CaptureEntry{}, schema, table)
+}
+
+// WarnBaselineFirstEventGapForTable is WarnBaselineFirstEventGap with what
+// the index records about the table entering capture (entry, from
+// TableCaptureEntry; the zero value is WarnBaselineFirstEventGap itself).
+func WarnBaselineFirstEventGapForTable(flavor string, bmeta baseline.DumpMetadata, first query.ResultRow, start query.IndexStart, startOK bool, entry query.CaptureEntry, schema, table string) {
 	// Mirror of cli.resolveGapCheck: force PG semantics when the flavor read
 	// came back empty but the baseline carries an LSN anchor (its lineage is
 	// provably PostgreSQL — LSN text must never be compared lexically), then
@@ -179,7 +239,11 @@ func WarnBaselineFirstEventGap(flavor string, bmeta baseline.DumpMetadata, first
 			"baseline_lsn", bmeta.LSN,
 			"flavor", flavor)
 	default:
-		if DecideBaselineGap(flavor, bmeta, first, start, startOK) == GapVerdictUnproven {
+		switch DecideBaselineGapForTable(flavor, bmeta, first, start, startOK, entry) {
+		case GapVerdictLateEntry:
+			msg, args := LateEntryWarning(entry, bmeta, first)
+			slog.Warn(msg, append([]any{"schema", schema, "table", table}, args...)...)
+		case GapVerdictUnproven:
 			slog.Warn("possible gap between baseline and this table's first indexed event — the index's earliest surviving event also starts past the baseline anchor, so coverage of the window between them cannot be proven (capture may have started after the baseline, or older events may have been rotated out)",
 				"schema", schema, "table", table,
 				"baseline_file", bmeta.BinlogFile,

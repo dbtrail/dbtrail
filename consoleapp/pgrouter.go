@@ -212,6 +212,7 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 	}
 	fmt.Fprintf(&b, "PostgreSQL router: %s on the copy at once, %s and up to %s of memory each (%s), and at most %d clients connected. These are set where this is started (--workers, --threads, --sql-memory, --max-connections); nothing is worked out from the machine.\n",
 		countOfStatements(st.Workers), countOfThreads(st.Threads), memory, memoryFrom, st.MaxConns)
+	fmt.Fprintf(&b, "PostgreSQL router: the results being sent to clients are held in memory up to %d MB in all; past that a statement is refused with an error (53000) until clients have read their answers.\n", int64(defaultFlashbackResultBudget)>>20)
 	if memoryErr != nil {
 		fmt.Fprintf(&b, "PostgreSQL router: the SQL memory saved in the web interface could NOT be read, so the default is used: %v\n", memoryErr)
 	}
@@ -287,6 +288,10 @@ type pgRouterPort struct {
 	// poll is how often it looks for a password while it has none.
 	poll time.Duration
 	out  io.Writer
+	// budget bounds the results the port holds while it sends them (#2804).
+	// nil: serve makes one of the default size; a test passes its own to
+	// read it.
+	budget *pgshim.ResultBudget
 
 	mu    sync.Mutex
 	bound string
@@ -339,6 +344,13 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		return fmt.Errorf("the PostgreSQL router cannot listen on %s: %w", p.addr, err)
 	}
 	_ = probe.Close()
+	// One for the port, however many times it is opened again: a result
+	// still being sent when the port closes is given back by its own
+	// connection.
+	budget := p.budget
+	if budget == nil {
+		budget = newPGPortResultBudget()
+	}
 	opened, waiting, saidRebind := false, false, false
 	for ctx.Err() == nil {
 		if !p.open() {
@@ -377,7 +389,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
-		err = servePGPort(child, p.srv, ln, p.maxConns)
+		err = servePGPortWithin(child, p.srv, ln, p.maxConns, budget)
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop, p.passwords = "", nil, nil
@@ -426,6 +438,21 @@ func validPGListen(addr, name string) error {
 // servePGPort serves the PostgreSQL-protocol port on ln until ctx ends, with
 // at most maxConns clients connected (0 for no limit).
 func servePGPort(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int) error {
+	return servePGPortWithin(ctx, srv, ln, maxConns, newPGPortResultBudget())
+}
+
+// newPGPortResultBudget is the port's bound on the results it holds while it
+// sends them, when nobody gave one: the size the MySQL port's has
+// (defaultFlashbackResultBudget), with the same meaning. There is no flag
+// for it on either port.
+func newPGPortResultBudget() *pgshim.ResultBudget {
+	return pgshim.NewResultBudget(defaultFlashbackResultBudget)
+}
+
+// servePGPortWithin is servePGPort with the budget its results are counted
+// in (#2804): time travel's answers and the copy's alike, from the moment
+// one is built until it is written or its connection ends.
+func servePGPortWithin(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget) error {
 	logger := slog.Default()
 	// Accept returns when the listener is closed; the connections end with
 	// ctx (pgshim closes each one's socket), and Serve waits for them.
@@ -437,7 +464,7 @@ func servePGPort(ctx context.Context, srv *console.Server, ln net.Listener, maxC
 	// travel is refused on this wire, so nothing waits on it; the engine
 	// asks for it all the same.
 	gate := shim.NewGate(defaultFlashbackMaxFullTable)
-	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger), Logger: logger, MaxConns: maxConns})
+	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger), Logger: logger, MaxConns: maxConns, ResultBudget: budget})
 }
 
 // pgPortLogin is the port's login: the port's passwords, then the server.
@@ -533,8 +560,9 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 		}
 		copySQL := tgt.SQL
 		// A PostgreSQL source's copy answers by PostgreSQL's rules, with its
-		// names resolved where PostgreSQL resolves them.
-		sess, schema := sqlsandbox.Session{PostgresRules: true}, pgPortSchema
+		// names resolved where PostgreSQL resolves them, and a column the
+		// statement did not name headed as PostgreSQL heads it (#2803).
+		sess, schema := sqlsandbox.Session{PostgresRules: true, PostgresNames: true}, pgPortSchema
 		bound.Answered = copySQL.NoteAnswered
 		bound.Run = func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
 			if timeout > 0 {
