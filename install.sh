@@ -211,6 +211,10 @@ if [ ! -f "$DIR/docker-compose.yml" ]; then
   if [ "$PORT" = "3309" ] || [ "$MPORT" = "3309" ] || port_in_use 3309; then
     SQLPORT_SKIP=1
   fi
+  # The PostgreSQL-protocol port (5433), the same way.
+  if [ "$PORT" = "5433" ] || [ "$MPORT" = "5433" ] || port_in_use 5433; then
+    PGPORT_SKIP=1
+  fi
 fi
 
 # Need curl or wget to fetch the compose file.
@@ -427,6 +431,18 @@ else
     that 'ports:' line by hand, or report it."
     fi
     say "${DIM}    port 3309 is taken, so the MySQL port is not published (add a 'ports:' line to docker-compose.yml to use it)${RST}"
+  fi
+  # Only a file that publishes it: the file of an older release has no
+  # PostgreSQL port, and there is then nothing to leave out or to say.
+  if [ -n "${PGPORT_SKIP:-}" ] && grep -q '"127.0.0.1:5433:5433"' docker-compose.yml; then
+    grep -v '"127.0.0.1:5433:5433"' docker-compose.yml > docker-compose.yml.tmp \
+      && mv docker-compose.yml.tmp docker-compose.yml
+    if grep -Eq '^[^#]*5433:5433' docker-compose.yml; then
+      die "Port 5433 is in use on this machine and the PostgreSQL port's published-port
+    line in ${DIR}/docker-compose.yml isn't what this installer expected. Delete
+    that 'ports:' line by hand, or report it."
+    fi
+    say "${DIM}    port 5433 is taken, so the PostgreSQL port is not published (add a 'ports:' line to docker-compose.yml to use it)${RST}"
   fi
   # Same rewrite for the metrics mapping, verified the same way.
   if [ "$MPORT" != "9090" ]; then

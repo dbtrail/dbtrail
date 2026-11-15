@@ -306,6 +306,24 @@ is. A capture that keeps up records one about every 30 seconds; one that is
 more than a second behind records none, and shows as behind. It is one
 `SELECT` on the health poll's connection.
 
+#### A large transaction arrives whole, after it commits
+
+PostgreSQL sends a transaction to capture only once it has committed (capture
+asks for version 1 of the `pgoutput` protocol, which does not stream a
+transaction that is still open). Nothing is missing from the copy while it is
+open: its changes are not visible on the source either. The cost comes at the
+commit. The whole transaction is then sent in one piece and indexed, and every
+change committed after it waits behind it. A transaction that changed a few
+million rows can leave the copy minutes behind, where the same rows in small
+transactions would have gone through as they were made.
+
+So what sets the delay is how MUCH one transaction changed, not how long it
+stayed open: a transaction open for an hour that changed ten rows costs
+nothing. While the large one goes through, the web interface shows the capture
+as behind and the copy stays where it was; both recover by themselves once it
+is in. If a job on the source changes rows in
+bulk, committing in batches keeps the copy close.
+
 ---
 
 ## Running it
@@ -657,9 +675,17 @@ What to know:
   ordinary UPDATE and for one that changes the key. A marker is only in
   changes captured without the whole old row, where the value was never
   captured.
-- **A table with no change is rewritten**, never carried forward or written as
-  a delta (`--carry-forward-unchanged` and `--table-deltas` apply to MySQL only):
-  the new file must hold the new starting point.
+- **A table with no change is carried forward** under
+  `--carry-forward-unchanged`, as for MySQL: the new snapshot gets the previous
+  file (a hard link where the filesystem allows one) and the table is not read
+  or written again. Two cases still rewrite it. The first update after a full
+  read rewrites every table once, because a full read's files do not record
+  how far back their missing changes reach. And a table that has gone
+  unchanged for long is rewritten before the index drops the changes its file
+  starts from. Only the scheduled updates of the web console carry tables
+  forward: `bintrail baseline refresh` on the command line does not know how
+  long the index keeps its changes, and rewrites. A changed table is rewritten
+  in full: `--table-deltas` applies to MySQL only.
 - **Capture that is behind is safe for the chain, not for one file.** A
   snapshot folded while capture is behind holds the table as of the newest
   change the index has, under the requested point's name, and the run warns.
@@ -710,9 +736,38 @@ listener, its own workers, its own memory.
   resolve in `public`. NULL order, integer division and text comparison follow
   PostgreSQL, and each type reads as [the table below](#how-each-type-reads-in-sql-on-the-copy)
   says; the differences listed there apply here too.
-- **Every column is sent as text**, written the way PostgreSQL writes a value
-  of that kind (`t`/`f`, `{a,b}`, `2026-03-04 05:06:07+00`). `psql` shows them
-  as it would; a driver that asks for a column's type is told `text`.
+- **Each column carries its PostgreSQL type**, and each value is written the
+  way PostgreSQL writes a value of that type (`t`/`f`, `{a,b}`,
+  `2026-03-04 05:06:07+00`, `\xdead`, `-0`, `NaN`). A column of the table
+  keeps the type, type modifier and size the source announces for it:
+  `integer`, `bigint`, `smallint`, `numeric(p,s)`, `real`, `double precision`,
+  `boolean`, `date`, `timestamp`, `timestamptz`, `time`, `timetz`, `uuid`,
+  `bytea`, `text`, and arrays of one dimension of those. So `pgx` returns an
+  `int64` or a `time.Time`, psycopg an `int`, a `Decimal` or a `datetime`, and
+  JDBC's `getObject` a `Long`, a `BigDecimal` or a `Timestamp`, as they do from
+  the source. When a driver asks for results in binary (`pgx` and JDBC do for
+  common types, psycopg on a binary cursor), they are sent in binary, the
+  same bytes the source sends. Some columns are announced as `text`, with the
+  text PostgreSQL writes:
+  - `json`, `jsonb`, `varchar(n)`, `char(n)`, enums and the other types the
+    copy keeps as text (the [table below](#how-each-type-reads-in-sql-on-the-copy)
+    lists them);
+  - `interval`: JDBC reads a column of that type by asking the server's
+    catalog about it, which this port does not answer, so `getObject` would
+    fail; as text every driver reads it;
+  - a value of a type the copy has and PostgreSQL does not (a struct, a map,
+    an array of arrays);
+  - time travel (`_flashback`, `_snapshot`) and `SHOW`.
+
+  An expression's type is the one the copy computes it with, which is not
+  always PostgreSQL's: `avg()` of whole numbers is a `double precision` here
+  and a `numeric` there, and an aggregate or a literal of a `numeric` keeps its
+  precision and scale here (`numeric(10,2)`) where PostgreSQL reports none. A
+  `numeric` declared without precision is a `numeric(38,18)` here and is
+  written with its 18 decimals (`12345.678000000000000000` where the source
+  writes `12345.678`). A value with no binary form for its type (a date past
+  year 9999) is refused with error `0A000` when a client asks for binary, and
+  sent as text when it asks for text.
 - **A column with no name of its own is headed as PostgreSQL heads it**:
   `count(*)` is `count`, a function call takes the function's name, a cast of
   an expression takes the type's name (`int4`, `numeric`, `timestamptz`), and
@@ -863,12 +918,12 @@ Scope and behaviour track PostgreSQL's current time-travel maturity:
   needs the `CREATE TABLE` metadata a PG baseline does not carry. A whole
   table at a point in time is `reconstruct --output-format parquet` (see
   [Full-table snapshots](#full-table-snapshots)).
-- Columns render as **text** (the conservative first cut): read each one as a
-  string, or let your driver text-parse it into a typed target. One caveat: a
+- Columns render as **text**, on purpose: a row as it was can carry other
+  columns, and other types, than the table has now. Read each one as a string,
+  or let your driver text-parse it into a typed target. One caveat: a
   binary/`bytea` value containing a `0x00` byte truncates at the first NUL in
   `psql`/libpq (their text protocol uses NUL-terminated C strings); a driver that
   reads the raw value (e.g. `pgx` scanning into `[]byte`) round-trips it intact.
-  Per-column type OIDs (so `bytea` arrives as `bytea`) are a follow-up.
 - Both the **simple and the extended query protocol** are served, so a driver
   in its default mode can prepare `SELECT * FROM _flashback.orders AS OF $1
   WHERE id = $2` and run it with arguments. An argument cannot hold a single

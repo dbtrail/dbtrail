@@ -82,3 +82,38 @@ if [ "$router_check" = yes ]; then
         echo "  journalctl -u bintrail-router -n 50"
     fi
 fi
+
+# The PostgreSQL port (5433) is answered by a third service of this package,
+# bintrail-pg-router, handled as the router is above: enabled and started
+# once (its own marker), left alone after that if its operator stopped it,
+# restarted on an upgrade when it runs. It needs no settings to start, accepts
+# no connection until the port for SQL clients is turned on in the web
+# interface, and with MySQL or MariaDB servers it waits.
+pg_marker=${BINTRAIL_PG_ROUTER_MARKER:-/etc/bintrail/.pg-router-started}
+pg_check=no
+if [ "$upgrade" = yes ] && systemctl is-active --quiet bintrail-pg-router.service; then
+    systemctl try-restart bintrail-pg-router.service || true
+    pg_check=yes
+    touch "$pg_marker" 2>/dev/null || true
+elif [ ! -e "$pg_marker" ]; then
+    [ -d /var/lib/bintrail ] || install -d -o bintrail -g bintrail -m 0750 /var/lib/bintrail
+    if systemctl enable --now bintrail-pg-router.service; then
+        pg_check=yes
+        touch "$pg_marker" 2>/dev/null || true
+        echo "The PostgreSQL port (5433) is answered by the bintrail-pg-router"
+        echo "service, which runs from now on. It accepts no connection until the"
+        echo "port for SQL clients is on."
+    else
+        echo "WARNING: the bintrail-pg-router service did not enable."
+        echo "Nothing answers on the PostgreSQL port (5433) until it runs:"
+        echo "  sudo systemctl enable --now bintrail-pg-router"
+    fi
+fi
+if [ "$pg_check" = yes ]; then
+    sleep 2
+    if ! systemctl is-active --quiet bintrail-pg-router.service; then
+        echo "WARNING: bintrail-pg-router is not running."
+        echo "Nothing answers on the PostgreSQL port (5433). To see why:"
+        echo "  journalctl -u bintrail-pg-router -n 50"
+    fi
+fi

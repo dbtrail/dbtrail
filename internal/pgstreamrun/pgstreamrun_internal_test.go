@@ -296,7 +296,7 @@ func TestPersistSlotLostPG_stampWithdrawsAcknowledgement(t *testing.T) {
 
 	mock.ExpectExec(`(?s)INSERT INTO stream_state \(id, mode, flavor, server_id, last_checkpoint, gap_lost_at, gap_lost_detail\)`+
 		`.*ON DUPLICATE KEY UPDATE\s+`+
-		`gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = VALUES\(gap_lost_detail\),\s+gap_acked_at\s+= NULL,\s+caught_up_at\s+= NULL\s*$`).
+		`gap_lost_at\s+= UTC_TIMESTAMP\(\),\s+gap_lost_detail = VALUES\(gap_lost_detail\),\s+gap_acked_at\s+= NULL,\s+caught_up_at\s+= NULL,\s+pg_caught_up_source_at = NULL\s*$`).
 		WithArgs("postgres", uint32(7), "slot lost").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

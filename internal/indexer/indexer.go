@@ -896,6 +896,15 @@ func EnsureSchema(db *sql.DB) error {
 		return err
 	}
 
+	// pg_caught_up_source_at: the source's own clock at the moment
+	// caught_up_at stamps, for readers that compare it with commit times
+	// (a snapshot's time bound), which are on that clock too.
+	if err := ensureColumn(db, "stream_state", "pg_caught_up_source_at",
+		`ALTER TABLE stream_state ADD COLUMN pg_caught_up_source_at DATETIME(6) DEFAULT NULL COMMENT 'the source''s own clock when this PostgreSQL capture was last caught up with it: every change not yet captured then committed after it (the source''s time on a primary, the commit time of the last replayed transaction on a standby)'`,
+	); err != nil {
+		return err
+	}
+
 	// source_identity names the server whose binlog coordinates the
 	// checkpoint carries (MySQL @@server_uuid, MariaDB "server_id:<n>"), so a
 	// resume compares binlog file numbers only against a checkpoint of the

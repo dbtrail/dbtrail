@@ -60,6 +60,28 @@ func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
 // nil answers a request for TLS 'N'.
 func startPGExtPortTLS(t *testing.T, ctx context.Context, tlsConfig *tls.Config) pgExtEnv {
 	t.Helper()
+	return startPGPortFor(t, ctx, tlsConfig, pgPortFixture{table: pgExtTable, slot: pgExtSlot, pub: pgExtPub, setup: []string{
+		"CREATE TABLE " + pgExtTable + ` (
+		id int PRIMARY KEY, status text, amount numeric(10,2), placed timestamptz,
+		day date, ok boolean, weight double precision, note text, data bytea, uid uuid, big bigint)`,
+		"INSERT INTO " + pgExtTable + ` VALUES
+		(1, 'new',  10.50, '2026-03-04 05:06:07+00',        '2026-03-04', true,  1.5,  '',    '\xdead', '12345678-9abc-def0-1234-56789abcdef0', 9007199254740993),
+		(2, 'paid', 0.00,  '2026-03-04 05:06:07.123456+00', '2026-12-31', false, 0.1,  'x',   '\x00',   'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', -1),
+		(3, NULL,   NULL,  NULL,                            NULL,         NULL,  NULL, NULL,  NULL,     NULL, NULL),
+		(4, 'Paid', 7.25,  '1999-12-31 23:59:59+00',        '1999-12-31', true,  -2,   'año', '\x',     '00000000-0000-0000-0000-000000000000', 0),
+		(5, 'it''s', 3.10, '2026-01-01 00:00:00+00',        '2026-01-01', false, 2.5,  'a\b', '\x41',   NULL, 42)`,
+	}})
+}
+
+// pgPortFixture is the one table a port test reads: created by setup on the
+// source, published, and snapshotted into the copy the port serves.
+type pgPortFixture struct {
+	table, slot, pub string
+	setup            []string
+}
+
+func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx pgPortFixture) pgExtEnv {
+	t.Helper()
 	testutil.SkipIfNoMySQL(t)
 	baseDSN := testutil.SkipIfNoPostgres(t)
 	source, err := pgconn.Connect(ctx, baseDSN)
@@ -75,23 +97,17 @@ func startPGExtPortTLS(t *testing.T, ctx context.Context, tlsConfig *tls.Config)
 	}
 	dropAll := func() {
 		bg := context.Background()
-		_, _ = source.Exec(bg, "DROP PUBLICATION IF EXISTS "+pgExtPub).ReadAll()
-		_, _ = source.Exec(bg, "DROP TABLE IF EXISTS "+pgExtTable).ReadAll()
-		_, _ = source.Exec(bg, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '"+pgExtSlot+"'").ReadAll()
+		_, _ = source.Exec(bg, "DROP PUBLICATION IF EXISTS "+fx.pub).ReadAll()
+		_, _ = source.Exec(bg, "DROP TABLE IF EXISTS "+fx.table).ReadAll()
+		_, _ = source.Exec(bg, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '"+fx.slot+"'").ReadAll()
 	}
 	dropAll()
 	t.Cleanup(dropAll)
 	exec1("SET TimeZone = 'UTC'")
-	exec1("CREATE TABLE " + pgExtTable + ` (
-		id int PRIMARY KEY, status text, amount numeric(10,2), placed timestamptz,
-		day date, ok boolean, weight double precision, note text, data bytea, uid uuid, big bigint)`)
-	exec1("INSERT INTO " + pgExtTable + ` VALUES
-		(1, 'new',  10.50, '2026-03-04 05:06:07+00',        '2026-03-04', true,  1.5,  '',    '\xdead', '12345678-9abc-def0-1234-56789abcdef0', 9007199254740993),
-		(2, 'paid', 0.00,  '2026-03-04 05:06:07.123456+00', '2026-12-31', false, 0.1,  'x',   '\x00',   'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', -1),
-		(3, NULL,   NULL,  NULL,                            NULL,         NULL,  NULL, NULL,  NULL,     NULL, NULL),
-		(4, 'Paid', 7.25,  '1999-12-31 23:59:59+00',        '1999-12-31', true,  -2,   'año', '\x',     '00000000-0000-0000-0000-000000000000', 0),
-		(5, 'it''s', 3.10, '2026-01-01 00:00:00+00',        '2026-01-01', false, 2.5,  'a\b', '\x41',   NULL, 42)`)
-	exec1("CREATE PUBLICATION " + pgExtPub + " FOR TABLE " + pgExtTable)
+	for _, stmt := range fx.setup {
+		exec1(stmt)
+	}
+	exec1("CREATE PUBLICATION " + fx.pub + " FOR TABLE " + fx.table)
 
 	outDir := t.TempDir()
 	repl := baseDSN + "?replication=database"
@@ -99,7 +115,7 @@ func startPGExtPortTLS(t *testing.T, ctx context.Context, tlsConfig *tls.Config)
 		repl = baseDSN + "&replication=database"
 	}
 	if _, err := pgbaseline.Run(ctx, pgbaseline.Config{
-		QueryDSN: baseDSN, ReplDSN: repl, SlotName: pgExtSlot, Publication: pgExtPub,
+		QueryDSN: baseDSN, ReplDSN: repl, SlotName: fx.slot, Publication: fx.pub,
 		OutputDir: outDir, Compression: "none", Parallelism: 2,
 	}); err != nil {
 		t.Fatalf("pgbaseline.Run: %v", err)

@@ -50,6 +50,35 @@ func caughtUpStamp(t *testing.T, db *sql.DB) string {
 	return s.String
 }
 
+// sourceClockBehindStamp is how far pg_caught_up_source_at is before
+// caught_up_at. The first is the source's clock as it was given and the
+// second this host's moment on the index's clock, so on one machine their
+// difference is the offset the test gave the source.
+func sourceClockBehindStamp(t *testing.T, db *sql.DB) time.Duration {
+	t.Helper()
+	var us sql.NullInt64
+	if err := db.QueryRow(`SELECT TIMESTAMPDIFF(MICROSECOND, pg_caught_up_source_at, caught_up_at) FROM stream_state WHERE id = 1`).Scan(&us); err != nil || !us.Valid {
+		t.Fatalf("read pg_caught_up_source_at: %v (set: %v)", err, us.Valid)
+	}
+	return time.Duration(us.Int64) * time.Microsecond
+}
+
+// settledStamp returns the stamp once two readings of it 300 ms apart agree.
+func settledStamp(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s := caughtUpStamp(t, db)
+		time.Sleep(300 * time.Millisecond)
+		if caughtUpStamp(t, db) == s {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stamp never held still")
+		}
+	}
+}
+
 func waitCaughtUp(t *testing.T, what string, limit time.Duration, done func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(limit)
@@ -78,7 +107,8 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 		if failing.Load() {
 			return pgcapture.HealthSnapshot{FlushedLSNErr: errors.New("permission denied")}, nil
 		}
-		return pgcapture.HealthSnapshot{FlushedLSN: flushed.Load()}, nil
+		// The source's clock, three hours behind this host's.
+		return pgcapture.HealthSnapshot{FlushedLSN: flushed.Load(), FlushedSourceAt: time.Now().Add(-3 * time.Hour)}, nil
 	}
 	idx := indexer.New(db, 1000)
 	events := make(chan event.Event)
@@ -123,11 +153,19 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 		t.Fatalf("the stamp is %s old, %s after the capture reached the source", ago, time.Since(before))
 	}
 
+	// The source's own clock for that moment is saved with it, as the source
+	// gave it: three hours before the stamp, which is on this host's clock.
+	if d := sourceClockBehindStamp(t, db); d < 3*time.Hour-2*time.Second || d > 3*time.Hour+2*time.Second {
+		t.Fatalf("pg_caught_up_source_at is %s before caught_up_at, want the source's three hours", d)
+	}
+
 	// The source moves on and the capture does not: the stamp stays where it
 	// was, and grows old.
+	// A reading taken before the source moved can still be saved after it
+	// (the checkpoint that writes it may be slow), so the stamp is taken once
+	// it holds still.
 	flushed.Store(9000)
-	time.Sleep(100 * time.Millisecond)
-	held := caughtUpStamp(t, db)
+	held := settledStamp(t, db)
 	if held == "" {
 		t.Fatal("the checkpoints with nothing new to stamp erased the stamp")
 	}
@@ -138,8 +176,10 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 
 	// A reading that fails is not one: reaching 9000 while the source cannot
 	// be read stamps nothing.
+	// Long enough for a failed reading to replace the last good one, on a
+	// slow machine too.
 	failing.Store(true)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	send(sentMarkerAt(9000))
 	time.Sleep(200 * time.Millisecond)
 	if now := caughtUpStamp(t, db); now != held {
@@ -154,6 +194,10 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 	persistSlotLostPG(db, 92845, "test: slot lost", slog.New(slog.DiscardHandler))
 	if ago, ok := caughtUpAgo(t, db); ok {
 		t.Fatalf("a stamp %s old survived a lost slot", ago)
+	}
+	var left sql.NullString
+	if err := db.QueryRow(`SELECT CAST(pg_caught_up_source_at AS CHAR) FROM stream_state WHERE id = 1`).Scan(&left); err != nil || left.Valid {
+		t.Fatalf("the source's clock for the stamp survived a lost slot: %q (err %v)", left.String, err)
 	}
 }
 

@@ -108,6 +108,27 @@ func TestPGFoldedDeltaSince(t *testing.T) {
 		{"nothing folded", pgRunEnd{at: at, newestAt: at.Add(-time.Minute)}, pgFoldBounds{Next: floor}, prev},
 		{"an empty index", pgRunEnd{at: at, none: true}, pgFoldBounds{Next: floor}, prev},
 		{"nothing folded, a bound with a fraction", pgRunEnd{at: at}, pgFoldBounds{Next: floor}, prev},
+		// A source with no change: the newest change stays an hour back, and
+		// the moment capture was last caught up is what moves the bound.
+		{"caught up after the newest change", pgRunEnd{at: at, newestAt: at.Add(-time.Hour), caughtUpAt: at.Add(-10 * time.Minute), allIn: true}, folded,
+			time.Date(2026, 10, 17, 11, 49, 0, 0, time.UTC)},
+		{"caught up before the newest change", pgRunEnd{at: at, newestAt: at.Add(-5 * time.Minute), caughtUpAt: at.Add(-time.Hour), allIn: true}, folded,
+			time.Date(2026, 10, 17, 11, 54, 0, 0, time.UTC)},
+		// Never past the point: the snapshot is named after it.
+		{"caught up after the point", pgRunEnd{at: at, newestAt: at.Add(-time.Hour), caughtUpAt: at.Add(time.Hour), allIn: true}, folded,
+			time.Date(2026, 10, 17, 11, 59, 0, 0, time.UTC)},
+		// The newest change is in the index and left to the next fold: it
+		// may have committed before the stamp.
+		{"caught up, the newest change left out", pgRunEnd{at: at, newestAt: at.Add(-time.Hour), caughtUpAt: at.Add(-10 * time.Minute)}, folded,
+			time.Date(2026, 10, 17, 10, 59, 0, 0, time.UTC)},
+		{"caught up, a change past the point", pgRunEnd{at: at, newestAt: at.Add(time.Hour), caughtUpAt: at.Add(-10 * time.Minute)}, folded,
+			time.Date(2026, 10, 17, 11, 59, 0, 0, time.UTC)},
+		{"nothing folded, caught up", pgRunEnd{at: at, newestAt: at.Add(-time.Hour), caughtUpAt: at.Add(-10 * time.Minute), allIn: true}, pgFoldBounds{Next: floor},
+			time.Date(2026, 10, 17, 11, 49, 0, 0, time.UTC)},
+		{"an empty index, caught up", pgRunEnd{at: at, none: true, caughtUpAt: at.Add(-10 * time.Minute), allIn: true}, pgFoldBounds{Next: floor},
+			time.Date(2026, 10, 17, 11, 49, 0, 0, time.UTC)},
+		{"nothing folded, caught up before the bound", pgRunEnd{at: at, caughtUpAt: prev.Add(-time.Hour), allIn: true}, pgFoldBounds{Next: floor}, prev},
+		{"nothing folded, caught up, a change left out", pgRunEnd{at: at, caughtUpAt: at.Add(-10 * time.Minute)}, pgFoldBounds{Next: floor}, prev},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

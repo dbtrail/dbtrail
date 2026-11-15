@@ -349,8 +349,10 @@ func expectations() []expectation {
 		eq(`SELECT sum(fixed) FROM ` + odd),
 		eq(`SELECT id, fixed FROM ` + odd),
 		// It prints with 18 decimals, where the source prints the digits
-		// the value was written with.
-		still("precision", "", "#2768: a numeric without precision prints with the copy's 18 decimals", `SELECT free FROM `+odd+` WHERE id = 3`),
+		// the value was written with: the copy does not keep the scale each
+		// value was written with, and trimming the zeros would print 1.50 as
+		// 1.5. The PostgreSQL port writes it so too (#2768).
+		still("precision", "", "by design: a numeric without precision prints with the copy's 18 decimals", `SELECT free FROM `+odd+` WHERE id = 3`),
 		// A value the copy's type cannot hold fails the statement that reads
 		// it, and only that one.
 		refused("NaN", "by design: NaN is not a DECIMAL", `SELECT free FROM `+odd+` WHERE id = 1`),

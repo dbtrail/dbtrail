@@ -952,6 +952,39 @@ func parseStatement(ctx context.Context, conn *sql.Conn, text string, noFileRead
 	return parsed.Statements[0], ""
 }
 
+// infinityText is "infinity" or "-infinity" for a DATE or a timestamp that
+// holds one, and "" for every other value. PostgreSQL has both, a copy of a
+// PostgreSQL table keeps them, and the engine prints them by those words.
+// The driver cannot say so: it hands over a time.Time, and the engine's
+// infinity is the largest number its type counts in (days for a DATE; the
+// unit of the type for a timestamp), so it arrives as a date in the year
+// 5881580 or a timestamp in 294247 that reads like any other. No value of
+// those types is that number without being infinity.
+func infinityText(x time.Time, typ string) string {
+	var n, most int64 = 0, math.MaxInt64
+	switch {
+	case typ == "DATE":
+		n, most = x.Unix()/86400, math.MaxInt32
+	case typ == "TIMESTAMP_S":
+		n = x.Unix()
+	case typ == "TIMESTAMP_MS":
+		n = x.UnixMilli()
+	case typ == "TIMESTAMP_NS":
+		n = x.UnixNano()
+	case strings.HasPrefix(typ, "TIMESTAMP"):
+		n = x.UnixMicro()
+	default:
+		return ""
+	}
+	switch n {
+	case most:
+		return "infinity"
+	case -most:
+		return "-infinity"
+	}
+	return ""
+}
+
 // renderer turns driver values into cells and counts the ones it cut.
 type renderer struct{ truncated int }
 
@@ -973,6 +1006,9 @@ func (r *renderer) cell(v any, typ string) any {
 	case float64:
 		return floatCell(x)
 	case time.Time:
+		if inf := infinityText(x, typ); inf != "" {
+			return inf
+		}
 		switch {
 		case typ == "DATE":
 			return x.Format("2006-01-02")

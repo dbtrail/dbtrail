@@ -101,7 +101,8 @@ metrics to the next free port and says so. Choose one yourself with
 answers nothing until the port is on: adding the first server turns it on,
 or turn it on in the web interface). When 3309 is
 taken, the installer leaves that port unpublished and says so; add a `ports:`
-line to the `router` service of `docker-compose.yml` to use it. Prefer to drive Compose yourself?
+line to the `router` service of `docker-compose.yml` to use it. The PostgreSQL
+port, 5433 (the `pg-router` service), is handled the same way. Prefer to drive Compose yourself?
 
 Take the compose file of one release and write its version down, so a later
 `docker compose pull` stays on it. Set `V` to the newest version on the
@@ -226,8 +227,11 @@ the two apart, not its place: two folders that end in the same name
 
 The ports the first installation holds are found taken: metrics move to a free
 port by themselves, and the MySQL port (3309) is left unpublished, with the
-installer saying so. A PostgreSQL installation has no use for it. A second
-MySQL or MariaDB installation does: the installer prints the `ports:` line to
+installer saying so, and so is the PostgreSQL port (5433). An installation
+uses the port of its own family and has no use for the other. A second
+PostgreSQL installation adds a `ports:` line to its `pg-router` service (such
+as `127.0.0.1:5434:5433`) and connects to that number. A second
+MySQL or MariaDB installation does the same with the `router` service: the installer prints the `ports:` line to
 add to its `docker-compose.yml` (such as `127.0.0.1:3310:3309`), and that
 number is the one to use after `-P`, whatever the web interface prints.
 
@@ -337,6 +341,7 @@ What the package puts on the machine:
 | Path | What it is |
 |---|---|
 | `/usr/lib/systemd/system/bintrail-router.service` | The router's unit: the service that answers the MySQL port (3309). The package enables and starts it (below) |
+| `/usr/lib/systemd/system/bintrail-pg-router.service` | The PostgreSQL router's unit: the service that answers the PostgreSQL port (5433). The package enables and starts it (below) |
 | `/usr/lib/systemd/system/bintrail-console.service` | The unit: restarts whenever the process ends without being asked to stop, and gives capture 60 seconds to save its position on a stop |
 | `/etc/bintrail/bintrail-console.env` | The settings, mode `0600` because the index DSN holds a password. Created on install when there is none; no upgrade overwrites it or asks about it |
 | `/var/lib/bintrail` | What DBTrail saves: the servers you add, the login, Claude's token, the work folders of full reads |
@@ -505,6 +510,38 @@ examples.
 > **Managed MySQL (RDS, Aurora, Cloud SQL)?** `bintrail up` connects over the
 > replication protocol — no disk access to binlogs required. See
 > [streaming.md](./streaming.md).
+
+#### The PostgreSQL router, a third service of the same package
+
+The package also installs `bintrail-pg-router.service`, which runs
+`bintrail-console pg-router`: the service that answers the PostgreSQL port,
+5433, where PostgreSQL clients read the copy of a PostgreSQL server.
+
+The package enables and starts it, as it does the router, and it is started
+**once**: its marker is `/etc/bintrail/.pg-router-started`, so a later upgrade
+does not start one you stopped. It needs no settings to start and accepts no
+connection until the port for SQL clients is on. An installation serves one
+database family, so with MySQL or MariaDB servers it has nothing to answer
+for: it waits and uses next to nothing. To stop it for good:
+`sudo systemctl disable --now bintrail-pg-router`.
+
+```sh
+systemctl status bintrail-pg-router
+journalctl -u bintrail-pg-router -f
+psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app sslmode=require"
+```
+
+It reads the same settings file. Its own settings are at the end of that file,
+commented out: `BINTRAIL_PG_ROUTER_LISTEN` (`127.0.0.1:5433` unless set; on a
+machine that runs a second PostgreSQL cluster, 5433 is often that cluster's,
+so choose another), `BINTRAIL_PG_ROUTER_TLS_CERT` and
+`BINTRAIL_PG_ROUTER_TLS_KEY` (a certificate clients can verify; unset,
+`sslmode=require` works and `verify-ca` and `verify-full` do not), and
+`BINTRAIL_PG_ROUTER_WORKERS`, `BINTRAIL_PG_ROUTER_THREADS` and
+`BINTRAIL_PG_ROUTER_MAX_CONNECTIONS` (2, 2 and 16 unless set). The login is
+SCRAM-SHA-256, so the password never crosses the network; the port cannot turn
+away a client that asks for no TLS, so set `sslmode=require` in clients on
+other machines.
 
 ### Step-by-step setup
 
