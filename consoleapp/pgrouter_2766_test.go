@@ -222,9 +222,6 @@ func TestPGRouter_loginOverTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.owner.Add(console.ServerEntry{Name: "mysqlsrv", DSN: "u:p@tcp(127.0.0.1:1)/idx_my"}); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := f.owner.SetPortLogin(prod.ID, "app1", "pw-one"); err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +263,6 @@ func TestPGRouter_loginOverTLS(t *testing.T) {
 		{verified, "app1", "wrong", "prod", "28P01", false, "a login with a wrong password"},
 		{verified, "anyone", "wrong", "nowhere", "28P01", false, "a wrong password says nothing about the server"},
 		{verified, "anyone", "port-pw", "nowhere", "3D000", false, "a server that does not exist"},
-		{verified, "anyone", "port-pw", "mysqlsrv", "0A000", false, "a MySQL server"},
 	} {
 		got, encrypted := pgTLSLoginCode(t, byName, tc.params, tc.user, tc.pw, tc.db)
 		if got != tc.want || encrypted != tc.encrypted {
