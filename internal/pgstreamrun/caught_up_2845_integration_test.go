@@ -191,13 +191,17 @@ func TestIntegrationPGCaughtUpStampFollowsWhatWasReached_2845(t *testing.T) {
 	waitCaughtUp(t, "a stamp once the source could be read again", 5*time.Second, func() bool { return caughtUpStamp(t, db) != held })
 
 	// A lost slot removes the stamp: capture is not caught up with anything.
+	// The loop of this test is still running, and the real one has ended by
+	// the time a lost slot is recorded: the source is made unreadable first
+	// and the stamp left to hold still, so no reading still on its way is
+	// saved after the removal.
+	failing.Store(true)
+	time.Sleep(300 * time.Millisecond)
+	settledStamp(t, db)
 	persistSlotLostPG(db, 92845, "test: slot lost", slog.New(slog.DiscardHandler))
-	if ago, ok := caughtUpAgo(t, db); ok {
-		t.Fatalf("a stamp %s old survived a lost slot", ago)
-	}
-	var left sql.NullString
-	if err := db.QueryRow(`SELECT CAST(pg_caught_up_source_at AS CHAR) FROM stream_state WHERE id = 1`).Scan(&left); err != nil || left.Valid {
-		t.Fatalf("the source's clock for the stamp survived a lost slot: %q (err %v)", left.String, err)
+	var stamp, sourceAt sql.NullString
+	if err := db.QueryRow(`SELECT CAST(caught_up_at AS CHAR), CAST(pg_caught_up_source_at AS CHAR) FROM stream_state WHERE id = 1`).Scan(&stamp, &sourceAt); err != nil || stamp.Valid || sourceAt.Valid {
+		t.Fatalf("after a lost slot: caught_up_at %q, pg_caught_up_source_at %q (err %v); want neither", stamp.String, sourceAt.String, err)
 	}
 }
 
