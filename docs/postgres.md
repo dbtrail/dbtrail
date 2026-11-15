@@ -624,6 +624,14 @@ listener, its own workers, its own memory.
 - A result with more rows than the port's row cap, or with a cell longer than
   the cap on one cell, is refused, not cut: add a `LIMIT`, or select part of
   the long column.
+- **Results being sent are held in memory up to 256 MB in all.** The port
+  builds a result whole and keeps it until the client has read it. While it
+  holds 256 MB of results for clients that have not read theirs yet, the next
+  statement is refused with error `53000` before it runs; run it again once
+  the other clients have read their answers. Time travel answers are counted
+  too. A client that asks for a result and reads nothing of it for 60 seconds
+  is disconnected, and what the port held for it is freed. There is no flag
+  for this size; the MySQL port holds the same amount.
 - **Time travel on the same connection**: one row as it was at a past moment,
   from the server's change history and snapshots.
 

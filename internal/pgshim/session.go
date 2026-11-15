@@ -29,6 +29,11 @@ type session struct {
 	// connection's context, which ends when the client leaves.
 	bound *Binding
 	ctx   context.Context
+	// budget is the port's bound on the results it holds while it sends
+	// them (resultbudget.go), nil for none; heldResult is what this
+	// connection's result counts in it now.
+	budget     *ResultBudget
+	heldResult int64
 }
 
 // pgErr is a query-level failure carrying a 5-char SQLSTATE and a message.
@@ -48,6 +53,10 @@ func (s *session) handleSimpleQuery(qstr string) error {
 		return s.readyFlush()
 	}
 
+	// Whatever result this statement counts in the port's budget is given
+	// back when this returns: its answer is written by then, or never will
+	// be (the write failed, the client left, the statement was refused).
+	defer s.releaseResult()
 	cols, rows, tag, perr := s.resolve(qstr)
 	if perr != nil {
 		s.errorResponse(perr.code, perr.msg)
@@ -130,6 +139,18 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 		return nil, nil, "", &pgErr{"42501", msg}
 	}
 
+	// A time-travel answer is held like any other while it is sent, so the
+	// port's result budget is asked for it too (#2804): after the statement
+	// was found to be one this connection may send, before the index is read
+	// for it. Only for a statement that would be answered with a row: a
+	// whole table as of a moment and _diff are refused below for what they
+	// are, which sending them again would not change.
+	if (q.Type == shim.TypeFlashback || q.Type == shim.TypeSnapshot) && q.PKColumn != "" {
+		if refusal := s.admitResult(); refusal != nil {
+			return nil, nil, "", refusal
+		}
+	}
+
 	// PK-column validation is shared with the MySQL front-end (#296/#821): a
 	// WHERE whose column is not the table's single-column PK is refused so a
 	// non-PK filter cannot silently return the wrong row.
@@ -173,8 +194,15 @@ func (s *session) resolve(qstr string) (cols []string, rows [][][]byte, tag stri
 			// the marker's JSON as a value.
 			return nil, nil, "", &pgErr{"XX000", cerr.Error()}
 		}
+		rows = [][][]byte{cells}
+		// Counted from here until it is written; refused when the budget
+		// was taken while the row was read. Before the audit record: a
+		// refused answer served nobody.
+		if refusal := s.holdResult(rows); refusal != nil {
+			return nil, nil, "", refusal
+		}
 		s.h.AuditResolve(q, 1)
-		return cols, [][][]byte{cells}, "SELECT 1", nil
+		return cols, rows, "SELECT 1", nil
 	default:
 		return nil, nil, "", &pgErr{"XX000", fmt.Sprintf("unsupported query type: %s", q.Type)}
 	}
