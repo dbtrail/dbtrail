@@ -65,24 +65,25 @@ func TestSQL_realWorkerAvg_2920(t *testing.T) {
 	}
 	for _, c := range []struct {
 		stmt string
-		// mine: no other rule refuses it, so the refusal is AvgVeto's.
-		mine bool
+		// why: no other rule refuses it, so the refusal is AvgVeto's, with
+		// this reason; "" when another rule refuses it first.
+		why string
 	}{
-		{"SELECT AVG(dc) FROM shop.av", true},
-		{"SELECT AVG(dbl) FROM shop.av", true},
-		{"SELECT AVG(s) FROM shop.av", false},
-		{"SELECT AVG(dt) FROM shop.av", false},
-		{"SELECT AVG(LENGTH(s)) FROM shop.av", false},
-		{"SELECT AVG(k) * 3 FROM shop.av", true},
-		{"SELECT id, AVG(k) a FROM shop.av GROUP BY id ORDER BY a", true},
-		{"SELECT id, AVG(k) FROM shop.av GROUP BY id HAVING AVG(k) > 1", true},
+		{"SELECT AVG(dc) FROM shop.av", readrouter.VetoAvgArgument},
+		{"SELECT AVG(dbl) FROM shop.av", readrouter.VetoAvgArgument},
+		{"SELECT AVG(s) FROM shop.av", ""},
+		{"SELECT AVG(dt) FROM shop.av", ""},
+		{"SELECT AVG(LENGTH(s)) FROM shop.av", ""},
+		{"SELECT AVG(k) * 3 FROM shop.av", readrouter.VetoAvgPlace},
+		{"SELECT id, AVG(k) a FROM shop.av GROUP BY id ORDER BY a", readrouter.VetoAvgPlace},
+		{"SELECT id, AVG(k) FROM shop.av GROUP BY id HAVING AVG(k) > 1", readrouter.VetoAvgPlace},
 	} {
 		_, err := run(c.stmt)
 		var refusal *sqlStarRefusal
 		switch {
 		case !errors.As(err, &refusal):
 			t.Errorf("%s: err = %v, want a refusal", c.stmt, err)
-		case c.mine && !strings.Contains(refusal.Message, readrouter.VetoAvgPlace):
+		case c.why != "" && !strings.Contains(refusal.Message, c.why):
 			t.Errorf("%s: refusal %q, want AvgVeto's", c.stmt, refusal.Message)
 		}
 	}
