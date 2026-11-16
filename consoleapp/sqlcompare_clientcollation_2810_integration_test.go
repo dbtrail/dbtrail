@@ -162,7 +162,14 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	// copyReadText is copyRead with a string literal, which the copy answers
 	// only under a collation that compares as it does.
 	const copyReadText = "SELECT side, dt FROM ev WHERE side > '0' ORDER BY k"
-	copyCollations := map[string]bool{"utf8mb4_0900_ai_ci": true, "utf8mb4_unicode_ci": true, "utf8mb4_uca1400_ai_ci": true}
+	// comparesAsCopy says the session on db compares literals as the copy
+	// is documented against (the port's own probe, its first four
+	// comparisons), whatever its collation is called: a MariaDB after 11.4
+	// gives a client that asks for utf8_general_ci utf8mb3_uca1400_ai_ci
+	// (character_set_collations), which does.
+	comparesAsCopy := func(db *sql.DB) bool {
+		return answerText(db, "SELECT CONCAT('a' = 'A', 'a' = 'á', 'ß' = 'ss', 'a' = 'ａ')") == "1111"
+	}
 	// The copy answers copyRead when the session the SOURCE gives this client
 	// sends utf8mb4 and reads the statement as utf8mb4 (the session
 	// read-back's rule), read from the direct connection. Its collation does
@@ -223,7 +230,7 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", label, copyRead, got, want)
 		}
-		if wantWho == "copy" && !copyCollations[liveSession[0]] {
+		if wantWho == "copy" && !comparesAsCopy(live) {
 			wantWho = "live"
 		}
 		got, want = answerText(port, copyReadText), answerText(live, copyReadText)
@@ -241,8 +248,11 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	// ASCII is MySQL's under any session already (#2533), so the character
 	// is put in a comment, which MySQL skips and the copy reads past: under
 	// utf8mb4 the copy answers that statement, so its refusal under utf8mb3
-	// is this rule's. utf8_unicode_ci compares as the copy does, so there a
-	// string literal is the copy's too; utf8_general_ci does not (#2836).
+	// is this rule's. A string literal is the copy's only under a session
+	// that compares as the copy does (#2836), read from the source
+	// ("literal"): utf8_unicode_ci does, utf8_general_ci does not on MySQL
+	// and on MariaDB up to 11.4, and a later MariaDB gives that client
+	// utf8mb3_uca1400_ai_ci, which does.
 	const (
 		emoNoText    = "SELECT side, k FROM emo ORDER BY k"
 		emoComment   = "SELECT side, k FROM emo /* \U0001F600 */ ORDER BY k"
@@ -251,20 +261,24 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	for _, c := range []struct{ collation, stmt, wantWho string }{
 		{"utf8mb4_unicode_ci", emoNoText, "copy"},
 		{"utf8mb4_unicode_ci", emoComment, "copy"},
-		{"utf8mb4_unicode_ci", asciiLiteral, "copy"},
+		{"utf8mb4_unicode_ci", asciiLiteral, "literal"},
 		{"utf8_general_ci", emoNoText, "copy"},
 		{"utf8_general_ci", emoComment, "live"},
-		{"utf8_general_ci", asciiLiteral, "live"},
+		{"utf8_general_ci", asciiLiteral, "literal"},
 		{"utf8_unicode_ci", emoNoText, "copy"},
 		{"utf8_unicode_ci", emoComment, "live"},
-		{"utf8_unicode_ci", asciiLiteral, "copy"},
+		{"utf8_unicode_ci", asciiLiteral, "literal"},
 	} {
 		port := openRaw(t, withCollation(portDSN, c.collation))
 		live := openRaw(t, withCollation(liveDSN, c.collation))
+		wantWho := c.wantWho
+		if wantWho == "literal" {
+			wantWho = map[bool]string{true: "copy", false: "live"}[comparesAsCopy(live)]
+		}
 		got, want := answerText(port, c.stmt), answerText(live, c.stmt)
 		t.Logf("%-20s port %-70.200s %s (source %s)", c.collation, got, c.stmt, answerText(live, session))
-		if who := map[bool]string{true: "copy", false: "live"}[strings.Contains(got, "copy|")]; who != c.wantWho {
-			t.Errorf("%s: %q answered by %s, want %s", c.collation, c.stmt, who, c.wantWho)
+		if who := map[bool]string{true: "copy", false: "live"}[strings.Contains(got, "copy|")]; who != wantWho {
+			t.Errorf("%s: %q answered by %s, want %s", c.collation, c.stmt, who, wantWho)
 		}
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", c.collation, c.stmt, got, want)

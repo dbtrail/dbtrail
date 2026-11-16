@@ -1214,7 +1214,12 @@ The decision, in order, for every statement:
    so the MariaDB client's default session gets the copy's answers to the
    statements with no string literal and no function that returns text,
    as under `utf8mb4_general_ci` (#2836); under `utf8mb3_unicode_ci`,
-   which compares as the copy does, the copy answers those too.
+   which compares as the copy does, the copy answers those too. MariaDB
+   after 11.4 (measured on 11.8 and 12.3; 11.4 keeps `utf8mb3_general_ci`)
+   gives a client that asks for `utf8mb3_general_ci` the collation
+   `utf8mb3_uca1400_ai_ci` instead (`character_set_collations`), which
+   compares as the copy does, so there the copy answers that client's
+   statements with a string literal too.
 
    Not covered: the character set MySQL reads the statement's bytes in,
    `character_set_client`, is not read back. It moves with the other two
