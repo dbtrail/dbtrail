@@ -52,7 +52,7 @@ const lengthTable = "CREATE TABLE ln (id INT NOT NULL PRIMARY KEY, k INT, side V
 	"b VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, cb CHAR(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, " +
 	"m3 VARCHAR(16) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin, l VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_bin, " +
 	"vt VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, bn BINARY(4), js JSON, " +
-	"asc1 VARCHAR(16) CHARACTER SET ascii, u3 VARCHAR(16) CHARACTER SET utf8)"
+	"asc1 VARCHAR(16) CHARACTER SET ascii, u3 VARCHAR(16) CHARACTER SET utf8 COLLATE utf8_bin)"
 
 // lengthRows is one side's rows: live is what is inserted into the source,
 // copy is what the copy holds (a CHAR as MySQL reads it back, without its
