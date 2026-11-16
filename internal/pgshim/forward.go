@@ -59,6 +59,20 @@ type Forward struct {
 	// Timeout bounds each wait for the source's answer, as the port's own
 	// cap bounds a statement on the copy; 0 for none.
 	Timeout time.Duration
+	// Barred, when set, is asked before every statement: a reason it
+	// returns sends nothing to the source, as if the server had no
+	// forwarding account. It is how a host keeps what its views hide (rows,
+	// tables or columns a server's rules hide) from being read on the
+	// source, where those rules do not apply.
+	Barred func() string
+}
+
+// barred is why nothing may be sent to the source now, "" when it may.
+func (f *Forward) barred() string {
+	if f == nil || f.Barred == nil {
+		return ""
+	}
+	return f.Barred()
 }
 
 // Timeouts toward the source. Variables so a test can shorten them.
@@ -126,7 +140,25 @@ type upstream struct {
 // forwarding reports whether this connection can send statements to its
 // source.
 func (s *session) forwarding() bool {
+	return s.hasForwardAccount() && s.bound.Forward.barred() == ""
+}
+
+// hasForwardAccount reports whether the server has a forwarding account,
+// whether or not anything may be sent with it now.
+func (s *session) hasForwardAccount() bool {
 	return s.bound != nil && s.bound.Forward != nil && s.bound.Forward.DSN != ""
+}
+
+// leaveBarredSource drops the connection to the source when nothing may be
+// sent there any more (Forward.Barred: a rule saved while it was open): a
+// block open on it fails, and only its ROLLBACK is answered.
+func (s *session) leaveBarredSource() {
+	if s.up == nil || !s.hasForwardAccount() {
+		return
+	}
+	if why := s.bound.Forward.barred(); why != "" {
+		s.loseSource(why)
+	}
 }
 
 // pinned reports whether the client's transaction block lives on the source.
@@ -135,6 +167,13 @@ func (s *session) pinned() bool { return s.up != nil && s.up.inTx }
 // source returns the connection to the source, opening it when there is
 // none.
 func (s *session) source() (*upstream, *pgErr) {
+	// Every path to the source comes through here: whatever way a statement
+	// took, nothing reaches a source the host bars (Forward.Barred), and a
+	// connection open on it when that changed is dropped.
+	if why := s.bound.Forward.barred(); why != "" {
+		s.loseSource(why)
+		return nil, &pgErr{"0A000", "this statement is answered by the source, and nothing is sent there: " + why}
+	}
 	if s.up != nil {
 		return s.up, nil
 	}
@@ -807,6 +846,7 @@ func (s *session) followSourceStatus(up *upstream, tx byte) {
 // a block the client opens lives on the source until it ends. tag, when not
 // empty, is the command tag the source answered, which the client is given.
 func (s *session) forwardTxControl(qstr string, cmd *sessionCmd) (tag string, perr *pgErr) {
+	s.leaveBarredSource()
 	if !s.forwarding() {
 		return "", nil
 	}

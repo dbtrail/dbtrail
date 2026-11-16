@@ -37,6 +37,7 @@ const (
 	// The copy answered.
 	ReasonAnswersTheSame   = "answers_the_same"   // everything in it answers on the copy as on PostgreSQL
 	ReasonNoForwardAccount = "no_forward_account" // the server has no forwarding account: the copy answers alone
+	ReasonHiddenRules      = "hidden_rules"       // the server hides tables or columns: nothing is sent to its source
 	ReasonCopyCommand      = "copy_command"       // a command of the copy's own (SHOW TABLES, DESCRIBE)
 
 	// The source answered.
@@ -103,6 +104,9 @@ func CopyScreen(stmt string, types map[string][]string) string {
 // route decides which side answers a statement. side "" is a statement
 // neither side runs: the port answers it itself, or refuses it.
 func (s *session) route(c classified, qstr string) routeDecision {
+	// A rule saved while a block was open on the source: that block fails
+	// here, before another statement can read there.
+	s.leaveBarredSource()
 	switch c.kind {
 	case kindRefused:
 		if s.forwarding() && c.perr == catalogRefusal {
@@ -111,6 +115,9 @@ func (s *session) route(c classified, qstr string) routeDecision {
 		return routeDecision{}
 	case kindFree:
 		if !s.forwarding() {
+			if s.hasForwardAccount() {
+				return routeDecision{RouteCopy, ReasonHiddenRules}
+			}
 			return routeDecision{RouteCopy, ReasonNoForwardAccount}
 		}
 		if s.pinned() {

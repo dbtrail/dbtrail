@@ -57,6 +57,10 @@ type pgRouterServerNumbers struct {
 	// Statements is the per-statement table, present only with
 	// StatementTable.
 	Statements *console.RouterStatementTable `json:"statements,omitempty"`
+	// ForwardingOff says why nothing is sent to this server's source though
+	// it has a forwarding account (it hides tables or columns), as its last
+	// statement found; absent when statements may go there.
+	ForwardingOff string `json:"forwarding_off,omitempty"`
 }
 
 // pgRouteStats is the tally.
@@ -73,6 +77,7 @@ type pgRouteTally struct {
 	answers               map[string]*pgRouteAnswers
 	rows                  map[pgShapeKey]*pgShapeRow
 	notCounted            uint64
+	barred                string
 }
 
 type pgRouteAnswers struct {
@@ -167,6 +172,24 @@ func (r *pgRouteStats) note(id string, n pgshim.RouteNote) {
 	row.reasons[n.Reason]++
 }
 
+// setBarred keeps why nothing is sent to server id's source, "" for nothing.
+func (r *pgRouteStats) setBarred(id, why string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := r.perServer[id]
+	if t == nil {
+		if why == "" {
+			return
+		}
+		t = &pgRouteTally{reasons: map[string]uint64{}, answers: map[string]*pgRouteAnswers{}}
+		r.perServer[id] = t
+	}
+	t.barred = why
+}
+
 // forServer is the callback a connection of server id is bound with.
 func (r *pgRouteStats) forServer(id string) func(pgshim.RouteNote) {
 	if r == nil {
@@ -184,7 +207,7 @@ func (r *pgRouteStats) doc(listen string) pgRouterStatusDoc {
 		Servers: map[string]pgRouterServerNumbers{}}
 	for id, t := range r.perServer {
 		n := pgRouterServerNumbers{Copy: t.copy, Source: t.source, Refused: t.refused,
-			Reasons: maps.Clone(t.reasons), Answers: map[string]console.RouteAnswers{}}
+			Reasons: maps.Clone(t.reasons), Answers: map[string]console.RouteAnswers{}, ForwardingOff: t.barred}
 		for side, a := range t.answers {
 			n.Answers[side] = a.dto()
 		}

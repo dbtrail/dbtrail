@@ -51,6 +51,9 @@ type pgExtEnv struct {
 	eventAt   time.Time
 	// indexDSN is the server's index, for a test that adds more servers.
 	indexDSN string
+	// routes is the port's tally of which side answered each statement
+	// (#2770), with its per-statement table.
+	routes *pgRouteStats
 }
 
 func startPGExtPort(t *testing.T, ctx context.Context) pgExtEnv {
@@ -159,7 +162,8 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	}
 	t.Cleanup(runner.Close)
 	srv.RefreshFollowedFiles()
-	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard, tls: tlsConfig}
+	routes := newPGRouteStats(time.Now(), true)
+	router := &pgRouterPort{srv: srv, addr: freeAddr(t), maxConns: 32, poll: 20 * time.Millisecond, out: io.Discard, tls: tlsConfig, routes: routes}
 	if fx.sources > 0 {
 		router.sources = newPGSourceSlots(fx.sources)
 	}
@@ -169,7 +173,7 @@ func startPGPortFor(t *testing.T, ctx context.Context, tlsConfig *tls.Config, fx
 	t.Cleanup(func() { stopPort(); <-served })
 	waitUntil(t, "the port to open", func() bool { return router.listening() != "" })
 	host, portNum, _ := net.SplitHostPort(router.listening())
-	return pgExtEnv{sourceDSN: baseDSN, host: host, port: portNum, owner: f.owner, srv: srv, serverID: ent.ID, eventAt: eventAt, indexDSN: dsn}
+	return pgExtEnv{sourceDSN: baseDSN, host: host, port: portNum, owner: f.owner, srv: srv, serverID: ent.ID, eventAt: eventAt, indexDSN: dsn, routes: routes}
 }
 
 func (e pgExtEnv) portDSN() string {

@@ -773,7 +773,8 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 				return nil, &pgshim.Error{Code: "57P03", Message: "the server's forwarding account changed while connecting; reconnect"}
 			}
 			closers = append(closers, untrack)
-			bound.Forward = &pgshim.Forward{DSN: fwdDSN, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout}
+			bound.Forward = &pgshim.Forward{DSN: fwdDSN, Acquire: sources.acquire, Limit: sources.limit(), Timeout: timeout,
+				Barred: pgForwardBarred(tgt.ID, tgt.TimeTravelRefusal, routes, logger)}
 		case fwdRefused != "":
 			bound.Forward = &pgshim.Forward{Refused: fwdRefused}
 		}
@@ -821,5 +822,42 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			})
 		}
 		return bound, nil
+	}
+}
+
+// pgHiddenBarred is why nothing is sent to the source of a server that hides
+// tables or columns (#2770): the rules are applied by the copy's views, and a
+// statement run on the source reads past them. A check of the forwarding
+// account's grants could not settle it: a view runs with its owner's rights,
+// as a SECURITY DEFINER function does, and a role's grants are not all in
+// sight, so an account that reads none of the hidden tables itself can still
+// reach them.
+const pgHiddenBarred = "this server hides tables or columns, which its source would not hide, so the PostgreSQL port sends nothing to the source for it: the copy answers alone"
+
+// pgBarredSaid is, per server id, the last reason nothing is sent to its
+// source that was logged, so each one is logged once.
+var pgBarredSaid sync.Map
+
+// pgForwardBarred is pgshim.Forward.Barred for server id: refusal is the
+// server's own gate on what reads past its views (console.FlashbackTarget.
+// TimeTravelRefusal), asked per statement so a rule saved while a
+// connection is open governs its next one. Rules that cannot be read bar it
+// too. A change is logged once and shown in the port's status.
+func pgForwardBarred(id string, refusal func() string, routes *pgRouteStats, logger *slog.Logger) func() string {
+	return func() string {
+		why := ""
+		if refusal != nil && refusal() != "" {
+			why = pgHiddenBarred
+		}
+		if prev, _ := pgBarredSaid.Load(id); prev != why {
+			pgBarredSaid.Store(id, why)
+			if why != "" {
+				logger.Warn("PostgreSQL router: nothing is sent to this server's source", "server", id, "reason", why)
+			} else if prev != nil {
+				logger.Info("PostgreSQL router: this server's source answers again what the copy does not", "server", id)
+			}
+		}
+		routes.setBarred(id, why)
+		return why
 	}
 }

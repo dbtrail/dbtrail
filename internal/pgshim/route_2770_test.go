@@ -288,6 +288,9 @@ func TestCopyFallback_reasons(t *testing.T) {
 // 08001 for was sent there.
 type fallbackLogin struct {
 	forward bool
+	// barred bars the source (Forward.Barred), as a server that hides
+	// tables or columns does.
+	barred  bool
 	mu      sync.Mutex
 	notes   []RouteNote
 }
@@ -311,8 +314,11 @@ func (l *fallbackLogin) login(_ context.Context, _, _ string, password *Password
 		defer l.mu.Unlock()
 		l.notes = append(l.notes, n)
 	}}
-	if l.forward {
+	if l.forward || l.barred {
 		b.Forward = &Forward{DSN: "postgres://fwd:pw@127.0.0.1:1/db?sslmode=disable&connect_timeout=2"}
+	}
+	if l.barred {
+		b.Forward.Barred = func() string { return "it hides tables" }
 	}
 	return b, nil
 }
@@ -329,8 +335,9 @@ func (l *fallbackLogin) last() RouteNote {
 func TestRoute_aStatementTheCopyDoesNotAnswerGoesToTheSource(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for _, forward := range []bool{false, true} {
-		l := &fallbackLogin{forward: forward}
+	for _, mode := range []string{"none", "forward", "barred"} {
+		forward := mode == "forward"
+		l := &fallbackLogin{forward: forward, barred: mode == "barred"}
 		addr := serveAddrCfg(t, Config{Login: l.login})
 		c, err := pgconn.Connect(ctx, fmt.Sprintf("host=%s port=%s user=orders password=%s sslmode=disable", hostOf(addr), portOf(addr), portPassword))
 		if err != nil {
@@ -351,7 +358,7 @@ func TestRoute_aStatementTheCopyDoesNotAnswerGoesToTheSource(t *testing.T) {
 		check := func(what string, got, want outcome) {
 			t.Helper()
 			if got != want {
-				t.Errorf("forward=%v %s: %+v, want %+v", forward, what, got, want)
+				t.Errorf("%s %s: %+v, want %+v", mode, what, got, want)
 			}
 		}
 		simple := func(stmt string) outcome {
@@ -374,6 +381,22 @@ func TestRoute_aStatementTheCopyDoesNotAnswerGoesToTheSource(t *testing.T) {
 			check("extended: a table the copy does not hold", extended("SELECT * FROM missing"), outcome{"08001", RouteSource, ReasonTableNotOnCopy})
 			check("extended: now()", extended("SELECT now()"), outcome{"08001", RouteSource, ReasonVeto})
 			check("extended: a read the copy answers", extended("SELECT n FROM t"), outcome{"", RouteCopy, ReasonAnswersTheSame})
+		} else if mode == "barred" {
+			// Nothing reaches the source (no 08001): the copy's own answer or
+			// error, a transaction block included.
+			check("a table the copy does not hold", simple("SELECT * FROM missing"), outcome{"42P01", RouteCopy, ReasonHiddenRules})
+			check("now()", simple("SELECT now()"), outcome{"", RouteCopy, ReasonHiddenRules})
+			check("extended: a table the copy does not hold", extended("SELECT * FROM missing"), outcome{"42P01", RouteCopy, ReasonHiddenRules})
+			if _, err := c.Exec(ctx, "BEGIN").ReadAll(); err != nil {
+				t.Errorf("barred: BEGIN: %v, want it answered by the port", err)
+			}
+			check("in a block", simple("SELECT now()"), outcome{"", RouteCopy, ReasonHiddenRules})
+			if _, err := c.Exec(ctx, "ROLLBACK").ReadAll(); err != nil {
+				t.Errorf("barred: ROLLBACK: %v", err)
+			}
+			if _, err := c.Exec(ctx, "SELECT relname FROM pg_class WHERE relkind = 'v'").ReadAll(); code(err) != "0A000" {
+				t.Errorf("barred: a catalog statement the copy does not answer: %v, want the port's refusal", err)
+			}
 		} else {
 			// As before: the copy's own answer or error.
 			check("a table the copy does not hold", simple("SELECT * FROM missing"), outcome{"42P01", RouteCopy, ReasonNoForwardAccount})
@@ -382,7 +405,7 @@ func TestRoute_aStatementTheCopyDoesNotAnswerGoesToTheSource(t *testing.T) {
 			check("extended: a table the copy does not hold", extended("SELECT * FROM missing"), outcome{"42P01", RouteCopy, ReasonNoForwardAccount})
 		}
 		if st := c.TxStatus(); st != 'I' {
-			t.Errorf("forward=%v: the connection is left in status %c", forward, st)
+			t.Errorf("%s: the connection is left in status %c", mode, st)
 		}
 	}
 }

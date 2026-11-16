@@ -376,6 +376,7 @@ func sameShape(st *preparedStatement, fields []pgproto3.FieldDescription, noData
 
 // describePortalOnSource answers Describe of a portal bound on the source.
 func (s *session) describePortalOnSource(p *portal) {
+	s.leaveBarredSource()
 	up := s.up
 	if up == nil {
 		s.extFail(&pgErr{"08006", "the connection to the source was lost (" + s.upLost + "); reconnect"})
@@ -398,6 +399,7 @@ func (s *session) describePortalOnSource(p *portal) {
 
 // executeOnSource answers Execute of a portal bound on the source.
 func (s *session) executeOnSource(p *portal, maxRows uint32) {
+	s.leaveBarredSource()
 	up := s.up
 	if up == nil {
 		s.extFail(&pgErr{"08006", "the connection to the source was lost (" + s.upLost + "); reconnect"})
