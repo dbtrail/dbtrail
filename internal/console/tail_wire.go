@@ -72,6 +72,22 @@ func withTailsFor(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, tailsCtxKey{}, id)
 }
 
+type seenFloorKey struct{}
+
+// withSeenFloor marks ctx with the highest index event id an earlier answer
+// on the copy of the same connection held every event through.
+func withSeenFloor(ctx context.Context, id uint64) context.Context {
+	if id == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, seenFloorKey{}, id)
+}
+
+func seenFloor(ctx context.Context) uint64 {
+	id, _ := ctx.Value(seenFloorKey{}).(uint64)
+	return id
+}
+
 func tailsFor(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(tailsCtxKey{}).(string)
 	return id, ok && id != ""
@@ -144,13 +160,24 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 		return nil
 	}
 	old := s.tails.by[id]
+	capturesKey := s.tailCapturesKey(id)
 	if old != nil {
-		if src, ok := old.src.(*indexTailSource); ok && src.b == b {
+		// The same index connection, not the same bundle: an edit of the
+		// server that leaves its index alone (its application login, a
+		// setting) makes a new bundle over the same connection
+		// (rebuildDerived), and a keeper replaced for it started with no
+		// tails, so every statement read the snapshot alone, minutes old,
+		// until they were built again. What capture records is part of it:
+		// a tail of a table capture no longer records would claim changes
+		// it cannot see.
+		if src, ok := old.src.(*indexTailSource); ok && src.b.db == b.db && src.capturesKey == capturesKey {
 			s.tails.mu.Unlock()
 			return old
 		}
 	}
-	k := newTailKeeper(newIndexTailSource(s, b).capturing(captures), os.TempDir(), tailBudgetFromEnv(), tailKeepOld, tailIdle)
+	src := newIndexTailSource(s, b).capturing(captures)
+	src.capturesKey = capturesKey
+	k := newTailKeeper(src, os.TempDir(), tailBudgetFromEnv(), tailKeepOld, tailIdle)
 	k.pub.auto = true
 	if s.tails.by == nil {
 		s.tails.by = map[string]*tailKeeper{}
@@ -186,6 +213,16 @@ func (s *Server) tailCaptures(id string) (func(schema, table string) bool, bool)
 	}
 	filters := cliutil.BuildIndexFilters(e.Schemas, "")
 	return filters.Matches, true
+}
+
+// tailCapturesKey is what tailCaptures decides from, for telling one
+// decision from another.
+func (s *Server) tailCapturesKey(id string) string {
+	if s.tailCapturesHook != nil || s.cm == nil || s.cm.reg == nil {
+		return ""
+	}
+	e, _ := s.cm.reg.Get(id)
+	return e.Schemas
 }
 
 // statementTails returns tables with the tails of read, the tables a
@@ -228,6 +265,81 @@ func (s *Server) statementTailsMark(ctx context.Context, k *tailKeeper, tables, 
 		}
 	}
 	return out, through, throughID, true
+}
+
+// freshTailsWait is how long a fresh-mode statement on the port waits for
+// a table's tail that is on its way (being built over a new snapshot, the
+// first update after the follower started, an update that failed), counted
+// from the statement's first look. Past it the statement does not read the
+// snapshot alone as if it were fresh: see statementTailsFresh.
+const freshTailsWait = 3 * time.Second
+
+// statementTailsFresh is statementTailsMark for fresh mode, where a
+// statement never answers from the snapshot alone without saying so. A table
+// whose tail is on its way is waited for, the follower woken, up to wait;
+// one whose tail is refused until the next snapshot (its key, its budget, a
+// definition that changed) is not, since no wait brings it. ok false comes
+// with missing, the reason for a client: the caller sends the statement to
+// MySQL (routing) or answers from the snapshot with it as a warning.
+func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable, wait time.Duration) (out []views.BaselineTable, through time.Time, throughID uint64, ok bool, missing string) {
+	deadline := time.Now().Add(wait)
+	for {
+		ch := k.nextPublish()
+		out, through, throughID, ok = s.statementTailsMark(ctx, k, tables, read)
+		if ok || len(read) == 0 {
+			return out, through, throughID, ok, ""
+		}
+		pub, _ := k.published(read)
+		refused := k.refusedOf(read)
+		pending, why := "", ""
+		for _, t := range read {
+			key := tailKey(t.Schema, t.Table)
+			if _, has := pub[key]; has {
+				continue
+			}
+			name := t.Schema + "." + t.Table
+			if r, no := refused[key]; no {
+				if why == "" {
+					why = name + " has no tail (" + r + ")"
+				}
+				continue
+			}
+			if pending == "" {
+				pending = name
+			}
+		}
+		if pending == "" && why != "" {
+			return tables, time.Time{}, 0, false, why
+		}
+		if pending == "" {
+			// Every table has a view, of two updates: the next publish has
+			// them at one instant.
+			pending = read[0].Schema + "." + read[0].Table
+		}
+		left := time.Until(deadline)
+		if left <= 0 || ctx.Err() != nil || k.life.Err() != nil {
+			return tables, time.Time{}, 0, false, "the newest captured changes of " + pending + " are not ready yet"
+		}
+		k.wakeFollower()
+		t := time.NewTimer(left)
+		select {
+		case <-ch:
+		case <-t.C:
+		case <-ctx.Done():
+		case <-k.life.Done():
+		}
+		t.Stop()
+	}
+}
+
+// freshSnapshotNote is the warning of an answer that fresh mode had to give
+// from the snapshot alone, on a connection that does not route.
+func freshSnapshotNote(missing string, snapshot time.Time) string {
+	at := "its last snapshot"
+	if !snapshot.IsZero() {
+		at = "its snapshot of " + snapshot.UTC().Format("2006-01-02 15:04:05 UTC")
+	}
+	return "Answered from " + at + " without the newest captured changes: " + missing + "."
 }
 
 // tailsSayTheInstant is whether a statement whose tables all read tails

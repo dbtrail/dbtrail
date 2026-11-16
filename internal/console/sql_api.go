@@ -1222,6 +1222,9 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// printNote is the warning the MySQL port without routing sends with
 	// the answer (sqlFixedPrintNote, #2829); "" when none.
 	var printNote string
+	// freshNote says a fresh-mode answer came from the snapshot alone, and
+	// why (statementTailsFresh); "" when it did not.
+	var freshNote string
 	// dateScales are how MySQL declares the answer's date and time columns
 	// (sqlDateScales, #2849), set once the views are decided.
 	var dateScales []sqlsandbox.DateScale
@@ -1297,9 +1300,29 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			// would build a tail for every table of the copy.
 			if tails != nil && narrowed.OnlyViews != nil {
 				tailsStart := time.Now()
-				narrowed.Baselines, tailThrough, tailThroughID, allTailed = s.statementTailsMark(ctx, tails, narrowed.Baselines, readTables)
+				var missing string
+				untailed := narrowed.Baselines
+				narrowed.Baselines, tailThrough, tailThroughID, allTailed, missing = s.statementTailsFresh(ctx, tails, narrowed.Baselines, readTables, freshTailsWait)
+				if missing == "" && allTailed && tailThroughID != 0 && tailThroughID < seenFloor(ctx) {
+					// Never an answer older than one this connection already
+					// had: its last answer on the copy read the index
+					// further than these tails do.
+					allTailed, missing = false, "the copy's newest version is older than an answer this connection already had"
+					narrowed.Baselines, tailThrough, tailThroughID = untailed, time.Time{}, 0
+				}
 				parent.Tails += time.Since(tailsStart)
 				parent.TailsRan = true
+				if missing != "" && !sqlMentionsEvents(statement) {
+					// Fresh mode never answers from the snapshot alone
+					// without saying so. Under routing MySQL answers; on a
+					// connection that does not route, the snapshot answers
+					// with the reason as a warning.
+					if sess.StrictStar {
+						viewsRefusal = &sqlChangedRefusal{"fresh mode: " + missing}
+						return "", viewsRefusal
+					}
+					freshNote = freshSnapshotNote(missing, in.BaselineSnapshot)
+				}
 				allTailed = tailsSayTheInstant(statement, allTailed)
 			}
 			// The server's lag limit (#2777), once the tables and their tails
@@ -1475,7 +1498,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	res.DateScales = dateScales
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,
-		PrintNote: printNote}, nil
+		PrintNote: printNote, OlderCopyNote: freshNote}, nil
 }
 
 // sqlWantedViews decides which of the copy's views a statement needs, from
