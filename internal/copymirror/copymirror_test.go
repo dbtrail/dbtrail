@@ -1293,20 +1293,21 @@ func TestSync_aSourceThatGoesSilentIsGivenUp(t *testing.T) {
 }
 
 // A slow download that keeps arriving is not a silent one, and one that
-// goes quiet for longer than the stall timeout between two bytes is. Both run
+// goes quiet for longer than the stall timeout between two bytes, after some
+// have come, is. Both run
 // on a clock of the test's own: each byte comes after a fixed step of it, so
 // the outcome does not depend on how busy the machine is (on the wall clock,
 // a loaded CI machine stretched a 20ms pause past a 200ms timeout).
 func TestSync_slowIsNotSilent(t *testing.T) {
 	const stall = time.Hour // on the test's clock; the wall clock never gets there
-	for name, tc := range map[string]struct {
-		step   time.Duration
-		silent bool
-	}{
+	for name, quietAt := range map[string]int{
 		// 64 bytes at 0.9 of the timeout each: far longer in all than the
 		// timeout, never silent for as long.
-		"slow but never silent for the timeout": {step: stall * 9 / 10},
-		"silent for longer than the timeout":    {step: stall * 11 / 10, silent: true},
+		"slow but never silent for the timeout": -1,
+		// The same, until 1.1 of the timeout passes before byte 11. The
+		// watch that gives up is one already pushed back by ten bytes, so a
+		// push back by more than the timeout would be caught here.
+		"silent for longer than the timeout after ten bytes": 10,
 	} {
 		t.Run(name, func(t *testing.T) {
 			src := newSource()
@@ -1315,14 +1316,16 @@ func TestSync_slowIsNotSilent(t *testing.T) {
 			cfg.StallTimeout = stall
 			clock := &stepClock{}
 			cfg.afterFunc = clock.afterFunc
-			cfg.Source = &slowSource{fakeSource: src, clock: clock, step: tc.step}
+			cfg.Source = &slowSource{fakeSource: src, clock: clock, step: stall * 9 / 10,
+				quietKey: t1 + "/shop/orders.parquet", quietAt: quietAt, quiet: stall * 11 / 10}
 			res, err := Sync(context.Background(), cfg)
 			if clock.started() == 0 {
 				t.Fatal("the stall watch never used the test's clock")
 			}
-			if tc.silent {
-				if !errors.Is(err, ErrSourceSilent) || !strings.Contains(err.Error(), "no bytes for") {
-					t.Fatalf("err = %v, want ErrSourceSilent with how long it waited", err)
+			if quietAt >= 0 {
+				if !errors.Is(err, ErrSourceSilent) || !strings.Contains(err.Error(), "no bytes for") ||
+					!strings.Contains(err.Error(), "after 10 of 64 bytes") {
+					t.Fatalf("err = %v, want ErrSourceSilent after 10 of 64 bytes, with how long it waited", err)
 				}
 				return
 			}
@@ -1396,11 +1399,14 @@ func (tm *stepTimer) Stop() bool {
 }
 
 // slowSource hands each body out a byte at a time, moving the clock by step
-// before each one.
+// before each one. The body of quietKey moves it by quiet instead before its
+// byte number quietAt (counted from 0; negative is never).
 type slowSource struct {
 	*fakeSource
-	clock *stepClock
-	step  time.Duration
+	clock       *stepClock
+	step, quiet time.Duration
+	quietKey    string
+	quietAt     int
 }
 
 func (s *slowSource) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -1408,19 +1414,30 @@ func (s *slowSource) Get(ctx context.Context, key string) (io.ReadCloser, error)
 	if err != nil {
 		return nil, err
 	}
-	return io.NopCloser(&dripReader{ctx: ctx, r: rc, clock: s.clock, step: s.step}), nil
+	d := &dripReader{ctx: ctx, r: rc, clock: s.clock, step: s.step, quietAt: -1}
+	if key == s.quietKey {
+		d.quietAt, d.quiet = s.quietAt, s.quiet
+	}
+	return io.NopCloser(d), nil
 }
 
 // dripReader ends when its request's context does, as a real body would.
 type dripReader struct {
 	ctx   context.Context
 	r     io.Reader
-	clock *stepClock
-	step  time.Duration
+	clock       *stepClock
+	step, quiet time.Duration
+	quietAt     int
+	reads       int
 }
 
 func (d *dripReader) Read(p []byte) (int, error) {
-	d.clock.advance(d.step)
+	step := d.step
+	if d.reads == d.quietAt {
+		step = d.quiet
+	}
+	d.reads++
+	d.clock.advance(step)
 	if err := d.ctx.Err(); err != nil {
 		return 0, err
 	}
