@@ -68,7 +68,11 @@ func (s *session) fallBackPortal(p *portal) (tried bool) {
 	if why == "" || p.bind == nil || p.sent != 0 || !s.canFallBack() || !isSelectLike(p.stmt.query) {
 		return false
 	}
-	p.stmt.fallback = why
+	s.logger.Debug("pgshim: the copy did not answer a statement; the source does", "reason", why)
+	if !transientFallback(why) {
+		// The statement's own reason: it stays with the source.
+		p.stmt.fallback = why
+	}
 	p.route = routeDecision{RouteSource, why}
 	s.portalToSource(p)
 	return true

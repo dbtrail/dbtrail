@@ -1053,9 +1053,9 @@ The source answers:
   `nullif`, `greatest`, `least`, `length`, `substring`, `trim`, `position`,
   `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
   `extract`, `date_part` and `date_trunc` of a year, month or day; the
-  operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `->>`, `LIKE`,
-  `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`, `ANY`, `EXISTS`, array
-  subscripts; `::date` and `CAST(... AS date)`; `DATE`, `TIMESTAMP`, `TIME` and
+  operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
+  (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,
+  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `DATE`, `TIMESTAMP`, `TIME` and
   `INTERVAL` literals; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
   `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
   `OFFSET`. Anything else goes to the source. Some of what the harness found
@@ -1063,7 +1063,9 @@ The source answers:
   `numeric` (PostgreSQL keeps more decimals), `round()` of a
   `double precision` (it rounds a half to even), a division by a column or by
   zero (the copy answers NULL where PostgreSQL fails), `~` and `SIMILAR TO`
-  (the copy matched no row), `->` (PostgreSQL answers `json`), `::text` of a
+  (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
+  writes a nested value with spaces), a number with an exponent (a `numeric`
+  on PostgreSQL), `::text` of a
   float, `upper`, `lower` and `ILIKE` (PostgreSQL folds case by the database's
   character type), `COLLATE`, `AT TIME ZONE`, `FOR UPDATE`, `jsonb` operators,
   `generate_series` and every function the list does not name.
@@ -1078,8 +1080,9 @@ The source answers:
 - **What the copy cannot run, before the client is told anything**: a table
   the copy does not hold, a statement the copy refuses (a reserved word of its
   own dialect, a value it does not read, such as `NaN` in a numeric or
-  `24:00:00`), a result over the row cap, a copy that is busy, behind the
-  server's lag limit, or holding as many results as it keeps. A column of a
+  `24:00:00`), a copy that is busy or behind the server's lag limit. A
+  result over the port's row or size cap is still refused, as before: the
+  source would send it whole, past the caps. A column of a
   `numeric` declared without precision, which the copy writes with 18
   decimals, is sent to the source too.
 - **What is not a query**: `EXPLAIN`, cursors and savepoints outside a block,
@@ -1134,8 +1137,6 @@ The reasons, with the MySQL port's names where they mean the same:
 | source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
 | source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
 | source | `copy_queue_full`, `copy_wait_timeout` | the copy was busy |
-| source | `copy_results_held` | the port held as many results as it keeps |
-| source | `result_over_row_cap` | the copy's answer was over its row or cell cap |
 | refused | `read_only` | not a read |
 
 What the copy would answer and the source did not make faster is not decided

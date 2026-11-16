@@ -265,7 +265,6 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// Before anything is run (#2804): a statement whose result the port has
 	// no room to hold is refused here, not after the copy answered it.
 	if refusal := s.admitResult(); refusal != nil {
-		s.fallTo(ReasonCopyResultsHeld)
 		return nil, nil, nil, "", refusal
 	}
 	res, err := s.bound.Run(ctx, qstr, s.runOptions())
@@ -286,7 +285,6 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows
 		// for the whole answer.
-		s.fallTo(ReasonResultOverCap)
 		return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
 			"the result has more than %d rows, the most one statement returns on this port, and is not returned cut; add a LIMIT or narrow the statement",
 			len(res.Rows))}
@@ -300,7 +298,6 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		return nil, nil, nil, "", &pgErr{"0A000", fmt.Sprintf("column %q is a numeric the copy writes otherwise", col)}
 	}
 	if res.TruncatedCells > 0 {
-		s.fallTo(ReasonResultOverCap)
 		// Refused too. The copy cuts a cell past its cap and ends it with a
 		// marker, which a reader of text can see; here a cell is written
 		// again the way PostgreSQL writes its kind, and a cut bytea would
@@ -337,7 +334,6 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// taken while the statement ran. Before the notice and the audit
 	// record: a refused answer served nobody.
 	if refusal := s.holdResult(rows); refusal != nil {
-		s.fallTo(ReasonCopyResultsHeld)
 		return nil, nil, nil, "", refusal
 	}
 	if res.Note != "" {

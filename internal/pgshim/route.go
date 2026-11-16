@@ -3,6 +3,7 @@ package pgshim
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -51,8 +52,6 @@ const (
 	ReasonCopyAgeUnknown    = "copy_age_unknown"    // the copy's lag cannot be told, and the server has a limit
 	ReasonCopyQueueFull     = "copy_queue_full"     // every slot of the copy was taken, and the line was full
 	ReasonCopyWaitTimeout   = "copy_wait_timeout"   // it waited for a slot of the copy as long as it may
-	ReasonCopyResultsHeld   = "copy_results_held"   // the port already holds as many results as it keeps
-	ReasonResultOverCap     = "result_over_row_cap" // the copy's answer was over its row or cell cap
 	ReasonCopyColumnsDiffer = "copy_columns_differ" // the copy answered with a column it writes otherwise
 	ReasonCatalogNotOnCopy  = "catalog_not_on_copy" // a catalog statement the copy does not answer
 
@@ -221,11 +220,24 @@ func (s *session) copyFallback(err error, perr *pgErr) string {
 	case errors.Is(err, sqlsandbox.ErrBusy):
 		return ReasonCopyQueueFull
 	case errors.Is(err, sqlsandbox.ErrResultTooLarge):
-		return ReasonResultOverCap
+		// Refused for its size, as before: the source would send it whole,
+		// past every cap the port keeps.
+		return ""
 	case perr.code == "42P01":
 		return ReasonTableNotOnCopy
 	}
 	return ReasonCopyRefused
+}
+
+// transientFallback reports whether a reason a statement went to the
+// source is the moment's (a busy or lagging copy), which must not keep a
+// prepared statement on the source for good.
+func transientFallback(reason string) bool {
+	switch reason {
+	case ReasonCopyBehindSource, ReasonCopyAgeUnknown, ReasonCopyQueueFull, ReasonCopyWaitTimeout:
+		return true
+	}
+	return false
 }
 
 // unsizedNumeric is the copy's type for a numeric declared without
@@ -279,7 +291,9 @@ func lexSQL(q string) (toks []rtToken, why string) {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f':
 			i++
 		case c == '-' && i+1 < len(q) && q[i+1] == '-':
-			for i < len(q) && q[i] != '\n' {
+			// PostgreSQL ends it at a carriage return as at a newline, and so
+			// does the copy's engine: what follows one is read.
+			for i < len(q) && q[i] != '\n' && q[i] != '\r' {
 				i++
 			}
 		case c == '/' && i+1 < len(q) && q[i+1] == '*':
@@ -385,6 +399,11 @@ func lexSQL(q string) (toks []rtToken, why string) {
 				// 0x1F, 1_000, 10abc: another base, separators, or a
 				// number run into a name.
 				return toks, "a number written in another form"
+			}
+			if strings.ContainsAny(q[i:j], "eE") || len(q[i:j]) > 18 {
+				// A numeric on PostgreSQL, a DOUBLE on the copy (1e-1 * 3 is
+				// 0.3 there and 0.30000000000000004 here).
+				return toks, "a number with an exponent or of more than 18 digits"
 			}
 			toks = append(toks, rtToken{rtNumber, q[i:j]})
 			i = j
@@ -523,6 +542,12 @@ var vetoWords = map[string]string{
 	"row":         "ROW",
 	"values":      "VALUES",
 	"some":        "SOME",
+	// The copy's own syntax, which PostgreSQL refuses.
+	"qualify":    "QUALIFY",
+	"asof":       "an ASOF join",
+	"positional": "a POSITIONAL join",
+	"anti":       "an ANTI join",
+	"semi":       "a SEMI join",
 	// The clock and the session: the copy's clock is not the source's, and
 	// its data is older than the moment they read.
 	"current_date": "CURRENT_DATE", "current_time": "CURRENT_TIME", "current_timestamp": "CURRENT_TIMESTAMP",
@@ -536,7 +561,7 @@ var vetoWords = map[string]string{
 // where PostgreSQL fails, and divides a numeric to another scale.
 var copyOps = map[string]bool{
 	"=": true, "<>": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true,
-	"+": true, "-": true, "*": true, "||": true, "->>": true,
+	"+": true, "-": true, "*": true, "||": true,
 	"(": true, ")": true, "[": true, "]": true, ",": true, ";": true, ".": true,
 }
 
@@ -564,6 +589,10 @@ func typeIsFloat(t string) bool { return t == "DOUBLE" || t == "FLOAT" || t == "
 // types by name (columnTypes); nil when they are not known, and then every
 // name may be a text column.
 func screenForCopy(in []rtToken, types map[string][]string) string {
+	if why := aliasUse(in); why != "" {
+		return why
+	}
+	types = withoutAliases(in, types)
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
 	toks := make([]rtToken, 0, len(in))
@@ -614,9 +643,12 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 		}
 		return false
 	}
+	// anyText: the statement may hold a text value somewhere, which a
+	// position or an alias in ORDER BY can stand for: a text column or
+	// literal, a parameter, or an expression that makes text of anything.
 	anyText := false
 	for _, t := range toks {
-		if textish(t) {
+		if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
 			anyText = true
 			break
 		}
@@ -698,7 +730,7 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 			core = append(core, t)
 		}
 		for _, t := range core {
-			if textish(t) || t.kind == rtParam {
+			if textish(t) || t.kind == rtParam || t.kind == rtOp && t.text == "||" || t.kind == rtWord && textMakers[t.text] {
 				return true
 			}
 		}
@@ -758,7 +790,18 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 		if lit.kind != rtString && lit.kind != rtParam && lit.kind != rtNumber {
 			return false
 		}
+		if lit.kind == rtString && zonedLiteral.MatchString(lit.text) && col.kind == rtWord {
+			// A time zone in the text: PostgreSQL drops it for a timestamp
+			// column, the copy applies it.
+			return false
+		}
 		return col.kind == rtWord && all(col.text, func(ty string) bool { return !typeIsText(ty) })
+	}
+	// textCol: a column that is text wherever its name is found.
+	textCol := func(t rtToken) bool { return t.kind == rtWord && all(t.text, typeIsText) }
+	// timeCol: a column that is a timestamp without a time zone.
+	timeCol := func(t rtToken) bool {
+		return t.kind == rtWord && all(t.text, func(ty string) bool { return ty == "TIMESTAMP" })
 	}
 	// operandText: an operand next to a comparison may be text.
 	operandText := func(t rtToken) bool {
@@ -820,7 +863,25 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 				if !concatOK(prev) || !concatOK(next) {
 					return "|| of a value the copy may write otherwise as text"
 				}
+			case "[":
+				// A subscript by a positive whole number, as measured: the copy
+				// counts a negative one from the end, PostgreSQL answers NULL.
+				if next.kind != rtNumber || strings.Contains(next.text, ".") || strings.Trim(next.text, "0") == "" || at(i+2).kind != rtOp || at(i+2).text != "]" {
+					return "an array subscript other than a positive whole number"
+				}
 			default:
+				if compareOps[t.text] {
+					// A text column against a number: PostgreSQL refuses it, the
+					// copy converts one of them.
+					if textCol(prev) && next.kind == rtNumber || textCol(next) && prev.kind == rtNumber {
+						return "a text column compared with a number"
+					}
+					// A time zone in a string compared with a timestamp column.
+					if timeCol(prev) && next.kind == rtString && zonedLiteral.MatchString(next.text) ||
+						timeCol(next) && prev.kind == rtString && zonedLiteral.MatchString(prev.text) {
+						return "a timestamp compared with a string that names a time zone"
+					}
+				}
 				if orderingOps[t.text] {
 					// Two parameters, or a parameter and a string, compare
 					// as text on PostgreSQL: nothing else gives them a type.
@@ -837,6 +898,12 @@ func screenForCopy(in []rtToken, types map[string][]string) string {
 				return what
 			}
 			switch {
+			case t.text == "like" && (next.kind == rtParam || next.kind == rtString && strings.Contains(next.text, `\`)):
+				// PostgreSQL's LIKE escapes with a backslash by default, the
+				// copy's has no escape.
+				return "a LIKE pattern with a backslash, or given as a parameter"
+			case t.text == "by" && next.kind == rtWord && next.text == "all":
+				return "ORDER BY ALL or GROUP BY ALL"
 			case t.text == "for" && next.kind == rtWord && (next.text == "update" || next.text == "share" || next.text == "no" || next.text == "key"):
 				return "FOR UPDATE or FOR SHARE"
 			case t.text == "order" && next.kind == rtWord && next.text == "by":
@@ -930,4 +997,99 @@ func (s *session) routeNote(stmt string, d routeDecision, took time.Duration, fa
 		return
 	}
 	s.bound.Routed(RouteNote{Statement: stmt, Side: d.side, Reason: d.reason, Took: took, Failed: failed})
+}
+
+// compareOps compare two values.
+var compareOps = map[string]bool{"=": true, "<>": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true}
+
+// textMakers are the functions that make text of their arguments, whatever
+// those are.
+var textMakers = map[string]bool{"concat": true, "string_agg": true, "substring": true, "trim": true}
+
+// zonedLiteral is a date and time written with a time zone: an offset, Z,
+// or a zone's name after the time.
+var zonedLiteral = regexp.MustCompile(`\d:\d\d(:\d\d(\.\d+)?)?\s*([+-]\d{1,2}(:?\d\d)?|[zZ]|[A-Za-z][A-Za-z_/+-]*)\s*$`)
+
+// aliasStop are the words that end a select item or a FROM item: never an
+// alias.
+var aliasStop = map[string]bool{
+	"from": true, "where": true, "group": true, "order": true, "having": true, "limit": true, "offset": true,
+	"join": true, "left": true, "right": true, "full": true, "inner": true, "outer": true, "cross": true, "on": true,
+	"using": true, "union": true, "intersect": true, "except": true, "and": true, "or": true, "not": true,
+	"as": true, "by": true, "asc": true, "desc": true, "nulls": true, "first": true, "last": true, "select": true,
+	"distinct": true, "all": true, "is": true, "null": true, "true": true, "false": true, "in": true, "like": true,
+	"between": true, "case": true, "when": true, "then": true, "else": true, "end": true, "with": true, "over": true,
+	"filter": true, "partition": true, "window": true,
+}
+
+// aliases are the names a statement gives with AS, or right after a value
+// in its select list (SELECT name n, ...): each stands for an expression,
+// whatever column shares its name. at are their positions.
+func aliases(toks []rtToken) (names map[string]bool, at map[int]bool) {
+	names, at = map[string]bool{}, map[int]bool{}
+	for i, t := range toks {
+		if t.kind != rtWord || aliasStop[t.text] || i == 0 {
+			continue
+		}
+		prev := toks[i-1]
+		// CAST(x AS date) names a type, not an alias.
+		isAlias := prev.kind == rtWord && prev.text == "as" && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ")")
+		if !isAlias && i+1 < len(toks) {
+			next := toks[i+1]
+			ends := next.kind == rtOp && next.text == "," || next.kind == rtWord && next.text == "from"
+			value := prev.kind == rtString || prev.kind == rtNumber || prev.kind == rtParam ||
+				prev.kind == rtOp && (prev.text == ")" || prev.text == "]") || prev.kind == rtWord && !aliasStop[prev.text]
+			isAlias = ends && value
+		}
+		if isAlias {
+			names[t.text] = true
+			at[i] = true
+		}
+	}
+	return names, at
+}
+
+// withoutAliases is types without the names the statement gives as
+// aliases: a name that may stand for an expression is a name of unknown
+// type (SELECT name AS id ... ORDER BY id sorts text).
+func withoutAliases(toks []rtToken, types map[string][]string) map[string][]string {
+	names, _ := aliases(toks)
+	if types == nil || len(names) == 0 {
+		return types
+	}
+	out := make(map[string][]string, len(types))
+	for k, v := range types {
+		if !names[k] {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// aliasUse names an alias of the select list used in WHERE or HAVING, which
+// PostgreSQL refuses and the copy answers. A name followed by a dot is a
+// table's.
+func aliasUse(toks []rtToken) string {
+	names, at := aliases(toks)
+	if len(names) == 0 {
+		return ""
+	}
+	clause := ""
+	for i, t := range toks {
+		if t.kind != rtWord {
+			continue
+		}
+		switch t.text {
+		case "where", "having":
+			clause = t.text
+			continue
+		case "select", "from", "group", "order", "limit", "union", "intersect", "except":
+			clause = ""
+			continue
+		}
+		if clause != "" && names[t.text] && !at[i] && !(i+1 < len(toks) && toks[i+1].kind == rtOp && toks[i+1].text == ".") {
+			return fmt.Sprintf("the name %s, given in the select list, used in %s", t.text, strings.ToUpper(clause))
+		}
+	}
+	return ""
 }

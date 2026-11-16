@@ -361,7 +361,7 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			return
 		}
 		cols, types, held, perr := s.describeStatement(st)
-		if st.fallback != "" && s.canFallBack() {
+		if perr == nil && st.fallback != "" && s.canFallBack() {
 			// The copy could not describe it (route.go): the source does.
 			s.describeOnSource(st)
 			s.noteIfFailed(st)
@@ -518,7 +518,10 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 		return columnNames(got), types, true, nil
 	}
 	perr = freeError(err, s.logger)
-	if why := s.copyFallback(err, perr); selectLike && why != "" {
+	if why := s.copyFallback(err, perr); selectLike && why != "" && !transientFallback(why) {
+		// The statement's own: it stays with the source. One the moment
+		// refused (a busy or lagging copy) fails its Describe, as before.
+		s.logger.Debug("pgshim: the copy cannot describe a statement; the source does", "reason", why, "code", perr.code, "err", perr.msg)
 		st.fallback = why
 		return nil, nil, false, nil
 	}
@@ -951,6 +954,7 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 // one that does not exist is not an error. Closing a statement closes the
 // portals made from it.
 func (s *session) handleClose(m *pgproto3.Close) {
+	s.leaveBarredSource()
 	switch m.ObjectType {
 	case 'S':
 		if st, ok := s.ext.stmts[m.Name]; ok {
@@ -993,6 +997,7 @@ func (s *session) closeStatement(name string) {
 // transaction block it ends the implicit transaction, and with it every
 // portal; then ReadyForQuery says the status.
 func (s *session) handleSync() error {
+	s.leaveBarredSource()
 	// The source's part of the batch ends first: its status is the block's.
 	s.syncOnSource()
 	s.ext.skip = false

@@ -167,6 +167,7 @@ func (s *session) handleSimpleQuery(qstr string) error {
 			// The copy did not answer it, and nothing was sent yet: the
 			// source answers instead (route.go).
 			s.fallback = ""
+			s.logger.Debug("pgshim: the copy did not answer a statement; the source does", "reason", why, "code", perr.code, "err", perr.msg)
 			s.releaseResult()
 			d = routeDecision{RouteSource, why}
 			ok := s.forwardSimple(qstr)
