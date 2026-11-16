@@ -859,8 +859,11 @@ psql "host=127.0.0.1 port=5433 dbname=<server id or name> user=app sslmode=requi
 ```
 
 The database name is the server's id or name; the username can be anything.
-The copy answers every statement, by PostgreSQL's rules. Nothing is sent to
-your PostgreSQL, and a statement that is not a read is refused.
+The copy answers reads, by PostgreSQL's rules. A transaction block a client
+opens runs on your PostgreSQL as the server's forwarding user, read-only, when
+one is set (`bintrail-console server forward-user`; see
+[docs/postgres.md](postgres.md#transactions-on-the-source-the-forwarding-user));
+without one, the copy answers alone. A statement that is not a read is refused.
 
 For another machine, open a tunnel, or widen the mapping to `"5433:5433"`
 behind a firewall: the port's password reads every server. If 5433 is taken

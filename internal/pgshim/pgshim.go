@@ -333,9 +333,18 @@ func commandLoop(be *pgproto3.Backend, sess *session) {
 	// port's result budget outlives it, a portal's kept rows included.
 	defer sess.releaseResult()
 	defer sess.dropPortals()
+	// The connection to the source, if one was opened, ends with the
+	// client's (forward.go).
+	defer sess.closeSource()
 	for {
 		msg, rerr := be.Receive()
 		if rerr != nil {
+			var big *pgproto3.ExceededMaxBodyLenErr
+			if errors.As(rerr, &big) {
+				// Said before the connection closes, not cut without a word:
+				// the rest of the message cannot be read past.
+				sendFatal(be, "54000", fmt.Sprintf("a message of %d bytes is larger than the %d MB this port takes in one statement; send a shorter one", big.ActualBodyLen, maxStatementMessage>>20))
+			}
 			return // client disconnect / read error
 		}
 		if sess.ext.skip {

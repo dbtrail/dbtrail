@@ -1291,16 +1291,21 @@ them, and a statement reads the newest version ready instead of waiting for
 the index. While an update is slow, the answers are older by as long as it
 takes.
 A statement reads every table at one moment, with every table's tail, so a
-join never pairs a row of now with a row of an hour ago. In fresh mode it
-never answers from the snapshot alone without saying so. When a table it
-reads has no tail yet (being built: the first statement over it, the first
-after a newer snapshot of it), the statement waits for it, up to 3 seconds,
-and the router brings it up to date at once instead of after its pause.
-When the tail is still not there, or the table cannot have one until its
-next snapshot, a statement on a connection that routes goes to your MySQL
-(counted as `copy_too_old` in the router's reasons), and one on a connection
-that does not route (`<server>@copy`, Engine Routing off) is answered from
-the snapshot with a warning that says so and why (`SHOW WARNINGS`). A table
+join never pairs a row of now with a row of an hour ago. When a table it
+reads has its tail on the way (being built: the first statement over it,
+the first after a newer snapshot of it), the statement waits for it, up to 3
+seconds, and the router brings it up to date at once instead of after its
+pause. When the tail is still not there after that, a statement on a
+connection that routes goes to your MySQL (counted as `copy_too_old` in the
+router's reasons), and one on a connection that does not route
+(`<server>@copy`, Engine Routing off) is answered from the snapshot with a
+warning that says so and why (`SHOW WARNINGS`): an answer from the snapshot
+alone there would read as fresh and be minutes old.
+
+A table that cannot have a tail is read as of its snapshot, every table of
+the statement with it, as in fast mode; the answer's lag (`data_as_of`,
+`behind_source_seconds` in the router's `/status`) is that snapshot's, and a
+server's lag limit (`max_behind_source_seconds`) decides as always. A table
 cannot have a tail when:
 
 - its primary key is not made of integers;
@@ -1308,7 +1313,14 @@ cannot have a tail when:
   the source server changed;
 - capture does not record it, `bintrail index` also wrote the index, or the
   index holds no captured change yet;
-- its tail would pass its budget when it is built (below).
+- its tail would pass its budget when it is built, or a build of it failed
+  and is being tried again (below);
+- tails stopped at different moments (one passed its budget, below).
+
+A statement whose tables the port cannot tell apart (a `WITH` that reads
+another `WITH`, for one) reads no tails either, and neither does a statement
+answered from an earlier snapshot because the newest holds more unmerged
+changes than it can read (that answer says so).
 
 A table whose changes since its snapshot pass its budget, or whose tails
 together pass theirs (`BINTRAIL_SQL_TAIL_MAX_KEYS`,
@@ -1317,16 +1329,14 @@ advancing until the next snapshot. When an update of the tails fails or
 runs out of time, statements keep reading the last version that was
 brought up to date (older, and the answer's lag says by how much), for up
 to 15 minutes. An edit of a server that leaves its index connection alone
-(its application login on the port, a setting) keeps its tails. The
-copy never answers a connection with less of the index than an earlier
-answer of the copy on that same connection held: such a statement goes to
-MySQL, or, on a connection that does not route, is answered with a warning
-that says so. (An answer of MySQL on a routing connection is MySQL's own,
-and the next answer of the copy can be a second or so behind it, as any
-replica is.) The same rule covers a statement whose tables the port cannot
-tell apart (a `WITH` that reads another `WITH`, for one), which reads no
-tails. A statement answered from an earlier snapshot, because the newest holds more
-unmerged changes than it can read, reads no tails, and says so.
+(its application login on the port, a setting) keeps its tails. The copy
+never answers a connection with less of the index than an earlier answer of
+the copy on that same connection held: such a statement goes to MySQL, or,
+on a connection that does not route, is answered with a warning that says
+so. (An answer of MySQL on a routing connection is MySQL's own, and the next
+answer of the copy can be a second or so behind it, as any replica is.) A
+statement waiting for a tail holds its place among the statements that run
+on the copy at once.
 
 In fast mode (saved for the server, or `off`, `false`, `0`, `no` or `fast`
 in the setting for every server) the copy answers as it

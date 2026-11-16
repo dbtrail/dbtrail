@@ -119,7 +119,8 @@ func TestBuildRouteDSN(t *testing.T) {
 		{name: "raw dsn that does not parse", req: serverRequest{RouteDSN: strPtr("fwd:s3cr3tpw@tcp(db.prod:3306")}, oldSource: src, newSource: src, wantErr: "invalid route_dsn"},
 		{name: "account with no source", req: serverRequest{RouteUser: strPtr("fwd"), RoutePassword: strPtr("pw")}, wantErr: "source"},
 		{name: "raw dsn with no source", req: serverRequest{RouteDSN: strPtr(other)}, wantErr: "source"},
-		{name: "account on a PostgreSQL source", req: serverRequest{RouteUser: strPtr("fwd"), RoutePassword: strPtr("pw")}, oldSource: "postgres://u:p@h/db", newSource: "postgres://u:p@h/db", flavor: FlavorPostgres, wantErr: "MySQL"},
+		// An account on a PostgreSQL source is the PostgreSQL port's since
+		// #2771: TestBuildPGRouteDSN.
 		{name: "PostgreSQL with nothing sent", oldSource: "postgres://u:p@h/db", newSource: "postgres://u:p@h/db", flavor: FlavorPostgres},
 	}
 	for _, tc := range cases {

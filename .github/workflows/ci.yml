@@ -126,6 +126,7 @@ jobs:
       console: ${{ steps.filter.outputs.console }}
       data: ${{ steps.filter.outputs.data }}
       consoleit: ${{ steps.filter.outputs.consoleit }}
+      consolego: ${{ steps.filter.outputs.consolego }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -134,7 +135,7 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           # A file counts for a filter when it matches at least one pattern
-          # and none of that filter's `!` patterns. Only `data` and `dbgo`
+          # and none of that filter's `!` patterns. Only `data`, `dbgo` and `consolego`
           # have any, so `go` and `console` behave exactly as with the
           # default.
           predicate-quantifier: some-with-excludes
@@ -190,6 +191,15 @@ jobs:
             # change to the rest of consoleapp still does not.
             consoleit:
               - 'consoleapp/**/*_integration_test.go'
+            # The console's Go code is the port's read path (routing, the
+            # copy's tails): a change to it runs the MariaDB cells too, whose
+            # routing differs from MySQL's. `data` leaves internal/console out,
+            # so such a change ran the read path's integration tests on 8.4
+            # alone and none on MariaDB. 8.0 and 9.7 stay out: they run the
+            # same read path as 8.4.
+            consolego:
+              - 'internal/console/**/*.go'
+              - '!internal/console/assets_*_test.go'
             data:
               - '**/*.go'
               - 'go.mod'
@@ -675,7 +685,7 @@ jobs:
       # Data-path PRs only (plus push/nightly/dispatch). Step-level, not
       # job-level: this job has a matrix, and its cells are required
       # checks. See the note on the `changes` job.
-      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || needs.changes.outputs.consoleit == 'true' }}
+      RUN: ${{ github.event_name != 'pull_request' || needs.changes.outputs.data == 'true' || needs.changes.outputs.consoleit == 'true' || needs.changes.outputs.consolego == 'true' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

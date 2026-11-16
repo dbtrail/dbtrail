@@ -40,7 +40,13 @@ func TestTailKeeperOutlivesABundleOverTheSameIndex(t *testing.T) {
 	if k1 == nil {
 		t.Fatal("no keeper for a fresh server")
 	}
-	t.Cleanup(func() { s.tails.mu.Lock(); defer s.tails.mu.Unlock(); for _, k := range s.tails.by { k.close() } })
+	t.Cleanup(func() {
+		s.tails.mu.Lock()
+		defer s.tails.mu.Unlock()
+		for _, k := range s.tails.by {
+			k.close()
+		}
+	})
 
 	// rebuildDerived: a new bundle, the same connection.
 	if k2 := s.tailKeeperFor(id, &bundle{db: db, dbName: "idx"}); k2 != k1 {
@@ -189,7 +195,7 @@ func TestStatementTailsFresh(t *testing.T) {
 		k.settle()
 	})
 
-	t.Run("a refused tail is not waited for", func(t *testing.T) {
+	t.Run("a table that cannot have a tail is read from its snapshot, as without fresh mode, at once", func(t *testing.T) {
 		f := &fakeIndex{startWhy: map[string]string{tailKey("shop", "orders"): "its key is not made of integers"}}
 		k := newRig(f)
 		s.statementTails(ctx, k, orders, orders)
@@ -197,8 +203,8 @@ func TestStatementTailsFresh(t *testing.T) {
 		k.followOnce(ctx, time.Minute)
 		start := time.Now()
 		_, _, _, ok, missing := s.statementTailsFresh(ctx, k, orders, orders, 10*time.Second)
-		if ok || !strings.Contains(missing, "integers") {
-			t.Fatalf("ok %v, missing %q", ok, missing)
+		if ok || missing != "" {
+			t.Fatalf("ok %v, missing %q: a table that cannot have a tail is not sent to MySQL", ok, missing)
 		}
 		if took := time.Since(start); took > time.Second {
 			t.Fatalf("a refused tail was waited for %v", took)
@@ -281,7 +287,7 @@ func TestAPortLoginEditKeepsTheTails(t *testing.T) {
 }
 
 // An index with no captured change has no tails, and no wait brings one:
-// the statement is told at once, not after the whole wait.
+// the statement reads the snapshot at once, as without fresh mode.
 func TestStatementTailsFreshOverAnEmptyIndex(t *testing.T) {
 	ctx := context.Background()
 	k := newTailKeeper(&fakeIndex{}, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
@@ -292,8 +298,8 @@ func TestStatementTailsFreshOverAnEmptyIndex(t *testing.T) {
 	k.followOnce(ctx, time.Minute)
 	start := time.Now()
 	_, _, _, ok, missing := s.statementTailsFresh(ctx, k, orders, orders, 10*time.Second)
-	if ok || !strings.Contains(missing, "no change") {
-		t.Fatalf("ok %v, missing %q", ok, missing)
+	if ok || missing != "" {
+		t.Fatalf("ok %v, missing %q: an index with nothing captured has no tails, by design", ok, missing)
 	}
 	if took := time.Since(start); took > time.Second {
 		t.Fatalf("waited %v over an empty index", took)
@@ -301,7 +307,7 @@ func TestStatementTailsFreshOverAnEmptyIndex(t *testing.T) {
 }
 
 // One table refused until its next snapshot and another on its way: all or
-// nothing, so the statement is told at once.
+// nothing, so the statement reads the snapshot at once.
 func TestStatementTailsFreshARefusedTableEndsTheWait(t *testing.T) {
 	ctx := context.Background()
 	f := &fakeIndex{startWhy: map[string]string{tailKey("shop", "customers"): "its key is not made of integers"}}
@@ -319,7 +325,7 @@ func TestStatementTailsFreshARefusedTableEndsTheWait(t *testing.T) {
 	both := []views.BaselineTable{keeperTable("orders"), keeperTable("customers")}
 	start := time.Now()
 	_, _, _, ok, missing := s.statementTailsFresh(ctx, k, both, both, 10*time.Second)
-	if ok || !strings.Contains(missing, "integers") {
+	if ok || missing != "" {
 		t.Fatalf("ok %v, missing %q", ok, missing)
 	}
 	if took := time.Since(start); took > 2*time.Second {

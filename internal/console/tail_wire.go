@@ -266,19 +266,27 @@ func (s *Server) statementTailsMark(ctx context.Context, k *tailKeeper, tables, 
 }
 
 // freshTailsWait is how long a fresh-mode statement on the port waits for
-// a table's tail that is on its way (being built over a new snapshot, the
-// first update after the follower started, an update that failed), counted
-// from the statement's first look. Past it the statement does not read the
-// snapshot alone as if it were fresh: see statementTailsFresh.
+// a table's tail that is on its way, counted from the statement's first
+// look. Past it the statement does not read the snapshot alone as if it
+// were fresh: see statementTailsFresh.
 const freshTailsWait = 3 * time.Second
 
-// statementTailsFresh is statementTailsMark for fresh mode, where a
-// statement never answers from the snapshot alone without saying so. A table
-// whose tail is on its way is waited for, the follower woken, up to wait;
-// one whose tail is refused until the next snapshot (its key, its budget, a
-// definition that changed) is not, since no wait brings it. ok false comes
-// with missing, the reason for a client: the caller sends the statement to
-// MySQL (routing) or answers from the snapshot with it as a warning.
+// statementTailsFresh is statementTailsMark for fresh mode, which tells a
+// table whose tail is on its way from one that cannot have one now.
+//
+// On its way: the keeper is building it over the cut the statement reads
+// (the first statement over a table, the first after a newer snapshot), or
+// no update has said yet (none ran over this cut, or the last one failed).
+// The statement waits for it, the follower woken once, up to wait; past it,
+// missing says why for a client: the caller sends the statement to MySQL
+// (routing) or answers from the snapshot with it as a warning. An answer
+// from the snapshot alone there would read as fresh and be minutes old.
+//
+// Cannot have one now (its key is not made of integers, its definition
+// changed, capture does not record it, the index holds no captured change,
+// tails at two instants after one stopped over its budget): no wait brings
+// it, and the statement reads the snapshot as without fresh mode, ok false
+// and missing "", its age in the answer's lag as always.
 func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable, wait time.Duration) (out []views.BaselineTable, through time.Time, throughID uint64, ok bool, missing string) {
 	deadline := time.Now().Add(wait)
 	woke := false
@@ -289,35 +297,27 @@ func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables,
 			return out, through, throughID, ok, ""
 		}
 		pub, _ := k.published(read)
-		refused := k.refusedOf(read)
-		pending, why := "", ""
+		pending := ""
 		for _, t := range read {
-			key := tailKey(t.Schema, t.Table)
-			if _, has := pub[key]; has {
+			if _, has := pub[tailKey(t.Schema, t.Table)]; has {
 				continue
 			}
-			name := t.Schema + "." + t.Table
-			if r, no := refused[key]; no {
-				if why == "" {
-					why = name + " has no tail (" + r + ")"
+			switch k.stateOf(t) {
+			case tailNone:
+				// All or nothing: one table that cannot have a tail now
+				// keeps the statement from tails, however soon the others
+				// come.
+				return tables, time.Time{}, 0, false, ""
+			default:
+				if pending == "" {
+					pending = t.Schema + "." + t.Table
 				}
-				continue
 			}
-			if pending == "" {
-				pending = name
-			}
-		}
-		if why != "" {
-			// All or nothing: one table that cannot have a tail until its
-			// next snapshot keeps the statement from tails, however soon the
-			// others come.
-			return tables, time.Time{}, 0, false, why
 		}
 		if pending == "" {
 			// Every table has a view, of one update, at two instants: a tail
-			// over its budget stopped advancing, until the next snapshot. No
-			// wait brings them together.
-			return tables, time.Time{}, 0, false, "the tables it reads are not up to date to one moment (a tail over its budget stopped advancing)"
+			// over its budget stopped advancing, until the next snapshot.
+			return tables, time.Time{}, 0, false, ""
 		}
 		left := time.Until(deadline)
 		if left <= 0 || ctx.Err() != nil || k.life.Err() != nil {

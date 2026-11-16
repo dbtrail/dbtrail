@@ -1208,10 +1208,6 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	if id, ok := tailsFor(ctx); ok && at.IsZero() && b.db != nil && s.tailsOnFor(id) {
 		tails = s.tailKeeperFor(id, b)
 	}
-	// freshPort: the statement is one of the port's in fresh mode, whose
-	// answers never come from the snapshot alone unsaid (statementTailsFresh),
-	// even when its tails cannot be read below.
-	freshPort := tails != nil
 	if tails != nil {
 		if dir, err := tails.ensureDir(); err != nil {
 			tails.note(fmt.Errorf("the tails' directory: %w", err))
@@ -1329,10 +1325,6 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 				parent.Tails += time.Since(tailsStart)
 				parent.TailsRan = true
 				allTailed = tailsSayTheInstant(statement, allTailed)
-			case freshPort && len(readTables) > 0 && tails == nil:
-				missing = "the tails cannot be written on this host (their directory)"
-			case freshPort && len(readTables) > 0:
-				missing = "which tables the statement reads cannot be told, so no tables' newest captured changes are read"
 			}
 			if missing != "" {
 				if ctx.Err() != nil {

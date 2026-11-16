@@ -56,6 +56,9 @@ func (s *Server) probeRouteAccount(ctx context.Context, req serverRequest, saved
 	if err != nil {
 		return &routeProbeResult{Error: err.Error()}
 	}
+	if flavor == FlavorPostgres {
+		return probePGRouteAccount(candidate, newSource)
+	}
 	state, cfg := routeAccountState(candidate, newSource)
 	switch state {
 	case routeNone:
