@@ -427,6 +427,7 @@ func InitIndexTables(t *testing.T, db *sql.DB) {
 		pg_sent_through_at DATETIME DEFAULT NULL,
 		pg_capture_from_lsn BIGINT UNSIGNED DEFAULT NULL,
 		pg_caught_up_source_at DATETIME(6) DEFAULT NULL,
+		pg_checkpoint_event_id BIGINT UNSIGNED DEFAULT NULL,
 		CONSTRAINT single_row CHECK (id = 1)
 	) ENGINE=InnoDB`)
 

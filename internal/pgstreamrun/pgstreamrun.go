@@ -140,6 +140,15 @@ type pgStreamState struct {
 	// (pgcapture.QueryFlushed), stamped with it into
 	// pg_caught_up_source_at; zero when the source gave none.
 	caughtUpSourceAt time.Time
+	// checkpointEvent is the newest event at or before the commit LSN the
+	// next save writes (newestEventThrough), and stampEvent says that save
+	// writes it into pg_checkpoint_event_id (0: none, written as NULL). Set
+	// only when a transaction ended since the last save: then everything at
+	// or before that LSN is a transaction delivered whole. A save with none
+	// ended leaves the column as it is, so rows of a transaction delivered
+	// again after a restart stay above it until that delivery is whole.
+	checkpointEvent uint64
+	stampEvent      bool
 	// metrics is where the loop publishes its Prometheus metrics (#2762);
 	// nil publishes none (metrics.go).
 	metrics *pgMetrics
@@ -535,6 +544,9 @@ func streamLoopPG(
 	// database still gets its checkpoint (and its sent-through position,
 	// #2746) saved every interval instead of never.
 	var lastCommitLSN uint64
+	// commitsSince: a transaction ended since the last saved checkpoint
+	// (pgStreamState.checkpointEvent).
+	var commitsSince bool
 	if state.resumed {
 		lastCommitLSN = state.lsn
 	}
@@ -606,12 +618,24 @@ func streamLoopPG(
 		if !state.resumed && state.captureFrom == 0 && cap != nil {
 			state.captureFrom = cap.StartedFrom()
 		}
+		// Which event the position reaches, read after the rows are in and
+		// before the position is saved (#2756). Only when a transaction ended
+		// since the last save: see pgStreamState.checkpointEvent.
+		if commitsSince {
+			id, err := newestEventThrough(indexDB, lastCommitLSN)
+			if err != nil {
+				state.metrics.failed(errTypeCheckpoint)
+				return err
+			}
+			state.checkpointEvent, state.stampEvent = id, true
+		}
 		// Read before the save, which clears it once it is stamped.
 		stamping := state.caughtUpAt
 		if err := saveCheckpointPG(indexDB, state, lastCommitLSN); err != nil {
 			state.metrics.failed(errTypeCheckpoint)
 			return err
 		}
+		commitsSince = false
 		state.metrics.checkpointSaved(lastCommitLSN, stamping)
 		// Only now is it safe to let PostgreSQL release WAL up to lastCommitLSN.
 		if cap != nil {
@@ -696,6 +720,7 @@ func streamLoopPG(
 				// The boundary: record the commit LSN; its rows are already in the
 				// writer (pgoutput delivers them before the commit).
 				lastCommitLSN = ev.EndPos
+				commitsSince = true
 				inferredSeen.reset()
 				if err := w.End(); err != nil {
 					return err
@@ -799,6 +824,25 @@ func loadStreamStatePG(db *sql.DB) (*pgStreamState, error) {
 	return &pgStreamState{lsn: lsn, eventsIndexed: eventsIndexed, serverID: serverID, lastEventTime: lastEventTime}, nil
 }
 
+// newestEventThrough is the newest event of the index whose position is at
+// or before lsn, 0 when it holds none. The rows above it are what was made
+// visible past lsn (a transaction still arriving in parts), so the walk back
+// from the newest row is over those alone.
+func newestEventThrough(db *sql.DB, lsn uint64) (uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), indexer.WriteTimeout)
+	defer cancel()
+	var id uint64
+	err := db.QueryRowContext(ctx,
+		`SELECT event_id FROM binlog_events FORCE INDEX (PRIMARY) WHERE start_pos <= ? ORDER BY event_id DESC LIMIT 1`, lsn).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("pgstreamrun: read the newest event at or before %s: %w", pglogrepl.LSN(lsn), err)
+	}
+	return id, nil
+}
+
 // saveCheckpointPG persists the durable cursor (commitLSN — the last complete
 // transaction) and the running counters. mode='gtid'/flavor='postgres': the LSN
 // rides binlog_position (uint64) and binlog_file/gtid_set (the "X/Y" string).
@@ -839,6 +883,12 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 	if !state.caughtUpAt.IsZero() && !state.caughtUpSourceAt.IsZero() {
 		caughtUpSourceAt = state.caughtUpSourceAt.UTC().Format("2006-01-02 15:04:05.000000")
 	}
+	// pg_checkpoint_event_id (#2756): written only by a save that follows a
+	// transaction's end, NULL when the index holds no event up to the LSN.
+	var checkpointEvent any
+	if state.stampEvent && state.checkpointEvent != 0 {
+		checkpointEvent = state.checkpointEvent
+	}
 	// pg_sent_through_at gets the same UTC_TIMESTAMP() as last_checkpoint
 	// (one statement, one value). Verify trusts pg_sent_through_lsn only while
 	// the two are equal, so a save by any writer that does not set it (an
@@ -848,9 +898,9 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			(id, mode, binlog_file, binlog_position, gtid_set, flavor,
 			 events_indexed, last_event_time, last_checkpoint, server_id,
 			 pg_sent_through_lsn, pg_sent_through_at, caught_up_at, pg_capture_from_lsn,
-			 pg_caught_up_source_at)
+			 pg_caught_up_source_at, pg_checkpoint_event_id)
 		VALUES (1, 'gtid', ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, UTC_TIMESTAMP(),
-			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?)
+			UTC_TIMESTAMP(6) - INTERVAL ? MICROSECOND, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			binlog_file     = VALUES(binlog_file),
 			binlog_position = VALUES(binlog_position),
@@ -864,13 +914,15 @@ func saveCheckpointPG(db *sql.DB, state *pgStreamState, commitLSN uint64) error 
 			pg_sent_through_at = UTC_TIMESTAMP(),
 			caught_up_at = COALESCE(VALUES(caught_up_at), caught_up_at),
 			pg_caught_up_source_at = COALESCE(VALUES(pg_caught_up_source_at), pg_caught_up_source_at),
-			pg_capture_from_lsn = IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn))`,
+			pg_capture_from_lsn = IF(?, pg_capture_from_lsn, VALUES(pg_capture_from_lsn)),
+			pg_checkpoint_event_id = IF(?, VALUES(pg_checkpoint_event_id), pg_checkpoint_event_id)`,
 		lsnStr, commitLSN, lsnStr, pgFlavor, state.eventsIndexed, lastEventTime, state.serverID,
-		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, state.resumed)
+		state.sentThrough, caughtUpAgo, captureFrom, caughtUpSourceAt, checkpointEvent, state.resumed, state.stampEvent)
 	if err != nil {
 		return fmt.Errorf("pgstreamrun: save checkpoint at %s: %w", lsnStr, err)
 	}
 	state.caughtUpAt, state.caughtUpSourceAt = time.Time{}, time.Time{}
+	state.stampEvent = false
 	return nil
 }
 
