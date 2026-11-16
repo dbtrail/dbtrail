@@ -40,7 +40,13 @@ func TestTailKeeperOutlivesABundleOverTheSameIndex(t *testing.T) {
 	if k1 == nil {
 		t.Fatal("no keeper for a fresh server")
 	}
-	t.Cleanup(func() { s.tails.mu.Lock(); defer s.tails.mu.Unlock(); for _, k := range s.tails.by { k.close() } })
+	t.Cleanup(func() {
+		s.tails.mu.Lock()
+		defer s.tails.mu.Unlock()
+		for _, k := range s.tails.by {
+			k.close()
+		}
+	})
 
 	// rebuildDerived: a new bundle, the same connection.
 	if k2 := s.tailKeeperFor(id, &bundle{db: db, dbName: "idx"}); k2 != k1 {

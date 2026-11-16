@@ -135,7 +135,7 @@ func TestIntegrationFreshOverATableThatCannotHaveATail(t *testing.T) {
 		if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=new" || res.Note != "" {
 			t.Fatalf("routing %v: rows %v, note %q", sess.StrictStar, res.Rows, res.Note)
 		}
-		if took := time.Since(start); took > 2*time.Second {
+		if took := time.Since(start); took >= freshTailsWait {
 			t.Fatalf("routing %v: waited %v over a table that cannot have a tail", sess.StrictStar, took)
 		}
 	}
