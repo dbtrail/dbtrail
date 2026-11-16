@@ -114,6 +114,14 @@ func TestSQLAvgRefusalFor_2920(t *testing.T) {
 	if got := sqlAvgRefusalFor(in, "SELECT k, average FROM a", asked); got != "" || asked.calls != 0 {
 		t.Errorf("no AVG: %q after %d questions, want none asked", got, asked.calls)
 	}
+	// The copy's own avg left in the text it is sent: refused whatever the
+	// reading says.
+	for _, text := range []string{"SELECT avg(k) FROM a", "SELECT AVG (k) FROM a", "SELECT x.avg(k) FROM a", "SELECT AVG/**/(k) FROM a"} {
+		asked = &avgAsked{}
+		if got := sqlAvgRefusalFor(in, text, asked); !strings.Contains(got, "not written") {
+			t.Errorf("%s sent to the copy: %q, want a refusal", text, got)
+		}
+	}
 	if got := sqlAvgRefusalFor(in, "SELECT avg(k) FROM a", nil); got == "" {
 		t.Error("no reading of the statement with an AVG: answered, want a refusal")
 	}

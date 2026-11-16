@@ -30,6 +30,14 @@ func sqlAvgRefusalFor(narrowed views.Input, statement string, types sqlsandbox.C
 	if types == nil {
 		return refuse + "it could not be searched for AVG"
 	}
+	if rawAvgCall.MatchString(statement) {
+		// The text the copy is about to run still calls its own avg, a
+		// DOUBLE: the routing port writes every AVG it lets through as the
+		// macro, so this is a caller that did not. A string or a comment
+		// that reads like the call is refused too, which costs only the
+		// offload.
+		return refuse + "an AVG is not written as the copy's exact average"
+	}
 	var whole, other []string
 	for _, t := range narrowed.SelectedBaselines() {
 		if !t.SchemaKnown {
@@ -56,6 +64,11 @@ func sqlAvgRefusalFor(narrowed views.Input, statement string, types sqlsandbox.C
 	}
 	return ""
 }
+
+// rawAvgCall is AVG called as the copy's own function: the word, not after a
+// letter, a digit, _ or $ (_bintrail_avg is the macro), then white space and
+// a parenthesis or a comment.
+var rawAvgCall = regexp.MustCompile(`(?i)(?:^|[^\pL\pN_$])avg[\s\v]*(?:\(|/\*|--|#)`)
 
 // mayCallAvg is a word of AVG, or of the copy's macros the router writes it
 // as, anywhere in a statement.
