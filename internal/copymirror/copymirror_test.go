@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1291,24 +1292,115 @@ func TestSync_aSourceThatGoesSilentIsGivenUp(t *testing.T) {
 	}
 }
 
-// A slow download that keeps arriving is not a silent one.
+// A slow download that keeps arriving is not a silent one, and one that
+// goes quiet for longer than the stall timeout between two bytes is. Both run
+// on a clock of the test's own: each byte comes after a fixed step of it, so
+// the outcome does not depend on how busy the machine is (on the wall clock,
+// a loaded CI machine stretched a 20ms pause past a 200ms timeout).
 func TestSync_slowIsNotSilent(t *testing.T) {
-	src := newSource()
-	src.publish(t1, map[string]string{"shop/orders.parquet": strings.Repeat("x", 64)})
-	cfg := testConfig(t, src)
-	cfg.StallTimeout = 200 * time.Millisecond
-	slow := &slowSource{fakeSource: src, pause: 20 * time.Millisecond}
-	cfg.Source = slow
-	if res := mustSync(t, cfg); res.Downloaded != t1 {
-		t.Errorf("result = %+v", res)
+	const stall = time.Hour // on the test's clock; the wall clock never gets there
+	for name, tc := range map[string]struct {
+		step   time.Duration
+		silent bool
+	}{
+		// 64 bytes at 0.9 of the timeout each: far longer in all than the
+		// timeout, never silent for as long.
+		"slow but never silent for the timeout": {step: stall * 9 / 10},
+		"silent for longer than the timeout":    {step: stall * 11 / 10, silent: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := newSource()
+			src.publish(t1, map[string]string{"shop/orders.parquet": strings.Repeat("x", 64)})
+			cfg := testConfig(t, src)
+			cfg.StallTimeout = stall
+			clock := &stepClock{}
+			cfg.afterFunc = clock.afterFunc
+			cfg.Source = &slowSource{fakeSource: src, clock: clock, step: tc.step}
+			res, err := Sync(context.Background(), cfg)
+			if clock.started() == 0 {
+				t.Fatal("the stall watch never used the test's clock")
+			}
+			if tc.silent {
+				if !errors.Is(err, ErrSourceSilent) || !strings.Contains(err.Error(), "no bytes for") {
+					t.Fatalf("err = %v, want ErrSourceSilent with how long it waited", err)
+				}
+				return
+			}
+			if err != nil || res.Downloaded != t1 {
+				t.Fatalf("Sync: err %v, result %+v", err, res)
+			}
+		})
 	}
 }
 
-// slowSource hands each body out a byte at a time with a pause between,
-// longer in all than the stall timeout and never silent for as long.
+// stepClock is a clock that moves only when the test says. Its timers fire,
+// on the goroutine that moves the clock, once it reaches their deadline.
+type stepClock struct {
+	mu     sync.Mutex
+	now    time.Duration
+	timers []*stepTimer
+}
+
+type stepTimer struct {
+	c        *stepClock
+	deadline time.Duration
+	armed    bool
+	f        func()
+}
+
+func (c *stepClock) afterFunc(d time.Duration, f func()) stallTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	tm := &stepTimer{c: c, deadline: c.now + d, armed: true, f: f}
+	c.timers = append(c.timers, tm)
+	return tm
+}
+
+func (c *stepClock) started() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
+// advance moves the clock by d and runs every timer it passes.
+func (c *stepClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.now += d
+	var due []func()
+	for _, tm := range c.timers {
+		if tm.armed && c.now >= tm.deadline {
+			tm.armed = false
+			due = append(due, tm.f)
+		}
+	}
+	c.mu.Unlock()
+	for _, f := range due {
+		f()
+	}
+}
+
+func (tm *stepTimer) Reset(d time.Duration) bool {
+	tm.c.mu.Lock()
+	defer tm.c.mu.Unlock()
+	was := tm.armed
+	tm.deadline, tm.armed = tm.c.now+d, true
+	return was
+}
+
+func (tm *stepTimer) Stop() bool {
+	tm.c.mu.Lock()
+	defer tm.c.mu.Unlock()
+	was := tm.armed
+	tm.armed = false
+	return was
+}
+
+// slowSource hands each body out a byte at a time, moving the clock by step
+// before each one.
 type slowSource struct {
 	*fakeSource
-	pause time.Duration
+	clock *stepClock
+	step  time.Duration
 }
 
 func (s *slowSource) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -1316,21 +1408,21 @@ func (s *slowSource) Get(ctx context.Context, key string) (io.ReadCloser, error)
 	if err != nil {
 		return nil, err
 	}
-	return io.NopCloser(&dripReader{ctx: ctx, r: rc, pause: s.pause}), nil
+	return io.NopCloser(&dripReader{ctx: ctx, r: rc, clock: s.clock, step: s.step}), nil
 }
 
 // dripReader ends when its request's context does, as a real body would.
 type dripReader struct {
 	ctx   context.Context
 	r     io.Reader
-	pause time.Duration
+	clock *stepClock
+	step  time.Duration
 }
 
 func (d *dripReader) Read(p []byte) (int, error) {
-	select {
-	case <-d.ctx.Done():
-		return 0, d.ctx.Err()
-	case <-time.After(d.pause):
+	d.clock.advance(d.step)
+	if err := d.ctx.Err(); err != nil {
+		return 0, err
 	}
 	return d.r.Read(p[:1])
 }
