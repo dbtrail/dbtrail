@@ -143,7 +143,7 @@ func CheckChain(ctx context.Context, db *sql.DB, dir string, chain Chain, base s
 			}
 			switch {
 			case md[MetaKeyBase] != base:
-				return nil, fmt.Errorf("%w: %s was written for another table at (%q, and this one is %q)", ErrBrokenChain, at, md[MetaKeyBase], base)
+				return nil, fmt.Errorf("%w: %s was written for another table file (%q, and this one is %q)", ErrBrokenChain, at, md[MetaKeyBase], base)
 			case md[MetaKeySeq] != strconv.Itoa(p.Seq):
 				return nil, fmt.Errorf("%w: %s says it is pair %q", ErrBrokenChain, at, md[MetaKeySeq])
 			case md[MetaKeyRun] == "":
@@ -154,7 +154,7 @@ func CheckChain(ctx context.Context, db *sql.DB, dir string, chain Chain, base s
 				return nil, fmt.Errorf("%w: pair %0*d of %s does not follow the pair before it (it was written after %q, and that pair is %q)",
 					ErrBrokenChain, seqWidth, p.Seq, chain.Table, md[MetaKeyPrev], prev)
 			case md[MetaKeyColumns] != wantColumns:
-				return nil, fmt.Errorf("%w: %s was written with the columns %s, and the table at has %s", ErrBrokenChain, at, md[MetaKeyColumns], wantColumns)
+				return nil, fmt.Errorf("%w: %s was written with the columns %s, and the table file has %s", ErrBrokenChain, at, md[MetaKeyColumns], wantColumns)
 			}
 			run, last = md[MetaKeyRun], md
 		}
