@@ -13,21 +13,21 @@ var avgRoutedOpts = CopyOptions{MySQLClockKeywords: true, MySQLDateFunctions: tr
 // refused; the port without routing (no MySQLAvg) sends AVG as written.
 func TestForCopyOpts_avg_2920(t *testing.T) {
 	written := map[string]string{
-		"SELECT AVG(k) FROM t":                         "SELECT _bintrail_avg(k) FROM t",
-		"SELECT avg (k) FROM t":                        "SELECT _bintrail_avg(k) FROM t",
-		"SELECT Avg(\nk\n) FROM t":                     "SELECT _bintrail_avg(k\n) FROM t",
-		"SELECT AVG(`k`) FROM `t`":                     `SELECT _bintrail_avg("k") FROM "t"`,
-		"SELECT AVG(DISTINCT k) FROM t":                "SELECT _bintrail_avg_distinct(k) FROM t",
-		"SELECT AVG(distinct(k)) FROM t":               "SELECT _bintrail_avg_distinct((k)) FROM t",
-		"SELECT AVG(DISTINCT t.k), AVG(t.b) a FROM t":  "SELECT _bintrail_avg_distinct(t.k), _bintrail_avg(t.b) a FROM t",
-		"SELECT g, AVG(k) FROM t GROUP BY g":           "SELECT g, _bintrail_avg(k) FROM t GROUP BY g",
-		"SELECT AVG(k) FROM t WHERE s = 'AVG(k)'":      "SELECT _bintrail_avg(k) FROM t WHERE s = 'AVG(k)'",
-		"SELECT AVG(k) /* AVG(x) */ FROM t":            "SELECT _bintrail_avg(k) /* AVG(x) */ FROM t",
-		"SELECT avg, avg_k FROM t":                     "SELECT avg, avg_k FROM t",
-		"SELECT myavg(k), average(k) FROM t":           "SELECT myavg(k), average(k) FROM t",
-		"SELECT AVG(DISTINCTROW k) FROM t":             "SELECT _bintrail_avg(DISTINCTROW k) FROM t", // MySQL's error; the copy's too
-		"SELECT AVG(distinct_k) FROM t":                "SELECT _bintrail_avg(distinct_k) FROM t",
-		"SELECT ROUND(AVG(k), 2) FROM t":               "SELECT ROUND(_bintrail_avg(k), 2) FROM t", // RoundVeto keeps it on MySQL
+		"SELECT AVG(k) FROM t":                        "SELECT _bintrail_avg(k) FROM t",
+		"SELECT avg (k) FROM t":                       "SELECT _bintrail_avg(k) FROM t",
+		"SELECT Avg(\nk\n) FROM t":                    "SELECT _bintrail_avg(k\n) FROM t",
+		"SELECT AVG(`k`) FROM `t`":                    `SELECT _bintrail_avg("k") FROM "t"`,
+		"SELECT AVG(DISTINCT k) FROM t":               "SELECT _bintrail_avg_distinct(k) FROM t",
+		"SELECT AVG(distinct(k)) FROM t":              "SELECT _bintrail_avg_distinct((k)) FROM t",
+		"SELECT AVG(DISTINCT t.k), AVG(t.b) a FROM t": "SELECT _bintrail_avg_distinct(t.k), _bintrail_avg(t.b) a FROM t",
+		"SELECT g, AVG(k) FROM t GROUP BY g":          "SELECT g, _bintrail_avg(k) FROM t GROUP BY g",
+		"SELECT AVG(k) FROM t WHERE s = 'AVG(k)'":     "SELECT _bintrail_avg(k) FROM t WHERE s = 'AVG(k)'",
+		"SELECT AVG(k) /* AVG(x) */ FROM t":           "SELECT _bintrail_avg(k) /* AVG(x) */ FROM t",
+		"SELECT avg, avg_k FROM t":                    "SELECT avg, avg_k FROM t",
+		"SELECT myavg(k), average(k) FROM t":          "SELECT myavg(k), average(k) FROM t",
+		"SELECT AVG(DISTINCTROW k) FROM t":            "SELECT _bintrail_avg(DISTINCTROW k) FROM t", // MySQL's error; the copy's too
+		"SELECT AVG(distinct_k) FROM t":               "SELECT _bintrail_avg(distinct_k) FROM t",
+		"SELECT ROUND(AVG(k), 2) FROM t":              "SELECT ROUND(_bintrail_avg(k), 2) FROM t", // RoundVeto keeps it on MySQL
 	}
 	for stmt, want := range written {
 		got, why := ForCopyOpts(stmt, avgRoutedOpts)
@@ -40,12 +40,12 @@ func TestForCopyOpts_avg_2920(t *testing.T) {
 		}
 	}
 	refused := []string{
-		"SELECT AVG/**/(k) FROM t",     // a comment before the parenthesis is not read
-		"SELECT t.avg(k) FROM t",       // a stored function on MySQL
-		"SELECT `db`.avg(k) FROM t",    //
-		"SELECT AVG(",                  // a prepared statement's piece cut at a placeholder
-		"SELECT AVG(k, b) FROM t",      // two arguments: MySQL's error
-		"SELECT AVG() FROM t",          //
+		"SELECT AVG/**/(k) FROM t",          // a comment before the parenthesis is not read
+		"SELECT t.avg(k) FROM t",            // a stored function on MySQL
+		"SELECT `db`.avg(k) FROM t",         //
+		"SELECT AVG(",                       // a prepared statement's piece cut at a placeholder
+		"SELECT AVG(k, b) FROM t",           // two arguments: MySQL's error
+		"SELECT AVG() FROM t",               //
 		"SELECT AVG(k) + AVG/**/(b) FROM t", // one written, one not
 	}
 	for _, stmt := range refused {
@@ -74,13 +74,13 @@ func TestVetoOpts_avg_2920(t *testing.T) {
 		}
 	}
 	kept := map[string]string{
-		"SELECT AVG/**/(k) FROM t":        VetoAvgLeft,
-		"SELECT t.avg(k) FROM t":          VetoAvgLeft,
-		"SELECT MEDIAN(k) OVER () FROM t": vetoMedian,
+		"SELECT AVG/**/(k) FROM t":                VetoAvgLeft,
+		"SELECT t.avg(k) FROM t":                  VetoAvgLeft,
+		"SELECT MEDIAN(k) OVER () FROM t":         vetoMedian,
 		"SELECT AVG(k), MEDIAN(k) OVER () FROM t": vetoMedian,
-		"SELECT AVG(k) / 2 FROM t":        vetoDivision,
-		"SELECT _bintrail_avg(k) FROM t":  vetoCopyMacro,
-		"SELECT _bintrail_avg_of(k, 1) FROM t": vetoCopyMacro,
+		"SELECT AVG(k) / 2 FROM t":                vetoDivision,
+		"SELECT _bintrail_avg(k) FROM t":          vetoCopyMacro,
+		"SELECT _bintrail_avg_of(k, 1) FROM t":    vetoCopyMacro,
 	}
 	for stmt, want := range kept {
 		if got := VetoOpts(stmt, avgRoutedOpts); got != want {
