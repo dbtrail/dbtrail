@@ -124,7 +124,7 @@ at a non-MySQL server is **not** supported.
 |---|---|---|---|
 | **MySQL** 8.0, 8.4 and 9.7 LTS (incl. Percona, RDS, Aurora, Cloud SQL) | Supported | ROW-format binlog over the replication protocol | [streaming.md](./streaming.md) |
 | **MariaDB** 10.11+ (10.11, 11.4, 11.8 and 12.3 tested) | Supported | ROW-format binlog (MariaDB GTID) | [mariadb.md](./mariadb.md) |
-| **PostgreSQL** 14+ | Beta — via the separate `bintrail-pg` binary | Logical replication (`pgoutput`) | [postgres.md](./postgres.md) |
+| **PostgreSQL** 15 to 18 (14 may work, best effort) | Beta — via the separate `bintrail-pg` binary | Logical replication (`pgoutput`) | [postgres.md](./postgres.md) |
 
 **We install nothing in your source database.** DBTrail connects as an ordinary
 read-only replication client. For PostgreSQL specifically, capture uses the
