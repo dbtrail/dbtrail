@@ -82,6 +82,11 @@ out.elsewhere = { extra: extra(f), plain: pick(body(f)) };
 f = show({ monitor: true }, null);
 out.fresh = { extra: extra(f), remove: !!f.elements.route_remove, body: pick(body(f)) };
 out.hint = vm.runInContext("FORWARDING_HINT", ctx);
+out.hintPG = vm.runInContext("FORWARDING_HINT_PG", ctx);
+f = show({ monitor: true }, { ...saved, flavor: "postgres" });
+out.pgPrefill = { user: f.elements.route_user.value, extra: extra(f), remove: !!f.elements.route_remove, plain: pick(body(f)) };
+f.elements.route_password.value = "pg-pw";
+out.pgPassword = pick(body(f));
 console.log(JSON.stringify(out));
 `
 	path := filepath.Join(t.TempDir(), "forwarding.js")
@@ -109,8 +114,14 @@ console.log(JSON.stringify(out));
 			User, Password, Placeholder, Extra string
 			Remove                             bool
 		}
-		PlainSave, NewPassword, NewUser, Set                                                                sent
-		Postgres, UnreadableRemoved                                                                         sent
+		PlainSave, NewPassword, NewUser, Set    sent
+		Postgres, UnreadableRemoved, PgPassword sent
+		PgPrefill                               struct {
+			User, Extra string
+			Remove      bool
+			Plain       sent
+		}
+		HintPG                                                                                              string
 		Emptied, Removed, RemovedWithPassword, RemovedWithUser, EmptiedWithPassword, UnreadablePasswordOnly struct {
 			Body    sent
 			Problem string
@@ -173,11 +184,24 @@ console.log(JSON.stringify(out));
 	if got.Set != (sent{HasUser: true, User: "report_ro", HasPassword: true, Password: "pw"}) {
 		t.Errorf("setting one sends %+v", got.Set)
 	}
-	// The fields are hidden for a PostgreSQL source: what was typed before
-	// the source type changed must not be sent, or the save fails on a field
-	// the reader cannot see.
-	if got.Postgres != nothing {
-		t.Errorf("a PostgreSQL source sends %+v, want no forwarding field", got.Postgres)
+	// A PostgreSQL source has the fields too (#2771): what was typed stays
+	// on screen when the source type changes, and is sent.
+	if got.Postgres != (sent{HasUser: true, User: "report_ro", HasPassword: true, Password: "pw"}) {
+		t.Errorf("a PostgreSQL source sends %+v, want the typed forwarding user and password", got.Postgres)
+	}
+	if got.PgPrefill.User != "report_ro" || !got.PgPrefill.Remove || got.PgPrefill.Plain != nothing {
+		t.Errorf("a PostgreSQL server with a forwarding account = %+v, want the user, the remove control and nothing sent on a plain save", got.PgPrefill)
+	}
+	if got.PgPassword != (sent{HasUser: true, User: "report_ro", HasPassword: true, Password: "pg-pw"}) {
+		t.Errorf("a PostgreSQL server's typed password sends %+v", got.PgPassword)
+	}
+	for _, want := range []string{"transaction block", "read-only", "never forwards with the account DBTrail captures with", "closes the connections"} {
+		if !strings.Contains(got.HintPG, want) {
+			t.Errorf("the PostgreSQL form hint lacks %q: %s", want, got.HintPG)
+		}
+	}
+	if strings.Contains(got.HintPG, "Engine Routing") || strings.Contains(got.HintPG, "MySQL") {
+		t.Errorf("the PostgreSQL form hint speaks of the MySQL port: %s", got.HintPG)
 	}
 	// A stored value the server could not read is SHOWN, kept by a plain
 	// save, and removable.
@@ -199,7 +223,7 @@ console.log(JSON.stringify(out));
 	if !strings.Contains(got.Hint, "closes the connections") {
 		t.Errorf("the form hint does not say a change closes the open connections: %s", got.Hint)
 	}
-	for name, text := range map[string]string{"prefill": got.Prefill.Extra, "unreadable": got.Unreadable.Extra, "capture": got.IsCapture.Extra, "elsewhere": got.Elsewhere.Extra, "emptied": got.Emptied.Problem, "hint": got.Hint} {
+	for name, text := range map[string]string{"prefill": got.Prefill.Extra, "unreadable": got.Unreadable.Extra, "capture": got.IsCapture.Extra, "elsewhere": got.Elsewhere.Extra, "emptied": got.Emptied.Problem, "hint": got.Hint, "hint pg": got.HintPG} {
 		if strings.Contains(text, "—") || strings.Contains(text, "undefined") {
 			t.Errorf("%s: holds an em dash or undefined: %s", name, text)
 		}

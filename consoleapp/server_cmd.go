@@ -353,6 +353,10 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 		if err := c.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
 			return err
 		}
+		if s.Flavor == console.FlavorPostgres {
+			fmt.Fprintf(out, "%q has no forwarding user now: the PostgreSQL port answers its clients from the copy alone, and a transaction block is not sent to your PostgreSQL.\n", s.Name)
+			return nil
+		}
 		fmt.Fprintf(out, "%q has no forwarding user now: with Engine Routing on, a statement the copy cannot answer is refused.\n", s.Name)
 		return nil
 	}
@@ -367,7 +371,7 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 	case !ask.Interactive():
 		return errors.New("no password: this is not a terminal, so it cannot be asked for. Use --password-stdin")
 	default:
-		if password, err = ask.Secret(fmt.Sprintf("Password of %s on your MySQL", user)); err != nil {
+		if password, err = ask.Secret(fmt.Sprintf("Password of %s on your %s", user, sourceWord(s))); err != nil {
 			return err
 		}
 	}
@@ -377,8 +381,21 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 	if err := setForwardUser(ctx, c, s, user, password); err != nil {
 		return err
 	}
+	if s.Flavor == console.FlavorPostgres {
+		fmt.Fprintf(out, "%q forwards as %s: the PostgreSQL port sends a client's transaction blocks to your PostgreSQL as that user, read-only.\n", s.Name, user)
+		return nil
+	}
 	fmt.Fprintf(out, "%q forwards as %s. Engine Routing uses it once it is on:  bintrail-console port routing on\n", s.Name, user)
 	return nil
+}
+
+// sourceWord names the database a server's source is, for the questions and
+// refusals about its forwarding user.
+func sourceWord(s ctlServer) string {
+	if s.Flavor == console.FlavorPostgres {
+		return "PostgreSQL"
+	}
+	return "MySQL"
 }
 
 // setForwardUser saves user as server s's forwarding account and checks
@@ -387,7 +404,7 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 // does nothing. Shared by `server forward-user` and `server add`.
 func setForwardUser(ctx context.Context, c *ctlClient, s ctlServer, user, password string) error {
 	if s.SourceUser != "" && user == s.SourceUser {
-		return fmt.Errorf("%s is the user DBTrail reads %q with, and the port never forwards as that one: it can read far more than an application should. Create another user on your MySQL, with the application's grants, and set that one", user, s.Name)
+		return fmt.Errorf("%s is the user DBTrail reads %q with, and the port never forwards as that one: it can read far more than an application should. Create another user on your %s, with the application's grants, and set that one", user, s.Name, sourceWord(s))
 	}
 	var saved ctlServer
 	if err := c.do(ctx, http.MethodPut, "/api/servers/"+s.ID+"/route", map[string]string{"user": user, "password": password}, &saved); err != nil {
@@ -399,7 +416,7 @@ func setForwardUser(ctx context.Context, c *ctlClient, s ctlServer, user, passwo
 	// Saved, and of no use: the daemon knows the capture user better than
 	// this command does (a name the list did not carry).
 	if saved.RouteIsCapture {
-		return fmt.Errorf("%s is the user DBTrail reads %q with, and the port never forwards as that one: it can read far more than an application should. Create another user on your MySQL, with the application's grants, and set that one", user, s.Name)
+		return fmt.Errorf("%s is the user DBTrail reads %q with, and the port never forwards as that one: it can read far more than an application should. Create another user on your %s, with the application's grants, and set that one", user, s.Name, sourceWord(s))
 	}
 	return nil
 }
@@ -498,7 +515,7 @@ func resolveAddInput(f addFlags, ask asker, stdin io.Reader) (addInput, error) {
 	case !pg && (in.Database != "" || in.Slot != "" || in.Publication != ""):
 		return addInput{}, errors.New("--database, --slot and --publication are a PostgreSQL's: add --flavor postgres")
 	case pg && (strings.TrimSpace(f.ForwardUser) != "" || f.NoForward):
-		return addInput{}, errors.New("a PostgreSQL has no forwarding user: its port answers from the copy alone. Leave --forward-user and --no-forward out")
+		return addInput{}, errors.New("a PostgreSQL's forwarding user is set once it is added, with its own command: bintrail-console server forward-user <server> -u <user> -p. Leave --forward-user and --no-forward out")
 	}
 	defaultPort := "3306"
 	if pg {

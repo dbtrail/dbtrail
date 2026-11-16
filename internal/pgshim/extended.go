@@ -50,6 +50,12 @@ type preparedStatement struct {
 	// paramOIDs is one type per parameter: the one the client declared, or
 	// 0 when it declared none.
 	paramOIDs []uint32
+	// declaredOIDs are the types as the client's Parse sent them, which is
+	// how the statement is parsed on the source (forward_ext.go).
+	declaredOIDs []uint32
+	// describedOnSource says the Describe the client got came from the
+	// source, not from the copy.
+	describedOnSource bool
 	// rd is who reads the statement once its arguments are written in.
 	rd reader
 	// describedNames are the columns a Describe of the statement named,
@@ -71,6 +77,9 @@ type portal struct {
 	stmt          *preparedStatement
 	text          string
 	resultFormats []int16
+	// onSource is set for a portal bound on the source (forward_ext.go):
+	// its Describe, Execute and Close are sent there.
+	onSource bool
 	// ran is set once the statement ran; what it answered is below.
 	ran   bool
 	empty bool
@@ -196,7 +205,8 @@ func (s *session) handleParse(m *pgproto3.Parse) {
 	}
 	oids := make([]uint32, n)
 	copy(oids, m.ParameterOIDs)
-	st := &preparedStatement{name: m.Name, query: m.Query, tmpl: tmpl, paramOIDs: oids, described: -1}
+	st := &preparedStatement{name: m.Name, query: m.Query, tmpl: tmpl, paramOIDs: oids, described: -1,
+		declaredOIDs: append([]uint32(nil), m.ParameterOIDs...)}
 	// Which parser reads the statement decides how an argument is written
 	// into it, and the arguments do not exist yet: ask with a stand-in.
 	if s.classify(st.probeText()).timeTravel {
@@ -234,6 +244,22 @@ func (s *session) handleBind(m *pgproto3.Bind) {
 	}
 	if perr := s.abortedRefusal(st.query); perr != nil {
 		s.extFail(perr)
+		return
+	}
+	if s.stmtToSource(st) {
+		// The source reads the arguments and the formats itself; only the
+		// port's own limits are asked here.
+		if m.DestinationPortal != "" {
+			if _, ok := s.ext.portals[m.DestinationPortal]; ok {
+				s.extFail(&pgErr{"42P03", fmt.Sprintf("portal %q already exists", m.DestinationPortal)})
+				return
+			}
+			if len(s.ext.portals) >= maxPortals {
+				s.extFail(&pgErr{"54000", fmt.Sprintf("this connection already has %d open portals, the most it keeps; close some", maxPortals)})
+				return
+			}
+		}
+		s.bindOnSource(st, m)
 		return
 	}
 	if len(m.Parameters) != len(st.paramOIDs) {
@@ -312,6 +338,10 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 			s.extFail(&pgErr{"26000", fmt.Sprintf("prepared statement %q does not exist", m.Name)})
 			return
 		}
+		if s.abortedRefusal(st.query) == nil && s.stmtToSource(st) {
+			s.describeOnSource(st)
+			return
+		}
 		cols, types, held, perr := s.describeStatement(st)
 		if perr != nil {
 			// What fails here PostgreSQL reports at Parse, where the
@@ -337,6 +367,10 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 		p, ok := s.ext.portals[m.Name]
 		if !ok {
 			s.extFail(&pgErr{"34000", fmt.Sprintf("portal %q does not exist", m.Name)})
+			return
+		}
+		if p.onSource {
+			s.describePortalOnSource(p)
 			return
 		}
 		if !p.ran {
@@ -797,6 +831,10 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		s.extFail(perr)
 		return
 	}
+	if p.onSource {
+		s.executeOnSource(p, m.MaxRows)
+		return
+	}
 	if perr := s.runPortal(p); perr != nil {
 		s.extFail(perr)
 		return
@@ -852,8 +890,20 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 func (s *session) handleClose(m *pgproto3.Close) {
 	switch m.ObjectType {
 	case 'S':
+		if st, ok := s.ext.stmts[m.Name]; ok {
+			// On the source a statement's portals close with it.
+			for pname, p := range s.ext.portals {
+				if p.stmt == st && p.onSource && s.up != nil {
+					delete(s.up.portals, pname)
+				}
+			}
+			s.closeOnSource('S', m.Name, st)
+		}
 		s.closeStatement(m.Name)
 	case 'P':
+		if p, ok := s.ext.portals[m.Name]; ok && p.onSource {
+			s.closeOnSource('P', m.Name, nil)
+		}
 		s.dropPortal(m.Name)
 	default:
 		s.extFail(&pgErr{"08P01", fmt.Sprintf("invalid CLOSE message subtype %d", m.ObjectType)})
@@ -880,6 +930,8 @@ func (s *session) closeStatement(name string) {
 // transaction block it ends the implicit transaction, and with it every
 // portal; then ReadyForQuery says the status.
 func (s *session) handleSync() error {
+	// The source's part of the batch ends first: its status is the block's.
+	s.syncOnSource()
 	s.ext.skip = false
 	// Outside a block the Sync ends the implicit transaction, and every
 	// portal with it. In a failed block no portal can run again (25P02):

@@ -67,7 +67,7 @@ func TestPortOnAndStatusWithPostgresServers(t *testing.T) {
 			}
 			text := out.String()
 			for _, s := range []string{"The port for SQL clients is on.", `psql "host=10.0.0.5 port=5433 dbname=shop user=app sslmode=require"`,
-				"The database is the server's name", "nothing is sent to your PostgreSQL"} {
+				"The database is the server's name", "goes to your PostgreSQL as the server's forwarding user"} {
 				if !strings.Contains(text, s) {
 					t.Errorf("output lacks %q:\n%s", s, text)
 				}

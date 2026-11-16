@@ -62,8 +62,8 @@ func TestResolveAddInputPostgres(t *testing.T) {
 			ask: fakeAsker{tty: true, secret: "pw", lines: map[string]string{"Database": ""}}, wantErr: "no database"},
 		{name: "a slot PostgreSQL would refuse", flags: addFlags{Flavor: "postgres", Database: "shop", Publication: "p", Slot: "Shop-Slot"}, cnf: pgcnf, wantErr: "cannot name a replication slot"},
 		{name: "a slot of 64 characters", flags: addFlags{Flavor: "postgres", Database: "shop", Publication: "p", Slot: strings.Repeat("a", 64)}, cnf: pgcnf, wantErr: "cannot name a replication slot"},
-		{name: "a forwarding user", flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: "shop", Publication: "p", ForwardUser: "app"}, wantErr: "no forwarding user"},
-		{name: "--no-forward", flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: "shop", Publication: "p", NoForward: true}, wantErr: "no forwarding user"},
+		{name: "a forwarding user", flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: "shop", Publication: "p", ForwardUser: "app"}, wantErr: "set once it is added"},
+		{name: "--no-forward", flags: addFlags{Host: "pg1", User: "u", Flavor: "postgres", Database: "shop", Publication: "p", NoForward: true}, wantErr: "set once it is added"},
 		// A PostgreSQL's options on a MySQL say the flavor was left out.
 		{name: "--database without the flavor", flags: addFlags{Host: "db1", User: "u", Database: "shop"}, wantErr: "--flavor postgres"},
 		{name: "--publication on a mariadb", flags: addFlags{Host: "db1", User: "u", Flavor: "mariadb", Publication: "p"}, wantErr: "--flavor postgres"},
