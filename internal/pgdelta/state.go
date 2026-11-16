@@ -20,18 +20,23 @@ import (
 // (SeqColumn, six digits, so its text orders as the number does). Keys are
 // compared as their bytes (encode), whatever collation the session has: two
 // keys that differ only in case, or in an accent, are two rows.
+//
+// Every read turns Hive partitioning off: a folder named "env=prod" above
+// the files would otherwise add a column "env" to the table. A file listed
+// twice is read once.
 func StateSQL(base string, dead, rows []string) string {
+	dead, rows = unique(dead), unique(rows)
 	if len(dead) == 0 && len(rows) == 0 {
-		return "SELECT * FROM read_parquet(" + quote(base) + ")"
+		return "SELECT * FROM read_parquet(" + quote(base) + noHive + ")"
 	}
 	var b strings.Builder
-	b.WriteString("SELECT bintrail_b.* EXCLUDE (file_row_number) FROM read_parquet(" + quote(base) + ", file_row_number=true) AS bintrail_b")
+	b.WriteString("SELECT bintrail_b.* EXCLUDE (file_row_number) FROM read_parquet(" + quote(base) + ", file_row_number=true" + noHive + ") AS bintrail_b")
 	if len(dead) > 0 {
-		b.WriteString(" WHERE NOT EXISTS (SELECT 1 FROM read_parquet(" + list(dead) + ") AS bintrail_d" +
+		b.WriteString(" WHERE NOT EXISTS (SELECT 1 FROM read_parquet(" + list(dead) + noHive + ") AS bintrail_d" +
 			` WHERE bintrail_d."` + baseline.TableDeltaPosColumn + `" = bintrail_b.file_row_number)`)
 	}
 	if len(rows) > 0 {
-		src := "read_parquet(" + list(rows) + ", union_by_name=true)"
+		src := "read_parquet(" + list(rows) + ", union_by_name=true" + noHive + ")"
 		b.WriteString(" UNION ALL BY NAME SELECT bintrail_n.* EXCLUDE (" + KeyColumn + ", " + OpColumn + ", " + SeqColumn + ")" +
 			" FROM " + src + " AS bintrail_n" +
 			" JOIN (SELECT encode(" + KeyColumn + ") AS bintrail_k, max(" + SeqColumn + ") AS bintrail_s FROM " + src + " GROUP BY 1) AS bintrail_m" +
@@ -39,6 +44,23 @@ func StateSQL(base string, dead, rows []string) string {
 			" WHERE bintrail_n." + OpColumn + " = '" + OpPut + "'")
 	}
 	return b.String()
+}
+
+// noHive is the read_parquet option that keeps folder names out of the
+// columns.
+const noHive = ", hive_partitioning=false"
+
+// unique is paths with each one once, in its first place.
+func unique(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // quote is s as a SQL string literal.

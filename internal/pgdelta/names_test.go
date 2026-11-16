@@ -96,6 +96,14 @@ func TestChainOf(t *testing.T) {
 		t.Fatalf("the table with a dot in its name: %+v, %v", c, err)
 	}
 
+	// A path or a bucket key in place of a file's name: an error, never a
+	// chain that reads as empty.
+	for _, withFolder := range []string{"public/orders.000000.pgnew", `public\orders.000000.pgdead`, "s3://b/k/orders.000000.pgnew"} {
+		if c, err := ChainOf("orders", append(pair("000000"), withFolder)); err == nil || errors.Is(err, ErrBrokenChain) {
+			t.Errorf("a name with a folder (%s): %+v, %v; want an error of its own", withFolder, c, err)
+		}
+	}
+
 	for name, names := range map[string][]string{
 		"half a pair, the rows":           {"orders.000000.pgnew"},
 		"half a pair, the dead rows":      {"orders.000000.pgdead"},

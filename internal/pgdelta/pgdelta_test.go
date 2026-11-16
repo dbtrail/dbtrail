@@ -94,8 +94,13 @@ func pair(t *testing.T, db *sql.DB, base string, seq int, cols, keyCols []string
 		positions = append(positions, p)
 	}
 	sort.Slice(positions, func(i, j int) bool { return positions[i] < positions[j] })
+	prevRun := ""
+	if seq > 0 {
+		prevRun = fmt.Sprintf("run-%d", seq-1)
+	}
 	dead, rows, _, err = WritePair(PairInput{
-		BasePath: base, Seq: seq, Base: "base-1", Run: fmt.Sprintf("run-%d", seq), Columns: cols, Dead: positions,
+		BasePath: base, Seq: seq, Base: "base-1", Run: fmt.Sprintf("run-%d", seq), PrevRun: prevRun,
+		Columns: cols, KeyColumns: keyCols, Dead: positions,
 		Changes: func(yield func(Change) error) error {
 			for _, c := range changes {
 				ch := Change{Key: c.key, Delete: c.del}
@@ -327,7 +332,8 @@ func TestWritePairRefuses(t *testing.T) {
 		}
 	}
 	row := func(k string) Change { return Change{Key: k, Values: []string{k, "x"}, Nulls: []bool{false, false}} }
-	good := PairInput{BasePath: base, Seq: 0, Base: "b", Run: "r", Columns: []string{"id", "val"}, Dead: []int64{0, 5}, Changes: one(row("1"), row("2"))}
+	good := PairInput{BasePath: base, Seq: 0, Base: "b", Run: "r", Columns: []string{"id", "val"}, KeyColumns: []string{"id"},
+		Dead: []int64{0, 5}, Changes: one(row("1"), row("2"))}
 	with := func(f func(*PairInput)) PairInput { in := good; f(&in); return in }
 	cases := []struct {
 		name string
@@ -337,7 +343,25 @@ func TestWritePairRefuses(t *testing.T) {
 		{"a column named as the pair's key", with(func(in *PairInput) { in.Columns = []string{"id", KeyColumn} }), ErrReservedColumn},
 		{"a column named as the pair's sequence", with(func(in *PairInput) { in.Columns = []string{SeqColumn, "val"} }), ErrReservedColumn},
 		{"a column named file_row_number", with(func(in *PairInput) { in.Columns = []string{"id", "file_row_number"} }), ErrReservedColumn},
-		{"a column named twice", with(func(in *PairInput) { in.Columns = []string{"id", "id"} }), nil},
+		{"a column named twice", with(func(in *PairInput) { in.Columns = []string{"id", "id"} }), ErrReservedColumn},
+		// The engine that reads the files sets case aside.
+		{"two columns that differ by case", with(func(in *PairInput) { in.Columns = []string{"id", "ID"} }), ErrReservedColumn},
+		{"the pair's key column in capitals", with(func(in *PairInput) { in.Columns = []string{"id", "BINTRAIL_PK"} }), ErrReservedColumn},
+		{"File_Row_Number", with(func(in *PairInput) { in.Columns = []string{"id", "File_Row_Number"} }), ErrReservedColumn},
+		{"no key column", with(func(in *PairInput) { in.KeyColumns = nil }), nil},
+		{"a key column the table does not have", with(func(in *PairInput) { in.KeyColumns = []string{"nope"} }), nil},
+		{"a key column in another case", with(func(in *PairInput) { in.KeyColumns = []string{"ID"} }), nil},
+		{"a row filed under another row's key", with(func(in *PairInput) {
+			in.Changes = one(Change{Key: "1", Values: []string{"2", "x"}, Nulls: []bool{false, false}})
+		}), nil},
+		{"a row with no value in its key column", with(func(in *PairInput) {
+			in.Changes = one(Change{Key: "1", Values: []string{"1", "x"}, Nulls: []bool{true, false}})
+		}), nil},
+		{"more dead rows than changed keys", with(func(in *PairInput) { in.Dead = []int64{0, 5, 9} }), nil},
+		{"dead rows and no changed key", with(func(in *PairInput) { in.Changes = one() }), nil},
+		{"the first pair with a pair before it", with(func(in *PairInput) { in.PrevRun = "r0" }), nil},
+		{"a later pair with none before it", with(func(in *PairInput) { in.Seq = 1 }), nil},
+		{"a table file in a bucket", with(func(in *PairInput) { in.BasePath = "s3://bucket/snap/public/t.parquet" }), nil},
 		{"no column", with(func(in *PairInput) { in.Columns = nil }), nil},
 		{"dead rows out of order", with(func(in *PairInput) { in.Dead = []int64{5, 0} }), nil},
 		{"a dead row twice", with(func(in *PairInput) { in.Dead = []int64{3, 3} }), nil},
@@ -369,14 +393,83 @@ func TestWritePairRefuses(t *testing.T) {
 			if len(left) != 0 {
 				t.Errorf("a refused pair left files: %v", left)
 			}
+			// And made no folder named after a URL.
+			if _, err := os.Stat("s3:"); err == nil {
+				os.RemoveAll("s3:")
+				t.Error("a table file in a bucket was written as a local folder named s3:")
+			}
 		})
 	}
 	// A deletion alone, and dead rows alone, are pairs.
 	if _, _, keys, err := WritePair(with(func(in *PairInput) { in.Dead, in.Changes = nil, one(Change{Key: "9", Delete: true}) })); err != nil || keys != 1 {
 		t.Fatalf("a deletion alone: %d, %v", keys, err)
 	}
-	if _, _, keys, err := WritePair(with(func(in *PairInput) { in.Seq, in.Changes = 1, one() })); err != nil || keys != 0 {
-		t.Fatalf("dead rows alone: %d, %v", keys, err)
+
+	// A pair is written once. A second write of the same sequence is
+	// refused, whether it would have succeeded or failed, and the pair that
+	// was there is still there, whole.
+	dir := t.TempDir()
+	in := with(func(in *PairInput) { in.BasePath = filepath.Join(dir, "t.parquet") })
+	dead, rows, _, err := WritePair(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := func() [2]int64 {
+		var out [2]int64
+		for i, f := range []string{dead, rows} {
+			st, err := os.Stat(f)
+			if err != nil {
+				t.Fatalf("the pair that was there is gone: %v", err)
+			}
+			out[i] = st.Size()
+		}
+		return out
+	}
+	sizes := before()
+	for name, again := range map[string]PairInput{
+		"the same write again": in,
+		"a write that fails":   func() PairInput { x := in; x.Changes = one(row("2"), row("1")); return x }(),
+		"a write with nothing": func() PairInput { x := in; x.Dead, x.Changes = nil, one(); return x }(),
+	} {
+		if _, _, _, err := WritePair(again); !errors.Is(err, ErrPairExists) {
+			t.Errorf("%s over a pair that is there: %v, want ErrPairExists", name, err)
+		}
+		if got := before(); got != sizes {
+			t.Errorf("%s changed the pair that was there: sizes %v, were %v", name, got, sizes)
+		}
+	}
+	// Half a pair left by something else is not written over either.
+	half := with(func(in *PairInput) { in.BasePath = filepath.Join(t.TempDir(), "t.parquet") })
+	_, lone, _ := Paths(half.BasePath, 0)
+	if err := os.WriteFile(lone, []byte("not ours"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := WritePair(half); !errors.Is(err, ErrPairExists) {
+		t.Errorf("a write beside half a pair: %v, want ErrPairExists", err)
+	}
+	if b, _ := os.ReadFile(lone); string(b) != "not ours" {
+		t.Errorf("the file that was there was replaced")
+	}
+	// Nothing is left under a name still being written.
+	if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) != 0 {
+		t.Errorf("files still being written were left: %v", left)
+	}
+}
+
+// The key's columns are checked in the order the index writes a key in: on
+// a table (a, b) the key is "a|b" whatever order the primary key declares.
+func TestWritePairChecksTheKeyOrder(t *testing.T) {
+	change := func(yield func(Change) error) error {
+		return yield(Change{Key: "1|x", Values: []string{"1", "x", "v"}, Nulls: []bool{false, false, false}})
+	}
+	in := PairInput{Seq: 0, Base: "b", Run: "r", Columns: []string{"a", "b", "val"}, Changes: change}
+	in.BasePath, in.KeyColumns = filepath.Join(t.TempDir(), "t.parquet"), []string{"a", "b"}
+	if _, _, keys, err := WritePair(in); err != nil || keys != 1 {
+		t.Fatalf("the table's order: %d, %v", keys, err)
+	}
+	in.BasePath, in.KeyColumns = filepath.Join(t.TempDir(), "t.parquet"), []string{"b", "a"}
+	if _, _, _, err := WritePair(in); err == nil || !strings.Contains(err.Error(), `make "x|1"`) {
+		t.Fatalf("the key's columns the other way round: %v", err)
 	}
 }
 
@@ -385,6 +478,7 @@ func TestCheckChain(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	base := filepath.Join(dir, "t.parquet")
+	tcols := []string{"val", "id"} // any order
 	writeBase(t, base, []string{"id", "val"}, []cell{v("1"), v("a")}, []cell{v("2"), v("b")})
 	up := func(k, val string) change { return change{key: k, row: []cell{v(k), v(val)}} }
 	pair(t, db, base, 0, []string{"id", "val"}, []string{"id"}, up("1", "x"))
@@ -405,18 +499,25 @@ func TestCheckChain(t *testing.T) {
 	if err != nil || len(chain.Pairs) != 2 {
 		t.Fatalf("ChainOf: %+v, %v", chain, err)
 	}
-	last, err := CheckChain(ctx, db, dir, chain, "base-1")
+	last, err := CheckChain(ctx, db, dir, chain, "base-1", tcols)
 	if err != nil || last[MetaKeySeq] != "1" || last[baseline.MetaKeyLSN] != "4096" || last[MetaKeyRun] != "run-1" {
 		t.Fatalf("a whole chain: %v, %v", last, err)
 	}
-	if last, err := CheckChain(ctx, db, dir, Chain{Table: "t"}, "base-1"); err != nil || last != nil {
+	if last, err := CheckChain(ctx, db, dir, Chain{Table: "t"}, "base-1", tcols); err != nil || last != nil {
 		t.Fatalf("an empty chain: %v, %v", last, err)
 	}
-	if _, err := CheckChain(ctx, db, dir, chain, "another-base"); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "another table file") {
+	if _, err := CheckChain(ctx, db, dir, chain, "another-base", tcols); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "another table file") {
 		t.Fatalf("a chain of another base: %v", err)
 	}
-	if _, err := CheckChain(ctx, db, dir, chain, ""); err == nil {
+	if _, err := CheckChain(ctx, db, dir, chain, "", tcols); err == nil {
 		t.Fatal("no base id gave no error")
+	}
+	// The table file has a column the pairs were not written with (or lacks
+	// one): their rows would read as NULL there.
+	for _, other := range [][]string{{"id", "val", "added"}, {"id"}, {"id", "VAL"}, nil} {
+		if _, err := CheckChain(ctx, db, dir, chain, "base-1", other); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "written with the columns") {
+			t.Fatalf("pairs of other columns than %v: %v", other, err)
+		}
 	}
 
 	// The second pair's rows, written again by another run: the two files of
@@ -425,8 +526,8 @@ func TestCheckChain(t *testing.T) {
 	if err := os.Remove(r1); err != nil {
 		t.Fatal(err)
 	}
-	_, other, _, err := WritePair(PairInput{BasePath: filepath.Join(dir, "other", "t.parquet"), Seq: 1, Base: "base-1", Run: "another-run",
-		Columns: []string{"id", "val"}, Changes: func(yield func(Change) error) error {
+	_, other, _, err := WritePair(PairInput{BasePath: filepath.Join(dir, "other", "t.parquet"), Seq: 1, Base: "base-1", Run: "another-run", PrevRun: "run-0",
+		Columns: []string{"id", "val"}, KeyColumns: []string{"id"}, Changes: func(yield func(Change) error) error {
 			return yield(Change{Key: "2", Values: []string{"2", "z"}, Nulls: []bool{false, false}})
 		}})
 	if err != nil {
@@ -435,8 +536,34 @@ func TestCheckChain(t *testing.T) {
 	if err := os.Rename(other, r1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CheckChain(ctx, db, dir, chain, "base-1"); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "different writes") {
+	if _, err := CheckChain(ctx, db, dir, chain, "base-1", tcols); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "different writes") {
 		t.Fatalf("a pair from two writes: %v", err)
+	}
+
+	// Both files of the second pair from that other write: a whole pair, of
+	// the right number, that another writer put there. It was written after
+	// a pair this chain does not hold.
+	otherDead, _, _ := Paths(filepath.Join(dir, "other", "t.parquet"), 1)
+	if err := os.Rename(otherDead, d1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckChain(ctx, db, dir, chain, "base-1", tcols); err != nil {
+		t.Fatalf("a pair that follows the one before it, from another run: %v", err)
+	}
+	if err := os.Remove(d1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(r1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := WritePair(PairInput{BasePath: base, Seq: 1, Base: "base-1", Run: "run-1b", PrevRun: "a-pair-0-of-another-writer",
+		Columns: []string{"id", "val"}, KeyColumns: []string{"id"}, Changes: func(yield func(Change) error) error {
+			return yield(Change{Key: "2", Values: []string{"2", "w"}, Nulls: []bool{false, false}})
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckChain(ctx, db, dir, chain, "base-1", tcols); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "does not follow the pair before it") {
+		t.Fatalf("a pair written after another pair 0: %v", err)
 	}
 
 	// A file under the name of another sequence.
@@ -444,32 +571,35 @@ func TestCheckChain(t *testing.T) {
 	if err := os.Rename(d1, d0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CheckChain(ctx, db, dir, Chain{Table: "t", Pairs: chain.Pairs[:1]}, "base-1"); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "says it is pair") {
+	if _, err := CheckChain(ctx, db, dir, Chain{Table: "t", Pairs: chain.Pairs[:1]}, "base-1", tcols); !errors.Is(err, ErrBrokenChain) || !strings.Contains(err.Error(), "says it is pair") {
 		t.Fatalf("a file under another sequence's name: %v", err)
 	}
 	// A file that is not there.
-	if _, err := CheckChain(ctx, db, dir, chain, "base-1"); err == nil {
+	if _, err := CheckChain(ctx, db, dir, chain, "base-1", tcols); err == nil {
 		t.Fatal("a missing file gave no error")
 	}
 }
 
 func TestBaseID(t *testing.T) {
 	taken := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
-	good := baseline.DumpMetadata{LSN: 0x500, PGDeltaSince: "2026-11-15T09:59:00Z", SnapshotTimestamp: taken}
-	id, err := BaseID(good, 1234)
+	good := baseline.DumpMetadata{LSN: 0x500, PGDeltaSince: "2026-11-15T09:59:00Z", SnapshotTimestamp: taken, RenderGUCs: baseline.RenderGUCsPinned}
+	id, err := BaseID(good, 1234, 10)
 	if err != nil || id == "" {
 		t.Fatalf("BaseID: %q, %v", id, err)
 	}
 	// Any part that differs is another base.
 	for name, other := range map[string]func() (string, error){
-		"another LSN":   func() (string, error) { m := good; m.LSN++; return BaseID(m, 1234) },
-		"another bound": func() (string, error) { m := good; m.PGDeltaSince = "2026-11-15T09:58:00Z"; return BaseID(m, 1234) },
+		"another LSN":   func() (string, error) { m := good; m.LSN++; return BaseID(m, 1234, 10) },
+		"another bound": func() (string, error) { m := good; m.PGDeltaSince = "2026-11-15T09:58:00Z"; return BaseID(m, 1234, 10) },
 		"another time": func() (string, error) {
 			m := good
 			m.SnapshotTimestamp = taken.Add(time.Microsecond)
-			return BaseID(m, 1234)
+			return BaseID(m, 1234, 10)
 		},
-		"another size": func() (string, error) { return BaseID(good, 1235) },
+		"another size": func() (string, error) { return BaseID(good, 1235, 10) },
+		// Two tables of one snapshot share everything above but these two.
+		"another row count": func() (string, error) { return BaseID(good, 1234, 11) },
+		"no row":            func() (string, error) { return BaseID(good, 1234, 0) },
 	} {
 		if got, err := other(); err != nil || got == id {
 			t.Errorf("%s: %q, %v; want another id than %q", name, got, err, id)
@@ -478,17 +608,67 @@ func TestBaseID(t *testing.T) {
 	// The same instant in another zone is the same base.
 	m := good
 	m.SnapshotTimestamp = taken.In(time.FixedZone("x", 3*3600))
-	if got, _ := BaseID(m, 1234); got != id {
+	if got, _ := BaseID(m, 1234, 10); got != id {
 		t.Errorf("the same instant in another zone: %q, want %q", got, id)
 	}
 	for name, bad := range map[string]func() (string, error){
-		"no LSN":   func() (string, error) { m := good; m.LSN = 0; return BaseID(m, 1234) },
-		"no bound": func() (string, error) { m := good; m.PGDeltaSince = ""; return BaseID(m, 1234) },
-		"no time":  func() (string, error) { m := good; m.SnapshotTimestamp = time.Time{}; return BaseID(m, 1234) },
-		"no size":  func() (string, error) { return BaseID(good, 0) },
+		"no LSN":   func() (string, error) { m := good; m.LSN = 0; return BaseID(m, 1234, 10) },
+		"no bound": func() (string, error) { m := good; m.PGDeltaSince = ""; return BaseID(m, 1234, 10) },
+		"no time":  func() (string, error) { m := good; m.SnapshotTimestamp = time.Time{}; return BaseID(m, 1234, 10) },
+		"no size":  func() (string, error) { return BaseID(good, 0, 10) },
+		"no record of the settings its values were rendered under": func() (string, error) {
+			m := good
+			m.RenderGUCs = ""
+			return BaseID(m, 1234, 10)
+		},
+		"a row count below zero": func() (string, error) { return BaseID(good, 1234, -1) },
 	} {
 		if got, err := bad(); err == nil {
 			t.Errorf("%s: %q, want an error", name, got)
 		}
 	}
+}
+
+// A chain past its tenth pair, a pair with no dead row (an insert alone, a
+// deletion of a key the base never held), the files under a folder named
+// like a Hive partition, and a file listed twice.
+func TestStateOfALongChain(t *testing.T) {
+	db := duck(t)
+	base := filepath.Join(t.TempDir(), "env=prod", "public", "t.parquet")
+	cols, key := []string{"id", "val"}, []string{"id"}
+	writeBase(t, base, cols, []cell{v("1"), v("base")}, []cell{v("2"), v("base")})
+	if n, err := BaseRows(context.Background(), db, base); err != nil || n != 2 {
+		t.Fatalf("BaseRows = %d, %v", n, err)
+	}
+	var dead, rows []string
+	for seq := range 12 {
+		changes := []change{{key: "1", row: []cell{v("1"), v(fmt.Sprintf("v%d", seq))}}}
+		switch seq {
+		case 3: // an insert alone would have no dead row; with it, one.
+			changes = append(changes, change{key: "3", row: []cell{v("3"), v("new")}})
+		case 7:
+			changes = []change{{key: "9", del: true}} // a key the base never held: no dead row at all
+		case 10:
+			changes = append(changes, change{key: "3", del: true})
+		}
+		d, r := pair(t, db, base, seq, cols, key, changes...)
+		dead, rows = append(dead, d), append(rows, r)
+	}
+	got := state(t, db, base, dead, rows, cols...)
+	want(t, "twelve pairs", got, "[1] [v11]", "[2] [base]")
+	// The folder's name is not a column.
+	rs, err := db.Query("SELECT * FROM (" + StateSQL(base, dead, rows) + ") LIMIT 0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, _ := rs.Columns()
+	rs.Close()
+	sort.Strings(names)
+	if !reflect.DeepEqual(names, []string{"id", "val"}) {
+		t.Fatalf("columns = %v", names)
+	}
+	// A file named twice is read once.
+	want(t, "every file listed twice", state(t, db, base, append(dead, dead...), append(rows, rows...), cols...), got...)
+	// Up to the tenth pair only: pair 9's row, not pair 10's or 11's.
+	want(t, "the first ten pairs", state(t, db, base, dead[:10], rows[:10], cols...), "[1] [v9]", "[2] [base]", "[3] [new]")
 }

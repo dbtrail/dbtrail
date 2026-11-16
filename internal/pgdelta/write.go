@@ -1,10 +1,13 @@
 package pgdelta
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 )
@@ -27,6 +30,16 @@ const (
 	MetaKeyBase = "bintrail.pgdelta_base"
 	MetaKeySeq  = "bintrail.pgdelta_seq"
 	MetaKeyRun  = "bintrail.pgdelta_run"
+	// MetaKeyPrev is the run of the pair before this one, empty on pair 0:
+	// a pair replaced by another write under the same number breaks the
+	// link. MetaKeyColumns is the table's columns the pair was written
+	// with, sorted, as JSON.
+	MetaKeyPrev    = "bintrail.pgdelta_prev"
+	MetaKeyColumns = "bintrail.pgdelta_columns"
+
+	// tmpSuffix ends a file still being written. ParseName refuses it, so a
+	// write cut short is never part of a chain.
+	tmpSuffix = ".tmp"
 )
 
 // reservedColumns are names a table cannot have a column of and be given a
@@ -42,12 +55,23 @@ var ErrReservedColumn = errors.New("the table has a column named like one a Post
 var ErrNothingToWrite = errors.New("a PostgreSQL table delta with nothing in it")
 
 // BaseID names a base file for the pairs beside it: its LSN floor, its time
-// bound, when its snapshot was taken, and its size. A pair's dead rows are
-// row NUMBERS of one file; on another file they would remove other rows, and
-// nothing would say so. Every part must be there: a base with no LSN or no
-// recorded bound is not one a chain may start on.
-func BaseID(meta baseline.DumpMetadata, size int64) (string, error) {
+// bound, when its snapshot was taken, its size and how many rows it holds. A
+// pair's dead rows are row NUMBERS of one file; on another file they would
+// remove other rows, and nothing would say so. The first three are the same
+// for every table of one snapshot, so the size and the row count are what
+// tell two files of one run apart. Every part must be there: a base with no
+// LSN, no recorded bound, or no record of the settings its values were
+// rendered under (a key rendered under another time zone is another key) is
+// not one a chain may start on.
+//
+// The same file linked into a later snapshot folder has the same id, which
+// is right: its row numbers are the same.
+func BaseID(meta baseline.DumpMetadata, size, rowCount int64) (string, error) {
 	switch {
+	case meta.RenderGUCs == "":
+		return "", errors.New("pgdelta: the base file does not record the settings its values were rendered under")
+	case rowCount < 0:
+		return "", errors.New("pgdelta: the base file has no row count")
 	case meta.LSN == 0:
 		return "", errors.New("pgdelta: the base file records no LSN")
 	case meta.PGDeltaSince == "":
@@ -57,8 +81,8 @@ func BaseID(meta baseline.DumpMetadata, size int64) (string, error) {
 	case size <= 0:
 		return "", errors.New("pgdelta: the base file has no size")
 	}
-	return fmt.Sprintf("lsn=%d since=%s taken=%s size=%d", meta.LSN, meta.PGDeltaSince,
-		meta.SnapshotTimestamp.UTC().Format("2006-01-02T15:04:05.000000Z"), size), nil
+	return fmt.Sprintf("lsn=%d since=%s taken=%s size=%d rows=%d", meta.LSN, meta.PGDeltaSince,
+		meta.SnapshotTimestamp.UTC().Format("2006-01-02T15:04:05.000000Z"), size, rowCount), nil
 }
 
 // Change is one key a window changed, as the window left it.
@@ -82,11 +106,18 @@ type PairInput struct {
 	BasePath string
 	Seq      int
 	// Base is BaseID of that file and Run a value of the caller's that no
-	// other write has.
-	Base, Run string
+	// other write has. PrevRun is the Run of the pair before this one, and
+	// empty for pair 0.
+	Base, Run, PrevRun string
 	// Columns names the table's columns, in the order every Change's Values
 	// follow.
 	Columns []string
+	// KeyColumns names the key's columns in the order the index writes a
+	// key in: the columns' position in the TABLE, not the order the primary
+	// key declares them. Every row written is checked against its Key with
+	// them, so a key built in another order, or a row filed under another
+	// row's key, stops the write. Required.
+	KeyColumns []string
 	// Dead is the row numbers of the base file the window killed (a row it
 	// changed or deleted), ascending, none twice.
 	Dead []int64
@@ -98,9 +129,22 @@ type PairInput struct {
 	Metadata map[string]string
 }
 
+// ErrPairExists says a file of the pair asked for is already there. A pair
+// is written once: writing over one a reader may hold, or removing it when
+// the second write fails, would take a published pair away.
+var ErrPairExists = errors.New("a PostgreSQL table delta of that sequence is already there")
+
 // WritePair writes the two files of a pair and returns their paths and how
-// many keys the .pgnew file holds. On any error neither file is left.
+// many keys the .pgnew file holds. Both are written under other names and
+// given theirs at the end, the .pgdead last: on any error neither is left,
+// a write cut short leaves nothing a chain takes, and a pair already there
+// is never touched.
 func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
+	// A local folder: the files are written with the operating system's
+	// calls, and "s3://bucket/…" would be made as a folder named "s3:".
+	if strings.Contains(in.BasePath, "://") {
+		return "", "", 0, fmt.Errorf("pgdelta: a pair is written beside a local table file, not %q", in.BasePath)
+	}
 	dead, rows, err = Paths(in.BasePath, in.Seq)
 	if err != nil {
 		return "", "", 0, err
@@ -108,18 +152,41 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 	if in.Base == "" || in.Run == "" {
 		return "", "", 0, errors.New("pgdelta: a pair needs its base's id and its run's")
 	}
-	seen := map[string]bool{}
-	for _, c := range in.Columns {
-		if reservedColumns[c] {
+	if (in.Seq == 0) != (in.PrevRun == "") {
+		return "", "", 0, fmt.Errorf("pgdelta: pair %d and the run before it (%q): the first pair has none and every other has one", in.Seq, in.PrevRun)
+	}
+	// The engine that reads these files does not tell names apart by case.
+	at := map[string]int{}
+	for i, c := range in.Columns {
+		low := strings.ToLower(c)
+		if reservedColumns[low] {
 			return "", "", 0, fmt.Errorf("%w: %q", ErrReservedColumn, c)
 		}
-		if c == "" || seen[c] {
-			return "", "", 0, fmt.Errorf("pgdelta: column %q is empty or named twice", c)
+		if _, twice := at[low]; c == "" || twice {
+			return "", "", 0, fmt.Errorf("%w: column %q is empty, or named twice once case is set aside", ErrReservedColumn, c)
 		}
-		seen[c] = true
+		at[low] = i
 	}
 	if len(in.Columns) == 0 {
 		return "", "", 0, errors.New("pgdelta: a table with no column")
+	}
+	if len(in.KeyColumns) == 0 {
+		return "", "", 0, errors.New("pgdelta: a pair needs the table's key columns")
+	}
+	keyAt := make([]int, len(in.KeyColumns))
+	for i, c := range in.KeyColumns {
+		j, ok := at[strings.ToLower(c)]
+		if !ok || in.Columns[j] != c {
+			return "", "", 0, fmt.Errorf("pgdelta: key column %q is not a column of the table", c)
+		}
+		keyAt[i] = j
+	}
+	for _, f := range []string{dead, rows} {
+		if _, serr := os.Lstat(f); serr == nil {
+			return "", "", 0, fmt.Errorf("%w: %s", ErrPairExists, f)
+		} else if !errors.Is(serr, os.ErrNotExist) {
+			return "", "", 0, fmt.Errorf("pgdelta: look for %s: %w", f, serr)
+		}
 	}
 	last := int64(-1)
 	for _, p := range in.Dead {
@@ -129,32 +196,62 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 		last = p
 	}
 
-	md := make(map[string]string, len(in.Metadata)+3)
+	md := make(map[string]string, len(in.Metadata)+5)
 	for k, v := range in.Metadata {
 		md[k] = v
 	}
-	md[MetaKeyBase], md[MetaKeyRun], md[MetaKeySeq] = in.Base, in.Run, strconv.Itoa(in.Seq)
+	md[MetaKeyBase], md[MetaKeyRun], md[MetaKeySeq], md[MetaKeyPrev] = in.Base, in.Run, strconv.Itoa(in.Seq), in.PrevRun
+	md[MetaKeyColumns] = columnsValue(in.Columns)
 
+	deadTmp, rowsTmp := dead+tmpSuffix, rows+tmpSuffix
 	defer func() {
+		// Only what this call made: never a file under a pair's own name.
+		os.Remove(deadTmp)
+		os.Remove(rowsTmp)
 		if err != nil {
-			os.Remove(dead)
-			os.Remove(rows)
 			dead, rows, keys = "", "", 0
 		}
 	}()
-	if keys, err = writeNew(rows, in, md); err != nil {
+	if keys, err = writeNew(rowsTmp, in, keyAt, md); err != nil {
 		return
 	}
-	if keys == 0 && len(in.Dead) == 0 {
+	if keys == 0 {
+		// No key changed, so no row of the base died either.
 		err = ErrNothingToWrite
+		if len(in.Dead) > 0 {
+			err = fmt.Errorf("pgdelta: %d dead rows and no changed key", len(in.Dead))
+		}
 		return
 	}
-	err = writeDead(dead, in.Dead, md)
+	// A dead row is the base's row of one changed key.
+	if int64(len(in.Dead)) > keys {
+		err = fmt.Errorf("pgdelta: %d dead rows for %d changed keys", len(in.Dead), keys)
+		return
+	}
+	if err = writeDead(deadTmp, in.Dead, md); err != nil {
+		return
+	}
+	// The rows first: with only them the pair is half a pair, which no
+	// chain takes. The dead rows' name is what makes it one.
+	if err = os.Rename(rowsTmp, rows); err != nil {
+		return
+	}
+	if err = os.Rename(deadTmp, dead); err != nil {
+		os.Remove(rows)
+	}
 	return
 }
 
+// columnsValue is columns as MetaKeyColumns holds them: sorted, as JSON.
+func columnsValue(columns []string) string {
+	sorted := append([]string{}, columns...)
+	sort.Strings(sorted)
+	b, _ := json.Marshal(sorted)
+	return string(b)
+}
+
 // writeNew writes the .pgnew file: the table's columns and the pair's three.
-func writeNew(path string, in PairInput, md map[string]string) (keys int64, err error) {
+func writeNew(path string, in PairInput, keyAt []int, md map[string]string) (keys int64, err error) {
 	cols := make([]baseline.Column, 0, len(in.Columns)+3)
 	for _, c := range append(append([]string{}, in.Columns...), KeyColumn, OpColumn, SeqColumn) {
 		cols = append(cols, baseline.Column{Name: c, RawText: true})
@@ -190,6 +287,17 @@ func writeNew(path string, in PairInput, md map[string]string) (keys int64, err 
 				op = OpPut
 				for i := range n {
 					values[i], nulls[i] = c.Values[i], c.Nulls[i]
+				}
+				// The row is the one its key names.
+				parts := make([]string, len(keyAt))
+				for i, j := range keyAt {
+					if c.Nulls[j] {
+						return fmt.Errorf("pgdelta: the row of key %q has no value in key column %s", c.Key, in.Columns[j])
+					}
+					parts[i] = c.Values[j]
+				}
+				if got := KeyOf(parts); got != c.Key {
+					return fmt.Errorf("pgdelta: a row whose key columns (%s) make %q was filed under key %q", strings.Join(in.KeyColumns, ", "), got, c.Key)
 				}
 			}
 			values[n], values[n+1], values[n+2] = c.Key, op, seq

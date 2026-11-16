@@ -100,10 +100,20 @@ var ErrBrokenChain = errors.New("the PostgreSQL table delta beside the table fil
 // chain. Files of other tables are ignored, also one whose name starts with
 // this table's ("orders" does not take "orders_old.000000.pgnew", nor
 // "orders.eu.000000.pgnew", which is the table "orders.eu").
+//
+// What the names cannot say is that the LAST pairs are missing: a chain cut
+// short is a whole chain. That is for whoever records which files a
+// snapshot holds.
 func ChainOf(table string, names []string) (Chain, error) {
 	type half struct{ dead, rows string }
 	found := map[int]*half{}
 	for _, name := range names {
+		// A base name, never a path or a key: with a folder in front the
+		// table would not match, every file would be skipped, and a chain
+		// that is there would read as none.
+		if strings.ContainsAny(name, `/\`) {
+			return Chain{}, fmt.Errorf("pgdelta: %q is a path, and a chain is listed by its files' names", name)
+		}
 		n, ok := ParseName(name)
 		if !ok || n.Table != table {
 			continue

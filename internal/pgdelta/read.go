@@ -25,9 +25,12 @@ func KeyOf(parts []string) string {
 }
 
 // BasePositions finds, in a base file, the row number of every key that
-// want reports true for. keyColumns are the key's columns in the key's
-// order. A key the file does not hold is absent from the answer: it is a
-// row the window inserted.
+// want reports true for. keyColumns are the key's columns in the order the
+// index writes a key in: their position in the TABLE, not the order the
+// primary key declares them (PRIMARY KEY (b, a) on a table (a, b) is the
+// key "a|b"). In another order no changed key is found, every old row
+// stays, and the new one is added beside it. A key the file does not hold
+// is absent from the answer: it is a row the window inserted.
 //
 // It reads the key columns of every row of the file: PostgreSQL values are
 // stored as text, so there is no index of keys to ask.
@@ -43,7 +46,7 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 		cols[i] = `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
 	}
 	rows, err := db.QueryContext(ctx, "SELECT file_row_number, "+strings.Join(cols, ", ")+
-		" FROM read_parquet("+quote(basePath)+", file_row_number=true)")
+		" FROM read_parquet("+quote(basePath)+", file_row_number=true"+noHive+")")
 	if err != nil {
 		return nil, fmt.Errorf("read the keys of %s: %w", basePath, err)
 	}
@@ -82,6 +85,15 @@ func BasePositions(ctx context.Context, db *sql.DB, basePath string, keyColumns 
 	return found, nil
 }
 
+// BaseRows is how many rows a base file holds, for BaseID.
+func BaseRows(ctx context.Context, db *sql.DB, basePath string) (int64, error) {
+	var n int64
+	if err := db.QueryRowContext(ctx, "SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata("+quote(basePath)+")").Scan(&n); err != nil {
+		return 0, fmt.Errorf("read the row count of %s: %w", basePath, err)
+	}
+	return n, nil
+}
+
 // Footer reads a file's own metadata, key by key.
 func Footer(ctx context.Context, db *sql.DB, file string) (map[string]string, error) {
 	rows, err := db.QueryContext(ctx, "SELECT decode(key), decode(value) FROM parquet_kv_metadata("+quote(file)+")")
@@ -104,16 +116,23 @@ func Footer(ctx context.Context, db *sql.DB, file string) (map[string]string, er
 }
 
 // CheckChain reads the footers of every file of chain, in the folder (or
-// s3:// prefix) dir, and refuses a chain that is not this base's: a file
-// written for another base file, one whose footer names another sequence
-// than its name, a pair whose two files come from different writes. It
-// returns the footer of the last pair's .pgnew file, which carries where
-// the next window starts; nil for an empty chain.
-func CheckChain(ctx context.Context, db *sql.DB, dir string, chain Chain, base string) (map[string]string, error) {
+// URL prefix) dir, and refuses a chain that is not this base's, whole: a
+// file written for another base file; one whose footer names another
+// sequence than its name; a pair whose two files come from different
+// writes; a pair that does not follow the one before it (another write put
+// a pair of that number in its place); a pair written with other columns
+// than the base's, whose rows would read as NULL in the columns one side
+// lacks. columns is the base file's columns, in any order.
+//
+// It returns the footer of the last pair's .pgnew file, which carries where
+// the next window starts and that pair's run; nil for an empty chain.
+func CheckChain(ctx context.Context, db *sql.DB, dir string, chain Chain, base string, columns []string) (map[string]string, error) {
 	if base == "" {
 		return nil, errors.New("pgdelta: a chain is checked against its base's id")
 	}
+	wantColumns := columnsValue(columns)
 	var last map[string]string
+	prev := ""
 	for _, p := range chain.Pairs {
 		var run string
 		for i, name := range []string{p.Dead, p.New} {
@@ -131,16 +150,23 @@ func CheckChain(ctx context.Context, db *sql.DB, dir string, chain Chain, base s
 				return nil, fmt.Errorf("%w: %s does not say which write it is from", ErrBrokenChain, file)
 			case i == 1 && md[MetaKeyRun] != run:
 				return nil, fmt.Errorf("%w: the two files of pair %0*d of %s are from different writes", ErrBrokenChain, seqWidth, p.Seq, chain.Table)
+			case md[MetaKeyPrev] != prev:
+				return nil, fmt.Errorf("%w: pair %0*d of %s does not follow the pair before it (it was written after %q, and that pair is %q)",
+					ErrBrokenChain, seqWidth, p.Seq, chain.Table, md[MetaKeyPrev], prev)
+			case md[MetaKeyColumns] != wantColumns:
+				return nil, fmt.Errorf("%w: %s was written with the columns %s, and the table file has %s", ErrBrokenChain, file, md[MetaKeyColumns], wantColumns)
 			}
 			run, last = md[MetaKeyRun], md
 		}
+		prev = run
 	}
 	return last, nil
 }
 
-// join is name under dir, a folder or an s3:// prefix.
+// join is name under dir, a folder or a URL prefix (s3://…), whose double
+// slash a path join would fold.
 func join(dir, name string) string {
-	if strings.HasPrefix(dir, "s3://") {
+	if strings.Contains(dir, "://") {
 		return strings.TrimSuffix(dir, "/") + "/" + name
 	}
 	return path.Join(dir, name)
