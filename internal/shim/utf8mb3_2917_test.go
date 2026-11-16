@@ -429,6 +429,14 @@ func TestRoutedSession_utf8mb3RemembersAStatement_2917(t *testing.T) {
 	if rig.last() != "copy/expensive_plan" || rig.f.calls != calls+1 {
 		t.Errorf("after SET NAMES utf8mb4 observed %s after %d more copy run(s), want the copy", rig.last(), rig.f.calls-calls)
 	}
+	// And back to utf8mb3: the session was read again, so what was
+	// remembered is gone and the copy is asked once more.
+	rig.run(t, "SET NAMES utf8mb3")
+	rig.r.src.cs, rig.r.src.csConn = "utf8mb3", "utf8mb3"
+	calls = rig.f.calls
+	if got := firstCell(t, rig.run(t, stmt)); got != "mysql" || rig.f.calls != calls+1 {
+		t.Errorf("back under utf8mb3: answered by %s after %d more copy run(s), want mysql after the copy was asked again", got, rig.f.calls-calls)
+	}
 }
 
 // The memory is bounded: past narrowMemoSize the oldest is forgotten.
