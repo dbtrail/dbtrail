@@ -2464,6 +2464,10 @@ func writeStateViews(b *strings.Builder, in Input) bool {
 // writeStateBody writes one state view's body, ending in ";\n".
 func writeStateBody(b *strings.Builder, in Input, t BaselineTable) {
 	{
+		if body, ok := pgPairStateBody(in, t); ok {
+			fmt.Fprintf(b, "  %s;\n", body)
+			return
+		}
 		if t.Tail != nil && !in.Follow.follows() {
 			fmt.Fprintf(b, "  %s;\n", tailStateBody(t))
 			return
