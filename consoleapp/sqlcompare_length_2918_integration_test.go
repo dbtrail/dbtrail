@@ -23,8 +23,8 @@ import (
 // and CHARACTER_LENGTH of a text column in utf8mb4 or utf8mb3 are answered
 // by the copy with MySQL's numbers, under a collation that compares like the
 // copy and under one that does not (utf8mb4_general_ci); over a latin1 or
-// binary column, or an expression, they stay on MySQL, and so does AVG
-// (#2806) whatever the collation.
+// binary column, or an expression, they stay on MySQL, and so does AVG of
+// them (#2806, #2920: AVG of an expression) whatever the collation.
 func TestIntegrationSQLCompareLengthFunctions(t *testing.T) {
 	srcDB, srcName := testutil.CreateTestDB(t)
 	lengthFunctions(t, srcDB, srcName, testutil.IntegrationDSN(srcName), false)
@@ -153,7 +153,7 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		{"SELECT MIN(side), k % 3 AS bucket, COUNT(*), SUM(LENGTH(cf)) FROM ln GROUP BY bucket ORDER BY bucket", "copy", "the report of #2918 without AVG"},
 		{"SELECT side, k FROM ln WHERE LENGTH(b) > 2 AND CHAR_LENGTH(a) < 5 ORDER BY k", "copy", "in WHERE"},
 
-		{avgReport, "live", "AVG (#2806)"},
+		{avgReport, "live", "AVG of an expression (#2920)"},
 		{"SELECT side, LENGTH(l), CHAR_LENGTH(l) FROM ln ORDER BY k", "live", "latin1: one byte a letter on MySQL"},
 		{"SELECT side, LENGTH(bn), CHAR_LENGTH(bn) FROM ln ORDER BY k", "live", "BINARY"},
 		{"SELECT side, LENGTH(vt) FROM ln ORDER BY k", "live", "a trailing space (#2533)"},
@@ -200,12 +200,13 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 					t.Errorf("%q (%s) through the port:\n  got  %s\n  want %s, the source's own answer", c.stmt, c.why, got, want)
 				}
 			}
-			// #2806 keeps AVG on MySQL whatever the collation: the report of
-			// #2918 is a veto, not the collation.
+			// AVG of an expression stays on MySQL whatever the collation
+			// (AvgVeto, #2920, counted copy_columns_differ): the report of
+			// #2918 is that rule, not the collation.
 			before := lengthReasons(t, srv, ent.ID)
 			connTypedAnswer(port, avgReport)
-			if r := reasonAdded(before, lengthReasons(t, srv, ent.ID)); r != "veto" {
-				t.Errorf("AVG(LENGTH(cf)) under %s was forwarded as %q, want veto", session, r)
+			if r := reasonAdded(before, lengthReasons(t, srv, ent.ID)); r != "copy_columns_differ" {
+				t.Errorf("AVG(LENGTH(cf)) under %s was forwarded as %q, want copy_columns_differ", session, r)
 			}
 		})
 	}
