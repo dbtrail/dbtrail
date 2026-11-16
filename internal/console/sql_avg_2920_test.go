@@ -82,7 +82,7 @@ func TestSQL_realWorkerAvg_2920(t *testing.T) {
 		switch {
 		case !errors.As(err, &refusal):
 			t.Errorf("%s: err = %v, want a refusal", c.stmt, err)
-		case c.mine && !strings.Contains(refusal.Message, readrouter.VetoAvg):
+		case c.mine && !strings.Contains(refusal.Message, readrouter.VetoAvgPlace):
 			t.Errorf("%s: refusal %q, want AvgVeto's", c.stmt, refusal.Message)
 		}
 	}
