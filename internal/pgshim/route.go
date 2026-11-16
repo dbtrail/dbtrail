@@ -244,12 +244,12 @@ type rtKind int
 
 const (
 	rtWord   rtKind = iota // a name or a keyword, lowercased
-	rtQuoted                // a "quoted name", as written inside the quotes
-	rtString                // a '...' string, its text with '' as one quote
-	rtNumber                // a number
-	rtOp                    // an operator or a punctuation mark
-	rtTyped                 // a typed literal (DATE '...'), its type the text (screenForCopy)
-	rtParam                 // a $n parameter
+	rtQuoted               // a "quoted name", as written inside the quotes
+	rtString               // a '...' string, its text with '' as one quote
+	rtNumber               // a number
+	rtOp                   // an operator or a punctuation mark
+	rtTyped                // a typed literal (DATE '...'), its type the text (screenForCopy)
+	rtParam                // a $n parameter
 )
 
 type rtToken struct {
