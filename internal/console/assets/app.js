@@ -19376,11 +19376,14 @@ function fillRouteExtra(form, prefill) {
   const box = form.querySelector("div#route-extra");
   if (!box) return;
   const stored = prefill.has_route || prefill.route_unreadable || prefill.route_is_capture;
+  // The port that forwards for this server (#2771): a PostgreSQL server's is
+  // the PostgreSQL port, every other one's the MySQL port, as before.
+  const portWord = prefill.flavor === "postgres" ? "PostgreSQL port" : "MySQL port";
   if (!stored) return;
   if (prefill.route_unreadable) {
-    box.append(el("p", { class: "form-msg err", text: "The forwarding account saved for this server cannot be read (was the servers file edited by hand?), so the port cannot forward for this server. Type the forwarding user and password again, or remove it below. Saving this form without doing either leaves it as it is." }));
+    box.append(el("p", { class: "form-msg err", text: "The forwarding account saved for this server cannot be read (was the servers file edited by hand?), so the " + portWord + " cannot forward for this server. Type the forwarding user and password again, or remove it below. Saving this form without doing either leaves it as it is." }));
   } else if (prefill.route_is_capture) {
-    box.append(el("p", { class: "form-hint", text: "The forwarding account saved for this server is the same account DBTrail captures with. The port never forwards with that one, so it does not forward for this server. Set another forwarding user, or remove it below." }));
+    box.append(el("p", { class: "form-hint", text: "The forwarding account saved for this server is the same account DBTrail captures with. The " + portWord + " never forwards with that one, so it does not forward for this server. Set another forwarding user, or remove it below." }));
   } else if (prefill.route_host) {
     box.append(el("p", { class: "form-hint", text: "This forwarding account connects to " + prefill.route_host + (prefill.route_port ? ":" + prefill.route_port : "") + ", not to the source's address. It keeps that address when its user or password is changed here." }));
   }
