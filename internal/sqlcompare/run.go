@@ -104,6 +104,9 @@ func Run(ctx context.Context, opts Options, statements []string) (*Report, error
 		return nil, fmt.Errorf("source: %w", err)
 	}
 	defer src.Close()
+	if err := explainVersionOne(ctx, src.c); err != nil {
+		return nil, fmt.Errorf("source: %w", err)
+	}
 	cp, err := openConn(ctx, opts.CopyDSN, opts.Schema)
 	if err != nil {
 		return nil, fmt.Errorf("copy: %w", err)
@@ -302,6 +305,29 @@ func compareOne(ctx context.Context, src, cp *conn, opts Options, stmt string) R
 func copyStatement(stmt string) string {
 	text, _ := readrouter.ForCopy(stmt)
 	return text
+}
+
+// explainVersionOne gives the connection to the source the plan layout the
+// port asks a MySQL 9 for on each of its connections
+// (readrouter.ExplainVersionSet), so that route reads the plans the port
+// reads. A source that refuses it with an error of its own is left as it is:
+// route then says why for each statement (explain_failed).
+func explainVersionOne(ctx context.Context, c *sql.Conn) error {
+	var version string
+	if err := c.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		return fmt.Errorf("SELECT VERSION(): %w", err)
+	}
+	if !readrouter.ExplainVersionDefaultsToTwo(version) {
+		return nil
+	}
+	if _, err := c.ExecContext(ctx, readrouter.ExplainVersionSet); err != nil {
+		var me *drivermysql.MySQLError
+		if errors.As(err, &me) {
+			return nil
+		}
+		return fmt.Errorf("%s: %w", readrouter.ExplainVersionSet, err)
+	}
+	return nil
 }
 
 // route is the read router's decision for the statement, taken the same way

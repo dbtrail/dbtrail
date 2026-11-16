@@ -586,6 +586,37 @@ its own reversal is **not** emitted either.
 All wrapped in `SET FOREIGN_KEY_CHECKS=0/1`. Like `recover`, it only generates
 SQL — review before applying.
 
+**A source that writes its cascades to the binary log.** MySQL 9.6 and later
+(9.7 among the supported versions) run foreign-key cascades in the server
+instead of in InnoDB, and log the child rows a cascade deletes or rewrites
+like any other change, unless the server starts with
+`innodb_native_foreign_keys = ON`. Nothing has to be reconstructed then:
+`recover-cascade` reverses those logged child changes, the ones of the parent
+change's own transaction whose row pointed at the parent, with the parent
+change itself. A child row the application changed in that same transaction
+(it deleted the children, then the parent) is reversed too, since it has the
+same shape.
+
+Which of the two applies is read from the source, never from its version
+number. While capture runs (when it connects, then once a minute) and at every
+schema snapshot, the index records which start of the source server it is
+talking to and that start's `innodb_native_foreign_keys` (MariaDB and MySQL
+before 9.6 have no such variable: nothing is logged). The setting can only
+change with a restart, and two readings of the same start prove that no
+restart came between them, so a parent change is judged by the start whose
+readings surround it. An index that spans an upgrade from 8.4 to 9.7 gets each
+change right on either side of it.
+
+A parent change no readings surround (older than the first one, or in the
+minute or so before a restart, or while capture was down across a restart) is
+reconstructed as before, and when the index holds child changes of the same
+transaction the result is marked incomplete and names the first of them: the
+index cannot tell a logged cascade from children the application deleted
+itself, and says so rather than putting back fewer rows than were removed.
+For a change judged logged, the reconstruction runs as well, and any child it
+finds still pointing at the parent is put back too, with a warning that the
+record and the binary log disagree.
+
 ```bash
 bintrail recover-cascade --index-dsn "..." \
   --schema shop --table orders --pk '42' --dry-run

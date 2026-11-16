@@ -101,7 +101,7 @@ func TestGeneratedColumnsStopDoctorAndCapture(t *testing.T) {
 			default:
 			}
 			var active bool
-			if pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active {
+			if pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active {
 				cancel()
 				<-done
 				return nil
@@ -221,7 +221,7 @@ func TestDeferrableKeyStopsDoctorAndCapture(t *testing.T) {
 			default:
 			}
 			var active bool
-			if pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active {
+			if pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active {
 				cancel()
 				<-done
 				return nil

@@ -81,7 +81,7 @@ func TestPGWire_PostgresSourceRoundTrip(t *testing.T) {
 
 	waitForCond(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active

@@ -94,7 +94,7 @@ func TestOne_FoldWarnsForATableThatEnteredCaptureLate_2862(t *testing.T) {
 	})
 	waitFor(t, 30*time.Second, func() bool {
 		var active bool
-		return pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
+		return pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
 	}, "replication slot active")
 	// indexed waits for a change to be in the index and behind a checkpoint:
 	// a fold reads only as far as the last checkpoint.

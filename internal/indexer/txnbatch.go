@@ -132,6 +132,10 @@ func NewTxnBatcher(idx *Indexer, maxRows int64, maxOpen time.Duration, hooks Txn
 // since the last End.
 func (b *TxnBatcher) InTxn() bool { return b.inTxn }
 
+// CompleteRows is how many rows of complete transactions wait uncommitted:
+// zero when CommitComplete would write nothing.
+func (b *TxnBatcher) CompleteRows() int { return b.done }
+
 // SetCommitWithin sets how long complete transactions wait before the caller
 // is told to commit them (WithinC). Zero, the value a new batcher has, never
 // tells: they commit when a batch fills or when the caller decides. It applies

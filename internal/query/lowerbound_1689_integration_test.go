@@ -181,7 +181,8 @@ func checkSincePosPruning(t *testing.T, base time.Time) {
 // this one reads several because the fetch under test is a join.
 func explainScanPartitions(t *testing.T, db *sql.DB, stmt string, args ...any) string {
 	t.Helper()
-	rows, err := db.Query("EXPLAIN "+stmt, args...)
+	// TRADITIONAL by name: MySQL 9.7 answers a bare EXPLAIN as a tree.
+	rows, err := db.Query("EXPLAIN FORMAT=TRADITIONAL "+stmt, args...)
 	if err != nil {
 		t.Fatalf("EXPLAIN: %v", err)
 	}

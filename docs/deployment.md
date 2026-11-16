@@ -93,7 +93,7 @@ On-demand (DBA workstation):
 
 ### Version
 
-MySQL 8.0 or later. The `binlog_events` table uses `RANGE (TO_SECONDS(...))` partitioning and generated stored columns — both require MySQL 8.0+.
+MySQL 8.0, 8.4 or 9.7 (the 9.x Innovation releases between LTS lines are not supported). The `binlog_events` table uses `RANGE (TO_SECONDS(...))` partitioning and generated stored columns — both require MySQL 8.0+.
 
 ### Separate server recommended
 

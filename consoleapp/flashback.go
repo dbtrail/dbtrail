@@ -736,6 +736,13 @@ func bindReadRouterWhy(h *shim.Handler, srv *console.Server, tgt console.Flashba
 				logger.Warn("Engine Routing: this connection's session did not get the collation or character set it was to have; it stays as the port's login left it (the error says why, and whether the port or the source decided)",
 					"server", user, "collation", collation, "error", err.Error())
 			}
+			// A MySQL 9 source would not take the SET that asks for the
+			// plan layout the router reads: every statement of this
+			// connection stays on MySQL (explain_failed).
+			fw.OnExplainFormat = func(err error) {
+				logger.Warn("Engine Routing: the source refused SET SESSION explain_json_format_version = 1, so the port cannot read its plans and this connection's statements stay on MySQL",
+					"server", user, "error", err.Error())
+			}
 			// The source is asked to say when a statement changed one of
 			// the session settings the copy runs under, so that a change
 			// made inside a stored function is seen (#2127). A source that

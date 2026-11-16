@@ -60,6 +60,12 @@ and emits reversal SQL:
     referenced key are ignored entirely.
 All wrapped in SET FOREIGN_KEY_CHECKS=0/1.
 
+A source that writes its cascades to the binary log (MySQL 9.6 and later
+with innodb_native_foreign_keys = OFF, the default) has the child rows of
+each cascade in the index: those logged changes are reversed with the parent
+change instead of being reconstructed. Which case applies is read from the
+setting the index recorded for the server start that wrote the change.
+
 It NEVER executes SQL — review the dry-run/output before applying.
 
 Phase-1 (binlog-window) recovers children with a binlog event within --lookback.
@@ -349,6 +355,15 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("load FK graph: %w", lerr)
 		}
 		caveats = append(caveats, fkCaveats...)
+		// Whether the source logged its cascades, per server start: a change
+		// written by one that did has its child rows reversed from the index
+		// (cascade.Logging). An unreadable record is judged unknown, never
+		// guessed.
+		logging, logErr := cascade.LoadLogging(cmd.Context(), db)
+		if logErr != nil {
+			caveats = append(caveats, "could not read whether the source logs its foreign-key cascades ("+logErr.Error()+"); every parent change is treated as unknown")
+			logging = cascade.NewLogging(nil)
+		}
 		results := make([]cascade.Result, 0, len(groups))
 		for _, g := range groups {
 			r, serr := cascade.SynthesizeVictims(cmd.Context(), fetcher, g.FKs, g.Roots, cascade.Options{
@@ -358,6 +373,7 @@ func runRecoverCascade(cmd *cobra.Command, args []string) error {
 				ArchivesPresent: archivesExist,
 				WindowCovered:   liveWindow,
 				PKMetas:         cascade.PKMetasFromResolver(resolver),
+				Logging:         logging,
 			})
 			results = append(results, r)
 			if serr != nil {

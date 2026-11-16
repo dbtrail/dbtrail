@@ -225,6 +225,14 @@ type Options struct {
 	// runs), so with no probe and no covering baseline the gate is off
 	// entirely. Wire the probe.
 	PKMetas func(schema, table string) []metadata.ColumnMeta
+	// Logging, when set, is the index's record of whether the source wrote
+	// the rows its foreign keys cascade to into the binary log (LoadLogging).
+	// Parent changes written by a server that does (MySQL 9.6 and later with
+	// innodb_native_foreign_keys = OFF) have those rows reversed from the
+	// index instead of synthesized; see Logging for the three cases. nil
+	// synthesizes every root, as before the record existed. The commands
+	// always set it.
+	Logging *Logging
 }
 
 // PKMetasFromResolver adapts a schema resolver into Options.PKMetas. A nil
@@ -427,6 +435,9 @@ func SynthesizeVictims(
 	parentEvents []query.ResultRow,
 	opts Options,
 ) (Result, error) {
+	if opts.Logging != nil {
+		return synthesizeByLogging(ctx, query.ForRun(eng), fks, parentEvents, opts)
+	}
 	opts = opts.withDefaults()
 	// One picture of the index for the whole run: scanChildren below fetches
 	// once per (foreign key, parent row), and each of those fetches would
@@ -1638,6 +1649,11 @@ func dedupVictimsNewest(victims []query.ResultRow) []query.ResultRow {
 	out := victims[:0]
 	for _, v := range victims {
 		key := v.SchemaName + "." + v.TableName + "|" + v.PKValues
+		if v.EventType == event.EventUpdate {
+			// A logged cascade's child UPDATE (collectLogged): each one is
+			// its own change to reverse. Synthesized victims are all DELETEs.
+			key += "|" + strconv.FormatUint(v.EventID, 10)
+		}
 		if j, ok := idx[key]; ok {
 			if v.EventTimestamp.After(out[j].EventTimestamp) {
 				out[j] = v

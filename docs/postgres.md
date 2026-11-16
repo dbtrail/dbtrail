@@ -4,7 +4,7 @@ bintrail can capture from a **PostgreSQL** server while the index database stays
 MySQL. PostgreSQL capture lives in its own binary, **`bintrail-pg`**. This is a
 **beta** capability: capture is type-faithful,
 `REPLICA IDENTITY FULL`-enforced, replication-slot/WAL-retention-monitored, and
-DDL-drift-safe, all verified end-to-end against real PostgreSQL (14–17 in CI)
+DDL-drift-safe, all verified end-to-end against real PostgreSQL (15–18 in CI)
 and smoke-validated on managed PostgreSQL (RDS / Aurora). It still has
 documented limitations (below) — notably whole-table time-travel in the shim
 and full-table `reconstruct` to a mydumper dump, which stay out of scope for

@@ -325,9 +325,10 @@ func runCascade2156(t *testing.T, flavor, sourceDSN, applyDSN string, sourceDB, 
 		t.Fatalf("LoadCascadeFKs: %v", err)
 	}
 
+	opts := cascade.Options{}
 	script := func(t *testing.T, f query.Fetcher) (string, cascade.Result) {
 		t.Helper()
-		res, err := cascade.SynthesizeVictims(ctx, f, fks, parents, cascade.Options{})
+		res, err := cascade.SynthesizeVictims(ctx, f, fks, parents, opts)
 		if err != nil {
 			t.Fatalf("SynthesizeVictims: %v", err)
 		}
@@ -354,6 +355,33 @@ func runCascade2156(t *testing.T, flavor, sourceDSN, applyDSN string, sourceDB, 
 		// Back to the state after the cascade (the capture has stopped).
 		testutil.MustExec(t, sourceDB, "DELETE FROM parent")
 		return v
+	}
+
+	// A source that writes its cascades to the binary log (MySQL 9.6 and
+	// later with innodb_native_foreign_keys = OFF) logged child 10's delete
+	// with the value the database held. recover-cascade reverses that event
+	// instead of synthesizing one, so there is no pick to order: the child
+	// comes back as wait-B through the commands' path (Options.Logging).
+	// The subtests below pin the synthesis, which such a source never takes.
+	if src, err := metadata.ReadSourceFKLogging(ctx, sourceDB); err != nil {
+		t.Fatalf("ReadSourceFKLogging: %v", err)
+	} else if src.LogsCascades() {
+		if _, err := metadata.RecordSourceFKLogging(ctx, sourceDB, indexDB); err != nil {
+			t.Fatalf("RecordSourceFKLogging: %v", err)
+		}
+		logging, err := cascade.LoadLogging(ctx, indexDB)
+		if err != nil {
+			t.Fatalf("LoadLogging: %v", err)
+		}
+		opts.Logging = logging
+		s, res := script(t, query.New(indexDB))
+		if len(res.Incomplete) != 0 || len(res.Victims) != 1 {
+			t.Fatalf("logged cascade: victims %d, incomplete %v; want the child's own delete and nothing missing", len(res.Victims), res.Incomplete)
+		}
+		if got := childAfterApply(t, s); got != "wait-B" {
+			t.Fatalf("logged cascade: child 10 = %s, want wait-B:\n%s", got, s)
+		}
+		return
 	}
 
 	t.Run("premise: the statement-time pick puts back A's value", func(t *testing.T) {

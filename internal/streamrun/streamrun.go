@@ -867,6 +867,11 @@ func buildTLSConfig(mode, ca, cert, key, serverName string) (*tls.Config, error)
 // AllowFallbackToPlaintext), so every connection that may send data
 // unencrypted warns identically. required/verify-* never retry: a
 // TLS-incapable server fails closed with an actionable hint.
+// sourceFKLoggingEvery is how often a running capture re-reads the source's
+// start and cascade setting (metadata.RecordSourceFKLogging): the window
+// before a restart that recover-cascade cannot attribute is at most this long.
+const sourceFKLoggingEvery = time.Minute
+
 func connectHelper(dsn, label, mode, ca, cert, key string) (*sql.DB, error) {
 	// Settings errors first and unwrapped (a bad --ssl-mode or an unreadable
 	// --ssl-ca is a local problem): wrapped below they would carry tlsHint's
@@ -1867,8 +1872,43 @@ var (
 // variable so a test can change it.
 var commitWithin = indexer.CommitWithinFromEnv
 
+// checkpointSoonest is how soon after one save of the position the next may
+// be made because rows were committed (#2645). The interval's save stays: it
+// is the one a quiet source gets, and the one that logs at info. A variable so
+// a test can change it.
+var checkpointSoonest = 150 * time.Millisecond
+
+// savedCoords is the part of a save that says how far capture read: the
+// safe coordinates in position mode, the set in GTID mode. Not GTID mode's
+// coordinates: they move with every event, inside a transaction too, and a
+// save for those would say nothing a reader can use.
+type savedCoords struct {
+	file string
+	pos  uint64
+	gtid string
+}
+
+func coordsOf(state *streamState) savedCoords {
+	if state.mode == "gtid" {
+		return savedCoords{gtid: state.gtidSet}
+	}
+	// No safe point yet: checkpointPosition falls back to the per-event
+	// coordinates, which can sit inside a transaction. Not a reason to save.
+	return savedCoords{file: state.safeFile, pos: state.safePos}
+}
+
 // streamLoop consumes parser events, flushes batches to MySQL, and writes
-// checkpoints to stream_state at the given interval.
+// checkpoints to stream_state at the given interval, and once the position
+// moved, at most every checkpointSoonest (#2645).
+//
+// A crash between a commit of rows and the save of their position leaves
+// rows in the index past the saved position, as a crash between a commit and
+// the interval's save always did: the resume deletes what was written at or
+// after the saved position (deleteEventsSinceCheckpoint) and reads it again.
+// Saving more often only shrinks that window. An early save never names a
+// transaction whose rows are not committed: it is made only when no complete
+// transaction waits uncommitted, and not inside a CREATE TABLE ... SELECT
+// whose GTID its DDL already added to the set.
 //
 // A reader of the index never sees part of a source transaction (#2391).
 // Rows of COMPLETE transactions are batched together as before, up to the
@@ -1914,6 +1954,21 @@ func streamLoop(
 ) error {
 	ticker := time.NewTicker(checkpointInterval)
 	defer ticker.Stop()
+
+	// saved is the position the last successful save wrote (#2645), lastSave
+	// when a save was last tried; soon fires when a save was held back by
+	// checkpointSoonest.
+	saved := coordsOf(state)
+	var lastSave time.Time
+	// oftenOff: an early save failed, and none is tried until a save
+	// succeeds.
+	oftenOff := false
+	var soon *time.Timer
+	defer func() {
+		if soon != nil {
+			soon.Stop()
+		}
+	}()
 
 	// The writer: complete transactions batched together, the one being read
 	// held in an index transaction of its own until its end (#2391).
@@ -1973,16 +2028,39 @@ func streamLoop(
 	// max_allowed_packet) be silently skipped (#652). A saveCheckpoint failure
 	// is NOT data loss — it only re-streams from an older checkpoint on restart —
 	// so it stays a warning.
-	checkpoint := func() error {
+	//
+	// often is a save of the commit path (#2645): it logs at debug, success
+	// and failure alike, since it runs several times a second under load and
+	// the interval's save says the same thing at info every checkpointInterval.
+	checkpointAt := func(often bool) error {
 		if err := w.CommitComplete(); err != nil {
 			return err
 		}
+		// Asked again right before the write: a capture lock lost after
+		// CommitComplete looked must not save a position over the one the
+		// next capture writes.
+		if stopWithoutFlush(ctx) {
+			return ErrStopWithoutFlush
+		}
 		state.lastSaveErr = nil
-		if err := saveCheckpoint(db, state); err != nil {
+		err := saveCheckpoint(db, state)
+		// From the end of the write: one slow to fail is not followed by
+		// another at once.
+		lastSave = time.Now()
+		if err != nil {
 			state.lastSaveErr = err
-			slog.Warn("saveCheckpoint failed", "error", err)
+			if often {
+				// Early saves stop until a save succeeds: a failure that
+				// lasts is tried, and warned about, at the interval, as
+				// before #2645, not several times a second at debug.
+				oftenOff = true
+				slog.Debug("saveCheckpoint failed", "error", err)
+			} else {
+				slog.Warn("saveCheckpoint failed", "error", err)
+			}
 			m.Errors.WithLabelValues("checkpoint").Inc()
 		} else {
+			saved, oftenOff = coordsOf(state), false
 			// Stamped: the next stamp needs a new marker. A failed save
 			// keeps it, so the next tick retries with the same read time.
 			state.caughtUpReadAt = time.Time{}
@@ -1990,12 +2068,43 @@ func streamLoop(
 			if hooks != nil && hooks.OnCheckpoint != nil {
 				hooks.OnCheckpoint()
 			}
-			slog.Info("checkpoint saved",
+			level := slog.LevelInfo
+			if often {
+				level = slog.LevelDebug
+			}
+			slog.Log(context.Background(), level, "checkpoint saved",
 				"file", state.binlogFile,
 				"pos", state.binlogPos,
 				"events_indexed", state.eventsIndexed)
 		}
 		return nil
+	}
+	checkpoint := func() error { return checkpointAt(false) }
+
+	// saveSoon saves the position once it moved (#2645), so a reader
+	// comparing the source's position with the saved one is held back by about
+	// checkpointSoonest, not by checkpointInterval. Moved counts transactions
+	// with no row capture keeps (another table's, a DDL, a rotation): their
+	// end is a position the source reports too. Only when no
+	// complete transaction waits in the batcher: then CommitComplete writes
+	// nothing, every transaction the saved coordinates name is already in the
+	// index, and the save adds no INSERT (a busy source keeps its full
+	// batches). Saved at most once per checkpointSoonest; one held back by it
+	// is made when soon fires, unless a later commit made it first.
+	saveSoon := func() error {
+		// ddlClaimed: in GTID mode a CREATE TABLE ... SELECT's GTID is in the
+		// set from its DDL on, before its rows arrive. Saved now, a crash
+		// before its end would resume past rows never indexed.
+		if oftenOff || ddlClaimed || coordsOf(state) == saved || w.CompleteRows() > 0 {
+			return nil
+		}
+		if wait := checkpointSoonest - time.Since(lastSave); wait > 0 {
+			if soon == nil {
+				soon = time.NewTimer(wait)
+			}
+			return nil
+		}
+		return checkpointAt(true)
 	}
 
 	// stop ends the loop on cancellation or a closed channel. The rows of a
@@ -2050,14 +2159,37 @@ func streamLoop(
 	}
 
 	for {
+		// After whatever the last turn committed. Not on a stop: stop() saves
+		// on its own, and a stop without flush must write nothing.
+		if ctx.Err() == nil {
+			if err := saveSoon(); err != nil {
+				return err
+			}
+		}
+		var soonC <-chan time.Time
+		if soon != nil {
+			soonC = soon.C
+		}
 		select {
 		case <-ctx.Done():
 			return stop()
 
 		case <-ticker.C:
+			// Not inside a CREATE TABLE ... SELECT in GTID mode: its GTID
+			// is in the set since its DDL and its rows are not all indexed
+			// yet, so a crash after this save would resume past them. The
+			// next tick saves. (A stop inside it keeps its rows: stop.)
+			if ddlClaimed {
+				continue
+			}
 			if err := checkpoint(); err != nil {
 				return err
 			}
+
+		case <-soonC:
+			// The held-back save: saveSoon at the top of the loop makes it,
+			// if nothing saved in between.
+			soon = nil
 
 		case <-w.CapC():
 			if err := w.OnCap(); err != nil {
@@ -2066,8 +2198,10 @@ func streamLoop(
 
 		case <-w.WithinC():
 			// Complete transactions have waited long enough for a batch to
-			// fill (#2666). Their rows become visible now; the position is
-			// saved at the checkpoint, as after a full batch.
+			// fill (#2666). Their rows become visible now, and their position
+			// is saved right after (#2645, saveSoon at the top of the loop,
+			// which keeps a very short BINTRAIL_COMMIT_WITHIN from saving
+			// more often than checkpointSoonest).
 			if err := w.CommitComplete(); err != nil {
 				return err
 			}
@@ -2548,6 +2682,54 @@ func oneRun(ctx context.Context, cfg Config) error {
 	} else {
 		fmt.Println("Source: no FK cascades \u2713")
 	}
+	// Whether this start of the source logs the rows its foreign keys cascade
+	// to (MySQL 9.6 and later with innodb_native_foreign_keys = OFF), kept
+	// with the index for recover-cascade (metadata.DDLSourceFKLogging). Every
+	// connect reads it: a restart (an upgrade among them) is the only time it
+	// can change, and a restart always breaks this connection. Not fatal: a
+	// missing record makes recover-cascade flag what it cannot attribute.
+	//
+	// A reading also proves that the start it finds was still running, so it
+	// is repeated while capture runs (sourceFKLoggingEvery): a change is
+	// credited to a start only between two readings of it, and the few
+	// minutes before a restart that no reading covered stay unknown, which
+	// recover-cascade flags instead of guessing.
+	recordFKLogging := func(warn bool) bool {
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if _, rerr := metadata.RecordSourceFKLogging(rctx, sourceDB, indexDB); rerr != nil {
+			if warn && ctx.Err() == nil {
+				slog.Warn("could not record whether the source logs its foreign-key cascades; "+
+					"recover-cascade flags the cascades of changes it cannot attribute", "error", rerr)
+			}
+			return false
+		}
+		return true
+	}
+	recordFKLogging(true)
+	fkCtx, stopFKLogging := context.WithCancel(ctx)
+	var fkLoggingDone sync.WaitGroup
+	fkLoggingDone.Add(1)
+	go func() {
+		defer fkLoggingDone.Done()
+		t := time.NewTicker(sourceFKLoggingEvery)
+		defer t.Stop()
+		failing := false
+		for {
+			select {
+			case <-fkCtx.Done():
+				return
+			case <-t.C:
+				// One warning per run of failures, not one a minute.
+				ok := recordFKLogging(!failing)
+				if ok && failing {
+					slog.Info("recording whether the source logs its foreign-key cascades works again")
+				}
+				failing = !ok
+			}
+		}
+	}()
+	defer func() { stopFKLogging(); fkLoggingDone.Wait() }()
 
 	if cfg.Hooks != nil && cfg.Hooks.OnSourceConnected != nil {
 		cfg.Hooks.OnSourceConnected()
