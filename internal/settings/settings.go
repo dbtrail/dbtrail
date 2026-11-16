@@ -217,6 +217,8 @@ var table = []Entry{
 	{Env: "BINTRAIL_BASELINE_TABLE_DELTAS"},
 	{Env: "BINTRAIL_BASELINE_CARRY_FORWARD_UNCHANGED"},
 	{Env: "BINTRAIL_KEY_INDEX"},
+	// PostgreSQL only, off by default: see reconstruct.PGTableDeltaEnv.
+	{Env: "BINTRAIL_PG_TABLE_DELTAS"},
 	{Env: "BINTRAIL_S3_BUCKET"},
 	{Env: "BINTRAIL_S3_REGION"},
 	{Env: "BINTRAIL_S3_ARN"},
