@@ -469,7 +469,7 @@ func postgresInstall(servers []ctlServer, err error) bool {
 
 // postgresOnlyRefusal is why a setting of the MySQL port has nothing to act
 // on for a PostgreSQL server.
-const postgresOnlyRefusal = "its port answers reads from the copy, as of the copy's last update, and sends to the source only a client's transaction blocks: there is no per-statement routing, fresh mode or lag limit for it yet"
+const postgresOnlyRefusal = "its port decides statement by statement whether the copy or the source answers, when the server has a forwarding user (bintrail-console server forward-user); it has no fresh mode, and no lag limit is set for it from here yet"
 
 // printPortPG is printPort for an installation of PostgreSQL servers
 // (#2773): the setting and its password are the same, what answers is the
@@ -489,7 +489,7 @@ func printPortPG(out io.Writer, p ctlPort, db string) {
 		host = "127.0.0.1"
 	}
 	fmt.Fprintf(out, "The port for SQL clients is on. PostgreSQL clients connect to the PostgreSQL port (5433, unless the PostgreSQL router was given another). %s, and the user can be anything:\n\n  psql \"host=%s port=5433 dbname=%s user=app sslmode=require\"\n\n", who, host, db)
-	fmt.Fprintln(out, "The copy answers reads. A transaction block a client opens goes to your PostgreSQL as the server's forwarding user, read-only, when one is set (bintrail-console server forward-user); without one, the copy answers alone.")
+	fmt.Fprintln(out, "The copy answers what it is known to answer as PostgreSQL does. Every other statement, and a transaction block a client opens, goes to your PostgreSQL as the server's forwarding user, read-only, when one is set (bintrail-console server forward-user); without one, the copy answers alone.")
 	if p.Notice != "" {
 		fmt.Fprintf(out, "\n%s\n", p.Notice)
 	}

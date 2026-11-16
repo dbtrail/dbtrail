@@ -132,21 +132,6 @@ func (s *session) forwarding() bool {
 // pinned reports whether the client's transaction block lives on the source.
 func (s *session) pinned() bool { return s.up != nil && s.up.inTx }
 
-// toSource decides whether a statement goes to the source.
-func (s *session) toSource(c classified) bool {
-	if !s.forwarding() {
-		return false
-	}
-	switch c.kind {
-	case kindRefused:
-		// A statement on the catalog this port does not answer from the copy.
-		return c.perr == catalogRefusal
-	case kindFree:
-		return s.pinned()
-	}
-	return false
-}
-
 // source returns the connection to the source, opening it when there is
 // none.
 func (s *session) source() (*upstream, *pgErr) {
@@ -700,21 +685,22 @@ func (s *session) afterSource(up *upstream) {
 }
 
 // forwardSimple answers a simple query from the source. Every outcome is sent
-// to the client here; the caller sends ReadyForQuery.
-func (s *session) forwardSimple(qstr string) {
+// to the client here; the caller sends ReadyForQuery. ok is false when the
+// client was sent an error.
+func (s *session) forwardSimple(qstr string) (ok bool) {
 	if perr := forwardRefusal(qstr); perr != nil {
 		s.fail(perr)
-		return
+		return false
 	}
 	up, perr := s.prepareSource()
 	if perr != nil {
 		s.fail(perr)
-		return
+		return false
 	}
 	if _, lost := s.syncCycle(up, relayClient); lost != nil {
 		s.loseSource(lost.why)
 		s.fail(s.lostError(lost))
-		return
+		return false
 	}
 	ctx, done := s.statementContext()
 	defer done()
@@ -723,7 +709,7 @@ func (s *session) forwardSimple(qstr string) {
 	if err := up.send(&pgproto3.Query{String: qstr}); err != nil {
 		s.loseSource("it could not be written to: " + err.Error())
 		s.fail(s.lostError(&errSourceLost{"it could not be written to"}))
-		return
+		return false
 	}
 	delete(up.stmts, "")
 	k := &statusKeeper{}
@@ -733,16 +719,18 @@ func (s *session) forwardSimple(qstr string) {
 		if srcErr != nil {
 			// The source's error was sent: one answer, not two.
 			s.markFailed()
-			return
+			return false
 		}
 		s.fail(s.lostError(lost))
-		return
+		return false
 	}
 	if srcErr == nil && k.tx == 'T' {
 		s.tookSavepointStmt(qstr)
 	}
 	s.followSourceStatus(up, k.tx)
+	unsafe := up.unsafe
 	s.afterSource(up)
+	return srcErr == nil && !unsafe
 }
 
 // savepoint is what the session's settings were when a savepoint of the

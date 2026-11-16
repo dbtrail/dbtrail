@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -24,6 +25,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/pgshim"
 	"github.com/dbtrail/dbtrail/internal/shim"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
+	"github.com/dbtrail/dbtrail/internal/streamrun"
 )
 
 // pgRouterCmd is the PostgreSQL-protocol port (#2765) as a process of its
@@ -41,26 +43,38 @@ import (
 // A client picks its server with the database name (dbname=<server id or
 // name>); the password is the one the MySQL port takes. A username that is a
 // server's application login opens that server alone, with that login's
-// password or the port's, whatever database it names. The copy answers reads;
-// a transaction block the client opens, and a catalog statement the copy does
-// not answer, are sent to the source as the server's forwarding account
-// (#2771), never as the account DBTrail captures with, and nothing that writes
-// is sent. A server without a forwarding account is answered from the copy
-// alone, as before. Time travel (_flashback,
+// password or the port's, whatever database it names. With the server's
+// forwarding account (#2771), each statement is answered by the copy only
+// when the copy is known to answer it as PostgreSQL does, and by the source
+// otherwise (#2770, pgshim route.go); a transaction block the client opens
+// and a catalog statement the copy does not answer go to the source too. The
+// source is reached as the forwarding account, never as the account DBTrail
+// captures with, and nothing that writes is sent. A server without a
+// forwarding account is answered from the copy alone, as before. Time travel (_flashback,
 // _snapshot, AS OF for one row) is answered on the same connection from the
 // server's index and snapshots, unless the server hides rows or columns:
 // time travel reads past the views that hide them.
 var pgRouterCmd = &cobra.Command{
 	Use:   "pg-router",
 	Short: "Serve a PostgreSQL-protocol port that runs read-only SQL on the copy of a PostgreSQL server, as a service of its own",
-	Long: `Starts a PostgreSQL-protocol port that PostgreSQL clients connect to. A read
-is answered by the copy of the server the client named, by PostgreSQL's rules.
-A transaction block the client opens (BEGIN to COMMIT or ROLLBACK), and a
-statement on the system catalog the copy does not answer, are sent to the
-server's own PostgreSQL as its forwarding user (bintrail-console server
-forward-user), never as the user DBTrail captures with; a server without one is
-answered from the copy alone. Nothing that writes is sent: a statement that is
-not a read is refused, and the connection to the source is read-only.
+	Long: `Starts a PostgreSQL-protocol port that PostgreSQL clients connect to. When
+the server the client named has a forwarding user (bintrail-console server
+forward-user), each statement is answered by the server's copy only when the
+copy is known to give the answer PostgreSQL gives, and by the server's own
+PostgreSQL otherwise: a function, operator or construct the copy answers
+differently or not at all, the clock and the session (now(), current_user),
+text sorted or compared by order, a table the copy does not hold, a statement
+the copy refuses. A transaction block the client opens (BEGIN to COMMIT or
+ROLLBACK), and a statement on the system catalog the copy does not answer, go
+there too. The source is reached as the forwarding user, never as the user
+DBTrail captures with; a server without one is answered from the copy alone.
+Nothing that writes is sent: a statement that is not a read is refused, and
+the connection to the source is read-only.
+
+With --status-addr, http://<address>/status says, per server, how many
+statements each side answered and why; --status-statements adds a row per
+statement shape (values blanked, table and column names kept). That address
+asks for no password.
 
 It runs beside 'bintrail-console watch' and reads the servers the web
 interface manages, never writing them. Connect with the server's id or name as
@@ -121,7 +135,9 @@ func addPGRouterFlags(cmd *cobra.Command) {
 	f.Int("workers", defaultPGRouterWorkers, fmt.Sprintf("How many statements run on the copy at once, 1 to %d. The rest wait their turn. Env BINTRAIL_PG_ROUTER_WORKERS.", maxPGRouterWorkers))
 	f.Int("threads", defaultPGRouterThreads, fmt.Sprintf("How many threads each statement may use, 1 to %d. Env BINTRAIL_PG_ROUTER_THREADS.", maxPGRouterThreads))
 	f.Int("max-connections", defaultPGRouterMaxConns, fmt.Sprintf("How many clients may be connected at once, 1 to %d; one more is refused with an error. Env BINTRAIL_PG_ROUTER_MAX_CONNECTIONS.", maxPGRouterMaxConns))
-	f.Int("max-source-connections", defaultPGRouterMaxSourceConns, fmt.Sprintf("How many connections to the servers' own PostgreSQL this process holds at once, across every server, 1 to %d. A client holds one while its transaction block, or a catalog statement the copy does not answer, runs there; past the limit, the statement that needed one is refused with an error (53300). Env BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS.", maxPGRouterMaxSourceConns))
+	f.Int("max-source-connections", defaultPGRouterMaxSourceConns, fmt.Sprintf("How many connections to the servers' own PostgreSQL this process holds at once, across every server, 1 to %d. A client holds one while a statement the source answers, or its transaction block, runs there; past the limit, the statement that needed one is refused with an error (53300). Env BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS.", maxPGRouterMaxSourceConns))
+	f.String("status-addr", "", "Address to serve the port's status on (host:port, e.g. 127.0.0.1:9092): /status, as JSON, says per server which side answered each statement and why, and /metrics this process's Prometheus metrics. Empty: none. It asks for no password. Env BINTRAIL_PG_ROUTER_STATUS_ADDR.")
+	f.Bool("status-statements", false, "Keep a row per statement shape and side in /status (values blanked, table and column names kept): whoever reaches --status-addr then reads the names of the tables and columns your clients query. Env BINTRAIL_PG_ROUTER_STATUS_STATEMENTS.")
 	f.String("max-wait", "", "How long a statement waits for its turn when every worker is busy, e.g. 30s or 2m; past it the client gets an error. Empty or 0: no limit of its own, and the five minutes one statement may take, its wait included, is what ends it. Env BINTRAIL_PG_ROUTER_MAX_WAIT.")
 	f.Int("sql-port-max-rows", console.DefaultSQLPortMaxRows, "Most rows one statement returns; a result with more is refused, not cut. Env BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS.")
 }
@@ -141,6 +157,10 @@ type pgRouterSettings struct {
 	MaxSourceConns int
 	MaxWait        time.Duration
 	SQLPortMaxRows int
+	// StatusAddr is where /status is served (#2770), "" for nowhere;
+	// StatusStatements keeps its per-statement table.
+	StatusAddr       string
+	StatusStatements bool
 	// TLS is the operator's certificate (--tls-cert, --tls-key), nil when
 	// none is set: the port then serves one made up at start.
 	TLS *shim.PortTLS
@@ -217,6 +237,23 @@ func pgRouterSettingsFrom(cmd *cobra.Command) (pgRouterSettings, error) {
 	}
 	if st.SQLPortMaxRows, err = num("sql-port-max-rows", "BINTRAIL_CONSOLE_SQL_PORT_MAX_ROWS", 1, 1<<31-1, "the most rows one statement returns"); err != nil {
 		return st, err
+	}
+	if st.StatusAddr = str("status-addr", "BINTRAIL_PG_ROUTER_STATUS_ADDR"); st.StatusAddr != "" {
+		name := "--status-addr"
+		if !f.Changed("status-addr") {
+			name = "BINTRAIL_PG_ROUTER_STATUS_ADDR"
+		}
+		if err := validPGListen(st.StatusAddr, name); err != nil {
+			return st, err
+		}
+	}
+	st.StatusStatements, _ = f.GetBool("status-statements")
+	if !f.Changed("status-statements") {
+		if v := os.Getenv("BINTRAIL_PG_ROUTER_STATUS_STATEMENTS"); v != "" {
+			if st.StatusStatements, err = strconv.ParseBool(strings.TrimSpace(v)); err != nil {
+				return st, fmt.Errorf("BINTRAIL_PG_ROUTER_STATUS_STATEMENTS=%q is not true or false", v)
+			}
+		}
 	}
 	// named is str with the name the value came from, for a refusal: the
 	// flag when it was given, else the variable when it is set.
@@ -295,7 +332,15 @@ func pgRouterStartupLines(st pgRouterSettings, memory, memoryFrom string, memory
 	}
 	b.WriteString(".\n")
 	b.WriteString("PostgreSQL router: it serves PostgreSQL servers only. The copy answers reads, as of its last snapshot update.\n")
-	fmt.Fprintf(&b, "PostgreSQL router: a transaction block a client opens, and a catalog statement the copy does not answer, go to the server's own PostgreSQL as its forwarding user (bintrail-console server forward-user), read-only, at most %d connections there at once (--max-source-connections); a server without a forwarding user is answered from the copy alone.\n", st.MaxSourceConns)
+	fmt.Fprintf(&b, "PostgreSQL router: with a server's forwarding user (bintrail-console server forward-user), each statement is answered by the copy only when the copy is known to answer it as PostgreSQL does, and by the server's own PostgreSQL otherwise, as well as a transaction block a client opens; read-only, at most %d connections there at once (--max-source-connections). A server without a forwarding user is answered from the copy alone.\n", st.MaxSourceConns)
+	switch {
+	case st.StatusAddr != "" && st.StatusStatements:
+		fmt.Fprintf(&b, "PostgreSQL router: http://%s/status says which side answered each statement and why, with a row per statement shape, which names tables and columns (values are blanked); that address asks for no password.\n", st.StatusAddr)
+	case st.StatusAddr != "":
+		fmt.Fprintf(&b, "PostgreSQL router: http://%s/status says, per server, how many statements each side answered and why; that address asks for no password.\n", st.StatusAddr)
+	case st.StatusStatements:
+		b.WriteString("PostgreSQL router: --status-statements is set but --status-addr is not, so the per-statement table is not served anywhere.\n")
+	}
 	b.WriteString(pgRouterAddressLine(st.Listen, inContainer()))
 	b.WriteString(pgRouterTLSLines(st.TLS, time.Time{}))
 	if !serversExist {
@@ -360,8 +405,18 @@ func runPGRouter(cmd *cobra.Command, _ []string) error {
 		// In the log as well: the startup lines are plain text on stderr.
 		slog.Warn("PostgreSQL router: " + p)
 	}
+	routes := newPGRouteStats(time.Now(), st.StatusStatements && st.StatusAddr != "")
+	if st.StatusAddr != "" {
+		stopStatus, err := streamrun.StartMetricsServerWith(st.StatusAddr, map[string]http.Handler{
+			"GET " + routerStatusPath: pgRouterStatusHandler(routes, st.Listen),
+		})
+		if err != nil {
+			return fmt.Errorf("the PostgreSQL router cannot serve its status on %s: %w", st.StatusAddr, err)
+		}
+		defer stopStatus()
+	}
 	port := &pgRouterPort{srv: srv, addr: st.Listen, maxConns: st.MaxConns, poll: console.DefaultFollowInterval, out: os.Stderr, tls: served.Config,
-		sources: newPGSourceSlots(st.MaxSourceConns)}
+		sources: newPGSourceSlots(st.MaxSourceConns), routes: routes}
 	return port.serve(ctx)
 }
 
@@ -401,6 +456,9 @@ type pgRouterPort struct {
 	// sources bounds the connections to the servers' sources (#2771); nil:
 	// serve makes one of the default size.
 	sources *pgSourceSlots
+	// routes counts which side answered each statement (#2770); nil
+	// counts nothing.
+	routes *pgRouteStats
 
 	mu    sync.Mutex
 	bound string
@@ -503,7 +561,7 @@ func (p *pgRouterPort) serve(ctx context.Context) error {
 		p.bound, p.stop, p.passwords = ln.Addr().String(), cancel, passwords
 		p.mu.Unlock()
 		slog.Info("PostgreSQL router: the port is open", "listen", ln.Addr().String())
-		err = servePGPortWith(child, p.srv, ln, p.maxConns, budget, p.tls, sources)
+		err = servePGPortRouted(child, p.srv, ln, p.maxConns, budget, p.tls, sources, p.routes)
 		cancel()
 		p.mu.Lock()
 		p.bound, p.stop, p.passwords = "", nil, nil
@@ -591,6 +649,12 @@ func (p *pgSourceSlots) acquire() (release func(), ok bool) {
 // servePGPortWith is servePGPortWithin with the bound on connections to the
 // sources (#2771).
 func servePGPortWith(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots) error {
+	return servePGPortRouted(ctx, srv, ln, maxConns, budget, tlsConfig, sources, nil)
+}
+
+// servePGPortRouted is servePGPortWith with the tally of which side answered
+// each statement (#2770); nil counts nothing.
+func servePGPortRouted(ctx context.Context, srv *console.Server, ln net.Listener, maxConns int, budget *pgshim.ResultBudget, tlsConfig *tls.Config, sources *pgSourceSlots, routes *pgRouteStats) error {
 	logger := slog.Default()
 	// Accept returns when the listener is closed; the connections end with
 	// ctx (pgshim closes each one's socket), and Serve waits for them.
@@ -602,7 +666,7 @@ func servePGPortWith(ctx context.Context, srv *console.Server, ln net.Listener, 
 	// travel is refused on this wire, so nothing waits on it; the engine
 	// asks for it all the same.
 	gate := shim.NewGate(defaultFlashbackMaxFullTable)
-	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
+	return pgshim.Serve(ctx, ln, pgshim.Config{Login: pgPortLogin(srv, pgRouterQueryTimeout, gate, logger, sources, routes), Logger: logger, MaxConns: maxConns, ResultBudget: budget, TLS: tlsConfig})
 }
 
 // pgPortLogin is the port's login: the port's passwords, then the server.
@@ -614,8 +678,9 @@ func servePGPortWith(ctx context.Context, srv *console.Server, ln net.Listener, 
 // whether or not the username is an application login (Password.Matches).
 //
 // sources bounds the connections to the servers' sources that the logins'
-// connections share (#2771).
-func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots) pgshim.LoginFunc {
+// connections share (#2771), and routes counts which side answered each of
+// their statements (#2770; nil counts nothing).
+func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, logger *slog.Logger, sources *pgSourceSlots, routes *pgRouteStats) pgshim.LoginFunc {
 	return func(ctx context.Context, user, database string, password *pgshim.Password, drop func()) (*pgshim.Binding, *pgshim.Error) {
 		// Before the passwords are read: a connection opened with an
 		// application login is served only if no login changed since
@@ -665,7 +730,7 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			return nil, &pgshim.Error{Code: "0A000", Message: fmt.Sprintf(
 				"server %q is not a PostgreSQL server, and this port serves PostgreSQL servers only; the copy of a MySQL or MariaDB server is read with a MySQL client on the MySQL port", tgt.ID)}
 		}
-		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema}
+		bound := &pgshim.Binding{Actor: "server:" + tgt.ID, Schema: pgPortSchema, Routed: routes.forServer(tgt.ID)}
 		// Time travel, by the engine the MySQL port binds per connection
 		// (flashbackShimConfig, called as it is): the server's index and its
 		// snapshots. The server's own gate goes with it: a server that hides

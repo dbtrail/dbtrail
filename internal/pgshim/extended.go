@@ -69,6 +69,9 @@ type preparedStatement struct {
 	// client (-1 for none, and for no rows: noRows), which every portal
 	// bound from it must keep: the client decodes the rows by that answer.
 	described int
+	// fallback is why the statement goes to the source since the copy
+	// could not answer it (route.go), "" while it has not been sent there.
+	fallback string
 }
 
 // portal is a statement with its arguments, ready to run.
@@ -95,6 +98,14 @@ type portal struct {
 	// keeps them (resultbudget.go): from the run until the last of them is
 	// sent, or the portal ends.
 	held int64
+	// bind is the client's Bind of a portal bound on the copy, kept so the
+	// portal can be bound on the source if the copy does not answer it
+	// (route.go); nil on a connection that cannot reach its source.
+	bind *pgproto3.Bind
+	// route is which side answers the portal, and why, for the port's
+	// status; noted is set once it was told (session.routeNote).
+	route routeDecision
+	noted bool
 }
 
 // extState is the extended protocol's state on one connection.
@@ -260,6 +271,7 @@ func (s *session) handleBind(m *pgproto3.Bind) {
 			}
 		}
 		s.bindOnSource(st, m)
+		s.noteIfFailed(st)
 		return
 	}
 	if len(m.Parameters) != len(st.paramOIDs) {
@@ -321,11 +333,16 @@ func (s *session) handleBind(m *pgproto3.Bind) {
 	}
 	// The unnamed portal a new Bind replaces gives back what it kept.
 	s.dropPortal(m.DestinationPortal)
-	s.ext.portals[m.DestinationPortal] = &portal{
+	p := &portal{
 		name: m.DestinationPortal, stmt: st, text: text,
 		// The message's buffer is reused for the next one.
 		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
+		route:         s.stmtRoute(st),
 	}
+	if p.route.side == RouteCopy && s.canFallBack() {
+		p.bind = cloneBind(m)
+	}
+	s.ext.portals[m.DestinationPortal] = p
 	s.be.Send(&pgproto3.BindComplete{})
 }
 
@@ -340,9 +357,16 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 		}
 		if s.abortedRefusal(st.query) == nil && s.stmtToSource(st) {
 			s.describeOnSource(st)
+			s.noteIfFailed(st)
 			return
 		}
 		cols, types, held, perr := s.describeStatement(st)
+		if st.fallback != "" && s.canFallBack() {
+			// The copy could not describe it (route.go): the source does.
+			s.describeOnSource(st)
+			s.noteIfFailed(st)
+			return
+		}
 		if perr != nil {
 			// What fails here PostgreSQL reports at Parse, where the
 			// statement then never exists. It goes, so that a client that
@@ -381,7 +405,19 @@ func (s *session) handleDescribe(m *pgproto3.Describe) {
 				return
 			}
 		}
+		if !p.noted && !p.ran {
+			// Run here, for its columns: its note is this one.
+			p.noted = true
+			started := time.Now()
+			defer func() { s.routeNote(p.stmt.query, p.route, time.Since(started), s.ext.skip) }()
+		}
 		if perr := s.runPortal(p); perr != nil {
+			if s.fallBackPortal(p) {
+				if p.onSource {
+					s.describePortalOnSource(p)
+				}
+				return
+			}
 			s.extFail(perr)
 			return
 		}
@@ -465,7 +501,16 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 	if perr != nil {
 		return nil, nil, false, perr
 	}
+	// A statement routed to the copy that the copy cannot answer the way
+	// PostgreSQL does goes to the source (route.go), described there. Only
+	// a query: a command of the copy's own (SHOW TABLES) cannot stand in
+	// the subquery, and runs on the copy as before.
+	selectLike := s.canFallBack() && isSelectLike(st.query)
 	if err == nil {
+		if selectLike && writtenOtherwise(got) != "" {
+			st.fallback = ReasonCopyColumnsDiffer
+			return nil, nil, false, nil
+		}
 		types = columnTypes(sandboxTypes(got))
 		if perr := s.untypedArgumentsAsText(st, types); perr != nil {
 			return nil, nil, false, perr
@@ -473,6 +518,10 @@ func (s *session) describeFree(st *preparedStatement) (cols []string, types []co
 		return columnNames(got), types, true, nil
 	}
 	perr = freeError(err, s.logger)
+	if why := s.copyFallback(err, perr); selectLike && why != "" {
+		st.fallback = why
+		return nil, nil, false, nil
+	}
 	if strings.HasPrefix(perr.code, "42") || perr.code == "0A000" {
 		// The statement's own shape or text: it cannot stand in the
 		// subquery, and its Execute answers the error a simple query gets.
@@ -620,6 +669,7 @@ func (s *session) runPortal(p *portal) *pgErr {
 		p.empty = true
 		return nil
 	}
+	s.fallback = ""
 	cols, types, rows, tag, perr := s.run(p.text)
 	// What the statement counted in the port's budget is the portal's from
 	// here: the connection's next statement must not give it back while the
@@ -831,11 +881,24 @@ func (s *session) handleExecute(m *pgproto3.Execute) {
 		s.extFail(perr)
 		return
 	}
+	if !p.noted {
+		// One note per portal, at its first Execute: one with a row limit
+		// is executed more than once.
+		p.noted = true
+		started := time.Now()
+		defer func() { s.routeNote(p.stmt.query, p.route, time.Since(started), s.ext.skip) }()
+	}
 	if p.onSource {
 		s.executeOnSource(p, m.MaxRows)
 		return
 	}
 	if perr := s.runPortal(p); perr != nil {
+		if s.fallBackPortal(p) {
+			if p.onSource {
+				s.executeOnSource(p, m.MaxRows)
+			}
+			return
+		}
 		s.extFail(perr)
 		return
 	}

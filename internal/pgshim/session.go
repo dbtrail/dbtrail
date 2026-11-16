@@ -72,6 +72,9 @@ type session struct {
 	// savepoints are the savepoints of the client's block on the source,
 	// oldest first (forward.go).
 	savepoints []savepoint
+	// fallback is why the statement the copy just failed goes to the
+	// source instead (route.go), "" when it does not; set by runFree.
+	fallback string
 }
 
 // initSettings sets a connection's settings before its start-up message is
@@ -145,16 +148,36 @@ func (s *session) handleSimpleQuery(qstr string) error {
 	// back when this returns: its answer is written by then, or never will
 	// be (the write failed, the client left, the statement was refused).
 	defer s.releaseResult()
-	// A statement the source answers (forward.go) is relayed from it.
-	if s.abortedRefusal(qstr) == nil && s.toSource(s.classify(qstr)) {
-		s.forwardSimple(qstr)
+	// A statement the source answers (forward.go, route.go) is relayed from
+	// it.
+	started := time.Now()
+	var d routeDecision
+	if s.abortedRefusal(qstr) == nil {
+		d = s.route(s.classify(qstr), qstr)
+	}
+	if d.side == RouteSource || d.side == RouteRefused {
+		ok := s.forwardSimple(qstr)
+		s.routeNote(qstr, d, time.Since(started), !ok)
 		return s.readyFlush()
 	}
+	s.fallback = ""
 	cols, types, rows, tag, perr := s.run(qstr)
 	if perr != nil {
+		if why := s.fallback; why != "" && d.side == RouteCopy {
+			// The copy did not answer it, and nothing was sent yet: the
+			// source answers instead (route.go).
+			s.fallback = ""
+			s.releaseResult()
+			d = routeDecision{RouteSource, why}
+			ok := s.forwardSimple(qstr)
+			s.routeNote(qstr, d, time.Since(started), !ok)
+			return s.readyFlush()
+		}
 		s.fail(perr)
+		s.routeNote(qstr, d, time.Since(started), true)
 		return s.readyFlush()
 	}
+	s.routeNote(qstr, d, time.Since(started), false)
 	// cols == nil marks a non-row reply (a handshake/setup probe like SET): no
 	// RowDescription, just the CommandComplete tag. A real query — even one that
 	// resolves to zero rows (row absent at AsOf) — has a non-nil cols and emits

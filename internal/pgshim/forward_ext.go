@@ -20,7 +20,86 @@ import (
 // stmtToSource decides whether a prepared statement is described and run on
 // the source.
 func (s *session) stmtToSource(st *preparedStatement) bool {
-	return s.forwarding() && s.toSource(s.classify(st.probeText()))
+	d := s.stmtRoute(st)
+	return d.side == RouteSource || d.side == RouteRefused
+}
+
+// stmtRoute is the side that answers a prepared statement now, and why. A
+// statement the copy refused once (st.fallback) goes to the source from
+// then on: the client keeps the description it was given, so the decision
+// stays with the statement.
+func (s *session) stmtRoute(st *preparedStatement) routeDecision {
+	if st.fallback != "" && s.forwarding() {
+		if s.pinned() {
+			return routeDecision{RouteSource, ReasonInTransaction}
+		}
+		return routeDecision{RouteSource, st.fallback}
+	}
+	// Classified with a stand-in for each argument, as Parse classifies it;
+	// screened as the client wrote it, each $n a value of its own type.
+	return s.route(s.classify(st.probeText()), st.query)
+}
+
+// cloneBind copies a Bind message, whose buffers the next message reuses.
+func cloneBind(m *pgproto3.Bind) *pgproto3.Bind {
+	c := &pgproto3.Bind{
+		DestinationPortal:    m.DestinationPortal,
+		PreparedStatement:    m.PreparedStatement,
+		ParameterFormatCodes: append([]int16(nil), m.ParameterFormatCodes...),
+		ResultFormatCodes:    append([]int16(nil), m.ResultFormatCodes...),
+		Parameters:           make([][]byte, len(m.Parameters)),
+	}
+	for i, p := range m.Parameters {
+		if p != nil {
+			c.Parameters[i] = append([]byte{}, p...)
+		}
+	}
+	return c
+}
+
+// fallBackPortal moves to the source a portal of the copy whose statement
+// the copy just failed (session.fallback), before any of its rows was sent.
+// tried false: it stays on the copy, and its error is the client's; true:
+// the portal is on the source (p.onSource), or the client was sent the
+// error that kept it from getting there.
+func (s *session) fallBackPortal(p *portal) (tried bool) {
+	why := s.fallback
+	s.fallback = ""
+	if why == "" || p.bind == nil || p.sent != 0 || !s.canFallBack() || !isSelectLike(p.stmt.query) {
+		return false
+	}
+	p.stmt.fallback = why
+	p.route = routeDecision{RouteSource, why}
+	s.portalToSource(p)
+	return true
+}
+
+// portalToSource binds on the source a portal the copy could not answer
+// (route.go), with the client's own Bind, before anything of its answer was
+// sent. The client already has its BindComplete. ok false: the client was
+// sent an error.
+func (s *session) portalToSource(p *portal) (ok bool) {
+	if p.bind == nil {
+		return false
+	}
+	if perr := forwardRefusal(p.stmt.query); perr != nil {
+		s.extFail(perr)
+		return false
+	}
+	up, perr := s.prepareSource()
+	if perr != nil {
+		s.extFail(perr)
+		return false
+	}
+	if !s.ensureParsed(up, p.stmt) {
+		return false
+	}
+	if !s.sendBindToSource(up, p.stmt, p.bind) {
+		return false
+	}
+	p.onSource = true
+	p.cols, p.types, p.rows, p.tag = nil, nil, nil, ""
+	return true
 }
 
 // textish are the types whose binary form is their text: a column of one is
@@ -208,6 +287,25 @@ func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
 	if !s.ensureParsed(up, st) {
 		return
 	}
+	if !s.sendBindToSource(up, st, m) {
+		return
+	}
+	if s.ext.portals == nil {
+		s.ext.portals = map[string]*portal{}
+	}
+	s.dropPortal(m.DestinationPortal)
+	s.ext.portals[m.DestinationPortal] = &portal{
+		name: m.DestinationPortal, stmt: st, onSource: true,
+		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
+		route:         s.stmtRoute(st),
+	}
+	s.be.Send(&pgproto3.BindComplete{})
+}
+
+// sendBindToSource sends the client's Bind of st to the source, parsed
+// there already, and reads its answer. ok false: the client was sent an
+// error, and its batch is discarded up to its Sync.
+func (s *session) sendBindToSource(up *upstream, st *preparedStatement, m *pgproto3.Bind) (ok bool) {
 	msgs := []pgproto3.FrontendMessage{m}
 	// The client decodes the rows by the Describe it got. One the port gave
 	// from the copy is checked against what the source will send.
@@ -218,7 +316,7 @@ func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
 	msgs = append(msgs, &pgproto3.Flush{})
 	if err := up.send(msgs...); err != nil {
 		s.sourceLostExt(&errSourceLost{"it could not be written to: " + err.Error()})
-		return
+		return false
 	}
 	var fields []pgproto3.FieldDescription
 	noData := false
@@ -238,27 +336,19 @@ func (s *session) bindOnSource(st *preparedStatement, m *pgproto3.Bind) {
 	}))
 	if lost != nil {
 		s.sourceLostExt(lost)
-		return
+		return false
 	}
 	if perr != nil {
 		s.sourceFailed(up)
-		return
+		return false
 	}
 	up.portals[m.DestinationPortal] = true
 	if check && !sameShape(st, fields, noData, m.ResultFormatCodes) {
 		// PostgreSQL's words, which drivers prepare the statement again on.
 		s.extFail(&pgErr{"0A000", "cached plan must not change result type"})
-		return
+		return false
 	}
-	if s.ext.portals == nil {
-		s.ext.portals = map[string]*portal{}
-	}
-	s.dropPortal(m.DestinationPortal)
-	s.ext.portals[m.DestinationPortal] = &portal{
-		name: m.DestinationPortal, stmt: st, onSource: true,
-		resultFormats: append([]int16(nil), m.ResultFormatCodes...),
-	}
-	s.be.Send(&pgproto3.BindComplete{})
+	return true
 }
 
 // sameShape reports whether the source's columns for a portal read the way

@@ -354,7 +354,7 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 			return err
 		}
 		if s.Flavor == console.FlavorPostgres {
-			fmt.Fprintf(out, "%q has no forwarding user now: the PostgreSQL port answers its clients from the copy alone, and a transaction block is not sent to your PostgreSQL.\n", s.Name)
+			fmt.Fprintf(out, "%q has no forwarding user now: the PostgreSQL port answers its clients from the copy alone. A statement the copy cannot answer gets an error, and nothing is sent to your PostgreSQL.\n", s.Name)
 			return nil
 		}
 		fmt.Fprintf(out, "%q has no forwarding user now: with Engine Routing on, a statement the copy cannot answer is refused.\n", s.Name)
@@ -382,7 +382,7 @@ func runServerForwardUser(ctx context.Context, c *ctlClient, name string, f fwdF
 		return err
 	}
 	if s.Flavor == console.FlavorPostgres {
-		fmt.Fprintf(out, "%q forwards as %s: the PostgreSQL port sends a client's transaction blocks to your PostgreSQL as that user, read-only.\n", s.Name, user)
+		fmt.Fprintf(out, "%q forwards as %s: the PostgreSQL port sends to your PostgreSQL, as that user and read-only, every statement the copy is not known to answer as PostgreSQL does, and a client's transaction blocks.\n", s.Name, user)
 		return nil
 	}
 	fmt.Fprintf(out, "%q forwards as %s. Engine Routing uses it once it is on:  bintrail-console port routing on\n", s.Name, user)

@@ -141,6 +141,8 @@ func TestIntegrationPGCompare(t *testing.T) {
 		t.Errorf("%d statements were EQUAL, fewer than 50", n)
 	}
 
+	checkRouting(t, ctx, cp, rep, want)
+
 	// The read-only transaction is the lock behind IsQuery and ReadOnlyVeto.
 	// Straight to the source, past both: a statement that turns the session
 	// read-write changes nothing for the next one, and a WITH that writes is
@@ -233,6 +235,7 @@ func expectations() []expectation {
 	const (
 		otherTypes = "#2770: json's operators belong to the source's dialect"
 		dialect    = "#2770: the copy's dialect answers this differently; it belongs to the source"
+		route      = "#2770: the PostgreSQL port sends this to the source"
 	)
 	still := func(kind, says, why, stmt string) expectation {
 		return expectation{stmt: stmt, verdict: sqlcompare.Different, kind: kind, why: why, says: says}
@@ -359,30 +362,36 @@ func expectations() []expectation {
 		refused("more than 18 decimals", "by design: never rounded", `SELECT free FROM `+odd+` WHERE id = 2`),
 		// Which of the two values stops it first is the engine's choice.
 		refused("", "by design: a statement that reads the whole column meets those values", `SELECT id FROM `+odd+` WHERE free > 12345`),
-		// PROBE-2770 (temporary): measured to build the routing lists.
-		eq(`SELECT name FROM ` + c + ` ORDER BY name`),
-		eq(`SELECT min(name), max(name) FROM ` + c),
+		// Measured for the PostgreSQL port's per-statement routing (#2770):
+		// what the port lets the copy answer is built from these lines, and
+		// every line that differs here is one it sends to the source
+		// (TestIntegrationPGCompare checks that below).
+		//
+		// Text by order: the source orders it by its collation (en_US here),
+		// the copy by bytes. name > 'B' happens to agree on these rows.
+		still("order", "", route, `SELECT name FROM `+c+` ORDER BY name`),
+		still("rows", "", route, `SELECT min(name), max(name) FROM `+c),
 		eq(`SELECT name FROM ` + c + ` WHERE name > 'B'`),
-		eq(`SELECT 'a' < 'B' AS lt`),
+		still("rows", "", route, `SELECT 'a' < 'B' AS lt`),
 		eq(`SELECT upper('é'), lower('É')`),
 		eq(`SELECT lower(name) FROM ` + c),
-		eq(`SELECT id, amount / qty FROM ` + o + ` WHERE id = 6`),
-		eq(`SELECT avg(qty) FROM ` + o),
-		eq(`SELECT id FROM ` + o + ` WHERE status ~ '^p'`),
-		eq(`SELECT id FROM ` + o + ` WHERE status SIMILAR TO 'p%'`),
-		eq(`SELECT id FROM ` + o + ` WHERE attrs ? 'n'`),
-		eq(`SELECT id, attrs->'k' FROM ` + o),
-		eq(`SELECT id, attrs #>> '{k}' FROM ` + o),
+		{stmt: `SELECT id, amount / qty FROM ` + o + ` WHERE id = 6`, verdict: sqlcompare.SourceError},
+		still("precision", "", route, `SELECT avg(qty) FROM `+o),
+		still("rows", "", route, `SELECT id FROM `+o+` WHERE status ~ '^p'`),
+		still("rows", "", route, `SELECT id FROM `+o+` WHERE status SIMILAR TO 'p%'`),
+		refused("syntax error", route, `SELECT id FROM `+o+` WHERE attrs ? 'n'`),
+		still("rows", "", route, `SELECT id, attrs->'k' FROM `+o),
+		refused("syntax error", route, `SELECT id, attrs #>> '{k}' FROM `+o),
 		eq(`SELECT id, qty % 3 FROM ` + o),
 		eq(`SELECT id, -qty % 3 FROM ` + o),
 		eq(`SELECT id, abs(qty) FROM ` + o),
-		eq(`SELECT id, round(ratio) FROM ` + o),
+		still("rows", "", route, `SELECT id, round(ratio) FROM `+o),
 		eq(`SELECT id, round(amount, 1) FROM ` + o),
-		eq(`SELECT id, ratio::int FROM ` + o),
+		{stmt: `SELECT id, ratio::int FROM ` + o, verdict: sqlcompare.SourceError},
 		eq(`SELECT id, amount::int FROM ` + o),
 		eq(`SELECT id, qty::bigint FROM ` + o),
 		eq(`SELECT id, qty::text FROM ` + o),
-		eq(`SELECT id, ratio::text FROM ` + o),
+		still("precision", "", route, `SELECT id, ratio::text FROM `+o),
 		eq(`SELECT id, placed_at::text FROM ` + o),
 		eq(`SELECT id, CAST(qty AS bigint) FROM ` + o),
 		eq(`SELECT id, CAST(placed_at AS date) FROM ` + o),
@@ -407,7 +416,7 @@ func expectations() []expectation {
 		eq(`SELECT id, greatest(qty, 5), least(qty, 5) FROM ` + o),
 		eq(`SELECT id, date_part('year', placed_at) FROM ` + o),
 		eq(`SELECT id, seen_at AT TIME ZONE 'America/Bogota' FROM ` + o),
-		eq(`SELECT id, to_char(placed_at, 'YYYY-MM') FROM ` + o),
+		refused("to_char", route, `SELECT id, to_char(placed_at, 'YYYY-MM') FROM `+o),
 		eq(`SELECT id, concat(status, '-', qty) FROM ` + o),
 		eq(`SELECT id, status || qty FROM ` + o),
 		eq(`SELECT string_agg(status, ',' ORDER BY id) FROM ` + o),
@@ -416,11 +425,11 @@ func expectations() []expectation {
 		eq(`SELECT id, lag(qty) OVER (ORDER BY id) FROM ` + o),
 		eq(`SELECT id, ratio * 2.5 FROM ` + o),
 		eq(`SELECT id, amount * 1.5 FROM ` + o),
-		eq(`SELECT id, amount / 2 FROM ` + o),
-		eq(`SELECT id, qty / 2.0 FROM ` + o),
+		still("precision", "", route, `SELECT id, amount / 2 FROM `+o),
+		still("precision", "", route, `SELECT id, qty / 2.0 FROM `+o),
 		eq(`SELECT sum(ratio) FROM ` + o),
-		eq(`SELECT sum(qty)::numeric / 3 FROM ` + o),
-		eq(`SELECT stddev(qty) FROM ` + o),
+		still("precision", "", route, `SELECT sum(qty)::numeric / 3 FROM `+o),
+		still("precision", "", route, `SELECT stddev(qty) FROM `+o),
 		eq(`SELECT bool_and(active) FROM ` + c),
 		eq(`SELECT id FROM ` + o + ` WHERE placed_at > now() - interval '100 years'`),
 		eq(`SELECT current_date > DATE '2000-01-01'`),
@@ -431,9 +440,9 @@ func expectations() []expectation {
 		eq(`SELECT id FROM ` + o + ` WHERE note ILIKE 'F%'`),
 		eq(`SELECT id, length(note) FROM ` + o),
 		eq(`SELECT id, position('i' in note) FROM ` + o),
-		eq(`SELECT generate_series(1, 3)`),
+		still("rows", "", route, `SELECT generate_series(1, 3)`),
 		eq(`SELECT id, payload FROM ` + o + ` ORDER BY payload NULLS LAST, id`),
-		eq(`SELECT id, fixed / 3 FROM ` + odd),
+		still("precision", "", route, `SELECT id, fixed / 3 FROM `+odd),
 		// Not compared.
 		{stmt: `SELECT * FROM pgcmp_missing`, verdict: sqlcompare.SourceError},
 		{stmt: `DELETE FROM ` + o, verdict: sqlcompare.Skipped, kind: "not_a_query"},

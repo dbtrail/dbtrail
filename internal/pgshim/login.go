@@ -91,10 +91,15 @@ type Binding struct {
 	// Close, when set, runs once when the connection ends.
 	Close func()
 	// Forward, when set, is how the connection reaches the server's source,
-	// which answers a transaction block the client opens and a catalog
-	// statement the copy does not answer (forward.go). Nil: those are
-	// answered as the port answers them without one.
+	// which answers a transaction block the client opens, a catalog
+	// statement the copy does not answer, and every statement the copy is
+	// not known to answer as PostgreSQL does (forward.go, route.go). Nil:
+	// those are answered as the port answers them without one.
 	Forward *Forward
+	// Routed, when set, is told which side answered each statement that
+	// reached the copy or the source, and why (route.go), for the port's
+	// status.
+	Routed func(RouteNote)
 }
 
 // RunOptions are what a connection set for itself that a statement on the
@@ -244,6 +249,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// the question has its own, and the statement's must stay the one a
 	// cancel request stops.
 	if perr := s.zoneOnCopy(s.set.zone, true); perr != nil {
+		s.fallTo(ReasonCopyRefused)
 		return nil, nil, nil, "", perr
 	}
 	ctx, done := s.statementContext()
@@ -259,6 +265,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// Before anything is run (#2804): a statement whose result the port has
 	// no room to hold is refused here, not after the copy answered it.
 	if refusal := s.admitResult(); refusal != nil {
+		s.fallTo(ReasonCopyResultsHeld)
 		return nil, nil, nil, "", refusal
 	}
 	res, err := s.bound.Run(ctx, qstr, s.runOptions())
@@ -270,16 +277,30 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 		}
 	}
 	if err != nil {
-		return nil, nil, nil, "", s.statementError(ctx, err)
+		perr := s.statementError(ctx, err)
+		if ctx.Err() == nil {
+			s.fallTo(s.copyFallback(err, perr))
+		}
+		return nil, nil, nil, "", perr
 	}
 	if res.Truncated {
 		// Refused, not returned short: a client would take the first rows
 		// for the whole answer.
+		s.fallTo(ReasonResultOverCap)
 		return nil, nil, nil, "", &pgErr{"54000", fmt.Sprintf(
 			"the result has more than %d rows, the most one statement returns on this port, and is not returned cut; add a LIMIT or narrow the statement",
 			len(res.Rows))}
 	}
+	if col := writtenOtherwise(res.Columns); col != "" && s.canFallBack() {
+		// A numeric declared without precision, which the copy writes with
+		// all its decimals: the source writes it as PostgreSQL does. Only
+		// where the source can answer; without, the copy's answer is the
+		// one this port has always given.
+		s.fallTo(ReasonCopyColumnsDiffer)
+		return nil, nil, nil, "", &pgErr{"0A000", fmt.Sprintf("column %q is a numeric the copy writes otherwise", col)}
+	}
 	if res.TruncatedCells > 0 {
+		s.fallTo(ReasonResultOverCap)
 		// Refused too. The copy cuts a cell past its cap and ends it with a
 		// marker, which a reader of text can see; here a cell is written
 		// again the way PostgreSQL writes its kind, and a cut bytea would
@@ -316,6 +337,7 @@ func (s *session) runFree(qstr string) (cols []string, types []colType, rows [][
 	// taken while the statement ran. Before the notice and the audit
 	// record: a refused answer served nobody.
 	if refusal := s.holdResult(rows); refusal != nil {
+		s.fallTo(ReasonCopyResultsHeld)
 		return nil, nil, nil, "", refusal
 	}
 	if res.Note != "" {
