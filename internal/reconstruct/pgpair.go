@@ -232,7 +232,7 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	}
 
 	rep.BaselineRows = baseRows
-	rep.UpdatesApplied, rep.InsertsEmitted, rep.DeletesSkipped = replaced, puts-replaced, removed
+	rep.UpdatesApplied, rep.InsertsEmitted, rep.DeletesSkipped = int64(replaced), int64(puts-replaced), int64(removed)
 	rep.RowsWritten = baseRows - int64(len(positions)) + int64(puts)
 	rep.Files = []string{
 		filepath.Join(in.Schema, in.Table+".parquet"),

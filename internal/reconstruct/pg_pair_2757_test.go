@@ -34,15 +34,15 @@ func TestPGPairEligible(t *testing.T) {
 	local := "/data/2026-11-16T11-00-00Z/public/orders.parquet"
 	changed := func() *foldResult { return &foldResult{Changes: map[string]*query.ResultRow{"1": {}}} }
 	cases := []struct {
-		name   string
-		off    bool
-		cfg    FullTableConfig
-		src    string
-		meta   baseline.DumpMetadata
-		since  time.Duration // the file's bound, before the run
-		fold   *foldResult
-		gap    *CaptureGap
-		want   bool
+		name  string
+		off   bool
+		cfg   FullTableConfig
+		src   string
+		meta  baseline.DumpMetadata
+		since time.Duration // the file's bound, before the run
+		fold  *foldResult
+		gap   *CaptureGap
+		want  bool
 	}{
 		{name: "changed, bound recorded and young", cfg: lined, src: local, meta: recorded, since: time.Hour, fold: changed(), want: true},
 		{name: "the switch is off", off: true, cfg: lined, src: local, meta: recorded, since: time.Hour, fold: changed()},
