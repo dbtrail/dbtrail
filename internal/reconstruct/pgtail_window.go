@@ -3,8 +3,11 @@ package reconstruct
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -24,19 +27,27 @@ func PGRowLSN(ev *query.ResultRow) (uint64, bool) { return pgRowLSN(ev) }
 
 // PGCheckpoint is what a PostgreSQL capture last saved: the commit LSN of
 // the last complete transaction, and the newest event at or before it when a
-// transaction last ended (stream_state.pg_checkpoint_event_id). Every event
-// up to eventID whose LSN is at or before lsn belongs to a transaction
-// delivered whole; rows above eventID may be a transaction still arriving,
-// or one arriving a second time after a restart, under the same LSN.
+// transaction last ended (stream_state.pg_checkpoint_event_id). No event up
+// to eventID has an LSN between that event's own and lsn, and among the
+// events up to eventID whose LSN is at or before its own, every transaction
+// is there delivered whole at least once: an earlier delivery of one, cut
+// short by a restart, can be there too, before the whole one. Rows above
+// eventID may be a transaction still arriving, or one arriving a second
+// time after a restart, under the same LSN.
 //
 // ok is false when the index records no such pair: no PostgreSQL capture
-// yet, one that has not ended a transaction, an index of another family, or
-// a capture older than the column.
+// yet, one that has not ended a transaction since it began to record the
+// event, an index of another family, or an index no capture of this version
+// has opened (the column is not there).
 func PGCheckpoint(ctx context.Context, db *sql.DB) (lsn, eventID uint64, ok bool, err error) {
 	var pos, id sql.NullInt64
 	err = db.QueryRowContext(ctx, `SELECT binlog_position, pg_checkpoint_event_id FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&pos, &id)
+	var missing *mysql.MySQLError
 	switch {
 	case err == sql.ErrNoRows:
+		return 0, 0, false, nil
+	case errors.As(err, &missing) && missing.Number == 1054:
+		// Unknown column: the capture that adds it has not opened this index.
 		return 0, 0, false, nil
 	case err != nil:
 		return 0, 0, false, fmt.Errorf("read the capture's saved position: %w", err)

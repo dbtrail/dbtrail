@@ -85,6 +85,13 @@ type pgTailSource struct {
 	// leaves such a row out and Broken ends the table's tail, so one bad row
 	// costs one table its tail and not the server every tail.
 	unordered map[string]string
+	// skipped remembers a read by Since that handed nothing: from the event
+	// from, everything up to the event to was read and left out, so the
+	// next read from the same event starts after to. The keeper's own
+	// position moves only with a row handed to it, and a long run of rows
+	// left out (what a crash in the middle of a large transaction leaves)
+	// would otherwise be read again at every refresh.
+	skipped struct{ from, to uint64 }
 }
 
 // pgBrokenMemo is one table's last answer to Broken and what it was made
@@ -99,6 +106,7 @@ type pgBrokenMemo struct {
 // the loss capture recorded.
 type pgBrokenKey struct {
 	base        string // the file itself (baseFileID): two files can share a floor
+	gapColumns  bool   // the record of a loss is readable at all
 	floor       uint64
 	snapshotID  int64
 	schemaChgID int64
@@ -326,11 +334,15 @@ func (x *pgTailSource) Start(ctx context.Context, t views.BaselineTable) (tailTa
 			generated = append(generated, col.Name)
 		}
 	}
-	// An error, not a refusal: a read cut short by the build's deadline is
-	// tried again, where a refusal would stand until the next snapshot.
 	fileColumns, err := reconstruct.ReadBaselineColumns(ctx, t.Path, duckdbutil.DefaultTuning())
 	if err != nil {
-		return nil, "", fmt.Errorf("read the columns of %s's snapshot file: %w", name, err)
+		// A read cut short by the build's deadline is an error, tried
+		// again; a file that cannot be read is a refusal, which stands
+		// until the next snapshot, where retrying it would never end.
+		if ctx.Err() != nil {
+			return nil, "", fmt.Errorf("read the columns of %s's snapshot file: %w", name, err)
+		}
+		return nil, fmt.Sprintf("the columns of %s's snapshot file could not be read: %v", name, err), nil
 	}
 	tail, err := reconstruct.NewPGTail(t.Schema, t.Table, c.md, fileColumns, tm.PKColumnMetas(), generated)
 	if err != nil {
@@ -456,38 +468,88 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 	for i, t := range tables {
 		refs[i] = query.SchemaTable{Schema: t.Schema, Table: t.Table}
 	}
-	for from < upTo {
-		rows, err := query.FetchEventRange(ctx, x.b.db, refs, from, upTo, x.pageSize)
+	// Where the last read from this same event stopped, having handed
+	// nothing. What it left out stays left out: a row then past the LSN
+	// read up to was the beginning of a transaction that has to come again
+	// whole, and that whole delivery is above it.
+	cur := from
+	x.mu.Lock()
+	if x.skipped.from == from && x.skipped.to > cur {
+		cur = min(x.skipped.to, upTo)
+	}
+	x.mu.Unlock()
+	handedAny := false
+	for cur < upTo {
+		rows, err := query.FetchEventRange(ctx, x.b.db, refs, cur, upTo, x.pageSize)
 		if err != nil {
 			return err
 		}
 		if len(rows) == 0 {
-			return nil
+			cur = upTo
+			break
 		}
 		kept, bad := pgTailPage(rows, upTo, through, handed)
 		x.noteUnordered(bad)
-		if len(kept) > 0 {
-			// In id order a page's LSNs can still step back inside it.
-			ordered := kept[:0]
-			for _, r := range kept {
-				if r.StartPos < handed {
-					continue
-				}
-				handed = r.StartPos
-				ordered = append(ordered, r)
+		// In id order a page's LSNs can still step back inside it.
+		ordered := kept[:0]
+		for _, r := range kept {
+			if r.StartPos < handed {
+				continue
 			}
-			if len(ordered) > 0 {
-				if err := page(ordered); err != nil {
-					return err
-				}
+			handed = r.StartPos
+			ordered = append(ordered, r)
+		}
+		if len(ordered) > 0 {
+			if err := page(ordered); err != nil {
+				return err
 			}
+			handedAny = true
 		}
 		if len(rows) < x.pageSize {
-			return nil
+			cur = upTo
+			break
 		}
-		from = rows[len(rows)-1].EventID
+		cur = rows[len(rows)-1].EventID
+		if len(ordered) == 0 {
+			// A whole page left out: ask the index where the next row to
+			// hand is, and do not read the ones before it.
+			next, found, err := x.nextToHand(ctx, cur, upTo, handed, through)
+			if err != nil {
+				return err
+			}
+			if !found {
+				cur = upTo
+				break
+			}
+			cur = next - 1
+		}
 	}
+	x.mu.Lock()
+	if handedAny {
+		x.skipped.from, x.skipped.to = 0, 0
+	} else {
+		x.skipped.from, x.skipped.to = from, cur
+	}
+	x.mu.Unlock()
 	return nil
+}
+
+// nextToHand is the first event after id after, up to upTo, whose LSN is
+// from atLeast up to through: where Since goes on after a page it left out
+// whole. The index walks the rows between; none of them is read here.
+func (x *pgTailSource) nextToHand(ctx context.Context, after, upTo, atLeast, through uint64) (uint64, bool, error) {
+	var id uint64
+	err := x.b.db.QueryRowContext(ctx,
+		`SELECT event_id FROM binlog_events FORCE INDEX (PRIMARY)
+		 WHERE event_id > ? AND event_id <= ? AND start_pos >= ? AND start_pos <= ? ORDER BY event_id LIMIT 1`,
+		after, upTo, atLeast, through).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("find the next event to read after %d: %w", after, err)
+	}
+	return id, true, nil
 }
 
 // noteUnordered remembers the tables of rows that carry no LSN.
@@ -543,7 +605,8 @@ func (x *pgTailSource) Broken(ctx context.Context, tables []views.BaselineTable)
 	if err := x.b.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0), COUNT(*) FROM schema_changes").Scan(&schemaChgID, &schemaChgs); err != nil {
 		return nil, fmt.Errorf("read the newest schema change of the index: %w", err)
 	}
-	base := pgBrokenKey{snapshotID: snapshotID, schemaChgID: schemaChgID, schemaChgs: schemaChgs, stateKnown: st != nil}
+	base := pgBrokenKey{snapshotID: snapshotID, schemaChgID: schemaChgID, schemaChgs: schemaChgs, stateKnown: st != nil,
+		gapColumns: st != nil && st.GapColumnsPresent}
 	if st != nil && st.GapColumnsPresent && st.GapLostAt.Valid {
 		base.lostAt, base.lostKnown = st.GapLostAt.Time.UTC(), true
 	}
