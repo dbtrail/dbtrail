@@ -1208,6 +1208,10 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	if id, ok := tailsFor(ctx); ok && at.IsZero() && b.db != nil && s.tailsOnFor(id) {
 		tails = s.tailKeeperFor(id, b)
 	}
+	// freshPort: the statement is one of the port's in fresh mode, whose
+	// answers never come from the snapshot alone unsaid (statementTailsFresh),
+	// even when its tails cannot be read below.
+	freshPort := tails != nil
 	if tails != nil {
 		if dir, err := tails.ensureDir(); err != nil {
 			tails.note(fmt.Errorf("the tails' directory: %w", err))
@@ -1298,32 +1302,49 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			}
 			// Not over a statement whose tables the parse could not tell: it
 			// would build a tail for every table of the copy.
-			if tails != nil && narrowed.OnlyViews != nil {
+			var missing, olderNote string
+			switch {
+			case tails != nil && narrowed.OnlyViews != nil:
 				tailsStart := time.Now()
-				var missing string
-				untailed := narrowed.Baselines
 				narrowed.Baselines, tailThrough, tailThroughID, allTailed, missing = s.statementTailsFresh(ctx, tails, narrowed.Baselines, readTables, freshTailsWait)
 				if missing == "" && allTailed && tailThroughID != 0 && tailThroughID < seenFloor(ctx) {
-					// Never an answer older than one this connection already
-					// had: its last answer on the copy read the index
-					// further than these tails do.
-					allTailed, missing = false, "the copy's newest version is older than an answer this connection already had"
-					narrowed.Baselines, tailThrough, tailThroughID = untailed, time.Time{}, 0
+					// An earlier answer of the copy on this connection read
+					// the index further than these tails do. Under routing
+					// MySQL answers; on a connection that does not route these
+					// tails do (still newer than the snapshot), saying so.
+					if sess.StrictStar {
+						missing = "the copy's newest version is older than an earlier answer of the copy on this connection"
+					} else {
+						olderNote = "Answered from captured changes older than an earlier answer of the copy on this connection: the copy's newest version is behind it."
+					}
 				}
 				parent.Tails += time.Since(tailsStart)
 				parent.TailsRan = true
-				if missing != "" && !sqlMentionsEvents(statement) {
-					// Fresh mode never answers from the snapshot alone
-					// without saying so. Under routing MySQL answers; on a
-					// connection that does not route, the snapshot answers
-					// with the reason as a warning.
-					if sess.StrictStar {
-						viewsRefusal = &sqlChangedRefusal{"fresh mode: " + missing}
-						return "", viewsRefusal
-					}
-					freshNote = freshSnapshotNote(missing, in.BaselineSnapshot)
-				}
 				allTailed = tailsSayTheInstant(statement, allTailed)
+			case freshPort && len(readTables) > 0 && tails == nil:
+				missing = "the tails cannot be written on this host (their directory)"
+			case freshPort && len(readTables) > 0:
+				missing = "which tables the statement reads cannot be told, so no tables' newest captured changes are read"
+			}
+			if missing != "" {
+				if ctx.Err() != nil {
+					// The client left, or the statement's time ran out,
+					// while it waited: that, not a refusal MySQL would be
+					// asked to answer for nobody.
+					viewsRefusal = ctx.Err()
+					return "", viewsRefusal
+				}
+				// Fresh mode never answers from the snapshot alone without
+				// saying so. Under routing MySQL answers; on a connection
+				// that does not route, the snapshot answers with the reason
+				// as a warning.
+				if sess.StrictStar {
+					viewsRefusal = &sqlChangedRefusal{"fresh mode: " + missing}
+					return "", viewsRefusal
+				}
+				freshNote = freshSnapshotNote(missing, in.BaselineSnapshot)
+			} else if olderNote != "" {
+				freshNote = olderNote
 			}
 			// The server's lag limit (#2777), once the tables and their tails
 			// are known and before anything heavier: a statement that reads

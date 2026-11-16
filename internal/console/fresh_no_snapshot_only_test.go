@@ -279,3 +279,81 @@ func TestAPortLoginEditKeepsTheTails(t *testing.T) {
 		t.Fatal("a login saved on the port replaced the server's tails: its statements read the snapshot alone")
 	}
 }
+
+// An index with no captured change has no tails, and no wait brings one:
+// the statement is told at once, not after the whole wait.
+func TestStatementTailsFreshOverAnEmptyIndex(t *testing.T) {
+	ctx := context.Background()
+	k := newTailKeeper(&fakeIndex{}, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	orders := []views.BaselineTable{keeperTable("orders")}
+	s := &Server{}
+	s.statementTails(ctx, k, orders, orders)
+	k.settle()
+	k.followOnce(ctx, time.Minute)
+	start := time.Now()
+	_, _, _, ok, missing := s.statementTailsFresh(ctx, k, orders, orders, 10*time.Second)
+	if ok || !strings.Contains(missing, "no change") {
+		t.Fatalf("ok %v, missing %q", ok, missing)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("waited %v over an empty index", took)
+	}
+}
+
+// One table refused until its next snapshot and another on its way: all or
+// nothing, so the statement is told at once.
+func TestStatementTailsFreshARefusedTableEndsTheWait(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeIndex{startWhy: map[string]string{tailKey("shop", "customers"): "its key is not made of integers"}}
+	f.add("orders", "1")
+	f.add("customers", "1")
+	k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	s := &Server{}
+	customers := []views.BaselineTable{keeperTable("customers")}
+	s.statementTails(ctx, k, customers, customers)
+	k.settle()
+	k.followOnce(ctx, time.Minute)
+	f.mu.Lock()
+	f.fillGate = map[string]chan struct{}{tailKey("shop", "orders"): make(chan struct{})}
+	f.mu.Unlock()
+	both := []views.BaselineTable{keeperTable("orders"), keeperTable("customers")}
+	start := time.Now()
+	_, _, _, ok, missing := s.statementTailsFresh(ctx, k, both, both, 10*time.Second)
+	if ok || !strings.Contains(missing, "integers") {
+		t.Fatalf("ok %v, missing %q", ok, missing)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("waited %v for a tail that could not be used", took)
+	}
+	f.mu.Lock()
+	close(f.fillGate[tailKey("shop", "orders")])
+	f.mu.Unlock()
+	k.close()
+	k.settle()
+}
+
+// An update that started every tail over (the index was rebuilt) and then
+// failed keeps no view: they are of what it threw away.
+func TestAFailedUpdateAfterARebuildKeepsNoViews(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeIndex{}
+	f.add("orders", "1")
+	k := newTailKeeper(f, t.TempDir(), tailBudget{Keys: 3}, time.Minute, time.Hour)
+	s := &Server{}
+	orders := []views.BaselineTable{keeperTable("orders")}
+	s.statementTails(ctx, k, orders, orders)
+	k.settle()
+	k.followOnce(ctx, time.Minute)
+	k.followOnce(ctx, time.Minute)
+	if _, _, ok := s.statementTails(ctx, k, orders, orders); !ok {
+		t.Fatal("the rig has no tail")
+	}
+	f.mu.Lock()
+	f.events[0].StartPos += 7 // the mark's event is not what it was: rebuilt
+	f.changedErr = errors.New("schema_changes unreadable")
+	f.mu.Unlock()
+	k.followOnce(ctx, time.Minute)
+	if v, _ := k.published(orders); len(v) != 0 {
+		t.Fatalf("views of the tails a rebuilt index threw away: %v", v)
+	}
+}

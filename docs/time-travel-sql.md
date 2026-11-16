@@ -1305,7 +1305,8 @@ cannot have a tail when:
 - its primary key is not made of integers;
 - its definition changed since its snapshot, capture lost events since, or
   the source server changed;
-- capture does not record it, or `bintrail index` also wrote the index;
+- capture does not record it, `bintrail index` also wrote the index, or the
+  index holds no captured change yet;
 - its tail would pass its budget when it is built (below).
 
 A table whose changes since its snapshot pass its budget, or whose tails
@@ -1315,14 +1316,16 @@ advancing until the next snapshot. When an update of the tails fails or
 runs out of time, statements keep reading the last version that was
 brought up to date (older, and the answer's lag says by how much), for up
 to 15 minutes. An edit of a server that leaves its index connection alone
-(its application login on the port, a setting) keeps its tails. A
-connection never gets an answer from the copy older than one it already
-had: such a statement goes to MySQL, or answers with the warning. A
-statement answered from an earlier snapshot, because the newest holds more
+(its application login on the port, a setting) keeps its tails. The
+copy never answers a connection with less of the index than an earlier
+answer of the copy on that same connection held: such a statement goes to
+MySQL, or, on a connection that does not route, is answered with a warning
+that says so. (An answer of MySQL on a routing connection is MySQL's own,
+and the next answer of the copy can be a second or so behind it, as any
+replica is.) The same rule covers a statement whose tables the port cannot
+tell apart (a `WITH` that reads another `WITH`, for one), which reads no
+tails. A statement answered from an earlier snapshot, because the newest holds more
 unmerged changes than it can read, reads no tails, and says so.
-
-A statement whose tables the port cannot tell apart (a `WITH` that reads
-another `WITH`, for one) reads no tails either.
 
 In fast mode (saved for the server, or `off`, `false`, `0`, `no` or `fast`
 in the setting for every server) the copy answers as it

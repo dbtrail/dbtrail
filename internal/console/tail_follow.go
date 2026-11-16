@@ -219,7 +219,7 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 	if tables == nil {
 		return false
 	}
-	got, refused, err := k.refreshWithinRefused(ctx, d, tables)
+	got, refused, dropped, err := k.refreshWithinRefused(ctx, d, tables)
 	if k.life.Err() == nil {
 		// Not a keeper closed under its update: nothing reads it any more.
 		k.note(err)
@@ -245,9 +245,12 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 		// not wake the follower for tables it just failed on, which it tries
 		// again in its own time.
 		kept := map[string]tailView{}
-		if k.now().Sub(p.okAt) > k.keepOld/2 {
-			// Replaced versions are removed after keepOld: past half of it
-			// the files these views read may be the next to go.
+		if dropped || k.now().Sub(p.okAt) > k.keepOld/2 {
+			// dropped: the update started every tail over (the index was
+			// rebuilt, the directory removed) before it failed, and the last
+			// views are of what it threw away. Past half of keepOld: replaced
+			// versions are removed after it, and the files these views read
+			// may be the next to go.
 			p.views = nil
 		}
 		for key, v := range p.views {
@@ -257,6 +260,12 @@ func (k *tailKeeper) followOnce(ctx context.Context, d time.Duration) bool {
 		}
 		if len(kept) == 0 {
 			kept = nil
+		}
+		// A refusal stands only over the cut it was made for.
+		for key := range p.refused {
+			if p.cuts[key] != cuts[key] {
+				delete(p.refused, key)
+			}
 		}
 		p.views, p.cuts = kept, cuts
 		return true
@@ -306,6 +315,7 @@ func (k *tailKeeper) runFollower() {
 	stopped := func() {
 		p.mu.Lock()
 		p.views, p.cuts, p.running = nil, nil, false
+		p.markPublishedLocked()
 		p.mu.Unlock()
 	}
 	defer func() {
@@ -315,6 +325,7 @@ func (k *tailKeeper) runFollower() {
 		}
 		p.mu.Lock()
 		p.views, p.cuts, p.running, p.updating = nil, nil, false, false
+		p.markPublishedLocked()
 		p.panics++
 		wait := k.retryWait(p.panics)
 		p.restartAt = k.now().Add(wait)

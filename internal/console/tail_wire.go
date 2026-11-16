@@ -144,7 +144,7 @@ func TailsSetting() (on bool, read string) {
 // connection was opened again) is replaced; its files are removed once no
 // statement can still read them.
 func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
-	captures, known := s.tailCaptures(id)
+	captures, capturesKey, known := s.tailCapturesKeyed(id)
 	if !known {
 		return nil
 	}
@@ -160,7 +160,6 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 		return nil
 	}
 	old := s.tails.by[id]
-	capturesKey := s.tailCapturesKey(id)
 	if old != nil {
 		// The same index connection, not the same bundle: an edit of the
 		// server that leaves its index alone (its application login, a
@@ -198,31 +197,30 @@ func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
 // table). The boot server's filters are the daemon's flags, which this
 // process does not know: no tails for it.
 func (s *Server) tailCaptures(id string) (func(schema, table string) bool, bool) {
+	f, _, ok := s.tailCapturesKeyed(id)
+	return f, ok
+}
+
+// tailCapturesKeyed is tailCaptures with the setting it decided from (the
+// entry's Schemas), both of one read of the registry, for telling one
+// decision from another.
+func (s *Server) tailCapturesKeyed(id string) (func(schema, table string) bool, string, bool) {
 	if s.tailCapturesHook != nil {
-		return s.tailCapturesHook(id)
+		f, ok := s.tailCapturesHook(id)
+		return f, "", ok
 	}
-	if id == bootServerID || s.cm.reg == nil {
-		return nil, false
+	if id == bootServerID || s.cm == nil || s.cm.reg == nil {
+		return nil, "", false
 	}
 	e, ok := s.cm.reg.Get(id)
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	if e.Schemas == "" {
-		return nil, true
+		return nil, "", true
 	}
 	filters := cliutil.BuildIndexFilters(e.Schemas, "")
-	return filters.Matches, true
-}
-
-// tailCapturesKey is what tailCaptures decides from, for telling one
-// decision from another.
-func (s *Server) tailCapturesKey(id string) string {
-	if s.tailCapturesHook != nil || s.cm == nil || s.cm.reg == nil {
-		return ""
-	}
-	e, _ := s.cm.reg.Get(id)
-	return e.Schemas
+	return filters.Matches, e.Schemas, true
 }
 
 // statementTails returns tables with the tails of read, the tables a
@@ -283,6 +281,7 @@ const freshTailsWait = 3 * time.Second
 // MySQL (routing) or answers from the snapshot with it as a warning.
 func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables, read []views.BaselineTable, wait time.Duration) (out []views.BaselineTable, through time.Time, throughID uint64, ok bool, missing string) {
 	deadline := time.Now().Add(wait)
+	woke := false
 	for {
 		ch := k.nextPublish()
 		out, through, throughID, ok = s.statementTailsMark(ctx, k, tables, read)
@@ -308,19 +307,28 @@ func (s *Server) statementTailsFresh(ctx context.Context, k *tailKeeper, tables,
 				pending = name
 			}
 		}
-		if pending == "" && why != "" {
+		if why != "" {
+			// All or nothing: one table that cannot have a tail until its
+			// next snapshot keeps the statement from tails, however soon the
+			// others come.
 			return tables, time.Time{}, 0, false, why
 		}
 		if pending == "" {
-			// Every table has a view, of two updates: the next publish has
-			// them at one instant.
-			pending = read[0].Schema + "." + read[0].Table
+			// Every table has a view, of one update, at two instants: a tail
+			// over its budget stopped advancing, until the next snapshot. No
+			// wait brings them together.
+			return tables, time.Time{}, 0, false, "the tables it reads are not up to date to one moment (a tail over its budget stopped advancing)"
 		}
 		left := time.Until(deadline)
 		if left <= 0 || ctx.Err() != nil || k.life.Err() != nil {
 			return tables, time.Time{}, 0, false, "the newest captured changes of " + pending + " are not ready yet"
 		}
-		k.wakeFollower()
+		if !woke {
+			// Once: the follower then goes on at its own pace, so statements
+			// waiting together do not keep it from pausing.
+			k.wakeFollower()
+			woke = true
+		}
 		t := time.NewTimer(left)
 		select {
 		case <-ch:
