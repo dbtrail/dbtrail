@@ -1,6 +1,7 @@
 package reconstruct
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -33,6 +34,13 @@ import (
 //     comparing the key columns, which is exact only where text compares by
 //     its bytes: under the PostgreSQL session's rules, not under the MySQL
 //     session's. Who builds this tail answers for that.
+//
+// What this type does not look at, and whoever builds one must: a change of
+// the table's definition after the copy's cut (a column's type, a TRUNCATE,
+// the table made again), and events capture lost. And it must be fed only up
+// to capture's saved position, where every transaction is whole: a
+// transaction delivered a second time after a crash is accepted only once
+// its second delivery is complete (ErrPGTailTxnOpen until then).
 //
 // Positions. What drives a tail (the keeper) orders positions as binary log
 // coordinates and takes an LSN for no position at all. So the events and the
@@ -73,15 +81,30 @@ type PGTail struct {
 	pkNames []string
 	fold    foldResult
 	dirty   map[string]struct{}
+	// generated are the columns a change's image may hold that the copy does
+	// not: the table's generated columns. Any other column the copy lacks
+	// was added at the source after the cut.
+	generated map[string]bool
 	// needFull: see Tail.needFull.
 	needFull bool
 }
 
+// ErrPGTailTxnOpen says a key's transaction was delivered a second time and
+// the second delivery is not whole yet: the tail cannot be written now, and
+// can once the rest is folded. Not a refusal.
+var ErrPGTailTxnOpen = errors.New("a transaction delivered a second time is not whole yet")
+
+// pgTxnBytes is what the record of a key's last transaction holds on the
+// heap, key and map slot included: Bytes counts it per key.
+const pgTxnBytes = 300
+
 // NewPGTail starts an empty tail for schema.table. md is the footer of the
-// file the table's view reads, fileColumns that file's columns, and pkCols
-// the table's key as the index's schema records it, in table order. A
-// *TailRefusal when the table cannot have one.
-func NewPGTail(schema, table string, md baseline.DumpMetadata, fileColumns []string, pkCols []metadata.ColumnMeta) (*PGTail, error) {
+// file the table's view reads, fileColumns that file's columns, pkCols the
+// table's key as the index's schema records it, in table order, and
+// generated the table's generated columns as that schema names them (the
+// ones the snapshot recorded are added). A *TailRefusal when the table
+// cannot have one.
+func NewPGTail(schema, table string, md baseline.DumpMetadata, fileColumns []string, pkCols []metadata.ColumnMeta, generated []string) (*PGTail, error) {
 	name := schema + "." + table
 	rel, err := checkPGFoldable(schema, table, md)
 	if err != nil {
@@ -111,13 +134,32 @@ func NewPGTail(schema, table string, md baseline.DumpMetadata, fileColumns []str
 		return nil, &TailRefusal{fmt.Sprintf("%s: its key is now (%s), and its copy was taken under (%s)",
 			name, strings.Join(pkNames, ", "), strings.Join(rel.PrimaryKey, ", "))}
 	}
+	// A key is written with its columns in the table's order, and a deleted
+	// row's tombstone is built by splitting it in that order: in another one
+	// the tombstone would carry another row's key, and nothing would say so.
+	at := make(map[string]int, len(rel.Columns))
+	for i, c := range rel.Columns {
+		at[c.Name] = i
+	}
+	for i := 1; i < len(pkNames); i++ {
+		if at[pkNames[i-1]] >= at[pkNames[i]] {
+			return nil, &TailRefusal{fmt.Sprintf("%s: its key columns (%s) were not given in the table's column order", name, strings.Join(pkNames, ", "))}
+		}
+	}
+	gen := make(map[string]bool, len(generated)+len(rel.Generated))
+	for _, c := range generated {
+		gen[c] = true
+	}
+	for _, c := range rel.Generated {
+		gen[c.Name] = true
+	}
 	// The two columns a tail file adds.
 	cols := rawTextColumns(fileColumns)
 	if _, err := baseline.TableDeltaColumns(cols); err != nil {
 		return nil, &TailRefusal{fmt.Sprintf("%s: %v", name, err)}
 	}
 	return &PGTail{schema: schema, table: table, names: append([]string(nil), fileColumns...), cols: cols,
-		pkCols: pkCols, pkNames: pkNames,
+		pkCols: pkCols, pkNames: pkNames, generated: gen,
 		fold: foldResult{Changes: map[string]*query.ResultRow{}}, dirty: map[string]struct{}{}}, nil
 }
 
@@ -207,7 +249,10 @@ func (t *PGTail) PruneThrough(anchor query.BinlogPos, afterID uint64) (int, erro
 func (t *PGTail) Keys() int { return len(t.fold.Changes) }
 
 // Bytes is an estimate of the heap the tail holds (see Tail.Bytes).
-func (t *PGTail) Bytes() int64 { b, _ := sampledChangeBytes(t.fold.Changes); return b }
+func (t *PGTail) Bytes() int64 {
+	b, _ := sampledChangeBytes(t.fold.Changes)
+	return b + int64(len(t.fold.pgTxn))*pgTxnBytes
+}
 
 // Dirty is how many keys changed since the last file was written.
 func (t *PGTail) Dirty() int { return len(t.dirty) }
@@ -254,11 +299,18 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 		return 0, fmt.Errorf("internal: the tail of %s.%s would replace %s, which a running statement may be reading", t.schema, t.table, path)
 	}
 	// A transaction delivered a second time and not yet whole: what is
-	// folded of it is not what the source holds. Whoever feeds this tail
-	// stops at capture's saved position, where the last delivery is whole,
-	// so one still open here is a sequence that cannot be read.
-	if err := t.fold.pgTxnEnd(t.schema, t.table); err != nil {
-		return 0, &TailRefusal{err.Error()}
+	// folded of it is not what the source holds. Only a key about to be
+	// written can have one open (a key not changed since the last file was
+	// whole then). An error, not a refusal: the rest of the delivery closes
+	// it, and the keys stay changed for the next write.
+	open := make(map[string]pgKeyTxn, len(keys))
+	for _, k := range keys {
+		if rec, ok := t.fold.pgTxn[k]; ok {
+			open[k] = rec
+		}
+	}
+	if err := pgTxnOpenRepeat(open, t.schema, t.table); err != nil {
+		return 0, fmt.Errorf("%s.%s: %w", t.schema, t.table, ErrPGTailTxnOpen)
 	}
 	if missing := droppedBaselineColumns(t.fold.ImageColumns, t.fold.SawImage, t.names); len(missing) > 0 {
 		return 0, &TailRefusal{fmt.Sprintf("%s.%s: column(s) %s of its copy are missing from changes after the copy's cut (dropped at the source)",
@@ -267,6 +319,14 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 	upsCols, err := baseline.TableDeltaColumns(t.cols)
 	if err != nil {
 		return 0, &TailRefusal{fmt.Sprintf("%s.%s: %v", t.schema, t.table, err)}
+	}
+	// Every row before the file: a refusal leaves nothing behind.
+	sort.Strings(keys)
+	out := make([]map[string]any, len(keys))
+	for i, k := range keys {
+		if out[i], err = t.tailRow(k, t.fold.Changes[k]); err != nil {
+			return 0, err
+		}
 	}
 	tmp := path + ".tmp"
 	w, err := newParquetTableWriter(tmp, upsCols, map[string]string{
@@ -281,12 +341,7 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 			_ = os.Remove(tmp)
 		}
 	}()
-	sort.Strings(keys)
-	for _, k := range keys {
-		row, err := t.tailRow(k, t.fold.Changes[k])
-		if err != nil {
-			return 0, err
-		}
+	for _, row := range out {
 		if err := w.WriteRow(row, t.schema, t.table); err != nil {
 			return 0, err
 		}
@@ -301,22 +356,25 @@ func (t *PGTail) write(path string, keys []string) (rows int64, retErr error) {
 	return w.Rows(), nil
 }
 
-// tailRow is one key's row of the file: the copy's columns and no other (a
-// generated column the source publishes is in the image and not in the
-// copy), and the row's key columns are checked against the key it is filed
-// under, so a row is never written over another row's.
+// tailRow is one key's row of the file: the copy's columns and no other,
+// and the row's key columns checked against the key it is filed under, so a
+// row is never written over another row's. What it cannot write is a
+// *TailRefusal: none of it changes at the next write.
 func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error) {
 	name := t.schema + "." + t.table
+	refuse := func(format string, args ...any) (map[string]any, error) {
+		return nil, &TailRefusal{name + ": " + fmt.Sprintf(format, args...)}
+	}
 	// pk_values is cut at this length where it is stored: a key this long
 	// may be the beginning of another.
 	if utf8.RuneCountInString(key) >= event.MaxPKValuesLen {
-		return nil, &TailRefusal{fmt.Sprintf("%s: a key is as long as the index stores one (%d characters), so two keys may be filed as one", name, event.MaxPKValuesLen)}
+		return refuse("a key is as long as the index stores one (%d characters), so two keys may be filed as one", event.MaxPKValuesLen)
 	}
 	row := make(map[string]any, len(t.names)+2)
 	if ev.EventType == event.EventDelete {
 		parts, err := pgKeyParts(key, len(t.pkNames))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
+			return refuse("%v", err)
 		}
 		for _, c := range t.names {
 			row[c] = nil
@@ -327,25 +385,40 @@ func (t *PGTail) tailRow(key string, ev *query.ResultRow) (map[string]any, error
 		row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpDelete
 	} else {
 		if ev.RowAfter == nil {
-			return nil, fmt.Errorf("%s: the change of key %q has no row image", name, key)
+			return refuse("the change of key %q has no row image", key)
 		}
 		for _, c := range t.names {
 			v, ok := ev.RowAfter[c]
 			if !ok {
-				return nil, &TailRefusal{fmt.Sprintf("%s: column %s of its copy is missing from a change after the copy's cut", name, c)}
+				return refuse("column %s of its copy is missing from a change after the copy's cut", c)
 			}
 			row[c] = v
+		}
+		// A column the copy does not hold: a generated one, which the source
+		// may publish, or one added at the source after the cut, which this
+		// tail would hide.
+		if len(ev.RowAfter) > len(t.names) {
+			var added []string
+			for c := range ev.RowAfter {
+				if _, in := row[c]; !in && !t.generated[c] {
+					added = append(added, c)
+				}
+			}
+			if len(added) > 0 {
+				sort.Strings(added)
+				return refuse("column(s) %s are in a change after the copy's cut and not in the copy (added at the source)", strings.Join(added, ", "))
+			}
 		}
 		parts := make([]string, len(t.pkNames))
 		for i, c := range t.pkNames {
 			s, ok := row[c].(string)
 			if !ok {
-				return nil, fmt.Errorf("%s: the change of key %q has no text value in key column %s", name, key, c)
+				return refuse("the change of key %q has no text value in key column %s", key, c)
 			}
 			parts[i] = s
 		}
 		if got := pgdelta.KeyOf(parts); got != key {
-			return nil, fmt.Errorf("%s: a row whose key columns (%s) make %q is filed under key %q", name, strings.Join(t.pkNames, ", "), got, key)
+			return refuse("a row whose key columns (%s) make %q is filed under key %q", strings.Join(t.pkNames, ", "), got, key)
 		}
 		row[baseline.TableDeltaOpColumn] = baseline.TableDeltaOpUpsert
 	}

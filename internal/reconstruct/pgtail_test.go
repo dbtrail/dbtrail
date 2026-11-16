@@ -3,7 +3,9 @@ package reconstruct
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -92,7 +94,7 @@ func readPGState(t *testing.T, stateSQL string) []string {
 
 func newTestPGTail(t *testing.T, md baseline.DumpMetadata) *PGTail {
 	t.Helper()
-	tail, err := NewPGTail("mydb", "orders", md, pgTailCols, pkColsIntID())
+	tail, err := NewPGTail("mydb", "orders", md, pgTailCols, pkColsIntID(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +112,11 @@ func TestPGTail_OverTheCopy(t *testing.T) {
 		[2]string{"1", "one"}, [2]string{"2", "two"}, [2]string{"3", "three"},
 		[2]string{`a|b\c`, "piped"}, [2]string{"k", "lower"}, [2]string{"K", "upper"})
 	tail := newTestPGTail(t, md)
-	// Out of order on purpose: the later LSN wins, whatever the page order.
+	// The later LSN wins, whatever the page order and whatever the ids: the
+	// change with the LOWER id is the later one here, as after a transaction
+	// delivered again.
 	pages := [][]query.ResultRow{
-		{pgUpd(11, 0x620, "1", "1", "ONE again"), pgUpd(10, 0x610, "1", "1", "ONE")},
+		{pgUpd(10, 0x620, "1", "1", "ONE again"), pgUpd(11, 0x610, "1", "1", "ONE")},
 		{pgDel(12, 0x630, "2"), pgIns(13, 0x640, "9", "nine")},
 		{pgIns(14, 0x650, "8", "brief"), pgDel(15, 0x660, "8")},
 		{pgUpd(16, 0x670, `a|b\c`, `a|b\c`, "piped twice"), pgUpd(17, 0x680, "K", "K", "UPPER")},
@@ -185,14 +189,23 @@ func TestPGTail_KeyChange(t *testing.T) {
 	dir := t.TempDir()
 	base, md := writePGTailBase(t, dir, nil, [2]string{"1", "one"}, [2]string{"2", "two"})
 	tail := newTestPGTail(t, md)
+	if err := tail.Apply([]query.ResultRow{pgUpd(9, 0x600, "2", "2", "TWO")}); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(dir, "1-orders.parquet")
+	if _, err := tail.WriteFile(first); err != nil {
+		t.Fatal(err)
+	}
 	if err := tail.Apply([]query.ResultRow{pgEv(10, 0x610, event.EventUpdate, pgImg("1", "one"), pgImg("7", "moved"))}); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "1-orders.parquet")
-	if _, err := tail.WriteFile(path); err != nil {
-		t.Fatal(err)
+	// Both keys of the change are in the delta: the old one as a tombstone.
+	second := filepath.Join(dir, "2-orders.parquet")
+	if rows, err := tail.WriteDelta(second); err != nil || rows != 2 {
+		t.Fatalf("WriteDelta: %d rows, %v; want the old key and the new one", rows, err)
 	}
-	if got, want := readPGState(t, baseline.TableTailStateSQL(pgPublished(base), lit(path), tail.PKColumns(), "")), []string{"2=two", "7=moved"}; !reflect.DeepEqual(got, want) {
+	state := baseline.TableTailChainStateSQL(pgPublished(base), []string{lit(first), lit(second)}, tail.PKColumns(), "")
+	if got, want := readPGState(t, state), []string{"2=TWO", "7=moved"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("state %v, want %v", got, want)
 	}
 }
@@ -268,33 +281,151 @@ func TestPGTail_PruneThrough(t *testing.T) {
 	}
 }
 
-// A column the source publishes and the copy does not hold (a generated
-// one) is in the image and not in the tail's file.
+// A generated column the source publishes is in the image and not in the
+// tail's file; any other column the copy does not hold was added at the
+// source, and refuses.
 func TestPGTail_OnlyTheCopysColumns(t *testing.T) {
 	dir := t.TempDir()
 	base, md := writePGTailBase(t, dir, nil, [2]string{"1", "one"})
-	tail := newTestPGTail(t, md)
 	after := map[string]any{"id": "1", "status": "ONE", "status_upper": "ONE"}
 	before := map[string]any{"id": "1", "status": "one", "status_upper": "ONE"}
-	if err := tail.Apply([]query.ResultRow{pgEv(10, 0x610, event.EventUpdate, before, after)}); err != nil {
+	ev := func() []query.ResultRow { return []query.ResultRow{pgEv(10, 0x610, event.EventUpdate, before, after)} }
+
+	tail, err := NewPGTail("mydb", "orders", md, pgTailCols, pkColsIntID(), []string{"status_upper"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tail.Apply(ev()); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "1-orders.parquet")
 	if _, err := tail.WriteFile(path); err != nil {
 		t.Fatal(err)
 	}
+	state := baseline.TableTailStateSQL(pgPublished(base), lit(path), tail.PKColumns(), "")
+	if got, want := readPGState(t, state), []string{"1=ONE"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state %v, want %v", got, want)
+	}
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rs, err := db.Query("SELECT * FROM (" + baseline.TableTailStateSQL(pgPublished(base), lit(path), tail.PKColumns(), "") + ")")
+	rs, err := db.Query("SELECT * FROM (" + state + ")")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rs.Close()
 	if cols, _ := rs.Columns(); !reflect.DeepEqual(cols, pgTailCols) {
 		t.Fatalf("the table reads with columns %v, want %v", cols, pgTailCols)
+	}
+
+	// The same change with nobody saying the column is generated.
+	plain := newTestPGTail(t, md)
+	if err := plain.Apply(ev()); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(dir, "2-orders.parquet")
+	_, err = plain.WriteFile(gone)
+	var refusal *TailRefusal
+	if !asTailRefusal(err, &refusal) || !strings.Contains(refusal.Reason, "status_upper") || !strings.Contains(refusal.Reason, "added at the source") {
+		t.Fatalf("a column added at the source: %v", err)
+	}
+	for _, f := range []string{gone, gone + ".tmp"} {
+		if _, err := os.Lstat(f); err == nil {
+			t.Fatalf("the refused write left %s", f)
+		}
+	}
+}
+
+// Two changes of one key in one transaction order by event id, and a
+// transaction delivered a second time is written only once the second
+// delivery is whole: until then the write fails without refusing the tail.
+func TestPGTail_SameTransaction(t *testing.T) {
+	dir := t.TempDir()
+	base, md := writePGTailBase(t, dir, nil, [2]string{"1", "one"})
+	tail := newTestPGTail(t, md)
+	const lsn = 0x700
+	ins := func(id uint64) query.ResultRow { return pgEv(id, lsn, event.EventInsert, nil, pgImg("5", "a")) }
+	upd := func(id uint64) query.ResultRow {
+		return pgEv(id, lsn, event.EventUpdate, pgImg("5", "a"), pgImg("5", "b"))
+	}
+	if err := tail.Apply([]query.ResultRow{ins(10), upd(11)}); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(dir, "1-orders.parquet")
+	if _, err := tail.WriteFile(first); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readPGState(t, baseline.TableTailStateSQL(pgPublished(base), lit(first), tail.PKColumns(), "")), []string{"1=one", "5=b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state %v, want %v", got, want)
+	}
+	// The transaction comes again, and only its first change so far.
+	if err := tail.Apply([]query.ResultRow{ins(12)}); err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(dir, "2-orders.parquet")
+	_, err := tail.WriteDelta(second)
+	var refusal *TailRefusal
+	if !errors.Is(err, ErrPGTailTxnOpen) || asTailRefusal(err, &refusal) || tail.Dirty() != 1 {
+		t.Fatalf("a second delivery not whole yet: %v, dirty %d; want ErrPGTailTxnOpen and the key still changed", err, tail.Dirty())
+	}
+	if _, err := os.Lstat(second); err == nil {
+		t.Fatal("the failed write left its file")
+	}
+	// Its rest arrives: the same write goes through.
+	if err := tail.Apply([]query.ResultRow{upd(13)}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := tail.WriteDelta(second); err != nil || rows != 1 {
+		t.Fatalf("WriteDelta once the delivery is whole: %d rows, %v", rows, err)
+	}
+	state := baseline.TableTailChainStateSQL(pgPublished(base), []string{lit(first), lit(second)}, tail.PKColumns(), "")
+	if got, want := readPGState(t, state), []string{"1=one", "5=b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state %v, want %v", got, want)
+	}
+}
+
+// A key of two columns is written in the table's column order, whatever
+// order the primary key declares, and a deleted row's tombstone carries that
+// row's key: a tail given the key in another order is refused.
+func TestPGTail_CompositeKey(t *testing.T) {
+	dir := t.TempDir()
+	declared := pgTailRel
+	declared.PrimaryKey = []string{"status", "id"}
+	enc, err := declared.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, md := writePGTailBase(t, dir, func(m map[string]string) { m[baseline.MetaKeyPGRelation] = enc },
+		[2]string{"1", "2"}, [2]string{"2", "1"}, [2]string{"3", "3"})
+	inTable := []metadata.ColumnMeta{{Name: "id", OrdinalPosition: 1, IsPK: true}, {Name: "status", OrdinalPosition: 2, IsPK: true}}
+	_, err = NewPGTail("mydb", "orders", md, pgTailCols, []metadata.ColumnMeta{inTable[1], inTable[0]}, nil)
+	var refusal *TailRefusal
+	if !asTailRefusal(err, &refusal) || !strings.Contains(refusal.Reason, "column order") {
+		t.Fatalf("a key given in the primary key's own order: %v", err)
+	}
+	tail, err := NewPGTail("mydb", "orders", md, pgTailCols, inTable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	del := query.ResultRow{EventID: 10, BinlogFile: lsnText(0x610), StartPos: 0x610, EndPos: 0x610, EventTimestamp: foldBase,
+		SchemaName: "mydb", TableName: "orders", EventType: event.EventDelete, RowBefore: pgImg("1", "2")}
+	del.PKValues = event.BuildPKValues(inTable, del.RowBefore)
+	if del.PKValues != "1|2" {
+		t.Fatalf("the fixture's key is %q", del.PKValues)
+	}
+	if err := tail.Apply([]query.ResultRow{del}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "1-orders.parquet")
+	if rows, err := tail.WriteFile(path); err != nil || rows != 1 {
+		t.Fatalf("WriteFile: %d rows, %v", rows, err)
+	}
+	// (1,2) is gone and (2,1), whose columns hold the same two values the
+	// other way round, is not.
+	if got, want := readPGState(t, baseline.TableTailStateSQL(pgPublished(base), lit(path), tail.PKColumns(), "")), []string{"2=1", "3=3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("state %v, want %v", got, want)
 	}
 }
 
@@ -318,7 +449,7 @@ func TestNewPGTail_Refusals(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			_, md := writePGTailBase(t, t.TempDir(), c.mutate, [2]string{"1", "one"})
-			_, err := NewPGTail("mydb", "orders", md, c.cols, c.pk)
+			_, err := NewPGTail("mydb", "orders", md, c.cols, c.pk, nil)
 			var refusal *TailRefusal
 			if !asTailRefusal(err, &refusal) || !strings.Contains(refusal.Reason, c.want) {
 				t.Fatalf("NewPGTail: %v, want a refusal with %q", err, c.want)
@@ -346,7 +477,8 @@ func TestPGTail_KeyGuards(t *testing.T) {
 	}
 	// The folded image's key column no longer says what its key says.
 	tail.fold.Changes["2"].RowAfter["id"] = "3"
-	if _, err := tail.WriteFile(filepath.Join(dir, "1-orders.parquet")); err == nil || !strings.Contains(err.Error(), "is filed under key") {
+	var refusal *TailRefusal
+	if _, err := tail.WriteFile(filepath.Join(dir, "1-orders.parquet")); !asTailRefusal(err, &refusal) || !strings.Contains(refusal.Reason, "is filed under key") {
 		t.Fatalf("a row under another row's key: %v", err)
 	}
 	long := newTestPGTail(t, md)
@@ -355,7 +487,6 @@ func TestPGTail_KeyGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := long.WriteFile(filepath.Join(dir, "2-orders.parquet"))
-	var refusal *TailRefusal
 	if !asTailRefusal(err, &refusal) || !strings.Contains(refusal.Reason, "as long as the index stores one") {
 		t.Fatalf("a key as long as the index stores: %v", err)
 	}
