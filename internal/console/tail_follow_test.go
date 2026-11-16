@@ -98,14 +98,15 @@ func TestTailFollower(t *testing.T) {
 		if _, _, ok := s.statementTails(ctx, k, one(orders), one(orders)); !ok || updates(k) != n {
 			t.Fatalf("a statement read the index: tails %v, updates %d → %d", ok, n, updates(k))
 		}
-		// The follower meets the error: nothing published until an update
-		// succeeds, and statements do not read the index for it each.
+		// The follower meets the error: the last version stays (older,
+		// and saying how old), not the snapshot alone in its place, and
+		// statements do not read the index for it each.
 		if !k.followOnce(ctx, time.Minute) {
 			t.Fatal("the follower stopped with a table asked for")
 		}
 		n = updates(k)
-		if _, _, ok := s.statementTails(ctx, k, one(orders), one(orders)); ok {
-			t.Fatal("the last version was kept as current after a failed update")
+		if _, _, ok := s.statementTails(ctx, k, one(orders), one(orders)); !ok {
+			t.Fatal("a failed update dropped the last version: statements read the snapshot alone")
 		}
 		if updates(k) != n {
 			t.Error("a statement read the index after the follower failed on it")

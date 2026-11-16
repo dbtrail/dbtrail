@@ -262,6 +262,9 @@ type tailKeeper struct {
 	// early time, and everything folded before it is still folded.
 	through time.Time
 	tables  map[string]*tailEntry
+	// drops counts dropAll: an update that dropped every tail before it
+	// failed leaves nothing a published view may still stand for.
+	drops   uint64
 	written int
 	// rowsWritten counts the rows of every file written, for the debug log:
 	// what a cycle cost.
@@ -342,11 +345,40 @@ func (k *tailKeeper) refresh(ctx context.Context, tables []views.BaselineTable) 
 // refreshWithin is refresh with d to do it in, counted from when the keeper
 // is this statement's: not spent waiting on another statement's refresh.
 func (k *tailKeeper) refreshWithin(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, error) {
+	out, _, _, err := k.refreshWithinBuilding(ctx, d, tables)
+	return out, err
+}
+
+// refreshWithinBuilding is refreshWithin that also says which tables of
+// tables have no view yet only because their tail is being built over the
+// cut they are read at (a build running, or started and not failed yet):
+// the one case where a statement's tail is on its way. A table with no view
+// and no such build cannot have a tail now (refused: its key, its budget,
+// its definition; capture does not record it; an index with no captured
+// change), and no wait brings one. dropped says the update started every
+// tail over before it returned.
+func (k *tailKeeper) refreshWithinBuilding(ctx context.Context, d time.Duration, tables []views.BaselineTable) (map[string]tailView, map[string]bool, bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
-	return k.refreshLocked(ctx, tables)
+	drops := k.drops
+	out, err := k.refreshLocked(ctx, tables)
+	dropped := k.drops != drops
+	if err != nil {
+		return nil, nil, dropped, err
+	}
+	building := map[string]bool{}
+	for _, t := range tables {
+		key := tailKey(t.Schema, t.Table)
+		if _, ok := out[key]; ok {
+			continue
+		}
+		if b := k.builds[key]; b != nil && !b.dead && b.cut == tailCutOf(t) && b.failures == 0 {
+			building[key] = true
+		}
+	}
+	return out, building, dropped, nil
 }
 
 func (k *tailKeeper) refreshLocked(ctx context.Context, tables []views.BaselineTable) (map[string]tailView, error) {
@@ -1200,6 +1232,7 @@ func (k *tailKeeper) drop(e *tailEntry) {
 // dropAll forgets every tail, keeping their files until no statement reads
 // them.
 func (k *tailKeeper) dropAll() {
+	k.drops++
 	k.dropBuilds()
 	for key, e := range k.tables {
 		k.drop(e)
