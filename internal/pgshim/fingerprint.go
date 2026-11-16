@@ -15,9 +15,9 @@ func Fingerprint(stmt string) string {
 	for _, t := range toks {
 		var text string
 		switch t.kind {
-		case tokString, tokNumber, tokParam:
+		case rtString, rtNumber, rtParam:
 			text = "?"
-		case tokQuoted:
+		case rtQuoted:
 			text = `"` + strings.ReplaceAll(t.text, `"`, `""`) + `"`
 		default:
 			text = t.text

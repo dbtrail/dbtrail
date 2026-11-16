@@ -239,21 +239,21 @@ func writtenOtherwise(cols []sqlsandbox.Column) string {
 
 // --- the screen ----------------------------------------------------------------
 
-// tokKind is what a token of a statement is.
-type tokKind int
+// rtKind is what a token of a statement is.
+type rtKind int
 
 const (
-	tokWord   tokKind = iota // a name or a keyword, lowercased
-	tokQuoted                // a "quoted name", as written inside the quotes
-	tokString                // a '...' string, its text with '' as one quote
-	tokNumber                // a number
-	tokOp                    // an operator or a punctuation mark
-	tokTyped                 // a typed literal (DATE '...'), its type the text (screenForCopy)
-	tokParam                 // a $n parameter
+	rtWord   rtKind = iota // a name or a keyword, lowercased
+	rtQuoted                // a "quoted name", as written inside the quotes
+	rtString                // a '...' string, its text with '' as one quote
+	rtNumber                // a number
+	rtOp                    // an operator or a punctuation mark
+	rtTyped                 // a typed literal (DATE '...'), its type the text (screenForCopy)
+	rtParam                 // a $n parameter
 )
 
-type token struct {
-	kind tokKind
+type rtToken struct {
+	kind rtKind
 	text string
 }
 
@@ -261,7 +261,7 @@ type token struct {
 // empty, is something in the text the copy is never handed: a string with
 // escapes, a dollar quote, a bit string, a $n parameter, a number written in
 // another base.
-func lexSQL(q string) (toks []token, why string) {
+func lexSQL(q string) (toks []rtToken, why string) {
 	isWordStart := func(c byte) bool { return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80 }
 	isWord := func(c byte) bool { return isWordStart(c) || c >= '0' && c <= '9' || c == '$' }
 	isDigit := func(c byte) bool { return c >= '0' && c <= '9' }
@@ -314,7 +314,7 @@ func lexSQL(q string) (toks []token, why string) {
 			if !closed {
 				return toks, "an unterminated string"
 			}
-			toks = append(toks, token{tokString, b.String()})
+			toks = append(toks, rtToken{rtString, b.String()})
 			i = j + 1
 		case c == '"':
 			var b strings.Builder
@@ -336,7 +336,7 @@ func lexSQL(q string) (toks []token, why string) {
 			if !closed {
 				return toks, "an unterminated quoted name"
 			}
-			toks = append(toks, token{tokQuoted, b.String()})
+			toks = append(toks, rtToken{rtQuoted, b.String()})
 			i = j + 1
 		case c == '$':
 			if i+1 < len(q) && isDigit(q[i+1]) {
@@ -346,7 +346,7 @@ func lexSQL(q string) (toks []token, why string) {
 				for j < len(q) && isDigit(q[j]) {
 					j++
 				}
-				toks = append(toks, token{tokParam, q[i:j]})
+				toks = append(toks, rtToken{rtParam, q[i:j]})
 				i = j
 				continue
 			}
@@ -379,7 +379,7 @@ func lexSQL(q string) (toks []token, why string) {
 				// number run into a name.
 				return toks, "a number written in another form"
 			}
-			toks = append(toks, token{tokNumber, q[i:j]})
+			toks = append(toks, rtToken{rtNumber, q[i:j]})
 			i = j
 		case isWordStart(c):
 			j := i
@@ -398,13 +398,13 @@ func lexSQL(q string) (toks []token, why string) {
 			if strings.ContainsRune(w, '$') {
 				return toks, "a name with a dollar sign"
 			}
-			toks = append(toks, token{tokWord, w})
+			toks = append(toks, rtToken{rtWord, w})
 			i = j
 		case c == ':' && i+1 < len(q) && q[i+1] == ':':
-			toks = append(toks, token{tokOp, "::"})
+			toks = append(toks, rtToken{rtOp, "::"})
 			i += 2
 		case strings.IndexByte("()[],;.:", c) >= 0:
-			toks = append(toks, token{tokOp, string(c)})
+			toks = append(toks, rtToken{rtOp, string(c)})
 			i++
 		case strings.IndexByte(opChars, c) >= 0:
 			j := i
@@ -414,7 +414,7 @@ func lexSQL(q string) (toks []token, why string) {
 				}
 				j++
 			}
-			toks = append(toks, token{tokOp, q[i:j]})
+			toks = append(toks, rtToken{rtOp, q[i:j]})
 			i = j
 		default:
 			return toks, fmt.Sprintf("the character %q", c)
@@ -432,12 +432,12 @@ func isSelectLike(q string) bool {
 }
 
 // firstWord is a statement's first word, past any opening parentheses.
-func firstWord(toks []token) string {
+func firstWord(toks []rtToken) string {
 	for _, t := range toks {
-		if t.kind == tokOp && t.text == "(" {
+		if t.kind == rtOp && t.text == "(" {
 			continue
 		}
-		if t.kind == tokWord {
+		if t.kind == rtWord {
 			return t.text
 		}
 		return ""
@@ -556,19 +556,19 @@ func typeIsFloat(t string) bool { return t == "DOUBLE" || t == "FLOAT" || t == "
 // answer as PostgreSQL does, "" when nothing. types is the copy's column
 // types by name (columnTypes); nil when they are not known, and then every
 // name may be a text column.
-func screenForCopy(in []token, types map[string][]string) string {
+func screenForCopy(in []rtToken, types map[string][]string) string {
 	// A typed literal (DATE '...', '...'::date) is one value, never text:
 	// its string is folded into one token.
-	toks := make([]token, 0, len(in))
+	toks := make([]rtToken, 0, len(in))
 	for j := 0; j < len(in); j++ {
 		t := in[j]
-		if t.kind == tokWord && typedLiterals[t.text] && j+1 < len(in) && in[j+1].kind == tokString {
-			toks = append(toks, token{tokTyped, t.text})
+		if t.kind == rtWord && typedLiterals[t.text] && j+1 < len(in) && in[j+1].kind == rtString {
+			toks = append(toks, rtToken{rtTyped, t.text})
 			j++
 			continue
 		}
-		if t.kind == tokString && j+2 < len(in) && in[j+1].kind == tokOp && in[j+1].text == "::" && in[j+2].kind == tokWord && typedLiterals[in[j+2].text] {
-			t = token{tokTyped, in[j+2].text}
+		if t.kind == rtString && j+2 < len(in) && in[j+1].kind == rtOp && in[j+1].text == "::" && in[j+2].kind == rtWord && typedLiterals[in[j+2].text] {
+			t = rtToken{rtTyped, in[j+2].text}
 		}
 		toks = append(toks, t)
 	}
@@ -587,13 +587,13 @@ func screenForCopy(in []token, types map[string][]string) string {
 		return true
 	}
 	// textish reports whether a token may be a text value.
-	textish := func(t token) bool {
+	textish := func(t rtToken) bool {
 		switch t.kind {
-		case tokString:
+		case rtString:
 			return true
-		case tokQuoted:
+		case rtQuoted:
 			return types == nil || !all(strings.ToLower(t.text), func(ty string) bool { return !typeIsText(ty) })
-		case tokWord:
+		case rtWord:
 			if types == nil {
 				return true
 			}
@@ -614,9 +614,9 @@ func screenForCopy(in []token, types map[string][]string) string {
 			break
 		}
 	}
-	at := func(i int) token {
+	at := func(i int) rtToken {
 		if i < 0 || i >= len(toks) {
-			return token{kind: tokOp, text: ""}
+			return rtToken{kind: rtOp, text: ""}
 		}
 		return toks[i]
 	}
@@ -624,7 +624,7 @@ func screenForCopy(in []token, types map[string][]string) string {
 	closing := func(open int) int {
 		depth := 0
 		for j := open; j < len(toks); j++ {
-			if toks[j].kind != tokOp {
+			if toks[j].kind != rtOp {
 				continue
 			}
 			switch toks[j].text {
@@ -641,17 +641,17 @@ func screenForCopy(in []token, types map[string][]string) string {
 	}
 	// args splits the tokens between open and its closing parenthesis at
 	// their top-level commas.
-	args := func(open int) [][]token {
+	args := func(open int) [][]rtToken {
 		end := closing(open)
 		if end < 0 {
 			return nil
 		}
-		var out [][]token
-		var cur []token
+		var out [][]rtToken
+		var cur []rtToken
 		depth := 0
 		for j := open + 1; j < end; j++ {
 			t := toks[j]
-			if t.kind == tokOp {
+			if t.kind == rtOp {
 				switch t.text {
 				case "(", "[":
 					depth++
@@ -671,8 +671,8 @@ func screenForCopy(in []token, types map[string][]string) string {
 	}
 	// unknownWord: a name that is not a column (an alias, a table): what
 	// it stands for is not known here.
-	unknownWord := func(t token) bool {
-		if t.kind != tokWord {
+	unknownWord := func(t rtToken) bool {
+		if t.kind != rtWord {
 			return false
 		}
 		if types == nil {
@@ -682,38 +682,38 @@ func screenForCopy(in []token, types map[string][]string) string {
 		return !found
 	}
 	// sortKeyText reports whether an ORDER BY key may sort text.
-	sortKeyText := func(key []token) bool {
-		var core []token
+	sortKeyText := func(key []rtToken) bool {
+		var core []rtToken
 		for _, t := range key {
-			if t.kind == tokWord && (t.text == "asc" || t.text == "desc" || t.text == "nulls" || t.text == "first" || t.text == "last") {
+			if t.kind == rtWord && (t.text == "asc" || t.text == "desc" || t.text == "nulls" || t.text == "first" || t.text == "last") {
 				continue
 			}
 			core = append(core, t)
 		}
 		for _, t := range core {
-			if textish(t) || t.kind == tokParam {
+			if textish(t) || t.kind == rtParam {
 				return true
 			}
 		}
-		if len(core) == 1 && (core[0].kind == tokNumber || unknownWord(core[0])) {
+		if len(core) == 1 && (core[0].kind == rtNumber || unknownWord(core[0])) {
 			// A position or an alias: it may be any column of the answer.
 			return anyText
 		}
 		for _, t := range core {
-			if t.kind == tokOp && (t.text == ")" || t.text == "]") && anyText {
+			if t.kind == rtOp && (t.text == ")" || t.text == "]") && anyText {
 				return true
 			}
 		}
 		return false
 	}
 	// orderByKeys are the keys of the ORDER BY at i (the word ORDER).
-	orderByKeys := func(i int) [][]token {
-		var out [][]token
-		var cur []token
+	orderByKeys := func(i int) [][]rtToken {
+		var out [][]rtToken
+		var cur []rtToken
 		depth := 0
 		for j := i + 2; j < len(toks); j++ {
 			t := toks[j]
-			if t.kind == tokOp {
+			if t.kind == rtOp {
 				switch t.text {
 				case "(", "[":
 					depth++
@@ -734,7 +734,7 @@ func screenForCopy(in []token, types map[string][]string) string {
 					}
 				}
 			}
-			if t.kind == tokWord && depth == 0 {
+			if t.kind == rtWord && depth == 0 {
 				switch t.text {
 				case "limit", "offset", "union", "intersect", "except", "for", "fetch", "rows", "range", "groups":
 					return append(out, cur)
@@ -745,11 +745,11 @@ func screenForCopy(in []token, types map[string][]string) string {
 		return append(out, cur)
 	}
 	// operandText: an operand next to a comparison may be text.
-	operandText := func(t token) bool {
+	operandText := func(t rtToken) bool {
 		if textish(t) {
 			return true
 		}
-		if t.kind == tokOp && (t.text == ")" || t.text == "]") {
+		if t.kind == rtOp && (t.text == ")" || t.text == "]") {
 			return anyText
 		}
 		return unknownWord(t) && anyText
@@ -757,13 +757,13 @@ func screenForCopy(in []token, types map[string][]string) string {
 	// concatOK: a value concatenated as text writes the same on both: a
 	// string, a whole number, or a column of text, of whole numbers or of
 	// dates.
-	concatOK := func(t token) bool {
+	concatOK := func(t rtToken) bool {
 		switch t.kind {
-		case tokString:
+		case rtString:
 			return true
-		case tokNumber:
+		case rtNumber:
 			return !strings.ContainsAny(t.text, ".eE")
-		case tokWord:
+		case rtWord:
 			return all(t.text, func(ty string) bool {
 				return typeIsText(ty) || typeIsInteger(ty) || ty == "DATE"
 			})
@@ -774,18 +774,18 @@ func screenForCopy(in []token, types map[string][]string) string {
 	for i, t := range toks {
 		next, prev := at(i+1), at(i-1)
 		switch t.kind {
-		case tokQuoted:
+		case rtQuoted:
 			if strings.ToLower(t.text) != t.text {
 				// PostgreSQL tells "Name" from "name"; the copy does not.
 				return fmt.Sprintf("the quoted name %q, with capitals", t.text)
 			}
-			if next.kind == tokOp && next.text == "(" {
+			if next.kind == rtOp && next.text == "(" {
 				return fmt.Sprintf("the function %q", t.text)
 			}
-		case tokOp:
+		case rtOp:
 			switch t.text {
 			case "::":
-				if next.kind != tokWord || next.text != "date" || at(i+2).kind == tokOp && (at(i+2).text == "[" || at(i+2).text == "(") {
+				if next.kind != rtWord || next.text != "date" || at(i+2).kind == rtOp && (at(i+2).text == "[" || at(i+2).text == "(") {
 					return "a cast with :: to a type other than date"
 				}
 			case "/":
@@ -794,9 +794,9 @@ func screenForCopy(in []token, types map[string][]string) string {
 				// other can divide by zero (NULL on the copy, an error on
 				// PostgreSQL) or divide a numeric to another scale.
 				n := next
-				ok := n.kind == tokNumber && !strings.ContainsAny(n.text, ".eE") && strings.Trim(n.text, "0") != "" &&
-					!(at(i+2).kind == tokOp && (at(i+2).text == "." || at(i+2).text == "::" || at(i+2).text == "[")) &&
-					prev.kind == tokWord && all(prev.text, func(ty string) bool { return typeIsInteger(ty) || typeIsFloat(ty) })
+				ok := n.kind == rtNumber && !strings.ContainsAny(n.text, ".eE") && strings.Trim(n.text, "0") != "" &&
+					!(at(i+2).kind == rtOp && (at(i+2).text == "." || at(i+2).text == "::" || at(i+2).text == "[")) &&
+					prev.kind == rtWord && all(prev.text, func(ty string) bool { return typeIsInteger(ty) || typeIsFloat(ty) })
 				if !ok {
 					return "a division"
 				}
@@ -808,7 +808,7 @@ func screenForCopy(in []token, types map[string][]string) string {
 				if orderingOps[t.text] {
 					// Two parameters, or a parameter and a string, compare
 					// as text on PostgreSQL: nothing else gives them a type.
-					bothUntyped := (prev.kind == tokParam || prev.kind == tokString) && (next.kind == tokParam || next.kind == tokString)
+					bothUntyped := (prev.kind == rtParam || prev.kind == rtString) && (next.kind == rtParam || next.kind == rtString)
 					if bothUntyped || operandText(prev) || operandText(next) {
 						return "text compared by order (the source compares it by its collation)"
 					}
@@ -816,14 +816,14 @@ func screenForCopy(in []token, types map[string][]string) string {
 					return fmt.Sprintf("the operator %s", t.text)
 				}
 			}
-		case tokWord:
+		case rtWord:
 			if what, ok := vetoWords[t.text]; ok {
 				return what
 			}
 			switch {
-			case t.text == "for" && next.kind == tokWord && (next.text == "update" || next.text == "share" || next.text == "no" || next.text == "key"):
+			case t.text == "for" && next.kind == rtWord && (next.text == "update" || next.text == "share" || next.text == "no" || next.text == "key"):
 				return "FOR UPDATE or FOR SHARE"
-			case t.text == "order" && next.kind == tokWord && next.text == "by":
+			case t.text == "order" && next.kind == rtWord && next.text == "by":
 				for _, key := range orderByKeys(i) {
 					if sortKeyText(key) {
 						return "text sorted by ORDER BY (the source sorts it by its collation)"
@@ -833,11 +833,11 @@ func screenForCopy(in []token, types map[string][]string) string {
 				if operandText(prev) || operandText(next) {
 					return "text compared with BETWEEN (the source compares it by its collation)"
 				}
-			case next.kind == tokOp && next.text == "(":
+			case next.kind == rtOp && next.text == "(":
 				if parenWords[t.text] {
 					break
 				}
-				if prev.kind == tokOp && prev.text == "." {
+				if prev.kind == rtOp && prev.text == "." {
 					return fmt.Sprintf("the function %s.%s", at(i-2).text, t.text)
 				}
 				if t.text == "cast" {
@@ -846,7 +846,7 @@ func screenForCopy(in []token, types map[string][]string) string {
 						return "CAST"
 					}
 					in := a[0]
-					if w := in[len(in)-2]; w.kind != tokWord || w.text != "as" || in[len(in)-1].kind != tokWord || in[len(in)-1].text != "date" {
+					if w := in[len(in)-2]; w.kind != rtWord || w.text != "as" || in[len(in)-1].kind != rtWord || in[len(in)-1].text != "date" {
 						return "a CAST to a type other than date"
 					}
 					break
@@ -857,18 +857,18 @@ func screenForCopy(in []token, types map[string][]string) string {
 				a := args(i + 1)
 				switch t.text {
 				case "extract":
-					if len(a) != 1 || len(a[0]) < 1 || a[0][0].kind != tokWord || !dateFields[a[0][0].text] {
+					if len(a) != 1 || len(a[0]) < 1 || a[0][0].kind != rtWord || !dateFields[a[0][0].text] {
 						return "extract() of a field other than year, month or day"
 					}
 				case "date_part":
-					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != tokString || !dateFields[strings.ToLower(a[0][0].text)] {
+					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != rtString || !dateFields[strings.ToLower(a[0][0].text)] {
 						return "date_part() of a field other than year, month or day"
 					}
 				case "date_trunc":
 					// On a date PostgreSQL answers a timestamp with time zone,
 					// the copy a timestamp: only a timestamp column is measured.
-					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != tokString || !dateFields[strings.ToLower(a[0][0].text)] ||
-						len(a[1]) != 1 || a[1][0].kind != tokWord || !all(a[1][0].text, func(ty string) bool { return ty == "TIMESTAMP" }) {
+					if len(a) != 2 || len(a[0]) != 1 || a[0][0].kind != rtString || !dateFields[strings.ToLower(a[0][0].text)] ||
+						len(a[1]) != 1 || a[1][0].kind != rtWord || !all(a[1][0].text, func(ty string) bool { return ty == "TIMESTAMP" }) {
 						return "date_trunc() other than of year, month or day of a timestamp column"
 					}
 				case "concat":
@@ -881,17 +881,17 @@ func screenForCopy(in []token, types map[string][]string) string {
 				if orderingFuncs[t.text] {
 					for _, arg := range a {
 						for _, x := range arg {
-							if operandText(x) || x.kind == tokParam {
+							if operandText(x) || x.kind == rtParam {
 								return fmt.Sprintf("%s() of text (the source compares it by its collation)", t.text)
 							}
 						}
 					}
 				}
-			case next.kind == tokString:
+			case next.kind == rtString:
 				if !typedLiterals[t.text] && !literalWords[t.text] {
 					return fmt.Sprintf("a literal of type %s", t.text)
 				}
-			case t.text == "time" && next.kind == tokWord && next.text == "zone":
+			case t.text == "time" && next.kind == rtWord && next.text == "zone":
 				return "a time zone"
 			}
 		}
