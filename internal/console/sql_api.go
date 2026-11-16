@@ -1208,10 +1208,6 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	if id, ok := tailsFor(ctx); ok && at.IsZero() && b.db != nil && s.tailsOnFor(id) {
 		tails = s.tailKeeperFor(id, b)
 	}
-	// freshPort: the statement is one of the port's in fresh mode, whose
-	// answers never come from the snapshot alone unsaid (statementTailsFresh),
-	// even when its tails cannot be read below.
-	freshPort := tails != nil
 	if tails != nil {
 		if dir, err := tails.ensureDir(); err != nil {
 			tails.note(fmt.Errorf("the tails' directory: %w", err))
@@ -1226,9 +1222,6 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	// printNote is the warning the MySQL port without routing sends with
 	// the answer (sqlFixedPrintNote, #2829); "" when none.
 	var printNote string
-	// freshNote says a fresh-mode answer came from the snapshot alone, and
-	// why (statementTailsFresh); "" when it did not.
-	var freshNote string
 	// dateScales are how MySQL declares the answer's date and time columns
 	// (sqlDateScales, #2849), set once the views are decided.
 	var dateScales []sqlsandbox.DateScale
@@ -1302,49 +1295,12 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			}
 			// Not over a statement whose tables the parse could not tell: it
 			// would build a tail for every table of the copy.
-			var missing, olderNote string
-			switch {
-			case tails != nil && narrowed.OnlyViews != nil:
+			if tails != nil && narrowed.OnlyViews != nil {
 				tailsStart := time.Now()
-				narrowed.Baselines, tailThrough, tailThroughID, allTailed, missing = s.statementTailsFresh(ctx, tails, narrowed.Baselines, readTables, freshTailsWait)
-				if missing == "" && allTailed && tailThroughID != 0 && tailThroughID < seenFloor(ctx) {
-					// An earlier answer of the copy on this connection read
-					// the index further than these tails do. Under routing
-					// MySQL answers; on a connection that does not route these
-					// tails do (still newer than the snapshot), saying so.
-					if sess.StrictStar {
-						missing = "the copy's newest version is older than an earlier answer of the copy on this connection"
-					} else {
-						olderNote = "Answered from captured changes older than an earlier answer of the copy on this connection: the copy's newest version is behind it."
-					}
-				}
+				narrowed.Baselines, tailThrough, tailThroughID, allTailed = s.statementTailsMark(ctx, tails, narrowed.Baselines, readTables)
 				parent.Tails += time.Since(tailsStart)
 				parent.TailsRan = true
 				allTailed = tailsSayTheInstant(statement, allTailed)
-			case freshPort && len(readTables) > 0 && tails == nil:
-				missing = "the tails cannot be written on this host (their directory)"
-			case freshPort && len(readTables) > 0:
-				missing = "which tables the statement reads cannot be told, so no tables' newest captured changes are read"
-			}
-			if missing != "" {
-				if ctx.Err() != nil {
-					// The client left, or the statement's time ran out,
-					// while it waited: that, not a refusal MySQL would be
-					// asked to answer for nobody.
-					viewsRefusal = ctx.Err()
-					return "", viewsRefusal
-				}
-				// Fresh mode never answers from the snapshot alone without
-				// saying so. Under routing MySQL answers; on a connection
-				// that does not route, the snapshot answers with the reason
-				// as a warning.
-				if sess.StrictStar {
-					viewsRefusal = &sqlChangedRefusal{"fresh mode: " + missing}
-					return "", viewsRefusal
-				}
-				freshNote = freshSnapshotNote(missing, in.BaselineSnapshot)
-			} else if olderNote != "" {
-				freshNote = olderNote
 			}
 			// The server's lag limit (#2777), once the tables and their tails
 			// are known and before anything heavier: a statement that reads
@@ -1519,7 +1475,7 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 	res.DateScales = dateScales
 	return sqlOutcome{Result: res, CopyUpdatedAt: copyUpdatedAt, Phases: parent,
 		ReadFrom: readFrom, ReadFromOK: readFromOK, TailThrough: tailThrough, TailThroughID: tailThroughID, AllTailed: allTailed,
-		PrintNote: printNote, OlderCopyNote: freshNote}, nil
+		PrintNote: printNote}, nil
 }
 
 // sqlWantedViews decides which of the copy's views a statement needs, from

@@ -296,6 +296,7 @@ var table = []Entry{
 	{Env: "BINTRAIL_PG_ROUTER_WORKERS"},
 	{Env: "BINTRAIL_PG_ROUTER_THREADS"},
 	{Env: "BINTRAIL_PG_ROUTER_MAX_CONNECTIONS"},
+	{Env: "BINTRAIL_PG_ROUTER_MAX_SOURCE_CONNECTIONS"},
 	{Env: "BINTRAIL_PG_ROUTER_MAX_WAIT"},
 	// Which ROUTER_AWS_* the compose file was given (#2690), never values.
 	{Env: "BINTRAIL_ROUTER_OWN_AWS_KEYS", Kind: Internal},

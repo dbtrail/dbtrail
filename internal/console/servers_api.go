@@ -1944,7 +1944,11 @@ func (s *Server) entryDTO(e ServerEntry) serverDTO {
 	}
 	fillDSNParts(&dto, e.DSN)
 	fillSourceDSNParts(&dto, e.SourceDSN, e.SourceFlavor())
-	fillRouteDSNParts(&dto, e.RouteDSN, e.SourceDSN)
+	if e.IsPostgres() {
+		fillPGRouteDSNParts(&dto, e.RouteDSN, e.SourceDSN)
+	} else {
+		fillRouteDSNParts(&dto, e.RouteDSN, e.SourceDSN)
+	}
 	if s.monitorCtrl != nil && e.SourceDSN != "" {
 		st := s.monitorCtrl.Status(e.ID)
 		dto.MonitorState, dto.MonitorPhase, dto.MonitorPhaseDetail = st.State, st.Phase, st.PhaseDetail
