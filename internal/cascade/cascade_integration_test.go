@@ -47,6 +47,8 @@ func TestCascadeRecoverySpike(t *testing.T) {
 	ctx := context.Background()
 
 	sourceDB, sourceName := testutil.CreateTestDB(t)
+
+	skipIfSourceLogsCascades(t, sourceDB)
 	indexDB, _ := testutil.CreateTestDB(t)
 	testutil.InitIndexTables(t, indexDB)
 

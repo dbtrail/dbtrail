@@ -17,7 +17,8 @@ import (
 // statement, as MySQL prints it (comma-separated partition names).
 func explainPartitions(t *testing.T, db *sql.DB, stmt string, args ...any) string {
 	t.Helper()
-	rows, err := db.Query("EXPLAIN "+stmt, args...)
+	// TRADITIONAL by name: MySQL 9.7 answers a bare EXPLAIN as a tree.
+	rows, err := db.Query("EXPLAIN FORMAT=TRADITIONAL "+stmt, args...)
 	if err != nil {
 		t.Fatalf("EXPLAIN: %v", err)
 	}

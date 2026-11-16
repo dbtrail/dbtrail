@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -263,6 +264,20 @@ func runIndex(cmd *cobra.Command, args []string) error {
 				firstErr = err
 			}
 		}
+	}
+
+	// The source's start and cascade setting, read now that the files are
+	// indexed: a reading proves its start ran from then until now, so the
+	// cascades of changes it wrote in that span are judged by it
+	// (metadata.DDLSourceFKLogging). Changes older than this start stay
+	// unknown to recover-cascade, which flags them.
+	if sourceDB != nil {
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, rerr := metadata.RecordSourceFKLogging(rctx, sourceDB, indexDB); rerr != nil {
+			slog.Warn("could not record whether the source logs its foreign-key cascades; "+
+				"recover-cascade flags the cascades of changes it cannot attribute", "error", rerr)
+		}
+		cancel()
 	}
 
 	slog.Info("indexing complete",

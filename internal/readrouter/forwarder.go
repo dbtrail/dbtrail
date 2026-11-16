@@ -90,6 +90,10 @@ type Forwarder struct {
 	// one the client asked for, and why it is not the session's. The
 	// connection works, under the collation the source gave it.
 	OnCollation func(collation string, err error)
+	// OnExplainFormat, when set, is told that a MySQL 9 source refused the
+	// SET that asks it for the plan layout the router reads
+	// (explainVersionOne): that connection's statements stay on MySQL.
+	OnExplainFormat func(err error)
 	// ClientCollation is the collation number the client asked the port
 	// for (its handshake's, go-mysql's server.Conn.Charset(), or the one a
 	// COM_CHANGE_USER carried), set before the first statement: the session
@@ -378,6 +382,12 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 			err = fmt.Errorf("settle the session's collation: %w", serr)
 		}
 	}
+	if err == nil {
+		if eerr := f.explainVersionOne(ctx, c); eerr != nil {
+			_ = c.Close()
+			err = fmt.Errorf("ask the source for the plan format the port reads: %w", eerr)
+		}
+	}
 	if err == nil && f.StopOnSource && f.queryTimeout > 0 {
 		f.identity = readSourceIdentity(ctx, c)
 	}
@@ -393,6 +403,74 @@ func (f *Forwarder) open(ctx context.Context, track bool) (*client.Conn, bool, e
 		return nil, false, err
 	}
 	return c, tracked, nil
+}
+
+// ExplainVersionSet is what the port sends a MySQL 9 source on each new
+// connection (explainVersionOne), and what internal/sqlcompare sends its own
+// connection to the source so that it predicts the same plans.
+const ExplainVersionSet = "SET SESSION explain_json_format_version = 1"
+
+// explainVersionOne runs on a connection the source has just accepted, before
+// anything of the client's, and asks a MySQL 9 or later for the EXPLAIN
+// FORMAT=JSON layout ParsePlan reads. MySQL 9.7 answers EXPLAIN FORMAT=JSON
+// with its version 2 layout by default (explain_json_format_version = 2,
+// measured on 9.7.4): a "query_plan" tree with no "query_block", so without
+// this every statement on the port would stay on MySQL. MySQL 8.0 and 8.4
+// answer in version 1, so they are sent nothing; MariaDB has no such variable
+// and is sent nothing either. It is a session variable
+// that no SET_VAR hint reaches (measured on 9.7.4), so the session is where it
+// goes.
+//
+// It is a statement of the port's, like settleCollation's, and goes around
+// Forward for the same reasons. What the client can see: its own EXPLAIN
+// FORMAT=JSON on the port shows the version 1 layout, and
+// @@explain_json_format_version reads 1. A client that sets the variable
+// itself gets its value, and with version 2 its statements then stay on
+// MySQL (ParsePlan says why).
+//
+// A source that refuses the SET and keeps the session (stillInSession)
+// leaves the connection as it is: the client still gets every answer, from
+// MySQL, and OnExplainFormat is told. Anything else is a connection that did
+// not open.
+//
+// What decides is the greeting's version. A proxy that greets with a version
+// of its own (ProxySQL's mysql-server_version) in front of a MySQL 9 is sent
+// nothing, and its statements stay on MySQL; ParsePlan's error then names
+// the layout.
+func (f *Forwarder) explainVersionOne(ctx context.Context, c *client.Conn) error {
+	if !ExplainVersionDefaultsToTwo(c.GetServerVersion()) {
+		return nil
+	}
+	defer context.AfterFunc(ctx, func() { _ = c.Conn.Conn.Close() })()
+	_, err := c.Execute(ExplainVersionSet)
+	if cause := ctx.Err(); cause != nil {
+		// The client left: AfterFunc may have closed the socket under a
+		// SET that went through.
+		return cause
+	}
+	if err != nil && stillInSession(err) {
+		if f.OnExplainFormat != nil {
+			f.OnExplainFormat(err)
+		}
+		return nil
+	}
+	return err
+}
+
+// ExplainVersionDefaultsToTwo reports whether a server that greets with
+// version may answer EXPLAIN FORMAT=JSON in the version 2 layout: a MySQL
+// (not MariaDB) of major version 9 or later. A version that does not parse is
+// answered false: the port then behaves as it always did.
+func ExplainVersionDefaultsToTwo(version string) bool {
+	if strings.Contains(strings.ToLower(version), "mariadb") {
+		return false
+	}
+	major, _, ok := strings.Cut(version, ".")
+	if !ok {
+		return false
+	}
+	n, err := strconv.Atoi(major)
+	return err == nil && n >= 9
 }
 
 // lose records that the upstream connection is gone, closes it, and makes

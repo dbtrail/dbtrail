@@ -867,6 +867,11 @@ func buildTLSConfig(mode, ca, cert, key, serverName string) (*tls.Config, error)
 // AllowFallbackToPlaintext), so every connection that may send data
 // unencrypted warns identically. required/verify-* never retry: a
 // TLS-incapable server fails closed with an actionable hint.
+// sourceFKLoggingEvery is how often a running capture re-reads the source's
+// start and cascade setting (metadata.RecordSourceFKLogging): the window
+// before a restart that recover-cascade cannot attribute is at most this long.
+const sourceFKLoggingEvery = time.Minute
+
 func connectHelper(dsn, label, mode, ca, cert, key string) (*sql.DB, error) {
 	// Settings errors first and unwrapped (a bad --ssl-mode or an unreadable
 	// --ssl-ca is a local problem): wrapped below they would carry tlsHint's
@@ -2548,6 +2553,54 @@ func oneRun(ctx context.Context, cfg Config) error {
 	} else {
 		fmt.Println("Source: no FK cascades \u2713")
 	}
+	// Whether this start of the source logs the rows its foreign keys cascade
+	// to (MySQL 9.6 and later with innodb_native_foreign_keys = OFF), kept
+	// with the index for recover-cascade (metadata.DDLSourceFKLogging). Every
+	// connect reads it: a restart (an upgrade among them) is the only time it
+	// can change, and a restart always breaks this connection. Not fatal: a
+	// missing record makes recover-cascade flag what it cannot attribute.
+	//
+	// A reading also proves that the start it finds was still running, so it
+	// is repeated while capture runs (sourceFKLoggingEvery): a change is
+	// credited to a start only between two readings of it, and the few
+	// minutes before a restart that no reading covered stay unknown, which
+	// recover-cascade flags instead of guessing.
+	recordFKLogging := func(warn bool) bool {
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if _, rerr := metadata.RecordSourceFKLogging(rctx, sourceDB, indexDB); rerr != nil {
+			if warn && ctx.Err() == nil {
+				slog.Warn("could not record whether the source logs its foreign-key cascades; "+
+					"recover-cascade flags the cascades of changes it cannot attribute", "error", rerr)
+			}
+			return false
+		}
+		return true
+	}
+	recordFKLogging(true)
+	fkCtx, stopFKLogging := context.WithCancel(ctx)
+	var fkLoggingDone sync.WaitGroup
+	fkLoggingDone.Add(1)
+	go func() {
+		defer fkLoggingDone.Done()
+		t := time.NewTicker(sourceFKLoggingEvery)
+		defer t.Stop()
+		failing := false
+		for {
+			select {
+			case <-fkCtx.Done():
+				return
+			case <-t.C:
+				// One warning per run of failures, not one a minute.
+				ok := recordFKLogging(!failing)
+				if ok && failing {
+					slog.Info("recording whether the source logs its foreign-key cascades works again")
+				}
+				failing = !ok
+			}
+		}
+	}()
+	defer func() { stopFKLogging(); fkLoggingDone.Wait() }()
 
 	if cfg.Hooks != nil && cfg.Hooks.OnSourceConnected != nil {
 		cfg.Hooks.OnSourceConnected()

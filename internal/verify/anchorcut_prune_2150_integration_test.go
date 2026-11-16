@@ -36,7 +36,8 @@ func TestIntegrationSnapshotCutWalkIsPruned2150(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := db.Query("EXPLAIN "+snapshotCutFirstPageSQL(floor, clause, snapshotCutPage), floor)
+	// TRADITIONAL by name: MySQL 9.7 answers a bare EXPLAIN as a tree.
+	rows, err := db.Query("EXPLAIN FORMAT=TRADITIONAL "+snapshotCutFirstPageSQL(floor, clause, snapshotCutPage), floor)
 	if err != nil {
 		t.Fatal(err)
 	}

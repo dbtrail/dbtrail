@@ -495,7 +495,7 @@ A healthy index lists its servers, a recent stream position, and its partitions.
 
 ### Connecting to an external index MySQL (bring your own)
 
-To run your own index instead of the bundled 8.4, set `INDEX_DSN` in `.env` to a MySQL 8.0+ you operate and
+To run your own index instead of the bundled 8.4, set `INDEX_DSN` in `.env` to a MySQL 8.0, 8.4 or 9.7 you operate and
 remove the bundled index from the compose file: delete the `index-init` and
 `index-mysql` services, the `bintrail-index-data` / `bintrail-index-secret`
 volumes, the `bintrail-index-secret` mount, the `bintrail-index-data`
@@ -615,7 +615,7 @@ Notes:
     profile does not refresh the images only this profile uses. Run
     `docker compose --profile baseline pull`.
 - **Sources with `explain_format=TREE` or `JSON`** (MySQL 9.x; `TREE` is
-  Percona Server 9.7's default). mydumper crashes on them with a
+  the default of MySQL 9.7 and Percona Server 9.7). mydumper crashes on them with a
   segmentation fault while it sizes tables, unless its own sessions use
   `TRADITIONAL`. Step `baseline-quiet` asks the source for the variable in
   every lock mode and, when it exists, writes `/dump/mydumper-session.cnf`

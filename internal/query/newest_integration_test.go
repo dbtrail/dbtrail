@@ -442,7 +442,8 @@ func TestNewestWalkMeasure(t *testing.T) {
 func explainLog(t *testing.T, db *sql.DB, label, q string, args ...any) {
 	t.Helper()
 	{
-		rows, err := db.Query("EXPLAIN "+q, args...)
+		// TRADITIONAL by name: MySQL 9.7 answers a bare EXPLAIN as a tree.
+		rows, err := db.Query("EXPLAIN FORMAT=TRADITIONAL "+q, args...)
 		if err != nil {
 			t.Fatal(err)
 		}

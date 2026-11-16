@@ -670,6 +670,13 @@ func ParsePlan(explainJSON []byte) (Plan, error) {
 	}
 	qb, ok := root["query_block"].(map[string]any)
 	if !ok {
+		if _, v2 := root["query_plan"]; v2 {
+			// MySQL 9's default layout (explain_json_format_version = 2).
+			// The forwarder asks for version 1 on every connection it opens
+			// (explainVersionOne); this is a session where that did not
+			// hold: the source refused it, or the client set version 2.
+			return Plan{}, fmt.Errorf("explain output is in the version 2 layout (explain_json_format_version = 2), and the port reads version 1")
+		}
 		return Plan{}, fmt.Errorf("explain output has no query_block")
 	}
 	var p Plan

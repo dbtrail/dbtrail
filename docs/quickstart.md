@@ -61,7 +61,8 @@ rebuild a row or a table as it was.
   The second option, for MySQL 8.0 and 8.4 sources, is to create the user with
   `IDENTIFIED WITH mysql_native_password BY <choose a password>`. MySQL 8.4
   ships that plugin turned off (start the server with
-  `mysql_native_password=ON`).
+  `mysql_native_password=ON`). MySQL 9.7 no longer has the plugin at all, so
+  there use the upgrade or the Dockerfile above.
 
   `RELOAD`/`BACKUP_ADMIN` let the baseline dump take a point-in-time snapshot.
   **On managed MySQL (RDS, Aurora, Cloud SQL), `BACKUP_ADMIN` cannot be granted**, so grant `LOCK TABLES, SHOW VIEW` instead. Snapshots then use `lock-all` on their own (an Amazon RDS or Aurora host name picks it, and a refused default is retried once with it): equally point-consistent, and the mode mydumper itself names for RDS. `BASELINE_LOCK_MODE` in `.env` only overrides that choice. If you would rather grant nothing extra on a self-hosted source, `BASELINE_LOCK_MODE=safe-no-lock` never writes a torn snapshot, but it refuses on a write-active source.
