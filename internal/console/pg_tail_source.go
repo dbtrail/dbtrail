@@ -38,19 +38,25 @@ import (
 //
 // Where it stops. A PostgreSQL capture makes the rows of a transaction
 // visible before it saves its position, and a large transaction in parts, so
-// the newest rows of the index can be half a transaction. A tail is fed only
-// up to the capture's saved position (Newest), which is after a whole
-// transaction. After a crash the capture receives again what follows that
-// position, under new and higher ids, so rows of an earlier delivery can sit
-// below the newest row at or before the saved position while their own
-// transaction is past it: every read here also drops the rows whose LSN is
-// above the LSN of the event it reads up to. Those come again, whole.
+// the newest rows of the index can be half a transaction. And after a
+// restart PostgreSQL sends again what follows the saved position and the
+// transaction at it, under new and higher ids: while that second delivery
+// arrives, its rows carry the saved position's own LSN. So a tail is fed
+// only up to the event the capture recorded for its saved position when a
+// transaction last ended (Newest), and of the rows up to that event, only
+// the ones whose LSN is at or before that event's: a row of an earlier
+// delivery whose transaction is past the position comes again, whole.
 //
-// What it does not see: the publication. A table the snapshot holds and the
-// publication does not has no events, and its tail would say the copy is
-// current. What the index records of a table entering capture late
-// (query.PGTableEnteredCaptureAfter) and of a change of the publication
-// (CheckDestructiveDDL) refuse; a table never published is not told apart.
+// A transaction delivered twice reaches a read in id order with its LSN
+// going back (a, b, then a and b again). The keeper takes a position that
+// goes back for a source whose log started over and builds every tail
+// again, so Since hands over no row below the LSN it has already handed:
+// such a row is a second delivery of a transaction handed whole before it.
+//
+// What it does not see: the publication. A table with no shape in the index
+// (never written since capture began, or never published) has no tail. A
+// table that was captured and then left the publication is told only by the
+// change of publication the capture inferred (CheckDestructiveDDL).
 type pgTailSource struct {
 	s        *Server
 	b        *bundle
@@ -69,12 +75,16 @@ type pgTailSource struct {
 	schemaID int64
 	// shapes are the shapes the stream recorded, read again on the same
 	// signal (shapesID), from shapesFrom.
-	shapes     []metadata.PGShape
-	shapesID   int64
-	shapesFrom uint64
+	shapes        []metadata.PGShape
+	shapesID      int64
+	shapesFromLSN uint64
 	// broken remembers each table's answer to Broken for as long as nothing
 	// it is made from changed (pgBrokenKey).
 	broken map[string]pgBrokenMemo
+	// unordered are the tables an event with no LSN was read for: Since
+	// leaves such a row out and Broken ends the table's tail, so one bad row
+	// costs one table its tail and not the server every tail.
+	unordered map[string]string
 }
 
 // pgBrokenMemo is one table's last answer to Broken and what it was made
@@ -88,11 +98,14 @@ type pgBrokenMemo struct {
 // floor, the newest schema snapshot and schema change the index holds, and
 // the loss capture recorded.
 type pgBrokenKey struct {
+	base        string // the file itself (baseFileID): two files can share a floor
 	floor       uint64
 	snapshotID  int64
 	schemaChgID int64
+	schemaChgs  int64 // how many: a row removed below the newest moves no id
 	lostAt      time.Time
 	lostKnown   bool
+	stateKnown  bool
 }
 
 func newPGTailSource(s *Server, b *bundle) *pgTailSource {
@@ -105,34 +118,29 @@ func (x *pgTailSource) capturing(captures func(schema, table string) bool) *pgTa
 	return x
 }
 
-// Newest is the newest event at or before the capture's saved position: ID 0
-// when the index records no PostgreSQL capture's position, or holds no event
-// at or before it. The rows past the position are what was committed since
-// it was saved, so the walk back from the newest row is short.
+// Newest is the event the capture recorded for its saved position: ID 0
+// when the index records none (PGCheckpoint), or no longer holds that event
+// as a PostgreSQL event at or before the position.
 func (x *pgTailSource) Newest(ctx context.Context) (tailMark, error) {
-	checkpoint, ok, err := reconstruct.PGCheckpoint(ctx, x.b.db)
+	checkpoint, id, ok, err := reconstruct.PGCheckpoint(ctx, x.b.db)
 	if err != nil || !ok {
 		return tailMark{}, err
 	}
-	// The position first, the row after: every row at or before a saved
-	// position was committed before it was saved.
-	var m tailMark
 	var file sql.NullString
 	var pos sql.NullInt64
-	err = x.b.db.QueryRowContext(ctx,
-		`SELECT event_id, binlog_file, start_pos, event_timestamp FROM binlog_events FORCE INDEX (PRIMARY)
-		 WHERE start_pos <= ? ORDER BY event_id DESC LIMIT 1`, checkpoint).
-		Scan(&m.ID, &file, &pos, &m.At)
+	m := tailMark{ID: id}
+	err = x.b.db.QueryRowContext(ctx, `SELECT binlog_file, start_pos, event_timestamp FROM binlog_events WHERE event_id = ?`, id).
+		Scan(&file, &pos, &m.At)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return tailMark{}, nil
 	case err != nil:
-		return tailMark{}, fmt.Errorf("read the newest event of the index: %w", err)
+		return tailMark{}, fmt.Errorf("read event %d of the index: %w", id, err)
 	}
 	lsn, ok := pgEventLSN(file, pos)
-	if !ok {
-		// A row that is not a PostgreSQL event (an index another family
-		// wrote before): nothing here can be ordered against it.
+	if !ok || lsn > checkpoint {
+		// Not what the capture recorded: an index emptied and written
+		// again, or another family's row.
 		return tailMark{}, nil
 	}
 	m.Pos, m.At = reconstruct.PGTailPos(lsn), m.At.UTC()
@@ -257,19 +265,25 @@ func (x *pgTailSource) resolver(ctx context.Context) (*metadata.Resolver, error)
 	if err != nil {
 		return nil, err
 	}
-	x.mu.Lock()
-	defer x.mu.Unlock()
 	if id == 0 {
 		return nil, nil
 	}
-	if x.schema == nil || id != x.schemaID {
-		r, err := metadata.NewLatestPerTableResolver(x.b.db)
-		if err != nil {
-			return nil, fmt.Errorf("read the index's schema snapshots: %w", err)
-		}
-		x.schema, x.schemaID = r, id
+	x.mu.Lock()
+	have, haveID := x.schema, x.schemaID
+	x.mu.Unlock()
+	if have != nil && haveID == id {
+		return have, nil
 	}
-	return x.schema, nil
+	// Outside the lock: the read has a deadline of its own, longer than a
+	// refresh's.
+	r, err := metadata.NewLatestPerTableResolver(x.b.db)
+	if err != nil {
+		return nil, fmt.Errorf("read the index's schema snapshots: %w", err)
+	}
+	x.mu.Lock()
+	x.schema, x.schemaID = r, id
+	x.mu.Unlock()
+	return r, nil
 }
 
 // Start builds t's tail from the footer of the file its view reads (the
@@ -312,9 +326,11 @@ func (x *pgTailSource) Start(ctx context.Context, t views.BaselineTable) (tailTa
 			generated = append(generated, col.Name)
 		}
 	}
+	// An error, not a refusal: a read cut short by the build's deadline is
+	// tried again, where a refusal would stand until the next snapshot.
 	fileColumns, err := reconstruct.ReadBaselineColumns(ctx, t.Path, duckdbutil.DefaultTuning())
 	if err != nil {
-		return nil, fmt.Sprintf("the columns of %s's snapshot file could not be read: %v", name, err), nil
+		return nil, "", fmt.Errorf("read the columns of %s's snapshot file: %w", name, err)
 	}
 	tail, err := reconstruct.NewPGTail(t.Schema, t.Table, c.md, fileColumns, tm.PKColumnMetas(), generated)
 	if err != nil {
@@ -347,7 +363,7 @@ func (x *pgTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo uin
 		return "", err
 	}
 	if !ok {
-		return fmt.Sprintf("the index no longer holds the event the tail of %s was to be read up to", name), nil
+		return "", fmt.Errorf("the index no longer holds event %d, which the tail of %s was to be read up to", upTo, name)
 	}
 	opts := c.windowOptions(t)
 	opts.Limit = x.pageSize
@@ -356,9 +372,9 @@ func (x *pgTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo uin
 		if err != nil {
 			return "", fmt.Errorf("read the changes of %s: %w", name, err)
 		}
-		kept, why := pgTailPage(rows, upTo, through, name)
-		if why != "" {
-			return why, nil
+		kept, bad := pgTailPage(rows, upTo, through, 0)
+		if len(bad) > 0 {
+			return fmt.Sprintf("event %d of %s has no LSN, so its order against the others cannot be told", bad[0].EventID, name), nil
 		}
 		if len(kept) > 0 {
 			if err := page(kept); err != nil {
@@ -390,9 +406,9 @@ func (x *pgTailSource) Fill(ctx context.Context, t views.BaselineTable, upTo uin
 }
 
 // pgTailPage is rows as a tail is fed them: the ones with an id up to upTo
-// and a commit LSN up to through, each spelled for the keeper. A row that
-// carries no LSN refuses: it has no order among the others.
-func pgTailPage(rows []query.ResultRow, upTo, through uint64, name string) (kept []query.ResultRow, why string) {
+// and a commit LSN from atLeast up to through, each spelled for the keeper.
+// bad are the rows that carry no LSN, which have no order among the others.
+func pgTailPage(rows []query.ResultRow, upTo, through, atLeast uint64) (kept, bad []query.ResultRow) {
 	kept = rows[:0:0]
 	for _, r := range rows {
 		if r.EventID > upTo {
@@ -400,20 +416,26 @@ func pgTailPage(rows []query.ResultRow, upTo, through uint64, name string) (kept
 		}
 		lsn, ok := reconstruct.PGRowLSN(&r)
 		if !ok {
-			return nil, fmt.Sprintf("event %d of %s has no LSN, so its order against the others cannot be told", r.EventID, name)
+			bad = append(bad, r)
+			continue
 		}
-		if lsn > through {
+		if lsn > through || lsn < atLeast {
 			continue
 		}
 		reconstruct.PGTailEvent(&r)
 		kept = append(kept, r)
 	}
-	return kept, ""
+	return kept, bad
 }
 
 // Since reads the events of tables with ids in (from, upTo], in id order.
 // The paging goes by the rows read, not by the ones handed over: a page of
 // which none is kept is not the end.
+//
+// The rows are handed with their LSN never going back: one below the
+// highest already handed (from's own, then each page's) is a transaction
+// arriving a second time, whose first delivery was handed whole. A row with
+// no LSN is left out, and its table's tail ends at the next Broken.
 func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, from, upTo uint64, page func([]query.ResultRow) error) error {
 	through, ok, err := x.lsnOf(ctx, upTo)
 	if err != nil {
@@ -421,6 +443,14 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 	}
 	if !ok {
 		return fmt.Errorf("the index no longer holds event %d, which the tails were to be read up to", upTo)
+	}
+	// Where the hand-over stands: the event read up to last time. When the
+	// index no longer holds it, nothing is known to have been handed.
+	var handed uint64
+	if from > 0 {
+		if handed, _, err = x.lsnOf(ctx, from); err != nil {
+			return err
+		}
 	}
 	refs := make([]query.SchemaTable, len(tables))
 	for i, t := range tables {
@@ -434,13 +464,22 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 		if len(rows) == 0 {
 			return nil
 		}
-		kept, why := pgTailPage(rows, upTo, through, "a table of this server")
-		if why != "" {
-			return errors.New(why)
-		}
+		kept, bad := pgTailPage(rows, upTo, through, handed)
+		x.noteUnordered(bad)
 		if len(kept) > 0 {
-			if err := page(kept); err != nil {
-				return err
+			// In id order a page's LSNs can still step back inside it.
+			ordered := kept[:0]
+			for _, r := range kept {
+				if r.StartPos < handed {
+					continue
+				}
+				handed = r.StartPos
+				ordered = append(ordered, r)
+			}
+			if len(ordered) > 0 {
+				if err := page(ordered); err != nil {
+					return err
+				}
 			}
 		}
 		if len(rows) < x.pageSize {
@@ -449,6 +488,21 @@ func (x *pgTailSource) Since(ctx context.Context, tables []views.BaselineTable, 
 		from = rows[len(rows)-1].EventID
 	}
 	return nil
+}
+
+// noteUnordered remembers the tables of rows that carry no LSN.
+func (x *pgTailSource) noteUnordered(bad []query.ResultRow) {
+	if len(bad) == 0 {
+		return
+	}
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.unordered == nil {
+		x.unordered = map[string]string{}
+	}
+	for _, r := range bad {
+		x.unordered[tailKey(r.SchemaName, r.TableName)] = fmt.Sprintf("event %d of %s.%s has no LSN, so its order against the others cannot be told", r.EventID, r.SchemaName, r.TableName)
+	}
 }
 
 // Broken says why each table's tail cannot go on, asked at every refresh: a
@@ -485,67 +539,92 @@ func (x *pgTailSource) Broken(ctx context.Context, tables []views.BaselineTable)
 	if err != nil {
 		return nil, err
 	}
-	var schemaChgID int64
-	if err := x.b.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM schema_changes").Scan(&schemaChgID); err != nil {
+	var schemaChgID, schemaChgs int64
+	if err := x.b.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0), COUNT(*) FROM schema_changes").Scan(&schemaChgID, &schemaChgs); err != nil {
 		return nil, fmt.Errorf("read the newest schema change of the index: %w", err)
 	}
-	base := pgBrokenKey{snapshotID: snapshotID, schemaChgID: schemaChgID}
+	base := pgBrokenKey{snapshotID: snapshotID, schemaChgID: schemaChgID, schemaChgs: schemaChgs, stateKnown: st != nil}
 	if st != nil && st.GapColumnsPresent && st.GapLostAt.Valid {
 		base.lostAt, base.lostKnown = st.GapLostAt.Time.UTC(), true
 	}
 
-	x.mu.Lock()
-	defer x.mu.Unlock()
-	if x.broken == nil {
-		x.broken = map[string]pgBrokenMemo{}
-	}
+	// The memo is read and written under the lock; the index is asked
+	// outside it, so a slow read holds up no other reader of this source.
 	out := map[string]string{}
-	seen := make(map[string]bool, len(tables))
-	var shapes []metadata.PGShape
-	shapesRead := false
+	keys := make([]pgBrokenKey, len(tables))
+	var ask []int
+	x.mu.Lock()
 	for i, t := range tables {
 		if cuts[i].refusal != "" {
 			continue
 		}
 		key := tailKey(t.Schema, t.Table)
-		seen[key] = true
-		k := base
-		k.floor = cuts[i].floor
-		if memo, ok := x.broken[key]; ok && memo.key == k {
+		if why, bad := x.unordered[key]; bad {
+			out[key] = why
+			continue
+		}
+		keys[i] = base
+		keys[i].floor, keys[i].base = cuts[i].floor, baseFileID(t.Path)
+		if memo, ok := x.broken[key]; ok && memo.key == keys[i] && keys[i].base != "" {
 			if memo.reason != "" {
 				out[key] = memo.reason
 			}
 			continue
 		}
-		if !shapesRead {
-			if shapes, err = x.shapesLocked(ctx, snapshotID, oldest); err != nil {
-				return nil, err
-			}
-			shapesRead = true
-		}
-		reason, err := pgTailBroken(ctx, x.b.db, t, cuts[i], st, shapes)
+		ask = append(ask, i)
+	}
+	x.mu.Unlock()
+	if len(ask) == 0 {
+		return out, nil
+	}
+	shapes, err := x.shapesFrom(ctx, snapshotID, oldest)
+	if err != nil {
+		return nil, err
+	}
+	answers := make(map[int]string, len(ask))
+	for _, i := range ask {
+		reason, err := pgTailBroken(ctx, x.b.db, tables[i], cuts[i], st, shapes)
 		if err != nil {
 			return nil, err
 		}
-		x.broken[key] = pgBrokenMemo{key: k, reason: reason}
+		answers[i] = reason
+	}
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.broken == nil {
+		x.broken = map[string]pgBrokenMemo{}
+	}
+	for i, reason := range answers {
+		key := tailKey(tables[i].Schema, tables[i].Table)
+		x.broken[key] = pgBrokenMemo{key: keys[i], reason: reason}
 		if reason != "" {
 			out[key] = reason
 		}
 	}
-	for key := range x.broken {
-		if !seen[key] {
-			delete(x.broken, key)
+	if len(x.broken) > 4*len(tables)+64 {
+		// Tables no longer asked about: keep the memo from growing.
+		asked := make(map[string]bool, len(tables))
+		for _, t := range tables {
+			asked[tailKey(t.Schema, t.Table)] = true
+		}
+		for key := range x.broken {
+			if !asked[key] {
+				delete(x.broken, key)
+			}
 		}
 	}
 	return out, nil
 }
 
-// shapesLocked is the shapes the stream recorded from the position from on,
+// shapesFrom is the shapes the stream recorded from the position from on,
 // read again when a newer schema snapshot appears or an older position is
-// asked for. x.mu is held.
-func (x *pgTailSource) shapesLocked(ctx context.Context, snapshotID int64, from uint64) ([]metadata.PGShape, error) {
-	if x.shapes != nil && x.shapesID == snapshotID && x.shapesFrom <= from {
-		return x.shapes, nil
+// asked for.
+func (x *pgTailSource) shapesFrom(ctx context.Context, snapshotID int64, from uint64) ([]metadata.PGShape, error) {
+	x.mu.Lock()
+	have, id, at := x.shapes, x.shapesID, x.shapesFromLSN
+	x.mu.Unlock()
+	if have != nil && id == snapshotID && at <= from {
+		return have, nil
 	}
 	shapes, err := metadata.LoadPGShapes(ctx, x.b.db, from)
 	if err != nil {
@@ -554,7 +633,9 @@ func (x *pgTailSource) shapesLocked(ctx context.Context, snapshotID int64, from 
 	if shapes == nil {
 		shapes = []metadata.PGShape{}
 	}
-	x.shapes, x.shapesID, x.shapesFrom = shapes, snapshotID, from
+	x.mu.Lock()
+	x.shapes, x.shapesID, x.shapesFromLSN = shapes, snapshotID, from
+	x.mu.Unlock()
 	return shapes, nil
 }
 
@@ -575,8 +656,10 @@ func pgTailBroken(ctx context.Context, db *sql.DB, t views.BaselineTable, c pgCu
 	if key != nil && len(rel.PrimaryKey) > 0 && !sameStringSet(key, rel.PrimaryKey) {
 		return fmt.Sprintf("the key of %s is now (%s), and its copy was taken under (%s)", name, strings.Join(key, ", "), strings.Join(rel.PrimaryKey, ", ")), nil
 	}
-	// Until now: the refresh stops at its own time, a tail has none.
-	err = reconstruct.CheckDestructiveDDL(ctx, db, t.Schema, t.Table, reconstruct.DDLWindow{Since: c.since, Until: time.Now().UTC().Add(time.Hour)})
+	// No end: the refresh stops at its own time, a tail has none, and the
+	// answer is kept until a schema change is recorded, so one dated ahead
+	// of this host's clock must be inside the window the first time.
+	err = reconstruct.CheckDestructiveDDL(ctx, db, t.Schema, t.Table, reconstruct.DDLWindow{Since: c.since, Until: time.Now().UTC().AddDate(100, 0, 0)})
 	switch {
 	case errors.Is(err, reconstruct.ErrDestructiveDDL):
 		return fmt.Sprintf("%s had a schema change since its snapshot: %v", name, err), nil

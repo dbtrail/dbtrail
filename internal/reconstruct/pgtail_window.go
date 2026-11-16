@@ -22,21 +22,28 @@ func PGLSNText(lsn uint64) string { return lsnText(lsn) }
 // none (a binary log position, or a position whose two spellings disagree).
 func PGRowLSN(ev *query.ResultRow) (uint64, bool) { return pgRowLSN(ev) }
 
-// PGCheckpoint is the commit LSN of the last complete transaction a
-// PostgreSQL capture saved: what its events are whole up to. ok is false
-// when the index records none (no capture yet, or another family's).
-func PGCheckpoint(ctx context.Context, db *sql.DB) (lsn uint64, ok bool, err error) {
-	var pos sql.NullInt64
-	err = db.QueryRowContext(ctx, `SELECT binlog_position FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&pos)
+// PGCheckpoint is what a PostgreSQL capture last saved: the commit LSN of
+// the last complete transaction, and the newest event at or before it when a
+// transaction last ended (stream_state.pg_checkpoint_event_id). Every event
+// up to eventID whose LSN is at or before lsn belongs to a transaction
+// delivered whole; rows above eventID may be a transaction still arriving,
+// or one arriving a second time after a restart, under the same LSN.
+//
+// ok is false when the index records no such pair: no PostgreSQL capture
+// yet, one that has not ended a transaction, an index of another family, or
+// a capture older than the column.
+func PGCheckpoint(ctx context.Context, db *sql.DB) (lsn, eventID uint64, ok bool, err error) {
+	var pos, id sql.NullInt64
+	err = db.QueryRowContext(ctx, `SELECT binlog_position, pg_checkpoint_event_id FROM stream_state WHERE id = 1 AND flavor = 'postgres'`).Scan(&pos, &id)
 	switch {
 	case err == sql.ErrNoRows:
-		return 0, false, nil
+		return 0, 0, false, nil
 	case err != nil:
-		return 0, false, fmt.Errorf("read the capture's saved position: %w", err)
-	case !pos.Valid || pos.Int64 <= 0:
-		return 0, false, nil
+		return 0, 0, false, fmt.Errorf("read the capture's saved position: %w", err)
+	case !pos.Valid || pos.Int64 <= 0 || !id.Valid || id.Int64 <= 0:
+		return 0, 0, false, nil
 	}
-	return uint64(pos.Int64), true, nil
+	return uint64(pos.Int64), uint64(id.Int64), true, nil
 }
 
 // PGShapeKey checks the shapes the stream recorded for schema.table from

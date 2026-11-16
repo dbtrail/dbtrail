@@ -69,13 +69,23 @@ func newPGTailRig(t *testing.T) *pgTailRig {
 
 func pgLSN(lsn uint64) string { return fmt.Sprintf("%X/%X", lsn>>32, uint32(lsn)) }
 
-// checkpoint is the capture's saved position: the commit LSN of the last
-// whole transaction.
-func (r *pgTailRig) checkpoint(lsn uint64) {
+// position is the capture's saved position alone: the commit LSN of the
+// last whole transaction, as a save writes it when no transaction ended
+// since the one before.
+func (r *pgTailRig) position(lsn uint64) {
 	r.t.Helper()
 	testutil.MustExec(r.t, r.db, fmt.Sprintf(`INSERT INTO stream_state (id, mode, binlog_file, binlog_position, flavor, events_indexed, last_checkpoint, server_id)
 		VALUES (1, 'gtid', '%s', %d, 'postgres', 1, UTC_TIMESTAMP(), 1)
 		ON DUPLICATE KEY UPDATE binlog_file = VALUES(binlog_file), binlog_position = VALUES(binlog_position)`, pgLSN(lsn), lsn))
+}
+
+// checkpoint is a save after a transaction ended: the position, and the
+// newest event at or before it, as the capture records them.
+func (r *pgTailRig) checkpoint(lsn uint64) {
+	r.t.Helper()
+	r.position(lsn)
+	testutil.MustExec(r.t, r.db, fmt.Sprintf(`UPDATE stream_state SET pg_checkpoint_event_id =
+		(SELECT MAX(event_id) FROM binlog_events WHERE start_pos <= %d) WHERE id = 1`, lsn))
 }
 
 // shape records table's shape as the stream saw it at lsn: id (the key) and
@@ -241,6 +251,67 @@ func TestIntegrationPGTailSource(t *testing.T) {
 		r.checkpoint(0x820)
 		if got, want := r.state(ctx, tbl), []string{"1=T1", "5=T2 first row", "6=T2 second row"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("once T2 is delivered whole: state %v, want %v", got, want)
+		}
+	})
+
+	t.Run("the saved transaction arriving a second time is not read until it is whole", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		// One transaction inserts a row and deletes it.
+		r.change(tbl.Table, event.EventInsert, "7", "brief", 0x840, 23*time.Minute)
+		r.change(tbl.Table, event.EventDelete, "7", "brief", 0x840, 23*time.Minute)
+		r.checkpoint(0x840)
+		if got, want := r.state(ctx, tbl), []string{"1=one"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v", got, want)
+		}
+		// The capture starts again and PostgreSQL sends that transaction a
+		// second time: its first row is in, under the saved position's own
+		// LSN, and the position is saved again with no transaction ended.
+		r.change(tbl.Table, event.EventInsert, "7", "brief", 0x840, 23*time.Minute)
+		r.position(0x840)
+		if got, want := r.state(ctx, tbl), []string{"1=one"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("with the second delivery half in: state %v, want %v (row 7 was never committed alone)", got, want)
+		}
+		r.change(tbl.Table, event.EventDelete, "7", "brief", 0x840, 23*time.Minute)
+		r.checkpoint(0x840)
+		if got, want := r.state(ctx, tbl), []string{"1=one"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("with the second delivery whole: state %v, want %v", got, want)
+		}
+	})
+
+	t.Run("two transactions arriving a second time do not end the server's other tails", func(t *testing.T) {
+		a := r.table(nil, [2]string{"1", "one"})
+		b := r.table(nil, [2]string{"1", "one"})
+		both := []views.BaselineTable{a, b}
+		r.change(b.Table, event.EventUpdate, "1", "B", 0x850, 23*time.Minute)
+		r.checkpoint(0x850)
+		got, err := settledRefresh(t, ctx, r.k, both)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, ok := got[tailKey(b.Schema, b.Table)]
+		if !ok || len(before.Paths) == 0 {
+			t.Fatalf("the other table has no tail: %v", got)
+		}
+		// Ta and Tb were visible and not saved; both come again.
+		for range 2 {
+			r.change(a.Table, event.EventUpdate, "1", "Ta", 0x860, 23*time.Minute)
+			r.change(a.Table, event.EventInsert, "8", "Tb", 0x870, 23*time.Minute)
+		}
+		r.checkpoint(0x870)
+		got, err = settledRefresh(t, ctx, r.k, both)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if va, ok := got[tailKey(a.Schema, a.Table)]; !ok {
+			t.Fatal("the table has no tail after its transactions came twice")
+		} else if state, want := merged(t, a, va), []string{"1=Ta", "8=Tb"}; !reflect.DeepEqual(state, want) {
+			t.Fatalf("state %v, want %v", state, want)
+		}
+		// The other table's tail is the one it had: its first file is the
+		// same file, where tails built again would have written new ones.
+		after, ok := got[tailKey(b.Schema, b.Table)]
+		if !ok || len(after.Paths) == 0 || after.Paths[0] != before.Paths[0] {
+			t.Fatalf("the other table's tail was built again: %v, was %v", after.Paths, before.Paths)
 		}
 	})
 
