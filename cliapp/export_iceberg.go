@@ -62,7 +62,10 @@ CATALOGS
                    optional location prefix. Authenticate with --catalog-sigv4,
                    or an OAuth client credential, or a bearer token; with a
                    credential, --catalog-scope sets the OAuth scope (Apache
-                   Polaris wants PRINCIPAL_ROLE:ALL). Secrets are
+                   Polaris wants PRINCIPAL_ROLE:ALL). The run asks the catalog
+                   for vended storage credentials; with a catalog that has none
+                   to give, --catalog-access-delegation none writes the files
+                   with this machine's own. Secrets are
                    never flag values: set ` + envCatalogCredential + ` or
                    ` + envCatalogToken + `, or point --catalog-credential-file or
                    --catalog-token-file at a file holding the secret.
@@ -189,6 +192,7 @@ var (
 	eiCredentialFile   string
 	eiTokenFile        string
 	eiCatalogScope     string
+	eiAccessDelegation string
 )
 
 // The REST catalog's secrets are read from these variables or from the
@@ -225,6 +229,7 @@ func init() {
 	f.StringVar(&eiCredentialFile, "catalog-credential-file", "", "File holding the REST catalog OAuth client credential (client_id:client_secret); or set "+envCatalogCredential)
 	f.StringVar(&eiTokenFile, "catalog-token-file", "", "File holding the REST catalog bearer token; or set "+envCatalogToken)
 	f.StringVar(&eiCatalogScope, "catalog-scope", "", "OAuth scope the client credential's token exchange asks for (default: catalog; Apache Polaris wants PRINCIPAL_ROLE:ALL). Not a secret (--catalog rest)")
+	f.StringVar(&eiAccessDelegation, "catalog-access-delegation", "", "What to ask the REST catalog for: vended-credentials (default) or none, to not ask for storage credentials; the files are then written with this machine's own unless the catalog sends some anyway (--catalog rest)")
 	cli.AddDuckDBTuningFlags(exportIcebergCmd)
 	bindCommandEnv(exportIcebergCmd)
 
@@ -491,13 +496,14 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // catalog is refused, because the operator meant something by it.
 func exportCatalogConfig() (icebergexport.CatalogConfig, error) {
 	c := icebergexport.CatalogConfig{
-		Kind:         icebergexport.CatalogKind(strings.ToLower(strings.TrimSpace(eiCatalog))),
-		URI:          eiCatalogURI,
-		Warehouse:    eiCatalogWarehouse,
-		SigV4:        eiSigV4,
-		SigV4Region:  eiSigV4Region,
-		SigV4Service: eiSigV4Service,
-		Scope:        eiCatalogScope,
+		Kind:             icebergexport.CatalogKind(strings.ToLower(strings.TrimSpace(eiCatalog))),
+		URI:              eiCatalogURI,
+		Warehouse:        eiCatalogWarehouse,
+		SigV4:            eiSigV4,
+		SigV4Region:      eiSigV4Region,
+		SigV4Service:     eiSigV4Service,
+		Scope:            eiCatalogScope,
+		AccessDelegation: eiAccessDelegation,
 	}
 	if c.Kind == "" {
 		c.Kind = icebergexport.CatalogHadoop

@@ -227,6 +227,35 @@ bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
 Glue's endpoint and Glue's API register the same tables, so a table written
 with one is read with the other.
 
+Every request asks the catalog for vended storage credentials (the
+`X-Iceberg-Access-Delegation: vended-credentials` header), and the files are
+written with them when the catalog sends some, or with the machine's own AWS
+credentials when it sends none. A catalog that is set up with no credentials
+to vend may refuse the table instead: Apache Gravitino's Iceberg REST server
+with no credential provider answers `No credential provider found for path
+s3://... with scheme s3`, and Apache Polaris with `stsUnavailable` answers
+`Credential vending was requested for table ..., but no credentials are
+available`. When the machine running the export can write to the warehouse
+itself, tell the catalog not to vend:
+
+```bash
+bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
+  --catalog rest \
+  --catalog-uri http://localhost:9001/iceberg \
+  --catalog-access-delegation none \
+  --warehouse s3://my-bucket/iceberg
+```
+
+`--catalog-access-delegation` takes `vended-credentials` (the default) or
+`none`. With `none` no request carries the header, and the S3 region comes
+from the AWS chain (`AWS_REGION` or a profile). It cannot be combined with
+`--catalog-sigv4`, because the header is removed after the request is signed.
+`remote-signing`, the other mode in the Iceberg spec, is refused: the library
+bintrail uses cannot have S3 requests signed by the catalog, and a catalog
+that answers with remote signing (LakeKeeper's default for an S3 warehouse
+without STS) fails the first file read with `remote S3 request signing is not
+supported`; turn remote signing off for that warehouse.
+
 S3 Tables: give the endpoint, the table bucket's ARN as the warehouse, and no
 `--warehouse`, so S3 Tables picks where the files go:
 
@@ -714,6 +743,7 @@ nothing. Both report `unchanged`.
 | `--catalog-sigv4` | sign REST requests with AWS credentials (`rest`) |
 | `--catalog-sigv4-region`, `--catalog-sigv4-service` | override the signing region and service (default: from a Glue or S3 Tables URI, else the AWS chain and `execute-api`) |
 | `--catalog-credential-file`, `--catalog-token-file` | file holding the REST OAuth client credential or bearer token; or env `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL`, `BINTRAIL_ICEBERG_CATALOG_TOKEN` |
+| `--catalog-access-delegation` | what the REST requests ask the catalog for: `vended-credentials` (default) or `none`, to not ask for storage credentials, so the files are written with this machine's own unless the catalog sends some anyway (`rest`; not with `--catalog-sigv4`) |
 | `--catalog-scope` | OAuth scope the client credential's token exchange asks for (`rest`, with a credential; default `catalog`; Apache Polaris wants `PRINCIPAL_ROLE:ALL`) |
 | `--tables` | comma-separated `schema.table` list (default: every table in the newest snapshot) |
 | `--at` | export up to this instant (default: now); must be after the table's cursor and not below the live window |
