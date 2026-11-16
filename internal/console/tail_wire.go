@@ -144,6 +144,9 @@ func TailsSetting() (on bool, read string) {
 // connection was opened again) is replaced; its files are removed once no
 // statement can still read them.
 func (s *Server) tailKeeperFor(id string, b *bundle) *tailKeeper {
+	if s.pgTailsFor(id, b) {
+		return s.tailKeeperForPG(id, b)
+	}
 	captures, capturesKey, known := s.tailCapturesKeyed(id)
 	if !known {
 		return nil
