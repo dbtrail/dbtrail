@@ -1086,6 +1086,15 @@ The source answers:
   `VALUES`, `TABLE`. A statement that writes is refused (`25006`). `SHOW
   TABLES` and `DESCRIBE`, the copy's own, stay on the copy.
 
+**A server that hides tables or columns sends nothing to its source**, not a
+statement the copy refuses, not a transaction block, not a catalog statement:
+the rules are applied by the copy's views, and a statement run on the source
+reads past them, whatever the forwarding user's grants (a view there runs with
+its owner's rights, as a `SECURITY DEFINER` function does). Such a server is
+answered by the copy alone, as without a forwarding user; a rule saved while a
+block is open on the source fails that block. `/status` says so for the server
+(`forwarding_off`), and the log once.
+
 A prepared statement keeps the side it was given once its columns were
 described: a driver that prepared it once (pgx, JDBC) is not told other
 columns later. One that the copy refused at its first execution runs on the
@@ -1114,6 +1123,7 @@ The reasons, with the MySQL port's names where they mean the same:
 | copy | `answers_the_same` | everything in it answers on the copy as on PostgreSQL |
 | copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
 | copy | `no_forward_account` | the server has no forwarding user: the copy answers alone |
+| copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
 | source | `in_transaction` | the client's transaction block |
 | source | `veto` | a construct the copy answers differently, or is not known to answer the same |
 | source | `session_differs` | a session setting the copy is not known to reproduce (`TimeZone`) |
