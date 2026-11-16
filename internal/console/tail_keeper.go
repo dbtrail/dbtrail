@@ -99,6 +99,12 @@ type tailSource interface {
 	// position of its published cut and the last event id it records (0:
 	// none), or why that cannot be read.
 	Cut(t views.BaselineTable) (tailFloor, string)
+	// BaseFile names the file t's view reads first (t.Path, its base) as a
+	// file, not as a name: the same for two names of one file, different for
+	// a file written again, "" when it cannot be told. A refresh links the
+	// base of a table into its new snapshot directory, so the name changes
+	// at every refresh and the file does not.
+	BaseFile(t views.BaselineTable) string
 	// Broken says, by tailKey, why a table's tail cannot go on, asked at
 	// every refresh (its definition changed after its cut, capture lost
 	// events since). Tables it leaves out can.
@@ -167,7 +173,11 @@ type tailEntry struct {
 	// the tail is never pruned). Set when the tail is built or pruned, never
 	// when it is only kept standing for a newer cut: it still holds what it
 	// read from its older one.
-	from    *tailFloor
+	from *tailFloor
+	// base is the source's BaseFile of the base file the tail was built
+	// against ("" not known): a newer cut whose base is that same file under
+	// another name may be pruned to (standsFor).
+	base    string
 	tail    tailTable
 	refused string
 	frozen  bool
@@ -718,6 +728,10 @@ func (k *tailKeeper) runBuild(ctx context.Context, b *tailBuild, key string, t v
 					slog.Info("Engine Routing: a table's tail was built after failing before", "table", t.Schema+"."+t.Table, "failures", b.failures)
 				}
 				k.install(key, e)
+				// A statement waits for the update that publishes it
+				// (statementTailsFresh), which would otherwise start only
+				// after the follower's pause: up to a second of its wait.
+				k.wakeFollower()
 				return true
 			}
 			to = k.mark
@@ -809,8 +823,11 @@ func (k *tailKeeper) failBuild(key string, b *tailBuild, t views.BaselineTable, 
 // (not refused, not frozen: it holds every change after its own cut through
 // the cursor):
 //   - t reads the same base file: the tail's columns, key and the checks of
-//     NewTail were made against it, and a copy written again (a new snapshot)
-//     may differ;
+//     NewTail were made against it, and a copy written again (a new snapshot,
+//     a compaction) may differ. The same FILE, not the same name: a refresh
+//     links the base into its new snapshot directory, so every refresh names
+//     it anew, and a rule on the name rebuilt every tail at every refresh,
+//     reading the index from the new cut while statements waited (sameBase);
 //   - both cuts and the cursor are positions in one numbering of the binary
 //     log, the only order the comparisons below mean anything in;
 //   - the newer cut is after the older one: one that moved back or did not
@@ -846,7 +863,7 @@ func (k *tailKeeper) pruneTo(e *tailEntry, t views.BaselineTable, cut string) bo
 // window starts. The conditions are pruneTo's, listed above it; none reads
 // the index.
 func (k *tailKeeper) standsFor(e *tailEntry, t views.BaselineTable) (tailFloor, bool) {
-	if e.refused != "" || e.frozen || e.from == nil || e.tail == nil || t.Path != e.table.Path {
+	if e.refused != "" || e.frozen || e.from == nil || e.tail == nil || !k.sameBase(e, t) {
 		return tailFloor{}, false
 	}
 	to, why := k.src.Cut(t)
@@ -868,6 +885,21 @@ func (k *tailKeeper) standsFor(e *tailEntry, t views.BaselineTable) (tailFloor, 
 		return tailFloor{}, false
 	}
 	return to, true
+}
+
+// sameBase says whether t's view reads the base file e's tail was built
+// against, by the file (the source's BaseFile, as it was when the tail was
+// built) when both sides are known: a file written again under the same name
+// is another file, the same file under a new snapshot's name is not. With
+// either side not known, only the same name is the same file, as before
+// identities were read.
+func (k *tailKeeper) sameBase(e *tailEntry, t views.BaselineTable) bool {
+	if e.base != "" {
+		if id := k.src.BaseFile(t); id != "" {
+			return id == e.base
+		}
+	}
+	return t.Path == e.table.Path
 }
 
 // reachedFloor says whether the cursor has folded every change the published
@@ -996,9 +1028,16 @@ func (k *tailKeeper) build(ctx context.Context, src tailSource, t views.Baseline
 	if f, why := src.Cut(t); why == "" {
 		from = &f
 	}
+	// The file Start reads the definition from, named before and after it
+	// reads it: kept only when both say the same file, so the identity is of
+	// the file the checks were made against ("" otherwise: not known).
+	base := src.BaseFile(t)
 	tail, why, err := src.Start(ctx, t)
 	if err != nil {
 		return nil, err
+	}
+	if base != "" && src.BaseFile(t) != base {
+		base = ""
 	}
 	if why != "" {
 		return refused(why)
@@ -1024,7 +1063,7 @@ func (k *tailKeeper) build(ctx context.Context, src tailSource, t views.Baseline
 	case why != "":
 		return refused(why)
 	}
-	return &tailEntry{table: t, cut: cut, from: from, tail: tail, dirty: true}, nil
+	return &tailEntry{table: t, cut: cut, from: from, base: base, tail: tail, dirty: true}, nil
 }
 
 // view is what a statement reads of e: its newest version, written first if

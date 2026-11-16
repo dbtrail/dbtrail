@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/metadata"
@@ -330,6 +332,29 @@ func (x *indexTailSource) Since(ctx context.Context, tables []views.BaselineTabl
 		from = rows[len(rows)-1].EventID
 	}
 	return nil
+}
+
+// BaseFile names t's base file by what the file system says of it: its
+// device, inode, size and time of last write, which two names of one file
+// (a hard link) share and a file written again does not. "" when it cannot
+// be read (a file gone, an S3 copy, a system without inodes).
+func (x *indexTailSource) BaseFile(t views.BaselineTable) string {
+	return baseFileID(t.Path)
+}
+
+func baseFileID(path string) string {
+	if path == "" {
+		return ""
+	}
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d:%d:%d", uint64(st.Dev), uint64(st.Ino), fi.Size(), fi.ModTime().UnixNano())
 }
 
 // Cut reads where Fill starts t's window: its cut's anchor and last event id.
