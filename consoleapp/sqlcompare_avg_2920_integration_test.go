@@ -217,7 +217,7 @@ func fieldMeta(t *testing.T, dsn, stmt string) []string {
 func avgMetadata(t *testing.T, portDSN, sourceDSN string) {
 	for _, stmt := range []string{
 		"SELECT MIN(side), AVG(k), AVG(u), AVG(b), AVG(ti), AVG(bo), AVG(DISTINCT k) FROM ev",
-		"SELECT side, g FROM ev WHERE id = 1",
+		"SELECT MIN(side), g FROM ev GROUP BY g ORDER BY g LIMIT 1",
 	} {
 		got, want := fieldMeta(t, portDSN, stmt), fieldMeta(t, sourceDSN, stmt)
 		for i := range want {
