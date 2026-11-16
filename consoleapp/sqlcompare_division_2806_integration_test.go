@@ -21,7 +21,8 @@ import (
 // are answered by MySQL, which returns a DECIMAL with div_precision_increment
 // more digits than the operand (k / 7 is 0.1429) where the copy divides as a
 // DOUBLE (0.14285714285714285). A SUM of whole numbers is answered by the
-// copy, typed DECIMAL as MySQL types it.
+// copy, typed DECIMAL as MySQL types it. Since #2920 an AVG of a whole-number
+// column alone is the copy's exact average (sqlcompare_avg_2920).
 func TestIntegrationSQLCompareDivisionRouted(t *testing.T) {
 	srcDB, srcName := testutil.CreateTestDB(t)
 	divisionRouted(t, srcDB, srcName, testutil.IntegrationDSN(srcName))
@@ -192,8 +193,8 @@ func divisionRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT side, k / ? FROM ev ORDER BY k", args: []any{7}, who: "live", why: "prepared"},
 		{stmt: "SELECT MIN(side), SUM(k) / COUNT(*) FROM ev", who: "live", why: "SUM over COUNT"},
 		{stmt: "SELECT MIN(side), AVG(k), AVG(b), AVG(u), AVG(dc), AVG(dbl) FROM ev", who: "live", why: "AVG"},
-		{stmt: "SELECT MIN(side), AVG(z) FROM ev WHERE k IS NULL", who: "live", why: "AVG of NULLs"},
-		{stmt: "SELECT MIN(side), avg (k) FROM ev", who: "live", why: "AVG with a space"},
+		{stmt: "SELECT MIN(side), AVG(z) FROM ev WHERE k IS NULL", who: "copy", why: "AVG of NULLs: a whole-number column, the copy's exact average since #2920"},
+		{stmt: "SELECT MIN(side), avg (k) FROM ev", who: "copy", why: "AVG with a space, over a whole-number column (#2920)"},
 
 		{stmt: "SELECT MIN(side), SUM(k) FROM ev", who: "copy", why: "the issue's SUM"},
 		{stmt: "SELECT MIN(side), SUM(b), SUM(u), SUM(ui) FROM ev", who: "copy", why: "BIGINT, UNSIGNED, past 2^64"},

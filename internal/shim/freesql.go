@@ -419,8 +419,11 @@ func (h *Handler) copyOpts() readrouter.CopyOptions {
 	// result outside the years 1 to 9999, where MySQL answers NULL (#2800).
 	// MySQLTimestampDiff: TIMESTAMPDIFF as the copy's macros, defined there
 	// too; the console keeps on MySQL a call whose dates are not date columns
-	// or clock calls (readrouter.TimestampDiffVeto).
-	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true, MySQLTimestampDiff: true}
+	// or clock calls (readrouter.TimestampDiffVeto). MySQLAvg: AVG as the
+	// copy's exact average of whole numbers, defined there too (#2920); the
+	// console keeps on MySQL an AVG of anything else, or one used other than
+	// as a column of the select list (readrouter.AvgVeto).
+	return readrouter.CopyOptions{LikeIgnoresCase: h.routerCfg.LikeIgnoresCase, MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true, MySQLTimestampDiff: true, MySQLAvg: true}
 }
 
 // Close releases what a connection holds: the router's upstream connection,

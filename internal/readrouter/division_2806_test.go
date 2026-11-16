@@ -113,16 +113,16 @@ func TestVetoOpts_divisionUnderRouting(t *testing.T) {
 // and quoted names is read without growing faster than its length.
 func TestVeto_divisionIsLinear(t *testing.T) {
 	long := "SELECT " + strings.Repeat("FROM_UNIXTIME(", 50000) + strings.Repeat(`"a""b" `, 50000)
-	if got := divisionVeto(long); got != "" {
+	if got := divisionVeto(long, false); got != "" {
 		t.Errorf("divisionVeto(unclosed calls) = %q, want none", got)
 	}
-	if got := divisionVeto(long + " ) / 2"); got != "" {
+	if got := divisionVeto(long+" ) / 2", false); got != "" {
 		t.Errorf("divisionVeto(a / still inside the calls) = %q, want none", got)
 	}
-	if got := divisionVeto(strings.Repeat("(", 100000) + "1/2"); got != vetoDivision {
+	if got := divisionVeto(strings.Repeat("(", 100000)+"1/2", false); got != vetoDivision {
 		t.Errorf("divisionVeto(deep) = %q, want %q", got, vetoDivision)
 	}
-	if got := divisionVeto(strings.Repeat("1,", 200000) + "9223372036854775808"); got != vetoBigInteger {
+	if got := divisionVeto(strings.Repeat("1,", 200000)+"9223372036854775808", false); got != vetoBigInteger {
 		t.Errorf("divisionVeto(many numbers) = %q, want %q", got, vetoBigInteger)
 	}
 }

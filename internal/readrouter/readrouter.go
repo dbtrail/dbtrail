@@ -391,7 +391,14 @@ func VetoOpts(stmt string, o CopyOptions) string {
 	if !leftRightAgree(sc.blankedCopy) {
 		return vetoLeftRight
 	}
-	if why := divisionVeto(sc.blankedCopy); why != "" {
+	if o.MySQLAvg && avgOpen.MatchString(sc.blankedCopy) {
+		// The rewrite's own answer (#2920): an AVG it did not write as the
+		// copy's macro would be the copy's DOUBLE.
+		if _, why := ForCopyOpts(stmt, o); why == VetoAvgLeft {
+			return VetoAvgLeft
+		}
+	}
+	if why := divisionVeto(sc.blankedCopy, o.MySQLAvg); why != "" {
 		return why
 	}
 	return unsignedCallVeto(sc.blankedCopy)

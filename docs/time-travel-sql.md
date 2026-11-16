@@ -708,7 +708,7 @@ The decision, in order, for every statement:
    is not two arguments (see below), a call of a function whose name starts
    with `_bintrail_` (the copy's own functions, which MySQL does not have), `WEEK`, `YEARWEEK` and `EXTRACT(WEEK ...)`, a recursive
    CTE (`WITH RECURSIVE`), `COLLATE`, `CAST AS UNSIGNED`, `DIV`, a `/` outside the argument of
-   `FROM_UNIXTIME`, `AVG` and MariaDB's `MEDIAN`, a whole number written from
+   `FROM_UNIXTIME`, an `AVG` outside the rule below and MariaDB's `MEDIAN`, a whole number written from
    9223372036854775808 up, `RAND`, user and system
    variables, locking reads, `information_schema`, full-text `MATCH`,
    JSON functions and the `->`/`->>` operators, a backslash inside a string
@@ -751,6 +751,45 @@ The decision, in order, for every statement:
    statement then goes to MySQL under the same reason, not as a fault of
    the copy, so a statement whose `UNIX_TIMESTAMP` reaches a NULL row goes
    to MySQL.
+
+   `AVG(column)` and `AVG(DISTINCT column)` over a whole-number column go to
+   the copy since #2920. MySQL's `AVG` of whole numbers is a `DECIMAL` with
+   `div_precision_increment` (4) decimals: `AVG(k)` over 1, 2 and 4 is
+   `2.3333`, where the copy's own average is a double
+   (`2.3333333333333335`). The copy is sent a function of its session that
+   computes the average with whole numbers and rounds a half away from zero,
+   as MySQL does (one 1 among 32 rows is `0.0313`, one -1 is `-0.0313`), so
+   the text and the column's type and decimals are MySQL's, exact for
+   `BIGINT` values near 2^63 and `BIGINT UNSIGNED` near 2^64; no row and
+   NULLs only are `NULL`. Measured on MySQL 8.0 and MariaDB 10.11, which
+   agree. The column must be a `TINYINT`, `SMALLINT`, `MEDIUMINT`, `INT` or
+   `BIGINT` (signed or not, `BOOL` included) named as a bare column, and the
+   `AVG` a whole column of the select list, with or without an alias. MySQL
+   computes an `AVG` on more digits than it prints (`2.333333333` inside),
+   so these stay on MySQL: an `AVG` in arithmetic (`AVG(k) * 3` is `7.0000`
+   on MySQL), in a comparison (`AVG(k) > 2.3333` is true on MySQL 8.0 and
+   false on MariaDB), under another call (`ROUND(AVG(k), 1)`), in `HAVING`
+   or `ORDER BY`, named there by its alias or its position, or as a window
+   (`OVER`); a `SELECT DISTINCT`; a statement with a subquery, a `WITH` or a
+   `UNION`. So does an `AVG` over a `DECIMAL` (its scale plus four, `1.246667`
+   over a `DECIMAL(10,2)`), a `FLOAT` or `DOUBLE`, text, a date, a column
+   whose type the snapshot does not record, or any expression:
+   `AVG(LENGTH(c))` is a `DECIMAL` with four decimals on MySQL too, but the
+   port does not read the type of an expression. A `*` or `t.*` in the
+   select list with a column position in `GROUP BY` or `ORDER BY` also
+   stays on MySQL: the star stands for many columns, so a position may name
+   the `AVG`. In the result's metadata, measured on the wire against MySQL
+   8.0.46 and MariaDB 10.11.19, the column's type (`NEWDECIMAL`), its
+   decimals (4) and its flags (`BINARY`, never `UNSIGNED`, also over an
+   unsigned column) are the same as the source's; the length is not: the
+   copy leaves it 0, where MySQL and MariaDB send one that depends on the
+   argument (16 for an `INT`, 25 for a `BIGINT`, 26 for a `BIGINT UNSIGNED`,
+   9 for a `TINYINT`). The length is a display width a client may use to size
+   a column; the value and the decimals do not depend on it.
+
+   A plain `INT` column that the copy answers (not an `AVG`) is declared
+   `BIGINT` in the result's metadata, where MySQL declares `INT`; the values
+   are identical. This is older than #2920 and has not changed.
 
    `DATE_FORMAT(d, 'format')` and `DATEDIFF(a, b)`, the way a report
    buckets and ages its rows, go to the copy since #2611 when its answer is
@@ -1095,7 +1134,7 @@ The decision, in order, for every statement:
    | `sql_select_limit` | any limit of 1 or more, applied to the copy's answer | `0` |
    | `sql_mode` | any combination of `ONLY_FULL_GROUP_BY`, `STRICT_TRANS_TABLES`, `STRICT_ALL_TABLES`, `NO_ZERO_DATE`, `NO_ZERO_IN_DATE`, `ERROR_FOR_DIVISION_BY_ZERO`, `NO_ENGINE_SUBSTITUTION`, `NO_UNSIGNED_SUBTRACTION`, `NO_AUTO_VALUE_ON_ZERO`, `NO_DIR_IN_CREATE`, `TRADITIONAL` (and MariaDB's `NO_AUTO_CREATE_USER`, `NO_FIELD_OPTIONS`, `NO_KEY_OPTIONS`, `NO_TABLE_OPTIONS`, `SIMULTANEOUS_ASSIGNMENT`), the empty mode included | any other flag: `PAD_CHAR_TO_FULL_LENGTH`, `HIGH_NOT_PRECEDENCE`, `REAL_AS_FLOAT`, `TIME_TRUNCATE_FRACTIONAL`, `ALLOW_INVALID_DATES`, `IGNORE_SPACE`, `ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `ANSI`, MariaDB's `EMPTY_STRING_IS_NULL`, `TIME_ROUND_FRACTIONAL`, `ORACLE` |
    | `lc_time_names` | `en_US` | any other locale (`MONTHNAME`, `DAYNAME`) |
-   | `div_precision_increment` | `4` (the default). A `/` and an `AVG` stay on MySQL under routing whatever the value (#2806), so this setting only decides the session's other statements | any other value: it moves MySQL's answer further from the copy's |
+   | `div_precision_increment` | `4` (the default). A `/` stays on MySQL under routing whatever the value (#2806); an `AVG` of a whole-number column is answered by the copy with four decimals (#2920), which is MySQL's answer only at this value | any other value: it moves MySQL's answer further from the copy's |
    | `sql_auto_is_null` | `0` | `1` |
    | `timestamp`, asked before each statement that calls `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` or `UTC_DATE()` (#2611) | not set, and the source's clock within a second of DBTrail's host's | set (`SET timestamp = ...`, as replay tools do: MySQL's `NOW()` is that moment), or a source clock more than a second from DBTrail's host's (the copy reads the host's) |
    | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
@@ -2178,7 +2217,8 @@ What this is and is not:
     minutes.
   - **`AVG` and `/` return a double** on the copy (on the port without
     routing and in the console; under Engine Routing both stay on MySQL
-    since #2806), where MySQL returns a
+    since #2806, but an `AVG` of a whole-number column, which the copy
+    answers exactly since #2920), where MySQL returns a
     `DECIMAL` with four decimals more than the operand has (for `DECIMAL`
     and integer operands; a `DOUBLE` operand gives a double on both):
     `AVG(amount)` over a `DECIMAL(12,2)` is `1.8` on the copy and
