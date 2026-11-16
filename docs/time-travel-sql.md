@@ -775,9 +775,21 @@ The decision, in order, for every statement:
    over a `DECIMAL(10,2)`), a `FLOAT` or `DOUBLE`, text, a date, a column
    whose type the snapshot does not record, or any expression:
    `AVG(LENGTH(c))` is a `DECIMAL` with four decimals on MySQL too, but the
-   port does not read the type of an expression. The column's display
-   length in the result's metadata is the copy's own, as for `SUM`; the
-   type and the decimals are MySQL's.
+   port does not read the type of an expression. A `*` or `t.*` in the
+   select list with a column position in `GROUP BY` or `ORDER BY` also
+   stays on MySQL: the star stands for many columns, so a position may name
+   the `AVG`. In the result's metadata, measured on the wire against MySQL
+   8.0.46 and MariaDB 10.11.19, the column's type (`NEWDECIMAL`), its
+   decimals (4) and its flags (`BINARY`, never `UNSIGNED`, also over an
+   unsigned column) are the same as the source's; the length is not: the
+   copy leaves it 0, where MySQL and MariaDB send one that depends on the
+   argument (16 for an `INT`, 25 for a `BIGINT`, 26 for a `BIGINT UNSIGNED`,
+   9 for a `TINYINT`). The length is a display width a client may use to size
+   a column; the value and the decimals do not depend on it.
+
+   A plain `INT` column that the copy answers (not an `AVG`) is declared
+   `BIGINT` in the result's metadata, where MySQL declares `INT`; the values
+   are identical. This is older than #2920 and has not changed.
 
    `DATE_FORMAT(d, 'format')` and `DATEDIFF(a, b)`, the way a report
    buckets and ages its rows, go to the copy since #2611 when its answer is
