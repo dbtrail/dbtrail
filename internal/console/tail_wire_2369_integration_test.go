@@ -4,7 +4,9 @@ package console
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,5 +104,44 @@ func TestIntegrationPortReadsTheTail(t *testing.T) {
 	r.s.tails = tailKeepers{} // a keeper made again, with the filters now
 	if got := settled(t); len(got) != 1 || got[0] != "1=new" {
 		t.Fatalf("a table capture does not record: %v", got)
+	}
+}
+
+// Fresh mode never answers from the snapshot alone without saying so: over a
+// table that has no tail, a connection that routes is told to send the
+// statement to MySQL, and one that does not route gets the snapshot's answer
+// with a warning that says so.
+func TestIntegrationFreshNeverAnswersTheSnapshotAloneSilently(t *testing.T) {
+	t.Setenv("BINTRAIL_SQL_TAILS", "on")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := newTailRig(t)
+	r.s.sqlRunner = sandboxRunner{sqlsandbox.New(sqlsandbox.Config{Exe: exe, Args: []string{}, Limits: sqlsandbox.Limits{Timeout: 60 * time.Second}})}
+	r.s.sqlLimits = resolveSQLLimits(sqlsandbox.Limits{})
+	r.b.baselineConfigured = true
+	r.s.tailCapturesHook = func(string) (func(string, string) bool, bool) {
+		return func(string, string) bool { return false }, true // capture records none: no tail
+	}
+	tbl := r.table(nil)
+	r.change(tbl.Table, event.EventUpdate, "1", "paid", "binlog.000008", 100, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
+	q := &SQLOnCopy{s: r.s, b: r.b, user: "u", id: bootServerID}
+	stmt := "SELECT CAST(id AS VARCHAR) || '=' || status FROM shop." + tbl.Table + " ORDER BY id"
+
+	res, err := q.Run(context.Background(), stmt, "", sqlsandbox.Session{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0].(string) != "1=new" {
+		t.Fatalf("the snapshot's answer: %v", res.Rows)
+	}
+	if !strings.Contains(res.Note, "without the newest captured changes") || !strings.Contains(res.Note, tbl.Table) {
+		t.Fatalf("a fresh answer from the snapshot alone with the note %q", res.Note)
+	}
+	_, err = q.Run(context.Background(), stmt, "", sqlsandbox.Session{StrictStar: true})
+	var changed *sqlsandbox.MayHaveChangedError
+	if !errors.As(err, &changed) || !strings.Contains(changed.Reason, "fresh mode") {
+		t.Fatalf("under routing: %v, want a refusal that sends the statement to MySQL", err)
 	}
 }
