@@ -87,14 +87,15 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	if err := src.QueryRow("SHOW CREATE TABLE ev").Scan(&name, &ddl); err != nil {
 		t.Fatal(err)
 	}
-	// #2917: a table with a four-byte character (an emoji) in one row's
-	// text, which utf8mb3 does not have. No letter with an accent: that
-	// keeps a statement reading the column on MySQL for another reason.
+	// #2917: a table of plain text, for statements and answers with a
+	// four-byte character (an emoji), which utf8mb3 does not have. The
+	// character is never stored: a stored one keeps every statement reading
+	// its column on MySQL for another reason (#2533).
 	emoRows := func(side string) [][]string {
 		return [][]string{
 			{"1", "1", side, "plain"},
 			{"2", "2", side, "b"},
-			{"3", "3", side, "a\U0001F600b"},
+			{"3", "3", side, "c"},
 		}
 	}
 	if _, err := src.Exec("CREATE TABLE emo (id INT NOT NULL PRIMARY KEY, k INT, side VARCHAR(8), s VARCHAR(8)) DEFAULT CHARSET=utf8mb4"); err != nil {
@@ -235,26 +236,23 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		}
 	}
 
-	// #2917: under utf8mb3 the copy answers, except a statement or an
-	// answer with a character utf8mb3 does not have, which MySQL turns into
-	// '?'. utf8_unicode_ci compares as the copy does, so there a string
+	// #2917: under utf8mb3 the copy answers, except a statement with a
+	// character utf8mb3 does not have (MySQL reads it as '?', or refuses
+	// it). utf8_unicode_ci compares as the copy does, so there a string
 	// literal is the copy's too; utf8_general_ci does not (#2836). Under
 	// utf8mb4 the same statements are the copy's: each refusal below is
 	// this rule's.
 	const (
-		emoRead    = "SELECT side, s FROM emo ORDER BY k"
 		emoNoText  = "SELECT side, k FROM emo ORDER BY k"
 		emoLiteral = "SELECT side, k FROM emo WHERE s <> 'x\U0001F600' ORDER BY k"
 		bmpLiteral = "SELECT side, k FROM emo WHERE s <> 'zz\u4e2d' ORDER BY k"
 	)
 	for _, c := range []struct{ collation, stmt, wantWho string }{
-		{"utf8mb4_unicode_ci", emoRead, "copy"},
 		{"utf8mb4_unicode_ci", emoNoText, "copy"},
 		{"utf8mb4_unicode_ci", emoLiteral, "copy"},
 		{"utf8mb4_unicode_ci", bmpLiteral, "copy"},
-		{"utf8_general_ci", emoRead, "live"},
 		{"utf8_general_ci", emoNoText, "copy"},
-		{"utf8_unicode_ci", emoRead, "live"},
+		{"utf8_general_ci", bmpLiteral, "live"},
 		{"utf8_unicode_ci", emoNoText, "copy"},
 		{"utf8_unicode_ci", emoLiteral, "live"},
 		{"utf8_unicode_ci", bmpLiteral, "copy"},
@@ -269,6 +267,35 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", c.collation, c.stmt, got, want)
 		}
+	}
+	// And an answer with such a character, on a session whose results alone
+	// are utf8mb3: MySQL sends it as '?', so the copy's answer is not sent.
+	// Under utf8mb4 results the copy answers the same statement.
+	const emoOut = "SELECT side, k, 'x\U0001F600' AS e FROM emo ORDER BY k"
+	for _, results := range []struct{ cs, wantWho string }{{"utf8mb4", "copy"}, {"utf8mb3", "live"}} {
+		pc, err := openRaw(t, portDSN).Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		lc, err := openRaw(t, liveDSN).Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cn := range []*sql.Conn{pc, lc} {
+			if _, err := cn.ExecContext(context.Background(), "SET character_set_results = "+results.cs); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, want := connAnswer(t, pc, emoOut), connAnswer(t, lc, emoOut)
+		t.Logf("results %-8s port %-70.200s %s (source %s)", results.cs, got, emoOut, connAnswer(t, lc, session))
+		if who := map[bool]string{true: "copy", false: "live"}[strings.Contains(got, "copy|")]; who != results.wantWho {
+			t.Errorf("results %s: %q answered by %s, want %s", results.cs, emoOut, who, results.wantWho)
+		}
+		if strings.ReplaceAll(got, "copy|", "live|") != want {
+			t.Errorf("results %s: %q through the port:\n  got  %s\n  want %s, the source's own answer", results.cs, emoOut, got, want)
+		}
+		pc.Close()
+		lc.Close()
 	}
 
 	// A SET NAMES of the client's own, later: the copy answers once the
