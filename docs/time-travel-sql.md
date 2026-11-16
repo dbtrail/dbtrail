@@ -1203,9 +1203,10 @@ The decision, in order, for every statement:
      text). The connection then remembers the statement (by its shape, its
      values left out, up to 256 of them) and sends it straight to MySQL the
      next times, so it does not cost a run on the copy each time; the
-     memory is dropped when the session is read again (after a `SET NAMES`
-     or any other `SET`), so a session that moves to utf8mb4 gets the copy
-     back.
+     memory is dropped when the session is read again (after any forwarded
+     statement that is not a plain read, such as a `SET`, a write or a
+     `CALL`, or a session change the source reports), so a session that
+     moves to utf8mb4 gets the copy back.
 
    Under utf8mb3 results the copy declares each text column as MySQL does,
    in `utf8mb3_general_ci` (33) instead of `utf8mb4_0900_ai_ci`'s 255.

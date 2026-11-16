@@ -454,11 +454,12 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db string, toF
 	if err != nil {
 		return nil, err
 	}
-	// The arguments are literals too: under a utf8mb3 connection MySQL
+	// The arguments are literals too: under a utf8mb3 session MySQL
 	// converts a string argument as it converts one written out (#2917).
-	if v := h.narrowStatementVeto(text); v != "" {
-		return nil, &narrowStatementError{why: v}
-	}
+	// Looked at as the client sent them, not in text: written in, a BLOB
+	// argument (which MySQL does not convert) reads as any string, and one
+	// that is not UTF-8 as unhex('...'). The statement's own text, the
+	// template, is checked by the ladder (route).
 	if v := h.narrowArgumentVeto(args); v != "" {
 		return nil, &narrowStatementError{why: v}
 	}

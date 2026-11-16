@@ -205,10 +205,23 @@ func TestRoutedSession_utf8mb3PreparedArgument_2917(t *testing.T) {
 	}
 	// A BLOB-typed argument is bytes to MySQL (the binary character set),
 	// not converted: the copy's.
-	blob := mysql.TypedBytes{Type: mysql.MYSQL_TYPE_BLOB, Bytes: []byte("a\xff" + emoji)}
-	res, err = rig.h.HandleStmtExecute(sel, "", []any{blob})
-	if err != nil || binaryFirstCell(t, res) != "copy" {
-		t.Errorf("a BLOB argument: %v (%s), want the copy", err, rig.last())
+	for name, b := range map[string]string{"valid UTF-8 with an emoji": "a" + emoji, "not UTF-8": "a\xff" + emoji} {
+		blob := mysql.TypedBytes{Type: mysql.MYSQL_TYPE_BLOB, Bytes: []byte(b)}
+		res, err = rig.h.HandleStmtExecute(sel, "", []any{blob})
+		if err != nil || binaryFirstCell(t, res) != "copy" {
+			t.Errorf("a BLOB argument, %s: %v (%s), want the copy", name, err, rig.last())
+		}
+	}
+	// A four-byte character in the statement's own text is vetoed whatever
+	// its arguments.
+	_, _, own, err := rig.h.HandleStmtPrepare("SELECT status, count(*) FROM t /* " + emoji + " */ WHERE status = ? GROUP BY status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := rig.f.calls
+	res, err = rig.h.HandleStmtExecute(own, "", []any{strArg("plain")})
+	if err != nil || binaryFirstCell(t, res) != "mysql" || rig.last() != "mysql/veto" || rig.f.calls != calls {
+		t.Errorf("an emoji in the template: %v (%s), want mysql/veto without the copy", err, rig.last())
 	}
 }
 
