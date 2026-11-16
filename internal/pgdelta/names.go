@@ -46,7 +46,7 @@ type Name struct {
 // ParseName reads a file's base name ("orders.000003.pgnew"). ok is false
 // for every name that is not exactly "<table>.<six digits>.pgdead|pgnew"
 // with a table of at least one byte: a table file, a MySQL delta file, a
-// name with a sign or a seventh digit. A table's own name may hold dots,
+// name with a sign or a seventh digit, a file still being written (IsTemp). A table's own name may hold dots,
 // and may itself look like a pair's ("orders.000003"): the last two parts
 // are the sequence and the suffix, whatever comes before.
 func ParseName(name string) (Name, bool) {

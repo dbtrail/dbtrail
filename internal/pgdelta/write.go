@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,10 +38,18 @@ const (
 	MetaKeyPrev    = "bintrail.pgdelta_prev"
 	MetaKeyColumns = "bintrail.pgdelta_columns"
 
-	// tmpSuffix ends a file still being written. ParseName refuses it, so a
-	// write cut short is never part of a chain.
-	tmpSuffix = ".tmp"
+	// tmpMark is in the name of a file still being written, after the
+	// pair's own suffix. ParseName refuses such a name, so a write cut short
+	// is never part of a chain.
+	tmpMark = ".tmp-"
 )
+
+// IsTemp reports whether name is a file a write of this package was still
+// writing: what a write that was cut short can leave behind, for whoever
+// owns the folder to remove.
+func IsTemp(name string) bool {
+	return strings.Contains(name, DeadSuffix+tmpMark) || strings.Contains(name, NewSuffix+tmpMark)
+}
 
 // reservedColumns are names a table cannot have a column of and be given a
 // pair: the pair's own, and the two the state's reads add.
@@ -118,9 +127,12 @@ type PairInput struct {
 	// them, so a key built in another order, or a row filed under another
 	// row's key, stops the write. Required.
 	KeyColumns []string
-	// Dead is the row numbers of the base file the window killed (a row it
-	// changed or deleted), ascending, none twice.
-	Dead []int64
+	// Positions is where the base file holds the changed keys that it holds
+	// at all: the key, and its row number there (BasePositions). The pair's
+	// dead rows are these, and nothing else: a row dies because its key
+	// changed. Every key in it must be one Changes hands over, and no two
+	// keys share a row.
+	Positions map[string]int64
 	// Changes hands every changed key to yield, in ascending order of Key's
 	// bytes, none twice. An error from yield must be returned as it is.
 	Changes func(yield func(Change) error) error
@@ -135,10 +147,15 @@ type PairInput struct {
 var ErrPairExists = errors.New("a PostgreSQL table delta of that sequence is already there")
 
 // WritePair writes the two files of a pair and returns their paths and how
-// many keys the .pgnew file holds. Both are written under other names and
-// given theirs at the end, the .pgdead last: on any error neither is left,
-// a write cut short leaves nothing a chain takes, and a pair already there
-// is never touched.
+// many keys the .pgnew file holds. Both are written under names of this
+// call's own and given theirs at the end, the .pgdead last, each only if
+// nothing has that name: a write that fails leaves neither, a write cut
+// short leaves nothing a chain takes (IsTemp names what it can leave), and a
+// pair already there is never written over, by this call or by another one
+// writing the same pair at the same moment.
+//
+// One thing it cannot undo: a process that stops between the two names
+// leaves the .pgnew alone. That is half a pair, which ChainOf refuses.
 func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 	// A local folder: the files are written with the operating system's
 	// calls, and "s3://bucket/…" would be made as a folder named "s3:".
@@ -188,12 +205,15 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 			return "", "", 0, fmt.Errorf("pgdelta: look for %s: %w", f, serr)
 		}
 	}
-	last := int64(-1)
-	for _, p := range in.Dead {
-		if p <= last {
-			return "", "", 0, fmt.Errorf("pgdelta: dead rows out of order or repeated (%d after %d)", p, last)
+	rowOf := make(map[int64]string, len(in.Positions))
+	for key, p := range in.Positions {
+		if p < 0 {
+			return "", "", 0, fmt.Errorf("pgdelta: key %q at row %d of the base", key, p)
 		}
-		last = p
+		if other, taken := rowOf[p]; taken {
+			return "", "", 0, fmt.Errorf("pgdelta: keys %q and %q are both said to be row %d of the base", other, key, p)
+		}
+		rowOf[p] = key
 	}
 
 	md := make(map[string]string, len(in.Metadata)+5)
@@ -203,7 +223,12 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 	md[MetaKeyBase], md[MetaKeyRun], md[MetaKeySeq], md[MetaKeyPrev] = in.Base, in.Run, strconv.Itoa(in.Seq), in.PrevRun
 	md[MetaKeyColumns] = columnsValue(in.Columns)
 
-	deadTmp, rowsTmp := dead+tmpSuffix, rows+tmpSuffix
+	// Names no other call has, so two writes of one pair never share a file
+	// being written.
+	deadTmp, rowsTmp, err := tempNames(dead, rows)
+	if err != nil {
+		return "", "", 0, err
+	}
 	defer func() {
 		// Only what this call made: never a file under a pair's own name.
 		os.Remove(deadTmp)
@@ -212,34 +237,73 @@ func WritePair(in PairInput) (dead, rows string, keys int64, err error) {
 			dead, rows, keys = "", "", 0
 		}
 	}()
-	if keys, err = writeNew(rowsTmp, in, keyAt, md); err != nil {
+	var deadRows []int64
+	if keys, deadRows, err = writeNew(rowsTmp, in, keyAt, md); err != nil {
 		return
 	}
 	if keys == 0 {
-		// No key changed, so no row of the base died either.
 		err = ErrNothingToWrite
-		if len(in.Dead) > 0 {
-			err = fmt.Errorf("pgdelta: %d dead rows and no changed key", len(in.Dead))
-		}
 		return
 	}
-	// A dead row is the base's row of one changed key.
-	if int64(len(in.Dead)) > keys {
-		err = fmt.Errorf("pgdelta: %d dead rows for %d changed keys", len(in.Dead), keys)
-		return
-	}
-	if err = writeDead(deadTmp, in.Dead, md); err != nil {
+	if err = writeDead(deadTmp, deadRows, md); err != nil {
 		return
 	}
 	// The rows first: with only them the pair is half a pair, which no
 	// chain takes. The dead rows' name is what makes it one.
-	if err = os.Rename(rowsTmp, rows); err != nil {
+	if err = publish(rowsTmp, rows); err != nil {
 		return
 	}
-	if err = os.Rename(deadTmp, dead); err != nil {
-		os.Remove(rows)
+	if err = publish(deadTmp, dead); err != nil {
+		// Take the rows back, if they are still the ones this call put
+		// there.
+		if mine, serr := os.Stat(rowsTmp); serr == nil {
+			if there, serr := os.Stat(rows); serr == nil && os.SameFile(mine, there) {
+				os.Remove(rows)
+			}
+		}
 	}
 	return
+}
+
+// tempNames makes the two names this call writes under, beside the final
+// ones, and leaves an empty file at each so no other call is given them.
+func tempNames(dead, rows string) (deadTmp, rowsTmp string, err error) {
+	if err := os.MkdirAll(filepath.Dir(dead), 0o755); err != nil {
+		return "", "", fmt.Errorf("pgdelta: %w", err)
+	}
+	names := make([]string, 0, 2)
+	for _, final := range []string{dead, rows} {
+		f, cerr := os.CreateTemp(filepath.Dir(final), filepath.Base(final)+tmpMark+"*")
+		if cerr != nil {
+			for _, n := range names {
+				os.Remove(n)
+			}
+			return "", "", fmt.Errorf("pgdelta: a name to write %s under: %w", final, cerr)
+		}
+		f.Close()
+		names = append(names, f.Name())
+	}
+	return names[0], names[1], nil
+}
+
+// publish gives tmp the name final, only if nothing has it. A hard link
+// does both at once; where the folder cannot hold one, the name is looked
+// for and then taken, which a single writer makes safe.
+func publish(tmp, final string) error {
+	err := os.Link(tmp, final)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, os.ErrExist):
+		return fmt.Errorf("%w: %s", ErrPairExists, final)
+	}
+	if _, serr := os.Lstat(final); serr == nil {
+		return fmt.Errorf("%w: %s", ErrPairExists, final)
+	}
+	if rerr := os.Rename(tmp, final); rerr != nil {
+		return fmt.Errorf("pgdelta: name %s: %w (a hard link failed first: %v)", final, rerr, err)
+	}
+	return nil
 }
 
 // columnsValue is columns as MetaKeyColumns holds them: sorted, as JSON.
@@ -251,14 +315,18 @@ func columnsValue(columns []string) string {
 }
 
 // writeNew writes the .pgnew file: the table's columns and the pair's three.
-func writeNew(path string, in PairInput, keyAt []int, md map[string]string) (keys int64, err error) {
+// It returns how many keys it wrote and the base's rows they kill,
+// ascending: the row of every key written that Positions places in the
+// base. A key in Positions that no change named is an error: its row would
+// die with nothing in its place.
+func writeNew(path string, in PairInput, keyAt []int, md map[string]string) (keys int64, dead []int64, err error) {
 	cols := make([]baseline.Column, 0, len(in.Columns)+3)
 	for _, c := range append(append([]string{}, in.Columns...), KeyColumn, OpColumn, SeqColumn) {
 		cols = append(cols, baseline.Column{Name: c, RawText: true})
 	}
 	w, err := baseline.NewWriter(path, cols, baseline.WriterConfig{Compression: "zstd", RowGroupSize: 100_000, Metadata: md})
 	if err != nil {
-		return 0, fmt.Errorf("create %s: %w", path, err)
+		return 0, nil, fmt.Errorf("create %s: %w", path, err)
 	}
 	closed := false
 	defer func() {
@@ -303,17 +371,24 @@ func writeNew(path string, in PairInput, keyAt []int, md map[string]string) (key
 			values[n], values[n+1], values[n+2] = c.Key, op, seq
 			nulls[n], nulls[n+1], nulls[n+2] = false, false, false
 			keys++
+			if p, inBase := in.Positions[c.Key]; inBase {
+				dead = append(dead, p)
+			}
 			return w.WriteRow(values, nulls)
 		})
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
+	}
+	if len(dead) != len(in.Positions) {
+		return 0, nil, fmt.Errorf("pgdelta: %d keys are placed in the base and only %d of them changed: a row would die with nothing in its place", len(in.Positions), len(dead))
 	}
 	closed = true
 	if err := w.Close(); err != nil {
-		return 0, fmt.Errorf("close %s: %w", path, err)
+		return 0, nil, fmt.Errorf("close %s: %w", path, err)
 	}
-	return keys, nil
+	sort.Slice(dead, func(i, j int) bool { return dead[i] < dead[j] })
+	return keys, dead, nil
 }
 
 // writeDead writes the .pgdead file: one column, the dead row numbers.

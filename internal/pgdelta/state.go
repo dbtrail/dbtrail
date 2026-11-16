@@ -1,6 +1,7 @@
 package pgdelta
 
 import (
+	"path"
 	"strings"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
@@ -23,7 +24,10 @@ import (
 //
 // Every read turns Hive partitioning off: a folder named "env=prod" above
 // the files would otherwise add a column "env" to the table. A file listed
-// twice is read once.
+// twice under one spelling of its path, or two that clean to the same one,
+// is read once. The same file under two paths that differ otherwise (a
+// linked folder) is two files to this function, and each of its keys would
+// be there twice: a chain's files are named from one listing of one folder.
 func StateSQL(base string, dead, rows []string) string {
 	dead, rows = unique(dead), unique(rows)
 	if len(dead) == 0 && len(rows) == 0 {
@@ -50,13 +54,18 @@ func StateSQL(base string, dead, rows []string) string {
 // columns.
 const noHive = ", hive_partitioning=false"
 
-// unique is paths with each one once, in its first place.
+// unique is paths with each one once, in its first place. A local path is
+// compared cleaned ("dir/./f" is "dir/f"); a URL as it is written.
 func unique(paths []string) []string {
 	seen := make(map[string]bool, len(paths))
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
-		if !seen[p] {
-			seen[p] = true
+		k := p
+		if !strings.Contains(p, "://") {
+			k = path.Clean(p)
+		}
+		if !seen[k] {
+			seen[k] = true
 			out = append(out, p)
 		}
 	}

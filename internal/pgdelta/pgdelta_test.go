@@ -89,18 +89,13 @@ func pair(t *testing.T, db *sql.DB, base string, seq int, cols, keyCols []string
 	if err != nil {
 		t.Fatal(err)
 	}
-	var positions []int64
-	for _, p := range at {
-		positions = append(positions, p)
-	}
-	sort.Slice(positions, func(i, j int) bool { return positions[i] < positions[j] })
 	prevRun := ""
 	if seq > 0 {
 		prevRun = fmt.Sprintf("run-%d", seq-1)
 	}
 	dead, rows, _, err = WritePair(PairInput{
 		BasePath: base, Seq: seq, Base: "base-1", Run: fmt.Sprintf("run-%d", seq), PrevRun: prevRun,
-		Columns: cols, KeyColumns: keyCols, Dead: positions,
+		Columns: cols, KeyColumns: keyCols, Positions: at,
 		Changes: func(yield func(Change) error) error {
 			for _, c := range changes {
 				ch := Change{Key: c.key, Delete: c.del}
@@ -336,7 +331,7 @@ func TestWritePairRefuses(t *testing.T) {
 	}
 	row := func(k string) Change { return Change{Key: k, Values: []string{k, "x"}, Nulls: []bool{false, false}} }
 	good := PairInput{BasePath: base, Seq: 0, Base: "b", Run: "r", Columns: []string{"id", "val"}, KeyColumns: []string{"id"},
-		Dead: []int64{0, 5}, Changes: one(row("1"), row("2"))}
+		Positions: map[string]int64{"1": 0, "2": 5}, Changes: one(row("1"), row("2"))}
 	with := func(f func(*PairInput)) PairInput { in := good; f(&in); return in }
 	cases := []struct {
 		name string
@@ -356,26 +351,29 @@ func TestWritePairRefuses(t *testing.T) {
 		{"a key column in another case", with(func(in *PairInput) { in.KeyColumns = []string{"ID"} }), nil},
 		// One dead row for the one key, so nothing else refuses these two.
 		{"a row filed under another row's key", with(func(in *PairInput) {
-			in.Dead, in.Changes = []int64{0}, one(Change{Key: "1", Values: []string{"2", "x"}, Nulls: []bool{false, false}})
+			in.Positions, in.Changes = map[string]int64{"1": 0}, one(Change{Key: "1", Values: []string{"2", "x"}, Nulls: []bool{false, false}})
 		}), nil},
 		{"a row with no value in its key column", with(func(in *PairInput) {
-			in.Dead, in.Changes = []int64{0}, one(Change{Key: "1", Values: []string{"1", "x"}, Nulls: []bool{true, false}})
+			in.Positions, in.Changes = map[string]int64{"1": 0}, one(Change{Key: "1", Values: []string{"1", "x"}, Nulls: []bool{true, false}})
 		}), nil},
-		{"more dead rows than changed keys", with(func(in *PairInput) { in.Dead = []int64{0, 5, 9} }), nil},
-		{"dead rows and no changed key", with(func(in *PairInput) { in.Changes = one() }), nil},
+		{"rows of the base and no changed key", with(func(in *PairInput) { in.Changes = one() }), nil},
 		{"the first pair with a pair before it", with(func(in *PairInput) { in.PrevRun = "r0" }), nil},
 		{"a later pair with none before it", with(func(in *PairInput) { in.Seq = 1 }), nil},
 		{"a table file in a bucket", with(func(in *PairInput) { in.BasePath = "s3://bucket/snap/public/t.parquet" }), nil},
 		{"no column", with(func(in *PairInput) { in.Columns = nil }), nil},
-		{"dead rows out of order", with(func(in *PairInput) { in.Dead = []int64{5, 0} }), nil},
-		{"a dead row twice", with(func(in *PairInput) { in.Dead = []int64{3, 3} }), nil},
+		// A row of the base dies because its key changed, and for nothing
+		// else: a row whose key did not change would vanish.
+		{"a key placed in the base that did not change", with(func(in *PairInput) { in.Positions = map[string]int64{"1": 0, "9": 7} }), nil},
+		{"only a key that did not change", with(func(in *PairInput) { in.Positions = map[string]int64{"9": 7} }), nil},
+		{"two keys at one row of the base", with(func(in *PairInput) { in.Positions = map[string]int64{"1": 3, "2": 3} }), nil},
+		{"a row below zero", with(func(in *PairInput) { in.Positions = map[string]int64{"1": -1} }), nil},
 		{"keys out of order", with(func(in *PairInput) { in.Changes = one(row("2"), row("1")) }), nil},
 		{"a key twice", with(func(in *PairInput) { in.Changes = one(row("1"), row("1")) }), nil},
 		{"a row with a value missing", with(func(in *PairInput) {
-			in.Dead, in.Changes = []int64{0}, one(Change{Key: "1", Values: []string{"1"}, Nulls: []bool{false}})
+			in.Positions, in.Changes = map[string]int64{"1": 0}, one(Change{Key: "1", Values: []string{"1"}, Nulls: []bool{false}})
 		}), nil},
-		{"nothing changed", with(func(in *PairInput) { in.Dead, in.Changes = nil, one() }), ErrNothingToWrite},
-		{"nothing changed, no source of changes", with(func(in *PairInput) { in.Dead, in.Changes = nil, nil }), ErrNothingToWrite},
+		{"nothing changed", with(func(in *PairInput) { in.Positions, in.Changes = nil, one() }), ErrNothingToWrite},
+		{"nothing changed, no source of changes", with(func(in *PairInput) { in.Positions, in.Changes = nil, nil }), ErrNothingToWrite},
 		{"no base id", with(func(in *PairInput) { in.Base = "" }), nil},
 		{"no run", with(func(in *PairInput) { in.Run = "" }), nil},
 		{"a sequence past the last", with(func(in *PairInput) { in.Seq = MaxSeq + 1 }), nil},
@@ -404,9 +402,15 @@ func TestWritePairRefuses(t *testing.T) {
 			}
 		})
 	}
-	// A deletion alone, and dead rows alone, are pairs.
-	if _, _, keys, err := WritePair(with(func(in *PairInput) { in.Dead, in.Changes = nil, one(Change{Key: "9", Delete: true}) })); err != nil || keys != 1 {
+	// A deletion alone is a pair: of a key the base never held, with no
+	// dead row, and of one it holds, whose row dies.
+	if _, _, keys, err := WritePair(with(func(in *PairInput) { in.Positions, in.Changes = nil, one(Change{Key: "9", Delete: true}) })); err != nil || keys != 1 {
 		t.Fatalf("a deletion alone: %d, %v", keys, err)
+	}
+	if _, _, keys, err := WritePair(with(func(in *PairInput) {
+		in.BasePath, in.Positions, in.Changes = filepath.Join(t.TempDir(), "t.parquet"), map[string]int64{"9": 4}, one(Change{Key: "9", Delete: true})
+	})); err != nil || keys != 1 {
+		t.Fatalf("the deletion of a row the base holds: %d, %v", keys, err)
 	}
 
 	// A pair is written once. A second write of the same sequence is
@@ -433,7 +437,7 @@ func TestWritePairRefuses(t *testing.T) {
 	for name, again := range map[string]PairInput{
 		"the same write again": in,
 		"a write that fails":   func() PairInput { x := in; x.Changes = one(row("2"), row("1")); return x }(),
-		"a write with nothing": func() PairInput { x := in; x.Dead, x.Changes = nil, one(); return x }(),
+		"a write with nothing": func() PairInput { x := in; x.Positions, x.Changes = nil, one(); return x }(),
 	} {
 		if _, _, _, err := WritePair(again); !errors.Is(err, ErrPairExists) {
 			t.Errorf("%s over a pair that is there: %v, want ErrPairExists", name, err)
@@ -454,9 +458,79 @@ func TestWritePairRefuses(t *testing.T) {
 	if b, _ := os.ReadFile(lone); string(b) != "not ours" {
 		t.Errorf("the file that was there was replaced")
 	}
-	// Nothing is left under a name still being written.
-	if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) != 0 {
-		t.Errorf("files still being written were left: %v", left)
+	// Nothing is left under a name still being written, by the write that
+	// worked or by the three that were refused; and such a name is told
+	// apart from a pair's.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if _, ok := ParseName(e.Name()); !ok || IsTemp(e.Name()) {
+			t.Errorf("left in the folder: %s", e.Name())
+		}
+	}
+	if len(entries) != 2 {
+		t.Errorf("the folder holds %d files, want the pair's two", len(entries))
+	}
+	for name, want := range map[string]bool{
+		"t.000000.pgnew.tmp-123": true, "t.000000.pgdead.tmp-9x": true,
+		"t.000000.pgnew": false, "t.000000.pgdead": false, "t.parquet": false, "t.000000.upserts": false, "x.tmp-1": false,
+	} {
+		if IsTemp(name) != want {
+			t.Errorf("IsTemp(%q) = %v", name, !want)
+		}
+		if _, ok := ParseName(name); ok && want {
+			t.Errorf("a file still being written parses as a pair's: %q", name)
+		}
+	}
+}
+
+// Two writes of the same pair at the same moment: exactly one is the pair,
+// the other is told the pair exists, and what is left is one whole pair
+// from one write.
+func TestWritePairTwiceAtOnce(t *testing.T) {
+	db := duck(t)
+	for round := range 20 {
+		dir := t.TempDir()
+		base := filepath.Join(dir, "t.parquet")
+		results := make(chan error, 2)
+		for _, run := range []string{"run-a", "run-b"} {
+			go func() {
+				_, _, _, err := WritePair(PairInput{BasePath: base, Seq: 0, Base: "b", Run: run, Columns: []string{"id", "val"}, KeyColumns: []string{"id"},
+					Positions: map[string]int64{"1": 0},
+					Changes: func(yield func(Change) error) error {
+						return yield(Change{Key: "1", Values: []string{"1", run}, Nulls: []bool{false, false}})
+					}})
+				results <- err
+			}()
+		}
+		var won, refused int
+		for range 2 {
+			switch err := <-results; {
+			case err == nil:
+				won++
+			case errors.Is(err, ErrPairExists):
+				refused++
+			default:
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+		if won != 1 || refused != 1 {
+			t.Fatalf("round %d: %d writes won and %d were refused, want one of each", round, won, refused)
+		}
+		entries, _ := os.ReadDir(dir)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		chain, err := ChainOf("t", names)
+		if err != nil || len(chain.Pairs) != 1 || len(names) != 2 {
+			t.Fatalf("round %d: the folder holds %v (%v)", round, names, err)
+		}
+		if _, err := CheckChain(context.Background(), db, dir, chain, "b", []string{"id", "val"}); err != nil {
+			t.Fatalf("round %d: the pair left is not from one write: %v", round, err)
+		}
 	}
 }
 
@@ -671,8 +745,17 @@ func TestStateOfALongChain(t *testing.T) {
 	if !reflect.DeepEqual(names, []string{"id", "val"}) {
 		t.Fatalf("columns = %v", names)
 	}
-	// A file named twice is read once.
+	// A file named twice is read once, also under another spelling of its
+	// path.
 	want(t, "every file listed twice", state(t, db, base, append(dead, dead...), append(rows, rows...), cols...), got...)
+	respelled := func(paths []string) []string {
+		out := append([]string{}, paths...)
+		for _, p := range paths {
+			out = append(out, filepath.Dir(p)+"/./"+filepath.Base(p))
+		}
+		return out
+	}
+	want(t, "every file listed under two spellings", state(t, db, base, respelled(dead), respelled(rows), cols...), got...)
 	// Up to the tenth pair only: pair 9's row, not pair 10's or 11's.
 	want(t, "the first ten pairs", state(t, db, base, dead[:10], rows[:10], cols...), "[1] [v9]", "[2] [base]", "[3] [new]")
 }
