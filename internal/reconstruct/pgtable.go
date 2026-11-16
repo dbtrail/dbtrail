@@ -61,8 +61,11 @@ type pgTableInput struct {
 //     that raced the snapshot writes no row events and may be missing from
 //     it, and the fold would bring its rows back. By time only: the anchor is
 //     an LSN.
-//   - No table delta. A table with no change is carried forward only when
-//     its footer records its own time bound (pgCarryForwardEligible, #2757):
+//   - No MySQL table delta. A table that changed can be published as its
+//     previous file and a pair of PostgreSQL's own beside it (pgPairEligible,
+//     writePGPair), off by default. A table with no change is carried
+//     forward only when its footer records its own time bound
+//     (pgCarryForwardEligible, #2757):
 //     a carried file keeps the previous floor and bound, and a bound the
 //     footer does not record is a margin a reader would measure from this
 //     snapshot's later time.
@@ -223,6 +226,19 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 		PGCutLSN:          b.Next,
 		PGDeltaSince:      b.Since,
 		PGGenerated:       generated,
+	}
+	// A table that changed, as its previous file and a delta beside it
+	// (#2757, off unless PGTableDeltaEnv says so). After every refusal above,
+	// like the carry; when it declines, the merge below writes the table.
+	if pgPairEligible(cfg, p.baselinePath, bmeta, since, fold, capGap) {
+		written, perr := writePGPair(ctx, in, fold, rep)
+		if perr != nil {
+			return nil, perr
+		}
+		if written {
+			rep.Duration = time.Since(start)
+			return rep, nil
+		}
 	}
 	merge := mergeBaselineIntoParquet
 	if cfg.OutputFormat == OutputFormatPsql {
