@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-
 )
 
 // freeAddr returns a loopback address nothing listens on right now.
