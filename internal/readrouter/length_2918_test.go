@@ -69,10 +69,10 @@ func TestLengthVeto(t *testing.T) {
 	}
 	// The reason says which call kept the statement on MySQL.
 	for stmt, in := range map[string][2]string{
-		"SELECT LENGTH(u), LENGTH(l) FROM t":     {"LENGTH(l)", "LENGTH(u)"},
+		"SELECT LENGTH(u), LENGTH(l) FROM t":      {"LENGTH(l)", "LENGTH(u)"},
 		"SELECT CHAR_LENGTH(u), LENGTH(n) FROM t": {"LENGTH(n)", "CHAR_LENGTH(u)"},
-		"SELECT LENGTH(LOWER(u)) FROM t":         {"LENGTH(LOWER(u))", "zzz"},
-		"SELECT LENGTH/**/(l) FROM t":            {"LENGTH(l)", "zzz"},
+		"SELECT LENGTH(LOWER(u)) FROM t":          {"LENGTH(LOWER(u))", "zzz"},
+		"SELECT LENGTH/**/(l) FROM t":             {"LENGTH(l)", "zzz"},
 	} {
 		got := LengthVeto(Shape(stmt), safe, other)
 		if !strings.HasPrefix(got, VetoLength) || !strings.Contains(got, in[0]) || strings.Contains(got, in[1]) {
