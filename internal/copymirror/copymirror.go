@@ -157,6 +157,17 @@ type Config struct {
 	Gone func(error) bool
 	// Now is the clock. Nil is time.Now.
 	Now func() time.Time
+
+	// afterFunc starts the stall watch of one request. Nil is time.AfterFunc;
+	// tests set it to a clock of their own, so what they check about silence
+	// does not depend on how busy the machine running them is.
+	afterFunc func(d time.Duration, f func()) stallTimer
+}
+
+// stallTimer is the part of *time.Timer the stall watch uses.
+type stallTimer interface {
+	Reset(d time.Duration) bool
+	Stop() bool
 }
 
 // Result is what a round did. Every field is set on a failed round too, as
@@ -319,6 +330,13 @@ func (m *mirror) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (m *mirror) startStallTimer(f func()) stallTimer {
+	if m.cfg.afterFunc != nil {
+		return m.cfg.afterFunc(m.stall(), f)
+	}
+	return time.AfterFunc(m.stall(), f)
+}
+
 func (m *mirror) stall() time.Duration {
 	if m.cfg.StallTimeout > 0 {
 		return m.cfg.StallTimeout
@@ -331,7 +349,7 @@ func (m *mirror) stall() time.Duration {
 // context is cancelled, which ends both. The caller calls stop when done.
 func (m *mirror) get(ctx context.Context, key string) (body io.ReadCloser, stop func(), err error) {
 	gctx, cancel := context.WithCancel(ctx)
-	timer := time.AfterFunc(m.stall(), cancel)
+	timer := m.startStallTimer(cancel)
 	stop = func() { timer.Stop(); cancel() }
 	rc, err := m.cfg.Source.Get(gctx, key)
 	if err != nil {
@@ -350,7 +368,7 @@ func (m *mirror) get(ctx context.Context, key string) (body io.ReadCloser, stop 
 // watchedBody pushes the stall timer back on every read that brings bytes.
 type watchedBody struct {
 	rc        io.ReadCloser
-	timer     *time.Timer
+	timer     stallTimer
 	stall     time.Duration
 	gctx, ctx context.Context
 }
