@@ -187,7 +187,7 @@ func TestFingerprint(t *testing.T) {
 	for in, want := range map[string]string{
 		`SELECT id, note FROM t WHERE id = 42 AND note = 'secret'`:  `select id, note from t where id = ? and note = ?`,
 		"select\n  *  from \"My T\" -- c\n where x in (1, 2.5, $1)": `select * from "My T" where x in (?, ?, ?)`,
-		`SELECT count(*), now() FROM t`: `select count(*), now() from t`,
+		`SELECT count(*), now() FROM t`:                             `select count(*), now() from t`,
 		`SELECT a.b::date FROM t`:                                   `select a.b::date from t`,
 		`SELECT $$hidden value$$`:                                   `select …`,
 		`SELECT E'hidden'`:                                          `select …`,
@@ -296,9 +296,9 @@ type fallbackLogin struct {
 	forward bool
 	// barred bars the source (Forward.Barred), as a server that hides
 	// tables or columns does.
-	barred  bool
-	mu      sync.Mutex
-	notes   []RouteNote
+	barred bool
+	mu     sync.Mutex
+	notes  []RouteNote
 }
 
 func (l *fallbackLogin) run(_ context.Context, st string, _ RunOptions) (sqlsandbox.Result, error) {
