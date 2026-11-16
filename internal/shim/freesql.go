@@ -800,6 +800,22 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if why := h.sessionKeepsCopyFromAnswering(ctx, qstr); why != "" {
 		return ops.forward(RouteReasonSessionDiffers, "session differs: "+why)
 	}
+	// Under a utf8mb3 connection, a statement with a character utf8mb3 does
+	// not have (#2917). Here and not with the other vetoes: what the
+	// connection's character set is is only known once the session is read.
+	if v := h.narrowStatementVeto(qstr); v != "" {
+		return ops.forward(RouteReasonVeto, "veto: "+v)
+	}
+	// A statement whose answer from the copy could not go out under
+	// utf8mb3 results earlier on this session goes to MySQL straight away.
+	narrowFP := ""
+	if narrowResults, _ := h.narrowSession(); narrowResults {
+		narrowFP = readrouter.Fingerprint(qstr)
+		if h.narrowRemembered(narrowFP) {
+			return ops.forward(RouteReasonSessionDiffers, "session differs: character_set_results = utf8mb3: "+
+				"an earlier answer of the copy to this statement on this connection held a character utf8mb3 does not have")
+		}
+	}
 	// A statement that reads the copy's clock (#2611) also needs the source's
 	// clock to be the time: asked of every such statement.
 	if readrouter.CallsNow(qstr) {
@@ -842,6 +858,24 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		// warning, so it does not read as a fault nor use up a fault's.
 		h.routeWarn("columns", "Engine Routing: the copy's columns are not MySQL's for a statement (a star, a NATURAL JOIN, the name of a column the copy does not hold, or a date, time or year column it reads another way), forwarded to mysql", err)
 		return ops.forward(RouteReasonCopyColumnsDiffer, "copy's columns differ: "+differ.Reason)
+	}
+	var narrowStmt *narrowStatementError
+	if errors.As(err, &narrowStmt) {
+		// The same veto, found in a prepared statement's arguments.
+		return ops.forward(RouteReasonVeto, "veto: "+narrowStmt.why)
+	}
+	var narrow *narrowResultError
+	if errors.As(err, &narrow) {
+		// The copy answered with what utf8mb3 results cannot carry (#2917):
+		// a setting of the session the copy does not reproduce for this
+		// answer, so the statement is MySQL's under that reason.
+		h.routeWarn("narrow-results", "Engine Routing: an answer of the copy held a character utf8mb3 does not have (four bytes in UTF-8, as an emoji) "+
+			"while the connection's character_set_results is utf8mb3; such statements are run on MySQL, which sends the character as '?' "+
+			"(a client that asks for utf8mb4 gets them from the copy)", nil)
+		if narrowFP != "" {
+			h.rememberNarrow(narrowFP)
+		}
+		return ops.forward(RouteReasonSessionDiffers, "session differs: "+narrow.Error())
 	}
 	var held *ResultsHeldError
 	if errors.As(err, &held) {
@@ -1400,6 +1434,15 @@ func (h *Handler) runFreeSQLRouted(schema, qstr string, types sqlsandbox.ColumnT
 		// DOUBLE cell that is no number) gets here.
 		h.logger.Error("free sql: build resultset", "err", err)
 		return nil, fmt.Errorf("free sql: build resultset: %w", err)
+	}
+	if narrowResults, _ := h.narrowSession(); narrowResults && h.router != nil {
+		// The source's session takes its results in utf8mb3 (#2917,
+		// utf8mb3.go): an answer MySQL would have sent with a '?' in it is
+		// not sent, and the rest is declared as MySQL declares it.
+		if err := narrowAnswerCheck(rs, res, vars.loc); err != nil {
+			return nil, err
+		}
+		declareUTF8MB3(rs.Fields, res.Columns)
 	}
 	out := &mysql.Result{Status: mysql.SERVER_STATUS_AUTOCOMMIT, Resultset: rs}
 	// Counted from here until its answer is written (#2241). Before the
