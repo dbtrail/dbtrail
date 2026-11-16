@@ -74,8 +74,11 @@ func TestFlashbackControl_OpenMoveClose(t *testing.T) {
 	if err := c.Apply(""); err != nil {
 		t.Fatalf("closing a closed port: %v", err)
 	}
-	if err := c.Apply(a); err != nil || !accepts(a) {
-		t.Fatalf("open after close: err %v, accepting %v", err, accepts(a))
+	// A fresh address: a has been free since the move, long enough for another
+	// process to take it, and reopening after a close does not need the same one.
+	reopen := freeAddr(t)
+	if err := c.Apply(reopen); err != nil || !accepts(reopen) {
+		t.Fatalf("open %s after close: err %v, accepting %v", reopen, err, accepts(reopen))
 	}
 }
 
