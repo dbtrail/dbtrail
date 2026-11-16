@@ -16123,9 +16123,9 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     if (!split) return panel;
     if (pg) {
       wrap.append(cnSection("PostgreSQL client", "Read your copy from a PostgreSQL client",
-        "Your tables as DBTrail keeps them, answered by DBTrail's copy. A transaction block goes to your database, read-only, as the server's forwarding user when it has one.", "pink"), panel);
+        "Your tables as DBTrail keeps them, answered by DBTrail's copy where it gives the answer PostgreSQL gives. Everything else goes to your database, read-only, as the server's forwarding user when it has one.", "pink"), panel);
       wrap.append(el("section", { class: "ov-panel cn-routep sqlc is-idle" },
-        el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins are the MySQL port's. On the PostgreSQL port, the copy answers reads; a transaction block (BEGIN to COMMIT or ROLLBACK) runs on your PostgreSQL as the server's forwarding user, read-only, when one is set (edit the server); without one, the copy answers alone." })));
+        el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins are the MySQL port's. On the PostgreSQL port, the copy answers what it is known to answer as PostgreSQL does; every other statement, and a transaction block (BEGIN to COMMIT or ROLLBACK), runs on your PostgreSQL as the server's forwarding user, read-only, when one is set (edit the server); without one, the copy answers alone." })));
       return wrap;
     }
     wrap.append(cnSection("MySQL client", "Read your copy from a MySQL client",
@@ -17881,7 +17881,7 @@ const FORWARDING_HINT = "Forwarding user and password are optional. They only ma
 
 // FORWARDING_HINT_PG is FORWARDING_HINT for a PostgreSQL source (#2771): what
 // its port, the PostgreSQL router, sends there as this user.
-const FORWARDING_HINT_PG = "Forwarding user and password are optional. With them, a transaction block a SQL client opens on the PostgreSQL port (BEGIN to COMMIT or ROLLBACK), and a catalog statement the copy does not answer, run on this server as the forwarding user, read-only; reads outside a transaction are still answered by the copy. Create a role that can log in, with SELECT on what the port should read and nothing more. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank a transaction is answered by the copy alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+const FORWARDING_HINT_PG = "Forwarding user and password are optional. With them, every statement the copy is not known to answer as PostgreSQL does, a transaction block a SQL client opens on the PostgreSQL port (BEGIN to COMMIT or ROLLBACK), and a catalog statement the copy does not answer run on this server as the forwarding user, read-only; the copy answers the rest. Create a role that can log in, with SELECT on what the port should read and nothing more. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
 
 // routePrefill remembers, per form, the forwarding account its server had
 // when the form opened: serverFormBody sends the forwarding fields only when

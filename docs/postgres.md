@@ -745,12 +745,17 @@ listener, its own workers, its own memory.
 - **As of the last snapshot update.** Fresh mode does not apply to a
   PostgreSQL server, so an answer is as old as the copy's last update, and
   this process keeps no files of recent changes.
-- **The copy answers reads.** A transaction block the client opens, and a
-  catalog statement the copy does not answer, go to the source as the
-  server's forwarding user, read-only (see
-  [Transactions on the source](#transactions-on-the-source-the-forwarding-user));
-  a server without a forwarding user is answered from the copy alone. A
-  statement that is not a read is refused with an error. Unqualified names
+- **The copy answers what it answers as PostgreSQL does.** With the server's
+  forwarding user, each statement is decided on its own: the copy answers it
+  when everything in it is known to give PostgreSQL's answer there, and the
+  source otherwise, read-only (see
+  [Which side answers a statement](#which-side-answers-a-statement-on-the-postgresql-port)).
+  A transaction block the client opens, and a catalog statement the copy does
+  not answer, go to the source too (see
+  [Transactions on the source](#transactions-on-the-source-the-forwarding-user)).
+  A server without a forwarding user is answered from the copy alone, and a
+  statement the copy cannot answer gets its error. A statement that is not a
+  read is refused with an error. Unqualified names
   resolve in `public` until the client sets `search_path` (see
   [Session settings](#session-settings-and-query-cancel-on-the-postgresql-port)). NULL order, integer division and text comparison follow
   PostgreSQL, and each type reads as [the table below](#how-each-type-reads-in-sql-on-the-copy)
@@ -950,9 +955,11 @@ A transaction block a client opens on the PostgreSQL port (`BEGIN` or
 `START TRANSACTION` to `COMMIT` or `ROLLBACK`) runs on the server's own
 PostgreSQL, every statement in it, and so does a statement on the system
 catalog that the port does not answer from the copy
-([below](#listing-schemas-tables-and-columns-on-the-postgresql-port)). Every
-other statement is answered by the copy, as before. It needs the server's
-**forwarding user**, a role of its own on the source:
+([below](#listing-schemas-tables-and-columns-on-the-postgresql-port)), and
+every statement outside a block that the copy is not known to answer as
+PostgreSQL does
+([below](#which-side-answers-a-statement-on-the-postgresql-port)). It needs the
+server's **forwarding user**, a role of its own on the source:
 
 ```sql
 CREATE ROLE app_ro LOGIN PASSWORD <a password>;
@@ -967,8 +974,8 @@ or in the web interface, edit the server (Forwarding user and password). It is
 laid over the source's own address, database and parameters (`sslmode`
 included), and must be another user than the one DBTrail captures with: the
 port never runs anything as that one, which holds `REPLICATION` and reads every
-published table. Without a forwarding user, a transaction block is answered by
-the copy alone, as before. Changing the forwarding user, or removing the
+published table. Without a forwarding user, every statement, a transaction
+block's too, is answered by the copy alone, as before. Changing the forwarding user, or removing the
 server, closes the connections that use it; clients reconnect.
 
 - **Read-only, three ways.** A statement that is not a read is refused before
@@ -1028,6 +1035,115 @@ server, closes the connections that use it; clients reconnect.
 - `REPEATABLE READ` and `SERIALIZABLE` are still refused, as on the copy:
   inside a block the port still answers some statements itself (`SHOW`,
   the catalog statements it recognizes, time travel).
+
+### Which side answers a statement on the PostgreSQL port
+
+With a forwarding user, a statement outside a transaction block is answered by
+the copy only when everything in it is something the copy is known to answer
+the way PostgreSQL does. What "known" means is measured, not assumed: the
+comparison harness (`internal/pgcompare`) runs the same statements on a real
+PostgreSQL and on its copy, and only what it found answering the same is let
+through. When in doubt, the source answers: the cost is a slower answer, never
+a different one.
+
+The source answers:
+
+- **A function, operator, cast or construct the copy answers differently or
+  not at all.** The copy takes `count`, `sum`, `min`, `max`, `coalesce`,
+  `nullif`, `greatest`, `least`, `length`, `substring`, `trim`, `position`,
+  `concat`, `abs`, `bool_and`, `string_agg`, `row_number`, `rank`, `lag`, and
+  `extract`, `date_part` and `date_trunc` of a year, month or day; the
+  operators `=`, `<>`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `||`, `LIKE`
+  (a pattern without a backslash), `IN`, `BETWEEN`, `IS [NOT] DISTINCT FROM`,
+  `ANY`, `EXISTS`, an array subscript by a positive whole number; `::date` and `CAST(... AS date)`; `DATE`, `TIMESTAMP`, `TIME` and
+  `INTERVAL` literals; joins, `GROUP BY`, `HAVING`, `DISTINCT [ON]`, `UNION`,
+  `INTERSECT`, `EXCEPT`, `WITH`, window functions, `FILTER`, `LIMIT` and
+  `OFFSET`. Anything else goes to the source. Some of what the harness found
+  answering otherwise, and why each one goes there: `avg()` and division of a
+  `numeric` (PostgreSQL keeps more decimals), `round()` of a
+  `double precision` (it rounds a half to even), a division by a column or by
+  zero (the copy answers NULL where PostgreSQL fails), `~` and `SIMILAR TO`
+  (the copy matched no row), `->` and `->>` (PostgreSQL answers `json`, and
+  writes a nested value with spaces), a number with an exponent (a `numeric`
+  on PostgreSQL), `::text` of a
+  float, `upper`, `lower` and `ILIKE` (PostgreSQL folds case by the database's
+  character type), `COLLATE`, `AT TIME ZONE`, `FOR UPDATE`, `jsonb` operators,
+  `generate_series` and every function the list does not name.
+- **The clock and the session**: `now()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`,
+  `LOCALTIMESTAMP`, `current_user` and the like. The copy's data is as old as
+  its last update, and its clock and session are not the source's.
+- **Text sorted or compared by order** (`ORDER BY` a text column, `min()` of
+  one, `name > 'B'`): PostgreSQL orders text by the database's collation, the
+  copy by bytes. Text compared for equality, grouped or matched with `LIKE`
+  stays on the copy.
+- **A session `TimeZone` other than UTC**, which the harness has not measured.
+- **What the copy cannot run, before the client is told anything**: a table
+  the copy does not hold, a statement the copy refuses (a reserved word of its
+  own dialect, a value it does not read, such as `NaN` in a numeric or
+  `24:00:00`), a copy that is busy or behind the server's lag limit. A
+  result over the port's row or size cap is still refused, as before: the
+  source would send it whole, past the caps. A column of a
+  `numeric` declared without precision, which the copy writes with 18
+  decimals, is sent to the source too.
+- **What is not a query**: `EXPLAIN`, cursors and savepoints outside a block,
+  `VALUES`, `TABLE`. A statement that writes is refused (`25006`). `SHOW
+  TABLES` and `DESCRIBE`, the copy's own, stay on the copy.
+
+**A server that hides tables or columns sends nothing to its source**, not a
+statement the copy refuses, not a transaction block, not a catalog statement:
+the rules are applied by the copy's views, and a statement run on the source
+reads past them, whatever the forwarding user's grants (a view there runs with
+its owner's rights, as a `SECURITY DEFINER` function does). Such a server is
+answered by the copy alone, as without a forwarding user; a rule saved while a
+block is open on the source fails that block. `/status` says so for the server
+(`forwarding_off`), and the log once.
+
+A prepared statement keeps the side it was given once its columns were
+described: a driver that prepared it once (pgx, JDBC) is not told other
+columns later. One that the copy refused at its first execution runs on the
+source from then on.
+
+#### The port's status
+
+```bash
+bintrail-console pg-router --status-addr 127.0.0.1:9092 [--status-statements]
+curl -s http://127.0.0.1:9092/status
+```
+
+`/status` is JSON: per server (by its id), how many statements each side
+answered (`copy`, `source`, `refused`), why (`reasons`), and per side how many
+finished, how many got an error and how long they took (`answers`). With
+`--status-statements` each server also carries `statements`: a row per
+statement shape and side, values blanked and table and column names kept. That
+address asks for no password: whoever reaches it reads the counts, and with
+`--status-statements` the names of the tables and columns your clients query.
+`/metrics` on the same address is this process's Prometheus metrics.
+
+The reasons, with the MySQL port's names where they mean the same:
+
+| Side | Reason | Why |
+|---|---|---|
+| copy | `answers_the_same` | everything in it answers on the copy as on PostgreSQL |
+| copy | `copy_command` | a command of the copy's own (`SHOW TABLES`, `DESCRIBE`) |
+| copy | `no_forward_account` | the server has no forwarding user: the copy answers alone |
+| copy | `hidden_rules` | the server hides tables or columns: nothing is sent to its source |
+| source | `in_transaction` | the client's transaction block |
+| source | `veto` | a construct the copy answers differently, or is not known to answer the same |
+| source | `session_differs` | a session setting the copy is not known to reproduce (`TimeZone`) |
+| source | `not_a_select` | `EXPLAIN`, a cursor, a savepoint, `VALUES` |
+| source | `catalog_not_on_copy` | a catalog statement the copy does not answer |
+| source | `table_not_on_copy` | a table the copy does not hold |
+| source | `copy_refused` | the copy could not run it |
+| source | `copy_columns_differ` | a column the copy writes otherwise (a `numeric` without precision) |
+| source | `copy_behind_source`, `copy_age_unknown` | the server's lag limit |
+| source | `copy_queue_full`, `copy_wait_timeout` | the copy was busy |
+| refused | `read_only` | not a read |
+
+What the copy would answer and the source did not make faster is not decided
+here yet: every statement the copy can answer goes to the copy, however cheap
+it would be on the source. Deciding by the source's plan, as the MySQL port
+does, would cost a login to the source for each statement, since a connection
+holds one there only while something of its own lives on it.
 
 ### Listing schemas, tables and columns on the PostgreSQL port
 
