@@ -320,6 +320,9 @@ func TestBasePositions(t *testing.T) {
 }
 
 func TestWritePairRefuses(t *testing.T) {
+	// In a folder this test may write in: a table file "in a bucket" that
+	// was not refused would be made here, as a folder named "s3:".
+	t.Chdir(t.TempDir())
 	base := filepath.Join(t.TempDir(), "t.parquet")
 	one := func(changes ...Change) func(func(Change) error) error {
 		return func(yield func(Change) error) error {
@@ -351,11 +354,12 @@ func TestWritePairRefuses(t *testing.T) {
 		{"no key column", with(func(in *PairInput) { in.KeyColumns = nil }), nil},
 		{"a key column the table does not have", with(func(in *PairInput) { in.KeyColumns = []string{"nope"} }), nil},
 		{"a key column in another case", with(func(in *PairInput) { in.KeyColumns = []string{"ID"} }), nil},
+		// One dead row for the one key, so nothing else refuses these two.
 		{"a row filed under another row's key", with(func(in *PairInput) {
-			in.Changes = one(Change{Key: "1", Values: []string{"2", "x"}, Nulls: []bool{false, false}})
+			in.Dead, in.Changes = []int64{0}, one(Change{Key: "1", Values: []string{"2", "x"}, Nulls: []bool{false, false}})
 		}), nil},
 		{"a row with no value in its key column", with(func(in *PairInput) {
-			in.Changes = one(Change{Key: "1", Values: []string{"1", "x"}, Nulls: []bool{true, false}})
+			in.Dead, in.Changes = []int64{0}, one(Change{Key: "1", Values: []string{"1", "x"}, Nulls: []bool{true, false}})
 		}), nil},
 		{"more dead rows than changed keys", with(func(in *PairInput) { in.Dead = []int64{0, 5, 9} }), nil},
 		{"dead rows and no changed key", with(func(in *PairInput) { in.Changes = one() }), nil},
@@ -368,7 +372,7 @@ func TestWritePairRefuses(t *testing.T) {
 		{"keys out of order", with(func(in *PairInput) { in.Changes = one(row("2"), row("1")) }), nil},
 		{"a key twice", with(func(in *PairInput) { in.Changes = one(row("1"), row("1")) }), nil},
 		{"a row with a value missing", with(func(in *PairInput) {
-			in.Changes = one(Change{Key: "1", Values: []string{"1"}, Nulls: []bool{false}})
+			in.Dead, in.Changes = []int64{0}, one(Change{Key: "1", Values: []string{"1"}, Nulls: []bool{false}})
 		}), nil},
 		{"nothing changed", with(func(in *PairInput) { in.Dead, in.Changes = nil, one() }), ErrNothingToWrite},
 		{"nothing changed, no source of changes", with(func(in *PairInput) { in.Dead, in.Changes = nil, nil }), ErrNothingToWrite},
@@ -394,7 +398,7 @@ func TestWritePairRefuses(t *testing.T) {
 				t.Errorf("a refused pair left files: %v", left)
 			}
 			// And made no folder named after a URL.
-			if _, err := os.Stat("s3:"); err == nil {
+			if _, serr := os.Stat("s3:"); serr == nil {
 				os.RemoveAll("s3:")
 				t.Error("a table file in a bucket was written as a local folder named s3:")
 			}
