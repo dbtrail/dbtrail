@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,10 +28,26 @@ type sourcePositions struct {
 	connect func(dsn string, ssl config.SSL) (*sql.DB, error)
 }
 
+// sourcePositionPool is one server's: its own lock, so a source that takes
+// its time to connect holds back no other server.
 type sourcePositionPool struct {
+	mu  sync.Mutex
 	key string
 	db  *sql.DB
+	// failedUntil: a connection that failed is not tried again before then,
+	// so a source that is down costs one attempt, not one per statement.
+	failedUntil time.Time
+	failed      error
+	// identity is the server's (@@server_uuid, or server_id:<n> on MariaDB,
+	// as capture records it), read at identityAt; "" when it could not be.
+	identity   string
+	identityAt time.Time
 }
+
+const (
+	sourcePositionRetry    = 30 * time.Second
+	sourceIdentityKeepFor = 30 * time.Second
+)
 
 func newSourcePositions() *sourcePositions {
 	return &sourcePositions{pools: map[string]*sourcePositionPool{}, connect: connectSource}
@@ -38,7 +55,7 @@ func newSourcePositions() *sourcePositions {
 
 // SourcePosition implements console.SourcePositionReader.
 func (p *sourcePositions) SourcePosition(ctx context.Context, e console.ServerEntry) (console.SourcePosition, error) {
-	db, err := p.pool(e)
+	pool, db, err := p.pool(e)
 	if err != nil {
 		return console.SourcePosition{}, sourcePositionError(err, e.SourceDSN)
 	}
@@ -46,32 +63,74 @@ func (p *sourcePositions) SourcePosition(ctx context.Context, e console.ServerEn
 	if err != nil {
 		return console.SourcePosition{}, sourcePositionError(err, e.SourceDSN)
 	}
-	return console.SourcePosition{File: file, Pos: pos}, nil
+	return console.SourcePosition{File: file, Pos: pos, Identity: pool.identityOf(ctx, db, e.SourceFlavor())}, nil
 }
 
-func (p *sourcePositions) pool(e console.ServerEntry) (*sql.DB, error) {
+func (p *sourcePositions) pool(e console.ServerEntry) (*sourcePositionPool, *sql.DB, error) {
 	ssl := e.SourceSSL()
 	key := e.SourceDSN + "\x00" + fmt.Sprintf("%+v", ssl)
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if old := p.pools[e.ID]; old != nil {
-		if old.key == key {
-			return old.db, nil
+	pool := p.pools[e.ID]
+	if pool == nil {
+		pool = &sourcePositionPool{}
+		p.pools[e.ID] = pool
+	}
+	p.mu.Unlock()
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.key != key {
+		if pool.db != nil {
+			pool.db.Close()
 		}
-		old.db.Close()
-		delete(p.pools, e.ID)
+		pool.key, pool.db, pool.failed, pool.failedUntil, pool.identity, pool.identityAt = key, nil, nil, time.Time{}, "", time.Time{}
+	}
+	if pool.db != nil {
+		return pool, pool.db, nil
+	}
+	if time.Now().Before(pool.failedUntil) {
+		return pool, nil, pool.failed
 	}
 	db, err := p.connect(e.SourceDSN, ssl)
 	if err != nil {
-		return nil, err
+		pool.failed, pool.failedUntil = err, time.Now().Add(sourcePositionRetry)
+		return pool, nil, err
 	}
 	// One read at a time per server is what the wait asks (statements share
 	// it); a second connection covers one that is being replaced.
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxIdleTime(5 * time.Minute)
-	p.pools[e.ID] = &sourcePositionPool{key: key, db: db}
-	return db, nil
+	pool.db = db
+	return pool, db, nil
+}
+
+// identityOf is the server's identity as capture records it in
+// stream_state.source_identity, read again every sourceIdentityKeepFor;
+// "" when it cannot be read (then no comparison is made).
+func (pool *sourcePositionPool) identityOf(ctx context.Context, db *sql.DB, flavor string) string {
+	pool.mu.Lock()
+	if !pool.identityAt.IsZero() && time.Since(pool.identityAt) < sourceIdentityKeepFor {
+		id := pool.identity
+		pool.mu.Unlock()
+		return id
+	}
+	pool.mu.Unlock()
+	id := ""
+	if flavor == console.FlavorMariaDB {
+		var n uint32
+		if db.QueryRowContext(ctx, "SELECT @@server_id").Scan(&n) == nil {
+			id = fmt.Sprintf("server_id:%d", n)
+		}
+	} else {
+		var u string
+		if db.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&u) == nil {
+			id = strings.ToLower(strings.TrimSpace(u))
+		}
+	}
+	pool.mu.Lock()
+	pool.identity, pool.identityAt = id, time.Now()
+	pool.mu.Unlock()
+	return id
 }
 
 // sourcePositionError scrubs the DSN out of err and marks a refusal: an

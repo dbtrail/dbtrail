@@ -178,7 +178,7 @@ func (r *waitRig) setSaved(p SourcePosition) {
 
 func (r *waitRig) wait(ctx context.Context) time.Duration {
 	start := time.Now()
-	r.s.waitForSource(ctx, r.id, nil, r.k, r.read)
+	r.s.waitForSource(ctx, r.id, nil, r.k, r.read)(true)
 	return time.Since(start)
 }
 
@@ -410,18 +410,77 @@ func TestWaitForSource_2645(t *testing.T) {
 		r.tick(time.Millisecond)
 		r.k.followOnce(ctx, time.Minute)
 		wg.Wait()
-		if c := r.src.calls.Load(); c != 1 {
-			t.Fatalf("20 statements at once read the source %d times, want 1", c)
+		// The first read was sent before the other 19 arrived: they share
+		// the next one.
+		if c := r.src.calls.Load(); c > 2 {
+			t.Fatalf("20 statements at once read the source %d times, want at most 2", c)
 		}
 		if n := r.numbers(); n.Reached != 20 {
 			t.Fatalf("got %+v, want 20 reached", n)
 		}
 	})
 
+	t.Run("a read sent before the statement arrived is not joined", func(t *testing.T) {
+		r := newWaitRig(t, 5*time.Second)
+		r.publish(t)
+		gate := make(chan struct{})
+		r.src.mu.Lock()
+		r.src.gate = gate
+		r.src.mu.Unlock()
+		w := r.s.freshWaits.of(r.id)
+		got := make(chan SourcePosition, 2)
+		go func() { p, _ := w.sourcePosition(ctx, r.src, ServerEntry{}); got <- p }()
+		for r.src.calls.Load() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		// The first read is on its way to the source, maybe answered
+		// already: the client's write after it is not in it.
+		r.src.mu.Lock()
+		r.src.pos = SourcePosition{File: "binlog.000007", Pos: 2000}
+		r.src.mu.Unlock()
+		go func() { p, _ := w.sourcePosition(ctx, r.src, ServerEntry{}); got <- p }()
+		time.Sleep(30 * time.Millisecond)
+		close(gate)
+		a, b := <-got, <-got
+		if c := r.src.calls.Load(); c != 2 {
+			t.Fatalf("%d reads, want 2: the second statement joined a read sent before it arrived", c)
+		}
+		if a.Pos != 2000 || b.Pos != 2000 {
+			// Both read after the change here (the fake answers at the
+			// gate); what matters is the second read.
+			t.Logf("positions %d %d", a.Pos, b.Pos)
+		}
+	})
+
+	t.Run("capture's position of another server: no wait", func(t *testing.T) {
+		r := newWaitRig(t, 5*time.Second)
+		r.publish(t)
+		r.src.pos = SourcePosition{File: "binlog.000007", Pos: 900, Identity: "3f2a1c88-0000-0000-0000-00000000000a"}
+		r.setSaved(SourcePosition{File: "binlog.000500", Pos: 900, Identity: "3f2a1c88-0000-0000-0000-00000000000b"})
+		r.wait(ctx)
+		if n := r.numbers(); n.Skipped[freshSkipOtherSource] != 1 || n.Reached != 0 {
+			t.Fatalf("got %+v, want one other_source", n)
+		}
+	})
+
+	t.Run("reached but the statement read no tails: not counted as reached", func(t *testing.T) {
+		r := newWaitRig(t, 5*time.Second)
+		r.publish(t)
+		done := make(chan func(bool), 1)
+		go func() { done <- r.s.waitForSource(ctx, r.id, nil, r.k, r.read) }()
+		<-r.k.pub.wake
+		r.tick(time.Millisecond)
+		r.k.followOnce(ctx, time.Minute)
+		(<-done)(false)
+		if n := r.numbers(); n.Reached != 0 || n.Skipped[freshSkipNotCurrent] != 1 {
+			t.Fatalf("got %+v, want one tails_not_current", n)
+		}
+	})
+
 	t.Run("a server with no source connection does not wait", func(t *testing.T) {
 		r := newWaitRig(t, 5*time.Second)
 		r.publish(t)
-		r.s.waitForSource(ctx, "unknown-id", nil, r.k, r.read)
+		r.s.waitForSource(ctx, "unknown-id", nil, r.k, r.read)(true)
 		if n := r.s.freshWaits.of("unknown-id").numbers(time.Second, time.Now()); n.Skipped[freshSkipNoSource] != 1 {
 			t.Fatalf("got %+v, want one no_source", n)
 		}

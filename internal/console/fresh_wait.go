@@ -91,6 +91,11 @@ func freshWaitFrom(raw string) (time.Duration, string) {
 type SourcePosition struct {
 	File string
 	Pos  uint64
+	// Identity is the server's, as capture records it in
+	// stream_state.source_identity (@@server_uuid; server_id:<n> on
+	// MariaDB); "" when not known. Two different ones are two servers, whose
+	// positions say nothing of each other.
+	Identity string
 }
 
 // SourcePositionReader reads e's source position (SHOW BINARY LOG STATUS,
@@ -110,6 +115,11 @@ const (
 	freshSkipRefused     = "position_refused"
 	freshSkipUnread      = "position_unread"
 	freshSkipOtherLog    = "other_binary_log"
+	freshSkipOtherSource = "other_source"
+	// freshSkipNotCurrent: capture reached the position and the tails were
+	// brought up to date after, but the statement's tables were not among
+	// them (a tail refused or frozen in that update): it read no tails.
+	freshSkipNotCurrent = "tails_not_current"
 	freshSkipNoCapture   = "no_capture_position"
 	freshSkipStateUnread = "capture_position_unread"
 	freshSkipNoSource    = "no_source"
@@ -173,6 +183,11 @@ type positionSample struct {
 type freshWaitServer struct {
 	mu       sync.Mutex
 	source   *positionRead // in flight
+	// queued is the read the statements arriving while source is in flight
+	// share, sent when it ends, with queuedReader and queuedEntry.
+	queued       *positionRead
+	queuedReader SourcePositionReader
+	queuedEntry  ServerEntry
 	saved    *savedRead    // in flight, or the last one
 	samples  []positionSample
 	// seen is the saved position last read and seenAt the end of the first
@@ -257,35 +272,28 @@ func (w *freshWaitServer) count(outcome string, waited time.Duration) {
 	}
 }
 
-// sourcePosition is the source's position for a statement: the read in
-// flight if there is one, else a new one. It is not cancelled by any
-// statement (others may share it), only bounded by freshWaitReadTimeout; a
-// statement stops waiting for it at its own ctx.
+// sourcePosition is the source's position for a statement, read after the
+// statement arrived: a read already sent to the source may have been
+// answered before the client's own write committed, so a statement never
+// joins one. It joins the next read instead, sent when the one in flight
+// ends, which every statement arriving meanwhile shares: a burst costs two
+// reads, not one each. Reads are not cancelled by any statement (others may
+// share them), only bounded by freshWaitReadTimeout; a statement stops
+// waiting at its own ctx.
 func (w *freshWaitServer) sourcePosition(ctx context.Context, r SourcePositionReader, e ServerEntry) (SourcePosition, error) {
 	w.mu.Lock()
-	call := w.source
-	if call == nil {
+	var call *positionRead
+	switch {
+	case w.source == nil:
 		call = &positionRead{done: make(chan struct{})}
 		w.source = call
-		go func() {
-			rctx, cancel := context.WithTimeout(context.Background(), freshWaitReadTimeout)
-			defer cancel()
-			pos, err := r.SourcePosition(rctx, e)
-			w.mu.Lock()
-			call.pos, call.err, call.at = pos, err, time.Now()
-			if w.source == call {
-				w.source = nil
-			}
-			if err == nil {
-				w.samples = append(w.samples, positionSample{pos: pos, at: call.at})
-				cut := call.at.Add(-5 * freshWaitBehind)
-				for len(w.samples) > 1 && w.samples[0].at.Before(cut) {
-					w.samples = w.samples[1:]
-				}
-			}
-			w.mu.Unlock()
-			close(call.done)
-		}()
+		go w.readSource(call, r, e)
+	case w.queued != nil:
+		call = w.queued
+	default:
+		call = &positionRead{done: make(chan struct{})}
+		w.queued = call
+		w.queuedReader, w.queuedEntry = r, e
 	}
 	w.mu.Unlock()
 	select {
@@ -293,6 +301,33 @@ func (w *freshWaitServer) sourcePosition(ctx context.Context, r SourcePositionRe
 		return call.pos, call.err
 	case <-ctx.Done():
 		return SourcePosition{}, ctx.Err()
+	}
+}
+
+// readSource runs one read, then the next one queued while it ran.
+func (w *freshWaitServer) readSource(call *positionRead, r SourcePositionReader, e ServerEntry) {
+	for call != nil {
+		rctx, cancel := context.WithTimeout(context.Background(), freshWaitReadTimeout)
+		pos, err := r.SourcePosition(rctx, e)
+		cancel()
+		w.mu.Lock()
+		call.pos, call.err, call.at = pos, err, time.Now()
+		if err == nil {
+			w.samples = append(w.samples, positionSample{pos: pos, at: call.at})
+			cut := call.at.Add(-5 * freshWaitBehind)
+			for len(w.samples) > 1 && w.samples[0].at.Before(cut) {
+				w.samples = w.samples[1:]
+			}
+		}
+		next := w.queued
+		w.queued = nil
+		if next != nil {
+			r, e = w.queuedReader, w.queuedEntry
+		}
+		w.source = next
+		w.mu.Unlock()
+		close(call.done)
+		call = next
 	}
 }
 
@@ -359,7 +394,7 @@ type savedPositionRead func(ctx context.Context) (pos SourcePosition, none bool,
 func indexSavedPosition(db *sql.DB) savedPositionRead {
 	return func(ctx context.Context) (SourcePosition, bool, error) {
 		var p SourcePosition
-		err := db.QueryRowContext(ctx, `SELECT binlog_file, binlog_position FROM stream_state WHERE id = 1`).Scan(&p.File, &p.Pos)
+		err := db.QueryRowContext(ctx, `SELECT binlog_file, binlog_position, COALESCE(source_identity, '') FROM stream_state WHERE id = 1`).Scan(&p.File, &p.Pos, &p.Identity)
 		if errors.Is(err, sql.ErrNoRows) {
 			return SourcePosition{}, true, nil
 		}
@@ -412,15 +447,16 @@ func positionReached(want, saved SourcePosition) (reached, comparable bool) {
 // when the limit ran out, when the statement ended, or at once when waiting
 // cannot help. It never fails the statement: the statement goes on to read
 // what is published, as without it.
-func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tailKeeper, read []views.BaselineTable) {
+func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tailKeeper, read []views.BaselineTable) (done func(tailed bool)) {
+	noop := func(bool) {}
 	limit := s.freshWait
 	if limit <= 0 || s.sourcePos == nil || k == nil || len(read) == 0 {
-		return
+		return noop
 	}
 	readSaved := s.freshSavedHook
 	if readSaved == nil {
 		if b == nil || b.db == nil {
-			return
+			return noop
 		}
 		readSaved = indexSavedPosition(b.db)
 	}
@@ -434,14 +470,14 @@ func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tai
 	// A PostgreSQL source has no binary log; its LSN is another slice's.
 	if !found || entry.SourceDSN == "" || entry.IsPostgres() {
 		w.count(freshSkipNoSource, 0)
-		return
+		return noop
 	}
 	// A table with no tail reads the snapshot: no wait changes it.
 	pub, _ := k.published(read)
 	for _, t := range read {
 		if _, ok := pub[tailKey(t.Schema, t.Table)]; !ok {
 			w.count(freshSkipNoTail, 0)
-			return
+			return noop
 		}
 	}
 	w.mu.Lock()
@@ -449,12 +485,14 @@ func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tai
 	w.mu.Unlock()
 	if refused {
 		w.count(freshSkipRefused, 0)
-		return
+		return noop
 	}
 	wctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	ended := func() {
-		if ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			// The client left (a statement's own time running out is a
+			// deadline, and counts as running out).
 			w.count("cancelled", time.Since(start))
 			return
 		}
@@ -482,29 +520,39 @@ func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tai
 			slog.Debug("Engine Routing: the source's binary log position could not be read; the statement does not wait", "server", id, "error", err)
 			w.count(freshSkipUnread, 0)
 		}
-		return
+		return noop
 	}
+	w.mu.Lock()
+	// Read again: a refusal that comes back later is said again.
+	w.refusedWhy = ""
+	w.mu.Unlock()
 	var since time.Time
 	for {
 		saved, none, seenAt, err := w.savedPosition(wctx, readSaved, k.now)
 		switch {
 		case wctx.Err() != nil:
 			ended()
-			return
+			return noop
 		case err != nil:
 			w.mu.Lock()
 			w.lastWhy = err.Error()
 			w.mu.Unlock()
 			w.count(freshSkipStateUnread, 0)
-			return
+			return noop
 		case none:
 			w.count(freshSkipNoCapture, 0)
-			return
+			return noop
+		}
+		if want.Identity != "" && saved.Identity != "" && want.Identity != saved.Identity {
+			// Capture's position is of another server (a failover, a
+			// restore, a replaced source with the same binary log name).
+			w.count(freshSkipOtherSource, 0)
+			return noop
 		}
 		reached, comparable := positionReached(want, saved)
 		if !comparable {
 			w.count(freshSkipOtherLog, 0)
-			return
+			return noop
 		}
 		if reached {
 			since = seenAt
@@ -513,7 +561,7 @@ func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tai
 		if old, ok := w.oldSample(time.Now()); ok {
 			if r, _ := positionReached(old, saved); !r {
 				w.count(freshSkipBehind, 0)
-				return
+				return noop
 			}
 		}
 		t := time.NewTimer(freshWaitPoll)
@@ -522,7 +570,7 @@ func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tai
 		case <-wctx.Done():
 			t.Stop()
 			ended()
-			return
+			return noop
 		}
 	}
 	// Capture holds every row the source had: an update that began after
@@ -533,7 +581,15 @@ func (s *Server) waitForSource(ctx context.Context, id string, b *bundle, k *tai
 	}
 	if !k.waitPublishedSince(wctx, since) {
 		ended()
-		return
+		return noop
 	}
-	w.count("reached", time.Since(start))
+	waited := time.Since(start)
+	// Counted once the statement read its tails: reached only if it did.
+	return func(tailed bool) {
+		if tailed {
+			w.count("reached", waited)
+			return
+		}
+		w.count(freshSkipNotCurrent, 0)
+	}
 }

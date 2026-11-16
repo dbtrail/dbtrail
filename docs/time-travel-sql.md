@@ -639,8 +639,9 @@ Every cell of a forwarded result is the text MySQL sent, unchanged: a
 `FLOAT` holding `1e38` reads `1e38`, a `FLOAT(7,2)` `0.10` reads `0.10`
 and an `INT ZEROFILL` `00042` reads `00042`. A
 server with no forwarding account is not forwarded for: the account
-DBTrail captures with is never used by this port, so the copy answers that
-server alone. Resultsets are streamed to the client as they arrive, never held
+DBTrail captures with never runs a client's statement on this port (with
+`BINTRAIL_SQL_FRESH_WAIT` on, the router uses it only to read the source's
+binary log position), so the copy answers that server alone. Resultsets are streamed to the client as they arrive, never held
 in the router. The one exception is a `SELECT` whose plan says it is
 expensive: it runs on the copy, and if the copy rejects it (DuckDB does not
 know the syntax, the table is not in the copy, the result exceeds the
@@ -1348,7 +1349,15 @@ and tried again after 5 minutes. Statements that arrive while a read is in
 flight share it. A statement does not wait when a table it reads has no
 tail, when capture is known to be behind (a source position read 2 s ago
 not reached yet), when the two positions belong to different binary logs
-(the source was replaced), or when capture saved no position. A statement
+or capture's position is of another server (by `@@server_uuid`, or
+`server_id` on MariaDB: a failover, a replaced source), or when capture saved
+no position. Two limits to know: the wait holds only when capture reads the
+server your clients write to (with capture on a replica, the replica's
+position may not hold a write yet); and after a statement with no row and no
+commit of its own (a `GRANT`, a `CREATE USER`, a binary log rotation) on a
+source that then goes quiet, capture's saved position stays behind the
+source's until the next write, so statements in the meantime run out of the
+wait, then skip it as `capture_behind`. A statement
 in a transaction goes to MySQL, and a time-travel statement reads no tails,
 so neither waits. A waiting statement holds its place among those that run
 on the copy at once. The router's `/status` shows per server `fresh_wait`:

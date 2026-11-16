@@ -1306,13 +1306,15 @@ func (s *Server) runSQLAt(ctx context.Context, b *bundle, user, statement, schem
 			switch {
 			case tails != nil && narrowed.OnlyViews != nil:
 				tailsStart := time.Now()
+				waited := func(bool) {}
 				if id, ok := tailsFor(ctx); ok {
 					// Fresh mode's wait for the source (#2645), off unless
 					// BINTRAIL_SQL_FRESH_WAIT is set. Its time counts as
 					// the tails' step.
-					s.waitForSource(ctx, id, b, tails, readTables)
+					waited = s.waitForSource(ctx, id, b, tails, readTables)
 				}
 				narrowed.Baselines, tailThrough, tailThroughID, allTailed, missing = s.statementTailsFresh(ctx, tails, narrowed.Baselines, readTables, freshTailsWait)
+				waited(allTailed && missing == "")
 				if missing == "" && allTailed && tailThroughID != 0 && tailThroughID < seenFloor(ctx) {
 					// An earlier answer of the copy on this connection read
 					// the index further than these tails do. Under routing
