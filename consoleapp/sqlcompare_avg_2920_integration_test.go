@@ -16,6 +16,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/testutil"
 	"github.com/go-mysql-org/go-mysql/client"
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	drivermysql "github.com/go-sql-driver/mysql"
 )
 
@@ -182,9 +183,9 @@ func avgRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 }
 
 // fieldMeta is the protocol-level description of each column of stmt's
-// result, as the server or the routed port sends it: name, type, length,
-// decimals, flags and character set.
-func fieldMeta(t *testing.T, dsn, stmt string) []string {
+// result, as the server or the routed port sends it, and who answered (the
+// first column's value in the first row).
+func fieldMeta(t *testing.T, dsn, stmt string) (who string, fields []*gomysql.Field) {
 	t.Helper()
 	cfg, err := drivermysql.ParseDSN(dsn)
 	if err != nil {
@@ -199,30 +200,37 @@ func fieldMeta(t *testing.T, dsn, stmt string) []string {
 	if err != nil {
 		t.Fatalf("%s: %v", stmt, err)
 	}
-	var out []string
-	who := "no row"
 	if res.RowNumber() > 0 {
 		who, _ = res.GetString(0, 0)
 	}
-	out = append(out, "answered by "+who)
-	for _, f := range res.Fields {
-		out = append(out, fmt.Sprintf("%s type=%d len=%d dec=%d flag=%#x charset=%d", f.Name, f.Type, f.ColumnLength, f.Decimal, f.Flag, f.Charset))
-	}
-	return out
+	return who, res.Fields
 }
 
-// avgMetadata logs, column by column, the metadata of an AVG over an INT,
-// an UNSIGNED BIGINT and the rest, and of a plain INT column, from the
-// source and from the routed port.
+// avgMetadata compares, column by column, the protocol metadata of an AVG
+// over each whole-number type from the routed port (the copy's answer) and
+// from the source. Proven equal: the type (NEWDECIMAL), the decimals (4) and
+// the flags (BINARY, no UNSIGNED even over an unsigned column). Not equal and
+// documented: the column length, which the copy leaves 0 and MySQL and
+// MariaDB size from the argument (16 for an INT, 25 for a BIGINT, 26 for a
+// BIGINT UNSIGNED, 9 for a TINYINT). A plain INT column the copy answers is
+// declared BIGINT there (type, length and the NUM flag differ): logged only.
 func avgMetadata(t *testing.T, portDSN, sourceDSN string) {
-	for _, stmt := range []string{
-		"SELECT MIN(side), AVG(k), AVG(u), AVG(b), AVG(ti), AVG(bo), AVG(DISTINCT k) FROM ev",
-		"SELECT MIN(side), g FROM ev GROUP BY g ORDER BY g LIMIT 1",
-	} {
-		got, want := fieldMeta(t, portDSN, stmt), fieldMeta(t, sourceDSN, stmt)
-		for i := range want {
-			t.Logf("META %-50.50s routed %s", stmt, got[i])
-			t.Logf("META %-50.50s source %s", stmt, want[i])
-		}
+	const stmt = "SELECT MIN(side), AVG(k), AVG(u), AVG(b), AVG(ti), AVG(bo), AVG(DISTINCT k) FROM ev"
+	who, got := fieldMeta(t, portDSN, stmt)
+	_, want := fieldMeta(t, sourceDSN, stmt)
+	if who != "copy" || len(got) != len(want) {
+		t.Fatalf("metadata probe: answered by %q with %d columns, want the copy and %d", who, len(got), len(want))
 	}
+	for i := 1; i < len(want); i++ {
+		if got[i].Type != want[i].Type || got[i].Decimal != want[i].Decimal || got[i].Flag != want[i].Flag {
+			t.Errorf("%s: copy type=%d decimals=%d flags=%#x, source type=%d decimals=%d flags=%#x", want[i].Name,
+				got[i].Type, got[i].Decimal, got[i].Flag, want[i].Type, want[i].Decimal, want[i].Flag)
+		}
+		t.Logf("length of %s: copy %d, source %d", want[i].Name, got[i].ColumnLength, want[i].ColumnLength)
+	}
+	const plain = "SELECT MIN(side), g FROM ev GROUP BY g ORDER BY g LIMIT 1"
+	_, got = fieldMeta(t, portDSN, plain)
+	_, want = fieldMeta(t, sourceDSN, plain)
+	t.Logf("plain INT column g: copy type=%d len=%d flags=%#x, source type=%d len=%d flags=%#x",
+		got[1].Type, got[1].ColumnLength, got[1].Flag, want[1].Type, want[1].ColumnLength, want[1].Flag)
 }
