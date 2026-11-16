@@ -16,11 +16,11 @@ import (
 func resetCatalogGlobals(t *testing.T) {
 	t.Helper()
 	resetExportGlobals(t)
-	sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok := eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile
+	sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok, sScope := eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope
 	t.Cleanup(func() {
-		eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile = sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok
+		eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope = sKind, sURI, sWh, sV4, sV4R, sV4S, sCred, sTok, sScope
 	})
-	eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile = "hadoop", "", "", false, "", "", "", ""
+	eiCatalog, eiCatalogURI, eiCatalogWarehouse, eiSigV4, eiSigV4Region, eiSigV4Service, eiCredentialFile, eiTokenFile, eiCatalogScope = "hadoop", "", "", false, "", "", "", "", ""
 	t.Setenv(envCatalogCredential, "")
 	t.Setenv(envCatalogToken, "")
 }
@@ -80,6 +80,15 @@ func TestRunExportIceberg_catalogFlags(t *testing.T) {
 			eiCatalog, eiWarehouse, eiCatalogURI = "rest", "", "http://127.0.0.1:1"
 			eiTokenFile = secretFile(t, " \n")
 		}, "--catalog-token-file is empty"},
+		{"hadoop with a scope", func(t *testing.T) { eiCatalogScope = "PRINCIPAL_ROLE:ALL" }, "--catalog-scope only applies to --catalog rest"},
+		{"rest scope with a token", func(t *testing.T) {
+			eiCatalog, eiWarehouse, eiCatalogURI, eiCatalogScope = "rest", "", "http://127.0.0.1:1", "PRINCIPAL_ROLE:ALL"
+			t.Setenv(envCatalogToken, "S3CR3T-tok3")
+		}, "--catalog-scope only applies with a client credential"},
+		{"positive control: rest credential with a scope stops at the catalog", func(t *testing.T) {
+			eiCatalog, eiWarehouse, eiCatalogURI, eiCatalogScope = "rest", "", "http://127.0.0.1:1", "PRINCIPAL_ROLE:ALL"
+			t.Setenv(envCatalogCredential, "S3CR3T-cred:x")
+		}, "open the REST catalog"},
 		{"positive control: glue stops at the region", func(t *testing.T) {
 			eiCatalog, eiWarehouse = "glue", "s3://b/p"
 			isolateAWS(t)

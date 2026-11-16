@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/glue"
@@ -64,6 +65,12 @@ type CatalogConfig struct {
 	// or a file, never from the command line; nothing here echoes them.
 	Credential string
 	Token      string
+
+	// Scope is the OAuth scope the client-credential exchange asks for (rest
+	// only, with Credential). Blank keeps the library's default, "catalog".
+	// Apache Polaris refuses that one and wants PRINCIPAL_ROLE:ALL (or
+	// PRINCIPAL_ROLE:<name>). It is not a secret.
+	Scope string
 }
 
 func (c CatalogConfig) kind() CatalogKind {
@@ -71,6 +78,11 @@ func (c CatalogConfig) kind() CatalogKind {
 		return CatalogHadoop
 	}
 	return CatalogKind(strings.ToLower(string(c.Kind)))
+}
+
+// scope is the OAuth scope as sent: trimmed, "" when blank.
+func (c CatalogConfig) scope() string {
+	return strings.TrimSpace(c.Scope)
 }
 
 // CheckCatalog validates the catalog settings together with the warehouse
@@ -98,6 +110,7 @@ func CheckCatalog(c CatalogConfig, warehouse string) (string, error) {
 			{c.SigV4Service != "", "--catalog-sigv4-service"},
 			{c.Credential != "", "a catalog credential"},
 			{c.Token != "", "a catalog token"},
+			{c.scope() != "", "--catalog-scope"},
 		} {
 			if f.set {
 				return "", fmt.Errorf("%s only applies to --catalog rest", f.name)
@@ -162,6 +175,17 @@ func CheckCatalog(c CatalogConfig, warehouse string) (string, error) {
 		}
 		if !c.SigV4 && c.SigV4Service != "" {
 			return "", errors.New("--catalog-sigv4-service needs --catalog-sigv4")
+		}
+		if s := c.scope(); s != "" {
+			if c.Credential == "" {
+				// A bearer token or SigV4 makes no token exchange, so the
+				// scope would be dropped without a word.
+				return "", fmt.Errorf("--catalog-scope only applies with a client credential (%s or --catalog-credential-file): it is what the credential's token exchange asks for, and a bearer token or SigV4 makes none",
+					"BINTRAIL_ICEBERG_CATALOG_CREDENTIAL")
+			}
+			if strings.IndexFunc(s, unicode.IsControl) >= 0 {
+				return "", errors.New("--catalog-scope has a control character (a newline or a tab); give the scope on one line, several scopes separated by spaces")
+			}
 		}
 		if strings.TrimSpace(warehouse) == "" {
 			return "", nil
@@ -392,6 +416,9 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 			opts = append(opts, rest.WithSigV4RegionSvc(cfg.Region, service), rest.WithAwsConfig(cfg))
 		case c.Credential != "":
 			opts = append(opts, rest.WithCredential(c.Credential))
+			if s := c.scope(); s != "" {
+				opts = append(opts, rest.WithScope(s))
+			}
 		case c.Token != "":
 			opts = append(opts, rest.WithOAuthToken(c.Token))
 		}

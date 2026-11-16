@@ -193,6 +193,7 @@ func TestComposeIcebergExportCatalogPassthrough(t *testing.T) {
 		"ICEBERG_CATALOG_URI":       "--catalog-uri ",
 		"ICEBERG_CATALOG_WAREHOUSE": "--catalog-warehouse ",
 		"ICEBERG_CATALOG_SIGV4":     "--catalog-sigv4",
+		"ICEBERG_CATALOG_SCOPE":     "--catalog-scope ",
 	} {
 		if _, ok := svc.Environment[env]; !ok {
 			t.Errorf("iceberg-export does not take %s", env)
