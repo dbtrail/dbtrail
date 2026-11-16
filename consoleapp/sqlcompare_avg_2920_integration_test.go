@@ -200,6 +200,11 @@ func fieldMeta(t *testing.T, dsn, stmt string) []string {
 		t.Fatalf("%s: %v", stmt, err)
 	}
 	var out []string
+	who := "no row"
+	if res.RowNumber() > 0 {
+		who, _ = res.GetString(0, 0)
+	}
+	out = append(out, "answered by "+who)
 	for _, f := range res.Fields {
 		out = append(out, fmt.Sprintf("%s type=%d len=%d dec=%d flag=%#x charset=%d", f.Name, f.Type, f.ColumnLength, f.Decimal, f.Flag, f.Charset))
 	}
@@ -211,17 +216,13 @@ func fieldMeta(t *testing.T, dsn, stmt string) []string {
 // source and from the routed port.
 func avgMetadata(t *testing.T, portDSN, sourceDSN string) {
 	for _, stmt := range []string{
-		"SELECT AVG(k), AVG(u), AVG(b), AVG(ti), AVG(bo), AVG(DISTINCT k) FROM ev",
-		"SELECT MIN(side), g FROM ev",
+		"SELECT MIN(side), AVG(k), AVG(u), AVG(b), AVG(ti), AVG(bo), AVG(DISTINCT k) FROM ev",
+		"SELECT side, g FROM ev WHERE id = 1",
 	} {
 		got, want := fieldMeta(t, portDSN, stmt), fieldMeta(t, sourceDSN, stmt)
 		for i := range want {
-			if i >= len(got) {
-				t.Errorf("%s: column %d missing", stmt, i)
-				continue
-			}
-			t.Logf("META %-60.60s routed %s", stmt, got[i])
-			t.Logf("META %-60.60s source %s", stmt, want[i])
+			t.Logf("META %-50.50s routed %s", stmt, got[i])
+			t.Logf("META %-50.50s source %s", stmt, want[i])
 		}
 	}
 }
