@@ -206,7 +206,7 @@ func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 		}
 		return text, ""
 	}
-	text := sc.copyText(o)
+	text = sc.copyText(o)
 	if o.MySQLAvg && avgLeft(text) {
 		// An AVG copyText could not write as the macro: the copy's own avg
 		// would answer it as a DOUBLE.

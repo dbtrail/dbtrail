@@ -27,9 +27,9 @@ var (
 	// item: nothing, or an alias with or without AS. A string literal (blanked
 	// to '' in the shape) is not read as an alias: its name is not known.
 	avgAlias = regexp.MustCompile(`(?i)^(?:as[\s\v]+)?("[^"]*"|[\pL\pN_$]+)$`)
-	// setOperation is a UNION, INTERSECT or EXCEPT: the copy and MySQL type a
+	// avgSetOperation is a UNION, INTERSECT or EXCEPT: the copy and MySQL type a
 	// column of the result from every branch.
-	setOperation = regexp.MustCompile(`(?i)\b(?:union|intersect|except)\b`)
+	avgSetOperation = regexp.MustCompile(`(?i)\b(?:union|intersect|except)\b`)
 	// nameToken is a quoted name or a word.
 	nameToken = regexp.MustCompile(`"[^"]*"|[\pL\pN_$]+`)
 	// listClause opens a GROUP BY or an ORDER BY, whose items may name a
@@ -39,8 +39,8 @@ var (
 	listClauseEnd = regexp.MustCompile(`(?i)\b(?:having|group[\s\v]+by|order[\s\v]+by|limit|window|for|lock|into|procedure)\b|;`)
 	// sortDirection is ASC or DESC after an ORDER BY item.
 	sortDirection = regexp.MustCompile(`(?i)[\s\v]+(?:asc|desc)$`)
-	// selectWord is the SELECT a statement opens with.
-	selectWord = regexp.MustCompile(`(?i)^[\s\v]*select(?:[^\pL\pN_$]|$)`)
+	// avgSelectWord is the SELECT a statement opens with.
+	avgSelectWord = regexp.MustCompile(`(?i)^[\s\v]*select(?:[^\pL\pN_$]|$)`)
 )
 
 // AvgVeto says why the copy must not answer a routed statement because of an
@@ -76,10 +76,10 @@ func AvgVeto(shape string, whole, other []string) string {
 	if len(locs) == 0 {
 		return ""
 	}
-	if subquery.MatchString(shape) || setOperation.MatchString(shape) {
+	if subquery.MatchString(shape) || avgSetOperation.MatchString(shape) {
 		return VetoAvg
 	}
-	m := selectWord.FindStringIndex(shape)
+	m := avgSelectWord.FindStringIndex(shape)
 	if m == nil {
 		return VetoAvg
 	}
