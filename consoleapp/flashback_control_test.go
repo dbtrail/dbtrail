@@ -46,7 +46,7 @@ func newControl(t *testing.T) *flashbackControl {
 // process runs, one address at a time.
 func TestFlashbackControl_OpenMoveClose(t *testing.T) {
 	c := newControl(t)
-	a, b := freeAddr(t), freeAddr(t)
+	a := freeAddr(t)
 
 	if err := c.Apply(a); err != nil || !accepts(a) {
 		t.Fatalf("open %s: err %v, accepting %v", a, err, accepts(a))
@@ -54,8 +54,19 @@ func TestFlashbackControl_OpenMoveClose(t *testing.T) {
 	if err := c.Apply(a); err != nil || !accepts(a) {
 		t.Fatalf("the same address again: err %v, accepting %v", err, accepts(a))
 	}
-	if err := c.Apply(b); err != nil || !accepts(b) || accepts(a) {
-		t.Fatalf("move to %s: err %v, new accepting %v, old accepting %v", b, err, accepts(b), accepts(a))
+	// b is picked while the port holds a, so the kernel cannot hand back the
+	// same port number. Two freeAddr calls in a row can: the first releases
+	// its port before the second asks, and then "moving" to b is moving to a,
+	// which Apply treats as no change and both addresses still accept.
+	b := freeAddr(t)
+	if b == a {
+		t.Fatalf("freeAddr returned %s, the address the port is listening on", b)
+	}
+	if err := c.Apply(b); err != nil {
+		t.Fatalf("move %s to %s: %v", a, b, err)
+	}
+	if newOK, oldOK := accepts(b), accepts(a); !newOK || oldOK {
+		t.Fatalf("move %s to %s: new accepting %v, old accepting %v", a, b, newOK, oldOK)
 	}
 	if err := c.Apply(""); err != nil || accepts(b) {
 		t.Fatalf("close: err %v, still accepting %v", err, accepts(b))
