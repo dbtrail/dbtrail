@@ -258,6 +258,27 @@ client credential or a bearer token gets it one of two ways:
 - a file only the job can read: `--catalog-credential-file` or
   `--catalog-token-file`.
 
+With a client credential, `bintrail` exchanges it for a token and asks for the
+OAuth scope `catalog`, the Iceberg library's default. Some catalogs want
+another one: Apache Polaris refuses `catalog` with `invalid_scope: The scope is
+invalid` and wants `PRINCIPAL_ROLE:ALL` (or `PRINCIPAL_ROLE:<name>`). Give it
+with `--catalog-scope`, which is not a secret and so is a flag:
+
+```bash
+export BINTRAIL_ICEBERG_CATALOG_CREDENTIAL='<client_id>:<client_secret>'
+bintrail export iceberg --index-dsn "..." --baseline-dir /data/baselines \
+  --catalog rest \
+  --catalog-uri https://polaris.example.com/api/catalog \
+  --catalog-warehouse my_catalog \
+  --catalog-scope PRINCIPAL_ROLE:ALL
+```
+
+Several scopes go in one value, separated by spaces. `--catalog-scope` applies
+only to a credential: with a bearer token or SigV4 there is no exchange to ask
+for a scope, so the combination is refused instead of ignored. Prefer the
+credential to a token for a run on a timetable: the credential is exchanged
+again when its token expires, and a token you pass yourself is not renewed.
+
 Only one way to sign in is accepted per run: SigV4, a credential, or a token.
 Two at once, or the same secret from both the variable and the file, is
 refused. A `--catalog-uri` with a user name or password in it
@@ -693,6 +714,7 @@ nothing. Both report `unchanged`.
 | `--catalog-sigv4` | sign REST requests with AWS credentials (`rest`) |
 | `--catalog-sigv4-region`, `--catalog-sigv4-service` | override the signing region and service (default: from a Glue or S3 Tables URI, else the AWS chain and `execute-api`) |
 | `--catalog-credential-file`, `--catalog-token-file` | file holding the REST OAuth client credential or bearer token; or env `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL`, `BINTRAIL_ICEBERG_CATALOG_TOKEN` |
+| `--catalog-scope` | OAuth scope the client credential's token exchange asks for (`rest`, with a credential; default `catalog`; Apache Polaris wants `PRINCIPAL_ROLE:ALL`) |
 | `--tables` | comma-separated `schema.table` list (default: every table in the newest snapshot) |
 | `--at` | export up to this instant (default: now); must be after the table's cursor and not below the live window |
 | `--fetch-batch-size` | event page size for the fold (0 = default) |

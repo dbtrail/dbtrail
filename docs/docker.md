@@ -701,8 +701,9 @@ Notes:
 - To register the tables in AWS Glue or an Iceberg REST catalog instead of
   the local volume, set `ICEBERG_CATALOG` (`glue` or `rest`) and
   `WAREHOUSE_DIR` to the `s3://` location, plus `ICEBERG_CATALOG_URI`,
-  `ICEBERG_CATALOG_WAREHOUSE` and `ICEBERG_CATALOG_SIGV4=1` as the catalog
-  needs. A REST secret goes in `.env` as `BINTRAIL_ICEBERG_CATALOG_TOKEN` or
+  `ICEBERG_CATALOG_WAREHOUSE`, `ICEBERG_CATALOG_SIGV4=1` and
+  `ICEBERG_CATALOG_SCOPE` (the OAuth scope a credential asks for; Apache
+  Polaris wants `PRINCIPAL_ROLE:ALL`) as the catalog needs. A REST secret goes in `.env` as `BINTRAIL_ICEBERG_CATALOG_TOKEN` or
   `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL`: it reaches the container as a
   variable, never on a command line. See [Iceberg export](iceberg-export.md).
 - A run that dies before committing leaves the previous copy in place and
@@ -1006,6 +1007,7 @@ surface, use the demo image ([demo.md](./demo.md)).
 | `ICEBERG_EVERY` | compose `iceberg-export-loop` profile (optional) | How long the loop service waits after each run ends before the next (default `1h`, at least `1m`) |
 | `ICEBERG_CATALOG` | compose `iceberg-export` profiles (optional) | `glue` or `rest` to register the tables in that catalog (default: the local volume); set `WAREHOUSE_DIR` to the `s3://` location |
 | `ICEBERG_CATALOG_URI`, `ICEBERG_CATALOG_WAREHOUSE`, `ICEBERG_CATALOG_SIGV4` | compose `iceberg-export` profiles (optional) | The REST catalog's URL, warehouse identifier, and `1` to sign requests with AWS credentials |
+| `ICEBERG_CATALOG_SCOPE` | compose `iceberg-export` profiles (optional) | OAuth scope for `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL` (default `catalog`; Apache Polaris wants `PRINCIPAL_ROLE:ALL`) |
 | `BINTRAIL_ICEBERG_CATALOG_TOKEN`, `BINTRAIL_ICEBERG_CATALOG_CREDENTIAL` | compose `iceberg-export` profiles (optional) | REST catalog bearer token or OAuth client credential, passed to the container as a variable |
 | `SHIM_USER` | compose `flashback` profile | Login the time-travel `mysql` terminal authenticates with (required to start the `shim` service) |
 | `SHIM_PASSWORD` | compose `flashback` profile | Cleartext password for `SHIM_USER` (required) |

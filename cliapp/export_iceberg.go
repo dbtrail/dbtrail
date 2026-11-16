@@ -60,7 +60,9 @@ CATALOGS
                    is the identifier the server expects (a catalog name, an AWS
                    account id, an S3 Tables bucket ARN); --warehouse is an
                    optional location prefix. Authenticate with --catalog-sigv4,
-                   or an OAuth client credential, or a bearer token. Secrets are
+                   or an OAuth client credential, or a bearer token; with a
+                   credential, --catalog-scope sets the OAuth scope (Apache
+                   Polaris wants PRINCIPAL_ROLE:ALL). Secrets are
                    never flag values: set ` + envCatalogCredential + ` or
                    ` + envCatalogToken + `, or point --catalog-credential-file or
                    --catalog-token-file at a file holding the secret.
@@ -186,6 +188,7 @@ var (
 	eiSigV4Service     string
 	eiCredentialFile   string
 	eiTokenFile        string
+	eiCatalogScope     string
 )
 
 // The REST catalog's secrets are read from these variables or from the
@@ -221,6 +224,7 @@ func init() {
 	f.StringVar(&eiSigV4Service, "catalog-sigv4-service", "", "Service to sign for (default: glue or s3tables from the --catalog-uri host, else execute-api)")
 	f.StringVar(&eiCredentialFile, "catalog-credential-file", "", "File holding the REST catalog OAuth client credential (client_id:client_secret); or set "+envCatalogCredential)
 	f.StringVar(&eiTokenFile, "catalog-token-file", "", "File holding the REST catalog bearer token; or set "+envCatalogToken)
+	f.StringVar(&eiCatalogScope, "catalog-scope", "", "OAuth scope the client credential's token exchange asks for (default: catalog; Apache Polaris wants PRINCIPAL_ROLE:ALL). Not a secret (--catalog rest)")
 	cli.AddDuckDBTuningFlags(exportIcebergCmd)
 	bindCommandEnv(exportIcebergCmd)
 
@@ -493,6 +497,7 @@ func exportCatalogConfig() (icebergexport.CatalogConfig, error) {
 		SigV4:        eiSigV4,
 		SigV4Region:  eiSigV4Region,
 		SigV4Service: eiSigV4Service,
+		Scope:        eiCatalogScope,
 	}
 	if c.Kind == "" {
 		c.Kind = icebergexport.CatalogHadoop
