@@ -1173,23 +1173,25 @@ The decision, in order, for every statement:
    port). A client's own `SET NAMES` later in the session works as before.
 
    **A session in utf8mb3.** The MariaDB command-line client asks for
-   `utf8mb3_general_ci` when it connects, and ProxySQL's default character
-   set is `utf8` (`utf8mb3`), so such a session is common (#2917). utf8mb3
-   is UTF-8 that stops at three bytes: every character below U+10000 (all
-   of Latin, Greek, Cyrillic, Arabic, Hebrew, the common CJK) has the same
-   bytes in it as in utf8mb4, and the characters from U+10000 up (emoji,
-   rarer CJK, historic scripts) do not exist in it. MySQL turns those into
-   `?`. So under `character_set_results = utf8mb3` or
-   `character_set_connection = utf8mb3` the copy answers, with two
+   `utf8mb3_general_ci` when it connects, and a client behind ProxySQL that
+   names no character set gets ProxySQL's default,
+   `mysql-default_charset=utf8` (`utf8mb3`), so such a session is common
+   (#2917). utf8mb3 is UTF-8 that stops at three bytes: every character
+   below U+10000 (all of Latin, Greek, Cyrillic, Arabic, Hebrew, the common
+   CJK) has the same bytes in it as in utf8mb4, and the characters from
+   U+10000 up (emoji, rarer CJK, historic scripts) do not exist in it.
+   MySQL turns those into `?`. So under `character_set_results = utf8mb3`
+   or `character_set_connection = utf8mb3` the copy answers, with two
    exceptions that go to MySQL:
 
    - a statement that holds such a character anywhere in its text, or bytes
-     that are not UTF-8, when the connection's character set is utf8mb3
-     (MySQL reads it as `?`, the copy as it is); a prepared statement's
-     string arguments count too. Counted as `veto`. (A string literal
-     outside printable ASCII stays on MySQL under any session already, see
-     "The copy itself compares text"; this also covers a comment, a name and
-     an argument.)
+     that are not UTF-8, when the connection's character set or the
+     results' is utf8mb3 (MySQL reads it as `?`, the copy as it is). A
+     prepared statement's arguments count too, checked as the client sent
+     them, except one sent as a `BLOB`, which MySQL takes as bytes. Counted
+     as `veto`. (A string literal outside printable ASCII stays on MySQL
+     under any session already, see "The copy itself compares text"; this
+     also covers a comment, a name and an argument.)
    - an answer of the copy with such a character (or bytes that are not
      UTF-8) in a text cell, when the results are in utf8mb3: MySQL would
      send `?` there, so the copy's answer is not sent and the statement runs
@@ -1197,7 +1199,13 @@ The decision, in order, for every statement:
      once per connection. The copy's answer is checked whole before any of
      it is sent, a large one read back from its file, so such a session
      pays one more pass over each answer. A `BLOB` is not checked: MySQL
-     sends its bytes as they are.
+     sends its bytes as they are (a list of them is, being sent as JSON
+     text). The connection then remembers the statement (by its shape, its
+     values left out, up to 256 of them) and sends it straight to MySQL the
+     next times, so it does not cost a run on the copy each time; the
+     memory is dropped when the session is read again (after a `SET NAMES`
+     or any other `SET`), so a session that moves to utf8mb4 gets the copy
+     back.
 
    Under utf8mb3 results the copy declares each text column as MySQL does,
    in `utf8mb3_general_ci` (33) instead of `utf8mb4_0900_ai_ci`'s 255.
@@ -1205,10 +1213,17 @@ The decision, in order, for every statement:
    so the MariaDB client's default session gets the copy's answers to the
    statements with no string literal and no function that returns text,
    as under `utf8mb4_general_ci` (#2836); under `utf8mb3_unicode_ci`,
-   which compares as the copy does, the copy answers those too. The character set MySQL reads the statement's bytes in,
-   `character_set_client`, is not read: it moves with the other two under
-   `SET NAMES` and a client's handshake, and a session that sets it alone
-   to another character set is not detected.
+   which compares as the copy does, the copy answers those too.
+
+   Not covered: the character set MySQL reads the statement's bytes in,
+   `character_set_client`, is not read back. It moves with the other two
+   under `SET NAMES` and a client's handshake, and the statement check
+   above runs when either of the other two is utf8mb3, which covers a
+   client that asked for utf8mb3 and then changed only its collation; a
+   session that sets `character_set_client` alone to utf8mb3 while both
+   others are utf8mb4 is not detected. Nor are the column names of an
+   answer checked: the port sends the source's names for them, and keeps
+   the copy's own only when the source cannot say what they are.
 
    **A setting changed inside a stored function.** A `SELECT` that calls a
    stored function is a read by its text, and the function can run `SET`

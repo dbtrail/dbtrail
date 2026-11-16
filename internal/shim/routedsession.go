@@ -84,6 +84,9 @@ type routeSession struct {
 	// turns a four-byte character of a literal into '?' and the copy keeps
 	// it: a statement holding one is MySQL's (narrowStatementVeto).
 	narrowConnection bool
+	// narrowMemo is the statements whose answer from the copy did not go
+	// out under narrowResults (narrowMemo); nil for none.
+	narrowMemo *narrowMemo
 	// zone is @@time_zone as MySQL reports it; zoneUTC says every probe
 	// instant came back with no offset, whatever the zone is called. Both
 	// are set whenever the session was read, reproducible or not: time

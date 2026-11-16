@@ -806,6 +806,16 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 	if v := h.narrowStatementVeto(qstr); v != "" {
 		return ops.forward(RouteReasonVeto, "veto: "+v)
 	}
+	// A statement whose answer from the copy could not go out under
+	// utf8mb3 results earlier on this session goes to MySQL straight away.
+	narrowFP := ""
+	if narrowResults, _ := h.narrowSession(); narrowResults {
+		narrowFP = readrouter.Fingerprint(qstr)
+		if h.narrowRemembered(narrowFP) {
+			return ops.forward(RouteReasonSessionDiffers, "session differs: character_set_results = utf8mb3: "+
+				"an earlier answer of the copy to this statement on this connection held a character utf8mb3 does not have")
+		}
+	}
 	// A statement that reads the copy's clock (#2611) also needs the source's
 	// clock to be the time: asked of every such statement.
 	if readrouter.CallsNow(qstr) {
@@ -862,6 +872,9 @@ func (h *Handler) route(ctx context.Context, qstr string, ops routeOps) (*mysql.
 		h.routeWarn("narrow-results", "Engine Routing: an answer of the copy held a character utf8mb3 does not have (four bytes in UTF-8, as an emoji) "+
 			"while the connection's character_set_results is utf8mb3; such statements are run on MySQL, which sends the character as '?' "+
 			"(a client that asks for utf8mb4 gets them from the copy)", nil)
+		if narrowFP != "" {
+			h.rememberNarrow(narrowFP)
+		}
 		return ops.forward(RouteReasonSessionDiffers, "session differs: "+narrow.Error())
 	}
 	var held *ResultsHeldError

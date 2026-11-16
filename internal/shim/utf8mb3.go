@@ -23,13 +23,19 @@ import (
 //     one is MySQL's (narrowStatementVeto), wherever in the text it is: a
 //     comment or a name too, where MySQL errors or ignores it and the copy
 //     would not care, since telling those apart is not worth a wrong answer.
+//     The same holds when only the results are in utf8mb3: the session's
+//     character_set_client, which the read-back does not read, is then most
+//     likely utf8mb3 too (a client that asked for it and later changed only
+//     its collation), and MySQL reads the statement's bytes in it.
 //   - character_set_results: MySQL sends each text cell converted, so a
 //     four-byte character goes out as '?'. The copy's answer is checked
 //     before anything of it is written (narrowAnswerCheck); one with such a
 //     character in a text cell is not sent, the statement goes to MySQL,
 //     which answers it its own way (narrowResultError). Bytes that are not
 //     UTF-8 at all are treated the same: what MySQL makes of them is not
-//     the copy's to guess.
+//     the copy's to guess. A statement so forwarded is remembered on the
+//     connection (narrowMemo) and goes straight to MySQL the next times,
+//     instead of costing a run on the copy and then one on MySQL again.
 //
 // The column definitions say utf8mb3 too: MySQL declares each text column of
 // a converted answer in the results' character set, utf8mb3_general_ci (33),
@@ -80,15 +86,103 @@ func (h *Handler) narrowSession() (results, connection bool) {
 	return h.routeSess.narrowResults, h.routeSess.narrowConnection
 }
 
-// narrowStatementVeto is why a statement is MySQL's under a utf8mb3
-// connection, or "". text is what the copy would read: the client's
-// statement, or a prepared one with its arguments written in.
+// narrowStatementVeto is why a statement is MySQL's under a session in
+// utf8mb3 (its connection or its results), or "". text is what the copy
+// would read: the client's statement, or a prepared one with its arguments
+// written in.
 func (h *Handler) narrowStatementVeto(text string) string {
-	if _, conn := h.narrowSession(); !conn || fitsUTF8MB3(text) {
+	if results, conn := h.narrowSession(); !(conn || results) || fitsUTF8MB3(text) {
 		return ""
 	}
-	return "the statement holds a character utf8mb3 does not have (four bytes in UTF-8, as an emoji) or bytes that are not UTF-8, " +
-		"and the connection's character set is utf8mb3: MySQL reads it as '?', the copy as it is"
+	return narrowStatementWhy
+}
+
+const narrowStatementWhy = "the statement holds a character utf8mb3 does not have (four bytes in UTF-8, as an emoji) or bytes that are not UTF-8, " +
+	"and the session's character set is utf8mb3: MySQL reads it as '?', the copy as it is"
+
+// narrowArgumentVeto is narrowStatementVeto over a prepared statement's
+// arguments as the client sent them. Their text is not enough: an argument
+// that is not UTF-8 is written into it as unhex('...'), which is ASCII.
+// MySQL converts a string argument as it converts a literal; one the client
+// typed as a BLOB it takes as bytes (the binary character set), and so does
+// the copy (unhex, or the same bytes as text), so a BLOB is not looked at.
+// Nor is a number or a date, sent in a binary form that is not text at all.
+func (h *Handler) narrowArgumentVeto(args []any) string {
+	if results, conn := h.narrowSession(); !(conn || results) {
+		return ""
+	}
+	for _, a := range args {
+		var b []byte
+		switch v := a.(type) {
+		case string:
+			b = []byte(v)
+		case []byte:
+			b = v
+		case mysql.TypedBytes:
+			switch v.Type {
+			case mysql.MYSQL_TYPE_TINY_BLOB, mysql.MYSQL_TYPE_MEDIUM_BLOB, mysql.MYSQL_TYPE_LONG_BLOB, mysql.MYSQL_TYPE_BLOB,
+				mysql.MYSQL_TYPE_DATE, mysql.MYSQL_TYPE_NEWDATE, mysql.MYSQL_TYPE_DATETIME, mysql.MYSQL_TYPE_TIMESTAMP, mysql.MYSQL_TYPE_TIME:
+				continue
+			}
+			b = v.Bytes
+		default:
+			continue
+		}
+		if !fitsUTF8MB3Bytes(b) {
+			return narrowStatementWhy
+		}
+	}
+	return ""
+}
+
+// narrowMemoSize bounds narrowMemo: past it the oldest statement is
+// forgotten, and costs one more run on the copy if it comes back.
+const narrowMemoSize = 256
+
+// narrowMemo is the statements (by readrouter.Fingerprint) whose answer
+// from the copy held what utf8mb3 results cannot carry, on this
+// connection's session as it was read: kept on the routeSession, so a
+// session read again (after a SET NAMES, a SET of any kind, a change the
+// source reported) starts with none. Under the connection's lock.
+type narrowMemo struct {
+	seen  map[string]bool
+	order []string
+}
+
+func (m *narrowMemo) add(fp string) {
+	if m.seen[fp] {
+		return
+	}
+	if m.seen == nil {
+		m.seen = map[string]bool{}
+	}
+	if len(m.order) >= narrowMemoSize {
+		delete(m.seen, m.order[0])
+		m.order = m.order[1:]
+	}
+	m.seen[fp] = true
+	m.order = append(m.order, fp)
+}
+
+// rememberNarrow records that the copy's answer to a statement of this
+// fingerprint was not sent (narrowResultError).
+func (h *Handler) rememberNarrow(fp string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.routeSess.known {
+		return
+	}
+	if h.routeSess.narrowMemo == nil {
+		h.routeSess.narrowMemo = &narrowMemo{}
+	}
+	h.routeSess.narrowMemo.add(fp)
+}
+
+// narrowRemembered says rememberNarrow recorded fp on the session as it is.
+func (h *Handler) narrowRemembered(fp string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.routeSess.narrowMemo != nil && h.routeSess.narrowMemo.seen[fp]
 }
 
 // narrowStatementError is narrowStatementVeto found in a prepared
@@ -117,7 +211,11 @@ func (e *narrowResultError) Error() string {
 // its bytes whatever the session's character sets (the copy declares it
 // utf8mb4 too, an older difference).
 func narrowTextColumn(duckType string) bool {
-	base, _ := duckBaseType(duckType)
+	base, nested := duckBaseType(duckType)
+	if nested {
+		// Sent as JSON text, whatever its elements (a BLOB[] too).
+		return true
+	}
 	switch base {
 	case "BLOB", "BYTEA", "BINARY", "VARBINARY", "BIT", "BITSTRING":
 		return false

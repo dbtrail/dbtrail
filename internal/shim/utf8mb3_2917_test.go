@@ -3,6 +3,7 @@ package shim
 import (
 	"bytes"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -148,13 +149,18 @@ func TestRoutedSession_utf8mb3StatementWithAFourByteCharacter_2917(t *testing.T)
 			if got := firstCell(t, wide.run(t, tc.stmt)); got != "copy" {
 				t.Fatalf("under utf8mb4 answered by %s (%s), want the copy: the test would prove nothing", got, wide.last())
 			}
-			rig := narrowRig(t, "utf8mb4", "utf8mb3", "11110")
-			calls := rig.f.calls
-			if got := firstCell(t, rig.run(t, tc.stmt)); got != "mysql" || rig.last() != "mysql/veto" {
-				t.Errorf("under a utf8mb3 connection answered by %s (%s), want mysql/veto", got, rig.last())
-			}
-			if rig.f.calls != calls {
-				t.Error("the copy was asked")
+			// The connection in utf8mb3; or only the results, where the
+			// client's character set (not read back) is most likely utf8mb3
+			// still: a MariaDB client that changed only its collation.
+			for _, narrow := range []struct{ results, conn string }{{"utf8mb4", "utf8mb3"}, {"utf8mb3", "utf8mb4"}} {
+				rig := narrowRig(t, narrow.results, narrow.conn, "11110")
+				calls := rig.f.calls
+				if got := firstCell(t, rig.run(t, tc.stmt)); got != "mysql" || rig.last() != "mysql/veto" {
+					t.Errorf("results %s, connection %s: answered by %s (%s), want mysql/veto", narrow.results, narrow.conn, got, rig.last())
+				}
+				if rig.f.calls != calls {
+					t.Errorf("results %s, connection %s: the copy was asked", narrow.results, narrow.conn)
+				}
 			}
 		})
 	}
@@ -178,13 +184,31 @@ func TestRoutedSession_utf8mb3PreparedArgument_2917(t *testing.T) {
 	if err != nil || binaryFirstCell(t, res) != "copy" {
 		t.Fatalf("a BMP argument: %v (%s), want the copy", err, rig.last())
 	}
-	calls := rig.f.calls
-	res, err = rig.h.HandleStmtExecute(sel, "", []any{strArg("a" + emoji)})
-	if err != nil || binaryFirstCell(t, res) != "mysql" || rig.last() != "mysql/veto" {
-		t.Errorf("a four-byte argument: %v (%s), want mysql/veto", err, rig.last())
+	for _, tc := range []struct {
+		name string
+		arg  any
+	}{
+		{"a four-byte argument", strArg("a" + emoji)},
+		// Written into the text as unhex('...'), which is ASCII: the
+		// argument itself is what is looked at.
+		{"an argument that is not UTF-8", strArg("a\xffb")},
+		{"a []byte argument that is not UTF-8", []byte("a\xffb")},
+	} {
+		calls := rig.f.calls
+		res, err = rig.h.HandleStmtExecute(sel, "", []any{tc.arg})
+		if err != nil || binaryFirstCell(t, res) != "mysql" || rig.last() != "mysql/veto" {
+			t.Errorf("%s: %v (%s), want mysql/veto", tc.name, err, rig.last())
+		}
+		if rig.f.calls != calls {
+			t.Errorf("%s: the copy was asked", tc.name)
+		}
 	}
-	if rig.f.calls != calls {
-		t.Error("the copy was asked")
+	// A BLOB-typed argument is bytes to MySQL (the binary character set),
+	// not converted: the copy's.
+	blob := mysql.TypedBytes{Type: mysql.MYSQL_TYPE_BLOB, Bytes: []byte("a\xff" + emoji)}
+	res, err = rig.h.HandleStmtExecute(sel, "", []any{blob})
+	if err != nil || binaryFirstCell(t, res) != "copy" {
+		t.Errorf("a BLOB argument: %v (%s), want the copy", err, rig.last())
 	}
 }
 
@@ -218,6 +242,9 @@ func TestRoutedSession_utf8mb3AnswerWithAFourByteCharacter_2917(t *testing.T) {
 		{"a BLOB holding a four-byte sequence", narrowAnswer("x", emoji), false, true},
 		{"a nested column", sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "l", Type: "VARCHAR[]"}},
 			Rows: [][]any{{[]any{"a", emoji}}}}, true, true},
+		// A list of BLOBs is sent as JSON text, not as bytes.
+		{"a BLOB[] column", sqlsandbox.Result{Columns: []sqlsandbox.Column{{Name: "l", Type: "BLOB[]"}},
+			Rows: [][]any{{[]any{emoji}}}}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.wideToCopy {
@@ -368,5 +395,57 @@ func TestRoutedSession_utf8mb3ColumnCharset_2917(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The copy's answer to a statement that it cannot send is paid once per
+// connection: the same statement (any values) goes straight to MySQL after
+// that, until the session is read again. Another statement still reaches
+// the copy, and after a SET NAMES utf8mb4 so does this one.
+func TestRoutedSession_utf8mb3RemembersAStatement_2917(t *testing.T) {
+	rig := narrowRig(t, "utf8mb3", "utf8mb3", "11110")
+	rig.f.res = narrowAnswer("a"+emoji, "x")
+	const stmt = "SELECT s, b, n FROM t WHERE n > 1"
+	if got := firstCell(t, rig.run(t, stmt)); got != "mysql" || rig.f.calls != 1 {
+		t.Fatalf("first: answered by %s after %d copy run(s), want mysql after 1", got, rig.f.calls)
+	}
+	for _, again := range []string{stmt, "SELECT s, b, n FROM t WHERE n > 2"} {
+		if got := firstCell(t, rig.run(t, again)); got != "mysql" || rig.last() != "mysql/session_differs" {
+			t.Errorf("%q: answered by %s (%s), want mysql/session_differs", again, got, rig.last())
+		}
+	}
+	if rig.f.calls != 1 {
+		t.Errorf("the copy ran %d times, want once: a statement already refused was run on it again", rig.f.calls)
+	}
+	rig.f.res = oneCell("side", "VARCHAR", "copy")
+	if got := firstCell(t, rig.run(t, expensive)); got != "copy" {
+		t.Errorf("another statement answered by %s (%s), want the copy", got, rig.last())
+	}
+	rig.run(t, "SET NAMES utf8mb4")
+	rig.r.src.cs, rig.r.src.csConn = "utf8mb4", "utf8mb4"
+	rig.f.res = narrowAnswer("a"+emoji, "x")
+	calls := rig.f.calls
+	rig.run(t, stmt)
+	if rig.last() != "copy/expensive_plan" || rig.f.calls != calls+1 {
+		t.Errorf("after SET NAMES utf8mb4 observed %s after %d more copy run(s), want the copy", rig.last(), rig.f.calls-calls)
+	}
+}
+
+// The memory is bounded: past narrowMemoSize the oldest is forgotten.
+func TestNarrowMemo_bounded_2917(t *testing.T) {
+	var m narrowMemo
+	for i := range narrowMemoSize + 10 {
+		m.add(strconv.Itoa(i))
+	}
+	m.add("5") // already forgotten: added again at the end
+	if len(m.seen) != narrowMemoSize || len(m.order) != narrowMemoSize {
+		t.Fatalf("%d remembered (%d in order), want %d", len(m.seen), len(m.order), narrowMemoSize)
+	}
+	if m.seen["0"] || m.seen["10"] || !m.seen["11"] || !m.seen[strconv.Itoa(narrowMemoSize+9)] || !m.seen["5"] {
+		t.Errorf("the oldest were not the ones forgotten: %v ... %v", m.order[:3], m.order[len(m.order)-3:])
+	}
+	m.add("11")
+	if len(m.order) != narrowMemoSize || m.order[len(m.order)-1] == "11" {
+		t.Error("adding one already remembered changed the order")
 	}
 }
