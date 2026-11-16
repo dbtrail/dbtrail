@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -107,24 +108,21 @@ func pgPairEligible(cfg FullTableConfig, srcPath string, bmeta baseline.DumpMeta
 // and its bound); the carried file keeps its own.
 func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *TableReport) (written bool, err error) {
 	src, bmeta := in.SourceBaseline.Path, in.SourceBaseline.Metadata
-	// The same checks the full merge makes of the file's columns against
-	// the changes and the recorded shape. A refusal is the merge's to give.
 	dst := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
 	full := func(why string, cause error) (bool, error) {
 		if cerr := ctx.Err(); cerr != nil {
 			return false, cerr
 		}
-		// Whatever a failed write left under the pair's names: the folder is
-		// this run's own, and half a pair beside the file the merge is about
-		// to write would be a broken chain on a good table.
-		if dead, rows, perr := pgdelta.Paths(dst, 0); perr == nil {
-			os.Remove(dead)
-			os.Remove(rows)
+		// A pair that was already there is not this call's to remove.
+		if !errors.Is(cause, pgdelta.ErrPairExists) {
+			removePGPair(dst)
 		}
 		slog.Warn("PostgreSQL table delta not written; the table is written in full",
 			"schema", in.Schema, "table", in.Table, "reason", why, "error", cause)
 		return false, nil
 	}
+	// The same checks the full merge makes of the file's columns against
+	// the changes and the recorded shape. A refusal is the merge's to give.
 	colNames, err := prepareMerge(ctx, in)
 	if err != nil {
 		return full("the table file's columns do not pass the merge's checks, which the merge reports", err)
@@ -138,6 +136,23 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	}
 	if in.PGCutLSN == 0 || in.PGDeltaSince.IsZero() {
 		return full("the run has no cut or no bound to record on the delta", nil)
+	}
+	// A pair is found again by its file's name in its folder; a table whose
+	// name holds a path separator has its file somewhere a listing of names
+	// does not say.
+	if strings.ContainsAny(in.Table, `/\`) {
+		return false, nil
+	}
+	// A column a pair cannot hold beside its own: known before the file is
+	// read, true at every update, and no fault, so said once at Info.
+	for _, c := range colNames {
+		if pgdelta.Reserved(c) {
+			pgPairReservedOnce.Do(func() {
+				slog.Info("a PostgreSQL table with a column named like one a table delta adds is written in full at every update",
+					"schema", in.Schema, "table", in.Table, "column", c)
+			})
+			return false, nil
+		}
 	}
 
 	duck, err := sql.Open("duckdb", "")
@@ -240,10 +255,6 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return false, fmt.Errorf("carry %s.%s forward beside its delta: %w", in.Schema, in.Table, err)
 	}
 
-	if !linked {
-		slog.Warn("the table file beside a PostgreSQL table delta was COPIED, not linked: the delta saved no disk and no write for this table",
-			"schema", in.Schema, "table", in.Table)
-	}
 	// The file's rows that no change claimed, as the merge counts them.
 	rep.BaselineRows = baseRows - int64(len(positions))
 	rep.UpdatesApplied, rep.InsertsEmitted, rep.DeletesSkipped = int64(replaced), int64(puts-replaced), int64(removed)
@@ -270,21 +281,56 @@ func pgPairRun(at time.Time) (string, error) {
 	return at.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(b[:]), nil
 }
 
+// pgPairReservedOnce keeps the reserved-column line to one per process.
+var pgPairReservedOnce sync.Once
+
+// pgTableFile is a table file's own name, the last part of its path.
+func pgTableFile(basePath string) string { return filepath.Base(filepath.Clean(basePath)) }
+
+// removePGPair removes whatever is under the names of pair 0 beside the
+// table file at dst, in a snapshot folder this run is still writing: half a
+// pair beside the file the merge is about to write would be a broken chain
+// on a good table.
+func removePGPair(dst string) {
+	if dead, rows, err := pgdelta.Paths(dst, 0); err == nil {
+		os.Remove(dead)
+		os.Remove(rows)
+	}
+}
+
 // pgPairBeside is the delta files beside a PostgreSQL table file: the names
 // of the chain's files, in order, and none for a table with no delta. A
 // chain that is not whole is an error: what the table holds cannot be said.
-func pgPairBeside(basePath, table string) ([]string, error) {
+//
+// A chain starts at pair 0, so a table with neither file of pair 0 has none,
+// and its folder is not listed: this runs for every table carried forward,
+// and a folder holds every table of the schema.
+func pgPairBeside(basePath string) ([]string, error) {
+	dead, rows, err := pgdelta.Paths(basePath, 0)
+	if err != nil {
+		return nil, nil
+	}
+	_, deadErr := os.Lstat(dead)
+	_, rowsErr := os.Lstat(rows)
+	if errors.Is(deadErr, os.ErrNotExist) && errors.Is(rowsErr, os.ErrNotExist) {
+		return nil, nil
+	}
 	entries, err := os.ReadDir(filepath.Dir(basePath))
 	if err != nil {
 		return nil, fmt.Errorf("list the files beside %s: %w", basePath, err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
+		// Another table's file, whose name is its table's: not this chain's,
+		// and not a name ChainOf takes.
+		if strings.ContainsAny(e.Name(), `/\`) {
+			continue
+		}
 		names = append(names, e.Name())
 	}
-	chain, err := pgdelta.ChainOf(table, names)
+	chain, err := pgdelta.ChainOf(strings.TrimSuffix(pgTableFile(basePath), ".parquet"), names)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w; the table cannot be carried forward until this server has a new full snapshot, and every update says so until then", err)
 	}
 	var files []string
 	for _, p := range chain.Pairs {
@@ -305,7 +351,7 @@ func pgPairBeside(basePath, table string) ([]string, error) {
 // there the table is not in the new folder. It returns the delta's files as
 // the report names them, relative to the snapshot folder.
 func pgCarryForward(ctx context.Context, srcPath, snapshotDir, schema, table string) (linked bool, delta []string, err error) {
-	names, err := pgPairBeside(srcPath, table)
+	names, err := pgPairBeside(srcPath)
 	if err != nil {
 		return false, nil, err
 	}
@@ -317,11 +363,12 @@ func pgCarryForward(ctx context.Context, srcPath, snapshotDir, schema, table str
 	}
 	for _, name := range names {
 		dst := filepath.Join(snapshotDir, schema, name)
-		if _, cerr := carryForwardFile(ctx, filepath.Join(filepath.Dir(srcPath), name), dst, false); cerr != nil {
+		// Before the call: a copy that fails partway leaves a file too.
+		made = append(made, dst)
+		if _, cerr := carryForwardFile(ctx, filepath.Join(filepath.Dir(srcPath), name), dst, true); cerr != nil {
 			undo()
 			return false, nil, fmt.Errorf("carry %s forward: %w", name, cerr)
 		}
-		made = append(made, dst)
 		delta = append(delta, filepath.Join(schema, name))
 	}
 	if linked, err = carryForward(ctx, srcPath, snapshotDir, schema, table); err != nil {

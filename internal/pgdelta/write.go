@@ -55,6 +55,11 @@ func IsTemp(name string) bool {
 // pair: the pair's own, and the two the state's reads add.
 var reservedColumns = map[string]bool{KeyColumn: true, OpColumn: true, SeqColumn: true, "file_row_number": true, "filename": true}
 
+// Reserved reports whether a table column of that name keeps the table from
+// having a pair: the pair's own columns and the two a read adds, whatever the
+// case. A caller that knows the columns asks before it reads the table file.
+func Reserved(column string) bool { return reservedColumns[strings.ToLower(column)] }
+
 // ErrReservedColumn says the table has a column named as one a pair adds.
 // Its caller writes the table in full instead.
 var ErrReservedColumn = errors.New("the table has a column named like one a PostgreSQL table delta adds")

@@ -347,6 +347,10 @@ func TestReconstructTables_PGTablePairIsCarriedWithItsFile(t *testing.T) {
 				t.Fatalf("the second update wrote no pair: %v, %v", want, f.pairFiles(root, at2))
 			}
 
+			// Another table's file beside it, with a backslash in its name.
+			if err := os.WriteFile(filepath.Join(root, reconstruct.SnapshotDirName(at2), "public", `a\b.note`), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			// The index loses every event; the switch is whatever it is.
 			testutil.MustExec(t, f.db, "DELETE FROM binlog_events")
 			reconstruct.SetPGTableDeltas(t, on)

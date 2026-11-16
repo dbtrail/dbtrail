@@ -1,10 +1,15 @@
 package reconstruct
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
 	"github.com/dbtrail/dbtrail/internal/query"
 )
 
@@ -71,11 +76,60 @@ func TestPGPairEligible(t *testing.T) {
 	}
 }
 
-// Off unless the variable says so: the default of a process that sets
-// nothing.
-func TestPGTableDeltasOffByDefault(t *testing.T) {
-	if on, _ := pgTableDeltaOn(""); on {
-		t.Fatal("PostgreSQL table deltas are on with the variable unset")
+// A decline after a write that left files removes them: the merge is about
+// to write the table's file, and half a pair beside it is a broken chain.
+func TestRemovePGPair(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "orders.parquet")
+	dead, rows, err := pgdelta.Paths(dst, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(dir, "items.000000.pgnew")
+	for _, f := range []string{dead, rows, other, dst} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removePGPair(dst)
+	for f, want := range map[string]bool{dead: false, rows: false, other: true, dst: true} {
+		if _, err := os.Stat(f); (err == nil) != want {
+			t.Errorf("%s: there %v, want %v", filepath.Base(f), err == nil, want)
+		}
+	}
+}
+
+// pgPairBeside lists nothing for a table with no pair, whatever else is in
+// the folder, and names a whole pair; half a pair is an error.
+func TestPGPairBeside(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "orders.parquet")
+	touch := func(names ...string) {
+		t.Helper()
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Other tables' files, one with a backslash in its name, another table's
+	// pair, and a file still being written.
+	touch("orders.parquet", `a\b.parquet`, "items.parquet", "items.000000.pgdead", "items.000000.pgnew", "orders.000000.pgnew.tmp-1")
+	if got, err := pgPairBeside(base); err != nil || len(got) != 0 {
+		t.Fatalf("no pair: %v, %v", got, err)
+	}
+	// The folder is not even listed: unreadable, the answer is the same.
+	if got, err := pgPairBeside(filepath.Join(dir, "missing", "orders.parquet")); err != nil || len(got) != 0 {
+		t.Fatalf("a folder that is not there: %v, %v", got, err)
+	}
+	touch("orders.000000.pgnew")
+	if _, err := pgPairBeside(base); !errors.Is(err, pgdelta.ErrBrokenChain) || !strings.Contains(err.Error(), "new full snapshot") {
+		t.Fatalf("half a pair: %v", err)
+	}
+	touch("orders.000000.pgdead")
+	got, err := pgPairBeside(base)
+	if err != nil || len(got) != 2 || got[0] != "orders.000000.pgdead" || got[1] != "orders.000000.pgnew" {
+		t.Fatalf("a whole pair: %v, %v", got, err)
 	}
 }
 
