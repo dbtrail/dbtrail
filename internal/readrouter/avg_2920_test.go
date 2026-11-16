@@ -102,6 +102,9 @@ func TestAvgVeto_2920(t *testing.T) {
 		"SELECT g AS bucket, COUNT(*), AVG(k) FROM t GROUP BY bucket ORDER BY bucket", // the issue's shape, over a column
 		"SELECT g, AVG(k) FROM t GROUP BY g ORDER BY 1",
 		"SELECT g, AVG(k) FROM t GROUP BY 1 ORDER BY 1 DESC",
+		"SELECT COUNT(*), AVG(k) FROM t ORDER BY 1", // COUNT(*) is one item, not a star
+		"SELECT g * 2, AVG(k) FROM t GROUP BY g",
+		"SELECT *, AVG(k) FROM t GROUP BY id ORDER BY id", // a star and no position
 		"SELECT g, AVG(k) AS a FROM t GROUP BY g ORDER BY g LIMIT 2",
 		"SELECT AVG(k) a FROM t",
 		"SELECT AVG(k) AS `my avg` FROM t",
@@ -194,13 +197,13 @@ func TestAvgVeto_2920(t *testing.T) {
 		if s == "SELECT AVG(k) FROM t" {
 			o = append(append([]string(nil), other...), "k")
 		}
-		if got := AvgVeto(Shape(s), whole, o); got != VetoAvg {
-			t.Errorf("AvgVeto(%q) = %q, want %q", s, got, VetoAvg)
+		if got := AvgVeto(Shape(s), whole, o); got == "" {
+			t.Errorf("AvgVeto(%q) = none, want a reason", s)
 		}
 	}
 	// No column known: every AVG over a column stays on MySQL.
-	if got := AvgVeto(Shape("SELECT AVG(k) FROM t"), nil, nil); got != VetoAvg {
-		t.Errorf("AvgVeto with no columns known = %q, want %q", got, VetoAvg)
+	if got := AvgVeto(Shape("SELECT AVG(k) FROM t"), nil, nil); got != VetoAvgArgument {
+		t.Errorf("AvgVeto with no columns known = %q, want %q", got, VetoAvgArgument)
 	}
 	if got := ShapeOf("SELECT AVG(k) FROM t").AvgVeto(whole, other); got != "" {
 		t.Errorf("StatementShape.AvgVeto = %q, want none", got)
@@ -210,7 +213,83 @@ func TestAvgVeto_2920(t *testing.T) {
 // AvgVeto reads the statement in one pass whatever its length.
 func TestAvgVeto_long_2920(t *testing.T) {
 	stmt := "SELECT " + strings.Repeat("AVG(k), ", 20000) + "AVG(k) FROM t ORDER BY " + strings.Repeat("1, ", 20000) + "1"
-	if got := AvgVeto(Shape(stmt), []string{"k"}, nil); got != VetoAvg {
-		t.Errorf("AvgVeto(20001 AVGs ordered by the first) = %q, want %q", got, VetoAvg)
+	if got := AvgVeto(Shape(stmt), []string{"k"}, nil); got != VetoAvgPlace {
+		t.Errorf("AvgVeto(20001 AVGs ordered by the first) = %q, want %q", got, VetoAvgPlace)
+	}
+}
+
+// A * or t.* in the select list stands for many columns, so a column
+// position in ORDER BY or GROUP BY may name the AVG although it counts one
+// item for the star (#2920 review): SELECT *, AVG(k) FROM ev ORDER BY 13.
+func TestAvgVeto_star_2920(t *testing.T) {
+	whole := []string{"k"}
+	kept := []string{
+		"SELECT *, AVG(k) FROM ev GROUP BY id ORDER BY 13",
+		"SELECT *, AVG(k) FROM ev GROUP BY id ORDER BY 1",
+		"SELECT g.*, AVG(t.k) FROM g JOIN t ON t.gid = g.id GROUP BY g.id ORDER BY 3",
+		"SELECT g.*, AVG(t.k) FROM g JOIN t ON t.gid = g.id GROUP BY 1 ORDER BY g.id",
+		"SELECT SQL_NO_CACHE *, AVG(k) FROM ev GROUP BY id ORDER BY 13 DESC",
+		"SELECT AVG(k), * FROM ev GROUP BY id ORDER BY 2",
+		"SELECT `db`.`g`.*, AVG(k) FROM db.g GROUP BY id ORDER BY 3",
+	}
+	for _, s := range kept {
+		if got := AvgVeto(Shape(s), whole, nil); got != VetoAvgStar && got != VetoAvgPlace {
+			t.Errorf("AvgVeto(%q) = %q, want %q", s, got, VetoAvgStar)
+		}
+	}
+	// The star alone, with no position, is answered; so is a position with no star.
+	for _, s := range []string{"SELECT *, AVG(k) FROM ev GROUP BY id ORDER BY id", "SELECT id, AVG(k) FROM ev GROUP BY id ORDER BY 1"} {
+		if got := AvgVeto(Shape(s), whole, nil); got != "" {
+			t.Errorf("AvgVeto(%q) = %q, want none", s, got)
+		}
+	}
+	// The star's own reason, where only the star makes the position unsafe.
+	if got := AvgVeto(Shape("SELECT *, AVG(k) FROM ev GROUP BY id ORDER BY 13"), whole, nil); got != VetoAvgStar {
+		t.Errorf("star and a position: %q, want %q", got, VetoAvgStar)
+	}
+}
+
+// Each cause has its own reason.
+func TestAvgVeto_reasons_2920(t *testing.T) {
+	whole, other := []string{"k"}, []string{"dc"}
+	want := map[string]string{
+		"SELECT AVG(dc) FROM t":                              VetoAvgArgument,
+		"SELECT AVG(LENGTH(s)) FROM t":                       VetoAvgArgument,
+		"SELECT AVG(k) * 3 FROM t":                           VetoAvgPlace,
+		"SELECT g FROM t GROUP BY g HAVING AVG(k) > 1":       VetoAvgPlace,
+		"SELECT g, AVG(k) FROM t GROUP BY g ORDER BY 2":      VetoAvgPlace,
+		"SELECT DISTINCT g, AVG(k) FROM t GROUP BY g":        VetoAvgPlace,
+		"SELECT AVG(k) FROM t WHERE k IN (SELECT k FROM t)": VetoAvgShape,
+		"SELECT AVG(k) FROM t UNION SELECT AVG(k) FROM t":    VetoAvgShape,
+		"SELECT t.avg(k) FROM t":                             VetoAvgShape,
+	}
+	for s, w := range want {
+		if got := AvgVeto(Shape(s), whole, other); got != w {
+			t.Errorf("AvgVeto(%q) = %q, want %q", s, got, w)
+		}
+	}
+	seen := map[string]bool{}
+	for _, r := range []string{VetoAvgArgument, VetoAvgPlace, VetoAvgShape, VetoAvgStar} {
+		if seen[r] {
+			t.Errorf("two causes share the reason %q", r)
+		}
+		seen[r] = true
+	}
+}
+
+// A backtick-quoted `avg`(k) is an unknown function on MySQL (an error); the
+// copy would read "avg"(k) as its own average, a DOUBLE. It stays on MySQL,
+// with or without the routing option.
+func TestVetoOpts_quotedAvg_2920(t *testing.T) {
+	for _, stmt := range []string{"SELECT `avg`(k) FROM t", "SELECT `AVG` (k) FROM t", "SELECT `median`(k) OVER () FROM t", "SELECT 1 + `avg`(k) FROM t"} {
+		for _, o := range []CopyOptions{avgRoutedOpts, {}} {
+			if got := VetoOpts(stmt, o); got != vetoQuotedAvg {
+				t.Errorf("VetoOpts(%q, MySQLAvg=%v) = %q, want %q", stmt, o.MySQLAvg, got, vetoQuotedAvg)
+			}
+		}
+	}
+	// A column named avg, not called, is not a call.
+	if got := VetoOpts("SELECT `avg` FROM t", avgRoutedOpts); got != "" {
+		t.Errorf("a column named avg: %q, want none", got)
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"github.com/dbtrail/dbtrail/internal/console"
 	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/testutil"
+	"github.com/go-mysql-org/go-mysql/client"
+	drivermysql "github.com/go-sql-driver/mysql"
 )
 
 // #2920 against a real MySQL: under routing, an AVG of a whole-number column
@@ -160,6 +162,7 @@ func avgRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		{stmt: "SELECT MIN(side), AVG(k) FROM ev WHERE k IN (SELECT k FROM ev)", who: "live", why: "a subquery"},
 		{stmt: "SELECT MIN(side), AVG(?) FROM ev", args: []any{3}, who: "live", why: "a placeholder"},
 	}
+	avgMetadata(t, portDSN, sourceDSN)
 	asText := func(dsn string) string { return strings.Replace(dsn, "parseTime=true", "parseTime=false", 1) }
 	routedText := openRaw(t, asText(withZone(portDSN, "+00:00")))
 	liveText := openRaw(t, asText(withZone(sourceDSN, "+00:00")))
@@ -174,6 +177,51 @@ func avgRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		}
 		if strings.ReplaceAll(got, "(copy,", "(live,") != want {
 			t.Errorf("routed %q (%s):\n  got  %s\n  want %s, the source's own answer", c.stmt, c.why, got, want)
+		}
+	}
+}
+
+// fieldMeta is the protocol-level description of each column of stmt's
+// result, as the server or the routed port sends it: name, type, length,
+// decimals, flags and character set.
+func fieldMeta(t *testing.T, dsn, stmt string) []string {
+	t.Helper()
+	cfg, err := drivermysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := client.Connect(cfg.Addr, cfg.User, cfg.Passwd, cfg.DBName)
+	if err != nil {
+		t.Fatalf("connect %s: %v", cfg.Addr, err)
+	}
+	defer c.Close()
+	res, err := c.Execute(stmt)
+	if err != nil {
+		t.Fatalf("%s: %v", stmt, err)
+	}
+	var out []string
+	for _, f := range res.Fields {
+		out = append(out, fmt.Sprintf("%s type=%d len=%d dec=%d flag=%#x charset=%d", f.Name, f.Type, f.ColumnLength, f.Decimal, f.Flag, f.Charset))
+	}
+	return out
+}
+
+// avgMetadata logs, column by column, the metadata of an AVG over an INT,
+// an UNSIGNED BIGINT and the rest, and of a plain INT column, from the
+// source and from the routed port.
+func avgMetadata(t *testing.T, portDSN, sourceDSN string) {
+	for _, stmt := range []string{
+		"SELECT AVG(k), AVG(u), AVG(b), AVG(ti), AVG(bo), AVG(DISTINCT k) FROM ev",
+		"SELECT MIN(side), g FROM ev",
+	} {
+		got, want := fieldMeta(t, portDSN, stmt), fieldMeta(t, sourceDSN, stmt)
+		for i := range want {
+			if i >= len(got) {
+				t.Errorf("%s: column %d missing", stmt, i)
+				continue
+			}
+			t.Logf("META %-60.60s routed %s", stmt, got[i])
+			t.Logf("META %-60.60s source %s", stmt, want[i])
 		}
 	}
 }

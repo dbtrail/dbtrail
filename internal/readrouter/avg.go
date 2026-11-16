@@ -6,9 +6,22 @@ import (
 	"strings"
 )
 
-// VetoAvg is why AvgVeto keeps a statement on MySQL.
-const VetoAvg = "AVG of something other than a whole-number column, or an AVG used other than as a whole column of the select list " +
-	"(a DECIMAL with div_precision_increment more digits than its argument on MySQL, computed and compared on more digits than it prints)"
+// The reasons AvgVeto keeps a statement on MySQL, one per cause.
+const (
+	// VetoAvgArgument: what AVG is given is not a whole-number column.
+	VetoAvgArgument = "AVG of something other than a whole-number column (over a DECIMAL MySQL answers its scale plus div_precision_increment decimals, " +
+		"over a FLOAT or a DOUBLE a DOUBLE, and the type of an expression is not known here)"
+	// VetoAvgPlace: the AVG is not a whole column of the select list.
+	VetoAvgPlace = "AVG used other than as a whole column of the select list " +
+		"(MySQL computes an AVG on more digits than it prints, which arithmetic, a comparison, another call, HAVING, ORDER BY, a window or SELECT DISTINCT would see)"
+	// VetoAvgShape: a statement whose names or columns the router cannot read
+	// with certainty.
+	VetoAvgShape = "AVG in a statement with a subquery, a WITH, a UNION, a function written db.avg or a select list the router could not read, " +
+		"where a name may not be the table's column"
+	// VetoAvgStar: a * in the select list and a column position in GROUP BY or
+	// ORDER BY.
+	VetoAvgStar = "AVG with a * in the select list and a column position in GROUP BY or ORDER BY (the * stands for many columns, so the position may name the AVG)"
+)
 
 // VetoAvgLeft is why ForCopyOpts refuses a statement under MySQLAvg: an AVG
 // call it did not write as the copy's macro (a comment before its
@@ -79,11 +92,11 @@ func AvgVeto(shape string, whole, other []string) string {
 		return ""
 	}
 	if subquery.MatchString(shape) || avgSetOperation.MatchString(shape) {
-		return VetoAvg
+		return VetoAvgShape
 	}
 	m := avgSelectWord.FindStringIndex(shape)
 	if m == nil {
-		return VetoAvg
+		return VetoAvgShape
 	}
 	// Right after the word SELECT.
 	listStart := m[0] + strings.Index(strings.ToLower(shape[m[0]:m[1]]), "select") + len("select")
@@ -92,7 +105,16 @@ func AvgVeto(shape string, whole, other []string) string {
 		// SELECT DISTINCT compares the rows, the averages among them. The
 		// modifier may come after another (SELECT SQL_NO_CACHE DISTINCT),
 		// always before the first item's first parenthesis.
-		return VetoAvg
+		return VetoAvgPlace
+	}
+	star := false
+	for _, it := range items {
+		// An item that ends in * is * or t.* (SQL_NO_CACHE * too): an
+		// expression cannot end in one. It expands to every column of a table,
+		// so a position after it does not count the written items.
+		if strings.HasSuffix(strings.TrimSpace(shape[it[0]:it[1]]), "*") {
+			star = true
+		}
 	}
 	known := knownNames(whole, other)
 	aliases := map[string]bool{}
@@ -101,29 +123,29 @@ func AvgVeto(shape string, whole, other []string) string {
 	for _, l := range locs {
 		if l[0] < listStart || l[0] >= listEnd || (l[0] > 0 && (shape[l[0]-1] == '.' || shape[l[0]-1] == '"')) {
 			// Outside the select list, or db.avg(...), a stored function.
-			return VetoAvg
+			return VetoAvgShape
 		}
 		for next < len(items) && items[next][1] <= l[0] {
 			next++
 		}
 		if next == len(items) {
-			return VetoAvg
+			return VetoAvgShape
 		}
 		item := items[next]
 		if strings.TrimLeft(shape[item[0]:l[0]], " \t\n\r\f\v") != "" {
 			// Something before the AVG in its item: DISTINCT, a sign, an
 			// operand, an enclosing call.
-			return VetoAvg
+			return VetoAvgPlace
 		}
 		body, ok := closingBody(shape, l[1])
 		if !ok {
-			return VetoAvg
+			return VetoAvgShape
 		}
 		rest := strings.TrimSpace(shape[l[1]+len(body)+1 : item[1]])
 		if rest != "" {
 			a := avgAlias.FindStringSubmatch(rest)
 			if a == nil || strings.EqualFold(a[1], "over") {
-				return VetoAvg
+				return VetoAvgPlace
 			}
 			aliases[sameName(unquote(a[1]))] = true
 		}
@@ -134,7 +156,7 @@ func AvgVeto(shape string, whole, other []string) string {
 		}
 		c := columnRef.FindStringSubmatch(unwrap(arg))
 		if c == nil || !known[sameName(unquote(c[1]))] {
-			return VetoAvg
+			return VetoAvgArgument
 		}
 		next++
 	}
@@ -142,10 +164,10 @@ func AvgVeto(shape string, whole, other []string) string {
 	for _, tok := range nameToken.FindAllString(tail, -1) {
 		if strings.HasPrefix(tok, `"`) && strings.Contains(tok, "(") {
 			// ORDER BY `AVG(k)`: the column MySQL names after the call.
-			return VetoAvg
+			return VetoAvgPlace
 		}
 		if aliases[sameName(unquote(tok))] {
-			return VetoAvg
+			return VetoAvgPlace
 		}
 	}
 	for _, c := range listClause.FindAllStringIndex(tail, -1) {
@@ -156,8 +178,11 @@ func AvgVeto(shape string, whole, other []string) string {
 		parts, _ := topLevelArgs(clause)
 		for _, p := range parts {
 			p = unwrap(strings.TrimSpace(sortDirection.ReplaceAllString(p, "")))
-			if n, err := strconv.Atoi(p); err == nil && positions[n] {
-				return VetoAvg
+			if n, err := strconv.Atoi(p); err == nil && (positions[n] || star) {
+				if !positions[n] {
+					return VetoAvgStar
+				}
+				return VetoAvgPlace
 			}
 		}
 	}

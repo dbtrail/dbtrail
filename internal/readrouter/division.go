@@ -49,6 +49,14 @@ const (
 // which costs a statement the copy could have answered, never a wrong one.
 var avgCallOpen = regexp.MustCompile(`(?i)\b(?:avg|median)` + callOpen)
 
+// quotedAvgCall is AVG or MEDIAN written as a quoted name and called: a
+// backtick-quoted `avg`(k) is an unknown function on MySQL (an error), where
+// the copy reads "avg"(k) as its own average, a DOUBLE.
+var quotedAvgCall = regexp.MustCompile(`(?i)"(?:avg|median)"` + callOpen)
+
+// vetoQuotedAvg is why a quoted AVG or MEDIAN call stays on MySQL.
+const vetoQuotedAvg = "AVG or MEDIAN written as a quoted name (MySQL does not read it as the function)"
+
 // medianCallOpen is MEDIAN called, read as avgCallOpen reads it.
 var medianCallOpen = regexp.MustCompile(`(?i)\bmedian` + callOpen)
 
@@ -62,6 +70,9 @@ var medianCallOpen = regexp.MustCompile(`(?i)\bmedian` + callOpen)
 func divisionVeto(blanked string, avgWritten bool) string {
 	if strings.IndexByte(blanked, '/') >= 0 && slashOutsideFromUnixTime(blanked) {
 		return vetoDivision
+	}
+	if quotedAvgCall.MatchString(blanked) {
+		return vetoQuotedAvg
 	}
 	if avgWritten {
 		if medianCallOpen.MatchString(blanked) {

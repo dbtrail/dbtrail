@@ -83,3 +83,58 @@ func TestAvgMacros_2920(t *testing.T) {
 		t.Errorf("grouped = %s, want %s", got, want)
 	}
 }
+
+// The macros call one another with the parameters s, n and x: a table with
+// columns of those names must not be read as the macro's own (#2920 review).
+func TestAvgMacros_columnNames_2920(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	job := f.job("SELECT _bintrail_avg(x) AS ax, _bintrail_avg(s) AS a_s, _bintrail_avg(n) AS an, _bintrail_avg_distinct(n) AS dn, _bintrail_avg_distinct(s) AS ds, _bintrail_avg(x + 0) AS ex " +
+		"FROM (VALUES (1, 10, -1), (2, 20, -2), (4, 10, -4)) v(s, n, x)")
+	job.Session = Session{MySQLClock: true}
+	res, err := r.Run(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(res.Rows), "[[-2.3333 2.3333 13.3333 15.0000 2.3333 -2.3333]]"; got != want {
+		t.Errorf("columns named s, n and x: %s, want %s", got, want)
+	}
+}
+
+// A sum or a product past what a 128-bit integer holds is an error on the
+// copy and never a wrapped number: abs(sum) * 20000 passes 1.7e38 from a sum
+// of about 8.5e33, and the sum itself at about 1.7e38. Each statement is its
+// own run, since an error ends it. What a run's error then does to the
+// client's statement is the router's (shim RouteReasonCopyRefused: the copy
+// errored, MySQL answers); no BIGINT column reaches either sum in fewer than
+// about 10^15 rows.
+func TestAvgMacros_overflow_2920(t *testing.T) {
+	f := newCopyFixture(t)
+	r := newTestRunner(t, testLimits())
+	run := func(values string) (any, error) {
+		job := f.job("SELECT _bintrail_avg(x) FROM (VALUES " + values + ") v(x)")
+		job.Session = Session{MySQLClock: true}
+		res, err := r.Run(context.Background(), job)
+		if err != nil {
+			return nil, err
+		}
+		return res.Rows[0][0], nil
+	}
+	h := func(v string) string { return "(CAST(" + v + " AS HUGEINT))" }
+	for _, c := range []struct{ name, values string }{
+		{"the product: one value of 9e33", h("9000000000000000000000000000000000")},
+		{"the sum: two values of 1e38", h("100000000000000000000000000000000000000") + ", " + h("100000000000000000000000000000000000000")},
+		{"the sum: two values of -1e38", h("-100000000000000000000000000000000000000") + ", " + h("-100000000000000000000000000000000000000")},
+		{"the product, negative: -9e33", h("-9000000000000000000000000000000000")},
+	} {
+		name := c.name
+		got, err := run(c.values)
+		if err == nil {
+			t.Errorf("%s: answered %v, want an error", name, got)
+		}
+	}
+	// Just under the product's limit the answer is exact.
+	if got, err := run(h("8000000000000000000000000000000000")); err != nil || fmt.Sprint(got) != "8000000000000000000000000000000000.0000" {
+		t.Errorf("8e33: %v, %v; want 8000000000000000000000000000000000.0000", got, err)
+	}
+}

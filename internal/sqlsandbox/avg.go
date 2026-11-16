@@ -18,9 +18,11 @@ package sqlsandbox
 //     the only value the routing port lets reach the copy.
 //
 // No row, or NULLs only, is NULL, as on MySQL. A sum too large for the
-// multiplication (past about 10^34) is an error on the copy, which hands the
-// statement to MySQL; no BIGINT column reaches it in fewer than about 10^15
-// rows.
+// multiplication (past about 8.5e33) or for the sum itself (past about
+// 1.7e38) is an error on the copy, never a wrapped number
+// (TestAvgMacros_overflow_2920); the router sends a statement the copy
+// errored on to MySQL (shim RouteReasonCopyRefused). No BIGINT column reaches
+// either in fewer than about 10^15 rows.
 //
 // What they are given is the router's to decide (readrouter.AvgVeto): a bare
 // whole-number column. Over anything else the cast would round a fraction
