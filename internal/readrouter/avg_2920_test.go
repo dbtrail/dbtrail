@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// routedOpts are the options the routing port runs with (shim copyOpts).
-var routedOpts = CopyOptions{MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true, MySQLTimestampDiff: true, MySQLAvg: true}
+// avgRoutedOpts are the options the routing port runs with (shim copyOpts).
+var avgRoutedOpts = CopyOptions{MySQLClockKeywords: true, MySQLDateFunctions: true, MySQLDateSub: true, MySQLDateAdd: true, MySQLTimestampDiff: true, MySQLAvg: true}
 
 // #2920: under routing AVG(x) and AVG(DISTINCT x) are sent to the copy as its
 // exact average of whole numbers. Every call is written, or the statement is
@@ -30,7 +30,7 @@ func TestForCopyOpts_avg_2920(t *testing.T) {
 		"SELECT ROUND(AVG(k), 2) FROM t":               "SELECT ROUND(_bintrail_avg(k), 2) FROM t", // RoundVeto keeps it on MySQL
 	}
 	for stmt, want := range written {
-		got, why := ForCopyOpts(stmt, routedOpts)
+		got, why := ForCopyOpts(stmt, avgRoutedOpts)
 		if why != "" || got != want {
 			t.Errorf("ForCopyOpts(%q) = %q, %q; want %q", stmt, got, why, want)
 		}
@@ -49,7 +49,7 @@ func TestForCopyOpts_avg_2920(t *testing.T) {
 		"SELECT AVG(k) + AVG/**/(b) FROM t", // one written, one not
 	}
 	for _, stmt := range refused {
-		if got, why := ForCopyOpts(stmt, routedOpts); why != VetoAvgLeft {
+		if got, why := ForCopyOpts(stmt, avgRoutedOpts); why != VetoAvgLeft {
 			t.Errorf("ForCopyOpts(%q) = %q, %q; want refused %q", stmt, got, why, VetoAvgLeft)
 		}
 	}
@@ -66,7 +66,7 @@ func TestVetoOpts_avg_2920(t *testing.T) {
 		"SELECT AVG(`k`) AS `a` FROM `t`",
 	}
 	for _, stmt := range pass {
-		if got := VetoOpts(stmt, routedOpts); got != "" {
+		if got := VetoOpts(stmt, avgRoutedOpts); got != "" {
 			t.Errorf("VetoOpts(%q) = %q, want none (AvgVeto decides)", stmt, got)
 		}
 		if got := Veto(stmt); got != vetoAvg {
@@ -83,7 +83,7 @@ func TestVetoOpts_avg_2920(t *testing.T) {
 		"SELECT _bintrail_avg_of(k, 1) FROM t": vetoCopyMacro,
 	}
 	for stmt, want := range kept {
-		if got := VetoOpts(stmt, routedOpts); got != want {
+		if got := VetoOpts(stmt, avgRoutedOpts); got != want {
 			t.Errorf("VetoOpts(%q) = %q, want %q", stmt, got, want)
 		}
 	}
