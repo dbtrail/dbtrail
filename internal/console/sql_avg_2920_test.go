@@ -107,7 +107,7 @@ func TestSQLAvgRefusalFor_2920(t *testing.T) {
 		t.Errorf("asked %d times, whole %q other %q; want once, whole k,bo and other dc,s,dbl", asked.calls, asked.whole, asked.other)
 	}
 	asked = &avgAsked{why: "x"}
-	if got := sqlAvgRefusalFor(in, "SELECT AVG(k) FROM a", asked); !strings.HasSuffix(got, "x") {
+	if got := sqlAvgRefusalFor(in, "SELECT _bintrail_avg(k) FROM a", asked); !strings.HasSuffix(got, "x") {
 		t.Errorf("refusal %q, want the reason", got)
 	}
 	asked = &avgAsked{why: "x"}
