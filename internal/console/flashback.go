@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
@@ -123,10 +122,6 @@ type SQLOnCopy struct {
 	id string
 	// last is what answered the connection's last statement (#2369).
 	last lastAnswerState
-	// seen is the highest index event id an answer on the copy held every
-	// event through, on this connection: no later answer of the copy may
-	// hold less (seenFloor).
-	seen atomic.Uint64
 }
 
 // Run runs one statement; schema is where unqualified names resolve (the
@@ -162,7 +157,7 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		// a count of rows. MySQL would return every one.
 		maxRows = math.MaxInt32
 	}
-	out, err := q.s.runSQLVouched(withSeenFloor(withTailsFor(ctx, q.id), q.seen.Load()), q.b, q.user, statement, schema, maxRows, sess, unchanged)
+	out, err := q.s.runSQLVouched(withTailsFor(ctx, q.id), q.b, q.user, statement, schema, maxRows, sess, unchanged)
 	if err != nil {
 		q.noteCopyRefused()
 		var werr *sqlsandbox.WorkerError
@@ -201,14 +196,6 @@ func (q *SQLOnCopy) Run(ctx context.Context, statement, schema string, sess sqls
 		return sqlsandbox.Result{}, err
 	}
 	q.noteCopyAnswerMark(out.ReadFrom, out.ReadFromOK, time.Now(), out.TailThrough, out.TailThroughID, out.AllTailed)
-	if out.AllTailed {
-		for id := out.TailThroughID; ; {
-			was := q.seen.Load()
-			if id <= was || q.seen.CompareAndSwap(was, id) {
-				break
-			}
-		}
-	}
 	out.Result.Note = out.OlderCopyNote
 	out.Result.PrintNote = out.PrintNote
 	return out.Result, nil
