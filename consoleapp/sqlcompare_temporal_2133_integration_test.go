@@ -290,10 +290,16 @@ func temporalColumns(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	}
 	reasons := fb.Routing.Servers[ent.ID].Reasons
 	t.Logf("routing reasons: %v", reasons)
-	// The two AVG statements are vetoed from the text since #2806, and
-	// YEAR(created_on) + 1 since #2848. A date plus a day is the copy's to
-	// decline since #2849: MySQL answers it as a DATE.
-	if reasons["copy_columns_differ"] != 15 || reasons["veto"] != 5 || reasons["expensive_plan"] != 3 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
-		t.Errorf("reasons = %v, want copy_columns_differ 15, veto 5, expensive_plan 3, copy_refused 0, explain_failed 0", reasons)
+	// Under routing the AVG text veto of #2806 is left to the router's own
+	// AVG rule since #2920 (readrouter.AvgVeto, asked once the table's columns
+	// are known), so the two AVG statements, AVG(dt) over a DATETIME column
+	// and AVG(x) over an alias in a subquery, are refused by it and counted
+	// as copy_columns_differ, with the reason that names the AVG (not a
+	// whole-number column; a subquery). They are still answered by the
+	// source. YEAR(created_on) + 1 is vetoed from the text since #2848. A
+	// date plus a day is the copy's to decline since #2849: MySQL answers it
+	// as a DATE.
+	if reasons["copy_columns_differ"] != 17 || reasons["veto"] != 3 || reasons["expensive_plan"] != 3 || reasons["copy_refused"] != 0 || reasons["explain_failed"] != 0 {
+		t.Errorf("reasons = %v, want copy_columns_differ 17, veto 3, expensive_plan 3, copy_refused 0, explain_failed 0", reasons)
 	}
 }
