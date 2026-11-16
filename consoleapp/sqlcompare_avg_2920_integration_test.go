@@ -126,8 +126,9 @@ func avgRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	t.Cleanup(func() { cancel(); <-served })
 	portDSN := fmt.Sprintf("%s:tok@tcp(%s)/%s?parseTime=true&timeout=5s", ent.ID, ln.Addr().String(), srcName)
 
-	// A plain INT column such as g is typed by the copy as a BIGINT: that is
-	// not what this test is about, so g is cast where it is selected.
+	// A plain INT column such as g is typed by the copy as a BIGINT, and a CAST
+	// goes to MySQL: neither is what this test is about, so g is only grouped
+	// and ordered by, never selected.
 	// who "" asserts the answer and not who gave it. The first column of
 	// every row is side, so the answer says who gave it.
 	cases := []struct {
@@ -136,12 +137,12 @@ func avgRouted(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		who  string
 		why  string
 	}{
-		{stmt: "SELECT MIN(side), CAST(g AS SIGNED), AVG(k) FROM ev GROUP BY g ORDER BY g", who: "copy", why: "a third, a negative, NULLs only, a half each way"},
-		{stmt: "SELECT MIN(side), CAST(g AS SIGNED), AVG(b), AVG(u), AVG(ti), AVG(bo) FROM ev GROUP BY g ORDER BY g", who: "copy", why: "BIGINT and UNSIGNED at their limits, TINYINT, TINYINT(1)"},
+		{stmt: "SELECT MIN(side), AVG(k) FROM ev GROUP BY g ORDER BY g", who: "copy", why: "a third, a negative, NULLs only, a half each way"},
+		{stmt: "SELECT MIN(side), AVG(b), AVG(u), AVG(ti), AVG(bo) FROM ev GROUP BY g ORDER BY g", who: "copy", why: "BIGINT and UNSIGNED at their limits, TINYINT, TINYINT(1)"},
 		{stmt: "SELECT MIN(side), AVG(DISTINCT k), AVG(DISTINCT(ti)), AVG(k) FROM ev", who: "copy", why: "DISTINCT"},
 		{stmt: "SELECT MIN(side), avg (k), Avg(`k`) AS `a`, AVG(ev.k) a2 FROM ev", who: "copy", why: "spellings"},
-		{stmt: "SELECT MIN(side), CAST(g AS SIGNED) AS bucket, COUNT(*), AVG(k) FROM ev GROUP BY bucket ORDER BY bucket", who: "copy", why: "the issue's shape over a column"},
-		{stmt: "SELECT MIN(side), CAST(g AS SIGNED), AVG(k) FROM ev GROUP BY g ORDER BY 1, 2", who: "copy", why: "ORDER BY other positions"},
+		{stmt: "SELECT MIN(side), COUNT(*), AVG(k) FROM ev GROUP BY g ORDER BY g", who: "copy", why: "the issue's shape over a column"},
+		{stmt: "SELECT MIN(side), AVG(k) FROM ev GROUP BY g ORDER BY 1, g", who: "copy", why: "ORDER BY other positions"},
 		{stmt: "SELECT MIN(side), AVG(k) FROM ev WHERE g = 3", who: "copy", why: "NULLs only"},
 		{stmt: "SELECT MIN(side), AVG(k) FROM ev WHERE k > 100", who: "", why: "no row: nothing says who answered"},
 		{stmt: "SELECT MIN(side), AVG(k) FROM ev WHERE g > ?", args: []any{0}, who: "copy", why: "prepared"},
