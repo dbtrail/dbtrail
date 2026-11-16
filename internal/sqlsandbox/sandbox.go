@@ -383,6 +383,10 @@ type Session struct {
 // FLOAT columns, star says the statement holds a star (Refs), and the answer
 // is why the copy must not answer a statement that reads one, or "".
 //
+// AvgVeto is about AVG under routing (#2920): whole are the whole-number
+// columns (TINYINT to BIGINT and BOOL, signed or not), other the rest, and the
+// answer is why an AVG must not be answered by the copy, or "".
+//
 // UnsignedVeto is about arithmetic on UNSIGNED whole numbers under routing
 // (#2848): unsigned are the UNSIGNED TINYINT to BIGINT columns, star says the
 // statement holds a star (Refs), and the answer is why the copy must not
@@ -400,6 +404,7 @@ type ColumnTypes interface {
 	TimestampDiffVeto(dates, other []string) string
 	FloatVeto(floats []string, star bool) string
 	UnsignedVeto(unsigned []string, star bool) string
+	AvgVeto(whole, other []string) string
 }
 
 // Column is one result column with DuckDB's type name (INTEGER, VARCHAR,

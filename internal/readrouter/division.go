@@ -24,7 +24,15 @@ const (
 	// AVG(k) over an INT is 2.8571 on MySQL and 2.857142857142857 on the
 	// copy. MariaDB's MEDIAN interpolates between two rows the same way and
 	// is kept with it; it was not measured.
+	//
+	// Under CopyOptions.MySQLAvg (the routing port, #2920) AVG is written as
+	// the copy's exact average instead, and only MEDIAN is kept here: what
+	// AVG may be given is AvgVeto's to decide once the columns' types are
+	// known.
 	vetoAvg = "AVG or MEDIAN (a DECIMAL with div_precision_increment more digits than its argument on MySQL, a DOUBLE on the copy)"
+	// vetoMedian is vetoAvg once AVG is the copy's macro: MariaDB's MEDIAN
+	// alone.
+	vetoMedian = "MEDIAN (a DECIMAL with div_precision_increment more digits than its argument on MariaDB, a DOUBLE on the copy)"
 	// vetoBigInteger: a whole number written in the statement from 2^63 up
 	// is a BIGINT UNSIGNED on MySQL up to 2^64-1 and a DECIMAL past it; the
 	// copy reads it as a 128-bit integer (sent as a DECIMAL, applyDuckType
@@ -41,16 +49,25 @@ const (
 // which costs a statement the copy could have answered, never a wrong one.
 var avgCallOpen = regexp.MustCompile(`(?i)\b(?:avg|median)` + callOpen)
 
+// medianCallOpen is MEDIAN called, read as avgCallOpen reads it.
+var medianCallOpen = regexp.MustCompile(`(?i)\bmedian` + callOpen)
+
 // divisionVeto says why the copy must not answer blanked (the statement as
 // the vetoes read it: string literals blanked, comments removed, backticks
 // written as double quotes), or "": a / outside the argument of a
 // FROM_UNIXTIME call and outside a quoted name, an AVG or a MEDIAN, or a
-// whole number written from 2^63 up. One pass over the text.
-func divisionVeto(blanked string) string {
+// whole number written from 2^63 up. One pass over the text. With
+// avgWritten (CopyOptions.MySQLAvg, every AVG written as the copy's macro)
+// an AVG is left to AvgVeto and only a MEDIAN is kept.
+func divisionVeto(blanked string, avgWritten bool) string {
 	if strings.IndexByte(blanked, '/') >= 0 && slashOutsideFromUnixTime(blanked) {
 		return vetoDivision
 	}
-	if avgCallOpen.MatchString(blanked) {
+	if avgWritten {
+		if medianCallOpen.MatchString(blanked) {
+			return vetoMedian
+		}
+	} else if avgCallOpen.MatchString(blanked) {
 		return vetoAvg
 	}
 	if bigWholeNumber(blanked) {

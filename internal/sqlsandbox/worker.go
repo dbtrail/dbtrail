@@ -348,6 +348,10 @@ func runJobOn(sess *session, job wireJob, ask func(Refs) (string, error), stderr
 		if _, err := conn.ExecContext(ctx, timestampDiffMacros); err != nil {
 			return sessionErr("define TIMESTAMPDIFF: %v", err)
 		}
+		// And AVG of whole numbers, exact (#2920).
+		if _, err := conn.ExecContext(ctx, avgMacros); err != nil {
+			return sessionErr("define AVG: %v", err)
+		}
 		// And DATE_ADD, and d + INTERVAL n unit (#2800).
 		if _, err := conn.ExecContext(ctx, dateAddMacro); err != nil {
 			return sessionErr("define DATE_ADD: %v", err)

@@ -130,6 +130,17 @@ type CopyOptions struct {
 	// Without it the veto keeps them on MySQL. Only the routing port sets it;
 	// the port without routing answers them with the copy's meaning.
 	MySQLClockKeywords bool
+	// MySQLAvg writes MySQL's AVG(x) and AVG(DISTINCT x) as the copy's
+	// _bintrail_avg and _bintrail_avg_distinct macros (mysqlAvgCall, #2920),
+	// which sqlsandbox defines under Session.MySQLClock: MySQL's average of
+	// whole numbers, a DECIMAL with four decimals, computed exactly. An AVG
+	// it cannot write so is refused (VetoAvgLeft), and VetoOpts lets AVG past
+	// the veto list only when every call was written. Only the routing port
+	// sets it, and the caller keeps on MySQL an AVG of anything but a
+	// whole-number column, or one used other than as a column of the select
+	// list (AvgVeto). Off, AVG is sent as written: the copy's own avg, a
+	// DOUBLE.
+	MySQLAvg bool
 }
 
 // ForCopy returns the statement the copy is sent: every backtick-quoted name
@@ -190,9 +201,18 @@ func ForCopyOpts(stmt string, o CopyOptions) (text, refusal string) {
 			// parenthesis): the copy's own date_add would answer, unchecked.
 			return stmt, VetoDateAdd
 		}
+		if o.MySQLAvg && avgLeft(text) {
+			return stmt, VetoAvgLeft
+		}
 		return text, ""
 	}
-	return sc.copyText(o), ""
+	text := sc.copyText(o)
+	if o.MySQLAvg && avgLeft(text) {
+		// An AVG copyText could not write as the macro: the copy's own avg
+		// would answer it as a DOUBLE.
+		return stmt, VetoAvgLeft
+	}
+	return text, ""
 }
 
 // literalVeto is the part of the veto that comes from how the statement's
@@ -562,7 +582,7 @@ func wordByte(c byte) bool {
 
 // rewrittenKeywords are the words copyText may rewrite, lowercase.
 var rewrittenKeywords = []string{"straight_join", "like", "limit", "date_format", "datediff", "date_sub", "subdate", "date_add", "adddate", "timestampdiff",
-	"current_timestamp", "current_date", "localtime", "localtimestamp"}
+	"current_timestamp", "current_date", "localtime", "localtimestamp", "avg"}
 
 // keywordAt is where one of rewrittenKeywords starts in the text sent to the
 // copy (cp) and in the blanked text (bl).
@@ -638,6 +658,16 @@ func (sc scanned) copyText(o CopyOptions) string {
 				continue
 			}
 			call, n, ok := mysqlTimestampDiffCall(cp[j.cp+kw:], bl[j.bl+kw:])
+			if !ok {
+				continue
+			}
+			cp = cp[:j.cp] + call + cp[j.cp+kw+n:]
+			continue
+		case j.word == "avg":
+			if !o.MySQLAvg {
+				continue
+			}
+			call, n, ok := mysqlAvgCall(cp[j.cp+kw:])
 			if !ok {
 				continue
 			}
