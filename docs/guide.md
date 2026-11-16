@@ -590,7 +590,7 @@ itself stays plain Parquet: [Parquet reference](parquet-debugging.md#the-archive
 
 **Re-indexing new binlog files:** Just run `index --all` again. Files already marked `completed` are skipped automatically — re-running is always safe.
 
-**Running `stream` as a service:** `bintrail stream` is a long-running process — it runs indefinitely and self-checkpoints every 10 seconds (configurable). Run it under systemd with `Type=simple` and `Restart=always` so it automatically recovers from network interruptions. On restart it resumes from the last saved checkpoint in `stream_state` — no `--start-gtid` or `--start-file` needed. See [deployment.md](./deployment.md) for a ready-to-use systemd unit template.
+**Running `stream` as a service:** `bintrail stream` is a long-running process — it runs indefinitely and self-checkpoints every 10 seconds (configurable), and on MySQL and MariaDB also soon after each write to the index. Run it under systemd with `Type=simple` and `Restart=always` so it automatically recovers from network interruptions. On restart it resumes from the last saved checkpoint in `stream_state` — no `--start-gtid` or `--start-file` needed. See [deployment.md](./deployment.md) for a ready-to-use systemd unit template.
 
 **After schema changes:** If you ran `ALTER TABLE`, `CREATE TABLE`, or `DROP TABLE` on the source, re-run `snapshot` so the indexer has current column metadata:
 
