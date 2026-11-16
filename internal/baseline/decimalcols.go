@@ -105,6 +105,9 @@ type TableFooter struct {
 	// the table's shape (MetaKeyPGRelation), and PG says how each column's
 	// text is read (PGCasts, #2755). Nil for a MySQL or MariaDB file.
 	PG []PGCast
+	// PGRelation is that recorded shape, for a PostgreSQL file whose PG is
+	// set: the catalog the PostgreSQL-protocol port answers from (#2769).
+	PGRelation *PGRelation
 }
 
 // DistinctColumns splits a parsed schema into the columns whose DISTINCT
@@ -707,7 +710,7 @@ func (st *footerScan) collectPGRelation(file, value string) {
 			folded[key] = true
 		}
 	}
-	st.footers[file] = TableFooter{PG: casts, Columns: names}
+	st.footers[file] = TableFooter{PG: casts, Columns: names, PGRelation: &rel}
 }
 
 // DecimalColumns picks the decimal and numeric columns out of a parsed schema.

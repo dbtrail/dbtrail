@@ -68,6 +68,12 @@ type Binding struct {
 	Actor string
 	// Schema is where unqualified names resolve, for the audit record.
 	Schema string
+	// Catalog, when set, reads the copy's tables for the system catalog
+	// statements tools send to list them (catalog.go): the tables a
+	// statement on the copy can read, each column with the copy engine's
+	// type, and what the source recorded of each. Nil: such statements are
+	// refused.
+	Catalog func(ctx context.Context) ([]CatalogTable, error)
 	// TimeTravel, when set, answers the time-travel statements of this
 	// connection (single-row _flashback and _snapshot AS OF, as the first
 	// mode serves them). It reads the index and the snapshot directly. Nil:
@@ -200,6 +206,7 @@ func handleLoginConn(ctx context.Context, c net.Conn, cfg Config, pt *portTLS, c
 	// included: the schema free SQL resolves names in, until a SET
 	// search_path.
 	sess.currentDB = bound.Schema
+	sess.database = database
 	sess.initSettings(bound.Schema, user)
 	target, release := cancels.register()
 	defer release()

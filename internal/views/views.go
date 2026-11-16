@@ -218,6 +218,12 @@ type BaselineTable struct {
 	// and of everything set with it but Columns: a PostgreSQL file carries
 	// no CREATE TABLE, and what those fields answer is asked about MySQL.
 	PGCasts []baseline.PGCast
+	// PGRelation is the table's shape as the PostgreSQL source recorded it
+	// in the snapshot (baseline.PGRelation: OID, columns with NOT NULL and
+	// default, primary key), set with PGCasts; nil for any other table. Only
+	// the PostgreSQL-protocol port's catalog reads it (#2769); the views do
+	// not.
+	PGRelation *baseline.PGRelation
 
 	// SchemaKnown records whether the table's embedded CREATE TABLE was read at
 	// all. It separates "this table has no decimal columns" from "we could not

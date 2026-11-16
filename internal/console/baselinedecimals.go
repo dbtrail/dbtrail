@@ -119,3 +119,27 @@ func (s *Server) rememberBaselineDecimals(key string, decimals map[string]baseli
 	}
 	s.baselineDecimals[key] = baselineDecimalEntry{decimals: decimals, at: time.Now(), failed: failed, unread: unread}
 }
+
+// CopyTable is one table of the copy as the PostgreSQL-protocol port's
+// catalog describes it (#2769): where it is, the columns its view hides, and
+// the shape the source recorded for it in the snapshot (nil when the
+// snapshot predates that record).
+type CopyTable struct {
+	Schema, Table string
+	Hidden        []string
+	Relation      *baseline.PGRelation
+}
+
+// CopyTables are the tables the copy serves this connection, after the
+// server's hidden rules: the ones a statement can read, no more.
+func (q *SQLOnCopy) CopyTables(ctx context.Context) ([]CopyTable, error) {
+	in, err := q.s.buildViewsInput(ctx, q.b, viewsRequest{PinSnapshot: true, OmitEvents: true, StateOnly: true, ForStatement: true, LocalCopy: true, ApplyHidden: true})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CopyTable, 0, len(in.Baselines))
+	for _, t := range in.Baselines {
+		out = append(out, CopyTable{Schema: t.Schema, Table: t.Table, Hidden: t.HiddenColumns, Relation: t.PGRelation})
+	}
+	return out, nil
+}

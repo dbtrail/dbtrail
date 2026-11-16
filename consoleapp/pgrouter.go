@@ -664,6 +664,19 @@ func pgPortLogin(srv *console.Server, timeout time.Duration, gate *shim.Gate, lo
 			sess := sqlsandbox.Session{PostgresRules: true, PostgresNames: true, TimeZone: opts.TimeZone}
 			return copySQL.Run(ctx, statement, schema, sess)
 		}
+		// The system catalog's statements are answered from the copy's own
+		// tables (#2769), read in UTC and in the port's schema: what the
+		// catalog lists does not depend on the session.
+		bound.Catalog = func(ctx context.Context) ([]pgshim.CatalogTable, error) {
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			return pgCopyCatalog(ctx, copySQL, func(ctx context.Context, statement string) (sqlsandbox.Result, error) {
+				return copySQL.Run(ctx, statement, pgPortSchema, sqlsandbox.Session{PostgresRules: true, PostgresNames: true})
+			})
+		}
 		return bound, nil
 	}
 }
