@@ -74,6 +74,16 @@ type routeSession struct {
 	// copy still answers a statement that collation cannot change
 	// (readrouter.CollationFree), and no other.
 	collationDiffers string
+	// narrowResults: character_set_results is utf8mb3 (#2917). MySQL sends
+	// every character below U+10000 as the bytes the copy's utf8mb4 holds,
+	// and a four-byte one as '?': an answer of the copy with one in a text
+	// cell is not sent (narrowResultError), and a text column is declared
+	// utf8mb3, as MySQL declares it.
+	narrowResults bool
+	// narrowConnection: character_set_connection is utf8mb3 (#2917). MySQL
+	// turns a four-byte character of a literal into '?' and the copy keeps
+	// it: a statement holding one is MySQL's (narrowStatementVeto).
+	narrowConnection bool
 	// zone is @@time_zone as MySQL reports it; zoneUTC says every probe
 	// instant came back with no offset, whatever the zone is called. Both
 	// are set whenever the session was read, reproducible or not: time
@@ -280,8 +290,18 @@ func collationReproducible(probe string) bool {
 // what Connector/J sets, or binary), where MySQL sends each column in the
 // column's own character set and says so in the column's definition, as the
 // copy does. Under any other, MySQL converts (and replaces what does not
-// fit, so utf8mb3 turns a four-byte character into '?').
-var reproducibleResultCharsets = map[string]bool{"utf8mb4": true, "": true, "binary": true}
+// fit, so latin1 turns a character outside it into '?').
+//
+// utf8mb3 (spelled utf8 before MySQL 8.0.30) is reproduced too (#2917): it
+// is the utf8mb4 bytes for every character below U+10000, and the port
+// checks each answer for the others (narrowResults). It is what the MariaDB
+// command-line client asks for, and ProxySQL's default.
+var reproducibleResultCharsets = map[string]bool{"utf8mb4": true, "": true, "binary": true, "utf8mb3": true, "utf8": true}
+
+// isUTF8MB3 says a character set name is utf8mb3, by either spelling.
+func isUTF8MB3(cs string) bool {
+	return strings.EqualFold(cs, "utf8mb3") || strings.EqualFold(cs, "utf8")
+}
 
 // sessionFromReadBack turns the read-back's row into what the port knows. The row
 // is never trusted to be well formed: a cell that is missing or NULL where a
@@ -379,18 +399,22 @@ func sessionFromReadBack(cells []any, instants []time.Time, copyZone func(duckZo
 		return differ("sql_big_selects", bigSelects, "MySQL refuses large reads under it (max_join_size) and the copy would answer them")
 	case !reproducibleResultCharsets[strings.ToLower(csResults)]:
 		return differ("character_set_results", csResults, "the copy answers in utf8mb4")
-	case !strings.EqualFold(csConnection, "utf8mb4"):
+	case !strings.EqualFold(csConnection, "utf8mb4") && !isUTF8MB3(csConnection):
 		// A literal is converted to this character set before it is
 		// compared: under latin1 a literal outside it becomes '?' on MySQL
-		// and stays itself on the copy.
+		// and stays itself on the copy. Under utf8mb3 only a four-byte
+		// character does, and a statement holding one is MySQL's
+		// (narrowStatementVeto).
 		return differ("character_set_connection", csConnection, "the copy reads the statement's literals as utf8mb4")
-	case !collationReproducible(collation):
+	}
+	rs.narrowResults, rs.narrowConnection = isUTF8MB3(csResults), isUTF8MB3(csConnection)
+	if !collationReproducible(collation) {
 		// Last of the checks, so every other setting is reproduced: the
 		// copy may still answer what this collation cannot change.
 		rs.collationDiffers = "collation_connection = (not one that compares like utf8mb4_0900_ai_ci): " +
 			"the copy's text comparisons are documented against MySQL's default collation (utf8mb4_0900_ai_ci), and this connection compares otherwise, " +
 			"so a statement with a string literal, or a function that returns text, is MySQL's. " +
-			"utf8mb4_unicode_ci and utf8mb4_0900_ai_ci compare as the copy does; utf8mb4_general_ci (go-sql-driver's and PyMySQL's default, and MariaDB 10.11's for utf8mb4) does not: " +
+			"utf8mb4_unicode_ci and utf8mb4_0900_ai_ci compare as the copy does; utf8mb4_general_ci (go-sql-driver's and PyMySQL's default, and MariaDB 10.11's for utf8mb4) and utf8mb3_general_ci (the MariaDB client's) do not: " +
 			"ask for utf8mb4_0900_ai_ci or utf8mb4_unicode_ci when connecting, or SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
 	}
 	return rs, nil

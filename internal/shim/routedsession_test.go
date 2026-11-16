@@ -232,7 +232,8 @@ func TestRoutedSession_settingsTheCopyDoesNotReproduce(t *testing.T) {
 		{"sql_auto_is_null", func(s *fakeSource) { s.autoNull = "1" }, "sql_auto_is_null = 1"},
 		{"sql_big_selects off", func(s *fakeSource) { s.big = "0" }, "sql_big_selects = 0"},
 		{"character_set_results latin1", func(s *fakeSource) { s.cs = "latin1" }, "character_set_results = latin1"},
-		{"character_set_results utf8mb3", func(s *fakeSource) { s.cs = "utf8mb3" }, "character_set_results = utf8mb3"},
+		// utf8mb3 results and connection are the copy's (#2917):
+		// TestRoutedSession_copyRunsUnderTheSourcesSession.
 		{"a latin1 connection character set, whose default collation also ignores case and accents", func(s *fakeSource) { s.csConn = "latin1" }, "character_set_connection = latin1"},
 		// The connection's collation keeps only some statements on MySQL
 		// (#2836): TestRoutedSession_collationKeepsOnlyTextOnMySQL_2836.
@@ -348,6 +349,10 @@ func TestRoutedSession_copyRunsUnderTheSourcesSession(t *testing.T) {
 		}, sqlsandbox.Session{}},
 		{"character_set_results NULL (Connector/J)", func(s *fakeSource) { s.cs = nil }, sqlsandbox.Session{}},
 		{"character_set_results binary", func(s *fakeSource) { s.cs = "binary" }, sqlsandbox.Session{}},
+		// #2917: the same bytes as utf8mb4 below U+10000.
+		{"character_set_results utf8mb3", func(s *fakeSource) { s.cs = "utf8mb3" }, sqlsandbox.Session{}},
+		{"character_set_results utf8", func(s *fakeSource) { s.cs = "utf8" }, sqlsandbox.Session{}},
+		{"character_set_connection utf8mb3", func(s *fakeSource) { s.csConn = "utf8mb3" }, sqlsandbox.Session{}},
 		// A PAD SPACE collation that agrees on everything but trailing
 		// spaces (utf8mb4_unicode_ci, MariaDB's default uca1400_ai_ci): the
 		// documented difference, accepted.

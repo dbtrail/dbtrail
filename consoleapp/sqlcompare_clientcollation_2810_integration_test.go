@@ -87,8 +87,36 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 	if err := src.QueryRow("SHOW CREATE TABLE ev").Scan(&name, &ddl); err != nil {
 		t.Fatal(err)
 	}
+	// #2917: a table with a four-byte character (an emoji) in one row's
+	// text, which utf8mb3 does not have. No letter with an accent: that
+	// keeps a statement reading the column on MySQL for another reason.
+	emoRows := func(side string) [][]string {
+		return [][]string{
+			{"1", "1", side, "plain"},
+			{"2", "2", side, "b"},
+			{"3", "3", side, "a\U0001F600b"},
+		}
+	}
+	if _, err := src.Exec("CREATE TABLE emo (id INT NOT NULL PRIMARY KEY, k INT, side VARCHAR(8), s VARCHAR(8)) DEFAULT CHARSET=utf8mb4"); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range emoRows("live") {
+		if _, err := src.Exec("INSERT INTO emo VALUES ('" + strings.Join(r, "','") + "')"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := src.Exec("ANALYZE TABLE emo"); err != nil {
+		t.Fatal(err)
+	}
+	var emoDDL string
+	if err := src.QueryRow("SHOW CREATE TABLE emo").Scan(&name, &emoDDL); err != nil {
+		t.Fatal(err)
+	}
 	baseDir := t.TempDir()
-	writeOrderSnapshot(t, baseDir, srcName, []orderTable{{name: "ev", ddl: ddl + ";\n", rows: rows("live"), copyRows: rows("copy"), footer: true}})
+	writeOrderSnapshot(t, baseDir, srcName, []orderTable{
+		{name: "ev", ddl: ddl + ";\n", rows: rows("live"), copyRows: rows("copy"), footer: true},
+		{name: "emo", ddl: emoDDL + ";\n", rows: emoRows("live"), copyRows: emoRows("copy"), footer: true},
+	})
 
 	reg, err := console.LoadRegistry(t.TempDir() + "/servers.yaml")
 	if err != nil {
@@ -147,6 +175,9 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		{"binary"},
 		{"utf8mb4_unicode_ci"},
 		{"utf8mb4_0900_ai_ci"},
+		// The MariaDB command-line client's handshake (#2917): utf8mb3,
+		// whose default collation is not one the copy compares as.
+		{"utf8_general_ci"},
 	}
 	for _, c := range cases {
 		label := c.collation
@@ -173,7 +204,10 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		}
 		liveSession := strings.Split(answerText(live, session), "|")
 		wantWho := "live"
-		if len(liveSession) == 4 && liveSession[2] == "utf8mb4" && liveSession[3] == "utf8mb4" {
+		// utf8mb3 is the same bytes below U+10000 (#2917), and ev holds
+		// nothing above.
+		wide := map[string]bool{"utf8mb4": true, "utf8mb3": true, "utf8": true}
+		if len(liveSession) == 4 && wide[liveSession[2]] && wide[liveSession[3]] {
 			wantWho = "copy"
 		}
 		got, want := answerText(port, copyRead), answerText(live, copyRead)
@@ -198,6 +232,42 @@ func clientCollation(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string, mar
 		}
 		if strings.ReplaceAll(got, "copy|", "live|") != want {
 			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", label, copyReadText, got, want)
+		}
+	}
+
+	// #2917: under utf8mb3 the copy answers, except a statement or an
+	// answer with a character utf8mb3 does not have, which MySQL turns into
+	// '?'. utf8_unicode_ci compares as the copy does, so there a string
+	// literal is the copy's too; utf8_general_ci does not (#2836). Under
+	// utf8mb4 the same statements are the copy's: each refusal below is
+	// this rule's.
+	const (
+		emoRead    = "SELECT side, s FROM emo ORDER BY k"
+		emoNoText  = "SELECT side, k FROM emo ORDER BY k"
+		emoLiteral = "SELECT side, k FROM emo WHERE s <> 'x\U0001F600' ORDER BY k"
+		bmpLiteral = "SELECT side, k FROM emo WHERE s <> 'zz\u4e2d' ORDER BY k"
+	)
+	for _, c := range []struct{ collation, stmt, wantWho string }{
+		{"utf8mb4_unicode_ci", emoRead, "copy"},
+		{"utf8mb4_unicode_ci", emoNoText, "copy"},
+		{"utf8mb4_unicode_ci", emoLiteral, "copy"},
+		{"utf8mb4_unicode_ci", bmpLiteral, "copy"},
+		{"utf8_general_ci", emoRead, "live"},
+		{"utf8_general_ci", emoNoText, "copy"},
+		{"utf8_unicode_ci", emoRead, "live"},
+		{"utf8_unicode_ci", emoNoText, "copy"},
+		{"utf8_unicode_ci", emoLiteral, "live"},
+		{"utf8_unicode_ci", bmpLiteral, "copy"},
+	} {
+		port := openRaw(t, withCollation(portDSN, c.collation))
+		live := openRaw(t, withCollation(liveDSN, c.collation))
+		got, want := answerText(port, c.stmt), answerText(live, c.stmt)
+		t.Logf("%-20s port %-70.200s %s (source %s)", c.collation, got, c.stmt, answerText(live, session))
+		if who := map[bool]string{true: "copy", false: "live"}[strings.Contains(got, "copy|")]; who != c.wantWho {
+			t.Errorf("%s: %q answered by %s, want %s", c.collation, c.stmt, who, c.wantWho)
+		}
+		if strings.ReplaceAll(got, "copy|", "live|") != want {
+			t.Errorf("%s: %q through the port:\n  got  %s\n  want %s, the source's own answer", c.collation, c.stmt, got, want)
 		}
 	}
 

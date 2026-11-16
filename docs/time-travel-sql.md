@@ -1099,7 +1099,8 @@ The decision, in order, for every statement:
    | `sql_auto_is_null` | `0` | `1` |
    | `timestamp`, asked before each statement that calls `NOW()`, `CURDATE()`, `UTC_TIMESTAMP()` or `UTC_DATE()` (#2611) | not set, and the source's clock within a second of DBTrail's host's | set (`SET timestamp = ...`, as replay tools do: MySQL's `NOW()` is that moment), or a source clock more than a second from DBTrail's host's (the copy reads the host's) |
    | `sql_big_selects` | `1` | `0` (MySQL refuses large reads; with `max_join_size` at its default it is 1) |
-   | `character_set_results` | `utf8mb4`; `NULL` or `binary` (no conversion: each column comes in its own character set and says so, as from the copy) | `latin1`, `utf8mb3` and the rest: MySQL converts, the copy answers in utf8mb4 |
+   | `character_set_results` | `utf8mb4`; `NULL` or `binary` (no conversion: each column comes in its own character set and says so, as from the copy); `utf8mb3` (also spelled `utf8`), since #2917, except an answer with a character utf8mb3 does not have (below) | `latin1` and the rest: MySQL converts, the copy answers in utf8mb4 |
+   | `character_set_connection` | `utf8mb4`; `utf8mb3` (also spelled `utf8`), since #2917, except a statement with a character utf8mb3 does not have (below) | `latin1` and the rest: MySQL converts a literal to it, and one outside it becomes `?` there and stays itself on the copy |
    | the connection's collation (`SET NAMES ... COLLATE`, `collation_connection`), which decides comparisons between two literals (a column carries its own) | one that compares like `utf8mb4_0900_ai_ci`: no case, no accents, `ß` equal to `ss`, a full-width letter equal to the plain one. The copy itself folds case only: accents, `ß` and full-width letters stay a documented difference under every one of these (see "The copy itself compares text"). Measured: `utf8mb4_0900_ai_ci`, `utf8mb4_unicode_ci`, `utf8mb4_unicode_520_ci`, MariaDB's `utf8mb4_uca1400_ai_ci` and the `_nopad_` variants of those. Under the ones that pad (`unicode_ci`, `unicode_520_ci`, `uca1400_ai_ci`, MariaDB's default) one difference stays: `'a' = 'a '` is true on MySQL and false on the copy, as for a column under a PAD SPACE collation | `utf8mb4_general_ci` and `utf8mb4_general_nopad_ci` (`ß` equals `s`, a full-width letter is another letter), `_bin`, `_cs`, `_as_cs`: since #2836, only for a statement with a string literal (or a double-quoted string, a hex or bit number, a placeholder) or a call other than `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, the number and date functions (`ROUND`, `YEAR`, `NOW()`, `DATEDIFF` and a few more) and the keywords that open a list. A statement with neither has no text that takes the connection's collation (a column carries its own, and wins against a literal), and the copy answers it under any collation |
 
    These are session settings whose value MySQL reads when it answers a
@@ -1154,7 +1155,8 @@ The decision, in order, for every statement:
    reset on 11.4 and later).
 
    Whether the copy answers is the table above: only under a collation that
-   compares like `utf8mb4_0900_ai_ci` and with results in `utf8mb4`. That
+   compares like `utf8mb4_0900_ai_ci` and with results in `utf8mb4` or
+   `utf8mb3` (below). That
    matters for drivers whose default is another collation:
    go-sql-driver/mysql asks for `utf8mb4_general_ci`, so on MySQL and on
    MariaDB 10.11 a Go client that names no collation is now answered by
@@ -1169,6 +1171,41 @@ The decision, in order, for every statement:
    MariaDB 10.11 (which has no `utf8mb4_0900_ai_ci` and gives a client that
    asks for it `utf8mb4_general_ci`, on a direct connection as through the
    port). A client's own `SET NAMES` later in the session works as before.
+
+   **A session in utf8mb3.** The MariaDB command-line client asks for
+   `utf8mb3_general_ci` when it connects, and ProxySQL's default character
+   set is `utf8` (`utf8mb3`), so such a session is common (#2917). utf8mb3
+   is UTF-8 that stops at three bytes: every character below U+10000 (all
+   of Latin, Greek, Cyrillic, Arabic, Hebrew, the common CJK) has the same
+   bytes in it as in utf8mb4, and the characters from U+10000 up (emoji,
+   rarer CJK, historic scripts) do not exist in it. MySQL turns those into
+   `?`. So under `character_set_results = utf8mb3` or
+   `character_set_connection = utf8mb3` the copy answers, with two
+   exceptions that go to MySQL:
+
+   - a statement that holds such a character anywhere in its text, or bytes
+     that are not UTF-8, when the connection's character set is utf8mb3
+     (MySQL reads it as `?`, the copy as it is); a prepared statement's
+     string arguments count too. Counted as `veto`.
+   - an answer of the copy with such a character (or bytes that are not
+     UTF-8) in a text cell, when the results are in utf8mb3: MySQL would
+     send `?` there, so the copy's answer is not sent and the statement runs
+     on MySQL instead. Counted as `session_differs`, and the log says so
+     once per connection. The copy's answer is checked whole before any of
+     it is sent, a large one read back from its file, so such a session
+     pays one more pass over each answer. A `BLOB` is not checked: MySQL
+     sends its bytes as they are.
+
+   Under utf8mb3 results the copy declares each text column as MySQL does,
+   in `utf8mb3_general_ci` (33) instead of `utf8mb4_0900_ai_ci`'s 255.
+   `utf8mb3_general_ci` itself does not compare like `utf8mb4_0900_ai_ci`,
+   so the MariaDB client's default session gets the copy's answers to the
+   statements with no string literal and no function that returns text,
+   as under `utf8mb4_general_ci` (#2836); under `utf8mb3_unicode_ci`,
+   which compares as the copy does, the copy answers those too. The character set MySQL reads the statement's bytes in,
+   `character_set_client`, is not read: it moves with the other two under
+   `SET NAMES` and a client's handshake, and a session that sets it alone
+   to another character set is not detected.
 
    **A setting changed inside a stored function.** A `SELECT` that calls a
    stored function is a read by its text, and the function can run `SET`

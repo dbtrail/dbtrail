@@ -454,6 +454,11 @@ func (h *Handler) runPreparedOnCopy(st *preparedStmt, args []any, db string, toF
 	if err != nil {
 		return nil, err
 	}
+	// The arguments are literals too: under a utf8mb3 connection MySQL
+	// converts a string argument as it converts one written out (#2917).
+	if v := h.narrowStatementVeto(text); v != "" {
+		return nil, &narrowStatementError{why: v}
+	}
 	res, err := h.runFreeSQLRouted(db, text, readrouter.ShapeOf(st.query), readrouter.KeepsJoinOrder(st.query), toFile, true, reason, unchangedWithin)
 	if err != nil {
 		return nil, err
