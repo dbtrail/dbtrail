@@ -837,6 +837,7 @@ jobs:
             TestIntegrationSQLCompareTemporalColumnsMariaDB \
             TestIntegrationSQLCompareCopyWordsMariaDB \
             TestIntegrationSQLCompareBacktickNamesMariaDB \
+            TestIntegrationSQLCompareLengthFunctionsMariaDB \
             TestTakeSnapshot_pkLessVersionedTableRefused_mariadb \
             TestIntegrationReplicaCheckMariaDB \
             TestBuild_MariaDBVersionRow \

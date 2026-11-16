@@ -71,7 +71,7 @@ type TextUse struct {
 var keepsEnds = map[string]bool{
 	"lower": true, "upper": true, "lcase": true, "ucase": true,
 	"trim": true, "ltrim": true, "rtrim": true,
-	"length": true, "char_length": true, "character_length": true, "octet_length": true, "strlen": true,
+	"length": true, "char_length": true, "character_length": true, "octet_length": true, "strlen": true, "bit_length": true,
 	"count": true, "count_star": true, "coalesce": true, "ifnull": true, "nullif": true, "concat": true,
 	"min": true, "max": true, "any_value": true, "first": true,
 	"sum": true, "avg": true, "string_agg": true, "abs": true, "round": true, "floor": true, "ceil": true,

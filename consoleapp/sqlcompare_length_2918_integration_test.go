@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,9 +21,10 @@ import (
 
 // #2918 against a real MySQL: LENGTH, OCTET_LENGTH, BIT_LENGTH, CHAR_LENGTH
 // and CHARACTER_LENGTH of a text column in utf8mb4 or utf8mb3 are answered
-// by the copy with MySQL's numbers, under a collation that compares like
-// the copy and under one that does not (utf8mb4_general_ci); over a latin1,
-// binary or JSON column, or an expression, they stay on MySQL.
+// by the copy with MySQL's numbers, under a collation that compares like the
+// copy and under one that does not (utf8mb4_general_ci); over a latin1 or
+// binary column, or an expression, they stay on MySQL, and so does AVG
+// (#2806) whatever the collation.
 func TestIntegrationSQLCompareLengthFunctions(t *testing.T) {
 	srcDB, srcName := testutil.CreateTestDB(t)
 	lengthFunctions(t, srcDB, srcName, testutil.IntegrationDSN(srcName))
@@ -30,47 +32,44 @@ func TestIntegrationSQLCompareLengthFunctions(t *testing.T) {
 
 // The same against a MariaDB source. A test of its own, with MariaDB in its
 // name: the MariaDB job picks its tests by name. On MariaDB 10.11,
-// utf8mb4_unicode_ci is the collation that compares like the copy.
+// utf8mb4_unicode_ci is a collation that compares like the copy.
 func TestIntegrationSQLCompareLengthFunctionsMariaDB(t *testing.T) {
 	testutil.SkipIfNoMySQL(t)
 	srcDB, srcName := testutil.CreateTestMariaDB(t)
 	lengthFunctions(t, srcDB, srcName, testutil.MariaDBBaseDSN()+"/"+srcName+"?parseTime=true")
 }
 
-// lengthTable is the fixture: u utf8mb4, c a utf8mb4 CHAR, m3 utf8mb3, l
-// latin1, bn a BINARY(4) MySQL pads with 0x00, js JSON. The rows hold a
-// two-byte letter, a four-byte emoji, a letter and a combining accent (one
-// character to the eye, two code points, three bytes), trailing spaces in a
-// VARCHAR (kept) and in a CHAR (MySQL drops them on read, and the copy holds
-// the value as read), the empty string and NULL.
+// lengthTable is the fixture. a and cf are under the table's collation, where
+// the copy answers only while the values are printable ASCII with no
+// trailing space (#2533): a holds such text, cf is a CHAR whose stored
+// trailing spaces MySQL drops on read. b, cb and m3 are under a _bin
+// collation of utf8mb4 and utf8mb3, where the copy answers text past ASCII:
+// a two-byte letter, a four-byte emoji, a letter and a combining accent (two
+// code points, three bytes). l is latin1, where MySQL counts a letter as one
+// byte; vt holds trailing spaces; bn is a BINARY(4) MySQL pads with 0x00.
 const lengthTable = "CREATE TABLE ln (id INT NOT NULL PRIMARY KEY, k INT, side VARCHAR(8), " +
-	"u VARCHAR(16) CHARACTER SET utf8mb4, c CHAR(8) CHARACTER SET utf8mb4, m3 VARCHAR(16) CHARACTER SET utf8mb3, " +
-	"l VARCHAR(16) CHARACTER SET latin1, bn BINARY(4), js JSON)"
+	"a VARCHAR(16) CHARACTER SET utf8mb4, cf CHAR(8) CHARACTER SET utf8mb4, " +
+	"b VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, cb CHAR(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, " +
+	"m3 VARCHAR(16) CHARACTER SET utf8mb3 COLLATE utf8mb3_bin, l VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_bin, " +
+	"vt VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, bn BINARY(4), js JSON)"
 
 // lengthRows is one side's rows: live is what is inserted into the source,
-// copy is what the copy holds (the CHAR as MySQL reads it back, without its
-// trailing spaces; a binary value as mydumper's --hex-blob writes it).
+// copy is what the copy holds (a CHAR as MySQL reads it back, without its
+// trailing spaces, which is also how the binlog carries it; a BINARY as
+// mydumper's --hex-blob writes it, padded).
 func lengthRows(side string) [][]string {
-	combining := "é"
-	char := func(live, copy string) string {
+	pick := func(live, copy string) string {
 		if side == "live" {
 			return live
 		}
 		return copy
 	}
-	bin := func(live, hex string) string {
-		if side == "live" {
-			return live
-		}
-		return hex
-	}
 	return [][]string{
-		{"1", "1", side, "é", char("é  ", "é"), "é", "é", bin("é", "0xC3A9"), `{"a": 1}`},
-		{"2", "2", side, "😀", "😀", "x", "e", bin("ab", "0x6162"), `[]`},
-		{"3", "3", side, "a  ", char("ab ", "ab"), "a ", "a  ", bin("a", "0x61"), `\N`},
-		{"4", "4", side, "", "", "", "", bin("x", "0x78"), `\N`},
-		{"5", "5", side, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`},
-		{"6", "6", side, combining, "ñandú", "ü", "ÿ", bin("x", "0x78"), `\N`},
+		{"1", "1", side, "abc", pick("ab ", "ab"), "é", pick("é  ", "é"), "é", "é", "a  ", pick("é", "0xC3A90000"), `{"a": "é"}`},
+		{"2", "2", side, "x1", "x", "😀", "😀", "ü", "e", "b", pick("ab", "0x61620000"), `[]`},
+		{"3", "3", side, "", "", "é", "ñandú", "", "", "", pick("a", "0x61000000"), `\N`},
+		{"4", "4", side, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`, `\N`},
+		{"5", "5", side, "hello world", "q  r", "", "", "x", "x", "x", pick("x", "0x78000000"), `\N`},
 	}
 }
 
@@ -94,7 +93,7 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 				args[i] = v
 			}
 		}
-		if _, err := srcDB.Exec("INSERT INTO ln VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", args...); err != nil {
+		if _, err := srcDB.Exec("INSERT INTO ln VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", args...); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -133,26 +132,28 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 	t.Cleanup(func() { cancel(); <-served })
 
 	// The report of #2918, with AVG.
-	const avgReport = "SELECT MIN(side), k % 3 AS bucket, COUNT(*), AVG(LENGTH(c)) FROM ln GROUP BY bucket ORDER BY bucket"
+	const avgReport = "SELECT MIN(side), k % 3 AS bucket, COUNT(*), AVG(LENGTH(cf)) FROM ln GROUP BY bucket ORDER BY bucket"
 	// ORDER BY k and WHERE k: a column with no index, so the plan reads the
-	// whole table and the copy is asked.
+	// whole table and the copy is asked. who "" is not asserted.
 	cases := []struct{ stmt, who, why string }{
-		{"SELECT side, LENGTH(u), OCTET_LENGTH(u), CHAR_LENGTH(u), CHARACTER_LENGTH(u), BIT_LENGTH(u) FROM ln ORDER BY k", "copy", "utf8mb4"},
-		{"SELECT side, LENGTH(c), OCTET_LENGTH(c), CHAR_LENGTH(c), BIT_LENGTH(c) FROM ln ORDER BY k", "copy", "a CHAR"},
-		{"SELECT side, LENGTH(m3), CHAR_LENGTH(m3), BIT_LENGTH(m3) FROM ln ORDER BY k", "copy", "utf8mb3"},
-		{"SELECT side, length (u), Char_Length(c) FROM ln ORDER BY k", "copy", "spelled otherwise"},
-		{"SELECT MIN(side), SUM(LENGTH(u)), MAX(CHAR_LENGTH(c)), MIN(BIT_LENGTH(m3)), COUNT(*) FROM ln WHERE k > 0", "copy", "aggregates"},
-		{"SELECT MIN(side), k % 3 AS bucket, COUNT(*), SUM(LENGTH(c)) FROM ln GROUP BY bucket ORDER BY bucket", "copy", "the report of #2918 without AVG"},
-		{"SELECT side, k FROM ln WHERE LENGTH(u) > 2 AND CHAR_LENGTH(c) < 5 ORDER BY k", "copy", "in WHERE"},
+		{"SELECT side, LENGTH(a), OCTET_LENGTH(a), BIT_LENGTH(a), CHAR_LENGTH(a), CHARACTER_LENGTH(a), LENGTH(cf), CHAR_LENGTH(cf) FROM ln ORDER BY k", "copy", "ASCII under the table's collation, and a CHAR"},
+		{"SELECT side, LENGTH(b), OCTET_LENGTH(b), BIT_LENGTH(b), CHAR_LENGTH(b), CHARACTER_LENGTH(b) FROM ln ORDER BY k", "copy", "utf8mb4_bin past ASCII"},
+		{"SELECT side, LENGTH(cb), CHAR_LENGTH(cb), BIT_LENGTH(cb) FROM ln ORDER BY k", "copy", "a utf8mb4_bin CHAR"},
+		{"SELECT side, LENGTH(m3), CHAR_LENGTH(m3), BIT_LENGTH(m3) FROM ln ORDER BY k", "copy", "utf8mb3_bin"},
+		{"SELECT side, length (b), Char_Length(cb), OCTET_LENGTH/* x */(b) FROM ln ORDER BY k", "copy", "spelled otherwise"},
+		{"SELECT MIN(side), SUM(LENGTH(b)), MAX(CHAR_LENGTH(cb)), MIN(BIT_LENGTH(m3)), COUNT(*) FROM ln WHERE k > 0", "copy", "aggregates"},
+		{"SELECT MIN(side), k % 3 AS bucket, COUNT(*), SUM(LENGTH(cf)) FROM ln GROUP BY bucket ORDER BY bucket", "copy", "the report of #2918 without AVG"},
+		{"SELECT side, k FROM ln WHERE LENGTH(b) > 2 AND CHAR_LENGTH(a) < 5 ORDER BY k", "copy", "in WHERE"},
 
 		{avgReport, "live", "AVG (#2806)"},
 		{"SELECT side, LENGTH(l), CHAR_LENGTH(l) FROM ln ORDER BY k", "live", "latin1: one byte a letter on MySQL"},
 		{"SELECT side, LENGTH(bn), CHAR_LENGTH(bn) FROM ln ORDER BY k", "live", "BINARY"},
-		{"SELECT side, LENGTH(js) FROM ln ORDER BY k", "", "JSON: MySQL's own type, held as other text on the copy (MySQL); text on MariaDB (either)"},
-		{"SELECT side, LENGTH(LOWER(u)) FROM ln ORDER BY k", "live", "an expression"},
+		{"SELECT side, LENGTH(vt) FROM ln ORDER BY k", "live", "a trailing space (#2533)"},
+		{"SELECT side, LENGTH(LOWER(b)) FROM ln ORDER BY k", "live", "an expression"},
 		{"SELECT side, LENGTH(k) FROM ln ORDER BY k", "live", "a number"},
-		{"SELECT side, LENGTH(u) FROM ln ORDER BY LENGTH(u), k", "live", "after ORDER BY"},
-		{"SELECT side, x FROM (SELECT side, k, LENGTH(u) AS x FROM ln) q ORDER BY k", "live", "a subquery"},
+		{"SELECT side, LENGTH(b) FROM ln ORDER BY LENGTH(b), k", "live", "after ORDER BY"},
+		{"SELECT side, x FROM (SELECT side, k, LENGTH(b) AS x FROM ln) q ORDER BY k", "live", "a subquery"},
+		{"SELECT side, LENGTH(js), CHAR_LENGTH(js) FROM ln ORDER BY k", "", "JSON: its own type on MySQL (kept there), LONGTEXT on MariaDB"},
 	}
 	// The collation that compares like the copy, and utf8mb4_general_ci
 	// (go-sql-driver's default, MariaDB 10.11's for utf8mb4), which does not
@@ -177,16 +178,16 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 				got := connTypedAnswer(port, c.stmt)
 				reason := reasonAdded(before, lengthReasons(t, srv, ent.ID))
 				want := typedAnswer(liveDB, c.stmt)
-				t.Logf("%-5s %-16s port %-80.300s %s (%s)", c.who, reason, got, c.stmt, c.why)
+				t.Logf("%-5s %-20s port %-80.300s %s (%s)", c.who, reason, got, c.stmt, c.why)
 				if strings.HasPrefix(want, "ERROR ") {
 					t.Errorf("the source refused %q: %s", c.stmt, want)
 					continue
 				}
-				if c.who != "" && !strings.Contains(got, c.who+",") && !strings.Contains(got, "("+c.who+")") {
+				if c.who != "" && !strings.Contains(got, "("+c.who+",") {
 					t.Errorf("%q (%s) answered %s [%s], want it answered by %s", c.stmt, c.why, got, reason, c.who)
 					continue
 				}
-				if strings.ReplaceAll(got, "copy", "live") != want {
+				if sameWidth(strings.ReplaceAll(got, "(copy,", "(live,")) != sameWidth(want) {
 					t.Errorf("%q (%s) through the port:\n  got  %s\n  want %s, the source's own answer", c.stmt, c.why, got, want)
 				}
 			}
@@ -195,7 +196,7 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 			before := lengthReasons(t, srv, ent.ID)
 			connTypedAnswer(port, avgReport)
 			if r := reasonAdded(before, lengthReasons(t, srv, ent.ID)); r != "veto" {
-				t.Errorf("AVG(LENGTH(c)) under %s was forwarded as %q, want veto", session, r)
+				t.Errorf("AVG(LENGTH(cf)) under %s was forwarded as %q, want veto", session, r)
 			}
 		})
 	}
@@ -212,14 +213,25 @@ func lengthFunctions(t *testing.T, srcDB *sql.DB, srcName, sourceDSN string) {
 		if _, err := port.ExecContext(context.Background(), "SET SESSION sql_mode = CONCAT(@@sql_mode, ',PAD_CHAR_TO_FULL_LENGTH')"); err != nil {
 			t.Fatal(err)
 		}
-		stmt := "SELECT side, LENGTH(c), CHAR_LENGTH(c) FROM ln ORDER BY k"
+		stmt := "SELECT side, LENGTH(cf), CHAR_LENGTH(cf) FROM ln ORDER BY k"
 		before := lengthReasons(t, srv, ent.ID)
 		got := connTypedAnswer(port, stmt)
 		reason := reasonAdded(before, lengthReasons(t, srv, ent.ID))
-		if !strings.Contains(got, "live,") || reason != "session_differs" {
-			t.Errorf("%q under PAD_CHAR_TO_FULL_LENGTH answered %s [%s], want MySQL's answer, as session_differs", stmt, got, reason)
+		if !strings.Contains(got, "(live, 8, 8)") || reason != "session_differs" {
+			t.Errorf("%q under PAD_CHAR_TO_FULL_LENGTH answered %s [%s], want MySQL's padded answer, as session_differs", stmt, got, reason)
 		}
 	})
+}
+
+// intType is the INT a MariaDB source declares LENGTH and CHAR_LENGTH as,
+// where the copy declares a BIGINT: the same numbers in another declared
+// width, a difference of form (#2856).
+var intType = regexp.MustCompile(`\bINT\b`)
+
+// sameWidth is a typed answer with every INT column declared BIGINT.
+func sameWidth(answer string) string {
+	head, rest, _ := strings.Cut(answer, "]")
+	return intType.ReplaceAllString(head, "BIGINT") + "]" + rest
 }
 
 // connTypedAnswer is typedAnswer on one connection.

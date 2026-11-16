@@ -152,6 +152,7 @@ func (a *askedTypes) TimestampDiffVeto(dates, other []string) string            
 func (a *askedTypes) FloatVeto(floats []string, star bool) string                   { return "" }
 func (a *askedTypes) UnsignedVeto(unsigned []string, star bool) string              { return "" }
 func (a *askedTypes) AvgVeto(whole, other []string) string                          { return "" }
+func (a *askedTypes) LengthVeto(safe, other []string) string                        { return "" }
 
 func (a *askedTypes) NameVeto(names []string) string {
 	a.nameCalls++

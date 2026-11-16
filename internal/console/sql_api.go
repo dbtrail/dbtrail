@@ -22,6 +22,7 @@ import (
 	"github.com/dbtrail/dbtrail/internal/baseline"
 	"github.com/dbtrail/dbtrail/internal/cliutil"
 	"github.com/dbtrail/dbtrail/internal/observe"
+	"github.com/dbtrail/dbtrail/internal/readrouter"
 	"github.com/dbtrail/dbtrail/internal/reconstruct"
 	"github.com/dbtrail/dbtrail/internal/sqlsandbox"
 	"github.com/dbtrail/dbtrail/internal/views"
@@ -1724,6 +1725,9 @@ func sqlStrictRefusalFor(in, narrowed views.Input, refs sqlsandbox.Refs, stateme
 	if msg := sqlRoundRefusalFor(narrowed, statement, types); msg != "" {
 		return msg
 	}
+	if msg := sqlLengthRefusalFor(narrowed, statement, types); msg != "" {
+		return msg
+	}
 	if msg := sqlFloatRefusalFor(narrowed, refs, types); msg != "" {
 		return msg
 	}
@@ -1820,6 +1824,48 @@ func sqlRoundRefusalFor(narrowed views.Input, statement string, types sqlsandbox
 			safe = nil
 		}
 		why = types.RoundVeto(safe, other)
+	}
+	if why == "" {
+		return ""
+	}
+	return "the copy does not answer this statement: " + why
+}
+
+// lengthWord is a call of one of the length functions anywhere in a
+// statement's Shape (each name ends with LENGTH), for a statement that could
+// not be read (sqlLengthRefusalFor). It is matched against the Shape and not
+// the raw text: there comments are blanked, so LENGTH/**/(c) and a name
+// split from its parenthesis by a -- or # comment are the calls the rewriter
+// takes them for. A string is blanked too, which only spares a refusal.
+var lengthWord = regexp.MustCompile(`(?i)length[\s\v"` + "`" + `]*\(`)
+
+// sqlLengthRefusalFor says why the copy must not answer a statement because of
+// a LENGTH, OCTET_LENGTH, BIT_LENGTH, CHAR_LENGTH or CHARACTER_LENGTH call, or
+// "" when it can (#2918). MySQL counts the bytes of a text in its column's
+// character set, the copy those of the UTF-8 it holds: over a latin1 column
+// 'é' is 1 on MySQL and 2 on the copy. The rule is the routing layer's
+// (readrouter.LengthVeto, asked through types), over every table's columns
+// split by character set from its snapshot's table definition. A table whose
+// column types are not known can hold any text under any name: no column is
+// safe then. With no reading of the statement (types is nil) the copy does
+// not answer a statement with such a call: not known is never "nothing to
+// find".
+func sqlLengthRefusalFor(narrowed views.Input, statement string, types sqlsandbox.ColumnTypes) string {
+	why := ""
+	switch {
+	case types == nil && lengthWord.MatchString(readrouter.Shape(statement)):
+		why = "the statement could not be searched for its LENGTH and CHAR_LENGTH calls"
+	case types != nil:
+		var safe, other []string
+		unknown := false
+		for _, t := range narrowed.SelectedBaselines() {
+			unknown = unknown || !t.SchemaKnown
+			safe, other = append(safe, t.LengthSafe...), append(other, t.LengthOther...)
+		}
+		if unknown {
+			safe = nil
+		}
+		why = types.LengthVeto(safe, other)
 	}
 	if why == "" {
 		return ""
