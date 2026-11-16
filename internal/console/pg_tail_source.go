@@ -189,7 +189,7 @@ type pgCut struct {
 func (x *pgTailSource) cut(t views.BaselineTable) pgCut {
 	name := t.Schema + "." + t.Table
 	refuse := func(format string, args ...any) pgCut { return pgCut{refusal: fmt.Sprintf(format, args...)} }
-	if t.Delta != nil || len(t.DeltaFiles) > 0 {
+	if t.Delta || len(t.DeltaFiles) > 0 {
 		return refuse("the copy of %s has a MySQL table delta beside it", name)
 	}
 	dir, ok := copySnapshotDir(t)
