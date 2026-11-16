@@ -165,6 +165,9 @@ func (r *waitRig) publish(t *testing.T) {
 	if v, _ := r.k.published(r.read); len(v) != 1 {
 		t.Fatalf("the rig's tail is not published: %v", v)
 	}
+	// Time goes on after the update: a position first seen from here on is
+	// after the update began, as on a real clock.
+	r.tick(time.Millisecond)
 }
 
 func (r *waitRig) setSaved(p SourcePosition) {

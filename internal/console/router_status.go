@@ -338,6 +338,13 @@ func (s *Server) RouterNumbers() RouterNumbers {
 	if s.freshWait > 0 && s.sourcePos != nil {
 		waits := s.freshWaits.snapshot()
 		now := time.Now()
+		for id := range waits {
+			if _, ok := out.Servers[id]; !ok {
+				n := RouterServerNumbers{Reasons: map[string]uint64{}}
+				n.SQLMode, n.SQLModeFrom = s.SQLModeOf(id)
+				out.Servers[id] = n
+			}
+		}
 		for id, n := range out.Servers {
 			w, ok := waits[id]
 			if !ok && n.SQLMode != "fresh" {
