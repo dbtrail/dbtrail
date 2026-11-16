@@ -177,12 +177,12 @@ func reconstructPGTable(ctx context.Context, cfg FullTableConfig, p pgTableInput
 	// (#2757). After the fold, so the change map is known, and after every
 	// refusal above (see ReconstructTable's step 5b for why each matters).
 	if pgCarryForwardEligible(cfg, p.baselinePath, bmeta, since, b.Since, fold.changeCount(), capGap) {
-		linked, cerr := carryForward(ctx, p.baselinePath, cfg.snapshotDir, schema, table)
+		linked, delta, cerr := pgCarryForward(ctx, p.baselinePath, cfg.snapshotDir, schema, table)
 		if cerr != nil {
 			return nil, fmt.Errorf("carry %s.%s forward unchanged: %w", schema, table, cerr)
 		}
 		rep.CarriedForward, rep.CarriedByLink = true, linked
-		rep.Files = []string{filepath.Join(schema, table+".parquet")}
+		rep.Files = append([]string{filepath.Join(schema, table+".parquet")}, delta...)
 		rep.Duration = time.Since(start)
 		slog.Info("table carried forward unchanged", "schema", schema, "table", table,
 			"reason", "no events in the window", "linked", linked,

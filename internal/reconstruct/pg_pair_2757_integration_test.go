@@ -219,7 +219,7 @@ func TestReconstructTables_PGTablePair(t *testing.T) {
 		t.Fatalf("second update: delta files %v, want one pair", left)
 	}
 	r := reps[0]
-	if r.CarriedForward || !r.PG || len(r.Files) != 3 || r.BaselineRows != 24 || r.UpdatesApplied != 2 || r.InsertsEmitted != 1 || r.DeletesSkipped != 1 || r.RowsWritten != 24 {
+	if r.CarriedForward || !r.PG || len(r.Files) != 3 || r.BaselineRows != 21 || r.UpdatesApplied != 2 || r.InsertsEmitted != 1 || r.DeletesSkipped != 1 || r.RowsWritten != 24 {
 		t.Fatalf("second update's report: carried %v pg %v files %v file rows %d updates %d inserts %d deletes %d rows %d",
 			r.CarriedForward, r.PG, r.Files, r.BaselineRows, r.UpdatesApplied, r.InsertsEmitted, r.DeletesSkipped, r.RowsWritten)
 	}
@@ -314,6 +314,52 @@ func TestReconstructTables_PGTablePairDeclines(t *testing.T) {
 			}
 			if left := f.pairFiles(root, at2); len(left) != 0 || len(reps[0].Files) != 1 || md.LSN != 0x701 || got["1"] != "late" || f.sameFile(f.tableFile(root, at1), f.tableFile(root, at2)) {
 				t.Fatalf("delta files %v files %v LSN %X row %q; want the table written in full to 701", left, reps[0].Files, md.LSN, got["1"])
+			}
+		})
+	}
+}
+
+// A table whose file has a delta beside it, and no change in the window, is
+// carried with its delta. The window can be empty because the changes the
+// delta holds are gone from the index: carried alone, the file would be the
+// table as it was before them.
+func TestReconstructTables_PGTablePairIsCarriedWithItsFile(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("switch on at the carry: %v", on), func(t *testing.T) {
+			f := newPGFixture(t)
+			root := t.TempDir()
+			f.baseline(root, f.at(10*time.Minute), 0x500, "", pairRows()...)
+			f.other(0x600, 12*time.Minute)
+			at1 := f.at(20 * time.Minute)
+			if _, _, _, err := f.run(root, pgRun{at: at1, carry: true}); err != nil {
+				t.Fatal(err)
+			}
+			f.event(0x700, 22*time.Minute, 2, "1", s("late"))
+			f.event(0x710, 23*time.Minute, 3, "2", nil)
+			f.checkpoint(0x710)
+			at2 := f.at(30 * time.Minute)
+			reconstruct.SetPGTableDeltas(t, true)
+			if _, _, _, err := f.run(root, pgRun{at: at2, carry: true, chainFloor: f.base}); err != nil {
+				t.Fatal(err)
+			}
+			want, _ := f.state(root, at2)
+			if want["1"] != "late" || len(f.pairFiles(root, at2)) != 2 {
+				t.Fatalf("the second update wrote no pair: %v, %v", want, f.pairFiles(root, at2))
+			}
+
+			// The index loses every event; the switch is whatever it is.
+			testutil.MustExec(t, f.db, "DELETE FROM binlog_events")
+			reconstruct.SetPGTableDeltas(t, on)
+			at3 := f.at(40 * time.Minute)
+			_, _, reps, err := f.run(root, pgRun{at: at3, carry: true, chainFloor: f.base})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reps[0].CarriedForward || len(reps[0].Files) != 3 {
+				t.Fatalf("third update: carried %v files %v; want the file and its pair carried", reps[0].CarriedForward, reps[0].Files)
+			}
+			if got, _ := f.state(root, at3); !sameRows(got, want) {
+				t.Fatalf("the carried table reads %v, want %v", got, want)
 			}
 		})
 	}

@@ -109,24 +109,35 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	src, bmeta := in.SourceBaseline.Path, in.SourceBaseline.Metadata
 	// The same checks the full merge makes of the file's columns against
 	// the changes and the recorded shape. A refusal is the merge's to give.
-	colNames, err := prepareMerge(ctx, in)
-	if err != nil {
-		return false, nil
-	}
-	rel, _, err := baseline.ParsePGRelation(bmeta.PGRelation)
-	if err != nil || checkPGFileColumns(rel, colNames, in.Schema, in.Table) != nil {
-		return false, nil
-	}
-	if in.PGCutLSN == 0 || in.PGDeltaSince.IsZero() {
-		return false, nil
-	}
+	dst := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
 	full := func(why string, cause error) (bool, error) {
 		if cerr := ctx.Err(); cerr != nil {
 			return false, cerr
 		}
+		// Whatever a failed write left under the pair's names: the folder is
+		// this run's own, and half a pair beside the file the merge is about
+		// to write would be a broken chain on a good table.
+		if dead, rows, perr := pgdelta.Paths(dst, 0); perr == nil {
+			os.Remove(dead)
+			os.Remove(rows)
+		}
 		slog.Warn("PostgreSQL table delta not written; the table is written in full",
 			"schema", in.Schema, "table", in.Table, "reason", why, "error", cause)
 		return false, nil
+	}
+	colNames, err := prepareMerge(ctx, in)
+	if err != nil {
+		return full("the table file's columns do not pass the merge's checks, which the merge reports", err)
+	}
+	rel, _, err := baseline.ParsePGRelation(bmeta.PGRelation)
+	if err == nil {
+		err = checkPGFileColumns(rel, colNames, in.Schema, in.Table)
+	}
+	if err != nil {
+		return full("the table file's columns are not its recorded shape's, which the merge reports", err)
+	}
+	if in.PGCutLSN == 0 || in.PGDeltaSince.IsZero() {
+		return full("the run has no cut or no bound to record on the delta", nil)
 	}
 
 	duck, err := sql.Open("duckdb", "")
@@ -211,7 +222,6 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 	if err != nil {
 		return full("could not name the write", err)
 	}
-	dst := filepath.Join(in.SnapshotDir, in.Schema, in.Table+".parquet")
 	dead, rows, _, err := pgdelta.WritePair(pgdelta.PairInput{
 		BasePath: dst, Seq: 0, Base: baseID, Run: run,
 		Columns: colNames, KeyColumns: keyCols,
@@ -219,7 +229,6 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		Metadata: snapshotFileMetadata(in),
 	})
 	if err != nil {
-		// WritePair leaves neither file when it fails.
 		return full("the delta could not be written", err)
 	}
 	// From here the table is published or the table fails: the file is in
@@ -231,7 +240,12 @@ func writePGPair(ctx context.Context, in mergeInput, fold *foldResult, rep *Tabl
 		return false, fmt.Errorf("carry %s.%s forward beside its delta: %w", in.Schema, in.Table, err)
 	}
 
-	rep.BaselineRows = baseRows
+	if !linked {
+		slog.Warn("the table file beside a PostgreSQL table delta was COPIED, not linked: the delta saved no disk and no write for this table",
+			"schema", in.Schema, "table", in.Table)
+	}
+	// The file's rows that no change claimed, as the merge counts them.
+	rep.BaselineRows = baseRows - int64(len(positions))
 	rep.UpdatesApplied, rep.InsertsEmitted, rep.DeletesSkipped = int64(replaced), int64(puts-replaced), int64(removed)
 	rep.RowsWritten = baseRows - int64(len(positions)) + int64(puts)
 	rep.Files = []string{
@@ -254,4 +268,65 @@ func pgPairRun(at time.Time) (string, error) {
 		return "", err
 	}
 	return at.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(b[:]), nil
+}
+
+// pgPairBeside is the delta files beside a PostgreSQL table file: the names
+// of the chain's files, in order, and none for a table with no delta. A
+// chain that is not whole is an error: what the table holds cannot be said.
+func pgPairBeside(basePath, table string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Dir(basePath))
+	if err != nil {
+		return nil, fmt.Errorf("list the files beside %s: %w", basePath, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	chain, err := pgdelta.ChainOf(table, names)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, p := range chain.Pairs {
+		files = append(files, p.Dead, p.New)
+	}
+	return files, nil
+}
+
+// pgCarryForward is carryForward for a PostgreSQL table: the file, and the
+// delta beside it when it has one. A table with no change in the window is
+// what its file AND its delta say. The fold found no change either because
+// there was none since the file was written, and then there is no delta, or
+// because the changes the delta holds are no longer in the window (the index
+// holds no event at all, so the fetch was skipped): carried alone, the file
+// would be the table as it was before them, to whatever reads the delta.
+//
+// The delta first and the file last, as writePGPair does: until the file is
+// there the table is not in the new folder. It returns the delta's files as
+// the report names them, relative to the snapshot folder.
+func pgCarryForward(ctx context.Context, srcPath, snapshotDir, schema, table string) (linked bool, delta []string, err error) {
+	names, err := pgPairBeside(srcPath, table)
+	if err != nil {
+		return false, nil, err
+	}
+	var made []string
+	undo := func() {
+		for _, f := range made {
+			os.Remove(f)
+		}
+	}
+	for _, name := range names {
+		dst := filepath.Join(snapshotDir, schema, name)
+		if _, cerr := carryForwardFile(ctx, filepath.Join(filepath.Dir(srcPath), name), dst, false); cerr != nil {
+			undo()
+			return false, nil, fmt.Errorf("carry %s forward: %w", name, cerr)
+		}
+		made = append(made, dst)
+		delta = append(delta, filepath.Join(schema, name))
+	}
+	if linked, err = carryForward(ctx, srcPath, snapshotDir, schema, table); err != nil {
+		undo()
+		return false, nil, err
+	}
+	return linked, delta, nil
 }
