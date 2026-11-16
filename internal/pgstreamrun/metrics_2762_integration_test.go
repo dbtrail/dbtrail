@@ -276,7 +276,7 @@ func TestIntegrationPGMetricsRealSource_2762(t *testing.T) {
 		default:
 		}
 		var active bool
-		return pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
+		return pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
 	})
 	key := func(name string) string { return name + `{source="` + slot + `"}` }
 

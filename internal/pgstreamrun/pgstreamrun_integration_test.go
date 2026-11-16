@@ -94,7 +94,7 @@ func TestOne_EndToEnd_PostgresToIndexToRecovery(t *testing.T) {
 	// change is captured.
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active
@@ -227,7 +227,7 @@ func TestOne_DDLDrift_MidStreamAlter(t *testing.T) {
 
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active
@@ -354,7 +354,7 @@ func TestOne_LostSlotResume_PersistsLossBadge(t *testing.T) {
 	go func() { runErr <- pgstreamrun.One(runCtx, cfg) }()
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active
@@ -387,7 +387,7 @@ func TestOne_LostSlotResume_PersistsLossBadge(t *testing.T) {
 	// on 14/17): the #607 flake. Wait for the slot to go inactive before dropping it.
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false // slot row must still exist here (not dropped yet); transient → keep waiting
 		}
 		return !active
@@ -576,7 +576,7 @@ func TestDropSlot_ActiveSlotErrors(t *testing.T) {
 	waitFor(t, 15*time.Second, started.Load, "replication started on the slot")
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active
@@ -704,7 +704,7 @@ func TestOne_MultiTable_PKScopedRecovery(t *testing.T) {
 
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active
@@ -890,7 +890,7 @@ func TestOne_PGDialect_ReversalExecutesAgainstPostgres(t *testing.T) {
 	go func() { runErr <- pgstreamrun.One(runCtx, cfg) }()
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active
@@ -1108,7 +1108,7 @@ func TestOne_PGTypeRoundTripMatrix(t *testing.T) {
 	go func() { runErr <- pgstreamrun.One(runCtx, cfg) }()
 	waitFor(t, 15*time.Second, func() bool {
 		var active bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active); err != nil {
 			return false
 		}
 		return active
@@ -1255,7 +1255,7 @@ func TestOne_PGIdentityGenerated_Recovery(t *testing.T) {
 	go func() { runErr <- pgstreamrun.One(runCtx, cfg) }()
 	waitFor(t, 15*time.Second, func() bool {
 		var a bool
-		if err := pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&a); err != nil {
+		if err := pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&a); err != nil {
 			return false
 		}
 		return a
