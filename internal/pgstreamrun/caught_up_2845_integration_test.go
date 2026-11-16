@@ -331,7 +331,7 @@ func TestIntegrationPGCaughtUpStampRealSource_2845(t *testing.T) {
 	}()
 	waitCaughtUp(t, "the slot active", 30*time.Second, func() bool {
 		var active bool
-		return pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
+		return pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
 	})
 
 	// fresh waits for a stamp newer than held, and answers with it.
@@ -540,7 +540,7 @@ func TestIntegrationPGCaptureFromRealSource_2843(t *testing.T) {
 				}()
 				waitCaughtUp(t, "the slot active", 30*time.Second, func() bool {
 					var active bool
-					return pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
+					return pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active) == nil && active
 				})
 				return func() {
 					cancel()
