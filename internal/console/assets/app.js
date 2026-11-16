@@ -16123,9 +16123,9 @@ function sqlClientPanel(servers, fb, reveal, live, rt, split) {
     if (!split) return panel;
     if (pg) {
       wrap.append(cnSection("PostgreSQL client", "Read your copy from a PostgreSQL client",
-        "Your tables as DBTrail keeps them, answered by DBTrail's copy. Nothing here touches your database.", "pink"), panel);
+        "Your tables as DBTrail keeps them, answered by DBTrail's copy. A transaction block goes to your database, read-only, as the server's forwarding user when it has one.", "pink"), panel);
       wrap.append(el("section", { class: "ov-panel cn-routep sqlc is-idle" },
-        el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins send statements on to a MySQL or MariaDB server. A PostgreSQL server's port answers from the copy alone." })));
+        el("p", { class: "cn-sql-row", text: "Engine Routing and the proxy logins are the MySQL port's. On the PostgreSQL port, the copy answers reads; a transaction block (BEGIN to COMMIT or ROLLBACK) runs on your PostgreSQL as the server's forwarding user, read-only, when one is set (edit the server); without one, the copy answers alone." })));
       return wrap;
     }
     wrap.append(cnSection("MySQL client", "Read your copy from a MySQL client",
@@ -17879,6 +17879,10 @@ function serverRow(s) {
 // form (#2079) in the form's own words.
 const FORWARDING_HINT = "Forwarding user and password are optional. They only matter while Engine Routing is on (Settings, MySQL clients, Connect a SQL client): what a SQL client sends to the MySQL port then runs on this server as the forwarding user, so the forwarding user's permissions are all that port can do here, and what its SELECT covers is all it can read. Give it SELECT only, on the schemas the port should read. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank the port does not forward for this server and the copy answers alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
 
+// FORWARDING_HINT_PG is FORWARDING_HINT for a PostgreSQL source (#2771): what
+// its port, the PostgreSQL router, sends there as this user.
+const FORWARDING_HINT_PG = "Forwarding user and password are optional. With them, a transaction block a SQL client opens on the PostgreSQL port (BEGIN to COMMIT or ROLLBACK), and a catalog statement the copy does not answer, run on this server as the forwarding user, read-only; reads outside a transaction are still answered by the copy. Create a role that can log in, with SELECT on what the port should read and nothing more. It must be another user than the source user: the port never forwards with the account DBTrail captures with, so with these fields blank a transaction is answered by the copy alone. Saving a change to the forwarding account closes the connections open on that port for this server, so that none stays on the previous account; clients reconnect.";
+
 // routePrefill remembers, per form, the forwarding account its server had
 // when the form opened: serverFormBody sends the forwarding fields only when
 // they differ from it.
@@ -17893,7 +17897,7 @@ const routePrefill = new WeakMap();
 // longer shows.
 function routeFormProblem(form) {
   const f = form.elements, was = routePrefill.get(form) || { user: "" };
-  if (!f.route_user || f.flavor.value === "postgres") return "";
+  if (!f.route_user) return "";
   const user = f.route_user.value.trim(), typedPassword = f.route_password.value !== "";
   if (f.route_remove && f.route_remove.checked) {
     return typedPassword || (user !== "" && user !== was.user)
@@ -18207,12 +18211,13 @@ function buildServerForm(offered, familyLine) {
   monGrid.append(srvField("Source port", "source_port", { placeholder: "3306" }));
   monGrid.append(srvField("Source user", "source_user", { placeholder: "repl" }));
   monGrid.append(srvField("Source password", "source_password", { type: "password", autocomplete: "new-password" }));
-  // The forwarding account (#2079): optional, MySQL and MariaDB only. Sent
-  // by serverFormBody only when changed; the password is never prefilled
-  // and blank keeps the saved one. Removing a saved account is the control
-  // in #route-extra, filled in when the form opens on a server that has one.
-  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank: the port does not forward", autocomplete: "off" }), "mysql mariadb"));
-  monGrid.append(tagFlavor(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }), "mysql mariadb"));
+  // The forwarding account (#2079; a PostgreSQL source's since #2771):
+  // optional. Sent by serverFormBody only when changed; the password is
+  // never prefilled and blank keeps the saved one. Removing a saved account
+  // is the control in #route-extra, filled in when the form opens on a
+  // server that has one.
+  monGrid.append(tagFlavor(srvField("Forwarding user", "route_user", { placeholder: "(optional) blank: the port does not forward", autocomplete: "off" }), "mysql mariadb postgres"));
+  monGrid.append(tagFlavor(srvField("Forwarding password", "route_password", { type: "password", autocomplete: "new-password" }), "mysql mariadb postgres"));
   // PostgreSQL-only: a logical-replication connection is per-database, and the
   // slot/publication are operator-created (validate-don't-create).
   monGrid.append(tagFlavor(srvField("Database", "source_database", { placeholder: "appdb" }), "postgres"));
@@ -18234,8 +18239,9 @@ function buildServerForm(offered, familyLine) {
   monGrid.append(srvField("S3 access key", "s3_access_key_id", { placeholder: "(optional) blank uses DBTrail's own credentials", autocomplete: "off" }));
   monGrid.append(srvField("S3 secret key", "s3_secret_access_key", { type: "password", autocomplete: "new-password" }));
   mon.append(monGrid);
-  mon.append(tagFlavor(el("div", { id: "route-extra" }), "mysql mariadb"));
+  mon.append(tagFlavor(el("div", { id: "route-extra" }), "mysql mariadb postgres"));
   mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT }), "mysql mariadb"));
+  mon.append(tagFlavor(el("p", { class: "form-hint", text: FORWARDING_HINT_PG }), "postgres"));
   mon.append(el("p", { class: "form-hint", text: "Leave the S3 fields blank for AWS. They apply to the Archive and Snapshots locations set on this server, for uploads and reads alike, not to the default Snapshots location DBTrail was started with. A bucket has one store and one pair of keys, so two servers sharing a bucket must agree. Clearing the access key removes both keys." }));
   // The source user is the #1 friction point — spell out the grant inline,
   // never behind a <details>. REPLICATION SLAVE/CLIENT drive the stream;
@@ -19372,9 +19378,9 @@ function fillRouteExtra(form, prefill) {
   const stored = prefill.has_route || prefill.route_unreadable || prefill.route_is_capture;
   if (!stored) return;
   if (prefill.route_unreadable) {
-    box.append(el("p", { class: "form-msg err", text: "The forwarding account saved for this server cannot be read (was the servers file edited by hand?), so the MySQL port cannot forward for this server. Type the forwarding user and password again, or remove it below. Saving this form without doing either leaves it as it is." }));
+    box.append(el("p", { class: "form-msg err", text: "The forwarding account saved for this server cannot be read (was the servers file edited by hand?), so the port cannot forward for this server. Type the forwarding user and password again, or remove it below. Saving this form without doing either leaves it as it is." }));
   } else if (prefill.route_is_capture) {
-    box.append(el("p", { class: "form-hint", text: "The forwarding account saved for this server is the same account DBTrail captures with. The MySQL port never forwards with that one, so it does not forward for this server. Set another forwarding user, or remove it below." }));
+    box.append(el("p", { class: "form-hint", text: "The forwarding account saved for this server is the same account DBTrail captures with. The port never forwards with that one, so it does not forward for this server. Set another forwarding user, or remove it below." }));
   } else if (prefill.route_host) {
     box.append(el("p", { class: "form-hint", text: "This forwarding account connects to " + prefill.route_host + (prefill.route_port ? ":" + prefill.route_port : "") + ", not to the source's address. It keeps that address when its user or password is changed here." }));
   }
@@ -19406,10 +19412,8 @@ function serverFormBody(form) {
   // read). A typed password goes with the user the form shows. Removing is
   // the remove control alone. A form routeFormProblem would stop (an
   // emptied user, Remove beside something typed) sends nothing about the
-  // account. A PostgreSQL source has none: its
-  // fields are hidden, and what was typed in them before the source type
-  // changed is not sent.
-  if (f.route_user && f.flavor.value !== "postgres" && !routeFormProblem(form)) {
+  // account. Every source type has the fields, a PostgreSQL one since #2771.
+  if (f.route_user && !routeFormProblem(form)) {
     const was = routePrefill.get(form) || { user: "" };
     const user = f.route_user.value.trim();
     if (f.route_remove && f.route_remove.checked) {

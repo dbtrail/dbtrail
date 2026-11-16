@@ -90,6 +90,11 @@ type Binding struct {
 	Answered func(took time.Duration, refused bool)
 	// Close, when set, runs once when the connection ends.
 	Close func()
+	// Forward, when set, is how the connection reaches the server's source,
+	// which answers a transaction block the client opens and a catalog
+	// statement the copy does not answer (forward.go). Nil: those are
+	// answered as the port answers them without one.
+	Forward *Forward
 }
 
 // RunOptions are what a connection set for itself that a statement on the

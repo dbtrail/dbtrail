@@ -60,6 +60,11 @@ func buildRouteDSN(req serverRequest, stored, oldSource, newSource, flavor strin
 			return "", nil
 		}
 	}
+	if flavor == FlavorPostgres {
+		// The PostgreSQL port's account (#2771), a postgres:// URL. The
+		// MySQL branch below is not reached for it.
+		return buildPGRouteDSN(req, stored, oldSource, newSource, asked)
+	}
 	if !mysqlFamily(flavor) {
 		if asked {
 			return "", errors.New("a forwarding account applies to MySQL and MariaDB sources only")
