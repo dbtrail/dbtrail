@@ -75,7 +75,7 @@ func TestOne_InfersDDLFromRelationShapes_2441(t *testing.T) {
 		go func() { runErr <- pgstreamrun.One(runCtx, cfg) }()
 		waitFor(t, 15*time.Second, func() bool {
 			var active bool
-			_ = pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active)
+			_ = pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active)
 			return active
 		}, "replication slot active")
 		stop = func() {
@@ -86,7 +86,7 @@ func TestOne_InfersDDLFromRelationShapes_2441(t *testing.T) {
 			}
 			waitFor(t, 15*time.Second, func() bool {
 				var active bool
-				_ = pg.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active)
+				_ = pg.QueryRow(ctx, "SELECT active AND confirmed_flush_lsn IS NOT NULL FROM pg_replication_slots WHERE slot_name=$1", slot).Scan(&active)
 				return !active
 			}, "replication slot released")
 		}
