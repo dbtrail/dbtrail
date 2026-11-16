@@ -905,6 +905,15 @@ func EnsureSchema(db *sql.DB) error {
 		return err
 	}
 
+	// pg_checkpoint_event_id: which event a PostgreSQL capture's saved
+	// position reaches, for readers that must stop at whole transactions
+	// (the tails of fresh mode, #2756).
+	if err := ensureColumn(db, "stream_state", "pg_checkpoint_event_id",
+		`ALTER TABLE stream_state ADD COLUMN pg_checkpoint_event_id BIGINT UNSIGNED DEFAULT NULL COMMENT 'the newest event at or before binlog_position when a PostgreSQL capture saved it after a transaction ended (#2756): every event up to this one whose position is at or before binlog_position belongs to a transaction delivered whole; rows above it may be a transaction still arriving, or one delivered again after a restart; NULL = none yet, or a MySQL/MariaDB capture'`,
+	); err != nil {
+		return err
+	}
+
 	// source_identity names the server whose binlog coordinates the
 	// checkpoint carries (MySQL @@server_uuid, MariaDB "server_id:<n>"), so a
 	// resume compares binlog file numbers only against a checkpoint of the
