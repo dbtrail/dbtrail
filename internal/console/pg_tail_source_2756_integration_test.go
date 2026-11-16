@@ -1,0 +1,306 @@
+//go:build integration
+
+package console
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/dbtrail/dbtrail/internal/baseline"
+	"github.com/dbtrail/dbtrail/internal/event"
+	"github.com/dbtrail/dbtrail/internal/indexer"
+	"github.com/dbtrail/dbtrail/internal/metadata"
+	"github.com/dbtrail/dbtrail/internal/pgdelta"
+	"github.com/dbtrail/dbtrail/internal/query"
+	"github.com/dbtrail/dbtrail/internal/reconstruct"
+	"github.com/dbtrail/dbtrail/internal/testutil"
+	"github.com/dbtrail/dbtrail/internal/views"
+)
+
+// #2756 against a real index: a PostgreSQL table's tail, driven by the same
+// keeper a MySQL table's is, starts at its snapshot's LSN floor, follows the
+// index up to the capture's saved position and no further, and is refused by
+// what would make it wrong. Each case has its own table.
+
+// pgTailRig is an index a PostgreSQL stream wrote (real partitions, one
+// schema snapshot per table, a saved position), a snapshot folder taken ten
+// minutes into the current hour, and a keeper over pgTailSource.
+type pgTailRig struct {
+	t      *testing.T
+	db     *sql.DB
+	s      *Server
+	b      *bundle
+	k      *tailKeeper
+	root   string
+	base   time.Time // the current hour
+	at     time.Time // the snapshot's time
+	tables atomic.Int32
+}
+
+const pgTailFloor = 0x500
+
+func newPGTailRig(t *testing.T) *pgTailRig {
+	t.Helper()
+	ctx := context.Background()
+	db, dbName := testutil.CreateTestDB(t)
+	if err := indexer.CreateIndexTables(ctx, db, 48, false, nil); err != nil {
+		t.Fatalf("CreateIndexTables: %v", err)
+	}
+	if err := indexer.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	r := &pgTailRig{t: t, db: db, root: t.TempDir(), base: base, at: base.Add(10 * time.Minute)}
+	r.s = &Server{cm: newConnManager(nil, false), captureStatus: &fakeWatermark{ago: 5 * time.Second}}
+	r.b = &bundle{db: db, dbName: dbName, engine: query.New(db), baselineSrc: r.root}
+	r.s.cm.boot = r.b
+	r.k = newTailKeeper(newPGTailSource(r.s, r.b).capturing(nil), t.TempDir(), tailBudget{Keys: 1000}, time.Minute, time.Hour)
+	return r
+}
+
+func pgLSN(lsn uint64) string { return fmt.Sprintf("%X/%X", lsn>>32, uint32(lsn)) }
+
+// checkpoint is the capture's saved position: the commit LSN of the last
+// whole transaction.
+func (r *pgTailRig) checkpoint(lsn uint64) {
+	r.t.Helper()
+	testutil.MustExec(r.t, r.db, fmt.Sprintf(`INSERT INTO stream_state (id, mode, binlog_file, binlog_position, flavor, events_indexed, last_checkpoint, server_id)
+		VALUES (1, 'gtid', '%s', %d, 'postgres', 1, UTC_TIMESTAMP(), 1)
+		ON DUPLICATE KEY UPDATE binlog_file = VALUES(binlog_file), binlog_position = VALUES(binlog_position)`, pgLSN(lsn), lsn))
+}
+
+// shape records table's shape as the stream saw it at lsn: id (the key) and
+// status, and whatever extra names.
+func (r *pgTailRig) shape(table string, lsn uint64, extra ...string) {
+	r.t.Helper()
+	oid, _ := strconv.Atoi(table[1:])
+	rel := &metadata.PGRelationSchema{OID: uint32(17000 + oid), Schema: "public", Table: table, SeenLSN: lsn, SeenAt: r.base,
+		Columns: []metadata.PGRelationColumn{
+			{Name: "id", Ordinal: 1, IsPK: true, TypeOID: 25, TypeMod: -1},
+			{Name: "status", Ordinal: 2, TypeOID: 25, TypeMod: -1},
+		}}
+	for i, c := range extra {
+		rel.Columns = append(rel.Columns, metadata.PGRelationColumn{Name: c, Ordinal: 3 + i, TypeOID: 25, TypeMod: -1})
+	}
+	if _, err := metadata.WritePGSnapshot(context.Background(), r.db, rel); err != nil {
+		r.t.Fatalf("WritePGSnapshot: %v", err)
+	}
+}
+
+// table writes a table file of rows (id, status) in the snapshot's folder,
+// its footer changed by edit, records the table's shape, and returns it as
+// the views name it.
+func (r *pgTailRig) table(edit func(md map[string]string), rows ...[2]string) views.BaselineTable {
+	r.t.Helper()
+	n := int(r.tables.Add(1))
+	name := "t" + strconv.Itoa(n)
+	rel, err := baseline.PGRelation{OID: uint32(17000 + n), Columns: []baseline.PGColumn{
+		{Name: "id", TypeOID: 25, TypeMod: -1, Type: "text", NotNull: true, Ordinal: 1},
+		{Name: "status", TypeOID: 25, TypeMod: -1, Type: "text", Ordinal: 2},
+	}, PrimaryKey: []string{"id"}}.Encode()
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	stamp := r.at.Format(time.RFC3339)
+	md := map[string]string{
+		baseline.MetaKeySnapshotTimestamp: stamp,
+		baseline.MetaKeyLastDumpAt:        stamp,
+		baseline.MetaKeyLSN:               strconv.FormatUint(pgTailFloor, 10),
+		baseline.MetaKeyPGDeltaSince:      r.at.Add(-time.Minute).Format(time.RFC3339),
+		baseline.MetaKeyPGRelation:        rel,
+		baseline.MetaKeyRenderGUCs:        baseline.RenderGUCsPinned,
+		baseline.MetaKeyLockMode:          baseline.LockStampPGRepeatableRead,
+		baseline.MetaKeySnapshotProducer:  baseline.ProducerDump,
+	}
+	if edit != nil {
+		edit(md)
+	}
+	path := filepath.Join(r.root, reconstruct.SnapshotDirName(r.at), "public", name+".parquet")
+	w, err := baseline.NewWriter(path, []baseline.Column{{Name: "id", RawText: true}, {Name: "status", RawText: true}},
+		baseline.WriterConfig{Compression: "none", RowGroupSize: 100, Metadata: md})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	for _, row := range rows {
+		if err := w.WriteRow([]string{row[0], row[1]}, []bool{false, false}); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		r.t.Fatal(err)
+	}
+	r.shape(name, 0x300)
+	return views.BaselineTable{Schema: "public", Table: name, Path: path}
+}
+
+// change indexes one row of the transaction committed at lsn, d into the
+// hour: id's status becomes status. Its values are text, as PostgreSQL
+// capture writes them.
+func (r *pgTailRig) change(table string, typ event.EventType, id, status string, lsn uint64, d time.Duration) {
+	r.t.Helper()
+	img, _ := json.Marshal(map[string]string{"id": id, "status": status})
+	old, _ := json.Marshal(map[string]string{"id": id, "status": "before"})
+	var before, after []byte
+	switch typ {
+	case event.EventInsert:
+		after = img
+	case event.EventUpdate:
+		before, after = old, img
+	case event.EventDelete:
+		before = img
+	}
+	testutil.InsertEvent(r.t, r.db, pgLSN(lsn), lsn, lsn, r.base.Add(d).Format("2006-01-02 15:04:05"), nil,
+		"public", table, uint8(typ), id, nil, before, after)
+}
+
+// state is tbl as a statement reads it: its tail over its file, or "no tail"
+// when it has none.
+func (r *pgTailRig) state(ctx context.Context, tbl views.BaselineTable) []string {
+	r.t.Helper()
+	got, err := settledRefresh(r.t, ctx, r.k, []views.BaselineTable{tbl})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	v, ok := got[tailKey(tbl.Schema, tbl.Table)]
+	if !ok {
+		return []string{"no tail"}
+	}
+	return merged(r.t, tbl, v)
+}
+
+func TestIntegrationPGTailSource(t *testing.T) {
+	ctx := context.Background()
+	r := newPGTailRig(t)
+	noTail := []string{"no tail"}
+
+	t.Run("no saved position, no tail", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0x600, 20*time.Minute)
+		if m, err := r.k.src.Newest(ctx); err != nil || m.ID != 0 {
+			t.Fatalf("Newest with no saved position: %+v, %v", m, err)
+		}
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("state %v, want no tail", got)
+		}
+	})
+
+	t.Run("the window from the floor, then the index as it grows, never past the saved position", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"}, [2]string{"2", "two"})
+		r.change(tbl.Table, event.EventUpdate, "1", "old", 0x400, 5*time.Minute) // before the floor
+		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0x610, 20*time.Minute)
+		r.change(tbl.Table, event.EventInsert, "3", "three", 0x620, 21*time.Minute)
+		r.change("t999", event.EventInsert, "9", "x", 0x630, 21*time.Minute)
+		r.checkpoint(0x630)
+		if got, want := r.state(ctx, tbl), []string{"1=paid", "2=two", "3=three"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v", got, want)
+		}
+		m, err := r.k.src.Newest(ctx)
+		if err != nil || m.Pos != reconstruct.PGTailPos(0x630) {
+			t.Fatalf("Newest: %+v, %v; want the event at 630, spelled for the keeper", m, err)
+		}
+		if ok, err := r.k.src.Holds(ctx, m); err != nil || !ok {
+			t.Fatalf("Holds its own mark: %v, %v", ok, err)
+		}
+
+		// Rows of a transaction the capture has not saved its position
+		// after: visible in the index, not in the tail.
+		r.change(tbl.Table, event.EventDelete, "2", "two", 0x700, 22*time.Minute)
+		if got, want := r.state(ctx, tbl), []string{"1=paid", "2=two", "3=three"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("before the position is saved: state %v, want %v", got, want)
+		}
+		r.checkpoint(0x700)
+		if got, want := r.state(ctx, tbl), []string{"1=paid", "3=three"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("once it is saved: state %v, want %v", got, want)
+		}
+	})
+
+	t.Run("what a crash left behind is not read until it comes again", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		// Two transactions were visible and not saved when capture stopped:
+		// T1 at 810 and the first row of T2 at 820.
+		r.change(tbl.Table, event.EventUpdate, "1", "T1", 0x810, 23*time.Minute)
+		r.change(tbl.Table, event.EventInsert, "5", "T2 first row", 0x820, 23*time.Minute)
+		// It starts again: T1 comes a second time, and its position is saved.
+		r.change(tbl.Table, event.EventUpdate, "1", "T1", 0x810, 23*time.Minute)
+		r.checkpoint(0x810)
+		if got, want := r.state(ctx, tbl), []string{"1=T1"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("with T2 left behind below T1's second delivery: state %v, want %v", got, want)
+		}
+		// T2 comes again, whole.
+		r.change(tbl.Table, event.EventInsert, "5", "T2 first row", 0x820, 23*time.Minute)
+		r.change(tbl.Table, event.EventInsert, "6", "T2 second row", 0x820, 23*time.Minute)
+		r.checkpoint(0x820)
+		if got, want := r.state(ctx, tbl), []string{"1=T1", "5=T2 first row", "6=T2 second row"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("once T2 is delivered whole: state %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a table delta beside the file: no tail", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		_, rows, err := pgdelta.Paths(tbl.Path, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rows, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0x900, 24*time.Minute)
+		r.checkpoint(0x900)
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("state %v, want no tail", got)
+		}
+	})
+
+	t.Run("a snapshot with no LSN, or no bound of its own time: no tail or a tail from the margin", func(t *testing.T) {
+		none := r.table(func(md map[string]string) { delete(md, baseline.MetaKeyLSN) }, [2]string{"1", "one"})
+		r.change(none.Table, event.EventUpdate, "1", "paid", 0x910, 24*time.Minute)
+		r.checkpoint(0x910)
+		if got := r.state(ctx, none); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("no LSN: state %v, want no tail", got)
+		}
+		// A full read's file records no bound: its reader starts a minute
+		// before the snapshot.
+		margin := r.table(func(md map[string]string) { delete(md, baseline.MetaKeyPGDeltaSince) }, [2]string{"1", "one"})
+		r.change(margin.Table, event.EventUpdate, "1", "paid", 0x920, 24*time.Minute)
+		r.checkpoint(0x920)
+		if got, want := r.state(ctx, margin), []string{"1=paid"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("no recorded bound: state %v, want %v", got, want)
+		}
+	})
+
+	t.Run("the table's shape changes after its floor: its tail ends", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0xa00, 25*time.Minute)
+		r.checkpoint(0xa00)
+		if got, want := r.state(ctx, tbl), []string{"1=paid"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v", got, want)
+		}
+		r.shape(tbl.Table, 0xa10, "note")
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("after a column was added at the source: state %v, want no tail", got)
+		}
+	})
+
+	// Last: a loss on record is the whole server's.
+	t.Run("capture lost events since the snapshot: no table has a tail", func(t *testing.T) {
+		tbl := r.table(nil, [2]string{"1", "one"})
+		r.change(tbl.Table, event.EventUpdate, "1", "paid", 0xb00, 26*time.Minute)
+		r.checkpoint(0xb00)
+		if got, want := r.state(ctx, tbl), []string{"1=paid"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("state %v, want %v", got, want)
+		}
+		testutil.MustExec(t, r.db, "UPDATE stream_state SET gap_lost_at = UTC_TIMESTAMP() + INTERVAL 1 HOUR WHERE id = 1")
+		if got := r.state(ctx, tbl); !reflect.DeepEqual(got, noTail) {
+			t.Fatalf("after a loss on record: state %v, want no tail", got)
+		}
+	})
+}
