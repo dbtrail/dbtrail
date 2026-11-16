@@ -189,11 +189,12 @@ func TestComposeIcebergExportCatalogPassthrough(t *testing.T) {
 	svc := doc.Services["iceberg-export"]
 	cmd := strings.Join(svc.Command, "\n")
 	for env, flag := range map[string]string{
-		"ICEBERG_CATALOG":           "--catalog ",
-		"ICEBERG_CATALOG_URI":       "--catalog-uri ",
-		"ICEBERG_CATALOG_WAREHOUSE": "--catalog-warehouse ",
-		"ICEBERG_CATALOG_SIGV4":     "--catalog-sigv4",
-		"ICEBERG_CATALOG_SCOPE":     "--catalog-scope ",
+		"ICEBERG_CATALOG":                   "--catalog ",
+		"ICEBERG_CATALOG_URI":               "--catalog-uri ",
+		"ICEBERG_CATALOG_WAREHOUSE":         "--catalog-warehouse ",
+		"ICEBERG_CATALOG_SIGV4":             "--catalog-sigv4",
+		"ICEBERG_CATALOG_SCOPE":             "--catalog-scope ",
+		"ICEBERG_CATALOG_ACCESS_DELEGATION": "--catalog-access-delegation ",
 	} {
 		if _, ok := svc.Environment[env]; !ok {
 			t.Errorf("iceberg-export does not take %s", env)

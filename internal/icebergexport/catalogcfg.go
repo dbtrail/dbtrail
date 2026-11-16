@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -71,6 +72,14 @@ type CatalogConfig struct {
 	// Apache Polaris refuses that one and wants PRINCIPAL_ROLE:ALL (or
 	// PRINCIPAL_ROLE:<name>). It is not a secret.
 	Scope string
+
+	// AccessDelegation is what the REST client asks the catalog for, in the
+	// X-Iceberg-Access-Delegation header (rest only): "vended-credentials",
+	// the library's default (blank keeps it), or "none", which sends no
+	// header so the files are read and written with the machine's own
+	// storage credentials. A catalog with no credentials to vend refuses to
+	// create a table at an s3:// location when they are asked for.
+	AccessDelegation string
 }
 
 func (c CatalogConfig) kind() CatalogKind {
@@ -78,6 +87,23 @@ func (c CatalogConfig) kind() CatalogKind {
 		return CatalogHadoop
 	}
 	return CatalogKind(strings.ToLower(string(c.Kind)))
+}
+
+// Values of --catalog-access-delegation.
+const (
+	delegationVended = "vended-credentials"
+	delegationNone   = "none"
+	// delegationRemoteSigning is the spec's other mode; the library cannot
+	// do it, so it is refused by name.
+	delegationRemoteSigning = "remote-signing"
+)
+
+// headerAccessDelegation is the header the REST client sends the mode in.
+const headerAccessDelegation = "X-Iceberg-Access-Delegation"
+
+// accessDelegation is the mode as given: trimmed, lowercased, "" when blank.
+func (c CatalogConfig) accessDelegation() string {
+	return strings.ToLower(strings.TrimSpace(c.AccessDelegation))
 }
 
 // scope is the OAuth scope as sent: trimmed, "" when blank.
@@ -111,6 +137,7 @@ func CheckCatalog(c CatalogConfig, warehouse string) (string, error) {
 			{c.Credential != "", "a catalog credential"},
 			{c.Token != "", "a catalog token"},
 			{c.scope() != "", "--catalog-scope"},
+			{c.accessDelegation() != "", "--catalog-access-delegation"},
 		} {
 			if f.set {
 				return "", fmt.Errorf("%s only applies to --catalog rest", f.name)
@@ -186,6 +213,19 @@ func CheckCatalog(c CatalogConfig, warehouse string) (string, error) {
 			if strings.IndexFunc(s, unicode.IsControl) >= 0 {
 				return "", errors.New("--catalog-scope has a control character (a newline or a tab); give the scope on one line, several scopes separated by spaces")
 			}
+		}
+		switch d := c.accessDelegation(); d {
+		case "", delegationVended:
+		case delegationNone:
+			if c.SigV4 {
+				// The header is removed below the library's signer, so the
+				// request would no longer match its signature.
+				return "", errors.New("--catalog-access-delegation none cannot be combined with --catalog-sigv4: the header is removed after the request is signed, which breaks the signature")
+			}
+		case delegationRemoteSigning:
+			return "", errors.New("--catalog-access-delegation remote-signing: bintrail cannot have S3 requests signed by the catalog; use vended-credentials, or none to write the files with this machine's own storage credentials")
+		default:
+			return "", fmt.Errorf("--catalog-access-delegation %q is not vended-credentials or none", strings.TrimSpace(c.AccessDelegation))
 		}
 		if strings.TrimSpace(warehouse) == "" {
 			return "", nil
@@ -422,11 +462,18 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 		case c.Token != "":
 			opts = append(opts, rest.WithOAuthToken(c.Token))
 		}
+		release := noop
+		if c.accessDelegation() == delegationNone {
+			base := http.DefaultTransport.(*http.Transport).Clone()
+			opts = append(opts, rest.WithCustomTransport(dropHeader{base: base, header: headerAccessDelegation}))
+			release = base.CloseIdleConnections
+		}
 		cat, err := rest.NewCatalog(ctx, "bintrail", strings.TrimSpace(c.URI), opts...)
 		if err != nil {
+			release()
 			return nil, nil, ctx, fmt.Errorf("open the REST catalog at %s: %w", RedactURI(c.URI), err)
 		}
-		return guard(cat), noop, ctx, nil
+		return guard(cat), release, ctx, nil
 
 	default:
 		cat, release, err := openHadoopWarehouse(ctx, location)
@@ -435,6 +482,25 @@ func openCatalog(ctx context.Context, c CatalogConfig, location string) (catalog
 		}
 		return guard(cat), release, ctx, nil
 	}
+}
+
+// dropHeader removes one header from every request before it is sent. The
+// REST library sets its access-delegation header on every request with no
+// option to leave it out, so --catalog-access-delegation none removes it at
+// the transport. It runs after the library's own headers and signer, which
+// is why it is refused with SigV4.
+type dropHeader struct {
+	base   http.RoundTripper
+	header string
+}
+
+func (d dropHeader) RoundTrip(r *http.Request) (*http.Response, error) {
+	if _, ok := r.Header[http.CanonicalHeaderKey(d.header)]; !ok {
+		return d.base.RoundTrip(r)
+	}
+	r2 := r.Clone(r.Context())
+	r2.Header.Del(d.header)
+	return d.base.RoundTrip(r2)
 }
 
 // newGlueCatalog opens the Glue catalog on cfg. A variable so a test sees

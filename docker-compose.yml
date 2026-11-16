@@ -1260,8 +1260,9 @@ services:
   #
   # To register the tables in AWS Glue or an Iceberg REST catalog instead, set
   # ICEBERG_CATALOG (glue or rest) and WAREHOUSE_DIR to the s3:// location, plus
-  # ICEBERG_CATALOG_URI, ICEBERG_CATALOG_WAREHOUSE, ICEBERG_CATALOG_SIGV4=1 and
-  # ICEBERG_CATALOG_SCOPE as the catalog needs (docs/iceberg-export.md). A REST
+  # ICEBERG_CATALOG_URI, ICEBERG_CATALOG_WAREHOUSE, ICEBERG_CATALOG_SIGV4=1,
+  # ICEBERG_CATALOG_SCOPE and ICEBERG_CATALOG_ACCESS_DELEGATION as the catalog
+  # needs (docs/iceberg-export.md). A REST
   # secret goes in .env as BINTRAIL_ICEBERG_CATALOG_TOKEN or
   # BINTRAIL_ICEBERG_CATALOG_CREDENTIAL; it reaches the container as a
   # variable, never on a command line.
@@ -1305,6 +1306,9 @@ services:
       # OAuth scope for a client credential (Apache Polaris: PRINCIPAL_ROLE:ALL).
       # Not a secret, so it may reach the command line.
       ICEBERG_CATALOG_SCOPE: ${ICEBERG_CATALOG_SCOPE:-}
+      # "none" for a REST catalog with no storage credentials to vend: the
+      # files are then written with this container's own (the AWS_* below).
+      ICEBERG_CATALOG_ACCESS_DELEGATION: ${ICEBERG_CATALOG_ACCESS_DELEGATION:-}
       # REST catalog secrets, read by bintrail from these variables only.
       BINTRAIL_ICEBERG_CATALOG_CREDENTIAL: ${BINTRAIL_ICEBERG_CATALOG_CREDENTIAL:-}
       BINTRAIL_ICEBERG_CATALOG_TOKEN: ${BINTRAIL_ICEBERG_CATALOG_TOKEN:-}
@@ -1356,6 +1360,7 @@ services:
         [ -n "$$ICEBERG_CATALOG_URI" ] && set -- "$$@" --catalog-uri "$$ICEBERG_CATALOG_URI"
         [ -n "$$ICEBERG_CATALOG_WAREHOUSE" ] && set -- "$$@" --catalog-warehouse "$$ICEBERG_CATALOG_WAREHOUSE"
         [ -n "$$ICEBERG_CATALOG_SCOPE" ] && set -- "$$@" --catalog-scope "$$ICEBERG_CATALOG_SCOPE"
+        [ -n "$$ICEBERG_CATALOG_ACCESS_DELEGATION" ] && set -- "$$@" --catalog-access-delegation "$$ICEBERG_CATALOG_ACCESS_DELEGATION"
         case "$$ICEBERG_CATALOG_SIGV4" in
           ""|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) ;;
           1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) set -- "$$@" --catalog-sigv4 ;;
