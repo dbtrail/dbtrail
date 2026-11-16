@@ -768,8 +768,8 @@ listener, its own workers, its own memory.
     copy keeps as text (the [table below](#how-each-type-reads-in-sql-on-the-copy)
     lists them);
   - `interval`: JDBC reads a column of that type by asking the server's
-    catalog about it, which this port does not answer, so `getObject` would
-    fail; as text every driver reads it;
+    catalog about the type, which this port answers only for the types it
+    announces, so `getObject` would fail; as text every driver reads it;
   - a value of a type the copy has and PostgreSQL does not (a struct, a map,
     an array of arrays);
   - time travel (`_flashback`, `_snapshot`) and `SHOW`.
@@ -938,6 +938,51 @@ is refused with the reason: `SET TimeZone = 'UTC'` first. Its columns are text,
 written as the change history holds them. On `bintrail-pg flashback`, which
 answers time travel only, `TimeZone` is UTC only, at connect too: start a JDBC
 client with `-Duser.timezone=UTC`.
+
+### Listing schemas, tables and columns on the PostgreSQL port
+
+The statements tools send to list what a server holds are answered by the
+port from the copy's real tables: psql's `\l`, `\dn`, `\dt` (with or without
+a pattern), `\d`, `\d <table>` and `\d+ <table>`; JDBC's `getSchemas`,
+`getCatalogs`, `getTables`, `getColumns` and `getPrimaryKeys` (what DBeaver and
+Metabase call); SQLAlchemy's inspector (`get_schema_names`, `get_table_names`,
+`get_view_names`, `get_columns`, `get_pk_constraint`, `has_table`,
+`get_foreign_keys`, `get_indexes`, which Superset calls); and Grafana's table
+and column lists. They were checked against PostgreSQL 16 with psql 16, JDBC
+42.7, SQLAlchemy 1.4 with psycopg2 and Grafana's queries: for the copy's tables
+each prints what it prints for the source's, but for what follows.
+
+- **What the copy can be read for, and only that**: the tables and columns a
+  statement on the copy reads. A table or a column the server hides is not
+  listed, and neither is a primary key one of whose columns it hides. The
+  copy's own schema (`main`, where the change log is) is not listed.
+- **Each column has the type a result announces for it** (see
+  [above](#sql-on-the-copy-from-psql)), so
+  what a tool lists is what it then reads: a `varchar(n)`, `jsonb`, enum or
+  `interval` column is listed as `text`.
+- **`NOT NULL`, the default and the primary key are the source's**, as the
+  snapshot recorded them, and so is the table's OID. The primary key is named
+  as PostgreSQL names one by default (`<table>_pkey`): the snapshot does not
+  record its name. A snapshot taken before DBTrail recorded a table's shape
+  lists the table without them (a warning in the log names it); the next
+  snapshot records them.
+- **What the copy does not have is not listed**: no other index, no foreign
+  key, view, sequence, policy, publication, comment, enum or domain, and no
+  access method. The owner of everything is the user the client connected
+  as, and the one database is the one it connected to, with collation `C`
+  (text compares byte by byte here).
+- **Any other statement on the system catalog is refused** (`0A000`) by name:
+  `pg_catalog`, `information_schema` and the `pg_` catalog tables are not run
+  on the copy, whose engine has a catalog of its own that would answer with
+  its internal schemas and types. `SHOW TABLES` and `DESCRIBE <table>` list
+  the copy's tables and columns in its engine's terms. A client version that
+  writes these statements otherwise than the versions above is refused the
+  same way.
+- `\d` of an index is refused: the copy has no index; `\d <table>` shows the
+  primary key. A connection reads the catalog once for a burst of statements:
+  a table hidden while it is connected leaves its listing within 10 seconds,
+  and is never readable.
+
 ### Interactive `AS OF` from `psql`
 
 The `_flashback` / `_snapshot` / `AS OF` time-travel grammar is also available

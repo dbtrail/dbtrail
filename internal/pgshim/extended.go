@@ -390,6 +390,9 @@ func (s *session) describeStatement(st *preparedStatement) (cols []string, types
 		// without running them.
 		cols, types, perr := s.localColumns(c.cmd)
 		return cols, types, perr == nil, perr
+	case kindCatalog:
+		cols, types := catalogColumns(c.cat)
+		return cols, types, true, nil
 	case kindTimeTravel:
 		// The gates first: the table's columns are something said about it.
 		if perr := s.timeTravelGates(c.q, false); perr != nil {
