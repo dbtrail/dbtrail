@@ -1423,8 +1423,8 @@ func (s *slowSource) Get(ctx context.Context, key string) (io.ReadCloser, error)
 
 // dripReader ends when its request's context does, as a real body would.
 type dripReader struct {
-	ctx   context.Context
-	r     io.Reader
+	ctx         context.Context
+	r           io.Reader
 	clock       *stepClock
 	step, quiet time.Duration
 	quietAt     int
